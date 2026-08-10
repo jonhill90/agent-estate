@@ -67,6 +67,21 @@ class AdapterTest(unittest.TestCase):
         self.adapter.register_lane(
             lane="infra-claude", target="%8", harness="claude", repo="/repo/hill90", nonce="nonce-8"
         )
+        self._source_number = 899
+
+    def seed_source(self, task_id, summary):
+        self._source_number += 1
+        self.ledger.reconstruct_task(
+            task_id=task_id,
+            source_kind="issue",
+            source_url=f"https://github.com/jonhill90/Hill90/issues/{self._source_number}",
+            source_ref="a" * 40,
+            summary=summary,
+            source_state="OPEN",
+            status="created",
+            evidence=[],
+            status_marker=None,
+        )
 
     def test_harness_classifiers_cover_idle_active_blocked_and_approval(self):
         self.assertEqual("idle", classify_capture("codex", "─ Worked for 1m ─\n\n› Continue\n"))
@@ -78,6 +93,8 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual("approval", classify_capture("claude", "Allow this command? [Y/n]\n❯ \n"))
 
     def test_assignment_is_task_bound_and_accepts_real_codex_and_claude_activity(self):
+        self.seed_source("codex-task", "Review one artifact")
+        self.seed_source("claude-task", "Inspect one issue")
         codex = self.adapter.assign_task(
             lane="architecture", task_id="codex-task", summary="Review one artifact"
         )
@@ -98,6 +115,7 @@ class AdapterTest(unittest.TestCase):
         self.assertIsNone(self.ledger.get_task("blocked-task"))
 
     def test_idle_outstanding_task_emits_attention_without_observed_transition(self):
+        self.seed_source("short-task", "Short review")
         self.adapter.assign_task(lane="architecture", task_id="short-task", summary="Short review")
         self.transport.panes["%19"]["capture"] = "Review finished\n─ Worked for 2m ─\n\n› Continue\n"
         event = self.adapter.observe_lane("architecture")
@@ -106,6 +124,7 @@ class AdapterTest(unittest.TestCase):
         self.assertEqual(event["key"], repeated["key"])
 
     def test_blocked_after_echo_does_not_ack_architecture_notification(self):
+        self.seed_source("review-task", "Review")
         self.adapter.assign_task(lane="infra-claude", task_id="review-task", summary="Review")
         self.ledger.complete("review-task", b"# Result\n\nNo findings.\n")
         self.transport.panes["%19"]["after_send"] = "■ You have hit your usage limit.\n\n› Continue\n"
@@ -125,6 +144,7 @@ class AdapterTest(unittest.TestCase):
             self.transport.sends.append((target, payload))
             raise RuntimeError("tmux send-keys timed out")
 
+        self.seed_source("flaky-task", "Ambiguous delivery")
         self.transport.send_literal = failing_send
         with self.assertRaisesRegex(RuntimeError, "timed out"):
             self.adapter.assign_task(lane="architecture", task_id="flaky-task", summary="Ambiguous delivery")
@@ -148,6 +168,7 @@ class AdapterTest(unittest.TestCase):
     def test_successful_send_does_not_infer_delivery_from_echoed_prompt_text(self):
         # Even though the pane echoes the sent prompt back into its own capture,
         # assign_task must not use that capture to decide the task was delivered.
+        self.seed_source("quiet-task", "No echo needed")
         self.transport.panes["%19"]["after_send"] = "flaky terminal chrome, no active/idle marker\n"
         task = self.adapter.assign_task(lane="architecture", task_id="quiet-task", summary="No echo needed")
         self.assertEqual("delivered", task["status"])

@@ -67,6 +67,11 @@ class CliTest(unittest.TestCase):
                 lane="architecture", pane_id="%19", nonce="nonce-19", harness="codex", repo="/repo",
                 server_id="server", session_id="$1", command="codex",
             )
+            ledger.reconstruct_task(
+                task_id="flaky-task", source_kind="issue",
+                source_url="https://github.com/jonhill90/Hill90/issues/901", source_ref="a" * 40,
+                summary="Ambiguous", source_state="OPEN", status="created", evidence=[], status_marker=None,
+            )
             ledger.assign(task_id="flaky-task", lane="architecture", pane_nonce="nonce-19", summary="Ambiguous")
             ledger.mark_delivery_pending("flaky-task", pane_nonce="nonce-19")
 
@@ -88,6 +93,11 @@ class CliTest(unittest.TestCase):
             ledger.register_lane(
                 lane="architecture", pane_id="%19", nonce="nonce-dead", harness="codex", repo="/repo",
                 server_id="server", session_id="$1", command="codex",
+            )
+            ledger.reconstruct_task(
+                task_id="flaky-task", source_kind="issue",
+                source_url="https://github.com/jonhill90/Hill90/issues/902", source_ref="a" * 40,
+                summary="Ambiguous", source_state="OPEN", status="created", evidence=[], status_marker=None,
             )
             ledger.assign(task_id="flaky-task", lane="architecture", pane_nonce="nonce-dead", summary="Ambiguous")
             ledger.mark_delivery_pending("flaky-task", pane_nonce="nonce-dead")

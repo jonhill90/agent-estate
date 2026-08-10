@@ -425,6 +425,13 @@ class Ledger:
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
             self._verify_lane_nonce(connection, lane, pane_nonce)
+            source = connection.execute("SELECT * FROM source_tasks WHERE id = ?", (task_id,)).fetchone()
+            if source is None:
+                raise ValueError("task requires a reconstructed GitHub source")
+            if source["source_state"].upper() != "OPEN":
+                raise ValueError("GitHub source is not open")
+            if source["status"] != "created":
+                raise ValueError(f"GitHub source is already {source['status']}")
             existing = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             if existing is not None:
                 if existing["lane"] == lane and existing["pane_nonce"] == pane_nonce and existing["summary"] == summary:
