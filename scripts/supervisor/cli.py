@@ -120,7 +120,7 @@ def main(argv=None):
         if task is None:
             raise ValueError("unknown task")
         _verify_caller(adapter, ledger, task["lane"])
-        value = ledger.complete(args.task, args.result_file.read_bytes())
+        value = ledger.complete(args.task, args.result_file.read_bytes(), pane_nonce=task["pane_nonce"])
     elif args.command == "reconcile":
         # Deliberately not caller-verified and deliberately not the lane's
         # *current* nonce: this is the human-operator path for an ambiguous

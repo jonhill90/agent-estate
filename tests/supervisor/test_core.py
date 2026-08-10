@@ -232,19 +232,58 @@ class LedgerTest(unittest.TestCase):
         # A retired ambiguous task frees the lane for a genuinely new assignment.
         self.assign("review-872")
 
+    def test_completion_requires_the_owning_pane_incarnation(self):
+        """Red: complete() takes no pane_nonce at all -- any caller who knows
+        a task_id can complete it, regardless of which pane incarnation
+        actually owns the lane the task is bound to."""
+        self.assign()
+        self.ledger.mark_delivery_pending("review-870", pane_nonce="nonce-22-a")
+        self.ledger.mark_delivered("review-870", pane_nonce="nonce-22-a")
+        self.ledger.accept("review-870", pane_nonce="nonce-22-a")
+
+        # A different (impersonating) incarnation must not be able to complete
+        # a task it does not own.
+        with self.assertRaisesRegex(ValueError, "pane incarnation"):
+            self.ledger.complete("review-870", b"# Result\n\nDone.\n", pane_nonce="some-other-nonce")
+
+        completed = self.ledger.complete("review-870", b"# Result\n\nDone.\n", pane_nonce="nonce-22-a")
+        self.assertEqual("complete", completed["status"])
+
+    def test_lane_reregistration_is_rejected_while_an_outstanding_non_pending_task_exists(self):
+        """Red: register_lane does an unconditional INSERT ... ON CONFLICT
+        UPDATE with no check for an outstanding task bound to the old pane
+        incarnation -- re-registering silently rebinds a live task's
+        identity out from under it. `delivery_pending` is exempted: it has
+        its own reconciliation escape valve keyed off the task's own
+        pane_nonce (see `_reconcile_transition`), which #871 relies on to
+        survive a dead pane being re-registered."""
+        self.assign()
+        with self.assertRaisesRegex(ValueError, "outstanding task"):
+            self.ledger.register_lane(
+                lane="app-review",
+                pane_id="%23",
+                nonce="nonce-23-b",
+                harness="codex",
+                repo="/repo/app",
+                server_id="server-a",
+                session_id="$4",
+                command="codex",
+            )
+        self.assertEqual("nonce-22-a", self.ledger.get_lane("app-review")["nonce"])
+
     def test_completion_is_immutable_idempotent_and_event_is_exactly_once(self):
         self.assign()
         result = b"# Result\n\nNo findings.\n"
-        completed = self.ledger.complete("review-870", result)
+        completed = self.ledger.complete("review-870", result, pane_nonce="nonce-22-a")
         self.assertEqual("complete", completed["status"])
         self.assertEqual(hashlib.sha256(result).hexdigest(), completed["result_sha256"])
 
-        repeated = self.ledger.complete("review-870", result)
+        repeated = self.ledger.complete("review-870", result, pane_nonce="nonce-22-a")
         self.assertEqual(completed["result_sha256"], repeated["result_sha256"])
         events = self.ledger.list_events(task_id="review-870", event_type="completion")
         self.assertEqual(["completion:review-870"], [event["key"] for event in events])
         with self.assertRaisesRegex(ValueError, "immutable result"):
-            self.ledger.complete("review-870", b"different result\n")
+            self.ledger.complete("review-870", b"different result\n", pane_nonce="nonce-22-a")
 
     def test_completion_reconciles_each_injected_crash_point(self):
         result = b"# Evidence\n\nchecks passed\n"
@@ -255,8 +294,8 @@ class LedgerTest(unittest.TestCase):
                     self.ledger.cancel_open_task("app-review")
                 self.assign(task_id)
                 with self.assertRaisesRegex(RuntimeError, failpoint):
-                    self.ledger.complete(task_id, result, failpoint=failpoint)
-                recovered = self.ledger.complete(task_id, result)
+                    self.ledger.complete(task_id, result, pane_nonce="nonce-22-a", failpoint=failpoint)
+                recovered = self.ledger.complete(task_id, result, pane_nonce="nonce-22-a")
                 self.assertEqual("complete", recovered["status"])
                 events = self.ledger.list_events(task_id=task_id, event_type="completion")
                 self.assertEqual(1, len(events))
@@ -274,7 +313,7 @@ class LedgerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "task disposition"):
             self.ledger.ack([event["key"]])
 
-        self.ledger.complete("review-870", b"# Result\n\nDone.\n")
+        self.ledger.complete("review-870", b"# Result\n\nDone.\n", pane_nonce="nonce-22-a")
         self.ledger.ack([event["key"]])
         self.assertEqual("acked", self.ledger.get_event(event["key"])["status"])
 
