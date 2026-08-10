@@ -1,0 +1,134 @@
+import contextlib
+import io
+import json
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+from unittest.mock import patch
+
+
+SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "scripts" / "supervisor"
+sys.path.insert(0, str(SUPERVISOR_DIR))
+
+import cli  # noqa: E402
+from core import Ledger  # noqa: E402
+
+
+class BlindGithubSensor:
+    def __init__(self, ledger, repositories, timeout):
+        self.ledger = ledger
+
+    def collect_all(self):
+        return {"events": [], "errors": [{"component": "github-Hill90", "error": "timeout"}], "recoveries": []}
+
+
+class RecordingAdapter:
+    instances = []
+
+    def __init__(self, ledger, transport):
+        self.observed = []
+        self.notified = False
+        self.__class__.instances.append(self)
+
+    def observe_lane(self, lane):
+        self.observed.append(lane)
+        return None
+
+    def notify_architecture(self, *, lane, retry_after):
+        self.notified = True
+        return True
+
+
+class CliTest(unittest.TestCase):
+    def test_tick_gates_lane_advancement_and_notification_while_github_is_blind(self):
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            for lane in ("architecture", "worker"):
+                ledger.register_lane(
+                    lane=lane, pane_id=f"%{lane}", nonce=lane, harness="codex", repo="/repo",
+                    server_id="server", session_id="$1", command="codex",
+                )
+            RecordingAdapter.instances.clear()
+            output = io.StringIO()
+            with patch.object(cli, "StateSensor", BlindGithubSensor), patch.object(cli, "TmuxAdapter", RecordingAdapter), contextlib.redirect_stdout(output):
+                self.assertEqual(0, cli.main(["--state-dir", root, "tick"]))
+            value = json.loads(output.getvalue())
+            adapter = RecordingAdapter.instances[-1]
+            self.assertTrue(value["gated"])
+            self.assertEqual(["github-Hill90"], value["sensor_blockers"])
+            self.assertEqual([], adapter.observed)
+            self.assertFalse(adapter.notified)
+
+    def test_reconcile_resolves_an_ambiguous_delivery_without_pane_capture(self):
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            ledger.register_lane(
+                lane="architecture", pane_id="%19", nonce="nonce-19", harness="codex", repo="/repo",
+                server_id="server", session_id="$1", command="codex",
+            )
+            ledger.assign(task_id="flaky-task", lane="architecture", pane_nonce="nonce-19", summary="Ambiguous")
+            ledger.mark_delivery_pending("flaky-task", pane_nonce="nonce-19")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    0,
+                    cli.main(
+                        ["--state-dir", root, "reconcile", "--task", "flaky-task", "--outcome", "delivered"]
+                    ),
+                )
+            value = json.loads(output.getvalue())
+            self.assertEqual("delivered", value["status"])
+            self.assertEqual("delivered", ledger.get_task("flaky-task")["status"])
+
+    def test_reconcile_survives_lane_re_registration_after_a_dead_pane(self):
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            ledger.register_lane(
+                lane="architecture", pane_id="%19", nonce="nonce-dead", harness="codex", repo="/repo",
+                server_id="server", session_id="$1", command="codex",
+            )
+            ledger.assign(task_id="flaky-task", lane="architecture", pane_nonce="nonce-dead", summary="Ambiguous")
+            ledger.mark_delivery_pending("flaky-task", pane_nonce="nonce-dead")
+
+            # The pane died and was re-registered under a new tmux pane and nonce
+            # before a human got to reconcile the stuck delivery.
+            ledger.register_lane(
+                lane="architecture", pane_id="%25", nonce="nonce-reborn", harness="codex", repo="/repo",
+                server_id="server", session_id="$1", command="codex",
+            )
+            self.assertEqual("nonce-reborn", ledger.get_lane("architecture")["nonce"])
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    0,
+                    cli.main(
+                        ["--state-dir", root, "reconcile", "--task", "flaky-task", "--outcome", "delivered"]
+                    ),
+                )
+            value = json.loads(output.getvalue())
+            self.assertEqual("delivered", value["status"])
+            self.assertEqual("delivered", ledger.get_task("flaky-task")["status"])
+
+    def test_tick_without_the_canonical_sensor_is_also_gated(self):
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            ledger.register_lane(
+                lane="architecture", pane_id="%architecture", nonce="architecture", harness="codex", repo="/repo",
+                server_id="server", session_id="$1", command="codex",
+            )
+            RecordingAdapter.instances.clear()
+            output = io.StringIO()
+            with patch.object(cli, "TmuxAdapter", RecordingAdapter), contextlib.redirect_stdout(output):
+                self.assertEqual(0, cli.main(["--state-dir", root, "tick", "--no-sensors"]))
+            value = json.loads(output.getvalue())
+            adapter = RecordingAdapter.instances[-1]
+            self.assertTrue(value["gated"])
+            self.assertEqual(["github-sensor-disabled"], value["sensor_blockers"])
+            self.assertFalse(adapter.notified)
+
+
+if __name__ == "__main__":
+    unittest.main()
