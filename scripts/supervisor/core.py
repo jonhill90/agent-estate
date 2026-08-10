@@ -660,7 +660,16 @@ class Ledger:
                 row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             return self._dict(row)
 
-    def observe_idle(self, lane, *, pane_nonce):
+    def observe_attention(self, lane, *, pane_nonce, reason="idle"):
+        """Durably record that an outstanding task's lane needs attention.
+
+        `reason` names *why* (idle, blocked, approval, unknown). Idle keeps
+        the original unsuffixed key (`attention:<task>`) so existing
+        idle-triggered event consumers are unaffected; every other reason
+        gets its own key (`attention:<task>:<reason>`) so a lane that is
+        blocked and later becomes idle (or vice versa) is tracked as two
+        distinct durable events, not silently collapsed into one.
+        """
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
             self._verify_lane_nonce(connection, lane, pane_nonce)
@@ -673,7 +682,7 @@ class Ledger:
             ).fetchone()
             if task is None:
                 return None
-            key = f"attention:{task['id']}"
+            key = f"attention:{task['id']}" if reason == "idle" else f"attention:{task['id']}:{reason}"
             connection.execute(
                 """
                 INSERT OR IGNORE INTO events(key, type, task_id, status, created_at)
@@ -683,6 +692,9 @@ class Ledger:
             )
             event = connection.execute("SELECT * FROM events WHERE key=?", (key,)).fetchone()
         return self._dict(event)
+
+    def observe_idle(self, lane, *, pane_nonce):
+        return self.observe_attention(lane, pane_nonce=pane_nonce, reason="idle")
 
     def list_events(self, *, task_id=None, event_type=None):
         clauses = []
