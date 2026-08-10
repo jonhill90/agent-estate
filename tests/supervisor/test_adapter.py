@@ -126,7 +126,7 @@ class AdapterTest(unittest.TestCase):
     def test_blocked_after_echo_does_not_ack_architecture_notification(self):
         self.seed_source("review-task", "Review")
         self.adapter.assign_task(lane="infra-claude", task_id="review-task", summary="Review")
-        self.ledger.complete("review-task", b"# Result\n\nNo findings.\n")
+        self.ledger.complete("review-task", b"# Result\n\nNo findings.\n", pane_nonce="nonce-8")
         self.transport.panes["%19"]["after_send"] = "■ You have hit your usage limit.\n\n› Continue\n"
         notified = self.adapter.notify_architecture(lane="architecture", retry_after=900)
         self.assertFalse(notified)

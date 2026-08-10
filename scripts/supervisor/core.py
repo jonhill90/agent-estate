@@ -288,6 +288,35 @@ class Ledger:
             raise ValueError("lane registration fields must be non-empty")
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
+            current = connection.execute("SELECT * FROM lanes WHERE lane = ?", (lane,)).fetchone()
+            if current is not None and any(
+                current[field] != value
+                for field, value in (
+                    ("pane_id", pane_id),
+                    ("nonce", nonce),
+                    ("harness", harness),
+                    ("repo", repo),
+                    ("server_id", server_id),
+                    ("session_id", session_id),
+                    ("command", command),
+                )
+            ):
+                # A changed identity is a genuinely new incarnation. An
+                # outstanding task still bound to the old incarnation must not
+                # be silently rebound to it -- except `delivery_pending`,
+                # which has its own reconciliation escape valve keyed off the
+                # task's own recorded pane_nonce (`_reconcile_transition`),
+                # not the lane's current one. #871 depends on re-registration
+                # succeeding over a `delivery_pending` task to recover a dead
+                # pane; every other outstanding status has no such recovery
+                # path and would otherwise be orphaned by this rebind.
+                outstanding = connection.execute(
+                    "SELECT id FROM tasks WHERE lane = ? AND status NOT IN "
+                    "('complete', 'failed', 'cancelled', 'delivery_pending')",
+                    (lane,),
+                ).fetchone()
+                if outstanding is not None:
+                    raise ValueError(f"lane has an outstanding task: {outstanding['id']}")
             connection.execute(
                 """
                 INSERT INTO lanes(lane, pane_id, nonce, harness, repo, server_id,
@@ -588,9 +617,15 @@ class Ledger:
         if failpoint == expected:
             raise RuntimeError(expected)
 
-    def complete(self, task_id, result, *, failpoint=None):
+    def complete(self, task_id, result, *, pane_nonce, failpoint=None):
         self._require_task_id(task_id)
         with self._locked():
+            with contextlib.closing(self._connect()) as probe:
+                existing = probe.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if existing is None:
+                    raise ValueError("unknown task")
+                if existing["pane_nonce"] != pane_nonce:
+                    raise ValueError("pane incarnation does not match task")
             destination, digest = self._write_result(task_id, result)
             self._fail(failpoint, "after_result")
             now = int(self.clock())
@@ -598,6 +633,8 @@ class Ledger:
                 row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
                 if row is None:
                     raise ValueError("unknown task")
+                if row["pane_nonce"] != pane_nonce:
+                    raise ValueError("pane incarnation does not match task")
                 if row["status"] == "complete":
                     if row["result_sha256"] != digest:
                         raise ValueError("immutable result conflicts with completed task")
