@@ -179,6 +179,24 @@ class AdapterTest(unittest.TestCase):
             self.assertFalse(self.adapter.notify_architecture(lane="architecture", retry_after=900))
         self.assertEqual([], self.transport.sends)
 
+    def test_blocked_approval_and_unknown_outstanding_tasks_emit_durable_attention(self):
+        """Red: observe_lane only calls ledger.observe_idle when state == "idle";
+        blocked/approval/unknown states hit `return None` and produce no
+        durable event at all -- a restart between the pane going blocked and a
+        human noticing loses that signal entirely."""
+        self.seed_source("needs-help", "Review")
+        self.adapter.assign_task(lane="architecture", task_id="needs-help", summary="Review")
+        for capture_text, reason in (
+            ("■ You've hit your usage limit.\n› Continue\n", "blocked"),
+            ("Allow this command? [Y/n]\n› Continue\n", "approval"),
+            ("unexpected terminal chrome with no recognizable marker\n", "unknown"),
+        ):
+            with self.subTest(reason=reason):
+                self.transport.panes["%19"]["capture"] = capture_text
+                event = self.adapter.observe_lane("architecture")
+                self.assertIsNotNone(event, f"no durable event for {reason}")
+                self.assertEqual(f"attention:needs-help:{reason}", event["key"])
+
 
 if __name__ == "__main__":
     unittest.main()

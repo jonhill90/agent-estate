@@ -133,9 +133,9 @@ class TmuxAdapter:
     def observe_lane(self, lane):
         record = self._verified_lane(lane)
         state = classify_capture(record["harness"], self.transport.capture(record["pane_id"], lines=25))
-        if state == "idle":
-            return self.ledger.observe_idle(lane, pane_nonce=record["nonce"])
-        return None
+        if state == "active":
+            return None
+        return self.ledger.observe_attention(lane, pane_nonce=record["nonce"], reason=state)
 
     def notify_architecture(self, *, lane, retry_after):
         with self.ledger.operation_lock():
