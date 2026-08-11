@@ -12,6 +12,16 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/../../scripts/supervisor/input-box.sh"
+
+# input-box.sh matches NBSP by byte escape ($'\xc2\xa0'), not by locale-aware
+# character class -- the file's own comment says so (bash 3.2 on macOS has no
+# \u). Under a UTF-8 locale, awk's [:space:] class ALSO matches NBSP as a wide
+# character, which silently does INPUT_BOX_NBSP's job for it: the gsub on that
+# var becomes redundant and a defanged INPUT_BOX_NBSP goes unnoticed. Forcing
+# the byte-oriented locale here is what makes the test below actually exercise
+# the constant instead of exercising awk's locale tables.
+export LC_ALL=C
+
 pass=0; fail=0
 
 want() { # want <name> <expected> <capture>
@@ -49,6 +59,18 @@ want "a dim placeholder is empty, not text" empty \
 want "a dim follow-up suggestion is empty, not text" empty \
   "$(box "${P}$(printf '\033[2mnow echo goodbye\033[0m')")"
 want "a box with nothing in it at all is empty" empty "$(box "${P}")"
+
+# --- INPUT_BOX_NBSP: a second constant with a different job ----------------
+# INPUT_BOX_PROMPT anchors the box; INPUT_BOX_NBSP strips a trailing NBSP
+# from the body once the box is found -- a real terminal can pad an
+# otherwise-empty box with a bare, non-dim NBSP rather than an ordinary
+# space, and that byte is not the placeholder (not dim) and not whitespace
+# under the byte-oriented locale forced above. Only line 148's
+# `gsub(nbsp, "", body)` removes it. Defang INPUT_BOX_NBSP and this must go
+# to `text`; the anchor's own tests above must not move.
+NBSP=$'\xc2\xa0'
+want "a bare trailing NBSP with no typed text is still empty" empty \
+  "$(box "${P}${NBSP}")"
 
 # --- the box is more than one row ------------------------------------------
 # A 360-character brief wraps across five rows in an 80-column lane, and a
