@@ -105,23 +105,44 @@ def last_wakeup(transcript: str) -> tuple[str | None, float | None, bool]:
     return found
 
 
-def newest_transcript(project_dir: str) -> str | None:
-    matches = glob.glob(os.path.join(project_dir, "*.jsonl"))
-    if not matches:
-        return None
-    return max(matches, key=os.path.getmtime)
+def latest_wakeup_across(project_dir: str) -> tuple[str | None, float | None, bool]:
+    """Find the most recent ScheduleWakeup in ANY transcript in the project.
+
+    Every lane -- supervisor and workers alike -- runs with the same working
+    directory, so they all write into one Claude project directory. Picking
+    the newest *file* therefore almost always picks a busy worker, and workers
+    never schedule wakeups.
+
+    Measured 2026-08-11: the three newest transcripts had `ScheduleWakeup=0`
+    while the supervisor's older one held eleven. sleepcheck reported "no
+    ScheduleWakeup found", the watchdog read that as a dead loop, restarted a
+    healthy supervisor three times, hit its escalation cap and paged Jon at
+    06:37Z for a problem that did not exist.
+
+    Only the loop schedules wakeups, so the most recent wakeup across all
+    transcripts IS the loop's state, whichever file it happens to live in.
+    """
+    latest: tuple[str | None, float | None, bool] = (None, None, False)
+    # sorted() so iteration order is deterministic: without it the result
+    # depends on filesystem order, and a test that pins ordering behaviour
+    # can pass by luck while the comparison below is broken.
+    for path in sorted(glob.glob(os.path.join(project_dir, "*.jsonl"))):
+        try:
+            stamp, delay, stopped = last_wakeup(path)
+        except OSError:
+            continue
+        if stamp is None:
+            continue
+        if latest[0] is None or stamp > latest[0]:
+            latest = (stamp, delay, stopped)
+    return latest
 
 
 def main(argv: list[str]) -> int:
     grace = float(argv[1]) if len(argv) > 1 else DEFAULT_GRACE_SECONDS
     project_dir = os.environ.get("SLEEPCHECK_DIR") or DEFAULT_PROJECT_DIR
 
-    transcript = newest_transcript(project_dir)
-    if transcript is None:
-        print("no transcript found")
-        return 1
-
-    scheduled_at, delay, stopped = last_wakeup(transcript)
+    scheduled_at, delay, stopped = latest_wakeup_across(project_dir)
     verdict = decide_liveness(scheduled_at, delay, stopped, time.time(), grace)
     print(verdict.reason)
     return 0 if verdict.asleep else 1
