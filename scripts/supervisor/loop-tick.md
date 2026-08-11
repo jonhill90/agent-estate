@@ -3,6 +3,23 @@
 One iteration of the architecture supervisor loop. If your context was lost,
 read `brief.md` in this directory first — it is the full standing context.
 
+## Advance the live worktree, before anything else
+
+```bash
+scripts/supervisor/advance-live.sh
+```
+
+The watchdog LaunchAgent runs from a pinned worktree
+(`~/.local/state/agent-dotfiles-supervisor/live`) that nothing else updates
+(#99). `watchdog.status`'s `code:` line reports how far behind it is; this
+command is what acts on that report. It only advances when the candidate
+commit's own `watchdog.sh` runs and writes a well-formed status from a
+throwaway worktree, and only in the window right after the live watchdog's
+last tick — outside that gate it exits 0 having done nothing, which is
+correct, not a failure. Never run it against any worktree other than the
+default live one, and never touch `~/.local/state/agent-dotfiles-supervisor/live`
+by hand outside this command.
+
 ## Read the Director's inbox first, before anything else
 
 ```bash
