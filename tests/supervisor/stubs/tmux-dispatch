@@ -24,15 +24,28 @@ case "$sub" in
       # reproduces the failure observed live on 2026-08-11: characters typed
       # while the harness repaints are silently swallowed, and the lane is left
       # holding a truncated brief.
-      win=""; keys=()
+      #
+      # -l matters here (agent-dotfiles#152): real tmux only treats an
+      # argument as a key name (Enter, C-u, C-c, Escape, ...) when `-l` is
+      # ABSENT. With `-l`, every argument is typed as literal characters, key
+      # name or not -- that is the whole of the fix for a message that IS a
+      # key name. A stub that appended every non-Enter/C-u argument as text
+      # regardless of `-l` could not tell a literal-safe send from an unsafe
+      # one; this one can.
+      win=""; keys=(); literal=0
       while [ $# -gt 0 ]; do
         case "$1" in
           -t) win="${2##*:}"; shift 2 ;;
+          -l) literal=1; shift ;;
           *) keys+=("$1"); shift ;;
         esac
       done
       buf="$PANES/$win"
       for k in "${keys[@]:-}"; do
+        if [ "$literal" = 1 ]; then
+          printf '%s' "$k" >> "$buf"
+          continue
+        fi
         case "$k" in
           # Enter SUBMITS: it empties the input box. This stub used to treat it
           # as a no-op, which is the same misunderstanding #141 is about -- the
@@ -45,8 +58,30 @@ case "$sub" in
           # longer to repaint than the dispatcher waits, and the Enter that
           # follows is eaten by the reset. The text stays in the box, nothing
           # runs, and every instrument reports the lane idle.
-          Enter) [ "${DISPATCH_SWALLOW_ENTER:-0}" = 1 ] || : > "$buf" ;;
-          C-u)   : > "$buf" ;;
+          #
+          # It is ALSO logged to <pane>.keys (#152). Emptying the box is not
+          # evidence Enter was sent -- an empty box is equally what "nothing was
+          # ever typed" looks like -- and deleting the Enter call used to pass
+          # every assertion in the routing suite.
+          #
+          # And the submitted text is recorded before the box is cleared, one
+          # line per submit. A real pane keeps what it submitted: the text
+          # scrolls up into the transcript. Without that record, emptying the
+          # box destroys the only evidence a delivery test has -- what the lane
+          # actually received -- and "submitted" becomes indistinguishable from
+          # "never typed". #142's routing suite needs exactly this distinction:
+          # `delivered` has to mean the reply arrived and went in.
+          Enter)
+            printf '%s\n' "Enter" >> "$buf.keys"
+            if [ "${DISPATCH_SWALLOW_ENTER:-0}" != 1 ]; then
+              if [ -s "$buf" ]; then cat "$buf" >> "$buf.submitted"; printf '\n' >> "$buf.submitted"; fi
+              : > "$buf"
+            fi ;;
+          C-u)   : > "$buf"; printf '%s\n' "C-u" >> "$buf.keys" ;;
+          C-c|Escape|Up|Down|Left|Right|Tab)
+            # A real key name with no -l fires the action, not the text --
+            # it never reaches the pane buffer at all.
+            printf '%s\n' "$k" >> "$buf.keys" ;;
           *)
             drop="${DISPATCH_DROP_PREFIX:-0}"
             # Only the brief itself, not a short command like `/clear`: the

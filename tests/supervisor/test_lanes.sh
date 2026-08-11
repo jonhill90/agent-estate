@@ -187,5 +187,19 @@ for good in w-real-free w-mentions w-mentions-blocked w-placeholder w-empty-box;
   else echo "  FAIL --free withheld $good"; fail=$((fail+1)); fi
 done
 
+# agent-dotfiles#142: --blocked is what inbound Telegram routing is built on
+# -- the same session:index shape as --free, but the opposite predicate.
+blocked=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --blocked 2>&1)
+for want_blocked in w-blocked w-trust w-model w-permission; do
+  wi=$(awk -F'|' -v n="$want_blocked" '$2==n{print $1}' "$D/fixture")
+  if grep -qx ".*:$wi" <<<"$blocked"; then echo "  ok   --blocked offers $want_blocked"; pass=$((pass+1));
+  else echo "  FAIL --blocked withheld $want_blocked"; fail=$((fail+1)); fi
+done
+for not_blocked in arch w-dead w-hung w-busy w-real-free w-mentions w-mentions-blocked; do
+  ni=$(awk -F'|' -v n="$not_blocked" '$2==n{print $1}' "$D/fixture")
+  if grep -qx ".*:$ni" <<<"$blocked"; then echo "  FAIL --blocked offered $not_blocked"; fail=$((fail+1));
+  else echo "  ok   --blocked withholds $not_blocked"; pass=$((pass+1)); fi
+done
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
