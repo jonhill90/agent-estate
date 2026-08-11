@@ -226,6 +226,14 @@ When it matters, do the decisive thing instead of reading a diff: merge into a
 scratch worktree and look. That is what found the genuine #96/#97 semantic
 conflict, which git reported as a clean merge.
 
+Do not do this by hand, and do not rely on having read this section:
+`scripts/supervisor/would-revert.sh <branch> [base]` does it for you and
+reports deletions, conflicts, and other changes as three distinct things.
+Run it before writing a revert hold; exit 0 means the merge deletes nothing
+(agent-dotfiles#114 -- the same two-dot misreading held PR #111 an hour
+after this section was written, because a rule in a document only works if
+the reader happens to reach it first).
+
 ## Before you finish the tick
 
 Keep `brief.md` current as state changes — it is what a cold session resumes
