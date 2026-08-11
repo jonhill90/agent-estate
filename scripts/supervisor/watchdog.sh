@@ -83,6 +83,39 @@ if [ "$branch" = "HEAD" ]; then
 fi
 sha=$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo unknown)
 
+# How far behind main this copy is. The LaunchAgent runs the watchdog from a
+# PINNED detached worktree that nothing in this repository updates (#99), so a
+# merged fix to watchdog.sh, sleepcheck.py, watchdog_notify.py or loop-tick.md
+# can sit green on main indefinitely while the live copy keeps running the old
+# one. `code: detached @ 9cddafb` reads exactly as healthy as a current sha
+# unless the reader already knows what main is.
+#
+# Reported, never acted on: code that guards the loop must not deploy itself.
+# A broken watchdog would reinstall itself every 180s and nothing would be left
+# to notice.
+#
+# NO `git fetch` -- this runs every 180s. The comparison is against the LOCAL
+# origin/main ref, so a nonzero count is trustworthy and a zero is not proof of
+# freshness.
+#
+# The live copy is a git WORKTREE of this repository, not a standalone clone, so
+# it shares one object store and one set of refs with the main checkout and with
+# every lane worktree on the machine. origin/main's freshness is therefore an
+# emergent property of whatever unrelated git activity has happened recently --
+# it may be seconds old because a lane just fetched, or hours old because none
+# did. This check cannot tell which. The wording claims only what it knows: that
+# IT did not refetch. Do not read it as an assertion that the ref is stale.
+behind=$(git -C "$HERE" rev-list --count HEAD..origin/main 2>/dev/null || echo "")
+# THREE outcomes, not two. Lumping the unreadable case in with zero is the same
+# defect this line exists to fix: if origin/main is missing or git fails, an
+# empty result printed as no-note reads exactly like "up to date". Caught in
+# review before merge -- the first version had `''|0) code_note=""`.
+case "$behind" in
+  0)            code_note="" ;;
+  ''|*[!0-9]*)  code_note=" (cannot compare — origin/main ref unreadable)" ;;
+  *)            code_note=" (${behind} behind origin/main, not refetched by this check)" ;;
+esac
+
 log() { printf '%s %s\n' "$iso" "$*" >>"$LOG"; }
 
 # Heartbeat. Written on EVERY exit path, including the healthy one — that is
@@ -105,7 +138,7 @@ report() {                       # report <state> <detail> [notify-line]
     # what guards the loop. On 2026-08-11 the live watchdog spent a stretch
     # running from a test branch purely because that was the last checkout --
     # it worked, but by luck. An unexpected branch here is a real finding.
-    printf 'code:     %s @ %s\n' "$branch" "$sha"
+    printf 'code:     %s @ %s%s\n' "$branch" "$sha" "$code_note"
     # Present only when a send was attempted and failed (#91). "escalate with
     # no notify: line" is therefore "a human was reached"; this line is the
     # difference between that and "the loop is down and NOBODY KNOWS". Written
