@@ -156,14 +156,59 @@ worktree.sh done <path>                # remove a worktree; refuses if dirty
 worktree.sh guard <repo>               # exit 1 if <repo> itself is dirty
 ```
 
-`loop-tick.md` requires the dispatch step to call `new` and hand the printed
-path to the lane in its brief, rather than telling the lane to create its own
-worktree — a step in a brief is a step that can be skipped, which is why
-`claim.sh` and `lanes.sh` are tools and not paragraphs either. `done` and
-`guard` both refuse when the target has uncommitted changes, matching
-`safe-deletion`: a worktree with uncommitted changes is someone's unfinished
-work, not garbage. `guard` is for the Director's own use of the shared
-checkout, which caused the same class of bug this tool exists to prevent.
+`dispatch.sh` calls `new` and hands the printed path to the lane, rather than
+a brief telling the lane to create its own worktree — a step in a brief is a
+step that can be skipped. `done` and `guard` both refuse when the target has
+uncommitted changes, matching `safe-deletion`: a worktree with uncommitted
+changes is someone's unfinished work, not garbage. `guard` is for the
+Director's own use of the shared checkout, which caused the same class of bug
+this tool exists to prevent.
+
+## Dispatch
+
+`dispatch.sh` is the caller. It performs one dispatch end to end — pick a free
+lane, claim the issue, create the worktree, rename the window, send the brief:
+
+```bash
+dispatch.sh <issue> <slug> <brief-file> [repo] [repo-path]
+```
+
+A lane is a candidate only if `lanes.sh` calls it `free` **and** its window is
+named `free-N`. Both are needed: `lanes.sh` reads pane content, so a lane that
+finished without being renamed, and one paused on an approval prompt, look
+identical to an unowned one — the name is the only signal that separates them,
+and `/clear`ing the wrong lane destroys whatever it had not posted yet (#89).
+The lane cannot be chosen from the environment; there is no override.
+
+It exists because `worktree.sh` shipped (#79) with no automated caller
+(agent-dotfiles#81): `grep -rn worktree.sh` found three code fences in
+`loop-tick.md` and the section above, and nothing else. The tool fails closed
+when it is called; nothing made it get called, so enforcement was still "the
+dispatcher reads the file and runs the command" — the mechanism whose failure
+produced #73. That is the third instance of one shape in this repository:
+`acp_transport.py` (302 lines, tested, zero importers, #56), `claim.sh` (wired
+into the dispatch step by #74, the one that got it right), `worktree.sh`
+(#81). **A tool that fails closed when called, and that nothing calls, is a
+documentation rule with a binary attached.**
+
+Every step is a refusal point, and every refusal aborts the whole dispatch and
+undoes what it already did — the claim is released, a created worktree is
+removed. A failed `worktree.sh new` in particular is fatal rather than
+degraded: a lane with no worktree works in the shared checkout, which is #73.
+The window name follows the `<prefix><issue>-<slug>` convention `loop-tick.md`
+requires, with the prefix derived from the repo name (`agent-dotfiles` → `ad`,
+`skills` → `skills`).
+
+**It checks that the brief landed before submitting it.** Running the first
+version against a live tmux server, the lane's prompt came back reading
+`/var/…/brief.md and do exactly what it says` — the leading `Read ` swallowed
+while the harness repainted after `/clear`. A mangled brief is worse than a
+missing one: the lane acts on it anyway. So the brief is typed, the pane is
+read back, and only a pane showing both the head of the message and the
+worktree path gets an `Enter`. One retype is attempted; if it still has not
+landed, the dispatch aborts and rolls back rather than submitting whatever is
+in the input. `DISPATCH_SETTLE` (default 2s) is the pause that gives the
+harness time to finish repainting.
 
 ## Scheduled session recycling
 
@@ -228,7 +273,8 @@ python3 -m py_compile scripts/supervisor/*.py
 The first command is agent-dotfiles' repository-wide test command, run from
 the repository root; it discovers this core's tests under `tests/supervisor/`
 along with the rest of the suite — including the stub-driven bash suites for
-`lanes.sh`, `watchdog.sh`, and `claim.sh`, which `test_shell_suites.py` runs as
+`lanes.sh`, `watchdog.sh`, `claim.sh`, `worktree.sh` and `dispatch.sh`, which
+`test_shell_suites.py` runs as
 subtests. Until that shim existed the sentence above was false for them: they
 were in no workflow and no test shelled out to them, so a regression in
 `lanes.sh` would have reached `main` green.
