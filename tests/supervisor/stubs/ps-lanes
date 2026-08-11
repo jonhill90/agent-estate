@@ -1,0 +1,29 @@
+#!/bin/bash
+# Stub `ps` for lanes.sh tests (#154). lanes.sh asks exactly one question of
+# ps -- "what is the pane's first process actually running?" -- as
+#
+#   ps -o args= -p <pane_pid>
+#
+# stubs/tmux-lanes reports `pane_pid` as PID_BASE + window index, so this maps
+# the pid back to that window's 8th fixture column and prints it. A row that
+# omits the column gets `-zsh`, which is what every real lane's pane process
+# measured as in the live session on 2026-08-11: the agent runs as a child of
+# the login shell, so the pane's own process is the shell either way, and only
+# its argv tells a dead lane from a service window.
+F="${LANES_FIXTURE:?}"
+PID_BASE="${LANES_STUB_PID_BASE:-9000}"
+
+pid=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -p) pid="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$pid" ] || exit 1
+
+win=$(( pid - PID_BASE ))
+line=$(awk -F'|' -v w="$win" '$1==w' "$F")
+[ -n "$line" ] || exit 1        # a pid we do not know: same as real ps, no output, exit 1
+argv=$(cut -d'|' -f8 <<<"$line")
+printf '%s\n' "${argv:--zsh}"

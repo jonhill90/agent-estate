@@ -22,6 +22,10 @@ want_exit() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected exit $3,
 D=$(mktemp -d); mkdir -p "$D/bin"
 cp "$HERE/stubs/gh-claim" "$D/bin/gh"
 cp "$HERE/stubs/tmux-lanes" "$D/bin/tmux"
+# #154: lanes.sh asks ps what a shell pane's own process is before calling it
+# dead. Stubbed here too, so this suite's fixture pids resolve to its own rows
+# instead of to whatever the host happens to have running at that pid.
+cp "$HERE/stubs/ps-lanes" "$D/bin/ps"
 
 cat > "$D/issues" <<'FIX'
 28|| Duplicate identities

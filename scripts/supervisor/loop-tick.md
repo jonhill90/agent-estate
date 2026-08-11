@@ -343,6 +343,12 @@ these apart, and all of them were misread as "nothing to do" on 2026-08-11:
 - `dead` — no agent, just a shell. A dispatch lands in `zsh`, which replies
   `no such file or directory: /clear`, and the work is silently lost. Restart
   the agent with `claude --dangerously-skip-permissions` before using the lane.
+- `service` — a supervisor service that lives in this session and is not a
+  lane, such as the Telegram poller (`inbox-poll.sh`, window 11). Its command
+  is a shell because the service is a shell script, so it read `dead` until
+  #154 and the restart instruction above pointed straight at it — restarting it
+  replaces the poller with an agent and Jon's replies stop arriving silently.
+  **Leave it alone.** It is never offered by `--free`.
 - `unknown` — a non-Claude harness. There is no probe for it; do not guess.
 
 This tool exists because a dispatch was sent into a dead lane and vanished, and

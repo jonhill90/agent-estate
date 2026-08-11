@@ -16,12 +16,17 @@ want() { # want <name> <window-name> <expected-state> <output>
 
 D=$(mktemp -d); mkdir -p "$D/bin"
 cp "$HERE/stubs/tmux-lanes" "$D/bin/tmux"
-# columns: index|name|command|status-line|seconds-since-output|in-mode|input-box
+cp "$HERE/stubs/ps-lanes" "$D/bin/ps"
+# columns: index|name|command|status-line|seconds-since-output|in-mode|input-box|pane-argv
 # The 7th column is optional and models the input box (#141). Omitted, no box
 # is rendered and classification is exactly what it was before #141 -- which
 # is why every pre-existing row below is left untouched. `-` is an empty box,
 # `dim:X` is an empty box showing Claude Code's dim placeholder, anything else
 # is text typed into the box and never submitted. See stubs/tmux-lanes.
+# The 8th column is also optional and models the argv of the pane's own first
+# process (#154), which is what separates a service window from a dead lane.
+# Omitted, it is `-zsh` -- what every real lane measured as -- so every
+# pre-existing row is untouched by that too.
 cat > "$D/fixture" <<'FIX'
 1|arch|claude.exe|❯ ready|1|0
 2|w-busy|claude.exe|esc to interrupt 3s|1|0
@@ -47,6 +52,11 @@ cat > "$D/fixture" <<'FIX'
 22|w-typeahead|claude.exe|esc to interrupt 3s|1|0|typed while the turn runs
 23|w-optionrow|claude.exe|❯ 1. Post the comment|1|0
 24|w-optionrow-yes|claude.exe|❯ 1. Yes|1|0
+25|telegram-poller|bash|inbox-poll: waiting on Telegram|1|0||bash /repo/scripts/supervisor/inbox-poll.sh
+26|ad102-renamed-lane|zsh|❯ |1|0
+27|free-27|zsh|❯ |1|0
+28|w-hand-run-poller|bash|inbox-poll: waiting on Telegram|1|0||-zsh
+29|w-mentions-poller|zsh|running scripts/supervisor/inbox-poll.sh\n\n❯ |1|0
 FIX
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
 
@@ -145,6 +155,52 @@ want "type-ahead during a live turn is busy, not unsent" w-typeahead busy "$out"
 want "an option row is blocked, not free"                w-optionrow blocked "$out"
 want "a short option row is blocked, not free"           w-optionrow-yes blocked "$out"
 
+# --- #154: a service window is not a dead lane ----------------------------
+# The live shape, verbatim: `inbox-poll.sh` deployed as `agent-dotfiles:11`
+# per the deployment path its own header recommends. Its pane command is
+# legitimately `bash` -- the script IS a bash script -- so every version of
+# lanes.sh before #154 reported it `dead`, and the count line told whoever
+# read the table to restart it. Restarting it replaces the poller with an
+# agent and Jon's Telegram replies stop arriving, silently.
+#
+# What separates it from a dead lane is measured, not named: on 2026-08-11
+# every lane's `pane_pid` process was the login shell `-zsh` (the agent runs
+# as its child), while window 11's was `bash .../inbox-poll.sh` directly,
+# because the window was created with the script as its command.
+want "a supervisor service window is service, not dead"  telegram-poller service "$out"
+# THE REGRESSION THAT MATTERS. Silencing the poller by silencing the check is
+# worse than the bug: a lane that really has lost its agent must still say so.
+want "a free-N lane that lost its agent is still dead"   free-27 dead "$out"
+want "the generic shell lane is still dead"              w-dead  dead "$out"
+# The #102 case the issue flags against the name-convention design: a lane
+# that finished, was renamed, and then lost its agent. Under "anything not
+# named free-N is not a lane" this window would have become invisible. The
+# probe here keys on what the pane's process IS, not on what the window is
+# called, so a renamed lane is classified exactly as it was before #154.
+want "a renamed lane that lost its agent is still dead"  ad102-renamed-lane dead "$out"
+# The exemption is deliberately narrow: it covers the deployment path
+# `inbox-poll.sh`'s header recommends (the script as the window's command),
+# not "any pane with a poller somewhere in it". A poller typed by hand into an
+# interactive shell leaves the pane's own process as the login shell, and that
+# pane still reads dead. Over-reporting dead is the safe direction; an
+# exemption broad enough to cover any lane that ever shelled out is not.
+want "a poller hand-run inside a login shell is still dead" w-hand-run-poller dead "$out"
+# The #65 discipline, applied to this probe: classification must not be
+# reachable from pane TEXT. A dead lane whose scrollback merely names the
+# poller script is dead -- the service signal comes from ps, and the status
+# probes still read exactly one line.
+want "a dead lane that merely printed the script name is dead" w-mentions-poller dead "$out"
+
+# #154: the count line is the hazard, not the table row -- `loop-tick.md` tells
+# a reader to restart every lane it counts. Five dead lanes here (w-dead,
+# ad102-renamed-lane, free-27, w-hand-run-poller, w-mentions-poller); the
+# service window must not be one of them.
+if grep -qE '5 lane\(s\) have no agent' <<<"$out"; then
+  echo "  ok   the dead count line counts only genuinely dead lanes"; pass=$((pass+1));
+else
+  echo "  FAIL dead count line is not 5 in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
+fi
+
 if grep -qE '6 lane\(s\) (is|are) blocked' <<<"$out"; then
   echo "  ok   the table prints a count line for blocked lanes"; pass=$((pass+1));
 else
@@ -173,7 +229,8 @@ fi
 free=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --free 2>&1)
 for bad in arch w-dead w-hung w-busy w-copilot w-minute-tick w-scrolled w-blocked \
            w-trust w-model w-permission w-idle-footer w-subagent-task w-subagent-wait \
-           w-unsent w-unsent-ready-footer w-typeahead w-optionrow w-optionrow-yes; do
+           w-unsent w-unsent-ready-footer w-typeahead w-optionrow w-optionrow-yes \
+           telegram-poller ad102-renamed-lane free-27 w-hand-run-poller w-mentions-poller; do
   bi=$(awk -F'|' -v n="$bad" '$2==n{print $1}' "$D/fixture")
   if grep -qx ".*:$bi" <<<"$free"; then echo "  FAIL --free offered $bad"; fail=$((fail+1));
   else echo "  ok   --free withholds $bad"; pass=$((pass+1)); fi
@@ -195,11 +252,27 @@ for want_blocked in w-blocked w-trust w-model w-permission; do
   if grep -qx ".*:$wi" <<<"$blocked"; then echo "  ok   --blocked offers $want_blocked"; pass=$((pass+1));
   else echo "  FAIL --blocked withheld $want_blocked"; fail=$((fail+1)); fi
 done
-for not_blocked in arch w-dead w-hung w-busy w-real-free w-mentions w-mentions-blocked; do
+for not_blocked in arch w-dead w-hung w-busy w-real-free w-mentions w-mentions-blocked \
+                   telegram-poller free-27; do
   ni=$(awk -F'|' -v n="$not_blocked" '$2==n{print $1}' "$D/fixture")
   if grep -qx ".*:$ni" <<<"$blocked"; then echo "  FAIL --blocked offered $not_blocked"; fail=$((fail+1));
   else echo "  ok   --blocked withholds $not_blocked"; pass=$((pass+1)); fi
 done
+
+# #154: --json carries whatever the table carries, so the new state must show
+# up there rather than being flattened into one of the old ones -- and the
+# objects for pre-existing states must be untouched.
+json=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --json 2>&1)
+if grep -q '{"window":25,"name":"telegram-poller","command":"bash","state":"service"}' <<<"$json"; then
+  echo "  ok   --json reports the service window as service"; pass=$((pass+1));
+else
+  echo "  FAIL --json missing the service object in:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
+fi
+if grep -q '{"window":4,"name":"w-dead","command":"zsh","state":"dead"}' <<<"$json"; then
+  echo "  ok   --json is unchanged for a dead lane"; pass=$((pass+1));
+else
+  echo "  FAIL --json changed shape for a dead lane:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
+fi
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

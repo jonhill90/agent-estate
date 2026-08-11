@@ -10,6 +10,7 @@
 #   blocked  the agent is waiting on an interactive prompt    -> needs a human
 #   unsent   a brief is typed into the box and never submitted -> needs a human
 #   dead     no agent at all, just a shell                   -> restart the agent
+#   service  a supervisor service, deliberately not a lane   -> leave alone
 #   unknown  no probe recognizes the last line                -> ask a human
 #            (a non-Claude harness, or a Claude Code shape that is not the
 #            enumerated ready footer -- see READY_RE below. #126: this is
@@ -59,6 +60,42 @@ esac
 
 # Shells mean "the agent exited and left the pane behind".
 SHELLS="bash|zsh|sh|fish|login"
+# #154: ...with one exception, and it is a NARROW one. `inbox-poll.sh` is
+# deployed as a window in the lane session, per the deployment path its own
+# header recommends. It is a bash script, so its pane's command is legitimately
+# `bash`, and this classifier reported it `dead` -- whereupon the count line
+# below told whoever read the table to restart it. Restarting it replaces the
+# poller with an agent and Jon's Telegram replies stop arriving, which looks
+# exactly like nobody having written anything: the precise defect the inbound
+# half exists to prevent.
+#
+# THE SIGNAL IS THE PANE'S OWN PROCESS, not the window's name. #154 proposed a
+# name convention ("anything not `free-N` is not a lane") as the cheap option,
+# and it is the wrong one: a lane that finished, was renamed, and then lost its
+# agent is a state this estate has seen (#102), and under that rule it would
+# stop being reported at all. `pane_start_command` was measured next and is
+# empty for every window under tmux 3.5, including the poller -- it cannot
+# carry this. What does, measured against the live session on 2026-08-11:
+#
+#   window 11 (the poller)  pane_pid -> `bash .../inbox-poll.sh`
+#   every lane, 1-10        pane_pid -> `-zsh`
+#
+# because the poller's window was created with the script as its command while
+# a lane's agent runs as a CHILD of the pane's login shell. So a pane is a
+# service iff its FIRST process is one of this directory's long-running
+# services. That cannot drift the way a config list can, and it says nothing
+# about any window whose process is a shell -- every genuinely dead lane,
+# renamed or not, is classified exactly as it was before #154.
+#
+# Deliberately narrow in two ways. Only the pane's own process is inspected,
+# not its descendants: a poller someone typed into an interactive shell still
+# reads `dead`, because a rule that searched the process tree would exempt any
+# lane that ever shelled out, and hiding one real dead lane is worse than this
+# whole bug. And only `inbox-poll.sh` is listed, because it is the only service
+# this estate actually runs in the lane session -- `watchdog.sh` runs from a
+# LaunchAgent and never occupies a window. LANES_SERVICE_RE extends it without
+# editing code; whatever is added must be observed running that way first.
+SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
 # The supervisor's own pane. It is never a dispatch target: sending a worker
 # brief there /clear's the loop and replaces it with someone else's task.
 # Done twice on 2026-08-11 -- once via an empty tmux target, once because
@@ -178,19 +215,34 @@ TAB=$'\t'   # tmux does not interpret a literal \t inside -F
 # -- the pane that capture-pane reads and send-keys would hit. Reading the
 # command from ":$w.1" while capturing from ":$w" meant a split lane could
 # report the first pane's command and the active pane's screen.
-declare -a IDX NAME CMD ACTIVITY PANEMODE
-while IFS=$'\t' read -r w n c a m; do
+declare -a IDX NAME CMD ACTIVITY PANEMODE PANEPID
+while IFS=$'\t' read -r w n c a m p; do
   [ -n "$w" ] || continue
-  IDX+=("$w"); NAME+=("$n"); CMD+=("$c"); ACTIVITY+=("$a"); PANEMODE+=("$m")
+  IDX+=("$w"); NAME+=("$n"); CMD+=("$c"); ACTIVITY+=("$a"); PANEMODE+=("$m"); PANEPID+=("$p")
 done < <(tmux list-panes -s -t "$SESSION" -f '#{pane_active}' \
-           -F "#{window_index}${TAB}#{window_name}${TAB}#{pane_current_command}${TAB}#{window_activity}${TAB}#{pane_in_mode}" 2>/dev/null)
+           -F "#{window_index}${TAB}#{window_name}${TAB}#{pane_current_command}${TAB}#{window_activity}${TAB}#{pane_in_mode}${TAB}#{pane_pid}" 2>/dev/null)
+
+# #154. Answers one question about a pane whose command is a shell: is that
+# shell one of this directory's services, or is it the wreckage of an agent
+# that exited? `pane_pid` is tmux's own handle on the pane's FIRST process, so
+# this reads what that process is running rather than trusting a name, a
+# window title, or a config list. Nothing about the pane's TEXT is consulted --
+# a dead lane whose scrollback merely names the script is still dead, which is
+# the #65 discipline applied to a probe that is not a status-line probe at all.
+is_service_pane() {
+  local pid="${1:-}" argv
+  [ -n "$pid" ] || return 1
+  argv=$(ps -o args= -p "$pid" 2>/dev/null) || return 1
+  [ -n "$argv" ] || return 1
+  grep -qE "$SERVICE_RE" <<<"$argv"
+}
 
 now_epoch=$(date +%s)
 
 emit_rows() {
   local i
   for i in "${!IDX[@]}"; do
-    local w="${IDX[$i]}" name="${NAME[$i]}" cmd="${CMD[$i]}" act="${ACTIVITY[$i]}" mode="${PANEMODE[$i]}"
+    local w="${IDX[$i]}" name="${NAME[$i]}" cmd="${CMD[$i]}" act="${ACTIVITY[$i]}" mode="${PANEMODE[$i]}" pid="${PANEPID[$i]}"
     local pane state age
     # ONLY the status line -- the last non-empty line of the visible pane.
     #
@@ -222,7 +274,13 @@ emit_rows() {
       # copy mode exited.
       state=scrolled
     elif [[ "$cmd" =~ ^($SHELLS)$ ]]; then
-      state=dead
+      # #154: a pure NARROWING of `dead`, the same shape #141 used for `free`.
+      # The only lane this can move is one that was already going to be called
+      # dead, and it can only move it to `service` -- no other state's
+      # classification is reachable from here, so `--free`, `--blocked`, and
+      # every existing row are untouched. See SERVICE_RE above for why the
+      # signal is the pane's own process and not the window's name.
+      if is_service_pane "$pid"; then state=service; else state=dead; fi
     elif [[ ! "$cmd" =~ ^(claude|claude\.exe)$ ]]; then
       # The busy probe greps Claude Code's own status string. Other harnesses
       # paint different UIs, and guessing produces false alarms: a healthy idle
