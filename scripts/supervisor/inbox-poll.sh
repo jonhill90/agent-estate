@@ -49,19 +49,52 @@
 #   pages again.
 #
 #   The poller process itself is going down, for any reason: an EXIT trap
-#   fires on every exit path -- clean or not, bash cannot tell the two apart
-#   and it is safer to over-report than to miss a real crash -- and tells Jon
-#   through notify.sh before the process is gone. This is the one report a
-#   dying process can still make for itself; it cannot detect being SIGKILLed
-#   or the machine going to sleep, which is exactly why continuous running
-#   under a restart-on-crash launcher (above) is part of the design, not an
-#   optional extra.
+#   fires on every exit path bash can still act on and tells Jon through
+#   notify.sh before the process is gone. This is the one report a dying
+#   process can still make for itself; it cannot detect being SIGKILLed or
+#   the machine going to sleep (SIGKILL runs no userspace code at all, trap
+#   included -- verified, not assumed), which is exactly why continuous
+#   running under a restart-on-crash launcher (above) is part of the design,
+#   not an optional extra.
+#
+# agent-dotfiles#155: the EXIT trap above originally fired unconditionally,
+# so a 12-second pre-flight run -- confirming the poller starts, nothing
+# more -- paged Jon exactly like a production death would. Two things now
+# gate the page, not the record (see report_stop below):
+#
+#   Deliberate stop: the loop reaching INBOX_POLL_ITERATIONS and returning is
+#   only ever a test or pre-flight run -- production leaves ITERATIONS at 0
+#   (forever) and never reaches this path by exhaustion. It sets DELIBERATE
+#   before breaking, and report_stop stays quiet whenever that flag is set,
+#   regardless of how long the run lasted.
+#
+#   Too young to matter: anything else -- a signal, an unhandled error --
+#   stays quiet if it happens before INBOX_POLL_MIN_UPTIME seconds have
+#   passed. A run that dies at second 12 was never the estate's poller in
+#   any sense Jon needs paged about; a run that dies after the threshold is
+#   treated as the real thing going down and pages exactly as before.
+#   Default is 60s: an order of magnitude past the 12s pre-flight that
+#   caused #155, so no plausible pre-flight or `--help`-style smoke check
+#   crosses it by accident, while still being short enough that a genuine
+#   crash is normally well past it. The accepted gap: a poller that starts
+#   clean and then dies inside that first 60s -- e.g. a config typo that
+#   only breaks on the first real inbox.sh call -- goes unreported by this
+#   path. That is deliberate, not an oversight: the same window is exactly
+#   when a human is watching (a deploy, a restart, a pre-flight), the status
+#   file (below) still records "stopped" for whoever checks it, and widening
+#   the window to cover that case reintroduces the false pages this issue
+#   exists to remove. If unattended early deaths in that window turn out to
+#   matter in practice, the fix is a supervising watchdog that notices the
+#   heartbeat go stale (report() below already provides that signal), not a
+#   lower threshold here.
 #
 # Usage: inbox-poll.sh [session]
 # Config: INBOX_POLL_TIMEOUT          Telegram long-poll seconds (default 25)
 #         INBOX_POLL_FAIL_THRESHOLD   consecutive failures before paging (default 3)
 #         INBOX_POLL_ITERATIONS       stop after N loop iterations (default 0 = forever;
 #                                     tests use this, production never sets it)
+#         INBOX_POLL_MIN_UPTIME       seconds a run must have been alive before an
+#                                     unexpected exit pages Jon (default 60; #155)
 #         INBOX_POLL_BACKOFF_BASE     seconds of backoff per consecutive failure,
 #                                     capped past 12 (default 5; tests set 0)
 
@@ -75,7 +108,9 @@ LOG="${INBOX_POLL_LOG:-$STATE/inbox-poll.log}"
 POLL_TIMEOUT="${INBOX_POLL_TIMEOUT:-25}"
 FAIL_THRESHOLD="${INBOX_POLL_FAIL_THRESHOLD:-3}"
 ITERATIONS="${INBOX_POLL_ITERATIONS:-0}"
+MIN_UPTIME="${INBOX_POLL_MIN_UPTIME:-60}"
 BACKOFF_BASE="${INBOX_POLL_BACKOFF_BASE:-5}"
+START_TS=$(date +%s)
 
 mkdir -p "$(dirname "$STATUS")" 2>/dev/null
 
@@ -97,11 +132,26 @@ report() {  # report <state> <detail>
 }
 
 STOPPING=""
+DELIBERATE=""
 report_stop() {
   [ -n "$STOPPING" ] && return
   STOPPING=1
+  # The record and the page are different things (#155): the status file and
+  # log line below happen on every exit, paged or not, so a later reader
+  # (human or watchdog) always has the fact even when Jon does not get pinged.
   report stopped "poller process exiting"
-  log "STOPPING pid $$"
+  local uptime=$(( $(date +%s) - START_TS ))
+  log "STOPPING pid $$ after ${uptime}s"
+
+  if [ -n "$DELIBERATE" ]; then
+    log "deliberate stop (INBOX_POLL_ITERATIONS reached) -- not paging Jon"
+    return
+  fi
+  if [ "$uptime" -lt "$MIN_UPTIME" ]; then
+    log "stopped after ${uptime}s, under INBOX_POLL_MIN_UPTIME=${MIN_UPTIME}s -- too young to have been the estate's real poller, not paging Jon"
+    return
+  fi
+
   if ! AGENT_NOTIFY_CALLER=supervisor "$HERE/notify.sh" \
        "Telegram inbox poller stopped" \
        "pid $$ on this machine is no longer polling -- replies will queue until the Director's next inbox.sh tick or the poller restarts" \
@@ -157,6 +207,7 @@ while :; do
   fi
 
   if [ "$ITERATIONS" -gt 0 ] && [ "$iter" -ge "$ITERATIONS" ]; then
+    DELIBERATE=1
     break
   fi
   # Only a failed call needs a local backoff -- a successful call already
