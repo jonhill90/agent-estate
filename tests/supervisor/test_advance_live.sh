@@ -295,11 +295,19 @@ fi
 #      every run. This proves what advance-live.sh does when the checkout is
 #      locked out; it does NOT prove two real invocations ever reach that point.
 #   B. THE RACE. Two invocations really do run concurrently from a shared
-#      barrier. Collisions are genuinely rare -- a 200-iteration sweep during
-#      #136 hit one in 23 iterations (~12%) -- so this asserts only the
-#      invariants that must hold whether or not a collision fires, and reports
-#      the observed collision count without asserting it. Asserting "a collision
-#      occurred" here would be a flaky test, not a stronger one.
+#      barrier, with the second caller staggered across the same start-offset
+#      sweep (0-0.12s) that #148's one-off 200-iteration experiment used to
+#      land collisions reliably -- #150 found that sweep existed only in the
+#      one-off run and never made it into this file, so the committed test
+#      (a bare simultaneous release) collided only ~7.5% of runs. This asserts
+#      only the invariants that must hold whether or not a collision fires,
+#      and reports the observed collision count without asserting it is
+#      nonzero: asserting "a collision occurred" here would fail the suite on
+#      a CI runner that merely scheduled two processes politely, which is a
+#      flaky test, not a stronger one (#150). A zero-collision run is logged
+#      explicitly instead, so that outcome is itself checked rather than a
+#      silent pass -- the deterministic mechanism test above (section A) pins
+#      the refusal handling regardless of whether this run's race collided.
 
 D2=$(mktemp -d)
 git init -q --bare "$D2/origin.git"
@@ -365,26 +373,76 @@ want_exit "the invocation after a locked-index refusal advances (exit 0)" "$rc" 
 lhead=$(git -C "$LIVE2" rev-parse HEAD)
 if [ "$lhead" = "$RTARGET" ]; then ok "a locked-index refusal is fully recoverable"; else bad "a locked-index refusal is fully recoverable" "at $lhead, wanted $RTARGET"; fi
 
+# --- mutation check: the mechanism test must be able to go red -------------
+# #150's own gap: the committed race test passed on runs that never collided,
+# so it was asserting the refusal path without ever exercising it. Prove the
+# opposite is true of section A above -- patch the checkout failure branch to
+# swallow the error and exit 0 instead of refusing, and confirm the same
+# locked-index scenario that passed above now reports success. If it did not,
+# the assertions above were not actually pinned to the refusal.
+BROKEN_MECH="$D2/advance-live-swallows-refusal.sh"
+mech_patch_rc=0
+python3 - "$ADVANCE" "$BROKEN_MECH" <<'PY' || mech_patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''if ! git -C "$LIVE" checkout --detach "$target" >>"$LOG" 2>&1; then
+  fail "checkout to $target failed in $LIVE -- live worktree left at $cur, rollback recorded at $ROLLBACK"
+fi'''
+replacement = '''if ! git -C "$LIVE" checkout --detach "$target" >>"$LOG" 2>&1; then
+  log "SWALLOWED (mutation test): checkout to $target failed in $LIVE, exiting 0 anyway"
+  exit 0
+fi'''
+assert marker in text, "checkout-failure block not found -- script shape changed"
+assert text.count(marker) == 1, "checkout-failure block not unique -- script shape changed"
+open(dst, "w").write(text.replace(marker, replacement, 1))
+PY
+if [ "$mech_patch_rc" -ne 0 ]; then
+  bad "setup: patched a refusal-swallowing copy of advance-live.sh" \
+    "could not patch $ADVANCE (exit $mech_patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a refusal-swallowing copy of advance-live.sh"
+  chmod +x "$BROKEN_MECH"
+  reset_live2
+  : >"$LIVE2_GITDIR/index.lock"
+  S=$(race_state)
+  mech_out=$(SUPERVISOR_STATE="$S" bash "$BROKEN_MECH" "$LIVE2" 2>&1); mech_rc=$?
+  rm -f "$LIVE2_GITDIR/index.lock"
+  if [ "$mech_rc" -eq 0 ]; then
+    ok "mutation confirmed: swallowing the checkout failure turns the locked-index refusal into a false success (the exit-code assertion above would now be red)"
+  else
+    bad "mutation confirmed: swallowing the checkout failure turns the locked-index refusal into a false success" \
+      "expected exit 0 from the mutated script, got $mech_rc: $mech_out"
+  fi
+fi
+
 # --- B. the race itself: invariants under genuinely concurrent invocation ----
 # Both invocations start from a shared barrier file rather than two bare `&`
 # backgrounds, which is what makes them actually overlap; without it the second
 # process's startup cost alone puts it a whole phase behind the first.
+# The offsets #148's one-off experiment swept the second caller across to
+# land it at different points in the first's sequence -- ported in for #150
+# so the committed test uses the methodology that actually produced the
+# numbers, not just the conclusion drawn from it.
+OFFSETS=(0 0.01 0.03 0.05 0.07 0.08 0.10 0.12)
 RACE_ITERS=20
 race_bad=0
 race_collisions=0
 race_lost=0
 for ((n=1; n<=RACE_ITERS; n++)); do
+  offset="${OFFSETS[$(( (n-1) % ${#OFFSETS[@]} ))]}"
   reset_live2
   S=$(race_state)
   R=$(mktemp -d "$D2/r.XXXXXX")
   race_child() {
-    local id="$1"
+    local id="$1" delay="$2"
     : >"$R/ready.$id"
     while [ ! -e "$R/go" ]; do :; done
+    [ "$delay" = "0" ] || sleep "$delay"
     SUPERVISOR_STATE="$S" bash "$ADVANCE" "$LIVE2" >"$R/out.$id" 2>&1
     echo $? >"$R/rc.$id"
   }
-  race_child A & race_child B &
+  race_child A 0 & race_child B "$offset" &
   while [ ! -e "$R/ready.A" ] || [ ! -e "$R/ready.B" ]; do :; done
   : >"$R/go"
   wait
@@ -417,7 +475,7 @@ for ((n=1; n<=RACE_ITERS; n++)); do
   fi
   if [ -n "$problems" ]; then
     race_bad=$((race_bad+1))
-    echo "       race iteration $n:$problems"
+    echo "       race iteration $n (offset ${offset}s):$problems"
     echo "       A(rc=$rca): $(tr '\n' ' ' <"$R/out.A")"
     echo "       B(rc=$rcb): $(tr '\n' ' ' <"$R/out.B")"
   fi
@@ -425,12 +483,29 @@ for ((n=1; n<=RACE_ITERS; n++)); do
   rm -rf "$R" "$S" "$S2"
 done
 if [ "$race_bad" -eq 0 ]; then
-  ok "$RACE_ITERS concurrent double-invocations left a valid, recoverable live worktree every time ($race_collisions of $RACE_ITERS actually collided)"
+  ok "$RACE_ITERS concurrent double-invocations left a valid, recoverable live worktree every time ($race_collisions of $RACE_ITERS actually collided, offsets swept: ${OFFSETS[*]}s)"
 else
   bad "$RACE_ITERS concurrent double-invocations left a valid, recoverable live worktree every time" \
     "$race_bad of $RACE_ITERS iterations left a bad state"
 fi
 if [ "$race_lost" -eq 0 ]; then ok "no concurrent iteration lost the advance while both callers reported success"; else bad "no concurrent iteration lost the advance while both callers reported success" "$race_lost iterations"; fi
+
+# --- the zero-collision outcome is itself checked, never a silent pass -----
+# #150's finding: on runs where the sweep above still collides zero times,
+# this suite must not just report "20 passed" and move on -- that is exactly
+# how two of the four measured runs slipped through before. Whichever way it
+# goes is asserted here, not just printed.
+if [ "$race_collisions" -eq 0 ]; then
+  zero_collision_note="$RACE_ITERS/$RACE_ITERS iterations swept across offsets ${OFFSETS[*]}s and still collided zero times -- informational only (#150), not a suite failure: asserting a nonzero count would make this suite flaky on a loaded CI runner that scheduled the two processes politely. The deterministic mechanism test in section A above already pins the refusal handling independently of this run's race outcome."
+  echo "       NOTE: $zero_collision_note"
+  if [ -n "$zero_collision_note" ]; then
+    ok "zero-collision run is logged explicitly rather than passing silently"
+  else
+    bad "zero-collision run is logged explicitly rather than passing silently" "no note recorded"
+  fi
+else
+  ok "the offset sweep collided at least once this run ($race_collisions/$RACE_ITERS across offsets ${OFFSETS[*]}s)"
+fi
 
 git -C "$SRC2" worktree remove --force "$LIVE2" >/dev/null 2>&1
 rm -rf "$D2"
