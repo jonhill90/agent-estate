@@ -282,6 +282,159 @@ else
   fi
 fi
 
+# --- #136: two uncoordinated callers advancing the same live worktree -------
+# Since #132 there are two callers -- loop-tick.md's step 0 and watchdog.sh's
+# exit trap -- and the normal case is the watchdog running from the pinned copy
+# at the moment a supervisor tick begins. #136 filed that as low severity on the
+# reasoned claim that the worst case is bounded by git's own `index.lock`: one
+# `git checkout --detach` fails cleanly and is reported as a refusal, never
+# corruption. The two blocks below turn that reasoning into assertions.
+#
+# They are separate claims and are deliberately kept separate:
+#   A. THE MECHANISM. `index.lock` is held by the test, so the refusal fires on
+#      every run. This proves what advance-live.sh does when the checkout is
+#      locked out; it does NOT prove two real invocations ever reach that point.
+#   B. THE RACE. Two invocations really do run concurrently from a shared
+#      barrier. Collisions are genuinely rare -- a 200-iteration sweep during
+#      #136 hit one in 23 iterations (~12%) -- so this asserts only the
+#      invariants that must hold whether or not a collision fires, and reports
+#      the observed collision count without asserting it. Asserting "a collision
+#      occurred" here would be a flaky test, not a stronger one.
+
+D2=$(mktemp -d)
+git init -q --bare "$D2/origin.git"
+git clone -q "$D2/origin.git" "$D2/src" 2>/dev/null
+SRC2="$D2/src"
+git -C "$SRC2" config user.email test@example.com
+git -C "$SRC2" config user.name "Test"
+git -C "$SRC2" checkout -q -b main
+mkdir -p "$SRC2/scripts/supervisor"
+cat >"$SRC2/scripts/supervisor/watchdog.sh" <<'EOF'
+#!/bin/bash
+set -uo pipefail
+STATUS="${SUPERVISOR_STATUS:?}"
+mkdir -p "$(dirname "$STATUS")"
+printf 'checked:  %s\nstate:    pane_unreadable\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STATUS"
+exit 0
+EOF
+chmod +x "$SRC2/scripts/supervisor/watchdog.sh"
+echo baseline >"$SRC2/untouched.txt"
+git -C "$SRC2" add -A
+git -C "$SRC2" commit -q -m "race fixture base"
+git -C "$SRC2" push -q -u origin main
+RBASE=$(git -C "$SRC2" rev-parse HEAD)
+echo two >"$SRC2/file.txt"
+git -C "$SRC2" add file.txt
+git -C "$SRC2" commit -q -m "race fixture target"
+git -C "$SRC2" push -q origin main
+RTARGET=$(git -C "$SRC2" rev-parse HEAD)
+LIVE2="$D2/live"
+git -C "$SRC2" worktree add -q --detach "$LIVE2" "$RBASE"
+LIVE2_GITDIR=$(git -C "$LIVE2" rev-parse --absolute-git-dir)
+
+race_state() { # race_state -> echoes a fresh state dir with a just-ticked status
+  local s; s=$(mktemp -d "$D2/s.XXXXXX")
+  printf 'checked:  %s\nstate:    working\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$s/watchdog.status"
+  echo "$s"
+}
+reset_live2() {
+  git -C "$LIVE2" checkout -q --detach "$RBASE"
+  git -C "$LIVE2" clean -qfd
+  git -C "$LIVE2" update-ref refs/remotes/origin/main "$RTARGET"
+}
+
+# --- A. the mechanism: a locked index means a clean refusal, not a half-state -
+reset_live2
+: >"$LIVE2_GITDIR/index.lock"
+S=$(race_state)
+out=$(SUPERVISOR_STATE="$S" bash "$ADVANCE" "$LIVE2" 2>&1); rc=$?
+rm -f "$LIVE2_GITDIR/index.lock"
+want_exit "locked index refuses (nonzero exit)" "$rc" 1 "$out"
+if grep -q "checkout to .* failed" <<<"$out"; then ok "locked-index refusal names the failed checkout"; else bad "locked-index refusal names the failed checkout" "$out"; fi
+lhead=$(git -C "$LIVE2" rev-parse HEAD)
+if [ "$lhead" = "$RBASE" ]; then ok "locked index leaves live at the pre-advance sha"; else bad "locked index leaves live at the pre-advance sha" "at $lhead, wanted $RBASE"; fi
+lstatus=$(git -C "$LIVE2" status --porcelain)
+if [ -z "$lstatus" ]; then ok "locked-index refusal leaves a clean worktree"; else bad "locked-index refusal leaves a clean worktree" "$lstatus"; fi
+if grep -q "rollback recorded" <<<"$out"; then ok "locked-index refusal points at the recorded rollback"; else bad "locked-index refusal points at the recorded rollback" "$out"; fi
+# The refusal must be recoverable: the next invocation, with the lock gone,
+# finishes the advance. A refusal that wedges the worktree would be a defect
+# regardless of how loudly it reported itself.
+S=$(race_state)
+out=$(SUPERVISOR_STATE="$S" bash "$ADVANCE" "$LIVE2" 2>&1); rc=$?
+want_exit "the invocation after a locked-index refusal advances (exit 0)" "$rc" 0 "$out"
+lhead=$(git -C "$LIVE2" rev-parse HEAD)
+if [ "$lhead" = "$RTARGET" ]; then ok "a locked-index refusal is fully recoverable"; else bad "a locked-index refusal is fully recoverable" "at $lhead, wanted $RTARGET"; fi
+
+# --- B. the race itself: invariants under genuinely concurrent invocation ----
+# Both invocations start from a shared barrier file rather than two bare `&`
+# backgrounds, which is what makes them actually overlap; without it the second
+# process's startup cost alone puts it a whole phase behind the first.
+RACE_ITERS=20
+race_bad=0
+race_collisions=0
+race_lost=0
+for ((n=1; n<=RACE_ITERS; n++)); do
+  reset_live2
+  S=$(race_state)
+  R=$(mktemp -d "$D2/r.XXXXXX")
+  race_child() {
+    local id="$1"
+    : >"$R/ready.$id"
+    while [ ! -e "$R/go" ]; do :; done
+    SUPERVISOR_STATE="$S" bash "$ADVANCE" "$LIVE2" >"$R/out.$id" 2>&1
+    echo $? >"$R/rc.$id"
+  }
+  race_child A & race_child B &
+  while [ ! -e "$R/ready.A" ] || [ ! -e "$R/ready.B" ]; do :; done
+  : >"$R/go"
+  wait
+  rca=$(cat "$R/rc.A"); rcb=$(cat "$R/rc.B")
+  [ "$rca" -ne 0 ] || [ "$rcb" -ne 0 ] && race_collisions=$((race_collisions+1))
+
+  problems=""
+  rhead=$(git -C "$LIVE2" rev-parse HEAD 2>&1) || problems+=" HEAD-unreadable"
+  git -C "$LIVE2" cat-file -e "${rhead}^{commit}" 2>/dev/null || problems+=" HEAD-is-not-a-commit"
+  [ "$rhead" = "$RBASE" ] || [ "$rhead" = "$RTARGET" ] || problems+=" HEAD-in-limbo($rhead)"
+  [ -e "$LIVE2_GITDIR/index.lock" ] && problems+=" index.lock-left-behind"
+  rstatus=$(git -C "$LIVE2" status --porcelain 2>&1)
+  [ -n "$rstatus" ] && problems+=" dirty-after($(tr '\n' ';' <<<"$rstatus"))"
+  rleft=$(git -C "$LIVE2" worktree list --porcelain | grep -c 'ad99-advance-smoke' || true)
+  [ "$rleft" -ne 0 ] && problems+=" leftover-smoke-worktrees($rleft)"
+  # Whatever the race did, a following solo invocation must be able to finish
+  # the job. This is the assertion that would catch "the concurrent path leaves
+  # a state the next invocation cannot recover from" -- the outcome that would
+  # make #136's low severity wrong.
+  S2=$(race_state)
+  rout=$(SUPERVISOR_STATE="$S2" bash "$ADVANCE" "$LIVE2" 2>&1); rrc=$?
+  rhead2=$(git -C "$LIVE2" rev-parse HEAD 2>/dev/null)
+  { [ "$rrc" -eq 0 ] && [ "$rhead2" = "$RTARGET" ]; } \
+    || problems+=" not-recoverable(rc=$rrc head=$rhead2: $(tr '\n' ' ' <<<"$rout"))"
+  # Neither must the advance be silently lost: two callers racing may not leave
+  # the worktree behind with both of them reporting success.
+  if [ "$rca" -eq 0 ] && [ "$rcb" -eq 0 ] && [ "$rhead" != "$RTARGET" ]; then
+    race_lost=$((race_lost+1))
+    problems+=" advance-lost(both exited 0 but live stayed at $rhead)"
+  fi
+  if [ -n "$problems" ]; then
+    race_bad=$((race_bad+1))
+    echo "       race iteration $n:$problems"
+    echo "       A(rc=$rca): $(tr '\n' ' ' <"$R/out.A")"
+    echo "       B(rc=$rcb): $(tr '\n' ' ' <"$R/out.B")"
+  fi
+  git -C "$LIVE2" worktree prune >/dev/null 2>&1
+  rm -rf "$R" "$S" "$S2"
+done
+if [ "$race_bad" -eq 0 ]; then
+  ok "$RACE_ITERS concurrent double-invocations left a valid, recoverable live worktree every time ($race_collisions of $RACE_ITERS actually collided)"
+else
+  bad "$RACE_ITERS concurrent double-invocations left a valid, recoverable live worktree every time" \
+    "$race_bad of $RACE_ITERS iterations left a bad state"
+fi
+if [ "$race_lost" -eq 0 ]; then ok "no concurrent iteration lost the advance while both callers reported success"; else bad "no concurrent iteration lost the advance while both callers reported success" "$race_lost iterations"; fi
+
+git -C "$SRC2" worktree remove --force "$LIVE2" >/dev/null 2>&1
+rm -rf "$D2"
+
 rm -rf "$D"
 
 echo "$pass passed, $fail failed"
