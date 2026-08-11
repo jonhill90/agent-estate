@@ -60,6 +60,36 @@
 # its place: it is what makes the LOOP's call safe, and what catches a tick
 # that overran its own cadence.
 #
+# TWO CALLERS, STILL NO LOCK (#136). Since #132 two uncoordinated callers can
+# reach this at once -- loop-tick.md's step 0 and watchdog.sh's exit trap -- and
+# the normal case is the watchdog running from the pinned copy exactly when a
+# supervisor tick begins. #136 filed that as low severity on the reasoned claim
+# that git's own `index.lock` bounds the worst case. That claim was then driven
+# rather than argued: 200 concurrent double-invocations against a throwaway
+# worktree, two processes released from a shared barrier, swept across start
+# offsets. 400 invocations, five distinct outcomes, all of them benign --
+# 377 advanced, 10 refused on the locked checkout, 8 found the tree already
+# current, 3 + 2 refused on a transiently dirty read. Zero left an invalid or
+# unrecoverable worktree; no `index.lock` was ever orphaned; every iteration
+# ended at the target with at least one caller having advanced it.
+#
+# Two of those outcomes were not predicted by the issue and are worth knowing
+# before debugging one: the dirty guards can fire on a tree that is not dirty.
+# A concurrent `git checkout --detach` writes files before it moves HEAD, so the
+# other invocation's `git status --porcelain` can catch a real file reported as
+# untracked. The message says "became dirty while the smoke test ran" and the
+# tree is clean by the time a human looks. That is a misleading diagnosis, not
+# an unsafe one -- it still refuses, loudly, with LIVE untouched.
+#
+# So NO LOCK, deliberately. A lock would convert "one caller refuses and the
+# other advances" into "one caller waits", and the caller most likely to wait is
+# watchdog.sh's exit trap -- a watchdog blocked on a mutex is a watchdog not
+# watching, which is the failure this whole tool exists downstream of. The
+# current shape already has the property a lock would buy: the advance is never
+# lost, because the caller that refuses is the redundant one.
+# tests/supervisor/test_advance_live.sh holds `index.lock` to pin the refusal
+# mechanism and races 20 real double-invocations to pin the invariants.
+#
 # ROLLBACK: the pre-advance sha is written to disk before anything is
 # mutated, because it is only knowable then -- after `checkout --detach` you
 # are guessing from reflog.
