@@ -123,3 +123,85 @@ class LastWakeupTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LatestWakeupAcrossTests(unittest.TestCase):
+    """Which transcript the loop's state is read from.
+
+    Every lane shares one Claude project directory, so the newest *file* is
+    almost always a busy worker. Measured 2026-08-11: the three newest
+    transcripts had zero ScheduleWakeup calls while the supervisor's older one
+    held eleven. Reading the newest file reported "no wakeup found", the
+    watchdog read that as a dead loop, restarted a healthy supervisor three
+    times, hit its escalation cap and paged Jon for a problem that did not
+    exist.
+    """
+
+    def write(self, directory: Path, name: str, records: list[dict]) -> None:
+        with open(directory / name, "w") as handle:
+            for record in records:
+                handle.write(json.dumps(record) + "\n")
+
+    @staticmethod
+    def wakeup(timestamp: str, **params) -> dict:
+        return {
+            "timestamp": timestamp,
+            "message": {
+                "content": [
+                    {"type": "tool_use", "name": "ScheduleWakeup", "input": params}
+                ]
+            },
+        }
+
+    def test_a_newer_worker_transcript_does_not_hide_the_loop(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write(root, "supervisor.jsonl", [self.wakeup(iso(60), delaySeconds=3600)])
+            # A worker, written later, with no wakeups at all.
+            self.write(root, "worker.jsonl", [{"timestamp": iso(1), "message": {"content": []}}])
+            import os as _os
+            _os.utime(root / "worker.jsonl", None)
+
+            stamp, delay, stopped = sleepcheck.latest_wakeup_across(str(root))
+
+        self.assertEqual((stamp, delay, stopped), (iso(60), 3600, False))
+
+    def test_the_most_recent_wakeup_wins_across_files(self) -> None:
+        # Names chosen so the STALE wakeup is visited last in glob order: a
+        # "keep whatever I saw most recently" implementation picks the wrong
+        # one and this test goes red. An earlier version used old/new, where
+        # glob order happened to favour the right answer, so the mutation
+        # check passed while the guard was broken.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write(root, "a-current.jsonl", [self.wakeup(iso(120), delaySeconds=1800)])
+            self.write(root, "z-stale.jsonl", [self.wakeup(iso(9000), delaySeconds=3600)])
+
+            stamp, delay, _ = sleepcheck.latest_wakeup_across(str(root))
+
+        self.assertEqual((stamp, delay), (iso(120), 1800))
+
+    def test_ordering_holds_when_the_stale_file_sorts_first(self) -> None:
+        # Mirror of the test above. Together they pin the comparison from both
+        # directions: one fails a "keep the last one I saw" implementation,
+        # this one fails "keep the first one I saw". Either alone passes by
+        # luck, which is exactly what the mutation check caught.
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write(root, "a-stale.jsonl", [self.wakeup(iso(9000), delaySeconds=3600)])
+            self.write(root, "z-current.jsonl", [self.wakeup(iso(120), delaySeconds=1800)])
+
+            stamp, delay, _ = sleepcheck.latest_wakeup_across(str(root))
+
+        self.assertEqual((stamp, delay), (iso(120), 1800))
+
+    def test_no_wakeups_anywhere_reports_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            self.write(root, "a.jsonl", [{"timestamp": iso(5), "message": {"content": []}}])
+
+            self.assertEqual(sleepcheck.latest_wakeup_across(str(root)), (None, None, False))
+
+    def test_an_empty_directory_reports_none(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            self.assertEqual(sleepcheck.latest_wakeup_across(tmp), (None, None, False))
