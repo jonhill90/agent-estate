@@ -47,6 +47,7 @@ class Ledger:
         os.chmod(self.lock_path, 0o600)
         self._lock_depth = 0
         self._initialize()
+        self._migrate_lanes_table(failpoint=_migration_failpoint)
         self._migrate_tasks_table(failpoint=_migration_failpoint)
 
     def _connect(self, *, foreign_keys=True):
@@ -101,7 +102,7 @@ class Ledger:
                     lane TEXT PRIMARY KEY,
                     pane_id TEXT NOT NULL,
                     nonce TEXT NOT NULL,
-                    harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude')),
+                    harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude', 'copilot-acp')),
                     repo TEXT NOT NULL,
                     server_id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
@@ -172,6 +173,80 @@ class Ledger:
         os.chmod(self.db_path, 0o600)
 
     _TASKS_SCHEMA_MARKERS = ("delivery_pending", "delivery_attempted_at")
+    _LANES_SCHEMA_MARKERS = ("copilot-acp",)
+
+    def _migrate_lanes_table(self, *, failpoint=None):
+        """Widen an existing `lanes` table's harness CHECK constraint in place.
+
+        `CREATE TABLE IF NOT EXISTS` in `_initialize` never touches a table
+        that already exists, so a ledger created before `copilot-acp` existed
+        keeps rejecting that harness forever unless this runs. SQLite has no
+        `ALTER TABLE ... ALTER COLUMN` / `DROP CONSTRAINT`, so the only way to
+        widen a CHECK constraint is to rebuild the table, mirroring
+        `_migrate_tasks_table`.
+
+        Every row is preserved. The rebuild is one transaction: any failure
+        mid-migration rolls back to the original table, unmodified. Foreign
+        key enforcement is turned off only around this rebuild (it cannot be
+        toggled mid-transaction) because `tasks.lane REFERENCES lanes(lane)`
+        would otherwise block dropping the original table while rows still
+        reference it; the table this rebuild produces is named `lanes` again
+        by the time this returns, so that reference is satisfied exactly as
+        before.
+        """
+        with self._locked():
+            with contextlib.closing(self._connect()) as probe:
+                existing = probe.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='lanes'"
+                ).fetchone()
+                if existing is None:
+                    return
+                if all(marker in existing["sql"] for marker in self._LANES_SCHEMA_MARKERS):
+                    return
+
+            connection = self._connect(foreign_keys=False)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    connection.execute(
+                        """
+                        CREATE TABLE lanes_migrated (
+                            lane TEXT PRIMARY KEY,
+                            pane_id TEXT NOT NULL,
+                            nonce TEXT NOT NULL,
+                            harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude', 'copilot-acp')),
+                            repo TEXT NOT NULL,
+                            server_id TEXT NOT NULL,
+                            session_id TEXT NOT NULL,
+                            command TEXT NOT NULL,
+                            updated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self._fail(failpoint, "after_create")
+                    connection.execute(
+                        """
+                        INSERT INTO lanes_migrated (
+                            lane, pane_id, nonce, harness, repo, server_id, session_id,
+                            command, updated_at
+                        )
+                        SELECT lane, pane_id, nonce, harness, repo, server_id, session_id,
+                               command, updated_at
+                        FROM lanes
+                        """
+                    )
+                    self._fail(failpoint, "after_copy")
+                    connection.execute("DROP TABLE lanes")
+                    self._fail(failpoint, "after_drop")
+                    connection.execute("ALTER TABLE lanes_migrated RENAME TO lanes")
+                    self._fail(failpoint, "after_rename")
+                except BaseException:
+                    connection.rollback()
+                    raise
+                else:
+                    connection.commit()
+            finally:
+                connection.close()
 
     def _migrate_tasks_table(self, *, failpoint=None):
         """Widen an existing `tasks` table to the current schema in place.
@@ -282,7 +357,7 @@ class Ledger:
             raise ValueError("pane incarnation does not match registered lane")
 
     def register_lane(self, *, lane, pane_id, nonce, harness, repo, server_id, session_id, command):
-        if harness not in ("codex", "claude"):
+        if harness not in ("codex", "claude", "copilot-acp"):
             raise ValueError("unsupported harness")
         if not all((lane, pane_id, nonce, repo, server_id, session_id, command)):
             raise ValueError("lane registration fields must be non-empty")

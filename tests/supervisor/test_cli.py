@@ -40,6 +40,27 @@ class RecordingAdapter:
         return True
 
 
+class RecordingACPAdapter:
+    instances = []
+
+    def __init__(self, ledger, transport_factory):
+        self.assigned = []
+        self.__class__.instances.append(self)
+
+    def register_lane(self, *, lane, target, harness, repo, nonce):
+        return {"lane": lane, "harness": harness, "pane_id": "sess-1", "session_id": "sess-1"}
+
+    def assign_task(self, *, lane, task_id, summary):
+        self.assigned.append((lane, task_id, summary))
+        return {"status": "complete"}
+
+    def observe_lane(self, lane):
+        return None
+
+    def notify_architecture(self, *, lane, retry_after):
+        return False
+
+
 class CliTest(unittest.TestCase):
     def test_tick_gates_lane_advancement_and_notification_while_github_is_blind(self):
         with tempfile.TemporaryDirectory() as root:
@@ -121,6 +142,46 @@ class CliTest(unittest.TestCase):
             value = json.loads(output.getvalue())
             self.assertEqual("delivered", value["status"])
             self.assertEqual("delivered", ledger.get_task("flaky-task")["status"])
+
+    def test_register_with_copilot_acp_harness_dispatches_through_acp_adapter(self):
+        RecordingACPAdapter.instances.clear()
+        with tempfile.TemporaryDirectory() as root:
+            output = io.StringIO()
+            with patch.object(cli, "ACPAdapter", RecordingACPAdapter), contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    0,
+                    cli.main([
+                        "--state-dir", root, "register",
+                        "--lane", "copilot-worker", "--target", "unused",
+                        "--harness", "copilot-acp", "--repo", "/repo",
+                    ]),
+                )
+            value = json.loads(output.getvalue())
+            self.assertEqual("copilot-acp", value["harness"])
+            self.assertEqual(1, len(RecordingACPAdapter.instances))
+
+    def test_assign_to_a_copilot_acp_lane_dispatches_through_acp_adapter_not_tmux(self):
+        """The real point of the wiring: a lane registered as copilot-acp
+        must route through ACPTransport for dispatch, while every other lane
+        keeps using TmuxAdapter untouched."""
+        RecordingACPAdapter.instances.clear()
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            ledger.register_lane(
+                lane="copilot-worker", pane_id="sess-1", nonce="nonce-acp", harness="copilot-acp",
+                repo="/repo", server_id="acp", session_id="sess-1", command="copilot",
+            )
+            output = io.StringIO()
+            with patch.object(cli, "ACPAdapter", RecordingACPAdapter), contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    0,
+                    cli.main([
+                        "--state-dir", root, "assign",
+                        "--lane", "copilot-worker", "--task", "t1", "--summary", "Do it",
+                    ]),
+                )
+            adapter = RecordingACPAdapter.instances[-1]
+            self.assertEqual([("copilot-worker", "t1", "Do it")], adapter.assigned)
 
     def test_tick_without_the_canonical_sensor_is_also_gated(self):
         with tempfile.TemporaryDirectory() as root:

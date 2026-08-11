@@ -8,7 +8,8 @@ import os
 import secrets
 from pathlib import Path
 
-from adapter import TmuxAdapter
+from acp_transport import ACPTransport
+from adapter import ACPAdapter, TmuxAdapter
 from core import Ledger
 from github_source import GithubTaskSource
 from sensor import StateSensor
@@ -32,7 +33,7 @@ def parser():
     register = sub.add_parser("register")
     register.add_argument("--lane", required=True)
     register.add_argument("--target", required=True)
-    register.add_argument("--harness", choices=("codex", "claude"), required=True)
+    register.add_argument("--harness", choices=("codex", "claude", "copilot-acp"), required=True)
     register.add_argument("--repo", required=True)
     register.add_argument("--nonce")
 
@@ -96,10 +97,26 @@ def _verify_caller(adapter, ledger, lane):
 def main(argv=None):
     args = parser().parse_args(argv)
     ledger = Ledger(args.state_dir)
+    # tmux stays the default transport for every existing lane (codex,
+    # claude) and is never replaced -- Jon requires the persistent, watchable
+    # terminals it gives him. ACP is opt-in per lane, selected by the lane's
+    # registered harness: only harness=copilot-acp dispatches through
+    # ACPTransport (SPEC §15.2 -- Copilot is the only harness that ships an
+    # ACP server today).
     adapter = TmuxAdapter(ledger, TmuxTransport(args.tmux_bin))
+    acp_adapter = ACPAdapter(ledger, ACPTransport.spawn)
+
+    def adapter_for_harness(harness):
+        return acp_adapter if harness == "copilot-acp" else adapter
+
+    def adapter_for_lane(lane):
+        record = ledger.get_lane(lane)
+        if record is None:
+            raise ValueError(f"unknown lane: {lane}")
+        return adapter_for_harness(record["harness"])
 
     if args.command == "register":
-        value = adapter.register_lane(
+        value = adapter_for_harness(args.harness).register_lane(
             lane=args.lane,
             target=args.target,
             harness=args.harness,
@@ -107,7 +124,7 @@ def main(argv=None):
             nonce=args.nonce or secrets.token_hex(16),
         )
     elif args.command == "assign":
-        value = adapter.assign_task(lane=args.lane, task_id=args.task, summary=args.summary)
+        value = adapter_for_lane(args.lane).assign_task(lane=args.lane, task_id=args.task, summary=args.summary)
     elif args.command == "accept":
         task = ledger.get_task(args.task)
         if task is None:
@@ -135,7 +152,9 @@ def main(argv=None):
         value = ledger.reconcile_delivery(args.task, pane_nonce=task["pane_nonce"], outcome=args.outcome)
     elif args.command == "observe":
         lanes = args.lane or [item["lane"] for item in ledger.list_lanes() if item["lane"] != "architecture"]
-        value = [event for lane in lanes if (event := adapter.observe_lane(lane)) is not None]
+        value = [
+            event for lane in lanes if (event := adapter_for_lane(lane).observe_lane(lane)) is not None
+        ]
     elif args.command == "notify":
         value = {"notified": adapter.notify_architecture(lane=args.architecture_lane, retry_after=args.retry_after)}
     elif args.command == "tick":
@@ -159,7 +178,7 @@ def main(argv=None):
                     if lane["lane"] == args.architecture_lane:
                         continue
                     try:
-                        event = adapter.observe_lane(lane["lane"])
+                        event = adapter_for_harness(lane["harness"]).observe_lane(lane["lane"])
                         if event is not None:
                             observations.append(event["key"])
                         ledger.record_component(f"lane:{lane['lane']}", snapshot=b"reachable", healthy=True)

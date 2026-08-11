@@ -264,6 +264,21 @@ class ACPTransport:
             self._sessions[session_id] = {"chunks": [], "context_usage": None}
         return session_id
 
+    def load_session(self, session_id, *, cwd):
+        """Resume a session a previous, since-exited process created.
+
+        The CLI dispatches one command per process, so the `copilot --acp`
+        subprocess behind a lane does not survive between calls -- each
+        `assign` reconnects with a fresh `spawn()` and must resume the
+        lane's session by id rather than starting a new one. Relies on the
+        agent's `loadSession` capability (confirmed present for
+        `copilot --acp`, see the PR description for the handshake).
+        """
+        self._request("session/load", {"sessionId": session_id, "cwd": cwd})
+        with self._sessions_lock:
+            self._sessions[session_id] = {"chunks": [], "context_usage": None}
+        return session_id
+
     def send_literal(self, target, payload):
         """Deliver `payload` to session `target` and return the structured result.
 
