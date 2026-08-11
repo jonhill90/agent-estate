@@ -164,5 +164,59 @@ else
   ok "check without [repo] does not emit an unbound-variable error"
 fi
 
+# --- a closed issue is not claimable (#95) ---------------------------------
+# On 2026-08-11 `claim.sh take` succeeded against two issues closed nearly
+# three hours earlier, and dispatch.sh sent lanes to already-finished work.
+# `--add-assignee` has no opinion about issue state, so the refusal has to
+# live in the read that happens before it.
+printf '150||Closed nearly three hours ago|CLOSED\n' >> "$D/issues"
+out=$(run take 150 acme/repo lane-9); rc=$?
+if [ "$rc" -ne 0 ]; then ok "take refuses a closed issue with a non-zero exit"; else bad "take refuses a closed issue with a non-zero exit" "$out"; fi
+want_contains "the refusal names the state" "not open" "$out"
+a=$(awk -F'|' '$1==150{print $2}' "$D/issues")
+if [ -z "$a" ]; then ok "a closed issue gets no assignee"; else bad "a closed issue gets no assignee" "$a"; fi
+
+# The happy path this whole mechanism exists to protect: an OPEN issue with no
+# assignee must still be claimable after the state check is added.
+printf '151||Still open|OPEN\n' >> "$D/issues"
+out=$(run take 151 acme/repo lane-9); rc=$?
+want_exit "take still succeeds against an open issue" "$rc" 0
+want_contains "the claim names the taker" "lane-9" "$out"
+
+# --- gh failing outright is a refusal, not a proceed (#95) -----------------
+# An issue number gh cannot resolve at all (network error, deleted issue,
+# whatever) must not be read as "open, go ahead" -- an empty answer is not a
+# yes.
+out=$(run take 999999 acme/repo lane-9); rc=$?
+if [ "$rc" -ne 0 ]; then ok "an unreadable issue state is refused, not proceeded"; else bad "an unreadable issue state is refused, not proceeded" "$out"; fi
+a=$(awk -F'|' '$1==999999{print $2}' "$D/issues")
+if [ -z "$a" ]; then ok "an unreadable issue gets no assignee"; else bad "an unreadable issue gets no assignee" "$a"; fi
+
+# --- take with no [repo] argument must not die on the unguarded array (#95) -
+# take's new state+assignees read (added by this fix) is a THIRD gh call site
+# inside `take`, added after #96 converted the two pre-existing ones to the
+# ${R[@]+"${R[@]}"} guard. dispatch.sh now always passes the repo slot, empty
+# or not (#96), so `claim.sh take <issue> "" <lane>` is the real shape a
+# no-repo dispatch produces. Run under /bin/bash specifically -- see the
+# comment above the `check` version of this test for why `bash` (Homebrew 5.3
+# here) cannot reproduce bash 3.2's unbound-variable-on-empty-array behaviour
+# under `set -u`.
+printf '152||No repo argument, open|OPEN\n' >> "$D/issues"
+out=$(run_system_bash take 152 "" lane-9); rc=$?
+if grep -q "unbound variable" <<<"$out"; then
+  bad "take without [repo] does not emit an unbound-variable error" "$out"
+else
+  ok "take without [repo] does not emit an unbound-variable error"
+fi
+# Exit 2 is claim.sh's "cannot read" / "could not assign" shape -- the one an
+# unbound-variable abort produces. 0 (claimed) is the real answer here since
+# #152 is open and unclaimed.
+if [ "$rc" = "2" ]; then
+  bad "take without [repo] does not abort before reaching gh" "exit 2: $out"
+else
+  ok "take without [repo] does not abort before reaching gh"
+fi
+want_exit "take without [repo] still claims a genuinely open issue" "$rc" 0
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
