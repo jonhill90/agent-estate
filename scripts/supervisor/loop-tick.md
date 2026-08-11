@@ -127,6 +127,55 @@ tick, not a failure of one.
   `$HOME` (`sync.py apply`, `install.sh`, any `apm` mutation).
 - Commits: Jon Hill \<jonhill90@live.com\> sole author, no co-author trailers.
 
+## Before you merge, check what the merge will CLOSE
+
+```bash
+gh pr view <n> --json closingIssuesReferences --jq '.closingIssuesReferences[].number'
+```
+
+If that list does not match what you intend to close, fix the PR body before
+merging. It is the only way to see this — the PR body reads as prose and the
+linkage is invisible in it.
+
+**GitHub's closing-keyword parser is not negation-aware.** A PR body saying
+
+> It does not explain or close #NNN
+
+links issue NNN as a closing reference and auto-closes it on merge. The sentence
+promising not to close the issue is what closes it. Caught on #98 by review,
+after the PR had been open for a full tick and read past twice.
+
+Two things that follow, both learned the hard way on that PR:
+
+- The **commit message** counts too, not just the body. A squash merge folds
+  commit messages into the merge commit, so amend the branch as well.
+- Writing the explanation reintroduces the bug. The note added to #98's body
+  describing this trap repeated the same keyword-then-number pattern three more
+  times and re-linked the issue. **On a PR that should close nothing**, break
+  every `close|closes|closed|fix|fixes|resolve|resolves` followed by
+  `#<number>` — including inside quotes and explanations — then re-check and
+  confirm the list is empty.
+
+**The target is "matches intent", never "empty".** A PR that genuinely resolves
+an issue SHOULD carry `Fixes #N`, and stripping it breaks something real:
+`claim.sh stale` finds in-flight work by grepping PR bodies for
+`(fixes|closes|resolves) #N`, and that is the only signal it has. A PR with no
+reference is invisible to every duplicate-work check in this estate — which is
+how a lane was dispatched to #99 while #100 was already open, #100 having
+omitted the keyword because it implements only half of that issue.
+
+So there are two failure directions, not one:
+
+- a keyword that should not be there closes an issue nothing has solved
+- a missing keyword hides live work and gets a second lane dispatched onto it
+
+Both are silent. Check the list against what you intend; do not reach for
+either extreme by reflex.
+
+An issue closed by accident is a louder false signal than almost anything else
+this loop produces: the tracker then says a problem is solved, and the next
+session believes it.
+
 ## Before you finish the tick
 
 Keep `brief.md` current as state changes — it is what a cold session resumes
