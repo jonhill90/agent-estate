@@ -12,10 +12,11 @@ Sweep GitHub across the four repos — `agent-dotfiles`, `skills`,
 - PRs needing independent review or a merge,
 - failing CI.
 
-**If there is actionable work:** dispatch it to a free lane with a fresh
-bounded brief and a **backgrounded** `tmux wait-for` waiter, so lanes run
-concurrently rather than serially. Review, then merge what passes. You have
-full autonomy to merge and close in these four repos.
+**If there is actionable work:** claim it (see "Claim the issue before you
+dispatch it"), then dispatch it to a free lane with a fresh bounded brief and a
+**backgrounded** `tmux wait-for` waiter, so lanes run concurrently rather than
+serially. Review, then merge what passes. You have full autonomy to merge and
+close in these four repos.
 
 `/clear` a lane before reusing it for an independent review — an author
 reviewing their own PR is not an independent reviewer.
@@ -99,6 +100,48 @@ these apart, and all of them were misread as "nothing to do" on 2026-08-11:
 This tool exists because a dispatch was sent into a dead lane and vanished, and
 because a lane wedged for 40 minutes was read as busy and left alone. Reading
 the table costs one command; both of those cost a whole tick.
+
+## Claim the issue before you dispatch it
+
+`lanes.sh` answers *is this lane safe to dispatch to*. This is the orthogonal
+question: *has this work already been taken*. A perfectly healthy free lane is
+exactly where duplicate work lands.
+
+Select work with `claim.sh list`, never a bare `gh issue list`, and take the
+claim **before** the `send-keys`:
+
+```bash
+scripts/supervisor/claim.sh list jonhill90/agent-dotfiles   # open AND unclaimed
+scripts/supervisor/claim.sh take 70 jonhill90/agent-dotfiles ad70-claim-signal
+```
+
+`take` prints the holder and **exits non-zero** if someone got there first.
+Treat that as "pick different work", not as an error to retry.
+
+The claim is the GitHub **assignee**. In these four repos an assignee means
+*claimed by a lane* — do not hand-assign an issue you are not dispatching. The
+claim is released when the PR closes the issue; release it by hand with
+`claim.sh release <n> <repo>` if the lane abandons the work.
+
+This exists because on 2026-08-11 issue #28 was dispatched to two lanes
+independently — once by the Director, once by the supervisor — and both
+produced complete, near-identical fixes (#68 merged, #69 closed). About an hour
+of lane work was spent twice. Neither dispatcher was wrong: `gh issue list`
+shows an open issue whether or not another lane took it ninety seconds ago.
+
+**Claims expire with the lane, not on a clock.** A task here can legitimately
+run for hours, so a timeout short enough to be useful would steal live work.
+Before dispatching, check for claims whose lane is gone:
+
+```bash
+scripts/supervisor/claim.sh stale jonhill90/agent-dotfiles
+```
+
+It reports a claim as stale when no live lane window names that issue and no
+open PR says it fixes it — a `dead` lane from `lanes.sh` is exactly the case it
+catches. It **reports only**: releasing is your call, because a bare issue
+number cannot tell `agent-dotfiles#70` from `skills#70`, and leaving a claim in
+place costs a tick while dropping a live one costs an hour.
 
 ## An empty tmux target hits the ACTIVE window — always resolve it first
 
