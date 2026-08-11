@@ -77,5 +77,39 @@ fi
 D=$(mktemp -d); run idle "$D/w"
 check "status names the running branch and sha" "^code:" "$D/w/st"
 
+# A missing state directory used to make every status write fail silently:
+# exit 0, and watchdog.status quietly stops updating -- indistinguishable from
+# a dead cron, which is the condition this tool exists to detect.
+D=$(mktemp -d); rm -rf "$D/absent"
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy \
+SUPERVISOR_STATE="$D/absent" SLEEPCHECK_DIR="$D/none" \
+  bash "$WATCHDOG" >/dev/null 2>&1
+if [ -f "$D/absent/watchdog.status" ]; then
+  echo "  ok   a missing state directory is created, not failed into silently"; pass=$((pass+1))
+else
+  echo "  FAIL status was not written when the state directory was absent"; fail=$((fail+1))
+fi
+
+# The live copy runs from a DETACHED worktree, so 'git rev-parse --abbrev-ref'
+# returns the literal "HEAD". Reporting that would make the provenance line
+# useless exactly where it matters most.
+D=$(mktemp -d); mkdir -p "$D/gitstub" "$D/w"
+cat > "$D/gitstub/git" <<'GITEOF'
+#!/bin/bash
+for a in "$@"; do
+  case "$a" in
+    --abbrev-ref) echo "HEAD"; exit 0 ;;
+    --points-at)  echo "main"; exit 0 ;;
+    --short)      echo "deadbee"; exit 0 ;;
+  esac
+done
+exit 0
+GITEOF
+chmod +x "$D/gitstub/git"
+SUPERVISOR_PATH="$D/gitstub:$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy \
+SUPERVISOR_STATE="$D/w" SLEEPCHECK_DIR="$D/none" \
+  bash "$WATCHDOG" >/dev/null 2>&1
+check "a detached worktree reports a real ref, not HEAD" "^code: *main" "$D/w/watchdog.status"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
