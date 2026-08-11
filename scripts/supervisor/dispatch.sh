@@ -211,14 +211,87 @@ if ! tmux rename-window -t "$LANE" "$WINDOW_NAME" 2>/dev/null; then
   exit 1
 fi
 
-MESSAGE="Read $BRIEF and do exactly what it says. That file is your complete brief. Do all of your work in the worktree at $WORKTREE -- it is yours, already branched; never work in the shared checkout at $REPO_PATH."
-
 abort_send() {
   echo "dispatch: $1" >&2
   "$HERE/worktree.sh" done "$WORKTREE" >/dev/null 2>&1
   release_claim
   exit 1
 }
+
+# WHAT IS TYPED INTO THE PANE STAYS SHORT, AND HERE IS THE MEASURED REASON.
+#
+# This message is typed into the lane's input box and then verified by reading
+# the pane back. The box shows only its last few rows: past a certain length it
+# scrolls INTERNALLY, the head disappears from the visible region, and
+# `capture-pane` cannot see it however correct the delivery was.
+#
+# Measured against a real Claude Code TUI at 80x24 (throwaway tmux server, one
+# probe per length, never a live lane):
+#
+#   ~450 chars -> head visible          ~500 chars -> HEAD LOST
+#
+# The first version of the deliverable contract lived in this string and took
+# it to 610 characters. That failed verification 4 times out of 4 at 80x24 and
+# passed 3/3 at 126x60 -- and `free-9` and `free-10` are 80x24, so it broke
+# dispatch to real lanes while every stub test stayed green (#118 review).
+#
+# So the contract is NOT in this string. The message is back to 389 characters
+# with representative paths, and `MESSAGE_BUDGET` below pins that this stays
+# true: the paths are the bulk of it and they vary, so the margin is thin and
+# it is enforced rather than remembered.
+MESSAGE="Read $BRIEF and do exactly what it says. That file is your complete brief. Do all of your work in the worktree at $WORKTREE -- it is yours, already branched; never work in the shared checkout at $REPO_PATH."
+
+# The head of the message is what an internally-scrolling box hides first, so
+# the length that matters is the whole string. 450 is the measured cliff at
+# 80x24; 430 leaves a little room for a slow repaint eating a row.
+MESSAGE_BUDGET="${DISPATCH_MESSAGE_BUDGET:-430}"
+if [ "${#MESSAGE}" -gt "$MESSAGE_BUDGET" ]; then
+  echo "dispatch: the brief message is ${#MESSAGE} chars, over the ${MESSAGE_BUDGET}-char budget for an 80x24 lane." >&2
+  echo "  Past ~450 the input box scrolls the head out of view, capture-pane cannot see it," >&2
+  echo "  and dispatch aborts even though the message arrived. Shorten it, or put the text in" >&2
+  abort_send "the brief message is over the ${MESSAGE_BUDGET}-char budget -- #$ISSUE_ARG was NOT dispatched"
+fi
+
+
+# The standing deliverable contract (#117), written into the BRIEF rather than
+# typed at the pane. A lane completed #112 correctly -- tests green,
+# mutation-checked, committed -- and stopped, because the brief never said to
+# push. It was right to be literal. From outside, a lane that finished without
+# shipping is indistinguishable from one that did nothing: no PR, no comment,
+# issue still claimed, and the work living only as an unpushed commit in a
+# temporary worktree one cleanup away from being lost.
+#
+# Still structural, which is the whole point of #117: the DISPATCHER writes it
+# on every dispatch, so it does not depend on whoever wrote the brief
+# remembering -- the mechanism that failed in #114. It moved out of the typed
+# message because that string has a hard length budget and this text does not
+# fit in it; the brief file has no such limit and is the thing the lane is told
+# to read.
+#
+# It also stops the message contradicting itself. Typed at the pane, the
+# dispatcher said "that file is your COMPLETE brief" and then added an
+# instruction that was not in it -- and for a read-only review brief, "push
+# your branch and open a PR" contradicted the brief's own first line. In the
+# file it sits with the rest of the instructions and defers to them.
+CONTRACT_MARKER="<!-- dispatch:deliverable-contract -->"
+if ! grep -qF "$CONTRACT_MARKER" "$BRIEF" 2>/dev/null; then
+  cat >>"$BRIEF" <<EOF || abort_send "could not append the deliverable contract to $BRIEF -- #$ISSUE_ARG was NOT dispatched"
+
+$CONTRACT_MARKER
+## Delivering this work
+
+Added by \`dispatch.sh\` on every dispatch, not by the brief's author.
+
+Unless this brief says otherwise, when you are finished:
+**push your branch and open a PR**.
+If you produced no code -- a review, an investigation, an options paper --
+**post your findings as a comment** on the issue or PR the brief names.
+
+Do not stop with the work only in your worktree. From outside, a lane that
+finished without shipping is indistinguishable from a lane that did nothing:
+unshipped work looks exactly like no work, and the worktree is temporary.
+EOF
+fi
 
 # `/clear` first: an author reviewing their own PR is not an independent
 # reviewer, and a lane carrying the last task's context is not a fresh one.
@@ -239,13 +312,24 @@ for attempt in 1 2; do
   tmux send-keys -t "$LANE" "$MESSAGE" 2>/dev/null \
     || abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
   sleep "${DISPATCH_SETTLE:-1}"
-  # Check the HEAD of the message and the worktree path: the head is what a
-  # dropped prefix eats first, and the path is what the lane must not lose.
+  # Check BOTH ENDS of the message plus the worktree path. The head is what a
+  # dropped prefix eats first (observed live, 2026-08-11), and it is also the
+  # first thing an over-long message hides by scrolling -- so checking the head
+  # alone conflates "arrived and is visible" with "fits". The tail is the part
+  # that stays visible under scrolling, so it is the half that still reports
+  # honestly when the box is full; checking only the tail would pass a dropped
+  # prefix, which is the failure this loop exists for. Both, or neither is
+  # evidence.
+  #
+  # The tail token is the closing phrase plus $REPO_PATH, not the path alone:
+  # the harness prints the working directory in its own header, so the bare
+  # path matches ordinary pane furniture and would pass on a blank pane.
   # Spaces and newlines come out because a real pane wraps a long path across
   # lines and indents the continuation.
   pane=$(tmux capture-pane -p -t "$LANE" 2>/dev/null | tr -d ' \n')
   if grep -qF "$(tr -d ' ' <<<"Read $BRIEF")" <<<"$pane" \
-     && grep -qF "$(tr -d ' ' <<<"$WORKTREE")" <<<"$pane"; then
+     && grep -qF "$(tr -d ' ' <<<"$WORKTREE")" <<<"$pane" \
+     && grep -qF "$(tr -d ' ' <<<"never work in the shared checkout at $REPO_PATH.")" <<<"$pane"; then
     sent=1
     break
   fi

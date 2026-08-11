@@ -67,6 +67,9 @@ run() {
     TMUX_PANES="$D/panes" DISPATCH_SETTLE=0 \
     DISPATCH_DROP_PREFIX="${DISPATCH_DROP_PREFIX:-0}" \
     DISPATCH_LANE="${DISPATCH_LANE:-}" \
+    DISPATCH_PANE_ROWS="${DISPATCH_PANE_ROWS:-}" \
+    DISPATCH_PANE_COLS="${DISPATCH_PANE_COLS:-60}" \
+    DISPATCH_MESSAGE_BUDGET="${DISPATCH_MESSAGE_BUDGET:-430}" \
     WORKTREE_ROOT="$D/roots" bash "$DISPATCH" "$@" 2>&1
 }
 tmuxlog()   { cat "$D/tmux.log"; }
@@ -371,7 +374,87 @@ log=$(tmuxlog)
 want_missing "no brief is sent when a claim in the list fails" "send-keys" "$log"
 if [ "$(worktrees)" = "$before" ]; then ok "no worktree is left behind by a partial claim"; else bad "no worktree is left behind by a partial claim" "$before -> $(worktrees)"; fi
 
+# --- the lane is told what "done" means, by the dispatcher (#117) ----------
+#
+# A lane completed #112 correctly -- tests green, mutation-checked, committed --
+# and stopped, because its brief never said to push. It was right to be literal.
+# From outside that is indistinguishable from a lane that did nothing: no PR, no
+# comment, issue still claimed, and the work living only as an unpushed commit
+# in a temporary worktree.
+#
+# Every other brief that night said "open a PR when done". Depending on that is
+# depending on whoever wrote the brief remembering, which is the mechanism that
+# failed in #114. So the dispatcher states it, on every dispatch.
+echo '78|| a dispatch that must say what done means' >> "$D/issues"
+cp "$D/brief.md" "$D/brief-orig.md"
+out=$(run 78 deliverable-contract "$D/brief.md" "" "$REPO"); rc=$?
+want_exit "a dispatch still succeeds with the contract attached" "$rc" 0 "$out"
+brief=$(cat "$D/brief.md")
+want_contains "the lane is told to push and open a PR" "push your branch and open a PR" "$brief"
+want_contains "a no-code lane is told to comment instead" "post your findings as a comment" "$brief"
+want_contains "and told why it matters" "unshipped work looks exactly like no work" "$brief"
+want_contains "the contract defers to the brief, so a read-only brief still wins" \
+  "Unless this brief says otherwise" "$brief"
+want_contains "the brief's own content is left alone" "$(head -1 "$D/brief-orig.md")" "$brief"
+
+# The contract goes in the BRIEF, not the typed message -- see the next block
+# for why. Assert that directly, or a later edit could move it back into the
+# pane and every assertion above would still pass.
+want_missing "the contract is not typed into the pane" "unshipped work looks exactly like no work" "$(tmuxlog)"
+
+# Re-dispatching the same brief must not stack the contract up.
+out=$(run 78 deliverable-contract "$D/brief.md" "" "$REPO")
+if [ "$(grep -c 'dispatch:deliverable-contract' "$D/brief.md")" = 1 ]; then
+  ok "a re-dispatch does not append the contract twice"
+else
+  bad "a re-dispatch does not append the contract twice" \
+    "found $(grep -c 'dispatch:deliverable-contract' "$D/brief.md") copies"
+fi
+
+# --- the typed message must fit a lane's visible input box (#118) ----------
+#
+# THE REGRESSION THIS PINS. The message is typed into the lane's input box and
+# then verified by reading the pane back. That box shows only its last few rows
+# and scrolls INTERNALLY: past roughly 450 characters at 80x24 the head leaves
+# the visible region, `capture-pane` cannot see it, the grep for `Read $BRIEF`
+# fails, dispatch retypes once, fails again and aborts -- unwinding the claim
+# and the worktree for a message that actually arrived.
+#
+# Measured against a real Claude Code TUI, not this stub: at 80x24 a 610-char
+# message failed 4/4 and the 389-char one passed 4/4; at 126x60 both passed.
+# `free-9` and `free-10` are 80x24, so the long version broke dispatch to real
+# lanes -- while all 78 assertions here stayed green, because the stub modelled
+# an input line of unbounded height. DISPATCH_PANE_ROWS now models that box.
+echo '79|| a dispatch into a small lane' >> "$D/issues"
+out=$(DISPATCH_PANE_ROWS=7 DISPATCH_PANE_COLS=60 DISPATCH_MESSAGE_BUDGET=430 run 79 small-lane "$D/brief.md" "" "$REPO"); rc=$?
+want_exit "a dispatch succeeds into a lane whose input box shows only 7 rows" "$rc" 0 "$out"
+
+# And the guard is load-bearing: a message too long for that box must FAIL, or
+# the assertion above is satisfied by a stub that cannot see the problem.
+#
+# The length comes from a DEEP BRIEF PATH rather than a giant slug, because the
+# slug also names the branch and the worktree directory and a filesystem-illegal
+# name aborts the dispatch earlier, for the wrong reason. Long paths are also
+# what actually happens here: the worktree paths in this estate run past 90
+# characters on their own.
+DEEP="$D/$(printf 'nested-brief-directory/%.0s' $(seq 1 12))"
+mkdir -p "$DEEP" && cp "$D/brief-orig.md" "$DEEP/brief.md"
+echo '80|| a dispatch whose message is too long' >> "$D/issues"
+out=$(DISPATCH_PANE_ROWS=7 DISPATCH_PANE_COLS=60 DISPATCH_MESSAGE_BUDGET=99999 \
+      run 80 long-message "$DEEP/brief.md" "" "$REPO"); rc=$?
+want_exit "an over-long message is caught by the pane check, not silently sent" "$rc" 1 "$out"
+want_contains "and says the brief did not land" "did not land intact" "$out"
+
+# The budget check is the cheaper guard in front of it: it refuses before
+# touching a lane at all, and names the reason.
+echo '81|| a dispatch over the message budget' >> "$D/issues"
+out=$(DISPATCH_MESSAGE_BUDGET=430 run 81 long-message "$DEEP/brief.md" "" "$REPO"); rc=$?
+want_exit "a message over the budget refuses up front" "$rc" 1 "$out"
+want_contains "and explains the 80x24 limit" "over the 430-char budget" "$out"
+want_missing "nothing is typed at a lane when the budget is blown" "send-keys" "$(tmuxlog)"
+
 rm -rf "$D"
+
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
