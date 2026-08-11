@@ -122,8 +122,14 @@ if [ -z "$LANE" ]; then
 fi
 
 # --- 2. the claim, before anything else is built --------------------------
-CLAIM_ARGS=("$ISSUE")
-[ -n "$REPO" ] && CLAIM_ARGS+=("$REPO")
+# The repo slot is ALWAYS passed, even empty. claim.sh's interface is
+# positional -- `take <issue> [repo] [lane]` -- so dropping an empty repo does
+# not shorten the argument list, it SHIFTS the lane name into the repo slot.
+# `dispatch.sh 95 claim-refuses-closed brief.md` with no repo argument ran
+# `gh issue view 95 -R claim-refuses-closed`, which fails, and reported
+# `claim: could not assign #95` for an open, unclaimed issue. Indistinguishable
+# from a legitimate refusal, and it aborted the dispatch every time.
+CLAIM_ARGS=("$ISSUE" "$REPO")
 if ! "$HERE/claim.sh" take "${CLAIM_ARGS[@]}" "$WINDOW_NAME"; then
   echo "dispatch: #$ISSUE is not available -- pick different work" >&2
   exit 1

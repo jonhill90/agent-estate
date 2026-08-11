@@ -63,7 +63,7 @@ if [ "$CMD" != list ] && [ "$CMD" != stale ] && [ -z "$ISSUE" ]; then
 fi
 
 holder_of() { # holder_of <issue> -> comma-separated logins, empty if unclaimed
-  gh issue view "$1" "${R[@]}" --json assignees \
+  gh issue view "$1" ${R[@]+"${R[@]}"} --json assignees \
      -q '.assignees|map(.login)|join(",")' 2>/dev/null
 }
 
@@ -82,7 +82,7 @@ take)
     echo "claim: #$ISSUE is already claimed by $h — not dispatching to $LANE" >&2
     exit 1
   fi
-  gh issue edit "$ISSUE" "${R[@]}" --add-assignee @me >/dev/null 2>&1 || {
+  gh issue edit "$ISSUE" ${R[@]+"${R[@]}"} --add-assignee @me >/dev/null 2>&1 || {
     echo "claim: could not assign #$ISSUE" >&2; exit 2; }
   h=$(holder_of "$ISSUE")
   [ -n "$h" ] || { echo "claim: assignment to #$ISSUE did not stick" >&2; exit 2; }
@@ -90,14 +90,14 @@ take)
   exit 0 ;;
 
 release)
-  gh issue edit "$ISSUE" "${R[@]}" --remove-assignee @me >/dev/null 2>&1 || {
+  gh issue edit "$ISSUE" ${R[@]+"${R[@]}"} --remove-assignee @me >/dev/null 2>&1 || {
     echo "claim: could not unassign #$ISSUE" >&2; exit 2; }
   echo "claim: #$ISSUE released"
   exit 0 ;;
 
 list)
   # What the dispatch step reads INSTEAD of a bare `gh issue list`.
-  gh issue list "${R[@]}" --state open --limit 200 --json number,assignees \
+  gh issue list ${R[@]+"${R[@]}"} --state open --limit 200 --json number,assignees \
      -q '.[]|"\(.number)\t\(.assignees|map(.login)|join(","))"' 2>/dev/null \
     | awk -F'\t' '$2==""{print $1}'
   exit 0 ;;
@@ -123,11 +123,11 @@ stale)
     "$HERE/lanes.sh" "$SESSION" 2>/dev/null \
       | awk 'NR>1 && $1 ~ /^[0-9]+$/ && $NF!="dead" && $2 !~ /^free-[0-9]+$/ {print $2}' \
       | sed -E -n 's/^[A-Za-z]+([0-9]+)-.*/\1/p'
-    gh pr list "${R[@]}" --state open --limit 200 --json number,body \
+    gh pr list ${R[@]+"${R[@]}"} --state open --limit 200 --json number,body \
        -q '.[]|"\(.number)\t\(.body)"' 2>/dev/null \
       | cut -f2- | grep -oiE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+'
   )
-  gh issue list "${R[@]}" --state open --limit 200 --json number,assignees \
+  gh issue list ${R[@]+"${R[@]}"} --state open --limit 200 --json number,assignees \
      -q '.[]|"\(.number)\t\(.assignees|map(.login)|join(","))"' 2>/dev/null \
     | awk -F'\t' '$2!=""{print $1}' \
     | while read -r n; do
