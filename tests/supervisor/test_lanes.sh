@@ -52,11 +52,12 @@ cat > "$D/fixture" <<'FIX'
 22|w-typeahead|claude.exe|esc to interrupt 3s|1|0|typed while the turn runs
 23|w-optionrow|claude.exe|❯ 1. Post the comment|1|0
 24|w-optionrow-yes|claude.exe|❯ 1. Yes|1|0
-25|telegram-poller|bash|inbox-poll: waiting on Telegram|1|0||bash /repo/scripts/supervisor/inbox-poll.sh
-26|ad102-renamed-lane|zsh|❯ |1|0
-27|free-27|zsh|❯ |1|0
-28|w-hand-run-poller|bash|inbox-poll: waiting on Telegram|1|0||-zsh
-29|w-mentions-poller|zsh|running scripts/supervisor/inbox-poll.sh\n\n❯ |1|0
+25|w-text-blocked|claude.exe|Which environment should I target? Type the name, or press Esc to cancel|1|0
+26|telegram-poller|bash|inbox-poll: waiting on Telegram|1|0||bash /repo/scripts/supervisor/inbox-poll.sh
+27|ad102-renamed-lane|zsh|❯ |1|0
+28|free-27|zsh|❯ |1|0
+29|w-hand-run-poller|bash|inbox-poll: waiting on Telegram|1|0||-zsh
+30|w-mentions-poller|zsh|running scripts/supervisor/inbox-poll.sh\n\n❯ |1|0
 FIX
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
 
@@ -91,7 +92,7 @@ want "a lane that merely printed the phrase is free"     w-mentions free    "$ou
 
 # The #123 case: a lane sitting on a selection menu is not idle, it is
 # waiting on a human, and must not be offered to the dispatcher.
-want "a lane on a selection menu is blocked, not free"   w-blocked blocked "$out"
+want "a lane on a selection menu is menu-blocked, not free" w-blocked menu-blocked "$out"
 # Same #65 shape as w-mentions above, but for the blocked footer: a lane that
 # merely printed the footer text earlier, with a normal last line, is free.
 want "a lane that merely printed the footer is free"     w-mentions-blocked free "$out"
@@ -100,10 +101,20 @@ want "a lane that merely printed the footer is free"     w-mentions-blocked free
 # /theme emits it. These three status lines were captured off a real Claude
 # Code pane (v2.1.220) driven through each prompt; all three read `free` before
 # the marker set was widened, and (3) -- a bash tool-permission approval -- is
-# the commonest blocking event a supervised lane actually hits.
-want "the folder-trust dialog is blocked"                w-trust      blocked "$out"
-want "the /model menu is blocked"                        w-model      blocked "$out"
-want "a bash tool-permission prompt is blocked"          w-permission blocked "$out"
+# the commonest blocking event a supervised lane actually hits. #159: all four
+# real captures are menus (see lanes.sh's MENU_ENTER_RE comment), so all four
+# read menu-blocked here, not text-blocked.
+want "the folder-trust dialog is menu-blocked"           w-trust      menu-blocked "$out"
+want "the /model menu is menu-blocked"                   w-model      menu-blocked "$out"
+want "a bash tool-permission prompt is menu-blocked"     w-permission menu-blocked "$out"
+
+# #159: no real free-text blocked prompt has been captured in this estate --
+# every one of the four real captures above is a menu. This fixture models
+# the shape the design calls for anyway (a dismissible prompt with neither an
+# "Enter to <verb>" footer nor a numbered option row nearby): the routing
+# decision (inbox-route.sh) still has to have a text-blocked case to deliver
+# to, or "do not fix this by refusing everything" is untestable.
+want "a dismissible free-text prompt is text-blocked, not menu-blocked" w-text-blocked text-blocked "$out"
 
 # #126: free inverted from a blacklist to a whitelist. A lane is dispatchable
 # only when its last line is a recognised ready shape; everything else is
@@ -152,8 +163,8 @@ want "type-ahead during a live turn is busy, not unsent" w-typeahead busy "$out"
 # approval prompt, holding a completed-but-unposted review verdict. READY_RE's
 # bare-`❯` half matches it, so as the last line it read `free` and a dispatch
 # would have destroyed the verdict.
-want "an option row is blocked, not free"                w-optionrow blocked "$out"
-want "a short option row is blocked, not free"           w-optionrow-yes blocked "$out"
+want "an option row is menu-blocked, not free"           w-optionrow menu-blocked "$out"
+want "a short option row is menu-blocked, not free"      w-optionrow-yes menu-blocked "$out"
 
 # --- #154: a service window is not a dead lane ----------------------------
 # The live shape, verbatim: `inbox-poll.sh` deployed as `agent-dotfiles:11`
@@ -201,7 +212,10 @@ else
   echo "  FAIL dead count line is not 5 in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
 fi
 
-if grep -qE '6 lane\(s\) (is|are) blocked' <<<"$out"; then
+# #159: seven blocked lanes -- the six menu/text captures above plus
+# w-text-blocked. None of #154's new fixture rows (service/dead) are blocked,
+# so this total is unaffected by that merge.
+if grep -qE '7 lane\(s\) (is|are) blocked' <<<"$out"; then
   echo "  ok   the table prints a count line for blocked lanes"; pass=$((pass+1));
 else
   echo "  FAIL no blocked count line in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
@@ -230,6 +244,7 @@ free=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --free 2>&1)
 for bad in arch w-dead w-hung w-busy w-copilot w-minute-tick w-scrolled w-blocked \
            w-trust w-model w-permission w-idle-footer w-subagent-task w-subagent-wait \
            w-unsent w-unsent-ready-footer w-typeahead w-optionrow w-optionrow-yes \
+           w-text-blocked \
            telegram-poller ad102-renamed-lane free-27 w-hand-run-poller w-mentions-poller; do
   bi=$(awk -F'|' -v n="$bad" '$2==n{print $1}' "$D/fixture")
   if grep -qx ".*:$bi" <<<"$free"; then echo "  FAIL --free offered $bad"; fail=$((fail+1));
@@ -245,17 +260,23 @@ for good in w-real-free w-mentions w-mentions-blocked w-placeholder w-empty-box;
 done
 
 # agent-dotfiles#142: --blocked is what inbound Telegram routing is built on
-# -- the same session:index shape as --free, but the opposite predicate.
+# -- the same session:index shape as --free, but the opposite predicate. #159
+# adds a second tab-separated field naming the kind (menu/text), so a match
+# here has to anchor on the lane field, not any substring of the line --
+# `.*:$wi` would also match a longer index that happens to end the same way,
+# and now has a `\tkind` suffix a bare `-x` exact match would never see.
 blocked=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --blocked 2>&1)
-for want_blocked in w-blocked w-trust w-model w-permission; do
-  wi=$(awk -F'|' -v n="$want_blocked" '$2==n{print $1}' "$D/fixture")
-  if grep -qx ".*:$wi" <<<"$blocked"; then echo "  ok   --blocked offers $want_blocked"; pass=$((pass+1));
-  else echo "  FAIL --blocked withheld $want_blocked"; fail=$((fail+1)); fi
+for want_blocked in w-blocked:menu w-trust:menu w-model:menu w-permission:menu w-text-blocked:text; do
+  want_blocked_name="${want_blocked%%:*}"; want_blocked_kind="${want_blocked##*:}"
+  wi=$(awk -F'|' -v n="$want_blocked_name" '$2==n{print $1}' "$D/fixture")
+  if grep -qE "^[^	]*:${wi}	${want_blocked_kind}\$" <<<"$blocked"; then
+    echo "  ok   --blocked offers $want_blocked_name as $want_blocked_kind"; pass=$((pass+1));
+  else echo "  FAIL --blocked withheld $want_blocked_name as $want_blocked_kind ($blocked)"; fail=$((fail+1)); fi
 done
 for not_blocked in arch w-dead w-hung w-busy w-real-free w-mentions w-mentions-blocked \
                    telegram-poller free-27; do
   ni=$(awk -F'|' -v n="$not_blocked" '$2==n{print $1}' "$D/fixture")
-  if grep -qx ".*:$ni" <<<"$blocked"; then echo "  FAIL --blocked offered $not_blocked"; fail=$((fail+1));
+  if grep -qE "^[^	]*:${ni}	" <<<"$blocked"; then echo "  FAIL --blocked offered $not_blocked"; fail=$((fail+1));
   else echo "  ok   --blocked withholds $not_blocked"; pass=$((pass+1)); fi
 done
 
@@ -263,7 +284,7 @@ done
 # up there rather than being flattened into one of the old ones -- and the
 # objects for pre-existing states must be untouched.
 json=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --json 2>&1)
-if grep -q '{"window":25,"name":"telegram-poller","command":"bash","state":"service"}' <<<"$json"; then
+if grep -q '{"window":26,"name":"telegram-poller","command":"bash","state":"service"}' <<<"$json"; then
   echo "  ok   --json reports the service window as service"; pass=$((pass+1));
 else
   echo "  FAIL --json missing the service object in:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));

@@ -15,6 +15,27 @@ sub="$1"; shift
 PANES="${TMUX_PANES:-${TMPDIR:-/tmp}/tmux-dispatch-panes}"
 mkdir -p "$PANES"
 
+# agent-dotfiles#159. STUB_MENU_PANES names windows (space-separated) whose
+# pane is a SELECTION MENU, not a text buffer -- the distinction the real bug
+# turned on: a reply routed to a menu-blocked lane was consumed as navigation
+# keys, not typed text, and the trailing Enter committed whatever option was
+# already highlighted (changing a lane's `/theme` setting in the live
+# incident). Everywhere else in this stub, "pane" means the append-only input
+# line modelled below; a window named here is the one exception, and it is
+# opt-in per test so every existing fixture keeps the old (accurate, for a
+# real text box) behaviour untouched.
+#
+# STUB_MENU_AS_TEXT=1 turns this back off without removing the window from
+# STUB_MENU_PANES -- agent-dotfiles#159's mutation-check 3: revert the stub to
+# the old single model and confirm the test that depends on the distinction
+# goes red. If it does not, the test was never exercising the distinction.
+is_menu_pane() {
+  [ "${STUB_MENU_AS_TEXT:-0}" != 1 ] || return 1
+  local target="$1" p
+  for p in ${STUB_MENU_PANES:-}; do [ "$p" = "$target" ] && return 0; done
+  return 1
+}
+
 case "$sub" in
   rename-window|send-keys)
     printf '%s %s\n' "$sub" "$*" >> "$LOG"
@@ -41,6 +62,52 @@ case "$sub" in
         esac
       done
       buf="$PANES/$win"
+      if is_menu_pane "$win"; then
+        # #159. A menu does not have a text buffer to append to -- there is
+        # no `buf` for it to land in, `-l` or not: real tmux's `-l` only
+        # controls whether TMUX itself interprets an argument as a key name
+        # before sending it; either way the bytes reach the app as keypresses,
+        # and a selector app reads keypresses as navigation, not as a string
+        # to insert. That is the whole of the bug: routing text with `-l` was
+        # necessary (#152) and not sufficient (#159).
+        #
+        # Modelled minimally: a digit sets the pending selection (arrow-key
+        # navigation would do the same in a real menu); anything else is
+        # swallowed, exactly as an unrecognised keypress would be; Enter
+        # commits whichever option is CURRENTLY pending -- defaulting to
+        # STUB_MENU_DEFAULT (the option the fixture says is highlighted) if
+        # nothing sent so far happened to be a digit. Nothing here EVER
+        # touches `.submitted` -- that is the file a text delivery test reads,
+        # and the point of this model is that a menu never writes it.
+        for k in "${keys[@]:-}"; do
+          if [ "$literal" = 1 ]; then
+            # A literal send (agent-dotfiles#152's `-l`, which inbox-route.sh
+            # always uses) still delivers the string to the app one keypress
+            # at a time -- `-l` changes how TMUX parses its OWN argument, not
+            # how many keys the app on the other end receives. "yes" sent -l
+            # is `y`, `e`, `s`: none select an option, none is Enter, so a
+            # menu just swallows all three.
+            n=${#k}; ci=0
+            while [ "$ci" -lt "$n" ]; do
+              c="${k:$ci:1}"
+              case "$c" in [0-9]) printf '%s' "$c" > "$buf.menu-pending" ;; esac
+              ci=$((ci+1))
+            done
+            continue
+          fi
+          case "$k" in
+            [0-9]) printf '%s' "$k" > "$buf.menu-pending" ;;
+            Enter)
+              sel="${STUB_MENU_DEFAULT:-1}"
+              [ -s "$buf.menu-pending" ] && sel="$(cat "$buf.menu-pending")"
+              printf '%s\n' "$sel" >> "$buf.selected"
+              printf '%s\n' "Enter" >> "$buf.keys"
+              rm -f "$buf.menu-pending" ;;
+            *) : ;;
+          esac
+        done
+        exit 0
+      fi
       for k in "${keys[@]:-}"; do
         if [ "$literal" = 1 ]; then
           printf '%s' "$k" >> "$buf"

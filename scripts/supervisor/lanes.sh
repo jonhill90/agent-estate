@@ -161,6 +161,37 @@ BLOCKED_MARKERS='Esc to cancel|Enter to select'
 # cannot collide with this.
 OPTION_ROW_RE='^[[:space:]]*❯ [0-9]+\.[[:space:]]'
 
+# #159: `blocked` used to be one state, and inbox-route.sh treated every
+# member of it as a place to type free text. That is wrong for the common
+# case -- routing a Telegram reply into a lane sitting on a selection menu
+# types the reply as NAVIGATION KEYS, not as an answer, and the trailing
+# Enter commits whatever option happened to be highlighted. Proven live: a
+# reply routed to a `/theme` dialog changed the lane's theme instead of
+# being read as text.
+#
+# So `blocked` splits into `menu-blocked` and `text-blocked`. The evidence is
+# drawn from the SAME four real captures BLOCKED_MARKERS above is built from
+# -- nothing new was inferred, only recombined:
+#
+#   folder trust     Enter to confirm · Esc to cancel        (+ an option row)
+#   /model            Enter to set as default · s to use this session only · Esc to cancel
+#   bash permission  Esc to cancel · Tab to amend · ctrl+e to explain (+ an option row)
+#   /theme            Enter to select · Esc to cancel
+#
+# Three of the four spell out what Enter does as a verb phrase -- "confirm",
+# "set", "select" -- which a plain text input never does; Enter there just
+# submits, and nothing about that needs narrating. The fourth (bash
+# permission) narrates Tab and ctrl+e instead, but paints a numbered option
+# row (`❯ 1. Yes`) one or two lines above its footer -- the same option-row
+# shape #133 already matches, just not necessarily on the LAST line, so
+# menu detection here looks at a short trailing window, not only the last
+# line. `MENU_TAIL_LINES` bounds that window: wide enough to hold a
+# question line plus a couple of options plus the footer, narrow enough to
+# stay clear of the #65 mistake (matching text the pane had merely printed,
+# far up in a normal capture).
+MENU_ENTER_RE='Enter to [a-z]+'
+MENU_TAIL_LINES=6
+
 # #126: free used to be "whatever is left after busy/hung/blocked/dead are
 # ruled out" -- a blacklist. Two lanes running an approved billed eval and a
 # research task read free while each had delegated to a background subagent:
@@ -243,7 +274,7 @@ emit_rows() {
   local i
   for i in "${!IDX[@]}"; do
     local w="${IDX[$i]}" name="${NAME[$i]}" cmd="${CMD[$i]}" act="${ACTIVITY[$i]}" mode="${PANEMODE[$i]}" pid="${PANEPID[$i]}"
-    local pane state age
+    local pane state age pane_lines pane_tail
     # ONLY the status line -- the last non-empty line of the visible pane.
     #
     # This used to grep `capture-pane -S -6`, which is six scrollback lines
@@ -253,7 +284,12 @@ emit_rows() {
     # state during the review that found it. An earlier comment here blamed
     # the Copilot harness; that was a misdiagnosis. It was never
     # harness-specific, it was the capture window.
-    pane=$(tmux capture-pane -p -t "$SESSION:$w" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -1)
+    pane_lines=$(tmux capture-pane -p -t "$SESSION:$w" 2>/dev/null | grep -v '^[[:space:]]*$')
+    pane=$(tail -1 <<<"$pane_lines")
+    # Only consulted once a lane is already known to be blocked (below), to
+    # decide menu vs text -- never for busy/free, which stay #65-disciplined
+    # to the single last line.
+    pane_tail=$(tail -n "$MENU_TAIL_LINES" <<<"$pane_lines")
 
     # A SECOND, separate capture, and deliberately not a widening of the one
     # above. `-e` keeps the SGR attributes that input-box.sh needs to tell a
@@ -295,7 +331,19 @@ emit_rows() {
       # only the status line above, the same fix #65 required for the busy
       # probe: an exact-match sweep over scrollback caught a lane merely
       # displaying the phrase, not showing it.
-      state=blocked
+      #
+      # #159: which KIND of prompt matters to a caller deciding whether free
+      # text is a safe thing to type into it -- see MENU_ENTER_RE above.
+      # `text-blocked` is the default, not a positively-matched case: nothing
+      # in this estate has been captured that proves it, so it is reached by
+      # absence of menu evidence rather than by a marker of its own. That
+      # keeps the same posture BLOCKED_MARKERS itself uses -- observed
+      # evidence adds a case, the absence of evidence never removes one.
+      if grep -qE "$MENU_ENTER_RE" <<<"$pane" || grep -qE "$OPTION_ROW_RE" <<<"$pane_tail"; then
+        state=menu-blocked
+      else
+        state=text-blocked
+      fi
     elif grep -q 'esc to interrupt' <<<"$pane"; then
       # Busy-looking. Hung iff tmux has seen no output for HUNG_AFTER.
       #
@@ -340,11 +388,17 @@ case "$MODE" in
     # `send-keys -t session:name` silently hits the first match.
     awk -F'\t' -v s="$SESSION" '$4=="free"{print s ":" $1}' <<<"$rows" ;;
   --blocked)
-    # Same session:index shape as --free, for the same reason. This is the
-    # routing signal agent-dotfiles#142 builds inbound Telegram delivery on:
-    # a lane in `blocked` is waiting on an interactive prompt, and Jon's
-    # reply is presumed to be the answer to it.
-    awk -F'\t' -v s="$SESSION" '$4=="blocked"{print s ":" $1}' <<<"$rows" ;;
+    # Same session:index shape as --free, for the same reason, plus a second
+    # tab-separated field naming the KIND (#159) -- `menu` or `text`. This is
+    # the routing table agent-dotfiles#142/#159 build inbound Telegram
+    # delivery on: a lane in `menu-blocked` or `text-blocked` is waiting on
+    # an interactive prompt, and Jon's reply is presumed to be the answer to
+    # it, but only a `text` lane can safely receive it as typed text --
+    # inbox-route.sh needs the kind to decide that, not just the lane.
+    awk -F'\t' -v s="$SESSION" '
+      $4=="menu-blocked"{print s ":" $1 "\tmenu"}
+      $4=="text-blocked"{print s ":" $1 "\ttext"}
+    ' <<<"$rows" ;;
   --json)
     printf '['
     awk -F'\t' 'BEGIN{c=0}
@@ -356,7 +410,11 @@ case "$MODE" in
     awk -F'\t' '{printf("%-4s %-24s %-12s %s\n",$1,$2,$3,$4)}' <<<"$rows"
     dead=$(awk -F'\t' '$4=="dead"' <<<"$rows" | wc -l | tr -d ' ')
     hung=$(awk -F'\t' '$4=="hung"' <<<"$rows" | wc -l | tr -d ' ')
-    blocked=$(awk -F'\t' '$4=="blocked"' <<<"$rows" | wc -l | tr -d ' ')
+    # #159: menu-blocked and text-blocked are counted together here -- this
+    # line answers "how many lanes need a human", the same question it
+    # answered before the split. Which kind matters to inbox-route.sh, not to
+    # someone scanning the table for whether to look.
+    blocked=$(awk -F'\t' '$4=="menu-blocked" || $4=="text-blocked"' <<<"$rows" | wc -l | tr -d ' ')
     unsent=$(awk -F'\t' '$4=="unsent"' <<<"$rows" | wc -l | tr -d ' ')
     unknown=$(awk -F'\t' '$4=="unknown"' <<<"$rows" | wc -l | tr -d ' ')
     [ "$dead" -gt 0 ] && echo "  ${dead} lane(s) have no agent — restart before dispatching"
