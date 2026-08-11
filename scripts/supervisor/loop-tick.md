@@ -410,22 +410,60 @@ after the task they last ran (`docs-loop-acp`, `findings-acd`), which went
 stale the moment a lane was cleared and reused, so they were renamed to
 `worker-N`. That traded a misleading label for no label.
 
-**Rename the window on every dispatch and on every completion.** It is one
-extra tmux call per dispatch and it costs nothing:
+**Rename the window on every dispatch and on every completion.**
 
-```bash
-tmux rename-window -t agent-dotfiles:<n> 'skills139-verify-instrument'   # on dispatch
-tmux rename-window -t agent-dotfiles:<n> 'free-<n>'                      # on completion
-```
-
-Rules:
-
-- **Dispatching:** name it `<repo><issue>-<short-slug>`, e.g. `skills140-loop-contract`.
-  Short enough to read in the status bar; the issue number makes it traceable.
+- **Dispatching:** `dispatch.sh` does this itself — `<repo><issue>-<short-slug>`,
+  e.g. `skills140-loop-contract`. Nothing to remember here.
 - **Finished and available:** rename back to `free-<n>`. A lane called `free-3`
   is unambiguous; a lane still carrying a task name is still working on it.
-- **Never leave a completed lane named after its finished task.** That is the
-  stale-label failure this rule exists to prevent.
+  **Never leave a completed lane named after its finished task.**
+
+### Completion is `lane-done.sh`, not a thing to remember (#102)
+
+Renaming on dispatch was mechanical from the start (`dispatch.sh`); renaming
+on completion was not — it stayed a sentence in this file for anyone to
+forget, and everyone did. `lanes.sh --free` returning nothing then reads as
+"the estate is at capacity" when every lane sitting idle has actually
+finished and is simply still wearing its task name. Observed twice in one
+evening on 2026-08-11: five lanes idle and unrenamed, then two more half an
+hour later, `dispatch.sh` refusing #99 the whole time.
+
+The tempting fix — rename any lane `lanes.sh` reports idle — is wrong and
+dangerous: idle also means "between tool calls" and "blocked on an approval
+prompt holding an unposted verdict", and those look identical to `lanes.sh`.
+Reclaiming on idle alone was tried against a live lane the same night and
+nearly destroyed a verdict.
+
+So the rename is tied to the one signal that cannot fire early: the worker's
+own `tmux wait-for -S <channel>`, its brief's literal last action (§14.1).
+Immediately after a successful `dispatch.sh`, background a waiter for the
+same channel named in that brief:
+
+```bash
+scripts/supervisor/dispatch.sh 102 lane-rename-on-completion \
+  ~/.local/state/agent-dotfiles-supervisor/ad102-brief.md \
+  jonhill90/agent-dotfiles ~/source/repos/Personal/agent-dotfiles
+# brief.md ends with: Final shell action: tmux wait-for -S ad102-done
+
+scripts/supervisor/lane-done.sh <window-index> ad102-lane-rename-on-completion ad102-done
+# run this with the Bash tool's run_in_background:true so the tick is not
+# blocked while it waits
+```
+
+`lane-done.sh` blocks on bare `wait-for` — the counterpart of the worker's
+`-S`, and **not** `wait-for -L`, which is the unrelated lock primitive and
+returns immediately on a channel nobody has locked (#108) — and renames to
+`free-<n>` only when it returns, and only if the window still carries the
+exact name it was dispatched with. If it doesn't, someone already handled it,
+or the lane was redispatched while the waiter was still up, and renaming now
+would steal the new name. Needs no pane inspection, so it cannot mistake an
+approval prompt for completion. It has the same open limit `wait-for` itself
+has (SPEC §14.2 L3 — no timeout): a worker that crashes or wedges before its
+final action leaves the waiter blocked forever, same as today.
+
+Channel names are a flat global namespace on the tmux server with no enforced
+uniqueness — any `-S` on the same string releases the waiter, whoever sent it.
+Tie the channel to the issue number, as every example here does.
 
 The window list then answers "what is going on" at a glance: anything named
 `free-N` is available, anything else is in flight and says what it is doing.
