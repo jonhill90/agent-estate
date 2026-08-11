@@ -3,6 +3,34 @@
 One iteration of the architecture supervisor loop. If your context was lost,
 read `brief.md` in this directory first — it is the full standing context.
 
+## Read the Director's inbox first, before anything else
+
+```bash
+scripts/supervisor/director-inbox.sh drain
+```
+
+Constraints and corrections from the Director are meant to arrive here, not
+as messages typed into your pane. Act on anything it returns before doing the
+rest of the tick — it is usually a correction that changes what the rest of
+the tick should do, and acting on it late means work gets done wrong first.
+
+Why it works this way, and it matters: a dynamic `/loop` stays alive by
+scheduling its own wakeup at the end of each turn. **A plain message sent to
+your pane replaces the loop prompt**, so the next turn is an ordinary turn and
+nothing re-arms. The loop ends silently, and the watchdog cannot tell that
+from a crash — both look like "idle pane, agent alive, no pending wakeup".
+
+Measured on 2026-08-11 (#85): 27 `/loop` messages since 09:00 produced zero
+`ScheduleWakeup` calls. The watchdog restarted three times; each restart did
+real work and was then ended by the Director sending a constraint; the third
+tripped the escalation cap and paged Jon at 09:34:49Z — for a condition the
+Director itself kept re-creating.
+
+The pane is convention-single-writer: nobody but the watchdog's `/loop` is
+supposed to write into it. Nothing enforces that yet — it depends on every
+caller reading this file and using `director-inbox.sh post` instead of a raw
+`send-keys`. See #81/#88.
+
 ## What to do
 
 Sweep GitHub across the four repos — `agent-dotfiles`, `skills`,
