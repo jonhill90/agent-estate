@@ -360,6 +360,15 @@ tmux send-keys -t "$LANE" Enter 2>/dev/null \
 # never ran. The input box emptying is the durable signal: it is true while
 # the turn runs AND after it finishes, and it is false in precisely the
 # failure this exists for.
+#
+# LATENCY: this loop adds ~DISPATCH_SETTLE (default 1s) to every dispatch,
+# even one that lands instantly, because the first sleep runs before the
+# first check -- and up to DISPATCH_CONFIRM_TRIES x DISPATCH_SETTLE (10s by
+# default) to a slow-confirming one. That is the price of #141: it is what
+# turns "the dispatcher printed success" into "the box actually went empty",
+# so do not tune DISPATCH_CONFIRM_TRIES down to make dispatch feel faster
+# without understanding that the loop is what makes an unsent brief
+# detectable instead of silent.
 CONFIRM_TRIES="${DISPATCH_CONFIRM_TRIES:-10}"
 submitted=""
 box=""
