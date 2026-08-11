@@ -27,8 +27,13 @@
 # available to the next tick.
 #
 # Usage:
-#   dispatch.sh <issue> <slug> <brief-file> [repo] [repo-path]
+#   dispatch.sh <issue>[,<issue>...] <slug> <brief-file> [repo] [repo-path]
 #
+# <issue>      one issue number, or a comma-separated list (agent-dotfiles#112)
+#              when one brief covers several -- e.g. `110,109`. Every issue in
+#              the list is claimed; the lane still gets ONE worktree and ONE
+#              brief, because it is doing one piece of work that happens to
+#              close more than one issue.
 # <slug>       short reason, e.g. `dispatch-worktree`; with <issue> it names
 #              both the lane branch and the tmux window.
 # <brief-file> the worker's complete brief. Sent by path, not pasted: a brief
@@ -45,16 +50,26 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SESSION="${LANES_SESSION:-agent-dotfiles}"
 
-ISSUE="${1:-}"
+ISSUE_ARG="${1:-}"
 SLUG="${2:-}"
 BRIEF="${3:-}"
 REPO="${4:-}"
 REPO_PATH="${5:-$PWD}"
 
-if [ -z "$ISSUE" ] || [ -z "$SLUG" ] || [ -z "$BRIEF" ]; then
+if [ -z "$ISSUE_ARG" ] || [ -z "$SLUG" ] || [ -z "$BRIEF" ]; then
   sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
   exit 2
 fi
+
+# One brief, possibly several issues (agent-dotfiles#112): #109 and #110 came
+# from the same review of the same PR and were dispatched to one lane, but
+# dispatch.sh only ever claimed the issue it was given -- the rest sat open
+# and looked free to the next dispatcher while a lane was actively on them.
+# ISSUE (singular, first of the list) is what names the lane branch and the
+# tmux window; a list changing the window name mid-estate would break
+# `lanes.sh` and `claim.sh stale`, which both match on it.
+IFS=',' read -r -a ISSUES <<< "$ISSUE_ARG"
+ISSUE="${ISSUES[0]:-}"
 
 # Checked before anything is claimed or created: a typo in the brief path is
 # the cheapest failure available, and it must stay that way.
@@ -114,7 +129,7 @@ while read -r candidate; do
 done < <("$HERE/lanes.sh" --free "$SESSION" 2>/dev/null)
 
 if [ -z "$LANE" ]; then
-  echo "dispatch: no free lane in session '$SESSION' -- not dispatching #$ISSUE" >&2
+  echo "dispatch: no free lane in session '$SESSION' -- not dispatching #$ISSUE_ARG" >&2
   echo "dispatch: a lane must be idle AND named 'free-N' to be dispatchable --" >&2
   echo "dispatch: one still carrying a task name is still working on it" >&2
   "$HERE/lanes.sh" "$SESSION" >&2
@@ -129,16 +144,47 @@ fi
 # `gh issue view 95 -R claim-refuses-closed`, which fails, and reported
 # `claim: could not assign #95` for an open, unclaimed issue. Indistinguishable
 # from a legitimate refusal, and it aborted the dispatch every time.
-CLAIM_ARGS=("$ISSUE" "$REPO")
-if ! "$HERE/claim.sh" take "${CLAIM_ARGS[@]}" "$WINDOW_NAME"; then
-  echo "dispatch: #$ISSUE is not available -- pick different work" >&2
-  exit 1
-fi
+#
+# CLAIMED holds only what actually got claimed, in claim order, so a failure
+# partway through a multi-issue list (agent-dotfiles#112) unwinds exactly the
+# issues this dispatch took and none it did not touch. Aborting the WHOLE
+# dispatch when any one claim fails, rather than proceeding with a partial
+# claim, matches the existing "every failure aborts" contract: a lane already
+# dispatched to a partial claim would be actively working issues the estate
+# cannot see as taken, which is the exact failure #112 was filed over.
+CLAIMED=()
+CLAIM_FAILED=""
+for i in "${ISSUES[@]}"; do
+  if "$HERE/claim.sh" take "$i" "$REPO" "$WINDOW_NAME"; then
+    CLAIMED+=("$i")
+  else
+    echo "dispatch: #$i is not available -- pick different work" >&2
+    CLAIM_FAILED=1
+    break
+  fi
+done
 
 release_claim() {
-  "$HERE/claim.sh" release "${CLAIM_ARGS[@]}" >/dev/null 2>&1 \
-    || echo "dispatch: could not release the claim on #$ISSUE -- release it by hand" >&2
+  local failed=() i
+  # Reverse of claim order; the order itself has no observable effect on
+  # GitHub state, but unwinding newest-first mirrors how the failure was hit.
+  for ((idx = ${#CLAIMED[@]} - 1; idx >= 0; idx--)); do
+    i="${CLAIMED[idx]}"
+    "$HERE/claim.sh" release "$i" "$REPO" >/dev/null 2>&1 || failed+=("$i")
+  done
+  if [ "${#failed[@]}" -gt 0 ]; then
+    # Loud and unambiguous: a claim nobody can see is worse than no claim,
+    # and a silently half-undone abort is exactly that -- issues in $failed
+    # are still assigned even though this dispatch is telling its caller it
+    # sent nothing.
+    echo "dispatch: could not release the claim on #${failed[*]} -- release ${failed[*]} by hand" >&2
+  fi
 }
+
+if [ -n "$CLAIM_FAILED" ]; then
+  release_claim
+  exit 1
+fi
 
 # --- 3. the worktree. Not optional, not recoverable ------------------------
 # worktree.sh prints the path on stdout and git's progress on stderr, so the
@@ -148,7 +194,7 @@ WORKTREE_ERR=$(mktemp)
 WORKTREE=$("$HERE/worktree.sh" new "${ISSUE}-${SLUG}" "$REPO_PATH" 2>"$WORKTREE_ERR")
 rc=$?
 if [ "$rc" -ne 0 ] || [ -z "$WORKTREE" ] || [ ! -d "$WORKTREE" ]; then
-  echo "dispatch: worktree.sh new failed for #$ISSUE in $REPO_PATH -- NOT dispatching" >&2
+  echo "dispatch: worktree.sh new failed for #$ISSUE_ARG in $REPO_PATH -- NOT dispatching" >&2
   echo "dispatch: a lane with no worktree works in the shared checkout, which is #73" >&2
   sed 's/^/  /' "$WORKTREE_ERR" >&2
   rm -f "$WORKTREE_ERR"
@@ -159,7 +205,7 @@ rm -f "$WORKTREE_ERR"
 
 # --- 4. the lane is told what it is doing, then given the work ------------
 if ! tmux rename-window -t "$LANE" "$WINDOW_NAME" 2>/dev/null; then
-  echo "dispatch: could not rename $LANE -- not dispatching #$ISSUE" >&2
+  echo "dispatch: could not rename $LANE -- not dispatching #$ISSUE_ARG" >&2
   "$HERE/worktree.sh" done "$WORKTREE" >/dev/null 2>&1
   release_claim
   exit 1
@@ -177,7 +223,7 @@ abort_send() {
 # `/clear` first: an author reviewing their own PR is not an independent
 # reviewer, and a lane carrying the last task's context is not a fresh one.
 tmux send-keys -t "$LANE" "/clear" Enter 2>/dev/null \
-  || abort_send "send-keys to $LANE failed -- #$ISSUE was not dispatched"
+  || abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
 
 # THEN WAIT. Observed live on 2026-08-11 while building this: typing the brief
 # immediately after `/clear` lost the leading characters -- the lane's prompt
@@ -191,7 +237,7 @@ sleep "${DISPATCH_SETTLE:-2}"
 sent=0
 for attempt in 1 2; do
   tmux send-keys -t "$LANE" "$MESSAGE" 2>/dev/null \
-    || abort_send "send-keys to $LANE failed -- #$ISSUE was not dispatched"
+    || abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
   sleep "${DISPATCH_SETTLE:-1}"
   # Check the HEAD of the message and the worktree path: the head is what a
   # dropped prefix eats first, and the path is what the lane must not lose.
@@ -208,12 +254,12 @@ for attempt in 1 2; do
   sleep "${DISPATCH_SETTLE:-1}"
 done
 
-[ "$sent" = 1 ] || abort_send "the brief did not land intact in $LANE -- #$ISSUE was NOT dispatched (check the pane by hand)"
+[ "$sent" = 1 ] || abort_send "the brief did not land intact in $LANE -- #$ISSUE_ARG was NOT dispatched (check the pane by hand)"
 
 tmux send-keys -t "$LANE" Enter 2>/dev/null \
-  || abort_send "could not submit the brief in $LANE -- #$ISSUE was not dispatched"
+  || abort_send "could not submit the brief in $LANE -- #$ISSUE_ARG was not dispatched"
 
-echo "dispatch: #$ISSUE -> $LANE ($WINDOW_NAME)"
+echo "dispatch: #$ISSUE_ARG -> $LANE ($WINDOW_NAME)"
 echo "  worktree: $WORKTREE"
 echo "  brief:    $BRIEF"
 exit 0
