@@ -234,6 +234,39 @@ Run it before writing a revert hold; exit 0 means the merge deletes nothing
 after this section was written, because a rule in a document only works if
 the reader happens to reach it first).
 
+### Which diff answers which question
+
+For "would merging this branch delete something", use **three-dot**
+(`main...branch`) — see above. For "does `main` already contain this branch's
+work", **neither plain form is correct**:
+
+- `main...branch` — after a squash merge, `main` holds that content under a
+  different commit, so this still lists it. Reports finished work as outstanding.
+- `main..branch` — once `main` drifts, this lists `main`'s own newer files as
+  "deletions". Reports unrelated work as the branch's.
+
+What works is two-dot **scoped to the paths the branch touched**, with the
+pathspec passed through `xargs -0` so filenames cannot word-split:
+
+```bash
+mb=$(git merge-base main "$b")
+git diff --name-only -z "$mb" "$b" | xargs -0 git diff --stat main.."$b" --
+# empty => the branch's work is on main
+```
+
+**Do not write that as `-- $paths`.** Unquoted, it is broken in both shells and
+both failures say "already merged" — the direction that gets unmerged work
+deleted. In bash a path containing a space splits into two pathspecs that match
+nothing; in zsh, which does not word-split, a multi-file branch becomes one
+newline-joined pathspec that matches nothing. Verified in both shells.
+
+Verified by construction: superseded branch with `main` drifted → empty; branch
+that only deletes a file → still reported; rename, add-on-both-sides, binary,
+and a path containing a space → all correct.
+
+This question got four wrong answers in one night, three of them written by
+whoever was also writing this section. Check it rather than adopt it.
+
 ## Before you finish the tick
 
 Keep `brief.md` current as state changes — it is what a cold session resumes
