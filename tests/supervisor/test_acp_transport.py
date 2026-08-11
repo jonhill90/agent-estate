@@ -123,6 +123,31 @@ class ACPTransportSessionTest(unittest.TestCase):
             transport.close()
             peer.close()
 
+    def test_load_session_sends_the_stored_session_id_and_registers_it_as_known(self):
+        """The CLI is a fresh process per invocation (SPEC §15 boundary): a
+        lane's `copilot --acp` subprocess does not survive between `assign`
+        calls, so a later call must resume the session it registered by id
+        via `loadSession` rather than starting a new one -- `agentCapabilities
+        including loadSession` is the proven fact this depends on."""
+        peer = FakePeer()
+
+        def handler(obj):
+            if obj["method"] == "session/load":
+                _respond(peer, obj["id"], {})
+
+        peer.on_request(handler)
+        transport = ACPTransport(peer.transport_reader, peer.transport_writer)
+        try:
+            transport.load_session("sess-1", cwd="/tmp/example")
+            self.assertEqual("session/load", peer.received[0]["method"])
+            self.assertEqual(
+                {"sessionId": "sess-1", "cwd": "/tmp/example"}, peer.received[0]["params"]
+            )
+            self.assertTrue(transport.metadata("sess-1")["session_known"])
+        finally:
+            transport.close()
+            peer.close()
+
 
 class ACPTransportPromptTest(unittest.TestCase):
     def test_send_literal_returns_structured_stop_reason_and_token_usage(self):

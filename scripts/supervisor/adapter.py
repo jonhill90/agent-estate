@@ -166,3 +166,103 @@ class TmuxAdapter:
                 return False
             self.ledger.mark_notified(keys, retry_after=retry_after)
             return True
+
+
+class ACPAdapter:
+    """ACP-driven sibling to `TmuxAdapter` for the single `copilot-acp` harness.
+
+    Per SPEC §15.1 the core owns the ledger and lifecycle; this class only
+    owns "deliver this prompt to this lane and report what came back." Where
+    `TmuxAdapter` scrapes pane scrollback to guess a lane's state and relies
+    on the agent to self-report completion via a separate `complete` CLI
+    call, ACP's `session/prompt` already blocks until the agent reaches a
+    structured `stopReason` -- so assignment and completion happen in one
+    round trip here, and there is no pane to classify as idle/active between
+    calls (`observe_lane` is a deliberate no-op).
+
+    The CLI dispatches one process per command, so there is no long-lived
+    transport to hold onto between calls the way `TmuxAdapter` holds a
+    `TmuxTransport` for the process lifetime. `transport_factory` is called
+    fresh for every operation (production wiring: `ACPTransport.spawn`) and
+    the resulting transport is always closed before returning -- a later
+    call resumes the same agent-side session via `ACPTransport.load_session`
+    using the session id stored as the lane's `pane_id` at registration.
+    """
+
+    def __init__(self, ledger, transport_factory, *, clock=None):
+        self.ledger = ledger
+        self.transport_factory = transport_factory
+        self.clock = clock or time.time
+
+    def register_lane(self, *, lane, target, harness, repo, nonce):
+        if harness != "copilot-acp":
+            raise RuntimeError(f"ACPAdapter only supports copilot-acp lanes, got {harness!r}")
+        transport = self.transport_factory()
+        try:
+            transport.initialize()
+            session_id = transport.new_session(repo)
+        finally:
+            transport.close()
+        return self.ledger.register_lane(
+            lane=lane,
+            pane_id=session_id,
+            nonce=nonce,
+            harness=harness,
+            repo=repo,
+            server_id="acp",
+            session_id=session_id,
+            command="copilot",
+        )
+
+    def _verified_lane(self, lane):
+        record = self.ledger.get_lane(lane)
+        if record is None:
+            raise RuntimeError(f"unknown lane: {lane}")
+        if record["harness"] != "copilot-acp":
+            raise RuntimeError(f"lane {lane} is not an ACP lane: {record['harness']}")
+        return record
+
+    def assign_task(self, *, lane, task_id, summary):
+        with self.ledger.operation_lock():
+            record = self._verified_lane(lane)
+            existing = self.ledger.get_task(task_id)
+            if existing is not None and existing["status"] == "delivery_pending":
+                raise RuntimeError(
+                    f"delivery already attempted for task {task_id} and is unconfirmed; "
+                    "reconcile the task before it can be assigned again"
+                )
+            self.ledger.assign(task_id=task_id, lane=lane, pane_nonce=record["nonce"], summary=summary)
+            prompt = (
+                f"[Hill90 task {task_id}] {summary}\n\n"
+                "Do not begin unrelated work. Record commands and actual outputs in a compact result."
+            )
+            # Same ambiguous-state-before-physical-send ordering as
+            # TmuxAdapter.assign_task: if the resumed prompt raises, the task
+            # is left `delivery_pending` rather than silently eligible for
+            # an automatic resend.
+            self.ledger.mark_delivery_pending(task_id, pane_nonce=record["nonce"])
+            transport = self.transport_factory()
+            try:
+                transport.initialize()
+                transport.load_session(record["session_id"], cwd=record["repo"])
+                result = transport.send_literal(record["session_id"], prompt)
+            finally:
+                transport.close()
+            self.ledger.mark_delivered(task_id, pane_nonce=record["nonce"])
+            message = (result.get("message") or "").strip()
+            if not message:
+                message = f"ACP stopReason={result.get('stop_reason')}"
+            return self.ledger.complete(task_id, message.encode("utf-8"), pane_nonce=record["nonce"])
+
+    def observe_lane(self, lane):
+        """Always None: a prompt either already returned (and completed the
+        task inline in `assign_task`) or the call is still in flight -- there
+        is no pane to poll between the two."""
+        self._verified_lane(lane)
+        return None
+
+    def notify_architecture(self, *, lane, retry_after):
+        """copilot-acp workers never host the architecture lane -- only
+        codex/claude do (SPEC §15.2) -- so there is nothing for this adapter
+        to notify."""
+        return False
