@@ -9,7 +9,10 @@
 #   hung     the pane looks busy but has stopped advancing   -> needs a human
 #   blocked  the agent is waiting on an interactive prompt    -> needs a human
 #   dead     no agent at all, just a shell                   -> restart the agent
-#   unknown  a non-Claude harness; no probe exists for it     -> ask a human
+#   unknown  no probe recognizes the last line                -> ask a human
+#            (a non-Claude harness, or a Claude Code shape that is not the
+#            enumerated ready footer -- see READY_RE below. #126: this is
+#            the default now, not the exception -- see the comment there.)
 #
 # `capture-pane` alone reports the last three identically. A dispatch sent to a
 # dead lane lands in zsh, which answers "no such file or directory: /clear" and
@@ -78,6 +81,39 @@ HUNG_AFTER="${LANES_HUNG_AFTER:-180}"
 # line. Anything added here must be observed on a real pane first, not inferred.
 BLOCKED_MARKERS='Esc to cancel|Enter to select'
 
+# #126: free used to be "whatever is left after busy/hung/blocked/dead are
+# ruled out" -- a blacklist. Two lanes running an approved billed eval and a
+# research task read free while each had delegated to a background subagent:
+# the main agent was idle (no `esc to interrupt`), but the lane's work was
+# not done. That was the THIRD blacklist patch in one night (#102 renamed-but-
+# finished, #123 blocked-on-a-prompt, this one) -- three fixes to one
+# predicate says the predicate is inverted, not that a fourth pattern is
+# missing. So free is now a whitelist: only a recognised ready shape is
+# offered; every last line this probe has not been shown is `unknown`, which
+# --free already excludes, rather than guessed as available.
+#
+# Two ready shapes are known-safe, both confirmed against real Claude Code
+# panes (v2.1.220) on 2026-08-11 -- lanes sitting at the prompt with a
+# typed-but-unsent brief, no delegation in flight. Their last non-empty
+# line reads, e.g.:
+#
+#   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent
+#
+# The captured status line ends `← 1 agent` -- the count includes the main
+# agent itself, so 1 means nothing is delegated. The #126 panes read
+# `← 2 agents` (this file's own test fixture, captured off a live idle
+# footer during #124's review) or a bare task-list row with no count at all
+# (`◯ general-purpose  Verifying tick-7.log with grep      42s`,
+# `✻ Waiting for 1 background agent to finish` -- both observed live on the
+# lanes #126 reported). None of those end `← 1 agent`, so none match.
+#
+# The second shape, a bare `❯ ...` line with no footer at all, covers older
+# captures and the test fixtures that stand in for "a normal prompt" without
+# spelling out real footer chrome -- harmless to keep since it still refuses
+# anything containing `←`, so a stray agent-count segment on a `❯` line still
+# fails the match.
+READY_RE='^❯ [^←]*$|← 1 agent$'
+
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "lanes: session '$SESSION' does not exist" >&2
   exit 1
@@ -141,9 +177,7 @@ emit_rows() {
       # probe: an exact-match sweep over scrollback caught a lane merely
       # displaying the phrase, not showing it.
       state=blocked
-    elif ! grep -q 'esc to interrupt' <<<"$pane"; then
-      state=free
-    else
+    elif grep -q 'esc to interrupt' <<<"$pane"; then
       # Busy-looking. Hung iff tmux has seen no output for HUNG_AFTER.
       #
       # This deliberately does NOT diff pane text across a short gap. That was
@@ -154,6 +188,15 @@ emit_rows() {
       # independent of whatever the harness chooses to paint.
       age=$(( now_epoch - ${act:-now_epoch} ))
       if [ "$age" -ge "$HUNG_AFTER" ]; then state=hung; else state=busy; fi
+    elif grep -qE "$READY_RE" <<<"$pane"; then
+      state=free
+    else
+      # #126: the old code fell through to `free` here. Everything that is
+      # not busy, hung, blocked, dead, scrolled, or another harness used to
+      # count as available -- including a lane that had delegated to a
+      # background subagent and was nowhere near done. Default is now
+      # unknown: nothing lands here unless it positively matches READY_RE.
+      state=unknown
     fi
     printf '%s\t%s\t%s\t%s\n' "$w" "$name" "$cmd" "$state"
   done
@@ -179,10 +222,16 @@ case "$MODE" in
     dead=$(awk -F'\t' '$4=="dead"' <<<"$rows" | wc -l | tr -d ' ')
     hung=$(awk -F'\t' '$4=="hung"' <<<"$rows" | wc -l | tr -d ' ')
     blocked=$(awk -F'\t' '$4=="blocked"' <<<"$rows" | wc -l | tr -d ' ')
+    unknown=$(awk -F'\t' '$4=="unknown"' <<<"$rows" | wc -l | tr -d ' ')
     [ "$dead" -gt 0 ] && echo "  ${dead} lane(s) have no agent — restart before dispatching"
     [ "$hung" -gt 0 ] && echo "  ${hung} lane(s) look wedged — a dispatch there would queue forever"
     # A blocked lane is a question nobody has heard -- surface it, don't just
     # exclude it from --free.
     [ "$blocked" -gt 0 ] && echo "  ${blocked} lane(s) are blocked on a prompt — a human must answer before dispatching"
+    # #126: free is now a whitelist, so unknown is the expected home for any
+    # shape this probe has not been shown yet -- it must never be silent, or
+    # an operator reading only the table would see the same lanes vanish from
+    # --free with no clue why.
+    [ "$unknown" -gt 0 ] && echo "  ${unknown} lane(s) are unclassified — not a recognised ready shape, --free withholds them"
     : ;;
 esac
