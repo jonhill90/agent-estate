@@ -48,6 +48,8 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./input-box.sh
+. "$HERE/input-box.sh"
 SESSION="${LANES_SESSION:-agent-dotfiles}"
 
 ISSUE_ARG="${1:-}"
@@ -343,7 +345,52 @@ done
 tmux send-keys -t "$LANE" Enter 2>/dev/null \
   || abort_send "could not submit the brief in $LANE -- #$ISSUE_ARG was not dispatched"
 
-# --- 5. record what was dispatched. BEST EFFORT, NEVER FATAL --------------
+# --- 5. AND THE BRIEF ACTUALLY STARTED ------------------------------------
+# #141. Everything above proves the brief was TYPED. Nothing proved it was
+# SUBMITTED, and on 2026-08-11 two lanes sat for 40 minutes each holding a
+# full brief in the input box because the Enter arrived while `/clear` was
+# still repainting and was swallowed. The dispatcher printed
+# `dispatch: #N -> lane` and walked away. This is the #81 and #130 shape
+# again: the dispatcher's success message is not evidence of dispatch.
+#
+# What "started" means is measured, not assumed. The obvious check -- wait for
+# the footer to show a running shape -- is racy: driving a real Claude Code
+# pane through a short turn, `esc to interrupt` was gone from the footer
+# within six seconds, so a fast first turn looks exactly like a brief that
+# never ran. The input box emptying is the durable signal: it is true while
+# the turn runs AND after it finishes, and it is false in precisely the
+# failure this exists for.
+CONFIRM_TRIES="${DISPATCH_CONFIRM_TRIES:-10}"
+submitted=""
+box=""
+for ((attempt = 1; attempt <= CONFIRM_TRIES; attempt++)); do
+  sleep "${DISPATCH_SETTLE:-1}"
+  box=$(tmux capture-pane -pe -t "$LANE" 2>/dev/null | input_box_state)
+  if [ "$box" = empty ]; then submitted=1; break; fi
+done
+
+if [ -z "$submitted" ]; then
+  if [ "$box" = text ]; then
+    # Confirmed failure: the message is still sitting in the box. Unwind, so
+    # the issue goes back to the pool rather than looking claimed-and-running.
+    #
+    # The text is deliberately NOT cleared on the way out. C-u does not
+    # reliably empty a multi-row box on a real pane, so "cleared" would be
+    # another unverified claim -- and a lane left holding it is now visible:
+    # `lanes.sh` reports it `unsent` with a count line, which is the state
+    # #141 added for exactly this.
+    abort_send "the brief was typed into $LANE but never submitted -- #$ISSUE_ARG was NOT dispatched (lanes.sh will show that lane 'unsent')"
+  fi
+  # `unknown`: the box could not be identified at all -- another harness, or a
+  # pane too short to show it. The brief may well be running, so unwinding
+  # would release a claim out from under a working lane, which is its own
+  # failure. Say so loudly instead of printing a clean success line.
+  echo "dispatch: WARNING -- could not confirm the brief started in $LANE" >&2
+  echo "dispatch: the input box was not readable (input_box_state: ${box:-none})." >&2
+  echo "dispatch: #$ISSUE_ARG is claimed and the worktree exists; CHECK THE PANE BY HAND." >&2
+fi
+
+# --- 6. record what was dispatched. BEST EFFORT, NEVER FATAL --------------
 #
 # agent-dotfiles#140. Every signal that a lane is busy is today inferred from
 # pane content, and inference is what produced the false-`free` bugs #102,
@@ -367,6 +414,12 @@ tmux send-keys -t "$LANE" Enter 2>/dev/null \
 # worse than no record at all -- the point of the ledger is to be believed.
 # Ordering is what guarantees that, not cleanup, so nothing above this line
 # needs an unwind for it.
+#
+# That is also why step 5 (#141) sits ABOVE this block rather than below it.
+# Step 5 can abort_send -- a brief that was typed but never submitted unwinds
+# the claim and the worktree -- and a ledger record written before it would be
+# exactly the "work is in flight" claim this paragraph rules out, asserted
+# about a lane that is running nothing.
 ledger_record_failed() {
   echo "dispatch: LEDGER RECORD FAILED for $WINDOW_NAME -- the dispatch STANDS, the record does not" >&2
   sed 's/^/  /' <<<"${1:-}" >&2

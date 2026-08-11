@@ -34,7 +34,18 @@ case "$sub" in
       buf="$PANES/$win"
       for k in "${keys[@]:-}"; do
         case "$k" in
-          Enter) : ;;
+          # Enter SUBMITS: it empties the input box. This stub used to treat it
+          # as a no-op, which is the same misunderstanding #141 is about -- the
+          # dispatcher sent Enter, reported success, and never checked that the
+          # box had emptied. A stub whose Enter does nothing cannot tell a
+          # submitted brief from one still sitting in the box, so it agreed
+          # with the code about the one thing the code had wrong.
+          #
+          # DISPATCH_SWALLOW_ENTER=1 reproduces the live failure: `/clear` takes
+          # longer to repaint than the dispatcher waits, and the Enter that
+          # follows is eaten by the reset. The text stays in the box, nothing
+          # runs, and every instrument reports the lane idle.
+          Enter) [ "${DISPATCH_SWALLOW_ENTER:-0}" = 1 ] || : > "$buf" ;;
           C-u)   : > "$buf" ;;
           *)
             drop="${DISPATCH_DROP_PREFIX:-0}"
@@ -116,28 +127,47 @@ case "$sub" in
         printf '%s\n' "$value" ;;
     esac ;;
   capture-pane)
-    printf '%b\n' "$(cut -d'|' -f4 <<<"$line")"
-    # Whatever has been typed into this pane and not yet cleared. Line-wrapped
-    # at DISPATCH_PANE_COLS columns, because a real pane wraps a long path
-    # across lines and a caller checking for it must survive that.
-    #
-    # DISPATCH_PANE_ROWS models the OTHER half of a real input box, and this
-    # stub was blind to it until #118: the box shows only its last few rows and
-    # scrolls INTERNALLY, so a long enough message pushes its own head out of
-    # what capture-pane can see. Measured against a real Claude Code TUI at
-    # 80x24, the head goes out of view somewhere between 450 and 500 characters
-    # -- and the stub, modelling an input line of unbounded height, reported
-    # every length as fully visible. A message that broke dispatch to `free-9`
-    # and `free-10` passed all 78 assertions.
-    #
-    # Unset (the default) keeps the old unbounded behaviour, so existing tests
-    # are unchanged; set it to model a small lane.
-    if [ -f "$PANES/$win" ]; then
+    # The input box, in the shape a real Claude Code pane paints it: `❯` plus
+    # U+00A0, bounded by a pair of horizontal rules. input-box.sh keys on that
+    # shape rather than on plain text, so a stub that emitted the raw buffer
+    # would be testing a pane no harness produces. It is emitted ABOVE the
+    # fixture's status line because that is where it sits on screen, and
+    # because lanes.sh reads the last non-empty line.
+    rule=$(printf '─%.0s' $(seq 1 40))
+    printf '%s\n' "$rule"
+    if [ -s "$PANES/$win" ]; then
+      printf '\033[39m❯\xc2\xa0'
+      # Whatever has been typed into this pane and not yet cleared. Line-wrapped
+      # at DISPATCH_PANE_COLS columns, because a real pane wraps a long path
+      # across lines and a caller checking for it must survive that.
+      #
+      # DISPATCH_PANE_ROWS models the OTHER half of a real input box, and this
+      # stub was blind to it until #118: the box shows only its last few rows and
+      # scrolls INTERNALLY, so a long enough message pushes its own head out of
+      # what capture-pane can see. Measured against a real Claude Code TUI at
+      # 80x24, the head goes out of view somewhere between 450 and 500 characters
+      # -- and the stub, modelling an input line of unbounded height, reported
+      # every length as fully visible. A message that broke dispatch to `free-9`
+      # and `free-10` passed all 78 assertions.
+      #
+      # Unset (the default) keeps the old unbounded behaviour, so existing tests
+      # are unchanged; set it to model a small lane.
+      #
+      # The buffer is written without a trailing newline, so one is added after
+      # it. Without that, the closing rule lands on the same line as the last
+      # row of the box, that line stops matching `^─+$`, and input-box.sh
+      # answers `unknown` for a box it can plainly see.
       if [ -n "${DISPATCH_PANE_ROWS:-}" ]; then
         fold -w "${DISPATCH_PANE_COLS:-60}" "$PANES/$win" | tail -n "$DISPATCH_PANE_ROWS"
       else
         fold -w "${DISPATCH_PANE_COLS:-60}" "$PANES/$win"
       fi
-    fi ;;
+      printf '\n'
+    else
+      printf '\033[39m❯\xc2\xa0\n'
+    fi
+    printf '%s\n' "$rule"
+    printf '%b\n' "$(cut -d'|' -f4 <<<"$line")"
+    ;;
 esac
 exit 0

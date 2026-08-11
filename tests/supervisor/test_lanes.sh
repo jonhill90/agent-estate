@@ -16,7 +16,12 @@ want() { # want <name> <window-name> <expected-state> <output>
 
 D=$(mktemp -d); mkdir -p "$D/bin"
 cp "$HERE/stubs/tmux-lanes" "$D/bin/tmux"
-# columns: index|name|command|status-line|seconds-since-output|in-mode
+# columns: index|name|command|status-line|seconds-since-output|in-mode|input-box
+# The 7th column is optional and models the input box (#141). Omitted, no box
+# is rendered and classification is exactly what it was before #141 -- which
+# is why every pre-existing row below is left untouched. `-` is an empty box,
+# `dim:X` is an empty box showing Claude Code's dim placeholder, anything else
+# is text typed into the box and never submitted. See stubs/tmux-lanes.
 cat > "$D/fixture" <<'FIX'
 1|arch|claude.exe|❯ ready|1|0
 2|w-busy|claude.exe|esc to interrupt 3s|1|0
@@ -35,6 +40,13 @@ cat > "$D/fixture" <<'FIX'
 15|w-real-free|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0
 16|w-subagent-task|claude.exe|◯ general-purpose  Verifying tick-7.log with grep      42s|1|0
 17|w-subagent-wait|claude.exe|✻ Waiting for 1 background agent to finish|1|0
+18|w-unsent|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle)|1|0|Read /brief.md and do exactly what it says.
+19|w-unsent-ready-footer|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0|Read /brief.md and do exactly what it says.
+20|w-placeholder|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0|dim:Try "write a test for <filepath>"
+21|w-empty-box|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0|-
+22|w-typeahead|claude.exe|esc to interrupt 3s|1|0|typed while the turn runs
+23|w-optionrow|claude.exe|❯ 1. Post the comment|1|0
+24|w-optionrow-yes|claude.exe|❯ 1. Yes|1|0
 FIX
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
 
@@ -102,7 +114,38 @@ want "a bare ready prompt with the real footer is free" w-real-free free "$out"
 want "a subagent task-list row is unknown, not free"     w-subagent-task unknown "$out"
 want "a waiting-for-background-agent line is unknown, not free" w-subagent-wait unknown "$out"
 
-if grep -qE '4 lane\(s\) (is|are) blocked' <<<"$out"; then
+# --- #141: a lane holding a brief nobody submitted -------------------------
+# The incident shape, verbatim: the footer a real pane paints while the box
+# holds typed text (the `← 1 agent` segment drops when you are composing), and
+# a brief sitting in the box. Before #141 this read `unknown` -- withheld, but
+# indistinguishable from a lane that was unclassified for four seconds while
+# repainting, which is why it went unnoticed for 40 minutes.
+want "a lane holding an unsent brief is unsent"          w-unsent unsent "$out"
+# THE ONE THAT MATTERS. Same unsent brief, but the footer is a recognised
+# ready shape, so READY_RE matches and every version of lanes.sh before #141
+# would have called this lane free and dispatched over the brief. `free` now
+# depends on the box being empty, not only on the footer.
+want "a ready footer does not make an unsent lane free"  w-unsent-ready-footer unsent "$out"
+# The false positive that a first cut of input-box.sh produced. An EMPTY box
+# is not blank: it paints a rotating dim suggestion in the same row an unsent
+# brief occupies, and in a plain-text capture the two are identical. Calling
+# this `unsent` withholds every freshly started idle lane in the estate and
+# --free collapses to nothing.
+want "a dim placeholder is an EMPTY box, so free"        w-placeholder free "$out"
+want "a genuinely empty box is free"                     w-empty-box free "$out"
+# unsent is decided after busy: a lane typed into while its turn runs is busy,
+# and busy is the more useful thing to say about it.
+want "type-ahead during a live turn is busy, not unsent" w-typeahead busy "$out"
+
+# --- #133: a confirmation dialog's option row ------------------------------
+# `❯ 1. Post the comment` is verbatim what lane 6 displayed while blocked on an
+# approval prompt, holding a completed-but-unposted review verdict. READY_RE's
+# bare-`❯` half matches it, so as the last line it read `free` and a dispatch
+# would have destroyed the verdict.
+want "an option row is blocked, not free"                w-optionrow blocked "$out"
+want "a short option row is blocked, not free"           w-optionrow-yes blocked "$out"
+
+if grep -qE '6 lane\(s\) (is|are) blocked' <<<"$out"; then
   echo "  ok   the table prints a count line for blocked lanes"; pass=$((pass+1));
 else
   echo "  FAIL no blocked count line in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
@@ -117,10 +160,20 @@ else
   echo "  FAIL no unknown count line in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
 fi
 
+# #141: withholding the lane was never the missing part -- the whitelist
+# already did that. Being TOLD is. w-unsent and w-unsent-ready-footer are the
+# two here.
+if grep -qE '2 lane\(s\) hold an unsent prompt' <<<"$out"; then
+  echo "  ok   the table prints a count line for unsent lanes"; pass=$((pass+1));
+else
+  echo "  FAIL no unsent count line in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
+fi
+
 # --free must never offer a lane that would swallow the dispatch.
 free=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --free 2>&1)
 for bad in arch w-dead w-hung w-busy w-copilot w-minute-tick w-scrolled w-blocked \
-           w-trust w-model w-permission w-idle-footer w-subagent-task w-subagent-wait; do
+           w-trust w-model w-permission w-idle-footer w-subagent-task w-subagent-wait \
+           w-unsent w-unsent-ready-footer w-typeahead w-optionrow w-optionrow-yes; do
   bi=$(awk -F'|' -v n="$bad" '$2==n{print $1}' "$D/fixture")
   if grep -qx ".*:$bi" <<<"$free"; then echo "  FAIL --free offered $bad"; fail=$((fail+1));
   else echo "  ok   --free withholds $bad"; pass=$((pass+1)); fi
@@ -128,7 +181,7 @@ done
 
 # And it must still offer a lane that IS a recognised ready shape -- the
 # whitelist must not collapse into refusing everything.
-for good in w-real-free w-mentions w-mentions-blocked; do
+for good in w-real-free w-mentions w-mentions-blocked w-placeholder w-empty-box; do
   gi=$(awk -F'|' -v n="$good" '$2==n{print $1}' "$D/fixture")
   if grep -qx ".*:$gi" <<<"$free"; then echo "  ok   --free offers $good"; pass=$((pass+1));
   else echo "  FAIL --free withheld $good"; fail=$((fail+1)); fi
