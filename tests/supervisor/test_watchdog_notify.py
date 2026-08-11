@@ -160,15 +160,106 @@ class CheckAndNotifyTest(unittest.TestCase):
                 log_path=log_path,
             )
 
-        # The episode must still be marked notified — a failed send attempt
-        # is still an attempt; retrying every tick after a failed send would
-        # be a message storm the moment the channel comes back.
+        # #91: the episode flag records DELIVERY, not attempt. A failed send
+        # that marked the episode notified consumed the escalation — the
+        # retry was deduped away and nobody was ever paged.
         state = json.loads(self.episode_path.read_text())
-        self.assertTrue(state["notified"])
+        self.assertFalse(state["notified"])
 
-        # The failure must be visible locally, not swallowed.
-        self.assertIn("SEND-FAILED", log_path.read_text())
-        self.assertIn("fake channel unreachable", log_path.read_text())
+        # The failure must be visible locally, and must say plainly that
+        # nobody was told — this log is all that is left when the channel is
+        # the thing that is broken.
+        logged = log_path.read_text()
+        self.assertIn("NOTIFY-FAILED", logged)
+        self.assertIn("will retry", logged)
+        self.assertIn("fake channel unreachable", logged)
+
+    def test_a_failed_tick_is_retried_by_the_next_tick(self):
+        """The #91 regression: tick 1 fails, tick 2 must still attempt."""
+        write_status(self.status_path, "escalate", "keeps dying", restarts=3)
+        log_path = Path(self.tempdir.name) / "watchdog-notify.log"
+        kwargs = dict(
+            status_path=self.status_path,
+            episode_state_path=self.episode_path,
+            log_path=log_path,
+        )
+
+        unreachable = FakeSender(fail=True)
+        with self.assertRaises(SendError):
+            check_and_notify(sender=unreachable, **kwargs)
+        self.assertEqual(len(unreachable.calls), 1)
+
+        # Tick 2, same escalate, channel back: the page must go out.
+        recovered = FakeSender()
+        decision = check_and_notify(sender=recovered, **kwargs)
+        self.assertTrue(decision.should_notify)
+        self.assertEqual(len(recovered.calls), 1)
+        self.assertIn("NOTIFY-SENT", log_path.read_text())
+
+        # Tick 3: now that it was actually delivered, dedup takes over.
+        after = FakeSender()
+        check_and_notify(sender=after, **kwargs)
+        self.assertEqual(after.calls, [])
+
+    def test_a_long_outage_delivers_one_page_not_a_burst(self):
+        """Retry-every-tick must not become a queue of identical pages.
+
+        The flag is per-episode, so a recovered channel gets one message
+        describing the live state, no matter how many ticks failed first.
+        """
+        write_status(self.status_path, "escalate", "keeps dying", restarts=3)
+        log_path = Path(self.tempdir.name) / "watchdog-notify.log"
+        kwargs = dict(
+            status_path=self.status_path,
+            episode_state_path=self.episode_path,
+            log_path=log_path,
+        )
+
+        unreachable = FakeSender(fail=True)
+        for _ in range(5):
+            with self.assertRaises(SendError):
+                check_and_notify(sender=unreachable, **kwargs)
+        self.assertEqual(len(unreachable.calls), 5)
+
+        recovered = FakeSender()
+        for _ in range(4):
+            check_and_notify(sender=recovered, **kwargs)
+        self.assertEqual(len(recovered.calls), 1, "a recovered channel drained a backlog")
+
+    def test_the_failure_log_counts_attempts_so_an_outage_is_legible(self):
+        write_status(self.status_path, "escalate", "keeps dying", restarts=3)
+        log_path = Path(self.tempdir.name) / "watchdog-notify.log"
+        sender = FakeSender(fail=True)
+        for _ in range(2):
+            with self.assertRaises(SendError):
+                check_and_notify(
+                    status_path=self.status_path,
+                    episode_state_path=self.episode_path,
+                    sender=sender,
+                    log_path=log_path,
+                )
+        self.assertIn("attempt 1", log_path.read_text())
+        self.assertIn("attempt 2", log_path.read_text())
+
+    def test_recovery_clears_the_attempt_count_for_the_next_episode(self):
+        log_path = Path(self.tempdir.name) / "watchdog-notify.log"
+        kwargs = dict(
+            status_path=self.status_path,
+            episode_state_path=self.episode_path,
+            log_path=log_path,
+        )
+        write_status(self.status_path, "escalate", "keeps dying", restarts=3)
+        with self.assertRaises(SendError):
+            check_and_notify(sender=FakeSender(fail=True), **kwargs)
+
+        write_status(self.status_path, "restarted", "recovered")
+        check_and_notify(sender=FakeSender(), **kwargs)
+        self.assertEqual(json.loads(self.episode_path.read_text())["attempts"], 0)
+
+        write_status(self.status_path, "escalate", "dying again", restarts=3)
+        with self.assertRaises(SendError):
+            check_and_notify(sender=FakeSender(fail=True), **kwargs)
+        self.assertIn("attempt 1", log_path.read_text().splitlines()[-1])
 
 
 class MainCliTest(unittest.TestCase):
@@ -202,7 +293,22 @@ class MainCliTest(unittest.TestCase):
         write_status(self.status_path, "escalate", "keeps dying", restarts=3)
         rc = main(self._args())
         self.assertEqual(rc, 1)
-        self.assertIn("SEND-FAILED", self.log_path.read_text())
+        self.assertIn("NOTIFY-FAILED", self.log_path.read_text())
+
+    def test_a_failed_cli_tick_leaves_the_episode_open_for_the_next_one(self):
+        """End to end through main(), the way watchdog.sh calls it: an
+        unconfigured (hence unreachable) notifier must not consume the
+        escalation."""
+        write_status(self.status_path, "escalate", "keeps dying", restarts=3)
+        self.assertEqual(main(self._args()), 1)
+        self.assertFalse(json.loads(self.episode_path.read_text())["notified"])
+
+        # Next tick, with a notifier that works: the page goes out.
+        script = Path(self.tempdir.name) / "notify.sh"
+        script.write_text('#!/bin/bash\nprintf "%s|%s" "$1" "$2" >> "$(dirname "$0")/got"\n')
+        script.chmod(0o755)
+        self.assertEqual(main(self._args(notify_script=str(script))), 0)
+        self.assertIn("Supervisor escalation|watchdog: escalate", (Path(self.tempdir.name) / "got").read_text())
 
 
 if __name__ == "__main__":

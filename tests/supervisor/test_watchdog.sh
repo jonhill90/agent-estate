@@ -24,7 +24,7 @@ run() { # run <state> <workdir>
   SUPERVISOR_STATE="$2" SUPERVISOR_STATUS="$2/st" SUPERVISOR_LOG="$2/lg" \
   SUPERVISOR_STAMP="$2/stamp" SUPERVISOR_HISTORY="$2/hist" NOTIFY_ENV="$2/none.env" \
   SLEEPCHECK_DIR="${STUB_SLEEPCHECK_DIR:-$2/transcripts}" \
-  bash "$WATCHDOG" >/dev/null 2>&1
+  bash "$WATCHDOG" >/dev/null 2>"$2/err"
 }
 
 echo "watchdog.sh"
@@ -34,6 +34,22 @@ D=$(mktemp -d); run busy "$D/w"
 check "busy pane reports working" "state:    working" "$D/w/st"
 [ ! -s "$D/w/sent" ] && { echo "  ok   busy pane receives no keystrokes"; pass=$((pass+1)); } \
                      || { echo "  FAIL busy pane was sent: $(cat "$D/w/sent")"; fail=$((fail+1)); }
+# A healthy tick carries no notify: line -- nothing was sent, so there is no
+# send outcome to report. Asserted because the state: line alone does not
+# prove the ordinary write path ran: while `notify:` was being added, a false
+# test as the last command in the status group made every FIRST write fail
+# ("WATCHDOG CANNOT WRITE STATUS") and only the failure-path rewrite produced
+# a file at all -- and this suite stayed green through it.
+if grep -q '^notify:' "$D/w/st" 2>/dev/null; then
+  echo "  FAIL a healthy tick reported a notify outcome: $(grep '^notify:' "$D/w/st")"; fail=$((fail+1))
+else
+  echo "  ok   a healthy tick writes status with no notify: line"; pass=$((pass+1))
+fi
+if grep -q 'CANNOT WRITE STATUS' "$D/w/err" 2>/dev/null; then
+  echo "  FAIL the first status write failed and was papered over"; fail=$((fail+1))
+else
+  echo "  ok   the first status write is the one that lands"; pass=$((pass+1))
+fi
 
 # An idle pane with work is a dead loop: restart it, and the /loop must
 # actually be delivered.
@@ -110,6 +126,70 @@ SUPERVISOR_PATH="$D/gitstub:$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy \
 SUPERVISOR_STATE="$D/w" SLEEPCHECK_DIR="$D/none" \
   bash "$WATCHDOG" >/dev/null 2>&1
 check "a detached worktree reports a real ref, not HEAD" "^code: *main" "$D/w/watchdog.status"
+
+# --- escalation must survive an unreachable channel (#91) ------------------
+# The one path that reaches a human, driven end to end through watchdog.sh
+# with a STUB notifier -- never a real channel. Tick 1's notifier exits 1;
+# tick 2's works and must still be called. Marking the episode notified on
+# *attempt* meant tick 2 was deduped away and Jon was never paged.
+escalate_run() { # escalate_run <workdir> <notify-script>
+  rm -rf "$1"; mkdir -p "$1" "$1/transcripts"
+  # MAX_RESTARTS restarts already inside ESCALATE_WINDOW -> the escalate branch.
+  now=$(date +%s)
+  for i in 1 2 3; do echo $((now - 60)); done > "$1/hist"
+  SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=idle STUB_SENT="$1/sent" \
+  SUPERVISOR_STATE="$1" SUPERVISOR_STATUS="$1/st" SUPERVISOR_LOG="$1/lg" \
+  SUPERVISOR_STAMP="$1/stamp" SUPERVISOR_HISTORY="$1/hist" NOTIFY_ENV="$1/none.env" \
+  SLEEPCHECK_DIR="$1/transcripts" NOTIFY_SCRIPT="$2" \
+  bash "$WATCHDOG" >/dev/null 2>&1
+}
+
+D=$(mktemp -d)
+cat > "$D/down.sh" <<'EOF'
+#!/bin/bash
+echo "attempted" >> "$(dirname "$0")/down-calls"
+echo "no channel reachable" >&2
+exit 1
+EOF
+cat > "$D/up.sh" <<'EOF'
+#!/bin/bash
+echo "$1|$2" >> "$(dirname "$0")/up-calls"
+EOF
+chmod +x "$D/down.sh" "$D/up.sh"
+
+# Tick 1: escalate, channel down.
+escalate_run "$D/w" "$D/down.sh"
+check "escalate with a dead channel still reports escalate" "state:    escalate" "$D/w/st"
+check "the failed send is named in watchdog.status" "^notify: *FAILED" "$D/w/st"
+check "the failed send is named in the notify log" "NOTIFY-FAILED" "$D/w/watchdog-notify.log"
+check "the notify log says a retry is coming" "will retry" "$D/w/watchdog-notify.log"
+if grep -q '"notified": *false' "$D/w/.watchdog-escalate-episode.json" 2>/dev/null; then
+  echo "  ok   a failed send does not consume the escalation episode"; pass=$((pass+1))
+else
+  echo "  FAIL episode marked notified after a failed send: $(cat "$D/w/.watchdog-escalate-episode.json" 2>/dev/null)"; fail=$((fail+1))
+fi
+
+# Tick 2: same escalation, channel back. The state dir is kept, so the episode
+# flag written by tick 1 is the one this tick reads -- which is the whole bug.
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=idle STUB_SENT="$D/w/sent" \
+SUPERVISOR_STATE="$D/w" SUPERVISOR_STATUS="$D/w/st" SUPERVISOR_LOG="$D/w/lg" \
+SUPERVISOR_STAMP="$D/w/stamp" SUPERVISOR_HISTORY="$D/w/hist" NOTIFY_ENV="$D/w/none.env" \
+SLEEPCHECK_DIR="$D/w/transcripts" NOTIFY_SCRIPT="$D/up.sh" \
+  bash "$WATCHDOG" >/dev/null 2>&1
+check "the next tick retries the send"        "Supervisor escalation" "$D/up-calls"
+check "and records that it was delivered"     "NOTIFY-SENT" "$D/w/watchdog-notify.log"
+
+# Tick 3: delivered, so dedup takes over. One page per episode, not a burst.
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=idle STUB_SENT="$D/w/sent" \
+SUPERVISOR_STATE="$D/w" SUPERVISOR_STATUS="$D/w/st" SUPERVISOR_LOG="$D/w/lg" \
+SUPERVISOR_STAMP="$D/w/stamp" SUPERVISOR_HISTORY="$D/w/hist" NOTIFY_ENV="$D/w/none.env" \
+SLEEPCHECK_DIR="$D/w/transcripts" NOTIFY_SCRIPT="$D/up.sh" \
+  bash "$WATCHDOG" >/dev/null 2>&1
+if [ "$(wc -l < "$D/up-calls" | tr -d ' ')" = 1 ]; then
+  echo "  ok   a delivered escalation is not re-sent every tick"; pass=$((pass+1))
+else
+  echo "  FAIL escalation sent $(wc -l < "$D/up-calls") times: $(cat "$D/up-calls")"; fail=$((fail+1))
+fi
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
