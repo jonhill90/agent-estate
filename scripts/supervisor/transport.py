@@ -50,3 +50,14 @@ class TmuxTransport:
         time.sleep(0.1)
         self._run("send-keys", "-t", target, "Enter")
         time.sleep(0.5)
+
+    def respawn_pane(self, target):
+        """Kill whatever is running in `target` and restart its command.
+
+        Used by `recycle.respawn_supervisor` to replace a long-lived
+        supervisor session with a fresh one; `send_literal` afterward seeds
+        the tick prompt. `-k` kills the current pane process first, so this
+        is destructive to whatever was running there -- it is never called
+        against a pane with unflushed state.
+        """
+        self._run("respawn-pane", "-k", "-t", target)
