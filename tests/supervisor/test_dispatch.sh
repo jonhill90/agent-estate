@@ -326,6 +326,51 @@ want_missing "the lane is not renamed for a closed issue" "rename-window" "$log"
 if [ "$(assignees 150)" = "" ]; then ok "a closed issue gets no assignee via dispatch"; else bad "a closed issue gets no assignee via dispatch" "assignees: $(assignees 150)"; fi
 if [ "$(worktrees)" = "$before" ]; then ok "a closed issue leaves no worktree behind"; else bad "a closed issue leaves no worktree behind" "$before -> $(worktrees)"; fi
 
+# --- multi-issue dispatch: one brief, several issues (#112) ---------------
+# #109 and #110 came out of one review of one PR and were dispatched to one
+# lane in one brief. dispatch.sh claimed only #110 -- #109 sat open and
+# looked free to the next dispatcher while a lane was actively on it. A
+# comma-separated issue list must claim every issue named, and the window
+# (which lanes.sh and `claim.sh stale` both match on) must still come from
+# the FIRST issue, no matter how many are in the list.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+printf '200|| First of a three-issue brief\n202|| Second of a three-issue brief\n203|| Third of a three-issue brief\n' >> "$D/issues"
+out=$(run 200,202,203 multi-issue "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a multi-issue dispatch succeeds" "$rc" 0 "$out"
+want_contains "the first issue in the list is claimed" "jonhill90" "$(assignees 200)"
+want_contains "the second issue in the list is claimed" "jonhill90" "$(assignees 202)"
+want_contains "the third issue in the list is claimed" "jonhill90" "$(assignees 203)"
+log=$(tmuxlog)
+want_contains "the window name comes from the FIRST issue" "ad200-multi-issue" "$log"
+want_missing "the window name does not carry the second issue" "ad202-multi-issue" "$log"
+want_missing "the window name does not carry the third issue" "ad203-multi-issue" "$log"
+
+# --- a failure partway through the list unwinds what was already claimed --
+# #211 is already claimed by another lane, so the take on it must fail. #210
+# was claimed first and must be RELEASED, not left assigned: a claim nobody
+# can see -- because the dispatch reported failure -- is worse than no claim.
+# #211's original holder must be untouched, not overwritten and not cleared.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+printf '210|| Claimable, claimed first\n211|someone-else| Already claimed, second in the list\n' >> "$D/issues"
+before=$(worktrees)
+out=$(run 210,211 partial-claim "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a failed claim partway through the list aborts the dispatch" "$rc" 1 "$out"
+if [ "$(assignees 210)" = "" ]; then
+  ok "the earlier successful claim is released on abort"
+else
+  bad "the earlier successful claim is released on abort" "assignees: $(assignees 210)"
+fi
+want_contains "the other lane's claim is left alone" "someone-else" "$(assignees 211)"
+log=$(tmuxlog)
+want_missing "no brief is sent when a claim in the list fails" "send-keys" "$log"
+if [ "$(worktrees)" = "$before" ]; then ok "no worktree is left behind by a partial claim"; else bad "no worktree is left behind by a partial claim" "$before -> $(worktrees)"; fi
+
 rm -rf "$D"
 
 echo "  $pass passed, $fail failed"
