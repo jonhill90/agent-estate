@@ -29,7 +29,11 @@
 # Cost when healthy: one tmux read, one status write, zero model tokens.
 
 set -uo pipefail
-PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin"
+# A fixed PATH so a LaunchAgent (which inherits almost nothing) finds tmux,
+# gh and python3. Overridable ONLY so tests can inject stub binaries -- three
+# separate bugs shipped in this file because a hardcoded PATH made it
+# impossible to test without a live tmux server and a live GitHub.
+PATH="${SUPERVISOR_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin}"
 export PATH
 
 # Overridable so the script is testable and so a second lane can
@@ -45,8 +49,8 @@ STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 LOG="${SUPERVISOR_LOG:-$STATE/watchdog.log}"
 STATUS="${SUPERVISOR_STATUS:-$STATE/watchdog.status}"
 TICK="${SUPERVISOR_TICK:-$HERE/loop-tick.md}"
-STAMP="$STATE/.last-restart"
-HISTORY="$STATE/.restart-history"
+STAMP="${SUPERVISOR_STAMP:-$STATE/.last-restart}"
+HISTORY="${SUPERVISOR_HISTORY:-$STATE/.restart-history}"
 read -r -a REPOS <<<"${SUPERVISOR_REPOS:-agent-dotfiles skills skills-private agent-evals}"
 
 COOLDOWN=600        # no more than one restart per 10 minutes
@@ -207,6 +211,22 @@ tmux send-keys -t "$PANE" BSpace 2>/dev/null; sleep 1
 if [ -n "$before" ] && [ "$after" = "${before}X" ]; then
   report human_typing "un-submitted text in the pane — left alone"
   log "real un-submitted text in pane — not touching it"
+  exit 0
+fi
+
+# Re-check busy IMMEDIATELY before sending. The earlier check is stale by
+# several seconds: the ghost-text probe types a character, sleeps, backspaces
+# and sleeps again, and the supervisor can start a turn inside that window.
+#
+# Losing this race is not harmless. A slash command delivered to a busy pane
+# is QUEUED AS PLAIN TEXT and never parses as a command -- the pane shows
+# "Press up to edit queued messages" -- so the /loop never re-arms the loop.
+# Measured 2026-08-11: the supervisor transcript held 91 "/loop" messages and
+# only 11 ScheduleWakeup calls, and had not re-armed since 02:31Z while the
+# watchdog restarted it all night believing it had.
+if tmux capture-pane -p -t "$PANE" -S -6 2>/dev/null | grep -q 'esc to interrupt'; then
+  report working "became busy during the pre-send probe; not sending a /loop into a busy pane"
+  log "SKIPPED restart — pane became busy mid-probe (a queued /loop is inert)"
   exit 0
 fi
 

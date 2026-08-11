@@ -1,0 +1,28 @@
+#!/bin/bash
+# Stub tmux for watchdog tests.
+#
+# STUB_PANE_STATE: idle | busy | ghost — what capture-pane reports.
+# STUB_BUSY_AFTER: report idle for the first N capture-pane calls, then busy.
+#   This reproduces the real race the watchdog loses: the pane is idle when
+#   first checked, then starts a turn during the ghost-text probe, and the
+#   /loop lands in a busy pane where it queues as inert plain text.
+# STUB_SENT: file that every send-keys payload is appended to.
+COUNTER="${STUB_COUNTER:-/dev/null}"
+case "$1" in
+  has-session) exit 0 ;;
+  capture-pane)
+    state="${STUB_PANE_STATE:-idle}"
+    if [ -n "${STUB_BUSY_AFTER:-}" ]; then
+      n=$(cat "$COUNTER" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$COUNTER"
+      [ "$n" -gt "$STUB_BUSY_AFTER" ] && state=busy || state=idle
+    fi
+    case "$state" in
+      busy)  printf '  ⏵⏵ bypass permissions on · esc to interrupt · ← 1 agent\n' ;;
+      ghost) printf '❯ some previous prompt\n' ;;
+      *)     printf '❯ \n' ;;
+    esac ;;
+  send-keys) shift; printf '%s\n' "$*" >> "${STUB_SENT:-/dev/null}" ;;
+  display-message) printf 'stub\n' ;;
+  *) : ;;
+esac
+exit 0
