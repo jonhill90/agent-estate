@@ -175,6 +175,49 @@ catches. It **reports only**: releasing is your call, because a bare issue
 number cannot tell `agent-dotfiles#70` from `skills#70`, and leaving a claim in
 place costs a tick while dropping a live one costs an hour.
 
+## Give the lane its own worktree — never brief work into the shared checkout
+
+Every lane, the Director, and the supervisor share one working tree,
+`~/source/repos/Personal/agent-dotfiles`. Two lanes editing it at once is not
+a hypothetical: on 2026-08-11 a lane working #28 had its branch switched out
+from under it mid-task by another lane. Its uncommitted edits to four files
+were discarded, and its staged deletion of a file was swept into an unrelated
+lane's commit, which shipped in a PR whose own message never mentions the
+deletion. That is the shared checkout destroying one agent's work and
+silently corrupting another's commit (#73).
+
+Create the worktree yourself and hand the lane a ready path, rather than
+telling it to create one — a step in a brief is a step that can be skipped:
+
+```bash
+scripts/supervisor/worktree.sh new <issue>-<slug> ~/source/repos/Personal/agent-dotfiles
+# -> prints the new worktree's path; put that path in the brief
+```
+
+Tell the worker to do all its work in that path, not in
+`~/source/repos/Personal/agent-dotfiles`. On completion — PR opened, or the
+lane abandoning the task — remove it:
+
+```bash
+scripts/supervisor/worktree.sh done <path>
+```
+
+`done` refuses and prints `git status` if the worktree is dirty. Treat that
+refusal as "someone's work is still here", not as an error to force past —
+matching the same rule `safe-deletion` applies to any other directory.
+
+**This applies to the Director too.** It has been branching directly in the
+shared checkout all night — the same bug, not a different one. Before
+branching or checking out anything there, confirm it is actually clean:
+
+```bash
+scripts/supervisor/worktree.sh guard ~/source/repos/Personal/agent-dotfiles
+```
+
+A non-zero exit means the shared checkout is dirty. That is someone's live
+work, not a base to branch on — leave it alone and use a worktree instead of
+proceeding.
+
 ## An empty tmux target hits the ACTIVE window — always resolve it first
 
 `tmux send-keys -t agent-dotfiles:` with an empty index does **not** error. It
