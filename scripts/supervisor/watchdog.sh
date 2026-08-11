@@ -66,6 +66,12 @@ if [ -r "$ENVFILE" ]; then set -a; . "$ENVFILE"; set +a; fi
 now=$(date +%s)
 iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 branch=$(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
+# A detached worktree -- how the live copy is pinned -- reports "HEAD", which
+# tells a reader nothing. Name a ref that actually contains this commit.
+if [ "$branch" = "HEAD" ]; then
+  branch=$(git -C "$HERE" for-each-ref --format='%(refname:short)' --points-at HEAD 2>/dev/null | head -1)
+  branch="${branch:-detached}"
+fi
 sha=$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo unknown)
 
 log() { printf '%s %s\n' "$iso" "$*" >>"$LOG"; }
@@ -74,6 +80,11 @@ log() { printf '%s %s\n' "$iso" "$*" >>"$LOG"; }
 # the whole point of finding 2. Atomic so a reader never sees a half file.
 report() {                       # report <state> <detail>
   local tmp="$STATUS.$$"
+  # A missing state directory used to make every write fail silently: the
+  # script still exited 0 while watchdog.status quietly stopped updating,
+  # which is indistinguishable from a dead cron -- the exact failure this
+  # tool exists to detect, occurring inside the tool itself.
+  mkdir -p "$(dirname "$STATUS")" 2>/dev/null
   {
     printf 'checked:  %s\n' "$iso"
     printf 'state:    %s\n' "$1"
@@ -86,7 +97,8 @@ report() {                       # report <state> <detail>
     # running from a test branch purely because that was the last checkout --
     # it worked, but by luck. An unexpected branch here is a real finding.
     printf 'code:     %s @ %s\n' "$branch" "$sha"
-  } >"$tmp" 2>/dev/null && mv -f "$tmp" "$STATUS" 2>/dev/null
+  } >"$tmp" 2>/dev/null && mv -f "$tmp" "$STATUS" 2>/dev/null \
+    || printf '%s WATCHDOG CANNOT WRITE STATUS to %s\n' "$iso" "$STATUS" >&2
 
   # escalate is the only state a human needs told about; every other state
   # (working/waiting_on_jon/cooling_down/restarted/...) stays silent, and
