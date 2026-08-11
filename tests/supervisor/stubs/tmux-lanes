@@ -1,0 +1,43 @@
+#!/bin/bash
+# Stub tmux for lanes.sh tests. LANES_FIXTURE holds one line per window:
+#   <index>|<name>|<command>|<pane-text>|<activity-age-seconds>|<in-mode>
+# The last column is how many seconds ago tmux last saw output, which is what
+# separates hung from busy. It replaced a two-capture scheme that diffed pane
+# text: Claude Code's elapsed footer is minute-granular past 60s, so a live
+# turn emits identical bytes for a whole minute and was reported hung.
+F="${LANES_FIXTURE:?}"
+sub="$1"; shift
+target=""; fmt=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    -t) target="$2"; shift 2 ;;
+    -p|-S) shift ;;
+    -*) shift ;;
+    *) fmt="$1"; shift ;;
+  esac
+done
+win="${target##*:}"; win="${win%%.*}"
+line=$(awk -F'|' -v w="$win" '$1==w' "$F")
+case "$sub" in
+  has-session) exit 0 ;;
+  list-windows) cut -d'|' -f1 "$F" ;;
+  list-panes)
+    # Mirrors the real -F used by lanes.sh: index, name, command, activity,
+    # in-mode, tab separated, active pane only.
+    now=$(date +%s)
+    while IFS='|' read -r i n c t a m; do
+      printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$n" "$c" "$((now-a))" "${m:-0}"
+    done < "$F" ;;
+  display-message)
+    case "$fmt" in
+      '#{window_name}') cut -d'|' -f2 <<<"$line" ;;
+      '#{pane_current_command}') cut -d'|' -f3 <<<"$line" ;;
+      '#{window_activity}') echo $(( $(date +%s) - $(cut -d'|' -f5 <<<"$line") )) ;;
+    esac ;;
+  capture-pane)
+    # \n in the fixture's pane column becomes a real newline, so a test can
+    # express "the phrase is in the scrollback but not on the status line" --
+    # the live case that made idle lanes report busy.
+    printf '%b\n' "$(cut -d'|' -f4 <<<"$line")" ;;
+esac
+exit 0

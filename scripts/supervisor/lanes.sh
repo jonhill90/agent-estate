@@ -1,0 +1,147 @@
+#!/bin/bash
+# Report the real state of every worker lane in a tmux session.
+#
+# WHY: "idle" was doing four different jobs, and the supervisor could not tell
+# them apart. All four were hit in one night, 2026-08-11:
+#
+#   free     an agent is running and waiting for work        -> dispatch to it
+#   busy     an agent is mid-turn                            -> leave alone
+#   hung     the pane looks busy but has stopped advancing   -> needs a human
+#   dead     no agent at all, just a shell                   -> restart the agent
+#   unknown  a non-Claude harness; no probe exists for it     -> ask a human
+#
+# `capture-pane` alone reports the last three identically. A dispatch sent to a
+# dead lane lands in zsh, which answers "no such file or directory: /clear" and
+# the work is silently lost. A dispatch sent to a hung lane is queued forever.
+#
+# Two signals, neither sufficient alone:
+#   - `pane_current_command` separates dead from everything else.
+#   - Sampling the pane twice separates hung from busy: a live turn's elapsed
+#     timer advances between samples, a wedged one does not.
+#
+# Usage: lanes.sh [session]        human-readable table
+#        lanes.sh --free [session] print only lane names safe to dispatch to
+#        lanes.sh --json [session]
+#
+# Exit 0 always when the session exists; the states are the output, not the
+# exit code. Exit 1 if the session does not exist -- which is NOT "no lanes".
+
+set -uo pipefail
+
+SESSION="${2:-${LANES_SESSION:-agent-dotfiles}}"
+MODE="${1:-}"
+case "$MODE" in
+  --free|--json) ;;
+  "") ;;
+  *) SESSION="$MODE"; MODE="" ;;
+esac
+
+# Shells mean "the agent exited and left the pane behind".
+SHELLS="bash|zsh|sh|fish|login"
+# The supervisor's own pane. It is never a dispatch target: sending a worker
+# brief there /clear's the loop and replaces it with someone else's task.
+# Done twice on 2026-08-11 -- once via an empty tmux target, once because
+# --free cheerfully offered window 1 while the supervisor sat idle between
+# ticks. "Free" and "yours to take" are different questions.
+SUPERVISOR_WINDOW="${LANES_SUPERVISOR_WINDOW:-1}"
+# A lane is hung if it looks busy but tmux has seen no output from it for this
+# long. Must exceed the slowest legitimate repaint interval -- Claude Code's
+# footer drops to MINUTE granularity past 60s, so a live turn can go ~60s
+# without changing a single byte.
+HUNG_AFTER="${LANES_HUNG_AFTER:-180}"
+
+if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  echo "lanes: session '$SESSION' does not exist" >&2
+  exit 1
+fi
+
+# First sample of every pane, taken together so the gap is shared rather than
+# paid per lane.
+TAB=$'\t'   # tmux does not interpret a literal \t inside -F
+# One list-panes call for every field, all from the ACTIVE pane of each window
+# -- the pane that capture-pane reads and send-keys would hit. Reading the
+# command from ":$w.1" while capturing from ":$w" meant a split lane could
+# report the first pane's command and the active pane's screen.
+declare -a IDX NAME CMD ACTIVITY PANEMODE
+while IFS=$'\t' read -r w n c a m; do
+  [ -n "$w" ] || continue
+  IDX+=("$w"); NAME+=("$n"); CMD+=("$c"); ACTIVITY+=("$a"); PANEMODE+=("$m")
+done < <(tmux list-panes -s -t "$SESSION" -f '#{pane_active}' \
+           -F "#{window_index}${TAB}#{window_name}${TAB}#{pane_current_command}${TAB}#{window_activity}${TAB}#{pane_in_mode}" 2>/dev/null)
+
+now_epoch=$(date +%s)
+
+emit_rows() {
+  local i
+  for i in "${!IDX[@]}"; do
+    local w="${IDX[$i]}" name="${NAME[$i]}" cmd="${CMD[$i]}" act="${ACTIVITY[$i]}" mode="${PANEMODE[$i]}"
+    local pane state age
+    # ONLY the status line -- the last non-empty line of the visible pane.
+    #
+    # This used to grep `capture-pane -S -6`, which is six scrollback lines
+    # PLUS the whole visible pane (~60 lines). Any lane that had merely
+    # PRINTED the phrase -- reviewing this very file, reading loop-tick.md --
+    # matched and was reported busy, then hung. Two live lanes were in that
+    # state during the review that found it. An earlier comment here blamed
+    # the Copilot harness; that was a misdiagnosis. It was never
+    # harness-specific, it was the capture window.
+    pane=$(tmux capture-pane -p -t "$SESSION:$w" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -1)
+
+    if [ "$w" = "$SUPERVISOR_WINDOW" ]; then
+      state=supervisor
+    elif [ "${mode:-0}" != "0" ]; then
+      # A pane in copy mode still captures its underlying screen, so an idle
+      # agent someone scrolled up reads free -- but keys sent there are eaten
+      # by the copy-mode key table and never reach the agent. Reproduced live
+      # against a real tmux server in review of #65: the dispatch vanished and
+      # copy mode exited.
+      state=scrolled
+    elif [[ "$cmd" =~ ^($SHELLS)$ ]]; then
+      state=dead
+    elif [[ ! "$cmd" =~ ^(claude|claude\.exe)$ ]]; then
+      # The busy probe greps Claude Code's own status string. Other harnesses
+      # paint different UIs, and guessing produces false alarms: a healthy idle
+      # Copilot pane was classified `hung` because that string appeared in its
+      # scrollback. Report what is known and refuse to invent the rest.
+      state=unknown
+    elif ! grep -q 'esc to interrupt' <<<"$pane"; then
+      state=free
+    else
+      # Busy-looking. Hung iff tmux has seen no output for HUNG_AFTER.
+      #
+      # This deliberately does NOT diff pane text across a short gap. That was
+      # the first version and it was wrong: Claude Code's elapsed footer shows
+      # minute granularity past 60s, so a turn running 61-119s prints an
+      # identical byte string for a whole minute and was reported hung while
+      # fully alive. Found in review of #65. tmux's own activity timestamp is
+      # independent of whatever the harness chooses to paint.
+      age=$(( now_epoch - ${act:-now_epoch} ))
+      if [ "$age" -ge "$HUNG_AFTER" ]; then state=hung; else state=busy; fi
+    fi
+    printf '%s\t%s\t%s\t%s\n' "$w" "$name" "$cmd" "$state"
+  done
+}
+
+rows=$(emit_rows)
+
+case "$MODE" in
+  --free)
+    # session:index, never the window name: names are not unique (the live
+    # session briefly had two windows both called ad65-lanes-review) and
+    # `send-keys -t session:name` silently hits the first match.
+    awk -F'\t' -v s="$SESSION" '$4=="free"{print s ":" $1}' <<<"$rows" ;;
+  --json)
+    printf '['
+    awk -F'\t' 'BEGIN{c=0}
+      {if(c++)printf(",");printf("{\"window\":%s,\"name\":\"%s\",\"command\":\"%s\",\"state\":\"%s\"}",$1,$2,$3,$4)}
+      END{}' <<<"$rows"
+    printf ']\n' ;;
+  *)
+    printf '%-4s %-24s %-12s %s\n' WINDOW NAME COMMAND STATE
+    awk -F'\t' '{printf("%-4s %-24s %-12s %s\n",$1,$2,$3,$4)}' <<<"$rows"
+    dead=$(awk -F'\t' '$4=="dead"' <<<"$rows" | wc -l | tr -d ' ')
+    hung=$(awk -F'\t' '$4=="hung"' <<<"$rows" | wc -l | tr -d ' ')
+    [ "$dead" -gt 0 ] && echo "  ${dead} lane(s) have no agent — restart before dispatching"
+    [ "$hung" -gt 0 ] && echo "  ${hung} lane(s) look wedged — a dispatch there would queue forever"
+    : ;;
+esac
