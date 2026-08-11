@@ -112,6 +112,59 @@ evidence value. The marker is compact, sorted JSON inside an HTML comment:
 local `source_tasks` spool, even into an empty state directory. It does not
 invent a tmux pane or dispatch work.
 
+## Scheduled session recycling
+
+`recycle.py` decides when a long-lived supervisor session should checkpoint
+and hand over to a fresh one, on a wall-clock schedule rather than on
+exhaustion (agent-dotfiles#47). Per the transport-adapter boundary above,
+`decide_recycle` is pure and tmux-free -- it takes a brief path, a "session
+started at" reading, a max session age, and a max brief staleness, and
+returns a `RecycleDecision(allowed, reason, channels)`. `respawn_supervisor`
+is the thin actuator that replaces the pane's session and seeds it with the
+tick prompt; it is never exercised against a live pane in tests.
+
+Every refusal fails closed: a missing brief, a stale brief (not written
+within the staleness window), or a brief with no `## Live lanes and armed
+channels` section all refuse recycling rather than treating absence as
+"nothing to check". A session younger than the max age is a normal negative,
+not a refusal.
+
+### The channels section
+
+The brief carries a `## Live lanes and armed channels` heading followed by
+a markdown table, one row per in-flight lane:
+
+```text
+## Live lanes and armed channels
+
+| Channel | Lane | Working from | Task |
+|---|---|---|---|
+| `recycling` | `agent-dotfiles:worker-1` | `recycle-brief.md` | #47 session recycling |
+```
+
+This is the field a successor re-arms `tmux wait-for` channels from after a
+recycle, so tmux's queued-signal behavior (a signal sent to a channel with
+no waiter is delivered to the next waiter, not lost) still covers in-flight
+lanes across the handover. A successor can read it directly with grep,
+without `recycle.py`:
+
+```bash
+grep -A5 '^## Live lanes and armed channels' ~/.local/state/agent-dotfiles-supervisor/brief.md
+```
+
+An idle supervisor must say so explicitly. The section's body must be
+either the table above, or the literal marker `_No lanes armed._` -- nothing
+else parses. A heading followed by the marker means "no lanes in flight" and
+parses to an empty list. A heading followed by anything else that is neither
+a readable table nor that marker -- free text, a stale format, a typo in the
+table header -- raises `ChannelsSectionUnparseable`, and `decide_recycle`
+turns that into a refusal, not an empty list silently treated as "nothing
+running". A heading that is entirely absent is a third, distinct fact --
+`parse_armed_channels` raises `ChannelsSectionMissing` for that case.
+"Zero channels", "I could not read the channels", and "there is no channels
+section at all" are three different values; none of them collapses into
+either of the others.
+
 ## Verification
 
 ```bash
