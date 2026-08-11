@@ -14,11 +14,16 @@ check() { # check <name> <expected-substring> <file>
   else echo "  FAIL $1 — expected '$2' in $(cat "$3" 2>/dev/null | tr '\n' ' ')"; fail=$((fail+1)); fi
 }
 run() { # run <state> <workdir>
-  rm -rf "$2"; mkdir -p "$2"
+  # An empty transcript dir by default: sleepcheck finds no pending wakeup, so
+  # these tests exercise the watchdog's own decisions rather than the live
+  # supervisor's sleep state. Without this the suite passes or fails depending
+  # on whether the real loop happens to be asleep when it runs.
+  rm -rf "$2"; mkdir -p "$2" "$2/transcripts"
   SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE="$1" STUB_SENT="$2/sent" \
   STUB_BUSY_AFTER="${STUB_BUSY_AFTER:-}" STUB_COUNTER="$2/counter" \
   SUPERVISOR_STATE="$2" SUPERVISOR_STATUS="$2/st" SUPERVISOR_LOG="$2/lg" \
   SUPERVISOR_STAMP="$2/stamp" SUPERVISOR_HISTORY="$2/hist" NOTIFY_ENV="$2/none.env" \
+  SLEEPCHECK_DIR="${STUB_SLEEPCHECK_DIR:-$2/transcripts}" \
   bash "$WATCHDOG" >/dev/null 2>&1
 }
 
@@ -45,6 +50,25 @@ if grep -q '/loop' "$D/w/sent" 2>/dev/null; then
   echo "  FAIL a /loop was delivered into a busy pane"; fail=$((fail+1))
 else
   echo "  ok   no /loop delivered into a busy pane"; pass=$((pass+1))
+fi
+
+# A loop with a pending wakeup is asleep, not dead. The watchdog must leave it
+# alone even though the pane is idle and there is queued work -- restarting a
+# sleeping loop is what churned the supervisor all night before #59.
+D=$(mktemp -d); mkdir -p "$D/sleeping"
+python3 - "$D/sleeping/t.jsonl" <<'PYEOF'
+import json, sys, datetime
+stamp = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+rec = {"timestamp": stamp, "message": {"content": [
+    {"type": "tool_use", "name": "ScheduleWakeup", "input": {"delaySeconds": 3600}}]}}
+open(sys.argv[1], "w").write(json.dumps(rec) + "\n")
+PYEOF
+STUB_SLEEPCHECK_DIR="$D/sleeping" run idle "$D/w"
+check "a sleeping loop is left alone" "state:    asleep" "$D/w/st"
+if grep -q '/loop' "$D/w/sent" 2>/dev/null; then
+  echo "  FAIL a sleeping loop was restarted"; fail=$((fail+1))
+else
+  echo "  ok   a sleeping loop receives no keystrokes"; pass=$((pass+1))
 fi
 
 echo "  $pass passed, $fail failed"
