@@ -30,7 +30,7 @@ class StateSensor:
 
     def _collect_git(self, repository):
         repo_path = repository["path"]
-        git = os.environ.get("HILL90_GIT_BIN", "git")
+        git = os.environ.get("AGENT_GIT_BIN", "git")
         head = self._run([git, "-C", repo_path, "rev-parse", "HEAD"]).strip()
         upstream = self._run([git, "-C", repo_path, "rev-parse", "origin/main"]).strip()
         status = self._run([git, "-C", repo_path, "status", "--porcelain=v1"]).splitlines()
@@ -42,7 +42,7 @@ class StateSensor:
 
     def _collect_github(self, repository):
         github = repository["github"]
-        gh = os.environ.get("HILL90_GH_BIN", "gh")
+        gh = os.environ.get("AGENT_GH_BIN", "gh")
         prs = self._run(
             [
                 gh, "pr", "list", "--repo", github, "--state", "open", "--limit", "100",
