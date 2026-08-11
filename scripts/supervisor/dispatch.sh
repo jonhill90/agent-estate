@@ -343,6 +343,67 @@ done
 tmux send-keys -t "$LANE" Enter 2>/dev/null \
   || abort_send "could not submit the brief in $LANE -- #$ISSUE_ARG was not dispatched"
 
+# --- 5. record what was dispatched. BEST EFFORT, NEVER FATAL --------------
+#
+# agent-dotfiles#140. Every signal that a lane is busy is today inferred from
+# pane content, and inference is what produced the false-`free` bugs #102,
+# #123 and #126. This writes the fact down instead. Nothing reads it yet --
+# `lanes.sh` classifies panes exactly as it did before this block existed --
+# and that is deliberate: a recording layer nothing depends on can be wrong
+# without taking the estate down, and its records can be checked against
+# reality before anything trusts them.
+#
+# THIS BLOCK MUST NOT ABORT THE DISPATCH, AND THAT IS THE OPPOSITE OF EVERY
+# OTHER STEP ABOVE. "Every failure aborts and unwinds" is right for the claim
+# and the worktree, which are real resources a half-dispatch would strand. It
+# is wrong for a bookkeeping write nothing consumes: a broken ledger that
+# stopped the estate dispatching would trade the whole estate for a record
+# with no reader. So this is best-effort and LOUD -- never silent, never
+# fatal. Do not "fix" it into an abort_send; tests/supervisor/test_dispatch.sh
+# mutation-checks that removing this tolerance turns the suite red.
+#
+# WHY IT RUNS LAST, after the final Enter and past every abort path: a record
+# asserting work is in flight, left behind by a dispatch that then aborted, is
+# worse than no record at all -- the point of the ledger is to be believed.
+# Ordering is what guarantees that, not cleanup, so nothing above this line
+# needs an unwind for it.
+ledger_record_failed() {
+  echo "dispatch: LEDGER RECORD FAILED for $WINDOW_NAME -- the dispatch STANDS, the record does not" >&2
+  sed 's/^/  /' <<<"${1:-}" >&2
+  echo "dispatch: the lane is working; nothing reads the ledger yet, so this costs a record, not the run" >&2
+  return 0  # the ledger write is never fatal -- agent-dotfiles#140
+}
+
+# One tmux call for the pane identity the ledger records. The recorder itself
+# never talks to tmux: a durable record that cannot be written without a live
+# tmux server is not the portability the ledger is for, and the caller here is
+# already holding a tmux connection.
+LANE_META=$(tmux display-message -p -t "$LANE" \
+  '#{pane_id}|#{pane_current_command}|#{pane_current_path}|#{socket_path}|#{session_created}|#{session_id}' 2>&1)
+if [ -z "$LANE_META" ] || [[ "$LANE_META" != *"|"* ]]; then
+  ledger_record_failed "could not read pane metadata for $LANE: $LANE_META"
+else
+  IFS='|' read -r PANE_ID PANE_CMD PANE_PATH SOCKET_PATH SESSION_CREATED SESSION_ID <<<"$LANE_META"
+  LEDGER_ARGS=(
+    record-dispatch
+    --lane "$LANE"
+    --task "$WINDOW_NAME"
+    --summary "#$ISSUE_ARG $SLUG; worktree=$WORKTREE; brief=$BRIEF"
+    --pane-id "$PANE_ID"
+    --pane-path "$PANE_PATH"
+    --command "$PANE_CMD"
+    --server-id "${SOCKET_PATH}:${SESSION_CREATED}"
+    --session-id "$SESSION_ID"
+    --github "$REPO"
+  )
+  for i in "${ISSUES[@]}"; do
+    LEDGER_ARGS+=(--issue "$i")
+  done
+  if ! LEDGER_OUT=$("${DISPATCH_PYTHON:-python3}" "$HERE/cli.py" "${LEDGER_ARGS[@]}" 2>&1); then
+    ledger_record_failed "$LEDGER_OUT"
+  fi
+fi
+
 echo "dispatch: #$ISSUE_ARG -> $LANE ($WINDOW_NAME)"
 echo "  worktree: $WORKTREE"
 echo "  brief:    $BRIEF"

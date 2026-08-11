@@ -49,6 +49,7 @@ class Ledger:
         self._initialize()
         self._migrate_lanes_table(failpoint=_migration_failpoint)
         self._migrate_tasks_table(failpoint=_migration_failpoint)
+        self._migrate_source_tasks_table(failpoint=_migration_failpoint)
 
     def _connect(self, *, foreign_keys=True):
         connection = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
@@ -136,7 +137,7 @@ class Ledger:
                 CREATE TABLE IF NOT EXISTS source_tasks (
                     id TEXT PRIMARY KEY,
                     source_kind TEXT NOT NULL CHECK (source_kind IN ('issue', 'pull')),
-                    source_url TEXT NOT NULL UNIQUE,
+                    source_url TEXT NOT NULL,
                     source_ref TEXT NOT NULL,
                     summary TEXT NOT NULL,
                     source_state TEXT NOT NULL,
@@ -339,6 +340,104 @@ class Ledger:
             finally:
                 connection.close()
 
+    _SOURCE_TASKS_OLD_UNIQUE_MARKER = "source_url TEXT NOT NULL UNIQUE"
+
+    def _migrate_source_tasks_table(self, *, failpoint=None):
+        """Drop `source_tasks.source_url`'s table-level UNIQUE constraint.
+
+        agent-dotfiles#144 finding 1: `source_url` is derived from the issue
+        number alone (`cli.py`'s `record_dispatch`), and `reconstruct_task`
+        upserts `ON CONFLICT(id)` -- a DIFFERENT key. A second dispatch of the
+        same issue under a different task id (a retry after a lane died, a
+        re-brief, a follow-up review -- this estate does this constantly; see
+        the docstring on `reconstruct_task`) raised `UNIQUE constraint failed:
+        source_tasks.source_url` on the second attempt, permanently, for that
+        issue.
+
+        The modelling decision, argued once here rather than worked around:
+        each `source_tasks` row is one recorded DISPATCH ATTEMPT (its primary
+        key is the task id, not the issue), not one row per GitHub issue. The
+        one caller that DOES want "one row per issue" --
+        `GithubTaskSource.reconstruct`, the marker-based path -- already gets
+        that for free, because its `task_id` is `_task_id(parts)`, a pure
+        function of the same URL; reconstructing the same issue twice through
+        that path always hits the same `id` and upserts in place regardless of
+        this constraint. The URL-uniqueness was never doing anything for that
+        caller and was actively wrong for `cli.py`'s -- several attempts
+        legitimately share a URL, so the column is dropped rather than
+        replaced with a scoped ("one OPEN attempt per URL") constraint: this
+        table's own `status` is never advanced past 'created' by the
+        `record_dispatch` recording path (nothing here tracks a task's real
+        lifecycle back into `source_tasks`), so an open-attempt constraint
+        would immediately wedge on the very case it exists to protect --
+        finding 3's issue by another name. Concurrent double-dispatch of the
+        same issue is `claim.sh`'s job, upstream of this layer entirely (see
+        `record_dispatch`'s own docstring); this table records what was
+        dispatched, it does not arbitrate whether it should have been.
+
+        Same SQLite limitation as `_migrate_lanes_table` / `_migrate_tasks_table`:
+        there is no `ALTER TABLE ... DROP CONSTRAINT`, so the only way to widen
+        a column is to rebuild the table. Every row is preserved; the rebuild
+        is one transaction, rolled back whole on any failure.
+        """
+        with self._locked():
+            with contextlib.closing(self._connect()) as probe:
+                existing = probe.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='source_tasks'"
+                ).fetchone()
+                if existing is None:
+                    return
+                if self._SOURCE_TASKS_OLD_UNIQUE_MARKER not in existing["sql"]:
+                    return
+
+            connection = self._connect(foreign_keys=False)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    connection.execute(
+                        """
+                        CREATE TABLE source_tasks_migrated (
+                            id TEXT PRIMARY KEY,
+                            source_kind TEXT NOT NULL CHECK (source_kind IN ('issue', 'pull')),
+                            source_url TEXT NOT NULL,
+                            source_ref TEXT NOT NULL,
+                            summary TEXT NOT NULL,
+                            source_state TEXT NOT NULL,
+                            status TEXT NOT NULL CHECK (
+                                status IN ('created', 'delivered', 'accepted', 'running',
+                                           'complete', 'failed', 'cancelled')
+                            ),
+                            evidence_json TEXT NOT NULL,
+                            status_marker TEXT,
+                            updated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self._fail(failpoint, "after_create")
+                    connection.execute(
+                        """
+                        INSERT INTO source_tasks_migrated (
+                            id, source_kind, source_url, source_ref, summary, source_state,
+                            status, evidence_json, status_marker, updated_at
+                        )
+                        SELECT id, source_kind, source_url, source_ref, summary, source_state,
+                               status, evidence_json, status_marker, updated_at
+                        FROM source_tasks
+                        """
+                    )
+                    self._fail(failpoint, "after_copy")
+                    connection.execute("DROP TABLE source_tasks")
+                    self._fail(failpoint, "after_drop")
+                    connection.execute("ALTER TABLE source_tasks_migrated RENAME TO source_tasks")
+                    self._fail(failpoint, "after_rename")
+                except BaseException:
+                    connection.rollback()
+                    raise
+                else:
+                    connection.commit()
+            finally:
+                connection.close()
+
     @staticmethod
     def _dict(row):
         return dict(row) if row is not None else None
@@ -356,61 +455,106 @@ class Ledger:
         if row["nonce"] != pane_nonce:
             raise ValueError("pane incarnation does not match registered lane")
 
-    def register_lane(self, *, lane, pane_id, nonce, harness, repo, server_id, session_id, command):
+    @staticmethod
+    def _cancel_task_row(connection, task_id, now):
+        connection.execute(
+            "UPDATE tasks SET status='cancelled', updated_at=?, completed_at=? WHERE id=?",
+            (now, now, task_id),
+        )
+
+    def _register_lane_tx(self, connection, *, lane, pane_id, nonce, harness, repo, server_id, session_id, command, now):
         if harness not in ("codex", "claude", "copilot-acp"):
             raise ValueError("unsupported harness")
         if not all((lane, pane_id, nonce, repo, server_id, session_id, command)):
             raise ValueError("lane registration fields must be non-empty")
+        current = connection.execute("SELECT * FROM lanes WHERE lane = ?", (lane,)).fetchone()
+        if current is not None and any(
+            current[field] != value
+            for field, value in (
+                ("pane_id", pane_id),
+                ("nonce", nonce),
+                ("harness", harness),
+                ("repo", repo),
+                ("server_id", server_id),
+                ("session_id", session_id),
+                ("command", command),
+            )
+        ):
+            # A changed identity is a genuinely new incarnation. An
+            # outstanding task still bound to the old incarnation must not
+            # be silently REBOUND to it -- except `delivery_pending`,
+            # which has its own reconciliation escape valve keyed off the
+            # task's own recorded pane_nonce (`_reconcile_transition`),
+            # not the lane's current one. #871 depends on re-registration
+            # succeeding over a `delivery_pending` task to recover a dead
+            # pane; every other outstanding status has no such recovery
+            # path and would otherwise be orphaned by this rebind.
+            outstanding = connection.execute(
+                "SELECT id FROM tasks WHERE lane = ? AND status NOT IN "
+                "('complete', 'failed', 'cancelled', 'delivery_pending')",
+                (lane,),
+            ).fetchone()
+            if outstanding is not None:
+                # agent-dotfiles#144 finding 3: this used to raise here,
+                # unconditionally, and the ONLY way out was `lane-done.sh`
+                # moving that exact task to a terminal status by renaming the
+                # window it owns. A lane freed any other way -- renamed by
+                # hand, a worker that died mid-turn, the completion signal
+                # never firing (#102, #123, #126 were exactly this) -- wedged
+                # every subsequent `register_lane` call for that lane forever,
+                # with no self-heal. `cancel_open_task` already existed for
+                # exactly this and had no caller anywhere in this tree: the
+                # fifth instance of a durability tool built with no wiring
+                # (`acp_transport.py` #56, `worktree.sh` #81, `advance-live.sh`,
+                # and #140 itself named this exact risk before merging).
+                #
+                # A CHANGED IDENTITY is the evidence that the old task can
+                # never complete through this pane again -- nothing watching
+                # tmux would ever see the rename or crash that produced this
+                # call; only the caller registering a BRAND NEW incarnation in
+                # the lane's place can know that. Cancel the stale task and
+                # proceed, rather than wedge the recorder for that lane
+                # permanently. Scoped to the exact row `outstanding` above
+                # already found -- `delivery_pending` is excluded from that
+                # query and stays excluded here, unchanged from #871: it has
+                # its own reconciliation path and must not be silently
+                # discarded by a re-registration racing an in-flight send.
+                self._cancel_task_row(connection, outstanding["id"], now)
+        connection.execute(
+            """
+            INSERT INTO lanes(lane, pane_id, nonce, harness, repo, server_id,
+                              session_id, command, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(lane) DO UPDATE SET
+                pane_id=excluded.pane_id,
+                nonce=excluded.nonce,
+                harness=excluded.harness,
+                repo=excluded.repo,
+                server_id=excluded.server_id,
+                session_id=excluded.session_id,
+                command=excluded.command,
+                updated_at=excluded.updated_at
+            """,
+            (lane, pane_id, nonce, harness, repo, server_id, session_id, command, now),
+        )
+        row = connection.execute("SELECT * FROM lanes WHERE lane = ?", (lane,)).fetchone()
+        return self._dict(row)
+
+    def register_lane(self, *, lane, pane_id, nonce, harness, repo, server_id, session_id, command):
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
-            current = connection.execute("SELECT * FROM lanes WHERE lane = ?", (lane,)).fetchone()
-            if current is not None and any(
-                current[field] != value
-                for field, value in (
-                    ("pane_id", pane_id),
-                    ("nonce", nonce),
-                    ("harness", harness),
-                    ("repo", repo),
-                    ("server_id", server_id),
-                    ("session_id", session_id),
-                    ("command", command),
-                )
-            ):
-                # A changed identity is a genuinely new incarnation. An
-                # outstanding task still bound to the old incarnation must not
-                # be silently rebound to it -- except `delivery_pending`,
-                # which has its own reconciliation escape valve keyed off the
-                # task's own recorded pane_nonce (`_reconcile_transition`),
-                # not the lane's current one. #871 depends on re-registration
-                # succeeding over a `delivery_pending` task to recover a dead
-                # pane; every other outstanding status has no such recovery
-                # path and would otherwise be orphaned by this rebind.
-                outstanding = connection.execute(
-                    "SELECT id FROM tasks WHERE lane = ? AND status NOT IN "
-                    "('complete', 'failed', 'cancelled', 'delivery_pending')",
-                    (lane,),
-                ).fetchone()
-                if outstanding is not None:
-                    raise ValueError(f"lane has an outstanding task: {outstanding['id']}")
-            connection.execute(
-                """
-                INSERT INTO lanes(lane, pane_id, nonce, harness, repo, server_id,
-                                  session_id, command, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(lane) DO UPDATE SET
-                    pane_id=excluded.pane_id,
-                    nonce=excluded.nonce,
-                    harness=excluded.harness,
-                    repo=excluded.repo,
-                    server_id=excluded.server_id,
-                    session_id=excluded.session_id,
-                    command=excluded.command,
-                    updated_at=excluded.updated_at
-                """,
-                (lane, pane_id, nonce, harness, repo, server_id, session_id, command, now),
+            return self._register_lane_tx(
+                connection,
+                lane=lane,
+                pane_id=pane_id,
+                nonce=nonce,
+                harness=harness,
+                repo=repo,
+                server_id=server_id,
+                session_id=session_id,
+                command=command,
+                now=now,
             )
-            row = connection.execute("SELECT * FROM lanes WHERE lane = ?", (lane,)).fetchone()
-        return self._dict(row)
 
     def get_lane(self, lane):
         with contextlib.closing(self._connect()) as connection:
@@ -455,6 +599,68 @@ class Ledger:
             rows = connection.execute("SELECT * FROM source_tasks ORDER BY id").fetchall()
         return [self._source_task_dict(row) for row in rows]
 
+    def _reconstruct_task_tx(
+        self,
+        connection,
+        *,
+        task_id,
+        source_kind,
+        source_url,
+        source_ref,
+        summary,
+        source_state,
+        status,
+        evidence,
+        status_marker,
+        now,
+    ):
+        self._require_task_id(task_id)
+        if source_kind not in ("issue", "pull"):
+            raise ValueError("unsupported GitHub source kind")
+        if status not in ("created", "delivered", "accepted", "running", "complete", "failed", "cancelled"):
+            raise ValueError("unsupported source task status")
+        if not all(isinstance(value, str) and value for value in (source_url, source_ref, summary, source_state)):
+            raise ValueError("source task fields must be non-empty")
+        if not isinstance(evidence, list) or not all(isinstance(value, str) and value for value in evidence):
+            raise ValueError("source task evidence must be non-empty strings")
+        if status in TERMINAL_STATUSES and not evidence:
+            raise ValueError("terminal source task requires evidence")
+        if status_marker is not None and not isinstance(status_marker, str):
+            raise ValueError("source task status marker must be text")
+        encoded_evidence = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
+        connection.execute(
+            """
+            INSERT INTO source_tasks(
+                id, source_kind, source_url, source_ref, summary, source_state,
+                status, evidence_json, status_marker, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                source_kind=excluded.source_kind,
+                source_url=excluded.source_url,
+                source_ref=excluded.source_ref,
+                summary=excluded.summary,
+                source_state=excluded.source_state,
+                status=excluded.status,
+                evidence_json=excluded.evidence_json,
+                status_marker=excluded.status_marker,
+                updated_at=excluded.updated_at
+            """,
+            (
+                task_id,
+                source_kind,
+                source_url,
+                source_ref,
+                summary,
+                source_state,
+                status,
+                encoded_evidence,
+                status_marker,
+                now,
+            ),
+        )
+        row = connection.execute("SELECT * FROM source_tasks WHERE id = ?", (task_id,)).fetchone()
+        return self._source_task_dict(row)
+
     def reconstruct_task(
         self,
         *,
@@ -473,108 +679,81 @@ class Ledger:
         This intentionally has no lane or pane dependency: reconstruction must
         work after the entire supervisor state directory has been recreated.
         """
-        self._require_task_id(task_id)
-        if source_kind not in ("issue", "pull"):
-            raise ValueError("unsupported GitHub source kind")
-        if status not in ("created", "delivered", "accepted", "running", "complete", "failed", "cancelled"):
-            raise ValueError("unsupported source task status")
-        if not all(isinstance(value, str) and value for value in (source_url, source_ref, summary, source_state)):
-            raise ValueError("source task fields must be non-empty")
-        if not isinstance(evidence, list) or not all(isinstance(value, str) and value for value in evidence):
-            raise ValueError("source task evidence must be non-empty strings")
-        if status in TERMINAL_STATUSES and not evidence:
-            raise ValueError("terminal source task requires evidence")
-        if status_marker is not None and not isinstance(status_marker, str):
-            raise ValueError("source task status marker must be text")
         now = int(self.clock())
-        encoded_evidence = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
         with self._locked(), self._transaction() as connection:
-            connection.execute(
-                """
-                INSERT INTO source_tasks(
-                    id, source_kind, source_url, source_ref, summary, source_state,
-                    status, evidence_json, status_marker, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(id) DO UPDATE SET
-                    source_kind=excluded.source_kind,
-                    source_url=excluded.source_url,
-                    source_ref=excluded.source_ref,
-                    summary=excluded.summary,
-                    source_state=excluded.source_state,
-                    status=excluded.status,
-                    evidence_json=excluded.evidence_json,
-                    status_marker=excluded.status_marker,
-                    updated_at=excluded.updated_at
-                """,
-                (
-                    task_id,
-                    source_kind,
-                    source_url,
-                    source_ref,
-                    summary,
-                    source_state,
-                    status,
-                    encoded_evidence,
-                    status_marker,
-                    now,
-                ),
+            return self._reconstruct_task_tx(
+                connection,
+                task_id=task_id,
+                source_kind=source_kind,
+                source_url=source_url,
+                source_ref=source_ref,
+                summary=summary,
+                source_state=source_state,
+                status=status,
+                evidence=evidence,
+                status_marker=status_marker,
+                now=now,
             )
-            row = connection.execute("SELECT * FROM source_tasks WHERE id = ?", (task_id,)).fetchone()
-        return self._source_task_dict(row)
 
-    def assign(self, *, task_id, lane, pane_nonce, summary):
+    def _assign_tx(self, connection, *, task_id, lane, pane_nonce, summary, now):
         self._require_task_id(task_id)
         if not summary.strip():
             raise ValueError("task summary must be non-empty")
+        self._verify_lane_nonce(connection, lane, pane_nonce)
+        source = connection.execute("SELECT * FROM source_tasks WHERE id = ?", (task_id,)).fetchone()
+        if source is None:
+            raise ValueError("task requires a reconstructed GitHub source")
+        if source["source_state"].upper() != "OPEN":
+            raise ValueError("GitHub source is not open")
+        if source["status"] != "created":
+            raise ValueError(f"GitHub source is already {source['status']}")
+        existing = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if existing is not None:
+            if existing["lane"] == lane and existing["pane_nonce"] == pane_nonce and existing["summary"] == summary:
+                return self._dict(existing)
+            raise ValueError("task id already exists with different assignment")
+        try:
+            connection.execute(
+                """
+                INSERT INTO tasks(id, lane, pane_nonce, summary, status, created_at, updated_at)
+                VALUES (?, ?, ?, ?, 'created', ?, ?)
+                """,
+                (task_id, lane, pane_nonce, summary, now, now),
+            )
+        except sqlite3.IntegrityError as error:
+            if "tasks.lane" in str(error):
+                raise ValueError(f"lane has an outstanding task: {lane}") from error
+            raise
+        row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return self._dict(row)
+
+    def assign(self, *, task_id, lane, pane_nonce, summary):
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
-            self._verify_lane_nonce(connection, lane, pane_nonce)
-            source = connection.execute("SELECT * FROM source_tasks WHERE id = ?", (task_id,)).fetchone()
-            if source is None:
-                raise ValueError("task requires a reconstructed GitHub source")
-            if source["source_state"].upper() != "OPEN":
-                raise ValueError("GitHub source is not open")
-            if source["status"] != "created":
-                raise ValueError(f"GitHub source is already {source['status']}")
-            existing = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-            if existing is not None:
-                if existing["lane"] == lane and existing["pane_nonce"] == pane_nonce and existing["summary"] == summary:
-                    return self._dict(existing)
-                raise ValueError("task id already exists with different assignment")
-            try:
-                connection.execute(
-                    """
-                    INSERT INTO tasks(id, lane, pane_nonce, summary, status, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, 'created', ?, ?)
-                    """,
-                    (task_id, lane, pane_nonce, summary, now, now),
-                )
-            except sqlite3.IntegrityError as error:
-                if "tasks.lane" in str(error):
-                    raise ValueError(f"lane has an outstanding task: {lane}") from error
-                raise
-            row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            return self._assign_tx(connection, task_id=task_id, lane=lane, pane_nonce=pane_nonce, summary=summary, now=now)
+
+    def _transition_tx(self, connection, task_id, pane_nonce, allowed, target, timestamp_column, now):
+        row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        if row is None:
+            raise ValueError("unknown task")
+        self._verify_lane_nonce(connection, row["lane"], pane_nonce)
+        if row["pane_nonce"] != pane_nonce:
+            raise ValueError("pane incarnation does not match task")
+        if row["status"] == target:
+            return self._dict(row)
+        if row["status"] not in allowed:
+            raise ValueError(f"cannot transition task from {row['status']} to {target}")
+        connection.execute(
+            f"UPDATE tasks SET status = ?, updated_at = ?, {timestamp_column} = ? WHERE id = ?",
+            (target, now, now, task_id),
+        )
+        row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return self._dict(row)
 
     def _transition(self, task_id, pane_nonce, allowed, target, timestamp_column):
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
-            row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-            if row is None:
-                raise ValueError("unknown task")
-            self._verify_lane_nonce(connection, row["lane"], pane_nonce)
-            if row["pane_nonce"] != pane_nonce:
-                raise ValueError("pane incarnation does not match task")
-            if row["status"] == target:
-                return self._dict(row)
-            if row["status"] not in allowed:
-                raise ValueError(f"cannot transition task from {row['status']} to {target}")
-            connection.execute(
-                f"UPDATE tasks SET status = ?, updated_at = ?, {timestamp_column} = ? WHERE id = ?",
-                (target, now, now, task_id),
-            )
-            row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
-        return self._dict(row)
+            return self._transition_tx(connection, task_id, pane_nonce, allowed, target, timestamp_column, now)
 
     def mark_delivery_pending(self, task_id, *, pane_nonce):
         """Persist an ambiguous, non-resendable state before the physical send.
@@ -641,20 +820,124 @@ class Ledger:
     def accept(self, task_id, *, pane_nonce):
         return self._transition(task_id, pane_nonce, ("delivered",), "accepted", "accepted_at")
 
+    def _cancel_open_task_tx(self, connection, lane, now):
+        row = connection.execute(
+            "SELECT * FROM tasks WHERE lane = ? AND status NOT IN ('complete','failed','cancelled')",
+            (lane,),
+        ).fetchone()
+        if row is None:
+            return None
+        self._cancel_task_row(connection, row["id"], now)
+        return self._dict(connection.execute("SELECT * FROM tasks WHERE id=?", (row["id"],)).fetchone())
+
     def cancel_open_task(self, lane):
+        """Free a lane's outstanding task by marking it cancelled.
+
+        agent-dotfiles#144 finding 3: this had no caller anywhere in the tree
+        until that review. `_register_lane_tx` now calls the narrower
+        `_cancel_task_row` directly (same UPDATE, scoped to the specific
+        outstanding row it already found, excluding `delivery_pending` --
+        this method's own SELECT is intentionally broader and stays available
+        standalone, e.g. for a human operator freeing a lane by hand).
+        """
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
-            row = connection.execute(
-                "SELECT * FROM tasks WHERE lane = ? AND status NOT IN ('complete','failed','cancelled')",
-                (lane,),
-            ).fetchone()
-            if row is None:
-                return None
-            connection.execute(
-                "UPDATE tasks SET status='cancelled', updated_at=?, completed_at=? WHERE id=?",
-                (now, now, row["id"]),
+            return self._cancel_open_task_tx(connection, lane, now)
+
+    def record_dispatch(
+        self,
+        *,
+        lane,
+        pane_id,
+        nonce,
+        harness,
+        repo,
+        server_id,
+        session_id,
+        command,
+        task_id,
+        source_kind,
+        source_url,
+        source_ref,
+        summary,
+        source_state,
+        evidence,
+        status_marker=None,
+        failpoint=None,
+    ):
+        """Atomically register the lane, record the GitHub source, assign, and mark delivered.
+
+        agent-dotfiles#144 finding 2: `cli.py`'s free function `record_dispatch`
+        used to call `register_lane`, `reconstruct_task`, `assign`,
+        `mark_delivery_pending` and `mark_delivered` as five INDEPENDENT
+        `Ledger` calls, each its own lock and its own transaction. A crash
+        between any two of them left on disk whatever had already committed --
+        reproduced by the #144 review as an orphan `lanes` row (`register_lane`
+        had committed; nothing after it had) claiming a lane occupied for a
+        dispatch that was otherwise never recorded. An orphan row asserting a
+        lane is busy is exactly the state this layer exists to prevent.
+
+        This performs the same five writes against ONE connection inside ONE
+        transaction, so a failure at any step rolls back everything this call
+        has done so far -- there is no window where step 1 committed and step
+        2 did not. `failpoint` exists so a test can inject that failure after
+        any named step below without a real crash; see `_fail`.
+
+        This does not weaken #140's central safety property. The caller
+        (`cli.py`'s `record_dispatch`, invoked from `dispatch.sh`) still
+        tolerates this raising -- a ledger failure here still cannot abort a
+        dispatch that has already physically happened in the pane. This only
+        removes the partial-write window *inside* the recording step itself;
+        it does not make the recording step itself load-bearing for the
+        dispatch.
+        """
+        now = int(self.clock())
+        with self._locked(), self._transaction() as connection:
+            lane_record = self._register_lane_tx(
+                connection,
+                lane=lane,
+                pane_id=pane_id,
+                nonce=nonce,
+                harness=harness,
+                repo=repo,
+                server_id=server_id,
+                session_id=session_id,
+                command=command,
+                now=now,
             )
-            return self._dict(connection.execute("SELECT * FROM tasks WHERE id=?", (row["id"],)).fetchone())
+            self._fail(failpoint, "after_register_lane")
+            registered_nonce = lane_record["nonce"]
+            self._reconstruct_task_tx(
+                connection,
+                task_id=task_id,
+                source_kind=source_kind,
+                source_url=source_url,
+                source_ref=source_ref,
+                summary=summary,
+                source_state=source_state,
+                status="created",
+                evidence=evidence,
+                status_marker=status_marker,
+                now=now,
+            )
+            self._fail(failpoint, "after_reconstruct_task")
+            self._assign_tx(
+                connection, task_id=task_id, lane=lane, pane_nonce=registered_nonce, summary=summary, now=now
+            )
+            self._fail(failpoint, "after_assign")
+            # The intermediate `delivery_pending` write is not skipped: it is
+            # the state machine's only route to `delivered`, and its own
+            # guard against a silent resend (see `mark_delivery_pending`'s
+            # docstring).
+            self._transition_tx(
+                connection, task_id, registered_nonce, ("created",), "delivery_pending", "delivery_attempted_at", now
+            )
+            self._fail(failpoint, "after_mark_delivery_pending")
+            task = self._transition_tx(
+                connection, task_id, registered_nonce, ("delivery_pending",), "delivered", "delivered_at", now
+            )
+            self._fail(failpoint, "after_mark_delivered")
+        return {"lane": lane_record, "task": task}
 
     def _write_result(self, task_id, result):
         if not isinstance(result, bytes):
