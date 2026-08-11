@@ -121,5 +121,48 @@ else
   bad "an unrelated digit in the window slug does not hide a stale claim" "$out"
 fi
 
+# --- the optional [repo] argument must actually be optional ---------------
+#
+# `[repo] is OWNER/NAME; omitted, gh resolves it from the working directory` --
+# claim.sh's own usage text. Omitting it aborted the script instead:
+#
+#   claim.sh: line 66: R[@]: unbound variable
+#
+# `set -u` plus `"${R[@]}"` on an EMPTY array is an unbound-variable error in
+# bash 3.2, which is what macOS ships at /bin/bash and what the shebang selects.
+# bash 5 expands an empty array to nothing and is fine, so this is invisible on
+# any machine with a modern bash first in PATH -- and every one of these scripts
+# runs under /bin/bash on Jon's Mac.
+#
+# Live consequence, 2026-08-11: `dispatch.sh 95 <slug> <brief>` with no repo
+# argument reported `claim: could not assign #95` for an open, unclaimed issue,
+# and the dispatch aborted. The failure was indistinguishable from a legitimate
+# refusal.
+# Deliberately /bin/bash and not `bash`: the `run` helper above uses whatever
+# bash is first in PATH, which on this machine is Homebrew's 5.3 -- where an
+# empty array expands to nothing and the bug cannot reproduce. The shebang on
+# every one of these scripts selects /bin/bash, so that is what must be tested.
+# Issue 57 is used because 28 and 70 are claimed by the tests above.
+run_system_bash() {
+  PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
+    LANES_FIXTURE="$D/lanes" LANES_SESSION=t /bin/bash "$CLAIM" "$@" 2>&1
+}
+out=$(run_system_bash check 57); rc=$?
+# Assert on exit 2 specifically, not on 0. `check` answers 0 (claimable) or 1
+# (claimed by someone) and both are real answers -- which one depends on what
+# the tests above this line claimed, so pinning 0 makes this test depend on
+# their order. Exit 2 is `cannot read issue`, which is the shape the bug
+# produces: the script aborting before it ever reaches gh.
+if [ "$rc" = "2" ]; then
+  bad "check without [repo] does not abort on an empty array" "exit 2 (cannot read): $out"
+else
+  ok "check without [repo] does not abort on an empty array"
+fi
+if grep -q "unbound variable" <<<"$out"; then
+  bad "check without [repo] does not emit an unbound-variable error" "$out"
+else
+  ok "check without [repo] does not emit an unbound-variable error"
+fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

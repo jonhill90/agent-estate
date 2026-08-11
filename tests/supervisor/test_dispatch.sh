@@ -255,6 +255,58 @@ log=$(tmuxlog)
 want_contains "the brief goes to the lane lanes.sh chose" "send-keys -t t:3" "$log"
 want_missing "not to the window DISPATCH_LANE named" "-t t:1" "$log"
 
+# --- the optional [repo] argument must not shift the lane into its slot ---
+#
+# claim.sh's interface is positional: `take <issue> [repo] [lane]`. dispatch.sh
+# used to append the repo only when it was non-empty, so omitting it did not
+# shorten the argument list -- it moved the WINDOW NAME into the repo slot.
+# `claim.sh take 95 ad95-claim-refuses-closed` then ran
+# `gh issue view 95 -R ad95-claim-refuses-closed`, which fails, and dispatch.sh
+# reported `claim: could not assign #95` for an issue that was open and
+# unclaimed. Observed live on 2026-08-11 against agent-dotfiles#95; the same
+# dispatch WITH an explicit repo argument succeeded, which is what made the
+# positional shift visible.
+#
+# The failure was indistinguishable from a legitimate "someone else has it".
+# Its own fixture issue: every number used above is either claimed by an
+# earlier test or absent from $D/issues, and reusing one makes this test depend
+# on their order rather than on the behaviour it is checking.
+echo '77|| An issue dispatched without a repo argument' >> "$D/issues"
+# An EMPTY repo argument, with the fixture repo path still supplied. Passing
+# no trailing arguments at all would make dispatch.sh fall back to its default
+# repo path -- the real working directory -- and this test would create a real
+# branch and worktree in the actual repository. It did exactly that once while
+# being written: `lane/77-no-repo-arg` and a stray worktree had to be pruned by
+# hand, and the second run then failed because the branch already existed. A
+# test that mutates the repo it is testing is not repeatable.
+out=$(run 77 no-repo-arg "$D/brief.md" "" "$REPO"); rc=$?
+want_exit "a dispatch with no [repo] argument succeeds" "$rc" 0 "$out"
+if grep -q "could not assign" <<<"$out"; then
+  bad "no-[repo] dispatch does not report a phantom claim failure" "$out"
+else
+  ok "no-[repo] dispatch does not report a phantom claim failure"
+fi
+# The lane name must reach claim.sh as the LANE, not as the repo -- assert the
+# issue actually ends up claimed rather than trusting the exit code alone.
+if [ -n "$(assignees 77)" ]; then
+  ok "no-[repo] dispatch actually takes the claim"
+else
+  bad "no-[repo] dispatch actually takes the claim" "issue 77 has no assignee"
+fi
+# THE load-bearing assertion for the positional shift, and the only one here
+# that is stub-independent. The gh stub ignores -R, so a bogus repo argument
+# does not fail under test -- an assertion on exit code or assignee passes with
+# the bug still present, which an earlier version of this test did.
+#
+# claim.sh echoes `#<issue> taken by $LANE`. Under the shift, the window name is
+# consumed as the repo and LANE falls back to `hostname -s`, so the claim is
+# recorded against the MACHINE rather than the lane -- which is also what makes
+# `claim.sh stale` unable to match it to a window later. The window prefix is
+# derived from the repo basename, so it is `repo77-` under this fixture and
+# `ad77-` in production -- assert the fixture's form, not production's.
+want_contains "the lane name reaches claim.sh as the lane, not as the repo" \
+  "taken by repo77-no-repo-arg" "$out"
+
 rm -rf "$D"
 
 echo "  $pass passed, $fail failed"
