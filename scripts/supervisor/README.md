@@ -178,19 +178,39 @@ that acts on the report:
 advance-live.sh [live-worktree-path]   # default: $SUPERVISOR_STATE/live
 ```
 
-Three design constraints, each argued out on #99 from measured toil (five
+Four design constraints — the first argued out on #99 and revised by #130,
+the second on #130, the last two on #99 from measured toil (five
 hand-advances in one day, each prompted only by a human noticing the
-`code:` line) and not reargued here:
+`code:` line). They are recorded here, not reargued:
 
-- **Not the watchdog advancing itself, not a merge webhook, not a plain
-  timer.** A broken watchdog auto-installing itself every 180s leaves
-  nothing to notice the break; a merge-triggered deploy puts the decision in
-  the same system that produced the change, which is what makes "merged
-  does not mean running" a safety property here. `loop-tick.md` calls this
-  as its first step, once per supervisor tick — gated on real activity, not
-  a clock, and invoked rather than merely documented (the
-  `acp_transport.py`/`worktree.sh`/`lane-done.sh` shape: a tool nothing
+- **The watchdog calls it, and so does the loop. Not a merge webhook, not a
+  plain timer.** A merge-triggered deploy puts the decision in the same
+  system that produced the change, which is what makes "merged does not mean
+  running" a safety property here; a plain timer supplies no gate at all.
+  `loop-tick.md` calls this as its first step, once per supervisor tick, and
+  `watchdog.sh` calls it on the way out of every tick in which the copy
+  running is the pinned live one — invoked rather than merely documented
+  (the `acp_transport.py`/`worktree.sh`/`lane-done.sh` shape: a tool nothing
   calls is a documentation rule with a binary attached).
+
+  The watchdog was originally excluded on the grounds that a broken watchdog
+  auto-installing itself every 180s leaves nothing to notice the break.
+  #130 reversed that: the objection is answered by the run-gate below — a
+  candidate that cannot run is never installed — while leaving the loop as
+  the only caller meant the live copy stopped advancing whenever the loop
+  went down, including during a deliberate escalation, when it is down by
+  design. The guard ran its stalest code during exactly the incidents it
+  exists for.
+- **During an escalation the code is frozen, deliberately.** Escalation is
+  the one state where a human has already been paged, so staleness is
+  bounded by someone who is coming and who can run this by hand. Against
+  that bound, advancing costs more than it saves: the sha in the status file
+  a human was paged with must still be the sha they find, a recent merge is
+  a leading suspect for whatever made the loop die three times in an hour,
+  and freezing is reversible by hand while a redeploy mid-diagnosis is not.
+  `watchdog.status` says `advance: held` when this happens. The full
+  argument, including the case for the opposite choice, is in `watchdog.sh`
+  beside the code.
 - **The candidate must demonstrably run before the pin moves.** CI green is
   a property of the merge commit, not proof this machine's copy works.
   Before switching `live`, `advance-live.sh` checks the candidate commit out
@@ -212,6 +232,16 @@ before anything is mutated — it is only knowable then; after
 `origin/main`, a failed smoke test, a post-checkout HEAD that does not match
 the target) exits non-zero with `live` left exactly where it was — no
 silent revert, no half-state.
+
+When the watchdog is the caller it adds one line to `watchdog.status` saying
+what this tick did about the drift the `code:` line reports — `advanced`,
+`current`, `not this tick` (a gate declined; ordinary), `refused` (with the
+reason), or `held` (an escalation). The `code:` line is unchanged by any of
+this and still describes the code the tick that wrote it actually ran.
+A refusal never fails the tick: the watchdog still writes its status, still
+restarts or pages, and still exits 0. Turning "the code is one commit stale"
+into "the watchdog is down" would be a strictly worse outcome than the one
+being reported.
 
 ## Dispatch
 
