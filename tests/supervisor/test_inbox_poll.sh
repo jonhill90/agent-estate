@@ -122,14 +122,74 @@ run "$D/fixture-onefail" 2 INBOX_POLL_FAIL_THRESHOLD=3 >"$D/out4" 2>&1
 grep -qi 'cannot reach telegram' "$D/notify.log" && bad "paged on a single failure" "$(cat "$D/notify.log")" \
   || ok "a single failure below threshold does not page"
 
-# --- the poller reports itself on exit --------------------------------------
+# --- agent-dotfiles#155: a deliberate, bounded run does not page Jon -------
+# A run that hits INBOX_POLL_ITERATIONS and returns is only ever a test or a
+# pre-flight -- production never sets ITERATIONS. It stays quiet regardless
+# of INBOX_POLL_MIN_UPTIME (default 60s here, but this run finishes in well
+# under a second either way). The record must still land: the status file
+# and the log line are how a later reader learns the poller stopped even
+# though nobody was paged about it.
 cat > "$D/fixture-exit" <<'FIX'
 ok:
 FIX
 run "$D/fixture-exit" 1 >"$D/out5" 2>&1
-grep -qi 'poller stopped' "$D/notify.log" && ok "the poller reports its own exit, not silence" \
-  || bad "no stop notification on exit" "$(cat "$D/notify.log" 2>/dev/null)"
-[ -f "$D/status" ] && grep -q 'state:.*stopped' "$D/status" && ok "the heartbeat file records the stop" \
+grep -qi 'poller stopped' "$D/notify.log" && bad "a deliberate, bounded run paged Jon" "$(cat "$D/notify.log")" \
+  || ok "a deliberate, bounded run (INBOX_POLL_ITERATIONS reached) does not page Jon"
+[ -f "$D/status" ] && grep -q 'state:.*stopped' "$D/status" && ok "the heartbeat file records the stop anyway" \
+  || bad "no heartbeat status recorded" "$(cat "$D/status" 2>/dev/null)"
+
+# --- agent-dotfiles#155: an unexpected death still pages Jon ---------------
+# The issue's own wording is "kill -9 ... assert the alert path is taken",
+# but SIGKILL cannot be caught by any process -- verified directly: a bash
+# script with `trap ... EXIT` given `kill -9` never runs its trap, full stop,
+# no exception. (This is also why the script's header already disclaims
+# detecting SIGKILL and leans on a restart-on-crash launcher for it -- that
+# limitation predates this issue and this change does not touch it.) What
+# "unexpected death" can mean *inside this process* is any exit bash is
+# still able to run its EXIT trap for. SIGTERM is the representative case --
+# it is also what a plain `kill`, a service manager's stop, or an OOM
+# killer's first pass sends -- so that is what this test sends. This test
+# sets INBOX_POLL_MIN_UPTIME=0 so it is exercising the "was this deliberate"
+# question in isolation from the "was this old enough" question, which gets
+# its own test below.
+cat > "$D/fixture-forever" <<'FIX'
+FIX
+rm -f "$D/notify.log" "$D/status" "$D/poll.log"
+: > "$D/notify.log"
+HOME="$D/state" INBOX_SCRIPT="$D/fixture-forever" ROUTE_LOG="$D/route.log" NOTIFY_LOG="$D/notify.log" \
+  INBOX_POLL_ITERATIONS=0 INBOX_POLL_STATUS="$D/status" INBOX_POLL_LOG="$D/poll.log" \
+  INBOX_POLL_BACKOFF_BASE=0 INBOX_POLL_MIN_UPTIME=0 \
+  bash "$D/lane/inbox-poll.sh" t >"$D/out6" 2>&1 &
+pid=$!
+waited=0
+while [ ! -s "$D/status" ] && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+kill -TERM "$pid" 2>/dev/null
+wait "$pid" 2>/dev/null
+grep -qi 'poller stopped' "$D/notify.log" 2>/dev/null && ok "an unexpected (signal-terminated) death still pages Jon" \
+  || bad "no stop notification after an unexpected SIGTERM" "$(cat "$D/notify.log" 2>/dev/null)"
+grep -q 'state:.*stopped' "$D/status" 2>/dev/null && ok "...and the heartbeat file records it too" \
+  || bad "no heartbeat status recorded after SIGTERM" "$(cat "$D/status" 2>/dev/null)"
+
+# --- agent-dotfiles#155: a death too young to matter stays quiet, but is
+# still recorded. This is the case the issue asked to be argued, not just
+# implemented: a run that dies before INBOX_POLL_MIN_UPTIME (default 60s)
+# was never distinguishable from a pre-flight, so it does not page -- even
+# though this particular run is a real SIGTERM, not a clean stop. See the
+# INBOX_POLL_MIN_UPTIME comment in inbox-poll.sh for what that trades away.
+rm -f "$D/notify.log" "$D/status" "$D/poll.log"
+: > "$D/notify.log"
+HOME="$D/state" INBOX_SCRIPT="$D/fixture-forever" ROUTE_LOG="$D/route.log" NOTIFY_LOG="$D/notify.log" \
+  INBOX_POLL_ITERATIONS=0 INBOX_POLL_STATUS="$D/status" INBOX_POLL_LOG="$D/poll.log" \
+  INBOX_POLL_BACKOFF_BASE=0 INBOX_POLL_MIN_UPTIME=60 \
+  bash "$D/lane/inbox-poll.sh" t >"$D/out7" 2>&1 &
+pid=$!
+waited=0
+while [ ! -s "$D/status" ] && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+kill -TERM "$pid" 2>/dev/null
+wait "$pid" 2>/dev/null
+grep -qi 'poller stopped' "$D/notify.log" 2>/dev/null && bad "paged for a death under INBOX_POLL_MIN_UPTIME" "$(cat "$D/notify.log")" \
+  || ok "a death under INBOX_POLL_MIN_UPTIME does not page"
+grep -q 'state:.*stopped' "$D/status" 2>/dev/null && ok "...but the heartbeat file still records it" \
   || bad "no heartbeat status recorded" "$(cat "$D/status" 2>/dev/null)"
 
 echo "  $pass passed, $fail failed"
