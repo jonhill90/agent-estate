@@ -19,6 +19,7 @@ episode so a later escalate notifies again.
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
@@ -196,7 +197,13 @@ def send_via_notify_skill(message: str, *, notify_script: str) -> None:
     The skill becomes the single canonical sender once it grows Telegram
     (jonhill90/skills#146); until then, routing escalations through the
     iMessage-only path would mean escalations that reach nobody.
+
+    `AGENT_NOTIFY_CALLER=supervisor` is set on the child's environment
+    because `notify.sh` refuses to touch any channel without it
+    (agent-dotfiles#52) -- this is the one process in the estate allowed
+    to identify itself that way; nothing else should.
     """
+    env = dict(os.environ, AGENT_NOTIFY_CALLER="supervisor")
     if notify_script.endswith(".sh"):
         argv = [notify_script, "Supervisor escalation", message]
     else:
@@ -206,6 +213,7 @@ def send_via_notify_skill(message: str, *, notify_script: str) -> None:
         capture_output=True,
         text=True,
         timeout=30,
+        env=env,
     )
     if result.returncode != 0:
         raise SendError(

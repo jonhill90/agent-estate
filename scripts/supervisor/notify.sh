@@ -11,9 +11,15 @@
 # coordinate work, and that still stands — GitHub remains the queue, tmux
 # remains the frontend. Nothing here becomes a dependency of the loop.
 #
-# Usage: notify.sh "subject" "body"
+# Usage: AGENT_NOTIFY_CALLER=supervisor notify.sh "subject" "body"
 # Config: AGENT_NOTIFY_IMESSAGE_TO   phone number or Apple ID to message
 #         AGENT_NOTIFY_TELEGRAM_TOKEN / _CHAT_ID   (fallback, later)
+#
+# CALLER GATE (agent-dotfiles#52): only the supervisor/watchdog sender may
+# message Jon. This script refuses to touch any channel unless
+# AGENT_NOTIFY_CALLER=supervisor is set — `watchdog_notify.py` sets it on
+# every call it makes. See that gate below for what this does and does not
+# guarantee.
 #
 # Exit 0 only if a channel actually accepted the message. A send failure is
 # logged loudly rather than swallowed — an unreachable channel that looks like
@@ -33,6 +39,23 @@ if [ -r "$ENVFILE" ]; then set -a; . "$ENVFILE"; set +a; fi
 
 iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 log() { printf '%s %s\n' "$iso" "$*" >>"$LOG"; }
+
+# --- caller gate (agent-dotfiles#52) ---------------------------------------
+# Only the supervisor/watchdog sender may message Jon: five lanes each
+# judging their own work urgent produces five notifications for one event.
+# Nothing OS-level distinguishes a worker's shell from the supervisor's --
+# same user, same $HOME, same credentials -- so this is a deliberate
+# affordance, not a security boundary: a caller has to know to identify
+# itself as "supervisor" to get through. That is enough to stop a worker
+# from reaching Jon by routine or accident, which is the failure this
+# exists to prevent; it is not enough to stop a worker that reads this
+# script and decides to spoof it. `watchdog_notify.py` sets this on every
+# invocation it makes.
+if [ "${AGENT_NOTIFY_CALLER:-}" != "supervisor" ]; then
+  log "REFUSED — caller not identified as supervisor (AGENT_NOTIFY_CALLER=${AGENT_NOTIFY_CALLER:-<unset>}): $SUBJECT${BODY:+ — $BODY}"
+  echo "NOTIFY REFUSED: only the supervisor/watchdog sender may notify Jon (set AGENT_NOTIFY_CALLER=supervisor)" >&2
+  exit 1
+fi
 
 msg="$SUBJECT"
 [ -n "$BODY" ] && msg="$SUBJECT — $BODY"
