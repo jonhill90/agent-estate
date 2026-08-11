@@ -87,7 +87,7 @@ log() { printf '%s %s\n' "$iso" "$*" >>"$LOG"; }
 
 # Heartbeat. Written on EVERY exit path, including the healthy one — that is
 # the whole point of finding 2. Atomic so a reader never sees a half file.
-report() {                       # report <state> <detail>
+report() {                       # report <state> <detail> [notify-line]
   local tmp="$STATUS.$$"
   # A missing state directory used to make every write fail silently: the
   # script still exited 0 while watchdog.status quietly stopped updating,
@@ -106,18 +106,34 @@ report() {                       # report <state> <detail>
     # running from a test branch purely because that was the last checkout --
     # it worked, but by luck. An unexpected branch here is a real finding.
     printf 'code:     %s @ %s\n' "$branch" "$sha"
+    # Present only when a send was attempted and failed (#91). "escalate with
+    # no notify: line" is therefore "a human was reached"; this line is the
+    # difference between that and "the loop is down and NOBODY KNOWS". Written
+    # on the second pass below, because the notifier has to read this file to
+    # decide before there is any outcome to report.
+    #
+    # An `if`, not `[ ... ] && printf`: a false test as the LAST command in
+    # this group makes the group exit non-zero, the `&& mv` below never runs,
+    # and every tick reports CANNOT WRITE STATUS instead of writing one.
+    if [ -n "${3:-}" ]; then printf 'notify:   %s\n' "$3"; fi
   } >"$tmp" 2>/dev/null && mv -f "$tmp" "$STATUS" 2>/dev/null \
     || printf '%s WATCHDOG CANNOT WRITE STATUS to %s\n' "$iso" "$STATUS" >&2
+
+  # A recursive call carrying the outcome; it must not run the notifier again.
+  if [ -n "${3:-}" ]; then return 0; fi
 
   # escalate is the only state a human needs told about; every other state
   # (working/waiting_on_jon/cooling_down/restarted/...) stays silent, and
   # dedup is one message per escalation episode, not one per tick. That
   # decision and its dedup state live in tracked, tested code — this line
   # is the whole hookup. See scripts/supervisor/watchdog_notify.py in
-  # agent-dotfiles (#50); AGENT_DOTFILES_REPO overrides the default clone
-  # path for a machine laid out differently.
+  # agent-dotfiles (#50). Resolved from $HERE, not from a guessed clone
+  # path: the notifier ships beside this script, so the copy that runs is
+  # always the copy that was reviewed alongside the watchdog invoking it --
+  # and a test running this file from a worktree exercises that worktree's
+  # notifier rather than whatever happens to be in the shared checkout.
   local notify_out notify_rc
-  notify_out=$(python3 "${AGENT_DOTFILES_REPO:-$HOME/source/repos/Personal/agent-dotfiles}/scripts/supervisor/watchdog_notify.py" \
+  notify_out=$(python3 "$HERE/watchdog_notify.py" \
     --status-path "$STATUS" \
     --episode-state-path "$STATE/.watchdog-escalate-episode.json" \
     --log-path "$STATE/watchdog-notify.log" \
@@ -125,6 +141,11 @@ report() {                       # report <state> <detail>
   notify_rc=$?
   if [ "$notify_rc" -ne 0 ]; then
     log "NOTIFY-CHECK rc=$notify_rc: $notify_out"
+    # Say so in the one file a human `cat`s. The log is append-only and easy
+    # to scroll past; watchdog.status is the answer to "where are we", and
+    # "escalate" alone reads as "Jon has been told" when the truth may be
+    # that nothing got out. Newlines collapsed so the field stays one line.
+    report "$1" "${2:-}" "FAILED — escalation did NOT reach a human, retrying next tick: $(printf '%s' "$notify_out" | tr '\n' ' ')"
   fi
 }
 
@@ -205,12 +226,19 @@ fi
 if [ "$recent" -ge "$MAX_RESTARTS" ]; then
   report escalate "restarted $recent times in ${ESCALATE_WINDOW}s and it keeps dying — NOT restarting again, needs a human"
   log "ESCALATE: $recent restarts in ${ESCALATE_WINDOW}s; leaving the loop down deliberately"
-  # Reach a human. ONLY here -- never on working, waiting_on_jon, cooling_down
-  # or restarted. Deduplicated to one message per escalate episode by
-  # watchdog_notify.py, because a watchdog that messages every tick gets muted
-  # and a muted channel is indistinguishable from no channel.
-  python3 "$HERE/watchdog_notify.py" >/dev/null 2>&1 \
-    || log "NOTIFY FAILED — escalation did not reach a human"
+  # Reaching a human happens inside report() above -- ONLY on escalate, never
+  # on working/waiting_on_jon/cooling_down/restarted, and deduplicated to one
+  # delivered message per escalate episode by watchdog_notify.py, because a
+  # watchdog that messages every tick gets muted and a muted channel is
+  # indistinguishable from no channel.
+  #
+  # There used to be a SECOND, argument-less call to watchdog_notify.py right
+  # here. It was redundant -- report() had already run the same check one line
+  # earlier -- and actively harmful: with no arguments it fell back to the
+  # default state paths under $HOME instead of this run's $STATE, so a test or
+  # a second machine layout read and rewrote the LIVE episode file. A test
+  # exercising this branch could mark the real escalation delivered and
+  # suppress a real page.
   exit 0
 fi
 
