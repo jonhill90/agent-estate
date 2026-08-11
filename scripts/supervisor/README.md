@@ -140,6 +140,31 @@ authenticates as the same GitHub user, so two dispatchers reading "unassigned"
 within the same second still both win. That is a sub-second window replacing a
 multi-minute one; GitHub offers no CAS on issues.
 
+## Worktree isolation
+
+`worktree.sh` gives every dispatch its own git worktree, so lanes and the
+Director stop sharing one working tree (agent-dotfiles#73). On 2026-08-11 a
+lane working #28 had its branch switched out from under it mid-task by
+another lane in the shared checkout: its uncommitted edits to four files were
+discarded, and its staged deletion of a file was swept into an unrelated
+lane's commit, which shipped without that deletion ever mentioned in the
+commit message.
+
+```bash
+worktree.sh new <slug> [repo] [base]   # create a worktree, print its path
+worktree.sh done <path>                # remove a worktree; refuses if dirty
+worktree.sh guard <repo>               # exit 1 if <repo> itself is dirty
+```
+
+`loop-tick.md` requires the dispatch step to call `new` and hand the printed
+path to the lane in its brief, rather than telling the lane to create its own
+worktree — a step in a brief is a step that can be skipped, which is why
+`claim.sh` and `lanes.sh` are tools and not paragraphs either. `done` and
+`guard` both refuse when the target has uncommitted changes, matching
+`safe-deletion`: a worktree with uncommitted changes is someone's unfinished
+work, not garbage. `guard` is for the Director's own use of the shared
+checkout, which caused the same class of bug this tool exists to prevent.
+
 ## Scheduled session recycling
 
 `recycle.py` decides when a long-lived supervisor session should checkpoint
