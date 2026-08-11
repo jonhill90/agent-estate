@@ -8,11 +8,23 @@
 #   busy     an agent is mid-turn                            -> leave alone
 #   hung     the pane looks busy but has stopped advancing   -> needs a human
 #   blocked  the agent is waiting on an interactive prompt    -> needs a human
+#   unsent   a brief is typed into the box and never submitted -> needs a human
 #   dead     no agent at all, just a shell                   -> restart the agent
 #   unknown  no probe recognizes the last line                -> ask a human
 #            (a non-Claude harness, or a Claude Code shape that is not the
 #            enumerated ready footer -- see READY_RE below. #126: this is
 #            the default now, not the exception -- see the comment there.)
+#
+# #141 added `unsent`, and it is worth being precise about what it buys. Two
+# lanes sat for 40 minutes holding a full brief that had been typed in and
+# never submitted, because the `Enter` landed while `/clear` was repainting.
+# `--free` did NOT offer them -- the whitelist held, and they read `unknown` --
+# but `unknown` means "not offered", not "someone should look". There is no
+# way to tell a lane that has been unknown for 40 minutes holding work from
+# one that was unknown for 4 seconds while repainting. So the point of
+# `unsent` is VISIBILITY: it is the same withholding, with the reason attached
+# and a count line in the table. See input-box.sh for how it is detected and
+# for what was measured rather than guessed.
 #
 # `capture-pane` alone reports the last three identically. A dispatch sent to a
 # dead lane lands in zsh, which answers "no such file or directory: /clear" and
@@ -31,6 +43,10 @@
 # exit code. Exit 1 if the session does not exist -- which is NOT "no lanes".
 
 set -uo pipefail
+
+LANES_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./input-box.sh
+. "$LANES_HERE/input-box.sh"
 
 SESSION="${2:-${LANES_SESSION:-agent-dotfiles}}"
 MODE="${1:-}"
@@ -81,6 +97,32 @@ HUNG_AFTER="${LANES_HUNG_AFTER:-180}"
 # line. Anything added here must be observed on a real pane first, not inferred.
 BLOCKED_MARKERS='Esc to cancel|Enter to select'
 
+# #133: a confirmation dialog's SELECTED OPTION ROW, e.g.
+#
+#   ❯ 1. Post the comment
+#   ❯ 2. Show me the comment
+#
+# The first of those is verbatim what lane 6 displayed on 2026-08-11 while
+# blocked on an approval prompt, holding a completed-but-unposted review
+# verdict -- and `READY_RE`'s bare-`❯` half matches it, so had that row been
+# the last line the lane would have read `free` and a dispatch would have
+# destroyed the verdict.
+#
+# The bad case is still not demonstrated: driving a real Claude Code pane
+# (v2.1.220) through the folder-trust dialog at heights 30 down to 6 kept the
+# `Esc to cancel` footer anchored last every time, and the /theme dialog
+# overflowed instead, putting body text last. Neither ever put an option row
+# last. But #133's point stands regardless of which shapes were reachable on
+# one evening: an option row means a dialog is up, so matching it as `blocked`
+# removes the dependency on where the footer lands rather than waiting for a
+# capture that proves the hazard. The direction that matters is FEWER things
+# reading `free`, never more.
+#
+# `❯` here is followed by an ORDINARY space. The live input box uses a
+# NO-BREAK SPACE (see input-box.sh), so a lane whose own prompt begins `1. `
+# cannot collide with this.
+OPTION_ROW_RE='^[[:space:]]*❯ [0-9]+\.[[:space:]]'
+
 # #126: free used to be "whatever is left after busy/hung/blocked/dead are
 # ruled out" -- a blacklist. Two lanes running an approved billed eval and a
 # research task read free while each had delegated to a background subagent:
@@ -93,10 +135,8 @@ BLOCKED_MARKERS='Esc to cancel|Enter to select'
 # --free already excludes, rather than guessed as available.
 #
 # Two ready shapes are known-safe, both confirmed against real Claude Code
-# panes (v2.1.220) on 2026-08-11 -- lanes sitting at the prompt with a
-# typed-but-unsent brief, no delegation in flight. Their last non-empty
-# line reads, e.g.:
-#
+# panes (v2.1.220) on 2026-08-11 -- lanes sitting at the prompt with nothing
+# delegated. Their last non-empty line reads, e.g.:
 #   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent
 #
 # The captured status line ends `← 1 agent` -- the count includes the main
@@ -106,6 +146,17 @@ BLOCKED_MARKERS='Esc to cancel|Enter to select'
 # (`◯ general-purpose  Verifying tick-7.log with grep      42s`,
 # `✻ Waiting for 1 background agent to finish` -- both observed live on the
 # lanes #126 reported). None of those end `← 1 agent`, so none match.
+#
+# The note that used to stand here described those panes as holding "a
+# typed-but-unsent brief". Re-measuring for #141 showed that was a misreading:
+# what the box held was Claude Code's own DIM placeholder suggestion, which
+# occupies the same row and is byte-identical to typed text in a plain capture
+# (`❯ now echo goodbye` was a SUGGESTED follow-up, not something anyone typed).
+# A box genuinely holding typed text drops the `← 1 agent` segment from this
+# footer -- measured across three live panes -- so it does not match READY_RE
+# at all, and such a lane read `unknown`, which is exactly what #141 records.
+# The correction matters because the old wording implied this footer had been
+# checked against the #141 hazard and found safe. It had not been.
 #
 # The second shape, a bare `❯ ...` line with no footer at all, covers older
 # captures and the test fixtures that stand in for "a normal prompt" without
@@ -151,6 +202,15 @@ emit_rows() {
     # harness-specific, it was the capture window.
     pane=$(tmux capture-pane -p -t "$SESSION:$w" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -1)
 
+    # A SECOND, separate capture, and deliberately not a widening of the one
+    # above. `-e` keeps the SGR attributes that input-box.sh needs to tell a
+    # dim placeholder from typed text, and it is read ONLY by input_box_state,
+    # which anchors on a marker (`❯` + NO-BREAK SPACE) that nothing but the
+    # live input box paints. The status-line probes keep reading exactly one
+    # line, which is the #65 discipline; this does not relax it, and taking a
+    # second capture rather than reusing one keeps that impossible to blur.
+    box=$(tmux capture-pane -pe -t "$SESSION:$w" 2>/dev/null | input_box_state)
+
     if [ "$w" = "$SUPERVISOR_WINDOW" ]; then
       state=supervisor
     elif [ "${mode:-0}" != "0" ]; then
@@ -168,7 +228,7 @@ emit_rows() {
       # Copilot pane was classified `hung` because that string appeared in its
       # scrollback. Report what is known and refuse to invent the rest.
       state=unknown
-    elif grep -qE "$BLOCKED_MARKERS" <<<"$pane"; then
+    elif grep -qE "$BLOCKED_MARKERS" <<<"$pane" || grep -qE "$OPTION_ROW_RE" <<<"$pane"; then
       # An interactive prompt, not idle: the agent is waiting on a human, not
       # on work. Must be decided before free, since that is the classification
       # it is stealing from. Match the harness's own footer chrome, not the
@@ -188,6 +248,16 @@ emit_rows() {
       # independent of whatever the harness chooses to paint.
       age=$(( now_epoch - ${act:-now_epoch} ))
       if [ "$age" -ge "$HUNG_AFTER" ]; then state=hung; else state=busy; fi
+    elif [ "$box" = text ]; then
+      # #141. Decided AFTER busy/hung -- a lane typing ahead into the box
+      # while a turn runs is busy, and busy is the more useful thing to say --
+      # and BEFORE free, because free is the classification it is stealing.
+      #
+      # This is a pure narrowing: `text` can only move a lane out of free,
+      # never into it. `unknown` from input_box_state changes nothing, so
+      # every lane this probe cannot read is classified exactly as it was
+      # before #141.
+      state=unsent
     elif grep -qE "$READY_RE" <<<"$pane"; then
       state=free
     else
@@ -222,12 +292,17 @@ case "$MODE" in
     dead=$(awk -F'\t' '$4=="dead"' <<<"$rows" | wc -l | tr -d ' ')
     hung=$(awk -F'\t' '$4=="hung"' <<<"$rows" | wc -l | tr -d ' ')
     blocked=$(awk -F'\t' '$4=="blocked"' <<<"$rows" | wc -l | tr -d ' ')
+    unsent=$(awk -F'\t' '$4=="unsent"' <<<"$rows" | wc -l | tr -d ' ')
     unknown=$(awk -F'\t' '$4=="unknown"' <<<"$rows" | wc -l | tr -d ' ')
     [ "$dead" -gt 0 ] && echo "  ${dead} lane(s) have no agent — restart before dispatching"
     [ "$hung" -gt 0 ] && echo "  ${hung} lane(s) look wedged — a dispatch there would queue forever"
     # A blocked lane is a question nobody has heard -- surface it, don't just
     # exclude it from --free.
     [ "$blocked" -gt 0 ] && echo "  ${blocked} lane(s) are blocked on a prompt — a human must answer before dispatching"
+    # #141: the state that was invisible for 40 minutes. It is withheld from
+    # --free either way; what this line adds is that anyone reading the table
+    # is TOLD, instead of seeing a lane quietly missing from the free list.
+    [ "$unsent" -gt 0 ] && echo "  ${unsent} lane(s) hold an unsent prompt — a brief is typed in the box and was never submitted"
     # #126: free is now a whitelist, so unknown is the expected home for any
     # shape this probe has not been shown yet -- it must never be silent, or
     # an operator reading only the table would see the same lanes vanish from

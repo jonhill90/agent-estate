@@ -72,6 +72,8 @@ run() {
     DISPATCH_MESSAGE_BUDGET="${DISPATCH_MESSAGE_BUDGET:-430}" \
     AGENT_SUPERVISOR_STATE_DIR="${LEDGER_STATE:-$D/state}" \
     STUB_PANE_PATH="${STUB_PANE_PATH:-$REPO}" \
+    DISPATCH_SWALLOW_ENTER="${DISPATCH_SWALLOW_ENTER:-0}" \
+    DISPATCH_CONFIRM_TRIES="${DISPATCH_CONFIRM_TRIES:-2}" \
     WORKTREE_ROOT="$D/roots" bash "${DISPATCH_SCRIPT:-$DISPATCH}" "$@" 2>&1
 }
 # AGENT_SUPERVISOR_STATE_DIR is not optional in this harness. Without it the
@@ -649,6 +651,47 @@ want_exit "a dispatch refused at the claim still fails" "$rc" 1 "$out"
 status=$(LEDGER_STATE="$D/state-144" ledger status 2>&1)
 want_contains "a refused claim records no lane" '"lanes":[]' "$status"
 want_contains "a refused claim records no task" '"tasks":[]' "$status"
+# --- the brief must actually START, not merely be typed (#141) -------------
+# Two lanes sat for 40 minutes each holding a full brief that was typed in and
+# never submitted: `/clear` takes longer to repaint than the dispatcher waits,
+# so the Enter that followed was swallowed. dispatch.sh printed
+# `dispatch: #N -> lane` and walked away, claim.sh showed the issue claimed,
+# and the work was invisible -- not queued, not running, not lost.
+#
+# DISPATCH_SWALLOW_ENTER models exactly that: the keys arrive, the box keeps
+# the text, nothing runs.
+echo '160|| a dispatch whose Enter is swallowed' >> "$D/issues"
+# Successful dispatches earlier in this file leave their worktrees in place,
+# so the assertion is that this one ADDS none -- not that none exist.
+before=$(worktrees)
+out=$(LEDGER_STATE="$D/state-160" DISPATCH_SWALLOW_ENTER=1 \
+      run 160 unsent-brief "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a brief that never submits fails the dispatch" "$rc" 1 "$out"
+want_contains "and says it was typed but never submitted" "never submitted" "$out"
+want_missing "and does not print a success line" "dispatch: #160 -> " "$out"
+# Unwound like every other refusal: the issue goes back to the pool rather
+# than looking claimed-and-running while nothing runs.
+if [ -z "$(assignees 160)" ]; then ok "the claim is released when the brief never starts"
+else bad "the claim is released when the brief never starts" "still assigned: $(assignees 160)"; fi
+if [ "$(worktrees)" = "$before" ]; then ok "no worktree is left behind by an unsent brief"
+else bad "no worktree is left behind by an unsent brief" "$before before, $(worktrees) after"; fi
+# The ordering #140's own comment demands, now that there is an abort BELOW
+# the final Enter: the ledger records "work is in flight" and this dispatch
+# has none. The #141 confirmation therefore runs BEFORE the ledger write, not
+# after it, or every swallowed Enter would leave a record asserting a lane is
+# working on an issue it was never given.
+status=$(LEDGER_STATE="$D/state-160" ledger status 2>&1)
+want_contains "an unsent brief records no lane in the ledger" '"lanes":[]' "$status"
+want_contains "an unsent brief records no task in the ledger" '"tasks":[]' "$status"
+
+# The other direction, and the one that keeps the check honest: a dispatch
+# that DOES submit must pass silently. A confirmation that fires on every
+# dispatch is the same as no confirmation.
+echo '161|| a dispatch that submits normally' >> "$D/issues"
+out=$(run 161 submits-fine "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a brief that submits still exits 0" "$rc" 0 "$out"
+want_contains "and reports the dispatch" "dispatch: #161 -> " "$out"
+want_missing "and warns about nothing" "WARNING" "$out"
 
 rm -rf "$D"
 

@@ -1,10 +1,29 @@
 #!/bin/bash
 # Stub tmux for lanes.sh tests. LANES_FIXTURE holds one line per window:
-#   <index>|<name>|<command>|<pane-text>|<activity-age-seconds>|<in-mode>
-# The last column is how many seconds ago tmux last saw output, which is what
+#   <index>|<name>|<command>|<pane-text>|<activity-age-seconds>|<in-mode>|<box>
+# The 5th column is how many seconds ago tmux last saw output, which is what
 # separates hung from busy. It replaced a two-capture scheme that diffed pane
 # text: Claude Code's elapsed footer is minute-granular past 60s, so a live
 # turn emits identical bytes for a whole minute and was reported hung.
+#
+# The 7th column models the INPUT BOX (#141), rendered in the shape a real
+# Claude Code pane paints -- `❯` + U+00A0, wrapped in a pair of horizontal
+# rules -- because that shape, not the plain text, is what input-box.sh keys
+# on. Values:
+#
+#   (absent)   no box is rendered; input_box_state answers `unknown` and
+#              classification is exactly what it was before #141. Every
+#              pre-existing fixture is in this case, on purpose.
+#   -          an empty box
+#   dim:TEXT   an empty box showing Claude Code's DIM placeholder suggestion.
+#              This is the fixture that matters most: in a plain capture it is
+#              indistinguishable from an unsent brief, and a first version of
+#              input-box.sh called it `text` and would have withheld every
+#              idle lane in the estate.
+#   TEXT       a box holding TEXT that was typed and never submitted
+#
+# `capture-pane -e` is what carries the dim attribute, so the box is emitted
+# with real SGR: dim is ESC[2m ... ESC[0m, exactly as the live TUI paints it.
 F="${LANES_FIXTURE:?}"
 sub="$1"; shift
 target=""; fmt=""
@@ -25,7 +44,10 @@ case "$sub" in
     # Mirrors the real -F used by lanes.sh: index, name, command, activity,
     # in-mode, tab separated, active pane only.
     now=$(date +%s)
-    while IFS='|' read -r i n c t a m; do
+    # `b` absorbs the input-box column so it cannot leak into `m`: with a
+    # 6-variable read, a 7-field row put "0|<box>" into the in-mode slot and
+    # every boxed fixture reported `scrolled`.
+    while IFS='|' read -r i n c t a m b; do
       printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$n" "$c" "$((now-a))" "${m:-0}"
     done < "$F" ;;
   display-message)
@@ -35,6 +57,20 @@ case "$sub" in
       '#{window_activity}') echo $(( $(date +%s) - $(cut -d'|' -f5 <<<"$line") )) ;;
     esac ;;
   capture-pane)
+    # The input box sits ABOVE the status line in a real pane, so it is
+    # emitted first and the fixture's pane column stays last -- lanes.sh reads
+    # the last non-empty line, and that must keep meaning the status line.
+    box=$(cut -d'|' -f7 <<<"$line")
+    if [ -n "$box" ]; then
+      rule=$(printf '─%.0s' $(seq 1 40))
+      printf '%s\n' "$rule"
+      case "$box" in
+        -)      printf '\033[39m❯\xc2\xa0\n' ;;
+        dim:*)  printf '\033[39m❯\xc2\xa0\033[2m%s\033[0m\n' "${box#dim:}" ;;
+        *)      printf '\033[39m❯\xc2\xa0%s\n' "$box" ;;
+      esac
+      printf '%s\n' "$rule"
+    fi
     # \n in the fixture's pane column becomes a real newline, so a test can
     # express "the phrase is in the scrollback but not on the status line" --
     # the live case that made idle lanes report busy.
