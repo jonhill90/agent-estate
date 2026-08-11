@@ -67,6 +67,19 @@ done)
     echo "$status" >&2
     exit 1
   fi
+  # A clean `git status` says nothing about a detached HEAD: a lane can
+  # `checkout --detach` and commit there, and the dirty-tree check above
+  # never sees it. Removing the worktree at that point makes the commit
+  # unreachable from any ref -- a dangling object, invisible and eventually
+  # GC-eligible. Refuse unless some branch, local or remote, already
+  # contains HEAD.
+  if ! git -C "$TARGET" symbolic-ref -q HEAD >/dev/null; then
+    containing=$(git -C "$TARGET" for-each-ref refs/heads refs/remotes --contains HEAD --format='%(refname)' 2>/dev/null)
+    if [ -z "$containing" ]; then
+      echo "worktree: $TARGET is on a detached HEAD at $(git -C "$TARGET" rev-parse --short HEAD 2>/dev/null) with no branch containing it -- not removing (would lose the commit)" >&2
+      exit 1
+    fi
+  fi
   git -C "$TARGET" worktree remove "$TARGET" >&2 || exit 1
   exit 0 ;;
 

@@ -64,6 +64,22 @@ out=$(bash "$WT" done "$DEST" 2>&1); rc=$?
 want_exit "done removes a clean worktree" "$rc" 0 "$out"
 if [ -d "$DEST" ]; then bad "worktree directory is gone" "still present at $DEST"; else ok "worktree directory is gone"; fi
 
+# --- done: refuses a detached HEAD carrying a commit unreachable from any
+# branch (agent-dotfiles#79 finding A) -- `git status --porcelain` is clean
+# in this case, so the dirty-tree check above cannot catch it.
+out=$(bash "$WT" new 79-detach "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "new (detach case) exits 0" "$rc" 0 "$out"
+DETACH_DEST="$out"
+git -C "$DETACH_DEST" checkout -q --detach
+echo "detached commit" >> "$DETACH_DEST/file.txt"
+git -C "$DETACH_DEST" add file.txt
+git -C "$DETACH_DEST" commit -q -m "detached work"
+DETACHED_SHA=$(git -C "$DETACH_DEST" rev-parse HEAD)
+out=$(bash "$WT" done "$DETACH_DEST" 2>&1); rc=$?
+want_exit "done refuses a detached HEAD with an unreachable commit" "$rc" 1 "$out"
+if [ -d "$DETACH_DEST" ]; then ok "done left the detached worktree in place"; else bad "done left the detached worktree in place" "removed despite an unreachable commit"; fi
+if git -C "$REPO" cat-file -e "$DETACHED_SHA" 2>/dev/null; then ok "detached commit is still reachable in the object store"; else bad "detached commit is still reachable in the object store" "commit $DETACHED_SHA missing"; fi
+
 # --- guard: refuses to treat a dirty shared checkout as a clean base ------
 echo "half-finished lane edit" >> "$REPO/file.txt"
 out=$(bash "$WT" guard "$REPO" 2>&1); rc=$?
@@ -72,6 +88,16 @@ want_exit "guard refuses a dirty shared checkout" "$rc" 1 "$out"
 git -C "$REPO" checkout -q -- file.txt
 out=$(bash "$WT" guard "$REPO" 2>&1); rc=$?
 want_exit "guard passes a clean shared checkout" "$rc" 0 "$out"
+
+# --- guard: also catches an untracked-only dirty tree, not just modified
+# tracked files (agent-dotfiles#79 finding B) --------------------------------
+echo "new file" > "$REPO/untracked.txt"
+out=$(bash "$WT" guard "$REPO" 2>&1); rc=$?
+want_exit "guard refuses an untracked-only dirty shared checkout" "$rc" 1 "$out"
+
+rm -f "$REPO/untracked.txt"
+out=$(bash "$WT" guard "$REPO" 2>&1); rc=$?
+want_exit "guard passes after removing the untracked-only file" "$rc" 0 "$out"
 
 rm -rf "$D"
 
