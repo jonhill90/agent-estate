@@ -132,21 +132,14 @@ not a refusal.
 ### The channels section
 
 The brief carries a `## Live lanes and armed channels` heading followed by
-one block per in-flight task, blocks separated by a blank line (or `---`),
-each block four `key: value` lines:
+a markdown table, one row per in-flight lane:
 
 ```text
 ## Live lanes and armed channels
 
-channel: infra-claude-tick
-lane: infra-claude
-brief: ~/.local/state/agent-dotfiles-supervisor/brief.md
-description: implementing #47 recycle decision function
-
-channel: skills-tick
-lane: skills
-brief: ~/.local/state/agent-dotfiles-supervisor/brief.md
-description: rostering the loop-memory skill
+| Channel | Lane | Working from | Task |
+|---|---|---|---|
+| `recycling` | `agent-dotfiles:worker-1` | `recycle-brief.md` | #47 session recycling |
 ```
 
 This is the field a successor re-arms `tmux wait-for` channels from after a
@@ -156,14 +149,21 @@ lanes across the handover. A successor can read it directly with grep,
 without `recycle.py`:
 
 ```bash
-grep -A3 '^channel:' ~/.local/state/agent-dotfiles-supervisor/brief.md
+grep -A5 '^## Live lanes and armed channels' ~/.local/state/agent-dotfiles-supervisor/brief.md
 ```
 
-A heading present with no blocks under it means "no lanes in flight" and
-parses to an empty list. A heading that is entirely absent is not the same
-fact -- `parse_armed_channels` raises `ChannelsSectionMissing`, and
-`decide_recycle` turns that into a refusal, not an empty list silently
-treated as "nothing running".
+An idle supervisor must say so explicitly. The section's body must be
+either the table above, or the literal marker `_No lanes armed._` -- nothing
+else parses. A heading followed by the marker means "no lanes in flight" and
+parses to an empty list. A heading followed by anything else that is neither
+a readable table nor that marker -- free text, a stale format, a typo in the
+table header -- raises `ChannelsSectionUnparseable`, and `decide_recycle`
+turns that into a refusal, not an empty list silently treated as "nothing
+running". A heading that is entirely absent is a third, distinct fact --
+`parse_armed_channels` raises `ChannelsSectionMissing` for that case.
+"Zero channels", "I could not read the channels", and "there is no channels
+section at all" are three different values; none of them collapses into
+either of the others.
 
 ## Verification
 
