@@ -21,6 +21,38 @@ close in these four repos.
 `/clear` a lane before reusing it for an independent review — an author
 reviewing their own PR is not an independent reviewer.
 
+## "Blocked on Jon" is often true of an issue and false of a piece of it
+
+Before recording an issue as gated, ask what specifically is gated. The gate is
+usually on one verb, and the rest of the issue is ordinary work.
+
+Worked example, 2026-08-11. `agent-evals#3` reads as fully blocked: every
+redesign it proposes changes what a scenario measures, so each needs fresh
+baselines, and baselines are billed agent sessions the owner must authorise.
+True — and it hid a deliverable. The issue's own text named a fixture as
+"specified and not written". **Writing a fixture costs nothing. Running one is
+what costs money.** The fixture was built that night, unrun, and is now waiting
+for whenever the baselines are authorised.
+
+The same split recurs:
+
+- **run vs write** — the run is billed, the artifact is free
+- **decide vs prepare** — the decision is Jon's, the options paper is not
+- **deploy vs build** — `$HOME` mutation is gated, the PR is not
+- **measure vs explain** — a billed measurement is gated, reading the code to
+  work out *why* is free and often worth more. `#44` produced a better answer
+  under a no-billed-runs constraint than the measurement would have.
+
+Two failure modes, and the second is the common one:
+
+- Doing the gated part anyway. Obvious, and the constraints catch it.
+- **Recording the whole issue as blocked and moving on.** That looks like
+  discipline and is how work quietly stops. A tick that reports "all gated on
+  Jon" without having asked *which verb* is gated has not finished its sweep.
+
+Say in the report which part was gated and which part was done, so the
+distinction survives into the next tick.
+
 ## If everything left is gated on Jon
 
 Currently gated: **#24** herdr build-vs-adopt · **#20** apm pin bump ·
