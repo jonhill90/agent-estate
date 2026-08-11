@@ -121,6 +121,121 @@ def _seed_pre_pr_database(root: Path):
         connection.close()
 
 
+# Old `lanes` CHECK constraint (no `copilot-acp`) paired with the *current*
+# `tasks` schema, so opening this database exercises `_migrate_lanes_table`
+# in isolation: `_migrate_tasks_table` finds its markers already present and
+# no-ops. `_migrate_lanes_table` runs first in `Ledger.__init__`, and both
+# migrations share failpoint names (`after_create`, `after_copy`,
+# `after_drop`, `after_rename`), so seeding with `_seed_pre_pr_database`
+# instead would trip the *lanes* rebuild's failpoint before the tasks
+# rebuild ever starts — silently no-op-ing any attempt to drive a tasks
+# checkpoint, and equally hiding a lanes-only rollback assertion inside what
+# looks like a tasks test.
+PRE_LANES_MIGRATION_SCHEMA_SCRIPT = """
+CREATE TABLE lanes (
+    lane TEXT PRIMARY KEY,
+    pane_id TEXT NOT NULL,
+    nonce TEXT NOT NULL,
+    harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude')),
+    repo TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    session_id TEXT NOT NULL,
+    command TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE tasks (
+    id TEXT PRIMARY KEY,
+    lane TEXT NOT NULL REFERENCES lanes(lane),
+    pane_nonce TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN ('created', 'delivery_pending', 'delivered', 'accepted',
+                   'running', 'complete', 'failed', 'cancelled')
+    ),
+    result_path TEXT,
+    result_sha256 TEXT,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL,
+    delivery_attempted_at INTEGER,
+    delivered_at INTEGER,
+    accepted_at INTEGER,
+    completed_at INTEGER
+);
+
+CREATE UNIQUE INDEX one_open_task_per_lane
+    ON tasks(lane)
+    WHERE status NOT IN ('complete', 'failed', 'cancelled');
+
+CREATE TABLE source_tasks (
+    id TEXT PRIMARY KEY,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('issue', 'pull')),
+    source_url TEXT NOT NULL UNIQUE,
+    source_ref TEXT NOT NULL,
+    summary TEXT NOT NULL,
+    source_state TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (
+        status IN ('created', 'delivered', 'accepted', 'running',
+                   'complete', 'failed', 'cancelled')
+    ),
+    evidence_json TEXT NOT NULL,
+    status_marker TEXT,
+    updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE events (
+    key TEXT PRIMARY KEY,
+    type TEXT NOT NULL,
+    task_id TEXT REFERENCES tasks(id),
+    status TEXT NOT NULL CHECK (status IN ('pending', 'notified', 'acked')),
+    payload_path TEXT,
+    created_at INTEGER NOT NULL,
+    notified_at INTEGER,
+    retry_at INTEGER,
+    acked_at INTEGER
+);
+
+CREATE TABLE components (
+    name TEXT PRIMARY KEY,
+    healthy INTEGER NOT NULL,
+    error TEXT,
+    snapshot_sha256 TEXT,
+    updated_at INTEGER NOT NULL
+);
+"""
+
+
+def _seed_pre_lanes_migration_database(root: Path):
+    """Build a ledger.sqlite3 with an old `lanes` table and a current `tasks` table."""
+    root.mkdir(parents=True, exist_ok=True)
+    db_path = root / "ledger.sqlite3"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.executescript(PRE_LANES_MIGRATION_SCHEMA_SCRIPT)
+        connection.execute(
+            """
+            INSERT INTO lanes(lane, pane_id, nonce, harness, repo, server_id, session_id, command, updated_at)
+            VALUES ('app-review', '%22', 'nonce-22-a', 'codex', '/repo/app', 'server-a', '$4', 'codex', 1000)
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO tasks(id, lane, pane_nonce, summary, status, created_at, updated_at)
+            VALUES ('review-870', 'app-review', 'nonce-22-a', 'Review PR 870 without editing', 'created', 1000, 1000)
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO events(key, type, task_id, status, created_at)
+            VALUES ('attention:review-870', 'attention', 'review-870', 'pending', 1000)
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 class MutableClock:
     def __init__(self, value=1_000):
         self.value = value
@@ -611,6 +726,51 @@ class LaneTableMigrationTest(unittest.TestCase):
         # The outstanding task still bound to the untouched lane survives the rebuild.
         self.assertEqual("created", ledger.get_task("review-870")["status"])
         self.assertEqual(2, len(ledger.list_lanes()))
+
+    def test_migration_failure_rolls_back_leaving_original_table_and_rows_intact(self):
+        for failpoint in ("after_create", "after_copy", "after_drop", "after_rename"):
+            with self.subTest(failpoint=failpoint):
+                root = Path(tempfile.mkdtemp())
+                self.addCleanup(lambda r=root: __import__("shutil").rmtree(r, ignore_errors=True))
+                _seed_pre_lanes_migration_database(root)
+
+                with self.assertRaisesRegex(RuntimeError, failpoint):
+                    Ledger(root, clock=lambda: 2_000, _migration_failpoint=failpoint)
+
+                # Rolled back: the table is exactly as it was before the attempt.
+                connection = sqlite3.connect(root / "ledger.sqlite3")
+                connection.row_factory = sqlite3.Row
+                try:
+                    sql = connection.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='table' AND name='lanes'"
+                    ).fetchone()["sql"]
+                    self.assertNotIn("copilot-acp", sql, f"schema leaked past rollback at {failpoint}")
+                    row = dict(connection.execute("SELECT * FROM lanes WHERE lane='app-review'").fetchone())
+                    self.assertEqual("codex", row["harness"])
+                    self.assertEqual("nonce-22-a", row["nonce"])
+                    self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM lanes").fetchone()[0])
+                    self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM tasks").fetchone()[0])
+                    self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM events").fetchone()[0])
+                finally:
+                    connection.close()
+
+                # And migration recovers cleanly on the very next open.
+                recovered = Ledger(root, clock=lambda: 3_000)
+                connection = sqlite3.connect(root / "ledger.sqlite3")
+                try:
+                    migrated_sql = connection.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='table' AND name='lanes'"
+                    ).fetchone()[0]
+                finally:
+                    connection.close()
+                self.assertIn("copilot-acp", migrated_sql)
+                existing = recovered.get_lane("app-review")
+                self.assertEqual("codex", existing["harness"])
+                registered = recovered.register_lane(
+                    lane="copilot-worker", pane_id="session-1", nonce="nonce-acp", harness="copilot-acp",
+                    repo="/repo/app", server_id="acp", session_id="session-1", command="copilot",
+                )
+                self.assertEqual("copilot-acp", registered["harness"])
 
     def test_fresh_ledger_never_triggers_a_lanes_migration_rebuild(self):
         fresh_root = Path(tempfile.mkdtemp())
