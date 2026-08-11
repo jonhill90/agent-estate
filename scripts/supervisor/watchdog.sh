@@ -69,7 +69,16 @@ branch=$(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
 # A detached worktree -- how the live copy is pinned -- reports "HEAD", which
 # tells a reader nothing. Name a ref that actually contains this commit.
 if [ "$branch" = "HEAD" ]; then
-  branch=$(git -C "$HERE" for-each-ref --format='%(refname:short)' --points-at HEAD 2>/dev/null | head -1)
+  # Prefer main when several refs point at the same commit. A worker branching
+  # from main creates a second ref at that sha, and picking arbitrarily made
+  # the status file report 'code: feat/claim-before-dispatch' while the live
+  # copy was faithfully running main's commit. The sha was right and the name
+  # was misleading, which is worse than saying nothing in a line whose whole
+  # job is telling a human what is running.
+  refs=$(git -C "$HERE" for-each-ref --format='%(refname:short)' --points-at HEAD 2>/dev/null)
+  branch=$(grep -m1 -x 'main' <<<"$refs" \
+        || grep -m1 -x 'origin/main' <<<"$refs" \
+        || head -1 <<<"$refs")
   branch="${branch:-detached}"
 fi
 sha=$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo unknown)
