@@ -1,4 +1,4 @@
-"""Command line interface for Hill90's portable supervisor ledger."""
+"""Command line interface for the portable supervisor ledger."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ import argparse
 import json
 import os
 import secrets
+import sys
 from pathlib import Path
 
 from acp_transport import ACPTransport
@@ -16,18 +17,25 @@ from sensor import StateSensor
 from transport import TmuxTransport
 
 
-DEFAULT_STATE = Path.home() / ".local/state/hill90-supervisor"
+DEFAULT_STATE = Path.home() / ".local/state/agent-dotfiles-supervisor"
+# The four harness repos, and only these. This subsystem was ported from the
+# estate it was written for (see README.md), and its defaults came with it --
+# `tick` runs GitHub sensors against every entry here. That was harmless only
+# for as long as the module had no `__main__` and could not be run at all.
+# Adding the entry point makes the default list live, so it has to name the
+# repos this supervisor actually drives.
 DEFAULT_REPOSITORIES = (
-    {"name": "Hill90", "path": "/Users/jon/source/repos/Personal/Hill90", "github": "jonhill90/Hill90"},
-    {"name": "hill90-app", "path": "/Users/jon/source/repos/Personal/hill90-app", "github": "jonhill90/hill90-app"},
-    {"name": "hill90-docs", "path": "/Users/jon/source/repos/Personal/hill90-docs", "github": "jonhill90/hill90-docs"},
+    {"name": "agent-dotfiles", "path": "/Users/jon/source/repos/Personal/agent-dotfiles", "github": "jonhill90/agent-dotfiles"},
+    {"name": "skills", "path": "/Users/jon/source/repos/Personal/Skills", "github": "jonhill90/skills"},
+    {"name": "skills-private", "path": "/Users/jon/source/repos/Personal/skills-private", "github": "jonhill90/skills-private"},
+    {"name": "agent-evals", "path": "/Users/jon/source/repos/Personal/agent-evals", "github": "jonhill90/agent-evals"},
 )
 
 
 def parser():
     root = argparse.ArgumentParser()
     root.add_argument("--state-dir", type=Path, default=DEFAULT_STATE)
-    root.add_argument("--tmux-bin", default=os.environ.get("HILL90_TMUX_BIN", "tmux"))
+    root.add_argument("--tmux-bin", default=os.environ.get("AGENT_TMUX_BIN", "tmux"))
     sub = root.add_subparsers(dest="command", required=True)
 
     register = sub.add_parser("register")
@@ -224,3 +232,10 @@ def main(argv=None):
         raise AssertionError(args.command)
     _print(value)
     return 0
+
+
+# Without this, the module is unreachable as a program: `cli.py --help` printed
+# nothing and exited 0, which reads as success to any wrapper checking $?. The
+# import-based tests all passed throughout, because they call main() directly.
+if __name__ == "__main__":
+    sys.exit(main())
