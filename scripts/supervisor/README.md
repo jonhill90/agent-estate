@@ -112,6 +112,34 @@ evidence value. The marker is compact, sorted JSON inside an HTML comment:
 local `source_tasks` spool, even into an empty state directory. It does not
 invent a tmux pane or dispatch work.
 
+## Claims
+
+`claim.sh` makes "has this work already been taken" answerable from GitHub.
+The contract above says Issues are the canonical task, **claim**, and status
+record; task and status were true, claim was not, and on 2026-08-11 issue #28
+was dispatched to two lanes independently and fixed twice (#68 merged, #69
+closed). The claim is the GitHub assignee — a first-class field, visible in
+the UI, and surviving the loss of the local spool, which the contract requires.
+
+```bash
+claim.sh list  <repo>                 # open issues with no claim -- what dispatch reads
+claim.sh take  <n> <repo> <lane>      # exits non-zero if someone got there first
+claim.sh check <n> <repo>
+claim.sh release <n> <repo>
+claim.sh stale <repo>                 # claims whose lane is gone
+```
+
+`loop-tick.md` requires the dispatch step to call it. Claims expire with the
+lane, not on a clock: a task here runs for hours, so a useful timeout would
+steal live work. `stale` reports a claim when no live lane window names the
+issue — `dead` from `lanes.sh` is the case it catches — and no open PR says it
+fixes it. It reports only; releasing stays a decision.
+
+`--add-assignee` is add-to-a-set, not compare-and-swap, and every lane
+authenticates as the same GitHub user, so two dispatchers reading "unassigned"
+within the same second still both win. That is a sub-second window replacing a
+multi-minute one; GitHub offers no CAS on issues.
+
 ## Scheduled session recycling
 
 `recycle.py` decides when a long-lived supervisor session should checkpoint
@@ -174,7 +202,11 @@ python3 -m py_compile scripts/supervisor/*.py
 
 The first command is agent-dotfiles' repository-wide test command, run from
 the repository root; it discovers this core's tests under `tests/supervisor/`
-along with the rest of the suite.
+along with the rest of the suite — including the stub-driven bash suites for
+`lanes.sh`, `watchdog.sh`, and `claim.sh`, which `test_shell_suites.py` runs as
+subtests. Until that shim existed the sentence above was false for them: they
+were in no workflow and no test shelled out to them, so a regression in
+`lanes.sh` would have reached `main` green.
 
 The v4-cutover, rollback, and launchd-adapter behavior described below is
 Hill90-specific and lives in Hill90's `service.sh` and `install.sh`, not in

@@ -1,0 +1,66 @@
+#!/bin/bash
+# Stub gh for claim.sh tests.
+#
+# GH_ISSUES holds one line per open issue:   <number>|<assignees-csv>|<title>
+# GH_PRS    holds one line per open PR:      <number>|<body>
+#
+# Writes land back in GH_ISSUES, so a claim taken by one invocation is visible
+# to the next -- which is the whole point of the test: a SECOND dispatcher must
+# see what the first one wrote. A stub that discarded writes would pass the
+# refusal test for the wrong reason.
+set -uo pipefail
+I="${GH_ISSUES:?}"
+P="${GH_PRS:-/dev/null}"
+ME="${GH_ME:-jonhill90}"
+
+sub="$1"; shift
+case "$sub" in
+  issue)
+    verb="$1"; shift
+    num=""
+    # First bare argument is the issue number for view/edit/comment.
+    for a in "$@"; do case "$a" in [0-9]*) num="$a"; break ;; esac; done
+    case "$verb" in
+      view)
+        line=$(awk -F'|' -v n="$num" '$1==n' "$I")
+        [ -n "$line" ] || { echo "gh: no issue $num" >&2; exit 1; }
+        a=$(cut -d'|' -f2 <<<"$line"); t=$(cut -d'|' -f3 <<<"$line")
+        # Only the two -q shapes claim.sh asks for.
+        if [[ "$*" == *"assignees"* ]]; then printf '%s\n' "$a"; else printf '%s\n' "$t"; fi
+        ;;
+      list)
+        # claim.sh asks for number<TAB>assignees over open issues.
+        while IFS='|' read -r n a t; do printf '%s\t%s\n' "$n" "$a"; done < "$I"
+        ;;
+      edit)
+        add=""; rm=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --add-assignee) add="$2"; shift 2 ;;
+            --remove-assignee) rm="$2"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        [ "$add" = "@me" ] && add="$ME"
+        [ "$rm" = "@me" ] && rm="$ME"
+        tmp=$(mktemp)
+        while IFS='|' read -r n a t; do
+          if [ "$n" = "$num" ]; then
+            if [ -n "$add" ]; then
+              case ",$a," in *",$add,"*) ;; *) a="${a:+$a,}$add" ;; esac
+            fi
+            if [ -n "$rm" ]; then
+              a=$(tr ',' '\n' <<<"$a" | grep -vx "$rm" | paste -sd, -)
+            fi
+          fi
+          printf '%s|%s|%s\n' "$n" "$a" "$t"
+        done < "$I" > "$tmp"
+        mv "$tmp" "$I"
+        ;;
+    esac ;;
+  pr)
+    # pr list --json number,body -q '.[]|...'  -> number<TAB>body
+    while IFS='|' read -r n b; do [ -n "$n" ] && printf '%s\t%s\n' "$n" "$b"; done < "$P"
+    ;;
+esac
+exit 0
