@@ -164,6 +164,55 @@ changes is someone's unfinished work, not garbage. `guard` is for the
 Director's own use of the shared checkout, which caused the same class of bug
 this tool exists to prevent.
 
+## Advancing the live worktree
+
+The watchdog LaunchAgent runs `watchdog.sh` from one pinned worktree,
+`~/.local/state/agent-dotfiles-supervisor/live` — a git worktree of this
+repository, sharing its object store and refs with every other worktree on
+the machine, detached at whatever commit it was last checked out to. Nothing
+in this repository advanced it (#99). `watchdog.status`'s `code:` line
+(#100) reports how far behind that copy is; `advance-live.sh` is the step
+that acts on the report:
+
+```bash
+advance-live.sh [live-worktree-path]   # default: $SUPERVISOR_STATE/live
+```
+
+Three design constraints, each argued out on #99 from measured toil (five
+hand-advances in one day, each prompted only by a human noticing the
+`code:` line) and not reargued here:
+
+- **Not the watchdog advancing itself, not a merge webhook, not a plain
+  timer.** A broken watchdog auto-installing itself every 180s leaves
+  nothing to notice the break; a merge-triggered deploy puts the decision in
+  the same system that produced the change, which is what makes "merged
+  does not mean running" a safety property here. `loop-tick.md` calls this
+  as its first step, once per supervisor tick — gated on real activity, not
+  a clock, and invoked rather than merely documented (the
+  `acp_transport.py`/`worktree.sh`/`lane-done.sh` shape: a tool nothing
+  calls is a documentation rule with a binary attached).
+- **The candidate must demonstrably run before the pin moves.** CI green is
+  a property of the merge commit, not proof this machine's copy works.
+  Before switching `live`, `advance-live.sh` checks the candidate commit out
+  into a throwaway worktree and runs its own `watchdog.sh` once, pointed at
+  scratch state with a `SUPERVISOR_PANE` that cannot exist, and requires a
+  well-formed status file back. That exercises the real entry point without
+  any possibility of a tmux send-keys reaching the live loop.
+- **Advance only in the window right after a live tick, never blind.**
+  `watchdog.sh` writes `watchdog.status` on every tick, including a
+  `checked:` timestamp. `advance-live.sh` reads that file — it does not
+  touch or lock `watchdog.sh` itself — and refuses to advance once too much
+  of the cadence between ticks has elapsed, so a checkout never lands mid-
+  tick. Outside that window it exits 0 having done nothing; that is
+  correct, not a failure, and the next supervisor tick tries again.
+
+The pre-advance sha is written to `$SUPERVISOR_STATE/.live-rollback-sha`
+before anything is mutated — it is only knowable then; after
+`checkout --detach` you are guessing from reflog. Any refusal (unreadable
+`origin/main`, a failed smoke test, a post-checkout HEAD that does not match
+the target) exits non-zero with `live` left exactly where it was — no
+silent revert, no half-state.
+
 ## Dispatch
 
 `dispatch.sh` is the caller. It performs one dispatch end to end — pick a free
