@@ -75,7 +75,24 @@ check)
   echo "claimable"; exit 0 ;;
 
 take)
-  h=$(holder_of "$ISSUE")
+  # Read state and assignees in the one call, immediately before the write: an
+  # issue closed hours ago (#95) must not pass "is this available" just
+  # because `--add-assignee` itself has no opinion about issue state. An
+  # unreadable answer -- network error, gh failure, empty output -- is refused
+  # rather than treated as open; #59, #92 and #95 are all the same shape of an
+  # unreadable answer being read as permissive.
+  info=$(gh issue view "$ISSUE" ${R[@]+"${R[@]}"} --json state,assignees \
+     -q '"\(.state)\t\(.assignees|map(.login)|join(","))"' 2>/dev/null)
+  if [ -z "$info" ]; then
+    echo "claim: cannot read #$ISSUE — refusing to claim on an unreadable state" >&2
+    exit 2
+  fi
+  state="${info%%$'\t'*}"
+  h="${info#*$'\t'}"
+  if [ "$state" != "OPEN" ]; then
+    echo "claim: #$ISSUE is not open (state=$state) — not dispatching to $LANE" >&2
+    exit 1
+  fi
   if [ -n "$h" ]; then
     # The refusal a second dispatcher must see. Say who, so the supervisor can
     # check whether that claim is stale rather than assuming it is live.

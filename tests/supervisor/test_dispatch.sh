@@ -307,6 +307,25 @@ fi
 want_contains "the lane name reaches claim.sh as the lane, not as the repo" \
   "taken by repo77-no-repo-arg" "$out"
 
+# --- a closed issue: refused end to end, nothing left behind (#95) --------
+# On 2026-08-11 dispatch.sh sent two lanes to issues closed nearly three hours
+# earlier, because claim.sh's `take` did not check issue state. The fix lives
+# in claim.sh, and dispatch.sh's existing "every failure aborts" contract must
+# do the rest: no assignee, no worktree, no brief sent.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+printf '150||Closed nearly three hours ago|CLOSED\n' >> "$D/issues"
+before=$(worktrees)
+out=$(run 150 already-closed "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a dispatch against a closed issue is refused" "$rc" 1 "$out"
+log=$(tmuxlog)
+want_missing "no brief is sent for a closed issue" "send-keys" "$log"
+want_missing "the lane is not renamed for a closed issue" "rename-window" "$log"
+if [ "$(assignees 150)" = "" ]; then ok "a closed issue gets no assignee via dispatch"; else bad "a closed issue gets no assignee via dispatch" "assignees: $(assignees 150)"; fi
+if [ "$(worktrees)" = "$before" ]; then ok "a closed issue leaves no worktree behind"; else bad "a closed issue leaves no worktree behind" "$before -> $(worktrees)"; fi
+
 rm -rf "$D"
 
 echo "  $pass passed, $fail failed"

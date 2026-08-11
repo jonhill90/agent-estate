@@ -1,8 +1,11 @@
 #!/bin/bash
 # Stub gh for claim.sh tests.
 #
-# GH_ISSUES holds one line per open issue:   <number>|<assignees-csv>|<title>
+# GH_ISSUES holds one line per open issue:   <number>|<assignees-csv>|<title>|<state>
 # GH_PRS    holds one line per open PR:      <number>|<body>
+#
+# <state> is optional and defaults to OPEN when the field is absent, so
+# fixtures written before #95 (three fields) still describe open issues.
 #
 # Writes land back in GH_ISSUES, so a claim taken by one invocation is visible
 # to the next -- which is the whole point of the test: a SECOND dispatcher must
@@ -25,8 +28,16 @@ case "$sub" in
         line=$(awk -F'|' -v n="$num" '$1==n' "$I")
         [ -n "$line" ] || { echo "gh: no issue $num" >&2; exit 1; }
         a=$(cut -d'|' -f2 <<<"$line"); t=$(cut -d'|' -f3 <<<"$line")
-        # Only the two -q shapes claim.sh asks for.
-        if [[ "$*" == *"assignees"* ]]; then printf '%s\n' "$a"; else printf '%s\n' "$t"; fi
+        st=$(cut -d'|' -f4 <<<"$line"); st="${st:-OPEN}"
+        # Only the -q shapes claim.sh asks for: state+assignees combined, or
+        # assignees alone; anything else falls back to the title.
+        if [[ "$*" == *"state"* && "$*" == *"assignees"* ]]; then
+          printf '%s\t%s\n' "$st" "$a"
+        elif [[ "$*" == *"assignees"* ]]; then
+          printf '%s\n' "$a"
+        else
+          printf '%s\n' "$t"
+        fi
         ;;
       list)
         # claim.sh asks for number<TAB>assignees over open issues.
@@ -44,7 +55,7 @@ case "$sub" in
         [ "$add" = "@me" ] && add="$ME"
         [ "$rm" = "@me" ] && rm="$ME"
         tmp=$(mktemp)
-        while IFS='|' read -r n a t; do
+        while IFS='|' read -r n a t st; do
           if [ "$n" = "$num" ]; then
             if [ -n "$add" ]; then
               case ",$a," in *",$add,"*) ;; *) a="${a:+$a,}$add" ;; esac
@@ -53,7 +64,7 @@ case "$sub" in
               a=$(tr ',' '\n' <<<"$a" | grep -vx "$rm" | paste -sd, -)
             fi
           fi
-          printf '%s|%s|%s\n' "$n" "$a" "$t"
+          printf '%s|%s|%s|%s\n' "$n" "$a" "$t" "$st"
         done < "$I" > "$tmp"
         mv "$tmp" "$I"
         ;;
