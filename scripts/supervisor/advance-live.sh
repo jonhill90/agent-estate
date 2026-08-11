@@ -3,18 +3,38 @@
 # origin/main -- the half of #99 that nothing did. #100 built the report
 # (`code: ... behind origin/main`); this is the deploy step that acts on it.
 #
-# WHO CALLS THIS: loop-tick.md's first step, once per supervisor tick --
-# invoked, not merely documented (the `acp_transport.py`/`worktree.sh`/
-# `lane-done.sh` shape: a tool nothing calls is a documentation rule with a
-# binary attached). Rejected designs, from #99's own comments:
-#   - the watchdog advancing itself: a broken watchdog would then reinstall
-#     itself every 180s and nothing would be left to notice.
+# WHO CALLS THIS: watchdog.sh, on the way out of every tick, whenever the copy
+# running is the pinned live one -- and loop-tick.md's first step, once per
+# supervisor tick. Invoked, not merely documented (the `acp_transport.py`/
+# `worktree.sh`/`lane-done.sh` shape: a tool nothing calls is a documentation
+# rule with a binary attached).
+#
+# The watchdog was originally REJECTED as the caller, in #99's own comments,
+# on the grounds that "a broken watchdog would reinstall itself every 180s and
+# nothing would be left to notice." #130 reversed that, and the reversal is
+# the more interesting half: the objection is answered by THE GATE below, not
+# by declining to deploy. A candidate that cannot run is never installed, so
+# the copy left unable to notice anything never becomes live. Meanwhile the
+# loop -- the caller the objection left in place -- is the component that goes
+# down, and is down by design during an escalation, so the live worktree
+# stopped advancing exactly during the incidents it needed to be current for.
+# The loop's call is kept: it is the path that still works when the watchdog
+# is running from somewhere other than the pinned worktree.
+#
+# Still rejected, unchanged:
 #   - a merge webhook / CI step: puts the deploy decision in the same system
 #     that produced the change, which is what makes "merged does not mean
 #     running" a safety property here.
-#   - a plain timer: same failure shape as the first, with extra steps.
-# A supervisor tick is gated on real activity (dispatch, review, merge), not
-# a clock, so this is neither.
+#   - a plain timer: a clock deciding when to deploy, with none of the gates
+#     a caller can supply. A supervisor tick is gated on real activity
+#     (dispatch, review, merge) and a watchdog tick has already finished its
+#     duties before it calls this; a bare timer is neither.
+#
+# CALLED FROM watchdog.sh, THIS SCRIPT CHECKS OUT OVER ITSELF. The watchdog
+# runs a COPY of this file from a temporary path for that reason; do not
+# "simplify" that away. Everything below runs from the copy, and the smoke
+# test runs the candidate's own watchdog.sh out of the scratch worktree, so
+# no process is ever reading a file this checkout is replacing.
 #
 # THE GATE: CI green is a property of the merge commit, not proof this
 # machine's copy runs. Before switching LIVE's pin, check out the candidate
@@ -23,7 +43,10 @@
 # exercises the real entry point without ever touching the live loop: the
 # smoke run's SUPERVISOR_PANE targets a pane that cannot exist, so the
 # candidate takes the pane_unreadable/no_session branch and returns before
-# any tmux send-keys is possible.
+# any tmux send-keys is possible, and its SUPERVISOR_LIVE names a path it is
+# not running from, so the candidate's own advance step sees that it is not
+# the live copy and does nothing. A smoke test that advanced the live
+# worktree would be the gate performing the act it exists to gate.
 #
 # THE RACE: the LaunchAgent runs watchdog.sh from LIVE on a fixed cadence.
 # Swapping LIVE's working tree mid-tick can hand that tick a half-rewritten
@@ -31,7 +54,11 @@
 # would change code #100 already shipped. Instead this reads watchdog.status's
 # own `checked:` timestamp (the same file the watchdog writes every tick) and
 # only advances in the window right after a tick, never blind and never in
-# the stretch just before the next one is due.
+# the stretch just before the next one is due. Called from the watchdog's own
+# exit path that window is satisfied by construction -- the timestamp being
+# read was written seconds earlier by the caller -- and the check still earns
+# its place: it is what makes the LOOP's call safe, and what catches a tick
+# that overran its own cadence.
 #
 # ROLLBACK: the pre-advance sha is written to disk before anything is
 # mutated, because it is only knowable then -- after `checkout --detach` you
@@ -150,6 +177,7 @@ SUPERVISOR_STATE="$SMOKE" SUPERVISOR_STATUS="$SMOKE/watchdog.status" \
 SUPERVISOR_LOG="$SMOKE/watchdog.log" SUPERVISOR_STAMP="$SMOKE/.last-restart" \
 SUPERVISOR_HISTORY="$SMOKE/.restart-history" NOTIFY_ENV="$SMOKE/none.env" \
 SUPERVISOR_PANE="advance-live-smoke-test:999.1" \
+SUPERVISOR_LIVE="$SMOKE/live" \
   bash "$SCRATCH/scripts/supervisor/watchdog.sh" >"$SMOKE/stdout" 2>"$SMOKE/stderr"
 smoke_rc=$?
 

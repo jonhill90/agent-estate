@@ -20,6 +20,13 @@ correct, not a failure. Never run it against any worktree other than the
 default live one, and never touch `~/.local/state/agent-dotfiles-supervisor/live`
 by hand outside this command.
 
+`watchdog.sh` now runs the same command itself on the way out of every tick
+(#130), so this step is usually a no-op that reports `current`. Keep it: the
+watchdog only advances when it is running from the pinned live worktree, and
+this is the path that still works when it is not. If it reports anything
+other than `current` or `advanced`, read `watchdog.status`'s `advance:` line
+before doing anything else — the guard is running code you did not merge.
+
 ## Read the Director's inbox first, before anything else
 
 ```bash
