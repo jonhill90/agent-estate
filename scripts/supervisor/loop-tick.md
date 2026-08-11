@@ -105,6 +105,30 @@ Keep `brief.md` current as state changes — it is what a cold session resumes
 from. Durable preferences and decisions go to the Obsidian vault under
 `agent/facts/` with an index line, not into this file.
 
+## Dispatch with `dispatch.sh` — it is the whole dispatch, in one command
+
+Write the brief to a file, then:
+
+```bash
+scripts/supervisor/dispatch.sh 81 dispatch-worktree \
+  ~/.local/state/agent-dotfiles-supervisor/ad81-brief.md \
+  jonhill90/agent-dotfiles ~/source/repos/Personal/agent-dotfiles
+```
+
+It picks a free lane — idle **and** named `free-N`, both required — claims the
+issue, **creates the worktree**, renames the
+window, and sends the brief — the five steps the rest of this file describes,
+performed rather than recited. Any refusal aborts the whole dispatch and undoes
+what it already did, so a non-zero exit means nothing happened and the issue is
+still available. Exit 0 means a lane has the work.
+
+The sections below are why each step exists and what its refusals mean. Read
+them to interpret a refusal; do not re-perform the steps by hand. Running the
+pieces individually is how the worktree step got skipped all night, which is
+`#81`: `worktree.sh` shipped with no caller, so "give the lane a worktree"
+stayed a sentence someone had to remember, which is exactly the failure mode
+that produced `#73`.
+
 ## Check lane health before dispatching — do not trust "idle"
 
 Run this first, every time you are about to dispatch:
@@ -139,16 +163,15 @@ the table costs one command; both of those cost a whole tick.
 question: *has this work already been taken*. A perfectly healthy free lane is
 exactly where duplicate work lands.
 
-Select work with `claim.sh list`, never a bare `gh issue list`, and take the
-claim **before** the `send-keys`:
+Select work with `claim.sh list`, never a bare `gh issue list`:
 
 ```bash
 scripts/supervisor/claim.sh list jonhill90/agent-dotfiles   # open AND unclaimed
-scripts/supervisor/claim.sh take 70 jonhill90/agent-dotfiles ad70-claim-signal
 ```
 
-`take` prints the holder and **exits non-zero** if someone got there first.
-Treat that as "pick different work", not as an error to retry.
+`dispatch.sh` then takes the claim itself, before it builds anything and long
+before the `send-keys`. It prints the holder and **exits non-zero** if someone
+got there first. Treat that as "pick different work", not as an error to retry.
 
 The claim is the GitHub **assignee**. In these four repos an assignee means
 *claimed by a lane* — do not hand-assign an issue you are not dispatching. The
@@ -186,17 +209,17 @@ lane's commit, which shipped in a PR whose own message never mentions the
 deletion. That is the shared checkout destroying one agent's work and
 silently corrupting another's commit (#73).
 
-Create the worktree yourself and hand the lane a ready path, rather than
-telling it to create one — a step in a brief is a step that can be skipped:
+`dispatch.sh` creates the worktree and hands the lane a ready path in the
+message it sends, rather than telling the lane to create one — a step in a
+brief is a step that can be skipped, and for one night this one was: the tool
+existed and no dispatch called it (`#81`).
 
-```bash
-scripts/supervisor/worktree.sh new <issue>-<slug> ~/source/repos/Personal/agent-dotfiles
-# -> prints the new worktree's path; put that path in the brief
-```
+If `worktree.sh new` fails, `dispatch.sh` sends nothing and exits non-zero. A
+lane with no worktree works in the shared checkout, which is the bug, not a
+degraded mode — so a failed worktree is a failed dispatch. Fix the cause and
+dispatch again.
 
-Tell the worker to do all its work in that path, not in
-`~/source/repos/Personal/agent-dotfiles`. On completion — PR opened, or the
-lane abandoning the task — remove it:
+On completion — PR opened, or the lane abandoning the task — remove it:
 
 ```bash
 scripts/supervisor/worktree.sh done <path>
@@ -230,7 +253,14 @@ the session's active window, and the supervisor was `/clear`ed and handed a
 worker's brief — losing its loop context and spending a turn duplicating a
 review another lane was already running.
 
-Before any `send-keys` or `rename-window`, resolve the index and refuse to
+`dispatch.sh` resolves its lane from `lanes.sh --free` **intersected with the
+`free-N` naming rule below**, and refuses an empty target, so a dispatch made
+through it cannot hit the supervisor. It takes no lane from the environment:
+`DISPATCH_LANE` was an override that skipped every one of those checks, and
+`DISPATCH_LANE=t:1` reproduced this same incident at exit 0, so it was removed
+(#89). To aim a dispatch at a specific lane, rename that lane `free-N` first.
+For any other
+`send-keys` or `rename-window`, resolve the index yourself and refuse to
 proceed if it is empty:
 
 ```bash
