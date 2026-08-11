@@ -289,6 +289,41 @@ landed, the dispatch aborts and rolls back rather than submitting whatever is
 in the input. `DISPATCH_SETTLE` (default 2s) is the pause that gives the
 harness time to finish repainting.
 
+### It records what it dispatched (#140)
+
+After the brief is submitted, `dispatch.sh` writes the dispatch to the ledger
+(`cli.py record-dispatch`), and `lane-done.sh` marks it complete
+(`cli.py record-completion`) after it renames the lane back to `free-N`. The
+task id is the window name, the identifier `lanes.sh` and `claim.sh stale`
+already key on. `AGENT_SUPERVISOR_STATE_DIR` aims both at a state directory;
+unset, it is the default under `~/.local/state/`, which `Ledger.__init__`
+`chmod`s to `0700` on first write.
+
+**Nothing reads these records.** `lanes.sh` still classifies panes exactly as
+it did; no dispatch decision consults the ledger. That is the point: a
+recording layer nothing depends on can be compared against reality before
+anything trusts it.
+
+Two consequences of that, both deliberate:
+
+- **A ledger failure never aborts a dispatch or a completion.** Everywhere
+  else in `dispatch.sh` a failure aborts and unwinds, which is right for
+  claims and worktrees — real resources. A bookkeeping write with no reader is
+  not one: a broken ledger that stopped the estate dispatching would trade the
+  estate for a record nobody consumes. Failures are loud on stderr and the run
+  stands. `tests/supervisor/test_dispatch.sh` mutation-checks this by making
+  the write fatal and asserting the suite goes red.
+- **The write is last, after every abort path.** A record asserting work is in
+  flight, left by a dispatch that then aborted, is worse than no record — the
+  ledger's value is that it can be believed. Ordering guarantees it; there is
+  no cleanup step to get wrong.
+
+Neither `register` nor `assign` is used for this, and the difference matters:
+`TmuxAdapter.assign_task` *sends a prompt* to the pane, so calling it here
+would type a second, competing task at a lane that has just been given its
+brief. `record_dispatch` in `cli.py` documents that and the rest of the
+routing.
+
 ## Scheduled session recycling
 
 `recycle.py` decides when a long-lived supervisor session should checkpoint

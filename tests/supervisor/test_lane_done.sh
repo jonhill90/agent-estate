@@ -56,8 +56,13 @@ run_script() {
   local script="$1"; shift
   : > "$D/tmux.log"
   PATH="$D:$PATH" LANES_FIXTURE="$D/lanes" TMUX_LOG="$D/tmux.log" \
-    WAIT_DIR="$D/wait" STUB_WAIT_TIMEOUT=1 bash "$script" "$@" 2>&1
+    WAIT_DIR="$D/wait" STUB_WAIT_TIMEOUT=1 \
+    AGENT_SUPERVISOR_STATE_DIR="${LEDGER_STATE:-$D/state}" bash "$script" "$@" 2>&1
 }
+# AGENT_SUPERVISOR_STATE_DIR is not optional in this harness. lane-done.sh now
+# records the completion in the ledger (#140); without it, every case in this
+# file would write into the REAL supervisor state directory under $HOME.
+ledger() { AGENT_SUPERVISOR_STATE_DIR="${LEDGER_STATE:-$D/state}" python3 "$HERE/../../scripts/supervisor/cli.py" "$@"; }
 signal() { mkdir -p "$D/wait"; : > "$D/wait/$1.signaled"; }
 tmuxlog() { cat "$D/tmux.log"; }
 
@@ -81,6 +86,52 @@ signal ad102-done
 out=$(run 6 ad102-lane-rename-on-completion ad102-done t); rc=$?
 want_exit "a name mismatch exits non-zero" "$rc" 1 "$out"
 want_missing "a name mismatch is never renamed" "rename-window" "$(tmuxlog)"
+
+# --- the completion is RECORDED, not just renamed away (#140) --------------
+#
+# The rename returns the lane to the pool; nothing recorded that the work
+# finished, which is the completion-signal gap #140 names. lane-done.sh now
+# writes it. The task id is the window name, which is what dispatch.sh
+# recorded it under -- and is already the identifier `lanes.sh` and
+# `claim.sh stale` key on, so the two halves agree without a new identifier.
+#
+# Seeded through the shipped recorder rather than by hand: a fixture written
+# straight into SQLite would prove the assertion below and nothing about
+# whether the two commands actually meet.
+LEDGER_STATE="$D/state-140" ledger record-dispatch \
+  --lane t:5 --task ad102-lane-rename-on-completion \
+  --summary "#102 lane-rename-on-completion" \
+  --pane-id '%5' --pane-path "$D" --command claude \
+  --server-id 'socket:1' --session-id '$0' --issue 102 >/dev/null 2>&1
+seed_rc=$?
+if [ "$seed_rc" -ne 0 ]; then
+  bad "setup: a dispatch record exists for the lane about to finish" "record-dispatch exited $seed_rc"
+else
+  ok "setup: a dispatch record exists for the lane about to finish"
+  before=$(LEDGER_STATE="$D/state-140" ledger status 2>&1)
+  want_contains "the seeded task starts out delivered, not complete" '"status":"delivered"' "$before"
+
+  signal ad102-done
+  out=$(LEDGER_STATE="$D/state-140" run 5 ad102-lane-rename-on-completion ad102-done t); rc=$?
+  want_exit "a signaled lane whose completion is recorded still exits zero" "$rc" 0 "$out"
+  want_contains "the lane is still renamed back to free-N" "rename-window -t t:5 free-5" "$(tmuxlog)"
+  after=$(LEDGER_STATE="$D/state-140" ledger status 2>&1)
+  want_contains "lane-done.sh marks the task complete" '"status":"complete"' "$after"
+  want_contains "the completion has a result artifact, hashed and immutable" '"result_sha256":"' "$after"
+  # The signal it was evidenced by, in the result the ledger stores -- not in
+  # the row, which only carries the path and the hash.
+  want_contains "and that artifact records which channel fired" "ad102-done" \
+    "$(cat "$D/state-140/results/ad102-lane-rename-on-completion.md" 2>&1)"
+fi
+
+# ...and a ledger that errors must not turn a lane that genuinely finished
+# into a reported failure -- same best-effort-and-loud contract dispatch.sh
+# carries, for the same reason: nothing reads the ledger yet.
+signal ad102-done
+out=$(LEDGER_STATE="$D/lanes/state" run 5 ad102-lane-rename-on-completion ad102-done t); rc=$?
+want_exit "a broken ledger does not fail a completion" "$rc" 0 "$out"
+want_contains "the lane is still returned to the pool" "rename-window -t t:5 free-5" "$(tmuxlog)"
+want_contains "the ledger failure is loud, not swallowed" "LEDGER RECORD FAILED" "$out"
 
 # --- prove the safety assertion is load-bearing -----------------------------
 # Patch a copy of lane-done.sh to drop the wait-for guard entirely -- the
@@ -194,7 +245,8 @@ else
     W=$(rtmux list-windows -t "$RSESS" -F '#{window_index}' | head -1)
     rtmux rename-window -t "${RSESS}:${W}" ad108-realcheck
     real_run() {
-      env -u TMUX TMUX_TMPDIR="$RT" timeout "$1" bash "$2" \
+      env -u TMUX TMUX_TMPDIR="$RT" AGENT_SUPERVISOR_STATE_DIR="$D/state-realtmux" \
+        timeout "$1" bash "$2" \
         "$W" ad108-realcheck "rt-lanedone-$$" "$RSESS" 2>&1
     }
 
@@ -222,6 +274,100 @@ else
       else
         bad "real tmux: the wait-for -L copy renames an unfinished lane immediately" \
           "expected exit 0 and window free-${W}, got exit $rc and window '$name': $out"
+      fi
+    fi
+
+    # 5. THE RENAME-WINDOW GUARD (agent-dotfiles#144 finding 4): a rename
+    #    that FAILS must not be treated as a released lane. `lane-done.sh`
+    #    only records a completion AFTER a successful rename, on the theory
+    #    that "the only completion ever recorded is one that actually
+    #    released the lane" -- but nothing exercised the failure half of
+    #    that claim against real tmux. Shim `tmux` so every call proxies to
+    #    the real server except `rename-window`, which is refused --
+    #    modelling a genuine tmux failure (a racing rename, a dying server)
+    #    rather than assuming rename-window always succeeds.
+    REAL_TMUX="$(command -v tmux)"
+    RTSHIM="$D/rtshim"; mkdir -p "$RTSHIM"
+    cat > "$RTSHIM/tmux" <<SHIM
+#!/bin/bash
+if [ "\$1" = "rename-window" ]; then
+  echo "shim: rename-window refused" >&2
+  exit 1
+fi
+exec env -u TMUX TMUX_TMPDIR="$RT" "$REAL_TMUX" -f /dev/null "\$@"
+SHIM
+    chmod +x "$RTSHIM/tmux"
+
+    LEDGER_STATE="$D/state-renamefail" ledger record-dispatch \
+      --lane "${RSESS}:${W}" --task ad144-renamefail \
+      --summary "#144 rename-window guard" \
+      --pane-id '%9' --pane-path "$D" --command claude \
+      --server-id 'socket:1' --session-id '$0' --issue 144 >/dev/null 2>&1
+
+    rtmux rename-window -t "${RSESS}:${W}" ad144-renamefail
+    ( sleep 1; rtmux wait-for -S "rt-renamefail-$$" ) &
+    sigpid=$!
+    out=$(PATH="$RTSHIM:$PATH" env -u TMUX AGENT_SUPERVISOR_STATE_DIR="$D/state-renamefail" \
+      timeout 6 bash "$LANE_DONE" "$W" ad144-renamefail "rt-renamefail-$$" "$RSESS" 2>&1)
+    rc=$?
+    wait "$sigpid" 2>/dev/null
+    want_exit "real tmux: a failed rename-window makes lane-done.sh exit non-zero, not zero" "$rc" 1 "$out"
+    name=$(rtmux display-message -p -t "${RSESS}:${W}" '#{window_name}')
+    want_contains "real tmux: the window keeps its task name when rename-window fails" "ad144-renamefail" "$name"
+    after=$(LEDGER_STATE="$D/state-renamefail" ledger status 2>&1)
+    want_contains "real tmux: the failed-rename task is still delivered, not complete" '"status":"delivered"' "$after"
+    want_missing "real tmux: no completion is recorded when the rename failed" '"status":"complete"' "$after"
+
+    # ...and that guard is load-bearing. Patch a copy with the `|| exit 1`
+    # dropped and confirm the SAME failed rename now reports success and
+    # records a completion for a lane that is STILL named ad144-renamefail2
+    # -- if this passes, the guard's own claim ("the only completion ever
+    # recorded is one that actually released the lane") is untested.
+    NORENAMEGUARD="$D/lane-done-no-rename-guard.sh"
+    patch_rc2=0
+    python3 - "$LANE_DONE" "$NORENAMEGUARD" <<'PY' || patch_rc2=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = 'tmux rename-window -t "${SESSION}:${IDX}" "free-${IDX}" || exit 1'
+assert marker in text, "rename-window guard not found -- script shape changed"
+assert text.count(marker) == 1, "rename-window guard not unique -- script shape changed"
+text = text.replace(marker, marker.replace(' || exit 1', ''), 1)
+# The copy runs from a temp directory, and lane-done.sh finds cli.py relative
+# to its own location. Pin that to the real one, or the copy's own ledger
+# call fails with "can't open file .../cli.py" before reaching the mutation
+# under test -- which would make the assertion below pass for the wrong
+# reason, same pitfall test_dispatch.sh's HERE-pinning trick avoids.
+here_expr = '"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cli.py"'
+assert text.count(here_expr) == 1, "cli.py path expression not found or not unique -- script shape changed"
+import os
+text = text.replace(here_expr, '%r' % os.path.join(os.path.dirname(os.path.abspath(src)), "cli.py"), 1)
+open(dst, "w").write(text)
+PY
+    if [ "$patch_rc2" -ne 0 ]; then
+      bad "setup: patched a copy of lane-done.sh whose rename-window failure is ignored" \
+        "could not patch $LANE_DONE (exit $patch_rc2) -- treating as a failure, not a skip"
+    else
+      ok "setup: patched a copy of lane-done.sh whose rename-window failure is ignored"
+      LEDGER_STATE="$D/state-renamefail2" ledger record-dispatch \
+        --lane "${RSESS}:${W}" --task ad144-renamefail2 \
+        --summary "#144 rename-window guard (mutated)" \
+        --pane-id '%9' --pane-path "$D" --command claude \
+        --server-id 'socket:1' --session-id '$0' --issue 144 >/dev/null 2>&1
+      rtmux rename-window -t "${RSESS}:${W}" ad144-renamefail2
+      ( sleep 1; rtmux wait-for -S "rt-renamefail2-$$" ) &
+      sigpid=$!
+      out=$(PATH="$RTSHIM:$PATH" env -u TMUX AGENT_SUPERVISOR_STATE_DIR="$D/state-renamefail2" \
+        timeout 6 bash "$NORENAMEGUARD" "$W" ad144-renamefail2 "rt-renamefail2-$$" "$RSESS" 2>&1)
+      rc=$?
+      wait "$sigpid" 2>/dev/null
+      name=$(rtmux display-message -p -t "${RSESS}:${W}" '#{window_name}')
+      mutated_status=$(LEDGER_STATE="$D/state-renamefail2" ledger status 2>&1)
+      if [ "$rc" -eq 0 ] && [ "$name" = "ad144-renamefail2" ] && grep -qF '"status":"complete"' <<<"$mutated_status"; then
+        ok "mutation confirmed: dropping the guard reports success AND records a completion for a rename that never happened (the assertions above would now be red)"
+      else
+        bad "mutation confirmed: dropping the guard reports success and records a completion for a rename that never happened" \
+          "expected exit 0, window STILL ad144-renamefail2, and a complete status; got exit $rc, window '$name': $out / $mutated_status"
       fi
     fi
   fi

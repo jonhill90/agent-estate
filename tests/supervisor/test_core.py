@@ -236,6 +236,38 @@ def _seed_pre_lanes_migration_database(root: Path):
         connection.close()
 
 
+def _seed_pre_source_tasks_migration_database(root: Path):
+    """Build a ledger.sqlite3 with the pre-#144 schema (old `source_url`
+    table-level UNIQUE constraint, current lanes/tasks) and one source_tasks
+    row."""
+    root.mkdir(parents=True, exist_ok=True)
+    db_path = root / "ledger.sqlite3"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.executescript(PRE_PR_SCHEMA_SCRIPT)
+        connection.execute(
+            """
+            INSERT INTO lanes(lane, pane_id, nonce, harness, repo, server_id, session_id, command, updated_at)
+            VALUES ('app-review', '%22', 'nonce-22-a', 'codex', '/repo/app', 'server-a', '$4', 'codex', 1000)
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO source_tasks(
+                id, source_kind, source_url, source_ref, summary, source_state,
+                status, evidence_json, status_marker, updated_at
+            ) VALUES (
+                'ad999-first', 'issue', 'https://github.com/jonhill90/agent-dotfiles/issues/999', '999',
+                '#999 first', 'OPEN', 'created', '[]', NULL, 1000
+            )
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 class MutableClock:
     def __init__(self, value=1_000):
         self.value = value
@@ -283,6 +315,47 @@ class LedgerTest(unittest.TestCase):
             pane_nonce="nonce-22-a",
             summary="Review PR 870 without editing",
         )
+
+    def test_reconstruct_task_allows_a_second_dispatch_of_the_same_issue_under_a_different_task_id(self):
+        """agent-dotfiles#144 finding 1. `source_url` used to be declared
+        `NOT NULL UNIQUE`, and is derived from the issue number alone
+        (`cli.py`'s `record_dispatch`) -- while `reconstruct_task` upserts
+        `ON CONFLICT(id)`, a DIFFERENT key. A second dispatch of the same
+        issue under a different task id (a lane failing and being
+        re-briefed, a follow-up review -- this estate does this constantly)
+        raised `UNIQUE constraint failed: source_tasks.source_url`,
+        permanently, for that issue.
+
+        The modelling decision (argued in full on `_migrate_source_tasks_table`):
+        each `source_tasks` row is one recorded DISPATCH ATTEMPT, several of
+        which legitimately share a URL, so the column is no longer unique at
+        all -- not scoped to "one open attempt", because this table's status
+        is never advanced past 'created' by this recording path and a scoped
+        constraint would immediately wedge on exactly the case it exists to
+        protect.
+        """
+        url = "https://github.com/jonhill90/agent-dotfiles/issues/999"
+        first = self.ledger.reconstruct_task(
+            task_id="ad999-first", source_kind="issue", source_url=url, source_ref="999",
+            summary="#999 first attempt", source_state="OPEN", status="created",
+            evidence=["claimed by dispatch.sh for lane free-3"], status_marker=None,
+        )
+        self.assertEqual(url, first["source_url"])
+
+        # Not exotic: re-dispatch under a different task id, same URL.
+        second = self.ledger.reconstruct_task(
+            task_id="ad999-rereview", source_kind="issue", source_url=url, source_ref="999",
+            summary="#999 rereview", source_state="OPEN", status="created",
+            evidence=["claimed by dispatch.sh for lane free-4"], status_marker=None,
+        )
+        self.assertEqual(url, second["source_url"])
+
+        # Both rows survive independently -- this is not an upsert collapsing
+        # the two attempts into one.
+        self.assertEqual("#999 first attempt", self.ledger.get_source_task("ad999-first")["summary"])
+        self.assertEqual("#999 rereview", self.ledger.get_source_task("ad999-rereview")["summary"])
+        urls = {row["source_url"] for row in self.ledger.list_source_tasks()}
+        self.assertEqual({url}, urls)
 
     def test_assignment_requires_a_reconstructed_open_github_source(self):
         """Red: current assign() writes free-text summaries with no GitHub
@@ -364,27 +437,84 @@ class LedgerTest(unittest.TestCase):
         completed = self.ledger.complete("review-870", b"# Result\n\nDone.\n", pane_nonce="nonce-22-a")
         self.assertEqual("complete", completed["status"])
 
-    def test_lane_reregistration_is_rejected_while_an_outstanding_non_pending_task_exists(self):
-        """Red: register_lane does an unconditional INSERT ... ON CONFLICT
-        UPDATE with no check for an outstanding task bound to the old pane
-        incarnation -- re-registering silently rebinds a live task's
-        identity out from under it. `delivery_pending` is exempted: it has
-        its own reconciliation escape valve keyed off the task's own
-        pane_nonce (see `_reconcile_transition`), which #871 relies on to
-        survive a dead pane being re-registered."""
+    def test_lane_reregistration_cancels_an_outstanding_non_pending_task_instead_of_rebinding_it(self):
+        """register_lane does an unconditional INSERT ... ON CONFLICT UPDATE,
+        so re-registering with a CHANGED identity would silently rebind a
+        live task's identity out from under it if nothing intervened.
+        `delivery_pending` is exempted: it has its own reconciliation escape
+        valve keyed off the task's own pane_nonce (see `_reconcile_transition`),
+        which #871 relies on to survive a dead pane being re-registered.
+
+        agent-dotfiles#144 finding 3: for every OTHER outstanding status this
+        used to raise here, permanently -- the only way out was `lane-done.sh`
+        completing that exact task by renaming the window it owned, so a lane
+        freed any other way (renamed by hand, a worker that died mid-turn)
+        wedged every subsequent register_lane call for that lane forever. A
+        changed identity is the evidence that the old task can never complete
+        through this pane again, so this now CANCELS the stale task and
+        proceeds with the re-registration, rather than wedging."""
+        task = self.assign()
+        self.assertEqual("created", task["status"])
+        registered = self.ledger.register_lane(
+            lane="app-review",
+            pane_id="%23",
+            nonce="nonce-23-b",
+            harness="codex",
+            repo="/repo/app",
+            server_id="server-a",
+            session_id="$4",
+            command="codex",
+        )
+        self.assertEqual("nonce-23-b", registered["nonce"])
+        self.assertEqual("nonce-23-b", self.ledger.get_lane("app-review")["nonce"])
+        stale = self.ledger.get_task("review-870")
+        self.assertEqual("cancelled", stale["status"])
+        # And the lane is genuinely free again: a new task can be assigned to
+        # it under the new incarnation without hitting the one-open-task guard.
+        self.seed_source("review-871")
+        reassigned = self.ledger.assign(
+            task_id="review-871", lane="app-review", pane_nonce="nonce-23-b", summary="Second task"
+        )
+        self.assertEqual("created", reassigned["status"])
+
+    def test_lane_reregistration_with_the_same_identity_does_not_cancel_the_outstanding_task(self):
+        """The cancel-on-reregistration self-heal (#144 finding 3) is scoped
+        to a CHANGED identity. Re-registering the exact same pane_id/nonce/
+        harness/repo/server_id/session_id/command -- the ordinary no-op path,
+        e.g. a duplicate register call -- must leave a genuinely still-running
+        task alone."""
+        task = self.assign()
+        self.assertEqual("created", task["status"])
+        self.ledger.register_lane(
+            lane="app-review",
+            pane_id="%22",
+            nonce="nonce-22-a",
+            harness="codex",
+            repo="/repo/app",
+            server_id="server-a",
+            session_id="$4",
+            command="codex",
+        )
+        self.assertEqual("created", self.ledger.get_task("review-870")["status"])
+
+    def test_lane_reregistration_does_not_cancel_a_delivery_pending_task(self):
+        """#871: a `delivery_pending` task survives re-registration untouched
+        -- it has its own reconciliation path keyed off the task's own
+        pane_nonce, and must not be silently cancelled by a re-registration
+        racing an in-flight send."""
         self.assign()
-        with self.assertRaisesRegex(ValueError, "outstanding task"):
-            self.ledger.register_lane(
-                lane="app-review",
-                pane_id="%23",
-                nonce="nonce-23-b",
-                harness="codex",
-                repo="/repo/app",
-                server_id="server-a",
-                session_id="$4",
-                command="codex",
-            )
-        self.assertEqual("nonce-22-a", self.ledger.get_lane("app-review")["nonce"])
+        self.ledger.mark_delivery_pending("review-870", pane_nonce="nonce-22-a")
+        self.ledger.register_lane(
+            lane="app-review",
+            pane_id="%23",
+            nonce="nonce-23-b",
+            harness="codex",
+            repo="/repo/app",
+            server_id="server-a",
+            session_id="$4",
+            command="codex",
+        )
+        self.assertEqual("delivery_pending", self.ledger.get_task("review-870")["status"])
 
     def test_completion_is_immutable_idempotent_and_event_is_exactly_once(self):
         self.assign()
@@ -414,6 +544,97 @@ class LedgerTest(unittest.TestCase):
                 self.assertEqual("complete", recovered["status"])
                 events = self.ledger.list_events(task_id=task_id, event_type="completion")
                 self.assertEqual(1, len(events))
+
+    def test_record_dispatch_is_atomic_across_every_injected_crash_point(self):
+        """agent-dotfiles#144 finding 2. `record_dispatch` used to make five
+        independent `Ledger` calls -- register_lane, reconstruct_task, assign,
+        mark_delivery_pending, mark_delivered -- each its own lock and
+        transaction. A crash between any two left whatever had already
+        committed: the review reproduced this as an orphan `lanes` row (the
+        lane registered, nothing else recorded) claiming a lane occupied for a
+        dispatch nothing else records. That is exactly the state this layer
+        exists to prevent, so this parametrises over EVERY step, not just the
+        one the reviewer happened to hit.
+
+        A failure at ANY step must leave NO lane row, NO task row and NO
+        source_tasks row for that attempt -- not a partial write, not an
+        orphan claiming the lane is busy. A clean retry afterwards must then
+        succeed exactly as if the failed attempt never happened.
+        """
+        failpoints = (
+            "after_register_lane",
+            "after_reconstruct_task",
+            "after_assign",
+            "after_mark_delivery_pending",
+            "after_mark_delivered",
+        )
+        for failpoint in failpoints:
+            with self.subTest(failpoint=failpoint):
+                lane = f"lane-{failpoint}"
+                task_id = f"task-{failpoint}"
+                url = f"https://github.com/jonhill90/agent-dotfiles/issues/{hash(failpoint) % 10_000}"
+                kwargs = dict(
+                    lane=lane,
+                    pane_id="%9",
+                    nonce="nonce-9",
+                    harness="codex",
+                    repo="/repo/app",
+                    server_id="server-a",
+                    session_id="$9",
+                    command="codex",
+                    task_id=task_id,
+                    source_kind="issue",
+                    source_url=url,
+                    source_ref="999",
+                    summary="Atomicity check",
+                    source_state="OPEN",
+                    evidence=["seeded"],
+                    status_marker=None,
+                )
+                with self.assertRaisesRegex(RuntimeError, failpoint):
+                    self.ledger.record_dispatch(**kwargs, failpoint=failpoint)
+
+                # THE assertion: no partial write survives the crash.
+                self.assertIsNone(self.ledger.get_lane(lane), f"orphan lane row survived {failpoint}")
+                self.assertIsNone(self.ledger.get_task(task_id), f"orphan task row survived {failpoint}")
+                self.assertIsNone(
+                    self.ledger.get_source_task(task_id), f"orphan source_tasks row survived {failpoint}"
+                )
+
+                # And a clean retry afterwards succeeds normally -- the crash
+                # left nothing behind to conflict with it.
+                result = self.ledger.record_dispatch(**kwargs)
+                self.assertEqual("nonce-9", result["lane"]["nonce"])
+                self.assertEqual("delivered", result["task"]["status"])
+
+    def test_record_dispatch_succeeds_end_to_end_and_matches_the_five_call_sequence(self):
+        """Not just atomic -- still does the same work the five-call sequence
+        used to, in the same order, so a caller (`cli.py`'s `record_dispatch`)
+        that switches to this one call sees identical results."""
+        result = self.ledger.record_dispatch(
+            lane="free-3",
+            pane_id="%3",
+            nonce="nonce-3",
+            harness="claude",
+            repo="/repo/free-3",
+            server_id="server-a",
+            session_id="$3",
+            command="claude.exe",
+            task_id="ad999-first",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-dotfiles/issues/999",
+            source_ref="999",
+            summary="#999 first",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-3", "issues: 999"],
+            status_marker=None,
+        )
+        self.assertEqual("nonce-3", result["lane"]["nonce"])
+        self.assertEqual("claude", result["lane"]["harness"])
+        self.assertEqual("delivered", result["task"]["status"])
+        self.assertIsNotNone(result["task"]["delivered_at"])
+        source = self.ledger.get_source_task("ad999-first")
+        self.assertEqual("https://github.com/jonhill90/agent-dotfiles/issues/999", source["source_url"])
 
     def test_idle_attention_is_level_triggered_until_task_disposition(self):
         self.assign()
@@ -781,6 +1002,118 @@ class LaneTableMigrationTest(unittest.TestCase):
             repo="/r", server_id="acp", session_id="session-1", command="copilot",
         )
         self.assertEqual("copilot-acp", registered["harness"])
+
+
+class SourceTasksMigrationTest(unittest.TestCase):
+    """agent-dotfiles#144 finding 1: `source_tasks.source_url`'s old
+    table-level UNIQUE constraint made a second dispatch of the same GitHub
+    issue, under a different task id, fail forever. `CREATE TABLE IF NOT
+    EXISTS` does not migrate an existing DB -- every ledger created before
+    this fix still carries that constraint unless this migration runs."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+        _seed_pre_source_tasks_migration_database(self.root)
+
+    def _raw_source_tasks_sql(self, root=None):
+        connection = sqlite3.connect((root or self.root) / "ledger.sqlite3")
+        try:
+            return connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='source_tasks'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+
+    def test_reproduction_old_unique_constraint_rejects_a_second_row_with_the_same_url_directly(self):
+        """Before any migration exists, a second source_tasks row for the
+        same URL under a different id must fail against the raw pre-#144
+        schema -- this is the bug the migration fixes."""
+        connection = sqlite3.connect(self.root / "ledger.sqlite3")
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO source_tasks(id, source_kind, source_url, source_ref, summary, "
+                    "source_state, status, evidence_json, status_marker, updated_at) VALUES "
+                    "('ad999-rereview', 'issue', 'https://github.com/jonhill90/agent-dotfiles/issues/999', "
+                    "'999', '#999 rereview', 'OPEN', 'created', '[]', NULL, 1000)"
+                )
+        finally:
+            connection.close()
+
+    def test_opening_pre_144_database_migrates_schema_and_preserves_every_row(self):
+        ledger = Ledger(self.root, clock=lambda: 2_000)
+
+        migrated_sql = self._raw_source_tasks_sql()
+        self.assertNotIn("UNIQUE", migrated_sql)
+
+        existing = ledger.get_source_task("ad999-first")
+        self.assertEqual("#999 first", existing["summary"])
+
+        # The point: a second dispatch of the same issue now works against
+        # the migrated schema.
+        second = ledger.reconstruct_task(
+            task_id="ad999-rereview", source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-dotfiles/issues/999", source_ref="999",
+            summary="#999 rereview", source_state="OPEN", status="created",
+            evidence=["claimed by dispatch.sh for lane free-4"], status_marker=None,
+        )
+        self.assertEqual("#999 rereview", second["summary"])
+        self.assertEqual(2, len(ledger.list_source_tasks()))
+
+        # Every other table survives the rebuild untouched.
+        self.assertEqual(1, len(ledger.list_lanes()))
+
+    def test_migration_failure_rolls_back_leaving_original_table_and_rows_intact(self):
+        for failpoint in ("after_create", "after_copy", "after_drop", "after_rename"):
+            with self.subTest(failpoint=failpoint):
+                root = Path(tempfile.mkdtemp())
+                self.addCleanup(lambda r=root: __import__("shutil").rmtree(r, ignore_errors=True))
+                _seed_pre_source_tasks_migration_database(root)
+
+                with self.assertRaisesRegex(RuntimeError, failpoint):
+                    Ledger(root, clock=lambda: 2_000, _migration_failpoint=failpoint)
+
+                connection = sqlite3.connect(root / "ledger.sqlite3")
+                connection.row_factory = sqlite3.Row
+                try:
+                    sql = connection.execute(
+                        "SELECT sql FROM sqlite_master WHERE type='table' AND name='source_tasks'"
+                    ).fetchone()["sql"]
+                    self.assertIn("UNIQUE", sql, f"schema rebuilt past rollback at {failpoint}")
+                    row = dict(connection.execute("SELECT * FROM source_tasks WHERE id='ad999-first'").fetchone())
+                    self.assertEqual("#999 first", row["summary"])
+                    self.assertEqual(1, connection.execute("SELECT COUNT(*) FROM source_tasks").fetchone()[0])
+                finally:
+                    connection.close()
+
+                # And migration recovers cleanly on the very next open.
+                recovered = Ledger(root, clock=lambda: 3_000)
+                self.assertNotIn("UNIQUE", self._raw_source_tasks_sql(root))
+                second = recovered.reconstruct_task(
+                    task_id="ad999-rereview", source_kind="issue",
+                    source_url="https://github.com/jonhill90/agent-dotfiles/issues/999", source_ref="999",
+                    summary="#999 rereview", source_state="OPEN", status="created",
+                    evidence=["x"], status_marker=None,
+                )
+                self.assertEqual("#999 rereview", second["summary"])
+
+    def test_fresh_ledger_source_tasks_never_enforces_url_uniqueness(self):
+        fresh_root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(fresh_root, ignore_errors=True))
+        ledger = Ledger(fresh_root, clock=lambda: 1_000)
+        ledger.reconstruct_task(
+            task_id="t1", source_kind="issue",
+            source_url="https://github.com/jonhill90/Hill90/issues/1", source_ref="1",
+            summary="one", source_state="OPEN", status="created", evidence=[], status_marker=None,
+        )
+        second = ledger.reconstruct_task(
+            task_id="t2", source_kind="issue",
+            source_url="https://github.com/jonhill90/Hill90/issues/1", source_ref="1",
+            summary="two", source_state="OPEN", status="created", evidence=[], status_marker=None,
+        )
+        self.assertEqual("two", second["summary"])
 
 
 class DeliveryTimestampTest(unittest.TestCase):

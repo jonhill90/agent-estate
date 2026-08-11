@@ -73,9 +73,47 @@ case "$sub" in
     done < "$F" ;;
   display-message)
     case "$fmt" in
-      '#{window_name}') cut -d'|' -f2 <<<"$line" ;;
-      '#{pane_current_command}') cut -d'|' -f3 <<<"$line" ;;
       '#{window_activity}') echo $(( $(date +%s) - $(cut -d'|' -f5 <<<"$line") )) ;;
+      '#{pane_id}|#{pane_current_command}|#{pane_current_path}|#{socket_path}|#{session_created}|#{session_id}')
+        # STUB_LANE_META_BROKEN models a real tmux failure on the ledger's
+        # own identity probe (agent-dotfiles#144 finding 4): a target that
+        # cannot be resolved prints a single-line error with NO pipe in it,
+        # not an empty string and not a partially-filled template. dispatch.sh
+        # has one guard specifically for this (`LANE_META` sanity check); a
+        # test that never exercises this branch cannot tell whether that
+        # guard does anything.
+        if [ -n "${STUB_LANE_META_BROKEN:-}" ]; then
+          echo "can't find pane: $target"
+        else
+          value="$fmt"
+          value="${value//'#{window_name}'/$(cut -d'|' -f2 <<<"$line")}"
+          value="${value//'#{pane_current_command}'/$(cut -d'|' -f3 <<<"$line")}"
+          value="${value//'#{pane_id}'/%$win}"
+          value="${value//'#{pane_current_path}'/${STUB_PANE_PATH:-$PWD}}"
+          value="${value//'#{socket_path}'/${STUB_SOCKET_PATH:-/tmp/stub-tmux-socket}}"
+          value="${value//'#{session_created}'/${STUB_SESSION_CREATED:-1700000000}}"
+          value="${value//'#{session_id}'/${STUB_SESSION_ID:-\$0}}"
+          printf '%s\n' "$value"
+        fi ;;
+      *)
+        # Token expansion rather than whole-format matching, so a caller
+        # asking for several fields in one call gets them the way real tmux
+        # does. dispatch.sh reads the pane's identity this way for the ledger
+        # record (#140); the single-token formats used elsewhere still come
+        # out unchanged.
+        #
+        # The pane identity fields have no fixture column -- the fixture is
+        # about lane STATE -- so they are synthesised per window, and
+        # overridable where a test needs to assert on the value.
+        value="$fmt"
+        value="${value//'#{window_name}'/$(cut -d'|' -f2 <<<"$line")}"
+        value="${value//'#{pane_current_command}'/$(cut -d'|' -f3 <<<"$line")}"
+        value="${value//'#{pane_id}'/%$win}"
+        value="${value//'#{pane_current_path}'/${STUB_PANE_PATH:-$PWD}}"
+        value="${value//'#{socket_path}'/${STUB_SOCKET_PATH:-/tmp/stub-tmux-socket}}"
+        value="${value//'#{session_created}'/${STUB_SESSION_CREATED:-1700000000}}"
+        value="${value//'#{session_id}'/${STUB_SESSION_ID:-\$0}}"
+        printf '%s\n' "$value" ;;
     esac ;;
   capture-pane)
     printf '%b\n' "$(cut -d'|' -f4 <<<"$line")"

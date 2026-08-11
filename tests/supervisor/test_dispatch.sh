@@ -70,8 +70,15 @@ run() {
     DISPATCH_PANE_ROWS="${DISPATCH_PANE_ROWS:-}" \
     DISPATCH_PANE_COLS="${DISPATCH_PANE_COLS:-60}" \
     DISPATCH_MESSAGE_BUDGET="${DISPATCH_MESSAGE_BUDGET:-430}" \
-    WORKTREE_ROOT="$D/roots" bash "$DISPATCH" "$@" 2>&1
+    AGENT_SUPERVISOR_STATE_DIR="${LEDGER_STATE:-$D/state}" \
+    STUB_PANE_PATH="${STUB_PANE_PATH:-$REPO}" \
+    WORKTREE_ROOT="$D/roots" bash "${DISPATCH_SCRIPT:-$DISPATCH}" "$@" 2>&1
 }
+# AGENT_SUPERVISOR_STATE_DIR is not optional in this harness. Without it the
+# ledger record dispatch.sh now writes (#140) would land in the REAL supervisor
+# state directory under $HOME -- a test suite writing into the live estate's
+# ledger. LEDGER_STATE overrides it for the cases that need a broken one.
+ledger() { AGENT_SUPERVISOR_STATE_DIR="${LEDGER_STATE:-$D/state}" python3 "$HERE/../../scripts/supervisor/cli.py" "$@"; }
 tmuxlog()   { cat "$D/tmux.log"; }
 assignees() { awk -F'|' -v n="$1" '$1==n{print $2}' "$D/issues"; }
 worktrees() { ls "$D/roots" 2>/dev/null | wc -l | tr -d ' '; }
@@ -452,6 +459,196 @@ out=$(DISPATCH_MESSAGE_BUDGET=430 run 81 long-message "$DEEP/brief.md" "" "$REPO
 want_exit "a message over the budget refuses up front" "$rc" 1 "$out"
 want_contains "and explains the 80x24 limit" "over the 430-char budget" "$out"
 want_missing "nothing is typed at a lane when the budget is blown" "send-keys" "$(tmuxlog)"
+
+# --- the dispatch is RECORDED, not left to be inferred later (#140) -------
+#
+# Every signal that a lane is busy is inferred from pane content today, and
+# inference is what produced the false-`free` bugs #102, #123 and #126. A
+# successful dispatch must leave a record that says so, in the ledger, without
+# changing anything about what runs: the assertions above this line are the
+# same ones, and they pass unchanged.
+#
+# Its own state directory, because the successful dispatches earlier in this
+# file already recorded a task against lane t:3 and the ledger allows one
+# outstanding task per lane. In production lane-done.sh completes that task
+# before the lane can be redispatched -- it does the rename that makes the
+# lane eligible at all -- so the sequence this isolates for is the test
+# file's, not the estate's.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+printf '140|| a dispatch that must be recorded\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-140" run 140 ledger-record "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a dispatch that will be recorded still succeeds" "$rc" 0 "$out"
+status=$(LEDGER_STATE="$D/state-140" ledger status 2>&1)
+want_contains "the lane the brief went to is recorded" '"lane":"t:3"' "$status"
+want_contains "the pane identity is recorded, not guessed" '"pane_id":"%3"' "$status"
+want_contains "the harness is recorded" '"harness":"claude"' "$status"
+want_contains "the task is recorded under the window name the estate keys on" \
+  '"id":"ad140-ledger-record"' "$status"
+want_contains "the task is recorded as delivered -- the brief was verified in the pane" \
+  '"status":"delivered"' "$status"
+want_contains "the record carries the worktree the lane was given" "$D/roots" "$status"
+want_contains "the record carries the issue it was dispatched for" '"source_ref":"140"' "$status"
+
+# --- THE LANE_META SANITY GUARD (agent-dotfiles#144 finding 4) ------------
+#
+# The pane-identity probe the ledger recording block makes right before
+# `record-dispatch` can itself fail against a real tmux -- a target it
+# cannot resolve prints a single-line error, not the pipe-joined template
+# dispatch.sh expects. The guard exists to catch that BEFORE `IFS='|' read`
+# scatters an error string across PANE_ID/PANE_CMD/etc and hands it to
+# cli.py as if it were real pane identity. The brief must still go out --
+# this is a bookkeeping failure, not a dispatch failure, same contract as
+# #140's own ledger-failure tolerance.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+printf '145|| a dispatch whose pane-identity probe itself fails\n' >> "$D/issues"
+export STUB_LANE_META_BROKEN=1
+out=$(LEDGER_STATE="$D/state-145" run 145 ledger-meta-broken "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+unset STUB_LANE_META_BROKEN
+want_exit "a broken pane-identity probe does NOT abort the dispatch" "$rc" 0 "$out"
+log=$(tmuxlog)
+want_contains "the brief still goes out" "send-keys -t t:3" "$log"
+want_contains "and is still submitted" "send-keys -t t:3 Enter" "$log"
+want_contains "the guard names the failure as an unreadable pane probe" \
+  "could not read pane metadata" "$out"
+status=$(LEDGER_STATE="$D/state-145" ledger status 2>&1)
+want_contains "no garbage dispatch is recorded from the malformed probe" '"lanes":[]' "$status"
+want_contains "and no task either" '"tasks":[]' "$status"
+
+# ...and that guard is load-bearing. Patch a copy that always takes the
+# "well-formed" branch regardless of what LANE_META actually contains, and
+# confirm the specific reason string above disappears -- a suite that still
+# reports "could not read pane metadata" with the guard removed has not
+# tested the guard, only the ledger-failure tolerance underneath it.
+BROKEN_META_GUARD="$D/dispatch-lane-meta-unguarded.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$BROKEN_META_GUARD" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = 'if [ -z "$LANE_META" ] || [[ "$LANE_META" != *"|"* ]]; then'
+assert marker in text, "LANE_META guard not found -- script shape changed"
+assert text.count(marker) == 1, "LANE_META guard not unique -- script shape changed"
+text = text.replace(marker, "if false; then  # MUTATED: guard always skipped", 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose LANE_META guard is skipped" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh whose LANE_META guard is skipped"
+  printf '146|| the same broken probe, against the unguarded copy\n' >> "$D/issues"
+  export STUB_LANE_META_BROKEN=1
+  out=$(DISPATCH_SCRIPT="$BROKEN_META_GUARD" LEDGER_STATE="$D/state-146" \
+        run 146 ledger-meta-unguarded "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+  unset STUB_LANE_META_BROKEN
+  if ! grep -qF "could not read pane metadata" <<<"$out"; then
+    ok "mutation confirmed: skipping the guard loses the specific pane-probe diagnosis (the assertion above would now be red)"
+  else
+    bad "mutation confirmed: skipping the guard loses the specific pane-probe diagnosis" \
+      "the unguarded copy still reported 'could not read pane metadata' -- the patch missed the real guard: $out"
+  fi
+  want_exit "the unguarded copy still does not abort the dispatch" "$rc" 0 "$out"
+fi
+
+# --- A LEDGER FAILURE MUST NOT ABORT A DISPATCH ---------------------------
+#
+# The property the whole design rests on. `dispatch.sh` aborts and unwinds on
+# every other failure, which is right for claims and worktrees -- real
+# resources. It is wrong here: nothing reads the ledger yet, so a broken one
+# that stopped the estate dispatching would trade the estate for a record with
+# no reader. The failure must be LOUD and the dispatch must stand.
+#
+# The break is a state directory that cannot exist -- a path whose parent is a
+# regular file -- so the ledger genuinely errors rather than being skipped.
+printf '141|| a dispatch whose ledger write fails\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/brief.md/state" run 141 ledger-broken "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a ledger that errors does NOT abort the dispatch" "$rc" 0 "$out"
+log=$(tmuxlog)
+want_contains "the brief still goes out when the ledger is broken" "send-keys -t t:3" "$log"
+want_contains "and is still submitted" "send-keys -t t:3 Enter" "$log"
+want_contains "the ledger failure is loud, not swallowed" "LEDGER RECORD FAILED" "$out"
+want_contains "and says which dispatch lost its record" "ad141-ledger-broken" "$out"
+want_contains "the claim is NOT unwound over a bookkeeping failure" "jonhill90" "$(assignees 141)"
+
+# ...and that tolerance is load-bearing. Patch a copy that makes the ledger
+# write fatal and confirm the case above goes red against it -- a suite that
+# still passes with the failure-tolerance removed has not tested the property.
+BROKEN_DISPATCH="$D/dispatch-ledger-fatal.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$BROKEN_DISPATCH" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = "  return 0  # the ledger write is never fatal -- agent-dotfiles#140"
+assert marker in text, "ledger failure-tolerance line not found -- script shape changed"
+assert text.count(marker) == 1, "ledger failure-tolerance line not unique -- script shape changed"
+text = text.replace(marker, "  exit 1  # MUTATED: ledger write made fatal", 1)
+# The copy runs from a temp directory, and dispatch.sh finds lanes.sh,
+# claim.sh, worktree.sh and cli.py relative to its own location. Pin HERE to
+# the real one, or the copy refuses "no free lane" before reaching the line
+# under test and the mutation check passes for the wrong reason -- which is
+# what it did on the first run of this test.
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose ledger write is fatal" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh whose ledger write is fatal"
+  printf '142|| the same failure, against the fatal copy\n' >> "$D/issues"
+  out=$(DISPATCH_SCRIPT="$BROKEN_DISPATCH" LEDGER_STATE="$D/brief.md/state" \
+        run 142 ledger-fatal "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    ok "mutation confirmed: making the ledger write fatal fails a dispatch that WORKED (the assertion above would now be red)"
+  else
+    bad "mutation confirmed: making the ledger write fatal fails a dispatch that worked" \
+      "the fatal copy still exited 0 -- the patch missed the real failure-tolerance path: $out"
+  fi
+  want_contains "and the brief had already gone out when it did -- which is why fatal is wrong here" \
+    "send-keys -t t:3 Enter" "$(tmuxlog)"
+fi
+
+# --- AN ABORTED DISPATCH LEAVES NO RECORD SAYING WORK IS IN FLIGHT --------
+#
+# The subtle one. A record claiming a lane is busy, written by a dispatch that
+# then aborted, is worse than no record: the entire point of the ledger is to
+# be believed. The guarantee is ordering, not cleanup -- the write happens
+# after the last abort path -- so this asserts the ledger is EMPTY, lane row
+# included, not merely that the task was tidied up afterwards.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+printf '143|| a dispatch that aborts on its worktree\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-143" run 143 ledger-abort "$D/brief-orig.md" acme/agent-dotfiles "$D/not-a-git-repo"); rc=$?
+want_exit "a dispatch that aborts on a failed worktree still fails" "$rc" 1 "$out"
+status=$(LEDGER_STATE="$D/state-143" ledger status 2>&1)
+want_missing "an aborted dispatch records no task" "ad143-ledger-abort" "$status"
+want_contains "and no lane record asserting a lane is occupied" '"lanes":[]' "$status"
+want_contains "and no task at all" '"tasks":[]' "$status"
+
+# The same, for the abort that happens before a worktree is even attempted:
+# an issue someone else has claimed.
+printf '144|someone-else| already claimed, must record nothing\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-144" run 144 ledger-claimed "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a dispatch refused at the claim still fails" "$rc" 1 "$out"
+status=$(LEDGER_STATE="$D/state-144" ledger status 2>&1)
+want_contains "a refused claim records no lane" '"lanes":[]' "$status"
+want_contains "a refused claim records no task" '"tasks":[]' "$status"
 
 rm -rf "$D"
 

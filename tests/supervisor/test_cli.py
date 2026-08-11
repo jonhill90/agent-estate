@@ -290,5 +290,71 @@ class CliIsRunnable(unittest.TestCase):
         self.assertNotEqual(0, proc.returncode)
 
 
+class RecordDispatchCliTest(unittest.TestCase):
+    """agent-dotfiles#144: exercises `record-dispatch` / `record-completion`
+    end to end through `cli.main`, the way `dispatch.sh` / `lane-done.sh`
+    actually call them -- not just `Ledger.record_dispatch` directly."""
+
+    def _dispatch(self, root, *, lane, task, issue, pane_id="%3"):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = cli.main([
+                "--state-dir", root, "record-dispatch",
+                "--lane", lane, "--task", task, "--summary", f"#{issue} summary",
+                "--pane-id", pane_id, "--pane-path", root, "--command", "claude.exe",
+                "--server-id", "socket:1", "--session-id", "$0",
+                "--issue", str(issue), "--github", "jonhill90/agent-dotfiles",
+            ])
+        return rc, output.getvalue()
+
+    def test_re_dispatching_the_same_issue_under_a_different_task_id_is_recorded(self):
+        """agent-dotfiles#144 finding 1, the reviewer's own repro: a lane
+        fails, work is re-briefed under a new task id, same issue. This used
+        to raise `UNIQUE constraint failed: source_tasks.source_url` on the
+        second call."""
+        with tempfile.TemporaryDirectory() as root:
+            rc1, out1 = self._dispatch(root, lane="free-3", task="ad999-first", issue=999)
+            self.assertEqual(0, rc1, out1)
+            rc2, out2 = self._dispatch(root, lane="free-4", task="ad999-rereview", issue=999, pane_id="%4")
+            self.assertEqual(0, rc2, out2)
+            self.assertEqual("delivered", json.loads(out2)["task"]["status"])
+
+    def test_record_completion_of_an_unknown_task_raises_rather_than_reporting_success(self):
+        """agent-dotfiles#144 finding 4: `record_completion` looked up the
+        task and raised `RuntimeError(f"unknown task: {task}")` when it was
+        missing. Pins that the CLI surfaces this as a failure, not as a
+        silently empty success -- a mutation to `return {}` instead must turn
+        this red."""
+        with tempfile.TemporaryDirectory() as root:
+            proc = subprocess.run(
+                [sys.executable, str(SUPERVISOR_DIR / "cli.py"), "--state-dir", root,
+                 "record-completion", "--task", "does-not-exist", "--note", "done"],
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(0, proc.returncode)
+            self.assertIn("unknown task", proc.stderr)
+
+    def test_record_dispatch_refuses_an_unmapped_pane_command_without_a_harness_override(self):
+        """agent-dotfiles#144 finding 4: `HARNESS_BY_COMMAND` only maps
+        codex/claude/claude.exe. A pane running an unmapped command (the
+        review's example: `node`, seen live on agent-dotfiles:7/:8) must
+        raise and name the command, not silently default to a harness the
+        pane is not actually running."""
+        with tempfile.TemporaryDirectory() as root:
+            proc = subprocess.run(
+                [sys.executable, str(SUPERVISOR_DIR / "cli.py"), "--state-dir", root,
+                 "record-dispatch", "--lane", "free-7", "--task", "ad999-node",
+                 "--summary", "#999 summary", "--pane-id", "%7", "--pane-path", root,
+                 "--command", "node", "--server-id", "socket:1", "--session-id", "$0",
+                 "--issue", "999"],
+                capture_output=True, text=True,
+            )
+            self.assertNotEqual(0, proc.returncode)
+            self.assertIn("cannot tell which harness", proc.stderr)
+            self.assertIn("node", proc.stderr)
+            # And no partial record was left behind by the refusal.
+            self.assertIsNone(Ledger(Path(root)).get_task("ad999-node"))
+
+
 if __name__ == "__main__":
     unittest.main()

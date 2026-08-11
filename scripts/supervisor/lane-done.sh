@@ -89,4 +89,27 @@ if [ "$CURRENT" != "$EXPECTED_NAME" ]; then
   exit 1
 fi
 
-tmux rename-window -t "${SESSION}:${IDX}" "free-${IDX}"
+tmux rename-window -t "${SESSION}:${IDX}" "free-${IDX}" || exit 1
+
+# Record the completion (agent-dotfiles#140). BEST EFFORT, NEVER FATAL, for
+# the same reason as dispatch.sh's matching block: nothing reads the ledger
+# yet, so a failed bookkeeping write must not turn a lane that genuinely
+# finished -- and has already been renamed back into the pool -- into a
+# reported failure. Loud on failure, never silent.
+#
+# Runs AFTER the rename, so the only completion ever recorded is one that
+# actually released the lane. The task id is the window name dispatch.sh set,
+# which is what it recorded the task under.
+#
+# Not `cli.py complete`: that verifies $TMUX_PANE owns the lane and wants a
+# --result-file. This script runs in the supervisor's pane and holds no result
+# artifact -- the fact it has is that the worker's channel fired.
+if ! LEDGER_OUT=$("${LANE_DONE_PYTHON:-python3}" \
+    "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cli.py" \
+    record-completion --task "$EXPECTED_NAME" \
+    --note "lane-done: ${CHANNEL} signaled; ${SESSION}:${IDX} renamed to free-${IDX}" 2>&1); then
+  echo "lane-done: LEDGER RECORD FAILED for $EXPECTED_NAME -- the lane IS free, the record is not written" >&2
+  sed 's/^/  /' <<<"$LEDGER_OUT" >&2
+fi
+
+exit 0
