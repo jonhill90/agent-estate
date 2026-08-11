@@ -1,6 +1,6 @@
 #!/bin/bash
 # Stub tmux for lanes.sh tests. LANES_FIXTURE holds one line per window:
-#   <index>|<name>|<command>|<pane-text>|<activity-age-seconds>|<in-mode>|<box>
+#   <index>|<name>|<command>|<pane-text>|<activity-age-seconds>|<in-mode>|<box>|<pane-argv>
 # The 5th column is how many seconds ago tmux last saw output, which is what
 # separates hung from busy. It replaced a two-capture scheme that diffed pane
 # text: Claude Code's elapsed footer is minute-granular past 60s, so a live
@@ -24,7 +24,18 @@
 #
 # `capture-pane -e` is what carries the dim attribute, so the box is emitted
 # with real SGR: dim is ESC[2m ... ESC[0m, exactly as the live TUI paints it.
+#
+# The 8th column models the argv of the pane's FIRST process (#154) -- what
+# `ps -o args= -p #{pane_pid}` prints. `pane_pid` is emitted here as
+# PID_BASE + window index, and stubs/ps-lanes maps it back to this column, so
+# a fixture row can say "this pane's own process is the Telegram poller"
+# rather than starting one. Omitted, it defaults to `-zsh`, which is what
+# every real lane in the live session measured as on 2026-08-11 -- the agent
+# runs as a CHILD of the pane's login shell. Every pre-existing fixture row is
+# in that case, on purpose.
 F="${LANES_FIXTURE:?}"
+# Kept in sync with stubs/ps-lanes.
+PID_BASE="${LANES_STUB_PID_BASE:-9000}"
 sub="$1"; shift
 target=""; fmt=""
 while [ $# -gt 0 ]; do
@@ -42,13 +53,14 @@ case "$sub" in
   list-windows) cut -d'|' -f1 "$F" ;;
   list-panes)
     # Mirrors the real -F used by lanes.sh: index, name, command, activity,
-    # in-mode, tab separated, active pane only.
+    # in-mode, pane pid, tab separated, active pane only.
     now=$(date +%s)
     # `b` absorbs the input-box column so it cannot leak into `m`: with a
     # 6-variable read, a 7-field row put "0|<box>" into the in-mode slot and
-    # every boxed fixture reported `scrolled`.
-    while IFS='|' read -r i n c t a m b; do
-      printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$n" "$c" "$((now-a))" "${m:-0}"
+    # every boxed fixture reported `scrolled`. `p` does the same for the argv
+    # column added in #154.
+    while IFS='|' read -r i n c t a m b p; do
+      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$n" "$c" "$((now-a))" "${m:-0}" "$((PID_BASE+i))"
     done < "$F" ;;
   display-message)
     case "$fmt" in
