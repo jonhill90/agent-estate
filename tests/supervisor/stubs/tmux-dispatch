@@ -80,8 +80,26 @@ case "$sub" in
   capture-pane)
     printf '%b\n' "$(cut -d'|' -f4 <<<"$line")"
     # Whatever has been typed into this pane and not yet cleared. Line-wrapped
-    # at 60 columns, because a real pane wraps a long path across lines and a
-    # caller checking for it must survive that.
-    [ -f "$PANES/$win" ] && fold -w 60 "$PANES/$win" ;;
+    # at DISPATCH_PANE_COLS columns, because a real pane wraps a long path
+    # across lines and a caller checking for it must survive that.
+    #
+    # DISPATCH_PANE_ROWS models the OTHER half of a real input box, and this
+    # stub was blind to it until #118: the box shows only its last few rows and
+    # scrolls INTERNALLY, so a long enough message pushes its own head out of
+    # what capture-pane can see. Measured against a real Claude Code TUI at
+    # 80x24, the head goes out of view somewhere between 450 and 500 characters
+    # -- and the stub, modelling an input line of unbounded height, reported
+    # every length as fully visible. A message that broke dispatch to `free-9`
+    # and `free-10` passed all 78 assertions.
+    #
+    # Unset (the default) keeps the old unbounded behaviour, so existing tests
+    # are unchanged; set it to model a small lane.
+    if [ -f "$PANES/$win" ]; then
+      if [ -n "${DISPATCH_PANE_ROWS:-}" ]; then
+        fold -w "${DISPATCH_PANE_COLS:-60}" "$PANES/$win" | tail -n "$DISPATCH_PANE_ROWS"
+      else
+        fold -w "${DISPATCH_PANE_COLS:-60}" "$PANES/$win"
+      fi
+    fi ;;
 esac
 exit 0
