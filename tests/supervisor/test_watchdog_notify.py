@@ -16,6 +16,7 @@ from watchdog_notify import (  # noqa: E402
     main,
     parse_restarts,
     parse_status,
+    send_via_notify_skill,
 )
 
 
@@ -206,3 +207,41 @@ class MainCliTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SenderInvocationTests(unittest.TestCase):
+    """Which notifier gets called, and how.
+
+    Two notifiers exist: the `notify` skill (iMessage only) and
+    `scripts/supervisor/notify.sh` (Telegram, the only one proven to reach
+    Jon). Routing an escalation to the wrong one means an escalation that
+    reaches nobody, which is the failure this whole path exists to prevent.
+    """
+
+    def test_a_shell_notifier_is_called_with_subject_and_body(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "notify.sh"
+            script.write_text('#!/bin/bash\nprintf "%s|%s" "$1" "$2" > "$(dirname "$0")/got"\n')
+            script.chmod(0o755)
+            send_via_notify_skill("loop is down", notify_script=str(script))
+            self.assertEqual((Path(tmp) / "got").read_text(), "Supervisor escalation|loop is down")
+
+    def test_a_python_notifier_keeps_the_flag_form(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "notify.py"
+            script.write_text(
+                "import sys,pathlib\n"
+                "pathlib.Path(__file__).with_name('got').write_text(' '.join(sys.argv[1:]))\n"
+            )
+            send_via_notify_skill("loop is down", notify_script=str(script))
+            self.assertEqual(
+                (Path(tmp) / "got").read_text(), "--message loop is down --send"
+            )
+
+    def test_a_failing_notifier_raises_rather_than_silently_succeeding(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "notify.sh"
+            script.write_text('#!/bin/bash\necho "no channel" >&2\nexit 1\n')
+            script.chmod(0o755)
+            with self.assertRaises(SendError):
+                send_via_notify_skill("x", notify_script=str(script))

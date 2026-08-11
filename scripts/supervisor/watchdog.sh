@@ -1,0 +1,223 @@
+#!/bin/bash
+# Restarts the architecture supervisor loop when it has died with work left.
+#
+# It is a WATCHDOG, not the loop. The loop is event-driven; this only catches
+# the case where it stopped and nobody noticed. Never make this the mechanism —
+# a 3-minute timer driving real work is what exhausted the weekly limit twice
+# (see loop-throughput-comes-from-lanes-not-cadence in the memory vault).
+#
+# Rewritten 2026-08-11 after a four-reviewer council (Codex/gpt-5.6-sol,
+# Claude, Copilot, Pi/gpt-5.5), each given a different lens. Three findings
+# were confirmed with evidence and are fixed here:
+#
+#   1. GitHub failure was counted as zero work.  `n=$(gh ...) || n=0` turned an
+#      unreachable API into "nothing actionable" — indistinguishable from a
+#      genuinely empty queue. This matters specifically because `gh` keeps its
+#      token in the macOS keyring, which a cron job frequently cannot read.
+#      Evidenced: the 04:18:02Z tick logged "nothing actionable" while eleven
+#      actionable items were open. Now a query failure marks the tick DEGRADED
+#      and fails TOWARD restarting, because a stalled loop costs more than a
+#      redundant restart.
+#   2. Silent on the healthy path.  Healthy-and-busy, dead-cron, and
+#      nothing-to-do all looked identical: no new log line. Now every tick
+#      writes STATUS atomically, so one `cat` answers "where are we" and a
+#      stale timestamp proves the cron itself has stopped.
+#   3. No escalation.  Restarting forever hides the bug it is papering over.
+#      After MAX_RESTARTS in ESCALATE_WINDOW it stops restarting, says so in
+#      STATUS, and leaves the loop down for a human.
+#
+# Cost when healthy: one tmux read, one status write, zero model tokens.
+
+set -uo pipefail
+PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin"
+export PATH
+
+# Overridable so the script is testable and so a second lane can
+# reuse it. Hardcoding the target was raised in review as both a
+# portability and an untestability problem.
+PANE="${SUPERVISOR_PANE:-agent-dotfiles:1.1}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Runtime state (logs, status, briefs) stays outside the repo; the CODE
+# lives here and is versioned and tested. Splitting them was the point of
+# moving this file in: an untracked shell script that the whole loop
+# depends on is not reproducible for anyone else.
+STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
+LOG="${SUPERVISOR_LOG:-$STATE/watchdog.log}"
+STATUS="${SUPERVISOR_STATUS:-$STATE/watchdog.status}"
+TICK="${SUPERVISOR_TICK:-$HERE/loop-tick.md}"
+STAMP="$STATE/.last-restart"
+HISTORY="$STATE/.restart-history"
+read -r -a REPOS <<<"${SUPERVISOR_REPOS:-agent-dotfiles skills skills-private agent-evals}"
+
+COOLDOWN=600        # no more than one restart per 10 minutes
+MAX_RESTARTS=3      # ...and no more than this many
+ESCALATE_WINDOW=3600 # ...within this window, or stop and escalate
+
+# Credentials + NOTIFY_SCRIPT for the escalate path. Sourced here so the
+# LaunchAgent needs no secrets inlined in its plist.
+ENVFILE="${NOTIFY_ENV:-$STATE/notify.env}"
+# shellcheck source=/dev/null
+if [ -r "$ENVFILE" ]; then set -a; . "$ENVFILE"; set +a; fi
+
+now=$(date +%s)
+iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+
+log() { printf '%s %s\n' "$iso" "$*" >>"$LOG"; }
+
+# Heartbeat. Written on EVERY exit path, including the healthy one — that is
+# the whole point of finding 2. Atomic so a reader never sees a half file.
+report() {                       # report <state> <detail>
+  local tmp="$STATUS.$$"
+  {
+    printf 'checked:  %s\n' "$iso"
+    printf 'state:    %s\n' "$1"
+    printf 'detail:   %s\n' "${2:-}"
+    printf 'pane:     %s\n' "$PANE"
+    printf 'restarts: %s in the last %ss\n' "${recent:-0}" "$ESCALATE_WINDOW"
+  } >"$tmp" 2>/dev/null && mv -f "$tmp" "$STATUS" 2>/dev/null
+
+  # escalate is the only state a human needs told about; every other state
+  # (working/waiting_on_jon/cooling_down/restarted/...) stays silent, and
+  # dedup is one message per escalation episode, not one per tick. That
+  # decision and its dedup state live in tracked, tested code — this line
+  # is the whole hookup. See scripts/supervisor/watchdog_notify.py in
+  # agent-dotfiles (#50); AGENT_DOTFILES_REPO overrides the default clone
+  # path for a machine laid out differently.
+  local notify_out notify_rc
+  notify_out=$(python3 "${AGENT_DOTFILES_REPO:-$HOME/source/repos/Personal/agent-dotfiles}/scripts/supervisor/watchdog_notify.py" \
+    --status-path "$STATUS" \
+    --episode-state-path "$STATE/.watchdog-escalate-episode.json" \
+    --log-path "$STATE/watchdog-notify.log" \
+    --notify-script "${NOTIFY_SCRIPT:-}" 2>&1)
+  notify_rc=$?
+  if [ "$notify_rc" -ne 0 ]; then
+    log "NOTIFY-CHECK rc=$notify_rc: $notify_out"
+  fi
+}
+
+trap 'rm -f "$STATUS.$$" 2>/dev/null' EXIT
+
+# How many restarts inside the escalation window?
+recent=0
+if [ -f "$HISTORY" ]; then
+  recent=$(awk -v now="$now" -v w="$ESCALATE_WINDOW" '$1 > now - w' "$HISTORY" 2>/dev/null | wc -l | tr -d ' ')
+  awk -v now="$now" -v w="$ESCALATE_WINDOW" '$1 > now - w' "$HISTORY" >"$HISTORY.tmp" 2>/dev/null \
+    && mv -f "$HISTORY.tmp" "$HISTORY"
+fi
+
+if ! tmux has-session -t agent-dotfiles 2>/dev/null; then
+  report no_session "tmux session 'agent-dotfiles' does not exist"
+  log "no agent-dotfiles session"; exit 0
+fi
+
+pane=$(tmux capture-pane -p -t "$PANE" -S -6 2>/dev/null) || {
+  report pane_unreadable "cannot capture $PANE"
+  log "pane $PANE unreadable"; exit 0
+}
+
+# Busy. The harness prints this only while a turn is running. This is a
+# Claude Code string — see the portability note in the repo copy; a lane
+# running another harness needs its own probe.
+if grep -q 'esc to interrupt' <<<"$pane"; then
+  report working "supervisor turn in progress"
+  exit 0
+fi
+
+# Idle is NOT evidence of death. A dynamic /loop sleeps by scheduling its own
+# wakeup, so between ticks the pane looks exactly like a stopped loop. Measured
+# 2026-08-11: the supervisor had scheduled delay=3600 on eight consecutive
+# ticks ("maximum sleep keeps the loop alive") and had crashed zero times --
+# while this watchdog was restarting it every cooldown because it counted nine
+# open issues the supervisor had correctly judged gated on Jon. The watchdog
+# was the thing interrupting the loop it existed to protect.
+#
+# sleepcheck.py reads the last ScheduleWakeup from the live transcript and
+# says whether a wakeup is still pending. It observes rather than trusting a
+# cooperating writer, which is the same reason completion is not inferred from
+# echoed prompt text.
+if python3 "$HERE/sleepcheck.py" >/dev/null 2>&1; then
+  report asleep "loop has a pending wakeup — idle is correct, not dead"
+  exit 0
+fi
+
+# Idle. Is there anything to do? A failed query is NOT zero (finding 1).
+work=0; degraded=""
+for r in "${REPOS[@]}"; do
+  if n=$(gh issue list --repo "jonhill90/$r" --state open --limit 60 \
+           --json number,labels \
+           --jq '[.[]|select([.labels[].name]|any(.=="parked" or .=="question")|not)]|length' 2>/dev/null) \
+     && [[ "$n" =~ ^[0-9]+$ ]]; then
+    work=$((work + n))
+  else
+    degraded="${degraded}${r} "
+  fi
+  if p=$(gh pr list --repo "jonhill90/$r" --state open --json number --jq 'length' 2>/dev/null) \
+     && [[ "$p" =~ ^[0-9]+$ ]]; then
+    work=$((work + p))
+  else
+    degraded="${degraded}${r}:pr "
+  fi
+done
+
+if [ -n "$degraded" ]; then
+  log "DEGRADED: GitHub unreachable for: ${degraded% } — treating as work-present, not as zero"
+fi
+
+if [ -z "$degraded" ] && [ "$work" -eq 0 ]; then
+  report waiting_on_jon "idle, queue empty or everything gated on Jon — correct to be still"
+  exit 0
+fi
+
+# Idle with work (or unknown). The loop should not be stopped.
+if [ "$recent" -ge "$MAX_RESTARTS" ]; then
+  report escalate "restarted $recent times in ${ESCALATE_WINDOW}s and it keeps dying — NOT restarting again, needs a human"
+  log "ESCALATE: $recent restarts in ${ESCALATE_WINDOW}s; leaving the loop down deliberately"
+  # Reach a human. ONLY here -- never on working, waiting_on_jon, cooling_down
+  # or restarted. Deduplicated to one message per escalate episode by
+  # watchdog_notify.py, because a watchdog that messages every tick gets muted
+  # and a muted channel is indistinguishable from no channel.
+  python3 "$HERE/watchdog_notify.py" >/dev/null 2>&1 \
+    || log "NOTIFY FAILED — escalation did not reach a human"
+  exit 0
+fi
+
+last=$(cat "$STAMP" 2>/dev/null || echo 0)
+if [ $((now - last)) -lt "$COOLDOWN" ]; then
+  report cooling_down "idle with ${work} item(s); last restart $((now - last))s ago"
+  exit 0
+fi
+
+# Do not clobber text Jon has typed and not submitted.
+#
+# The harness renders the PREVIOUS prompt as ghost placeholder text on an empty
+# input line, so "the line looks non-empty" proves nothing. Append a character
+# and see whether it lands on top of existing text or replaces the ghost:
+#
+#   real text  ->  "❯ do the thing"  becomes  "❯ do the thingX"
+#   ghost text ->  "❯ do the thing"  becomes  "❯ X"
+#
+# Real iff the new line is the old line with X appended. The first version
+# compared the wrong direction and called every ghost line real, which would
+# have meant the watchdog never restarted anything.
+promptline() { tmux capture-pane -p -t "$PANE" -S -3 2>/dev/null | grep -m1 '^❯' || true; }
+before=$(promptline)
+tmux send-keys -t "$PANE" -l 'X' 2>/dev/null; sleep 1
+after=$(promptline)
+tmux send-keys -t "$PANE" BSpace 2>/dev/null; sleep 1
+if [ -n "$before" ] && [ "$after" = "${before}X" ]; then
+  report human_typing "un-submitted text in the pane — left alone"
+  log "real un-submitted text in pane — not touching it"
+  exit 0
+fi
+
+tmux send-keys -t "$PANE" C-u 2>/dev/null; sleep 1
+tmux send-keys -t "$PANE" -l \
+  "/loop Supervisor tick. Follow $TICK exactly. Dispatch to idle worker lanes rather than implementing yourself. Never call stop, always re-arm." 2>/dev/null
+sleep 2
+tmux send-keys -t "$PANE" Enter 2>/dev/null
+
+echo "$now" >"$STAMP"
+echo "$now" >>"$HISTORY"
+recent=$((recent + 1))
+report restarted "was idle with ${work} item(s)${degraded:+ (GitHub degraded: ${degraded% })}"
+log "RESTARTED loop — idle with ${work} actionable item(s)${degraded:+; DEGRADED: ${degraded% }}"

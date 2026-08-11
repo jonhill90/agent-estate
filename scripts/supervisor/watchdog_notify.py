@@ -180,19 +180,29 @@ def check_and_notify(*, status_path, episode_state_path, sender, log_path=None) 
 
 
 def send_via_notify_skill(message: str, *, notify_script: str) -> None:
-    """Real sender: shells out to the `notify` skill's `notify.py --send`.
+    """Real sender: shells out to whichever notifier is configured.
 
-    The skill (jonhill90/skills#148) is the canonical sender, not the
-    untracked reference `notify.sh`. It reads `NOTIFY_IMESSAGE_TARGET` from
-    the environment; this function does not set it, so a missing target
-    surfaces as the skill's own config-error exit 2. `notify.sh`'s
-    `AGENT_NOTIFY_IMESSAGE_TO` is retired by this change -- two env var
-    names for one setting is how a config silently stops working. Its
-    Telegram fallback is real behaviour the skill does not have yet;
-    folding that in is jonhill90/skills#146, not this change.
+    Two call shapes, chosen by extension, because two notifiers exist and
+    only one of them can currently reach Jon:
+
+    - `*.sh` -> `notify.sh "<subject>" "<body>"`. This is
+      `scripts/supervisor/notify.sh`, which delivers over Telegram and is
+      the only path proven to land on Jon's phone (first real message
+      2026-08-11 05:52Z). An earlier version of this docstring called it
+      "the untracked reference"; it is tracked as of #55.
+    - anything else -> `python <script> --message <msg> --send`, the
+      `notify` skill (jonhill90/skills#148), which is iMessage-only today.
+
+    The skill becomes the single canonical sender once it grows Telegram
+    (jonhill90/skills#146); until then, routing escalations through the
+    iMessage-only path would mean escalations that reach nobody.
     """
+    if notify_script.endswith(".sh"):
+        argv = [notify_script, "Supervisor escalation", message]
+    else:
+        argv = [sys.executable, notify_script, "--message", message, "--send"]
     result = subprocess.run(
-        [sys.executable, notify_script, "--message", message, "--send"],
+        argv,
         capture_output=True,
         text=True,
         timeout=30,
