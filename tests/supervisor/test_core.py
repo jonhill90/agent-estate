@@ -362,6 +362,24 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual("claude", claude_lane["harness"])
         self.assertNotEqual(codex_lane["nonce"], claude_lane["nonce"])
 
+    def test_copilot_acp_is_a_registerable_harness(self):
+        """Red: register_lane's Python-level check and the lanes table's CHECK
+        constraint both still hard-code ('codex', 'claude') -- a copilot-acp
+        lane cannot be registered at all, so ACPTransport has no lane to
+        dispatch through."""
+        lane = self.ledger.register_lane(
+            lane="copilot-worker",
+            pane_id="session-1",
+            nonce="nonce-acp",
+            harness="copilot-acp",
+            repo="/repo/app",
+            server_id="acp",
+            session_id="session-1",
+            command="copilot",
+        )
+        self.assertEqual("copilot-acp", lane["harness"])
+        self.assertEqual("copilot-acp", self.ledger.get_lane("copilot-worker")["harness"])
+
     def test_concurrent_assignments_leave_exactly_one_open_task(self):
         self.seed_source("race-a", summary="Task race-a")
         self.seed_source("race-b", summary="Task race-b")
@@ -537,6 +555,72 @@ class TaskTableMigrationTest(unittest.TestCase):
         self.assertEqual("created", task["status"])
         pending = ledger.mark_delivery_pending("t1", pane_nonce="n")
         self.assertEqual("delivery_pending", pending["status"])
+
+
+class LaneTableMigrationTest(unittest.TestCase):
+    """`CREATE TABLE IF NOT EXISTS` does not migrate an existing DB: every
+    ledger created before copilot-acp existed still carries the old
+    CHECK (harness IN ('codex', 'claude')) constraint and would reject a
+    copilot-acp registration forever unless this migration runs."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+        _seed_pre_pr_database(self.root)
+
+    def _raw_lanes_sql(self):
+        connection = sqlite3.connect(self.root / "ledger.sqlite3")
+        try:
+            return connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='lanes'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+
+    def test_reproduction_old_check_constraint_rejects_copilot_acp_directly(self):
+        connection = sqlite3.connect(self.root / "ledger.sqlite3")
+        try:
+            with self.assertRaises(sqlite3.IntegrityError):
+                connection.execute(
+                    "INSERT INTO lanes(lane, pane_id, nonce, harness, repo, server_id, "
+                    "session_id, command, updated_at) VALUES "
+                    "('copilot-worker', 'session-1', 'nonce-acp', 'copilot-acp', '/repo/app', "
+                    "'acp', 'session-1', 'copilot', 1000)"
+                )
+        finally:
+            connection.close()
+
+    def test_opening_pre_pr_database_migrates_lanes_schema_and_preserves_every_row(self):
+        ledger = Ledger(self.root, clock=lambda: 2_000)
+
+        migrated_sql = self._raw_lanes_sql()
+        self.assertIn("copilot-acp", migrated_sql)
+
+        existing = ledger.get_lane("app-review")
+        self.assertEqual("codex", existing["harness"])
+        self.assertEqual("nonce-22-a", existing["nonce"])
+
+        # The point: registering a copilot-acp lane now works against the migrated schema.
+        registered = ledger.register_lane(
+            lane="copilot-worker", pane_id="session-1", nonce="nonce-acp", harness="copilot-acp",
+            repo="/repo/app", server_id="acp", session_id="session-1", command="copilot",
+        )
+        self.assertEqual("copilot-acp", registered["harness"])
+
+        # The outstanding task still bound to the untouched lane survives the rebuild.
+        self.assertEqual("created", ledger.get_task("review-870")["status"])
+        self.assertEqual(2, len(ledger.list_lanes()))
+
+    def test_fresh_ledger_never_triggers_a_lanes_migration_rebuild(self):
+        fresh_root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(fresh_root, ignore_errors=True))
+        ledger = Ledger(fresh_root, clock=lambda: 1_000)
+        registered = ledger.register_lane(
+            lane="copilot-worker", pane_id="session-1", nonce="n", harness="copilot-acp",
+            repo="/r", server_id="acp", session_id="session-1", command="copilot",
+        )
+        self.assertEqual("copilot-acp", registered["harness"])
 
 
 class DeliveryTimestampTest(unittest.TestCase):

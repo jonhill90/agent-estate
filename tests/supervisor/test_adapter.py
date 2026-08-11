@@ -7,7 +7,7 @@ from pathlib import Path
 SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "scripts" / "supervisor"
 sys.path.insert(0, str(SUPERVISOR_DIR))
 
-from adapter import TmuxAdapter, classify_capture  # noqa: E402
+from adapter import ACPAdapter, TmuxAdapter, classify_capture  # noqa: E402
 from core import Ledger  # noqa: E402
 
 
@@ -196,6 +196,118 @@ class AdapterTest(unittest.TestCase):
                 event = self.adapter.observe_lane("architecture")
                 self.assertIsNotNone(event, f"no durable event for {reason}")
                 self.assertEqual(f"attention:needs-help:{reason}", event["key"])
+
+
+class FakeACPTransport:
+    """Stands in for a freshly `ACPTransport.spawn()`-ed process per call --
+    the CLI is one process per command, so there is no live subprocess to
+    reuse between `assign_task` invocations (see `ACPTransport.load_session`
+    docstring)."""
+
+    instances = []
+
+    def __init__(self, sessions=None, stop_reason="end_turn", message="Done."):
+        self.sessions = sessions if sessions is not None else {}
+        self.stop_reason = stop_reason
+        self.message = message
+        self.initialized = False
+        self.loaded_sessions = []
+        self.prompts = []
+        self.closed = False
+        self.terminated = False
+        self.__class__.instances.append(self)
+
+    def initialize(self, **kwargs):
+        self.initialized = True
+        return {}
+
+    def new_session(self, cwd, **kwargs):
+        session_id = f"sess-{len(self.sessions) + 1}"
+        self.sessions[session_id] = cwd
+        return session_id
+
+    def load_session(self, session_id, *, cwd):
+        self.loaded_sessions.append((session_id, cwd))
+        return session_id
+
+    def send_literal(self, target, payload):
+        self.prompts.append((target, payload))
+        return {
+            "stop_reason": self.stop_reason,
+            "message": self.message,
+            "token_usage": {"input_tokens": 10, "output_tokens": 5},
+            "context_window": None,
+        }
+
+    def close(self):
+        self.closed = True
+
+    def terminate(self):
+        self.terminated = True
+        self.close()
+
+
+class ACPAdapterTest(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.ledger = Ledger(Path(self.tempdir.name), clock=lambda: 1_000)
+        FakeACPTransport.instances = []
+        self.shared_sessions = {}
+        self.adapter = ACPAdapter(
+            self.ledger,
+            lambda: FakeACPTransport(sessions=self.shared_sessions),
+            clock=lambda: 1_000,
+        )
+        self._source_number = 899
+
+    def seed_source(self, task_id, summary):
+        self._source_number += 1
+        self.ledger.reconstruct_task(
+            task_id=task_id,
+            source_kind="issue",
+            source_url=f"https://github.com/jonhill90/Hill90/issues/{self._source_number}",
+            source_ref="a" * 40,
+            summary=summary,
+            source_state="OPEN",
+            status="created",
+            evidence=[],
+            status_marker=None,
+        )
+
+    def test_register_lane_opens_an_acp_session_and_stores_it_as_the_lane_identity(self):
+        record = self.adapter.register_lane(
+            lane="copilot-worker", target=None, harness="copilot-acp", repo="/repo/hill90", nonce="nonce-acp"
+        )
+        self.assertEqual("copilot-acp", record["harness"])
+        self.assertEqual(record["pane_id"], record["session_id"])
+        self.assertTrue(FakeACPTransport.instances[0].initialized)
+        self.assertTrue(FakeACPTransport.instances[0].closed)
+
+    def test_assign_task_resumes_the_session_and_completes_synchronously_from_the_stop_reason(self):
+        self.adapter.register_lane(
+            lane="copilot-worker", target=None, harness="copilot-acp", repo="/repo/hill90", nonce="nonce-acp"
+        )
+        self.seed_source("acp-task", "Review one artifact")
+        task = self.adapter.assign_task(lane="copilot-worker", task_id="acp-task", summary="Review one artifact")
+        self.assertEqual("complete", task["status"])
+
+        # A fresh transport was spawned for this call and closed afterward --
+        # no subprocess lingers between CLI invocations.
+        assign_transport = FakeACPTransport.instances[-1]
+        self.assertTrue(assign_transport.closed)
+        self.assertEqual(1, len(assign_transport.loaded_sessions))
+        self.assertIn("acp-task", assign_transport.prompts[0][1])
+
+    def test_assign_task_to_unregistered_lane_raises(self):
+        with self.assertRaisesRegex(RuntimeError, "unknown lane"):
+            self.adapter.assign_task(lane="missing", task_id="t1", summary="x")
+
+    def test_observe_lane_is_a_no_op_because_prompts_are_synchronous(self):
+        self.adapter.register_lane(
+            lane="copilot-worker", target=None, harness="copilot-acp", repo="/repo/hill90", nonce="nonce-acp"
+        )
+        self.assertIsNone(self.adapter.observe_lane("copilot-worker"))
 
 
 if __name__ == "__main__":
