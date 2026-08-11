@@ -18,6 +18,14 @@ echo "inbox-route.sh"
 D=$(mktemp -d); mkdir -p "$D/bin" "$D/state/.local/state/agent-dotfiles-supervisor"
 cp "$HERE/stubs/tmux-dispatch" "$D/bin/tmux"
 
+# Mutants below have to live next to the real scripts, not in $D: inbox-route.sh
+# resolves lanes.sh/input-box.sh/notify.sh relative to its OWN path
+# (`$HERE/lanes.sh` etc. inside the script, unrelated to this test's $HERE), so
+# a mutated copy dropped in a bare tmp dir fails to source its siblings and the
+# test would be asserting on a script that never ran, not on the mutation.
+ROUTE_DIR="$(cd "$(dirname "$ROUTE")" && pwd)"
+trap 'rm -f "$ROUTE_DIR"/.inbox-route-mutant-*.sh' EXIT
+
 # notify.sh's real caller gate + Telegram send, with curl stubbed so no test
 # touches the network -- same technique as test_notify.sh.
 cat > "$D/bin/curl" <<'EOF'
@@ -41,10 +49,18 @@ run() {  # run <lanes-fixture-file> <message...>
     bash "$ROUTE" "$@" t
 }
 
-# --- exactly one blocked lane: unambiguous, deliver there -------------------
+# --- exactly one blocked lane, TEXT-blocked: unambiguous, deliver there ----
+# agent-dotfiles#159: this fixture used to model a MENU (a bash-permission
+# approval, `Do you want to proceed? / 1. Yes / 2. No`) and still asserted
+# that a free-text reply was delivered into it -- which is the bug #159 is
+# about. It is retexted here to the estate's modelled text-blocked shape
+# (lanes.sh's w-text-blocked fixture) so the tests below it -- which are
+# about DELIVERY MECHANICS (literal keys, Enter-as-its-own-call, evidenced
+# `delivered`) -- keep exercising the code path where delivery is supposed
+# to happen. The menu-refusal path gets its own fixture and tests below.
 cat > "$D/one-blocked" <<'FIX'
 1|arch|claude.exe|❯ ready|1|0
-2|ad99-thing|claude.exe|Do you want to proceed?\n❯ 1. Yes\n  2. No\n Esc to cancel · Tab to amend|1|0
+2|ad99-thing|claude.exe|Which environment should I target? Type the name, or press Esc to cancel|1|0
 3|free-3|claude.exe|❯ ready|1|0
 FIX
 out=$(run "$D/one-blocked" "yes")
@@ -79,6 +95,69 @@ grep -qx 'yes' "$D/panes/2.submitted" 2>/dev/null \
   || ok "the input box emptied -- the reply was submitted, not left unsent"
 [ -s "$D/curl.log" ] && bad "notify.sh was called even though delivery succeeded" "$(cat "$D/curl.log")" \
   || ok "no Telegram notification sent when delivery succeeds"
+
+# --- exactly one blocked lane, MENU-blocked: refuse, tell Jon the menu -----
+# agent-dotfiles#159. This is the reproduction from the issue, verbatim: a
+# lane sitting on a bash tool-permission approval (real capture, v2.1.220)
+# is the commonest blocking event this estate hits, and it is a MENU. Routing
+# a free-text reply into it used to be "delivered" -- the text was consumed
+# as navigation keys and the trailing Enter committed whatever option was
+# already highlighted. The fix must never call send-keys with the reply at
+# all here, not just avoid claiming success afterward.
+cat > "$D/menu-blocked" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+2|ad42-approve|claude.exe|Do you want to proceed?\n❯ 1. Yes\n  2. No\n Esc to cancel · Tab to amend · ctrl+e to explain|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+out=$(run "$D/menu-blocked" "yes")
+rc=$?
+[ "$rc" -eq 0 ] && ok "menu-blocked lane: exits 0 (Jon was told)" || bad "exited $rc" "$out"
+[ ! -s "$D/panes/2.submitted" ] && ok "the reply was never submitted to the menu-blocked lane" \
+  || bad "the reply landed in the menu-blocked lane's pane" "$(cat "$D/panes/2.submitted")"
+[ ! -s "$D/panes/2" ] && ok "nothing was even typed into the menu-blocked lane's input box" \
+  || bad "characters were typed into the menu-blocked lane's input box" "$(cat "$D/panes/2")"
+grep -q '^send-keys .*t:2' "$D/tmux.log" 2>/dev/null \
+  && bad "send-keys was called against the menu-blocked lane at all" "$(cat "$D/tmux.log")" \
+  || ok "inbox-route.sh never called send-keys against the menu-blocked lane"
+[ -s "$D/curl.log" ] && ok "Jon is notified instead of the reply being delivered" \
+  || bad "no notify.sh call for the menu-blocked lane" "$out"
+grep -q 'Do you want to proceed' "$D/curl.log" 2>/dev/null \
+  && ok "Jon is told what the menu says, not just that it exists" \
+  || bad "the menu's own text was not relayed to Jon" "$(cat "$D/curl.log")"
+
+# --- #159 mutation-check 3: the stub must tell a menu apart from a text
+# buffer, or the safety above is unfalsifiable ------------------------------
+# Bypasses inbox-route.sh and drives the stub directly, simulating exactly
+# what the OLD, buggy code did: send-keys -l "yes" then Enter, at a window
+# the fixture models as a menu (stubs/tmux-dispatch's STUB_MENU_PANES). This
+# is the load-bearing test change #159 calls for -- a stub that models every
+# pane as an append-only text buffer cannot express this bug, so an
+# assertion built on it would pass whether or not the real code is safe.
+: > "$D/tmux.log"; rm -rf "$D/panes"; mkdir -p "$D/panes"
+PATH="$D/bin:$PATH" LANES_FIXTURE="$D/menu-blocked" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+  STUB_MENU_PANES="2" tmux send-keys -l -t t:2 "yes" >/dev/null 2>&1
+PATH="$D/bin:$PATH" LANES_FIXTURE="$D/menu-blocked" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+  STUB_MENU_PANES="2" tmux send-keys -t t:2 Enter >/dev/null 2>&1
+[ ! -s "$D/panes/2.submitted" ] && ok "the stub models a menu distinctly: a naive send never lands as submitted text" \
+  || bad "the stub let a naive send land as submitted text even in menu mode" "$(cat "$D/panes/2.submitted")"
+grep -qx '1' "$D/panes/2.selected" 2>/dev/null && ok "Enter committed the highlighted option, not the typed reply" \
+  || bad "the menu's committed selection was not recorded as expected" "$(cat "$D/panes/2.selected" 2>&1)"
+
+# Mutation-check 3, verbatim: revert the stub's menu-modeling and repeat the
+# SAME naive send. If the assertions above still read the same way with the
+# distinction turned off, the stub was never actually distinguishing
+# anything -- confirm they flip.
+: > "$D/tmux.log"; rm -rf "$D/panes"; mkdir -p "$D/panes"
+PATH="$D/bin:$PATH" LANES_FIXTURE="$D/menu-blocked" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+  STUB_MENU_PANES="2" STUB_MENU_AS_TEXT=1 tmux send-keys -l -t t:2 "yes" >/dev/null 2>&1
+PATH="$D/bin:$PATH" LANES_FIXTURE="$D/menu-blocked" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+  STUB_MENU_PANES="2" STUB_MENU_AS_TEXT=1 tmux send-keys -t t:2 Enter >/dev/null 2>&1
+if grep -qx 'yes' "$D/panes/2.submitted" 2>/dev/null; then
+  ok "mutation confirmed: with the stub reverted to a plain text buffer, the same naive send silently looks like a normal delivery (the assertions above would be red)"
+else
+  bad "mutation confirmed: reverting the stub to a plain text buffer" \
+    "expected 'yes' in panes/2.submitted once the menu-distinction is off, got: $(cat "$D/panes/2.submitted" 2>&1)"
+fi
 
 # --- zero blocked lanes: ask Jon rather than dropping it -------------------
 cat > "$D/zero-blocked" <<'FIX'
@@ -160,21 +239,19 @@ grep -qx 'Enter' "$D/panes/2.keys" 2>/dev/null && ok "the pane acted on the Ente
 # The assertion that broke on CI is the one that matters: `delivered` must mean
 # the reply reached the lane, not that send-keys returned 0. A delivery check
 # that cannot be turned red by breaking delivery is not checking delivery, so
-# both ways of breaking it are exercised here rather than assumed.
+# multiple ways of breaking it are exercised here rather than assumed.
 
-# (a) delivery removed outright: inbox-route still reports success and exits 0,
-#     and the lane never sees a thing.
-MUTANT="$D/inbox-route-nosend.sh"
+# (a) delivery removed outright: the literal send never happens.
+MUTANT="$ROUTE_DIR/.inbox-route-mutant-nosend.sh"
 patch_rc=0
 python3 - "$ROUTE" "$MUTANT" <<'PY' || patch_rc=$?
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = '''    if tmux send-keys -l -t "$LANE" "$MESSAGE" 2>/dev/null \\
-       && tmux send-keys -t "$LANE" Enter 2>/dev/null; then'''
-assert marker in text, "send-keys block not found -- inbox-route.sh shape changed"
-assert text.count(marker) == 1, "send-keys block not unique -- inbox-route.sh shape changed"
-open(dst, "w").write(text.replace(marker, "    if true; then", 1))
+marker = '''    if ! tmux send-keys -l -t "$LANE" "$MESSAGE" 2>/dev/null; then'''
+assert marker in text, "literal send-keys call not found -- inbox-route.sh shape changed"
+assert text.count(marker) == 1, "literal send-keys call not unique -- inbox-route.sh shape changed"
+open(dst, "w").write(text.replace(marker, '''    if ! true; then''', 1))
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a delivery-free copy of inbox-route.sh" \
@@ -182,32 +259,98 @@ if [ "$patch_rc" -ne 0 ]; then
 else
   ok "setup: patched a delivery-free copy of inbox-route.sh"
   : > "$D/tmux.log"; rm -rf "$D/panes"; mkdir -p "$D/panes"; : > "$D/curl.log"
-  PATH="$D/bin:$PATH" LANES_FIXTURE="$D/one-blocked" LANES_SESSION=t \
+  out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/one-blocked" LANES_SESSION=t \
     TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
     HOME="$D/state" NOTIFY_ENV="$D/notify.env" CURL_LOG="$D/curl.log" \
-    bash "$MUTANT" "yes" t >/dev/null 2>&1
+    bash "$MUTANT" "yes" t 2>&1)
   if [ ! -s "$D/panes/2.submitted" ]; then
     ok "mutation confirmed: with delivery removed nothing is submitted (the arrival assertions above would be red)"
   else
     bad "mutation confirmed: with delivery removed nothing is submitted" \
       "something was still submitted: $(cat "$D/panes/2.submitted")"
   fi
+  # #159 test 4: even under this mutation, the fix's OWN pane-evidence check
+  # (input_box_state reading something other than `text` here, since nothing
+  # was typed) refuses to claim delivered -- this is not a skip, it is the
+  # requirement working as designed.
+  ! grep -q '^inbox-route: delivered' <<<"$out" \
+    && ok "inbox-route.sh does not claim delivered when nothing was sent" \
+    || bad "inbox-route.sh claimed delivered with nothing sent" "$out"
 fi
 
 # (b) the #141 failure shape: the message is typed but the Enter that follows
-#     is swallowed by a repainting harness. The reply sits in the box and
-#     nothing runs -- and inbox-route still reports `delivered`. Both delivery
-#     assertions must go red on this, or "submitted" is not being tested.
+#     is swallowed by a repainting harness. The reply sits in the box,
+#     nothing runs, and -- with the REAL, unmutated script -- delivery must
+#     not be claimed.
 : > "$D/tmux.log"; rm -rf "$D/panes"; mkdir -p "$D/panes"; : > "$D/curl.log"
-PATH="$D/bin:$PATH" LANES_FIXTURE="$D/one-blocked" LANES_SESSION=t \
+out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/one-blocked" LANES_SESSION=t \
   TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" DISPATCH_SWALLOW_ENTER=1 \
   HOME="$D/state" NOTIFY_ENV="$D/notify.env" CURL_LOG="$D/curl.log" \
-  bash "$ROUTE" "yes" t >/dev/null 2>&1
+  bash "$ROUTE" "yes" t 2>&1)
 if [ ! -s "$D/panes/2.submitted" ] && grep -qx 'yes' "$D/panes/2" 2>/dev/null; then
-  ok "mutation confirmed: a swallowed Enter leaves the reply unsent in the box (both delivery assertions would be red)"
+  ok "a swallowed Enter leaves the reply unsent in the box"
 else
-  bad "mutation confirmed: a swallowed Enter leaves the reply unsent in the box" \
+  bad "a swallowed Enter leaves the reply unsent in the box" \
     "box='$(cat "$D/panes/2" 2>/dev/null)' submitted='$(cat "$D/panes/2.submitted" 2>/dev/null)'"
+fi
+! grep -q '^inbox-route: delivered' <<<"$out" \
+  && ok "inbox-route.sh does not claim delivered when Enter was swallowed" \
+  || bad "inbox-route.sh claimed delivered with a swallowed Enter" "$out"
+[ -s "$D/curl.log" ] && ok "Jon is notified when a swallowed Enter leaves the reply unconfirmed" \
+  || bad "no notify.sh call when a swallowed Enter leaves the reply unconfirmed" "$out"
+
+# (c) #159 mutation-check 4: patch OUT the pane-evidence verification itself
+# (both input_box_state checks) while leaving the real send-keys calls in
+# place, and confirm that with DISPATCH_SWALLOW_ENTER=1 -- a reply that never
+# actually submitted -- this reverted script DOES claim delivered. That is
+# the exact bug requirement 4 is about, reproduced on demand, and it proves
+# the verification above is what stands between the estate and it, not
+# incidental to it.
+MUTANT2="$ROUTE_DIR/.inbox-route-mutant-noverify.sh"
+patch_rc=0
+python3 - "$ROUTE" "$MUTANT2" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''    if [ "$(tmux capture-pane -pe -t "$LANE" 2>/dev/null | input_box_state)" != text ]; then
+      echo "inbox-route: $LANE never showed the reply after typing it -- not sending Enter" >&2
+      notify_jon "Telegram reply could not be confirmed" \\
+        "$LANE was blocked and waiting but the reply never appeared in its input box -- reply was: $MESSAGE"
+      exit 1
+    fi
+    if ! tmux send-keys -t "$LANE" Enter 2>/dev/null; then
+      echo "inbox-route: sending Enter to $LANE failed" >&2
+      notify_jon "Telegram reply could not be delivered" \\
+        "$LANE was blocked and waiting but sending Enter failed -- reply was: $MESSAGE"
+      exit 1
+    fi
+    if [ "$(tmux capture-pane -pe -t "$LANE" 2>/dev/null | input_box_state)" = empty ]; then
+      echo "inbox-route: delivered to $LANE"
+      exit 0
+    fi'''
+assert marker in text, "verification block not found -- inbox-route.sh shape changed"
+assert text.count(marker) == 1, "verification block not unique -- inbox-route.sh shape changed"
+replacement = '''    tmux send-keys -t "$LANE" Enter 2>/dev/null
+    echo "inbox-route: delivered to $LANE"
+    exit 0'''
+open(dst, "w").write(text.replace(marker, replacement, 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a verification-free copy of inbox-route.sh" \
+    "could not patch $ROUTE (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a verification-free copy of inbox-route.sh"
+  : > "$D/tmux.log"; rm -rf "$D/panes"; mkdir -p "$D/panes"; : > "$D/curl.log"
+  out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/one-blocked" LANES_SESSION=t \
+    TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" DISPATCH_SWALLOW_ENTER=1 \
+    HOME="$D/state" NOTIFY_ENV="$D/notify.env" CURL_LOG="$D/curl.log" \
+    bash "$MUTANT2" "yes" t 2>&1)
+  if grep -q '^inbox-route: delivered' <<<"$out" && [ -s "$D/panes/2" ]; then
+    ok "mutation confirmed: without the pane-evidence check, a swallowed Enter is wrongly reported delivered (test 4 would be red)"
+  else
+    bad "mutation confirmed: without the pane-evidence check, delivered is wrongly claimed" \
+      "out='$out' box='$(cat "$D/panes/2" 2>/dev/null)'"
+  fi
 fi
 
 echo "  $pass passed, $fail failed"
