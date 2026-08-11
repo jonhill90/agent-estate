@@ -65,6 +65,8 @@ if [ -r "$ENVFILE" ]; then set -a; . "$ENVFILE"; set +a; fi
 
 now=$(date +%s)
 iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+branch=$(git -C "$HERE" rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)
+sha=$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo unknown)
 
 log() { printf '%s %s\n' "$iso" "$*" >>"$LOG"; }
 
@@ -78,6 +80,12 @@ report() {                       # report <state> <detail>
     printf 'detail:   %s\n' "${2:-}"
     printf 'pane:     %s\n' "$PANE"
     printf 'restarts: %s in the last %ss\n' "${recent:-0}" "$ESCALATE_WINDOW"
+    # Which code is actually running. The LaunchAgent executes this file from
+    # the repo WORKING TREE, so whichever branch happens to be checked out is
+    # what guards the loop. On 2026-08-11 the live watchdog spent a stretch
+    # running from a test branch purely because that was the last checkout --
+    # it worked, but by luck. An unexpected branch here is a real finding.
+    printf 'code:     %s @ %s\n' "$branch" "$sha"
   } >"$tmp" 2>/dev/null && mv -f "$tmp" "$STATUS" 2>/dev/null
 
   # escalate is the only state a human needs told about; every other state

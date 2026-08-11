@@ -71,5 +71,11 @@ else
   echo "  ok   a sleeping loop receives no keystrokes"; pass=$((pass+1))
 fi
 
+# The status file must name the code that produced it. The LaunchAgent runs
+# this script from the repo working tree, so the live guard is whatever branch
+# is checked out -- an invisible dependency until it is printed.
+D=$(mktemp -d); run idle "$D/w"
+check "status names the running branch and sha" "^code:" "$D/w/st"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
