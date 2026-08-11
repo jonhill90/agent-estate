@@ -122,7 +122,7 @@ stale)
   live_numbers=$(
     "$HERE/lanes.sh" "$SESSION" 2>/dev/null \
       | awk 'NR>1 && $1 ~ /^[0-9]+$/ && $NF!="dead" && $2 !~ /^free-[0-9]+$/ {print $2}' \
-      | grep -oE '[0-9]+'
+      | sed -E -n 's/^[A-Za-z]+([0-9]+)-.*/\1/p'
     gh pr list "${R[@]}" --state open --limit 200 --json number,body \
        -q '.[]|"\(.number)\t\(.body)"' 2>/dev/null \
       | cut -f2- | grep -oiE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+'

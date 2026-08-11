@@ -94,5 +94,32 @@ if grep -qx '28' <<<"$out"; then bad "an open PR keeps the claim alive" "$out"; 
 out=$(run check 57 acme/repo); rc=$?
 want_exit "stale does not release the claim itself" "$rc" 1
 
+# --- stale must anchor to the leading <repo><issue>- prefix ---------------
+# A window slug can contain digits that are not the dispatched issue number
+# (a second issue number, a PR number, a date). `stale` must not treat every
+# digit substring in the window name as a live issue -- that hides an
+# unrelated claimed issue from `stale` forever, since nothing else re-checks
+# it.
+printf '99|| An unrelated issue\n' >> "$D/issues"
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+2|ad70-issue-99-fix|claude.exe|esc to interrupt 3s|1|0
+FIX
+: > "$D/prs"
+run release 70 acme/repo >/dev/null 2>&1
+run take 70 acme/repo lane-2 >/dev/null   # legit: window 2 is dispatched on 70
+run take 99 acme/repo lane-9 >/dev/null   # no window actually names 99
+out=$(run stale acme/repo)
+if grep -qx '70' <<<"$out"; then
+  bad "a window's own issue number keeps its claim live" "$out"
+else
+  ok "a window's own issue number keeps its claim live"
+fi
+if grep -qx '99' <<<"$out"; then
+  ok "an unrelated digit in the window slug does not hide a stale claim"
+else
+  bad "an unrelated digit in the window slug does not hide a stale claim" "$out"
+fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
