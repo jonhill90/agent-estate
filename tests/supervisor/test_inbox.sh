@@ -144,5 +144,46 @@ else
   bad "concurrent callers delivered hello=$hello_count world=$world_count (want 1 each) -- race1=$(cat "$D/race1.out") race2=$(cat "$D/race2.out")"
 fi
 
+# --- prove the offset-ack test above is load-bearing (agent-dotfiles#187) --
+# #187 asked this to be mutation-checked specifically: it is the one test
+# that would catch the poller-restart work silently duplicating or dropping
+# Jon's replies across a restart, because a restart can only ever be safe if
+# the offset write it relies on is real. Patch a copy of inbox.sh with the
+# ack write turned into a no-op and confirm "second call is empty" now goes
+# the other way -- re-delivering the same messages -- so the earlier
+# assertion is proven to be exercising the persistence, not just agreeing
+# with whatever inbox.sh happens to do.
+BROKEN="$D/inbox-broken.sh"
+patch_rc=0
+python3 - "$INBOX" "$BROKEN" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''    if highest and not peek:
+        tmp = offset_file + ".tmp"
+        with open(tmp, "w") as handle:
+            handle.write(str(highest + 1))
+        os.replace(tmp, offset_file)'''
+assert marker in text, "offset-ack block not found -- script shape changed"
+assert text.count(marker) == 1, "offset-ack block not unique -- script shape changed"
+text = text.replace(marker, "    pass  # agent-dotfiles#187 mutation check: offset never persisted", 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched an ack-free copy of inbox.sh" "could not patch $INBOX (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched an ack-free copy of inbox.sh"
+  rm -f "$offset_file"
+  HOME="$D/state" PATH="$D/bin:$PATH" NOTIFY_ENV="$D/notify.env" bash "$BROKEN" >"$D/mut1.out" 2>&1
+  out_m2=$(HOME="$D/state" PATH="$D/bin:$PATH" NOTIFY_ENV="$D/notify.env" bash "$BROKEN" 2>&1)
+  if grep -q 'hello' <<<"$out_m2" && grep -q 'world' <<<"$out_m2"; then
+    ok "mutation confirmed: an unpersisted offset re-delivers hello/world on the second call (the assertion above would now be red)"
+  else
+    bad "mutation confirmed: an unpersisted offset re-delivers hello/world on the second call" \
+      "expected both messages again on the broken copy's second call, got: '$out_m2'"
+  fi
+  rm -f "$offset_file"
+fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

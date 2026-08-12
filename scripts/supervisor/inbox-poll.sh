@@ -88,6 +88,32 @@
 #   heartbeat go stale (report() below already provides that signal), not a
 #   lower threshold here.
 #
+# agent-dotfiles#187: this script executes whatever text it was started
+# with and has no mechanism of its own to notice a merge. #130 was the same
+# defect in watchdog.sh, and #132 fixed it there by having the watchdog
+# advance its own pinned worktree every tick -- the fix here is the
+# analogous half for THIS process, not a second copy of that mechanism:
+# advance-live.sh (called from watchdog.sh's exit trap, once it has decided
+# what LIVE's own head sha is) compares that sha against the `sha:` line
+# this script writes into its own status file below, and if they differ it
+# writes INBOX_POLL_RESTART_FLAG and queues a relaunch into this pane -- see
+# advance-live.sh's `maybe_restart_poller` for the write side.
+#
+# COOPERATIVE, NOT SIGNALED. The flag is checked once per loop iteration,
+# strictly between an inbox.sh call and the next one -- never while a batch
+# of Jon's messages is being routed. inbox.sh acknowledges (persists) a
+# whole batch's Telegram offset before this loop routes any of them (see
+# inbox.sh's own header), so the ONE window that must never be interrupted
+# is that per-iteration read-route span; checking between iterations instead
+# of via a signal means a restart can never land inside it, so nothing this
+# process was already responsible for delivering is skipped, and nothing it
+# already acknowledged to Telegram is asked for again.
+#
+# A version-triggered restart sets DELIBERATE (like the INBOX_POLL_ITERATIONS
+# path above) so report_stop below does not page Jon -- #160 gates the page
+# on "was this deliberate", and a deploy restart is exactly that. An
+# unexpected death still has DELIBERATE unset and still pages, same as ever.
+#
 # Usage: inbox-poll.sh [session]
 # Config: INBOX_POLL_TIMEOUT          Telegram long-poll seconds (default 25)
 #         INBOX_POLL_FAIL_THRESHOLD   consecutive failures before paging (default 3)
@@ -97,6 +123,9 @@
 #                                     unexpected exit pages Jon (default 60; #155)
 #         INBOX_POLL_BACKOFF_BASE     seconds of backoff per consecutive failure,
 #                                     capped past 12 (default 5; tests set 0)
+#         INBOX_POLL_RESTART_FLAG     path checked once per iteration; its presence
+#                                     is a deliberate, non-paging restart request
+#                                     (default $STATE/.inbox-poll-restart-requested; #187)
 
 set -uo pipefail
 
@@ -110,7 +139,14 @@ FAIL_THRESHOLD="${INBOX_POLL_FAIL_THRESHOLD:-3}"
 ITERATIONS="${INBOX_POLL_ITERATIONS:-0}"
 MIN_UPTIME="${INBOX_POLL_MIN_UPTIME:-60}"
 BACKOFF_BASE="${INBOX_POLL_BACKOFF_BASE:-5}"
+RESTART_FLAG="${INBOX_POLL_RESTART_FLAG:-$STATE/.inbox-poll-restart-requested}"
 START_TS=$(date +%s)
+# The commit this running process was started from -- written into every
+# status report so an external reader (advance-live.sh) can tell a stale
+# poller from a current one without guessing at process age. "unknown" when
+# $HERE is not a git worktree at all (a stray copy run by hand); that value
+# never equals a real sha, so it never falsely reads as current.
+POLLER_SHA=$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo unknown)
 
 mkdir -p "$(dirname "$STATUS")" 2>/dev/null
 
@@ -125,6 +161,7 @@ report() {  # report <state> <detail>
   local tmp="$STATUS.$$"
   {
     printf 'checked: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    printf 'sha:     %s\n' "$POLLER_SHA"
     printf 'state:   %s\n' "$1"
     printf 'detail:  %s\n' "${2:-}"
     printf 'pid:     %s\n' "$$"
@@ -133,6 +170,7 @@ report() {  # report <state> <detail>
 
 STOPPING=""
 DELIBERATE=""
+DELIBERATE_REASON=""
 report_stop() {
   [ -n "$STOPPING" ] && return
   STOPPING=1
@@ -144,7 +182,7 @@ report_stop() {
   log "STOPPING pid $$ after ${uptime}s"
 
   if [ -n "$DELIBERATE" ]; then
-    log "deliberate stop (INBOX_POLL_ITERATIONS reached) -- not paging Jon"
+    log "deliberate stop (${DELIBERATE_REASON:-reason not recorded}) -- not paging Jon"
     return
   fi
   if [ "$uptime" -lt "$MIN_UPTIME" ]; then
@@ -160,6 +198,23 @@ report_stop() {
   fi
 }
 trap report_stop EXIT
+# agent-dotfiles#187: EXIT alone is not enough, and the gap is not theoretical.
+# An UNTRAPPED SIGTERM only reaches the EXIT trap when bash happens to be
+# waiting on a foreground child (the inbox.sh long poll, most of the time) --
+# it defers the signal, the child finishes, the shell exits normally and the
+# trap runs. When the signal instead lands while bash is executing its own
+# builtins -- the status write, the log line, the loop arithmetic -- the
+# default disposition kills the shell outright and the EXIT trap NEVER RUNS.
+# Measured on this file: 150 SIGTERMs at a loop boundary, 4 produced no page
+# to Jon and no `stopped` heartbeat at all. That is #160's guarantee failing
+# a few percent of the time, silently, and it is what turned this branch's CI
+# red -- the two heartbeat assertions in test_inbox_poll.sh are exactly the
+# ones that lose the race. Trapping the signal explicitly makes bash run the
+# handler at the next command boundary no matter what it was doing.
+# report_stop's own STOPPING guard makes the EXIT trap that follows a no-op.
+trap 'report_stop; exit 143' TERM   # 128 + 15
+trap 'report_stop; exit 130' INT    # 128 + 2
+trap 'report_stop; exit 129' HUP    # 128 + 1
 
 fail_count=0
 notified_down=""
@@ -260,8 +315,23 @@ while :; do
     fi
   fi
 
+  # agent-dotfiles#187: checked here, between iterations -- never inside the
+  # block above -- so a restart can only land at a boundary where this
+  # iteration's whole read-route span has already finished (see the header
+  # comment). The flag is this process's own responsibility to clear: it is
+  # the only reader, and leaving it behind would make the NEXT process to
+  # start (the one this restart is deploying) read it as a second request.
+  if [ -f "$RESTART_FLAG" ]; then
+    rm -f "$RESTART_FLAG"
+    DELIBERATE=1
+    DELIBERATE_REASON="version-triggered restart requested"
+    log "restart flag seen at $RESTART_FLAG -- exiting cleanly so the queued relaunch picks up the current code"
+    break
+  fi
+
   if [ "$ITERATIONS" -gt 0 ] && [ "$iter" -ge "$ITERATIONS" ]; then
     DELIBERATE=1
+    DELIBERATE_REASON="INBOX_POLL_ITERATIONS reached"
     break
   fi
   # Only a failed call needs a local backoff -- a successful call already
