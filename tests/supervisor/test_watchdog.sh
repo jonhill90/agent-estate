@@ -205,9 +205,14 @@ fi
 # happens to be doing. A test that depends on that is not a test.
 G="$D/gitrepo"; mkdir -p "$G/scripts/supervisor"
 cp "$HERE/../../scripts/supervisor/watchdog.sh" "$G/scripts/supervisor/"
-for dep in sleepcheck.py watchdog_notify.py loop-tick.md; do
+for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
   cp "$HERE/../../scripts/supervisor/$dep" "$G/scripts/supervisor/" 2>/dev/null
 done
+# The harness adapters are part of what watchdog.sh needs to decide anything
+# at all since #215 -- without them its busy probe cannot tell, and a tick
+# that cannot tell assumes busy and stops. A copy that omits them is not a
+# copy of the watchdog.
+cp -R "$HERE/../../scripts/supervisor/harness" "$G/scripts/supervisor/" 2>/dev/null
 git -C "$G" init -q
 git -C "$G" config user.email t@e.com; git -C "$G" config user.name T
 git -C "$G" add -A >/dev/null 2>&1
@@ -289,9 +294,10 @@ SRC="$A/src"
 git -C "$SRC" config user.email t@e.com; git -C "$SRC" config user.name T
 git -C "$SRC" checkout -q -b main
 mkdir -p "$SRC/scripts/supervisor"
-for f in watchdog.sh advance-live.sh sleepcheck.py watchdog_notify.py loop-tick.md; do
+for f in watchdog.sh advance-live.sh sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
   cp "$HERE/../../scripts/supervisor/$f" "$SRC/scripts/supervisor/"
 done
+cp -R "$HERE/../../scripts/supervisor/harness" "$SRC/scripts/supervisor/"
 # A tracked file no later commit here touches, so an uncommitted edit to it is
 # the non-conflicting shape `git checkout --detach` carries silently forward --
 # what makes advance-live.sh's dirty refusal load-bearing rather than a
@@ -633,6 +639,112 @@ else
   say_bad "two independent alarms in one tick each page once, not zero and not a burst" \
     "paged $(up_call_count) time(s): $(up_calls)"
 fi
+
+# --- #215: the busy probe is harness-parameterised, and fails closed -------
+#
+# The probe used to be one Claude Code literal (`esc to interrupt`) grepped out
+# of a six-line capture, with no branch for "this is not a Claude pane". On any
+# harness that does not paint that string the check fell through to NOT BUSY,
+# and a mid-turn lane was read as a dead one -- by the component whose job is to
+# intervene when a lane is stuck. The direction is what matters: the watchdog
+# acts on idle, so a false idle is an intervention against a working lane, while
+# a false busy costs one skipped tick.
+#
+# The probe now asks the same harness/*.sh adapters lanes.sh asks (via
+# harness-registry.sh) and has three outcomes, not two: busy, idle, and
+# cannot-tell -- and cannot-tell is treated as busy.
+hrun() { # hrun <pane-state> <pane-command> <workdir> [extra env assignments...]
+  local st="$1" cmd="$2" dir="$3"; shift 3
+  rm -rf "$dir"; mkdir -p "$dir" "$dir/transcripts"
+  env SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE="$st" STUB_PANE_COMMAND="$cmd" \
+    STUB_SENT="$dir/sent" SUPERVISOR_STATE="$dir" SUPERVISOR_STATUS="$dir/st" \
+    SUPERVISOR_LOG="$dir/lg" SUPERVISOR_STAMP="$dir/stamp" SUPERVISOR_HISTORY="$dir/hist" \
+    NOTIFY_ENV="$dir/none.env" SLEEPCHECK_DIR="$dir/transcripts" "$@" \
+    bash "$WATCHDOG" >/dev/null 2>"$dir/err"
+}
+not_sent() { # not_sent <name> <workdir>
+  if [ -s "$2/sent" ] && grep -q '/loop' "$2/sent" 2>/dev/null; then
+    say_bad "$1" "a /loop was delivered: $(tr '\n' ' ' <"$2/sent")"
+  else
+    say_ok "$1"
+  fi
+}
+was_sent() { # was_sent <name> <workdir>
+  if grep -q '/loop' "$2/sent" 2>/dev/null; then say_ok "$1"
+  else say_bad "$1" "nothing was delivered: $(tr '\n' ' ' <"$2/sent" 2>/dev/null)"; fi
+}
+
+# 1. THE DEFECT ITSELF. A real, mid-turn Copilot pane: `◎ Working esc
+#    interrupt` -- `esc interrupt`, not Claude's `esc to interrupt`. One
+#    missing word, and the old probe called a working lane dead.
+D=$(mktemp -d); hrun copilot-busy node "$D/w"
+check "a mid-turn copilot pane is not restarted" "state:    working" "$D/w/st"
+not_sent "a mid-turn copilot pane receives no keystrokes" "$D/w"
+
+# 2. A real mid-turn codex pane. Its marker happens to BE Claude's literal, but
+#    it sits four non-empty lines above the footer -- so this row proves the
+#    per-harness tail window (HARNESS_BUSY_TAIL=4) is honoured, not that the
+#    shared string is. A last-line-only probe reads this pane idle.
+D=$(mktemp -d); hrun codex-busy codex "$D/w"
+check "a mid-turn codex pane is not restarted" "state:    working" "$D/w/st"
+not_sent "a mid-turn codex pane receives no keystrokes" "$D/w"
+
+# 3. THE UNKNOWN CASE. A pane whose command no adapter under harness/ claims
+#    (pi, opencode, anything new). Nothing can be concluded about it, so the
+#    only safe conclusion is "assume busy" -- never idle.
+D=$(mktemp -d); hrun alien pi "$D/w"
+check "an unrecognised harness fails closed, not idle" "state:    harness_unknown" "$D/w/st"
+not_sent "an unrecognised harness receives no keystrokes" "$D/w"
+
+# 4. The adapters themselves being unreachable is the same cannot-tell. Point
+#    the registry at an empty directory: no adapter claims anything, and the
+#    watchdog must not fall back to a hardcoded guess.
+D=$(mktemp -d); mkdir -p "$D/noadapters"
+hrun busy claude "$D/w" HARNESS_REGISTRY_DIR="$D/noadapters"
+check "no adapters at all fails closed" "state:    harness_unknown" "$D/w/st"
+not_sent "no adapters at all receives no keystrokes" "$D/w"
+
+# 5. An unreadable/blank capture is cannot-tell too. `capture-pane` exiting
+#    non-zero is already `pane_unreadable`; this is the other half -- it
+#    succeeds and returns nothing, which the old probe scored as "the string is
+#    absent", i.e. idle.
+D=$(mktemp -d); hrun blank claude "$D/w" STUB_BLANK_CAPTURE=1
+check "an empty capture fails closed" "state:    harness_unknown" "$D/w/st"
+not_sent "an empty capture receives no keystrokes" "$D/w"
+
+# 6. THE OTHER DIRECTION, and it is what keeps case 3 honest. Fail-closed must
+#    not become always-closed: a genuinely idle lane on a NON-Claude harness,
+#    with work queued, must still be restarted. A probe that answered "busy" to
+#    everything would pass cases 1-5 and be useless.
+D=$(mktemp -d); hrun copilot-ready node "$D/w"
+check "an idle copilot pane with work is still restarted" "state:    restarted" "$D/w/st"
+was_sent "an idle copilot pane is still sent a /loop" "$D/w"
+
+# 7. The pre-send re-check (the second call site) is harness-parameterised too.
+#    It is the one that guards against a /loop queuing as inert text in a pane
+#    that became busy mid-probe -- and it carried the same Claude literal.
+#    STUB_BUSY_AFTER flips the stub to a COPILOT busy shape after the first
+#    capture, which is idle-then-busy on a non-Claude harness.
+D=$(mktemp -d); hrun copilot-ready node "$D/w" STUB_BUSY_AFTER=1 STUB_BUSY_SHAPE=copilot-busy \
+  STUB_COUNTER="$D/w/counter"
+check "a copilot pane that turns busy mid-probe is not sent to" "state:    working" "$D/w/st"
+not_sent "no /loop delivered into a busy copilot pane" "$D/w"
+
+# 8. The registry is part of what this script needs to decide anything. If it
+#    is missing beside watchdog.sh -- a partial deploy, a copied file -- the
+#    probe must say so and assume busy rather than resurrect the old literal.
+D=$(mktemp -d); mkdir -p "$D/partial/scripts/supervisor"
+for f in watchdog.sh sleepcheck.py watchdog_notify.py loop-tick.md; do
+  cp "$HERE/../../scripts/supervisor/$f" "$D/partial/scripts/supervisor/" 2>/dev/null
+done
+rm -rf "$D/pw"; mkdir -p "$D/pw" "$D/pw/transcripts"
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=idle STUB_PANE_COMMAND=claude \
+STUB_SENT="$D/pw/sent" SUPERVISOR_STATE="$D/pw" SUPERVISOR_STATUS="$D/pw/st" \
+SUPERVISOR_LOG="$D/pw/lg" SUPERVISOR_STAMP="$D/pw/stamp" SUPERVISOR_HISTORY="$D/pw/hist" \
+NOTIFY_ENV="$D/pw/none.env" SLEEPCHECK_DIR="$D/pw/transcripts" \
+  bash "$D/partial/scripts/supervisor/watchdog.sh" >/dev/null 2>"$D/pw/err"
+check "a missing harness registry fails closed" "state:    harness_unknown" "$D/pw/st"
+not_sent "a missing harness registry receives no keystrokes" "$D/pw"
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

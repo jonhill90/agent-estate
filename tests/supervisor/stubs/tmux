@@ -1,7 +1,19 @@
 #!/bin/bash
 # Stub tmux for watchdog tests.
 #
-# STUB_PANE_STATE: idle | busy | ghost — what capture-pane reports.
+# STUB_PANE_STATE: what capture-pane reports.
+#   idle | busy | ghost                     — Claude Code shapes.
+#   copilot-busy | copilot-ready            — real Copilot CLI captures.
+#   codex-busy                              — a real Codex CLI capture.
+#   alien                                   — a pane whose chrome no adapter models.
+#   The non-Claude captures are the same verbatim rows tests/supervisor/
+#   test_lanes.sh carries in its fixture (measured off real codex v0.147.0 and
+#   copilot v1.0.79 panes on 2026-08-12, see harness/codex.sh and
+#   harness/copilot.sh) -- reused rather than re-invented, so a shape that
+#   changes has one place to change.
+# STUB_PANE_COMMAND: what `display-message -p '#{pane_current_command}'`
+#   reports -- how watchdog.sh finds which harness adapter owns the pane.
+#   Defaults to `claude`, the harness the live supervisor pane runs.
 # STUB_BUSY_AFTER: report idle for the first N capture-pane calls, then busy.
 #   This reproduces the real race the watchdog loses: the pane is idle when
 #   first checked, then starts a turn during the ghost-text probe, and the
@@ -12,17 +24,38 @@ case "$1" in
   has-session) exit 0 ;;
   capture-pane)
     state="${STUB_PANE_STATE:-idle}"
+    # A capture that SUCCEEDS and returns nothing -- a repainting pane, a pane
+    # whose harness has printed nothing yet. Distinct from capture-pane
+    # failing, which the watchdog already reports as pane_unreadable.
+    if [ -n "${STUB_BLANK_CAPTURE:-}" ]; then printf '\n   \n'; exit 0; fi
     if [ -n "${STUB_BUSY_AFTER:-}" ]; then
       n=$(cat "$COUNTER" 2>/dev/null || echo 0); n=$((n+1)); echo "$n" > "$COUNTER"
-      [ "$n" -gt "$STUB_BUSY_AFTER" ] && state=busy || state=idle
+      # STUB_BUSY_SHAPE picks WHICH harness's busy chrome the pane turns into,
+      # so the mid-probe race can be driven on a non-Claude harness too.
+      [ "$n" -gt "$STUB_BUSY_AFTER" ] && state="${STUB_BUSY_SHAPE:-busy}" || state="${STUB_PANE_STATE:-idle}"
     fi
     case "$state" in
       busy)  printf '  ⏵⏵ bypass permissions on · esc to interrupt · ← 1 agent\n' ;;
       ghost) printf '❯ some previous prompt\n' ;;
+      # Copilot's busy marker IS its last line, and its wording is `esc
+      # interrupt` -- no "to". That one missing word is why Claude's literal
+      # reads a mid-turn copilot pane as idle.
+      copilot-busy)  printf ' ◎ Working esc interrupt                              Claude Sonnet 5\n' ;;
+      copilot-ready) printf ' ← open sidebar · / commands · ? help · tab next tab   Claude Sonnet 5\n' ;;
+      # Codex's turn indicator sits four non-empty lines above its footer, so
+      # a last-line-only probe misses it. Multi-line on purpose.
+      codex-busy)    printf '• Working (9s • esc to interrupt)\n\n› Improve documentation in @filename\n\n  gpt-5.5 medium · /repo/path\n' ;;
+      alien)         printf 'some harness nobody here has ever seen\n' ;;
       *)     printf '❯ \n' ;;
     esac ;;
   send-keys) shift; printf '%s\n' "$*" >> "${STUB_SENT:-/dev/null}" ;;
-  display-message) printf 'stub\n' ;;
+  display-message)
+    for a in "$@"; do
+      case "$a" in
+        '#{pane_current_command}') printf '%s\n' "${STUB_PANE_COMMAND:-claude}"; exit 0 ;;
+      esac
+    done
+    printf 'stub\n' ;;
   *) : ;;
 esac
 exit 0

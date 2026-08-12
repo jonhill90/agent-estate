@@ -59,6 +59,17 @@ HARNESS_COMMANDS = {
 # See dispatch.sh's header for the refined test this instance motivated.
 # Do not wire a new caller through here without first rebuilding this to
 # lanes.sh's standard (docs/supervisor-disposition.md:359, agent-dotfiles#222).
+#
+# agent-dotfiles#215 is the first issue to take that instruction as written.
+# It reported watchdog.sh's Claude-only busy literal as "the general solution
+# exists and nothing calls it", and pointed here. watchdog.sh's probe was
+# rebuilt per-harness and fail-closed WITHOUT routing through this function --
+# deliberately, and recorded at both ends: this function's 25-line quoted-
+# phrase window is the #65 anti-pattern the watchdog must not inherit, and it
+# raises on any harness other than claude/codex, which inside a bash `if` is a
+# non-zero exit, i.e. "not busy" -- reintroducing the exact failure direction
+# #215 exists to remove. It reads the same harness/*.sh adapters lanes.sh
+# reads, via harness-registry.sh. See watchdog.sh's own #215 section.
 def classify_capture(harness, capture):
     tail = "\n".join(capture.splitlines()[-25:])
     if BLOCKED_RE.search(tail):
