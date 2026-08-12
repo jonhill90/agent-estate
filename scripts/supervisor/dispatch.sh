@@ -19,6 +19,18 @@
 # lanes.sh, run claim.sh, run worktree.sh, rename the window, send-keys --
 # lives here, where the worktree step cannot be the one that gets skipped.
 #
+# REFINEMENT (agent-dotfiles#222): the rule above has an opposite failure
+# mode, not just the nothing-calls-it one. An abstraction can be present and
+# CORRECTLY avoided. When callers route around a seam because its
+# implementation is worse than the ad-hoc code it would replace, that is
+# indistinguishable from outside from the nothing-calls-it defect above --
+# and is its opposite. Wiring the caller in "fixes" it by importing the
+# defect. The test for an adapter is "is the implementation fit to be
+# called?", not "is there a caller?". When the answer is no, the avoidance
+# must be recorded at the seam, not only in whichever caller dodged it. Live
+# instance: adapter.classify_capture's header comment, avoided by this very
+# script's dispatch path -- see that comment for the mechanics.
+#
 # EVERY FAILURE ABORTS THE DISPATCH. In particular a failed `worktree.sh new`
 # is fatal: a lane with no worktree works in the shared checkout, and that is
 # the original bug, not a degraded mode of operation. Whatever was already
