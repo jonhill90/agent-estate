@@ -388,6 +388,24 @@ class LedgerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "pane incarnation"):
             self.ledger.accept("review-870", pane_nonce="reused-pane")
 
+    def test_lane_available_is_tristate_unknown_free_or_occupied(self):
+        """agent-dotfiles#174: `dispatch.sh` now trusts this instead of the
+        tmux window name, and the three-way split matters -- an unregistered
+        lane is a different claim from a registered-but-busy one, and the
+        caller (the CLI's first-sight backfill) needs to tell them apart.
+        """
+        self.assertIsNone(self.ledger.lane_available("never-registered"))
+
+        self.assertTrue(self.ledger.lane_available("app-review"))
+
+        task = self.assign()
+        self.ledger.mark_delivery_pending(task["id"], pane_nonce="nonce-22-a")
+        self.ledger.mark_delivered(task["id"], pane_nonce="nonce-22-a")
+        self.assertFalse(self.ledger.lane_available("app-review"))
+
+        self.ledger.complete(task["id"], b"done", pane_nonce="nonce-22-a")
+        self.assertTrue(self.ledger.lane_available("app-review"))
+
     def test_delivery_pending_persists_before_send_and_blocks_direct_delivered(self):
         self.assign()
         with self.assertRaisesRegex(ValueError, "cannot transition"):
@@ -635,6 +653,78 @@ class LedgerTest(unittest.TestCase):
         self.assertIsNotNone(result["task"]["delivered_at"])
         source = self.ledger.get_source_task("ad999-first")
         self.assertEqual("https://github.com/jonhill90/agent-dotfiles/issues/999", source["source_url"])
+
+    def test_mark_lane_held_makes_a_free_lane_read_occupied(self):
+        """agent-dotfiles#188 finding 1: this is what closes the window a
+        rolled-back `record_dispatch` used to leave open -- a lane the ledger
+        already had registered free must not go on reading free just because
+        the write that was supposed to claim it failed."""
+        self.assertTrue(self.ledger.lane_available("app-review"))
+        held = self.ledger.mark_lane_held("app-review", note="record_dispatch failed for task review-870")
+        self.assertEqual("created", held["status"])
+        self.assertEqual("app-review", held["lane"])
+        self.assertFalse(self.ledger.lane_available("app-review"))
+
+    def test_mark_lane_held_on_an_unknown_lane_is_a_no_op(self):
+        """Nothing to close: an unregistered lane already reads `None`
+        (unknown), and unknown is not free -- `dispatch.sh`'s `lane-free`
+        never offers it. Writing a placeholder task here would need a
+        `lanes` row that does not exist and violate the FK."""
+        self.assertIsNone(self.ledger.lane_available("never-registered"))
+        self.assertIsNone(self.ledger.mark_lane_held("never-registered", note="unused"))
+        self.assertIsNone(self.ledger.lane_available("never-registered"))
+
+    def test_mark_lane_held_on_an_already_occupied_lane_is_a_no_op(self):
+        """The lane is already exactly as unavailable as this method would
+        make it -- the one_open_task_per_lane index refuses the second
+        placeholder, and that refusal is fine: it means something else
+        already guarantees the property this method exists for."""
+        self.assign()
+        self.assertFalse(self.ledger.lane_available("app-review"))
+        self.assertIsNone(self.ledger.mark_lane_held("app-review", note="unused"))
+        self.assertFalse(self.ledger.lane_available("app-review"))
+
+    def test_record_dispatch_failure_leaves_the_lane_held_not_free(self):
+        """The mutation this guards against, end to end: seed a lane already
+        free, force `record_dispatch` to fail deep inside its transaction
+        (the same `assign` collision #144's own atomicity test uses), and
+        confirm the failure does not leave the pre-existing free row intact.
+        Without `mark_lane_held` wired into the caller, this goes red -- the
+        rollback restores exactly the free row asserted at the top."""
+        self.assertTrue(self.ledger.lane_available("app-review"))
+        self.seed_source("collide-870")
+        self.ledger.assign(
+            task_id="collide-870", lane="app-review", pane_nonce="nonce-22-a", summary="already here"
+        )
+        self.ledger.cancel_open_task("app-review")
+        self.assertTrue(self.ledger.lane_available("app-review"))
+        # A second dispatch racing the first tries to reuse "collide-870" for
+        # a DIFFERENT lane -- `_assign_tx` refuses it, `record_dispatch`
+        # rolls back every write it had made for "app-review" so far, and
+        # the pre-existing free row for "app-review" survives the rollback
+        # untouched, exactly the #188 finding 1 scenario.
+        with self.assertRaisesRegex(ValueError, "already exists with different assignment"):
+            self.ledger.record_dispatch(
+                lane="app-review",
+                pane_id="%22",
+                nonce="nonce-22-b",
+                harness="codex",
+                repo="/repo/app",
+                server_id="server-a",
+                session_id="$4",
+                command="codex",
+                task_id="collide-870",
+                source_kind="issue",
+                source_url="https://github.com/jonhill90/agent-dotfiles/issues/870",
+                source_ref="870",
+                summary="a different task body entirely",
+                source_state="OPEN",
+                evidence=["claimed by dispatch.sh for lane app-review"],
+                status_marker=None,
+            )
+        self.assertTrue(self.ledger.lane_available("app-review"))  # the bug, absent the fix
+        self.ledger.mark_lane_held("app-review", note="record_dispatch failed for task collide-870")
+        self.assertFalse(self.ledger.lane_available("app-review"))  # closed
 
     def test_idle_attention_is_level_triggered_until_task_disposition(self):
         self.assign()

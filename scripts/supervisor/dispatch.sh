@@ -92,22 +92,53 @@ else
 fi
 WINDOW_NAME="${PREFIX}${ISSUE}-${SLUG}"
 
+# --- 0. the ledger must be readable before any lane is trusted ------------
+# agent-dotfiles#174. Everything below this line asks the LEDGER whether a
+# lane is free, not the window name -- the whole point of the change. That
+# only holds if the ledger itself can be read at all: an unreadable ledger
+# answering nothing must mean "cannot tell what is free", never "assume
+# everything is free". This is the inverse of #140's original ledger WRITE,
+# which was made non-fatal precisely because nothing read it yet (see step 6
+# below for where that reasoning still applies, and why).
+#
+# Checked once, up front, rather than folded into the per-candidate query in
+# step 1: a broken ledger fails every one of those queries identically, and
+# diffusing the same failure across a loop would report it as "no free lane"
+# -- true, but not why, and indistinguishable from an estate that is
+# genuinely full.
+LEDGER_PYTHON="${DISPATCH_PYTHON:-python3}"
+LEDGER_CLI="$HERE/cli.py"
+if ! LEDGER_STATUS_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" status 2>&1); then
+  echo "dispatch: the ledger is unreadable -- refusing to dispatch #$ISSUE_ARG" >&2
+  echo "dispatch: cannot tell which lanes are free without it, so nothing is safe to pick" >&2
+  sed 's/^/  /' <<<"$LEDGER_STATUS_OUT" >&2
+  exit 1
+fi
+
 # --- 1. a lane that is actually safe to dispatch to ------------------------
 # `send-keys -t session:` with an empty index does not error; it targets the
 # active window, which is usually the supervisor. Refuse an empty target
 # rather than discover where the brief landed.
 #
 # TWO questions, and `lanes.sh --free` only answers the first. "Is an agent
-# there and not mid-turn" it answers from pane content. "Is this lane UNOWNED"
-# it cannot answer at all: a lane that finished and was never renamed, and a
-# lane paused on an approval prompt, both show no busy marker and are
-# byte-identical to a genuinely idle one. The window NAME is the only signal
-# that survives that, which is why claim.sh's `stale` keys on
-# `$2 !~ /^free-[0-9]+$/` and loop-tick.md requires the rename on completion.
-# This is now the only path a brief takes to a lane, so the rule has to hold
-# here too. On 2026-08-11 the supervisor took `--free | head -1` by hand, got
+# there and not mid-turn" it answers from pane content -- that stays exactly
+# as it was; lanes.sh keeps classifying panes, this change is not about that.
+# "Is this lane UNOWNED" is the ledger's question now, not the window name's:
+# a lane that finished and was never renamed, and a lane paused on an
+# approval prompt, both show no busy marker and are byte-identical to a
+# genuinely idle one from pane content alone, and the ledger is what breaks
+# that tie. On 2026-08-11 the supervisor took `--free | head -1` by hand, got
 # another dispatcher's task-named lane, and `/clear`ed it; nothing was lost
 # only because that lane had already shipped.
+#
+# The window NAME still matters for exactly one thing: MIGRATION. A lane the
+# ledger has never heard of -- every lane alive before this landed, or one
+# opened by hand -- is backfilled into the ledger as free the FIRST time it
+# is seen named `free-N`, and never consulted by name again after that (see
+# `cli.py lane_free`'s docstring). A lane the ledger already knows about, free
+# or occupied, answers from the ledger alone regardless of what it is
+# currently named -- that is the inversion #174 exists to prove: an occupied
+# lane hand-renamed to `free-N` is still not offered.
 #
 # There is deliberately NO env-var override of this selection. `DISPATCH_LANE`
 # used to be honoured verbatim -- no free check, no name check, no supervisor
@@ -115,16 +146,35 @@ WINDOW_NAME="${PREFIX}${ISSUE}-${SLUG}"
 # supervisor's own pane at exit 0, which is the incident loop-tick.md records
 # under "an empty tmux target hits the ACTIVE window", reached through a stray
 # environment variable instead of an empty string. Nothing called it. An
-# escape hatch around the only guard is not worth a caller it does not have;
-# to aim a dispatch, rename the target lane `free-N` first, which is the same
-# thing its owner would have done on finishing.
-FREE_NAMED=$("$HERE/lanes.sh" "$SESSION" 2>/dev/null \
-  | awk 'NR>1 && $1 ~ /^[0-9]+$/ && $2 ~ /^free-[0-9]+$/ {print $1}')
+# escape hatch around the only guard is not worth a caller it does not have.
+# agent-dotfiles#188 finding 2: `lane-free` below is a QUERY, not a claim --
+# see `cli.py lane_free`'s own docstring for the measured proof and the
+# terms `claim.sh`'s header uses for its own sub-second race. Nothing here
+# re-checks between a candidate reading free (this loop) and the first
+# `send-keys` several steps below, and unlike `claim.sh`'s race this window
+# is not sub-second: it spans claim, worktree creation and the send itself.
+# Two dispatchers on unrelated cadences CAN both read this lane free and
+# both type into the same pane -- that collision is not prevented here.
+# Step 6's `record_dispatch` (`one_open_task_per_lane`) does NOT catch this
+# either, measured (#183 round 3): it mints a fresh nonce every call, so a
+# second writer for the same lane is never refused -- it cancels the first
+# writer's task and installs its own, leaving one clean recorded occupancy
+# with no trace that two briefs went into the pane. "Authoritative" names
+# which source wins an availability READ, not an exclusive claim on it, and
+# the ledger keeps no evidence when that read was wrong.
+declare -A WINDOW_NAME_BY_INDEX
+while IFS=$'\t' read -r idx wname; do
+  [ -n "$idx" ] || continue
+  WINDOW_NAME_BY_INDEX["$idx"]="$wname"
+done < <("$HERE/lanes.sh" "$SESSION" 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $1"\t"$2}')
+
 LANE=""
 while read -r candidate; do
   [ -n "$candidate" ] || continue
-  # lanes.sh --free prints session:index, and the index is what names the row.
-  if grep -qx -- "${candidate##*:}" <<<"$FREE_NAMED"; then
+  idx="${candidate##*:}"
+  wname="${WINDOW_NAME_BY_INDEX[$idx]:-}"
+  CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidate" --target "$candidate" --window-name "$wname" 2>/dev/null) || continue
+  if grep -qF '"free":true' <<<"$CHECK"; then
     LANE="$candidate"
     break
   fi
@@ -132,8 +182,8 @@ done < <("$HERE/lanes.sh" --free "$SESSION" 2>/dev/null)
 
 if [ -z "$LANE" ]; then
   echo "dispatch: no free lane in session '$SESSION' -- not dispatching #$ISSUE_ARG" >&2
-  echo "dispatch: a lane must be idle AND named 'free-N' to be dispatchable --" >&2
-  echo "dispatch: one still carrying a task name is still working on it" >&2
+  echo "dispatch: the ledger must say a lane is free to be dispatchable --" >&2
+  echo "dispatch: one it has never seen is backfilled only if named 'free-N'; one it knows is occupied stays occupied regardless of name" >&2
   "$HERE/lanes.sh" "$SESSION" >&2
   exit 1
 fi
@@ -401,22 +451,48 @@ fi
 
 # --- 6. record what was dispatched. BEST EFFORT, NEVER FATAL --------------
 #
-# agent-dotfiles#140. Every signal that a lane is busy is today inferred from
-# pane content, and inference is what produced the false-`free` bugs #102,
-# #123 and #126. This writes the fact down instead. Nothing reads it yet --
-# `lanes.sh` classifies panes exactly as it did before this block existed --
-# and that is deliberate: a recording layer nothing depends on can be wrong
-# without taking the estate down, and its records can be checked against
-# reality before anything trusts them.
+# agent-dotfiles#140, updated by agent-dotfiles#174. Every signal that a lane
+# is busy used to be inferred from pane content, and inference is what
+# produced the false-`free` bugs #102, #123 and #126. This writes the fact
+# down instead.
 #
-# THIS BLOCK MUST NOT ABORT THE DISPATCH, AND THAT IS THE OPPOSITE OF EVERY
-# OTHER STEP ABOVE. "Every failure aborts and unwinds" is right for the claim
-# and the worktree, which are real resources a half-dispatch would strand. It
-# is wrong for a bookkeeping write nothing consumes: a broken ledger that
-# stopped the estate dispatching would trade the whole estate for a record
-# with no reader. So this is best-effort and LOUD -- never silent, never
-# fatal. Do not "fix" it into an abort_send; tests/supervisor/test_dispatch.sh
-# mutation-checks that removing this tolerance turns the suite red.
+# #140 made this write non-fatal because NOTHING READ IT YET -- a recording
+# layer nothing depends on can be wrong without taking the estate down. That
+# premise is gone: step 1 above now reads exactly this record to pick every
+# future lane, and #174 was filed to make that inversion explicit rather than
+# leave this comment asserting the opposite of what the code now does. Read
+# what follows as "still non-fatal, for a DIFFERENT reason", not as the old
+# reason left unexamined.
+#
+# THIS BLOCK STILL MUST NOT ABORT THE DISPATCH, AND THAT IS STILL THE
+# OPPOSITE OF EVERY OTHER STEP ABOVE. The brief has already been typed,
+# verified and submitted into a REAL, LIVE pane by the time this block runs --
+# unwinding the claim and the worktree here would strand a worker that is
+# actively working, which is strictly worse than a stale ledger row. So the
+# failure mode this block accepts is not "the estate may dispatch to a lane
+# that is actually busy" -- it is "this ONE lane stops being offered until
+# reconciliation happens". That cost is bounded and visible (the LOUD message
+# below, and `lanes.sh` still showing the window doing nothing); trading the
+# live worker for it would not be. Do not "fix" it into an abort_send;
+# tests/supervisor/test_dispatch.sh mutation-checks that removing this
+# tolerance turns the suite red.
+#
+# agent-dotfiles#188 finding 1: step 1's fail-closed read does NOT rule out
+# "actually busy" on its own here. `Ledger.record_dispatch` is one
+# transaction, so a failure rolls back every one of its five writes -- and
+# for a lane the ledger already had registered free (every lane after its
+# first backfill, and every lane `lane-done.sh` has ever freed, which is
+# ordinary steady state, not an edge case), rollback restores exactly that
+# pre-existing FREE row, not UNKNOWN. A comment here used to claim the
+# unrecorded lane reads UNKNOWN regardless; it does not, and #188 is the
+# defect that shape produces (also #145, #170: a comment asserting a
+# protection the code does not have). `cli.py`'s `record_dispatch` now closes
+# that window itself -- on any failure it calls `Ledger.mark_lane_held`
+# before re-raising, which writes a placeholder outstanding task for the
+# lane so `lane_available` reads occupied, not whatever it read before the
+# call. That write happens inside the Python process handling this exact
+# failure, so it is not conditional on this bash block at all; what follows
+# here is only the loud, human-facing report of what already happened.
 #
 # WHY IT RUNS LAST, after the final Enter and past every abort path: a record
 # asserting work is in flight, left behind by a dispatch that then aborted, is
@@ -432,7 +508,7 @@ fi
 ledger_record_failed() {
   echo "dispatch: LEDGER RECORD FAILED for $WINDOW_NAME -- the dispatch STANDS, the record does not" >&2
   sed 's/^/  /' <<<"${1:-}" >&2
-  echo "dispatch: the lane is working; nothing reads the ledger yet, so this costs a record, not the run" >&2
+  echo "dispatch: the lane is working, and cli.py has marked it HELD (a placeholder occupied task) so it will not be offered again -- reconcile it by hand (cli.py register / record-dispatch) or let a later dispatch overwrite it" >&2
   return 0  # the ledger write is never fatal -- agent-dotfiles#140
 }
 

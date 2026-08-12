@@ -287,12 +287,22 @@ lane, claim the issue, create the worktree, rename the window, send the brief:
 dispatch.sh <issue> <slug> <brief-file> [repo] [repo-path]
 ```
 
-A lane is a candidate only if `lanes.sh` calls it `free` **and** its window is
-named `free-N`. Both are needed: `lanes.sh` reads pane content, so a lane that
+A lane is a candidate only if `lanes.sh` calls it `free` **and** the LEDGER
+says it is unowned (agent-dotfiles#174). `lanes.sh` still answers "is an agent
+there and not mid-turn" from pane content — that has not changed. "Is this
+lane UNOWNED" used to be answered by the window name (`free-N`); a lane that
 finished without being renamed, and one paused on an approval prompt, look
-identical to an unowned one — the name is the only signal that separates them,
-and `/clear`ing the wrong lane destroys whatever it had not posted yet (#89).
-The lane cannot be chosen from the environment; there is no override.
+identical to an unowned one from pane content alone, and the name used to be
+the only signal that survived that. Now the ledger is: `dispatch.sh` asks
+`cli.py lane-free`, which answers from the `lanes`/`tasks` tables, not the
+name. The window name still matters for exactly one thing — MIGRATION: a lane
+the ledger has never heard of is registered as free the first time it is seen
+named `free-N`, and never consulted by name again after that. A lane the
+ledger already knows about, free or occupied, answers from the ledger alone
+regardless of what it is currently named — a hand-renamed occupied lane is
+still not offered, which is the inversion #174 exists to prove. An unreadable
+ledger refuses every candidate rather than assume any of them are free. The
+lane cannot be chosen from the environment; there is no override.
 
 It exists because `worktree.sh` shipped (#79) with no automated caller
 (agent-dotfiles#81): `grep -rn worktree.sh` found three code fences in
@@ -324,7 +334,7 @@ landed, the dispatch aborts and rolls back rather than submitting whatever is
 in the input. `DISPATCH_SETTLE` (default 2s) is the pause that gives the
 harness time to finish repainting.
 
-### It records what it dispatched (#140)
+### It records what it dispatched (#140), and now reads it back (#174)
 
 After the brief is submitted, `dispatch.sh` writes the dispatch to the ledger
 (`cli.py record-dispatch`), and `lane-done.sh` marks it complete
@@ -334,10 +344,16 @@ already key on. `AGENT_SUPERVISOR_STATE_DIR` aims both at a state directory;
 unset, it is the default under `~/.local/state/`, which `Ledger.__init__`
 `chmod`s to `0700` on first write.
 
-**Nothing reads these records.** `lanes.sh` still classifies panes exactly as
-it did; no dispatch decision consults the ledger. That is the point: a
-recording layer nothing depends on can be compared against reality before
-anything trusts it.
+**`dispatch.sh`'s own lane-selection step reads these records now** (#174):
+`lanes.sh` still classifies panes exactly as it did, but "is this lane
+unowned" is answered from the ledger, not the window name. That write was
+made non-fatal-on-failure by #140 specifically because nothing read it back
+yet; #140's own docstring named that as a risk to revisit once something did.
+A ledger record this dispatch failed to write simply makes that ONE lane read
+`unknown` (never offered) until it is reconciled by hand or overwritten by a
+later dispatch — see `cli.py`'s `lane_free` docstring and `dispatch.sh` step
+6's comment for the full argument on why the write still does not abort an
+already-live dispatch.
 
 Two consequences of that, both deliberate:
 
