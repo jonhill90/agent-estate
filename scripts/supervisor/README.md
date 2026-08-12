@@ -154,6 +154,7 @@ commit message.
 worktree.sh new <slug> [repo] [base]   # create a worktree, print its path
 worktree.sh done <path>                # remove a worktree; refuses if dirty
 worktree.sh guard <repo>               # exit 1 if <repo> itself is dirty
+worktree.sh gc    [repo] [base]        # remove worktrees merged into [base] and clean
 ```
 
 `dispatch.sh` calls `new` and hands the printed path to the lane, rather than
@@ -163,6 +164,20 @@ uncommitted changes, matching `safe-deletion`: a worktree with uncommitted
 changes is someone's unfinished work, not garbage. `guard` is for the
 Director's own use of the shared checkout, which caused the same class of bug
 this tool exists to prevent.
+
+Nothing calls `new`'s counterpart: `lane-done.sh` renames the tmux window and
+closes the ledger task but never removes the worktree it was handed
+(agent-dotfiles#165). `gc` is the intended cleanup, but it is not
+"`lane-done.sh` calls `done`" — a just-finished lane's branch is usually
+pushed and in review, so removing its tree at completion time is early, and
+`done` correctly refuses a dirty tree, which would make a lane that finished
+with uncommitted work leak silently. `gc` instead sweeps every worktree in
+`[repo]` and removes one only when its branch's tip is an ancestor of
+`[base]` *and* its tree is clean, reusing the same dirty/detached-HEAD guard
+as `done`. It is idempotent and safe to run repeatedly, but it is not wired
+into `dispatch.sh`, `lane-done.sh`, or the Director tick — that is a separate
+decision left to whoever owns the tick, not bundled into landing the tool
+(see dispatch.sh's header on tools nothing calls).
 
 ## Advancing the live worktree
 
