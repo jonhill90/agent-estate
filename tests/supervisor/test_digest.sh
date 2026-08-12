@@ -146,6 +146,11 @@ case "$1 $2" in
     f="$FIX/run_${branch}.json"
     [ -f "$f" ] && cat "$f" || echo "[]"
     ;;
+  "pr view")
+    num="$3"
+    f="$FIX/reviews_${num}.json"
+    [ -f "$f" ] && cat "$f" || echo '{"reviews":[]}'
+    ;;
   *) exit 1 ;;
 esac
 S
@@ -153,10 +158,10 @@ chmod +x "$OK/bin/gh"
 
 cat > "$OK/fixtures/pr_list.json" <<'S'
 [
-  {"number":1,"title":"current head, clean merge","headRefOid":"aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111","headRefName":"b1","mergeStateStatus":"CLEAN","comments":[]},
-  {"number":2,"title":"stale pass, dirty merge","headRefOid":"bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222","headRefName":"b2","mergeStateStatus":"DIRTY","comments":[]},
-  {"number":3,"title":"no CI run at all, behind","headRefOid":"cccc3333cccc3333cccc3333cccc3333cccc3333","headRefName":"b3","mergeStateStatus":"BEHIND","comments":[]},
-  {"number":4,"title":"current head, CI failed","headRefOid":"dddd4444dddd4444dddd4444dddd4444dddd4444","headRefName":"b4","mergeStateStatus":"CLEAN","comments":[{"body":"REQUEST CHANGES: fix x"}]}
+  {"number":1,"title":"current head, clean merge","headRefOid":"aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111","headRefName":"b1","mergeStateStatus":"CLEAN"},
+  {"number":2,"title":"stale pass, dirty merge","headRefOid":"bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222","headRefName":"b2","mergeStateStatus":"DIRTY"},
+  {"number":3,"title":"no CI run at all, behind","headRefOid":"cccc3333cccc3333cccc3333cccc3333cccc3333","headRefName":"b3","mergeStateStatus":"BEHIND"},
+  {"number":4,"title":"current head, CI failed","headRefOid":"dddd4444dddd4444dddd4444dddd4444dddd4444","headRefName":"b4","mergeStateStatus":"CLEAN"}
 ]
 S
 cat > "$OK/fixtures/run_b1.json" <<'S'
@@ -170,9 +175,23 @@ cat > "$OK/fixtures/run_b4.json" <<'S'
 S
 # b3 deliberately has no run_b3.json -- stub falls back to "[]", i.e. no run.
 
+# PR4's review carries the exact prose that used to invert the old
+# regex-on-comment-prose verdict (agent-dotfiles#203 correction): a
+# COMMENTED review whose body says "I cannot approve this, it is unsafe."
+# The real GitHub *state* is CHANGES_REQUESTED from a second review below.
+# The adapter must read the STATE field only -- if it regressed to reading
+# comment bodies again, this body would flip verdict to "approved".
+cat > "$OK/fixtures/reviews_4.json" <<'S'
+{"reviews":[
+  {"state":"COMMENTED","body":"I cannot approve this, it is unsafe."},
+  {"state":"CHANGES_REQUESTED","body":"Rejected: the mutation-check never went red"}
+]}
+S
+
 run_ok() {
   PATH="$OK/bin:$PATH" SUPERVISOR_STATE="$D/state" LANES_SESSION=nosuch \
     DIGEST_REPOS=test-repo DIGEST_OWNER=ownerx GH_STUB_FIXTURES="$OK/fixtures" \
+    DIGEST_VERDICT_SOURCE=github \
     bash "$DIGEST" --json 2>/dev/null
 }
 J=$(run_ok)
@@ -205,7 +224,52 @@ chk "PR3 merge_state passes through BEHIND" "BEHIND" "$(jq -r '.merge_state' <<<
 p4=$(pr 4)
 chk "PR4 run_conclusion failure" "failure" "$(jq -r '.run_conclusion' <<<"$p4")"
 chk "PR4 ci_is_current true (the failing run IS for this head)" "true" "$(jq -r '.ci_is_current' <<<"$p4")"
-chk "PR4 verdict reads REQUEST CHANGES from the comment" "REQUEST CHANGES" "$(jq -r '.verdict' <<<"$p4")"
+# THE REGRESSION agent-dotfiles#203 exists to fix: this PR's own review state
+# is CHANGES_REQUESTED, but a comment on it says "I cannot approve this, it
+# is unsafe." -- prose that the old `test("APPROVE";"i")` regex read as an
+# approval. If verdict.py's github source regressed to reading comment
+# bodies instead of review state, this would read "approved", not "rejected".
+chk "PR4 verdict reads rejected from real GitHub review state, not comment prose" \
+  "rejected" "$(jq -r '.verdict' <<<"$p4")"
+
+# 13. never reviewed / approved / rejected are three distinct digest outputs
+# from the ledger source -- the bar this whole issue is measured against.
+LSTATE="$D/ledger-state"; mkdir -p "$LSTATE"
+VPY="$HERE/../../scripts/supervisor/verdict.py"
+run_ledger() {
+  PATH="$OK/bin:$PATH" SUPERVISOR_STATE="$LSTATE" LANES_SESSION=nosuch \
+    DIGEST_REPOS=test-repo DIGEST_OWNER=ownerx GH_STUB_FIXTURES="$OK/fixtures" \
+    DIGEST_VERDICT_SOURCE=ledger \
+    bash "$DIGEST" --json 2>/dev/null
+}
+never=$(jq -c --argjson n 1 '.prs[] | select(.number==$n)' <<<"$(run_ledger)")
+chk "1. never reviewed reads none, not unknown" "none" "$(jq -r '.verdict' <<<"$never")"
+
+python3 "$VPY" --state-dir "$LSTATE" record --repo ownerx/test-repo --number 1 \
+  --verdict approved --head-sha aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111 \
+  --reviewer lane-7 >/dev/null
+approved=$(jq -c --argjson n 1 '.prs[] | select(.number==$n)' <<<"$(run_ledger)")
+chk "2. reviewed and approved reads approved" "approved" "$(jq -r '.verdict' <<<"$approved")"
+
+python3 "$VPY" --state-dir "$LSTATE" record --repo ownerx/test-repo --number 2 \
+  --verdict rejected --head-sha bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222 \
+  --reviewer lane-7 --note "mutation-check never went red" >/dev/null
+rejected=$(jq -c --argjson n 2 '.prs[] | select(.number==$n)' <<<"$(run_ledger)")
+chk "3. reviewed and rejected reads rejected, distinct from 1 and 2" "rejected" "$(jq -r '.verdict' <<<"$rejected")"
+
+# 14. MUTATION-CHECK: break the adapter's reader and confirm the gate fails
+# CLOSED (unknown), never open (approved/none). A verdict source that
+# degrades to "approved" on error is the worst possible failure here
+# (agent-dotfiles#203's "fail closed, never open").
+BROKEN="$D/bin-broken"; mkdir -p "$BROKEN"
+printf '#!/bin/bash\necho "not json"\nexit 1\n' > "$BROKEN/verdict-broken"
+chmod +x "$BROKEN/verdict-broken"
+broken_out=$(PATH="$OK/bin:$PATH" SUPERVISOR_STATE="$LSTATE" LANES_SESSION=nosuch \
+  DIGEST_REPOS=test-repo DIGEST_OWNER=ownerx GH_STUB_FIXTURES="$OK/fixtures" \
+  DIGEST_VERDICT_BIN="$BROKEN/verdict-broken" \
+  bash "$DIGEST" --json 2>/dev/null)
+broken2=$(jq -c --argjson n 2 '.prs[] | select(.number==$n)' <<<"$broken_out")
+chk "broken adapter reader fails CLOSED (unknown), not open" "unknown" "$(jq -r '.verdict' <<<"$broken2")"
 
 rm -rf "$OK"
 

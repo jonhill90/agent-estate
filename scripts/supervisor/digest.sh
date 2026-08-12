@@ -41,6 +41,15 @@ REPOS="${DIGEST_REPOS:-agent-dotfiles skills skills-private agent-evals}"
 OWNER="${DIGEST_OWNER:-jonhill90}"
 SINCE="${DIGEST_SINCE:-}"
 MODE="${1:-}"
+# The verdict source is an adapter (agent-dotfiles#203, scripts/supervisor/
+# verdict.py) -- this script holds no knowledge of where the answer comes
+# from, only which source name(s) to ask and a python3 binary to ask them
+# with. DIGEST_VERDICT_BIN lets a test replace the whole call with a stub
+# that takes --repo/--number and prints {"verdict":...} on stdout, the same
+# override shape as DIGEST_LANES_BIN above.
+VERDICT_SOURCE="${DIGEST_VERDICT_SOURCE:-ledger}"
+VERDICT_PYTHON="${DIGEST_VERDICT_PYTHON:-python3}"
+VERDICT_BIN="${DIGEST_VERDICT_BIN:-}"
 
 # jq is the only dependency this script does not already share with the rest
 # of the estate: watchdog.sh and loop-tick.md both use `gh ... --jq`, which is
@@ -120,6 +129,23 @@ elif [ "$lane_rows" -eq 0 ]; then
 fi
 lane_line() { awk -v s="$1" 'NR>1 && $NF==s {print $2}' <<<"$LANES_OUT" | paste -sd, - ; }
 
+# Resolves one PR's verdict through the adapter. Always prints SOME JSON --
+# a source failure or a missing/broken stub must read as {"verdict":"unknown"},
+# never as empty output that a caller could mistake for "no verdict field".
+verdict_for() {
+  local repo_full="$1" number="$2" out
+  if [ -n "$VERDICT_BIN" ]; then
+    out=$("$VERDICT_BIN" --repo "$repo_full" --number "$number" 2>/dev/null)
+  else
+    out=$("$VERDICT_PYTHON" "$HERE/verdict.py" --state-dir "$STATE" \
+          get --repo "$repo_full" --number "$number" --source "$VERDICT_SOURCE" 2>/dev/null)
+  fi
+  if ! jq -e . >/dev/null 2>&1 <<<"$out"; then
+    out='{"verdict":"unknown","detail":"verdict source produced no readable output"}'
+  fi
+  printf '%s\n' "$out"
+}
+
 # --- pull requests --------------------------------------------------------
 # One `gh` call per repo for the PR list, then one `gh run list` per PR,
 # scoped to that PR's own branch.
@@ -137,7 +163,7 @@ lane_line() { awk -v s="$1" 'NR>1 && $NF==s {print $2}' <<<"$LANES_OUT" | paste 
 PR_JSON="[]"
 for repo in $REPOS; do
   list=$(gh pr list -R "$OWNER/$repo" --state open \
-        --json number,title,headRefOid,headRefName,mergeStateStatus,comments 2>/dev/null) || {
+        --json number,title,headRefOid,headRefName,mergeStateStatus 2>/dev/null) || {
     note_error "gh pr list failed for $OWNER/$repo -- its PRs are NOT in this digest"
     continue
   }
@@ -154,7 +180,12 @@ for repo in $REPOS; do
     }
     [ -z "$run" ] && run="[]"
     r=$(jq -c '.[0] // {}' <<<"$run")
-    entry=$(jq -n --argjson p "$p" --argjson r "$r" --arg repo "$repo" '
+    # Verdict comes from the adapter, not from this jq -- see verdict_for()
+    # above and scripts/supervisor/verdict.py. It used to regex-match the
+    # last PR comment's prose here, which read "I cannot approve this, it is
+    # unsafe." as an APPROVE (agent-dotfiles#203).
+    v=$(verdict_for "$OWNER/$repo" "$num")
+    entry=$(jq -n --argjson p "$p" --argjson r "$r" --arg repo "$repo" --argjson v "$v" '
       {
         repo: $repo, number: $p.number, title: $p.title,
         head: $p.headRefOid[0:8],
@@ -164,11 +195,8 @@ for repo in $REPOS; do
         # UI does not distinguish, and a conflicted branch produces no run at all
         ci_is_current: (($r.headSha // "") == $p.headRefOid),
         merge_state: $p.mergeStateStatus,
-        verdict: (
-          [ $p.comments[]? | select(.body | test("quota limit") | not) ] | last | .body // ""
-          | if test("REQUEST CHANGES";"i") then "REQUEST CHANGES"
-            elif test("APPROVE";"i") then "APPROVE" else "none" end
-        )
+        verdict: ($v.verdict // "unknown"),
+        verdict_detail: ($v.detail // "")
       }') || { note_error "jq failed assembling $OWNER/$repo#$num"; continue; }
     PR_JSON=$(jq -nc --argjson acc "$PR_JSON" --argjson e "$entry" '$acc + [$e]')
   done
