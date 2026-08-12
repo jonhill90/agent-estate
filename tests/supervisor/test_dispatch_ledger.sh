@@ -172,19 +172,63 @@ import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
 marker = '''  CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidate" --target "$candidate" --window-name "$wname" 2>/dev/null) || continue
-  if grep -qF '"free":true' <<<"$CHECK"; then
+  grep -qF '"free":true' <<<"$CHECK" || continue
+
+  # Test-only instrumentation (agent-dotfiles#184): when set, run this
+  # command with the candidate lane as $1 right after it reads free and
+  # before this dispatch claims it -- exactly the gap a second dispatcher
+  # would need to land a whole competing dispatch in to prove the race.
+  # No caller sets this outside tests/supervisor/test_dispatch.sh.
+  if [ -n "${DISPATCH_TEST_RACE_HOOK:-}" ]; then
+    "$DISPATCH_TEST_RACE_HOOK" "$candidate" || true
+  fi
+
+  # CLAIM_LANE is set BEFORE the claim call, not after it (agent-dotfiles#209).
+  # The placeholder row is written INSIDE that call, so assigning afterwards
+  # left a real window: a TERM landing while the dispatcher waited on this
+  # command substitution ran the trap with CLAIM_LANE still empty and the row
+  # already committed -- a stranded claim on the one signal path the trap
+  # exists to cover. Naming a lane this dispatch did not win costs nothing:
+  # `release_lane_claim` is scoped to (lane, THIS dispatch's token,
+  # status='created'), so it matches no row unless the claim really succeeded.
+  #
+  # `--owner-pid $$` is THIS script's pid, not the `cli.py` child's: the child
+  # exits the moment the claim is written, so its pid would read dead
+  # instantly and step 0.5's reap would clear a live dispatch's claim. `$$` is
+  # the parent shell's pid even inside this command substitution.
+  CLAIM_LANE="$candidate"
+  CLAIM=$("$LEDGER_PYTHON" "$LEDGER_CLI" claim-lane --lane "$candidate" --token "$CLAIM_TOKEN" --owner-pid $$ 2>/dev/null) || { release_lane_claim; continue; }
+  if grep -qF '"claimed":true' <<<"$CLAIM"; then
     LANE="$candidate"
     break
-  fi'''
+  fi
+  # Lost this candidate to another dispatcher: move on, exactly as before.
+  # The release is a no-op in that case (the row is the winner's, not ours)
+  # and only bites when the claim committed but its result did not come back
+  # readable -- which would otherwise leak a claim only the reap could clear.
+  release_lane_claim'''
 assert marker in text, "lane-free selection block not found -- script shape changed"
 assert text.count(marker) == 1, "lane-free selection block not unique -- script shape changed"
 mutated = '''  # MUTATED: reproduces the pre-#174 bug -- trust the window name on a
-  # ledger miss instead of refusing.
+  # ledger miss instead of refusing, bypassing the ledger read AND the
+  # agent-dotfiles#184 claim that would otherwise still catch this (the
+  # claim's own INSERT would collide with the real occupant, so the
+  # mutation must skip it too to actually reproduce the pre-#174 shape).
   if [[ "$wname" =~ ^free-[0-9]+$ ]]; then
     LANE="$candidate"
     break
   fi'''
 text = text.replace(marker, mutated, 1)
+# agent-dotfiles#209 round 2 adds a THIRD guard on the same path, for the same
+# reason the claim had to be skipped above: step 4.5 refuses to send unless it
+# can mark THIS dispatch's claim live, and a mutant that never claimed has
+# none to mark. Left in, the fallback copy aborts at the commit instead of
+# dispatching to an occupied lane, and this case would report the pre-#174 bug
+# as closed by a guard that has nothing to do with reading the ledger.
+commit_guard = 'if ! grep -qF \'"committed":true\' <<<"$COMMIT_OUT"; then'
+assert commit_guard in text, "commit guard not found -- script shape changed"
+assert text.count(commit_guard) == 1, "commit guard not unique -- script shape changed"
+text = text.replace(commit_guard, 'if false; then  # MUTATED: step 4.5 commit guard bypassed', 1)
 here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
 assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
 text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)

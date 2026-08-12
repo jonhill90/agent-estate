@@ -151,6 +151,31 @@ case "$sub" in
             if [ "${DISPATCH_SWALLOW_ENTER:-0}" != 1 ]; then
               if [ -s "$buf" ]; then cat "$buf" >> "$buf.submitted"; printf '\n' >> "$buf.submitted"; fi
               : > "$buf"
+            fi
+            # agent-dotfiles#209 round 2. Signal the DISPATCHER at the exact
+            # instant the brief goes live in the pane -- after the submit has
+            # landed, before the dispatcher's next statement runs. That is the
+            # window the re-review reproduced: the lane is renamed, the brief
+            # is submitted, and a signal arriving here used to run the trap and
+            # free the lane out from under it.
+            #
+            # Fires ONLY on a bare `send-keys -t <lane> Enter`, which is the
+            # brief submit. `/clear` is sent as `send-keys -t <lane> /clear
+            # Enter` (two key arguments) and the retype loop's C-u is not an
+            # Enter at all, so neither trips this. Off unless
+            # DISPATCH_TEST_SEND_SIGNAL is exported; no non-test caller sets it.
+            #
+            # $PPID is the dispatcher: dispatch.sh runs `tmux send-keys ...` as
+            # a plain foreground command, not inside a command substitution, so
+            # this stub's parent IS the script's own shell -- the same process
+            # `--owner-pid` names on the claim.
+            if [ -n "${DISPATCH_TEST_SEND_SIGNAL:-}" ] && [ "${#keys[@]}" -eq 1 ]; then
+              printf 'signalled %s to %s at submit\n' "$DISPATCH_TEST_SEND_SIGNAL" "$PPID" >> "$LOG"
+              kill "-${DISPATCH_TEST_SEND_SIGNAL}" "$PPID" 2>/dev/null
+              # On a TERM the dispatcher runs its trap only once this
+              # foreground child is gone; on a KILL it is already dead. The
+              # pause keeps either from racing the assertions that follow.
+              sleep 1
             fi ;;
           C-u)   : > "$buf"; printf '%s\n' "C-u" >> "$buf.keys" ;;
           C-c|Escape|Up|Down|Left|Right|Tab)

@@ -2,6 +2,7 @@ import contextlib
 import io
 import json
 import os
+import socket
 import subprocess
 import sys
 import tempfile
@@ -503,6 +504,161 @@ class LaneFreeTest(unittest.TestCase):
             self.assertFalse(result["free"])
             self.assertIn("node", result.get("reason", ""))
             self.assertIsNone(ledger.get_lane("t:3"))
+
+
+class StrandedClaimRecoveryIsReachable(unittest.TestCase):
+    """agent-dotfiles#209. The recovery for a stranded claim has to be
+    RUNNABLE, not merely implemented.
+
+    `Ledger.cancel_open_task` was the #144 review's own example of a method
+    with no caller, and it still had none: not in `cli.py`'s parser, not
+    invoked anywhere outside `tests/`. `reap_stale_lane_claims` would have
+    been the second if it shipped without wiring. These drive `cli.py` as a
+    SUBPROCESS, the way `dispatch.sh` and a human operator both reach it --
+    an import-level test would pass against a parser that never learned the
+    subcommand.
+    """
+
+    def _run(self, root, *args):
+        return subprocess.run(
+            [sys.executable, str(SUPERVISOR_DIR / "cli.py"), "--state-dir", str(root), *args],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+
+    def _lane(self, root):
+        ledger = Ledger(Path(root))
+        ledger.register_lane(
+            lane="free-9", pane_id="%9", nonce="nonce-9", harness="claude",
+            repo=root, server_id="socket:1", session_id="$0", command="claude.exe",
+        )
+        return ledger
+
+    def test_claim_lane_records_the_owner_pid_it_is_given(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._lane(root)
+            proc = self._run(root, "claim-lane", "--lane", "free-9", "--token", "ad1-x", "--owner-pid", "4242")
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertTrue(json.loads(proc.stdout)["claimed"])
+            task = Ledger(Path(root)).get_task("ledger-claim:free-9:ad1-x")
+            self.assertIn(f"{socket.gethostname()}:4242", task["summary"])
+
+    def test_claim_lane_without_an_owner_is_still_accepted(self):
+        """`--owner-pid` is additive. A caller that omits it gets exactly the
+        pre-#209 behaviour rather than an error."""
+        with tempfile.TemporaryDirectory() as root:
+            self._lane(root)
+            proc = self._run(root, "claim-lane", "--lane", "free-9", "--token", "ad1-x")
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertTrue(json.loads(proc.stdout)["claimed"])
+            self.assertNotIn("[owner=", Ledger(Path(root)).get_task("ledger-claim:free-9:ad1-x")["summary"])
+
+    def test_reap_lane_claims_is_runnable_and_frees_a_dead_owners_lane(self):
+        with tempfile.TemporaryDirectory() as root:
+            ledger = self._lane(root)
+            dead = subprocess.Popen([sys.executable, "-c", "pass"])
+            dead.wait()
+            self.assertEqual(0, self._run(
+                root, "claim-lane", "--lane", "free-9", "--token", "ad1-x", "--owner-pid", str(dead.pid),
+            ).returncode)
+            self.assertFalse(ledger.lane_available("free-9"))
+
+            proc = self._run(root, "reap-lane-claims")
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertEqual(1, json.loads(proc.stdout)["count"])
+            self.assertTrue(Ledger(Path(root)).lane_available("free-9"))
+
+    def test_reap_lane_claims_leaves_a_live_owners_lane_alone(self):
+        with tempfile.TemporaryDirectory() as root:
+            ledger = self._lane(root)
+            self.assertEqual(0, self._run(
+                root, "claim-lane", "--lane", "free-9", "--token", "ad1-x", "--owner-pid", str(os.getpid()),
+            ).returncode)
+            proc = self._run(root, "reap-lane-claims")
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertEqual(0, json.loads(proc.stdout)["count"])
+            self.assertFalse(ledger.lane_available("free-9"))
+
+    def test_commit_lane_claim_is_runnable_and_puts_the_claim_out_of_reap_range(self):
+        """agent-dotfiles#209 round 2. `dispatch.sh` calls this immediately
+        before the `send-keys Enter` that submits the brief, so from the CLI's
+        side the contract is: after it returns committed, a reap that finds
+        the owner provably dead must still leave the lane held."""
+        with tempfile.TemporaryDirectory() as root:
+            ledger = self._lane(root)
+            dead = subprocess.Popen([sys.executable, "-c", "pass"])
+            dead.wait()
+            self.assertEqual(0, self._run(
+                root, "claim-lane", "--lane", "free-9", "--token", "ad1-x", "--owner-pid", str(dead.pid),
+            ).returncode)
+
+            proc = self._run(root, "commit-lane-claim", "--lane", "free-9", "--token", "ad1-x")
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertTrue(json.loads(proc.stdout)["committed"])
+
+            reap = self._run(root, "reap-lane-claims")
+            self.assertEqual(0, reap.returncode, reap.stderr)
+            self.assertEqual(0, json.loads(reap.stdout)["count"])
+            self.assertFalse(ledger.lane_available("free-9"))
+
+            # ...and the scoped release the trap uses will not free it either,
+            # and says so: an operator following the refusal's recovery steps
+            # must not read `released: true` off a command that freed nothing.
+            rel = self._run(root, "release-lane-claim", "--lane", "free-9", "--token", "ad1-x")
+            self.assertEqual(0, rel.returncode, rel.stderr)
+            self.assertFalse(json.loads(rel.stdout)["released"])
+            self.assertIn("cancel-open-task", json.loads(rel.stdout)["hint"])
+            self.assertFalse(Ledger(Path(root)).lane_available("free-9"))
+
+    def test_release_lane_claim_reports_true_only_when_it_freed_something(self):
+        """The control: the same command on a claim that is still only a
+        reservation reports the release it actually performed."""
+        with tempfile.TemporaryDirectory() as root:
+            ledger = self._lane(root)
+            self.assertEqual(0, self._run(
+                root, "claim-lane", "--lane", "free-9", "--token", "ad1-x", "--owner-pid", "4242",
+            ).returncode)
+            rel = self._run(root, "release-lane-claim", "--lane", "free-9", "--token", "ad1-x")
+            self.assertEqual(0, rel.returncode, rel.stderr)
+            self.assertTrue(json.loads(rel.stdout)["released"])
+            self.assertTrue(ledger.lane_available("free-9"))
+
+    def test_commit_lane_claim_refuses_a_claim_that_was_never_made(self):
+        """`dispatch.sh` treats a non-committed result as fatal and does not
+        send, so this refusal has to be visible in the exit-0 JSON rather than
+        implied by an absence."""
+        with tempfile.TemporaryDirectory() as root:
+            self._lane(root)
+            proc = self._run(root, "commit-lane-claim", "--lane", "free-9", "--token", "never-claimed")
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            value = json.loads(proc.stdout)
+            self.assertFalse(value["committed"])
+            self.assertEqual("missing", value["reason"])
+            self.assertTrue(Ledger(Path(root)).lane_available("free-9"))
+
+    def test_cancel_open_task_is_the_operators_hammer_and_is_runnable(self):
+        """The manual half of the recovery `dispatch.sh`'s refusal now names:
+        it clears whatever outstanding task holds the lane, including a
+        `ledger-hold:` row the automatic reap deliberately will not touch."""
+        with tempfile.TemporaryDirectory() as root:
+            ledger = self._lane(root)
+            ledger.mark_lane_held("free-9", note="ledger record failed")
+            self.assertFalse(ledger.lane_available("free-9"))
+            self.assertEqual(0, self._run(root, "reap-lane-claims").returncode)
+            self.assertFalse(ledger.lane_available("free-9"), "the reap must not touch a deliberate hold")
+
+            proc = self._run(root, "cancel-open-task", "--lane", "free-9")
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertEqual("cancelled", json.loads(proc.stdout)["cancelled"]["status"])
+            self.assertTrue(Ledger(Path(root)).lane_available("free-9"))
+
+    def test_cancel_open_task_on_an_already_free_lane_is_a_no_op(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._lane(root)
+            proc = self._run(root, "cancel-open-task", "--lane", "free-9")
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertIsNone(json.loads(proc.stdout)["cancelled"])
 
 
 if __name__ == "__main__":
