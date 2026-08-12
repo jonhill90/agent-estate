@@ -28,10 +28,26 @@ HARNESS_SEND_LITERAL=1
 # Ready shape. Codex's footer -- "<model> <effort> · <cwd>" -- is the LAST
 # non-empty line whether or not a turn is running (see HARNESS_BUSY_TAIL
 # below); it is NOT proof of idle by itself, only proof this is a codex
-# pane's normal chrome. Anchored on the middle dot before an absolute path
-# rather than the model name, which is a user setting (`gpt-5.5 medium` here,
-# changeable via `/model`) and not safe to hardcode.
-HARNESS_READY_RE='^[[:space:]]*[^·[:space:]][^·]*·[[:space:]]*/'
+# pane's normal chrome. Anchored on the middle dot before a path rather than
+# the model name, which is a user setting (`gpt-5.5 medium` here, changeable
+# via `/model`) and not safe to hardcode.
+#
+# agent-dotfiles#250: the path may start with `~` as well as `/`. Codex prints
+# the cwd tilde-abbreviated whenever it is under $HOME, which is the ordinary
+# case for this estate -- the live `free-codex` lane's last non-empty line, on
+# 2026-08-12, verbatim:
+#
+#   gpt-5.5 medium · ~/source/repos/Personal/agent-dotfiles
+#
+# An absolute-path-only anchor never matched it, so the lane read `unknown`,
+# `--free` withheld it exactly as #126/#131 intend, and dispatch.sh could
+# never give the only untouched harness in the estate any work. The class is
+# widened by exactly one character: `[/~]` covers the two cwd renderings codex
+# is observed to emit and nothing else. It is deliberately NOT relaxed to "any
+# text after the dot" -- #201's finding is that a matcher loose enough to
+# cover every possible chrome is how one harness's shapes start falsely
+# matching another's.
+HARNESS_READY_RE='^[[:space:]]*[^·[:space:]][^·]*·[[:space:]]*[/~]'
 
 # Busy. The turn indicator (`• Working (Ns • esc to interrupt)`) sits ABOVE
 # the footer, not on it -- captured live:
