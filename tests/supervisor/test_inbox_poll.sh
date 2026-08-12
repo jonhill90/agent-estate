@@ -21,8 +21,117 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POLL="$HERE/../../scripts/supervisor/inbox-poll.sh"
 pass=0; fail=0
-ok()  { echo "  ok   $1"; pass=$((pass+1)); }
-bad() { echo "  FAIL $1"; sed 's/^/       /' <<<"${2:-}"; fail=$((fail+1)); }
+# Every assertion writes to fd 3, a dup of the suite's real stdout, NOT to
+# whatever stdout happens to be at the call site. run() below is invoked as
+# `run ... >"$D/out1" 2>&1` at nearly every one of its twelve sites, so a
+# failure reported from inside it with a plain `echo` lands in a scratch file
+# nobody reads -- a bound that fires silently, which is the stated worst case
+# (#213's `stderr is clean`). Caught by this change's own RUN_MAX_SECONDS=0
+# mutation check: 23 failures, zero FAIL lines on stdout, until this dup.
+exec 3>&1
+ok()  { echo "  ok   $1" >&3; pass=$((pass+1)); }
+bad() { { echo "  FAIL $1"; sed 's/^/       /' <<<"${2:-}"; } >&3; fail=$((fail+1)); }
+
+# agent-dotfiles#227: this suite backgrounds inbox-poll.sh a dozen times to
+# exercise its SIGTERM handling, and every one of those tests used to close
+# with a bare `wait "$pid"` -- no bound of its own. Under real contention
+# (measured: a resource-constrained CI runner, reproduced locally by
+# throttling the container to 2 CPUs) that wait can sit for minutes instead
+# of the near-instant exit SIGTERM normally produces: the killed process is
+# still alive and still scheduled eventually, so `wait` is not deadlocked,
+# it is just waiting arbitrarily long behind everything else fighting for
+# the CPU -- and CI's own 300s harness timeout has no visibility into any
+# of that, so the whole suite (and every suite queued after it in the same
+# `unittest discover` run) reads as a silent hang instead of a reported
+# failure. reap() gives that wait a wall-clock bound: escalate to SIGKILL
+# and fail LOUDLY, naming the pid and what it was waiting for, rather than
+# ever blocking past REAP_MAX_SECONDS. Measured normal case (an inbox-poll.sh
+# that traps SIGTERM correctly, no contention): 0/300 misses, exit in low
+# tens of milliseconds -- 30s is three orders of magnitude of margin above
+# that, not a tight bound being tuned to the failure.
+#
+# reap() alone was not enough, because it only ever bounds the
+# *background-and-kill* shape. The suite's other, larger blocking surface is
+# run() below, which used to invoke inbox-poll.sh in the FOREGROUND at twelve
+# call sites with no bound of any kind. That surface is not hypothetical:
+# measured under contention on this branch's head, one foreground run()
+# invocation sat for 239 seconds before RUN_MAX_SECONDS killed it and named
+# the fixture. Bounding five background waits while twelve foreground calls
+# stayed unbounded showed the suite did not block in one set of runs; it did
+# not establish that it could not.
+#
+# What this file does NOT have, deliberately: a suite-wide wall-clock budget.
+# One was written here (SUITE_MAX_SECONDS=270, clamping every per-site
+# deadline and aborting through a give_up()), on the argument that per-site
+# bounds can sum past test_shell_suites.py's timeout=300 in the pathological
+# case. Measured, it cost more than it bought: at 270s it aborted 3 of 5
+# runs that were proceeding correctly -- 26, 14 and 7 green assertions deep
+# -- in the same emulated 1-CPU container it had been calibrated in. The
+# calibration itself was the problem. The suite's own run-to-run variance
+# there was measured at 228-382s, wider than the margin the budget left, and
+# that container is ~36x slower than the machine CI actually runs on, so any
+# number tuned in it is tuned to the wrong box. A budget that cannot be
+# calibrated where it runs is a new flake source, introduced by a change
+# whose whole purpose is to make a flaky suite honest.
+#
+# The concern it was reaching for is real and is already owned one level up:
+# test_shell_suites.py invokes this file with timeout=300, which bounds the
+# suite as a whole from outside, where the harness -- not this file -- can
+# see it. Arguing the suite budget back in needs a calibration measured
+# where CI runs, not where the repro runs. (agent-dotfiles#227, PR #232.)
+#
+# Two earlier readings from this PR's history should not be cited again:
+# "hung 15/15 at a 40s bound" and the review's "7/15 before, 7/15 after".
+# Both are accurate as readings and wrong as conclusions -- at a 40s bound
+# the fixed and unfixed trees fail at the same rate, at the same assertion,
+# with identical logs, which says 40s is less than this suite needs on that
+# box, not that the defect is present. The evidence this file rests on is
+# the 239s foreground stall above, which is the mechanism rather than a
+# symptom.
+#
+# Every bound here is WALL-CLOCK ($SECONDS, a deadline computed up front),
+# not a count of `sleep 0.1` iterations. That distinction is not academic:
+# the iteration-counting version of this patch was measured hanging in the
+# same emulated 1-CPU container below for 13+ minutes without its "10s"
+# bound ever firing. Under that contention each loop pass -- a `sleep` fork
+# plus a `kill -0` -- costs seconds, not the nominal 0.1s, so "100
+# iterations" is 100 * however-slow-the-box-is, which is exactly the
+# unbounded quantity the bound exists to remove. A deadline in $SECONDS
+# cannot be stretched that way.
+REAP_MAX_SECONDS=${REAP_MAX_SECONDS:-30}
+RUN_MAX_SECONDS=${RUN_MAX_SECONDS:-60}
+STATUS_MAX_SECONDS=${STATUS_MAX_SECONDS:-15}
+EXIT_MAX_SECONDS=${EXIT_MAX_SECONDS:-15}
+
+reap() {  # reap <pid> <label> -- bounded replacement for `wait "$pid"`
+  local pid="$1" label="$2" started="$SECONDS" deadline=$(( SECONDS + REAP_MAX_SECONDS ))
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      bad "$label: pid $pid still alive $((SECONDS - started))s after SIGTERM -- escalating to SIGKILL instead of hanging" ""
+      kill -KILL "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      return 1
+    fi
+    sleep 0.1
+  done
+  wait "$pid" 2>/dev/null
+  return 0
+}
+
+await_status() {  # await_status <label> -- wait for the poller's heartbeat
+                  # file to appear, and SAY SO if the wait expires.
+  # Every one of these four waits used to fall through silently on expiry.
+  # The run still went red -- some assertion below the wait would fail
+  # because the status file it reads was never written -- but it went red
+  # with a misleading reason, blaming its own subject for a wait that had
+  # already given up. An expiry has to name itself, the way RUN_MAX_SECONDS
+  # does, or the failure it produces sends the reader to the wrong place.
+  local label="$1" started="$SECONDS" deadline=$(( SECONDS + STATUS_MAX_SECONDS ))
+  while [ ! -s "$D/status" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.1; done
+  [ -s "$D/status" ] && return 0
+  bad "$label: the ${STATUS_MAX_SECONDS}s wait for the heartbeat file expired after $((SECONDS - started))s -- assertions below this point are reporting THAT, not their own subject" ""
+  return 1
+}
 
 echo "inbox-poll.sh"
 
@@ -103,6 +212,22 @@ cp "$D/bin-route.sh" "$D/lane/director-route.sh"
 cp "$D/bin-notify.sh" "$D/lane/notify.sh"
 chmod +x "$D/lane"/*.sh
 
+# run() is the suite's OTHER blocking shape, and the larger one: twelve of
+# these against five reap() sites. It used to invoke inbox-poll.sh in the
+# foreground, where the shell waits on it exactly as it waits on any
+# foreground command -- no bound, no timeout, nothing reap() can help with,
+# because there is no `wait "$pid"` here to replace. That is the call
+# measured stalling for 239 seconds under a throttled, CPU-starved
+# container. So it now backgrounds the poller and waits on it the same
+# bounded way reap() does: escalate to SIGKILL and fail loudly, naming the
+# fixture, at RUN_MAX_SECONDS.
+# Measured normal case: every one of these twelve calls runs 1-3 iterations
+# of a stubbed poller and returns in well under a second (whole suite, no
+# contention: ~5s wall clock). 60s is deliberately looser than that margin
+# needs to be, so it only ever fires on genuine pathology and not on a
+# merely slow box: measured, the reap()-only suite needs ~210s end to end
+# under the emulated 1-CPU container, so a tight per-site bound would turn a
+# slow-but-correct run red for no benefit.
 run() {  # run <inbox-script-fixture> <iterations> [extra env...]
   local fixture="$1" iters="$2"; shift 2
   ROUTE_LOG="$D/route.log"; : > "$ROUTE_LOG"
@@ -111,7 +236,18 @@ run() {  # run <inbox-script-fixture> <iterations> [extra env...]
   HOME="$D/state" INBOX_SCRIPT="$fixture" ROUTE_LOG="$ROUTE_LOG" NOTIFY_LOG="$NOTIFY_LOG" \
     INBOX_POLL_ITERATIONS="$iters" INBOX_POLL_STATUS="$D/status" INBOX_POLL_LOG="$D/poll.log" \
     INBOX_POLL_BACKOFF_BASE=0 \
-    env "$@" bash "$D/lane/inbox-poll.sh" t
+    env "$@" bash "$D/lane/inbox-poll.sh" t &
+  local pid=$! started="$SECONDS" deadline=$(( SECONDS + RUN_MAX_SECONDS ))
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$SECONDS" -ge "$deadline" ]; then
+      bad "run ${fixture##*/} x${iters}: pid $pid still running after $((SECONDS - started))s -- killing instead of blocking on a foreground poller that never returned" ""
+      kill -KILL "$pid" 2>/dev/null
+      wait "$pid" 2>/dev/null
+      return 1
+    fi
+    sleep 0.1
+  done
+  wait "$pid" 2>/dev/null
 }
 
 # --- a message is routed the moment inbox.sh returns it --------------------
@@ -245,10 +381,9 @@ HOME="$D/state" INBOX_SCRIPT="$D/fixture-forever" ROUTE_LOG="$D/route.log" NOTIF
   INBOX_POLL_BACKOFF_BASE=0 INBOX_POLL_MIN_UPTIME=0 \
   bash "$D/lane/inbox-poll.sh" t >"$D/out6" 2>&1 &
 pid=$!
-waited=0
-while [ ! -s "$D/status" ] && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+await_status "SIGTERM death test"
 kill -TERM "$pid" 2>/dev/null
-wait "$pid" 2>/dev/null
+reap "$pid" "SIGTERM death test"
 grep -qi 'poller stopped' "$D/notify.log" 2>/dev/null && ok "an unexpected (signal-terminated) death still pages Jon" \
   || bad "no stop notification after an unexpected SIGTERM" "$(cat "$D/notify.log" 2>/dev/null)"
 grep -q 'state:.*stopped' "$D/status" 2>/dev/null && ok "...and the heartbeat file records it too" \
@@ -267,10 +402,9 @@ HOME="$D/state" INBOX_SCRIPT="$D/fixture-forever" ROUTE_LOG="$D/route.log" NOTIF
   INBOX_POLL_BACKOFF_BASE=0 INBOX_POLL_MIN_UPTIME=60 \
   bash "$D/lane/inbox-poll.sh" t >"$D/out7" 2>&1 &
 pid=$!
-waited=0
-while [ ! -s "$D/status" ] && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+await_status "MIN_UPTIME death test"
 kill -TERM "$pid" 2>/dev/null
-wait "$pid" 2>/dev/null
+reap "$pid" "MIN_UPTIME death test"
 grep -qi 'poller stopped' "$D/notify.log" 2>/dev/null && bad "paged for a death under INBOX_POLL_MIN_UPTIME" "$(cat "$D/notify.log")" \
   || ok "a death under INBOX_POLL_MIN_UPTIME does not page"
 grep -q 'state:.*stopped' "$D/status" 2>/dev/null && ok "...but the heartbeat file still records it" \
@@ -353,17 +487,16 @@ done
 # Not sensitive enough to catch the race on its own (see above) -- it is here
 # to catch gross breakage of the stop path, which it does deterministically.
 term_misses=0
-for _ in $(seq 1 12); do
+for n in $(seq 1 12); do
   rm -f "$D/notify.log" "$D/status" "$D/poll.log"; : > "$D/notify.log"
   HOME="$D/state" INBOX_SCRIPT="$D/fixture-forever" ROUTE_LOG="$D/route.log" NOTIFY_LOG="$D/notify.log" \
     INBOX_POLL_ITERATIONS=0 INBOX_POLL_STATUS="$D/status" INBOX_POLL_LOG="$D/poll.log" \
     INBOX_POLL_BACKOFF_BASE=0 INBOX_POLL_MIN_UPTIME=0 \
     bash "$D/lane/inbox-poll.sh" t >/dev/null 2>&1 &
   pid=$!
-  waited=0
-  while [ ! -s "$D/status" ] && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+  await_status "SIGTERM loop iteration $n/12"
   kill -TERM "$pid" 2>/dev/null
-  wait "$pid" 2>/dev/null
+  reap "$pid" "SIGTERM loop iteration $n/12"
   grep -qi 'poller stopped' "$D/notify.log" 2>/dev/null || term_misses=$((term_misses + 1))
 done
 [ "$term_misses" -eq 0 ] && ok "twelve consecutive SIGTERMs each paged Jon" \
@@ -396,16 +529,16 @@ HOME="$D/state" INBOX_SCRIPT="$D/fixture-forever" ROUTE_LOG="$D/route.log" NOTIF
   INBOX_POLL_BACKOFF_BASE=0 INBOX_POLL_MIN_UPTIME=0 INBOX_POLL_RESTART_FLAG="$RESTART_FLAG" \
   bash "$D/lane/inbox-poll.sh" t >"$D/out14" 2>&1 &
 pid=$!
-waited=0
-while [ ! -s "$D/status" ] && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+await_status "restart-flag test"
 : > "$RESTART_FLAG"
-waited=0
-while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((waited + 1)); done
+exit_started="$SECONDS"
+exit_deadline=$(( SECONDS + EXIT_MAX_SECONDS ))
+while kill -0 "$pid" 2>/dev/null && [ "$SECONDS" -lt "$exit_deadline" ]; do sleep 0.1; done
 if kill -0 "$pid" 2>/dev/null; then
-  bad "a restart-flag request makes the poller exit on its own" "still running after ${waited}00ms"
-  kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+  bad "a restart-flag request makes the poller exit on its own" "still running after $((SECONDS - exit_started))s"
+  kill -TERM "$pid" 2>/dev/null; reap "$pid" "restart-flag cleanup"
 else
-  wait "$pid" 2>/dev/null
+  reap "$pid" "restart-flag exit"
   ok "a restart-flag request makes the poller exit on its own"
 fi
 grep -qi 'poller stopped' "$D/notify.log" 2>/dev/null && bad "a version-triggered restart paged Jon" "$(cat "$D/notify.log")" \
