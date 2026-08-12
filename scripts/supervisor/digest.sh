@@ -268,7 +268,15 @@ else
     # (agent-dotfiles#218) is otherwise indistinguishable here from any other
     # unreadable-source "unknown" -- the detail names which commit the
     # verdict was actually filed against, traceable against \(.head) above.
-    (.prs[] | "  \(.repo)#\(.number) ci=\(.run_conclusion)\(if (.ci_is_current or .run_conclusion == "NO RUN") then "" else " [STALE - run is for \(.run_sha), head is \(.head)]" end) \(.merge_state) verdict=\(.verdict)\(if .verdict == "unknown" and (.verdict_detail|length) > 0 then " (\(.verdict_detail))" else "" end)"),
+    # The detail prints for EVERY verdict that carries one, not only for
+    # "unknown" (agent-dotfiles#229). It used to be gated on `.verdict ==
+    # "unknown"`, which silently dropped the basis of an approved/rejected
+    # verdict -- including one #226 promoted across a rebase, so a
+    # rebase-promoted approval rendered identically to a review filed at the
+    # literal current head. A rule that shows the basis only sometimes is a
+    # rule the next reader has to learn, and its absence then reads as
+    # "nothing to say" -- which is the failure #226 and #229 are both about.
+    (.prs[] | "  \(.repo)#\(.number) ci=\(.run_conclusion)\(if (.ci_is_current or .run_conclusion == "NO RUN") then "" else " [STALE - run is for \(.run_sha), head is \(.head)]" end) \(.merge_state) verdict=\(.verdict)\(if (.verdict_detail|length) > 0 then " (\(.verdict_detail))" else "" end)"),
     (if (.merged_since|length) > 0 then "merged:" else empty end),
     (.merged_since[] | "  \(.repo)#\(.number) \(.title[0:52])"),
     (if (.errors|length) > 0 then "ERRORS (this digest is INCOMPLETE):" else empty end),
