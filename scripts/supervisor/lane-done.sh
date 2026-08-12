@@ -58,7 +58,10 @@
 # script) immediately after a successful dispatch, so the supervisor's tick
 # stays free while it waits -- SPEC §14.3's fast path.
 #
-# Exit 0 only after a successful rename.
+# Exit 0 once the signal is confirmed and the name still matches, whether or
+#   not the rename itself succeeds (agent-dotfiles#194) -- see the ledger
+#   release and rename-window comments below for why the rename is cosmetic
+#   now, not the release condition.
 # Exit 1 if the channel was never signaled, or if the window no longer
 #   carries <expected-name> when it was.
 # `tmux wait-for` itself has no timeout (SPEC §14.2 L3): a worker that
@@ -89,31 +92,22 @@ if [ "$CURRENT" != "$EXPECTED_NAME" ]; then
   exit 1
 fi
 
-# agent-dotfiles#174 test 5 ("the rename is cosmetic") is NOT yet true here,
-# tracked as a deliberate deferral in agent-dotfiles#194: this rename is
-# still `|| exit 1`, evaluated before the ledger release below, so a failed
-# rename (e.g. the window closed) leaves the lane occupied in the ledger
-# with no rename to retry by hand. Not fixed in #183/#174 because
-# `test_lane_done.sh` has its own tested invariant -- no completion is ever
-# recorded for a rename that did not happen -- that a reorder would need to
-# revisit under real tmux, which is a completion-path behavior change, not
-# the availability-side change #174 scoped itself to. See #194.
-tmux rename-window -t "${SESSION}:${IDX}" "free-${IDX}" || exit 1
-
-# Record the completion (agent-dotfiles#140, updated by agent-dotfiles#174).
-# BEST EFFORT, NEVER FATAL, but for a different reason now that dispatch.sh
-# reads this record to decide what is free: the rename above already
-# happened, so the lane IS free in reality regardless of whether this write
-# lands. If it fails, the ledger keeps showing this lane's last task open --
-# dispatch.sh's fail-closed read (#174) then treats the lane as occupied and
-# simply never offers it again, rather than risk mistakenly offering a lane
-# that is not actually free. That is the safe direction to be wrong in, which
-# is why this stays best-effort rather than turning a genuine completion into
-# a reported failure. Loud on failure, never silent.
+# agent-dotfiles#194: the ledger release is the authoritative operation now
+# (agent-dotfiles#174 test 5, "the rename is cosmetic") -- it runs FIRST and
+# unconditionally, so a failed rename below can no longer strand a finished
+# lane in the ledger. Reordering this ahead of the rename means the note can
+# no longer assert the rename already happened; it only asserts what this
+# script actually knows at this point, which is that the signal fired for a
+# window still carrying the expected name.
 #
-# Runs AFTER the rename, so the only completion ever recorded is one that
-# actually released the lane. The task id is the window name dispatch.sh set,
-# which is what it recorded the task under.
+# Record the completion (agent-dotfiles#140, updated by agent-dotfiles#174,
+# reordered by agent-dotfiles#194). BEST EFFORT, NEVER FATAL: dispatch.sh's
+# fail-closed read (#174) treats a missing/failed record as "still occupied"
+# and simply never offers the lane again, rather than risk offering one that
+# is not actually free. That is the safe direction to be wrong in, which is
+# why this stays best-effort rather than turning a genuine completion into a
+# reported failure. Loud on failure, never silent. The task id is the window
+# name dispatch.sh set, which is what it recorded the task under.
 #
 # Not `cli.py complete`: that verifies $TMUX_PANE owns the lane and wants a
 # --result-file. This script runs in the supervisor's pane and holds no result
@@ -121,9 +115,30 @@ tmux rename-window -t "${SESSION}:${IDX}" "free-${IDX}" || exit 1
 if ! LEDGER_OUT=$("${LANE_DONE_PYTHON:-python3}" \
     "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cli.py" \
     record-completion --task "$EXPECTED_NAME" \
-    --note "lane-done: ${CHANNEL} signaled; ${SESSION}:${IDX} renamed to free-${IDX}" 2>&1); then
+    --note "lane-done: ${CHANNEL} signaled for ${SESSION}:${IDX}, still named '$EXPECTED_NAME'" 2>&1); then
   echo "lane-done: LEDGER RECORD FAILED for $EXPECTED_NAME -- the lane IS free, the record is not written" >&2
   sed 's/^/  /' <<<"$LEDGER_OUT" >&2
+fi
+
+# Rename back to free-N is now COSMETIC, not the release condition
+# (agent-dotfiles#194): the ledger write above is what actually frees the
+# lane, so a failed rename -- the window was closed, renamed by hand, the
+# index moved -- must not undo or block that release. Loud on failure, not
+# fatal, and NOT `|| exit 1` any more: `loop-tick.md`'s old "rename it back
+# to free-N by hand" recovery is unnecessary once the ledger already
+# released the lane, and would be actively wrong if attempted against a
+# window meanwhile reused for other work.
+#
+# A lane released here but left misnamed IS still dispatchable: dispatch.sh's
+# candidate list comes from `lanes.sh --free`, which classifies a lane from
+# PANE content (agent idle and ready), not the window name, and `cli.py
+# lane_free` answers a lane the ledger already knows purely from the ledger,
+# ignoring the name entirely (see that function's docstring) -- the name
+# convention only gates lanes the ledger has never seen. So this is a stated
+# property, not an assumption: a stale name after a failed rename does not
+# withhold the lane from dispatch.
+if ! tmux rename-window -t "${SESSION}:${IDX}" "free-${IDX}"; then
+  echo "lane-done: rename-window FAILED for ${SESSION}:${IDX} -- the lane IS released in the ledger; the window keeps its stale name '$EXPECTED_NAME' (still dispatchable -- see comment above)" >&2
 fi
 
 exit 0

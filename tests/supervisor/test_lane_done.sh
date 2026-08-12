@@ -277,15 +277,24 @@ else
       fi
     fi
 
-    # 5. THE RENAME-WINDOW GUARD (agent-dotfiles#144 finding 4): a rename
-    #    that FAILS must not be treated as a released lane. `lane-done.sh`
-    #    only records a completion AFTER a successful rename, on the theory
-    #    that "the only completion ever recorded is one that actually
-    #    released the lane" -- but nothing exercised the failure half of
-    #    that claim against real tmux. Shim `tmux` so every call proxies to
-    #    the real server except `rename-window`, which is refused --
-    #    modelling a genuine tmux failure (a racing rename, a dying server)
-    #    rather than assuming rename-window always succeeds.
+    # 5. THE RENAME-WINDOW GUARD, REVISED (agent-dotfiles#194, superseding
+    #    #144 finding 4): #144 required that a rename FAILURE must not be
+    #    treated as a released lane -- lane-done.sh recorded a completion
+    #    only AFTER a successful rename. #174 test 5 requires the opposite
+    #    property: the rename must be cosmetic, and the ledger release must
+    #    not depend on it succeeding, because #174 made the ledger's answer
+    #    win over the window name regardless of what it is renamed to -- so
+    #    a rename failure under the OLD ordering left a finished lane
+    #    permanently unrenamable AND permanently occupied in the ledger,
+    #    with no recovery route left (#194's own deadlock finding). #194
+    #    resolves the conflict by keeping #144's spirit -- a completion is
+    #    still recorded only for a genuine signal against a name that still
+    #    matches, never for idle-alone or a stolen name -- while dropping
+    #    the specific mechanism (gating the ledger write behind rename
+    #    success) that made the deadlock possible. Shim `tmux` so every call
+    #    proxies to the real server except `rename-window`, which is
+    #    refused -- modelling a genuine tmux failure (a racing rename, a
+    #    dying server) rather than assuming rename-window always succeeds.
     REAL_TMUX="$(command -v tmux)"
     RTSHIM="$D/rtshim"; mkdir -p "$RTSHIM"
     cat > "$RTSHIM/tmux" <<SHIM
@@ -311,63 +320,70 @@ SHIM
       timeout 6 bash "$LANE_DONE" "$W" ad144-renamefail "rt-renamefail-$$" "$RSESS" 2>&1)
     rc=$?
     wait "$sigpid" 2>/dev/null
-    want_exit "real tmux: a failed rename-window makes lane-done.sh exit non-zero, not zero" "$rc" 1 "$out"
+    want_exit "real tmux: a failed rename-window still exits zero -- the release is what matters, not the rename (agent-dotfiles#194)" "$rc" 0 "$out"
     name=$(rtmux display-message -p -t "${RSESS}:${W}" '#{window_name}')
-    want_contains "real tmux: the window keeps its task name when rename-window fails" "ad144-renamefail" "$name"
+    want_contains "real tmux: the window keeps its stale task name when rename-window fails" "ad144-renamefail" "$name"
     after=$(LEDGER_STATE="$D/state-renamefail" ledger status 2>&1)
-    want_contains "real tmux: the failed-rename task is still delivered, not complete" '"status":"delivered"' "$after"
-    want_missing "real tmux: no completion is recorded when the rename failed" '"status":"complete"' "$after"
+    want_contains "real tmux: the lane is STILL released in the ledger despite the failed rename (#194 -- this is the fix)" '"status":"complete"' "$after"
 
-    # ...and that guard is load-bearing. Patch a copy with the `|| exit 1`
-    # dropped and confirm the SAME failed rename now reports success and
-    # records a completion for a lane that is STILL named ad144-renamefail2
-    # -- if this passes, the guard's own claim ("the only completion ever
-    # recorded is one that actually released the lane") is untested.
-    NORENAMEGUARD="$D/lane-done-no-rename-guard.sh"
+    # ...and that reordering is what makes the property true, not the
+    # harness. Patch a copy that puts the rename back in FRONT of the ledger
+    # release with its `|| exit 1` restored -- exactly #183's original
+    # shipped ordering, which is the bug #194 exists to fix -- and confirm
+    # the SAME failed rename now leaves the ledger showing the task still
+    # delivered, not complete: the assertion just above would go red against
+    # this copy. If it does not, the assertion above is not actually
+    # exercising the reorder.
+    OLDORDER="$D/lane-done-old-order.sh"
     patch_rc2=0
-    python3 - "$LANE_DONE" "$NORENAMEGUARD" <<'PY' || patch_rc2=$?
+    python3 - "$LANE_DONE" "$OLDORDER" <<'PY' || patch_rc2=$?
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = 'tmux rename-window -t "${SESSION}:${IDX}" "free-${IDX}" || exit 1'
-assert marker in text, "rename-window guard not found -- script shape changed"
-assert text.count(marker) == 1, "rename-window guard not unique -- script shape changed"
-text = text.replace(marker, marker.replace(' || exit 1', ''), 1)
-# The copy runs from a temp directory, and lane-done.sh finds cli.py relative
-# to its own location. Pin that to the real one, or the copy's own ledger
-# call fails with "can't open file .../cli.py" before reaching the mutation
-# under test -- which would make the assertion below pass for the wrong
-# reason, same pitfall test_dispatch.sh's HERE-pinning trick avoids.
-here_expr = '"$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cli.py"'
-assert text.count(here_expr) == 1, "cli.py path expression not found or not unique -- script shape changed"
-import os
-text = text.replace(here_expr, '%r' % os.path.join(os.path.dirname(os.path.abspath(src)), "cli.py"), 1)
-open(dst, "w").write(text)
+
+ledger_start = 'if ! LEDGER_OUT=$('
+ledger_end_marker = "sed 's/^/  /' <<<\"$LEDGER_OUT\" >&2\nfi\n"
+i0 = text.index(ledger_start)
+i1 = text.index(ledger_end_marker, i0) + len(ledger_end_marker)
+assert i0 > 0 and i1 > i0, "ledger release block not found -- script shape changed"
+ledger_block = text[i0:i1]
+
+rename_start = 'if ! tmux rename-window -t "${SESSION}:${IDX}" "free-${IDX}"; then'
+rename_end_marker = "fi\n\nexit 0\n"
+j0 = text.index(rename_start)
+j1 = text.index(rename_end_marker, j0) + len(rename_end_marker)
+assert j0 > i1, "rename-window block is not after the ledger block -- script shape changed, mutation would not test the reorder"
+rename_block = text[j0:j1]
+
+before = text[:i0]
+after = text[j1:]
+old_rename = 'tmux rename-window -t "${SESSION}:${IDX}" "free-${IDX}" || exit 1\n\n'
+open(dst, "w").write(before + old_rename + ledger_block + "\nexit 0\n" + after)
 PY
     if [ "$patch_rc2" -ne 0 ]; then
-      bad "setup: patched a copy of lane-done.sh whose rename-window failure is ignored" \
+      bad "setup: patched a copy of lane-done.sh with the pre-#194 rename-before-release ordering" \
         "could not patch $LANE_DONE (exit $patch_rc2) -- treating as a failure, not a skip"
     else
-      ok "setup: patched a copy of lane-done.sh whose rename-window failure is ignored"
+      ok "setup: patched a copy of lane-done.sh with the pre-#194 rename-before-release ordering"
       LEDGER_STATE="$D/state-renamefail2" ledger record-dispatch \
         --lane "${RSESS}:${W}" --task ad144-renamefail2 \
-        --summary "#144 rename-window guard (mutated)" \
+        --summary "#194 mutation: pre-#194 ordering" \
         --pane-id '%9' --pane-path "$D" --command claude \
         --server-id 'socket:1' --session-id '$0' --issue 144 >/dev/null 2>&1
       rtmux rename-window -t "${RSESS}:${W}" ad144-renamefail2
       ( sleep 1; rtmux wait-for -S "rt-renamefail2-$$" ) &
       sigpid=$!
       out=$(PATH="$RTSHIM:$PATH" env -u TMUX AGENT_SUPERVISOR_STATE_DIR="$D/state-renamefail2" \
-        timeout 6 bash "$NORENAMEGUARD" "$W" ad144-renamefail2 "rt-renamefail2-$$" "$RSESS" 2>&1)
+        timeout 6 bash "$OLDORDER" "$W" ad144-renamefail2 "rt-renamefail2-$$" "$RSESS" 2>&1)
       rc=$?
       wait "$sigpid" 2>/dev/null
       name=$(rtmux display-message -p -t "${RSESS}:${W}" '#{window_name}')
       mutated_status=$(LEDGER_STATE="$D/state-renamefail2" ledger status 2>&1)
-      if [ "$rc" -eq 0 ] && [ "$name" = "ad144-renamefail2" ] && grep -qF '"status":"complete"' <<<"$mutated_status"; then
-        ok "mutation confirmed: dropping the guard reports success AND records a completion for a rename that never happened (the assertions above would now be red)"
+      if [ "$rc" -eq 1 ] && [ "$name" = "ad144-renamefail2" ] && grep -qF '"status":"delivered"' <<<"$mutated_status"; then
+        ok "mutation confirmed: restoring rename-before-release strands the lane in the ledger on a failed rename (the assertion above would now be red)"
       else
-        bad "mutation confirmed: dropping the guard reports success and records a completion for a rename that never happened" \
-          "expected exit 0, window STILL ad144-renamefail2, and a complete status; got exit $rc, window '$name': $out / $mutated_status"
+        bad "mutation confirmed: restoring rename-before-release strands the lane in the ledger on a failed rename" \
+          "expected exit 1, window STILL ad144-renamefail2, and a delivered (not complete) status; got exit $rc, window '$name': $out / $mutated_status"
       fi
     fi
   fi
