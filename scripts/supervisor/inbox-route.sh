@@ -53,11 +53,30 @@
 # claiming success when nothing landed at all, and claiming success when
 # Enter was swallowed by a repaint and the reply sat there unsent.
 #
+# #164: two things worth being honest about rather than implying coverage.
+# First, `text-blocked` now requires positive evidence of its own (see
+# lanes.sh's TEXT_PROMPT_RE) instead of being reached by absence of menu
+# evidence -- no real free-text-blocked prompt has ever been captured in
+# this estate, so as measured today this branch is reached only by the
+# modelled fixture, not by anything seen live. Second, the pane-evidence
+# check two paragraphs up keys on `input_box_state`, which anchors on Claude
+# Code's MAIN input box (`❯` + no-break space, input-box.sh). A genuinely
+# text-blocked dialog is by definition not sitting at the main prompt and
+# may never paint that box at all -- in which case this refuses with "never
+# showed the reply" and exits 1. Safe (it does not lie), but it means the
+# whole text branch, evidence check included, is modelled end to end and
+# untested against a real pane.
+#
 # Usage: inbox-route.sh "<message text>" [session]
 #
-# Exit 0 once the message has been either delivered to a lane or reported to
-# Jon via notify.sh. Exit 1 if neither happened -- the message text is
-# printed to stderr in that case so it is not lost from the caller's log.
+# Exit 0 once the message has been delivered to a lane and confirmed by the
+# pane's own input box. Exit 2 if nothing was delivered but Jon was told why
+# (a menu refusal, zero lanes waiting, or more than one candidate) -- #164:
+# this used to share exit 0 with a real delivery, and inbox-poll.sh logged
+# both as `ROUTED`, which is a message the log records as routed when it was
+# deliberately not. Exit 1 if neither delivery nor notification happened --
+# the message text is printed to stderr in that case so it is not lost from
+# the caller's log.
 
 set -uo pipefail
 
@@ -79,6 +98,15 @@ notify_jon() {  # notify_jon <subject> <body>
   fi
 }
 
+# #164: a refusal is not a delivery, and the exit code must say so -- the
+# poller logged both as `ROUTED`, which recorded a message as routed when it
+# was deliberately not. Exit 2 for "nothing was typed anywhere, but Jon was
+# told why"; exit 1 (the pre-existing "neither happened" code) if notify.sh
+# itself failed, same as every other failure path below.
+refuse_exit() {  # refuse_exit <subject> <body>
+  if notify_jon "$1" "$2"; then exit 2; else exit 1; fi
+}
+
 BLOCKED=(); KIND=()
 while IFS=$'\t' read -r candidate kind; do
   [ -n "$candidate" ] || continue
@@ -94,9 +122,8 @@ case "${#BLOCKED[@]}" in
       # this lane cannot read as an answer.
       MENU_TEXT=$(tmux capture-pane -p -t "$LANE" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -6)
       echo "inbox-route: $LANE is menu-blocked, refusing to type the reply into it" >&2
-      notify_jon "Telegram reply -- $LANE is on a menu, not free text" \
+      refuse_exit "Telegram reply -- $LANE is on a menu, not free text" \
         "$LANE is waiting on a selection, not typed text -- your reply (\"$MESSAGE\") was NOT sent, to avoid it landing as navigation keys. What it shows: $MENU_TEXT"
-      exit $?
     fi
     # `-l`: unlike dispatch.sh's own brief send, this text comes from an
     # external network service (agent-dotfiles#152) -- it is never safe to
@@ -141,14 +168,12 @@ case "${#BLOCKED[@]}" in
     exit 1
     ;;
   0)
-    notify_jon "Telegram message received, no lane is waiting" \
+    refuse_exit "Telegram message received, no lane is waiting" \
       "No blocked lane to route to -- got: $MESSAGE"
-    exit $?
     ;;
   *)
     LIST="$(IFS=', '; echo "${BLOCKED[*]}")"
-    notify_jon "Telegram reply -- which lane?" \
+    refuse_exit "Telegram reply -- which lane?" \
       "${#BLOCKED[@]} lanes are blocked ($LIST) -- got: $MESSAGE -- reply naming the lane"
-    exit $?
     ;;
 esac

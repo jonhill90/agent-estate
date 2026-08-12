@@ -111,7 +111,7 @@ cat > "$D/menu-blocked" <<'FIX'
 FIX
 out=$(run "$D/menu-blocked" "yes")
 rc=$?
-[ "$rc" -eq 0 ] && ok "menu-blocked lane: exits 0 (Jon was told)" || bad "exited $rc" "$out"
+[ "$rc" -eq 2 ] && ok "menu-blocked lane: exits 2, refused-but-notified (#164)" || bad "exited $rc, wanted 2" "$out"
 [ ! -s "$D/panes/2.submitted" ] && ok "the reply was never submitted to the menu-blocked lane" \
   || bad "the reply landed in the menu-blocked lane's pane" "$(cat "$D/panes/2.submitted")"
 [ ! -s "$D/panes/2" ] && ok "nothing was even typed into the menu-blocked lane's input box" \
@@ -124,6 +124,31 @@ grep -q '^send-keys .*t:2' "$D/tmux.log" 2>/dev/null \
 grep -q 'Do you want to proceed' "$D/curl.log" 2>/dev/null \
   && ok "Jon is told what the menu says, not just that it exists" \
   || bad "the menu's own text was not relayed to Jon" "$(cat "$D/curl.log")"
+
+# --- agent-dotfiles#164: a refusal Jon was never told about is exit 1, not 2
+# refuse_exit only returns 2 when notify.sh actually succeeded. If Telegram
+# is unreachable too, neither delivery nor notification happened -- the
+# header contract's exit 1 -- and that must not be conflated with the
+# ordinary "refused but Jon knows" case.
+cat > "$D/bin/curl" <<'EOF'
+#!/bin/bash
+echo "curl $* (forced failure)" >> "${CURL_LOG:-/dev/null}"
+exit 1
+EOF
+chmod +x "$D/bin/curl"
+out=$(run "$D/menu-blocked" "yes")
+rc=$?
+[ "$rc" -eq 1 ] && ok "menu-blocked lane, Telegram also unreachable: exits 1, not 2 (#164)" \
+  || bad "exited $rc, wanted 1" "$out"
+grep -q 'forced failure' "$D/curl.log" 2>/dev/null \
+  && ok "the forced Telegram failure actually fired (curl was invoked and failed)" \
+  || bad "curl.log does not show the forced failure" "$(cat "$D/curl.log" 2>&1)"
+cat > "$D/bin/curl" <<'EOF'
+#!/bin/bash
+echo "curl $*" >> "${CURL_LOG:-/dev/null}"
+exit 0
+EOF
+chmod +x "$D/bin/curl"
 
 # --- #159 mutation-check 3: the stub must tell a menu apart from a text
 # buffer, or the safety above is unfalsifiable ------------------------------
@@ -167,7 +192,7 @@ cat > "$D/zero-blocked" <<'FIX'
 FIX
 out=$(run "$D/zero-blocked" "yes")
 rc=$?
-[ "$rc" -eq 0 ] && ok "zero blocked lanes: still exits 0 (Jon was told)" || bad "exited $rc" "$out"
+[ "$rc" -eq 2 ] && ok "zero blocked lanes: exits 2, refused-but-notified (#164)" || bad "exited $rc, wanted 2" "$out"
 [ -s "$D/curl.log" ] && ok "zero blocked lanes notifies Jon through notify.sh" \
   || bad "no notify.sh call for zero blocked lanes"
 [ -z "$(ls "$D/panes" 2>/dev/null)" ] && ok "nothing was sent to any pane" \
@@ -181,7 +206,7 @@ cat > "$D/two-blocked" <<'FIX'
 FIX
 out=$(run "$D/two-blocked" "yes")
 rc=$?
-[ "$rc" -eq 0 ] && ok "several blocked lanes: exits 0 (Jon was asked)" || bad "exited $rc" "$out"
+[ "$rc" -eq 2 ] && ok "several blocked lanes: exits 2, refused-but-notified (#164)" || bad "exited $rc, wanted 2" "$out"
 [ -s "$D/curl.log" ] && ok "several blocked lanes notifies Jon to disambiguate" \
   || bad "no notify.sh call for several blocked lanes"
 [ -z "$(ls "$D/panes" 2>/dev/null)" ] && ok "nothing was guessed into any pane" \

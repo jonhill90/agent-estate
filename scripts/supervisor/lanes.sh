@@ -192,6 +192,36 @@ OPTION_ROW_RE='^[[:space:]]*❯ [0-9]+\.[[:space:]]'
 MENU_ENTER_RE='Enter to [a-z]+'
 MENU_TAIL_LINES=6
 
+# #164: `text-blocked` used to be reached by the ABSENCE of the two markers
+# above -- an unrecognised menu shape (no "Enter to <verb>" phrase, no option
+# row) fell through to text-blocked, and inbox-route.sh then typed a routed
+# reply into it as free text. That is the exact hazard #159 just fixed for
+# every menu this estate HAS captured; it stayed open for every one it
+# has not. Independent review of #161 measured the margin: an
+# unrecognised bash-permission-style footer needs only 6 non-empty lines
+# above it to fall into this default, and the real dialog spends 3 --
+# option count and text WRAPPING (`2. Yes, and don't ask again for: curl *`
+# is one line at 200 columns, two in a narrow split) eat the rest.
+#
+# #126 already settled this exact argument for `free`: the dangerous
+# classification must require positive evidence, not be the fallback of a
+# blacklist. Typing free text into a pane is the dangerous act here, so the
+# fallback for anything blocked-but-unrecognised is now `menu-blocked`
+# (refuse-and-relay) and `text-blocked` requires a marker of its OWN.
+#
+# TEXT_PROMPT_RE is MODELED, NOT OBSERVED. No genuine free-text-blocked
+# prompt has ever been captured in this estate (#164) -- every real capture
+# BLOCKED_MARKERS/MENU_ENTER_RE/OPTION_ROW_RE are built from is a menu. This
+# regex exists only so the estate's own modelled fixture (lanes.sh's
+# w-text-blocked, inbox-route's "one-blocked") keeps exercising
+# inbox-route.sh's delivery mechanics -- literal send, evidenced `delivered`
+# -- rather than that whole branch going dead. It must not be treated as
+# validated against a real pane, and widening it to match one requires a
+# real capture first, the same rule every other marker here follows. Until
+# that capture exists, this refusal-favoring default is the only thing a
+# caller can rely on for an unrecognised blocked shape.
+TEXT_PROMPT_RE='Type the [a-z]'
+
 # #126: free used to be "whatever is left after busy/hung/blocked/dead are
 # ruled out" -- a blacklist. Two lanes running an approved billed eval and a
 # research task read free while each had delegated to a background subagent:
@@ -334,15 +364,18 @@ emit_rows() {
       #
       # #159: which KIND of prompt matters to a caller deciding whether free
       # text is a safe thing to type into it -- see MENU_ENTER_RE above.
-      # `text-blocked` is the default, not a positively-matched case: nothing
-      # in this estate has been captured that proves it, so it is reached by
-      # absence of menu evidence rather than by a marker of its own. That
-      # keeps the same posture BLOCKED_MARKERS itself uses -- observed
-      # evidence adds a case, the absence of evidence never removes one.
+      # #164: `menu-blocked` is now the default for anything blocked that
+      # this probe cannot positively place -- see TEXT_PROMPT_RE above for
+      # why. `text-blocked` requires its own positive marker, same posture
+      # as `free`'s whitelist since #126: observed evidence adds a case, the
+      # absence of evidence never removes one -- so absence of MENU evidence
+      # no longer defaults to text.
       if grep -qE "$MENU_ENTER_RE" <<<"$pane" || grep -qE "$OPTION_ROW_RE" <<<"$pane_tail"; then
         state=menu-blocked
-      else
+      elif grep -qE "$TEXT_PROMPT_RE" <<<"$pane"; then
         state=text-blocked
+      else
+        state=menu-blocked
       fi
     elif grep -q 'esc to interrupt' <<<"$pane"; then
       # Busy-looking. Hung iff tmux has seen no output for HUNG_AFTER.
