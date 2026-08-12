@@ -14,6 +14,34 @@ want() { # want <name> <window-name> <expected-state> <output>
   else echo "  FAIL $1 — $2 not '$3' in:"; sed 's/^/       /' <<<"$4"; fail=$((fail+1)); fi
 }
 
+# Rewrite one `NAME=<value>` assignment in a copy of a harness adapter, used
+# by the mutation checks below to break a matcher on purpose.
+#
+# agent-dotfiles#250: this exists because the mutation checks used to find
+# their target by pasting the adapter's CURRENT regex in as a literal string
+# and asserting it was present. That couples every mutation check to the exact
+# bytes of the thing it mutates: #250's one-character widening of codex's
+# ready matcher made the assert fail, and the failure landed in the check's
+# SETUP, not in an assertion -- so the suite went from 116 passed / 0 failed
+# to 112 passed / 1 failed. Four checks stopped running and the only sign was
+# a smaller total. Anchoring on the variable NAME instead means a matcher can
+# be changed without silently deleting the checks that prove it matters. The
+# uniqueness assert keeps the anchor honest: an adapter that grew a second
+# assignment to the same name fails loudly rather than mutating the wrong one.
+mutate_assign() { # mutate_assign <file> <var-name> <new-value-with-quoting>
+  python3 - "$1" "$2" "$3" <<'PY'
+import re, sys
+path, var, value = sys.argv[1], sys.argv[2], sys.argv[3]
+text = open(path).read()
+pattern = re.compile(r"^%s=.*$" % re.escape(var), re.M)
+found = pattern.findall(text)
+assert len(found) == 1, \
+    "%s: expected exactly one %s= assignment, found %d -- file shape changed" % (
+        path, var, len(found))
+open(path, "w").write(pattern.sub(lambda m: "%s=%s" % (var, value), text, count=1))
+PY
+}
+
 D=$(mktemp -d); mkdir -p "$D/bin"
 cp "$HERE/stubs/tmux-lanes" "$D/bin/tmux"
 cp "$HERE/stubs/ps-lanes" "$D/bin/ps"
@@ -69,6 +97,7 @@ cat > "$D/fixture" <<'FIX'
 39|w-shell-idle-hung|claude.exe|⏵⏵ bypass permissions on · 1 shell · ← 1 agent · ↓ to manage|900|0
 40|w-shell-tasks|claude.exe|⏵⏵ bypass permissions on · 1 shell · ctrl+t to hide tasks · ← 1 agent · ↓ to manage|1|0
 41|w-shells-plural|claude.exe|⏵⏵ bypass permissions on · 2 shells · ← 1 agent · ↓ to manage|1|0
+42|w-codex-ready-tilde|codex|  gpt-5.5 medium · ~/source/repos/Personal/agent-dotfiles|1|0
 FIX
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
 
@@ -205,6 +234,18 @@ want "codex's own startup trust menu is menu-blocked"     w-codex-trust menu-blo
 want "a real copilot idle footer is free"                 w-copilot-ready free "$out"
 want "a real copilot mid-turn pane is busy, not free"     w-copilot-busy busy "$out"
 
+# --- agent-dotfiles#250: codex abbreviates a cwd under $HOME ---------------
+# The row above carries `/repo/path` because #201's throwaway lab ran out of
+# a private temp directory. Every lane in this estate runs out of $HOME, and
+# there codex prints the cwd tilde-abbreviated instead -- so the absolute-path
+# anchor #201 shipped matched the lab and never the real thing. This row is
+# the live `free-codex` lane's last non-empty line on 2026-08-12, verbatim,
+# and it read `unknown` until harness/codex.sh's ready matcher accepted `~`.
+# Unknown is the correct default for a shape nothing recognises (#126), which
+# is why this never showed up as a broken lane: it showed up as no lane at
+# all, withheld from --free forever with no error anywhere.
+want "a codex footer with a tilde-abbreviated cwd is free (#250)" w-codex-ready-tilde free "$out"
+
 # --- agent-dotfiles#207: a background shell changes Claude's footer shape --
 # All five rows below are verbatim real captures off a real Claude Code pane
 # (v2.1.220) in a throwaway tmux server, private TMUX_TMPDIR, 2026-08-12 --
@@ -320,7 +361,7 @@ done
 # And it must still offer a lane that IS a recognised ready shape -- the
 # whitelist must not collapse into refusing everything.
 for good in w-real-free w-mentions w-mentions-blocked w-placeholder w-empty-box \
-            w-codex-ready w-copilot-ready; do
+            w-codex-ready w-codex-ready-tilde w-copilot-ready; do
   gi=$(awk -F'|' -v n="$good" '$2==n{print $1}' "$D/fixture")
   if grep -qE "^[^	]*:${gi}	" <<<"$free"; then echo "  ok   --free offers $good"; pass=$((pass+1));
   else echo "  FAIL --free withheld $good"; fail=$((fail+1)); fi
@@ -467,15 +508,8 @@ trap - EXIT
 HDIR="$(cd "$(dirname "$LANES")/harness" && pwd)"
 MUTHDIR=$(mktemp -d)
 cp "$HDIR"/*.sh "$MUTHDIR"/
-python3 - "$MUTHDIR/codex.sh" <<'PY'
-import sys
-path = sys.argv[1]
-text = open(path).read()
-marker = "HARNESS_READY_RE='^[[:space:]]*[^·[:space:]][^·]*·[[:space:]]*/'"
-assert marker in text, "codex.sh's HARNESS_READY_RE not found -- file shape changed"
-open(path, "w").write(text.replace(marker, "HARNESS_READY_RE='NEVER_MATCHES_ANYTHING_XYZZY'", 1))
-PY
-mutation_rc=$?
+mutation_rc=0
+mutate_assign "$MUTHDIR/codex.sh" HARNESS_READY_RE "'NEVER_MATCHES_ANYTHING_XYZZY'" || mutation_rc=$?
 if [ "$mutation_rc" -ne 0 ]; then
   echo "  FAIL setup: could not mutate a copy of harness/codex.sh (exit $mutation_rc)"; fail=$((fail+1));
 else
@@ -499,6 +533,48 @@ else
 fi
 rm -rf "$MUTHDIR"
 
+# --- agent-dotfiles#250 mutation check: revert to the absolute-path anchor -
+# The #201 check above proves an unmatchable matcher moves the codex lane. It
+# does NOT prove the tilde case needs anything, because a NEVER_MATCHES value
+# breaks both codex rows at once. This one reverts codex's ready matcher to
+# the exact pre-#250 value -- absolute paths only -- and asserts the two rows
+# part company: the tilde-abbreviated footer goes `unknown` while the
+# absolute-path footer stays `free`. Without the fix under test this check
+# cannot pass, so the assertion above is provably checking something.
+#
+# The direction is the point (#124, #126): the pre-#250 matcher must send the
+# tilde lane to `unknown`, never to `free`. The one-way ratchet is that no
+# change may make a lane AVAILABLE by accident; withholding a lane that is
+# genuinely idle is the safe failure, and is exactly the (costly, silent)
+# failure #250 fixes.
+MUTHDIR3=$(mktemp -d)
+cp "$HDIR"/*.sh "$MUTHDIR3"/
+mutation_rc=0
+mutate_assign "$MUTHDIR3/codex.sh" HARNESS_READY_RE \
+  "'^[[:space:]]*[^·[:space:]][^·]*·[[:space:]]*/'" || mutation_rc=$?
+if [ "$mutation_rc" -ne 0 ]; then
+  echo "  FAIL setup: could not revert a copy of harness/codex.sh to the pre-#250 anchor (exit $mutation_rc)"; fail=$((fail+1));
+else
+  echo "  ok   setup: reverted a copy of harness/codex.sh to the pre-#250 absolute-path anchor"; pass=$((pass+1));
+  tilde_out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" LANES_HARNESS_DIR="$MUTHDIR3" bash "$LANES" 2>&1)
+  if grep -qE "^[0-9]+ +w-codex-ready-tilde +[^ ]+ +unknown$" <<<"$tilde_out"; then
+    echo "  ok   mutation confirmed: the pre-#250 anchor cannot see a tilde-abbreviated cwd"; pass=$((pass+1));
+  else
+    echo "  FAIL mutation confirmed: the pre-#250 anchor did not move w-codex-ready-tilde to unknown:"; sed 's/^/       /' <<<"$tilde_out"; fail=$((fail+1));
+  fi
+  if grep -qE "^[0-9]+ +w-codex-ready-tilde +[^ ]+ +free$" <<<"$tilde_out"; then
+    echo "  FAIL the one-way ratchet broke: w-codex-ready-tilde became free under the reverted anchor"; fail=$((fail+1));
+  else
+    echo "  ok   the one-way ratchet holds: w-codex-ready-tilde never became free"; pass=$((pass+1));
+  fi
+  if grep -qE "^[0-9]+ +w-codex-ready +[^ ]+ +free$" <<<"$tilde_out"; then
+    echo "  ok   the widening is narrow: the absolute-path footer read free before #250 and still does"; pass=$((pass+1));
+  else
+    echo "  FAIL the absolute-path codex footer stopped reading free under the pre-#250 anchor:"; sed 's/^/       /' <<<"$tilde_out"; fail=$((fail+1));
+  fi
+fi
+rm -rf "$MUTHDIR3"
+
 # --- agent-dotfiles#207 mutation check: break the new busy matcher --------
 # Drop the `↓ to manage` alternative harness/claude.sh#207 added and confirm
 # w-shell-idle falls to `unknown` -- and explicitly, never to `free` -- and
@@ -507,15 +583,8 @@ rm -rf "$MUTHDIR"
 # lanes were stuck in before the fix.
 MUTHDIR2=$(mktemp -d)
 cp "$HDIR"/*.sh "$MUTHDIR2"/
-python3 - "$MUTHDIR2/claude.sh" <<'PY'
-import sys
-path = sys.argv[1]
-text = open(path).read()
-marker = "HARNESS_BUSY_RE='esc to interrupt|↓ to manage'"
-assert marker in text, "claude.sh's HARNESS_BUSY_RE not found -- file shape changed"
-open(path, "w").write(text.replace(marker, "HARNESS_BUSY_RE='esc to interrupt'", 1))
-PY
-mutation_rc=$?
+mutation_rc=0
+mutate_assign "$MUTHDIR2/claude.sh" HARNESS_BUSY_RE "'esc to interrupt'" || mutation_rc=$?
 if [ "$mutation_rc" -ne 0 ]; then
   echo "  FAIL setup: could not mutate a copy of harness/claude.sh (exit $mutation_rc)"; fail=$((fail+1));
 else
