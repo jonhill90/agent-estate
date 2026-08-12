@@ -241,13 +241,14 @@ DIGEST=$(jq -n \
   --arg free "$(lane_line free)" --arg busy "$(lane_line busy)" \
   --arg blocked "$(lane_line blocked)" --arg menu "$(lane_line menu-blocked)" \
   --arg dead "$(lane_line dead)" --arg service "$(lane_line service)" \
+  --arg stale "$(lane_line stale)" \
   --arg unknown "$(lane_line unknown)" \
   --argjson prs "$PR_JSON" --argjson merged "$MERGED_JSON" --argjson errors "$ERR_JSON" '
   {checked: $checked,
    watchdog: {state:$wd_state, checked:$wd_checked, restarts:$wd_restarts, heartbeat:$wd_heartbeat},
    poller: {alive:$poller_alive, state:$poller_state, checked:$poller_checked},
    lanes: {free:$free, busy:$busy, blocked:$blocked, menu_blocked:$menu,
-           dead:$dead, service:$service, unknown:$unknown},
+           dead:$dead, stale:$stale, service:$service, unknown:$unknown},
    prs: $prs, merged_since: $merged, errors: $errors,
    ok: ($errors | length == 0)}')
 
@@ -259,6 +260,10 @@ else
     "poller:   alive=\(.poller.alive) state=\(.poller.state)",
     "lanes:    free=[\(.lanes.free)] busy=[\(.lanes.busy)]",
     "          blocked=[\(.lanes.blocked)] menu=[\(.lanes.menu_blocked)] dead=[\(.lanes.dead)]",
+    # #237: a stale lane is a dead one whose window name still claims a task.
+    # Printed on its own line rather than folded into `dead` because the
+    # action differs -- restore.sh, and do not believe the name.
+    "          stale=[\(.lanes.stale)]",
     (if (.prs|length) == 0 then "prs:      none open" else "prs:" end),
     # Three distinct CI states, not two: no run at all, a run that failed, and
     # a run that passed but is not for this head. Collapsing "no run" and

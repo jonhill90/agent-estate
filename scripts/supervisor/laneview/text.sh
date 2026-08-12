@@ -30,6 +30,10 @@ glyph = {
     "menu-blocked": "?", "text-blocked": "?", "unsent": "~",
     "service": ".", "supervisor": ".", "unknown": "?",
     "scrolled": "^",
+    # A narrowing of "dead" (agent-dotfiles#237): the shell's window name
+    # still claims a task the ledger has already closed. Distinct glyph so
+    # the lying name is visible, not folded into "x" as if it were silent.
+    "stale": "X",
 }
 
 print(f"laneview text -- {session}")

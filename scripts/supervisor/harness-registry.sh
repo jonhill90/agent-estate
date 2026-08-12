@@ -19,8 +19,16 @@
 # Sets, all parallel and keyed by POSITION:
 #   HARNESS_IDS  H_COMMAND_RE  H_READY_RE  H_BUSY_RE  H_BUSY_TAIL
 #   H_BLOCKED_MARKERS  H_OPTION_ROW_RE  H_MENU_ENTER_RE  H_MENU_TAIL
-#   H_TEXT_PROMPT_RE
+#   H_TEXT_PROMPT_RE  H_LAUNCH_CMD  H_RESUME_CMD
 # and defines harness_index_for_command / harness_index_for_name.
+#
+# agent-dotfiles#237 loads the two COMMAND fields into arrays for the first
+# time. `HARNESS_LAUNCH_CMD` has been recorded in harness/claude.sh since #201
+# with a comment saying no caller reads it; `restore.sh` is that caller, and
+# `HARNESS_RESUME_CMD` (a printf format taking the session id) is its sibling.
+# An empty H_RESUME_CMD is meaningful and is the default: it says this harness
+# has no resume dialect here, and `restore.sh` reports such a lane
+# unrecoverable rather than starting a fresh agent in it.
 #
 # Parallel INDEXED arrays, not `declare -A`. Every caller in this directory
 # invokes its script by its own shebang, which runs it under `/bin/bash` --
@@ -34,6 +42,7 @@
 HARNESS_REGISTRY_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_IDS=(); H_COMMAND_RE=(); H_READY_RE=(); H_BUSY_RE=(); H_BUSY_TAIL=()
 H_BLOCKED_MARKERS=(); H_OPTION_ROW_RE=(); H_MENU_ENTER_RE=(); H_MENU_TAIL=(); H_TEXT_PROMPT_RE=()
+H_LAUNCH_CMD=(); H_RESUME_CMD=()
 # LANES_HARNESS_DIR is the name `lanes.sh` has always used and its tests still
 # set (they point it at a MUTATED copy of the adapters to prove one adapter's
 # breakage cannot move another harness's lane). Kept as an alias so that
@@ -43,7 +52,7 @@ for _hf in "$HARNESS_DIR"/*.sh; do
   [ -e "$_hf" ] || continue
   unset HARNESS_NAME HARNESS_COMMAND_RE HARNESS_READY_RE HARNESS_BUSY_RE HARNESS_BUSY_TAIL \
         HARNESS_BLOCKED_MARKERS HARNESS_OPTION_ROW_RE HARNESS_MENU_ENTER_RE HARNESS_MENU_TAIL \
-        HARNESS_TEXT_PROMPT_RE HARNESS_LAUNCH_CMD HARNESS_SEND_LITERAL
+        HARNESS_TEXT_PROMPT_RE HARNESS_LAUNCH_CMD HARNESS_RESUME_CMD HARNESS_SEND_LITERAL
   # shellcheck disable=SC1090
   . "$_hf"
   : "${HARNESS_NAME:?$_hf did not set HARNESS_NAME}"
@@ -59,6 +68,8 @@ for _hf in "$HARNESS_DIR"/*.sh; do
   H_MENU_ENTER_RE+=("${HARNESS_MENU_ENTER_RE:-}")
   H_MENU_TAIL+=("${HARNESS_MENU_TAIL:-6}")
   H_TEXT_PROMPT_RE+=("${HARNESS_TEXT_PROMPT_RE:-}")
+  H_LAUNCH_CMD+=("${HARNESS_LAUNCH_CMD:-}")
+  H_RESUME_CMD+=("${HARNESS_RESUME_CMD:-}")
 done
 unset _hf
 

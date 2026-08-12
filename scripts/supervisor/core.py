@@ -199,6 +199,16 @@ class Ledger:
                     server_id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
                     command TEXT NOT NULL,
+                    -- agent-dotfiles#237. NOT `session_id` above, which is
+                    -- tmux's own `#{session_id}` (`$0`) and dies with the tmux
+                    -- server. This is the HARNESS's conversation id -- the
+                    -- thing `claude --resume` takes -- and it is the only part
+                    -- of a lane's identity that survives a server loss,
+                    -- because it names a file on disk that tmux never owned.
+                    -- Empty means "not resolved", never "none": `restore.sh`
+                    -- reports an empty one unrecoverable rather than starting
+                    -- a fresh agent in that lane's place.
+                    harness_session_id TEXT NOT NULL DEFAULT '',
                     updated_at INTEGER NOT NULL
                 );
 
@@ -280,7 +290,12 @@ class Ledger:
     # from the ACP-driven 'copilot-acp' already here) to the same CHECK
     # constraint this migration widens -- both markers must be present or a
     # ledger created before #216 keeps rejecting the new harness forever.
-    _LANES_SCHEMA_MARKERS = ("copilot-acp", "'copilot'")
+    # agent-dotfiles#237 adds a THIRD marker for the same reason: a ledger
+    # created before #237 has no `harness_session_id` column at all, and
+    # `CREATE TABLE IF NOT EXISTS` will never add one. Without this marker the
+    # live ledger -- the one carrying every lane the restore path exists for --
+    # keeps the old table and every write naming the new column fails.
+    _LANES_SCHEMA_MARKERS = ("copilot-acp", "'copilot'", "harness_session_id")
 
     def _migrate_lanes_table(self, *, failpoint=None):
         """Widen an existing `lanes` table's harness CHECK constraint in place.
@@ -310,6 +325,23 @@ class Ledger:
                     return
                 if all(marker in existing["sql"] for marker in self._LANES_SCHEMA_MARKERS):
                     return
+                # agent-dotfiles#237: which columns the OLD table actually has,
+                # asked rather than assumed. This rebuild now runs for two
+                # different reasons -- a narrow harness CHECK (pre-#216) and a
+                # missing `harness_session_id` (pre-#237) -- and a ledger can
+                # need either without the other. A hardcoded copy list would
+                # read a column that does not exist yet on one path, and
+                # silently DROP recorded session ids on the other.
+                old_columns = {row["name"] for row in probe.execute("PRAGMA table_info(lanes)").fetchall()}
+            carried = [
+                column
+                for column in (
+                    "lane", "pane_id", "nonce", "harness", "repo", "server_id",
+                    "session_id", "command", "harness_session_id", "updated_at",
+                )
+                if column in old_columns
+            ]
+            carried_sql = ", ".join(carried)
 
             connection = self._connect(foreign_keys=False)
             try:
@@ -326,21 +358,14 @@ class Ledger:
                             server_id TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             command TEXT NOT NULL,
+                            harness_session_id TEXT NOT NULL DEFAULT '',
                             updated_at INTEGER NOT NULL
                         )
                         """
                     )
                     self._fail(failpoint, "after_create")
                     connection.execute(
-                        """
-                        INSERT INTO lanes_migrated (
-                            lane, pane_id, nonce, harness, repo, server_id, session_id,
-                            command, updated_at
-                        )
-                        SELECT lane, pane_id, nonce, harness, repo, server_id, session_id,
-                               command, updated_at
-                        FROM lanes
-                        """
+                        f"INSERT INTO lanes_migrated ({carried_sql}) SELECT {carried_sql} FROM lanes"
                     )
                     self._fail(failpoint, "after_copy")
                     connection.execute("DROP TABLE lanes")
@@ -568,13 +593,34 @@ class Ledger:
             (now, now, task_id),
         )
 
-    def _register_lane_tx(self, connection, *, lane, pane_id, nonce, harness, repo, server_id, session_id, command, now):
+    def _register_lane_tx(
+        self,
+        connection,
+        *,
+        lane,
+        pane_id,
+        nonce,
+        harness,
+        repo,
+        server_id,
+        session_id,
+        command,
+        now,
+        harness_session_id="",
+    ):
         if harness not in ("codex", "claude", "copilot", "copilot-acp"):
             raise ValueError("unsupported harness")
         if not all((lane, pane_id, nonce, repo, server_id, session_id, command)):
             raise ValueError("lane registration fields must be non-empty")
         current = connection.execute("SELECT * FROM lanes WHERE lane = ?", (lane,)).fetchone()
-        if current is not None and any(
+        # agent-dotfiles#237: `harness_session_id` is deliberately NOT in the
+        # identity tuple below. A lane's conversation id changes within one
+        # pane incarnation every time the agent runs `/clear` (measured: a
+        # Claude Code pane's process env keeps its launch-time id while the
+        # live session file is a different uuid), and treating that as a new
+        # incarnation would CANCEL the lane's open task -- turning a routine
+        # `/clear` into a lost dispatch.
+        changed_identity = current is not None and any(
             current[field] != value
             for field, value in (
                 ("pane_id", pane_id),
@@ -585,7 +631,18 @@ class Ledger:
                 ("session_id", session_id),
                 ("command", command),
             )
-        ):
+        )
+        # What an empty `harness_session_id` argument means, and it is never
+        # "erase what is recorded": callers that do not resolve one (the #174
+        # first-sight backfill, `register`, `bootstrap-session.sh`) pass
+        # nothing, and must not wipe an id a real dispatch resolved. The one
+        # case where the recorded id is actively WRONG is a new incarnation --
+        # a different pane or a restarted agent -- so that, and only that,
+        # clears it. Empty then reads "not resolved" for the new incarnation,
+        # which is what `restore.sh` refuses on.
+        if not harness_session_id:
+            harness_session_id = "" if changed_identity or current is None else current["harness_session_id"]
+        if changed_identity:
             # A changed identity is a genuinely new incarnation. An
             # outstanding task still bound to the old incarnation must not
             # be silently REBOUND to it -- except `delivery_pending`,
@@ -629,8 +686,8 @@ class Ledger:
         connection.execute(
             """
             INSERT INTO lanes(lane, pane_id, nonce, harness, repo, server_id,
-                              session_id, command, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              session_id, command, harness_session_id, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(lane) DO UPDATE SET
                 pane_id=excluded.pane_id,
                 nonce=excluded.nonce,
@@ -639,14 +696,17 @@ class Ledger:
                 server_id=excluded.server_id,
                 session_id=excluded.session_id,
                 command=excluded.command,
+                harness_session_id=excluded.harness_session_id,
                 updated_at=excluded.updated_at
             """,
-            (lane, pane_id, nonce, harness, repo, server_id, session_id, command, now),
+            (lane, pane_id, nonce, harness, repo, server_id, session_id, command, harness_session_id, now),
         )
         row = connection.execute("SELECT * FROM lanes WHERE lane = ?", (lane,)).fetchone()
         return self._dict(row)
 
-    def register_lane(self, *, lane, pane_id, nonce, harness, repo, server_id, session_id, command):
+    def register_lane(
+        self, *, lane, pane_id, nonce, harness, repo, server_id, session_id, command, harness_session_id=""
+    ):
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
             return self._register_lane_tx(
@@ -659,6 +719,7 @@ class Ledger:
                 server_id=server_id,
                 session_id=session_id,
                 command=command,
+                harness_session_id=harness_session_id,
                 now=now,
             )
 
@@ -691,6 +752,48 @@ class Ledger:
         with contextlib.closing(self._connect()) as connection:
             rows = connection.execute("SELECT * FROM lanes ORDER BY lane").fetchall()
         return [self._dict(row) for row in rows]
+
+    def restore_plan(self):
+        """Every lane the ledger knows, with the one thing tmux cannot hold.
+
+        agent-dotfiles#237. This is the whole read side of the restore path,
+        and it is a LEDGER query on purpose: after a tmux server loss there is
+        no window name left to consult, and the names a restored server does
+        produce are a stale snapshot -- the #237 incident is an operator
+        trusting exactly those names and killing nine live agents.
+
+        Per lane: its registered pane cwd, its harness, its harness session id
+        (empty when none was ever resolved), and the open task that owns it if
+        one does. `task` is the task id, which `dispatch.sh` sets to the window
+        name it intends -- so the name is a PROJECTION of this record, never
+        its source. A lane with no open task is reported with `task: None`;
+        the caller decides whether a lane with nothing outstanding is worth
+        resuming (`restore.sh` starts it fresh, since there is no conversation
+        to lose).
+        """
+        with contextlib.closing(self._connect()) as connection:
+            lanes = connection.execute("SELECT * FROM lanes ORDER BY lane").fetchall()
+            plan = []
+            for lane in lanes:
+                task = connection.execute(
+                    "SELECT id, summary, status FROM tasks WHERE lane = ? "
+                    "AND status NOT IN ('complete', 'failed', 'cancelled') "
+                    "ORDER BY created_at DESC LIMIT 1",
+                    (lane["lane"],),
+                ).fetchone()
+                plan.append(
+                    {
+                        "lane": lane["lane"],
+                        "harness": lane["harness"],
+                        "harness_session_id": lane["harness_session_id"],
+                        "repo": lane["repo"],
+                        "pane_id": lane["pane_id"],
+                        "task": None if task is None else task["id"],
+                        "summary": None if task is None else task["summary"],
+                        "status": None if task is None else task["status"],
+                    }
+                )
+        return plan
 
     def get_component(self, name):
         with contextlib.closing(self._connect()) as connection:
@@ -990,6 +1093,7 @@ class Ledger:
         source_state,
         evidence,
         status_marker=None,
+        harness_session_id="",
         failpoint=None,
     ):
         """Atomically register the lane, record the GitHub source, assign, and mark delivered.
@@ -1030,6 +1134,7 @@ class Ledger:
                 server_id=server_id,
                 session_id=session_id,
                 command=command,
+                harness_session_id=harness_session_id,
                 now=now,
             )
             self._fail(failpoint, "after_register_lane")

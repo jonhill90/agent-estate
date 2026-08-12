@@ -127,7 +127,11 @@ stale)
   #
   # A claim is LIVE if either holds:
   #   - a lane window names that issue number and lanes.sh does not report it
-  #     `dead` (#66 gave the estate that signal; this is what rests on it), or
+  #     `dead` or `stale` (#66 gave the estate the first signal and #237 split
+  #     the second out of it -- a dead pane whose window name still claims a
+  #     task. Both mean the same thing HERE: no agent is running, so the name
+  #     is not evidence of a live claim. Excluding only `dead` after #237
+  #     would make every stale name hold its issue hostage), or
   #   - an open PR says it fixes the issue. A finished lane is renamed `free-N`
   #     while its PR waits for review; the work is real and must not be redone.
   #
@@ -138,7 +142,7 @@ stale)
   # Release deliberately stays a decision, `claim.sh release <n>`.
   live_numbers=$(
     "$HERE/lanes.sh" "$SESSION" 2>/dev/null \
-      | awk 'NR>1 && $1 ~ /^[0-9]+$/ && $NF!="dead" && $2 !~ /^free-[0-9]+$/ {print $2}' \
+      | awk 'NR>1 && $1 ~ /^[0-9]+$/ && $NF!="dead" && $NF!="stale" && $2 !~ /^free-[0-9]+$/ {print $2}' \
       | sed -E -n 's/^[A-Za-z]+([0-9]+)-.*/\1/p'
     gh pr list ${R[@]+"${R[@]}"} --state open --limit 200 --json number,body \
        -q '.[]|"\(.number)\t\(.body)"' 2>/dev/null \
