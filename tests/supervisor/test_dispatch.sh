@@ -856,6 +856,43 @@ want_exit "a brief that submits still exits 0" "$rc" 0 "$out"
 want_contains "and reports the dispatch" "dispatch: #161 -> " "$out"
 want_missing "and warns about nothing" "WARNING" "$out"
 
+
+# --- agent-dotfiles#199: dispatch.sh is silent on stderr under bash 3.2 ---
+# WHY: `declare -A WINDOW_NAME_BY_INDEX` used to be rejected by macOS's real
+# /bin/bash (3.2, no associative arrays), which prints straight to stderr on
+# every dispatch and reads exactly like a broken guard on the command that
+# decides where work goes -- see #199. `run()` above launches dispatch.sh
+# with whatever `bash` PATH resolves to, which is a modern bash on most dev
+# machines and never hits the bug; this case runs the script directly so
+# its own `#!/bin/bash` shebang picks the interpreter, matching how the
+# supervisor actually invokes it in production, and asserts stderr is empty
+# on a dispatch that succeeds. That is the regression guard: it is what
+# would catch the next 3.2-incompatible construct landing on this path.
+echo '170|| dispatch must be silent on stderr' >> "$D/issues"
+: > "$D/tmux.log"
+rm -rf "$D/panes"; mkdir -p "$D/panes"
+STDERR_FILE="$D/dispatch199.err"
+PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
+  LANES_FIXTURE="$D/lanes" LANES_SESSION=t TMUX_LOG="$D/tmux.log" \
+  TMUX_PANES="$D/panes" DISPATCH_SETTLE=0 DISPATCH_PANE_COLS=60 \
+  DISPATCH_MESSAGE_BUDGET=430 DISPATCH_CONFIRM_TRIES=2 \
+  AGENT_SUPERVISOR_STATE_DIR="$(mktemp -d "$D/state.XXXXXX")" \
+  STUB_PANE_PATH="$REPO" WORKTREE_ROOT="$D/roots" \
+  "$DISPATCH" 170 stderr-clean "$D/brief.md" acme/agent-dotfiles "$REPO" \
+  1>"$D/dispatch199.out" 2>"$STDERR_FILE"
+rc=$?
+out=$(cat "$D/dispatch199.out")
+err=$(cat "$STDERR_FILE")
+want_exit "a dispatch run under its own shebang still succeeds" "$rc" 0 "$out"
+# Empty, not just missing "declare:" -- a substring check only catches a
+# re-introduced declare -A and waves through any other stray write (proved
+# by injecting `echo ... >&2` before dispatch.sh's final exit 0 and watching
+# this suite stay green). stderr on a successful dispatch is not a place for
+# progress lines: the supervisor treats dispatch.sh's stderr as the signal
+# that something is wrong, so a legitimate message belongs on stdout instead.
+if [ -z "$err" ]; then ok "stderr is clean on a successful dispatch (agent-dotfiles#199)"
+else bad "stderr is clean on a successful dispatch (agent-dotfiles#199)" "expected empty stderr, got: $err"; fi
+
 rm -rf "$D"
 
 
