@@ -61,6 +61,32 @@ COOLDOWN=600        # no more than one restart per 10 minutes
 MAX_RESTARTS=3      # ...and no more than this many
 ESCALATE_WINDOW=3600 # ...within this window, or stop and escalate
 
+# --- #163: inbox-poll heartbeat staleness -----------------------------------
+# `inbox-poll.sh` writes `inbox-poll.status` every iteration and pages Jon
+# itself from `trap report_stop EXIT` -- but a SIGKILL, an OOM kill, or a hard
+# power loss runs no trap at all, so `checked:` simply stops moving. This
+# watchdog is the natural external observer: it already runs unattended every
+# 180s and already reads-a-status-file-and-decides-if-something-is-overdue for
+# the supervisor loop itself (see report()/the escalate branch below). What
+# watches THIS watcher is the same answer as for that check: a human, paged
+# through the identical notify path, and this tick's own `checked:` line in
+# watchdog.status going stale if the LaunchAgent stops firing entirely.
+INBOX_POLL_STATUS_PATH="${SUPERVISOR_INBOX_POLL_STATUS:-$STATE/inbox-poll.status}"
+INBOX_HEARTBEAT_EPISODE="${SUPERVISOR_HEARTBEAT_EPISODE:-$STATE/.watchdog-heartbeat-episode.json}"
+# Threshold derived from inbox-poll.sh's own worst-case gap between heartbeat
+# writes while the process is genuinely alive -- not a round number (#163):
+#   - one iteration can block up to POLL_TIMEOUT+20s before giving up
+#     (inbox.sh's CURL_MAX_TIME = timeout+20, so curl always outlives
+#     Telegram's own long-poll timeout);
+#   - a FAILING iteration then backs off before retrying, capped at 60s
+#     (inbox-poll.sh: fail_count<12 ? fail_count*BACKOFF_BASE : 60).
+# POLL_TIMEOUT+80 is that worst single-iteration span; doubled for scheduling
+# jitter and because this watchdog itself only samples every ~180s, so the
+# threshold does not need to be tight to still catch a dead poller within a
+# couple of ticks. Default POLL_TIMEOUT=25 -> 2*(25+80) = 210s (3.5min).
+INBOX_POLL_TIMEOUT_ASSUMED="${INBOX_POLL_TIMEOUT:-25}"
+INBOX_HEARTBEAT_STALE_AFTER="${INBOX_HEARTBEAT_STALE_AFTER:-$(( 2 * (INBOX_POLL_TIMEOUT_ASSUMED + 80) ))}"
+
 # Credentials + NOTIFY_SCRIPT for the escalate path. Sourced here so the
 # LaunchAgent needs no secrets inlined in its plist.
 ENVFILE="${NOTIFY_ENV:-$STATE/notify.env}"
@@ -287,12 +313,56 @@ advance_note() {                 # advance_note <line>
   return 0
 }
 
+# Same tmp+rename append advance_note uses, for a second, unrelated line: the
+# result of #163's inbox-poll heartbeat check. Kept as its own function rather
+# than generalizing advance_note, so a change to one line's format cannot
+# silently reach the other.
+heartbeat_note() {               # heartbeat_note <line>
+  local tmp="$STATUS.hb.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^heartbeat:' "$STATUS"; printf 'heartbeat: %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# Runs on EVERY exit path, regardless of which early `exit 0` above fired --
+# that is the whole reason this lives in the trap rather than in the main
+# body: the supervisor-loop checks below (busy/idle/asleep/...) all return
+# early, but the inbox-poll heartbeat is a different subsystem entirely and
+# must be read every tick no matter which of those branches this one took.
+# Mirrors the escalate notifier's call shape (report(), above): read the
+# episode-gated decision from watchdog_notify.py, log it, and surface it in
+# watchdog.status even when the page itself could not be delivered (#163's
+# "failure must be visible locally" constraint) -- notify.log and
+# watchdog.status are what remain when the channel is the thing that broke.
+check_inbox_heartbeat() {
+  local notify_out notify_rc
+  notify_out=$(python3 "$HERE/watchdog_notify.py" \
+    --mode heartbeat \
+    --heartbeat-status-path "$INBOX_POLL_STATUS_PATH" \
+    --threshold-seconds "$INBOX_HEARTBEAT_STALE_AFTER" \
+    --episode-state-path "$INBOX_HEARTBEAT_EPISODE" \
+    --log-path "$STATE/watchdog-notify.log" \
+    --notify-script "${NOTIFY_SCRIPT:-}" 2>&1)
+  notify_rc=$?
+  heartbeat_note "$(printf '%s' "$notify_out" | tr '\n' ' ')"
+  if [ "$notify_rc" -ne 0 ]; then
+    log "HEARTBEAT-CHECK FAILED rc=$notify_rc: $notify_out"
+  else
+    log "HEARTBEAT-CHECK: $notify_out"
+  fi
+}
+
 # Runs on EVERY exit path. It must never change this tick's exit status and
 # must never abort it: a refused advance is a report, not a crash -- the tick
 # it rode out on had already succeeded, and failing it would turn "the code is
-# one commit stale" into "the watchdog is down".
+# one commit stale" into "the watchdog is down". Takes rc as an argument
+# rather than reading $? itself: it is no longer the trap handler directly
+# (on_exit, below, is, so it can also run check_inbox_heartbeat on every exit
+# path) and $? inside a called function reflects THAT call, not the script's.
 advance_on_exit() {
-  local rc=$?
+  local rc="$1"
   rm -f "$STATUS.$$" 2>/dev/null
 
   local root
@@ -337,7 +407,16 @@ advance_on_exit() {
   return $rc
 }
 
-trap advance_on_exit EXIT
+# The actual trap handler. Captures $? FIRST, exactly as advance_on_exit used
+# to do directly -- everything after this line runs commands of its own that
+# would otherwise clobber it.
+on_exit() {
+  local rc=$?
+  check_inbox_heartbeat
+  advance_on_exit "$rc"
+  return $rc
+}
+trap on_exit EXIT
 
 # How many restarts inside the escalation window?
 recent=0
