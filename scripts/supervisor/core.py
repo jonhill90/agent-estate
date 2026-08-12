@@ -169,6 +169,17 @@ class Ledger:
                     snapshot_sha256 TEXT,
                     updated_at INTEGER NOT NULL
                 );
+
+                CREATE TABLE IF NOT EXISTS pr_verdicts (
+                    repo TEXT NOT NULL,
+                    number INTEGER NOT NULL,
+                    verdict TEXT NOT NULL CHECK (verdict IN ('approved', 'rejected')),
+                    head_sha TEXT NOT NULL,
+                    reviewer TEXT NOT NULL,
+                    note TEXT,
+                    updated_at INTEGER NOT NULL,
+                    PRIMARY KEY (repo, number)
+                );
                 """
             )
         os.chmod(self.db_path, 0o600)
@@ -1210,6 +1221,48 @@ class Ledger:
             )
             row = connection.execute("SELECT * FROM components WHERE name=?", (name,)).fetchone()
         return self._dict(row)
+
+    def record_pr_verdict(self, *, repo, number, verdict, head_sha, reviewer, note=None):
+        """Record what this estate decided about a PR, independent of whether
+        GitHub can represent it (agent-dotfiles#203). `repo` is the full
+        `owner/name` slug so a verdict source needs no other context to look
+        one up. Overwrites any prior verdict for the same repo+number -- a
+        reviewing lane re-recording after a fixup replaces its own earlier
+        answer rather than appending to a history nothing reads."""
+        if verdict not in ("approved", "rejected"):
+            raise ValueError("verdict must be 'approved' or 'rejected'")
+        if not repo or not isinstance(repo, str):
+            raise ValueError("repo is required")
+        if not head_sha or not isinstance(head_sha, str):
+            raise ValueError("head_sha is required")
+        if not reviewer or not isinstance(reviewer, str):
+            raise ValueError("reviewer is required")
+        now = int(self.clock())
+        with self._locked(), self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO pr_verdicts(repo, number, verdict, head_sha, reviewer, note, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(repo, number) DO UPDATE SET
+                    verdict=excluded.verdict,
+                    head_sha=excluded.head_sha,
+                    reviewer=excluded.reviewer,
+                    note=excluded.note,
+                    updated_at=excluded.updated_at
+                """,
+                (repo, number, verdict, head_sha, reviewer, note, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM pr_verdicts WHERE repo=? AND number=?", (repo, number)
+            ).fetchone()
+        return self._dict(row)
+
+    def get_pr_verdict(self, *, repo, number):
+        with self._locked(), self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM pr_verdicts WHERE repo=? AND number=?", (repo, number)
+            ).fetchone()
+        return self._dict(row) if row is not None else None
 
     @staticmethod
     def _atomic_replace(destination, content):
