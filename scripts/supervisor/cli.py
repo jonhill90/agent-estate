@@ -72,6 +72,12 @@ def parser():
     record_dispatch_parser.add_argument("--command", dest="pane_command", required=True)
     record_dispatch_parser.add_argument("--server-id", required=True)
     record_dispatch_parser.add_argument("--session-id", required=True)
+    # agent-dotfiles#237. NOT required: the resolver only speaks Claude Code
+    # today, and a dispatch to a codex or copilot lane must still record
+    # everything else it knows rather than fail. Empty means "not resolved",
+    # and `restore.sh` refuses such a lane instead of starting a fresh agent
+    # in it -- the failure direction #237 names as its primary constraint.
+    record_dispatch_parser.add_argument("--harness-session-id", default="")
     record_dispatch_parser.add_argument("--issue", action="append", required=True)
     record_dispatch_parser.add_argument("--github", default="")
     record_dispatch_parser.add_argument("--harness", choices=("codex", "claude", "copilot", "copilot-acp"))
@@ -176,6 +182,11 @@ def parser():
     # dispatch.sh touch the database directly.
     task_lane_parser = sub.add_parser("task-lane")
     task_lane_parser.add_argument("--task", required=True)
+
+    # agent-dotfiles#237: the read `restore.sh` runs after a tmux server loss.
+    # Deliberately its own command rather than a flag on `status`: it must
+    # work when there is no tmux server at all, so it touches no transport.
+    sub.add_parser("restore-plan")
 
     sub.add_parser("status")
     return root
@@ -366,6 +377,7 @@ def record_dispatch(
     issues,
     github="",
     harness=None,
+    harness_session_id="",
 ):
     """Record a dispatch that ALREADY happened. Writes; never sends.
 
@@ -439,6 +451,10 @@ def record_dispatch(
             repo=pane_path,
             server_id=server_id,
             session_id=session_id,
+            # agent-dotfiles#237: the harness conversation id the dispatcher
+            # resolved (`harness-session.sh`), or "" when it could not. Never
+            # guessed here -- this function has no way to observe a pane.
+            harness_session_id=harness_session_id,
             command=command,
             task_id=task,
             source_kind="issue",
@@ -528,6 +544,7 @@ def main(argv=None):
             command=args.pane_command,
             server_id=args.server_id,
             session_id=args.session_id,
+            harness_session_id=args.harness_session_id,
             issues=args.issue,
             github=args.github,
             harness=args.harness,
@@ -650,6 +667,8 @@ def main(argv=None):
         value = GithubTaskSource().reconstruct(
             ledger, source_url=args.source_url, source_ref=args.source_ref
         )
+    elif args.command == "restore-plan":
+        value = ledger.restore_plan()
     elif args.command == "status":
         value = {
             "lanes": ledger.list_lanes(),

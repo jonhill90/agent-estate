@@ -26,6 +26,16 @@ HARNESS_COMMAND_RE='^(claude|claude\.exe)$'
 HARNESS_LAUNCH_CMD='claude --dangerously-skip-permissions'
 HARNESS_SEND_LITERAL=1
 
+# agent-dotfiles#237: how this harness is told to come back to an EXISTING
+# conversation. `%s` is the session id the ledger recorded at dispatch;
+# `restore.sh` is the only caller. Checked against the shipped CLI, not
+# assumed: `claude --help` on v2.1.220 documents `-r, --resume [value]` as
+# "Resume a conversation by session ID", and `--session-id <uuid>` as a
+# separate flag for choosing one up front. A harness file that leaves this
+# unset says "no resume dialect here", and restore refuses its lanes rather
+# than starting a fresh agent -- which is #237's whole failure direction.
+HARNESS_RESUME_CMD='claude --dangerously-skip-permissions --resume %s'
+
 # Ready shape -- last non-empty line only (the #65 discipline). Two shapes:
 # the real idle footer (`← 1 agent`, the count including the main agent
 # itself so 1 means nothing delegated -- #126) and a bare `❯ ...` line with
