@@ -12,9 +12,10 @@
 #   dead     no agent at all, just a shell                   -> restart the agent
 #   service  a supervisor service, deliberately not a lane   -> leave alone
 #   unknown  no probe recognizes the last line                -> ask a human
-#            (a non-Claude harness, or a Claude Code shape that is not the
-#            enumerated ready footer -- see READY_RE below. #126: this is
-#            the default now, not the exception -- see the comment there.)
+#            (a harness with no adapter under harness/, or a recognised
+#            harness's shape that is not its adapter's enumerated ready
+#            footer -- see harness/*.sh. #126: this is the default now, not
+#            the exception -- see harness_index_for_command below.)
 #
 # #141 added `unsent`, and it is worth being precise about what it buys. Two
 # lanes sat for 40 minutes holding a full brief that had been typed in and
@@ -49,6 +50,64 @@ set -uo pipefail
 LANES_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./input-box.sh
 . "$LANES_HERE/input-box.sh"
+
+# agent-dotfiles#201: every harness-specific shape this file used to hold as
+# a literal now lives in its own file under harness/ -- lanes.sh asks the
+# adapter instead of naming a harness itself. Adding a harness is a new file
+# there; removing one is a deletion, no edit here required. See
+# harness/claude.sh and harness/codex.sh for the contract each file fills in
+# and the real-pane evidence behind its values; harness/copilot.sh documents
+# where that harness's contract is intentionally incomplete.
+#
+# Parallel INDEXED arrays, not `declare -A`. Every caller in this directory
+# invokes this file by its own shebang (`"$HERE/lanes.sh"`, `./lanes.sh` via
+# loop-tick.md), which runs it under `/bin/bash` -- macOS's own, stuck at
+# 3.2.57 (no associative arrays) even when a newer `bash` sits on PATH.
+# Checked live, not assumed: `/bin/bash -c 'declare -A x'` on this machine
+# fails with "invalid option". Indexed arrays and `${!arr[@]}` both predate
+# bash 3.2 and this file already relies on the same feature set (see the
+# pre-existing `declare -a IDX NAME CMD ...` below), so this loader matches
+# it rather than introducing the one construct that would have made
+# `lanes.sh` fail closed on every real invocation.
+HARNESS_IDS=(); H_COMMAND_RE=(); H_READY_RE=(); H_BUSY_RE=(); H_BUSY_TAIL=()
+H_BLOCKED_MARKERS=(); H_OPTION_ROW_RE=(); H_MENU_ENTER_RE=(); H_MENU_TAIL=(); H_TEXT_PROMPT_RE=()
+HARNESS_DIR="${LANES_HARNESS_DIR:-$LANES_HERE/harness}"
+for _hf in "$HARNESS_DIR"/*.sh; do
+  [ -e "$_hf" ] || continue
+  unset HARNESS_NAME HARNESS_COMMAND_RE HARNESS_READY_RE HARNESS_BUSY_RE HARNESS_BUSY_TAIL \
+        HARNESS_BLOCKED_MARKERS HARNESS_OPTION_ROW_RE HARNESS_MENU_ENTER_RE HARNESS_MENU_TAIL \
+        HARNESS_TEXT_PROMPT_RE HARNESS_LAUNCH_CMD HARNESS_SEND_LITERAL
+  # shellcheck disable=SC1090
+  . "$_hf"
+  : "${HARNESS_NAME:?$_hf did not set HARNESS_NAME}"
+  : "${HARNESS_COMMAND_RE:?$_hf ($HARNESS_NAME) did not set HARNESS_COMMAND_RE}"
+  : "${HARNESS_READY_RE:?$_hf ($HARNESS_NAME) did not set HARNESS_READY_RE}"
+  HARNESS_IDS+=("$HARNESS_NAME")
+  H_COMMAND_RE+=("$HARNESS_COMMAND_RE")
+  H_READY_RE+=("$HARNESS_READY_RE")
+  H_BUSY_RE+=("${HARNESS_BUSY_RE:-}")
+  H_BUSY_TAIL+=("${HARNESS_BUSY_TAIL:-1}")
+  H_BLOCKED_MARKERS+=("${HARNESS_BLOCKED_MARKERS:-}")
+  H_OPTION_ROW_RE+=("${HARNESS_OPTION_ROW_RE:-}")
+  H_MENU_ENTER_RE+=("${HARNESS_MENU_ENTER_RE:-}")
+  H_MENU_TAIL+=("${HARNESS_MENU_TAIL:-6}")
+  H_TEXT_PROMPT_RE+=("${HARNESS_TEXT_PROMPT_RE:-}")
+done
+unset _hf
+
+# Which adapter, if any, claims a pane's own command -- prints that
+# adapter's ARRAY INDEX (the arrays above are parallel, keyed by position,
+# not by name). Empty output + a non-zero return means no adapter
+# recognises it -- lanes.sh's own #126 posture (a whitelist, not a
+# blacklist) applied one level up: an unrecognised COMMAND is `unknown`,
+# same as an unrecognised STATUS LINE.
+harness_index_for_command() {
+  local cmd="$1" i
+  for i in "${!HARNESS_IDS[@]}"; do
+    if [[ "$cmd" =~ ${H_COMMAND_RE[$i]} ]]; then printf '%s\n' "$i"; return 0; fi
+  done
+  return 1
+}
 
 SESSION="${2:-${LANES_SESSION:-agent-dotfiles}}"
 MODE="${1:-}"
@@ -107,162 +166,16 @@ SUPERVISOR_WINDOW="${LANES_SUPERVISOR_WINDOW:-1}"
 # footer drops to MINUTE granularity past 60s, so a live turn can go ~60s
 # without changing a single byte.
 HUNG_AFTER="${LANES_HUNG_AFTER:-180}"
-# Footer chrome that means "this pane is waiting on a human keystroke".
-#
-# The first version of this probe matched only `Enter to select`, inferred from
-# a single example. Review of #124 drove a real Claude Code pane (v2.1.220)
-# through four genuine prompts and only ONE of them says that:
-#
-#   folder trust     Enter to confirm · Esc to cancel
-#   /model           Enter to set as default · s to use this session only · Esc to cancel
-#   bash permission  Esc to cancel · Tab to amend · ctrl+e to explain
-#   /theme           Enter to select · Esc to cancel
-#
-# All three of the misses read `free`, including the bash tool-permission
-# approval -- the commonest blocking event a supervised lane hits, and the one
-# the whole state exists for. `Esc to cancel` is the substring common to all
-# four; it is what every dismissible dialog paints.
-#
-# A false positive here is worse than the bug -- it makes a lane permanently
-# undispatchable -- so this was checked in the other direction too, against the
-# same live pane: idle at the prompt, text typed but unsent, the `/` command
-# popup, the `@` file popup, `?` shortcuts, and a running turn. None of those
-# last lines contain the marker; they end in `⏸ manual mode on · ...`,
-# `/keybindings to customize`, or `esc to interrupt`.
-#
-# `Enter to select` is kept as a second marker, not as the only one: it costs
-# nothing and covers any menu that paints a selection footer without an Esc
-# line. Anything added here must be observed on a real pane first, not inferred.
-BLOCKED_MARKERS='Esc to cancel|Enter to select'
 
-# #133: a confirmation dialog's SELECTED OPTION ROW, e.g.
-#
-#   ❯ 1. Post the comment
-#   ❯ 2. Show me the comment
-#
-# The first of those is verbatim what lane 6 displayed on 2026-08-11 while
-# blocked on an approval prompt, holding a completed-but-unposted review
-# verdict -- and `READY_RE`'s bare-`❯` half matches it, so had that row been
-# the last line the lane would have read `free` and a dispatch would have
-# destroyed the verdict.
-#
-# The bad case is still not demonstrated: driving a real Claude Code pane
-# (v2.1.220) through the folder-trust dialog at heights 30 down to 6 kept the
-# `Esc to cancel` footer anchored last every time, and the /theme dialog
-# overflowed instead, putting body text last. Neither ever put an option row
-# last. But #133's point stands regardless of which shapes were reachable on
-# one evening: an option row means a dialog is up, so matching it as `blocked`
-# removes the dependency on where the footer lands rather than waiting for a
-# capture that proves the hazard. The direction that matters is FEWER things
-# reading `free`, never more.
-#
-# `❯` here is followed by an ORDINARY space. The live input box uses a
-# NO-BREAK SPACE (see input-box.sh), so a lane whose own prompt begins `1. `
-# cannot collide with this.
-OPTION_ROW_RE='^[[:space:]]*❯ [0-9]+\.[[:space:]]'
-
-# #159: `blocked` used to be one state, and inbox-route.sh treated every
-# member of it as a place to type free text. That is wrong for the common
-# case -- routing a Telegram reply into a lane sitting on a selection menu
-# types the reply as NAVIGATION KEYS, not as an answer, and the trailing
-# Enter commits whatever option happened to be highlighted. Proven live: a
-# reply routed to a `/theme` dialog changed the lane's theme instead of
-# being read as text.
-#
-# So `blocked` splits into `menu-blocked` and `text-blocked`. The evidence is
-# drawn from the SAME four real captures BLOCKED_MARKERS above is built from
-# -- nothing new was inferred, only recombined:
-#
-#   folder trust     Enter to confirm · Esc to cancel        (+ an option row)
-#   /model            Enter to set as default · s to use this session only · Esc to cancel
-#   bash permission  Esc to cancel · Tab to amend · ctrl+e to explain (+ an option row)
-#   /theme            Enter to select · Esc to cancel
-#
-# Three of the four spell out what Enter does as a verb phrase -- "confirm",
-# "set", "select" -- which a plain text input never does; Enter there just
-# submits, and nothing about that needs narrating. The fourth (bash
-# permission) narrates Tab and ctrl+e instead, but paints a numbered option
-# row (`❯ 1. Yes`) one or two lines above its footer -- the same option-row
-# shape #133 already matches, just not necessarily on the LAST line, so
-# menu detection here looks at a short trailing window, not only the last
-# line. `MENU_TAIL_LINES` bounds that window: wide enough to hold a
-# question line plus a couple of options plus the footer, narrow enough to
-# stay clear of the #65 mistake (matching text the pane had merely printed,
-# far up in a normal capture).
-MENU_ENTER_RE='Enter to [a-z]+'
-MENU_TAIL_LINES=6
-
-# #164: `text-blocked` used to be reached by the ABSENCE of the two markers
-# above -- an unrecognised menu shape (no "Enter to <verb>" phrase, no option
-# row) fell through to text-blocked, and inbox-route.sh then typed a routed
-# reply into it as free text. That is the exact hazard #159 just fixed for
-# every menu this estate HAS captured; it stayed open for every one it
-# has not. Independent review of #161 measured the margin: an
-# unrecognised bash-permission-style footer needs only 6 non-empty lines
-# above it to fall into this default, and the real dialog spends 3 --
-# option count and text WRAPPING (`2. Yes, and don't ask again for: curl *`
-# is one line at 200 columns, two in a narrow split) eat the rest.
-#
-# #126 already settled this exact argument for `free`: the dangerous
-# classification must require positive evidence, not be the fallback of a
-# blacklist. Typing free text into a pane is the dangerous act here, so the
-# fallback for anything blocked-but-unrecognised is now `menu-blocked`
-# (refuse-and-relay) and `text-blocked` requires a marker of its OWN.
-#
-# TEXT_PROMPT_RE is MODELED, NOT OBSERVED. No genuine free-text-blocked
-# prompt has ever been captured in this estate (#164) -- every real capture
-# BLOCKED_MARKERS/MENU_ENTER_RE/OPTION_ROW_RE are built from is a menu. This
-# regex exists only so the estate's own modelled fixture (lanes.sh's
-# w-text-blocked, inbox-route's "one-blocked") keeps exercising
-# inbox-route.sh's delivery mechanics -- literal send, evidenced `delivered`
-# -- rather than that whole branch going dead. It must not be treated as
-# validated against a real pane, and widening it to match one requires a
-# real capture first, the same rule every other marker here follows. Until
-# that capture exists, this refusal-favoring default is the only thing a
-# caller can rely on for an unrecognised blocked shape.
-TEXT_PROMPT_RE='Type the [a-z]'
-
-# #126: free used to be "whatever is left after busy/hung/blocked/dead are
-# ruled out" -- a blacklist. Two lanes running an approved billed eval and a
-# research task read free while each had delegated to a background subagent:
-# the main agent was idle (no `esc to interrupt`), but the lane's work was
-# not done. That was the THIRD blacklist patch in one night (#102 renamed-but-
-# finished, #123 blocked-on-a-prompt, this one) -- three fixes to one
-# predicate says the predicate is inverted, not that a fourth pattern is
-# missing. So free is now a whitelist: only a recognised ready shape is
-# offered; every last line this probe has not been shown is `unknown`, which
-# --free already excludes, rather than guessed as available.
-#
-# Two ready shapes are known-safe, both confirmed against real Claude Code
-# panes (v2.1.220) on 2026-08-11 -- lanes sitting at the prompt with nothing
-# delegated. Their last non-empty line reads, e.g.:
-#   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent
-#
-# The captured status line ends `← 1 agent` -- the count includes the main
-# agent itself, so 1 means nothing is delegated. The #126 panes read
-# `← 2 agents` (this file's own test fixture, captured off a live idle
-# footer during #124's review) or a bare task-list row with no count at all
-# (`◯ general-purpose  Verifying tick-7.log with grep      42s`,
-# `✻ Waiting for 1 background agent to finish` -- both observed live on the
-# lanes #126 reported). None of those end `← 1 agent`, so none match.
-#
-# The note that used to stand here described those panes as holding "a
-# typed-but-unsent brief". Re-measuring for #141 showed that was a misreading:
-# what the box held was Claude Code's own DIM placeholder suggestion, which
-# occupies the same row and is byte-identical to typed text in a plain capture
-# (`❯ now echo goodbye` was a SUGGESTED follow-up, not something anyone typed).
-# A box genuinely holding typed text drops the `← 1 agent` segment from this
-# footer -- measured across three live panes -- so it does not match READY_RE
-# at all, and such a lane read `unknown`, which is exactly what #141 records.
-# The correction matters because the old wording implied this footer had been
-# checked against the #141 hazard and found safe. It had not been.
-#
-# The second shape, a bare `❯ ...` line with no footer at all, covers older
-# captures and the test fixtures that stand in for "a normal prompt" without
-# spelling out real footer chrome -- harmless to keep since it still refuses
-# anything containing `←`, so a stray agent-count segment on a `❯` line still
-# fails the match.
-READY_RE='^❯ [^←]*$|← 1 agent$'
+# agent-dotfiles#201: the footer/menu/ready chrome that used to sit here as
+# global constants (BLOCKED_MARKERS, OPTION_ROW_RE, MENU_ENTER_RE,
+# MENU_TAIL_LINES, TEXT_PROMPT_RE, READY_RE) is now per-harness, sourced
+# above from harness/*.sh into the H_* arrays. See harness/claude.sh for the
+# real-Claude-Code-pane evidence those constants used to document in place
+# (moved, not re-derived), and harness/codex.sh / harness/copilot.sh for
+# what the other two harnesses need instead. `emit_rows` below looks up a
+# window's own harness by its pane command and applies that harness's
+# H_* entries; nothing in this file names a harness by string any more.
 
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "lanes: session '$SESSION' does not exist" >&2
@@ -304,7 +217,7 @@ emit_rows() {
   local i
   for i in "${!IDX[@]}"; do
     local w="${IDX[$i]}" name="${NAME[$i]}" cmd="${CMD[$i]}" act="${ACTIVITY[$i]}" mode="${PANEMODE[$i]}" pid="${PANEPID[$i]}"
-    local pane state age pane_lines pane_tail
+    local pane state age pane_lines pane_tail hidx busy_tail
     # ONLY the status line -- the last non-empty line of the visible pane.
     #
     # This used to grep `capture-pane -S -6`, which is six scrollback lines
@@ -316,10 +229,6 @@ emit_rows() {
     # harness-specific, it was the capture window.
     pane_lines=$(tmux capture-pane -p -t "$SESSION:$w" 2>/dev/null | grep -v '^[[:space:]]*$')
     pane=$(tail -1 <<<"$pane_lines")
-    # Only consulted once a lane is already known to be blocked (below), to
-    # decide menu vs text -- never for busy/free, which stay #65-disciplined
-    # to the single last line.
-    pane_tail=$(tail -n "$MENU_TAIL_LINES" <<<"$pane_lines")
 
     # A SECOND, separate capture, and deliberately not a widening of the one
     # above. `-e` keeps the SGR attributes that input-box.sh needs to tell a
@@ -347,13 +256,16 @@ emit_rows() {
       # every existing row are untouched. See SERVICE_RE above for why the
       # signal is the pane's own process and not the window's name.
       if is_service_pane "$pid"; then state=service; else state=dead; fi
-    elif [[ ! "$cmd" =~ ^(claude|claude\.exe)$ ]]; then
-      # The busy probe greps Claude Code's own status string. Other harnesses
-      # paint different UIs, and guessing produces false alarms: a healthy idle
-      # Copilot pane was classified `hung` because that string appeared in its
-      # scrollback. Report what is known and refuse to invent the rest.
+    elif ! hidx=$(harness_index_for_command "$cmd"); then
+      # agent-dotfiles#201: no adapter's HARNESS_COMMAND_RE claims this pane's
+      # command -- a harness this file has never been shown (opencode does
+      # not even hold a pane long enough to reach here), or a plain shell
+      # variant SHELLS above did not already catch. Report what is known and
+      # refuse to invent the rest, same posture the pre-#201 Claude-only
+      # check had for "not Claude".
       state=unknown
-    elif grep -qE "$BLOCKED_MARKERS" <<<"$pane" || grep -qE "$OPTION_ROW_RE" <<<"$pane"; then
+    elif { [ -n "${H_BLOCKED_MARKERS[$hidx]}" ] && grep -qE "${H_BLOCKED_MARKERS[$hidx]}" <<<"$pane"; } \
+      || { [ -n "${H_OPTION_ROW_RE[$hidx]}" ] && grep -qE "${H_OPTION_ROW_RE[$hidx]}" <<<"$pane"; }; then
       # An interactive prompt, not idle: the agent is waiting on a human, not
       # on work. Must be decided before free, since that is the classification
       # it is stealing from. Match the harness's own footer chrome, not the
@@ -363,21 +275,23 @@ emit_rows() {
       # displaying the phrase, not showing it.
       #
       # #159: which KIND of prompt matters to a caller deciding whether free
-      # text is a safe thing to type into it -- see MENU_ENTER_RE above.
-      # #164: `menu-blocked` is now the default for anything blocked that
-      # this probe cannot positively place -- see TEXT_PROMPT_RE above for
-      # why. `text-blocked` requires its own positive marker, same posture
-      # as `free`'s whitelist since #126: observed evidence adds a case, the
-      # absence of evidence never removes one -- so absence of MENU evidence
-      # no longer defaults to text.
-      if grep -qE "$MENU_ENTER_RE" <<<"$pane" || grep -qE "$OPTION_ROW_RE" <<<"$pane_tail"; then
+      # text is a safe thing to type into it -- see each harness file's
+      # HARNESS_MENU_ENTER_RE. #164: `menu-blocked` is the default for
+      # anything blocked that this probe cannot positively place -- see
+      # HARNESS_TEXT_PROMPT_RE for why. `text-blocked` requires its own
+      # positive marker, same posture as `free`'s whitelist since #126:
+      # observed evidence adds a case, the absence of evidence never removes
+      # one -- so absence of MENU evidence no longer defaults to text.
+      pane_tail=$(tail -n "${H_MENU_TAIL[$hidx]}" <<<"$pane_lines")
+      if { [ -n "${H_MENU_ENTER_RE[$hidx]}" ] && grep -qE "${H_MENU_ENTER_RE[$hidx]}" <<<"$pane"; } \
+        || { [ -n "${H_OPTION_ROW_RE[$hidx]}" ] && grep -qE "${H_OPTION_ROW_RE[$hidx]}" <<<"$pane_tail"; }; then
         state=menu-blocked
-      elif grep -qE "$TEXT_PROMPT_RE" <<<"$pane"; then
+      elif [ -n "${H_TEXT_PROMPT_RE[$hidx]}" ] && grep -qE "${H_TEXT_PROMPT_RE[$hidx]}" <<<"$pane"; then
         state=text-blocked
       else
         state=menu-blocked
       fi
-    elif grep -q 'esc to interrupt' <<<"$pane"; then
+    elif { busy_tail=$(tail -n "${H_BUSY_TAIL[$hidx]}" <<<"$pane_lines"); [ -n "${H_BUSY_RE[$hidx]}" ] && grep -qE "${H_BUSY_RE[$hidx]}" <<<"$busy_tail"; }; then
       # Busy-looking. Hung iff tmux has seen no output for HUNG_AFTER.
       #
       # This deliberately does NOT diff pane text across a short gap. That was
@@ -386,6 +300,12 @@ emit_rows() {
       # identical byte string for a whole minute and was reported hung while
       # fully alive. Found in review of #65. tmux's own activity timestamp is
       # independent of whatever the harness chooses to paint.
+      #
+      # HARNESS_BUSY_TAIL is the harness's own bound on how far back this
+      # looks -- 1 (last line only, the #65 discipline) for Claude and
+      # Copilot, whose busy marker IS the last line; wider for Codex, whose
+      # busy marker sits above a footer that never changes. See
+      # harness/codex.sh for the real capture that shape is measured from.
       age=$(( now_epoch - ${act:-now_epoch} ))
       if [ "$age" -ge "$HUNG_AFTER" ]; then state=hung; else state=busy; fi
     elif [ "$box" = text ]; then
@@ -398,14 +318,15 @@ emit_rows() {
       # every lane this probe cannot read is classified exactly as it was
       # before #141.
       state=unsent
-    elif grep -qE "$READY_RE" <<<"$pane"; then
+    elif grep -qE "${H_READY_RE[$hidx]}" <<<"$pane"; then
       state=free
     else
       # #126: the old code fell through to `free` here. Everything that is
       # not busy, hung, blocked, dead, scrolled, or another harness used to
       # count as available -- including a lane that had delegated to a
       # background subagent and was nowhere near done. Default is now
-      # unknown: nothing lands here unless it positively matches READY_RE.
+      # unknown: nothing lands here unless it positively matches the
+      # harness's own HARNESS_READY_RE.
       state=unknown
     fi
     printf '%s\t%s\t%s\t%s\n' "$w" "$name" "$cmd" "$state"

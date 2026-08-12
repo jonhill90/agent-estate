@@ -59,6 +59,11 @@ cat > "$D/fixture" <<'FIX'
 29|w-hand-run-poller|bash|inbox-poll: waiting on Telegram|1|0||-zsh
 30|w-mentions-poller|zsh|running scripts/supervisor/inbox-poll.sh\n\n❯ |1|0
 31|w-unrecognized-blocked|claude.exe|Confirm the target environment · Esc to cancel|1|0
+32|w-codex-ready|codex|  gpt-5.5 medium · /repo/path|1|0
+33|w-codex-busy|codex|• Working (9s • esc to interrupt)\n\n› Improve documentation in @filename\n\n  gpt-5.5 medium · /repo/path|1|0
+34|w-codex-trust|codex|› 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue|1|0
+35|w-copilot-ready|node| ← open sidebar · / commands · ? help · tab next tab   Claude Sonnet 5|1|0
+36|w-copilot-busy|node| ◎ Working esc interrupt                              Claude Sonnet 5|1|0
 FIX
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
 
@@ -183,6 +188,18 @@ want "type-ahead during a live turn is busy, not unsent" w-typeahead busy "$out"
 want "an option row is menu-blocked, not free"           w-optionrow menu-blocked "$out"
 want "a short option row is menu-blocked, not free"      w-optionrow-yes menu-blocked "$out"
 
+# --- agent-dotfiles#201: a harness adapter, not a Claude-only whitelist ---
+# All five rows below are verbatim real captures (harness/codex.sh,
+# harness/copilot.sh) off a real codex (v0.147.0) and copilot (v1.0.79) pane
+# in a throwaway tmux session on 2026-08-12, never the pre-#201 fixture's
+# invented `w-copilot|node` row (which models an UNRECOGNISED harness, not
+# copilot -- kept as-is above since that is still a real and separate case).
+want "a real codex idle footer is free"                  w-codex-ready free "$out"
+want "a real codex mid-turn pane is busy, not free"       w-codex-busy busy "$out"
+want "codex's own startup trust menu is menu-blocked"     w-codex-trust menu-blocked "$out"
+want "a real copilot idle footer is free"                 w-copilot-ready free "$out"
+want "a real copilot mid-turn pane is busy, not free"     w-copilot-busy busy "$out"
+
 # --- #154: a service window is not a dead lane ----------------------------
 # The live shape, verbatim: `inbox-poll.sh` deployed as `agent-dotfiles:11`
 # per the deployment path its own header recommends. Its pane command is
@@ -229,11 +246,12 @@ else
   echo "  FAIL dead count line is not 5 in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
 fi
 
-# #159: eight blocked lanes -- the six menu/text captures, w-text-blocked,
-# and #164's w-unrecognized-blocked (menu-blocked by the new default). None
-# of #154's fixture rows (service/dead) are blocked, so this total is
-# unaffected by that merge.
-if grep -qE '8 lane\(s\) (is|are) blocked' <<<"$out"; then
+# #159: nine blocked lanes -- the six menu/text captures, w-text-blocked,
+# #164's w-unrecognized-blocked (menu-blocked by the new default), and
+# #201's w-codex-trust (codex's own startup menu, verified against a real
+# pane). None of #154's fixture rows (service/dead) are blocked, so this
+# total is unaffected by that merge.
+if grep -qE '9 lane\(s\) (is|are) blocked' <<<"$out"; then
   echo "  ok   the table prints a count line for blocked lanes"; pass=$((pass+1));
 else
   echo "  FAIL no blocked count line in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
@@ -262,7 +280,7 @@ free=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --free 2>&1)
 for bad in arch w-dead w-hung w-busy w-copilot w-minute-tick w-scrolled w-blocked \
            w-trust w-model w-permission w-idle-footer w-subagent-task w-subagent-wait \
            w-unsent w-unsent-ready-footer w-typeahead w-optionrow w-optionrow-yes \
-           w-text-blocked w-unrecognized-blocked \
+           w-text-blocked w-unrecognized-blocked w-codex-busy w-codex-trust w-copilot-busy \
            telegram-poller ad102-renamed-lane free-27 w-hand-run-poller w-mentions-poller; do
   bi=$(awk -F'|' -v n="$bad" '$2==n{print $1}' "$D/fixture")
   if grep -qx ".*:$bi" <<<"$free"; then echo "  FAIL --free offered $bad"; fail=$((fail+1));
@@ -271,7 +289,8 @@ done
 
 # And it must still offer a lane that IS a recognised ready shape -- the
 # whitelist must not collapse into refusing everything.
-for good in w-real-free w-mentions w-mentions-blocked w-placeholder w-empty-box; do
+for good in w-real-free w-mentions w-mentions-blocked w-placeholder w-empty-box \
+            w-codex-ready w-copilot-ready; do
   gi=$(awk -F'|' -v n="$good" '$2==n{print $1}' "$D/fixture")
   if grep -qx ".*:$gi" <<<"$free"; then echo "  ok   --free offers $good"; pass=$((pass+1));
   else echo "  FAIL --free withheld $good"; fail=$((fail+1)); fi
@@ -285,7 +304,7 @@ done
 # and now has a `\tkind` suffix a bare `-x` exact match would never see.
 blocked=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --blocked 2>&1)
 for want_blocked in w-blocked:menu w-trust:menu w-model:menu w-permission:menu w-text-blocked:text \
-                    w-unrecognized-blocked:menu; do
+                    w-unrecognized-blocked:menu w-codex-trust:menu; do
   want_blocked_name="${want_blocked%%:*}"; want_blocked_kind="${want_blocked##*:}"
   wi=$(awk -F'|' -v n="$want_blocked_name" '$2==n{print $1}' "$D/fixture")
   if grep -qE "^[^	]*:${wi}	${want_blocked_kind}\$" <<<"$blocked"; then
@@ -333,16 +352,20 @@ python3 - "$LANES" "$MUTANT" <<'PY' || patch_rc=$?
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = '''      if grep -qE "$MENU_ENTER_RE" <<<"$pane" || grep -qE "$OPTION_ROW_RE" <<<"$pane_tail"; then
+marker = '''      pane_tail=$(tail -n "${H_MENU_TAIL[$hidx]}" <<<"$pane_lines")
+      if { [ -n "${H_MENU_ENTER_RE[$hidx]}" ] && grep -qE "${H_MENU_ENTER_RE[$hidx]}" <<<"$pane"; } \\
+        || { [ -n "${H_OPTION_ROW_RE[$hidx]}" ] && grep -qE "${H_OPTION_ROW_RE[$hidx]}" <<<"$pane_tail"; }; then
         state=menu-blocked
-      elif grep -qE "$TEXT_PROMPT_RE" <<<"$pane"; then
+      elif [ -n "${H_TEXT_PROMPT_RE[$hidx]}" ] && grep -qE "${H_TEXT_PROMPT_RE[$hidx]}" <<<"$pane"; then
         state=text-blocked
       else
         state=menu-blocked
       fi'''
 assert marker in text, "menu/text fallback block not found -- lanes.sh shape changed"
 assert text.count(marker) == 1, "menu/text fallback block not unique -- lanes.sh shape changed"
-replacement = '''      if grep -qE "$MENU_ENTER_RE" <<<"$pane" || grep -qE "$OPTION_ROW_RE" <<<"$pane_tail"; then
+replacement = '''      pane_tail=$(tail -n "${H_MENU_TAIL[$hidx]}" <<<"$pane_lines")
+      if { [ -n "${H_MENU_ENTER_RE[$hidx]}" ] && grep -qE "${H_MENU_ENTER_RE[$hidx]}" <<<"$pane"; } \\
+        || { [ -n "${H_OPTION_ROW_RE[$hidx]}" ] && grep -qE "${H_OPTION_ROW_RE[$hidx]}" <<<"$pane_tail"; }; then
         state=menu-blocked
       else
         state=text-blocked
@@ -363,6 +386,46 @@ else
 fi
 rm -f "$MUTANT"
 trap - EXIT
+
+# --- agent-dotfiles#201 mutation check: the seam does not leak -----------
+# Break ONLY codex's ready matcher and confirm ONLY the codex lane goes
+# unknown while claude, and copilot, stay correctly classified. If breaking
+# one adapter ever moves another harness's lane, the "adapter, not a
+# regex" contract has failed -- #201's acceptance bar is exactly this.
+HDIR="$(cd "$(dirname "$LANES")/harness" && pwd)"
+MUTHDIR=$(mktemp -d)
+cp "$HDIR"/*.sh "$MUTHDIR"/
+python3 - "$MUTHDIR/codex.sh" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+marker = "HARNESS_READY_RE='^[[:space:]]*[^·[:space:]][^·]*·[[:space:]]*/'"
+assert marker in text, "codex.sh's HARNESS_READY_RE not found -- file shape changed"
+open(path, "w").write(text.replace(marker, "HARNESS_READY_RE='NEVER_MATCHES_ANYTHING_XYZZY'", 1))
+PY
+mutation_rc=$?
+if [ "$mutation_rc" -ne 0 ]; then
+  echo "  FAIL setup: could not mutate a copy of harness/codex.sh (exit $mutation_rc)"; fail=$((fail+1));
+else
+  echo "  ok   setup: mutated a copy of harness/codex.sh's ready matcher"; pass=$((pass+1));
+  seam_out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" LANES_HARNESS_DIR="$MUTHDIR" bash "$LANES" 2>&1)
+  if grep -qE "^[0-9]+ +w-codex-ready +[^ ]+ +unknown$" <<<"$seam_out"; then
+    echo "  ok   breaking codex's ready matcher moves the codex lane to unknown"; pass=$((pass+1));
+  else
+    echo "  FAIL breaking codex's ready matcher did not move w-codex-ready to unknown:"; sed 's/^/       /' <<<"$seam_out"; fail=$((fail+1));
+  fi
+  if grep -qE "^[0-9]+ +w-real-free +[^ ]+ +free$" <<<"$seam_out"; then
+    echo "  ok   the seam does not leak: claude's lane is still free"; pass=$((pass+1));
+  else
+    echo "  FAIL the seam leaked: breaking codex's adapter moved a claude lane too:"; sed 's/^/       /' <<<"$seam_out"; fail=$((fail+1));
+  fi
+  if grep -qE "^[0-9]+ +w-copilot-ready +[^ ]+ +free$" <<<"$seam_out"; then
+    echo "  ok   the seam does not leak: copilot's lane is still free"; pass=$((pass+1));
+  else
+    echo "  FAIL the seam leaked: breaking codex's adapter moved a copilot lane too:"; sed 's/^/       /' <<<"$seam_out"; fail=$((fail+1));
+  fi
+fi
+rm -rf "$MUTHDIR"
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
