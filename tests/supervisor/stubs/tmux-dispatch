@@ -56,7 +56,15 @@ case "$sub" in
       win=""; keys=(); literal=0
       while [ $# -gt 0 ]; do
         case "$1" in
-          -t) win="${2##*:}"; shift 2 ;;
+          # Strip both the session prefix and a trailing `.pane` the same
+          # way the capture-pane/list-panes parsing below this case
+          # statement already does (agent-dotfiles#193) -- a target like
+          # `t:1.1` used to leave send-keys writing to buffer "1.1" while
+          # capture-pane read fixture/buffer "1", so a caller addressing a
+          # specific pane (not just a window) saw its own send-keys as
+          # invisible. No prior caller of this stub addressed a pane
+          # suffix, so nothing exercised the mismatch until now.
+          -t) win="${2##*:}"; win="${win%%.*}"; shift 2 ;;
           -l) literal=1; shift ;;
           *) keys+=("$1"); shift ;;
         esac

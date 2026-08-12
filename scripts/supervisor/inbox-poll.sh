@@ -246,72 +246,35 @@ while :; do
     notified_down=""
     report ok "listening"
     if [ -n "$out" ]; then
-      # agent-dotfiles#186: a burst that drains as N messages with zero lanes
-      # blocked used to produce N identical "no lane is waiting" pings --
-      # observed live as 23 messages -> 21 pings in ~21 seconds. The batch
-      # boundary already exists right here (one drain of $out), so each
-      # no-lane-waiting message is routed with INBOX_ROUTE_BATCH=1, which
-      # makes inbox-route.sh stay quiet and exit 3 instead of notifying Jon
-      # itself (see inbox-route.sh's own comment on that branch). This loop
-      # tallies how many hit that branch and sends ONE summary notice after
-      # the drain, covering the whole batch. Messages that route to a lane,
-      # or that hit a menu/ambiguity refusal (exit 2), are untouched -- those
-      # still notify exactly as before, per message, because each of those is
-      # its own distinct, actionable event, not repetition of the same one.
-      no_lane_count=0
-      no_lane_last=""
+      # agent-dotfiles#193: every message goes to the Director, always --
+      # there is no more "nobody is listening" case to batch-suppress
+      # (#186's whole reason for existing). director-route.sh durably
+      # queues before it ever touches the pane, so a message here is
+      # accounted for the moment the call returns; the exit code only says
+      # whether the live nudge also landed this instant or is waiting for
+      # the Director to free up.
       while IFS=$'\t' read -r text display; do
         [ -n "$text" ] || continue
         # inbox.sh (#152) emits TEXT and DISPLAY tab-separated on one line --
-        # route the bare TEXT (what a lane should receive), log the DISPLAY
-        # form (what a human reading $LOG wants to see). Never re-derive TEXT
-        # by parsing DISPLAY back apart.
-        if INBOX_ROUTE_BATCH=1 "$HERE/inbox-route.sh" "$text" "$SESSION" >>"$LOG" 2>&1; then
+        # route the bare TEXT (what the Director should receive), log the
+        # DISPLAY form (what a human reading $LOG wants to see). Never
+        # re-derive TEXT by parsing DISPLAY back apart.
+        if "$HERE/director-route.sh" "$text" "$SESSION" >>"$LOG" 2>&1; then
           log "ROUTED: ${display:-$text}"
         else
           route_rc=$?
-          # #164: inbox-route.sh exits 2 for "nothing was typed anywhere,
-          # but Jon was told why" (a menu refusal, zero lanes waiting, or
-          # ambiguity) -- distinct from exit 1 (couldn't even reach Jon) and
-          # from exit 0 (delivered). This used to share exit 0 with a real
-          # delivery and get logged as ROUTED, which recorded a message as
-          # routed when it was deliberately not.
-          # #186: exit 3 is exit 2's batched sibling -- zero lanes waiting,
-          # deliberately not notified yet because this loop owns one summary
-          # notice for the whole drain instead. It is still a refusal for
-          # logging purposes; only the notification is deferred.
+          # director-route.sh's own contract: 2 means queued for the
+          # Director but not yet live-delivered (busy/blocked/unsent-box) --
+          # not lost, not worth a distinct notice, just not instant. 1 means
+          # the durable queue write itself failed, which director-route.sh
+          # already tried to tell Jon about directly.
           if [ "$route_rc" -eq 2 ]; then
-            log "REFUSED: ${display:-$text}"
-          elif [ "$route_rc" -eq 3 ]; then
-            log "REFUSED: ${display:-$text}"
-            no_lane_count=$((no_lane_count + 1))
-            no_lane_last="${display:-$text}"
+            log "QUEUED: ${display:-$text}"
           else
             log "ROUTE FAILED: ${display:-$text}"
           fi
         fi
       done <<<"$out"
-
-      if [ "$no_lane_count" -gt 0 ]; then
-        # #186: the no-drop guarantee (#142) is unchanged -- Jon is still
-        # told, exactly once per message when N=1 (unchanged wording), and
-        # once total naming the count when N>1. If notify.sh itself fails,
-        # the REFUSED lines already logged above are the record that no
-        # message here was silently dropped, same as every other notify
-        # failure path in this script.
-        if [ "$no_lane_count" -eq 1 ]; then
-          subject="Telegram message received, no lane is waiting"
-          body="No blocked lane to route to -- got: $no_lane_last"
-        else
-          subject="Telegram messages received, no lane is waiting"
-          body="$no_lane_count messages received, no lane waiting"
-        fi
-        if AGENT_NOTIFY_CALLER=supervisor "$HERE/notify.sh" "$subject" "$body" >>"$LOG" 2>&1; then
-          log "NOTIFIED: one summary notice for $no_lane_count no-lane message(s)"
-        else
-          log "COULD NOT NOTIFY ABOUT $no_lane_count NO-LANE MESSAGE(S) EITHER -- the REFUSED lines above are the record"
-        fi
-      fi
     fi
   fi
 
@@ -321,6 +284,8 @@ while :; do
   # comment). The flag is this process's own responsibility to clear: it is
   # the only reader, and leaving it behind would make the NEXT process to
   # start (the one this restart is deploying) read it as a second request.
+  # Checked BEFORE the #193 flush below -- a deploy restart exits the loop
+  # outright, so there is no point nudging the Director first.
   if [ -f "$RESTART_FLAG" ]; then
     rm -f "$RESTART_FLAG"
     DELIBERATE=1
@@ -328,6 +293,19 @@ while :; do
     log "restart flag seen at $RESTART_FLAG -- exiting cleanly so the queued relaunch picks up the current code"
     break
   fi
+
+  # agent-dotfiles#193: retry the live nudge every iteration, whether or not
+  # this iteration saw a new message. A message that arrived while the
+  # Director was mid-turn is durably queued already (director-route.sh
+  # above), but nothing else will re-attempt delivery once the Director
+  # frees up unless something asks again -- Jon sending a second message
+  # would trigger it by accident, but silence should not mean the reply
+  # waits for whatever the Director's own next scheduled wakeup happens to
+  # be. `--flush` does the same idle-pane check director-route.sh always
+  # does and sends the same standing nudge if it is now safe, without
+  # posting anything new to the queue. Bounded by POLL_TIMEOUT (~25s
+  # default) either way, since this loop only comes back around that often.
+  "$HERE/director-route.sh" --flush "$SESSION" >>"$LOG" 2>&1
 
   if [ "$ITERATIONS" -gt 0 ] && [ "$iter" -ge "$ITERATIONS" ]; then
     DELIBERATE=1

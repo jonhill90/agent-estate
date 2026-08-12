@@ -3,10 +3,20 @@
 # must never exit without telling Jon it stopped -- and must page him, not
 # stay quiet, once Telegram has been unreachable for a while.
 #
-# agent-dotfiles#142. inbox.sh and inbox-route.sh are both stubbed out here
-# (real behaviour is covered by test_inbox.sh and test_inbox_route.sh); this
-# suite is only about the loop that wires them together, its heartbeat, and
-# its failure reporting.
+# agent-dotfiles#142. inbox.sh and director-route.sh are both stubbed out
+# here (real behaviour is covered by test_inbox.sh and
+# test_director_route.sh); this suite is only about the loop that wires them
+# together, its heartbeat, and its failure reporting.
+#
+# agent-dotfiles#193: this poller now calls director-route.sh instead of
+# inbox-route.sh for every message -- there is no more "no lane waiting"
+# case to batch-suppress (#186's whole reason for existing), because there
+# is always exactly one recipient (the Director) and director-route.sh
+# itself durably queues before it ever risks touching a pane. The #186
+# batch-summary tests this file used to carry are gone with the code path
+# they tested; what replaces them below is a check that `--flush` is called
+# once per loop iteration, which is the mechanism that now closes the
+# "Director was busy, nobody retried" gap #186's batching used to leave.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POLL="$HERE/../../scripts/supervisor/inbox-poll.sh"
@@ -45,26 +55,25 @@ esac
 EOF
 chmod +x "$D/bin-inbox.sh"
 
-# Stub inbox-route.sh: records every message it was asked to route, and
-# exits whatever ROUTE_EXIT says (default 0 = delivered) so #164's
-# ROUTED/REFUSED/ROUTE-FAILED log branching can be driven from the outside.
-# agent-dotfiles#186: a message text prefixed RC0:/RC2:/RC3: overrides
-# ROUTE_EXIT for just that one message, so a single batch can mix outcomes
-# (some delivered, some no-lane-waiting) the way a real mixed drain does.
-# REQUIRE_BATCH_FLAG=1 makes the stub refuse (exit 1) unless the caller set
-# INBOX_ROUTE_BATCH -- used to prove inbox-poll.sh actually asks for batched
-# behaviour rather than relying on inbox-route.sh's default.
+# Stub director-route.sh: records every message it was asked to route (or,
+# for a `--flush` call with no message, records that a flush happened), and
+# exits whatever ROUTE_EXIT says (default 0 = delivered+nudged). A message
+# text prefixed RC0:/RC2:/RC1: overrides ROUTE_EXIT for just that one
+# message, so a single batch can mix outcomes (some delivered, some merely
+# queued) the way a real mixed drain does -- director-route.sh's own exit
+# contract: 0 delivered, 2 queued but not yet live (not lost), 1 the durable
+# queue write itself failed.
 cat > "$D/bin-route.sh" <<'EOF'
 #!/bin/bash
-echo "$1" >> "${ROUTE_LOG:?}"
-if [ "${REQUIRE_BATCH_FLAG:-}" = "1" ] && [ "${INBOX_ROUTE_BATCH:-}" != "1" ]; then
-  echo "stub-route: refused, caller did not set INBOX_ROUTE_BATCH" >&2
-  exit 1
+if [ "${1:-}" = "--flush" ]; then
+  echo "FLUSH" >> "${ROUTE_LOG:?}"
+  exit "${FLUSH_EXIT:-0}"
 fi
+echo "$1" >> "${ROUTE_LOG:?}"
 case "$1" in
   RC0:*) exit 0 ;;
+  RC1:*) exit 1 ;;
   RC2:*) exit 2 ;;
-  RC3:*) exit 3 ;;
   *) exit "${ROUTE_EXIT:-0}" ;;
 esac
 EOF
@@ -90,7 +99,7 @@ chmod +x "$D/bin-notify.sh"
 mkdir -p "$D/lane"
 cp "$POLL" "$D/lane/inbox-poll.sh"
 cp "$D/bin-inbox.sh" "$D/lane/inbox.sh"
-cp "$D/bin-route.sh" "$D/lane/inbox-route.sh"
+cp "$D/bin-route.sh" "$D/lane/director-route.sh"
 cp "$D/bin-notify.sh" "$D/lane/notify.sh"
 chmod +x "$D/lane"/*.sh
 
@@ -114,48 +123,50 @@ run() {  # run <inbox-script-fixture> <iterations> [extra env...]
 printf 'ok:yes\t[telegram 1 from Jon] yes\n' > "$D/fixture-basic"
 rm -f "$D/poll.log"
 run "$D/fixture-basic" 1 >"$D/out1" 2>&1
-[ "$(cat "$D/route.log" 2>/dev/null)" = "yes" ] && ok "the bare reply text is handed to inbox-route.sh" \
+[ "$(grep -vx FLUSH "$D/route.log" 2>/dev/null)" = "yes" ] && ok "the bare reply text is handed to director-route.sh" \
   || bad "route.log should contain only the bare reply \"yes\", not the framing" "$(cat "$D/route.log" 2>/dev/null)"
 grep -q ' ROUTED: ' "$D/poll.log" 2>/dev/null && ok "a real delivery (exit 0) is logged ROUTED" \
   || bad "no ROUTED line for a real delivery" "$(cat "$D/poll.log" 2>/dev/null)"
 
-# --- agent-dotfiles#164: a refusal (exit 2) is logged REFUSED, not ROUTED --
-# inbox-route.sh exits 2 when it deliberately did not type anything anywhere
-# but told Jon why (a menu refusal, zero lanes waiting, ambiguity). Before
-# #164 that shared exit 0 with a real delivery and the poller logged it
-# ROUTED regardless -- a message the log records as routed when it was
-# deliberately not.
-printf 'ok:yes\t[telegram 1 from Jon] yes\n' > "$D/fixture-refused"
+# --- agent-dotfiles#193: a queued-not-yet-delivered reply (exit 2) is
+# logged QUEUED, not ROUTED -- director-route.sh exits 2 when the Director
+# was busy/blocked and the message is durably queued but not live-nudged.
+# This is the expected, common outcome, not a failure -- unlike the old
+# lane-routing REFUSED, it must never trigger a notify.sh call, because the
+# whole point of #193 is that there is no more "nobody is listening" case.
+printf 'ok:yes\t[telegram 1 from Jon] yes\n' > "$D/fixture-queued"
 rm -f "$D/poll.log"
-run "$D/fixture-refused" 1 ROUTE_EXIT=2 >"$D/out1b" 2>&1
-grep -q ' REFUSED: ' "$D/poll.log" 2>/dev/null && ok "a refusal (exit 2) is logged REFUSED, not ROUTED" \
-  || bad "no REFUSED line for a refusal" "$(cat "$D/poll.log" 2>/dev/null)"
-grep -q ' ROUTED: ' "$D/poll.log" 2>/dev/null && bad "a refusal was also logged ROUTED" "$(cat "$D/poll.log" 2>/dev/null)" \
-  || ok "a refusal is never logged ROUTED"
+run "$D/fixture-queued" 1 ROUTE_EXIT=2 >"$D/out1b" 2>&1
+grep -q ' QUEUED: ' "$D/poll.log" 2>/dev/null && ok "a queued-not-delivered reply (exit 2) is logged QUEUED, not ROUTED" \
+  || bad "no QUEUED line for exit 2" "$(cat "$D/poll.log" 2>/dev/null)"
+grep -q ' ROUTED: ' "$D/poll.log" 2>/dev/null && bad "a queued reply was also logged ROUTED" "$(cat "$D/poll.log" 2>/dev/null)" \
+  || ok "a queued reply is never logged ROUTED"
+[ -s "$D/notify.log" ] && bad "a queued (not-lost) reply triggered a notify.sh call" "$(cat "$D/notify.log")" \
+  || ok "a queued reply does not page Jon -- director-route.sh already handled durability"
 
-# --- a hard failure (exit 1: could not even notify) is still ROUTE FAILED -
-# The three-way branch must not collapse 1 and 2 together either -- exit 1
-# means neither delivery nor notification happened, which is the one case
-# that genuinely deserves "FAILED".
+# --- a hard failure (exit 1: the durable queue write itself failed) is
+# still ROUTE FAILED. The three-way branch must not collapse 1 and 2
+# together -- exit 1 is director-route.sh's own "this really might be lost"
+# case, distinct from the ordinary queued-while-busy case above.
 printf 'ok:yes\t[telegram 1 from Jon] yes\n' > "$D/fixture-hardfail"
 rm -f "$D/poll.log"
 run "$D/fixture-hardfail" 1 ROUTE_EXIT=1 >"$D/out1c" 2>&1
 grep -q ' ROUTE FAILED: ' "$D/poll.log" 2>/dev/null && ok "a hard failure (exit 1) is still logged ROUTE FAILED" \
   || bad "no ROUTE FAILED line for exit 1" "$(cat "$D/poll.log" 2>/dev/null)"
-grep -qE ' (ROUTED|REFUSED): ' "$D/poll.log" 2>/dev/null && bad "a hard failure was logged as ROUTED or REFUSED" "$(cat "$D/poll.log" 2>/dev/null)" \
-  || ok "a hard failure is never logged ROUTED or REFUSED"
+grep -qE ' (ROUTED|QUEUED): ' "$D/poll.log" 2>/dev/null && bad "a hard failure was logged as ROUTED or QUEUED" "$(cat "$D/poll.log" 2>/dev/null)" \
+  || ok "a hard failure is never logged ROUTED or QUEUED"
 
-# Mutation check: reverting inbox-route.sh's exit code to the pre-#164 shape
-# (0 for both delivered and refused) is exactly the historical bug -- with
-# THIS poller unchanged, a refusal reported that way logs ROUTED, not
-# REFUSED. This is the regression #164 closes, reproduced on demand rather
-# than only asserted against.
+# Mutation check: reverting director-route.sh's exit code to look like a
+# delivery (0) when it was actually only queued is exactly the shape #164
+# fixed for the old lane router -- with THIS poller unchanged, that
+# mislogs a queued-not-delivered reply as ROUTED. Reproduced on demand
+# rather than only asserted against.
 rm -f "$D/poll.log"
-run "$D/fixture-refused" 1 ROUTE_EXIT=0 >"$D/out1d" 2>&1
-if grep -q ' ROUTED: ' "$D/poll.log" 2>/dev/null && ! grep -q ' REFUSED: ' "$D/poll.log" 2>/dev/null; then
-  ok "mutation confirmed: a pre-#164-shaped inbox-route.sh (exit 0 on refusal) mislogs a refusal as ROUTED (the assertions above would be red)"
+run "$D/fixture-queued" 1 ROUTE_EXIT=0 >"$D/out1d" 2>&1
+if grep -q ' ROUTED: ' "$D/poll.log" 2>/dev/null && ! grep -q ' QUEUED: ' "$D/poll.log" 2>/dev/null; then
+  ok "mutation confirmed: a director-route.sh that always exits 0 mislogs a queued reply as ROUTED (the assertions above would be red)"
 else
-  bad "mutation confirmed: pre-#164 exit-0-on-refusal shape" "$(cat "$D/poll.log" 2>/dev/null)"
+  bad "mutation confirmed: always-exit-0 director-route.sh shape" "$(cat "$D/poll.log" 2>/dev/null)"
 fi
 
 # --- nothing new: nothing routed, no notification ---------------------------
@@ -163,7 +174,11 @@ cat > "$D/fixture-empty" <<'FIX'
 ok:
 FIX
 run "$D/fixture-empty" 1 >"$D/out2" 2>&1
-[ ! -s "$D/route.log" ] && ok "nothing new -> nothing routed" || bad "routed something on an empty tick" "$(cat "$D/route.log")"
+# The per-iteration --flush retry (agent-dotfiles#193) still runs on an
+# empty tick -- that is its whole point -- so route.log legitimately holds
+# one FLUSH line here. What must NOT appear is an actual message.
+[ "$(grep -vx FLUSH "$D/route.log" 2>/dev/null)" = "" ] && ok "nothing new -> nothing routed (only the standing --flush retry)" \
+  || bad "routed something on an empty tick" "$(cat "$D/route.log")"
 # The exit-time "poller stopped" report (asserted separately below) is
 # expected on every run of this test harness, since INBOX_POLL_ITERATIONS
 # always ends the loop. What must NOT appear on an ordinary empty tick is an
@@ -261,81 +276,53 @@ grep -qi 'poller stopped' "$D/notify.log" 2>/dev/null && bad "paged for a death 
 grep -q 'state:.*stopped' "$D/status" 2>/dev/null && ok "...but the heartbeat file still records it" \
   || bad "no heartbeat status recorded" "$(cat "$D/status" 2>/dev/null)"
 
-# --- agent-dotfiles#186: a burst with no lane waiting sends ONE notification
-# per drain, not one per message -- 23 inbound messages producing 21
-# identical pings in ~21 seconds is the storm this closes. -----------------
-
-# 1. One message, no lane waiting -> exactly one notification, same wording
-# as before batching existed (nothing here should change the N=1 case).
-printf 'ok:RC3:reply1\t[telegram] reply1\n' > "$D/fixture-noLane-one"
-run "$D/fixture-noLane-one" 1 REQUIRE_BATCH_FLAG=1 >"$D/out8" 2>&1
-[ "$(wc -l < "$D/notify.log" | tr -d ' ')" = "1" ] && ok "one no-lane message -> exactly one notification" \
-  || bad "wanted exactly 1 notification for one no-lane message" "$(cat "$D/notify.log" 2>/dev/null)"
-grep -q 'no lane is waiting' "$D/notify.log" 2>/dev/null && ok "the single-message notice text is unchanged" \
-  || bad "no-lane notice text changed" "$(cat "$D/notify.log" 2>/dev/null)"
-
-# 2. N messages in ONE drain, no lane waiting -> ONE notification, and it
-# says N -- the actual storm shape from the issue, just smaller.
-printf 'batch:RC3:m1|RC3:m2|RC3:m3|RC3:m4|RC3:m5\n' > "$D/fixture-batch5"
-run "$D/fixture-batch5" 1 REQUIRE_BATCH_FLAG=1 >"$D/out9" 2>&1
-[ "$(wc -l < "$D/notify.log" | tr -d ' ')" = "1" ] && ok "five no-lane messages in one drain -> exactly one notification" \
-  || bad "wanted exactly 1 notification for a 5-message drain" "$(cat "$D/notify.log" 2>/dev/null)"
-grep -q '5 messages received, no lane waiting' "$D/notify.log" 2>/dev/null && ok "the summary notice names the count (5)" \
-  || bad "summary notice did not name the count" "$(cat "$D/notify.log" 2>/dev/null)"
-[ "$(wc -l < "$D/route.log" | tr -d ' ')" = "5" ] && ok "all five messages were individually handed to inbox-route.sh" \
-  || bad "not all five messages reached inbox-route.sh" "$(cat "$D/route.log" 2>/dev/null)"
-
-# 3. Messages that DO route to a lane are unaffected -- still delivered,
-# still produce no notification at all.
-printf 'batch:RC0:m1|RC0:m2|RC0:m3\n' > "$D/fixture-batch-routed"
+# --- agent-dotfiles#193: several messages in one drain each reach the
+# Director independently -- no batching, no summarising, because there is
+# no longer a "nobody is listening" case to suppress. Every message gets
+# its own ROUTED/QUEUED/ROUTE-FAILED line and, unlike the old lane router,
+# a queued (exit 2) message never itself pages Jon.
+printf 'batch:RC0:m1|RC2:m2|RC0:m3\n' > "$D/fixture-batch-mixed"
 rm -f "$D/poll.log"
-run "$D/fixture-batch-routed" 1 REQUIRE_BATCH_FLAG=1 >"$D/out10" 2>&1
-[ ! -s "$D/notify.log" ] && ok "a batch that all routes to lanes produces no notification" \
-  || bad "a fully-routed batch notified Jon anyway" "$(cat "$D/notify.log" 2>/dev/null)"
-[ "$(grep -c ' ROUTED: ' "$D/poll.log" 2>/dev/null)" = "3" ] && ok "all three routed messages are logged ROUTED" \
-  || bad "not all routed messages logged ROUTED" "$(cat "$D/poll.log" 2>/dev/null)"
+run "$D/fixture-batch-mixed" 1 >"$D/out8" 2>&1
+[ "$(grep -c ' ROUTED: ' "$D/poll.log" 2>/dev/null)" = "2" ] && ok "both delivered messages in a mixed drain are logged ROUTED" \
+  || bad "wanted 2 ROUTED lines" "$(cat "$D/poll.log" 2>/dev/null)"
+[ "$(grep -c ' QUEUED: ' "$D/poll.log" 2>/dev/null)" = "1" ] && ok "the queued message in the same drain is logged QUEUED" \
+  || bad "wanted 1 QUEUED line" "$(cat "$D/poll.log" 2>/dev/null)"
+[ ! -s "$D/notify.log" ] && ok "no-drop holds without paging Jon: nothing in a mixed drain triggers a notification" \
+  || bad "a mixed drain notified Jon anyway" "$(cat "$D/notify.log" 2>/dev/null)"
 
-# 4. A mixed batch (some routable, some not) notifies ONLY about the
-# unroutable ones -- one summary naming just those, not the routed ones.
-printf 'batch:RC0:ok1|RC3:no1|RC0:ok2|RC3:no2|RC3:no3\n' > "$D/fixture-batch-mixed"
+# --- agent-dotfiles#193: --flush runs once per loop iteration, whether or
+# not this iteration saw a new message -- this is what closes the "Director
+# was busy, nobody retried until Jon wrote again" gap. Two iterations, no
+# new messages in either, must still show two FLUSH calls.
 rm -f "$D/poll.log"
-run "$D/fixture-batch-mixed" 1 REQUIRE_BATCH_FLAG=1 >"$D/out11" 2>&1
-[ "$(wc -l < "$D/notify.log" | tr -d ' ')" = "1" ] && ok "a mixed batch still produces exactly one notification" \
-  || bad "mixed batch notification count wrong" "$(cat "$D/notify.log" 2>/dev/null)"
-grep -q '3 messages received, no lane waiting' "$D/notify.log" 2>/dev/null && ok "the mixed-batch notice counts only the 3 unroutable messages" \
-  || bad "mixed-batch notice did not count only the unroutable messages" "$(cat "$D/notify.log" 2>/dev/null)"
+cat > "$D/fixture-two-empty" <<'FIX'
+ok:
+ok:
+FIX
+run "$D/fixture-two-empty" 2 >"$D/out9" 2>&1
+[ "$(grep -cx FLUSH "$D/route.log" 2>/dev/null)" = "2" ] && ok "director-route.sh --flush is called once per iteration, including empty ones" \
+  || bad "wanted 2 --flush calls for 2 iterations" "$(cat "$D/route.log" 2>/dev/null)"
 
-# 5. No-drop guarantee (#142) holds: every message in the mixed batch is
-# either delivered (ROUTED) or accounted for (REFUSED, which the summary
-# notice above covers) -- nothing simply vanishes from the log.
-routed=$(grep -c ' ROUTED: ' "$D/poll.log" 2>/dev/null || true)
-refused=$(grep -c ' REFUSED: ' "$D/poll.log" 2>/dev/null || true)
-[ "$((routed + refused))" = "5" ] && ok "no-drop holds: all five mixed-batch messages are delivered or accounted for" \
-  || bad "some mixed-batch messages were neither ROUTED nor REFUSED" "$(cat "$D/poll.log" 2>/dev/null)"
-
-# Mutation check: removing the batch summary (so five no-lane messages send
-# zero notifications instead of one) must fail the N=5 assertion above --
-# proving that assertion actually depends on the summary-notify code, not on
-# some other path. This is #186's mutation-check-2, aimed at this poller's
-# own new code rather than at inbox-route.sh (already mutation-checked in
-# test_inbox_route.sh).
+# Mutation check: removing the --flush call (so a queued message is never
+# retried once the Director frees up unless Jon happens to send another
+# message) must fail the assertion above -- proving it actually depends on
+# the retry call, not on some other path.
 MUTANT="$D/lane/inbox-poll.sh"
 python3 - "$MUTANT" <<'PYEOF'
-import re, sys
+import sys
 path = sys.argv[1]
 text = open(path).read()
-marker = 'if [ "$no_lane_count" -gt 0 ]; then'
-assert text.count(marker) == 1, "summary-notify guard not found or not unique -- inbox-poll.sh shape changed"
-start = text.index(marker)
-end = text.index("\n      fi\n", start) + len("\n      fi\n")
-mutated = text[:start] + "if false; then\n        :\n      fi\n" + text[end:]
-open(path, "w").write(mutated)
+marker = '  "$HERE/director-route.sh" --flush "$SESSION" >>"$LOG" 2>&1\n'
+assert text.count(marker) == 1, "flush call not found or not unique -- inbox-poll.sh shape changed"
+open(path, "w").write(text.replace(marker, "", 1))
 PYEOF
-run "$D/fixture-batch5" 1 REQUIRE_BATCH_FLAG=1 >"$D/out12" 2>&1
-if [ ! -s "$D/notify.log" ]; then
-  ok "mutation confirmed: stripping the batch summary leaves 5 no-lane messages with zero notifications (the assertion above would be red)"
+rm -f "$D/poll.log"
+run "$D/fixture-two-empty" 2 >"$D/out10" 2>&1
+if [ ! -s "$D/route.log" ] || [ "$(grep -cx FLUSH "$D/route.log" 2>/dev/null)" = "0" ]; then
+  ok "mutation confirmed: removing the --flush call leaves zero retries across 2 iterations (the assertion above would be red)"
 else
-  bad "mutation confirmed: batch-summary removal" "$(cat "$D/notify.log" 2>/dev/null)"
+  bad "mutation confirmed: --flush call removal" "$(cat "$D/route.log" 2>/dev/null)"
 fi
 cp "$POLL" "$D/lane/inbox-poll.sh"; chmod +x "$D/lane/inbox-poll.sh"
 
