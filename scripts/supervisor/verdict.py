@@ -155,8 +155,9 @@ def main(argv=None):
     get.add_argument("--number", type=int, required=True)
     get.add_argument(
         "--source",
-        default="ledger",
-        help="comma-separated source names to try in order (default: ledger)",
+        default="github",
+        help="comma-separated source names to try in order (default: github; "
+        "'ledger' has no caller that writes to it yet -- agent-dotfiles#214)",
     )
 
     record = sub.add_parser("record", help="record a verdict in the ledger source")

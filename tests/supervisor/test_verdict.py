@@ -58,6 +58,26 @@ class GithubReviewVerdictSourceTests(unittest.TestCase):
         source = GithubReviewVerdictSource(runner=lambda cmd: payload)
         self.assertEqual(source.verdict(repo=REPO, number=1)["verdict"], "none")
 
+    def test_regression_request_changes_prose_on_an_approved_pr(self):
+        """agent-dotfiles#214: the 2026-08-12 misreport. A reviewer's comment
+        on PR #206 described the very bug this module fixes, using the
+        literal string "REQUEST CHANGES" inside a sentence about the bug --
+        not as a review decision. The old prose-regex read that string and
+        reported the PR as REQUEST CHANGES even though its real GitHub
+        review state was APPROVE. This source must read only the `state`
+        field and report "approved", never let that substring flip it."""
+        payload = (
+            '{"reviews":['
+            '{"state":"COMMENTED","body":'
+            '"digest.sh misread this because the comment contained the '
+            'literal string REQUEST CHANGES inside a sentence describing '
+            'the bug."},'
+            '{"state":"APPROVED","body":"Looks good."}'
+            "]}"
+        )
+        source = GithubReviewVerdictSource(runner=lambda cmd: payload)
+        self.assertEqual(source.verdict(repo=REPO, number=206)["verdict"], "approved")
+
     def test_runner_failure_fails_closed_to_unknown(self):
         def raiser(cmd):
             raise RuntimeError("gh: command failed")
