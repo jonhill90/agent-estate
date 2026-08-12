@@ -106,7 +106,7 @@ record ad237test:3 ad902-second ""
 start_estate
 before=$(tmux list-windows -t ad237test -F '#{window_index} #{window_name}' 2>&1)
 want "setup: three lanes are live before the kill" "2 ad901-first" "$before"
-tmux kill-server 2>/dev/null
+"$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null
 sleep 0.5
 gone=$(tmux has-session -t ad237test 2>&1; echo "rc=$?")
 want "RED: the tmux server is gone and so is every pane" "rc=[^0]" "$gone"
@@ -122,7 +122,7 @@ rm -rf "$D/state"; : > "$D/launched.log"
 record ad237test:2 ad901-first "$LANE2_ID"
 record ad237test:3 ad902-second "$LANE3_ID"
 start_estate
-tmux kill-server 2>/dev/null
+"$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null
 sleep 0.5
 green=$(bash "$SUP/restore.sh" 2>&1); greenrc=$?
 sleep 1
@@ -163,7 +163,7 @@ rm -rf "$D/state"; : > "$D/launched.log"
 record ad237test:2 ad901-first "deadbeef-dead-4bee-8bee-deadbeefdead"
 record ad237test:3 ad902-second "$LANE3_ID"
 start_estate
-tmux kill-server 2>/dev/null
+"$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null
 sleep 0.5
 mut=$(bash "$SUP/restore.sh" 2>&1); mutrc=$?
 sleep 1

@@ -15,7 +15,12 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 BOOT="$HERE/../../scripts/supervisor/bootstrap-session.sh"
+source "$HERE/../../scripts/supervisor/tmux-isolation.sh"
 S="bootstrap-test-$$"
+RT="$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-tmux.XXXXXX")"
+unset TMUX
+export TMUX_TMPDIR="$RT"
+assert_isolated_tmux || exit 1
 pass=0; fail=0
 
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
@@ -23,8 +28,9 @@ bad()  { echo "  FAIL $1 — $2"; fail=$((fail+1)); }
 check(){ # check <name> <expected> <actual>
   if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "want '$2', got '$3'"; fi
 }
-cleanup() { tmux kill-session -t "$S" 2>/dev/null; }
-trap cleanup EXIT INT TERM
+cleanup() { unset TMUX; export TMUX_TMPDIR="$RT"; assert_isolated_tmux; tmux kill-session -t "$S" 2>/dev/null; }
+cleanup_all() { cleanup; rm -rf "$RT"; }
+trap cleanup_all EXIT INT TERM
 
 if ! command -v tmux >/dev/null 2>&1; then
   echo "  SKIP no tmux on PATH"; exit 0
@@ -122,7 +128,7 @@ check "prefix neighbour is NOT modified by --add-lanes" \
 tmux has-session -t "=$S" 2>/dev/null
 check "the named session itself was created" "0" "$?"
 cleanup
-tmux kill-session -t "=$NEIGHBOUR" 2>/dev/null
+unset TMUX; export TMUX_TMPDIR="$RT"; assert_isolated_tmux; tmux kill-session -t "=$NEIGHBOUR" 2>/dev/null
 
 # 11. `command -v` succeeds for shell builtins, which have no PATH binary and
 #     are not harnesses. `--agent cd` produced exactly the all-`dead` session

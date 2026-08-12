@@ -29,6 +29,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LANE_DONE="$HERE/../../scripts/supervisor/lane-done.sh"
+source "$HERE/../../scripts/supervisor/tmux-isolation.sh"
 pass=0; fail=0
 
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
@@ -318,13 +319,13 @@ else
   # Total isolation from any live estate: a private server socket via
   # TMUX_TMPDIR, no user config (-f /dev/null), a name nothing else uses, and
   # kill-server on the way out. This suite must never touch a working lane.
-  RT="$D/tmuxsrv"; mkdir -p "$RT"
+  RT="$(mktemp -d "${TMPDIR:-/tmp}/lane-done-tmux.XXXXXX")"
   RSESS="lanedonetest-$$"
   rtmux() { env -u TMUX TMUX_TMPDIR="$RT" tmux -f /dev/null "$@"; }
   # `timeout` execs a binary and cannot run a shell function, so the bounded
   # form spells the same command out: timeout_rtmux <seconds> <tmux args...>
   timeout_rtmux() { local t="$1"; shift; timeout "$t" env -u TMUX TMUX_TMPDIR="$RT" tmux -f /dev/null "$@"; }
-  cleanup_rt() { env -u TMUX TMUX_TMPDIR="$RT" tmux kill-server 2>/dev/null; }
+  cleanup_rt() { unset TMUX; export TMUX_TMPDIR="$RT"; assert_isolated_tmux; tmux kill-server 2>/dev/null; }
   trap cleanup_rt EXIT
 
   if ! rtmux new-session -d -s "$RSESS" -n placeholder 2>/dev/null; then
