@@ -26,13 +26,22 @@
 #
 # Usage:
 #   bootstrap-session.sh [--session NAME] [--lanes N] [--agent CMD]
-#                        [--cwd DIR] [--add-lanes] [--dry-run]
+#                        [--harness NAME] [--cwd DIR] [--add-lanes] [--dry-run]
 #
 #   --session NAME  tmux session to create; default $LANES_SESSION or
 #                   agent-dotfiles. Must match what lanes.sh/dispatch.sh read.
 #   --lanes N       total windows including the supervisor; default 10.
 #   --agent CMD     command started in each lane; default $LANES_AGENT_CMD or
 #                   `claude`. Use `copilot` / `codex` at a site without Claude.
+#   --harness NAME  the harness identity to RECORD on every lane window this
+#                   run creates (claude/codex/copilot; agent-dotfiles#216).
+#                   Default: inferred from --agent's basename when it is one
+#                   of those three names exactly; otherwise unrecorded. Pass
+#                   this explicitly when --agent is a wrapper/launcher whose
+#                   binary is not named after the harness it runs (codex
+#                   under a Node loader is the case #216 measured live) --
+#                   the pane's OWN process name can never disambiguate that,
+#                   because several harnesses run as `node`.
 #   --cwd DIR       working directory for every window; default $PWD.
 #   --add-lanes     if the session exists, ADD windows up to --lanes. Never
 #                   touches windows that already exist.
@@ -46,6 +55,7 @@ set -euo pipefail
 SESSION="${LANES_SESSION:-agent-dotfiles}"
 LANES=10
 AGENT_CMD="${LANES_AGENT_CMD:-claude}"
+HARNESS=""
 WORKDIR="$PWD"
 ADD_LANES=0
 DRY_RUN=0
@@ -61,6 +71,7 @@ while [ $# -gt 0 ]; do
     --session)   SESSION="${2:?--session needs a value}"; shift 2 ;;
     --lanes)     LANES="${2:?--lanes needs a value}"; shift 2 ;;
     --agent)     AGENT_CMD="${2:?--agent needs a value}"; shift 2 ;;
+    --harness)   HARNESS="${2:?--harness needs a value}"; shift 2 ;;
     --cwd)       WORKDIR="${2:?--cwd needs a value}"; shift 2 ;;
     --add-lanes) ADD_LANES=1; shift ;;
     --dry-run)   DRY_RUN=1; shift ;;
@@ -117,6 +128,37 @@ if [ -z "$AGENT_PATH" ] || [ ! -x "$AGENT_PATH" ]; then
   echo "bootstrap-session: agent command not on PATH: $AGENT_BIN" >&2
   echo "  pass --agent with the harness this machine actually has (claude, copilot, codex)" >&2
   exit 1
+fi
+
+# agent-dotfiles#216: harness identity is RECORDED here, at the one place it
+# is actually decided, rather than guessed later from the pane's process name
+# -- every Node-based harness (copilot, and codex whenever it is not started
+# as a binary literally named `codex`) reads `node` there and is otherwise
+# indistinguishable from any other Node harness. An explicit --harness wins;
+# otherwise infer from --agent's own basename when it names one of the three
+# recognised harnesses exactly.
+if [ -n "$HARNESS" ]; then
+  case "$HARNESS" in
+    claude|codex|copilot) ;;
+    *) echo "bootstrap-session: --harness must be claude, codex or copilot, got '$HARNESS'" >&2; exit 1 ;;
+  esac
+else
+  case "$(basename "$AGENT_BIN")" in
+    claude|claude.exe)   HARNESS=claude ;;
+    codex|codex.exe)     HARNESS=codex ;;
+    copilot|copilot.exe) HARNESS=copilot ;;
+    # Left unrecorded, not guessed. A wrapper/launcher (codex run under a
+    # Node loader, for instance) still starts a working lane -- it just
+    # reads unidentified to `lane_free` until an operator names it with
+    # `--harness` here or `cli.py register --harness` later. Fail-closed
+    # downstream, not a bootstrap refusal: the window is still useful for
+    # manual work even if the supervisor cannot dispatch to it yet.
+    *) HARNESS="" ;;
+  esac
+fi
+if [ -z "$HARNESS" ]; then
+  echo "bootstrap-session: harness not recorded for agent '$AGENT_BIN' -- lanes will read unidentified" >&2
+  echo "  until named by hand (pass --harness, or register the lane with 'cli.py register --harness')" >&2
 fi
 
 run() {
@@ -178,6 +220,10 @@ if ! session_exists; then
     [ "$first" = "$SUPERVISOR_WINDOW" ] || tmux move-window -s "=$SESSION:$first" -t "=$SESSION:$SUPERVISOR_WINDOW"
   fi
   run send-keys -t "=$SESSION:$SUPERVISOR_WINDOW" "$AGENT_CMD" Enter
+  # Not a dispatch target (lanes.sh never offers the supervisor window), but
+  # recorded anyway for consistency -- nothing downstream should have to
+  # special-case "the one window with no harness option".
+  [ -z "$HARNESS" ] || run set-option -p -t "=$SESSION:$SUPERVISOR_WINDOW" @hill90_lane_harness "$HARNESS"
   created=$((created + 1))
   echo "  window $SUPERVISOR_WINDOW ($SUPERVISOR_NAME): supervisor, created"
 else
@@ -196,6 +242,12 @@ while [ "$idx" -lt "$((SUPERVISOR_WINDOW + LANES - 1))" ]; do
   fi
   run new-window -d -t "=$SESSION:$idx" -n "free-$idx" -c "$WORKDIR"
   run send-keys -t "=$SESSION:$idx" "$AGENT_CMD" Enter
+  # agent-dotfiles#216: the RECORD `lane_free`'s backfill reads instead of
+  # inferring harness from `#{pane_current_command}` (see that function and
+  # `TmuxAdapter.HARNESS_OPTION`). Skipped when HARNESS is empty -- an
+  # unrecognised --agent leaves the lane usable but unidentified, not
+  # mis-identified.
+  [ -z "$HARNESS" ] || run set-option -p -t "=$SESSION:$idx" @hill90_lane_harness "$HARNESS"
   created=$((created + 1))
   echo "  window $idx (free-$idx): lane, created"
 done

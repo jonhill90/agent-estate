@@ -143,5 +143,43 @@ check "that refusal leaves no stray session" \
 bash "$BOOT" --session "bs.evil-$$" --lanes 3 --agent bash >/dev/null 2>&1
 check "refuses a session name containing '.'" "1" "$?"
 
+# --- agent-dotfiles#216: harness identity is RECORDED at bootstrap ---------
+
+# 13. --agent named exactly after a recognised harness gets the option
+#     inferred and set on every lane window it creates.
+bash "$BOOT" --session "$S" --lanes 3 --agent bash --harness codex >/dev/null 2>&1
+check "creates cleanly with an explicit --harness" "0" "$?"
+opt() { tmux show-options -p -t "=$S:$1" -v @hill90_lane_harness 2>/dev/null; }
+check "explicit --harness recorded on the supervisor window" "codex" "$(opt 1)"
+check "explicit --harness recorded on lane window 2" "codex" "$(opt 2)"
+check "explicit --harness recorded on lane window 3" "codex" "$(opt 3)"
+cleanup
+
+# 14. --agent whose OWN basename names a recognised harness gets it inferred
+#     with no --harness flag at all -- the common case, matching what a real
+#     `claude`/`codex`/`copilot` launch on PATH looks like.
+FAKE_BIN="$(mktemp -d)"
+cp "$(command -v bash)" "$FAKE_BIN/claude"
+chmod +x "$FAKE_BIN/claude"
+PATH="$FAKE_BIN:$PATH" bash "$BOOT" --session "$S" --lanes 2 --agent claude >/dev/null 2>&1
+check "creates cleanly inferring harness from --agent's basename" "0" "$?"
+check "inferred harness (claude) recorded on the lane" "claude" "$(opt 2)"
+cleanup
+rm -rf "$FAKE_BIN"
+
+# 15. An --agent this script cannot map to a harness (the pre-existing `bash`
+#     fixture used throughout this suite) leaves the option UNSET rather than
+#     guessing -- fail closed, not fail permissive (agent-dotfiles#216).
+bash "$BOOT" --session "$S" --lanes 2 --agent bash >/dev/null 2>&1
+check "creates cleanly with an unmappable --agent" "0" "$?"
+check "no harness recorded for an unrecognised agent" "" "$(opt 2)"
+cleanup
+
+# 16. An invalid --harness value is refused before any window is created.
+bash "$BOOT" --session "$S" --lanes 2 --agent bash --harness gemini >/dev/null 2>&1
+check "refuses an unrecognised --harness value" "1" "$?"
+tmux has-session -t "=$S" 2>/dev/null
+check "no session left behind by an invalid --harness" "1" "$?"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

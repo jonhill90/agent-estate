@@ -195,6 +195,25 @@ case "$sub" in
       done
     fi
     exit 0 ;;
+  set-option)
+    # agent-dotfiles#216: models a tmux pane option well enough for
+    # `TmuxAdapter.register_lane`/`cli.py lane_free` to read back what
+    # `bootstrap-session.sh`/`register` wrote (@hill90_lane_harness, plus the
+    # pre-existing @hill90_lane_nonce/@hill90_lane) -- persisted per window as
+    # a file, read back by the `display-message` fallback below. Positional
+    # args after flags are `<name> <value>`, same order real `set-option`
+    # takes them.
+    win=""; name=""; value=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) win="${2##*:}"; win="${win%%.*}"; shift 2 ;;
+        -p|-g|-u) shift ;;
+        -*) shift ;;
+        *) if [ -z "$name" ]; then name="$1"; else value="$1"; fi; shift ;;
+      esac
+    done
+    printf '%s' "$value" > "$PANES/$win.opt.${name#@}"
+    exit 0 ;;
 esac
 
 target=""; fmt=""
@@ -259,6 +278,15 @@ case "$sub" in
         value="${value//'#{socket_path}'/${STUB_SOCKET_PATH:-/tmp/stub-tmux-socket}}"
         value="${value//'#{session_created}'/${STUB_SESSION_CREATED:-1700000000}}"
         value="${value//'#{session_id}'/${STUB_SESSION_ID:-\$0}}"
+        # agent-dotfiles#216: a pane option read (`cli.py`'s `get_option`
+        # always asks for exactly one bare `#{@name}` token, never combined
+        # with other fields) -- read back whatever `set-option` persisted for
+        # this window, empty string if it was never set. Real tmux's
+        # `#{@foo}` for an unset user option is likewise empty, not an error.
+        if [[ "$value" == '#{@'*'}' ]]; then
+          optname="${value#'#{@'}"; optname="${optname%'}'}"
+          value="$(cat "$PANES/$win.opt.$optname" 2>/dev/null || true)"
+        fi
         printf '%s\n' "$value" ;;
     esac ;;
   capture-pane)

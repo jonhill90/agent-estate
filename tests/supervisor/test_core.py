@@ -208,6 +208,51 @@ CREATE TABLE components (
 """
 
 
+# agent-dotfiles#216: the intermediate state most ledgers on disk today
+# actually are in -- already widened once for 'copilot-acp', never widened
+# again for the plain tmux 'copilot' harness #216 adds. `_LANES_SCHEMA_MARKERS`
+# has to require BOTH markers, not just re-check the first one, or a ledger
+# in exactly this state would read "already migrated" and reject 'copilot'
+# forever -- this is the schema that proves it.
+PRE_216_LANES_SCHEMA_SCRIPT = PRE_LANES_MIGRATION_SCHEMA_SCRIPT.replace(
+    "harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude'))",
+    "harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude', 'copilot-acp'))",
+)
+
+
+def _seed_pre_216_lanes_migration_database(root: Path):
+    """Build a ledger.sqlite3 already widened for copilot-acp but not yet for
+    the plain tmux 'copilot' harness -- one existing lane of each kind."""
+    root.mkdir(parents=True, exist_ok=True)
+    db_path = root / "ledger.sqlite3"
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.execute("PRAGMA foreign_keys = ON")
+        connection.executescript(PRE_216_LANES_SCHEMA_SCRIPT)
+        connection.execute(
+            """
+            INSERT INTO lanes(lane, pane_id, nonce, harness, repo, server_id, session_id, command, updated_at)
+            VALUES ('app-review', '%22', 'nonce-22-a', 'codex', '/repo/app', 'server-a', '$4', 'codex', 1000)
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO lanes(lane, pane_id, nonce, harness, repo, server_id, session_id, command, updated_at)
+            VALUES ('copilot-worker', 'session-1', 'nonce-acp', 'copilot-acp', '/repo/app', 'acp', 'session-1',
+                    'copilot', 1000)
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO tasks(id, lane, pane_nonce, summary, status, created_at, updated_at)
+            VALUES ('review-870', 'app-review', 'nonce-22-a', 'Review PR 870 without editing', 'created', 1000, 1000)
+            """
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
 def _seed_pre_lanes_migration_database(root: Path):
     """Build a ledger.sqlite3 with an old `lanes` table and a current `tasks` table."""
     root.mkdir(parents=True, exist_ok=True)
@@ -1025,6 +1070,10 @@ class LaneTableMigrationTest(unittest.TestCase):
 
         migrated_sql = self._raw_lanes_sql()
         self.assertIn("copilot-acp", migrated_sql)
+        # agent-dotfiles#216: the same rebuild also widens for the plain
+        # tmux/Node 'copilot' harness, one migration doing both jumps at once
+        # for a ledger old enough to have needed the first.
+        self.assertIn("'copilot'", migrated_sql)
 
         existing = ledger.get_lane("app-review")
         self.assertEqual("codex", existing["harness"])
@@ -1037,9 +1086,47 @@ class LaneTableMigrationTest(unittest.TestCase):
         )
         self.assertEqual("copilot-acp", registered["harness"])
 
+        # And a plain tmux copilot lane, the harness #216 added.
+        tmux_copilot = ledger.register_lane(
+            lane="council-copilot", pane_id="%7", nonce="nonce-7", harness="copilot",
+            repo="/repo/app", server_id="server-a", session_id="$4", command="node",
+        )
+        self.assertEqual("copilot", tmux_copilot["harness"])
+
         # The outstanding task still bound to the untouched lane survives the rebuild.
         self.assertEqual("created", ledger.get_task("review-870")["status"])
-        self.assertEqual(2, len(ledger.list_lanes()))
+        self.assertEqual(3, len(ledger.list_lanes()))
+
+    def test_opening_a_post_copilot_acp_pre_216_database_widens_for_plain_copilot(self):
+        """agent-dotfiles#216: a ledger already migrated once for copilot-acp
+        must migrate AGAIN for the plain tmux 'copilot' harness -- this is
+        the schema state most real ledgers are actually in, and the marker
+        check that decides "already migrated" has to require both."""
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        _seed_pre_216_lanes_migration_database(root)
+
+        ledger = Ledger(root, clock=lambda: 2_000)
+
+        connection = sqlite3.connect(root / "ledger.sqlite3")
+        try:
+            migrated_sql = connection.execute(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='lanes'"
+            ).fetchone()[0]
+        finally:
+            connection.close()
+        self.assertIn("copilot-acp", migrated_sql)
+        self.assertIn("'copilot'", migrated_sql)
+
+        # Both pre-existing lanes survived the second rebuild untouched.
+        self.assertEqual("codex", ledger.get_lane("app-review")["harness"])
+        self.assertEqual("copilot-acp", ledger.get_lane("copilot-worker")["harness"])
+
+        registered = ledger.register_lane(
+            lane="council-copilot", pane_id="%7", nonce="nonce-7", harness="copilot",
+            repo="/repo/app", server_id="server-a", session_id="$4", command="node",
+        )
+        self.assertEqual("copilot", registered["harness"])
 
     def test_migration_failure_rolls_back_leaving_original_table_and_rows_intact(self):
         for failpoint in ("after_create", "after_copy", "after_drop", "after_rename"):

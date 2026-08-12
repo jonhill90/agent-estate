@@ -194,7 +194,7 @@ class Ledger:
                     lane TEXT PRIMARY KEY,
                     pane_id TEXT NOT NULL,
                     nonce TEXT NOT NULL,
-                    harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude', 'copilot-acp')),
+                    harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude', 'copilot', 'copilot-acp')),
                     repo TEXT NOT NULL,
                     server_id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
@@ -276,7 +276,11 @@ class Ledger:
         os.chmod(self.db_path, 0o600)
 
     _TASKS_SCHEMA_MARKERS = ("delivery_pending", "delivery_attempted_at")
-    _LANES_SCHEMA_MARKERS = ("copilot-acp",)
+    # agent-dotfiles#216 added 'copilot' (a plain tmux/Node lane, distinct
+    # from the ACP-driven 'copilot-acp' already here) to the same CHECK
+    # constraint this migration widens -- both markers must be present or a
+    # ledger created before #216 keeps rejecting the new harness forever.
+    _LANES_SCHEMA_MARKERS = ("copilot-acp", "'copilot'")
 
     def _migrate_lanes_table(self, *, failpoint=None):
         """Widen an existing `lanes` table's harness CHECK constraint in place.
@@ -317,7 +321,7 @@ class Ledger:
                             lane TEXT PRIMARY KEY,
                             pane_id TEXT NOT NULL,
                             nonce TEXT NOT NULL,
-                            harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude', 'copilot-acp')),
+                            harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude', 'copilot', 'copilot-acp')),
                             repo TEXT NOT NULL,
                             server_id TEXT NOT NULL,
                             session_id TEXT NOT NULL,
@@ -565,7 +569,7 @@ class Ledger:
         )
 
     def _register_lane_tx(self, connection, *, lane, pane_id, nonce, harness, repo, server_id, session_id, command, now):
-        if harness not in ("codex", "claude", "copilot-acp"):
+        if harness not in ("codex", "claude", "copilot", "copilot-acp"):
             raise ValueError("unsupported harness")
         if not all((lane, pane_id, nonce, repo, server_id, session_id, command)):
             raise ValueError("lane registration fields must be non-empty")
