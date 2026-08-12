@@ -1500,6 +1500,358 @@ else
   fi
 fi
 
+# --- agent-dotfiles#212: a review must not land on the lane that wrote it -
+#
+# WHY: on 2026-08-12 the review of #204 was dispatched to lane 4, the same
+# lane that had written the code under review (ad193/ad204), and its APPROVE
+# had to be thrown away and a second review dispatched. The fix is
+# `--reviews-pr`: the caller names which PR is under review, and dispatch.sh
+# resolves that PR's authoring task from the ledger -- never from a window
+# name -- and refuses to hand it back to its own author.
+#
+# Two free lanes this time (t:3 and t:4), so there is a genuine choice to
+# make: skipping the author must land on the OTHER free lane, not just fail.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+printf '193|| the code PR #204 was written from\n' >> "$D/issues"
+printf '205|| review PR #204, first attempt\n' >> "$D/issues"
+printf '206|| review PR #204, second attempt\n' >> "$D/issues"
+# PR #204's branch names the authoring dispatch's slug -- see worktree.sh
+# new's `BRANCH="lane/$SLUG"`, called with dispatch.sh's own
+# `${ISSUE}-${SLUG}` -- which is the exact mapping step 0.5 verifies before
+# trusting it.
+printf '204|Fixes #193|lane/193-telegram-to-director\n' >> "$D/prs"
+
+out=$(LEDGER_STATE="$D/state-212" run 193 telegram-to-director "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "the authoring dispatch (#193) succeeds" "$rc" 0 "$out"
+log=$(tmuxlog)
+want_contains "and lands on the first free lane, t:3" "send-keys -t t:3" "$log"
+
+# The authoring lane finishes and goes idle again -- exactly what makes it
+# eligible for ordinary dispatch, and exactly the case #212 exists for: a
+# lane that is free right now can still be the wrong lane for THIS review.
+LEDGER_STATE="$D/state-212" ledger record-completion --task ad193-telegram-to-director --note done >/dev/null
+
+out=$(LEDGER_STATE="$D/state-212" run 205 rev-204 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 204); rc=$?
+want_exit "a review of PR #204 is still dispatched" "$rc" 0 "$out"
+want_contains "the author's lane is named and skipped" "skipping t:3" "$out"
+want_contains "the skip names the authoring task" "ad193-telegram-to-director" "$out"
+log=$(tmuxlog)
+want_contains "and the review lands on the OTHER free lane, t:4" "send-keys -t t:4" "$log"
+want_missing "never on the author's lane" "send-keys -t t:3 " "$log"
+
+# Now t:4 (from the review just dispatched) is the only thing standing
+# between t:3 (free, but the author) and a refusal -- leave it occupied and
+# confirm the SAME PR's review is refused outright when the author is the
+# only free lane, not silently sent anyway.
+out=$(LEDGER_STATE="$D/state-212" run 206 rev-204-again "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 204); rc=$?
+want_exit "a review refused when the only free lane is the author" "$rc" 1 "$out"
+want_contains "names the PR" "PR #204" "$out"
+want_contains "names the authoring task, not just the lane" "ad193-telegram-to-director" "$out"
+if [ -z "$(assignees 206)" ]; then ok "the refused review takes no claim on its own issue"
+else bad "the refused review takes no claim on its own issue" "still assigned: $(assignees 206)"; fi
+
+# --- fails closed: authorship that cannot be determined refuses the WHOLE
+# dispatch, not just the candidate it could not clear -------------------
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+printf '207|| review of a PR with no lane/ branch\n' >> "$D/issues"
+printf '299|Fixes #100|some-hand-pushed-branch\n' >> "$D/prs"
+out=$(LEDGER_STATE="$D/state-212-closed" run 207 rev-299 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 299); rc=$?
+want_exit "authorship that cannot be read from the branch refuses the dispatch" "$rc" 1 "$out"
+want_contains "and says why: not the lane/<issue>-<slug> convention" "not a lane/<issue>-<slug> branch" "$out"
+want_contains "and says authorship is unknown, not assumed safe" "authorship unknown" "$out"
+if [ -z "$(assignees 207)" ]; then ok "a fail-closed refusal takes no claim"
+else bad "a fail-closed refusal takes no claim" "still assigned: $(assignees 207)"; fi
+
+printf '208|| review of a PR from an untracked branch\n' >> "$D/issues"
+printf '300|Fixes #101|lane/101-never-dispatched\n' >> "$D/prs"
+out=$(LEDGER_STATE="$D/state-212-closed" run 208 rev-300 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 300); rc=$?
+want_exit "a branch the ledger has no task for also refuses, not assumes free" "$rc" 1 "$out"
+want_contains "and names the unresolvable task" "ad101-never-dispatched" "$out"
+
+# A dispatch that never says --reviews-pr is unaffected by any of the above
+# -- ordinary work is not held to the review rule.
+printf '209|| ordinary dispatch, not a review\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-212-closed" run 209 ordinary "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a dispatch with no --reviews-pr is not held to the authorship check" "$rc" 0 "$out"
+
+# --- MUTATION-CHECK: remove the refusal and watch dispatch send a review
+# straight to its own author --------------------------------------------
+#
+# The load-bearing assertion this proves alive: "the author's lane is named
+# and skipped" above, and "the review lands on the OTHER free lane" -- if
+# the exclusion in the lane-selection loop is deleted, both go red because
+# dispatch sends the self-review to t:3 instead of refusing/rerouting it.
+MUTATED="$D/dispatch-no-author-guard.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$MUTATED" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = 'if [ -n "$AUTHOR_LANE" ] && [ "$candidate" = "$AUTHOR_LANE" ]; then'
+assert marker in text, "author-exclusion guard not found -- script shape changed"
+assert text.count(marker) == 1, "author-exclusion guard not unique -- script shape changed"
+text = text.replace(marker, "if false; then  # MUTATED: author-exclusion always skipped", 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose author-exclusion is disabled" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh whose author-exclusion is disabled"
+  chmod +x "$MUTATED"
+  cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+  # A fresh issue number for this second authoring dispatch -- #193 is
+  # already claimed (permanently, on GitHub) by the earlier, unmutated run
+  # above, and reusing it here would confuse the claim on GH state left over
+  # from that case rather than exercise the mutation.
+  printf '194|| the code PR #220 was written from\n' >> "$D/issues"
+  printf '210|| review PR #220 against the mutated guard\n' >> "$D/issues"
+  LEDGER_STATE="$D/state-212-mutant" run 194 telegram-to-director-2 "$D/brief.md" acme/agent-dotfiles "$REPO" >/dev/null
+  LEDGER_STATE="$D/state-212-mutant" ledger record-completion --task ad194-telegram-to-director-2 --note done >/dev/null
+  printf '220|Fixes #194|lane/194-telegram-to-director-2\n' >> "$D/prs"
+  out=$(DISPATCH_SCRIPT="$MUTATED" LEDGER_STATE="$D/state-212-mutant" \
+        run 210 rev-220 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 220); rc=$?
+  want_exit "mutation confirmed: the unguarded copy dispatches a self-review" "$rc" 0 "$out"
+  log=$(tmuxlog)
+  want_contains "mutation confirmed: it lands on the author's own lane, t:3" "send-keys -t t:3" "$log"
+fi
+
+# --- agent-dotfiles#225: --reviews-pr with no value must refuse, not hang -
+#
+# WHY: `REVIEWS_PR="${2:-}"; shift 2` -- with the flag last and its value
+# forgotten, $# is 1 when the case arm runs, so `shift 2` fails and shifts
+# nothing. Under `set -uo pipefail` (this script has no `set -e`), a failed
+# `shift` does not abort -- the `while [ $# -gt 0 ]` loop just re-enters the
+# same arm forever. That is a hang, not a crash, so it needs `timeout` to
+# reproduce and to prove fixed: an ordinary `$(...)` capture would sit here
+# for the life of the test run.
+: > "$D/tmux.log"
+rm -rf "$D/panes"; mkdir -p "$D/panes"
+printf '213|| a dangling --reviews-pr must refuse, not hang\n' >> "$D/issues"
+out=$(timeout 10 env PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
+  LANES_FIXTURE="$D/lanes" LANES_SESSION=t TMUX_LOG="$D/tmux.log" \
+  TMUX_PANES="$D/panes" DISPATCH_SETTLE=0 \
+  AGENT_SUPERVISOR_STATE_DIR="$(mktemp -d "$D/state.XXXXXX")" \
+  STUB_PANE_PATH="$REPO" WORKTREE_ROOT="$D/roots" \
+  "$DISPATCH" 213 dangling-flag "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 2>&1); rc=$?
+want_exit "a --reviews-pr with no value refuses instead of hanging" "$rc" 1 "$out"
+want_contains "and explains the usage" "--reviews-pr requires a PR number" "$out"
+if [ -z "$(assignees 213)" ]; then ok "the refused dispatch takes no claim on its own issue"
+else bad "the refused dispatch takes no claim on its own issue" "still assigned: $(assignees 213)"; fi
+
+# MUTATION-CHECK: put the un-guarded `${2:-}; shift 2` back and confirm the
+# suite actually notices -- a test that only ever ran the fixed script would
+# pass whether or not the guard exists.
+MUTATED_225A="$D/dispatch-no-flag-guard.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$MUTATED_225A" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+guarded = '''      if [ $# -lt 2 ]; then
+        echo "dispatch: --reviews-pr requires a PR number" >&2
+        sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \\{0,1\\}//' >&2
+        exit 1
+      fi
+      REVIEWS_PR="$2"
+      shift 2'''
+assert text.count(guarded) == 1, "flag-value guard not found or not unique -- script shape changed"
+text = text.replace(guarded, '      REVIEWS_PR="${2:-}"\n      shift 2', 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh with the flag-value guard reverted" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh with the flag-value guard reverted"
+  chmod +x "$MUTATED_225A"
+  : > "$D/tmux.log"
+  rm -rf "$D/panes"; mkdir -p "$D/panes"
+  mut_rc=0
+  timeout 10 env PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
+    LANES_FIXTURE="$D/lanes" LANES_SESSION=t TMUX_LOG="$D/tmux.log" \
+    TMUX_PANES="$D/panes" DISPATCH_SETTLE=0 \
+    AGENT_SUPERVISOR_STATE_DIR="$(mktemp -d "$D/state.XXXXXX")" \
+    STUB_PANE_PATH="$REPO" WORKTREE_ROOT="$D/roots" \
+    "$MUTATED_225A" 213 dangling-flag-2 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr \
+    >/dev/null 2>&1 || mut_rc=$?
+  want_exit "mutation confirmed: the unguarded copy hangs (killed by timeout)" "$mut_rc" 124
+fi
+
+
+# --- agent-dotfiles#225: two empty-array expansions break under bash 3.2 --
+#
+# WHY: dispatch.sh is `#!/bin/bash`, and loop-tick.md invokes it directly, so
+# on macOS that is /bin/bash 3.2.57 -- where "${arr[@]}" on an EMPTY array
+# under `set -u` is an unbound-variable error, not zero words (bash >= 4.4
+# fixed this; 3.2 never will). Both cases below invoke "$DISPATCH" directly
+# (not `bash "$DISPATCH"`, which would pick up PATH's bash and never see the
+# bug), the same style #199's stderr-clean case above uses, so the script's
+# own shebang selects the interpreter exactly as production does.
+#
+# The two assertions here are portable and always run. The mutation-check at
+# the end of the block is NOT portable -- it asserts a crash only pre-4.4
+# bash produces -- and probes the interpreter before demanding it; see the
+# comment there.
+echo "--- agent-dotfiles#225: bash 3.2 empty-array sites ---"
+
+# Site 1: dispatch.sh:82's `set -- "${POSITIONAL[@]}"` on the zero-argument
+# path, where POSITIONAL is empty. Every invocation with a missing/typo'd
+# argument hits this before anything else runs.
+STDERR_225B="$D/dispatch225-zeroarg.err"
+"$DISPATCH" 1>"$D/dispatch225-zeroarg.out" 2>"$STDERR_225B"
+rc=$?
+zeroarg_err=$(cat "$STDERR_225B")
+want_exit "dispatch.sh with no args still exits 2 (usage), not a 3.2 crash" "$rc" 2 "$zeroarg_err"
+want_missing "no unbound-variable error on the zero-arg path" "unbound variable" "$zeroarg_err"
+
+# Site 2: dispatch.sh:188's `"${GH_REPO_ARGS[@]}"`, empty whenever [repo] is
+# omitted on a --reviews-pr dispatch -- documented as supported in the flag's
+# own usage text. Uses the real gh stub so the call reaches line 188 and
+# fails (or succeeds) for a REASON, not because `gh` itself is missing.
+printf '212|| review of a PR, [repo] omitted\n' >> "$D/issues"
+printf '301|Fixes #102|lane/102-omitted-repo\n' >> "$D/prs"
+STDERR_225C="$D/dispatch225-reviewargs.err"
+: > "$D/tmux.log"
+rm -rf "$D/panes"; mkdir -p "$D/panes"
+PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
+  LANES_FIXTURE="$D/lanes" LANES_SESSION=t TMUX_LOG="$D/tmux.log" \
+  TMUX_PANES="$D/panes" DISPATCH_SETTLE=0 \
+  AGENT_SUPERVISOR_STATE_DIR="$(mktemp -d "$D/state.XXXXXX")" \
+  STUB_PANE_PATH="$REPO" WORKTREE_ROOT="$D/roots" \
+  "$DISPATCH" 212 rev-301 "$D/brief.md" "" "$REPO" --reviews-pr 301 \
+  1>"$D/dispatch225-reviewargs.out" 2>"$STDERR_225C"
+reviewargs_err=$(cat "$STDERR_225C")
+want_missing "no unbound-variable error with [repo] omitted on --reviews-pr" "unbound variable" "$reviewargs_err"
+# With [repo] empty, NAME_PART falls back to basename($REPO_PATH) -- here
+# the test clone's directory, literally named "repo" -- so the task id this
+# resolves to is repo102-omitted-repo, not ad102-omitted-repo; see
+# dispatch.sh's own NAME_PART fallback just above step 0. The ledger has no
+# record of it (nothing ever dispatched #301's branch), so this still
+# refuses -- fails closed, same outcome the finding describes, just for the
+# right reason (`gh` actually ran) instead of the wrong one (`gh` never ran
+# because the shell crashed first).
+want_contains "and still fails closed for the documented reason: no ledger record" "repo102-omitted-repo" "$reviewargs_err"
+
+# MUTATION-CHECK: put both raw "${arr[@]}" expansions back and confirm the
+# suite actually notices under real /bin/bash.
+MUTATED_225B="$D/dispatch-no-array-guard.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$MUTATED_225B" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+n = text.count('set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"')
+assert n == 1, "POSITIONAL 3.2-safe expansion not found or not unique -- script shape changed"
+text = text.replace('set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"', 'set -- "${POSITIONAL[@]}"', 1)
+n = text.count('gh pr view "$REVIEWS_PR" "${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"}" --json headRefName')
+assert n == 1, "GH_REPO_ARGS 3.2-safe expansion not found or not unique -- script shape changed"
+text = text.replace(
+    'gh pr view "$REVIEWS_PR" "${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"}" --json headRefName',
+    'gh pr view "$REVIEWS_PR" "${GH_REPO_ARGS[@]}" --json headRefName',
+    1,
+)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh with both 3.2-safe expansions reverted" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh with both 3.2-safe expansions reverted"
+  chmod +x "$MUTATED_225B"
+
+  # The two POSITIVE cases above run everywhere: the shipped expansions are
+  # correct under every bash, so asserting "no unbound-variable error" is a
+  # portable claim. The MUTATION half is not -- it asserts the reverted copy
+  # CRASHES, and only pre-4.4 bash raises that error at all. On Ubuntu CI
+  # /bin/bash is 5.x, the mutant runs cleanly, and both assertions failed for
+  # a reason that had nothing to do with dispatch.sh: that is what turned this
+  # branch's CI red at head 860e586 while the same suite passed on macOS.
+  #
+  # So probe whether the bug is reproducible in this interpreter before
+  # demanding the mutant reproduce it. Probe the BEHAVIOUR, not
+  # $BASH_VERSION: what this case needs to know is whether an empty
+  # "${arr[@]}" under `set -u` errors here, which is a property of the shell
+  # in front of us, and a version string is a proxy for it that can be wrong
+  # (distro backports, a rebuilt bash) in either direction.
+  #
+  # Probe the interpreter the MUTANT will actually use, read off its own
+  # shebang, so the probe and the mutant can never disagree about which bash
+  # is under test -- the mutant is executed directly (not via PATH's `bash`)
+  # precisely so its shebang chooses, exactly as production does.
+  MUT_SHELL=$(sed -n '1s|^#!||p' "$MUTATED_225B" | awk '{print $1}')
+  [ -n "$MUT_SHELL" ] || MUT_SHELL=/bin/bash
+  # TWO probes, because one cannot separate the two ways this can go wrong.
+  # The obvious single probe -- run the expansion and treat exit 1 as "it
+  # errored" -- is wrong: measured on this machine, /bin/bash 3.2.57 exits
+  # **127** on that expansion, not 1, so keying on 1 would have mis-read real
+  # 3.2 as "no bug here" and silently skipped the mutation on the one platform
+  # that has the bug. And 127 is also what a missing shell returns, so the
+  # expansion probe alone cannot tell 3.2 apart from "no such interpreter".
+  #
+  # So: probe 1 asks only "can this shell run anything at all", probe 2 asks
+  # only "did the empty expansion abort before reaching exit 7". A shell that
+  # cannot run is a FAILURE, never a skip -- a mutation-check that silently
+  # stops running is the exact failure mode this block exists to prevent.
+  "$MUT_SHELL" -c 'exit 7' >/dev/null 2>&1
+  shell_rc=$?
+  "$MUT_SHELL" -c 'set -uo pipefail; A=(); printf "%s" "${A[@]}"; exit 7' >/dev/null 2>&1
+  probe_rc=$?
+  if [ "$shell_rc" -ne 7 ]; then
+    bad "setup: probed whether an empty \"\${arr[@]}\" errors under $MUT_SHELL" \
+      "cannot run $MUT_SHELL at all (a bare 'exit 7' returned $shell_rc) -- the mutant runs under this interpreter via its shebang, so this is a failure, not a skip"
+  elif [ "$probe_rc" -eq 7 ]; then
+    echo "  (skipped, not passed: $MUT_SHELL expands an empty \"\${arr[@]}\" to zero words under set -u -- bash >= 4.4 -- so reverting the 3.2-safe expansions is UNOBSERVABLE here and the mutation cannot be checked on this machine. The two positive cases above did run. Exercise this on macOS's real /bin/bash 3.2.)"
+  else
+    mut_zeroarg_err=$("$MUTATED_225B" 2>&1 1>/dev/null)
+    want_contains "mutation confirmed: the zero-arg path crashes under 3.2" "unbound variable" "$mut_zeroarg_err"
+
+    : > "$D/tmux.log"
+    rm -rf "$D/panes"; mkdir -p "$D/panes"
+    mut_reviewargs_err=$(PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
+      LANES_FIXTURE="$D/lanes" LANES_SESSION=t TMUX_LOG="$D/tmux.log" \
+      TMUX_PANES="$D/panes" DISPATCH_SETTLE=0 \
+      AGENT_SUPERVISOR_STATE_DIR="$(mktemp -d "$D/state.XXXXXX")" \
+      STUB_PANE_PATH="$REPO" WORKTREE_ROOT="$D/roots" \
+      "$MUTATED_225B" 212 rev-301-2 "$D/brief.md" "" "$REPO" --reviews-pr 301 2>&1 1>/dev/null)
+    want_contains "mutation confirmed: [repo]-omitted --reviews-pr crashes under 3.2" "unbound variable" "$mut_reviewargs_err"
+  fi
+fi
+
+# --- agent-dotfiles#225: does the existing stderr-clean guard (#199) catch
+# finding 2's message on its own? -------------------------------------------
+#
+# The brief asks this explicitly: #199's assertion is `[ -z "$err" ]` over a
+# SUCCESSFUL dispatch's stderr, and both of finding 2's sites only run at
+# all on the --reviews-pr path, which #199's own case never takes (it
+# dispatches ordinary work, no --reviews-pr). So the existing guard's reach
+# does not cover this: it was never exercised against this path, not
+# defeated by it. The dedicated cases above are what actually catch it.
+echo "  (agent-dotfiles#199's stderr-clean case never takes the --reviews-pr path, so it could not have caught finding 2 either way -- confirmed by inspection, not a case here)"
+
 rm -rf "$D"
 
 

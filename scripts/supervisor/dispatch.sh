@@ -39,7 +39,7 @@
 # available to the next tick.
 #
 # Usage:
-#   dispatch.sh <issue>[,<issue>...] <slug> <brief-file> [repo] [repo-path]
+#   dispatch.sh <issue>[,<issue>...] <slug> <brief-file> [repo] [repo-path] [--reviews-pr <PR>]
 #
 # <issue>      one issue number, or a comma-separated list (agent-dotfiles#112)
 #              when one brief covers several -- e.g. `110,109`. Every issue in
@@ -52,10 +52,16 @@
 #              large enough to be worth writing is too large for send-keys.
 # [repo]       OWNER/NAME for the claim; omitted, gh resolves it from [repo-path].
 # [repo-path]  the shared checkout to branch the worktree from; default $PWD.
+# --reviews-pr <PR>
+#              this dispatch is a review of PR <PR>. dispatch.sh (#212) then
+#              refuses any candidate lane that authored that PR's branch,
+#              fails closed if authorship cannot be determined at all, and
+#              proceeds unchanged if the flag is omitted -- see step 0.5.
 #
 # Exit 0 only when a lane has been sent a brief. Exit 1 on any refusal --
 # no free lane, an issue someone else already claimed, a worktree that could
-# not be created, a send that failed.
+# not be created, a send that failed, or a review whose only free lane wrote
+# the PR under review.
 
 set -uo pipefail
 
@@ -63,6 +69,52 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./input-box.sh
 . "$HERE/input-box.sh"
 SESSION="${LANES_SESSION:-agent-dotfiles}"
+
+# `--reviews-pr <PR>` is pulled out wherever it appears rather than bound to a
+# fixed position: every other argument here is positional and some of them
+# (repo, repo-path) are already optional, so a new optional flag is scanned
+# out first and the remaining args keep their existing $1..$5 meaning
+# untouched. This is deliberately NOT `DISPATCH_LANE` reborn under a new name
+# -- see the lane-selection loop below -- it names which PR is under review,
+# it never names which lane to use.
+REVIEWS_PR=""
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --reviews-pr)
+      # A `--reviews-pr` with no value after it (flag last, value forgotten)
+      # must refuse rather than hang: `shift 2` with only 1 arg left ($#=1)
+      # fails under `set -uo pipefail` (no `set -e` here), and a `case` loop
+      # that never shifts on a failed shift spins at ~100% CPU forever --
+      # indistinguishable from outside from a lane still working. Refusing
+      # loudly here is also why this is a dedicated check rather than
+      # `shift 2 || shift`: silently falling back to `shift 1` would make the
+      # flag consume the next positional argument (e.g. the brief path) as
+      # its value instead, which is its own defect, not a fix for this one.
+      if [ $# -lt 2 ]; then
+        echo "dispatch: --reviews-pr requires a PR number" >&2
+        sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+        exit 1
+      fi
+      REVIEWS_PR="$2"
+      shift 2
+      ;;
+    *)
+      POSITIONAL+=("$1")
+      shift
+      ;;
+  esac
+done
+# bash 3.2 (macOS's real /bin/bash, no associative arrays -- see #213's
+# `declare -A` removal in this same file) treats "${arr[@]}" on an EMPTY
+# array as an unbound-variable error under `set -u`, even though modern bash
+# treats it as zero words. POSITIONAL is empty on dispatch.sh's own
+# zero-argument path (the usage-error branch just below), which every
+# invocation with a typo hits, so the 3.2-safe idiom is required here, not
+# optional: "${arr[@]+"${arr[@]}"}" expands to nothing when the array is
+# empty (the `+` alternate-value test never triggers) and to the array's
+# words otherwise.
+set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
 
 ISSUE_ARG="${1:-}"
 SLUG="${2:-}"
@@ -158,6 +210,83 @@ if REAP_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" reap-lane-claims 2>&1); then
 else
   echo "dispatch: WARNING -- could not reap stranded lane claims; continuing" >&2
   sed 's/^/  /' <<<"$REAP_OUT" >&2
+fi
+
+# --- 0.5. a review must not land on the lane that wrote what it reviews ---
+# agent-dotfiles#212. On 2026-08-12 a review of #204 was dispatched to lane
+# 4, the same lane that had written the code under review (ad193/ad204),
+# and its APPROVE had to be thrown away. This is that refusal, built the way
+# #174 requires: BY LEDGER RECORD, never by window name -- for a lane the
+# ledger already knows, `cli.py lane_free` answers from the ledger alone and
+# the window name is never consulted (see step 1's own comment), so a name
+# cannot be used to steer a review away from its author either.
+#
+# Only runs when the caller says this dispatch IS a review, via
+# `--reviews-pr`. Ordinary (non-review) dispatches are unaffected -- there is
+# no author to avoid.
+#
+# THE MAPPING THIS RELIES ON, verified against the code that writes both
+# sides of it rather than assumed:
+#   * `worktree.sh new "${ISSUE}-${SLUG}"` (step 3 below) creates branch
+#     `lane/${ISSUE}-${SLUG}` -- literally `BRANCH="lane/$SLUG"` in
+#     worktree.sh, where the caller's $SLUG here is already `$ISSUE-$SLUG`.
+#   * Step 6 below records that same dispatch's task under id
+#     `$WINDOW_NAME`, i.e. `${PREFIX}${ISSUE}-${SLUG}` -- and `tasks.id` is a
+#     SQLite PRIMARY KEY; `Ledger._assign_tx` raises rather than let a second
+#     lane reuse an existing task id (core.py), so a task id's `lane` column
+#     never silently changes owner once written.
+# So `lane/<n>-<slug>` on a PR's head branch and task id `${PREFIX}<n>-<slug>`
+# are two spellings of the same fact, produced by the same dispatch, and the
+# second is a permanent ledger row. Neither spelling includes REPO's OWNER,
+# so this check only makes sense within one repo -- exactly what a single
+# `dispatch.sh` invocation already is.
+#
+# FAILS CLOSED throughout: `gh` unreachable, a PR with no head branch, a head
+# branch outside the `lane/<n>-<slug>` convention (hand-pushed, or from
+# before #81 wired worktrees into every dispatch), or a task id the ledger
+# has no row for -- every one of these means authorship cannot be
+# determined, and this refuses the WHOLE dispatch rather than guess. A
+# candidate lane is only ever excluded, never assumed innocent from missing
+# data.
+AUTHOR_LANE=""
+AUTHOR_TASK=""
+if [ -n "$REVIEWS_PR" ]; then
+  GH_REPO_ARGS=()
+  [ -n "$REPO" ] && GH_REPO_ARGS=(-R "$REPO")
+  # Same bash 3.2 empty-array hazard as POSITIONAL above: [repo] is
+  # documented as optional on this exact flag (`--reviews-pr` with [repo]
+  # omitted), so GH_REPO_ARGS is empty on that path and "${GH_REPO_ARGS[@]}"
+  # alone would abort under 3.2 before `gh` ever runs.
+  PR_JSON=$(gh pr view "$REVIEWS_PR" "${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"}" --json headRefName 2>&1)
+  if [ $? -ne 0 ]; then
+    echo "dispatch: cannot read PR #$REVIEWS_PR -- refusing to dispatch its review (authorship unknown, failing closed)" >&2
+    sed 's/^/  /' <<<"$PR_JSON" >&2
+    exit 1
+  fi
+  HEAD_REF=$(sed -n 's/.*"headRefName":"\([^"]*\)".*/\1/p' <<<"$PR_JSON")
+  if [ -z "$HEAD_REF" ]; then
+    echo "dispatch: PR #$REVIEWS_PR's head branch is unreadable -- refusing to dispatch its review (authorship unknown, failing closed)" >&2
+    exit 1
+  fi
+  if [[ "$HEAD_REF" =~ ^lane/([0-9]+)-(.+)$ ]]; then
+    AUTHOR_TASK="${PREFIX}${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
+  else
+    echo "dispatch: PR #$REVIEWS_PR's branch '$HEAD_REF' is not a lane/<issue>-<slug> branch -- cannot determine its author, refusing (authorship unknown, failing closed)" >&2
+    exit 1
+  fi
+  AUTHOR_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" task-lane --task "$AUTHOR_TASK" 2>&1)
+  if [ $? -ne 0 ]; then
+    echo "dispatch: could not query the ledger for task $AUTHOR_TASK -- refusing to dispatch the review of PR #$REVIEWS_PR (authorship unknown, failing closed)" >&2
+    sed 's/^/  /' <<<"$AUTHOR_JSON" >&2
+    exit 1
+  fi
+  if grep -qF '"known":true' <<<"$AUTHOR_JSON"; then
+    AUTHOR_LANE=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$AUTHOR_JSON")
+  fi
+  if [ -z "$AUTHOR_LANE" ]; then
+    echo "dispatch: the ledger has no record of task $AUTHOR_TASK, the task PR #$REVIEWS_PR's branch names as its author -- refusing (authorship unknown, failing closed)" >&2
+    exit 1
+  fi
 fi
 
 # --- 1. a lane that is actually safe to dispatch to ------------------------
@@ -289,10 +418,22 @@ done < <("$HERE/lanes.sh" "$SESSION" 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9]+$/ 
 LANE=""
 CLAIM_LANE=""
 LANE_HARNESS=""
+AUTHOR_SKIPPED=""
 while read -r candidate; do
   [ -n "$candidate" ] || continue
   idx="${candidate##*:}"
   wname="${WINDOW_NAME_BY_INDEX[$idx]:-}"
+  # agent-dotfiles#212: excluded BEFORE the ledger's free/occupied query, not
+  # inside it -- a candidate that authored the PR under review is unsafe
+  # regardless of what `lane-free` would say, and this way the exclusion is
+  # visible on its own rather than folded into that check's result. An
+  # ordinary (non-review) dispatch never sets AUTHOR_LANE and never reaches
+  # this branch.
+  if [ -n "$AUTHOR_LANE" ] && [ "$candidate" = "$AUTHOR_LANE" ]; then
+    echo "dispatch: skipping $candidate -- it authored task $AUTHOR_TASK, the PR #$REVIEWS_PR under review; an author does not review their own work" >&2
+    AUTHOR_SKIPPED=1
+    continue
+  fi
   CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidate" --target "$candidate" --window-name "$wname" 2>/dev/null) || continue
   grep -qF '"free":true' <<<"$CHECK" || continue
 
@@ -341,6 +482,10 @@ while read -r candidate; do
 done < <("$HERE/lanes.sh" --free "$SESSION" 2>/dev/null)
 
 if [ -z "$LANE" ]; then
+  if [ -n "$AUTHOR_SKIPPED" ]; then
+    echo "dispatch: no free lane other than the author of PR #$REVIEWS_PR (task $AUTHOR_TASK) -- not dispatching its review #$ISSUE_ARG" >&2
+    echo "dispatch: an author never reviews their own PR, even when it is the only free lane" >&2
+  fi
   echo "dispatch: no free lane in session '$SESSION' -- not dispatching #$ISSUE_ARG" >&2
   echo "dispatch: the ledger must say a lane is free to be dispatchable --" >&2
   echo "dispatch: one it has never seen is backfilled only if named 'free-N'; one it knows is occupied stays occupied regardless of name" >&2

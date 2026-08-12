@@ -71,7 +71,11 @@ serially. Review, then merge what passes. You have full autonomy to merge and
 close in these four repos.
 
 `/clear` a lane before reusing it for an independent review — an author
-reviewing their own PR is not an independent reviewer.
+reviewing their own PR is not an independent reviewer. Pass `--reviews-pr
+<PR>` to `dispatch.sh` for a review dispatch (agent-dotfiles#212): it refuses
+to send that review to the lane whose ledger record shows it authored the
+PR's branch, and fails closed if authorship cannot be determined at all —
+never rely on remembering which lane wrote what by hand.
 
 ## "Blocked on Jon" is often true of an issue and false of a piece of it
 
