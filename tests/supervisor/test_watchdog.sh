@@ -508,5 +508,131 @@ fi
 git -C "$SRC" worktree remove --force "$LIVE" >/dev/null 2>&1
 rm -rf "$A"
 
+# --- #163: the inbox-poll heartbeat, the death report_stop() cannot report -
+#
+# inbox-poll.sh pages Jon itself from `trap report_stop EXIT`, but SIGKILL,
+# an OOM kill, or a hard power loss run no trap at all -- the process just
+# stops updating inbox-poll.status's `checked:` line. These drive the real
+# watchdog.sh end to end with a stub notifier, the same shape as the
+# escalate_run tests above, but against inbox-poll.status instead of
+# watchdog.status.
+stamp_ago() { # stamp_ago <seconds-ago> -- an inbox-poll.status `checked:` timestamp
+  python3 -c 'import datetime,sys
+print((datetime.datetime.now(datetime.timezone.utc)
+       - datetime.timedelta(seconds=int(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$1"
+}
+write_inbox_status() { # write_inbox_status <path> <seconds-ago> <state>
+  printf 'checked: %s\nstate:   %s\ndetail:  listening\npid:     999\n' "$(stamp_ago "$2")" "$3" >"$1"
+}
+hb_run() { # hb_run <workdir> <inbox-poll.status-seconds-ago-or-absent> <state> [notify-script]
+  rm -rf "$1"; mkdir -p "$1" "$1/transcripts"
+  if [ "$2" != "absent" ]; then write_inbox_status "$1/inbox-poll.status" "$2" "$3"; fi
+  SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy STUB_SENT="$1/sent" \
+  SUPERVISOR_STATE="$1" SUPERVISOR_STATUS="$1/st" SUPERVISOR_LOG="$1/lg" \
+  SUPERVISOR_STAMP="$1/stamp" SUPERVISOR_HISTORY="$1/hist" NOTIFY_ENV="$1/none.env" \
+  SLEEPCHECK_DIR="$1/transcripts" NOTIFY_SCRIPT="${4:-}" \
+  SUPERVISOR_INBOX_POLL_STATUS="$1/inbox-poll.status" \
+  SUPERVISOR_HEARTBEAT_EPISODE="$1/.hb-episode.json" \
+  INBOX_HEARTBEAT_STALE_AFTER=100 \
+    bash "$WATCHDOG" >/dev/null 2>"$1/err"
+}
+
+# Stub notifier, in a directory of its own that outlives every case below --
+# each case gets a fresh mktemp workdir via hb_run's `rm -rf`, and the
+# notifier itself must not live inside one of those or a later case's setup
+# would delete the very script the earlier case's watchdog run needs. Calls
+# are recorded beside the script itself ($0.calls), not beside the case's
+# workdir, so every case shares one call log -- read it, then truncate it,
+# between cases.
+NOTIFY_DIR=$(mktemp -d)
+cat >"$NOTIFY_DIR/up.sh" <<'EOF'
+#!/bin/bash
+echo "$1|$2" >> "$0.calls"
+EOF
+chmod +x "$NOTIFY_DIR/up.sh"
+UP="$NOTIFY_DIR/up.sh"
+up_calls() { cat "$UP.calls" 2>/dev/null; }
+up_call_count() { wc -l <"$UP.calls" 2>/dev/null | tr -d ' '; }
+
+# 1. Missing status file: never paged, reported distinctly from stale.
+D=$(mktemp -d)
+hb_run "$D/w" absent ok "$UP"
+check "a missing inbox-poll.status is named in watchdog.status" "^heartbeat: .*missing" "$D/w/st"
+if [ -z "$(up_calls)" ]; then say_ok "a missing status file never pages"
+else say_bad "a missing status file never pages" "paged: $(up_calls)"; fi
+
+# 2. Fresh heartbeat (well under the 100s threshold): no page.
+D=$(mktemp -d)
+hb_run "$D/w" 5 ok "$UP"
+check "a fresh heartbeat is reported alive" "^heartbeat: .*alive" "$D/w/st"
+if [ -z "$(up_calls)" ]; then say_ok "a fresh heartbeat never pages"
+else say_bad "a fresh heartbeat never pages" "paged: $(up_calls)"; fi
+
+# 3. Stale heartbeat (past the 100s threshold), state still ok (a SIGKILL: the
+#    process is gone but the last heartbeat it wrote never says so): pages.
+: >"$UP.calls"
+D=$(mktemp -d)
+hb_run "$D/w" 500 ok "$UP"
+check "a stale heartbeat is reported in watchdog.status" "^heartbeat: .*new stale-heartbeat episode" "$D/w/st"
+if grep -q "watchdog: inbox-poll heartbeat stale" "$UP.calls" 2>/dev/null; then
+  say_ok "a stale heartbeat pages through the notify path"
+else
+  say_bad "a stale heartbeat pages through the notify path" "got: $(up_calls)"
+fi
+
+# 4. Same stale episode, second tick: deduped, not paged again. Reuses $D/w
+#    from case 3 -- the episode file written there is what this tick must
+#    read to dedup correctly.
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy STUB_SENT="$D/w/sent" \
+SUPERVISOR_STATE="$D/w" SUPERVISOR_STATUS="$D/w/st" SUPERVISOR_LOG="$D/w/lg" \
+SUPERVISOR_STAMP="$D/w/stamp" SUPERVISOR_HISTORY="$D/w/hist" NOTIFY_ENV="$D/w/none.env" \
+SLEEPCHECK_DIR="$D/w/transcripts" NOTIFY_SCRIPT="$UP" \
+SUPERVISOR_INBOX_POLL_STATUS="$D/w/inbox-poll.status" \
+SUPERVISOR_HEARTBEAT_EPISODE="$D/w/.hb-episode.json" \
+INBOX_HEARTBEAT_STALE_AFTER=100 \
+  bash "$WATCHDOG" >/dev/null 2>"$D/w/err2"
+if [ "$(up_call_count)" = 1 ]; then
+  say_ok "a stale-heartbeat episode is not re-paged every tick"
+else
+  say_bad "a stale-heartbeat episode is not re-paged every tick" "paged $(up_call_count) times"
+fi
+
+# 5. An orderly stop (state: stopped, written by inbox-poll.sh's own
+#    report_stop() on the way out) must NOT also page here, no matter how
+#    stale `checked:` has become since -- report_stop already decided
+#    whether to page Jon for this exit (#155). Alarming on it too pages him
+#    twice for one event, which the brief calls out by name.
+: >"$UP.calls"
+D=$(mktemp -d)
+hb_run "$D/w" 999999 stopped "$UP"
+check "an orderly stop is reported distinctly, not as a page" "^heartbeat: .*own stop" "$D/w/st"
+if [ -z "$(up_calls)" ]; then say_ok "an orderly stop never double-pages"
+else say_bad "an orderly stop never double-pages" "paged: $(up_calls)"; fi
+
+# 6. The escalate-restart notifier and the heartbeat notifier must not share
+#    dedup state: a live escalation must still page even while a stale
+#    heartbeat is also being reported (and vice versa) -- they are different
+#    episodes about different subsystems.
+: >"$UP.calls"
+D=$(mktemp -d); mkdir -p "$D/w/transcripts"
+write_inbox_status "$D/w/inbox-poll.status" 500 ok
+now=$(date +%s); for i in 1 2 3; do echo $((now - 60)); done >"$D/w/hist"
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=idle STUB_SENT="$D/w/sent" \
+SUPERVISOR_STATE="$D/w" SUPERVISOR_STATUS="$D/w/st" SUPERVISOR_LOG="$D/w/lg" \
+SUPERVISOR_STAMP="$D/w/stamp" SUPERVISOR_HISTORY="$D/w/hist" NOTIFY_ENV="$D/w/none.env" \
+SLEEPCHECK_DIR="$D/w/transcripts" NOTIFY_SCRIPT="$UP" \
+SUPERVISOR_INBOX_POLL_STATUS="$D/w/inbox-poll.status" \
+SUPERVISOR_HEARTBEAT_EPISODE="$D/w/.hb-episode.json" \
+INBOX_HEARTBEAT_STALE_AFTER=100 \
+  bash "$WATCHDOG" >/dev/null 2>"$D/w/err"
+check "the watchdog still escalates the loop-restart failure" "state:    escalate" "$D/w/st"
+check "and separately reports the stale heartbeat" "^heartbeat: .*new stale-heartbeat episode" "$D/w/st"
+if [ "$(up_call_count)" = 2 ]; then
+  say_ok "two independent alarms in one tick each page once, not zero and not a burst"
+else
+  say_bad "two independent alarms in one tick each page once, not zero and not a burst" \
+    "paged $(up_call_count) time(s): $(up_calls)"
+fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
