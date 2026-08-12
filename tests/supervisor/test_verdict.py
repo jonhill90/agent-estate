@@ -78,6 +78,55 @@ class GithubReviewVerdictSourceTests(unittest.TestCase):
         source = GithubReviewVerdictSource(runner=lambda cmd: payload)
         self.assertEqual(source.verdict(repo=REPO, number=206)["verdict"], "approved")
 
+    def test_approved_at_current_head_reads_approved(self):
+        source = GithubReviewVerdictSource(
+            runner=lambda cmd: '{"reviews":[{"state":"APPROVED","commit":{"oid":"' + "a" * 40 + '"}}]}'
+        )
+        result = source.verdict(repo=REPO, number=1, head_sha="a" * 40)
+        self.assertEqual(result["verdict"], "approved")
+
+    def test_regression_218_review_filed_against_a_superseded_head_reads_unknown_not_approved(self):
+        """agent-dotfiles#218: a review APPROVED at SHA A, followed by a push
+        moving the head to SHA B, must not still answer for B. Reporting
+        "approved" here is the same failure shape as the pre-#206
+        prose-regex bug -- the field says something about a PR that nobody
+        actually reviewed at its current state -- arriving by a different
+        route (a stale SHA instead of misread prose)."""
+        source = GithubReviewVerdictSource(
+            runner=lambda cmd: '{"reviews":[{"state":"APPROVED","commit":{"oid":"' + "a" * 40 + '"}}]}'
+        )
+        result = source.verdict(repo=REPO, number=1, head_sha="b" * 40)
+        self.assertEqual(result["verdict"], "unknown")
+        self.assertNotEqual(result["verdict"], "none", "a review WAS filed -- 'none' would misreport an absence")
+
+    def test_regression_218_rejection_filed_against_a_superseded_head_reads_unknown_not_rejected(self):
+        source = GithubReviewVerdictSource(
+            runner=lambda cmd: '{"reviews":[{"state":"CHANGES_REQUESTED","commit":{"oid":"' + "a" * 40 + '"}}]}'
+        )
+        result = source.verdict(repo=REPO, number=1, head_sha="b" * 40)
+        self.assertEqual(result["verdict"], "unknown")
+
+    def test_mutation_218_a_sha_comparison_that_always_passes_must_turn_this_red(self):
+        """The bar #218 sets: mutate the SHA check to always agree and watch
+        the suite go red. This test IS that mutation-detector -- it only
+        passes while `verdict()` actually compares `commit.oid` against
+        `head_sha` rather than ignoring `head_sha` (or always matching)."""
+        source = GithubReviewVerdictSource(
+            runner=lambda cmd: '{"reviews":[{"state":"APPROVED","commit":{"oid":"' + "a" * 40 + '"}}]}'
+        )
+        stale = source.verdict(repo=REPO, number=1, head_sha="b" * 40)
+        current = source.verdict(repo=REPO, number=1, head_sha="a" * 40)
+        self.assertNotEqual(stale["verdict"], current["verdict"])
+
+    def test_no_head_sha_given_preserves_pre_218_behaviour(self):
+        """A caller with no head to check against (head_sha=None, the
+        default) gets the pre-#218 answer -- unable to tell current from
+        stale, same as before this module knew about SHAs at all."""
+        source = GithubReviewVerdictSource(
+            runner=lambda cmd: '{"reviews":[{"state":"APPROVED","commit":{"oid":"' + "a" * 40 + '"}}]}'
+        )
+        self.assertEqual(source.verdict(repo=REPO, number=1)["verdict"], "approved")
+
     def test_runner_failure_fails_closed_to_unknown(self):
         def raiser(cmd):
             raise RuntimeError("gh: command failed")
@@ -125,6 +174,38 @@ class LedgerVerdictSourceTests(unittest.TestCase):
         )
         self.assertEqual(self.source.verdict(repo=REPO, number=1)["verdict"], "approved")
 
+    def test_recorded_verdict_at_current_head_is_reported(self):
+        self.ledger.record_pr_verdict(
+            repo=REPO, number=1, verdict="approved", head_sha="a" * 40, reviewer="lane-1"
+        )
+        result = self.source.verdict(repo=REPO, number=1, head_sha="a" * 40)
+        self.assertEqual(result["verdict"], "approved")
+
+    def test_regression_218_recorded_verdict_against_a_superseded_head_reads_unknown(self):
+        """Same question as GithubReviewVerdictSourceTests's #218 cases, in
+        the ledger's shape: a verdict recorded at SHA A must not answer for
+        a PR a push has since moved to SHA B."""
+        self.ledger.record_pr_verdict(
+            repo=REPO, number=1, verdict="approved", head_sha="a" * 40, reviewer="lane-1"
+        )
+        result = self.source.verdict(repo=REPO, number=1, head_sha="b" * 40)
+        self.assertEqual(result["verdict"], "unknown")
+        self.assertNotEqual(result["verdict"], "none")
+
+    def test_mutation_218_ledger_sha_comparison_that_always_passes_must_turn_this_red(self):
+        self.ledger.record_pr_verdict(
+            repo=REPO, number=1, verdict="rejected", head_sha="a" * 40, reviewer="lane-1"
+        )
+        stale = self.source.verdict(repo=REPO, number=1, head_sha="b" * 40)
+        current = self.source.verdict(repo=REPO, number=1, head_sha="a" * 40)
+        self.assertNotEqual(stale["verdict"], current["verdict"])
+
+    def test_no_head_sha_given_preserves_pre_218_behaviour(self):
+        self.ledger.record_pr_verdict(
+            repo=REPO, number=1, verdict="rejected", head_sha="a" * 40, reviewer="lane-1"
+        )
+        self.assertEqual(self.source.verdict(repo=REPO, number=1)["verdict"], "rejected")
+
     def test_a_different_pr_number_is_unaffected(self):
         self.ledger.record_pr_verdict(
             repo=REPO, number=1, verdict="rejected", head_sha="a" * 40, reviewer="lane-1"
@@ -159,7 +240,7 @@ class ResolveTests(unittest.TestCase):
         def __init__(self, result):
             self.result = result
 
-        def verdict(self, *, repo, number):
+        def verdict(self, *, repo, number, head_sha=None):
             return self.result
 
     def test_first_decisive_source_wins(self):
@@ -184,6 +265,22 @@ class ResolveTests(unittest.TestCase):
         stubs = {"a": self.Stub({"verdict": "none", "detail": ""}), "b": self.Stub({"verdict": "none", "detail": ""})}
         with self._patched(stubs):
             self.assertEqual(resolve(["a", "b"], state_dir="unused", repo=REPO, number=1)["verdict"], "none")
+
+    def test_head_sha_is_threaded_through_to_the_source(self):
+        """resolve() must pass its head_sha argument on to each source's
+        verdict() call, not swallow it -- a source cannot detect a stale
+        review or ledger record (#218) if resolve() never gives it the
+        current head to compare against."""
+        received = {}
+
+        class CapturingStub:
+            def verdict(self, *, repo, number, head_sha=None):
+                received["head_sha"] = head_sha
+                return {"verdict": "none", "detail": ""}
+
+        with self._patched({"a": CapturingStub()}):
+            resolve(["a"], state_dir="unused", repo=REPO, number=1, head_sha="deadbeef" * 5)
+        self.assertEqual(received["head_sha"], "deadbeef" * 5)
 
     def test_unknown_source_name_fails_closed_to_unknown(self):
         result = resolve(["not-a-real-source"], state_dir="unused", repo=REPO, number=1)
@@ -263,6 +360,34 @@ class CliTests(unittest.TestCase):
                 )
             self.assertEqual(rc, 0)
             self.assertEqual(json.loads(out.getvalue())["verdict"], "rejected")
+
+    def test_get_with_head_sha_detects_a_stale_ledger_record(self):
+        """agent-dotfiles#218 end-to-end through the CLI: record at SHA A,
+        `get` with a DIFFERENT --head-sha, confirm the CLI itself (not just
+        the class under test) resolves to unknown rather than approved."""
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = main(
+                [
+                    "--state-dir", tmp, "record", "--repo", REPO, "--number", "9",
+                    "--verdict", "approved", "--head-sha", "a" * 40, "--reviewer", "lane-3",
+                ]
+            )
+            self.assertEqual(rc, 0)
+
+            import io
+            import contextlib
+            import json
+
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rc = main(
+                    [
+                        "--state-dir", tmp, "get", "--repo", REPO, "--number", "9",
+                        "--source", "ledger", "--head-sha", "b" * 40,
+                    ]
+                )
+            self.assertEqual(rc, 0)
+            self.assertEqual(json.loads(out.getvalue())["verdict"], "unknown")
 
     def test_get_never_raises_even_for_a_broken_state_dir(self):
         """main() must always produce a well-formed unknown verdict, never a
