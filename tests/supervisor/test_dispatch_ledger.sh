@@ -200,6 +200,15 @@ marker = '''  CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidat
   CLAIM=$("$LEDGER_PYTHON" "$LEDGER_CLI" claim-lane --lane "$candidate" --token "$CLAIM_TOKEN" --owner-pid $$ 2>/dev/null) || { release_lane_claim; continue; }
   if grep -qF '"claimed":true' <<<"$CLAIM"; then
     LANE="$candidate"
+    # agent-dotfiles#216: `lane-free` above already resolved this lane's
+    # RECORDED harness (from its @hill90_lane_harness pane option, or the
+    # ledger row if it was already known) -- carried forward to step 6 so
+    # `record-dispatch` gets an explicit --harness instead of re-guessing one
+    # from `#{pane_current_command}`, which cannot tell a Node harness like
+    # copilot apart from any other. Empty is possible only if `lane-free`'s
+    # own JSON shape ever changes underneath this grep; step 6's existing
+    # fallback (HARNESS_BY_COMMAND) covers that, unchanged.
+    LANE_HARNESS=$(grep -oE '"harness":"[a-z-]*"' <<<"$CHECK" | head -1 | sed -E 's/.*:"([a-z-]*)"/\\1/')
     break
   fi
   # Lost this candidate to another dispatcher: move on, exactly as before.

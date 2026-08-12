@@ -404,15 +404,21 @@ class RecordDispatchCliTest(unittest.TestCase):
 
 
 class FakeMetadataTransport:
-    """Stands in for `TmuxTransport.metadata` -- lane_free's only tmux touch."""
+    """Stands in for `TmuxTransport.metadata`/`get_option` -- lane_free's only
+    tmux touches (agent-dotfiles#216 added the option read)."""
 
-    def __init__(self, metadata):
+    def __init__(self, metadata, options=None):
         self._metadata = metadata
+        self._options = options or {}
         self.calls = []
 
     def metadata(self, target):
         self.calls.append(target)
         return self._metadata
+
+    def get_option(self, target, name):
+        self.calls.append((target, name))
+        return self._options.get(name, "")
 
 
 class LaneFreeTest(unittest.TestCase):
@@ -432,7 +438,9 @@ class LaneFreeTest(unittest.TestCase):
 
             result = cli.lane_free(ledger, transport, lane="t:3", target="t:3", window_name="ad999-some-task")
 
-            self.assertEqual({"lane": "t:3", "known": True, "free": True, "backfilled": False}, result)
+            self.assertEqual(
+                {"lane": "t:3", "known": True, "free": True, "backfilled": False, "harness": "claude"}, result
+            )
             self.assertEqual([], transport.calls, "a known lane must not need a pane read")
 
     def test_an_occupied_lane_is_not_free_regardless_of_its_current_window_name(self):
@@ -461,13 +469,16 @@ class LaneFreeTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             ledger = Ledger(Path(root))
             transport = FakeMetadataTransport(
-                {"pane_id": "%3", "command": "claude.exe", "path": "/repo", "server_id": "server", "session_id": "$0"}
+                {"pane_id": "%3", "command": "claude.exe", "path": "/repo", "server_id": "server", "session_id": "$0"},
+                options={cli.HARNESS_OPTION: "claude"},
             )
 
             result = cli.lane_free(ledger, transport, lane="t:3", target="t:3", window_name="free-3")
 
-            self.assertEqual({"lane": "t:3", "known": True, "free": True, "backfilled": True}, result)
-            self.assertEqual(["t:3"], transport.calls)
+            self.assertEqual(
+                {"lane": "t:3", "known": True, "free": True, "backfilled": True, "harness": "claude"}, result
+            )
+            self.assertEqual(["t:3", ("t:3", cli.HARNESS_OPTION)], transport.calls)
             self.assertIsNotNone(ledger.get_lane("t:3"))
             self.assertTrue(ledger.lane_available("t:3"))
 
@@ -475,8 +486,46 @@ class LaneFreeTest(unittest.TestCase):
             # from the ledger, not the name -- first sight only.
             transport.calls.clear()
             second = cli.lane_free(ledger, transport, lane="t:3", target="t:3", window_name="free-3")
-            self.assertEqual({"lane": "t:3", "known": True, "free": True, "backfilled": False}, second)
+            self.assertEqual(
+                {"lane": "t:3", "known": True, "free": True, "backfilled": False, "harness": "claude"}, second
+            )
             self.assertEqual([], transport.calls)
+
+    def test_a_copilot_lane_is_backfilled_free_from_its_recorded_harness_option(self):
+        """agent-dotfiles#216: the bug's own reproduction. `council-copilot`
+        runs as `node` -- indistinguishable by process name from any other
+        Node harness -- so this only works because the harness option is
+        read as a recorded fact, not guessed from `command`."""
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            transport = FakeMetadataTransport(
+                {"pane_id": "%7", "command": "node", "path": "/repo", "server_id": "server", "session_id": "$0"},
+                options={cli.HARNESS_OPTION: "copilot"},
+            )
+
+            result = cli.lane_free(ledger, transport, lane="t:7", target="t:7", window_name="free-7")
+
+            self.assertEqual(
+                {"lane": "t:7", "known": True, "free": True, "backfilled": True, "harness": "copilot"}, result
+            )
+            self.assertEqual("copilot", ledger.get_lane("t:7")["harness"])
+
+    def test_a_codex_lane_running_a_binary_not_literally_named_codex_is_backfilled(self):
+        """agent-dotfiles#216 acceptance: codex under a launcher (also `node`
+        live, per the issue's window-8 measurement) must work too, once its
+        harness is recorded."""
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            transport = FakeMetadataTransport(
+                {"pane_id": "%8", "command": "node", "path": "/repo", "server_id": "server", "session_id": "$0"},
+                options={cli.HARNESS_OPTION: "codex"},
+            )
+
+            result = cli.lane_free(ledger, transport, lane="t:8", target="t:8", window_name="free-8")
+
+            self.assertEqual(
+                {"lane": "t:8", "known": True, "free": True, "backfilled": True, "harness": "codex"}, result
+            )
 
     def test_an_unknown_lane_not_named_free_n_is_unknown_not_free(self):
         """Fail closed (agent-dotfiles#174): a lane this code cannot
@@ -492,7 +541,11 @@ class LaneFreeTest(unittest.TestCase):
             self.assertEqual([], transport.calls, "an ineligible name must not even probe tmux")
             self.assertIsNone(ledger.get_lane("t:3"))
 
-    def test_an_unmapped_harness_command_refuses_the_backfill_without_crashing(self):
+    def test_an_unrecorded_harness_refuses_the_backfill_without_crashing(self):
+        """The bug this exists for: #216's exact reproduction. A `node` pane
+        with no `HARNESS_OPTION` set is unidentifiable and MUST stay refused
+        -- this is the correct behaviour the issue itself names, not the
+        defect. Only a positively recorded harness may pass."""
         with tempfile.TemporaryDirectory() as root:
             ledger = Ledger(Path(root))
             transport = FakeMetadataTransport(
@@ -502,6 +555,26 @@ class LaneFreeTest(unittest.TestCase):
             result = cli.lane_free(ledger, transport, lane="t:3", target="t:3", window_name="free-3")
 
             self.assertFalse(result["free"])
+            self.assertIn("node", result.get("reason", ""))
+            self.assertIsNone(ledger.get_lane("t:3"))
+
+    def test_a_recorded_harness_the_live_pane_contradicts_refuses_the_backfill(self):
+        """Mutation-check target (agent-dotfiles#216 acceptance): a pane
+        recorded "claude" but actually running the process a copilot/codex
+        lane runs (`node`) must NOT be trusted just because an option is
+        present. If this refusal is ever weakened to trust any recorded
+        value outright, this is the test that must go red."""
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            transport = FakeMetadataTransport(
+                {"pane_id": "%3", "command": "node", "path": "/repo", "server_id": "server", "session_id": "$0"},
+                options={cli.HARNESS_OPTION: "claude"},
+            )
+
+            result = cli.lane_free(ledger, transport, lane="t:3", target="t:3", window_name="free-3")
+
+            self.assertFalse(result["free"])
+            self.assertIn("claude", result.get("reason", ""))
             self.assertIn("node", result.get("reason", ""))
             self.assertIsNone(ledger.get_lane("t:3"))
 

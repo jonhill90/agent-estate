@@ -82,6 +82,16 @@ FIX
 run() {
   : > "$D/tmux.log"
   rm -rf "$D/panes"; mkdir -p "$D/panes"
+  # agent-dotfiles#216: same shape as DISPATCH_TEST_RACE_HOOK below -- test-only,
+  # opt-in, no non-test caller sets it. Runs against the FRESH panes dir this
+  # call just created, before dispatch.sh's own probe of it, so a case can
+  # model a lane whose harness was already recorded (bootstrap-session.sh /
+  # `cli.py register`) the way a real pre-existing lane would be, instead of
+  # every dispatch starting from a pane with no options set at all.
+  if [ -n "${RUN_PRESEED_PANES:-}" ]; then
+    PATH="$D/bin:$PATH" LANES_FIXTURE="$D/lanes" LANES_SESSION=t TMUX_PANES="$D/panes" \
+      bash -c "$RUN_PRESEED_PANES"
+  fi
   PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
     LANES_FIXTURE="$D/lanes" LANES_SESSION=t TMUX_LOG="$D/tmux.log" \
     TMUX_PANES="$D/panes" DISPATCH_SETTLE=0 \
@@ -576,6 +586,47 @@ want_contains "the task is recorded as delivered -- the brief was verified in th
 want_contains "the record carries the worktree the lane was given" "$D/roots" "$status"
 want_contains "the record carries the issue it was dispatched for" '"source_ref":"140"' "$status"
 
+# --- agent-dotfiles#216: a copilot lane, GREEN against the stub -----------
+#
+# The bug's own reproduction, against a stub instead of the live
+# council-copilot pane #216 explicitly forbids touching: a lane running
+# `node` -- copilot's process name is indistinguishable from any other Node
+# harness -- reads `free` from `lanes.sh` and is STILL refused by
+# `dispatch.sh` before this fix, because `cli.py lane-free`'s backfill could
+# only map `codex`/`claude`/`claude.exe` process names to a harness. Once the
+# pane's harness is a RECORDED fact (the `@hill90_lane_harness` option
+# `bootstrap-session.sh`/`cli.py register` would have set), the same dispatch
+# reaches it end to end: claimed, briefed, and recorded with the harness
+# that was actually running, not a guess from `node`.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+7|free-7|node|← open sidebar|1|0
+FIX
+printf '216|| a copilot lane must be dispatchable\n' >> "$D/issues"
+RUN_PRESEED_PANES='tmux set-option -p -t t:7 @hill90_lane_harness copilot' \
+  out=$(LEDGER_STATE="$D/state-216" run 216 copilot-lane "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a dispatch to a recorded-copilot lane succeeds" "$rc" 0 "$out"
+log=$(tmuxlog)
+want_contains "the brief reaches the copilot lane, by index" "send-keys -t t:7" "$log"
+want_contains "the brief is submitted to the copilot lane" "send-keys -t t:7 Enter" "$log"
+status=$(LEDGER_STATE="$D/state-216" ledger status 2>&1)
+want_contains "the lane the brief went to is recorded" '"lane":"t:7"' "$status"
+want_contains "the RECORDED harness is copilot, not guessed from 'node'" '"harness":"copilot"' "$status"
+
+# The unidentifiable case still refuses (agent-dotfiles#216's own rule): the
+# SAME node lane with no harness option recorded must not be dispatched to --
+# "cannot tell" staying refused is correct behaviour, not the defect.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+8|free-8|node|← open sidebar|1|0
+FIX
+printf '217|| an unrecorded node lane must stay refused\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-217" run 217 unrecorded-node "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a dispatch with no free lane refuses" "$rc" 1 "$out"
+want_contains "the refusal names the unidentifiable lane" "no free lane" "$out"
+log=$(tmuxlog)
+want_missing "nothing was ever sent to the unrecorded lane" "send-keys -t t:8" "$log"
+
 # --- THE LANE_META SANITY GUARD (agent-dotfiles#144 finding 4) ------------
 #
 # The pane-identity probe the ledger recording block makes right before
@@ -1029,6 +1080,15 @@ marker = '''  CLAIM_LANE="$candidate"
   CLAIM=$("$LEDGER_PYTHON" "$LEDGER_CLI" claim-lane --lane "$candidate" --token "$CLAIM_TOKEN" --owner-pid $$ 2>/dev/null) || { release_lane_claim; continue; }
   if grep -qF '"claimed":true' <<<"$CLAIM"; then
     LANE="$candidate"
+    # agent-dotfiles#216: `lane-free` above already resolved this lane's
+    # RECORDED harness (from its @hill90_lane_harness pane option, or the
+    # ledger row if it was already known) -- carried forward to step 6 so
+    # `record-dispatch` gets an explicit --harness instead of re-guessing one
+    # from `#{pane_current_command}`, which cannot tell a Node harness like
+    # copilot apart from any other. Empty is possible only if `lane-free`'s
+    # own JSON shape ever changes underneath this grep; step 6's existing
+    # fallback (HARNESS_BY_COMMAND) covers that, unchanged.
+    LANE_HARNESS=$(grep -oE '"harness":"[a-z-]*"' <<<"$CHECK" | head -1 | sed -E 's/.*:"([a-z-]*)"/\\1/')
     break
   fi
   # Lost this candidate to another dispatcher: move on, exactly as before.

@@ -11,7 +11,7 @@ import sys
 from pathlib import Path
 
 from acp_transport import ACPTransport
-from adapter import ACPAdapter, TmuxAdapter
+from adapter import ACPAdapter, TmuxAdapter, HARNESS_COMMANDS
 from core import Ledger, claim_owner_token
 from github_source import GithubTaskSource
 from sensor import StateSensor
@@ -48,7 +48,7 @@ def parser():
     register = sub.add_parser("register")
     register.add_argument("--lane", required=True)
     register.add_argument("--target", required=True)
-    register.add_argument("--harness", choices=("codex", "claude", "copilot-acp"), required=True)
+    register.add_argument("--harness", choices=("codex", "claude", "copilot", "copilot-acp"), required=True)
     register.add_argument("--repo", required=True)
     register.add_argument("--nonce")
 
@@ -74,7 +74,7 @@ def parser():
     record_dispatch_parser.add_argument("--session-id", required=True)
     record_dispatch_parser.add_argument("--issue", action="append", required=True)
     record_dispatch_parser.add_argument("--github", default="")
-    record_dispatch_parser.add_argument("--harness", choices=("codex", "claude", "copilot-acp"))
+    record_dispatch_parser.add_argument("--harness", choices=("codex", "claude", "copilot", "copilot-acp"))
 
     record_completion_parser = sub.add_parser("record-completion")
     record_completion_parser.add_argument("--task", required=True)
@@ -175,8 +175,24 @@ def _print(value):
     print(json.dumps(value, sort_keys=True, separators=(",", ":")))
 
 
+# NARROW inference, for a command that is actually diagnostic on its own
+# (agent-dotfiles#216). Every ledger and every lane bootstrapped before #216
+# has no `HARNESS_OPTION` recorded anywhere -- if `lane_free` required that
+# option unconditionally, EVERY existing claude/codex lane would go from
+# dispatchable to permanently refused the moment this shipped, which is
+# obviously not what "fail closed" is supposed to protect. This dict stays
+# exactly as narrow as it always was (exact binary name only, no "node"
+# entry: `node` names several harnesses and must never resolve from a name
+# alone) -- it is what keeps every already-working lane working. It is
+# consulted FIRST, in `lane_free`; the recorded `HARNESS_OPTION` is the
+# fallback for a command this dict cannot place, e.g. `node`.
 HARNESS_BY_COMMAND = {"codex": "codex", "claude": "claude", "claude.exe": "claude"}
 FREE_WINDOW_NAME_RE = re.compile(r"^free-[0-9]+$")
+# agent-dotfiles#216: the pane option `lane_free`'s backfill reads as the
+# RECORDED harness, instead of inferring it from `#{pane_current_command}` --
+# see `TmuxAdapter.HARNESS_OPTION` and `bootstrap-session.sh`, the two
+# writers.
+HARNESS_OPTION = TmuxAdapter.HARNESS_OPTION
 
 
 def lane_free(ledger, transport, *, lane, target, window_name):
@@ -203,6 +219,25 @@ def lane_free(ledger, transport, *, lane, target, window_name):
       UNKNOWN, and unknown is not free. This is the fail-closed default: a
       lane this code cannot positively place is never offered, the same
       posture `lanes.sh`'s own whitelist (#126) already takes for pane state.
+
+    agent-dotfiles#216: harness identity for the backfill branch above tries
+    `HARNESS_BY_COMMAND` first -- unchanged, exact-binary-name inference,
+    same as before #216 -- and only falls back to the pane's `HARNESS_OPTION`
+    (a RECORDED fact, written by `bootstrap-session.sh` or `cli.py register`)
+    for a command that dict cannot place. That ordering, not the option
+    alone, is what keeps every lane bootstrapped before #216 dispatchable:
+    none of them ever had the option written, and requiring it unconditionally
+    would have refused all of them the moment this shipped. The option only
+    matters for a command `HARNESS_BY_COMMAND` was never able to place --
+    every Node-based harness's process reads "node", so copilot (and codex
+    whenever its binary is not literally named `codex`) needs a written
+    record to be identified at all. An unrecorded option, or one that names a
+    harness the live pane's command visibly contradicts
+    (`TmuxAdapter._command_matches`), still refuses: this closes the gap for
+    a harness that WAS written down, it does not turn "cannot tell" into "go
+    ahead". The success reply's `"harness"` key lets a caller (`dispatch.sh`)
+    forward the same resolved value into `record-dispatch` instead of that
+    command re-deriving one from the pane command on its own.
 
     WHAT THIS DOES NOT DO (agent-dotfiles#188 finding 2, in the terms
     `claim.sh`'s own header uses for its sub-second race): this is a QUERY,
@@ -232,24 +267,68 @@ def lane_free(ledger, transport, *, lane, target, window_name):
     """
     known = ledger.lane_available(lane)
     if known is not None:
-        return {"lane": lane, "known": True, "free": known, "backfilled": False}
+        record = ledger.get_lane(lane)
+        return {
+            "lane": lane,
+            "known": True,
+            "free": known,
+            "backfilled": False,
+            "harness": record["harness"] if record else None,
+        }
     if not FREE_WINDOW_NAME_RE.match(window_name):
         return {"lane": lane, "known": False, "free": False, "backfilled": False}
     metadata = transport.metadata(target)
-    harness = HARNESS_BY_COMMAND.get(metadata["command"])
-    if harness is None:
+    command = metadata["command"]
+    # Narrow inference first (unchanged from before #216: exact binary name,
+    # never guessed for an ambiguous one like `node`), THEN the recorded
+    # option as the fallback for a command this dict cannot place. Checking
+    # both, rather than the option alone, is what keeps every pre-#216 lane
+    # (no option ever written for it) dispatchable exactly as before.
+    inferred = HARNESS_BY_COMMAND.get(command)
+    recorded = transport.get_option(target, HARNESS_OPTION)
+    recorded = recorded if recorded in HARNESS_COMMANDS else None
+    if inferred and recorded and inferred != recorded:
         return {
             "lane": lane,
             "known": False,
             "free": False,
             "backfilled": False,
-            "reason": f"cannot tell which harness pane command {metadata['command']!r} is",
+            "reason": (
+                f"recorded harness {recorded!r} does not match pane command {command!r}"
+            ),
+        }
+    if inferred:
+        harness = inferred
+    elif recorded and TmuxAdapter._command_matches(recorded, command):
+        harness = recorded
+    elif recorded:
+        return {
+            "lane": lane,
+            "known": False,
+            "free": False,
+            "backfilled": False,
+            "reason": (
+                f"recorded harness {recorded!r} does not match pane command {command!r}"
+            ),
+        }
+    else:
+        return {
+            "lane": lane,
+            "known": False,
+            "free": False,
+            "backfilled": False,
+            "reason": (
+                f"cannot tell which harness pane command {command!r} is "
+                f"-- no {HARNESS_OPTION} recorded on the pane"
+            ),
         }
     # No tmux options are set here (unlike `TmuxAdapter.register_lane`): this
     # mirrors `record_dispatch`'s own choice not to touch tmux beyond reading
     # it (see that function's docstring) -- a real dispatch re-registers this
     # lane with a fresh identity moments later anyway, so nothing here needs
-    # to survive past this one query.
+    # to survive past this one query. The harness option itself was already
+    # written by whoever recorded it (bootstrap or `register`); this function
+    # only ever reads it.
     ledger.register_lane(
         lane=lane,
         pane_id=metadata["pane_id"],
@@ -260,7 +339,7 @@ def lane_free(ledger, transport, *, lane, target, window_name):
         session_id=metadata["session_id"],
         command=metadata["command"],
     )
-    return {"lane": lane, "known": True, "free": True, "backfilled": True}
+    return {"lane": lane, "known": True, "free": True, "backfilled": True, "harness": harness}
 
 
 def record_dispatch(

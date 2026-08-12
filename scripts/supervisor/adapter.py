@@ -16,6 +16,29 @@ CLAUDE_ACTIVE_RE = re.compile(
 )
 
 
+# Harness identity, once known, is a RECORDED fact -- written down at the one
+# place it is actually decided: `bootstrap-session.sh` (the operator names
+# the harness a lane's window starts with), `cli.py register` (an operator
+# names it by hand), or `lane_free`'s own first-sight backfill of a pane
+# option one of those two already set. It is never solely inferred here
+# (agent-dotfiles#216).
+#
+# This table is the PLAUSIBILITY CHECK `_command_matches` runs against a
+# harness already on record; it does not decide what a lane IS. Every
+# Node-based harness's process reads "node" in `#{pane_current_command}` --
+# confirmed live for both copilot and codex (#216's own measurement, window 8
+# ran codex under `node`) -- so a bare command name cannot tell them apart
+# from each other, and the table says so by listing "node" for both. What it
+# still catches: a lane recorded "claude" whose pane is running anything
+# other than the claude binary -- exactly the case #216's mutation-check
+# asks for (register the wrong harness, confirm something refuses).
+HARNESS_COMMANDS = {
+    "claude": ("claude", "claude.exe"),
+    "codex": ("codex", "codex.exe", "node"),
+    "copilot": ("copilot", "copilot.exe", "node"),
+}
+
+
 # Matches on a quoted phrase anywhere in a 25-line capture window, the same
 # wide-window anti-pattern #65 fixed lanes.sh to avoid (docs/supervisor-
 # disposition.md §3). Measured there: a healthy lane quoting "Should I
@@ -60,6 +83,10 @@ def classify_capture(harness, capture):
 class TmuxAdapter:
     NONCE_OPTION = "@hill90_lane_nonce"
     LANE_OPTION = "@hill90_lane"
+    # agent-dotfiles#216: the record `lane_free`'s backfill (cli.py) and this
+    # class's own `register_lane` both read authority from, instead of
+    # guessing it back out of the pane's process name every time.
+    HARNESS_OPTION = "@hill90_lane_harness"
 
     def __init__(self, ledger, transport, *, clock=None):
         self.ledger = ledger
@@ -68,11 +95,10 @@ class TmuxAdapter:
 
     @staticmethod
     def _command_matches(harness, command):
-        if harness == "codex":
-            return command == "codex"
-        if harness == "claude":
-            return command in ("claude", "claude.exe")
-        return False
+        """Plausibility check, NOT identity (agent-dotfiles#216). `harness`
+        must already be a recorded fact by the time this is called; this
+        only refuses a recording that the live pane visibly contradicts."""
+        return command in HARNESS_COMMANDS.get(harness, ())
 
     def register_lane(self, *, lane, target, harness, repo, nonce):
         metadata = self.transport.metadata(target)
@@ -82,6 +108,7 @@ class TmuxAdapter:
             raise RuntimeError(f"lane harness mismatch: {metadata['command']}")
         self.transport.set_option(target, self.NONCE_OPTION, nonce)
         self.transport.set_option(target, self.LANE_OPTION, lane)
+        self.transport.set_option(target, self.HARNESS_OPTION, harness)
         return self.ledger.register_lane(
             lane=lane,
             pane_id=metadata["pane_id"],

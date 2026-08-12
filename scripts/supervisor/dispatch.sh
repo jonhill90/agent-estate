@@ -288,6 +288,7 @@ done < <("$HERE/lanes.sh" "$SESSION" 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9]+$/ 
 
 LANE=""
 CLAIM_LANE=""
+LANE_HARNESS=""
 while read -r candidate; do
   [ -n "$candidate" ] || continue
   idx="${candidate##*:}"
@@ -321,6 +322,15 @@ while read -r candidate; do
   CLAIM=$("$LEDGER_PYTHON" "$LEDGER_CLI" claim-lane --lane "$candidate" --token "$CLAIM_TOKEN" --owner-pid $$ 2>/dev/null) || { release_lane_claim; continue; }
   if grep -qF '"claimed":true' <<<"$CLAIM"; then
     LANE="$candidate"
+    # agent-dotfiles#216: `lane-free` above already resolved this lane's
+    # RECORDED harness (from its @hill90_lane_harness pane option, or the
+    # ledger row if it was already known) -- carried forward to step 6 so
+    # `record-dispatch` gets an explicit --harness instead of re-guessing one
+    # from `#{pane_current_command}`, which cannot tell a Node harness like
+    # copilot apart from any other. Empty is possible only if `lane-free`'s
+    # own JSON shape ever changes underneath this grep; step 6's existing
+    # fallback (HARNESS_BY_COMMAND) covers that, unchanged.
+    LANE_HARNESS=$(grep -oE '"harness":"[a-z-]*"' <<<"$CHECK" | head -1 | sed -E 's/.*:"([a-z-]*)"/\1/')
     break
   fi
   # Lost this candidate to another dispatcher: move on, exactly as before.
@@ -784,6 +794,13 @@ else
     --session-id "$SESSION_ID"
     --github "$REPO"
   )
+  # agent-dotfiles#216: forward the harness `lane-free` already resolved
+  # (step 1) instead of letting `record-dispatch` re-derive one from
+  # $PANE_CMD via its own narrower HARNESS_BY_COMMAND fallback -- that
+  # fallback cannot represent a Node harness at all, which is the bug this
+  # closes. Omitted when step 1 never resolved one (LANE_HARNESS empty);
+  # record-dispatch's fallback still applies then, unchanged.
+  [ -z "$LANE_HARNESS" ] || LEDGER_ARGS+=(--harness "$LANE_HARNESS")
   for i in "${ISSUES[@]}"; do
     LEDGER_ARGS+=(--issue "$i")
   done
