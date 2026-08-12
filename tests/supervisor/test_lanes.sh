@@ -64,6 +64,11 @@ cat > "$D/fixture" <<'FIX'
 34|w-codex-trust|codex|› 1. Yes, continue\n  2. No, quit\n\n  Press enter to continue|1|0
 35|w-copilot-ready|node| ← open sidebar · / commands · ? help · tab next tab   Claude Sonnet 5|1|0
 36|w-copilot-busy|node| ◎ Working esc interrupt                              Claude Sonnet 5|1|0
+37|w-shell-busy|claude.exe|⏵⏵ bypass permissions on · 1 shell · esc to interrupt · ← 1 agent · ↓ to manage|1|0
+38|w-shell-idle|claude.exe|⏵⏵ bypass permissions on · 1 shell · ← 1 agent · ↓ to manage|1|0
+39|w-shell-idle-hung|claude.exe|⏵⏵ bypass permissions on · 1 shell · ← 1 agent · ↓ to manage|900|0
+40|w-shell-tasks|claude.exe|⏵⏵ bypass permissions on · 1 shell · ctrl+t to hide tasks · ← 1 agent · ↓ to manage|1|0
+41|w-shells-plural|claude.exe|⏵⏵ bypass permissions on · 2 shells · ← 1 agent · ↓ to manage|1|0
 FIX
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
 
@@ -200,6 +205,30 @@ want "codex's own startup trust menu is menu-blocked"     w-codex-trust menu-blo
 want "a real copilot idle footer is free"                 w-copilot-ready free "$out"
 want "a real copilot mid-turn pane is busy, not free"     w-copilot-busy busy "$out"
 
+# --- agent-dotfiles#207: a background shell changes Claude's footer shape --
+# All five rows below are verbatim real captures off a real Claude Code pane
+# (v2.1.220) in a throwaway tmux server, private TMUX_TMPDIR, 2026-08-12 --
+# never the live agent-dotfiles session. w-shell-idle and w-shell-tasks match
+# the issue's own two live captures byte-for-byte (win 3 and win 10). Mid-turn
+# WITH a background shell registered, the footer carries both `esc to
+# interrupt` and `↓ to manage` -- already caught by the pre-existing busy
+# regex, kept here as w-shell-busy so the fix is proven not to have narrowed
+# that case. Once the turn ends but the shell is still running, `esc to
+# interrupt` drops and only `↓ to manage` remains -- w-shell-idle -- which read
+# `unknown` before this fix, and is why `#203`/`#184` sat withheld from --free
+# indefinitely (the lane leak #207 describes). Regardless of which harness
+# chrome painted it, this shape is not idle -- a background shell is still
+# doing the lane's work -- so it reads busy, never free.
+want "a mid-turn pane with a background shell is busy"                 w-shell-busy      busy   "$out"
+want "an idle pane with a registered background shell is busy, not unknown (#207)" w-shell-idle busy "$out"
+want "the ctrl+t-to-hide-tasks variant is busy too (#207)"             w-shell-tasks     busy   "$out"
+want "the plural shells variant is busy too (#207)"                    w-shells-plural   busy   "$out"
+# THE ONE THAT MATTERS (#207): before this fix, `hung` was unreachable for
+# this shape -- it never had a busy branch to compute liveness inside. Same
+# pane text as w-shell-idle, frozen for 900s (LANES_HUNG_AFTER defaults to
+# 180) instead of 1s.
+want "an idle-with-shell pane frozen past HUNG_AFTER is hung, not unknown (#207)" w-shell-idle-hung hung "$out"
+
 # --- #154: a service window is not a dead lane ----------------------------
 # The live shape, verbatim: `inbox-poll.sh` deployed as `agent-dotfiles:11`
 # per the deployment path its own header recommends. Its pane command is
@@ -281,6 +310,7 @@ for bad in arch w-dead w-hung w-busy w-copilot w-minute-tick w-scrolled w-blocke
            w-trust w-model w-permission w-idle-footer w-subagent-task w-subagent-wait \
            w-unsent w-unsent-ready-footer w-typeahead w-optionrow w-optionrow-yes \
            w-text-blocked w-unrecognized-blocked w-codex-busy w-codex-trust w-copilot-busy \
+           w-shell-busy w-shell-idle w-shell-idle-hung w-shell-tasks w-shells-plural \
            telegram-poller ad102-renamed-lane free-27 w-hand-run-poller w-mentions-poller; do
   bi=$(awk -F'|' -v n="$bad" '$2==n{print $1}' "$D/fixture")
   if grep -qx ".*:$bi" <<<"$free"; then echo "  FAIL --free offered $bad"; fail=$((fail+1));
@@ -426,6 +456,53 @@ else
   fi
 fi
 rm -rf "$MUTHDIR"
+
+# --- agent-dotfiles#207 mutation check: break the new busy matcher --------
+# Drop the `↓ to manage` alternative harness/claude.sh#207 added and confirm
+# w-shell-idle falls to `unknown` -- and explicitly, never to `free` -- and
+# that w-shell-idle-hung, which depends on the same branch to compute
+# liveness at all, goes with it. This is the shape the issue's own live
+# lanes were stuck in before the fix.
+MUTHDIR2=$(mktemp -d)
+cp "$HDIR"/*.sh "$MUTHDIR2"/
+python3 - "$MUTHDIR2/claude.sh" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+marker = "HARNESS_BUSY_RE='esc to interrupt|↓ to manage'"
+assert marker in text, "claude.sh's HARNESS_BUSY_RE not found -- file shape changed"
+open(path, "w").write(text.replace(marker, "HARNESS_BUSY_RE='esc to interrupt'", 1))
+PY
+mutation_rc=$?
+if [ "$mutation_rc" -ne 0 ]; then
+  echo "  FAIL setup: could not mutate a copy of harness/claude.sh (exit $mutation_rc)"; fail=$((fail+1));
+else
+  echo "  ok   setup: mutated a copy of harness/claude.sh's busy matcher"; pass=$((pass+1));
+  shell_out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" LANES_HARNESS_DIR="$MUTHDIR2" bash "$LANES" 2>&1)
+  if grep -qE "^[0-9]+ +w-shell-idle +[^ ]+ +unknown$" <<<"$shell_out"; then
+    echo "  ok   breaking the #207 busy matcher moves w-shell-idle to unknown"; pass=$((pass+1));
+  else
+    echo "  FAIL breaking the #207 busy matcher did not move w-shell-idle to unknown:"; sed 's/^/       /' <<<"$shell_out"; fail=$((fail+1));
+  fi
+  if grep -qE "^[0-9]+ +w-shell-idle +[^ ]+ +free$" <<<"$shell_out"; then
+    echo "  FAIL the one-way ratchet broke: w-shell-idle became free"; fail=$((fail+1));
+  else
+    echo "  ok   the one-way ratchet holds: w-shell-idle never became free"; pass=$((pass+1));
+  fi
+  if grep -qE "^[0-9]+ +w-shell-idle-hung +[^ ]+ +unknown$" <<<"$shell_out"; then
+    echo "  ok   breaking the busy matcher also makes hung unreachable for this shape, confirming hung depended on it"; pass=$((pass+1));
+  else
+    echo "  FAIL w-shell-idle-hung did not also go unknown:"; sed 's/^/       /' <<<"$shell_out"; fail=$((fail+1));
+  fi
+  # And the seam still doesn't leak: breaking claude's matcher must not move
+  # codex's or copilot's already-passing rows.
+  if grep -qE "^[0-9]+ +w-codex-busy +[^ ]+ +busy$" <<<"$shell_out"; then
+    echo "  ok   the seam does not leak: codex's busy lane is untouched"; pass=$((pass+1));
+  else
+    echo "  FAIL the seam leaked: breaking claude's busy matcher moved a codex lane too:"; sed 's/^/       /' <<<"$shell_out"; fail=$((fail+1));
+  fi
+fi
+rm -rf "$MUTHDIR2"
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
