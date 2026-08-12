@@ -140,13 +140,20 @@ lane_line() { awk -v s="$1" 'NR>1 && $NF==s {print $2}' <<<"$LANES_OUT" | paste 
 # Resolves one PR's verdict through the adapter. Always prints SOME JSON --
 # a source failure or a missing/broken stub must read as {"verdict":"unknown"},
 # never as empty output that a caller could mistake for "no verdict field".
+#
+# head_sha is the PR's current headRefOid (already fetched below via `gh pr
+# list`) -- passed through so a source can tell a review or ledger record
+# filed against an OLDER commit apart from one that answers for this head
+# (agent-dotfiles#218). Without it every verdict source is blind to a push
+# that moved the head after the verdict was filed.
 verdict_for() {
-  local repo_full="$1" number="$2" out
+  local repo_full="$1" number="$2" head_sha="$3" out
   if [ -n "$VERDICT_BIN" ]; then
-    out=$("$VERDICT_BIN" --repo "$repo_full" --number "$number" 2>/dev/null)
+    out=$("$VERDICT_BIN" --repo "$repo_full" --number "$number" --head-sha "$head_sha" 2>/dev/null)
   else
     out=$("$VERDICT_PYTHON" "$HERE/verdict.py" --state-dir "$STATE" \
-          get --repo "$repo_full" --number "$number" --source "$VERDICT_SOURCE" 2>/dev/null)
+          get --repo "$repo_full" --number "$number" --source "$VERDICT_SOURCE" \
+          --head-sha "$head_sha" 2>/dev/null)
   fi
   if ! jq -e . >/dev/null 2>&1 <<<"$out"; then
     out='{"verdict":"unknown","detail":"verdict source produced no readable output"}'
@@ -181,6 +188,7 @@ for repo in $REPOS; do
     p=$(jq -c ".[$i]" <<<"$list")
     branch=$(jq -r '.headRefName' <<<"$p")
     num=$(jq -r '.number' <<<"$p")
+    head_oid=$(jq -r '.headRefOid' <<<"$p")
     run=$(gh run list -R "$OWNER/$repo" --branch "$branch" --limit 1 \
           --json headSha,conclusion 2>/dev/null) || {
       note_error "gh run list failed for $OWNER/$repo#$num -- CI status omitted"
@@ -192,7 +200,7 @@ for repo in $REPOS; do
     # above and scripts/supervisor/verdict.py. It used to regex-match the
     # last PR comment's prose here, which read "I cannot approve this, it is
     # unsafe." as an APPROVE (agent-dotfiles#203).
-    v=$(verdict_for "$OWNER/$repo" "$num")
+    v=$(verdict_for "$OWNER/$repo" "$num" "$head_oid")
     entry=$(jq -n --argjson p "$p" --argjson r "$r" --arg repo "$repo" --argjson v "$v" '
       {
         repo: $repo, number: $p.number, title: $p.title,
@@ -256,7 +264,11 @@ else
     # a run that passed but is not for this head. Collapsing "no run" and
     # "stale" cost a real investigation (#149) -- the STALE annotation names a
     # run to distrust, so it is only printed when a run actually exists.
-    (.prs[] | "  \(.repo)#\(.number) ci=\(.run_conclusion)\(if (.ci_is_current or .run_conclusion == "NO RUN") then "" else " [STALE - run is for \(.run_sha), head is \(.head)]" end) \(.merge_state) verdict=\(.verdict)"),
+    # A verdict of "unknown" caused by a stale review/ledger record
+    # (agent-dotfiles#218) is otherwise indistinguishable here from any other
+    # unreadable-source "unknown" -- the detail names which commit the
+    # verdict was actually filed against, traceable against \(.head) above.
+    (.prs[] | "  \(.repo)#\(.number) ci=\(.run_conclusion)\(if (.ci_is_current or .run_conclusion == "NO RUN") then "" else " [STALE - run is for \(.run_sha), head is \(.head)]" end) \(.merge_state) verdict=\(.verdict)\(if .verdict == "unknown" and (.verdict_detail|length) > 0 then " (\(.verdict_detail))" else "" end)"),
     (if (.merged_since|length) > 0 then "merged:" else empty end),
     (.merged_since[] | "  \(.repo)#\(.number) \(.title[0:52])"),
     (if (.errors|length) > 0 then "ERRORS (this digest is INCOMPLETE):" else empty end),

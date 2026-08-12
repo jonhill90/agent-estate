@@ -161,7 +161,8 @@ cat > "$OK/fixtures/pr_list.json" <<'S'
   {"number":1,"title":"current head, clean merge","headRefOid":"aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111","headRefName":"b1","mergeStateStatus":"CLEAN"},
   {"number":2,"title":"stale pass, dirty merge","headRefOid":"bbbb2222bbbb2222bbbb2222bbbb2222bbbb2222","headRefName":"b2","mergeStateStatus":"DIRTY"},
   {"number":3,"title":"no CI run at all, behind","headRefOid":"cccc3333cccc3333cccc3333cccc3333cccc3333","headRefName":"b3","mergeStateStatus":"BEHIND"},
-  {"number":4,"title":"current head, CI failed","headRefOid":"dddd4444dddd4444dddd4444dddd4444dddd4444","headRefName":"b4","mergeStateStatus":"CLEAN"}
+  {"number":4,"title":"current head, CI failed","headRefOid":"dddd4444dddd4444dddd4444dddd4444dddd4444","headRefName":"b4","mergeStateStatus":"CLEAN"},
+  {"number":6,"title":"review filed against a since-superseded head","headRefOid":"newnewnewnewnewnewnewnewnewnewnewnewnewn","headRefName":"b6","mergeStateStatus":"CLEAN"}
 ]
 S
 cat > "$OK/fixtures/run_b1.json" <<'S'
@@ -174,6 +175,17 @@ cat > "$OK/fixtures/run_b4.json" <<'S'
 [{"headSha":"dddd4444dddd4444dddd4444dddd4444dddd4444","conclusion":"failure"}]
 S
 # b3 deliberately has no run_b3.json -- stub falls back to "[]", i.e. no run.
+# b6 deliberately has no run_b6.json either -- CI freshness is not this PR's point.
+
+# PR6's review was APPROVED, but at the OLD head -- a push since moved
+# headRefOid to "newnewnew...". This is agent-dotfiles#218: a review filed
+# against SHA A must not answer for a PR now at SHA B. Approved-but-stale is
+# the exact failure the second GitHub identity in #203 would make reachable.
+cat > "$OK/fixtures/reviews_6.json" <<'S'
+{"reviews":[
+  {"state":"APPROVED","body":"Looks good.","commit":{"oid":"oldoldoldoldoldoldoldoldoldoldoldoldoldo"}}
+]}
+S
 
 # PR4's review carries the exact prose that used to invert the old
 # regex-on-comment-prose verdict (agent-dotfiles#203 correction): a
@@ -181,10 +193,13 @@ S
 # The real GitHub *state* is CHANGES_REQUESTED from a second review below.
 # The adapter must read the STATE field only -- if it regressed to reading
 # comment bodies again, this body would flip verdict to "approved".
+# The CHANGES_REQUESTED review's commit.oid matches PR4's headRefOid above --
+# this fixture exercises the STATE-vs-prose regression (#203), not the
+# SHA-staleness one (#218); that one has its own fixture (PR6) below.
 cat > "$OK/fixtures/reviews_4.json" <<'S'
 {"reviews":[
   {"state":"COMMENTED","body":"I cannot approve this, it is unsafe."},
-  {"state":"CHANGES_REQUESTED","body":"Rejected: the mutation-check never went red"}
+  {"state":"CHANGES_REQUESTED","body":"Rejected: the mutation-check never went red","commit":{"oid":"dddd4444dddd4444dddd4444dddd4444dddd4444"}}
 ]}
 S
 
@@ -232,6 +247,16 @@ chk "PR4 ci_is_current true (the failing run IS for this head)" "true" "$(jq -r 
 chk "PR4 verdict reads rejected from real GitHub review state, not comment prose" \
   "rejected" "$(jq -r '.verdict' <<<"$p4")"
 
+# 12b. agent-dotfiles#218: a review APPROVED at an old SHA must not answer for
+# a head a push has since moved past. This is the failure #218 exists to
+# close -- reported "approved" here would be the same shape as the pre-#206
+# prose-regex bug, arriving through the SHA instead of through prose.
+p6=$(pr 6)
+chk "PR6 verdict reads unknown, not approved, for a review filed against a superseded head" \
+  "unknown" "$(jq -r '.verdict' <<<"$p6")"
+[ -n "$(jq -r '.verdict_detail' <<<"$p6")" ] && ok "PR6 verdict_detail names the stale SHA, not just 'unknown'" \
+  || bad "PR6 verdict_detail non-empty" "$p6"
+
 # 13. never reviewed / approved / rejected are three distinct digest outputs
 # from the ledger source -- the bar this whole issue is measured against.
 LSTATE="$D/ledger-state"; mkdir -p "$LSTATE"
@@ -256,6 +281,19 @@ python3 "$VPY" --state-dir "$LSTATE" record --repo ownerx/test-repo --number 2 \
   --reviewer lane-7 --note "mutation-check never went red" >/dev/null
 rejected=$(jq -c --argjson n 2 '.prs[] | select(.number==$n)' <<<"$(run_ledger)")
 chk "3. reviewed and rejected reads rejected, distinct from 1 and 2" "rejected" "$(jq -r '.verdict' <<<"$rejected")"
+
+# 13b. agent-dotfiles#218, ledger source: PR6's headRefOid in the fixture is
+# "newnewnew...", but the ledger verdict below is recorded against the OLD
+# "oldoldold..." head -- a push moved the head after the lane recorded its
+# verdict. Must read unknown, the same fail-closed answer as the github
+# source's PR6 case above, never the recorded "approved" answering for a
+# head it never saw.
+python3 "$VPY" --state-dir "$LSTATE" record --repo ownerx/test-repo --number 6 \
+  --verdict approved --head-sha oldoldoldoldoldoldoldoldoldoldoldoldoldo \
+  --reviewer lane-7 >/dev/null
+stale_ledger=$(jq -c --argjson n 6 '.prs[] | select(.number==$n)' <<<"$(run_ledger)")
+chk "3b. ledger verdict recorded against a superseded head reads unknown, not approved" \
+  "unknown" "$(jq -r '.verdict' <<<"$stale_ledger")"
 
 # 14. MUTATION-CHECK: break the adapter's reader and confirm the gate fails
 # CLOSED (unknown), never open (approved/none). A verdict source that
@@ -300,7 +338,7 @@ S
 cat > "$OK/fixtures/reviews_5.json" <<'S'
 {"reviews":[
   {"state":"COMMENTED","body":"digest.sh misread a prior PR because the reviewer comment contained the literal string REQUEST CHANGES inside a sentence describing the bug."},
-  {"state":"APPROVED","body":"Looks good."}
+  {"state":"APPROVED","body":"Looks good.","commit":{"oid":"eeee5555eeee5555eeee5555eeee5555eeee5555"}}
 ]}
 S
 default_out=$(PATH="$OK/bin:$PATH" SUPERVISOR_STATE="$D/state" LANES_SESSION=nosuch \

@@ -53,10 +53,15 @@ class VerdictSource:
 
     `verdict()` must never raise -- catch everything internally and return
     `{"verdict": "unknown", "detail": "..."}` instead, so a caller iterating
-    several sources never has one blow up the rest.
+    several sources never has one blow up the rest. `head_sha`, when given,
+    is the PR's CURRENT head (`headRefOid`) -- a source that recorded its
+    answer against an older commit must not answer for this one
+    (agent-dotfiles#218). `head_sha=None` means the caller has no head to
+    check against; a source then answers as it always has, unable to tell
+    a current verdict from a stale one.
     """
 
-    def verdict(self, *, repo, number):
+    def verdict(self, *, repo, number, head_sha=None):
         raise NotImplementedError
 
 
@@ -70,7 +75,7 @@ class GithubReviewVerdictSource(VerdictSource):
     def __init__(self, runner=None):
         self.runner = runner or _subprocess_runner
 
-    def verdict(self, *, repo, number):
+    def verdict(self, *, repo, number, head_sha=None):
         try:
             raw = self.runner(["gh", "pr", "view", str(number), "--repo", repo, "--json", "reviews"])
             payload = json.loads(raw)
@@ -79,11 +84,28 @@ class GithubReviewVerdictSource(VerdictSource):
                 raise ValueError("reviews is not a list")
         except Exception as error:
             return {"verdict": "unknown", "detail": f"github review read failed: {error}"}
-        states = [r.get("state") for r in reviews if isinstance(r, dict)]
-        if "CHANGES_REQUESTED" in states:
-            return {"verdict": "rejected", "detail": "GitHub review state CHANGES_REQUESTED"}
-        if "APPROVED" in states:
-            return {"verdict": "approved", "detail": "GitHub review state APPROVED"}
+        decisive = [r for r in reviews if isinstance(r, dict) and r.get("state") in ("CHANGES_REQUESTED", "APPROVED")]
+        if head_sha is None:
+            # No head to check freshness against -- answer as before #218,
+            # unable to tell a current review from a stale one.
+            states = [r.get("state") for r in decisive]
+            if "CHANGES_REQUESTED" in states:
+                return {"verdict": "rejected", "detail": "GitHub review state CHANGES_REQUESTED"}
+            if "APPROVED" in states:
+                return {"verdict": "approved", "detail": "GitHub review state APPROVED"}
+            return {"verdict": "none", "detail": ""}
+        current = [r for r in decisive if (r.get("commit") or {}).get("oid") == head_sha]
+        current_states = [r.get("state") for r in current]
+        if "CHANGES_REQUESTED" in current_states:
+            return {"verdict": "rejected", "detail": f"GitHub review state CHANGES_REQUESTED at {head_sha}"}
+        if "APPROVED" in current_states:
+            return {"verdict": "approved", "detail": f"GitHub review state APPROVED at {head_sha}"}
+        if decisive:
+            stale_shas = sorted({(r.get("commit") or {}).get("oid") or "unknown-sha" for r in decisive})
+            return {
+                "verdict": "unknown",
+                "detail": f"review(s) filed against {', '.join(stale_shas)}, not current head {head_sha}",
+            }
         return {"verdict": "none", "detail": ""}
 
 
@@ -93,7 +115,7 @@ class LedgerVerdictSource(VerdictSource):
     def __init__(self, ledger):
         self.ledger = ledger
 
-    def verdict(self, *, repo, number):
+    def verdict(self, *, repo, number, head_sha=None):
         try:
             row = self.ledger.get_pr_verdict(repo=repo, number=number)
         except Exception as error:
@@ -102,9 +124,15 @@ class LedgerVerdictSource(VerdictSource):
             return {"verdict": "none", "detail": ""}
         if row.get("verdict") not in ("approved", "rejected"):
             return {"verdict": "unknown", "detail": "ledger row has an unrecognised verdict value"}
+        recorded_sha = row.get("head_sha")
+        if head_sha is not None and recorded_sha != head_sha:
+            return {
+                "verdict": "unknown",
+                "detail": f"ledger verdict recorded at {recorded_sha}, not current head {head_sha}",
+            }
         return {
             "verdict": row["verdict"],
-            "detail": f"ledger: {row['reviewer']} recorded at {row['updated_at']}",
+            "detail": f"ledger: {row['reviewer']} recorded at {row['updated_at']} for {recorded_sha}",
         }
 
 
@@ -122,18 +150,20 @@ def build_source(name, *, state_dir):
     return SOURCES[name]()
 
 
-def resolve(names, *, state_dir, repo, number):
+def resolve(names, *, state_dir, repo, number, head_sha=None):
     """Try each named source in order. A decisive verdict (approved/rejected)
     from an earlier source wins outright. If none is decisive, a source
     error ("unknown") wins over a later source's plain "none" -- an error
     must never be silently masked by "nothing to report" from elsewhere in
     the chain. Only when every source is reachable and none has anything on
-    record does this return "none"."""
+    record does this return "none". `head_sha`, when given, is the PR's
+    current head -- a source is passed it so it can refuse to answer for a
+    review or ledger record filed against an older commit (#218)."""
     first_unknown = None
     for name in names:
         try:
             source = build_source(name, state_dir=state_dir)
-            result = source.verdict(repo=repo, number=number)
+            result = source.verdict(repo=repo, number=number, head_sha=head_sha)
         except Exception as error:
             result = {"verdict": "unknown", "detail": f"{name}: {error}"}
         if result.get("verdict") not in VERDICT_VALUES:
@@ -158,6 +188,14 @@ def main(argv=None):
         default="github",
         help="comma-separated source names to try in order (default: github; "
         "'ledger' has no caller that writes to it yet -- agent-dotfiles#214)",
+    )
+    get.add_argument(
+        "--head-sha",
+        default=None,
+        help="the PR's current headRefOid; a verdict filed against a different "
+        "commit resolves to unknown rather than answering for a head it never "
+        "saw (agent-dotfiles#218). Omit only when the caller has no head to "
+        "check against.",
     )
 
     record = sub.add_parser("record", help="record a verdict in the ledger source")
@@ -187,7 +225,9 @@ def main(argv=None):
         names = [n.strip() for n in args.source.split(",") if n.strip()]
         if not names:
             raise ValueError("no verdict source named")
-        result = resolve(names, state_dir=args.state_dir, repo=args.repo, number=args.number)
+        result = resolve(
+            names, state_dir=args.state_dir, repo=args.repo, number=args.number, head_sha=args.head_sha
+        )
     except Exception as error:
         result = {"verdict": "unknown", "detail": f"verdict resolution failed: {error}"}
     print(json.dumps(result))
