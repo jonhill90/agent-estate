@@ -39,7 +39,29 @@ HARNESS_READY_RE='^❯ [^←]*$|← 1 agent$'
 # marker sits several lines above a footer that never changes -- see
 # harness/codex.sh's HARNESS_BUSY_TAIL comment for why that harness needs a
 # wider window and this one does not.
-HARNESS_BUSY_RE='esc to interrupt'
+#
+# agent-dotfiles#207: a second busy shape, `↓ to manage`, appended whenever a
+# background shell is registered -- singular or plural (`1 shell`/`2 shells`),
+# with or without `ctrl+t to hide tasks` in between. Measured live against a
+# real Claude Code pane (v2.1.220) in a throwaway tmux server, private
+# TMUX_TMPDIR, 2026-08-12: mid-turn with a backgrounded shell running, the
+# footer carries BOTH `esc to interrupt` and `↓ to manage` --
+#   ⏵⏵ bypass permissions on · 1 shell · esc to interrupt · ← 1 agent · ↓ to manage
+# --  already caught by the first alternative. Once the turn itself ends but
+# the shell is still running, `esc to interrupt` drops and only the second
+# alternative still matches --
+#   ⏵⏵ bypass permissions on · 1 shell · ← 1 agent · ↓ to manage
+# -- the exact shape agent-dotfiles#207 captured off two live dispatched
+# lanes (`ad203-verdict-adapter`, `live184-ad184-race`) reading `unknown`.
+# That pane is not mid-turn, but it is not idle either: a background shell it
+# started is still doing work on the lane's behalf, and #207's acceptance is
+# to treat that as busy (not a new state, and never free) rather than offer
+# it to the dispatcher while the shell runs. Deliberately does NOT touch
+# HARNESS_READY_RE: `← 1 agent$` is anchored to end-of-line, so a footer with
+# `· ↓ to manage` trailing it already fails that anchor on its own -- adding
+# this alternative here cannot make a lane MORE free, only less unknown,
+# which is the #124/#126 one-way ratchet this file is under.
+HARNESS_BUSY_RE='esc to interrupt|↓ to manage'
 HARNESS_BUSY_TAIL=1
 
 # Blocked gate (last line) plus the menu/text split (#159/#164). `Esc to
