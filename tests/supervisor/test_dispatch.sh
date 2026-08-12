@@ -59,6 +59,26 @@ cat > "$D/lanes" <<'FIX'
 3|free-3|claude.exe|❯ ready|1|0
 FIX
 
+# agent-dotfiles#174: dispatch.sh now READS the ledger to pick a lane, where
+# before this suite was written it only ever WROTE to it (#140, nothing read
+# it back). Every case in this file that dispatches to lane t:3 under the
+# implicit default state dir used to be independent BY ACCIDENT -- nothing
+# read the previous case's leftover ledger row, so it did not matter that
+# they shared one. Now it would: a second dispatch to t:3 under a ledger that
+# still shows the first one's task open would be correctly refused as
+# occupied, breaking every case below that expects a second dispatch to
+# succeed under the SAME implicit state dir. Each call gets an UNSHARED
+# default state dir via `mktemp`, so every case that has not opted into a
+# shared one via LEDGER_STATE keeps testing exactly what it tested before
+# this landed -- one dispatch, in isolation. Cases that explicitly set
+# LEDGER_STATE (to inspect what a specific dispatch recorded, or to force a
+# broken ledger) are unaffected; they never relied on the implicit default.
+#
+# `mktemp -d`, not a counter: `run()` is almost always called as
+# `out=$(run ...)`, and command substitution forks a SUBSHELL -- a counter
+# variable incremented inside `run()` would increment only that subshell's
+# copy and never advance in the parent, so every call would compute the same
+# "next" value. `mktemp` needs no shared, persistent state to stay unique.
 run() {
   : > "$D/tmux.log"
   rm -rf "$D/panes"; mkdir -p "$D/panes"
@@ -70,7 +90,7 @@ run() {
     DISPATCH_PANE_ROWS="${DISPATCH_PANE_ROWS:-}" \
     DISPATCH_PANE_COLS="${DISPATCH_PANE_COLS:-60}" \
     DISPATCH_MESSAGE_BUDGET="${DISPATCH_MESSAGE_BUDGET:-430}" \
-    AGENT_SUPERVISOR_STATE_DIR="${LEDGER_STATE:-$D/state}" \
+    AGENT_SUPERVISOR_STATE_DIR="${LEDGER_STATE:-$(mktemp -d "$D/state.XXXXXX")}" \
     STUB_PANE_PATH="${STUB_PANE_PATH:-$REPO}" \
     DISPATCH_SWALLOW_ENTER="${DISPATCH_SWALLOW_ENTER:-0}" \
     DISPATCH_CONFIRM_TRIES="${DISPATCH_CONFIRM_TRIES:-2}" \
@@ -81,6 +101,56 @@ run() {
 # state directory under $HOME -- a test suite writing into the live estate's
 # ledger. LEDGER_STATE overrides it for the cases that need a broken one.
 ledger() { AGENT_SUPERVISOR_STATE_DIR="${LEDGER_STATE:-$D/state}" python3 "$HERE/../../scripts/supervisor/cli.py" "$@"; }
+# Registers a lane as known-and-free directly, the way `cli.py lane-free`'s
+# first-sight backfill would if it ever saw this lane named `free-N` -- used
+# where a case needs the ledger to ALREADY know a lane before dispatch.sh's
+# own pane-identity probe is made to fail, so that probe's failure is
+# isolated to the thing it is actually testing rather than also breaking the
+# unrelated backfill probe dispatch.sh's lane-selection step makes first.
+preregister_lane() {
+  local state="$1" lane="$2" target="$3"
+  AGENT_SUPERVISOR_STATE_DIR="$state" PATH="$D/bin:$PATH" \
+    LANES_FIXTURE="$D/lanes" LANES_SESSION=t \
+    STUB_PANE_PATH="${STUB_PANE_PATH:-$REPO}" \
+    python3 "$HERE/../../scripts/supervisor/cli.py" register \
+      --lane "$lane" --target "$target" --harness claude --repo "$REPO" >/dev/null
+}
+# Registers `lane` (free, no task) AND a task already under `task_id`,
+# assigned to a DIFFERENT lane -- so a later `record-dispatch` call that
+# tries to use `task_id` for `lane` collides deterministically at the
+# application layer. Used to prove step 6's ledger write staying non-fatal
+# without touching filesystem permissions -- a read-only sqlite file was
+# tried first and dropped as non-deterministic across process boundaries
+# (see the comment where this is used).
+seed_conflicting_task() {
+  local state="$1" lane="$2" task_id="$3" issue="$4"
+  AGENT_SUPERVISOR_STATE_DIR="$state" python3 - "$HERE/../../scripts/supervisor" "$lane" "$task_id" "$issue" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+
+lane, task_id, issue = sys.argv[2], sys.argv[3], sys.argv[4]
+ledger = Ledger(Path(os.environ["AGENT_SUPERVISOR_STATE_DIR"]))
+ledger.register_lane(
+    lane=lane, pane_id="%seed", nonce="seed-free", harness="claude", repo="/nonexistent",
+    server_id="seed:1700000000", session_id="$0", command="claude.exe",
+)
+ledger.register_lane(
+    lane="t:seed-other", pane_id="%seed-other", nonce="seed-other", harness="claude", repo="/nonexistent",
+    server_id="seed:1700000000", session_id="$0", command="claude.exe",
+)
+ledger.reconstruct_task(
+    task_id=task_id, source_kind="issue",
+    source_url=f"https://github.com/acme/agent-dotfiles/issues/{issue}", source_ref=issue,
+    summary="a different lane got here first", source_state="OPEN", status="created",
+    evidence=["seeded by test_dispatch.sh"], status_marker=None,
+)
+ledger.assign(task_id=task_id, lane="t:seed-other", pane_nonce="seed-other", summary="a different lane got here first")
+PY
+}
 tmuxlog()   { cat "$D/tmux.log"; }
 assignees() { awk -F'|' -v n="$1" '$1==n{print $2}' "$D/issues"; }
 worktrees() { ls "$D/roots" 2>/dev/null | wc -l | tr -d ' '; }
@@ -509,6 +579,12 @@ cat > "$D/lanes" <<'FIX'
 3|free-3|claude.exe|❯ ready|1|0
 FIX
 printf '145|| a dispatch whose pane-identity probe itself fails\n' >> "$D/issues"
+# Pre-registered so agent-dotfiles#174's OWN pane-identity read (lane
+# selection's first-sight backfill, step 1) does not also hit
+# STUB_LANE_META_BROKEN and refuse the lane before this test's actual target
+# -- the step 6 probe -- is ever reached. With the lane already known-free,
+# step 1 answers from the ledger alone and never touches tmux.
+preregister_lane "$D/state-145" t:3 t:3
 export STUB_LANE_META_BROKEN=1
 out=$(LEDGER_STATE="$D/state-145" run 145 ledger-meta-broken "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
 unset STUB_LANE_META_BROKEN
@@ -519,8 +595,8 @@ want_contains "and is still submitted" "send-keys -t t:3 Enter" "$log"
 want_contains "the guard names the failure as an unreadable pane probe" \
   "could not read pane metadata" "$out"
 status=$(LEDGER_STATE="$D/state-145" ledger status 2>&1)
-want_contains "no garbage dispatch is recorded from the malformed probe" '"lanes":[]' "$status"
-want_contains "and no task either" '"tasks":[]' "$status"
+want_contains "the pre-registered lane is still the only one on record" '"lane":"t:3"' "$status"
+want_contains "no garbage task is recorded from the malformed probe" '"tasks":[]' "$status"
 
 # ...and that guard is load-bearing. Patch a copy that always takes the
 # "well-formed" branch regardless of what LANE_META actually contains, and
@@ -549,6 +625,7 @@ if [ "$patch_rc" -ne 0 ]; then
 else
   ok "setup: patched a copy of dispatch.sh whose LANE_META guard is skipped"
   printf '146|| the same broken probe, against the unguarded copy\n' >> "$D/issues"
+  preregister_lane "$D/state-146" t:3 t:3
   export STUB_LANE_META_BROKEN=1
   out=$(DISPATCH_SCRIPT="$BROKEN_META_GUARD" LEDGER_STATE="$D/state-146" \
         run 146 ledger-meta-unguarded "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
@@ -562,29 +639,109 @@ else
   want_exit "the unguarded copy still does not abort the dispatch" "$rc" 0 "$out"
 fi
 
-# --- A LEDGER FAILURE MUST NOT ABORT A DISPATCH ---------------------------
+# --- AN UNREADABLE LEDGER REFUSES TO DISPATCH (agent-dotfiles#174) --------
 #
-# The property the whole design rests on. `dispatch.sh` aborts and unwinds on
-# every other failure, which is right for claims and worktrees -- real
-# resources. It is wrong here: nothing reads the ledger yet, so a broken one
-# that stopped the estate dispatching would trade the estate for a record with
-# no reader. The failure must be LOUD and the dispatch must stand.
+# The inversion from #140. That ledger write was made non-fatal precisely
+# BECAUSE nothing read it -- see step 6's comment. Step 1 above now reads it
+# for every candidate lane before picking one, so an unreadable ledger can no
+# longer mean "proceed as if every lane were free"; it has to mean "cannot
+# tell, refuse". This is issue test 4.
 #
 # The break is a state directory that cannot exist -- a path whose parent is a
 # regular file -- so the ledger genuinely errors rather than being skipped.
-printf '141|| a dispatch whose ledger write fails\n' >> "$D/issues"
+# Checked before any claim or worktree: nothing about this issue is touched.
+printf '141|| a dispatch whose ledger cannot be read\n' >> "$D/issues"
+before=$(worktrees)
 out=$(LEDGER_STATE="$D/brief.md/state" run 141 ledger-broken "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
-want_exit "a ledger that errors does NOT abort the dispatch" "$rc" 0 "$out"
+want_exit "an unreadable ledger refuses the dispatch" "$rc" 1 "$out"
 log=$(tmuxlog)
-want_contains "the brief still goes out when the ledger is broken" "send-keys -t t:3" "$log"
-want_contains "and is still submitted" "send-keys -t t:3 Enter" "$log"
-want_contains "the ledger failure is loud, not swallowed" "LEDGER RECORD FAILED" "$out"
-want_contains "and says which dispatch lost its record" "ad141-ledger-broken" "$out"
-want_contains "the claim is NOT unwound over a bookkeeping failure" "jonhill90" "$(assignees 141)"
+want_missing "nothing is sent when the ledger cannot be read" "send-keys" "$log"
+want_contains "and says the ledger is why" "ledger is unreadable" "$out"
+if [ "$(assignees 141)" = "" ]; then ok "an unreadable ledger takes no claim"; else bad "an unreadable ledger takes no claim" "assignees: $(assignees 141)"; fi
+if [ "$(worktrees)" = "$before" ]; then ok "an unreadable ledger creates no worktree"; else bad "an unreadable ledger creates no worktree" "$before -> $(worktrees)"; fi
 
-# ...and that tolerance is load-bearing. Patch a copy that makes the ledger
-# write fatal and confirm the case above goes red against it -- a suite that
-# still passes with the failure-tolerance removed has not tested the property.
+# ...and that guard is load-bearing. Patch a copy that skips the step-0 check
+# and confirm the case above goes red against it.
+BROKEN_READ_GUARD="$D/dispatch-ledger-read-unguarded.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$BROKEN_READ_GUARD" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = 'if ! LEDGER_STATUS_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" status 2>&1); then'
+assert marker in text, "ledger readability guard not found -- script shape changed"
+assert text.count(marker) == 1, "ledger readability guard not unique -- script shape changed"
+text = text.replace(marker, "if false; then  # MUTATED: readability guard always skipped", 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose ledger readability guard is skipped" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh whose ledger readability guard is skipped"
+  printf '147|| the same broken ledger, against the unguarded copy\n' >> "$D/issues"
+  out=$(DISPATCH_SCRIPT="$BROKEN_READ_GUARD" LEDGER_STATE="$D/brief.md/state" \
+        run 147 ledger-read-unguarded "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+  if ! grep -qF "ledger is unreadable" <<<"$out"; then
+    ok "mutation confirmed: skipping the guard loses the up-front refusal (the assertion above would now be red)"
+  else
+    bad "mutation confirmed: skipping the guard loses the up-front refusal" \
+      "the unguarded copy still reported 'ledger is unreadable' -- the patch missed the real guard: $out"
+  fi
+fi
+
+# --- A LEDGER *WRITE* FAILURE STILL DOES NOT ABORT A DISPATCH -------------
+#
+# #140's original property, narrowed by #174 rather than dropped: once a lane
+# is ALREADY known free (so step 1 needed no write of its own -- see the
+# lane-free command's docstring), a dispatch proceeds through claim, worktree
+# and a real, verified send before step 6 ever touches the ledger again. If
+# THAT final write fails, the brief has already reached a live pane; unwinding
+# the claim and the worktree at that point would strand a worker that is
+# actually running, which is worse than one stale ledger row. See step 6's
+# own comment for the full argument.
+#
+# The break is deliberately an APPLICATION-level conflict, not a filesystem
+# one: a task already exists under the exact id this dispatch's window name
+# will produce (`ad148-ledger-write-broken`), assigned to a DIFFERENT lane.
+# `Ledger.record_dispatch`'s own assign step refuses that outright (agent-
+# dotfiles#144 finding 2's docstring). A read-only sqlite file was tried
+# first and dropped: whether SQLite's WAL machinery lets a given read
+# through after the main file is chmod'd read-only turned out to depend on
+# per-process lock/checkpoint state and was not deterministic across
+# separate `cli.py` invocations -- exactly the kind of flake this suite
+# should not carry. Reads (step 0, step 1) are untouched by this seed; only
+# the write `record-dispatch` performs at the very end collides.
+LSTATE="$D/state-148"
+seed_conflicting_task "$LSTATE" t:3 ad148-ledger-write-broken 148
+printf '148|| a dispatch whose final ledger write fails\n' >> "$D/issues"
+out=$(LEDGER_STATE="$LSTATE" run 148 ledger-write-broken "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a ledger write that collides still does not abort the dispatch" "$rc" 0 "$out"
+log=$(tmuxlog)
+want_contains "the brief still goes out" "send-keys -t t:3" "$log"
+want_contains "and is still submitted" "send-keys -t t:3 Enter" "$log"
+want_contains "the write failure is loud, not swallowed" "LEDGER RECORD FAILED" "$out"
+want_contains "and says which dispatch lost its record" "ad148-ledger-write-broken" "$out"
+want_contains "the claim is NOT unwound over a bookkeeping failure" "jonhill90" "$(assignees 148)"
+
+# agent-dotfiles#188 finding 1: lane t:3 was ALREADY registered free before
+# this dispatch (seed_conflicting_task's first register_lane call) -- the
+# case #144's own recovery argument does not cover. `record_dispatch` rolled
+# back every write it attempted for t:3, which restores that pre-existing
+# free row unless the caller (`cli.py record_dispatch`) explicitly closes it.
+# A lane running a live, unrecorded brief must never read free again.
+free_check=$(AGENT_SUPERVISOR_STATE_DIR="$LSTATE" python3 "$HERE/../../scripts/supervisor/cli.py" \
+  lane-free --lane t:3 --target t:3 --window-name ad148-ledger-write-broken 2>&1)
+want_missing "the lane a failed record just wrote to no longer reads free" '"free":true' "$free_check"
+want_contains "the ledger already knows this lane, so the answer is not a name-based backfill" '"known":true' "$free_check"
+
+# ...and that tolerance is load-bearing. Patch a copy that makes the write
+# fatal and confirm the case above goes red against it -- a suite that still
+# passes with the failure-tolerance removed has not tested the property.
 BROKEN_DISPATCH="$D/dispatch-ledger-fatal.sh"
 patch_rc=0
 python3 - "$DISPATCH" "$BROKEN_DISPATCH" <<'PY' || patch_rc=$?
@@ -611,9 +768,11 @@ if [ "$patch_rc" -ne 0 ]; then
     "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
 else
   ok "setup: patched a copy of dispatch.sh whose ledger write is fatal"
-  printf '142|| the same failure, against the fatal copy\n' >> "$D/issues"
-  out=$(DISPATCH_SCRIPT="$BROKEN_DISPATCH" LEDGER_STATE="$D/brief.md/state" \
-        run 142 ledger-fatal "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+  LSTATE2="$D/state-149"
+  seed_conflicting_task "$LSTATE2" t:3 ad149-ledger-fatal 149
+  printf '149|| the same write failure, against the fatal copy\n' >> "$D/issues"
+  out=$(DISPATCH_SCRIPT="$BROKEN_DISPATCH" LEDGER_STATE="$LSTATE2" \
+        run 149 ledger-fatal "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
   if [ "$rc" -ne 0 ]; then
     ok "mutation confirmed: making the ledger write fatal fails a dispatch that WORKED (the assertion above would now be red)"
   else
@@ -626,11 +785,16 @@ fi
 
 # --- AN ABORTED DISPATCH LEAVES NO RECORD SAYING WORK IS IN FLIGHT --------
 #
-# The subtle one. A record claiming a lane is busy, written by a dispatch that
+# The subtle one. A record claiming a lane is BUSY, written by a dispatch that
 # then aborted, is worse than no record: the entire point of the ledger is to
 # be believed. The guarantee is ordering, not cleanup -- the write happens
-# after the last abort path -- so this asserts the ledger is EMPTY, lane row
-# included, not merely that the task was tidied up afterwards.
+# after the last abort path -- so this asserts no TASK is ever recorded,
+# which is what "busy" actually means to `lane_available` (agent-dotfiles#174:
+# `lanes":[]` no longer holds here on its own -- step 1's lane selection runs
+# BEFORE the claim and the worktree, and its first-sight backfill legitimately
+# registers a never-seen `free-N` lane as free while deciding whether to use
+# it, whether or not the rest of the dispatch goes on to succeed. That row
+# says free, truthfully, and free is not the claim this test guards against.
 cat > "$D/lanes" <<'FIX'
 1|arch|claude.exe|❯ ready|1|0
 3|free-3|claude.exe|❯ ready|1|0
@@ -640,7 +804,6 @@ out=$(LEDGER_STATE="$D/state-143" run 143 ledger-abort "$D/brief-orig.md" acme/a
 want_exit "a dispatch that aborts on a failed worktree still fails" "$rc" 1 "$out"
 status=$(LEDGER_STATE="$D/state-143" ledger status 2>&1)
 want_missing "an aborted dispatch records no task" "ad143-ledger-abort" "$status"
-want_contains "and no lane record asserting a lane is occupied" '"lanes":[]' "$status"
 want_contains "and no task at all" '"tasks":[]' "$status"
 
 # The same, for the abort that happens before a worktree is even attempted:
@@ -649,8 +812,8 @@ printf '144|someone-else| already claimed, must record nothing\n' >> "$D/issues"
 out=$(LEDGER_STATE="$D/state-144" run 144 ledger-claimed "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "a dispatch refused at the claim still fails" "$rc" 1 "$out"
 status=$(LEDGER_STATE="$D/state-144" ledger status 2>&1)
-want_contains "a refused claim records no lane" '"lanes":[]' "$status"
-want_contains "a refused claim records no task" '"tasks":[]' "$status"
+want_missing "a refused claim records no task" "ad144-ledger-claimed" "$status"
+want_contains "and no task at all" '"tasks":[]' "$status"
 # --- the brief must actually START, not merely be typed (#141) -------------
 # Two lanes sat for 40 minutes each holding a full brief that was typed in and
 # never submitted: `/clear` takes longer to repaint than the dispatcher waits,
@@ -681,8 +844,8 @@ else bad "no worktree is left behind by an unsent brief" "$before before, $(work
 # after it, or every swallowed Enter would leave a record asserting a lane is
 # working on an issue it was never given.
 status=$(LEDGER_STATE="$D/state-160" ledger status 2>&1)
-want_contains "an unsent brief records no lane in the ledger" '"lanes":[]' "$status"
-want_contains "an unsent brief records no task in the ledger" '"tasks":[]' "$status"
+want_missing "an unsent brief records no task in the ledger" "ad160-unsent-brief" "$status"
+want_contains "and no task at all" '"tasks":[]' "$status"
 
 # The other direction, and the one that keeps the check honest: a dispatch
 # that DOES submit must pass silently. A confirmation that fires on every

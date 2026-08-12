@@ -307,8 +307,8 @@ scripts/supervisor/dispatch.sh 81 dispatch-worktree \
   jonhill90/agent-dotfiles ~/source/repos/Personal/agent-dotfiles
 ```
 
-It picks a free lane — idle **and** named `free-N`, both required — claims the
-issue, **creates the worktree**, renames the
+It picks a free lane — idle **and** unowned per the ledger, both required
+(agent-dotfiles#174) — claims the issue, **creates the worktree**, renames the
 window, and sends the brief — the five steps the rest of this file describes,
 performed rather than recited. Any refusal aborts the whole dispatch and undoes
 what it already did, so a non-zero exit means nothing happened and the issue is
@@ -451,12 +451,18 @@ the session's active window, and the supervisor was `/clear`ed and handed a
 worker's brief — losing its loop context and spending a turn duplicating a
 review another lane was already running.
 
-`dispatch.sh` resolves its lane from `lanes.sh --free` **intersected with the
-`free-N` naming rule below**, and refuses an empty target, so a dispatch made
-through it cannot hit the supervisor. It takes no lane from the environment:
-`DISPATCH_LANE` was an override that skipped every one of those checks, and
-`DISPATCH_LANE=t:1` reproduced this same incident at exit 0, so it was removed
-(#89). To aim a dispatch at a specific lane, rename that lane `free-N` first.
+`dispatch.sh` resolves its lane from `lanes.sh --free` **intersected with what
+the ledger says is unowned** (agent-dotfiles#174, superseding the `free-N`
+naming rule below as the authority — the name still matters for a lane the
+ledger has never registered, see that section), and refuses an empty target,
+so a dispatch made through it cannot hit the supervisor. It takes no lane from
+the environment: `DISPATCH_LANE` was an override that skipped every one of
+those checks, and `DISPATCH_LANE=t:1` reproduced this same incident at exit 0,
+so it was removed (#89). To aim a dispatch at a specific lane the ledger has
+never seen, rename that lane `free-N` first; a lane the ledger already knows
+is occupied has to be released in the ledger (its worker finishing normally
+through `lane-done.sh`, or `cli.py record-completion` by hand) — renaming it
+no longer has any effect on whether it is offered.
 For any other
 `send-keys` or `rename-window`, resolve the index yourself and refuse to
 proceed if it is empty:
@@ -537,4 +543,8 @@ uniqueness — any `-S` on the same string releases the waiter, whoever sent it.
 Tie the channel to the issue number, as every example here does.
 
 The window list then answers "what is going on" at a glance: anything named
-`free-N` is available, anything else is in flight and says what it is doing.
+`free-N` is USUALLY available, anything else is USUALLY in flight and says
+what it is doing. It is a human-readable label now, not the authority (agent-
+dotfiles#174) — `dispatch.sh` decides from the ledger, so a stale `free-N`
+left by a hand-rename or a lost completion signal is a cosmetic bug rather
+than a lane the estate mistakenly hands work to.

@@ -560,6 +560,27 @@ class Ledger:
         with contextlib.closing(self._connect()) as connection:
             return self._dict(connection.execute("SELECT * FROM lanes WHERE lane = ?", (lane,)).fetchone())
 
+    def lane_available(self, lane):
+        """Tri-state: None (lane unknown to the ledger), True (registered,
+        no outstanding task), False (registered, an outstanding task owns it).
+
+        agent-dotfiles#174: this is the query `dispatch.sh` now trusts instead
+        of the tmux window name. `None` is deliberately distinct from `False`
+        -- a lane the ledger has never heard of is not the same claim as one
+        it knows is busy, and the caller (dispatch.sh's lane-free backfill)
+        needs to tell them apart to decide whether a first-sight registration
+        is even in play. "Outstanding" mirrors the `one_open_task_per_lane`
+        index: any task not in `complete`, `failed` or `cancelled`.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            if connection.execute("SELECT 1 FROM lanes WHERE lane = ?", (lane,)).fetchone() is None:
+                return None
+            open_task = connection.execute(
+                "SELECT 1 FROM tasks WHERE lane = ? AND status NOT IN ('complete', 'failed', 'cancelled')",
+                (lane,),
+            ).fetchone()
+            return open_task is None
+
     def list_lanes(self):
         with contextlib.closing(self._connect()) as connection:
             rows = connection.execute("SELECT * FROM lanes ORDER BY lane").fetchall()
@@ -938,6 +959,58 @@ class Ledger:
             )
             self._fail(failpoint, "after_mark_delivered")
         return {"lane": lane_record, "task": task}
+
+    def mark_lane_held(self, lane, *, note):
+        """Force `lane_available` to read `False` after a failed `record_dispatch`.
+
+        agent-dotfiles#188 finding 1. `record_dispatch` runs after the brief
+        is already live in a real pane (see its own docstring) and does its
+        five writes in one transaction, so any failure rolls all of them
+        back. For a lane the ledger already knew as free -- every lane after
+        its first backfill, and every lane `lane-done.sh` has ever freed --
+        rollback restores exactly that pre-existing free row. The caller
+        (`cli.py`'s `record_dispatch`) used to just let that rollback stand
+        and trust a comment claiming the lane would read UNKNOWN; it does
+        not, it reads FREE, and the next dispatch clobbers a lane that is
+        actually working.
+
+        This closes that window with an explicit write instead of an absence
+        of one: a placeholder task, status `created`, inserted for `lane` in
+        its own transaction. `lane_available`'s occupied branch -- an
+        outstanding task owns the lane -- becomes true immediately, and
+        stays true until a human reconciles it (`cli.py register` re-issues
+        the lane a clean identity, cancelling this placeholder the same way
+        `register_lane` cancels any other stale outstanding task) or a later
+        dispatch overwrites it, exactly the recovery `record_dispatch`'s own
+        failure message already promises.
+
+        Two cases need no placeholder and are both safe no-ops:
+        * The lane is unknown to the ledger (never registered, or backfill
+          itself never ran) -- `lane_available` already returns `None` there,
+          and `None` is not `True`, so there is nothing to close.
+        * The lane already carries an outstanding task -- the
+          `one_open_task_per_lane` index refuses the INSERT, which only
+          happens when something else already makes this lane read
+          occupied, the exact state this method exists to guarantee.
+        """
+        now = int(self.clock())
+        with self._locked(), self._transaction() as connection:
+            lane_row = connection.execute("SELECT nonce FROM lanes WHERE lane = ?", (lane,)).fetchone()
+            if lane_row is None:
+                return None
+            task_id = f"ledger-hold:{lane}:{now}"
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO tasks(id, lane, pane_nonce, summary, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'created', ?, ?)
+                    """,
+                    (task_id, lane, lane_row["nonce"], f"ledger record failed: {note}", now, now),
+                )
+            except sqlite3.IntegrityError:
+                return None
+            row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            return self._dict(row)
 
     def _write_result(self, task_id, result):
         if not isinstance(result, bytes):

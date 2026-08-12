@@ -85,17 +85,31 @@ fi
 
 CURRENT="$(tmux display-message -p -t "${SESSION}:${IDX}" '#{window_name}' 2>/dev/null)"
 if [ "$CURRENT" != "$EXPECTED_NAME" ]; then
-  echo "lane-done: ${SESSION}:${IDX} is now '$CURRENT', not '$EXPECTED_NAME' -- already handled, not renaming" >&2
+  echo "lane-done: ${SESSION}:${IDX} is now '$CURRENT', not '$EXPECTED_NAME' -- already handled, not renaming. If this lane is actually stranded, recover with: cli.py record-completion --task '$EXPECTED_NAME'" >&2
   exit 1
 fi
 
+# agent-dotfiles#174 test 5 ("the rename is cosmetic") is NOT yet true here,
+# tracked as a deliberate deferral in agent-dotfiles#194: this rename is
+# still `|| exit 1`, evaluated before the ledger release below, so a failed
+# rename (e.g. the window closed) leaves the lane occupied in the ledger
+# with no rename to retry by hand. Not fixed in #183/#174 because
+# `test_lane_done.sh` has its own tested invariant -- no completion is ever
+# recorded for a rename that did not happen -- that a reorder would need to
+# revisit under real tmux, which is a completion-path behavior change, not
+# the availability-side change #174 scoped itself to. See #194.
 tmux rename-window -t "${SESSION}:${IDX}" "free-${IDX}" || exit 1
 
-# Record the completion (agent-dotfiles#140). BEST EFFORT, NEVER FATAL, for
-# the same reason as dispatch.sh's matching block: nothing reads the ledger
-# yet, so a failed bookkeeping write must not turn a lane that genuinely
-# finished -- and has already been renamed back into the pool -- into a
-# reported failure. Loud on failure, never silent.
+# Record the completion (agent-dotfiles#140, updated by agent-dotfiles#174).
+# BEST EFFORT, NEVER FATAL, but for a different reason now that dispatch.sh
+# reads this record to decide what is free: the rename above already
+# happened, so the lane IS free in reality regardless of whether this write
+# lands. If it fails, the ledger keeps showing this lane's last task open --
+# dispatch.sh's fail-closed read (#174) then treats the lane as occupied and
+# simply never offers it again, rather than risk mistakenly offering a lane
+# that is not actually free. That is the safe direction to be wrong in, which
+# is why this stays best-effort rather than turning a genuine completion into
+# a reported failure. Loud on failure, never silent.
 #
 # Runs AFTER the rename, so the only completion ever recorded is one that
 # actually released the lane. The task id is the window name dispatch.sh set,
