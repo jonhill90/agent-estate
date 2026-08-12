@@ -25,14 +25,79 @@
 #   worktree.sh new  <slug> [repo] [base]   create a worktree, print its path
 #   worktree.sh done <path>                 remove a worktree; refuses if dirty
 #   worktree.sh guard <repo>                exit 1 if <repo> itself is dirty
+#   worktree.sh gc    [repo] [base]         remove every worktree whose branch
+#                                            is merged into [base] and whose
+#                                            tree is clean
 #
 # [repo] defaults to the current directory; [base] defaults to origin/main.
 # <slug> becomes branch `lane/<slug>` -- pass the issue and a short reason,
 # e.g. `73-worktree-isolation`, so the branch name says what it is without
 # opening a pane.
+#
+# WHY `gc` exists and what it deliberately does not do (agent-dotfiles#165):
+# `new` has run on every dispatch since #81 and nothing ever calls `done` --
+# `lane-done.sh` renames the tmux window and closes the ledger task but never
+# touches the worktree it was given. 92 registered worktrees held 66 branches
+# the night this was measured, and a held branch cannot be deleted: `gh pr
+# merge --delete-branch` failed twice with "used by worktree at ...".
+#
+# The obvious fix, "lane-done.sh calls done", is wrong for two reasons a
+# completion event cannot see. First, a finished lane's branch is normally
+# pushed and in review -- a reviewer or a follow-up fix may still want that
+# tree, so removing it at completion time is early, not automatic garbage.
+# Second, `done` correctly refuses a dirty tree, so a lane that finished with
+# uncommitted work would silently fail to clean and the leak would persist
+# exactly where losing it matters, with nobody told.
+#
+# `gc` is a sweep, not a completion hook: it removes a worktree only once
+# both are true -- its branch's tip is an ancestor of [base] (so nothing
+# reachable only from the branch would become unreachable) and its tree is
+# clean (the same guard `done` already applies, reused rather than
+# reimplemented). Anything unmerged or dirty is left alone and reported, not
+# retried or forced. This makes `gc` idempotent and safe to run repeatedly
+# from wherever it ends up wired in -- deliberately NOT wired into the
+# dispatch/lane-done pair or the Director tick by this change. This estate
+# has shipped that exact shape wrong five times already (`acp_transport.py`,
+# `claim.sh` before #74, `worktree.sh` itself before #81, and two more --
+# see dispatch.sh's header): a tool that fails closed when called, that
+# nothing calls. Wiring `gc` in is a separate decision for whoever owns the
+# Director tick, not bundled into landing the tool.
 set -uo pipefail
 
 usage() { sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+# Shared by `done` and `gc`: remove TARGET, refusing anything that would
+# discard work. Never call this on a target that has not already been
+# checked for uncommitted changes belonging to work in progress -- `gc`
+# checks "merged" separately, before this runs.
+safe_remove() {
+  local target="$1"
+  # A worktree with uncommitted changes is someone's unfinished work, not
+  # garbage -- refuse rather than guess, same as safe-deletion.
+  local status
+  status=$(git -C "$target" status --porcelain 2>&1)
+  if [ -n "$status" ]; then
+    echo "worktree: $target has uncommitted changes -- not removing" >&2
+    echo "$status" >&2
+    return 1
+  fi
+  # A clean `git status` says nothing about a detached HEAD: a lane can
+  # `checkout --detach` and commit there, and the dirty-tree check above
+  # never sees it. Removing the worktree at that point makes the commit
+  # unreachable from any ref -- a dangling object, invisible and eventually
+  # GC-eligible. Refuse unless some branch, local or remote, already
+  # contains HEAD.
+  if ! git -C "$target" symbolic-ref -q HEAD >/dev/null; then
+    local containing
+    containing=$(git -C "$target" for-each-ref refs/heads refs/remotes --contains HEAD --format='%(refname)' 2>/dev/null)
+    if [ -z "$containing" ]; then
+      echo "worktree: $target is on a detached HEAD at $(git -C "$target" rev-parse --short HEAD 2>/dev/null) with no branch containing it -- not removing (would lose the commit)" >&2
+      return 1
+    fi
+  fi
+  git -C "$target" worktree remove "$target" >&2 || return 1
+  return 0
+}
 
 CMD="${1:-}"
 case "$CMD" in
@@ -59,28 +124,67 @@ done)
   TARGET="${2:-}"
   [ -n "$TARGET" ] || usage
   [ -d "$TARGET" ] || { echo "worktree: $TARGET does not exist" >&2; exit 1; }
-  # A worktree with uncommitted changes is someone's unfinished work, not
-  # garbage -- refuse rather than guess, same as safe-deletion.
-  status=$(git -C "$TARGET" status --porcelain 2>&1)
-  if [ -n "$status" ]; then
-    echo "worktree: $TARGET has uncommitted changes -- not removing" >&2
-    echo "$status" >&2
-    exit 1
+  safe_remove "$TARGET" || exit 1
+  exit 0 ;;
+
+gc)
+  REPO="${2:-$PWD}"
+  BASE="${3:-origin/main}"
+  # Parse `worktree list --porcelain`: records are blank-line separated,
+  # each starting with `worktree <path>`, optionally followed by a
+  # `branch refs/heads/<name>` line (absent for detached/bare entries).
+  # The first record is always the main worktree (REPO itself) -- never a
+  # gc candidate, so it is dropped before the loop below.
+  path="" branch="" first=1
+  paths=() branches=()
+  while IFS= read -r line; do
+    case "$line" in
+      worktree\ *) path="${line#worktree }"; branch="" ;;
+      branch\ refs/heads/*) branch="${line#branch refs/heads/}" ;;
+      "")
+        if [ -n "$path" ]; then
+          if [ "$first" -eq 1 ]; then
+            first=0
+          else
+            paths+=("$path")
+            branches+=("$branch")
+          fi
+        fi
+        path="" ;;
+    esac
+  done < <(git -C "$REPO" worktree list --porcelain)
+  if [ -n "$path" ] && [ "$first" -eq 0 ]; then
+    paths+=("$path")
+    branches+=("$branch")
   fi
-  # A clean `git status` says nothing about a detached HEAD: a lane can
-  # `checkout --detach` and commit there, and the dirty-tree check above
-  # never sees it. Removing the worktree at that point makes the commit
-  # unreachable from any ref -- a dangling object, invisible and eventually
-  # GC-eligible. Refuse unless some branch, local or remote, already
-  # contains HEAD.
-  if ! git -C "$TARGET" symbolic-ref -q HEAD >/dev/null; then
-    containing=$(git -C "$TARGET" for-each-ref refs/heads refs/remotes --contains HEAD --format='%(refname)' 2>/dev/null)
-    if [ -z "$containing" ]; then
-      echo "worktree: $TARGET is on a detached HEAD at $(git -C "$TARGET" rev-parse --short HEAD 2>/dev/null) with no branch containing it -- not removing (would lose the commit)" >&2
-      exit 1
+
+  removed=0 skipped=0
+  for i in "${!paths[@]}"; do
+    p="${paths[$i]}"
+    b="${branches[$i]}"
+    if [ -z "$b" ]; then
+      echo "worktree: gc skipping $p -- no branch (detached or bare)" >&2
+      skipped=$((skipped + 1))
+      continue
     fi
-  fi
-  git -C "$TARGET" worktree remove "$TARGET" >&2 || exit 1
+    if [ ! -d "$p" ]; then
+      echo "worktree: gc skipping $p -- registered but missing on disk (run 'git worktree prune')" >&2
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if ! git -C "$REPO" merge-base --is-ancestor "refs/heads/$b" "$BASE" 2>/dev/null; then
+      echo "worktree: gc skipping $p -- branch '$b' is not merged into $BASE" >&2
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if safe_remove "$p"; then
+      echo "worktree: gc removed $p (branch '$b' merged into $BASE)" >&2
+      removed=$((removed + 1))
+    else
+      skipped=$((skipped + 1))
+    fi
+  done
+  echo "worktree: gc done -- removed $removed, skipped $skipped" >&2
   exit 0 ;;
 
 guard)

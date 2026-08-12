@@ -99,6 +99,77 @@ rm -f "$REPO/untracked.txt"
 out=$(bash "$WT" guard "$REPO" 2>&1); rc=$?
 want_exit "guard passes after removing the untracked-only file" "$rc" 0 "$out"
 
+# --- gc: removes a merged, clean worktree; leaves unmerged/dirty ones alone
+# (agent-dotfiles#165) ------------------------------------------------------
+git -C "$REPO" checkout -q -- file.txt 2>/dev/null || true
+
+# Candidate A: branch merged into origin/main, tree clean -> gc removes it.
+out=$(bash "$WT" new 165-merged "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "gc setup: new (merged case) exits 0" "$rc" 0 "$out"
+MERGED_DEST="$out"
+echo "merged change" >> "$MERGED_DEST/file.txt"
+git -C "$MERGED_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "merged work"
+git -C "$MERGED_DEST" push -q origin lane/165-merged
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/165-merged
+git -C "$REPO" push -q origin main
+git -C "$MERGED_DEST" fetch -q origin
+
+# Candidate B: branch unmerged, tree clean -> gc must leave it. It needs a
+# commit of its own -- a branch with no unique commits is trivially an
+# ancestor of main and gc would (correctly) treat it as merged.
+out=$(bash "$WT" new 165-unmerged "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "gc setup: new (unmerged case) exits 0" "$rc" 0 "$out"
+UNMERGED_DEST="$out"
+echo "unmerged change" >> "$UNMERGED_DEST/file.txt"
+git -C "$UNMERGED_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "unmerged work"
+
+# Candidate C: branch merged, tree dirty -> gc must leave it (mutation-check
+# below drops exactly this guard).
+out=$(bash "$WT" new 165-dirty "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "gc setup: new (dirty-but-merged case) exits 0" "$rc" 0 "$out"
+DIRTY_DEST="$out"
+echo "dirty merged change" >> "$DIRTY_DEST/file.txt"
+git -C "$DIRTY_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "dirty-merged base"
+git -C "$DIRTY_DEST" push -q origin lane/165-dirty
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/165-dirty
+git -C "$REPO" push -q origin main
+git -C "$DIRTY_DEST" fetch -q origin
+echo "uncommitted on top of merged branch" >> "$DIRTY_DEST/file.txt"
+
+gc_out=$(bash "$WT" gc "$REPO" origin/main 2>&1); gc_rc=$?
+want_exit "gc exits 0 (a sweep reports, does not fail)" "$gc_rc" 0 "$gc_out"
+
+if [ -d "$MERGED_DEST" ]; then bad "gc removes a merged, clean worktree" "$MERGED_DEST still present: $gc_out"; else ok "gc removes a merged, clean worktree"; fi
+if [ -d "$UNMERGED_DEST" ]; then ok "gc leaves an unmerged worktree in place"; else bad "gc leaves an unmerged worktree in place" "removed despite being unmerged"; fi
+if [ -d "$DIRTY_DEST" ]; then ok "gc leaves a merged-but-dirty worktree in place"; else bad "gc leaves a merged-but-dirty worktree in place" "removed despite uncommitted edits"; fi
+
+# The assertion that ties this to the actual complaint: a branch gc freed can
+# now be deleted, where it failed while the worktree held it.
+if git -C "$REPO" branch -D lane/165-merged >/dev/null 2>&1; then
+  ok "branch -D succeeds on the branch gc freed"
+else
+  bad "branch -D succeeds on the branch gc freed" "still held after gc"
+fi
+if git -C "$REPO" branch -D lane/165-unmerged >/dev/null 2>&1; then
+  bad "unmerged branch should still be held by its worktree" "branch -D unexpectedly succeeded"
+else
+  ok "unmerged branch is still held by its worktree, as expected"
+fi
+
+# Idempotent: a second run over the same repo changes nothing further -- the
+# unmerged and dirty candidates are still there, and gc reports 0 removed.
+gc_out2=$(bash "$WT" gc "$REPO" origin/main 2>&1); gc_rc2=$?
+want_exit "gc second run exits 0" "$gc_rc2" 0 "$gc_out2"
+if grep -q "removed 0" <<<"$gc_out2"; then ok "gc is idempotent -- second run removes nothing"; else bad "gc is idempotent -- second run removes nothing" "$gc_out2"; fi
+if [ -d "$UNMERGED_DEST" ] && [ -d "$DIRTY_DEST" ]; then ok "gc second run left the same worktrees untouched"; else bad "gc second run left the same worktrees untouched" "one of them disappeared"; fi
+
+# Clean up the two survivors so the fixture directory can be removed.
+git -C "$DIRTY_DEST" checkout -q -- file.txt
+bash "$WT" done "$DIRTY_DEST" >/dev/null 2>&1
+bash "$WT" done "$UNMERGED_DEST" >/dev/null 2>&1
+
 rm -rf "$D"
 
 echo "$pass passed, $fail failed"
