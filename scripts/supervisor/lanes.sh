@@ -10,6 +10,8 @@
 #   blocked  the agent is waiting on an interactive prompt    -> needs a human
 #   unsent   a brief is typed into the box and never submitted -> needs a human
 #   dead     no agent at all, just a shell                   -> restart the agent
+#   stale    no agent, and the window name still claims a task -> restore.sh,
+#            and do not believe the name (#237)
 #   service  a supervisor service, deliberately not a lane   -> leave alone
 #   unknown  no probe recognizes the last line                -> ask a human
 #            (a harness with no adapter under harness/, or a recognised
@@ -141,6 +143,15 @@ SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
 # --free cheerfully offered window 1 while the supervisor sat idle between
 # ticks. "Free" and "yours to take" are different questions.
 SUPERVISOR_WINDOW="${LANES_SUPERVISOR_WINDOW:-1}"
+# agent-dotfiles#237: the shape `dispatch.sh` mints for a dispatched lane's
+# window -- `<repo initials><issue number>-<slug>`, e.g. `ad180-status-accuracy`
+# or `sk159-plugin-json` (dispatch.sh:157). A window name matching this is
+# CLAIMING a task; every other name (`free-27`, `arch`, `telegram-poller`,
+# anything hand-typed) claims nothing. Deliberately a POSITIVE match on the
+# estate's own convention rather than "not free-N": the #126 whitelist
+# posture, and it keeps every window this probe has never been shown reading
+# exactly as it did before #237.
+TASK_NAME_RE="${LANES_TASK_NAME_RE:-^[A-Za-z]+[0-9]+-}"
 # A lane is hung if it looks busy but tmux has seen no output from it for this
 # long. Must exceed the slowest legitimate repaint interval -- Claude Code's
 # footer drops to MINUTE granularity past 60s, so a live turn can go ~60s
@@ -262,7 +273,33 @@ emit_rows() {
       # classification is reachable from here, so `--free`, `--blocked`, and
       # every existing row are untouched. See SERVICE_RE above for why the
       # signal is the pane's own process and not the window's name.
-      if is_service_pane "$pid"; then state=service; else state=dead; fi
+      # agent-dotfiles#237: a THIRD outcome for a pane running a shell, and
+      # the same shape of narrowing #154 used above -- `stale` can only be
+      # reached from `dead`, so no other state moves and `--free` is
+      # untouched.
+      #
+      # `dead` was the correct answer during the #237 incident and it was not
+      # ENOUGH. Nine panes came back as dead shells still wearing window
+      # names from hours-finished work (`sk159-plugin-json`,
+      # `ad180-status-accuracy`), an operator read those names as current,
+      # and respawning them killed the live agents that had been resumed by
+      # hand in the meantime. The name was confidently wrong and nothing in
+      # the table said so.
+      #
+      # The name is read here for exactly ONE thing: to notice that this pane
+      # is CLAIMING a task. It is never read to decide what the lane was
+      # doing -- that answer lives in the ledger, which is what `restore.sh`
+      # consults. A shell cannot be running the task its window advertises,
+      # so a shell under a task-shaped name is a lie in the table, whoever
+      # wrote it. `free-N` is the estate's "no claim" convention and stays
+      # plain `dead`: nothing about it misleads.
+      if is_service_pane "$pid"; then
+        state=service
+      elif [[ "$name" =~ $TASK_NAME_RE ]]; then
+        state=stale
+      else
+        state=dead
+      fi
     elif ! hidx=$(harness_index_for_command "$cmd"); then
       # agent-dotfiles#201: no adapter's HARNESS_COMMAND_RE claims this pane's
       # command -- a harness this file has never been shown (opencode does
@@ -398,6 +435,7 @@ case "$MODE" in
     printf '%-4s %-24s %-12s %s\n' WINDOW NAME COMMAND STATE
     awk -F'\t' '{printf("%-4s %-24s %-12s %s\n",$1,$2,$3,$4)}' <<<"$rows"
     dead=$(awk -F'\t' '$4=="dead"' <<<"$rows" | wc -l | tr -d ' ')
+    stale=$(awk -F'\t' '$4=="stale"' <<<"$rows" | wc -l | tr -d ' ')
     hung=$(awk -F'\t' '$4=="hung"' <<<"$rows" | wc -l | tr -d ' ')
     # #159: menu-blocked and text-blocked are counted together here -- this
     # line answers "how many lanes need a human", the same question it
@@ -407,6 +445,10 @@ case "$MODE" in
     unsent=$(awk -F'\t' '$4=="unsent"' <<<"$rows" | wc -l | tr -d ' ')
     unknown=$(awk -F'\t' '$4=="unknown"' <<<"$rows" | wc -l | tr -d ' ')
     [ "$dead" -gt 0 ] && echo "  ${dead} lane(s) have no agent — restart before dispatching"
+    # #237: louder than `dead` on purpose. The danger here is not the missing
+    # agent, it is the name, which reads as live work to anyone scanning the
+    # table -- and acting on it is what turned one tmux server loss into two.
+    [ "$stale" -gt 0 ] && echo "  ${stale} lane(s) have no agent but still carry a task name — the name is STALE, do not trust it; run restore.sh"
     [ "$hung" -gt 0 ] && echo "  ${hung} lane(s) look wedged — a dispatch there would queue forever"
     # A blocked lane is a question nobody has heard -- surface it, don't just
     # exclude it from --free.

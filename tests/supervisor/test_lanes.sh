@@ -292,7 +292,16 @@ want "the generic shell lane is still dead"              w-dead  dead "$out"
 # named free-N is not a lane" this window would have become invisible. The
 # probe here keys on what the pane's process IS, not on what the window is
 # called, so a renamed lane is classified exactly as it was before #154.
-want "a renamed lane that lost its agent is still dead"  ad102-renamed-lane dead "$out"
+#
+# agent-dotfiles#237 SPLIT this row out of `dead` without weakening anything
+# above: the pane's process is still what decides that no agent is running,
+# and the lane is still reported. What `stale` adds is the second fact #154
+# had no way to say -- this window's NAME still claims a task it cannot be
+# doing. That is the #237 incident exactly (nine dead shells wearing finished
+# work's names, read as current, respawned over live agents), and the name is
+# consulted here ONLY to notice the claim, never to decide what the lane was
+# doing; `restore.sh` answers that from the ledger.
+want "a renamed lane that lost its agent is stale, not dead" ad102-renamed-lane stale "$out"
 # The exemption is deliberately narrow: it covers the deployment path
 # `inbox-poll.sh`'s header recommends (the script as the window's command),
 # not "any pane with a poller somewhere in it". A poller typed by hand into an
@@ -307,13 +316,42 @@ want "a poller hand-run inside a login shell is still dead" w-hand-run-poller de
 want "a dead lane that merely printed the script name is dead" w-mentions-poller dead "$out"
 
 # #154: the count line is the hazard, not the table row -- `loop-tick.md` tells
-# a reader to restart every lane it counts. Five dead lanes here (w-dead,
-# ad102-renamed-lane, free-27, w-hand-run-poller, w-mentions-poller); the
-# service window must not be one of them.
-if grep -qE '5 lane\(s\) have no agent' <<<"$out"; then
+# a reader to restart every lane it counts. Four dead lanes here (w-dead,
+# free-27, w-hand-run-poller, w-mentions-poller); the service window must not
+# be one of them, and #237 moved ad102-renamed-lane to its own `stale` count
+# line below -- it is still counted, still visible, just not under a heading
+# whose instruction ("restart before dispatching") is the wrong one for it.
+if grep -qE '4 lane\(s\) have no agent' <<<"$out"; then
   echo "  ok   the dead count line counts only genuinely dead lanes"; pass=$((pass+1));
 else
-  echo "  FAIL dead count line is not 5 in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
+  echo "  FAIL dead count line is not 4 in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
+fi
+
+# agent-dotfiles#237: the stale count line, and the WORDING is the point. The
+# incident was not caused by a missing row -- `dead` was reported correctly
+# for all nine panes. It was caused by nobody being told the NAMES were a
+# stale snapshot, so an operator acted on them. A count line that said
+# "restart before dispatching" is exactly the instruction that killed live
+# agents.
+if grep -qE '1 lane\(s\) have no agent but still carry a task name' <<<"$out" \
+  && grep -qiE 'STALE, do not trust it' <<<"$out"; then
+  echo "  ok   the stale count line names the name itself as the hazard"; pass=$((pass+1));
+else
+  echo "  FAIL stale count line missing or does not warn about the name:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
+fi
+# The narrowing must be exactly that: `stale` is reachable ONLY from `dead`.
+# If a single lane that used to read free/busy/blocked/unknown now reads
+# stale, this change has broken dispatch, not improved reporting.
+if [ "$(awk '$NF=="stale"' <<<"$out" | wc -l | tr -d ' ')" = 1 ]; then
+  echo "  ok   stale claimed exactly one row, and it came from dead"; pass=$((pass+1));
+else
+  echo "  FAIL stale claimed rows other than the one dead lane:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
+fi
+# A stale lane is never offered for work -- the same withholding `dead` had.
+if grep -qE '(^|:)27$' <<<"$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --free 2>&1)"; then
+  echo "  FAIL --free offered the stale lane"; fail=$((fail+1));
+else
+  echo "  ok   --free withholds the stale lane"; pass=$((pass+1));
 fi
 
 # #159: nine blocked lanes -- the six menu/text captures, w-text-blocked,

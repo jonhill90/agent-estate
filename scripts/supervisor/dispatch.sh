@@ -744,6 +744,13 @@ unshipped work looks exactly like no work, and the worktree is temporary.
 EOF
 fi
 
+# agent-dotfiles#237: the instant BEFORE the `/clear` that starts this lane's
+# new conversation. `harness_session.py` uses it to tell the transcript this
+# dispatch created from every other transcript on the machine -- see that
+# module for why "began after this moment" is one of the three tests it
+# requires, and why nothing weaker resolves a lane in this estate.
+DISPATCH_SEND_EPOCH=$(date +%s)
+
 # `/clear` first: an author reviewing their own PR is not an independent
 # reviewer, and a lane carrying the last task's context is not a fresh one.
 tmux send-keys -t "$LANE_TARGET" "/clear" Enter 2>/dev/null \
@@ -980,6 +987,41 @@ if [ -z "$LANE_META" ] || [[ "$LANE_META" != *"|"* ]]; then
   ledger_record_failed "could not read pane metadata for $LANE: $LANE_META"
 else
   IFS='|' read -r PANE_ID PANE_CMD PANE_PATH SOCKET_PATH SESSION_CREATED SESSION_ID <<<"$LANE_META"
+  # agent-dotfiles#237: the HARNESS conversation id, which is the only part of
+  # this record that survives a tmux server loss -- `$SESSION_ID` above is
+  # tmux's own `#{session_id}` and dies with the server. Resolved here, in the
+  # same block as the rest of the pane identity, and under the same rule as
+  # everything else in it: FAILING TO RESOLVE IS NOT A DISPATCH FAILURE. The
+  # brief is already live in the pane; a lane recorded with no session id is
+  # merely one `restore.sh` will report unrecoverable, which is the outcome
+  # #237 asks for over a fresh agent wearing this lane's name.
+  #
+  # `--marker "$WORKTREE"`: unique to this dispatch (worktree.sh mints a fresh
+  # path per dispatch), so the resolver can tell this lane's brand-new
+  # transcript from every other one on the machine. See harness_session.py for
+  # the two other tests it applies and for what was measured before settling
+  # on these.
+  HARNESS_SESSION_ID=""
+  if [ -n "$LANE_HARNESS" ]; then
+    if ! HARNESS_SESSION_ID=$("${DISPATCH_PYTHON:-python3}" "$HERE/harness_session.py" \
+        --harness "$LANE_HARNESS" \
+        --marker "$WORKTREE" \
+        --since "$DISPATCH_SEND_EPOCH" \
+        --timeout "${DISPATCH_SESSION_TIMEOUT:-20}" 2>&1); then
+      # stdout, not stderr (agent-dotfiles#199/#237): this is loud, not a
+      # failure -- the brief already went out and the dispatch still
+      # succeeds. #199 holds dispatch.sh's stderr clean on any successful
+      # dispatch, on purpose, so the supervisor can treat stderr output as
+      # "something is wrong" without also having to parse it for this
+      # expected, non-fatal case. A resolver that can never find a real
+      # harness process (this repo's own test stubs, or a lane whose
+      # harness has no transcript path at all) hits this on every dispatch,
+      # which is exactly the noise #199 exists to keep off stderr.
+      echo "dispatch: no harness session id recorded for $WINDOW_NAME -- ${HARNESS_SESSION_ID:-no reason given}"
+      echo "dispatch: the dispatch STANDS; this lane will read unrecoverable to restore.sh until its next dispatch"
+      HARNESS_SESSION_ID=""
+    fi
+  fi
   LEDGER_ARGS=(
     record-dispatch
     --lane "$LANE"
@@ -990,6 +1032,7 @@ else
     --command "$PANE_CMD"
     --server-id "${SOCKET_PATH}:${SESSION_CREATED}"
     --session-id "$SESSION_ID"
+    --harness-session-id "$HARNESS_SESSION_ID"
     --github "$REPO"
   )
   # agent-dotfiles#216: forward the harness `lane-free` already resolved

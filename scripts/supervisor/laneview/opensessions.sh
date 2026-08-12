@@ -69,7 +69,12 @@ map_status() {
     busy) echo running ;;
     hung) echo stale ;;
     menu-blocked|text-blocked|unsent|scrolled) echo waiting ;;
-    dead) echo error ;;
+    # `stale` (agent-dotfiles#237) is a narrowing of `dead`: a shell whose
+    # window name still claims a task the ledger has already closed. It is
+    # error, same as dead, because there is no agent running -- the
+    # narrowing is diagnostic (a lying name vs. no name), not a different
+    # severity, and OpenSessions has no vocabulary slot for "dead and lying".
+    dead|stale) echo error ;;
     service|supervisor|unknown) echo idle ;;
     *)
       echo "laneview/opensessions.sh: no mapping for lanes.sh state '$1' -- rendering it stale rather than idle" >&2
