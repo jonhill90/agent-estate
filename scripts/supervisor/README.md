@@ -287,6 +287,33 @@ lane, claim the issue, create the worktree, rename the window, send the brief:
 dispatch.sh <issue> <slug> <brief-file> [repo] [repo-path]
 ```
 
+### Two identities per window, and they are not interchangeable (#241)
+
+A lane has a **lane id** and a **tmux target**, and the split runs through
+`lanes.sh`, `dispatch.sh` and `lane-done.sh`:
+
+| | example | what it is | who takes it |
+|---|---|---|---|
+| lane | `agent-dotfiles:5` | a SLOT number — the identity the ledger keys on, the one every recovery command in `dispatch.sh`'s refusal names, and the one Jon reads off the tmux window list | `cli.py lane-free --lane`, `record-dispatch --lane`, `cancel-open-task --lane` |
+| target | `agent-dotfiles:@12` | tmux's own handle for the window, stable for its lifetime and never reused | every `send-keys`, `rename-window`, `capture-pane`, `display-message` |
+
+This server runs `renumber-windows on`, so closing any window shifts every
+higher **index** down by one. A target resolved before a close and used after
+it addresses a different pane — measured in agent-dotfiles#241, and observed
+on 2026-08-12 as three briefs landing in windows other than the ones
+`dispatch.sh` reported. A window **id** cannot move.
+
+The lane id deliberately stays index-based: it names a slot that must survive
+a window being closed and recreated, which is exactly what destroys a window
+id. So `lanes.sh --free` emits both, tab separated, and `cli.py lane_free`'s
+existing `--lane`/`--target` split is where they part company.
+
+Empty targets are refused, not defaulted: `send-keys -t session:` does not
+error, it hits the ACTIVE window (usually the supervisor), and `session:@` is
+empty the same way. `dispatch.sh` checks the target's shape positively and
+skips any candidate it cannot place, so a `lanes.sh` that stopped emitting the
+column dispatches nothing rather than guessing.
+
 A lane is a candidate only if `lanes.sh` calls it `free` **and** the LEDGER
 says it is unowned (agent-dotfiles#174). `lanes.sh` still answers "is an agent
 there and not mid-turn" from pane content — that has not changed. "Is this

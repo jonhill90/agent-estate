@@ -36,6 +36,25 @@
 F="${LANES_FIXTURE:?}"
 # Kept in sync with stubs/ps-lanes.
 PID_BASE="${LANES_STUB_PID_BASE:-9000}"
+
+# agent-dotfiles#241: windows now have TWO names -- the index (a slot number,
+# what the fixture keys on) and tmux's own `#{window_id}` (`@N`, stable for
+# the window's lifetime). The scripts under test address panes by id, so this
+# stub has to answer to both. Ids are synthesised as WID_BASE + index and are
+# deliberately NOT equal to the index: a stub where `@5` and `5` were the same
+# string could not tell an id-addressed call from an index-addressed one, and
+# the whole point of #241's tests is that distinction.
+WID_BASE="${LANES_STUB_WID_BASE:-100}"
+wid_for()  { printf '@%s' "$(( WID_BASE + $1 ))"; }
+# Resolve whatever came after `session:` back to a fixture index. An `@N`
+# target is a window id; anything else is already an index.
+idx_for() {
+  local w="$1"
+  case "$w" in
+    @*) printf '%s' "$(( ${w#@} - WID_BASE ))" ;;
+    *)  printf '%s' "$w" ;;
+  esac
+}
 sub="$1"; shift
 target=""; fmt=""
 while [ $# -gt 0 ]; do
@@ -47,26 +66,32 @@ while [ $# -gt 0 ]; do
   esac
 done
 win="${target##*:}"; win="${win%%.*}"
+win="$(idx_for "$win")"
 line=$(awk -F'|' -v w="$win" '$1==w' "$F")
 case "$sub" in
   has-session) exit 0 ;;
   list-windows) cut -d'|' -f1 "$F" ;;
   list-panes)
     # Mirrors the real -F used by lanes.sh: index, name, command, activity,
-    # in-mode, pane pid, tab separated, active pane only.
+    # in-mode, pane pid, window id, tab separated, active pane only. The
+    # window id is synthesised (#241) rather than being a fixture column --
+    # no fixture needs to CHOOSE an id, only to have one that differs from
+    # the index.
     now=$(date +%s)
     # `b` absorbs the input-box column so it cannot leak into `m`: with a
     # 6-variable read, a 7-field row put "0|<box>" into the in-mode slot and
     # every boxed fixture reported `scrolled`. `p` does the same for the argv
     # column added in #154.
     while IFS='|' read -r i n c t a m b p; do
-      printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$n" "$c" "$((now-a))" "${m:-0}" "$((PID_BASE+i))"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$n" "$c" "$((now-a))" "${m:-0}" "$((PID_BASE+i))" "$(wid_for "$i")"
     done < "$F" ;;
   display-message)
     case "$fmt" in
       '#{window_name}') cut -d'|' -f2 <<<"$line" ;;
       '#{pane_current_command}') cut -d'|' -f3 <<<"$line" ;;
       '#{window_activity}') echo $(( $(date +%s) - $(cut -d'|' -f5 <<<"$line") )) ;;
+      '#{window_index}') printf '%s\n' "$win" ;;
+      '#{window_id}') wid_for "$win"; printf '\n' ;;
     esac ;;
   capture-pane)
     # The input box sits ABOVE the status line in a real pane, so it is

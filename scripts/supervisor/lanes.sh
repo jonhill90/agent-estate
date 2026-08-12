@@ -42,6 +42,27 @@
 #        lanes.sh --blocked [session] print only lane names waiting on a human
 #        lanes.sh --json [session]
 #
+# TWO WAYS TO NAME A WINDOW, AND THEY ARE NOT INTERCHANGEABLE (#241). A
+# window INDEX (`session:5`) is a slot number: humans read it, it is what the
+# tmux window list shows, and it is what this estate means by "lane 5". It is
+# NOT a stable handle -- this server runs `renumber-windows on`, so closing
+# any window shifts every higher index down by one, measured in #241. A
+# window ID (`session:@12`) is tmux's own handle: stable for the window's
+# lifetime and never reused.
+#
+# So every renderer below emits BOTH, and each consumer takes the one that
+# answers its question:
+#
+#   the table   index only -- it is what Jon reads, and that must not change
+#   --json      "window" (index) and "window_id"
+#   --free      "<session>:<index>\t<session>:@<id>" -- the LANE identity that
+#               the ledger keys on, then the TMUX TARGET to address it with
+#
+# `--free`'s two columns are the seam `cli.py lane_free` already has as
+# `--lane` and `--target`. The ledger identity stays the index on purpose: it
+# names a SLOT that must survive a window being closed and recreated, which
+# a window id deliberately does not.
+#
 # Exit 0 always when the session exists; the states are the output, not the
 # exit code. Exit 1 if the session does not exist -- which is NOT "no lanes".
 
@@ -148,12 +169,18 @@ TAB=$'\t'   # tmux does not interpret a literal \t inside -F
 # -- the pane that capture-pane reads and send-keys would hit. Reading the
 # command from ":$w.1" while capturing from ":$w" meant a split lane could
 # report the first pane's command and the active pane's screen.
-declare -a IDX NAME CMD ACTIVITY PANEMODE PANEPID
-while IFS=$'\t' read -r w n c a m p; do
+#
+# #241 adds `#{window_id}` to the same call rather than a second one: the
+# index and the id must describe the SAME window, and two calls could not
+# guarantee that -- a window closing between them is the very race this is
+# being read for. It is appended last so every existing positional read of
+# this list keeps its column.
+declare -a IDX NAME CMD ACTIVITY PANEMODE PANEPID WID
+while IFS=$'\t' read -r w n c a m p wid; do
   [ -n "$w" ] || continue
-  IDX+=("$w"); NAME+=("$n"); CMD+=("$c"); ACTIVITY+=("$a"); PANEMODE+=("$m"); PANEPID+=("$p")
+  IDX+=("$w"); NAME+=("$n"); CMD+=("$c"); ACTIVITY+=("$a"); PANEMODE+=("$m"); PANEPID+=("$p"); WID+=("$wid")
 done < <(tmux list-panes -s -t "$SESSION" -f '#{pane_active}' \
-           -F "#{window_index}${TAB}#{window_name}${TAB}#{pane_current_command}${TAB}#{window_activity}${TAB}#{pane_in_mode}${TAB}#{pane_pid}" 2>/dev/null)
+           -F "#{window_index}${TAB}#{window_name}${TAB}#{pane_current_command}${TAB}#{window_activity}${TAB}#{pane_in_mode}${TAB}#{pane_pid}${TAB}#{window_id}" 2>/dev/null)
 
 # #154. Answers one question about a pane whose command is a shell: is that
 # shell one of this directory's services, or is it the wreckage of an agent
@@ -175,8 +202,29 @@ now_epoch=$(date +%s)
 emit_rows() {
   local i
   for i in "${!IDX[@]}"; do
-    local w="${IDX[$i]}" name="${NAME[$i]}" cmd="${CMD[$i]}" act="${ACTIVITY[$i]}" mode="${PANEMODE[$i]}" pid="${PANEPID[$i]}"
-    local pane state age pane_lines pane_tail hidx busy_tail
+    local w="${IDX[$i]}" name="${NAME[$i]}" cmd="${CMD[$i]}" act="${ACTIVITY[$i]}" mode="${PANEMODE[$i]}" pid="${PANEPID[$i]}" wid="${WID[$i]}"
+    local pane state age pane_lines pane_tail hidx busy_tail target
+    # #241: the captures below address the window by ID, not by index. The
+    # list-panes call above and these two captures are separated by a whole
+    # loop iteration per lane, and under `renumber-windows on` a window
+    # closing in between shifts every higher index -- which would attribute
+    # one lane's pane content to another lane's row. The id cannot shift.
+    # Falls back to the index only if tmux gave no id, and says so when it
+    # does. A target is never allowed to be empty -- an empty tmux target
+    # hits the ACTIVE window, which is the incident dispatch.sh's own refusal
+    # exists for -- so the fallback has to be to something, and the index is
+    # what this file used before #241. It is a silent-regression path
+    # otherwise, which is exactly the shape #241 is about, so it is loud.
+    #
+    # THE ONE WAY THIS FIRES IN PRACTICE is a truncated `list-panes` row.
+    # `IFS=$'\t' read` collapses a RUN of tabs into one delimiter (a tab is
+    # IFS whitespace), so any empty field above shifts every later one left
+    # and empties this last variable. Real tmux never emits an empty field
+    # for any of the six; a stub that did is what found this.
+    if [ -z "$wid" ]; then
+      echo "lanes: no window id for ${SESSION}:${w} -- addressing it by index, which is not stable under renumber-windows (#241)" >&2
+    fi
+    target="$SESSION:${wid:-$w}"
     # ONLY the status line -- the last non-empty line of the visible pane.
     #
     # This used to grep `capture-pane -S -6`, which is six scrollback lines
@@ -186,7 +234,7 @@ emit_rows() {
     # state during the review that found it. An earlier comment here blamed
     # the Copilot harness; that was a misdiagnosis. It was never
     # harness-specific, it was the capture window.
-    pane_lines=$(tmux capture-pane -p -t "$SESSION:$w" 2>/dev/null | grep -v '^[[:space:]]*$')
+    pane_lines=$(tmux capture-pane -p -t "$target" 2>/dev/null | grep -v '^[[:space:]]*$')
     pane=$(tail -1 <<<"$pane_lines")
 
     # A SECOND, separate capture, and deliberately not a widening of the one
@@ -196,7 +244,7 @@ emit_rows() {
     # live input box paints. The status-line probes keep reading exactly one
     # line, which is the #65 discipline; this does not relax it, and taking a
     # second capture rather than reusing one keeps that impossible to blur.
-    box=$(tmux capture-pane -pe -t "$SESSION:$w" 2>/dev/null | input_box_state)
+    box=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_state)
 
     if [ "$w" = "$SUPERVISOR_WINDOW" ]; then
       state=supervisor
@@ -288,7 +336,9 @@ emit_rows() {
       # harness's own HARNESS_READY_RE.
       state=unknown
     fi
-    printf '%s\t%s\t%s\t%s\n' "$w" "$name" "$cmd" "$state"
+    # #241 appends the window id as a FIFTH column rather than inserting it,
+    # so every awk expression below keeps the field numbers it already had.
+    printf '%s\t%s\t%s\t%s\t%s\n' "$w" "$name" "$cmd" "$state" "$wid"
   done
 }
 
@@ -296,10 +346,27 @@ rows=$(emit_rows)
 
 case "$MODE" in
   --free)
-    # session:index, never the window name: names are not unique (the live
-    # session briefly had two windows both called ad65-lanes-review) and
-    # `send-keys -t session:name` silently hits the first match.
-    awk -F'\t' -v s="$SESSION" '$4=="free"{print s ":" $1}' <<<"$rows" ;;
+    # Never the window name: names are not unique (the live session briefly
+    # had two windows both called ad65-lanes-review) and `send-keys -t
+    # session:name` silently hits the first match.
+    #
+    # TWO tab-separated columns since #241, the same shape `--blocked` below
+    # has carried since #159:
+    #
+    #   1. session:index -- the LANE, the identity `cli.py lane-free`,
+    #      `record-dispatch` and every operator recovery command key on. It
+    #      names a slot, and a slot has to outlive the window sitting in it.
+    #   2. session:@id   -- the TMUX TARGET, what `rename-window`, `send-keys`
+    #      and `capture-pane` must be given. Stable for the window's lifetime
+    #      and never reused, so it cannot come to mean another pane between
+    #      the moment this line is printed and the moment it is used.
+    #
+    # #241 is that second column's whole reason: under `renumber-windows on`
+    # (this server's setting) closing any window shifts every higher INDEX
+    # down by one, so a target resolved here and used after a close addresses
+    # a different pane. dispatch.sh reads both; a human running this by hand
+    # reads the first.
+    awk -F'\t' -v s="$SESSION" '$4=="free"{print s ":" $1 "\t" s ":" $5}' <<<"$rows" ;;
   --blocked)
     # Same session:index shape as --free, for the same reason, plus a second
     # tab-separated field naming the KIND (#159) -- `menu` or `text`. This is
@@ -313,12 +380,21 @@ case "$MODE" in
       $4=="text-blocked"{print s ":" $1 "\ttext"}
     ' <<<"$rows" ;;
   --json)
+    # #241: both identities, because a JSON consumer may be doing either job.
+    # `window` is the index (unchanged, still a number, so no existing reader
+    # breaks); `window_id` is the tmux handle to address it with.
     printf '['
     awk -F'\t' 'BEGIN{c=0}
-      {if(c++)printf(",");printf("{\"window\":%s,\"name\":\"%s\",\"command\":\"%s\",\"state\":\"%s\"}",$1,$2,$3,$4)}
+      {if(c++)printf(",");printf("{\"window\":%s,\"window_id\":\"%s\",\"name\":\"%s\",\"command\":\"%s\",\"state\":\"%s\"}",$1,$5,$2,$3,$4)}
       END{}' <<<"$rows"
     printf ']\n' ;;
   *)
+    # THE TABLE PRINTS THE INDEX AND NOTHING ELSE (#241). Jon reads the tmux
+    # window list by index and this table beside it; adding a `@12` column
+    # would change that reading to buy nothing -- no machine consumes this
+    # renderer, and the two that do (`--free`, `--json`) carry the id
+    # already. `dispatch.sh`'s window-name map parses this output positionally
+    # and its keys must stay numeric, which is a second reason not to widen it.
     printf '%-4s %-24s %-12s %s\n' WINDOW NAME COMMAND STATE
     awk -F'\t' '{printf("%-4s %-24s %-12s %s\n",$1,$2,$3,$4)}' <<<"$rows"
     dead=$(awk -F'\t' '$4=="dead"' <<<"$rows" | wc -l | tr -d ' ')
