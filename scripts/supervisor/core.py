@@ -14,6 +14,7 @@ import hashlib
 import json
 import os
 import re
+import socket
 import sqlite3
 import tempfile
 import time
@@ -24,6 +25,96 @@ TERMINAL_STATUSES = ("complete", "failed", "cancelled")
 TASK_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 COMPONENT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 MAX_RESULT_BYTES = 64 * 1024
+
+# agent-dotfiles#209. `claim_lane` writes a placeholder task under this id
+# prefix; `reap_stale_lane_claims` is the only thing that removes one whose
+# owner never came back, and it must be able to tell a claim placeholder from
+# every other kind of outstanding task by inspection alone -- in particular
+# from `mark_lane_held`'s `ledger-hold:` rows (#188), which are DELIBERATE
+# holds awaiting a human and must never be reaped.
+CLAIM_TASK_PREFIX = "ledger-claim:"
+
+# The claiming process's identity, recorded in the placeholder's `summary`.
+# A suffix on an existing column rather than a new one: a `tasks` column would
+# mean a schema migration (see `_migrate_tasks_table`) for a field exactly one
+# row-shape in the whole table ever carries. Anchored at the end and matched
+# with a strict shape, so an unowned claim -- or a summary that merely happens
+# to mention the word -- parses as `None` and is never reaped.
+CLAIM_OWNER_RE = re.compile(r" \[owner=(?P<host>[^\]\s:]+):(?P<pid>[1-9][0-9]*)\]$")
+
+# A claim placeholder has exactly two states, and the difference between them
+# is the whole of agent-dotfiles#209 round 2.
+#
+# RESERVED -- the claim exists, nothing has been sent into the pane. Nobody is
+# working this lane, so both cleanup paths (`release_lane_claim` on the
+# dispatcher's own trap, `reap_stale_lane_claims` when the dispatcher died
+# where nothing could trap) MAY free it. That is what #209 round 1 built.
+#
+# LIVE -- `commit_lane_claim` has been called, which `dispatch.sh` does
+# IMMEDIATELY BEFORE the `send-keys Enter` that submits the brief. From here a
+# worker may be running in that pane, so NEITHER cleanup path may free it: a
+# lane wrongly held costs capacity and has a documented manual recovery, while
+# a lane wrongly freed costs a running lane's work, which is the loss this
+# whole subsystem exists to prevent (#102/#123/#126, and #124/#126's one-way
+# ratchet).
+#
+# Round 1 drew that line with an in-process bash flag set ~70 lines AFTER the
+# submit, so a signal landing in between freed a lane whose brief was already
+# live -- reproduced in tests/supervisor/test_dispatch.sh. Both cleanup paths
+# scope themselves to RESERVED, so moving a row to LIVE is what puts it out of
+# their reach, and it is a durable ledger fact rather than a variable in a
+# process that may be killed a microsecond later.
+#
+# `delivered` is the status LIVE maps onto, and the choice is load-bearing in
+# one non-obvious way: `_register_lane_tx` excludes `delivery_pending` from
+# the outstanding-task query it cancels through (#871's reconciliation escape
+# valve), so a claim parked there would survive `record_dispatch` and then
+# collide with its task INSERT under `one_open_task_per_lane`, failing every
+# clean dispatch. `delivered` is not excluded, so the ordinary success path
+# still cancels this placeholder and replaces it with the real task.
+CLAIM_STATUS_RESERVED = "created"
+CLAIM_STATUS_LIVE = "delivered"
+
+
+def claim_owner_token(pid, *, host=None):
+    """The `host:pid` string `claim_lane` records for `owner`.
+
+    Composed HERE rather than by the shell caller so both sides of the
+    liveness check spell the host the same way: `reap_stale_lane_claims`
+    compares against `socket.gethostname()`, and `$(hostname)` in bash is not
+    guaranteed to agree with it. A mismatch would be safe (the claim simply
+    would not be reaped) but permanently so, which is the failure this exists
+    to end.
+    """
+    return f"{host or socket.gethostname()}:{int(pid)}"
+
+
+def pid_is_alive(pid):
+    """True unless `pid` is provably gone on THIS host.
+
+    Deliberately asymmetric, because the two errors are not equally bad. A
+    false "alive" leaves a stranded claim for the next dispatch to reap or an
+    operator to clear by hand -- the cost #209 is reducing. A false "dead"
+    reaps a LIVE dispatcher's claim and reopens the race #184 closed, which is
+    the one-way ratchet of #124/#126. So `PermissionError` (the pid exists and
+    belongs to another user) reads as alive, and anything unparseable reads as
+    alive too.
+    """
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return True
+    if pid <= 0:
+        return True
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return True
+    return True
 
 
 class Ledger:
@@ -1022,6 +1113,237 @@ class Ledger:
                 return None
             row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             return self._dict(row)
+
+    def claim_lane(self, lane, *, token, note="dispatch claim", owner=None):
+        """Atomically reserve `lane` for `token`, or refuse if it is not free.
+
+        agent-dotfiles#184. `lane_free` (the read `dispatch.sh` uses to pick a
+        candidate -- see that function's own docstring) is a QUERY, not a
+        claim: two dispatchers can both read the same lane free and both
+        proceed into the rest of the dispatch pipeline (claim the issue,
+        build the worktree, send-keys) before either calls `record_dispatch`.
+        `record_dispatch` does not arbitrate between them either -- its
+        `_register_lane_tx` treats every call as a new pane incarnation
+        (`cli.py`'s `record_dispatch` mints a fresh nonce every call) and
+        CANCELS whatever task was outstanding rather than refusing, so the
+        second writer always wins silently (measured, #183 round 3).
+
+        This closes the gap the same way `mark_lane_held` (#188) already
+        forces `lane_available` to read occupied: insert a placeholder task,
+        status `created`, for `lane`, protected by the same
+        `one_open_task_per_lane` unique index the rest of this table already
+        relies on. Two processes calling this for the same lane are
+        serialized by `_locked` (an flock held across the whole
+        check-and-insert) plus SQLite's own `BEGIN IMMEDIATE` -- the second
+        to acquire the lock finds the first row already committed and its
+        INSERT raises `IntegrityError`, so it is refused, not merged.
+
+        Returns a dict with `claimed`: True only when `token` itself now
+        owns the lane -- the re-read after the write is the verify half of
+        claim-then-verify, not a redundant check: it is what lets a caller
+        trust "the value read back is mine" instead of assuming its own
+        write could not have lost a race it was never actually exposed to.
+
+        agent-dotfiles#209: `owner` is the claiming PROCESS's identity
+        (`claim_owner_token`), recorded so that a claim whose owner died
+        before it could release can be told apart from one still in flight.
+        Optional, and its absence is not an error -- a claim with no owner is
+        simply never reaped automatically, which is exactly the behaviour
+        every claim had before #209. `dispatch.sh` always passes one.
+        """
+        now = int(self.clock())
+        summary = note if owner is None else f"{note} [owner={owner}]"
+        with self._locked(), self._transaction() as connection:
+            lane_row = connection.execute("SELECT nonce FROM lanes WHERE lane = ?", (lane,)).fetchone()
+            if lane_row is None:
+                return {"lane": lane, "claimed": False, "reason": "unknown"}
+            task_id = f"{CLAIM_TASK_PREFIX}{lane}:{token}"
+            try:
+                connection.execute(
+                    """
+                    INSERT INTO tasks(id, lane, pane_nonce, summary, status, created_at, updated_at)
+                    VALUES (?, ?, ?, ?, 'created', ?, ?)
+                    """,
+                    (task_id, lane, lane_row["nonce"], summary, now, now),
+                )
+            except sqlite3.IntegrityError:
+                pass
+            row = connection.execute(
+                "SELECT id FROM tasks WHERE lane = ? AND status NOT IN ('complete', 'failed', 'cancelled')",
+                (lane,),
+            ).fetchone()
+            if row is None or row["id"] != task_id:
+                return {"lane": lane, "claimed": False, "reason": "occupied", "holder": row["id"] if row else None}
+            return {"lane": lane, "claimed": True, "reason": None, "token": token}
+
+    def commit_lane_claim(self, lane, *, token):
+        """Mark a claim as having a LIVE brief behind it, so no cleanup frees it.
+
+        agent-dotfiles#209 round 2. `claim_lane` reserves a lane; this is the
+        point of no return, and `dispatch.sh` calls it IMMEDIATELY BEFORE the
+        `send-keys Enter` that submits the brief into the pane. After it
+        returns `committed`, the lane may be working, and both cleanup paths
+        stop being allowed to touch the row:
+
+        * `release_lane_claim` (the dispatcher's own EXIT/TERM/INT trap) is
+          scoped to `CLAIM_STATUS_RESERVED` and matches nothing here.
+        * `reap_stale_lane_claims` selects only `CLAIM_STATUS_RESERVED` rows,
+          so a LIVE claim survives even when its owner pid is provably gone --
+          which is the case the reap's liveness rule ALONE cannot decide.
+          "The owner is dead" does not distinguish "claim taken, nothing sent"
+          from "claim taken, brief live in the pane"; before this existed both
+          were `created` with a dead owner, and the reap cleared both.
+
+        This has to be a LEDGER fact, not a flag in the dispatcher, for the
+        SIGKILL case specifically: a bash variable dies with the process that
+        set it, and at that instant this row is the only record that the lane
+        is occupied at all -- `record_dispatch` has not run yet.
+
+        Idempotent: committing an already-LIVE claim succeeds and changes
+        nothing, so a retry cannot walk the row backwards.
+
+        Refuses rather than invents state. A claim that is missing (never
+        made, or already released) is not committed into existence here --
+        `dispatch.sh` treats that refusal as fatal and does not send, which is
+        the fail-closed direction: nothing has gone into the pane yet, so
+        unwinding is still free.
+        """
+        now = int(self.clock())
+        task_id = f"{CLAIM_TASK_PREFIX}{lane}:{token}"
+        with self._locked(), self._transaction() as connection:
+            row = connection.execute(
+                "SELECT status FROM tasks WHERE id = ? AND lane = ?", (task_id, lane)
+            ).fetchone()
+            if row is None:
+                return {"lane": lane, "committed": False, "reason": "missing", "token": token}
+            if row["status"] == CLAIM_STATUS_LIVE:
+                return {"lane": lane, "committed": True, "reason": None, "token": token}
+            if row["status"] != CLAIM_STATUS_RESERVED:
+                return {"lane": lane, "committed": False, "reason": row["status"], "token": token}
+            connection.execute(
+                "UPDATE tasks SET status = ?, updated_at = ?, delivered_at = ? WHERE id = ?",
+                (CLAIM_STATUS_LIVE, now, now, task_id),
+            )
+            return {"lane": lane, "committed": True, "reason": None, "token": token}
+
+    def release_lane_claim(self, lane, *, token):
+        """Undo a `claim_lane` this same caller made, and ONLY that claim.
+
+        DELETES the placeholder row rather than marking it `cancelled`: this
+        row was never a real dispatch, only a reservation, and dispatch.sh
+        calls this on every abort path a dispatch can take -- a worktree
+        that fails to build, a message over budget, a brief that never
+        submits. None of those should leave anything behind for `cli.py
+        status` to show; the abort tests in test_dispatch.sh assert exactly
+        `"tasks":[]` in cases like these, same as before this claim step
+        existed. A soft-cancel would reintroduce a row those cases never
+        used to have.
+
+        Scoped to `(lane, id=ledger-claim:{lane}:{token}, status='created')`
+        so this can never touch a real dispatch that has since taken the
+        lane over fairly: `record_dispatch`'s own `_register_lane_tx`
+        already cancels this placeholder the moment a dispatch it belongs to
+        actually lands (any identity change cancels whatever was
+        outstanding), so by the time that has happened this DELETE matches
+        no row and is a safe no-op -- the caller does not need to know
+        which case it is in before calling this.
+
+        agent-dotfiles#209 round 2: that `status` scope is now load-bearing in
+        a second way, and it is not incidental. `CLAIM_STATUS_RESERVED` means
+        nothing has been sent into the pane; once `commit_lane_claim` has
+        moved the row to `CLAIM_STATUS_LIVE` this DELETE deliberately matches
+        nothing, because a brief is live behind that claim and freeing it
+        would hand a working lane to the next dispatcher. The dispatcher's
+        trap calls this unconditionally on every exit including a signal, so
+        this scope -- not the caller's own bookkeeping -- is what makes that
+        safe.
+        """
+        task_id = f"{CLAIM_TASK_PREFIX}{lane}:{token}"
+        with self._locked(), self._transaction() as connection:
+            cursor = connection.execute(
+                "DELETE FROM tasks WHERE id = ? AND lane = ? AND status = ?",
+                (task_id, lane, CLAIM_STATUS_RESERVED),
+            )
+            # Returns whether a row actually went away, so a CALLER can report
+            # what happened instead of what it attempted. `dispatch.sh`'s trap
+            # ignores it -- every no-op case there is expected -- but the
+            # refusal text points an OPERATOR at this command, and a CLI that
+            # printed `released: true` after matching nothing would tell them
+            # a lane was freed when it was not. That is the message/state
+            # mismatch #145, #170 and #188 were each filed over.
+            return cursor.rowcount > 0
+
+    def reap_stale_lane_claims(self, *, host=None, is_alive=None):
+        """Delete `claim_lane` placeholders whose owning process is provably gone.
+
+        agent-dotfiles#209. `claim_lane` + `release_lane_claim` + `dispatch.sh`'s
+        EXIT/TERM/INT trap cover every exit a dispatcher can OBSERVE. SIGKILL,
+        an OOM kill and a host crash are not observable -- bash cannot trap
+        them (`inbox-poll.sh:200` says the same thing about its own EXIT trap)
+        -- and a dispatcher lost that way leaves its placeholder behind with
+        status `created`. `lane_available` counts any non-terminal status as
+        occupied, so that lane reads occupied forever: agent-dotfiles#102's
+        failure shape (dispatch capacity silently falling to zero while lanes
+        sit idle) arriving through the mechanism built to prevent it.
+
+        This is the untrappable half of the cleanup, and it is deliberately
+        NOT a TTL. A TTL short enough to be useful can expire while a real
+        dispatch is still running -- worktree creation, the settle sleeps,
+        `DISPATCH_CONFIRM_TRIES` x `DISPATCH_SETTLE` (10s by default, and a
+        slow harness makes it longer) -- and reaping a LIVE dispatcher's claim
+        would reopen the very race #184 closed. Elapsed time cannot tell a
+        slow dispatch from a dead one; a pid can. So expiry here is a liveness
+        question with no clock in it at all, and it cannot fire early:
+
+        * Only rows under `CLAIM_TASK_PREFIX` are considered. `ledger-hold:`
+          rows (`mark_lane_held`, #188) are deliberate holds waiting on a
+          human and are never touched, nor is any real dispatch task.
+        * Only rows whose recorded owner host matches THIS host. A ledger
+          reached from more than one machine cannot have its claims judged
+          from here, and an unrecognisable owner is left alone.
+        * Only rows whose owner pid is provably gone -- see `pid_is_alive`,
+          which resolves every ambiguity as "alive". A recycled pid means a
+          claim is not reaped; it never means a live one is.
+        * Only rows still in `CLAIM_STATUS_RESERVED` (agent-dotfiles#209 round
+          2). This is the constraint a liveness rule cannot supply on its own:
+          a SIGKILLed dispatcher's pid is provably gone whether it died before
+          sending anything or a microsecond after its brief went live in the
+          pane, and in the second case this placeholder is the ONLY record
+          that the lane is occupied, because `record_dispatch` never ran. Both
+          looked identical -- `created`, dead owner -- so the reap cleared
+          both, and the next dispatcher typed a whole second brief into a pane
+          that was already working. `commit_lane_claim` writes the fact that
+          tells them apart, before the send rather than after it, and a LIVE
+          claim is left for the documented manual path instead.
+
+        That is the one-way ratchet of #124/#126 held: this can make a lane
+        available only by clearing a claim whose owner no longer exists AND
+        which never got as far as putting a brief in front of a worker.
+
+        DELETEs rather than cancels, for `release_lane_claim`'s reason: the
+        row was a reservation, never a dispatch, and the abort cases in
+        test_dispatch.sh assert an empty task list. Returns the reaped rows,
+        so a caller can say out loud what it cleared.
+        """
+        host = host or socket.gethostname()
+        alive = pid_is_alive if is_alive is None else is_alive
+        reaped = []
+        with self._locked(), self._transaction() as connection:
+            rows = connection.execute(
+                "SELECT * FROM tasks WHERE status = ? AND id LIKE ? ORDER BY id",
+                (CLAIM_STATUS_RESERVED, f"{CLAIM_TASK_PREFIX}%"),
+            ).fetchall()
+            for row in rows:
+                match = CLAIM_OWNER_RE.search(row["summary"] or "")
+                if match is None or match.group("host") != host:
+                    continue
+                if alive(int(match.group("pid"))):
+                    continue
+                connection.execute("DELETE FROM tasks WHERE id = ?", (row["id"],))
+                record = self._dict(row)
+                record["owner"] = f"{match.group('host')}:{match.group('pid')}"
+                reaped.append(record)
+        return reaped
 
     def _write_result(self, task_id, result):
         if not isinstance(result, bytes):

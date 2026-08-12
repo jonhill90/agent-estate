@@ -12,7 +12,7 @@ from pathlib import Path
 
 from acp_transport import ACPTransport
 from adapter import ACPAdapter, TmuxAdapter
-from core import Ledger
+from core import Ledger, claim_owner_token
 from github_source import GithubTaskSource
 from sensor import StateSensor
 from transport import TmuxTransport
@@ -124,6 +124,48 @@ def parser():
     lane_free_parser.add_argument("--lane", required=True)
     lane_free_parser.add_argument("--target", required=True)
     lane_free_parser.add_argument("--window-name", required=True)
+
+    # agent-dotfiles#184: the claim side `lane-free` (a query) never had. See
+    # `Ledger.claim_lane`'s docstring for why a read-then-write pair of
+    # separate calls does not close the race and this is one atomic write.
+    claim_lane_parser = sub.add_parser("claim-lane")
+    claim_lane_parser.add_argument("--lane", required=True)
+    claim_lane_parser.add_argument("--token", required=True)
+    # agent-dotfiles#209: the claiming process's pid, so a claim stranded by a
+    # kill the shell could not trap can be told from one still in flight. The
+    # HOST half is composed here (`claim_owner_token`), not passed in, so it
+    # matches what `reap-lane-claims` compares against on the way back out.
+    claim_lane_parser.add_argument("--owner-pid", type=int, default=None)
+
+    # agent-dotfiles#209 round 2: the point of no return, called by
+    # `dispatch.sh` immediately before the `send-keys Enter` that submits the
+    # brief. See `Ledger.commit_lane_claim` for why this is a ledger fact
+    # written BEFORE the send rather than a flag in the dispatcher set after
+    # it. No `--owner-pid`: this does not change who owns the claim, only
+    # whether a cleanup path is still allowed to free it.
+    commit_lane_claim_parser = sub.add_parser("commit-lane-claim")
+    commit_lane_claim_parser.add_argument("--lane", required=True)
+    commit_lane_claim_parser.add_argument("--token", required=True)
+
+    release_lane_claim_parser = sub.add_parser("release-lane-claim")
+    release_lane_claim_parser.add_argument("--lane", required=True)
+    release_lane_claim_parser.add_argument("--token", required=True)
+
+    # agent-dotfiles#209: the untrappable half of claim cleanup. Called by
+    # `dispatch.sh` at startup, before it picks a lane -- see that script's
+    # step 0.5 for why the dispatcher itself is the right caller.
+    sub.add_parser("reap-lane-claims")
+
+    # agent-dotfiles#209, from the #144 finding that never got a caller:
+    # `Ledger.cancel_open_task` had no CLI wiring at all, so the recovery it
+    # exists for -- an operator freeing a lane held by something the automatic
+    # reap will not touch (a `ledger-hold:` row from #188, or a claim whose
+    # owner pid has been recycled) -- could not be performed with the tools
+    # this estate ships. Broader than `release-lane-claim` on purpose: it
+    # cancels whatever outstanding task owns the lane, without needing to know
+    # its id. Reach for `release-lane-claim` first; it is the scoped one.
+    cancel_open_task_parser = sub.add_parser("cancel-open-task")
+    cancel_open_task_parser.add_argument("--lane", required=True)
 
     sub.add_parser("status")
     return root
@@ -405,6 +447,27 @@ def main(argv=None):
         value = lane_free(
             ledger, adapter.transport, lane=args.lane, target=args.target, window_name=args.window_name
         )
+    elif args.command == "claim-lane":
+        owner = None if args.owner_pid is None else claim_owner_token(args.owner_pid)
+        value = ledger.claim_lane(args.lane, token=args.token, owner=owner)
+    elif args.command == "commit-lane-claim":
+        value = ledger.commit_lane_claim(args.lane, token=args.token)
+    elif args.command == "release-lane-claim":
+        # `released` reports whether a row actually went away, not whether the
+        # command ran (agent-dotfiles#209 round 2). It is `false` for a claim
+        # that never existed AND for one already marked live by
+        # `commit-lane-claim`, which this deliberately will not free -- and an
+        # operator following the refusal's recovery steps has to be able to
+        # see that from the output rather than by re-reading `status`.
+        released = ledger.release_lane_claim(args.lane, token=args.token)
+        value = {"lane": args.lane, "token": args.token, "released": released}
+        if not released:
+            value["hint"] = "no reserved claim matched; a claim with a live brief behind it needs cancel-open-task"
+    elif args.command == "reap-lane-claims":
+        reaped = ledger.reap_stale_lane_claims()
+        value = {"reaped": reaped, "count": len(reaped)}
+    elif args.command == "cancel-open-task":
+        value = {"lane": args.lane, "cancelled": ledger.cancel_open_task(args.lane)}
     elif args.command == "record-completion":
         value = record_completion(ledger, task=args.task, note=args.note)
     elif args.command == "accept":

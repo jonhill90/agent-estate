@@ -151,6 +151,18 @@ ledger.reconstruct_task(
 ledger.assign(task_id=task_id, lane="t:seed-other", pane_nonce="seed-other", summary="a different lane got here first")
 PY
 }
+# The ledger's own answer, asked directly: True (registered, free), False
+# (registered, an outstanding task owns it), None (never registered). No tmux
+# in the path, so this reports on ledger state and nothing else.
+lane_available() {  # lane_available <state-dir> <lane>
+  AGENT_SUPERVISOR_STATE_DIR="$1" python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+print(Ledger(sys.argv[2]).lane_available(sys.argv[3]))
+' "$HERE/../../scripts/supervisor" "$1" "$2" 2>&1
+}
+
 tmuxlog()   { cat "$D/tmux.log"; }
 assignees() { awk -F'|' -v n="$1" '$1==n{print $2}' "$D/issues"; }
 worktrees() { ls "$D/roots" 2>/dev/null | wc -l | tr -d ' '; }
@@ -596,7 +608,16 @@ want_contains "the guard names the failure as an unreadable pane probe" \
   "could not read pane metadata" "$out"
 status=$(LEDGER_STATE="$D/state-145" ledger status 2>&1)
 want_contains "the pre-registered lane is still the only one on record" '"lane":"t:3"' "$status"
-want_contains "no garbage task is recorded from the malformed probe" '"tasks":[]' "$status"
+# agent-dotfiles#184: this used to assert `"tasks":[]` -- true before this
+# dispatch's own step-1 `claim-lane` call existed, because nothing wrote to
+# the tasks table until step 6, and step 6 never runs a real record-dispatch
+# call down this branch (the malformed probe is caught before it). Now step
+# 1's claim placeholder is what is left behind, and that is correct, not
+# garbage: the brief DID go out (asserted above), so the lane must keep
+# reading occupied even though bookkeeping past the claim degraded -- the
+# same property #188 added `mark_lane_held` for on the record-dispatch side.
+want_contains "the claim placeholder is what is left recording the lane occupied" \
+  '"id":"ledger-claim:t:3:ad145-ledger-meta-broken"' "$status"
 
 # ...and that guard is load-bearing. Patch a copy that always takes the
 # "well-formed" branch regardless of what LANE_META actually contains, and
@@ -844,8 +865,35 @@ else bad "no worktree is left behind by an unsent brief" "$before before, $(work
 # after it, or every swallowed Enter would leave a record asserting a lane is
 # working on an issue it was never given.
 status=$(LEDGER_STATE="$D/state-160" ledger status 2>&1)
-want_missing "an unsent brief records no task in the ledger" "ad160-unsent-brief" "$status"
-want_contains "and no task at all" '"tasks":[]' "$status"
+# The exact id `record-dispatch --task "$WINDOW_NAME"` would write, which is
+# distinct from the claim placeholder's `ledger-claim:<lane>:<token>` id even
+# though both end in the window name.
+want_missing "an unsent brief records no DISPATCH task in the ledger" '"id":"ad160-unsent-brief"' "$status"
+# ...but the LANE CLAIM stays, and this assertion is the cost of
+# agent-dotfiles#209 round 2 written down rather than discovered later.
+#
+# It used to read `"tasks":[]`. The Enter that this case swallows is sent
+# AFTER step 4.5 marks the claim live, so by the time step 5 concludes the box
+# never emptied, this dispatcher has already crossed its own point of no
+# return -- and the whole of round 2 is that nothing may free a lane from the
+# far side of that line. `input_box_state` saying `text` is strong evidence
+# nothing was submitted, but it is still evidence read out of pane content,
+# which is the instrument #102, #123 and #126 were all filed against; trading
+# a bounded capacity loss for the chance of handing out a working lane is the
+# trade this subsystem exists to refuse.
+#
+# So a swallowed Enter now costs a HELD lane needing one manual command, where
+# before it cost nothing. That is a real regression in ergonomics for a
+# failure that has been observed live (#141, twice on 2026-08-11), accepted in
+# exchange for the guarantee. It is not silent: `lanes.sh` reports the lane
+# `unsent`, and the abort prints the exact command below.
+want_contains "but the lane claim REMAINS -- past the commit point, nothing may free a lane" \
+  '"id":"ledger-claim:t:3:ad160-unsent-brief"' "$status"
+want_contains "...and the claim is marked live, not merely reserved" '"status":"delivered"' "$status"
+want_contains "...so the ledger reads that lane occupied" "False" "$(lane_available "$D/state-160" t:3)"
+want_contains "...and the abort says the lane stays held rather than leaving it to be discovered" \
+  "STAYS HELD" "$out"
+want_contains "...and names the one command that frees it" "cancel-open-task --lane t:3" "$out"
 
 # The other direction, and the one that keeps the check honest: a dispatch
 # that DOES submit must pass silently. A confirmation that fires on every
@@ -892,6 +940,505 @@ want_exit "a dispatch run under its own shebang still succeeds" "$rc" 0 "$out"
 # that something is wrong, so a legitimate message belongs on stdout instead.
 if [ -z "$err" ]; then ok "stderr is clean on a successful dispatch (agent-dotfiles#199)"
 else bad "stderr is clean on a successful dispatch (agent-dotfiles#199)" "expected empty stderr, got: $err"; fi
+
+# --- agent-dotfiles#184: two dispatchers racing the SAME candidate lane ---
+#
+# Every case above dispatches once, in isolation -- the second dispatcher
+# never exists. #184 is specifically about what happens when it does: two
+# dispatchers can both read `lanes.sh --free` + `cli.py lane-free` and see
+# the SAME lane free before either one finishes acting on it. A test that
+# only calls dispatch.sh twice IN SEQUENCE proves nothing (the second call
+# losing is what happens either way) -- this drives dispatcher A into the
+# stub, splices a WHOLE second dispatch (dispatcher B, for a different
+# issue, against the real unmodified dispatch.sh) in via a test-only hook
+# right after A reads the lane free and before A can act on that read, and
+# only then lets A continue. That is "dispatcher A reads availability, then
+# B completes a whole dispatch, then A sends" -- #184's own required shape,
+# not two calls back to back.
+#
+# DISPATCH_TEST_RACE_HOOK is dispatch.sh's only concession to this: a command
+# run with the candidate lane as $1, at exactly the point a second dispatcher
+# would need to land a competing dispatch to prove the race. No caller sets
+# it outside this file.
+cat > "$D/race-hook.sh" <<'HOOK'
+#!/bin/bash
+set -uo pipefail
+env -u DISPATCH_TEST_RACE_HOOK bash "$RACE_DISPATCH" "$RACE_B_ISSUE" "$RACE_B_SLUG" \
+  "$RACE_B_BRIEF" "$RACE_B_REPO_SLUG" "$RACE_B_REPO_PATH" > "$RACE_B_LOG" 2>&1
+echo $? > "$RACE_B_RC"
+HOOK
+chmod +x "$D/race-hook.sh"
+
+# Runs dispatcher A for issue $1 through dispatch script $2 (the real
+# dispatch.sh, or a mutated copy), with dispatcher B (issue $3, ALWAYS the
+# real, unmutated dispatch.sh -- the race is about what A does with a
+# genuine competing dispatch, not about B's own correctness) spliced in via
+# the hook. Leaves $RACE_RC_A/$RACE_OUT_A for A and $RACE_RC_B/$RACE_OUT_B
+# for B, plus $RACE_LOG (the shared tmux log both dispatchers wrote to).
+run_race() {
+  local issue_a="$1" script="$2" issue_b="$3"
+  local state="$D/state-race-$issue_a"
+  printf '%s|| dispatcher A races for the only free lane\n%s|| dispatcher B wins the same race\n' \
+    "$issue_a" "$issue_b" >> "$D/issues"
+  : > "$D/race-b.out"; : > "$D/race-b.rc"
+  local out
+  out=$(LEDGER_STATE="$state" \
+        DISPATCH_TEST_RACE_HOOK="$D/race-hook.sh" \
+        RACE_DISPATCH="$DISPATCH" RACE_B_ISSUE="$issue_b" RACE_B_SLUG="race-b-$issue_b" \
+        RACE_B_BRIEF="$D/brief.md" RACE_B_REPO_SLUG=acme/agent-dotfiles \
+        RACE_B_REPO_PATH="$REPO" RACE_B_LOG="$D/race-b.out" RACE_B_RC="$D/race-b.rc" \
+        DISPATCH_SCRIPT="$script" \
+        run "$issue_a" "race-a-$issue_a" "$D/brief.md" acme/agent-dotfiles "$REPO")
+  RACE_RC_A=$?
+  RACE_OUT_A="$out"
+  RACE_OUT_B=$(cat "$D/race-b.out" 2>/dev/null)
+  RACE_RC_B=$(cat "$D/race-b.rc" 2>/dev/null)
+  RACE_LOG=$(tmuxlog)
+}
+
+# --- the fixed shape: exactly one dispatcher wins, the other is refused loud
+run_race 501 "$DISPATCH" 502
+want_exit "dispatcher B (spliced in mid-A's selection) completes its own dispatch" "$RACE_RC_B" 0 "$RACE_OUT_B"
+want_contains "...and B's brief actually went out" "dispatch: #502 -> " "$RACE_OUT_B"
+want_exit "dispatcher A is refused: B already won the only free lane" "$RACE_RC_A" 1 "$RACE_OUT_A"
+want_contains "...and the refusal is LOUD, not silent" "no free lane" "$RACE_OUT_A"
+cnt=$(grep -c "rename-window -t t:3" <<<"$RACE_LOG")
+if [ "$cnt" = 1 ]; then
+  ok "only one brief reaches the shared lane t:3"
+else
+  bad "only one brief reaches the shared lane t:3" "rename-window -t t:3 appeared $cnt times: $RACE_LOG"
+fi
+if [ "$(assignees 501)" = "" ]; then
+  ok "A's issue is never claimed -- refused before claim.sh even runs"
+else
+  bad "A's issue is never claimed" "assignees: $(assignees 501)"
+fi
+want_contains "B's issue IS claimed" "jonhill90" "$(assignees 502)"
+
+# --- RED BEFORE THE FIX: a copy with no atomic claim at all, the exact shape
+# dispatch.sh had on origin/main before agent-dotfiles#184 -- `lane-free`'s
+# read picked a candidate and nothing closed the gap before send-keys.
+NO_CLAIM_MUTANT="$D/dispatch-no-claim.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$NO_CLAIM_MUTANT" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''  CLAIM_LANE="$candidate"
+  CLAIM=$("$LEDGER_PYTHON" "$LEDGER_CLI" claim-lane --lane "$candidate" --token "$CLAIM_TOKEN" --owner-pid $$ 2>/dev/null) || { release_lane_claim; continue; }
+  if grep -qF '"claimed":true' <<<"$CLAIM"; then
+    LANE="$candidate"
+    break
+  fi
+  # Lost this candidate to another dispatcher: move on, exactly as before.
+  # The release is a no-op in that case (the row is the winner's, not ours)
+  # and only bites when the claim committed but its result did not come back
+  # readable -- which would otherwise leak a claim only the reap could clear.
+  release_lane_claim'''
+assert marker in text, "claim-lane block not found -- script shape changed"
+assert text.count(marker) == 1, "claim-lane block not unique -- script shape changed"
+replacement = '''  LANE="$candidate"  # MUTATED: no atomic claim at all -- agent-dotfiles#184 pre-fix shape
+  break'''
+text = text.replace(marker, replacement, 1)
+# agent-dotfiles#209 round 2: also neutralise step 4.5's commit guard. It
+# refuses to send when the claim it is asked to mark live does not exist --
+# correct, and exactly what a mutant with no claim (or an ignored verify)
+# produces. Left in, dispatcher A would be stopped by the COMMIT check
+# rather than sail past the missing CLAIM check, and this case would report
+# a race closed by the wrong guard. Same reason d2bce42 extended
+# test_dispatch_ledger.sh's fallback mutation past the claim call.
+commit_guard = 'if ! grep -qF \'"committed":true\' <<<"$COMMIT_OUT"; then'
+assert commit_guard in text, "commit guard not found -- script shape changed"
+assert text.count(commit_guard) == 1, "commit guard not unique -- script shape changed"
+text = text.replace(commit_guard, 'if false; then  # MUTATED: step 4.5 commit guard bypassed', 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh with no lane claim at all" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh with no lane claim at all"
+  run_race 503 "$NO_CLAIM_MUTANT" 504
+  cnt=$(grep -c "rename-window -t t:3" <<<"$RACE_LOG")
+  if [ "$RACE_RC_A" = 0 ] && [ "$cnt" -ge 2 ]; then
+    ok "RED before the fix: with no atomic claim, BOTH dispatchers land a brief in lane t:3 (x$cnt) -- this is the race #184 reports"
+  else
+    bad "RED before the fix: with no atomic claim, BOTH dispatchers land a brief in lane t:3" \
+      "expected A to also succeed (exit 0) and t:3 renamed >=2 times; rcA=$RACE_RC_A count=$cnt outA=$RACE_OUT_A"
+  fi
+fi
+
+# --- MUTATION KILL: the fix's own verify-read, made non-fatal on mismatch --
+# #184 names this explicitly: mutate the verify-read's mismatch to non-fatal
+# and confirm the suite goes red, or the test proves nothing. This defeats
+# dispatch.sh's OWN check of the claim result -- the bash-side half of
+# claim-then-verify -- while leaving the ledger call itself untouched.
+VERIFY_DEFEATED_MUTANT="$D/dispatch-verify-defeated.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$VERIFY_DEFEATED_MUTANT" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = 'if grep -qF \'"claimed":true\' <<<"$CLAIM"; then'
+assert marker in text, "claim verify guard not found -- script shape changed"
+assert text.count(marker) == 1, "claim verify guard not unique -- script shape changed"
+text = text.replace(marker, 'if true; then  # MUTATED: claim-lane verify-read mismatch made non-fatal', 1)
+# agent-dotfiles#209 round 2: also neutralise step 4.5's commit guard. It
+# refuses to send when the claim it is asked to mark live does not exist --
+# correct, and exactly what a mutant with no claim (or an ignored verify)
+# produces. Left in, dispatcher A would be stopped by the COMMIT check
+# rather than sail past the missing CLAIM check, and this case would report
+# a race closed by the wrong guard. Same reason d2bce42 extended
+# test_dispatch_ledger.sh's fallback mutation past the claim call.
+commit_guard = 'if ! grep -qF \'"committed":true\' <<<"$COMMIT_OUT"; then'
+assert commit_guard in text, "commit guard not found -- script shape changed"
+assert text.count(commit_guard) == 1, "commit guard not unique -- script shape changed"
+text = text.replace(commit_guard, 'if false; then  # MUTATED: step 4.5 commit guard bypassed', 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose claim verify-read is non-fatal" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh whose claim verify-read is non-fatal"
+  run_race 505 "$VERIFY_DEFEATED_MUTANT" 506
+  cnt=$(grep -c "rename-window -t t:3" <<<"$RACE_LOG")
+  if [ "$RACE_RC_A" = 0 ] && [ "$cnt" -ge 2 ]; then
+    ok "mutation confirmed: an ignored claim verify-read reopens the race (the assertions above would now be red)"
+  else
+    bad "mutation confirmed: an ignored claim verify-read reopens the race" \
+      "expected A to also succeed (exit 0) and t:3 renamed >=2 times; rcA=$RACE_RC_A count=$cnt outA=$RACE_OUT_A"
+  fi
+fi
+
+# --- agent-dotfiles#209: a dispatcher killed between claim and release -----
+#
+# Everything above proves that every abort path dispatch.sh ENUMERATES
+# releases its lane claim. #209 is about the paths it cannot enumerate: a
+# `kill`, an OOM, a closed terminal, a host crash. The placeholder
+# `claim_lane` writes is a task with status `created`, and `lane_available`
+# counts any non-terminal status as occupied -- so a dispatcher that dies
+# holding one leaves the lane reading occupied with nothing working it. That
+# is agent-dotfiles#102's failure shape (dispatch capacity silently falling to
+# zero while lanes sit idle) reached through the mechanism built to prevent
+# it, and it was hand-reconciled nine times in two days before this test
+# existed.
+#
+# The kill is delivered by standing in for `python3` (DISPATCH_PYTHON, which
+# dispatch.sh already reads) and signalling the DISPATCHER the instant its
+# claim has committed -- the exact instant the gap opens. No new seam in
+# dispatch.sh, and the victim is named by the `--owner-pid` argument the claim
+# itself carries, so the test cannot kill the wrong process.
+cat > "$D/kill-after-claim.sh" <<'KILL'
+#!/bin/bash
+set -uo pipefail
+out=$(python3 "$@" 2>&1); rc=$?
+printf '%s\n' "$out"
+case " $* " in
+  *" claim-lane "*) ;;
+  *) exit $rc ;;
+esac
+grep -qF '"claimed":true' <<<"$out" || exit $rc
+victim=""; prev=""
+for a in "$@"; do
+  [ "$prev" = "--owner-pid" ] && victim="$a"
+  prev="$a"
+done
+[ -n "$victim" ] || { echo "kill-after-claim: no --owner-pid in: $*" >&2; exit $rc; }
+kill "-${DISPATCH_TEST_KILL_SIGNAL:-KILL}" "$victim" 2>/dev/null
+# On a TERM the dispatcher runs its trap only once this foreground child is
+# gone; on a KILL it is already dead. The pause keeps either from racing the
+# assertions that follow.
+sleep 1
+exit $rc
+KILL
+chmod +x "$D/kill-after-claim.sh"
+
+# Runs one dispatch that gets signalled right after its claim commits.
+# Leaves $CRASH_RC and $CRASH_OUT.
+run_killed_dispatch() {  # run_killed_dispatch <state> <issue> <slug> <signal> <script>
+  local state="$1" issue="$2" slug="$3" signal="$4" script="$5"
+  printf '%s|| a dispatcher signalled between claim and release\n' "$issue" >> "$D/issues"
+  CRASH_OUT=$(LEDGER_STATE="$state" DISPATCH_PYTHON="$D/kill-after-claim.sh" \
+              DISPATCH_TEST_KILL_SIGNAL="$signal" DISPATCH_SCRIPT="$script" \
+              run "$issue" "$slug" "$D/brief.md" acme/agent-dotfiles "$REPO")
+  CRASH_RC=$?
+}
+
+# --- SIGKILL: untrappable by any shell, so the reap is the only cover ------
+CRASH_STATE="$D/state-crash"
+run_killed_dispatch "$CRASH_STATE" 601 crash-after-claim KILL "$DISPATCH"
+want_exit "a dispatcher SIGKILLed right after its claim dies un-cleanly" "$CRASH_RC" 137 "$CRASH_OUT"
+crash_status=$(LEDGER_STATE="$CRASH_STATE" ledger status)
+want_contains "...leaving its claim placeholder behind: nothing released it" \
+  '"id":"ledger-claim:t:3:ad601-crash-after-claim"' "$crash_status"
+want_contains "...and the placeholder records the owner that died" '[owner=' "$crash_status"
+want_contains "...so the ledger reads lane t:3 OCCUPIED with nothing working it (#102's shape)" \
+  "False" "$(lane_available "$CRASH_STATE" t:3)"
+
+echo '602|| the lane must come back after a killed dispatcher' >> "$D/issues"
+out=$(LEDGER_STATE="$CRASH_STATE" run 602 after-crash "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "the NEXT dispatch reclaims that lane: the stranded claim is reaped" "$rc" 0 "$out"
+want_contains "...and says what it cleared instead of doing it silently" "cleared stranded lane claim" "$out"
+want_contains "...and the brief actually goes out" "dispatch: #602 -> " "$out"
+
+# --- SIGTERM: trappable, and the trap must not wait for a later reap -------
+TERM_STATE="$D/state-term"
+run_killed_dispatch "$TERM_STATE" 603 term-after-claim TERM "$DISPATCH"
+want_exit "a dispatcher SIGTERMed right after its claim exits through its trap" "$CRASH_RC" 143 "$CRASH_OUT"
+want_contains "...and the TRAP released the claim immediately -- lane free with no reap yet" \
+  "True" "$(lane_available "$TERM_STATE" t:3)"
+term_status=$(LEDGER_STATE="$TERM_STATE" ledger status)
+want_missing "...and left no placeholder behind at all" "ledger-claim:t:3" "$term_status"
+
+# --- MUTATION: remove the trap, and the SIGTERM case must go red ----------
+# The reap cannot stand in for this: a TERMed dispatcher's pid is gone, so a
+# LATER dispatch would reap its claim either way. What the trap buys is the
+# lane coming back AT ONCE rather than at the mercy of the next dispatch, so
+# the assertion this mutation has to break is the one taken immediately after
+# the signal, with no dispatch in between.
+NO_TRAP_MUTANT="$D/dispatch-no-trap.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$NO_TRAP_MUTANT" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''trap release_lane_claim EXIT
+trap 'release_lane_claim; exit 143' TERM   # 128 + 15
+trap 'release_lane_claim; exit 130' INT    # 128 + 2'''
+assert marker in text, "claim-release traps not found -- script shape changed"
+assert text.count(marker) == 1, "claim-release traps not unique -- script shape changed"
+text = text.replace(marker, ': # MUTATED: no trap -- only the four enumerated abort paths release', 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh with no claim-release trap" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh with no claim-release trap"
+  NO_TRAP_STATE="$D/state-no-trap"
+  run_killed_dispatch "$NO_TRAP_STATE" 604 term-no-trap TERM "$NO_TRAP_MUTANT"
+  if [ "$(lane_available "$NO_TRAP_STATE" t:3)" = "False" ]; then
+    ok "mutation confirmed: with no trap, a SIGTERMed dispatcher strands its claim (the assertion above would now be red)"
+  else
+    bad "mutation confirmed: with no trap, a SIGTERMed dispatcher strands its claim" \
+      "expected lane_available False, got '$(lane_available "$NO_TRAP_STATE" t:3)'; rc=$CRASH_RC out=$CRASH_OUT"
+  fi
+fi
+
+# --- MUTATION: remove the reap, and the SIGKILL case must go red ----------
+NO_REAP_MUTANT="$D/dispatch-no-reap.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$NO_REAP_MUTANT" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''if REAP_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" reap-lane-claims 2>&1); then'''
+assert marker in text, "reap block not found -- script shape changed"
+assert text.count(marker) == 1, "reap block not unique -- script shape changed"
+text = text.replace(marker, 'if REAP_OUT="" && false; then  # MUTATED: no reap of stranded claims', 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh that never reaps a stranded claim" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh that never reaps a stranded claim"
+  NO_REAP_STATE="$D/state-no-reap"
+  run_killed_dispatch "$NO_REAP_STATE" 605 crash-no-reap KILL "$NO_REAP_MUTANT"
+  echo '606|| the lane the un-reaped mutant can never get back' >> "$D/issues"
+  out=$(LEDGER_STATE="$NO_REAP_STATE" DISPATCH_SCRIPT="$NO_REAP_MUTANT" \
+        run 606 after-crash-no-reap "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+  if [ "$rc" -ne 0 ] && grep -qF "no free lane" <<<"$out"; then
+    ok "mutation confirmed: with no reap, the killed dispatcher's lane never comes back (the assertions above would now be red)"
+  else
+    bad "mutation confirmed: with no reap, the killed dispatcher's lane never comes back" \
+      "expected a refusal naming 'no free lane'; rc=$rc out=$out"
+  fi
+  want_contains "and the refusal names how to clear a stranded claim by hand" "release-lane-claim --lane <lane> --token <token>" "$out"
+  want_contains "and how to read the token out of the ledger" 'ledger-claim:<lane>:<token>' "$out"
+fi
+
+# --- agent-dotfiles#209 round 2: the point of no return is the SEND -------
+#
+# Every case above signals the dispatcher right after `claim-lane`, which is
+# the EARLIEST instant the claim exists -- nothing has been typed, no lane has
+# been renamed, and freeing the claim there is correct. None of them signals
+# after the brief is live, and that absence is what let the first round of
+# this fix ship with the cleanup pointed at the wrong instant.
+#
+# The re-review's measurement: the trap and the reap both treated
+# `CLAIM_COMMITTED` (set after step 5's confirmation loop) as the point of no
+# return, but the brief goes live ~70 lines earlier, at the `send-keys Enter`
+# that submits it -- up to DISPATCH_CONFIRM_TRIES x DISPATCH_SETTLE (10s by
+# default) of wall clock in between. A signal landing in that window ran the
+# trap and deleted the claim AFTER the lane had been renamed and the brief
+# submitted, and `lane_available` then answered True for a lane that was
+# actively working. #102/#126's failure shape produced by the cleanup instead
+# of prevented by it, which dispatch.sh's own step 6 comment says in its own
+# words must not happen.
+#
+# So the commit point is now the ledger fact `commit-lane-claim` writes
+# IMMEDIATELY BEFORE that Enter, and the two assertions below are about the
+# same instant from the two sides that can reach it: a trappable signal
+# (SIGTERM, the trap runs) and an untrappable one (SIGKILL, only the reap
+# runs). Both must leave the lane HELD.
+#
+# The signal is delivered by the tmux stub at the submit -- see
+# DISPATCH_TEST_SEND_SIGNAL there. No live pane anywhere in this.
+
+# Runs one dispatch that gets signalled at the instant its brief is submitted.
+# Leaves $LIVE_RC and $LIVE_OUT.
+run_signalled_at_send() {  # run_signalled_at_send <state> <issue> <slug> <signal> <script>
+  local state="$1" issue="$2" slug="$3" signal="$4" script="$5"
+  printf '%s|| a dispatcher signalled as its brief goes live\n' "$issue" >> "$D/issues"
+  LIVE_OUT=$(LEDGER_STATE="$state" DISPATCH_TEST_SEND_SIGNAL="$signal" \
+             DISPATCH_SCRIPT="$script" \
+             run "$issue" "$slug" "$D/brief.md" acme/agent-dotfiles "$REPO")
+  LIVE_RC=$?
+}
+
+# --- SIGTERM at the submit: the trap must NOT free a working lane ---------
+LIVE_TERM_STATE="$D/state-live-term"
+run_signalled_at_send "$LIVE_TERM_STATE" 701 live-then-term TERM "$DISPATCH"
+want_exit "a dispatcher SIGTERMed as its brief goes live dies through its trap" "$LIVE_RC" 143 "$LIVE_OUT"
+# The probe is only worth anything if the brief REALLY went out first. Assert
+# that before asserting anything about the ledger: a signal that landed early
+# would leave the lane held for the wrong reason and pass the check below
+# while proving nothing.
+live_term_log=$(cat "$D/tmux.log")
+want_contains "...and the signal was delivered at the submit, not earlier" "signalled TERM to " "$live_term_log"
+want_contains "...the lane really was renamed to the task first (a real dispatch)" \
+  "rename-window -t t:3 ad701-live-then-term" "$live_term_log"
+want_contains "...and the brief really was submitted into the pane" "send-keys -t t:3 Enter" "$live_term_log"
+# THE ASSERTION. Before the commit point moved, this read True.
+want_contains "...so the lane stays HELD: a brief is live in it and no cleanup may free it" \
+  "False" "$(lane_available "$LIVE_TERM_STATE" t:3)"
+live_term_status=$(LEDGER_STATE="$LIVE_TERM_STATE" ledger status)
+want_contains "...and the claim placeholder is still there holding it" \
+  '"id":"ledger-claim:t:3:ad701-live-then-term"' "$live_term_status"
+
+# --- SIGKILL at the submit: the reap must NOT free a working lane ---------
+# The dangerous half, and the one moving an in-process flag cannot fix: a
+# SIGKILL leaves the placeholder behind, and at that moment the placeholder is
+# the ONLY record that the lane is occupied, because step 6's `record_dispatch`
+# never ran. A reap that judges only "is the owner pid gone" cannot tell that
+# apart from a claim taken with nothing sent yet -- so the fact the send
+# happened has to be written to the LEDGER before the send, which is what
+# `commit-lane-claim` does and what the reap now refuses to touch.
+LIVE_KILL_STATE="$D/state-live-kill"
+run_signalled_at_send "$LIVE_KILL_STATE" 702 live-then-kill KILL "$DISPATCH"
+want_exit "a dispatcher SIGKILLed as its brief goes live dies un-cleanly" "$LIVE_RC" 137 "$LIVE_OUT"
+live_kill_log=$(cat "$D/tmux.log")
+want_contains "...with the lane renamed and the brief submitted first" \
+  "rename-window -t t:3 ad702-live-then-kill" "$live_kill_log"
+want_contains "...and the brief really was submitted into the pane" "send-keys -t t:3 Enter" "$live_kill_log"
+want_contains "...so the lane reads HELD immediately after the kill" \
+  "False" "$(lane_available "$LIVE_KILL_STATE" t:3)"
+
+# ...and it must STILL read held after a reap runs, which is what the next
+# dispatch does first. This is the assertion the reap's liveness rule alone
+# cannot satisfy: the owner pid IS provably gone.
+echo '703|| the next dispatch must not take a lane that is working' >> "$D/issues"
+out=$(LEDGER_STATE="$LIVE_KILL_STATE" run 703 the-next-one "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "the NEXT dispatch refuses rather than take the lane the killed dispatcher left working" "$rc" 1 "$out"
+want_contains "...naming the only lane it had as unavailable" "no free lane" "$out"
+want_missing "...and it did NOT reap the live claim away" "ledger-claim:t:3:ad702-live-then-kill" "$out"
+want_missing "...and typed nothing into that pane" "rename-window -t t:3 ad703-the-next-one" "$(cat "$D/tmux.log")"
+# Fail-closed has a price and the refusal must name it: this lane needs a
+# human, and `release-lane-claim` deliberately will not clear it.
+want_contains "...and says how to clear a claim with a live brief behind it" "cancel-open-task --lane" "$out"
+
+# --- the previous round's finding must not regress ------------------------
+# Moving the commit point later would be an easy way to satisfy everything
+# above and reopen #209 round 1: a dispatcher killed BEFORE the brief is live
+# must still release its claim at once. That is what the `603` case near the
+# top of this block asserts (SIGTERM right after `claim-lane` -> lane_available
+# True with no reap yet), and this repeats it against the SEND-time harness so
+# both instants are covered by the same file: same signal, same dispatcher,
+# but the brief never gets typed because the send fails outright.
+NO_SEND_STATE="$D/state-no-send"
+echo '704|| a dispatcher killed before the brief goes live' >> "$D/issues"
+NO_SEND_OUT=$(LEDGER_STATE="$NO_SEND_STATE" DISPATCH_PYTHON="$D/kill-after-claim.sh" \
+              DISPATCH_TEST_KILL_SIGNAL=TERM run 704 killed-before-send "$D/brief.md" \
+              acme/agent-dotfiles "$REPO"); NO_SEND_RC=$?
+want_exit "a dispatcher killed BEFORE the brief goes live still exits through its trap" "$NO_SEND_RC" 143 "$NO_SEND_OUT"
+want_missing "...having submitted nothing into the pane" "send-keys -t t:3 Enter" "$(cat "$D/tmux.log")"
+want_contains "...and its claim IS released at once -- nothing is working that lane" \
+  "True" "$(lane_available "$NO_SEND_STATE" t:3)"
+
+# --- MUTATION: move the commit point back to where it was -----------------
+# The guard has to survive its own mutation. This patches a copy whose
+# `commit-lane-claim` call is removed and whose CLAIM_COMMITTED is set where it
+# used to be -- after step 5's confirmation loop, ~70 lines past the submit --
+# which is exactly the shape the re-review reproduced. Both assertions above
+# must go red on it, and by the two DIFFERENT mechanisms they test: the trap
+# (TERM) and the reap (KILL).
+LATE_COMMIT_MUTANT="$D/dispatch-late-commit.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$LATE_COMMIT_MUTANT" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = 'COMMIT_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" commit-lane-claim'
+assert marker in text, "commit-lane-claim call not found -- script shape changed"
+assert text.count(marker) == 1, "commit-lane-claim call not unique -- script shape changed"
+start = text.rindex("\n", 0, text.index(marker))
+end = text.index("CLAIM_COMMITTED=1", start) + len("CLAIM_COMMITTED=1")
+text = text[:start] + "\n: # MUTATED: no ledger commit, and CLAIM_COMMITTED set late instead" + text[end:]
+late = "# --- 6. record what was dispatched."
+assert late in text, "step 6's header not found -- script shape changed"
+assert text.count(late) == 1, "step 6's header not unique -- script shape changed"
+text = text.replace(late, "CLAIM_COMMITTED=1  # MUTATED: back where round 1 had it\n\n" + late, 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose commit point is back after the send" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh whose commit point is back after the send"
+  LATE_TERM_STATE="$D/state-late-term"
+  run_signalled_at_send "$LATE_TERM_STATE" 705 late-commit-term TERM "$LATE_COMMIT_MUTANT"
+  if [ "$(lane_available "$LATE_TERM_STATE" t:3)" = "True" ] \
+     && grep -qF "send-keys -t t:3 Enter" "$D/tmux.log"; then
+    ok "mutation confirmed: with the commit point late, the TRAP frees a lane whose brief is live (the assertion above would now be red)"
+  else
+    bad "mutation confirmed: with the commit point late, the TRAP frees a lane whose brief is live" \
+      "expected lane_available True after a submitted brief, got '$(lane_available "$LATE_TERM_STATE" t:3)'; rc=$LIVE_RC out=$LIVE_OUT"
+  fi
+
+  LATE_KILL_STATE="$D/state-late-kill"
+  run_signalled_at_send "$LATE_KILL_STATE" 706 late-commit-kill KILL "$LATE_COMMIT_MUTANT"
+  echo '707|| the lane the late-commit mutant hands out from under a worker' >> "$D/issues"
+  out=$(LEDGER_STATE="$LATE_KILL_STATE" DISPATCH_SCRIPT="$LATE_COMMIT_MUTANT" \
+        run 707 late-commit-next "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+  if [ "$rc" -eq 0 ] && grep -qF "rename-window -t t:3 ad707-late-commit-next" "$D/tmux.log"; then
+    ok "mutation confirmed: with the commit point late, the REAP hands a working lane to the next dispatcher (the assertions above would now be red)"
+  else
+    bad "mutation confirmed: with the commit point late, the REAP hands a working lane to the next dispatcher" \
+      "expected the next dispatch to succeed into t:3; rc=$rc out=$out"
+  fi
+fi
 
 rm -rf "$D"
 

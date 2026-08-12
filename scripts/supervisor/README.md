@@ -304,6 +304,76 @@ still not offered, which is the inversion #174 exists to prove. An unreadable
 ledger refuses every candidate rather than assume any of them are free. The
 lane cannot be chosen from the environment; there is no override.
 
+Reading a lane free is not the same as taking it (agent-dotfiles#184).
+`lane-free` is a QUERY, and the gap between it and the first `send-keys` spans
+the issue claim, the worktree build and the send — long enough for a second
+dispatcher to walk straight into it. So a candidate that reads free is
+immediately followed by `cli.py claim-lane`, an atomic write-then-verify: it
+inserts a placeholder task under the `one_open_task_per_lane` unique index and
+re-reads to confirm the row occupying the lane is its own. Two dispatchers
+racing the same candidate are serialized by the ledger's `flock` plus
+`BEGIN IMMEDIATE`; the loser is refused and moves to the next candidate.
+
+**And a claim outlives the process that took it, so both halves of its
+cleanup have to exist** (agent-dotfiles#209). `lane_available` counts that
+placeholder as occupying the lane, which is the point — but it means a
+dispatcher that dies holding one leaves the lane reading occupied with nothing
+working it, which is agent-dotfiles#102's failure shape (capacity silently
+falling to zero while lanes sit idle) arriving through the mechanism built to
+prevent it. Two mechanisms cover it, and neither is sufficient alone:
+
+- **A trap**, on `EXIT`/`TERM`/`INT`, releasing the claim on every exit the
+  shell can observe — the same guard `advance-live.sh`, `would-revert.sh`,
+  `watchdog.sh` and `inbox-poll.sh` already put on their own held resources.
+- **A reap**, run by `dispatch.sh` itself before it picks a lane
+  (`cli.py reap-lane-claims`), covering what no shell can trap: SIGKILL, an
+  OOM kill, a host crash. It is **not a TTL**. A TTL short enough to be
+  useful can expire on a slow-but-live dispatch and reopen the race above;
+  elapsed time cannot tell a slow dispatcher from a dead one. Each claim
+  records the owning process instead, and a claim is cleared only when that
+  pid is provably gone **on this host**. Every ambiguity — a live pid, a
+  recycled pid, another host, no recorded owner — leaves the claim alone, so
+  this can only ever clear a claim nobody owns, never grant a lane
+  (agent-dotfiles#124/#126's one-way ratchet).
+
+**Both stop at the same line, and the line is the send.** A claim is
+`created` while it is only a reservation, and `cli.py commit-lane-claim` moves
+it to `delivered` — which `dispatch.sh` calls immediately *before* the
+`send-keys Enter` that submits the brief. Neither the trap nor the reap will
+touch a claim past that point, because from the instant a brief is in front of
+a worker, freeing the lane is agent-dotfiles#102 caused by the cleanup rather
+than prevented by it. It is a ledger fact rather than a flag in the dispatcher
+precisely because the SIGKILL case is one where the dispatcher stops existing:
+at that moment the placeholder is the only record the lane is occupied at all,
+since `record-dispatch` has not run yet. A dead owner does not distinguish
+"claim taken, nothing sent" from "claim taken, brief live in the pane"; this
+status does.
+
+That ordering is deliberately fail-closed and it has a price. Every failure
+after the commit — a send that errors, or the agent-dotfiles#141 confirmation
+concluding the brief never left the input box — now leaves the lane **held**
+where it used to be freed. A lane wrongly held costs capacity and is recovered
+by one command; a lane wrongly freed costs a running lane's work and is
+recovered by nothing. The abort says so and prints the command, and `lanes.sh`
+still reports such a lane `unsent`.
+
+If a lane is still held after all that, `dispatch.sh`'s `no free lane` refusal
+names the manual recoveries rather than leaving them to be reconstructed, and
+**which one applies depends on the claim's status**, readable straight out of
+`cli.py status` (whose task id is `ledger-claim:<lane>:<token>`):
+
+- `created` — a reservation that never sent anything. Clear it with
+  `cli.py release-lane-claim --lane <lane> --token <token>`.
+- `delivered` — a claim with a live brief behind it. `release-lane-claim`
+  deliberately will not touch this one; that is the guard working. If the pane
+  really is idle, `cli.py cancel-open-task --lane <lane>`.
+- a `ledger-hold:` row instead of a claim — a failed `record-dispatch`
+  (agent-dotfiles#188) awaiting reconciliation, which the automatic reap also
+  deliberately will not touch. Same `cancel-open-task --lane <lane>`.
+
+Check the pane before running any of them: all of them make the lane
+dispatchable again.
+
 It exists because `worktree.sh` shipped (#79) with no automated caller
 (agent-dotfiles#81): `grep -rn worktree.sh` found three code fences in
 `loop-tick.md` and the section above, and nothing else. The tool fails closed
