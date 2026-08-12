@@ -154,7 +154,8 @@ commit message.
 worktree.sh new <slug> [repo] [base]   # create a worktree, print its path
 worktree.sh done <path>                # remove a worktree; refuses if dirty
 worktree.sh guard <repo>               # exit 1 if <repo> itself is dirty
-worktree.sh gc    [repo] [base]        # remove worktrees merged into [base] and clean
+worktree.sh gc [--dry-run] [repo] [base]  # remove clean worktrees whose branch
+                                          # content is already on [base]
 ```
 
 `dispatch.sh` calls `new` and hands the printed path to the lane, rather than
@@ -172,9 +173,28 @@ closes the ledger task but never removes the worktree it was handed
 pushed and in review, so removing its tree at completion time is early, and
 `done` correctly refuses a dirty tree, which would make a lane that finished
 with uncommitted work leak silently. `gc` instead sweeps every worktree in
-`[repo]` and removes one only when its branch's tip is an ancestor of
-`[base]` *and* its tree is clean, reusing the same dirty/detached-HEAD guard
-as `done`. It is idempotent and safe to run repeatedly, but it is not wired
+`[repo]` and removes one only when `[base]` already contains the branch's
+content *and* its tree is clean, reusing the same dirty/detached-HEAD guard
+as `done`.
+
+That predicate was tip-ancestry until agent-dotfiles#169. This repository
+squash-merges, and a squash merge writes a new commit with no parent link to
+the branch, so a fully merged branch is never an ancestor of `origin/main` —
+`gc` refused those trees permanently, and one more with every merge. It now
+asks the content question instead, in `loop-tick.md`'s formulation: a two-dot
+`base..branch` diff scoped to the paths the branch touched (see "Which diff
+answers which question"), with ancestry kept as the cheap yes.
+
+Measured on the live checkout, 2026-08-11: 70 worktree-held branches, 26
+ancestors (what `gc` reached before), and 12 more whose content is already on
+`origin/main` — 38 reachable. The 32 it still refuses include 17 with a
+MERGED PR whose files `main` has since changed again: merged, then superseded.
+No local check can tell that apart from unmerged work, so `gc` leaves them.
+Converging is not emptying.
+
+`--dry-run` runs every check and prints what a real run would remove, without
+removing anything — the way to confirm the list against the live estate before
+trusting it. It is idempotent and safe to run repeatedly, but it is not wired
 into `dispatch.sh`, `lane-done.sh`, or the Director tick — that is a separate
 decision left to whoever owns the tick, not bundled into landing the tool
 (see dispatch.sh's header on tools nothing calls).
