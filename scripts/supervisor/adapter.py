@@ -16,6 +16,26 @@ CLAUDE_ACTIVE_RE = re.compile(
 )
 
 
+# Matches on a quoted phrase anywhere in a 25-line capture window, the same
+# wide-window anti-pattern #65 fixed lanes.sh to avoid (docs/supervisor-
+# disposition.md §3). Measured there: a healthy lane quoting "Should I
+# proceed?" or a PR body's own text reads back as approval/blocked.
+#
+# It has real callers, right here: TmuxAdapter.assign_task, .observe_lane,
+# and .notify_architecture -- the last of which calls it twice, once to
+# check the pane is idle before sending and once after to confirm the send
+# landed. What routes around it is one level up -- dispatch.sh's dispatch
+# path (via cli.py's `record_dispatch` command) deliberately calls the
+# ledger's `dispatch` recorder instead of `assign_task`, precisely to keep
+# this function's defect out of the dispatch flow. See `record_dispatch`'s
+# own docstring in cli.py, which names #131 as the change that took pane
+# inference OUT of that path. "Routed around on purpose."
+#
+# That makes this the opposite of the nothing-calls-it defect dispatch.sh's
+# header describes: the implementation is unfit to call, not merely uncalled.
+# See dispatch.sh's header for the refined test this instance motivated.
+# Do not wire a new caller through here without first rebuilding this to
+# lanes.sh's standard (docs/supervisor-disposition.md:359, agent-dotfiles#222).
 def classify_capture(harness, capture):
     tail = "\n".join(capture.splitlines()[-25:])
     if BLOCKED_RE.search(tail):
