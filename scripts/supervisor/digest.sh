@@ -47,7 +47,15 @@ MODE="${1:-}"
 # with. DIGEST_VERDICT_BIN lets a test replace the whole call with a stub
 # that takes --repo/--number and prints {"verdict":...} on stdout, the same
 # override shape as DIGEST_LANES_BIN above.
-VERDICT_SOURCE="${DIGEST_VERDICT_SOURCE:-ledger}"
+#
+# Default is "github", not "ledger" (agent-dotfiles#214): LedgerVerdictSource
+# is a table nothing writes -- record_pr_verdict has no caller anywhere in
+# this estate outside its own tests -- so "ledger" as a default always reads
+# "none". GithubReviewVerdictSource works today with zero further wiring;
+# under one GitHub identity the only verdict it can see is a formal
+# `--request-changes` (#203), so it reports real rejections truthfully and
+# "none" for everything else, which is honest about what it cannot see.
+VERDICT_SOURCE="${DIGEST_VERDICT_SOURCE:-github}"
 VERDICT_PYTHON="${DIGEST_VERDICT_PYTHON:-python3}"
 VERDICT_BIN="${DIGEST_VERDICT_BIN:-}"
 

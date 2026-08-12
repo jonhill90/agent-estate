@@ -271,6 +271,45 @@ broken_out=$(PATH="$OK/bin:$PATH" SUPERVISOR_STATE="$LSTATE" LANES_SESSION=nosuc
 broken2=$(jq -c --argjson n 2 '.prs[] | select(.number==$n)' <<<"$broken_out")
 chk "broken adapter reader fails CLOSED (unknown), not open" "unknown" "$(jq -r '.verdict' <<<"$broken2")"
 
+# 15. DEFAULT SOURCE (agent-dotfiles#214): with no DIGEST_VERDICT_SOURCE set
+# at all, digest.sh must resolve through "github", not "ledger" -- ledger is
+# a table nothing writes yet, so defaulting to it always reads "none" no
+# matter what actually happened on the PR. PR5's fixture is the REAL text
+# that caused the 2026-08-12 misreport: a review COMMENTED "the literal
+# string REQUEST CHANGES inside a sentence describing the bug", on a PR
+# whose real GitHub review state is APPROVED. The old regex read that
+# comment and flipped the verdict; the adapter must read only the state
+# field and report "approved".
+python3 - "$OK/fixtures/pr_list.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+data = json.load(open(path))
+data.append({
+    "number": 5,
+    "title": "default-source regression fixture",
+    "headRefOid": "eeee5555eeee5555eeee5555eeee5555eeee5555",
+    "headRefName": "b5",
+    "mergeStateStatus": "CLEAN",
+})
+json.dump(data, open(path, "w"))
+PY
+rm -f "$OK/fixtures/pr_list.json.new"
+cat > "$OK/fixtures/run_b5.json" <<'S'
+[{"headSha":"eeee5555eeee5555eeee5555eeee5555eeee5555","conclusion":"success"}]
+S
+cat > "$OK/fixtures/reviews_5.json" <<'S'
+{"reviews":[
+  {"state":"COMMENTED","body":"digest.sh misread a prior PR because the reviewer comment contained the literal string REQUEST CHANGES inside a sentence describing the bug."},
+  {"state":"APPROVED","body":"Looks good."}
+]}
+S
+default_out=$(PATH="$OK/bin:$PATH" SUPERVISOR_STATE="$D/state" LANES_SESSION=nosuch \
+  DIGEST_REPOS=test-repo DIGEST_OWNER=ownerx GH_STUB_FIXTURES="$OK/fixtures" \
+  bash "$DIGEST" --json 2>/dev/null)
+p5=$(jq -c --argjson n 5 '.prs[] | select(.number==$n)' <<<"$default_out")
+chk "default source (unset) resolves to github, not always-none ledger" \
+  "approved" "$(jq -r '.verdict' <<<"$p5")"
+
 rm -rf "$OK"
 
 echo "  $pass passed, $fail failed"
