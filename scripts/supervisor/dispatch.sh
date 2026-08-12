@@ -162,7 +162,16 @@ fi
 # with no trace that two briefs went into the pane. "Authoritative" names
 # which source wins an availability READ, not an exclusive claim on it, and
 # the ledger keeps no evidence when that read was wrong.
-declare -A WINDOW_NAME_BY_INDEX
+# agent-dotfiles#199: NOT `declare -A`. macOS ships /bin/bash 3.2, which has
+# no associative arrays -- `declare -A` is rejected there and prints
+# straight to stderr on every dispatch, which reads like a broken guard on
+# the command that decides where work goes. A plain (indexed) array works
+# without it: bash auto-vivifies WINDOW_NAME_BY_INDEX on first assignment,
+# and every subscript below is a tmux window index (numeric, from
+# `lanes.sh`'s own window-index column), so each key keeps its own slot the
+# same way an associative array would. This is only safe because the keys
+# stay numeric -- a non-numeric key here would silently collapse to index 0
+# instead of getting its own slot.
 while IFS=$'\t' read -r idx wname; do
   [ -n "$idx" ] || continue
   WINDOW_NAME_BY_INDEX["$idx"]="$wname"
