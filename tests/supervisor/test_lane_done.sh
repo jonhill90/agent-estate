@@ -251,7 +251,7 @@ python3 - "$LANE_DONE" "$BROKEN" <<'PY' || patch_rc=$?
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = 'if ! tmux wait-for "$CHANNEL" 2>/dev/null; then\n  echo "lane-done: channel \'$CHANNEL\' was not signaled -- not renaming ${SESSION}:${IDX}" >&2\n  exit 1\nfi\n\n'
+marker = 'if ! tmux wait-for "$CHANNEL" 2>/dev/null; then\n  echo "lane-done: channel \'$CHANNEL\' was not signaled -- not renaming ${TARGET}" >&2\n  exit 1\nfi\n\n'
 assert marker in text, "wait-for guard block not found -- script shape changed"
 assert text.count(marker) == 1, "wait-for guard block not unique -- script shape changed"
 open(dst, "w").write(text.replace(marker, "", 1))
@@ -454,7 +454,7 @@ i1 = text.index(ledger_end_marker, i0) + len(ledger_end_marker)
 assert i0 > 0 and i1 > i0, "ledger release block not found -- script shape changed"
 ledger_block = text[i0:i1]
 
-rename_start = 'if ! tmux rename-window -t "${SESSION}:${IDX}" "free-${IDX}"; then'
+rename_start = 'FREE_IDX="$(tmux display-message -p -t "$TARGET" \'#{window_index}\' 2>/dev/null)"'
 rename_end_marker = "fi\n\nexit 0\n"
 j0 = text.index(rename_start)
 j1 = text.index(rename_end_marker, j0) + len(rename_end_marker)
@@ -463,7 +463,7 @@ rename_block = text[j0:j1]
 
 before = text[:i0]
 after = text[j1:]
-old_rename = 'tmux rename-window -t "${SESSION}:${IDX}" "free-${IDX}" || exit 1\n\n'
+old_rename = 'tmux rename-window -t "$TARGET" "free-${WINDOW}" || exit 1\n\n'
 open(dst, "w").write(before + old_rename + ledger_block + "\nexit 0\n" + after)
 PY
     if [ "$patch_rc2" -ne 0 ]; then
@@ -491,6 +491,150 @@ PY
         bad "mutation confirmed: restoring rename-before-release strands the lane in the ledger on a failed rename" \
           "expected exit 1, window STILL ad144-renamefail2, and a delivered (not complete) status; got exit $rc, window '$name': $out / $mutated_status"
       fi
+    fi
+
+    # --- 6. THE #241 REGRESSION: a resolved index names a different window --
+    #
+    # This is the defect, reproduced end to end against real tmux rather than
+    # asserted about. `renumber-windows on` -- this server's setting, read
+    # directly in agent-dotfiles#241 -- makes closing any window shift every
+    # HIGHER index down by one. lane-done.sh is where that costs most,
+    # because it holds a resolved target for as long as the work takes: it is
+    # handed a window at dispatch and uses it when the worker's channel fires,
+    # hours later, and windows close in between.
+    #
+    # The harm is not a stolen rename -- the name-match guard prevents that,
+    # and it stays exactly as it is. The harm is a LOST one: the finished
+    # lane's window is no longer at the index that was resolved, some
+    # stranger's is, the guard correctly refuses the stranger, and a lane that
+    # genuinely finished is never released. That is #102's shape (capacity
+    # silently falling to zero) reached through the mechanism built to prevent
+    # it.
+    #
+    # Four windows so there is something above AND below the one that closes;
+    # the lane under test sits above it, which is the only position the shift
+    # can reach.
+    RS2="lanedone241-$$"
+    if ! rtmux new-session -d -s "$RS2" -n keep-a 2>/dev/null; then
+      bad "real tmux #241: started a second throwaway session" "new-session failed"
+    else
+      # The setting the whole defect depends on, set HERE rather than assumed:
+      # a test that silently ran against `renumber-windows off` would pass for
+      # the wrong reason and pin nothing.
+      rtmux set-option -t "$RS2" renumber-windows on >/dev/null 2>&1
+      rtmux new-window -t "$RS2" -n victim >/dev/null 2>&1
+      rtmux new-window -t "$RS2" -n ad241-finished-lane >/dev/null 2>&1
+      rtmux new-window -t "$RS2" -n keep-b >/dev/null 2>&1
+
+      idx_of() { rtmux list-windows -t "$RS2" -F '#{window_name} #{window_index}' | awk -v n="$1" '$1==n{print $2}'; }
+      wid_of() { rtmux list-windows -t "$RS2" -F '#{window_name} #{window_id}'    | awk -v n="$1" '$1==n{print $2}'; }
+
+      # What a dispatcher resolves, at dispatch time: both identities of the
+      # same window, exactly the pair `lanes.sh --free` now emits.
+      RESOLVED_IDX="$(idx_of ad241-finished-lane)"
+      RESOLVED_ID="$(wid_of ad241-finished-lane)"
+
+      # ...and then a lower-indexed window closes, which is an ordinary event
+      # in this estate: every completed lane's window, every hand-opened
+      # scratch window, every `kill-window` in a recovery.
+      rtmux kill-window -t "$RS2:$(idx_of victim)" 2>/dev/null
+      SHIFTED_IDX="$(idx_of ad241-finished-lane)"
+      STRANGER="$(rtmux display-message -p -t "$RS2:$RESOLVED_IDX" '#{window_name}' 2>/dev/null)"
+
+      if [ "$SHIFTED_IDX" = "$RESOLVED_IDX" ]; then
+        bad "real tmux #241: closing a lower window shifts the lane's index" \
+          "index did not move ($RESOLVED_IDX -> $SHIFTED_IDX) -- renumber-windows is not on for this server, so this section proves nothing"
+      else
+        ok "real tmux #241: closing a lower-indexed window shifted the lane from index $RESOLVED_IDX to $SHIFTED_IDX; the resolved index now names '$STRANGER'"
+        want_contains "real tmux #241: ...and the window ID did NOT move -- it still names the lane" \
+          "ad241-finished-lane" "$(rtmux display-message -p -t "$RS2:$RESOLVED_ID" '#{window_name}' 2>/dev/null)"
+
+        # A shared runner: same script, same signal, one argument different.
+        # `$1` is the script, `$2` the window argument, `$3` the state dir.
+        # NOT called inside a command substitution: `rc241` has to survive
+        # into the assertions, and an exit code set in a subshell does not.
+        # The output goes to a file for the same reason.
+        run241() {
+          ( sleep 1; rtmux wait-for -S "rt-241-$$" ) &
+          local sigpid=$!
+          env -u TMUX TMUX_TMPDIR="$RT" AGENT_SUPERVISOR_STATE_DIR="$3" \
+            timeout 8 bash "$1" "$2" ad241-finished-lane "rt-241-$$" "$RS2" >"$D/out241" 2>&1
+          rc241=$?
+          wait "$sigpid" 2>/dev/null
+        }
+        seed241() {
+          LEDGER_STATE="$1" ledger record-dispatch \
+            --lane "${RS2}:${RESOLVED_IDX}" --task ad241-finished-lane \
+            --summary "#241 stable window ids" \
+            --pane-id '%241' --pane-path "$D" --command claude \
+            --server-id 'socket:1' --session-id '$0' --issue 241 >/dev/null 2>&1
+        }
+
+        # THE PRE-#241 SHAPE: the index-addressed contract, and the rename
+        # built from the argument rather than from the window's current index.
+        # Both halves reverted together, because both are what changed.
+        PRE241="$SHIPDIR/lane-done-pre241.sh"
+        patch_rc241=0
+        python3 - "$LANE_DONE" "$PRE241" <<'PY' || patch_rc241=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+start = 'FREE_IDX="$(tmux display-message -p -t "$TARGET" \'#{window_index}\' 2>/dev/null)"'
+end_marker = "fi\n\nexit 0\n"
+i0 = text.index(start)
+i1 = text.index(end_marker, i0) + len(end_marker)
+assert text.count(start) == 1, "free-N index lookup not unique -- script shape changed"
+old = ('if ! tmux rename-window -t "$TARGET" "free-${WINDOW}"; then\n'
+       '  echo "lane-done: rename-window FAILED for ${TARGET}" >&2\n'
+       'fi\n\nexit 0\n')
+open(dst, "w").write(text[:i0] + old + text[i1:])
+PY
+        if [ "$patch_rc241" -ne 0 ]; then
+          bad "setup: patched a pre-#241 (index-addressed) copy of lane-done.sh" \
+            "could not patch $LANE_DONE (exit $patch_rc241) -- treating as a failure, not a skip"
+        else
+          ok "setup: patched a pre-#241 (index-addressed) copy of lane-done.sh"
+          chmod +x "$PRE241"
+
+          # RED: the old shape, given the index it resolved at dispatch.
+          seed241 "$D/state-241-pre"
+          run241 "$PRE241" "$RESOLVED_IDX" "$D/state-241-pre"; out=$(cat "$D/out241")
+          pre_name="$(rtmux display-message -p -t "$RS2:$RESOLVED_ID" '#{window_name}')"
+          pre_status=$(LEDGER_STATE="$D/state-241-pre" ledger status 2>&1)
+          if [ "$rc241" -ne 0 ] && [ "$pre_name" = "ad241-finished-lane" ] \
+             && grep -qF '"status":"delivered"' <<<"$pre_status"; then
+            ok "real tmux #241: the index-addressed shape lands on '$STRANGER', refuses on the name guard, and leaves a FINISHED lane unrenamed and unreleased (exit $rc241) -- this is the defect"
+          else
+            bad "real tmux #241: the index-addressed shape strands the finished lane" \
+              "expected non-zero exit, the window still named ad241-finished-lane, and a delivered (not complete) status; got exit $rc241, window '$pre_name': $out / $pre_status"
+          fi
+
+          # GREEN: the shipped script, given the window id -- same signal,
+          # same estate, same instant.
+          seed241 "$D/state-241-fix"
+          run241 "$LANE_DONE" "$RESOLVED_ID" "$D/state-241-fix"; out=$(cat "$D/out241")
+          fix_name="$(rtmux display-message -p -t "$RS2:$RESOLVED_ID" '#{window_name}')"
+          fix_status=$(LEDGER_STATE="$D/state-241-fix" ledger status 2>&1)
+          want_exit "real tmux #241: the id-addressed shape finds the lane and exits zero" "$rc241" 0 "$out"
+          want_contains "real tmux #241: the finished lane IS released in the ledger" '"status":"complete"' "$fix_status"
+          # free-N takes N from the window's CURRENT index, not from the one
+          # resolved at dispatch: a window that moved to index 2 must not be
+          # labelled free-3, or the name lies about the very thing the window
+          # list is read for.
+          if [ "$fix_name" = "free-${SHIFTED_IDX}" ]; then
+            ok "real tmux #241: renamed to free-${SHIFTED_IDX} -- the CURRENT index, not the resolved one (free-${RESOLVED_IDX})"
+          else
+            bad "real tmux #241: renamed using the window's current index" \
+              "expected free-${SHIFTED_IDX}, got '$fix_name': $out"
+          fi
+          # And the stranger the old shape reached was never touched by the
+          # new one. A fix that merely moved which window it damages is not a
+          # fix.
+          want_contains "real tmux #241: the window at the stale index is untouched" \
+            "$STRANGER" "$(rtmux display-message -p -t "$RS2:$RESOLVED_IDX" '#{window_name}' 2>/dev/null)"
+        fi
+      fi
+      rtmux kill-session -t "$RS2" 2>/dev/null
     fi
   fi
   cleanup_rt

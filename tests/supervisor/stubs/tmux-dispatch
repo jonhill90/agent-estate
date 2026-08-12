@@ -15,6 +15,25 @@ sub="$1"; shift
 PANES="${TMUX_PANES:-${TMPDIR:-/tmp}/tmux-dispatch-panes}"
 mkdir -p "$PANES"
 
+# agent-dotfiles#241: windows now have TWO names -- the index (a slot number,
+# what the fixture keys on) and tmux's own `#{window_id}` (`@N`, stable for
+# the window's lifetime). The scripts under test address panes by id, so this
+# stub has to answer to both. Ids are synthesised as WID_BASE + index and are
+# deliberately NOT equal to the index: a stub where `@5` and `5` were the same
+# string could not tell an id-addressed call from an index-addressed one, and
+# the whole point of #241's tests is that distinction.
+WID_BASE="${LANES_STUB_WID_BASE:-100}"
+wid_for()  { printf '@%s' "$(( WID_BASE + $1 ))"; }
+# Resolve whatever came after `session:` back to a fixture index. An `@N`
+# target is a window id; anything else is already an index.
+idx_for() {
+  local w="$1"
+  case "$w" in
+    @*) printf '%s' "$(( ${w#@} - WID_BASE ))" ;;
+    *)  printf '%s' "$w" ;;
+  esac
+}
+
 # agent-dotfiles#159. STUB_MENU_PANES names windows (space-separated) whose
 # pane is a SELECTION MENU, not a text buffer -- the distinction the real bug
 # turned on: a reply routed to a menu-blocked lane was consumed as navigation
@@ -64,7 +83,7 @@ case "$sub" in
           # specific pane (not just a window) saw its own send-keys as
           # invisible. No prior caller of this stub addressed a pane
           # suffix, so nothing exercised the mismatch until now.
-          -t) win="${2##*:}"; win="${win%%.*}"; shift 2 ;;
+          -t) win="${2##*:}"; win="${win%%.*}"; win="$(idx_for "$win")"; shift 2 ;;
           -l) literal=1; shift ;;
           *) keys+=("$1"); shift ;;
         esac
@@ -206,7 +225,7 @@ case "$sub" in
     win=""; name=""; value=""
     while [ $# -gt 0 ]; do
       case "$1" in
-        -t) win="${2##*:}"; win="${win%%.*}"; shift 2 ;;
+        -t) win="${2##*:}"; win="${win%%.*}"; win="$(idx_for "$win")"; shift 2 ;;
         -p|-g|-u) shift ;;
         -*) shift ;;
         *) if [ -z "$name" ]; then name="$1"; else value="$1"; fi; shift ;;
@@ -227,14 +246,25 @@ while [ $# -gt 0 ]; do
   esac
 done
 win="${target##*:}"; win="${win%%.*}"
+win="$(idx_for "$win")"
 line=$(awk -F'|' -v w="$win" '$1==w' "$F")
 case "$sub" in
   has-session) exit 0 ;;
   list-windows) cut -d'|' -f1 "$F" ;;
   list-panes)
+    # Six columns became seven with #241's `#{window_id}`.
+    #
+    # The pane pid is SYNTHESISED rather than left empty, and that is not
+    # cosmetic: `lanes.sh` reads this list with `IFS=$'\t' read`, and a tab is
+    # an IFS *whitespace* character, so bash collapses a run of them into one
+    # delimiter. An empty pid column would therefore shift the window id into
+    # the pid variable and leave the id empty -- a stub-only corruption of a
+    # list real tmux never emits an empty field into. Same PID_BASE + index
+    # scheme stubs/tmux-lanes uses; no fixture here models a service pane, so
+    # the value itself is never looked up.
     now=$(date +%s)
     while IFS='|' read -r i n c t a m; do
-      printf '%s\t%s\t%s\t%s\t%s\n' "$i" "$n" "$c" "$((now-a))" "${m:-0}"
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$n" "$c" "$((now-a))" "${m:-0}" "$((9000+i))" "$(wid_for "$i")"
     done < "$F" ;;
   display-message)
     case "$fmt" in
@@ -272,6 +302,8 @@ case "$sub" in
         # overridable where a test needs to assert on the value.
         value="$fmt"
         value="${value//'#{window_name}'/$(cut -d'|' -f2 <<<"$line")}"
+        value="${value//'#{window_index}'/$win}"
+        value="${value//'#{window_id}'/$(wid_for "$win")}"
         value="${value//'#{pane_current_command}'/$(cut -d'|' -f3 <<<"$line")}"
         value="${value//'#{pane_id}'/%$win}"
         value="${value//'#{pane_current_path}'/${STUB_PANE_PATH:-$PWD}}"

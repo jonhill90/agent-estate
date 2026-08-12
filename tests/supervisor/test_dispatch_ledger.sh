@@ -80,7 +80,7 @@ printf '201|| test 1: ledger says free\n' >> "$D/issues"
 out=$(LEDGER_STATE="$S1" run 201 ledger-says-free "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "a lane the ledger says is free is dispatched to" "$rc" 0 "$out"
 want_contains "even though the window is still named after an old task" \
-  "send-keys -t t:3" "$(tmuxlog)"
+  "send-keys -t t:@103" "$(tmuxlog)"
 
 # --- test 2: a lane the ledger says is occupied is refused, even named ----
 # free-N -- THE INVERSION #174 exists to prove.
@@ -120,7 +120,7 @@ seed_free_lane "$S3" t:3
 printf '205|| test 3b: free lane, hand-renamed, still dispatched to\n' >> "$D/issues"
 out=$(LEDGER_STATE="$S3" run 205 renamed-still-free "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "a free lane hand-renamed to anything else is still dispatched to" "$rc" 0 "$out"
-want_contains "the rename does not occupy it" "send-keys -t t:3" "$(tmuxlog)"
+want_contains "the rename does not occupy it" "send-keys -t t:@103" "$(tmuxlog)"
 
 # --- test 4: an unreadable ledger refuses to dispatch and says why --------
 printf '206|| test 4: the ledger cannot be read at all\n' >> "$D/issues"
@@ -156,7 +156,7 @@ AGENT_SUPERVISOR_STATE_DIR="$S5" python3 "$CLI" record-completion \
 printf '209|| test 5c: same lane, after release, dispatched to\n' >> "$D/issues"
 out=$(LEDGER_STATE="$S5" run 209 after-release "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "lane-done's release lets the lane be dispatched to again" "$rc" 0 "$out"
-want_contains "and the brief actually goes to it" "send-keys -t t:3" "$(tmuxlog)"
+want_contains "and the brief actually goes to it" "send-keys -t t:@103" "$(tmuxlog)"
 
 # --- mutation-check 2: a name-fallback on a ledger miss must go red -------
 # agent-dotfiles#174's own words: "make dispatch.sh fall back to the window
@@ -171,7 +171,7 @@ import os
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = '''  CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidate" --target "$candidate" --window-name "$wname" 2>/dev/null) || continue
+marker = '''  CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidate" --target "$candidate_target" --window-name "$wname" 2>/dev/null) || continue
   grep -qF '"free":true' <<<"$CHECK" || continue
 
   # Test-only instrumentation (agent-dotfiles#184): when set, run this
@@ -200,6 +200,7 @@ marker = '''  CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidat
   CLAIM=$("$LEDGER_PYTHON" "$LEDGER_CLI" claim-lane --lane "$candidate" --token "$CLAIM_TOKEN" --owner-pid $$ 2>/dev/null) || { release_lane_claim; continue; }
   if grep -qF '"claimed":true' <<<"$CLAIM"; then
     LANE="$candidate"
+    LANE_TARGET="$candidate_target"
     # agent-dotfiles#216: `lane-free` above already resolved this lane's
     # RECORDED harness (from its @hill90_lane_harness pane option, or the
     # ledger row if it was already known) -- carried forward to step 6 so
@@ -225,6 +226,7 @@ mutated = '''  # MUTATED: reproduces the pre-#174 bug -- trust the window name o
   # mutation must skip it too to actually reproduce the pre-#174 shape).
   if [[ "$wname" =~ ^free-[0-9]+$ ]]; then
     LANE="$candidate"
+    LANE_TARGET="$candidate_target"
     break
   fi'''
 text = text.replace(marker, mutated, 1)
@@ -262,7 +264,7 @@ FIX
   out=$(DISPATCH_SCRIPT="$FALLBACK_DISPATCH" LEDGER_STATE="$S6" \
         run 211 mutation-fallback "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
   log=$(tmuxlog)
-  if [ "$rc" = 0 ] && grep -qF "send-keys -t t:3" <<<"$log"; then
+  if [ "$rc" = 0 ] && grep -qF "send-keys -t t:@103" <<<"$log"; then
     ok "mutation confirmed: a name-fallback dispatches to an occupied lane (the assertion above would now be red)"
   else
     bad "mutation confirmed: a name-fallback dispatches to an occupied lane" \

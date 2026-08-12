@@ -191,7 +191,7 @@ branch=$(git -C "${WT:-/nonexistent}" branch --show-current 2>/dev/null)
 want_contains "the worktree is on its own lane branch" "81-dispatch-worktree" "$branch"
 
 log=$(tmuxlog)
-want_contains "the brief is sent to the free lane, by index" "send-keys -t t:3" "$log"
+want_contains "the brief is sent to the free lane, by its window id" "send-keys -t t:@103" "$log"
 want_contains "the lane is told which worktree to work in" "${WT:-NO-WORKTREE}" "$log"
 want_contains "the lane is pointed at the brief" "$D/brief.md" "$log"
 want_contains "the window is renamed to say what is running" "rename-window" "$log"
@@ -199,7 +199,7 @@ want_contains "the window name carries the issue number" "ad81-dispatch-worktree
 want_contains "the lane is cleared before reuse" "/clear" "$log"
 want_contains "the issue is claimed before the brief goes out" "jonhill90" "$(assignees 81)"
 
-want_contains "the brief is submitted, not left sitting in the input" "send-keys -t t:3 Enter" "$log"
+want_contains "the brief is submitted, not left sitting in the input" "send-keys -t t:@103 Enter" "$log"
 
 # --- a mangled brief is not a delivered brief -----------------------------
 # Observed live on 2026-08-11 building this: characters typed straight after
@@ -212,8 +212,8 @@ printf '83|| dropped once\n84|| dropped always\n' >> "$D/issues"
 out=$(DISPATCH_DROP_PREFIX=40 run 83 dropped-prefix "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "a dropped prefix is retyped, not shipped mangled" "$rc" 0 "$out"
 log=$(tmuxlog)
-want_contains "the mangled input is cleared before retyping" "send-keys -t t:3 C-u" "$log"
-want_contains "the retyped brief is the one submitted" "send-keys -t t:3 Enter" "$log"
+want_contains "the mangled input is cleared before retyping" "send-keys -t t:@103 C-u" "$log"
+want_contains "the retyped brief is the one submitted" "send-keys -t t:@103 Enter" "$log"
 
 # ...and if it never lands intact, nothing is submitted at all. This wrapper
 # makes EVERY typing attempt lose its prefix, not just the first.
@@ -228,7 +228,7 @@ before=$(worktrees)
 out=$(DISPATCH_DROP_PREFIX=40 run 84 always-dropped "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "a brief that never lands intact fails the dispatch" "$rc" 1 "$out"
 log=$(tmuxlog)
-want_missing "a mangled brief is never submitted" "send-keys -t t:3 Enter" "$log"
+want_missing "a mangled brief is never submitted" "send-keys -t t:@103 Enter" "$log"
 if [ "$(assignees 84)" = "" ]; then ok "a mangled brief releases the claim"; else bad "a mangled brief releases the claim" "assignees: $(assignees 84)"; fi
 if [ "$(worktrees)" = "$before" ]; then ok "a mangled brief leaves no worktree behind"; else bad "a mangled brief leaves no worktree behind" "$before -> $(worktrees)"; fi
 cp "$D/bin/tmux-real" "$D/bin/tmux"
@@ -324,8 +324,8 @@ printf '98|| Needs the renamed lane, not the first one\n' >> "$D/issues"
 out=$(run 98 free-named-lane "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "an owned lane ahead of a free one does not block the dispatch" "$rc" 0 "$out"
 log=$(tmuxlog)
-want_contains "the brief goes to the lane named free-N" "send-keys -t t:4" "$log"
-want_missing "the task-named lane is left untouched" "-t t:3" "$log"
+want_contains "the brief goes to the lane named free-N" "send-keys -t t:@104" "$log"
+want_missing "the task-named lane is left untouched" "-t t:@103" "$log"
 
 # --- DISPATCH_LANE is gone: no env var aims a dispatch --------------------
 # It used to be honoured verbatim -- no free check, no name check, no
@@ -356,8 +356,8 @@ printf '99|| Must go where lanes.sh says\n' >> "$D/issues"
 out=$(DISPATCH_LANE=t:1 run 99 no-redirect "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "DISPATCH_LANE does not redirect a dispatch" "$rc" 0 "$out"
 log=$(tmuxlog)
-want_contains "the brief goes to the lane lanes.sh chose" "send-keys -t t:3" "$log"
-want_missing "not to the window DISPATCH_LANE named" "-t t:1" "$log"
+want_contains "the brief goes to the lane lanes.sh chose" "send-keys -t t:@103" "$log"
+want_missing "not to the window DISPATCH_LANE named" "-t t:@101" "$log"
 
 # --- the optional [repo] argument must not shift the lane into its slot ---
 #
@@ -607,8 +607,8 @@ RUN_PRESEED_PANES='tmux set-option -p -t t:7 @hill90_lane_harness copilot' \
   out=$(LEDGER_STATE="$D/state-216" run 216 copilot-lane "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "a dispatch to a recorded-copilot lane succeeds" "$rc" 0 "$out"
 log=$(tmuxlog)
-want_contains "the brief reaches the copilot lane, by index" "send-keys -t t:7" "$log"
-want_contains "the brief is submitted to the copilot lane" "send-keys -t t:7 Enter" "$log"
+want_contains "the brief reaches the copilot lane, by its window id" "send-keys -t t:@107" "$log"
+want_contains "the brief is submitted to the copilot lane" "send-keys -t t:@107 Enter" "$log"
 status=$(LEDGER_STATE="$D/state-216" ledger status 2>&1)
 want_contains "the lane the brief went to is recorded" '"lane":"t:7"' "$status"
 want_contains "the RECORDED harness is copilot, not guessed from 'node'" '"harness":"copilot"' "$status"
@@ -625,7 +625,7 @@ out=$(LEDGER_STATE="$D/state-217" run 217 unrecorded-node "$D/brief-orig.md" acm
 want_exit "a dispatch with no free lane refuses" "$rc" 1 "$out"
 want_contains "the refusal names the unidentifiable lane" "no free lane" "$out"
 log=$(tmuxlog)
-want_missing "nothing was ever sent to the unrecorded lane" "send-keys -t t:8" "$log"
+want_missing "nothing was ever sent to the unrecorded lane" "send-keys -t t:@108" "$log"
 
 # --- THE LANE_META SANITY GUARD (agent-dotfiles#144 finding 4) ------------
 #
@@ -653,8 +653,8 @@ out=$(LEDGER_STATE="$D/state-145" run 145 ledger-meta-broken "$D/brief-orig.md" 
 unset STUB_LANE_META_BROKEN
 want_exit "a broken pane-identity probe does NOT abort the dispatch" "$rc" 0 "$out"
 log=$(tmuxlog)
-want_contains "the brief still goes out" "send-keys -t t:3" "$log"
-want_contains "and is still submitted" "send-keys -t t:3 Enter" "$log"
+want_contains "the brief still goes out" "send-keys -t t:@103" "$log"
+want_contains "and is still submitted" "send-keys -t t:@103 Enter" "$log"
 want_contains "the guard names the failure as an unreadable pane probe" \
   "could not read pane metadata" "$out"
 status=$(LEDGER_STATE="$D/state-145" ledger status 2>&1)
@@ -794,8 +794,8 @@ printf '148|| a dispatch whose final ledger write fails\n' >> "$D/issues"
 out=$(LEDGER_STATE="$LSTATE" run 148 ledger-write-broken "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "a ledger write that collides still does not abort the dispatch" "$rc" 0 "$out"
 log=$(tmuxlog)
-want_contains "the brief still goes out" "send-keys -t t:3" "$log"
-want_contains "and is still submitted" "send-keys -t t:3 Enter" "$log"
+want_contains "the brief still goes out" "send-keys -t t:@103" "$log"
+want_contains "and is still submitted" "send-keys -t t:@103 Enter" "$log"
 want_contains "the write failure is loud, not swallowed" "LEDGER RECORD FAILED" "$out"
 want_contains "and says which dispatch lost its record" "ad148-ledger-write-broken" "$out"
 want_contains "the claim is NOT unwound over a bookkeeping failure" "jonhill90" "$(assignees 148)"
@@ -852,7 +852,7 @@ else
       "the fatal copy still exited 0 -- the patch missed the real failure-tolerance path: $out"
   fi
   want_contains "and the brief had already gone out when it did -- which is why fatal is wrong here" \
-    "send-keys -t t:3 Enter" "$(tmuxlog)"
+    "send-keys -t t:@103 Enter" "$(tmuxlog)"
 fi
 
 # --- AN ABORTED DISPATCH LEAVES NO RECORD SAYING WORK IS IN FLIGHT --------
@@ -1053,11 +1053,11 @@ want_exit "dispatcher B (spliced in mid-A's selection) completes its own dispatc
 want_contains "...and B's brief actually went out" "dispatch: #502 -> " "$RACE_OUT_B"
 want_exit "dispatcher A is refused: B already won the only free lane" "$RACE_RC_A" 1 "$RACE_OUT_A"
 want_contains "...and the refusal is LOUD, not silent" "no free lane" "$RACE_OUT_A"
-cnt=$(grep -c "rename-window -t t:3" <<<"$RACE_LOG")
+cnt=$(grep -c "rename-window -t t:@103" <<<"$RACE_LOG")
 if [ "$cnt" = 1 ]; then
   ok "only one brief reaches the shared lane t:3"
 else
-  bad "only one brief reaches the shared lane t:3" "rename-window -t t:3 appeared $cnt times: $RACE_LOG"
+  bad "only one brief reaches the shared lane t:3" "rename-window -t t:@103 appeared $cnt times: $RACE_LOG"
 fi
 if [ "$(assignees 501)" = "" ]; then
   ok "A's issue is never claimed -- refused before claim.sh even runs"
@@ -1080,6 +1080,7 @@ marker = '''  CLAIM_LANE="$candidate"
   CLAIM=$("$LEDGER_PYTHON" "$LEDGER_CLI" claim-lane --lane "$candidate" --token "$CLAIM_TOKEN" --owner-pid $$ 2>/dev/null) || { release_lane_claim; continue; }
   if grep -qF '"claimed":true' <<<"$CLAIM"; then
     LANE="$candidate"
+    LANE_TARGET="$candidate_target"
     # agent-dotfiles#216: `lane-free` above already resolved this lane's
     # RECORDED harness (from its @hill90_lane_harness pane option, or the
     # ledger row if it was already known) -- carried forward to step 6 so
@@ -1099,6 +1100,7 @@ marker = '''  CLAIM_LANE="$candidate"
 assert marker in text, "claim-lane block not found -- script shape changed"
 assert text.count(marker) == 1, "claim-lane block not unique -- script shape changed"
 replacement = '''  LANE="$candidate"  # MUTATED: no atomic claim at all -- agent-dotfiles#184 pre-fix shape
+  LANE_TARGET="$candidate_target"
   break'''
 text = text.replace(marker, replacement, 1)
 # agent-dotfiles#209 round 2: also neutralise step 4.5's commit guard. It
@@ -1123,7 +1125,7 @@ if [ "$patch_rc" -ne 0 ]; then
 else
   ok "setup: patched a copy of dispatch.sh with no lane claim at all"
   run_race 503 "$NO_CLAIM_MUTANT" 504
-  cnt=$(grep -c "rename-window -t t:3" <<<"$RACE_LOG")
+  cnt=$(grep -c "rename-window -t t:@103" <<<"$RACE_LOG")
   if [ "$RACE_RC_A" = 0 ] && [ "$cnt" -ge 2 ]; then
     ok "RED before the fix: with no atomic claim, BOTH dispatchers land a brief in lane t:3 (x$cnt) -- this is the race #184 reports"
   else
@@ -1170,7 +1172,7 @@ if [ "$patch_rc" -ne 0 ]; then
 else
   ok "setup: patched a copy of dispatch.sh whose claim verify-read is non-fatal"
   run_race 505 "$VERIFY_DEFEATED_MUTANT" 506
-  cnt=$(grep -c "rename-window -t t:3" <<<"$RACE_LOG")
+  cnt=$(grep -c "rename-window -t t:@103" <<<"$RACE_LOG")
   if [ "$RACE_RC_A" = 0 ] && [ "$cnt" -ge 2 ]; then
     ok "mutation confirmed: an ignored claim verify-read reopens the race (the assertions above would now be red)"
   else
@@ -1385,8 +1387,8 @@ want_exit "a dispatcher SIGTERMed as its brief goes live dies through its trap" 
 live_term_log=$(cat "$D/tmux.log")
 want_contains "...and the signal was delivered at the submit, not earlier" "signalled TERM to " "$live_term_log"
 want_contains "...the lane really was renamed to the task first (a real dispatch)" \
-  "rename-window -t t:3 ad701-live-then-term" "$live_term_log"
-want_contains "...and the brief really was submitted into the pane" "send-keys -t t:3 Enter" "$live_term_log"
+  "rename-window -t t:@103 ad701-live-then-term" "$live_term_log"
+want_contains "...and the brief really was submitted into the pane" "send-keys -t t:@103 Enter" "$live_term_log"
 # THE ASSERTION. Before the commit point moved, this read True.
 want_contains "...so the lane stays HELD: a brief is live in it and no cleanup may free it" \
   "False" "$(lane_available "$LIVE_TERM_STATE" t:3)"
@@ -1407,8 +1409,8 @@ run_signalled_at_send "$LIVE_KILL_STATE" 702 live-then-kill KILL "$DISPATCH"
 want_exit "a dispatcher SIGKILLed as its brief goes live dies un-cleanly" "$LIVE_RC" 137 "$LIVE_OUT"
 live_kill_log=$(cat "$D/tmux.log")
 want_contains "...with the lane renamed and the brief submitted first" \
-  "rename-window -t t:3 ad702-live-then-kill" "$live_kill_log"
-want_contains "...and the brief really was submitted into the pane" "send-keys -t t:3 Enter" "$live_kill_log"
+  "rename-window -t t:@103 ad702-live-then-kill" "$live_kill_log"
+want_contains "...and the brief really was submitted into the pane" "send-keys -t t:@103 Enter" "$live_kill_log"
 want_contains "...so the lane reads HELD immediately after the kill" \
   "False" "$(lane_available "$LIVE_KILL_STATE" t:3)"
 
@@ -1420,7 +1422,7 @@ out=$(LEDGER_STATE="$LIVE_KILL_STATE" run 703 the-next-one "$D/brief.md" acme/ag
 want_exit "the NEXT dispatch refuses rather than take the lane the killed dispatcher left working" "$rc" 1 "$out"
 want_contains "...naming the only lane it had as unavailable" "no free lane" "$out"
 want_missing "...and it did NOT reap the live claim away" "ledger-claim:t:3:ad702-live-then-kill" "$out"
-want_missing "...and typed nothing into that pane" "rename-window -t t:3 ad703-the-next-one" "$(cat "$D/tmux.log")"
+want_missing "...and typed nothing into that pane" "rename-window -t t:@103 ad703-the-next-one" "$(cat "$D/tmux.log")"
 # Fail-closed has a price and the refusal must name it: this lane needs a
 # human, and `release-lane-claim` deliberately will not clear it.
 want_contains "...and says how to clear a claim with a live brief behind it" "cancel-open-task --lane" "$out"
@@ -1439,7 +1441,7 @@ NO_SEND_OUT=$(LEDGER_STATE="$NO_SEND_STATE" DISPATCH_PYTHON="$D/kill-after-claim
               DISPATCH_TEST_KILL_SIGNAL=TERM run 704 killed-before-send "$D/brief.md" \
               acme/agent-dotfiles "$REPO"); NO_SEND_RC=$?
 want_exit "a dispatcher killed BEFORE the brief goes live still exits through its trap" "$NO_SEND_RC" 143 "$NO_SEND_OUT"
-want_missing "...having submitted nothing into the pane" "send-keys -t t:3 Enter" "$(cat "$D/tmux.log")"
+want_missing "...having submitted nothing into the pane" "send-keys -t t:@103 Enter" "$(cat "$D/tmux.log")"
 want_contains "...and its claim IS released at once -- nothing is working that lane" \
   "True" "$(lane_available "$NO_SEND_STATE" t:3)"
 
@@ -1480,7 +1482,7 @@ else
   LATE_TERM_STATE="$D/state-late-term"
   run_signalled_at_send "$LATE_TERM_STATE" 705 late-commit-term TERM "$LATE_COMMIT_MUTANT"
   if [ "$(lane_available "$LATE_TERM_STATE" t:3)" = "True" ] \
-     && grep -qF "send-keys -t t:3 Enter" "$D/tmux.log"; then
+     && grep -qF "send-keys -t t:@103 Enter" "$D/tmux.log"; then
     ok "mutation confirmed: with the commit point late, the TRAP frees a lane whose brief is live (the assertion above would now be red)"
   else
     bad "mutation confirmed: with the commit point late, the TRAP frees a lane whose brief is live" \
@@ -1492,11 +1494,142 @@ else
   echo '707|| the lane the late-commit mutant hands out from under a worker' >> "$D/issues"
   out=$(LEDGER_STATE="$LATE_KILL_STATE" DISPATCH_SCRIPT="$LATE_COMMIT_MUTANT" \
         run 707 late-commit-next "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
-  if [ "$rc" -eq 0 ] && grep -qF "rename-window -t t:3 ad707-late-commit-next" "$D/tmux.log"; then
+  if [ "$rc" -eq 0 ] && grep -qF "rename-window -t t:@103 ad707-late-commit-next" "$D/tmux.log"; then
     ok "mutation confirmed: with the commit point late, the REAP hands a working lane to the next dispatcher (the assertions above would now be red)"
   else
     bad "mutation confirmed: with the commit point late, the REAP hands a working lane to the next dispatcher" \
       "expected the next dispatch to succeed into t:3; rc=$rc out=$out"
+  fi
+fi
+
+# --- agent-dotfiles#241: EVERY tmux target is a window ID, never an index --
+#
+# tmux window indices are not stable on this server: `renumber-windows on`
+# means closing any window shifts every higher index down by one (measured in
+# #241, and reproduced end to end against real tmux in
+# tests/supervisor/test_lane_done.sh's `#241` section). dispatch.sh resolves a
+# lane and then spends a claim, a worktree creation and a rename before its
+# first `send-keys` -- so an index resolved at the top of that sequence can
+# name a different pane by the bottom of it. Observed 2026-08-12: three
+# briefs reported as lanes 8/9/10 were found in other windows.
+#
+# The individual assertions above already pin each call site's target
+# (`send-keys -t t:@103`, `rename-window -t t:@103`). This one is the
+# WHOLE-LOG property, which is what actually has to hold: no tmux call
+# dispatch.sh makes may address a window by index, because one that slipped
+# through would be invisible in a green suite until an estate under load
+# renumbered underneath it.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+2|ad82-other|claude.exe|esc to interrupt 3s|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+printf '241|| stable window ids\n' > "$D/issues"
+out=$(LEDGER_STATE="$D/state-241" run 241 stable-window-ids "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a dispatch under #241's shape still succeeds" "$rc" 0 "$out"
+log=$(tmuxlog)
+# Every logged `-t` argument, one per line. The stub logs rename-window and
+# send-keys verbatim, which is every tmux call that WRITES to a pane.
+targets=$(grep -oE -- '-t [^ ]+' <<<"$log" | sort -u)
+if [ -n "$targets" ] && ! grep -qvE -- '^-t t:@[0-9]+$' <<<"$targets"; then
+  ok "every tmux target dispatch.sh writes through is a window id: $(tr '\n' ' ' <<<"$targets")"
+else
+  bad "every tmux target dispatch.sh writes through is a window id" \
+    "an index-shaped or empty target is present: $targets"
+fi
+# The dispatch is still recorded under the LANE (session:index), not under the
+# target. The two identities are deliberately different things: the ledger
+# keys on a slot that survives a window being closed and recreated, which a
+# window id does not. If this ever flips, every operator recovery command the
+# refusal path prints (`cancel-open-task --lane t:3`) starts naming something
+# no human can read off the window list.
+want_contains "the dispatch is still recorded under the lane index, not the window id" \
+  '"lane":"t:3"' "$(LEDGER_STATE="$D/state-241" ledger status 2>&1)"
+
+# --- ...and a target that is empty or missing is REFUSED, not guessed -----
+# `send-keys -t t:` with an empty index does not error: it hits the ACTIVE
+# window, which is usually the supervisor (loop-tick.md, "An empty tmux
+# target hits the ACTIVE window"). `t:@` is empty in exactly the same way,
+# and #241 must not reintroduce that incident through a new spelling. So the
+# guard is a POSITIVE check on the target's shape, and a `lanes.sh` that
+# stops emitting one makes dispatch refuse outright rather than fall back to
+# the index.
+#
+# Shadow supervisor directory: every real file symlinked, `lanes.sh` replaced
+# by one whose `--free` prints the lane and NO target. dispatch.sh resolves
+# its siblings from its own directory, so a mutated lanes.sh anywhere else
+# would never be the one it calls.
+SHADOW="$D/shadow-supervisor"
+rm -rf "$SHADOW"; mkdir -p "$SHADOW"
+for f in "$HERE/../../scripts/supervisor/"*; do ln -s "$f" "$SHADOW/$(basename "$f")"; done
+rm -f "$SHADOW/lanes.sh"
+cat > "$SHADOW/lanes.sh" <<'LANESTUB'
+#!/bin/bash
+# A lanes.sh that has lost its window-id column -- the shape #241's guard has
+# to refuse rather than paper over.
+case "${1:-}" in
+  --free)    printf 't:3\n' ;;
+  --blocked) : ;;
+  --json)    printf '[]\n' ;;
+  *)         printf 'WINDOW NAME COMMAND STATE\n3 free-3 claude.exe free\n' ;;
+esac
+LANESTUB
+chmod +x "$SHADOW/lanes.sh"
+printf '242|| a lanes.sh with no window-id column\n' > "$D/issues"
+before=$(worktrees)
+out=$(DISPATCH_SCRIPT="$SHADOW/dispatch.sh" run 242 no-target "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a candidate with no window-id target is refused, not dispatched to" "$rc" 1 "$out"
+want_contains "...and the refusal says why" "no usable window-id target" "$out"
+log=$(tmuxlog)
+want_missing "...nothing is sent anywhere -- not to the lane, not to the active window" "send-keys" "$log"
+want_missing "...and no window is renamed" "rename-window" "$log"
+if [ "$(assignees 242)" = "" ]; then ok "...and no claim is taken"; else bad "...and no claim is taken" "assignees: $(assignees 242)"; fi
+if [ "$(worktrees)" = "$before" ]; then ok "...and no worktree is created"; else bad "...and no worktree is created" "$before -> $(worktrees)"; fi
+
+# --- MUTATION: put the index back at ONE call site ------------------------
+# The whole-log assertion above is only worth anything if a single reverted
+# target turns it red. This repository's most-repeated defect is a test that
+# passes without running its subject (#192 was the eighth instance), and a
+# log-shape assertion is exactly the kind that can look thorough while
+# checking nothing.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+2|ad82-other|claude.exe|esc to interrupt 3s|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+# A SECOND shadow directory, with the REAL lanes.sh: the mutant must be
+# stopped by nothing except its own reverted target, and $SHADOW's lanes.sh
+# is deliberately broken.
+SHADOW2="$D/shadow-supervisor-2"
+rm -rf "$SHADOW2"; mkdir -p "$SHADOW2"
+for f in "$HERE/../../scripts/supervisor/"*; do ln -s "$f" "$SHADOW2/$(basename "$f")"; done
+rm -f "$SHADOW2/dispatch.sh"
+INDEX_MUTANT="$SHADOW2/dispatch.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$INDEX_MUTANT" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+# The brief submit -- the single most consequential target in the script.
+marker = 'tmux send-keys -t "$LANE_TARGET" "$MESSAGE" 2>/dev/null'
+assert marker in text, "the brief's send-keys not found -- script shape changed"
+assert text.count(marker) == 1, "the brief's send-keys not unique -- script shape changed"
+open(dst, "w").write(text.replace(marker, 'tmux send-keys -t "$LANE" "$MESSAGE" 2>/dev/null', 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh with one index-addressed send-keys" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh with one index-addressed send-keys"
+  chmod +x "$INDEX_MUTANT"
+  printf '243|| one call site reverted to the index\n' > "$D/issues"
+  out=$(DISPATCH_SCRIPT="$INDEX_MUTANT" run 243 index-target "$D/brief.md" acme/agent-dotfiles "$REPO")
+  mutant_targets=$(grep -oE -- '-t [^ ]+' <<<"$(tmuxlog)" | sort -u)
+  if grep -qE -- '^-t t:3$' <<<"$mutant_targets"; then
+    ok "mutation confirmed: one reverted call site puts an index target back in the log (the assertion above would now be red): $(tr '\n' ' ' <<<"$mutant_targets")"
+  else
+    bad "mutation confirmed: one reverted call site puts an index target back in the log" \
+      "expected '-t t:3' among the mutant's targets, got: $mutant_targets / $out"
   fi
 fi
 
@@ -1528,7 +1661,13 @@ printf '204|Fixes #193|lane/193-telegram-to-director\n' >> "$D/prs"
 out=$(LEDGER_STATE="$D/state-212" run 193 telegram-to-director "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "the authoring dispatch (#193) succeeds" "$rc" 0 "$out"
 log=$(tmuxlog)
-want_contains "and lands on the first free lane, t:3" "send-keys -t t:3" "$log"
+# TARGETS ARE WINDOW IDS HERE, LANE NAMES ARE INDICES (#241, merged after this
+# section was written). The stub synthesises `@N` as 100 + index, so lane t:3's
+# target is `t:@103`. Which LANE was chosen is still asserted as an index -- see
+# "the author's lane is named and skipped" below, which reads `skipping t:3`
+# from dispatch.sh's own message. That split is #241's whole point and these
+# assertions now carry it: the ledger keys on the slot, tmux is addressed by id.
+want_contains "and lands on the first free lane, t:3 (target t:@103)" "send-keys -t t:@103" "$log"
 
 # The authoring lane finishes and goes idle again -- exactly what makes it
 # eligible for ordinary dispatch, and exactly the case #212 exists for: a
@@ -1540,8 +1679,11 @@ want_exit "a review of PR #204 is still dispatched" "$rc" 0 "$out"
 want_contains "the author's lane is named and skipped" "skipping t:3" "$out"
 want_contains "the skip names the authoring task" "ad193-telegram-to-director" "$out"
 log=$(tmuxlog)
-want_contains "and the review lands on the OTHER free lane, t:4" "send-keys -t t:4" "$log"
-want_missing "never on the author's lane" "send-keys -t t:3 " "$log"
+want_contains "and the review lands on the OTHER free lane, t:4 (target t:@104)" "send-keys -t t:@104" "$log"
+# The negative has to move to the id too, or it stops biting: after #241 no
+# tmux call names `t:3` at all, so a `want_missing "-t t:3 "` would pass on a
+# dispatch that landed squarely on the author.
+want_missing "never on the author's lane (t:3, target t:@103)" "send-keys -t t:@103 " "$log"
 
 # Now t:4 (from the review just dispatched) is the only thing standing
 # between t:3 (free, but the author) and a refusal -- leave it occupied and
@@ -1628,7 +1770,7 @@ FIX
         run 210 rev-220 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 220); rc=$?
   want_exit "mutation confirmed: the unguarded copy dispatches a self-review" "$rc" 0 "$out"
   log=$(tmuxlog)
-  want_contains "mutation confirmed: it lands on the author's own lane, t:3" "send-keys -t t:3" "$log"
+  want_contains "mutation confirmed: it lands on the author's own lane, t:3 (target t:@103)" "send-keys -t t:@103" "$log"
 fi
 
 # --- agent-dotfiles#225: --reviews-pr with no value must refuse, not hang -
