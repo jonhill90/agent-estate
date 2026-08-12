@@ -111,6 +111,13 @@
 #   ADVANCE_ROLLBACK      default $SUPERVISOR_STATE/.live-rollback-sha
 #   ADVANCE_TICK_INTERVAL watchdog cadence in seconds; default 180
 #   ADVANCE_SAFETY_BUFFER seconds before the next tick to stay clear of; default 30
+#   SUPERVISOR_INBOX_POLL_STATUS  inbox-poll.sh's own status file (read, not
+#                                 written); default $SUPERVISOR_STATE/inbox-poll.status
+#   INBOX_POLL_RESTART_FLAG       written to request a poller restart; must
+#                                 match inbox-poll.sh's own default/override
+#   LANES_SERVICE_RE / LANES_SESSION  same pane-identification knobs lanes.sh
+#                                     uses to find the poller (#154); default
+#                                     session "agent-dotfiles"
 set -uo pipefail
 
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
@@ -146,6 +153,96 @@ watchdog_age() {
   echo $((now - epoch))
 }
 
+# --- agent-dotfiles#187: restart a stale inbox-poll.sh ----------------------
+# inbox-poll.sh is the estate's OTHER long-running process pinned to LIVE --
+# same defect #130/#132 fixed here for the watchdog itself, deployed later
+# and left with no equivalent. This is the analogous fix, not a second
+# mechanism: it runs from right here, where LIVE's post-advance head sha is
+# already known, and compares it against the `sha:` line inbox-poll.sh
+# writes into its own status file every iteration.
+#
+# COOPERATIVE, NOT SIGNALED (see inbox-poll.sh's matching header comment for
+# the read side). This only ever writes a flag file and queues a relaunch
+# command into the poller's pane -- it never signals the process. A restart
+# it triggers can therefore never land mid-drain: inbox-poll.sh only checks
+# the flag between iterations, after a batch's offset has been both
+# acknowledged to Telegram AND fully routed, so nothing is skipped and
+# nothing is asked for twice.
+#
+# WHY QUEUEING BEFORE THE POLLER HAS ACTUALLY EXITED IS SAFE: inbox-poll.sh
+# never reads stdin, so keystrokes sent to its pane while it is still the
+# foreground process sit unread in the pty's input queue until the shell
+# resumes reading -- the same mechanism watchdog.sh's own "queued /loop"
+# comment documents for a busy pane. No wait loop, no second invocation, no
+# race to get right here.
+#
+# THE PANE IS FOUND BY WHAT ITS OWN FIRST PROCESS IS, not a window number or
+# name -- exactly the identification lanes.sh's SERVICE_RE already uses
+# (#154), reused rather than reinvented so the two never drift apart.
+INBOX_POLL_STATUS_PATH="${SUPERVISOR_INBOX_POLL_STATUS:-$STATE/inbox-poll.status}"
+INBOX_POLL_RESTART_FLAG="${INBOX_POLL_RESTART_FLAG:-$STATE/.inbox-poll-restart-requested}"
+INBOX_POLL_SESSION="${LANES_SESSION:-agent-dotfiles}"
+INBOX_POLL_SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
+
+# Echoes "session:window.pane" for the first tmux pane in $INBOX_POLL_SESSION
+# whose own process matches $INBOX_POLL_SERVICE_RE, or returns 1 with
+# nothing echoed if tmux is unavailable, the session does not exist, or no
+# pane matches.
+find_poller_pane() {
+  command -v tmux >/dev/null 2>&1 || return 1
+  local target pid cmd
+  while IFS=$'\t' read -r target pid; do
+    [ -n "$pid" ] || continue
+    cmd=$(ps -o command= -p "$pid" 2>/dev/null) || continue
+    if [[ "$cmd" =~ $INBOX_POLL_SERVICE_RE ]]; then
+      printf '%s' "$target"
+      return 0
+    fi
+  done < <(tmux list-panes -t "$INBOX_POLL_SESSION" -F '#{session_name}:#{window_index}.#{pane_index}	#{pane_pid}' 2>/dev/null)
+  return 1
+}
+
+# maybe_restart_poller <live-head-sha> -- never fails the tick it is called
+# from: every branch below is a `log` and a `return 0`, mirroring
+# advance_on_exit's own "a refused advance is a report, not a crash" rule in
+# watchdog.sh, because this runs on the way out of an otherwise-successful
+# advance-live.sh pass.
+maybe_restart_poller() {
+  local live_sha="$1" poller_sha pane
+  if [ -f "$INBOX_POLL_RESTART_FLAG" ]; then
+    log "POLLER-CHECK: restart already requested at $INBOX_POLL_RESTART_FLAG, waiting for the poller to notice"
+    return 0
+  fi
+  if [ ! -f "$INBOX_POLL_STATUS_PATH" ]; then
+    log "POLLER-CHECK: no inbox-poll.status at $INBOX_POLL_STATUS_PATH -- poller not running or state wiped, not restarting"
+    return 0
+  fi
+  poller_sha=$(grep -m1 '^sha:' "$INBOX_POLL_STATUS_PATH" 2>/dev/null | awk '{print $2}')
+  if [ -z "$poller_sha" ]; then
+    log "POLLER-CHECK: $INBOX_POLL_STATUS_PATH has no sha: line -- cannot compare, not restarting"
+    return 0
+  fi
+  if [ "$poller_sha" = "$live_sha" ]; then
+    log "POLLER-CHECK: poller already at $live_sha, current"
+    return 0
+  fi
+  pane=$(find_poller_pane) || {
+    log "POLLER-CHECK: poller at $poller_sha, live now $live_sha, but no pane in session '$INBOX_POLL_SESSION' matches inbox-poll.sh -- not restarting"
+    return 0
+  }
+
+  mkdir -p "$(dirname "$INBOX_POLL_RESTART_FLAG")" 2>/dev/null
+  if ! : >"$INBOX_POLL_RESTART_FLAG" 2>/dev/null; then
+    log "POLLER-CHECK: could not write restart flag $INBOX_POLL_RESTART_FLAG -- not restarting"
+    return 0
+  fi
+
+  tmux send-keys -t "$pane" -l "cd '$LIVE' && exec scripts/supervisor/inbox-poll.sh" 2>/dev/null
+  tmux send-keys -t "$pane" Enter 2>/dev/null
+  log "POLLER-RESTART-QUEUED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written, relaunch queued for once the poller exits"
+  return 0
+}
+
 git -C "$LIVE" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git worktree: $LIVE"
 
 cur=$(git -C "$LIVE" rev-parse HEAD 2>/dev/null) || fail "cannot read HEAD in $LIVE"
@@ -158,6 +255,7 @@ esac
 
 if [ "$cur" = "$target" ] || [ "$behind" -eq 0 ]; then
   log "current: $cur already matches origin/main, nothing to advance"
+  maybe_restart_poller "$cur"
   exit 0
 fi
 
@@ -268,3 +366,4 @@ fi
 
 log "ADVANCED $LIVE from $cur to $target ($behind commit(s))"
 echo "advance-live: advanced $LIVE from ${cur:0:12} to ${target:0:12} ($behind commit(s))"
+maybe_restart_poller "$newsha"

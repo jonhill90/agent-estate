@@ -510,6 +510,120 @@ fi
 git -C "$SRC2" worktree remove --force "$LIVE2" >/dev/null 2>&1
 rm -rf "$D2"
 
+# --- agent-dotfiles#187: restarting a stale inbox-poll.sh -------------------
+# The watchdog's own restart-on-crash defect (#130) got #132: the watchdog
+# advances its OWN pinned worktree every tick. inbox-poll.sh is the estate's
+# other long-running process and got no equivalent (#187) -- this exercises
+# the fix, which lives here rather than in inbox-poll.sh itself (see this
+# file's own header). tmux is stubbed throughout: nothing here ever reaches
+# a real tmux server, let alone the live poller in agent-dotfiles:11 -- the
+# brief for this work says explicitly not to touch that pane, and a fake
+# `tmux` on PATH is how that is guaranteed rather than merely intended.
+D3=$(mktemp -d)
+git init -q --bare "$D3/origin.git"
+git clone -q "$D3/origin.git" "$D3/src" 2>/dev/null
+SRC3="$D3/src"
+git -C "$SRC3" config user.email test@example.com
+git -C "$SRC3" config user.name "Test"
+git -C "$SRC3" checkout -q -b main
+mkdir -p "$SRC3/scripts/supervisor"
+cat >"$SRC3/scripts/supervisor/watchdog.sh" <<'EOF'
+#!/bin/bash
+set -uo pipefail
+STATUS="${SUPERVISOR_STATUS:?}"
+mkdir -p "$(dirname "$STATUS")"
+printf 'checked:  %s\nstate:    pane_unreadable\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STATUS"
+exit 0
+EOF
+chmod +x "$SRC3/scripts/supervisor/watchdog.sh"
+git -C "$SRC3" add -A
+git -C "$SRC3" commit -q -m "base"
+git -C "$SRC3" push -q -u origin main
+LIVE3="$D3/live"
+git -C "$SRC3" worktree add -q --detach "$LIVE3" origin/main
+live3_sha=$(git -C "$LIVE3" rev-parse HEAD)
+
+# A real background process literally named inbox-poll.sh, standing in for
+# the poller's pane -- lanes.sh's SERVICE_RE (reused by maybe_restart_poller)
+# matches on the pane's own process, so the stand-in has to actually be a
+# running process a real `ps` can see, not just a string.
+#
+# `exec -a` in place of a nested `bash ... &`: the latter forks a CHILD
+# `sleep` under the wrapper bash, so killing $! only kills the wrapper and
+# leaves the orphaned `sleep` running (and, under a captured, non-tty
+# stdout/stderr -- exactly how this suite runs under Python's
+# subprocess.run in test_shell_suites.py -- holding those inherited pipes
+# open for the rest of its 300s and hanging the whole suite well past this
+# test's own completion). `exec -a` replaces this process's own image in
+# place, so $! IS the sleep, one PID, one kill, nothing left behind.
+mkdir -p "$D3/lane"
+cat > "$D3/lane/inbox-poll.sh" <<'EOF'
+#!/bin/bash
+exec -a inbox-poll.sh sleep 300
+EOF
+chmod +x "$D3/lane/inbox-poll.sh"
+bash "$D3/lane/inbox-poll.sh" &
+POLLER_PID=$!
+
+STUBS="$D3/bin"; mkdir -p "$STUBS"
+TMUX_LOG="$D3/tmux.log"
+cat > "$STUBS/tmux" <<EOF
+#!/bin/bash
+echo "\$@" >> "$TMUX_LOG"
+if [ "\$1" = "list-panes" ]; then
+  printf 'test-session-187:11.1\t$POLLER_PID\n'
+fi
+exit 0
+EOF
+chmod +x "$STUBS/tmux"
+
+# --- a stale poller (sha differs from LIVE3) gets a restart queued ---------
+S=$(mktemp -d)
+printf 'checked: %s\nstate:   ok\nsha:     deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$S/inbox-poll.status"
+out=$(SUPERVISOR_STATE="$S" LANES_SESSION="test-session-187" PATH="$STUBS:$PATH" bash "$ADVANCE" "$LIVE3" 2>&1); rc=$?
+want_exit "a poller-restart check never fails the tick (exit 0)" "$rc" 0 "$out"
+[ -f "$S/.inbox-poll-restart-requested" ] && ok "a stale poller gets a restart flag written" \
+  || bad "a stale poller gets a restart flag written" "$(ls "$S" 2>/dev/null)"
+grep -q 'inbox-poll.sh' "$TMUX_LOG" 2>/dev/null && ok "the relaunch command is queued into the poller's pane" \
+  || bad "the relaunch command is queued into the poller's pane" "$(cat "$TMUX_LOG" 2>/dev/null)"
+grep -q "test-session-187:11.1" "$TMUX_LOG" 2>/dev/null && ok "the queued command targets the poller's actual pane" \
+  || bad "the queued command targets the poller's actual pane" "$(cat "$TMUX_LOG" 2>/dev/null)"
+grep -qi 'POLLER-RESTART-QUEUED' "$S/advance-live.log" 2>/dev/null && ok "the restart is logged" \
+  || bad "the restart is logged" "$(cat "$S/advance-live.log" 2>/dev/null)"
+
+# --- a current poller (sha matches LIVE3) is left alone ---------------------
+S2=$(mktemp -d)
+printf 'checked: %s\nstate:   ok\nsha:     %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$live3_sha" >"$S2/inbox-poll.status"
+: >"$TMUX_LOG"
+out2=$(SUPERVISOR_STATE="$S2" LANES_SESSION="test-session-187" PATH="$STUBS:$PATH" bash "$ADVANCE" "$LIVE3" 2>&1); rc2=$?
+want_exit "a current-poller check never fails the tick (exit 0)" "$rc2" 0 "$out2"
+[ ! -f "$S2/.inbox-poll-restart-requested" ] && ok "a current poller gets no restart flag" \
+  || bad "a current poller gets no restart flag" ""
+[ ! -s "$TMUX_LOG" ] && ok "a current poller triggers no tmux send-keys" \
+  || bad "a current poller triggers no tmux send-keys" "$(cat "$TMUX_LOG")"
+
+# --- a restart already in flight is not re-queued ---------------------------
+S3=$(mktemp -d)
+printf 'checked: %s\nstate:   ok\nsha:     deadbeef\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$S3/inbox-poll.status"
+: >"$S3/.inbox-poll-restart-requested"
+: >"$TMUX_LOG"
+out3=$(SUPERVISOR_STATE="$S3" LANES_SESSION="test-session-187" PATH="$STUBS:$PATH" bash "$ADVANCE" "$LIVE3" 2>&1); rc3=$?
+[ ! -s "$TMUX_LOG" ] && ok "a restart already pending is not re-queued" \
+  || bad "a restart already pending is not re-queued" "$(cat "$TMUX_LOG")"
+
+# --- no pane matches the poller: refuses to guess, does not restart --------
+kill "$POLLER_PID" 2>/dev/null; wait "$POLLER_PID" 2>/dev/null
+S4=$(mktemp -d)
+printf 'checked: %s\nstate:   ok\nsha:     deadbeef\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$S4/inbox-poll.status"
+: >"$TMUX_LOG"
+out4=$(SUPERVISOR_STATE="$S4" LANES_SESSION="test-session-187" PATH="$STUBS:$PATH" bash "$ADVANCE" "$LIVE3" 2>&1); rc4=$?
+[ ! -f "$S4/.inbox-poll-restart-requested" ] && ok "no matching pane leaves the poller untouched" \
+  || bad "no matching pane leaves the poller untouched" ""
+grep -qi 'no pane' "$S4/advance-live.log" 2>/dev/null && ok "a missing pane is named in the log" \
+  || bad "a missing pane is named in the log" "$(cat "$S4/advance-live.log" 2>/dev/null)"
+
+rm -rf "$D3"
+
 rm -rf "$D"
 
 echo "$pass passed, $fail failed"

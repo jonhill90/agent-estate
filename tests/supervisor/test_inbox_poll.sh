@@ -339,5 +339,96 @@ else
 fi
 cp "$POLL" "$D/lane/inbox-poll.sh"; chmod +x "$D/lane/inbox-poll.sh"
 
+# --- agent-dotfiles#187: SIGTERM must be trapped, not left to EXIT ---------
+# The two heartbeat assertions above (SIGTERM pages, SIGTERM records
+# `stopped`) were flaky, and turned this branch's CI red: an UNTRAPPED
+# SIGTERM only reaches an EXIT trap when bash is waiting on a foreground
+# child. When it lands while bash is in its own builtins, the default
+# disposition kills the shell and the EXIT trap never runs -- no page, no
+# `stopped` heartbeat. Measured on this script before the fix: 4 of 150
+# SIGTERMs sent nothing at all; after trapping TERM/INT/HUP explicitly,
+# 0 of 300.
+#
+# This assertion is structural on purpose. The behavioural version cannot be
+# made deterministic: the miss rate is a few percent per kill, so no loop of
+# a length worth running in CI turns a deleted trap reliably red -- it would
+# just reintroduce the flake it exists to prevent. Deleting any trap line
+# below turns THIS red every time, which is the regression worth catching.
+# The behavioural half is the pair of assertions above, plus the short loop
+# after this one.
+for sig in TERM INT HUP; do
+  grep -qE "^trap '.*report_stop.*' .*\b$sig\b" "$POLL" \
+    && ok "inbox-poll.sh traps $sig explicitly, not only EXIT" \
+    || bad "no explicit $sig trap in inbox-poll.sh" "$(grep -n '^trap ' "$POLL")"
+done
+
+# The cheap behavioural backstop: every one of a dozen SIGTERMs must page.
+# Not sensitive enough to catch the race on its own (see above) -- it is here
+# to catch gross breakage of the stop path, which it does deterministically.
+term_misses=0
+for _ in $(seq 1 12); do
+  rm -f "$D/notify.log" "$D/status" "$D/poll.log"; : > "$D/notify.log"
+  HOME="$D/state" INBOX_SCRIPT="$D/fixture-forever" ROUTE_LOG="$D/route.log" NOTIFY_LOG="$D/notify.log" \
+    INBOX_POLL_ITERATIONS=0 INBOX_POLL_STATUS="$D/status" INBOX_POLL_LOG="$D/poll.log" \
+    INBOX_POLL_BACKOFF_BASE=0 INBOX_POLL_MIN_UPTIME=0 \
+    bash "$D/lane/inbox-poll.sh" t >/dev/null 2>&1 &
+  pid=$!
+  waited=0
+  while [ ! -s "$D/status" ] && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+  kill -TERM "$pid" 2>/dev/null
+  wait "$pid" 2>/dev/null
+  grep -qi 'poller stopped' "$D/notify.log" 2>/dev/null || term_misses=$((term_misses + 1))
+done
+[ "$term_misses" -eq 0 ] && ok "twelve consecutive SIGTERMs each paged Jon" \
+  || bad "a SIGTERM died without paging Jon" "$term_misses of 12 sent nothing"
+
+# --- agent-dotfiles#187: the status file records the running commit --------
+# advance-live.sh's poller-restart check compares THIS line against LIVE's
+# own head sha to decide whether the poller is stale. It has to be the real
+# commit, not a guess -- a lane copy checked out to a real sha proves it.
+git -C "$D/lane" init -q
+git -C "$D/lane" -c user.email=t@t -c user.name=t commit -q --allow-empty -m "lane commit"
+lane_sha=$(git -C "$D/lane" rev-parse HEAD)
+printf 'ok:\n' > "$D/fixture-sha"
+run "$D/fixture-sha" 1 >"$D/out13" 2>&1
+recorded=$(grep -m1 '^sha:' "$D/status" 2>/dev/null | awk '{print $2}')
+[ "$recorded" = "$lane_sha" ] && ok "the status file's sha: line matches the commit the poller is running from" \
+  || bad "status sha mismatch" "recorded='$recorded' wanted='$lane_sha'"
+
+# --- agent-dotfiles#187: a version-triggered restart is deliberate ---------
+# advance-live.sh's maybe_restart_poller writes INBOX_POLL_RESTART_FLAG and
+# queues a relaunch; this end only has to notice the flag, exit cleanly
+# between iterations, and not page Jon about it -- the same DELIBERATE gate
+# #155/#160 already built for the INBOX_POLL_ITERATIONS path above.
+rm -f "$D/notify.log" "$D/status" "$D/poll.log"
+: > "$D/notify.log"
+RESTART_FLAG="$D/restart-flag"
+rm -f "$RESTART_FLAG"
+HOME="$D/state" INBOX_SCRIPT="$D/fixture-forever" ROUTE_LOG="$D/route.log" NOTIFY_LOG="$D/notify.log" \
+  INBOX_POLL_ITERATIONS=0 INBOX_POLL_STATUS="$D/status" INBOX_POLL_LOG="$D/poll.log" \
+  INBOX_POLL_BACKOFF_BASE=0 INBOX_POLL_MIN_UPTIME=0 INBOX_POLL_RESTART_FLAG="$RESTART_FLAG" \
+  bash "$D/lane/inbox-poll.sh" t >"$D/out14" 2>&1 &
+pid=$!
+waited=0
+while [ ! -s "$D/status" ] && [ "$waited" -lt 50 ]; do sleep 0.1; waited=$((waited + 1)); done
+: > "$RESTART_FLAG"
+waited=0
+while kill -0 "$pid" 2>/dev/null && [ "$waited" -lt 100 ]; do sleep 0.1; waited=$((waited + 1)); done
+if kill -0 "$pid" 2>/dev/null; then
+  bad "a restart-flag request makes the poller exit on its own" "still running after ${waited}00ms"
+  kill -TERM "$pid" 2>/dev/null; wait "$pid" 2>/dev/null
+else
+  wait "$pid" 2>/dev/null
+  ok "a restart-flag request makes the poller exit on its own"
+fi
+grep -qi 'poller stopped' "$D/notify.log" 2>/dev/null && bad "a version-triggered restart paged Jon" "$(cat "$D/notify.log")" \
+  || ok "a version-triggered restart does not page Jon"
+[ -f "$RESTART_FLAG" ] && bad "the poller left the restart flag behind" "" \
+  || ok "the poller consumes (removes) the restart flag"
+grep -q 'state:.*stopped' "$D/status" 2>/dev/null && ok "the heartbeat file records the restart stop anyway" \
+  || bad "no heartbeat status recorded for the restart" "$(cat "$D/status" 2>/dev/null)"
+grep -qi 'version-triggered restart' "$D/poll.log" 2>/dev/null && ok "the log names it a version-triggered restart" \
+  || bad "no version-triggered restart line in the log" "$(cat "$D/poll.log" 2>/dev/null)"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
