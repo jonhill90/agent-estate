@@ -167,6 +167,16 @@ def parser():
     cancel_open_task_parser = sub.add_parser("cancel-open-task")
     cancel_open_task_parser.add_argument("--lane", required=True)
 
+    # agent-dotfiles#212: the read `dispatch.sh` needs to refuse a review
+    # dispatched back to the lane that wrote the code under review. The
+    # ledger already records each task's `lane` permanently (`tasks.id` is
+    # its primary key, and `Ledger._assign_tx` raises rather than let a
+    # second lane claim the same task id) -- this just exposes that lookup,
+    # the same way `lane-free` exposes `lane_available` rather than making
+    # dispatch.sh touch the database directly.
+    task_lane_parser = sub.add_parser("task-lane")
+    task_lane_parser.add_argument("--task", required=True)
+
     sub.add_parser("status")
     return root
 
@@ -547,6 +557,9 @@ def main(argv=None):
         value = {"reaped": reaped, "count": len(reaped)}
     elif args.command == "cancel-open-task":
         value = {"lane": args.lane, "cancelled": ledger.cancel_open_task(args.lane)}
+    elif args.command == "task-lane":
+        row = ledger.get_task(args.task)
+        value = {"task": args.task, "known": row is not None, "lane": row["lane"] if row is not None else None}
     elif args.command == "record-completion":
         value = record_completion(ledger, task=args.task, note=args.note)
     elif args.command == "accept":

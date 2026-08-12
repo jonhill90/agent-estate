@@ -1,11 +1,15 @@
 #!/bin/bash
-# Stub gh for claim.sh tests.
+# Stub gh for claim.sh and dispatch.sh tests.
 #
 # GH_ISSUES holds one line per open issue:   <number>|<assignees-csv>|<title>|<state>
-# GH_PRS    holds one line per open PR:      <number>|<body>
+# GH_PRS    holds one line per open PR:      <number>|<body>|<headRefName>
 #
 # <state> is optional and defaults to OPEN when the field is absent, so
 # fixtures written before #95 (three fields) still describe open issues.
+#
+# <headRefName> is optional and defaults to empty (agent-dotfiles#212 added
+# it) so fixtures written before that landed (two fields) still describe PR
+# bodies for `claim.sh stale`, which never reads this column.
 #
 # Writes land back in GH_ISSUES, so a claim taken by one invocation is visible
 # to the next -- which is the whole point of the test: a SECOND dispatcher must
@@ -70,8 +74,22 @@ case "$sub" in
         ;;
     esac ;;
   pr)
-    # pr list --json number,body -q '.[]|...'  -> number<TAB>body
-    while IFS='|' read -r n b; do [ -n "$n" ] && printf '%s\t%s\n' "$n" "$b"; done < "$P"
-    ;;
+    verb="$1"; shift
+    case "$verb" in
+      view)
+        num=""
+        for a in "$@"; do case "$a" in [0-9]*) num="$a"; break ;; esac; done
+        line=$(awk -F'|' -v n="$num" '$1==n' "$P")
+        [ -n "$line" ] || { echo "gh: no pull request $num" >&2; exit 1; }
+        href=$(cut -d'|' -f3 <<<"$line")
+        if [[ "$*" == *"headRefName"* ]]; then
+          printf '{"headRefName":"%s"}\n' "$href"
+        fi
+        ;;
+      list)
+        # pr list --json number,body -q '.[]|...'  -> number<TAB>body
+        while IFS='|' read -r n b h; do [ -n "$n" ] && printf '%s\t%s\n' "$n" "$b"; done < "$P"
+        ;;
+    esac ;;
 esac
 exit 0
