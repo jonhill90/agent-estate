@@ -11,15 +11,16 @@
 # coordinate work, and that still stands — GitHub remains the queue, tmux
 # remains the frontend. Nothing here becomes a dependency of the loop.
 #
-# Usage: AGENT_NOTIFY_CALLER=supervisor notify.sh "subject" "body"
+# Usage: AGENT_NOTIFY_CALLER=supervisor|director notify.sh "subject" "body"
 # Config: AGENT_NOTIFY_IMESSAGE_TO   phone number or Apple ID to message
 #         AGENT_NOTIFY_TELEGRAM_TOKEN / _CHAT_ID   (fallback, later)
 #
-# CALLER GATE (agent-dotfiles#52): only the supervisor/watchdog sender may
-# message Jon. This script refuses to touch any channel unless
-# AGENT_NOTIFY_CALLER=supervisor is set — `watchdog_notify.py` sets it on
-# every call it makes. See that gate below for what this does and does not
-# guarantee.
+# CALLER GATE (agent-dotfiles#52, extended by #193): only an authorized
+# sender may message Jon. This script refuses to touch any channel unless
+# AGENT_NOTIFY_CALLER is one of the two authorized values below —
+# `watchdog_notify.py` sets `supervisor` on every call it makes; the
+# Director sets `director`. See that gate below for what this does and does
+# not guarantee.
 #
 # Exit 0 only if a channel actually accepted the message. A send failure is
 # logged loudly rather than swallowed — an unreachable channel that looks like
@@ -40,22 +41,37 @@ if [ -r "$ENVFILE" ]; then set -a; . "$ENVFILE"; set +a; fi
 iso=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 log() { printf '%s %s\n' "$iso" "$*" >>"$LOG"; }
 
-# --- caller gate (agent-dotfiles#52) ---------------------------------------
-# Only the supervisor/watchdog sender may message Jon: five lanes each
-# judging their own work urgent produces five notifications for one event.
-# Nothing OS-level distinguishes a worker's shell from the supervisor's --
-# same user, same $HOME, same credentials -- so this is a deliberate
-# affordance, not a security boundary: a caller has to know to identify
-# itself as "supervisor" to get through. That is enough to stop a worker
-# from reaching Jon by routine or accident, which is the failure this
-# exists to prevent; it is not enough to stop a worker that reads this
-# script and decides to spoof it. `watchdog_notify.py` sets this on every
+# --- caller gate (agent-dotfiles#52, extended by #193) ---------------------
+# Only an authorized sender may message Jon: five lanes each judging their
+# own work urgent produces five notifications for one event. Nothing
+# OS-level distinguishes a worker's shell from the supervisor's or the
+# Director's -- same user, same $HOME, same credentials -- so this is a
+# deliberate affordance, not a security boundary: a caller has to know to
+# identify itself to get through. That is enough to stop a worker from
+# reaching Jon by routine or accident, which is the failure this exists to
+# prevent; it is not enough to stop a worker that reads this script and
+# decides to spoof it. `watchdog_notify.py` sets `supervisor` on every
 # invocation it makes.
-if [ "${AGENT_NOTIFY_CALLER:-}" != "supervisor" ]; then
-  log "REFUSED — caller not identified as supervisor (AGENT_NOTIFY_CALLER=${AGENT_NOTIFY_CALLER:-<unset>}): $SUBJECT${BODY:+ — $BODY}"
-  echo "NOTIFY REFUSED: only the supervisor/watchdog sender may notify Jon (set AGENT_NOTIFY_CALLER=supervisor)" >&2
-  exit 1
-fi
+#
+# agent-dotfiles#193: `director` is a second authorized value, not a second
+# gate -- #57's research recommended extending this one rather than
+# building a parallel mechanism. Before this, the Director's own replies to
+# Jon set AGENT_NOTIFY_CALLER=supervisor to get through at all, which meant
+# every message Jon received claimed to be from the Manager/watchdog tier
+# regardless of which tier actually sent it. The log line below now carries
+# the real caller so that lie is no longer possible to tell, by accident or
+# otherwise -- "SENT telegram (director): ..." vs "SENT telegram
+# (supervisor): ..." are distinguishable in notify.log even though both use
+# the one bot identity (#57 Part 3: one bot, not one per tier).
+CALLER="${AGENT_NOTIFY_CALLER:-}"
+case "$CALLER" in
+  supervisor|director) ;;
+  *)
+    log "REFUSED — caller not authorized (AGENT_NOTIFY_CALLER=${CALLER:-<unset>}): $SUBJECT${BODY:+ — $BODY}"
+    echo "NOTIFY REFUSED: only an authorized caller may notify Jon (set AGENT_NOTIFY_CALLER=supervisor or director)" >&2
+    exit 1
+    ;;
+esac
 
 msg="$SUBJECT"
 [ -n "$BODY" ] && msg="$SUBJECT — $BODY"
@@ -69,10 +85,10 @@ if [ -n "${AGENT_NOTIFY_TELEGRAM_TOKEN:-}" ] && [ -n "${AGENT_NOTIFY_TELEGRAM_CH
        "https://api.telegram.org/bot${AGENT_NOTIFY_TELEGRAM_TOKEN}/sendMessage" \
        -d "chat_id=${AGENT_NOTIFY_TELEGRAM_CHAT_ID}" \
        --data-urlencode "text=${msg}" >/dev/null 2>&1; then
-    log "SENT telegram: $SUBJECT"
+    log "SENT telegram ($CALLER): $SUBJECT"
     echo "sent via telegram"; exit 0
   fi
-  log "FAILED telegram — falling through"
+  log "FAILED telegram ($CALLER) — falling through"
 fi
 
 # --- iMessage (fallback, Mac-only) ----------------------------------------
@@ -87,15 +103,15 @@ tell application "Messages"
 end tell
 APPLESCRIPT
   then
-    log "SENT imessage to $to: $SUBJECT"
+    log "SENT imessage ($CALLER) to $to: $SUBJECT"
     echo "sent via imessage"; exit 0
   fi
-  log "FAILED imessage to $to — falling through"
+  log "FAILED imessage ($CALLER) to $to — falling through"
 fi
 
 # --- No channel worked ----------------------------------------------------
 # Deliberately loud. The caller must be able to tell "nobody was told" from
 # "told successfully", or escalation silently does nothing.
-log "UNREACHABLE — no channel accepted: $SUBJECT${BODY:+ — $BODY}"
+log "UNREACHABLE ($CALLER) — no channel accepted: $SUBJECT${BODY:+ — $BODY}"
 echo "NOTIFY FAILED: no channel configured or all channels failed" >&2
 exit 1

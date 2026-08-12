@@ -1,6 +1,16 @@
 #!/bin/bash
 # Deliver one inbound Telegram message to the lane it answers.
 #
+# agent-dotfiles#193: NOT the automatic inbound path anymore. `inbox-poll.sh`
+# calls `director-route.sh` for every message now -- the Director is the
+# default recipient, and relaying a specific reply to a specific lane is
+# something the Director itself decides to do, not something the router
+# does automatically. This script is kept, unautomated, for exactly that:
+# the Director (or a human) can still invoke it directly when a reply is
+# clearly meant for a lane it already knows is waiting. Everything below —
+# the menu-vs-text distinction, the evidenced delivery, the exit-code
+# contract — is unchanged and still correct for that deliberate use.
+#
 # agent-dotfiles#142. The common case this exists for: a lane is mid-turn and
 # hit an interactive prompt -- a permission approval, a disambiguating
 # question -- and stalled. `lanes.sh` already detects exactly that shape as
