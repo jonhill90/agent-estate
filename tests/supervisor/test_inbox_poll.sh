@@ -30,6 +30,16 @@ echo $((pos+1)) > "$STATE_FILE"
 case "$line" in
   fail) echo "stub-inbox: telegram unreachable" >&2; exit 1 ;;
   ok:*) msg="${line#ok:}"; [ -n "$msg" ] && echo "$msg"; exit 0 ;;
+  # batch:<msg1>|<msg2>|... models a single getUpdates drain returning
+  # several queued messages at once (agent-dotfiles#186's storm shape) --
+  # every one of these lands in the SAME call to inbox-poll.sh's drain loop,
+  # unlike stacking multiple "ok:" lines, which are separate iterations.
+  batch:*)
+    items="${line#batch:}"
+    IFS='|' read -ra msgs <<<"$items"
+    for m in "${msgs[@]}"; do printf '%s\t[telegram] %s\n' "$m" "$m"; done
+    exit 0
+    ;;
   *)    exit 0 ;;
 esac
 EOF
@@ -38,10 +48,25 @@ chmod +x "$D/bin-inbox.sh"
 # Stub inbox-route.sh: records every message it was asked to route, and
 # exits whatever ROUTE_EXIT says (default 0 = delivered) so #164's
 # ROUTED/REFUSED/ROUTE-FAILED log branching can be driven from the outside.
+# agent-dotfiles#186: a message text prefixed RC0:/RC2:/RC3: overrides
+# ROUTE_EXIT for just that one message, so a single batch can mix outcomes
+# (some delivered, some no-lane-waiting) the way a real mixed drain does.
+# REQUIRE_BATCH_FLAG=1 makes the stub refuse (exit 1) unless the caller set
+# INBOX_ROUTE_BATCH -- used to prove inbox-poll.sh actually asks for batched
+# behaviour rather than relying on inbox-route.sh's default.
 cat > "$D/bin-route.sh" <<'EOF'
 #!/bin/bash
 echo "$1" >> "${ROUTE_LOG:?}"
-exit "${ROUTE_EXIT:-0}"
+if [ "${REQUIRE_BATCH_FLAG:-}" = "1" ] && [ "${INBOX_ROUTE_BATCH:-}" != "1" ]; then
+  echo "stub-route: refused, caller did not set INBOX_ROUTE_BATCH" >&2
+  exit 1
+fi
+case "$1" in
+  RC0:*) exit 0 ;;
+  RC2:*) exit 2 ;;
+  RC3:*) exit 3 ;;
+  *) exit "${ROUTE_EXIT:-0}" ;;
+esac
 EOF
 chmod +x "$D/bin-route.sh"
 
@@ -235,6 +260,84 @@ grep -qi 'poller stopped' "$D/notify.log" 2>/dev/null && bad "paged for a death 
   || ok "a death under INBOX_POLL_MIN_UPTIME does not page"
 grep -q 'state:.*stopped' "$D/status" 2>/dev/null && ok "...but the heartbeat file still records it" \
   || bad "no heartbeat status recorded" "$(cat "$D/status" 2>/dev/null)"
+
+# --- agent-dotfiles#186: a burst with no lane waiting sends ONE notification
+# per drain, not one per message -- 23 inbound messages producing 21
+# identical pings in ~21 seconds is the storm this closes. -----------------
+
+# 1. One message, no lane waiting -> exactly one notification, same wording
+# as before batching existed (nothing here should change the N=1 case).
+printf 'ok:RC3:reply1\t[telegram] reply1\n' > "$D/fixture-noLane-one"
+run "$D/fixture-noLane-one" 1 REQUIRE_BATCH_FLAG=1 >"$D/out8" 2>&1
+[ "$(wc -l < "$D/notify.log" | tr -d ' ')" = "1" ] && ok "one no-lane message -> exactly one notification" \
+  || bad "wanted exactly 1 notification for one no-lane message" "$(cat "$D/notify.log" 2>/dev/null)"
+grep -q 'no lane is waiting' "$D/notify.log" 2>/dev/null && ok "the single-message notice text is unchanged" \
+  || bad "no-lane notice text changed" "$(cat "$D/notify.log" 2>/dev/null)"
+
+# 2. N messages in ONE drain, no lane waiting -> ONE notification, and it
+# says N -- the actual storm shape from the issue, just smaller.
+printf 'batch:RC3:m1|RC3:m2|RC3:m3|RC3:m4|RC3:m5\n' > "$D/fixture-batch5"
+run "$D/fixture-batch5" 1 REQUIRE_BATCH_FLAG=1 >"$D/out9" 2>&1
+[ "$(wc -l < "$D/notify.log" | tr -d ' ')" = "1" ] && ok "five no-lane messages in one drain -> exactly one notification" \
+  || bad "wanted exactly 1 notification for a 5-message drain" "$(cat "$D/notify.log" 2>/dev/null)"
+grep -q '5 messages received, no lane waiting' "$D/notify.log" 2>/dev/null && ok "the summary notice names the count (5)" \
+  || bad "summary notice did not name the count" "$(cat "$D/notify.log" 2>/dev/null)"
+[ "$(wc -l < "$D/route.log" | tr -d ' ')" = "5" ] && ok "all five messages were individually handed to inbox-route.sh" \
+  || bad "not all five messages reached inbox-route.sh" "$(cat "$D/route.log" 2>/dev/null)"
+
+# 3. Messages that DO route to a lane are unaffected -- still delivered,
+# still produce no notification at all.
+printf 'batch:RC0:m1|RC0:m2|RC0:m3\n' > "$D/fixture-batch-routed"
+rm -f "$D/poll.log"
+run "$D/fixture-batch-routed" 1 REQUIRE_BATCH_FLAG=1 >"$D/out10" 2>&1
+[ ! -s "$D/notify.log" ] && ok "a batch that all routes to lanes produces no notification" \
+  || bad "a fully-routed batch notified Jon anyway" "$(cat "$D/notify.log" 2>/dev/null)"
+[ "$(grep -c ' ROUTED: ' "$D/poll.log" 2>/dev/null)" = "3" ] && ok "all three routed messages are logged ROUTED" \
+  || bad "not all routed messages logged ROUTED" "$(cat "$D/poll.log" 2>/dev/null)"
+
+# 4. A mixed batch (some routable, some not) notifies ONLY about the
+# unroutable ones -- one summary naming just those, not the routed ones.
+printf 'batch:RC0:ok1|RC3:no1|RC0:ok2|RC3:no2|RC3:no3\n' > "$D/fixture-batch-mixed"
+rm -f "$D/poll.log"
+run "$D/fixture-batch-mixed" 1 REQUIRE_BATCH_FLAG=1 >"$D/out11" 2>&1
+[ "$(wc -l < "$D/notify.log" | tr -d ' ')" = "1" ] && ok "a mixed batch still produces exactly one notification" \
+  || bad "mixed batch notification count wrong" "$(cat "$D/notify.log" 2>/dev/null)"
+grep -q '3 messages received, no lane waiting' "$D/notify.log" 2>/dev/null && ok "the mixed-batch notice counts only the 3 unroutable messages" \
+  || bad "mixed-batch notice did not count only the unroutable messages" "$(cat "$D/notify.log" 2>/dev/null)"
+
+# 5. No-drop guarantee (#142) holds: every message in the mixed batch is
+# either delivered (ROUTED) or accounted for (REFUSED, which the summary
+# notice above covers) -- nothing simply vanishes from the log.
+routed=$(grep -c ' ROUTED: ' "$D/poll.log" 2>/dev/null || true)
+refused=$(grep -c ' REFUSED: ' "$D/poll.log" 2>/dev/null || true)
+[ "$((routed + refused))" = "5" ] && ok "no-drop holds: all five mixed-batch messages are delivered or accounted for" \
+  || bad "some mixed-batch messages were neither ROUTED nor REFUSED" "$(cat "$D/poll.log" 2>/dev/null)"
+
+# Mutation check: removing the batch summary (so five no-lane messages send
+# zero notifications instead of one) must fail the N=5 assertion above --
+# proving that assertion actually depends on the summary-notify code, not on
+# some other path. This is #186's mutation-check-2, aimed at this poller's
+# own new code rather than at inbox-route.sh (already mutation-checked in
+# test_inbox_route.sh).
+MUTANT="$D/lane/inbox-poll.sh"
+python3 - "$MUTANT" <<'PYEOF'
+import re, sys
+path = sys.argv[1]
+text = open(path).read()
+marker = 'if [ "$no_lane_count" -gt 0 ]; then'
+assert text.count(marker) == 1, "summary-notify guard not found or not unique -- inbox-poll.sh shape changed"
+start = text.index(marker)
+end = text.index("\n      fi\n", start) + len("\n      fi\n")
+mutated = text[:start] + "if false; then\n        :\n      fi\n" + text[end:]
+open(path, "w").write(mutated)
+PYEOF
+run "$D/fixture-batch5" 1 REQUIRE_BATCH_FLAG=1 >"$D/out12" 2>&1
+if [ ! -s "$D/notify.log" ]; then
+  ok "mutation confirmed: stripping the batch summary leaves 5 no-lane messages with zero notifications (the assertion above would be red)"
+else
+  bad "mutation confirmed: batch-summary removal" "$(cat "$D/notify.log" 2>/dev/null)"
+fi
+cp "$POLL" "$D/lane/inbox-poll.sh"; chmod +x "$D/lane/inbox-poll.sh"
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

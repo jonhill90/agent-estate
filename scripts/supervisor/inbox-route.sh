@@ -76,7 +76,10 @@
 # both as `ROUTED`, which is a message the log records as routed when it was
 # deliberately not. Exit 1 if neither delivery nor notification happened --
 # the message text is printed to stderr in that case so it is not lost from
-# the caller's log.
+# the caller's log. Exit 3 is exit 2's batched sibling (#186): zero lanes
+# waiting, nothing delivered, but Jon was deliberately NOT told, because
+# INBOX_ROUTE_BATCH is set and the caller owns a single summary notice for
+# the whole batch instead. Only reachable with that env var set.
 
 set -uo pipefail
 
@@ -168,6 +171,23 @@ case "${#BLOCKED[@]}" in
     exit 1
     ;;
   0)
+    # agent-dotfiles#186: inbox-poll.sh drains a batch from one getUpdates
+    # call and routes each message in turn. If every message in that batch
+    # hit this branch and each called notify_jon itself, a burst of N
+    # messages paged Jon N times in a row -- observed live as 23 messages
+    # producing 21 identical pings in ~21 seconds. INBOX_ROUTE_BATCH is set
+    # by inbox-poll.sh's drain loop (never by a standalone caller) to say
+    # "you are one message in a batch -- stay quiet and let the batch owner
+    # notify once." This is opt-in, not the default, so calling this script
+    # directly -- as the standalone test suite and any other caller does --
+    # keeps the original per-message notify. Exit 3 is distinct from exit 2
+    # ("refused, already notified") precisely so the caller can tell the two
+    # apart: 2 means Jon already knows, 3 means the caller still owes him a
+    # summary.
+    if [ -n "${INBOX_ROUTE_BATCH:-}" ]; then
+      echo "inbox-route: no lane waiting, deferring notice to the caller's batch summary -- got: $MESSAGE" >&2
+      exit 3
+    fi
     refuse_exit "Telegram message received, no lane is waiting" \
       "No blocked lane to route to -- got: $MESSAGE"
     ;;
