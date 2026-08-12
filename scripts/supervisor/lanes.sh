@@ -59,55 +59,14 @@ LANES_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # and the real-pane evidence behind its values; harness/copilot.sh documents
 # where that harness's contract is intentionally incomplete.
 #
-# Parallel INDEXED arrays, not `declare -A`. Every caller in this directory
-# invokes this file by its own shebang (`"$HERE/lanes.sh"`, `./lanes.sh` via
-# loop-tick.md), which runs it under `/bin/bash` -- macOS's own, stuck at
-# 3.2.57 (no associative arrays) even when a newer `bash` sits on PATH.
-# Checked live, not assumed: `/bin/bash -c 'declare -A x'` on this machine
-# fails with "invalid option". Indexed arrays and `${!arr[@]}` both predate
-# bash 3.2 and this file already relies on the same feature set (see the
-# pre-existing `declare -a IDX NAME CMD ...` below), so this loader matches
-# it rather than introducing the one construct that would have made
-# `lanes.sh` fail closed on every real invocation.
-HARNESS_IDS=(); H_COMMAND_RE=(); H_READY_RE=(); H_BUSY_RE=(); H_BUSY_TAIL=()
-H_BLOCKED_MARKERS=(); H_OPTION_ROW_RE=(); H_MENU_ENTER_RE=(); H_MENU_TAIL=(); H_TEXT_PROMPT_RE=()
-HARNESS_DIR="${LANES_HARNESS_DIR:-$LANES_HERE/harness}"
-for _hf in "$HARNESS_DIR"/*.sh; do
-  [ -e "$_hf" ] || continue
-  unset HARNESS_NAME HARNESS_COMMAND_RE HARNESS_READY_RE HARNESS_BUSY_RE HARNESS_BUSY_TAIL \
-        HARNESS_BLOCKED_MARKERS HARNESS_OPTION_ROW_RE HARNESS_MENU_ENTER_RE HARNESS_MENU_TAIL \
-        HARNESS_TEXT_PROMPT_RE HARNESS_LAUNCH_CMD HARNESS_SEND_LITERAL
-  # shellcheck disable=SC1090
-  . "$_hf"
-  : "${HARNESS_NAME:?$_hf did not set HARNESS_NAME}"
-  : "${HARNESS_COMMAND_RE:?$_hf ($HARNESS_NAME) did not set HARNESS_COMMAND_RE}"
-  : "${HARNESS_READY_RE:?$_hf ($HARNESS_NAME) did not set HARNESS_READY_RE}"
-  HARNESS_IDS+=("$HARNESS_NAME")
-  H_COMMAND_RE+=("$HARNESS_COMMAND_RE")
-  H_READY_RE+=("$HARNESS_READY_RE")
-  H_BUSY_RE+=("${HARNESS_BUSY_RE:-}")
-  H_BUSY_TAIL+=("${HARNESS_BUSY_TAIL:-1}")
-  H_BLOCKED_MARKERS+=("${HARNESS_BLOCKED_MARKERS:-}")
-  H_OPTION_ROW_RE+=("${HARNESS_OPTION_ROW_RE:-}")
-  H_MENU_ENTER_RE+=("${HARNESS_MENU_ENTER_RE:-}")
-  H_MENU_TAIL+=("${HARNESS_MENU_TAIL:-6}")
-  H_TEXT_PROMPT_RE+=("${HARNESS_TEXT_PROMPT_RE:-}")
-done
-unset _hf
-
-# Which adapter, if any, claims a pane's own command -- prints that
-# adapter's ARRAY INDEX (the arrays above are parallel, keyed by position,
-# not by name). Empty output + a non-zero return means no adapter
-# recognises it -- lanes.sh's own #126 posture (a whitelist, not a
-# blacklist) applied one level up: an unrecognised COMMAND is `unknown`,
-# same as an unrecognised STATUS LINE.
-harness_index_for_command() {
-  local cmd="$1" i
-  for i in "${!HARNESS_IDS[@]}"; do
-    if [[ "$cmd" =~ ${H_COMMAND_RE[$i]} ]]; then printf '%s\n' "$i"; return 0; fi
-  done
-  return 1
-}
+# The loader itself, and `harness_index_for_command`, moved out to
+# harness-registry.sh (agent-dotfiles#215) so watchdog.sh could ask the same
+# adapters instead of keeping its own Claude-only literal. Nothing about the
+# arrays or the lookup changed in the move; only their location did. See that
+# file for the arrays this defines and for why they are parallel INDEXED
+# arrays rather than `declare -A`.
+# shellcheck source=./harness-registry.sh
+. "$LANES_HERE/harness-registry.sh"
 
 SESSION="${2:-${LANES_SESSION:-agent-dotfiles}}"
 MODE="${1:-}"
