@@ -200,7 +200,18 @@ while :; do
         if "$HERE/inbox-route.sh" "$text" "$SESSION" >>"$LOG" 2>&1; then
           log "ROUTED: ${display:-$text}"
         else
-          log "ROUTE FAILED: ${display:-$text}"
+          route_rc=$?
+          # #164: inbox-route.sh exits 2 for "nothing was typed anywhere,
+          # but Jon was told why" (a menu refusal, zero lanes waiting, or
+          # ambiguity) -- distinct from exit 1 (couldn't even reach Jon) and
+          # from exit 0 (delivered). This used to share exit 0 with a real
+          # delivery and get logged as ROUTED, which recorded a message as
+          # routed when it was deliberately not.
+          if [ "$route_rc" -eq 2 ]; then
+            log "REFUSED: ${display:-$text}"
+          else
+            log "ROUTE FAILED: ${display:-$text}"
+          fi
         fi
       done <<<"$out"
     fi

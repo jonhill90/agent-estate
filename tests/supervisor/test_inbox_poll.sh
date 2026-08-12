@@ -35,11 +35,13 @@ esac
 EOF
 chmod +x "$D/bin-inbox.sh"
 
-# Stub inbox-route.sh: records every message it was asked to route.
+# Stub inbox-route.sh: records every message it was asked to route, and
+# exits whatever ROUTE_EXIT says (default 0 = delivered) so #164's
+# ROUTED/REFUSED/ROUTE-FAILED log branching can be driven from the outside.
 cat > "$D/bin-route.sh" <<'EOF'
 #!/bin/bash
 echo "$1" >> "${ROUTE_LOG:?}"
-exit 0
+exit "${ROUTE_EXIT:-0}"
 EOF
 chmod +x "$D/bin-route.sh"
 
@@ -85,9 +87,51 @@ run() {  # run <inbox-script-fixture> <iterations> [extra env...]
 # framing included -- instead of the bare reply; the fixture below models the
 # real inbox.sh output shape so this test can actually catch that again.
 printf 'ok:yes\t[telegram 1 from Jon] yes\n' > "$D/fixture-basic"
+rm -f "$D/poll.log"
 run "$D/fixture-basic" 1 >"$D/out1" 2>&1
 [ "$(cat "$D/route.log" 2>/dev/null)" = "yes" ] && ok "the bare reply text is handed to inbox-route.sh" \
   || bad "route.log should contain only the bare reply \"yes\", not the framing" "$(cat "$D/route.log" 2>/dev/null)"
+grep -q ' ROUTED: ' "$D/poll.log" 2>/dev/null && ok "a real delivery (exit 0) is logged ROUTED" \
+  || bad "no ROUTED line for a real delivery" "$(cat "$D/poll.log" 2>/dev/null)"
+
+# --- agent-dotfiles#164: a refusal (exit 2) is logged REFUSED, not ROUTED --
+# inbox-route.sh exits 2 when it deliberately did not type anything anywhere
+# but told Jon why (a menu refusal, zero lanes waiting, ambiguity). Before
+# #164 that shared exit 0 with a real delivery and the poller logged it
+# ROUTED regardless -- a message the log records as routed when it was
+# deliberately not.
+printf 'ok:yes\t[telegram 1 from Jon] yes\n' > "$D/fixture-refused"
+rm -f "$D/poll.log"
+run "$D/fixture-refused" 1 ROUTE_EXIT=2 >"$D/out1b" 2>&1
+grep -q ' REFUSED: ' "$D/poll.log" 2>/dev/null && ok "a refusal (exit 2) is logged REFUSED, not ROUTED" \
+  || bad "no REFUSED line for a refusal" "$(cat "$D/poll.log" 2>/dev/null)"
+grep -q ' ROUTED: ' "$D/poll.log" 2>/dev/null && bad "a refusal was also logged ROUTED" "$(cat "$D/poll.log" 2>/dev/null)" \
+  || ok "a refusal is never logged ROUTED"
+
+# --- a hard failure (exit 1: could not even notify) is still ROUTE FAILED -
+# The three-way branch must not collapse 1 and 2 together either -- exit 1
+# means neither delivery nor notification happened, which is the one case
+# that genuinely deserves "FAILED".
+printf 'ok:yes\t[telegram 1 from Jon] yes\n' > "$D/fixture-hardfail"
+rm -f "$D/poll.log"
+run "$D/fixture-hardfail" 1 ROUTE_EXIT=1 >"$D/out1c" 2>&1
+grep -q ' ROUTE FAILED: ' "$D/poll.log" 2>/dev/null && ok "a hard failure (exit 1) is still logged ROUTE FAILED" \
+  || bad "no ROUTE FAILED line for exit 1" "$(cat "$D/poll.log" 2>/dev/null)"
+grep -qE ' (ROUTED|REFUSED): ' "$D/poll.log" 2>/dev/null && bad "a hard failure was logged as ROUTED or REFUSED" "$(cat "$D/poll.log" 2>/dev/null)" \
+  || ok "a hard failure is never logged ROUTED or REFUSED"
+
+# Mutation check: reverting inbox-route.sh's exit code to the pre-#164 shape
+# (0 for both delivered and refused) is exactly the historical bug -- with
+# THIS poller unchanged, a refusal reported that way logs ROUTED, not
+# REFUSED. This is the regression #164 closes, reproduced on demand rather
+# than only asserted against.
+rm -f "$D/poll.log"
+run "$D/fixture-refused" 1 ROUTE_EXIT=0 >"$D/out1d" 2>&1
+if grep -q ' ROUTED: ' "$D/poll.log" 2>/dev/null && ! grep -q ' REFUSED: ' "$D/poll.log" 2>/dev/null; then
+  ok "mutation confirmed: a pre-#164-shaped inbox-route.sh (exit 0 on refusal) mislogs a refusal as ROUTED (the assertions above would be red)"
+else
+  bad "mutation confirmed: pre-#164 exit-0-on-refusal shape" "$(cat "$D/poll.log" 2>/dev/null)"
+fi
 
 # --- nothing new: nothing routed, no notification ---------------------------
 cat > "$D/fixture-empty" <<'FIX'

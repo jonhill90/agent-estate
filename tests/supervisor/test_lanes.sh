@@ -58,6 +58,7 @@ cat > "$D/fixture" <<'FIX'
 28|free-27|zsh|❯ |1|0
 29|w-hand-run-poller|bash|inbox-poll: waiting on Telegram|1|0||-zsh
 30|w-mentions-poller|zsh|running scripts/supervisor/inbox-poll.sh\n\n❯ |1|0
+31|w-unrecognized-blocked|claude.exe|Confirm the target environment · Esc to cancel|1|0
 FIX
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
 
@@ -113,8 +114,24 @@ want "a bash tool-permission prompt is menu-blocked"     w-permission menu-block
 # the shape the design calls for anyway (a dismissible prompt with neither an
 # "Enter to <verb>" footer nor a numbered option row nearby): the routing
 # decision (inbox-route.sh) still has to have a text-blocked case to deliver
-# to, or "do not fix this by refusing everything" is untestable.
+# to, or "do not fix this by refusing everything" is untestable. #164:
+# text-blocked now requires its OWN positive marker (TEXT_PROMPT_RE) rather
+# than being reached by absence of menu evidence, so this fixture's text
+# ("Type the name") was kept as-is because it already carries that marker --
+# it still reads text-blocked, unchanged, proving the inversion is a pure
+# narrowing of an unrelated case, not a rewrite of this one.
 want "a dismissible free-text prompt is text-blocked, not menu-blocked" w-text-blocked text-blocked "$out"
+
+# #164, the regression this issue is about: independent review of #161 found
+# that ANY unrecognised blocked shape -- no "Enter to <verb>" footer, no
+# option row, and (pre-fix) no positive text marker either -- fell through
+# to text-blocked by DEFAULT, so an unrecognised menu got free text typed
+# into it. This fixture has neither menu evidence nor TEXT_PROMPT_RE's "Type
+# the ..." phrase; before the #164 fix it read text-blocked here (the exact
+# bug), and now it must read menu-blocked -- refuse-and-relay is the safe
+# default for anything this probe cannot positively place, same posture #126
+# already established for `free`.
+want "an unrecognised blocked shape defaults to menu-blocked, not text-blocked" w-unrecognized-blocked menu-blocked "$out"
 
 # #126: free inverted from a blacklist to a whitelist. A lane is dispatchable
 # only when its last line is a recognised ready shape; everything else is
@@ -212,10 +229,11 @@ else
   echo "  FAIL dead count line is not 5 in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
 fi
 
-# #159: seven blocked lanes -- the six menu/text captures above plus
-# w-text-blocked. None of #154's new fixture rows (service/dead) are blocked,
-# so this total is unaffected by that merge.
-if grep -qE '7 lane\(s\) (is|are) blocked' <<<"$out"; then
+# #159: eight blocked lanes -- the six menu/text captures, w-text-blocked,
+# and #164's w-unrecognized-blocked (menu-blocked by the new default). None
+# of #154's fixture rows (service/dead) are blocked, so this total is
+# unaffected by that merge.
+if grep -qE '8 lane\(s\) (is|are) blocked' <<<"$out"; then
   echo "  ok   the table prints a count line for blocked lanes"; pass=$((pass+1));
 else
   echo "  FAIL no blocked count line in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
@@ -244,7 +262,7 @@ free=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --free 2>&1)
 for bad in arch w-dead w-hung w-busy w-copilot w-minute-tick w-scrolled w-blocked \
            w-trust w-model w-permission w-idle-footer w-subagent-task w-subagent-wait \
            w-unsent w-unsent-ready-footer w-typeahead w-optionrow w-optionrow-yes \
-           w-text-blocked \
+           w-text-blocked w-unrecognized-blocked \
            telegram-poller ad102-renamed-lane free-27 w-hand-run-poller w-mentions-poller; do
   bi=$(awk -F'|' -v n="$bad" '$2==n{print $1}' "$D/fixture")
   if grep -qx ".*:$bi" <<<"$free"; then echo "  FAIL --free offered $bad"; fail=$((fail+1));
@@ -266,7 +284,8 @@ done
 # `.*:$wi` would also match a longer index that happens to end the same way,
 # and now has a `\tkind` suffix a bare `-x` exact match would never see.
 blocked=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --blocked 2>&1)
-for want_blocked in w-blocked:menu w-trust:menu w-model:menu w-permission:menu w-text-blocked:text; do
+for want_blocked in w-blocked:menu w-trust:menu w-model:menu w-permission:menu w-text-blocked:text \
+                    w-unrecognized-blocked:menu; do
   want_blocked_name="${want_blocked%%:*}"; want_blocked_kind="${want_blocked##*:}"
   wi=$(awk -F'|' -v n="$want_blocked_name" '$2==n{print $1}' "$D/fixture")
   if grep -qE "^[^	]*:${wi}	${want_blocked_kind}\$" <<<"$blocked"; then
@@ -294,6 +313,56 @@ if grep -q '{"window":4,"name":"w-dead","command":"zsh","state":"dead"}' <<<"$js
 else
   echo "  FAIL --json changed shape for a dead lane:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
 fi
+
+# --- agent-dotfiles#164 mutation check: prove the default can go wrong -----
+# Revert lanes.sh's menu/text fallback to the pre-#164 shape (absence of
+# menu evidence -> text-blocked) and confirm w-unrecognized-blocked flips to
+# text-blocked -- the exact hazard this issue is about, reproduced on
+# demand so the assertion above is provably checking something.
+#
+# The mutant has to live NEXT TO the real lanes.sh, not in $D or $HERE:
+# lanes.sh resolves input-box.sh relative to its own path
+# (LANES_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" ...)"), so a mutated
+# copy dropped anywhere else fails to source its sibling and the test would
+# be asserting on a script that never ran.
+LANES_DIR="$(cd "$(dirname "$LANES")" && pwd)"
+MUTANT="$LANES_DIR/.lanes-mutant-164.sh"
+trap 'rm -f "$MUTANT"' EXIT
+patch_rc=0
+python3 - "$LANES" "$MUTANT" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''      if grep -qE "$MENU_ENTER_RE" <<<"$pane" || grep -qE "$OPTION_ROW_RE" <<<"$pane_tail"; then
+        state=menu-blocked
+      elif grep -qE "$TEXT_PROMPT_RE" <<<"$pane"; then
+        state=text-blocked
+      else
+        state=menu-blocked
+      fi'''
+assert marker in text, "menu/text fallback block not found -- lanes.sh shape changed"
+assert text.count(marker) == 1, "menu/text fallback block not unique -- lanes.sh shape changed"
+replacement = '''      if grep -qE "$MENU_ENTER_RE" <<<"$pane" || grep -qE "$OPTION_ROW_RE" <<<"$pane_tail"; then
+        state=menu-blocked
+      else
+        state=text-blocked
+      fi'''
+open(dst, "w").write(text.replace(marker, replacement, 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  echo "  FAIL setup: could not patch a pre-#164 copy of lanes.sh (exit $patch_rc)"; fail=$((fail+1));
+else
+  echo "  ok   setup: patched a pre-#164 copy of lanes.sh"; pass=$((pass+1));
+  chmod +x "$MUTANT"
+  mutant_out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$MUTANT" 2>&1)
+  if grep -qE "^[0-9]+ +w-unrecognized-blocked +[^ ]+ +text-blocked$" <<<"$mutant_out"; then
+    echo "  ok   mutation confirmed: the pre-#164 fallback types free text into an unrecognised blocked shape (the assertion above would be red)"; pass=$((pass+1));
+  else
+    echo "  FAIL mutation confirmed: pre-#164 fallback did not reproduce text-blocked for w-unrecognized-blocked:"; sed 's/^/       /' <<<"$mutant_out"; fail=$((fail+1));
+  fi
+fi
+rm -f "$MUTANT"
+trap - EXIT
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
