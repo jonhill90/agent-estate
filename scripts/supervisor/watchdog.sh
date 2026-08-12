@@ -67,10 +67,19 @@ ESCALATE_WINDOW=3600 # ...within this window, or stop and escalate
 # power loss runs no trap at all, so `checked:` simply stops moving. This
 # watchdog is the natural external observer: it already runs unattended every
 # 180s and already reads-a-status-file-and-decides-if-something-is-overdue for
-# the supervisor loop itself (see report()/the escalate branch below). What
-# watches THIS watcher is the same answer as for that check: a human, paged
-# through the identical notify path, and this tick's own `checked:` line in
-# watchdog.status going stale if the LaunchAgent stops firing entirely.
+# the supervisor loop itself (see report()/the escalate branch below).
+#
+# What watches THIS watcher: nothing does, to the same degree (#170). Every
+# tick writes its own `checked:` line to watchdog.status via report() above,
+# but no code reads THAT line for staleness -- watchdog_notify.py's
+# `--mode heartbeat` reads inbox-poll.status, not watchdog.status, and
+# `--mode escalate` (the default, called from report() below) only fires on
+# `state: escalate`; it never compares `checked:` against a threshold. The
+# LaunchAgent, ~/Library/LaunchAgents/com.jonhill.supervisor-watchdog.plist,
+# has `StartInterval` 180 and `RunAtLoad`, and no `KeepAlive` key. If it stops
+# firing -- unloaded, launchd killed, the machine off -- nothing pages
+# anyone; the estate is silent until Jon notices. That is the same gap #163
+# closed for inbox-poll.sh, left open here.
 INBOX_POLL_STATUS_PATH="${SUPERVISOR_INBOX_POLL_STATUS:-$STATE/inbox-poll.status}"
 INBOX_HEARTBEAT_EPISODE="${SUPERVISOR_HEARTBEAT_EPISODE:-$STATE/.watchdog-heartbeat-episode.json}"
 # Threshold derived from inbox-poll.sh's own worst-case gap between heartbeat
