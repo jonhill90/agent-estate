@@ -38,6 +38,25 @@ F="${LANES_FIXTURE:?}"
 LOG="${TMUX_LOG:-/dev/null}"
 WD="${WAIT_DIR:?}"
 TIMEOUT="${STUB_WAIT_TIMEOUT:-5}"
+
+# agent-dotfiles#241: windows now have TWO names -- the index (a slot number,
+# what the fixture keys on) and tmux's own `#{window_id}` (`@N`, stable for
+# the window's lifetime). The scripts under test address panes by id, so this
+# stub has to answer to both. Ids are synthesised as WID_BASE + index and are
+# deliberately NOT equal to the index: a stub where `@5` and `5` were the same
+# string could not tell an id-addressed call from an index-addressed one, and
+# the whole point of #241's tests is that distinction.
+WID_BASE="${LANES_STUB_WID_BASE:-100}"
+wid_for()  { printf '@%s' "$(( WID_BASE + $1 ))"; }
+# Resolve whatever came after `session:` back to a fixture index. An `@N`
+# target is a window id; anything else is already an index.
+idx_for() {
+  local w="$1"
+  case "$w" in
+    @*) printf '%s' "$(( ${w#@} - WID_BASE ))" ;;
+    *)  printf '%s' "$w" ;;
+  esac
+}
 sub="$1"; shift
 
 # Poll for $1 to exist, up to $TIMEOUT seconds. 0 -> appeared, 1 -> expired.
@@ -101,11 +120,17 @@ while [ $# -gt 0 ]; do
   esac
 done
 win="${target##*:}"; win="${win%%.*}"
+win="$(idx_for "$win")"
 line=$(awk -F'|' -v w="$win" '$1==w' "$F")
 case "$sub" in
   display-message)
     case "$fmt" in
       '#{window_name}') cut -d'|' -f2 <<<"$line" ;;
+      # #241: lane-done.sh reads the CURRENT index back to build `free-N`,
+      # because the argument it was given is a window id and carries none.
+      # An unknown window prints nothing, which is what real tmux does for a
+      # target that no longer exists.
+      '#{window_index}') [ -n "$line" ] && printf '%s\n' "$win" ;;
     esac ;;
 esac
 exit 0

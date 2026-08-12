@@ -313,7 +313,7 @@ for bad in arch w-dead w-hung w-busy w-copilot w-minute-tick w-scrolled w-blocke
            w-shell-busy w-shell-idle w-shell-idle-hung w-shell-tasks w-shells-plural \
            telegram-poller ad102-renamed-lane free-27 w-hand-run-poller w-mentions-poller; do
   bi=$(awk -F'|' -v n="$bad" '$2==n{print $1}' "$D/fixture")
-  if grep -qx ".*:$bi" <<<"$free"; then echo "  FAIL --free offered $bad"; fail=$((fail+1));
+  if grep -qE "^[^	]*:${bi}	" <<<"$free"; then echo "  FAIL --free offered $bad"; fail=$((fail+1));
   else echo "  ok   --free withholds $bad"; pass=$((pass+1)); fi
 done
 
@@ -322,9 +322,37 @@ done
 for good in w-real-free w-mentions w-mentions-blocked w-placeholder w-empty-box \
             w-codex-ready w-copilot-ready; do
   gi=$(awk -F'|' -v n="$good" '$2==n{print $1}' "$D/fixture")
-  if grep -qx ".*:$gi" <<<"$free"; then echo "  ok   --free offers $good"; pass=$((pass+1));
+  if grep -qE "^[^	]*:${gi}	" <<<"$free"; then echo "  ok   --free offers $good"; pass=$((pass+1));
   else echo "  FAIL --free withheld $good"; fail=$((fail+1)); fi
 done
+
+# agent-dotfiles#241. --free's shape: TWO tab-separated columns, the lane
+# (session:index, what the ledger keys on) and the tmux target
+# (session:@id, what send-keys must be given). Anchored on the lane field for
+# the same reason the --blocked loop below is: a bare substring match cannot
+# tell the two columns apart, and this suite's whole job here is that they
+# ARE different strings.
+#
+# The stub synthesises window ids as 100 + index precisely so an
+# index-addressed call and an id-addressed one cannot be confused for each
+# other -- see stubs/tmux-lanes.
+for good in w-real-free w-codex-ready w-copilot-ready; do
+  gi=$(awk -F'|' -v n="$good" '$2==n{print $1}' "$D/fixture")
+  if grep -qE "^[^	]*:${gi}	[^	]*:@$((100+gi))\$" <<<"$free"; then
+    echo "  ok   --free pairs $good's lane with its window-id target (session:$gi -> session:@$((100+gi)))"; pass=$((pass+1));
+  else
+    echo "  FAIL --free did not pair $good's lane with a window-id target"; sed 's/^/       /' <<<"$free"; fail=$((fail+1));
+  fi
+done
+# ...and NO line may be target-less. An empty second column would be handed
+# to `send-keys -t session:` by dispatch.sh, which does not error -- it hits
+# the ACTIVE window, i.e. the supervisor. That is the incident loop-tick.md
+# records; the shape of this output is the first place it can be prevented.
+if [ -n "$free" ] && grep -qvE "^[^	]*:[0-9]+	[^	]*:@[0-9]+\$" <<<"$free"; then
+  echo "  FAIL --free emitted a row that is not lane<TAB>window-id target:"; sed 's/^/       /' <<<"$free"; fail=$((fail+1));
+else
+  echo "  ok   every --free row is lane<TAB>window-id target, none empty"; pass=$((pass+1));
+fi
 
 # agent-dotfiles#142: --blocked is what inbound Telegram routing is built on
 # -- the same session:index shape as --free, but the opposite predicate. #159
@@ -352,15 +380,29 @@ done
 # up there rather than being flattened into one of the old ones -- and the
 # objects for pre-existing states must be untouched.
 json=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --json 2>&1)
-if grep -q '{"window":26,"name":"telegram-poller","command":"bash","state":"service"}' <<<"$json"; then
+if grep -q '{"window":26,"window_id":"@126","name":"telegram-poller","command":"bash","state":"service"}' <<<"$json"; then
   echo "  ok   --json reports the service window as service"; pass=$((pass+1));
 else
   echo "  FAIL --json missing the service object in:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
 fi
-if grep -q '{"window":4,"name":"w-dead","command":"zsh","state":"dead"}' <<<"$json"; then
-  echo "  ok   --json is unchanged for a dead lane"; pass=$((pass+1));
+if grep -q '{"window":4,"window_id":"@104","name":"w-dead","command":"zsh","state":"dead"}' <<<"$json"; then
+  echo "  ok   --json is unchanged for a dead lane, apart from the added window_id"; pass=$((pass+1));
 else
   echo "  FAIL --json changed shape for a dead lane:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
+fi
+# agent-dotfiles#241: `window` stays the INDEX and stays a JSON number, so no
+# existing consumer of this renderer (supervisor_view.py's LanesSource passes
+# the objects through untouched) has to change; `window_id` is added beside
+# it. Both, or a consumer cannot do the one job the split exists for.
+if grep -qE '\{"window":[0-9]+,"window_id":"@[0-9]+"' <<<"$json"; then
+  echo "  ok   --json carries the index as a number AND the window id beside it"; pass=$((pass+1));
+else
+  echo "  FAIL --json is missing one of the two identities:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
+fi
+if python3 -c 'import json,sys; rows=json.load(sys.stdin); sys.exit(0 if rows and all(isinstance(r["window"], int) and r["window_id"].startswith("@") for r in rows) else 1)' <<<"$json"; then
+  echo "  ok   --json still parses, with an int window and an @-prefixed window_id on every row"; pass=$((pass+1));
+else
+  echo "  FAIL --json does not parse or has a malformed identity:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
 fi
 
 # --- agent-dotfiles#164 mutation check: prove the default can go wrong -----

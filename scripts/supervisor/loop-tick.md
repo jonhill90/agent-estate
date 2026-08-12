@@ -334,6 +334,13 @@ scripts/supervisor/lanes.sh          # full table
 scripts/supervisor/lanes.sh --free   # only lanes safe to dispatch to
 ```
 
+The table prints window **indices**, which is what you read off the tmux
+window list, and that has not changed. `--free` prints two tab-separated
+columns per lane: the lane (`agent-dotfiles:5`, the identity the ledger and
+every recovery command key on) and its tmux target (`agent-dotfiles:@12`, the
+window id anything addressing a pane must use). See #241 for why the two are
+not interchangeable.
+
 **Dispatch only to lanes it reports `free`.** The supervisor's own window is
 reported `supervisor` and withheld from `--free` — sending a worker brief there
 `/clear`s the loop and replaces it with someone else's task. That happened twice
@@ -526,10 +533,22 @@ scripts/supervisor/dispatch.sh 102 lane-rename-on-completion \
   jonhill90/agent-dotfiles ~/source/repos/Personal/agent-dotfiles
 # brief.md ends with: Final shell action: tmux wait-for -S ad102-done
 
-scripts/supervisor/lane-done.sh <window-index> ad102-lane-rename-on-completion ad102-done
+scripts/supervisor/lane-done.sh <window-id> ad102-lane-rename-on-completion ad102-done
 # run this with the Bash tool's run_in_background:true so the tick is not
 # blocked while it waits
 ```
+
+**Pass the window ID (`@12`), not the index (#241.)** `dispatch.sh` prints it
+on success as `target:`, and `lanes.sh --free` emits it as its second column.
+This server runs `renumber-windows on`, so closing any window shifts every
+higher index down by one — and this waiter holds its target for as long as the
+work takes, which is the longest such hold anywhere in the estate. An index
+given here can name a different window by the time the channel fires; the
+name-match guard then correctly refuses the stranger, and a lane that
+genuinely finished is never renamed and never released. That is #102's shape
+reached through the mechanism built to prevent it. An index still works and is
+fine to type by hand off the window list for an immediate one-off; a script
+should never pass one.
 
 `lane-done.sh` blocks on bare `wait-for` — the counterpart of the worker's
 `-S`, and **not** `wait-for -L`, which is the unrelated lock primitive and

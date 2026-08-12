@@ -416,11 +416,45 @@ while IFS=$'\t' read -r idx wname; do
 done < <("$HERE/lanes.sh" "$SESSION" 2>/dev/null | awk 'NR>1 && $1 ~ /^[0-9]+$/ {print $1"\t"$2}')
 
 LANE=""
+LANE_TARGET=""
 CLAIM_LANE=""
 LANE_HARNESS=""
 AUTHOR_SKIPPED=""
-while read -r candidate; do
+# TWO IDENTITIES PER CANDIDATE, AND THEY ANSWER DIFFERENT QUESTIONS (#241).
+#
+# `$candidate` is `session:<index>` -- the LANE, which is what the ledger
+# keys on and what every operator recovery command below names. It is a slot
+# number and it must stay one: a lane has to keep its identity across a
+# window being closed and recreated, and a window id is destroyed by exactly
+# that.
+#
+# `$candidate_target` is `session:@<id>` -- the TMUX TARGET, and the only
+# thing any tmux call below is allowed to be given. tmux window INDICES are
+# not stable on this server (`renumber-windows on`, measured in #241):
+# closing any window shifts every higher index down by one. The gap between
+# resolving a lane here and the final `send-keys Enter` spans a claim, a
+# worktree creation and a rename -- "not sub-second the way `claim.sh`'s is",
+# as the comment above already says of the ledger race #184 closed. The same
+# gap lets an index silently come to mean another pane, and on 2026-08-12
+# three briefs landed in windows other than the ones this script reported.
+# A window id cannot move: tmux guarantees it for the window's lifetime and
+# never reuses it.
+while IFS=$'\t' read -r candidate candidate_target; do
   [ -n "$candidate" ] || continue
+  # THE EMPTY-TARGET REFUSAL, EXTENDED TO THE NEW SHAPE (#241). `send-keys -t
+  # session:` with an empty index does not error -- it targets the ACTIVE
+  # window, which is usually the supervisor, and that is the incident
+  # loop-tick.md records under "an empty tmux target hits the ACTIVE window".
+  # `session:@` is empty in exactly the same way and must be refused exactly
+  # as hard, so this is a POSITIVE check on the shape rather than a
+  # non-emptiness one: a candidate whose target is not a real `@N` handle is
+  # skipped, never guessed at and never fallen back to the index for. A
+  # `lanes.sh` that stopped emitting the second column would then dispatch
+  # nothing at all, which is the fail-closed direction.
+  if [[ ! "$candidate_target" =~ :@[0-9]+$ ]]; then
+    echo "dispatch: skipping candidate '$candidate' -- lanes.sh gave no usable window-id target ('${candidate_target:-}')" >&2
+    continue
+  fi
   idx="${candidate##*:}"
   wname="${WINDOW_NAME_BY_INDEX[$idx]:-}"
   # agent-dotfiles#212: excluded BEFORE the ledger's free/occupied query, not
@@ -434,7 +468,11 @@ while read -r candidate; do
     AUTHOR_SKIPPED=1
     continue
   fi
-  CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidate" --target "$candidate" --window-name "$wname" 2>/dev/null) || continue
+  # #241: `--lane` stays the index (the ledger's slot identity) and `--target`
+  # becomes the window id. Before this merge both arguments were `$candidate`,
+  # so the ledger recorded an index as the thing to address the window with --
+  # which is the defect, one seam later.
+  CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidate" --target "$candidate_target" --window-name "$wname" 2>/dev/null) || continue
   grep -qF '"free":true' <<<"$CHECK" || continue
 
   # Test-only instrumentation (agent-dotfiles#184): when set, run this
@@ -463,6 +501,7 @@ while read -r candidate; do
   CLAIM=$("$LEDGER_PYTHON" "$LEDGER_CLI" claim-lane --lane "$candidate" --token "$CLAIM_TOKEN" --owner-pid $$ 2>/dev/null) || { release_lane_claim; continue; }
   if grep -qF '"claimed":true' <<<"$CLAIM"; then
     LANE="$candidate"
+    LANE_TARGET="$candidate_target"
     # agent-dotfiles#216: `lane-free` above already resolved this lane's
     # RECORDED harness (from its @hill90_lane_harness pane option, or the
     # ledger row if it was already known) -- carried forward to step 6 so
@@ -515,6 +554,20 @@ if [ -z "$LANE" ]; then
   echo "dispatch: clear that one with the same cancel-open-task --lane <lane>   (frees whatever outstanding task owns the lane)" >&2
   echo "dispatch: CHECK THE PANE FIRST. All of these make the lane dispatchable again; on a lane that is actually working, that is #102." >&2
   "$HERE/lanes.sh" "$SESSION" >&2
+  exit 1
+fi
+
+# The refusal above is about there being no lane. This one is about not
+# knowing WHERE the lane is, and it is the same guard the loop applies per
+# candidate, restated once for the winner so that no path can reach a tmux
+# call with an unusable target (#241). Nothing has been claimed on GitHub or
+# created on disk yet, so refusing here is still free -- and the alternative
+# is `send-keys -t session:` landing in the active window, which is the
+# supervisor.
+if [[ ! "$LANE_TARGET" =~ :@[0-9]+$ ]]; then
+  echo "dispatch: lane $LANE has no usable tmux window-id target ('${LANE_TARGET:-}') -- not dispatching #$ISSUE_ARG" >&2
+  echo "dispatch: an empty or index-shaped target is refused: an empty tmux target hits the ACTIVE window, which is the supervisor" >&2
+  release_lane_claim
   exit 1
 fi
 
@@ -588,7 +641,7 @@ fi
 rm -f "$WORKTREE_ERR"
 
 # --- 4. the lane is told what it is doing, then given the work ------------
-if ! tmux rename-window -t "$LANE" "$WINDOW_NAME" 2>/dev/null; then
+if ! tmux rename-window -t "$LANE_TARGET" "$WINDOW_NAME" 2>/dev/null; then
   echo "dispatch: could not rename $LANE -- not dispatching #$ISSUE_ARG" >&2
   "$HERE/worktree.sh" done "$WORKTREE" >/dev/null 2>&1
   release_claim
@@ -693,7 +746,7 @@ fi
 
 # `/clear` first: an author reviewing their own PR is not an independent
 # reviewer, and a lane carrying the last task's context is not a fresh one.
-tmux send-keys -t "$LANE" "/clear" Enter 2>/dev/null \
+tmux send-keys -t "$LANE_TARGET" "/clear" Enter 2>/dev/null \
   || abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
 
 # THEN WAIT. Observed live on 2026-08-11 while building this: typing the brief
@@ -707,7 +760,7 @@ sleep "${DISPATCH_SETTLE:-2}"
 # call: what the pane actually shows is the only evidence that the keys landed.
 sent=0
 for attempt in 1 2; do
-  tmux send-keys -t "$LANE" "$MESSAGE" 2>/dev/null \
+  tmux send-keys -t "$LANE_TARGET" "$MESSAGE" 2>/dev/null \
     || abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
   sleep "${DISPATCH_SETTLE:-1}"
   # Check BOTH ENDS of the message plus the worktree path. The head is what a
@@ -724,7 +777,7 @@ for attempt in 1 2; do
   # path matches ordinary pane furniture and would pass on a blank pane.
   # Spaces and newlines come out because a real pane wraps a long path across
   # lines and indents the continuation.
-  pane=$(tmux capture-pane -p -t "$LANE" 2>/dev/null | tr -d ' \n')
+  pane=$(tmux capture-pane -p -t "$LANE_TARGET" 2>/dev/null | tr -d ' \n')
   if grep -qF "$(tr -d ' ' <<<"Read $BRIEF")" <<<"$pane" \
      && grep -qF "$(tr -d ' ' <<<"$WORKTREE")" <<<"$pane" \
      && grep -qF "$(tr -d ' ' <<<"never work in the shared checkout at $REPO_PATH.")" <<<"$pane"; then
@@ -732,7 +785,7 @@ for attempt in 1 2; do
     break
   fi
   # Clear whatever partial text is in the input and retype once.
-  tmux send-keys -t "$LANE" C-u 2>/dev/null
+  tmux send-keys -t "$LANE_TARGET" C-u 2>/dev/null
   sleep "${DISPATCH_SETTLE:-1}"
 done
 
@@ -784,7 +837,7 @@ if ! grep -qF '"committed":true' <<<"$COMMIT_OUT"; then
 fi
 CLAIM_COMMITTED=1
 
-tmux send-keys -t "$LANE" Enter 2>/dev/null \
+tmux send-keys -t "$LANE_TARGET" Enter 2>/dev/null \
   || abort_send "could not submit the brief in $LANE -- #$ISSUE_ARG was not dispatched"
 
 # --- 5. AND THE BRIEF ACTUALLY STARTED ------------------------------------
@@ -816,7 +869,7 @@ submitted=""
 box=""
 for ((attempt = 1; attempt <= CONFIRM_TRIES; attempt++)); do
   sleep "${DISPATCH_SETTLE:-1}"
-  box=$(tmux capture-pane -pe -t "$LANE" 2>/dev/null | input_box_state)
+  box=$(tmux capture-pane -pe -t "$LANE_TARGET" 2>/dev/null | input_box_state)
   if [ "$box" = empty ]; then submitted=1; break; fi
 done
 
@@ -921,7 +974,7 @@ ledger_record_failed() {
 # never talks to tmux: a durable record that cannot be written without a live
 # tmux server is not the portability the ledger is for, and the caller here is
 # already holding a tmux connection.
-LANE_META=$(tmux display-message -p -t "$LANE" \
+LANE_META=$(tmux display-message -p -t "$LANE_TARGET" \
   '#{pane_id}|#{pane_current_command}|#{pane_current_path}|#{socket_path}|#{session_created}|#{session_id}' 2>&1)
 if [ -z "$LANE_META" ] || [[ "$LANE_META" != *"|"* ]]; then
   ledger_record_failed "could not read pane metadata for $LANE: $LANE_META"
@@ -954,7 +1007,13 @@ else
   fi
 fi
 
+# The target is printed as well as the lane (#241) because the caller's very
+# next action is `lane-done.sh <window> <name> <channel>` (loop-tick.md), and
+# that waiter blocks for as long as the work takes -- the longest-lived
+# resolved target in the estate, and so the one most certain to be addressing
+# a renumbered index by the time it fires. Give it the id, not the index.
 echo "dispatch: #$ISSUE_ARG -> $LANE ($WINDOW_NAME)"
+echo "  target:   $LANE_TARGET   # pass this to lane-done.sh, not the index"
 echo "  worktree: $WORKTREE"
 echo "  brief:    $BRIEF"
 exit 0

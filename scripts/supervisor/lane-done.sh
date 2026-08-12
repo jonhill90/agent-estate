@@ -36,10 +36,27 @@
 # was written to fix. tests/supervisor/test_lane_done.sh now covers the
 # pairing against real tmux, not only against the stub.
 #
-# Usage: lane-done.sh <window-index> <expected-name> <channel> [session]
+# Usage: lane-done.sh <window> <expected-name> <channel> [session]
 #
-# <window-index>  the lane's tmux window index, e.g. what dispatch.sh sent
-#                 the brief to.
+# <window>        the lane's tmux WINDOW ID (`@12`) -- what `dispatch.sh`
+#                 prints as `target:` and what `lanes.sh --free` emits in its
+#                 second column. A bare window INDEX is still accepted, for
+#                 the operator typing this by hand off the window list, but it
+#                 is not what a script should pass (#241).
+#
+#                 WHY THE ID (#241): this script is the longest-lived resolved
+#                 target in the estate. It blocks on `wait-for` for as long as
+#                 the work takes -- hours -- and this server runs
+#                 `renumber-windows on`, so any window closing in the meantime
+#                 shifts every higher index down by one. An index resolved at
+#                 dispatch and used when the channel fires can name a
+#                 different window entirely, and the name-match guard below
+#                 then refuses a lane that genuinely finished: the rename is
+#                 lost and the ledger release with it, which is #102's shape.
+#                 A window id is stable for the window's lifetime and never
+#                 reused, so it still names the same window when the signal
+#                 arrives -- or names nothing at all, if that window closed,
+#                 which is the honest answer rather than a stranger's.
 # <expected-name> the task name dispatch.sh set on that window, e.g.
 #                 `ad102-lane-rename-on-completion`. Renaming is refused if
 #                 the window carries any other name when the signal arrives
@@ -71,24 +88,31 @@
 
 set -uo pipefail
 
-IDX="${1:-}"
+WINDOW="${1:-}"
 EXPECTED_NAME="${2:-}"
 CHANNEL="${3:-}"
 SESSION="${4:-${LANES_SESSION:-agent-dotfiles}}"
 
-if [ -z "$IDX" ] || [ -z "$EXPECTED_NAME" ] || [ -z "$CHANNEL" ]; then
+if [ -z "$WINDOW" ] || [ -z "$EXPECTED_NAME" ] || [ -z "$CHANNEL" ]; then
   sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
   exit 2
 fi
 
+# One string, used for every tmux call below, built once (#241). `$WINDOW` is
+# a window id (`@12`) from a script or an index from a human; `session:@12`
+# and `session:5` are both valid tmux window targets, so no branch is needed
+# to accept either -- what differs is only whether the target can drift, and
+# that is the caller's choice to make correctly.
+TARGET="${SESSION}:${WINDOW}"
+
 if ! tmux wait-for "$CHANNEL" 2>/dev/null; then
-  echo "lane-done: channel '$CHANNEL' was not signaled -- not renaming ${SESSION}:${IDX}" >&2
+  echo "lane-done: channel '$CHANNEL' was not signaled -- not renaming ${TARGET}" >&2
   exit 1
 fi
 
-CURRENT="$(tmux display-message -p -t "${SESSION}:${IDX}" '#{window_name}' 2>/dev/null)"
+CURRENT="$(tmux display-message -p -t "$TARGET" '#{window_name}' 2>/dev/null)"
 if [ "$CURRENT" != "$EXPECTED_NAME" ]; then
-  echo "lane-done: ${SESSION}:${IDX} is now '$CURRENT', not '$EXPECTED_NAME' -- already handled, not renaming. If this lane is actually stranded, recover with: cli.py record-completion --task '$EXPECTED_NAME'" >&2
+  echo "lane-done: ${TARGET} is now '$CURRENT', not '$EXPECTED_NAME' -- already handled, not renaming. If this lane is actually stranded, recover with: cli.py record-completion --task '$EXPECTED_NAME'" >&2
   exit 1
 fi
 
@@ -115,7 +139,7 @@ fi
 if ! LEDGER_OUT=$("${LANE_DONE_PYTHON:-python3}" \
     "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cli.py" \
     record-completion --task "$EXPECTED_NAME" \
-    --note "lane-done: ${CHANNEL} signaled for ${SESSION}:${IDX}, still named '$EXPECTED_NAME'" 2>&1); then
+    --note "lane-done: ${CHANNEL} signaled for ${TARGET}, still named '$EXPECTED_NAME'" 2>&1); then
   echo "lane-done: LEDGER RECORD FAILED for $EXPECTED_NAME -- the lane IS free, the record is not written" >&2
   sed 's/^/  /' <<<"$LEDGER_OUT" >&2
 fi
@@ -137,8 +161,21 @@ fi
 # convention only gates lanes the ledger has never seen. So this is a stated
 # property, not an assumption: a stale name after a failed rename does not
 # withhold the lane from dispatch.
-if ! tmux rename-window -t "${SESSION}:${IDX}" "free-${IDX}"; then
-  echo "lane-done: rename-window FAILED for ${SESSION}:${IDX} -- the lane IS released in the ledger; the window keeps its stale name '$EXPECTED_NAME' (still dispatchable -- see comment above)" >&2
+#
+# The `free-N` the window is renamed to takes N from the window's CURRENT
+# index, read back here rather than from the argument (#241). Two reasons,
+# and both are the same defect seen from either end: the argument is a window
+# id now, so it carries no index to use; and even when a human passes an
+# index, `renumber-windows on` means the window may have moved since -- the
+# old code would then have named a window `free-7` while it sat at index 5,
+# which is a projection that lies about the very thing Jon reads the window
+# list for. If the index cannot be read the window is gone, and there is
+# nothing to rename; the ledger release above has already happened either way.
+FREE_IDX="$(tmux display-message -p -t "$TARGET" '#{window_index}' 2>/dev/null)"
+if [ -z "$FREE_IDX" ]; then
+  echo "lane-done: could not read the current window index of ${TARGET} -- the lane IS released in the ledger; the window was not renamed (still dispatchable -- see comment above)" >&2
+elif ! tmux rename-window -t "$TARGET" "free-${FREE_IDX}"; then
+  echo "lane-done: rename-window FAILED for ${TARGET} -- the lane IS released in the ledger; the window keeps its stale name '$EXPECTED_NAME' (still dispatchable -- see comment above)" >&2
 fi
 
 exit 0
