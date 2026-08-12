@@ -498,6 +498,94 @@ running". A heading that is entirely absent is a third, distinct fact --
 section at all" are three different values; none of them collapses into
 either of the others.
 
+## MCP server (#198)
+
+A worker has always had to be on a machine where these scripts exist at the
+right paths. Claude Code, Codex and Copilot all speak MCP, so a tool surface is
+the one interface all three consume without the estate growing a client per
+harness. `mcp_server.py` is that surface.
+
+### The seam
+
+Two files, one direction:
+
+- `supervisor_view.py` — the read interface. A `ReadSource` base, one class per
+  question, a `READ_SOURCES` registry, and `SupervisorView.read`. Same shape as
+  `verdict.py`'s `VerdictSource`/`SOURCES` and `harness/*.sh`: adding a source
+  is a class plus an entry, removing one is a deletion, and no caller names any
+  of them. It knows nothing about MCP.
+- `mcp_server.py` — JSON-RPC 2.0 over stdio, and nothing else. It knows nothing
+  about `lanes.sh`, `digest.sh` or the ledger.
+
+Delete `mcp_server.py` and every script in this directory works exactly as it
+does now. `test_supervisor_view.py`'s `SeamTest` asserts that by parsing each
+Python file's imports, so the claim is checked rather than stated.
+
+Each source WRAPS an existing entry point (`lanes.sh --json`, `digest.sh
+--json`, `cli.py status`) rather than reimplementing it. There is no second
+behaviour to drift.
+
+### Three tools, and why only three
+
+| tool | source | answers |
+| --- | --- | --- |
+| `lanes` | `lanes.sh --json` | lane states, optionally for a named session |
+| `digest` | `digest.sh --json` | watchdog, poller, lane counts, open PRs, merges |
+| `ledger` | `cli.py status` | registered lanes, availability, outstanding tasks |
+
+Tool definitions are always-on context in every consuming session, which cuts
+directly against the estate's token aim — so the surface is deliberately small.
+`mcp_server.py --print-tools` emits the exact `tools/list` payload, so the cost
+is measurable rather than argued about.
+
+### It fails loud, never empty
+
+Every source raises `SupervisorUnavailable` when it cannot see its backing
+store — a non-zero exit, a zero-byte stdout, or output that is not JSON — and
+`_tools_call` turns that into an MCP result with `isError: true` and the reason
+attached. A tool that answers `[]` when the session is gone, jq is missing or
+the ledger will not open is indistinguishable from a quiet estate, which is
+this estate's most-repeated defect. `digest.sh`'s own header states the rule for
+itself ("an empty `prs` list and an unreachable GitHub must not look the same");
+this carries it across the process boundary.
+
+`digest.sh`'s PARTIAL digest is passed through intact rather than raised on: it
+exits 0 with the failures named in `errors` and `ok: false`, and throwing away
+the readable half would lose more than it protects.
+
+### Reads only
+
+No write tool is exposed, and `WRITE_SOURCES` is empty. `tool_definitions`
+refuses to publish any source whose `mutates` is true, so the absence is
+enforced rather than remembered. What a write tool needs first, none of which
+exists: a caller identity (`cli.py`'s `_verify_caller` authenticates a lane by a
+pane nonce an off-machine client cannot have), a blast-radius bound (a tool any
+agent may call on its own initiative is a third dispatcher, and #184/#209 are
+both about two), and an audit trail that survives the client. The seam is
+there; the authorisation story is not, so the tools are not.
+
+Nonces never leave. `LedgerSource` projects rows through explicit
+`LANE_FIELDS`/`TASK_FIELDS` allowlists — a column added to the schema later is
+omitted by default and must be named to appear.
+
+### Wiring it into a harness
+
+Declared once in `settings/mcp/servers.json` and projected by `sync.py` into
+all three harnesses: `~/.claude.json` (`merge_mcp`),
+`~/.copilot/mcp-config.json` (`merge_copilot_mcp`) and `~/.codex/config.toml`
+(`merge_codex_mcp`). #198 also taught the Codex renderer to render `command` /
+`args`; before that a stdio server became a bare `[mcp_servers.<name>]` table
+Codex could not launch.
+
+Run it by hand against any MCP client:
+
+```bash
+python3 scripts/supervisor/mcp_server.py            # stdio server
+python3 scripts/supervisor/mcp_server.py --print-tools
+npx @modelcontextprotocol/inspector --cli python3 \
+  scripts/supervisor/mcp_server.py --method tools/list
+```
+
 ## Verification
 
 ```bash
