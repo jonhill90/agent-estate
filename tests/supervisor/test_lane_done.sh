@@ -87,6 +87,112 @@ out=$(run 6 ad102-lane-rename-on-completion ad102-done t); rc=$?
 want_exit "a name mismatch exits non-zero" "$rc" 1 "$out"
 want_missing "a name mismatch is never renamed" "rename-window" "$(tmuxlog)"
 
+# --- ...and a name mismatch must not RELEASE THE LANE either (#205) --------
+#
+# The two assertions above check the rename and the exit code. Neither looks
+# at the ledger, and after #194 reordered the release ahead of the rename the
+# ledger write is the operation that actually frees the lane -- so those two
+# assertions no longer cover the thing that matters. This name-match check
+# (`lane-done.sh:90-93`) is now the ONLY gate between a fired `wait-for`
+# channel and an unconditional release: #194 deliberately removed the second
+# gate, rename success. #205's reviewer hoisted the release above this guard
+# and the suite stayed fully green, which is what this section closes.
+#
+# The case that gets through every other layer is a window renamed by hand
+# while its task is still open: `Ledger.complete` refuses cancelled/failed
+# tasks and verifies `pane_nonce` (`core.py`), so a redispatched lane is
+# caught there and surfaces as a loud LEDGER RECORD FAILED -- but a live task
+# under a hand-renamed window authenticates fine and would be marked
+# complete, marking a lane free with its worker still running (#184's shape).
+#
+# Seeded through the shipped recorder, under the name lane-done.sh is called
+# with, on a lane whose window now carries a different name (window 6 is
+# `ad103-something-else` in the fixture).
+NAMEMATCH_STATE="$D/state-205"
+LEDGER_STATE="$NAMEMATCH_STATE" ledger record-dispatch \
+  --lane t:6 --task ad205-name-match-guard \
+  --summary "#205 name-match guard" \
+  --pane-id '%6' --pane-path "$D" --command claude \
+  --server-id 'socket:1' --session-id '$0' --issue 205 >/dev/null 2>&1
+seed_rc=$?
+if [ "$seed_rc" -ne 0 ]; then
+  bad "setup: an open task exists for the lane whose window was renamed away" \
+    "record-dispatch exited $seed_rc"
+else
+  ok "setup: an open task exists for the lane whose window was renamed away"
+  signal ad102-done
+  out=$(LEDGER_STATE="$NAMEMATCH_STATE" run 6 ad205-name-match-guard ad102-done t); rc=$?
+  want_exit "a name mismatch with a live task still exits non-zero" "$rc" 1 "$out"
+  after=$(LEDGER_STATE="$NAMEMATCH_STATE" ledger status 2>&1)
+  want_contains "a name mismatch leaves the task open -- still delivered" \
+    '"status":"delivered"' "$after"
+  want_missing "a name mismatch records NO completion -- the guard is the only gate on the release (#205)" \
+    '"status":"complete"' "$after"
+fi
+
+# ...and prove that assertion is load-bearing rather than decorative. Patch a
+# copy that hoists the ledger release above the name-match guard -- exactly
+# the mutation #205's reviewer ran against the shipped file, which the suite
+# did not notice -- and confirm the same call now marks the lane complete
+# despite the mismatch, i.e. the assertion above would go red against it.
+# Unlike the two mutation copies above, this one must actually reach the
+# ledger: lane-done.sh resolves `cli.py` from its OWN directory, so a copy
+# dropped in $D would fail with "can't open file .../cli.py" and the mutant
+# would look innocent for the wrong reason. Build a shadow of
+# `scripts/supervisor/` -- every real file symlinked, `lane-done.sh` the
+# mutated copy -- so the mutant runs against the same cli.py the real one does.
+SHIPDIR="$D/shipdir"
+rm -rf "$SHIPDIR"; mkdir -p "$SHIPDIR"
+for f in "$HERE/../../scripts/supervisor/"*; do
+  ln -s "$f" "$SHIPDIR/$(basename "$f")"
+done
+rm -f "$SHIPDIR/lane-done.sh"
+HOISTED="$SHIPDIR/lane-done.sh"
+patch_rc3=0
+python3 - "$LANE_DONE" "$HOISTED" <<'PY' || patch_rc3=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+
+guard_start = 'if [ "$CURRENT" != "$EXPECTED_NAME" ]; then'
+guard_end_marker = "exit 1\nfi\n\n"
+i0 = text.index(guard_start)
+i1 = text.index(guard_end_marker, i0) + len(guard_end_marker)
+assert text.count(guard_start) == 1, "name-match guard not unique -- script shape changed"
+guard_block = text[i0:i1]
+
+ledger_start = 'if ! LEDGER_OUT=$('
+ledger_end_marker = "sed 's/^/  /' <<<\"$LEDGER_OUT\" >&2\nfi\n"
+j0 = text.index(ledger_start)
+j1 = text.index(ledger_end_marker, j0) + len(ledger_end_marker)
+assert j0 > i1, "ledger release is not after the name-match guard -- script shape changed, mutation would not test the guard"
+ledger_block = text[j0:j1]
+
+open(dst, "w").write(text[:i0] + text[i1:j0] + ledger_block + "\n" + guard_block + text[j1:])
+PY
+if [ "$patch_rc3" -ne 0 ]; then
+  bad "setup: patched a copy of lane-done.sh with the ledger release hoisted above the name-match guard" \
+    "could not patch $LANE_DONE (exit $patch_rc3) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of lane-done.sh with the ledger release hoisted above the name-match guard"
+  chmod +x "$HOISTED"
+  HOISTED_STATE="$D/state-205-mutant"
+  LEDGER_STATE="$HOISTED_STATE" ledger record-dispatch \
+    --lane t:6 --task ad205-name-match-guard \
+    --summary "#205 mutation: release hoisted above the guard" \
+    --pane-id '%6' --pane-path "$D" --command claude \
+    --server-id 'socket:1' --session-id '$0' --issue 205 >/dev/null 2>&1
+  signal ad102-done
+  out=$(LEDGER_STATE="$HOISTED_STATE" run_script "$HOISTED" 6 ad205-name-match-guard ad102-done t)
+  mutated_status=$(LEDGER_STATE="$HOISTED_STATE" ledger status 2>&1)
+  if grep -qF '"status":"complete"' <<<"$mutated_status"; then
+    ok "mutation confirmed: hoisting the release above the guard frees a lane whose window was renamed away (the assertion above would now be red)"
+  else
+    bad "mutation confirmed: hoisting the release above the guard frees a lane whose window was renamed away" \
+      "expected the hoisted copy to mark the task complete on a name mismatch; got: $mutated_status / $out"
+  fi
+fi
+
 # --- the completion is RECORDED, not just renamed away (#140) --------------
 #
 # The rename returns the lane to the pool; nothing recorded that the work

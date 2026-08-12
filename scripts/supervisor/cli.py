@@ -329,9 +329,11 @@ def record_completion(ledger, *, task, note):
     Not `cli.py complete`: that path verifies `TMUX_PANE` belongs to the
     lane's own pane and takes a `--result-file`. `lane-done.sh` runs in the
     supervisor's pane, not the worker's, and holds no result artifact -- the
-    only thing it knows is that the worker's `wait-for` channel fired and the
-    window was renamed. So it authenticates with the task's own recorded
-    `pane_nonce` and records that fact as the result.
+    only thing it knows is that the worker's `wait-for` channel fired for a
+    window still carrying the expected name. It cannot know the window was
+    renamed: since agent-dotfiles#194 this release runs BEFORE the rename and
+    unconditionally, and the rename is cosmetic. So it authenticates with the
+    task's own recorded `pane_nonce` and records that fact as the result.
 
     Note the one thing this does that is not inert: `Ledger.complete` inserts
     a `completion:<task>` event, and `cli.py notify`/`tick` would send those
