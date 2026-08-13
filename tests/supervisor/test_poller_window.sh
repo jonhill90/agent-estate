@@ -39,6 +39,40 @@ out=$(poller_window_target "$S" 2>&1); rc=$?
 [ "$rc" -eq 0 ] && [ "$out" = "$S:$want" ] && ok "one poller window returns its session-qualified window id" \
   || bad "one poller window returns its session-qualified window id" "rc=$rc out=$out want=$S:$want"
 
+while IFS= read -r wid; do
+  [ -n "$wid" ] && tmux kill-window -t "$S:$wid" 2>/dev/null
+done < <(tmux list-windows -t "$S" -F '#{window_name}	#{window_id}' 2>/dev/null | awk -F'\t' '$1=="inbox-poll"{print $2}')
+
+tmux new-window -t "$S" -n 'poller}window' -d
+tmux new-window -t "$S" -n other-poller-window -d
+brace_want=$(tmux list-windows -t "$S" -F '#{window_name}	#{window_id}' | awk -F'\t' '$1=="poller}window"{print $2}')
+out=$(LANES_POLLER_WINDOW='poller}window' bash -c ". '$HELPER'; poller_window_ids '$S'" 2>&1); rc=$?
+[ "$rc" -eq 0 ] && [ "$out" = "$brace_want" ] && ok "poller names containing a literal } return exactly the matching window id" \
+  || bad "poller names containing a literal } return exactly the matching window id" "rc=$rc out=$out want=$brace_want"
+out=$(LANES_POLLER_WINDOW='poller}window' bash -c ". '$HELPER'; poller_window_target '$S'" 2>&1); rc=$?
+[ "$rc" -eq 0 ] && [ "$out" = "$S:$brace_want" ] && ok "poller target accepts a literal } name as a plain string" \
+  || bad "poller target accepts a literal } name as a plain string" "rc=$rc out=$out want=$S:$brace_want"
+tmux kill-window -t "$S:$brace_want" 2>/dev/null
+
+# tmux's own -n/rename-window format-expand their argument, so a naive
+# `-n 'poller#{window'` never creates a window literally named that --
+# `#{window` isn't a valid variable reference and tmux silently truncates
+# it to `poller`, which made this case pass identically whether the code
+# was fixed or vulnerable (agent-supervisor#43 review, mutation-tested).
+# `##` is tmux's own escape for a literal `#`, so `poller##{window` is the
+# only `-n` argument that actually produces a window named `poller#{window`;
+# verify that against tmux's own report before trusting it as the fixture.
+tmux new-window -t "$S" -n 'poller##{window' -d
+hash_want=$(tmux list-windows -t "$S" -F '#{window_name}	#{window_id}' | awk -F'\t' '$1=="poller#{window"{print $2}')
+[ -n "$hash_want" ] || bad "fixture: a window literally named poller#{window exists" "no window matched"
+out=$(LANES_POLLER_WINDOW='poller#{window' bash -c ". '$HELPER'; poller_window_ids '$S'" 2>&1); rc=$?
+[ "$rc" -eq 0 ] && [ "$out" = "$hash_want" ] && ok "poller names containing #{ return exactly the matching window id" \
+  || bad "poller names containing #{ return exactly the matching window id" "rc=$rc out=$out want=$hash_want"
+tmux kill-window -t "$S:$hash_want" 2>/dev/null
+
+tmux new-window -t "$S" -n inbox-poll -d
+want=$(poller_window_ids "$S" | head -1)
+
 # agent-supervisor#28: the watchdog LaunchAgent's environment sets only
 # HOME, NOTIFY_ENV, and PATH -- no LANG/LC_ALL. Under that exact stripped
 # environment, tmux sanitises the literal tab in a `"#{a}\t#{b}"` format
@@ -58,6 +92,20 @@ tmux new-window -t "$S" -n inbox-poll -d
 out=$(poller_window_target "$S" 2>&1); rc=$?
 [ "$rc" -eq 2 ] && [ -z "$out" ] && ok "two poller windows returns 2 and prints nothing" \
   || bad "two poller windows returns 2 and prints nothing" "rc=$rc out=$out"
+
+while IFS= read -r wid; do
+  [ -n "$wid" ] && tmux kill-window -t "$S:$wid" 2>/dev/null
+done < <(tmux list-windows -t "$S" -F '#{window_name}	#{window_id}' 2>/dev/null | awk -F'\t' '$1=="inbox-poll"{print $2}')
+
+out=$(poller_window_target "$S" 2>&1); rc=$?
+[ "$rc" -eq 1 ] && [ -z "$out" ] && ok "zero poller windows still returns 1 after escaped-name lookups" \
+  || bad "zero poller windows still returns 1 after escaped-name lookups" "rc=$rc out=$out"
+
+tmux new-window -t "$S" -n 'poller}window' -d
+tmux new-window -t "$S" -n 'poller}window' -d
+out=$(LANES_POLLER_WINDOW='poller}window' bash -c ". '$HELPER'; poller_window_target '$S'" 2>&1); rc=$?
+[ "$rc" -eq 2 ] && [ -z "$out" ] && ok "duplicate literal } poller names still return 2 and print nothing" \
+  || bad "duplicate literal } poller names still return 2 and print nothing" "rc=$rc out=$out"
 
 # A query tmux could not answer (here: a session that does not exist) must
 # be distinguishable from a confirmed-zero result -- the same fail-open
