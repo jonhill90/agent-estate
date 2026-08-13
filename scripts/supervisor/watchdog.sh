@@ -226,12 +226,30 @@ if [ "$branch" = "HEAD" ]; then
 fi
 sha=$(git -C "$HERE" rev-parse --short HEAD 2>/dev/null || echo unknown)
 
+# Which REPOSITORY $sha belongs to (agent-supervisor#1). `code: branch @ sha`
+# alone was ambiguous about that the moment this tree stopped being the only
+# repo the estate runs code from: the live worktree pinned at `d6312b3` kept
+# reporting a plausible-looking branch/sha pair with no way to tell, from the
+# status file alone, that it was agent-dotfiles's `d6312b3` and not this
+# repo's. Read from `origin`, not hardcoded, so a clone under a second
+# machine layout or a fork still reports its own identity.
+#
+# SUPERVISOR_REPO_NAME overrides for tests and for a layout with no `origin`
+# remote at all -- same override shape as SUPERVISOR_STATE/SUPERVISOR_REPOS.
+repo=$(git -C "$HERE" remote get-url origin 2>/dev/null | sed 's/\.git$//' \
+     | awk -F'[:/]' 'NF>=2{print $(NF-1)"/"$NF}')
+if [ -z "$repo" ]; then
+  root=$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null)
+  [ -n "$root" ] && repo=$(basename "$root")
+fi
+repo="${SUPERVISOR_REPO_NAME:-${repo:-unknown}}"
+
 # How far behind main this copy is. The LaunchAgent runs the watchdog from a
 # PINNED detached worktree that nothing in this repository updates (#99), so a
 # merged fix to watchdog.sh, sleepcheck.py, watchdog_notify.py or loop-tick.md
 # can sit green on main indefinitely while the live copy keeps running the old
-# one. `code: detached @ 9cddafb` reads exactly as healthy as a current sha
-# unless the reader already knows what main is.
+# one. `code: agent-supervisor@detached @ 9cddafb` reads exactly as healthy as
+# a current sha unless the reader already knows what main is.
 #
 # Reported AND acted on: the `advance:` line at the bottom of this file says
 # what this tick did about the drift this line reports. Reporting alone was the
@@ -286,7 +304,7 @@ report() {                       # report <state> <detail> [notify-line]
     # what guards the loop. On 2026-08-11 the live watchdog spent a stretch
     # running from a test branch purely because that was the last checkout --
     # it worked, but by luck. An unexpected branch here is a real finding.
-    printf 'code:     %s @ %s%s\n' "$branch" "$sha" "$code_note"
+    printf 'code:     %s@%s @ %s%s\n' "$repo" "$branch" "$sha" "$code_note"
     # Present only when a send was attempted and failed (#91). "escalate with
     # no notify: line" is therefore "a human was reached"; this line is the
     # difference between that and "the loop is down and NOBODY KNOWS". Written
