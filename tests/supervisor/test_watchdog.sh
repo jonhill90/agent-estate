@@ -901,6 +901,11 @@ launchd_gate_run() { # launchd_gate_run <workdir> <poller-recover-state>
       printf '#!/bin/bash\nexit 0\n' >"$root/app/scripts/supervisor/poller-recover.sh"
       chmod 755 "$root/app/scripts/supervisor/poller-recover.sh"
       ;;
+    fails)
+      printf '#!/bin/bash\necho "FAILED -- could not determine poller windows (tmux query failed)"\nexit 1\n' \
+        >"$root/app/scripts/supervisor/poller-recover.sh"
+      chmod 755 "$root/app/scripts/supervisor/poller-recover.sh"
+      ;;
   esac
   env -i HOME="$home" NOTIFY_ENV="$home/none.env" PATH="$STUBS:/usr/bin:/bin" \
     bash "$root/app/scripts/supervisor/watchdog.sh" >/dev/null 2>"$root/err"
@@ -924,6 +929,43 @@ if grep -q '^recovery:' "$D/w/home/.local/state/agent-dotfiles-supervisor/watchd
     "$(grep '^recovery:' "$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.status")"
 else
   say_ok "an executable poller-recover.sh keeps the healthy path silent"
+fi
+
+# --- agent-supervisor#41 (agent-supervisor#28): a recovery ATTEMPT that
+# fails must be as loud as a missing/non-executable install, not swallowed
+# into watchdog.log alone. Measured incident: poller-recover.sh exited 1 on
+# 37 consecutive ticks (a real, functional refusal -- not a broken
+# install) while watchdog.status's `recovery:` line stayed entirely absent,
+# because check_poller_window() only ever called recovery_note for the
+# missing/broken cases above.
+D=$(mktemp -d); launchd_gate_run "$D/w" fails
+WSTATUS="$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.status"
+check "a poller-recover.sh that runs and fails is reported in watchdog.status" \
+      "^recovery: failed" "$WSTATUS"
+check "the failure names what poller-recover.sh itself said" \
+      "could not determine poller windows" "$WSTATUS"
+check "a first-ever failure names it as attempt 1" \
+      "attempt 1 in a row" "$WSTATUS"
+check "no prior success reads as never, not a guessed timestamp" \
+      "last confirmed recovery: never" "$WSTATUS"
+
+# A second consecutive failure, same state dir (same STATE, so the fail-streak
+# file persists) -- the streak count must accumulate, the way #28's 37 did.
+env -i HOME="$D/w/home" NOTIFY_ENV="$D/w/home/none.env" PATH="$STUBS:/usr/bin:/bin" \
+  bash "$D/w/app/scripts/supervisor/watchdog.sh" >/dev/null 2>"$D/w/err2"
+check "a second consecutive failure increments the streak, not resets it" \
+      "attempt 2 in a row" "$WSTATUS"
+
+# --- MUTATION: a recovery attempt that fails five times in a row must never
+# read as healthy in the plain-text digest.sh view -- prove the wiring by
+# reading the SAME status file back through digest.sh's own status_field
+# awk helper the way digest.sh does, rather than trusting grep alone.
+STATUS_FIELD_AWK='$0 ~ "^" label ":" { sub("^" label ": *", ""); print; exit }'
+recovery_value=$(awk -v label="recovery" "$STATUS_FIELD_AWK" "$WSTATUS")
+if [[ "$recovery_value" == failed* ]]; then
+  say_ok "digest.sh's own field reader sees the failure text, not a truncated or missing line"
+else
+  say_bad "digest.sh's own field reader sees the failure" "got '$recovery_value'"
 fi
 
 echo "  $pass passed, $fail failed"

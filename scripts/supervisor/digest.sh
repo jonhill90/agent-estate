@@ -101,9 +101,35 @@ if [ -r "$WD_FILE" ]; then
   wd_checked=$(status_field "$WD_FILE" checked)
   wd_restarts=$(status_field "$WD_FILE" restarts)
   wd_heartbeat=$(status_field "$WD_FILE" heartbeat)
+  wd_recovery=$(status_field "$WD_FILE" recovery)
+  wd_advance=$(status_field "$WD_FILE" advance)
 else
   wd_state="UNREADABLE"; wd_checked=""; wd_restarts=""; wd_heartbeat=""
+  wd_recovery=""; wd_advance=""
   note_error "watchdog.status unreadable at $WD_FILE"
+fi
+
+# agent-supervisor#41 (agent-supervisor#28): watchdog.status's `recovery:`
+# line is poller-recover.sh's own OUTCOME, not the poller process being up --
+# `pgrep inbox-poll.sh` and `state: ok` below both stayed green through 37
+# straight recovery failures because nothing here read this line at all. A
+# recovery attempt that found nothing to fix stays silent (recovery_note in
+# watchdog.sh never writes an "ok" line for that case); only a recorded
+# failure is degraded, so a healthy estate still reads healthy.
+if [[ "$wd_recovery" == failed* ]]; then
+  note_error "poller recovery: $wd_recovery"
+fi
+
+# agent-supervisor#41 (agent-supervisor#57): watchdog.status's `advance:` line
+# can read "current" or "advanced" -- both trivially successful outcomes of
+# the git-advance step -- while a poller-restart-request folded into that
+# SAME tick failed underneath it (advance-live.sh's maybe_restart_poller).
+# "the tick ran and reported success" must not stand in for "everything the
+# tick attempted succeeded" (measured 2026-08-13: this exact text repeated on
+# every watchdog run for hours with nothing surfacing it). Matched on the raw
+# text so it fires no matter which top-level advance outcome carries it.
+if [[ "$wd_advance" == *"could not be started"* ]]; then
+  note_error "watchdog advance: $wd_advance"
 fi
 
 # --- poller ---------------------------------------------------------------
@@ -313,6 +339,7 @@ DIGEST=$(jq -n \
   --arg checked "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg wd_state "$wd_state" --arg wd_checked "$wd_checked" \
   --arg wd_restarts "$wd_restarts" --arg wd_heartbeat "$wd_heartbeat" \
+  --arg wd_recovery "$wd_recovery" --arg wd_advance "$wd_advance" \
   --argjson poller_alive "$poller_alive" --arg poller_state "$poller_state" \
   --arg poller_checked "$poller_checked" \
   --argjson inbox "$inbox_json" --argjson inbox_stale "$inbox_stale" \
@@ -324,7 +351,8 @@ DIGEST=$(jq -n \
   --argjson reconciliation "$RECONCILIATION_JSON" \
   --argjson prs "$PR_JSON" --argjson merged "$MERGED_JSON" --argjson errors "$ERR_JSON" '
   {checked: $checked,
-   watchdog: {state:$wd_state, checked:$wd_checked, restarts:$wd_restarts, heartbeat:$wd_heartbeat},
+   watchdog: {state:$wd_state, checked:$wd_checked, restarts:$wd_restarts, heartbeat:$wd_heartbeat,
+              recovery:$wd_recovery, advance:$wd_advance},
    poller: {alive:$poller_alive, state:$poller_state, checked:$poller_checked},
    director_inbox: ($inbox + {stale: $inbox_stale}),
    lanes: {free:$free, busy:$busy, blocked:$blocked, menu_blocked:$menu,
@@ -338,6 +366,12 @@ if [ "$MODE" = "--json" ]; then
 else
   jq -r '
     "watchdog: \(.watchdog.state)  restarts=\(.watchdog.restarts)  \(.watchdog.heartbeat)",
+    # Printed only when there is an outcome to report -- a recovery attempt
+    # that found nothing to fix, or a tick with no poller-restart-request in
+    # it, writes no line here, same as .watchdog.heartbeat above. Present
+    # means an OUTCOME was recorded, not merely that the process ticked.
+    (if (.watchdog.recovery|length) > 0 then "          recovery: \(.watchdog.recovery)" else empty end),
+    (if (.watchdog.advance|length) > 0 then "          advance:  \(.watchdog.advance)" else empty end),
     "poller:   alive=\(.poller.alive) state=\(.poller.state)",
     # Printed every time, not only when stale -- this line IS the delivery
     # (agent-supervisor#34): a reader who checks this digest has seen the

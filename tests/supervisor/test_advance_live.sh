@@ -876,6 +876,18 @@ marker = '''  if prompt_poller_relaunch "$pane" "$poller_sha" "$live_sha" "$poll
     log "POLLER-RESTART-REQUESTED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written; prompt poller-recover.sh waiter started (watchdog remains the backstop)"
   else
     log "POLLER-RESTART-REQUESTED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written; prompt relaunch could not be started, watchdog poller-recover.sh remains the backstop"
+    # agent-supervisor#41 (agent-supervisor#57): this line used to reach only
+    # advance-live.log. watchdog.sh captures this script's STDOUT into its
+    # own `advance:` status line (advance_on_exit, watchdog.sh) -- but only
+    # ever the top-level "advance-live: current"/"advanced" echo, which
+    # reports the git-advance outcome and says nothing about a
+    # poller-restart-request nested inside it. On 2026-08-13 that produced
+    # exactly this: `advance-live: current, ...` every tick for hours while
+    # the SAME tick's prompt relaunch failed silently underneath it -- a
+    # trivially "successful" tick masking a real failure it also owns. This
+    # echo is what lets watchdog.status's `advance:` field, and so
+    # digest.sh, see the failure instead of only the outer success.
+    echo "advance-live: POLLER-RESTART-REQUESTED but prompt relaunch could not be started -- watchdog poller-recover.sh remains the backstop"
   fi
 '''
 replacement = '''  log "POLLER-RESTART-REQUESTED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written; prompt relaunch removed for this mutation test"

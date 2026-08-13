@@ -193,6 +193,14 @@ ESCALATE_WINDOW=3600 # ...within this window, or stop and escalate
 # closed for inbox-poll.sh, left open here.
 INBOX_POLL_STATUS_PATH="${SUPERVISOR_INBOX_POLL_STATUS:-$STATE/inbox-poll.status}"
 INBOX_HEARTBEAT_EPISODE="${SUPERVISOR_HEARTBEAT_EPISODE:-$STATE/.watchdog-heartbeat-episode.json}"
+# agent-supervisor#41: watchdog.status is rebuilt from scratch every tick
+# (report(), below), so a fact that must survive across ticks -- when
+# poller-recover.sh last actually confirmed the poller alive, and how many
+# consecutive attempts have failed since -- cannot live only in that file.
+# These two small files are that memory. agent-supervisor#28: recovery had
+# failed 37 consecutive times while nothing durable recorded either number.
+POLLER_RECOVERY_LAST_SUCCESS="${SUPERVISOR_POLLER_RECOVERY_LAST_SUCCESS:-$STATE/.poller-recovery-last-success}"
+POLLER_RECOVERY_FAIL_STREAK="${SUPERVISOR_POLLER_RECOVERY_FAIL_STREAK:-$STATE/.poller-recovery-fail-streak}"
 POLLER_SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
 # Threshold derived from inbox-poll.sh's own worst-case gap between heartbeat
 # writes while the process is genuinely alive -- not a round number (#163):
@@ -597,10 +605,33 @@ check_poller_window() {
         LANES_SESSION="${LANES_SESSION:-${PANE%%:*}}" \
         "$HERE/poller-recover.sh" 2>&1)
   rc=$?
+  # agent-supervisor#41 (agent-supervisor#28): a poller-recover.sh that runs
+  # and exits nonzero for a real reason (ambiguous windows, an orphan it
+  # refuses to duplicate, tmux itself failing) used to reach only
+  # watchdog.log -- FAILED rc=1 lines piled up there for 37 straight ticks
+  # while digest.sh, which never reads watchdog.log, kept reporting
+  # `poller: alive=true state=ok`. The recovery MECHANISM failing is a
+  # different fact from the poller PROCESS being up, and only the log
+  # captured it. recovery_note is the outcome field digest.sh reads; the
+  # healthy path (rc=0) stays silent below, same as the missing/broken
+  # checks above -- a recovery attempt that found nothing to fix is not
+  # noise, only one that failed is.
   if [ "$rc" -ne 0 ]; then
+    local streak=0
+    [ -r "$POLLER_RECOVERY_FAIL_STREAK" ] && streak=$(cat "$POLLER_RECOVERY_FAIL_STREAK" 2>/dev/null)
+    [[ "$streak" =~ ^[0-9]+$ ]] || streak=0
+    streak=$((streak + 1))
+    printf '%s' "$streak" >"$POLLER_RECOVERY_FAIL_STREAK" 2>/dev/null
+    local last_success=""
+    [ -r "$POLLER_RECOVERY_LAST_SUCCESS" ] && last_success=$(cat "$POLLER_RECOVERY_LAST_SUCCESS" 2>/dev/null)
     log "POLLER-RECOVER FAILED rc=$rc: $out"
-  elif [ -n "$out" ]; then
-    log "POLLER-RECOVER: $out"
+    recovery_note "failed (attempt ${streak} in a row) — rc=$rc: $(printf '%s' "$out" | tr '\n' ' ') — last confirmed recovery: ${last_success:-never}"
+  else
+    printf '0' >"$POLLER_RECOVERY_FAIL_STREAK" 2>/dev/null
+    printf '%s' "$iso" >"$POLLER_RECOVERY_LAST_SUCCESS" 2>/dev/null
+    if [ -n "$out" ]; then
+      log "POLLER-RECOVER: $out"
+    fi
   fi
 }
 

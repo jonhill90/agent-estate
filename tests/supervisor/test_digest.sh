@@ -672,5 +672,114 @@ grep -q "record-completion --task ad36-idle" <<<"$(PATH="$REC/bin:$PATH" SUPERVI
   && ok "human digest names record-completion for a finished-but-unsignalled lane" \
   || bad "human digest names record-completion" "$reconcile_json"
 
+# 17. agent-supervisor#41: a component's status file must record OUTCOMES,
+# not just liveness. Three cases, per the issue's own acceptance bar --
+# "could this field have caught #28, #44, or #57?":
+#
+#   17a. a component alive whose last attempt FAILED -> digest reports it
+#        degraded, naming the attempt and the failure (agent-supervisor#28:
+#        poller-recover.sh failed 37 consecutive times while digest kept
+#        reporting `poller: alive=true state=ok`, because nothing here read
+#        watchdog.status's `recovery:` line at all).
+#   17b. a component alive with a recent success -> reported healthy,
+#        silently. A detector that fires on the healthy case is noise.
+#   17c. a component whose overall tick trivially "succeeded" (advance:
+#        current/advanced) must not mask a real failure folded into that
+#        same tick (agent-supervisor#57: `advance-live: current` printed
+#        every watchdog run for hours while that SAME run's poller-restart
+#        request silently failed underneath it).
+OUT="$D/outcomes"; mkdir -p "$OUT"
+run_out() { PATH="$D/bin:$PATH" SUPERVISOR_STATE="$OUT" LANES_SESSION=nosuch bash "$DIGEST" "$@" 2>/dev/null; }
+
+# 17a. RED first: a status file that names a real recovery failure, read by
+# the digest as it stood before this fix, is silence -- prove that by
+# reading the field the OLD digest.sh literally never asked for. This pins
+# the defect to the reader, not to whether the fact exists on disk.
+cat > "$OUT/watchdog.status" <<'S'
+checked:  2026-08-13T00:00:00Z
+state:    working
+restarts: 0 in the last 3600s
+recovery: failed (attempt 37 in a row) — rc=1: FAILED -- could not determine poller windows — last confirmed recovery: 2026-08-12T20:00:00Z
+S
+cat > "$OUT/inbox-poll.status" <<'S'
+checked: 2026-08-13T00:00:00Z
+state:   ok
+S
+j=$(run_out --json)
+chk "17a: a failed recovery attempt is carried through in --json" \
+  "true" "$(jq -r '.watchdog.recovery | startswith("failed")' <<<"$j")"
+[ "$(jq -r '.ok' <<<"$j")" = "false" ] && ok "17a: a failed recovery attempt flips ok to false" \
+  || bad "17a: failed recovery flips ok false" "$j"
+grep -q "poller recovery: failed (attempt 37 in a row)" <<<"$(jq -r '.errors[]' <<<"$j")" \
+  && ok "17a: the error names the attempt count and the failure, not just 'degraded'" \
+  || bad "17a: error names the attempt and failure" "$j"
+T=$(run_out)
+grep -q "recovery: failed" <<<"$T" && ok "17a: text mode shows the recovery outcome, not just liveness" \
+  || bad "17a: text mode shows recovery outcome" "$T"
+
+# 17b. A component with no recovery failure recorded -- the ordinary,
+# healthy case -- must add no error and no line. Noise on the healthy path
+# is how #54 shipped a duplicate alarm that fires 100% of the time.
+cat > "$OUT/watchdog.status" <<'S'
+checked:  2026-08-13T00:00:00Z
+state:    working
+restarts: 0 in the last 3600s
+S
+j=$(run_out --json)
+chk "17b: no recovery line -> the field reads empty, not a guessed state" \
+  "" "$(jq -r '.watchdog.recovery' <<<"$j")"
+grep -q "poller recovery:" <<<"$(jq -r '.errors[]?' <<<"$j")" \
+  && bad "17b: a healthy recovery outcome adds no error" "$j" \
+  || ok "17b: a healthy recovery outcome adds no error"
+T=$(run_out)
+grep -q "^          recovery:" <<<"$T" && bad "17b: a healthy recovery outcome prints no line" "$T" \
+  || ok "17b: a healthy recovery outcome prints no line"
+
+# 17c. The overall tick trivially "succeeded" (advance: current) while a
+# poller-restart-request folded into that same tick failed. Must still be
+# named as degraded -- the trivial top-level success must not stand in for
+# every sub-action having succeeded.
+cat > "$OUT/watchdog.status" <<'S'
+checked:  2026-08-13T00:00:00Z
+state:    working
+restarts: 0 in the last 3600s
+advance:  current — live copy already at origin/main (fetched fresh) advance-live: POLLER-RESTART-REQUESTED but prompt relaunch could not be started -- watchdog poller-recover.sh remains the backstop
+S
+j=$(run_out --json)
+[ "$(jq -r '.ok' <<<"$j")" = "false" ] && ok "17c: a trivially-successful advance still degrades on a nested relaunch failure" \
+  || bad "17c: nested relaunch failure flips ok false" "$j"
+grep -q "could not be started" <<<"$(jq -r '.errors[]' <<<"$j")" \
+  && ok "17c: the error names the nested failure, not just 'current'" \
+  || bad "17c: error names the nested failure" "$j"
+
+# MUTATION: point digest.sh's field reader at a label that never matches --
+# the same shape as the pre-fix code, which asked WD_FILE for state/checked/
+# restarts/heartbeat and nothing else. Confirms 17a/17c are actually pinned
+# to reading these fields, not to some other path to `ok=false`.
+MUT_DIGEST="$D/digest-no-outcomes.sh"
+python3 - "$DIGEST" "$MUT_DIGEST" <<'PY'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker_a = 'if [[ "$wd_recovery" == failed* ]]; then'
+marker_b = 'if [[ "$wd_advance" == *"could not be started"* ]]; then'
+assert marker_a in text and marker_b in text, "outcome-check branches not found -- digest.sh shape changed"
+text = text.replace(marker_a, 'if false; then', 1)
+text = text.replace(marker_b, 'if false; then', 1)
+open(dst, "w").write(text)
+PY
+cat > "$OUT/watchdog.status" <<'S'
+checked:  2026-08-13T00:00:00Z
+state:    working
+restarts: 0 in the last 3600s
+recovery: failed (attempt 37 in a row) — rc=1: FAILED -- could not determine poller windows — last confirmed recovery: 2026-08-12T20:00:00Z
+S
+mut_out=$(PATH="$D/bin:$PATH" SUPERVISOR_STATE="$OUT" LANES_SESSION=nosuch bash "$MUT_DIGEST" --json 2>/dev/null)
+if grep -q "poller recovery: failed" <<<"$(jq -r '.errors[]?' <<<"$mut_out")"; then
+  bad "mutation confirmed: disabling the outcome checks hides the recovery failure" "$mut_out"
+else
+  ok "mutation confirmed: disabling the outcome checks lets 37 consecutive recovery failures pass without naming the failure (17a would be red)"
+fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
