@@ -125,7 +125,26 @@ chmod +x "$D/gitstub/git"
 SUPERVISOR_PATH="$D/gitstub:$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy \
 SUPERVISOR_STATE="$D/w" SLEEPCHECK_DIR="$D/none" \
   bash "$WATCHDOG" >/dev/null 2>&1
-check "a detached worktree reports a real ref, not HEAD" "^code: *main" "$D/w/watchdog.status"
+check "a detached worktree reports a real ref, not HEAD" "^code: *unknown@main" "$D/w/watchdog.status"
+
+# agent-supervisor#1: the `code:` line must name the REPO too, not just the
+# branch/sha -- a live worktree pinned at the wrong repo's commit reported a
+# perfectly plausible branch@sha with nothing to say which repository it
+# belonged to. Run with no git stub, against this checkout's own real
+# `origin` remote (jonhill90/agent-supervisor), so this exercises the actual
+# derivation rather than a canned stub answer.
+D=$(mktemp -d); run idle "$D/w"
+check "code: line names the repo derived from origin" "^code: *jonhill90/agent-supervisor@" "$D/w/st"
+
+# SUPERVISOR_REPO_NAME overrides the derived name -- same override shape as
+# SUPERVISOR_STATE/SUPERVISOR_REPOS, for a layout with no `origin` remote.
+D=$(mktemp -d); mkdir -p "$D/w"
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=idle STUB_SENT="$D/w/sent" \
+STUB_COUNTER="$D/w/counter" SUPERVISOR_STATE="$D/w" SUPERVISOR_STATUS="$D/w/st" \
+SUPERVISOR_LOG="$D/w/lg" SUPERVISOR_STAMP="$D/w/stamp" SUPERVISOR_HISTORY="$D/w/hist" \
+NOTIFY_ENV="$D/w/none.env" SLEEPCHECK_DIR="$D/w/transcripts" SUPERVISOR_REPO_NAME="a-second-machine/clone" \
+  bash "$WATCHDOG" >/dev/null 2>&1
+check "SUPERVISOR_REPO_NAME overrides the derived repo name" "^code: *a-second-machine/clone@" "$D/w/st"
 
 # --- escalation must survive an unreachable channel (#91) ------------------
 # The one path that reaches a human, driven end to end through watchdog.sh
