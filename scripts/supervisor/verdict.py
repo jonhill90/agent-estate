@@ -230,8 +230,45 @@ def _content_unchanged_since(*, runner, patch_id_fn, repo, number, old_sha, new_
     return True, basis
 
 
+def _parse_verdict_comment(body):
+    """A comment counts as a verdict ONLY when its body, stripped of leading
+    whitespace, starts with the literal prefix `**Verdict:` -- agent-
+    supervisor#53's guard 4 is a comment that merely mentions the word
+    "verdict" mid-body, which must NOT be counted. Anchoring on the prefix
+    (not a substring search) is what keeps that comment out.
+
+    Returns "approved", "rejected", or None -- None both when the prefix is
+    absent and when the prefix is present but the decision text after it is
+    not recognised; a comment this module cannot classify must not be
+    guessed at, the same fail-closed stance every other source in this
+    module takes."""
+    text = (body or "").strip()
+    prefix = "**Verdict:"
+    if not text.startswith(prefix):
+        return None
+    remainder = text[len(prefix):]
+    end = remainder.find("**")
+    decision_text = (remainder[:end] if end != -1 else remainder).strip().upper()
+    if "REQUEST CHANGES" in decision_text:
+        return "rejected"
+    if "APPROVE" in decision_text:
+        return "approved"
+    return None
+
+
 class GithubReviewVerdictSource(VerdictSource):
-    """Reads GitHub's own review state, never comment prose."""
+    """Reads GitHub's own review state, and -- agent-supervisor#53 -- issue
+    comments whose body starts with `**Verdict:`. Never comment PROSE: a
+    comment only counts through `_parse_verdict_comment`'s anchored prefix
+    check, the same fail-closed discipline #203 established for reviews.
+
+    The codex lane posts its verdicts as `gh pr comment`, not `gh pr
+    review` -- a review object alone missed exactly the reviews that
+    matter most (agent-supervisor#53). A review object still wins outright
+    when it is decisive at the current head: comments are consulted only
+    when the review side has nothing decisive to say (`none`, or `unknown`
+    from a stale/superseded review), so PRs with a real review object are
+    unaffected by this addition."""
 
     def __init__(self, runner=None, patch_id=None):
         self.runner = runner or _subprocess_runner
@@ -239,13 +276,58 @@ class GithubReviewVerdictSource(VerdictSource):
 
     def verdict(self, *, repo, number, head_sha=None):
         try:
-            raw = self.runner(["gh", "pr", "view", str(number), "--repo", repo, "--json", "reviews"])
+            raw = self.runner(
+                ["gh", "pr", "view", str(number), "--repo", repo, "--json", "reviews,comments,author"]
+            )
             payload = json.loads(raw)
             reviews = payload.get("reviews", [])
+            comments = payload.get("comments", [])
+            pr_author = (payload.get("author") or {}).get("login")
             if not isinstance(reviews, list):
                 raise ValueError("reviews is not a list")
+            if not isinstance(comments, list):
+                raise ValueError("comments is not a list")
         except Exception as error:
             return {"verdict": "unknown", "detail": f"github review read failed: {error}"}
+        review_result = self._review_verdict(reviews, repo=repo, number=number, head_sha=head_sha)
+        if review_result["verdict"] in ("approved", "rejected"):
+            return review_result
+        comment_result = self._comment_verdict(comments, pr_author=pr_author)
+        if comment_result is not None:
+            return comment_result
+        return review_result
+
+    def _comment_verdict(self, comments, *, pr_author):
+        """The LAST comment (chronological, as `gh` returns them) whose body
+        anchors on `**Verdict:` -- a later re-review supersedes an earlier
+        one, the same "current state" reading the review side already gives
+        a fresh review over a stale one. Returns None when no comment
+        qualifies, so the caller falls back to `review_result` unchanged."""
+        decisive = None
+        for comment in comments:
+            if not isinstance(comment, dict):
+                continue
+            parsed = _parse_verdict_comment(comment.get("body"))
+            if parsed is None:
+                continue
+            author = (comment.get("author") or {}).get("login")
+            decisive = (parsed, author, comment.get("createdAt") or "")
+        if decisive is None:
+            return None
+        verdict_value, author, created_at = decisive
+        # An approving/rejecting comment from the PR's OWN author is not an
+        # independent review -- the distinction the authorship work in
+        # agent-supervisor#35/#39 exists to preserve. This detector must not
+        # erase it, so the (non-)independence is stated in `detail` rather
+        # than silently collapsed into a bare verdict.
+        independent = author is not None and pr_author is not None and author != pr_author
+        who = f"@{author}" if author else "an unknown author"
+        independence = "independent" if independent else "NOT independent -- posted by the PR's own author"
+        when = f" at {created_at}" if created_at else ""
+        detail = f"PR comment verdict ({verdict_value}) by {who} ({independence}){when}"
+        return {"verdict": verdict_value, "detail": detail}
+
+    def _review_verdict(self, reviews, *, repo, number, head_sha=None):
         decisive = [r for r in reviews if isinstance(r, dict) and r.get("state") in ("CHANGES_REQUESTED", "APPROVED")]
         if head_sha is None:
             # No head to check freshness against -- answer as before #218,
