@@ -114,8 +114,9 @@
 # advance-live.sh (called from watchdog.sh's exit trap, once it has decided
 # what LIVE's own head sha is) compares that sha against the `sha:` line
 # this script writes into its own status file below, and if they differ it
-# writes INBOX_POLL_RESTART_FLAG and queues a relaunch into this pane -- see
-# advance-live.sh's `maybe_restart_poller` for the write side.
+# writes INBOX_POLL_RESTART_FLAG and starts a prompt poller-recover.sh waiter
+# that relaunches after this process exits -- see advance-live.sh's
+# `maybe_restart_poller` for the write side.
 #
 # COOPERATIVE, NOT SIGNALED. The flag is checked once per loop iteration,
 # strictly between an inbox.sh call and the next one -- never while a batch
@@ -308,7 +309,7 @@ while :; do
     rm -f "$RESTART_FLAG"
     DELIBERATE=1
     DELIBERATE_REASON="version-triggered restart requested"
-    log "restart flag seen at $RESTART_FLAG -- exiting cleanly so the queued relaunch picks up the current code"
+    log "restart flag seen at $RESTART_FLAG -- exiting cleanly so advance-live.sh's prompt relaunch can pick up the current code"
     break
   fi
 

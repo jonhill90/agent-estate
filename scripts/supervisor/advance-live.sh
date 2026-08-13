@@ -340,11 +340,11 @@ watchdog_stale_check() {
 # writes into its own status file every iteration.
 #
 # COOPERATIVE, NOT SIGNALED (see inbox-poll.sh's matching header comment for
-# the read side). This only ever writes a flag file -- it never signals the
-# process. A restart it triggers can therefore never land mid-drain:
-# inbox-poll.sh only checks the flag between iterations, after a batch's
-# offset has been both acknowledged to Telegram AND fully routed, so nothing
-# is skipped and nothing is asked for twice.
+# the read side). This writes a flag file -- it never signals the process. A
+# restart it triggers can therefore never land mid-drain: inbox-poll.sh only
+# checks the flag between iterations, after a batch's offset has been both
+# acknowledged to Telegram AND fully routed, so nothing is skipped and
+# nothing is asked for twice.
 #
 # agent-supervisor#10: this used to ALSO queue a relaunch command into the
 # poller's pane with `tmux send-keys`, reasoning that inbox-poll.sh never
@@ -354,11 +354,15 @@ watchdog_stale_check() {
 # rather than running under one, so when the flagged poller actually exits
 # there is nothing left in the pane to read those keys -- and, absent
 # `remain-on-exit`, no pane left at all. That queuing is gone. It is also no
-# longer needed: poller-recover.sh (called from watchdog.sh every tick)
-# notices the pane go dead once the flagged poller exits and relaunches it
-# with whatever code is on disk at $LIVE, which is exactly what the queued
-# command was trying to arrange by hand, just from a caller for which "no
-# pane left to type into" is not a failure mode.
+# longer needed: poller-recover.sh notices the pane go dead once the flagged
+# poller exits and relaunches it with whatever code is on disk at $LIVE. The
+# watchdog still calls poller-recover.sh every tick as the backstop, but
+# waiting for that cadence was agent-supervisor#47: every merge could leave
+# inbound down until the next 180s sweep. The prompt path below starts a
+# short background waiter from the process that wrote the flag, waits for the
+# old pid to exit, then invokes the same poller-recover.sh mechanism
+# immediately. poller-recover.sh keeps ownership of launch idempotency and
+# duplicate-poller prevention; advance-live.sh only removes the cadence gap.
 #
 # THE PANE IS FOUND BY THE POLLER WINDOW, not by `pane_current_command` or the
 # pane process argv. The live poller can read as a shell even when healthy, so
@@ -367,6 +371,7 @@ watchdog_stale_check() {
 INBOX_POLL_STATUS_PATH="${SUPERVISOR_INBOX_POLL_STATUS:-$STATE/inbox-poll.status}"
 INBOX_POLL_RESTART_FLAG="${INBOX_POLL_RESTART_FLAG:-$STATE/.inbox-poll-restart-requested}"
 INBOX_POLL_SESSION="${LANES_SESSION:-agent-dotfiles}"
+INBOX_POLL_RELAUNCH_WAIT_SECONDS="${INBOX_POLL_RELAUNCH_WAIT_SECONDS:-45}"
 
 # Echoes "session:@windowid" for the poller window in $INBOX_POLL_SESSION.
 find_poller_pane() {
@@ -379,7 +384,7 @@ find_poller_pane() {
 # watchdog.sh, because this runs on the way out of an otherwise-successful
 # advance-live.sh pass.
 maybe_restart_poller() {
-  local live_sha="$1" poller_sha pane
+  local live_sha="$1" poller_sha pane poller_pid
   if [ -f "$INBOX_POLL_RESTART_FLAG" ]; then
     log "POLLER-CHECK: restart already requested at $INBOX_POLL_RESTART_FLAG, waiting for the poller to notice"
     return 0
@@ -397,6 +402,7 @@ maybe_restart_poller() {
     log "POLLER-CHECK: poller already at $live_sha, current"
     return 0
   fi
+  poller_pid=$(grep -m1 '^pid:' "$INBOX_POLL_STATUS_PATH" 2>/dev/null | awk '{print $2}')
   pane=$(find_poller_pane)
   pane_rc=$?
   case "$pane_rc" in
@@ -421,8 +427,44 @@ maybe_restart_poller() {
     return 0
   fi
 
-  log "POLLER-RESTART-REQUESTED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written; poller-recover.sh relaunches it once it exits (agent-supervisor#10)"
+  if prompt_poller_relaunch "$pane" "$poller_sha" "$live_sha" "$poller_pid"; then
+    log "POLLER-RESTART-REQUESTED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written; prompt poller-recover.sh waiter started (watchdog remains the backstop)"
+  else
+    log "POLLER-RESTART-REQUESTED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written; prompt relaunch could not be started, watchdog poller-recover.sh remains the backstop"
+  fi
   return 0
+}
+
+prompt_poller_relaunch() { # prompt_poller_relaunch <pane> <old-sha> <live-sha> <old-pid>
+  local pane="$1" poller_sha="$2" live_sha="$3" poller_pid="$4"
+  if [ -z "$poller_pid" ]; then
+    log "POLLER-PROMPT-RELAUNCH-SKIPPED: $INBOX_POLL_STATUS_PATH has no pid: line, so advance-live.sh cannot tell when the old poller is gone; watchdog poller-recover.sh remains the backstop"
+    return 1
+  fi
+  if [ ! -x "$HERE/poller-recover.sh" ]; then
+    log "POLLER-PROMPT-RELAUNCH-SKIPPED: no executable poller-recover.sh beside advance-live.sh"
+    return 1
+  fi
+  (
+    deadline=$(( $(date +%s) + INBOX_POLL_RELAUNCH_WAIT_SECONDS ))
+    if [ -n "$poller_pid" ]; then
+      while kill -0 "$poller_pid" 2>/dev/null; do
+        [ "$(date +%s)" -lt "$deadline" ] || {
+          log "POLLER-PROMPT-RELAUNCH-TIMEOUT: old pid $poller_pid still alive after ${INBOX_POLL_RELAUNCH_WAIT_SECONDS}s; watchdog poller-recover.sh remains the backstop"
+          exit 0
+        }
+        sleep 0.2
+      done
+    fi
+    out=$(SUPERVISOR_STATE="$STATE" SUPERVISOR_LIVE="$LIVE" LANES_SESSION="$INBOX_POLL_SESSION" \
+          "$HERE/poller-recover.sh" 2>&1)
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      log "POLLER-PROMPT-RELAUNCH-FAILED rc=$rc: pane $pane, poller was $poller_sha, live now $live_sha: $out"
+    else
+      log "POLLER-PROMPT-RELAUNCH: pane $pane, poller was $poller_sha, live now $live_sha: $out"
+    fi
+  ) >/dev/null 2>&1 &
 }
 
 watchdog_stale_check
