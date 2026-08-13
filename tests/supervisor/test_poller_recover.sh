@@ -575,22 +575,37 @@ echo "poller-recover.sh: agent-supervisor#25 -- the orphan check must not fail o
 
 # The measured production defect: the LaunchAgent's PATH (watchdog.sh's own
 # SUPERVISOR_PATH default, quoted verbatim in the issue) has no /usr/sbin,
-# so bare `lsof` (which lives at /usr/sbin/lsof) was unreachable by name.
-# Reproduce the same windowless-orphan setup as test 10, but invoke
-# recover() under exactly that restricted PATH -- a test that inherits the
-# developer's PATH cannot catch this class, and this repository shipped
-# this exact defect green three times under exactly such a test.
-LAUNCHD_PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin"
-recover_launchd_path() {
-  PATH="$LAUNCHD_PATH" POLLER_WINDOW=inbox-poll POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
-    POLLER_RECOVER_LOCK="$STATE/.lock" POLLER_RECOVER_LOG="$STATE/log" \
-    SUPERVISOR_STATE="$STATE" bash "$RECOVER" "$S"
-}
+# so bare `lsof` (which lives at /usr/sbin/lsof on macOS) was unreachable by
+# name. That literal is macOS-specific -- on Linux (this suite's CI runner)
+# lsof lives at /usr/bin/lsof, already in the same literal PATH string, so
+# asserting the literal alone would not reproduce the defect there and the
+# mutation check below would pass for the wrong reason (lsof still found,
+# not the fail-closed path at all). Instead: find THIS machine's real lsof,
+# and build the LaunchAgent PATH with its directory removed, whichever
+# directory that is -- reproducing the class of bug (lsof's directory is
+# absent from the caller's PATH), not a platform-specific literal.
+LSOF_REAL_PATH="$(command -v lsof 2>/dev/null || true)"
+if [ -z "$LSOF_REAL_PATH" ]; then
+  echo "  SKIP no lsof on this machine -- cannot construct a PATH that omits it"
+else
+  LSOF_DIR="$(cd "$(dirname "$LSOF_REAL_PATH")" && pwd -P)"
+  LAUNCHD_PATH=""
+  for d in /opt/homebrew/bin /usr/local/bin /usr/bin /bin "$HOME/.local/bin"; do
+    [ "$d" = "$LSOF_DIR" ] && continue
+    LAUNCHD_PATH="${LAUNCHD_PATH:+$LAUNCHD_PATH:}$d"
+  done
+  recover_launchd_path() {
+    PATH="$LAUNCHD_PATH" POLLER_WINDOW=inbox-poll POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
+      POLLER_RECOVER_LOCK="$STATE/.lock" POLLER_RECOVER_LOG="$STATE/log" \
+      SUPERVISOR_STATE="$STATE" bash "$RECOVER" "$S"
+  }
 
-case ":$LAUNCHD_PATH:" in
-  *:/usr/sbin:*) bad "setup: LAUNCHD_PATH omits /usr/sbin" "it did not -- this test would not exercise the defect" ;;
-  *) ok "setup: LAUNCHD_PATH omits /usr/sbin, matching the measured LaunchAgent environment" ;;
-esac
+  if PATH="$LAUNCHD_PATH" command -v lsof >/dev/null 2>&1; then
+    bad "setup: LAUNCHD_PATH omits lsof's directory ($LSOF_DIR)" \
+      "lsof is still resolvable under the constructed PATH ($LAUNCHD_PATH) -- this test would not exercise the defect"
+  else
+    ok "setup: LAUNCHD_PATH omits lsof's directory ($LSOF_DIR), matching the measured LaunchAgent environment"
+  fi
 
 rm -f "$STATE/pid" "$STATE/stop" "$ORPHAN_RELEASE"
 tmux kill-window -t "$S:inbox-poll" 2>/dev/null
@@ -610,8 +625,8 @@ pid_alive "$p12" && ok "the poller process survives its window (launchd-PATH tes
   || bad "the poller process survives its window (launchd-PATH test)" "pid $p12 is not alive"
 
 out12=$(recover_launchd_path 2>&1); rc12=$?
-[ "$rc12" -ne 0 ] && ok "under the LaunchAgent's exact PATH (no /usr/sbin), recover() against a windowless orphan still refuses" \
-  || bad "under the LaunchAgent's exact PATH (no /usr/sbin), recover() against a windowless orphan still refuses" "exit $rc12: $out12"
+[ "$rc12" -ne 0 ] && ok "under the LaunchAgent's PATH (lsof's directory omitted), recover() against a windowless orphan still refuses" \
+  || bad "under the LaunchAgent's PATH (lsof's directory omitted), recover() against a windowless orphan still refuses" "exit $rc12: $out12"
 [ "$(window_count)" = "0" ] && ok "no window is created over a live orphan under the LaunchAgent PATH" \
   || bad "no window is created over a live orphan under the LaunchAgent PATH" "window_count=$(window_count)"
 [ "$(orphan_pid_count)" = "1" ] && ok "no second inbox-poll.sh process is started under the LaunchAgent PATH -- exactly one, still the orphan" \
@@ -708,6 +723,7 @@ else
 fi
 tmux kill-window -t "$S:inbox-poll" 2>/dev/null
 rm -f "$STATE/pid" "$STATE/stop" "$ORPHAN_RELEASE"
+fi   # LSOF_REAL_PATH found
 
 if [ "$fail" -eq 0 ]; then
   echo "$pass passed, $fail failed"
