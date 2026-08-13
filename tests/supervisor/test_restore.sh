@@ -185,5 +185,33 @@ nomatch=$(bash "$SUP/restore.sh" --dry-run 2>&1)
 want "MUTATION: a non-uuid id is refused too, not passed to the harness" \
   "UNRECOVERABLE.*no transcript on disk" "$nomatch"
 
+
+# --------------------------------------------------- NULL SESSION ID --------
+# agent-supervisor#65: `record()` above always writes `harness_session_id` as
+# `''` (cli.py's own default), never SQL NULL -- so it never reproduced what
+# was actually on the live estate. Every codex lane ever dispatched has a
+# genuine NULL there (codex has no session resolver at all), and #61's
+# migration briefly made that column NOT NULL, breaking every ledger read.
+# This writes a literal NULL directly, bypassing cli.py entirely, to prove
+# restore.sh refuses it exactly like an empty string -- not "" masquerading
+# as NULL, the real thing a nullable column now legitimately holds.
+rm -rf "$D/state"; : > "$D/launched.log"
+record ad237test:2 ad901-first ""
+python3 - "$D/state/ledger.sqlite3" <<'PY'
+import sqlite3, sys
+conn = sqlite3.connect(sys.argv[1])
+conn.execute("UPDATE lanes SET harness_session_id = NULL WHERE lane = 'ad237test:2'")
+conn.commit()
+conn.close()
+PY
+start_estate
+"$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null
+sleep 0.5
+nullcase=$(bash "$SUP/restore.sh" 2>&1); nullrc=$?
+want "NULL: a genuine SQL NULL session id is UNRECOVERABLE, not a crash" \
+  "ad237test:2 +UNRECOVERABLE.*no harness session id" "$nullcase"
+if [ "$nullrc" = 2 ]; then ok "NULL: restore exits 2, same as the empty-string case"; else bad "NULL: exit was $nullrc, not 2" "$nullcase"; fi
+wantnot "NULL: nothing was started for it" "." "$(cat "$D/launched.log")"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" = 0 ]
