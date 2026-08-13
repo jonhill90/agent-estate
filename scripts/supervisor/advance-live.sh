@@ -115,6 +115,12 @@
 #                                    get before this is treated as the
 #                                    watchdog LaunchAgent being gone rather
 #                                    than mid-cadence; default 3
+#   WATCHDOG_LAUNCHD_LABEL  the watchdog's own LaunchAgent label, used to
+#                           attribute a bootout; default
+#                           com.jonhill.supervisor-watchdog
+#   WATCHDOG_LAUNCHCTL_CMD / WATCHDOG_LOG_CMD  override the `launchctl` /
+#                           `log` binaries the bootout classifier shells out
+#                           to; for testing (stub binaries) only
 #   SUPERVISOR_INBOX_POLL_STATUS  inbox-poll.sh's own status file (read, not
 #                                 written); default $SUPERVISOR_STATE/inbox-poll.status
 #   INBOX_POLL_RESTART_FLAG       written to request a poller restart; must
@@ -207,13 +213,122 @@ watchdog_age() {
 # Exits non-zero and never returns: a stale watchdog is reported LOUDLY, on
 # this script's own exit code, rather than folded into `skip()`'s quiet
 # exit-0 shape used for "outside the safe window, try again next tick" --
-# those are both correct-and-boring; this is not.
+# those are both correct-and-boring; this is not -- UNLESS the classifier
+# below attributes the staleness to a deliberate bootout, in which case it is
+# reported and this returns 0.
+
+WATCHDOG_LAUNCHD_LABEL="${WATCHDOG_LAUNCHD_LABEL:-com.jonhill.supervisor-watchdog}"
+LAUNCHCTL_CMD="${WATCHDOG_LAUNCHCTL_CMD:-launchctl}"
+LOG_CMD="${WATCHDOG_LOG_CMD:-log}"
+
+# --- agent-supervisor#37 (review of #24): stopped is not dead ---------------
+# #24's own review (PR #37) rejected the fix above as-is: `:216` said the
+# LaunchAgent "may be unloaded or dead", collapsing two very different causes
+# into one alarm. The Director deliberately stops this same LaunchAgent
+# during incidents, so an alarm that cannot tell "I stopped it on purpose"
+# from "it died" is an alarm a human learns to ignore -- which is the exact
+# failure #24 itself was filed over (a real signal, ignored). This
+# classifies staleness before it is reported, using the same evidence the
+# reviewer confirmed was available for the #24 incident itself: launchd's own
+# unified log, and whether the LaunchAgent is currently loaded.
+#
+# TWO INDEPENDENT SIGNALS, EITHER SUFFICIENT, because either one going
+# unreadable must not silently downgrade a real death:
+#   - the unified log carries launchd's own bootout record for this label --
+#     the most direct evidence a human or `launchctl bootout` acted on it.
+#   - `launchctl print` for the label currently failing is corroborating
+#     evidence PROVIDED watchdog_age() already proved this label was ticking
+#     before (a status file with a readable `checked:` line does not exist
+#     unless something loaded and ran); a label that is both stale AND still
+#     loaded is not explained by a bootout at all -- that shape is a hung or
+#     crash-looping process, i.e. dead, not stopped.
+#
+# FAIL CLOSED ON "CANNOT TELL": if neither signal is readable (log command
+# missing/erroring, launchctl unreadable) this echoes "unknown", which
+# watchdog_stale_check treats identically to "dead" -- loud. An unreadable
+# log downgrading a real death to a shrug is worse than a false alarm on a
+# deliberate stop; #24 was filed over a signal nobody saw, not over one
+# extra alert.
+#
+# Echoes exactly one of stopped|dead|unknown and always returns 0 -- this is
+# a classifier, not a gate; watchdog_stale_check decides what each means.
+# Never caches a result: same discipline as watchdog_age/dirty_status above,
+# and for the same reason -- every caller exists to catch state changing
+# out from under an earlier read.
+watchdog_bootout_classify() {
+  local age="$1"
+  local log_out log_rc launchctl_out launchctl_rc
+  local log_readable=0 log_found=0
+  local launchctl_readable=0 launchctl_loaded=1
+  local lookback=$((age + 300))
+
+  # `command` is load-bearing, not decoration: this script already defines a
+  # `log()` shell function (the file logger near the top), and LOG_CMD's own
+  # default value is the literal string "log" -- an unqualified call would
+  # resolve to that function, not /usr/bin/log, and would silently "succeed"
+  # with empty output every time, which reads as log-readable-but-no-bootout
+  # on every call. `command` forces PATH lookup, bypassing shell functions.
+  log_out=$(command "$LOG_CMD" show --style syslog --last "${lookback}s" \
+    --predicate "eventMessage contains \"$WATCHDOG_LAUNCHD_LABEL\" and (eventMessage contains \"Bootout\" or eventMessage contains \"bootout\")" \
+    2>&1)
+  log_rc=$?
+  if [ "$log_rc" -eq 0 ]; then
+    log_readable=1
+    [ -n "$log_out" ] && log_found=1
+  fi
+
+  launchctl_out=$(command "$LAUNCHCTL_CMD" print "gui/$(id -u)/$WATCHDOG_LAUNCHD_LABEL" 2>&1)
+  launchctl_rc=$?
+  if [ "$launchctl_rc" -eq 0 ]; then
+    launchctl_readable=1
+    launchctl_loaded=1
+  elif grep -qi "could not find\|no such process\|not found" <<<"$launchctl_out"; then
+    # launchctl's own "no such service" shape -- exit codes for this have
+    # moved across macOS releases, so the message is the stable signal, not
+    # the code.
+    launchctl_readable=1
+    launchctl_loaded=0
+  fi
+
+  if [ "$log_found" -eq 1 ]; then
+    echo stopped
+    return 0
+  fi
+  if [ "$launchctl_readable" -eq 1 ] && [ "$launchctl_loaded" -eq 0 ]; then
+    echo stopped
+    return 0
+  fi
+  if [ "$log_readable" -eq 1 ] || [ "$launchctl_readable" -eq 1 ]; then
+    echo dead
+    return 0
+  fi
+  echo unknown
+  return 0
+}
+
 watchdog_stale_check() {
-  local age line
+  local age line classification
   age=$(watchdog_age) || return 0
   [ "$age" -gt "$STALE_AFTER" ] || return 0
   line=$(grep -m1 '^checked:' "$WATCHDOG_STATUS" 2>/dev/null | sed 's/^checked:  *//')
-  fail "WATCHDOG STALE -- $WATCHDOG_STATUS last checked ${line:-unknown} (${age}s ago), older than ${STALE_AFTER}s (${STALE_MULTIPLE}x the ${TICK_INTERVAL}s tick interval) -- the watchdog LaunchAgent may be unloaded or dead; nothing is restarting the supervisor loop if it dies"
+  classification=$(watchdog_bootout_classify "$age")
+  case "$classification" in
+    stopped)
+      # Reported on stdout too, not just $LOG -- this is a report, not an
+      # alarm, but a report nobody can see is the exact failure #24 was
+      # filed over. `log` alone (file-only) would repeat that mistake.
+      line="WATCHDOG STOPPED -- $WATCHDOG_STATUS last checked ${line:-unknown} (${age}s ago); a launchd bootout for $WATCHDOG_LAUNCHD_LABEL is attributable -- this is the Director deliberately stopping the watchdog, not a death; not reported as an alarm (agent-supervisor#37)"
+      log "$line"
+      echo "advance-live: $line"
+      return 0
+      ;;
+    dead)
+      fail "WATCHDOG STALE -- $WATCHDOG_STATUS last checked ${line:-unknown} (${age}s ago), older than ${STALE_AFTER}s (${STALE_MULTIPLE}x the ${TICK_INTERVAL}s tick interval) -- DEAD: no attributable bootout for $WATCHDOG_LAUNCHD_LABEL in the launchd unified log or launchctl print; nothing is restarting the supervisor loop if it dies"
+      ;;
+    *)
+      fail "WATCHDOG STALE -- $WATCHDOG_STATUS last checked ${line:-unknown} (${age}s ago), older than ${STALE_AFTER}s (${STALE_MULTIPLE}x the ${TICK_INTERVAL}s tick interval) -- UNKNOWN: could not read the launchd unified log or launchctl print to tell a deliberate stop from a death; treated as the loud case rather than silently downgrading a possible death"
+      ;;
+  esac
 }
 
 # --- agent-dotfiles#187: restart a stale inbox-poll.sh ----------------------
