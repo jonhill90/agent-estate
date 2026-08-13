@@ -55,7 +55,7 @@ HISTORY="${SUPERVISOR_HISTORY:-$STATE/.restart-history}"
 # the copy now running IS that pinned copy, and so whether it may advance
 # itself -- see the advance section at the bottom of this file.
 LIVE="${SUPERVISOR_LIVE:-$STATE/live}"
-read -r -a REPOS <<<"${SUPERVISOR_REPOS:-agent-dotfiles skills skills-private agent-evals}"
+read -r -a REPOS <<<"${SUPERVISOR_REPOS:-agent-dotfiles agent-supervisor skills skills-private agent-evals}"
 
 # --- #215: which harness is in the pane, and is it busy? --------------------
 #

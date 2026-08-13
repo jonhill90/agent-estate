@@ -53,7 +53,7 @@ from pathlib import Path
 BEGIN = "<!-- resume-point:begin -->"
 END = "<!-- resume-point:end -->"
 
-REPOS = ("agent-dotfiles", "skills", "skills-private", "agent-evals")
+REPOS = ("agent-dotfiles", "agent-supervisor", "skills", "skills-private", "agent-evals")
 REPO_ROOT = Path.home() / "source" / "repos" / "Personal"
 
 
