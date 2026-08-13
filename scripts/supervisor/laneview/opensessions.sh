@@ -5,7 +5,7 @@
 #
 # This is the "together" implementation (agent-dotfiles#178) -- the
 # tmux-plugin path. It is a productionized version of the bridge script
-# #173 wrote and measured live on REMOTE_TEST_HOST
+# #173 wrote and measured live on an operator-owned remote VPS
 # (`~/exp173/lanebridge.sh`); the mapping and mechanism are unchanged, only
 # cleaned up to fit the laneview.sh contract (README.md in this
 # directory): read-only, exits nonzero rather than showing stale state if
