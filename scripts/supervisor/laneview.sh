@@ -29,8 +29,20 @@ IMPL="${1:?usage: laneview.sh <impl> [session]}"
 SESSION="${2:-agent-dotfiles}"
 IMPL_SCRIPT="$HERE/laneview/$IMPL.sh"
 
+# The list is of names that can actually be passed as <impl>, so it is built
+# from `laneview/*.sh` rather than from every entry in the directory: `ls |
+# sed 's/\.sh$//'` offered `README.md` as an implementation, in the one
+# message a human reads when they have got the name wrong (#4 finding D).
+impl_names() {
+  local f
+  for f in "$HERE"/laneview/*.sh; do
+    [ -f "$f" ] || continue
+    printf '%s ' "$(basename "$f" .sh)"
+  done
+}
+
 if [ ! -x "$IMPL_SCRIPT" ]; then
-  echo "laneview.sh: no renderer at $IMPL_SCRIPT (implementations: $(ls "$HERE/laneview" 2>/dev/null | sed 's/\.sh$//' | tr '\n' ' '))" >&2
+  echo "laneview.sh: no renderer at $IMPL_SCRIPT (implementations: $(impl_names))" >&2
   exit 1
 fi
 

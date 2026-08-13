@@ -78,6 +78,41 @@ demonstrated:
 | `opensessions.sh` | a tmux sidebar pane, via OpenSessions' `/api/agent-event` + `/set-status` HTTP API | a Rust daemon + sidebar client per tmux client (TPM-installed plugin) | proves "together": the tmux-plugin path #173 measured live, unchanged in mechanism from `lanebridge.sh` |
 | `tui.sh` | a curses screen: a `digest.sh --json` header line, one line per lane below it, selectable, `enter` jumps to it | none when not running — no daemon, plain Python stdlib (`curses`); one extra subprocess (`digest.sh --json`) per refresh tick | jonhill90/agent-supervisor#7's "a TUI he owns" — no third-party program, unlike `opensessions.sh`; the header is agent-dotfiles#67 |
 
+### Where the two deliberately disagree: the supervisor row
+
+`text.sh` prints it (`. arch  supervisor`); `opensessions.sh` drops it
+(`if r["state"] == "supervisor": continue`). #4 asked for a choice --
+document the difference or make them agree -- and the choice is **keep them
+different**, because the difference is the renderers' vocabularies, not an
+oversight:
+
+- `text.sh` prints `lanes.sh`'s state name verbatim beside every glyph, so
+  `supervisor` is a thing it can say. A human reading that line is told
+  exactly what the window is, and the "never a dispatch target" fact is
+  carried by the word itself. Dropping the row would hide a window the
+  reader can see in tmux.
+- `opensessions.sh` renders into OpenSessions' fixed `AgentStatus`
+  vocabulary -- idle/running/stale/waiting/error -- which has no value
+  meaning "not a lane". Every value it *could* pick is a claim about an
+  agent, and the honest-looking one, `idle`, means "waiting for work" in a
+  sidebar whose purpose is showing which agents are free. The supervisor
+  pane is the one window a dispatch must never reach, so drawing it as
+  available is rule 4's defect with a different cause. Omitting the row is
+  rule 2 applied to a single tile: absence rather than a wrong claim.
+
+The rule that generalizes: a renderer whose vocabulary can *name* a state
+shows it; a renderer that would have to translate it into a claim it does
+not mean omits it and says why here.
+
+Making them agree would have retired one oddity -- `opensessions.sh`'s
+`supervisor) echo idle` arm is unreachable while the filter stands. That is
+a real argument and it loses to the above: the filter and the map arm guard
+different things (the filter is upstream of the map; if it is ever removed
+the arm is the only thing keeping `supervisor` off the `*)` stale path), so
+the arm stays and is now commented as deliberate. `tests/supervisor/
+test_laneview.sh` asserts the drop, so the divergence is checked and not
+merely described.
+
 Removing any is a deletion of its one file *under `scripts/`*. No
 implementation imports from another, and `laneview.sh` does not
 special-case any name — it re-enumerates this directory, so deleting
@@ -116,13 +151,29 @@ One caveat, measured in review of #231 rather than assumed: the earlier
 form of this claim was verified with a grep scoped to `scripts/supervisor`
 and then stated as if it covered the tree. It does not.
 `tests/supervisor/test_laneview.sh` names `text.sh` directly — deleting
-`text.sh` fails four of its cases. That is deliberate and is not coupling
-between implementations: the "apart" guarantee is a property of `text.sh`
-specifically (it renders with no tmux binary and no daemon reachable), so
-the test proving it has to name it. Deleting a renderer means deleting its
-file and the cases asserting its own behaviour. No other renderer, no
-supervisor script, and no check changes: `validate_laneview_state_maps`
-returns nothing when this directory is absent.
+`text.sh` fails **five** of its nineteen cases, measured on this change:
+
+```
+$ rm scripts/supervisor/laneview/text.sh && bash tests/supervisor/test_laneview.sh
+  ... 14 passed, 5 failed
+```
+
+That is deliberate and is not coupling between implementations: the "apart"
+guarantee is a property of `text.sh` specifically (it renders with no tmux
+binary and no daemon reachable), so the test proving it has to name it.
+Deleting a renderer means deleting its file and the cases asserting its own
+behaviour. No other renderer, no supervisor script, and no check changes:
+`validate_laneview_state_maps` returns nothing when this directory is
+absent.
+
+**This figure said "four" from the pre-split port (`4239313`) until #4
+corrected it, and re-measure it when you touch this suite.** Four was right
+when it was written; PR #12 (the two shipped viewers) and PR #69 (the
+`digest.sh --json` header) each added cases exercising the full
+`laneview.sh text` path without anyone re-running the deletion to check
+whether the count still held. It read as measured and had quietly stopped
+being one — the same drift `agent-dotfiles#246` found in this same
+paragraph before the split.
 
 ## What #173 already measured about the tmux-sidebar path specifically
 

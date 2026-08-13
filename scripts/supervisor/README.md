@@ -540,6 +540,33 @@ running". A heading that is entirely absent is a third, distinct fact --
 section at all" are three different values; none of them collapses into
 either of the others.
 
+## Lane views (#178)
+
+`lanes.sh` answers "what is every lane doing" for a human at a terminal.
+`laneview.sh` is the same answer rendered somewhere a human is already
+looking:
+
+```bash
+bash scripts/supervisor/laneview.sh text                  # stdout, one line per lane
+bash scripts/supervisor/laneview.sh text hill90            # ...for another session
+bash scripts/supervisor/laneview.sh opensessions           # a tmux sidebar, via its daemon
+bash scripts/supervisor/laneview.sh tui                    # a curses screen, selectable
+```
+
+`<impl>` is the basename of a script under `laneview/`; run it with a name
+that does not exist and it lists the ones that do. Every renderer is handed
+`lanes.sh --json` and reads nothing else — no tmux, no ledger, no second
+classifier — so a viewer can never disagree with the supervisor about a
+lane, and adding or deleting one changes no other file under `scripts/`.
+`laneview/README.md` is the contract: read, never write; degrade to absence
+rather than staleness; cost nothing when unused; name every state.
+
+Nothing headless calls this, by rule and now by check
+(`tests/supervisor/test_laneview_isolation.sh`). It exists for the human
+half — which is why it is documented here rather than only in its own
+directory: until #4, a human-invoked tool that no document told a human to
+invoke was, from outside, indistinguishable from one nobody invokes.
+
 ## MCP server (#198)
 
 A worker has always had to be on a machine where these scripts exist at the
