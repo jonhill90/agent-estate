@@ -147,12 +147,52 @@ if grep -qE '^\s*- free-2\s+free$' <<<"$out"; then
 else
   bad "tui.sh renders with no tmux, no daemon, and no tty reachable" "$out"
 fi
+if grep -qE '^\s*digest: ' <<<"$out"; then
+  ok "tui.sh's static frame carries a digest header line"
+else
+  bad "tui.sh's static frame carries a digest header line" "$out"
+fi
 
 out=$(PATH=/usr/bin:/bin bash "$TUI_IMPL" demo-session "$SCROLLED_JSON" </dev/null 2>&1)
 if grep -qE '^\s*\^ w-scroll\s+scrolled$' <<<"$out"; then
   ok "tui.sh gives scrolled a glyph of its own, not unknown's"
 else
   bad "tui.sh gives scrolled a glyph of its own, not unknown's" "$out"
+fi
+
+# agent-dotfiles#67: the header comes from digest.sh --json, the same
+# adapter boundary as lanes.sh -- structured output in, render out, never
+# digest.sh's human-readable text form. A digest.sh that cannot even be run
+# degrades the header to "unavailable", not a crash, and never takes over
+# the lane table the way an unreachable lanes.sh does (rule 2 distinguishes
+# the two: only the table's own backend gets the full-screen banner).
+out=$(PATH=/usr/bin:/bin LANEVIEW_TUI_DIGEST_SH=/no/such/digest.sh \
+  bash "$TUI_IMPL" demo-session \
+  '[{"window":1,"name":"free-2","command":"claude.exe","state":"free"}]' </dev/null 2>&1)
+if grep -qE '^\s*digest: unavailable --' <<<"$out" && grep -qE '^\s*- free-2\s+free$' <<<"$out"; then
+  ok "an unreachable digest.sh degrades only the header, not the lane table"
+else
+  bad "an unreachable digest.sh degrades only the header, not the lane table" "$out"
+fi
+
+# A digest.sh that runs and produces a real (even error-carrying) JSON body
+# is read through the JSON, not gated on its own exit code -- digest.sh
+# exits nonzero on ANY noted error (e.g. an unreadable watchdog.status),
+# which is not the same claim as "the header could not be built at all".
+D_STUB="$D/bin/digest-stub.sh"
+cat > "$D_STUB" <<'STUB'
+#!/bin/bash
+printf '%s\n' '{"prs":[{"verdict":"approved"},{"verdict":"none"}],"watchdog":{"state":"ok"},"poller":{"alive":true,"state":"ok"},"errors":["watchdog.status unreadable"],"ok":false}'
+exit 1
+STUB
+chmod +x "$D_STUB"
+out=$(PATH=/usr/bin:/bin LANEVIEW_TUI_DIGEST_SH="$D_STUB" \
+  bash "$TUI_IMPL" demo-session \
+  '[{"window":1,"name":"free-2","command":"claude.exe","state":"free"}]' </dev/null 2>&1)
+if grep -qE '^\s*digest: prs=2 \(approved=1 none=1\)\s+watchdog=ok\s+poller=alive:ok\s+\[1 digest error\(s\)\]$' <<<"$out"; then
+  ok "a digest.sh that exits nonzero but emits valid JSON still renders its data, not unavailable"
+else
+  bad "a digest.sh that exits nonzero but emits valid JSON still renders its data, not unavailable" "$out"
 fi
 
 # Through the full laneview.sh path, same fixture test_lanes.sh and the
