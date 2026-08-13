@@ -32,6 +32,9 @@ fi
 if ! command -v python3 >/dev/null 2>&1 || ! python3 -c 'import curses' 2>/dev/null; then
   echo "  SKIP no python3 curses module available"; exit 0
 fi
+if [ ! -f "$LANEVIEW" ]; then
+  echo "  SKIP no laneview.sh -- viewer adapter not installed"; exit 0
+fi
 
 RT="$(mktemp -d "${TMPDIR:-/tmp}/lv-tui-it.XXXXXX")"
 unset TMUX

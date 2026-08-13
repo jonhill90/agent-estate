@@ -10,6 +10,12 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$HERE/../../scripts/supervisor/tmux-isolation.sh"
 
+if [ ! -d "$HERE/../../scripts/supervisor/laneview-plugin-tmux" ]; then
+  echo "laneview-plugin-tmux"
+  echo "  SKIP no laneview-plugin-tmux -- viewer adapter not installed"
+  exit 0
+fi
+
 # Resolved the same way laneview.tmux resolves its own CURRENT_DIR (cd &&
 # pwd), so a literal grep against list-keys' output -- which stores
 # whatever bind-key was called with, i.e. laneview.tmux's own resolved

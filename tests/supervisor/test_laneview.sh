@@ -13,6 +13,10 @@ bad()  { echo "  FAIL $1 — $2"; fail=$((fail+1)); }
 
 echo "laneview.sh"
 
+if [ ! -f "$LANEVIEW" ]; then
+  echo "  SKIP no laneview.sh -- viewer adapter not installed"; exit 0
+fi
+
 # An unknown implementation name must fail loudly and name what IS available,
 # never silently fall back to one.
 out=$(bash "$LANEVIEW" no-such-impl fixture 2>&1); rc=$?

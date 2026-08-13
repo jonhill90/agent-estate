@@ -52,11 +52,19 @@ It must:
 That is the whole contract. It buys the two guarantees #178 asked to be
 demonstrated:
 
-- **Apart:** delete every file under `laneview/` and `laneview.sh` itself.
-  Nothing else in `scripts/supervisor/` references this directory (verify
-  with `grep -rl laneview scripts/supervisor --include='*.sh' | grep -v
+- **Apart:** delete every file under `laneview/` and `laneview.sh` itself
+  (and `laneview-plugin-tmux/`, if that's gone too). Nothing else in
+  `scripts/supervisor/` references this directory (verify with `grep -rl
+  laneview scripts/supervisor --include='*.sh' | grep -v
   ^scripts/supervisor/laneview`) — dispatch, merge, and notify are
-  unaffected.
+  unaffected. The verification surface holds too: `tests/supervisor/
+  test_laneview.sh`, `test_laneview_tmux_plugin.sh`, and
+  `test_laneview_tui_interactive.sh` each check for their subject before
+  doing anything else and print a `SKIP` line and exit 0 when it is
+  missing, rather than failing on a bare "No such file or directory" —
+  so `tests/supervisor/test_shell_suites.py`'s repo-wide discovery stays
+  green through the deletion instead of needing to be told which test
+  files to remove.
 - **Together:** stop every supervisor process (`dispatch.sh`,
   `watchdog.sh`, the cron/launchd driver) and run `laneview.sh <impl>`
   directly. It still renders, because it reads `lanes.sh --json`, which
