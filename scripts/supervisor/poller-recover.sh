@@ -161,11 +161,12 @@ acquire_lock() {
   if [ -n "$holder_pid" ] && kill -0 "$holder_pid" 2>/dev/null; then
     return 1   # a real, live holder -- genuinely concurrent, not stale
   fi
-  if [ -n "$started" ]; then
-    age=$((now - started))
-    [ "$age" -lt "$LOCK_MAX_AGE" ] && return 1   # too young to rule out a legitimate holder still writing pid/started
+  if [ -z "$started" ]; then
+    return 1   # lock dir exists but its writer hasn't recorded pid/started yet -- an in-progress acquisition, not a dead one
   fi
-  log "RECLAIMING stale lock $LOCK (holder pid ${holder_pid:-unknown}, age ${age:-unknown}s) -- its EXIT trap never ran"
+  age=$((now - started))
+  [ "$age" -lt "$LOCK_MAX_AGE" ] && return 1   # too young to rule out a legitimate holder still writing pid/started
+  log "RECLAIMING stale lock $LOCK (holder pid ${holder_pid:-unknown}, age ${age}s) -- its EXIT trap never ran"
   rm -rf "$LOCK" 2>/dev/null
   mkdir "$LOCK" 2>/dev/null || return 1
   printf '%s' "$$" >"$LOCK/pid" 2>/dev/null

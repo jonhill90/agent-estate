@@ -204,6 +204,105 @@ while IFS= read -r wid; do
 done < <(tmux list-windows -t "$S" -F '#{window_name}	#{window_id}' 2>/dev/null | awk -F'\t' '$1=="inbox-poll"{print $2}')
 rm -f "$STATE/pid" "$STATE/stop"
 
+# --- 6d. RED: reclaim must not steal the lock from a live, mid-acquisition
+# holder (agent-supervisor#14 review, the retracted-APPROVE comment) --
+# acquire_lock(), on a failed mkdir, reads $LOCK/pid and $LOCK/started
+# immediately. In the real window between the winner's mkdir succeeding and
+# its own pid/started writes landing two lines later (each a fork+exec, not
+# a builtin), both files are still empty, so neither guard fires and a
+# second caller falls straight through to RECLAIMING with no age check at
+# all. Reproduced with a *copy* of poller-recover.sh carrying a deliberate
+# delay inserted into that exact window -- widening the always-present race
+# to make it deterministic to observe, the reviewer's own method -- as the
+# slow, legitimately-alive acquirer ("A"). Every assertion below is about
+# what the REAL, UNMODIFIED script ("B", via recover()) does when it lands
+# in that window, not about the copy.
+WINDOW_NAME=inbox-poll
+poller_proc_count() { pgrep -f "$STAND_IN" 2>/dev/null | wc -l | tr -d ' '; }
+reset_race_state() {
+  : >"$STATE/stop" 2>/dev/null
+  for _ in $(seq 1 30); do [ "$(poller_proc_count)" = "0" ] && break; sleep 0.1; done
+  pkill -KILL -f "$STAND_IN" 2>/dev/null
+  while IFS= read -r wid; do
+    [ -n "$wid" ] && tmux kill-window -t "$S:$wid" 2>/dev/null
+  done < <(tmux list-windows -t "$S" -F '#{window_name}	#{window_id}' 2>/dev/null | awk -F'\t' -v w="$WINDOW_NAME" '$1==w{print $2}')
+  rm -f "$STATE/pid" "$STATE/stop"
+  rm -rf "$STATE/.lock"
+}
+reset_race_state
+
+SLOW="$STATE/poller-recover.slow.sh"
+patch_rc=0
+python3 - "$RECOVER" "$SLOW" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''  if mkdir "$LOCK" 2>/dev/null; then
+    printf '%s' "$$" >"$LOCK/pid" 2>/dev/null
+    date +%s >"$LOCK/started" 2>/dev/null
+    return 0
+  fi'''
+assert marker in text, "acquire_lock mkdir-success block not found -- poller-recover.sh shape changed"
+assert text.count(marker) == 1, "acquire_lock mkdir-success block not unique -- poller-recover.sh shape changed"
+patched = '''  if mkdir "$LOCK" 2>/dev/null; then
+    sleep "${POLLER_RECOVER_TEST_ACQUIRE_DELAY:-2}"
+    printf '%s' "$$" >"$LOCK/pid" 2>/dev/null
+    date +%s >"$LOCK/started" 2>/dev/null
+    return 0
+  fi'''
+open(dst, "w").write(text.replace(marker, patched, 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a slow-acquire copy of poller-recover.sh" \
+    "could not patch $RECOVER (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a slow-acquire copy of poller-recover.sh"
+  chmod +x "$SLOW"
+
+  # A: the copy, slow -- wins the mkdir, then sleeps mid-acquisition before it
+  # has written pid/started. Real tmux, real LAUNCH_CMD, same STATE as B.
+  POLLER_RECOVER_TEST_ACQUIRE_DELAY=2 POLLER_WINDOW="$WINDOW_NAME" POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
+    POLLER_RECOVER_LOCK="$STATE/.lock" POLLER_RECOVER_LOG="$STATE/log-A" \
+    SUPERVISOR_STATE="$STATE" bash "$SLOW" "$S" >"$STATE/out-A" 2>&1 &
+  A_JOB=$!
+
+  caught_window=0
+  for _ in $(seq 1 150); do
+    if [ -d "$STATE/.lock" ] && [ ! -s "$STATE/.lock/pid" ] && [ ! -s "$STATE/.lock/started" ]; then
+      caught_window=1; break
+    fi
+    sleep 0.02
+  done
+
+  if [ "$caught_window" -ne 1 ]; then
+    bad "setup: caught the in-progress-acquisition window (lock dir present, pid/started still empty)" \
+      "never observed that state -- widen POLLER_RECOVER_TEST_ACQUIRE_DELAY or the polling loop"
+    wait "$A_JOB" 2>/dev/null
+  else
+    # B: the REAL, unmodified script, run directly into that window.
+    out_b=$(recover 2>&1); rc_b=$?
+    wait "$A_JOB" 2>/dev/null
+
+    for _ in $(seq 1 50); do [ -f "$STATE/pid" ] && break; sleep 0.1; done
+    sleep 0.3   # let a second, wrongly-launched poller finish landing if it would
+
+    if echo "$out_b" | grep -q "RECLAIMING"; then
+      bad "the real script does not steal the lock from a live, mid-acquisition holder" \
+        "B reclaimed: $out_b"
+    else
+      ok "the real script does not steal the lock from a live, mid-acquisition holder"
+    fi
+
+    procs="$(poller_proc_count)"
+    [ "$procs" = "1" ] && ok "exactly one poller process results from the race (not two)" \
+      || bad "exactly one poller process results from the race (not two)" "poller_proc_count=$procs"
+
+    [ "$(window_count)" = "1" ] && ok "exactly one inbox-poll window results from the race" \
+      || bad "exactly one inbox-poll window results from the race" "window_count=$(window_count)"
+  fi
+fi
+reset_race_state
+
 echo
 echo "poller-recover.sh: mutation -- concurrent recovery must not create a second poller"
 
