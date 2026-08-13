@@ -693,21 +693,69 @@ fi
 # "how many pollers are alive?" The watchdog's tick already reads the poller
 # subsystem; this check must ask pgrep/ps and report duplicates with every pid
 # and start time, while leaving the healthy one-poller case silent.
-pc_run() { # pc_run <workdir> <pid-list>
-  rm -rf "$1"; mkdir -p "$1" "$1/transcripts"
-  printf 'checked: %s\nstate:   ok\ndetail:  listening\npid:     999\n' "$(stamp_ago 5)" >"$1/inbox-poll.status"
-  env SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy STUB_SENT="$1/sent" \
-    SUPERVISOR_STATE="$1" SUPERVISOR_STATUS="$1/st" SUPERVISOR_LOG="$1/lg" \
-    SUPERVISOR_STAMP="$1/stamp" SUPERVISOR_HISTORY="$1/hist" NOTIFY_ENV="$1/none.env" \
-    SLEEPCHECK_DIR="$1/transcripts" NOTIFY_SCRIPT="$UP" \
-    SUPERVISOR_INBOX_POLL_STATUS="$1/inbox-poll.status" \
-    STUB_POLLER_PIDS="$2" STUB_PS_LSTART_111="Thu Aug 13 04:05:56 2026" \
-    STUB_PS_LSTART_222="Thu Aug 13 04:08:56 2026" \
-    bash "$WATCHDOG" >/dev/null 2>"$1/err"
+pc_run() { # pc_run <workdir> <pid-list> [extra env assignments...]
+  local dir="$1" pids="$2"; shift 2
+  rm -rf "$dir"; mkdir -p "$dir" "$dir/transcripts"
+  printf 'checked: %s\nstate:   ok\ndetail:  listening\npid:     999\n' "$(stamp_ago 5)" >"$dir/inbox-poll.status"
+  env SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy STUB_SENT="$dir/sent" \
+    SUPERVISOR_STATE="$dir" SUPERVISOR_STATUS="$dir/st" SUPERVISOR_LOG="$dir/lg" \
+    SUPERVISOR_STAMP="$dir/stamp" SUPERVISOR_HISTORY="$dir/hist" NOTIFY_ENV="$dir/none.env" \
+    SLEEPCHECK_DIR="$dir/transcripts" NOTIFY_SCRIPT="$UP" \
+    SUPERVISOR_INBOX_POLL_STATUS="$dir/inbox-poll.status" \
+    STUB_POLLER_PIDS="$pids" STUB_PS_LSTART_111="Thu Aug 13 04:05:56 2026" \
+    STUB_PS_LSTART_222="Thu Aug 13 04:08:56 2026" "$@" \
+    bash "$WATCHDOG" >/dev/null 2>"$dir/err"
 }
 
 D=$(mktemp -d)
-pc_run "$D/w" "111 222"
+pc_run "$D/w" "111 222" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
+  STUB_PS_PPID_222=111 STUB_PS_PGID_222=111
+if grep -q '^poller:' "$D/w/st" 2>/dev/null || grep -q 'POLLER-DUPLICATE' "$D/w/lg" 2>/dev/null; then
+  say_bad "a poller and its own same-pgid child are silent" "$(cat "$D/w/st" 2>/dev/null | tr '\n' ' '); log=$(cat "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
+else
+  say_ok "a poller and its own same-pgid child are silent"
+fi
+
+MUT_CHILD=$(mktemp -d); mkdir -p "$MUT_CHILD/scripts/supervisor"
+cp "$WATCHDOG" "$MUT_CHILD/scripts/supervisor/watchdog.sh"
+for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh; do
+  cp "$HERE/../../scripts/supervisor/$dep" "$MUT_CHILD/scripts/supervisor/" 2>/dev/null
+done
+cp -R "$HERE/../../scripts/supervisor/harness" "$MUT_CHILD/scripts/supervisor/" 2>/dev/null
+patch_rc=0
+python3 - "$MUT_CHILD/scripts/supervisor/watchdog.sh" <<'PY' || patch_rc=$?
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = '''      if [ "$ppid" = "$parent_pid" ] && [ "$pgid" != "unknown" ] && [ "$pgid" = "$parent_pgid" ]; then
+        skip=1
+        break
+      fi'''
+assert old in text, "same-pgid child suppression block not found"
+assert text.count(old) == 1, "same-pgid child suppression block not unique"
+open(path, "w").write(text.replace(old, '      : # child suppression removed for this mutation test', 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  say_bad "setup: mutated the duplicate-poller child suppression away" "patch failed with exit $patch_rc"
+else
+  chmod +x "$MUT_CHILD/scripts/supervisor/watchdog.sh"
+  old_watchdog="$WATCHDOG"
+  WATCHDOG="$MUT_CHILD/scripts/supervisor/watchdog.sh"
+  D=$(mktemp -d)
+  pc_run "$D/w" "111 222" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
+    STUB_PS_PPID_222=111 STUB_PS_PGID_222=111
+  WATCHDOG="$old_watchdog"
+  if grep -q 'DUPLICATE' "$D/w/st" "$D/w/lg" 2>/dev/null; then
+    say_ok "mutation confirmed: removing same-pgid child suppression counts the poll-cycle child (the assertion above would be red)"
+  else
+    say_bad "mutation confirmed: removing same-pgid child suppression counts the poll-cycle child" \
+      "mutant stayed silent: $(cat "$D/w/st" "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
+  fi
+fi
+
+D=$(mktemp -d)
+pc_run "$D/w" "111 222" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
+  STUB_PS_PPID_222=20055 STUB_PS_PGID_222=222
 check "duplicate pollers are reported in watchdog.status" "^poller:.*DUPLICATE" "$D/w/st"
 check "the duplicate report names pid 111" "pid 111 started Thu Aug 13 04:05:56 2026" "$D/w/st"
 check "the duplicate report names pid 222" "pid 222 started Thu Aug 13 04:08:56 2026" "$D/w/st"

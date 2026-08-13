@@ -22,6 +22,16 @@ case "$field" in
     start="${!name:-Thu Aug 13 04:05:56 2026}"
     printf '%s\n' "$start"
     ;;
+  ppid=)
+    name="STUB_PS_PPID_${pid}"
+    ppid="${!name:-20055}"
+    printf '%s\n' "$ppid"
+    ;;
+  pgid=)
+    name="STUB_PS_PGID_${pid}"
+    pgid="${!name:-$pid}"
+    printf '%s\n' "$pgid"
+    ;;
   start=)
     name="STUB_PS_START_${pid}"
     start="${!name:-04:05}"
