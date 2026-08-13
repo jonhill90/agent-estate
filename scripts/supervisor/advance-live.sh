@@ -143,6 +143,14 @@ TICK_INTERVAL="${ADVANCE_TICK_INTERVAL:-180}"
 SAFETY_BUFFER="${ADVANCE_SAFETY_BUFFER:-30}"
 STALE_MULTIPLE="${ADVANCE_WATCHDOG_STALE_MULTIPLE:-3}"
 STALE_AFTER=$((TICK_INTERVAL * STALE_MULTIPLE))
+# agent-supervisor#51: before this fetch had a fetch, a hung one had never
+# been possible -- the comparison read a local ref. Now every watchdog tick
+# (every TICK_INTERVAL) makes a real network call, synchronously, with
+# nothing above this script bounding it. A remote that accepts the TCP
+# connection and then never answers (down DNS, a black-holing firewall, an
+# auth prompt with no TTY to answer it) would wedge the tick indefinitely --
+# worse than the silent-stale bug #11 fixed, per review on PR #51.
+FETCH_TIMEOUT_SECONDS="${ADVANCE_FETCH_TIMEOUT_SECONDS:-20}"
 
 log() { mkdir -p "$(dirname "$LOG")" 2>/dev/null; printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG"; }
 fail() { log "FAIL: $*"; echo "advance-live: $*" >&2; exit 1; }
@@ -511,8 +519,51 @@ cur=$(git -C "$LIVE" rev-parse HEAD 2>/dev/null) || fail "cannot read HEAD in $L
 # refused exactly as loudly as any other fail() below, never folded into
 # skip()'s quiet exit-0 shape. "could not tell" and "genuinely current" were
 # the same silence before; they are not the same message now.
-fetch_out=$(git -C "$LIVE" fetch origin main 2>&1)
+#
+# agent-supervisor#51: bounded with a hard timeout, for the same reason --
+# a hang here is not "current", it is a fourth thing (WEDGED) that must not
+# read as any of the other three. Not a `timeout`/`gtimeout` wrapper: the
+# watchdog pins PATH deliberately (SUPERVISOR_PATH, watchdog.sh) and this
+# repo's own test suite runs advance-live.sh against a PATH of only
+# /usr/bin:/bin to prove that pin holds -- neither ships GNU coreutils on
+# macOS, so a script that *required* an external timeout binary would fail
+# closed on every real production tick.
+#
+# Not `set -m` (bash job control) either: a process-group kill was the
+# first version of this fix, and it was dropped after this exact test
+# hung the suite intermittently under this harness -- `wait` on a job
+# started under job control from inside a captured `$(...)` did not
+# reliably see the child exit, a known class of bash/job-control/pipe
+# interaction, not specific to this script. The poll loop below is
+# strictly less elegant (a 1s-granularity `kill -0` loop, not an
+# interrupt) and only reaches the `git` pid itself, not any transport
+# helper it forks (ssh, git-remote-https) -- but it is deterministic,
+# which a fetch bound cannot compromise on without becoming exactly the
+# kind of intermittent hang it exists to prevent.
+fetch_out_file=$(mktemp "${TMPDIR:-/tmp}/advance-live-fetch.XXXXXX") || fail "could not create a scratch file for the fetch's output -- not advancing"
+git -C "$LIVE" fetch origin main >"$fetch_out_file" 2>&1 &
+fetch_pid=$!
+fetch_waited=0
+fetch_timed_out=0
+while kill -0 "$fetch_pid" 2>/dev/null; do
+  if [ "$fetch_waited" -ge "$FETCH_TIMEOUT_SECONDS" ]; then
+    fetch_timed_out=1
+    kill -TERM "$fetch_pid" 2>/dev/null
+    sleep 1
+    kill -KILL "$fetch_pid" 2>/dev/null
+    break
+  fi
+  sleep 1
+  fetch_waited=$((fetch_waited + 1))
+done
+wait "$fetch_pid" 2>/dev/null
 fetch_rc=$?
+fetch_out=$(cat "$fetch_out_file" 2>/dev/null)
+rm -f "$fetch_out_file"
+if [ "$fetch_timed_out" -eq 1 ]; then
+  fail "git fetch origin/main in $LIVE did not finish within ${FETCH_TIMEOUT_SECONDS}s and was killed -- refusing to compare against a ref nothing finished refreshing; this is UNKNOWN, not current
+$fetch_out"
+fi
 if [ "$fetch_rc" -ne 0 ]; then
   fail "could not fetch origin/main in $LIVE (git fetch exit $fetch_rc) -- refusing to compare against a ref nothing just refreshed; this is UNKNOWN, not current
 $fetch_out"

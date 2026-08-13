@@ -970,7 +970,7 @@ python3 - "$ADVANCE" "$NOFETCH" <<'PY' || patch_rc=$?
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker_start = text.index('fetch_out=$(git -C "$LIVE" fetch origin main')
+marker_start = text.index('fetch_out_file=$(mktemp')
 marker_end = text.index('target=$(git -C "$LIVE" rev-parse origin/main')
 assert marker_start < marker_end, "fetch block not found before target= -- script shape changed"
 patched = text[:marker_start] + text[marker_end:]
@@ -1053,6 +1053,137 @@ if grep -qi "could not fetch" <<<"$out5b"; then ok "stripped-env fetch failure n
 if grep -qi "^advance-live: current" <<<"$out5b"; then bad "stripped-env fetch failure is never reported as current" "$out5b"; else ok "stripped-env fetch failure is never reported as current"; fi
 
 rm -rf "$D5"
+
+echo
+echo "advance-live.sh: agent-supervisor#51 -- a hung fetch is bounded, not silent"
+
+# PR #51's review: a fetch that never returns (down DNS, a firewall
+# black-holing packets, an auth prompt with no TTY) is a fourth outcome, not
+# "current" and not the ordinary "fetch failed" case above -- before this
+# fix nothing bounded it and the tick would wedge indefinitely. A fake `git`
+# that intercepts only the fetch subcommand and sleeps, transparently
+# `exec`ing the real binary for everything else (rev-parse, checkout,
+# rev-list -- everything advance-live.sh also calls), reproduces a hang
+# without touching the network.
+D6=$(mktemp -d)
+git init -q --bare "$D6/origin.git"
+git clone -q "$D6/origin.git" "$D6/src" 2>/dev/null
+SRC6="$D6/src"
+git -C "$SRC6" config user.email test@example.com
+git -C "$SRC6" config user.name "Test"
+git -C "$SRC6" checkout -q -b main
+mkdir -p "$SRC6/scripts/supervisor"
+cat >"$SRC6/scripts/supervisor/watchdog.sh" <<'EOF'
+#!/bin/bash
+set -uo pipefail
+STATUS="${SUPERVISOR_STATUS:?}"
+mkdir -p "$(dirname "$STATUS")"
+printf 'checked:  %s\nstate:    pane_unreadable\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STATUS"
+exit 0
+EOF
+chmod +x "$SRC6/scripts/supervisor/watchdog.sh"
+git -C "$SRC6" add -A
+git -C "$SRC6" commit -q -m "base"
+git -C "$SRC6" push -q -u origin main
+LIVE6="$D6/live"
+git -C "$SRC6" worktree add -q --detach "$LIVE6" origin/main
+before6=$(git -C "$LIVE6" rev-parse HEAD)
+
+REAL_GIT="$(command -v git)"
+HANG_STUB=$(mktemp -d)
+cat >"$HANG_STUB/git" <<EOF
+#!/bin/bash
+if [ "\$1" = "-C" ] && [ "\$3" = "fetch" ]; then
+  sleep 30
+  exit 0
+fi
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$HANG_STUB/git"
+
+S6=$(mktemp -d); fresh_status "$S6"
+start6=$(date +%s)
+out6=$(timeout 20 env PATH="$HANG_STUB:$PATH" ADVANCE_FETCH_TIMEOUT_SECONDS=2 \
+  SUPERVISOR_STATE="$S6" bash "$ADVANCE" "$LIVE6" 2>&1); rc6=$?
+end6=$(date +%s)
+elapsed6=$((end6 - start6))
+
+want_exit "a hung fetch refuses (the script's own bound fires, not the test harness's)" "$rc6" 1 "$out6"
+if [ "$elapsed6" -lt 10 ]; then
+  ok "the hang was bounded near ADVANCE_FETCH_TIMEOUT_SECONDS=2, not the 20s outer safety net (${elapsed6}s)"
+else
+  bad "the hang was bounded near ADVANCE_FETCH_TIMEOUT_SECONDS=2, not the 20s outer safety net" \
+    "took ${elapsed6}s, rc=$rc6: $out6"
+fi
+if grep -qi "did not finish within 2s" <<<"$out6"; then
+  ok "a hung fetch names the timeout, not a generic fetch failure"
+else
+  bad "a hung fetch names the timeout, not a generic fetch failure" "$out6"
+fi
+after6=$(git -C "$LIVE6" rev-parse HEAD)
+if [ "$after6" = "$before6" ]; then ok "a hung fetch leaves live untouched"; else bad "a hung fetch leaves live untouched" "moved to $after6"; fi
+if grep -qi "^advance-live: current" <<<"$out6"; then bad "a hung fetch is never reported as current" "$out6"; else ok "a hung fetch is never reported as current"; fi
+
+# --- required mutation-check: strip the internal bound, confirm the exact
+# same hang is still running, unstopped, after a window well past
+# ADVANCE_FETCH_TIMEOUT_SECONDS=2 -- proving the assertions above are
+# pinned to advance-live.sh's own bound, not to some other source of
+# promptness (a fast stub, coincidental timing, etc). Run in the
+# background and polled, not wrapped in an external `timeout`: this
+# script's own poll-loop fix exists because a job-control-based bound
+# was intermittently unreliable under this exact harness, so the test
+# proving the mutation must not lean on a *different* external killer
+# being reliable either.
+UNBOUNDED="$D6/advance-live-unbounded.sh"
+patch_rc6=0
+python3 - "$ADVANCE" "$UNBOUNDED" <<'PY' || patch_rc6=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker_start = text.index('fetch_out_file=$(mktemp')
+marker_end = text.index('if [ "$fetch_rc" -ne 0 ]; then\n  fail "could not fetch origin/main')
+replacement = 'fetch_out=$(git -C "$LIVE" fetch origin main 2>&1)\nfetch_rc=$?\n'
+assert 'fetch_waited' not in text[marker_end:], "unexpected second fetch_waited occurrence -- script shape changed"
+patched = text[:marker_start] + replacement + text[marker_end:]
+assert 'fetch_waited' not in patched, "the poll-loop timeout wrapper survived the patch"
+open(dst, "w").write(patched)
+PY
+if [ "$patch_rc6" -ne 0 ]; then
+  bad "setup: patched an unbounded (no-timeout) copy of advance-live.sh" \
+    "could not patch $ADVANCE (exit $patch_rc6) -- treating as a failure, not a skip"
+else
+  ok "setup: patched an unbounded (no-timeout) copy of advance-live.sh"
+  chmod +x "$UNBOUNDED"
+
+  kill_tree() { # kill_tree <pid> -- SIGKILL a process and everything it forked
+    local pid="$1" child
+    for child in $(pgrep -P "$pid" 2>/dev/null); do kill_tree "$child"; done
+    kill -9 "$pid" 2>/dev/null
+  }
+
+  S6b=$(mktemp -d); fresh_status "$S6b"
+  UNBOUNDED_OUT="$D6/unbounded.out"
+  env PATH="$HANG_STUB:$PATH" SUPERVISOR_STATE="$S6b" \
+    bash "$UNBOUNDED" "$LIVE6" >"$UNBOUNDED_OUT" 2>&1 &
+  mut_pid6=$!
+  mut_waited6=0
+  while kill -0 "$mut_pid6" 2>/dev/null && [ "$mut_waited6" -lt 5 ]; do
+    sleep 1
+    mut_waited6=$((mut_waited6 + 1))
+  done
+  if kill -0 "$mut_pid6" 2>/dev/null; then
+    ok "mutation confirmed: without advance-live.sh's own bound, the same hang is still running after 5s (the assertions above would now be red)"
+  else
+    mut_out6=$(cat "$UNBOUNDED_OUT" 2>/dev/null)
+    bad "mutation confirmed: without advance-live.sh's own bound, the same hang is still running after 5s" \
+      "the unbounded copy finished on its own within 5s: $mut_out6"
+  fi
+  kill_tree "$mut_pid6"
+  wait "$mut_pid6" 2>/dev/null
+fi
+
+rm -rf "$HANG_STUB"
+rm -rf "$D6"
 
 rm -rf "$D"
 
