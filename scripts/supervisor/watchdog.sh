@@ -664,14 +664,47 @@ advance_on_exit() {
 
   # The copy: see point 3 above. Deleted whatever happens, including when the
   # advance it performed replaced the original underneath it.
+  #
+  # Every file advance-live.sh reaches for via $HERE must land beside the
+  # copy too, or its checks silently no-op inside copy_dir (agent-supervisor
+  # #57: poller-recover.sh was missing here, so the watchdog's every-tick
+  # relaunch attempt gave up before starting, every time, with only a log
+  # line to show for it). Keep this list in sync with `grep -n '\$HERE/'
+  # advance-live.sh`.
+  #
+  # poller-window.sh is a HARD dependency (advance-live.sh sources it
+  # unconditionally near the top): missing it aborts the copy entirely, the
+  # same refuse-rather-than-run posture the rest of this function already
+  # takes. poller-recover.sh is not: advance-live.sh already degrades
+  # gracefully when it is missing (POLLER-PROMPT-RELAUNCH-SKIPPED, #48/#56),
+  # falling back to the watchdog's own periodic backstop call below. Refusing
+  # the WHOLE advance over a missing poller-recover.sh would trade a live-code
+  # freeze for a poller-relaunch degradation that already reports itself
+  # loudly through its own path -- worse than the bug this fixes. So this
+  # copies it best-effort and logs loudly on failure, but never blocks the
+  # advance on it.
   local copy_dir copy out arc
   copy_dir=$(mktemp -d "${TMPDIR:-/tmp}/watchdog-advance-live.XXXXXX" 2>/dev/null) || return $rc
   copy="$copy_dir/advance-live.sh"
   cp "$HERE/advance-live.sh" "$copy" 2>/dev/null || { rm -rf "$copy_dir" 2>/dev/null; return $rc; }
   cp "$HERE/poller-window.sh" "$copy_dir/poller-window.sh" 2>/dev/null || { rm -rf "$copy_dir" 2>/dev/null; return $rc; }
+  # -p: poller-recover.sh is exec'd directly (not sourced via bash), so its
+  # executable bit must survive the copy, not fall through the umask.
+  if ! cp -p "$HERE/poller-recover.sh" "$copy_dir/poller-recover.sh" 2>/dev/null; then
+    log "ADVANCE-COPY-INCOMPLETE: poller-recover.sh could not be copied beside advance-live.sh -- the prompt poller relaunch will no-op this tick, watchdog poller-recover.sh remains the backstop"
+  fi
   out=$(SUPERVISOR_STATE="$STATE" SUPERVISOR_STATUS="$STATUS" bash "$copy" "$root" 2>&1)
   arc=$?
-  rm -rf "$copy_dir" 2>/dev/null
+  # advance-live.sh's prompt_poller_relaunch backgrounds a waiter that execs
+  # poller-recover.sh only once the OLD poller pid exits -- up to
+  # INBOX_POLL_RELAUNCH_WAIT_SECONDS later -- and returns immediately itself,
+  # so "bash $copy" above has already come back by the time that waiter is
+  # still running. Deleting copy_dir synchronously here race-deletes
+  # poller-recover.sh out from under it before it ever gets exec'd
+  # (agent-supervisor#57: this reproduced as ENOENT even with poller-recover.sh
+  # correctly copied in above). Defer the cleanup past that waiter's own
+  # deadline instead of racing it.
+  ( sleep "$(( ${INBOX_POLL_RELAUNCH_WAIT_SECONDS:-45} + 15 ))"; rm -rf "$copy_dir" ) >/dev/null 2>&1 &
   out=$(printf '%s' "$out" | tr '\n' ' ')
 
   if [ "$arc" -ne 0 ]; then
