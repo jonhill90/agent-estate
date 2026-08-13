@@ -137,6 +137,11 @@ SHELLS="bash|zsh|sh|fish|login"
 # LaunchAgent and never occupies a window. LANES_SERVICE_RE extends it without
 # editing code; whatever is added must be observed running that way first.
 SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
+# agent-supervisor#10: the window NAME the poller is deployed under, used
+# ONLY as a narrow fallback below when its PANE'S PROCESS cannot answer this
+# question at all -- see the comment at that fallback's one call site for
+# why that gap exists and why trusting the name there does not reopen #237.
+POLLER_WINDOW="${LANES_POLLER_WINDOW:-inbox-poll}"
 # The supervisor's own pane. It is never a dispatch target: sending a worker
 # brief there /clear's the loop and replaces it with someone else's task.
 # Done twice on 2026-08-11 -- once via an empty tmux target, once because
@@ -294,6 +299,30 @@ emit_rows() {
       # wrote it. `free-N` is the estate's "no claim" convention and stays
       # plain `dead`: nothing about it misleads.
       if is_service_pane "$pid"; then
+        state=service
+      elif [ "$name" = "$POLLER_WINDOW" ] && [ -n "$pid" ] && ! ps -p "$pid" >/dev/null 2>&1; then
+        # agent-supervisor#10: poller-recover.sh now sets `remain-on-exit` on
+        # this window, so a poller that exits leaves a DEAD pane here instead
+        # of taking the window with it, for as long as it takes the next
+        # watchdog tick (<=180s) to notice and respawn it. `is_service_pane`
+        # cannot see through that gap -- its whole contract is reading the
+        # pane's OWN process, and there is none: `pid` no longer names a
+        # process at all, which is exactly what the `! ps -p "$pid"` guard
+        # requires here rather than merely a process that isn't inbox-poll.sh.
+        # Without this branch that gap reads plain `dead`, and dispatch.sh's
+        # normal handling of `dead` is to launch a worker agent into it --
+        # permanently handing the poller's window to a lane and leaving
+        # nothing for poller-recover.sh to find on its next tick.
+        #
+        # Trusting the NAME here does not reopen #237, whose lesson was that
+        # a LANE's name is a claim a human can leave stale long after the
+        # work it names finished. This is not a claim: it is this estate's
+        # one hardcoded service window, the same kind of exception the
+        # `"$w" = "$SUPERVISOR_WINDOW"` branch above already makes for the
+        # supervisor's own window by name, and it only ever promotes a pane
+        # `is_service_pane` already couldn't rule OUT (no live process to
+        # check) rather than overriding one it ruled positively something
+        # else.
         state=service
       elif [[ "$name" =~ $TASK_NAME_RE ]]; then
         state=stale

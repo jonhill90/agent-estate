@@ -98,6 +98,8 @@ cat > "$D/fixture" <<'FIX'
 40|w-shell-tasks|claude.exe|⏵⏵ bypass permissions on · 1 shell · ctrl+t to hide tasks · ← 1 agent · ↓ to manage|1|0
 41|w-shells-plural|claude.exe|⏵⏵ bypass permissions on · 2 shells · ← 1 agent · ↓ to manage|1|0
 42|w-codex-ready-tilde|codex|  gpt-5.5 medium · ~/source/repos/Personal/agent-dotfiles|1|0
+43|inbox-poll|zsh|poller process exiting\n\n❯ |1|0||NONE
+44|inbox-poll|zsh|❯ |1|0
 FIX
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
 
@@ -315,16 +317,34 @@ want "a poller hand-run inside a login shell is still dead" w-hand-run-poller de
 # probes still read exactly one line.
 want "a dead lane that merely printed the script name is dead" w-mentions-poller dead "$out"
 
+# agent-supervisor#10: poller-recover.sh sets `remain-on-exit` on the poller's
+# window, so a poller that exits leaves a DEAD pane here (no process at all)
+# instead of taking the window with it, for up to one watchdog tick. Without
+# the name fallback below, `is_service_pane` cannot see a process that no
+# longer exists and this would read plain `dead` -- and dispatch.sh's normal
+# response to `dead` is to launch a worker agent into it, permanently handing
+# the poller's window to a lane.
+want "a poller mid-recovery (process gone, remain-on-exit pane) is service, not dead" inbox-poll service "$out"
+# THE REGRESSION THAT MATTERS, applied to the new branch: the fallback is
+# gated on the process actually being gone, not just on the window's name.
+# A pane that merely CLAIMS the poller's window name while a real, unrelated
+# shell is alive underneath it must still read dead -- trusting the name
+# outright here would be exactly the #237 mistake this file already rejected
+# once. Two fixture rows share the name "inbox-poll" on purpose, to prove
+# the branch keys on the pid, not a name lookup that stops at the first hit.
+want "a plain shell squatting the poller's window name is still dead" inbox-poll dead "$out"
+
 # #154: the count line is the hazard, not the table row -- `loop-tick.md` tells
-# a reader to restart every lane it counts. Four dead lanes here (w-dead,
-# free-27, w-hand-run-poller, w-mentions-poller); the service window must not
-# be one of them, and #237 moved ad102-renamed-lane to its own `stale` count
+# a reader to restart every lane it counts. Five dead lanes here (w-dead,
+# free-27, w-hand-run-poller, w-mentions-poller, and #10's imposter row); the
+# service window (both the alive one and the mid-recovery one) must not be
+# one of them, and #237 moved ad102-renamed-lane to its own `stale` count
 # line below -- it is still counted, still visible, just not under a heading
 # whose instruction ("restart before dispatching") is the wrong one for it.
-if grep -qE '4 lane\(s\) have no agent' <<<"$out"; then
+if grep -qE '5 lane\(s\) have no agent' <<<"$out"; then
   echo "  ok   the dead count line counts only genuinely dead lanes"; pass=$((pass+1));
 else
-  echo "  FAIL dead count line is not 4 in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
+  echo "  FAIL dead count line is not 5 in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
 fi
 
 # agent-dotfiles#237: the stale count line, and the WORDING is the point. The

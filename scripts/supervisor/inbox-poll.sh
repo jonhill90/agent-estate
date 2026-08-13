@@ -35,8 +35,26 @@
 # zero new infrastructure, and is where this should start: `tmux new-window
 # ... 'scripts/supervisor/inbox-poll.sh'`. It is one line, needs no plist, and
 # a crashed pane is as visible in `tmux list-windows` as a dead lane already
-# is. Promote it to a LaunchAgent (Hill90's adapter) once it has been run
-# that way and proven stable -- the same order watchdog.sh itself went
+# is.
+#
+# agent-supervisor#10: that one line was not enough by itself. This script's
+# pane command is `cd '$LIVE' && exec scripts/supervisor/inbox-poll.sh` --
+# `exec` replaces the pane's shell rather than running under one, so when
+# this process exits (this script's own clean paths, a crash, or a signal
+# nothing here can catch) there is nothing left in the pane, and by tmux's
+# default a pane with nothing left in it closes its WINDOW too. The restart
+# mechanisms both this file and advance-live.sh describe elsewhere need a
+# surviving pane to act on; an exited poller left none.
+#
+# The window this script runs in must therefore also carry
+# `remain-on-exit on` (so the window survives the process exiting -- the pane
+# goes dead instead of the window closing) and be watched by
+# `poller-recover.sh`, which watchdog.sh already calls every tick: it
+# recreates the window if it is missing entirely, or respawns the same dead
+# pane with this script if the process is gone. See poller-recover.sh's own
+# header for the full mechanism and its idempotency argument. Promote this to
+# a LaunchAgent (Hill90's adapter) once it has been run this way and proven
+# stable -- the same order watchdog.sh itself went
 # through.
 #
 # A DEAD POLLER MUST NOT LOOK LIKE SILENCE. Two failure shapes, two answers:

@@ -26,4 +26,10 @@ win=$(( pid - PID_BASE ))
 line=$(awk -F'|' -v w="$win" '$1==w' "$F")
 [ -n "$line" ] || exit 1        # a pid we do not know: same as real ps, no output, exit 1
 argv=$(cut -d'|' -f8 <<<"$line")
+# agent-supervisor#10: NONE models a pane whose OWN process has actually
+# exited while tmux (via remain-on-exit) still reports the pane's last-known
+# pid -- real `ps -p` on a pid nothing holds any more fails exactly this way,
+# no output, exit 1. Distinct from an omitted column ("-zsh", a live shell):
+# that pid is alive and answering; this one is not.
+[ "$argv" = "NONE" ] && exit 1
 printf '%s\n' "${argv:--zsh}"
