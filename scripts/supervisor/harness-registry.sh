@@ -19,7 +19,7 @@
 # Sets, all parallel and keyed by POSITION:
 #   HARNESS_IDS  H_COMMAND_RE  H_READY_RE  H_BUSY_RE  H_BUSY_TAIL
 #   H_BLOCKED_MARKERS  H_OPTION_ROW_RE  H_MENU_ENTER_RE  H_MENU_TAIL
-#   H_TEXT_PROMPT_RE  H_LAUNCH_CMD  H_RESUME_CMD
+#   H_TEXT_PROMPT_RE  H_LAUNCH_CMD  H_RESUME_CMD  H_SEND_LITERAL
 # and defines harness_index_for_command / harness_index_for_name.
 #
 # agent-dotfiles#237 loads the two COMMAND fields into arrays for the first
@@ -29,6 +29,14 @@
 # An empty H_RESUME_CMD is meaningful and is the default: it says this harness
 # has no resume dialect here, and `restore.sh` reports such a lane
 # unrecoverable rather than starting a fresh agent in it.
+#
+# #15 (agent-supervisor) is the first caller of `HARNESS_SEND_LITERAL`, so it
+# is loaded into its own parallel array here for the first time -- until now
+# every harness/*.sh set it and nothing read it back (see harness/claude.sh's
+# and harness/codex.sh's own "not wired into either yet" notes). `dispatch.sh`
+# needs it to know whether typing a harness's own launch command into a fresh
+# shell requires `-l`, same dialect question `H_LAUNCH_CMD` already answers
+# for what to type.
 #
 # Parallel INDEXED arrays, not `declare -A`. Every caller in this directory
 # invokes its script by its own shebang, which runs it under `/bin/bash` --
@@ -42,7 +50,7 @@
 HARNESS_REGISTRY_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_IDS=(); H_COMMAND_RE=(); H_READY_RE=(); H_BUSY_RE=(); H_BUSY_TAIL=()
 H_BLOCKED_MARKERS=(); H_OPTION_ROW_RE=(); H_MENU_ENTER_RE=(); H_MENU_TAIL=(); H_TEXT_PROMPT_RE=()
-H_LAUNCH_CMD=(); H_RESUME_CMD=()
+H_LAUNCH_CMD=(); H_RESUME_CMD=(); H_SEND_LITERAL=()
 # LANES_HARNESS_DIR is the name `lanes.sh` has always used and its tests still
 # set (they point it at a MUTATED copy of the adapters to prove one adapter's
 # breakage cannot move another harness's lane). Kept as an alias so that
@@ -70,6 +78,7 @@ for _hf in "$HARNESS_DIR"/*.sh; do
   H_TEXT_PROMPT_RE+=("${HARNESS_TEXT_PROMPT_RE:-}")
   H_LAUNCH_CMD+=("${HARNESS_LAUNCH_CMD:-}")
   H_RESUME_CMD+=("${HARNESS_RESUME_CMD:-}")
+  H_SEND_LITERAL+=("${HARNESS_SEND_LITERAL:-0}")
 done
 unset _hf
 
