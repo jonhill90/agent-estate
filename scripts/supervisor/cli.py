@@ -231,6 +231,8 @@ def parser():
     # work when there is no tmux server at all, so it touches no transport.
     sub.add_parser("restore-plan")
 
+    sub.add_parser("delivered-open")
+
     sub.add_parser("status")
     return root
 
@@ -720,6 +722,8 @@ def main(argv=None):
         )
     elif args.command == "restore-plan":
         value = ledger.restore_plan()
+    elif args.command == "delivered-open":
+        value = {"tasks": ledger.list_delivered_open_tasks()}
     elif args.command == "status":
         value = {
             "lanes": ledger.list_lanes(),

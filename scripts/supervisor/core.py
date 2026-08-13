@@ -835,6 +835,18 @@ class Ledger:
             rows = connection.execute("SELECT * FROM tasks ORDER BY created_at, id").fetchall()
         return [self._dict(row) for row in rows]
 
+    def list_delivered_open_tasks(self):
+        """Rows that claim delivered work but have no completion record yet."""
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM tasks
+                WHERE status='delivered' AND completed_at IS NULL
+                ORDER BY updated_at, id
+                """
+            ).fetchall()
+        return [self._dict(row) for row in rows]
+
     @staticmethod
     def _source_task_dict(row):
         if row is None:

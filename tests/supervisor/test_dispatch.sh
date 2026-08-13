@@ -1006,7 +1006,10 @@ want_contains "...and the claim is marked live, not merely reserved" '"status":"
 want_contains "...so the ledger reads that lane occupied" "False" "$(lane_available "$D/state-160" t:3)"
 want_contains "...and the abort says the lane stays held rather than leaving it to be discovered" \
   "STAYS HELD" "$out"
-want_contains "...and names the one command that frees it" "cancel-open-task --lane t:3" "$out"
+want_contains "...and names record-completion when the lane finished but never signalled" \
+  "record-completion --task ad160-unsent-brief" "$out"
+want_contains "...and still names cancel-open-task only for discarding non-work" \
+  "cancel-open-task --lane t:3" "$out"
 
 # The other direction, and the one that keeps the check honest: a dispatch
 # that DOES submit must pass silently. A confirmation that fires on every
@@ -1493,7 +1496,10 @@ want_missing "...and it did NOT reap the live claim away" "ledger-claim:t:3:ad70
 want_missing "...and typed nothing into that pane" "rename-window -t t:@103 ad703-the-next-one" "$(cat "$D/tmux.log")"
 # Fail-closed has a price and the refusal must name it: this lane needs a
 # human, and `release-lane-claim` deliberately will not clear it.
-want_contains "...and says how to clear a claim with a live brief behind it" "cancel-open-task --lane" "$out"
+want_contains "...and says to record a completion when a live brief finished without signalling" \
+  "record-completion --task <task>" "$out"
+want_contains "...and says cancel-open-task is for discarding a live brief that produced no real work" \
+  "cancel-open-task --lane" "$out"
 
 # --- the previous round's finding must not regress ------------------------
 # Moving the commit point later would be an easy way to satisfy everything

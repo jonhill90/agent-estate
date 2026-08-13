@@ -58,6 +58,9 @@ MODE="${1:-}"
 VERDICT_SOURCE="${DIGEST_VERDICT_SOURCE:-github}"
 VERDICT_PYTHON="${DIGEST_VERDICT_PYTHON:-python3}"
 VERDICT_BIN="${DIGEST_VERDICT_BIN:-}"
+LEDGER_PYTHON="${DIGEST_LEDGER_PYTHON:-python3}"
+LEDGER_CLI="${DIGEST_LEDGER_CLI:-$HERE/cli.py}"
+RECONCILE_IDLE_AFTER="${DIGEST_RECONCILE_IDLE_AFTER:-300}"
 
 # jq is the only dependency this script does not already share with the rest
 # of the estate: watchdog.sh and loop-tick.md both use `gh ... --jq`, which is
@@ -136,6 +139,56 @@ elif [ "$lane_rows" -eq 0 ]; then
   note_error "lanes.sh returned no lane rows for session '$SESSION' (header only)"
 fi
 lane_line() { awk -v s="$1" 'NR>1 && $NF==s {print $2}' <<<"$LANES_OUT" | paste -sd, - ; }
+
+# --- delivered-vs-pane reconciliation ------------------------------------
+# agent-supervisor#36. `dispatch.sh` reads the ledger and `lanes.sh` reads the
+# pane; when a worker finishes but never signals, both can be truthful and
+# still disagree forever. This section surfaces only the cheap, observable
+# disagreement: a task still `delivered` with no `completed_at`, whose lane's
+# pane is now `free` and whose tmux-derived `idle_seconds` exceeds the
+# threshold. It deliberately does NOT complete anything; the result note/path
+# belongs in `record-completion` after a human reads the pane.
+DELIVERED_OPEN_JSON="[]"
+RECONCILIATION_JSON="[]"
+if delivered_out=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" delivered-open 2>/dev/null); then
+  if jq -e . >/dev/null 2>&1 <<<"$delivered_out"; then
+    DELIVERED_OPEN_JSON=$(jq -c '.tasks // []' <<<"$delivered_out")
+  else
+    note_error "delivered-open produced unreadable JSON"
+  fi
+else
+  note_error "delivered-open failed for ledger at $STATE"
+fi
+LANES_JSON_OUT=$("$LANES_BIN" --json "$SESSION" 2>/dev/null)
+lanes_json_rc=$?
+if [ "$lanes_json_rc" -ne 0 ] || ! jq -e . >/dev/null 2>&1 <<<"$LANES_JSON_OUT"; then
+  note_error "lanes.sh --json failed for session '$SESSION' -- delivered/idle reconciliation omitted"
+  LANES_JSON_OUT="[]"
+fi
+RECONCILIATION_JSON=$(jq -nc \
+  --arg session "$SESSION" \
+  --arg ledger_python "$LEDGER_PYTHON" \
+  --arg ledger_cli "$LEDGER_CLI" \
+  --arg state "$STATE" \
+  --argjson threshold "$RECONCILE_IDLE_AFTER" \
+  --argjson tasks "$DELIVERED_OPEN_JSON" \
+  --argjson lanes "$LANES_JSON_OUT" '
+  [
+    $tasks[] as $task
+    | ($lanes[] | select(($session + ":" + (.window|tostring)) == $task.lane)) as $pane
+    | select($pane.state == "free")
+    | select(($pane.idle_seconds // 0) >= $threshold)
+    | {
+        task: $task.id,
+        lane: $task.lane,
+        idle_seconds: ($pane.idle_seconds // 0),
+        threshold_seconds: $threshold,
+        window: $pane.window,
+        window_id: $pane.window_id,
+        name: $pane.name,
+        recovery: ($ledger_python + " " + $ledger_cli + " --state-dir " + $state + " record-completion --task " + $task.id + " --note <note>")
+      }
+  ]')
 
 # Resolves one PR's verdict through the adapter. Always prints SOME JSON --
 # a source failure or a missing/broken stub must read as {"verdict":"unknown"},
@@ -243,12 +296,14 @@ DIGEST=$(jq -n \
   --arg dead "$(lane_line dead)" --arg service "$(lane_line service)" \
   --arg stale "$(lane_line stale)" \
   --arg unknown "$(lane_line unknown)" \
+  --argjson reconciliation "$RECONCILIATION_JSON" \
   --argjson prs "$PR_JSON" --argjson merged "$MERGED_JSON" --argjson errors "$ERR_JSON" '
   {checked: $checked,
    watchdog: {state:$wd_state, checked:$wd_checked, restarts:$wd_restarts, heartbeat:$wd_heartbeat},
    poller: {alive:$poller_alive, state:$poller_state, checked:$poller_checked},
    lanes: {free:$free, busy:$busy, blocked:$blocked, menu_blocked:$menu,
            dead:$dead, stale:$stale, service:$service, unknown:$unknown},
+   reconciliation: {delivered_idle: $reconciliation},
    prs: $prs, merged_since: $merged, errors: $errors,
    ok: ($errors | length == 0)}')
 
@@ -264,6 +319,8 @@ else
     # Printed on its own line rather than folded into `dead` because the
     # action differs -- restore.sh, and do not believe the name.
     "          stale=[\(.lanes.stale)]",
+    (if (.reconciliation.delivered_idle|length) > 0 then "reconcile:" else empty end),
+    (.reconciliation.delivered_idle[] | "  delivered-open \(.task) lane=\(.lane) idle=\(.idle_seconds)s; inspect pane, then record-completion --task \(.task)"),
     (if (.prs|length) == 0 then "prs:      none open" else "prs:" end),
     # Three distinct CI states, not two: no run at all, a run that failed, and
     # a run that passed but is not for this head. Collapsing "no run" and
