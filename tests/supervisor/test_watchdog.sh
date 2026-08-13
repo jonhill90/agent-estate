@@ -32,8 +32,18 @@ echo "watchdog.sh"
 # A busy supervisor is working, not dead. Nothing may be sent to it.
 D=$(mktemp -d); run busy "$D/w"
 check "busy pane reports working" "state:    working" "$D/w/st"
-[ ! -s "$D/w/sent" ] && { echo "  ok   busy pane receives no keystrokes"; pass=$((pass+1)); } \
-                     || { echo "  FAIL busy pane was sent: $(cat "$D/w/sent")"; fail=$((fail+1)); }
+# Not asserted as "$D/w/sent is empty": agent-supervisor#10's poller-recover.sh
+# now runs on every exit path too (a different subsystem, same reasoning as
+# the inbox-poll heartbeat check below), and against this stub -- which does
+# not implement list-windows/list-panes, so every target reads as absent --
+# it unconditionally queues its OWN send-keys for the unrelated inbox-poll
+# window into the same STUB_SENT file. That is a real send-keys, correctly
+# unrelated to $PANE; the property this test is actually pinning is "no
+# /loop reaches a busy pane", the same thing every other keystroke assertion
+# in this file checks.
+! grep -q '/loop' "$D/w/sent" 2>/dev/null \
+  && { echo "  ok   busy pane receives no /loop"; pass=$((pass+1)); } \
+  || { echo "  FAIL busy pane was sent a /loop: $(cat "$D/w/sent" 2>/dev/null)"; fail=$((fail+1)); }
 # A healthy tick carries no notify: line -- nothing was sent, so there is no
 # send outcome to report. Asserted because the state: line alone does not
 # prove the ordinary write path ran: while `notify:` was being added, a false
