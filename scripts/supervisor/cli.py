@@ -12,7 +12,7 @@ from pathlib import Path
 
 from acp_transport import ACPTransport
 from adapter import ACPAdapter, TmuxAdapter, HARNESS_COMMANDS
-from core import Ledger, claim_owner_token
+from core import CLAIM_TASK_PREFIX, Ledger, claim_owner_token
 from github_source import GithubTaskSource
 from sensor import StateSensor
 from transport import TmuxTransport
@@ -117,8 +117,18 @@ def parser():
     record_dispatch_parser.add_argument("--github", default="")
     record_dispatch_parser.add_argument("--harness", choices=("codex", "claude", "copilot", "copilot-acp"))
 
+    # agent-supervisor#36 (second issue comment): a stranded lane's open row
+    # is not always a task id an operator has on hand -- `claim_lane` writes
+    # a `ledger-claim:<lane>:<token>` row, and the codex harness's
+    # completions land as exactly that shape. `--lane` alone resolves
+    # whichever row shape currently occupies the lane, the same way
+    # `cancel-open-task` does for the discard path; `--task` alone keeps the
+    # exact-id behaviour this command has always had. At least one is
+    # required -- enforced in `record_completion`, not here, so the error
+    # names the actual gap instead of argparse's generic mutex message.
     record_completion_parser = sub.add_parser("record-completion")
-    record_completion_parser.add_argument("--task", required=True)
+    record_completion_parser.add_argument("--task")
+    record_completion_parser.add_argument("--lane")
     record_completion_parser.add_argument("--note", required=True)
 
     for name in ("accept", "complete"):
@@ -230,6 +240,8 @@ def parser():
     # Deliberately its own command rather than a flag on `status`: it must
     # work when there is no tmux server at all, so it touches no transport.
     sub.add_parser("restore-plan")
+
+    sub.add_parser("delivered-open")
 
     sub.add_parser("status")
     return root
@@ -513,7 +525,7 @@ def record_dispatch(
         raise
 
 
-def record_completion(ledger, *, task, note):
+def record_completion(ledger, *, task, lane, note):
     """Record that a dispatched task finished. Writes; never sends.
 
     Not `cli.py complete`: that path verifies `TMUX_PANE` belongs to the
@@ -530,11 +542,31 @@ def record_completion(ledger, *, task, note):
     to the architecture lane. Neither can fire from this wiring -- both go
     through `_verified_lane`, which requires an architecture lane registered
     with matching tmux options, and nothing here registers one.
+
+    agent-supervisor#36 (second issue comment): `--task` used to be the only
+    way in, and `get_task` is an exact id match -- so a `ledger-claim:<lane>:
+    <token>` row (how the codex harness's completions land) could not be
+    recorded honestly by an operator who only had the bare token, and
+    `cancel-open-task` was the only verb that worked, which discards the row
+    instead of completing it. Resolution order: an exact `--task` id match
+    first (unchanged behaviour for an ordinary task); failing that, with
+    `--lane` also given, the claim row that token would produce under that
+    lane; failing that, with only `--lane` given, whichever single row is
+    still open for it -- mirroring `cancel_open_task`'s own lookup, so the
+    caller does not have to know the row's shape before asking to close it.
     """
-    row = ledger.get_task(task)
+    if not task and not lane:
+        raise RuntimeError("record-completion requires --task or --lane")
+    row = ledger.get_task(task) if task else None
+    if row is None and lane and task:
+        row = ledger.get_task(f"{CLAIM_TASK_PREFIX}{lane}:{task}")
+    if row is None and lane and not task:
+        row = ledger.get_open_task_for_lane(lane)
     if row is None:
-        raise RuntimeError(f"unknown task: {task}")
-    return ledger.complete(task, note.encode("utf-8"), pane_nonce=row["pane_nonce"])
+        identity = f"task: {task}" if task else f"lane: {lane}"
+        raise RuntimeError(f"unknown {identity}")
+    allow_claim = row["id"].startswith(CLAIM_TASK_PREFIX)
+    return ledger.complete(row["id"], note.encode("utf-8"), pane_nonce=row["pane_nonce"], allow_claim=allow_claim)
 
 
 def _verify_caller(adapter, ledger, lane):
@@ -629,7 +661,7 @@ def main(argv=None):
             "task": row["id"] if row is not None else None,
         }
     elif args.command == "record-completion":
-        value = record_completion(ledger, task=args.task, note=args.note)
+        value = record_completion(ledger, task=args.task, lane=args.lane, note=args.note)
     elif args.command == "accept":
         task = ledger.get_task(args.task)
         if task is None:
@@ -720,6 +752,8 @@ def main(argv=None):
         )
     elif args.command == "restore-plan":
         value = ledger.restore_plan()
+    elif args.command == "delivered-open":
+        value = {"tasks": ledger.list_delivered_open_tasks()}
     elif args.command == "status":
         value = {
             "lanes": ledger.list_lanes(),
