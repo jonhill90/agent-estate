@@ -119,6 +119,123 @@ out2=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/busy" TMUX_LOG="$D/tmux.log" TMUX_P
 [ ! -s "$D/curl.log" ] && ok "a second flush against the same still-busy pane does not re-page for the same message" \
   || bad "the second flush re-paged for a message already escalated" "$(cat "$D/curl.log")"
 
+# --- agent-supervisor#42 review: a failed notify must NOT mark escalated ---
+# The reviewer's reproduction: a stale message, a permanently busy pane, and
+# no working notify channel. Before this fix, the row still became
+# `escalated: true` even though the page never reached Jon, and the next
+# flush's own not-already-escalated filter then suppressed the retry
+# forever -- the silent-loss shape #34 exists to fix, one layer up. This is
+# the failing-test-first case: it must be RED against the pre-fix shape
+# (mutation check below proves that) and green against the fix.
+cat > "$D/bin/curl" <<'EOF'
+#!/bin/bash
+echo "curl $*" >> "${CURL_LOG:-/dev/null}"
+exit 1
+EOF
+chmod +x "$D/bin/curl"
+
+fresh_inbox
+: > "$D/tmux.log"; rm -rf "$D/panes"; mkdir -p "$D/panes"; : > "$D/curl.log"
+PATH="$D/bin:$PATH" LANES_FIXTURE="$D/busy" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+  HOME="$D/state" NOTIFY_ENV="$D/notify.env" CURL_LOG="$D/curl.log" DIRECTOR_INBOX="$INBOX_BOX" \
+  bash "$ROUTE" "stuck with no working notify channel" t >/dev/null
+python3 -c "
+import json
+row = json.loads(open('$INBOX_BOX').read().strip())
+row['at'] = '2020-01-01T00:00:00Z'
+open('$INBOX_BOX', 'w').write(json.dumps(row) + chr(10))
+"
+: > "$D/curl.log"
+out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/busy" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+  HOME="$D/state" NOTIFY_ENV="$D/notify.env" CURL_LOG="$D/curl.log" DIRECTOR_INBOX="$INBOX_BOX" \
+  DIRECTOR_INBOX_STALE_SECONDS=60 \
+  bash "$ROUTE" --flush t)
+[ -s "$D/curl.log" ] && ok "a notify attempt was made even though the channel is broken" \
+  || bad "no notify attempt was made for the stale message" "$out"
+row_escalated=$(python3 -c "import json; print(json.loads(open('$INBOX_BOX').read().strip()).get('escalated', False))")
+[ "$row_escalated" = False ] && ok "a failed notify leaves the row NOT escalated -- it stays retryable" \
+  || bad "a failed notify must not mark the row escalated" "$(cat "$INBOX_BOX")"
+
+# Restore a working notify channel and confirm the SAME stale message is
+# retried and now reaches Jon and gets marked -- proving "not escalated"
+# above means "will retry," not "gave up."
+cat > "$D/bin/curl" <<'EOF'
+#!/bin/bash
+echo "curl $*" >> "${CURL_LOG:-/dev/null}"
+exit 0
+EOF
+chmod +x "$D/bin/curl"
+: > "$D/curl.log"
+out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/busy" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+  HOME="$D/state" NOTIFY_ENV="$D/notify.env" CURL_LOG="$D/curl.log" DIRECTOR_INBOX="$INBOX_BOX" \
+  DIRECTOR_INBOX_STALE_SECONDS=60 \
+  bash "$ROUTE" --flush t)
+[ -s "$D/curl.log" ] && ok "once the channel works again, the retried flush reaches Jon" \
+  || bad "the retry never reached Jon once the channel recovered" "$out"
+row_escalated2=$(python3 -c "import json; print(json.loads(open('$INBOX_BOX').read().strip()).get('escalated', False))")
+[ "$row_escalated2" = True ] && ok "only a successful notify marks the row escalated" \
+  || bad "a successful notify should mark the row escalated" "$(cat "$INBOX_BOX")"
+
+# Mutation-check: force the notify result to "success" regardless of what
+# notify_jon actually returned, and confirm the "not escalated on failure"
+# assertion above would go red. The brief's own bar.
+ROUTE_DIR="$(cd "$(dirname "$ROUTE")" && pwd)"
+MUTANT_FORCE="$ROUTE_DIR/.director-route-mutant-forcesuccess.sh"
+patch_rc=0
+python3 - "$ROUTE" "$MUTANT_FORCE" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''  if notify_jon "Director inbox has undelivered message(s)" \\
+       "pending >= ${STALE_THRESHOLD}s with the Director's pane never caught idle -- $escalated"; then'''
+replacement = '''  if notify_jon "Director inbox has undelivered message(s)" \\
+       "pending >= ${STALE_THRESHOLD}s with the Director's pane never caught idle -- $escalated" || true; then'''
+assert marker in text, "notify_jon guard not found -- director-route.sh shape changed"
+assert text.count(marker) == 1, "notify_jon guard not unique -- director-route.sh shape changed"
+open(dst, "w").write(text.replace(marker, replacement, 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a force-success copy of director-route.sh" \
+    "could not patch $ROUTE (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a force-success copy of director-route.sh"
+  cat > "$D/bin/curl" <<'EOF'
+#!/bin/bash
+echo "curl $*" >> "${CURL_LOG:-/dev/null}"
+exit 1
+EOF
+  chmod +x "$D/bin/curl"
+  fresh_inbox
+  : > "$D/tmux.log"; rm -rf "$D/panes"; mkdir -p "$D/panes"
+  PATH="$D/bin:$PATH" LANES_FIXTURE="$D/busy" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+    HOME="$D/state" NOTIFY_ENV="$D/notify.env" CURL_LOG="$D/curl.log" DIRECTOR_INBOX="$INBOX_BOX" \
+    bash "$MUTANT_FORCE" "will be force-escalated" t >/dev/null 2>&1
+  python3 -c "
+import json
+row = json.loads(open('$INBOX_BOX').read().strip())
+row['at'] = '2020-01-01T00:00:00Z'
+open('$INBOX_BOX', 'w').write(json.dumps(row) + chr(10))
+"
+  PATH="$D/bin:$PATH" LANES_FIXTURE="$D/busy" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+    HOME="$D/state" NOTIFY_ENV="$D/notify.env" CURL_LOG="$D/curl.log" DIRECTOR_INBOX="$INBOX_BOX" \
+    DIRECTOR_INBOX_STALE_SECONDS=60 \
+    bash "$MUTANT_FORCE" --flush t >/dev/null 2>&1
+  mutant_escalated=$(python3 -c "import json; print(json.loads(open('$INBOX_BOX').read().strip()).get('escalated', False))")
+  if [ "$mutant_escalated" = True ]; then
+    ok "mutation confirmed: forcing notify to 'success' marks the row escalated even though the real page failed (the assertion above would be red)"
+  else
+    bad "mutation confirmed: forcing notify success should have marked the row escalated" "$(cat "$INBOX_BOX")"
+  fi
+fi
+rm -f "$MUTANT_FORCE"
+
+cat > "$D/bin/curl" <<'EOF'
+#!/bin/bash
+echo "curl $*" >> "${CURL_LOG:-/dev/null}"
+exit 0
+EOF
+chmod +x "$D/bin/curl"
+
 # Mutation-check: drop the escalation block and confirm the above goes red --
 # the brief's own bar ("mutate your fix and watch a test go red").
 ROUTE_DIR="$(cd "$(dirname "$ROUTE")" && pwd)"
@@ -130,8 +247,18 @@ src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
 marker = '''STALE_THRESHOLD="${DIRECTOR_INBOX_STALE_SECONDS:-1800}"
 if escalated=$("$HERE/director-inbox.sh" escalate "$STALE_THRESHOLD" 2>/dev/null) && [ -n "$escalated" ]; then
-  notify_jon "Director inbox has undelivered message(s)" \\
-    "pending >= ${STALE_THRESHOLD}s with the Director's pane never caught idle -- $escalated"
+  if notify_jon "Director inbox has undelivered message(s)" \\
+       "pending >= ${STALE_THRESHOLD}s with the Director's pane never caught idle -- $escalated"; then
+    # Bash 3.2 (macOS) has no readarray/mapfile -- build the argv array by
+    # hand rather than reaching for either.
+    escalated_ats=()
+    while IFS= read -r ts; do
+      escalated_ats+=("$ts")
+    done < <(grep -oE '^\\[director [^]]+\\]' <<<"$escalated" | sed -E 's/^\\[director (.+)\\]$/\\1/')
+    "$HERE/director-inbox.sh" escalate-commit "${escalated_ats[@]}" >/dev/null
+  else
+    echo "director-route: escalation notify failed -- message(s) stay queued, will retry" >&2
+  fi
 fi'''
 assert marker in text, "escalation block not found -- director-route.sh shape changed"
 assert text.count(marker) == 1, "escalation block not unique -- director-route.sh shape changed"

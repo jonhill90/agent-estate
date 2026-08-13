@@ -21,12 +21,19 @@
 # Usage:
 #   director-inbox.sh post "message"   append a message for the next tick
 #   director-inbox.sh read             print undrained messages (no drain)
-#   director-inbox.sh drain            print undrained messages and mark them
+#   director-inbox.sh drain            print undrained messages, mark them
+#                                       read, and stamp delivered_at on each
+#                                       one drained for the first time
 #   director-inbox.sh stats            print {"pending":N,"oldest_at":...,
 #                                       "oldest_age_s":N} as JSON, no mutation
-#   director-inbox.sh escalate <secs>  mark-and-print pending messages older
-#                                       than <secs> that have not already been
-#                                       escalated; exit 0 if any, 1 if none
+#   director-inbox.sh escalate <secs>  print (do not mark) pending messages
+#                                       older than <secs> that have not
+#                                       already been escalated; exit 0 if any,
+#                                       1 if none
+#   director-inbox.sh escalate-commit  mark escalated the rows whose "at"
+#                                       timestamps are given one per line on
+#                                       stdin, unless already read or already
+#                                       escalated
 #
 # Drain marks rather than deletes: a message the supervisor read is still
 # readable afterwards, because losing the record of an instruction is worse
@@ -34,6 +41,29 @@
 # parse, or that parses to something other than a JSON object -- both are
 # preserved verbatim with a warning on stderr, never dropped, and never
 # allowed to crash a later read/drain (#90).
+#
+# agent-supervisor#42 review: `delivered_at` is set on drain, and ONLY on
+# drain -- the moment a tick actually consumed the message -- never on
+# escalate or the nudge in director-route.sh succeeding. Both of those are
+# evidence delivery was ATTEMPTED, not that it happened; a field that is set
+# on attempt cannot later distinguish a delivered message from a lost one.
+# It is set once, the first time a row's `read` flips false->true, and never
+# rewritten on a later drain of the same already-read row.
+#
+# agent-supervisor#42 review: `escalate` used to mark `escalated: true`
+# itself, unconditionally, the instant a message crossed the staleness
+# threshold -- before its caller (director-route.sh) had proven the page to
+# Jon actually went out. A notify failure (unreachable channel, missing
+# creds) then permanently suppressed the retry: the row was already
+# `escalated: true`, so the next call's own not-already-escalated filter
+# skipped it forever, and the message reporting it as lost was itself lost.
+# That is the identical silent-loss shape #34 exists to fix, just moved one
+# layer up. `escalate` is now detect-only (like `stats`, no lock write);
+# `escalate-commit` is the separate, explicit mark step, and
+# director-route.sh only calls it after `notify_jon` has actually returned
+# success. A failed notification leaves the row exactly as it was --
+# pending, not escalated -- so the next `--flush` (~25s later) detects it as
+# stale again and retries, instead of forgetting it happened.
 #
 # agent-supervisor#34: `read`/`drain` only ever surface a message to whoever
 # runs a Director tick, and a tick is exactly what stops happening when the
@@ -85,10 +115,10 @@ PY
     ;;
   read|drain)
     [ -s "$BOX" ] || { echo "(no director messages)"; exit 0; }
-    python3 - "$BOX" "$LOCK" "${1}" <<'PY'
+    python3 - "$BOX" "$LOCK" "${1}" "$(now)" <<'PY'
 import fcntl, json, os, sys
 
-box, lock, mode = sys.argv[1], sys.argv[2], sys.argv[3]
+box, lock, mode, stamp = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
 
 with open(lock, "a") as lockfile:
     fcntl.flock(lockfile, fcntl.LOCK_EX)
@@ -136,6 +166,12 @@ with open(lock, "a") as lockfile:
             if r is None:
                 out_lines.append(line)
             else:
+                # delivered_at is set once, the first time this row is
+                # actually drained -- never on a later drain of an
+                # already-read row, and never anywhere but here (see the
+                # header comment for why escalate/the nudge do not count).
+                if not r.get("read"):
+                    r["delivered_at"] = stamp
                 r["read"] = True
                 out_lines.append(json.dumps(r))
         tmp = box + ".tmp"
@@ -190,14 +226,68 @@ else:
 PY
     ;;
   escalate)
+    # Detect-only, like `stats`: reports pending, not-yet-escalated rows
+    # older than the threshold, but does NOT mark them. Marking happens in
+    # `escalate-commit`, and only once the caller has proven the page it
+    # builds from this output actually reached Jon -- see the header
+    # comment. No lock is taken: nothing here is read-modify-write.
     [ -n "${2:-}" ] || { echo "director-inbox: escalate needs a threshold in seconds" >&2; exit 1; }
     [ -s "$BOX" ] || { echo "(no stale director messages)"; exit 1; }
-    python3 - "$BOX" "$LOCK" "$(now)" "$2" <<'PY'
-import fcntl, json, os, sys
+    python3 - "$BOX" "$(now)" "$2" <<'PY'
+import json, sys
 from datetime import datetime, timezone
 
-box, lock, now_s, threshold = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
+box, now_s, threshold = sys.argv[1], sys.argv[2], float(sys.argv[3])
 now = datetime.strptime(now_s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+stale = []
+for raw in open(box):
+    line = raw.rstrip("\n")
+    if not line.strip():
+        continue
+    try:
+        r = json.loads(line)
+    except ValueError:
+        continue
+    if not isinstance(r, dict) or r.get("read") or r.get("escalated"):
+        continue
+    try:
+        age = (now - datetime.strptime(r.get("at", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        age = None
+    if age is not None and age >= threshold:
+        stale.append(r)
+
+if not stale:
+    print("(no stale director messages)")
+    sys.exit(1)
+
+for r in stale:
+    print(f"[director {r['at']}] {r['text']}")
+PY
+    ;;
+  escalate-commit)
+    # Marks escalated the rows whose "at" timestamp is given as an argument
+    # here -- the exact set `escalate` just reported and the caller just
+    # proved got through to Jon. Rows not in that set, already read, or
+    # already escalated are left untouched, so a stale message that shows up
+    # in the window between `escalate` and this call (and so was never in
+    # the notification body) is NOT marked here -- it stays retryable for
+    # the next detect/notify/commit cycle instead of being silently marked
+    # escalated without ever having been announced.
+    #
+    # Targets are argv, not stdin: `python3 -` already reads the program
+    # itself from stdin (that is what makes the heredoc below work), so
+    # anything piped into this command would be consumed as (invalid)
+    # program text, never reach the script's own logic, and this would
+    # silently commit nothing every time.
+    shift
+    [ "$#" -gt 0 ] || exit 0
+    python3 - "$BOX" "$LOCK" "$@" <<'PY'
+import fcntl, json, os, sys
+
+box, lock = sys.argv[1], sys.argv[2]
+targets = set(sys.argv[3:])
 
 with open(lock, "a") as lockfile:
     fcntl.flock(lockfile, fcntl.LOCK_EX)
@@ -217,34 +307,25 @@ with open(lock, "a") as lockfile:
             continue
         rows.append((line, parsed))
 
-    newly_stale = []
+    changed = False
     out_lines = []
     for line, r in rows:
-        if r is None or r.get("read") or r.get("escalated"):
-            out_lines.append(line if r is None else json.dumps(r))
-            continue
-        try:
-            age = (now - datetime.strptime(r.get("at", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)).total_seconds()
-        except (TypeError, ValueError):
-            age = None
-        if age is not None and age >= threshold:
+        if r is not None and r.get("at") in targets and not r.get("read") and not r.get("escalated"):
             r["escalated"] = True
-            newly_stale.append(r)
-        out_lines.append(json.dumps(r))
+            changed = True
+            out_lines.append(json.dumps(r))
+        else:
+            out_lines.append(line if r is None else json.dumps(r))
 
-    if not newly_stale:
-        print("(no stale director messages)")
-        sys.exit(1)
+    if not changed:
+        sys.exit(0)
 
     tmp = box + ".tmp"
     with open(tmp, "w") as handle:
         for line in out_lines:
             handle.write(line + "\n")
     os.replace(tmp, box)
-
-    for r in newly_stale:
-        print(f"[director {r['at']}] {r['text']}")
 PY
     ;;
-  *) echo "usage: director-inbox.sh {post <msg>|read|drain|stats|escalate <secs>}" >&2; exit 1 ;;
+  *) echo "usage: director-inbox.sh {post <msg>|read|drain|stats|escalate <secs>|escalate-commit}" >&2; exit 1 ;;
 esac

@@ -170,15 +170,35 @@ fi
 #
 # This runs on EVERY call -- a fresh post and a bare `--flush` alike -- and
 # before the idle check, so a pane that is never idle cannot suppress it the
-# way it suppresses the nudge. `director-inbox.sh escalate` is itself
-# idempotent per message (the `escalated` field on the row), so this does not
-# re-page Jon every ~25s while a message stays stuck; it pages once when a
-# message first crosses the threshold, the same debounce shape inbox.sh's own
-# FAIL_THRESHOLD notification already uses.
+# way it suppresses the nudge.
+#
+# agent-supervisor#42 review: the row used to be marked escalated the instant
+# it crossed the threshold, before notify_jon ran at all -- so a failed page
+# (unreachable channel, no creds) left the row permanently marked escalated
+# anyway, and the escalate-detect step's own not-already-escalated filter
+# then suppressed every later retry. That recreated the exact silent-loss
+# shape #34 exists to fix, one layer up: the escalation path failed once and
+# then suppressed itself forever. `director-inbox.sh escalate` is now
+# detect-only; the row is committed to `escalated: true` (via
+# `escalate-commit`) ONLY after notify_jon has actually returned success. A
+# failed notify leaves the row exactly as it was -- pending, not escalated --
+# so the next `--flush` (~25s later) detects it as stale again and retries,
+# the same debounce shape inbox.sh's own FAIL_THRESHOLD notification uses,
+# but now honest about what "escalated" means.
 STALE_THRESHOLD="${DIRECTOR_INBOX_STALE_SECONDS:-1800}"
 if escalated=$("$HERE/director-inbox.sh" escalate "$STALE_THRESHOLD" 2>/dev/null) && [ -n "$escalated" ]; then
-  notify_jon "Director inbox has undelivered message(s)" \
-    "pending >= ${STALE_THRESHOLD}s with the Director's pane never caught idle -- $escalated"
+  if notify_jon "Director inbox has undelivered message(s)" \
+       "pending >= ${STALE_THRESHOLD}s with the Director's pane never caught idle -- $escalated"; then
+    # Bash 3.2 (macOS) has no readarray/mapfile -- build the argv array by
+    # hand rather than reaching for either.
+    escalated_ats=()
+    while IFS= read -r ts; do
+      escalated_ats+=("$ts")
+    done < <(grep -oE '^\[director [^]]+\]' <<<"$escalated" | sed -E 's/^\[director (.+)\]$/\1/')
+    "$HERE/director-inbox.sh" escalate-commit "${escalated_ats[@]}" >/dev/null
+  else
+    echo "director-route: escalation notify failed -- message(s) stay queued, will retry" >&2
+  fi
 fi
 
 # --- is it safe to nudge the pane right now? --------------------------

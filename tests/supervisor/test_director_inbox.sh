@@ -47,6 +47,25 @@ want_contains "second drain reports nothing new" "no new director messages" "$ou
 [ "$snapshot" = "$(cat "$D/box.jsonl")" ] && ok "second drain leaves the file unchanged" \
   || bad "second drain leaves the file unchanged" "$(cat "$D/box.jsonl")"
 
+# --- drain stamps delivered_at, once, only on the row it actually drains ---
+# agent-supervisor#42 review: delivered_at must exist and must be set only
+# when a message is actually delivered (drained), never on read (no
+# mutation), never on escalate/escalate-commit (an attempt, not a success).
+rm -f "$D/box.jsonl"
+run post "stamp me" >/dev/null
+out=$(run read)
+want_not_contains "read alone never sets delivered_at" "delivered_at" "$(cat "$D/box.jsonl")"
+run drain >/dev/null
+want_contains "drain sets delivered_at on the row it just delivered" "delivered_at" "$(cat "$D/box.jsonl")"
+first_stamp=$(python3 -c "import json; print(json.loads(open('$D/box.jsonl').read().strip())['delivered_at'])")
+[ -n "$first_stamp" ] && ok "delivered_at is a non-empty timestamp" \
+  || bad "delivered_at is a non-empty timestamp" "$(cat "$D/box.jsonl")"
+sleep 1
+run drain >/dev/null
+second_stamp=$(python3 -c "import json; print(json.loads(open('$D/box.jsonl').read().strip())['delivered_at'])")
+[ "$first_stamp" = "$second_stamp" ] && ok "a later drain of an already-read row does not overwrite delivered_at" \
+  || bad "a later drain of an already-read row does not overwrite delivered_at" "first:$first_stamp second:$second_stamp"
+
 # --- missing/empty box: read and drain already handled, pin it -------------
 rm -f "$D/box.jsonl"
 out=$(run read); rc=$?
@@ -230,19 +249,38 @@ age=$(python3 -c "import json,sys; print(json.loads(sys.stdin.read())['oldest_ag
 [ "$age" -gt 1000000 ] && ok "stats computes a large oldest_age_s for a years-old message" \
   || bad "stats computes oldest_age_s" "$out"
 
-# --- escalate: marks-and-reports stale pending messages exactly once -------
-# The load-bearing claim: escalate must fire for a message that is old but
-# whose delivery has nothing to do with the pane -- this is the channel
-# agent-supervisor#34 asks for, independent of `director-route.sh`'s idle
-# check entirely (no tmux stub touched anywhere in this test).
+# --- escalate: detect-only, never marks by itself --------------------------
+# agent-supervisor#42 review: escalate used to mark the row escalated the
+# instant it was detected, before any caller had proven a notification
+# actually went out -- a failed page then permanently suppressed the retry.
+# escalate is now read-only, like stats: it reports, it does not mutate. The
+# load-bearing claim is unchanged from #34 -- escalate must fire for a
+# message that is old but whose delivery has nothing to do with the pane --
+# independent of director-route.sh's idle check entirely (no tmux stub
+# touched anywhere in this test).
 out=$(run escalate 60); rc=$?
 want_exit "escalate past its threshold exits 0" "$rc" 0
 want_contains "escalate reports the stale message's text" "fresh one" "$out"
-want_contains "escalate marks the row escalated in the box" '"escalated": true' "$(cat "$D/box.jsonl")"
+want_not_contains "escalate alone does not mark the row escalated" '"escalated": true' "$(cat "$D/box.jsonl")"
 
 out2=$(run escalate 60); rc2=$?
-want_exit "escalating the same message twice exits 1 the second time" "$rc2" 1
-want_contains "the second escalate call reports nothing new (no re-page)" "no stale director messages" "$out2"
+want_exit "calling escalate again without a commit still reports it (nothing marked it yet)" "$rc2" 0
+want_contains "the uncommitted escalate keeps reporting the same stale message" "fresh one" "$out2"
+
+# --- escalate-commit: marks only the "at" timestamps given as arguments ----
+at=$(python3 -c "import json; print(json.loads(open('$D/box.jsonl').read().strip())['at'])")
+run escalate-commit "$at"
+want_contains "escalate-commit marks the row escalated in the box" '"escalated": true' "$(cat "$D/box.jsonl")"
+
+out3=$(run escalate 60); rc3=$?
+want_exit "escalating a now-committed message exits 1 the second time" "$rc3" 1
+want_contains "the escalate call after commit reports nothing new (no re-page)" "no stale director messages" "$out3"
+
+# escalate-commit is idempotent and a no-op for an unknown/blank target.
+run escalate-commit "$at"
+want_contains "re-committing an already-escalated row is a no-op, not an error" '"escalated": true' "$(cat "$D/box.jsonl")"
+out4=$(run escalate-commit); rc4=$?
+want_exit "escalate-commit with no target arguments exits 0" "$rc4" 0
 
 # A message younger than the threshold is not escalated.
 rm -f "$D/box.jsonl"
@@ -266,11 +304,11 @@ out=$(run escalate 60); rc=$?
 want_exit "an already-drained old message is not escalated" "$rc" 1
 want_not_contains "a drained message never reports as stale" "already delivered" "$out"
 
-# --- mutation-check: drop the escalated-marking and confirm re-paging goes red
-# The brief's own bar: mutate the fix and watch a test go red. Patch out the
-# `r["escalated"] = True` write so a caller that ran escalate() twice would
-# be told to page Jon twice for the same message -- the exact repeat-page
-# failure the `escalated` field exists to prevent.
+# --- mutation-check: drop the escalate-commit marking and confirm re-paging
+# goes red. The brief's own bar: mutate the fix and watch a test go red.
+# Patch out the `r["escalated"] = True` write so a caller that committed the
+# same message twice would be told to page Jon twice for it -- the exact
+# repeat-page failure the `escalated` field exists to prevent.
 INBOX_DIR="$(cd "$(dirname "$INBOX")" && pwd)"
 MUTANT="$INBOX_DIR/.director-inbox-mutant-noescalated.sh"
 trap 'rm -f "$MUTANT"' EXIT
@@ -279,10 +317,10 @@ python3 - "$INBOX" "$MUTANT" <<'PY' || patch_rc=$?
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = '            r["escalated"] = True\n            newly_stale.append(r)'
-replacement = '            newly_stale.append(r)'
-assert marker in text, "escalate marking line not found -- director-inbox.sh shape changed"
-assert text.count(marker) == 1, "escalate marking line not unique -- director-inbox.sh shape changed"
+marker = '            r["escalated"] = True\n            changed = True'
+replacement = '            changed = True'
+assert marker in text, "escalate-commit marking line not found -- director-inbox.sh shape changed"
+assert text.count(marker) == 1, "escalate-commit marking line not unique -- director-inbox.sh shape changed"
 open(dst, "w").write(text.replace(marker, replacement, 1))
 PY
 if [ "$patch_rc" -ne 0 ]; then
@@ -298,7 +336,8 @@ row = json.loads(open('$D/box.jsonl').read().strip())
 row['at'] = '2020-01-01T00:00:00Z'
 open('$D/box.jsonl', 'w').write(json.dumps(row) + chr(10))
 "
-  DIRECTOR_INBOX="$D/box.jsonl" bash "$MUTANT" escalate 60 >/dev/null
+  at3=$(python3 -c "import json; print(json.loads(open('$D/box.jsonl').read().strip())['at'])")
+  DIRECTOR_INBOX="$D/box.jsonl" bash "$MUTANT" escalate-commit "$at3" >/dev/null
   out3=$(DIRECTOR_INBOX="$D/box.jsonl" bash "$MUTANT" escalate 60); rc3=$?
   if [ "$rc3" -eq 0 ]; then
     ok "mutation confirmed: without the escalated marking, the same stale message escalates again (a real fix would exit 1 here)"
