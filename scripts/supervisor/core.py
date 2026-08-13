@@ -1145,6 +1145,8 @@ class Ledger:
         return self._transition(task_id, pane_nonce, ("delivered",), "accepted", "accepted_at")
 
     def _cancel_open_task_tx(self, connection, lane, now):
+        if connection.execute("SELECT 1 FROM lanes WHERE lane = ?", (lane,)).fetchone() is None:
+            raise ValueError(f"unknown lane: {lane}")
         row = connection.execute(
             "SELECT * FROM tasks WHERE lane = ? AND status NOT IN ('complete','failed','cancelled')",
             (lane,),
@@ -1163,6 +1165,13 @@ class Ledger:
         outstanding row it already found, excluding `delivery_pending` --
         this method's own SELECT is intentionally broader and stays available
         standalone, e.g. for a human operator freeing a lane by hand).
+
+        agent-supervisor#17: an unrecognised lane id and a real lane with
+        nothing outstanding both returned `None`, so
+        `{"cancelled":null}` meant two different things -- and the second
+        one, an unknown id silently reported as "already free", is how a
+        typo'd `--lane` looks identical to a real completion. Raises for the
+        former; only a registered lane with no open task returns `None` now.
         """
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
