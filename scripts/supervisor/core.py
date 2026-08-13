@@ -804,6 +804,32 @@ class Ledger:
         with contextlib.closing(self._connect()) as connection:
             return self._dict(connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone())
 
+    def get_task_for_issue(self, issue_ref):
+        """The most recent task dispatched for a GitHub issue -- keyed by the
+        issue number, never by a branch name.
+
+        `record_dispatch` (via `cli.py`'s free `record_dispatch`) writes
+        `source_tasks.source_ref` as `str(primary)`, the issue this dispatch
+        was FOR -- see that function's docstring. `source_tasks.id` and
+        `tasks.id` are the same task id, written in the same transaction, so
+        this join needs no third mapping table. Ordered by `tasks.created_at`
+        DESC: an issue re-dispatched after a prior task finished (recycled,
+        or given to a second lane) has more than one row, and the most
+        recent dispatch is the one that actually holds the issue now.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT tasks.* FROM tasks
+                JOIN source_tasks ON source_tasks.id = tasks.id
+                WHERE source_tasks.source_kind = 'issue' AND source_tasks.source_ref = ?
+                ORDER BY tasks.created_at DESC
+                LIMIT 1
+                """,
+                (str(issue_ref),),
+            ).fetchone()
+        return self._dict(row)
+
     def list_tasks(self):
         with contextlib.closing(self._connect()) as connection:
             rows = connection.execute("SELECT * FROM tasks ORDER BY created_at, id").fetchall()
