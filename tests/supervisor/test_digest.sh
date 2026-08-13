@@ -616,5 +616,61 @@ chk "default source (unset) resolves to github, not always-none ledger" \
 
 rm -rf "$OK"
 
+# 16. agent-supervisor#36: delivered ledger rows whose pane has visibly
+# returned to idle must be surfaced, but never auto-completed. The busy twin is
+# the load-bearing negative case: a reconciler that reports every delivered
+# task creates noise, and noise is why the original capacity loss stayed
+# invisible for hours.
+REC="$D/reconcile"; mkdir -p "$REC/bin" "$REC/state"
+cat > "$REC/bin/gh" <<'S'
+#!/bin/bash
+case "$1 $2" in
+  "pr list") echo "[]" ;;
+  *) exit 1 ;;
+esac
+S
+chmod +x "$REC/bin/gh"
+cat > "$REC/bin/lanes" <<'S'
+#!/bin/bash
+case "${1:-}" in
+  --json)
+    cat <<'JSON'
+[
+  {"window":2,"window_id":"@102","name":"free-2","command":"claude.exe","state":"free","idle_seconds":480},
+  {"window":3,"window_id":"@103","name":"ad36-busy","command":"claude.exe","state":"busy","idle_seconds":480}
+]
+JSON
+    ;;
+  *)
+    printf 'WINDOW NAME COMMAND STATE\n'
+    printf '2      free-2 claude.exe free\n'
+    printf '3      ad36-busy claude.exe busy\n'
+    ;;
+esac
+S
+chmod +x "$REC/bin/lanes"
+AGENT_SUPERVISOR_STATE_DIR="$REC/state" python3 "$HERE/../../scripts/supervisor/cli.py" record-dispatch \
+  --lane t:2 --task ad36-idle --summary "idle task" --pane-id %2 --pane-path "$REC" \
+  --command claude.exe --server-id '$rec:1' --session-id '$0' --issue 36 --github acme/agent-supervisor >/dev/null
+AGENT_SUPERVISOR_STATE_DIR="$REC/state" python3 "$HERE/../../scripts/supervisor/cli.py" record-dispatch \
+  --lane t:3 --task ad36-busy --summary "busy task" --pane-id %3 --pane-path "$REC" \
+  --command claude.exe --server-id '$rec:1' --session-id '$0' --issue 37 --github acme/agent-supervisor >/dev/null
+before_status=$(AGENT_SUPERVISOR_STATE_DIR="$REC/state" python3 "$HERE/../../scripts/supervisor/cli.py" status)
+reconcile_json=$(PATH="$REC/bin:$PATH" SUPERVISOR_STATE="$REC/state" LANES_SESSION=t \
+  DIGEST_REPOS=only GH_STUB_FIXTURES="$REC" DIGEST_LANES_BIN="$REC/bin/lanes" DIGEST_RECONCILE_IDLE_AFTER=300 \
+  bash "$DIGEST" --json 2>/dev/null)
+after_status=$(AGENT_SUPERVISOR_STATE_DIR="$REC/state" python3 "$HERE/../../scripts/supervisor/cli.py" status)
+chk "delivered idle lane appears in reconciliation digest" \
+  "ad36-idle" "$(jq -r '.reconciliation.delivered_idle[0].task' <<<"$reconcile_json")"
+chk "busy delivered lane does NOT appear in reconciliation digest" \
+  "0" "$(jq -r '[.reconciliation.delivered_idle[] | select(.task=="ad36-busy")] | length' <<<"$reconcile_json")"
+chk "reconciler does not auto-complete the surfaced task" \
+  "$before_status" "$after_status"
+grep -q "record-completion --task ad36-idle" <<<"$(PATH="$REC/bin:$PATH" SUPERVISOR_STATE="$REC/state" LANES_SESSION=t \
+  DIGEST_REPOS=only GH_STUB_FIXTURES="$REC" DIGEST_LANES_BIN="$REC/bin/lanes" DIGEST_RECONCILE_IDLE_AFTER=300 \
+  bash "$DIGEST" 2>/dev/null)" \
+  && ok "human digest names record-completion for a finished-but-unsignalled lane" \
+  || bad "human digest names record-completion" "$reconcile_json"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

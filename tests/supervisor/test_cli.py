@@ -733,6 +733,53 @@ class StrandedClaimRecoveryIsReachable(unittest.TestCase):
             self.assertEqual(0, proc.returncode, proc.stderr)
             self.assertIsNone(json.loads(proc.stdout)["cancelled"])
 
+    def test_record_completion_by_lane_resolves_a_live_claim_row(self):
+        """agent-supervisor#36 (second issue comment): the codex harness's
+        completions land as a `ledger-claim:<lane>:<token>` row, not a task
+        row, so the only recovery verb that used to work on one was
+        `cancel-open-task` -- which DISCARDS a genuinely completed review.
+        `--lane` alone must resolve that row and mark it complete, mirroring
+        `cancel_open_task`'s own "whatever owns this lane" lookup but writing
+        the honest outcome instead of a cancellation."""
+        with tempfile.TemporaryDirectory() as root:
+            self._lane(root)
+            self.assertEqual(0, self._run(
+                root, "claim-lane", "--lane", "free-9", "--token", "ad1-review", "--owner-pid", "4242",
+            ).returncode)
+            self.assertEqual(0, self._run(
+                root, "commit-lane-claim", "--lane", "free-9", "--token", "ad1-review",
+            ).returncode)
+            proc = self._run(root, "record-completion", "--lane", "free-9", "--note", "review posted, PR merged")
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            value = json.loads(proc.stdout)
+            self.assertEqual("ledger-claim:free-9:ad1-review", value["id"])
+            self.assertEqual("complete", value["status"])
+            self.assertTrue(Ledger(Path(root)).lane_available("free-9"))
+
+    def test_record_completion_by_task_and_lane_resolves_the_matching_claim_row(self):
+        """The combined form: an operator who read the bare token off the
+        pane (as the issue's operator did) can pass it back with `--lane`
+        rather than needing to type the full `ledger-claim:` id."""
+        with tempfile.TemporaryDirectory() as root:
+            self._lane(root)
+            self.assertEqual(0, self._run(
+                root, "claim-lane", "--lane", "free-9", "--token", "ad1-review", "--owner-pid", "4242",
+            ).returncode)
+            self.assertEqual(0, self._run(
+                root, "commit-lane-claim", "--lane", "free-9", "--token", "ad1-review",
+            ).returncode)
+            proc = self._run(
+                root, "record-completion", "--task", "ad1-review", "--lane", "free-9", "--note", "done",
+            )
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertEqual("ledger-claim:free-9:ad1-review", json.loads(proc.stdout)["id"])
+
+    def test_record_completion_without_task_or_lane_raises(self):
+        with tempfile.TemporaryDirectory() as root:
+            proc = self._run(root, "record-completion", "--note", "done")
+            self.assertNotEqual(0, proc.returncode)
+            self.assertIn("requires --task or --lane", proc.stderr)
+
 
 class TaskLaneCliTest(unittest.TestCase):
     """agent-dotfiles#212: `dispatch.sh` refuses a review dispatched to the
