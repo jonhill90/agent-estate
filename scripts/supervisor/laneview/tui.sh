@@ -47,8 +47,16 @@ JSON="$2"
 
 REFRESH_SECS="${LANEVIEW_TUI_REFRESH:-2}"
 
-python3 - "$SESSION" "$JSON" "$LANES_SH" "$REFRESH_SECS" <<'PY'
-import json, os, subprocess, sys, time
+# Reviewed: `python3 -` reads the script itself from stdin, so a heredoc
+# feeding it here also consumes stdin -- curses then has no real terminal
+# to read keypresses from (every getch() came back -1, confirmed live: the
+# static frame rendered fine, but j/k/enter never registered a single
+# keystroke). The script goes to a temp file instead so stdin stays the
+# actual tty all the way into curses.
+PY_SRC="$(mktemp "${TMPDIR:-/tmp}/laneview-tui.XXXXXX.py")"
+trap 'rm -f "$PY_SRC"' EXIT
+cat > "$PY_SRC" <<'PY'
+import json, subprocess, sys, time
 
 session, raw, lanes_sh, refresh_secs = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
 
@@ -93,7 +101,11 @@ def run_curses(stdscr, rows0):
 
     curses.curs_set(0)
     stdscr.nodelay(True)
-    stdscr.timeout(int(refresh_secs * 1000))
+    # Reviewed: a sub-1s LANEVIEW_TUI_REFRESH truncated to a 0ms curses
+    # timeout, which turns getch() non-blocking and busy-loops fetch()
+    # below with no throttle at all. 250ms is fast enough to feel
+    # immediate without spinning.
+    stdscr.timeout(max(250, int(refresh_secs * 1000)))
     curses.start_color()
     curses.use_default_colors()
     curses.init_pair(1, curses.COLOR_GREEN, -1)   # free
@@ -136,17 +148,27 @@ def run_curses(stdscr, rows0):
             stdscr.addstr(2, 0, msg[: w - 1], curses.A_REVERSE | curses.A_BOLD)
             stdscr.addstr(4, 0, "press q to quit, any other key to retry"[: w - 1])
         else:
+            # Reviewed: the interactive path used to drop `supervisor` rows
+            # entirely, while render_static (the headless path) shows every
+            # row -- a real divergence between the two code paths for the
+            # same contract. Both now show every row text.sh does; only
+            # lanes (non-supervisor rows) are selectable/jumpable.
             lanes = [r for r in rows if r["state"] != "supervisor"]
             selected = max(0, min(selected, len(lanes) - 1)) if lanes else 0
-            for i, r in enumerate(lanes):
-                y = 2 + i
+            lane_i = 0
+            for y, r in enumerate(rows, start=2):
                 if y >= h - 2:
                     break
+                is_lane = r["state"] != "supervisor"
                 g = STATE_GLYPH.get(r["state"], "#")
                 line = f"{g} {r['name']:<24} {r['state']}"
                 attr = color_for(r["state"])
-                if i == selected:
-                    attr |= curses.A_REVERSE
+                if is_lane:
+                    if lane_i == selected:
+                        attr |= curses.A_REVERSE
+                    lane_i += 1
+                else:
+                    attr |= curses.A_DIM
                 stdscr.addstr(y, 0, line[: w - 1], attr)
             footer_y = h - 1
             stdscr.addstr(
@@ -159,17 +181,24 @@ def run_curses(stdscr, rows0):
 
         ch = stdscr.getch()
         now = time.monotonic()
-        if ch == -1 and now - last_ok < refresh_secs:
-            continue
 
+        # Reviewed: fetch() used to run unconditionally at the bottom of
+        # every iteration, so every single j/k/enter keypress triggered a
+        # fresh `lanes.sh --json` subprocess (up to a 10s stall per press
+        # if lanes.sh was slow) instead of only the refresh timer. A
+        # navigation keypress now redraws from the rows already in hand
+        # and loops back without touching the network/tmux at all; fetch()
+        # runs only on the timer tick (ch == -1) or an explicit retry
+        # keypress while UNREACHABLE.
         if ch in (ord("q"), 27):  # q or Esc
             break
-        elif ch in (curses.KEY_DOWN, ord("j")) and unreachable_reason is None:
-            selected = min(selected + 1, max(0, len([r for r in rows if r["state"] != "supervisor"]) - 1))
-        elif ch in (curses.KEY_UP, ord("k")) and unreachable_reason is None:
+        elif unreachable_reason is None and ch in (curses.KEY_DOWN, ord("j")):
+            selected = min(selected + 1, max(0, len(lanes) - 1))
+            continue
+        elif unreachable_reason is None and ch in (curses.KEY_UP, ord("k")):
             selected = max(selected - 1, 0)
-        elif ch in (10, 13, curses.KEY_ENTER) and unreachable_reason is None:
-            lanes = [r for r in rows if r["state"] != "supervisor"]
+            continue
+        elif unreachable_reason is None and ch in (10, 13, curses.KEY_ENTER):
             if lanes and 0 <= selected < len(lanes):
                 target = f"{session}:{lanes[selected]['window']}"
                 # Navigation only -- the same act typing the command by hand
@@ -178,8 +207,12 @@ def run_curses(stdscr, rows0):
                 subprocess.run(["tmux", "select-window", "-t", target])
                 subprocess.run(["tmux", "switch-client", "-t", session],
                                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            continue
+        elif ch != -1 and unreachable_reason is None:
+            continue  # unrecognized key while live: ignore, no fetch
 
-        # Refresh tick, or a keypress while unreachable asked for a retry.
+        # Reached only on the refresh timer (ch == -1) or any keypress
+        # while UNREACHABLE (an explicit retry).
         new_rows, err = fetch()
         if err is not None:
             unreachable_reason = err
@@ -203,3 +236,5 @@ import curses  # noqa: E402 -- only imported once we know we have a tty
 rc = curses.wrapper(run_curses, rows0)
 sys.exit(rc)
 PY
+
+python3 "$PY_SRC" "$SESSION" "$JSON" "$LANES_SH" "$REFRESH_SECS"

@@ -23,5 +23,14 @@ impl="${impl:-tui}"
 
 session="$(tmux display-message -p '#S')"
 
+# Reviewed: single-quoting $session directly into the -E command string
+# breaks (and could inject shell syntax) if a session name ever contains a
+# single quote -- tmux session names are supervisor-chosen today, but this
+# costs nothing to close. %q shell-escapes each value before it is spliced
+# into the popup's command string.
+printf -v quoted_impl '%q' "$impl"
+printf -v quoted_session '%q' "$session"
+printf -v quoted_laneview '%q' "$LANEVIEW_SH"
+
 tmux display-popup -w 90% -h 90% -T " laneview: $session " \
-  -E "bash '$LANEVIEW_SH' '$impl' '$session'"
+  -E "bash $quoted_laneview $quoted_impl $quoted_session"

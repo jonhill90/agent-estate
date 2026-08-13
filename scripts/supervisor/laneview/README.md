@@ -83,6 +83,16 @@ uses — and exits, so rule 2 (never crash into a traceback, never show
 staleness) holds headlessly too, and the renderer stays testable the same
 way `text.sh` is: call it directly with canned json and no tty.
 
+The interactive path (selection, jump-to-lane) is a different code path
+from that static frame and needs its own coverage — `tests/supervisor/
+test_laneview_tui_interactive.sh` drives it inside a real isolated tmux
+pane rather than skip it. It exists because review caught a real bug this
+way that a static-frame test alone could not: an earlier version fed the
+Python source to `python3 -` over a heredoc, which consumes stdin, so
+curses had no terminal left to read keys from — it rendered correctly
+(rendering only needs stdout) and silently dropped every keystroke. The
+fix writes the source to a temp file first so stdin stays the tty.
+
 ### The tmux plugin
 
 `../laneview-plugin-tmux/` is jonhill90/agent-supervisor#7's other ask, "a
