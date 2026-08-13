@@ -70,10 +70,10 @@ directory, invoke the same subcommands directly against `cli.py`, e.g.
 
 ```bash
 hill90-supervisor register --lane architecture --target %19 \
-  --harness codex --repo /Users/jon/source/repos/Personal/Hill90
+  --harness codex --repo ~/source/repos/Personal/Hill90
 
 hill90-supervisor register --lane infra-claude --target %8 \
-  --harness claude --repo /Users/jon/source/repos/Personal/Hill90
+  --harness claude --repo ~/source/repos/Personal/Hill90
 
 hill90-supervisor reconstruct \
   --source-url https://github.com/jonhill90/Hill90/issues/42 \
