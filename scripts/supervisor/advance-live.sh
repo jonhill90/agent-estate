@@ -466,6 +466,18 @@ maybe_restart_poller() {
     log "POLLER-RESTART-REQUESTED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written; prompt poller-recover.sh waiter started (watchdog remains the backstop)"
   else
     log "POLLER-RESTART-REQUESTED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written; prompt relaunch could not be started, watchdog poller-recover.sh remains the backstop"
+    # agent-supervisor#41 (agent-supervisor#57): this line used to reach only
+    # advance-live.log. watchdog.sh captures this script's STDOUT into its
+    # own `advance:` status line (advance_on_exit, watchdog.sh) -- but only
+    # ever the top-level "advance-live: current"/"advanced" echo, which
+    # reports the git-advance outcome and says nothing about a
+    # poller-restart-request nested inside it. On 2026-08-13 that produced
+    # exactly this: `advance-live: current, ...` every tick for hours while
+    # the SAME tick's prompt relaunch failed silently underneath it -- a
+    # trivially "successful" tick masking a real failure it also owns. This
+    # echo is what lets watchdog.status's `advance:` field, and so
+    # digest.sh, see the failure instead of only the outer success.
+    echo "advance-live: POLLER-RESTART-REQUESTED but prompt relaunch could not be started -- watchdog poller-recover.sh remains the backstop"
   fi
   return 0
 }
@@ -474,14 +486,17 @@ prompt_poller_relaunch() { # prompt_poller_relaunch <pane> <old-sha> <live-sha> 
   local pane="$1" poller_sha="$2" live_sha="$3" poller_pid="$4"
   if [ -z "$poller_pid" ]; then
     log "POLLER-PROMPT-RELAUNCH-SKIPPED: $INBOX_POLL_STATUS_PATH has no pid: line, so advance-live.sh cannot tell when the old poller is gone; watchdog poller-recover.sh remains the backstop"
+    echo "advance-live: poller-restart skipped -- $INBOX_POLL_STATUS_PATH has no pid: line"
     return 1
   fi
   if [ ! -e "$HERE/poller-recover.sh" ]; then
     log "POLLER-PROMPT-RELAUNCH-SKIPPED: poller-recover.sh is missing beside advance-live.sh; reinstall or advance the live worktree"
+    echo "advance-live: poller-restart skipped -- poller-recover.sh is missing beside advance-live.sh"
     return 1
   fi
   if [ ! -x "$HERE/poller-recover.sh" ]; then
     log "POLLER-PROMPT-RELAUNCH-SKIPPED: poller-recover.sh exists but is not executable; run chmod +x $HERE/poller-recover.sh or restore the committed 100755 mode"
+    echo "advance-live: poller-restart skipped -- poller-recover.sh exists but is not executable"
     return 1
   fi
   (
