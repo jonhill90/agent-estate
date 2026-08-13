@@ -702,6 +702,97 @@ class LedgerTest(unittest.TestCase):
         source = self.ledger.get_source_task("ad999-first")
         self.assertEqual("https://github.com/jonhill90/agent-dotfiles/issues/999", source["source_url"])
 
+    def test_get_task_for_issue_resolves_by_issue_never_by_branch(self):
+        """agent-supervisor#35: `dispatch.sh`'s `--reviews-pr` guard used to
+        determine a PR's author by regexing its head branch. The ledger
+        already carries the fact this needs -- `source_tasks.source_ref` is
+        the issue number `record_dispatch` was called FOR (see that
+        function's own docstring) -- so this reads it back keyed on the
+        issue, with no branch name involved anywhere in this test."""
+        self.assertIsNone(self.ledger.get_task_for_issue("501"))
+
+        self.ledger.record_dispatch(
+            lane="free-3",
+            pane_id="%3",
+            nonce="nonce-3",
+            harness="claude",
+            repo="/repo/free-3",
+            server_id="server-a",
+            session_id="$3",
+            command="claude.exe",
+            task_id="ad501-scrub-secrets",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-dotfiles/issues/501",
+            source_ref="501",
+            summary="#501 scrub secrets",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-3"],
+            status_marker=None,
+        )
+        found = self.ledger.get_task_for_issue("501")
+        self.assertEqual("free-3", found["lane"])
+        self.assertEqual("ad501-scrub-secrets", found["id"])
+
+        # An int and its string spelling are the same issue -- callers pass
+        # both (dispatch.sh always passes a string; cli.py's own argparse
+        # default for --issue is a str too, but this must not be brittle
+        # about the caller's type).
+        self.assertEqual("ad501-scrub-secrets", self.ledger.get_task_for_issue(501)["id"])
+
+        # A DIFFERENT issue number, even one that shares a prefix, is not a
+        # match -- this is not a substring or LIKE lookup.
+        self.assertIsNone(self.ledger.get_task_for_issue("5011"))
+        self.assertIsNone(self.ledger.get_task_for_issue("50"))
+
+    def test_get_task_for_issue_prefers_the_most_recent_dispatch(self):
+        """An issue re-dispatched after a prior task finished (recycled, or
+        handed to a second lane) has more than one `source_tasks` row for
+        the same issue -- the most recent one is the lane that actually
+        holds it now, not the first lane that ever touched it."""
+        self.ledger.record_dispatch(
+            lane="free-3",
+            pane_id="%3",
+            nonce="nonce-3",
+            harness="claude",
+            repo="/repo/free-3",
+            server_id="server-a",
+            session_id="$3",
+            command="claude.exe",
+            task_id="ad502-first-attempt",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-dotfiles/issues/502",
+            source_ref="502",
+            summary="#502 first attempt",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-3"],
+            status_marker=None,
+        )
+        self.ledger.cancel_open_task("free-3")
+        self.clock.value += 1
+
+        self.ledger.record_dispatch(
+            lane="free-4",
+            pane_id="%4",
+            nonce="nonce-4",
+            harness="claude",
+            repo="/repo/free-4",
+            server_id="server-a",
+            session_id="$4",
+            command="claude.exe",
+            task_id="ad502-second-attempt",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-dotfiles/issues/502",
+            source_ref="502",
+            summary="#502 second attempt",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-4"],
+            status_marker=None,
+        )
+
+        found = self.ledger.get_task_for_issue("502")
+        self.assertEqual("free-4", found["lane"])
+        self.assertEqual("ad502-second-attempt", found["id"])
+
     def test_mark_lane_held_makes_a_free_lane_read_occupied(self):
         """agent-dotfiles#188 finding 1: this is what closes the window a
         rolled-back `record_dispatch` used to leave open -- a lane the ledger
