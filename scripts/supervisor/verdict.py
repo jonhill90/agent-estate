@@ -76,6 +76,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -256,6 +257,20 @@ def _parse_verdict_comment(body):
     return None
 
 
+_REVIEW_LANE_RE = re.compile(r"(?im)^\s*Review-Lane:\s*([A-Za-z0-9_.:@/-]+)\s*$")
+
+
+def _parse_review_lane(body):
+    """Lane stamp for comment verdicts.
+
+    GitHub login cannot identify a lane in this estate because every agent
+    posts through the same account. A comment verdict can only be compared for
+    independence when the reviewing lane states its lane id explicitly.
+    """
+    match = _REVIEW_LANE_RE.search(body or "")
+    return match.group(1) if match else None
+
+
 class GithubReviewVerdictSource(VerdictSource):
     """Reads GitHub's own review state, and -- agent-supervisor#53 -- issue
     comments whose body starts with `**Verdict:`. Never comment PROSE: a
@@ -282,7 +297,6 @@ class GithubReviewVerdictSource(VerdictSource):
             payload = json.loads(raw)
             reviews = payload.get("reviews", [])
             comments = payload.get("comments", [])
-            pr_author = (payload.get("author") or {}).get("login")
             if not isinstance(reviews, list):
                 raise ValueError("reviews is not a list")
             if not isinstance(comments, list):
@@ -292,12 +306,12 @@ class GithubReviewVerdictSource(VerdictSource):
         review_result = self._review_verdict(reviews, repo=repo, number=number, head_sha=head_sha)
         if review_result["verdict"] in ("approved", "rejected"):
             return review_result
-        comment_result = self._comment_verdict(comments, pr_author=pr_author)
+        comment_result = self._comment_verdict(comments)
         if comment_result is not None:
             return comment_result
         return review_result
 
-    def _comment_verdict(self, comments, *, pr_author):
+    def _comment_verdict(self, comments):
         """The LAST comment (chronological, as `gh` returns them) whose body
         anchors on `**Verdict:` -- a later re-review supersedes an earlier
         one, the same "current state" reading the review side already gives
@@ -311,21 +325,19 @@ class GithubReviewVerdictSource(VerdictSource):
             if parsed is None:
                 continue
             author = (comment.get("author") or {}).get("login")
-            decisive = (parsed, author, comment.get("createdAt") or "")
+            reviewer_lane = _parse_review_lane(comment.get("body"))
+            decisive = (parsed, author, reviewer_lane, comment.get("createdAt") or "")
         if decisive is None:
             return None
-        verdict_value, author, created_at = decisive
-        # An approving/rejecting comment from the PR's OWN author is not an
-        # independent review -- the distinction the authorship work in
-        # agent-supervisor#35/#39 exists to preserve. This detector must not
-        # erase it, so the (non-)independence is stated in `detail` rather
-        # than silently collapsed into a bare verdict.
-        independent = author is not None and pr_author is not None and author != pr_author
+        verdict_value, author, reviewer_lane, created_at = decisive
         who = f"@{author}" if author else "an unknown author"
-        independence = "independent" if independent else "NOT independent -- posted by the PR's own author"
         when = f" at {created_at}" if created_at else ""
-        detail = f"PR comment verdict ({verdict_value}) by {who} ({independence}){when}"
-        return {"verdict": verdict_value, "detail": detail}
+        lane = f", review lane {reviewer_lane}" if reviewer_lane else ""
+        detail = f"PR comment verdict ({verdict_value}) by {who}{lane}{when}"
+        result = {"verdict": verdict_value, "detail": detail, "verdict_kind": "comment"}
+        if reviewer_lane:
+            result["reviewer_lane"] = reviewer_lane
+        return result
 
     def _review_verdict(self, reviews, *, repo, number, head_sha=None):
         decisive = [r for r in reviews if isinstance(r, dict) and r.get("state") in ("CHANGES_REQUESTED", "APPROVED")]
@@ -334,9 +346,9 @@ class GithubReviewVerdictSource(VerdictSource):
             # unable to tell a current review from a stale one.
             states = [r.get("state") for r in decisive]
             if "CHANGES_REQUESTED" in states:
-                return {"verdict": "rejected", "detail": "GitHub review state CHANGES_REQUESTED"}
+                return {"verdict": "rejected", "detail": "GitHub review state CHANGES_REQUESTED", "verdict_kind": "github_review"}
             if "APPROVED" in states:
-                return {"verdict": "approved", "detail": "GitHub review state APPROVED"}
+                return {"verdict": "approved", "detail": "GitHub review state APPROVED", "verdict_kind": "github_review"}
             return {"verdict": "none", "detail": ""}
         current = [r for r in decisive if (r.get("commit") or {}).get("oid") == head_sha]
         rebase_basis = None
@@ -357,9 +369,17 @@ class GithubReviewVerdictSource(VerdictSource):
                     break
         current_states = [r.get("state") for r in current]
         if "CHANGES_REQUESTED" in current_states:
-            return {"verdict": "rejected", "detail": rebase_basis or f"GitHub review state CHANGES_REQUESTED at {head_sha}"}
+            return {
+                "verdict": "rejected",
+                "detail": rebase_basis or f"GitHub review state CHANGES_REQUESTED at {head_sha}",
+                "verdict_kind": "github_review",
+            }
         if "APPROVED" in current_states:
-            return {"verdict": "approved", "detail": rebase_basis or f"GitHub review state APPROVED at {head_sha}"}
+            return {
+                "verdict": "approved",
+                "detail": rebase_basis or f"GitHub review state APPROVED at {head_sha}",
+                "verdict_kind": "github_review",
+            }
         if decisive:
             stale_shas = sorted({(r.get("commit") or {}).get("oid") or "unknown-sha" for r in decisive})
             return {
@@ -403,6 +423,8 @@ class LedgerVerdictSource(VerdictSource):
                         f"ledger: {row['reviewer']} recorded at {row['updated_at']} for {recorded_sha}, "
                         f"head moved {recorded_sha} -> {head_sha}, {basis}"
                     ),
+                    "verdict_kind": "ledger",
+                    "reviewer_lane": row["reviewer"],
                 }
             return {
                 "verdict": "unknown",
@@ -411,6 +433,8 @@ class LedgerVerdictSource(VerdictSource):
         return {
             "verdict": row["verdict"],
             "detail": f"ledger: {row['reviewer']} recorded at {row['updated_at']} for {recorded_sha}",
+            "verdict_kind": "ledger",
+            "reviewer_lane": row["reviewer"],
         }
 
 

@@ -437,27 +437,25 @@ class GithubCommentVerdictTests(unittest.TestCase):
         result = source.verdict(repo=REPO, number=1)
         self.assertEqual(result["verdict"], "none")
 
-    def test_verdict_comment_from_the_pr_author_is_reported_as_non_independent(self):
-        """Guard 5: a `**Verdict:` comment written by the PR's own author is
-        still reported, but marked as non-independent -- the authorship
-        distinction from agent-supervisor#35/#39 must not be erased."""
-        comments = [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**"}]
+    def test_verdict_comment_exposes_a_review_lane_stamp(self):
+        comments = [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:4"}]
         source = GithubReviewVerdictSource(
             runner=_comment_runner(comments=comments, author={"login": "jonhill90"})
         )
         result = source.verdict(repo=REPO, number=1)
         self.assertEqual(result["verdict"], "approved")
-        self.assertIn("NOT independent", result["detail"])
+        self.assertEqual(result["reviewer_lane"], "t:4")
+        self.assertEqual(result["verdict_kind"], "comment")
 
-    def test_verdict_comment_from_an_independent_author_says_so(self):
+    def test_unstamped_verdict_comment_does_not_guess_independence_from_login(self):
         comments = [{"author": {"login": "codex"}, "body": "**Verdict: APPROVE**"}]
         source = GithubReviewVerdictSource(
             runner=_comment_runner(comments=comments, author={"login": "jonhill90"})
         )
         result = source.verdict(repo=REPO, number=1)
         self.assertEqual(result["verdict"], "approved")
-        self.assertIn("independent", result["detail"])
-        self.assertNotIn("NOT independent", result["detail"])
+        self.assertNotIn("reviewer_lane", result)
+        self.assertNotIn("independent", result["detail"])
 
     def test_the_most_recent_matching_comment_wins(self):
         comments = [
