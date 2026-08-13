@@ -250,8 +250,9 @@ LOG_CMD="${WATCHDOG_LOG_CMD:-log}"
 # deliberate stop; #24 was filed over a signal nobody saw, not over one
 # extra alert.
 #
-# Echoes exactly one of stopped|dead|unknown and always returns 0 -- this is
-# a classifier, not a gate; watchdog_stale_check decides what each means.
+# Echoes exactly one of stopped|dead|loaded_not_firing|unknown and always
+# returns 0 -- this is a classifier, not a gate; watchdog_stale_check decides
+# what each means.
 # Never caches a result: same discipline as watchdog_age/dirty_status above,
 # and for the same reason -- every caller exists to catch state changing
 # out from under an earlier read.
@@ -298,6 +299,23 @@ watchdog_bootout_classify() {
     echo stopped
     return 0
   fi
+  # --- agent-supervisor#44: loaded and active is not automatically dead -----
+  # Measured live: `launchctl print` for a watchdog stale 18 minutes, no
+  # bootout, showed the label loaded, `state = active`, and `last exit code =
+  # 0` -- a clean exit, not a crash. `launchctl kickstart -k <label>` fixed it
+  # and normal cadence resumed unattended. That single field is the
+  # discriminator the issue itself measured between this and a genuine death:
+  # a hung or crash-looping process (the DEAD case below) has either a
+  # nonzero last exit code or none at all, because it never got that far.
+  # Checked only once launchctl_loaded=1 is already established above, so
+  # this can never fire for an absent/unloaded label (that is `stopped`,
+  # already handled) or an unreadable one (falls through to the fail-closed
+  # cases below).
+  if [ "$launchctl_readable" -eq 1 ] && [ "$launchctl_loaded" -eq 1 ] \
+     && grep -qE '^\s*last exit code = 0\s*$' <<<"$launchctl_out"; then
+    echo loaded_not_firing
+    return 0
+  fi
   if [ "$log_readable" -eq 1 ] || [ "$launchctl_readable" -eq 1 ]; then
     echo dead
     return 0
@@ -321,6 +339,15 @@ watchdog_stale_check() {
       log "$line"
       echo "advance-live: $line"
       return 0
+      ;;
+    loaded_not_firing)
+      # Loud, like DEAD -- per the brief, classification refines the report
+      # but must never gate whether the staleness alarm fires. Only the
+      # diagnosis and remedy differ: this is not "the agent is gone", it is
+      # "launchd is not re-firing it", so the message names the one command
+      # that fixed the measured incident instead of pointing at a corpse that
+      # is not there.
+      fail "WATCHDOG STALE -- $WATCHDOG_STATUS last checked ${line:-unknown} (${age}s ago), older than ${STALE_AFTER}s (${STALE_MULTIPLE}x the ${TICK_INTERVAL}s tick interval) -- LOADED BUT NOT FIRING: $WATCHDOG_LAUNCHD_LABEL is loaded and active with a clean last exit (code 0) but no attributable bootout -- launchd is not re-firing it; try: launchctl kickstart -k gui/$(id -u)/$WATCHDOG_LAUNCHD_LABEL"
       ;;
     dead)
       fail "WATCHDOG STALE -- $WATCHDOG_STATUS last checked ${line:-unknown} (${age}s ago), older than ${STALE_AFTER}s (${STALE_MULTIPLE}x the ${TICK_INTERVAL}s tick interval) -- DEAD: no attributable bootout for $WATCHDOG_LAUNCHD_LABEL in the launchd unified log or launchctl print; nothing is restarting the supervisor loop if it dies"
