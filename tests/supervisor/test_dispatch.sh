@@ -1158,6 +1158,14 @@ marker = '''  CLAIM_LANE="$candidate"
     LANE_HARNESS=$(grep -oE '"harness":"[a-z-]*"' <<<"$CHECK" | head -1 | sed -E 's/.*:"([a-z-]*)"/\\1/')
     break
   fi
+  claim_reason=$(json_field reason "$CLAIM")
+  claim_holder=$(json_field holder "$CLAIM")
+  [ "$claim_holder" = null ] && claim_holder=""
+  if [ -n "$claim_holder" ]; then
+    append_exclusion "dispatch:   $candidate: claim refused ($claim_reason; holder $claim_holder)"
+  else
+    append_exclusion "dispatch:   $candidate: claim refused ($claim_reason; no holder reported; token '$CLAIM_TOKEN' may already exist)"
+  fi
   # Lost this candidate to another dispatcher: move on, exactly as before.
   # The release is a no-op in that case (the row is the winner's, not ours)
   # and only bites when the claim committed but its result did not come back
@@ -1404,8 +1412,8 @@ else
     bad "mutation confirmed: with no reap, the killed dispatcher's lane never comes back" \
       "expected a refusal naming 'no free lane'; rc=$rc out=$out"
   fi
-  want_contains "and the refusal names how to clear a stranded claim by hand" "release-lane-claim --lane <lane> --token <token>" "$out"
-  want_contains "and how to read the token out of the ledger" 'ledger-claim:<lane>:<token>' "$out"
+  want_contains "and the refusal names the stranded claim id" "ledger-claim:t:3:ad605-crash-no-reap" "$out"
+  want_contains "and the refusal names how to clear that stranded claim by hand" "release-lane-claim --lane t:3 --token ad605-crash-no-reap" "$out"
 fi
 
 # --- agent-dotfiles#209 round 2: the point of no return is the SEND -------
@@ -1492,14 +1500,17 @@ echo '703|| the next dispatch must not take a lane that is working' >> "$D/issue
 out=$(LEDGER_STATE="$LIVE_KILL_STATE" run 703 the-next-one "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "the NEXT dispatch refuses rather than take the lane the killed dispatcher left working" "$rc" 1 "$out"
 want_contains "...naming the only lane it had as unavailable" "no free lane" "$out"
-want_missing "...and it did NOT reap the live claim away" "ledger-claim:t:3:ad702-live-then-kill" "$out"
+want_contains "...and it did NOT reap the live claim away" \
+  '"id":"ledger-claim:t:3:ad702-live-then-kill"' "$(LEDGER_STATE="$LIVE_KILL_STATE" ledger status 2>&1)"
 want_missing "...and typed nothing into that pane" "rename-window -t t:@103 ad703-the-next-one" "$(cat "$D/tmux.log")"
 # Fail-closed has a price and the refusal must name it: this lane needs a
 # human, and `release-lane-claim` deliberately will not clear it.
 want_contains "...and says to record a completion when a live brief finished without signalling" \
-  "record-completion --lane <lane>" "$out"
-want_contains "...and says cancel-open-task is for discarding a live brief that produced no real work" \
-  "cancel-open-task --lane" "$out"
+  "record-completion --lane t:3" "$out"
+want_missing "...and does not suggest release-lane-claim for a live delivered claim" \
+  "release-lane-claim" "$out"
+want_missing "...and does not suggest cancel-open-task for a delivered idle lane" \
+  "cancel-open-task" "$out"
 
 # --- the previous round's finding must not regress ------------------------
 # Moving the commit point later would be an easy way to satisfy everything

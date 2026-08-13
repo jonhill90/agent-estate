@@ -768,6 +768,22 @@ class Ledger:
             ).fetchone()
             return open_task is None
 
+    def open_task_for_lane(self, lane):
+        """Return the outstanding task that makes `lane_available` false.
+
+        This is the diagnostic half of `lane_available`: dispatch still makes
+        the yes/no decision through that API, but a refusal must explain which
+        row caused the lane to be excluded instead of collapsing every case
+        into "no free lane".
+        """
+        with contextlib.closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE lane = ? AND status NOT IN ('complete', 'failed', 'cancelled') "
+                "ORDER BY created_at DESC LIMIT 1",
+                (lane,),
+            ).fetchone()
+        return self._dict(row)
+
     def list_lanes(self):
         with contextlib.closing(self._connect()) as connection:
             rows = connection.execute("SELECT * FROM lanes ORDER BY lane").fetchall()
