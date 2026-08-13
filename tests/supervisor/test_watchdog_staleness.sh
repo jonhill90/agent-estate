@@ -83,13 +83,22 @@ EOF
 chmod +x "$D/bin/log"
 cat >"$D/bin/launchctl" <<'EOF'
 #!/bin/bash
-# STUB_LAUNCHCTL_MODE: loaded | absent | unreadable (default: loaded)
+# STUB_LAUNCHCTL_MODE: loaded | absent | unreadable | active_clean (default: loaded)
 case "$1" in
   print)
     case "${STUB_LAUNCHCTL_MODE:-loaded}" in
       loaded) echo "state = running"; exit 0 ;;
       absent) echo "Could not find service \"$2\" in domain for port" >&2; exit 3 ;;
       unreadable) echo "launchctl: internal error" >&2; exit 70 ;;
+      # agent-supervisor#44: loaded, active, currently idle between runs, and
+      # its last invocation exited cleanly -- the shape measured live for the
+      # incident this case exists to name (runs frozen, no bootout, no error).
+      active_clean)
+        echo "state = active"
+        echo "state = not running"
+        echo "last exit code = 0"
+        exit 0
+        ;;
     esac
     ;;
   *) exit 0 ;;
@@ -186,6 +195,73 @@ S=$(mktemp -d); status_at "$S" 5460
 out=$(PATH="$D/bin:$PATH" STUB_LOG_MODE=unreadable STUB_LAUNCHCTL_MODE=unreadable SUPERVISOR_STATE="$S" bash "$ADVANCE" "$LIVE" 2>&1); rc=$?
 want_exit "CANNOT TELL: both signals unreadable fails loudly, not silently downgraded" "$rc" 1 "$out"
 if grep -qi "UNKNOWN" <<<"$out"; then ok "the failure says explicitly it could not tell"; else bad "the failure says explicitly it could not tell" "$out"; fi
+
+# --- agent-supervisor#44: loaded but not firing, not DEAD -------------------
+# Measured live 2026-08-13: watchdog.status stale 18 minutes, `runs` frozen at
+# 59 across two readings 60s apart, no bootout in the log, and `launchctl
+# print` showed the label loaded/active with `last exit code = 0`. #37's
+# classifier called this DEAD -- wrong but loud. `launchctl kickstart -k
+# <label>` fixed it and normal cadence resumed on its own. This case must
+# report the diagnosis and the remedy, and must still fail loudly (exit 1):
+# per the brief, classification refines the report but must never gate
+# whether the staleness alarm fires.
+S=$(mktemp -d); status_at "$S" 5460
+out=$(PATH="$D/bin:$PATH" STUB_LOG_MODE=none STUB_LAUNCHCTL_MODE=active_clean SUPERVISOR_STATE="$S" bash "$ADVANCE" "$LIVE" 2>&1); rc=$?
+want_exit "LOADED BUT NOT FIRING: loaded/active, clean last exit, no bootout -- still fails loudly" "$rc" 1 "$out"
+if grep -qi "not firing" <<<"$out"; then ok "the failure names itself as loaded but not firing"; else bad "the failure names itself as loaded but not firing" "$out"; fi
+if grep -qi "DEAD" <<<"$out"; then bad "loaded-but-not-firing is not reported as DEAD" "$out"; else ok "loaded-but-not-firing is not reported as DEAD"; fi
+if grep -q "launchctl kickstart -k" <<<"$out"; then ok "the message contains the kickstart remedy"; else bad "the message contains the kickstart remedy" "$out"; fi
+
+# --- the case that matters: a third case must not swallow a real death -----
+# Same launchctl shape #37's own DEAD case already covers (loaded, but no
+# `last exit code = 0` line -- i.e. genuinely absent that evidence, the hung
+# or crash-looping shape) must still report DEAD, unchanged, now that a third
+# outcome exists to potentially swallow it.
+S=$(mktemp -d); status_at "$S" 5460
+out=$(PATH="$D/bin:$PATH" STUB_LOG_MODE=none STUB_LAUNCHCTL_MODE=loaded SUPERVISOR_STATE="$S" bash "$ADVANCE" "$LIVE" 2>&1); rc=$?
+want_exit "DEAD case still reports DEAD, not swallowed by the new case" "$rc" 1 "$out"
+if grep -qi "WATCHDOG STALE" <<<"$out" && grep -qi "DEAD" <<<"$out"; then ok "genuinely dead (no clean-exit evidence) still names itself DEAD"; else bad "genuinely dead (no clean-exit evidence) still names itself DEAD" "$out"; fi
+if grep -qi "not firing" <<<"$out"; then bad "the real DEAD case is not misreported as loaded-but-not-firing" "$out"; else ok "the real DEAD case is not misreported as loaded-but-not-firing"; fi
+
+# STOPPED must also stay unchanged now that a third outcome exists.
+S=$(mktemp -d); status_at "$S" 5460
+out=$(PATH="$D/bin:$PATH" STUB_LOG_MODE=bootout STUB_LAUNCHCTL_MODE=absent SUPERVISOR_STATE="$S" bash "$ADVANCE" "$LIVE" 2>&1); rc=$?
+want_exit "STOPPED (attributable bootout) is unchanged by the new case" "$rc" 0 "$out"
+if grep -qi "WATCHDOG STOPPED" <<<"$out"; then ok "an attributable bootout still reports stopped"; else bad "an attributable bootout still reports stopped" "$out"; fi
+
+# --- MUTATION: force the new branch's condition to always match ------------
+# The brief's own bar: make the new branch always true and confirm the DEAD
+# case above goes RED. If it stays green, the new branch is not gated by real
+# evidence and would swallow a genuine death -- this estate's most-repeated
+# defect (a test that passes identically whether the code is fixed or
+# vulnerable).
+MUT3="$D/advance-live-mutant-notfiring.sh"
+mut3_rc=0
+python3 - "$ADVANCE" "$MUT3" <<'PY' || mut3_rc=$?
+import re
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = "grep -qE '^\\s*last exit code = 0\\s*$' <<<\"$launchctl_out\""
+assert marker in text, "loaded-but-not-firing condition not found -- script shape changed"
+assert text.count(marker) == 1, "loaded-but-not-firing condition not unique -- script shape changed"
+open(dst, "w").write(text.replace(marker, "true", 1))
+PY
+if [ "$mut3_rc" -ne 0 ]; then
+  bad "setup: patched a copy of advance-live.sh whose loaded-but-not-firing condition always matches" \
+    "could not patch $ADVANCE (exit $mut3_rc)"
+else
+  ok "setup: patched a copy of advance-live.sh whose loaded-but-not-firing condition always matches"
+  chmod +x "$MUT3"
+  S=$(mktemp -d); status_at "$S" 5460
+  out=$(PATH="$D/bin:$PATH" STUB_LOG_MODE=none STUB_LAUNCHCTL_MODE=loaded SUPERVISOR_STATE="$S" bash "$MUT3" "$LIVE" 2>&1); rc=$?
+  if grep -qi "not firing" <<<"$out" && ! grep -qi "^advance-live:.*DEAD" <<<"$out"; then
+    ok "mutation confirmed: an unconditional match swallows the real DEAD case (the DEAD assertion above would now be red)"
+  else
+    bad "mutation confirmed: an unconditional match swallows the real DEAD case" \
+      "expected the DEAD case to be reported as loaded-but-not-firing instead, got rc=$rc: $out"
+  fi
+fi
 
 # --- default threshold: just past 3x the 180s default tick interval --------
 S=$(mktemp -d); status_at "$S" 541
