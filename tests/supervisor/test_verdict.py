@@ -368,6 +368,121 @@ def _raising_runner(cmd):
     raise RuntimeError(f"no stub for command: {cmd!r}")
 
 
+def _comment_runner(*, reviews=None, comments=None, author=None):
+    """A `runner` for `gh pr view ... --json reviews,comments,author` --
+    agent-supervisor#53. Raises for anything else, the same discipline
+    `_reviews_runner` uses, so a test that does not opt into the rebase
+    comparison gets a fail-closed "cannot compute" rather than a stub
+    silently answering for a call it was never given."""
+    payload = json.dumps({"reviews": reviews or [], "comments": comments or [], "author": author or {}})
+
+    def runner(cmd):
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return payload
+        raise RuntimeError(f"no stub for command: {cmd!r}")
+
+    return runner
+
+
+class GithubCommentVerdictTests(unittest.TestCase):
+    """agent-supervisor#53: the codex lane posts verdicts with `gh pr
+    comment`, not `gh pr review`, so `digest.sh` reported `verdict=none` for
+    a PR with a full REQUEST CHANGES posted 14 minutes earlier. These are
+    the "Red first" cases from the issue/brief, each named after the guard
+    it exercises."""
+
+    def test_verdict_comment_alone_is_reported_not_none(self):
+        """Guard 1: a PR whose only verdict is a `**Verdict:` comment must
+        be reported, not read as `none`."""
+        comments = [{"author": {"login": "codex"}, "body": "**Verdict: REQUEST CHANGES**  head SHA abc123", "createdAt": "2026-08-13T18:03:05Z"}]
+        source = GithubReviewVerdictSource(
+            runner=_comment_runner(comments=comments, author={"login": "jonhill90"})
+        )
+        result = source.verdict(repo=REPO, number=51)
+        self.assertEqual(result["verdict"], "rejected")
+        self.assertNotEqual(result["verdict"], "none")
+
+    def test_a_review_object_is_unaffected_by_comment_logic(self):
+        """Guard 2: a PR with a decisive review object behaves exactly as
+        before -- comments are never even consulted when the review side
+        already has a decisive answer."""
+        source = GithubReviewVerdictSource(
+            runner=_comment_runner(
+                reviews=[{"state": "APPROVED"}],
+                comments=[{"author": {"login": "codex"}, "body": "**Verdict: REQUEST CHANGES**"}],
+            )
+        )
+        result = source.verdict(repo=REPO, number=1)
+        self.assertEqual(result["verdict"], "approved")
+
+    def test_neither_review_nor_comment_reads_none(self):
+        """Guard 3: a detector that finds a verdict everywhere is as
+        useless as one that finds none -- absence of both must still read
+        `none`."""
+        source = GithubReviewVerdictSource(runner=_comment_runner())
+        result = source.verdict(repo=REPO, number=1)
+        self.assertEqual(result["verdict"], "none")
+
+    def test_verdict_mentioned_mid_body_is_not_counted(self):
+        """Guard 4: a comment merely mentioning the word "verdict" mid-body
+        must NOT be counted -- anchored on the `**Verdict:` prefix, not a
+        substring search."""
+        comments = [
+            {
+                "author": {"login": "codex"},
+                "body": "I think the verdict here should be REQUEST CHANGES, but I won't file one yet.",
+            }
+        ]
+        source = GithubReviewVerdictSource(runner=_comment_runner(comments=comments))
+        result = source.verdict(repo=REPO, number=1)
+        self.assertEqual(result["verdict"], "none")
+
+    def test_verdict_comment_from_the_pr_author_is_reported_as_non_independent(self):
+        """Guard 5: a `**Verdict:` comment written by the PR's own author is
+        still reported, but marked as non-independent -- the authorship
+        distinction from agent-supervisor#35/#39 must not be erased."""
+        comments = [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**"}]
+        source = GithubReviewVerdictSource(
+            runner=_comment_runner(comments=comments, author={"login": "jonhill90"})
+        )
+        result = source.verdict(repo=REPO, number=1)
+        self.assertEqual(result["verdict"], "approved")
+        self.assertIn("NOT independent", result["detail"])
+
+    def test_verdict_comment_from_an_independent_author_says_so(self):
+        comments = [{"author": {"login": "codex"}, "body": "**Verdict: APPROVE**"}]
+        source = GithubReviewVerdictSource(
+            runner=_comment_runner(comments=comments, author={"login": "jonhill90"})
+        )
+        result = source.verdict(repo=REPO, number=1)
+        self.assertEqual(result["verdict"], "approved")
+        self.assertIn("independent", result["detail"])
+        self.assertNotIn("NOT independent", result["detail"])
+
+    def test_the_most_recent_matching_comment_wins(self):
+        comments = [
+            {"author": {"login": "codex"}, "body": "**Verdict: REQUEST CHANGES**", "createdAt": "2026-08-13T10:00:00Z"},
+            {"author": {"login": "codex"}, "body": "**Verdict: APPROVE**", "createdAt": "2026-08-13T18:00:00Z"},
+        ]
+        source = GithubReviewVerdictSource(runner=_comment_runner(comments=comments))
+        result = source.verdict(repo=REPO, number=1)
+        self.assertEqual(result["verdict"], "approved")
+
+    def test_a_stale_review_falls_back_to_a_comment_verdict(self):
+        """A review filed against a superseded head has nothing decisive to
+        say (#218) -- a fresh `**Verdict:` comment must still be found
+        rather than the PR reading `unknown` forever."""
+        old_sha = "a" * 40
+        head_sha = "b" * 40
+        reviews = [{"state": "APPROVED", "commit": {"oid": old_sha}}]
+        comments = [{"author": {"login": "codex"}, "body": "**Verdict: REQUEST CHANGES**"}]
+        source = GithubReviewVerdictSource(
+            runner=_comment_runner(reviews=reviews, comments=comments), patch_id=lambda diff: None
+        )
+        result = source.verdict(repo=REPO, number=1, head_sha=head_sha)
+        self.assertEqual(result["verdict"], "rejected")
+
+
 class LedgerVerdictSourceTests(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()
