@@ -7,7 +7,7 @@ from pathlib import Path
 SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "scripts" / "supervisor"
 sys.path.insert(0, str(SUPERVISOR_DIR))
 
-from adapter import ACPAdapter, TmuxAdapter, classify_capture  # noqa: E402
+from adapter import ACPAdapter, PiRPCAdapter, TmuxAdapter, classify_capture  # noqa: E402
 from core import Ledger  # noqa: E402
 
 
@@ -82,6 +82,13 @@ class AdapterTest(unittest.TestCase):
             evidence=[],
             status_marker=None,
         )
+
+    def test_register_lane_records_send_keys_as_its_transport(self):
+        """agent-supervisor#58: a send-keys lane is acceptable, an UNLABELLED
+        one is not -- `TmuxAdapter` must write its transport down explicitly,
+        not rely on a default that could silently change underneath it."""
+        record = self.ledger.get_lane("architecture")
+        self.assertEqual("send-keys", record["transport"])
 
     def test_harness_classifiers_cover_idle_active_blocked_and_approval(self):
         self.assertEqual("idle", classify_capture("codex", "─ Worked for 1m ─\n\n› Continue\n"))
@@ -281,6 +288,8 @@ class ACPAdapterTest(unittest.TestCase):
         )
         self.assertEqual("copilot-acp", record["harness"])
         self.assertEqual(record["pane_id"], record["session_id"])
+        # agent-supervisor#58: recorded explicitly, not left to a default.
+        self.assertEqual("acp", record["transport"])
         self.assertTrue(FakeACPTransport.instances[0].initialized)
         self.assertTrue(FakeACPTransport.instances[0].closed)
 
@@ -308,6 +317,138 @@ class ACPAdapterTest(unittest.TestCase):
             lane="copilot-worker", target=None, harness="copilot-acp", repo="/repo/hill90", nonce="nonce-acp"
         )
         self.assertIsNone(self.adapter.observe_lane("copilot-worker"))
+
+
+class FakePiRPCTransport:
+    """Stands in for a freshly `PiRPCTransport.spawn()`-ed process per call --
+    same one-process-per-CLI-invocation shape as `FakeACPTransport`, adapted
+    to pi RPC's `get_state`/`send_literal` surface."""
+
+    instances = []
+
+    def __init__(self, cwd=None, session=None, sessions=None, stop_reason="end_turn", message="Done."):
+        self.cwd = cwd
+        self.session = session
+        self.sessions = sessions if sessions is not None else {}
+        self.stop_reason = stop_reason
+        self.message = message
+        self.prompts = []
+        self.closed = False
+        self.terminated = False
+        if session is None:
+            session_id = f"pi-sess-{len(self.sessions) + 1}"
+            self.sessions[session_id] = cwd
+            self._state = {"sessionId": session_id, "sessionFile": f"/tmp/{session_id}.json"}
+        else:
+            self._state = {"sessionId": session, "sessionFile": f"/tmp/{session}.json"}
+        self.__class__.instances.append(self)
+
+    def get_state(self):
+        return dict(self._state)
+
+    def send_literal(self, target, payload):
+        self.prompts.append((target, payload))
+        return {
+            "stop_reason": self.stop_reason,
+            "message": self.message,
+            "token_usage": {"input_tokens": 10, "output_tokens": 5},
+        }
+
+    def close(self):
+        self.closed = True
+
+    def terminate(self):
+        self.terminated = True
+        self.close()
+
+
+class PiRPCAdapterTest(unittest.TestCase):
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.ledger = Ledger(Path(self.tempdir.name), clock=lambda: 1_000)
+        FakePiRPCTransport.instances = []
+        self.shared_sessions = {}
+        self.adapter = PiRPCAdapter(
+            self.ledger,
+            lambda **kwargs: FakePiRPCTransport(sessions=self.shared_sessions, **kwargs),
+            clock=lambda: 1_000,
+        )
+        self._source_number = 899
+
+    def seed_source(self, task_id, summary):
+        self._source_number += 1
+        self.ledger.reconstruct_task(
+            task_id=task_id,
+            source_kind="issue",
+            source_url=f"https://github.com/jonhill90/Hill90/issues/{self._source_number}",
+            source_ref="a" * 40,
+            summary=summary,
+            source_state="OPEN",
+            status="created",
+            evidence=[],
+            status_marker=None,
+        )
+
+    def test_register_lane_opens_a_pi_rpc_session_and_stores_it_as_the_lane_identity(self):
+        record = self.adapter.register_lane(
+            lane="pi-worker", target=None, harness="pi", repo="/repo/hill90", nonce="nonce-pi"
+        )
+        self.assertEqual("pi", record["harness"])
+        self.assertEqual(record["pane_id"], record["session_id"])
+        # agent-supervisor#58: the whole point -- this lane's transport must
+        # read back from the ledger, not be inferred from its harness alone.
+        self.assertEqual("pi-rpc", record["transport"])
+        self.assertTrue(FakePiRPCTransport.instances[0].terminated)
+
+    def test_register_lane_rejects_a_non_pi_harness(self):
+        with self.assertRaisesRegex(RuntimeError, "only supports pi lanes"):
+            self.adapter.register_lane(
+                lane="codex-worker", target=None, harness="codex", repo="/repo/hill90", nonce="nonce-x"
+            )
+
+    def test_assign_task_resumes_the_session_and_completes_synchronously_from_the_stop_reason(self):
+        self.adapter.register_lane(
+            lane="pi-worker", target=None, harness="pi", repo="/repo/hill90", nonce="nonce-pi"
+        )
+        self.seed_source("pi-task", "Review one artifact")
+        task = self.adapter.assign_task(lane="pi-worker", task_id="pi-task", summary="Review one artifact")
+        self.assertEqual("complete", task["status"])
+
+        # A fresh transport was spawned for this call and terminated
+        # afterward -- no subprocess lingers between CLI invocations.
+        assign_transport = FakePiRPCTransport.instances[-1]
+        self.assertTrue(assign_transport.terminated)
+        self.assertIsNotNone(assign_transport.session)
+        self.assertIn("pi-task", assign_transport.prompts[0][1])
+
+    def test_assign_task_to_unregistered_lane_raises(self):
+        with self.assertRaisesRegex(RuntimeError, "unknown lane"):
+            self.adapter.assign_task(lane="missing", task_id="t1", summary="x")
+
+    def test_assign_task_refuses_a_lane_registered_as_send_keys(self):
+        """agent-supervisor#58: `pi` is the one harness allowed either
+        transport -- this adapter must refuse a lane recorded `send-keys`
+        rather than silently drive it over RPC anyway."""
+        self.ledger.register_lane(
+            lane="pi-worker",
+            pane_id="%1",
+            nonce="nonce-pi",
+            harness="pi",
+            repo="/repo/hill90",
+            server_id="server-a",
+            session_id="$1",
+            command="pi",
+            transport="send-keys",
+        )
+        with self.assertRaisesRegex(RuntimeError, "not a pi-rpc lane"):
+            self.adapter.assign_task(lane="pi-worker", task_id="t1", summary="x")
+
+    def test_observe_lane_is_a_no_op_because_prompts_are_synchronous(self):
+        self.adapter.register_lane(
+            lane="pi-worker", target=None, harness="pi", repo="/repo/hill90", nonce="nonce-pi"
+        )
+        self.assertIsNone(self.adapter.observe_lane("pi-worker"))
 
 
 if __name__ == "__main__":

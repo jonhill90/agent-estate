@@ -11,9 +11,10 @@ import sys
 from pathlib import Path
 
 from acp_transport import ACPTransport
-from adapter import ACPAdapter, TmuxAdapter, HARNESS_COMMANDS
+from adapter import ACPAdapter, PiRPCAdapter, TmuxAdapter, HARNESS_COMMANDS
 from core import CLAIM_TASK_PREFIX, Ledger, claim_owner_token
 from github_source import GithubTaskSource
+from pi_transport import PiRPCTransport
 from sensor import StateSensor
 from transport import TmuxTransport
 
@@ -83,9 +84,15 @@ def parser():
     register = sub.add_parser("register")
     register.add_argument("--lane", required=True)
     register.add_argument("--target", required=True)
-    register.add_argument("--harness", choices=("codex", "claude", "copilot", "copilot-acp"), required=True)
+    register.add_argument("--harness", choices=("codex", "claude", "copilot", "copilot-acp", "pi"), required=True)
     register.add_argument("--repo", required=True)
     register.add_argument("--nonce")
+    # Only `pi` lanes have a real choice here (agent-supervisor#58): every
+    # other harness has exactly one transport it may ever record
+    # (`core.py`'s `_TRANSPORTS_BY_HARNESS`), so passing this for them would
+    # either be redundant or rejected by that same allow-list. Omit it to get
+    # `pi`'s default, `send-keys` -- `pi-rpc` is never silently assumed.
+    register.add_argument("--transport", choices=("send-keys", "acp", "pi-rpc"), default=None)
 
     assign = sub.add_parser("assign")
     assign.add_argument("--lane", required=True)
@@ -115,7 +122,7 @@ def parser():
     record_dispatch_parser.add_argument("--harness-session-id", default="")
     record_dispatch_parser.add_argument("--issue", action="append", required=True)
     record_dispatch_parser.add_argument("--github", default="")
-    record_dispatch_parser.add_argument("--harness", choices=("codex", "claude", "copilot", "copilot-acp"))
+    record_dispatch_parser.add_argument("--harness", choices=("codex", "claude", "copilot", "copilot-acp", "pi"))
 
     # agent-supervisor#36 (second issue comment): a stranded lane's open row
     # is not always a task id an operator has on hand -- `claim_lane` writes
@@ -588,21 +595,30 @@ def main(argv=None):
     # terminals it gives him. ACP is opt-in per lane, selected by the lane's
     # registered harness: only harness=copilot-acp dispatches through
     # ACPTransport (SPEC §15.2 -- Copilot is the only harness that ships an
-    # ACP server today).
+    # ACP server today). pi RPC (agent-supervisor#58) is opt-in the same way,
+    # but by TRANSPORT rather than harness alone -- unlike copilot-acp, a
+    # `pi` lane may be registered either `send-keys` or `pi-rpc`
+    # (`core.py`'s `_TRANSPORTS_BY_HARNESS`), so harness alone cannot decide
+    # which adapter drives it; the lane's own recorded transport must.
     adapter = TmuxAdapter(ledger, TmuxTransport(args.tmux_bin))
     acp_adapter = ACPAdapter(ledger, ACPTransport.spawn)
+    pi_adapter = PiRPCAdapter(ledger, PiRPCTransport.spawn)
 
-    def adapter_for_harness(harness):
-        return acp_adapter if harness == "copilot-acp" else adapter
+    def adapter_for_harness(harness, transport=None):
+        if harness == "copilot-acp":
+            return acp_adapter
+        if harness == "pi" and transport == "pi-rpc":
+            return pi_adapter
+        return adapter
 
     def adapter_for_lane(lane):
         record = ledger.get_lane(lane)
         if record is None:
             raise ValueError(f"unknown lane: {lane}")
-        return adapter_for_harness(record["harness"])
+        return adapter_for_harness(record["harness"], record.get("transport"))
 
     if args.command == "register":
-        value = adapter_for_harness(args.harness).register_lane(
+        value = adapter_for_harness(args.harness, args.transport).register_lane(
             lane=args.lane,
             target=args.target,
             harness=args.harness,
@@ -731,7 +747,7 @@ def main(argv=None):
                     if lane["lane"] == args.architecture_lane:
                         continue
                     try:
-                        event = adapter_for_harness(lane["harness"]).observe_lane(lane["lane"])
+                        event = adapter_for_harness(lane["harness"], lane.get("transport")).observe_lane(lane["lane"])
                         if event is not None:
                             observations.append(event["key"])
                         ledger.record_component(f"lane:{lane['lane']}", snapshot=b"reachable", healthy=True)
