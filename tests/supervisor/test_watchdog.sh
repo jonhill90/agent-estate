@@ -476,7 +476,7 @@ git -C "$LIVE" update-ref refs/remotes/origin/main "$t4"
 #    later pass rather than swapping the tree out from under the next one.
 b8=$(at_sha)
 SA="$A/s7"; rm -rf "$SA"; mkdir -p "$SA"
-seed_status "$SA/st" 600
+seed_status "$SA/st" 200
 adv_direct "$SA"; rc8=$?
 want_exit "a stale watchdog tick is a skip, not a failure" "$rc8" 0 "$(cat "$SA/out" 2>/dev/null)"
 check "outside the post-tick window the advance is skipped" \
@@ -498,7 +498,7 @@ else say_ok "a skipped advance records no rollback target"; fi
 SB="$A/s8"; rm -rf "$SB"; mkdir -p "$SB"
 STALL=$(mktemp -d); rm -rf "$STALL"
 git -C "$SRC" worktree add -q --detach "$STALL" "$t4"
-stale_stamp=$(stamp_at 600)
+stale_stamp=$(stamp_at 200)
 cat >"$STALL/scripts/supervisor/watchdog.sh" <<EOF
 #!/bin/bash
 # Test fixture, not a watchdog. It writes the well-formed status advance-live.sh's
