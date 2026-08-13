@@ -553,12 +553,14 @@ advance_on_exit() {
 
   # The copy: see point 3 above. Deleted whatever happens, including when the
   # advance it performed replaced the original underneath it.
-  local copy out arc
-  copy=$(mktemp "${TMPDIR:-/tmp}/watchdog-advance-live.XXXXXX" 2>/dev/null) || return $rc
-  cp "$HERE/advance-live.sh" "$copy" 2>/dev/null || { rm -f "$copy" 2>/dev/null; return $rc; }
+  local copy_dir copy out arc
+  copy_dir=$(mktemp -d "${TMPDIR:-/tmp}/watchdog-advance-live.XXXXXX" 2>/dev/null) || return $rc
+  copy="$copy_dir/advance-live.sh"
+  cp "$HERE/advance-live.sh" "$copy" 2>/dev/null || { rm -rf "$copy_dir" 2>/dev/null; return $rc; }
+  cp "$HERE/poller-window.sh" "$copy_dir/poller-window.sh" 2>/dev/null || { rm -rf "$copy_dir" 2>/dev/null; return $rc; }
   out=$(SUPERVISOR_STATE="$STATE" SUPERVISOR_STATUS="$STATUS" bash "$copy" "$root" 2>&1)
   arc=$?
-  rm -f "$copy" 2>/dev/null
+  rm -rf "$copy_dir" 2>/dev/null
   out=$(printf '%s' "$out" | tr '\n' ' ')
 
   if [ "$arc" -ne 0 ]; then
