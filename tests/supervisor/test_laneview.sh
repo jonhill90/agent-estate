@@ -13,6 +13,10 @@ bad()  { echo "  FAIL $1 — $2"; fail=$((fail+1)); }
 
 echo "laneview.sh"
 
+if [ ! -f "$LANEVIEW" ]; then
+  echo "  SKIP no laneview.sh -- viewer adapter not installed"; exit 0
+fi
+
 # An unknown implementation name must fail loudly and name what IS available,
 # never silently fall back to one.
 out=$(bash "$LANEVIEW" no-such-impl fixture 2>&1); rc=$?
@@ -126,6 +130,43 @@ if [ "$rc" -eq 0 ] && grep -q 'pushed 3 lane(s)' <<<"$out"; then
   ok "a fully accepted push reports the count and exits zero"
 else
   bad "a fully accepted push reports the count and exits zero" "rc=$rc out=$out"
+fi
+
+# tui.sh -- jonhill90/agent-supervisor#7's "TUI Jon owns". curses needs a
+# real tty, which no test harness has, so what is exercised here is exactly
+# what any headless caller (this suite, a CI runner, `laneview.sh tui
+# session > file`) actually gets: the static-frame fallback. It must still
+# obey the same contract text.sh does -- no tmux, no daemon, name every
+# state.
+TUI_IMPL="$HERE/../../scripts/supervisor/laneview/tui.sh"
+
+out=$(PATH=/usr/bin:/bin bash "$TUI_IMPL" demo-session \
+  '[{"window":1,"name":"free-2","command":"claude.exe","state":"free"}]' </dev/null 2>&1)
+if grep -qE '^\s*- free-2\s+free$' <<<"$out"; then
+  ok "tui.sh renders with no tmux, no daemon, and no tty reachable"
+else
+  bad "tui.sh renders with no tmux, no daemon, and no tty reachable" "$out"
+fi
+
+out=$(PATH=/usr/bin:/bin bash "$TUI_IMPL" demo-session "$SCROLLED_JSON" </dev/null 2>&1)
+if grep -qE '^\s*\^ w-scroll\s+scrolled$' <<<"$out"; then
+  ok "tui.sh gives scrolled a glyph of its own, not unknown's"
+else
+  bad "tui.sh gives scrolled a glyph of its own, not unknown's" "$out"
+fi
+
+# Through the full laneview.sh path, same fixture test_lanes.sh and the
+# text.sh cases above use.
+out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANEVIEW" tui fixture </dev/null 2>&1)
+if grep -qE 'w-real-free +free' <<<"$out"; then
+  ok "a free lane renders as free through the full laneview.sh tui path"
+else
+  bad "a free lane renders as free through the full laneview.sh tui path" "$out"
+fi
+if grep -qE 'arch +supervisor' <<<"$out"; then
+  ok "the supervisor window is never rendered as a lane by tui.sh"
+else
+  bad "the supervisor window is never rendered as a lane by tui.sh" "$out"
 fi
 
 echo "  $pass passed, $fail failed"
