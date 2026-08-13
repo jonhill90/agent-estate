@@ -208,8 +208,25 @@ case "$1 $2" in
     ;;
   "pr view")
     num="$3"
-    f="$FIX/reviews_${num}.json"
-    [ -f "$f" ] && cat "$f" || echo '{"reviews":[]}'
+    fields=""
+    prev=""
+    for a in "$@"; do
+      [ "$prev" = "--json" ] && fields="$a"
+      prev="$a"
+    done
+    case "$fields" in
+      *closingIssuesReferences*)
+        f="$FIX/pr_view_${num}.json"
+        [ -f "$f" ] && cat "$f" || echo '{"headRefName":"","closingIssuesReferences":[],"commits":[]}'
+        ;;
+      *baseRefName*)
+        echo '{"baseRefName":"main"}'
+        ;;
+      *)
+        f="$FIX/reviews_${num}.json"
+        [ -f "$f" ] && cat "$f" || echo '{"reviews":[]}'
+        ;;
+    esac
     ;;
   "api "*)
     # verdict.py's #226 rebase-content comparison makes two shapes of call:
@@ -255,7 +272,10 @@ cat > "$OK/fixtures/pr_list.json" <<'S'
   {"number":7,"title":"pure rebase since review, content unchanged","headRefOid":"reb7reb7reb7reb7reb7reb7reb7reb7reb7reb7","headRefName":"b7","mergeStateStatus":"CLEAN"},
   {"number":8,"title":"real content change since review","headRefOid":"chg8chg8chg8chg8chg8chg8chg8chg8chg8chg8","headRefName":"b8","mergeStateStatus":"CLEAN"},
   {"number":9,"title":"rebase that dropped a commit main superseded","headRefOid":"reb9reb9reb9reb9reb9reb9reb9reb9reb9reb9","headRefName":"b9","mergeStateStatus":"CLEAN"},
-  {"number":10,"title":"a commit pushed on top after the review","headRefOid":"add0add0add0add0add0add0add0add0add0add0","headRefName":"b10","mergeStateStatus":"CLEAN"}
+  {"number":10,"title":"a commit pushed on top after the review","headRefOid":"add0add0add0add0add0add0add0add0add0add0","headRefName":"b10","mergeStateStatus":"CLEAN"},
+  {"number":11,"title":"comment verdict from another lane","headRefOid":"1111111111111111111111111111111111111111","headRefName":"b11","mergeStateStatus":"CLEAN"},
+  {"number":12,"title":"comment verdict from author lane","headRefOid":"1212121212121212121212121212121212121212","headRefName":"b12","mergeStateStatus":"CLEAN"},
+  {"number":13,"title":"comment verdict without lane stamp","headRefOid":"1313131313131313131313131313131313131313","headRefName":"b13","mergeStateStatus":"CLEAN"}
 ]
 S
 cat > "$OK/fixtures/run_b1.json" <<'S'
@@ -391,6 +411,38 @@ printf '%s\n' old0old0old0old0old0old0old0old0old0old0 add0add0add0add0add0add0a
 mkpatch old0old0old0old0old0old0old0old0old0old0 only 10 "new line"
 mkpatch add0add0add0add0add0add0add0add0add0add0 extra 10 "new line"
 
+# agent-supervisor#63: every lane posts through the same GitHub login, so
+# comment.author.login == pr.author.login is a constant. These PRs exercise
+# lane identity instead: the PR author comes from the ledger's issue-lane
+# lookup, and the reviewing lane comes from an explicit Review-Lane stamp in
+# the verdict comment. PR13 keeps the #55 behaviour (a `**Verdict:` comment
+# still counts) while refusing to guess independence when the comment has no
+# lane stamp.
+cat > "$OK/fixtures/pr_view_11.json" <<'S'
+{"headRefName":"fix/211-comment-verdict-other-lane","closingIssuesReferences":[{"number":211}],"commits":[]}
+S
+cat > "$OK/fixtures/reviews_11.json" <<'S'
+{"reviews":[],"comments":[
+  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:4","createdAt":"2026-08-13T20:57:01Z"}
+],"author":{"login":"jonhill90"}}
+S
+cat > "$OK/fixtures/pr_view_12.json" <<'S'
+{"headRefName":"fix/212-comment-verdict-author-lane","closingIssuesReferences":[{"number":212}],"commits":[]}
+S
+cat > "$OK/fixtures/reviews_12.json" <<'S'
+{"reviews":[],"comments":[
+  {"author":{"login":"jonhill90"},"body":"**Verdict: REQUEST CHANGES**\nReview-Lane: t:3","createdAt":"2026-08-13T20:58:01Z"}
+],"author":{"login":"jonhill90"}}
+S
+cat > "$OK/fixtures/pr_view_13.json" <<'S'
+{"headRefName":"fix/213-comment-verdict-unstamped","closingIssuesReferences":[{"number":213}],"commits":[]}
+S
+cat > "$OK/fixtures/reviews_13.json" <<'S'
+{"reviews":[],"comments":[
+  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**","createdAt":"2026-08-13T20:59:01Z"}
+],"author":{"login":"jonhill90"}}
+S
+
 run_ok() {
   PATH="$OK/bin:$PATH" SUPERVISOR_STATE="$D/state" LANES_SESSION=nosuch \
     DIGEST_REPOS=test-repo DIGEST_OWNER=ownerx GH_STUB_FIXTURES="$OK/fixtures" \
@@ -479,6 +531,48 @@ grep -q "1 of 3" <<<"$(jq -r '.verdict_detail' <<<"$p9")" \
 p10=$(pr 10)
 chk "PR10 (a commit pushed on top after the review) verdict stays unknown" \
   "unknown" "$(jq -r '.verdict' <<<"$p10")"
+
+LANE_STATE="$D/lane-state"; mkdir -p "$LANE_STATE"
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-dispatch \
+  --lane t:3 --task as211-author --summary "#211 author" --pane-id %3 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 211 --github ownerx/test-repo --harness claude >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-completion \
+  --task as211-author --note done >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-dispatch \
+  --lane t:3 --task as212-author --summary "#212 author" --pane-id %3 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 212 --github ownerx/test-repo --harness claude >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-completion \
+  --task as212-author --note done >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-dispatch \
+  --lane t:3 --task as213-author --summary "#213 author" --pane-id %3 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 213 --github ownerx/test-repo --harness claude >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-completion \
+  --task as213-author --note done >/dev/null
+lane_out=$(PATH="$OK/bin:$PATH" SUPERVISOR_STATE="$LANE_STATE" LANES_SESSION=nosuch \
+  DIGEST_REPOS=test-repo DIGEST_OWNER=ownerx GH_STUB_FIXTURES="$OK/fixtures" \
+  DIGEST_VERDICT_SOURCE=github \
+  bash "$DIGEST" --json 2>/dev/null)
+lp() { jq -c --argjson n "$1" '.prs[] | select(.number==$n)' <<<"$lane_out"; }
+p11=$(lp 11)
+chk "PR11 comment verdict from a different lane is independent, despite same GitHub login" \
+  "true" "$(jq -r '.verdict_independent' <<<"$p11")"
+grep -q "independent -- author lane t:3, reviewer lane t:4" <<<"$(jq -r '.verdict_detail' <<<"$p11")" \
+  && ok "PR11 detail names both lanes" \
+  || bad "PR11 detail names both lanes" "$p11"
+p12=$(lp 12)
+chk "PR12 comment verdict from the author lane is not independent" \
+  "false" "$(jq -r '.verdict_independent' <<<"$p12")"
+grep -q "NOT independent -- author lane t:3 reviewed its own PR" <<<"$(jq -r '.verdict_detail' <<<"$p12")" \
+  && ok "PR12 detail names the self-review by lane" \
+  || bad "PR12 detail names the self-review by lane" "$p12"
+p13=$(lp 13)
+chk "PR13 unstamped comment verdict still counts as a verdict (#55)" \
+  "approved" "$(jq -r '.verdict' <<<"$p13")"
+chk "PR13 unstamped comment verdict reports independence unknown, not not-independent" \
+  "null" "$(jq -r '.verdict_independent' <<<"$p13")"
+grep -q "independence unknown" <<<"$(jq -r '.verdict_detail' <<<"$p13")" \
+  && ok "PR13 detail says independence unknown" \
+  || bad "PR13 detail says independence unknown" "$p13"
 
 # 12b. agent-dotfiles#218: a review APPROVED at an old SHA must not answer for
 # a head a push has since moved past. This is the failure #218 exists to

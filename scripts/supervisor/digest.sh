@@ -264,6 +264,70 @@ verdict_for() {
   printf '%s\n' "$out"
 }
 
+repo_task_prefix() {
+  local repo_full="$1" name part prefix
+  name="${repo_full##*/}"
+  if [[ "$name" == *-* ]]; then
+    prefix=""
+    while IFS= read -r part; do
+      prefix="${prefix}${part:0:1}"
+    done < <(tr '-' '\n' <<<"$name")
+    printf '%s\n' "$prefix"
+  else
+    printf '%s\n' "$name"
+  fi
+}
+
+# Resolve the lane that authored a PR by the same ledger-first chain
+# dispatch.sh --reviews-pr uses: closing issue -> issue-lane, then branch name
+# as a last-resort task-id hint. Missing data is not an error in the digest;
+# it only makes verdict independence unknown for that PR.
+author_lane_for() {
+  local repo_full="$1" number="$2" pr_json head_ref candidates candidate issue_json
+  local prefix fallback_task fallback_json
+  if ! pr_json=$(gh pr view "$number" -R "$repo_full" --json headRefName,closingIssuesReferences,commits 2>/dev/null); then
+    jq -nc --arg detail "independence unknown -- PR author lane unresolved: gh pr view failed" \
+      '{known:false, lane:null, task:null, detail:$detail}'
+    return
+  fi
+  if ! jq -e . >/dev/null 2>&1 <<<"$pr_json"; then
+    jq -nc --arg detail "independence unknown -- PR author lane unresolved: gh pr view produced unreadable JSON" \
+      '{known:false, lane:null, task:null, detail:$detail}'
+    return
+  fi
+  head_ref=$(jq -r '.headRefName // ""' <<<"$pr_json")
+  candidates=$(
+    {
+      jq -r '.closingIssuesReferences[]?.number // empty' <<<"$pr_json"
+      jq -r '.commits[]? | (.messageHeadline // ""), (.messageBody // "")' <<<"$pr_json" \
+        | grep -ioE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+' || true
+    } | awk '!seen[$0]++'
+  )
+  for candidate in $candidates; do
+    if issue_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" issue-lane --issue "$candidate" 2>/dev/null) \
+       && jq -e '.known == true' >/dev/null 2>&1 <<<"$issue_json"; then
+      jq -nc --arg lane "$(jq -r '.lane' <<<"$issue_json")" \
+             --arg task "$(jq -r '.task // ""' <<<"$issue_json")" \
+             '{known:true, lane:$lane, task:$task, detail:""}'
+      return
+    fi
+  done
+  prefix=$(repo_task_prefix "$repo_full")
+  if [[ "$head_ref" =~ ^(lane|fix|feat|chore|docs)/([0-9]+)-(.+)$ ]]; then
+    fallback_task="${prefix}${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+    if fallback_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" task-lane --task "$fallback_task" 2>/dev/null) \
+       && jq -e '.known == true' >/dev/null 2>&1 <<<"$fallback_json"; then
+      jq -nc --arg lane "$(jq -r '.lane' <<<"$fallback_json")" \
+             --arg task "$fallback_task" \
+             '{known:true, lane:$lane, task:$task, detail:""}'
+      return
+    fi
+  fi
+  jq -nc --arg head "$head_ref" \
+         --arg task "${fallback_task:-none}" \
+         '{known:false, lane:null, task:null, detail:("independence unknown -- PR author lane unresolved from ledger issue lookup or branch " + ($head|if length > 0 then . else "unknown" end) + " (task " + $task + ")")}'
+}
+
 # --- pull requests --------------------------------------------------------
 # One `gh` call per repo for the PR list, then one `gh run list` per PR,
 # scoped to that PR's own branch.
@@ -304,7 +368,25 @@ for repo in $REPOS; do
     # last PR comment's prose here, which read "I cannot approve this, it is
     # unsafe." as an APPROVE (agent-dotfiles#203).
     v=$(verdict_for "$OWNER/$repo" "$num" "$head_oid")
-    entry=$(jq -n --argjson p "$p" --argjson r "$r" --arg repo "$repo" --argjson v "$v" '
+    author_lane=$(author_lane_for "$OWNER/$repo" "$num")
+    entry=$(jq -n --argjson p "$p" --argjson r "$r" --arg repo "$repo" --argjson v "$v" --argjson author "$author_lane" '
+      def independence:
+        if (($v.verdict_kind // "") | IN("comment", "ledger")) and (($v.verdict // "") | IN("approved", "rejected")) then
+          if (($v.reviewer_lane // "") | length) == 0 then
+            {value:null, detail:"independence unknown -- reviewer lane unresolved; comment verdicts must include Review-Lane: <lane-id>"}
+          elif ($author.known == true) then
+            if ($v.reviewer_lane == $author.lane) then
+              {value:false, detail:("NOT independent -- author lane " + $author.lane + " reviewed its own PR")}
+            else
+              {value:true, detail:("independent -- author lane " + $author.lane + ", reviewer lane " + $v.reviewer_lane)}
+            end
+          else
+            {value:null, detail:$author.detail}
+          end
+        else
+          {value:null, detail:""}
+        end;
+      independence as $ind |
       {
         repo: $repo, number: $p.number, title: $p.title,
         head: $p.headRefOid[0:8],
@@ -315,7 +397,12 @@ for repo in $REPOS; do
         ci_is_current: (($r.headSha // "") == $p.headRefOid),
         merge_state: $p.mergeStateStatus,
         verdict: ($v.verdict // "unknown"),
-        verdict_detail: ($v.detail // "")
+        verdict_independent: $ind.value,
+        verdict_detail: (
+          ($v.detail // "") +
+          (if (($v.detail // "") | length) > 0 and ($ind.detail | length) > 0 then "; " else "" end) +
+          $ind.detail
+        )
       }') || { note_error "jq failed assembling $OWNER/$repo#$num"; continue; }
     PR_JSON=$(jq -nc --argjson acc "$PR_JSON" --argjson e "$entry" '$acc + [$e]')
   done
