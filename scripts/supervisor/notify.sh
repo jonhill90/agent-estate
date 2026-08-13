@@ -28,7 +28,13 @@
 # hitting (see verify-the-instrument).
 
 set -uo pipefail
-STATE="$HOME/.local/state/agent-dotfiles-supervisor"
+# SUPERVISOR_STATE is the house override every other script in this tree
+# honours (advance-live.sh, watchdog.sh, dispatch.sh). This line was a bare
+# literal with NO override at all -- the only one -- which made the state
+# directory unrelocatable from here and was called out as a blocker in the
+# extraction inventory (#179 §3). The default is unchanged, so nothing that
+# already works moves.
+STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 LOG="$STATE/notify.log"
 SUBJECT="${1:-agent needs you}"
 BODY="${2:-}"

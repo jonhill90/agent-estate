@@ -31,11 +31,45 @@ DEFAULT_STATE = Path(
 # for as long as the module had no `__main__` and could not be run at all.
 # Adding the entry point makes the default list live, so it has to name the
 # repos this supervisor actually drives.
-DEFAULT_REPOSITORIES = (
-    {"name": "agent-dotfiles", "path": "/Users/jon/source/repos/Personal/agent-dotfiles", "github": "jonhill90/agent-dotfiles"},
-    {"name": "skills", "path": "/Users/jon/source/repos/Personal/Skills", "github": "jonhill90/skills"},
-    {"name": "skills-private", "path": "/Users/jon/source/repos/Personal/skills-private", "github": "jonhill90/skills-private"},
-    {"name": "agent-evals", "path": "/Users/jon/source/repos/Personal/agent-evals", "github": "jonhill90/agent-evals"},
+def _repositories_from_env():
+    """SUPERVISOR_REPOSITORIES overrides the built-in list.
+
+    Format: colon-separated `name=path=owner/repo` entries, e.g.
+        SUPERVISOR_REPOSITORIES="dots=$HOME/src/agent-dotfiles=jonhill90/agent-dotfiles"
+
+    #179 §3: the built-in list below hardcodes four absolute `/Users/jon/...`
+    paths. That was survivable while this tree lived inside the repo it names;
+    in a standalone repo it is the difference between "runs on one laptop" and
+    "runs anywhere". The default is unchanged so nothing that works today moves,
+    and a malformed entry is SKIPPED LOUDLY rather than silently dropped -- a
+    supervisor that quietly drives fewer repos than you configured looks exactly
+    like a supervisor with nothing to do.
+    """
+    raw = os.environ.get("SUPERVISOR_REPOSITORIES", "").strip()
+    if not raw:
+        return None
+    out = []
+    for entry in raw.split(":"):
+        entry = entry.strip()
+        if not entry:
+            continue
+        parts = entry.split("=")
+        if len(parts) != 3 or not all(parts):
+            print(
+                f"cli.py: SUPERVISOR_REPOSITORIES entry ignored, want name=path=owner/repo: {entry!r}",
+                file=sys.stderr,
+            )
+            continue
+        name, path, github = parts
+        out.append({"name": name, "path": os.path.expanduser(path), "github": github})
+    return out or None
+
+
+DEFAULT_REPOSITORIES = _repositories_from_env() or (
+    {"name": "agent-dotfiles", "path": os.path.expanduser("~/source/repos/Personal/agent-dotfiles"), "github": "jonhill90/agent-dotfiles"},
+    {"name": "skills", "path": os.path.expanduser("~/source/repos/Personal/Skills"), "github": "jonhill90/skills"},
+    {"name": "skills-private", "path": os.path.expanduser("~/source/repos/Personal/skills-private"), "github": "jonhill90/skills-private"},
+    {"name": "agent-evals", "path": os.path.expanduser("~/source/repos/Personal/agent-evals"), "github": "jonhill90/agent-evals"},
 )
 
 
