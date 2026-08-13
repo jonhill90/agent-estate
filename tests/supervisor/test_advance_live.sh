@@ -584,11 +584,21 @@ out=$(SUPERVISOR_STATE="$S" LANES_SESSION="test-session-187" PATH="$STUBS:$PATH"
 want_exit "a poller-restart check never fails the tick (exit 0)" "$rc" 0 "$out"
 [ -f "$S/.inbox-poll-restart-requested" ] && ok "a stale poller gets a restart flag written" \
   || bad "a stale poller gets a restart flag written" "$(ls "$S" 2>/dev/null)"
-grep -q 'inbox-poll.sh' "$TMUX_LOG" 2>/dev/null && ok "the relaunch command is queued into the poller's pane" \
-  || bad "the relaunch command is queued into the poller's pane" "$(cat "$TMUX_LOG" 2>/dev/null)"
-grep -q "test-session-187:11.1" "$TMUX_LOG" 2>/dev/null && ok "the queued command targets the poller's actual pane" \
-  || bad "the queued command targets the poller's actual pane" "$(cat "$TMUX_LOG" 2>/dev/null)"
-grep -qi 'POLLER-RESTART-QUEUED' "$S/advance-live.log" 2>/dev/null && ok "the restart is logged" \
+# agent-supervisor#10: this used to also assert a `tmux send-keys` relaunch
+# was queued into the poller's pane. That queuing relied on a shell still
+# being underneath the poller to read it, which is false -- the pane's
+# command is `exec inbox-poll.sh`, so nothing is left to read a queued
+# command once the poller actually exits (that gap is the issue). The flag
+# is now the whole mechanism; poller-recover.sh (tested separately) relaunches
+# once the flagged poller exits and its pane goes dead. This still checks
+# `find_poller_pane`'s own read of the session -- `list-panes` -- ran, so
+# the assertion still proves a real poller was confirmed present, not just
+# assumed.
+grep -q 'list-panes -t test-session-187' "$TMUX_LOG" 2>/dev/null && ok "a real poller pane was looked up before flagging" \
+  || bad "a real poller pane was looked up before flagging" "$(cat "$TMUX_LOG" 2>/dev/null)"
+! grep -q 'send-keys' "$TMUX_LOG" 2>/dev/null && ok "no send-keys is queued -- poller-recover.sh owns the relaunch now" \
+  || bad "no send-keys is queued -- poller-recover.sh owns the relaunch now" "$(cat "$TMUX_LOG" 2>/dev/null)"
+grep -qi 'POLLER-RESTART-REQUESTED' "$S/advance-live.log" 2>/dev/null && ok "the restart is logged" \
   || bad "the restart is logged" "$(cat "$S/advance-live.log" 2>/dev/null)"
 
 # --- a current poller (sha matches LIVE3) is left alone ---------------------

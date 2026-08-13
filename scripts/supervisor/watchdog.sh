@@ -485,6 +485,30 @@ check_inbox_heartbeat() {
   fi
 }
 
+# agent-supervisor#10: a poller that exits takes its window with it, so
+# nothing is left for the cooperative restart path to address. Runs on EVERY
+# exit path, same reasoning as check_inbox_heartbeat above -- this is a
+# different subsystem from the supervisor-loop checks (busy/idle/asleep/...)
+# that return early throughout this file, and has to be read every tick
+# regardless of which of those branches this one took. poller-recover.sh
+# owns its own idempotency (a lock around window creation, and a respawn
+# that can only ever land on the one pane it already found) -- nothing here
+# needs to serialize it further.
+check_poller_window() {
+  if [ ! -x "$HERE/poller-recover.sh" ]; then
+    log "POLLER-RECOVER-UNAVAILABLE: no poller-recover.sh beside this watchdog"
+    return 0
+  fi
+  local out rc
+  out=$(SUPERVISOR_STATE="$STATE" SUPERVISOR_LIVE="$LIVE" "$HERE/poller-recover.sh" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "POLLER-RECOVER FAILED rc=$rc: $out"
+  elif [ -n "$out" ]; then
+    log "POLLER-RECOVER: $out"
+  fi
+}
+
 # Runs on EVERY exit path. It must never change this tick's exit status and
 # must never abort it: a refused advance is a report, not a crash -- the tick
 # it rode out on had already succeeded, and failing it would turn "the code is
@@ -544,6 +568,7 @@ advance_on_exit() {
 on_exit() {
   local rc=$?
   check_inbox_heartbeat
+  check_poller_window
   advance_on_exit "$rc"
   return $rc
 }
