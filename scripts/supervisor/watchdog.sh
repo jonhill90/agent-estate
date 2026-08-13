@@ -193,6 +193,7 @@ ESCALATE_WINDOW=3600 # ...within this window, or stop and escalate
 # closed for inbox-poll.sh, left open here.
 INBOX_POLL_STATUS_PATH="${SUPERVISOR_INBOX_POLL_STATUS:-$STATE/inbox-poll.status}"
 INBOX_HEARTBEAT_EPISODE="${SUPERVISOR_HEARTBEAT_EPISODE:-$STATE/.watchdog-heartbeat-episode.json}"
+POLLER_SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
 # Threshold derived from inbox-poll.sh's own worst-case gap between heartbeat
 # writes while the process is genuinely alive -- not a round number (#163):
 #   - one iteration can block up to POLL_TIMEOUT+20s before giving up
@@ -464,6 +465,18 @@ heartbeat_note() {               # heartbeat_note <line>
   return 0
 }
 
+# Same tmp+rename append shape again, for the process-table measurement of
+# inbox-poll.sh. This line is intentionally absent in the healthy one-poller
+# case: the detector should be silent when the process table is exactly right.
+poller_note() {                  # poller_note <line>
+  local tmp="$STATUS.poller.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^poller:' "$STATUS"; printf 'poller:    %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 # Runs on EVERY exit path, regardless of which early `exit 0` above fired --
 # that is the whole reason this lives in the trap rather than in the main
 # body: the supervisor-loop checks below (busy/idle/asleep/...) all return
@@ -490,6 +503,55 @@ check_inbox_heartbeat() {
   else
     log "HEARTBEAT-CHECK: $notify_out"
   fi
+}
+
+# agent-supervisor#18: inbox-poll.status is authored by the poller itself, and
+# four duplicate pollers still reported one healthy pid because the last writer
+# won. The duplicate detector must therefore ask the kernel, not the status
+# file. It reports zero distinctly from more-than-one, and it never reaps: a
+# wrong reap bounces the live inbound channel.
+poller_process_rows() {
+  command -v pgrep >/dev/null 2>&1 || return 2
+  command -v ps >/dev/null 2>&1 || return 2
+  local pid cmd start
+  while IFS= read -r pid; do
+    [ -n "$pid" ] || continue
+    cmd=$(ps -o command= -p "$pid" 2>/dev/null) || continue
+    [[ "$cmd" =~ $POLLER_SERVICE_RE ]] || continue
+    start=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    [ -n "$start" ] || start=$(ps -o start= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+    printf '%s\t%s\n' "$pid" "${start:-unknown}"
+  done < <(pgrep -f inbox-poll.sh 2>/dev/null || true)
+  return 0
+}
+
+check_poller_process_count() {
+  local rows rows_rc count detail line pid start
+  rows=$(poller_process_rows)
+  rows_rc=$?
+  if [ "$rows_rc" -ne 0 ]; then
+    log "POLLER-CHECK FAILED rc=$rows_rc: could not measure live inbox-poll.sh processes from pgrep/ps"
+    poller_note "unknown — could not measure live inbox-poll.sh processes from pgrep/ps"
+    return 0
+  fi
+  count=$(grep -c . <<<"$rows" 2>/dev/null || true)
+  if [ "$count" -eq 1 ]; then
+    return 0
+  fi
+  if [ "$count" -eq 0 ]; then
+    log "POLLER-CHECK: zero live inbox-poll.sh processes by pid — dead-poller recovery handles this"
+    poller_note "dead — zero live inbox-poll.sh processes by pid; recovery handles this"
+    return 0
+  fi
+
+  detail="${count} live inbox-poll.sh processes by pid"
+  while IFS=$'\t' read -r pid start; do
+    [ -n "$pid" ] || continue
+    detail="$detail; pid $pid started ${start:-unknown}"
+  done <<<"$rows"
+  log "POLLER-DUPLICATE: $detail"
+  poller_note "DUPLICATE — $detail"
+  return 0
 }
 
 # agent-supervisor#10: a poller that exits takes its window with it, so
@@ -589,6 +651,7 @@ advance_on_exit() {
 on_exit() {
   local rc=$?
   check_inbox_heartbeat
+  check_poller_process_count
   check_poller_window
   advance_on_exit "$rc"
   return $rc

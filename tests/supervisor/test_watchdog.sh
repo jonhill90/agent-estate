@@ -687,6 +687,89 @@ else
     "paged $(up_call_count) time(s): $(up_calls)"
 fi
 
+# --- #18: duplicate inbox-poll.sh processes are measured by pid -----------
+#
+# inbox-poll.status names the last poller that wrote it, so it cannot answer
+# "how many pollers are alive?" The watchdog's tick already reads the poller
+# subsystem; this check must ask pgrep/ps and report duplicates with every pid
+# and start time, while leaving the healthy one-poller case silent.
+pc_run() { # pc_run <workdir> <pid-list>
+  rm -rf "$1"; mkdir -p "$1" "$1/transcripts"
+  printf 'checked: %s\nstate:   ok\ndetail:  listening\npid:     999\n' "$(stamp_ago 5)" >"$1/inbox-poll.status"
+  env SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy STUB_SENT="$1/sent" \
+    SUPERVISOR_STATE="$1" SUPERVISOR_STATUS="$1/st" SUPERVISOR_LOG="$1/lg" \
+    SUPERVISOR_STAMP="$1/stamp" SUPERVISOR_HISTORY="$1/hist" NOTIFY_ENV="$1/none.env" \
+    SLEEPCHECK_DIR="$1/transcripts" NOTIFY_SCRIPT="$UP" \
+    SUPERVISOR_INBOX_POLL_STATUS="$1/inbox-poll.status" \
+    STUB_POLLER_PIDS="$2" STUB_PS_LSTART_111="Thu Aug 13 04:05:56 2026" \
+    STUB_PS_LSTART_222="Thu Aug 13 04:08:56 2026" \
+    bash "$WATCHDOG" >/dev/null 2>"$1/err"
+}
+
+D=$(mktemp -d)
+pc_run "$D/w" "111 222"
+check "duplicate pollers are reported in watchdog.status" "^poller:.*DUPLICATE" "$D/w/st"
+check "the duplicate report names pid 111" "pid 111 started Thu Aug 13 04:05:56 2026" "$D/w/st"
+check "the duplicate report names pid 222" "pid 222 started Thu Aug 13 04:08:56 2026" "$D/w/st"
+check "the duplicate report is logged loudly" "POLLER-DUPLICATE" "$D/w/lg"
+
+D=$(mktemp -d)
+pc_run "$D/w" "111"
+if grep -q '^poller:' "$D/w/st" 2>/dev/null || grep -q 'POLLER-DUPLICATE' "$D/w/lg" 2>/dev/null; then
+  say_bad "exactly one live poller is silent" "$(cat "$D/w/st" 2>/dev/null | tr '\n' ' '); log=$(cat "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
+else
+  say_ok "exactly one live poller is silent"
+fi
+
+D=$(mktemp -d)
+pc_run "$D/w" ""
+check "zero live pollers are reported as dead, not duplicates" "^poller:.*dead.*zero live" "$D/w/st"
+if grep -q 'DUPLICATE' "$D/w/st" "$D/w/lg" 2>/dev/null; then
+  say_bad "zero live pollers do not report duplicates" "$(cat "$D/w/st" "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
+else
+  say_ok "zero live pollers do not report duplicates"
+fi
+
+# Mutation check: forcing the measured count to 1 is the exact broken shape
+# the brief names. The duplicate assertions above would go red.
+MUT=$(mktemp -d); mkdir -p "$MUT/scripts/supervisor"
+cp "$WATCHDOG" "$MUT/scripts/supervisor/watchdog.sh"
+for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh; do
+  cp "$HERE/../../scripts/supervisor/$dep" "$MUT/scripts/supervisor/" 2>/dev/null
+done
+cp -R "$HERE/../../scripts/supervisor/harness" "$MUT/scripts/supervisor/" 2>/dev/null
+patch_rc=0
+python3 - "$MUT/scripts/supervisor/watchdog.sh" <<'PY' || patch_rc=$?
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = 'count=$(grep -c . <<<"$rows" 2>/dev/null || true)'
+assert old in text, "poller process count assignment not found"
+assert text.count(old) == 1, "poller process count assignment not unique"
+open(path, "w").write(text.replace(old, 'count=1', 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  say_bad "setup: mutated the duplicate-poller count to always return 1" "patch failed with exit $patch_rc"
+else
+  chmod +x "$MUT/scripts/supervisor/watchdog.sh"
+  D=$(mktemp -d)
+  rm -rf "$D/w"; mkdir -p "$D/w" "$D/w/transcripts"
+  printf 'checked: %s\nstate:   ok\ndetail:  listening\npid:     999\n' "$(stamp_ago 5)" >"$D/w/inbox-poll.status"
+  env SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy STUB_SENT="$D/w/sent" \
+    SUPERVISOR_STATE="$D/w" SUPERVISOR_STATUS="$D/w/st" SUPERVISOR_LOG="$D/w/lg" \
+    SUPERVISOR_STAMP="$D/w/stamp" SUPERVISOR_HISTORY="$D/w/hist" NOTIFY_ENV="$D/w/none.env" \
+    SLEEPCHECK_DIR="$D/w/transcripts" NOTIFY_SCRIPT="$UP" \
+    SUPERVISOR_INBOX_POLL_STATUS="$D/w/inbox-poll.status" \
+    STUB_POLLER_PIDS="111 222" STUB_PS_LSTART_111="Thu Aug 13 04:05:56 2026" \
+    STUB_PS_LSTART_222="Thu Aug 13 04:08:56 2026" \
+    bash "$MUT/scripts/supervisor/watchdog.sh" >/dev/null 2>"$D/w/err"
+  if grep -q 'DUPLICATE' "$D/w/st" "$D/w/lg" 2>/dev/null; then
+    say_bad "mutation confirmed: count=1 hides duplicate pollers" "mutant still reported duplicates"
+  else
+    say_ok "mutation confirmed: count=1 hides duplicate pollers (the assertions above would be red)"
+  fi
+fi
+
 # --- #215: the busy probe is harness-parameterised, and fails closed -------
 #
 # The probe used to be one Claude Code literal (`esc to interrupt`) grepped out

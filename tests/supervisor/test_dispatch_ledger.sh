@@ -37,6 +37,10 @@ echo one > "$REPO/file.txt"
 git -C "$REPO" add file.txt
 git -C "$REPO" commit -q -m "initial"
 git -C "$REPO" push -q -u origin main
+# agent-supervisor#17: dispatch.sh now compares this origin against [repo]
+# ("acme/agent-dotfiles", every case below) and refuses on mismatch -- see
+# test_dispatch.sh's own setup for the identical reasoning.
+git -C "$REPO" remote set-url origin "git@github.com:acme/agent-dotfiles.git"
 
 : > "$D/issues"
 : > "$D/prs"
@@ -62,6 +66,49 @@ seed_free_lane() {
   PATH="$D/bin:$PATH" LANES_FIXTURE="$D/lanes" LANES_SESSION=t \
     AGENT_SUPERVISOR_STATE_DIR="$state" STUB_PANE_PATH="$REPO" \
     python3 "$CLI" register --lane "$lane" --target "$lane" --harness claude --repo "$REPO" >/dev/null
+}
+seed_task() {
+  local state="$1" lane="$2" task_id="$3" issue="$4" status="$5"
+  AGENT_SUPERVISOR_STATE_DIR="$state" python3 - "$HERE/../../scripts/supervisor" "$lane" "$task_id" "$issue" "$status" <<'PY'
+import os
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+
+lane, task_id, issue, status = sys.argv[2:6]
+ledger = Ledger(Path(os.environ["AGENT_SUPERVISOR_STATE_DIR"]))
+ledger.register_lane(
+    lane=lane,
+    pane_id="%seed",
+    nonce="seed-nonce",
+    harness="claude",
+    repo="/nonexistent",
+    server_id="seed:1700000000",
+    session_id="$0",
+    command="claude.exe",
+)
+ledger.reconstruct_task(
+    task_id=task_id,
+    source_kind="issue",
+    source_url=f"https://github.com/acme/agent-dotfiles/issues/{issue}",
+    source_ref=issue,
+    summary="seeded diagnostic task",
+    source_state="OPEN",
+    status="created",
+    evidence=["seeded by test_dispatch_ledger.sh"],
+    status_marker=None,
+)
+ledger.assign(task_id=task_id, lane=lane, pane_nonce="seed-nonce", summary="seeded diagnostic task")
+if status == "delivered":
+    ledger.mark_delivery_pending(task_id, pane_nonce="seed-nonce")
+    ledger.mark_delivered(task_id, pane_nonce="seed-nonce")
+elif status == "accepted":
+    ledger.mark_delivery_pending(task_id, pane_nonce="seed-nonce")
+    ledger.mark_delivered(task_id, pane_nonce="seed-nonce")
+    ledger.accept(task_id, pane_nonce="seed-nonce")
+PY
 }
 ledger_status() { AGENT_SUPERVISOR_STATE_DIR="$1" python3 "$CLI" status 2>&1; }
 tmuxlog()   { cat "$D/tmux.log"; }
@@ -102,6 +149,48 @@ want_missing "even though its window still says free-3" "send-keys" "$(tmuxlog)"
 if [ "$(assignees 203)" = "" ]; then ok "the occupied-lane refusal takes no claim"; else bad "the occupied-lane refusal takes no claim" "assignees: $(assignees 203)"; fi
 after=$(ls -d "$D"/roots/* 2>/dev/null | wc -l | tr -d ' ')
 if [ "$before" = "$after" ]; then ok "the occupied-lane refusal creates no worktree"; else bad "the occupied-lane refusal creates no worktree" "$before -> $after"; fi
+
+# --- issue #16: no-lane diagnostics name the reason, not generic surgery --
+S2D="$D/state-2-delivered"
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+seed_task "$S2D" t:3 ad212-finished-but-held 212 delivered
+printf '212|| delivered row with an idle pane\n' >> "$D/issues"
+out=$(LEDGER_STATE="$S2D" run 212 delivered-idle-diagnostic "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a delivered row with an idle pane still refuses dispatch" "$rc" 1 "$out"
+want_contains "the diagnostic names the excluded lane" "t:3" "$out"
+want_contains "the diagnostic names the delivered task id" "ad212-finished-but-held" "$out"
+want_contains "the diagnostic suggests recording completion by lane" "record-completion --lane t:3" "$out"
+want_missing "the delivered-idle diagnostic does not suggest cancelling first" "cancel-open-task" "$out"
+
+S2B="$D/state-2-busy"
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|ad213-running|claude.exe|esc to interrupt 3s|1|0
+FIX
+seed_task "$S2B" t:3 ad213-running 213 delivered
+printf '213|| genuinely busy lane\n' >> "$D/issues"
+out=$(LEDGER_STATE="$S2B" run 213 genuinely-busy-diagnostic "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "all lanes genuinely busy still refuses dispatch" "$rc" 1 "$out"
+want_contains "the diagnostic says the pane is busy" "pane state busy" "$out"
+want_contains "the busy diagnostic names the task" "ad213-running" "$out"
+want_missing "the busy diagnostic suggests no record-completion" "record-completion" "$out"
+want_missing "the busy diagnostic suggests no cancel-open-task" "cancel-open-task" "$out"
+want_missing "the busy diagnostic suggests no release-lane-claim" "release-lane-claim" "$out"
+
+S2F="$D/state-2-free"
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+seed_free_lane "$S2F" t:3
+printf '214|| dispatch proceeds when a lane is free\n' >> "$D/issues"
+out=$(LEDGER_STATE="$S2F" run 214 free-lane-no-diagnostic "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a free lane still dispatches unchanged" "$rc" 0 "$out"
+want_missing "successful dispatch prints no no-free diagnostic" "lane exclusion diagnostics" "$out"
+want_contains "the free lane receives the brief" "send-keys -t t:@103" "$(tmuxlog)"
 
 # --- test 3: a hand-renamed window does not change the decision -----------
 # Both directions: renaming an OCCUPIED lane to something innocuous does not
@@ -173,68 +262,33 @@ import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
 marker = '''  CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidate" --target "$candidate_target" --window-name "$wname" 2>/dev/null) || continue
-  grep -qF '"free":true' <<<"$CHECK" || continue
-
-  # Test-only instrumentation (agent-dotfiles#184): when set, run this
-  # command with the candidate lane as $1 right after it reads free and
-  # before this dispatch claims it -- exactly the gap a second dispatcher
-  # would need to land a whole competing dispatch in to prove the race.
-  # No caller sets this outside tests/supervisor/test_dispatch.sh.
-  if [ -n "${DISPATCH_TEST_RACE_HOOK:-}" ]; then
-    "$DISPATCH_TEST_RACE_HOOK" "$candidate" || true
-  fi
-
-  # CLAIM_LANE is set BEFORE the claim call, not after it (agent-dotfiles#209).
-  # The placeholder row is written INSIDE that call, so assigning afterwards
-  # left a real window: a TERM landing while the dispatcher waited on this
-  # command substitution ran the trap with CLAIM_LANE still empty and the row
-  # already committed -- a stranded claim on the one signal path the trap
-  # exists to cover. Naming a lane this dispatch did not win costs nothing:
-  # `release_lane_claim` is scoped to (lane, THIS dispatch's token,
-  # status='created'), so it matches no row unless the claim really succeeded.
-  #
-  # `--owner-pid $$` is THIS script's pid, not the `cli.py` child's: the child
-  # exits the moment the claim is written, so its pid would read dead
-  # instantly and step 0.5's reap would clear a live dispatch's claim. `$$` is
-  # the parent shell's pid even inside this command substitution.
-  CLAIM_LANE="$candidate"
-  CLAIM=$("$LEDGER_PYTHON" "$LEDGER_CLI" claim-lane --lane "$candidate" --token "$CLAIM_TOKEN" --owner-pid $$ 2>/dev/null) || { release_lane_claim; continue; }
-  if grep -qF '"claimed":true' <<<"$CLAIM"; then
-    LANE="$candidate"
-    LANE_TARGET="$candidate_target"
-    # agent-dotfiles#216: `lane-free` above already resolved this lane's
-    # RECORDED harness (from its @hill90_lane_harness pane option, or the
-    # ledger row if it was already known) -- carried forward to step 6 so
-    # `record-dispatch` gets an explicit --harness instead of re-guessing one
-    # from `#{pane_current_command}`, which cannot tell a Node harness like
-    # copilot apart from any other. Empty is possible only if `lane-free`'s
-    # own JSON shape ever changes underneath this grep; step 6's existing
-    # fallback (HARNESS_BY_COMMAND) covers that, unchanged.
-    LANE_HARNESS=$(grep -oE '"harness":"[a-z-]*"' <<<"$CHECK" | head -1 | sed -E 's/.*:"([a-z-]*)"/\\1/')
-    break
-  fi
-  # Lost this candidate to another dispatcher: move on, exactly as before.
-  # The release is a no-op in that case (the row is the winner's, not ours)
-  # and only bites when the claim committed but its result did not come back
-  # readable -- which would otherwise leak a claim only the reap could clear.
-  release_lane_claim'''
-assert marker in text, "lane-free selection block not found -- script shape changed"
-assert text.count(marker) == 1, "lane-free selection block not unique -- script shape changed"
+  if ! grep -qF '"free":true' <<<"$CHECK"; then
+    if grep -qF '"known":false' <<<"$CHECK" && [[ ! "$wname" =~ ^free-[0-9]+$ ]]; then
+      append_exclusion "dispatch:   $candidate: pane idle, but unknown to the ledger and window name '$wname' is not the free-N migration shape"
+    else
+      describe_excluded_lane "$candidate" free
+    fi
+    continue
+  fi'''
+assert marker in text, "lane-free refusal block not found -- script shape changed"
+assert text.count(marker) == 1, "lane-free refusal block not unique -- script shape changed"
 mutated = '''  # MUTATED: reproduces the pre-#174 bug -- trust the window name on a
-  # ledger miss instead of refusing, bypassing the ledger read AND the
-  # agent-dotfiles#184 claim that would otherwise still catch this (the
-  # claim's own INSERT would collide with the real occupant, so the
-  # mutation must skip it too to actually reproduce the pre-#174 shape).
-  if [[ "$wname" =~ ^free-[0-9]+$ ]]; then
+  # ledger miss instead of refusing, bypassing the ledger read when the
+  # visible pane still carries the old free-N convention.
+  CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidate" --target "$candidate_target" --window-name "$wname" 2>/dev/null) || continue
+  if ! grep -qF '"free":true' <<<"$CHECK" && [[ "$wname" =~ ^free-[0-9]+$ ]]; then
     LANE="$candidate"
     LANE_TARGET="$candidate_target"
-    # #15: this mutant never calls lane-free, so there is no $CHECK to read a
-    # harness back from -- every fixture lane in this suite runs claude.exe,
-    # so this is the same value the real path would have resolved here.
-    # Getting it is not what this mutation is testing; step 3.5's relaunch
-    # guard refusing on an empty harness would be.
     LANE_HARNESS=claude
     break
+  fi
+  if ! grep -qF '"free":true' <<<"$CHECK"; then
+    if grep -qF '"known":false' <<<"$CHECK" && [[ ! "$wname" =~ ^free-[0-9]+$ ]]; then
+      append_exclusion "dispatch:   $candidate: pane idle, but unknown to the ledger and window name '$wname' is not the free-N migration shape"
+    else
+      describe_excluded_lane "$candidate" free
+    fi
+    continue
   fi'''
 text = text.replace(marker, mutated, 1)
 # agent-dotfiles#209 round 2 adds a THIRD guard on the same path, for the same

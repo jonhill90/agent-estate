@@ -43,6 +43,14 @@ echo one > "$REPO/file.txt"
 git -C "$REPO" add file.txt
 git -C "$REPO" commit -q -m "initial"
 git -C "$REPO" push -q -u origin main
+# agent-supervisor#17: dispatch.sh now compares this origin against the
+# [repo] argument every case below passes ("acme/agent-dotfiles") and refuses
+# on mismatch, so the fixture's origin has to actually read as that repo --
+# `git worktree add` shares its parent's remotes, so setting it once here
+# covers every worktree any case below creates. `remote set-url` only edits
+# config; nothing here fetches or pushes to it, so the URL never needs to
+# resolve.
+git -C "$REPO" remote set-url origin "git@github.com:acme/agent-dotfiles.git"
 
 cat > "$D/issues" <<'FIX'
 81|| worktree.sh has no automated caller
@@ -288,6 +296,110 @@ else
   bad "the claim is released when the dispatch aborts" "assignees: $(assignees 82)"
 fi
 if [ "$(worktrees)" = "$before" ]; then ok "no stray worktree is left behind"; else bad "no stray worktree is left behind" "$before -> $(worktrees)"; fi
+
+# --- agent-supervisor#17: the worktree must actually BE [repo] ------------
+# `dispatch.sh <issue> <slug> <brief> [repo] [repo-path]` claimed against
+# [repo] but built the worktree from [repo-path], and nothing compared the
+# two -- so a cross-repo dispatch (repo-path a checkout of some OTHER repo)
+# silently claimed one repository and dropped the lane into a worktree of
+# another. A second, independent clone with a DIFFERENT origin stands in for
+# that other repo.
+git init -q --bare "$D/other-origin.git"
+git clone -q "$D/other-origin.git" "$D/other-repo" 2>/dev/null
+git -C "$D/other-repo" config user.email test@example.com
+git -C "$D/other-repo" config user.name "Test"
+git -C "$D/other-repo" checkout -q -b main
+echo other > "$D/other-repo/file.txt"
+git -C "$D/other-repo" add file.txt
+git -C "$D/other-repo" commit -q -m "initial"
+git -C "$D/other-repo" push -q -u origin main
+git -C "$D/other-repo" remote set-url origin "git@github.com:acme/other-repo.git"
+
+printf '17|| the worktree must actually be the claimed repo\n' >> "$D/issues"
+before=$(worktrees)
+out=$(run 17 worktree-repo-mismatch "$D/brief.md" acme/agent-dotfiles "$D/other-repo"); rc=$?
+want_exit "a worktree whose origin does not match [repo] refuses the dispatch" "$rc" 1 "$out"
+want_contains "...and the refusal names the CLAIMED repo" "acme/agent-dotfiles" "$out"
+want_contains "...and the repo the worktree actually is" "acme/other-repo" "$out"
+log=$(tmuxlog)
+want_missing "no brief is sent on a repo mismatch" "send-keys -t t:@103 " "$log"
+if [ "$(assignees 17)" = "" ]; then
+  ok "the claim is released on a repo mismatch"
+else
+  bad "the claim is released on a repo mismatch" "assignees: $(assignees 17)"
+fi
+
+# THE REGRESSION GUARD (#17): origin == [repo] -> dispatch proceeds
+# unchanged. A check that refuses every dispatch is not a fix -- every case
+# elsewhere in this file already exercises this path (their fixture's origin
+# was set to match "acme/agent-dotfiles" above for exactly this reason), and
+# this case makes the guard's positive path an explicit, named assertion
+# rather than an implication of everything else in the file staying green.
+printf '18|| a matching repo dispatches normally\n' >> "$D/issues"
+out=$(run 18 worktree-repo-match "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a worktree whose origin matches [repo] dispatches normally" "$rc" 0 "$out"
+
+# MUTATION-CHECK: disable the comparison and confirm the mismatch case above
+# goes red -- a check present in the diff but never actually reached would
+# leave this suite passing regardless.
+MUTATED_17="$D/dispatch-no-origin-check.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$MUTATED_17" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = 'if [ -n "$REPO" ]; then\n  WORKTREE_ORIGIN='
+assert text.count(marker) == 1, "origin check not found or not unique -- script shape changed"
+text = text.replace(marker, 'if false; then\n  WORKTREE_ORIGIN=', 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose origin check is disabled" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  chmod +x "$MUTATED_17"
+  ok "setup: patched a copy of dispatch.sh whose origin check is disabled"
+  printf '19|| mutation: origin check disabled\n' >> "$D/issues"
+  mut_out=$(DISPATCH_SCRIPT="$MUTATED_17" run 19 mutation-check "$D/brief.md" acme/agent-dotfiles "$D/other-repo"); mut_rc=$?
+  want_exit "mutation confirmed: with the origin check disabled, the mismatch case dispatches anyway (the assertion above would now be red)" "$mut_rc" 0 "$mut_out"
+fi
+
+# --- agent-supervisor#17: [repo] given, [repo-path] omitted is a trap -----
+# [repo-path] defaults to $PWD, so [repo] alone reads as "target that repo"
+# but silently builds the worktree from wherever dispatch.sh happened to run.
+# Invoked directly (not through run(), which always supplies both) with only
+# 4 positional args.
+printf '20|| repo given, repo-path omitted\n' >> "$D/issues"
+: > "$D/tmux.log"
+rm -rf "$D/panes"; mkdir -p "$D/panes"
+NO_PATH_OUT=$(cd "$REPO" && PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
+  LANES_FIXTURE="$D/lanes" LANES_SESSION=t TMUX_LOG="$D/tmux.log" \
+  TMUX_PANES="$D/panes" DISPATCH_SETTLE=0 \
+  AGENT_SUPERVISOR_STATE_DIR="$(mktemp -d "$D/state.XXXXXX")" \
+  STUB_PANE_PATH="$REPO" WORKTREE_ROOT="$D/roots" \
+  "$DISPATCH" 20 repo-path-omitted "$D/brief.md" acme/agent-dotfiles 2>&1); NO_PATH_RC=$?
+want_exit "[repo] with [repo-path] omitted refuses rather than silently use \$PWD" "$NO_PATH_RC" 2 "$NO_PATH_OUT"
+want_contains "...and explains the opt-in" "DISPATCH_ALLOW_CWD_REPO_PATH" "$NO_PATH_OUT"
+if [ -z "$(assignees 20)" ]; then ok "the refused dispatch takes no claim on its own issue"
+else bad "the refused dispatch takes no claim on its own issue" "still assigned: $(assignees 20)"; fi
+
+# ...and the explicit opt-in is honoured: with DISPATCH_ALLOW_CWD_REPO_PATH=1,
+# the same 4-argument call uses $PWD (here, $REPO, whose origin matches
+# [repo]) and proceeds.
+printf '21|| repo given, repo-path omitted, opted in\n' >> "$D/issues"
+: > "$D/tmux.log"
+rm -rf "$D/panes"; mkdir -p "$D/panes"
+OPT_IN_OUT=$(cd "$REPO" && PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
+  LANES_FIXTURE="$D/lanes" LANES_SESSION=t TMUX_LOG="$D/tmux.log" \
+  TMUX_PANES="$D/panes" DISPATCH_SETTLE=0 DISPATCH_ALLOW_CWD_REPO_PATH=1 \
+  AGENT_SUPERVISOR_STATE_DIR="$(mktemp -d "$D/state.XXXXXX")" \
+  STUB_PANE_PATH="$REPO" WORKTREE_ROOT="$D/roots" \
+  "$DISPATCH" 21 repo-path-opt-in "$D/brief.md" acme/agent-dotfiles 2>&1); OPT_IN_RC=$?
+want_exit "DISPATCH_ALLOW_CWD_REPO_PATH=1 opts into \$PWD explicitly" "$OPT_IN_RC" 0 "$OPT_IN_OUT"
 
 # --- already claimed: pick different work, do not build anything ---------
 # The issue and slug here must be UNIQUE to this case. This case used to reuse
@@ -1158,6 +1270,14 @@ marker = '''  CLAIM_LANE="$candidate"
     LANE_HARNESS=$(grep -oE '"harness":"[a-z-]*"' <<<"$CHECK" | head -1 | sed -E 's/.*:"([a-z-]*)"/\\1/')
     break
   fi
+  claim_reason=$(json_field reason "$CLAIM")
+  claim_holder=$(json_field holder "$CLAIM")
+  [ "$claim_holder" = null ] && claim_holder=""
+  if [ -n "$claim_holder" ]; then
+    append_exclusion "dispatch:   $candidate: claim refused ($claim_reason; holder $claim_holder)"
+  else
+    append_exclusion "dispatch:   $candidate: claim refused ($claim_reason; no holder reported; token '$CLAIM_TOKEN' may already exist)"
+  fi
   # Lost this candidate to another dispatcher: move on, exactly as before.
   # The release is a no-op in that case (the row is the winner's, not ours)
   # and only bites when the claim committed but its result did not come back
@@ -1404,8 +1524,8 @@ else
     bad "mutation confirmed: with no reap, the killed dispatcher's lane never comes back" \
       "expected a refusal naming 'no free lane'; rc=$rc out=$out"
   fi
-  want_contains "and the refusal names how to clear a stranded claim by hand" "release-lane-claim --lane <lane> --token <token>" "$out"
-  want_contains "and how to read the token out of the ledger" 'ledger-claim:<lane>:<token>' "$out"
+  want_contains "and the refusal names the stranded claim id" "ledger-claim:t:3:ad605-crash-no-reap" "$out"
+  want_contains "and the refusal names how to clear that stranded claim by hand" "release-lane-claim --lane t:3 --token ad605-crash-no-reap" "$out"
 fi
 
 # --- agent-dotfiles#209 round 2: the point of no return is the SEND -------
@@ -1492,14 +1612,17 @@ echo '703|| the next dispatch must not take a lane that is working' >> "$D/issue
 out=$(LEDGER_STATE="$LIVE_KILL_STATE" run 703 the-next-one "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "the NEXT dispatch refuses rather than take the lane the killed dispatcher left working" "$rc" 1 "$out"
 want_contains "...naming the only lane it had as unavailable" "no free lane" "$out"
-want_missing "...and it did NOT reap the live claim away" "ledger-claim:t:3:ad702-live-then-kill" "$out"
+want_contains "...and it did NOT reap the live claim away" \
+  '"id":"ledger-claim:t:3:ad702-live-then-kill"' "$(LEDGER_STATE="$LIVE_KILL_STATE" ledger status 2>&1)"
 want_missing "...and typed nothing into that pane" "rename-window -t t:@103 ad703-the-next-one" "$(cat "$D/tmux.log")"
 # Fail-closed has a price and the refusal must name it: this lane needs a
 # human, and `release-lane-claim` deliberately will not clear it.
 want_contains "...and says to record a completion when a live brief finished without signalling" \
-  "record-completion --lane <lane>" "$out"
-want_contains "...and says cancel-open-task is for discarding a live brief that produced no real work" \
-  "cancel-open-task --lane" "$out"
+  "record-completion --lane t:3" "$out"
+want_missing "...and does not suggest release-lane-claim for a live delivered claim" \
+  "release-lane-claim" "$out"
+want_missing "...and does not suggest cancel-open-task for a delivered idle lane" \
+  "cancel-open-task" "$out"
 
 # --- the previous round's finding must not regress ------------------------
 # Moving the commit point later would be an easy way to satisfy everything
