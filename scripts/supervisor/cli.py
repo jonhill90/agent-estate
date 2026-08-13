@@ -176,6 +176,9 @@ def parser():
     lane_free_parser.add_argument("--target", required=True)
     lane_free_parser.add_argument("--window-name", required=True)
 
+    lane_diagnostic_parser = sub.add_parser("lane-diagnostic")
+    lane_diagnostic_parser.add_argument("--lane", required=True)
+
     # agent-dotfiles#184: the claim side `lane-free` (a query) never had. See
     # `Ledger.claim_lane`'s docstring for why a read-then-write pair of
     # separate calls does not close the race and this is one atomic write.
@@ -628,6 +631,19 @@ def main(argv=None):
         value = lane_free(
             ledger, adapter.transport, lane=args.lane, target=args.target, window_name=args.window_name
         )
+    elif args.command == "lane-diagnostic":
+        lane = ledger.get_lane(args.lane)
+        task = ledger.open_task_for_lane(args.lane)
+        value = {
+            "lane": args.lane,
+            "known": lane is not None,
+            "task": task["id"] if task is not None else None,
+            "status": task["status"] if task is not None else None,
+            "summary": task["summary"] if task is not None else None,
+            "created_at": task["created_at"] if task is not None else None,
+            "updated_at": task["updated_at"] if task is not None else None,
+            "delivered_at": task["delivered_at"] if task is not None else None,
+        }
     elif args.command == "claim-lane":
         owner = None if args.owner_pid is None else claim_owner_token(args.owner_pid)
         value = ledger.claim_lane(args.lane, token=args.token, owner=owner)
