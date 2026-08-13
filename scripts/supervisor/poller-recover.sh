@@ -211,10 +211,20 @@ trap 'rm -rf "$LOCK" 2>/dev/null' EXIT
 # Every window in $SESSION named $WINDOW, by id. Zero: absent, create one.
 # One: the ordinary case, act on it. More than one: refuse rather than guess
 # which is the real poller -- see the header note on window-id addressing.
+# agent-supervisor#28: poller_window_ids's rc is checked here, not just its
+# output -- a query it could not trust (tmux missing, list-windows failing)
+# must refuse, not fall into the zero-windows branch below and risk
+# launching a second poller alongside one it simply failed to see.
+ids_raw=$(poller_window_ids "$SESSION")
+ids_rc=$?
+if [ "$ids_rc" -ne 0 ]; then
+  log "FAILED -- could not determine poller windows in session '$SESSION' (tmux query failed, rc=$ids_rc) -- refusing to guess whether a poller exists"
+  exit 1
+fi
 ids=()
 while IFS= read -r wid; do
   [ -n "$wid" ] && ids+=("$wid")
-done < <(poller_window_ids "$SESSION")
+done <<<"$ids_raw"
 
 if [ "${#ids[@]}" -gt 1 ]; then
   log "FAILED -- ${#ids[@]} windows named '$WINDOW' in session '$SESSION' (${ids[*]}) -- refusing to guess which is the poller, not touching any of them"

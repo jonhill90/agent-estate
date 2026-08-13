@@ -560,17 +560,39 @@ POLLER_PANE_PID=$!
 
 STUBS="$D3/bin"; mkdir -p "$STUBS"
 TMUX_LOG="$D3/tmux.log"
+# agent-supervisor#28: poller-window.sh no longer dumps
+# "#{window_id}\t#{window_name}" and splits it client-side -- it filters
+# with tmux's own `-f "#{==:#{window_name},NAME}"` and asks for the single
+# field "#{window_id}". This stub has to do that same filtering itself now,
+# or every test below that depends on window-name matching (the mutation
+# test, LANES_POLLER_WINDOW overrides, the multi-window case) would pass
+# vacuously by returning every row regardless of the query.
 cat > "$STUBS/tmux" <<EOF
 #!/bin/bash
 echo "\$@" >> "$TMUX_LOG"
 if [ "\$1" = "list-panes" ]; then
   printf 'test-session-187:11.1\t$POLLER_PANE_PID\n'
 elif [ "\$1" = "list-windows" ]; then
-  if [ -n "\${TMUX_WINDOW_ROWS:-}" ]; then
-    printf '%b' "\$TMUX_WINDOW_ROWS"
-  else
-    printf '@225\tinbox-poll\n'
-  fi
+  rows="\${TMUX_WINDOW_ROWS:-\$'@225\tinbox-poll\n'}"
+  want=""
+  prev=""
+  for arg in "\$@"; do
+    if [ "\$prev" = "-f" ]; then
+      case "\$arg" in
+        '#{==:#{window_name},'*'}')
+          want="\${arg#'#{==:#{window_name},'}"
+          want="\${want%\}}"
+          ;;
+      esac
+    fi
+    prev="\$arg"
+  done
+  while IFS=\$'\t' read -r id name; do
+    [ -n "\$id" ] || continue
+    if [ -z "\$want" ] || [ "\$name" = "\$want" ]; then
+      printf '%s\n' "\$id"
+    fi
+  done <<<"\$rows"
 fi
 exit 0
 EOF
