@@ -566,7 +566,11 @@ echo "\$@" >> "$TMUX_LOG"
 if [ "\$1" = "list-panes" ]; then
   printf 'test-session-187:11.1\t$POLLER_PANE_PID\n'
 elif [ "\$1" = "list-windows" ]; then
-  printf '@225\tinbox-poll\n'
+  if [ -n "\${TMUX_WINDOW_ROWS:-}" ]; then
+    printf '%b' "\$TMUX_WINDOW_ROWS"
+  else
+    printf '@225\tinbox-poll\n'
+  fi
 fi
 exit 0
 EOF
@@ -660,6 +664,18 @@ out4=$(SUPERVISOR_STATE="$S4" LANES_SESSION="test-session-187" LANES_POLLER_WIND
   || bad "no matching pane leaves the poller untouched" ""
 grep -qi 'no poller window' "$S4/advance-live.log" 2>/dev/null && ok "a missing poller window is named in the log" \
   || bad "a missing pane is named in the log" "$(cat "$S4/advance-live.log" 2>/dev/null)"
+
+# --- multiple poller windows: refuses to guess, does not restart ----------
+S5=$(mktemp -d)
+printf 'checked: %s\nstate:   ok\nsha:     deadbeef\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$S5/inbox-poll.status"
+: >"$TMUX_LOG"
+out5=$(TMUX_WINDOW_ROWS=$'@225\tinbox-poll\n@226\tinbox-poll\n' SUPERVISOR_STATE="$S5" LANES_SESSION="test-session-187" PATH="$STUBS:$PATH" bash "$ADVANCE" "$LIVE3" 2>&1); rc5=$?
+want_exit "multiple poller windows still leave advance-live exit 0" "$rc5" 0 "$out5"
+[ ! -f "$S5/.inbox-poll-restart-requested" ] && ok "multiple poller windows write no restart flag" \
+  || bad "multiple poller windows write no restart flag" "$(ls "$S5" 2>/dev/null)"
+grep -qi "multiple poller windows named 'inbox-poll' exist in session 'test-session-187' -- refusing to guess" "$S5/advance-live.log" 2>/dev/null \
+  && ok "multiple poller windows refusal is logged" \
+  || bad "multiple poller windows refusal is logged" "$(cat "$S5/advance-live.log" 2>/dev/null)"
 
 rm -rf "$D3"
 
