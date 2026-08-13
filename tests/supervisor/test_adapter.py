@@ -426,6 +426,37 @@ class PiRPCAdapterTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "unknown lane"):
             self.adapter.assign_task(lane="missing", task_id="t1", summary="x")
 
+    def test_assign_task_does_not_mark_delivered_when_the_transport_reports_a_dropped_stream(self):
+        """agent-supervisor#61: `send_literal` on a stream that closed before
+        `agent_settled` must raise (`pi_transport.PiRPCConnectionClosedError`
+        in production), not return a success-shaped result. This checks the
+        adapter's end of that contract -- a raising transport must leave the
+        task `delivery_pending`, not `complete`, and must still terminate the
+        transport it spawned."""
+
+        class DroppedStreamTransport(FakePiRPCTransport):
+            def send_literal(self, target, payload):
+                self.prompts.append((target, payload))
+                raise RuntimeError("pi RPC connection closed before the prompt settled")
+
+        self.adapter = PiRPCAdapter(
+            self.ledger,
+            lambda **kwargs: DroppedStreamTransport(sessions=self.shared_sessions, **kwargs),
+            clock=lambda: 1_000,
+        )
+        self.adapter.register_lane(
+            lane="pi-worker", target=None, harness="pi", repo="/repo/hill90", nonce="nonce-pi"
+        )
+        self.seed_source("pi-task", "Review one artifact")
+
+        with self.assertRaisesRegex(RuntimeError, "connection closed"):
+            self.adapter.assign_task(lane="pi-worker", task_id="pi-task", summary="Review one artifact")
+
+        task = self.ledger.get_task("pi-task")
+        self.assertEqual("delivery_pending", task["status"])
+        assign_transport = FakePiRPCTransport.instances[-1]
+        self.assertTrue(assign_transport.terminated)
+
     def test_assign_task_refuses_a_lane_registered_as_send_keys(self):
         """agent-supervisor#58: `pi` is the one harness allowed either
         transport -- this adapter must refuse a lane recorded `send-keys`

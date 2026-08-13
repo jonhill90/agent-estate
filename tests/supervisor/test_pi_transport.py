@@ -16,7 +16,12 @@ from pathlib import Path
 SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "scripts" / "supervisor"
 sys.path.insert(0, str(SUPERVISOR_DIR))
 
-from pi_transport import PiRPCProtocolError, PiRPCTimeoutError, PiRPCTransport  # noqa: E402
+from pi_transport import (  # noqa: E402
+    PiRPCConnectionClosedError,
+    PiRPCProtocolError,
+    PiRPCTimeoutError,
+    PiRPCTransport,
+)
 
 
 class FakePeer:
@@ -276,7 +281,14 @@ class PiRPCTransportPromptTest(unittest.TestCase):
 
     def test_connection_closed_wakes_a_blocked_send_literal(self):
         """A dead process settles nothing further -- a blocked send_literal
-        must be woken rather than wait out its full timeout."""
+        must be woken rather than wait out its full timeout, AND must raise
+        rather than return a success-shaped result. `_read_loop` sets the
+        same settle event a real settled turn uses, so a naive fix that only
+        wakes the wait leaves `send_literal` returning
+        `stop_reason=None, message=''` -- a dropped stream indistinguishable
+        from a delivered, empty turn. That is the exact failure direction
+        Phase 4a exists to retire (a response must be able to say "the pipe
+        died", not just "no answer yet")."""
         peer = FakePeer()
 
         def handler(obj):
@@ -287,13 +299,42 @@ class PiRPCTransportPromptTest(unittest.TestCase):
         peer.on_request(handler)
         transport = PiRPCTransport(peer.transport_reader, peer.transport_writer, prompt_timeout=5)
         started = time.time()
-        try:
+        with self.assertRaises(PiRPCConnectionClosedError):
             transport.send_literal("sess-1", "hello?")
-        except Exception:
-            pass
         elapsed = time.time() - started
         self.assertLess(elapsed, 2, "connection close should wake send_literal well before its 5s timeout")
         transport.close()
+
+    def test_connection_closed_after_real_settle_does_not_mask_the_result(self):
+        """The inverse race: `agent_settled` arrives and THEN the stream
+        closes (e.g. the process exits right after finishing). The already-
+        settled turn must still be returned -- closure must never overwrite
+        a settle that already won."""
+        peer = FakePeer()
+
+        def handler(obj):
+            if obj["type"] == "prompt":
+                _ack(peer, obj["id"])
+                peer.send({
+                    "type": "message_end",
+                    "message": {
+                        "role": "assistant",
+                        "stopReason": "end_turn",
+                        "content": [{"type": "text", "text": "done"}],
+                        "usage": {},
+                    },
+                })
+                peer.send({"type": "agent_settled"})
+                peer.close()
+
+        peer.on_request(handler)
+        transport = PiRPCTransport(peer.transport_reader, peer.transport_writer, prompt_timeout=5)
+        try:
+            result = transport.send_literal("sess-1", "hello?")
+            self.assertEqual("end_turn", result["stop_reason"])
+            self.assertEqual("done", result["message"])
+        finally:
+            transport.close()
 
 
 if __name__ == "__main__":

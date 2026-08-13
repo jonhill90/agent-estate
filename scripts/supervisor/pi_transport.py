@@ -45,6 +45,13 @@ class PiRPCProtocolError(RuntimeError):
     pass
 
 
+class PiRPCConnectionClosedError(PiRPCProtocolError):
+    """The stream closed before `agent_settled` arrived for the in-flight
+    prompt. Distinct from a timeout: the process is gone, not merely slow."""
+
+    pass
+
+
 class _PendingAck:
     def __init__(self):
         self.event = threading.Event()
@@ -94,6 +101,13 @@ class PiRPCTransport:
         # RPC subprocess actually is).
         self._settle_lock = threading.Lock()
         self._settle_event = None
+        # Set alongside `_settle_event` by whichever of `_record_settled` /
+        # `_read_loop`'s close handling wakes it first -- "settled" for a real
+        # `agent_settled` frame, "closed" for a dead stream. `send_literal`
+        # reads this after the wait to tell the two apart; neither wins a
+        # race against the other because both are assigned under
+        # `_settle_lock` before the event is set.
+        self._settle_outcome = None
         self._last_turn = {"stop_reason": None, "message": "", "usage": {}}
 
         self._reader_thread = threading.Thread(target=self._read_loop, daemon=True)
@@ -177,6 +191,10 @@ class PiRPCTransport:
                 entry.event.set()
             with self._settle_lock:
                 event = self._settle_event
+                # Don't overwrite a real settle that already won the race --
+                # only claim "closed" if nothing has set an outcome yet.
+                if event is not None and self._settle_outcome is None:
+                    self._settle_outcome = "closed"
             # A dead process settles nothing further; wake a blocked
             # `send_literal` rather than let it wait out its full timeout.
             if event is not None:
@@ -219,6 +237,8 @@ class PiRPCTransport:
     def _record_settled(self):
         with self._settle_lock:
             event = self._settle_event
+            if event is not None:
+                self._settle_outcome = "settled"
         if event is not None:
             event.set()
 
@@ -259,6 +279,7 @@ class PiRPCTransport:
             self._last_turn = {"stop_reason": None, "message": "", "usage": {}}
             settle_event = threading.Event()
             self._settle_event = settle_event
+            self._settle_outcome = None
 
         self._request("prompt", {"message": payload}, timeout=self.ack_timeout)
 
@@ -266,7 +287,13 @@ class PiRPCTransport:
             raise PiRPCTimeoutError(f"pi RPC prompt did not settle within {self.prompt_timeout}s")
 
         with self._settle_lock:
+            outcome = self._settle_outcome
             turn = dict(self._last_turn)
+
+        if outcome != "settled":
+            raise PiRPCConnectionClosedError(
+                "pi RPC connection closed before the prompt settled -- delivery is unconfirmed"
+            )
 
         usage = turn["usage"] or {}
         return {
