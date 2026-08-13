@@ -218,6 +218,14 @@ def parser():
     task_lane_parser = sub.add_parser("task-lane")
     task_lane_parser.add_argument("--task", required=True)
 
+    # agent-supervisor#35: the same lookup as `task-lane`, but keyed by the
+    # GitHub issue a PR closes rather than by a task id parsed out of a
+    # branch name -- see `Ledger.get_task_for_issue`. `dispatch.sh`'s
+    # `--reviews-pr` authorship check asks this FIRST, before it ever looks
+    # at a branch.
+    issue_lane_parser = sub.add_parser("issue-lane")
+    issue_lane_parser.add_argument("--issue", required=True)
+
     # agent-dotfiles#237: the read `restore.sh` runs after a tmux server loss.
     # Deliberately its own command rather than a flag on `status`: it must
     # work when there is no tmux server at all, so it touches no transport.
@@ -612,6 +620,14 @@ def main(argv=None):
     elif args.command == "task-lane":
         row = ledger.get_task(args.task)
         value = {"task": args.task, "known": row is not None, "lane": row["lane"] if row is not None else None}
+    elif args.command == "issue-lane":
+        row = ledger.get_task_for_issue(args.issue)
+        value = {
+            "issue": args.issue,
+            "known": row is not None,
+            "lane": row["lane"] if row is not None else None,
+            "task": row["id"] if row is not None else None,
+        }
     elif args.command == "record-completion":
         value = record_completion(ledger, task=args.task, note=args.note)
     elif args.command == "accept":

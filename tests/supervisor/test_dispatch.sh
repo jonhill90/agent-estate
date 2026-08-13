@@ -1749,10 +1749,14 @@ cat > "$D/lanes" <<'FIX'
 3|free-3|claude.exe|❯ ready|1|0
 FIX
 printf '207|| review of a PR with no lane/ branch\n' >> "$D/issues"
+# "Fixes #100" resolves a candidate issue via closingIssuesReferences, but
+# #100 was never dispatched -- the ledger has no record of it either -- and
+# the branch itself is not a type-prefixed one to fall back to. Every
+# source comes up empty, not just the branch-name one.
 printf '299|Fixes #100|some-hand-pushed-branch\n' >> "$D/prs"
 out=$(LEDGER_STATE="$D/state-212-closed" run 207 rev-299 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 299); rc=$?
 want_exit "authorship that cannot be read from the branch refuses the dispatch" "$rc" 1 "$out"
-want_contains "and says why: not the lane/<issue>-<slug> convention" "not a lane/<issue>-<slug> branch" "$out"
+want_contains "and says why: no branch task to fall back to either" "(task none)" "$out"
 want_contains "and says authorship is unknown, not assumed safe" "authorship unknown" "$out"
 if [ -z "$(assignees 207)" ]; then ok "a fail-closed refusal takes no claim"
 else bad "a fail-closed refusal takes no claim" "still assigned: $(assignees 207)"; fi
@@ -1768,6 +1772,128 @@ want_contains "and names the unresolvable task" "ad101-never-dispatched" "$out"
 printf '209|| ordinary dispatch, not a review\n' >> "$D/issues"
 out=$(LEDGER_STATE="$D/state-212-closed" run 209 ordinary "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "a dispatch with no --reviews-pr is not held to the authorship check" "$rc" 0 "$out"
+
+# --- agent-supervisor#35: the ledger decides authorship, not the branch --
+#
+# Before this, a `chore/<n>-<slug>` branch (or `fix/`, `feat/`, `docs/` --
+# every prefix CLAUDE.md's Work Tracking section actually asks for except
+# `lane/`) never matched dispatch.sh's branch regex at all, so EVERY review
+# of one refused outright with "authorship unknown" -- whether or not the
+# candidate lane actually wrote it. That is why the old guard "looked
+# healthy": a same-author review and a different-author review produced the
+# exact same refusal, so nothing distinguished a guard that worked from one
+# that just failed closed on everything. These two cases assert the REASON,
+# not just exit code, and only pass when the ledger -- not the branch --
+# actually told them apart.
+#
+# Case 1: chore branch, author lane IS the only free lane -> still REFUSED,
+# and refused BECAUSE it is the author (the same message #212's own
+# same-author case gets), not because the branch shape is unrecognized.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+printf '195|| the code PR #350 was written from (chore branch)\n' >> "$D/issues"
+printf '196|| review PR #350, same-author case\n' >> "$D/issues"
+# The PR's branch slug ("public-scrub") is deliberately NOT the authoring
+# dispatch's own slug ("scrub-secrets", task ad195-scrub-secrets) -- so the
+# widened branch-name fallback, if it fired, would resolve to a DIFFERENT,
+# unknown task (ad195-public-scrub) and find nothing. Only the ledger's
+# issue-lane lookup can resolve this one correctly; the mutation below
+# proves that.
+printf '350|Fixes #195|chore/195-public-scrub\n' >> "$D/prs"
+
+out=$(LEDGER_STATE="$D/state-35a" run 195 scrub-secrets "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch (#195, a chore/ branch) succeeds" "$rc" 0 "$out"
+LEDGER_STATE="$D/state-35a" ledger record-completion --task ad195-scrub-secrets --note done >/dev/null
+
+out=$(LEDGER_STATE="$D/state-35a" run 196 rev-350-same "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 350); rc=$?
+want_exit "a chore/ PR's review is refused when its author is the only free lane" "$rc" 1 "$out"
+want_contains "refused BECAUSE it is the author, resolved via the ledger despite the chore/ branch" \
+  "ad195-scrub-secrets" "$out"
+want_contains "not because the branch shape was unrecognized" "no free lane other than the author" "$out"
+want_missing "and no branch-shape refusal text leaks in instead" "authorship unknown" "$out"
+log=$(tmuxlog)
+want_missing "nothing was sent" "send-keys" "$log"
+
+# Case 2: chore branch, author lane is a DIFFERENT lane -> DISPATCHED, and
+# lands on the OTHER free lane -- proving the ledger both identified the
+# chore/ branch's real author AND still let a genuinely different lane take
+# the review, which the old branch-only guard could never reach (it refused
+# every chore/ PR before it got this far).
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+printf '197|| the code PR #351 was written from (chore branch)\n' >> "$D/issues"
+printf '198|| review PR #351, different-author case\n' >> "$D/issues"
+# Same divergence as case 1: the branch slug ("public-scrub-2") differs from
+# the authoring dispatch's slug ("scrub-secrets-2", task
+# ad197-scrub-secrets-2), so a branch-name fallback alone would not resolve
+# this either.
+printf '351|Fixes #197|chore/197-public-scrub-2\n' >> "$D/prs"
+
+out=$(LEDGER_STATE="$D/state-35b" run 197 scrub-secrets-2 "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch (#197, a chore/ branch) succeeds" "$rc" 0 "$out"
+log=$(tmuxlog)
+want_contains "and lands on the first free lane, t:3 (target t:@103)" "send-keys -t t:@103" "$log"
+LEDGER_STATE="$D/state-35b" ledger record-completion --task ad197-scrub-secrets-2 --note done >/dev/null
+
+out=$(LEDGER_STATE="$D/state-35b" run 198 rev-351-diff "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 351); rc=$?
+want_exit "a chore/ PR's review IS dispatched when its author is a different lane" "$rc" 0 "$out"
+want_contains "the author's lane (t:3) is named and skipped, via the ledger not the branch" "skipping t:3" "$out"
+want_contains "the skip names the authoring task the ledger resolved by issue" "ad197-scrub-secrets-2" "$out"
+log=$(tmuxlog)
+want_contains "and the review lands on the OTHER free lane, t:4 (target t:@104)" "send-keys -t t:@104" "$log"
+want_missing "never on the author's lane (t:3, target t:@103)" "send-keys -t t:@103 " "$log"
+
+# MUTATION: break the ledger issue-lane lookup (return unknown for every
+# issue) and confirm case 2 goes red -- with issue-lane silenced, dispatch.sh
+# falls through to the chore/ branch regex, which resolves to nothing (only
+# `lane/` was ever understood there before this brief widened it, and even
+# widened, plain regex matching is not what proves the LEDGER decided this),
+# so the review should refuse instead of skip-and-dispatch.
+MUTATED_35=$D/dispatch-no-issue-ledger.sh
+patch_rc=0
+python3 - "$DISPATCH" "$MUTATED_35" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = 'ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" issue-lane --issue "$candidate_issue" 2>&1) || continue'
+assert text.count(marker) == 1, "issue-lane lookup not found or not unique -- script shape changed"
+text = text.replace(marker, 'ISSUE_JSON=\'{"known":false}\'  # MUTATED: ledger issue-lane never consulted', 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose issue-lane lookup is silenced" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh whose issue-lane lookup is silenced"
+  chmod +x "$MUTATED_35"
+  cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+  printf '199|| the code PR #352 was written from (chore branch, mutant)\n' >> "$D/issues"
+  printf '211|| review PR #352 against the mutated guard\n' >> "$D/issues"
+  LEDGER_STATE="$D/state-35-mutant" run 199 scrub-secrets-3 "$D/brief.md" acme/agent-dotfiles "$REPO" >/dev/null
+  LEDGER_STATE="$D/state-35-mutant" ledger record-completion --task ad199-scrub-secrets-3 --note done >/dev/null
+  # Same divergence again: the branch slug does not match the authoring
+  # dispatch's real slug, so with issue-lane silenced NEITHER the ledger
+  # NOR the branch-name fallback can resolve this -- it must refuse.
+  printf '352|Fixes #199|chore/199-public-scrub-3\n' >> "$D/prs"
+  out=$(DISPATCH_SCRIPT="$MUTATED_35" LEDGER_STATE="$D/state-35-mutant" \
+        run 211 rev-352 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 352); rc=$?
+  want_exit "mutation confirmed: with the ledger's issue lookup silenced, a chore/ PR's review refuses again" "$rc" 1 "$out"
+  want_contains "mutation confirmed: back to authorship unknown (the assertions above would now be red)" \
+    "authorship unknown" "$out"
+fi
 
 # --- MUTATION-CHECK: remove the refusal and watch dispatch send a review
 # straight to its own author --------------------------------------------

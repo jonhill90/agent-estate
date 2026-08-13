@@ -227,31 +227,47 @@ fi
 # `--reviews-pr`. Ordinary (non-review) dispatches are unaffected -- there is
 # no author to avoid.
 #
-# THE MAPPING THIS RELIES ON, verified against the code that writes both
-# sides of it rather than assumed:
+# THE PRIMARY MAPPING (issue -> lane) is `source_tasks.source_ref` (the
+# issue number `record_dispatch` wrote it as, step 6 below) joined to
+# `tasks.lane` by task id -- see `Ledger.get_task_for_issue`. Neither side
+# comes from a branch name.
+#
+# THE FALLBACK MAPPING, used only when that lookup is silent, verified
+# against the code that writes both sides of it rather than assumed:
 #   * `worktree.sh new "${ISSUE}-${SLUG}"` (step 3 below) creates branch
 #     `lane/${ISSUE}-${SLUG}` -- literally `BRANCH="lane/$SLUG"` in
 #     worktree.sh, where the caller's $SLUG here is already `$ISSUE-$SLUG`.
+#     A hand-pushed or type-prefixed branch (`fix/`, `feat/`, `chore/`,
+#     `docs/`) is read the same way, per the widened regex below.
 #   * Step 6 below records that same dispatch's task under id
 #     `$WINDOW_NAME`, i.e. `${PREFIX}${ISSUE}-${SLUG}` -- and `tasks.id` is a
 #     SQLite PRIMARY KEY; `Ledger._assign_tx` raises rather than let a second
 #     lane reuse an existing task id (core.py), so a task id's `lane` column
 #     never silently changes owner once written.
-# So `lane/<n>-<slug>` on a PR's head branch and task id `${PREFIX}<n>-<slug>`
-# are two spellings of the same fact, produced by the same dispatch, and the
-# second is a permanent ledger row. Neither spelling includes REPO's OWNER,
-# so this check only makes sense within one repo -- exactly what a single
-# `dispatch.sh` invocation already is.
+# So `<prefix>/<n>-<slug>` on a PR's head branch and task id
+# `${PREFIX}<n>-<slug>` are two spellings of the same fact, produced by the
+# same dispatch, and the second is a permanent ledger row. Neither spelling
+# includes REPO's OWNER, so this check only makes sense within one repo --
+# exactly what a single `dispatch.sh` invocation already is.
 #
-# FAILS CLOSED throughout: `gh` unreachable, a PR with no head branch, a head
-# branch outside the `lane/<n>-<slug>` convention (hand-pushed, or from
-# before #81 wired worktrees into every dispatch), or a task id the ledger
-# has no row for -- every one of these means authorship cannot be
-# determined, and this refuses the WHOLE dispatch rather than guess. A
-# candidate lane is only ever excluded, never assumed innocent from missing
-# data.
+# FAILS CLOSED throughout: `gh` unreachable, a PR with no head branch, or
+# every source below coming up silent -- every one of these means authorship
+# cannot be determined, and this refuses the WHOLE dispatch rather than
+# guess. A candidate lane is only ever excluded, never assumed innocent from
+# missing data.
+#
+# agent-supervisor#35: a branch name is a label someone typed at dispatch
+# time, not a record this system wrote -- the ledger row is. THE LEDGER IS
+# ASKED FIRST NOW, keyed by the issue the PR closes, and the branch name is
+# kept only as a last-resort hint, widened to the prefixes actually in use
+# (CLAUDE.md's Work Tracking section requires type-prefixed branches --
+# `lane/` was the only shape understood before this, and it is the one the
+# convention is moving away from). Measured on this repo's own merged
+# history: 3 of 11 merged PRs, plus open PR #33, were unreviewable through
+# the branch-only path -- see the #35 issue body for the count.
 AUTHOR_LANE=""
 AUTHOR_TASK=""
+FALLBACK_TASK=""
 if [ -n "$REVIEWS_PR" ]; then
   GH_REPO_ARGS=()
   [ -n "$REPO" ] && GH_REPO_ARGS=(-R "$REPO")
@@ -259,7 +275,7 @@ if [ -n "$REVIEWS_PR" ]; then
   # documented as optional on this exact flag (`--reviews-pr` with [repo]
   # omitted), so GH_REPO_ARGS is empty on that path and "${GH_REPO_ARGS[@]}"
   # alone would abort under 3.2 before `gh` ever runs.
-  PR_JSON=$(gh pr view "$REVIEWS_PR" "${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"}" --json headRefName 2>&1)
+  PR_JSON=$(gh pr view "$REVIEWS_PR" "${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"}" --json headRefName,closingIssuesReferences,commits 2>&1)
   if [ $? -ne 0 ]; then
     echo "dispatch: cannot read PR #$REVIEWS_PR -- refusing to dispatch its review (authorship unknown, failing closed)" >&2
     sed 's/^/  /' <<<"$PR_JSON" >&2
@@ -270,23 +286,51 @@ if [ -n "$REVIEWS_PR" ]; then
     echo "dispatch: PR #$REVIEWS_PR's head branch is unreadable -- refusing to dispatch its review (authorship unknown, failing closed)" >&2
     exit 1
   fi
-  if [[ "$HEAD_REF" =~ ^lane/([0-9]+)-(.+)$ ]]; then
-    AUTHOR_TASK="${PREFIX}${BASH_REMATCH[1]}-${BASH_REMATCH[2]}"
-  else
-    echo "dispatch: PR #$REVIEWS_PR's branch '$HEAD_REF' is not a lane/<issue>-<slug> branch -- cannot determine its author, refusing (authorship unknown, failing closed)" >&2
-    exit 1
+
+  # 1 & 2. THE LEDGER, asked by ISSUE -- never by branch name. Two sources
+  # for "which issue this PR closes", tried in order and pooled (deduped)
+  # rather than short-circuited on the first that parses, because either can
+  # be empty for a PR that still has a real, ledger-known author:
+  #   1. closingIssuesReferences: GitHub's own parse of the PR body.
+  #   2. commit messages: this project's own convention closes issues from
+  #      commit trailers too (see this brief's own "Close with `Fixes
+  #      #35`"), which a PR body alone would miss.
+  # Each candidate issue number goes to `cli.py issue-lane`, which asks the
+  # ledger which lane was dispatched for that issue -- it never reads a
+  # branch. The first candidate the ledger actually knows about wins:
+  # silence on one candidate is a reason to try the next, not to refuse yet.
+  CANDIDATE_ISSUES=$(
+    {
+      grep -oE '"closingIssuesReferences":\[[^]]*\]' <<<"$PR_JSON" \
+        | grep -oE '"number":[0-9]+' | grep -oE '[0-9]+'
+      grep -oE '"message(Headline|Body)":"[^"]*"' <<<"$PR_JSON" \
+        | grep -ioE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+'
+    } | awk '!seen[$0]++'
+  )
+  for candidate_issue in $CANDIDATE_ISSUES; do
+    ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" issue-lane --issue "$candidate_issue" 2>&1) || continue
+    if grep -qF '"known":true' <<<"$ISSUE_JSON"; then
+      AUTHOR_LANE=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$ISSUE_JSON")
+      AUTHOR_TASK=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$ISSUE_JSON")
+      break
+    fi
+  done
+
+  # 3. Last resort: the branch name -- still resolved through the ledger by
+  # the task id that convention implies, never trusted on its own.
+  if [ -z "$AUTHOR_LANE" ] && [[ "$HEAD_REF" =~ ^(lane|fix|feat|chore|docs)/([0-9]+)-(.+)$ ]]; then
+    FALLBACK_TASK="${PREFIX}${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
+    FALLBACK_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" task-lane --task "$FALLBACK_TASK" 2>&1)
+    if [ $? -eq 0 ] && grep -qF '"known":true' <<<"$FALLBACK_JSON"; then
+      AUTHOR_LANE=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$FALLBACK_JSON")
+      AUTHOR_TASK="$FALLBACK_TASK"
+    fi
   fi
-  AUTHOR_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" task-lane --task "$AUTHOR_TASK" 2>&1)
-  if [ $? -ne 0 ]; then
-    echo "dispatch: could not query the ledger for task $AUTHOR_TASK -- refusing to dispatch the review of PR #$REVIEWS_PR (authorship unknown, failing closed)" >&2
-    sed 's/^/  /' <<<"$AUTHOR_JSON" >&2
-    exit 1
-  fi
-  if grep -qF '"known":true' <<<"$AUTHOR_JSON"; then
-    AUTHOR_LANE=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$AUTHOR_JSON")
-  fi
+
+  # 4. Still silent -> refuse. Every source above answered "no record", not
+  # "safe".
   if [ -z "$AUTHOR_LANE" ]; then
-    echo "dispatch: the ledger has no record of task $AUTHOR_TASK, the task PR #$REVIEWS_PR's branch names as its author -- refusing (authorship unknown, failing closed)" >&2
+    echo "dispatch: could not determine PR #$REVIEWS_PR's author -- the ledger has no record by issue, by commit, or by branch '$HEAD_REF' (task ${FALLBACK_TASK:-none}) -- refusing (authorship unknown, failing closed)" >&2
     exit 1
   fi
 fi
