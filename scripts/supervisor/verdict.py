@@ -364,7 +364,7 @@ def resolve(names, *, state_dir, repo, number, head_sha=None):
             result = {"verdict": "unknown", "detail": f"{name}: {error}"}
         if result.get("verdict") not in VERDICT_VALUES:
             result = {"verdict": "unknown", "detail": f"{name}: returned an unrecognised verdict"}
-        if result["verdict"] in ("approved", "rejected"):
+        if result["verdict"] in ("approved",):
             return result
         if result["verdict"] == "unknown" and first_unknown is None:
             first_unknown = result
