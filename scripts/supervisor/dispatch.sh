@@ -68,6 +68,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./input-box.sh
 . "$HERE/input-box.sh"
+# shellcheck source=./harness-registry.sh
+. "$HERE/harness-registry.sh"
 SESSION="${LANES_SESSION:-agent-dotfiles}"
 
 # `--reviews-pr <PR>` is pulled out wherever it appears rather than bound to a
@@ -640,15 +642,11 @@ if [ "$rc" -ne 0 ] || [ -z "$WORKTREE" ] || [ ! -d "$WORKTREE" ]; then
 fi
 rm -f "$WORKTREE_ERR"
 
-# --- 4. the lane is told what it is doing, then given the work ------------
-if ! tmux rename-window -t "$LANE_TARGET" "$WINDOW_NAME" 2>/dev/null; then
-  echo "dispatch: could not rename $LANE -- not dispatching #$ISSUE_ARG" >&2
-  "$HERE/worktree.sh" done "$WORKTREE" >/dev/null 2>&1
-  release_claim
-  release_lane_claim
-  exit 1
-fi
-
+# `abort_send` is defined here, right after the worktree exists, because step
+# 3.5 below is now the first thing that can fail with both a claim and a
+# worktree already committed -- the same shape every later failure in this
+# script already has. Moved up from just after the rename (where it used to
+# sit) with no change to its body.
 abort_send() {
   echo "dispatch: $1" >&2
   "$HERE/worktree.sh" done "$WORKTREE" >/dev/null 2>&1
@@ -690,6 +688,11 @@ abort_send() {
 # with representative paths, and `MESSAGE_BUDGET` below pins that this stays
 # true: the paths are the bulk of it and they vary, so the margin is thin and
 # it is enforced rather than remembered.
+#
+# Built and budget-checked here, BEFORE step 3.5 relaunches the harness: an
+# over-budget message means this dispatch is refused regardless of anything
+# below, and there is no reason to kill and relaunch a lane's harness only to
+# then abort without ever typing into it.
 MESSAGE="Read $BRIEF and do exactly what it says. That file is your complete brief. Do all of your work in the worktree at $WORKTREE -- it is yours, already branched; never work in the shared checkout at $REPO_PATH."
 
 # The head of the message is what an internally-scrolling box hides first, so
@@ -703,6 +706,84 @@ if [ "${#MESSAGE}" -gt "$MESSAGE_BUDGET" ]; then
   abort_send "the brief message is over the ${MESSAGE_BUDGET}-char budget -- #$ISSUE_ARG was NOT dispatched"
 fi
 
+# --- 3.5. put the lane IN its worktree, at the OS level (#15) --------------
+#
+# Measured on a live codex lane (#15): `lsof -a -p "$(tmux list-panes ... pane_pid)" -d cwd`
+# resolved to the SHARED checkout, never the worktree just created above,
+# even though the brief typed into the pane a few lines below names the
+# worktree and tells the lane to work only there. The harness process
+# occupying the pane had its cwd fixed the moment it was execed -- at lane
+# creation (`bootstrap-session.sh`'s `new-window -c "$WORKDIR"`) or its last
+# relaunch -- and nothing after that point can change a running process's
+# cwd from outside it. Typing `cd $WORKTREE` into the pane does not touch
+# that cwd: past this point in a lane's life the pane is not a shell, it is
+# the harness's own chat input box, and text sent there is a PROMPT, read and
+# acted on by the agent, never executed by a shell. A Claude lane usually
+# gets away with it because it reasons in absolute paths; a codex lane does
+# not, which is exactly how #15 was caught.
+#
+# So the fix is not a stronger sentence in the brief (#15 already had one,
+# and it still failed -- the shape #73/#81/#263 keep closing). It is the same
+# mechanism `restore.sh` already uses to put a restored lane in the right
+# directory: `-c <dir>` on the tmux call that creates the pane's process,
+# which sets the REAL, OS-level starting directory before anything runs in
+# it. `restore.sh` gets that for free because it always creates a fresh
+# window. `dispatch.sh` reuses an existing lane's window, so the equivalent
+# here is `respawn-pane -k -c "$WORKTREE"`: kill whatever the harness left
+# running (the pool only ever offers this step a FREE lane -- ledger and
+# lanes.sh both said so above -- so there is no live conversation to lose,
+# same as `restore.sh`'s own "no open task -> restore fresh" branch) and
+# start a brand-new shell whose cwd is the worktree. The harness is then
+# relaunched INTO that shell with its adapter's own `HARNESS_LAUNCH_CMD` --
+# a real shell command, typed into a real shell prompt, which is the one
+# place in this script's lifetime a `cd`-shaped instruction is actually
+# obeyed by something other than the agent choosing to obey it.
+#
+# Fails closed: a harness this dispatch cannot identify, or one whose
+# adapter records no launch command, is refused rather than dispatched with
+# an unverifiable cwd -- the exact failure mode #15 is about, produced on
+# purpose instead of by accident.
+HARNESS_HIDX=""
+if [ -n "$LANE_HARNESS" ]; then
+  HARNESS_HIDX=$(harness_index_for_name "$LANE_HARNESS") || HARNESS_HIDX=""
+fi
+if [ -z "$HARNESS_HIDX" ] || [ -z "${H_LAUNCH_CMD[$HARNESS_HIDX]:-}" ]; then
+  abort_send "no launch command recorded for harness '${LANE_HARNESS:-unknown}' in $LANE -- cannot relaunch it in the worktree, so its cwd cannot be verified correct (#15); #$ISSUE_ARG was NOT dispatched"
+fi
+LAUNCH_CMD="${H_LAUNCH_CMD[$HARNESS_HIDX]}"
+LAUNCH_LITERAL="${H_SEND_LITERAL[$HARNESS_HIDX]:-0}"
+
+if ! tmux respawn-pane -k -t "$LANE_TARGET" -c "$WORKTREE" 2>/dev/null; then
+  abort_send "tmux respawn-pane failed for $LANE -- could not put it in its worktree; #$ISSUE_ARG was NOT dispatched"
+fi
+
+# Settle before typing into the freshly spawned shell, same discipline the
+# `/clear` step below already uses for the same reason: a pane that has just
+# been torn down and repainted eats keys sent too soon.
+sleep "${DISPATCH_RESPAWN_SETTLE:-1}"
+
+if [ "$LAUNCH_LITERAL" = 1 ]; then
+  tmux send-keys -t "$LANE_TARGET" -l "$LAUNCH_CMD" 2>/dev/null \
+    && tmux send-keys -t "$LANE_TARGET" Enter 2>/dev/null \
+    || abort_send "could not relaunch harness '$LANE_HARNESS' in $LANE -- #$ISSUE_ARG was NOT dispatched"
+else
+  tmux send-keys -t "$LANE_TARGET" "$LAUNCH_CMD" Enter 2>/dev/null \
+    || abort_send "could not relaunch harness '$LANE_HARNESS' in $LANE -- #$ISSUE_ARG was NOT dispatched"
+fi
+
+# Give the harness time to actually start before anything else is typed at
+# it -- a cold process start is slower than the UI repaint `/clear` waits out
+# below, so this gets its own, longer default.
+sleep "${DISPATCH_LAUNCH_SETTLE:-3}"
+
+# --- 4. the lane is told what it is doing, then given the work ------------
+if ! tmux rename-window -t "$LANE_TARGET" "$WINDOW_NAME" 2>/dev/null; then
+  echo "dispatch: could not rename $LANE -- not dispatching #$ISSUE_ARG" >&2
+  "$HERE/worktree.sh" done "$WORKTREE" >/dev/null 2>&1
+  release_claim
+  release_lane_claim
+  exit 1
+fi
 
 # The standing deliverable contract (#117), written into the BRIEF rather than
 # typed at the pane. A lane completed #112 correctly -- tests green,
