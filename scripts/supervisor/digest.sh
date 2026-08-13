@@ -117,6 +117,30 @@ else
   [ "$poller_alive" = true ] && note_error "inbox-poll.status unreadable while the process is running"
 fi
 
+# --- director inbox --------------------------------------------------------
+# agent-supervisor#34: the Director only ever saw a queued Telegram message
+# by running a tick, and a tick is exactly what a busy pane can go hours
+# without -- 9 messages, 12 hours, nothing downstream able to tell "queued"
+# from "lost". This section is delivered-by-construction, the same shape as
+# every other field here: it costs a subprocess call regardless of whether
+# the Director's pane has ever gone idle, so reading THIS digest is itself a
+# delivery of the pending count and the oldest message's age, independent of
+# `director-route.sh`'s nudge succeeding.
+INBOX_BIN="${DIGEST_INBOX_BIN:-$HERE/director-inbox.sh}"
+INBOX_STALE_SECONDS="${DIGEST_INBOX_STALE_SECONDS:-1800}"
+inbox_json=$("$INBOX_BIN" stats 2>/dev/null)
+if ! jq -e . >/dev/null 2>&1 <<<"$inbox_json"; then
+  inbox_json='{"pending":null,"oldest_at":null,"oldest_age_s":null}'
+  note_error "director-inbox.sh stats produced no readable output"
+fi
+inbox_pending=$(jq -r '.pending // "unknown"' <<<"$inbox_json")
+inbox_oldest_age=$(jq -r '.oldest_age_s // empty' <<<"$inbox_json")
+inbox_stale=false
+if [ -n "$inbox_oldest_age" ] && [ "$inbox_oldest_age" -ge "$INBOX_STALE_SECONDS" ] 2>/dev/null; then
+  inbox_stale=true
+  note_error "director inbox: oldest pending message is ${inbox_oldest_age}s old (>= ${INBOX_STALE_SECONDS}s) -- not yet delivered to the Director"
+fi
+
 # --- lanes ----------------------------------------------------------------
 # Overridable so a test can exercise a lanes.sh shape (e.g. header row, no
 # data rows) without needing a real tmux session.
@@ -238,6 +262,7 @@ DIGEST=$(jq -n \
   --arg wd_restarts "$wd_restarts" --arg wd_heartbeat "$wd_heartbeat" \
   --argjson poller_alive "$poller_alive" --arg poller_state "$poller_state" \
   --arg poller_checked "$poller_checked" \
+  --argjson inbox "$inbox_json" --argjson inbox_stale "$inbox_stale" \
   --arg free "$(lane_line free)" --arg busy "$(lane_line busy)" \
   --arg blocked "$(lane_line blocked)" --arg menu "$(lane_line menu-blocked)" \
   --arg dead "$(lane_line dead)" --arg service "$(lane_line service)" \
@@ -247,6 +272,7 @@ DIGEST=$(jq -n \
   {checked: $checked,
    watchdog: {state:$wd_state, checked:$wd_checked, restarts:$wd_restarts, heartbeat:$wd_heartbeat},
    poller: {alive:$poller_alive, state:$poller_state, checked:$poller_checked},
+   director_inbox: ($inbox + {stale: $inbox_stale}),
    lanes: {free:$free, busy:$busy, blocked:$blocked, menu_blocked:$menu,
            dead:$dead, stale:$stale, service:$service, unknown:$unknown},
    prs: $prs, merged_since: $merged, errors: $errors,
@@ -258,6 +284,11 @@ else
   jq -r '
     "watchdog: \(.watchdog.state)  restarts=\(.watchdog.restarts)  \(.watchdog.heartbeat)",
     "poller:   alive=\(.poller.alive) state=\(.poller.state)",
+    # Printed every time, not only when stale -- this line IS the delivery
+    # (agent-supervisor#34): a reader who checks this digest has seen the
+    # pending count and the oldest message age regardless of whether the
+    # Director pane was ever caught idle to nudge.
+    "inbox:    pending=\(.director_inbox.pending // 0) oldest_age_s=\(.director_inbox.oldest_age_s // "n/a")\(if .director_inbox.stale then " [STALE - undelivered >= " + (.director_inbox.oldest_age_s|tostring) + "s]" else "" end)",
     "lanes:    free=[\(.lanes.free)] busy=[\(.lanes.busy)]",
     "          blocked=[\(.lanes.blocked)] menu=[\(.lanes.menu_blocked)] dead=[\(.lanes.dead)]",
     # #237: a stale lane is a dead one whose window name still claims a task.

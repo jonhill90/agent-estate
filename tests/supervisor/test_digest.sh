@@ -120,6 +120,66 @@ jout=$(nojq --json)
 jq -e . >/dev/null 2>&1 <<<"$jout" && ok "missing jq --json is still valid JSON" \
   || bad "missing jq --json valid" "$jout"
 
+# 8b. agent-supervisor#34: the director inbox's pending count and oldest-
+# message age must appear in the digest UNCONDITIONALLY -- this is the
+# pane-independent delivery channel the issue asks for. A reader who checks
+# this digest has "received" a stale message the moment it is printed, with
+# no tmux pane, no idle check, and no nudge anywhere in the path.
+j=$(run --json)
+chk "no director-inbox.jsonl -> pending is 0" "0" "$(jq -r '.director_inbox.pending' <<<"$j")"
+chk "no director-inbox.jsonl -> not stale" "false" "$(jq -r '.director_inbox.stale' <<<"$j")"
+
+DIRECTOR_INBOX="$D/state/director-inbox.jsonl" bash "$HERE/../../scripts/supervisor/director-inbox.sh" \
+  post "queued behind a busy Director pane" >/dev/null
+python3 -c "
+import json
+row = json.loads(open('$D/state/director-inbox.jsonl').read().strip())
+row['at'] = '2020-01-01T00:00:00Z'
+open('$D/state/director-inbox.jsonl', 'w').write(json.dumps(row) + chr(10))
+"
+j=$(run --json)
+chk "a queued message -> pending is 1" "1" "$(jq -r '.director_inbox.pending' <<<"$j")"
+chk "an old queued message -> stale is true" "true" "$(jq -r '.director_inbox.stale' <<<"$j")"
+age=$(jq -r '.director_inbox.oldest_age_s' <<<"$j")
+[ "$age" -gt 1000000 ] && ok "digest --json carries the large oldest_age_s" || bad "oldest_age_s in digest" "$j"
+[ "$(jq -r '.ok' <<<"$j")" = "false" ] && ok "a stale inbox flips ok to false, same as any other failing section" \
+  || bad "stale inbox flips ok false" "$j"
+grep -q "not yet delivered to the Director" <<<"$(jq -r '.errors[]' <<<"$j")" \
+  && ok "the stale-inbox reason is named in errors[]" \
+  || bad "stale-inbox reason named in errors" "$j"
+T=$(run)
+grep -q "^inbox:.*pending=1" <<<"$T" && ok "text mode prints the pending count on its own line" \
+  || bad "text mode prints pending count" "$T"
+grep -q "STALE" <<<"$T" && ok "text mode marks a stale inbox loudly, not just in --json" \
+  || bad "text mode marks stale inbox" "$T"
+rm -f "$D/state/director-inbox.jsonl"
+
+# Mutation-check: point digest.sh's inbox reader at a stub that always claims
+# nothing is pending, and confirm the assertions above go red -- the brief's
+# own bar ("mutate your fix and watch a test go red").
+STUBDIR="$D/inbox-stub"; mkdir -p "$STUBDIR"
+cat > "$STUBDIR/always-empty.sh" <<'S'
+#!/bin/bash
+echo '{"pending":0,"oldest_at":null,"oldest_age_s":null}'
+S
+chmod +x "$STUBDIR/always-empty.sh"
+DIRECTOR_INBOX="$D/state/director-inbox.jsonl" bash "$HERE/../../scripts/supervisor/director-inbox.sh" \
+  post "would be silently dropped by a broken reader" >/dev/null
+python3 -c "
+import json
+row = json.loads(open('$D/state/director-inbox.jsonl').read().strip())
+row['at'] = '2020-01-01T00:00:00Z'
+open('$D/state/director-inbox.jsonl', 'w').write(json.dumps(row) + chr(10))
+"
+mutant_out=$(PATH="$D/bin:$PATH" SUPERVISOR_STATE="$D/state" LANES_SESSION=nosuch \
+  DIGEST_INBOX_BIN="$STUBDIR/always-empty.sh" bash "$DIGEST" --json 2>/dev/null)
+if [ "$(jq -r '.director_inbox.pending' <<<"$mutant_out")" = "0" ]; then
+  ok "mutation confirmed: an inbox reader stub that always reports empty hides a real stale message (the assertions above would be red)"
+else
+  bad "mutation confirmed: the always-empty stub should hide the pending message" "$mutant_out"
+fi
+rm -f "$D/state/director-inbox.jsonl"
+
 # 9-12. THE BLOCKING FINDING (agent-dotfiles#192): the per-PR jq assembly
 # (repo, number, title, head, run_sha, run_conclusion, ci_is_current,
 # merge_state, verdict) never executed under test, because the stub gh in

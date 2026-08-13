@@ -572,7 +572,7 @@ behaviour to drift.
 | tool | source | answers |
 | --- | --- | --- |
 | `lanes` | `lanes.sh --json` | lane states, optionally for a named session |
-| `digest` | `digest.sh --json` | watchdog, poller, lane counts, open PRs, merges |
+| `digest` | `digest.sh --json` | watchdog, poller, director inbox pending/age, lane counts, open PRs, merges |
 | `ledger` | `cli.py status` | registered lanes, availability, outstanding tasks |
 
 Tool definitions are always-on context in every consuming session, which cuts
