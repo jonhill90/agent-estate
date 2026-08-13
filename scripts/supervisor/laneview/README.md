@@ -68,11 +68,31 @@ demonstrated:
 |---|---|---|---|
 | `text.sh` | one line per lane to stdout | none — no daemon, no plugin | proves "apart": works in a bare shell, in cron, over SSH, with the supervisor never running |
 | `opensessions.sh` | a tmux sidebar pane, via OpenSessions' `/api/agent-event` + `/set-status` HTTP API | a Rust daemon + sidebar client per tmux client (TPM-installed plugin) | proves "together": the tmux-plugin path #173 measured live, unchanged in mechanism from `lanebridge.sh` |
+| `tui.sh` | a curses screen: one line per lane, selectable, `enter` jumps to it | none when not running — no daemon, plain Python stdlib (`curses`) | jonhill90/agent-supervisor#7's "a TUI he owns" — no third-party program, unlike `opensessions.sh` |
 
-Removing either is a deletion of its one file *under `scripts/`*. Neither
-implementation imports from the other, and `laneview.sh` does not
-special-case either name — it re-enumerates this directory, so deleting
-`text.sh` leaves `opensessions` resolving and needs no edit in `scripts/`.
+Removing any is a deletion of its one file *under `scripts/`*. No
+implementation imports from another, and `laneview.sh` does not
+special-case any name — it re-enumerates this directory, so deleting
+`text.sh` leaves `opensessions` and `tui` resolving and needs no edit in
+`scripts/`.
+
+`tui.sh` needs a real tty to draw a curses screen, which no headless caller
+(cron, this repo's own tests, `laneview.sh tui session > file`) has. Rather
+than fail there, it renders one static frame — the same shape `text.sh`
+uses — and exits, so rule 2 (never crash into a traceback, never show
+staleness) holds headlessly too, and the renderer stays testable the same
+way `text.sh` is: call it directly with canned json and no tty.
+
+### The tmux plugin
+
+`../laneview-plugin-tmux/` is jonhill90/agent-supervisor#7's other ask, "a
+tmux plugin". It is not a fourth entry in the table above: it is a
+*launcher* that binds a tmux key to a popup running one of the
+implementations above (`tui.sh` by default, configurable). See its own
+README for install, keys, and the together/apart evidence for the plugin
+itself — deleting it is independent of deleting any renderer here, and
+deleting `tui.sh` degrades the plugin to `laneview.sh`'s own "no renderer"
+error rather than breaking it silently.
 
 One caveat, measured in review of #231 rather than assumed: the earlier
 form of this claim was verified with a grep scoped to `scripts/supervisor`
