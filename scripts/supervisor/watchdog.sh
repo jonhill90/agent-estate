@@ -33,7 +33,14 @@ set -uo pipefail
 # gh and python3. Overridable ONLY so tests can inject stub binaries -- three
 # separate bugs shipped in this file because a hardcoded PATH made it
 # impossible to test without a live tmux server and a live GitHub.
-PATH="${SUPERVISOR_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin}"
+#
+# /usr/sbin is included for lsof (agent-supervisor#25): this PATH is
+# inherited by every child this script execs, including poller-recover.sh,
+# whose orphan check needs lsof to tell "no live poller" from "cannot tell".
+# poller-recover.sh also resolves lsof by absolute path on its own now, so
+# this is defense in depth, not the only fix -- see that script for the
+# primary one.
+PATH="${SUPERVISOR_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:$HOME/.local/bin}"
 export PATH
 
 # Overridable so the script is testable and so a second lane can
