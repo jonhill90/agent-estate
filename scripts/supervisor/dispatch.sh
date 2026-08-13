@@ -466,6 +466,70 @@ LANE_TARGET=""
 CLAIM_LANE=""
 LANE_HARNESS=""
 AUTHOR_SKIPPED=""
+EXCLUSION_LINES=""
+SUGGEST_RECORD_COMPLETION=""
+SUGGEST_RELEASE_CLAIM=""
+json_field() {
+  local key="$1" json="$2"
+  sed -n "s/.*\"$key\":\\([^,}]*\\).*/\\1/p" <<<"$json" | head -1 | sed -E 's/^"//; s/"$//'
+}
+append_exclusion() {
+  local line="$1"
+  EXCLUSION_LINES="${EXCLUSION_LINES}${line}"$'\n'
+}
+claim_token_from_task() {
+  local lane="$1" task="$2" prefix
+  prefix="ledger-claim:${lane}:"
+  case "$task" in
+    "$prefix"*) printf '%s' "${task#"$prefix"}" ;;
+    *) printf '' ;;
+  esac
+}
+describe_excluded_lane() {
+  local lane="$1" pane_state="$2" diag task status age_base age_minutes token line
+  diag=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-diagnostic --lane "$lane" 2>/dev/null) || diag=""
+  task=$(json_field task "$diag")
+  status=$(json_field status "$diag")
+  [ "$task" = null ] && task=""
+  [ "$status" = null ] && status=""
+
+  if [ -z "$diag" ]; then
+    append_exclusion "dispatch:   $lane: pane state $pane_state; ledger diagnostic unavailable"
+    return
+  fi
+  if [ -z "$task" ]; then
+    if [ "$pane_state" = free ]; then
+      append_exclusion "dispatch:   $lane: pane is idle, but no claim could be won"
+    else
+      append_exclusion "dispatch:   $lane: pane state $pane_state; no open ledger task"
+    fi
+    return
+  fi
+
+  token=$(claim_token_from_task "$lane" "$task")
+  line="dispatch:   $lane: "
+  if [ "$pane_state" = free ]; then
+    line="${line}busy (task $task"
+    [ -n "$status" ] && line="${line} $status"
+    age_base=$(json_field delivered_at "$diag")
+    [ "$age_base" = null ] || [ -n "$age_base" ] || age_base=$(json_field updated_at "$diag")
+    if [[ "$age_base" =~ ^[0-9]+$ ]]; then
+      age_minutes=$(( ($(date +%s) - age_base) / 60 ))
+      [ "$age_minutes" -ge 0 ] && line="${line} ${age_minutes}m ago"
+    fi
+    line="${line}); pane idle"
+    append_exclusion "$line"
+    if [ "$status" = delivered ]; then
+      SUGGEST_RECORD_COMPLETION="${lane}	${task}"
+    fi
+  else
+    append_exclusion "${line}pane state $pane_state (task $task${status:+ $status})"
+  fi
+
+  if [ -n "$token" ] && [ "$status" = created ]; then
+    SUGGEST_RELEASE_CLAIM="${lane}	${token}"
+  fi
+}
 # TWO IDENTITIES PER CANDIDATE, AND THEY ANSWER DIFFERENT QUESTIONS (#241).
 #
 # `$candidate` is `session:<index>` -- the LANE, which is what the ledger
@@ -519,7 +583,14 @@ while IFS=$'\t' read -r candidate candidate_target; do
   # so the ledger recorded an index as the thing to address the window with --
   # which is the defect, one seam later.
   CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidate" --target "$candidate_target" --window-name "$wname" 2>/dev/null) || continue
-  grep -qF '"free":true' <<<"$CHECK" || continue
+  if ! grep -qF '"free":true' <<<"$CHECK"; then
+    if grep -qF '"known":false' <<<"$CHECK" && [[ ! "$wname" =~ ^free-[0-9]+$ ]]; then
+      append_exclusion "dispatch:   $candidate: pane idle, but unknown to the ledger and window name '$wname' is not the free-N migration shape"
+    else
+      describe_excluded_lane "$candidate" free
+    fi
+    continue
+  fi
 
   # Test-only instrumentation (agent-dotfiles#184): when set, run this
   # command with the candidate lane as $1 right after it reads free and
@@ -559,6 +630,14 @@ while IFS=$'\t' read -r candidate candidate_target; do
     LANE_HARNESS=$(grep -oE '"harness":"[a-z-]*"' <<<"$CHECK" | head -1 | sed -E 's/.*:"([a-z-]*)"/\1/')
     break
   fi
+  claim_reason=$(json_field reason "$CLAIM")
+  claim_holder=$(json_field holder "$CLAIM")
+  [ "$claim_holder" = null ] && claim_holder=""
+  if [ -n "$claim_holder" ]; then
+    append_exclusion "dispatch:   $candidate: claim refused ($claim_reason; holder $claim_holder)"
+  else
+    append_exclusion "dispatch:   $candidate: claim refused ($claim_reason; no holder reported; token '$CLAIM_TOKEN' may already exist)"
+  fi
   # Lost this candidate to another dispatcher: move on, exactly as before.
   # The release is a no-op in that case (the row is the winner's, not ours)
   # and only bites when the claim committed but its result did not come back
@@ -575,35 +654,36 @@ if [ -z "$LANE" ]; then
   echo "dispatch: the ledger must say a lane is free to be dispatchable --" >&2
   echo "dispatch: one it has never seen is backfilled only if named 'free-N'; one it knows is occupied stays occupied regardless of name" >&2
   echo "dispatch: a lane that read free just now may have already been claimed by another dispatcher" >&2
-  # agent-dotfiles#209, following `lane-done.sh`'s precedent of naming its own
-  # recovery command in the refusal itself rather than leaving an operator to
-  # reconstruct it. Step 0.5's reap has ALREADY run by the time this prints,
-  # so anything still held here is held by something the reap will not touch:
-  # a claim whose owner pid is still alive (or has been recycled), a claim
-  # written on a different host, or a `ledger-hold:` row from a failed
-  # `record_dispatch` (#188) that is waiting on a human by design.
-  #
-  # agent-dotfiles#209 round 2 adds a FOURTH case that must be named here,
-  # because it is the one the fail-closed reordering deliberately creates and
-  # `release-lane-claim` deliberately will not clear: a claim marked live
-  # (status `delivered`) whose dispatcher then died or aborted. Telling an
-  # operator to run a command that silently matches no row would be worse than
-  # printing nothing, so the status is what selects the command.
-  echo "dispatch: if this is wrong and a lane is held by a claim nobody owns:" >&2
-  echo "dispatch:   1. $LEDGER_PYTHON $LEDGER_CLI status   # look for '\"id\":\"ledger-claim:<lane>:<token>\"' -- the id IS the lane and token" >&2
-  echo "dispatch:   2. $LEDGER_PYTHON $LEDGER_CLI release-lane-claim --lane <lane> --token <token>" >&2
-  echo "dispatch: that clears a claim still at status 'created' -- one that never sent anything." >&2
-  echo "dispatch: a claim at status 'delivered' is a claim with a live brief behind it: its dispatcher got as far as submitting" >&2
-  echo "dispatch: into the pane, so release-lane-claim will NOT touch it (that is the guard, not a bug)." >&2
-  echo "dispatch: if the lane finished but never signalled, inspect the pane and write the real completion:" >&2
-  # --lane resolves whichever row shape holds it (task or ledger-claim:), so
-  # this works whether step 0.5's reap found a task or a claim.
-  echo "dispatch:   $LEDGER_PYTHON $LEDGER_CLI record-completion --lane <lane> --note <note>" >&2
-  echo "dispatch: if the live brief never produced real work and must be discarded:" >&2
-  echo "dispatch:   $LEDGER_PYTHON $LEDGER_CLI cancel-open-task --lane <lane>" >&2
-  echo "dispatch: a lane held by a 'ledger-hold:' row instead is a failed ledger record awaiting reconciliation, not a stranded claim --" >&2
-  echo "dispatch: clear that one with the same cancel-open-task --lane <lane>   (frees whatever outstanding task owns the lane)" >&2
-  echo "dispatch: CHECK THE PANE FIRST. All of these make the lane dispatchable again; on a lane that is actually working, that is #102." >&2
+
+  LANE_ROWS_JSON=$("$HERE/lanes.sh" --json "$SESSION" 2>/dev/null || printf '[]')
+  while IFS=$'\t' read -r diag_idx diag_state; do
+    [ -n "$diag_idx" ] || continue
+    [ "$diag_idx" = "${LANES_SUPERVISOR_WINDOW:-1}" ] && continue
+    [ "$diag_state" = free ] && continue
+    describe_excluded_lane "$SESSION:$diag_idx" "$diag_state"
+  done < <(printf '%s' "$LANE_ROWS_JSON" | "$LEDGER_PYTHON" -c 'import json,sys
+for row in json.load(sys.stdin):
+    print("{}\t{}".format(row.get("window", ""), row.get("state", "")))' 2>/dev/null)
+
+  if [ -n "$EXCLUSION_LINES" ]; then
+    echo "dispatch: lane exclusion diagnostics:" >&2
+    printf '%s' "$EXCLUSION_LINES" >&2
+  else
+    echo "dispatch: lane exclusion diagnostics: no lane rows were readable from lanes.sh" >&2
+  fi
+
+  if [ -n "$SUGGEST_RECORD_COMPLETION" ]; then
+    completion_lane="${SUGGEST_RECORD_COMPLETION%%	*}"
+    completion_task="${SUGGEST_RECORD_COMPLETION#*	}"
+    echo "dispatch: suggested recovery: inspect $completion_lane; if task $completion_task finished but never signalled, run:" >&2
+    echo "dispatch:   $LEDGER_PYTHON $LEDGER_CLI record-completion --lane $completion_lane --note '<what finished>'" >&2
+  elif [ -n "$SUGGEST_RELEASE_CLAIM" ]; then
+    claim_lane="${SUGGEST_RELEASE_CLAIM%%	*}"
+    claim_token="${SUGGEST_RELEASE_CLAIM#*	}"
+    echo "dispatch: suggested recovery: $LEDGER_PYTHON $LEDGER_CLI release-lane-claim --lane $claim_lane --token $claim_token" >&2
+  else
+    echo "dispatch: no ledger surgery suggested; inspect or wait on panes whose state is not ready" >&2
+  fi
   "$HERE/lanes.sh" "$SESSION" >&2
   exit 1
 fi
