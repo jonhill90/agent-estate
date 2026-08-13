@@ -29,10 +29,10 @@
 # Cost when healthy: one tmux read, one status write, zero model tokens.
 
 set -uo pipefail
-# A fixed PATH so a LaunchAgent (which inherits almost nothing) finds tmux,
-# gh and python3. Overridable ONLY so tests can inject stub binaries -- three
-# separate bugs shipped in this file because a hardcoded PATH made it
-# impossible to test without a live tmux server and a live GitHub.
+# A fixed fallback PATH so a LaunchAgent (which inherits almost nothing) finds
+# tmux, gh and python3. An inherited PATH is kept first so env -i tests can
+# inject stubs without relying on SUPERVISOR_PATH -- three separate bugs shipped
+# in this file because the production environment shape was not testable.
 #
 # /usr/sbin is included for lsof (agent-supervisor#25): this PATH is
 # inherited by every child this script execs, including poller-recover.sh,
@@ -40,7 +40,7 @@ set -uo pipefail
 # poller-recover.sh also resolves lsof by absolute path on its own now, so
 # this is defense in depth, not the only fix -- see that script for the
 # primary one.
-PATH="${SUPERVISOR_PATH:-/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:$HOME/.local/bin}"
+PATH="${SUPERVISOR_PATH:-${PATH:+$PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:$HOME/.local/bin}"
 export PATH
 
 # Overridable so the script is testable and so a second lane can
@@ -477,6 +477,18 @@ poller_note() {                  # poller_note <line>
   return 0
 }
 
+# Same tmp+rename append shape again, for the recovery mechanism's own
+# availability. Absent is different from present-but-not-runnable: the first is
+# a partial install, the second is a broken install with a concrete chmod fix.
+recovery_note() {                # recovery_note <line>
+  local tmp="$STATUS.recovery.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^recovery:' "$STATUS"; printf 'recovery: %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 # Runs on EVERY exit path, regardless of which early `exit 0` above fired --
 # that is the whole reason this lives in the trap rather than in the main
 # body: the supervisor-loop checks below (busy/idle/asleep/...) all return
@@ -564,8 +576,14 @@ check_poller_process_count() {
 # that can only ever land on the one pane it already found) -- nothing here
 # needs to serialize it further.
 check_poller_window() {
+  if [ ! -e "$HERE/poller-recover.sh" ]; then
+    log "POLLER-RECOVER-MISSING: poller-recover.sh is missing beside this watchdog; reinstall or advance the live worktree"
+    recovery_note "missing — poller-recover.sh is missing beside this watchdog; reinstall or advance the live worktree"
+    return 0
+  fi
   if [ ! -x "$HERE/poller-recover.sh" ]; then
-    log "POLLER-RECOVER-UNAVAILABLE: no poller-recover.sh beside this watchdog"
+    log "POLLER-RECOVER-BROKEN: poller-recover.sh exists but is not executable; run chmod +x $HERE/poller-recover.sh or restore the committed 100755 mode"
+    recovery_note "broken — poller-recover.sh exists but is not executable; run chmod +x $HERE/poller-recover.sh or restore the committed 100755 mode"
     return 0
   fi
   local out rc

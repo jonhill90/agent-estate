@@ -605,6 +605,36 @@ grep -q 'list-windows -t test-session-187' "$TMUX_LOG" 2>/dev/null && ok "the po
 grep -qi 'POLLER-RESTART-REQUESTED' "$S/advance-live.log" 2>/dev/null && ok "the restart is logged" \
   || bad "the restart is logged" "$(cat "$S/advance-live.log" 2>/dev/null)"
 
+# --- #22: prompt relaunch distinguishes missing from non-executable -------
+GATE_MUT="$D3/prompt-gate"; mkdir -p "$GATE_MUT/scripts/supervisor"
+cp "$ADVANCE" "$GATE_MUT/scripts/supervisor/advance-live.sh"
+cp "$HERE/../../scripts/supervisor/poller-window.sh" "$GATE_MUT/scripts/supervisor/poller-window.sh"
+chmod +x "$GATE_MUT/scripts/supervisor/advance-live.sh" "$GATE_MUT/scripts/supervisor/poller-window.sh"
+
+S_GATE=$(mktemp -d)
+printf 'checked: %s\nstate:   ok\nsha:     deadbeef\npid:     %s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$POLLER_PANE_PID" >"$S_GATE/inbox-poll.status"
+: >"$TMUX_LOG"
+out_gate=$(SUPERVISOR_STATE="$S_GATE" LANES_SESSION="test-session-187" INBOX_POLL_RELAUNCH_WAIT_SECONDS=0 PATH="$STUBS:$PATH" \
+  bash "$GATE_MUT/scripts/supervisor/advance-live.sh" "$LIVE3" 2>&1); rc_gate=$?
+want_exit "a missing prompt poller-recover.sh still leaves advance-live exit 0" "$rc_gate" 0 "$out_gate"
+grep -qi 'poller-recover.sh is missing beside advance-live.sh' "$S_GATE/advance-live.log" 2>/dev/null \
+  && ok "a missing prompt poller-recover.sh is logged distinctly" \
+  || bad "a missing prompt poller-recover.sh is logged distinctly" "$(cat "$S_GATE/advance-live.log" 2>/dev/null)"
+
+printf '#!/bin/bash\nexit 0\n' >"$GATE_MUT/scripts/supervisor/poller-recover.sh"
+chmod 644 "$GATE_MUT/scripts/supervisor/poller-recover.sh"
+S_GATE2=$(mktemp -d)
+printf 'checked: %s\nstate:   ok\nsha:     deadbeef\npid:     %s\n' \
+  "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$POLLER_PANE_PID" >"$S_GATE2/inbox-poll.status"
+: >"$TMUX_LOG"
+out_gate2=$(SUPERVISOR_STATE="$S_GATE2" LANES_SESSION="test-session-187" INBOX_POLL_RELAUNCH_WAIT_SECONDS=0 PATH="$STUBS:$PATH" \
+  bash "$GATE_MUT/scripts/supervisor/advance-live.sh" "$LIVE3" 2>&1); rc_gate2=$?
+want_exit "a non-executable prompt poller-recover.sh still leaves advance-live exit 0" "$rc_gate2" 0 "$out_gate2"
+grep -qi 'poller-recover.sh exists but is not executable' "$S_GATE2/advance-live.log" 2>/dev/null \
+  && ok "a non-executable prompt poller-recover.sh is logged distinctly" \
+  || bad "a non-executable prompt poller-recover.sh is logged distinctly" "$(cat "$S_GATE2/advance-live.log" 2>/dev/null)"
+
 # --- MUTATION: point the shared recognition rule at a name nothing matches -
 # This must make the restart assertion above go red. A missing poller window is
 # a loud refusal, not a quiet "no work" success.
