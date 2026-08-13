@@ -11,15 +11,20 @@
 HARNESS_NAME=codex
 HARNESS_COMMAND_RE='^codex$'
 
-# Launch + send-keys dialect. Not wired into dispatch.sh/bootstrap-session.sh
-# by #201 (see harness/claude.sh's note -- same scope line). `codex --help`
-# confirms `--dangerously-bypass-approvals-and-sandbox` exists ("Skip all
-# confirmation prompts and execute commands without sandboxing") -- codex's
-# named analogue of Claude's `--dangerously-skip-permissions` -- but it was
-# NOT exercised live here: driving it would mean approving filesystem trust
-# unattended, which is the exact #159/#161 hazard this issue is about.
-# Recorded as the documented candidate, not a verified one.
-HARNESS_LAUNCH_CMD='codex --dangerously-bypass-approvals-and-sandbox'
+# Launch + send-keys dialect. agent-supervisor#30 measured on 2026-08-13
+# against codex-cli 0.147.0 in throwaway tmux sockets only: `codex --help`
+# documents `-a, --ask-for-approval <APPROVAL_POLICY>` with accepted values
+# `untrusted`, `on-request`, and `never`, plus `-s, --sandbox` with
+# `danger-full-access`. The live codex lane had been launched as
+# `codex --dangerously-bypass-approvals-and-sandbox` (`ps -o command=`) and
+# still stalled on both "Would you like to run the following command?" and
+# "Would you like to make the following edits?". The explicit posture below
+# is the measured working replacement from #30: disable approval asks with
+# `-a never` and separately keep the old no-sandbox posture with
+# `-s danger-full-access`. Do not append the old dangerous shortcut here:
+# the CLI rejects combining it with `--ask-for-approval never`, and keeping
+# it alone leaves the actual approval policy implicit.
+HARNESS_LAUNCH_CMD='codex -a never -s danger-full-access'
 # Verified live: typing a literal `$1` into a running codex pane via
 # `tmux send-keys -l` reproduced it byte-for-byte in the transcript --
 # codex does not need anything Claude's `-l` doesn't already give it.
