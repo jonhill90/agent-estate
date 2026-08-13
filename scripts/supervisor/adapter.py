@@ -36,6 +36,7 @@ HARNESS_COMMANDS = {
     "claude": ("claude", "claude.exe"),
     "codex": ("codex", "codex.exe", "node"),
     "copilot": ("copilot", "copilot.exe", "node"),
+    "pi": ("pi", "pi.exe"),
 }
 
 
@@ -129,6 +130,11 @@ class TmuxAdapter:
             server_id=metadata["server_id"],
             session_id=metadata["session_id"],
             command=metadata["command"],
+            # Recorded explicitly rather than left to `register_lane`'s
+            # per-harness default (agent-supervisor#58): this class IS the
+            # send-keys transport by construction, so its lanes must never
+            # read as unlabelled even if the default ever changes.
+            transport="send-keys",
         )
 
     def _verified_lane(self, lane):
@@ -270,6 +276,10 @@ class ACPAdapter:
             server_id="acp",
             session_id=session_id,
             command="copilot",
+            # Explicit for the same reason as `TmuxAdapter.register_lane`:
+            # this class IS the ACP transport by construction, so its own
+            # lanes must never rely on `register_lane`'s default to say so.
+            transport="acp",
         )
 
     def _verified_lane(self, lane):
@@ -321,6 +331,118 @@ class ACPAdapter:
 
     def notify_architecture(self, *, lane, retry_after):
         """copilot-acp workers never host the architecture lane -- only
+        codex/claude do (SPEC §15.2) -- so there is nothing for this adapter
+        to notify."""
+        return False
+
+
+class PiRPCAdapter:
+    """pi-RPC-driven sibling to `ACPAdapter`, for `pi` lanes registered with
+    `transport='pi-rpc'` (agent-supervisor#58). `pi` is the one harness that
+    may be driven either way -- plain `send-keys` via `TmuxAdapter`, same as
+    every other harness, or its own documented RPC here -- so unlike
+    `ACPAdapter` this class does not own the harness outright; `cli.py`
+    chooses between the two by the lane's recorded `transport`, not its
+    `harness` alone.
+
+    Shares ACPAdapter's shape for the reason `pi_transport.py`'s module
+    docstring gives: pi's `prompt` command only acks acceptance, so
+    `PiRPCTransport.send_literal` itself waits out the async
+    agent_start -> ... -> agent_settled stream before returning -- from this
+    adapter's perspective that is the same "one blocking call, get back a
+    structured result" surface ACP's synchronous `session/prompt` gives
+    `ACPAdapter`. Assignment and completion happen in one round trip here for
+    the same reason: there is no pane to classify as idle/active in between.
+
+    The CLI dispatches one process per command, so, exactly like ACPAdapter,
+    there is no long-lived transport to hold onto between calls.
+    `transport_factory` is called fresh for every operation (production
+    wiring: `PiRPCTransport.spawn`) with `cwd` and, to resume a session a
+    prior process already started, `session=<recorded session id>` -- and the
+    resulting transport is always terminated before returning.
+    """
+
+    def __init__(self, ledger, transport_factory, *, clock=None):
+        self.ledger = ledger
+        self.transport_factory = transport_factory
+        self.clock = clock or time.time
+
+    def register_lane(self, *, lane, target, harness, repo, nonce):
+        if harness != "pi":
+            raise RuntimeError(f"PiRPCAdapter only supports pi lanes, got {harness!r}")
+        transport = self.transport_factory(cwd=repo)
+        try:
+            state = transport.get_state()
+            session_id = state.get("sessionId")
+            if not session_id:
+                raise RuntimeError(f"pi RPC get_state returned no sessionId: {state!r}")
+        finally:
+            transport.terminate()
+        return self.ledger.register_lane(
+            lane=lane,
+            pane_id=session_id,
+            nonce=nonce,
+            harness=harness,
+            repo=repo,
+            server_id="pi-rpc",
+            session_id=session_id,
+            command="pi",
+            # Explicit, same reasoning as TmuxAdapter/ACPAdapter: this class
+            # IS the pi-rpc transport by construction.
+            transport="pi-rpc",
+        )
+
+    def _verified_lane(self, lane):
+        record = self.ledger.get_lane(lane)
+        if record is None:
+            raise RuntimeError(f"unknown lane: {lane}")
+        if record["harness"] != "pi" or record["transport"] != "pi-rpc":
+            raise RuntimeError(
+                f"lane {lane} is not a pi-rpc lane: harness={record['harness']!r} "
+                f"transport={record.get('transport')!r}"
+            )
+        return record
+
+    def assign_task(self, *, lane, task_id, summary):
+        with self.ledger.operation_lock():
+            record = self._verified_lane(lane)
+            existing = self.ledger.get_task(task_id)
+            if existing is not None and existing["status"] == "delivery_pending":
+                raise RuntimeError(
+                    f"delivery already attempted for task {task_id} and is unconfirmed; "
+                    "reconcile the task before it can be assigned again"
+                )
+            self.ledger.assign(task_id=task_id, lane=lane, pane_nonce=record["nonce"], summary=summary)
+            prompt = (
+                f"[Hill90 task {task_id}] {summary}\n\n"
+                "Do not begin unrelated work. Record commands and actual outputs in a compact result."
+            )
+            # Same ambiguous-state-before-physical-send ordering as
+            # ACPAdapter.assign_task: if the resumed prompt raises, the task
+            # is left `delivery_pending` rather than silently eligible for
+            # an automatic resend.
+            self.ledger.mark_delivery_pending(task_id, pane_nonce=record["nonce"])
+            transport = self.transport_factory(cwd=record["repo"], session=record["session_id"])
+            try:
+                result = transport.send_literal(record["session_id"], prompt)
+            finally:
+                transport.terminate()
+            self.ledger.mark_delivered(task_id, pane_nonce=record["nonce"])
+            message = (result.get("message") or "").strip()
+            if not message:
+                message = f"pi RPC stop_reason={result.get('stop_reason')}"
+            return self.ledger.complete(task_id, message.encode("utf-8"), pane_nonce=record["nonce"])
+
+    def observe_lane(self, lane):
+        """Always None, for the same reason as `ACPAdapter.observe_lane`:
+        `send_literal` already blocks until the turn settles, so a task
+        either completed inline in `assign_task` or the call is still in
+        flight -- there is no pane to poll between the two."""
+        self._verified_lane(lane)
+        return None
+
+    def notify_architecture(self, *, lane, retry_after):
+        """pi-rpc workers never host the architecture lane -- only
         codex/claude do (SPEC §15.2) -- so there is nothing for this adapter
         to notify."""
         return False

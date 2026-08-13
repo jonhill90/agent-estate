@@ -194,7 +194,7 @@ class Ledger:
                     lane TEXT PRIMARY KEY,
                     pane_id TEXT NOT NULL,
                     nonce TEXT NOT NULL,
-                    harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude', 'copilot', 'copilot-acp')),
+                    harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude', 'copilot', 'copilot-acp', 'pi')),
                     repo TEXT NOT NULL,
                     server_id TEXT NOT NULL,
                     session_id TEXT NOT NULL,
@@ -209,6 +209,21 @@ class Ledger:
                     -- reports an empty one unrecoverable rather than starting
                     -- a fresh agent in that lane's place.
                     harness_session_id TEXT NOT NULL DEFAULT '',
+                    -- agent-supervisor#58 (Phase 4a): the thing this whole
+                    -- migration exists for. `harness` names the AGENT; this
+                    -- names how a prompt actually reaches it. Every lane
+                    -- before this column existed was driven by `send-keys`
+                    -- in / pattern-match out, which is exactly the class
+                    -- Phase 4a retires -- so that is the default, not a
+                    -- guess: an old row backfilled by this migration is
+                    -- described exactly as it was actually driven, including
+                    -- 'copilot-acp' lanes, which backfill to 'acp' rather
+                    -- than the default (see `_migrate_lanes_table`). Never
+                    -- inferred from `harness` at read time -- recorded once,
+                    -- at registration, by the adapter that is actually doing
+                    -- the delivering (agent-dotfiles#216 took the same
+                    -- position on `harness` itself).
+                    transport TEXT NOT NULL DEFAULT 'send-keys' CHECK (transport IN ('send-keys', 'acp', 'pi-rpc')),
                     updated_at INTEGER NOT NULL
                 );
 
@@ -295,16 +310,22 @@ class Ledger:
     # `CREATE TABLE IF NOT EXISTS` will never add one. Without this marker the
     # live ledger -- the one carrying every lane the restore path exists for --
     # keeps the old table and every write naming the new column fails.
-    _LANES_SCHEMA_MARKERS = ("copilot-acp", "'copilot'", "harness_session_id")
+    # agent-supervisor#58 adds two more, for the same reason again: `'pi'`
+    # (quoted, so it cannot false-match the "pi" inside "copilot") widens the
+    # harness CHECK, and `transport` is a column that plain
+    # `CREATE TABLE IF NOT EXISTS` will never retrofit onto an existing table.
+    _LANES_SCHEMA_MARKERS = ("copilot-acp", "'copilot'", "harness_session_id", "'pi'", "transport")
 
     def _migrate_lanes_table(self, *, failpoint=None):
-        """Widen an existing `lanes` table's harness CHECK constraint in place.
+        """Widen an existing `lanes` table to the current schema in place.
 
         `CREATE TABLE IF NOT EXISTS` in `_initialize` never touches a table
-        that already exists, so a ledger created before `copilot-acp` existed
-        keeps rejecting that harness forever unless this runs. SQLite has no
-        `ALTER TABLE ... ALTER COLUMN` / `DROP CONSTRAINT`, so the only way to
-        widen a CHECK constraint is to rebuild the table, mirroring
+        that already exists, so a ledger created before `copilot-acp` (or
+        `pi`, or the `transport` column) existed keeps rejecting/lacking them
+        forever unless this runs. SQLite has no `ALTER TABLE ... ALTER
+        COLUMN` / `DROP CONSTRAINT`, so the only way to widen a CHECK
+        constraint -- or add a NOT NULL column with a backfill that is not a
+        flat constant -- is to rebuild the table, mirroring
         `_migrate_tasks_table`.
 
         Every row is preserved. The rebuild is one transaction: any failure
@@ -326,22 +347,26 @@ class Ledger:
                 if all(marker in existing["sql"] for marker in self._LANES_SCHEMA_MARKERS):
                     return
                 # agent-dotfiles#237: which columns the OLD table actually has,
-                # asked rather than assumed. This rebuild now runs for two
-                # different reasons -- a narrow harness CHECK (pre-#216) and a
-                # missing `harness_session_id` (pre-#237) -- and a ledger can
-                # need either without the other. A hardcoded copy list would
-                # read a column that does not exist yet on one path, and
-                # silently DROP recorded session ids on the other.
+                # asked rather than assumed. This rebuild now runs for THREE
+                # different reasons -- a narrow harness CHECK (pre-#216), a
+                # missing `harness_session_id` (pre-#237), and a missing
+                # `transport` (pre-agent-supervisor#58) -- and a ledger can
+                # need any subset of them. A hardcoded copy list would read a
+                # column that does not exist yet on one path, and silently
+                # DROP recorded session ids on another.
                 old_columns = {row["name"] for row in probe.execute("PRAGMA table_info(lanes)").fetchall()}
-            carried = [
-                column
-                for column in (
-                    "lane", "pane_id", "nonce", "harness", "repo", "server_id",
-                    "session_id", "command", "harness_session_id", "updated_at",
-                )
-                if column in old_columns
-            ]
-            carried_sql = ", ".join(carried)
+
+            harness_session_expr = "harness_session_id" if "harness_session_id" in old_columns else "''"
+            # agent-supervisor#58: a pre-existing row was, in fact, driven by
+            # `send-keys` for every harness except `copilot-acp`, which was
+            # already ACP-driven (`ACPAdapter.register_lane` is the only
+            # writer of that harness value) -- so the backfill records what
+            # actually happened instead of a uniform guess. A ledger that
+            # already has the column keeps its own recorded value untouched.
+            transport_expr = (
+                "transport" if "transport" in old_columns
+                else "CASE WHEN harness = 'copilot-acp' THEN 'acp' ELSE 'send-keys' END"
+            )
 
             connection = self._connect(foreign_keys=False)
             try:
@@ -353,19 +378,28 @@ class Ledger:
                             lane TEXT PRIMARY KEY,
                             pane_id TEXT NOT NULL,
                             nonce TEXT NOT NULL,
-                            harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude', 'copilot', 'copilot-acp')),
+                            harness TEXT NOT NULL CHECK (harness IN ('codex', 'claude', 'copilot', 'copilot-acp', 'pi')),
                             repo TEXT NOT NULL,
                             server_id TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             command TEXT NOT NULL,
                             harness_session_id TEXT NOT NULL DEFAULT '',
+                            transport TEXT NOT NULL DEFAULT 'send-keys' CHECK (transport IN ('send-keys', 'acp', 'pi-rpc')),
                             updated_at INTEGER NOT NULL
                         )
                         """
                     )
                     self._fail(failpoint, "after_create")
                     connection.execute(
-                        f"INSERT INTO lanes_migrated ({carried_sql}) SELECT {carried_sql} FROM lanes"
+                        f"""
+                        INSERT INTO lanes_migrated (
+                            lane, pane_id, nonce, harness, repo, server_id, session_id, command,
+                            harness_session_id, transport, updated_at
+                        )
+                        SELECT lane, pane_id, nonce, harness, repo, server_id, session_id, command,
+                               {harness_session_expr}, {transport_expr}, updated_at
+                        FROM lanes
+                        """
                     )
                     self._fail(failpoint, "after_copy")
                     connection.execute("DROP TABLE lanes")
@@ -613,6 +647,23 @@ class Ledger:
             (now, now, task_id),
         )
 
+    # agent-supervisor#58: which transport a harness is allowed to record
+    # itself under. Not "every harness may claim any transport" -- a
+    # 'copilot-acp' lane IS the ACP adapter by construction
+    # (`ACPAdapter.register_lane` refuses any other harness), so a
+    # send-keys-labelled 'copilot-acp' row would be a lie no reader could
+    # detect. 'pi' is the one harness genuinely allowed either: a pi lane may
+    # be driven over its documented RPC (`PiRPCAdapter`) or, same as any
+    # other harness, over plain `send-keys` if that is what actually
+    # dispatched it.
+    _TRANSPORTS_BY_HARNESS = {
+        "codex": ("send-keys",),
+        "claude": ("send-keys",),
+        "copilot": ("send-keys",),
+        "copilot-acp": ("acp",),
+        "pi": ("send-keys", "pi-rpc"),
+    }
+
     def _register_lane_tx(
         self,
         connection,
@@ -627,9 +678,17 @@ class Ledger:
         command,
         now,
         harness_session_id="",
+        transport=None,
     ):
-        if harness not in ("codex", "claude", "copilot", "copilot-acp"):
+        if harness not in self._TRANSPORTS_BY_HARNESS:
             raise ValueError("unsupported harness")
+        if transport is None:
+            # Undeclared means "the pre-Phase-4a default for this harness":
+            # every harness that has ever been dispatchable only one way gets
+            # that way; 'copilot-acp' gets 'acp', its only real transport.
+            transport = self._TRANSPORTS_BY_HARNESS[harness][0]
+        if transport not in self._TRANSPORTS_BY_HARNESS[harness]:
+            raise ValueError(f"harness {harness!r} cannot record transport {transport!r}")
         if not all((lane, pane_id, nonce, repo, server_id, session_id, command)):
             raise ValueError("lane registration fields must be non-empty")
         current = connection.execute("SELECT * FROM lanes WHERE lane = ?", (lane,)).fetchone()
@@ -650,6 +709,7 @@ class Ledger:
                 ("server_id", server_id),
                 ("session_id", session_id),
                 ("command", command),
+                ("transport", transport),
             )
         )
         # What an empty `harness_session_id` argument means, and it is never
@@ -706,8 +766,8 @@ class Ledger:
         connection.execute(
             """
             INSERT INTO lanes(lane, pane_id, nonce, harness, repo, server_id,
-                              session_id, command, harness_session_id, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              session_id, command, harness_session_id, transport, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(lane) DO UPDATE SET
                 pane_id=excluded.pane_id,
                 nonce=excluded.nonce,
@@ -717,15 +777,16 @@ class Ledger:
                 session_id=excluded.session_id,
                 command=excluded.command,
                 harness_session_id=excluded.harness_session_id,
+                transport=excluded.transport,
                 updated_at=excluded.updated_at
             """,
-            (lane, pane_id, nonce, harness, repo, server_id, session_id, command, harness_session_id, now),
+            (lane, pane_id, nonce, harness, repo, server_id, session_id, command, harness_session_id, transport, now),
         )
         row = connection.execute("SELECT * FROM lanes WHERE lane = ?", (lane,)).fetchone()
         return self._dict(row)
 
     def register_lane(
-        self, *, lane, pane_id, nonce, harness, repo, server_id, session_id, command, harness_session_id=""
+        self, *, lane, pane_id, nonce, harness, repo, server_id, session_id, command, harness_session_id="", transport=None
     ):
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
@@ -740,6 +801,7 @@ class Ledger:
                 session_id=session_id,
                 command=command,
                 harness_session_id=harness_session_id,
+                transport=transport,
                 now=now,
             )
 
@@ -1197,6 +1259,7 @@ class Ledger:
         evidence,
         status_marker=None,
         harness_session_id="",
+        transport="send-keys",
         failpoint=None,
     ):
         """Atomically register the lane, record the GitHub source, assign, and mark delivered.

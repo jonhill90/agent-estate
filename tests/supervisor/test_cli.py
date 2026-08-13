@@ -32,7 +32,12 @@ class RecordingAdapter:
     def __init__(self, ledger, transport):
         self.observed = []
         self.notified = False
+        self.registered = []
         self.__class__.instances.append(self)
+
+    def register_lane(self, *, lane, target, harness, repo, nonce):
+        self.registered.append((lane, harness))
+        return {"lane": lane, "harness": harness, "pane_id": "%1", "transport": "send-keys"}
 
     def observe_lane(self, lane):
         self.observed.append(lane)
@@ -52,6 +57,35 @@ class RecordingACPAdapter:
 
     def register_lane(self, *, lane, target, harness, repo, nonce):
         return {"lane": lane, "harness": harness, "pane_id": "sess-1", "session_id": "sess-1"}
+
+    def assign_task(self, *, lane, task_id, summary):
+        self.assigned.append((lane, task_id, summary))
+        return {"status": "complete"}
+
+    def observe_lane(self, lane):
+        return None
+
+    def notify_architecture(self, *, lane, retry_after):
+        return False
+
+
+class RecordingPiRPCAdapter:
+    """`main()` always constructs one of these -- it is `pi`'s alternative
+    transport, not `pi`'s only one -- so a plain instance count cannot tell
+    a test whether it was actually DRIVEN. Assertions below check
+    `registered`/`assigned`, which only grow when this adapter's own methods
+    are called, not merely constructed."""
+
+    instances = []
+
+    def __init__(self, ledger, transport_factory):
+        self.registered = []
+        self.assigned = []
+        self.__class__.instances.append(self)
+
+    def register_lane(self, *, lane, target, harness, repo, nonce):
+        self.registered.append((lane, harness))
+        return {"lane": lane, "harness": harness, "transport": "pi-rpc", "pane_id": "sess-1", "session_id": "sess-1"}
 
     def assign_task(self, *, lane, task_id, summary):
         self.assigned.append((lane, task_id, summary))
@@ -185,6 +219,89 @@ class CliTest(unittest.TestCase):
                 )
             adapter = RecordingACPAdapter.instances[-1]
             self.assertEqual([("copilot-worker", "t1", "Do it")], adapter.assigned)
+
+    def test_register_pi_with_pi_rpc_transport_dispatches_through_pi_rpc_adapter(self):
+        RecordingPiRPCAdapter.instances.clear()
+        with tempfile.TemporaryDirectory() as root:
+            output = io.StringIO()
+            with patch.object(cli, "PiRPCAdapter", RecordingPiRPCAdapter), contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    0,
+                    cli.main([
+                        "--state-dir", root, "register",
+                        "--lane", "pi-worker", "--target", "unused",
+                        "--harness", "pi", "--transport", "pi-rpc", "--repo", "/repo",
+                    ]),
+                )
+            value = json.loads(output.getvalue())
+            self.assertEqual("pi", value["harness"])
+            self.assertEqual([("pi-worker", "pi")], RecordingPiRPCAdapter.instances[-1].registered)
+
+    def test_register_pi_without_transport_stays_on_tmux_adapter(self):
+        """agent-supervisor#58: `pi` may be driven either way -- omitting
+        `--transport` must default to plain send-keys, not silently pick RPC."""
+        RecordingPiRPCAdapter.instances.clear()
+        RecordingAdapter.instances.clear()
+        with tempfile.TemporaryDirectory() as root:
+            output = io.StringIO()
+            with patch.object(cli, "PiRPCAdapter", RecordingPiRPCAdapter), \
+                 patch.object(cli, "TmuxAdapter", RecordingAdapter), \
+                 contextlib.redirect_stdout(output):
+                cli.main([
+                    "--state-dir", root, "register",
+                    "--lane", "pi-worker", "--target", "unused",
+                    "--harness", "pi", "--repo", "/repo",
+                ])
+            self.assertEqual([("pi-worker", "pi")], RecordingAdapter.instances[-1].registered)
+            for instance in RecordingPiRPCAdapter.instances:
+                self.assertEqual([], instance.registered, "the RPC adapter must never be called for a send-keys register")
+
+    def test_assign_to_a_pi_rpc_lane_dispatches_through_pi_rpc_adapter_not_tmux(self):
+        """The real point of the wiring (agent-supervisor#58): a lane
+        registered with transport=pi-rpc must route through PiRPCTransport
+        for dispatch, keyed off the ledger's recorded transport, not the
+        harness alone -- a `pi` lane recorded `send-keys` must not."""
+        RecordingPiRPCAdapter.instances.clear()
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            ledger.register_lane(
+                lane="pi-worker", pane_id="sess-1", nonce="nonce-pi", harness="pi",
+                repo="/repo", server_id="pi-rpc", session_id="sess-1", command="pi",
+                transport="pi-rpc",
+            )
+            output = io.StringIO()
+            with patch.object(cli, "PiRPCAdapter", RecordingPiRPCAdapter), contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    0,
+                    cli.main([
+                        "--state-dir", root, "assign",
+                        "--lane", "pi-worker", "--task", "t1", "--summary", "Do it",
+                    ]),
+                )
+            adapter = RecordingPiRPCAdapter.instances[-1]
+            self.assertEqual([("pi-worker", "t1", "Do it")], adapter.assigned)
+
+    def test_assign_to_a_send_keys_pi_lane_does_not_use_the_pi_rpc_adapter(self):
+        RecordingPiRPCAdapter.instances.clear()
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            ledger.register_lane(
+                lane="pi-worker", pane_id="%1", nonce="nonce-pi", harness="pi",
+                repo="/repo", server_id="server", session_id="$1", command="pi",
+                transport="send-keys",
+            )
+            output = io.StringIO()
+            with patch.object(cli, "PiRPCAdapter", RecordingPiRPCAdapter), contextlib.redirect_stdout(output):
+                # No live tmux underneath -- the assignment itself will fail
+                # against the real TmuxTransport, but must fail INSIDE
+                # TmuxAdapter, never by reaching the RPC adapter at all.
+                with self.assertRaises(Exception):
+                    cli.main([
+                        "--state-dir", root, "assign",
+                        "--lane", "pi-worker", "--task", "t1", "--summary", "Do it",
+                    ])
+            for instance in RecordingPiRPCAdapter.instances:
+                self.assertEqual([], instance.assigned, "the RPC adapter must never be called for a send-keys lane")
 
     def test_tick_without_the_canonical_sensor_is_also_gated(self):
         with tempfile.TemporaryDirectory() as root:
