@@ -626,6 +626,28 @@ want_contains "the task is recorded as delivered -- the brief was verified in th
 want_contains "the record carries the worktree the lane was given" "$D/roots" "$status"
 want_contains "the record carries the issue it was dispatched for" '"source_ref":"140"' "$status"
 
+# --- agent-supervisor#30: codex relaunch uses explicit no-approval posture ---
+#
+# The old codex launch shortcut (`--dangerously-bypass-approvals-and-sandbox`)
+# was present in the adapter and visible in the live lane's `ps` output, but
+# #30 measured that the lane still stalled on command/edit approvals. The
+# adapter now records the explicit CLI knobs that control the two dimensions:
+# `-a never` for approval policy and `-s danger-full-access` for sandboxing.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+4|free-4|codex|  gpt-5.5 medium · /repo/path|1|0
+FIX
+printf '30|| codex lane must not stall on approvals\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-30" run 30 codex-approval "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a dispatch to a codex lane succeeds" "$rc" 0 "$out"
+log=$(tmuxlog)
+want_contains "the codex harness is relaunched with explicit no-approval flags" \
+  "codex -a never -s danger-full-access" "$log"
+want_missing "the old ambiguous codex shortcut is not relaunched" \
+  "codex --dangerously-bypass-approvals-and-sandbox" "$log"
+status=$(LEDGER_STATE="$D/state-30" ledger status 2>&1)
+want_contains "the codex harness is recorded" '"harness":"codex"' "$status"
+
 # --- agent-dotfiles#216: a copilot lane, GREEN against the stub -----------
 #
 # The bug's own reproduction, against a stub instead of the live
