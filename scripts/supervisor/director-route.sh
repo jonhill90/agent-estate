@@ -84,6 +84,16 @@
 # skips the queue step entirely -- there is nothing new to post -- and runs
 # only the nudge half.
 #
+# agent-supervisor#34: the nudge half depends on the pane going idle, and a
+# pane that is mid-tick or waiting on a tool almost all the time can go hours
+# without that ever being true -- measured at 9 messages, 12 hours, nothing
+# downstream able to tell "queued" from "lost". Every call here (post or
+# `--flush`) also runs `director-inbox.sh escalate`, which does not depend on
+# the pane at all: once a message has been queued past
+# `DIRECTOR_INBOX_STALE_SECONDS` (default 1800s) it pages Jon directly, once,
+# regardless of whether the nudge below ever succeeds. See that block's own
+# comment for why this cannot re-page every ~25s.
+#
 # Exit 0: queued, and the live nudge was sent and confirmed delivered
 #         (same pane-evidence discipline as inbox-route.sh: the box must
 #         show the prompt before Enter, and be empty after).
@@ -147,6 +157,47 @@ if [ -n "$MESSAGE" ]; then
     fi
     echo "director-route: could not reach Jon either -- message was: $MESSAGE" >&2
     exit 1
+  fi
+fi
+
+# --- escalate on age, unconditionally, before the idle check below ---------
+# agent-supervisor#34. Everything below this point can exit 2 (busy, on a
+# menu, unsent text in the box, a lost race) without the message being lost
+# -- it stays queued for the Director's own next tick. What #34 measured is
+# that "queued" and "delivered" then become indistinguishable from outside:
+# nine messages sat queued and un-escalated for twelve hours because the pane
+# was never once caught idle, and nothing else was watching the clock.
+#
+# This runs on EVERY call -- a fresh post and a bare `--flush` alike -- and
+# before the idle check, so a pane that is never idle cannot suppress it the
+# way it suppresses the nudge.
+#
+# agent-supervisor#42 review: the row used to be marked escalated the instant
+# it crossed the threshold, before notify_jon ran at all -- so a failed page
+# (unreachable channel, no creds) left the row permanently marked escalated
+# anyway, and the escalate-detect step's own not-already-escalated filter
+# then suppressed every later retry. That recreated the exact silent-loss
+# shape #34 exists to fix, one layer up: the escalation path failed once and
+# then suppressed itself forever. `director-inbox.sh escalate` is now
+# detect-only; the row is committed to `escalated: true` (via
+# `escalate-commit`) ONLY after notify_jon has actually returned success. A
+# failed notify leaves the row exactly as it was -- pending, not escalated --
+# so the next `--flush` (~25s later) detects it as stale again and retries,
+# the same debounce shape inbox.sh's own FAIL_THRESHOLD notification uses,
+# but now honest about what "escalated" means.
+STALE_THRESHOLD="${DIRECTOR_INBOX_STALE_SECONDS:-1800}"
+if escalated=$("$HERE/director-inbox.sh" escalate "$STALE_THRESHOLD" 2>/dev/null) && [ -n "$escalated" ]; then
+  if notify_jon "Director inbox has undelivered message(s)" \
+       "pending >= ${STALE_THRESHOLD}s with the Director's pane never caught idle -- $escalated"; then
+    # Bash 3.2 (macOS) has no readarray/mapfile -- build the argv array by
+    # hand rather than reaching for either.
+    escalated_ats=()
+    while IFS= read -r ts; do
+      escalated_ats+=("$ts")
+    done < <(grep -oE '^\[director [^]]+\]' <<<"$escalated" | sed -E 's/^\[director (.+)\]$/\1/')
+    "$HERE/director-inbox.sh" escalate-commit "${escalated_ats[@]}" >/dev/null
+  else
+    echo "director-route: escalation notify failed -- message(s) stay queued, will retry" >&2
   fi
 fi
 
