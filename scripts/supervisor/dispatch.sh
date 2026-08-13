@@ -185,12 +185,35 @@ BRIEF="$(cd "$(dirname "$BRIEF")" && pwd)/$(basename "$BRIEF")"
 # second-guessed. loop-tick.md's instruction to pass the flag stands.
 #
 # Detection: a line -- in the issue's own title, checked first, then the
-# brief -- containing both the word "review" and "PR #<N>" (case-
-# insensitive). That is the shape every review issue in this estate's own
-# history already uses: "review PR #204", "review PR #350", ... (see the
-# #212/#35 fixtures in tests/supervisor/test_dispatch.sh and loop-tick.md's
-# own dispatch instructions). No new convention is introduced; this only
-# reads one that already exists.
+# brief -- containing both the word "review" and a PR reference, in one of
+# three shapes (case-insensitive):
+#   * "PR #<N>"                       -- "review PR #204"
+#   * "PR <owner>/<repo>#<N>"         -- "review of PR jonhill90/agent-
+#                                         supervisor#72" (agent-supervisor#72:
+#                                         the Director's own review briefs
+#                                         write it this way, every time)
+#   * a github.com PR URL             -- ".../pull/<N>", with or without the
+#                                         word "PR" nearby -- "/pull/" is
+#                                         itself PR-specific (issues use
+#                                         "/issues/"), so it needs no other
+#                                         signal
+# That is the shape every review issue and brief in this estate's own
+# history already uses (see the #212/#35 fixtures in
+# tests/supervisor/test_dispatch.sh and loop-tick.md's own dispatch
+# instructions). No new convention is introduced; this only reads ones that
+# already exist.
+#
+# DELIBERATELY NOT MATCHED: a bare "#<N>" with no "PR" word and no
+# owner/repo before it. This estate's issues and briefs constantly say
+# "closing issue #70" or "Fixes #240" right next to a PR reference on the
+# same line ("review PR #500, no flag passed" is itself a title fixture
+# below) -- a bare number would as often grab the issue being closed as the
+# PR being reviewed, and inferring the WRONG PR is worse than inferring
+# none (step 0.5's guard would refuse or exclude based on the wrong
+# author). Likewise, `owner/repo#<N>` with no "PR" word is not matched: that
+# exact shape is this repo's own convention for citing an ISSUE inline
+# ("Fixes #240" close cousin), so matching it bare would conflate issue and
+# PR references. The "PR " prefix is what disambiguates both.
 #
 # WRONG IN EACH DIRECTION, both survivable:
 #   * FALSE POSITIVE (detected as a review when the dispatch is not one): the
@@ -201,18 +224,19 @@ BRIEF="$(cd "$(dirname "$BRIEF")" && pwd)/$(basename "$BRIEF")"
 #     re-dispatch (the issue's claim is released on refusal, same as every
 #     other refusal path in this script).
 #   * FALSE NEGATIVE (a real review not detected -- title and brief phrase it
-#     differently than the pattern above): behaviour is exactly today's
+#     differently than the shapes above): behaviour is exactly today's
 #     status quo. The explicit flag remains the only guaranteed way to
 #     trigger the guard; this block only catches the forgotten-flag case
-#     when the issue happens to name the PR in the shape above.
+#     when the issue happens to name the PR in one of the shapes above.
+INFER_PR_PATTERN='pr[[:space:]]*#[0-9]+|pr[[:space:]]*[a-z0-9_.-]+/[a-z0-9_.-]+#[0-9]+|github\.com/[a-z0-9_.-]+/[a-z0-9_.-]+/pull/[0-9]+'
 if [ -z "$REVIEWS_PR" ]; then
   INFER_GH_REPO_ARGS=()
   [ -n "$REPO" ] && INFER_GH_REPO_ARGS=(-R "$REPO")
   ISSUE_TITLE=$(gh issue view "$ISSUE" "${INFER_GH_REPO_ARGS[@]+"${INFER_GH_REPO_ARGS[@]}"}" --json title -q .title 2>/dev/null)
-  INFERRED_PR=$(grep -iE 'review' <<<"$ISSUE_TITLE" | grep -ioE 'pr[[:space:]]*#[0-9]+' | grep -oE '[0-9]+' | head -1)
+  INFERRED_PR=$(grep -iE 'review' <<<"$ISSUE_TITLE" | grep -ioE "$INFER_PR_PATTERN" | grep -oE '[0-9]+$' | head -1)
   INFERRED_FROM="issue #$ISSUE's title"
   if [ -z "$INFERRED_PR" ]; then
-    INFERRED_PR=$(grep -iE 'review' "$BRIEF" | grep -ioE 'pr[[:space:]]*#[0-9]+' | grep -oE '[0-9]+' | head -1)
+    INFERRED_PR=$(grep -iE 'review' "$BRIEF" | grep -ioE "$INFER_PR_PATTERN" | grep -oE '[0-9]+$' | head -1)
     INFERRED_FROM="the brief"
   fi
   if [ -n "$INFERRED_PR" ]; then

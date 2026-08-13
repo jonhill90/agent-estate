@@ -2402,6 +2402,39 @@ want_exit "the explicit --reviews-pr 501 is refused (its own author, t:3, is the
 want_contains "names PR #501, the flag's PR, not #500 from the title" "PR #501" "$out"
 want_missing "never inferred -- the explicit flag short-circuits detection" "inferred --reviews-pr" "$out"
 
+# agent-supervisor#72: the repo-qualified form ("PR owner/repo#N") is the
+# exact shape the Director's own review briefs use ("the independent review
+# of PR jonhill90/agent-supervisor#N"), and it was missed entirely -- only
+# bare "PR #N" was recognised. Same fixture shape as the #70 title tests
+# above, just with the repo-qualified spelling.
+printf '248|| the code PR #503 was written from\n' >> "$D/issues"
+printf '249|| independent review of PR acme/agent-dotfiles#503 closing issue #240\n' >> "$D/issues"
+printf '503|Fixes #248|lane/248-infer-qualified\n' >> "$D/prs"
+out=$(LEDGER_STATE="$D/state-70" run 248 infer-qualified "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch (#248) succeeds" "$rc" 0 "$out"
+LEDGER_STATE="$D/state-70" ledger record-completion --task ad248-infer-qualified --note done >/dev/null
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+out=$(LEDGER_STATE="$D/state-70" run 249 rev-503-qualified "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a review inferred from a repo-qualified PR reference (owner/repo#N) is refused when the only free lane is the author" "$rc" 1 "$out"
+want_contains "and says the flag was inferred, from the issue title" "inferred --reviews-pr 503 from issue #249's title" "$out"
+want_contains "names the PR" "PR #503" "$out"
+# The line also names issue #240 right next to the PR -- confirm the wrong
+# number (the issue being closed) was never picked up.
+want_missing "never inferred the issue number instead of the PR number" "inferred --reviews-pr 240" "$out"
+
+# A bare "owner/repo#N" with no "PR" word is this repo's own convention for
+# citing an ISSUE inline (see "Fixes #240" fixtures throughout this file) --
+# it must NOT be read as a PR reference, or an issue mention would silently
+# become the inferred review PR.
+printf '250|| review: see acme/agent-dotfiles#503 for the change, closing #240\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-70" run 250 no-bare-qualified "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a bare owner/repo#N with no 'PR' word is not inferred as a review" "$rc" 0 "$out"
+want_missing "nothing was inferred" "inferred --reviews-pr" "$out"
+LEDGER_STATE="$D/state-70" ledger record-completion --task ad250-no-bare-qualified --note done >/dev/null
+
 # MUTATION-CHECK: disable the inference block and confirm a forgotten flag
 # again dispatches straight to the author, the exact regression #70 exists
 # to close.
