@@ -47,6 +47,19 @@
 # ever needs mutual exclusion between shell processes on one machine, so
 # mkdir is enough and avoids a second language for it).
 #
+# THE LOCK MUST BE RECLAIMABLE. An `EXIT` trap does not run on SIGKILL, a
+# hard crash, or a LaunchAgent enforcing a hard kill on a hung tick -- all
+# real ways this script's OWN process can die while holding $LOCK. Without a
+# reclaim path a lock left behind that way is permanent: every later tick
+# reads "another recovery is already in flight", logs the same line forever,
+# and never touches tmux again -- the poller stays down and NOTHING says so
+# distinctly from the ordinary, benign "someone else is already handling
+# this tick" case. That is the exact silent, human-in-the-loop failure this
+# whole script exists to retire, one layer down. So the lock records who
+# holds it and when, and a failed acquire only ever gives up (leaving the
+# tick a benign no-op) when the recorded holder is either still alive or the
+# lock is too young for that to be ruled out; otherwise it reclaims.
+#
 # NON-CLEAN EXIT (crash, SIGKILL): recovery is IDENTICAL to the clean-exit
 # path, because it depends only on tmux's own `pane_dead`, not on the exiting
 # process running any code of its own -- a SIGKILLed poller cannot run a
@@ -69,26 +82,50 @@
 # with whatever code is on disk, which is exactly what advance-live.sh's
 # send-keys was trying to arrange by hand.
 #
+# ADDRESSED BY WINDOW ID, NOT NAME, ONCE FOUND. tmux allows duplicate window
+# names, and lanes.sh already had to learn this the hard way for the SAME
+# reason (#241: "the index and the id must describe the SAME window").
+# Addressing a later mutation (`respawn-pane`, `set-window-option`) by
+# `session:name` when two windows share that name does not pick one --
+# real tmux refuses the target outright ("can't find window"). So the name
+# is used for exactly one thing, the initial lookup, and if it resolves to
+# MORE than one window this script refuses to guess which is the real
+# poller and says so loudly, the same "refuse rather than guess" posture
+# advance-live.sh already takes for an ambiguous git state.
+#
+# EVERY ACTION IS VERIFIED, NOT ASSUMED. A `tmux` call that fails (server
+# hiccup, a target that stopped existing between the lookup and the
+# mutation) used to be swallowed by `2>/dev/null` with no exit code check,
+# so a failed respawn logged the same "RESPAWNED" line as a real one. Every
+# branch below now re-reads the state it just tried to produce and reports
+# failure (nonzero exit, a FAILED log line) when it does not hold.
+#
 # Usage: poller-recover.sh [session]
 # Env overrides (mirroring the rest of this directory's scripts):
-#   SUPERVISOR_STATE      state dir; default ~/.local/state/agent-dotfiles-supervisor
+#   SUPERVISOR_STATE       state dir; default ~/.local/state/agent-dotfiles-supervisor
 #   SUPERVISOR_LIVE        live worktree path; default $SUPERVISOR_STATE/live
-#   LANES_SESSION          tmux session; default agent-dotfiles
-#   POLLER_WINDOW           window name; default inbox-poll -- kept in sync
-#                          with lanes.sh's own LANES_POLLER_WINDOW default
-#   POLLER_LAUNCH_CMD       the command relaunched into the pane; default
+#   LANES_SESSION          tmux session; default agent-dotfiles -- same variable
+#                          lanes.sh/advance-live.sh already key on, not a second name
+#   LANES_POLLER_WINDOW    window name; default inbox-poll -- same variable
+#                          lanes.sh reads for its own service-pane fallback,
+#                          deliberately the ONE name so the two cannot drift
+#   POLLER_LAUNCH_CMD      the command relaunched into the pane; default
 #                          `cd '$LIVE' && exec scripts/supervisor/inbox-poll.sh`
-#   POLLER_RECOVER_LOCK     lock dir; default $SUPERVISOR_STATE/.poller-recover.lock
-#   POLLER_RECOVER_LOG      log file; default $SUPERVISOR_STATE/poller-recover.log
+#   POLLER_RECOVER_LOCK    lock dir; default $SUPERVISOR_STATE/.poller-recover.lock
+#   POLLER_RECOVER_LOCK_MAX_AGE  seconds before a lock with no provably-live
+#                          holder is reclaimed; default 60 -- generous over
+#                          this script's normal sub-second runtime
+#   POLLER_RECOVER_LOG     log file; default $SUPERVISOR_STATE/poller-recover.log
 
 set -uo pipefail
 
 SESSION="${1:-${LANES_SESSION:-agent-dotfiles}}"
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 LIVE="${SUPERVISOR_LIVE:-$STATE/live}"
-WINDOW="${POLLER_WINDOW:-inbox-poll}"
+WINDOW="${LANES_POLLER_WINDOW:-inbox-poll}"
 LAUNCH_CMD="${POLLER_LAUNCH_CMD:-cd '$LIVE' && exec scripts/supervisor/inbox-poll.sh}"
 LOCK="${POLLER_RECOVER_LOCK:-$STATE/.poller-recover.lock}"
+LOCK_MAX_AGE="${POLLER_RECOVER_LOCK_MAX_AGE:-60}"
 LOG="${POLLER_RECOVER_LOG:-$STATE/poller-recover.log}"
 
 # Writes to both the log file (the durable record) and stdout (so a caller
@@ -104,28 +141,81 @@ command -v tmux >/dev/null 2>&1 || { log "no tmux on PATH -- nothing to do"; exi
 tmux has-session -t "$SESSION" 2>/dev/null || { log "no session '$SESSION' -- nothing to recover into"; exit 0; }
 
 mkdir -p "$STATE" 2>/dev/null
+
 # Atomic: mkdir either creates the directory and succeeds, or finds it
 # already there and fails, with no window in between where two callers can
-# both see "absent". A stale lock (this process died holding it) is bounded
-# by the caller's own cadence -- watchdog.sh ticks every ~180s and this exits
-# in well under that, so the next tick clears it by trying again; nothing
-# here waits on it.
-if ! mkdir "$LOCK" 2>/dev/null; then
+# both see "absent". Records who holds it and when, so a FAILED acquire can
+# tell a genuinely concurrent holder (still alive) from a stale one (dead,
+# or old enough that no legitimate run could still be inside it) -- see the
+# header for why an EXIT trap alone cannot be trusted to always clear this.
+acquire_lock() {
+  if mkdir "$LOCK" 2>/dev/null; then
+    printf '%s' "$$" >"$LOCK/pid" 2>/dev/null
+    date +%s >"$LOCK/started" 2>/dev/null
+    return 0
+  fi
+  local holder_pid started now age
+  holder_pid=$(cat "$LOCK/pid" 2>/dev/null)
+  started=$(cat "$LOCK/started" 2>/dev/null)
+  now=$(date +%s)
+  if [ -n "$holder_pid" ] && kill -0 "$holder_pid" 2>/dev/null; then
+    return 1   # a real, live holder -- genuinely concurrent, not stale
+  fi
+  if [ -n "$started" ]; then
+    age=$((now - started))
+    [ "$age" -lt "$LOCK_MAX_AGE" ] && return 1   # too young to rule out a legitimate holder still writing pid/started
+  fi
+  log "RECLAIMING stale lock $LOCK (holder pid ${holder_pid:-unknown}, age ${age:-unknown}s) -- its EXIT trap never ran"
+  rm -rf "$LOCK" 2>/dev/null
+  mkdir "$LOCK" 2>/dev/null || return 1
+  printf '%s' "$$" >"$LOCK/pid" 2>/dev/null
+  date +%s >"$LOCK/started" 2>/dev/null
+  return 0
+}
+
+if ! acquire_lock; then
   log "SKIPPED -- another recovery is already in flight ($LOCK held)"
   exit 0
 fi
-trap 'rmdir "$LOCK" 2>/dev/null' EXIT
+trap 'rm -rf "$LOCK" 2>/dev/null' EXIT
 
-target="$SESSION:$WINDOW"
+# Every window in $SESSION named $WINDOW, by id. Zero: absent, create one.
+# One: the ordinary case, act on it. More than one: refuse rather than guess
+# which is the real poller -- see the header note on window-id addressing.
+ids=()
+while IFS= read -r wid; do
+  [ -n "$wid" ] && ids+=("$wid")
+done < <(tmux list-windows -t "$SESSION" -F '#{window_name}	#{window_id}' 2>/dev/null \
+          | awk -F'\t' -v w="$WINDOW" '$1==w{print $2}')
 
-if ! tmux list-windows -t "$SESSION" -F '#{window_name}' 2>/dev/null | grep -qFx "$WINDOW"; then
-  tmux new-window -t "$SESSION" -n "$WINDOW" -d 2>/dev/null
+if [ "${#ids[@]}" -gt 1 ]; then
+  log "FAILED -- ${#ids[@]} windows named '$WINDOW' in session '$SESSION' (${ids[*]}) -- refusing to guess which is the poller, not touching any of them"
+  exit 1
+fi
+
+if [ "${#ids[@]}" -eq 0 ]; then
+  if ! tmux new-window -t "$SESSION" -n "$WINDOW" -d -- "$LAUNCH_CMD" 2>/dev/null; then
+    log "FAILED -- tmux new-window for '$WINDOW' in session '$SESSION' did not succeed"
+    exit 1
+  fi
+  wid=$(tmux list-windows -t "$SESSION" -F '#{window_name}	#{window_id}' 2>/dev/null \
+          | awk -F'\t' -v w="$WINDOW" '$1==w{print $2; exit}')
+  if [ -z "$wid" ]; then
+    log "FAILED -- window '$WINDOW' not found in session '$SESSION' right after creating it"
+    exit 1
+  fi
+  target="$SESSION:$wid"
   tmux set-window-option -t "$target" remain-on-exit on 2>/dev/null
-  tmux send-keys -t "$target" -l "$LAUNCH_CMD" 2>/dev/null
-  tmux send-keys -t "$target" Enter 2>/dev/null
-  log "RECREATED window $target and launched: $LAUNCH_CMD"
+  dead=$(tmux list-panes -t "$target" -F '#{pane_dead}' 2>/dev/null | head -1)
+  if [ "$dead" != "0" ]; then
+    log "FAILED -- created window $target ($WINDOW) but its pane is not alive right after launch (pane_dead=${dead:-unreadable})"
+    exit 1
+  fi
+  log "RECREATED window $target ($WINDOW) and launched: $LAUNCH_CMD"
   exit 0
 fi
+
+target="$SESSION:${ids[0]}"
 
 # Idempotent even when this window already had it set (by a previous tick,
 # or by hand) -- and covers a window that predates this script entirely.
@@ -136,9 +226,22 @@ if [ "$dead" = "1" ]; then
   # -k also lets this recover from a pane left dead by something other than
   # the poller exiting on its own; it never fires against a LIVE pane, since
   # that branch is only reached when pane_dead already read 1.
-  tmux respawn-pane -k -t "$target" -- "$LAUNCH_CMD" 2>/dev/null
+  if ! tmux respawn-pane -k -t "$target" -- "$LAUNCH_CMD" 2>/dev/null; then
+    log "FAILED -- tmux respawn-pane on $target did not succeed"
+    exit 1
+  fi
+  redead=$(tmux list-panes -t "$target" -F '#{pane_dead}' 2>/dev/null | head -1)
+  if [ "$redead" != "0" ]; then
+    log "FAILED -- respawned $target but its pane is still not alive (pane_dead=${redead:-unreadable})"
+    exit 1
+  fi
   log "RESPAWNED dead pane $target: $LAUNCH_CMD"
   exit 0
+fi
+
+if [ "$dead" != "0" ]; then
+  log "FAILED -- could not read pane_dead for $target (got '${dead:-empty}') -- not acting on an unreadable pane"
+  exit 1
 fi
 
 log "OK -- $target alive, nothing to do"

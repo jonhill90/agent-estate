@@ -152,6 +152,58 @@ p4="$(live_pid)"
       "window_count=$(window_count) pane_dead=$(pane_dead) pid_alive=$(pid_alive "$p4" && echo yes || echo no)"
 : >"$STATE/stop"; sleep 0.3
 
+# --- 6b. A lock left by a process that never ran its EXIT trap is reclaimed
+# (a real possibility -- SIGKILL, a hard crash, a LaunchAgent enforcing a
+# hard kill -- none of which run the trap that normally clears $LOCK) rather
+# than wedging recovery shut forever.
+mkdir -p "$STATE/.lock"
+printf '99999999' >"$STATE/.lock/pid"   # a pid nothing on this machine holds
+echo $(( $(date +%s) - 3600 )) >"$STATE/.lock/started"   # an hour old
+rm -f "$STATE/pid" "$STATE/stop"
+tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+recover >/dev/null 2>&1
+for _ in $(seq 1 50); do [ -f "$STATE/pid" ] && break; sleep 0.1; done
+[ -f "$STATE/pid" ] && ok "a stale lock (dead holder, old) is reclaimed rather than wedging recovery shut" \
+  || bad "a stale lock (dead holder, old) is reclaimed rather than wedging recovery shut" \
+      "no poller launched -- recovery treated the stale lock as a live one"
+: >"$STATE/stop"; sleep 0.3
+rm -f "$STATE/pid" "$STATE/stop"
+
+# A YOUNG lock with an unreadable/dead-looking holder is NOT reclaimed --
+# only age (not a dead-looking pid alone) proves the original holder is
+# gone rather than mid-write of its own pid/started files.
+mkdir -p "$STATE/.lock"
+printf '99999999' >"$STATE/.lock/pid"
+date +%s >"$STATE/.lock/started"   # young
+tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+recover >/dev/null 2>&1
+[ ! -f "$STATE/pid" ] && ok "a young lock is left alone even if its recorded holder looks dead" \
+  || bad "a young lock is left alone even if its recorded holder looks dead" \
+      "recovery acted through a lock that should still have been honoured"
+rm -rf "$STATE/.lock"
+
+# --- 6c. Two windows sharing the poller's name: refuse, do not guess ------
+# The one case window-NAME addressing (necessary for the initial lookup,
+# since that is the deployment identity) cannot resolve safely -- tmux
+# allows duplicate window names, and a human recreating the window by hand
+# during an outage (exactly what the issue this fixes describes) while an
+# old, not-yet-cleaned-up one still exists produces precisely this state.
+tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+tmux new-window -t "$S" -n inbox-poll -d 2>/dev/null
+tmux new-window -t "$S" -n inbox-poll -d 2>/dev/null
+dup_count_before="$(window_count)"
+out=$(recover 2>&1); rc=$?
+[ "$rc" -ne 0 ] && ok "two windows sharing the poller's name: recovery refuses (nonzero exit)" \
+  || bad "two windows sharing the poller's name: recovery refuses (nonzero exit)" "exit $rc: $out"
+[ "$(window_count)" = "$dup_count_before" ] && ok "neither duplicate window is touched" \
+  || bad "neither duplicate window is touched" "window_count changed from $dup_count_before to $(window_count)"
+# `kill-window -t session:inbox-poll` is itself ambiguous while two windows
+# share that name -- same reason recovery refused above -- so clean up by ID.
+while IFS= read -r wid; do
+  [ -n "$wid" ] && tmux kill-window -t "$S:$wid" 2>/dev/null
+done < <(tmux list-windows -t "$S" -F '#{window_name}	#{window_id}' 2>/dev/null | awk -F'\t' '$1=="inbox-poll"{print $2}')
+rm -f "$STATE/pid" "$STATE/stop"
+
 echo
 echo "poller-recover.sh: mutation -- concurrent recovery must not create a second poller"
 
@@ -202,11 +254,11 @@ python3 - "$RECOVER" "$UNLOCKED" <<'PY' || patch_rc=$?
 import re, sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = '''if ! mkdir "$LOCK" 2>/dev/null; then
+marker = '''if ! acquire_lock; then
   log "SKIPPED -- another recovery is already in flight ($LOCK held)"
   exit 0
 fi
-trap 'rmdir "$LOCK" 2>/dev/null' EXIT'''
+trap 'rm -rf "$LOCK" 2>/dev/null' EXIT'''
 assert marker in text, "lock block not found -- poller-recover.sh shape changed"
 assert text.count(marker) == 1, "lock block not unique -- poller-recover.sh shape changed"
 open(dst, "w").write(text.replace(marker, ": # lock removed for this mutation test", 1))

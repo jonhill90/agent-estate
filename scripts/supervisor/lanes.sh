@@ -300,7 +300,7 @@ emit_rows() {
       # plain `dead`: nothing about it misleads.
       if is_service_pane "$pid"; then
         state=service
-      elif [ "$name" = "$POLLER_WINDOW" ] && ! ps -p "$pid" >/dev/null 2>&1; then
+      elif [ "$name" = "$POLLER_WINDOW" ] && [ -n "$pid" ] && ! ps -p "$pid" >/dev/null 2>&1; then
         # agent-supervisor#10: poller-recover.sh now sets `remain-on-exit` on
         # this window, so a poller that exits leaves a DEAD pane here instead
         # of taking the window with it, for as long as it takes the next

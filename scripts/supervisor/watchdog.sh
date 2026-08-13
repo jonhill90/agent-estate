@@ -500,7 +500,15 @@ check_poller_window() {
     return 0
   fi
   local out rc
-  out=$(SUPERVISOR_STATE="$STATE" SUPERVISOR_LIVE="$LIVE" "$HERE/poller-recover.sh" 2>&1)
+  # The poller lives in the same session $PANE does -- derived from it
+  # rather than a second independent default, so a deployment that points
+  # SUPERVISOR_PANE at a non-default session does not leave poller-recover.sh
+  # quietly acting on (or missing) the wrong one. LANES_SESSION, if the
+  # caller already set it, still wins -- same override precedence lanes.sh
+  # and advance-live.sh give it.
+  out=$(SUPERVISOR_STATE="$STATE" SUPERVISOR_LIVE="$LIVE" \
+        LANES_SESSION="${LANES_SESSION:-${PANE%%:*}}" \
+        "$HERE/poller-recover.sh" 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ]; then
     log "POLLER-RECOVER FAILED rc=$rc: $out"
