@@ -79,7 +79,8 @@ run() { # run <state-dir>
 S=$(mktemp -d)
 out=$(run "$S" 2>&1); rc=$?
 want_exit "already-current exits 0" "$rc" 0 "$out"
-if grep -qi "advanc" <<<"$out"; then bad "already-current does not claim to advance" "$out"; else ok "already-current does not claim to advance"; fi
+if grep -qi "advanced" <<<"$out"; then bad "already-current does not claim to advance" "$out"; else ok "already-current does not claim to advance"; fi
+if grep -qi "^advance-live: current" <<<"$out"; then ok "already-current says so explicitly (agent-supervisor#11)"; else bad "already-current says so explicitly (agent-supervisor#11)" "$out"; fi
 
 # --- put a second commit on origin/main so LIVE is genuinely behind -------
 echo two >"$SRC/file.txt"
@@ -111,10 +112,11 @@ git -C "$SRC" worktree add -q --detach "$BROKEN" origin/main
 printf '#!/bin/bash\nexit 1\n' >"$BROKEN/scripts/supervisor/watchdog.sh"
 git -C "$BROKEN" -c user.email=t@t -c user.name=t commit -aq -m "break watchdog.sh"
 broken_sha=$(git -C "$BROKEN" rev-parse HEAD)
-# Point LIVE's view of origin/main at the broken commit without touching the
-# real branch on origin -- update-ref on the shared object store, same trick
-# advance-live.sh itself only ever reads via `rev-parse origin/main`.
-git -C "$LIVE" update-ref refs/remotes/origin/main "$broken_sha"
+# Push the broken commit to the real origin/main, not just LIVE's local ref:
+# advance-live.sh now fetches origin/main itself before comparing
+# (agent-supervisor#11), so the old trick of pointing only the local ref at
+# an unpushed commit would get silently overwritten by that fetch.
+git -C "$BROKEN" push -q origin HEAD:refs/heads/main
 
 S=$(mktemp -d); fresh_status "$S"
 out=$(run "$S" 2>&1); rc=$?
@@ -123,7 +125,8 @@ after=$(git -C "$LIVE" rev-parse HEAD)
 if [ "$after" = "$before_sha" ]; then ok "broken candidate leaves live untouched"; else bad "broken candidate leaves live untouched" "moved to $after"; fi
 if [ -f "$S/.live-rollback-sha" ]; then bad "broken candidate did not write a rollback file" "$(cat "$S/.live-rollback-sha")"; else ok "broken candidate did not write a rollback file"; fi
 
-# restore origin/main to the good target for the success case
+# restore the real origin/main to the good target for the success case below
+git -C "$BROKEN" push -q --force origin "$target_sha:refs/heads/main"
 git -C "$LIVE" update-ref refs/remotes/origin/main "$target_sha"
 git -C "$SRC" worktree remove --force "$BROKEN" >/dev/null 2>&1
 git -C "$SRC" worktree prune >/dev/null 2>&1
@@ -212,14 +215,22 @@ after5=$(git -C "$LIVE" rev-parse HEAD)
 if [ "$after5" = "$before_sha4" ]; then ok "live is untouched when the re-check catches a closed window"; else bad "live is untouched when the re-check catches a closed window" "moved to $after5"; fi
 if grep -qi "closed while the smoke test ran" <<<"$out"; then ok "the refusal names the mid-smoke-test re-check"; else bad "the refusal names the mid-smoke-test re-check" "$out"; fi
 
-# --- origin/main unreadable: refuses loudly, live untouched ----------------
+# --- agent-supervisor#11: fetch fails -- refuses loudly, never reads as current
+# Deleting the local origin/main ref no longer reproduces "unreadable": the
+# fix fetches first, which recreates it from a reachable remote. The failure
+# this needs to simulate is the network itself -- offline, auth expired, a
+# timeout -- exactly the class #11 named. A bad remote URL gets there without
+# touching the real network.
 S=$(mktemp -d); fresh_status "$S"
-git -C "$LIVE" update-ref -d refs/remotes/origin/main
+git -C "$LIVE" remote set-url origin "$D/does-not-exist.git"
 before2=$(git -C "$LIVE" rev-parse HEAD)
 out=$(run "$S" 2>&1); rc=$?
-want_exit "unreadable origin/main refuses (nonzero exit)" "$rc" 1 "$out"
+want_exit "fetch failure refuses (nonzero exit)" "$rc" 1 "$out"
 after2=$(git -C "$LIVE" rev-parse HEAD)
-if [ "$after2" = "$before2" ]; then ok "unreadable origin/main leaves live untouched"; else bad "unreadable origin/main leaves live untouched" "moved to $after2"; fi
+if [ "$after2" = "$before2" ]; then ok "fetch failure leaves live untouched"; else bad "fetch failure leaves live untouched" "moved to $after2"; fi
+if grep -qi "could not fetch" <<<"$out"; then ok "fetch failure names the fetch"; else bad "fetch failure names the fetch" "$out"; fi
+if grep -qi "^advance-live: current" <<<"$out"; then bad "fetch failure is never reported as current" "$out"; else ok "fetch failure is never reported as current"; fi
+git -C "$LIVE" remote set-url origin "$D/origin.git"
 
 # advance-live.sh must clean up its own scratch smoke-test worktrees
 leftover=$(git -C "$SRC" worktree list --porcelain | grep -c '^worktree.*ad99-advance-smoke' || true)
@@ -264,9 +275,10 @@ if [ "$patch_rc" -ne 0 ]; then
 else
   ok "setup: patched a dirty-guard-free copy of advance-live.sh"
   chmod +x "$BROKEN"
-  # The "unreadable origin/main" case above deliberately deleted LIVE's view
-  # of origin/main; restore it so this mutation check is exercising the
-  # dirty guard specifically, not tripping the unrelated origin/main check.
+  # BROKEN still has its own fetch step, so LIVE's origin/main ref does not
+  # need restoring here the way it did when the "unreadable" case above
+  # deleted the ref by hand; that case now breaks the remote URL instead and
+  # already restores it itself.
   git -C "$LIVE" update-ref refs/remotes/origin/main "$target_sha4"
   echo "another local edit" >>"$LIVE/untouched.txt"
   before_m=$(git -C "$LIVE" rev-parse HEAD)
@@ -908,6 +920,300 @@ PY
 fi
 
 rm -rf "$D3"
+
+echo
+echo "advance-live.sh: agent-supervisor#11 -- fetch before comparing"
+
+# The exact production shape from issue #11: LIVE's LOCAL origin/main ref
+# already equals HEAD (nothing has fetched), while the real remote is ahead.
+# A test that fetches LIVE before invoking advance-live.sh -- as every case
+# above this point deliberately does, to hold LIVE at a known sha for the
+# window/dirty/race assertions -- can never reproduce this: fetching IS the
+# fix, so doing it in test setup would hide the exact bug #11 reports.
+D4=$(mktemp -d)
+git init -q --bare "$D4/origin.git"
+git clone -q "$D4/origin.git" "$D4/src" 2>/dev/null
+SRC4="$D4/src"
+git -C "$SRC4" config user.email test@example.com
+git -C "$SRC4" config user.name "Test"
+git -C "$SRC4" checkout -q -b main
+mkdir -p "$SRC4/scripts/supervisor"
+cat >"$SRC4/scripts/supervisor/watchdog.sh" <<'EOF'
+#!/bin/bash
+set -uo pipefail
+STATUS="${SUPERVISOR_STATUS:?}"
+mkdir -p "$(dirname "$STATUS")"
+printf 'checked:  %s\nstate:    pane_unreadable\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STATUS"
+exit 0
+EOF
+chmod +x "$SRC4/scripts/supervisor/watchdog.sh"
+git -C "$SRC4" add -A
+git -C "$SRC4" commit -q -m "base"
+git -C "$SRC4" push -q -u origin main
+LIVE4="$D4/live"
+git -C "$SRC4" worktree add -q --detach "$LIVE4" origin/main
+before4=$(git -C "$LIVE4" rev-parse HEAD)
+stale_local_ref=$(git -C "$LIVE4" rev-parse origin/main)
+
+# A second commit lands on the real remote. LIVE4's local origin/main ref is
+# deliberately left untouched -- that is the stale ref itself.
+echo two >"$SRC4/file.txt"
+git -C "$SRC4" add file.txt
+git -C "$SRC4" commit -q -m "second commit, not yet fetched by LIVE4"
+git -C "$SRC4" push -q origin main
+real_target4=$(git -C "$SRC4" rev-parse origin/main)
+
+if [ "$stale_local_ref" = "$before4" ] && [ "$real_target4" != "$before4" ]; then
+  ok "setup: LIVE4's local origin/main ref is stale (equals HEAD) while the real remote is ahead"
+else
+  bad "setup: LIVE4's local origin/main ref is stale (equals HEAD) while the real remote is ahead" \
+    "local=$stale_local_ref head=$before4 real_remote=$real_target4"
+fi
+local_ref_before_run=$(git -C "$LIVE4" rev-parse origin/main)
+
+S4=$(mktemp -d); fresh_status "$S4"
+out4=$(SUPERVISOR_STATE="$S4" bash "$ADVANCE" "$LIVE4" 2>&1); rc4=$?
+want_exit "a stale local ref does not read as current: advances instead (exit 0)" "$rc4" 0 "$out4"
+after4head=$(git -C "$LIVE4" rev-parse HEAD)
+if [ "$after4head" = "$real_target4" ]; then
+  ok "the fetch inside advance-live.sh found the real remote target and advanced to it"
+else
+  bad "the fetch inside advance-live.sh found the real remote target and advanced to it" \
+    "at $after4head, wanted $real_target4 (local ref before run was stale at $local_ref_before_run): $out4"
+fi
+if grep -qi "^advance-live: current" <<<"$out4"; then
+  bad "a stale ref is never silently reported as current" "$out4"
+else
+  ok "a stale ref is never silently reported as current"
+fi
+
+# --- required mutation-check: break the fetch, confirm this exact test goes red
+# Patches out the fetch block added for #11, reverting the candidate to the
+# pre-fix shape (compare against whatever local origin/main already holds).
+# Re-running the identical stale-ref setup against that patched copy must
+# reproduce the original bug: silent "current", zero commits advanced, exit 0
+# -- proving the assertions above are actually pinned to the fetch, not
+# vacuously true regardless of it.
+NOFETCH="$D4/advance-live-no-fetch.sh"
+patch_rc=0
+python3 - "$ADVANCE" "$NOFETCH" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker_start = text.index('fetch_out_file=$(mktemp')
+marker_end = text.index('target=$(git -C "$LIVE" rev-parse origin/main')
+assert marker_start < marker_end, "fetch block not found before target= -- script shape changed"
+patched = text[:marker_start] + text[marker_end:]
+assert 'git -C "$LIVE" fetch origin main' not in patched, "fetch call survived the patch"
+open(dst, "w").write(patched)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a fetch-free copy of advance-live.sh" \
+    "could not patch $ADVANCE (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a fetch-free copy of advance-live.sh"
+  chmod +x "$NOFETCH"
+
+  # Rebuild the identical stale-ref precondition: LIVE is at the base commit,
+  # its local origin/main ref still points at that same base commit, and the
+  # real remote is one commit ahead.
+  git -C "$LIVE4" checkout -q --detach "$before4"
+  git -C "$LIVE4" clean -qfd
+  git -C "$LIVE4" update-ref refs/remotes/origin/main "$before4"
+
+  S4b=$(mktemp -d); fresh_status "$S4b"
+  mut_out=$(SUPERVISOR_STATE="$S4b" bash "$NOFETCH" "$LIVE4" 2>&1); mut_rc=$?
+  mut_head=$(git -C "$LIVE4" rev-parse HEAD)
+  if [ "$mut_rc" -eq 0 ] && [ "$mut_head" = "$before4" ] && grep -qi "current" <<<"$mut_out"; then
+    ok "mutation confirmed: removing the fetch reproduces #11 -- the stale ref silently reads as current and nothing advances (the assertions above would now be red)"
+  else
+    bad "mutation confirmed: removing the fetch reproduces #11 -- the stale ref silently reads as current and nothing advances" \
+      "expected exit 0, HEAD still at $before4, output mentioning 'current'; got rc=$mut_rc head=$mut_head: $mut_out"
+  fi
+
+  # Restore LIVE4 to the real, fetched target so it does not leave a stale
+  # ref behind for anything that runs after this block.
+  git -C "$LIVE4" fetch -q origin main
+  git -C "$LIVE4" checkout -q --detach "$real_target4"
+fi
+
+rm -rf "$D4"
+
+echo
+echo "advance-live.sh: agent-supervisor#11 -- fetch failure is never current"
+
+# A fetch failure (offline, auth expired, timeout -- the classes #11 names)
+# must refuse loudly and never be read as "current". This runs under
+# env -i with only HOME/NOTIFY_ENV/PATH, per the brief: five defects shipped
+# elsewhere in this estate because a suite passed in a developer shell and
+# failed under launchd's stripped environment.
+D5=$(mktemp -d)
+git init -q --bare "$D5/origin.git"
+git clone -q "$D5/origin.git" "$D5/src" 2>/dev/null
+SRC5="$D5/src"
+git -C "$SRC5" config user.email test@example.com
+git -C "$SRC5" config user.name "Test"
+git -C "$SRC5" checkout -q -b main
+mkdir -p "$SRC5/scripts/supervisor"
+cat >"$SRC5/scripts/supervisor/watchdog.sh" <<'EOF'
+#!/bin/bash
+set -uo pipefail
+STATUS="${SUPERVISOR_STATUS:?}"
+mkdir -p "$(dirname "$STATUS")"
+printf 'checked:  %s\nstate:    pane_unreadable\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STATUS"
+exit 0
+EOF
+chmod +x "$SRC5/scripts/supervisor/watchdog.sh"
+git -C "$SRC5" add -A
+git -C "$SRC5" commit -q -m "base"
+git -C "$SRC5" push -q -u origin main
+LIVE5="$D5/live"
+git -C "$SRC5" worktree add -q --detach "$LIVE5" origin/main
+git -C "$LIVE5" remote set-url origin "$D5/does-not-exist.git"
+before5=$(git -C "$LIVE5" rev-parse HEAD)
+
+S5b=$(mktemp -d); fresh_status "$S5b"
+GIT_BIN="$(command -v git)"
+out5b=$(env -i HOME="$HOME" NOTIFY_ENV="${NOTIFY_ENV:-}" PATH="$(dirname "$GIT_BIN"):/usr/bin:/bin" \
+  SUPERVISOR_STATE="$S5b" bash "$ADVANCE" "$LIVE5" 2>&1); rc5b=$?
+want_exit "fetch failure under a stripped (env -i) environment still refuses (nonzero exit)" "$rc5b" 1 "$out5b"
+after5b=$(git -C "$LIVE5" rev-parse HEAD)
+if [ "$after5b" = "$before5" ]; then ok "stripped-env fetch failure leaves live untouched"; else bad "stripped-env fetch failure leaves live untouched" "moved to $after5b"; fi
+if grep -qi "could not fetch" <<<"$out5b"; then ok "stripped-env fetch failure names the fetch"; else bad "stripped-env fetch failure names the fetch" "$out5b"; fi
+if grep -qi "^advance-live: current" <<<"$out5b"; then bad "stripped-env fetch failure is never reported as current" "$out5b"; else ok "stripped-env fetch failure is never reported as current"; fi
+
+rm -rf "$D5"
+
+echo
+echo "advance-live.sh: agent-supervisor#51 -- a hung fetch is bounded, not silent"
+
+# PR #51's review: a fetch that never returns (down DNS, a firewall
+# black-holing packets, an auth prompt with no TTY) is a fourth outcome, not
+# "current" and not the ordinary "fetch failed" case above -- before this
+# fix nothing bounded it and the tick would wedge indefinitely. A fake `git`
+# that intercepts only the fetch subcommand and sleeps, transparently
+# `exec`ing the real binary for everything else (rev-parse, checkout,
+# rev-list -- everything advance-live.sh also calls), reproduces a hang
+# without touching the network.
+D6=$(mktemp -d)
+git init -q --bare "$D6/origin.git"
+git clone -q "$D6/origin.git" "$D6/src" 2>/dev/null
+SRC6="$D6/src"
+git -C "$SRC6" config user.email test@example.com
+git -C "$SRC6" config user.name "Test"
+git -C "$SRC6" checkout -q -b main
+mkdir -p "$SRC6/scripts/supervisor"
+cat >"$SRC6/scripts/supervisor/watchdog.sh" <<'EOF'
+#!/bin/bash
+set -uo pipefail
+STATUS="${SUPERVISOR_STATUS:?}"
+mkdir -p "$(dirname "$STATUS")"
+printf 'checked:  %s\nstate:    pane_unreadable\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STATUS"
+exit 0
+EOF
+chmod +x "$SRC6/scripts/supervisor/watchdog.sh"
+git -C "$SRC6" add -A
+git -C "$SRC6" commit -q -m "base"
+git -C "$SRC6" push -q -u origin main
+LIVE6="$D6/live"
+git -C "$SRC6" worktree add -q --detach "$LIVE6" origin/main
+before6=$(git -C "$LIVE6" rev-parse HEAD)
+
+REAL_GIT="$(command -v git)"
+HANG_STUB=$(mktemp -d)
+cat >"$HANG_STUB/git" <<EOF
+#!/bin/bash
+if [ "\$1" = "-C" ] && [ "\$3" = "fetch" ]; then
+  sleep 30
+  exit 0
+fi
+exec "$REAL_GIT" "\$@"
+EOF
+chmod +x "$HANG_STUB/git"
+
+S6=$(mktemp -d); fresh_status "$S6"
+start6=$(date +%s)
+out6=$(timeout 20 env PATH="$HANG_STUB:$PATH" ADVANCE_FETCH_TIMEOUT_SECONDS=2 \
+  SUPERVISOR_STATE="$S6" bash "$ADVANCE" "$LIVE6" 2>&1); rc6=$?
+end6=$(date +%s)
+elapsed6=$((end6 - start6))
+
+want_exit "a hung fetch refuses (the script's own bound fires, not the test harness's)" "$rc6" 1 "$out6"
+if [ "$elapsed6" -lt 10 ]; then
+  ok "the hang was bounded near ADVANCE_FETCH_TIMEOUT_SECONDS=2, not the 20s outer safety net (${elapsed6}s)"
+else
+  bad "the hang was bounded near ADVANCE_FETCH_TIMEOUT_SECONDS=2, not the 20s outer safety net" \
+    "took ${elapsed6}s, rc=$rc6: $out6"
+fi
+if grep -qi "did not finish within 2s" <<<"$out6"; then
+  ok "a hung fetch names the timeout, not a generic fetch failure"
+else
+  bad "a hung fetch names the timeout, not a generic fetch failure" "$out6"
+fi
+after6=$(git -C "$LIVE6" rev-parse HEAD)
+if [ "$after6" = "$before6" ]; then ok "a hung fetch leaves live untouched"; else bad "a hung fetch leaves live untouched" "moved to $after6"; fi
+if grep -qi "^advance-live: current" <<<"$out6"; then bad "a hung fetch is never reported as current" "$out6"; else ok "a hung fetch is never reported as current"; fi
+
+# --- required mutation-check: strip the internal bound, confirm the exact
+# same hang is still running, unstopped, after a window well past
+# ADVANCE_FETCH_TIMEOUT_SECONDS=2 -- proving the assertions above are
+# pinned to advance-live.sh's own bound, not to some other source of
+# promptness (a fast stub, coincidental timing, etc). Run in the
+# background and polled, not wrapped in an external `timeout`: this
+# script's own poll-loop fix exists because a job-control-based bound
+# was intermittently unreliable under this exact harness, so the test
+# proving the mutation must not lean on a *different* external killer
+# being reliable either.
+UNBOUNDED="$D6/advance-live-unbounded.sh"
+patch_rc6=0
+python3 - "$ADVANCE" "$UNBOUNDED" <<'PY' || patch_rc6=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker_start = text.index('fetch_out_file=$(mktemp')
+marker_end = text.index('if [ "$fetch_rc" -ne 0 ]; then\n  fail "could not fetch origin/main')
+replacement = 'fetch_out=$(git -C "$LIVE" fetch origin main 2>&1)\nfetch_rc=$?\n'
+assert 'fetch_waited' not in text[marker_end:], "unexpected second fetch_waited occurrence -- script shape changed"
+patched = text[:marker_start] + replacement + text[marker_end:]
+assert 'fetch_waited' not in patched, "the poll-loop timeout wrapper survived the patch"
+open(dst, "w").write(patched)
+PY
+if [ "$patch_rc6" -ne 0 ]; then
+  bad "setup: patched an unbounded (no-timeout) copy of advance-live.sh" \
+    "could not patch $ADVANCE (exit $patch_rc6) -- treating as a failure, not a skip"
+else
+  ok "setup: patched an unbounded (no-timeout) copy of advance-live.sh"
+  chmod +x "$UNBOUNDED"
+
+  kill_tree() { # kill_tree <pid> -- SIGKILL a process and everything it forked
+    local pid="$1" child
+    for child in $(pgrep -P "$pid" 2>/dev/null); do kill_tree "$child"; done
+    kill -9 "$pid" 2>/dev/null
+  }
+
+  S6b=$(mktemp -d); fresh_status "$S6b"
+  UNBOUNDED_OUT="$D6/unbounded.out"
+  env PATH="$HANG_STUB:$PATH" SUPERVISOR_STATE="$S6b" \
+    bash "$UNBOUNDED" "$LIVE6" >"$UNBOUNDED_OUT" 2>&1 &
+  mut_pid6=$!
+  mut_waited6=0
+  while kill -0 "$mut_pid6" 2>/dev/null && [ "$mut_waited6" -lt 5 ]; do
+    sleep 1
+    mut_waited6=$((mut_waited6 + 1))
+  done
+  if kill -0 "$mut_pid6" 2>/dev/null; then
+    ok "mutation confirmed: without advance-live.sh's own bound, the same hang is still running after 5s (the assertions above would now be red)"
+  else
+    mut_out6=$(cat "$UNBOUNDED_OUT" 2>/dev/null)
+    bad "mutation confirmed: without advance-live.sh's own bound, the same hang is still running after 5s" \
+      "the unbounded copy finished on its own within 5s: $mut_out6"
+  fi
+  kill_tree "$mut_pid6"
+  wait "$mut_pid6" 2>/dev/null
+fi
+
+rm -rf "$HANG_STUB"
+rm -rf "$D6"
 
 rm -rf "$D"
 

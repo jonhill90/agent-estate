@@ -649,8 +649,12 @@ advance_on_exit() {
   elif [[ "$out" == *"advance-live: advanced"* ]]; then
     log "ADVANCED: $out"
     advance_note "advanced — $out (the code: line above is what THIS tick ran)"
-  elif [ -z "$out" ]; then
-    advance_note "current — live copy already at origin/main"
+  elif [ -z "$out" ] || [[ "$out" == *"advance-live: current"* ]]; then
+    # agent-supervisor#11: advance-live.sh now fetches before it can call
+    # this "current" -- so the empty-output case (an older candidate that
+    # predates that fetch) and the explicit "advance-live: current" report
+    # both mean the same thing here: genuinely current, not merely silent.
+    advance_note "current — ${out:-live copy already at origin/main (fetched fresh)}"
   else
     # A gate declining is the ordinary case, not a fault: outside the post-tick
     # window, no status to compare against yet. Says so without shouting.
