@@ -119,15 +119,17 @@
 
 set -uo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./poller-window.sh
+. "$HERE/poller-window.sh"
+
 SESSION="${1:-${LANES_SESSION:-agent-dotfiles}}"
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 LIVE="${SUPERVISOR_LIVE:-$STATE/live}"
-WINDOW="${LANES_POLLER_WINDOW:-inbox-poll}"
+WINDOW="$POLLER_WINDOW_NAME"
 LAUNCH_CMD="${POLLER_LAUNCH_CMD:-cd '$LIVE' && exec scripts/supervisor/inbox-poll.sh}"
-# agent-supervisor#19: the SAME classifier lanes.sh's SERVICE_RE and
-# advance-live.sh's find_poller_pane already use to answer "is this process
-# the poller", reused rather than reinvented -- see the ORPHAN CHECK below
-# for why this script needs it too.
+# agent-supervisor#19: the same narrow process classifier lanes.sh uses for
+# service-vs-dead classification, reused here for the ORPHAN CHECK below.
 SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
 LOCK="${POLLER_RECOVER_LOCK:-$STATE/.poller-recover.lock}"
 LOCK_MAX_AGE="${POLLER_RECOVER_LOCK_MAX_AGE:-60}"
@@ -196,8 +198,7 @@ trap 'rm -rf "$LOCK" 2>/dev/null' EXIT
 ids=()
 while IFS= read -r wid; do
   [ -n "$wid" ] && ids+=("$wid")
-done < <(tmux list-windows -t "$SESSION" -F '#{window_name}	#{window_id}' 2>/dev/null \
-          | awk -F'\t' -v w="$WINDOW" '$1==w{print $2}')
+done < <(poller_window_ids "$SESSION")
 
 if [ "${#ids[@]}" -gt 1 ]; then
   log "FAILED -- ${#ids[@]} windows named '$WINDOW' in session '$SESSION' (${ids[*]}) -- refusing to guess which is the poller, not touching any of them"
@@ -219,9 +220,8 @@ if [ "${#ids[@]}" -eq 0 ]; then
   # behind for the NEXT tick to find here. Recreating on top of either one
   # is agent-supervisor#19 itself -- a second live poller racing the same
   # Telegram offset. Ask the process table, the same classifier
-  # advance-live.sh's find_poller_pane and lanes.sh's SERVICE_RE already use
-  # for this exact question, and refuse rather than duplicate when it says
-  # yes.
+  # lanes.sh's SERVICE_RE already uses for its service-vs-dead question, and
+  # refuse rather than duplicate when it says yes.
   # SCOPED TO THIS $LIVE, not every inbox-poll.sh on the machine. Multiple
   # deployments (production LIVE, another checkout, an agent's own worktree
   # if it ever runs this file directly) can coexist, each launched with
@@ -251,8 +251,7 @@ if [ "${#ids[@]}" -eq 0 ]; then
     log "FAILED -- tmux new-window for '$WINDOW' in session '$SESSION' did not succeed"
     exit 1
   fi
-  wid=$(tmux list-windows -t "$SESSION" -F '#{window_name}	#{window_id}' 2>/dev/null \
-          | awk -F'\t' -v w="$WINDOW" '$1==w{print $2; exit}')
+  wid=$(poller_window_ids "$SESSION" | head -1)
   if [ -z "$wid" ]; then
     log "FAILED -- window '$WINDOW' not found in session '$SESSION' right after creating it"
     exit 1

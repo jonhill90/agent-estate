@@ -13,6 +13,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RECOVER="$HERE/../../scripts/supervisor/poller-recover.sh"
+POLLER_WINDOW_HELPER="$HERE/../../scripts/supervisor/poller-window.sh"
 source "$HERE/../../scripts/supervisor/tmux-isolation.sh"
 
 S="poller-recover-test-$$"
@@ -56,9 +57,10 @@ EOF
 chmod +x "$STAND_IN"
 
 STATE="$(mktemp -d "${TMPDIR:-/tmp}/poller-recover-state.XXXXXX")"
+cp "$POLLER_WINDOW_HELPER" "$STATE/poller-window.sh"
 LAUNCH_CMD="POLLER_STOP_FILE='$STATE/stop' POLLER_PID_FILE='$STATE/pid' exec '$STAND_IN'"
 
-recover() { POLLER_WINDOW=inbox-poll POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
+recover() { LANES_POLLER_WINDOW=inbox-poll POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
             POLLER_RECOVER_LOCK="$STATE/.lock" POLLER_RECOVER_LOG="$STATE/log" \
             SUPERVISOR_STATE="$STATE" bash "$RECOVER" "$S"; }
 
@@ -261,7 +263,7 @@ else
 
   # A: the copy, slow -- wins the mkdir, then sleeps mid-acquisition before it
   # has written pid/started. Real tmux, real LAUNCH_CMD, same STATE as B.
-  POLLER_RECOVER_TEST_ACQUIRE_DELAY=2 POLLER_WINDOW="$WINDOW_NAME" POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
+  POLLER_RECOVER_TEST_ACQUIRE_DELAY=2 LANES_POLLER_WINDOW="$WINDOW_NAME" POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
     POLLER_RECOVER_LOCK="$STATE/.lock" POLLER_RECOVER_LOG="$STATE/log-A" \
     SUPERVISOR_STATE="$STATE" bash "$SLOW" "$S" >"$STATE/out-A" 2>&1 &
   A_JOB=$!
@@ -368,7 +370,7 @@ if [ "$patch_rc" -ne 0 ]; then
 else
   ok "setup: patched a lock-free copy of poller-recover.sh"
   chmod +x "$UNLOCKED"
-  unlocked_recover() { POLLER_WINDOW=inbox-poll POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
+  unlocked_recover() { LANES_POLLER_WINDOW=inbox-poll POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
     POLLER_RECOVER_LOCK="$STATE/.lock" POLLER_RECOVER_LOG="$STATE/log" \
     SUPERVISOR_STATE="$STATE" bash "$UNLOCKED" "$S"; }
   saw_two=0
@@ -538,7 +540,7 @@ if [ "$patch_rc" -ne 0 ]; then
 else
   ok "setup: patched a copy of poller-recover.sh with the orphan check removed"
   chmod +x "$NO_ORPHAN_CHECK"
-  no_orphan_check_recover() { POLLER_WINDOW=inbox-poll POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
+  no_orphan_check_recover() { LANES_POLLER_WINDOW=inbox-poll POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
     POLLER_RECOVER_LOCK="$STATE/.lock" POLLER_RECOVER_LOG="$STATE/log" \
     SUPERVISOR_STATE="$STATE" bash "$NO_ORPHAN_CHECK" "$S"; }
 

@@ -323,7 +323,7 @@ SRC="$A/src"
 git -C "$SRC" config user.email t@e.com; git -C "$SRC" config user.name T
 git -C "$SRC" checkout -q -b main
 mkdir -p "$SRC/scripts/supervisor"
-for f in watchdog.sh advance-live.sh sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
+for f in watchdog.sh advance-live.sh poller-window.sh sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
   cp "$HERE/../../scripts/supervisor/$f" "$SRC/scripts/supervisor/"
 done
 cp -R "$HERE/../../scripts/supervisor/harness" "$SRC/scripts/supervisor/"

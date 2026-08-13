@@ -543,27 +543,20 @@ LIVE3="$D3/live"
 git -C "$SRC3" worktree add -q --detach "$LIVE3" origin/main
 live3_sha=$(git -C "$LIVE3" rev-parse HEAD)
 
-# A real background process literally named inbox-poll.sh, standing in for
-# the poller's pane -- lanes.sh's SERVICE_RE (reused by maybe_restart_poller)
-# matches on the pane's own process, so the stand-in has to actually be a
-# running process a real `ps` can see, not just a string.
-#
-# `exec -a` in place of a nested `bash ... &`: the latter forks a CHILD
-# `sleep` under the wrapper bash, so killing $! only kills the wrapper and
-# leaves the orphaned `sleep` running (and, under a captured, non-tty
-# stdout/stderr -- exactly how this suite runs under Python's
-# subprocess.run in test_shell_suites.py -- holding those inherited pipes
-# open for the rest of its 300s and hanging the whole suite well past this
-# test's own completion). `exec -a` replaces this process's own image in
-# place, so $! IS the sleep, one PID, one kill, nothing left behind.
+# A shell standing in for the poller's pane. The live defect is exactly this
+# shape: the healthy poller is in the `inbox-poll` tmux window, but the pane's
+# first process reads as a shell, so matching the pane process misses it.
 mkdir -p "$D3/lane"
-cat > "$D3/lane/inbox-poll.sh" <<'EOF'
+cat > "$D3/lane/pane-shell.sh" <<'EOF'
 #!/bin/bash
-exec -a inbox-poll.sh sleep 300
+sleep 300 &
+child=$!
+trap 'kill "$child" 2>/dev/null' EXIT INT TERM
+wait "$child"
 EOF
-chmod +x "$D3/lane/inbox-poll.sh"
-bash "$D3/lane/inbox-poll.sh" &
-POLLER_PID=$!
+chmod +x "$D3/lane/pane-shell.sh"
+bash "$D3/lane/pane-shell.sh" >/dev/null 2>&1 &
+POLLER_PANE_PID=$!
 
 STUBS="$D3/bin"; mkdir -p "$STUBS"
 TMUX_LOG="$D3/tmux.log"
@@ -571,7 +564,9 @@ cat > "$STUBS/tmux" <<EOF
 #!/bin/bash
 echo "\$@" >> "$TMUX_LOG"
 if [ "\$1" = "list-panes" ]; then
-  printf 'test-session-187:11.1\t$POLLER_PID\n'
+  printf 'test-session-187:11.1\t$POLLER_PANE_PID\n'
+elif [ "\$1" = "list-windows" ]; then
+  printf '@225\tinbox-poll\n'
 fi
 exit 0
 EOF
@@ -590,16 +585,50 @@ want_exit "a poller-restart check never fails the tick (exit 0)" "$rc" 0 "$out"
 # command is `exec inbox-poll.sh`, so nothing is left to read a queued
 # command once the poller actually exits (that gap is the issue). The flag
 # is now the whole mechanism; poller-recover.sh (tested separately) relaunches
-# once the flagged poller exits and its pane goes dead. This still checks
-# `find_poller_pane`'s own read of the session -- `list-panes` -- ran, so
-# the assertion still proves a real poller was confirmed present, not just
-# assumed.
-grep -q 'list-panes -t test-session-187' "$TMUX_LOG" 2>/dev/null && ok "a real poller pane was looked up before flagging" \
-  || bad "a real poller pane was looked up before flagging" "$(cat "$TMUX_LOG" 2>/dev/null)"
+# once the flagged poller exits and its pane goes dead. This still checks the
+# restart path measured the tmux window it will rely on, rather than trusting
+# the stale status file alone.
+grep -q 'list-windows -t test-session-187' "$TMUX_LOG" 2>/dev/null && ok "the poller window was looked up before flagging" \
+  || bad "the poller window was looked up before flagging" "$(cat "$TMUX_LOG" 2>/dev/null)"
 ! grep -q 'send-keys' "$TMUX_LOG" 2>/dev/null && ok "no send-keys is queued -- poller-recover.sh owns the relaunch now" \
   || bad "no send-keys is queued -- poller-recover.sh owns the relaunch now" "$(cat "$TMUX_LOG" 2>/dev/null)"
 grep -qi 'POLLER-RESTART-REQUESTED' "$S/advance-live.log" 2>/dev/null && ok "the restart is logged" \
   || bad "the restart is logged" "$(cat "$S/advance-live.log" 2>/dev/null)"
+
+# --- MUTATION: point the shared recognition rule at a name nothing matches -
+# This must make the restart assertion above go red. A missing poller window is
+# a loud refusal, not a quiet "no work" success.
+MUT="$D3/mutant"; mkdir -p "$MUT/scripts/supervisor"
+cp "$ADVANCE" "$MUT/scripts/supervisor/advance-live.sh"
+cp "$HERE/../../scripts/supervisor/poller-window.sh" "$MUT/scripts/supervisor/poller-window.sh"
+patch_rc=0
+python3 - "$MUT/scripts/supervisor/poller-window.sh" <<'PY' || patch_rc=$?
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = 'POLLER_WINDOW_NAME="${LANES_POLLER_WINDOW:-inbox-poll}"'
+new = 'POLLER_WINDOW_NAME="${LANES_POLLER_WINDOW:-missing-poller-window}"'
+assert old in text, "poller-window default assignment not found"
+assert text.count(old) == 1, "poller-window default assignment not unique"
+open(path, "w").write(text.replace(old, new, 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: mutated the shared poller-window recognizer" "patch failed with exit $patch_rc"
+else
+  ok "setup: mutated the shared poller-window recognizer"
+  chmod +x "$MUT/scripts/supervisor/advance-live.sh" "$MUT/scripts/supervisor/poller-window.sh"
+  S_MUT=$(mktemp -d)
+  printf 'checked: %s\nstate:   ok\nsha:     deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$S_MUT/inbox-poll.status"
+  : >"$TMUX_LOG"
+  out_mut=$(SUPERVISOR_STATE="$S_MUT" LANES_SESSION="test-session-187" PATH="$STUBS:$PATH" bash "$MUT/scripts/supervisor/advance-live.sh" "$LIVE3" 2>&1); rc_mut=$?
+  if [ ! -f "$S_MUT/.inbox-poll-restart-requested" ] \
+     && grep -qi 'no poller window' "$S_MUT/advance-live.log" 2>/dev/null; then
+    ok "mutation confirmed: a recognizer pointed at a missing name cannot restart the stale poller (the assertion above would be red)"
+  else
+    bad "mutation confirmed: a recognizer pointed at a missing name cannot restart the stale poller" \
+      "rc=$rc_mut out=$out_mut log=$(cat "$S_MUT/advance-live.log" 2>/dev/null) files=$(ls "$S_MUT" 2>/dev/null)"
+  fi
+fi
 
 # --- a current poller (sha matches LIVE3) is left alone ---------------------
 S2=$(mktemp -d)
@@ -621,15 +650,15 @@ out3=$(SUPERVISOR_STATE="$S3" LANES_SESSION="test-session-187" PATH="$STUBS:$PAT
 [ ! -s "$TMUX_LOG" ] && ok "a restart already pending is not re-queued" \
   || bad "a restart already pending is not re-queued" "$(cat "$TMUX_LOG")"
 
-# --- no pane matches the poller: refuses to guess, does not restart --------
-kill "$POLLER_PID" 2>/dev/null; wait "$POLLER_PID" 2>/dev/null
+# --- no window matches the poller: refuses to guess, does not restart ------
+kill "$POLLER_PANE_PID" 2>/dev/null; wait "$POLLER_PANE_PID" 2>/dev/null
 S4=$(mktemp -d)
 printf 'checked: %s\nstate:   ok\nsha:     deadbeef\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$S4/inbox-poll.status"
 : >"$TMUX_LOG"
-out4=$(SUPERVISOR_STATE="$S4" LANES_SESSION="test-session-187" PATH="$STUBS:$PATH" bash "$ADVANCE" "$LIVE3" 2>&1); rc4=$?
-[ ! -f "$S4/.inbox-poll-restart-requested" ] && ok "no matching pane leaves the poller untouched" \
+out4=$(SUPERVISOR_STATE="$S4" LANES_SESSION="test-session-187" LANES_POLLER_WINDOW="missing-poller-window" PATH="$STUBS:$PATH" bash "$ADVANCE" "$LIVE3" 2>&1); rc4=$?
+[ ! -f "$S4/.inbox-poll-restart-requested" ] && ok "no matching window leaves the poller untouched" \
   || bad "no matching pane leaves the poller untouched" ""
-grep -qi 'no pane' "$S4/advance-live.log" 2>/dev/null && ok "a missing pane is named in the log" \
+grep -qi 'no poller window' "$S4/advance-live.log" 2>/dev/null && ok "a missing poller window is named in the log" \
   || bad "a missing pane is named in the log" "$(cat "$S4/advance-live.log" 2>/dev/null)"
 
 rm -rf "$D3"

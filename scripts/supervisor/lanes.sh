@@ -73,6 +73,8 @@ set -uo pipefail
 LANES_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./input-box.sh
 . "$LANES_HERE/input-box.sh"
+# shellcheck source=./poller-window.sh
+. "$LANES_HERE/poller-window.sh"
 
 # agent-dotfiles#201: every harness-specific shape this file used to hold as
 # a literal now lives in its own file under harness/ -- lanes.sh asks the
@@ -141,7 +143,6 @@ SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
 # ONLY as a narrow fallback below when its PANE'S PROCESS cannot answer this
 # question at all -- see the comment at that fallback's one call site for
 # why that gap exists and why trusting the name there does not reopen #237.
-POLLER_WINDOW="${LANES_POLLER_WINDOW:-inbox-poll}"
 # The supervisor's own pane. It is never a dispatch target: sending a worker
 # brief there /clear's the loop and replaces it with someone else's task.
 # Done twice on 2026-08-11 -- once via an empty tmux target, once because
@@ -300,7 +301,7 @@ emit_rows() {
       # plain `dead`: nothing about it misleads.
       if is_service_pane "$pid"; then
         state=service
-      elif [ "$name" = "$POLLER_WINDOW" ] && [ -n "$pid" ] && ! ps -p "$pid" >/dev/null 2>&1; then
+      elif is_poller_window_name "$name" && [ -n "$pid" ] && ! ps -p "$pid" >/dev/null 2>&1; then
         # agent-supervisor#10: poller-recover.sh now sets `remain-on-exit` on
         # this window, so a poller that exits leaves a DEAD pane here instead
         # of taking the window with it, for as long as it takes the next
