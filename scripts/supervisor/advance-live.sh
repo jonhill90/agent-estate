@@ -115,10 +115,14 @@
 #                                 written); default $SUPERVISOR_STATE/inbox-poll.status
 #   INBOX_POLL_RESTART_FLAG       written to request a poller restart; must
 #                                 match inbox-poll.sh's own default/override
-#   LANES_SERVICE_RE / LANES_SESSION  same pane-identification knobs lanes.sh
-#                                     uses to find the poller (#154); default
-#                                     session "agent-dotfiles"
+#   LANES_SESSION / LANES_POLLER_WINDOW  same poller-window recognition knobs
+#                                        lanes.sh and poller-recover.sh use;
+#                                        defaults agent-dotfiles / inbox-poll
 set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./poller-window.sh
+. "$HERE/poller-window.sh"
 
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 LIVE="${1:-${SUPERVISOR_LIVE:-$STATE/live}}"
@@ -182,32 +186,17 @@ watchdog_age() {
 # command was trying to arrange by hand, just from a caller for which "no
 # pane left to type into" is not a failure mode.
 #
-# THE PANE IS FOUND BY WHAT ITS OWN FIRST PROCESS IS, not a window number or
-# name -- exactly the identification lanes.sh's SERVICE_RE already uses
-# (#154), reused rather than reinvented so the two never drift apart. Used
-# here only to confirm a poller is actually running before flagging one that
-# is not -- see maybe_restart_poller below.
+# THE PANE IS FOUND BY THE POLLER WINDOW, not by `pane_current_command` or the
+# pane process argv. The live poller can read as a shell even when healthy, so
+# process matching is not the poller identity. The shared helper is also used
+# by lanes.sh and poller-recover.sh so the three call sites cannot drift.
 INBOX_POLL_STATUS_PATH="${SUPERVISOR_INBOX_POLL_STATUS:-$STATE/inbox-poll.status}"
 INBOX_POLL_RESTART_FLAG="${INBOX_POLL_RESTART_FLAG:-$STATE/.inbox-poll-restart-requested}"
 INBOX_POLL_SESSION="${LANES_SESSION:-agent-dotfiles}"
-INBOX_POLL_SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
 
-# Echoes "session:window.pane" for the first tmux pane in $INBOX_POLL_SESSION
-# whose own process matches $INBOX_POLL_SERVICE_RE, or returns 1 with
-# nothing echoed if tmux is unavailable, the session does not exist, or no
-# pane matches.
+# Echoes "session:@windowid" for the poller window in $INBOX_POLL_SESSION.
 find_poller_pane() {
-  command -v tmux >/dev/null 2>&1 || return 1
-  local target pid cmd
-  while IFS=$'\t' read -r target pid; do
-    [ -n "$pid" ] || continue
-    cmd=$(ps -o command= -p "$pid" 2>/dev/null) || continue
-    if [[ "$cmd" =~ $INBOX_POLL_SERVICE_RE ]]; then
-      printf '%s' "$target"
-      return 0
-    fi
-  done < <(tmux list-panes -t "$INBOX_POLL_SESSION" -F '#{session_name}:#{window_index}.#{pane_index}	#{pane_pid}' 2>/dev/null)
-  return 1
+  poller_window_target "$INBOX_POLL_SESSION"
 }
 
 # maybe_restart_poller <live-head-sha> -- never fails the tick it is called
@@ -234,10 +223,23 @@ maybe_restart_poller() {
     log "POLLER-CHECK: poller already at $live_sha, current"
     return 0
   fi
-  pane=$(find_poller_pane) || {
-    log "POLLER-CHECK: poller at $poller_sha, live now $live_sha, but no pane in session '$INBOX_POLL_SESSION' matches inbox-poll.sh -- not restarting"
-    return 0
-  }
+  pane=$(find_poller_pane)
+  pane_rc=$?
+  case "$pane_rc" in
+    0) ;;
+    1)
+      log "POLLER-CHECK: poller at $poller_sha, live now $live_sha, but no poller window named '$POLLER_WINDOW_NAME' exists in session '$INBOX_POLL_SESSION' -- not restarting"
+      return 0
+      ;;
+    2)
+      log "POLLER-CHECK: poller at $poller_sha, live now $live_sha, but multiple poller windows named '$POLLER_WINDOW_NAME' exist in session '$INBOX_POLL_SESSION' -- refusing to guess"
+      return 0
+      ;;
+    *)
+      log "POLLER-CHECK: poller at $poller_sha, live now $live_sha, but tmux could not read session '$INBOX_POLL_SESSION' -- not restarting"
+      return 0
+      ;;
+  esac
 
   mkdir -p "$(dirname "$INBOX_POLL_RESTART_FLAG")" 2>/dev/null
   if ! : >"$INBOX_POLL_RESTART_FLAG" 2>/dev/null; then
