@@ -800,5 +800,64 @@ class TaskLaneCliTest(unittest.TestCase):
             )
 
 
+class IssueLaneCliTest(unittest.TestCase):
+    """agent-supervisor#35: `dispatch.sh`'s `--reviews-pr` guard used to
+    determine a PR's author by regexing its head branch -- unreviewable
+    through anything but a `lane/<n>-<slug>` branch, which most of this
+    repo's own merged PRs are not. `issue-lane` is the read `cli.main`
+    exposes so it can ask the ledger by ISSUE instead, the same way
+    `task-lane` (above) already asks by task id -- exercised end to end
+    through `cli.main`, not `Ledger.get_task_for_issue` directly.
+    """
+
+    def _record_dispatch(self, root, *, lane, task, issue):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = cli.main([
+                "--state-dir", root, "record-dispatch",
+                "--lane", lane, "--task", task, "--summary", f"#{issue} summary",
+                "--pane-id", "%3", "--pane-path", root, "--command", "claude.exe",
+                "--server-id", "socket:1", "--session-id", "$0",
+                "--issue", str(issue), "--github", "jonhill90/agent-dotfiles",
+            ])
+        self.assertEqual(0, rc, output.getvalue())
+
+    def _issue_lane(self, root, issue):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = cli.main(["--state-dir", root, "issue-lane", "--issue", str(issue)])
+        self.assertEqual(0, rc, output.getvalue())
+        return json.loads(output.getvalue())
+
+    def test_a_dispatched_issue_answers_with_the_lane_that_authored_its_task(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._record_dispatch(root, lane="t:3", task="ad195-scrub-secrets", issue=195)
+
+            result = self._issue_lane(root, 195)
+
+            self.assertEqual(
+                {"issue": "195", "known": True, "lane": "t:3", "task": "ad195-scrub-secrets"}, result
+            )
+
+    def test_the_answer_never_depends_on_the_branch_the_pr_under_review_used(self):
+        """The whole point of #35: this reads back what `record_dispatch`
+        wrote for the ISSUE -- no branch name is an input anywhere in this
+        call. A `chore/`, `fix/`, or hand-pushed branch resolves identically
+        to a `lane/` one, because none of them are read here at all."""
+        with tempfile.TemporaryDirectory() as root:
+            self._record_dispatch(root, lane="t:4", task="ad196-public-scrub", issue=196)
+
+            self.assertEqual("t:4", self._issue_lane(root, 196)["lane"])
+
+    def test_an_unknown_issue_answers_known_false_rather_than_erroring(self):
+        """Fails closed the same way `task-lane` does (#174/#212):
+        `dispatch.sh` treats `known:false` as "authorship cannot be
+        determined" and tries its next source rather than guessing."""
+        with tempfile.TemporaryDirectory() as root:
+            result = self._issue_lane(root, 404)
+
+            self.assertEqual({"issue": "404", "known": False, "lane": None, "task": None}, result)
+
+
 if __name__ == "__main__":
     unittest.main()

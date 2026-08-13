@@ -2,7 +2,7 @@
 # Stub gh for claim.sh and dispatch.sh tests.
 #
 # GH_ISSUES holds one line per open issue:   <number>|<assignees-csv>|<title>|<state>
-# GH_PRS    holds one line per open PR:      <number>|<body>|<headRefName>
+# GH_PRS    holds one line per open PR:      <number>|<body>|<headRefName>|<commit-msgs>
 #
 # <state> is optional and defaults to OPEN when the field is absent, so
 # fixtures written before #95 (three fields) still describe open issues.
@@ -10,6 +10,13 @@
 # <headRefName> is optional and defaults to empty (agent-dotfiles#212 added
 # it) so fixtures written before that landed (two fields) still describe PR
 # bodies for `claim.sh stale`, which never reads this column.
+#
+# <commit-msgs> is optional and defaults to empty (agent-supervisor#35 added
+# it): a `;`-separated list of commit message headlines, used to synthesize
+# `pr view --json commits` for the authorship guard's commit-message
+# fallback. `pr view --json closingIssuesReferences` is synthesized from
+# <body> the same way real GitHub derives it: a `Fixes|Closes|Resolves #N`
+# match, case-insensitive.
 #
 # Writes land back in GH_ISSUES, so a claim taken by one invocation is visible
 # to the next -- which is the whole point of the test: a SECOND dispatcher must
@@ -81,10 +88,20 @@ case "$sub" in
         for a in "$@"; do case "$a" in [0-9]*) num="$a"; break ;; esac; done
         line=$(awk -F'|' -v n="$num" '$1==n' "$P")
         [ -n "$line" ] || { echo "gh: no pull request $num" >&2; exit 1; }
+        body=$(cut -d'|' -f2 <<<"$line")
         href=$(cut -d'|' -f3 <<<"$line")
-        if [[ "$*" == *"headRefName"* ]]; then
-          printf '{"headRefName":"%s"}\n' "$href"
+        commit_msgs=$(cut -d'|' -f4 <<<"$line")
+        issues_json="[]"
+        issue_nums=$(grep -ioE '(fixes|closes|resolves) #[0-9]+' <<<"$body" | grep -oE '[0-9]+')
+        if [ -n "$issue_nums" ]; then
+          issues_json="[$(awk '{printf "%s{\"number\":%s}", (NR>1?",":""), $0}' <<<"$issue_nums")]"
         fi
+        commits_json="[]"
+        if [ -n "$commit_msgs" ]; then
+          commits_json="[$(tr ';' '\n' <<<"$commit_msgs" | awk 'NF{printf "%s{\"messageHeadline\":\"%s\"}", (n++>0?",":""), $0}')]"
+        fi
+        printf '{"headRefName":"%s","closingIssuesReferences":%s,"commits":%s}\n' \
+          "$href" "$issues_json" "$commits_json"
         ;;
       list)
         # pr list --json number,body -q '.[]|...'  -> number<TAB>body
