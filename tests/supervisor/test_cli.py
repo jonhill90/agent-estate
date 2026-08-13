@@ -733,6 +733,25 @@ class StrandedClaimRecoveryIsReachable(unittest.TestCase):
             self.assertEqual(0, proc.returncode, proc.stderr)
             self.assertIsNone(json.loads(proc.stdout)["cancelled"])
 
+    def test_cancel_open_task_on_an_unknown_lane_errors_distinctly(self):
+        """agent-supervisor#17. `cancel-open-task --lane 2` against a lane id
+        that does not exist used to return `{"cancelled":null}` -- byte
+        identical to the no-op above, a real lane with nothing outstanding.
+        An unknown lane and an empty lane are different facts, and this verb
+        DISCARDS records: an operator reading `null` as "nothing to cancel"
+        on a typo'd id has no signal anything went wrong. It must now error,
+        and the error must not be exit-0 JSON indistinguishable from the
+        no-op case above."""
+        with tempfile.TemporaryDirectory() as root:
+            self._lane(root)
+            proc = self._run(root, "cancel-open-task", "--lane", "no-such-lane")
+            self.assertNotEqual(0, proc.returncode)
+            self.assertIn("unknown lane", proc.stderr)
+            # The two refusals must be told apart, not just both non-null.
+            noop = self._run(root, "cancel-open-task", "--lane", "free-9")
+            self.assertEqual(0, noop.returncode, noop.stderr)
+            self.assertNotEqual(proc.stdout, noop.stdout)
+
     def test_record_completion_by_lane_resolves_a_live_claim_row(self):
         """agent-supervisor#36 (second issue comment): the codex harness's
         completions land as a `ledger-claim:<lane>:<token>` row, not a task
