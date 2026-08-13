@@ -11,15 +11,13 @@ POLLER_WINDOW_NAME="${LANES_POLLER_WINDOW:-inbox-poll}"
 # engine sanitises the literal tab it emits into `_` when no locale is set
 # -- measured with `od -c` under `env -i HOME=... PATH=...`: `@225_inbox-
 # poll` instead of `@225<TAB>inbox-poll`. `awk -F"\t"` then never splits,
-# `$2` is never the window name, and the function returned EMPTY WITH RC=0
-# -- indistinguishable from "no poller window exists". Setting LANG in the
-# plist would paper over this one call site, but the plist is not the only
-# way this script runs (a human's shell, a test, a future caller), so the
-# fix does not rely on a separator tmux can rewrite at all: `-f` filters
-# window selection inside tmux itself, and `-F "#{window_id}"` asks for a
-# single field, so there is never a second field to split out and nothing
-# for locale-dependent sanitisation to corrupt. Verified under the exact
-# stripped env in test_poller_window.sh's "locale-independent" case below.
+# `$2` is never the window name, and the function returned EMPTY WITH RC=0 --
+# indistinguishable from "no poller window exists". agent-supervisor#31:
+# moving the comparison into tmux's `-f` format string fixed that locale bug
+# but made literal `}` / `#{` in LANES_POLLER_WINDOW part of tmux format
+# parsing. This keeps tmux output to a space-separated id/name record; space
+# survives the stripped environment, and the shell compares the configured
+# window name as plain text.
 poller_window_ids() { # poller_window_ids <session>
   # stdout: matching window ids, one per line. rc 0 = the tmux query ran
   # (0, 1, or many matches -- an empty result IS a fact here). rc 2 = the
@@ -31,15 +29,18 @@ poller_window_ids() { # poller_window_ids <session>
     echo "poller_window_ids: tmux not found on PATH" >&2
     return 2
   fi
-  out=$(tmux list-windows -t "$session" \
-          -f "#{==:#{window_name},$POLLER_WINDOW_NAME}" \
-          -F "#{window_id}" 2>&1)
+  out=$(tmux list-windows -t "$session" -F "#{window_id} #{window_name}" 2>&1)
   rc=$?
   if [ "$rc" -ne 0 ]; then
     echo "poller_window_ids: tmux list-windows -t '$session' failed (rc=$rc): $out" >&2
     return 2
   fi
-  [ -n "$out" ] && printf '%s\n' "$out"
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    id="${line%% *}"
+    name="${line#* }"
+    [ "$name" = "$POLLER_WINDOW_NAME" ] && printf '%s\n' "$id"
+  done <<<"$out"
   return 0
 }
 
