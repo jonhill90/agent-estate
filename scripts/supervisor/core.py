@@ -205,10 +205,15 @@ class Ledger:
                     -- thing `claude --resume` takes -- and it is the only part
                     -- of a lane's identity that survives a server loss,
                     -- because it names a file on disk that tmux never owned.
-                    -- Empty means "not resolved", never "none": `restore.sh`
-                    -- reports an empty one unrecoverable rather than starting
-                    -- a fresh agent in that lane's place.
-                    harness_session_id TEXT NOT NULL DEFAULT '',
+                    -- Empty (or NULL -- both read as "not resolved", never
+                    -- "none": agent-supervisor#65) means `restore.sh` reports
+                    -- this lane unrecoverable rather than starting a fresh
+                    -- agent in its place. Nullable rather than NOT NULL
+                    -- because a lane recorded before this column had a
+                    -- resolver for its harness (every codex lane, forever)
+                    -- legitimately has no value here -- that absence is
+                    -- correct data, not a gap to paper over with a fake id.
+                    harness_session_id TEXT DEFAULT '',
                     -- agent-supervisor#58 (Phase 4a): the thing this whole
                     -- migration exists for. `harness` names the AGENT; this
                     -- names how a prompt actually reaches it. Every lane
@@ -383,7 +388,12 @@ class Ledger:
                             server_id TEXT NOT NULL,
                             session_id TEXT NOT NULL,
                             command TEXT NOT NULL,
-                            harness_session_id TEXT NOT NULL DEFAULT '',
+                            -- agent-supervisor#65: NOT NULL here rejected
+                            -- every pre-existing row with no resolved
+                            -- session id -- every codex lane, since codex has
+                            -- no resolver -- and that is legitimate data, not
+                            -- a gap. See the matching column in `_initialize`.
+                            harness_session_id TEXT DEFAULT '',
                             transport TEXT NOT NULL DEFAULT 'send-keys' CHECK (transport IN ('send-keys', 'acp', 'pi-rpc')),
                             updated_at INTEGER NOT NULL
                         )
