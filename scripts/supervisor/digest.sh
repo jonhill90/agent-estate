@@ -37,7 +37,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 SESSION="${LANES_SESSION:-agent-dotfiles}"
-REPOS="${DIGEST_REPOS:-agent-dotfiles skills skills-private agent-evals}"
+REPOS="${DIGEST_REPOS:-agent-dotfiles agent-supervisor skills skills-private agent-evals}"
 OWNER="${DIGEST_OWNER:-jonhill90}"
 SINCE="${DIGEST_SINCE:-}"
 MODE="${1:-}"

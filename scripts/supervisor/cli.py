@@ -67,6 +67,7 @@ def _repositories_from_env():
 
 DEFAULT_REPOSITORIES = _repositories_from_env() or (
     {"name": "agent-dotfiles", "path": os.path.expanduser("~/source/repos/Personal/agent-dotfiles"), "github": "jonhill90/agent-dotfiles"},
+    {"name": "agent-supervisor", "path": os.path.expanduser("~/source/repos/Personal/agent-supervisor"), "github": "jonhill90/agent-supervisor"},
     {"name": "skills", "path": os.path.expanduser("~/source/repos/Personal/Skills"), "github": "jonhill90/skills"},
     {"name": "skills-private", "path": os.path.expanduser("~/source/repos/Personal/skills-private"), "github": "jonhill90/skills-private"},
     {"name": "agent-evals", "path": os.path.expanduser("~/source/repos/Personal/agent-evals"), "github": "jonhill90/agent-evals"},
