@@ -401,12 +401,16 @@ git -C "$SRC" worktree add -q --detach "$BRK" origin/main
 printf '#!/bin/bash\nexit 1\n' >"$BRK/scripts/supervisor/watchdog.sh"
 git -C "$BRK" -c user.email=t@e.com -c user.name=T commit -aq -m "break watchdog.sh"
 brk_sha=$(git -C "$BRK" rev-parse HEAD)
-git -C "$LIVE" update-ref refs/remotes/origin/main "$brk_sha"
+# Push the broken commit to the real origin/main -- advance-live.sh fetches
+# it itself before comparing (agent-supervisor#11), so pointing only LIVE's
+# local ref at an unpushed commit would be silently overwritten by that fetch.
+git -C "$BRK" push -q origin HEAD:refs/heads/main
 b5=$(at_sha)
 adv_run "$A/s4"
 if [ "$(at_sha)" = "$b5" ]; then say_ok "a candidate that fails its run-gate is not checked out"
 else say_bad "a candidate that fails its run-gate is not checked out" "live moved to $(at_sha) — the broken commit is now the guard"; fi
 check "the failed run-gate is named in the status file" "^advance: *refused.*well-formed status" "$A/s4/st"
+git -C "$BRK" push -q --force origin "$t4:refs/heads/main"
 git -C "$LIVE" update-ref refs/remotes/origin/main "$t4"
 git -C "$SRC" worktree remove --force "$BRK" >/dev/null 2>&1
 git -C "$SRC" worktree prune >/dev/null 2>&1
@@ -436,13 +440,23 @@ else say_bad "an escalation leaves the live copy where the page said it was" "mo
 
 # 5b. an unreadable origin/main: the `code:` line's three outcomes are
 #     untouched by any of this, and an advance that cannot compare refuses.
+# agent-supervisor#11: advance-live.sh now fetches before comparing, so a
+# merely-deleted local ref would just be recreated from a reachable remote.
+# The `code:` line's own comparison (watchdog.sh's report(), computed before
+# the exit trap's fetch ever runs) still reads the deleted local ref, so
+# deleting it still exercises that half; breaking the remote URL as well is
+# what makes advance-live.sh's own fetch fail too, exactly the offline/
+# auth-expired/timeout class #11 names.
 git -C "$LIVE" update-ref -d refs/remotes/origin/main
+real_origin_url=$(git -C "$LIVE" remote get-url origin)
+git -C "$LIVE" remote set-url origin "$A/does-not-exist.git"
 b7=$(at_sha)
 adv_run "$A/s6"
 check "an unreadable comparison still says so" "cannot compare" "$A/s6/st"
 check "and the advance refuses rather than guessing" "^advance: *refused" "$A/s6/st"
 if [ "$(at_sha)" = "$b7" ]; then say_ok "an unreadable comparison leaves live untouched"
 else say_bad "an unreadable comparison leaves live untouched" "moved to $(at_sha)"; fi
+git -C "$LIVE" remote set-url origin "$real_origin_url"
 
 # --- the race gate itself: outside the post-tick window, do not advance (#135)
 #
@@ -510,7 +524,10 @@ printf 'checked:  %s\nstate:    working\n' '$stale_stamp' >'$SB/st'
 EOF
 git -C "$STALL" -c user.email=t@e.com -c user.name=T commit -aq -m "candidate whose run outlives the window"
 stall_sha=$(git -C "$STALL" rev-parse HEAD)
-git -C "$LIVE" update-ref refs/remotes/origin/main "$stall_sha"
+# Push to the real origin/main, not just LIVE's local ref -- advance-live.sh
+# fetches before comparing (agent-supervisor#11), so a local-only ref would
+# be overwritten by that fetch before the smoke test ever ran.
+git -C "$STALL" push -q origin HEAD:refs/heads/main
 
 b9=$(at_sha)
 seed_status "$SB/st" 0
@@ -522,6 +539,7 @@ check "the window closing during the smoke test is caught before the checkout" \
 if [ "$(at_sha)" = "$b9" ]; then say_ok "the re-check leaves the live copy where it was"
 else say_bad "the re-check leaves the live copy where it was" "moved to $(at_sha) — checked out after the window closed"; fi
 
+git -C "$STALL" push -q --force origin "$t4:refs/heads/main"
 git -C "$LIVE" update-ref refs/remotes/origin/main "$t4"
 git -C "$SRC" worktree remove --force "$STALL" >/dev/null 2>&1
 git -C "$SRC" worktree prune >/dev/null 2>&1

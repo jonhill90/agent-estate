@@ -499,7 +499,26 @@ watchdog_stale_check
 git -C "$LIVE" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git worktree: $LIVE"
 
 cur=$(git -C "$LIVE" rev-parse HEAD 2>/dev/null) || fail "cannot read HEAD in $LIVE"
-target=$(git -C "$LIVE" rev-parse origin/main 2>/dev/null) || fail "origin/main unreadable in $LIVE -- not advancing"
+
+# --- agent-supervisor#11: fetch before comparing ---------------------------
+# Until this fix, `origin/main` below was whatever the worktree's LOCAL ref
+# last happened to hold -- nothing on this path ever refreshed it, so a
+# worktree that was genuinely behind compared clean against its own stale
+# ref and printed NOTHING, twice, in production (issue #11: live sat still
+# for up to 30 minutes holding a merged fix out of deployment, with neither
+# an ADVANCED nor an ADVANCE-REFUSED line to show for it). A failed fetch
+# must not fall through to that same silent "current" -- it is reported and
+# refused exactly as loudly as any other fail() below, never folded into
+# skip()'s quiet exit-0 shape. "could not tell" and "genuinely current" were
+# the same silence before; they are not the same message now.
+fetch_out=$(git -C "$LIVE" fetch origin main 2>&1)
+fetch_rc=$?
+if [ "$fetch_rc" -ne 0 ]; then
+  fail "could not fetch origin/main in $LIVE (git fetch exit $fetch_rc) -- refusing to compare against a ref nothing just refreshed; this is UNKNOWN, not current
+$fetch_out"
+fi
+
+target=$(git -C "$LIVE" rev-parse origin/main 2>/dev/null) || fail "origin/main unreadable in $LIVE even after a successful fetch -- not advancing"
 
 behind=$(git -C "$LIVE" rev-list --count HEAD..origin/main 2>/dev/null)
 case "$behind" in
@@ -507,7 +526,8 @@ case "$behind" in
 esac
 
 if [ "$cur" = "$target" ] || [ "$behind" -eq 0 ]; then
-  log "current: $cur already matches origin/main, nothing to advance"
+  log "CURRENT: $cur already matches origin/main after a fresh fetch, nothing to advance"
+  echo "advance-live: current, $cur already matches origin/main (fetched fresh)"
   maybe_restart_poller "$cur"
   exit 0
 fi
