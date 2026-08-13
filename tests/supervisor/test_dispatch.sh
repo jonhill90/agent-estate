@@ -95,6 +95,8 @@ run() {
   PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
     LANES_FIXTURE="$D/lanes" LANES_SESSION=t TMUX_LOG="$D/tmux.log" \
     TMUX_PANES="$D/panes" DISPATCH_SETTLE=0 \
+    DISPATCH_RESPAWN_SETTLE="${DISPATCH_RESPAWN_SETTLE:-0}" \
+    DISPATCH_LAUNCH_SETTLE="${DISPATCH_LAUNCH_SETTLE:-0}" \
     DISPATCH_DROP_PREFIX="${DISPATCH_DROP_PREFIX:-0}" \
     DISPATCH_LANE="${DISPATCH_LANE:-}" \
     DISPATCH_PANE_ROWS="${DISPATCH_PANE_ROWS:-}" \
@@ -179,6 +181,10 @@ assignees() { awk -F'|' -v n="$1" '$1==n{print $2}' "$D/issues"; }
 worktrees() { ls "$D/roots" 2>/dev/null | wc -l | tr -d ' '; }
 
 # --- the whole point: dispatch creates the worktree itself ----------------
+# Pinned rather than left to run()'s implicit mktemp default (see #174's own
+# comment on `run()` above): #15's own assertions below read this ledger back
+# after the dispatch, so they need to know where it landed.
+LEDGER_STATE="$D/state-81"
 out=$(run 81 dispatch-worktree "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "a dispatch to a free lane succeeds" "$rc" 0 "$out"
 
@@ -201,6 +207,32 @@ want_contains "the lane is cleared before reuse" "/clear" "$log"
 want_contains "the issue is claimed before the brief goes out" "jonhill90" "$(assignees 81)"
 
 want_contains "the brief is submitted, not left sitting in the input" "send-keys -t t:@103 Enter" "$log"
+
+# --- #15: the lane's cwd, not just the brief's TEXT, is the worktree ------
+# The bug: dispatch.sh named the worktree in the message it typed but never
+# put the lane's own process there -- measured live via `lsof -d cwd` on the
+# pane's pid resolving to the shared checkout. This stub cannot run `lsof`
+# (there is no real process behind a fixture pane), but `respawn-pane -c` is
+# the ONE call in dispatch.sh that can change a pane's OS-level cwd, so
+# asserting it was made, with the worktree as `-c`, and BEFORE anything else
+# is typed, is the equivalent check against this stub's own model of a pane
+# (`#{pane_current_path}`, which the stub now updates on respawn-pane the
+# same way real tmux updates the real thing).
+want_contains "the lane's pane is respawned into its worktree" "respawn-pane -k -t t:@103 -c ${WT:-NO-WORKTREE}" "$log"
+respawn_line=$(grep -n '^respawn-pane' <<<"$log" | head -1 | cut -d: -f1)
+rename_line=$(grep -n '^rename-window' <<<"$log" | head -1 | cut -d: -f1)
+if [ -n "$respawn_line" ] && [ -n "$rename_line" ] && [ "$respawn_line" -lt "$rename_line" ]; then
+  ok "the respawn happens before the lane is renamed or given anything to type"
+else
+  bad "the respawn happens before the lane is renamed or given anything to type" "respawn at line $respawn_line, rename at line $rename_line in: $log"
+fi
+want_contains "the harness is relaunched, into the worktree, right after the respawn" "claude --dangerously-skip-permissions" "$log"
+recorded_path=$(AGENT_SUPERVISOR_STATE_DIR="${LEDGER_STATE:-$D/state}" python3 "$HERE/../../scripts/supervisor/cli.py" status 2>/dev/null | grep -oE '"repo":"[^"]*"' | head -1 | sed -E 's/.*:"([^"]*)"/\1/')
+want_contains "the ledger records the lane's cwd as the worktree, not the shared checkout" "${WT:-NO-WORKTREE}" "$recorded_path"
+# Every case after this one relies on run()'s implicit per-call mktemp state
+# dir (see its own comment above) -- unset so LEDGER_STATE pinned just above
+# for this one assertion cannot leak into any of them.
+unset LEDGER_STATE
 
 # --- a mangled brief is not a delivered brief -----------------------------
 # Observed live on 2026-08-11 building this: characters typed straight after
@@ -229,7 +261,14 @@ before=$(worktrees)
 out=$(DISPATCH_DROP_PREFIX=40 run 84 always-dropped "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "a brief that never lands intact fails the dispatch" "$rc" 1 "$out"
 log=$(tmuxlog)
-want_missing "a mangled brief is never submitted" "send-keys -t t:@103 Enter" "$log"
+# #15: the log now opens with the harness-relaunch step's OWN bare
+# `send-keys ... Enter` (submitting the launch command into the freshly
+# respawned pane) -- unrelated to whether the BRIEF was submitted, and a
+# whole-log `want_missing` cannot tell the two apart. Everything this
+# assertion actually cares about happens from the rename onward, same as
+# every other case in this run that reads `log` after the relaunch step.
+log_after_rename=$(sed -n '/^rename-window/,$p' <<<"$log")
+want_missing "a mangled brief is never submitted" "send-keys -t t:@103 Enter" "$log_after_rename"
 if [ "$(assignees 84)" = "" ]; then ok "a mangled brief releases the claim"; else bad "a mangled brief releases the claim" "assignees: $(assignees 84)"; fi
 if [ "$(worktrees)" = "$before" ]; then ok "a mangled brief leaves no worktree behind"; else bad "a mangled brief leaves no worktree behind" "$before -> $(worktrees)"; fi
 cp "$D/bin/tmux-real" "$D/bin/tmux"
@@ -1103,6 +1142,11 @@ assert marker in text, "claim-lane block not found -- script shape changed"
 assert text.count(marker) == 1, "claim-lane block not unique -- script shape changed"
 replacement = '''  LANE="$candidate"  # MUTATED: no atomic claim at all -- agent-dotfiles#184 pre-fix shape
   LANE_TARGET="$candidate_target"
+  # #15: kept even in this mutant -- this test targets the atomic-claim race
+  # specifically, and an unset LANE_HARNESS would instead fail dispatcher A
+  # closed at step 3.5's harness-relaunch guard, reporting a defect this test
+  # is not about.
+  LANE_HARNESS=$(grep -oE '"harness":"[a-z-]*"' <<<"$CHECK" | head -1 | sed -E 's/.*:"([a-z-]*)"/\\1/')
   break'''
 text = text.replace(marker, replacement, 1)
 # agent-dotfiles#209 round 2: also neutralise step 4.5's commit guard. It

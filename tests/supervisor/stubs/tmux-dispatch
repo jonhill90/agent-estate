@@ -58,6 +58,23 @@ is_menu_pane() {
 case "$sub" in
   rename-window|send-keys)
     printf '%s %s\n' "$sub" "$*" >> "$LOG"
+    if [ "$sub" = rename-window ]; then
+      # #15: marks that THIS window has been renamed to its task -- the
+      # signal below (dispatch.sh's real Enter target, DISPATCH_TEST_SEND_SIGNAL)
+      # now needs to tell the harness-relaunch step's own bare Enter (sent
+      # before the rename, at step 3.5) apart from the brief's submit Enter
+      # (sent after it, at step 4.5). Both are single bare `Enter` sends and
+      # were indistinguishable to this stub before the marker existed.
+      rw_win=""
+      rw_args=("$@")
+      while [ ${#rw_args[@]} -gt 0 ]; do
+        case "${rw_args[0]}" in
+          -t) rw_win="${rw_args[1]##*:}"; rw_win="${rw_win%%.*}"; rw_win="$(idx_for "$rw_win")"; rw_args=("${rw_args[@]:2}") ;;
+          *) rw_args=("${rw_args[@]:1}") ;;
+        esac
+      done
+      [ -n "$rw_win" ] && : > "$PANES/$rw_win.renamed"
+    fi
     if [ "$sub" = send-keys ]; then
       # Model a pane's input line, so a test can assert on what the lane can
       # actually SEE -- not merely on what was sent at it. DISPATCH_DROP_PREFIX
@@ -184,11 +201,17 @@ case "$sub" in
             # Enter at all, so neither trips this. Off unless
             # DISPATCH_TEST_SEND_SIGNAL is exported; no non-test caller sets it.
             #
+            # #15 added a THIRD bare-Enter send earlier in the same dispatch --
+            # step 3.5's harness relaunch, before the rename. The `.renamed`
+            # marker (written by the rename-window case above) is what tells
+            # that one apart from the real brief submit, which always happens
+            # after the rename.
+            #
             # $PPID is the dispatcher: dispatch.sh runs `tmux send-keys ...` as
             # a plain foreground command, not inside a command substitution, so
             # this stub's parent IS the script's own shell -- the same process
             # `--owner-pid` names on the claim.
-            if [ -n "${DISPATCH_TEST_SEND_SIGNAL:-}" ] && [ "${#keys[@]}" -eq 1 ]; then
+            if [ -n "${DISPATCH_TEST_SEND_SIGNAL:-}" ] && [ "${#keys[@]}" -eq 1 ] && [ -e "$buf.renamed" ]; then
               printf 'signalled %s to %s at submit\n' "$DISPATCH_TEST_SEND_SIGNAL" "$PPID" >> "$LOG"
               kill "-${DISPATCH_TEST_SEND_SIGNAL}" "$PPID" 2>/dev/null
               # On a TERM the dispatcher runs its trap only once this
@@ -232,6 +255,34 @@ case "$sub" in
       esac
     done
     printf '%s' "$value" > "$PANES/$win.opt.${name#@}"
+    exit 0 ;;
+  respawn-pane)
+    # #15: models the one call this stub did not need until now -- setting a
+    # pane's cwd at the OS level, the way real tmux's `-c` does when a pane's
+    # process is (re)started. `-k` is accepted and ignored (this stub never
+    # models a live process to kill); `-c <dir>` is the part a test asserts
+    # on, both via TMUX_LOG (the call itself, same as every other write in
+    # this stub) and via the per-window path file `display-message` reads
+    # back below -- so a test can assert on the OUTCOME (`#{pane_current_path}`
+    # now reads the worktree) as well as the call, the same two-sided check
+    # the rest of this stub already gives send-keys and rename-window.
+    #
+    # Also clears the window's simulated input buffer: a respawned pane is a
+    # brand-new process with nothing typed into it yet, and a stub that left
+    # a stale buffer behind could not tell "the harness relaunch actually
+    # reset the pane" from "dispatch.sh never called respawn-pane at all".
+    printf '%s %s\n' "$sub" "$*" >> "$LOG"
+    win=""; dir=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        -t) win="${2##*:}"; win="${win%%.*}"; win="$(idx_for "$win")"; shift 2 ;;
+        -c) dir="$2"; shift 2 ;;
+        -k) shift ;;
+        *) shift ;;
+      esac
+    done
+    [ -n "$dir" ] && printf '%s' "$dir" > "$PANES/$win.path"
+    rm -f "$PANES/$win" "$PANES/$win.keys" "$PANES/$win.submitted" "$PANES/$win.dropped"
     exit 0 ;;
 esac
 
@@ -284,7 +335,7 @@ case "$sub" in
           value="${value//'#{window_name}'/$(cut -d'|' -f2 <<<"$line")}"
           value="${value//'#{pane_current_command}'/$(cut -d'|' -f3 <<<"$line")}"
           value="${value//'#{pane_id}'/%$win}"
-          value="${value//'#{pane_current_path}'/${STUB_PANE_PATH:-$PWD}}"
+          value="${value//'#{pane_current_path}'/$(cat "$PANES/$win.path" 2>/dev/null || echo "${STUB_PANE_PATH:-$PWD}")}"
           value="${value//'#{socket_path}'/${STUB_SOCKET_PATH:-/tmp/stub-tmux-socket}}"
           value="${value//'#{session_created}'/${STUB_SESSION_CREATED:-1700000000}}"
           value="${value//'#{session_id}'/${STUB_SESSION_ID:-\$0}}"
@@ -306,7 +357,7 @@ case "$sub" in
         value="${value//'#{window_id}'/$(wid_for "$win")}"
         value="${value//'#{pane_current_command}'/$(cut -d'|' -f3 <<<"$line")}"
         value="${value//'#{pane_id}'/%$win}"
-        value="${value//'#{pane_current_path}'/${STUB_PANE_PATH:-$PWD}}"
+        value="${value//'#{pane_current_path}'/$(cat "$PANES/$win.path" 2>/dev/null || echo "${STUB_PANE_PATH:-$PWD}")}"
         value="${value//'#{socket_path}'/${STUB_SOCKET_PATH:-/tmp/stub-tmux-socket}}"
         value="${value//'#{session_created}'/${STUB_SESSION_CREATED:-1700000000}}"
         value="${value//'#{session_id}'/${STUB_SESSION_ID:-\$0}}"
