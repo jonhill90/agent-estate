@@ -574,9 +574,29 @@ class Ledger:
         return dict(row) if row is not None else None
 
     @staticmethod
-    def _require_task_id(task_id):
-        if not TASK_ID_RE.fullmatch(task_id):
-            raise ValueError("invalid task id")
+    def _require_task_id(task_id, *, allow_claim=False):
+        if TASK_ID_RE.fullmatch(task_id):
+            return
+        # agent-supervisor#36: `complete()` used to reject every
+        # `ledger-claim:<lane>:<token>` row outright, because TASK_ID_RE has
+        # no colons in it. That was never a deliberate refusal of claim rows
+        # specifically -- nothing that creates one (`claim_lane`) validates
+        # its shape either, so the row already sits in `tasks` unguarded;
+        # this was only ever reachable from `complete()`'s own regex, which
+        # exists to bound what an UNTRUSTED caller (`cli.py complete`, a
+        # worker naming its own task id from inside its pane) can put into
+        # `_write_result`'s file path. `record_completion` never passes a
+        # caller-typed id here -- only one already read back out of the
+        # ledger via `get_task`/`get_open_task_for_lane` -- so `allow_claim`
+        # is opt-in per call, not a blanket loosening of the check every
+        # other caller still gets. Still bounds the token half to the same
+        # character set as an ordinary task id: only the `ledger-claim:` /
+        # lane prefix is exempted, not arbitrary content after it.
+        if allow_claim and task_id.startswith(CLAIM_TASK_PREFIX):
+            token = task_id.rsplit(":", 1)[-1]
+            if TASK_ID_RE.fullmatch(token):
+                return
+        raise ValueError("invalid task id")
 
     @staticmethod
     def _verify_lane_nonce(connection, lane, pane_nonce):
@@ -803,6 +823,26 @@ class Ledger:
     def get_task(self, task_id):
         with contextlib.closing(self._connect()) as connection:
             return self._dict(connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone())
+
+    def get_open_task_for_lane(self, lane):
+        """The single outstanding row that occupies a lane, whatever its id shape.
+
+        agent-supervisor#36 (second issue comment): a lane's outstanding row
+        is not always a dispatched task -- `claim_lane` writes a
+        `ledger-claim:<lane>:<token>` row under the same `tasks` table, and an
+        operator recovering a stranded lane by hand does not always know
+        which shape it is, only the lane. Same SELECT `_cancel_open_task_tx`
+        uses to find "whatever owns this lane" -- that method exists
+        precisely because a lane can be occupied by either shape and the
+        caller should not have to know which -- but this is read-only, for a
+        caller (`record_completion`) that must NOT cancel what it finds.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE lane = ? AND status NOT IN ('complete','failed','cancelled')",
+                (lane,),
+            ).fetchone()
+        return self._dict(row)
 
     def get_task_for_issue(self, issue_ref):
         """The most recent task dispatched for a GitHub issue -- keyed by the
@@ -1528,8 +1568,8 @@ class Ledger:
         if failpoint == expected:
             raise RuntimeError(expected)
 
-    def complete(self, task_id, result, *, pane_nonce, failpoint=None):
-        self._require_task_id(task_id)
+    def complete(self, task_id, result, *, pane_nonce, failpoint=None, allow_claim=False):
+        self._require_task_id(task_id, allow_claim=allow_claim)
         with self._locked():
             with contextlib.closing(self._connect()) as probe:
                 existing = probe.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()

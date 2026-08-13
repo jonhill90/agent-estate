@@ -1006,8 +1006,8 @@ want_contains "...and the claim is marked live, not merely reserved" '"status":"
 want_contains "...so the ledger reads that lane occupied" "False" "$(lane_available "$D/state-160" t:3)"
 want_contains "...and the abort says the lane stays held rather than leaving it to be discovered" \
   "STAYS HELD" "$out"
-want_contains "...and names record-completion when the lane finished but never signalled" \
-  "record-completion --task ad160-unsent-brief" "$out"
+want_contains "...and names record-completion --lane when the lane finished but never signalled" \
+  "record-completion --lane t:3" "$out"
 want_contains "...and still names cancel-open-task only for discarding non-work" \
   "cancel-open-task --lane t:3" "$out"
 
@@ -1497,7 +1497,7 @@ want_missing "...and typed nothing into that pane" "rename-window -t t:@103 ad70
 # Fail-closed has a price and the refusal must name it: this lane needs a
 # human, and `release-lane-claim` deliberately will not clear it.
 want_contains "...and says to record a completion when a live brief finished without signalling" \
-  "record-completion --task <task>" "$out"
+  "record-completion --lane <lane>" "$out"
 want_contains "...and says cancel-open-task is for discarding a live brief that produced no real work" \
   "cancel-open-task --lane" "$out"
 

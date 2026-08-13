@@ -596,7 +596,9 @@ if [ -z "$LANE" ]; then
   echo "dispatch: a claim at status 'delivered' is a claim with a live brief behind it: its dispatcher got as far as submitting" >&2
   echo "dispatch: into the pane, so release-lane-claim will NOT touch it (that is the guard, not a bug)." >&2
   echo "dispatch: if the lane finished but never signalled, inspect the pane and write the real completion:" >&2
-  echo "dispatch:   $LEDGER_PYTHON $LEDGER_CLI record-completion --task <task> --note <note>" >&2
+  # --lane resolves whichever row shape holds it (task or ledger-claim:), so
+  # this works whether step 0.5's reap found a task or a claim.
+  echo "dispatch:   $LEDGER_PYTHON $LEDGER_CLI record-completion --lane <lane> --note <note>" >&2
   echo "dispatch: if the live brief never produced real work and must be discarded:" >&2
   echo "dispatch:   $LEDGER_PYTHON $LEDGER_CLI cancel-open-task --lane <lane>" >&2
   echo "dispatch: a lane held by a 'ledger-hold:' row instead is a failed ledger record awaiting reconciliation, not a stranded claim --" >&2
@@ -709,7 +711,9 @@ abort_send() {
   if [ -n "${CLAIM_COMMITTED:-}" ]; then
     echo "dispatch: $LANE STAYS HELD -- the brief may have gone live in it, and a lane wrongly freed is not recoverable." >&2
     echo "dispatch: CHECK THE PANE. If the lane finished but never signalled, write the real completion with:" >&2
-    echo "dispatch:   $LEDGER_PYTHON $LEDGER_CLI record-completion --task $WINDOW_NAME --note <note>" >&2
+    # This row is a claim, not a task ($WINDOW_NAME is not its id) -- --lane
+    # resolves whichever row shape holds it, same as cancel-open-task below.
+    echo "dispatch:   $LEDGER_PYTHON $LEDGER_CLI record-completion --lane $LANE --note <note>" >&2
     echo "dispatch: If nothing real ran and the live brief must be discarded, free it with:" >&2
     echo "dispatch:   $LEDGER_PYTHON $LEDGER_CLI cancel-open-task --lane $LANE" >&2
   fi
