@@ -124,6 +124,11 @@ STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 LIVE="${SUPERVISOR_LIVE:-$STATE/live}"
 WINDOW="${LANES_POLLER_WINDOW:-inbox-poll}"
 LAUNCH_CMD="${POLLER_LAUNCH_CMD:-cd '$LIVE' && exec scripts/supervisor/inbox-poll.sh}"
+# agent-supervisor#19: the SAME classifier lanes.sh's SERVICE_RE and
+# advance-live.sh's find_poller_pane already use to answer "is this process
+# the poller", reused rather than reinvented -- see the ORPHAN CHECK below
+# for why this script needs it too.
+SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
 LOCK="${POLLER_RECOVER_LOCK:-$STATE/.poller-recover.lock}"
 LOCK_MAX_AGE="${POLLER_RECOVER_LOCK_MAX_AGE:-60}"
 LOG="${POLLER_RECOVER_LOG:-$STATE/poller-recover.log}"
@@ -136,6 +141,11 @@ log() {
   mkdir -p "$(dirname "$LOG")" 2>/dev/null
   printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" | tee -a "$LOG" 2>/dev/null
 }
+
+# Same idiom watchdog.sh's own real_path uses to compare worktree identity --
+# reused rather than reinvented, see the orphan check below for why this
+# script needs it too.
+real_path() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
 
 command -v tmux >/dev/null 2>&1 || { log "no tmux on PATH -- nothing to do"; exit 0; }
 tmux has-session -t "$SESSION" 2>/dev/null || { log "no session '$SESSION' -- nothing to recover into"; exit 0; }
@@ -195,6 +205,48 @@ if [ "${#ids[@]}" -gt 1 ]; then
 fi
 
 if [ "${#ids[@]}" -eq 0 ]; then
+  # agent-supervisor#19: ZERO WINDOWS IS NOT ZERO POLLERS. The "already
+  # alive?" question the lookup above answers is scoped to windows named
+  # $WINDOW; a poller can be alive with none. Measured cause: inbox-poll.sh
+  # traps HUP (killing this window sends it one) and its handler,
+  # report_stop, makes a network call (notify.sh) before the process
+  # actually exits -- a real, unbounded gap between "window gone" and
+  # "process gone" (the incident's pid 71021 needed SIGKILL because it was
+  # still inside that handler when someone tried TERM). Every FAILED branch
+  # below reaches this same state too: `tmux new-window` always launches
+  # the real process before this script can fail on what comes after, so a
+  # window-resolution failure a few lines down still leaves a live poller
+  # behind for the NEXT tick to find here. Recreating on top of either one
+  # is agent-supervisor#19 itself -- a second live poller racing the same
+  # Telegram offset. Ask the process table, the same classifier
+  # advance-live.sh's find_poller_pane and lanes.sh's SERVICE_RE already use
+  # for this exact question, and refuse rather than duplicate when it says
+  # yes.
+  # SCOPED TO THIS $LIVE, not every inbox-poll.sh on the machine. Multiple
+  # deployments (production LIVE, another checkout, an agent's own worktree
+  # if it ever runs this file directly) can coexist, each launched with
+  # `cd '$LIVE' && exec ...`, so the poller's own cwd is that $LIVE for as
+  # long as it runs -- the same real_path idiom watchdog.sh already uses to
+  # compare worktree identity, reused rather than a second one. Without this
+  # a recovery running against a DIFFERENT deployment's LIVE would refuse to
+  # ever create its own poller because some unrelated one exists elsewhere.
+  live_real=$(real_path "$LIVE")
+  orphan_pid=""
+  while IFS= read -r cand_pid; do
+    [ -n "$cand_pid" ] || continue
+    cmd=$(ps -o command= -p "$cand_pid" 2>/dev/null) || continue
+    [[ "$cmd" =~ $SERVICE_RE ]] || continue
+    cand_cwd=$(lsof -a -p "$cand_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+    [ -n "$cand_cwd" ] || continue
+    [ "$(real_path "$cand_cwd")" = "$live_real" ] || continue
+    orphan_pid="$cand_pid"
+    break
+  done < <(pgrep -f inbox-poll.sh 2>/dev/null)
+  if [ -n "$orphan_pid" ]; then
+    log "FAILED -- inbox-poll.sh is already running (pid $orphan_pid) with no window named '$WINDOW' in session '$SESSION' -- refusing to start a second poller; it needs a window reattached, not a duplicate"
+    exit 1
+  fi
+
   if ! tmux new-window -t "$SESSION" -n "$WINDOW" -d -- "$LAUNCH_CMD" 2>/dev/null; then
     log "FAILED -- tmux new-window for '$WINDOW' in session '$SESSION' did not succeed"
     exit 1

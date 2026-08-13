@@ -26,7 +26,7 @@ ok()  { echo "  ok   $1"; pass=$((pass+1)); }
 bad() { echo "  FAIL $1 — $2"; fail=$((fail+1)); }
 
 cleanup() { unset TMUX; export TMUX_TMPDIR="$RT"; tmux kill-session -t "$S" 2>/dev/null; }
-cleanup_all() { cleanup; rm -rf "$RT" "${STATE:-}"; }
+cleanup_all() { cleanup; pkill -KILL -f "$RT/inbox-poll.sh" 2>/dev/null; rm -rf "$RT" "${STATE:-}"; }
 trap cleanup_all EXIT INT TERM
 
 if ! command -v tmux >/dev/null 2>&1; then
@@ -398,6 +398,177 @@ else
   fi
 fi
 : >"$STATE/stop" 2>/dev/null
+
+echo
+echo "poller-recover.sh: agent-supervisor#19 -- window absence is not process absence"
+
+# --- 9. GREEN: a live poller in a window recover() never created -- genuine
+# no-op. #10's own suite (test 5, above) only ever exercises a poller THIS
+# script itself launched. #19's incident poller predates the tick that found
+# it -- launched by hand, or by advance-live.sh's cooperative restart path,
+# same as test 1's own repro method. This is the brief's required acceptance
+# test: no window created, no second process, exit 0.
+tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+rm -f "$STATE/pid" "$STATE/stop"
+tmux new-window -t "$S" -n inbox-poll -d 2>/dev/null
+tmux send-keys -t "$S:inbox-poll" -l "$LAUNCH_CMD" 2>/dev/null
+tmux send-keys -t "$S:inbox-poll" Enter 2>/dev/null
+for _ in $(seq 1 50); do [ -f "$STATE/pid" ] && break; sleep 0.1; done
+p9="$(live_pid)"
+pid_alive "$p9" && ok "setup: a poller is running in a window recover() did not create" \
+  || bad "setup: a poller is running in a window recover() did not create" "no live pid recorded"
+out9=$(recover 2>&1); rc9=$?
+[ "$rc9" -eq 0 ] && ok "recover() against it exits 0" \
+  || bad "recover() against it exits 0" "exit $rc9: $out9"
+[ "$(window_count)" = "1" ] && ok "no second window created" \
+  || bad "no second window created" "window_count=$(window_count)"
+[ "$(live_pid)" = "$p9" ] && pid_alive "$p9" && ok "no second process -- the original poller is untouched" \
+  || bad "no second process -- the original poller is untouched" "pid was $p9, now $(live_pid)"
+: >"$STATE/stop"; sleep 0.3
+rm -f "$STATE/pid" "$STATE/stop"
+
+# --- 10. GREEN: a windowless orphan -- recover refuses to duplicate it -----
+# Measured root cause (see poller-recover.sh's own comment at the fix): the
+# real inbox-poll.sh traps HUP (a killed window sends it one) and its
+# handler makes a network call before the process actually exits -- a real
+# gap where the window is gone but the process is not. Modeled here without
+# a network dependency: this stand-in's own HUP handler blocks on a release
+# file, the same shape (window destroyed, handler still running, process
+# still alive) without the timing flakiness a real sleep-based delay would
+# add. The file MUST be named inbox-poll.sh: that is the identity
+# poller-recover.sh's new orphan check keys on (SERVICE_RE, shared with
+# lanes.sh and advance-live.sh), not a window name -- the whole point of
+# this test.
+ORPHAN_STAND_IN="$RT/inbox-poll.sh"
+cat > "$ORPHAN_STAND_IN" <<'EOF'
+#!/bin/bash
+STOP="${POLLER_STOP_FILE:?}"
+PIDFILE="${POLLER_PID_FILE:?}"
+RELEASE="${POLLER_HUP_RELEASE_FILE:?}"
+echo "$$" > "$PIDFILE"
+on_hup() {
+  while [ ! -f "$RELEASE" ]; do sleep 0.1; done
+  exit 129
+}
+trap on_hup HUP
+while [ ! -f "$STOP" ]; do sleep 0.1; done
+exit 0
+EOF
+chmod +x "$ORPHAN_STAND_IN"
+ORPHAN_RELEASE="$STATE/hup-release"
+orphan_pid_count() { pgrep -f "$ORPHAN_STAND_IN" 2>/dev/null | wc -l | tr -d ' '; }
+
+tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+rm -f "$STATE/pid" "$STATE/stop" "$ORPHAN_RELEASE"
+# poller-recover.sh's orphan check scopes its process-table match to $LIVE
+# (real_path of it) so a deployment never refuses to recover its OWN poller
+# over some unrelated inbox-poll.sh elsewhere on the machine -- production's
+# own poller, for one, is very likely running on any dev box this suite runs
+# on. `cd` into recover()'s own default LIVE ($STATE/live, since SUPERVISOR_LIVE
+# is not overridden below) so this stand-in's cwd matches it, the same shape
+# `cd '$LIVE' && exec ...` gives the real poller.
+TEST_LIVE="$STATE/live"
+mkdir -p "$TEST_LIVE"
+ORPHAN_CMD="cd '$TEST_LIVE' && POLLER_STOP_FILE='$STATE/stop' POLLER_PID_FILE='$STATE/pid' POLLER_HUP_RELEASE_FILE='$ORPHAN_RELEASE' exec '$ORPHAN_STAND_IN'"
+tmux new-window -t "$S" -n inbox-poll -d 2>/dev/null
+tmux send-keys -t "$S:inbox-poll" -l "$ORPHAN_CMD" 2>/dev/null
+tmux send-keys -t "$S:inbox-poll" Enter 2>/dev/null
+for _ in $(seq 1 50); do [ -f "$STATE/pid" ] && break; sleep 0.1; done
+p10="$(live_pid)"
+pid_alive "$p10" && ok "setup: the orphan-to-be is running, in a window" \
+  || bad "setup: the orphan-to-be is running, in a window" "no live pid recorded"
+
+tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+for _ in $(seq 1 50); do [ "$(window_count)" = "0" ] && break; sleep 0.1; done
+[ "$(window_count)" = "0" ] && ok "the window is gone" \
+  || bad "the window is gone" "window_count=$(window_count)"
+pid_alive "$p10" && ok "the poller process survives its window -- a genuine windowless orphan" \
+  || bad "the poller process survives its window -- a genuine windowless orphan" "pid $p10 is not alive"
+
+out10=$(recover 2>&1); rc10=$?
+[ "$rc10" -ne 0 ] && ok "recover() against a windowless orphan refuses (nonzero exit), it does not silently retry-forever" \
+  || bad "recover() against a windowless orphan refuses (nonzero exit)" "exit $rc10: $out10"
+[ "$(window_count)" = "0" ] && ok "no window is created over a live orphan" \
+  || bad "no window is created over a live orphan" "window_count=$(window_count)"
+[ "$(orphan_pid_count)" = "1" ] && ok "no second inbox-poll.sh process is started -- exactly one, still the orphan" \
+  || bad "no second inbox-poll.sh process is started" "orphan_pid_count=$(orphan_pid_count)"
+
+# release the orphan and confirm the NEXT tick recovers normally once it is
+# actually gone -- the refusal above must be a hold, not a permanent wedge.
+: >"$ORPHAN_RELEASE"
+for _ in $(seq 1 50); do [ "$(orphan_pid_count)" = "0" ] && break; sleep 0.1; done
+[ "$(orphan_pid_count)" = "0" ] && ok "the orphan finishes exiting once released" \
+  || bad "the orphan finishes exiting once released" "orphan_pid_count=$(orphan_pid_count)"
+rm -f "$STATE/pid" "$STATE/stop"
+recover >/dev/null 2>&1
+for _ in $(seq 1 50); do [ -f "$STATE/pid" ] && break; sleep 0.1; done
+[ "$(window_count)" = "1" ] && pid_alive "$(live_pid)" \
+  && ok "once the orphan is truly gone, the next recovery creates the window normally" \
+  || bad "once the orphan is truly gone, the next recovery creates the window normally" \
+      "window_count=$(window_count) pid_alive=$(pid_alive "$(live_pid)" && echo yes || echo no)"
+: >"$STATE/stop"; sleep 0.3
+rm -f "$STATE/pid" "$STATE/stop"
+
+# --- 11. MUTATION CONFIRMED: strip the orphan check, the race reappears ---
+# Proves test 10 is actually pinning the new guard, not passing by luck --
+# same discipline as section 8's lock-removal mutation.
+NO_ORPHAN_CHECK="$STATE/poller-recover.no-orphan-check.sh"
+patch_rc=0
+python3 - "$RECOVER" "$NO_ORPHAN_CHECK" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+start_marker = '  orphan_pid=""\n'
+end_marker = '''  if [ -n "$orphan_pid" ]; then
+    log "FAILED -- inbox-poll.sh is already running (pid $orphan_pid) with no window named '$WINDOW' in session '$SESSION' -- refusing to start a second poller; it needs a window reattached, not a duplicate"
+    exit 1
+  fi
+'''
+assert start_marker in text, "orphan-check start marker not found -- poller-recover.sh shape changed"
+assert end_marker in text, "orphan-check end marker not found -- poller-recover.sh shape changed"
+start_i = text.index(start_marker)
+end_i = text.index(end_marker) + len(end_marker)
+patched = text[:start_i] + text[end_i:]
+assert patched != text, "orphan-check block did not shrink the script -- patch had no effect"
+open(dst, "w").write(patched)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of poller-recover.sh with the orphan check removed" \
+    "could not patch $RECOVER (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of poller-recover.sh with the orphan check removed"
+  chmod +x "$NO_ORPHAN_CHECK"
+  no_orphan_check_recover() { POLLER_WINDOW=inbox-poll POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
+    POLLER_RECOVER_LOCK="$STATE/.lock" POLLER_RECOVER_LOG="$STATE/log" \
+    SUPERVISOR_STATE="$STATE" bash "$NO_ORPHAN_CHECK" "$S"; }
+
+  rm -f "$STATE/pid" "$STATE/stop" "$ORPHAN_RELEASE"
+  tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+  tmux new-window -t "$S" -n inbox-poll -d 2>/dev/null
+  tmux send-keys -t "$S:inbox-poll" -l "$ORPHAN_CMD" 2>/dev/null
+  tmux send-keys -t "$S:inbox-poll" Enter 2>/dev/null
+  for _ in $(seq 1 50); do [ -f "$STATE/pid" ] && break; sleep 0.1; done
+  tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+  for _ in $(seq 1 50); do [ "$(window_count)" = "0" ] && break; sleep 0.1; done
+
+  out_m=$(no_orphan_check_recover 2>&1)
+  for _ in $(seq 1 50); do [ "$(window_count)" = "1" ] && break; sleep 0.1; done
+  # The duplicate lands via $LAUNCH_CMD (the generic $STAND_IN), not
+  # $ORPHAN_STAND_IN, so the signature is a NEW window/pid file appearing
+  # while the orphan (still counted separately, by its own script path) is
+  # untouched -- two live pollers, exactly what agent-supervisor#19 is about.
+  if [ "$(window_count)" = "1" ] && [ "$(orphan_pid_count)" = "1" ]; then
+    ok "mutation confirmed: removing the orphan check lets recover() duplicate a windowless poller (test 10's assertion would now be red)"
+  else
+    bad "mutation confirmed: removing the orphan check lets recover() duplicate a windowless poller" \
+      "window_count=$(window_count) orphan_pid_count=$(orphan_pid_count) -- expected a new window created (the duplicate) alongside the untouched orphan; recover() output: $out_m"
+  fi
+  : >"$ORPHAN_RELEASE"
+  for _ in $(seq 1 50); do [ "$(orphan_pid_count)" = "0" ] && break; sleep 0.1; done
+  : >"$STATE/stop" 2>/dev/null
+fi
+tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+rm -f "$STATE/pid" "$STATE/stop" "$ORPHAN_RELEASE"
 
 if [ "$fail" -eq 0 ]; then
   echo "$pass passed, $fail failed"
