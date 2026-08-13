@@ -52,6 +52,11 @@
 #              large enough to be worth writing is too large for send-keys.
 # [repo]       OWNER/NAME for the claim; omitted, gh resolves it from [repo-path].
 # [repo-path]  the shared checkout to branch the worktree from; default $PWD.
+#              [repo] given with [repo-path] omitted is refused (#17): almost
+#              always the mistake is believing [repo] alone also selects the
+#              checkout. Set DISPATCH_ALLOW_CWD_REPO_PATH=1 to use $PWD anyway.
+#              After the worktree is built, its `origin` is compared against
+#              [repo] and the dispatch is refused on mismatch (#17).
 # --reviews-pr <PR>
 #              this dispatch is a review of PR <PR>. dispatch.sh (#212) then
 #              refuses any candidate lane that authored that PR's branch,
@@ -122,11 +127,29 @@ ISSUE_ARG="${1:-}"
 SLUG="${2:-}"
 BRIEF="${3:-}"
 REPO="${4:-}"
-REPO_PATH="${5:-$PWD}"
 
 if [ -z "$ISSUE_ARG" ] || [ -z "$SLUG" ] || [ -z "$BRIEF" ]; then
   sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
   exit 2
+fi
+
+# agent-supervisor#17 (secondary finding): [repo-path] defaults to $PWD, and
+# [repo] given with [repo-path] omitted reads naturally as "target that repo"
+# -- it is almost never an intent to build the worktree from whatever
+# directory dispatch.sh happens to be run from. `${5+x}` (not `${5:-}`) is
+# what distinguishes "never passed" from "passed as empty string": the
+# former is the trap, the latter is an explicit (if odd) choice to use $PWD
+# and is left alone. Silence was what made this a trap; it is refused now
+# unless the caller opts in explicitly.
+if [ -n "${5+x}" ]; then
+  REPO_PATH="$5"
+elif [ -n "$REPO" ] && [ -z "${DISPATCH_ALLOW_CWD_REPO_PATH:-}" ]; then
+  echo "dispatch: [repo] '$REPO' was given but [repo-path] was not -- refusing to default to the working directory ($PWD)" >&2
+  echo "dispatch: this is the trap agent-supervisor#17 is about: a cross-repo dispatch silently building its worktree from the wrong checkout" >&2
+  echo "dispatch: pass [repo-path] explicitly, or set DISPATCH_ALLOW_CWD_REPO_PATH=1 to use \$PWD on purpose" >&2
+  exit 2
+else
+  REPO_PATH="$PWD"
 fi
 
 # One brief, possibly several issues (agent-dotfiles#112): #109 and #110 came
@@ -719,6 +742,25 @@ abort_send() {
   fi
   exit 1
 }
+
+# --- 3.1 the worktree must actually BE $REPO (#17) --------------------------
+# claim.sh (step 2, above) claimed the issue against $REPO. worktree.sh (step
+# 3, above) built the worktree from $REPO_PATH. Those two arguments encode
+# the same fact -- which repository this dispatch is for -- and until now
+# nothing compared them, though both are known by this point. Skipped only
+# when REPO was never given: `gh` then resolves the claim from REPO_PATH
+# itself, so there is nothing for the two to disagree about.
+if [ -n "$REPO" ]; then
+  WORKTREE_ORIGIN=$(git -C "$WORKTREE" remote get-url origin 2>/dev/null)
+  # Normalize `git@github.com:owner/name.git`, `https://github.com/owner/name`
+  # and a bare `owner/name` down to the same OWNER/NAME shape $REPO is given
+  # in -- the same awk this repo's watchdog.sh already uses to read its own
+  # identity from `origin`.
+  WORKTREE_REPO=$(sed 's/\.git$//' <<<"$WORKTREE_ORIGIN" | awk -F'[:/]' 'NF>=2{print $(NF-1)"/"$NF}')
+  if [ -z "$WORKTREE_REPO" ] || [ "$WORKTREE_REPO" != "$REPO" ]; then
+    abort_send "worktree $WORKTREE has origin '${WORKTREE_ORIGIN:-<unreadable>}' (repo '${WORKTREE_REPO:-unknown}'), not the claimed repo '$REPO' -- refusing rather than drop a lane claimed against one repository into a worktree of another (#17); #$ISSUE_ARG was NOT dispatched"
+  fi
+fi
 
 # WHAT IS TYPED INTO THE PANE STAYS SHORT, AND HERE IS THE MEASURED REASON.
 #

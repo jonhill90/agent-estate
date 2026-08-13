@@ -37,6 +37,10 @@ echo one > "$REPO/file.txt"
 git -C "$REPO" add file.txt
 git -C "$REPO" commit -q -m "initial"
 git -C "$REPO" push -q -u origin main
+# agent-supervisor#17: dispatch.sh now compares this origin against [repo]
+# ("acme/agent-dotfiles", every case below) and refuses on mismatch -- see
+# test_dispatch.sh's own setup for the identical reasoning.
+git -C "$REPO" remote set-url origin "git@github.com:acme/agent-dotfiles.git"
 
 : > "$D/issues"
 : > "$D/prs"
