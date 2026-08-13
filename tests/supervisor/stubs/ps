@@ -1,0 +1,31 @@
+#!/bin/bash
+# Stub ps for watchdog tests. Supports only the process-table fields the
+# duplicate-poller detector asks for.
+field=""
+pid=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    -o) field="${2:-}"; shift 2 ;;
+    -p) pid="${2:-}"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+[ -n "$pid" ] || exit 1
+case "$field" in
+  command=)
+    name="STUB_PS_COMMAND_${pid}"
+    cmd="${!name:-bash /repo/scripts/supervisor/inbox-poll.sh}"
+    printf '%s\n' "$cmd"
+    ;;
+  lstart=)
+    name="STUB_PS_LSTART_${pid}"
+    start="${!name:-Thu Aug 13 04:05:56 2026}"
+    printf '%s\n' "$start"
+    ;;
+  start=)
+    name="STUB_PS_START_${pid}"
+    start="${!name:-04:05}"
+    printf '%s\n' "$start"
+    ;;
+  *) exit 1 ;;
+esac
