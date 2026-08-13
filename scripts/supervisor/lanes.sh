@@ -405,7 +405,13 @@ emit_rows() {
     fi
     # #241 appends the window id as a FIFTH column rather than inserting it,
     # so every awk expression below keeps the field numbers it already had.
-    printf '%s\t%s\t%s\t%s\t%s\n' "$w" "$name" "$cmd" "$state" "$wid"
+    #
+    # agent-supervisor#36 appends idle_seconds, derived from tmux's own
+    # `#{window_activity}` reading. A caller comparing ledger state to pane
+    # state needs that measured pane age; a task timestamp this system wrote
+    # would be a ledger record, not observable pane state.
+    age=$(( now_epoch - ${act:-now_epoch} ))
+    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$w" "$name" "$cmd" "$state" "$wid" "$age"
   done
 }
 
@@ -452,7 +458,7 @@ case "$MODE" in
     # breaks); `window_id` is the tmux handle to address it with.
     printf '['
     awk -F'\t' 'BEGIN{c=0}
-      {if(c++)printf(",");printf("{\"window\":%s,\"window_id\":\"%s\",\"name\":\"%s\",\"command\":\"%s\",\"state\":\"%s\"}",$1,$5,$2,$3,$4)}
+      {if(c++)printf(",");printf("{\"window\":%s,\"window_id\":\"%s\",\"name\":\"%s\",\"command\":\"%s\",\"state\":\"%s\",\"idle_seconds\":%s}",$1,$5,$2,$3,$4,$6)}
       END{}' <<<"$rows"
     printf ']\n' ;;
   *)

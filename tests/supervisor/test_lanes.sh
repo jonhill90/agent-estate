@@ -479,13 +479,13 @@ done
 # up there rather than being flattened into one of the old ones -- and the
 # objects for pre-existing states must be untouched.
 json=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --json 2>&1)
-if grep -q '{"window":26,"window_id":"@126","name":"telegram-poller","command":"bash","state":"service"}' <<<"$json"; then
+if python3 -c 'import json,sys; rows=json.load(sys.stdin); sys.exit(0 if any(r.get("window")==26 and r.get("window_id")=="@126" and r.get("name")=="telegram-poller" and r.get("command")=="bash" and r.get("state")=="service" for r in rows) else 1)' <<<"$json"; then
   echo "  ok   --json reports the service window as service"; pass=$((pass+1));
 else
   echo "  FAIL --json missing the service object in:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
 fi
-if grep -q '{"window":4,"window_id":"@104","name":"w-dead","command":"zsh","state":"dead"}' <<<"$json"; then
-  echo "  ok   --json is unchanged for a dead lane, apart from the added window_id"; pass=$((pass+1));
+if python3 -c 'import json,sys; rows=json.load(sys.stdin); sys.exit(0 if any(r.get("window")==4 and r.get("window_id")=="@104" and r.get("name")=="w-dead" and r.get("command")=="zsh" and r.get("state")=="dead" for r in rows) else 1)' <<<"$json"; then
+  echo "  ok   --json carries the dead lane object with its state intact"; pass=$((pass+1));
 else
   echo "  FAIL --json changed shape for a dead lane:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
 fi
@@ -502,6 +502,21 @@ if python3 -c 'import json,sys; rows=json.load(sys.stdin); sys.exit(0 if rows an
   echo "  ok   --json still parses, with an int window and an @-prefixed window_id on every row"; pass=$((pass+1));
 else
   echo "  FAIL --json does not parse or has a malformed identity:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
+fi
+# agent-supervisor#36: a ledger-vs-pane reconciler has to threshold on a
+# measurement tmux produced, not on a timestamp this system wrote. `lanes.sh`
+# already reads `#{window_activity}` for hung/busy; --json must expose the
+# derived idle seconds so a caller can join that observable pane state to the
+# ledger without reimplementing lane classification.
+if python3 -c 'import json,sys; rows=json.load(sys.stdin); sys.exit(0 if rows and all(isinstance(r.get("idle_seconds"), int) for r in rows) else 1)' <<<"$json"; then
+  echo "  ok   --json exposes tmux-derived idle_seconds on every row"; pass=$((pass+1));
+else
+  echo "  FAIL --json is missing idle_seconds:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
+fi
+if python3 -c 'import json,sys; rows=json.load(sys.stdin); row=next(r for r in rows if r["name"]=="w-hung"); sys.exit(0 if row["idle_seconds"] >= 900 else 1)' <<<"$json"; then
+  echo "  ok   --json idle_seconds comes from window_activity age"; pass=$((pass+1));
+else
+  echo "  FAIL --json idle_seconds did not preserve the fixture age:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
 fi
 
 # --- agent-dotfiles#164 mutation check: prove the default can go wrong -----
