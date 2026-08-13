@@ -576,35 +576,58 @@ echo "poller-recover.sh: agent-supervisor#25 -- the orphan check must not fail o
 # The measured production defect: the LaunchAgent's PATH (watchdog.sh's own
 # SUPERVISOR_PATH default, quoted verbatim in the issue) has no /usr/sbin,
 # so bare `lsof` (which lives at /usr/sbin/lsof on macOS) was unreachable by
-# name. That literal is macOS-specific -- on Linux (this suite's CI runner)
-# lsof lives at /usr/bin/lsof, already in the same literal PATH string, so
-# asserting the literal alone would not reproduce the defect there and the
-# mutation check below would pass for the wrong reason (lsof still found,
-# not the fail-closed path at all). Instead: find THIS machine's real lsof,
-# and build the LaunchAgent PATH with its directory removed, whichever
-# directory that is -- reproducing the class of bug (lsof's directory is
-# absent from the caller's PATH), not a platform-specific literal.
+# name. Excluding lsof's directory wholesale is not portable to where this
+# suite also runs (CI, Linux): on a merged-usr distro /bin is a symlink to
+# /usr/bin, so removing "the directory containing lsof" from the PATH
+# literal removes ps/tmux/sed/etc. right along with it, breaking the script
+# for reasons that have nothing to do with #25. What matters is narrower:
+# every OTHER tool this script needs stays reachable, and only lsof is
+# not. Build a PATH with exactly that shape -- a directory of symlinks to
+# every external tool poller-recover.sh actually calls, lsof deliberately
+# excluded -- rather than trying to reproduce a literal that only applies
+# to one platform.
+POLLER_RECOVER_TOOLS="tmux pgrep ps mkdir date printf tee cat kill sed awk rm dirname head"
+# Resolved BEFORE the PATH restriction is built: `VAR=val cmd` looks up
+# `cmd` itself against the NEW value of VAR when VAR is PATH, so invoking
+# bare `bash` under a restricted PATH would fail to find bash itself --
+# nothing to do with #25, just command lookup. Calling bash by absolute
+# path bypasses PATH search entirely for the interpreter, the same way
+# `command -v tool` above resolves each dependency once, up front.
+BASH_BIN="$(command -v bash)"
 LSOF_REAL_PATH="$(command -v lsof 2>/dev/null || true)"
 if [ -z "$LSOF_REAL_PATH" ]; then
   echo "  SKIP no lsof on this machine -- cannot construct a PATH that omits it"
 else
-  LSOF_DIR="$(cd "$(dirname "$LSOF_REAL_PATH")" && pwd -P)"
-  LAUNCHD_PATH=""
-  for d in /opt/homebrew/bin /usr/local/bin /usr/bin /bin "$HOME/.local/bin"; do
-    [ "$d" = "$LSOF_DIR" ] && continue
-    LAUNCHD_PATH="${LAUNCHD_PATH:+$LAUNCHD_PATH:}$d"
+  TESTBIN="$STATE/launchd-path-bin"
+  rm -rf "$TESTBIN"; mkdir -p "$TESTBIN"
+  missing_tool=""
+  for t in $POLLER_RECOVER_TOOLS; do
+    real="$(command -v "$t" 2>/dev/null || true)"
+    if [ -z "$real" ]; then
+      missing_tool="$t"; break
+    fi
+    # A bash builtin (kill, printf) reports its bare name, no path -- it
+    # resolves without consulting PATH at all, so no symlink is needed or
+    # possible for it.
+    case "$real" in
+      /*) ln -s "$real" "$TESTBIN/$t" ;;
+    esac
   done
+  LAUNCHD_PATH="$TESTBIN"
   recover_launchd_path() {
     PATH="$LAUNCHD_PATH" POLLER_WINDOW=inbox-poll POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
       POLLER_RECOVER_LOCK="$STATE/.lock" POLLER_RECOVER_LOG="$STATE/log" \
-      SUPERVISOR_STATE="$STATE" bash "$RECOVER" "$S"
+      SUPERVISOR_STATE="$STATE" "$BASH_BIN" "$RECOVER" "$S"
   }
 
-  if PATH="$LAUNCHD_PATH" command -v lsof >/dev/null 2>&1; then
-    bad "setup: LAUNCHD_PATH omits lsof's directory ($LSOF_DIR)" \
+  if [ -n "$missing_tool" ]; then
+    bad "setup: built a PATH with every poller-recover.sh dependency but lsof" \
+      "'$missing_tool' is not on this machine's PATH -- cannot build the fixture"
+  elif PATH="$LAUNCHD_PATH" command -v lsof >/dev/null 2>&1; then
+    bad "setup: LAUNCHD_PATH omits lsof" \
       "lsof is still resolvable under the constructed PATH ($LAUNCHD_PATH) -- this test would not exercise the defect"
   else
-    ok "setup: LAUNCHD_PATH omits lsof's directory ($LSOF_DIR), matching the measured LaunchAgent environment"
+    ok "setup: LAUNCHD_PATH carries every other dependency but omits lsof, matching the measured LaunchAgent gap"
   fi
 
 rm -f "$STATE/pid" "$STATE/stop" "$ORPHAN_RELEASE"
@@ -625,8 +648,8 @@ pid_alive "$p12" && ok "the poller process survives its window (launchd-PATH tes
   || bad "the poller process survives its window (launchd-PATH test)" "pid $p12 is not alive"
 
 out12=$(recover_launchd_path 2>&1); rc12=$?
-[ "$rc12" -ne 0 ] && ok "under the LaunchAgent's PATH (lsof's directory omitted), recover() against a windowless orphan still refuses" \
-  || bad "under the LaunchAgent's PATH (lsof's directory omitted), recover() against a windowless orphan still refuses" "exit $rc12: $out12"
+[ "$rc12" -ne 0 ] && ok "under a PATH with everything but lsof (the LaunchAgent's gap), recover() against a windowless orphan still refuses" \
+  || bad "under a PATH with everything but lsof (the LaunchAgent's gap), recover() against a windowless orphan still refuses" "exit $rc12: $out12"
 [ "$(window_count)" = "0" ] && ok "no window is created over a live orphan under the LaunchAgent PATH" \
   || bad "no window is created over a live orphan under the LaunchAgent PATH" "window_count=$(window_count)"
 [ "$(orphan_pid_count)" = "1" ] && ok "no second inbox-poll.sh process is started under the LaunchAgent PATH -- exactly one, still the orphan" \
@@ -693,7 +716,7 @@ else
   pre_fix_recover_launchd_path() {
     PATH="$LAUNCHD_PATH" POLLER_WINDOW=inbox-poll POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
       POLLER_RECOVER_LOCK="$STATE/.lock" POLLER_RECOVER_LOG="$STATE/log" \
-      SUPERVISOR_STATE="$STATE" bash "$PRE_FIX" "$S"
+      SUPERVISOR_STATE="$STATE" "$BASH_BIN" "$PRE_FIX" "$S"
   }
 
   rm -f "$STATE/pid" "$STATE/stop" "$ORPHAN_RELEASE"
