@@ -858,5 +858,55 @@ NOTIFY_ENV="$D/pw/none.env" SLEEPCHECK_DIR="$D/pw/transcripts" \
 check "a missing harness registry fails closed" "state:    harness_unknown" "$D/pw/st"
 not_sent "a missing harness registry receives no keystrokes" "$D/pw"
 
+# --- #22: recovery availability must fail loud and precise -----------------
+#
+# The watchdog runs poller-recover.sh from an EXIT trap, so a missing or
+# non-executable recovery script can leave the main tick looking healthy while
+# inbox-poll recovery never runs. The pre-fix `-x` gate conflated "absent" with
+# "present but mode 644" and logged only "no poller-recover.sh beside this
+# watchdog". These cases run under an env -i LaunchAgent-shaped environment:
+# only HOME, NOTIFY_ENV and PATH are inherited.
+launchd_gate_run() { # launchd_gate_run <workdir> <poller-recover-state>
+  local root="$1" state="$2" home="$1/home"
+  rm -rf "$root"; mkdir -p "$root/app/scripts/supervisor" "$home" "$home/.local/state/agent-dotfiles-supervisor/transcripts"
+  for f in watchdog.sh sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
+    cp "$HERE/../../scripts/supervisor/$f" "$root/app/scripts/supervisor/" 2>/dev/null
+  done
+  cp -R "$HERE/../../scripts/supervisor/harness" "$root/app/scripts/supervisor/" 2>/dev/null
+  case "$state" in
+    absent) : ;;
+    nonexec)
+      printf '#!/bin/bash\nprintf should-not-run\\n\n' >"$root/app/scripts/supervisor/poller-recover.sh"
+      chmod 644 "$root/app/scripts/supervisor/poller-recover.sh"
+      ;;
+    exec)
+      printf '#!/bin/bash\nexit 0\n' >"$root/app/scripts/supervisor/poller-recover.sh"
+      chmod 755 "$root/app/scripts/supervisor/poller-recover.sh"
+      ;;
+  esac
+  env -i HOME="$home" NOTIFY_ENV="$home/none.env" PATH="$STUBS:/usr/bin:/bin" \
+    bash "$root/app/scripts/supervisor/watchdog.sh" >/dev/null 2>"$root/err"
+}
+
+D=$(mktemp -d); launchd_gate_run "$D/w" nonexec
+check "a present but non-executable poller-recover.sh is reported as a broken install" \
+      "poller-recover.sh exists but is not executable" "$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.log"
+check "the broken install is visible in watchdog.status" \
+      "^recovery: broken" "$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.status"
+
+D=$(mktemp -d); launchd_gate_run "$D/w" absent
+check "an absent poller-recover.sh is reported distinctly from a bad mode" \
+      "poller-recover.sh is missing beside this watchdog" "$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.log"
+check "the missing recovery script is visible in watchdog.status" \
+      "^recovery: missing" "$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.status"
+
+D=$(mktemp -d); launchd_gate_run "$D/w" exec
+if grep -q '^recovery:' "$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.status" 2>/dev/null; then
+  say_bad "an executable poller-recover.sh keeps the healthy path silent" \
+    "$(grep '^recovery:' "$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.status")"
+else
+  say_ok "an executable poller-recover.sh keeps the healthy path silent"
+fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -468,8 +468,12 @@ prompt_poller_relaunch() { # prompt_poller_relaunch <pane> <old-sha> <live-sha> 
     log "POLLER-PROMPT-RELAUNCH-SKIPPED: $INBOX_POLL_STATUS_PATH has no pid: line, so advance-live.sh cannot tell when the old poller is gone; watchdog poller-recover.sh remains the backstop"
     return 1
   fi
+  if [ ! -e "$HERE/poller-recover.sh" ]; then
+    log "POLLER-PROMPT-RELAUNCH-SKIPPED: poller-recover.sh is missing beside advance-live.sh; reinstall or advance the live worktree"
+    return 1
+  fi
   if [ ! -x "$HERE/poller-recover.sh" ]; then
-    log "POLLER-PROMPT-RELAUNCH-SKIPPED: no executable poller-recover.sh beside advance-live.sh"
+    log "POLLER-PROMPT-RELAUNCH-SKIPPED: poller-recover.sh exists but is not executable; run chmod +x $HERE/poller-recover.sh or restore the committed 100755 mode"
     return 1
   fi
   (
