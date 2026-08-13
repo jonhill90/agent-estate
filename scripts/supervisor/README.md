@@ -278,6 +278,21 @@ restarts or pages, and still exits 0. Turning "the code is one commit stale"
 into "the watchdog is down" would be a strictly worse outcome than the one
 being reported.
 
+### The watchdog's own absence must be loud (#24)
+
+On 2026-08-13 the watchdog LaunchAgent itself was unloaded for 91 minutes
+and nothing noticed — `watchdog.status`'s `checked:` line went stale and no
+code ever compared it to the clock. It was found only because a human
+happened to `cat` the file by hand. `advance-live.sh` already reads
+`checked:` on every invocation for the race gate above, and it already runs
+on every supervisor tick (`loop-tick.md`'s first step), so that is where the
+mechanical check lives rather than a new script the tick has to remember to
+call: if `checked:` is older than `ADVANCE_WATCHDOG_STALE_MULTIPLE` (default
+3) times the tick interval, `advance-live.sh` exits non-zero naming the
+staleness and the last-checked time, before it ever looks at whether there
+is anything to advance — a dead watchdog with an already-current live copy
+would otherwise sail through reporting nothing wrong.
+
 ## Dispatch
 
 `dispatch.sh` is the caller. It performs one dispatch end to end — pick a free
