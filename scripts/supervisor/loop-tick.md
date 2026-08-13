@@ -57,8 +57,8 @@ caller reading this file and using `director-inbox.sh post` instead of a raw
 
 ## What to do
 
-Sweep GitHub across the four repos — `agent-dotfiles`, `skills`,
-`skills-private`, `agent-evals` — for **actionable** work:
+Sweep GitHub across the five repos — `agent-dotfiles`, `agent-supervisor`,
+`skills`, `skills-private`, `agent-evals` — for **actionable** work:
 
 - open issues **not** gated on a Jon decision,
 - PRs needing independent review or a merge,
@@ -68,7 +68,7 @@ Sweep GitHub across the four repos — `agent-dotfiles`, `skills`,
 dispatch it"), then dispatch it to a free lane with a fresh bounded brief and a
 **backgrounded** `tmux wait-for` waiter, so lanes run concurrently rather than
 serially. Review, then merge what passes. You have full autonomy to merge and
-close in these four repos.
+close in these five repos.
 
 `/clear` a lane before reusing it for an independent review — an author
 reviewing their own PR is not an independent reviewer. Pass `--reviews-pr
@@ -136,7 +136,7 @@ reasoning was sound and the action was wrong: it ended the loop, and Jon's next
 observation was "its not looping."
 
 A blocked tick must be **cheap**, which is what makes an hourly sweep
-affordable: list open issues and PRs across the four repos, compare against the
+affordable: list open issues and PRs across the five repos, compare against the
 gated list, and if nothing has changed, sleep. No re-reading the codebase, no
 re-running suites, no fresh analysis of already-recorded decisions. Cost per
 blocked tick should be a few tool calls, not a work session.
@@ -382,7 +382,7 @@ scripts/supervisor/claim.sh list jonhill90/agent-dotfiles   # open AND unclaimed
 before the `send-keys`. It prints the holder and **exits non-zero** if someone
 got there first. Treat that as "pick different work", not as an error to retry.
 
-The claim is the GitHub **assignee**. In these four repos an assignee means
+The claim is the GitHub **assignee**. In these five repos an assignee means
 *claimed by a lane* — do not hand-assign an issue you are not dispatching. The
 claim is released when the PR closes the issue; release it by hand with
 `claim.sh release <n> <repo>` if the lane abandons the work.
