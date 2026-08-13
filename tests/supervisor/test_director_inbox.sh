@@ -198,6 +198,115 @@ else
   want_contains "the post racing drain survives in the file" "msg-2 racing the drain" "$final"
 fi
 
+# --- stats: pending count and oldest age, without depending on pane state --
+# agent-supervisor#34. `stats` is what lets a caller other than a Director
+# tick (digest.sh) answer "how long has this been waiting" -- it must not
+# mutate the file (a read used only to report must never also be the write
+# that marks something delivered).
+rm -f "$D/box.jsonl"
+out=$(run stats)
+want_contains "stats on an empty box reports zero pending" '"pending": 0' "$out"
+
+run post "fresh one" >/dev/null
+out=$(run stats)
+want_contains "stats reports one pending after a post" '"pending": 1' "$out"
+before=$(cat "$D/box.jsonl")
+run stats >/dev/null
+after=$(cat "$D/box.jsonl")
+[ "$before" = "$after" ] && ok "stats does not mutate the box" \
+  || bad "stats does not mutate the box" "before:$before"$'\n'"after:$after"
+
+# Backdate the message so its age is deterministic and clearly past a
+# threshold, the same trick digest.sh's own tests use for status timestamps.
+python3 -c "
+import json
+row = json.loads(open('$D/box.jsonl').read().strip())
+row['at'] = '2020-01-01T00:00:00Z'
+open('$D/box.jsonl', 'w').write(json.dumps(row) + chr(10))
+"
+out=$(run stats)
+want_contains "stats reports the backdated message's oldest_at" '"oldest_at": "2020-01-01T00:00:00Z"' "$out"
+age=$(python3 -c "import json,sys; print(json.loads(sys.stdin.read())['oldest_age_s'])" <<<"$out")
+[ "$age" -gt 1000000 ] && ok "stats computes a large oldest_age_s for a years-old message" \
+  || bad "stats computes oldest_age_s" "$out"
+
+# --- escalate: marks-and-reports stale pending messages exactly once -------
+# The load-bearing claim: escalate must fire for a message that is old but
+# whose delivery has nothing to do with the pane -- this is the channel
+# agent-supervisor#34 asks for, independent of `director-route.sh`'s idle
+# check entirely (no tmux stub touched anywhere in this test).
+out=$(run escalate 60); rc=$?
+want_exit "escalate past its threshold exits 0" "$rc" 0
+want_contains "escalate reports the stale message's text" "fresh one" "$out"
+want_contains "escalate marks the row escalated in the box" '"escalated": true' "$(cat "$D/box.jsonl")"
+
+out2=$(run escalate 60); rc2=$?
+want_exit "escalating the same message twice exits 1 the second time" "$rc2" 1
+want_contains "the second escalate call reports nothing new (no re-page)" "no stale director messages" "$out2"
+
+# A message younger than the threshold is not escalated.
+rm -f "$D/box.jsonl"
+run post "too young to escalate" >/dev/null
+out=$(run escalate 999999); rc=$?
+want_exit "a fresh message under threshold exits 1 (not escalated)" "$rc" 1
+want_not_contains "a fresh message under threshold is not reported as stale" "too young to escalate" "$out"
+
+# A message already drained (read=true) is never escalated, even if old --
+# it already reached the Director through the normal tick path.
+rm -f "$D/box.jsonl"
+run post "already delivered" >/dev/null
+run drain >/dev/null
+python3 -c "
+import json
+row = json.loads(open('$D/box.jsonl').read().strip())
+row['at'] = '2020-01-01T00:00:00Z'
+open('$D/box.jsonl', 'w').write(json.dumps(row) + chr(10))
+"
+out=$(run escalate 60); rc=$?
+want_exit "an already-drained old message is not escalated" "$rc" 1
+want_not_contains "a drained message never reports as stale" "already delivered" "$out"
+
+# --- mutation-check: drop the escalated-marking and confirm re-paging goes red
+# The brief's own bar: mutate the fix and watch a test go red. Patch out the
+# `r["escalated"] = True` write so a caller that ran escalate() twice would
+# be told to page Jon twice for the same message -- the exact repeat-page
+# failure the `escalated` field exists to prevent.
+INBOX_DIR="$(cd "$(dirname "$INBOX")" && pwd)"
+MUTANT="$INBOX_DIR/.director-inbox-mutant-noescalated.sh"
+trap 'rm -f "$MUTANT"' EXIT
+patch_rc=0
+python3 - "$INBOX" "$MUTANT" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '            r["escalated"] = True\n            newly_stale.append(r)'
+replacement = '            newly_stale.append(r)'
+assert marker in text, "escalate marking line not found -- director-inbox.sh shape changed"
+assert text.count(marker) == 1, "escalate marking line not unique -- director-inbox.sh shape changed"
+open(dst, "w").write(text.replace(marker, replacement, 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched an escalated-marking-free copy of director-inbox.sh" \
+    "could not patch $INBOX (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched an escalated-marking-free copy of director-inbox.sh"
+  rm -f "$D/box.jsonl"
+  DIRECTOR_INBOX="$D/box.jsonl" bash "$MUTANT" post "would re-page forever" >/dev/null
+  python3 -c "
+import json
+row = json.loads(open('$D/box.jsonl').read().strip())
+row['at'] = '2020-01-01T00:00:00Z'
+open('$D/box.jsonl', 'w').write(json.dumps(row) + chr(10))
+"
+  DIRECTOR_INBOX="$D/box.jsonl" bash "$MUTANT" escalate 60 >/dev/null
+  out3=$(DIRECTOR_INBOX="$D/box.jsonl" bash "$MUTANT" escalate 60); rc3=$?
+  if [ "$rc3" -eq 0 ]; then
+    ok "mutation confirmed: without the escalated marking, the same stale message escalates again (a real fix would exit 1 here)"
+  else
+    bad "mutation confirmed: removing the escalated marking should cause a re-escalation" "$out3"
+  fi
+fi
+
 rm -rf "$D"
 
 echo "$pass passed, $fail failed"

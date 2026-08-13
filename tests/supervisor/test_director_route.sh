@@ -83,6 +83,89 @@ grep -q 'send-keys .*t:1' "$D/tmux.log" 2>/dev/null \
   && bad "send-keys was called against the busy pane at all" "$(cat "$D/tmux.log")" \
   || ok "director-route.sh never called send-keys against the busy pane"
 
+# --- agent-supervisor#34: a message stuck behind an ALWAYS-busy pane still --
+# reaches Jon once it ages past the threshold, on an ordinary --flush call --
+# no pane ever goes idle in this test. This is the acceptance case from the
+# brief: queue with the pane busy, and show the message reaching Jon anyway,
+# through the escalation path rather than the nudge.
+fresh_inbox
+: > "$D/tmux.log"; rm -rf "$D/panes"; mkdir -p "$D/panes"; : > "$D/curl.log"
+out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/busy" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+  HOME="$D/state" NOTIFY_ENV="$D/notify.env" CURL_LOG="$D/curl.log" DIRECTOR_INBOX="$INBOX_BOX" \
+  bash "$ROUTE" "stuck behind a permanently busy pane" t)
+python3 -c "
+import json
+row = json.loads(open('$INBOX_BOX').read().strip())
+row['at'] = '2020-01-01T00:00:00Z'
+open('$INBOX_BOX', 'w').write(json.dumps(row) + chr(10))
+"
+: > "$D/curl.log"
+out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/busy" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+  HOME="$D/state" NOTIFY_ENV="$D/notify.env" CURL_LOG="$D/curl.log" DIRECTOR_INBOX="$INBOX_BOX" \
+  DIRECTOR_INBOX_STALE_SECONDS=60 \
+  bash "$ROUTE" --flush t)
+rc=$?
+[ "$rc" -eq 2 ] && ok "--flush against a permanently busy pane still exits 2 (not nudged)" || bad "exited $rc" "$out"
+[ -s "$D/curl.log" ] && ok "the aged message reaches Jon through escalation even though the pane was never idle" \
+  || bad "no notification was sent for a message stuck behind a busy pane" "$out"
+grep -q 'escalated' "$INBOX_BOX" 2>/dev/null && [ "$(python3 -c "import json; print(json.loads(open('$INBOX_BOX').read().strip())['escalated'])")" = True ] \
+  && ok "the row is marked escalated, so the same busy pane does not re-page every flush" \
+  || bad "the row was not marked escalated" "$(cat "$INBOX_BOX")"
+: > "$D/curl.log"
+out2=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/busy" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+  HOME="$D/state" NOTIFY_ENV="$D/notify.env" CURL_LOG="$D/curl.log" DIRECTOR_INBOX="$INBOX_BOX" \
+  DIRECTOR_INBOX_STALE_SECONDS=60 \
+  bash "$ROUTE" --flush t)
+[ ! -s "$D/curl.log" ] && ok "a second flush against the same still-busy pane does not re-page for the same message" \
+  || bad "the second flush re-paged for a message already escalated" "$(cat "$D/curl.log")"
+
+# Mutation-check: drop the escalation block and confirm the above goes red --
+# the brief's own bar ("mutate your fix and watch a test go red").
+ROUTE_DIR="$(cd "$(dirname "$ROUTE")" && pwd)"
+MUTANT_ESC="$ROUTE_DIR/.director-route-mutant-noescalate.sh"
+patch_rc=0
+python3 - "$ROUTE" "$MUTANT_ESC" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''STALE_THRESHOLD="${DIRECTOR_INBOX_STALE_SECONDS:-1800}"
+if escalated=$("$HERE/director-inbox.sh" escalate "$STALE_THRESHOLD" 2>/dev/null) && [ -n "$escalated" ]; then
+  notify_jon "Director inbox has undelivered message(s)" \\
+    "pending >= ${STALE_THRESHOLD}s with the Director's pane never caught idle -- $escalated"
+fi'''
+assert marker in text, "escalation block not found -- director-route.sh shape changed"
+assert text.count(marker) == 1, "escalation block not unique -- director-route.sh shape changed"
+open(dst, "w").write(text.replace(marker, "", 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched an escalation-free copy of director-route.sh" \
+    "could not patch $ROUTE (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched an escalation-free copy of director-route.sh"
+  fresh_inbox
+  : > "$D/tmux.log"; rm -rf "$D/panes"; mkdir -p "$D/panes"
+  PATH="$D/bin:$PATH" LANES_FIXTURE="$D/busy" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+    HOME="$D/state" NOTIFY_ENV="$D/notify.env" CURL_LOG="$D/curl.log" DIRECTOR_INBOX="$INBOX_BOX" \
+    bash "$MUTANT_ESC" "will never escalate" t >/dev/null 2>&1
+  python3 -c "
+import json
+row = json.loads(open('$INBOX_BOX').read().strip())
+row['at'] = '2020-01-01T00:00:00Z'
+open('$INBOX_BOX', 'w').write(json.dumps(row) + chr(10))
+"
+  : > "$D/curl.log"
+  PATH="$D/bin:$PATH" LANES_FIXTURE="$D/busy" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+    HOME="$D/state" NOTIFY_ENV="$D/notify.env" CURL_LOG="$D/curl.log" DIRECTOR_INBOX="$INBOX_BOX" \
+    DIRECTOR_INBOX_STALE_SECONDS=60 \
+    bash "$MUTANT_ESC" --flush t >/dev/null 2>&1
+  if [ ! -s "$D/curl.log" ]; then
+    ok "mutation confirmed: without the escalation block, a message stuck behind a busy pane never reaches Jon (the assertion above would be red)"
+  else
+    bad "mutation confirmed: removing the escalation block should stop the page" "$(cat "$D/curl.log")"
+  fi
+fi
+rm -f "$MUTANT_ESC"
+
 # --- Director's box holds real unsent text: queued, NOT clobbered ----------
 cat > "$D/unsent" <<'FIX'
 1|director|claude.exe|❯ |1|0

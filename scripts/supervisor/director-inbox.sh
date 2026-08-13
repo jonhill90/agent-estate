@@ -22,6 +22,11 @@
 #   director-inbox.sh post "message"   append a message for the next tick
 #   director-inbox.sh read             print undrained messages (no drain)
 #   director-inbox.sh drain            print undrained messages and mark them
+#   director-inbox.sh stats            print {"pending":N,"oldest_at":...,
+#                                       "oldest_age_s":N} as JSON, no mutation
+#   director-inbox.sh escalate <secs>  mark-and-print pending messages older
+#                                       than <secs> that have not already been
+#                                       escalated; exit 0 if any, 1 if none
 #
 # Drain marks rather than deletes: a message the supervisor read is still
 # readable afterwards, because losing the record of an instruction is worse
@@ -29,6 +34,18 @@
 # parse, or that parses to something other than a JSON object -- both are
 # preserved verbatim with a warning on stderr, never dropped, and never
 # allowed to crash a later read/drain (#90).
+#
+# agent-supervisor#34: `read`/`drain` only ever surface a message to whoever
+# runs a Director tick, and a tick is exactly what stops happening when the
+# Director's pane is never idle -- the failure this issue measured, 9
+# messages held 12 hours with nothing downstream able to tell "queued" from
+# "lost". `stats` and `escalate` answer a different, pane-independent
+# question -- "how long has the oldest pending message been waiting" -- so a
+# caller that is NOT the Director's own tick (digest.sh, inbox-poll.sh's
+# per-iteration flush) can notice and say so out loud, without needing the
+# pane to ever go idle. `escalated` is a field on the row, not a side file,
+# for the same reason `read` already is: it must survive whatever holds the
+# lock next, atomically, with the same rewrite this file already trusts.
 #
 # post/read/drain all take the same exclusive lock (via Python's fcntl,
 # since `flock(1)` isn't available on macOS) around the file, and drain holds
@@ -128,5 +145,106 @@ with open(lock, "a") as lockfile:
         os.replace(tmp, box)
 PY
     ;;
-  *) echo "usage: director-inbox.sh {post <msg>|read|drain}" >&2; exit 1 ;;
+  stats)
+    # Read-only, no lock needed -- nothing here is read-modify-write. A
+    # missing/empty box is not an error: it is the correct, common "nothing
+    # pending" state, distinct from an unreadable one (a caller's own
+    # `command -v`/`-r` checks catch that).
+    python3 - "$BOX" "$(now)" <<'PY'
+import json, sys
+from datetime import datetime, timezone
+
+box, now_s = sys.argv[1], sys.argv[2]
+now = datetime.strptime(now_s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+pending = []
+try:
+    for raw in open(box):
+        line = raw.rstrip("\n")
+        if not line.strip():
+            continue
+        try:
+            r = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(r, dict) or r.get("read"):
+            continue
+        pending.append(r)
+except FileNotFoundError:
+    pass
+
+if not pending:
+    print(json.dumps({"pending": 0, "oldest_at": None, "oldest_age_s": None}))
+else:
+    oldest = min(pending, key=lambda r: r.get("at", ""))
+    oldest_at = oldest.get("at")
+    try:
+        age = (now - datetime.strptime(oldest_at, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)).total_seconds()
+    except (TypeError, ValueError):
+        age = None
+    print(json.dumps({
+        "pending": len(pending),
+        "oldest_at": oldest_at,
+        "oldest_age_s": (int(age) if age is not None else None),
+    }))
+PY
+    ;;
+  escalate)
+    [ -n "${2:-}" ] || { echo "director-inbox: escalate needs a threshold in seconds" >&2; exit 1; }
+    [ -s "$BOX" ] || { echo "(no stale director messages)"; exit 1; }
+    python3 - "$BOX" "$LOCK" "$(now)" "$2" <<'PY'
+import fcntl, json, os, sys
+from datetime import datetime, timezone
+
+box, lock, now_s, threshold = sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4])
+now = datetime.strptime(now_s, "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+
+with open(lock, "a") as lockfile:
+    fcntl.flock(lockfile, fcntl.LOCK_EX)
+
+    rows = []
+    for raw in open(box):
+        line = raw.rstrip("\n")
+        if not line.strip():
+            continue
+        try:
+            parsed = json.loads(line)
+        except ValueError:
+            rows.append((line, None))
+            continue
+        if not isinstance(parsed, dict):
+            rows.append((line, None))
+            continue
+        rows.append((line, parsed))
+
+    newly_stale = []
+    out_lines = []
+    for line, r in rows:
+        if r is None or r.get("read") or r.get("escalated"):
+            out_lines.append(line if r is None else json.dumps(r))
+            continue
+        try:
+            age = (now - datetime.strptime(r.get("at", ""), "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)).total_seconds()
+        except (TypeError, ValueError):
+            age = None
+        if age is not None and age >= threshold:
+            r["escalated"] = True
+            newly_stale.append(r)
+        out_lines.append(json.dumps(r))
+
+    if not newly_stale:
+        print("(no stale director messages)")
+        sys.exit(1)
+
+    tmp = box + ".tmp"
+    with open(tmp, "w") as handle:
+        for line in out_lines:
+            handle.write(line + "\n")
+    os.replace(tmp, box)
+
+    for r in newly_stale:
+        print(f"[director {r['at']}] {r['text']}")
+PY
+    ;;
+  *) echo "usage: director-inbox.sh {post <msg>|read|drain|stats|escalate <secs>}" >&2; exit 1 ;;
 esac

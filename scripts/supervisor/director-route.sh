@@ -84,6 +84,16 @@
 # skips the queue step entirely -- there is nothing new to post -- and runs
 # only the nudge half.
 #
+# agent-supervisor#34: the nudge half depends on the pane going idle, and a
+# pane that is mid-tick or waiting on a tool almost all the time can go hours
+# without that ever being true -- measured at 9 messages, 12 hours, nothing
+# downstream able to tell "queued" from "lost". Every call here (post or
+# `--flush`) also runs `director-inbox.sh escalate`, which does not depend on
+# the pane at all: once a message has been queued past
+# `DIRECTOR_INBOX_STALE_SECONDS` (default 1800s) it pages Jon directly, once,
+# regardless of whether the nudge below ever succeeds. See that block's own
+# comment for why this cannot re-page every ~25s.
+#
 # Exit 0: queued, and the live nudge was sent and confirmed delivered
 #         (same pane-evidence discipline as inbox-route.sh: the box must
 #         show the prompt before Enter, and be empty after).
@@ -148,6 +158,27 @@ if [ -n "$MESSAGE" ]; then
     echo "director-route: could not reach Jon either -- message was: $MESSAGE" >&2
     exit 1
   fi
+fi
+
+# --- escalate on age, unconditionally, before the idle check below ---------
+# agent-supervisor#34. Everything below this point can exit 2 (busy, on a
+# menu, unsent text in the box, a lost race) without the message being lost
+# -- it stays queued for the Director's own next tick. What #34 measured is
+# that "queued" and "delivered" then become indistinguishable from outside:
+# nine messages sat queued and un-escalated for twelve hours because the pane
+# was never once caught idle, and nothing else was watching the clock.
+#
+# This runs on EVERY call -- a fresh post and a bare `--flush` alike -- and
+# before the idle check, so a pane that is never idle cannot suppress it the
+# way it suppresses the nudge. `director-inbox.sh escalate` is itself
+# idempotent per message (the `escalated` field on the row), so this does not
+# re-page Jon every ~25s while a message stays stuck; it pages once when a
+# message first crosses the threshold, the same debounce shape inbox.sh's own
+# FAIL_THRESHOLD notification already uses.
+STALE_THRESHOLD="${DIRECTOR_INBOX_STALE_SECONDS:-1800}"
+if escalated=$("$HERE/director-inbox.sh" escalate "$STALE_THRESHOLD" 2>/dev/null) && [ -n "$escalated" ]; then
+  notify_jon "Director inbox has undelivered message(s)" \
+    "pending >= ${STALE_THRESHOLD}s with the Director's pane never caught idle -- $escalated"
 fi
 
 # --- is it safe to nudge the pane right now? --------------------------
