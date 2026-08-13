@@ -162,23 +162,31 @@ watchdog_age() {
 # writes into its own status file every iteration.
 #
 # COOPERATIVE, NOT SIGNALED (see inbox-poll.sh's matching header comment for
-# the read side). This only ever writes a flag file and queues a relaunch
-# command into the poller's pane -- it never signals the process. A restart
-# it triggers can therefore never land mid-drain: inbox-poll.sh only checks
-# the flag between iterations, after a batch's offset has been both
-# acknowledged to Telegram AND fully routed, so nothing is skipped and
-# nothing is asked for twice.
+# the read side). This only ever writes a flag file -- it never signals the
+# process. A restart it triggers can therefore never land mid-drain:
+# inbox-poll.sh only checks the flag between iterations, after a batch's
+# offset has been both acknowledged to Telegram AND fully routed, so nothing
+# is skipped and nothing is asked for twice.
 #
-# WHY QUEUEING BEFORE THE POLLER HAS ACTUALLY EXITED IS SAFE: inbox-poll.sh
-# never reads stdin, so keystrokes sent to its pane while it is still the
-# foreground process sit unread in the pty's input queue until the shell
-# resumes reading -- the same mechanism watchdog.sh's own "queued /loop"
-# comment documents for a busy pane. No wait loop, no second invocation, no
-# race to get right here.
+# agent-supervisor#10: this used to ALSO queue a relaunch command into the
+# poller's pane with `tmux send-keys`, reasoning that inbox-poll.sh never
+# reads stdin, so the keystrokes would sit unread until "the shell resumes
+# reading". There is no shell to resume: the pane's command is
+# `exec scripts/supervisor/inbox-poll.sh`, which replaces the pane's shell
+# rather than running under one, so when the flagged poller actually exits
+# there is nothing left in the pane to read those keys -- and, absent
+# `remain-on-exit`, no pane left at all. That queuing is gone. It is also no
+# longer needed: poller-recover.sh (called from watchdog.sh every tick)
+# notices the pane go dead once the flagged poller exits and relaunches it
+# with whatever code is on disk at $LIVE, which is exactly what the queued
+# command was trying to arrange by hand, just from a caller for which "no
+# pane left to type into" is not a failure mode.
 #
 # THE PANE IS FOUND BY WHAT ITS OWN FIRST PROCESS IS, not a window number or
 # name -- exactly the identification lanes.sh's SERVICE_RE already uses
-# (#154), reused rather than reinvented so the two never drift apart.
+# (#154), reused rather than reinvented so the two never drift apart. Used
+# here only to confirm a poller is actually running before flagging one that
+# is not -- see maybe_restart_poller below.
 INBOX_POLL_STATUS_PATH="${SUPERVISOR_INBOX_POLL_STATUS:-$STATE/inbox-poll.status}"
 INBOX_POLL_RESTART_FLAG="${INBOX_POLL_RESTART_FLAG:-$STATE/.inbox-poll-restart-requested}"
 INBOX_POLL_SESSION="${LANES_SESSION:-agent-dotfiles}"
@@ -237,9 +245,7 @@ maybe_restart_poller() {
     return 0
   fi
 
-  tmux send-keys -t "$pane" -l "cd '$LIVE' && exec scripts/supervisor/inbox-poll.sh" 2>/dev/null
-  tmux send-keys -t "$pane" Enter 2>/dev/null
-  log "POLLER-RESTART-QUEUED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written, relaunch queued for once the poller exits"
+  log "POLLER-RESTART-REQUESTED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written; poller-recover.sh relaunches it once it exits (agent-supervisor#10)"
   return 0
 }
 
