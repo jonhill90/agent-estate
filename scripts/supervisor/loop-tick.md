@@ -70,6 +70,17 @@ dispatch it"), then dispatch it to a free lane with a fresh bounded brief and a
 serially. Review, then merge what passes. You have full autonomy to merge and
 close in these five repos.
 
+Branch protection and rulesets are unavailable on these private repos without
+GitHub Pro (agent-supervisor#13, measured: both 403 "Upgrade to GitHub Pro or
+make this repository public"), so `gh pr merge` alone enforces nothing about
+the PR's checks. Merge through `merge-pr.sh <repo> <number> [gh pr merge
+args...]`, never `gh pr merge` directly -- it runs `ci_gate.py`, which
+re-fetches the PR's head SHA live and refuses unless every check for that
+exact SHA is green (an absent check refuses too, it is not treated as
+pending). This is enforcement in the actor, not the platform: it is still
+convention that a lane or the loop uses this script rather than calling `gh
+pr merge` by hand.
+
 `/clear` a lane before reusing it for an independent review — an author
 reviewing their own PR is not an independent reviewer. Pass `--reviews-pr
 <PR>` to `dispatch.sh` for a review dispatch (agent-dotfiles#212): it refuses
