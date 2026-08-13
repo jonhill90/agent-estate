@@ -48,6 +48,7 @@ run() {
   PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
     LANES_FIXTURE="$D/lanes" LANES_SESSION=t TMUX_LOG="$D/tmux.log" \
     TMUX_PANES="$D/panes" DISPATCH_SETTLE=0 DISPATCH_CONFIRM_TRIES=2 \
+    DISPATCH_RESPAWN_SETTLE=0 DISPATCH_LAUNCH_SETTLE=0 DISPATCH_SESSION_TIMEOUT=0 \
     AGENT_SUPERVISOR_STATE_DIR="${LEDGER_STATE:?run needs LEDGER_STATE}" \
     STUB_PANE_PATH="${STUB_PANE_PATH:-$REPO}" \
     WORKTREE_ROOT="$D/roots" bash "${DISPATCH_SCRIPT:-$DISPATCH}" "$@" 2>&1
@@ -227,6 +228,12 @@ mutated = '''  # MUTATED: reproduces the pre-#174 bug -- trust the window name o
   if [[ "$wname" =~ ^free-[0-9]+$ ]]; then
     LANE="$candidate"
     LANE_TARGET="$candidate_target"
+    # #15: this mutant never calls lane-free, so there is no $CHECK to read a
+    # harness back from -- every fixture lane in this suite runs claude.exe,
+    # so this is the same value the real path would have resolved here.
+    # Getting it is not what this mutation is testing; step 3.5's relaunch
+    # guard refusing on an empty harness would be.
+    LANE_HARNESS=claude
     break
   fi'''
 text = text.replace(marker, mutated, 1)
