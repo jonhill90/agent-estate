@@ -525,15 +525,31 @@ check_inbox_heartbeat() {
 poller_process_rows() {
   command -v pgrep >/dev/null 2>&1 || return 2
   command -v ps >/dev/null 2>&1 || return 2
-  local pid cmd start
+  local pid cmd start ppid pgid records line parent_pid parent_ppid parent_pgid parent_start skip
   while IFS= read -r pid; do
     [ -n "$pid" ] || continue
     cmd=$(ps -o command= -p "$pid" 2>/dev/null) || continue
     [[ "$cmd" =~ $POLLER_SERVICE_RE ]] || continue
+    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//') || ppid=""
+    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//') || pgid=""
     start=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     [ -n "$start" ] || start=$(ps -o start= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    printf '%s\t%s\n' "$pid" "${start:-unknown}"
+    records="${records:-}${pid}	${ppid:-unknown}	${pgid:-unknown}	${start:-unknown}
+"
   done < <(pgrep -f inbox-poll.sh 2>/dev/null || true)
+  while IFS=$'\t' read -r pid ppid pgid start; do
+    [ -n "$pid" ] || continue
+    skip=0
+    while IFS=$'\t' read -r parent_pid parent_ppid parent_pgid parent_start; do
+      [ -n "$parent_pid" ] || continue
+      if [ "$ppid" = "$parent_pid" ] && [ "$pgid" != "unknown" ] && [ "$pgid" = "$parent_pgid" ]; then
+        skip=1
+        break
+      fi
+    done <<<"${records:-}"
+    [ "$skip" -eq 1 ] && continue
+    printf '%s\t%s\n' "$pid" "${start:-unknown}"
+  done <<<"${records:-}"
   return 0
 }
 
