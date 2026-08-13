@@ -111,6 +111,10 @@
 #   ADVANCE_ROLLBACK      default $SUPERVISOR_STATE/.live-rollback-sha
 #   ADVANCE_TICK_INTERVAL watchdog cadence in seconds; default 180
 #   ADVANCE_SAFETY_BUFFER seconds before the next tick to stay clear of; default 30
+#   ADVANCE_WATCHDOG_STALE_MULTIPLE  how many tick intervals old `checked:` may
+#                                    get before this is treated as the
+#                                    watchdog LaunchAgent being gone rather
+#                                    than mid-cadence; default 3
 #   SUPERVISOR_INBOX_POLL_STATUS  inbox-poll.sh's own status file (read, not
 #                                 written); default $SUPERVISOR_STATE/inbox-poll.status
 #   INBOX_POLL_RESTART_FLAG       written to request a poller restart; must
@@ -131,6 +135,8 @@ LOG="${ADVANCE_LOG:-$STATE/advance-live.log}"
 ROLLBACK="${ADVANCE_ROLLBACK:-$STATE/.live-rollback-sha}"
 TICK_INTERVAL="${ADVANCE_TICK_INTERVAL:-180}"
 SAFETY_BUFFER="${ADVANCE_SAFETY_BUFFER:-30}"
+STALE_MULTIPLE="${ADVANCE_WATCHDOG_STALE_MULTIPLE:-3}"
+STALE_AFTER=$((TICK_INTERVAL * STALE_MULTIPLE))
 
 log() { mkdir -p "$(dirname "$LOG")" 2>/dev/null; printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG"; }
 fail() { log "FAIL: $*"; echo "advance-live: $*" >&2; exit 1; }
@@ -155,6 +161,59 @@ watchdog_age() {
   [ -n "$epoch" ] || return 1
   now=$(date -u +%s)
   echo $((now - epoch))
+}
+
+# --- agent-supervisor#24: the watchdog's own absence must be loud ----------
+# `watchdog.status`'s `checked:` line is the watchdog's own heartbeat: it is
+# rewritten on every tick, including every early-exit path (watchdog.sh's
+# report()), so it going stale means the LaunchAgent itself stopped ticking,
+# not that the loop is merely idle. On 2026-08-13 the watchdog was unloaded
+# for 91 minutes (10:14:38Z-11:45:36Z) and nothing here noticed: it was found
+# only because a human happened to `cat` this file and compare it to the
+# clock by hand.
+#
+# THIS is where that check lives, not a new script, and not lanes.sh:
+#   - advance-live.sh already runs on every supervisor tick -- it is
+#     loop-tick.md's literal first step -- so wiring the check in here needs
+#     nothing new remembered on the tick's path. A separate script the tick
+#     has to additionally call is exactly the shape #81/#99 both criticised
+#     ("a step in a brief is a step that can be skipped"; "a tool nothing
+#     calls is a documentation rule with a binary attached").
+#   - advance-live.sh already parses this exact file's `checked:` line, for
+#     the unrelated post-tick race gate below (watchdog_age). Reusing that
+#     function keeps one parser for one timestamp instead of two that could
+#     drift.
+#   - lanes.sh answers "what is tmux doing" from pane content; it has no
+#     reason to open a state-directory status file, and teaching it to would
+#     duplicate watchdog_age() for no caller this script does not already
+#     have.
+#
+# WHY THIS RUNS BEFORE EVERYTHING ELSE, not folded into the race gate lower
+# down: the race gate is only reached when LIVE is genuinely behind
+# origin/main (the `cur = target` shortcut returns first) -- so a dead
+# watchdog with an up-to-date live copy would sail through this script
+# reporting nothing wrong, the exact failure this check exists to close.
+#
+# WHY A MULTIPLE OF THE TICK INTERVAL, not the race gate's own
+# TICK_INTERVAL-SAFETY_BUFFER window: that window is deliberately tight (it
+# exists to stay OUT of a live tick), and tripping this alarm on ordinary
+# scheduling jitter between two watchdog ticks would make it noise within a
+# single healthy cadence -- exactly the false-alarm-every-tick shape #22
+# named as how a real alarm gets ignored. Three tick intervals (9 minutes at
+# the default 180s cadence) is short enough to catch a dead watchdog in a
+# couple of ticks and long enough that a healthy watchdog, which rewrites
+# this line every ~180s, never gets near it.
+#
+# Exits non-zero and never returns: a stale watchdog is reported LOUDLY, on
+# this script's own exit code, rather than folded into `skip()`'s quiet
+# exit-0 shape used for "outside the safe window, try again next tick" --
+# those are both correct-and-boring; this is not.
+watchdog_stale_check() {
+  local age line
+  age=$(watchdog_age) || return 0
+  [ "$age" -gt "$STALE_AFTER" ] || return 0
+  line=$(grep -m1 '^checked:' "$WATCHDOG_STATUS" 2>/dev/null | sed 's/^checked:  *//')
+  fail "WATCHDOG STALE -- $WATCHDOG_STATUS last checked ${line:-unknown} (${age}s ago), older than ${STALE_AFTER}s (${STALE_MULTIPLE}x the ${TICK_INTERVAL}s tick interval) -- the watchdog LaunchAgent may be unloaded or dead; nothing is restarting the supervisor loop if it dies"
 }
 
 # --- agent-dotfiles#187: restart a stale inbox-poll.sh ----------------------
@@ -250,6 +309,8 @@ maybe_restart_poller() {
   log "POLLER-RESTART-REQUESTED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written; poller-recover.sh relaunches it once it exits (agent-supervisor#10)"
   return 0
 }
+
+watchdog_stale_check
 
 git -C "$LIVE" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git worktree: $LIVE"
 
