@@ -620,14 +620,21 @@ python3 -m unittest discover -s tests -v
 python3 -m py_compile scripts/supervisor/*.py
 ```
 
-The first command is agent-dotfiles' repository-wide test command, run from
-the repository root; it discovers this core's tests under `tests/supervisor/`
+The first command is this repository's own test command, run from the
+repository root, and `.github/workflows/validate.yml` runs it on every
+`pull_request`; it discovers this core's tests under `tests/supervisor/`
 along with the rest of the suite — including the stub-driven bash suites for
 `lanes.sh`, `watchdog.sh`, `claim.sh`, `worktree.sh` and `dispatch.sh`, which
 `test_shell_suites.py` runs as
 subtests. Until that shim existed the sentence above was false for them: they
 were in no workflow and no test shelled out to them, so a regression in
 `lanes.sh` would have reached `main` green.
+
+`test_bootstrap_session.sh`, `test_lane_done.sh` and `test_restore.sh` also
+gate real-tmux checks behind `command -v tmux`, skipping loudly
+(`SKIP real-tmux checks: tmux not installed …`) rather than passing silently
+when tmux is absent. The workflow installs tmux via `apt-get` so CI exercises
+those checks for real instead of skipping them.
 
 The v4-cutover, rollback, and launchd-adapter behavior described below is
 Hill90-specific and lives in Hill90's `service.sh` and `install.sh`, not in
