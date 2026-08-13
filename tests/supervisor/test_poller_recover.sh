@@ -570,6 +570,184 @@ fi
 tmux kill-window -t "$S:inbox-poll" 2>/dev/null
 rm -f "$STATE/pid" "$STATE/stop" "$ORPHAN_RELEASE"
 
+echo
+echo "poller-recover.sh: agent-supervisor#25 -- the orphan check must not fail open when lsof is off PATH"
+
+# The measured production defect: the LaunchAgent's PATH (watchdog.sh's own
+# SUPERVISOR_PATH default, quoted verbatim in the issue) has no /usr/sbin,
+# so bare `lsof` (which lives at /usr/sbin/lsof on macOS) was unreachable by
+# name. Excluding lsof's directory wholesale is not portable to where this
+# suite also runs (CI, Linux): on a merged-usr distro /bin is a symlink to
+# /usr/bin, so removing "the directory containing lsof" from the PATH
+# literal removes ps/tmux/sed/etc. right along with it, breaking the script
+# for reasons that have nothing to do with #25. What matters is narrower:
+# every OTHER tool this script needs stays reachable, and only lsof is
+# not. Build a PATH with exactly that shape -- a directory of symlinks to
+# every external tool poller-recover.sh actually calls, lsof deliberately
+# excluded -- rather than trying to reproduce a literal that only applies
+# to one platform.
+POLLER_RECOVER_TOOLS="tmux pgrep ps mkdir date printf tee cat kill sed awk rm dirname head"
+# Resolved BEFORE the PATH restriction is built: `VAR=val cmd` looks up
+# `cmd` itself against the NEW value of VAR when VAR is PATH, so invoking
+# bare `bash` under a restricted PATH would fail to find bash itself --
+# nothing to do with #25, just command lookup. Calling bash by absolute
+# path bypasses PATH search entirely for the interpreter, the same way
+# `command -v tool` above resolves each dependency once, up front.
+BASH_BIN="$(command -v bash)"
+LSOF_REAL_PATH="$(command -v lsof 2>/dev/null || true)"
+if [ -z "$LSOF_REAL_PATH" ]; then
+  echo "  SKIP no lsof on this machine -- cannot construct a PATH that omits it"
+else
+  TESTBIN="$STATE/launchd-path-bin"
+  rm -rf "$TESTBIN"; mkdir -p "$TESTBIN"
+  missing_tool=""
+  for t in $POLLER_RECOVER_TOOLS; do
+    real="$(command -v "$t" 2>/dev/null || true)"
+    if [ -z "$real" ]; then
+      missing_tool="$t"; break
+    fi
+    # A bash builtin (kill, printf) reports its bare name, no path -- it
+    # resolves without consulting PATH at all, so no symlink is needed or
+    # possible for it.
+    case "$real" in
+      /*) ln -s "$real" "$TESTBIN/$t" ;;
+    esac
+  done
+  LAUNCHD_PATH="$TESTBIN"
+  recover_launchd_path() {
+    PATH="$LAUNCHD_PATH" POLLER_WINDOW=inbox-poll POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
+      POLLER_RECOVER_LOCK="$STATE/.lock" POLLER_RECOVER_LOG="$STATE/log" \
+      SUPERVISOR_STATE="$STATE" "$BASH_BIN" "$RECOVER" "$S"
+  }
+
+  if [ -n "$missing_tool" ]; then
+    bad "setup: built a PATH with every poller-recover.sh dependency but lsof" \
+      "'$missing_tool' is not on this machine's PATH -- cannot build the fixture"
+  elif PATH="$LAUNCHD_PATH" command -v lsof >/dev/null 2>&1; then
+    bad "setup: LAUNCHD_PATH omits lsof" \
+      "lsof is still resolvable under the constructed PATH ($LAUNCHD_PATH) -- this test would not exercise the defect"
+  else
+    ok "setup: LAUNCHD_PATH carries every other dependency but omits lsof, matching the measured LaunchAgent gap"
+  fi
+
+rm -f "$STATE/pid" "$STATE/stop" "$ORPHAN_RELEASE"
+tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+tmux new-window -t "$S" -n inbox-poll -d 2>/dev/null
+tmux send-keys -t "$S:inbox-poll" -l "$ORPHAN_CMD" 2>/dev/null
+tmux send-keys -t "$S:inbox-poll" Enter 2>/dev/null
+for _ in $(seq 1 50); do [ -f "$STATE/pid" ] && break; sleep 0.1; done
+p12="$(live_pid)"
+pid_alive "$p12" && ok "setup: the orphan-to-be is running, in a window (launchd-PATH test)" \
+  || bad "setup: the orphan-to-be is running, in a window (launchd-PATH test)" "no live pid recorded"
+
+tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+for _ in $(seq 1 50); do [ "$(window_count)" = "0" ] && break; sleep 0.1; done
+[ "$(window_count)" = "0" ] && ok "the window is gone (launchd-PATH test)" \
+  || bad "the window is gone (launchd-PATH test)" "window_count=$(window_count)"
+pid_alive "$p12" && ok "the poller process survives its window (launchd-PATH test)" \
+  || bad "the poller process survives its window (launchd-PATH test)" "pid $p12 is not alive"
+
+out12=$(recover_launchd_path 2>&1); rc12=$?
+[ "$rc12" -ne 0 ] && ok "under a PATH with everything but lsof (the LaunchAgent's gap), recover() against a windowless orphan still refuses" \
+  || bad "under a PATH with everything but lsof (the LaunchAgent's gap), recover() against a windowless orphan still refuses" "exit $rc12: $out12"
+[ "$(window_count)" = "0" ] && ok "no window is created over a live orphan under the LaunchAgent PATH" \
+  || bad "no window is created over a live orphan under the LaunchAgent PATH" "window_count=$(window_count)"
+[ "$(orphan_pid_count)" = "1" ] && ok "no second inbox-poll.sh process is started under the LaunchAgent PATH -- exactly one, still the orphan" \
+  || bad "no second inbox-poll.sh process is started under the LaunchAgent PATH" "orphan_pid_count=$(orphan_pid_count)"
+
+: >"$ORPHAN_RELEASE"
+for _ in $(seq 1 50); do [ "$(orphan_pid_count)" = "0" ] && break; sleep 0.1; done
+rm -f "$STATE/pid" "$STATE/stop" "$ORPHAN_RELEASE"
+tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+
+# --- 13. MUTATION CONFIRMED: revert to bare `lsof` (no absolute-path
+# fallback, no fail-closed on missing/erroring/empty lsof) and watch test 12
+# go red -- proves test 12 is actually pinning the #25 fix, not passing by
+# luck. This is the exact pre-fix shape: `2>/dev/null` swallowing lsof's
+# failure into an empty $cand_cwd, `continue`d past as "not the poller".
+PRE_FIX="$STATE/poller-recover.pre-fix-25.sh"
+patch_rc=0
+python3 - "$RECOVER" "$PRE_FIX" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+
+lsof_resolve_start = 'LSOF_BIN=""\n'
+lsof_resolve_end = '''elif [ -x /usr/sbin/lsof ]; then
+  LSOF_BIN="/usr/sbin/lsof"
+fi
+'''
+assert lsof_resolve_start in text, "LSOF_BIN resolution start marker not found -- poller-recover.sh shape changed"
+assert lsof_resolve_end in text, "LSOF_BIN resolution end marker not found -- poller-recover.sh shape changed"
+start_i = text.index(lsof_resolve_start)
+end_i = text.index(lsof_resolve_end) + len(lsof_resolve_end)
+text = text[:start_i] + text[end_i:]
+
+loop_marker_start = '''    if [ -z "$LSOF_BIN" ]; then
+      log "FAILED -- lsof is not available (checked PATH and /usr/sbin/lsof) -- cannot determine cwd of candidate pid $cand_pid ($cmd), refusing to rule out a live poller"
+      exit 1
+    fi
+    cand_lsof_out=$("$LSOF_BIN" -a -p "$cand_pid" -d cwd -Fn 2>&1)
+    lsof_rc=$?
+    if [ "$lsof_rc" -ne 0 ]; then
+      log "FAILED -- $LSOF_BIN exited $lsof_rc probing candidate pid $cand_pid ($cmd): ${cand_lsof_out:-no output} -- refusing to rule out a live poller"
+      exit 1
+    fi
+    cand_cwd=$(printf '%s\\n' "$cand_lsof_out" | sed -n 's/^n//p' | head -1)
+    if [ -z "$cand_cwd" ]; then
+      log "FAILED -- $LSOF_BIN reported no cwd for candidate pid $cand_pid ($cmd) -- refusing to rule out a live poller"
+      exit 1
+    fi
+'''
+assert loop_marker_start in text, "orphan-check lsof-probe block not found -- poller-recover.sh shape changed"
+assert text.count(loop_marker_start) == 1, "orphan-check lsof-probe block not unique -- poller-recover.sh shape changed"
+pre_fix_probe = '''    cand_cwd=$(lsof -a -p "$cand_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
+    [ -n "$cand_cwd" ] || continue
+'''
+text = text.replace(loop_marker_start, pre_fix_probe, 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a pre-#25-fix copy of poller-recover.sh" \
+    "could not patch $RECOVER (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a pre-#25-fix copy of poller-recover.sh (bare lsof, no fail-closed)"
+  chmod +x "$PRE_FIX"
+  pre_fix_recover_launchd_path() {
+    PATH="$LAUNCHD_PATH" POLLER_WINDOW=inbox-poll POLLER_LAUNCH_CMD="$LAUNCH_CMD" \
+      POLLER_RECOVER_LOCK="$STATE/.lock" POLLER_RECOVER_LOG="$STATE/log" \
+      SUPERVISOR_STATE="$STATE" "$BASH_BIN" "$PRE_FIX" "$S"
+  }
+
+  rm -f "$STATE/pid" "$STATE/stop" "$ORPHAN_RELEASE"
+  tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+  tmux new-window -t "$S" -n inbox-poll -d 2>/dev/null
+  tmux send-keys -t "$S:inbox-poll" -l "$ORPHAN_CMD" 2>/dev/null
+  tmux send-keys -t "$S:inbox-poll" Enter 2>/dev/null
+  for _ in $(seq 1 50); do [ -f "$STATE/pid" ] && break; sleep 0.1; done
+  tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+  for _ in $(seq 1 50); do [ "$(window_count)" = "0" ] && break; sleep 0.1; done
+
+  out_m=$(pre_fix_recover_launchd_path 2>&1)
+  for _ in $(seq 1 50); do [ "$(window_count)" = "1" ] && break; sleep 0.1; done
+  # Same duplicate signature as test 11: a new window/pid via $LAUNCH_CMD
+  # (the generic $STAND_IN) alongside the untouched orphan (still counted
+  # separately, by its own script path) -- the exact "created a duplicate
+  # window and a second poller" the issue measured in production.
+  if [ "$(window_count)" = "1" ] && [ "$(orphan_pid_count)" = "1" ]; then
+    ok "mutation confirmed: the pre-#25 script fails open under the LaunchAgent PATH and duplicates a windowless poller (test 12's assertion would now be red)"
+  else
+    bad "mutation confirmed: the pre-#25 script fails open under the LaunchAgent PATH and duplicates a windowless poller" \
+      "window_count=$(window_count) orphan_pid_count=$(orphan_pid_count) -- expected a new window created (the duplicate) alongside the untouched orphan; recover() output: $out_m"
+  fi
+  : >"$ORPHAN_RELEASE"
+  for _ in $(seq 1 50); do [ "$(orphan_pid_count)" = "0" ] && break; sleep 0.1; done
+  : >"$STATE/stop" 2>/dev/null
+fi
+tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+rm -f "$STATE/pid" "$STATE/stop" "$ORPHAN_RELEASE"
+fi   # LSOF_REAL_PATH found
+
 if [ "$fail" -eq 0 ]; then
   echo "$pass passed, $fail failed"
 else

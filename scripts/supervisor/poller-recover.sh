@@ -150,6 +150,22 @@ real_path() { (cd "$1" 2>/dev/null && pwd -P) || printf '%s' "$1"; }
 command -v tmux >/dev/null 2>&1 || { log "no tmux on PATH -- nothing to do"; exit 0; }
 tmux has-session -t "$SESSION" 2>/dev/null || { log "no session '$SESSION' -- nothing to recover into"; exit 0; }
 
+# agent-supervisor#25: lsof lives at /usr/sbin/lsof on macOS, and
+# /usr/sbin is NOT on the LaunchAgent's PATH (watchdog.sh's own hardcoded
+# PATH override, which every child it execs -- including this script --
+# inherits, lists /opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:$HOME/.local/bin
+# and nothing under /sbin). Under that PATH `command -v lsof` finds nothing,
+# and the orphan check below used to treat that exactly like "this
+# candidate has no cwd" -- i.e. "not the poller", the fail-OPEN defect this
+# fix closes. Resolved once, here, by absolute path if bare `lsof` is not
+# on PATH, so the orphan check does not depend on the caller's PATH at all.
+LSOF_BIN=""
+if command -v lsof >/dev/null 2>&1; then
+  LSOF_BIN="lsof"
+elif [ -x /usr/sbin/lsof ]; then
+  LSOF_BIN="/usr/sbin/lsof"
+fi
+
 mkdir -p "$STATE" 2>/dev/null
 
 # Atomic: mkdir either creates the directory and succeeds, or finds it
@@ -236,8 +252,29 @@ if [ "${#ids[@]}" -eq 0 ]; then
     [ -n "$cand_pid" ] || continue
     cmd=$(ps -o command= -p "$cand_pid" 2>/dev/null) || continue
     [[ "$cmd" =~ $SERVICE_RE ]] || continue
-    cand_cwd=$(lsof -a -p "$cand_pid" -d cwd -Fn 2>/dev/null | sed -n 's/^n//p' | head -1)
-    [ -n "$cand_cwd" ] || continue
+    # agent-supervisor#25: "cannot determine this candidate's cwd" must mean
+    # "cannot rule out a live poller", never "no poller alive". A missing
+    # lsof binary, an lsof that errors, and an lsof that runs but reports no
+    # cwd were all previously swallowed by `2>/dev/null` into the same empty
+    # $cand_cwd and treated as "not the poller" (`continue`) -- exactly the
+    # fail-open this issue is about. All three now refuse instead: the tick
+    # no-ops (exit 1, no window touched) rather than concluding "no poller
+    # alive" on missing information.
+    if [ -z "$LSOF_BIN" ]; then
+      log "FAILED -- lsof is not available (checked PATH and /usr/sbin/lsof) -- cannot determine cwd of candidate pid $cand_pid ($cmd), refusing to rule out a live poller"
+      exit 1
+    fi
+    cand_lsof_out=$("$LSOF_BIN" -a -p "$cand_pid" -d cwd -Fn 2>&1)
+    lsof_rc=$?
+    if [ "$lsof_rc" -ne 0 ]; then
+      log "FAILED -- $LSOF_BIN exited $lsof_rc probing candidate pid $cand_pid ($cmd): ${cand_lsof_out:-no output} -- refusing to rule out a live poller"
+      exit 1
+    fi
+    cand_cwd=$(printf '%s\n' "$cand_lsof_out" | sed -n 's/^n//p' | head -1)
+    if [ -z "$cand_cwd" ]; then
+      log "FAILED -- $LSOF_BIN reported no cwd for candidate pid $cand_pid ($cmd) -- refusing to rule out a live poller"
+      exit 1
+    fi
     [ "$(real_path "$cand_cwd")" = "$live_real" ] || continue
     orphan_pid="$cand_pid"
     break
