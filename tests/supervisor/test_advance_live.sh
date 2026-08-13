@@ -582,10 +582,10 @@ exit 0
 EOF
 chmod +x "$STUBS/tmux"
 
-# --- a stale poller (sha differs from LIVE3) gets a restart queued ---------
+# --- a stale poller (sha differs from LIVE3) gets a restart requested ------
 S=$(mktemp -d)
 printf 'checked: %s\nstate:   ok\nsha:     deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$S/inbox-poll.status"
-out=$(SUPERVISOR_STATE="$S" LANES_SESSION="test-session-187" PATH="$STUBS:$PATH" bash "$ADVANCE" "$LIVE3" 2>&1); rc=$?
+out=$(SUPERVISOR_STATE="$S" LANES_SESSION="test-session-187" INBOX_POLL_RELAUNCH_WAIT_SECONDS=0 PATH="$STUBS:$PATH" bash "$ADVANCE" "$LIVE3" 2>&1); rc=$?
 want_exit "a poller-restart check never fails the tick (exit 0)" "$rc" 0 "$out"
 [ -f "$S/.inbox-poll-restart-requested" ] && ok "a stale poller gets a restart flag written" \
   || bad "a stale poller gets a restart flag written" "$(ls "$S" 2>/dev/null)"
@@ -630,7 +630,7 @@ else
   S_MUT=$(mktemp -d)
   printf 'checked: %s\nstate:   ok\nsha:     deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$S_MUT/inbox-poll.status"
   : >"$TMUX_LOG"
-  out_mut=$(SUPERVISOR_STATE="$S_MUT" LANES_SESSION="test-session-187" PATH="$STUBS:$PATH" bash "$MUT/scripts/supervisor/advance-live.sh" "$LIVE3" 2>&1); rc_mut=$?
+  out_mut=$(SUPERVISOR_STATE="$S_MUT" LANES_SESSION="test-session-187" INBOX_POLL_RELAUNCH_WAIT_SECONDS=0 PATH="$STUBS:$PATH" bash "$MUT/scripts/supervisor/advance-live.sh" "$LIVE3" 2>&1); rc_mut=$?
   if [ ! -f "$S_MUT/.inbox-poll-restart-requested" ] \
      && grep -qi 'no poller window' "$S_MUT/advance-live.log" 2>/dev/null; then
     ok "mutation confirmed: a recognizer pointed at a missing name cannot restart the stale poller (the assertion above would be red)"
@@ -651,14 +651,14 @@ want_exit "a current-poller check never fails the tick (exit 0)" "$rc2" 0 "$out2
 [ ! -s "$TMUX_LOG" ] && ok "a current poller triggers no tmux send-keys" \
   || bad "a current poller triggers no tmux send-keys" "$(cat "$TMUX_LOG")"
 
-# --- a restart already in flight is not re-queued ---------------------------
+# --- a restart already in flight is not requested again ---------------------
 S3=$(mktemp -d)
 printf 'checked: %s\nstate:   ok\nsha:     deadbeef\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$S3/inbox-poll.status"
 : >"$S3/.inbox-poll-restart-requested"
 : >"$TMUX_LOG"
 out3=$(SUPERVISOR_STATE="$S3" LANES_SESSION="test-session-187" PATH="$STUBS:$PATH" bash "$ADVANCE" "$LIVE3" 2>&1); rc3=$?
-[ ! -s "$TMUX_LOG" ] && ok "a restart already pending is not re-queued" \
-  || bad "a restart already pending is not re-queued" "$(cat "$TMUX_LOG")"
+[ ! -s "$TMUX_LOG" ] && ok "a restart already pending is not requested again" \
+  || bad "a restart already pending is not requested again" "$(cat "$TMUX_LOG")"
 
 # --- no window matches the poller: refuses to guess, does not restart ------
 kill "$POLLER_PANE_PID" 2>/dev/null; wait "$POLLER_PANE_PID" 2>/dev/null
@@ -682,6 +682,200 @@ want_exit "multiple poller windows still leave advance-live exit 0" "$rc5" 0 "$o
 grep -qi "multiple poller windows named 'inbox-poll' exist in session 'test-session-187' -- refusing to guess" "$S5/advance-live.log" 2>/dev/null \
   && ok "multiple poller windows refusal is logged" \
   || bad "multiple poller windows refusal is logged" "$(cat "$S5/advance-live.log" 2>/dev/null)"
+
+echo
+echo "advance-live.sh: agent-supervisor#47 -- prompt poller relaunch"
+
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "  SKIP no tmux on PATH"
+else
+  # This drives real tmux, but under a private socket directory. It never
+  # addresses the live supervisor session.
+  # shellcheck source=./tmux-isolation.sh
+  source "$HERE/../../scripts/supervisor/tmux-isolation.sh"
+  RT47="$(mktemp -d "${TMPDIR:-/tmp}/advance-live-47-tmux.XXXXXX")"
+  OLD_TMUX="${TMUX-}"
+  OLD_TMUX_TMPDIR="${TMUX_TMPDIR-}"
+  unset TMUX
+  export TMUX_TMPDIR="$RT47"
+  S47_SESSION="advance-live-47-$$"
+  if ! assert_isolated_tmux; then
+    bad "setup: isolated tmux socket for #47 prompt relaunch test" "TMUX_TMPDIR=$TMUX_TMPDIR"
+  else
+    ok "setup: isolated tmux socket for #47 prompt relaunch test"
+    S47="$(mktemp -d "${TMPDIR:-/tmp}/advance-live-47-state.XXXXXX")"
+    STAND_IN_47="$RT47/inbox-poll.sh"
+    cat >"$STAND_IN_47" <<'EOF'
+#!/bin/bash
+set -u
+STATUS="${INBOX_POLL_STATUS:?}"
+FLAG="${INBOX_POLL_RESTART_FLAG:?}"
+PID_FILE="${POLLER_PID_FILE:?}"
+PID_HISTORY="${POLLER_PID_HISTORY:?}"
+SHA="${POLLER_STATUS_SHA:?}"
+mkdir -p "$(dirname "$STATUS")"
+echo "$$" >"$PID_FILE"
+echo "$$" >>"$PID_HISTORY"
+{
+  printf 'checked: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'sha:     %s\n' "$SHA"
+  printf 'state:   ok\n'
+  printf 'pid:     %s\n' "$$"
+} >"$STATUS"
+while :; do
+  if [ -f "$FLAG" ]; then
+    rm -f "$FLAG"
+    {
+      printf 'checked: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'sha:     %s\n' "$SHA"
+      printf 'state:   stopped\n'
+      printf 'pid:     %s\n' "$$"
+    } >"$STATUS"
+    exit 0
+  fi
+  sleep 0.1
+done
+EOF
+    chmod +x "$STAND_IN_47"
+
+    tmux new-session -d -s "$S47_SESSION" -x 200 -y 50
+    FLAG47="$S47/.inbox-poll-restart-requested"
+    STATUS47="$S47/inbox-poll.status"
+    PID47="$S47/pid"
+    PID_HISTORY47="$S47/pids"
+    LAUNCH47="INBOX_POLL_STATUS='$STATUS47' INBOX_POLL_RESTART_FLAG='$FLAG47' POLLER_PID_FILE='$PID47' POLLER_PID_HISTORY='$PID_HISTORY47' POLLER_STATUS_SHA='$live3_sha' exec '$STAND_IN_47'"
+    OLD_LAUNCH47="INBOX_POLL_STATUS='$STATUS47' INBOX_POLL_RESTART_FLAG='$FLAG47' POLLER_PID_FILE='$PID47' POLLER_PID_HISTORY='$PID_HISTORY47' POLLER_STATUS_SHA='deadbeefdeadbeefdeadbeefdeadbeefdeadbeef' exec '$STAND_IN_47'"
+    tmux new-window -t "$S47_SESSION" -n inbox-poll -d -- "$OLD_LAUNCH47"
+    tmux set-window-option -t "$S47_SESSION:inbox-poll" remain-on-exit on >/dev/null 2>&1
+
+    wait_for_pid_file() {
+      local deadline=$((SECONDS + 8))
+      while [ ! -s "$PID47" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.1; done
+      [ -s "$PID47" ]
+    }
+    pid_alive_47() { [ -n "${1:-}" ] && kill -0 "$1" 2>/dev/null; }
+    window_count_47() { tmux list-windows -t "$S47_SESSION" -F '#{window_name}' 2>/dev/null | grep -cFx inbox-poll; }
+    live_poller_count_47() {
+      local count=0 p
+      while IFS= read -r p; do
+        [ -n "$p" ] && kill -0 "$p" 2>/dev/null && count=$((count + 1))
+      done < <(pgrep -f "$STAND_IN_47" 2>/dev/null)
+      printf '%s\n' "$count"
+    }
+    await_replacement_47() {
+      local old="$1" deadline=$((SECONDS + 8)) new
+      while [ "$SECONDS" -lt "$deadline" ]; do
+        new=$(cat "$PID47" 2>/dev/null)
+        if [ -n "$new" ] && [ "$new" != "$old" ] && pid_alive_47 "$new"; then
+          printf '%s\n' "$new"
+          return 0
+        fi
+        sleep 0.1
+      done
+      return 1
+    }
+
+    if wait_for_pid_file; then
+      old47=$(cat "$PID47")
+      ok "setup: stale poller is running before #47 restart"
+    else
+      old47=""
+      bad "setup: stale poller is running before #47 restart" "no pid file"
+    fi
+
+    out47=$(SUPERVISOR_STATE="$S47" INBOX_POLL_RESTART_FLAG="$FLAG47" SUPERVISOR_INBOX_POLL_STATUS="$STATUS47" \
+      LANES_SESSION="$S47_SESSION" POLLER_LAUNCH_CMD="$LAUNCH47" POLLER_RECOVER_LOCK="$S47/.recover.lock" \
+      POLLER_RECOVER_LOG="$S47/recover.log" INBOX_POLL_RELAUNCH_WAIT_SECONDS=8 \
+      bash "$ADVANCE" "$LIVE3" 2>&1); rc47=$?
+    want_exit "#47 prompt relaunch request keeps advance-live exit 0" "$rc47" 0 "$out47"
+    new47=$(await_replacement_47 "$old47" || true)
+    if [ -n "$new47" ]; then
+      ok "restart flag makes the poller exit and a different live pid appears within seconds"
+    else
+      bad "restart flag makes the poller exit and a different live pid appears within seconds" \
+        "old=$old47 current=$(cat "$PID47" 2>/dev/null) log=$(cat "$S47/advance-live.log" 2>/dev/null) recover=$(cat "$S47/recover.log" 2>/dev/null)"
+    fi
+    [ "$(window_count_47)" = "1" ] && [ "$(live_poller_count_47)" = "1" ] \
+      && ok "prompt relaunch leaves exactly one live poller" \
+      || bad "prompt relaunch leaves exactly one live poller" \
+        "windows=$(window_count_47) live_processes=$(live_poller_count_47) pids=$(cat "$PID_HISTORY47" 2>/dev/null)"
+
+    # Two quick restart requests must end with one poller, relying on
+    # poller-recover.sh's existing lock/idempotency instead of a second
+    # launcher in advance-live.sh.
+    current47=$(cat "$PID47" 2>/dev/null)
+    {
+      printf 'checked: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      printf 'sha:     stale-second-request\n'
+      printf 'state:   ok\n'
+      printf 'pid:     %s\n' "$current47"
+    } >"$STATUS47"
+    SUPERVISOR_STATE="$S47" INBOX_POLL_RESTART_FLAG="$FLAG47" SUPERVISOR_INBOX_POLL_STATUS="$STATUS47" \
+      LANES_SESSION="$S47_SESSION" POLLER_LAUNCH_CMD="$LAUNCH47" POLLER_RECOVER_LOCK="$S47/.recover.lock" \
+      POLLER_RECOVER_LOG="$S47/recover.log" INBOX_POLL_RELAUNCH_WAIT_SECONDS=8 \
+      bash "$ADVANCE" "$LIVE3" >/dev/null 2>&1
+    SUPERVISOR_STATE="$S47" INBOX_POLL_RESTART_FLAG="$FLAG47" SUPERVISOR_INBOX_POLL_STATUS="$STATUS47" \
+      LANES_SESSION="$S47_SESSION" POLLER_LAUNCH_CMD="$LAUNCH47" POLLER_RECOVER_LOCK="$S47/.recover.lock" \
+      POLLER_RECOVER_LOG="$S47/recover.log" INBOX_POLL_RELAUNCH_WAIT_SECONDS=8 \
+      bash "$ADVANCE" "$LIVE3" >/dev/null 2>&1
+    newer47=$(await_replacement_47 "$current47" || true)
+    [ -n "$newer47" ] && [ "$(window_count_47)" = "1" ] && [ "$(live_poller_count_47)" = "1" ] \
+      && ok "two quick restart requests end with exactly one live poller" \
+      || bad "two quick restart requests end with exactly one live poller" \
+        "replacement=${newer47:-none} windows=$(window_count_47) live_processes=$(live_poller_count_47) pids=$(cat "$PID_HISTORY47" 2>/dev/null)"
+
+    MUT47="$S47/advance-live.no-prompt.sh"
+    patch_rc=0
+    python3 - "$ADVANCE" "$MUT47" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''  if prompt_poller_relaunch "$pane" "$poller_sha" "$live_sha" "$poller_pid"; then
+    log "POLLER-RESTART-REQUESTED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written; prompt poller-recover.sh waiter started (watchdog remains the backstop)"
+  else
+    log "POLLER-RESTART-REQUESTED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written; prompt relaunch could not be started, watchdog poller-recover.sh remains the backstop"
+  fi
+'''
+replacement = '''  log "POLLER-RESTART-REQUESTED: pane $pane, poller was $poller_sha, live now $live_sha -- flag written; prompt relaunch removed for this mutation test"
+'''
+assert marker in text, "prompt relaunch block not found -- advance-live.sh shape changed"
+assert text.count(marker) == 1, "prompt relaunch block not unique -- advance-live.sh shape changed"
+open(dst, "w").write(text.replace(marker, replacement, 1))
+PY
+    if [ "$patch_rc" -ne 0 ]; then
+      bad "setup: patched prompt relaunch out of advance-live.sh" "patch failed with exit $patch_rc"
+    else
+      ok "setup: patched prompt relaunch out of advance-live.sh"
+      chmod +x "$MUT47"
+      current47=$(cat "$PID47" 2>/dev/null)
+      {
+        printf 'checked: %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+        printf 'sha:     stale-without-prompt\n'
+        printf 'state:   ok\n'
+        printf 'pid:     %s\n' "$current47"
+      } >"$STATUS47"
+      SUPERVISOR_STATE="$S47" INBOX_POLL_RESTART_FLAG="$FLAG47" SUPERVISOR_INBOX_POLL_STATUS="$STATUS47" \
+        LANES_SESSION="$S47_SESSION" POLLER_LAUNCH_CMD="$LAUNCH47" POLLER_RECOVER_LOCK="$S47/.recover.lock" \
+        POLLER_RECOVER_LOG="$S47/recover.log" INBOX_POLL_RELAUNCH_WAIT_SECONDS=2 \
+        bash "$MUT47" "$LIVE3" >/dev/null 2>&1
+      sleep 3
+      no_prompt_pid=$(cat "$PID47" 2>/dev/null)
+      if [ "$no_prompt_pid" = "$current47" ] || ! pid_alive_47 "$no_prompt_pid"; then
+        ok "mutation confirmed: removing prompt relaunch leaves no different live pid within the bound"
+      else
+        bad "mutation confirmed: removing prompt relaunch leaves no different live pid within the bound" \
+          "old=$current47 now=$no_prompt_pid recover=$(cat "$S47/recover.log" 2>/dev/null)"
+      fi
+    fi
+
+    tmux kill-session -t "$S47_SESSION" 2>/dev/null
+    pkill -KILL -f "$STAND_IN_47" 2>/dev/null
+    rm -rf "$S47" "$RT47"
+  fi
+  unset TMUX
+  if [ -n "$OLD_TMUX_TMPDIR" ]; then export TMUX_TMPDIR="$OLD_TMUX_TMPDIR"; else unset TMUX_TMPDIR; fi
+  if [ -n "$OLD_TMUX" ]; then export TMUX="$OLD_TMUX"; else unset TMUX; fi
+fi
 
 rm -rf "$D3"
 

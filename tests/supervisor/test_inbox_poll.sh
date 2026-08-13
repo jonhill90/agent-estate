@@ -517,9 +517,9 @@ recorded=$(grep -m1 '^sha:' "$D/status" 2>/dev/null | awk '{print $2}')
 
 # --- agent-dotfiles#187: a version-triggered restart is deliberate ---------
 # advance-live.sh's maybe_restart_poller writes INBOX_POLL_RESTART_FLAG and
-# queues a relaunch; this end only has to notice the flag, exit cleanly
-# between iterations, and not page Jon about it -- the same DELIBERATE gate
-# #155/#160 already built for the INBOX_POLL_ITERATIONS path above.
+# starts a prompt relaunch waiter; this end only has to notice the flag, exit
+# cleanly between iterations, and not page Jon about it -- the same DELIBERATE
+# gate #155/#160 already built for the INBOX_POLL_ITERATIONS path above.
 rm -f "$D/notify.log" "$D/status" "$D/poll.log"
 : > "$D/notify.log"
 RESTART_FLAG="$D/restart-flag"
