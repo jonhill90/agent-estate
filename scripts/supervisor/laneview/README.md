@@ -76,7 +76,7 @@ demonstrated:
 |---|---|---|---|
 | `text.sh` | one line per lane to stdout | none — no daemon, no plugin | proves "apart": works in a bare shell, in cron, over SSH, with the supervisor never running |
 | `opensessions.sh` | a tmux sidebar pane, via OpenSessions' `/api/agent-event` + `/set-status` HTTP API | a Rust daemon + sidebar client per tmux client (TPM-installed plugin) | proves "together": the tmux-plugin path #173 measured live, unchanged in mechanism from `lanebridge.sh` |
-| `tui.sh` | a curses screen: one line per lane, selectable, `enter` jumps to it | none when not running — no daemon, plain Python stdlib (`curses`) | jonhill90/agent-supervisor#7's "a TUI he owns" — no third-party program, unlike `opensessions.sh` |
+| `tui.sh` | a curses screen: a `digest.sh --json` header line, one line per lane below it, selectable, `enter` jumps to it | none when not running — no daemon, plain Python stdlib (`curses`); one extra subprocess (`digest.sh --json`) per refresh tick | jonhill90/agent-supervisor#7's "a TUI he owns" — no third-party program, unlike `opensessions.sh`; the header is agent-dotfiles#67 |
 
 Removing any is a deletion of its one file *under `scripts/`*. No
 implementation imports from another, and `laneview.sh` does not
