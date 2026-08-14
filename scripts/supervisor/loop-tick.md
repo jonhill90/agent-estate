@@ -91,6 +91,13 @@ explicitly: agent-supervisor#70 added a best-effort fallback that infers the
 flag from a "review PR #<N>" line in the issue title or brief when it is
 forgotten, but that is a safety net, not a substitute for saying it.
 
+That inference reads prose, so an ordinary dispatch whose brief merely talks
+about a PR ("rebase it so PR #93 can be reviewed") is read as a review of it
+and can be refused on authorship grounds. Pass `--not-a-review`
+(agent-supervisor#101) for that dispatch — say it at the dispatch, never by
+rewording the brief until the tool stops matching it. The two flags are
+mutually exclusive; passing both is refused.
+
 ## "Blocked on Jon" is often true of an issue and false of a piece of it
 
 Before recording an issue as gated, ask what specifically is gated. The gate is
