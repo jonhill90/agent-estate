@@ -278,10 +278,10 @@ repo_task_prefix() {
   fi
 }
 
-# Resolve the lane that authored a PR by the same ledger-first chain
-# dispatch.sh --reviews-pr uses: closing issue -> issue-lane, then branch name
-# as a last-resort task-id hint. Missing data is not an error in the digest;
-# it only makes verdict independence unknown for that PR.
+# Resolve the lane that authored a PR by the same fail-closed chain
+# dispatch.sh --reviews-pr uses: closing issue -> author-issue-lane, then
+# branch name as a last-resort task-id hint. Missing data is not an error in
+# the digest; it only makes verdict independence unknown for that PR.
 author_lane_for() {
   local repo_full="$1" number="$2" pr_json head_ref candidates candidate issue_json
   local prefix fallback_task fallback_json
@@ -304,7 +304,7 @@ author_lane_for() {
     } | awk '!seen[$0]++'
   )
   for candidate in $candidates; do
-    if issue_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" issue-lane --issue "$candidate" 2>/dev/null) \
+    if issue_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" author-issue-lane --issue "$candidate" 2>/dev/null) \
        && jq -e '.known == true' >/dev/null 2>&1 <<<"$issue_json"; then
       jq -nc --arg lane "$(jq -r '.lane' <<<"$issue_json")" \
              --arg task "$(jq -r '.task // ""' <<<"$issue_json")" \

@@ -918,6 +918,68 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual("free-4", found["lane"])
         self.assertEqual("ad502-second-attempt", found["id"])
 
+    def test_get_author_task_for_issue_does_not_drift_to_later_reviews(self):
+        """agent-supervisor#76: review tasks for the same issue must never
+        become the author. The bug is drift, so this asserts after each new
+        review dispatch instead of checking only the final ledger shape."""
+
+        def dispatch(lane, task_id, summary):
+            self.ledger.record_dispatch(
+                lane=lane,
+                pane_id=f"%{lane.rsplit('-', 1)[-1]}",
+                nonce=f"nonce-{task_id}",
+                harness="claude",
+                repo=f"/repo/{lane}",
+                server_id="server-a",
+                session_id="$3",
+                command="claude.exe",
+                task_id=task_id,
+                source_kind="issue",
+                source_url="https://github.com/jonhill90/agent-supervisor/issues/76",
+                source_ref="76",
+                summary=summary,
+                source_state="OPEN",
+                evidence=[f"claimed by dispatch.sh for lane {lane}"],
+                status_marker=None,
+            )
+            self.ledger.complete(task_id, b"# Result\n\nDone.\n", pane_nonce=f"nonce-{task_id}")
+            self.clock.value += 1
+
+        dispatch("free-3", "as76-author-lane-drift", "#76 fix author resolver")
+        self.assertEqual("free-3", self.ledger.get_author_task_for_issue("76")["lane"])
+
+        for lane, task_id in [
+            ("free-4", "as76-review-as73"),
+            ("free-5", "as76-rev73b"),
+            ("free-6", "as76-review-as73c"),
+            ("free-7", "as76-review-as73d"),
+        ]:
+            dispatch(lane, task_id, "#76 review PR #73")
+            author = self.ledger.get_author_task_for_issue("76")
+            self.assertEqual("free-3", author["lane"])
+            self.assertEqual("as76-author-lane-drift", author["id"])
+
+    def test_get_author_task_for_issue_unknown_when_only_reviews_exist(self):
+        self.ledger.record_dispatch(
+            lane="free-4",
+            pane_id="%4",
+            nonce="nonce-review-only",
+            harness="claude",
+            repo="/repo/free-4",
+            server_id="server-a",
+            session_id="$4",
+            command="claude.exe",
+            task_id="as76-review-as73",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/76",
+            source_ref="76",
+            summary="#76 review PR #73",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-4"],
+            status_marker=None,
+        )
+        self.assertIsNone(self.ledger.get_author_task_for_issue("76"))
+
     def test_mark_lane_held_makes_a_free_lane_read_occupied(self):
         """agent-dotfiles#188 finding 1: this is what closes the window a
         rolled-back `record_dispatch` used to leave open -- a lane the ledger

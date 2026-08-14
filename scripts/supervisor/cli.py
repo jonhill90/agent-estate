@@ -246,6 +246,9 @@ def parser():
     issue_lane_parser = sub.add_parser("issue-lane")
     issue_lane_parser.add_argument("--issue", required=True)
 
+    author_issue_lane_parser = sub.add_parser("author-issue-lane")
+    author_issue_lane_parser.add_argument("--issue", required=True)
+
     # agent-dotfiles#237: the read `restore.sh` runs after a tmux server loss.
     # Deliberately its own command rather than a flag on `status`: it must
     # work when there is no tmux server at all, so it touches no transport.
@@ -686,6 +689,14 @@ def main(argv=None):
         value = {"task": args.task, "known": row is not None, "lane": row["lane"] if row is not None else None}
     elif args.command == "issue-lane":
         row = ledger.get_task_for_issue(args.issue)
+        value = {
+            "issue": args.issue,
+            "known": row is not None,
+            "lane": row["lane"] if row is not None else None,
+            "task": row["id"] if row is not None else None,
+        }
+    elif args.command == "author-issue-lane":
+        row = ledger.get_author_task_for_issue(args.issue)
         value = {
             "issue": args.issue,
             "known": row is not None,

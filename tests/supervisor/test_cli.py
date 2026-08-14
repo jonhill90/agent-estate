@@ -1012,6 +1012,13 @@ class IssueLaneCliTest(unittest.TestCase):
         self.assertEqual(0, rc, output.getvalue())
         return json.loads(output.getvalue())
 
+    def _author_issue_lane(self, root, issue):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = cli.main(["--state-dir", root, "author-issue-lane", "--issue", str(issue)])
+        self.assertEqual(0, rc, output.getvalue())
+        return json.loads(output.getvalue())
+
     def test_a_dispatched_issue_answers_with_the_lane_that_authored_its_task(self):
         with tempfile.TemporaryDirectory() as root:
             self._record_dispatch(root, lane="t:3", task="ad195-scrub-secrets", issue=195)
@@ -1040,6 +1047,21 @@ class IssueLaneCliTest(unittest.TestCase):
             result = self._issue_lane(root, 404)
 
             self.assertEqual({"issue": "404", "known": False, "lane": None, "task": None}, result)
+
+    def test_author_issue_lane_skips_later_review_tasks(self):
+        """agent-supervisor#76: the authorship read exposed to shell callers
+        must not drift when later review tasks are recorded for the issue."""
+        with tempfile.TemporaryDirectory() as root:
+            self._record_dispatch(root, lane="t:3", task="as76-author-lane-drift", issue=76)
+            self._record_dispatch(root, lane="t:4", task="as76-review-as73", issue=76)
+            self._record_dispatch(root, lane="t:5", task="as76-rev73b", issue=76)
+
+            author = self._author_issue_lane(root, 76)
+
+            self.assertEqual(
+                {"issue": "76", "known": True, "lane": "t:3", "task": "as76-author-lane-drift"},
+                author,
+            )
 
 
 if __name__ == "__main__":

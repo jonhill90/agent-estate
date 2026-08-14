@@ -958,6 +958,38 @@ class Ledger:
             ).fetchone()
         return self._dict(row)
 
+    @staticmethod
+    def _task_looks_like_review(task_id, summary):
+        text = f"{task_id or ''} {summary or ''}".lower()
+        return bool(
+            re.search(r"(^|[-_])(review|rev)[-_0-9a-z]*($|[-_])", text)
+            or re.search(r"\breview(ing|s)?\s+(pr|pull request|#[0-9]+)", text)
+        )
+
+    def get_author_task_for_issue(self, issue_ref):
+        """The first non-review task dispatched for a GitHub issue.
+
+        agent-supervisor#76: authorship is about the task that produced the
+        branch, not the newest task for the issue. Later review tasks are
+        legitimate ledger rows for the same issue, but a review task must
+        never be eligible as the author of the PR it reviewed.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT tasks.* FROM tasks
+                JOIN source_tasks ON source_tasks.id = tasks.id
+                WHERE source_tasks.source_kind = 'issue' AND source_tasks.source_ref = ?
+                ORDER BY tasks.created_at ASC, tasks.id ASC
+                """,
+                (str(issue_ref),),
+            ).fetchall()
+        for row in rows:
+            task = self._dict(row)
+            if not self._task_looks_like_review(task["id"], task["summary"]):
+                return task
+        return None
+
     def list_tasks(self):
         with contextlib.closing(self._connect()) as connection:
             rows = connection.execute("SELECT * FROM tasks ORDER BY created_at, id").fetchall()
