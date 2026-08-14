@@ -2748,6 +2748,103 @@ FIX
   want_contains "mutation confirmed: straight to the author's own lane, t:3 (target t:@103)" "send-keys -t t:@103" "$log"
 fi
 
+# --- agent-supervisor#117: resolve authorship by the WORKTREE, when the
+# PR's branch shares no text with the dispatch slug and the ledger's issue
+# lookup has nothing to go on either -------------------------------------
+#
+# WHY: the measured incident. Task `as101-reviewspr-inference` produced PR
+# branch `fix/101-not-a-review-escape` -- reconstructing a task id from that
+# branch name (`${PREFIX}101-not-a-review-escape`) never matches the real
+# task id, so the old fallback refused a review the ledger could actually
+# answer. This reproduces the divergence directly: dispatch a real task,
+# then RENAME its real worktree's branch (the way a lane renames its
+# checkout to satisfy the type-prefix convention with a slug of its own
+# choosing) to something sharing no text with the dispatch slug, and give
+# the review a PR whose "Fixes #<N>" line names an issue the ledger has NO
+# record of at all -- so the issue-keyed lookup (steps 1/2) is silenced on
+# purpose, and only a worktree-based lookup can resolve this.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+printf '101|| the code PR #600 was written from\n' >> "$D/issues"
+printf '102|| review PR #600, branch renamed away from the dispatch slug\n' >> "$D/issues"
+
+out=$(LEDGER_STATE="$D/state-117" run 101 pr-inference-fix "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch (#101) succeeds" "$rc" 0 "$out"
+WT_117=$(sed -n 's/^  worktree: //p' <<<"$out")
+if [ -z "$WT_117" ] || [ ! -d "$WT_117" ]; then
+  bad "setup: the authoring dispatch printed a real worktree path" "got: '$WT_117' from: $out"
+else
+  ok "setup: the authoring dispatch printed a real worktree path"
+fi
+# The rename itself: same worktree, a branch name sharing no text with
+# "101-pr-inference-fix" -- exactly what a lane does to satisfy the
+# type-prefix convention with its own descriptive slug.
+git -C "$WT_117" branch -m "fix/101-not-a-review-escape"
+
+# The PR's own "Fixes #<N>" deliberately names an issue (999) nothing in
+# this ledger was ever dispatched for -- steps 1/2 (the issue-keyed lookup)
+# must come up silent, so only the worktree-based fallback can resolve this.
+printf '600|Fixes #999|fix/101-not-a-review-escape\n' >> "$D/prs"
+
+out=$(LEDGER_STATE="$D/state-117" run 102 rev-600 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 600); rc=$?
+want_exit "a review of PR #600 is still dispatched, resolved by worktree not branch text" "$rc" 0 "$out"
+want_contains "the author's lane is named and skipped" "skipping t:3" "$out"
+want_contains "the skip names the real authoring task, not a reconstruction from the branch" \
+  "ad101-pr-inference-fix" "$out"
+want_missing "never the old fallback's wrong reconstruction" "ad101-not-a-review-escape" "$out"
+log=$(tmuxlog)
+want_contains "and the review lands on the OTHER free lane, t:4 (target t:@104)" "send-keys -t t:@104" "$log"
+want_missing "never on the author's lane (t:3, target t:@103)" "send-keys -t t:@103 " "$log"
+
+# The only-free-lane variant: the author must still be refused even when it
+# is the only candidate, same as every other authorship path.
+printf '103|| review PR #600 again, only the author is free\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-117" run 103 rev-600-only-author "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 600); rc=$?
+want_exit "a review refused when the only free lane is the author, resolved by worktree" "$rc" 1 "$out"
+want_contains "names the real authoring task" "ad101-pr-inference-fix" "$out"
+
+# MUTATION-CHECK: silence the worktree-based lookup (`worktree-lane` always
+# reads unknown) and confirm the SAME scenario goes red -- the divergent
+# branch means the legacy branch-name fallback cannot pick up the slack
+# either, so this must go from "dispatched, author skipped" to "refused,
+# authorship unknown".
+MUTATED_117="$D/dispatch-no-worktree-lookup.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$MUTATED_117" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = 'WORKTREE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" worktree-lane --path "$MATCHED_WORKTREE" 2>&1)'
+assert text.count(marker) == 1, "worktree-lane lookup not found or not unique -- script shape changed"
+text = text.replace(marker, 'WORKTREE_JSON=\'{"known":false}\'  # MUTATED: worktree-lane never consulted', 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose worktree-lane lookup is silenced" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh whose worktree-lane lookup is silenced"
+  chmod +x "$MUTATED_117"
+  cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+  printf '104|| review PR #600 against the mutated guard\n' >> "$D/issues"
+  out=$(DISPATCH_SCRIPT="$MUTATED_117" LEDGER_STATE="$D/state-117" \
+        run 104 rev-600-mutant "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 600); rc=$?
+  want_exit "mutation confirmed: with worktree-lane silenced, the same review now refuses" "$rc" 1 "$out"
+  want_contains "mutation confirmed: back to authorship unknown (the assertions above would now be red)" \
+    "authorship unknown" "$out"
+fi
+
 rm -rf "$D"
 
 

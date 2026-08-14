@@ -124,6 +124,12 @@ def parser():
     record_dispatch_parser.add_argument("--issue", action="append", required=True)
     record_dispatch_parser.add_argument("--github", default="")
     record_dispatch_parser.add_argument("--harness", choices=("codex", "claude", "copilot", "copilot-acp", "pi"))
+    # agent-supervisor#117: the worktree `worktree.sh new` built for this
+    # dispatch, structured now instead of only living inside `--summary`
+    # text -- see `Ledger.get_task_for_worktree`. Not required: a caller
+    # that predates this flag (or genuinely has no worktree) still records
+    # everything else, same as `--harness-session-id` above.
+    record_dispatch_parser.add_argument("--worktree", default="")
 
     # agent-supervisor#36 (second issue comment): a stranded lane's open row
     # is not always a task id an operator has on hand -- `claim_lane` writes
@@ -269,6 +275,15 @@ def parser():
     # resolves authorship by what actually produced the branch instead of by
     # position in the issue's task list. See `Ledger.get_author_task_for_issue`.
     author_issue_lane_parser.add_argument("--head-ref", default=None)
+
+    # agent-supervisor#117: `dispatch.sh`'s `--reviews-pr` last resort, when
+    # neither `issue-lane` nor `author-issue-lane` answers. Keyed by the
+    # worktree path that currently has the PR's head branch checked out
+    # (resolved by the caller from `git worktree list`, not here -- see
+    # `Ledger.get_task_for_worktree` for why a branch name alone cannot be
+    # trusted) rather than by reconstructing a task id from that branch name.
+    worktree_lane_parser = sub.add_parser("worktree-lane")
+    worktree_lane_parser.add_argument("--path", required=True)
 
     # agent-dotfiles#237: the read `restore.sh` runs after a tmux server loss.
     # Deliberately its own command rather than a flag on `status`: it must
@@ -467,6 +482,7 @@ def record_dispatch(
     github="",
     harness=None,
     harness_session_id="",
+    worktree_path="",
 ):
     """Record a dispatch that ALREADY happened. Writes; never sends.
 
@@ -535,8 +551,9 @@ def record_dispatch(
             harness=harness,
             # The pane's own working directory, which is what
             # `TmuxAdapter._verified_lane` compares this column against. NOT
-            # the lane's worktree -- that belongs to the task and is carried
-            # in its summary, because the tasks table has no column for it.
+            # the lane's worktree -- that belongs to the task, and (as of
+            # agent-supervisor#117) is passed separately below as
+            # `worktree_path` rather than only living inside `summary` text.
             repo=pane_path,
             server_id=server_id,
             session_id=session_id,
@@ -553,6 +570,7 @@ def record_dispatch(
             source_state="OPEN",
             evidence=[f"claimed by dispatch.sh for lane {lane}", f"issues: {','.join(str(i) for i in issues)}"],
             status_marker=None,
+            worktree_path=worktree_path,
         )
     except Exception as error:
         ledger.mark_lane_held(lane, note=f"record_dispatch failed for task {task}: {error}")
@@ -678,6 +696,7 @@ def main(argv=None):
             issues=args.issue,
             github=args.github,
             harness=args.harness,
+            worktree_path=args.worktree,
         )
     elif args.command == "lane-free":
         value = lane_free(
@@ -732,6 +751,14 @@ def main(argv=None):
         row = ledger.get_author_task_for_issue(args.issue, head_ref=args.head_ref)
         value = {
             "issue": args.issue,
+            "known": row is not None,
+            "lane": row["lane"] if row is not None else None,
+            "task": row["id"] if row is not None else None,
+        }
+    elif args.command == "worktree-lane":
+        row = ledger.get_task_for_worktree(args.path)
+        value = {
+            "path": args.path,
             "known": row is not None,
             "lane": row["lane"] if row is not None else None,
             "task": row["id"] if row is not None else None,

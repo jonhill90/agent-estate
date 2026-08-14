@@ -1159,6 +1159,74 @@ class LedgerTest(unittest.TestCase):
             "for a completed author task -- if it found one, this test cannot tell the fix from the bug",
         )
 
+    def test_get_task_for_worktree_resolves_when_the_branch_slug_differs_from_the_task_slug(self):
+        """agent-supervisor#117: the actual, measured bug. Task
+        `as101-pr-inference-fix` produced a PR whose head branch was
+        `fix/101-not-a-review-escape` -- a slug sharing no text with the
+        dispatch's own -- so nothing reconstructed from that branch name
+        could ever find this task. The worktree path is not renamed the way
+        the branch is, so recording it at dispatch time and looking it back
+        up here resolves this regardless of what the branch was later
+        called."""
+        self.ledger.record_dispatch(
+            lane="free-3",
+            pane_id="%3",
+            nonce="nonce-117",
+            harness="claude",
+            repo="/repo/free-3",
+            server_id="server-a",
+            session_id="$3",
+            command="claude.exe",
+            task_id="as101-pr-inference-fix",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/101",
+            source_ref="101",
+            summary="#101 pr-inference-fix; worktree=/tmp/ad-101-pr-inference-fix-42",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-3"],
+            status_marker=None,
+            worktree_path="/tmp/ad-101-pr-inference-fix-42",
+        )
+
+        found = self.ledger.get_task_for_worktree("/tmp/ad-101-pr-inference-fix-42")
+        self.assertIsNotNone(found)
+        self.assertEqual("free-3", found["lane"])
+        self.assertEqual("as101-pr-inference-fix", found["id"])
+
+    def test_get_task_for_worktree_unknown_for_an_unrecorded_path(self):
+        self.assertIsNone(self.ledger.get_task_for_worktree("/tmp/never-recorded"))
+
+    def test_get_task_for_worktree_unknown_for_a_blank_path(self):
+        """A pre-#117 row's `worktree_path` reads '' (see
+        `_migrate_tasks_table`), and matching '' against another blank path
+        would wrongly declare every such row the same worktree."""
+        self.assertIsNone(self.ledger.get_task_for_worktree(""))
+
+    def test_get_task_for_worktree_never_returns_a_review_task(self):
+        """agent-supervisor#76's rule holds here too: a review task must
+        never stand in as the author, even if (implausibly) it shared a
+        worktree path with the real one."""
+        self.ledger.record_dispatch(
+            lane="free-4",
+            pane_id="%4",
+            nonce="nonce-review",
+            harness="claude",
+            repo="/repo/free-4",
+            server_id="server-a",
+            session_id="$4",
+            command="claude.exe",
+            task_id="as101-review-as114",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/101",
+            source_ref="101",
+            summary="#101 review PR #114",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-4"],
+            status_marker=None,
+            worktree_path="/tmp/ad-101-review-as114-7",
+        )
+        self.assertIsNone(self.ledger.get_task_for_worktree("/tmp/ad-101-review-as114-7"))
+
     def test_mark_lane_held_makes_a_free_lane_read_occupied(self):
         """agent-dotfiles#188 finding 1: this is what closes the window a
         rolled-back `record_dispatch` used to leave open -- a lane the ledger
@@ -1383,6 +1451,7 @@ class TaskTableMigrationTest(unittest.TestCase):
         migrated_sql = self._raw_tasks_sql()
         self.assertIn("delivery_pending", migrated_sql)
         self.assertIn("delivery_attempted_at", migrated_sql)
+        self.assertIn("worktree_path", migrated_sql)
 
         after = ledger.get_task("review-870")
         self.assertEqual(before["id"], after["id"])
@@ -1392,6 +1461,14 @@ class TaskTableMigrationTest(unittest.TestCase):
         self.assertEqual(before["status"], after["status"])
         self.assertEqual(before["created_at"], after["created_at"])
         self.assertIsNone(after["delivery_attempted_at"])
+        # agent-supervisor#117: a row this old recorded no worktree path
+        # anywhere structured (only, maybe, as free text inside `summary`)
+        # -- backfilling one by parsing that text would be writing a guess
+        # into a column whose entire point is to be authored fact, so the
+        # migration deliberately leaves it '', the same "never recorded"
+        # answer `get_task_for_worktree` already gives any unmatched path.
+        self.assertEqual("", after["worktree_path"])
+        self.assertIsNone(ledger.get_task_for_worktree(""))
 
         # Every other table, and the lane row the task's FK depends on, survives untouched.
         self.assertEqual(1, len(ledger.list_lanes()))
