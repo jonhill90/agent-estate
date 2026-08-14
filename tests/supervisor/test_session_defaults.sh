@@ -52,18 +52,7 @@ assert old in text, "shared default literal not found"
 open(path, 'w').write(text.replace(old, 'agent-dotfiles', 1))
 PY
   out=$(env -i HOME="$HOME" NOTIFY_ENV= PATH="/usr/bin:/bin" bash -c '. "$1"; lanes_session_or_default' _ "$D/session-defaults.sh" 2>&1)
-  if [ "$out" = "agent-supervisor" ]; then
-    ok "mutation-check: breaking the shared default goes red"
-  else
-    ok "mutation-check: breaking the shared default is detected"
-  fi
-  if [ "$out" = "agent-supervisor" ]; then
-    :
-  else
-    # This is the expected mutant result; count it as test coverage without
-    # failing the suite.
-    :
-  fi
+  want "mutation-check: breaking the shared default is detected" "agent-dotfiles" "$out"
 fi
 
 if [ "$fail" -eq 0 ]; then
