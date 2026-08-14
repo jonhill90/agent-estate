@@ -2718,7 +2718,7 @@ import os
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = 'if [ -z "$REVIEWS_PR" ]; then\n  INFER_GH_REPO_ARGS=()'
+marker = 'if [ -z "$REVIEWS_PR" ] && [ -z "$NOT_A_REVIEW" ]; then\n  INFER_GH_REPO_ARGS=()'
 assert marker in text, "inference block not found -- script shape changed"
 text = text.replace(marker, 'if false; then  # MUTATED: inference disabled\n  INFER_GH_REPO_ARGS=()', 1)
 here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
@@ -2843,6 +2843,156 @@ FIX
   want_exit "mutation confirmed: with worktree-lane silenced, the same review now refuses" "$rc" 1 "$out"
   want_contains "mutation confirmed: back to authorship unknown (the assertions above would now be red)" \
     "authorship unknown" "$out"
+fi
+
+# --- agent-supervisor#101: an inferred review must be escapable without
+# rewording the brief --------------------------------------------------------
+#
+# WHY: #70's inference reads prose, and prose ABOUT a PR is not a review OF
+# that PR. Measured on this estate: a rebase dispatch whose brief said
+# "rebase it so it can be reviewed" next to "PR #93" was read as a review of
+# #93 and then refused on authorship grounds -- for a task where authorship is
+# irrelevant (a rebase by a non-author is normal). The operator escaped by
+# rewording the brief, which teaches writing around the tool.
+#
+# The fix does NOT narrow detection: every narrowing available reads the same
+# prose and would drop real reviews #70 catches today, which is the dangerous
+# direction. It adds `--not-a-review`, said at the dispatch instead of in the
+# brief. The cases below hold BOTH directions: the escape works, and with the
+# escape absent the same brief is still inferred and still excludes the author.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+BRIEF_REBASE="$D/brief-rebase.md"
+printf 'This branch conflicts with main. Rebase it so PR #510 can be reviewed.\n' > "$BRIEF_REBASE"
+printf '259|| the code PR #510 was written from\n' >> "$D/issues"
+printf '260|| rebase a conflicted branch\n' >> "$D/issues"
+printf '510|Fixes #259|lane/259-escape-author\n' >> "$D/prs"
+
+out=$(LEDGER_STATE="$D/state-101" run 259 escape-author "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch (#259) succeeds" "$rc" 0 "$out"
+LEDGER_STATE="$D/state-101" ledger record-completion --task ad259-escape-author --note done >/dev/null
+
+# RED FIRST #1 -- the reported defect. The brief merely MENTIONS PR #510 on a
+# line that also says "reviewed"; the dispatch is a rebase, and the only free
+# lane is the branch's own author, which is fine for a rebase. `--not-a-review`
+# must let it through untouched.
+out=$(LEDGER_STATE="$D/state-101" run 260 rebase-510 "$BRIEF_REBASE" acme/agent-dotfiles "$REPO" --not-a-review); rc=$?
+want_exit "--not-a-review lets a non-review brief that mentions a PR proceed" "$rc" 0 "$out"
+want_missing "nothing was inferred under --not-a-review" "inferred --reviews-pr" "$out"
+want_missing "and no authorship refusal was reached" "authorship unknown" "$out"
+log=$(tmuxlog)
+want_contains "the rebase lands on the branch's own author lane, t:3 (target t:@103)" "send-keys -t t:@103" "$log"
+LEDGER_STATE="$D/state-101" ledger record-completion --task ad260-rebase-510 --note done >/dev/null
+
+# RED FIRST #2 -- the same brief WITHOUT the escape is still inferred and
+# still refuses the author's lane. This is the #70 behaviour the fix must not
+# weaken: it is green before this change and green after it.
+printf '266|| rebase a conflicted branch, no escape flag\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-101" run 266 rebase-510-noflag "$BRIEF_REBASE" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "without the escape, the same brief is still inferred and still refused" "$rc" 1 "$out"
+want_contains "still says what it inferred" "inferred --reviews-pr 510 from the brief" "$out"
+want_contains "and points at the escape rather than at the brief" "--not-a-review" "$out"
+
+# A GENUINE review brief -- naming both "review" and the PR -- still infers
+# the flag and still excludes the author. Same fixtures, review wording, no
+# escape flag.
+BRIEF_REVIEW_101="$D/brief-review-101.md"
+printf 'Independent review of PR #510: correctness and merge readiness.\n' > "$BRIEF_REVIEW_101"
+printf '261|| do the independent review\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-101" run 261 rev-510 "$BRIEF_REVIEW_101" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a genuine review brief is still inferred and still refused to its author" "$rc" 1 "$out"
+want_contains "names the inferred PR" "inferred --reviews-pr 510 from the brief" "$out"
+want_contains "names the authoring task" "ad259-escape-author" "$out"
+
+# ...and with a second free lane it still lands on the NON-author, i.e. the
+# guard is doing its job, not merely refusing everything.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+out=$(LEDGER_STATE="$D/state-101" run 261 rev-510 "$BRIEF_REVIEW_101" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "with another free lane, the genuine review is dispatched" "$rc" 0 "$out"
+want_contains "the author's lane is skipped" "skipping t:3" "$out"
+log=$(tmuxlog)
+want_contains "and it lands on the other lane, t:4 (target t:@104)" "send-keys -t t:@104" "$log"
+want_missing "never on the author's lane (t:3, target t:@103)" "send-keys -t t:@103 " "$log"
+LEDGER_STATE="$D/state-101" ledger record-completion --task ad261-rev-510 --note done >/dev/null
+
+# The issue's third red-first item: inference fires AND authorship is
+# unresolvable -- today those two findings arrive together and read as one
+# failure about authorship. PR #511's head branch carries a prefix the
+# fallback does not read and closes an issue no lane authored, so authorship
+# genuinely cannot be resolved.
+printf '263|| review PR #511 please\n' >> "$D/issues"
+printf '511|Fixes #262|hotfix/511-never-dispatched\n' >> "$D/prs"
+out=$(LEDGER_STATE="$D/state-101" run 263 rev-511-unknown "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "an inferred review whose author is unresolvable still refuses" "$rc" 1 "$out"
+want_contains "says authorship could not be determined" "could not determine PR #511's author" "$out"
+want_contains "and separately says the review status was only INFERRED" "PR #511 was INFERRED from issue #263's title" "$out"
+want_contains "and names the escape for the not-a-review case" "re-run with --not-a-review" "$out"
+
+# The same dispatch, declared not-a-review, proceeds: an unresolvable author
+# is not a question a non-review dispatch has to answer at all.
+out=$(LEDGER_STATE="$D/state-101" run 263 rev-511-escaped "$D/brief.md" acme/agent-dotfiles "$REPO" --not-a-review); rc=$?
+want_exit "the same dispatch under --not-a-review proceeds" "$rc" 0 "$out"
+want_missing "the authorship question never arises" "could not determine" "$out"
+LEDGER_STATE="$D/state-101" ledger record-completion --task ad263-rev-511-escaped --note done >/dev/null
+
+# Both flags at once are contradictory statements about one dispatch. Refused
+# before anything is claimed -- honouring either one silently would mean
+# guessing which of two explicit answers the caller meant.
+printf '267|| a dispatch that says both things at once\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-101" run 267 both-flags "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 510 --not-a-review); rc=$?
+want_exit "--reviews-pr with --not-a-review is refused, not resolved" "$rc" 2 "$out"
+want_contains "and says why" "contradict each other" "$out"
+if [ -z "$(assignees 267)" ]; then ok "the contradictory dispatch claims nothing"
+else bad "the contradictory dispatch claims nothing" "still assigned: $(assignees 267)"; fi
+
+# MUTATION-CHECK: remove the `--not-a-review` arm from the argument scanner
+# (the flag then falls through to POSITIONAL and sets nothing) and confirm the
+# first case above goes red again -- the escape is what carries it, not some
+# other change in this diff.
+MUTATED_101="$D/dispatch-no-escape.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$MUTATED_101" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '    --not-a-review)\n'
+assert marker in text, "--not-a-review arm not found -- script shape changed"
+start = text.index(marker)
+end = text.index('      ;;\n', start) + len('      ;;\n')
+text = text[:start] + text[end:]
+assert '--not-a-review)' not in text, "the flag's case arm survived the cut"
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh with --not-a-review removed" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh with --not-a-review removed"
+  chmod +x "$MUTATED_101"
+  cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+  printf '264|| the code PR #512 was written from\n' >> "$D/issues"
+  printf '265|| rebase a conflicted branch, mutant\n' >> "$D/issues"
+  printf '512|Fixes #264|lane/264-escape-mutant\n' >> "$D/prs"
+  printf 'This branch conflicts with main. Rebase it so PR #512 can be reviewed.\n' > "$D/brief-rebase-mutant.md"
+  LEDGER_STATE="$D/state-101-mutant" run 264 escape-mutant "$D/brief.md" acme/agent-dotfiles "$REPO" >/dev/null
+  LEDGER_STATE="$D/state-101-mutant" ledger record-completion --task ad264-escape-mutant --note done >/dev/null
+  out=$(DISPATCH_SCRIPT="$MUTATED_101" LEDGER_STATE="$D/state-101-mutant" \
+        run 265 rebase-512 "$D/brief-rebase-mutant.md" acme/agent-dotfiles "$REPO" --not-a-review); rc=$?
+  want_exit "mutation confirmed: without the escape arm, the rebase is refused again" "$rc" 1 "$out"
+  want_contains "mutation confirmed: the flag was ignored and the review inferred" "inferred --reviews-pr 512" "$out"
 fi
 
 rm -rf "$D"

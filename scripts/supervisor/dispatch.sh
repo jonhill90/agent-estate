@@ -39,7 +39,7 @@
 # available to the next tick.
 #
 # Usage:
-#   dispatch.sh <issue>[,<issue>...] <slug> <brief-file> [repo] [repo-path] [--reviews-pr <PR>]
+#   dispatch.sh <issue>[,<issue>...] <slug> <brief-file> [repo] [repo-path] [--reviews-pr <PR>] [--not-a-review]
 #
 # <issue>      one issue number, or a comma-separated list (agent-dotfiles#112)
 #              when one brief covers several -- e.g. `110,109`. Every issue in
@@ -67,6 +67,20 @@
 #              both "review" and "PR #<N>" -- so a forgotten flag is not
 #              automatically a silent self-review. Passing the flag
 #              explicitly always wins and is never second-guessed.
+# --not-a-review
+#              this dispatch is NOT a review, whatever its brief says.
+#              agent-supervisor#101: the inference above reads prose, and
+#              prose about a PR is not the same as a review OF that PR --
+#              "rebase it so it can be reviewed" plus "PR #93" was enough to
+#              infer a review and refuse a rebase on authorship grounds. This
+#              is the escape, taken at the DISPATCH rather than by rewording
+#              the brief: it turns the inference off for this one invocation
+#              and changes nothing else. The guard itself is untouched --
+#              `--reviews-pr` still guards, prose still infers when neither
+#              flag is given. Passing both flags is refused rather than
+#              resolved: the two say opposite things about the same dispatch
+#              and guessing which one is meant is exactly the guessing this
+#              guard exists to avoid.
 #
 # Exit 0 only when a lane has been sent a brief. Exit 1 on any refusal --
 # no free lane, an issue someone else already claimed, a worktree that could
@@ -135,6 +149,7 @@ fi
 # -- see the lane-selection loop below -- it names which PR is under review,
 # it never names which lane to use.
 REVIEWS_PR=""
+NOT_A_REVIEW=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -156,6 +171,12 @@ while [ $# -gt 0 ]; do
       REVIEWS_PR="$2"
       shift 2
       ;;
+    --not-a-review)
+      # agent-supervisor#101. Takes no value, so it has none of the dangling-
+      # flag hazard above.
+      NOT_A_REVIEW=1
+      shift
+      ;;
     *)
       POSITIONAL+=("$1")
       shift
@@ -172,6 +193,19 @@ done
 # empty (the `+` alternate-value test never triggers) and to the array's
 # words otherwise.
 set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
+
+# agent-supervisor#101: the two flags are contradictory statements about the
+# same dispatch -- "this reviews PR N" and "this is not a review". Neither is
+# an inference this script may resolve in the caller's favour: honouring
+# `--reviews-pr` would ignore an explicit "no", honouring `--not-a-review`
+# would disarm the guard on an explicit "yes". Refuse before anything is
+# claimed, which is the cheapest failure available and leaves the estate
+# untouched.
+if [ -n "$REVIEWS_PR" ] && [ -n "$NOT_A_REVIEW" ]; then
+  echo "dispatch: --reviews-pr $REVIEWS_PR and --not-a-review contradict each other -- refusing rather than picking one" >&2
+  echo "dispatch: pass --reviews-pr <PR> for a review, or --not-a-review for anything else, never both" >&2
+  exit 2
+fi
 
 ISSUE_ARG="${1:-}"
 SLUG="${2:-}"
@@ -273,8 +307,19 @@ BRIEF="$(cd "$(dirname "$BRIEF")" && pwd)/$(basename "$BRIEF")"
 #     status quo. The explicit flag remains the only guaranteed way to
 #     trigger the guard; this block only catches the forgotten-flag case
 #     when the issue happens to name the PR in one of the shapes above.
+#
+# agent-supervisor#101 changed NONE of the detection above. The false
+# positive it reports is real -- "rebase it so it can be reviewed" next to
+# "PR #93" is a rebase, not a review -- but every narrowing available reads
+# the same prose the current pattern reads and so would drop real reviews
+# this catches today, which is the dangerous direction. The escape is
+# `--not-a-review` instead: an operator says "not a review" at the dispatch,
+# where the intent actually lives, rather than rewording a brief until the
+# tool stops matching it. Detection stays exactly as wide as it was; only the
+# cost of being wrong changed, from "reword the brief" to "pass a flag".
 INFER_PR_PATTERN='pr[[:space:]]*#[0-9]+|pr[[:space:]]*[a-z0-9_.-]+/[a-z0-9_.-]+#[0-9]+|github\.com/[a-z0-9_.-]+/[a-z0-9_.-]+/pull/[0-9]+'
-if [ -z "$REVIEWS_PR" ]; then
+REVIEWS_PR_INFERRED=""
+if [ -z "$REVIEWS_PR" ] && [ -z "$NOT_A_REVIEW" ]; then
   INFER_GH_REPO_ARGS=()
   [ -n "$REPO" ] && INFER_GH_REPO_ARGS=(-R "$REPO")
   ISSUE_TITLE=$(gh issue view "$ISSUE" "${INFER_GH_REPO_ARGS[@]+"${INFER_GH_REPO_ARGS[@]}"}" --json title -q .title 2>/dev/null)
@@ -286,7 +331,9 @@ if [ -z "$REVIEWS_PR" ]; then
   fi
   if [ -n "$INFERRED_PR" ]; then
     REVIEWS_PR="$INFERRED_PR"
+    REVIEWS_PR_INFERRED=1
     echo "dispatch: inferred --reviews-pr $REVIEWS_PR from $INFERRED_FROM (a line with 'review' and 'PR #$REVIEWS_PR') -- pass --reviews-pr explicitly to override" >&2
+    echo "dispatch: if this dispatch is NOT a review, re-run it with --not-a-review (agent-supervisor#101) -- no need to reword the brief" >&2
   fi
 fi
 
@@ -550,6 +597,17 @@ if [ -n "$REVIEWS_PR" ]; then
   # "safe".
   if [ -z "$AUTHOR_LANE" ]; then
     echo "dispatch: could not determine PR #$REVIEWS_PR's author -- the ledger has no record by issue, by commit, or by branch '$HEAD_REF' (task ${FALLBACK_TASK:-none}) -- refusing (authorship unknown, failing closed)" >&2
+    # agent-supervisor#101, third red-first item: on the inferred path these
+    # are TWO separate findings arriving together -- "this looked like a
+    # review" and "its author is unresolvable" -- and read as one failure
+    # about authorship. An operator whose dispatch was never a review has no
+    # authorship problem to fix; they have an inference to switch off. Say
+    # which of the two is theirs.
+    if [ -n "$REVIEWS_PR_INFERRED" ]; then
+      echo "dispatch: NOTE -- --reviews-pr was never passed; PR #$REVIEWS_PR was INFERRED from $INFERRED_FROM" >&2
+      echo "dispatch: two separate things are true here -- this dispatch LOOKED like a review, and that PR's author cannot be resolved" >&2
+      echo "dispatch: if it is not a review at all (a rebase, a fix pass, a follow-up), re-run with --not-a-review and the authorship question does not arise" >&2
+    fi
     exit 1
   fi
 fi
@@ -882,6 +940,9 @@ if [ -z "$LANE" ]; then
   if [ -n "$AUTHOR_SKIPPED" ]; then
     echo "dispatch: no free lane other than the author of PR #$REVIEWS_PR (task $AUTHOR_TASK) -- not dispatching its review #$ISSUE_ARG" >&2
     echo "dispatch: an author never reviews their own PR, even when it is the only free lane" >&2
+    if [ -n "$REVIEWS_PR_INFERRED" ]; then
+      echo "dispatch: --reviews-pr was never passed; PR #$REVIEWS_PR was INFERRED from $INFERRED_FROM -- if this is not a review, re-run with --not-a-review (agent-supervisor#101)" >&2
+    fi
   fi
   echo "dispatch: no free lane in session '$SESSION' -- not dispatching #$ISSUE_ARG" >&2
   echo "dispatch: the ledger must say a lane is free to be dispatchable --" >&2
