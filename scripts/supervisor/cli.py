@@ -15,6 +15,7 @@ from adapter import ACPAdapter, PiRPCAdapter, TmuxAdapter, HARNESS_COMMANDS
 from core import CLAIM_TASK_PREFIX, Ledger, claim_owner_token, lane_relation
 from github_source import GithubTaskSource
 from pi_transport import PiRPCTransport
+from reconcile_sources import SourceTaskReconciler
 from sensor import StateSensor
 from transport import TmuxTransport
 
@@ -147,6 +148,13 @@ def parser():
     reconcile = sub.add_parser("reconcile")
     reconcile.add_argument("--task", required=True)
     reconcile.add_argument("--outcome", choices=("delivered", "failed"), required=True)
+
+    # agent-supervisor#127: NOT the single-task verb above. `reconcile`
+    # resolves one human-supplied delivery verdict; this sweeps every
+    # `source_tasks` row forward from GitHub state and the local `tasks`
+    # table -- see `reconcile_sources.py`'s module docstring for why they
+    # are separate commands rather than one overloaded.
+    sub.add_parser("reconcile-source-tasks")
 
     observe = sub.add_parser("observe")
     observe.add_argument("--lane", action="append")
@@ -755,6 +763,10 @@ def main(argv=None):
         if task is None:
             raise ValueError("unknown task")
         value = ledger.reconcile_delivery(args.task, pane_nonce=task["pane_nonce"], outcome=args.outcome)
+    elif args.command == "reconcile-source-tasks":
+        value = SourceTaskReconciler(
+            ledger, gh_bin=os.environ.get("AGENT_GH_BIN", "gh")
+        ).sweep()
     elif args.command == "observe":
         lanes = args.lane or [item["lane"] for item in ledger.list_lanes() if item["lane"] != "architecture"]
         value = [

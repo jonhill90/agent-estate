@@ -22,6 +22,10 @@ from pathlib import Path
 
 
 TERMINAL_STATUSES = ("complete", "failed", "cancelled")
+# The exact `source_tasks.status` CHECK, in one place so a second writer
+# (agent-supervisor#127's `reconcile_sources.py`) doesn't have to duplicate a
+# constraint it does not own the table definition of.
+SOURCE_TASK_STATUSES = ("created", "delivered", "accepted", "running", "complete", "failed", "cancelled")
 TASK_ID_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 COMPONENT_RE = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$")
 MAX_RESULT_BYTES = 64 * 1024
@@ -1216,6 +1220,53 @@ class Ledger:
                 status_marker=status_marker,
                 now=now,
             )
+
+    def update_source_task_state(self, task_id, *, source_state=None, status=None):
+        """Advance one `source_tasks` row's two DERIVED columns -- and only those.
+
+        agent-supervisor#127: `source_tasks` is written once, at dispatch
+        (`record_dispatch`) or reconstruction (`reconstruct_task`), and never
+        touched again -- `source_state` and `status` look like a state
+        machine's schema but nothing advances them. This is that writer. It
+        deliberately touches only `source_state` and `status`; every other
+        column (`source_url`, `source_ref`, `summary`, `evidence_json`,
+        `status_marker`) is what was actually dispatched, and reconciliation
+        has no business rewriting a record of what happened.
+
+        Either argument may be omitted (left `None`) to leave that column
+        untouched. This matters because the two columns are derived from
+        different, independent facts: `reconcile_sources.SourceTaskReconciler`
+        can always read this task's local `tasks` row to recompute `status`,
+        but can only recompute `source_state` when GitHub actually answered
+        for that row's repo. A caller that could not resolve `source_state`
+        must be able to still advance `status` (or vice versa) without
+        clobbering the column it has no fresh fact for back to some default.
+
+        Idempotent by construction: if the requested value(s) already match
+        the row, this returns without writing -- `updated_at` does not move.
+        A sweep run twice therefore performs zero writes the second time.
+        """
+        if source_state is None and status is None:
+            raise ValueError("update_source_task_state requires source_state or status")
+        if status is not None and status not in SOURCE_TASK_STATUSES:
+            raise ValueError("unsupported source task status")
+        if source_state is not None and not source_state:
+            raise ValueError("source task state must be non-empty")
+        now = int(self.clock())
+        with self._locked(), self._transaction() as connection:
+            row = connection.execute("SELECT * FROM source_tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                raise ValueError("unknown source task")
+            next_source_state = source_state if source_state is not None else row["source_state"]
+            next_status = status if status is not None else row["status"]
+            if next_source_state == row["source_state"] and next_status == row["status"]:
+                return self._source_task_dict(row)
+            connection.execute(
+                "UPDATE source_tasks SET source_state = ?, status = ?, updated_at = ? WHERE id = ?",
+                (next_source_state, next_status, now, task_id),
+            )
+            row = connection.execute("SELECT * FROM source_tasks WHERE id = ?", (task_id,)).fetchone()
+        return self._source_task_dict(row)
 
     def _assign_tx(self, connection, *, task_id, lane, pane_nonce, summary, now):
         self._require_task_id(task_id)
