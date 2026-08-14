@@ -29,7 +29,12 @@ func TestDecodeInvalidJSON(t *testing.T) {
 // candidate." This duplicates variants.go's init() panic as a normal test
 // failure (readable in `go test` output, not a crash trace) and is the
 // thing that goes red the moment someone adds a fifth variant without
-// filling in all twelve states.
+// filling in all thirteen states.
+//
+// This only checks a variant against AllStates -- it cannot by itself catch
+// AllStates being incomplete (agent-tui#3: it wasn't, and this test stayed
+// green throughout). states_lanessh_test.go's TestAllStatesCoversLanesShStates
+// is the guard for that half.
 func TestEveryVariantNamesEveryState(t *testing.T) {
 	for _, set := range Variants {
 		if missing := MissingStates(set); len(missing) > 0 {

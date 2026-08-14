@@ -10,9 +10,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: agent-tui
+      # agent-tui#3: internal/lane/states_lanessh_test.go cross-checks
+      # AllStates against lanes.sh's own `state=` assignments, but only when
+      # AGENT_SUPERVISOR_REPO points at a real checkout -- otherwise it
+      # skips, since this repo must still build and test standalone. This
+      # checkout, and the env var on the test step below, are what make that
+      # guard actually run here instead of merely being available to whoever
+      # happens to have both repos checked out locally.
+      - uses: actions/checkout@v4
+        with:
+          repository: jonhill90/agent-supervisor
+          path: agent-supervisor
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
       - run: go build ./...
+        working-directory: agent-tui
       - run: go vet ./...
+        working-directory: agent-tui
       - run: go test ./...
+        working-directory: agent-tui
+        env:
+          AGENT_SUPERVISOR_REPO: ${{ github.workspace }}/agent-supervisor

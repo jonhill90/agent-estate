@@ -46,10 +46,14 @@ variable.
 | 3 | `blocks` | unicode block elements — solid reads filled, hollow reads empty |
 | 4 | `emoji` | color emoji, the only set where `menu-blocked` and `text-blocked` get visually distinct glyphs, not just distinct labels |
 
-Every variant renders all twelve `lanes.sh` states, `stale`/`menu-blocked`/
-`unsent` included — a variant that can't is not a candidate, and
+Every variant renders all thirteen `lanes.sh` states, `stale`/`menu-blocked`/
+`unsent`/`scrolled` included — a variant that can't is not a candidate, and
 `internal/lane/variants.go`'s `init()` refuses to start if one is
-incomplete. **The set itself is data, not code:** `internal/lane/variants.go`
+incomplete. `internal/lane/states.go`'s `AllStates` is the count, and
+`internal/lane/states_lanessh_test.go` cross-checks it against `lanes.sh`'s
+own `state=` assignments rather than letting it drift unnoticed the way it
+did before [agent-tui#3](https://github.com/jonhill90/agent-tui/issues/3).
+**The set itself is data, not code:** `internal/lane/variants.go`
 is a `[]GlyphSet` literal and nothing reads a variant's ID anywhere else, so
 adding a fifth candidate or deleting one Jon dislikes is a one-line change
 to that slice — see `internal/lane/glyph.go` for the shape (`Motion`,
@@ -76,7 +80,7 @@ default tmux session name) survived a full day past the split.
 - **A left rail for managing tmux sessions.** The anchor feature, and the one
   asked for four times.
 - **State you can read at a glance** — glyphs and motion rather than words,
-  without losing the fidelity of the supervisor's eleven lane states.
+  without losing the fidelity of the supervisor's thirteen lane states.
 - **Knowledge and memory**, read-first, layered over an existing vault rather
   than owning a second store.
 - **Sandboxes** — spinning up AgentBoxes to give harnesses isolated
