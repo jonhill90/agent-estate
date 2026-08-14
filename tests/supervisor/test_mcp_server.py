@@ -114,9 +114,9 @@ class ToolListTest(unittest.TestCase):
             tool_definitions(SupervisorView([MutatingSource()]))
         self.assertIn("dispatch", str(caught.exception))
 
-    def test_the_real_surface_is_three_read_tools(self):
+    def test_the_real_surface_is_four_read_tools(self):
         tools = tool_definitions(SupervisorView())
-        self.assertEqual(["lanes", "digest", "ledger"], [tool["name"] for tool in tools])
+        self.assertEqual(["lanes", "digest", "ledger", "events"], [tool["name"] for tool in tools])
 
 
 class ToolCallTest(unittest.TestCase):
@@ -215,7 +215,9 @@ class LiveSurfaceTest(unittest.TestCase):
         frames = [json.loads(line) for line in process.stdout.splitlines() if line.strip()]
         self.assertEqual(2, len(frames), process.stdout)
         self.assertEqual("supervisor", frames[0]["result"]["serverInfo"]["name"])
-        self.assertEqual(["lanes", "digest", "ledger"], [tool["name"] for tool in frames[1]["result"]["tools"]])
+        self.assertEqual(
+            ["lanes", "digest", "ledger", "events"], [tool["name"] for tool in frames[1]["result"]["tools"]]
+        )
 
     def test_a_missing_session_surfaces_as_an_error_not_an_empty_lane_list(self):
         """End-to-end mutation check: point the tool at a tmux session that
@@ -237,7 +239,7 @@ class LiveSurfaceTest(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(0, process.returncode, process.stderr)
-        self.assertEqual(3, len(json.loads(process.stdout)["tools"]))
+        self.assertEqual(4, len(json.loads(process.stdout)["tools"]))
 
 
 if __name__ == "__main__":

@@ -75,8 +75,17 @@ CLOSED_TASK_STATUSES = ("complete", "failed", "cancelled")
 
 # Explicit allowlists -- see the module docstring. `nonce`/`pane_nonce` are
 # authentication material and are absent from both by construction.
-LANE_FIELDS = ("lane", "harness", "repo", "pane_id", "updated_at")
+#
+# `transport` is here because an app cannot answer "how is this lane driven"
+# without it -- `send-keys`, `acp` and `pi-rpc` are not interchangeable, and
+# agent-supervisor#87 makes that answer part of the read surface's job.
+LANE_FIELDS = ("lane", "harness", "repo", "pane_id", "transport", "updated_at")
 TASK_FIELDS = ("id", "lane", "summary", "status", "created_at", "updated_at")
+
+# `events` carries no credential (unlike `lanes`/`tasks`), but the allowlist
+# discipline stays the same: a column added to the table later is omitted by
+# default and has to be named to appear here.
+EVENT_FIELDS = ("key", "type", "task_id", "status", "payload_path", "created_at", "notified_at", "retry_at", "acked_at")
 
 
 class SupervisorUnavailable(RuntimeError):
@@ -290,7 +299,80 @@ class LedgerSource(ReadSource):
         }
 
 
-READ_SOURCES = {source.name: source for source in (LanesSource, DigestSource, LedgerSource)}
+class EventsSource(ReadSource):
+    """The ledger's own event log, from `cli.py events` -- completion and
+    attention events, in the delivery order `list_events` already returns
+    them (`ORDER BY created_at, key`).
+
+    This is the answer to "learn a lane changed state without polling
+    `lanes.sh` in a loop": a consumer calls once with no `after_key` to see
+    the whole log, then passes back each response's `next_cursor` on the
+    next call to get only what is new. The cursor is an event `key`, not a
+    timestamp -- `created_at` has one-second resolution and the table has no
+    other ordering column, so two events in the same second would be
+    indistinguishable by time alone. Keys are unique and already the table's
+    ordering tiebreaker, so resuming after one is exact.
+
+    Nothing here is filtered to "pending" -- `acked`/`notified` events are
+    history a consumer may still want (a TUI showing what a lane recently
+    finished), and `cli.py events --due` already exists for the narrower
+    "what still needs delivering" question a notifier asks. This source
+    answers the other one.
+    """
+
+    name = "events"
+    summary = (
+        "The supervisor's event log: completion and attention events, in "
+        "delivery order. Call once with no argument to see the whole log, "
+        "then pass the response's next_cursor back as after_key to fetch "
+        "only what is new -- this is how to learn a lane changed state "
+        "without polling lanes in a loop."
+    )
+    parameters = (
+        {
+            "name": "after_key",
+            "type": "string",
+            "required": False,
+            "help": "resume after this event's key (a prior call's next_cursor); omit for the full log.",
+        },
+    )
+
+    def __init__(
+        self,
+        *,
+        cli=None,
+        python=None,
+        state_dir=None,
+        runner=_subprocess_runner,
+        timeout=DEFAULT_TIMEOUT_SECONDS,
+    ):
+        self.cli = Path(cli) if cli else HERE / "cli.py"
+        self.python = python or sys.executable or "python3"
+        self.state_dir = Path(state_dir) if state_dir else DEFAULT_STATE_DIR
+        self.runner = runner
+        self.timeout = timeout
+
+    def read(self, *, after_key=None):
+        command = [self.python, str(self.cli), "--state-dir", str(self.state_dir), "events"]
+        rows = _decode(self.runner(command, timeout=self.timeout), label="cli.py events")
+        if not isinstance(rows, list):
+            raise SupervisorUnavailable("cli.py events returned something that is not a list of events")
+
+        events = [{field: row.get(field) for field in EVENT_FIELDS} for row in rows]
+
+        if after_key is None:
+            selected = events
+        else:
+            index = next((i for i, event in enumerate(events) if event["key"] == after_key), None)
+            if index is None:
+                raise ValueError(f"events: unknown cursor {after_key!r}")
+            selected = events[index + 1 :]
+
+        next_cursor = selected[-1]["key"] if selected else after_key
+        return {"events": selected, "count": len(selected), "next_cursor": next_cursor}
+
+
+READ_SOURCES = {source.name: source for source in (LanesSource, DigestSource, LedgerSource, EventsSource)}
 
 # Intentionally empty, and intentionally present.
 #

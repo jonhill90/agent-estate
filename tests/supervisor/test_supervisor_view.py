@@ -14,6 +14,7 @@ import supervisor_view  # noqa: E402
 from supervisor_view import (  # noqa: E402
     CLOSED_TASK_STATUSES,
     DigestSource,
+    EventsSource,
     LanesSource,
     LedgerSource,
     SupervisorUnavailable,
@@ -124,6 +125,7 @@ LEDGER_STATUS = {
             "server_id": "/tmp/x:1",
             "session_id": "$1",
             "command": "claude",
+            "transport": "send-keys",
             "updated_at": 1,
         },
         {
@@ -135,6 +137,7 @@ LEDGER_STATUS = {
             "server_id": "/tmp/x:1",
             "session_id": "$1",
             "command": "codex",
+            "transport": "pi-rpc",
             "updated_at": 2,
         },
     ],
@@ -158,6 +161,16 @@ class LedgerSourceTest(unittest.TestCase):
         self.assertEqual(["t1"], [task["id"] for task in value["open_tasks"]])
         self.assertEqual(["free-2"], value["available_lanes"])
         self.assertEqual([False, True], [lane["available"] for lane in value["lanes"]])
+
+    def test_publishes_each_lane_s_transport(self):
+        """agent-supervisor#87: 'how is this lane driven' has to be
+        answerable from the read surface, not just from a local ledger
+        query -- send-keys, acp and pi-rpc are not interchangeable."""
+        value = self.source(completed(stdout=json.dumps(LEDGER_STATUS))).read()
+        self.assertEqual(
+            {"free-1": "send-keys", "free-2": "pi-rpc"},
+            {lane["lane"]: lane["transport"] for lane in value["lanes"]},
+        )
 
     def test_never_publishes_a_pane_nonce(self):
         """lanes.nonce and tasks.pane_nonce are what cli.py authenticates a
@@ -193,10 +206,79 @@ class LedgerSourceTest(unittest.TestCase):
         self.assertIn(f"status NOT IN ({rendered})", core)
 
 
+EVENT_ROWS = [
+    {
+        "key": "completion:t1",
+        "type": "completion",
+        "task_id": "t1",
+        "status": "pending",
+        "payload_path": "/state/results/t1.md",
+        "created_at": 1,
+        "notified_at": None,
+        "retry_at": None,
+        "acked_at": None,
+        "pane_nonce": "should-never-appear",
+    },
+    {
+        "key": "completion:t2",
+        "type": "completion",
+        "task_id": "t2",
+        "status": "acked",
+        "payload_path": "/state/results/t2.md",
+        "created_at": 2,
+        "notified_at": 2,
+        "retry_at": None,
+        "acked_at": 3,
+    },
+]
+
+
+class EventsSourceTest(unittest.TestCase):
+    def source(self, result):
+        return EventsSource(runner=runner_returning(result), state_dir="/tmp/state")
+
+    def test_returns_the_whole_log_with_no_cursor(self):
+        value = self.source(completed(stdout=json.dumps(EVENT_ROWS))).read()
+        self.assertEqual(["completion:t1", "completion:t2"], [event["key"] for event in value["events"]])
+        self.assertEqual(2, value["count"])
+        self.assertEqual("completion:t2", value["next_cursor"])
+
+    def test_after_key_returns_only_what_is_new(self):
+        value = self.source(completed(stdout=json.dumps(EVENT_ROWS))).read(after_key="completion:t1")
+        self.assertEqual(["completion:t2"], [event["key"] for event in value["events"]])
+        self.assertEqual("completion:t2", value["next_cursor"])
+
+    def test_after_key_at_the_end_returns_nothing_new_and_holds_the_cursor(self):
+        value = self.source(completed(stdout=json.dumps(EVENT_ROWS))).read(after_key="completion:t2")
+        self.assertEqual([], value["events"])
+        self.assertEqual("completion:t2", value["next_cursor"])
+
+    def test_unknown_cursor_is_refused_not_treated_as_the_start(self):
+        """A stale or made-up cursor must not silently resolve to 'the whole
+        log' -- that would hide a gap from a consumer resuming after a
+        restart."""
+        with self.assertRaises(ValueError):
+            self.source(completed(stdout=json.dumps(EVENT_ROWS))).read(after_key="no-such-key")
+
+    def test_pane_nonce_is_not_in_the_allowlist(self):
+        rendered = json.dumps(self.source(completed(stdout=json.dumps(EVENT_ROWS))).read())
+        self.assertNotIn("should-never-appear", rendered)
+
+    def test_unreadable_ledger_is_an_error_not_an_empty_log(self):
+        source = self.source(completed(1, stderr="sqlite3.DatabaseError: file is not a database"))
+        with self.assertRaises(SupervisorUnavailable):
+            source.read()
+
+    def test_json_that_is_not_an_event_list_is_an_error(self):
+        source = self.source(completed(0, stdout='{"events":[]}'))
+        with self.assertRaises(SupervisorUnavailable):
+            source.read()
+
+
 class SupervisorViewTest(unittest.TestCase):
     def test_describes_every_read_source(self):
         names = [source["name"] for source in SupervisorView().describe()]
-        self.assertEqual(["lanes", "digest", "ledger"], names)
+        self.assertEqual(["lanes", "digest", "ledger", "events"], names)
 
     def test_every_exposed_source_is_read_only(self):
         self.assertTrue(all(not source["mutates"] for source in SupervisorView().describe()))

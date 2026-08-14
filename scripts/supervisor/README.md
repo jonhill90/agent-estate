@@ -594,18 +594,64 @@ Each source WRAPS an existing entry point (`lanes.sh --json`, `digest.sh
 --json`, `cli.py status`) rather than reimplementing it. There is no second
 behaviour to drift.
 
-### Three tools, and why only three
+### Four tools, and why only four
 
 | tool | source | answers |
 | --- | --- | --- |
 | `lanes` | `lanes.sh --json` | lane states, optionally for a named session |
-| `digest` | `digest.sh --json` | watchdog, poller, director inbox pending/age, lane counts, open PRs, merges |
-| `ledger` | `cli.py status` | registered lanes, availability, outstanding tasks |
+| `digest` | `digest.sh --json` | watchdog, poller, director inbox pending/age, lane counts, open PRs (CI + verdict), merges |
+| `ledger` | `cli.py status` | registered lanes (harness, repo, **transport**), availability, outstanding tasks per lane |
+| `events` | `cli.py events` | the ledger's event log (completion, attention), cursor-resumable |
 
 Tool definitions are always-on context in every consuming session, which cuts
 directly against the estate's token aim — so the surface is deliberately small.
 `mcp_server.py --print-tools` emits the exact `tools/list` payload, so the cost
 is measurable rather than argued about.
+
+`ledger` now projects `transport` (`send-keys` / `acp` / `pi-rpc`) alongside
+each lane (agent-supervisor#87). It was already a ledger column — every lane
+records which transport drives it (agent-supervisor#58) — but the MCP
+allowlist omitted it, which meant "how is this lane driven" was the one
+acceptance question in #87 that the read surface could not yet answer.
+
+### The event stream (agent-supervisor#87)
+
+The obligation from #198/PHASES.md §4c is narrow: a consumer must be able to
+learn that a lane changed state **without polling `lanes` in a loop**. `events`
+answers that by wrapping `cli.py events` (`Ledger.list_events`, already ordered
+`ORDER BY created_at, key`) with a cursor:
+
+1. Call `events` with no `after_key` to read the whole log once.
+2. Store the response's `next_cursor` (an event `key`).
+3. Poll `events` again passing that value as `after_key`; the response holds
+   only events recorded since, plus a new `next_cursor`.
+
+The cursor is a `key`, not a timestamp — `created_at` has one-second
+resolution and two events can land in the same second, so time alone cannot
+order them exactly. An unrecognised `after_key` is refused (`ValueError`,
+surfaced as an MCP protocol error) rather than silently treated as "start from
+the beginning" — a stale cursor from a restarted consumer must be visible as a
+gap, not hidden as a full replay.
+
+**What this is not:** a push channel. MCP's stdio transport here is
+request/response only (no server-initiated notifications), so "without
+polling" means *without polling the expensive, whole-estate `lanes` command in
+a loop* — a consumer instead polls the cheap, incremental `events` log, or
+polls `digest`/`ledger` at whatever cadence it needs and reconciles against
+the cursor it already holds. A server-push stream is a transport-level
+change (SSE, WebSocket) that `mcp_server.py`'s stdio framing does not carry,
+and is out of scope for a read-only fill of the existing surface — noted here
+as a rejected design, not a deferred one, so it is not re-derived from
+scratch later.
+
+**Rejected: a dedicated "lane state changed" event type.** `lanes.sh`'s states
+(free/busy/hung/blocked/…) are derived by classifying a pane right now, not
+recorded facts — writing one to the `events` table on every transition would
+make the ledger the author of a UI-shaped concept (`lane_changed`) it does not
+otherwise need, for a table whose whole job today is delivery bookkeeping
+(`completion`/`attention`). A consumer that wants lane-state transitions polls
+`lanes`/`digest` at its own cadence; `events` is for the two event kinds the
+ledger already produces.
 
 ### It fails loud, never empty
 
@@ -635,7 +681,9 @@ there; the authorisation story is not, so the tools are not.
 
 Nonces never leave. `LedgerSource` projects rows through explicit
 `LANE_FIELDS`/`TASK_FIELDS` allowlists — a column added to the schema later is
-omitted by default and must be named to appear.
+omitted by default and must be named to appear. `EventsSource` follows the
+same discipline with `EVENT_FIELDS`, even though the `events` table carries no
+credential today.
 
 ### Wiring it into a harness
 
