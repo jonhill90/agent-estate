@@ -43,7 +43,7 @@ class RecordingAdapter:
         self.observed.append(lane)
         return None
 
-    def notify_architecture(self, *, lane, retry_after):
+    def notify_supervisor(self, *, lane, retry_after):
         self.notified = True
         return True
 
@@ -65,7 +65,7 @@ class RecordingACPAdapter:
     def observe_lane(self, lane):
         return None
 
-    def notify_architecture(self, *, lane, retry_after):
+    def notify_supervisor(self, *, lane, retry_after):
         return False
 
 
@@ -94,7 +94,7 @@ class RecordingPiRPCAdapter:
     def observe_lane(self, lane):
         return None
 
-    def notify_architecture(self, *, lane, retry_after):
+    def notify_supervisor(self, *, lane, retry_after):
         return False
 
 
@@ -117,6 +117,77 @@ class CliTest(unittest.TestCase):
             self.assertEqual(["github-Hill90"], value["sensor_blockers"])
             self.assertEqual([], adapter.observed)
             self.assertFalse(adapter.notified)
+
+    # as#132: the acceptance test. `observe`'s lane filter used to hardcode
+    # the literal "architecture" -- a flag/default rename alone leaves that
+    # literal matching nothing, so the supervisor lane stops being excluded
+    # and starts being treated as an ordinary dispatchable worker. This is
+    # the mutation the fix (`_is_supervisor_lane`) targets; the PR body
+    # carries the before/after demonstration with the literal reverted by
+    # hand.
+    def test_observe_excludes_the_supervisor_lane_registered_as_architecture(self):
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            for lane in ("architecture", "worker"):
+                ledger.register_lane(
+                    lane=lane, pane_id=f"%{lane}", nonce=lane, harness="codex", repo="/repo",
+                    server_id="server", session_id="$1", command="codex",
+                )
+            RecordingAdapter.instances.clear()
+            output = io.StringIO()
+            with patch.object(cli, "TmuxAdapter", RecordingAdapter), contextlib.redirect_stdout(output):
+                self.assertEqual(0, cli.main(["--state-dir", root, "observe"]))
+            adapter = RecordingAdapter.instances[-1]
+            self.assertEqual(["worker"], adapter.observed, "the supervisor lane must never be observed as a worker")
+
+    def test_observe_excludes_the_supervisor_lane_registered_as_supervisor(self):
+        """Item 3: the lane lookup accepts EITHER name for one release, so
+        an estate whose ledger row is already migrated to "supervisor"
+        survives too, not just the pre-migration "architecture" row."""
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            for lane in ("supervisor", "worker"):
+                ledger.register_lane(
+                    lane=lane, pane_id=f"%{lane}", nonce=lane, harness="codex", repo="/repo",
+                    server_id="server", session_id="$1", command="codex",
+                )
+            RecordingAdapter.instances.clear()
+            output = io.StringIO()
+            with patch.object(cli, "TmuxAdapter", RecordingAdapter), contextlib.redirect_stdout(output):
+                self.assertEqual(0, cli.main(["--state-dir", root, "observe"]))
+            adapter = RecordingAdapter.instances[-1]
+            self.assertEqual(["worker"], adapter.observed, "the supervisor lane must never be observed as a worker")
+
+    def test_architecture_lane_flag_is_a_hidden_alias_for_supervisor_lane(self):
+        """Item 2: --architecture-lane must still work and must produce the
+        same result as --supervisor-lane, for a caller not yet migrated."""
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            for lane in ("director", "worker"):
+                ledger.register_lane(
+                    lane=lane, pane_id=f"%{lane}", nonce=lane, harness="codex", repo="/repo",
+                    server_id="server", session_id="$1", command="codex",
+                )
+            RecordingAdapter.instances.clear()
+            output = io.StringIO()
+            with patch.object(cli, "TmuxAdapter", RecordingAdapter), contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    0,
+                    cli.main(["--state-dir", root, "observe", "--architecture-lane", "director"]),
+                )
+            via_old_flag = RecordingAdapter.instances[-1].observed
+
+            RecordingAdapter.instances.clear()
+            output = io.StringIO()
+            with patch.object(cli, "TmuxAdapter", RecordingAdapter), contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    0,
+                    cli.main(["--state-dir", root, "observe", "--supervisor-lane", "director"]),
+                )
+            via_new_flag = RecordingAdapter.instances[-1].observed
+
+            self.assertEqual(["worker"], via_old_flag)
+            self.assertEqual(via_new_flag, via_old_flag, "the hidden alias must produce the same result as the new flag")
 
     def test_reconcile_resolves_an_ambiguous_delivery_without_pane_capture(self):
         with tempfile.TemporaryDirectory() as root:

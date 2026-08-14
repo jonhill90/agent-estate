@@ -1,5 +1,10 @@
 #!/bin/bash
-# Restarts the architecture supervisor loop when it has died with work left.
+# Restarts the supervisor loop when it has died with work left.
+#
+# as#132: this file finds the pane by COORDINATES (SUPERVISOR_PANE, below),
+# never by window name -- `grep -nE 'window_name|#W|list-windows'` over this
+# file matches nothing. Renaming the window (as#132) does not affect revival;
+# what IS load-bearing is the window's position (window 1), not its label.
 #
 # It is a WATCHDOG, not the loop. The loop is event-driven; this only catches
 # the case where it stopped and nobody noticed. Never make this the mechanism —

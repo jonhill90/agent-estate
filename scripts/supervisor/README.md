@@ -49,9 +49,9 @@ part of this directory.
   (idle) or `attention:<task-id>:<reason>` (blocked/approval/unknown) event.
   It cannot be acknowledged until the task is completed, failed, or
   cancelled, and notified events retry after their deadline.
-- Architecture notifications contain event IDs and result paths—not tmux
+- Supervisor notifications contain event IDs and result paths—not tmux
   scrollback or broad repository snapshots—and are marked notified only after
-  the architecture harness is genuinely active.
+  the supervisor harness is genuinely active.
 - Codex and Claude use different terminal classifiers but the same ledger
   schema and lifecycle.
 - GitHub is the canonical external sensor. A GitHub timeout or failure leaves

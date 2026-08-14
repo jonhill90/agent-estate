@@ -86,7 +86,12 @@ DRY_RUN=0
 # Keep in step with lanes.sh's own default; a supervisor window in a different
 # slot would be offered as a dispatch target, which lanes.sh exists to prevent.
 SUPERVISOR_WINDOW="${LANES_SUPERVISOR_WINDOW:-1}"
-SUPERVISOR_NAME="${LANES_SUPERVISOR_NAME:-architecture}"
+# as#132: "architecture" was a leftover name from an earlier era that misled
+# every new reader. "supervisor" is the default going forward; an estate
+# already running under LANES_SUPERVISOR_NAME=architecture is unaffected --
+# this only changes the default for a FRESH bootstrap, never an existing
+# session (see the SAFETY note above).
+SUPERVISOR_NAME="${LANES_SUPERVISOR_NAME:-supervisor}"
 
 usage() { sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; }
 

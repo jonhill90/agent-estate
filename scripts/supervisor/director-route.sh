@@ -17,8 +17,8 @@
 # free text into a MENU. That still applies here, but it is not what makes
 # this script different from a simple `inbox-route.sh` copy pointed at a
 # fixed pane. Research for #193 established that the Director's pane IS the
-# same physical pane `watchdog.sh` restarts as "the architecture supervisor
-# loop" -- `SUPERVISOR_PANE`, default `agent-dotfiles:1.1` -- a self-scheduling
+# same physical pane `watchdog.sh` restarts as "the supervisor loop" --
+# `SUPERVISOR_PANE`, default `agent-dotfiles:1.1` -- a self-scheduling
 # `/loop`. `loop-tick.md`'s own header names the hazard: "A plain message
 # sent to your pane REPLACES the loop prompt, so the next turn is an
 # ordinary turn and nothing re-arms." Measured there (#85): 27 raw messages
