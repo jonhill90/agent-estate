@@ -1020,5 +1020,116 @@ EOF
   fi
 fi
 
+# 19. agent-supervisor#89: the `advance:` line is only rewritten when
+# watchdog.sh itself ticks, same tick that writes `checked:` -- between
+# ticks it sits unchanged, so a reader with no age on it reads a replay as a
+# live fact. `checked:` and `advance:` are written by the SAME tick, so
+# checked:'s age is usable as advance:'s age without a second timestamp.
+#
+# iso_ago portably renders "N seconds before now" as the estate's UTC-ISO8601
+# shape, mirroring digest.sh's own iso_to_epoch (BSD `date -r`, GNU `date -d`
+# fallback) so the test's clock math cannot drift from the code under test.
+iso_ago() {
+  local secs="$1" epoch
+  epoch=$(( $(date -u +%s) - secs ))
+  date -u -r "$epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+    || date -u -d "@$epoch" +%Y-%m-%dT%H:%M:%SZ
+}
+
+# 19a. RED first: a status file written 5 minutes ago -> the digest line
+# includes that age. Mutating the age away (deleting `checked:` below) must
+# turn this red -- proven by the mutation test at the end of this block.
+fresh_checked=$(iso_ago 300)
+cat > "$OUT/watchdog.status" <<S
+checked:  $fresh_checked
+state:    working
+restarts: 0 in the last 3600s
+advance:  current, abc123 already matches origin/main (fetched fresh)
+S
+T=$(run_out)
+grep -q "advance:.*(as of .*, 5m ago)" <<<"$T" \
+  && ok "19a: the advance line carries its own age" \
+  || bad "19a: advance line carries its age" "$T"
+j=$(run_out --json)
+age_s=$(jq -r '.watchdog.advance_age_s' <<<"$j")
+[ "$age_s" -ge 299 ] 2>/dev/null && [ "$age_s" -le 301 ] \
+  && ok "19a: --json carries the age in seconds" \
+  || bad "19a: --json carries the age in seconds" "want 299..301, got '$age_s'"
+chk "19a: --json reads not-stale under the default threshold" "false" "$(jq -r '.watchdog.advance_stale' <<<"$j")"
+grep -q "STALE" <<<"$T" && bad "19a: a fresh advance line is not marked STALE" "$T" \
+  || ok "19a: a fresh advance line is not marked STALE"
+
+# 19b. THE CASE THAT MATTERS: a status older than the staleness threshold
+# (3x the 180s tick interval = 540s by default) is reported as stale, not
+# read as a fresh "current" -- this is the exact defect #89 was filed over:
+# GitHub had moved a commit ahead of live while this line, over an hour old,
+# still asserted "current ... (fetched fresh)" with nothing naming its age.
+stale_checked=$(iso_ago 4200)
+cat > "$OUT/watchdog.status" <<S
+checked:  $stale_checked
+state:    working
+restarts: 0 in the last 3600s
+advance:  current, abc123 already matches origin/main (fetched fresh)
+S
+T=$(run_out)
+grep -q "advance:.*\[STALE" <<<"$T" \
+  && ok "19b: a status past the staleness threshold is reported STALE" \
+  || bad "19b: a stale status reads STALE" "$T"
+j=$(run_out --json)
+chk "19b: --json flips advance_stale true" "true" "$(jq -r '.watchdog.advance_stale' <<<"$j")"
+# Tolerance, not exact match: the test's iso_ago() and digest.sh's own
+# iso_to_epoch/`date -u +%s` each call the wall clock independently, so a
+# second can tick between them. An exact-equality assertion here flaked
+# 5 of 6 local runs (off-by-one) -- widened per PR #95 review.
+age_s=$(jq -r '.watchdog.advance_age_s' <<<"$j")
+[ "$age_s" -ge 4199 ] 2>/dev/null && [ "$age_s" -le 4201 ] \
+  && ok "19b: --json carries the actual age, not a rounded/guessed one" \
+  || bad "19b: --json carries the actual age, not a rounded/guessed one" "want 4199..4201, got '$age_s'"
+
+# 19c. A status written seconds ago reads as current, without a nagging age
+# qualifier that would train readers to ignore it -- only genuinely stale
+# lines get the STALE marker.
+now_checked=$(iso_ago 0)
+cat > "$OUT/watchdog.status" <<S
+checked:  $now_checked
+state:    working
+restarts: 0 in the last 3600s
+advance:  current, abc123 already matches origin/main (fetched fresh)
+S
+T=$(run_out)
+grep -q "advance:.*\[STALE" <<<"$T" && bad "19c: a just-written status is not marked STALE" "$T" \
+  || ok "19c: a just-written status is not marked STALE"
+grep -q "advance:.*(as of .*, 0s ago)" <<<"$T" \
+  && ok "19c: a just-written status still carries a plain, unalarming age" \
+  || bad "19c: a just-written status carries a plain age" "$T"
+
+# MUTATION: point digest.sh's age computation at a `checked:` field that
+# never resolves (iso_to_epoch always fails), the same shape as the pre-fix
+# code, which never read an age for the advance: line at all. Confirms 19a/
+# 19b are actually pinned to that computation, not to some other path to
+# the strings above.
+MUT_DIGEST2="$D/digest-no-age.sh"
+python3 - "$DIGEST" "$MUT_DIGEST2" <<'PY'
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = 'if wd_checked_epoch=$(iso_to_epoch "$wd_checked"); then'
+assert marker in text, "advance-age branch not found -- digest.sh shape changed"
+text = text.replace(marker, 'if false; then', 1)
+open(dst, "w").write(text)
+PY
+cat > "$OUT/watchdog.status" <<S
+checked:  $stale_checked
+state:    working
+restarts: 0 in the last 3600s
+advance:  current, abc123 already matches origin/main (fetched fresh)
+S
+mut_out=$(PATH="$D/bin:$PATH" SUPERVISOR_STATE="$OUT" LANES_SESSION=nosuch bash "$MUT_DIGEST2" 2>/dev/null)
+if grep -q "advance:.*\[STALE" <<<"$mut_out"; then
+  bad "mutation confirmed: disabling the age computation still reports STALE" "$mut_out"
+else
+  ok "mutation confirmed: disabling the age computation lets an hour-old 'current' replay through unmarked (19b would be red)"
+fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

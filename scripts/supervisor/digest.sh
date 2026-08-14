@@ -64,6 +64,19 @@ LEDGER_PYTHON="${DIGEST_LEDGER_PYTHON:-python3}"
 LEDGER_CLI="${DIGEST_LEDGER_CLI:-$HERE/cli.py}"
 RECONCILE_IDLE_AFTER="${DIGEST_RECONCILE_IDLE_AFTER:-300}"
 
+# agent-supervisor#89: the `advance:` line watchdog.status carries is only
+# rewritten when watchdog.sh itself ticks (advance_on_exit runs on every
+# watchdog exit path, same tick that writes `checked:` with the same $iso).
+# Between ticks the line sits unchanged, so a reader with no age on it reads
+# a replay as a fresh observation -- exactly the shape #24 (watchdog silently
+# unloaded for 91 minutes) already burned this estate on once. These knobs
+# name the SAME tick cadence advance-live.sh's own watchdog_stale_check
+# already uses (ADVANCE_TICK_INTERVAL / ADVANCE_WATCHDOG_STALE_MULTIPLE), not
+# a second independent threshold that could drift from it.
+ADVANCE_TICK_INTERVAL="${ADVANCE_TICK_INTERVAL:-180}"
+ADVANCE_WATCHDOG_STALE_MULTIPLE="${ADVANCE_WATCHDOG_STALE_MULTIPLE:-3}"
+ADVANCE_STALE_AFTER=$((ADVANCE_TICK_INTERVAL * ADVANCE_WATCHDOG_STALE_MULTIPLE))
+
 # jq is the only dependency this script does not already share with the rest
 # of the estate: watchdog.sh and loop-tick.md both use `gh ... --jq`, which is
 # gh's own bundled implementation and works with standalone jq absent. This is
@@ -96,6 +109,32 @@ status_field() {
   ' "$file"
 }
 
+# Same UTC-ISO8601 -> epoch parse advance-live.sh's watchdog_age() uses --
+# one parsing convention for this timestamp shape, not two that could drift.
+# BSD `date -j` first (macOS ships no GNU date), GNU `date -d` as the
+# fallback. Echoes nothing and returns 1 on an unparseable/empty input.
+iso_to_epoch() {
+  local line="$1" epoch
+  [ -n "$line" ] || return 1
+  epoch=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$line" +%s 2>/dev/null \
+        || date -u -d "$line" +%s 2>/dev/null)
+  [ -n "$epoch" ] || return 1
+  printf '%s\n' "$epoch"
+}
+
+# "68m ago" / "3h12m ago" -- coarse on purpose, this is a staleness read at a
+# glance, not a stopwatch.
+age_human() {
+  local secs="$1"
+  if [ "$secs" -lt 60 ]; then
+    printf '%ss ago' "$secs"
+  elif [ "$secs" -lt 3600 ]; then
+    printf '%sm ago' "$((secs / 60))"
+  else
+    printf '%sh%02dm ago' "$((secs / 3600))" "$(((secs % 3600) / 60))"
+  fi
+}
+
 # --- watchdog -------------------------------------------------------------
 WD_FILE="$STATE/watchdog.status"
 if [ -r "$WD_FILE" ]; then
@@ -109,6 +148,36 @@ else
   wd_state="UNREADABLE"; wd_checked=""; wd_restarts=""; wd_heartbeat=""
   wd_recovery=""; wd_advance=""
   note_error "watchdog.status unreadable at $WD_FILE"
+fi
+
+# agent-supervisor#89: `advance:` and `checked:` are written by the same
+# tick (watchdog.sh's advance_on_exit runs on every exit path and reuses
+# that tick's own $iso) -- so checked:'s age IS advance:'s age, without a
+# second timestamp advance_note would have to start writing. wd_advance_disp
+# is what gets printed/JSON-ed; empty wd_advance stays empty (no line is
+# printed for it either way).
+wd_advance_disp="$wd_advance"
+wd_advance_age_s=""
+wd_advance_stale="false"
+if [ -n "$wd_advance" ]; then
+  if wd_checked_epoch=$(iso_to_epoch "$wd_checked"); then
+    wd_advance_age_s=$(( $(date -u +%s) - wd_checked_epoch ))
+    [ "$wd_advance_age_s" -ge 0 ] || wd_advance_age_s=0
+    wd_checked_time="${wd_checked#*T}"
+    if [ "$wd_advance_age_s" -gt "$ADVANCE_STALE_AFTER" ]; then
+      wd_advance_stale="true"
+      wd_advance_disp="$wd_advance [STALE - as of $wd_checked_time, $(age_human "$wd_advance_age_s"), older than ${ADVANCE_STALE_AFTER}s]"
+    else
+      wd_advance_disp="$wd_advance (as of $wd_checked_time, $(age_human "$wd_advance_age_s"))"
+    fi
+  else
+    # checked: unreadable/unparseable but advance: is present -- say so
+    # rather than silently printing the bare (potentially stale) line as if
+    # age were known to be fine. This is the failure #89 was filed over: an
+    # instrument that cannot see a thing must not look like the thing is
+    # absent (or, here, current).
+    wd_advance_disp="$wd_advance [age unknown - checked: unreadable in $WD_FILE]"
+  fi
 fi
 
 # agent-supervisor#41 (agent-supervisor#28): watchdog.status's `recovery:`
@@ -469,7 +538,8 @@ DIGEST=$(jq -n \
   --arg checked "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --arg wd_state "$wd_state" --arg wd_checked "$wd_checked" \
   --arg wd_restarts "$wd_restarts" --arg wd_heartbeat "$wd_heartbeat" \
-  --arg wd_recovery "$wd_recovery" --arg wd_advance "$wd_advance" \
+  --arg wd_recovery "$wd_recovery" --arg wd_advance "$wd_advance_disp" \
+  --arg wd_advance_age_s "$wd_advance_age_s" --argjson wd_advance_stale "$wd_advance_stale" \
   --argjson poller_alive "$poller_alive" --arg poller_state "$poller_state" \
   --arg poller_checked "$poller_checked" \
   --argjson inbox "$inbox_json" --argjson inbox_stale "$inbox_stale" \
@@ -482,7 +552,9 @@ DIGEST=$(jq -n \
   --argjson prs "$PR_JSON" --argjson merged "$MERGED_JSON" --argjson errors "$ERR_JSON" '
   {checked: $checked,
    watchdog: {state:$wd_state, checked:$wd_checked, restarts:$wd_restarts, heartbeat:$wd_heartbeat,
-              recovery:$wd_recovery, advance:$wd_advance},
+              recovery:$wd_recovery, advance:$wd_advance,
+              advance_age_s:($wd_advance_age_s | if length > 0 then tonumber else null end),
+              advance_stale:$wd_advance_stale},
    poller: {alive:$poller_alive, state:$poller_state, checked:$poller_checked},
    director_inbox: ($inbox + {stale: $inbox_stale}),
    lanes: {free:$free, busy:$busy, blocked:$blocked, menu_blocked:$menu,
