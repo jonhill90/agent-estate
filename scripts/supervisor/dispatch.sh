@@ -407,23 +407,25 @@ fi
 # `tasks.lane` by task id, with review tasks explicitly filtered out -- see
 # `Ledger.get_author_task_for_issue`. Neither side comes from a branch name.
 #
-# THE FALLBACK MAPPING, used only when that lookup is silent, verified
-# against the code that writes both sides of it rather than assumed:
-#   * `worktree.sh new "${ISSUE}-${SLUG}"` (step 3 below) creates branch
-#     `lane/${ISSUE}-${SLUG}` -- literally `BRANCH="lane/$SLUG"` in
-#     worktree.sh, where the caller's $SLUG here is already `$ISSUE-$SLUG`.
-#     A hand-pushed or type-prefixed branch (`fix/`, `feat/`, `chore/`,
-#     `docs/`) is read the same way, per the widened regex below.
-#   * Step 6 below records that same dispatch's task under id
-#     `$WINDOW_NAME`, i.e. `${PREFIX}${ISSUE}-${SLUG}` -- and `tasks.id` is a
-#     SQLite PRIMARY KEY; `Ledger._assign_tx` raises rather than let a second
-#     lane reuse an existing task id (core.py), so a task id's `lane` column
-#     never silently changes owner once written.
-# So `<prefix>/<n>-<slug>` on a PR's head branch and task id
-# `${PREFIX}<n>-<slug>` are two spellings of the same fact, produced by the
-# same dispatch, and the second is a permanent ledger row. Neither spelling
-# includes REPO's OWNER, so this check only makes sense within one repo --
-# exactly what a single `dispatch.sh` invocation already is.
+# THE FALLBACK MAPPING, used only when that lookup is silent, is #117's own
+# fix: the WORKTREE `worktree.sh new` built for a dispatch (step 3 below) is
+# recorded against that dispatch's task id at dispatch time (`--worktree`,
+# step 6), and never touched again. That worktree is not renamed even when
+# its branch is -- a lane routinely renames its checkout to a type-prefixed
+# branch (`fix/`, `feat/`, ...) with a slug of its OWN choosing, unrelated
+# to the dispatch slug the task id was minted from, so the branch on a PR is
+# frequently NOT `<prefix>/<n>-<slug>` for the `$PREFIX`/`$SLUG` this
+# dispatch would reconstruct (agent-supervisor#117: task
+# `as101-reviewspr-inference` produced branch `fix/101-not-a-review-escape`
+# -- the two slugs share no text at all). So this asks `git worktree list`
+# which worktree currently has the PR's HEAD_REF checked out, then asks the
+# ledger which task that worktree's PATH was recorded against -- a fact
+# nobody has to reconstruct, because it was written once and never changes.
+#
+# A LEGACY fallback (step 3.1) still reconstructs a task id from the branch
+# name, kept only for tasks dispatched before this column existed (they
+# recorded no worktree path at all, so step 3 can never match them) -- see
+# its own comment below for why it is trusted no further than before.
 #
 # FAILS CLOSED throughout: `gh` unreachable, a PR with no head branch, or
 # every source below coming up silent -- every one of these means authorship
@@ -434,12 +436,12 @@ fi
 # agent-supervisor#35: a branch name is a label someone typed at dispatch
 # time, not a record this system wrote -- the ledger row is. THE LEDGER IS
 # ASKED FIRST NOW, keyed by the issue the PR closes, and the branch name is
-# kept only as a last-resort hint, widened to the prefixes actually in use
-# (CLAUDE.md's Work Tracking section requires type-prefixed branches --
-# `lane/` was the only shape understood before this, and it is the one the
-# convention is moving away from). Measured on this repo's own merged
-# history: 3 of 11 merged PRs, plus open PR #33, were unreviewable through
-# the branch-only path -- see the #35 issue body for the count.
+# only ever consulted through a ledger record it points at, never trusted on
+# its own -- first the worktree that produced it (#117), then, only for
+# rows that predate that, the task id it implies by convention (#35).
+# Measured on this repo's own merged history when #35 shipped: 3 of 11
+# merged PRs, plus open PR #33, were unreviewable through the branch-only
+# path -- see the #35 issue body for the count.
 AUTHOR_LANE=""
 AUTHOR_TASK=""
 FALLBACK_TASK=""
@@ -492,8 +494,49 @@ if [ -n "$REVIEWS_PR" ]; then
     fi
   done
 
-  # 3. Last resort: the branch name -- still resolved through the ledger by
-  # the task id that convention implies, never trusted on its own.
+  # 3. agent-supervisor#117: which worktree currently has HEAD_REF checked
+  # out -- resolved through the ledger by the worktree PATH recorded at
+  # dispatch time (`--worktree`, step 6 of a PRIOR dispatch), never by
+  # reconstructing a task id from the branch name. A lane routinely renames
+  # its worktree's branch to satisfy the type-prefix convention (`fix/`,
+  # `feat/`, ...) with a slug of its OWN choosing, independent of the
+  # dispatch slug the task id was minted from -- exactly the #117 confound
+  # ("as101-reviewspr-inference" produced branch "fix/101-not-a-review-
+  # escape"; the two slugs share nothing). The worktree itself is never
+  # renamed, so `git worktree list` still finds it by its current branch
+  # regardless of how many times that branch was renamed, and the ledger
+  # already knows which task built it.
+  #
+  # `$REPO_PATH` is the local checkout `--reviews-pr`'s caller is running
+  # in, i.e. the one whose worktrees this can actually see -- REQUIRED for
+  # this step; skipped (not refused) when a caller omitted it, exactly like
+  # `DISPATCH_ALLOW_CWD_REPO_PATH` skips it above for [repo] alone.
+  if [ -z "$AUTHOR_LANE" ] && [ -n "$REPO_PATH" ]; then
+    WORKTREE_LIST=$(git -C "$REPO_PATH" worktree list --porcelain 2>/dev/null || true)
+    if [ -n "$WORKTREE_LIST" ]; then
+      MATCHED_WORKTREE=$(awk -v want="branch refs/heads/$HEAD_REF" '
+        /^worktree / { path = substr($0, 10) }
+        $0 == want { print path }
+      ' <<<"$WORKTREE_LIST")
+      # More than one worktree currently on the same branch cannot happen --
+      # git itself refuses to check the same branch out twice -- but take
+      # only the first match defensively rather than trust that invariant.
+      MATCHED_WORKTREE=$(head -n1 <<<"$MATCHED_WORKTREE")
+      if [ -n "$MATCHED_WORKTREE" ]; then
+        WORKTREE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" worktree-lane --path "$MATCHED_WORKTREE" 2>&1)
+        if [ $? -eq 0 ] && grep -qF '"known":true' <<<"$WORKTREE_JSON"; then
+          AUTHOR_LANE=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$WORKTREE_JSON")
+          AUTHOR_TASK=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$WORKTREE_JSON")
+        fi
+      fi
+    fi
+  fi
+
+  # 3.1. Legacy last resort, kept only for tasks dispatched before #117: no
+  # worktree path was ever recorded for them, so step 3 above can never
+  # match. The branch name IS trusted here, but only as far as the ledger
+  # confirms it -- a task id it does not recognise still refuses, same as
+  # always.
   if [ -z "$AUTHOR_LANE" ] && [[ "$HEAD_REF" =~ ^(lane|fix|feat|chore|docs)/([0-9]+)-(.+)$ ]]; then
     FALLBACK_TASK="${PREFIX}${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
     FALLBACK_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" task-lane --task "$FALLBACK_TASK" 2>&1)
@@ -1460,6 +1503,18 @@ else
       HARNESS_SESSION_ID=""
     fi
   fi
+  # agent-supervisor#117: recorded CANONICAL, not as `worktree.sh` printed
+  # it. `WORKTREE` is built from `$TMPDIR`/`WORKTREE_ROOT`, and on macOS
+  # both `/tmp` and (the `/var/folders/...` `$TMPDIR` default) `/var` are
+  # themselves symlinks into `/private` -- `git worktree list --porcelain`
+  # (step 3's own lookup, above) reports the RESOLVED path, so recording
+  # the unresolved one here would make every future lookup miss by
+  # construction, silently, for every dispatch on such a host. Falls back
+  # to the unresolved path only if `cd`+`pwd -P` cannot run (the worktree
+  # already gone) rather than dropping the association entirely.
+  WORKTREE_CANONICAL="$WORKTREE"
+  WORKTREE_CANONICAL_RESOLVED=$(cd "$WORKTREE" 2>/dev/null && pwd -P) || true
+  [ -n "$WORKTREE_CANONICAL_RESOLVED" ] && WORKTREE_CANONICAL="$WORKTREE_CANONICAL_RESOLVED"
   LEDGER_ARGS=(
     record-dispatch
     --lane "$LANE"
@@ -1472,6 +1527,11 @@ else
     --session-id "$SESSION_ID"
     --harness-session-id "$HARNESS_SESSION_ID"
     --github "$REPO"
+    # agent-supervisor#117: the worktree this dispatch just built, recorded
+    # as its own column now (`Ledger.get_task_for_worktree`) instead of only
+    # living inside --summary text, so a later --reviews-pr authorship check
+    # can look it back up without reconstructing anything from a branch name.
+    --worktree "$WORKTREE_CANONICAL"
   )
   # agent-dotfiles#216: forward the harness `lane-free` already resolved
   # (step 1) instead of letting `record-dispatch` re-derive one from

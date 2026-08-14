@@ -306,7 +306,12 @@ class Ledger:
                     delivery_attempted_at INTEGER,
                     delivered_at INTEGER,
                     accepted_at INTEGER,
-                    completed_at INTEGER
+                    completed_at INTEGER,
+                    -- agent-supervisor#117: the worktree this dispatch's
+                    -- branch actually lives in, recorded once at dispatch
+                    -- time. '' (never NULL) for a task dispatched before
+                    -- this column existed -- see `_migrate_tasks_table`.
+                    worktree_path TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE UNIQUE INDEX IF NOT EXISTS one_open_task_per_lane
@@ -363,7 +368,12 @@ class Ledger:
             )
         os.chmod(self.db_path, 0o600)
 
-    _TASKS_SCHEMA_MARKERS = ("delivery_pending", "delivery_attempted_at")
+    # agent-supervisor#117 adds `worktree_path`: the worktree `worktree.sh
+    # new` built for this dispatch, known at dispatch time alongside the
+    # lane and task id but, before this, carried only as unstructured text
+    # inside `summary` (see `cli.py`'s `record_dispatch` docstring) -- so
+    # nothing could look it back up. See `Ledger.get_task_for_worktree`.
+    _TASKS_SCHEMA_MARKERS = ("delivery_pending", "delivery_attempted_at", "worktree_path")
     # agent-dotfiles#216 added 'copilot' (a plain tmux/Node lane, distinct
     # from the ACP-driven 'copilot-acp' already here) to the same CHECK
     # constraint this migration widens -- both markers must be present or a
@@ -512,6 +522,14 @@ class Ledger:
                     return
                 columns = {info["name"] for info in probe.execute("PRAGMA table_info(tasks)").fetchall()}
             attempted_column = "delivery_attempted_at" if "delivery_attempted_at" in columns else "NULL"
+            # agent-supervisor#117: a pre-existing row recorded no worktree
+            # path anywhere structured -- only as free text inside `summary`
+            # (`worktree=<path>`). Backfilling that by parsing `summary`
+            # would be writing a guess into a column whose whole point is to
+            # be authored, recorded fact, so this deliberately does not
+            # parse it: an old row reads '', the same "not recorded" answer
+            # `get_task_for_worktree` already gives for any unmatched path.
+            worktree_path_column = "worktree_path" if "worktree_path" in columns else "''"
 
             connection = self._connect(foreign_keys=False)
             try:
@@ -535,7 +553,8 @@ class Ledger:
                             delivery_attempted_at INTEGER,
                             delivered_at INTEGER,
                             accepted_at INTEGER,
-                            completed_at INTEGER
+                            completed_at INTEGER,
+                            worktree_path TEXT NOT NULL DEFAULT ''
                         )
                         """
                     )
@@ -545,11 +564,11 @@ class Ledger:
                         INSERT INTO tasks_migrated (
                             id, lane, pane_nonce, summary, status, result_path, result_sha256,
                             created_at, updated_at, delivery_attempted_at, delivered_at,
-                            accepted_at, completed_at
+                            accepted_at, completed_at, worktree_path
                         )
                         SELECT id, lane, pane_nonce, summary, status, result_path, result_sha256,
                                created_at, updated_at, {attempted_column}, delivered_at,
-                               accepted_at, completed_at
+                               accepted_at, completed_at, {worktree_path_column}
                         FROM tasks
                         """
                     )
@@ -1088,6 +1107,46 @@ class Ledger:
             return candidates[0]
         return None
 
+    def get_task_for_worktree(self, worktree_path):
+        """The task recorded against one exact worktree path (agent-supervisor#117).
+
+        `worktree.sh new` mints a fresh path per dispatch (its destination
+        name embeds the dispatching process's pid), so at most one task is
+        expected to ever match -- this is a point lookup, not a fallback
+        chain like `get_author_task_for_issue`. It exists because a branch
+        cannot be trusted to still spell what it was dispatched as: a lane
+        routinely renames its worktree's branch to satisfy the type-prefix
+        convention (`fix/`, `feat/`, ...) with a slug of its own choosing,
+        so reconstructing a task id from that branch name misses exactly
+        the lane-authored PRs this lookup exists to find (dispatch.sh's own
+        `--reviews-pr` fallback, replaced by this). The worktree itself does
+        not get renamed, so its recorded path is stable even when its
+        current branch is not.
+
+        A review task can never be its own PR's author (agent-supervisor#76),
+        so review tasks are filtered out here exactly as
+        `get_author_task_for_issue` filters them -- this only ever answers
+        with a task that could plausibly be one.
+
+        Blank `worktree_path` never matches: rows written before this
+        column existed carry '' (see `_migrate_tasks_table`), and matching
+        one blank against another would wrongly declare every pre-#117 task
+        the same worktree.
+        """
+        if not worktree_path:
+            return None
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT * FROM tasks WHERE worktree_path = ? ORDER BY created_at ASC, id ASC",
+                (worktree_path,),
+            ).fetchall()
+        candidates = [
+            self._dict(row) for row in rows if not self._task_looks_like_review(row["id"], row["summary"])
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
     def list_tasks(self):
         with contextlib.closing(self._connect()) as connection:
             rows = connection.execute("SELECT * FROM tasks ORDER BY created_at, id").fetchall()
@@ -1268,7 +1327,7 @@ class Ledger:
             row = connection.execute("SELECT * FROM source_tasks WHERE id = ?", (task_id,)).fetchone()
         return self._source_task_dict(row)
 
-    def _assign_tx(self, connection, *, task_id, lane, pane_nonce, summary, now):
+    def _assign_tx(self, connection, *, task_id, lane, pane_nonce, summary, now, worktree_path=""):
         self._require_task_id(task_id)
         if not summary.strip():
             raise ValueError("task summary must be non-empty")
@@ -1288,10 +1347,10 @@ class Ledger:
         try:
             connection.execute(
                 """
-                INSERT INTO tasks(id, lane, pane_nonce, summary, status, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 'created', ?, ?)
+                INSERT INTO tasks(id, lane, pane_nonce, summary, status, created_at, updated_at, worktree_path)
+                VALUES (?, ?, ?, ?, 'created', ?, ?, ?)
                 """,
-                (task_id, lane, pane_nonce, summary, now, now),
+                (task_id, lane, pane_nonce, summary, now, now, worktree_path),
             )
         except sqlite3.IntegrityError as error:
             if "tasks.lane" in str(error):
@@ -1300,10 +1359,18 @@ class Ledger:
         row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
         return self._dict(row)
 
-    def assign(self, *, task_id, lane, pane_nonce, summary):
+    def assign(self, *, task_id, lane, pane_nonce, summary, worktree_path=""):
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
-            return self._assign_tx(connection, task_id=task_id, lane=lane, pane_nonce=pane_nonce, summary=summary, now=now)
+            return self._assign_tx(
+                connection,
+                task_id=task_id,
+                lane=lane,
+                pane_nonce=pane_nonce,
+                summary=summary,
+                now=now,
+                worktree_path=worktree_path,
+            )
 
     def _transition_tx(self, connection, task_id, pane_nonce, allowed, target, timestamp_column, now):
         row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
@@ -1447,6 +1514,7 @@ class Ledger:
         status_marker=None,
         harness_session_id="",
         transport="send-keys",
+        worktree_path="",
         failpoint=None,
     ):
         """Atomically register the lane, record the GitHub source, assign, and mark delivered.
@@ -1507,7 +1575,13 @@ class Ledger:
             )
             self._fail(failpoint, "after_reconstruct_task")
             self._assign_tx(
-                connection, task_id=task_id, lane=lane, pane_nonce=registered_nonce, summary=summary, now=now
+                connection,
+                task_id=task_id,
+                lane=lane,
+                pane_nonce=registered_nonce,
+                summary=summary,
+                now=now,
+                worktree_path=worktree_path,
             )
             self._fail(failpoint, "after_assign")
             # The intermediate `delivery_pending` write is not skipped: it is

@@ -993,16 +993,19 @@ class IssueLaneCliTest(unittest.TestCase):
     through `cli.main`, not `Ledger.get_task_for_issue` directly.
     """
 
-    def _record_dispatch(self, root, *, lane, task, issue):
+    def _record_dispatch(self, root, *, lane, task, issue, worktree=None):
         output = io.StringIO()
+        argv = [
+            "--state-dir", root, "record-dispatch",
+            "--lane", lane, "--task", task, "--summary", f"#{issue} summary",
+            "--pane-id", "%3", "--pane-path", root, "--command", "claude.exe",
+            "--server-id", "socket:1", "--session-id", "$0",
+            "--issue", str(issue), "--github", "jonhill90/agent-dotfiles",
+        ]
+        if worktree is not None:
+            argv += ["--worktree", worktree]
         with contextlib.redirect_stdout(output):
-            rc = cli.main([
-                "--state-dir", root, "record-dispatch",
-                "--lane", lane, "--task", task, "--summary", f"#{issue} summary",
-                "--pane-id", "%3", "--pane-path", root, "--command", "claude.exe",
-                "--server-id", "socket:1", "--session-id", "$0",
-                "--issue", str(issue), "--github", "jonhill90/agent-dotfiles",
-            ])
+            rc = cli.main(argv)
         self.assertEqual(0, rc, output.getvalue())
 
     def _issue_lane(self, root, issue):
@@ -1119,6 +1122,72 @@ class IssueLaneCliTest(unittest.TestCase):
             author = self._author_issue_lane(root, 13)
 
             self.assertEqual({"issue": "13", "known": False, "lane": None, "task": None}, author)
+
+
+class WorktreeLaneCliTest(unittest.TestCase):
+    """agent-supervisor#117: `dispatch.sh --reviews-pr`'s last-resort read,
+    exercised through `cli.main` the same way `TaskLaneCliTest` and
+    `IssueLaneCliTest` exercise their own lookups end to end."""
+
+    def _record_dispatch(self, root, *, lane, task, issue, worktree):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = cli.main([
+                "--state-dir", root, "record-dispatch",
+                "--lane", lane, "--task", task, "--summary", f"#{issue} summary",
+                "--pane-id", "%3", "--pane-path", root, "--command", "claude.exe",
+                "--server-id", "socket:1", "--session-id", "$0",
+                "--issue", str(issue), "--github", "jonhill90/agent-dotfiles",
+                "--worktree", worktree,
+            ])
+        self.assertEqual(0, rc, output.getvalue())
+
+    def _worktree_lane(self, root, path):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = cli.main(["--state-dir", root, "worktree-lane", "--path", path])
+        self.assertEqual(0, rc, output.getvalue())
+        return json.loads(output.getvalue())
+
+    def test_a_recorded_worktree_answers_with_the_lane_that_built_it(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._record_dispatch(
+                root, lane="t:3", task="as117-fix", issue=117, worktree="/tmp/ad-117-fix-99"
+            )
+
+            result = self._worktree_lane(root, "/tmp/ad-117-fix-99")
+
+            self.assertEqual(
+                {"path": "/tmp/ad-117-fix-99", "known": True, "lane": "t:3", "task": "as117-fix"},
+                result,
+            )
+
+    def test_an_unrecorded_worktree_answers_known_false_rather_than_erroring(self):
+        """Fails closed the same way `task-lane`/`issue-lane` do: `known:false`
+        is "cannot be determined", never guessed at."""
+        with tempfile.TemporaryDirectory() as root:
+            result = self._worktree_lane(root, "/tmp/never-recorded")
+
+            self.assertEqual(
+                {"path": "/tmp/never-recorded", "known": False, "lane": None, "task": None}, result
+            )
+
+    def test_the_answer_does_not_depend_on_the_branch_the_pr_under_review_used(self):
+        """agent-supervisor#117's own reproduction: task
+        `as101-reviewspr-inference` produced PR branch
+        `fix/101-not-a-review-escape` -- a slug sharing no text with the
+        dispatch's own. This lookup never reads a branch name at all, so it
+        answers identically no matter what the eventual branch was called."""
+        with tempfile.TemporaryDirectory() as root:
+            self._record_dispatch(
+                root, lane="t:3", task="as101-pr-inference-fix", issue=101,
+                worktree="/tmp/ad-101-pr-inference-fix-7",
+            )
+
+            result = self._worktree_lane(root, "/tmp/ad-101-pr-inference-fix-7")
+
+            self.assertEqual("t:3", result["lane"])
+            self.assertEqual("as101-pr-inference-fix", result["task"])
 
 
 if __name__ == "__main__":
