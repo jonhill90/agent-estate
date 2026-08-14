@@ -93,7 +93,7 @@ check "refuses --lanes 1" "1" "$?"
 bash "$BOOT" --session "$S" --lanes 4 --agent bash >/dev/null 2>&1
 check "creates cleanly" "0" "$?"
 check "supervisor + 3 lanes, named to convention" \
-  "1 architecture
+  "1 supervisor
 2 free-2
 3 free-3
 4 free-4" "$(windows)"
@@ -105,7 +105,7 @@ tmux rename-window -t "$S:2" IN-USE
 bash "$BOOT" --session "$S" --lanes 6 --agent bash --add-lanes >/dev/null 2>&1
 check "--add-lanes exits 0" "0" "$?"
 check "adds only missing windows, busy lane untouched" \
-  "1 architecture
+  "1 supervisor
 2 IN-USE
 3 free-3
 4 free-4

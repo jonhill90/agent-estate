@@ -46,7 +46,7 @@ HARNESS_COMMANDS = {
 # proceed?" or a PR body's own text reads back as approval/blocked.
 #
 # It has real callers, right here: TmuxAdapter.assign_task, .observe_lane,
-# and .notify_architecture -- the last of which calls it twice, once to
+# and .notify_supervisor -- the last of which calls it twice, once to
 # check the pane is idle before sending and once after to confirm the send
 # landed. What routes around it is one level up -- dispatch.sh's dispatch
 # path (via cli.py's `record_dispatch` command) deliberately calls the
@@ -201,7 +201,7 @@ class TmuxAdapter:
             return None
         return self.ledger.observe_attention(lane, pane_nonce=record["nonce"], reason=state)
 
-    def notify_architecture(self, *, lane, retry_after):
+    def notify_supervisor(self, *, lane, retry_after):
         with self.ledger.operation_lock():
             record = self._verified_lane(lane)
             pre_state = classify_capture(record["harness"], self.transport.capture(record["pane_id"], lines=25))
@@ -329,8 +329,8 @@ class ACPAdapter:
         self._verified_lane(lane)
         return None
 
-    def notify_architecture(self, *, lane, retry_after):
-        """copilot-acp workers never host the architecture lane -- only
+    def notify_supervisor(self, *, lane, retry_after):
+        """copilot-acp workers never host the supervisor lane -- only
         codex/claude do (SPEC §15.2) -- so there is nothing for this adapter
         to notify."""
         return False
@@ -441,8 +441,8 @@ class PiRPCAdapter:
         self._verified_lane(lane)
         return None
 
-    def notify_architecture(self, *, lane, retry_after):
-        """pi-rpc workers never host the architecture lane -- only
+    def notify_supervisor(self, *, lane, retry_after):
+        """pi-rpc workers never host the supervisor lane -- only
         codex/claude do (SPEC §15.2) -- so there is nothing for this adapter
         to notify."""
         return False

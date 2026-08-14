@@ -1,6 +1,6 @@
 # Supervisor tick
 
-One iteration of the architecture supervisor loop. If your context was lost,
+One iteration of the supervisor loop. If your context was lost,
 read `brief.md` in this directory first — it is the full standing context.
 
 ## Advance the live worktree, before anything else

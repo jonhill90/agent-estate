@@ -158,13 +158,21 @@ def parser():
 
     observe = sub.add_parser("observe")
     observe.add_argument("--lane", action="append")
+    observe.add_argument("--supervisor-lane", default="supervisor", dest="supervisor_lane")
+    observe.add_argument("--architecture-lane", dest="supervisor_lane", help=argparse.SUPPRESS)
 
     notify = sub.add_parser("notify")
-    notify.add_argument("--architecture-lane", default="architecture")
+    # as#132: --architecture-lane is a leftover name that misleads every new
+    # reader. --supervisor-lane is the name going forward; the old flag is
+    # kept as a hidden (help=SUPPRESS) alias sharing the same dest, so a
+    # caller that was not migrated in lockstep keeps working.
+    notify.add_argument("--supervisor-lane", default="supervisor", dest="supervisor_lane")
+    notify.add_argument("--architecture-lane", dest="supervisor_lane", help=argparse.SUPPRESS)
     notify.add_argument("--retry-after", type=int, default=900)
 
     tick = sub.add_parser("tick")
-    tick.add_argument("--architecture-lane", default="architecture")
+    tick.add_argument("--supervisor-lane", default="supervisor", dest="supervisor_lane")
+    tick.add_argument("--architecture-lane", dest="supervisor_lane", help=argparse.SUPPRESS)
     tick.add_argument("--retry-after", type=int, default=900)
     tick.add_argument("--no-sensors", action="store_true")
     tick.add_argument("--sensor-timeout", type=int, default=30)
@@ -176,7 +184,8 @@ def parser():
 
     ack = sub.add_parser("ack")
     ack.add_argument("--event", action="append", required=True)
-    ack.add_argument("--architecture-lane", default="architecture")
+    ack.add_argument("--supervisor-lane", default="supervisor", dest="supervisor_lane")
+    ack.add_argument("--architecture-lane", dest="supervisor_lane", help=argparse.SUPPRESS)
 
     reconstruct = sub.add_parser("reconstruct")
     reconstruct.add_argument("--source-url", required=True)
@@ -573,8 +582,8 @@ def record_completion(ledger, *, task, lane, note):
 
     Note the one thing this does that is not inert: `Ledger.complete` inserts
     a `completion:<task>` event, and `cli.py notify`/`tick` would send those
-    to the architecture lane. Neither can fire from this wiring -- both go
-    through `_verified_lane`, which requires an architecture lane registered
+    to the supervisor lane. Neither can fire from this wiring -- both go
+    through `_verified_lane`, which requires a supervisor lane registered
     with matching tmux options, and nothing here registers one.
 
     agent-supervisor#36 (second issue comment): `--task` used to be the only
@@ -601,6 +610,21 @@ def record_completion(ledger, *, task, lane, note):
         raise RuntimeError(f"unknown {identity}")
     allow_claim = row["id"].startswith(CLAIM_TASK_PREFIX)
     return ledger.complete(row["id"], note.encode("utf-8"), pane_nonce=row["pane_nonce"], allow_claim=allow_claim)
+
+
+# as#132: the ledger's registered lane id can still be the pre-migration
+# "architecture", the post-migration "supervisor", or whatever the caller
+# passed via --supervisor-lane/--architecture-lane -- any of those must be
+# recognised as THE supervisor lane so a lane-exclusion check does not fail
+# open (agent-supervisor#132, cli.py's `observe` filter used to hardcode the
+# literal "architecture" and silently stopped excluding anything once the
+# flag's default moved). Drop the "architecture" alias once every estate has
+# migrated its ledger rows and callers to "supervisor".
+_SUPERVISOR_LANE_ALIASES = frozenset({"architecture", "supervisor"})
+
+
+def _is_supervisor_lane(lane_id, configured):
+    return lane_id == configured or lane_id in _SUPERVISOR_LANE_ALIASES
 
 
 def _verify_caller(adapter, ledger, lane):
@@ -768,12 +792,14 @@ def main(argv=None):
             ledger, gh_bin=os.environ.get("AGENT_GH_BIN", "gh")
         ).sweep()
     elif args.command == "observe":
-        lanes = args.lane or [item["lane"] for item in ledger.list_lanes() if item["lane"] != "architecture"]
+        lanes = args.lane or [
+            item["lane"] for item in ledger.list_lanes() if not _is_supervisor_lane(item["lane"], args.supervisor_lane)
+        ]
         value = [
             event for lane in lanes if (event := adapter_for_lane(lane).observe_lane(lane)) is not None
         ]
     elif args.command == "notify":
-        value = {"notified": adapter.notify_architecture(lane=args.architecture_lane, retry_after=args.retry_after)}
+        value = {"notified": adapter.notify_supervisor(lane=args.supervisor_lane, retry_after=args.retry_after)}
     elif args.command == "tick":
         with ledger.operation_lock():
             sensor_result = {"events": [], "errors": [], "recoveries": []}
@@ -792,7 +818,7 @@ def main(argv=None):
             notified = False
             if not gated:
                 for lane in ledger.list_lanes():
-                    if lane["lane"] == args.architecture_lane:
+                    if _is_supervisor_lane(lane["lane"], args.supervisor_lane):
                         continue
                     try:
                         event = adapter_for_harness(lane["harness"], lane.get("transport")).observe_lane(lane["lane"])
@@ -803,11 +829,18 @@ def main(argv=None):
                         ledger.record_component(f"lane:{lane['lane']}", healthy=False, error=str(error))
                         errors.append({"lane": lane["lane"], "error": str(error)})
                 try:
-                    notified = adapter.notify_architecture(lane=args.architecture_lane, retry_after=args.retry_after)
+                    notified = adapter.notify_supervisor(lane=args.supervisor_lane, retry_after=args.retry_after)
+                    # as#132: "architecture" here is a ledger COMPONENT KEY, not
+                    # the lane name or the window name -- record_component's own
+                    # rows are keyed by this literal and changing it would start
+                    # a fresh health history and orphan everything recorded
+                    # before this PR, for zero behavioural gain. Left unchanged
+                    # deliberately; the flag/lane rename above does not migrate
+                    # this key. See agent-supervisor#132 (Director's comment).
                     ledger.record_component("architecture", snapshot=b"reachable", healthy=True)
                 except Exception as error:
                     ledger.record_component("architecture", healthy=False, error=str(error))
-                    errors.append({"lane": args.architecture_lane, "error": str(error)})
+                    errors.append({"lane": args.supervisor_lane, "error": str(error)})
                     notified = False
         value = {
             "sensor_events": sensor_result["events"],
@@ -823,7 +856,7 @@ def main(argv=None):
     elif args.command == "events":
         value = ledger.events_due() if args.due else ledger.list_events()
     elif args.command == "ack":
-        _verify_caller(adapter, ledger, args.architecture_lane)
+        _verify_caller(adapter, ledger, args.supervisor_lane)
         ledger.ack(args.event)
         value = {"acked": args.event}
     elif args.command == "reconstruct":

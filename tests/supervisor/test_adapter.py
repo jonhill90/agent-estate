@@ -135,7 +135,7 @@ class AdapterTest(unittest.TestCase):
         self.adapter.assign_task(lane="infra-claude", task_id="review-task", summary="Review")
         self.ledger.complete("review-task", b"# Result\n\nNo findings.\n", pane_nonce="nonce-8")
         self.transport.panes["%19"]["after_send"] = "■ You have hit your usage limit.\n\n› Continue\n"
-        notified = self.adapter.notify_architecture(lane="architecture", retry_after=900)
+        notified = self.adapter.notify_supervisor(lane="architecture", retry_after=900)
         self.assertFalse(notified)
         event = self.ledger.get_event("completion:review-task")
         self.assertEqual("pending", event["status"])
@@ -183,7 +183,7 @@ class AdapterTest(unittest.TestCase):
     def test_one_hundred_unchanged_observations_send_nothing(self):
         for _ in range(100):
             self.assertIsNone(self.adapter.observe_lane("architecture"))
-            self.assertFalse(self.adapter.notify_architecture(lane="architecture", retry_after=900))
+            self.assertFalse(self.adapter.notify_supervisor(lane="architecture", retry_after=900))
         self.assertEqual([], self.transport.sends)
 
     def test_blocked_approval_and_unknown_outstanding_tasks_emit_durable_attention(self):
