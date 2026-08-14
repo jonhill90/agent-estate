@@ -2317,6 +2317,164 @@ fi
 # defeated by it. The dedicated cases above are what actually catch it.
 echo "  (agent-dotfiles#199's stderr-clean case never takes the --reviews-pr path, so it could not have caught finding 2 either way -- confirmed by inspection, not a case here)"
 
+# --- agent-supervisor#70: a forgotten --reviews-pr is not a silent self-
+# review -------------------------------------------------------------------
+#
+# WHY: `--reviews-pr` (#212/#35) resolves authorship correctly and refuses a
+# self-review -- but only when the caller remembers to pass it, and the
+# supervisor forgot it three times in one day (PR #62 twice, #69 once),
+# dispatching a self-review every time. This exercises the exact same #212
+# refusal reached WITHOUT the flag: dispatch.sh infers it from the issue
+# title's own "review PR #<N>" shape (the shape every review issue in this
+# estate's history already uses -- see the #212/#35 fixtures above).
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+printf '240|| the code PR #500 was written from\n' >> "$D/issues"
+printf '241|| review PR #500, no flag passed\n' >> "$D/issues"
+printf '500|Fixes #240|lane/240-infer-author\n' >> "$D/prs"
+
+out=$(LEDGER_STATE="$D/state-70" run 240 infer-author "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "the authoring dispatch (#240) succeeds" "$rc" 0 "$out"
+LEDGER_STATE="$D/state-70" ledger record-completion --task ad240-infer-author --note done >/dev/null
+
+# Case 1 (red first #1): the author's lane is the ONLY free lane -> refuses,
+# naming the lane and the PR, even though --reviews-pr was never passed.
+out=$(LEDGER_STATE="$D/state-70" run 241 rev-500-noflag "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a review inferred from the issue title is refused when the only free lane is the author" "$rc" 1 "$out"
+want_contains "and says the flag was inferred, from the issue title" "inferred --reviews-pr 500 from issue #241's title" "$out"
+want_contains "names the PR" "PR #500" "$out"
+want_contains "names the authoring task, not just the lane" "ad240-infer-author" "$out"
+if [ -z "$(assignees 241)" ]; then ok "the refused inferred review takes no claim on its own issue"
+else bad "the refused inferred review takes no claim on its own issue" "still assigned: $(assignees 241)"; fi
+
+# Case 2 (red first #2): a second free lane exists -> the inferred review
+# lands on it, silently -- this is what keeps inference usable rather than
+# obstructive.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+out=$(LEDGER_STATE="$D/state-70" run 241 rev-500-noflag "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "with another free lane available, the inferred review IS dispatched" "$rc" 0 "$out"
+want_contains "the author's lane is named and skipped, from inference alone" "skipping t:3" "$out"
+log=$(tmuxlog)
+want_contains "and lands on the OTHER free lane, t:4 (target t:@104)" "send-keys -t t:@104" "$log"
+want_missing "never on the author's lane (t:3, target t:@103)" "send-keys -t t:@103 " "$log"
+
+# Case 3 (red first #3): an ordinary dispatch -- no "review" + "PR #N" shape
+# anywhere in the issue title or brief -- is unaffected. This is the
+# regression that matters: an over-eager inference would block a normal fix
+# pass by the PR's own author, stalling every PR.
+printf '242|| add a missing null check\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-70" run 242 null-check "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "an ordinary dispatch with no review shape in title or brief is unaffected" "$rc" 0 "$out"
+want_missing "nothing was inferred" "inferred --reviews-pr" "$out"
+LEDGER_STATE="$D/state-70" ledger record-completion --task ad242-null-check --note done >/dev/null
+
+# Inference also reads the BRIEF, not just the title, when the title alone
+# does not name a PR -- e.g. a generic "do the review" issue whose brief is
+# where the PR number actually lives.
+BRIEF_REVIEW="$D/brief-review.md"
+printf 'Review PR #500 for correctness and merge readiness.\n' > "$BRIEF_REVIEW"
+printf '243|| do the review\n' >> "$D/issues"
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+out=$(LEDGER_STATE="$D/state-70" run 243 rev-500-brief "$BRIEF_REVIEW" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a review inferred from the BRIEF (title alone has no PR number) is refused when the only free lane is the author" "$rc" 1 "$out"
+want_contains "and says the flag was inferred, from the brief" "inferred --reviews-pr 500 from the brief" "$out"
+
+# An explicit --reviews-pr always wins and is never second-guessed by
+# inference -- passing a DIFFERENT PR than the one the title/brief would
+# have inferred must resolve the flag's PR, not the inferred one.
+printf '244|| the code PR #501 was written from\n' >> "$D/issues"
+printf '245|| review PR #500, but --reviews-pr says 501\n' >> "$D/issues"
+printf '501|Fixes #244|lane/244-infer-explicit\n' >> "$D/prs"
+out=$(LEDGER_STATE="$D/state-70" run 244 infer-explicit "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the second authoring dispatch (#244) succeeds" "$rc" 0 "$out"
+LEDGER_STATE="$D/state-70" ledger record-completion --task ad244-infer-explicit --note done >/dev/null
+out=$(LEDGER_STATE="$D/state-70" run 245 rev-explicit-wins "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 501); rc=$?
+want_exit "the explicit --reviews-pr 501 is refused (its own author, t:3, is the only free lane)" "$rc" 1 "$out"
+want_contains "names PR #501, the flag's PR, not #500 from the title" "PR #501" "$out"
+want_missing "never inferred -- the explicit flag short-circuits detection" "inferred --reviews-pr" "$out"
+
+# agent-supervisor#72: the repo-qualified form ("PR owner/repo#N") is the
+# exact shape the Director's own review briefs use ("the independent review
+# of PR jonhill90/agent-supervisor#N"), and it was missed entirely -- only
+# bare "PR #N" was recognised. Same fixture shape as the #70 title tests
+# above, just with the repo-qualified spelling.
+printf '248|| the code PR #503 was written from\n' >> "$D/issues"
+printf '249|| independent review of PR acme/agent-dotfiles#503 closing issue #240\n' >> "$D/issues"
+printf '503|Fixes #248|lane/248-infer-qualified\n' >> "$D/prs"
+out=$(LEDGER_STATE="$D/state-70" run 248 infer-qualified "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch (#248) succeeds" "$rc" 0 "$out"
+LEDGER_STATE="$D/state-70" ledger record-completion --task ad248-infer-qualified --note done >/dev/null
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+out=$(LEDGER_STATE="$D/state-70" run 249 rev-503-qualified "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a review inferred from a repo-qualified PR reference (owner/repo#N) is refused when the only free lane is the author" "$rc" 1 "$out"
+want_contains "and says the flag was inferred, from the issue title" "inferred --reviews-pr 503 from issue #249's title" "$out"
+want_contains "names the PR" "PR #503" "$out"
+# The line also names issue #240 right next to the PR -- confirm the wrong
+# number (the issue being closed) was never picked up.
+want_missing "never inferred the issue number instead of the PR number" "inferred --reviews-pr 240" "$out"
+
+# A bare "owner/repo#N" with no "PR" word is this repo's own convention for
+# citing an ISSUE inline (see "Fixes #240" fixtures throughout this file) --
+# it must NOT be read as a PR reference, or an issue mention would silently
+# become the inferred review PR.
+printf '250|| review: see acme/agent-dotfiles#503 for the change, closing #240\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-70" run 250 no-bare-qualified "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a bare owner/repo#N with no 'PR' word is not inferred as a review" "$rc" 0 "$out"
+want_missing "nothing was inferred" "inferred --reviews-pr" "$out"
+LEDGER_STATE="$D/state-70" ledger record-completion --task ad250-no-bare-qualified --note done >/dev/null
+
+# MUTATION-CHECK: disable the inference block and confirm a forgotten flag
+# again dispatches straight to the author, the exact regression #70 exists
+# to close.
+MUTATED_70="$D/dispatch-no-inference.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$MUTATED_70" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = 'if [ -z "$REVIEWS_PR" ]; then\n  INFER_GH_REPO_ARGS=()'
+assert marker in text, "inference block not found -- script shape changed"
+text = text.replace(marker, 'if false; then  # MUTATED: inference disabled\n  INFER_GH_REPO_ARGS=()', 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh with inference disabled" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh with inference disabled"
+  chmod +x "$MUTATED_70"
+  cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+  printf '246|| the code PR #502 was written from\n' >> "$D/issues"
+  printf '247|| review PR #502, mutant\n' >> "$D/issues"
+  printf '502|Fixes #246|lane/246-infer-mutant\n' >> "$D/prs"
+  LEDGER_STATE="$D/state-70-mutant" run 246 infer-mutant "$D/brief.md" acme/agent-dotfiles "$REPO" >/dev/null
+  LEDGER_STATE="$D/state-70-mutant" ledger record-completion --task ad246-infer-mutant --note done >/dev/null
+  out=$(DISPATCH_SCRIPT="$MUTATED_70" LEDGER_STATE="$D/state-70-mutant" \
+        run 247 rev-502-mutant "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+  want_exit "mutation confirmed: with inference disabled, a forgotten flag dispatches again" "$rc" 0 "$out"
+  log=$(tmuxlog)
+  want_contains "mutation confirmed: straight to the author's own lane, t:3 (target t:@103)" "send-keys -t t:@103" "$log"
+fi
+
 rm -rf "$D"
 
 

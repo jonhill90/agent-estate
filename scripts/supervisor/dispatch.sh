@@ -62,6 +62,11 @@
 #              refuses any candidate lane that authored that PR's branch,
 #              fails closed if authorship cannot be determined at all, and
 #              proceeds unchanged if the flag is omitted -- see step 0.5.
+#              agent-supervisor#70: when omitted, dispatch.sh tries to infer
+#              it from the issue's title, then the brief -- a line naming
+#              both "review" and "PR #<N>" -- so a forgotten flag is not
+#              automatically a silent self-review. Passing the flag
+#              explicitly always wins and is never second-guessed.
 #
 # Exit 0 only when a lane has been sent a brief. Exit 1 on any refusal --
 # no free lane, an issue someone else already claimed, a worktree that could
@@ -166,6 +171,79 @@ ISSUE="${ISSUES[0]:-}"
 # the cheapest failure available, and it must stay that way.
 [ -f "$BRIEF" ] || { echo "dispatch: no brief file at $BRIEF" >&2; exit 1; }
 BRIEF="$(cd "$(dirname "$BRIEF")" && pwd)/$(basename "$BRIEF")"
+
+# --- infer --reviews-pr when the caller forgot it (agent-supervisor#70) ----
+# agent-dotfiles#263's shape: a guard that "proceeds unchanged if the flag is
+# omitted" is a guard that will be omitted. Measured on this estate: a
+# self-review was dispatched three times in one day (PR #62 twice, #69 once)
+# because `--reviews-pr` was forgotten every time, not because the guard
+# below (step 0.5) failed once it ran.
+#
+# This is a SAFETY NET on top of the explicit flag, not a replacement for it.
+# Skipped entirely when `--reviews-pr` was actually passed -- REVIEWS_PR is
+# already non-empty then, and the caller's explicit answer is never
+# second-guessed. loop-tick.md's instruction to pass the flag stands.
+#
+# Detection: a line -- in the issue's own title, checked first, then the
+# brief -- containing both the word "review" and a PR reference, in one of
+# three shapes (case-insensitive):
+#   * "PR #<N>"                       -- "review PR #204"
+#   * "PR <owner>/<repo>#<N>"         -- "review of PR jonhill90/agent-
+#                                         supervisor#72" (agent-supervisor#72:
+#                                         the Director's own review briefs
+#                                         write it this way, every time)
+#   * a github.com PR URL             -- ".../pull/<N>", with or without the
+#                                         word "PR" nearby -- "/pull/" is
+#                                         itself PR-specific (issues use
+#                                         "/issues/"), so it needs no other
+#                                         signal
+# That is the shape every review issue and brief in this estate's own
+# history already uses (see the #212/#35 fixtures in
+# tests/supervisor/test_dispatch.sh and loop-tick.md's own dispatch
+# instructions). No new convention is introduced; this only reads ones that
+# already exist.
+#
+# DELIBERATELY NOT MATCHED: a bare "#<N>" with no "PR" word and no
+# owner/repo before it. This estate's issues and briefs constantly say
+# "closing issue #70" or "Fixes #240" right next to a PR reference on the
+# same line ("review PR #500, no flag passed" is itself a title fixture
+# below) -- a bare number would as often grab the issue being closed as the
+# PR being reviewed, and inferring the WRONG PR is worse than inferring
+# none (step 0.5's guard would refuse or exclude based on the wrong
+# author). Likewise, `owner/repo#<N>` with no "PR" word is not matched: that
+# exact shape is this repo's own convention for citing an ISSUE inline
+# ("Fixes #240" close cousin), so matching it bare would conflate issue and
+# PR references. The "PR " prefix is what disambiguates both.
+#
+# WRONG IN EACH DIRECTION, both survivable:
+#   * FALSE POSITIVE (detected as a review when the dispatch is not one): the
+#     worst outcome is step 0.5 below excluding one candidate lane it did not
+#     need to, or refusing outright with "no free lane other than the
+#     author" when that candidate was the only free one. Annoying, not
+#     dangerous -- the message names exactly why, and the fix is to
+#     re-dispatch (the issue's claim is released on refusal, same as every
+#     other refusal path in this script).
+#   * FALSE NEGATIVE (a real review not detected -- title and brief phrase it
+#     differently than the shapes above): behaviour is exactly today's
+#     status quo. The explicit flag remains the only guaranteed way to
+#     trigger the guard; this block only catches the forgotten-flag case
+#     when the issue happens to name the PR in one of the shapes above.
+INFER_PR_PATTERN='pr[[:space:]]*#[0-9]+|pr[[:space:]]*[a-z0-9_.-]+/[a-z0-9_.-]+#[0-9]+|github\.com/[a-z0-9_.-]+/[a-z0-9_.-]+/pull/[0-9]+'
+if [ -z "$REVIEWS_PR" ]; then
+  INFER_GH_REPO_ARGS=()
+  [ -n "$REPO" ] && INFER_GH_REPO_ARGS=(-R "$REPO")
+  ISSUE_TITLE=$(gh issue view "$ISSUE" "${INFER_GH_REPO_ARGS[@]+"${INFER_GH_REPO_ARGS[@]}"}" --json title -q .title 2>/dev/null)
+  INFERRED_PR=$(grep -iE 'review' <<<"$ISSUE_TITLE" | grep -ioE "$INFER_PR_PATTERN" | grep -oE '[0-9]+$' | head -1)
+  INFERRED_FROM="issue #$ISSUE's title"
+  if [ -z "$INFERRED_PR" ]; then
+    INFERRED_PR=$(grep -iE 'review' "$BRIEF" | grep -ioE "$INFER_PR_PATTERN" | grep -oE '[0-9]+$' | head -1)
+    INFERRED_FROM="the brief"
+  fi
+  if [ -n "$INFERRED_PR" ]; then
+    REVIEWS_PR="$INFERRED_PR"
+    echo "dispatch: inferred --reviews-pr $REVIEWS_PR from $INFERRED_FROM (a line with 'review' and 'PR #$REVIEWS_PR') -- pass --reviews-pr explicitly to override" >&2
+  fi
+fi
 
 # Window name: <prefix><issue>-<slug>, the convention loop-tick.md requires so
 # Jon can read the tmux window list and know what the estate is doing. The

@@ -75,7 +75,10 @@ reviewing their own PR is not an independent reviewer. Pass `--reviews-pr
 <PR>` to `dispatch.sh` for a review dispatch (agent-dotfiles#212): it refuses
 to send that review to the lane whose ledger record shows it authored the
 PR's branch, and fails closed if authorship cannot be determined at all —
-never rely on remembering which lane wrote what by hand.
+never rely on remembering which lane wrote what by hand. Still pass it
+explicitly: agent-supervisor#70 added a best-effort fallback that infers the
+flag from a "review PR #<N>" line in the issue title or brief when it is
+forgotten, but that is a safety net, not a substitute for saying it.
 
 ## "Blocked on Jon" is often true of an issue and false of a piece of it
 
