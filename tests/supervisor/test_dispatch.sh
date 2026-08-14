@@ -100,8 +100,13 @@ run() {
     PATH="$D/bin:$PATH" LANES_FIXTURE="$D/lanes" LANES_SESSION=t TMUX_PANES="$D/panes" \
       bash -c "$RUN_PRESEED_PANES"
   fi
+  # RUN_SESSION names the tmux SESSION this dispatch runs against, defaulting
+  # to `t` so every existing case is untouched. agent-supervisor#108 needs two
+  # dispatches against ONE ledger under two different session names -- that is
+  # what a `tmux rename-session` looks like from the ledger's side, and it is
+  # the only thing that changes between the two halves of that case.
   PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
-    LANES_FIXTURE="$D/lanes" LANES_SESSION=t TMUX_LOG="$D/tmux.log" \
+    LANES_FIXTURE="$D/lanes" LANES_SESSION="${RUN_SESSION:-t}" TMUX_LOG="$D/tmux.log" \
     TMUX_PANES="$D/panes" DISPATCH_SETTLE=0 \
     DISPATCH_RESPAWN_SETTLE="${DISPATCH_RESPAWN_SETTLE:-0}" \
     DISPATCH_LAUNCH_SETTLE="${DISPATCH_LAUNCH_SETTLE:-0}" \
@@ -2079,6 +2084,88 @@ FIX
   fi
 fi
 
+# --- agent-supervisor#108: renaming the session does not create a new lane -
+#
+# WHY: on 2026-08-14 the live tmux session `agent-dotfiles` was renamed to
+# `agent-supervisor` to recover from #102. Lane identity is the string
+# `<session>:<index>`, so 526 task rows now name a lane that -- AS A STRING --
+# no longer exists, while the WINDOW each of them names is still there, under
+# the new session name. The author-exclusion guard compared those strings, so
+# `agent-dotfiles:3` never equalled `agent-supervisor:3` and the guard stopped
+# excluding the one window it was pointed at: a self-review would be dispatched
+# and reported as independent.
+#
+# Modelled exactly that way, with nothing else moved: the authoring dispatch
+# runs under session `old`, the review under session `t`, against ONE shared
+# ledger. The fixture is the same file both times -- same windows, same panes,
+# same indices -- because a rename changes the session's LABEL and nothing else.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+printf '410|| the code PR #420 was written from, before the session rename\n' >> "$D/issues"
+printf '411|| review PR #420, dispatched after the session rename\n' >> "$D/issues"
+# Branch slug ("public-420") deliberately differs from the authoring dispatch's
+# own slug ("pre-rename-author"), the same divergence #35/#90 use: it forces
+# authorship through the ledger's ISSUE lookup rather than the branch-name
+# fallback, so what is under test is the lane identity comparison and not a
+# lucky string match on a task id.
+printf '420|Fixes #410|lane/410-public-420\n' >> "$D/prs"
+
+out=$(LEDGER_STATE="$D/state-108" RUN_SESSION=old run 410 pre-rename-author "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch under the OLD session name succeeds" "$rc" 0 "$out"
+want_contains "setup: and the ledger records its lane under the old session name" \
+  '"lane":"old:3"' "$(LEDGER_STATE="$D/state-108" ledger status)"
+LEDGER_STATE="$D/state-108" ledger record-completion --task ad410-pre-rename-author --note done >/dev/null
+
+# The rename has happened: same server, same windows, same panes, new session
+# name. The review is dispatched under it.
+out=$(LEDGER_STATE="$D/state-108" run 411 rev-420-after-rename "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 420); rc=$?
+want_exit "a review dispatched after the rename still succeeds" "$rc" 0 "$out"
+want_contains "the author's WINDOW is skipped even though its recorded lane names the old session" \
+  "skipping t:3" "$out"
+want_contains "the skip names the pre-rename authoring task" "ad410-pre-rename-author" "$out"
+want_contains "and says what was compared, so the skip is readable" "old:3" "$out"
+log=$(tmuxlog)
+want_contains "and the review lands on the OTHER free lane, t:4 (target t:@104)" "send-keys -t t:@104" "$log"
+want_missing "never on the author's window (t:3, target t:@103)" "send-keys -t t:@103 " "$log"
+
+# The only-free-lane variant, across the same boundary: t:4 is now busy with
+# the review just dispatched, so the author's own window is the only candidate
+# left. It must refuse outright -- the same refusal a same-session author gets.
+printf '412|| review PR #420 again, only the pre-rename author is free\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-108" run 412 rev-420-only-author "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 420); rc=$?
+want_exit "a review refused when the only free window is the pre-rename author" "$rc" 1 "$out"
+want_contains "and names the pre-rename authoring task, not just a lane string" "ad410-pre-rename-author" "$out"
+if [ -z "$(assignees 412)" ]; then ok "the refused cross-rename review takes no claim on its own issue"
+else bad "the refused cross-rename review takes no claim on its own issue" "still assigned: $(assignees 412)"; fi
+
+# THE OTHER DIRECTION, which is what keeps this from being "block every review
+# after a rename": a genuinely DIFFERENT window, whose recorded lane also names
+# the old session, is still dispatchable. The author here is window 4; the
+# review must land on window 3 and must not be refused.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+printf '413|| the code PR #421 was written from, on a different window\n' >> "$D/issues"
+printf '414|| review PR #421 after the rename, from another window\n' >> "$D/issues"
+printf '421|Fixes #413|lane/413-public-421\n' >> "$D/prs"
+out=$(LEDGER_STATE="$D/state-108b" RUN_SESSION=old run 413 other-window-author "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch lands on window 4 under the old session name" "$rc" 0 "$out"
+want_contains "setup: recorded as old:4" '"lane":"old:4"' "$(LEDGER_STATE="$D/state-108b" ledger status)"
+LEDGER_STATE="$D/state-108b" ledger record-completion --task ad413-other-window-author --note done >/dev/null
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+out=$(LEDGER_STATE="$D/state-108b" run 414 rev-421-other-window "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 421); rc=$?
+want_exit "a different window is still allowed to review across the rename" "$rc" 0 "$out"
+log=$(tmuxlog)
+want_contains "and the review lands on it (t:3, target t:@103)" "send-keys -t t:@103" "$log"
+want_missing "no over-correction into refusing every post-rename review" "no free lane other than the author" "$out"
+
 # --- fails closed: authorship that cannot be determined refuses the WHOLE
 # dispatch, not just the candidate it could not clear -------------------
 cat > "$D/lanes" <<'FIX'
@@ -2246,7 +2333,7 @@ import os
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = 'if [ -n "$AUTHOR_LANE" ] && [ "$candidate" = "$AUTHOR_LANE" ]; then'
+marker = 'if [ -n "$AUTHOR_LANE" ] && [ "$(lane_relation "$candidate" "$AUTHOR_LANE")" != different ]; then'
 assert marker in text, "author-exclusion guard not found -- script shape changed"
 assert text.count(marker) == 1, "author-exclusion guard not unique -- script shape changed"
 text = text.replace(marker, "if false; then  # MUTATED: author-exclusion always skipped", 1)

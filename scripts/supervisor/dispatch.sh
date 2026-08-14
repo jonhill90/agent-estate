@@ -317,6 +317,25 @@ WINDOW_NAME="${PREFIX}${ISSUE}-${SLUG}"
 # genuinely full.
 LEDGER_PYTHON="${DISPATCH_PYTHON:-python3}"
 LEDGER_CLI="$HERE/cli.py"
+# agent-supervisor#108: "are these two lane ids the same lane?" is answered by
+# `core.lane_relation` through the ledger CLI, never by `=` here. Two callers
+# ask it (this script's author-exclusion guard, and digest.sh's independence
+# report) and they must not disagree; a bash string comparison in either one is
+# how they came to disagree with the ledger in the first place.
+#
+# Anything that is not a positively parsed answer -- python missing, cli.py
+# broken, JSON in a shape this cannot read -- prints `unknown`, and every
+# caller treats `unknown` as "do not admit". Failing to run the check must
+# never read as permission.
+lane_relation() {  # lane_relation <lane> <other> -> same|different|unknown
+  local json rel
+  json=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-relation --lane "$1" --other "$2" 2>/dev/null) || json=""
+  rel=$(sed -n 's/.*"relation":"\([a-z]*\)".*/\1/p' <<<"$json" | head -1)
+  case "$rel" in
+    same|different) printf '%s\n' "$rel" ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
 if ! LEDGER_STATUS_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" status 2>&1); then
   echo "dispatch: the ledger is unreadable -- refusing to dispatch #$ISSUE_ARG" >&2
   echo "dispatch: cannot tell which lanes are free without it, so nothing is safe to pick" >&2
@@ -717,8 +736,22 @@ while IFS=$'\t' read -r candidate candidate_target; do
   # visible on its own rather than folded into that check's result. An
   # ordinary (non-review) dispatch never sets AUTHOR_LANE and never reaches
   # this branch.
-  if [ -n "$AUTHOR_LANE" ] && [ "$candidate" = "$AUTHOR_LANE" ]; then
-    echo "dispatch: skipping $candidate -- it authored task $AUTHOR_TASK, the PR #$REVIEWS_PR under review; an author does not review their own work" >&2
+  #
+  # agent-supervisor#108: the comparison is `lane_relation`, not string
+  # equality. A lane id embeds the session's NAME, and renaming the session
+  # (done on 2026-08-14 to recover from #102) changed that name for every
+  # window at once -- so the author row `agent-dotfiles:3` stopped matching
+  # the very same window now called `agent-supervisor:3`, and this guard
+  # silently admitted the author. Only a POSITIVE `different` -- both ids
+  # parse and their window indices differ -- lets a candidate through;
+  # `same` and `unknown` both exclude, which is the same fail-closed posture
+  # step 0.5 already takes when authorship cannot be resolved at all.
+  if [ -n "$AUTHOR_LANE" ] && [ "$(lane_relation "$candidate" "$AUTHOR_LANE")" != different ]; then
+    if [ "$candidate" = "$AUTHOR_LANE" ]; then
+      echo "dispatch: skipping $candidate -- it authored task $AUTHOR_TASK, the PR #$REVIEWS_PR under review; an author does not review their own work" >&2
+    else
+      echo "dispatch: skipping $candidate -- it cannot be told apart from author lane $AUTHOR_LANE (task $AUTHOR_TASK, the PR #$REVIEWS_PR under review); a session rename changes a lane's name, not which window it is" >&2
+    fi
     AUTHOR_SKIPPED=1
     continue
   fi

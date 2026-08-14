@@ -277,7 +277,9 @@ cat > "$OK/fixtures/pr_list.json" <<'S'
   {"number":12,"title":"comment verdict from author lane","headRefOid":"1212121212121212121212121212121212121212","headRefName":"b12","mergeStateStatus":"CLEAN"},
   {"number":13,"title":"comment verdict without lane stamp","headRefOid":"1313131313131313131313131313131313131313","headRefName":"b13","mergeStateStatus":"CLEAN"},
   {"number":14,"title":"author lane must not drift to newer reviews","headRefOid":"1414141414141414141414141414141414141414","headRefName":"fix/214-author-drift","mergeStateStatus":"CLEAN"},
-  {"number":15,"title":"re-dispatch: head ref, not first-attempt position, names the author","headRefOid":"1515151515151515151515151515151515151515","headRefName":"lane/215-second-attempt","mergeStateStatus":"CLEAN"}
+  {"number":15,"title":"re-dispatch: head ref, not first-attempt position, names the author","headRefOid":"1515151515151515151515151515151515151515","headRefName":"lane/215-second-attempt","mergeStateStatus":"CLEAN"},
+  {"number":16,"title":"self-review across a session rename","headRefOid":"1616161616161616161616161616161616161616","headRefName":"fix/216-renamed-session","mergeStateStatus":"CLEAN"},
+  {"number":17,"title":"reviewer lane stamped with something that is not a lane id","headRefOid":"1717171717171717171717171717171717171717","headRefName":"fix/217-unparseable-stamp","mergeStateStatus":"CLEAN"}
 ]
 S
 cat > "$OK/fixtures/run_b1.json" <<'S'
@@ -468,6 +470,30 @@ cat > "$OK/fixtures/reviews_15.json" <<'S'
 ],"author":{"login":"jonhill90"}}
 S
 
+# agent-supervisor#108. PR16's author was recorded under the session name the
+# estate used BEFORE the 2026-08-14 rename (`old:3`); the review is stamped
+# with the same window's name AFTER it (`t:3`). One window, two spellings --
+# and independence was decided by `==` on those two strings, so this PR would
+# have been reported independent. PR17 stamps a branch name instead of a lane
+# id (which is literally what PR #95's stamp carried): nothing about it
+# establishes a different window, so it must read UNKNOWN, not independent.
+cat > "$OK/fixtures/pr_view_16.json" <<'S'
+{"headRefName":"fix/216-renamed-session","closingIssuesReferences":[{"number":216}],"commits":[]}
+S
+cat > "$OK/fixtures/reviews_16.json" <<'S'
+{"reviews":[],"comments":[
+  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:3","createdAt":"2026-08-14T09:00:01Z"}
+],"author":{"login":"jonhill90"}}
+S
+cat > "$OK/fixtures/pr_view_17.json" <<'S'
+{"headRefName":"fix/217-unparseable-stamp","closingIssuesReferences":[{"number":217}],"commits":[]}
+S
+cat > "$OK/fixtures/reviews_17.json" <<'S'
+{"reviews":[],"comments":[
+  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: lane/89-rev95","createdAt":"2026-08-14T09:01:01Z"}
+],"author":{"login":"jonhill90"}}
+S
+
 run_ok() {
   PATH="$OK/bin:$PATH" SUPERVISOR_STATE="$D/state" LANES_SESSION=nosuch \
     DIGEST_REPOS=test-repo DIGEST_OWNER=ownerx GH_STUB_FIXTURES="$OK/fixtures" \
@@ -601,6 +627,16 @@ python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record
   --command claude --server-id srv --session-id sess --issue 215 --github ownerx/test-repo --harness claude >/dev/null
 python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-completion \
   --task as215-second-attempt --note done >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-dispatch \
+  --lane old:3 --task as216-renamed-author --summary "#216 author, pre-rename session" --pane-id %3 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 216 --github ownerx/test-repo --harness claude >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-completion \
+  --task as216-renamed-author --note done >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-dispatch \
+  --lane t:5 --task as217-unparseable --summary "#217 author" --pane-id %5 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 217 --github ownerx/test-repo --harness claude >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-completion \
+  --task as217-unparseable --note done >/dev/null
 lane_out=$(PATH="$OK/bin:$PATH" SUPERVISOR_STATE="$LANE_STATE" LANES_SESSION=nosuch \
   DIGEST_REPOS=test-repo DIGEST_OWNER=ownerx GH_STUB_FIXTURES="$OK/fixtures" \
   DIGEST_VERDICT_SOURCE=github \
@@ -638,6 +674,21 @@ chk "PR15 (agent-supervisor#77): a review from the STALE first-attempt lane (t:3
 grep -q "independent -- author lane t:7, reviewer lane t:3" <<<"$(jq -r '.verdict_detail' <<<"$p15")" \
   && ok "PR15 detail names the head-ref-resolved author lane (t:7), not the stale first attempt (t:3)" \
   || bad "PR15 detail names the head-ref-resolved author lane" "$p15"
+p16=$(lp 16)
+chk "PR16 (agent-supervisor#108): a review from the SAME WINDOW under the post-rename session name is not independent" \
+  "false" "$(jq -r '.verdict_independent' <<<"$p16")"
+grep -q "NOT independent -- author lane old:3 reviewed its own PR" <<<"$(jq -r '.verdict_detail' <<<"$p16")" \
+  && ok "PR16 detail names the self-review across the rename" \
+  || bad "PR16 detail names the self-review across the rename" "$p16"
+grep -q "the same window, renamed session" <<<"$(jq -r '.verdict_detail' <<<"$p16")" \
+  && ok "PR16 detail says WHY two different-looking lane ids are one lane" \
+  || bad "PR16 detail says why the two ids are one lane" "$p16"
+p17=$(lp 17)
+chk "PR17 (agent-supervisor#108): a Review-Lane stamp that is not a lane id reports unknown, never independent" \
+  "null" "$(jq -r '.verdict_independent' <<<"$p17")"
+grep -q "not comparable lane ids" <<<"$(jq -r '.verdict_detail' <<<"$p17")" \
+  && ok "PR17 detail says the two ids could not be compared" \
+  || bad "PR17 detail says the two ids could not be compared" "$p17"
 
 # 12b. agent-dotfiles#218: a review APPROVED at an old SHA must not answer for
 # a head a push has since moved past. This is the failure #218 exists to

@@ -12,7 +12,7 @@ from pathlib import Path
 
 from acp_transport import ACPTransport
 from adapter import ACPAdapter, PiRPCAdapter, TmuxAdapter, HARNESS_COMMANDS
-from core import CLAIM_TASK_PREFIX, Ledger, claim_owner_token
+from core import CLAIM_TASK_PREFIX, Ledger, claim_owner_token, lane_relation
 from github_source import GithubTaskSource
 from pi_transport import PiRPCTransport
 from sensor import StateSensor
@@ -245,6 +245,15 @@ def parser():
     # at a branch.
     issue_lane_parser = sub.add_parser("issue-lane")
     issue_lane_parser.add_argument("--issue", required=True)
+
+    # agent-supervisor#108: the ONE comparison of two lane ids in this system,
+    # exposed so `dispatch.sh` (the guard) and `digest.sh` (the independence
+    # report) cannot drift apart on what "the same lane" means -- they had two
+    # separate string equalities before this, and both were wrong the same way
+    # the morning the session was renamed. See `core.lane_relation`.
+    lane_relation_parser = sub.add_parser("lane-relation")
+    lane_relation_parser.add_argument("--lane", required=True)
+    lane_relation_parser.add_argument("--other", required=True)
 
     author_issue_lane_parser = sub.add_parser("author-issue-lane")
     author_issue_lane_parser.add_argument("--issue", required=True)
@@ -596,6 +605,18 @@ def _verify_caller(adapter, ledger, lane):
 
 def main(argv=None):
     args = parser().parse_args(argv)
+    # agent-supervisor#108: answered BEFORE any ledger is opened. Comparing two
+    # lane ids reads no row and writes none, and a comparison that needed a
+    # readable database would make the author-exclusion guard fail on a state
+    # directory it never had to touch -- including in a test harness, or on a
+    # host where the default state dir is another estate's live ledger.
+    if args.command == "lane-relation":
+        _print({
+            "lane": args.lane,
+            "other": args.other,
+            "relation": lane_relation(args.lane, args.other),
+        })
+        return 0
     ledger = Ledger(args.state_dir)
     # tmux stays the default transport for every existing lane (codex,
     # claude) and is never replaced -- Jon requires the persistent, watchable

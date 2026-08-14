@@ -390,6 +390,23 @@ repo_task_prefix() {
   fi
 }
 
+# agent-supervisor#108: the same single comparison `dispatch.sh`'s guard uses
+# -- `core.lane_relation` via the ledger CLI. Independence was decided by `==`
+# on two lane-id strings, and the session rename on 2026-08-14 made the author
+# row (`agent-dotfiles:3`) stop matching the same window's new id
+# (`agent-supervisor:3`), so a genuine self-review would have been printed as
+# "independent". Anything this cannot positively answer is `unknown`, which the
+# caller renders as independence unknown rather than as independence.
+lane_relation() {  # lane_relation <lane> <other> -> same|different|unknown
+  local json rel
+  json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" lane-relation --lane "$1" --other "$2" 2>/dev/null) || json=""
+  rel=$(jq -r '.relation // ""' 2>/dev/null <<<"$json") || rel=""
+  case "$rel" in
+    same|different) printf '%s\n' "$rel" ;;
+    *) printf 'unknown\n' ;;
+  esac
+}
+
 # Resolve the lane that authored a PR by the same fail-closed chain
 # dispatch.sh --reviews-pr uses: closing issue -> author-issue-lane, then
 # branch name as a last-resort task-id hint. Missing data is not an error in
@@ -481,16 +498,31 @@ for repo in $REPOS; do
     # unsafe." as an APPROVE (agent-dotfiles#203).
     v=$(verdict_for "$OWNER/$repo" "$num" "$head_oid")
     author_lane=$(author_lane_for "$OWNER/$repo" "$num")
-    entry=$(jq -n --argjson p "$p" --argjson r "$r" --arg repo "$repo" --argjson v "$v" --argjson author "$author_lane" '
+    # #108: computed HERE, in the shell, because it is a ledger question --
+    # jq can only compare the two strings, which is exactly what was wrong.
+    reviewer_lane_id=$(jq -r '.reviewer_lane // ""' <<<"$v")
+    author_lane_id=$(jq -r 'if .known == true then (.lane // "") else "" end' <<<"$author_lane")
+    lane_rel=unknown
+    if [ -n "$reviewer_lane_id" ] && [ -n "$author_lane_id" ]; then
+      lane_rel=$(lane_relation "$author_lane_id" "$reviewer_lane_id")
+    fi
+    entry=$(jq -n --argjson p "$p" --argjson r "$r" --arg repo "$repo" --argjson v "$v" --argjson author "$author_lane" --arg lane_rel "$lane_rel" '
       def independence:
         if (($v.verdict_kind // "") | IN("comment", "ledger")) and (($v.verdict // "") | IN("approved", "rejected")) then
           if (($v.reviewer_lane // "") | length) == 0 then
             {value:null, detail:"independence unknown -- reviewer lane unresolved; comment verdicts must include Review-Lane: <lane-id>"}
           elif ($author.known == true) then
-            if ($v.reviewer_lane == $author.lane) then
-              {value:false, detail:("NOT independent -- author lane " + $author.lane + " reviewed its own PR")}
-            else
+            # THREE branches, not two (#108). "not the same lane" is not the
+            # same claim as "a different lane": two ids this system cannot
+            # compare establish nothing, and printing "independent" for them
+            # is how a self-review would be laundered across a session rename.
+            if ($lane_rel == "same") then
+              {value:false, detail:("NOT independent -- author lane " + $author.lane + " reviewed its own PR"
+                + (if ($v.reviewer_lane != $author.lane) then " (reviewed as " + $v.reviewer_lane + " -- the same window, renamed session)" else "" end))}
+            elif ($lane_rel == "different") then
               {value:true, detail:("independent -- author lane " + $author.lane + ", reviewer lane " + $v.reviewer_lane)}
+            else
+              {value:null, detail:("independence unknown -- author lane " + $author.lane + " and reviewer lane " + $v.reviewer_lane + " are not comparable lane ids")}
             end
           else
             {value:null, detail:$author.detail}

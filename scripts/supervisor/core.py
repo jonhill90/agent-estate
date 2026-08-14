@@ -89,6 +89,60 @@ def claim_owner_token(pid, *, host=None):
     return f"{host or socket.gethostname()}:{int(pid)}"
 
 
+# agent-supervisor#108. A lane id is spelled `<session>:<index>`, and the
+# session part is a LABEL -- `tmux rename-session` changes it without touching
+# a single window, pane or process. On 2026-08-14 the live session was renamed
+# from `agent-dotfiles` to `agent-supervisor` to recover from #102, and every
+# task row written before that names a lane whose STRING no longer matches the
+# same physical window's current name. Comparing lane ids as strings therefore
+# answered "different lane" for one window, and the author-exclusion guard --
+# whose whole job is to keep a lane off its own PR -- stopped excluding it.
+#
+# The index is the part this system authors: `lanes.sh` reads it off the
+# window, `dispatch.sh` keys the ledger on it, and it survives a window being
+# closed and recreated. So identity is compared on the index, and the session
+# name is not consulted at all.
+LANE_ID_RE = re.compile(r"^(?P<session>[^:\s]*):(?P<index>[0-9]+)$")
+
+
+def lane_relation(one, other):
+    """How two lane ids relate: `same`, `different`, or `unknown`.
+
+    Three answers, not two, because "I cannot tell" is a real state and the
+    callers must not be handed a boolean that hides it (agent-supervisor#108):
+
+    * `same` -- identical strings, or the same window index. Two ids that
+      differ only in the session name name ONE window: a session rename is the
+      only thing that produces that pair on a single server, and the estate has
+      now produced it once. Answering `same` here is also the fail-closed
+      direction if two differently-named sessions ever did coexist: the cost is
+      one candidate lane withheld from one review, against a self-review
+      dispatched and reported as independent.
+    * `different` -- both parse and their indices differ. Different windows,
+      positively established. This is the ONLY answer a caller may treat as
+      permission, and it is what keeps the guard from refusing every review.
+    * `unknown` -- either id is missing, or does not parse as `<session>:<index>`
+      (a `Review-Lane:` stamp someone typed by hand, a lane id from a shape this
+      system does not mint). Nothing was established; a caller must not read it
+      as `different`.
+    """
+    if not isinstance(one, str) or not isinstance(other, str):
+        return "unknown"
+    one, other = one.strip(), other.strip()
+    if not one or not other:
+        return "unknown"
+    if one == other:
+        return "same"
+    left, right = LANE_ID_RE.match(one), LANE_ID_RE.match(other)
+    if left is None or right is None:
+        return "unknown"
+    # int(), not string equality: `03` and `3` are the same window index, and a
+    # comparison that said otherwise would be a smaller version of this bug.
+    if int(left.group("index")) == int(right.group("index")):
+        return "same"
+    return "different"
+
+
 def pid_is_alive(pid):
     """True unless `pid` is provably gone on THIS host.
 
