@@ -11,6 +11,53 @@ Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
 ## Status
 
+**6 shipped: the task board, as a projection.** `agent-tui -board` renders
+a second screen -- five columns (Backlog, In progress, In review, Blocked,
+Done), grouped by repo, across every repo the estate touches. **A card's
+column is computed fresh on every fetch, never stored** -- there is no
+write path from this screen into GitHub or the ledger, and no fourth store:
+Backlog/In progress/Done come from GitHub issues and PRs (`gh issue|pr
+list`), In progress/lane linkage and cycle time come from the ledger's
+`tasks`/`source_tasks` tables (opened `sqlite3 -readonly`, never the live
+file), and Blocked additionally checks the same live `lanes` MCP payload
+the rail already fetches. See `internal/board/card.go`'s `Derive` for the
+whole rule table, and `agent-supervisor#127`/PR#130 for the reconciliation
+sweep this board depends on (`source_tasks` was write-once before that
+landed -- confirm `select source_state, status, count(*) from source_tasks
+group by 1,2` shows a distribution, not one row, before trusting a board
+built on a ledger the sweep hasn't touched).
+
+Two layout variants ship (`internal/board/view.go`), picked live with
+**1-2**, same picker convention as the rail's glyph sets:
+
+| # | id | what it's for |
+|---|----|----------------|
+| 1 (default) | `by-column` | one WIP-wide question at a time -- "what needs review right now, across every repo" |
+| 2 | `by-repo` | "what does this one repo look like right now" |
+
+WIP is shown **per tmux session** (the part of a lane name before `:`),
+not globally -- two workers per session is the estate's real capacity, and
+a session running three is flagged `OVER` right on the board. A card that
+has sat in its current column two hours or more (`as#95`'s own case: it
+sat CONFLICTING for two hours before a human noticed) is marked `!` and
+colored.
+
+```
+go build -o agent-tui ./cmd/agent-tui
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./agent-tui -board \
+  -ledger /path/to/a/COPY/of/ledger.sqlite3
+```
+
+`-ledger` is always opened `sqlite3 -readonly` (a second line of defense
+behind pointing it at a copy in the first place), defaults to
+`$AGENT_TUI_LEDGER`, then `$AGENT_SUPERVISOR_STATE_DIR/ledger.sqlite3`.
+`-repositories` accepts the exact `SUPERVISOR_REPOSITORIES` shape
+agent-supervisor's own `.env.example` documents; unset, the board unions
+agent-supervisor's own `DEFAULT_REPOSITORIES` with every repo it discovers
+in the ledger's own `source_tasks.source_url` column, so a repo dispatched
+under an env override that was never persisted (agent-tui itself, measured
+while building this) still shows up without editing a flag.
+
 **5a shipped: the left rail.** `cmd/agent-tui` renders a left-anchored
 navigation rail (~28 columns) driven entirely by the supervisor's `lanes` MCP
 tool — no second reader of tmux, no ledger access. Every state `lanes.sh`
