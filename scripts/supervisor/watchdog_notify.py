@@ -391,6 +391,52 @@ def check_and_notify_heartbeat(
     return _deliver(decision, episode_state_path=episode_state_path, sender=sender, log=log, attempts=attempts)
 
 
+#: The notifier ships beside this module. Resolved from `__file__` rather
+#: than from any absolute path so that moving the tree -- a repository split,
+#: a relocated live worktree, a test running from a worktree -- moves the
+#: notifier with it. #118: the operator's `NOTIFY_SCRIPT` still named the
+#: pre-split `agent-dotfiles` copy months after it stopped existing, and
+#: nothing noticed because nothing checked.
+DEFAULT_NOTIFY_SCRIPT = Path(__file__).resolve().parent / "notify.sh"
+
+
+def _notifier_is_usable(path: str) -> bool:
+    """A `*.sh` notifier is exec'd directly, so it must be executable; anything
+    else is handed to `sys.executable`, which only needs to be able to read it."""
+    if path.endswith(".sh"):
+        return os.access(path, os.X_OK)
+    return os.path.isfile(path)
+
+
+def resolve_notify_script(configured: str) -> tuple[str, str | None]:
+    """Decide which notifier to actually run, and say so when it is not the
+    configured one.
+
+    Returns `(path, note)`; `note` is None when the configured value was used
+    as given, and otherwise a line for `watchdog-notify.log` naming what was
+    overridden. A relocation that invalidates the configured path must not be
+    able to happen quietly -- that is the whole of #118 -- so the fallback is
+    never silent.
+
+    An EMPTY configured value is deliberately left alone rather than defaulted
+    here. `main()` already treats "nothing configured" as a loud SendError, and
+    that is the branch every test exercising an unconfigured notifier takes:
+    defaulting it would make those tests execute the real `notify.sh`, which
+    reaches a real phone. A wrong path is a bug to route around; no path at all
+    is a decision the operator has not made, and guessing at a live channel is
+    not this function's call.
+    """
+    if not configured:
+        return configured, None
+    if _notifier_is_usable(configured):
+        return configured, None
+    fallback = str(DEFAULT_NOTIFY_SCRIPT)
+    return fallback, (
+        f"NOTIFY-PATH-STALE: configured notifier {configured!r} does not resolve; "
+        f"falling back to the one shipped beside this module: {fallback}"
+    )
+
+
 def send_via_notify_skill(message: str, *, notify_script: str) -> None:
     """Real sender: shells out to whichever notifier is configured.
 
@@ -419,13 +465,31 @@ def send_via_notify_skill(message: str, *, notify_script: str) -> None:
         argv = [notify_script, "Supervisor escalation", message]
     else:
         argv = [sys.executable, notify_script, "--message", message, "--send"]
-    result = subprocess.run(
-        argv,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        env=env,
-    )
+    try:
+        result = subprocess.run(
+            argv,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            env=env,
+        )
+    except OSError as error:
+        # A notifier that cannot be RUN is a delivery failure like any other,
+        # and has to arrive through the same channel as one (#118). Left
+        # uncaught, `subprocess.run` raised a bare FileNotFoundError past
+        # `main()`, which only catches SendError: the process died with a
+        # traceback instead of producing the NOTIFY-FAILED line, the rc=1, and
+        # the "escalation did NOT reach a human" line `watchdog.sh` writes
+        # into `watchdog.status` from it. The estate's loudest failure came
+        # out as its quietest. Catching OSError covers the whole family --
+        # missing, not executable, dangling symlink, unusable interpreter --
+        # rather than only the path shape that happened to get reported.
+        raise SendError(f"could not run notifier {notify_script!r}: {error}") from error
+    except subprocess.TimeoutExpired as error:
+        # Same reasoning, other way to not deliver: a channel that hangs is a
+        # channel that reached nobody, and must not exit through a traceback
+        # either.
+        raise SendError(f"notifier {notify_script!r} timed out after 30s; nobody was told") from error
     if result.returncode != 0:
         raise SendError(
             f"notify.py exited {result.returncode}: {result.stderr.strip() or result.stdout.strip() or '(no output)'}"
@@ -469,8 +533,16 @@ def main(argv: list[str] | None = None) -> int:
         # on the every-tick, non-escalate/non-stale path -- it only matters
         # the instant there is actually something to send.
         if not args.notify_script:
-            raise SendError("--notify-script (or $NOTIFY_SCRIPT) is not configured")
-        send_via_notify_skill(message, notify_script=args.notify_script)
+            raise SendError(
+                "--notify-script (or $NOTIFY_SCRIPT) is not configured "
+                f"(the notifier shipped with this tree is {DEFAULT_NOTIFY_SCRIPT})"
+            )
+        script, note = resolve_notify_script(args.notify_script)
+        if note is not None:
+            # Written before the attempt, not after: if the send then fails
+            # too, the log still says which notifier was tried.
+            _log_local(Path(args.log_path), note)
+        send_via_notify_skill(message, notify_script=script)
 
     try:
         if args.mode == "heartbeat":
