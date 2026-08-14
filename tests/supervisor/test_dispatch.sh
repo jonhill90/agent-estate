@@ -242,6 +242,16 @@ want_contains "the ledger records the lane's cwd as the worktree, not the shared
 # for this one assertion cannot leak into any of them.
 unset LEDGER_STATE
 
+: > "$D/tmux.log"
+rehome_out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/lanes" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+  DISPATCH_RESPAWN_SETTLE=0 "$DISPATCH" --rehome-lane t:@103 "$REPO" claude 2>&1); rehome_rc=$?
+want_exit "the supported re-home verb succeeds" "$rehome_rc" 0 "$rehome_out"
+log=$(tmuxlog)
+want_contains "the supported re-home verb respawns the pane into an existing directory" "respawn-pane -k -t t:@103 -c $REPO" "$log"
+want_contains "the supported re-home verb relaunches the harness" "claude --dangerously-skip-permissions" "$log"
+pane_path=$(cat "$D/panes/3.path" 2>/dev/null || true)
+want_contains "the supported re-home verb updates the pane cwd" "$REPO" "$pane_path"
+
 # --- a mangled brief is not a delivered brief -----------------------------
 # Observed live on 2026-08-11 building this: characters typed straight after
 # `/clear` were swallowed while the harness repainted, and the lane's prompt
@@ -275,10 +285,16 @@ log=$(tmuxlog)
 # whole-log `want_missing` cannot tell the two apart. Everything this
 # assertion actually cares about happens from the rename onward, same as
 # every other case in this run that reads `log` after the relaunch step.
-log_after_rename=$(sed -n '/^rename-window/,$p' <<<"$log")
-want_missing "a mangled brief is never submitted" "send-keys -t t:@103 Enter" "$log_after_rename"
+log_after_rename_before_rehome=$(sed -n '/^rename-window/,/^respawn-pane/{/^respawn-pane/!p;}' <<<"$log")
+want_missing "a mangled brief is never submitted" "send-keys -t t:@103 Enter" "$log_after_rename_before_rehome"
 if [ "$(assignees 84)" = "" ]; then ok "a mangled brief releases the claim"; else bad "a mangled brief releases the claim" "assignees: $(assignees 84)"; fi
 if [ "$(worktrees)" = "$before" ]; then ok "a mangled brief leaves no worktree behind"; else bad "a mangled brief leaves no worktree behind" "$before -> $(worktrees)"; fi
+pane_path=$(cat "$D/panes/3.path" 2>/dev/null || true)
+if [ -n "$pane_path" ] && [ -d "$pane_path" ]; then
+  ok "a rollback does not leave the lane sitting in a deleted cwd"
+else
+  bad "a rollback does not leave the lane sitting in a deleted cwd" "pane path: ${pane_path:-<missing>}"
+fi
 cp "$D/bin/tmux-real" "$D/bin/tmux"
 
 # --- THE LOAD-BEARING CASE: no worktree, no dispatch ---------------------
@@ -328,6 +344,7 @@ if [ "$(assignees 17)" = "" ]; then
 else
   bad "the claim is released on a repo mismatch" "assignees: $(assignees 17)"
 fi
+if [ "$(worktrees)" = "$before" ]; then ok "a normal rollback still removes an unused worktree"; else bad "a normal rollback still removes an unused worktree" "$before -> $(worktrees)"; fi
 
 # THE REGRESSION GUARD (#17): origin == [repo] -> dispatch proceeds
 # unchanged. A check that refuses every dispatch is not a fix -- every case

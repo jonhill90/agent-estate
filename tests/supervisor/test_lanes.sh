@@ -45,7 +45,7 @@ PY
 D=$(mktemp -d); mkdir -p "$D/bin"
 cp "$HERE/stubs/tmux-lanes" "$D/bin/tmux"
 cp "$HERE/stubs/ps-lanes" "$D/bin/ps"
-# columns: index|name|command|status-line|seconds-since-output|in-mode|input-box|pane-argv
+# columns: index|name|command|status-line|seconds-since-output|in-mode|input-box|pane-argv|pane-current-path
 # The 7th column is optional and models the input box (#141). Omitted, no box
 # is rendered and classification is exactly what it was before #141 -- which
 # is why every pre-existing row below is left untouched. `-` is an empty box,
@@ -67,6 +67,11 @@ cp "$HERE/stubs/ps-lanes" "$D/bin/ps"
 # not exited -- busy, waiting, or genuinely wedged alike -- so stubs/ps-lanes
 # models three tiers (pane -> harness -> work), not two, and only a row
 # marked `child` here gets the third tier.
+# The 10th column is optional and models `#{pane_current_path}` (#88).
+# Omitted, it defaults to this harness's existing temp directory; a
+# nonexistent path means the lane cannot start any turn and must not be
+# offered.
+MISSING_CWD="$D/missing-cwd"
 cat > "$D/fixture" <<'FIX'
 1|arch|claude.exe|❯ ready|1|0
 2|w-busy|claude.exe|esc to interrupt 3s|1|0
@@ -117,6 +122,7 @@ cat > "$D/fixture" <<'FIX'
 47|w-codex-hung-live-child|codex|• Working (9s • esc to interrupt)\n\n› Improve documentation in @filename\n\n  gpt-5.5 medium · /repo/path|900|0||-zsh|child
 48|w-codex-hung|codex|• Working (9s • esc to interrupt)\n\n› Improve documentation in @filename\n\n  gpt-5.5 medium · /repo/path|900|0
 FIX
+printf '49|w-missing-cwd|codex|  gpt-5.5 medium · /repo/path|1|0||||%s\n' "$MISSING_CWD" >> "$D/fixture"
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
 
 echo "lanes.sh"
@@ -279,6 +285,7 @@ want "a real codex mid-turn pane is busy, not free"       w-codex-busy busy "$ou
 want "codex's own startup trust menu is menu-blocked"     w-codex-trust menu-blocked "$out"
 want "a real copilot idle footer is free"                 w-copilot-ready free "$out"
 want "a real copilot mid-turn pane is busy, not free"     w-copilot-busy busy "$out"
+want "a lane whose cwd no longer exists is broken, not free" w-missing-cwd broken "$out"
 
 # --- agent-dotfiles#250: codex abbreviates a cwd under $HOME ---------------
 # The row above carries `/repo/path` because #201's throwaway lab ran out of
@@ -391,6 +398,12 @@ else
   echo "  FAIL dead count line is not 5 in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
 fi
 
+if grep -qE '1 lane\(s\) have a missing cwd' <<<"$out"; then
+  echo "  ok   the broken count line names missing cwd lanes"; pass=$((pass+1));
+else
+  echo "  FAIL no broken count line in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
+fi
+
 # agent-dotfiles#237: the stale count line, and the WORDING is the point. The
 # incident was not caused by a missing row -- `dead` was reported correctly
 # for all nine panes. It was caused by nobody being told the NAMES were a
@@ -454,7 +467,8 @@ for bad in arch w-dead w-hung w-busy w-copilot w-minute-tick w-scrolled w-blocke
            w-unsent w-unsent-ready-footer w-typeahead w-optionrow w-optionrow-yes \
            w-text-blocked w-unrecognized-blocked w-codex-busy w-codex-trust w-copilot-busy \
            w-shell-busy w-shell-idle w-shell-idle-hung w-shell-tasks w-shells-plural \
-           telegram-poller ad102-renamed-lane free-27 w-hand-run-poller w-mentions-poller; do
+           telegram-poller ad102-renamed-lane free-27 w-hand-run-poller w-mentions-poller \
+           w-missing-cwd; do
   bi=$(awk -F'|' -v n="$bad" '$2==n{print $1}' "$D/fixture")
   if grep -qE "^[^	]*:${bi}	" <<<"$free"; then echo "  FAIL --free offered $bad"; fail=$((fail+1));
   else echo "  ok   --free withholds $bad"; pass=$((pass+1)); fi
@@ -532,6 +546,11 @@ if python3 -c 'import json,sys; rows=json.load(sys.stdin); sys.exit(0 if any(r.g
   echo "  ok   --json carries the dead lane object with its state intact"; pass=$((pass+1));
 else
   echo "  FAIL --json changed shape for a dead lane:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
+fi
+if python3 -c 'import json,sys; rows=json.load(sys.stdin); sys.exit(0 if any(r.get("window")==49 and r.get("window_id")=="@149" and r.get("name")=="w-missing-cwd" and r.get("state")=="broken" for r in rows) else 1)' <<<"$json"; then
+  echo "  ok   --json reports a missing-cwd lane as broken"; pass=$((pass+1));
+else
+  echo "  FAIL --json missing the broken lane object:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
 fi
 # agent-dotfiles#241: `window` stays the INDEX and stays a JSON number, so no
 # existing consumer of this renderer (supervisor_view.py's LanesSource passes

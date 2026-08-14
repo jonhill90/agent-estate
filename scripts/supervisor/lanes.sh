@@ -12,6 +12,7 @@
 #   dead     no agent at all, just a shell                   -> restart the agent
 #   stale    no agent, and the window name still claims a task -> restore.sh,
 #            and do not believe the name (#237)
+#   broken   the pane's cwd no longer exists                  -> re-home it
 #   service  a supervisor service, deliberately not a lane   -> leave alone
 #   unknown  no probe recognizes the last line                -> ask a human
 #            (a harness with no adapter under harness/, or a recognised
@@ -194,12 +195,12 @@ TAB=$'\t'   # tmux does not interpret a literal \t inside -F
 # guarantee that -- a window closing between them is the very race this is
 # being read for. It is appended last so every existing positional read of
 # this list keeps its column.
-declare -a IDX NAME CMD ACTIVITY PANEMODE PANEPID WID
-while IFS=$'\t' read -r w n c a m p wid; do
+declare -a IDX NAME CMD ACTIVITY PANEMODE PANEPID WID PANE_PATH
+while IFS=$'\t' read -r w n c a m p wid path; do
   [ -n "$w" ] || continue
-  IDX+=("$w"); NAME+=("$n"); CMD+=("$c"); ACTIVITY+=("$a"); PANEMODE+=("$m"); PANEPID+=("$p"); WID+=("$wid")
+  IDX+=("$w"); NAME+=("$n"); CMD+=("$c"); ACTIVITY+=("$a"); PANEMODE+=("$m"); PANEPID+=("$p"); WID+=("$wid"); PANE_PATH+=("$path")
 done < <(tmux list-panes -s -t "$SESSION" -f '#{pane_active}' \
-           -F "#{window_index}${TAB}#{window_name}${TAB}#{pane_current_command}${TAB}#{window_activity}${TAB}#{pane_in_mode}${TAB}#{pane_pid}${TAB}#{window_id}" 2>/dev/null)
+           -F "#{window_index}${TAB}#{window_name}${TAB}#{pane_current_command}${TAB}#{window_activity}${TAB}#{pane_in_mode}${TAB}#{pane_pid}${TAB}#{window_id}${TAB}#{pane_current_path}" 2>/dev/null)
 
 # #154. Answers one question about a pane whose command is a shell: is that
 # shell one of this directory's services, or is it the wreckage of an agent
@@ -272,7 +273,7 @@ now_epoch=$(date +%s)
 emit_rows() {
   local i
   for i in "${!IDX[@]}"; do
-    local w="${IDX[$i]}" name="${NAME[$i]}" cmd="${CMD[$i]}" act="${ACTIVITY[$i]}" mode="${PANEMODE[$i]}" pid="${PANEPID[$i]}" wid="${WID[$i]}"
+    local w="${IDX[$i]}" name="${NAME[$i]}" cmd="${CMD[$i]}" act="${ACTIVITY[$i]}" mode="${PANEMODE[$i]}" pid="${PANEPID[$i]}" wid="${WID[$i]}" path="${PANE_PATH[$i]}"
     local pane state age pane_lines pane_tail hidx busy_tail target
     # #241: the captures below address the window by ID, not by index. The
     # list-panes call above and these two captures are separated by a whole
@@ -325,6 +326,14 @@ emit_rows() {
       # against a real tmux server in review of #65: the dispatch vanished and
       # copy mode exited.
       state=scrolled
+    elif [ -n "$path" ] && [ ! -d "$path" ]; then
+      # agent-supervisor#88: a pane whose current working directory has been
+      # removed cannot start another turn at all. It is not hung (there may
+      # be no running turn), not dead (the harness process may still be
+      # alive), and never free. The remedy is to re-home the pane into a
+      # directory that exists, so report a distinct state rather than hide it
+      # under one of the older buckets.
+      state=broken
     elif [[ "$cmd" =~ ^($SHELLS)$ ]]; then
       # #154: a pure NARROWING of `dead`, the same shape #141 used for `free`.
       # The only lane this can move is one that was already going to be called
@@ -537,6 +546,7 @@ case "$MODE" in
     awk -F'\t' '{printf("%-4s %-24s %-12s %s\n",$1,$2,$3,$4)}' <<<"$rows"
     dead=$(awk -F'\t' '$4=="dead"' <<<"$rows" | wc -l | tr -d ' ')
     stale=$(awk -F'\t' '$4=="stale"' <<<"$rows" | wc -l | tr -d ' ')
+    broken=$(awk -F'\t' '$4=="broken"' <<<"$rows" | wc -l | tr -d ' ')
     hung=$(awk -F'\t' '$4=="hung"' <<<"$rows" | wc -l | tr -d ' ')
     # #159: menu-blocked and text-blocked are counted together here -- this
     # line answers "how many lanes need a human", the same question it
@@ -550,6 +560,7 @@ case "$MODE" in
     # agent, it is the name, which reads as live work to anyone scanning the
     # table -- and acting on it is what turned one tmux server loss into two.
     [ "$stale" -gt 0 ] && echo "  ${stale} lane(s) have no agent but still carry a task name — the name is STALE, do not trust it; run restore.sh"
+    [ "$broken" -gt 0 ] && echo "  ${broken} lane(s) have a missing cwd — re-home before dispatching"
     [ "$hung" -gt 0 ] && echo "  ${hung} lane(s) look wedged — a dispatch there would queue forever"
     # A blocked lane is a question nobody has heard -- surface it, don't just
     # exclude it from --free.

@@ -1,6 +1,6 @@
 #!/bin/bash
 # Stub tmux for lanes.sh tests. LANES_FIXTURE holds one line per window:
-#   <index>|<name>|<command>|<pane-text>|<activity-age-seconds>|<in-mode>|<box>|<pane-argv>
+#   <index>|<name>|<command>|<pane-text>|<activity-age-seconds>|<in-mode>|<box>|<pane-argv>|<live-child>|<pane-current-path>
 # The 5th column is how many seconds ago tmux last saw output, which is what
 # separates hung from busy. It replaced a two-capture scheme that diffed pane
 # text: Claude Code's elapsed footer is minute-granular past 60s, so a live
@@ -33,6 +33,15 @@
 # every real lane in the live session measured as on 2026-08-11 -- the agent
 # runs as a CHILD of the pane's login shell. Every pre-existing fixture row is
 # in that case, on purpose.
+#
+# The 9th column models whether the pane's HARNESS has a live child of its
+# own (#83, #92) -- read directly from the fixture by stubs/ps-lanes, not by
+# this stub. It is absorbed here (as `ch`) purely so it cannot shift the 10th
+# column left.
+#
+# The 10th column models `#{pane_current_path}`. Omitted, it defaults to the
+# directory containing the fixture, which exists. A nonexistent value lets the
+# suite reproduce a pane whose cwd was deleted out from under it.
 F="${LANES_FIXTURE:?}"
 # Kept in sync with stubs/ps-lanes.
 PID_BASE="${LANES_STUB_PID_BASE:-9000}"
@@ -73,7 +82,7 @@ case "$sub" in
   list-windows) cut -d'|' -f1 "$F" ;;
   list-panes)
     # Mirrors the real -F used by lanes.sh: index, name, command, activity,
-    # in-mode, pane pid, window id, tab separated, active pane only. The
+    # in-mode, pane pid, window id, current path, tab separated, active pane only. The
     # window id is synthesised (#241) rather than being a fixture column --
     # no fixture needs to CHOOSE an id, only to have one that differs from
     # the index.
@@ -81,9 +90,11 @@ case "$sub" in
     # `b` absorbs the input-box column so it cannot leak into `m`: with a
     # 6-variable read, a 7-field row put "0|<box>" into the in-mode slot and
     # every boxed fixture reported `scrolled`. `p` does the same for the argv
-    # column added in #154.
-    while IFS='|' read -r i n c t a m b p; do
-      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$n" "$c" "$((now-a))" "${m:-0}" "$((PID_BASE+i))" "$(wid_for "$i")"
+    # column added in #154; `ch` absorbs the #83 live-child column (read
+    # directly from the fixture by stubs/ps-lanes, not passed through here)
+    # so it cannot shift `cwd`, the #88 current-path column, left.
+    while IFS='|' read -r i n c t a m b p ch cwd; do
+      printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$i" "$n" "$c" "$((now-a))" "${m:-0}" "$((PID_BASE+i))" "$(wid_for "$i")" "${cwd:-$(dirname "$F")}"
     done < "$F" ;;
   display-message)
     case "$fmt" in
@@ -92,6 +103,7 @@ case "$sub" in
       '#{window_activity}') echo $(( $(date +%s) - $(cut -d'|' -f5 <<<"$line") )) ;;
       '#{window_index}') printf '%s\n' "$win" ;;
       '#{window_id}') wid_for "$win"; printf '\n' ;;
+      '#{pane_current_path}') cut -d'|' -f10 <<<"$line" | grep -q . && cut -d'|' -f10 <<<"$line" || dirname "$F" ;;
     esac ;;
   capture-pane)
     # The input box sits ABOVE the status line in a real pane, so it is
