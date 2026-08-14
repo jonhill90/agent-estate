@@ -1,25 +1,81 @@
 #!/bin/bash
-# Stub `ps` for lanes.sh tests (#154). lanes.sh asks exactly one question of
-# ps -- "what is the pane's first process actually running?" -- as
+# Stub `ps` for lanes.sh tests (#154, #83, #92). lanes.sh asks two questions
+# of ps:
 #
-#   ps -o args= -p <pane_pid>
+#   ps -o args= -p <pane_pid>                "what is the pane's own process running?"
+#   ps -o pid=,ppid= -ax                      "who is whose live child?"
 #
-# stubs/tmux-lanes reports `pane_pid` as PID_BASE + window index, so this maps
-# the pid back to that window's 8th fixture column and prints it. A row that
-# omits the column gets `-zsh`, which is what every real lane's pane process
-# measured as in the live session on 2026-08-11: the agent runs as a child of
-# the login shell, so the pane's own process is the shell either way, and only
-# its argv tells a dead lane from a service window.
+# stubs/tmux-lanes reports `pane_pid` as PID_BASE + window index, so the
+# first form maps the pid back to that window's 8th fixture column and
+# prints it. A row that omits the column gets `-zsh`, which is what every
+# real lane's pane process measured as in the live session on 2026-08-11:
+# the agent runs as a child of the login shell, so the pane's own process is
+# the shell either way, and only its argv tells a dead lane from a service
+# window.
+#
+# The second form has no `-p`, so it cannot key on a single pid -- real `ps
+# -ax` lists every process on the box. PR #92's REQUEST CHANGES review found
+# that the first version of this stub modeled the process tree wrong in a
+# way that hid a real bug: it printed a fixture row's OWN pane_pid as a ppid
+# only when column 9 marked a live child, as if the pane process having a
+# child at all were the #83 signal. On a real, deployed lane the harness
+# (claude.exe, codex, ...) is ALWAYS a live child of the pane's login shell
+# for as long as the harness itself has not exited -- busy, waiting, or
+# genuinely wedged alike -- so that shape can never distinguish anything.
+# What actually distinguishes a waiting lane is whether the HARNESS has live
+# children OF ITS OWN (a grandchild of the pane): that is where a spawned
+# test suite or Monitor'd task actually runs.
+#
+# So this stub now models three process-tree layers, matching the real
+# shape documented above:
+#   pane_pid (PID_BASE + window index)          -- the login shell
+#   harness_pid (HARNESS_BASE + window index)    -- claude.exe/codex/node,
+#                                                    printed as a child of
+#                                                    pane_pid for every row
+#                                                    whose own command is NOT
+#                                                    a bare shell ($SHELLS),
+#                                                    regardless of column 9
+#   work_pid (WORK_BASE + window index)           -- printed as a child of
+#                                                    harness_pid ONLY for a
+#                                                    row whose 9th column
+#                                                    marks a live child
+# `pane_has_live_children` in lanes.sh walks pid/ppid pairs to ask "does
+# pane_pid's child (the harness) itself have a live child" -- so only a row
+# with column 9 set can make it return true, and a row without one models
+# the harness alone, alive or not, which must not.
 F="${LANES_FIXTURE:?}"
 PID_BASE="${LANES_STUB_PID_BASE:-9000}"
+HARNESS_BASE=$(( PID_BASE + 100000 ))
+WORK_BASE=$(( PID_BASE + 200000 ))
+SHELLS_RE='^(bash|zsh|sh|fish|login)$'
 
-pid=""
+pid=""; want_tree=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -p) pid="$2"; shift 2 ;;
+    -ax|-A) shift ;;
+    -o)
+      case "$2" in
+        *pid=*ppid=*|*ppid=*pid=*) want_tree=1 ;;
+      esac
+      shift 2 ;;
     *) shift ;;
   esac
 done
+
+if [ "$want_tree" = 1 ] && [ -z "$pid" ]; then
+  awk -F'|' -v pbase="$PID_BASE" -v hbase="$HARNESS_BASE" -v wbase="$WORK_BASE" -v shells="$SHELLS_RE" '
+    {
+      w = $1; cmd = $3; has_child = ($9 == "child")
+      if (cmd !~ shells) {
+        print (hbase + w), (pbase + w)
+        if (has_child) print (wbase + w), (hbase + w)
+      }
+    }
+  ' "$F"
+  exit 0
+fi
+
 [ -n "$pid" ] || exit 1
 
 win=$(( pid - PID_BASE ))
