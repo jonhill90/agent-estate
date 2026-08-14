@@ -28,7 +28,24 @@ bad()  { echo "  FAIL $1 — $2"; fail=$((fail+1)); }
 check(){ # check <name> <expected> <actual>
   if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "want '$2', got '$3'"; fi
 }
-cleanup() { unset TMUX; export TMUX_TMPDIR="$RT"; assert_isolated_tmux; tmux kill-session -t "$S" 2>/dev/null; }
+# agent-supervisor#111: `bootstrap-test-48488` proved this trap was
+# incomplete, not absent. Case 10 below stands up a SECOND session
+# ($NEIGHBOUR) to reproduce #137's prefix-match bug, and used to kill it only
+# with an inline `tmux kill-session` right after the case ran (still present
+# below, for the common path -- it frees the session as soon as it is no
+# longer needed rather than making every run wait for the trap). That inline
+# call is not the EXIT/INT/TERM trap, so a kill, a crash, or this script's own
+# `set -e`-free early exit between creating $NEIGHBOUR and reaching it left an
+# orphan exactly the leaked-session shape #111 measured live. NEIGHBOUR is
+# declared here (empty) so `cleanup` can reference it unconditionally from the
+# first line of the script onward -- it only ever actually kills something
+# once case 10 has set it.
+NEIGHBOUR=""
+cleanup() {
+  unset TMUX; export TMUX_TMPDIR="$RT"; assert_isolated_tmux
+  tmux kill-session -t "$S" 2>/dev/null
+  [ -z "$NEIGHBOUR" ] || tmux kill-session -t "=$NEIGHBOUR" 2>/dev/null
+}
 cleanup_all() { cleanup; rm -rf "$RT"; }
 trap cleanup_all EXIT INT TERM
 
@@ -127,8 +144,9 @@ check "prefix neighbour is NOT modified by --add-lanes" \
 # and the intended session must actually have been created, not skipped
 tmux has-session -t "=$S" 2>/dev/null
 check "the named session itself was created" "0" "$?"
+# `cleanup` now kills $NEIGHBOUR too (see its definition above) -- one call
+# instead of the separate inline kill this line used to duplicate.
 cleanup
-unset TMUX; export TMUX_TMPDIR="$RT"; assert_isolated_tmux; tmux kill-session -t "=$NEIGHBOUR" 2>/dev/null
 
 # 11. `command -v` succeeds for shell builtins, which have no PATH binary and
 #     are not harnesses. `--agent cd` produced exactly the all-`dead` session

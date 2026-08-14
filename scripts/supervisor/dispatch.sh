@@ -82,7 +82,10 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/harness-registry.sh"
 # shellcheck source=./session-defaults.sh
 . "$HERE/session-defaults.sh"
-SESSION="$(lanes_session_or_default)"
+# agent-supervisor#111: SESSION is resolved from the target repo, not a
+# global default -- see the assignment below NAME_PART, once REPO and
+# REPO_PATH are both known. Nothing above that point touches tmux, so this
+# placeholder only exists to document that SESSION is not usable yet.
 
 dispatch_rehome_lane() {
   local target="$1" dir="$2" harness="${3:-}" hidx="" cmd="" launch_cmd="" launch_literal=""
@@ -294,6 +297,16 @@ fi
 # skills139-...), which is what the live session already looks like.
 NAME_PART="${REPO##*/}"
 [ -n "$NAME_PART" ] || NAME_PART="$(basename "$REPO_PATH")"
+
+# agent-supervisor#111: one tmux session per repo, named for the repo NAME_PART
+# just resolved -- a lane working in jonhill90/agent-tui runs in session
+# agent-tui, not whatever repo the supervisor itself happens to live in.
+# LANES_SESSION still overrides unconditionally (session_for_repo, #99).
+# Resolved here rather than at the top of the script because NAME_PART is the
+# earliest point REPO and REPO_PATH are both known, and SESSION is not read
+# by anything above this line (first use is the lanes.sh call below).
+SESSION="$(session_for_repo "$NAME_PART")"
+
 if [[ "$NAME_PART" == *-* ]]; then
   PREFIX=$(tr '-' '\n' <<<"$NAME_PART" | cut -c1 | tr -d '\n')
 else

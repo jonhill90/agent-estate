@@ -29,7 +29,14 @@
 #                        [--harness NAME] [--cwd DIR] [--add-lanes] [--dry-run]
 #
 #   --session NAME  tmux session to create; default $LANES_SESSION or
-#                   agent-supervisor. Must match what lanes.sh/dispatch.sh read.
+#                   agent-supervisor. Must match what lanes.sh/dispatch.sh read
+#                   for the target lane -- since agent-supervisor#111,
+#                   dispatch.sh derives that per repo (a lane working in
+#                   jonhill90/X runs in session X), so bootstrapping a
+#                   session for a repo that has none means passing --session
+#                   with that repo's name explicitly, not relying on this
+#                   default (which stays the shared fallback for non-repo
+#                   callers, e.g. the poller).
 #   --lanes N       total windows including the supervisor; default 10.
 #   --agent CMD     command started in each lane; default $LANES_AGENT_CMD or
 #                   `claude`. Use `copilot` / `codex` at a site without Claude.
