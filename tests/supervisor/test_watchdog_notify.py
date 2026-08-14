@@ -1,4 +1,6 @@
 import json
+import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -23,6 +25,27 @@ from watchdog_notify import (  # noqa: E402
     parse_status,
     send_via_notify_skill,
 )
+
+
+def setUpModule():
+    """No test in this file may reach a real channel.
+
+    Learned the hard way while writing #118's tests: `notify.sh` sources
+    `$NOTIFY_ENV` (default `~/.local/state/agent-dotfiles-supervisor/notify.env`,
+    which on the operator's machine holds live Telegram credentials) and
+    `watchdog_notify.py` sets the `AGENT_NOTIFY_CALLER=supervisor` the caller
+    gate wants. A test that reached the real `notify.sh` therefore sent Jon a
+    real message -- one did, at 2026-08-14T16:17:25Z, before this guard existed.
+
+    Pointing NOTIFY_ENV at a path that cannot exist means the credentials are
+    never loaded, in this process or in any subprocess it spawns. Individual
+    tests still avoid the real notifier; this is the floor under them.
+    """
+    tmp = tempfile.TemporaryDirectory()
+    unittest.addModuleCleanup(tmp.cleanup)
+    os.environ["NOTIFY_ENV"] = str(Path(tmp.name) / "no-credentials.env")
+    for leaked in ("AGENT_NOTIFY_TELEGRAM_TOKEN", "AGENT_NOTIFY_TELEGRAM_CHAT_ID", "AGENT_NOTIFY_IMESSAGE_TO"):
+        os.environ.pop(leaked, None)
 
 
 class FakeSender:
@@ -639,3 +662,191 @@ class SenderInvocationTests(unittest.TestCase):
             script.chmod(0o755)
             with self.assertRaises(SendError):
                 send_via_notify_skill("x", notify_script=str(script))
+
+
+#: A recording stand-in for notify.sh. Writes the caller gate value and both
+#: arguments so a test can prove WHICH notifier ran and how it was called.
+STUB_NOTIFIER = (
+    '#!/bin/bash\n'
+    'printf "%s|%s|%s\\n" "$AGENT_NOTIFY_CALLER" "$1" "$2" >> "$(dirname "$0")/pages"\n'
+)
+
+
+def deploy_module(tree: Path, *, notifier: str | None = STUB_NOTIFIER) -> Path:
+    """Copy `watchdog_notify.py` into `tree` as if the tree had been deployed
+    there, optionally with a notifier beside it. `notifier=None` deploys the
+    module with no `notify.sh` neighbour at all.
+
+    Copied rather than imported so the module resolves its neighbour from the
+    directory it was DEPLOYED into. A test that imported it from the repo
+    would resolve the repo's own notify.sh -- the real one -- and prove
+    nothing about relocation while quietly risking a live send.
+    """
+    tree.mkdir(parents=True, exist_ok=True)
+    (tree / "watchdog_notify.py").write_bytes((SUPERVISOR_DIR / "watchdog_notify.py").read_bytes())
+    if notifier is not None:
+        script = tree / "notify.sh"
+        script.write_text(notifier)
+        script.chmod(0o755)
+    return tree
+
+
+class NotifierThatDoesNotExistTests(unittest.TestCase):
+    """#118: the configured notifier path stopped existing.
+
+    `NOTIFY_SCRIPT` in the operator's `notify.env` still named the pre-split
+    `agent-dotfiles` copy of `notify.sh` after the supervisor moved out. Every
+    escalation then died inside `subprocess.run` with a raw `FileNotFoundError`
+    that `main()` does not catch -- so the one failure mode the whole
+    escalate path exists to report came out as a traceback in a log nobody
+    reads, instead of through the NOTIFY-FAILED/rc=1 channel `watchdog.sh`
+    reads and surfaces in `watchdog.status`.
+
+    A missing notifier is a delivery failure like any other, and must be
+    reported like one.
+    """
+
+    STALE = "/Users/jon/source/repos/Personal/agent-dotfiles/scripts/supervisor/notify.sh"
+
+    def test_a_notifier_that_does_not_exist_raises_send_error(self) -> None:
+        with self.assertRaises(SendError) as caught:
+            send_via_notify_skill("loop is down", notify_script=self.STALE)
+        # It has to name the path: "the notifier is missing" and "Telegram
+        # refused" are different problems with different fixes, and the
+        # message is all a human gets.
+        self.assertIn(self.STALE, str(caught.exception))
+
+    def test_a_notifier_that_hangs_raises_send_error(self) -> None:
+        """The other way to not deliver. Patched rather than actually slept:
+        a real 30s hang would cost the suite 30s to prove one branch."""
+        import watchdog_notify
+
+        def hang(*_args, **_kwargs):
+            raise subprocess.TimeoutExpired(cmd="notify.sh", timeout=30)
+
+        original = watchdog_notify.subprocess.run
+        watchdog_notify.subprocess.run = hang
+        self.addCleanup(setattr, watchdog_notify.subprocess, "run", original)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "notify.sh"
+            script.write_text("#!/bin/bash\nexit 0\n")
+            script.chmod(0o755)
+            with self.assertRaises(SendError) as caught:
+                send_via_notify_skill("loop is down", notify_script=str(script))
+            self.assertIn("nobody was told", str(caught.exception))
+
+    def test_a_notifier_that_is_not_executable_raises_send_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "notify.sh"
+            script.write_text("#!/bin/bash\nexit 0\n")
+            script.chmod(0o644)
+            with self.assertRaises(SendError) as caught:
+                send_via_notify_skill("loop is down", notify_script=str(script))
+            self.assertIn(str(script), str(caught.exception))
+
+    def test_an_escalation_with_no_reachable_notifier_is_loud_not_a_traceback(self) -> None:
+        """End to end, the shape watchdog.sh actually runs, with BOTH the
+        configured notifier and the shipped fallback absent -- so the failure
+        is genuine and no real channel is anywhere near this test."""
+        with tempfile.TemporaryDirectory() as tmp:
+            # A deployed tree holding the module and deliberately NO notify.sh.
+            tree = deploy_module(Path(tmp) / "supervisor", notifier=None)
+            status_path = Path(tmp) / "watchdog.status"
+            episode_path = Path(tmp) / ".escalate-episode.json"
+            log_path = Path(tmp) / "watchdog-notify.log"
+            write_status(status_path, "escalate", "keeps dying", restarts=3)
+
+            proc = subprocess.run(
+                [
+                    sys.executable, str(tree / "watchdog_notify.py"),
+                    "--status-path", str(status_path),
+                    "--episode-state-path", str(episode_path),
+                    "--log-path", str(log_path),
+                    "--notify-script", self.STALE,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            self.assertEqual(proc.returncode, 1, f"{proc.stdout}\n{proc.stderr}")
+            # A traceback is the defect, not the report. watchdog.sh turns the
+            # rc into "escalation did NOT reach a human" in watchdog.status;
+            # a crash out of main() bypasses that entirely.
+            self.assertNotIn("Traceback", proc.stderr)
+            self.assertIn("ERROR:", proc.stderr)
+            self.assertIn("NOTIFY-FAILED", log_path.read_text())
+            # The escalation is not consumed -- nobody was told, so the next
+            # tick must try again (#91).
+            self.assertFalse(json.loads(episode_path.read_text())["notified"])
+
+
+class NotifierResolvesWithTheTreeTests(unittest.TestCase):
+    """#118, the half that stops it happening again.
+
+    The configured path was correct when it was written and became wrong when
+    the tree moved. Nothing in the estate can promise a hand-written absolute
+    path will keep resolving, so the notifier is found relative to this module
+    instead: whatever directory `watchdog_notify.py` is deployed into is the
+    directory its `notify.sh` is in.
+
+    This runs a COPY of the module out of a throwaway directory, with a stub
+    notifier beside it, and asserts the stub is the one that got called. A test
+    that only checked a constant would pass against a module that still shelled
+    out to the stale path.
+    """
+
+    def test_a_stale_configured_path_still_reaches_the_shipped_notifier(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = deploy_module(Path(tmp) / "some" / "relocated" / "supervisor")
+            status_path = Path(tmp) / "watchdog.status"
+            episode_path = Path(tmp) / ".escalate-episode.json"
+            log_path = Path(tmp) / "watchdog-notify.log"
+            write_status(status_path, "escalate", "keeps dying", restarts=3)
+
+            proc = subprocess.run(
+                [
+                    sys.executable, str(tree / "watchdog_notify.py"),
+                    "--status-path", str(status_path),
+                    "--episode-state-path", str(episode_path),
+                    "--log-path", str(log_path),
+                    "--notify-script", NotifierThatDoesNotExistTests.STALE,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+
+            self.assertEqual(proc.returncode, 0, f"{proc.stdout}\n{proc.stderr}")
+            pages = (tree / "pages").read_text()
+            self.assertIn("Supervisor escalation", pages)
+            # The caller gate notify.sh enforces must survive the fallback --
+            # a page it refuses is a page nobody gets (agent-dotfiles#52).
+            self.assertTrue(pages.startswith("supervisor|"), pages)
+            # ...and it is loud about having ignored what was configured.
+            self.assertIn("NOTIFY-PATH-STALE", log_path.read_text())
+            self.assertIn(NotifierThatDoesNotExistTests.STALE, log_path.read_text())
+            # It really did deliver, so the escalation is consumed.
+            self.assertTrue(json.loads(episode_path.read_text())["notified"])
+
+    def test_the_fallback_is_the_neighbour_not_a_hardcoded_repo_path(self):
+        """Two trees, two notifiers: each module must page its OWN neighbour.
+        A hardcoded path -- however corrected -- would send both to one file."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tree = deploy_module(Path(tmp) / "some" / "relocated" / "supervisor")
+            self.assertEqual(
+                Path(
+                    subprocess.run(
+                        [
+                            sys.executable, "-c",
+                            "import sys; sys.path.insert(0, sys.argv[1]);"
+                            "import watchdog_notify;"
+                            "print(watchdog_notify.DEFAULT_NOTIFY_SCRIPT)",
+                            str(tree),
+                        ],
+                        capture_output=True, text=True, timeout=60, check=True,
+                    ).stdout.strip()
+                ).resolve(),
+                (tree / "notify.sh").resolve(),
+            )
