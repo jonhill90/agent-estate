@@ -16,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/jonhill90/agent-tui/internal/cost"
 	"github.com/jonhill90/agent-tui/internal/lane"
 )
 
@@ -25,6 +26,15 @@ const RailWidth = 28
 
 const tickInterval = 120 * time.Millisecond
 const refreshInterval = 2 * time.Second
+
+// costRefreshInterval matches internal/cost's own refreshInterval exactly
+// (see model.go's doc comment there for the measured reason: a single
+// `ccusage daily --json --by-agent` call takes low-single-digit seconds).
+// Wiring the cost line into the rail (agent-tui#4 -- "glanceable, always
+// there, no command to run") must not make it poll any harder just because
+// it is now always visible; this constant, and TestCostRefreshIntervalIsFiveMinutes
+// pinning it, are what keep that true.
+const costRefreshInterval = 5 * time.Minute
 
 // Fetcher retrieves the current lane list. cmd/agent-tui supplies the real
 // implementation (an MCP tools/call("lanes")); this package knows nothing
@@ -36,15 +46,28 @@ type Fetcher func() ([]lane.Lane, error)
 
 type tickMsg time.Time
 type refreshMsg time.Time
+type costRefreshMsg time.Time
 
 type fetchResultMsg struct {
 	lanes []lane.Lane
 	err   error
 }
 
+type costFetchResultMsg struct {
+	snap cost.Snapshot
+	err  error
+}
+
 // Model is the rail's Bubble Tea model.
 type Model struct {
 	fetch Fetcher
+
+	// costFetch is optional -- nil in tests and in any embedding that has
+	// no ccusage to read -- so New() keeps working exactly as before it
+	// existed. cmd/agent-tui always supplies one via NewWithCost so the
+	// rail's default screen carries agent-tui#4's cost line with no flag
+	// needed to see it.
+	costFetch cost.Fetcher
 
 	width, height int
 	tick          int
@@ -63,15 +86,35 @@ type Model struct {
 	fetchErr    error
 	lastFetched time.Time
 	quitting    bool
+
+	costSnap    cost.Snapshot
+	costFetched time.Time
 }
 
-// New builds a Model bound to the given fetch function.
+// New builds a Model bound to the given fetch function, with no cost line
+// (costFetch is nil). Use NewWithCost to get agent-tui#4's rail line.
 func New(fetch Fetcher) Model {
 	return Model{fetch: fetch, width: RailWidth, height: 24}
 }
 
+// NewWithCost builds a Model that also renders a compact, per-harness cost
+// line (agent-tui#4) below the lane list -- the default-visible spot issue
+// #4 asked for, no flag required. costFetch follows the same "unknown,
+// never zero" discipline as internal/cost.Fetcher; pass nil to fall back to
+// New's behavior (no cost line at all) when there is genuinely nothing to
+// read it from.
+func NewWithCost(fetch Fetcher, costFetch cost.Fetcher) Model {
+	m := New(fetch)
+	m.costFetch = costFetch
+	return m
+}
+
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(tickCmd(), refreshCmd(), doFetch(m.fetch))
+	cmds := []tea.Cmd{tickCmd(), refreshCmd(), doFetch(m.fetch)}
+	if m.costFetch != nil {
+		cmds = append(cmds, costRefreshCmd(), doCostFetch(m.costFetch))
+	}
+	return tea.Batch(cmds...)
 }
 
 func tickCmd() tea.Cmd {
@@ -82,10 +125,21 @@ func refreshCmd() tea.Cmd {
 	return tea.Tick(refreshInterval, func(t time.Time) tea.Msg { return refreshMsg(t) })
 }
 
+func costRefreshCmd() tea.Cmd {
+	return tea.Tick(costRefreshInterval, func(t time.Time) tea.Msg { return costRefreshMsg(t) })
+}
+
 func doFetch(fetch Fetcher) tea.Cmd {
 	return func() tea.Msg {
 		lanes, err := fetch()
 		return fetchResultMsg{lanes: lanes, err: err}
+	}
+}
+
+func doCostFetch(fetch cost.Fetcher) tea.Cmd {
+	return func() tea.Msg {
+		snap, err := fetch()
+		return costFetchResultMsg{snap: snap, err: err}
 	}
 }
 
@@ -138,6 +192,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.selected = max(0, len(m.lanes)-1)
 			}
 		}
+		return m, nil
+
+	case costRefreshMsg:
+		return m, tea.Batch(costRefreshCmd(), doCostFetch(m.costFetch))
+
+	case costFetchResultMsg:
+		if msg.err == nil {
+			m.costSnap = msg.snap
+		} else {
+			// Same discipline as internal/cost.Model: a failed fetch must
+			// not leave a stale-but-real snapshot looking current. Fold in
+			// Unknown() so the rail's cost line reads "unknown", never last
+			// cycle's numbers going silently stale.
+			m.costSnap = cost.Unknown()
+		}
+		m.costFetched = time.Now()
 		return m, nil
 	}
 	return m, nil
@@ -267,6 +337,22 @@ func (m Model) View() string {
 	b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("glyphs %d/%d: %s", m.glyphSet+1, len(lane.Variants), set.Name)))
 	b = append(b, legendStyle.Width(innerWidth).Render(truncate(set.Description, innerWidth)))
 	b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("[1-%d] to switch", len(lane.Variants))))
+
+	// The cost line (agent-tui#4): glanceable, always in the rail, no flag
+	// or command needed to see it. Only present when cmd/agent-tui wired a
+	// costFetch in (NewWithCost) -- New() alone still renders nothing here,
+	// same as before this existed.
+	if m.costFetch != nil {
+		b = append(b, dimStyle.Width(innerWidth).Render(""))
+		b = append(b, legendStyle.Width(innerWidth).Render("cost:"))
+		for _, line := range cost.RenderCompact(m.costSnap, innerWidth) {
+			b = append(b, legendStyle.Width(innerWidth).Render(truncate(line, innerWidth)))
+		}
+		if !m.costFetched.IsZero() {
+			age := time.Since(m.costFetched).Round(time.Second)
+			b = append(b, legendStyle.Width(innerWidth).Render(truncate(fmt.Sprintf("age: %s", age), innerWidth)))
+		}
+	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, b...)
 	return borderStyle.Height(m.height - 1).Render(content)

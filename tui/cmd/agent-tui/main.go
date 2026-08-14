@@ -10,10 +10,14 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-tui/internal/cost"
 	"github.com/jonhill90/agent-tui/internal/lane"
 	"github.com/jonhill90/agent-tui/internal/mcp"
 	"github.com/jonhill90/agent-tui/internal/rail"
@@ -43,6 +47,19 @@ func main() {
 			"colon-separated name=path=owner/repo entries, same shape as agent-supervisor's SUPERVISOR_REPOSITORIES "+
 				"(.env.example) -- the board unions this with every repo it discovers in the ledger's own source_urls, "+
 				"so it never has to hardcode a list. Defaults to $SUPERVISOR_REPOSITORIES.")
+		showCost = flag.Bool("cost", false, "show the cost panel (agent-tui#4) instead of the rail -- a separate "+
+			"screen, never a rail restyle. Reads ccusage, never reimplements its per-harness usage parse.")
+		ccusageBin = flag.String("ccusage-bin", envOr("AGENT_TUI_CCUSAGE_BIN", "npx"),
+			"binary to run for ccusage calls. Combined with -ccusage-args (default \"ccusage\"). Point this at a "+
+				"binary that does not exist to exercise the blindness path (agent-tui#4 acceptance item 2): the "+
+				"panel must render \"unknown\", never 0.")
+		ccusageArgs = flag.String("ccusage-args", envOr("AGENT_TUI_CCUSAGE_ARGS", "ccusage"),
+			"space-separated args prepended before every ccusage subcommand, e.g. \"ccusage\" for `npx ccusage ...` "+
+				"or empty if -ccusage-bin is already the ccusage binary itself.")
+		claudeBlockLimit = flag.Int64("claude-block-limit", envOrInt64("AGENT_TUI_CLAUDE_BLOCK_LIMIT", 0),
+			"token ceiling for Claude's active 5h session block, passed to `ccusage blocks --token-limit`. ccusage "+
+				"has no default of its own (it cannot know your plan's real cap) -- leave unset and the panel shows "+
+				"Claude's limit as \"unknown\", never a fabricated percentage (agent-tui#4's honesty constraint).")
 	)
 	flag.Parse()
 
@@ -51,6 +68,24 @@ func main() {
 			"the ledger; refusing to default to the live supervisor ledger (agent-tui#6's rule -- see -ledger's "+
 			"flag help)")
 		os.Exit(1)
+	}
+
+	// Built once, used by both the -cost detail screen and the rail's
+	// default cost line below -- the two are separate consumers of the
+	// same Fetcher, not separate cost implementations.
+	costFetch := buildCostFetch(*ccusageBin, splitArgs(*ccusageArgs), *claudeBlockLimit, time.Now)
+
+	// The cost panel reads only ccusage -- never lanes, never the
+	// supervisor MCP server -- so it is the one screen that must not pay
+	// (or require) a supervisor connection to start. Every other screen
+	// (rail, board) needs lanes and connects exactly as before.
+	if *showCost {
+		p := tea.NewProgram(cost.New(costFetch), tea.WithAltScreen())
+		if _, err := p.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "agent-tui:", err)
+			os.Exit(1)
+		}
+		return
 	}
 
 	client, cleanup, err := connect(*supervisorRepo, *python, *mcpCmd)
@@ -77,7 +112,10 @@ func main() {
 		boardFetch := buildBoardFetch(*ledger, *ghBin, *sqliteBin, *repositories, lanesFetch)
 		p = tea.NewProgram(board.New(boardFetch), tea.WithAltScreen())
 	} else {
-		p = tea.NewProgram(rail.New(lanesFetch), tea.WithAltScreen())
+		// NewWithCost, not New: the rail is where agent-tui#4's "glanceable,
+		// always there, no command to run" panel actually has to live --
+		// see internal/rail.Model's costFetch doc comment.
+		p = tea.NewProgram(rail.NewWithCost(lanesFetch, costFetch), tea.WithAltScreen())
 	}
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "agent-tui:", err)
@@ -112,4 +150,24 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+func envOrInt64(key string, fallback int64) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+// splitArgs splits -ccusage-args on whitespace, dropping empty fields --
+// "" (the empty flag value) must become no args, not one empty-string arg
+// that exec would pass straight through to the ccusage binary.
+func splitArgs(s string) []string {
+	fields := strings.Fields(s)
+	return fields
 }
