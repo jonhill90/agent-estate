@@ -499,7 +499,26 @@ prompt_poller_relaunch() { # prompt_poller_relaunch <pane> <old-sha> <live-sha> 
     echo "advance-live: poller-restart skipped -- poller-recover.sh exists but is not executable"
     return 1
   fi
+  # agent-supervisor#75: this waiter runs to a `sleep`-bound deadline and then
+  # execs poller-recover.sh -- outliving the "bash $copy" invocation above it
+  # (see watchdog.sh's advance_on_exit) by design. Under the real watchdog
+  # LaunchAgent, "bash $copy" exiting is also the job's main process exiting,
+  # and launchd's default AbandonProcessGroup=false sends SIGTERM (then
+  # SIGKILL) to anything left in the job's process group once that happens --
+  # including this waiter, mid-sleep or mid-exec, before it reaches any of the
+  # log lines below. Eight starts and zero terminal lines (#75) was exactly
+  # that: not a bug in the waiter's own logic, a process-group reap from
+  # outside it. `set -m` (job control) makes bash put a background job in ITS
+  # OWN process group instead of the shell's -- confirmed against a real,
+  # throwaway LaunchAgent (see #75) that only this, not a SIGTERM trap alone,
+  # keeps the waiter alive past the parent's exit. The trap below is defense
+  # in depth for the signal that DOES still reach it (SIGTERM, if grace-period
+  # timing or a future launchd change ever lets one through) -- SIGKILL cannot
+  # be trapped by any means, which is why the mutation test kills the waiter
+  # to confirm zero-outcome is still detectable, not to demand this handle it.
+  set -m
   (
+    trap 'log "POLLER-PROMPT-RELAUNCH-KILLED: waiter for pane $pane received SIGTERM before finishing; watchdog poller-recover.sh remains the backstop"; exit 143' TERM
     deadline=$(( $(date +%s) + INBOX_POLL_RELAUNCH_WAIT_SECONDS ))
     if [ -n "$poller_pid" ]; then
       while kill -0 "$poller_pid" 2>/dev/null; do
@@ -519,6 +538,7 @@ prompt_poller_relaunch() { # prompt_poller_relaunch <pane> <old-sha> <live-sha> 
       log "POLLER-PROMPT-RELAUNCH: pane $pane, poller was $poller_sha, live now $live_sha: $out"
     fi
   ) >/dev/null 2>&1 &
+  set +m
 }
 
 watchdog_stale_check
