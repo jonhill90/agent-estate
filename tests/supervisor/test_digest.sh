@@ -940,5 +940,85 @@ else
   ok "mutation confirmed: disabling the outcome checks lets 37 consecutive recovery failures pass without naming the failure (17a would be red)"
 fi
 
+# 18. agent-supervisor#96: `poller: alive=true` must be SCOPED to this
+# session's poller window, not any `inbox-poll.sh` on the machine. Confirmed
+# live: a leaked test poller ran 57 minutes holding zero handles on real
+# state (lsof -c agent-dotfiles-supervisor -> 0) and would have reported
+# alive=true here for as long as it existed -- for that whole window, a
+# genuinely dead poller in THIS session would have read alive too.
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "  SKIP #18 no tmux on PATH"
+else
+  source "$HERE/../../scripts/supervisor/tmux-isolation.sh"
+  S="digest-poller-test-$$"
+  RT="$(mktemp -d "${TMPDIR:-/tmp}/digest-poller-tmux.XXXXXX")"
+  unset TMUX
+  export TMUX_TMPDIR="$RT"
+  if ! assert_isolated_tmux; then
+    echo "  SKIP #18 could not set up isolated tmux"
+  else
+    # A stand-in that behaves like inbox-poll.sh for the one property this
+    # suite needs: it runs until told to stop. Named inbox-poll.sh so the
+    # digest's default SERVICE_RE matches it without an override, the same
+    # as the real deployment.
+    STAND_IN="$RT/inbox-poll.sh"
+    cat > "$STAND_IN" <<'EOF'
+#!/bin/bash
+STOP="${POLLER_STOP_FILE:?}"
+while [ ! -f "$STOP" ]; do sleep 0.1; done
+EOF
+    chmod +x "$STAND_IN"
+
+    LEAK_STOP="$RT/leak-stop"
+    IN_SESSION_STOP="$RT/in-session-stop"
+
+    digest18() { PATH="$D/bin:$PATH" SUPERVISOR_STATE="$D/state" LANES_SESSION="$S" bash "$DIGEST" --json 2>/dev/null; }
+
+    cleanup18() {
+      unset TMUX; export TMUX_TMPDIR="$RT"
+      touch "$LEAK_STOP" "$IN_SESSION_STOP" 2>/dev/null
+      tmux kill-session -t "$S" 2>/dev/null
+      pkill -KILL -f "$RT/inbox-poll.sh" 2>/dev/null
+      rm -rf "$RT"
+    }
+    trap 'cleanup18; rm -rf "$D"' EXIT INT TERM
+
+    tmux new-session -d -s "$S" -x 80 -y 24 -n not-poller
+    tmux new-window -t "$S" -n inbox-poll -d \
+      -- env POLLER_STOP_FILE="$IN_SESSION_STOP" "$STAND_IN"
+    sleep 0.3
+
+    # 18a. A real poller in this session -> alive=true.
+    j=$(digest18)
+    chk "18a: a real in-session poller reads alive=true" "true" "$(jq -r '.poller.alive' <<<"$j")"
+
+    # 18b. THE BUG: no poller in this session, but a matching inbox-poll.sh
+    # running elsewhere on the machine -> must read alive=false.
+    tmux kill-window -t "$S:inbox-poll" 2>/dev/null
+    for _ in $(seq 1 20); do
+      tmux list-windows -t "$S" -F '#{window_name}' 2>/dev/null | grep -qFx inbox-poll || break
+      sleep 0.1
+    done
+    env POLLER_STOP_FILE="$LEAK_STOP" "$STAND_IN" &
+    leak_pid=$!
+    for _ in $(seq 1 20); do
+      pgrep -f "$RT/inbox-poll.sh" >/dev/null 2>&1 && break
+      sleep 0.1
+    done
+    j=$(digest18)
+    chk "18b: no poller in this session but one leaked elsewhere reads alive=false" \
+      "false" "$(jq -r '.poller.alive' <<<"$j")"
+
+    # 18c. No poller anywhere -> alive=false.
+    touch "$LEAK_STOP"
+    wait "$leak_pid" 2>/dev/null
+    j=$(digest18)
+    chk "18c: no poller anywhere reads alive=false" "false" "$(jq -r '.poller.alive' <<<"$j")"
+
+    cleanup18
+    trap 'rm -rf "$D"' EXIT INT TERM
+  fi
+fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
