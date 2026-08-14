@@ -1012,10 +1012,13 @@ class IssueLaneCliTest(unittest.TestCase):
         self.assertEqual(0, rc, output.getvalue())
         return json.loads(output.getvalue())
 
-    def _author_issue_lane(self, root, issue):
+    def _author_issue_lane(self, root, issue, head_ref=None):
         output = io.StringIO()
+        argv = ["--state-dir", root, "author-issue-lane", "--issue", str(issue)]
+        if head_ref is not None:
+            argv += ["--head-ref", head_ref]
         with contextlib.redirect_stdout(output):
-            rc = cli.main(["--state-dir", root, "author-issue-lane", "--issue", str(issue)])
+            rc = cli.main(argv)
         self.assertEqual(0, rc, output.getvalue())
         return json.loads(output.getvalue())
 
@@ -1062,6 +1065,34 @@ class IssueLaneCliTest(unittest.TestCase):
                 {"issue": "76", "known": True, "lane": "t:3", "task": "as76-author-lane-drift"},
                 author,
             )
+
+    def test_author_issue_lane_resolves_by_head_ref_after_redispatch(self):
+        """agent-supervisor#77: an issue first attempted on one lane, then
+        re-dispatched to a second lane that actually produced the PR, must
+        resolve to the SECOND lane -- the one the PR's head branch names --
+        not the first (stale) non-review task, which is what the old
+        "first non-review task" rule picked."""
+        with tempfile.TemporaryDirectory() as root:
+            self._record_dispatch(root, lane="t:3", task="as13-as13-ci-as-a-gate", issue=13)
+            self._record_dispatch(root, lane="t:5", task="as13-as13-reopen", issue=13)
+
+            author = self._author_issue_lane(root, 13, head_ref="lane/13-as13-reopen")
+
+            self.assertEqual(
+                {"issue": "13", "known": True, "lane": "t:5", "task": "as13-as13-reopen"},
+                author,
+            )
+
+    def test_author_issue_lane_unknown_when_ambiguous_and_head_ref_absent(self):
+        """Two non-review tasks and no head ref to disambiguate them: this
+        must answer `known:false`, not guess by position."""
+        with tempfile.TemporaryDirectory() as root:
+            self._record_dispatch(root, lane="t:3", task="as13-as13-ci-as-a-gate", issue=13)
+            self._record_dispatch(root, lane="t:5", task="as13-as13-reopen", issue=13)
+
+            author = self._author_issue_lane(root, 13)
+
+            self.assertEqual({"issue": "13", "known": False, "lane": None, "task": None}, author)
 
 
 if __name__ == "__main__":

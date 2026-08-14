@@ -410,7 +410,7 @@ if [ -n "$REVIEWS_PR" ]; then
     } | awk '!seen[$0]++'
   )
   for candidate_issue in $CANDIDATE_ISSUES; do
-    ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" author-issue-lane --issue "$candidate_issue" 2>&1) || continue
+    ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" author-issue-lane --issue "$candidate_issue" --head-ref "$HEAD_REF" 2>&1) || continue
     if grep -qF '"known":true' <<<"$ISSUE_JSON"; then
       AUTHOR_LANE=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$ISSUE_JSON")
       AUTHOR_TASK=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$ISSUE_JSON")

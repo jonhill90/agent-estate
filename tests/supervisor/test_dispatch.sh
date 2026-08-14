@@ -2012,7 +2012,7 @@ import os
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = 'ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" author-issue-lane --issue "$candidate_issue" 2>&1) || continue'
+marker = 'ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" author-issue-lane --issue "$candidate_issue" --head-ref "$HEAD_REF" 2>&1) || continue'
 assert text.count(marker) == 1, "author-issue-lane lookup not found or not unique -- script shape changed"
 text = text.replace(marker, 'ISSUE_JSON=\'{"known":false}\'  # MUTATED: ledger author-issue-lane never consulted', 1)
 here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'

@@ -248,6 +248,10 @@ def parser():
 
     author_issue_lane_parser = sub.add_parser("author-issue-lane")
     author_issue_lane_parser.add_argument("--issue", required=True)
+    # agent-supervisor#77: the PR's own head branch, when the caller has it --
+    # resolves authorship by what actually produced the branch instead of by
+    # position in the issue's task list. See `Ledger.get_author_task_for_issue`.
+    author_issue_lane_parser.add_argument("--head-ref", default=None)
 
     # agent-dotfiles#237: the read `restore.sh` runs after a tmux server loss.
     # Deliberately its own command rather than a flag on `status`: it must
@@ -696,7 +700,7 @@ def main(argv=None):
             "task": row["id"] if row is not None else None,
         }
     elif args.command == "author-issue-lane":
-        row = ledger.get_author_task_for_issue(args.issue)
+        row = ledger.get_author_task_for_issue(args.issue, head_ref=args.head_ref)
         value = {
             "issue": args.issue,
             "known": row is not None,

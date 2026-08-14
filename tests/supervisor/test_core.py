@@ -959,6 +959,63 @@ class LedgerTest(unittest.TestCase):
             self.assertEqual("free-3", author["lane"])
             self.assertEqual("as76-author-lane-drift", author["id"])
 
+    def test_get_author_task_for_issue_resolves_by_head_ref_after_redispatch(self):
+        """agent-supervisor#77: the reviewer's own reproduction -- a first
+        attempt abandoned, then a second lane re-dispatched for the same
+        issue actually produces the PR. Resolving to "the first non-review
+        task" (the old rule) picks the stale, abandoned lane; this must
+        resolve to whichever lane the PR's head branch names instead."""
+        self.ledger.record_dispatch(
+            lane="free-3",
+            pane_id="%3",
+            nonce="nonce-first",
+            harness="claude",
+            repo="/repo/free-3",
+            server_id="server-a",
+            session_id="$3",
+            command="claude.exe",
+            task_id="as13-as13-ci-as-a-gate",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/13",
+            source_ref="13",
+            summary="#13 first attempt",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-3"],
+            status_marker=None,
+        )
+        self.ledger.complete("as13-as13-ci-as-a-gate", b"# Result\n\nAbandoned.\n", pane_nonce="nonce-first")
+        self.clock.value += 1
+
+        self.ledger.record_dispatch(
+            lane="free-5",
+            pane_id="%5",
+            nonce="nonce-second",
+            harness="claude",
+            repo="/repo/free-5",
+            server_id="server-a",
+            session_id="$5",
+            command="claude.exe",
+            task_id="as13-as13-reopen",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/13",
+            source_ref="13",
+            summary="#13 reopened attempt",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-5"],
+            status_marker=None,
+        )
+        self.ledger.complete("as13-as13-reopen", b"# Result\n\nDone.\n", pane_nonce="nonce-second")
+
+        # No head ref, two non-review candidates: genuinely ambiguous.
+        self.assertIsNone(self.ledger.get_author_task_for_issue("13"))
+
+        # The old "first" rule would answer free-3 here -- exactly the wrong
+        # lane the reviewer caught. The head ref names the lane that actually
+        # produced the PR.
+        author = self.ledger.get_author_task_for_issue("13", head_ref="lane/13-as13-reopen")
+        self.assertEqual("free-5", author["lane"])
+        self.assertEqual("as13-as13-reopen", author["id"])
+
     def test_get_author_task_for_issue_unknown_when_only_reviews_exist(self):
         self.ledger.record_dispatch(
             lane="free-4",
