@@ -96,7 +96,9 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./input-box.sh
 . "$HERE/input-box.sh"
-SESSION="${2:-${LANES_SESSION:-agent-dotfiles}}"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
+SESSION="${2:-$(lanes_session_or_default)}"
 MESSAGE="${1:-}"
 
 if [ -z "$MESSAGE" ]; then

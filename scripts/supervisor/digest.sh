@@ -35,8 +35,10 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
-SESSION="${LANES_SESSION:-agent-dotfiles}"
+SESSION="$(lanes_session_or_default)"
 REPOS="${DIGEST_REPOS:-agent-dotfiles agent-supervisor skills skills-private agent-evals}"
 OWNER="${DIGEST_OWNER:-jonhill90}"
 SINCE="${DIGEST_SINCE:-}"

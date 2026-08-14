@@ -149,7 +149,9 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SESSION="${1:-${LANES_SESSION:-agent-dotfiles}}"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
+SESSION="${1:-$(lanes_session_or_default)}"
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 STATUS="${INBOX_POLL_STATUS:-$STATE/inbox-poll.status}"
 LOG="${INBOX_POLL_LOG:-$STATE/inbox-poll.log}"

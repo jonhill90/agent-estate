@@ -116,16 +116,18 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./input-box.sh
 . "$HERE/input-box.sh"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
 
 FLUSH=""
 if [ "${1:-}" = "--flush" ]; then
   FLUSH=1
   shift
-  SESSION="${1:-${LANES_SESSION:-agent-dotfiles}}"
+  SESSION="${1:-$(lanes_session_or_default)}"
   MESSAGE=""
 else
   MESSAGE="${1:-}"
-  SESSION="${2:-${LANES_SESSION:-agent-dotfiles}}"
+  SESSION="${2:-$(lanes_session_or_default)}"
   if [ -z "$MESSAGE" ]; then
     echo "director-route: usage: director-route.sh \"<message text>\" [session] | director-route.sh --flush [session]" >&2
     exit 2
