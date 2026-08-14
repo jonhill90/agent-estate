@@ -75,6 +75,12 @@ map_status() {
     # narrowing is diagnostic (a lying name vs. no name), not a different
     # severity, and OpenSessions has no vocabulary slot for "dead and lying".
     dead|stale) echo error ;;
+    # `supervisor` is deliberately unreachable from this script's own path:
+    # the python step below drops that row rather than translating it into a
+    # vocabulary with no value for "not a lane" (README.md, "Where the two
+    # deliberately disagree"). The arm stays anyway -- rule 4 is about what
+    # the map NAMES, and if that filter is ever removed this is the only
+    # thing keeping `supervisor` off the `*)` stale path.
     service|supervisor|unknown) echo idle ;;
     *)
       echo "laneview/opensessions.sh: no mapping for lanes.sh state '$1' -- rendering it stale rather than idle" >&2
@@ -89,6 +95,11 @@ session, raw = sys.argv[1], sys.argv[2]
 rows = json.loads(raw)
 out = []
 for r in rows:
+    # The one row this renderer refuses to draw, and the one place the two
+    # shipped renderers deliberately differ -- see README.md, "Where the two
+    # deliberately disagree: the supervisor row". Every AgentStatus value is
+    # a claim about an agent, and the supervisor pane is the window a
+    # dispatch must never reach; absence beats a wrong claim (rule 2).
     if r["state"] == "supervisor":
         continue
     out.append({
