@@ -25,24 +25,48 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-IMPL="${1:?usage: laneview.sh <impl> [session]}"
-SESSION="${2:-agent-dotfiles}"
-IMPL_SCRIPT="$HERE/laneview/$IMPL.sh"
-
 # The list is of names that can actually be passed as <impl>, so it is built
 # from `laneview/*.sh` rather than from every entry in the directory: `ls |
 # sed 's/\.sh$//'` offered `README.md` as an implementation, in the one
 # message a human reads when they have got the name wrong (#4 finding D).
-impl_names() {
-  local f
+#
+# Each renderer's own one-line description comes from a `# laneview-summary:`
+# comment in that renderer's own file, not from a table kept here -- a
+# renderer added without one shows up nameless (never silently dropped from
+# the list), so the gap is visible in the one message a human actually reads
+# instead of requiring this script to be edited in step with laneview/.
+usage() {
+  cat >&2 <<EOF
+usage: laneview.sh <impl> [session]
+
+laneview/ is a stopgap lane-state renderer (laneview/README.md), not the
+supervisor's interface. Its renderers:
+$(impl_list)
+EOF
+}
+
+impl_list() {
+  local f name summary
   for f in "$HERE"/laneview/*.sh; do
     [ -f "$f" ] || continue
-    printf '%s ' "$(basename "$f" .sh)"
+    name="$(basename "$f" .sh)"
+    summary="$(grep -m1 '^# laneview-summary: ' "$f" 2>/dev/null | sed 's/^# laneview-summary: //')"
+    printf '  %-14s %s\n' "$name" "${summary:-(no description -- add a '# laneview-summary:' line to laneview/$name.sh)}"
   done
 }
 
+if [ $# -lt 1 ]; then
+  usage
+  exit 1
+fi
+
+IMPL="$1"
+SESSION="${2:-agent-dotfiles}"
+IMPL_SCRIPT="$HERE/laneview/$IMPL.sh"
+
 if [ ! -x "$IMPL_SCRIPT" ]; then
-  echo "laneview.sh: no renderer at $IMPL_SCRIPT (implementations: $(impl_names))" >&2
+  echo "laneview.sh: no renderer named '$IMPL'" >&2
+  usage
   exit 1
 fi
 

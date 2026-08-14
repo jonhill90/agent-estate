@@ -32,10 +32,58 @@ fi
 # they have got the name wrong (#4 finding D). Asserted without naming any
 # renderer: this case is about the listing, not about which renderers exist,
 # so deleting one must not fail it.
-if grep -qE 'implementations: [a-z]' <<<"$out" && ! grep -q 'README' <<<"$out"; then
+if grep -qE '^  [a-z]+ +\S' <<<"$out" && ! grep -qE '^  README' <<<"$out"; then
   ok "the renderer list offers renderers, not every file in the directory"
 else
   bad "the renderer list offers renderers, not every file in the directory" "$out"
+fi
+
+# A bare invocation (no impl at all) must fail the same informative way as
+# an invalid one -- it used to be `${1:?...}`, a bash parameter-expansion
+# error that names no renderer and reads as a shell bug, not a usage
+# message (agent-dotfiles#82).
+out=$(bash "$LANEVIEW" 2>&1); rc=$?
+if [ "$rc" -ne 0 ] && grep -q 'usage: laneview.sh' <<<"$out" \
+   && grep -qE '^  [a-z]+ +\S' <<<"$out"; then
+  ok "a bare invocation prints usage and the renderer list, not a shell error"
+else
+  bad "a bare invocation prints usage and the renderer list, not a shell error" "rc=$rc out=$out"
+fi
+
+# The usage text must say tui is the interactive renderer -- it is the only
+# one of the three with a UI a human drives, and #4 finding D's episode
+# (Jon ran laneview.sh bare, saw one line of shell error, and concluded the
+# project had shipped "a shell script") was this exact renderer staying
+# undiscoverable from the command itself.
+if grep -q 'tui' <<<"$out" && grep -qi 'interactive' <<<"$out"; then
+  ok "usage names tui as the interactive renderer"
+else
+  bad "usage names tui as the interactive renderer" "$out"
+fi
+
+# Every listed renderer must carry its own one-line description -- not a
+# bare name -- so a future renderer added without one fails loudly (a name
+# with no description reads as "(no description -- add a ...)", never as a
+# silently blank line).
+missing=0
+for impl in $(cd "$HERE/../../scripts/supervisor/laneview" && ls *.sh | sed 's/\.sh$//'); do
+  line=$(grep -E "^  $impl " <<<"$out") || true
+  if [ -z "$line" ] || grep -q 'no description' <<<"$line"; then
+    missing=1
+  fi
+done
+if [ "$missing" -eq 0 ]; then
+  ok "every renderer in the list carries its own one-line description"
+else
+  bad "every renderer in the list carries its own one-line description" "$out"
+fi
+
+# laneview/ must not be sold as the supervisor's interface -- PHASES.md §4b
+# scope correction: it is a stopgap lane-state renderer.
+if grep -qi 'stopgap' <<<"$out"; then
+  ok "usage does not imply laneview/ is the supervisor's interface"
+else
+  bad "usage does not imply laneview/ is the supervisor's interface" "$out"
 fi
 
 # laneview.sh's empty-`$json` guard answers review one's finding 4 and, until
