@@ -19,9 +19,12 @@ section before running anything.
 ## Step 1 — tell a real loss from a lane that only looks wrong
 
 Run `lanes.sh` (or `digest.sh`, which wraps it) first. It classifies every
-pane into one of eleven states (`scripts/supervisor/lanes.sh`, header
-comment); two of them are the ones this runbook cares about, and they mean
-different things:
+pane into one of eleven states (`AGENTS.md`/`CLAUDE.md`, repo-layout
+section). `lanes.sh`'s own header comment (lines 7–20) only enumerates ten —
+it omits `scrolled`, which the script still assigns at
+`scripts/supervisor/lanes.sh:328` (agent-supervisor#131 tracks fixing the
+header itself). Two of the eleven are the ones this runbook cares about, and
+they mean different things:
 
 - **`dead`** — no agent process in the pane, and the window name carries no
   task claim (`free-N`, or something restore.sh itself would ever have
