@@ -1,4 +1,6 @@
 #!/bin/bash
+# laneview-summary: one line per lane to stdout -- no daemon, works apart from tmux
+#
 # laneview implementation: plain stdout, no daemon, no tmux plugin.
 #
 # This is the "apart" implementation (agent-dotfiles#178): it has no

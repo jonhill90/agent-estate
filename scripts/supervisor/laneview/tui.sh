@@ -1,4 +1,6 @@
 #!/bin/bash
+# laneview-summary: the interactive renderer -- a curses screen, select a lane, enter jumps to it
+#
 # laneview implementation: a curses TUI Jon owns -- no third-party program,
 # no daemon, nothing running when it is not on screen.
 #

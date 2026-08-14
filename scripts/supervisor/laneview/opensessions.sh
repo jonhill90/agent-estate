@@ -1,4 +1,6 @@
 #!/bin/bash
+# laneview-summary: a tmux sidebar pane via OpenSessions -- needs its daemon and TPM plugin running
+#
 # laneview implementation: push lane state into an OpenSessions tmux
 # sidebar (github.com/Ataraxy-Labs/opensessions), via its documented
 # HTTP API.
