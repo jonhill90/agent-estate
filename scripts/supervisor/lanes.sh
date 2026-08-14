@@ -75,6 +75,8 @@ LANES_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$LANES_HERE/input-box.sh"
 # shellcheck source=./poller-window.sh
 . "$LANES_HERE/poller-window.sh"
+# shellcheck source=./session-defaults.sh
+. "$LANES_HERE/session-defaults.sh"
 
 # agent-dotfiles#201: every harness-specific shape this file used to hold as
 # a literal now lives in its own file under harness/ -- lanes.sh asks the
@@ -93,7 +95,7 @@ LANES_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./harness-registry.sh
 . "$LANES_HERE/harness-registry.sh"
 
-SESSION="${2:-${LANES_SESSION:-agent-dotfiles}}"
+SESSION="${2:-$(lanes_session_or_default)}"
 MODE="${1:-}"
 case "$MODE" in
   --free|--blocked|--json) ;;

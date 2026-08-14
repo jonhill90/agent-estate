@@ -621,6 +621,7 @@ grep -qi 'POLLER-RESTART-REQUESTED' "$S/advance-live.log" 2>/dev/null && ok "the
 GATE_MUT="$D3/prompt-gate"; mkdir -p "$GATE_MUT/scripts/supervisor"
 cp "$ADVANCE" "$GATE_MUT/scripts/supervisor/advance-live.sh"
 cp "$HERE/../../scripts/supervisor/poller-window.sh" "$GATE_MUT/scripts/supervisor/poller-window.sh"
+cp "$HERE/../../scripts/supervisor/session-defaults.sh" "$GATE_MUT/scripts/supervisor/session-defaults.sh"
 chmod +x "$GATE_MUT/scripts/supervisor/advance-live.sh" "$GATE_MUT/scripts/supervisor/poller-window.sh"
 
 S_GATE=$(mktemp -d)
@@ -653,6 +654,7 @@ grep -qi 'poller-recover.sh exists but is not executable' "$S_GATE2/advance-live
 MUT="$D3/mutant"; mkdir -p "$MUT/scripts/supervisor"
 cp "$ADVANCE" "$MUT/scripts/supervisor/advance-live.sh"
 cp "$HERE/../../scripts/supervisor/poller-window.sh" "$MUT/scripts/supervisor/poller-window.sh"
+cp "$HERE/../../scripts/supervisor/session-defaults.sh" "$MUT/scripts/supervisor/session-defaults.sh"
 patch_rc=0
 python3 - "$MUT/scripts/supervisor/poller-window.sh" <<'PY' || patch_rc=$?
 import sys

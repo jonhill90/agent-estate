@@ -234,7 +234,7 @@ fi
 # happens to be doing. A test that depends on that is not a test.
 G="$D/gitrepo"; mkdir -p "$G/scripts/supervisor"
 cp "$HERE/../../scripts/supervisor/watchdog.sh" "$G/scripts/supervisor/"
-for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
+for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh session-defaults.sh; do
   cp "$HERE/../../scripts/supervisor/$dep" "$G/scripts/supervisor/" 2>/dev/null
 done
 # The harness adapters are part of what watchdog.sh needs to decide anything
@@ -323,7 +323,7 @@ SRC="$A/src"
 git -C "$SRC" config user.email t@e.com; git -C "$SRC" config user.name T
 git -C "$SRC" checkout -q -b main
 mkdir -p "$SRC/scripts/supervisor"
-for f in watchdog.sh advance-live.sh poller-window.sh sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
+for f in watchdog.sh advance-live.sh poller-window.sh session-defaults.sh sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
   cp "$HERE/../../scripts/supervisor/$f" "$SRC/scripts/supervisor/"
 done
 cp -R "$HERE/../../scripts/supervisor/harness" "$SRC/scripts/supervisor/"
@@ -718,7 +718,7 @@ fi
 
 MUT_CHILD=$(mktemp -d); mkdir -p "$MUT_CHILD/scripts/supervisor"
 cp "$WATCHDOG" "$MUT_CHILD/scripts/supervisor/watchdog.sh"
-for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh; do
+for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh session-defaults.sh; do
   cp "$HERE/../../scripts/supervisor/$dep" "$MUT_CHILD/scripts/supervisor/" 2>/dev/null
 done
 cp -R "$HERE/../../scripts/supervisor/harness" "$MUT_CHILD/scripts/supervisor/" 2>/dev/null
@@ -782,7 +782,7 @@ fi
 # the brief names. The duplicate assertions above would go red.
 MUT=$(mktemp -d); mkdir -p "$MUT/scripts/supervisor"
 cp "$WATCHDOG" "$MUT/scripts/supervisor/watchdog.sh"
-for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh; do
+for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh session-defaults.sh; do
   cp "$HERE/../../scripts/supervisor/$dep" "$MUT/scripts/supervisor/" 2>/dev/null
 done
 cp -R "$HERE/../../scripts/supervisor/harness" "$MUT/scripts/supervisor/" 2>/dev/null
@@ -912,7 +912,7 @@ not_sent "no /loop delivered into a busy copilot pane" "$D/w"
 #    is missing beside watchdog.sh -- a partial deploy, a copied file -- the
 #    probe must say so and assume busy rather than resurrect the old literal.
 D=$(mktemp -d); mkdir -p "$D/partial/scripts/supervisor"
-for f in watchdog.sh sleepcheck.py watchdog_notify.py loop-tick.md; do
+for f in watchdog.sh session-defaults.sh sleepcheck.py watchdog_notify.py loop-tick.md; do
   cp "$HERE/../../scripts/supervisor/$f" "$D/partial/scripts/supervisor/" 2>/dev/null
 done
 rm -rf "$D/pw"; mkdir -p "$D/pw" "$D/pw/transcripts"
@@ -935,7 +935,7 @@ not_sent "a missing harness registry receives no keystrokes" "$D/pw"
 launchd_gate_run() { # launchd_gate_run <workdir> <poller-recover-state>
   local root="$1" state="$2" home="$1/home"
   rm -rf "$root"; mkdir -p "$root/app/scripts/supervisor" "$home" "$home/.local/state/agent-dotfiles-supervisor/transcripts"
-  for f in watchdog.sh sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
+  for f in watchdog.sh session-defaults.sh sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
     cp "$HERE/../../scripts/supervisor/$f" "$root/app/scripts/supervisor/" 2>/dev/null
   done
   cp -R "$HERE/../../scripts/supervisor/harness" "$root/app/scripts/supervisor/" 2>/dev/null

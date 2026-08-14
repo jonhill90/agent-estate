@@ -29,7 +29,7 @@
 #                        [--harness NAME] [--cwd DIR] [--add-lanes] [--dry-run]
 #
 #   --session NAME  tmux session to create; default $LANES_SESSION or
-#                   agent-dotfiles. Must match what lanes.sh/dispatch.sh read.
+#                   agent-supervisor. Must match what lanes.sh/dispatch.sh read.
 #   --lanes N       total windows including the supervisor; default 10.
 #   --agent CMD     command started in each lane; default $LANES_AGENT_CMD or
 #                   `claude`. Use `copilot` / `codex` at a site without Claude.
@@ -52,7 +52,10 @@
 
 set -euo pipefail
 
-SESSION="${LANES_SESSION:-agent-dotfiles}"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
+SESSION="$(lanes_session_or_default)"
 LANES=10
 AGENT_CMD="${LANES_AGENT_CMD:-claude}"
 HARNESS=""

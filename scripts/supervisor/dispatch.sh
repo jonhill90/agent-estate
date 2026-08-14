@@ -80,7 +80,9 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/input-box.sh"
 # shellcheck source=./harness-registry.sh
 . "$HERE/harness-registry.sh"
-SESSION="${LANES_SESSION:-agent-dotfiles}"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
+SESSION="$(lanes_session_or_default)"
 
 # `--reviews-pr <PR>` is pulled out wherever it appears rather than bound to a
 # fixed position: every other argument here is positional and some of them

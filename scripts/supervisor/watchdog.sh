@@ -43,11 +43,11 @@ set -uo pipefail
 PATH="${SUPERVISOR_PATH:-${PATH:+$PATH:}/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:$HOME/.local/bin}"
 export PATH
 
-# Overridable so the script is testable and so a second lane can
-# reuse it. Hardcoding the target was raised in review as both a
-# portability and an untestability problem.
-PANE="${SUPERVISOR_PANE:-agent-dotfiles:1.1}"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
+# Overridable so the script is testable and so a second lane can reuse it.
+PANE="${SUPERVISOR_PANE:-$(lanes_session_or_default):1.1}"
 # Runtime state (logs, status, briefs) stays outside the repo; the CODE
 # lives here and is versioned and tested. Splitting them was the point of
 # moving this file in: an untracked shell script that the whole loop
@@ -704,6 +704,7 @@ advance_on_exit() {
   copy="$copy_dir/advance-live.sh"
   cp "$HERE/advance-live.sh" "$copy" 2>/dev/null || { rm -rf "$copy_dir" 2>/dev/null; return $rc; }
   cp "$HERE/poller-window.sh" "$copy_dir/poller-window.sh" 2>/dev/null || { rm -rf "$copy_dir" 2>/dev/null; return $rc; }
+  cp "$HERE/session-defaults.sh" "$copy_dir/session-defaults.sh" 2>/dev/null || { rm -rf "$copy_dir" 2>/dev/null; return $rc; }
   # -p: poller-recover.sh is exec'd directly (not sourced via bash), so its
   # executable bit must survive the copy, not fall through the umask.
   if ! cp -p "$HERE/poller-recover.sh" "$copy_dir/poller-recover.sh" 2>/dev/null; then
@@ -764,9 +765,9 @@ if [ -f "$HISTORY" ]; then
     && mv -f "$HISTORY.tmp" "$HISTORY"
 fi
 
-if ! tmux has-session -t agent-dotfiles 2>/dev/null; then
-  report no_session "tmux session 'agent-dotfiles' does not exist"
-  log "no agent-dotfiles session"; exit 0
+if ! tmux has-session -t "$(lanes_session_or_default)" 2>/dev/null; then
+  report no_session "tmux session '$(lanes_session_or_default)' does not exist"
+  log "no $(lanes_session_or_default) session"; exit 0
 fi
 
 pane=$(tmux capture-pane -p -t "$PANE" -S -6 2>/dev/null) || {

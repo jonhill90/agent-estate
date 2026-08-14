@@ -56,7 +56,7 @@ SRC="$A/src"
 git -C "$SRC" config user.email t@e.com; git -C "$SRC" config user.name T
 git -C "$SRC" checkout -q -b main
 mkdir -p "$SRC/scripts/supervisor"
-for f in watchdog.sh advance-live.sh poller-window.sh poller-recover.sh \
+for f in watchdog.sh advance-live.sh poller-window.sh poller-recover.sh session-defaults.sh \
          sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
   cp "$SUP/$f" "$SRC/scripts/supervisor/"
 done
@@ -241,6 +241,8 @@ end = text.index(marker_end)
 assert start != -1 and end != -1, "copy-step block not found -- watchdog.sh shape changed"
 replacement = (
     '  cp "$HERE/poller-window.sh" "$copy_dir/poller-window.sh" 2>/dev/null || '
+    '{ rm -rf "$copy_dir" 2>/dev/null; return $rc; }\n  '
+    'cp "$HERE/session-defaults.sh" "$copy_dir/session-defaults.sh" 2>/dev/null || '
     '{ rm -rf "$copy_dir" 2>/dev/null; return $rc; }\n  '
 )
 open(path, "w").write(text[:start] + replacement + text[end:])

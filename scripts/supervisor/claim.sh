@@ -46,7 +46,9 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SESSION="${LANES_SESSION:-agent-dotfiles}"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
+SESSION="$(lanes_session_or_default)"
 
 CMD="${1:-}"
 case "$CMD" in

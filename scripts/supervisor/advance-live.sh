@@ -127,12 +127,14 @@
 #                                 match inbox-poll.sh's own default/override
 #   LANES_SESSION / LANES_POLLER_WINDOW  same poller-window recognition knobs
 #                                        lanes.sh and poller-recover.sh use;
-#                                        defaults agent-dotfiles / inbox-poll
+#                                        defaults agent-supervisor / inbox-poll
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./poller-window.sh
 . "$HERE/poller-window.sh"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
 
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 LIVE="${1:-${SUPERVISOR_LIVE:-$STATE/live}}"
@@ -405,7 +407,7 @@ watchdog_stale_check() {
 # by lanes.sh and poller-recover.sh so the three call sites cannot drift.
 INBOX_POLL_STATUS_PATH="${SUPERVISOR_INBOX_POLL_STATUS:-$STATE/inbox-poll.status}"
 INBOX_POLL_RESTART_FLAG="${INBOX_POLL_RESTART_FLAG:-$STATE/.inbox-poll-restart-requested}"
-INBOX_POLL_SESSION="${LANES_SESSION:-agent-dotfiles}"
+INBOX_POLL_SESSION="$(lanes_session_or_default)"
 INBOX_POLL_RELAUNCH_WAIT_SECONDS="${INBOX_POLL_RELAUNCH_WAIT_SECONDS:-45}"
 
 # Echoes "session:@windowid" for the poller window in $INBOX_POLL_SESSION.

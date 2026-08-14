@@ -88,10 +88,13 @@
 
 set -uo pipefail
 
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
 WINDOW="${1:-}"
 EXPECTED_NAME="${2:-}"
 CHANNEL="${3:-}"
-SESSION="${4:-${LANES_SESSION:-agent-dotfiles}}"
+SESSION="${4:-$(lanes_session_or_default)}"
 
 if [ -z "$WINDOW" ] || [ -z "$EXPECTED_NAME" ] || [ -z "$CHANNEL" ]; then
   sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2

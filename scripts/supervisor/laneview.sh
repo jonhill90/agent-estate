@@ -11,7 +11,7 @@
 #
 # Usage: laneview.sh <impl> [session]
 #   impl:    the basename of a script under laneview/, e.g. text, opensessions
-#   session: tmux session to report on (default: agent-dotfiles)
+#   session: tmux session to report on (default: agent-supervisor)
 #
 # Adding a renderer is a new file under laneview/ that names every state
 # lanes.sh ships (laneview/README.md rule 4, enforced by
@@ -61,7 +61,9 @@ if [ $# -lt 1 ]; then
 fi
 
 IMPL="$1"
-SESSION="${2:-agent-dotfiles}"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
+SESSION="${2:-$(lanes_session_or_default)}"
 IMPL_SCRIPT="$HERE/laneview/$IMPL.sh"
 
 if [ ! -x "$IMPL_SCRIPT" ]; then

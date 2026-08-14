@@ -122,8 +122,10 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./poller-window.sh
 . "$HERE/poller-window.sh"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
 
-SESSION="${1:-${LANES_SESSION:-agent-dotfiles}}"
+SESSION="${1:-$(lanes_session_or_default)}"
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 LIVE="${SUPERVISOR_LIVE:-$STATE/live}"
 WINDOW="$POLLER_WINDOW_NAME"

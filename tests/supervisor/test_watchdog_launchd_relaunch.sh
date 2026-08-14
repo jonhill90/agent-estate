@@ -91,7 +91,7 @@ SRC="$A/src"
 git -C "$SRC" config user.email t@e.com; git -C "$SRC" config user.name T
 git -C "$SRC" checkout -q -b main
 mkdir -p "$SRC/scripts/supervisor"
-for f in watchdog.sh advance-live.sh poller-window.sh poller-recover.sh \
+for f in watchdog.sh advance-live.sh poller-window.sh poller-recover.sh session-defaults.sh \
          sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
   cp "$SUP/$f" "$SRC/scripts/supervisor/"
 done
