@@ -854,11 +854,10 @@ class StrandedClaimRecoveryIsReachable(unittest.TestCase):
         """agent-supervisor#17. `cancel-open-task --lane 2` against a lane id
         that does not exist used to return `{"cancelled":null}` -- byte
         identical to the no-op above, a real lane with nothing outstanding.
-        An unknown lane and an empty lane are different facts, and this verb
-        DISCARDS records: an operator reading `null` as "nothing to cancel"
-        on a typo'd id has no signal anything went wrong. It must now error,
-        and the error must not be exit-0 JSON indistinguishable from the
-        no-op case above."""
+        An unknown lane and an empty lane are different facts: an operator
+        reading `null` as "nothing to cancel" on a typo'd id has no signal
+        anything went wrong. It must now error, and the error must not be
+        exit-0 JSON indistinguishable from the no-op case above."""
         with tempfile.TemporaryDirectory() as root:
             self._lane(root)
             proc = self._run(root, "cancel-open-task", "--lane", "no-such-lane")
@@ -873,7 +872,8 @@ class StrandedClaimRecoveryIsReachable(unittest.TestCase):
         """agent-supervisor#36 (second issue comment): the codex harness's
         completions land as a `ledger-claim:<lane>:<token>` row, not a task
         row, so the only recovery verb that used to work on one was
-        `cancel-open-task` -- which DISCARDS a genuinely completed review.
+        `cancel-open-task` -- which records a genuinely completed review as
+        cancelled.
         `--lane` alone must resolve that row and mark it complete, mirroring
         `cancel_open_task`'s own "whatever owns this lane" lookup but writing
         the honest outcome instead of a cancellation."""
@@ -1021,6 +1021,32 @@ class IssueLaneCliTest(unittest.TestCase):
             self.assertEqual(
                 {"issue": "195", "known": True, "lane": "t:3", "task": "ad195-scrub-secrets"}, result
             )
+
+    def test_the_answer_survives_cancel_open_task_freeing_the_lane(self):
+        """agent-supervisor#79: `cancel-open-task` is a lane-reconcile verb,
+        but review authorship is still a durable fact. Cancelling frees the
+        lane by making the task terminal; it must not erase the task/source
+        rows that `dispatch.sh --reviews-pr` reads through `issue-lane`."""
+        with tempfile.TemporaryDirectory() as root:
+            self._record_dispatch(root, lane="t:3", task="as79-reopen", issue=79)
+            proc = subprocess.run(
+                [
+                    sys.executable, str(SUPERVISOR_DIR / "cli.py"),
+                    "--state-dir", root, "cancel-open-task", "--lane", "t:3",
+                ],
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertTrue(Ledger(Path(root)).lane_available("t:3"), "cancel must still free the lane")
+
+            result = self._issue_lane(root, 79)
+
+            self.assertEqual("t:3", result["lane"], "authorship must outlive cancellation")
+            ledger = Ledger(Path(root))
+            self.assertEqual("cancelled", ledger.get_task("as79-reopen")["status"])
+            self.assertEqual("cancelled", ledger.get_source_task("as79-reopen")["status"])
 
     def test_the_answer_never_depends_on_the_branch_the_pr_under_review_used(self):
         """The whole point of #35: this reads back what `record_dispatch`
