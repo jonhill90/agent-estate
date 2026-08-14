@@ -239,10 +239,30 @@ is_service_pane() {
 # every busy pane on every tick. A live turn's own elapsed footer already
 # proves liveness without a `ps` call; this only has to answer the question
 # for the rare pane that both looks busy and has stopped repainting.
+#
+# review of the first cut of this function (PR #92): `$pid` here is
+# `#{pane_pid}`, tmux's handle on the pane's FIRST process -- per the module
+# comment above and `is_service_pane`, that is the login shell, and the
+# harness (claude.exe, codex, ...) runs as ITS direct child for as long as
+# the harness is alive at all, busy or wedged. A version that asked "does
+# $pid have ANY live child" was therefore true whenever the harness process
+# had not exited, which is every genuinely wedged live agent too -- it
+# narrowed `hung` to "the harness process itself died", not "the pane is
+# waiting on work", making hung unreachable for exactly the frozen-but-alive
+# shape it exists to catch. What actually distinguishes waiting from wedged
+# is whether the HARNESS has live children of ITS OWN -- a grandchild of the
+# pane -- since that is where a spawned test suite or Monitor'd task
+# actually runs; the harness being alive is not that evidence.
 pane_has_live_children() {
-  local pid="${1:-}"
+  local pid="${1:-}" tree kids k
   [ -n "$pid" ] || return 1
-  ps -o ppid= -ax 2>/dev/null | grep -qw "$pid"
+  tree=$(ps -o pid=,ppid= -ax 2>/dev/null) || return 1
+  [ -n "$tree" ] || return 1
+  kids=$(awk -v p="$pid" '$2==p{print $1}' <<<"$tree")
+  for k in $kids; do
+    awk -v p="$k" '$2==p{f=1} END{exit !f}' <<<"$tree" && return 0
+  done
+  return 1
 }
 
 now_epoch=$(date +%s)

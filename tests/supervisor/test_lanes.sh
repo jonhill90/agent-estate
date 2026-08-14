@@ -55,13 +55,18 @@ cp "$HERE/stubs/ps-lanes" "$D/bin/ps"
 # process (#154), which is what separates a service window from a dead lane.
 # Omitted, it is `-zsh` -- what every real lane measured as -- so every
 # pre-existing row is untouched by that too.
-# The 9th column is also optional and models whether the pane's process has a
-# live CHILD (#83) -- what `ps -o ppid= -ax` would show for a pane that is
-# genuinely idle at the prompt while a background command it started is still
-# running, versus one that has actually stopped. `child` means a live child
-# exists; omitted (every pre-existing row) means it does not, so every row
-# that predates #83 is classified exactly as it was before this column
-# existed.
+# The 9th column is also optional and models whether the pane's HARNESS
+# process (claude.exe, codex, ...) has a live child of its OWN (#83, #92) --
+# a grandchild of the pane -- which is what `pane_has_live_children` in
+# lanes.sh now walks the process tree for. `child` means a live grandchild
+# exists (a background test suite, a Monitor'd task); omitted (every
+# pre-existing row) means it does not, so every row that predates #83 is
+# classified exactly as it was before this column existed. PR #92's own
+# REQUEST CHANGES review found that a pane's login-shell process ALWAYS has
+# the harness itself as a live direct child for as long as the harness has
+# not exited -- busy, waiting, or genuinely wedged alike -- so stubs/ps-lanes
+# models three tiers (pane -> harness -> work), not two, and only a row
+# marked `child` here gets the third tier.
 cat > "$D/fixture" <<'FIX'
 1|arch|claude.exe|❯ ready|1|0
 2|w-busy|claude.exe|esc to interrupt 3s|1|0
@@ -108,6 +113,9 @@ cat > "$D/fixture" <<'FIX'
 42|w-codex-ready-tilde|codex|  gpt-5.5 medium · ~/source/repos/Personal/agent-dotfiles|1|0
 43|inbox-poll|zsh|poller process exiting\n\n❯ |1|0||NONE
 44|inbox-poll|zsh|❯ |1|0
+46|w-shell-busy-live-child|claude.exe|⏵⏵ bypass permissions on · 1 shell · ← 1 agent · ↓ to manage|900|0||-zsh|child
+47|w-codex-hung-live-child|codex|• Working (9s • esc to interrupt)\n\n› Improve documentation in @filename\n\n  gpt-5.5 medium · /repo/path|900|0||-zsh|child
+48|w-codex-hung|codex|• Working (9s • esc to interrupt)\n\n› Improve documentation in @filename\n\n  gpt-5.5 medium · /repo/path|900|0
 FIX
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
 
@@ -124,6 +132,24 @@ want "a turn frozen across samples is hung, not busy"    w-hung    hung    "$out
 # with a background test suite still running) -- it must read busy, not
 # hung.
 want "a frozen pane with a live child process is busy, not hung (#83)" w-hung-live-child busy "$out"
+# PR #92's REQUEST CHANGES review: the harness process itself is ALWAYS a
+# live direct child of the pane while alive, busy or wedged alike, so a
+# check that stops at "does the pane have any live child" can never move a
+# lane OUT of hung -- it would call every alive harness busy. w-shell-busy
+# below carries the #207 footer chrome claiming a registered background
+# shell (`↓ to manage`, `1 shell`) with NO live grandchild in the process
+# tree -- the shell it claims has already exited without being
+# deregistered -- and must still read hung: the kernel's process tree, not
+# the harness's own footer text, is the authority. w-shell-busy-live-child
+# is the SAME footer with a genuine grandchild and must read busy.
+want "a registered background shell with no live grandchild is hung, not busy (#83, text is not evidence)" w-shell-idle-hung hung "$out"
+want "a registered background shell with a live grandchild is busy, matching the real work (#83)" w-shell-busy-live-child busy "$out"
+# Harness-agnostic: `pane_has_live_children` reads the kernel process tree,
+# not any harness's own footer chrome, so the same distinction must hold for
+# codex (HARNESS_BUSY_TAIL=4, a different busy shape entirely) and not just
+# for claude.exe.
+want "a frozen codex pane with a live grandchild is busy, not hung (#83, harness-agnostic)" w-codex-hung-live-child busy "$out"
+want "a genuinely wedged codex pane is still hung, not busy (#83, harness-agnostic)" w-codex-hung hung "$out"
 want "a pane running a shell is dead, not idle"          w-dead    dead    "$out"
 # A Claude-specific probe must not be applied to other harnesses: on
 # 2026-08-11 a healthy idle Copilot pane was called `hung` because that
@@ -722,9 +748,15 @@ import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
 marker = '''pane_has_live_children() {
-  local pid="${1:-}"
+  local pid="${1:-}" tree kids k
   [ -n "$pid" ] || return 1
-  ps -o ppid= -ax 2>/dev/null | grep -qw "$pid"
+  tree=$(ps -o pid=,ppid= -ax 2>/dev/null) || return 1
+  [ -n "$tree" ] || return 1
+  kids=$(awk -v p="$pid" '$2==p{print $1}' <<<"$tree")
+  for k in $kids; do
+    awk -v p="$k" '$2==p{f=1} END{exit !f}' <<<"$tree" && return 0
+  done
+  return 1
 }'''
 replacement = '''pane_has_live_children() {
   return 1
@@ -750,6 +782,57 @@ else
   fi
 fi
 rm -f "$MUTANT83"
+trap - EXIT
+
+# --- agent-supervisor#92 mutation check: reintroduce the exact reviewer-
+# flagged bug -- checking whether the PANE has any live child (the harness
+# itself, always true while it is alive) instead of whether the HARNESS has
+# a live child of its own (real background work). PR #92's REQUEST CHANGES
+# review demonstrated this narrows `hung` to "the harness process exited",
+# which is not the state `hung` represents -- a genuinely wedged w-hung
+# lane, which has the harness alive with no work under it, would be
+# misreported busy. Reproduced on demand rather than trusted from the review
+# comment, per this repo's own discipline: an instrument that cannot show a
+# thing failing looks exactly like the thing never having been true.
+MUTANT92="$LANES_DIR/.lanes-mutant-92.sh"
+trap 'rm -f "$MUTANT92"' EXIT
+patch92_rc=0
+python3 - "$LANES" "$MUTANT92" <<'PY' || patch92_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''pane_has_live_children() {
+  local pid="${1:-}" tree kids k
+  [ -n "$pid" ] || return 1
+  tree=$(ps -o pid=,ppid= -ax 2>/dev/null) || return 1
+  [ -n "$tree" ] || return 1
+  kids=$(awk -v p="$pid" '$2==p{print $1}' <<<"$tree")
+  for k in $kids; do
+    awk -v p="$k" '$2==p{f=1} END{exit !f}' <<<"$tree" && return 0
+  done
+  return 1
+}'''
+replacement = '''pane_has_live_children() {
+  local pid="${1:-}"
+  [ -n "$pid" ] || return 1
+  ps -o pid=,ppid= -ax 2>/dev/null | awk -v p="$pid" '$2==p{f=1} END{exit !f}'
+}'''
+assert text.count(marker) == 1, "expected exactly one pane_has_live_children body, found %d -- file shape changed" % text.count(marker)
+open(dst, "w").write(text.replace(marker, replacement, 1))
+PY
+if [ "$patch92_rc" -ne 0 ]; then
+  echo "  FAIL setup: could not patch a copy of lanes.sh with the PR #92 review's flagged one-level check (exit $patch92_rc)"; fail=$((fail+1));
+else
+  echo "  ok   setup: patched a copy of lanes.sh with the pane-level-only live-child check"; pass=$((pass+1));
+  chmod +x "$MUTANT92"
+  mutant92_out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$MUTANT92" 2>&1)
+  if grep -qE "^[0-9]+ +w-hung +[^ ]+ +busy$" <<<"$mutant92_out"; then
+    echo "  ok   mutation confirmed: a pane-level-only check misreports a genuinely wedged lane busy, the exact bug PR #92's review found"; pass=$((pass+1));
+  else
+    echo "  FAIL a pane-level-only live-child check did not reproduce the reviewer-flagged bug for w-hung:"; sed 's/^/       /' <<<"$mutant92_out"; fail=$((fail+1));
+  fi
+fi
+rm -f "$MUTANT92"
 trap - EXIT
 
 echo "  $pass passed, $fail failed"
