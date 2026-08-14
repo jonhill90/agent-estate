@@ -1950,7 +1950,7 @@ printf '196|| review PR #350, same-author case\n' >> "$D/issues"
 # dispatch's own slug ("scrub-secrets", task ad195-scrub-secrets) -- so the
 # widened branch-name fallback, if it fired, would resolve to a DIFFERENT,
 # unknown task (ad195-public-scrub) and find nothing. Only the ledger's
-# issue-lane lookup can resolve this one correctly; the mutation below
+# author-issue-lane lookup can resolve this one correctly; the mutation below
 # proves that.
 printf '350|Fixes #195|chore/195-public-scrub\n' >> "$D/prs"
 
@@ -1999,8 +1999,8 @@ log=$(tmuxlog)
 want_contains "and the review lands on the OTHER free lane, t:4 (target t:@104)" "send-keys -t t:@104" "$log"
 want_missing "never on the author's lane (t:3, target t:@103)" "send-keys -t t:@103 " "$log"
 
-# MUTATION: break the ledger issue-lane lookup (return unknown for every
-# issue) and confirm case 2 goes red -- with issue-lane silenced, dispatch.sh
+# MUTATION: break the ledger author-issue-lane lookup (return unknown for every
+# issue) and confirm case 2 goes red -- with author-issue-lane silenced, dispatch.sh
 # falls through to the chore/ branch regex, which resolves to nothing (only
 # `lane/` was ever understood there before this brief widened it, and even
 # widened, plain regex matching is not what proves the LEDGER decided this),
@@ -2012,19 +2012,19 @@ import os
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = 'ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" issue-lane --issue "$candidate_issue" 2>&1) || continue'
-assert text.count(marker) == 1, "issue-lane lookup not found or not unique -- script shape changed"
-text = text.replace(marker, 'ISSUE_JSON=\'{"known":false}\'  # MUTATED: ledger issue-lane never consulted', 1)
+marker = 'ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" author-issue-lane --issue "$candidate_issue" --head-ref "$HEAD_REF" 2>&1) || continue'
+assert text.count(marker) == 1, "author-issue-lane lookup not found or not unique -- script shape changed"
+text = text.replace(marker, 'ISSUE_JSON=\'{"known":false}\'  # MUTATED: ledger author-issue-lane never consulted', 1)
 here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
 assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
 text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
 open(dst, "w").write(text)
 PY
 if [ "$patch_rc" -ne 0 ]; then
-  bad "setup: patched a copy of dispatch.sh whose issue-lane lookup is silenced" \
+  bad "setup: patched a copy of dispatch.sh whose author-issue-lane lookup is silenced" \
     "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
 else
-  ok "setup: patched a copy of dispatch.sh whose issue-lane lookup is silenced"
+  ok "setup: patched a copy of dispatch.sh whose author-issue-lane lookup is silenced"
   chmod +x "$MUTATED_35"
   cat > "$D/lanes" <<'FIX'
 1|arch|claude.exe|❯ ready|1|0
@@ -2036,7 +2036,7 @@ FIX
   LEDGER_STATE="$D/state-35-mutant" run 199 scrub-secrets-3 "$D/brief.md" acme/agent-dotfiles "$REPO" >/dev/null
   LEDGER_STATE="$D/state-35-mutant" ledger record-completion --task ad199-scrub-secrets-3 --note done >/dev/null
   # Same divergence again: the branch slug does not match the authoring
-  # dispatch's real slug, so with issue-lane silenced NEITHER the ledger
+  # dispatch's real slug, so with author-issue-lane silenced NEITHER the ledger
   # NOR the branch-name fallback can resolve this -- it must refuse.
   printf '352|Fixes #199|chore/199-public-scrub-3\n' >> "$D/prs"
   out=$(DISPATCH_SCRIPT="$MUTATED_35" LEDGER_STATE="$D/state-35-mutant" \

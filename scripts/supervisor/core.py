@@ -958,6 +958,74 @@ class Ledger:
             ).fetchone()
         return self._dict(row)
 
+    @staticmethod
+    def _task_looks_like_review(task_id, summary):
+        # `task_id` and `summary` are joined with a literal space before
+        # matching, so a task id whose "review"/"rev" run sits at the id's
+        # own end (e.g. "as76-rev73b") is followed by that space, not by
+        # end-of-string or a `-`/`_` -- the trailing boundary must accept
+        # whitespace too, or an id-only match like that silently never fires
+        # unless the summary text happens to say "review" as well.
+        text = f"{task_id or ''} {summary or ''}".lower()
+        return bool(
+            re.search(r"(^|[-_])(review|rev)[-_0-9a-z]*($|[-_\s])", text)
+            or re.search(r"\breview(ing|s)?\s+(pr|pull request|#[0-9]+)", text)
+        )
+
+    # `dispatch.sh`/`worktree.sh` mint every branch as `<prefix>/<issue>-<slug>`
+    # (or a hand-pushed `fix|feat|chore|docs/<issue>-<slug>`) and the SAME
+    # dispatch records that task under id `<window-prefix><issue>-<slug>` --
+    # see dispatch.sh's own comment above `AUTHOR_LANE=""`. `<issue>-<slug>`
+    # is therefore a suffix of the authoring task's id, deterministically, for
+    # every dispatch that followed the convention.
+    _HEAD_REF_RE = re.compile(r"^(?:lane|fix|feat|chore|docs)/([0-9]+)-(.+)$")
+
+    def get_author_task_for_issue(self, issue_ref, head_ref=None):
+        """The task whose dispatch produced this issue's current PR.
+
+        agent-supervisor#76: a review task must never be eligible as the
+        author of the PR it reviewed.
+
+        agent-supervisor#77: position in the task list (first, or most
+        recent) is not a reliable signal of authorship either -- an issue
+        re-dispatched after a prior attempt was abandoned has more than one
+        non-review task, and neither "first" nor "last" is right in general;
+        the reviewer reproduced the "first" rule picking a stale, abandoned
+        attempt over the task that actually produced the PR. `head_ref`, the
+        PR's own head branch, resolves this the way the review asked: by
+        what actually produced the branch, not by ordering. When it is
+        absent, or it does not disambiguate, this is only safe to answer
+        when exactly one non-review task exists -- anything else is a
+        genuine "don't know", returned as `None` rather than guessed at.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT tasks.* FROM tasks
+                JOIN source_tasks ON source_tasks.id = tasks.id
+                WHERE source_tasks.source_kind = 'issue' AND source_tasks.source_ref = ?
+                ORDER BY tasks.created_at ASC, tasks.id ASC
+                """,
+                (str(issue_ref),),
+            ).fetchall()
+        candidates = [
+            self._dict(row) for row in rows if not self._task_looks_like_review(row["id"], row["summary"])
+        ]
+        if not candidates:
+            return None
+
+        if head_ref:
+            match = self._HEAD_REF_RE.match(head_ref)
+            if match and match.group(1) == str(issue_ref):
+                suffix = f"{match.group(1)}-{match.group(2)}"
+                by_branch = [task for task in candidates if task["id"].endswith(suffix)]
+                if len(by_branch) == 1:
+                    return by_branch[0]
+
+        if len(candidates) == 1:
+            return candidates[0]
+        return None
+
     def list_tasks(self):
         with contextlib.closing(self._connect()) as connection:
             rows = connection.execute("SELECT * FROM tasks ORDER BY created_at, id").fetchall()

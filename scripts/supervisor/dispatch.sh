@@ -328,10 +328,10 @@ fi
 # `--reviews-pr`. Ordinary (non-review) dispatches are unaffected -- there is
 # no author to avoid.
 #
-# THE PRIMARY MAPPING (issue -> lane) is `source_tasks.source_ref` (the
+# THE PRIMARY MAPPING (issue -> author lane) is `source_tasks.source_ref` (the
 # issue number `record_dispatch` wrote it as, step 6 below) joined to
-# `tasks.lane` by task id -- see `Ledger.get_task_for_issue`. Neither side
-# comes from a branch name.
+# `tasks.lane` by task id, with review tasks explicitly filtered out -- see
+# `Ledger.get_author_task_for_issue`. Neither side comes from a branch name.
 #
 # THE FALLBACK MAPPING, used only when that lookup is silent, verified
 # against the code that writes both sides of it rather than assumed:
@@ -396,10 +396,11 @@ if [ -n "$REVIEWS_PR" ]; then
   #   2. commit messages: this project's own convention closes issues from
   #      commit trailers too (see this brief's own "Close with `Fixes
   #      #35`"), which a PR body alone would miss.
-  # Each candidate issue number goes to `cli.py issue-lane`, which asks the
-  # ledger which lane was dispatched for that issue -- it never reads a
-  # branch. The first candidate the ledger actually knows about wins:
-  # silence on one candidate is a reason to try the next, not to refuse yet.
+  # Each candidate issue number goes to `cli.py author-issue-lane`, which asks
+  # the ledger which non-review task authored that issue -- it never reads a
+  # branch, and a review task can never become the author. The first candidate
+  # the ledger actually knows about wins: silence on one candidate is a reason
+  # to try the next, not to refuse yet.
   CANDIDATE_ISSUES=$(
     {
       grep -oE '"closingIssuesReferences":\[[^]]*\]' <<<"$PR_JSON" \
@@ -409,7 +410,7 @@ if [ -n "$REVIEWS_PR" ]; then
     } | awk '!seen[$0]++'
   )
   for candidate_issue in $CANDIDATE_ISSUES; do
-    ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" issue-lane --issue "$candidate_issue" 2>&1) || continue
+    ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" author-issue-lane --issue "$candidate_issue" --head-ref "$HEAD_REF" 2>&1) || continue
     if grep -qF '"known":true' <<<"$ISSUE_JSON"; then
       AUTHOR_LANE=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$ISSUE_JSON")
       AUTHOR_TASK=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$ISSUE_JSON")

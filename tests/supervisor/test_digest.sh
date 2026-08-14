@@ -275,7 +275,9 @@ cat > "$OK/fixtures/pr_list.json" <<'S'
   {"number":10,"title":"a commit pushed on top after the review","headRefOid":"add0add0add0add0add0add0add0add0add0add0","headRefName":"b10","mergeStateStatus":"CLEAN"},
   {"number":11,"title":"comment verdict from another lane","headRefOid":"1111111111111111111111111111111111111111","headRefName":"b11","mergeStateStatus":"CLEAN"},
   {"number":12,"title":"comment verdict from author lane","headRefOid":"1212121212121212121212121212121212121212","headRefName":"b12","mergeStateStatus":"CLEAN"},
-  {"number":13,"title":"comment verdict without lane stamp","headRefOid":"1313131313131313131313131313131313131313","headRefName":"b13","mergeStateStatus":"CLEAN"}
+  {"number":13,"title":"comment verdict without lane stamp","headRefOid":"1313131313131313131313131313131313131313","headRefName":"b13","mergeStateStatus":"CLEAN"},
+  {"number":14,"title":"author lane must not drift to newer reviews","headRefOid":"1414141414141414141414141414141414141414","headRefName":"fix/214-author-drift","mergeStateStatus":"CLEAN"},
+  {"number":15,"title":"re-dispatch: head ref, not first-attempt position, names the author","headRefOid":"1515151515151515151515151515151515151515","headRefName":"lane/215-second-attempt","mergeStateStatus":"CLEAN"}
 ]
 S
 cat > "$OK/fixtures/run_b1.json" <<'S'
@@ -413,11 +415,11 @@ mkpatch add0add0add0add0add0add0add0add0add0add0 extra 10 "new line"
 
 # agent-supervisor#63: every lane posts through the same GitHub login, so
 # comment.author.login == pr.author.login is a constant. These PRs exercise
-# lane identity instead: the PR author comes from the ledger's issue-lane
-# lookup, and the reviewing lane comes from an explicit Review-Lane stamp in
-# the verdict comment. PR13 keeps the #55 behaviour (a `**Verdict:` comment
-# still counts) while refusing to guess independence when the comment has no
-# lane stamp.
+# lane identity instead: the PR author comes from the ledger's author-issue-lane
+# lookup, and the reviewing lane comes from an explicit Review-Lane stamp in the
+# verdict comment. PR13 keeps the #55 behaviour (a `**Verdict:` comment still
+# counts) while refusing to guess independence when the comment has no lane
+# stamp.
 cat > "$OK/fixtures/pr_view_11.json" <<'S'
 {"headRefName":"fix/211-comment-verdict-other-lane","closingIssuesReferences":[{"number":211}],"commits":[]}
 S
@@ -440,6 +442,29 @@ S
 cat > "$OK/fixtures/reviews_13.json" <<'S'
 {"reviews":[],"comments":[
   {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**","createdAt":"2026-08-13T20:59:01Z"}
+],"author":{"login":"jonhill90"}}
+S
+cat > "$OK/fixtures/pr_view_14.json" <<'S'
+{"headRefName":"fix/214-author-drift","closingIssuesReferences":[{"number":214}],"commits":[]}
+S
+cat > "$OK/fixtures/reviews_14.json" <<'S'
+{"reviews":[],"comments":[
+  {"author":{"login":"jonhill90"},"body":"**Verdict: REQUEST CHANGES**\nReview-Lane: t:3","createdAt":"2026-08-13T21:00:01Z"}
+],"author":{"login":"jonhill90"}}
+S
+
+# agent-supervisor#77: the reviewer's own reproduction, through the real
+# digest.sh path. Issue #215 was first attempted on t:3 (abandoned), then
+# re-dispatched to t:7, whose branch actually produced this PR. A reviewer
+# on t:3 -- the STALE lane -- must read independent, because t:3 is not the
+# real author; picking "first non-review task" (the bug) would say t:3 IS
+# the author and wrongly call this comment not independent.
+cat > "$OK/fixtures/pr_view_15.json" <<'S'
+{"headRefName":"lane/215-second-attempt","closingIssuesReferences":[{"number":215}],"commits":[]}
+S
+cat > "$OK/fixtures/reviews_15.json" <<'S'
+{"reviews":[],"comments":[
+  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:3","createdAt":"2026-08-13T21:01:01Z"}
 ],"author":{"login":"jonhill90"}}
 S
 
@@ -548,6 +573,34 @@ python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record
   --command claude --server-id srv --session-id sess --issue 213 --github ownerx/test-repo --harness claude >/dev/null
 python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-completion \
   --task as213-author --note done >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-dispatch \
+  --lane t:3 --task as214-author --summary "#214 author" --pane-id %3 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 214 --github ownerx/test-repo --harness claude >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-completion \
+  --task as214-author --note done >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-dispatch \
+  --lane t:4 --task as214-review-a --summary "#214 review PR #14" --pane-id %4 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 214 --github ownerx/test-repo --harness claude >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-completion \
+  --task as214-review-a --note done >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-dispatch \
+  --lane t:5 --task as214-rev14b --summary "#214 review PR #14 again" --pane-id %5 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 214 --github ownerx/test-repo --harness claude >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-completion \
+  --task as214-rev14b --note done >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-dispatch \
+  --lane t:6 --task as214-review-c --summary "#214 review PR #14 third" --pane-id %6 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 214 --github ownerx/test-repo --harness claude >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-dispatch \
+  --lane t:3 --task as215-first-attempt --summary "#215 first attempt" --pane-id %3 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 215 --github ownerx/test-repo --harness claude >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-completion \
+  --task as215-first-attempt --note abandoned >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-dispatch \
+  --lane t:7 --task as215-second-attempt --summary "#215 re-dispatched" --pane-id %7 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 215 --github ownerx/test-repo --harness claude >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-completion \
+  --task as215-second-attempt --note done >/dev/null
 lane_out=$(PATH="$OK/bin:$PATH" SUPERVISOR_STATE="$LANE_STATE" LANES_SESSION=nosuch \
   DIGEST_REPOS=test-repo DIGEST_OWNER=ownerx GH_STUB_FIXTURES="$OK/fixtures" \
   DIGEST_VERDICT_SOURCE=github \
@@ -573,6 +626,18 @@ chk "PR13 unstamped comment verdict reports independence unknown, not not-indepe
 grep -q "independence unknown" <<<"$(jq -r '.verdict_detail' <<<"$p13")" \
   && ok "PR13 detail says independence unknown" \
   || bad "PR13 detail says independence unknown" "$p13"
+p14=$(lp 14)
+chk "PR14 reviewer lane == original author lane stays not independent after later reviews" \
+  "false" "$(jq -r '.verdict_independent' <<<"$p14")"
+grep -q "NOT independent -- author lane t:3 reviewed its own PR" <<<"$(jq -r '.verdict_detail' <<<"$p14")" \
+  && ok "PR14 detail proves author did not drift to newer review lanes" \
+  || bad "PR14 detail proves author did not drift to newer review lanes" "$p14"
+p15=$(lp 15)
+chk "PR15 (agent-supervisor#77): a review from the STALE first-attempt lane (t:3) reads independent, because the head ref names t:7 as the real author, not the abandoned t:3 attempt" \
+  "true" "$(jq -r '.verdict_independent' <<<"$p15")"
+grep -q "independent -- author lane t:7, reviewer lane t:3" <<<"$(jq -r '.verdict_detail' <<<"$p15")" \
+  && ok "PR15 detail names the head-ref-resolved author lane (t:7), not the stale first attempt (t:3)" \
+  || bad "PR15 detail names the head-ref-resolved author lane" "$p15"
 
 # 12b. agent-dotfiles#218: a review APPROVED at an old SHA must not answer for
 # a head a push has since moved past. This is the failure #218 exists to
