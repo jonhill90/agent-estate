@@ -31,9 +31,10 @@ only one is PyYAML would cost more than the ~80 lines of protocol below.
 ## Cost
 
 Tool definitions are always-on context in every session that loads this
-server. Three tools, one optional argument between them. `--print-tools`
-emits the exact `tools/list` payload so the cost is measurable rather than
-argued about; see the PR for the measurement.
+server. Four tools -- `lanes`, `digest`, `ledger`, `events` -- each wrapping an
+existing entry point. `--print-tools` emits the exact `tools/list` payload so
+the cost is measurable rather than argued about; see the PR for the
+measurement.
 
 ## Write operations
 
