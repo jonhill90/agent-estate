@@ -21,10 +21,13 @@ scripts/supervisor/          the system
   adapter.py                 harness-neutral pane classification
   harness/{claude,codex,copilot}.sh   per-harness shapes
   laneview/                  two viewers, neither required
+  look.py                    let an agent SEE a pane: capture / png / navigate / frames
+  termshot.py                ANSI-to-SVG rasteriser look.py's `png` renders through
+  ui-evidence-gate.sh        CI check: a UI PR must carry a look.py frame
   mcp_server.py              read surface over MCP
   watchdog.sh                liveness, from OUTSIDE the loop
   inbox-poll.sh              Telegram poller (a service, never a lane)
-tests/supervisor/            41 files; the suite is the contract
+tests/supervisor/            44 files; the suite is the contract
 ```
 
 ## Invariants — do not break these without an explicit decision
@@ -103,3 +106,8 @@ documented before "fixing" it — the reason belongs next to the seam.
   judgement.
 - Anything touching tmux behaviour runs against an isolated socket or on a
   throwaway host — never the machine you are working on.
+- A UI PR (touching `scripts/supervisor/laneview/`) needs a captured frame,
+  not a description, as evidence — `look.py capture`/`look.py frames` (#110).
+  This is enforced, not just written down here: `.github/workflows/ui-evidence.yml`
+  runs `ui-evidence-gate.sh` on every PR and fails one that touches that path
+  without a `<!-- ui-evidence:v1 -->` marker in the body or a comment.
