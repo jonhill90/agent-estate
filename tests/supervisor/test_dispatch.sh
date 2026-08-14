@@ -1922,6 +1922,146 @@ log=$(tmuxlog)
 want_contains "and the review lands on the OTHER free lane, t:4 (target t:@104)" "send-keys -t t:@104" "$log"
 want_missing "never on the cancelled author's lane (t:3, target t:@103)" "send-keys -t t:@103 " "$log"
 
+# --- agent-supervisor#90: completed rows still identify the PR author ----
+#
+# `record-completion` is not a manual reconciliation hammer like
+# `cancel-open-task` (#79) -- the supervisor runs it on EVERY lane, EVERY
+# tick, as routine housekeeping the instant a worker's channel fires
+# (`lane-done.sh`). #90's own incident: two ticks correctly refused a
+# self-review while the author's task read `delivered`; the very next tick,
+# after `record-completion` had closed that task, the SAME dispatch landed
+# on the author. A guard that a normal tick's housekeeping can turn off is
+# not a guard that holds in the steady state.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+printf '390|| author row later closed by routine record-completion\n' >> "$D/issues"
+printf '392|| review PR #390 after record-completion\n' >> "$D/issues"
+# The branch slug ("public-close") is deliberately NOT the authoring
+# dispatch's own slug ("close-auth", task ad390-close-auth) -- same
+# divergence #35's own chore/ cases use, and for the same reason: it forces
+# resolution through the LEDGER'S ISSUE lookup (`get_author_task_for_issue`),
+# not the branch-name fallback (`task-lane`/`get_task`, which never filters
+# by status either and would otherwise paper over exactly the regression the
+# mutation below proves).
+printf '390|Fixes #390|lane/390-public-close\n' >> "$D/prs"
+
+out=$(LEDGER_STATE="$D/state-90" run 390 close-auth "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch (#390) succeeds" "$rc" 0 "$out"
+log=$(tmuxlog)
+want_contains "setup: the authoring dispatch lands on t:3 (target t:@103)" "send-keys -t t:@103" "$log"
+# #212's own block already proves "task still open -> still refused"; this
+# section is only about the ONE thing #90 adds: the SAME PR's review must
+# still be refused after `record-completion` closes that task -- exactly the
+# routine reconciliation step every tick runs, not a hand-typed recovery
+# command.
+LEDGER_STATE="$D/state-90" ledger record-completion --task ad390-close-auth --note "lane-done: routine reconciliation" >/dev/null
+
+out=$(LEDGER_STATE="$D/state-90" run 392 rev-390-after-complete "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 390); rc=$?
+want_exit "a review after record-completion is still dispatched to a non-author lane" "$rc" 0 "$out"
+want_contains "the completed author row is still found and skipped" "skipping t:3" "$out"
+want_contains "the skip names the completed authoring task" "ad390-close-auth" "$out"
+log=$(tmuxlog)
+want_contains "and the review lands on the OTHER free lane, t:4 (target t:@104)" "send-keys -t t:@104" "$log"
+want_missing "never on the completed author's lane (t:3, target t:@103)" "send-keys -t t:@103 " "$log"
+
+# The only-free-lane variant: t:4 now busy with the review just dispatched,
+# t:3 (free, but the author, and its task is COMPLETE not merely idle) is
+# the only other candidate -- must still refuse outright, not dispatch.
+printf '393|| review PR #390, only the completed author is free\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-90" run 393 rev-390-only-author-free "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 390); rc=$?
+want_exit "a review refused when the only free lane is the completed author" "$rc" 1 "$out"
+want_contains "names the completed authoring task, not just the lane" "ad390-close-auth" "$out"
+
+# --- MUTATION: an "only open tasks" author lookup -- the bug #90 reported -
+# The three assertions above are only worth anything if a lookup that DOES
+# forget authorship on completion turns them red. Built the same way as
+# every other mutation in this file (#184, #192, #241): a shadow copy of the
+# WHOLE scripts/supervisor directory, symlinked, with exactly one file
+# actually patched -- so nothing except the named defect can be responsible
+# for the result. `core.py` here, not `dispatch.sh`: `get_author_task_for_issue`
+# is the single function #77's own comment says both `dispatch.sh` and
+# `digest.sh` share for this -- see this brief's own note to reuse it -- so
+# patching it once proves the guard's actual dependency, not a shell-only
+# stand-in for it.
+SHADOW90="$D/shadow-supervisor-90"
+rm -rf "$SHADOW90"; mkdir -p "$SHADOW90"
+for f in "$HERE/../../scripts/supervisor/"*; do ln -s "$f" "$SHADOW90/$(basename "$f")"; done
+rm -f "$SHADOW90/core.py"
+# The glob above also symlinked __pycache__ -- straight back at the REAL
+# scripts/supervisor/__pycache__, which already holds a compiled .pyc of the
+# UNMUTATED core.py. Left in place, `python3 $SHADOW90/cli.py` resolves
+# `import core` against that cache before ever reading the mutant file
+# written below, and the mutation test passes for the wrong reason: nothing
+# ran the mutated code at all. Only ever discard the SYMLINK here, never the
+# real directory it points at.
+rm -f "$SHADOW90/__pycache__"
+# `cli.py` also cannot stay a symlink (unlike dispatch.sh, which is bash and
+# resolves its own directory logically via `cd`+`pwd`): CPython computes
+# `sys.path[0]` from the REALPATH of the script it was handed, so
+# `python3 $SHADOW90/cli.py` -- if cli.py is only a symlink -- puts the REAL
+# scripts/supervisor directory on sys.path, not $SHADOW90, and `import core`
+# silently picks up the unmutated original sitting there instead of the
+# mutant written below. Measured directly: it answered `known:true` for a
+# completed author with the symlink, `known:false` (correctly refusing) with
+# this copy. A real file's own directory is never resolved away.
+rm -f "$SHADOW90/cli.py"
+cp "$HERE/../../scripts/supervisor/cli.py" "$SHADOW90/cli.py"
+CORE_MUTANT="$SHADOW90/core.py"
+patch_rc=0
+python3 - "$HERE/../../scripts/supervisor/core.py" "$CORE_MUTANT" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = (
+    "                WHERE source_tasks.source_kind = 'issue' AND source_tasks.source_ref = ?\n"
+    "                ORDER BY tasks.created_at ASC, tasks.id ASC\n"
+)
+assert text.count(marker) == 1, "get_author_task_for_issue's query not found -- script shape changed"
+mutated = marker.replace(
+    "ORDER BY",
+    "AND tasks.status NOT IN ('complete', 'failed', 'cancelled')\n                ORDER BY",
+)
+open(dst, "w").write(text.replace(marker, mutated, 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of core.py whose author lookup considers only open tasks" \
+    "could not patch core.py (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of core.py whose author lookup considers only open tasks"
+  MUTANT_DISPATCH="$SHADOW90/dispatch.sh"
+  # Re-run the EXACT scenario the "review after record-completion" assertions
+  # above were built on (same lanes, same completed author, same PR) through
+  # the mutant instead of the real ledger. dispatch.sh's own fail-closed rule
+  # (an unresolved author refuses the WHOLE dispatch, never proceeds as if
+  # innocent) means this mutation cannot reproduce #90's incident as a
+  # WRONGFUL DISPATCH -- it shows up as a wrongful REFUSAL instead: a
+  # legitimate review of a merged PR now gets turned away with "authorship
+  # unknown", because the one row that proves who wrote it just stopped
+  # counting the moment it finished. Either direction is a real defect (a
+  # guard that refuses reviews it has no business refusing is not safe to
+  # operate), and either one is what "test 1 goes red" means here: none of
+  # the outcomes the passing assertions above depend on -- skipping t:3 by
+  # name, landing on t:4 -- survive against this mutant.
+  cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+  printf '394|| review PR #390 against the only-open-tasks mutant\n' >> "$D/issues"
+  out=$(LEDGER_STATE="$D/state-90" DISPATCH_SCRIPT="$MUTANT_DISPATCH" \
+    run 394 rev-390-mutant "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 390); rc=$?
+  log=$(tmuxlog)
+  if [ "$rc" = 0 ] && grep -qF "skipping t:3" <<<"$out" && grep -qF "send-keys -t t:@104" <<<"$log"; then
+    bad "mutation confirmed: the only-open-tasks lookup breaks test 1's outcome (the assertions above would now be red)" \
+      "the mutant reproduced the SAME outcome as the real ledger -- this mutation proves nothing: rc=$rc out=$out log=$log"
+  else
+    ok "mutation confirmed: the only-open-tasks lookup breaks test 1's outcome (the assertions above would now be red): rc=$rc out=$(head -c 160 <<<"$out")"
+  fi
+fi
+
 # --- fails closed: authorship that cannot be determined refuses the WHOLE
 # dispatch, not just the candidate it could not clear -------------------
 cat > "$D/lanes" <<'FIX'
