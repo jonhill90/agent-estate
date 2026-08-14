@@ -129,7 +129,7 @@ def parser():
     # a `ledger-claim:<lane>:<token>` row, and the codex harness's
     # completions land as exactly that shape. `--lane` alone resolves
     # whichever row shape currently occupies the lane, the same way
-    # `cancel-open-task` does for the discard path; `--task` alone keeps the
+    # `cancel-open-task` does for the cancellation path; `--task` alone keeps the
     # exact-id behaviour this command has always had. At least one is
     # required -- enforced in `record_completion`, not here, so the error
     # names the actual gap instead of argparse's generic mutex message.
@@ -564,8 +564,8 @@ def record_completion(ledger, *, task, lane, note):
     way in, and `get_task` is an exact id match -- so a `ledger-claim:<lane>:
     <token>` row (how the codex harness's completions land) could not be
     recorded honestly by an operator who only had the bare token, and
-    `cancel-open-task` was the only verb that worked, which discards the row
-    instead of completing it. Resolution order: an exact `--task` id match
+    `cancel-open-task` was the only verb that worked, which records the wrong
+    terminal outcome instead of completing it. Resolution order: an exact `--task` id match
     first (unchanged behaviour for an ordinary task); failing that, with
     `--lane` also given, the claim row that token would produce under that
     lane; failing that, with only `--lane` given, whichever single row is

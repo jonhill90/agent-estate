@@ -1120,7 +1120,7 @@ want_contains "...and the abort says the lane stays held rather than leaving it 
   "STAYS HELD" "$out"
 want_contains "...and names record-completion --lane when the lane finished but never signalled" \
   "record-completion --lane t:3" "$out"
-want_contains "...and still names cancel-open-task only for discarding non-work" \
+want_contains "...and still names cancel-open-task only for cancelling non-work" \
   "cancel-open-task --lane t:3" "$out"
 
 # The other direction, and the one that keeps the check honest: a dispatch
@@ -1892,6 +1892,35 @@ want_contains "names the PR" "PR #204" "$out"
 want_contains "names the authoring task, not just the lane" "ad193-telegram-to-director" "$out"
 if [ -z "$(assignees 206)" ]; then ok "the refused review takes no claim on its own issue"
 else bad "the refused review takes no claim on its own issue" "still assigned: $(assignees 206)"; fi
+
+# --- agent-supervisor#79: cancelled rows still identify the PR author ----
+#
+# `cancel-open-task` is the manual reconciliation hammer for a lane that is
+# idle again but still ledger-held. It must free the lane without erasing who
+# wrote the PR; otherwise the review guard has no author to exclude and can
+# hand the review back to the lane that authored it.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+printf '279|| author row later cancelled for reconciliation\n' >> "$D/issues"
+printf '280|| review PR #279 after cancel-open-task\n' >> "$D/issues"
+printf '279|Fixes #279|chore/279-cancel-auth\n' >> "$D/prs"
+
+out=$(LEDGER_STATE="$D/state-79" run 279 cancel-auth "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch (#279) succeeds" "$rc" 0 "$out"
+log=$(tmuxlog)
+want_contains "setup: the authoring dispatch lands on t:3 (target t:@103)" "send-keys -t t:@103" "$log"
+LEDGER_STATE="$D/state-79" ledger cancel-open-task --lane t:3 >/dev/null
+
+out=$(LEDGER_STATE="$D/state-79" run 280 rev-279-after-cancel "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 279); rc=$?
+want_exit "a review after cancel-open-task is still dispatched to a non-author lane" "$rc" 0 "$out"
+want_contains "the cancelled author row is still found and skipped" "skipping t:3" "$out"
+want_contains "the skip names the cancelled authoring task" "ad279-cancel-auth" "$out"
+log=$(tmuxlog)
+want_contains "and the review lands on the OTHER free lane, t:4 (target t:@104)" "send-keys -t t:@104" "$log"
+want_missing "never on the cancelled author's lane (t:3, target t:@103)" "send-keys -t t:@103 " "$log"
 
 # --- fails closed: authorship that cannot be determined refuses the WHOLE
 # dispatch, not just the candidate it could not clear -------------------

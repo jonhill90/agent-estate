@@ -656,6 +656,10 @@ class Ledger:
             "UPDATE tasks SET status='cancelled', updated_at=?, completed_at=? WHERE id=?",
             (now, now, task_id),
         )
+        connection.execute(
+            "UPDATE source_tasks SET status='cancelled', updated_at=? WHERE id=?",
+            (now, task_id),
+        )
 
     # agent-supervisor#58: which transport a harness is allowed to record
     # itself under. Not "every harness may claim any transport" -- a
