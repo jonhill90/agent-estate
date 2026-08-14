@@ -214,6 +214,37 @@ is_service_pane() {
   grep -qE "$SERVICE_RE" <<<"$argv"
 }
 
+# agent-supervisor#83: a pane whose status line still paints busy chrome
+# (Claude's `↓ to manage`, a mid-turn footer, etc.) but has not repainted in
+# HUNG_AFTER seconds is not necessarily wedged -- it may be idle at the
+# prompt, correctly waiting for a long background command (a full test
+# suite, a Monitor'd task) that it started and is still running. Measured
+# live, #83: a lane that had posted "I will pause here and wait for the
+# Monitor task notification" sat frozen for 8m35s and was reported `hung`,
+# with the table's own warning ("a dispatch there would queue forever")
+# emphatic enough that acting on it nearly stood the lane down mid-review.
+#
+# `#{window_activity}` -- what HUNG_AFTER's `age` already reads -- cannot
+# distinguish this case from a genuinely wedged one: it is exactly what
+# stopped advancing, on purpose, while the lane waits. What DOES distinguish
+# them is the kernel's own process tree: a pane that is truly waiting on
+# work it started still has that work running as a descendant of the pane's
+# process, where a wedged one does not. That is a measurement neither tmux
+# nor this system authored, so per CLAUDE.md's authorship test it may be
+# read directly, the same posture `is_service_pane` above already takes with
+# `ps -o args=`.
+#
+# Deliberately checked only on the path that is about to report `hung` --
+# once a pane has already gone HUNG_AFTER seconds with no repaint -- not on
+# every busy pane on every tick. A live turn's own elapsed footer already
+# proves liveness without a `ps` call; this only has to answer the question
+# for the rare pane that both looks busy and has stopped repainting.
+pane_has_live_children() {
+  local pid="${1:-}"
+  [ -n "$pid" ] || return 1
+  ps -o ppid= -ax 2>/dev/null | grep -qw "$pid"
+}
+
 now_epoch=$(date +%s)
 
 emit_rows() {
@@ -380,8 +411,20 @@ emit_rows() {
       # Copilot, whose busy marker IS the last line; wider for Codex, whose
       # busy marker sits above a footer that never changes. See
       # harness/codex.sh for the real capture that shape is measured from.
+      #
+      # #83: a frozen status line alone is not enough -- a pane can go
+      # HUNG_AFTER seconds with no repaint because it is correctly idle at
+      # the prompt, waiting on a background command it started (see
+      # pane_has_live_children above for why window_activity cannot tell
+      # these apart, and why the check belongs here rather than on every
+      # tick). Only checked once the pane is already past HUNG_AFTER, so a
+      # busy pane inside its normal window never pays the `ps` call.
       age=$(( now_epoch - ${act:-now_epoch} ))
-      if [ "$age" -ge "$HUNG_AFTER" ]; then state=hung; else state=busy; fi
+      if [ "$age" -ge "$HUNG_AFTER" ] && ! pane_has_live_children "$pid"; then
+        state=hung
+      else
+        state=busy
+      fi
     elif [ "$box" = text ]; then
       # #141. Decided AFTER busy/hung -- a lane typing ahead into the box
       # while a turn runs is busy, and busy is the more useful thing to say --
