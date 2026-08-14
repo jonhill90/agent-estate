@@ -82,6 +82,46 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/harness-registry.sh"
 SESSION="${LANES_SESSION:-agent-dotfiles}"
 
+dispatch_rehome_lane() {
+  local target="$1" dir="$2" harness="${3:-}" hidx="" cmd="" launch_cmd="" launch_literal=""
+  [ -n "$target" ] || { echo "dispatch: --rehome-lane requires a tmux target" >&2; return 2; }
+  [ -n "$dir" ] || dir="${HOME:-/tmp}"
+  [ -d "$dir" ] || { echo "dispatch: re-home target directory does not exist: $dir" >&2; return 1; }
+
+  if [ -n "$harness" ]; then
+    hidx=$(harness_index_for_name "$harness") || hidx=""
+  else
+    cmd=$(tmux display-message -p -t "$target" '#{pane_current_command}' 2>/dev/null) || cmd=""
+    [ -n "$cmd" ] && hidx=$(harness_index_for_command "$cmd") || hidx=""
+  fi
+  if [ -z "$hidx" ] || [ -z "${H_LAUNCH_CMD[$hidx]:-}" ]; then
+    echo "dispatch: cannot re-home $target -- no launch command for harness '${harness:-${cmd:-unknown}}'" >&2
+    return 1
+  fi
+
+  launch_cmd="${H_LAUNCH_CMD[$hidx]}"
+  launch_literal="${H_SEND_LITERAL[$hidx]:-0}"
+  if ! tmux respawn-pane -k -t "$target" -c "$dir" 2>/dev/null; then
+    echo "dispatch: tmux respawn-pane failed while re-homing $target to $dir" >&2
+    return 1
+  fi
+  sleep "${DISPATCH_RESPAWN_SETTLE:-1}"
+  if [ "$launch_literal" = 1 ]; then
+    tmux send-keys -t "$target" -l "$launch_cmd" 2>/dev/null \
+      && tmux send-keys -t "$target" Enter 2>/dev/null
+  else
+    tmux send-keys -t "$target" "$launch_cmd" Enter 2>/dev/null
+  fi
+}
+
+if [ "${1:-}" = "--rehome-lane" ]; then
+  rehome_target="${2:-}"
+  rehome_dir="${3:-${HOME:-/tmp}}"
+  rehome_harness="${4:-}"
+  dispatch_rehome_lane "$rehome_target" "$rehome_dir" "$rehome_harness"
+  exit $?
+fi
+
 # `--reviews-pr <PR>` is pulled out wherever it appears rather than bound to a
 # fixed position: every other argument here is positional and some of them
 # (repo, repo-path) are already optional, so a new optional flag is scanned
@@ -880,7 +920,22 @@ rm -f "$WORKTREE_ERR"
 # sit) with no change to its body.
 abort_send() {
   echo "dispatch: $1" >&2
-  "$HERE/worktree.sh" done "$WORKTREE" >/dev/null 2>&1
+  cleanup_worktree=1
+  lane_current_path=$(tmux display-message -p -t "$LANE_TARGET" '#{pane_current_path}' 2>/dev/null || true)
+  case "$lane_current_path" in
+    "$WORKTREE"|"$WORKTREE"/*)
+      if dispatch_rehome_lane "$LANE_TARGET" "$REPO_PATH" "$LANE_HARNESS" >/dev/null 2>&1; then
+        echo "dispatch: re-homed $LANE out of $WORKTREE before rollback cleanup" >&2
+      else
+        cleanup_worktree=0
+        echo "dispatch: leaving worktree $WORKTREE in place because $LANE still appears to be inside it" >&2
+        echo "dispatch: recover with: $0 --rehome-lane $LANE_TARGET '$REPO_PATH' ${LANE_HARNESS:-}" >&2
+      fi
+      ;;
+  esac
+  if [ "$cleanup_worktree" = 1 ]; then
+    "$HERE/worktree.sh" done "$WORKTREE" >/dev/null 2>&1
+  fi
   release_claim
   release_lane_claim
   # agent-dotfiles#209 round 2. Past step 4.5 the lane claim is LIVE and
