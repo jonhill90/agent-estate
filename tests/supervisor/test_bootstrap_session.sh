@@ -205,5 +205,37 @@ check "refuses an unrecognised --harness value" "1" "$?"
 tmux has-session -t "=$S" 2>/dev/null
 check "no session left behind by an invalid --harness" "1" "$?"
 
+# --- agent-supervisor#135: no --agent means ASK THE REGISTRY, not a literal
+#     -- the same H_LAUNCH_CMD dispatch.sh resolves, so there is one
+#     definition of how a Claude lane starts. --dry-run is enough here: it
+#     prints the resolved AGENT_CMD without needing a real tmux window, and
+#     env -u LANES_AGENT_CMD strips the one thing (besides --agent) that is
+#     ALLOWED to override the default, so what is left on the "agent=" line
+#     is purely what bootstrap-session.sh itself derived.
+FAKE_BIN="$(mktemp -d)"
+cp "$(command -v bash)" "$FAKE_BIN/claude"
+chmod +x "$FAKE_BIN/claude"
+
+out17="$(PATH="$FAKE_BIN:$PATH" env -u LANES_AGENT_CMD -u CLAUDE_LANE_MODEL \
+  bash "$BOOT" --session "$S" --lanes 2 --dry-run 2>&1)"
+agent_line="$(printf '%s\n' "$out17" | grep -o 'agent=.* cwd=' | sed 's/ cwd=$//')"
+check "17. with no --agent/LANES_AGENT_CMD, the default is registry-derived, not a bare literal" \
+  "agent=claude --model sonnet --dangerously-skip-permissions" "$agent_line"
+
+# 18. CLAUDE_LANE_MODEL is honoured through the SAME path dispatch.sh reads
+#     -- if only dispatch.sh's harness/claude.sh honoured it, bootstrap would
+#     still be a second, independent definition even with #135 "fixed".
+out18="$(PATH="$FAKE_BIN:$PATH" env -u LANES_AGENT_CMD CLAUDE_LANE_MODEL=haiku \
+  bash "$BOOT" --session "$S" --lanes 2 --dry-run 2>&1)"
+agent_line18="$(printf '%s\n' "$out18" | grep -o 'agent=.* cwd=' | sed 's/ cwd=$//')"
+check "18. CLAUDE_LANE_MODEL overrides the derived default (bootstrap path)" \
+  "agent=claude --model haiku --dangerously-skip-permissions" "$agent_line18"
+
+# 19. --agent still wins outright over the registry default -- the override
+#     this script documents as how a site without Claude runs codex/copilot.
+PATH="$FAKE_BIN:$PATH" env -u LANES_AGENT_CMD bash "$BOOT" --session "$S" --lanes 2 --agent bash --dry-run >/dev/null 2>&1
+check "19. explicit --agent still overrides the registry default" "0" "$?"
+rm -rf "$FAKE_BIN"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

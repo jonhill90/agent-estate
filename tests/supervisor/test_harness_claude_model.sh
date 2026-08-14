@@ -43,5 +43,42 @@ else
   ok "the pre-#120 unpinned command is no longer produced"
 fi
 
+# --- agent-supervisor#135: a SECOND launch literal, not covered by any of --
+# the checks above, existed in bootstrap-session.sh
+# (`AGENT_CMD="${LANES_AGENT_CMD:-claude}"`) and started every lane on the
+# account default whenever a session was bootstrapped with no --agent. #120
+# was closed as "the leak is fixed" after fixing only harness/claude.sh --
+# this repo's own rule (check the whole tree, not one file) was not applied
+# to the fix for it, and #135 is the second time this exact bug was found by
+# hand rather than by a test. This is the check that makes a THIRD site
+# impossible: it fails on any bare launch literal in scripts/supervisor/
+# outside the harness registry, not just today's two known sites.
+#
+# What this covers: a bash default-value literal (`${VAR:-claude}`) or a
+# bare `claude`-launching string with no `--model`, anywhere under
+# scripts/supervisor/ other than harness/*.sh (the one place a launch
+# command is allowed to be defined) or laneview/ (UI code, not a launch
+# path). What it does NOT cover: a launch literal for `codex` or `copilot`
+# (#135's evidence and #122's fix were both Claude-specific; a parallel leak
+# in another harness's OWN call sites, if one exists, needs its own check),
+# or a literal buried in a string built from concatenated variables that
+# this grep cannot see textually.
+SUPERVISOR_DIR="$HERE/../../scripts/supervisor"
+stray_default="$(grep -rn ':-claude}' "$SUPERVISOR_DIR" --include='*.sh' --include='*.py' \
+  | grep -v '/harness/' | grep -v '/laneview/' || true)"
+if [ -z "$stray_default" ]; then
+  ok "no bare '\${VAR:-claude}' launch default outside harness/"
+else
+  bad "no bare '\${VAR:-claude}' launch default outside harness/" "$stray_default"
+fi
+
+stray_unpinned="$(grep -rn 'claude --dangerously-skip-permissions' "$SUPERVISOR_DIR" --include='*.sh' --include='*.py' \
+  | grep -v '/harness/' | grep -v '/laneview/' || true)"
+if [ -z "$stray_unpinned" ]; then
+  ok "no unpinned (no --model) claude launch literal outside harness/"
+else
+  bad "no unpinned (no --model) claude launch literal outside harness/" "$stray_unpinned"
+fi
+
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
