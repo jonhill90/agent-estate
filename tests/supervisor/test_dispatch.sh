@@ -234,7 +234,7 @@ if [ -n "$respawn_line" ] && [ -n "$rename_line" ] && [ "$respawn_line" -lt "$re
 else
   bad "the respawn happens before the lane is renamed or given anything to type" "respawn at line $respawn_line, rename at line $rename_line in: $log"
 fi
-want_contains "the harness is relaunched, into the worktree, right after the respawn" "claude --dangerously-skip-permissions" "$log"
+want_contains "the harness is relaunched, into the worktree, right after the respawn" "claude --model sonnet --dangerously-skip-permissions" "$log"
 recorded_path=$(AGENT_SUPERVISOR_STATE_DIR="${LEDGER_STATE:-$D/state}" python3 "$HERE/../../scripts/supervisor/cli.py" status 2>/dev/null | grep -oE '"repo":"[^"]*"' | head -1 | sed -E 's/.*:"([^"]*)"/\1/')
 want_contains "the ledger records the lane's cwd as the worktree, not the shared checkout" "${WT:-NO-WORKTREE}" "$recorded_path"
 # Every case after this one relies on run()'s implicit per-call mktemp state
@@ -248,7 +248,7 @@ rehome_out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/lanes" TMUX_LOG="$D/tmux.log"
 want_exit "the supported re-home verb succeeds" "$rehome_rc" 0 "$rehome_out"
 log=$(tmuxlog)
 want_contains "the supported re-home verb respawns the pane into an existing directory" "respawn-pane -k -t t:@103 -c $REPO" "$log"
-want_contains "the supported re-home verb relaunches the harness" "claude --dangerously-skip-permissions" "$log"
+want_contains "the supported re-home verb relaunches the harness" "claude --model sonnet --dangerously-skip-permissions" "$log"
 pane_path=$(cat "$D/panes/3.path" 2>/dev/null || true)
 want_contains "the supported re-home verb updates the pane cwd" "$REPO" "$pane_path"
 

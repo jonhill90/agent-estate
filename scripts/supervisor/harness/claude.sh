@@ -23,7 +23,17 @@ HARNESS_COMMAND_RE='^(claude|claude\.exe)$'
 # says should live in an adapter instead of being reasoned about per call
 # site. `1` here records what lanes.sh's own docs say Claude needs; wiring
 # either caller to read it is follow-up, out of #201's scope.
-HARNESS_LAUNCH_CMD='claude --dangerously-skip-permissions'
+#
+# agent-supervisor#120: no `--model` here meant every lane launched on the
+# account default, which is Opus -- measured at ~3x Sonnet's per-token cost
+# for comparable worker volume (issue #120, 2026-08-12 ccusage split). This
+# is a launch-time default, not a symptom to patch at turnover: dispatch.sh
+# types this same string on every relaunch (dispatch.sh H_LAUNCH_CMD), so
+# whatever model is hardcoded here is what every lane silently inherits
+# forever. Default to the cheap model; `CLAUDE_LANE_MODEL` lets a lane that
+# genuinely needs Opus have it deliberately, by explicit env, not by
+# omission.
+HARNESS_LAUNCH_CMD="claude --model ${CLAUDE_LANE_MODEL:-sonnet} --dangerously-skip-permissions"
 HARNESS_SEND_LITERAL=1
 
 # agent-dotfiles#237: how this harness is told to come back to an EXISTING
