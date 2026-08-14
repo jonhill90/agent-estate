@@ -55,6 +55,13 @@ cp "$HERE/stubs/ps-lanes" "$D/bin/ps"
 # process (#154), which is what separates a service window from a dead lane.
 # Omitted, it is `-zsh` -- what every real lane measured as -- so every
 # pre-existing row is untouched by that too.
+# The 9th column is also optional and models whether the pane's process has a
+# live CHILD (#83) -- what `ps -o ppid= -ax` would show for a pane that is
+# genuinely idle at the prompt while a background command it started is still
+# running, versus one that has actually stopped. `child` means a live child
+# exists; omitted (every pre-existing row) means it does not, so every row
+# that predates #83 is classified exactly as it was before this column
+# existed.
 cat > "$D/fixture" <<'FIX'
 1|arch|claude.exe|❯ ready|1|0
 2|w-busy|claude.exe|esc to interrupt 3s|1|0
@@ -95,6 +102,7 @@ cat > "$D/fixture" <<'FIX'
 37|w-shell-busy|claude.exe|⏵⏵ bypass permissions on · 1 shell · esc to interrupt · ← 1 agent · ↓ to manage|1|0
 38|w-shell-idle|claude.exe|⏵⏵ bypass permissions on · 1 shell · ← 1 agent · ↓ to manage|1|0
 39|w-shell-idle-hung|claude.exe|⏵⏵ bypass permissions on · 1 shell · ← 1 agent · ↓ to manage|900|0
+45|w-hung-live-child|claude.exe|esc to interrupt 40m|900|0||-zsh|child
 40|w-shell-tasks|claude.exe|⏵⏵ bypass permissions on · 1 shell · ctrl+t to hide tasks · ← 1 agent · ↓ to manage|1|0
 41|w-shells-plural|claude.exe|⏵⏵ bypass permissions on · 2 shells · ← 1 agent · ↓ to manage|1|0
 42|w-codex-ready-tilde|codex|  gpt-5.5 medium · ~/source/repos/Personal/agent-dotfiles|1|0
@@ -106,6 +114,16 @@ out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
 echo "lanes.sh"
 want "a turn whose output advances is busy"              w-busy    busy    "$out"
 want "a turn frozen across samples is hung, not busy"    w-hung    hung    "$out"
+# #83, the regression this issue is about: a pane whose status line has been
+# frozen past HUNG_AFTER used to read `hung` unconditionally. w-hung above
+# (no live child in the fixture) proves that reading still holds when the
+# pane genuinely has stopped -- the case #83's own brief calls out as the
+# regression risk: a fix that treats every idle pane as busy would make
+# `hung` unreachable. This row is the SAME frozen status line, only with a
+# live child process (#83's own measured shape: a lane idle at the prompt
+# with a background test suite still running) -- it must read busy, not
+# hung.
+want "a frozen pane with a live child process is busy, not hung (#83)" w-hung-live-child busy "$out"
 want "a pane running a shell is dead, not idle"          w-dead    dead    "$out"
 # A Claude-specific probe must not be applied to other harnesses: on
 # 2026-08-11 a healthy idle Copilot pane was called `hung` because that
@@ -687,6 +705,52 @@ else
   fi
 fi
 rm -rf "$MUTHDIR2"
+
+# --- agent-supervisor#83 mutation check: drop the live-child check ---------
+# Mutate `pane_has_live_children` to always fail (as if lanes.sh never
+# checked the process tree at all) and confirm w-hung-live-child flips to
+# `hung` -- the exact regression #83 fixes, reproduced on demand so the
+# assertion above is provably checking something. w-hung, which has no live
+# child in the fixture either way, must stay `hung` throughout: the mutant
+# only removes a check that could move a lane OUT of hung, so nothing that
+# was already hung is affected.
+MUTANT83="$LANES_DIR/.lanes-mutant-83.sh"
+trap 'rm -f "$MUTANT83"' EXIT
+patch83_rc=0
+python3 - "$LANES" "$MUTANT83" <<'PY' || patch83_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''pane_has_live_children() {
+  local pid="${1:-}"
+  [ -n "$pid" ] || return 1
+  ps -o ppid= -ax 2>/dev/null | grep -qw "$pid"
+}'''
+replacement = '''pane_has_live_children() {
+  return 1
+}'''
+assert text.count(marker) == 1, "expected exactly one pane_has_live_children body, found %d -- file shape changed" % text.count(marker)
+open(dst, "w").write(text.replace(marker, replacement, 1))
+PY
+if [ "$patch83_rc" -ne 0 ]; then
+  echo "  FAIL setup: could not patch a copy of lanes.sh with pane_has_live_children disabled (exit $patch83_rc)"; fail=$((fail+1));
+else
+  echo "  ok   setup: patched a copy of lanes.sh with pane_has_live_children disabled"; pass=$((pass+1));
+  chmod +x "$MUTANT83"
+  mutant83_out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$MUTANT83" 2>&1)
+  if grep -qE "^[0-9]+ +w-hung-live-child +[^ ]+ +hung$" <<<"$mutant83_out"; then
+    echo "  ok   mutation confirmed: without the live-child check, a lane with live work is misreported hung (the assertion above would be red)"; pass=$((pass+1));
+  else
+    echo "  FAIL mutation confirmed: disabling the live-child check did not reproduce hung for w-hung-live-child:"; sed 's/^/       /' <<<"$mutant83_out"; fail=$((fail+1));
+  fi
+  if grep -qE "^[0-9]+ +w-hung +[^ ]+ +hung$" <<<"$mutant83_out"; then
+    echo "  ok   a genuinely wedged lane is still hung with the check disabled"; pass=$((pass+1));
+  else
+    echo "  FAIL w-hung stopped reading hung once the live-child check was disabled:"; sed 's/^/       /' <<<"$mutant83_out"; fail=$((fail+1));
+  fi
+fi
+rm -f "$MUTANT83"
+trap - EXIT
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

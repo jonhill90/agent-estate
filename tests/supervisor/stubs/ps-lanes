@@ -1,25 +1,43 @@
 #!/bin/bash
-# Stub `ps` for lanes.sh tests (#154). lanes.sh asks exactly one question of
-# ps -- "what is the pane's first process actually running?" -- as
+# Stub `ps` for lanes.sh tests (#154, #83). lanes.sh asks two questions of
+# ps:
 #
-#   ps -o args= -p <pane_pid>
+#   ps -o args= -p <pane_pid>        "what is the pane's own process running?"
+#   ps -o ppid= -ax                  "which pids are somebody's live child?"
 #
-# stubs/tmux-lanes reports `pane_pid` as PID_BASE + window index, so this maps
-# the pid back to that window's 8th fixture column and prints it. A row that
-# omits the column gets `-zsh`, which is what every real lane's pane process
-# measured as in the live session on 2026-08-11: the agent runs as a child of
-# the login shell, so the pane's own process is the shell either way, and only
-# its argv tells a dead lane from a service window.
+# stubs/tmux-lanes reports `pane_pid` as PID_BASE + window index, so the
+# first form maps the pid back to that window's 8th fixture column and
+# prints it. A row that omits the column gets `-zsh`, which is what every
+# real lane's pane process measured as in the live session on 2026-08-11:
+# the agent runs as a child of the login shell, so the pane's own process is
+# the shell either way, and only its argv tells a dead lane from a service
+# window.
+#
+# The second form has no `-p`, so it cannot key on a single pid -- real `ps
+# -ax` lists every process on the box. This stub answers it by walking every
+# fixture row and, for any row whose 9th column marks a live child (#83),
+# printing that row's own pane_pid as a ppid -- simulating a child process
+# parented to the pane. `pane_has_live_children` in lanes.sh greps this
+# output for the specific pid it asked about, so it does not matter that
+# real `ps -ax` output carries one pid per process; only the presence of the
+# target pid in the column matters.
 F="${LANES_FIXTURE:?}"
 PID_BASE="${LANES_STUB_PID_BASE:-9000}"
 
-pid=""
+pid=""; ax=0
 while [ $# -gt 0 ]; do
   case "$1" in
     -p) pid="$2"; shift 2 ;;
+    -ax|-A) ax=1; shift ;;
     *) shift ;;
   esac
 done
+
+if [ "$ax" = 1 ] && [ -z "$pid" ]; then
+  awk -F'|' -v base="$PID_BASE" '$9=="child"{print base+$1}' "$F"
+  exit 0
+fi
+
 [ -n "$pid" ] || exit 1
 
 win=$(( pid - PID_BASE ))
