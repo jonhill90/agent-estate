@@ -38,8 +38,11 @@
 #                   default (which stays the shared fallback for non-repo
 #                   callers, e.g. the poller).
 #   --lanes N       total windows including the supervisor; default 10.
-#   --agent CMD     command started in each lane; default $LANES_AGENT_CMD or
-#                   `claude`. Use `copilot` / `codex` at a site without Claude.
+#   --agent CMD     command started in each lane; default $LANES_AGENT_CMD, or
+#                   (agent-supervisor#135) the harness registry's `claude`
+#                   launch command -- the same one dispatch.sh resolves, so
+#                   this script carries no launch literal of its own. Use
+#                   `copilot` / `codex` at a site without Claude.
 #   --harness NAME  the harness identity to RECORD on every lane window this
 #                   run creates (claude/codex/copilot; agent-dotfiles#216).
 #                   Default: inferred from --agent's basename when it is one
@@ -64,7 +67,18 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/session-defaults.sh"
 SESSION="$(lanes_session_or_default)"
 LANES=10
-AGENT_CMD="${LANES_AGENT_CMD:-claude}"
+# agent-supervisor#135: no bare 'claude' literal here. `dispatch.sh` was fixed
+# by #122 to type the harness registry's H_LAUNCH_CMD (harness/claude.sh's
+# `claude --model ${CLAUDE_LANE_MODEL:-sonnet} ...`); this script carried its
+# own literal default and was not, so any session bootstrapped with no
+# --agent started every lane on the account default (Opus) -- the #135 leak.
+# LANES_AGENT_CMD stays a real override (it existed before #135 as the
+# documented way to hand this script a whole command, e.g. at a site running
+# codex/copilot); when it is unset AND --agent is not passed, AGENT_CMD is
+# left EMPTY here and resolved after option parsing from the harness
+# registry -- the same H_LAUNCH_CMD dispatch.sh resolves -- so there is one
+# definition of how a Claude lane starts, not two that can drift apart again.
+AGENT_CMD="${LANES_AGENT_CMD:-}"
 HARNESS=""
 WORKDIR="$PWD"
 ADD_LANES=0
@@ -102,6 +116,24 @@ if [ "$LANES" -lt 2 ]; then
 fi
 
 command -v tmux >/dev/null 2>&1 || { echo "bootstrap-session: tmux not on PATH" >&2; exit 1; }
+
+# agent-supervisor#135: neither LANES_AGENT_CMD nor --agent supplied a
+# command, so ask the harness registry for the one dispatch.sh already
+# resolves rather than falling back to a literal here. `HARNESS_REGISTRY_DIR`
+# is honoured (not hardcoded to $HERE/harness) so a test can point this at a
+# mutated adapter set the same way lanes.sh's/dispatch.sh's own tests do.
+if [ -z "$AGENT_CMD" ]; then
+  # shellcheck source=./harness-registry.sh
+  . "$HERE/harness-registry.sh"
+  _default_hidx="$(harness_index_for_name claude || true)"
+  if [ -z "$_default_hidx" ] || [ -z "${H_LAUNCH_CMD[$_default_hidx]:-}" ]; then
+    echo "bootstrap-session: no launch command recorded for harness 'claude' in $HARNESS_DIR" >&2
+    echo "  pass --agent explicitly, or fix harness/claude.sh's HARNESS_LAUNCH_CMD" >&2
+    exit 1
+  fi
+  AGENT_CMD="${H_LAUNCH_CMD[$_default_hidx]}"
+  unset _default_hidx
+fi
 
 # tmux silently rewrites `:` and `.` in a session name (they are its target
 # delimiters), then every later target built from the ORIGINAL string misses.
