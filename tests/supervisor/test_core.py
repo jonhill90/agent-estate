@@ -1,3 +1,4 @@
+import contextlib
 import hashlib
 import concurrent.futures
 import json
@@ -1036,6 +1037,68 @@ class LedgerTest(unittest.TestCase):
             status_marker=None,
         )
         self.assertIsNone(self.ledger.get_author_task_for_issue("76"))
+
+    def test_get_author_task_for_issue_survives_completion(self):
+        """agent-supervisor#90: the guard added by #70 (and generalised by
+        #76/#77) refused a review dispatched back to its author's lane, but
+        only while that lane's task read as still open -- `record-completion`
+        runs on every lane as routine reconciliation, and closing the task
+        made the same dispatch land on the author.
+
+        This query has no status filter at all -- unlike `lane_available` /
+        `get_open_task_for_lane` (which exist specifically to answer "is this
+        lane busy right now") -- so a task moving to `complete` must not
+        change the answer here, the same way #79/#80 already proved
+        `cancelled` does not. The mutation below is `dispatch.sh`'s own
+        author-lookup query with a status filter spliced in -- exactly the
+        defect this test exists to catch -- and confirms this test would
+        have gone red against it."""
+        self.ledger.record_dispatch(
+            lane="free-3",
+            pane_id="%3",
+            nonce="nonce-90",
+            harness="claude",
+            repo="/repo/free-3",
+            server_id="server-a",
+            session_id="$3",
+            command="claude.exe",
+            task_id="as90-authorship-outlives-task",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/90",
+            source_ref="90",
+            summary="#90 authorship outlives task",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-3"],
+            status_marker=None,
+        )
+        row = self.ledger.get_task("as90-authorship-outlives-task")
+        self.ledger.complete("as90-authorship-outlives-task", b"# Result\n\ndone\n", pane_nonce=row["pane_nonce"])
+
+        author = self.ledger.get_author_task_for_issue("90")
+        self.assertIsNotNone(author, "authorship must not go unknown just because the task completed")
+        self.assertEqual("free-3", author["lane"])
+        self.assertEqual("as90-authorship-outlives-task", author["id"])
+
+        # RED CHECK: an "only open tasks" mutation of the same query -- the
+        # bug #90 reported -- must lose this exact answer. If it did not,
+        # the assertions above would not be exercising the status-independence
+        # they claim to.
+        with contextlib.closing(self.ledger._connect()) as connection:
+            mutant_row = connection.execute(
+                """
+                SELECT tasks.* FROM tasks
+                JOIN source_tasks ON source_tasks.id = tasks.id
+                WHERE source_tasks.source_kind = 'issue' AND source_tasks.source_ref = ?
+                  AND tasks.status NOT IN ('complete', 'failed', 'cancelled')
+                ORDER BY tasks.created_at ASC, tasks.id ASC
+                """,
+                ("90",),
+            ).fetchone()
+        self.assertIsNone(
+            mutant_row,
+            "mutation sanity check failed: the 'only open tasks' variant should find nothing "
+            "for a completed author task -- if it found one, this test cannot tell the fix from the bug",
+        )
 
     def test_mark_lane_held_makes_a_free_lane_read_occupied(self):
         """agent-dotfiles#188 finding 1: this is what closes the window a
