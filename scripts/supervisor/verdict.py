@@ -240,19 +240,63 @@ def _content_unchanged_since(*, runner, patch_id_fn, repo, number, old_sha, new_
 # -- #169's REQUEST CHANGES sits after other text), an optional `#`..`######`
 # heading marker, an optional `**`/`*` opening emphasis, the literal word
 # "Verdict" in any case, then `:`. Liberal in what counts as the LABEL;
-# strict about the DECISION text after it, which still must contain exactly
-# APPROVE or REQUEST CHANGES.
+# strict about the DECISION text after it -- see `_classify_decision_text`
+# for what "strict" means (agent-supervisor#198).
 _VERDICT_LINE_RE = re.compile(r"^#{0,6}\s*\*{0,2}verdict:\**\s*(.*)$", re.IGNORECASE)
 
 
-def _parse_verdict_comment(body):
-    """A comment counts as a verdict when one of its LINES matches
-    `_VERDICT_LINE_RE` -- agent-supervisor#53's guard 4 (the word "verdict"
-    merely mentioned mid-sentence, e.g. "I think the verdict here should be
-    ...") still does not match, because the regex is anchored to the start
-    of the line, not a substring search. Two more exclusions #192 adds,
-    because the line-scan (rather than "body starts with") makes a verdict
-    line reachable from inside quoted material:
+# agent-supervisor#198: the decision text used to be matched with `in` --
+# a substring test -- which read `Verdict: NOT APPROVED` and `Verdict:
+# DISAPPROVE` as `approved`, because both strings contain "APPROVE". Every
+# other ambiguity in this module refuses; this one instead picked the
+# single most dangerous answer, and only in that direction: `REQUEST
+# CHANGES` was checked first so a body naming both phrases correctly
+# refused, but any rejection phrased WITHOUT those two exact words that
+# happened to contain "APPROVE" as a substring landed on approve. The
+# failure was one-directional and it always favoured merging.
+#
+# The fix is a whole-token match against a deliberately short, explicit
+# list, decided here rather than grown ad hoc:
+#   approved         -- APPROVE, APPROVED
+#   rejected         -- REQUEST CHANGES, REQUEST-CHANGES, REJECTED
+# Anything else -- including a recognised word wrapped in more words, e.g.
+# "APPROVED WITH CHANGES" (a real thing reviewers write, and it is neither
+# an approval nor a rejection) -- is unrecognised. A negation anywhere in
+# the text (`NOT`, `DIS`, `NO`, `N'T`) is also unrecognised outright, ahead
+# of the token match, even though whole-token matching alone already
+# defeats the two measured cases (`NOT APPROVED` and `DISAPPROVE` are each
+# a single token that is not in either list) -- named explicitly here
+# because this module does not attempt sentiment analysis on a negation
+# and must not be "improved" into trying to.
+_NEGATION_MARKERS = ("NOT", "DIS", "NO", "N'T")
+_APPROVED_TOKENS = frozenset({"APPROVE", "APPROVED"})
+_REJECTED_TOKENS = frozenset({"REQUEST CHANGES", "REQUEST-CHANGES", "REJECTED"})
+
+
+def _classify_decision_text(decision_text):
+    """`decision_text` is already normalised (trailing markup/punctuation
+    stripped, whitespace collapsed, upper-cased) by the caller. Returns
+    "approved", "rejected", or None -- None for anything not an exact match
+    to the lists above, including a negated one; a decision text this
+    module cannot classify must not be guessed at, the same fail-closed
+    stance the rest of this module takes."""
+    if any(marker in decision_text for marker in _NEGATION_MARKERS):
+        return None
+    if decision_text in _APPROVED_TOKENS:
+        return "approved"
+    if decision_text in _REJECTED_TOKENS:
+        return "rejected"
+    return None
+
+
+def _scan_verdict_lines(body):
+    """The list of `(decision, decision_text)` for every LINE of `body` that
+    matches `_VERDICT_LINE_RE` -- agent-supervisor#53's guard 4 (the word
+    "verdict" merely mentioned mid-sentence, e.g. "I think the verdict here
+    should be ...") still does not match, because the regex is anchored to
+    the start of the line, not a substring search. Two more exclusions #192
+    adds, because the line-scan (rather than "body starts with") makes a
+    verdict line reachable from inside quoted material:
 
     - a line inside a fenced code block (```...```) is never consulted --
       a verdict quoted as an EXAMPLE must not be read as a real one;
@@ -260,11 +304,52 @@ def _parse_verdict_comment(body):
       "quote reply" shape) is never consulted -- a reply quoting an EARLIER
       comment's verdict must not be read as this comment restating it.
 
-    #196: the line-scan reaches every qualifying line in the comment, not
-    just the first, so a SINGLE comment can carry more than one verdict
-    line -- a reviewer who drafts `Verdict: APPROVE`, reconsiders, and
-    writes `Verdict: REQUEST CHANGES` further down. Returning on the first
-    match would let that earlier, superseded APPROVE silently win, which is
+    `decision_text` is normalised (markup/punctuation stripped, whitespace
+    collapsed, upper-cased) before being classified by
+    `_classify_decision_text`, and is returned RAW-normalised alongside the
+    classification either way -- callers that need to name an unrecognised
+    decision in a refusal reason (agent-supervisor#198) get the text to
+    name without re-deriving it. `decision` is None for a line whose text
+    `_classify_decision_text` does not recognise; the caller decides what
+    an unrecognised or absent line means, this function only reports what
+    is on each qualifying line.
+
+    Shared by `_parse_verdict_comment` (one comment, may reference several
+    lines) and `GithubReviewVerdictSource._comment_verdict` (several
+    comments, needs the raw text of an unrecognised LAST verdict line)."""
+    in_fence = False
+    results = []
+    for raw_line in (body or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or line.startswith(">"):
+            continue
+        match = _VERDICT_LINE_RE.match(line)
+        if not match:
+            continue
+        rest = match.group(1)
+        end = rest.find("**")
+        if end != -1:
+            rest = rest[:end]
+        decision_text = re.sub(r"[*_`]+$", "", rest.strip()).strip()
+        decision_text = decision_text.rstrip(".:;,!").strip()
+        decision_text = re.sub(r"\s+", " ", decision_text).upper()
+        results.append((_classify_decision_text(decision_text), decision_text))
+    return results
+
+
+def _parse_verdict_comment(body):
+    """A comment counts as a verdict when `_scan_verdict_lines` finds at
+    least one qualifying line with a RECOGNISED decision (see
+    `_classify_decision_text`).
+
+    #196: every qualifying line in the comment is consulted, not just the
+    first, so a SINGLE comment can carry more than one verdict line -- a
+    reviewer who drafts `Verdict: APPROVE`, reconsiders, and writes
+    `Verdict: REQUEST CHANGES` further down. Returning on the first match
+    would let that earlier, superseded APPROVE silently win, which is
     exactly the "REQUEST CHANGES read as approved" failure this module
     exists to prevent -- so this collects every qualifying line's decision
     instead of stopping at the first:
@@ -284,34 +369,13 @@ def _parse_verdict_comment(body):
     when every qualifying line's decision text is unrecognised, or when
     qualifying lines disagree; a comment this module cannot classify
     cleanly must not be guessed at, the same fail-closed stance every
-    other source in this module takes."""
-    in_fence = False
-    decisions = []
-    for raw_line in (body or "").splitlines():
-        line = raw_line.strip()
-        if line.startswith("```"):
-            in_fence = not in_fence
-            continue
-        if in_fence or line.startswith(">"):
-            continue
-        match = _VERDICT_LINE_RE.match(line)
-        if not match:
-            continue
-        rest = match.group(1)
-        end = rest.find("**")
-        if end != -1:
-            rest = rest[:end]
-        decision_text = re.sub(r"[*_`]+$", "", rest.strip()).strip()
-        decision_text = decision_text.rstrip(".:;,!").strip().upper()
-        if "REQUEST CHANGES" in decision_text:
-            decisions.append("rejected")
-        elif "APPROVE" in decision_text:
-            decisions.append("approved")
-        # else: this line's decision text is unrecognised -- skip it and
-        # keep scanning, a later line may still supply a valid decision.
-    distinct = set(decisions)
-    if len(distinct) == 1:
-        return distinct.pop()
+    other source in this module takes. Callers that need to know WHY --
+    unrecognised text vs. no verdict line at all vs. a genuine conflict --
+    use `_scan_verdict_lines` directly (agent-supervisor#198); this
+    function only answers the yes/no/refuse question."""
+    decisions = {decision for decision, _ in _scan_verdict_lines(body) if decision is not None}
+    if len(decisions) == 1:
+        return decisions.pop()
     return None
 
 
@@ -371,32 +435,63 @@ class GithubReviewVerdictSource(VerdictSource):
         return review_result
 
     def _comment_verdict(self, comments):
-        """The LAST comment (chronological, as `gh` returns them) with a
-        `Verdict:` line -- a later re-review supersedes an earlier one, the
-        same "current state" reading the review side already gives a fresh
-        review over a stale one. Returns None when no comment qualifies, so
-        the caller falls back to `review_result` unchanged."""
-        decisive = None
+        """The LAST comment (chronological, as `gh` returns them) that has
+        at least one `Verdict:` line -- a later re-review supersedes an
+        earlier one, the same "current state" reading the review side
+        already gives a fresh review over a stale one. Returns None only
+        when NO comment has a qualifying line at all, so the caller falls
+        back to `review_result` unchanged.
+
+        agent-supervisor#198: this used to track only the last comment with
+        a RECOGNISED decision, silently skipping past one whose decision
+        text was unrecognised to an earlier, valid one underneath it -- a
+        rejection phrased in words this module could not classify would
+        have resolved to the reviewer's own earlier, since-superseded
+        approval, the same "stale answer silently wins" failure #196 fixed
+        for two lines inside one comment. So the LAST verdict-bearing
+        comment is authoritative even when its decision cannot be
+        classified: an unrecognised or internally-ambiguous last comment
+        returns a decisive `unknown` result naming the unrecognised text,
+        never a silent fall-through to an older answer or to `none` --
+        `none` must mean "nothing was ever posted", not "something was
+        posted that this module could not read" (#192's "never refuses
+        without a reason" property, extended to this path)."""
+        last = None
         for comment in comments:
             if not isinstance(comment, dict):
                 continue
-            parsed = _parse_verdict_comment(comment.get("body"))
-            if parsed is None:
+            scan = _scan_verdict_lines(comment.get("body"))
+            if not scan:
                 continue
-            author = (comment.get("author") or {}).get("login")
-            reviewer_lane = _parse_review_lane(comment.get("body"))
-            decisive = (parsed, author, reviewer_lane, comment.get("createdAt") or "")
-        if decisive is None:
+            last = (comment, scan)
+        if last is None:
             return None
-        verdict_value, author, reviewer_lane, created_at = decisive
+        comment, scan = last
+        body = comment.get("body")
+        author = (comment.get("author") or {}).get("login")
+        reviewer_lane = _parse_review_lane(body)
+        created_at = comment.get("createdAt") or ""
         who = f"@{author}" if author else "an unknown author"
         when = f" at {created_at}" if created_at else ""
         lane = f", review lane {reviewer_lane}" if reviewer_lane else ""
-        detail = f"PR comment verdict ({verdict_value}) by {who}{lane}{when}"
-        result = {"verdict": verdict_value, "detail": detail, "verdict_kind": "comment"}
-        if reviewer_lane:
-            result["reviewer_lane"] = reviewer_lane
-        return result
+
+        decisions = {decision for decision, _ in scan if decision is not None}
+        if len(decisions) == 1:
+            verdict_value = decisions.pop()
+            detail = f"PR comment verdict ({verdict_value}) by {who}{lane}{when}"
+            result = {"verdict": verdict_value, "detail": detail, "verdict_kind": "comment"}
+            if reviewer_lane:
+                result["reviewer_lane"] = reviewer_lane
+            return result
+
+        unrecognised = [text for decision, text in scan if decision is None]
+        if unrecognised:
+            named = "; ".join(f'"{text}"' for text in unrecognised)
+            reason = f"decision text not recognised: {named}"
+        else:
+            reason = "conflicting Verdict: lines in one comment"
+        detail = f"PR comment verdict unresolved ({reason}) by {who}{lane}{when}"
+        return {"verdict": "unknown", "detail": detail}
 
     def _review_verdict(self, reviews, *, repo, number, head_sha=None):
         decisive = [r for r in reviews if isinstance(r, dict) and r.get("state") in ("CHANGES_REQUESTED", "APPROVED")]
