@@ -116,6 +116,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./input-box.sh
 . "$HERE/input-box.sh"
+# shellcheck source=./send.sh
+. "$HERE/send.sh"
 # shellcheck source=./session-defaults.sh
 . "$HERE/session-defaults.sh"
 
@@ -242,29 +244,32 @@ fi
 TICK="${SUPERVISOR_TICK:-$HERE/loop-tick.md}"
 NUDGE="/loop Supervisor tick. Follow $TICK exactly. Dispatch to idle worker lanes rather than implementing yourself. Never call stop, always re-arm."
 
-tmux send-keys -t "$PANE" C-u 2>/dev/null
-if ! tmux send-keys -l -t "$PANE" "$NUDGE" 2>/dev/null; then
-  echo "director-route: send-keys to $PANE failed -- message stays queued" >&2
+# agent-supervisor#178: type, verify, THEN submit, via the shared primitive
+# in send.sh -- extracted from dispatch.sh's own loop. `--preclear` is this
+# call's `C-u` (this pane can hold leftover text from anywhere, unlike
+# dispatch.sh's freshly `/clear`'d lane); no `--proof` given falls back to
+# `input_box_state` merely reporting non-empty, the same evidence discipline
+# this file already used by hand before send.sh existed (#159/#161:
+# `delivered` must mean the pane's own box showed the text before Enter was
+# risked, not that send-keys returned 0). `--settle 0`/`--confirm-settle 0`
+# and `--retries 1`/`--confirm-tries 1` reproduce this file's own prior
+# behaviour exactly: one attempt each way, no injected delay, no retype.
+if ! verified_type "$PANE" "$NUDGE" --preclear --literal --settle 0 --retries 1; then
+  if [ "$SEND_STATUS" = send_failed ]; then
+    echo "director-route: send-keys to $PANE failed -- message stays queued" >&2
+  else
+    echo "director-route: $PANE never showed the nudge after typing it -- not sending Enter, message stays queued" >&2
+  fi
   exit 2
 fi
 
-# Same evidence discipline as inbox-route.sh (#159/#161): `delivered` must
-# mean the pane's own box showed the text before Enter was risked, not that
-# send-keys returned 0.
-if [ "$(tmux capture-pane -pe -t "$PANE" 2>/dev/null | input_box_state)" != text ]; then
-  echo "director-route: $PANE never showed the nudge after typing it -- not sending Enter, message stays queued" >&2
+if ! verified_submit "$PANE" --confirm-tries 1 --confirm-settle 0; then
+  case "$SEND_STATUS" in
+    send_failed) echo "director-route: sending Enter to $PANE failed -- message stays queued" >&2 ;;
+    *) echo "director-route: $PANE still shows the nudge after Enter -- not confirmed, message stays queued" >&2 ;;
+  esac
   exit 2
 fi
 
-if ! tmux send-keys -t "$PANE" Enter 2>/dev/null; then
-  echo "director-route: sending Enter to $PANE failed -- message stays queued" >&2
-  exit 2
-fi
-
-if [ "$(tmux capture-pane -pe -t "$PANE" 2>/dev/null | input_box_state)" = empty ]; then
-  echo "director-route: nudged $PANE -- Director will drain the inbox this tick"
-  exit 0
-fi
-
-echo "director-route: $PANE still shows the nudge after Enter -- not confirmed, message stays queued" >&2
-exit 2
+echo "director-route: nudged $PANE -- Director will drain the inbox this tick"
+exit 0

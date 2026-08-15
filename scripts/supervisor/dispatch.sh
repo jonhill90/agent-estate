@@ -92,6 +92,13 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./input-box.sh
 . "$HERE/input-box.sh"
+# shellcheck source=./send.sh
+# agent-supervisor#178: the type-verify-retype-then-submit loop below used to
+# live here, inline. It is the ORIGINAL of the shared primitive now in
+# send.sh -- extracted, not reimplemented, so read that file for why each
+# step exists; this file only supplies its own proof tokens and the ledger
+# commit that has to happen between "landed" and "submitted".
+. "$HERE/send.sh"
 # shellcheck source=./harness-registry.sh
 . "$HERE/harness-registry.sh"
 # shellcheck source=./session-defaults.sh
@@ -1295,6 +1302,21 @@ DISPATCH_SEND_EPOCH=$(date +%s)
 
 # `/clear` first: an author reviewing their own PR is not an independent
 # reviewer, and a lane carrying the last task's context is not a fresh one.
+#
+# `C-u` immediately before it, agent-supervisor#178/#179: this is the FIRST
+# thing dispatch.sh ever types into a lane it did not just create, and #179
+# found exactly this box holding a leftover, unsubmitted prompt from
+# something else entirely (`merge the PR`, sitting in the author lane's
+# input box). Typing `/clear` on top of that appends to it rather than
+# clearing anything -- `/clear` is a plain string to the pane, not a key
+# tmux interprets -- and #178's diagnosis is that the Enter which follows
+# then may not submit either. This does not go through the rest of
+# send.sh's verified_type/verified_submit: `/clear` blanks the whole screen,
+# which the input-box heuristic was never built to read through, so this is
+# a bare pre-clear, not a verified send -- narrower than the fix below, but
+# it removes the specific leftover-box risk at the one point every dispatch
+# passes through.
+tmux send-keys -t "$LANE_TARGET" C-u 2>/dev/null
 tmux send-keys -t "$LANE_TARGET" "/clear" Enter 2>/dev/null \
   || abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
 
@@ -1305,40 +1327,35 @@ tmux send-keys -t "$LANE_TARGET" "/clear" Enter 2>/dev/null \
 # worse than one that does not arrive: the lane acts on it anyway.
 sleep "${DISPATCH_SETTLE:-2}"
 
-# Type, verify, THEN submit. The verification is why the Enter is a separate
-# call: what the pane actually shows is the only evidence that the keys landed.
-sent=0
-for attempt in 1 2; do
-  tmux send-keys -t "$LANE_TARGET" "$MESSAGE" 2>/dev/null \
-    || abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
-  sleep "${DISPATCH_SETTLE:-1}"
-  # Check BOTH ENDS of the message plus the worktree path. The head is what a
-  # dropped prefix eats first (observed live, 2026-08-11), and it is also the
-  # first thing an over-long message hides by scrolling -- so checking the head
-  # alone conflates "arrived and is visible" with "fits". The tail is the part
-  # that stays visible under scrolling, so it is the half that still reports
-  # honestly when the box is full; checking only the tail would pass a dropped
-  # prefix, which is the failure this loop exists for. Both, or neither is
-  # evidence.
-  #
-  # The tail token is the closing phrase plus $REPO_PATH, not the path alone:
-  # the harness prints the working directory in its own header, so the bare
-  # path matches ordinary pane furniture and would pass on a blank pane.
-  # Spaces and newlines come out because a real pane wraps a long path across
-  # lines and indents the continuation.
-  pane=$(tmux capture-pane -p -t "$LANE_TARGET" 2>/dev/null | tr -d ' \n')
-  if grep -qF "$(tr -d ' ' <<<"Read $BRIEF")" <<<"$pane" \
-     && grep -qF "$(tr -d ' ' <<<"$WORKTREE")" <<<"$pane" \
-     && grep -qF "$(tr -d ' ' <<<"never work in the shared checkout at $REPO_PATH.")" <<<"$pane"; then
-    sent=1
-    break
+# Type, verify, THEN submit -- send.sh's verified_type, extracted from what
+# used to be this loop. The verification is why the Enter is a separate call
+# (verified_submit, below the ledger commit): what the pane actually shows
+# is the only evidence that the keys landed.
+#
+# Check BOTH ENDS of the message plus the worktree path -- the proof tokens
+# below. The head is what a dropped prefix eats first (observed live,
+# 2026-08-11), and it is also the first thing an over-long message hides by
+# scrolling -- so checking the head alone conflates "arrived and is visible"
+# with "fits". The tail is the part that stays visible under scrolling, so it
+# is the half that still reports honestly when the box is full; checking only
+# the tail would pass a dropped prefix, which is the failure this loop exists
+# for. Both, or neither is evidence.
+#
+# The tail token is the closing phrase plus $REPO_PATH, not the path alone:
+# the harness prints the working directory in its own header, so the bare
+# path matches ordinary pane furniture and would pass on a blank pane.
+# send.sh strips spaces and newlines from both sides before matching, because
+# a real pane wraps a long path across lines and indents the continuation.
+if ! verified_type "$LANE_TARGET" "$MESSAGE" \
+     --settle "${DISPATCH_SETTLE:-1}" --retries 2 \
+     --proof "Read $BRIEF" \
+     --proof "$WORKTREE" \
+     --proof "never work in the shared checkout at $REPO_PATH."; then
+  if [ "$SEND_STATUS" = send_failed ]; then
+    abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
   fi
-  # Clear whatever partial text is in the input and retype once.
-  tmux send-keys -t "$LANE_TARGET" C-u 2>/dev/null
-  sleep "${DISPATCH_SETTLE:-1}"
-done
-
-[ "$sent" = 1 ] || abort_send "the brief did not land intact in $LANE -- #$ISSUE_ARG was NOT dispatched (check the pane by hand)"
+  abort_send "the brief did not land intact in $LANE -- #$ISSUE_ARG was NOT dispatched (check the pane by hand)"
+fi
 
 # --- 4.5 THE POINT OF NO RETURN, AND IT IS THE SEND -----------------------
 # agent-dotfiles#209 round 2. `CLAIM_COMMITTED` used to be set ~70 lines below
@@ -1386,9 +1403,6 @@ if ! grep -qF '"committed":true' <<<"$COMMIT_OUT"; then
 fi
 CLAIM_COMMITTED=1
 
-tmux send-keys -t "$LANE_TARGET" Enter 2>/dev/null \
-  || abort_send "could not submit the brief in $LANE -- #$ISSUE_ARG was not dispatched"
-
 # --- 5. AND THE BRIEF ACTUALLY STARTED ------------------------------------
 # #141. Everything above proves the brief was TYPED. Nothing proved it was
 # SUBMITTED, and on 2026-08-11 two lanes sat for 40 minutes each holding a
@@ -1413,34 +1427,38 @@ tmux send-keys -t "$LANE_TARGET" Enter 2>/dev/null \
 # so do not tune DISPATCH_CONFIRM_TRIES down to make dispatch feel faster
 # without understanding that the loop is what makes an unsent brief
 # detectable instead of silent.
-CONFIRM_TRIES="${DISPATCH_CONFIRM_TRIES:-10}"
-submitted=""
-box=""
-for ((attempt = 1; attempt <= CONFIRM_TRIES; attempt++)); do
-  sleep "${DISPATCH_SETTLE:-1}"
-  box=$(tmux capture-pane -pe -t "$LANE_TARGET" 2>/dev/null | input_box_state)
-  if [ "$box" = empty ]; then submitted=1; break; fi
-done
-
-if [ -z "$submitted" ]; then
-  if [ "$box" = text ]; then
-    # Confirmed failure: the message is still sitting in the box. Unwind, so
-    # the issue goes back to the pool rather than looking claimed-and-running.
-    #
-    # The text is deliberately NOT cleared on the way out. C-u does not
-    # reliably empty a multi-row box on a real pane, so "cleared" would be
-    # another unverified claim -- and a lane left holding it is now visible:
-    # `lanes.sh` reports it `unsent` with a count line, which is the state
-    # #141 added for exactly this.
-    abort_send "the brief was typed into $LANE but never submitted -- #$ISSUE_ARG was NOT dispatched (lanes.sh will show that lane 'unsent')"
-  fi
-  # `unknown`: the box could not be identified at all -- another harness, or a
-  # pane too short to show it. The brief may well be running, so unwinding
-  # would release a claim out from under a working lane, which is its own
-  # failure. Say so loudly instead of printing a clean success line.
-  echo "dispatch: WARNING -- could not confirm the brief started in $LANE" >&2
-  echo "dispatch: the input box was not readable (input_box_state: ${box:-none})." >&2
-  echo "dispatch: #$ISSUE_ARG is claimed and the worktree exists; CHECK THE PANE BY HAND." >&2
+# verified_submit sends the Enter itself -- this used to be a separate
+# `tmux send-keys ... Enter` call right above step 5's comment block; moving
+# it into send.sh changed nothing about WHEN it fires (still immediately
+# after the ledger commit above, still fatal if the send-keys call itself
+# errors), only where the code that fires it lives.
+if ! verified_submit "$LANE_TARGET" \
+     --confirm-tries "${DISPATCH_CONFIRM_TRIES:-10}" \
+     --confirm-settle "${DISPATCH_SETTLE:-1}"; then
+  case "$SEND_STATUS" in
+    send_failed)
+      abort_send "could not submit the brief in $LANE -- #$ISSUE_ARG was not dispatched" ;;
+    stranded)
+      # Confirmed failure: the message is still sitting in the box. Unwind,
+      # so the issue goes back to the pool rather than looking
+      # claimed-and-running.
+      #
+      # The text is deliberately NOT cleared on the way out. C-u does not
+      # reliably empty a multi-row box on a real pane, so "cleared" would be
+      # another unverified claim -- and a lane left holding it is now
+      # visible: `lanes.sh` reports it `unsent` with a count line, which is
+      # the state #141 added for exactly this.
+      abort_send "the brief was typed into $LANE but never submitted -- #$ISSUE_ARG was NOT dispatched (lanes.sh will show that lane 'unsent')" ;;
+    unknown)
+      # The box could not be identified at all -- another harness, or a pane
+      # too short to show it. The brief may well be running, so unwinding
+      # would release a claim out from under a working lane, which is its
+      # own failure. Say so loudly instead of printing a clean success line.
+      echo "dispatch: WARNING -- could not confirm the brief started in $LANE" >&2
+      echo "dispatch: the input box was not readable (input_box_state: ${SEND_BOX_STATE:-none})." >&2
+      echo "dispatch: #$ISSUE_ARG is claimed and the worktree exists; CHECK THE PANE BY HAND." >&2
+      ;;
+  esac
 fi
 
 # The dispatch was committed at step 4.5, not here. This comment used to

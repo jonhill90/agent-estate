@@ -51,6 +51,8 @@ export PATH
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./session-defaults.sh
 . "$HERE/session-defaults.sh"
+# shellcheck source=./send.sh
+. "$HERE/send.sh"
 # Overridable so the script is testable and so a second lane can reuse it.
 PANE="${SUPERVISOR_PANE:-$(lanes_session_or_default):1.1}"
 # Runtime state (logs, status, briefs) stays outside the repo; the CODE
@@ -1373,11 +1375,18 @@ case "$(pane_busy_state "$recheck")" in
     exit 0 ;;
 esac
 
-tmux send-keys -t "$PANE" C-u 2>/dev/null; sleep 1
-tmux send-keys -t "$PANE" -l \
-  "/loop Supervisor tick. Follow $TICK exactly. Dispatch to idle worker lanes rather than implementing yourself. Never call stop, always re-arm." 2>/dev/null
-sleep 2
-tmux send-keys -t "$PANE" Enter 2>/dev/null
+# agent-supervisor#178: centralised via send.sh's blind_send, which
+# preserves this exact sequence (C-u, settle, literal type, settle, Enter)
+# byte for byte -- see that function's own header for why this is NOT
+# upgraded to verified_type/verified_submit here. This pane's stub models
+# busy/idle chrome, not an editable input buffer, so there is nothing yet
+# for a landed/submitted check to read; closing that gap for real is
+# follow-up work (growing the watchdog stub an input-buffer model, the way
+# tmux-dispatch already has one), not a silent claim of verification this
+# call cannot back.
+blind_send "$PANE" \
+  "/loop Supervisor tick. Follow $TICK exactly. Dispatch to idle worker lanes rather than implementing yourself. Never call stop, always re-arm." \
+  --preclear-settle 1 --type-settle 2 --literal
 
 echo "$now" >"$STAMP"
 echo "$now" >>"$HISTORY"

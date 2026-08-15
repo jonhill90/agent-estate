@@ -273,10 +273,18 @@ python3 - "$ROUTE" "$MUTANT" <<'PY' || patch_rc=$?
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = '''    if ! tmux send-keys -l -t "$LANE" "$MESSAGE" 2>/dev/null; then'''
-assert marker in text, "literal send-keys call not found -- inbox-route.sh shape changed"
-assert text.count(marker) == 1, "literal send-keys call not unique -- inbox-route.sh shape changed"
-open(dst, "w").write(text.replace(marker, '''    if ! true; then''', 1))
+# agent-supervisor#178 moved the literal `tmux send-keys` call into send.sh's
+# verified_type (shared by every caller, so mutating IT would mutate them
+# all, and skipping the CALL outright would also skip its own real landed
+# check, which is a second, independent gate this test must not disturb).
+# What still reproduces "the literal send never happens" at this file's own
+# level is starving that call of anything to type: an empty message can
+# never land, so verified_type's own unmutated evidence check still runs
+# for real and still correctly refuses.
+marker = '''verified_type "$LANE" "$MESSAGE" --literal --settle 0 --retries 1'''
+assert marker in text, "the verified_type call not found -- inbox-route.sh shape changed"
+assert text.count(marker) == 1, "the verified_type call not unique -- inbox-route.sh shape changed"
+open(dst, "w").write(text.replace(marker, '''verified_type "$LANE" "" --literal --settle 0 --retries 1''', 1))
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a delivery-free copy of inbox-route.sh" \
@@ -337,22 +345,24 @@ python3 - "$ROUTE" "$MUTANT2" <<'PY' || patch_rc=$?
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = '''    if [ "$(tmux capture-pane -pe -t "$LANE" 2>/dev/null | input_box_state)" != text ]; then
-      echo "inbox-route: $LANE never showed the reply after typing it -- not sending Enter" >&2
-      notify_jon "Telegram reply could not be confirmed" \\
-        "$LANE was blocked and waiting but the reply never appeared in its input box -- reply was: $MESSAGE"
+# Same relocation as mutation (a) above: the pane-evidence check is now
+# send.sh's verified_submit, shared by every caller. What this file still
+# owns is the call to it -- patched out here, leaving a raw Enter with no
+# verification at all, the exact #159 shape this test reproduces.
+marker = '''    if ! verified_submit "$LANE" --confirm-tries 1 --confirm-settle 0; then
+      if [ "$SEND_STATUS" = send_failed ]; then
+        echo "inbox-route: sending Enter to $LANE failed" >&2
+        notify_jon "Telegram reply could not be delivered" \\
+          "$LANE was blocked and waiting but sending Enter failed -- reply was: $MESSAGE"
+      else
+        echo "inbox-route: $LANE still shows the reply after Enter -- not confirmed delivered" >&2
+        notify_jon "Telegram reply could not be confirmed" \\
+          "$LANE was blocked and waiting but Enter did not submit the reply -- it may still be sitting in the box -- reply was: $MESSAGE"
+      fi
       exit 1
     fi
-    if ! tmux send-keys -t "$LANE" Enter 2>/dev/null; then
-      echo "inbox-route: sending Enter to $LANE failed" >&2
-      notify_jon "Telegram reply could not be delivered" \\
-        "$LANE was blocked and waiting but sending Enter failed -- reply was: $MESSAGE"
-      exit 1
-    fi
-    if [ "$(tmux capture-pane -pe -t "$LANE" 2>/dev/null | input_box_state)" = empty ]; then
-      echo "inbox-route: delivered to $LANE"
-      exit 0
-    fi'''
+    echo "inbox-route: delivered to $LANE"
+    exit 0'''
 assert marker in text, "verification block not found -- inbox-route.sh shape changed"
 assert text.count(marker) == 1, "verification block not unique -- inbox-route.sh shape changed"
 replacement = '''    tmux send-keys -t "$LANE" Enter 2>/dev/null

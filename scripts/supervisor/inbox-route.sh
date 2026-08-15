@@ -96,6 +96,8 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./input-box.sh
 . "$HERE/input-box.sh"
+# shellcheck source=./send.sh
+. "$HERE/send.sh"
 # shellcheck source=./session-defaults.sh
 . "$HERE/session-defaults.sh"
 SESSION="${2:-$(lanes_session_or_default)}"
@@ -140,47 +142,49 @@ case "${#BLOCKED[@]}" in
       refuse_exit "Telegram reply -- $LANE is on a menu, not free text" \
         "$LANE is waiting on a selection, not typed text -- your reply (\"$MESSAGE\") was NOT sent, to avoid it landing as navigation keys. What it shows: $MENU_TEXT"
     fi
-    # `-l`: unlike dispatch.sh's own brief send, this text comes from an
-    # external network service (agent-dotfiles#152) -- it is never safe to
-    # assume it isn't a recognised key name. Without `-l`, a reply of
-    # literally `C-c` or `Escape` fires that control action at the lane
-    # instead of typing the four characters; `C-u` would silently wipe
-    # whatever the lane had already typed. `-l` forces every byte to be
-    # typed as literal text, key name or not, and Enter stays a deliberate
-    # second call so a message can never smuggle in its own submission.
-    if ! tmux send-keys -l -t "$LANE" "$MESSAGE" 2>/dev/null; then
-      echo "inbox-route: send-keys to $LANE failed" >&2
-      notify_jon "Telegram reply could not be delivered" \
-        "$LANE was blocked and waiting but the send failed -- reply was: $MESSAGE"
+    # agent-supervisor#178: type, verify, THEN submit, via the shared
+    # primitive in send.sh. `--literal` is agent-dotfiles#152's `-l`: unlike
+    # dispatch.sh's own brief send, this text comes from an external network
+    # service and is never safe to assume it isn't a recognised key name --
+    # without it, a reply of literally `C-c` or `Escape` fires that control
+    # action at the lane instead of typing the four characters. No
+    # `--preclear`: `C-u` would silently wipe whatever the lane had already
+    # typed, which is exactly the menu-blocked case handled above this
+    # block. `--settle 0`/`--confirm-settle 0` and `--retries 1`/
+    # `--confirm-tries 1` reproduce this file's own prior behaviour exactly
+    # -- one attempt each way, no injected delay, no retype.
+    #
+    # #159/#141's evidence discipline is unchanged: the first check confirms
+    # the literal bytes actually landed in the input box before Enter is
+    # risked at all; the second confirms Enter actually submitted them (a
+    # repaint swallowing the Enter leaves the reply sitting there, unsent,
+    # while the box still shows it).
+    if ! verified_type "$LANE" "$MESSAGE" --literal --settle 0 --retries 1; then
+      if [ "$SEND_STATUS" = send_failed ]; then
+        echo "inbox-route: send-keys to $LANE failed" >&2
+        notify_jon "Telegram reply could not be delivered" \
+          "$LANE was blocked and waiting but the send failed -- reply was: $MESSAGE"
+      else
+        echo "inbox-route: $LANE never showed the reply after typing it -- not sending Enter" >&2
+        notify_jon "Telegram reply could not be confirmed" \
+          "$LANE was blocked and waiting but the reply never appeared in its input box -- reply was: $MESSAGE"
+      fi
       exit 1
     fi
-    # #159: `delivered` must be backed by evidence from the pane, not by
-    # `send-keys` returning 0 -- that was true right before the router typed
-    # a reply into a menu and reported success. The first check confirms the
-    # literal bytes actually landed in the input box before Enter is risked
-    # at all; the second confirms Enter actually submitted them (#141's
-    # failure shape: a repaint swallows the Enter and the reply sits there,
-    # unsent, while the box still shows it).
-    if [ "$(tmux capture-pane -pe -t "$LANE" 2>/dev/null | input_box_state)" != text ]; then
-      echo "inbox-route: $LANE never showed the reply after typing it -- not sending Enter" >&2
-      notify_jon "Telegram reply could not be confirmed" \
-        "$LANE was blocked and waiting but the reply never appeared in its input box -- reply was: $MESSAGE"
+    if ! verified_submit "$LANE" --confirm-tries 1 --confirm-settle 0; then
+      if [ "$SEND_STATUS" = send_failed ]; then
+        echo "inbox-route: sending Enter to $LANE failed" >&2
+        notify_jon "Telegram reply could not be delivered" \
+          "$LANE was blocked and waiting but sending Enter failed -- reply was: $MESSAGE"
+      else
+        echo "inbox-route: $LANE still shows the reply after Enter -- not confirmed delivered" >&2
+        notify_jon "Telegram reply could not be confirmed" \
+          "$LANE was blocked and waiting but Enter did not submit the reply -- it may still be sitting in the box -- reply was: $MESSAGE"
+      fi
       exit 1
     fi
-    if ! tmux send-keys -t "$LANE" Enter 2>/dev/null; then
-      echo "inbox-route: sending Enter to $LANE failed" >&2
-      notify_jon "Telegram reply could not be delivered" \
-        "$LANE was blocked and waiting but sending Enter failed -- reply was: $MESSAGE"
-      exit 1
-    fi
-    if [ "$(tmux capture-pane -pe -t "$LANE" 2>/dev/null | input_box_state)" = empty ]; then
-      echo "inbox-route: delivered to $LANE"
-      exit 0
-    fi
-    echo "inbox-route: $LANE still shows the reply after Enter -- not confirmed delivered" >&2
-    notify_jon "Telegram reply could not be confirmed" \
-      "$LANE was blocked and waiting but Enter did not submit the reply -- it may still be sitting in the box -- reply was: $MESSAGE"
-    exit 1
+    echo "inbox-route: delivered to $LANE"
+    exit 0
     ;;
   0)
     # agent-dotfiles#186: inbox-poll.sh drains a batch from one getUpdates
