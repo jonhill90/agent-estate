@@ -105,13 +105,32 @@ class LaneCompletionReconciler:
         return {str(row["window"]): row for row in payload}
 
     def sweep(self):
-        """Complete every lane observably free long enough. Safe on a schedule.
+        """Complete every ACCEPTED lane observably free long enough. Safe on
+        a schedule.
 
-        Returns a report dict: `completed` (task ids actually released),
-        `unresolved` (left alone -- not observably free long enough, or the
-        pane could not be read this run), and `errors` (a session's
-        `lanes.sh --json` call itself failed, affecting every task that
-        depended on it).
+        Returns a report dict: `completed` (task ids actually released as
+        `complete`), `failed_unaccepted` (task ids terminated `failed`
+        instead -- observably free long enough, but never accepted; see
+        below), `unresolved` (left alone -- not observably free long
+        enough, or the pane could not be read this run), and `errors` (a
+        session's `lanes.sh --json` call itself failed, affecting every
+        task that depended on it).
+
+        agent-supervisor#193: "lane free, idle past the dwell" alone is not
+        evidence a task's work ever started -- `at25-rev33`'s brief landed
+        as noise the harness discarded, the lane went quiet exactly like a
+        finished one, and this sweep used to certify it `complete` from that
+        alone. `accepted_at` is now the gate: it is set only by
+        `record_dispatch`'s own confirmation that its send actually landed
+        (see that method's docstring), never by mere pane quiet. A task that
+        is free-and-idle-enough WITH `accepted_at` set completes exactly as
+        before; one free-and-idle-enough WITHOUT it is terminated `failed`
+        instead -- never silently left `delivered` forever (that would just
+        strand the lane), and never asserted `complete` (that would be the
+        false record #193 filed against). Fail-closed cuts one way here: a
+        real completion is never reported as accepted-but-wasn't, because
+        `accepted_at` is written before this sweep ever runs, not inferred
+        by it.
         """
         tasks = self.ledger.list_delivered_open_tasks()
 
@@ -125,7 +144,7 @@ class LaneCompletionReconciler:
             session, index = parsed
             by_session.setdefault(session, []).append((task, index))
 
-        report = {"completed": [], "unresolved": [], "errors": []}
+        report = {"completed": [], "failed_unaccepted": [], "unresolved": [], "errors": []}
 
         for task in unresolvable:
             report["unresolved"].append(task["id"])
@@ -149,6 +168,9 @@ class LaneCompletionReconciler:
                 if not isinstance(idle_seconds, (int, float)) or idle_seconds < self.idle_after:
                     report["unresolved"].append(task["id"])
                     continue
+                if task.get("accepted_at") is None:
+                    self._fail_unaccepted(task, session=session, idle_seconds=idle_seconds, now=now, report=report)
+                    continue
                 self._complete_observed(task, session=session, idle_seconds=idle_seconds, now=now, report=report)
 
         return report
@@ -166,3 +188,25 @@ class LaneCompletionReconciler:
             report["errors"].append({"task": task["id"], "error": str(error)})
             return
         report["completed"].append(task["id"])
+
+    def _fail_unaccepted(self, task, *, session, idle_seconds, now, report):
+        """agent-supervisor#193: observed free/idle with no `accepted_at` is
+        not a completion -- see `sweep`'s own docstring. Terminated `failed`
+        instead, loud about exactly why (#118's lesson, same as
+        `_complete_observed`'s note), so a human reading the report or
+        `watchdog.status` can tell this apart from an ordinary completion at
+        a glance, not just from the ledger's status column.
+        """
+        note = (
+            f"reconcile-lane-completions: {task['lane']} observed free for "
+            f"{int(idle_seconds)}s (>= {self.idle_after}s) as of {int(now)} -- "
+            "never signalled completion AND no accepted_at recorded (this dispatch "
+            "was never confirmed to land) -- failed, not completed (agent-supervisor#193)"
+        ).encode("utf-8")
+        allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
+        try:
+            self.ledger.fail_unaccepted(task["id"], note, pane_nonce=task["pane_nonce"], allow_claim=allow_claim)
+        except Exception as error:
+            report["errors"].append({"task": task["id"], "error": str(error)})
+            return
+        report["failed_unaccepted"].append(task["id"])

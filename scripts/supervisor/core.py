@@ -1855,6 +1855,7 @@ class Ledger:
         harness_project_dir="",
         transport="send-keys",
         worktree_path="",
+        accepted=False,
         failpoint=None,
     ):
         """Atomically register the lane, record the GitHub source, assign, and mark delivered.
@@ -1882,6 +1883,20 @@ class Ledger:
         removes the partial-write window *inside* the recording step itself;
         it does not make the recording step itself load-bearing for the
         dispatch.
+
+        agent-supervisor#193: `accepted` is the caller's own evidence that
+        the brief did more than get typed -- it landed under a
+        position-anchored proof check and the box was then confirmed to go
+        empty (`dispatch.sh`'s `verified_type --proof-head` /
+        `verified_submit`, both fixed by this same issue). Nothing upstream
+        of `record_dispatch` self-reports acceptance; this is dispatch's OWN
+        confirmation, recorded durably so a later reconciler never has to
+        take "the lane went quiet" as a stand-in for "the work began" --
+        that substitution is exactly what let `reconcile_lane_completions.py`
+        certify `at25-rev33` `complete` after its brief landed as noise a
+        harness discarded. `accepted=False` (the default) leaves the task
+        `delivered`, same as before this parameter existed -- every existing
+        caller is unaffected until it opts in.
         """
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
@@ -1937,6 +1952,23 @@ class Ledger:
                 connection, task_id, registered_nonce, ("delivery_pending",), "delivered", "delivered_at", now
             )
             self._fail(failpoint, "after_mark_delivered")
+            if accepted:
+                # Deliberately NOT `_transition_tx(..., "accepted", ...)`:
+                # that moves `status` itself to `accepted`, which is the
+                # SELF-REPORT path's state (`Ledger.accept`, caller-verified
+                # against the lane's own pane_id) -- a distinct, visible
+                # status change other readers may key on (`status='delivered'`
+                # is what `list_delivered_open_tasks` -- and so the
+                # completion reconciler's whole candidate set -- selects on).
+                # This is dispatch's OWN evidence, not a self-report, and it
+                # must not remove the task from that candidate set; only
+                # `accepted_at` is stamped, `status` stays `delivered`.
+                connection.execute(
+                    "UPDATE tasks SET accepted_at = ? WHERE id = ? AND accepted_at IS NULL",
+                    (now, task_id),
+                )
+                self._fail(failpoint, "after_mark_accepted")
+                task = self._dict(connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone())
         return {"lane": lane_record, "task": task}
 
     def mark_lane_held(self, lane, *, note):
@@ -2350,6 +2382,78 @@ class Ledger:
                 connection.execute(
                     """
                     UPDATE tasks SET status='complete', result_path=?, result_sha256=?,
+                                     updated_at=?, completed_at=? WHERE id=?
+                    """,
+                    (str(destination), digest, now, now, task_id),
+                )
+                self._fail(failpoint, "after_task")
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO events(key, type, task_id, status, payload_path, created_at)
+                    VALUES (?, 'completion', ?, 'pending', ?, ?)
+                    """,
+                    (f"completion:{task_id}", task_id, str(destination), now),
+                )
+                self._fail(failpoint, "after_event")
+                row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            return self._dict(row)
+
+    def fail_unaccepted(self, task_id, result, *, pane_nonce, failpoint=None, allow_claim=False):
+        """Terminate a `delivered` task that shows no evidence of acceptance.
+
+        agent-supervisor#193. `reconcile_lane_completions.py` used to treat
+        "lane free, idle past the dwell" as evidence a delivered task was
+        done -- `at25-rev33`'s brief landed as noise a harness discarded as
+        an unknown command, the lane went quiet exactly like a finished one,
+        and the sweep certified it `complete`. `accepted_at` is the fact
+        that distinguishes the two: nothing sets it except `record_dispatch`
+        confirming its own send actually landed (see that method's
+        docstring). A `delivered` task the sweep finds idle with no
+        `accepted_at` gets THIS terminal state instead -- `failed`, not
+        `complete` -- so the ledger records what is actually known (this
+        dispatch was never seen to start) rather than asserting the work
+        finished. `failed` is still terminal (`one_open_task_per_lane`
+        excludes it), so the lane is free for a fresh dispatch; nothing here
+        claims to know why the send never took, only that it never did.
+
+        Mirrors `complete()`'s shape deliberately -- same immutable-result
+        write, same idempotency, same pane-nonce check -- so a caller reading
+        one already knows what the other does. The two ways this MUST differ
+        from `complete()`: the source status is checked (only `delivered`,
+        and only with `accepted_at` still NULL, is eligible -- anything else
+        means the caller's own evidence is stale or wrong, and this refuses
+        rather than guess), and the terminal status written is `failed`.
+        """
+        self._require_task_id(task_id, allow_claim=allow_claim)
+        with self._locked():
+            with contextlib.closing(self._connect()) as probe:
+                existing = probe.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if existing is None:
+                    raise ValueError("unknown task")
+                if existing["pane_nonce"] != pane_nonce:
+                    raise ValueError("pane incarnation does not match task")
+            destination, digest = self._write_result(task_id, result)
+            self._fail(failpoint, "after_result")
+            now = int(self.clock())
+            with self._transaction() as connection:
+                row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if row is None:
+                    raise ValueError("unknown task")
+                if row["pane_nonce"] != pane_nonce:
+                    raise ValueError("pane incarnation does not match task")
+                if row["status"] == "failed":
+                    if row["result_sha256"] != digest:
+                        raise ValueError("immutable result conflicts with already-failed task")
+                    return self._dict(row)
+                if row["status"] in ("complete", "cancelled"):
+                    raise ValueError(f"cannot fail-unaccepted a {row['status']} task")
+                if row["status"] != "delivered":
+                    raise ValueError(f"cannot fail-unaccepted a {row['status']} task -- only 'delivered' is eligible")
+                if row["accepted_at"] is not None:
+                    raise ValueError("task has accepted_at set -- it WAS accepted, use complete() instead")
+                connection.execute(
+                    """
+                    UPDATE tasks SET status='failed', result_path=?, result_sha256=?,
                                      updated_at=?, completed_at=? WHERE id=?
                     """,
                     (str(destination), digest, now, now, task_id),

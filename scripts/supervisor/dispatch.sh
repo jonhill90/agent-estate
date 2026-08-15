@@ -1416,22 +1416,27 @@ DISPATCH_SEND_EPOCH=$(date +%s)
 # input box). Typing `/clear` on top of that appends to it rather than
 # clearing anything -- `/clear` is a plain string to the pane, not a key
 # tmux interprets -- and #178's diagnosis is that the Enter which follows
-# then may not submit either. This does not go through the rest of
-# send.sh's verified_type/verified_submit: `/clear` blanks the whole screen,
-# which the input-box heuristic was never built to read through, so this is
-# a bare pre-clear, not a verified send -- narrower than the fix below, but
-# it removes the specific leftover-box risk at the one point every dispatch
-# passes through.
-tmux send-keys -t "$LANE_TARGET" C-u 2>/dev/null
-tmux send-keys -t "$LANE_TARGET" "/clear" Enter 2>/dev/null \
-  || abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
-
-# THEN WAIT. Observed live on 2026-08-11 while building this: typing the brief
-# immediately after `/clear` lost the leading characters -- the lane's prompt
-# read `/var/.../brief.md and do exactly what it says`, with `Read ` gone,
-# because the harness was still repainting. A brief that arrives mangled is
-# worse than one that does not arrive: the lane acts on it anyway.
-sleep "${DISPATCH_SETTLE:-2}"
+# then may not submit either.
+#
+# VERIFIED, not bare, as of agent-supervisor#193: `/clear`'s own Enter can be
+# swallowed exactly the way #178 already found a brief's Enter can be, and
+# that failure used to be invisible -- the retyped brief landed glued onto
+# the unsubmitted "/clear", and the proof-token check below (an AND-of-
+# substrings check with no notion of position) still read it as `landed`
+# because its tokens were still true substrings of the corrupted line.
+# `verified_preclear` (send.sh) confirms the screen actually came back
+# BLANK -- the input box reads `empty`, not `text` or `unknown` -- before
+# anything else is ever typed. This is still not `verified_type`/
+# `verified_submit`: `/clear` blanks the whole screen, which the proof-token
+# check was never built to read through (see that function's own header) --
+# confirming the blank is the whole of what can be confirmed here.
+if ! verified_preclear "$LANE_TARGET" \
+     --settle "${DISPATCH_SETTLE:-2}" --retries "${DISPATCH_PRECLEAR_RETRIES:-2}"; then
+  if [ "$SEND_STATUS" = send_failed ]; then
+    abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
+  fi
+  abort_send "/clear did not blank $LANE's screen -- #$ISSUE_ARG was NOT dispatched (check the pane by hand)"
+fi
 
 # Type, verify, THEN submit -- send.sh's verified_type, extracted from what
 # used to be this loop. The verification is why the Enter is a separate call
@@ -1452,9 +1457,19 @@ sleep "${DISPATCH_SETTLE:-2}"
 # path matches ordinary pane furniture and would pass on a blank pane.
 # send.sh strips spaces and newlines from both sides before matching, because
 # a real pane wraps a long path across lines and indents the continuation.
+#
+# The head token is `--proof-head`, not `--proof`, as of agent-supervisor#193:
+# the ORIGINAL `--proof "Read $BRIEF"` only checked that the string appeared
+# somewhere on the pane, and "somewhere" is exactly what let a corrupted
+# `/clearRead $BRIEF...` -- `/clear`'s own Enter swallowed, the retyped brief
+# glued onto the unsubmitted line -- read as `landed`: `Read $BRIEF` was
+# still a true substring, just not the start of anything. `--proof-head`
+# anchors it to the START of the input box's own content instead (see
+# send.sh's `_send_head_matches`), so this exact corruption now fails the
+# check and falls into the C-u-and-retype loop below rather than shipping.
 if ! verified_type "$LANE_TARGET" "$MESSAGE" \
      --settle "${DISPATCH_SETTLE:-1}" --retries 2 \
-     --proof "Read $BRIEF" \
+     --proof-head "Read $BRIEF" \
      --proof "$WORKTREE" \
      --proof "never work in the shared checkout at $REPO_PATH."; then
   if [ "$SEND_STATUS" = send_failed ]; then
@@ -1566,6 +1581,16 @@ if ! verified_submit "$LANE_TARGET" \
       ;;
   esac
 fi
+
+# agent-supervisor#193: the ledger's own record of "was this genuinely
+# accepted" (`--confirm-landed`, step 6 below), set ONLY when `SEND_STATUS`
+# reads `submitted` -- the box actually confirmed empty after a
+# position-anchored, proof-checked send. The `unknown` case just above is
+# explicitly NOT that: the brief may well be running, but nothing here
+# CONFIRMED it, and #193's whole point is that the reconciler must not take
+# "the lane went quiet" as a stand-in for that confirmation.
+DISPATCH_CONFIRM_LANDED_ARGS=()
+[ "$SEND_STATUS" = submitted ] && DISPATCH_CONFIRM_LANDED_ARGS=(--confirm-landed)
 
 # The dispatch was committed at step 4.5, not here. This comment used to
 # introduce a `CLAIM_COMMITTED=1` on this line, and that placement was
@@ -1747,6 +1772,9 @@ else
     # living inside --summary text, so a later --reviews-pr authorship check
     # can look it back up without reconstructing anything from a branch name.
     --worktree "$WORKTREE_CANONICAL"
+    # bash 3.2-safe empty-array expansion -- see this file's own comment on
+    # POSITIONAL, above, for why the bare "${arr[@]}" form is not.
+    "${DISPATCH_CONFIRM_LANDED_ARGS[@]+"${DISPATCH_CONFIRM_LANDED_ARGS[@]}"}"
   )
   # agent-dotfiles#216: forward the harness `lane-free` already resolved
   # (step 1) instead of letting `record-dispatch` re-derive one from

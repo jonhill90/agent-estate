@@ -564,6 +564,36 @@ class RecordDispatchCliTest(unittest.TestCase):
             self.assertEqual(0, rc2, out2)
             self.assertEqual("delivered", json.loads(out2)["task"]["status"])
 
+    def test_confirm_landed_flag_sets_accepted_at_without_omitting_it_stays_null(self):
+        """agent-supervisor#193: `--confirm-landed` is `dispatch.sh`'s own
+        evidence that its send actually landed (a position-anchored proof
+        check plus a confirmed-empty box) -- forwarded straight through to
+        `Ledger.record_dispatch(accepted=...)`. Omitted (every call before
+        this flag existed, and every call that omits it still) leaves
+        `accepted_at` null, same as before."""
+        with tempfile.TemporaryDirectory() as root:
+            rc, out = self._dispatch(root, lane="free-3", task="as193-confirmed", issue=193)
+            self.assertEqual(0, rc, out)
+            self.assertIsNone(Ledger(Path(root)).get_task("as193-confirmed")["accepted_at"])
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc2 = cli.main([
+                    "--state-dir", root, "record-dispatch",
+                    "--lane", "free-4", "--task", "as193-landed", "--summary", "#193 summary",
+                    "--pane-id", "%4", "--pane-path", root, "--command", "claude.exe",
+                    "--server-id", "socket:1", "--session-id", "$0",
+                    "--issue", "193", "--github", "jonhill90/agent-dotfiles",
+                    "--confirm-landed",
+                ])
+            self.assertEqual(0, rc2, output.getvalue())
+            landed_task = Ledger(Path(root)).get_task("as193-landed")
+            self.assertIsNotNone(landed_task["accepted_at"])
+            # And it stays `delivered` -- NOT the self-report status
+            # `Ledger.accept` uses -- so it is still `list_delivered_open_tasks`'s
+            # candidate set (the completion reconciler's whole input).
+            self.assertEqual("delivered", landed_task["status"])
+
     def test_record_completion_of_an_unknown_task_raises_rather_than_reporting_success(self):
         """agent-dotfiles#144 finding 4: `record_completion` looked up the
         task and raised `RuntimeError(f"unknown task: {task}")` when it was

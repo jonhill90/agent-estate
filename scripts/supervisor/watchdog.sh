@@ -946,10 +946,24 @@ except Exception:
     print("unparseable report")
     sys.exit(0)
 completed = d.get("completed", [])
+# agent-supervisor#193: never-accepted lanes the sweep now terminates
+# failed instead of complete (see reconcile_lane_completions.py) -- named
+# here for the same reason a completion is named, not just counted (issue
+# 118 lesson): a human scanning watchdog.log must be able to tell "this
+# lane was auto-completed" from "this lane was never accepted and failed"
+# without opening the ledger. No apostrophes in this block: it is embedded
+# in a single-quoted bash -c string, and a bare apostrophe here ends that
+# string early and breaks the shell parse, not the python one.
+failed_unaccepted = d.get("failed_unaccepted", [])
 unresolved = len(d.get("unresolved", []))
 errors = len(d.get("errors", []))
 names = ",".join(completed)
-print(f"completed={len(completed)} unresolved={unresolved} errors={errors}" + (f" ({names})" if names else ""))
+failed_names = ",".join(failed_unaccepted)
+print(
+    f"completed={len(completed)} failed_unaccepted={len(failed_unaccepted)} unresolved={unresolved} errors={errors}"
+    + (f" ({names})" if names else "")
+    + (f" (never-accepted: {failed_names})" if failed_names else "")
+)
 ' 2>"$py_err_file")
   py_rc=$?
   py_err=$(cat "$py_err_file" 2>/dev/null)

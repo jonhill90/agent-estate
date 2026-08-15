@@ -195,5 +195,180 @@ for lit_flag in "" "--literal"; do
     || bad "the pane buffer should never have been written" "$(cat "$D/panes/1" 2>/dev/null)"
 done
 
+# --- 6. POSITION-AWARE PROOF: a junk-prefixed message must NOT read as
+# landed (agent-supervisor#193) -----------------------------------------
+# `at25-rev33`'s reproduced shape: a `/clear` whose Enter never submitted
+# leaves "/clear" sitting in the box; a retype WITHOUT `--preclear` (exactly
+# how `dispatch.sh` calls `verified_type` -- it relies on the prior `/clear`
+# instead) then lands the brief GLUED onto it: "/clearRead <brief>...".
+# `Read <brief>` is still a true substring of that -- the ORIGINAL bug -- so
+# this is reproduced first against the pre-#193 `--proof` check to show the
+# false positive live, then against `--proof-head` to show the fix.
+reset_pane
+printf '%s' '/clear' > "$D/panes/1"
+MESSAGE="Read /brief.md and do exactly what it says. Work in the worktree, never in the shared checkout at /repo."
+out=$(run_send bash -c "
+  . '$SEND'
+  verified_type '$TARGET' '$MESSAGE' --settle 0 --retries 1 --proof 'Read /brief.md' --proof 'shared checkout'
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+want_contains "REPRODUCED: the pre-#193 whole-pane --proof check wrongly reports a junk-prefixed message as landed" "rc=0 status=landed" "$out"
+
+reset_pane
+printf '%s' '/clear' > "$D/panes/1"
+out=$(run_send bash -c "
+  . '$SEND'
+  verified_type '$TARGET' '$MESSAGE' --settle 0 --retries 1 --proof-head 'Read /brief.md' --proof 'shared checkout'
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+want_contains "FIXED: --proof-head refuses the same junk-prefixed message -- it does not START the box" "rc=2 status=not_landed" "$out"
+
+# ...and with the retry dispatch.sh actually uses (--retries 2), the
+# C-u-and-retype this file already trusts (test 3) recovers it: the second
+# attempt starts from a clean box, so the head token opens it for real.
+reset_pane
+printf '%s' '/clear' > "$D/panes/1"
+out=$(run_send bash -c "
+  . '$SEND'
+  verified_type '$TARGET' '$MESSAGE' --settle 0 --retries 2 --proof-head 'Read /brief.md' --proof 'shared checkout'
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+want_contains "the retry recovers a junk-prefixed message into a clean, anchored send" "rc=0 status=landed" "$out"
+[ "$(cat "$D/panes/1" 2>/dev/null)" = "$MESSAGE" ] \
+  && ok "...and the box holds EXACTLY the clean message, not the glued garbage" \
+  || bad "the box should hold exactly the retyped message" "$(cat "$D/panes/1" 2>/dev/null)"
+
+# --- MUTATION CHECK: de-anchor _send_head_matches -------------------------
+# Patch a copy of send.sh so the head check becomes a plain substring test
+# (the pre-#193 shape) and rerun test 6's exact --retries 1 scenario --
+# confirm it goes back to a false "landed" (red), proving the anchor, not
+# something else, is what makes that assertion pass.
+MUTANT_HEAD="$D/send-mutant-head.sh"
+cp "$HERE/../../scripts/supervisor/input-box.sh" "$D/input-box.sh"
+patch_rc=0
+python3 - "$SEND" "$MUTANT_HEAD" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '  [ -n "$body" ] && [[ "$body" == "$needle"* ]]'
+assert marker in text, "_send_head_matches's anchor line not found -- send.sh shape changed"
+assert text.count(marker) == 1, "the anchor line is not unique -- send.sh shape changed"
+mutated = '  [ -n "$body" ] && [[ "$body" == *"$needle"* ]]'
+open(dst, "w").write(text.replace(marker, mutated, 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of send.sh with the head anchor de-anchored" \
+    "could not patch $SEND (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of send.sh with the head anchor de-anchored"
+  reset_pane
+  printf '%s' '/clear' > "$D/panes/1"
+  out=$(run_send bash -c "
+    . '$MUTANT_HEAD'
+    verified_type '$TARGET' '$MESSAGE' --settle 0 --retries 1 --proof-head 'Read /brief.md' --proof 'shared checkout'
+    echo \"rc=\$? status=\$SEND_STATUS\"
+  ")
+  want_contains "MUTATION CONFIRMED (red): a de-anchored head check reports the junk-prefixed message landed again" "rc=0 status=landed" "$out"
+
+  reset_pane
+  printf '%s' '/clear' > "$D/panes/1"
+  out=$(run_send bash -c "
+    . '$SEND'
+    verified_type '$TARGET' '$MESSAGE' --settle 0 --retries 1 --proof-head 'Read /brief.md' --proof 'shared checkout'
+    echo \"rc=\$? status=\$SEND_STATUS\"
+  ")
+  want_contains "RESTORED (green): the real send.sh, same scenario, refuses again" "rc=2 status=not_landed" "$out"
+fi
+
+# --- 7. VERIFIED PRE-CLEAR (agent-supervisor#193) -------------------------
+# `dispatch.sh` used to send `/clear` + Enter blind, with no confirmation the
+# screen actually blanked -- exactly the gap `at25-rev33` fell through: the
+# Enter never submitted, and nothing downstream of the send noticed until
+# the corrupted retype (test 6, above) either. `verified_preclear` closes
+# that: `/clear` + Enter, then confirm the box reads EMPTY before returning
+# success.
+reset_pane
+out=$(run_send bash -c "
+  . '$SEND'
+  verified_preclear '$TARGET' --settle 0 --retries 1
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+want_contains "a clean /clear is confirmed landed" "rc=0 status=landed" "$out"
+[ ! -s "$D/panes/1" ] \
+  && ok "...and the box is confirmed EMPTY afterward" \
+  || bad "the box should be empty after a clean pre-clear" "$(cat "$D/panes/1" 2>/dev/null)"
+
+# The failure #193 actually hit: /clear's own Enter is swallowed (the stub's
+# narrower DISPATCH_SWALLOW_PRECLEAR_ENTER models exactly that -- only the
+# Enter that would submit a buffer holding EXACTLY "/clear"). Retries
+# exhausted with the swallow persisting every attempt -- verified_preclear
+# must abort, not type over the unsubmitted "/clear".
+reset_pane
+out=$(run_send env DISPATCH_SWALLOW_PRECLEAR_ENTER=1 bash -c "
+  . '$SEND'
+  verified_preclear '$TARGET' --settle 0 --retries 2
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+want_contains "a /clear whose Enter never submits is DETECTED, not reported as landed" "rc=2 status=not_landed" "$out"
+[ "$(cat "$D/panes/1" 2>/dev/null)" = "/clear" ] \
+  && ok "...and the box is CONFIRMED still holding the unsubmitted /clear afterward" \
+  || bad "the box should still hold the unsubmitted /clear" "$(cat "$D/panes/1" 2>/dev/null)"
+retry_count=$(grep -c '^send-keys -t t:1 /clear Enter$' "$D/tmux.log" 2>/dev/null || echo 0)
+[ "$retry_count" -eq 2 ] \
+  && ok "...and it actually retried (--retries 2), not just failed once" \
+  || bad "expected 2 /clear attempts logged, got $retry_count" "$(cat "$D/tmux.log")"
+
+# --- MUTATION CHECK: skip the post-/clear confirmation --------------------
+MUTANT_PRECLEAR="$D/send-mutant-preclear.sh"
+patch_rc=0
+python3 - "$SEND" "$MUTANT_PRECLEAR" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''    SEND_BOX_STATE=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_state)
+    if [ "$SEND_BOX_STATE" = empty ]; then
+      SEND_STATUS=landed
+      return 0
+    fi
+  done
+  SEND_STATUS=not_landed
+  return 2
+}
+
+# verified_submit'''
+assert marker in text, "verified_preclear's confirmation block not found -- send.sh shape changed"
+assert text.count(marker) == 1, "the confirmation block is not unique -- send.sh shape changed"
+mutated = '''    SEND_STATUS=landed
+    return 0
+  done
+  SEND_STATUS=not_landed
+  return 2
+}
+
+# verified_submit'''
+open(dst, "w").write(text.replace(marker, mutated, 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of send.sh with the pre-clear confirmation removed" \
+    "could not patch $SEND (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of send.sh with the pre-clear confirmation removed"
+  reset_pane
+  out=$(run_send env DISPATCH_SWALLOW_PRECLEAR_ENTER=1 bash -c "
+    . '$MUTANT_PRECLEAR'
+    verified_preclear '$TARGET' --settle 0 --retries 2
+    echo \"rc=\$? status=\$SEND_STATUS\"
+  ")
+  want_contains "MUTATION CONFIRMED (red): without the confirmation, an unsubmitted /clear reports landed" "rc=0 status=landed" "$out"
+
+  reset_pane
+  out=$(run_send env DISPATCH_SWALLOW_PRECLEAR_ENTER=1 bash -c "
+    . '$SEND'
+    verified_preclear '$TARGET' --settle 0 --retries 2
+    echo \"rc=\$? status=\$SEND_STATUS\"
+  ")
+  want_contains "RESTORED (green): the real send.sh, same scenario, detects it again" "rc=2 status=not_landed" "$out"
+fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
