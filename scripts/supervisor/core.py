@@ -272,6 +272,27 @@ class Ledger:
                     -- legitimately has no value here -- that absence is
                     -- correct data, not a gap to paper over with a fake id.
                     harness_session_id TEXT DEFAULT '',
+                    -- agent-supervisor#172. `repo` above is the lane's
+                    -- WORKING directory -- a worktree, replaced every
+                    -- dispatch -- and `claude --resume <id>` is scoped to the
+                    -- directory the harness process was actually LAUNCHED in,
+                    -- which is a different fact once the two diverge. They
+                    -- coincide for almost every lane today, which is exactly
+                    -- why this survived undetected: they do NOT coincide for
+                    -- any lane whose process predates the Phase 1.5 split (the
+                    -- supervisor lived in `agent-dotfiles`; `repo` was
+                    -- rewritten to `agent-supervisor` on the next dispatch,
+                    -- but the running process, and the id it resolves to,
+                    -- still belongs to the directory it was actually started
+                    -- in). Written together with `harness_session_id`
+                    -- (dispatch.sh records the pane's cwd at the SAME moment
+                    -- it resolves the session id, never independently), so
+                    -- the two can never name different conversations. Empty
+                    -- means the same as an empty `harness_session_id`: never
+                    -- resolved, or a row recorded before this column existed
+                    -- -- `restore.sh` refuses either case rather than
+                    -- guessing `repo` in its place.
+                    harness_project_dir TEXT DEFAULT '',
                     -- agent-supervisor#58 (Phase 4a): the thing this whole
                     -- migration exists for. `harness` names the AGENT; this
                     -- names how a prompt actually reaches it. Every lane
@@ -419,7 +440,11 @@ class Ledger:
     # (quoted, so it cannot false-match the "pi" inside "copilot") widens the
     # harness CHECK, and `transport` is a column that plain
     # `CREATE TABLE IF NOT EXISTS` will never retrofit onto an existing table.
-    _LANES_SCHEMA_MARKERS = ("copilot-acp", "'copilot'", "harness_session_id", "'pi'", "transport")
+    # agent-supervisor#172 adds a sixth: `harness_project_dir` is a new
+    # column, same reasoning as `harness_session_id` above -- a ledger
+    # created before it existed has no way to acquire it short of this
+    # rebuild.
+    _LANES_SCHEMA_MARKERS = ("copilot-acp", "'copilot'", "harness_session_id", "'pi'", "transport", "harness_project_dir")
 
     def _migrate_lanes_table(self, *, failpoint=None):
         """Widen an existing `lanes` table to the current schema in place.
@@ -452,16 +477,23 @@ class Ledger:
                 if all(marker in existing["sql"] for marker in self._LANES_SCHEMA_MARKERS):
                     return
                 # agent-dotfiles#237: which columns the OLD table actually has,
-                # asked rather than assumed. This rebuild now runs for THREE
+                # asked rather than assumed. This rebuild now runs for FOUR
                 # different reasons -- a narrow harness CHECK (pre-#216), a
-                # missing `harness_session_id` (pre-#237), and a missing
-                # `transport` (pre-agent-supervisor#58) -- and a ledger can
-                # need any subset of them. A hardcoded copy list would read a
-                # column that does not exist yet on one path, and silently
-                # DROP recorded session ids on another.
+                # missing `harness_session_id` (pre-#237), a missing
+                # `transport` (pre-agent-supervisor#58), and a missing
+                # `harness_project_dir` (pre-agent-supervisor#172) -- and a
+                # ledger can need any subset of them. A hardcoded copy list
+                # would read a column that does not exist yet on one path, and
+                # silently DROP recorded session ids on another.
                 old_columns = {row["name"] for row in probe.execute("PRAGMA table_info(lanes)").fetchall()}
 
             harness_session_expr = "harness_session_id" if "harness_session_id" in old_columns else "''"
+            # agent-supervisor#172: a pre-existing row has no recorded
+            # originating project directory -- and, per that issue, it must
+            # NOT be guessed as `repo`. Empty is the correct backfill, the
+            # same "not resolved" reading `harness_session_id` already gets;
+            # `restore.sh` fails closed on either.
+            harness_project_dir_expr = "harness_project_dir" if "harness_project_dir" in old_columns else "''"
             # agent-supervisor#58: a pre-existing row was, in fact, driven by
             # `send-keys` for every harness except `copilot-acp`, which was
             # already ACP-driven (`ACPAdapter.register_lane` is the only
@@ -494,6 +526,7 @@ class Ledger:
                             -- no resolver -- and that is legitimate data, not
                             -- a gap. See the matching column in `_initialize`.
                             harness_session_id TEXT DEFAULT '',
+                            harness_project_dir TEXT DEFAULT '',
                             transport TEXT NOT NULL DEFAULT 'send-keys' CHECK (transport IN ('send-keys', 'acp', 'pi-rpc')),
                             updated_at INTEGER NOT NULL
                         )
@@ -504,10 +537,10 @@ class Ledger:
                         f"""
                         INSERT INTO lanes_migrated (
                             lane, pane_id, nonce, harness, repo, server_id, session_id, command,
-                            harness_session_id, transport, updated_at
+                            harness_session_id, harness_project_dir, transport, updated_at
                         )
                         SELECT lane, pane_id, nonce, harness, repo, server_id, session_id, command,
-                               {harness_session_expr}, {transport_expr}, updated_at
+                               {harness_session_expr}, {harness_project_dir_expr}, {transport_expr}, updated_at
                         FROM lanes
                         """
                     )
@@ -801,6 +834,7 @@ class Ledger:
         command,
         now,
         harness_session_id="",
+        harness_project_dir="",
         transport=None,
     ):
         if harness not in self._TRANSPORTS_BY_HARNESS:
@@ -845,6 +879,17 @@ class Ledger:
         # which is what `restore.sh` refuses on.
         if not harness_session_id:
             harness_session_id = "" if changed_identity or current is None else current["harness_session_id"]
+        # agent-supervisor#172: the same rule, for the same reason, applied to
+        # the directory that id was resolved IN. A caller that resolves a
+        # fresh `harness_session_id` always passes both together (see
+        # dispatch.sh); a caller that does not resolve one (this row's
+        # identity changed, or nothing was resolved) must not have this
+        # column diverge from `harness_session_id` -- a stale project dir
+        # paired with a cleared session id would be meaningless, and a stale
+        # dir paired with an UNCHANGED session id would silently assert a
+        # directory nobody just verified.
+        if not harness_project_dir:
+            harness_project_dir = "" if changed_identity or current is None else current["harness_project_dir"]
         if changed_identity:
             # A changed identity is a genuinely new incarnation. An
             # outstanding task still bound to the old incarnation must not
@@ -889,8 +934,8 @@ class Ledger:
         connection.execute(
             """
             INSERT INTO lanes(lane, pane_id, nonce, harness, repo, server_id,
-                              session_id, command, harness_session_id, transport, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                              session_id, command, harness_session_id, harness_project_dir, transport, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(lane) DO UPDATE SET
                 pane_id=excluded.pane_id,
                 nonce=excluded.nonce,
@@ -900,16 +945,19 @@ class Ledger:
                 session_id=excluded.session_id,
                 command=excluded.command,
                 harness_session_id=excluded.harness_session_id,
+                harness_project_dir=excluded.harness_project_dir,
                 transport=excluded.transport,
                 updated_at=excluded.updated_at
             """,
-            (lane, pane_id, nonce, harness, repo, server_id, session_id, command, harness_session_id, transport, now),
+            (lane, pane_id, nonce, harness, repo, server_id, session_id, command, harness_session_id,
+             harness_project_dir, transport, now),
         )
         row = connection.execute("SELECT * FROM lanes WHERE lane = ?", (lane,)).fetchone()
         return self._dict(row)
 
     def register_lane(
-        self, *, lane, pane_id, nonce, harness, repo, server_id, session_id, command, harness_session_id="", transport=None
+        self, *, lane, pane_id, nonce, harness, repo, server_id, session_id, command, harness_session_id="",
+        harness_project_dir="", transport=None
     ):
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
@@ -924,6 +972,7 @@ class Ledger:
                 session_id=session_id,
                 command=command,
                 harness_session_id=harness_session_id,
+                harness_project_dir=harness_project_dir,
                 transport=transport,
                 now=now,
             )
@@ -1023,11 +1072,15 @@ class Ledger:
         trusting exactly those names and killing nine live agents.
 
         Per lane: its registered pane cwd, its harness, its harness session id
-        (empty when none was ever resolved), and the open task that owns it if
-        one does. `task` is the task id, which `dispatch.sh` sets to the window
-        name it intends -- so the name is a PROJECTION of this record, never
-        its source. A lane with no open task is reported with `task: None`;
-        the caller decides whether a lane with nothing outstanding is worth
+        (empty when none was ever resolved), the directory that session id was
+        resolved IN (agent-supervisor#172 -- empty under the same rule, and
+        never assumed equal to the pane cwd: `--resume` is scoped to the
+        directory the harness process actually started in, which a worktree
+        rewrite can leave behind), and the open task that owns it if one does.
+        `task` is the task id, which `dispatch.sh` sets to the window name it
+        intends -- so the name is a PROJECTION of this record, never its
+        source. A lane with no open task is reported with `task: None`; the
+        caller decides whether a lane with nothing outstanding is worth
         resuming (`restore.sh` starts it fresh, since there is no conversation
         to lose).
         """
@@ -1046,6 +1099,7 @@ class Ledger:
                         "lane": lane["lane"],
                         "harness": lane["harness"],
                         "harness_session_id": lane["harness_session_id"],
+                        "harness_project_dir": lane["harness_project_dir"],
                         "repo": lane["repo"],
                         "pane_id": lane["pane_id"],
                         "task": None if task is None else task["id"],
@@ -1584,6 +1638,7 @@ class Ledger:
         evidence,
         status_marker=None,
         harness_session_id="",
+        harness_project_dir="",
         transport="send-keys",
         worktree_path="",
         failpoint=None,
@@ -1627,6 +1682,7 @@ class Ledger:
                 session_id=session_id,
                 command=command,
                 harness_session_id=harness_session_id,
+                harness_project_dir=harness_project_dir,
                 now=now,
             )
             self._fail(failpoint, "after_register_lane")

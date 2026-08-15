@@ -23,6 +23,16 @@
 # the primary design constraint and this script's exit code carries it -- 2
 # means "some lane could not be brought back", and that is not a crash.
 #
+# agent-supervisor#172: a session id alone is not enough to resume with. A
+# harness's resume dialect is scoped to the directory its process was
+# actually LAUNCHED in, not the lane's WORKING directory (`repo`, a worktree
+# rewritten on every dispatch) -- the two coincide for most lanes, which is
+# why resuming from `repo` looked correct for a long time, and do not
+# coincide for a lane whose process predates a project-directory migration.
+# The originating directory is recorded (`harness_project_dir`) at the same
+# moment as the session id itself, and a lane missing it is refused exactly
+# like a lane missing the id -- never resumed against a guessed directory.
+#
 # IT NEVER KILLS ANYTHING. No `respawn-window`, no `-k`, no `kill-window`. A
 # window whose pane is running an agent is skipped as already live, which is
 # also what makes a second run a no-op. A window whose pane is a shell is
@@ -81,7 +91,7 @@ import json, sys
 FS = "\x1f"
 for row in json.loads(sys.argv[1]):
     print(FS.join(str(row.get(field) or "") for field in
-                    ("lane", "harness", "harness_session_id", "repo", "task")))
+                    ("lane", "harness", "harness_session_id", "harness_project_dir", "repo", "task")))
 PY
 ) || { echo "restore: the ledger plan is not readable JSON" >&2; exit 1; }
 
@@ -101,7 +111,7 @@ refuse() {
   unrecoverable=$((unrecoverable + 1))
 }
 
-while IFS="$FS" read -r lane harness session_id repo task; do
+while IFS="$FS" read -r lane harness session_id project_dir repo task; do
   [ -n "$lane" ] || continue
   # `lane` is `session:index`, the shape `lanes.sh --free` prints and
   # `dispatch.sh` records -- never a window name, which is not unique (the
@@ -143,6 +153,32 @@ while IFS="$FS" read -r lane harness session_id repo task; do
     fi
     # shellcheck disable=SC2059
     resume=$(printf "${H_RESUME_CMD[$hidx]}" "$session_id")
+    # agent-supervisor#172. `claude --resume` is scoped to the directory the
+    # harness process was actually LAUNCHED in -- not `$repo`, the lane's
+    # WORKING directory, which is a worktree rewritten on every dispatch.
+    # They coincide for most lanes, which is why resuming from `$repo` looked
+    # fine for so long; they do not coincide for a lane whose process
+    # predates a repo migration (agent-dotfiles -> agent-supervisor is the
+    # one that shipped this defect). `$project_dir` is recorded at the same
+    # moment as `$session_id` itself (dispatch.sh), so it never names a
+    # different conversation's directory.
+    #
+    # A missing value here is refused, never guessed as `$repo` -- that
+    # guess is exactly the bug. This also covers every row recorded before
+    # this column existed: the migration backfills it empty, the same
+    # "not resolved" reading `$session_id` itself gets. The message names
+    # `$repo` explicitly so the report can be told apart from "no session id
+    # recorded" -- this lane HAS a session, and refuses only because nothing
+    # says where to find it.
+    if [ -z "$project_dir" ]; then
+      refuse "$lane" "no originating project directory recorded for task '$task' -- refusing to guess between '$repo' and elsewhere (pre-agent-supervisor#172 lane)"
+      continue
+    fi
+    if [ ! -d "$project_dir" ]; then
+      refuse "$lane" "originating project directory '$project_dir' for task '$task' no longer exists on disk"
+      continue
+    fi
+    cwd="$project_dir"
   else
     if hidx=$(harness_index_for_name "$harness"); then
       resume="${H_LAUNCH_CMD[$hidx]}"
@@ -151,10 +187,9 @@ while IFS="$FS" read -r lane harness session_id repo task; do
       refuse "$lane" "harness '$harness' has no launch command -- cannot start this free lane"
       continue
     fi
+    cwd="$repo"
+    [ -d "$cwd" ] || cwd="$HOME_DIR"
   fi
-
-  cwd="$repo"
-  [ -d "$cwd" ] || cwd="$HOME_DIR"
 
   if [ "$DRY_RUN" = 1 ]; then
     printf '%-24s %-14s %s\n' "$target_session:$index" "WOULD-RESTORE" "$want_name <- $resume"

@@ -1,6 +1,6 @@
 # Runbook: restore after a tmux server loss
 
-`Verified 2026-08-14` unless a step says otherwise. Verified means: the
+`Verified 2026-08-15` unless a step says otherwise. Verified means: the
 command below was actually run — either against `tests/supervisor/test_restore.sh`
 (the repository's own hermetic demonstration, private socket, stub harness),
 or by hand against a throwaway isolated tmux server built for this runbook.
@@ -55,18 +55,22 @@ names described finished work and an operator trusted the names.
 `scripts/supervisor/restore.sh` reads `cli.py restore-plan` — a ledger query,
 never a window name (`core.py`'s `restore_plan`, docstring: "this is the
 whole read side of the restore path, and it is a LEDGER query on purpose").
-Per lane it gets: harness, harness session id, repo path, and the open task
-(if any) that owns it. Then, per lane:
+Per lane it gets: harness, harness session id, the directory that session id
+was resolved in (`harness_project_dir`, agent-supervisor#172 — distinct from
+`repo` below; see the note under Step 4), repo path (the lane's WORKING
+directory, a worktree), and the open task (if any) that owns it. Then, per
+lane:
 
 - **No open task** → the lane is started fresh, under the convention
   `free-N`. This is not "inventing" a conversation — the ledger itself says
   there is nothing to resume.
 - **Open task, but no `harness_session_id` recorded, no resume dialect for
-  that harness, or no transcript file on disk for that session id** → the
-  lane is reported `UNRECOVERABLE` and left completely alone. Nothing is
-  started in its place.
-- **Open task, session id present, transcript present on disk** → the
-  harness's resume command is typed into the pane
+  that harness, no transcript file on disk for that session id, or no
+  `harness_project_dir` recorded** → the lane is reported `UNRECOVERABLE` and
+  left completely alone. Nothing is started in its place.
+- **Open task, session id present, transcript present on disk,
+  `harness_project_dir` present** → the harness's resume command is typed
+  into the pane, from that recorded directory — not `repo`
   (`H_RESUME_CMD` in `harness-registry.sh`, e.g. `claude --resume <id>`),
   and the window is renamed to the task name **after** the resume command is
   queued — the rename is a projection, written last, read by nobody in this
@@ -81,7 +85,7 @@ second run of `restore.sh` a no-op for anything already recovered.
 ```
 $ bash tests/supervisor/test_restore.sh
 ...
-28 passed, 0 failed
+37 passed, 0 failed
 ```
 
 That suite (private tmux socket `ad237-test-$$`, private `$HOME`, a stub
@@ -136,6 +140,33 @@ rverify:3                UNRECOVERABLE  no transcript on disk for session 444444
 restore: 0 restored, 1 already live, 1 unrecoverable
 ```
 
+**Verified 2026-08-15** (agent-supervisor#172) — the manual reproduction
+above (`Verified 2026-08-14`) predates `harness_project_dir` and does not
+exercise it: that demo's lane happened to have `repo` and the originating
+directory coincide, which is exactly the common case that let this defect
+ship unnoticed. Re-verified instead against a **copy** of the live estate's
+own ledger (`cp ~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3
+<scratch>/`; the live file itself is never written by this script or by
+this check) — opening the copy runs the real migration, and `restore.sh
+--dry-run` against it, read-only, reports:
+
+```
+agent-supervisor:4       UNRECOVERABLE  no originating project directory recorded for task 'as169-fix-as169' -- refusing to guess between '/.../ad-169-fix-as169-37192' and elsewhere (pre-agent-supervisor#172 lane)
+agent-supervisor:5       UNRECOVERABLE  no originating project directory recorded for task 'as170-rerev176' -- refusing to guess between '/.../ad-170-rerev176-54616' and elsewhere (pre-agent-supervisor#172 lane)
+agent-supervisor:6       UNRECOVERABLE  no originating project directory recorded for task 'as172-restore-project-dir' -- refusing to guess between '/.../ad-172-restore-project-dir-86320' and elsewhere (pre-agent-supervisor#172 lane)
+```
+
+Three real, currently-live lanes — dispatched before this field existed,
+including the very lane this fix was written in — refuse cleanly, name the
+working directory they refuse to guess with, and read distinctly from a "no
+session id" refusal. Nothing was resumed, nothing was guessed, and the live
+ledger was never touched (`AGENTS.md` item 4's spirit applied to a database
+instead of a tmux socket). The hermetic suite (`test_restore.sh`, `PROJECT
+DIR`/`NO PROJECT DIR` sections) covers the positive case — a lane whose two
+directories genuinely differ resumes from the *originating* one, not `repo` —
+with a real, stub-harness process whose actual launch `$PWD` is captured and
+checked, something a read-only ledger copy cannot demonstrate.
+
 **Unverified**: the behavior of a *real* Claude Code `--resume` against a
 real, non-stub transcript — proving the resumed process itself recalls prior
 turns — is not re-demonstrated here. It is demonstrated in `README.md`'s
@@ -168,7 +199,7 @@ code any time even one lane cannot be brought back.
 ## Step 4 — what `UNRECOVERABLE` means and what to do about it
 
 It means `restore.sh` positively could not identify what that lane was
-doing, for one of three reasons the printed message names directly:
+doing, for one of four reasons the printed message names directly:
 
 1. **No `harness_session_id` recorded** — the ledger never resolved one for
    this task (see `harness_session.py`). There may be no on-disk transcript
@@ -182,6 +213,19 @@ doing, for one of three reasons the printed message names directly:
    (`~/.claude/projects/*/<session_id>.jsonl` for Claude) is gone, truncated,
    or the id itself is corrupted. This is the exact agent-dotfiles#237
    mutation case.
+4. **No `harness_project_dir` recorded, or the recorded one no longer exists
+   on disk** (agent-supervisor#172) — a session id was resolved, but the
+   directory it was resolved IN was not (every lane dispatched before this
+   field existed), or that directory has since been removed. `claude
+   --resume` is scoped to that directory, not to `repo` (a worktree,
+   rewritten on every dispatch) — the two coincide for most lanes, which is
+   why resuming from `repo` looked correct for a long time and is wrong for
+   any lane whose harness process predates a project-directory migration
+   (the Phase 1.5 split, `agent-dotfiles` → `agent-supervisor`, is the real
+   one this estate hit). The refusal message names `repo` explicitly, so it
+   reads as "a session exists, but I refuse to guess where," never as "no
+   conversation exists" (reason 1) — those are different facts and the
+   message says which one applies.
 
 **Do not** hand-start a fresh agent into that window under the old name — the
 whole point of refusing is that a fresh agent wearing the old name is

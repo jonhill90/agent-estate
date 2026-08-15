@@ -887,6 +887,68 @@ class LedgerTest(unittest.TestCase):
         source = self.ledger.get_source_task("ad999-first")
         self.assertEqual("https://github.com/jonhill90/agent-dotfiles/issues/999", source["source_url"])
 
+    def test_record_dispatch_records_the_originating_project_dir_alongside_the_session_id(self):
+        """agent-supervisor#172. `repo` is the lane's WORKING directory (a
+        worktree); `harness_project_dir` is the directory the harness process
+        was actually LAUNCHED in, which `restore.sh` needs because
+        `claude --resume` is scoped to it, not to `repo`. This is the
+        red-before-the-fix case: a lane whose two directories genuinely
+        differ, which the pre-#172 code had nowhere to record at all."""
+        self.ledger.record_dispatch(
+            lane="free-3",
+            pane_id="%3",
+            nonce="nonce-3",
+            harness="claude",
+            repo="/repo/free-3-worktree",
+            server_id="server-a",
+            session_id="$3",
+            command="claude.exe",
+            task_id="ad999-first",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-dotfiles/issues/999",
+            source_ref="999",
+            summary="#999 first",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-3", "issues: 999"],
+            status_marker=None,
+            harness_session_id="7cef6d59-0000-4000-8000-000000000000",
+            harness_project_dir="/repo/free-3-originating",
+        )
+        lane = self.ledger.get_lane("free-3")
+        self.assertEqual("/repo/free-3-worktree", lane["repo"])
+        self.assertEqual("/repo/free-3-originating", lane["harness_project_dir"])
+        self.assertNotEqual(lane["repo"], lane["harness_project_dir"])
+
+        plan = {row["lane"]: row for row in self.ledger.restore_plan()}
+        self.assertEqual("/repo/free-3-originating", plan["free-3"]["harness_project_dir"])
+        self.assertEqual("/repo/free-3-worktree", plan["free-3"]["repo"])
+
+    def test_a_changed_pane_identity_clears_harness_project_dir_with_the_session_id(self):
+        """The pairing rule: `harness_project_dir` must never survive a
+        re-registration that clears `harness_session_id`, or a stale
+        directory would sit next to a session id that no longer names it --
+        exactly the mismatch #172 exists to prevent, just introduced from the
+        other direction."""
+        self.ledger.register_lane(
+            lane="free-3", pane_id="%3", nonce="nonce-3", harness="claude",
+            repo="/repo/free-3", server_id="server-a", session_id="$3", command="claude.exe",
+            harness_session_id="7cef6d59-0000-4000-8000-000000000000",
+            harness_project_dir="/repo/free-3-originating",
+        )
+        before = self.ledger.get_lane("free-3")
+        self.assertEqual("/repo/free-3-originating", before["harness_project_dir"])
+
+        # A different pane_id is a new incarnation (`_register_lane_tx`'s own
+        # `changed_identity` test) -- the old conversation's directory must
+        # not be carried forward onto a process that was never launched in it.
+        self.ledger.register_lane(
+            lane="free-3", pane_id="%99", nonce="nonce-99", harness="claude",
+            repo="/repo/free-3", server_id="server-a", session_id="$3", command="claude.exe",
+        )
+        after = self.ledger.get_lane("free-3")
+        self.assertEqual("", after["harness_session_id"])
+        self.assertEqual("", after["harness_project_dir"])
+
     def test_get_task_for_issue_resolves_by_issue_never_by_branch(self):
         """agent-supervisor#35: `dispatch.sh`'s `--reviews-pr` guard used to
         determine a PR's author by regexing its head branch. The ledger
@@ -1749,6 +1811,10 @@ class NullableHarnessSessionIdMigrationTest(unittest.TestCase):
         migrated_sql = self._raw_lanes_sql()
         self.assertIn("'pi'", migrated_sql)
         self.assertIn("transport", migrated_sql)
+        # agent-supervisor#172: this schema (pre-#58) has no
+        # `harness_project_dir` column at all -- the migration must add it,
+        # same as `'pi'` and `transport` above.
+        self.assertIn("harness_project_dir", migrated_sql)
 
         # The point: this used to raise sqlite3.IntegrityError opening the
         # Ledger at all. Reading it back now works, and the NULL survived
@@ -1756,6 +1822,14 @@ class NullableHarnessSessionIdMigrationTest(unittest.TestCase):
         codex_lane = ledger.get_lane("app-review")
         self.assertIsNone(codex_lane["harness_session_id"])
         self.assertEqual("send-keys", codex_lane["transport"])
+        # agent-supervisor#172. A row from before this column existed backfills
+        # to '' -- NOT to `repo`, and NOT to NULL either (`harness_session_id`
+        # above is the one legitimately-nullable column; this one follows
+        # `harness_project_dir`'s own `DEFAULT ''`) -- the same "not resolved"
+        # reading `restore.sh` already gives an absent `harness_session_id`.
+        # Guessing `repo` here would be exactly the defect #172 exists to fix,
+        # reintroduced by the migration that is supposed to close it.
+        self.assertEqual("", codex_lane["harness_project_dir"])
 
         # A row that DID resolve a session id keeps it, proving the copy
         # isn't just dropping the column's value wholesale.
@@ -1799,6 +1873,10 @@ class NullableHarnessSessionIdMigrationTest(unittest.TestCase):
         plan = json.loads(restore_plan.stdout)
         by_lane = {row["lane"]: row for row in plan}
         self.assertIsNone(by_lane["app-review"]["harness_session_id"])
+        # agent-supervisor#172: the field `restore.sh` now reads to pick the
+        # resume directory, present in the plan (empty, not absent) even for
+        # a lane migrated from a schema that never had it.
+        self.assertEqual("", by_lane["app-review"]["harness_project_dir"])
 
     def test_migration_running_twice_is_a_harmless_no_op(self):
         """Confirms the schema-marker check (`_LANES_SCHEMA_MARKERS`) treats

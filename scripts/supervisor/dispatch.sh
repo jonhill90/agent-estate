@@ -1562,12 +1562,23 @@ else
   # the two other tests it applies and for what was measured before settling
   # on these.
   HARNESS_SESSION_ID=""
+  # agent-supervisor#172: the directory the harness process was actually
+  # launched in -- `$PANE_PATH`, read in the same tmux call as everything
+  # else above, at the SAME moment the session id is resolved. Never set
+  # independently of `HARNESS_SESSION_ID`: `claude --resume` is scoped to
+  # this directory, not to whatever `repo` (a worktree, rewritten on every
+  # dispatch) happens to hold later, and pairing a real id with the wrong
+  # directory is exactly the defect this issue exists to close. Left empty
+  # alongside `HARNESS_SESSION_ID` whenever resolution fails, below.
+  HARNESS_PROJECT_DIR=""
   if [ -n "$LANE_HARNESS" ]; then
-    if ! HARNESS_SESSION_ID=$("${DISPATCH_PYTHON:-python3}" "$HERE/harness_session.py" \
+    if HARNESS_SESSION_ID=$("${DISPATCH_PYTHON:-python3}" "$HERE/harness_session.py" \
         --harness "$LANE_HARNESS" \
         --marker "$WORKTREE" \
         --since "$DISPATCH_SEND_EPOCH" \
         --timeout "${DISPATCH_SESSION_TIMEOUT:-20}" 2>&1); then
+      HARNESS_PROJECT_DIR="$PANE_PATH"
+    else
       # stdout, not stderr (agent-dotfiles#199/#237): this is loud, not a
       # failure -- the brief already went out and the dispatch still
       # succeeds. #199 holds dispatch.sh's stderr clean on any successful
@@ -1605,6 +1616,7 @@ else
     --server-id "${SOCKET_PATH}:${SESSION_CREATED}"
     --session-id "$SESSION_ID"
     --harness-session-id "$HARNESS_SESSION_ID"
+    --harness-project-dir "$HARNESS_PROJECT_DIR"
     --github "$REPO"
     # agent-supervisor#117: the worktree this dispatch just built, recorded
     # as its own column now (`Ledger.get_task_for_worktree`) instead of only
