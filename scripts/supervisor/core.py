@@ -1110,6 +1110,56 @@ class Ledger:
             ).fetchone()
         return self._dict(row)
 
+    def get_open_task_for_pr(self, pr_ref):
+        """The open task (if any) already dispatched FOR a PR, keyed by PR
+        number -- never by issue, never by branch name.
+
+        agent-supervisor#159: `dispatch.sh` used to have no way to represent
+        "work on PR N" as distinct from "work on issue N" -- a review or a
+        fix pass on a PR whose underlying issue was still claimed by the
+        in-flight work that opened the PR had nowhere to record itself
+        except `claim.sh take` on that same issue, which correctly refused
+        (it is claimed) and pushed dispatch to a ledger-invisible tmux
+        hand-off instead. THE HARM #159 measured from that hand-off: a
+        second dispatcher, unable to see the first lane's claim anywhere,
+        minted a second task for the same PR ("...b" suffixed window names
+        on #157's review and #149's fix pass).
+
+        The fix is not a new claim primitive: `record_dispatch` (via
+        `cli.py`'s free function) already writes a `source_tasks` row per
+        dispatch, and that table's `source_kind` column has allowed `'pull'`
+        alongside `'issue'` since #144 -- this is the FIRST caller to ask for
+        one back. A PR-scoped dispatch (`dispatch.sh --pr <N>`, and
+        `--reviews-pr <N>` which now implies it) records `source_kind='pull'`,
+        `source_ref=str(N)` instead of the issue-keyed pair, going through
+        the exact same one-transaction `record_dispatch` write and the same
+        `one_open_task_per_lane` uniqueness every other dispatch already
+        relies on -- no new table, no second bookkeeping mechanism to keep in
+        sync with the first.
+
+        UNLIKE `get_task_for_issue` (which answers with the most recent row
+        regardless of status, because its only caller today is a diagnostic
+        query with no live caller in dispatch.sh), this filters to OPEN
+        status -- the same `NOT IN ('complete','failed','cancelled')` test
+        `get_open_task_for_lane` uses -- because the question this answers is
+        "is somebody working this PR RIGHT NOW", asked by `dispatch.sh`
+        BEFORE it selects a lane, so a finished or cancelled prior review of
+        the same PR does not wrongly refuse a fresh one.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT tasks.* FROM tasks
+                JOIN source_tasks ON source_tasks.id = tasks.id
+                WHERE source_tasks.source_kind = 'pull' AND source_tasks.source_ref = ?
+                  AND tasks.status NOT IN ('complete','failed','cancelled')
+                ORDER BY tasks.created_at DESC
+                LIMIT 1
+                """,
+                (str(pr_ref),),
+            ).fetchone()
+        return self._dict(row)
+
     @staticmethod
     def _task_looks_like_review(task_id, summary):
         # `task_id` and `summary` are joined with a literal space before

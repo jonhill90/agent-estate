@@ -1906,11 +1906,20 @@ want_missing "never on the author's lane (t:3, target t:@103)" "send-keys -t t:@
 
 # Now t:4 (from the review just dispatched) is the only thing standing
 # between t:3 (free, but the author) and a refusal -- leave it occupied and
-# confirm the SAME PR's review is refused outright when the author is the
-# only free lane, not silently sent anyway.
-out=$(LEDGER_STATE="$D/state-212" run 206 rev-204-again "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 204); rc=$?
+# confirm ANOTHER review of the same authoring issue is refused outright
+# when the author is the only free lane, not silently sent anyway.
+#
+# agent-supervisor#159: a DIFFERENT PR number (207), not 204 again -- 204
+# already has an open task (ad205-rev-204, deliberately left open so t:4
+# stays occupied and "only t:3 free" holds, same as before this PR) and
+# #159's own new duplicate-PR check would refuse a second dispatch of 204
+# for THAT reason, before authorship is ever consulted -- a real and
+# correct refusal, but not the one this case exists to prove. 207 closes
+# the SAME issue (#193), so authorship still resolves the same way.
+printf '207|Fixes #193|lane/193-telegram-to-director\n' >> "$D/prs"
+out=$(LEDGER_STATE="$D/state-212" run 206 rev-207-again "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 207); rc=$?
 want_exit "a review refused when the only free lane is the author" "$rc" 1 "$out"
-want_contains "names the PR" "PR #204" "$out"
+want_contains "names the PR" "PR #207" "$out"
 want_contains "names the authoring task, not just the lane" "ad193-telegram-to-director" "$out"
 if [ -z "$(assignees 206)" ]; then ok "the refused review takes no claim on its own issue"
 else bad "the refused review takes no claim on its own issue" "still assigned: $(assignees 206)"; fi
@@ -1992,8 +2001,14 @@ want_missing "never on the completed author's lane (t:3, target t:@103)" "send-k
 # The only-free-lane variant: t:4 now busy with the review just dispatched,
 # t:3 (free, but the author, and its task is COMPLETE not merely idle) is
 # the only other candidate -- must still refuse outright, not dispatch.
-printf '393|| review PR #390, only the completed author is free\n' >> "$D/issues"
-out=$(LEDGER_STATE="$D/state-90" run 393 rev-390-only-author-free "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 390); rc=$?
+#
+# agent-supervisor#159: PR 391, not 390 again -- 390 already has an open
+# task (ad392-rev-390-after-complete, deliberately left open so t:4 stays
+# occupied) and #159's own duplicate-PR check would refuse a second 390
+# dispatch for THAT reason first. 391 closes the same issue (#390).
+printf '391|Fixes #390|lane/390-public-close\n' >> "$D/prs"
+printf '393|| review PR #391, only the completed author is free\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-90" run 393 rev-391-only-author-free "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 391); rc=$?
 want_exit "a review refused when the only free lane is the completed author" "$rc" 1 "$out"
 want_contains "names the completed authoring task, not just the lane" "ad390-close-auth" "$out"
 
@@ -2134,8 +2149,14 @@ want_missing "never on the author's window (t:3, target t:@103)" "send-keys -t t
 # The only-free-lane variant, across the same boundary: t:4 is now busy with
 # the review just dispatched, so the author's own window is the only candidate
 # left. It must refuse outright -- the same refusal a same-session author gets.
-printf '412|| review PR #420 again, only the pre-rename author is free\n' >> "$D/issues"
-out=$(LEDGER_STATE="$D/state-108" run 412 rev-420-only-author "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 420); rc=$?
+#
+# agent-supervisor#159: PR 422, not 420 again -- 420 already has an open task
+# (ad411-rev-420-after-rename, deliberately left open so t:4 stays occupied)
+# and #159's own duplicate-PR check would refuse a second 420 dispatch for
+# THAT reason first. 422 closes the same issue (#410).
+printf '422|Fixes #410|lane/410-public-420\n' >> "$D/prs"
+printf '412|| review PR #422 again, only the pre-rename author is free\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-108" run 412 rev-422-only-author "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 422); rc=$?
 want_exit "a review refused when the only free window is the pre-rename author" "$rc" 1 "$out"
 want_contains "and names the pre-rename authoring task, not just a lane string" "ad410-pre-rename-author" "$out"
 if [ -z "$(assignees 412)" ]; then ok "the refused cross-rename review takes no claim on its own issue"
@@ -2801,8 +2822,18 @@ want_missing "never on the author's lane (t:3, target t:@103)" "send-keys -t t:@
 
 # The only-free-lane variant: the author must still be refused even when it
 # is the only candidate, same as every other authorship path.
-printf '103|| review PR #600 again, only the author is free\n' >> "$D/issues"
-out=$(LEDGER_STATE="$D/state-117" run 103 rev-600-only-author "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 600); rc=$?
+#
+# agent-supervisor#159: a DIFFERENT PR number (601), not 600 again -- 600
+# already has an open task (ad102-rev-600, still delivered, deliberately
+# left open so t:4 stays occupied and "only t:3 free" holds, same as before
+# this PR) and #159's own new duplicate-PR check would refuse a second
+# dispatch of 600 for THAT reason, before authorship is ever consulted --
+# a real and correct refusal, but not the one this case exists to prove.
+# 601 shares the same "Fixes #999" / renamed-branch shape so authorship
+# still resolves by WORKTREE, exactly as this block is about.
+printf '601|Fixes #999|fix/101-not-a-review-escape\n' >> "$D/prs"
+printf '103|| review PR #601 again, only the author is free\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-117" run 103 rev-601-only-author "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 601); rc=$?
 want_exit "a review refused when the only free lane is the author, resolved by worktree" "$rc" 1 "$out"
 want_contains "names the real authoring task" "ad101-pr-inference-fix" "$out"
 
@@ -2993,6 +3024,164 @@ FIX
         run 265 rebase-512 "$D/brief-rebase-mutant.md" acme/agent-dotfiles "$REPO" --not-a-review); rc=$?
   want_exit "mutation confirmed: without the escape arm, the rebase is refused again" "$rc" 1 "$out"
   want_contains "mutation confirmed: the flag was ignored and the review inferred" "inferred --reviews-pr 512" "$out"
+fi
+
+# --- agent-supervisor#159: a PR-scoped dispatch does not need its ISSUE ---
+#
+# WHY: a review of PR N, or a fix pass on PR N, is not new work on a fresh
+# issue -- it is work ON THE PR, and the issue that PR closes (or the
+# tracking issue a reviewer was handed) is correctly already claimed by the
+# in-flight work. `claim.sh take` refusing that was correct FOR ITS OWN
+# MODEL; the model was missing a dispatchable representation of "work on PR
+# N" distinct from "work on issue N". Three real collisions (measured, see
+# the issue) came from working around that refusal with a ledger-bypassing
+# tmux hand-off instead of fixing the model: #142's fix pass, #157's review,
+# #149's fix pass, the last two landing with a literal "b"-suffixed second
+# task id because nothing could see the first one was already there.
+#
+# RED FIRST (acceptance #3): before this PR, case 1 below failed exactly the
+# way the issue quotes -- `claim.sh take` on the review's own issue refused
+# because it actually was already claimed, and the whole dispatch aborted.
+# Verified by hand: `git stash` on dispatch.sh/cli.py/core.py and re-running
+# this section reproduces exit 1 with "is not available -- pick different
+# work" for case 1, "cannot tell which harness" is never reached. Restoring
+# the stash turns it green. That stash/restore is not re-run by this suite
+# (there would be nothing left here to assert against a script that no
+# longer exists), so this comment is the record of it.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+
+# --- case 1: a review of PR N dispatches while its own issue stays claimed
+printf '910|| the code PR #950 was written from\n' >> "$D/issues"
+# 911 is pre-claimed by someone else entirely -- unrelated to PR #950's
+# authorship, standing in for the tracking issue a real reviewer is handed
+# that just happens to already be assigned (the exact shape #149's own
+# `dispatch.sh 112 rev149 --reviews-pr 149` hit).
+printf '911|someone-else|review PR #950\n' >> "$D/issues"
+printf '950|Fixes #910|lane/910-original-work\n' >> "$D/prs"
+
+out=$(LEDGER_STATE="$D/state-159" run 910 original-work "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch (#910) succeeds" "$rc" 0 "$out"
+
+out=$(LEDGER_STATE="$D/state-159" run 911 rev950 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 950); rc=$?
+want_exit "a review of PR #950 dispatches even though issue #911 is already claimed" "$rc" 0 "$out"
+want_contains "the author's lane (t:3) is skipped as usual" "skipping t:3" "$out"
+log=$(tmuxlog)
+want_contains "and the review lands on the other free lane, t:4" "send-keys -t t:@104" "$log"
+if [ "$(assignees 911)" = "someone-else" ]; then
+  ok "issue #911 stays claimed by the original work -- no GitHub assignee call was made for it"
+else
+  bad "issue #911 stays claimed by the original work" "assignees changed to: $(assignees 911)"
+fi
+PR950_LANE=$(LEDGER_STATE="$D/state-159" ledger pr-lane --pr 950)
+want_contains "the ledger records this dispatch AGAINST THE PR, visibly" '"known":true' "$PR950_LANE"
+want_contains "...naming the lane that took it" '"lane":"t:4"' "$PR950_LANE"
+
+# --- case 2: a fix pass on PR N (not a review -- no author to exclude) ---
+# `--pr` alone, no `--reviews-pr`: the author guard must NOT run (no PR
+# fixture entry for #951 exists at all -- if dispatch.sh wrongly tried
+# `gh pr view 951`, the stub would fail loudly and this would refuse).
+printf '912|| the code a fix pass on PR #951 targets\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-159b" run 912 original-951 "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the original dispatch (#912) succeeds" "$rc" 0 "$out"
+
+out=$(LEDGER_STATE="$D/state-159b" run 912 fix-951 "$D/brief.md" acme/agent-dotfiles "$REPO" --pr 951); rc=$?
+want_exit "a fix pass on PR #951 dispatches while issue #912 stays claimed by the same in-flight work" "$rc" 0 "$out"
+log=$(tmuxlog)
+want_contains "and lands on a DIFFERENT lane than the one still working #912" "send-keys -t t:@104" "$log"
+PR951_LANE=$(LEDGER_STATE="$D/state-159b" ledger pr-lane --pr 951)
+want_contains "the fix pass is visible in the ledger by PR too" '"known":true' "$PR951_LANE"
+
+# --- case 3 (acceptance #4): the author guard still holds on this path ---
+# Only ONE free lane (t:3), and it is the author's -- the review must still
+# refuse, proving `--reviews-pr`'s new PR-scoped skip of the issue claim did
+# not also skip the guard agent-dotfiles#212/#254/#263 and #137 exist for.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+printf '913|| the code PR #952 was written from\n' >> "$D/issues"
+printf '914|someone-else|review PR #952\n' >> "$D/issues"
+printf '952|Fixes #913|lane/913-author-work\n' >> "$D/prs"
+
+out=$(LEDGER_STATE="$D/state-159c" run 913 author-work "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch (#913) succeeds" "$rc" 0 "$out"
+LEDGER_STATE="$D/state-159c" ledger record-completion --task ad913-author-work --note done >/dev/null
+# Now only the author's lane (t:3) is free.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+
+out=$(LEDGER_STATE="$D/state-159c" run 914 rev952 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 952); rc=$?
+want_exit "the review is still refused when the only free lane is the author -- #159 does not reopen #212" "$rc" 1 "$out"
+want_contains "still names the PR" "PR #952" "$out"
+want_contains "still names the authoring task" "ad913-author-work" "$out"
+if [ "$(assignees 914)" = "someone-else" ]; then
+  ok "a refused PR-scoped review leaves issue #914's own (unrelated) claim alone"
+else
+  bad "a refused PR-scoped review leaves issue #914's own claim alone" "assignees: $(assignees 914)"
+fi
+
+# --- case 4 (acceptance #6, issue comment): a PR already claimed refuses,
+# rather than minting a second "...b" task -----------------------------
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+printf '916|| first dispatch on PR #953\n' >> "$D/issues"
+printf '917|| a second dispatcher tries PR #953 too\n' >> "$D/issues"
+
+out=$(LEDGER_STATE="$D/state-159d" run 916 first-953 "$D/brief.md" acme/agent-dotfiles "$REPO" --pr 953); rc=$?
+want_exit "setup: the first PR #953 dispatch succeeds" "$rc" 0 "$out"
+
+before=$(worktrees)
+out=$(LEDGER_STATE="$D/state-159d" run 917 second-953b "$D/brief.md" acme/agent-dotfiles "$REPO" --pr 953); rc=$?
+want_exit "a second dispatch of the SAME PR is refused, not duplicated" "$rc" 1 "$out"
+want_contains "the refusal names the PR" "PR #953" "$out"
+want_contains "and names the lane already holding it" "ad916-first-953" "$out"
+log=$(tmuxlog)
+want_missing "a refused duplicate sends no brief" "send-keys" "$log"
+if [ "$(worktrees)" = "$before" ]; then
+  ok "a refused duplicate creates no worktree -- no '...b' task is minted"
+else
+  bad "a refused duplicate creates no worktree" "$before -> $(worktrees)"
+fi
+
+# MUTATION-CHECK: silence step 0.6's PR-lane refusal and confirm the SAME
+# second dispatch now goes through -- the load-bearing proof that the check
+# above is what refuses it, not some incidental side effect (a busy lane,
+# a full estate) that would refuse it anyway.
+MUTATED_159="$D/dispatch-no-pr-claim-check.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$MUTATED_159" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = 'if grep -qF \'"known":true\' <<<"$PR_LANE_JSON"; then'
+assert text.count(marker) == 1, "PR-lane duplicate check not found or not unique -- script shape changed"
+text = text.replace(marker, "if false; then  # MUTATED: PR-lane duplicate check always skipped", 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose PR-lane duplicate check is silenced" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh whose PR-lane duplicate check is silenced"
+  chmod +x "$MUTATED_159"
+  printf '918|| a third dispatcher tries PR #953 against the mutated guard\n' >> "$D/issues"
+  out=$(DISPATCH_SCRIPT="$MUTATED_159" LEDGER_STATE="$D/state-159d" \
+        run 918 third-953c "$D/brief.md" acme/agent-dotfiles "$REPO" --pr 953); rc=$?
+  want_exit "mutation confirmed: with the check silenced, a duplicate dispatch of PR #953 succeeds" "$rc" 0 "$out"
 fi
 
 rm -rf "$D"

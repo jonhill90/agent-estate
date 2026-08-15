@@ -978,6 +978,77 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual("free-4", found["lane"])
         self.assertEqual("ad502-second-attempt", found["id"])
 
+    def test_get_open_task_for_pr_resolves_by_pr_never_by_issue(self):
+        """agent-supervisor#159: a PR-scoped dispatch (a review, or a fix
+        pass, on PR N while the issue it closes stays claimed by the
+        in-flight work that opened it) is recorded `source_kind='pull'`,
+        keyed by the PR number -- never the issue. This is the read side,
+        the one `dispatch.sh` asks BEFORE picking a lane so a second
+        dispatcher can see the PR is already spoken for instead of minting a
+        second task for it (the measured "...b" suffix duplication)."""
+        self.assertIsNone(self.ledger.get_open_task_for_pr("149"))
+
+        self.ledger.record_dispatch(
+            lane="free-3",
+            pane_id="%3",
+            nonce="nonce-3",
+            harness="claude",
+            repo="/repo/free-3",
+            server_id="server-a",
+            session_id="$3",
+            command="claude.exe",
+            task_id="as159-rev149",
+            source_kind="pull",
+            source_url="https://github.com/jonhill90/agent-supervisor/pull/149",
+            source_ref="149",
+            summary="review PR #149",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-3", "pr: 149"],
+            status_marker=None,
+        )
+        found = self.ledger.get_open_task_for_pr("149")
+        self.assertEqual("free-3", found["lane"])
+        self.assertEqual("as159-rev149", found["id"])
+
+        # An int and its string spelling are the same PR, the same as
+        # `get_task_for_issue` above.
+        self.assertEqual("as159-rev149", self.ledger.get_open_task_for_pr(149)["id"])
+
+        # This task's issue (say, #112, the review's own tracking issue) was
+        # never claimed as its SOURCE -- `issue-lane` for it must not answer
+        # with this task.
+        self.assertIsNone(self.ledger.get_task_for_issue("112"))
+
+    def test_get_open_task_for_pr_ignores_completed_or_cancelled_tasks(self):
+        """UNLIKE `get_task_for_issue` (whose only caller today is a
+        diagnostic query with no live effect), this is asked by
+        `dispatch.sh` step 0.6 as a REFUSAL gate before a lane is even
+        picked -- so it must not go on refusing every future dispatch of the
+        same PR forever just because one prior review of it finished or was
+        cancelled."""
+        self.ledger.record_dispatch(
+            lane="free-3",
+            pane_id="%3",
+            nonce="nonce-3",
+            harness="claude",
+            repo="/repo/free-3",
+            server_id="server-a",
+            session_id="$3",
+            command="claude.exe",
+            task_id="as159-rev150-first",
+            source_kind="pull",
+            source_url="https://github.com/jonhill90/agent-supervisor/pull/150",
+            source_ref="150",
+            summary="review PR #150",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-3", "pr: 150"],
+            status_marker=None,
+        )
+        row = self.ledger.get_task("as159-rev150-first")
+        self.ledger.complete("as159-rev150-first", b"approved", pane_nonce=row["pane_nonce"])
+
+        self.assertIsNone(self.ledger.get_open_task_for_pr("150"))
+
     def test_get_author_task_for_issue_does_not_drift_to_later_reviews(self):
         """agent-supervisor#76: review tasks for the same issue must never
         become the author. The bug is drift, so this asserts after each new

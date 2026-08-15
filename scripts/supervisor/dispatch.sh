@@ -39,7 +39,7 @@
 # available to the next tick.
 #
 # Usage:
-#   dispatch.sh <issue>[,<issue>...] <slug> <brief-file> [repo] [repo-path] [--reviews-pr <PR>] [--not-a-review]
+#   dispatch.sh <issue>[,<issue>...] <slug> <brief-file> [repo] [repo-path] [--reviews-pr <PR>] [--not-a-review] [--pr <PR>]
 #
 # <issue>      one issue number, or a comma-separated list (agent-dotfiles#112)
 #              when one brief covers several -- e.g. `110,109`. Every issue in
@@ -81,6 +81,26 @@
 #              resolved: the two say opposite things about the same dispatch
 #              and guessing which one is meant is exactly the guessing this
 #              guard exists to avoid.
+# --pr <PR>
+#              agent-supervisor#159: this dispatch's real scope is PR <PR>,
+#              not the issue(s) named by <issue> -- a review of PR <PR>, a
+#              fix pass on it after REQUEST CHANGES, or any other follow-up
+#              work on it. Two things follow: step 2 does NOT call
+#              `claim.sh take` on <issue> at all (the issue stays claimed by
+#              whatever opened <PR> -- that is the whole point, see #159's
+#              own "why it matters"), and this dispatch is recorded in the
+#              ledger keyed by the PR (`source_kind='pull'`), not the issue,
+#              so a second dispatcher can see the PR is already spoken for
+#              (`cli.py pr-lane`) instead of minting a second task for it.
+#              `<issue>` is still required and still names the worktree and
+#              tmux window -- it is where this dispatch's WORK happens to
+#              live, not what it claims.
+#              `--reviews-pr <PR>` IMPLIES `--pr <PR>` (a review is one kind
+#              of PR-scoped dispatch, the one that also runs the author
+#              guard above) -- passing both is fine as long as they name the
+#              SAME PR; naming two different PRs is refused, the same
+#              "neither is an inference this script may resolve" posture
+#              `--reviews-pr`/`--not-a-review` already takes.
 #
 # Exit 0 only when a lane has been sent a brief. Exit 1 on any refusal --
 # no free lane, an issue someone else already claimed, a worktree that could
@@ -150,9 +170,21 @@ fi
 # it never names which lane to use.
 REVIEWS_PR=""
 NOT_A_REVIEW=""
+PR=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --pr)
+      # agent-supervisor#159. Same dangling-flag hazard and same fix as
+      # `--reviews-pr` just below -- see that case's own comment.
+      if [ $# -lt 2 ]; then
+        echo "dispatch: --pr requires a PR number" >&2
+        sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+        exit 1
+      fi
+      PR="$2"
+      shift 2
+      ;;
     --reviews-pr)
       # A `--reviews-pr` with no value after it (flag last, value forgotten)
       # must refuse rather than hang: `shift 2` with only 1 arg left ($#=1)
@@ -336,6 +368,19 @@ if [ -z "$REVIEWS_PR" ] && [ -z "$NOT_A_REVIEW" ]; then
     echo "dispatch: if this dispatch is NOT a review, re-run it with --not-a-review (agent-supervisor#101) -- no need to reword the brief" >&2
   fi
 fi
+
+# agent-supervisor#159: PR_SCOPED is the PR this dispatch is FOR, whichever
+# flag said so -- `--reviews-pr` (explicit or inferred above) implies it, and
+# `--pr` says it directly for a dispatch that is not a review at all (a fix
+# pass, most often). Computed AFTER inference, not before, so an inferred
+# `--reviews-pr` is covered by this check too: naming two different PRs
+# between `--pr` and `--reviews-pr` is refused rather than silently picking
+# one, the same posture `--reviews-pr`/`--not-a-review` already takes above.
+if [ -n "$PR" ] && [ -n "$REVIEWS_PR" ] && [ "$PR" != "$REVIEWS_PR" ]; then
+  echo "dispatch: --pr $PR and --reviews-pr $REVIEWS_PR name different PRs -- refusing rather than picking one" >&2
+  exit 2
+fi
+PR_SCOPED="${REVIEWS_PR:-$PR}"
 
 # Window name: <prefix><issue>-<slug>, the convention loop-tick.md requires so
 # Jon can read the tmux window list and know what the estate is doing. The
@@ -608,6 +653,38 @@ if [ -n "$REVIEWS_PR" ]; then
       echo "dispatch: two separate things are true here -- this dispatch LOOKED like a review, and that PR's author cannot be resolved" >&2
       echo "dispatch: if it is not a review at all (a rebase, a fix pass, a follow-up), re-run with --not-a-review and the authorship question does not arise" >&2
     fi
+    exit 1
+  fi
+fi
+
+# --- 0.6 a PR already claimed by a lane is refused, not double-dispatched -
+# agent-supervisor#159 (issue comment, third occurrence measured the same
+# night): two lanes worked #157's review and two lanes worked #149's fix
+# pass, both times through the SAME task id with a "b" suffix -- something
+# minted a second task for work that already had one instead of detecting
+# the first. The shared cause: a ledger-bypassing tmux hand-off (the
+# workaround for the issue-claim refusal this PR removes) leaves no row a
+# second dispatcher can see. This is the detection that was missing --
+# checked BEFORE step 1 picks a lane, so it costs nothing when it refuses:
+# no lane claim taken yet, no worktree built.
+#
+# Only runs for a PR-scoped dispatch (`PR_SCOPED` set, see the flag block
+# above) -- an ordinary issue-scoped dispatch has no PR to check yet, and
+# `claim.sh` in step 2 below is exactly this same guarantee for that case,
+# already proven. `cli.py pr-lane` asks `Ledger.get_open_task_for_pr`, which
+# is OPEN-status only (unlike `issue-lane`): a completed or cancelled prior
+# review of this PR must not block a fresh one.
+if [ -n "$PR_SCOPED" ]; then
+  PR_LANE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" pr-lane --pr "$PR_SCOPED" 2>&1)
+  if [ $? -ne 0 ]; then
+    echo "dispatch: could not ask the ledger whether PR #$PR_SCOPED already has a lane -- refusing rather than risk a duplicate" >&2
+    sed 's/^/  /' <<<"$PR_LANE_JSON" >&2
+    exit 1
+  fi
+  if grep -qF '"known":true' <<<"$PR_LANE_JSON"; then
+    PR_HOLDER_LANE=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$PR_LANE_JSON")
+    PR_HOLDER_TASK=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$PR_LANE_JSON")
+    echo "dispatch: PR #$PR_SCOPED is already claimed by lane $PR_HOLDER_LANE (task $PR_HOLDER_TASK) -- not dispatching, pick different work" >&2
     exit 1
   fi
 fi
@@ -1012,17 +1089,31 @@ fi
 # claim, matches the existing "every failure aborts" contract: a lane already
 # dispatched to a partial claim would be actively working issues the estate
 # cannot see as taken, which is the exact failure #112 was filed over.
+#
+# agent-supervisor#159: a PR-scoped dispatch (`PR_SCOPED` set) skips this
+# loop entirely -- ITS ISSUE(S) STAY CLAIMED BY THE ORIGINAL WORK, on
+# purpose. That claim is not this dispatch's to take: #159 was filed
+# because `claim.sh take` correctly refuses here (the issue IS claimed,
+# by the in-flight work that opened the PR under review/fix), and that
+# correct refusal was what pushed dispatch to a ledger-invisible tmux
+# hand-off. Step 0.6 above is this dispatch's real ownership check, against
+# the PR, not the issue; `CLAIMED` stays empty so `release_claim` below is
+# already a correct no-op for this path with no special-casing needed there.
 CLAIMED=()
 CLAIM_FAILED=""
-for i in "${ISSUES[@]}"; do
-  if "$HERE/claim.sh" take "$i" "$REPO" "$WINDOW_NAME"; then
-    CLAIMED+=("$i")
-  else
-    echo "dispatch: #$i is not available -- pick different work" >&2
-    CLAIM_FAILED=1
-    break
-  fi
-done
+if [ -n "$PR_SCOPED" ]; then
+  echo "dispatch: PR-scoped dispatch (PR #$PR_SCOPED) -- issue(s) ${ISSUES[*]} left claimed by the original work, no GitHub assignee taken" >&2
+else
+  for i in "${ISSUES[@]}"; do
+    if "$HERE/claim.sh" take "$i" "$REPO" "$WINDOW_NAME"; then
+      CLAIMED+=("$i")
+    else
+      echo "dispatch: #$i is not available -- pick different work" >&2
+      CLAIM_FAILED=1
+      break
+    fi
+  done
+fi
 
 release_claim() {
   local failed=() i
@@ -1604,6 +1695,11 @@ else
   for i in "${ISSUES[@]}"; do
     LEDGER_ARGS+=(--issue "$i")
   done
+  # agent-supervisor#159: recorded as the `source_tasks` KEY for a PR-scoped
+  # dispatch (`cli.py record_dispatch` writes `source_kind='pull'` when this
+  # is present) -- see cli.py's own docstring. The `--issue` args above are
+  # still sent; they land in evidence, not the source key, for this path.
+  [ -z "$PR_SCOPED" ] || LEDGER_ARGS+=(--pr "$PR_SCOPED")
   if ! LEDGER_OUT=$("${DISPATCH_PYTHON:-python3}" "$HERE/cli.py" "${LEDGER_ARGS[@]}" 2>&1); then
     ledger_record_failed "$LEDGER_OUT"
   fi

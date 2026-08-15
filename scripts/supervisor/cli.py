@@ -122,6 +122,14 @@ def parser():
     # in it -- the failure direction #237 names as its primary constraint.
     record_dispatch_parser.add_argument("--harness-session-id", default="")
     record_dispatch_parser.add_argument("--issue", action="append", required=True)
+    # agent-supervisor#159: a PR-scoped dispatch (a review, or a fix pass, on
+    # PR <N> while the issue it closes stays claimed by the in-flight work
+    # that opened it) records itself AGAINST THE PR, not the issue -- see
+    # `Ledger.get_open_task_for_pr`. `--issue` above is still sent and still
+    # required: it is what names the worktree/window and still belongs in
+    # the evidence trail, but when `--pr` is given it is no longer what this
+    # dispatch's `source_tasks` row is keyed by.
+    record_dispatch_parser.add_argument("--pr", default=None)
     record_dispatch_parser.add_argument("--github", default="")
     record_dispatch_parser.add_argument("--harness", choices=("codex", "claude", "copilot", "copilot-acp", "pi"))
     # agent-supervisor#117: the worktree `worktree.sh new` built for this
@@ -298,6 +306,15 @@ def parser():
     # at a branch.
     issue_lane_parser = sub.add_parser("issue-lane")
     issue_lane_parser.add_argument("--issue", required=True)
+
+    # agent-supervisor#159: the PR-scoped sibling of `issue-lane`, asked by
+    # `dispatch.sh` BEFORE it selects a lane -- unlike `issue-lane`, which
+    # answers the most recent row regardless of status (it has no live
+    # caller in dispatch.sh today), this one filters to OPEN so a completed
+    # or cancelled prior task on the same PR does not wrongly refuse a fresh
+    # dispatch. See `Ledger.get_open_task_for_pr`.
+    pr_lane_parser = sub.add_parser("pr-lane")
+    pr_lane_parser.add_argument("--pr", required=True)
 
     # agent-supervisor#108: the ONE comparison of two lane ids in this system,
     # exposed so `dispatch.sh` (the guard) and `digest.sh` (the independence
@@ -581,6 +598,7 @@ def record_dispatch(
     harness=None,
     harness_session_id="",
     worktree_path="",
+    pr=None,
 ):
     """Record a dispatch that ALREADY happened. Writes; never sends.
 
@@ -633,15 +651,35 @@ def record_dispatch(
     `Ledger.mark_lane_held` before re-raising, so the lane reads occupied
     instead of whatever it read before this call, regardless of which of
     the five writes failed or why.
+
+    agent-supervisor#159: `pr` is the PR-scoped sibling of the issue-keyed
+    write below -- passed by `dispatch.sh` for a review or a fix pass on PR
+    <N> whose underlying issue is deliberately left claimed by the in-flight
+    work that opened it. When given, the `source_tasks` row this writes is
+    keyed `source_kind='pull'`, `source_ref=str(pr)` instead of by the
+    primary issue, so `Ledger.get_open_task_for_pr` can find it -- the same
+    one-transaction write, the same `one_open_task_per_lane` uniqueness,
+    nothing new. `issues` is still recorded in `evidence` either way: this
+    dispatch still names which issue(s) it closes, it is only not claimed as
+    the SOURCE of the task.
     """
     try:
         harness = harness or HARNESS_BY_COMMAND.get(command)
         if harness is None:
             raise RuntimeError(f"cannot tell which harness pane command {command!r} is -- pass --harness")
         primary = issues[0]
-        source_url = (
-            f"https://github.com/{github}/issues/{primary}" if github else f"issue:{primary}@{Path(pane_path).name}"
-        )
+        evidence = [f"claimed by dispatch.sh for lane {lane}", f"issues: {','.join(str(i) for i in issues)}"]
+        if pr:
+            source_kind = "pull"
+            source_url = f"https://github.com/{github}/pull/{pr}" if github else f"pull:{pr}@{Path(pane_path).name}"
+            source_ref = str(pr)
+            evidence.append(f"pr: {pr}")
+        else:
+            source_kind = "issue"
+            source_url = (
+                f"https://github.com/{github}/issues/{primary}" if github else f"issue:{primary}@{Path(pane_path).name}"
+            )
+            source_ref = str(primary)
         return ledger.record_dispatch(
             lane=lane,
             pane_id=pane_id,
@@ -661,12 +699,12 @@ def record_dispatch(
             harness_session_id=harness_session_id,
             command=command,
             task_id=task,
-            source_kind="issue",
+            source_kind=source_kind,
             source_url=source_url,
-            source_ref=str(primary),
+            source_ref=source_ref,
             summary=summary,
             source_state="OPEN",
-            evidence=[f"claimed by dispatch.sh for lane {lane}", f"issues: {','.join(str(i) for i in issues)}"],
+            evidence=evidence,
             status_marker=None,
             worktree_path=worktree_path,
         )
@@ -810,6 +848,7 @@ def main(argv=None):
             github=args.github,
             harness=args.harness,
             worktree_path=args.worktree,
+            pr=args.pr,
         )
     elif args.command == "lane-free":
         value = lane_free(
@@ -856,6 +895,14 @@ def main(argv=None):
         row = ledger.get_task_for_issue(args.issue)
         value = {
             "issue": args.issue,
+            "known": row is not None,
+            "lane": row["lane"] if row is not None else None,
+            "task": row["id"] if row is not None else None,
+        }
+    elif args.command == "pr-lane":
+        row = ledger.get_open_task_for_pr(args.pr)
+        value = {
+            "pr": args.pr,
             "known": row is not None,
             "lane": row["lane"] if row is not None else None,
             "task": row["id"] if row is not None else None,
