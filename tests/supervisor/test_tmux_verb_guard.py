@@ -172,6 +172,124 @@ class GuardLogicTests(unittest.TestCase):
         self.assertEqual(str(a), findings[0].file)
 
 
+class GuardMarkerRemapClosesGapTests(unittest.TestCase):
+    """agent-supervisor#185's REQUEST CHANGES: a marker's text presence in
+    the prefix used to be trusted regardless of whether the code path
+    holding it had run by the verb -- including a named helper that is
+    DEFINED above the verb but not CALLED until after it. This is now
+    remapped through the same `_function_spans` machinery verb lines
+    already use, and should flip from evading to caught."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _write(self, name, text):
+        p = Path(self.tmp.name) / name
+        p.write_text(text)
+        return p
+
+    def test_helper_defined_above_verb_but_called_after_it_is_now_flagged(self):
+        # #185's evading fixture: setup_isolation() is textually above the
+        # verb, so a whole-prefix presence check reads it as isolation
+        # already in effect -- but it is not CALLED until after the verb,
+        # so the verb genuinely runs unisolated.
+        p = self._write(
+            "test_x.sh",
+            'setup_isolation() {\n'
+            '  source "$HERE/../../scripts/supervisor/tmux-isolation.sh"\n'
+            '  export TMUX_TMPDIR="$RT"\n'
+            '  assert_isolated_tmux || exit 1\n'
+            '}\n'
+            'tmux new-session -d -s leaky\n'
+            'setup_isolation\n',
+        )
+        findings = scan_file(p)
+        self.assertEqual(1, len(findings))
+        self.assertEqual("new-session", findings[0].verb)
+
+    def test_helper_defined_and_called_above_the_verb_still_clears_it(self):
+        # The mirror case: same helper shape, but called BEFORE the verb --
+        # genuinely isolated, and must stay clear.
+        p = self._write(
+            "test_x.sh",
+            'setup_isolation() {\n'
+            '  source "$HERE/../../scripts/supervisor/tmux-isolation.sh"\n'
+            '  export TMUX_TMPDIR="$RT"\n'
+            '  assert_isolated_tmux || exit 1\n'
+            '}\n'
+            'setup_isolation\n'
+            'tmux new-session -d -s ok\n',
+        )
+        self.assertEqual([], scan_file(p))
+
+
+class GuardKnownGapsTests(unittest.TestCase):
+    """Pins agent-supervisor#185's remaining evading fixtures as documented,
+    tracked gaps -- not fixed in this pass (see tmux_verb_guard.py's "Known
+    gaps" docstring section). Each assertion here is the CURRENT (wrong)
+    behavior, on purpose: if one of these ever starts asserting a Finding
+    where it currently asserts none, that gap has been closed and this
+    test (and the docstring) should be updated together, not left silently
+    stale."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+
+    def _write(self, name, text):
+        p = Path(self.tmp.name) / name
+        p.write_text(text)
+        return p
+
+    def test_variable_holding_tmux_evades_entirely(self):
+        p = self._write(
+            "test_x.sh",
+            'TMUX_BIN="tmux"\n'
+            '"$TMUX_BIN" new-session -d -s leaky\n',
+        )
+        self.assertEqual([], scan_file(p))
+
+    def test_which_tmux_captured_to_a_variable_evades_entirely(self):
+        p = self._write(
+            "test_x.sh",
+            'TMUX_BIN=$(which tmux)\n'
+            '"$TMUX_BIN" new-session -d -s leaky\n',
+        )
+        self.assertEqual([], scan_file(p))
+
+    def test_alias_indirection_evades_entirely(self):
+        p = self._write(
+            "test_x.sh",
+            'alias tx=tmux\n'
+            'tx new-session -d -s leaky\n',
+        )
+        self.assertEqual([], scan_file(p))
+
+    def test_line_continuation_evades_entirely(self):
+        p = self._write(
+            "test_x.sh",
+            'tmux \\\n'
+            '  new-session -d -s leaky\n',
+        )
+        self.assertEqual([], scan_file(p))
+
+    def test_isolation_markers_inside_dead_conditional_still_clear_it(self):
+        # `if false` never runs, so the markers below never actually
+        # establish isolation -- but the guard is a regex, not an
+        # interpreter, and cannot tell a dead branch from a live one.
+        p = self._write(
+            "test_x.sh",
+            'if false; then\n'
+            '  source "$HERE/../../scripts/supervisor/tmux-isolation.sh"\n'
+            '  export TMUX_TMPDIR="$RT"\n'
+            '  assert_isolated_tmux || exit 1\n'
+            'fi\n'
+            'tmux new-session -d -s leaky\n',
+        )
+        self.assertEqual([], scan_file(p))
+
+
 class RealSuiteIsIsolatedTests(unittest.TestCase):
     def test_no_unisolated_create_or_destroy_verb_in_any_shell_test(self):
         suites = sorted(TESTS_DIR.glob("test_*.sh"))

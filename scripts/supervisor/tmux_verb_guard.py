@@ -68,6 +68,55 @@ block are therefore judged as of that name's nearest CALL site instead of
 their own line -- falling back to the definition's own end if the
 function is never referenced (dead code some other check should catch,
 not this one).
+
+The same remap applies to ISOLATION MARKERS, not just verbs: a marker
+line (`source tmux-isolation.sh`, `export TMUX_TMPDIR=...`,
+`assert_isolated_tmux`, ...) written inside a `name() { ... }` block does
+not take effect where it is DEFINED either -- it takes effect wherever
+that function is later CALLED, exactly like a verb. A helper such as
+`setup_isolation() { ...markers...; }` defined above a bare `tmux
+new-session` but not CALLED until after it is therefore NOT isolation in
+effect at the verb, even though the marker text sits textually above the
+verb in the file. Both sides of a candidate verb -- what counts as the
+verb's effective position, and what counts as a marker having taken
+effect by that position -- go through the identical `_function_spans`
+remap, so a helper that is genuinely called first and one that is merely
+defined first are no longer indistinguishable to this scanner.
+
+## Known gaps (documented, not closed)
+
+This guard is a regex over line text, not a shell parser. Three shapes
+reach the guarded verb by a path VERB_RE or the marker-presence check
+cannot see at all, confirmed by fixtures agent-supervisor#185 built
+against this module:
+
+  - **Indirection through a variable or alias**: `$TMUX_BIN new-session`,
+    `TMUX_BIN=$(which tmux); "$TMUX_BIN" new-session ...`, or
+    `alias tx=tmux; tx new-session ...`. VERB_RE requires the literal
+    substring `tmux` on the SAME line as the verb; a call reached through
+    a variable or alias contains neither on that line, so the line is
+    never scanned in the first place -- not misjudged, invisible.
+  - **Line continuation**: a backslash-continued `tmux` line followed by
+    `new-session -d -s leaky` on the next line. VERB_RE matches within a
+    single line; a
+    verb split across a continuation is invisible for the same reason as
+    indirection above.
+  - **Dead-code markers**: isolation setup written inside a branch that
+    never executes (`if false; then ...markers...; fi`, verb unconditional
+    below it) still satisfies the presence check for every verb line
+    after it. The function-remap fix above closes the "not yet called"
+    case for markers inside a *named* helper, but a marker inside an
+    inline conditional that is simply never true is a different problem
+    -- it requires evaluating whether a branch runs at all, which this
+    scanner (a regex, not an interpreter) cannot do. Trusted on text
+    presence in the surviving prefix, same as before.
+
+A verb reached through any of these three shapes leaks silently: it is
+either never scanned, or scanned and wrongly cleared. Closing them needs
+real shell parsing (or a stricter allowlist of accepted verb/marker
+forms), which is out of scope for this pass -- tracked, not fixed, and
+pinned by fixtures in test_tmux_verb_guard.py so the gap cannot drift
+back to undocumented.
 """
 
 import re
@@ -161,6 +210,23 @@ def _function_spans(lines):
     return remap
 
 
+def _effective_prefix(lines, remap, effective_line):
+    """Text considered "in effect" by `effective_line`: every line whose
+    OWN effective position (itself, unless it lives inside a `name() {
+    ... }` block, in which case its nearest later call/trap site per
+    `remap`) is at or before `effective_line`. A marker line inside a
+    helper that has not been called yet is excluded even though it sits
+    textually earlier in the file -- the same rule already applied to
+    verb lines, extended to markers so a not-yet-called helper cannot
+    read as isolation in effect."""
+    included = [
+        line
+        for i, line in enumerate(lines, start=1)
+        if remap.get(i, i) <= effective_line
+    ]
+    return "\n".join(included)
+
+
 def scan_file(path: Path) -> list:
     try:
         text = path.read_text(encoding="utf-8")
@@ -177,7 +243,7 @@ def scan_file(path: Path) -> list:
         if not m:
             continue
         effective_line = remap.get(lineno, lineno)
-        prefix = "\n".join(lines[:effective_line])  # up to and including the effective line
+        prefix = _effective_prefix(lines, remap, effective_line)
         if _is_isolated(prefix):
             continue
         findings.append(Finding(str(path), lineno, m.group(1), line.strip()))
