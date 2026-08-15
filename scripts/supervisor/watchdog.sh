@@ -216,6 +216,26 @@ POLLER_SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
 # lane going never-busy while the first is still stuck must still page, so
 # the dedup key is the actual set of stuck names, not "has this fired before".
 NEVER_BUSY_EPISODE="${SUPERVISOR_NEVER_BUSY_EPISODE:-$STATE/.watchdog-never-busy-episode}"
+# agent-supervisor#163: the never-busy check ITSELF failing to run is a
+# different fact from it running and finding a stuck lane -- #163 measured
+# nine straight ticks of "NEVER-BUSY-CHECK FAILED: could not parse lanes.sh
+# --json output" in watchdog.log with nobody paged, because a failed check
+# only ever logged and wrote never_busy_note; nothing counted consecutive
+# failures or escalated them. The detection this guards (#112's four-hour
+# outage) is exactly the kind of thing that goes quiet for the same reason
+# twice, so a safety check that cannot run is itself an alarm condition, the
+# same posture poller-recover.sh's own fail streak already takes below. A
+# plain file, not a counter kept only in memory: this function returns on
+# EVERY exit path (report() cannot see it), so nothing here survives across
+# ticks except what is written to disk.
+NEVER_BUSY_CHECK_FAIL_STREAK="${SUPERVISOR_NEVER_BUSY_CHECK_FAIL_STREAK:-$STATE/.watchdog-never-busy-check-fail-streak}"
+# Escalate every Nth consecutive failure, not only the Nth: a check still
+# broken 20 ticks later must page again, not fall silent after the one page
+# at streak 3 -- the same noisy-vs-silent tradeoff #112's own lane dedup
+# makes in the other direction (page once per distinct STUCK SET, not once
+# per tick). Modulo, not equality, is what keeps paging without re-paging
+# every single tick once broken.
+NEVER_BUSY_CHECK_FAIL_ESCALATE_AFTER="${SUPERVISOR_NEVER_BUSY_CHECK_FAIL_ESCALATE_AFTER:-3}"
 # Threshold derived from inbox-poll.sh's own worst-case gap between heartbeat
 # writes while the process is genuinely alive -- not a round number (#163):
 #   - one iteration can block up to POLL_TIMEOUT+20s before giving up
@@ -962,10 +982,48 @@ print(f"completed={len(completed)} unresolved={unresolved} errors={errors}" + (f
 # time-based, not a new dialog shape to grep for here too) -- this function
 # only reads its --json output, counts `never-busy` rows, and pages once per
 # distinct set of stuck names via notify.sh, the path #118/#123 restored.
+# agent-supervisor#163: the fail-streak bookkeeping and escalation for the
+# never-busy check ITSELF being unable to run -- distinct from the check
+# running and finding a stuck lane, which is the rest of check_never_busy_
+# lanes below. <reason> is what goes in watchdog.log and never_busy_note;
+# it does not itself page -- only crossing a multiple of
+# NEVER_BUSY_CHECK_FAIL_ESCALATE_AFTER does, via the same notify.sh
+# resolution the stuck-lane page below uses, so a relocated tree cannot
+# silently lose this alarm either.
+never_busy_check_failed() {
+  local reason="$1" streak=0 notify_script notify_out notify_rc
+  [ -r "$NEVER_BUSY_CHECK_FAIL_STREAK" ] && streak=$(cat "$NEVER_BUSY_CHECK_FAIL_STREAK" 2>/dev/null)
+  [[ "$streak" =~ ^[0-9]+$ ]] || streak=0
+  streak=$((streak + 1))
+  printf '%s' "$streak" >"$NEVER_BUSY_CHECK_FAIL_STREAK" 2>/dev/null
+  log "NEVER-BUSY-CHECK FAILED (streak ${streak}): $reason"
+  never_busy_note "unknown — $reason (failed ${streak} check(s) in a row)"
+  if [ $(( streak % NEVER_BUSY_CHECK_FAIL_ESCALATE_AFTER )) -ne 0 ]; then
+    return 0
+  fi
+  notify_script="${NOTIFY_SCRIPT:-}"
+  if [ -z "$notify_script" ] || [ ! -x "$notify_script" ]; then
+    notify_script="$HERE/notify.sh"
+  fi
+  if [ ! -x "$notify_script" ]; then
+    log "NEVER-BUSY-CHECK-ESCALATE-UNAVAILABLE: no notifier at $notify_script"
+    return 0
+  fi
+  notify_out=$(AGENT_NOTIFY_CALLER=supervisor "$notify_script" \
+    "never-busy safety check has failed ${streak} times in a row" \
+    "agent-supervisor#163: the #112 stuck-lane detector cannot run: ${reason}. This has failed ${streak} consecutive ticks — the detector may be silently blind, the same shape #163 measured nine times in a row." 2>&1)
+  notify_rc=$?
+  if [ "$notify_rc" -ne 0 ]; then
+    log "NEVER-BUSY-CHECK-ESCALATE-FAILED rc=$notify_rc: $notify_out"
+  else
+    log "NEVER-BUSY-CHECK-ESCALATE: $notify_out"
+  fi
+  return 0
+}
+
 check_never_busy_lanes() {
   if [ ! -x "$HERE/lanes.sh" ]; then
-    log "NEVER-BUSY-CHECK-MISSING: lanes.sh is missing beside this watchdog"
-    never_busy_note "unknown — lanes.sh is missing beside this watchdog"
+    never_busy_check_failed "lanes.sh is missing beside this watchdog"
     return 0
   fi
   local session out out_rc names names_rc count message prev notify_script notify_out notify_rc joined
@@ -973,8 +1031,7 @@ check_never_busy_lanes() {
   out=$("$HERE/lanes.sh" --json "$session" 2>&1)
   out_rc=$?
   if [ "$out_rc" -ne 0 ]; then
-    log "NEVER-BUSY-CHECK FAILED: lanes.sh --json $session: $out"
-    never_busy_note "unknown — lanes.sh --json failed: $(printf '%s' "$out" | tr '\n' ' ')"
+    never_busy_check_failed "lanes.sh --json $session: $(printf '%s' "$out" | tr '\n' ' ')"
     return 0
   fi
   # `sort` here is not cosmetic: it makes the dedup key below stable across
@@ -990,10 +1047,13 @@ print("\n".join(sorted(r.get("name", "") for r in rows if r.get("state") == "nev
 ' "$out" 2>/dev/null)
   names_rc=$?
   if [ "$names_rc" -ne 0 ]; then
-    log "NEVER-BUSY-CHECK FAILED: could not parse lanes.sh --json $session output"
-    never_busy_note "unknown — could not parse lanes.sh --json output"
+    never_busy_check_failed "could not parse lanes.sh --json $session output"
     return 0
   fi
+  # The check itself ran and answered, whatever the answer -- reset the fail
+  # streak so a LATER unrelated failure starts counting from zero rather than
+  # continuing a streak that was actually already broken by a healthy tick.
+  printf '0' >"$NEVER_BUSY_CHECK_FAIL_STREAK" 2>/dev/null
   if [ -z "$names" ]; then
     # Recovered (or never stuck): clear the episode so a LATER occurrence,
     # even of the exact same lane name, pages again rather than reading as
