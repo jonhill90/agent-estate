@@ -15,6 +15,7 @@ from adapter import ACPAdapter, PiRPCAdapter, TmuxAdapter, HARNESS_COMMANDS
 from core import CLAIM_TASK_PREFIX, Ledger, claim_owner_token, lane_relation
 from github_source import GithubTaskSource
 from pi_transport import PiRPCTransport
+from reconcile_lane_completions import LaneCompletionReconciler
 from reconcile_sources import SourceTaskReconciler
 from sensor import StateSensor
 from transport import TmuxTransport
@@ -161,6 +162,17 @@ def parser():
     # table -- see `reconcile_sources.py`'s module docstring for why they
     # are separate commands rather than one overloaded.
     sub.add_parser("reconcile-source-tasks")
+
+    # agent-supervisor#155: a sibling sweep, same shape, a different table.
+    # `reconcile-source-tasks` advances `source_tasks` from GitHub state this
+    # process can observe; this advances `tasks.status` for a lane that
+    # finished without ever running `lane-done.sh`'s `wait-for -S`, from
+    # `lanes.sh --json`'s observed pane state instead of trusting the worker
+    # to announce it. See `reconcile_lane_completions.py`'s module docstring.
+    reconcile_lane_completions_parser = sub.add_parser("reconcile-lane-completions")
+    reconcile_lane_completions_parser.add_argument(
+        "--idle-after", type=int, default=int(os.environ.get("AGENT_LANE_IDLE_AFTER", "300"))
+    )
 
     observe = sub.add_parser("observe")
     observe.add_argument("--lane", action="append")
@@ -906,6 +918,11 @@ def main(argv=None):
     elif args.command == "reconcile-source-tasks":
         value = SourceTaskReconciler(
             ledger, gh_bin=os.environ.get("AGENT_GH_BIN", "gh")
+        ).sweep()
+    elif args.command == "reconcile-lane-completions":
+        lanes_bin = os.environ.get("AGENT_LANES_BIN", str(Path(__file__).resolve().parent / "lanes.sh"))
+        value = LaneCompletionReconciler(
+            ledger, lanes_bin=lanes_bin, idle_after=args.idle_after
         ).sweep()
     elif args.command == "observe":
         lanes = args.lane or [
