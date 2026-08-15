@@ -11,7 +11,17 @@ import (
 	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
-const refreshInterval = 5 * time.Second
+// DefaultRefreshInterval is how often the board re-fetches on its own tick,
+// with no flag or override supplied. agent-tui#28 measured the previous
+// value (5s) at ~138 GraphQL points/min against gh issue list/gh pr list --
+// ~8,160/hr against a 5,000/hr shared budget, enough to starve
+// agent-supervisor's own dispatch (agent-supervisor#144). 60s is not a
+// magic number chosen to hit some target ratio: it is what #28's own text
+// calls "honest for issue state" -- this is a screen a human reads, not a
+// control loop, and nothing on it needs sub-minute freshness. See
+// cmd/agent-tui's -board-refresh flag, which is how the value can be
+// argued without a rebuild (#28 acceptance item 2).
+const DefaultRefreshInterval = 60 * time.Second
 
 // Snapshot is one fetch's worth of already-derived board state.
 // cmd/agent-tui's Fetcher composes github.go/ledger.go/card.go into this;
@@ -46,8 +56,26 @@ type fetchResultMsg struct {
 type Model struct {
 	fetch Fetcher
 
+	// refreshInterval is how often Init/the refreshMsg loop below re-ticks.
+	// Set once, at construction (New/NewWithRefreshInterval), never mutated
+	// after -- there is no key that changes it, on purpose: #28's fix is a
+	// deploy-time flag (cmd/agent-tui's -board-refresh), not a runtime
+	// control, so the same "argued without a rebuild" flag also can't be
+	// fat-fingered from the keyboard mid-session back down toward 5s.
+	refreshInterval time.Duration
+
 	width, height int
 	layoutIdx     int
+
+	// scrollOffset is how many lines of the rendered board (post-header,
+	// pre-footer -- see View) are scrolled past. agent-tui#29: the board
+	// had no viewport at all, so content taller than the pane was only
+	// ever reachable by whatever the terminal itself did with overflow --
+	// which, per #29's own report, was "show the bottom, headers scrolled
+	// off, no indication anything is hidden." View clamps this to
+	// [0, maxScrollOffset] on every render, so it is safe for Update to
+	// move it by any amount, including past either end.
+	scrollOffset int
 
 	// deselected holds repos toggled OFF by GitHubID, lowercased. Empty
 	// means "show every repo" -- the default with zero interaction, and
@@ -77,7 +105,7 @@ type Model struct {
 }
 
 func New(fetch Fetcher) Model {
-	return Model{fetch: fetch, width: 100, height: 30, theme: theme.Default}
+	return NewWithRefreshInterval(fetch, DefaultRefreshInterval)
 }
 
 // WithTheme returns a copy of m with th (and, when non-empty, a visible
@@ -89,12 +117,25 @@ func (m Model) WithTheme(th theme.Theme, notice string) Model {
 	return m
 }
 
-func (m Model) Init() tea.Cmd {
-	return tea.Batch(refreshCmd(), doFetch(m.fetch))
+// NewWithRefreshInterval is New, with the tick interval as an explicit
+// argument -- cmd/agent-tui's -board-refresh flag (and $AGENT_TUI_BOARD_REFRESH)
+// call this directly so the value is settable without a rebuild (#28
+// acceptance item 2); New itself keeps DefaultRefreshInterval so every
+// existing caller and test that never touches the flag keeps working
+// unchanged.
+func NewWithRefreshInterval(fetch Fetcher, interval time.Duration) Model {
+	if interval <= 0 {
+		interval = DefaultRefreshInterval
+	}
+	return Model{fetch: fetch, width: 100, height: 30, refreshInterval: interval, theme: theme.Default}
 }
 
-func refreshCmd() tea.Cmd {
-	return tea.Tick(refreshInterval, func(t time.Time) tea.Msg { return refreshMsg(t) })
+func (m Model) Init() tea.Cmd {
+	return tea.Batch(refreshCmd(m.refreshInterval), doFetch(m.fetch))
+}
+
+func refreshCmd(interval time.Duration) tea.Cmd {
+	return tea.Tick(interval, func(t time.Time) tea.Msg { return refreshMsg(t) })
 }
 
 func doFetch(fetch Fetcher) tea.Cmd {
@@ -124,9 +165,28 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// deselected and forgot about.
 			m.deselected = nil
 			return m, nil
+		// agent-tui#29: up/down/j/k/pgup/pgdown move the viewport. The
+		// actual bound is enforced in View (it needs the rendered line
+		// count, which Update doesn't have), so these are free to push
+		// scrollOffset negative or past the end -- View's clamp is the only
+		// place that has to be right, and every caller of it (including
+		// these) can stay simple.
+		case "up", "k":
+			m.scrollOffset--
+			return m, nil
+		case "down", "j":
+			m.scrollOffset++
+			return m, nil
+		case "pgup":
+			m.scrollOffset -= pageSize(m.height)
+			return m, nil
+		case "pgdown", "pgdn":
+			m.scrollOffset += pageSize(m.height)
+			return m, nil
 		}
 		if n, ok := digitKey(msg.String()); ok && n >= 1 && n <= len(Layouts) {
 			m.layoutIdx = n - 1
+			m.scrollOffset = 0 // a new layout is different content; don't carry a stale scroll position into it
 			return m, nil
 		}
 		if i, ok := letterKey(msg.String()); ok && i < len(m.snap.Repos) {
@@ -139,11 +199,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			} else {
 				m.deselected[id] = true
 			}
+			m.scrollOffset = 0 // same reasoning as the layout switch above: the repo filter just changed what's on screen
 		}
 		return m, nil
 
 	case refreshMsg:
-		return m, tea.Batch(refreshCmd(), doFetch(m.fetch))
+		return m, tea.Batch(refreshCmd(m.refreshInterval), doFetch(m.fetch))
 
 	case fetchResultMsg:
 		m.fetchErr = msg.err
@@ -176,13 +237,13 @@ func letterKey(s string) (int, bool) {
 
 var titleStyle = lipgloss.NewStyle().Bold(true)
 
-// errStyle/dimStyle are per-render, built from m.theme -- see styles()
-// below. There is no package-level var for either any more: a literal
-// theme.Role color baked into a package var at init time couldn't change
-// when the active theme does, which is exactly the bug agent-tui#27 exists
-// to prevent.
+// errStyle/dimStyle/scrollIndicator are per-render, built from m.theme --
+// see styles() below. There is no package-level var for any of them any
+// more: a literal theme.Role color baked into a package var at init time
+// couldn't change when the active theme does, which is exactly the bug
+// agent-tui#27 exists to prevent.
 type boardStyles struct {
-	err, dim lipgloss.Style
+	err, dim, scrollIndicator lipgloss.Style
 }
 
 func (m Model) styles() boardStyles {
@@ -190,7 +251,62 @@ func (m Model) styles() boardStyles {
 	return boardStyles{
 		err: lipgloss.NewStyle().Bold(true).Foreground(th.Color(theme.RoleError)),
 		dim: lipgloss.NewStyle().Faint(true),
+		// scrollIndicator is agent-tui#29's "whatever is off-screen must be
+		// visibly indicated" element, given its own named field (rather
+		// than reusing dim inline, or a literal colour) specifically so
+		// agent-tui#27's theme table can restyle just this element without
+		// a second pass through this file. Currently identical to dim;
+		// #27 owns making it look like anything more than that.
+		scrollIndicator: lipgloss.NewStyle().Faint(true),
 	}
+}
+
+// pageSize is how many lines up/pgup/down/pgdown move for one page --
+// height minus a little headroom so a page-down always leaves the last
+// line of the previous page visible as an anchor, the same reason
+// terminal pagers (less, more) don't jump a full screen at a time. height
+// <= 0 (should not happen once WindowSizeMsg has landed once, but Update
+// doesn't get to assume that) falls back to a fixed page so pgup/pgdown are
+// never a no-op before the first resize arrives.
+func pageSize(height int) int {
+	if height <= 1 {
+		return 10
+	}
+	if height <= 3 {
+		return height
+	}
+	return height - 3
+}
+
+// scrollBody splits body into lines and returns the window [offset,
+// offset+viewportHeight) of it, clamped so offset can never show blank
+// space past either end -- the one place agent-tui#29's viewport math
+// lives, so Update's key handlers (which don't know the rendered line
+// count) can move scrollOffset by any amount without risking a panic or an
+// empty render here. Returns the visible lines, the clamped offset actually
+// used, and the total line count -- the caller needs all three to build the
+// "N more below/above" indicator.
+func scrollBody(body string, offset, viewportHeight int) (visible []string, usedOffset, total int) {
+	lines := strings.Split(body, "\n")
+	total = len(lines)
+	if viewportHeight < 1 {
+		viewportHeight = 1
+	}
+	maxOffset := total - viewportHeight
+	if maxOffset < 0 {
+		maxOffset = 0
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	if offset > maxOffset {
+		offset = maxOffset
+	}
+	end := offset + viewportHeight
+	if end > total {
+		end = total
+	}
+	return lines[offset:end], offset, total
 }
 
 func (m Model) View() string {
@@ -203,31 +319,57 @@ func (m Model) View() string {
 	}
 	st := m.styles()
 
-	var out string
-	out += titleStyle.Render("task board") + "\n"
-
+	var header strings.Builder
+	header.WriteString(titleStyle.Render("task board") + "\n")
 	if m.themeNotice != "" {
-		out += st.err.Render("! "+m.themeNotice) + "\n"
+		header.WriteString(st.err.Render("! "+m.themeNotice) + "\n")
 	}
-
 	if m.fetchErr != nil {
-		out += st.err.Render("! unavailable") + "\n"
-		out += st.dim.Render(m.fetchErr.Error()) + "\n"
+		header.WriteString(st.err.Render("! unavailable") + "\n")
+		header.WriteString(st.dim.Render(m.fetchErr.Error()) + "\n")
 	} else if len(m.snap.Cards) == 0 && m.lastFetched.IsZero() {
-		out += st.dim.Render("(loading)") + "\n"
+		header.WriteString(st.dim.Render("(loading)") + "\n")
 	}
 
 	layout := Layouts[m.layoutIdx]
-	out += layout.Render(m.visibleCards(), m.snap.WIP, width, m.theme)
+	body := strings.TrimRight(layout.Render(m.visibleCards(), m.snap.WIP, width, m.theme), "\n")
 
+	var footer strings.Builder
 	if !m.lastFetched.IsZero() {
 		age := time.Since(m.lastFetched).Round(time.Second)
-		out += "\n" + st.dim.Render(fmt.Sprintf("fetched %s ago", age)) + "\n"
+		footer.WriteString(st.dim.Render(fmt.Sprintf("fetched %s ago", age)) + "\n")
 	}
-	out += st.dim.Render(fmt.Sprintf("layout %d/%d: %s -- %s", m.layoutIdx+1, len(Layouts), layout.Name, layout.Description)) + "\n"
-	out += st.dim.Render(fmt.Sprintf("[1-%d] switch layout  %s", len(Layouts), m.repoLegend())) + "\n"
-	out += st.dim.Render("[r] refresh  [q] quit")
-	return out
+	footer.WriteString(st.dim.Render(fmt.Sprintf("layout %d/%d: %s -- %s", m.layoutIdx+1, len(Layouts), layout.Name, layout.Description)) + "\n")
+	footer.WriteString(st.dim.Render(fmt.Sprintf("[1-%d] switch layout  %s", len(Layouts), m.repoLegend())) + "\n")
+	footer.WriteString(st.dim.Render("[j/k up/down  pgup/pgdn] scroll  [r] refresh  [q] quit"))
+
+	// agent-tui#29: the viewport is only the body -- header and footer
+	// always render in full, every frame, so the column-header row inside
+	// body is the ONLY thing that can ever scroll out of view (never the
+	// title, error state, or the key legend a lane needs to discover
+	// scrolling exists in the first place).
+	headerLines := strings.Count(header.String(), "\n")
+	footerLines := strings.Count(footer.String(), "\n") + 1
+	viewportHeight := m.height - headerLines - footerLines
+	if viewportHeight < 1 {
+		viewportHeight = 1
+	}
+
+	visible, offset, total := scrollBody(body, m.scrollOffset, viewportHeight)
+
+	var out strings.Builder
+	out.WriteString(header.String())
+	out.WriteString(strings.Join(visible, "\n"))
+	out.WriteString("\n")
+	if hiddenBelow := total - offset - len(visible); total > viewportHeight {
+		hiddenAbove := offset
+		out.WriteString(st.scrollIndicator.Render(fmt.Sprintf(
+			"-- showing lines %d-%d of %d (%d more above, %d more below) --",
+			offset+1, offset+len(visible), total, hiddenAbove, hiddenBelow,
+		)) + "\n")
+	}
+	out.WriteString(footer.String())
+	return out.String()
 }
 
 // visibleCards filters m.snap.Cards to repos not in m.deselected -- the

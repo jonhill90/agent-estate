@@ -78,6 +78,12 @@ func main() {
 			"lane state against every candidate glyph, including glyphs not yet in any set, each flagged with "+
 			"whether it needs a Nerd Font. A separate screen, never a rail restyle; reads no lanes and needs no "+
 			"supervisor connection, same as -cost.")
+		boardRefresh = flag.Duration("board-refresh", envOrDuration("AGENT_TUI_BOARD_REFRESH", board.DefaultRefreshInterval),
+			"how often -board re-fetches on its own tick (agent-tui#28). The previous hardcoded 5s measured at "+
+				"~8,160 GitHub GraphQL points/hr against gh issue list/gh pr list -- against a shared 5,000/hr "+
+				"budget, enough to starve agent-supervisor's own dispatch (agent-supervisor#144). This is a "+
+				"screen a human reads, not a control loop; [r] still refreshes on demand. Defaults to "+
+				"$AGENT_TUI_BOARD_REFRESH.")
 	)
 	flag.Parse()
 
@@ -167,7 +173,10 @@ func main() {
 	var p *tea.Program
 	if *showBoard {
 		boardFetch := buildBoardFetch(*ledger, *ghBin, *sqliteBin, *repositories, lanesFetch)
-		p = tea.NewProgram(board.New(boardFetch).WithTheme(activeTheme, themeNotice), tea.WithAltScreen())
+		p = tea.NewProgram(
+			board.NewWithRefreshInterval(boardFetch, *boardRefresh).WithTheme(activeTheme, themeNotice),
+			tea.WithAltScreen(),
+		)
 	} else {
 		// NewMultiSession, not NewWithCost: agent-tui#13 is the regression
 		// that shipped a rail showing one session's lanes when six sessions
@@ -224,6 +233,21 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// envOrDuration parses $key as a Go duration string (e.g. "60s", "5m"); an
+// unset or unparsable value falls back rather than erroring, same
+// leniency envOrInt64 already gives -claude-block-limit.
+func envOrDuration(key string, fallback time.Duration) time.Duration {
+	v := os.Getenv(key)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		return fallback
+	}
+	return d
 }
 
 func envOrInt64(key string, fallback int64) int64 {
