@@ -29,6 +29,30 @@ echo "director-inbox.sh"
 D=$(mktemp -d)
 run() { DIRECTOR_INBOX="$D/box.jsonl" bash "$INBOX" "$@"; }
 
+# --- no-argument invocation defaults to "read" (documented) — #113 ---------
+# `case "${1:-read}"` only defaults which BRANCH is selected. The read/drain
+# branch then re-reads the literal `$1` for its own use (to tell python which
+# of read/drain it is) -- and that reference is still unset when no argument
+# was given, so it crashes under `set -u`. The documented no-argument form
+# was the one form that failed. The box must be non-empty to hit this: an
+# empty box returns via the `[ -s "$BOX" ]` short-circuit before `$1` is ever
+# touched again, which is why this needs its own message posted first.
+rm -f "$D/box.jsonl"
+run post "default form" >/dev/null
+before=$(cat "$D/box.jsonl")
+out=$(DIRECTOR_INBOX="$D/box.jsonl" bash "$INBOX" 2>&1); rc=$?
+after=$(cat "$D/box.jsonl")
+want_exit "no-argument invocation exits 0" "$rc" 0
+want_contains "no-argument invocation shows the pending message (defaults to read)" "default form" "$out"
+[ "$before" = "$after" ] && ok "no-argument invocation does not mutate the file (defaults to read, not drain)" \
+  || bad "no-argument invocation does not mutate the file (defaults to read, not drain)" "before:$before"$'\n'"after:$after"
+
+# Same, under a minimal launchd-like environment -- #163 was exactly a check
+# that passed with a developer PATH and could never run where installed.
+out=$(env -i HOME="$D" PATH=/usr/bin:/bin DIRECTOR_INBOX="$D/box.jsonl" bash "$INBOX" 2>&1); rc=$?
+want_exit "no-argument invocation exits 0 under env -i (launchd-like PATH)" "$rc" 0
+want_contains "no-argument invocation under env -i shows the pending message" "default form" "$out"
+
 # --- post then read: message appears, read does not mutate the file --------
 run post "first message" >/dev/null
 before=$(cat "$D/box.jsonl")
