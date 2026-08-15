@@ -674,6 +674,21 @@ fi
 # already proven. `cli.py pr-lane` asks `Ledger.get_open_task_for_pr`, which
 # is OPEN-status only (unlike `issue-lane`): a completed or cancelled prior
 # review of this PR must not block a fresh one.
+#
+# agent-supervisor#169: THIS CHECK ALONE IS A TOCTOU, and is not the whole
+# guarantee -- a reviewer of this PR reproduced the exact "b"-suffixed
+# collision above THROUGH it: it is a plain read, run once, before a lane is
+# even picked, while the write that actually claims the PR
+# (`record-dispatch --pr`, step 6, far below) does not happen until after
+# lane selection, worktree creation and the brief itself -- a real,
+# multi-second window, not the sub-second gap `claim.sh`'s own docstring
+# accepts for the GitHub-assignee race. Two dispatchers can both pass this
+# exact check before either one has recorded anything. What actually closes
+# the race is `core.py`'s `one_open_pull_per_source_ref` trigger on
+# `record-dispatch`'s write, at the bottom of this script -- this check
+# stays because it is the FRIENDLY, EARLY refusal for the common case (no
+# wasted worktree, no stray brief); it is not, by itself, load-bearing for
+# correctness anymore.
 if [ -n "$PR_SCOPED" ]; then
   PR_LANE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" pr-lane --pr "$PR_SCOPED" 2>&1)
   if [ $? -ne 0 ]; then
@@ -1610,6 +1625,24 @@ ledger_record_failed() {
   return 0  # the ledger write is never fatal -- agent-dotfiles#140
 }
 
+# agent-supervisor#169: a PR-scoped record-dispatch failure is not an
+# ordinary ledger write failure -- `PR-DUPLICATE:` (printed by `cli.py`'s
+# `record_dispatch` when the write-time `one_open_pull_per_source_ref` index
+# refuses a second open row for the same PR) means ANOTHER lane genuinely
+# won the same PR, seconds ago, through the exact race step 0.6 cannot
+# always catch. `ledger_record_failed` above is deliberately non-fatal
+# because the brief is already live in the pane and nothing here can unsend
+# it -- that stays true here too, the dispatch still stands and the lane is
+# still marked HELD by the same call. What changes is the EXIT CODE: this
+# refusal is loud AND non-zero, so a caller (a human, or a supervisor loop)
+# is told this specific dispatch collided with a lane that actually holds
+# the PR, rather than reading dispatch.sh's overall success alongside a
+# buried warning.
+ledger_record_pr_duplicate() {
+  echo "dispatch: $1" >&2
+  echo "dispatch: the lane is working, and cli.py has marked it HELD (a placeholder occupied task) so it will not be offered again -- reconcile it by hand (cli.py register / record-dispatch, or cli.py cancel-open-task --lane $LANE if this lane's own brief should be abandoned)" >&2
+}
+
 # One tmux call for the pane identity the ledger records. The recorder itself
 # never talks to tmux: a durable record that cannot be written without a live
 # tmux server is not the portability the ledger is for, and the caller here is
@@ -1701,6 +1734,11 @@ else
   # still sent; they land in evidence, not the source key, for this path.
   [ -z "$PR_SCOPED" ] || LEDGER_ARGS+=(--pr "$PR_SCOPED")
   if ! LEDGER_OUT=$("${DISPATCH_PYTHON:-python3}" "$HERE/cli.py" "${LEDGER_ARGS[@]}" 2>&1); then
+    if grep -qF 'PR-DUPLICATE:' <<<"$LEDGER_OUT"; then
+      PR_DUP_MSG=$(sed -n 's/^PR-DUPLICATE: //p' <<<"$LEDGER_OUT" | head -1)
+      ledger_record_pr_duplicate "$PR_DUP_MSG"
+      exit 1
+    fi
     ledger_record_failed "$LEDGER_OUT"
   fi
 fi

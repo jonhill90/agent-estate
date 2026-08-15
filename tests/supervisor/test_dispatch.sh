@@ -1214,8 +1214,19 @@ else bad "stderr is clean on a successful dispatch (agent-dotfiles#199)" "expect
 cat > "$D/race-hook.sh" <<'HOOK'
 #!/bin/bash
 set -uo pipefail
+# Self-disarming after the first firing (agent-supervisor#169): the hook
+# runs once PER CANDIDATE LANE dispatcher A's loop tries, unconditionally --
+# #184's own race never notices because it seeds exactly one free lane, so
+# there is only ever one candidate and the loop ends the moment A's claim on
+# it fails. A race that needs A and B to land on TWO DIFFERENT lanes (this
+# one) seeds two free lanes, so A's loop tries a SECOND candidate after
+# losing the first -- and without this guard, the hook fired dispatcher B a
+# second, spurious time, which then raced against ITS OWN first (already
+# `delivered`) dispatch instead of proving anything about A.
+[ -e "$RACE_HOOK_FIRED" ] && exit 0
+: > "$RACE_HOOK_FIRED"
 env -u DISPATCH_TEST_RACE_HOOK bash "$RACE_DISPATCH" "$RACE_B_ISSUE" "$RACE_B_SLUG" \
-  "$RACE_B_BRIEF" "$RACE_B_REPO_SLUG" "$RACE_B_REPO_PATH" > "$RACE_B_LOG" 2>&1
+  "$RACE_B_BRIEF" "$RACE_B_REPO_SLUG" "$RACE_B_REPO_PATH" ${RACE_B_EXTRA:-} > "$RACE_B_LOG" 2>&1
 echo $? > "$RACE_B_RC"
 HOOK
 chmod +x "$D/race-hook.sh"
@@ -1226,20 +1237,29 @@ chmod +x "$D/race-hook.sh"
 # genuine competing dispatch, not about B's own correctness) spliced in via
 # the hook. Leaves $RACE_RC_A/$RACE_OUT_A for A and $RACE_RC_B/$RACE_OUT_B
 # for B, plus $RACE_LOG (the shared tmux log both dispatchers wrote to).
+#
+# Any trailing args ($4+) are forwarded to BOTH dispatcher A and dispatcher
+# B -- agent-supervisor#169's own race (both dispatchers racing the SAME
+# `--pr N`, not the #184 shape below of two dispatchers racing the same
+# LANE for two different issues) needs this; every existing caller passes
+# none, so this is purely additive.
 run_race() {
-  local issue_a="$1" script="$2" issue_b="$3"
+  local issue_a="$1" script="$2" issue_b="$3"; shift 3
+  local extra=("$@")
   local state="$D/state-race-$issue_a"
   printf '%s|| dispatcher A races for the only free lane\n%s|| dispatcher B wins the same race\n' \
     "$issue_a" "$issue_b" >> "$D/issues"
-  : > "$D/race-b.out"; : > "$D/race-b.rc"
+  : > "$D/race-b.out"; : > "$D/race-b.rc"; rm -f "$D/race-hook-fired"
   local out
   out=$(LEDGER_STATE="$state" \
         DISPATCH_TEST_RACE_HOOK="$D/race-hook.sh" \
+        RACE_HOOK_FIRED="$D/race-hook-fired" \
         RACE_DISPATCH="$DISPATCH" RACE_B_ISSUE="$issue_b" RACE_B_SLUG="race-b-$issue_b" \
         RACE_B_BRIEF="$D/brief.md" RACE_B_REPO_SLUG=acme/agent-dotfiles \
         RACE_B_REPO_PATH="$REPO" RACE_B_LOG="$D/race-b.out" RACE_B_RC="$D/race-b.rc" \
+        RACE_B_EXTRA="${extra[*]:-}" \
         DISPATCH_SCRIPT="$script" \
-        run "$issue_a" "race-a-$issue_a" "$D/brief.md" acme/agent-dotfiles "$REPO")
+        run "$issue_a" "race-a-$issue_a" "$D/brief.md" acme/agent-dotfiles "$REPO" "${extra[@]}")
   RACE_RC_A=$?
   RACE_OUT_A="$out"
   RACE_OUT_B=$(cat "$D/race-b.out" 2>/dev/null)
@@ -3154,9 +3174,17 @@ else
 fi
 
 # MUTATION-CHECK: silence step 0.6's PR-lane refusal and confirm the SAME
-# second dispatch now goes through -- the load-bearing proof that the check
-# above is what refuses it, not some incidental side effect (a busy lane,
-# a full estate) that would refuse it anyway.
+# second dispatch is STILL refused -- proof that step 0.6 is not the ONLY
+# thing standing between a duplicate PR dispatch and the ledger.
+#
+# agent-supervisor#169: before that fix, this assertion read the other way
+# (silencing step 0.6 let the duplicate straight through) -- step 0.6 WAS the
+# only guard. It no longer is: `core.py`'s `one_open_pull_per_source_ref`
+# write-time trigger (untouched by this mutant, which only patches
+# dispatch.sh) still catches it, seconds later, at record-dispatch. This is
+# now the load-bearing proof of DEFENSE IN DEPTH, not of step 0.6 alone --
+# see case 5 below for the mutation check that defeats the write-time gate
+# itself and confirms THAT one is load-bearing.
 MUTATED_159="$D/dispatch-no-pr-claim-check.sh"
 patch_rc=0
 python3 - "$DISPATCH" "$MUTATED_159" <<'PY' || patch_rc=$?
@@ -3181,7 +3209,108 @@ else
   printf '918|| a third dispatcher tries PR #953 against the mutated guard\n' >> "$D/issues"
   out=$(DISPATCH_SCRIPT="$MUTATED_159" LEDGER_STATE="$D/state-159d" \
         run 918 third-953c "$D/brief.md" acme/agent-dotfiles "$REPO" --pr 953); rc=$?
-  want_exit "mutation confirmed: with the check silenced, a duplicate dispatch of PR #953 succeeds" "$rc" 0 "$out"
+  want_exit "with step 0.6 silenced, the duplicate is STILL refused -- the write-time gate catches it" "$rc" 1 "$out"
+  want_contains "...refused at the WRITE this time, not the read" \
+    "PR #953 is already claimed by lane t:3 (task ad916-first-953) -- the write refused" "$out"
+fi
+
+# --- case 5 (agent-supervisor#169, the fix pass on THIS PR): step 0.6 is a
+# TOCTOU by itself -- reproduced directly by a reviewer of #169 using the
+# SAME `DISPATCH_TEST_RACE_HOOK` #184 already wires (it fires per lane
+# candidate, which is AFTER step 0.6 completes for dispatcher A): dispatcher
+# A passes step 0.6 (PR not yet claimed, nothing recorded yet), THEN
+# dispatcher B runs a whole competing dispatch for the SAME PR -- B's OWN
+# step 0.6 also reads "not yet claimed" (A hasn't written anything either),
+# so B proceeds, wins a free lane, and completes its dispatch cleanly. Only
+# when A resumes and reaches record-dispatch, seconds later, does the WRITE
+# -- not the read -- have to be the thing that catches it. Two free lanes
+# this time (t:3, t:4): unlike #184's race (both dispatchers wanting the
+# SAME lane), this is two dispatchers wanting the SAME PR on two DIFFERENT
+# lanes, which is exactly the "b"-suffixed collision (#157/#149) and the
+# real one this estate paid for (#181/#182).
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+
+run_race 919 "$DISPATCH" 920 --pr 960
+want_exit "dispatcher B (spliced in mid-A's lane selection) completes its own PR #960 dispatch" "$RACE_RC_B" 0 "$RACE_OUT_B"
+want_contains "...and B's brief actually went out" "dispatch: #920 -> " "$RACE_OUT_B"
+want_exit "dispatcher A is refused: B already won the same PR, at the WRITE, not the read" "$RACE_RC_A" 1 "$RACE_OUT_A"
+want_contains "...and the refusal is LOUD, not silent" "PR #960 is already claimed by lane" "$RACE_OUT_A"
+# Both briefs DID go out -- unlike step 0.6's own refusal (case 4), which
+# catches the common case before any worktree or brief exists, this is the
+# LAST-RESORT gate: by the time the write runs, A's brief is already live in
+# its own lane's pane (agent-dotfiles#140's own invariant -- nothing can
+# unsend it). What must be true is the LEDGER never lies about it afterward.
+log=$(tmuxlog)
+b_lane_target=$(sed -n 's/.*target: *\(t:@10[0-9]\).*/\1/p' <<<"$RACE_OUT_B" | head -1)
+want_contains "B's own brief reached its lane" "send-keys -t $b_lane_target" "$log"
+PR960_LANE=$(LEDGER_STATE="$D/state-race-919" ledger pr-lane --pr 960)
+want_contains "the ledger records exactly ONE open holder for PR #960 -- not both" '"known":true' "$PR960_LANE"
+want_contains "...and it is B, the actual winner of the write" '"task":"ad920-race-b-920"' "$PR960_LANE"
+want_contains "A's own lane is marked HELD, not left reading falsely free" "the lane is working, and cli.py has marked it HELD" "$RACE_OUT_A"
+
+# MUTATION-CHECK: defeat the write-time gate (core.py's
+# `one_open_pull_per_source_ref` trigger, created but never fires) and
+# confirm the SAME race now lets BOTH dispatchers land -- the exact
+# collision #181/#182 measured, reproduced through a script that differs
+# from the real one only by this one guard being gone. Same technique as
+# the step-0.6 mutation check above: a patched COPY of dispatch.sh whose
+# `HERE=` points at a patched copy of the whole `scripts/supervisor`
+# directory (cli.py imports core.py by relative path, so both must move
+# together), used for dispatcher A only -- A opens the shared ledger first
+# (well before the hook splices B in), so A's mutated code is what actually
+# decides whether the trigger's real logic ever gets created for this race.
+MUTATED_169_DIR="$D/mutated-supervisor-169"
+MUTATED_169_DISPATCH="$D/dispatch-no-pr-write-gate.sh"
+patch_rc=0
+python3 - "$HERE/../../scripts/supervisor" "$MUTATED_169_DIR" "$DISPATCH" "$MUTATED_169_DISPATCH" <<'PY' || patch_rc=$?
+import shutil
+import sys
+from pathlib import Path
+
+src_dir, mutated_dir, dispatch_src, dispatch_dst = (
+    Path(sys.argv[1]), Path(sys.argv[2]), Path(sys.argv[3]), Path(sys.argv[4])
+)
+# The whole directory, not just *.py: dispatch.sh also shells out to
+# lanes.sh/claim.sh/worktree.sh (and sources input-box.sh/harness-registry.sh/
+# session-defaults.sh) via "$HERE/...", and $HERE below points INTO this copy.
+shutil.copytree(
+    src_dir, mutated_dir, dirs_exist_ok=True,
+    ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+)
+
+core_text = (mutated_dir / "core.py").read_text()
+marker = "                        WHEN NEW.source_kind = 'pull' AND EXISTS ("
+assert core_text.count(marker) == 1, "pull-uniqueness trigger WHEN clause not found or not unique -- script shape changed"
+mutated_core = core_text.replace(
+    marker,
+    "                        -- MUTATED: agent-supervisor#169 write-time gate defeated\n"
+    "                        WHEN 0 AND EXISTS (",
+    1,
+)
+assert mutated_core != core_text, "mutation did not change core.py"
+(mutated_dir / "core.py").write_text(mutated_core)
+
+dispatch_text = dispatch_src.read_text()
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert dispatch_text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+dispatch_text = dispatch_text.replace(here, 'HERE=%r' % str(mutated_dir), 1)
+dispatch_dst.write_text(dispatch_text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh/core.py whose PR write-time gate is defeated" \
+    "could not patch (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh/core.py whose PR write-time gate is defeated"
+  chmod +x "$MUTATED_169_DISPATCH"
+  run_race 921 "$MUTATED_169_DISPATCH" 922 --pr 964
+  want_exit "mutation confirmed: with the write-time gate defeated, A's dispatch of the SAME PR now succeeds too" \
+    "$RACE_RC_A" 0 "$RACE_OUT_A"
+  want_contains "...both dispatchers, two lanes, one PR -- the exact collision this fix closes" \
+    "dispatch: #921 -> " "$RACE_OUT_A"
 fi
 
 rm -rf "$D"

@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -662,6 +663,22 @@ def record_dispatch(
     nothing new. `issues` is still recorded in `evidence` either way: this
     dispatch still names which issue(s) it closes, it is only not claimed as
     the SOURCE of the task.
+
+    agent-supervisor#169: step 0.6's `pr-lane` read (`dispatch.sh`, before a
+    lane is even picked) is a TOCTOU by itself -- this write, seconds later,
+    is the actual gate. `Ledger._migrate_source_tasks_pull_uniqueness`'s
+    `one_open_pull_per_source_ref` trigger (a `BEFORE INSERT` trigger, not a
+    plain partial index -- `source_tasks.status` never advances, so a
+    same-table index cannot ask the real "is this PR still open" question;
+    see that migration's own docstring) makes a second dispatcher's INSERT
+    for the same open PR raise `sqlite3.IntegrityError`, atomically, no
+    matter how close the two dispatchers' checks landed. When that happens
+    for a PR-scoped call, this prints one recognisable `PR-DUPLICATE:` line
+    (in addition to the generic `mark_lane_held` handling every other
+    failure already gets) naming the lane that actually won, so
+    `dispatch.sh` can tell this collision apart from an ordinary ledger
+    failure and refuse loud instead of folding it into the silent,
+    non-fatal `ledger_record_failed` path every other write failure takes.
     """
     try:
         harness = harness or HARNESS_BY_COMMAND.get(command)
@@ -710,6 +727,24 @@ def record_dispatch(
         )
     except Exception as error:
         ledger.mark_lane_held(lane, note=f"record_dispatch failed for task {task}: {error}")
+        # agent-supervisor#169: the write-time PR-duplicate collision is a
+        # distinct, expected failure -- not a generic ledger error -- and the
+        # caller (`dispatch.sh`) needs to be able to tell them apart to
+        # refuse loud rather than fold this into the silent non-fatal path
+        # every other record_dispatch failure takes. Detected by the index
+        # name rather than a generic IntegrityError check, so an unrelated
+        # constraint violation (a real bug) still surfaces as an ordinary,
+        # unrecognised failure instead of being misreported as this one.
+        if pr and isinstance(error, sqlite3.IntegrityError) and "source_tasks.source_ref" in str(error):
+            holder = ledger.get_open_task_for_pr(pr)
+            holder_lane = holder["lane"] if holder else "unknown"
+            holder_task = holder["id"] if holder else "unknown"
+            print(
+                f"PR-DUPLICATE: PR #{pr} is already claimed by lane {holder_lane} (task {holder_task}) "
+                f"-- the write refused this second open source_tasks row; lane {lane} (task {task}) "
+                "is marked HELD",
+                file=sys.stderr,
+            )
         raise
 
 
