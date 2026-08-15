@@ -81,7 +81,48 @@ HARNESS_READY_RE='^❯ [^←]*$|← 1 agent$'
 # `· ↓ to manage` trailing it already fails that anchor on its own -- adding
 # this alternative here cannot make a lane MORE free, only less unknown,
 # which is the #124/#126 one-way ratchet this file is under.
-HARNESS_BUSY_RE='esc to interrupt|↓ to manage'
+# agent-supervisor#164: a THIRD busy shape, live off `agent-tui:2` twice ~20
+# minutes apart, PR #22 delivered shortly after -- so the lane was healthy
+# and working the whole time it read `unknown`. A background subagent's task
+# rail pushes the turn footer (the `esc to interrupt` line above) up off the
+# last line, and puts its own row there instead, verbatim:
+#
+#   ✽ Building supervisor-side session write tools… (14m 13s · ↓ 82.3k tokens)
+#     ⎿  ◼ Supervisor PR: session write tools + fix #153 marker consumption
+#        ◻ agent-tui: rail attach/detach/add/remove UI + MCP client calls
+#     ⏵⏵ bypass permissions on · esc to interrupt · ctrl+t to hide tasks · ← 1 agent · ↓ to manage
+#     ⏺ main
+#     ◯ general-purpose  Build supervisor session write tools   21m 11s · ↓ 243.4k tokens
+#
+# The last non-empty line is the subagent's OWN row, not the footer, so
+# `HARNESS_BUSY_TAIL=1` never sees `esc to interrupt` -- widening the tail
+# instead (codex's approach, HARNESS_BUSY_TAIL=4) does not fit here: the
+# number of task-list lines and agent rows above the footer is unbounded --
+# a lane with a long task list or several concurrent subagents pushes the
+# footer arbitrarily far from the end, and #65 already found what happens
+# when this probe reads further back than one screen-line of intent (it
+# starts matching text the pane merely printed).
+#
+# What stays exactly one line deep is the subagent row's own trailing
+# `<elapsed> · ↓ <tokens> tokens` -- the same live-progress readout the main
+# turn's spinner line prints (`14m 13s · ↓ 82.3k tokens`, above), reused
+# verbatim for a subagent still executing. This is deliberately NOT "any
+# `◯ <name> ...` row": w-subagent-task (agent-supervisor#126, a real capture
+# from an EARLIER Claude Code release) is the same row shape with no token
+# readout at all --
+#
+#   ◯ general-purpose  Verifying tick-7.log with grep      42s
+#
+# -- and that one must keep reading unknown: #126 established that a
+# subagent row alone is not proof of anything (a finished-but-not-yet-
+# cleared row could look identical), so only the row carrying the live
+# token counter -- the same counter the running main turn also prints --
+# counts as busy. The counter's exact format (`243.4k` vs some other
+# release's rendering) is the one piece of this that could drift with a
+# harness release; `[0-9.]+k?` is kept loose enough to survive a
+# no-decimal or no-`k` count without loosening the anchor that matters,
+# which is the literal `↓ ... tokens` readout at end of line.
+HARNESS_BUSY_RE='esc to interrupt|↓ to manage|↓ [0-9]+(\.[0-9]+)?k? tokens$'
 HARNESS_BUSY_TAIL=1
 
 # Blocked gate (last line) plus the menu/text split (#159/#164). `Esc to

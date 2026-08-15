@@ -12,6 +12,11 @@
 #   dead     no agent at all, just a shell                   -> restart the agent
 #   stale    no agent, and the window name still claims a task -> restore.sh,
 #            and do not believe the name (#237)
+#   scrolled a human (or a copy-mode leftover) has the pane scrolled up      ->
+#            leave alone; keys sent here are eaten by copy mode, never the
+#            agent (#65, #131: this state was already emitted below but
+#            missing from this list, which itself claimed only ten states
+#            for eleven the code emitted)
 #   broken   the pane's cwd no longer exists                  -> re-home it
 #   service  a supervisor service, deliberately not a lane   -> leave alone
 #   unknown  no probe recognizes the last line                -> ask a human
