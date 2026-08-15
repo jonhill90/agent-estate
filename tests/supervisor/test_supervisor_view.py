@@ -17,6 +17,7 @@ from supervisor_view import (  # noqa: E402
     EventsSource,
     LanesSource,
     LedgerSource,
+    SessionsSource,
     SupervisorUnavailable,
     SupervisorView,
     build_source,
@@ -75,6 +76,44 @@ class LanesSourceTest(unittest.TestCase):
     def test_missing_script_is_an_error(self):
         with self.assertRaises(SupervisorUnavailable) as caught:
             LanesSource(script="/nonexistent/lanes.sh").read()
+        self.assertIn("not found", str(caught.exception))
+
+
+class SessionsSourceTest(unittest.TestCase):
+    def test_parses_sessions_json(self):
+        rows = [
+            {"session": "director", "supervised": False, "lanes": [{"window": 1, "state": "supervisor"}]},
+            {"session": "agent-supervisor", "supervised": True, "lanes": []},
+        ]
+        source = SessionsSource(runner=runner_returning(completed(stdout=json.dumps(rows))))
+        self.assertEqual({"sessions": rows, "count": 2}, source.read())
+
+    def test_takes_no_session_argument(self):
+        """Unlike `lanes`, `sessions` answers for every session that exists --
+        naming one would be the single-session shape agent-tui#13 is about."""
+        self.assertEqual((), SessionsSource.parameters)
+
+    def test_no_tmux_sessions_is_an_error_not_an_empty_list(self):
+        """sessions.sh exits 1 when tmux has no sessions at all -- the same
+        'blind, not quiet' contract lanes.sh's own exit already carries."""
+        source = SessionsSource(runner=runner_returning(completed(1, stderr="no tmux sessions")))
+        with self.assertRaises(SupervisorUnavailable) as caught:
+            source.read()
+        self.assertIn("no tmux sessions", str(caught.exception))
+
+    def test_silent_success_is_an_error(self):
+        source = SessionsSource(runner=runner_returning(completed(0, stdout="")))
+        with self.assertRaises(SupervisorUnavailable):
+            source.read()
+
+    def test_json_that_is_not_a_session_list_is_an_error(self):
+        source = SessionsSource(runner=runner_returning(completed(0, stdout='{"sessions":[]}')))
+        with self.assertRaises(SupervisorUnavailable):
+            source.read()
+
+    def test_missing_script_is_an_error(self):
+        with self.assertRaises(SupervisorUnavailable) as caught:
+            SessionsSource(script="/nonexistent/sessions.sh").read()
         self.assertIn("not found", str(caught.exception))
 
 
@@ -278,7 +317,7 @@ class EventsSourceTest(unittest.TestCase):
 class SupervisorViewTest(unittest.TestCase):
     def test_describes_every_read_source(self):
         names = [source["name"] for source in SupervisorView().describe()]
-        self.assertEqual(["lanes", "digest", "ledger", "events"], names)
+        self.assertEqual(["lanes", "sessions", "digest", "ledger", "events"], names)
 
     def test_every_exposed_source_is_read_only(self):
         self.assertTrue(all(not source["mutates"] for source in SupervisorView().describe()))

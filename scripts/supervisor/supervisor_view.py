@@ -200,6 +200,46 @@ class LanesSource(ReadSource):
         return {"lanes": rows, "count": len(rows)}
 
 
+class SessionsSource(ReadSource):
+    """Lane states across EVERY tmux session, straight from `sessions.sh --json`.
+
+    agent-tui#13: `LanesSource` above answers for one session because
+    `lanes.sh` does, by construction -- and a client that only ever asks
+    `lanes` cannot show more than the session it happened to name, which is
+    the whole regression that issue traces. `sessions.sh` wraps `lanes.sh`
+    per session rather than replacing it (see that script's own header), so
+    `lanes`'s existing single-session answer is untouched by this source
+    existing.
+
+    Each entry's `supervised` field is real ledger evidence (has the estate
+    ever registered a lane in this session), not agent-supervisor#153's own
+    marker -- #153 had not landed when this was written. See `sessions.sh`
+    for exactly what that does and does not prove, and replace this source's
+    reliance on it once #153 lands its own signal.
+    """
+
+    name = "sessions"
+    summary = (
+        "Worker lane states for every tmux session on the box, grouped by "
+        "session, each with an interim 'supervised' signal (ledger-based, "
+        "not a guess) until agent-supervisor#153's marker lands. Use when "
+        "asked what is happening across sessions, not just one."
+    )
+    parameters = ()
+
+    def __init__(self, *, script=None, runner=_subprocess_runner, timeout=DEFAULT_TIMEOUT_SECONDS):
+        self.script = Path(script) if script else HERE / "sessions.sh"
+        self.runner = runner
+        self.timeout = timeout
+
+    def read(self):
+        command = [str(self.script), "--json"]
+        sessions = _decode(self.runner(command, timeout=self.timeout), label="sessions.sh --json")
+        if not isinstance(sessions, list):
+            raise SupervisorUnavailable("sessions.sh --json returned something that is not a list of sessions")
+        return {"sessions": sessions, "count": len(sessions)}
+
+
 class DigestSource(ReadSource):
     """The whole-estate digest, straight from `digest.sh --json`.
 
@@ -372,7 +412,9 @@ class EventsSource(ReadSource):
         return {"events": selected, "count": len(selected), "next_cursor": next_cursor}
 
 
-READ_SOURCES = {source.name: source for source in (LanesSource, DigestSource, LedgerSource, EventsSource)}
+READ_SOURCES = {
+    source.name: source for source in (LanesSource, SessionsSource, DigestSource, LedgerSource, EventsSource)
+}
 
 # Intentionally empty, and intentionally present.
 #
