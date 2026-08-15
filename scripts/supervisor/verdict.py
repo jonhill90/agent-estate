@@ -231,29 +231,87 @@ def _content_unchanged_since(*, runner, patch_id_fn, repo, number, old_sha, new_
     return True, basis
 
 
-def _parse_verdict_comment(body):
-    """A comment counts as a verdict ONLY when its body, stripped of leading
-    whitespace, starts with the literal prefix `**Verdict:` -- agent-
-    supervisor#53's guard 4 is a comment that merely mentions the word
-    "verdict" mid-body, which must NOT be counted. Anchoring on the prefix
-    (not a substring search) is what keeps that comment out.
+# agent-supervisor#192: a verdict line is recognised on its CONTENT, not its
+# emphasis. `**Verdict:` alone missed every reviewer who wrote plain
+# `Verdict: APPROVE` or the heading form `## Verdict: APPROVE` -- three
+# approved, CI-green PRs (#169, #176, #191) sat blocked because the bold
+# form happened to be the only one #53 anchored on. This matches, per LINE
+# (not "body starts with"; a verdict line often follows prose or a rationale
+# -- #169's REQUEST CHANGES sits after other text), an optional `#`..`######`
+# heading marker, an optional `**`/`*` opening emphasis, the literal word
+# "Verdict" in any case, then `:`. Liberal in what counts as the LABEL;
+# strict about the DECISION text after it, which still must contain exactly
+# APPROVE or REQUEST CHANGES.
+_VERDICT_LINE_RE = re.compile(r"^#{0,6}\s*\*{0,2}verdict:\**\s*(.*)$", re.IGNORECASE)
 
-    Returns "approved", "rejected", or None -- None both when the prefix is
-    absent and when the prefix is present but the decision text after it is
-    not recognised; a comment this module cannot classify must not be
-    guessed at, the same fail-closed stance every other source in this
-    module takes."""
-    text = (body or "").strip()
-    prefix = "**Verdict:"
-    if not text.startswith(prefix):
-        return None
-    remainder = text[len(prefix):]
-    end = remainder.find("**")
-    decision_text = (remainder[:end] if end != -1 else remainder).strip().upper()
-    if "REQUEST CHANGES" in decision_text:
-        return "rejected"
-    if "APPROVE" in decision_text:
-        return "approved"
+
+def _parse_verdict_comment(body):
+    """A comment counts as a verdict when one of its LINES matches
+    `_VERDICT_LINE_RE` -- agent-supervisor#53's guard 4 (the word "verdict"
+    merely mentioned mid-sentence, e.g. "I think the verdict here should be
+    ...") still does not match, because the regex is anchored to the start
+    of the line, not a substring search. Two more exclusions #192 adds,
+    because the line-scan (rather than "body starts with") makes a verdict
+    line reachable from inside quoted material:
+
+    - a line inside a fenced code block (```...```) is never consulted --
+      a verdict quoted as an EXAMPLE must not be read as a real one;
+    - a line that is a markdown blockquote (starts with `>`, GitHub's own
+      "quote reply" shape) is never consulted -- a reply quoting an EARLIER
+      comment's verdict must not be read as this comment restating it.
+
+    #196: the line-scan reaches every qualifying line in the comment, not
+    just the first, so a SINGLE comment can carry more than one verdict
+    line -- a reviewer who drafts `Verdict: APPROVE`, reconsiders, and
+    writes `Verdict: REQUEST CHANGES` further down. Returning on the first
+    match would let that earlier, superseded APPROVE silently win, which is
+    exactly the "REQUEST CHANGES read as approved" failure this module
+    exists to prevent -- so this collects every qualifying line's decision
+    instead of stopping at the first:
+
+    - a line whose decision text is not recognised is SKIPPED, not treated
+      as a terminal failure -- a later line in the same comment still gets
+      a chance to supply a valid decision;
+    - two or more qualifying lines that agree (same decision, repeated) are
+      fine -- restating a verdict is not a conflict, and the comment
+      resolves to that decision;
+    - two or more qualifying lines with DIFFERING decisions make the whole
+      comment ambiguous -- this refuses with None rather than picking
+      either one, first or last: `unknown`/ambiguous must refuse at the
+      merge gate, never resolve to a decision.
+
+    Returns "approved", "rejected", or None -- None when no line qualifies,
+    when every qualifying line's decision text is unrecognised, or when
+    qualifying lines disagree; a comment this module cannot classify
+    cleanly must not be guessed at, the same fail-closed stance every
+    other source in this module takes."""
+    in_fence = False
+    decisions = []
+    for raw_line in (body or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or line.startswith(">"):
+            continue
+        match = _VERDICT_LINE_RE.match(line)
+        if not match:
+            continue
+        rest = match.group(1)
+        end = rest.find("**")
+        if end != -1:
+            rest = rest[:end]
+        decision_text = re.sub(r"[*_`]+$", "", rest.strip()).strip()
+        decision_text = decision_text.rstrip(".:;,!").strip().upper()
+        if "REQUEST CHANGES" in decision_text:
+            decisions.append("rejected")
+        elif "APPROVE" in decision_text:
+            decisions.append("approved")
+        # else: this line's decision text is unrecognised -- skip it and
+        # keep scanning, a later line may still supply a valid decision.
+    distinct = set(decisions)
+    if len(distinct) == 1:
+        return distinct.pop()
     return None
 
 
@@ -273,9 +331,10 @@ def _parse_review_lane(body):
 
 class GithubReviewVerdictSource(VerdictSource):
     """Reads GitHub's own review state, and -- agent-supervisor#53 -- issue
-    comments whose body starts with `**Verdict:`. Never comment PROSE: a
-    comment only counts through `_parse_verdict_comment`'s anchored prefix
-    check, the same fail-closed discipline #203 established for reviews.
+    comments with a `Verdict:` line (any heading/emphasis form -- #192).
+    Never comment PROSE: a comment only counts through
+    `_parse_verdict_comment`'s line-anchored match, the same fail-closed
+    discipline #203 established for reviews.
 
     The codex lane posts its verdicts as `gh pr comment`, not `gh pr
     review` -- a review object alone missed exactly the reviews that
@@ -312,11 +371,11 @@ class GithubReviewVerdictSource(VerdictSource):
         return review_result
 
     def _comment_verdict(self, comments):
-        """The LAST comment (chronological, as `gh` returns them) whose body
-        anchors on `**Verdict:` -- a later re-review supersedes an earlier
-        one, the same "current state" reading the review side already gives
-        a fresh review over a stale one. Returns None when no comment
-        qualifies, so the caller falls back to `review_result` unchanged."""
+        """The LAST comment (chronological, as `gh` returns them) with a
+        `Verdict:` line -- a later re-review supersedes an earlier one, the
+        same "current state" reading the review side already gives a fresh
+        review over a stale one. Returns None when no comment qualifies, so
+        the caller falls back to `review_result` unchanged."""
         decisive = None
         for comment in comments:
             if not isinstance(comment, dict):

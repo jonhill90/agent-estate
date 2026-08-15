@@ -224,6 +224,35 @@ if [ "$rc" -eq 1 ]; then ok "verdict with no Review-Lane trailer refused"; else 
 if [ ! -f "$MARKER" ]; then ok "no-Review-Lane verdict never merges"; else bad "no-Review-Lane verdict never merges" "$out"; fi
 echo "$out" | grep -q "not a lane-stamped" && ok "no-Review-Lane refusal names the reason" || bad "no-Review-Lane refusal named" "$out"
 
+# --- a refusal never prints a bare "refused --" (agent-supervisor#192) ----
+# `independence_verdict`'s "not yet reviewed" branch deliberately returns an
+# empty detail (kept that way for #184's OTHER caller, digest.sh) -- this PR
+# has no author fixture (unresolved authorship) AND no verdict comment at
+# all, reproducing the exact "detail empty" shape #192 measured on #169,
+# #176 and #191 right after the gate went live. The message must still name
+# something -- the raw verdict/author JSON, at minimum -- never an empty dash.
+rm -f "$MARKER"
+cat > "$FIX/head_46.json" <<'S'
+{"headRefOid": "sha-13"}
+S
+green_checkruns sha-13
+cat > "$FIX/author_46.json" <<'S'
+{"headRefName": "some-hand-pushed-branch", "closingIssuesReferences": [], "commits": []}
+S
+cat > "$FIX/reviews_46.json" <<'S'
+{"reviews": [], "comments": []}
+S
+out=$("$MERGE_PR" "$REPO" 46 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "never-reviewed + unresolved authorship refuses"; else bad "never-reviewed + unresolved authorship refuses" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "never-reviewed + unresolved authorship never merges"; else bad "never-reviewed + unresolved authorship never merges" "$out"; fi
+if ! echo "$out" | grep -qE '^merge-pr: refused -- *$'; then
+  ok "refusal is never a bare dash with nothing after it"
+else
+  bad "refusal is never a bare dash with nothing after it" "$out"
+fi
+echo "$out" | grep -q "merge-pr: refused -- .\+" && ok "refusal message names a reason" || bad "refusal message names a reason" "$out"
+
 # ============================================================================
 # MUTATION CHECK: silencing the authorship gate lets the #179 reproduction
 # (case above) through. Confirms the test above is real evidence, not a check

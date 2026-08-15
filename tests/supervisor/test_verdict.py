@@ -1,4 +1,5 @@
 import json
+import re
 import sys
 import tempfile
 import unittest
@@ -14,6 +15,8 @@ from verdict import (  # noqa: E402
     LedgerVerdictSource,
     _content_unchanged_since,
     _default_patch_id,
+    _parse_verdict_comment,
+    _VERDICT_LINE_RE,
     build_source,
     main,
     resolve,
@@ -479,6 +482,196 @@ class GithubCommentVerdictTests(unittest.TestCase):
         )
         result = source.verdict(repo=REPO, number=1, head_sha=head_sha)
         self.assertEqual(result["verdict"], "rejected")
+
+
+class ParseVerdictCommentTests(unittest.TestCase):
+    """agent-supervisor#192: `**Verdict:` alone missed every reviewer who
+    wrote plain `Verdict: APPROVE` or the heading form `## Verdict: ...` --
+    #169, #176 and #191 sat blocked, and #185 merged only because ONE of its
+    two simultaneous approvals happened to be bold (the issue's own
+    measurement table). Table-driven over every real form plus the negative
+    cases the line-scan approach newly has to guard against on its own
+    (a comment-scan is reachable from inside quoted/fenced material in a way
+    a whole-body-anchored check never was)."""
+
+    POSITIVE_CASES = [
+        ("plain", "Verdict: APPROVE", "approved"),
+        ("plain lowercase label", "verdict: APPROVE", "approved"),
+        ("bold, no closing stars", "**Verdict: APPROVE**", "approved"),
+        ("bold label only, decision outside", "**Verdict:** APPROVE", "approved"),
+        ("bold, closing stars immediately after word", "**Verdict: APPROVE**", "approved"),
+        ("heading form (#169's 18:45 REQUEST CHANGES)", "## Verdict: REQUEST CHANGES", "rejected"),
+        ("heading, bold decision", "## **Verdict: REQUEST CHANGES**", "rejected"),
+        ("indented", "    Verdict: APPROVE", "approved"),
+        ("trailing punctuation", "Verdict: APPROVE.", "approved"),
+        ("trailing period, bold", "**Verdict: APPROVE.**", "approved"),
+        ("verdict line after prose (real reviews explain themselves first)",
+         "Looks correct, tests pass.\n\nVerdict: APPROVE", "approved"),
+        ("verdict line followed by more content on later lines",
+         "**Verdict: REQUEST CHANGES**\n\nThe patch-id comparison is wrong.", "rejected"),
+        ("request changes, plain", "Verdict: REQUEST CHANGES", "rejected"),
+    ]
+
+    NEGATIVE_CASES = [
+        ("word 'verdict' in prose, no colon-label", "I think the verdict here should be REQUEST CHANGES, but I won't file one yet."),
+        ("verdict quoted inside a fenced code block",
+         "Example of the format:\n```\nVerdict: APPROVE\n```\nDon't actually use this yet."),
+        ("verdict quoting ANOTHER comment (markdown blockquote)",
+         "> Verdict: APPROVE\n\nI disagree with this, filing my own review separately."),
+        ("verdict quoting another comment, bold form",
+         "> **Verdict: APPROVE**\n\nThat was someone else's, not mine."),
+        ("no verdict line at all", "LGTM, thanks for the fix."),
+        ("label present, decision word unrecognised", "Verdict: LOOKS OK TO ME"),
+        ("empty body", ""),
+        ("None body", None),
+    ]
+
+    def test_every_real_and_wild_form_is_recognised(self):
+        for name, body, expected in self.POSITIVE_CASES:
+            with self.subTest(name):
+                self.assertEqual(_parse_verdict_comment(body), expected)
+
+    def test_every_negative_case_reads_none(self):
+        for name, body in self.NEGATIVE_CASES:
+            with self.subTest(name):
+                self.assertIsNone(_parse_verdict_comment(body))
+
+    def test_mutation_restricting_the_match_to_bold_only_turns_the_plain_and_heading_cases_red(self):
+        """The bar #192 sets, run the way #218's own mutation test in this
+        file is: restrict the match back to exactly the pre-#192 shape
+        (`**Verdict:` at the very start of the whole body) and confirm the
+        plain-text and heading-form cases -- the ones #169, #176 and #191
+        actually used -- go red. This IS the "mutate and watch it fail"
+        step; if this test ever passed with the restricted pattern, the
+        positive-case tests above would not be real evidence of the fix."""
+        bold_only_prefix = "**Verdict:"
+
+        def pre_192_parse(body):
+            text = (body or "").strip()
+            if not text.startswith(bold_only_prefix):
+                return None
+            remainder = text[len(bold_only_prefix):]
+            end = remainder.find("**")
+            decision_text = (remainder[:end] if end != -1 else remainder).strip().upper()
+            if "REQUEST CHANGES" in decision_text:
+                return "rejected"
+            if "APPROVE" in decision_text:
+                return "approved"
+            return None
+
+        regressions = [
+            (name, body, expected)
+            for name, body, expected in self.POSITIVE_CASES
+            if pre_192_parse(body) != expected
+        ]
+        self.assertTrue(
+            regressions,
+            "restricting the match to bold-only did not turn any current-fix case red -- "
+            "the positive-case table has no coverage of the #192 defect",
+        )
+        # And the fixed parser must still get every one of those right --
+        # proving the RED->GREEN transition the mutation is meant to show.
+        for name, body, expected in regressions:
+            with self.subTest(name):
+                self.assertEqual(_parse_verdict_comment(body), expected)
+
+    def test_verdict_line_regex_requires_the_colon(self):
+        """A sanity check on the instrument itself, not just its caller:
+        "Verdict" without a trailing colon must not match at all -- a label
+        without ":" is not one of the forms #192 names."""
+        self.assertIsNone(_VERDICT_LINE_RE.match("Verdict APPROVE"))
+
+
+class ParseVerdictCommentAmbiguityTests(unittest.TestCase):
+    """agent-supervisor#196: the line-scan #192 introduced reaches every
+    qualifying line in a comment, not just the first -- which made a SECOND
+    verdict line inside the same comment reachable for the first time (the
+    old body-start anchor could only ever see the first `**Verdict:` of the
+    whole body). A reviewer who drafts `Verdict: APPROVE`, reconsiders, and
+    writes `Verdict: REQUEST CHANGES` below it must not have that rejection
+    silently overridden by the earlier approval -- first-match-wins is
+    exactly the "REQUEST CHANGES read as approved" failure this module
+    exists to prevent, just triggered from inside one comment instead of
+    across two. Table-driven over every combination the docstring commits
+    to a rule for."""
+
+    CASES = [
+        (
+            "conflicting lines, approve then reject, refuse as ambiguous",
+            "Verdict: APPROVE\n\nActually wait.\n\nVerdict: REQUEST CHANGES",
+            None,
+        ),
+        (
+            "conflicting lines, reject then approve, refuse as ambiguous",
+            "Verdict: REQUEST CHANGES\n\nOn reflection.\n\nVerdict: APPROVE",
+            None,
+        ),
+        (
+            "two identical decisions, not a conflict",
+            "Verdict: APPROVE\n\nStill true after re-reading.\n\nVerdict: APPROVE",
+            "approved",
+        ),
+        (
+            "first line's decision word is unrecognised, a later line is valid",
+            "Verdict: LOOKS OK TO ME\n\nOn second thought:\n\nVerdict: REQUEST CHANGES",
+            "rejected",
+        ),
+        (
+            "one line only, unaffected by the multi-line rule",
+            "Verdict: REQUEST CHANGES",
+            "rejected",
+        ),
+    ]
+
+    def test_multi_line_ambiguity_cases(self):
+        for name, body, expected in self.CASES:
+            with self.subTest(name):
+                self.assertEqual(_parse_verdict_comment(body), expected)
+
+    def test_mutation_reverting_to_first_match_wins_turns_the_conflict_cases_red(self):
+        """Mutate back to "return on the first qualifying line" -- #196's
+        own bug, and #192's actual shape before this fix -- and confirm the
+        conflicting-line cases above go red. If they did not, the ambiguity
+        table above would not be real evidence of the fix."""
+
+        def first_match_wins_parse(body):
+            in_fence = False
+            for raw_line in (body or "").splitlines():
+                line = raw_line.strip()
+                if line.startswith("```"):
+                    in_fence = not in_fence
+                    continue
+                if in_fence or line.startswith(">"):
+                    continue
+                match = _VERDICT_LINE_RE.match(line)
+                if not match:
+                    continue
+                rest = match.group(1)
+                end = rest.find("**")
+                if end != -1:
+                    rest = rest[:end]
+                decision_text = re.sub(r"[*_`]+$", "", rest.strip()).strip()
+                decision_text = decision_text.rstrip(".:;,!").strip().upper()
+                if "REQUEST CHANGES" in decision_text:
+                    return "rejected"
+                if "APPROVE" in decision_text:
+                    return "approved"
+                return None
+            return None
+
+        regressions = [
+            (name, body, expected)
+            for name, body, expected in self.CASES
+            if first_match_wins_parse(body) != expected
+        ]
+        self.assertTrue(
+            regressions,
+            "reverting to first-match-wins did not turn any ambiguity case red -- "
+            "the ambiguity table has no coverage of the #196 defect",
+        )
+        for name, body, expected in regressions:
+            with self.subTest(name):
+                self.assertEqual(_parse_verdict_comment(body), expected)
 
 
 class LedgerVerdictSourceTests(unittest.TestCase):
