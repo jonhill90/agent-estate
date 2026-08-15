@@ -193,6 +193,15 @@ independence_verdict() {  # independence_verdict <verdict-json> <author-json> <l
       else
         {value:null, detail:$author.detail}
       end
+    elif (($v.verdict // "none") == "none") then
+      # #184: "not yet reviewed" is not the same statement as "independence
+      # unknown" -- restoring the pre-extraction (main) behavior byte for
+      # byte for this specific case. Every never-reviewed PR used to carry
+      # an empty detail here; the general catch-all below was made to
+      # explain itself for merge-pr.sh#179 refusal messages, and that
+      # explanation leaked onto this, the single most common case in the
+      # digest, as noise nobody asked for.
+      {value:null, detail:""}
     else
       {value:null, detail:("independence unknown -- verdict is " + ($v.verdict // "unknown")
         + (if (($v.verdict_kind // "") | length) > 0 then " (" + $v.verdict_kind + ")" else "" end)

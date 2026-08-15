@@ -772,6 +772,18 @@ run_ledger() {
 never=$(jq -c --argjson n 1 '.prs[] | select(.number==$n)' <<<"$(run_ledger)")
 chk "1. never reviewed reads none, not unknown" "none" "$(jq -r '.verdict' <<<"$never")"
 
+# agent-supervisor#184: independence_verdict's catch-all (verdict not a
+# decisive/lane-stamped comment-or-ledger record) must stay {value:null,
+# detail:""} -- exactly what the pre-extraction inline jq in digest.sh
+# returned. #179 pulled the independence computation out into
+# verdict-independence.sh and the catch-all grew prose along the way,
+# so EVERY never-reviewed PR's verdict_detail read a boilerplate
+# "independence unknown -- ..." sentence that told the reader nothing
+# "hasn't been reviewed yet" didn't already say. Pinned here so the next
+# extraction cannot repeat this silently.
+chk "1b. never-reviewed PR's verdict_detail is empty, not independence boilerplate" \
+  "" "$(jq -r '.verdict_detail' <<<"$never")"
+
 python3 "$VPY" --state-dir "$LSTATE" record --repo ownerx/test-repo --number 1 \
   --verdict approved --head-sha aaaa1111aaaa1111aaaa1111aaaa1111aaaa1111 \
   --reviewer lane-7 >/dev/null
