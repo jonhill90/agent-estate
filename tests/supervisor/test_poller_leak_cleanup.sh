@@ -1,0 +1,241 @@
+#!/bin/bash
+# agent-supervisor#104: test runs leaked long-lived inbox-poll.sh processes
+# that survived SIGTERM and polluted duplicate detection. Two things were
+# true at once and both are pinned here:
+#
+#   1. The suites that started a real poller (#57, #75, #154) either had no
+#      trap at all, or a trap that fired on EXIT only -- not INT/TERM -- and
+#      reaped by a bare `pkill -KILL -f`, fire-and-forget, no verification.
+#   2. tests/supervisor/test_shell_suites.py, the harness that actually runs
+#      every one of those suites in CI, used `subprocess.run(timeout=300)`,
+#      whose timeout handling sends the suite process SIGKILL directly.
+#      SIGKILL cannot be caught, so even a suite with a correct trap never
+#      gets to run it if the HARNESS is what kills it.
+#
+# Fixing only the suites (1) leaves every one of them still exposed to (2).
+# Fixing only the harness (2) does nothing for a suite whose own signal
+# ultimately still reaches its stand-in poller by name or not at all. This
+# file exercises both: reap-verified.sh (the primitive now used by #57, #75,
+# #154) directly, and the exact SIGKILL-vs-SIGTERM asymmetry that made (2)
+# the more dangerous of the two -- a suite killed the way the OLD harness
+# killed it leaks; the same suite killed the way the FIXED harness kills it
+# does not.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SUP="$HERE/../../scripts/supervisor"
+pass=0; fail=0
+say_ok()  { echo "  ok   $1"; pass=$((pass+1)); }
+say_bad() { echo "  FAIL $1 -- $2"; fail=$((fail+1)); }
+
+echo "reap-verified.sh: agent-supervisor#104 -- poller leak cleanup"
+
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "  SKIP no tmux on PATH"
+  echo "  0 passed, 0 failed"
+  exit 0
+fi
+
+# shellcheck source=../../scripts/supervisor/tmux-isolation.sh
+source "$SUP/tmux-isolation.sh"
+# shellcheck source=./lib/reap-verified.sh
+source "$HERE/lib/reap-verified.sh"
+
+RT="$(mktemp -d "${TMPDIR:-/tmp}/poller-leak-104-tmux.XXXXXX")"
+OLD_TMUX="${TMUX-}"
+OLD_TMUX_TMPDIR="${TMUX_TMPDIR-}"
+unset TMUX
+export TMUX_TMPDIR="$RT"
+cleanup_all() {
+  unset TMUX; export TMUX_TMPDIR="$RT"
+  tmux kill-server >/dev/null 2>&1
+  rm -rf "$RT"
+  [ -n "$OLD_TMUX_TMPDIR" ] && export TMUX_TMPDIR="$OLD_TMUX_TMPDIR" || unset TMUX_TMPDIR
+  [ -n "$OLD_TMUX" ] && export TMUX="$OLD_TMUX"
+}
+trap cleanup_all EXIT INT TERM
+
+if ! assert_isolated_tmux; then
+  say_bad "setup: isolated tmux socket for #104" "TMUX_TMPDIR=$TMUX_TMPDIR"
+  echo "  $pass passed, $fail failed"
+  exit 1
+fi
+say_ok "setup: isolated tmux socket for #104"
+
+# =============================================================================
+# Part 1 -- reap_pid_verified's own three properties, direct and fast.
+# =============================================================================
+
+# 1a. A healthy, cooperative process: SIGTERM alone must suffice. No KILL.
+D=$(mktemp -d "$RT/cooperative.XXXXXX")
+cat >"$D/poller.sh" <<'EOF'
+#!/bin/bash
+trap 'exit 0' TERM
+while :; do sleep 0.1; done
+EOF
+chmod +x "$D/poller.sh"
+"$D/poller.sh" & coop_pid=$!
+sleep 0.3
+out=$(reap_pid_verified "$coop_pid" "$D" 3 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && ! kill -0 "$coop_pid" 2>/dev/null && grep -q "exited on SIGTERM" <<<"$out"; then
+  say_ok "a healthy process is reaped by SIGTERM alone, no escalation"
+else
+  say_bad "a healthy process is reaped by SIGTERM alone, no escalation" "rc=$rc alive=$(kill -0 "$coop_pid" 2>/dev/null && echo yes || echo no) out=$out"
+fi
+
+# 1b. A process that ignores TERM (agent-supervisor#104's own measured
+#     symptom -- both leaked pollers needed SIGKILL): escalated, verified,
+#     reported.
+D=$(mktemp -d "$RT/stubborn.XXXXXX")
+cat >"$D/poller.sh" <<'EOF'
+#!/bin/bash
+trap '' TERM
+while :; do sleep 0.1; done
+EOF
+chmod +x "$D/poller.sh"
+"$D/poller.sh" & stub_pid=$!
+sleep 0.3
+out=$(reap_pid_verified "$stub_pid" "$D" 2 2>&1); rc=$?
+if [ "$rc" -eq 0 ] && ! kill -0 "$stub_pid" 2>/dev/null && grep -q "ignored SIGTERM, exited on SIGKILL" <<<"$out"; then
+  say_ok "a process that ignores TERM is escalated to KILL, verified, and reported"
+else
+  say_bad "a process that ignores TERM is escalated to KILL, verified, and reported" "rc=$rc alive=$(kill -0 "$stub_pid" 2>/dev/null && echo yes || echo no) out=$out"
+fi
+
+# 1c. THE SAFETY PROPERTY -- more important than the leak itself (per #104's
+#     own brief). A pid standing in for the live poller (running from
+#     OUTSIDE the sandbox this reap call was given) must never be signaled,
+#     even when it is sitting right there in the same pid-history file as
+#     genuine litter that DOES belong to this test.
+LIVE_LOOKING=$(mktemp -d "$RT/not-sandboxed.XXXXXX")
+cat >"$LIVE_LOOKING/inbox-poll.sh" <<'EOF'
+#!/bin/bash
+trap 'exit 0' TERM
+while :; do sleep 0.1; done
+EOF
+chmod +x "$LIVE_LOOKING/inbox-poll.sh"
+"$LIVE_LOOKING/inbox-poll.sh" & live_pid=$!
+sleep 0.3
+
+SANDBOX=$(mktemp -d "$RT/mine.XXXXXX")
+cat >"$SANDBOX/inbox-poll.sh" <<'EOF'
+#!/bin/bash
+trap 'exit 0' TERM
+while :; do sleep 0.1; done
+EOF
+chmod +x "$SANDBOX/inbox-poll.sh"
+"$SANDBOX/inbox-poll.sh" & mine_pid=$!
+sleep 0.3
+
+HIST="$RT/mixed-pid-history"
+{ printf '%s\n' "$live_pid"; printf '%s\n' "$mine_pid"; } >"$HIST"
+out=$(reap_pid_history_verified "$HIST" "$SANDBOX" 3 2>&1)
+
+live_untouched=0; kill -0 "$live_pid" 2>/dev/null && live_untouched=1
+mine_reaped=0; kill -0 "$mine_pid" 2>/dev/null || mine_reaped=1
+refused=0; grep -q "REFUSING to signal $live_pid" <<<"$out" && refused=1
+
+if [ "$live_untouched" -eq 1 ] && [ "$mine_reaped" -eq 1 ] && [ "$refused" -eq 1 ]; then
+  say_ok "the live-looking pid is never signaled, even mixed into the same pid-history file as genuine litter, and the refusal is reported"
+else
+  say_bad "the live-looking pid is never signaled" \
+    "live_untouched=$live_untouched(want 1) mine_reaped=$mine_reaped(want 1) refused=$refused(want 1) out=$out"
+fi
+kill -KILL "$live_pid" 2>/dev/null  # this test's own stand-in, not the reap primitive's job to clean up
+kill -KILL "$mine_pid" 2>/dev/null  # already reaped above; belt-and-suspenders against a false pass
+
+# =============================================================================
+# Part 2 -- the harness asymmetry that made #104 possible: a suite killed the
+# way test_shell_suites.py's OLD timeout handling killed it (SIGKILL, direct,
+# no trap ever runs) leaks a real, tmux-hosted poller. The SAME suite killed
+# the way the FIXED harness kills it (SIGTERM, the trap gets to run) does
+# not. This is #104's own "red first" case, reproduced live rather than
+# asserted from reading the code.
+# =============================================================================
+SESSION="poller-leak-104-$$"
+tmux new-session -d -s "$SESSION" -x 80 -y 24 -- sleep 300
+
+# fixture_suite <workdir> -- a minimal stand-in for #57/#75/#154's own shape:
+# starts a real, tmux-hosted "poller" process and installs the SAME kind of
+# verified, trap-based cleanup those suites now have.
+fixture_suite() {
+  local wd="$1"
+  cat >"$wd/fixture.sh" <<FIXTURE
+#!/bin/bash
+set -uo pipefail
+source "$HERE/lib/reap-verified.sh"
+STAND_IN="$wd/inbox-poll.sh"
+cat >"\$STAND_IN" <<'EOF'
+#!/bin/bash
+trap 'exit 0' TERM
+while :; do sleep 0.1; done
+EOF
+chmod +x "\$STAND_IN"
+export TMUX_TMPDIR="$RT"
+tmux new-window -t "$SESSION" -n "fixture-\$\$" -d -- "\$STAND_IN"
+sleep 0.3
+pid=\$(pgrep -f "\$STAND_IN" | head -1)
+echo "\$pid" > "$wd/pid"
+cleanup() { [ -n "\$pid" ] && reap_pid_verified "\$pid" "$wd" 3; }
+trap cleanup EXIT INT TERM
+# The long-running part of a real suite this stands in for -- a sleep here,
+# not a busy loop, so a SIGTERM landing while bash is blocked in \`wait\`
+# reaches the trap exactly the way inbox-poll.sh's own header documents
+# (agent-dotfiles#187) and the way test_shell_suites.py's GRACE_AFTER_TERM
+# gives every real suite the chance to do.
+sleep 300 &
+wait \$!
+FIXTURE
+  chmod +x "$wd/fixture.sh"
+}
+
+# 2a. RED: killed the OLD way (SIGKILL, direct pid, no process group) --
+#     the trap never runs, the poller outlives the suite.
+D=$(mktemp -d "$RT/harness-red.XXXXXX")
+fixture_suite "$D"
+"$D/fixture.sh" >"$D/out.log" 2>&1 &
+suite_pid=$!
+deadline=$((SECONDS + 5))
+while [ ! -s "$D/pid" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.1; done
+red_poller_pid=$(cat "$D/pid" 2>/dev/null)
+if [ -n "$red_poller_pid" ] && kill -0 "$red_poller_pid" 2>/dev/null; then
+  kill -KILL "$suite_pid" 2>/dev/null   # subprocess.run(timeout=...)'s own .kill()
+  wait "$suite_pid" 2>/dev/null
+  sleep 1
+  if kill -0 "$red_poller_pid" 2>/dev/null; then
+    say_ok "RED (pre-#104 harness behaviour): SIGKILLing the suite directly leaks its poller -- the trap never ran"
+  else
+    say_bad "RED (pre-#104 harness behaviour): SIGKILLing the suite directly leaks its poller" \
+      "poller pid $red_poller_pid is unexpectedly gone -- this case is not exercising the bug"
+  fi
+  reap_pid_verified "$red_poller_pid" "$D" 3 >/dev/null 2>&1  # this test's own cleanup, not the primitive under test
+else
+  say_bad "RED (pre-#104 harness behaviour) setup" "fixture poller never started: $(cat "$D/out.log" 2>/dev/null)"
+fi
+
+# 2b. GREEN: killed the FIXED way (SIGTERM first, grace, only escalate if
+#     still alive) -- the trap runs, the poller is gone with the suite.
+D=$(mktemp -d "$RT/harness-green.XXXXXX")
+fixture_suite "$D"
+"$D/fixture.sh" >"$D/out.log" 2>&1 &
+suite_pid=$!
+deadline=$((SECONDS + 5))
+while [ ! -s "$D/pid" ] && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.1; done
+green_poller_pid=$(cat "$D/pid" 2>/dev/null)
+if [ -n "$green_poller_pid" ] && kill -0 "$green_poller_pid" 2>/dev/null; then
+  kill -TERM "$suite_pid" 2>/dev/null   # the fixed harness's first move
+  deadline=$((SECONDS + 10))
+  while [ "$SECONDS" -lt "$deadline" ] && kill -0 "$green_poller_pid" 2>/dev/null; do sleep 0.2; done
+  wait "$suite_pid" 2>/dev/null
+  if ! kill -0 "$green_poller_pid" 2>/dev/null; then
+    say_ok "GREEN (#104-fixed harness behaviour): SIGTERM to the suite lets its own trap reap the poller -- nothing survives"
+  else
+    say_bad "GREEN (#104-fixed harness behaviour): SIGTERM to the suite lets its own trap reap the poller" \
+      "poller pid $green_poller_pid is still alive"
+    reap_pid_verified "$green_poller_pid" "$D" 3 >/dev/null 2>&1
+  fi
+else
+  say_bad "GREEN (#104-fixed harness behaviour) setup" "fixture poller never started: $(cat "$D/out.log" 2>/dev/null)"
+fi
+
+echo "  $pass passed, $fail failed"
+[ "$fail" -eq 0 ]
