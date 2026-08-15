@@ -15,6 +15,20 @@
 # Config: AGENT_NOTIFY_IMESSAGE_TO   phone number or Apple ID to message
 #         AGENT_NOTIFY_TELEGRAM_TOKEN / _CHAT_ID   (fallback, later)
 #
+# QA MODE (agent-supervisor#138). Every experiment with the notification
+# channel used to run through the one bot that pages Jon -- a routing bug
+# reached him personally before anyone else saw it. AGENT_NOTIFY_MODE=qa
+# runs this exact script -- same caller gate, same curl call, same log
+# format -- against a second credential instead of forking the code path:
+# AGENT_NOTIFY_TELEGRAM_TOKEN_QA / _CHAT_ID_QA, read from the SAME env file
+# as the production credential (never a separate untracked store to forget).
+# Unset is the safe direction: qa mode with no QA credential REFUSES, the
+# same way an unauthorized caller is refused below -- it never silently
+# sends through the production token, which would be a QA run paging Jon.
+# iMessage is also skipped entirely in qa mode: it is Jon's phone, and
+# falling through to it would page him exactly as badly as the Telegram
+# token mistake this exists to prevent.
+#
 # CALLER GATE (agent-dotfiles#52, extended by #193): only an authorized
 # sender may message Jon. This script refuses to touch any channel unless
 # AGENT_NOTIFY_CALLER is one of the two authorized values below —
@@ -82,19 +96,53 @@ esac
 msg="$SUBJECT"
 [ -n "$BODY" ] && msg="$SUBJECT — $BODY"
 
+# --- QA mode credential selection (agent-supervisor#138) -------------------
+# Same code path below, different credential: MODE picks which token/chat-id
+# pair the Telegram call uses. Unset (the default, "live") is unchanged
+# production behaviour. "qa" refuses outright if the QA credential is not
+# configured -- it never falls back to the production values above.
+MODE="${AGENT_NOTIFY_MODE:-live}"
+case "$MODE" in
+  qa)
+    tg_token="${AGENT_NOTIFY_TELEGRAM_TOKEN_QA:-}"
+    tg_chat="${AGENT_NOTIFY_TELEGRAM_CHAT_ID_QA:-}"
+    if [ -z "$tg_token" ] || [ -z "$tg_chat" ]; then
+      log "REFUSED — QA mode requested but no QA credential configured (AGENT_NOTIFY_TELEGRAM_TOKEN_QA/_CHAT_ID_QA): $SUBJECT${BODY:+ — $BODY}"
+      echo "NOTIFY REFUSED: QA mode has no QA credential configured (set AGENT_NOTIFY_TELEGRAM_TOKEN_QA and AGENT_NOTIFY_TELEGRAM_CHAT_ID_QA) -- refusing rather than falling back to the production bot" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    tg_token="${AGENT_NOTIFY_TELEGRAM_TOKEN:-}"
+    tg_chat="${AGENT_NOTIFY_TELEGRAM_CHAT_ID:-}"
+    ;;
+esac
+tag="$CALLER"
+[ "$MODE" = "qa" ] && tag="$CALLER, qa"
+
 # --- Telegram (PRIMARY) ---------------------------------------------------
 # Jon chose Telegram over iMessage on 2026-08-11: it works from any machine
 # and does not depend on macOS automation permissions. iMessage stays below
 # as a Mac-only fallback since it was already written and costs nothing.
-if [ -n "${AGENT_NOTIFY_TELEGRAM_TOKEN:-}" ] && [ -n "${AGENT_NOTIFY_TELEGRAM_CHAT_ID:-}" ]; then
+if [ -n "$tg_token" ] && [ -n "$tg_chat" ]; then
   if curl -fsS -m 15 -X POST \
-       "https://api.telegram.org/bot${AGENT_NOTIFY_TELEGRAM_TOKEN}/sendMessage" \
-       -d "chat_id=${AGENT_NOTIFY_TELEGRAM_CHAT_ID}" \
+       "https://api.telegram.org/bot${tg_token}/sendMessage" \
+       -d "chat_id=${tg_chat}" \
        --data-urlencode "text=${msg}" >/dev/null 2>&1; then
-    log "SENT telegram ($CALLER): $SUBJECT"
+    log "SENT telegram ($tag): $SUBJECT"
     echo "sent via telegram"; exit 0
   fi
-  log "FAILED telegram ($CALLER) — falling through"
+  log "FAILED telegram ($tag) — falling through"
+fi
+
+# QA mode stops here: no other channel is QA's to use. iMessage below pages
+# Jon's own phone -- falling through to it on a QA failure would be exactly
+# the "QA run silently pages Jon" outcome agent-supervisor#138 exists to
+# prevent, so QA mode never reaches it.
+if [ "$MODE" = "qa" ]; then
+  log "UNREACHABLE ($CALLER, qa) — Telegram failed and QA has no fallback channel by design: $SUBJECT${BODY:+ — $BODY}"
+  echo "NOTIFY FAILED: QA Telegram send failed and QA mode does not fall through to iMessage" >&2
+  exit 1
 fi
 
 # --- iMessage (fallback, Mac-only) ----------------------------------------
