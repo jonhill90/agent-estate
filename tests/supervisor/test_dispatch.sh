@@ -2029,18 +2029,69 @@ FIX
   # (measured directly: this exact test read its own fix back once the
   # commit landed). The merge-base is the shared ancestor with main -- the
   # pre-widening script -- regardless of how many commits sit on top here.
+  #
+  # `origin/main` is not guaranteed to already resolve. A CI checkout of a
+  # single branch/PR ref leaves no local `origin/main` at all (agent-supervisor
+  # #201: this failed exit-128 in CI, "Not a valid object name origin/main",
+  # while passing on every dev machine that happened to have a full clone --
+  # the second sighting of the shape PR #194's reviewer had already set aside
+  # once, wrongly, as a local-clone artifact). Resolve it ourselves: use an
+  # already-resolvable ref if there is one, else fetch main with an explicit
+  # refspec (a bare `fetch origin main` on a single-branch clone updates
+  # FETCH_HEAD only, never `refs/remotes/origin/main`, and would look like a
+  # no-op success while changing nothing -- measured directly here). If the
+  # ref genuinely cannot be produced, this SKIPS the mutation check with a
+  # stated reason instead of crashing the whole suite or silently passing it.
   MUTATED_190="$D/dispatch-pre190.sh"
   patch_rc=0
   python3 - "$HERE/../../scripts/supervisor/dispatch.sh" "$MUTATED_190" <<'PY' || patch_rc=$?
 import os
 import subprocess
 import sys
+
 dst = sys.argv[2]
 repo_dir = os.path.dirname(os.path.abspath(sys.argv[1]))
-base_ref = subprocess.run(
-    ["git", "-C", repo_dir, "merge-base", "HEAD", "origin/main"],
-    check=True, capture_output=True, text=True,
-).stdout.strip()
+
+
+def git(*args):
+    return subprocess.run(["git", "-C", repo_dir, *args], capture_output=True, text=True)
+
+
+def resolves(ref):
+    return git("rev-parse", "--verify", "-q", ref).returncode == 0
+
+
+target = next((ref for ref in ("origin/main", "main") if resolves(ref)), None)
+
+if target is None:
+    fetch = git("fetch", "-q", "origin", "main:refs/remotes/origin/main")
+    if fetch.returncode == 0 and resolves("origin/main"):
+        target = "origin/main"
+    else:
+        print(
+            "SKIP: no origin/main ref, and fetching one failed -- "
+            f"{fetch.stderr.strip() or 'no route to the remote'}",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+
+mb = git("merge-base", "HEAD", target)
+if mb.returncode != 0 and git("rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+    # A shallow checkout's own history may not reach far enough back to share
+    # an ancestor with main even once the ref exists -- unshallow once, then
+    # give the merge-base one more try before giving up.
+    git("fetch", "-q", "--unshallow", "origin")
+    mb = git("merge-base", "HEAD", target)
+
+if mb.returncode != 0:
+    print(
+        f"SKIP: git merge-base HEAD {target} failed even after fetch/unshallow: "
+        f"{mb.stderr.strip()}",
+        file=sys.stderr,
+    )
+    sys.exit(3)
+
+base_ref = mb.stdout.strip()
 text = subprocess.run(
     ["git", "-C", repo_dir, "show", f"{base_ref}:scripts/supervisor/dispatch.sh"],
     check=True, capture_output=True, text=True,
@@ -2050,7 +2101,9 @@ assert text.count(here) == 1, "HERE assignment not found or not unique -- pre-#1
 text = text.replace(here, 'HERE=%r' % repo_dir, 1)
 open(dst, "w").write(text)
 PY
-  if [ "$patch_rc" -ne 0 ]; then
+  if [ "$patch_rc" -eq 3 ]; then
+    echo "  SKIP agent-supervisor#190 mutation check: pre-#190 baseline could not be resolved (see stderr above) -- UNVERIFIED, not a pass"
+  elif [ "$patch_rc" -ne 0 ]; then
     bad "setup: fetched the pre-#190 dispatch.sh from git HEAD" \
       "could not fetch/patch (exit $patch_rc) -- treating as a failure, not a skip"
   else
