@@ -1150,7 +1150,14 @@ S
 T=$(run_out)
 grep -q "advance:.*\[STALE" <<<"$T" && bad "19c: a just-written status is not marked STALE" "$T" \
   || ok "19c: a just-written status is not marked STALE"
-grep -q "advance:.*(as of .*, 0s ago)" <<<"$T" \
+# Tolerance, not exact match: iso_ago(0) and digest.sh's own age read
+# (iso_to_epoch/`date -u +%s`) are two independent wall-clock reads: the
+# first when this test writes `checked:`, the second when digest.sh renders
+# the advance line. A second can tick between them -- observed directly, see
+# the commit that introduced this comment for the measured value -- so this
+# accepts 0s or 1s. The same class of race is why 19b (above) already uses a
+# tolerance window instead of an exact match.
+grep -qE "advance:.*\(as of .*, (0s|1s) ago\)" <<<"$T" \
   && ok "19c: a just-written status still carries a plain, unalarming age" \
   || bad "19c: a just-written status carries a plain age" "$T"
 
