@@ -123,6 +123,7 @@ cat > "$D/fixture" <<'FIX'
 48|w-codex-hung|codex|• Working (9s • esc to interrupt)\n\n› Improve documentation in @filename\n\n  gpt-5.5 medium · /repo/path|900|0
 50|w-firstrun|claude.exe|Paste code here if prompted >|1300|0
 51|w-firstrun-fresh|claude.exe|Paste code here if prompted >|5|0
+52|w-subagent-busy|claude.exe|✽ Building supervisor-side session write tools… (14m 13s · ↓ 82.3k tokens)\n  ⎿  ◼ Supervisor PR: session write tools + fix #153 marker consumption\n     ◻ agent-tui: rail attach/detach/add/remove UI + MCP client calls\n  ⏵⏵ bypass permissions on · esc to interrupt · ctrl+t to hide tasks · ← 1 agent · ↓ to manage\n  ⏺ main\n  ◯ general-purpose  Build supervisor session write tools   21m 11s · ↓ 243.4k tokens|1|0
 FIX
 printf '49|w-missing-cwd|codex|  gpt-5.5 medium · /repo/path|1|0||||%s\n' "$MISSING_CWD" >> "$D/fixture"
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
@@ -260,6 +261,21 @@ want "a lane stuck at an unrecognised dialog since launch is never-busy, not fre
 want "the same unrecognised dialog seconds after launch is still plain unknown" w-firstrun-fresh unknown "$out"
 want "a subagent task-list row is unknown, not free"     w-subagent-task unknown "$out"
 want "a waiting-for-background-agent line is unknown, not free" w-subagent-wait unknown "$out"
+
+# --- agent-supervisor#164: a busy lane running a background subagent ------
+# Verbatim off `agent-tui:2`, twice ~20 minutes apart, PR #22 delivered
+# shortly after -- so the lane was healthy and working the whole time it
+# read `unknown`. The subagent's own task-rail row, not the turn footer, is
+# the pane's last non-empty line, so the pre-#164 last-line-only busy check
+# never saw `esc to interrupt` at all. Must read busy, never free -- turning
+# this into `free` would dispatch a second brief into an occupied lane,
+# exactly the one-way-ratchet violation #124/#126 forbid.
+want "a lane running a background subagent is busy, not unknown (#164)" w-subagent-busy busy "$out"
+# THE ROW THIS MUST NOT ALSO CATCH. Same `◯ <agent> ...` shape as
+# w-subagent-task above (an earlier Claude Code release, no live token
+# counter) must still read unknown -- proving the fix keys on the live
+# `↓ ... tokens` readout, not merely on any subagent-shaped row.
+want "a subagent row with no live token counter is still unknown, not busy (#164)" w-subagent-task unknown "$out"
 
 # --- #141: a lane holding a brief nobody submitted -------------------------
 # The incident shape, verbatim: the footer a real pane paints while the box
