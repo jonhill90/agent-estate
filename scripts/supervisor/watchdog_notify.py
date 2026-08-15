@@ -391,6 +391,174 @@ def check_and_notify_heartbeat(
     return _deliver(decision, episode_state_path=episode_state_path, sender=sender, log=log, attempts=attempts)
 
 
+# --- as#151: director-inbox staleness, independent of the loop's own tick --
+#
+# director-route.sh already pages Jon when a queued message crosses
+# DIRECTOR_INBOX_STALE_SECONDS (as#34/#42) -- but that check only runs
+# inside inbox-poll.sh's own flush loop, once per Telegram long-poll
+# iteration. Measured on this issue (as#151): the flush loop can run for
+# hours logging "pane not idle, nothing sent" without the underlying
+# escalate ever having been proven to fire in production (notify.log's
+# entire history has no "Director inbox has undelivered message(s)" line,
+# despite at least one earlier incident -- as#34's own filing -- that should
+# have crossed the threshold). And if inbox-poll.sh itself is the thing that
+# is down, nothing calls director-route.sh --flush at all, so that escalate
+# never runs regardless of how stale the queue gets.
+#
+# This is the same fix #163 already applied to the poller's own heartbeat:
+# an external observer that reads the fact off disk (here, via
+# `director-inbox.sh stats`, not a status file) from watchdog.sh's own
+# unattended LaunchAgent tick, rather than depending on the cooperation of
+# the exact subsystem that is failing. Reuses the same episode-gated
+# delivery (`_deliver`, `_load_episode`, `_save_episode`) as every other
+# alarm in this module -- the only new thing is the decision.
+def classify_director_inbox(stats: dict | None, *, binary_missing: bool = False) -> tuple[str, float | None, int]:
+    """Read facts out of `director-inbox.sh stats`'s parsed JSON; apply no
+    threshold and make no notify decision -- same split as
+    `classify_heartbeat`.
+
+    Returns `(kind, age_seconds, pending)`:
+      "missing"    -- `director-inbox.sh` itself could not be found or run
+                      (`binary_missing=True`, from a FileNotFoundError /
+                      PermissionError trying to exec it). Same reasoning as
+                      `classify_heartbeat`'s "missing": a scratch copy of
+                      this tree that only carries the two or three scripts a
+                      given test needs (as#57/#75's `copy_dir`, for one) is
+                      not evidence the real queue is stuck -- it is evidence
+                      this check has nothing to read yet, which must not
+                      page any more than a poller that has never started
+                      does.
+      "unreadable" -- the binary WAS found and ran, but exited non-zero,
+                      timed out, or produced output that is not the JSON
+                      `stats` promises. Something is there and it is not
+                      trustworthy -- unlike "missing", this folds toward
+                      "worth paging", the same direction `classify_heartbeat`
+                      already takes for its own "unreadable".
+      "empty"      -- `pending == 0`. The ordinary, healthy state.
+      "pending"    -- `pending > 0`. `age_seconds` is `oldest_age_s`; the
+                      threshold comparison happens in
+                      `decide_notify_director_inbox`, not here.
+    """
+    if binary_missing:
+        return "missing", None, 0
+    if not isinstance(stats, dict):
+        return "unreadable", None, 0
+    pending = stats.get("pending")
+    if not isinstance(pending, int):
+        return "unreadable", None, 0
+    if pending == 0:
+        return "empty", None, 0
+    age = stats.get("oldest_age_s")
+    if not isinstance(age, (int, float)):
+        return "unreadable", None, pending
+    return "pending", float(age), pending
+
+
+def build_director_inbox_message(*, pending: int, age_seconds: float | None, threshold_seconds: int) -> str:
+    """A message a human can act on from a lock screen: how many, how
+    stale, against what threshold, and the one command to look deeper."""
+    age_desc = "unreadable" if age_seconds is None else f"{int(age_seconds)}s"
+    return (
+        f"watchdog: director inbox has {pending} undelivered message(s), oldest {age_desc} old, "
+        f"threshold {threshold_seconds}s. "
+        f"cat ~/.local/state/agent-dotfiles-supervisor/director-inbox.jsonl"
+    )
+
+
+def decide_notify_director_inbox(
+    *,
+    kind: str,
+    age_seconds: float | None,
+    pending: int,
+    threshold_seconds: int,
+    episode_notified: bool,
+) -> NotifyDecision:
+    """Pure decision: should this tick page Jon about the director inbox?
+    Same one-per-episode shape as `decide_notify_heartbeat`: missing, empty,
+    and fresh are all silent and reset the episode, so a later stale reading
+    -- even a recurrence of the same underlying cause -- is treated as a new
+    episode and pages again.
+    """
+    if kind == "missing":
+        return NotifyDecision(
+            should_notify=False,
+            reason="director-inbox.sh not found — nothing to measure yet, not a stale-inbox page",
+            next_episode_notified=False,
+        )
+    if kind == "empty":
+        return NotifyDecision(
+            should_notify=False,
+            reason="director inbox empty — nothing pending",
+            next_episode_notified=False,
+        )
+    stale = kind == "unreadable" or (age_seconds is not None and age_seconds > threshold_seconds)
+    if not stale:
+        return NotifyDecision(
+            should_notify=False,
+            reason=f"{pending} pending, oldest {int(age_seconds)}s old, within the {threshold_seconds}s threshold",
+            next_episode_notified=False,
+        )
+    if episode_notified:
+        return NotifyDecision(
+            should_notify=False,
+            reason="stale director-inbox episode already notified — deduped",
+            next_episode_notified=True,
+        )
+    return NotifyDecision(
+        should_notify=True,
+        reason="new stale director-inbox episode — notify",
+        next_episode_notified=True,
+        message=build_director_inbox_message(pending=pending, age_seconds=age_seconds, threshold_seconds=threshold_seconds),
+    )
+
+
+def check_and_notify_director_inbox(
+    *, director_inbox_bin, episode_state_path, sender, threshold_seconds: int, log_path=None, timeout: int = 15
+) -> NotifyDecision:
+    """Actuator: run `director-inbox.sh stats` (read-only, no lock, safe to
+    call every tick), decide via `decide_notify_director_inbox`, and deliver
+    through the same episode-gated path every other alarm in this module
+    uses. Unlike the heartbeat check, there is no injectable `now` -- the
+    age comes precomputed from `stats`'s own `oldest_age_s`, itself measured
+    against `director-inbox.sh`'s own clock read at call time.
+    """
+    episode_state_path = Path(episode_state_path)
+    log = (lambda line: _log_local(Path(log_path), line)) if log_path is not None else (lambda line: None)
+
+    stats = None
+    binary_missing = False
+    try:
+        result = subprocess.run(
+            [str(director_inbox_bin), "stats"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+        )
+        if result.returncode == 0:
+            stats = json.loads(result.stdout)
+    except OSError:
+        # director-inbox.sh could not even be exec'd -- not found, not
+        # executable, a dangling symlink. Distinct from a binary that ran
+        # and misbehaved (see classify_director_inbox's "missing" vs
+        # "unreadable"): a scratch copy of this tree that does not carry
+        # director-inbox.sh (as#57/#75's copy_dir, for one) must not read as
+        # a stuck queue.
+        binary_missing = True
+    except (subprocess.TimeoutExpired, ValueError):
+        stats = None
+
+    kind, age_seconds, pending = classify_director_inbox(stats, binary_missing=binary_missing)
+    episode_notified, attempts = _load_episode(episode_state_path)
+    decision = decide_notify_director_inbox(
+        kind=kind,
+        age_seconds=age_seconds,
+        pending=pending,
+        threshold_seconds=threshold_seconds,
+        episode_notified=episode_notified,
+    )
+    return _deliver(decision, episode_state_path=episode_state_path, sender=sender, log=log, attempts=attempts)
+
+
 #: The notifier ships beside this module. Resolved from `__file__` rather
 #: than from any absolute path so that moving the tree -- a repository split,
 #: a relocated live worktree, a test running from a worktree -- moves the
@@ -504,15 +672,26 @@ def main(argv: list[str] | None = None) -> int:
     default_state = Path(os.environ.get("SUPERVISOR_STATE_DIR", "~/.local/state/agent-dotfiles-supervisor")).expanduser()
     parser.add_argument(
         "--mode",
-        choices=["escalate", "heartbeat"],
+        choices=["escalate", "heartbeat", "director-inbox"],
         default="escalate",
-        help="'escalate' (default) is the loop-restart check; 'heartbeat' is #163's inbox-poll staleness check",
+        help=(
+            "'escalate' (default) is the loop-restart check; 'heartbeat' is #163's "
+            "inbox-poll staleness check; 'director-inbox' is as#151's director-inbox "
+            "staleness check"
+        ),
     )
     parser.add_argument("--status-path", default=str(default_state / "watchdog.status"), help="escalate mode: watchdog.status")
     parser.add_argument(
         "--heartbeat-status-path", default=str(default_state / "inbox-poll.status"), help="heartbeat mode: inbox-poll.status"
     )
-    parser.add_argument("--threshold-seconds", type=int, default=0, help="heartbeat mode: staleness threshold, in seconds")
+    parser.add_argument(
+        "--director-inbox-bin",
+        default=str(Path(__file__).resolve().parent / "director-inbox.sh"),
+        help="director-inbox mode: path to director-inbox.sh",
+    )
+    parser.add_argument(
+        "--threshold-seconds", type=int, default=0, help="heartbeat/director-inbox mode: staleness threshold, in seconds"
+    )
     # Default depends on --mode (each check must not read or reset the
     # other's episode file) so it is resolved below, after parsing, not here.
     parser.add_argument("--episode-state-path", default=None)
@@ -523,8 +702,12 @@ def main(argv: list[str] | None = None) -> int:
         help="path to the notify skill's scripts/notify.py",
     )
     args = parser.parse_args(argv)
+    _EPISODE_FILENAMES = {
+        "heartbeat": ".watchdog-heartbeat-episode.json",
+        "director-inbox": ".watchdog-director-inbox-episode.json",
+    }
     episode_state_path = args.episode_state_path or str(
-        default_state / (".watchdog-heartbeat-episode.json" if args.mode == "heartbeat" else ".watchdog-escalate-episode.json")
+        default_state / _EPISODE_FILENAMES.get(args.mode, ".watchdog-escalate-episode.json")
     )
 
     def sender(message: str) -> None:
@@ -551,6 +734,17 @@ def main(argv: list[str] | None = None) -> int:
                 return 2
             decision = check_and_notify_heartbeat(
                 heartbeat_status_path=args.heartbeat_status_path,
+                episode_state_path=episode_state_path,
+                sender=sender,
+                threshold_seconds=args.threshold_seconds,
+                log_path=args.log_path,
+            )
+        elif args.mode == "director-inbox":
+            if args.threshold_seconds <= 0:
+                print("ERROR: --threshold-seconds must be > 0 for --mode director-inbox", file=sys.stderr)
+                return 2
+            decision = check_and_notify_director_inbox(
+                director_inbox_bin=args.director_inbox_bin,
                 episode_state_path=episode_state_path,
                 sender=sender,
                 threshold_seconds=args.threshold_seconds,
