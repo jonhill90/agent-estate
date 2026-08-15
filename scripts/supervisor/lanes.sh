@@ -216,6 +216,21 @@ NEVER_BUSY_AFTER="${LANES_NEVER_BUSY_AFTER:-1200}"
 # window's own harness by its pane command and applies that harness's
 # H_* entries; nothing in this file names a harness by string any more.
 
+# agent-supervisor#163: watchdog.sh calls this file from a LaunchAgent whose
+# PATH is whatever SUPERVISOR_PATH's fallback lists -- and a hand-run caller
+# may have no such fallback at all. If tmux itself is not on PATH, `tmux
+# has-session` below fails to EXECUTE (bash exit 127), which `if ! ...`
+# reports identically to a genuine "no such session" -- "I cannot see tmux"
+# and "there is no session" collapsed into the same sentence and the same
+# exit code, the exact fail-open #124/#126 forbid: a watchdog that cannot
+# observe must not conclude there is nothing to observe. Checked here,
+# BEFORE the first tmux call, so the message names the actual reason instead
+# of guessing from has-session's exit status after the fact.
+if ! command -v tmux >/dev/null 2>&1; then
+  echo "lanes: tmux is not on PATH -- cannot tell whether session '$SESSION' exists (#163)" >&2
+  exit 2
+fi
+
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
   echo "lanes: session '$SESSION' does not exist" >&2
   exit 1
@@ -224,6 +239,21 @@ fi
 # First sample of every pane, taken together so the gap is shared rather than
 # paid per lane.
 TAB=$'\t'   # tmux does not interpret a literal \t inside -F
+# agent-supervisor#163: that TAB survives in -F output only when this process
+# has a UTF-8-aware locale. Under launchd's environment -- no LANG/LC_ALL at
+# all, measured with `env -i HOME=... PATH=...` -- tmux's format engine
+# silently substitutes '_' for the literal tab byte instead, collapsing every
+# column of the list-panes call below into one; poller-window.sh hit the
+# identical defect for a two-field lookup (#28/#31) and fixed it by avoiding
+# a literal tab in -F altogether. This call shares one list-panes sample
+# across eight fields (the whole reason it is one call, see the comment
+# above it), so that narrower fix does not fit here. SOH (0x01) does: tmux
+# escapes it into the literal four-character string "\001" UNCONDITIONALLY --
+# measured identical with and without LANG set -- so the list-panes call
+# below asks for SEP instead of a raw tab, and the escaped form is converted
+# back into a real tab immediately after, which is the only place downstream
+# needed to change; every existing `IFS=$'\t' read` still reads real tabs.
+SEP=$'\001'
 # One list-panes call for every field, all from the ACTIVE pane of each window
 # -- the pane that capture-pane reads and send-keys would hit. Reading the
 # command from ":$w.1" while capturing from ":$w" meant a split lane could
@@ -239,7 +269,8 @@ while IFS=$'\t' read -r w n c a m p wid path; do
   [ -n "$w" ] || continue
   IDX+=("$w"); NAME+=("$n"); CMD+=("$c"); ACTIVITY+=("$a"); PANEMODE+=("$m"); PANEPID+=("$p"); WID+=("$wid"); PANE_PATH+=("$path")
 done < <(tmux list-panes -s -t "$SESSION" -f '#{pane_active}' \
-           -F "#{window_index}${TAB}#{window_name}${TAB}#{pane_current_command}${TAB}#{window_activity}${TAB}#{pane_in_mode}${TAB}#{pane_pid}${TAB}#{window_id}${TAB}#{pane_current_path}" 2>/dev/null)
+           -F "#{window_index}${SEP}#{window_name}${SEP}#{pane_current_command}${SEP}#{window_activity}${SEP}#{pane_in_mode}${SEP}#{pane_pid}${SEP}#{window_id}${SEP}#{pane_current_path}" 2>/dev/null \
+         | sed "s/\\\\001/${TAB}/g")
 
 # #154. Answers one question about a pane whose command is a shell: is that
 # shell one of this directory's services, or is it the wreckage of an agent
@@ -624,10 +655,23 @@ case "$MODE" in
     # #241: both identities, because a JSON consumer may be doing either job.
     # `window` is the index (unchanged, still a number, so no existing reader
     # breaks); `window_id` is the tmux handle to address it with.
+    #
+    # agent-supervisor#163: `<<<"$rows"` here-strings a trailing newline even
+    # when $rows is the empty string (zero real lanes -- a session with no
+    # windows at all, or, as found reproducing #163's own watchdog failures, a
+    # tmux that answered `has-session` but returned nothing from list-panes).
+    # awk then processed that one blank line as a row with every field empty,
+    # emitting `{"window":,"window_id":"",...}` -- not valid JSON, so ANY
+    # strict consumer of a genuinely empty session broke the same way #163's
+    # malformed-under-launchd bug did, just from a different cause. Guarded
+    # here rather than in awk: zero real rows must print `[]`, not run the
+    # loop body once for a blank line that was never a lane.
     printf '['
-    awk -F'\t' 'BEGIN{c=0}
-      {if(c++)printf(",");printf("{\"window\":%s,\"window_id\":\"%s\",\"name\":\"%s\",\"command\":\"%s\",\"state\":\"%s\",\"idle_seconds\":%s}",$1,$5,$2,$3,$4,$6)}
-      END{}' <<<"$rows"
+    if [ -n "$rows" ]; then
+      awk -F'\t' 'BEGIN{c=0}
+        {if(c++)printf(",");printf("{\"window\":%s,\"window_id\":\"%s\",\"name\":\"%s\",\"command\":\"%s\",\"state\":\"%s\",\"idle_seconds\":%s}",$1,$5,$2,$3,$4,$6)}
+        END{}' <<<"$rows"
+    fi
     printf ']\n' ;;
   *)
     # THE TABLE PRINTS THE INDEX AND NOTHING ELSE (#241). Jon reads the tmux

@@ -56,8 +56,14 @@ SRC="$A/src"
 git -C "$SRC" config user.email t@e.com; git -C "$SRC" config user.name T
 git -C "$SRC" checkout -q -b main
 mkdir -p "$SRC/scripts/supervisor"
+# agent-supervisor#163: lanes.sh (and its own input-box.sh dependency) added
+# so watchdog.sh's never-busy check finds a real lanes.sh beside it here, the
+# same as a real live worktree always does -- without it, this fixture's
+# "lanes.sh is missing beside this watchdog" was never the scenario #57's
+# poller-copy path is about, and #163's new fail-streak escalation started
+# paging on it, which is what actually broke "pages nobody" below.
 for f in watchdog.sh advance-live.sh poller-window.sh poller-recover.sh session-defaults.sh \
-         sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
+         sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh lanes.sh input-box.sh; do
   cp "$SUP/$f" "$SRC/scripts/supervisor/"
 done
 cp -R "$SUP/harness" "$SRC/scripts/supervisor/"
