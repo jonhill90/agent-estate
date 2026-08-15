@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
@@ -51,5 +52,28 @@ func TestThemeSwitchChangesGalleryRender(t *testing.T) {
 	}
 	if strings.Contains(outMono, defFrag) {
 		t.Errorf("Mono gallery render still contains Default's flag colour fragment %q -- literal not routed", defFrag)
+	}
+}
+
+// TestKeyTCyclesThemeAtRuntime is agent-tui#25 scope item 3, driven -- see
+// board's identical test for the full rationale.
+func TestKeyTCyclesThemeAtRuntime(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	m := New().WithTheme(theme.Default, "")
+	m.height = 200
+	before := m.View()
+
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	m = next.(Model)
+	after := m.View()
+
+	if before == after {
+		t.Fatal("pressing 't' did not change the gallery's render -- runtime theme switch not wired")
+	}
+	if m.theme.ID != theme.Cycle(theme.Default).ID {
+		t.Fatalf("after 't', m.theme = %q, want %q", m.theme.ID, theme.Cycle(theme.Default).ID)
 	}
 }

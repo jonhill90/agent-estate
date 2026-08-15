@@ -78,6 +78,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.offset = len(m.rows) - 1
 			}
 			return m, nil
+		case "t":
+			// agent-tui#25 scope item 3: runtime theme comparison, same
+			// shape as rail.Model's "t" case -- see its comment for why
+			// this never touches theme.Save.
+			m.theme = theme.Cycle(m.theme)
+			return m, nil
 		}
 		return m, nil
 	}
@@ -123,7 +129,8 @@ func (m Model) View() string {
 	if m.themeNotice != "" {
 		out += st.err.Render("! "+m.themeNotice) + "\n"
 	}
-	out += st.dim.Render(fmt.Sprintf("state %d/%d -- [j/k] scroll one state, [g/G] top/bottom, [q] quit", m.offset+1, len(m.rows))) + "\n\n"
+	out += st.dim.Render(fmt.Sprintf("state %d/%d -- [j/k] scroll one state, [g/G] top/bottom, [t] switch theme (this session only), [q] quit", m.offset+1, len(m.rows))) + "\n"
+	out += st.dim.Render(fmt.Sprintf("theme: %s", m.theme.Name)) + "\n\n"
 
 	// Budget: title(1) + subtitle(1) + blank(1) + legend(len) + blank(1) +
 	// footer(1) reserved; whatever remains goes to Render's row content.

@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
@@ -69,5 +70,38 @@ func TestThemeSwitchChangesBoardRender(t *testing.T) {
 	}
 	if strings.Contains(outMono, defFrag) {
 		t.Errorf("Mono board render still contains Default's in-progress colour fragment %q -- literal not routed", defFrag)
+	}
+}
+
+// TestKeyTCyclesThemeAtRuntime is agent-tui#25 scope item 3, driven: "he
+// has consistently wanted to compare rather than commit" is not proven by
+// a struct returned from theme.Cycle (theme_test.go's TestCycleAdvancesAndWraps
+// already covers that) -- it needs a real key delivered to a real Model's
+// Update, then the real View() actually differing, the same "driven, not
+// a struct unit test" discipline TestThemeSwitchChangesBoardRender above
+// documents for WithTheme.
+func TestKeyTCyclesThemeAtRuntime(t *testing.T) {
+	prev := lipgloss.ColorProfile()
+	lipgloss.SetColorProfile(termenv.TrueColor)
+	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
+
+	snap := Snapshot{
+		Cards: []Card{{Repo: repoA, Number: 1, Title: "a card", Column: InProgress}},
+		Repos: []Repo{repoA},
+	}
+	m := New(func() (Snapshot, error) { return snap, nil }).WithTheme(theme.Default, "")
+	next, _ := m.Update(fetchResultMsg{snap: snap})
+	m = next.(Model)
+	before := m.View()
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	m = next.(Model)
+	after := m.View()
+
+	if before == after {
+		t.Fatal("pressing 't' did not change the board's render -- runtime theme switch not wired")
+	}
+	if m.theme.ID != theme.Cycle(theme.Default).ID {
+		t.Fatalf("after 't', m.theme = %q, want %q", m.theme.ID, theme.Cycle(theme.Default).ID)
 	}
 }

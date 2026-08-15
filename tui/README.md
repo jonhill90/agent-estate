@@ -11,6 +11,25 @@ Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
 ## Status
 
+**25 shipped: themes, per-user and switchable at runtime.** #27 (below)
+already landed the per-user, persisted half of this issue -- role-based
+colours, `theme.Load`'s config file, and the honest-failure notice were
+all in place before this issue's own lane started. What #25 adds on top:
+a `t` key in every screen (rail, board, cost, gallery) that cycles
+`theme.All` in memory, live against whatever is already on screen -- same
+shape as the existing `[1-N]` glyph-set/layout/view pickers and the rail's
+`[g]` grouping cycle. It is deliberately NOT persistence: pressing `t`
+never calls `theme.Save`, so a user's `theme.json` is untouched until they
+edit it themselves ("a theme that only an agent can change... is not this
+issue" cuts both ways -- a runtime compare that quietly rewrote your
+config would be the same defect from the other direction). This answers
+the issue's scope item 3, "switchable at runtime as well as at startup,
+if it is cheap... he has consistently wanted to compare rather than
+commit." See `theme.Cycle` (`internal/theme/registry.go`) and each
+package's `TestKeyTCyclesThemeAtRuntime` for the driven proof -- a real
+key delivered to a real `Update`, then a real `View()` actually differing,
+not a struct inspected in isolation.
+
 **27 shipped: aesthetics are data, not code.** Every look-and-feel literal
 in the render path -- colour, border character, chrome padding, the
 director's "★" mark -- now lives in `internal/theme` as one of two

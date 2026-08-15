@@ -56,3 +56,27 @@ func TestColorMissingRoleReturnsEmpty(t *testing.T) {
 		t.Fatalf("Color(missing role) = %q, want empty", got)
 	}
 }
+
+func TestCycleAdvancesAndWraps(t *testing.T) {
+	if len(All) < 2 {
+		t.Fatal("Cycle needs at least two shipped themes to prove anything")
+	}
+	got := Cycle(Default)
+	if got.ID == Default.ID {
+		t.Fatalf("Cycle(Default) = %q, want a different theme", got.ID)
+	}
+	if got.ID != All[1].ID {
+		t.Fatalf("Cycle(Default) = %q, want All[1] = %q", got.ID, All[1].ID)
+	}
+	// Wraps back to All[0] from the last theme in All, not off the end.
+	if got := Cycle(All[len(All)-1]); got.ID != All[0].ID {
+		t.Fatalf("Cycle(last) = %q, want wrap to All[0] = %q", got.ID, All[0].ID)
+	}
+}
+
+func TestCycleUnknownThemeReturnsFirst(t *testing.T) {
+	got := Cycle(Theme{ID: "not-a-shipped-theme"})
+	if got.ID != All[0].ID {
+		t.Fatalf("Cycle(unknown) = %q, want All[0] = %q", got.ID, All[0].ID)
+	}
+}

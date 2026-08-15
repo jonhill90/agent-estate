@@ -84,3 +84,28 @@ func ByID(id string) (Theme, bool) {
 	}
 	return Default, false
 }
+
+// Cycle returns the theme in All that follows current, wrapping around --
+// agent-tui#25's other half of "per-user, persisted": the config file
+// (config.go's Load/Save) is the committed preference, but issue #25's
+// scope item 3 also asks for "switchable at runtime as well as at
+// startup, if it is cheap... he has consistently wanted to compare rather
+// than commit." This is that comparison -- a live, in-memory swap the
+// four screens' Update loops call on a keypress (see each package's own
+// "t" case), same shape as lane.Variants' glyph-set cycle and this rail's
+// own group-style cycle. It never writes theme.Save; the config file is
+// untouched until a user edits it themselves, exactly as the issue
+// requires ("the user cannot set it by editing their own config" is what
+// would make a theme control wrong).
+//
+// A current theme not present in All (defensive -- every caller today
+// only ever holds a Theme that came from Default, ByID, or this function)
+// cycles to All[0] rather than panicking or standing still.
+func Cycle(current Theme) Theme {
+	for i, t := range All {
+		if t.ID == current.ID {
+			return All[(i+1)%len(All)]
+		}
+	}
+	return All[0]
+}

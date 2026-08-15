@@ -337,6 +337,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.groupStyle = (m.groupStyle + 1) % len(groupStyles)
 			}
 			return m, nil
+		case "t":
+			// agent-tui#25 scope item 3: switchable at runtime, not just at
+			// startup -- "he has consistently wanted to compare rather than
+			// commit." Cycles in memory only; never writes theme.Save, so
+			// the user's persisted preference (theme.ConfigPath) is
+			// untouched until they edit it themselves.
+			m.theme = theme.Cycle(m.theme)
+			return m, nil
 		}
 		// Number keys select a glyph set directly, live, against whatever
 		// is already on screen -- the whole picker is this one branch plus
@@ -568,6 +576,13 @@ func (m Model) View() string {
 		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("group %d/%d: %s", m.groupStyle+1, len(groupStyles), gs.Name)))
 		b = append(b, st.legend.Width(innerWidth).Render("[g] to switch"))
 	}
+
+	// The theme picker (agent-tui#25 scope item 3): which theme is live,
+	// in-memory, right now -- separate from the persisted preference
+	// theme.ConfigPath names, same as [1-N] above is separate from
+	// whichever glyph set ships as anyone's default.
+	b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("theme: %s", m.theme.Name)))
+	b = append(b, st.legend.Width(innerWidth).Render("[t] to switch (this session only)"))
 
 	// agent-tui#14's write path: the current mode's prompt (typing a new
 	// session's name, or a remove confirmation naming exactly what would be

@@ -108,6 +108,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case "r":
 			return m, doFetch(m.fetch)
+		case "t":
+			// agent-tui#25 scope item 3: runtime theme comparison, same
+			// shape as rail.Model's "t" case -- see its comment for why
+			// this never touches theme.Save.
+			m.theme = theme.Cycle(m.theme)
+			return m, nil
 		}
 		if n, ok := digitKey(msg.String()); ok && n >= 1 && n <= len(Views) {
 			m.viewIdx = n - 1
@@ -192,6 +198,7 @@ func (m Model) View() string {
 		out += "\n" + st.dim.Render(fmt.Sprintf("fetched %s ago -- refreshes every %s", age, refreshInterval)) + "\n"
 	}
 	out += st.dim.Render(fmt.Sprintf("view %d/%d: %s -- %s", m.viewIdx+1, len(Views), view.Name, view.Description)) + "\n"
+	out += st.dim.Render(fmt.Sprintf("theme: %s  [t] switch (this session only)", m.theme.Name)) + "\n"
 	out += st.dim.Render(fmt.Sprintf("[1-%d] switch view  [r] refresh  [q] quit", len(Views)))
 	return out
 }
