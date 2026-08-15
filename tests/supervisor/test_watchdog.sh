@@ -770,21 +770,43 @@ else
 fi
 
 # --- #147: a sandboxed test fixture's copy of inbox-poll.sh, still alive
-# under a mktemp'd path, must not be counted as a second poller. This is the
-# exact shape measured live: one real poller (pid 111, installed path) plus
-# one leaked watchdog test fixture (pid 333, launched from underneath
-# /var/folders) -- unrelated by ppid/pgid, so the parent/child suppression
-# above cannot silence it; only excluding it by path can.
+# under a mktemp'd path and MARKED as the watchdog's own fixture, must not
+# be counted as a second poller. This is the exact shape measured live: one
+# real poller (pid 111, installed path) plus one leaked watchdog test
+# fixture (pid 333, launched from underneath a mktemp'd path) -- unrelated
+# by ppid/pgid, so the parent/child suppression above cannot silence it;
+# only the marker (poller_fixture_marker in watchdog.sh) can. The marker is
+# a real file on disk next to the (real, if unused) script path, since
+# poller_is_verified_fixture stats it directly -- the stub ps only fakes
+# `ps` output, not the filesystem.
+FIXDIR=$(mktemp -d)
+touch "$FIXDIR/inbox-poll.sh" "$FIXDIR/.watchdog-test-fixture"
 D=$(mktemp -d)
 pc_run "$D/w" "111 333" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
   STUB_PS_PPID_333=84088 STUB_PS_PGID_333=333 \
-  STUB_PS_COMMAND_333="/bin/bash /var/folders/_b/xxx/T/watchdog-57-tmux.ON5Xcl/inbox-poll.sh"
+  STUB_PS_COMMAND_333="/bin/bash $FIXDIR/inbox-poll.sh"
 if grep -q '^poller:' "$D/w/st" 2>/dev/null || grep -q 'POLLER-DUPLICATE' "$D/w/lg" 2>/dev/null; then
-  say_bad "a real poller plus a sandboxed test fixture is silent" \
+  say_bad "a real poller plus a MARKED sandboxed test fixture is silent" \
     "$(cat "$D/w/st" 2>/dev/null | tr '\n' ' '); log=$(cat "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
 else
-  say_ok "a real poller plus a sandboxed test fixture is silent"
+  say_ok "a real poller plus a MARKED sandboxed test fixture is silent"
 fi
+
+# --- #194 (reviewer's adversarial case): a GENUINE independent second
+# poller -- unrelated ppid/pgid from the real one, deployed by hand from a
+# temp checkout, and carrying NO fixture marker -- must still fire. This is
+# the exact case the first version of this fix (path-substring alone, no
+# marker) silenced instead of catching, per PR #194's review. Same
+# directory shape as the fixture above, minus the marker file, proving path
+# alone is no longer sufficient to go quiet.
+DEPLOYDIR=$(mktemp -d)
+touch "$DEPLOYDIR/inbox-poll.sh"
+D=$(mktemp -d)
+pc_run "$D/w" "111 444" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
+  STUB_PS_PPID_444=1 STUB_PS_PGID_444=444 \
+  STUB_PS_COMMAND_444="/bin/bash $DEPLOYDIR/inbox-poll.sh"
+check "an unmarked independent poller under a temp path still fires POLLER-DUPLICATE" "^poller:.*DUPLICATE" "$D/w/st"
+check "the unmarked-independent-poller report is logged loudly" "POLLER-DUPLICATE" "$D/w/lg"
 
 MUT_SANDBOX=$(mktemp -d); mkdir -p "$MUT_SANDBOX/scripts/supervisor"
 cp "$WATCHDOG" "$MUT_SANDBOX/scripts/supervisor/watchdog.sh"
@@ -797,32 +819,31 @@ python3 - "$MUT_SANDBOX/scripts/supervisor/watchdog.sh" <<'PY' || patch_rc=$?
 import sys
 path = sys.argv[1]
 text = open(path).read()
-old = '''poller_is_sandboxed() {
-  case "$1" in
-    *"/var/folders/"*|*"/tmp/"*) return 0 ;;
-  esac
-  return 1
+old = '''poller_is_verified_fixture() { # poller_is_verified_fixture <cmd>
+  local marker
+  marker=$(poller_fixture_marker "$1")
+  [ -n "$marker" ] && [ -f "$marker" ]
 }'''
-assert old in text, "sandboxed-poller exclusion not found"
-assert text.count(old) == 1, "sandboxed-poller exclusion not unique"
-open(path, "w").write(text.replace(old, 'poller_is_sandboxed() { return 1; }', 1))
+assert old in text, "fixture-marker verification not found"
+assert text.count(old) == 1, "fixture-marker verification not unique"
+open(path, "w").write(text.replace(old, 'poller_is_verified_fixture() { return 0; }', 1))
 PY
 if [ "$patch_rc" -ne 0 ]; then
-  say_bad "setup: mutated the sandboxed-poller exclusion away" "patch failed with exit $patch_rc"
+  say_bad "setup: mutated the fixture-marker verification into always-trust" "patch failed with exit $patch_rc"
 else
   chmod +x "$MUT_SANDBOX/scripts/supervisor/watchdog.sh"
   old_watchdog="$WATCHDOG"
   WATCHDOG="$MUT_SANDBOX/scripts/supervisor/watchdog.sh"
   D=$(mktemp -d)
-  pc_run "$D/w" "111 333" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
-    STUB_PS_PPID_333=84088 STUB_PS_PGID_333=333 \
-    STUB_PS_COMMAND_333="/bin/bash /var/folders/_b/xxx/T/watchdog-57-tmux.ON5Xcl/inbox-poll.sh"
+  pc_run "$D/w" "111 444" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
+    STUB_PS_PPID_444=1 STUB_PS_PGID_444=444 \
+    STUB_PS_COMMAND_444="/bin/bash $DEPLOYDIR/inbox-poll.sh"
   WATCHDOG="$old_watchdog"
   if grep -q 'DUPLICATE' "$D/w/st" "$D/w/lg" 2>/dev/null; then
-    say_ok "mutation confirmed: removing the sandboxed-poller exclusion counts the leaked fixture (the assertion above would be red)"
+    say_bad "mutation confirmed: always-trusting the fixture marker silences a genuine independent poller (the assertion above would be red)" \
+      "mutant still fired: $(cat "$D/w/st" "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
   else
-    say_bad "mutation confirmed: removing the sandboxed-poller exclusion counts the leaked fixture" \
-      "mutant stayed silent: $(cat "$D/w/st" "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
+    say_ok "mutation confirmed: always-trusting the fixture marker silences a genuine independent poller (the assertion above would be red)"
   fi
 fi
 

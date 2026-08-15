@@ -703,20 +703,50 @@ check_director_inbox() {
 # every ~3 minutes was neither the poller's own child (that pgid-matches its
 # parent and is suppressed below) nor a second estate poller -- it was a
 # watchdog test fixture's copy of inbox-poll.sh, launched from a mktemp'd
-# sandbox and still alive because it survived SIGTERM (#104). Same script,
-# same POLLER_SERVICE_RE match, different path: the estate's own poller runs
-# from an installed checkout, a sandboxed one runs from underneath the
-# system temp directory (/var/folders on macOS, /tmp elsewhere -- both are
-# where mktemp -d and TMUX_TMPDIR sandboxes land in this repo's own tests).
-# It holds no ledger state and acks no production Telegram offset, so
-# counting it teaches the reader to ignore the one shape -- two independent,
-# offset-acking pollers -- this check exists to catch. Excluded by path, not
-# by name, since the process name is identical on purpose.
-poller_is_sandboxed() {
-  case "$1" in
-    *"/var/folders/"*|*"/tmp/"*) return 0 ;;
-  esac
-  return 1
+# sandbox and still alive because it survived SIGTERM (#104).
+#
+# A first version of this fix excluded any command path containing
+# /var/folders/ or /tmp/, applied BEFORE parentage suppression even ran. A
+# review of that PR (#194) constructed the adversarial case it invites: a
+# GENUINE independent second poller -- unrelated ppid/pgid, deployed by hand
+# from a temp checkout like /tmp/deploy-copy/... -- and the check went
+# silent. Path alone proves nothing about whether a process holds ledger
+# state or acks the production Telegram offset; it only proves where its
+# script happens to live. That is exactly the shape #147 exists to catch, so
+# a path-only exclusion is worse than the noise it silenced: nothing is
+# watching, and nobody knows.
+#
+# The fix: parentage runs first, against EVERY process matching
+# POLLER_SERVICE_RE, regardless of path -- the poller's own same-pgid child
+# is suppressed exactly as before. Only a process that survives that (an
+# unrelated ppid/pgid -- never the estate's own child) is even considered
+# for the fixture exclusion, and even then it is excluded only when it
+# carries a marker the test harness itself writes beside the fixture script
+# (poller_fixture_marker, below) -- something a genuine second poller has no
+# reason to ever have, accidentally or otherwise. No marker, no exclusion:
+# per the ratchet direction (#124/#126), an unresolved "is this harmless?"
+# makes the alert fire, never stays quiet.
+poller_fixture_marker() { # poller_fixture_marker <cmd> -- prints the marker
+  # path a genuine watchdog test fixture at this script path would carry, or
+  # nothing if none of <cmd>'s whitespace-separated tokens is an
+  # inbox-poll.sh path (a wrapper like "/bin/bash <path> --flag" still has
+  # the script path as its own token, not necessarily the last one).
+  local cmd="$1" tok dir
+  for tok in $cmd; do
+    case "$tok" in
+      */inbox-poll.sh)
+        dir="${tok%/inbox-poll.sh}"
+        printf '%s/.watchdog-test-fixture' "$dir"
+        return 0
+        ;;
+    esac
+  done
+}
+
+poller_is_verified_fixture() { # poller_is_verified_fixture <cmd>
+  local marker
+  marker=$(poller_fixture_marker "$1")
+  [ -n "$marker" ] && [ -f "$marker" ]
 }
 
 poller_process_rows() {
@@ -727,15 +757,14 @@ poller_process_rows() {
     [ -n "$pid" ] || continue
     cmd=$(ps -o command= -p "$pid" 2>/dev/null) || continue
     [[ "$cmd" =~ $POLLER_SERVICE_RE ]] || continue
-    poller_is_sandboxed "$cmd" && continue
     ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//') || ppid=""
     pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//') || pgid=""
     start=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     [ -n "$start" ] || start=$(ps -o start= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    records="${records:-}${pid}	${ppid:-unknown}	${pgid:-unknown}	${start:-unknown}
+    records="${records:-}${pid}	${ppid:-unknown}	${pgid:-unknown}	${start:-unknown}	${cmd}
 "
   done < <(pgrep -f inbox-poll.sh 2>/dev/null || true)
-  while IFS=$'\t' read -r pid ppid pgid start; do
+  while IFS=$'\t' read -r pid ppid pgid start cmd; do
     [ -n "$pid" ] || continue
     skip=0
     while IFS=$'\t' read -r parent_pid parent_ppid parent_pgid parent_start; do
@@ -746,6 +775,7 @@ poller_process_rows() {
       fi
     done <<<"${records:-}"
     [ "$skip" -eq 1 ] && continue
+    poller_is_verified_fixture "$cmd" && continue
     printf '%s\t%s\n' "$pid" "${start:-unknown}"
   done <<<"${records:-}"
   return 0
