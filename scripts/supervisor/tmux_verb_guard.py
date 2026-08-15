@@ -80,8 +80,28 @@ effect at the verb, even though the marker text sits textually above the
 verb in the file. Both sides of a candidate verb -- what counts as the
 verb's effective position, and what counts as a marker having taken
 effect by that position -- go through the identical `_function_spans`
-remap, so a helper that is genuinely called first and one that is merely
-defined first are no longer indistinguishable to this scanner.
+remap, so a helper whose containing function is genuinely called before
+the verb and one that is merely defined before it are no longer
+indistinguishable to this scanner -- PROVIDED that call is found at all.
+
+The two sides read the SAME "never referenced" fallback with opposite
+meanings, so they get opposite defaults. A verb inside a function
+`_function_spans` cannot resolve to any later call falls back to
+judging the verb at its own definition's end -- conservative-safe,
+since an unreferenced verb-holding function still gets flagged (dead
+code some other check should catch, not this one). A MARKER inside a
+function that cannot be resolved the same way gets no such fallback: an
+unresolved marker is excluded from the effective prefix outright, at
+every position, rather than trusted as of its function's own end. This
+matters because `_function_spans` only looks for a DIRECT textual
+reference to the function's own name -- a helper reached only through
+one more level of indirection (`outer() { inner }`, with only `outer`
+called directly) resolves as "never referenced" for `inner`, exactly
+like dead code, even when `outer` genuinely runs the verb unisolated.
+Treating that as "isolated as of the helper's own end" would fail open;
+treating it as "not established" fails closed instead -- the ratchet
+this scanner holds throughout: an unresolvable reachability question
+makes a file look LESS isolated, never more.
 
 ## Known gaps (documented, not closed)
 
@@ -117,6 +137,20 @@ real shell parsing (or a stricter allowlist of accepted verb/marker
 forms), which is out of scope for this pass -- tracked, not fixed, and
 pinned by fixtures in test_tmux_verb_guard.py so the gap cannot drift
 back to undocumented.
+
+  - **Marker reached only through nested indirection**: `outer() {
+    inner }` / `inner() { ...markers... }`, with only `outer` (never
+    `inner`) referenced anywhere else. `_function_spans` resolves
+    reachability by a DIRECT textual reference to the function's own
+    name, one level only -- it does not walk the call graph. `inner`
+    therefore reads as unresolved regardless of whether `outer` is
+    called before or after the verb, and the fail-closed default above
+    now excludes its markers unconditionally. This closes the evasion
+    (nested-and-called-after now correctly flags) at the cost of a new
+    false positive: nested-and-called-BEFORE the verb -- genuinely
+    isolated -- also flags, because this scanner cannot tell the two
+    apart without walking the call graph. Accepted on purpose: an
+    over-flag here is noisy but safe; the evasion it replaces was not.
 """
 
 import re
@@ -164,7 +198,14 @@ def _function_spans(lines):
     `name() { ... }` block should be judged at instead: the nearest later
     reference to that function's name (a `trap NAME ...` or a bare call),
     or the block's own closing line if the function is never referenced.
-    Lines outside any function body are absent from the returned dict."""
+    Lines outside any function body are absent from the returned dict.
+
+    Also returns an `unresolved` dict, keyed the same way, True for every
+    line whose containing function's reachability could NOT be
+    established (no later call or trap found). The remap value for those
+    lines still falls back to the block's own end -- callers that want
+    the fail-closed marker behaviour must check `unresolved` themselves;
+    see `_effective_prefix`."""
     # Depth-based, not "first `}` wins": a cleanup() body in this suite
     # routinely nests its own `cond && { ...; }` block (parameter
     # expansions like "${VAR:-}" are brace-balanced within one line and so
@@ -187,10 +228,12 @@ def _function_spans(lines):
             open_name = open_at = None
 
     remap = {}
+    unresolved = {}
     for name, start, end in spans:
         call_re = re.compile(r"\b" + re.escape(name) + r"\b")
         trap_re = re.compile(r"\btrap\b[^\n]*\b" + re.escape(name) + r"\b[^\n]*\b(EXIT|INT|TERM)\b")
         call_at = end
+        resolved = False
         for lineno, line in enumerate(lines, start=1):
             if lineno <= end:
                 continue
@@ -201,16 +244,19 @@ def _function_spans(lines):
                 # idiom (assert_isolated_tmux called right after `trap
                 # cleanup EXIT`, not before it). Defer to end of file.
                 call_at = len(lines)
+                resolved = True
                 break
             if call_re.search(line):
                 call_at = lineno
+                resolved = True
                 break
         for lineno in range(start, end + 1):
             remap[lineno] = call_at
-    return remap
+            unresolved[lineno] = not resolved
+    return remap, unresolved
 
 
-def _effective_prefix(lines, remap, effective_line):
+def _effective_prefix(lines, remap, unresolved, effective_line):
     """Text considered "in effect" by `effective_line`: every line whose
     OWN effective position (itself, unless it lives inside a `name() {
     ... }` block, in which case its nearest later call/trap site per
@@ -218,11 +264,21 @@ def _effective_prefix(lines, remap, effective_line):
     helper that has not been called yet is excluded even though it sits
     textually earlier in the file -- the same rule already applied to
     verb lines, extended to markers so a not-yet-called helper cannot
-    read as isolation in effect."""
+    read as isolation in effect.
+
+    A line whose containing function's reachability could not be
+    established at all (`unresolved`) is excluded unconditionally,
+    regardless of `effective_line` -- the verb-side fallback ("judge at
+    the function's own end") is conservative-safe for a verb, since an
+    unreferenced verb-holding function still gets flagged, but it would
+    be fail-OPEN for a marker: trusting an unresolvable "was this ever
+    called" as isolation already in effect. An unresolved marker counts
+    as NOT in effect, full stop -- the ratchet only ever makes a file
+    look less isolated, never more."""
     included = [
         line
         for i, line in enumerate(lines, start=1)
-        if remap.get(i, i) <= effective_line
+        if not unresolved.get(i, False) and remap.get(i, i) <= effective_line
     ]
     return "\n".join(included)
 
@@ -234,7 +290,7 @@ def scan_file(path: Path) -> list:
         return [Finding(str(path), 0, "decode-error", str(exc))]
 
     lines = text.splitlines()
-    remap = _function_spans(lines)
+    remap, unresolved = _function_spans(lines)
     findings = []
     for lineno, line in enumerate(lines, start=1):
         if COMMENT_RE.match(line):
@@ -243,7 +299,7 @@ def scan_file(path: Path) -> list:
         if not m:
             continue
         effective_line = remap.get(lineno, lineno)
-        prefix = _effective_prefix(lines, remap, effective_line)
+        prefix = _effective_prefix(lines, remap, unresolved, effective_line)
         if _is_isolated(prefix):
             continue
         findings.append(Finding(str(path), lineno, m.group(1), line.strip()))

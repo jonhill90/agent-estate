@@ -223,6 +223,71 @@ class GuardMarkerRemapClosesGapTests(unittest.TestCase):
         )
         self.assertEqual([], scan_file(p))
 
+    def test_marker_reached_only_through_nested_call_still_flags(self):
+        # #185's follow-up finding: `inner` is never referenced directly --
+        # only `outer` is, and `outer` is called AFTER the verb.
+        # `_function_spans` cannot resolve `inner`'s reachability (it only
+        # looks for a direct textual reference to `inner`, and the one
+        # inside `outer`'s body sits before `inner`'s own close), so this
+        # used to fall back to "judge at inner's own end" -- which reads as
+        # isolation already in effect and wrongly clears the verb. The
+        # verb genuinely runs unisolated; this must flag.
+        p = self._write(
+            "test_x.sh",
+            'outer() {\n'
+            '  inner\n'
+            '}\n'
+            'inner() {\n'
+            '  source "$HERE/../../scripts/supervisor/tmux-isolation.sh"\n'
+            '  export TMUX_TMPDIR="$RT"\n'
+            '  assert_isolated_tmux || exit 1\n'
+            '}\n'
+            'tmux new-session -d -s leaky\n'
+            'outer\n',
+        )
+        findings = scan_file(p)
+        self.assertEqual(1, len(findings))
+        self.assertEqual("new-session", findings[0].verb)
+
+    def test_marker_in_helper_never_called_at_all_still_flags(self):
+        # The "never called" variant of the same shape: neither `outer`
+        # nor `inner` is referenced anywhere. Must flag for the same
+        # reason a top-level unreferenced helper already did before this
+        # fix -- unresolved reachability is not isolation in effect.
+        p = self._write(
+            "test_x.sh",
+            'outer() {\n'
+            '  inner\n'
+            '}\n'
+            'inner() {\n'
+            '  source "$HERE/../../scripts/supervisor/tmux-isolation.sh"\n'
+            '  export TMUX_TMPDIR="$RT"\n'
+            '  assert_isolated_tmux || exit 1\n'
+            '}\n'
+            'tmux new-session -d -s leaky\n',
+        )
+        findings = scan_file(p)
+        self.assertEqual(1, len(findings))
+        self.assertEqual("new-session", findings[0].verb)
+
+    def test_single_level_helper_still_clears_when_called_before_verb(self):
+        # Mirror-case regression check for the fail-closed marker default:
+        # a single-level helper (no nesting) directly called before the
+        # verb must still resolve normally and stay clear -- the
+        # fail-closed default only bites when reachability genuinely
+        # cannot be established, not every helper call.
+        p = self._write(
+            "test_x.sh",
+            'setup_isolation() {\n'
+            '  source "$HERE/../../scripts/supervisor/tmux-isolation.sh"\n'
+            '  export TMUX_TMPDIR="$RT"\n'
+            '  assert_isolated_tmux || exit 1\n'
+            '}\n'
+            'setup_isolation\n'
+            'tmux kill-server\n',
+        )
+        self.assertEqual([], scan_file(p))
+
 
 class GuardKnownGapsTests(unittest.TestCase):
     """Pins agent-supervisor#185's remaining evading fixtures as documented,
@@ -288,6 +353,32 @@ class GuardKnownGapsTests(unittest.TestCase):
             'tmux new-session -d -s leaky\n',
         )
         self.assertEqual([], scan_file(p))
+
+    def test_nested_helper_called_before_verb_is_a_false_positive_now(self):
+        # Accepted trade-off from closing the nested-call evasion: `inner`
+        # is only reachable through `outer`, one level of indirection this
+        # scanner does not walk. It cannot tell this genuinely-isolated
+        # case (outer called BEFORE the verb) apart from the evading one
+        # (outer called after), so both now flag -- a false positive here,
+        # on purpose, in exchange for no longer being fail-open on the
+        # evading case. If this ever starts asserting `[]`, the scanner
+        # learned to walk nested calls and this pin (and the "Known gaps"
+        # docstring entry) should be updated together.
+        p = self._write(
+            "test_x.sh",
+            'outer() {\n'
+            '  inner\n'
+            '}\n'
+            'inner() {\n'
+            '  source "$HERE/../../scripts/supervisor/tmux-isolation.sh"\n'
+            '  export TMUX_TMPDIR="$RT"\n'
+            '  assert_isolated_tmux || exit 1\n'
+            '}\n'
+            'outer\n'
+            'tmux new-session -d -s ok\n',
+        )
+        findings = scan_file(p)
+        self.assertEqual(1, len(findings))
 
 
 class RealSuiteIsIsolatedTests(unittest.TestCase):
