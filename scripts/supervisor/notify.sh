@@ -50,6 +50,22 @@ set -uo pipefail
 # already works moves.
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 LOG="$STATE/notify.log"
+# agent-supervisor: REFUSE a flag-shaped subject rather than paging Jon with it.
+# On 2026-08-14 a caller used gh-style syntax (`notify.sh --body-file - /dev/stdin`)
+# against this script's positional interface, and ten Telegram messages reached
+# Jon whose entire subject line was the literal text `--body-file`. notify.sh
+# had no opinion about its own arguments, so garbage in was garbage delivered.
+#
+# This fails CLOSED and loudly: a malformed page is worse than no page, because
+# it trains the human to ignore the channel that exists to interrupt them.
+case "${1:-}" in
+  --*)
+    echo "notify.sh: refusing a flag-shaped subject: '${1}'" >&2
+    echo "notify.sh: usage is positional -- notify.sh \"subject\" \"body\"" >&2
+    echo "notify.sh: there is no --body-file; pipe or pass the body as \$2" >&2
+    exit 2
+    ;;
+esac
 SUBJECT="${1:-agent needs you}"
 BODY="${2:-}"
 # Credentials live in an untracked 0600 env file, never in this script, never
