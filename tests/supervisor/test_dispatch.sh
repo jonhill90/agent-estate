@@ -2109,6 +2109,16 @@ PY
   else
     ok "setup: fetched the pre-#190 dispatch.sh from git HEAD"
     chmod +x "$MUTATED_190"
+    # The correct dispatch above already recorded PR #460 as open, under
+    # ad211-rerev-460. That write-time PR-dedup gate (agent-supervisor#159,
+    # landed after #190's own branch point) lives in the ledger, not in
+    # dispatch.sh, so swapping in the pre-#190 SCRIPT does not revert it --
+    # the mutant would collide with its OWN earlier claim and refuse before
+    # ever reaching the code this section means to exercise, reporting a
+    # false red unrelated to #190. Release that claim first: this section
+    # is re-running the identical scenario, not proving the PR is still
+    # open.
+    LEDGER_STATE="$D/state-190" ledger record-completion --task ad211-rerev-460 --note done >/dev/null
     cat > "$D/lanes" <<'FIX'
 1|arch|claude.exe|❯ ready|1|0
 3|free-3|claude.exe|❯ ready|1|0
