@@ -27,6 +27,14 @@ echo "send.sh"
 
 D=$(mktemp -d); mkdir -p "$D/bin"
 cp "$HERE/stubs/tmux-dispatch" "$D/bin/tmux"
+# agent-supervisor#209: `bash` unqualified on this machine's PATH resolves to
+# Homebrew's bash (5.x), NOT production's `/bin/bash` (Apple's 3.2.57) --
+# `run_send`'s inner `bash -c "..."` calls below were therefore exercising
+# send.sh under a newer bash than production ever runs, the exact #163 shape
+# the issue asked to check for. Pinning a `bash` shim in front of PATH that
+# is really `/bin/bash` makes every `run_send ... bash -c ...` call below
+# actually run under the interpreter this suite claims to test.
+ln -sf /bin/bash "$D/bin/bash"
 cat > "$D/lanes" <<'FIX'
 1|w|claude.exe|❯ ready|1|0
 FIX
@@ -370,6 +378,41 @@ else
   ")
   want_contains "RESTORED (green): the real send.sh, same scenario, detects it again" "rc=2 status=not_landed" "$out"
 fi
+
+# --- 8. verified_send REACHES verified_type/verified_submit CLEANLY -----
+# agent-supervisor#209: `verified_send` builds `type_args`/`submit_args` as
+# bash arrays and, when a caller supplies none of a given kind (e.g.
+# `--proof` only, no `--confirm-tries`/`--confirm-settle`), the array stays
+# genuinely empty. Forwarding an empty array must add ZERO arguments to the
+# downstream call -- not a single empty-string argument, which
+# `verified_submit`'s option parser reads as `unknown option` (with nothing
+# after it: the empty string itself). Exercised for all four combinations,
+# under the `/bin/bash` shim pinned above, with `verified_type`/
+# `verified_submit` wrapped to record exactly what they were called with.
+send_probe() { # send_probe <label> <verified_send-args...>
+  local label="$1"; shift
+  reset_pane
+  out=$(run_send bash -c "
+    . '$SEND'
+    orig_type=\$(declare -f verified_type); eval \"real_\${orig_type}\"
+    verified_type() { echo \"TYPE_ARGC=\$#\" >> '$D/probe.log'; real_verified_type \"\$@\"; }
+    orig_submit=\$(declare -f verified_submit); eval \"real_\${orig_submit}\"
+    verified_submit() { echo \"SUBMIT_ARGC=\$#\" >> '$D/probe.log'; real_verified_submit \"\$@\"; }
+    verified_send '$TARGET' 'probe message' $*
+    echo \"rc=\$? status=\$SEND_STATUS\"
+  " 2>&1)
+  probe=$(cat "$D/probe.log" 2>/dev/null)
+  if grep -q 'unknown option' <<<"$out$probe"; then
+    bad "$label: an empty forwarded array must not read as 'unknown option'" "$out"$'\n'"$probe"
+    return
+  fi
+  ok "$label: no phantom empty argument reached verified_type/verified_submit"
+}
+
+: > "$D/probe.log"; send_probe "no options at all"
+: > "$D/probe.log"; send_probe "--proof only (the case #209's live repro broke)" --proof CHECKPOINT
+: > "$D/probe.log"; send_probe "--confirm-tries only" --confirm-tries 2
+: > "$D/probe.log"; send_probe "both --proof and --confirm-tries" --proof CHECKPOINT --confirm-tries 2
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

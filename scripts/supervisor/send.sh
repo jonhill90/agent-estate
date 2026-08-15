@@ -349,8 +349,16 @@ verified_send() {
       *) echo "verified_send: unknown option $1" >&2; SEND_STATUS=send_failed; return 1 ;;
     esac
   done
-  verified_type "$target" "$message" "${type_args[@]+"${type_args[@]}"}" || return $?
-  verified_submit "$target" "${submit_args[@]+"${submit_args[@]}"}"
+  if [ ${#type_args[@]} -gt 0 ]; then
+    verified_type "$target" "$message" "${type_args[@]}" || return $?
+  else
+    verified_type "$target" "$message" || return $?
+  fi
+  if [ ${#submit_args[@]} -gt 0 ]; then
+    verified_submit "$target" "${submit_args[@]}"
+  else
+    verified_submit "$target"
+  fi
 }
 
 # blind_send <target> <message> [--preclear-settle N] [--type-settle N] [--literal]
