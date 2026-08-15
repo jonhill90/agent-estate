@@ -21,6 +21,16 @@ RT="$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-tmux.XXXXXX")"
 unset TMUX
 export TMUX_TMPDIR="$RT"
 assert_isolated_tmux || exit 1
+# agent-supervisor#153: bootstrap-session.sh now writes a ledger row
+# (`cli.py adopt-session`) on every session it creates. Without this, every
+# run of this suite would write into Jon's REAL ledger at
+# ~/.local/state/agent-dotfiles-supervisor -- exactly the "do not mutate the
+# live ledger" rule #153's own brief calls out. A scratch state dir, same as
+# `--state-dir`/`AGENT_SUPERVISOR_STATE_DIR` is designed for.
+LEDGER_DIR="$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-ledger.XXXXXX")"
+export AGENT_SUPERVISOR_STATE_DIR="$LEDGER_DIR"
+CLI="$HERE/../../scripts/supervisor/cli.py"
+session_state() { python3 "$CLI" --state-dir "$LEDGER_DIR" session-state --session "$1" 2>/dev/null | sed -n 's/.*"state":"\([a-z]*\)".*/\1/p'; }
 pass=0; fail=0
 
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
@@ -46,7 +56,7 @@ cleanup() {
   tmux kill-session -t "$S" 2>/dev/null
   [ -z "$NEIGHBOUR" ] || tmux kill-session -t "=$NEIGHBOUR" 2>/dev/null
 }
-cleanup_all() { cleanup; rm -rf "$RT"; }
+cleanup_all() { cleanup; rm -rf "$RT" "$LEDGER_DIR"; }
 trap cleanup_all EXIT INT TERM
 
 if ! command -v tmux >/dev/null 2>&1; then
@@ -97,6 +107,10 @@ check "supervisor + 3 lanes, named to convention" \
 2 free-2
 3 free-3
 4 free-4" "$(windows)"
+# agent-supervisor#153 acceptance 2: a session bootstrap-session.sh creates
+# classifies as supervised.
+check "153: the session bootstrap-session.sh just created is supervised" \
+  "supervised" "$(session_state "$S")"
 
 # 6. THE IMPORTANT ONE. --add-lanes tops a session up without disturbing a
 #    window that is holding work. A bootstrap that renamed, renumbered or
@@ -111,12 +125,93 @@ check "adds only missing windows, busy lane untouched" \
 4 free-4
 5 free-5
 6 free-6" "$(windows)"
+check "153: --add-lanes on an already-supervised session leaves it supervised" \
+  "supervised" "$(session_state "$S")"
 
 # 7. --add-lanes on an already-full session is a no-op, not an error.
 before="$(windows)"
 bash "$BOOT" --session "$S" --lanes 6 --agent bash --add-lanes >/dev/null 2>&1
 check "--add-lanes when already full exits 0" "0" "$?"
 check "--add-lanes when already full changes nothing" "$before" "$(windows)"
+cleanup
+
+# --- agent-supervisor#153: mark a session SUPERVISED vs Jon's own ----------
+
+# 153a/153b use a session name distinct from $S -- $S already picked up a
+# ledger row in case 5 above, and a ledger row survives `cleanup` killing
+# the tmux session (that survival IS 153c's drift scenario, below). Reusing
+# $S here would test "does an old row for this name stick around" rather
+# than "does a name with no history at all read unknown", so a fresh name
+# with no ledger history keeps these two cases isolated from that one.
+# Reuses $NEIGHBOUR (declared at the top, killed by `cleanup` on any exit
+# path including a crash mid-case) rather than a plain local var, for the
+# same leak-safety case 10 below relies on it for.
+NEIGHBOUR="${S}-human"
+
+# 153a. A session tmux knows about that bootstrap-session.sh never touched --
+# the `Hill90` shape, a human's own session -- carries no marker at all and
+# must classify as unknown, which every caller treats as unsupervised. This
+# is acceptance 1 and 3 from as153-brief.md: no marker -> unknown ->
+# hands-off, without anyone having to configure anything.
+tmux new-session -d -s "$NEIGHBOUR" -n human-window 2>/dev/null
+check "153: a session bootstrap-session.sh never created is unknown, not supervised" \
+  "unknown" "$(session_state "$NEIGHBOUR")"
+tmux kill-session -t "=$NEIGHBOUR" 2>/dev/null
+
+# 153b. --add-lanes against a PRE-EXISTING, never-adopted session (the
+# Hill90 shape, topped up by hand or by another tool) must NOT silently
+# adopt it. Supervision is a decision bootstrap-session.sh only makes at
+# the moment it creates a session -- never as a side effect of adding
+# windows to one it did not create.
+tmux new-session -d -s "$NEIGHBOUR" -n human-window 2>/dev/null
+bash "$BOOT" --session "$NEIGHBOUR" --lanes 3 --agent bash --add-lanes >/dev/null 2>&1
+check "153: --add-lanes exits 0 against a pre-existing unadopted session" "0" "$?"
+check "153: --add-lanes never adopts a pre-existing session it did not create" \
+  "unknown" "$(session_state "$NEIGHBOUR")"
+tmux kill-session -t "=$NEIGHBOUR" 2>/dev/null
+NEIGHBOUR=""
+
+# 153c. #153's own measured drift: a ledger row can outlive the session it
+# names. Adopt a session, kill it, and confirm the STALE row does not read
+# as supervised -- there is nothing left to act on, so it must not be
+# reported as anything actionable (acceptance 4).
+bash "$BOOT" --session "$S" --lanes 2 --agent bash >/dev/null 2>&1
+check "153: setup for the stale-row case creates cleanly" "0" "$?"
+check "153: setup: freshly created session reads supervised" "supervised" "$(session_state "$S")"
+tmux kill-session -t "=$S" 2>/dev/null
+check "153: a stale ledger row for a session that no longer exists is unknown, not supervised" \
+  "unknown" "$(session_state "$S")"
+
+# 153d. THE ACCEPTANCE TEST (as153-brief.md item 3, verbatim): break the
+# marker read and confirm it degrades to unsupervised, never to supervised.
+# Recreate the session (so tmux genuinely has it again, isolating this case
+# from 153c's drift scenario above) and adopt it normally first, so the ONLY
+# thing broken below is the read, not "there was never a row to find" --
+# 153a/153b already cover that shape.
+bash "$BOOT" --session "$S" --lanes 2 --agent bash >/dev/null 2>&1
+check "153: setup for the mutation case creates cleanly" "0" "$?"
+check "153: setup: freshly adopted session reads supervised before the mutation" \
+  "supervised" "$(session_state "$S")"
+# Corrupt the `sessions` table's SCHEMA, not the whole ledger file: renaming
+# its primary-key column means `Ledger.__init__` still constructs cleanly
+# (`CREATE TABLE IF NOT EXISTS` never touches a table that already exists),
+# so this exercises exactly one thing -- `session_marked_supervised`'s own
+# `SELECT ... WHERE session = ?` now raises `sqlite3.OperationalError: no
+# such column: session` -- the real shape an old ledger predating a future
+# schema change, or a hand-edited one, would take. A whole-file corruption
+# (garbage bytes, wrong permissions) would ALSO degrade safely, but would
+# fail earlier, in `Ledger.__init__` itself, and prove less about this
+# specific read.
+sqlite3 "$LEDGER_DIR/ledger.sqlite3" \
+  "ALTER TABLE sessions RENAME COLUMN session TO sess;" 2>/dev/null
+mutant_state="$(session_state "$S")"
+check "153: mutation confirmed -- the session genuinely still exists in tmux" \
+  "0" "$(tmux has-session -t "=$S" 2>/dev/null; echo $?)"
+if [ "$mutant_state" = "supervised" ]; then
+  bad "153: a broken marker read must never degrade to supervised" "got 'supervised' with a corrupted sessions table"
+else
+  ok "153: a broken marker read degrades to unsupervised, never to supervised (got '${mutant_state:-<blank/error>}')"
+fi
 cleanup
 
 # 8. --lanes must be a number; a typo must not be read as 0 lanes.

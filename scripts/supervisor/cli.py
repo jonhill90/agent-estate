@@ -301,6 +301,25 @@ def parser():
 
     sub.add_parser("delivered-open")
 
+    # agent-supervisor#153: the write side. `bootstrap-session.sh` is the
+    # only caller today -- called once, at the moment it creates a session,
+    # never for a session it merely --add-lanes'd into (that session was
+    # either already adopted, or predates this feature and stays unknown
+    # until someone decides otherwise; --add-lanes has no opinion on
+    # supervision, only on window count).
+    adopt_session_parser = sub.add_parser("adopt-session")
+    adopt_session_parser.add_argument("--session", required=True)
+    adopt_session_parser.add_argument("--source", default="bootstrap-session.sh")
+
+    # agent-supervisor#153: the read side, and the one three-state answer
+    # every caller (dispatch.sh, a future window-kill guard, agent-tui) is
+    # meant to use instead of re-deriving this from lanes.lane strings the
+    # way #153 measured drifting. Touches tmux (has-session) as well as the
+    # ledger on purpose -- see `session_state` below for why a ledger-only
+    # answer is not enough.
+    session_state_parser = sub.add_parser("session-state")
+    session_state_parser.add_argument("--session", required=True)
+
     sub.add_parser("status")
     return root
 
@@ -327,6 +346,46 @@ FREE_WINDOW_NAME_RE = re.compile(r"^free-[0-9]+$")
 # see `TmuxAdapter.HARNESS_OPTION` and `bootstrap-session.sh`, the two
 # writers.
 HARNESS_OPTION = TmuxAdapter.HARNESS_OPTION
+
+
+# agent-supervisor#153. Three states, and `unknown` collapses to the SAME
+# treatment as `unsupervised` in every caller -- this module deliberately
+# returns them as distinct strings rather than a bool, because a future
+# `supervisor release <session>` (issue #153's own vocabulary, not built
+# here) needs to tell "known not ours" apart from "never told either way";
+# nothing yet writes the former, so it is not reachable today, but the
+# three-way shape is set up so adding it later is additive, not a rename of
+# an existing state's meaning.
+def session_state(ledger, transport, *, session):
+    """supervised / unsupervised / unknown -- the one answer #153 exists for.
+
+    Two independent checks, both required, neither trusted alone:
+
+    * `transport.session_exists` -- does tmux actually have this session
+      right now. A stale ledger row for a session that is gone (#153
+      measured `agent-dotfiles` and `ad241repro-22535` exactly this way)
+      must never read as `supervised` -- there is nothing to act on, and
+      reporting one as actionable is worse than reporting nothing, so this
+      collapses straight to `unknown`, without even asking the ledger.
+    * `ledger.session_marked_supervised` -- did WE decide to adopt it. This
+      is the one-way ratchet: unless this call plainly returns True, the
+      result is `unknown`, never `supervised`. Caught broadly on purpose --
+      a locked ledger, a corrupt file, an old ledger missing the `sessions`
+      table (`session_marked_supervised` raising `sqlite3.OperationalError`
+      rather than returning) are all "the marker could not be read", and
+      #153's acceptance test is exactly this: break that read and confirm
+      the result is `unknown`, never `supervised`. A caller-side try/except
+      would work too, but every caller would have to remember it; failing
+      closed belongs here, once, where it cannot be forgotten by a future
+      caller that assumes a clean read.
+    """
+    if not transport.session_exists(session):
+        return "unknown"
+    try:
+        marked = ledger.session_marked_supervised(session)
+    except Exception:
+        return "unknown"
+    return "supervised" if marked else "unknown"
 
 
 def lane_free(ledger, transport, *, lane, target, window_name):
@@ -894,12 +953,22 @@ def main(argv=None):
         value = ledger.restore_plan()
     elif args.command == "delivered-open":
         value = {"tasks": ledger.list_delivered_open_tasks()}
+    elif args.command == "adopt-session":
+        value = ledger.adopt_session(args.session, source=args.source)
+    elif args.command == "session-state":
+        value = {"session": args.session, "state": session_state(ledger, adapter.transport, session=args.session)}
     elif args.command == "status":
         value = {
             "lanes": ledger.list_lanes(),
             "source_tasks": ledger.list_source_tasks(),
             "tasks": ledger.list_tasks(),
             "events": ledger.list_events(),
+            # agent-supervisor#153: raw ledger rows, not the tri-state read --
+            # `status` is the offline, ledger-only view every other section
+            # here already is (compare `lanes`, `source_tasks`); cross-
+            # checking against a live tmux server belongs to `session-state`,
+            # which takes a target and actually queries transport.
+            "sessions": ledger.list_sessions(),
         }
     else:
         raise AssertionError(args.command)
