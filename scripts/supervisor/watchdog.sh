@@ -734,21 +734,45 @@ check_source_task_sweep() {
     sweep_note "failed — rc=$rc: $(printf '%s' "$out" | tr '\n' ' ')"
     return 0
   fi
-  local summary
-  summary=$(printf '%s' "$out" | python3 -c '
+  # Review fix (PR #142): this formatter used to build its f-strings with
+  # backslash-escaped double quotes inside the `{...}` expression --
+  # `f"updated={len(d.get(\"updated\", []))} "` -- which is a SyntaxError on
+  # every CPython from 3.9 to 3.14, not a version-specific issue. `python3
+  # -c` therefore failed before running a single line, on every invocation,
+  # success or not. That would have been visible immediately except the next
+  # line redirected the formatter's stderr to /dev/null -- so a SUCCESSFUL
+  # sweep (the row really did flip OPEN -> CLOSED) still rendered "not
+  # parseable" in watchdog.status forever, and nothing short of reading the
+  # Python by eye would have caught it. Fixed two ways: the f-strings below
+  # hold no quote characters at all (values are computed into plain
+  # variables first, so there is nothing left to escape), and the
+  # formatter's stderr is now captured, not discarded -- a crash in the
+  # formatter itself surfaces as FORMATTER-CRASHED, distinct from the sweep's
+  # own report genuinely being unparseable JSON (a real, different outcome
+  # `reconcile_sources.py` can also produce).
+  local summary py_rc py_err py_err_file
+  py_err_file="$STATUS.sweep-fmt-err.$$"
+  summary=$(printf '%s' "$out" | "${SUPERVISOR_PYTHON:-python3}" -c '
 import json, sys
 try:
     d = json.load(sys.stdin)
 except Exception:
     print("unparseable report")
-else:
-    print(
-        f"updated={len(d.get(\"updated\", []))} "
-        f"unchanged={len(d.get(\"unchanged\", []))} "
-        f"unresolved={len(d.get(\"unresolved\", []))} "
-        f"errors={len(d.get(\"errors\", []))}"
-    )
-' 2>/dev/null)
+    sys.exit(0)
+updated = len(d.get("updated", []))
+unchanged = len(d.get("unchanged", []))
+unresolved = len(d.get("unresolved", []))
+errors = len(d.get("errors", []))
+print(f"updated={updated} unchanged={unchanged} unresolved={unresolved} errors={errors}")
+' 2>"$py_err_file")
+  py_rc=$?
+  py_err=$(cat "$py_err_file" 2>/dev/null)
+  rm -f "$py_err_file" 2>/dev/null
+  if [ "$py_rc" -ne 0 ]; then
+    log "SOURCE-SWEEP-FORMATTER-CRASHED rc=$py_rc: $py_err"
+    sweep_note "formatter crashed — rc=$py_rc: $(printf '%s' "$py_err" | tr '\n' ' ')"
+    return 0
+  fi
   [ -n "$summary" ] || summary="ran, output not parseable: $(printf '%s' "$out" | tr '\n' ' ')"
   log "SOURCE-SWEEP: $summary"
   sweep_note "$summary"

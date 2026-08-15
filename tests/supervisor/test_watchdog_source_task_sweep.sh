@@ -93,5 +93,81 @@ else
   fail=$((fail+1))
 fi
 
+# PR #142 review: check_source_task_sweep()'s summary formatter was invalid
+# Python (backslash-escaped quotes inside an f-string expression -- illegal
+# on every CPython 3.9-3.14), so it SyntaxErrored on every invocation and
+# `2>/dev/null` swallowed the evidence. A SUCCESSFUL sweep -- this fixture's
+# sweep, which really did update one row -- still rendered as "not
+# parseable". The prior assertion above (`grep -q '^sweep:'`) is exactly the
+# shape of test the reviewer warned about: it passes whether the summary
+# renders real counts or the swallowed-crash fallback text, so it could not
+# have caught this. This one reads the actual line and requires real counts.
+sweep_line=$(grep '^sweep:' "$D/st" 2>/dev/null)
+echo "sweep line: $sweep_line"
+if [[ "$sweep_line" == *"updated=1"*"unchanged=0"*"unresolved=0"*"errors=0"* ]]; then
+  echo "  ok   a successful sweep renders its real counts, not a swallowed-crash fallback"
+  pass=$((pass+1))
+else
+  echo "  FAIL sweep succeeded (row went OPEN -> CLOSED above) but its summary did not render counts: $sweep_line"
+  fail=$((fail+1))
+fi
+
+# PR #142 review, point 2: the lesson is the swallowed stderr, not just the
+# quoting -- a formatter that CANNOT parse its input is a different outcome
+# from one that BLEW UP, and watchdog.status must be able to tell them
+# apart. Force the formatter subprocess itself to crash (independent of
+# whether the sweep's own JSON is well-formed) via a stub interpreter, and
+# assert the crash is visible and labeled distinctly, not folded into the
+# generic "not parseable" text a swallowed SyntaxError produces.
+D2=$(mktemp -d)
+python3 - "$D2" "$SUPERVISOR_DIR" <<'PY'
+import sys
+state_dir, supervisor_dir = sys.argv[1], sys.argv[2]
+sys.path.insert(0, supervisor_dir)
+from core import Ledger
+
+ledger = Ledger(state_dir, clock=lambda: 1_000)
+ledger.register_lane(
+    lane="free-1", pane_id="%1", nonce="nonce-1", harness="claude",
+    repo="/repo/free-1", server_id="server-a", session_id="$1", command="claude",
+)
+ledger.record_dispatch(
+    lane="free-1", pane_id="%1", nonce="nonce-1", harness="claude",
+    repo="/repo/free-1", server_id="server-a", session_id="$1", command="claude",
+    task_id="as133-sweep-target", source_kind="issue",
+    source_url="https://github.com/jonhill90/agent-supervisor/issues/133",
+    source_ref="133", summary="issue #133", source_state="OPEN",
+    evidence=["claimed by dispatch.sh for lane free-1", "issues: 133"],
+    status_marker=None,
+)
+PY
+
+SUPERVISOR_PATH="$GH_STUB_DIR:$STUBS:/usr/bin:/bin" \
+SUPERVISOR_PYTHON="$GH_STUB_DIR/python3-crash" \
+STUB_PANE_STATE=busy \
+STUB_GH_ISSUE_STATE="133=CLOSED" \
+SUPERVISOR_STATE="$D2" SUPERVISOR_STATUS="$D2/st" SUPERVISOR_LOG="$D2/lg" \
+SUPERVISOR_STAMP="$D2/stamp" SUPERVISOR_HISTORY="$D2/hist" NOTIFY_ENV="$D2/none.env" \
+SLEEPCHECK_DIR="$D2/transcripts" \
+bash "$WATCHDOG" >/dev/null 2>"$D2/err"
+
+crash_sweep_line=$(grep '^sweep:' "$D2/st" 2>/dev/null)
+echo "crash-scenario sweep line: $crash_sweep_line"
+if [[ "$crash_sweep_line" == *"crash"* ]] && [[ "$crash_sweep_line" != *"not parseable"* ]]; then
+  echo "  ok   a formatter crash is labeled distinctly from an unparseable report"
+  pass=$((pass+1))
+else
+  echo "  FAIL formatter crash was not surfaced distinctly: $crash_sweep_line"
+  fail=$((fail+1))
+fi
+if grep -q "simulated SyntaxError in the formatter" "$D2/lg" 2>/dev/null; then
+  echo "  ok   the formatter's own stderr reached the watchdog log, not /dev/null"
+  pass=$((pass+1))
+else
+  echo "  FAIL the formatter's stderr did not reach the log: $(cat "$D2/lg" 2>/dev/null)"
+  fail=$((fail+1))
+fi
+rm -rf "$D2"
+
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
