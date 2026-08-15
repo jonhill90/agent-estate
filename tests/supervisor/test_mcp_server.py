@@ -114,9 +114,9 @@ class ToolListTest(unittest.TestCase):
             tool_definitions(SupervisorView([MutatingSource()]))
         self.assertIn("dispatch", str(caught.exception))
 
-    def test_the_real_surface_is_four_read_tools(self):
+    def test_the_real_surface_is_five_read_tools(self):
         tools = tool_definitions(SupervisorView())
-        self.assertEqual(["lanes", "digest", "ledger", "events"], [tool["name"] for tool in tools])
+        self.assertEqual(["lanes", "sessions", "digest", "ledger", "events"], [tool["name"] for tool in tools])
 
 
 class ToolCallTest(unittest.TestCase):
@@ -216,7 +216,8 @@ class LiveSurfaceTest(unittest.TestCase):
         self.assertEqual(2, len(frames), process.stdout)
         self.assertEqual("supervisor", frames[0]["result"]["serverInfo"]["name"])
         self.assertEqual(
-            ["lanes", "digest", "ledger", "events"], [tool["name"] for tool in frames[1]["result"]["tools"]]
+            ["lanes", "sessions", "digest", "ledger", "events"],
+            [tool["name"] for tool in frames[1]["result"]["tools"]],
         )
 
     def test_a_missing_session_surfaces_as_an_error_not_an_empty_lane_list(self):
@@ -239,7 +240,7 @@ class LiveSurfaceTest(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(0, process.returncode, process.stderr)
-        self.assertEqual(4, len(json.loads(process.stdout)["tools"]))
+        self.assertEqual(5, len(json.loads(process.stdout)["tools"]))
 
 
 if __name__ == "__main__":
