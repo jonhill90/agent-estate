@@ -139,3 +139,50 @@ HARNESS_MENU_TAIL=6
 # mechanics; widening it to match a real prompt requires a real capture
 # first, same rule as every marker above.
 HARNESS_TEXT_PROMPT_RE='Type the [a-z]'
+
+# agent-supervisor#115: which model this pane is ACTUALLY running, not what
+# it was dispatched with or launched under -- see the issue for why a
+# process-tree read (`pgrep -fl claude`) cannot answer this: the visible
+# child of a busy pane is whatever the turn spawned (`npm exec
+# playwright-mcp`, `caffeinate`), not the harness itself, and even a
+# correctly-scoped read of the harness's OWN argv only proves what it was
+# launched with -- a live `/model` switch changes what is running without
+# touching argv at all. The self-report has to come from the pane's own
+# screen.
+#
+# Measured live against this estate's real session on 2026-08-15, across
+# eight lanes mid-conversation (`agent-supervisor:3` through `:10`) plus the
+# Director's own pane: NONE of Claude Code v2.1.220's busy/idle/blocked
+# footer chrome names the model at all. `grep -oiE "opus|sonnet|haiku"`
+# against the full visible screen -- the "obvious" read #115's own issue
+# proposes -- found exactly one match across all nine panes, and it was a
+# FALSE ONE: a window's own conversation-title bar, "Setup Opus orchestrator
+# for agent-dotfiles architecture", matched `Opus` because that word was in
+# the TASK NAME, not the model. A bare substring match on the model family
+# name is not safe at all -- it fires on prose the agent or a human wrote
+# about a model, indistinguishable from the harness reporting its own.
+#
+# The one place the model genuinely IS self-reported, also captured live
+# (`agent-tui:1`, the welcome screen before any turn has run):
+#
+#   ╭─── Claude Code v2.1.220 ──────────────────────────────...──────────╮
+#   │                  Welcome back Jon!                 │ Tips ...     │
+#   │     Sonnet 5 with medium effort · Claude Max ·     │ ...          │
+#
+# -- "<Family> <version> with <effort> effort · <plan> ·", inside the
+# startup splash. This is the ONLY genuine self-report found: once a
+# conversation is underway the splash scrolls off (confirmed live: a 50000-
+# line `capture-pane -S -50000` against a long-running lane found no trace
+# of it) and nothing later in the session repeats it -- Claude Code does not
+# carry the model in its ordinary footer the way Codex's `<model> <effort> ·
+# <cwd>` last line or Copilot's trailing `Claude Sonnet 5` do (see those
+# harnesses' own files). So this regex matches ONLY the freshly-launched
+# case -- which is exactly the shape #115's own incident needs: a lane
+# respawned without `--model sonnet` shows its wrong model on this splash
+# for as long as it survives on screen, before the conversation scrolls it
+# away. Anywhere else, it will not match, and the caller must read that as
+# `unknown`, not as "must be Sonnet" -- silently assuming compliance is the
+# exact failure #115 is filed over. Widening this beyond what is captured
+# above (e.g. dropping "with <effort> effort" to match a shape never
+# observed) is a guess, not a fix, per every other marker in this file.
+HARNESS_MODEL_RE='(Opus|Sonnet|Haiku)[[:space:]]+[0-9]+(\.[0-9]+)?([[:space:]]+with[[:space:]]+[a-z]+[[:space:]]+effort)?[[:space:]]*·'
