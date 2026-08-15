@@ -77,16 +77,30 @@ under an env override that was never persisted (agent-tui itself, measured
 while building this) still shows up without editing a flag.
 
 **5a shipped: the left rail.** `cmd/agent-tui` renders a left-anchored
-navigation rail (~28 columns) driven entirely by the supervisor's `lanes` MCP
-tool — no second reader of tmux, no ledger access. Every state `lanes.sh`
+navigation rail (~28 columns) driven entirely by the supervisor's MCP
+surface — no second reader of tmux, no ledger access. Every state `lanes.sh`
 emits animates: a spinner on `busy`, a settled dot on `free`, glitch/pulse
 motion on `hung`/`dead`/`stale`/`broken` so they read as wrong at a glance
 instead of just printing the word. See `internal/lane/glyph.go` for the full
 state→glyph map and `internal/rail/model.go` for the Bubble Tea program.
 
+**13 shipped: every tmux session, not one.** The rail regressed to a
+single-session list before anyone diffed it against the retired Python
+prototype — see [agent-tui#13](https://github.com/jonhill90/agent-tui/issues/13).
+It now reads the supervisor's `sessions` tool (`internal/rail.NewMultiSession`)
+and renders every tmux session grouped, `director` included and styled
+distinctly (`★`, gold accent — "something to make it special"), with an
+interim `supervised`/`unsupervised` marker per session (real ledger
+evidence, not agent-supervisor#153's own marker, which had not landed when
+this shipped — see `sessions.sh` and `lane.Session`'s doc comments for
+exactly what it proves and doesn't). Selection (`j`/`k`) spans every
+session's lanes as one list; `g` cycles the grouping style
+(flat-with-headers / indented tree — collapsible is a named gap, not
+shipped). `-board` is unaffected: it still reads `lanes` for one session.
+
 ```
 go build -o agent-tui ./cmd/agent-tui
-AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./agent-tui -session <tmux-session>
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./agent-tui
 ```
 
 It spawns `python3 scripts/supervisor/mcp_server.py` from the given

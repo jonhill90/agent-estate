@@ -44,6 +44,15 @@ const costRefreshInterval = 5 * time.Minute
 // an instrument that cannot see must not look like a healthy empty estate).
 type Fetcher func() ([]lane.Lane, error)
 
+// SessionsFetcher retrieves lane state grouped by every tmux session --
+// agent-tui#13, wrapping the supervisor's "sessions" MCP tool (itself
+// sessions.sh wrapping lanes.sh once per session; see that script's header
+// for why lanes.sh alone cannot answer this). Additive to Fetcher above,
+// which stays exactly as it is: board.go's single-session read and every
+// pre-#13 rail test still build a Model with New/NewWithCost and never see
+// this type. NewMultiSession is the only constructor that sets it.
+type SessionsFetcher func() ([]lane.Session, error)
+
 type tickMsg time.Time
 type refreshMsg time.Time
 type costRefreshMsg time.Time
@@ -51,6 +60,11 @@ type costRefreshMsg time.Time
 type fetchResultMsg struct {
 	lanes []lane.Lane
 	err   error
+}
+
+type sessionsFetchResultMsg struct {
+	sessions []lane.Session
+	err      error
 }
 
 type costFetchResultMsg struct {
@@ -89,6 +103,38 @@ type Model struct {
 
 	costSnap    cost.Snapshot
 	costFetched time.Time
+
+	// -- agent-tui#13: multi-session grouping. All nil/zero for a Model
+	// built with New/NewWithCost, so nothing below changes their behavior;
+	// see NewMultiSession.
+	sessionsFetch   SessionsFetcher
+	sessions        []lane.Session
+	sessionsErr     error
+	sessionsFetched time.Time
+	// lanesFetch is agent-tui#18's fix for at#13's own blocking finding: a
+	// Model built with NewMultiSession that has no fallback would render
+	// nothing at all -- "! unavailable" with no data -- for as long as the
+	// supervisor side (agent-supervisor#158, the "sessions" tool) lags
+	// behind this program, which is the normal state until #158 merges and
+	// stays true for anyone running an older supervisor checkout after
+	// that. When set, a failed sessions fetch falls back to this single-
+	// session Fetcher (the same "lanes" tool board.go already reads) and
+	// View() renders a visible note above it -- never a silent narrowing
+	// from "every session" to "one", and never a blank rail. Reuses
+	// fetch/fetchResultMsg/m.lanes/m.fetchErr below rather than a parallel
+	// set of fields, so the fallback render is exactly board.go's own flat
+	// single-session view, not a second implementation of it.
+	lanesFetch Fetcher
+	// directorSession is the tmux session name styled distinctly (Jon:
+	// "something to make it special") -- it is DATA passed in by
+	// cmd/agent-tui, not a literal compared here, so a rename or a second
+	// long-lived agent session is a flag change, not a code change.
+	directorSession string
+	// groupStyle indexes groupStyles (see sessions_view.go) -- the picker
+	// rule agent-tui#13 asks for applied to grouping the same way glyphSet
+	// applies it to glyphs: every candidate is real, numbered, and swapped
+	// live against the same on-screen data, never decided silently.
+	groupStyle int
 }
 
 // New builds a Model bound to the given fetch function, with no cost line
@@ -109,8 +155,52 @@ func NewWithCost(fetch Fetcher, costFetch cost.Fetcher) Model {
 	return m
 }
 
+// NewMultiSession builds a Model that renders lanes grouped by tmux session
+// (agent-tui#13) instead of one session's flat list -- cmd/agent-tui's
+// default screen, replacing what New/NewWithCost rendered before #13.
+// fetch is left nil deliberately: this Model reads sessionsFetch (and,
+// on failure, lanesFetch) only, and Init/Update below never call a nil
+// fetch because of that, not because of a special case for this
+// constructor.
+//
+// lanesFetch is at#18's degrade-gracefully fallback: pass the same "lanes"
+// Fetcher board.go uses, and a sessions fetch that fails (agent-tui#18 --
+// most commonly agent-supervisor#158's "sessions" tool not existing on an
+// older or not-yet-updated supervisor checkout) falls back to rendering
+// that one session instead of an empty/error-only rail, with a visible
+// note that the multi-session view needs the supervisor half. Pass nil to
+// get at#13's original behavior (an unavailable sessions fetch renders
+// only "! unavailable", no fallback) -- every pre-#18 rail test still
+// builds Models this way.
+//
+// directorSession names the one session styled distinctly (Jon: "something
+// to make it special") -- pass "" to disable that styling entirely rather
+// than have it silently match nothing.
+func NewMultiSession(sessionsFetch SessionsFetcher, lanesFetch Fetcher, costFetch cost.Fetcher, directorSession string) Model {
+	return Model{
+		fetch:           nil,
+		sessionsFetch:   sessionsFetch,
+		lanesFetch:      lanesFetch,
+		costFetch:       costFetch,
+		directorSession: directorSession,
+		width:           RailWidth,
+		height:          24,
+	}
+}
+
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{tickCmd(), refreshCmd(), doFetch(m.fetch)}
+	cmds := []tea.Cmd{tickCmd(), refreshCmd()}
+	// Exactly one of fetch/sessionsFetch is set on any Model this package
+	// hands out (New/NewWithCost set fetch only; NewMultiSession sets
+	// sessionsFetch only) -- both are guarded here anyway rather than
+	// assumed, so a Model built by hand (every existing rail test) with
+	// neither set still starts cleanly instead of calling a nil func.
+	if m.fetch != nil {
+		cmds = append(cmds, doFetch(m.fetch))
+	}
+	if m.sessionsFetch != nil {
+		cmds = append(cmds, doSessionsFetch(m.sessionsFetch))
+	}
 	if m.costFetch != nil {
 		cmds = append(cmds, costRefreshCmd(), doCostFetch(m.costFetch))
 	}
@@ -143,6 +233,13 @@ func doCostFetch(fetch cost.Fetcher) tea.Cmd {
 	}
 }
 
+func doSessionsFetch(fetch SessionsFetcher) tea.Cmd {
+	return func() tea.Msg {
+		sessions, err := fetch()
+		return sessionsFetchResultMsg{sessions: sessions, err: err}
+	}
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -155,17 +252,33 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		case "up", "k":
+			// Selection spans every session's lanes as one ordered list
+			// (agent-tui#13 requirement 4: "up/down should move across the
+			// whole tree") -- rowCount is that list's length regardless of
+			// which grouping variant is currently drawing headers between
+			// sessions; see sessionsFlat in sessions.go.
 			if m.selected > 0 {
 				m.selected--
 			}
 			return m, nil
 		case "down", "j":
-			if m.selected < len(m.lanes)-1 {
+			if m.selected < m.rowCount()-1 {
 				m.selected++
 			}
 			return m, nil
 		case "r":
-			return m, doFetch(m.fetch)
+			return m, m.doFetchAll()
+		case "g":
+			// Cycles the grouping-style picker (flat-with-headers /
+			// indented-tree) the same live-against-real-data way glyphSet
+			// does for glyphs -- agent-tui#13 requirement 5, applied only
+			// when there is something to group: a Model built with
+			// New/NewWithCost has no sessions and ignores this key, exactly
+			// as it ignored an unmapped key before #13.
+			if m.sessionsFetch != nil && len(groupStyles) > 0 {
+				m.groupStyle = (m.groupStyle + 1) % len(groupStyles)
+			}
+			return m, nil
 		}
 		// Number keys select a glyph set directly, live, against whatever
 		// is already on screen -- the whole picker is this one branch plus
@@ -181,7 +294,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case refreshMsg:
-		return m, tea.Batch(refreshCmd(), doFetch(m.fetch))
+		return m, tea.Batch(refreshCmd(), m.doFetchAll())
 
 	case fetchResultMsg:
 		m.fetchErr = msg.err
@@ -191,6 +304,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.selected >= len(m.lanes) {
 				m.selected = max(0, len(m.lanes)-1)
 			}
+		}
+		return m, nil
+
+	case sessionsFetchResultMsg:
+		// Same discipline as fetchResultMsg: a failed fetch leaves the prior
+		// (possibly stale) sessions on screen alongside a visible error --
+		// see View()'s "! unavailable" branch -- rather than clearing them
+		// to a blank rail a reader could mistake for a quiet estate.
+		m.sessionsErr = msg.err
+		if msg.err == nil {
+			m.sessions = msg.sessions
+			m.sessionsFetched = time.Now()
+			if n := m.rowCount(); m.selected >= n {
+				m.selected = max(0, n-1)
+			}
+			return m, nil
+		}
+		// at#18: the sessions fetch just failed. If a fallback Fetcher was
+		// wired in (NewMultiSession's lanesFetch), go get the one session it
+		// can still read RIGHT NOW rather than wait for the next
+		// refreshInterval tick -- the whole point is not to sit on a blank/
+		// error-only rail for up to refreshInterval while a perfectly
+		// readable single session goes unfetched.
+		if m.lanesFetch != nil {
+			return m, doFetch(m.lanesFetch)
 		}
 		return m, nil
 
@@ -218,6 +356,52 @@ func max(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// rowCount is the length of the selectable list "up"/"down" move through --
+// every session's lanes, in display order, headers excluded (a header is
+// not a lane and enter has nothing to do with it). A Model built with
+// New/NewWithCost has no sessions, so this falls back to the flat len(lanes)
+// it always used, unchanged. m.fallbackActive (at#18) selects the same flat
+// len(lanes) too: while the sessions fetch is down, selection must move
+// through what View() is actually drawing (the fallback single session),
+// not a cross-session list that has nothing behind it right now.
+func (m Model) rowCount() int {
+	if m.sessionsFetch != nil && !m.fallbackActive() {
+		return len(m.sessionsFlat())
+	}
+	return len(m.lanes)
+}
+
+// fallbackActive reports whether View()/rowCount() should be drawing at#18's
+// single-session fallback instead of the grouped multi-session body: the
+// sessions fetch has failed AND a fallback Fetcher was wired in via
+// NewMultiSession. A Model with no lanesFetch (every pre-#18 test) never
+// activates it -- a failed sessions fetch there still renders exactly what
+// it always did, "! unavailable" and nothing else.
+func (m Model) fallbackActive() bool {
+	return m.sessionsErr != nil && m.lanesFetch != nil
+}
+
+// doFetchAll re-issues whichever fetch(es) this Model was built with. "r"
+// and the periodic refreshMsg both go through this so neither has to know
+// which constructor built the Model.
+func (m Model) doFetchAll() tea.Cmd {
+	var cmds []tea.Cmd
+	if m.fetch != nil {
+		cmds = append(cmds, doFetch(m.fetch))
+	}
+	if m.sessionsFetch != nil {
+		cmds = append(cmds, doSessionsFetch(m.sessionsFetch))
+	}
+	// at#18: while the fallback is on screen, "r" (and the periodic
+	// refreshMsg, which also calls this) must refresh what is actually
+	// being shown, not just retry the sessions fetch and leave the visible
+	// fallback data to go stale until that retry itself fails again.
+	if m.fallbackActive() {
+		cmds = append(cmds, doFetch(m.lanesFetch))
+	}
+	return tea.Batch(cmds...)
 }
 
 // digitKey reports whether s is a single ASCII digit key and, if so, its
@@ -265,69 +449,20 @@ func (m Model) View() string {
 	var b []string
 	b = append(b, titleStyle.Width(innerWidth).Render("lanes"))
 
-	// A fetch failure is the load-bearing case (mirrors
-	// supervisor_view.SupervisorUnavailable): show it, never render a blank
-	// or stale-looking rail as if the estate were quietly idle.
-	if m.fetchErr != nil {
-		b = append(b, errStyle.Width(innerWidth).Render("! unavailable"))
-		b = append(b, dimStyle.Width(innerWidth).Render(truncate(m.fetchErr.Error(), innerWidth)))
-	} else if len(m.lanes) == 0 {
-		b = append(b, dimStyle.Width(innerWidth).Render("(no lanes)"))
-	}
-
-	// name budget: innerWidth minus the row's own Padding(0,1) (2 cols)
-	// minus the glyph column and the single space after it (2 cols). Both
-	// must be subtracted -- reserving only for the glyph+space and not for
-	// the row's own padding let a name run one cell past the available
-	// width and wrap onto a second line with no glyph or indent (as#109's
-	// second defect).
-	nameWidth := innerWidth - 4
-
-	for i, l := range m.lanes {
-		style := lane.StyleFor(set, l.State)
-		glyph := lane.Frame(set, l.State, m.tick)
-		name := truncate(l.Name, nameWidth)
-
-		var line string
-		if i == m.selected {
-			// Glyph and the rest of the row are rendered as two separately
-			// closed ANSI spans. A single Render() over a string that
-			// already contains the glyph's own embedded reset code would
-			// have that inner reset wipe the outer selection background
-			// for everything after it -- measured: the trailing " name"
-			// text came out with no background at all. Giving " "+name
-			// its own Background()-carrying span keeps the highlight
-			// unbroken across the whole row.
-			g := lipgloss.NewStyle().Foreground(lipgloss.Color(style.Color)).Background(selectionBackground).Render(glyph)
-			rest := lipgloss.NewStyle().Background(selectionBackground).Render(" " + name)
-			line = g + rest
-			b = append(b, selRowStyle.Width(innerWidth).Render(line))
-		} else {
-			g := lipgloss.NewStyle().Foreground(lipgloss.Color(style.Color)).Render(glyph)
-			line = fmt.Sprintf("%s %s", g, name)
-			b = append(b, rowStyle.Width(innerWidth).Render(line))
-		}
-	}
-
-	// The legend: every state must be nameable (issue #107 hard-acceptance
-	// item 3). This line always shows the SELECTED lane's real state word,
-	// verbatim, so a glyph is never the only source of truth on screen --
-	// the same discipline laneview/text.sh applies by printing the state
-	// name beside its glyph on every row.
-	b = append(b, dimStyle.Width(innerWidth).Render(""))
-	if len(m.lanes) > 0 && m.selected < len(m.lanes) {
-		sel := m.lanes[m.selected]
-		style := lane.StyleFor(set, sel.State)
-		label := style.Label
-		if label == "" {
-			label = sel.State // Unmapped: still print the raw word, never blank
-		}
-		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("state: %s", label)))
-		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("idle:  %ds", sel.IdleSeconds)))
-	}
-	if !m.lastFetched.IsZero() {
-		age := time.Since(m.lastFetched).Round(time.Second)
-		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("age:   %s", age)))
+	// agent-tui#13: a Model built with NewMultiSession renders every
+	// session, grouped; one built with New/NewWithCost (board.go, every
+	// pre-#13 test) renders the flat single-session list exactly as before
+	// -- see sessions.go for the grouped path. at#18: a NewMultiSession
+	// Model whose sessions fetch has failed AND has a fallback Fetcher
+	// wired renders that fallback instead -- see fallbackActive.
+	switch {
+	case m.sessionsFetch != nil && m.fallbackActive():
+		b = append(b, m.renderFallbackNote(innerWidth)...)
+		b = append(b, m.renderFlatBody(innerWidth, set)...)
+	case m.sessionsFetch != nil:
+		b = append(b, m.renderSessionsBody(innerWidth)...)
+	default:
+		b = append(b, m.renderFlatBody(innerWidth, set)...)
 	}
 
 	// The picker itself: which glyph set is live, and how to change it.
@@ -337,6 +472,14 @@ func (m Model) View() string {
 	b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("glyphs %d/%d: %s", m.glyphSet+1, len(lane.Variants), set.Name)))
 	b = append(b, legendStyle.Width(innerWidth).Render(truncate(set.Description, innerWidth)))
 	b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("[1-%d] to switch", len(lane.Variants))))
+
+	// The grouping-style picker (agent-tui#13 requirement 5) -- only shown
+	// when there is grouping to pick between at all.
+	if m.sessionsFetch != nil && len(groupStyles) > 0 {
+		gs := groupStyles[m.groupStyle]
+		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("group %d/%d: %s", m.groupStyle+1, len(groupStyles), gs.Name)))
+		b = append(b, legendStyle.Width(innerWidth).Render("[g] to switch"))
+	}
 
 	// The cost line (agent-tui#4): glanceable, always in the rail, no flag
 	// or command needed to see it. Only present when cmd/agent-tui wired a
@@ -356,6 +499,95 @@ func (m Model) View() string {
 
 	content := lipgloss.JoinVertical(lipgloss.Left, b...)
 	return borderStyle.Height(m.height - 1).Render(content)
+}
+
+// renderFallbackNote is at#18's visible note: a NewMultiSession Model whose
+// sessions fetch failed must never quietly narrow from "every session" to
+// "one" -- the reviewer's own reproduction of this PR's original defect was
+// exactly that narrowing going all the way to zero and nothing on screen
+// saying why. Shown above renderFlatBody's single-session render, never in
+// place of it -- the one session that IS readable must still show.
+func (m Model) renderFallbackNote(innerWidth int) []string {
+	return []string{
+		errStyle.Width(innerWidth).Render(truncate("! multi-session unavailable", innerWidth)),
+		dimStyle.Width(innerWidth).Render(truncate("this session only:", innerWidth)),
+		dimStyle.Width(innerWidth).Render(truncate("needs agent-supervisor#158", innerWidth)),
+		dimStyle.Width(innerWidth).Render(truncate(m.sessionsErr.Error(), innerWidth)),
+	}
+}
+
+// renderFlatBody is the single-session list every pre-#13 rail render used,
+// extracted unchanged so at#18's fallback path (renderFallbackNote above)
+// and the plain New/NewWithCost path share exactly one implementation of it
+// instead of two that could drift apart.
+func (m Model) renderFlatBody(innerWidth int, set lane.GlyphSet) []string {
+	var b []string
+
+	// A fetch failure is the load-bearing case (mirrors
+	// supervisor_view.SupervisorUnavailable): show it, never render a
+	// blank or stale-looking rail as if the estate were quietly idle.
+	if m.fetchErr != nil {
+		b = append(b, errStyle.Width(innerWidth).Render("! unavailable"))
+		b = append(b, dimStyle.Width(innerWidth).Render(truncate(m.fetchErr.Error(), innerWidth)))
+	} else if len(m.lanes) == 0 {
+		b = append(b, dimStyle.Width(innerWidth).Render("(no lanes)"))
+	}
+
+	// name budget: innerWidth minus the row's own Padding(0,1) (2 cols)
+	// minus the glyph column and the single space after it (2 cols).
+	// Both must be subtracted -- reserving only for the glyph+space and
+	// not for the row's own padding let a name run one cell past the
+	// available width and wrap onto a second line with no glyph or
+	// indent (as#109's second defect).
+	nameWidth := innerWidth - 4
+
+	for i, l := range m.lanes {
+		style := lane.StyleFor(set, l.State)
+		glyph := lane.Frame(set, l.State, m.tick)
+		name := truncate(l.Name, nameWidth)
+
+		var line string
+		if i == m.selected {
+			// Glyph and the rest of the row are rendered as two
+			// separately closed ANSI spans. A single Render() over a
+			// string that already contains the glyph's own embedded
+			// reset code would have that inner reset wipe the outer
+			// selection background for everything after it -- measured:
+			// the trailing " name" text came out with no background at
+			// all. Giving " "+name its own Background()-carrying span
+			// keeps the highlight unbroken across the whole row.
+			g := lipgloss.NewStyle().Foreground(lipgloss.Color(style.Color)).Background(selectionBackground).Render(glyph)
+			rest := lipgloss.NewStyle().Background(selectionBackground).Render(" " + name)
+			line = g + rest
+			b = append(b, selRowStyle.Width(innerWidth).Render(line))
+		} else {
+			g := lipgloss.NewStyle().Foreground(lipgloss.Color(style.Color)).Render(glyph)
+			line = fmt.Sprintf("%s %s", g, name)
+			b = append(b, rowStyle.Width(innerWidth).Render(line))
+		}
+	}
+
+	// The legend: every state must be nameable (issue #107
+	// hard-acceptance item 3). This line always shows the SELECTED
+	// lane's real state word, verbatim, so a glyph is never the only
+	// source of truth on screen -- the same discipline laneview/text.sh
+	// applies by printing the state name beside its glyph on every row.
+	b = append(b, dimStyle.Width(innerWidth).Render(""))
+	if len(m.lanes) > 0 && m.selected < len(m.lanes) {
+		sel := m.lanes[m.selected]
+		style := lane.StyleFor(set, sel.State)
+		label := style.Label
+		if label == "" {
+			label = sel.State // Unmapped: still print the raw word, never blank
+		}
+		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("state: %s", label)))
+		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("idle:  %ds", sel.IdleSeconds)))
+	}
+	if !m.lastFetched.IsZero() {
+		age := time.Since(m.lastFetched).Round(time.Second)
+		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("age:   %s", age)))
+	}
+	return b
 }
 
 func truncate(s string, n int) string {

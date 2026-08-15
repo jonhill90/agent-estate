@@ -1,9 +1,11 @@
 // agent-tui is a left-anchored navigation rail over agent-supervisor's lane
-// state. It reads exactly one surface -- the supervisor's "lanes" MCP tool,
-// backed by lanes.sh --json -- and renders nothing tmux itself would not
-// already show a human who ran that command. It never reads tmux directly
-// and never writes to the ledger or dispatches anything: this is a viewer,
-// same discipline as scripts/supervisor/laneview/ in agent-supervisor.
+// state. It reads the supervisor's MCP surface -- "sessions" (agent-tui#13,
+// every tmux session grouped) for the rail, "lanes" (one session) for
+// -board -- backed by sessions.sh/lanes.sh --json, and renders nothing
+// tmux itself would not already show a human who ran those commands. It
+// never reads tmux directly and never writes to the ledger or dispatches
+// anything: this is a viewer, same discipline as
+// scripts/supervisor/laneview/ in agent-supervisor.
 package main
 
 import (
@@ -30,8 +32,14 @@ func main() {
 			"path to an agent-supervisor checkout (contains scripts/supervisor/mcp_server.py). "+
 				"Defaults to $AGENT_SUPERVISOR_REPO.")
 		python  = flag.String("python", envOr("AGENT_TUI_PYTHON", "python3"), "python interpreter to run mcp_server.py with")
-		session = flag.String("session", os.Getenv("AGENT_SUPERVISOR_SESSION"), "tmux session to inspect; empty uses the supervisor's default")
-		mcpCmd  = flag.String("mcp-cmd", os.Getenv("AGENT_TUI_MCP_CMD"),
+		session = flag.String("session", os.Getenv("AGENT_SUPERVISOR_SESSION"), "tmux session to inspect; empty uses the supervisor's default. "+
+			"Only affects -board's single-session lane read -- the rail (agent-tui#13) reads every session via the "+
+			"supervisor's \"sessions\" tool and ignores this flag.")
+		directorSession = flag.String("director-session", envOr("AGENT_TUI_DIRECTOR_SESSION", "director"),
+			"tmux session name styled distinctly in the rail (agent-tui#13 -- \"it should look a bit different, "+
+				"something to make it special\"). Set to \"\" to disable the distinct styling entirely rather than "+
+				"have it silently match nothing.")
+		mcpCmd = flag.String("mcp-cmd", os.Getenv("AGENT_TUI_MCP_CMD"),
 			"full override command line for the MCP server, e.g. a remote SSH hop. Takes precedence over -supervisor-repo.")
 		showBoard = flag.Bool("board", false, "show the task board (agent-tui#6) instead of the rail -- a separate screen, "+
 			"never a rail restyle. Read-only: derives its columns fresh on every fetch, never stores one.")
@@ -124,15 +132,38 @@ func main() {
 		return lane.Decode(text)
 	}
 
+	// sessionsFetch is agent-tui#13's fix for the actual regression: "lanes"
+	// (above) is single-session BY CONSTRUCTION -- see agent-supervisor's
+	// lanes.sh header -- so the rail now reads "sessions" instead, which
+	// answers for every tmux session sessions.sh can see. This program
+	// still never enumerates or shells out to tmux itself (agent-tui#14):
+	// it calls one more MCP tool, nothing more.
+	sessionsFetch := func() ([]lane.Session, error) {
+		text, err := client.CallTool("sessions", map[string]any{})
+		if err != nil {
+			return nil, err
+		}
+		return lane.DecodeSessions(text)
+	}
+
 	var p *tea.Program
 	if *showBoard {
 		boardFetch := buildBoardFetch(*ledger, *ghBin, *sqliteBin, *repositories, lanesFetch)
 		p = tea.NewProgram(board.New(boardFetch), tea.WithAltScreen())
 	} else {
-		// NewWithCost, not New: the rail is where agent-tui#4's "glanceable,
-		// always there, no command to run" panel actually has to live --
-		// see internal/rail.Model's costFetch doc comment.
-		p = tea.NewProgram(rail.NewWithCost(lanesFetch, costFetch), tea.WithAltScreen())
+		// NewMultiSession, not NewWithCost: agent-tui#13 is the regression
+		// that shipped a rail showing one session's lanes when six sessions
+		// (including `director`) exist. See internal/rail.Model's
+		// sessionsFetch doc comment for why this is additive rather than a
+		// change to what NewWithCost itself does (board.go's single-session
+		// read is untouched). lanesFetch is at#18's fallback: agent-tui#13
+		// alone had no way to render anything at all if the supervisor's
+		// "sessions" tool (agent-supervisor#158) was not yet available --
+		// the reviewer reproduced exactly that against a real, un-patched
+		// supervisor checkout. Passing lanesFetch here means that case
+		// degrades to the old single-session rail (with a visible note)
+		// instead of going blind.
+		p = tea.NewProgram(rail.NewMultiSession(sessionsFetch, lanesFetch, costFetch, *directorSession), tea.WithAltScreen())
 	}
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "agent-tui:", err)
