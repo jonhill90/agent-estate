@@ -25,13 +25,19 @@ class FakeRunner:
         self.calls = []
 
     def __call__(self, command):
+        # agent-supervisor#144: reconcile_sources.py now speaks REST
+        # (`gh api --paginate repos/OWNER/REPO/issues|pulls?state=all&...`),
+        # not GraphQL (`gh issue list`/`gh pr list`) -- parsed back out of
+        # the endpoint path rather than off `--repo`/verb flags that no
+        # longer exist.
         self.calls.append(command)
-        verb = command[1]
-        repo = command[command.index("--repo") + 1]
-        kind = "issue" if verb == "issue" else "pull"
-        table = self.states.get(repo, {}).get(kind)
+        endpoint = command[-1]
+        path = endpoint.split("?", 1)[0]
+        owner_repo, _, kind_path = path[len("repos/") :].rpartition("/")
+        kind = "issue" if kind_path == "issues" else "pull"
+        table = self.states.get(owner_repo, {}).get(kind)
         if table is None:
-            raise RuntimeError(f"gh unavailable for {repo} {kind}")
+            raise RuntimeError(f"gh unavailable for {owner_repo} {kind}")
         return json.dumps([{"number": int(number), "state": state} for number, state in table.items()])
 
 
@@ -201,6 +207,81 @@ class SourceTaskReconcilerTest(unittest.TestCase):
         SourceTaskReconciler(self.ledger, runner=runner).sweep()
 
         self.assertEqual("created", self.ledger.get_source_task("as77-pending")["status"])
+
+
+class GraphqlExhaustedMutationCheckTest(unittest.TestCase):
+    """agent-supervisor#144 MUTATION CHECK, both directions, through the real
+    `subprocess_runner` and a real (stub) `gh` binary on PATH -- not
+    `FakeRunner`, which already assumes the REST command shape. Proves the
+    conversion by construction: `gh issue list`/`gh pr list` fail exactly the
+    way an exhausted GraphQL budget does, and the sweep must still complete
+    from `gh api ...` (REST core) alone."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.ledger = Ledger(Path(self.tempdir.name), clock=lambda: 1_000)
+        self.ledger.register_lane(
+            lane="free-1", pane_id="%1", nonce="nonce-1", harness="claude",
+            repo="/repo/free-1", server_id="server-a", session_id="$1", command="claude",
+        )
+        self.ledger.record_dispatch(
+            lane="free-1", pane_id="%1", nonce="nonce-1", harness="claude",
+            repo="/repo/free-1", server_id="server-a", session_id="$1", command="claude",
+            task_id="as109-rail-selection", source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/109",
+            source_ref="109", summary="issue #109", source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-1", "issues: 109"],
+            status_marker=None,
+        )
+
+    def _stub_gh(self, tmp, *, graphql_exhausted, rest_alive):
+        gh = Path(tmp) / "gh"
+        gh.write_text(
+            "#!/bin/bash\n"
+            "set -uo pipefail\n"
+            + ('case "$1" in\n  issue|pr)\n    echo \'gh: GraphQL: API rate limit exceeded\' >&2\n    exit 1 ;;\nesac\n'
+               if graphql_exhausted else '')
+            + (
+                'case "$1 $2" in\n'
+                '  "api --paginate")\n'
+                '    endpoint="$3"; path="${endpoint%%\\?*}"\n'
+                '    case "$path" in\n'
+                '      */issues) echo \'[{"number":109,"state":"closed"}]\' ;;\n'
+                '      */pulls)  echo \'[]\' ;;\n'
+                '      *) exit 1 ;;\n'
+                '    esac\n'
+                '    exit 0 ;;\n'
+                'esac\n'
+                if rest_alive else 'exit 1\n'
+            )
+        )
+        gh.chmod(0o755)
+        return str(gh)
+
+    def test_direction_1_graphql_exhausted_rest_alive(self):
+        from reconcile_sources import subprocess_runner
+
+        with tempfile.TemporaryDirectory() as bindir:
+            gh_path = self._stub_gh(bindir, graphql_exhausted=True, rest_alive=True)
+            report = SourceTaskReconciler(self.ledger, runner=subprocess_runner, gh_bin=gh_path).sweep()
+
+        self.assertEqual(["as109-rail-selection"], report["updated"])
+        source = self.ledger.get_source_task("as109-rail-selection")
+        self.assertEqual("CLOSED", source["source_state"])
+        self.assertEqual([], report["errors"])
+
+    def test_direction_2_rest_also_unreachable(self):
+        from reconcile_sources import subprocess_runner
+
+        with tempfile.TemporaryDirectory() as bindir:
+            gh_path = self._stub_gh(bindir, graphql_exhausted=True, rest_alive=False)
+            report = SourceTaskReconciler(self.ledger, runner=subprocess_runner, gh_bin=gh_path).sweep()
+
+        self.assertEqual([], report["updated"])
+        self.assertTrue(report["errors"], "a REST outage must be named in errors, not silently skipped")
+        source = self.ledger.get_source_task("as109-rail-selection")
+        self.assertEqual("OPEN", source["source_state"])  # left untouched, not guessed
 
 
 if __name__ == "__main__":

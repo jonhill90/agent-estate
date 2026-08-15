@@ -1,20 +1,24 @@
 #!/bin/bash
 # Stub gh for the source-task-sweep invocation test.
 #
-# The sweep (reconcile_sources.py) calls:
-#   gh issue list --repo <owner/repo> --state all --limit 1000 --json number,state
-#   gh pr    list --repo <owner/repo> --state all --limit 1000 --json number,state
+# agent-supervisor#144: the sweep (reconcile_sources.py) now calls REST core,
+# not GraphQL --
+#   gh api --paginate repos/<owner>/<repo>/issues?state=all&per_page=100
+#   gh api --paginate repos/<owner>/<repo>/pulls?state=all&per_page=100
 # Answered from STUB_GH_ISSUE_STATE / STUB_GH_PR_STATE, each
-# "<number>=<STATE>" (only one row needed for this test). Any other `gh`
-# shape (the watchdog's own actionable-work count) gets the same "1" the
-# shared stub answers, so a code path this test does not care about still
-# gets a harmless number rather than an empty string.
-verb="$1"
-if [[ " $* " == *" --json number,state "* ]]; then
-  case "$verb" in
-    issue) row="${STUB_GH_ISSUE_STATE:-}" ;;
-    pr)    row="${STUB_GH_PR_STATE:-}" ;;
-    *)     row="" ;;
+# "<number>=<STATE>" (only one row needed for this test, state given
+# lowercase the way REST actually returns it -- reconcile_sources.py
+# uppercases on read). Any other `gh` shape (the watchdog's own
+# actionable-work count) gets the same "1" the shared stub answers, so a
+# code path this test does not care about still gets a harmless number
+# rather than an empty string.
+if [ "$1" = "api" ]; then
+  endpoint="$2"; [ "$endpoint" = "--paginate" ] && endpoint="$3"
+  path="${endpoint%%\?*}"
+  case "$path" in
+    */issues) row="${STUB_GH_ISSUE_STATE:-}" ;;
+    */pulls)  row="${STUB_GH_PR_STATE:-}" ;;
+    *)        row="" ;;
   esac
   if [ -z "$row" ]; then
     echo "[]"

@@ -936,17 +936,22 @@ if python3 "$HERE/sleepcheck.py" >/dev/null 2>&1; then
 fi
 
 # Idle. Is there anything to do? A failed query is NOT zero (finding 1).
+#
+# agent-supervisor#144: REST core (`gh api repos/.../issues`,
+# `.../pulls`), not GraphQL (`gh issue list`/`gh pr list`) -- this loop runs
+# on every watchdog tick, for every repo. REST's `/issues` endpoint answers
+# for PRs too (they carry a `pull_request` key), filtered out here to match
+# `gh issue list`'s issues-only count.
 work=0; degraded=""
 for r in "${REPOS[@]}"; do
-  if n=$(gh issue list --repo "jonhill90/$r" --state open --limit 60 \
-           --json number,labels \
-           --jq '[.[]|select([.labels[].name]|any(.=="parked" or .=="question")|not)]|length' 2>/dev/null) \
+  if n=$(gh api "repos/jonhill90/$r/issues?state=open&per_page=100" \
+           --jq '[.[]|select(has("pull_request")|not)|select([.labels[].name]|any(.=="parked" or .=="question")|not)]|length' 2>/dev/null) \
      && [[ "$n" =~ ^[0-9]+$ ]]; then
     work=$((work + n))
   else
     degraded="${degraded}${r} "
   fi
-  if p=$(gh pr list --repo "jonhill90/$r" --state open --json number --jq 'length' 2>/dev/null) \
+  if p=$(gh api "repos/jonhill90/$r/pulls?state=open&per_page=100" --jq 'length' 2>/dev/null) \
      && [[ "$p" =~ ^[0-9]+$ ]]; then
     work=$((work + p))
   else

@@ -97,22 +97,29 @@ class SourceTaskReconciler:
     def _fetch_repo_states(self, owner, repo, kind):
         """One batched call for every issue or PR in one repo, open or closed.
 
-        `--state all` plus a generous `--limit` is what keeps this at "a
-        handful of calls" instead of "one call per row" -- see module
-        docstring. A repo with more open+closed issues/PRs than `--limit`
-        silently omits the oldest from this answer; a row whose number is
+        agent-supervisor#144: REST core (`gh api --paginate repos/.../issues`
+        or `.../pulls`), not GraphQL (`gh issue list`/`gh pr list`) -- this
+        sweep's own docstring already names this as "314 rows against 4-5
+        repos is 314 API calls done wrong and under 10 done right"; those ten
+        used to all draw on the empty budget. `--paginate` walks every page
+        rather than relying on one generous `--limit`, so nothing is silently
+        omitted the way a fixed `--limit` could; a row whose number is still
         missing from the result is treated as unresolved (fail-closed), not
         as evidence the number never existed.
         """
-        verb = "issue" if kind == "issue" else "pr"
+        path = "issues" if kind == "issue" else "pulls"
         command = [
-            self.gh_bin, verb, "list",
-            "--repo", f"{owner}/{repo}",
-            "--state", "all",
-            "--limit", "1000",
-            "--json", "number,state",
+            self.gh_bin, "api", "--paginate",
+            f"repos/{owner}/{repo}/{path}?state=all&per_page=100",
         ]
         payload = json.loads(self.runner(command))
+        if kind == "issue":
+            # REST's /issues answers for PRs too (they carry a `pull_request`
+            # key) -- filtered out here to match `gh issue list`'s
+            # issues-only answer; the /pulls fetch above is the fallback this
+            # sweep already has for a PR-numbered row (see sweep()'s own
+            # comment on `record_dispatch` hardcoding `source_kind`).
+            payload = [item for item in payload if "pull_request" not in item]
         return {str(item["number"]): str(item["state"]).upper() for item in payload}
 
     def sweep(self):

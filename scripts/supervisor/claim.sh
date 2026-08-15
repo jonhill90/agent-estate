@@ -42,6 +42,14 @@
 #   claim.sh stale   [repo]                  claimed issues whose lane is gone
 #
 # [repo] is OWNER/NAME; omitted, gh resolves it from the working directory.
+#
+# agent-supervisor#144: every gh call in this file is REST core
+# (`gh api repos/...`), not GraphQL (`gh issue view`/`gh issue list`/`gh pr
+# list`). This is the deadlock the issue names: `claim.sh check`'s old
+# GraphQL read failed closed with "cannot read issue" once the shared
+# GraphQL budget hit 0/5000, which made `dispatch.sh` correctly refuse --
+# so the fix for GraphQL exhaustion could not itself be dispatched while
+# GraphQL was exhausted. REST core sits on its own 5000-point budget.
 
 set -uo pipefail
 
@@ -57,16 +65,25 @@ case "$CMD" in
   *) sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
 
-R=()
-[ -n "${REPO:-}" ] && R=(-R "$REPO")
-
 if [ "$CMD" != list ] && [ "$CMD" != stale ] && [ -z "$ISSUE" ]; then
   echo "claim: $CMD needs an issue number" >&2; exit 2
 fi
 
+# api_base -> "repos/OWNER/NAME" when [repo] was given, else the same
+# {owner}/{repo} placeholder `gh` itself resolves from the working directory
+# for every other command here -- `gh api` has no `-R` flag, so the repo has
+# to be baked into the path instead.
+api_base() {
+  if [ -n "${REPO:-}" ]; then printf 'repos/%s\n' "$REPO"
+  else printf 'repos/{owner}/{repo}\n'; fi
+}
+
+me_login() { # the authenticated user's login, for the assignees write endpoints
+  gh api user -q .login 2>/dev/null
+}
+
 holder_of() { # holder_of <issue> -> comma-separated logins, empty if unclaimed
-  gh issue view "$1" ${R[@]+"${R[@]}"} --json assignees \
-     -q '.assignees|map(.login)|join(",")' 2>/dev/null
+  gh api "$(api_base)/issues/$1" -q '.assignees|map(.login)|join(",")' 2>/dev/null
 }
 
 case "$CMD" in
@@ -83,7 +100,9 @@ take)
   # unreadable answer -- network error, gh failure, empty output -- is refused
   # rather than treated as open; #59, #92 and #95 are all the same shape of an
   # unreadable answer being read as permissive.
-  info=$(gh issue view "$ISSUE" ${R[@]+"${R[@]}"} --json state,assignees \
+  # REST's `state` comes back lowercase ("open"/"closed"), unlike GraphQL's
+  # "OPEN"/"CLOSED" -- compared lowercase below.
+  info=$(gh api "$(api_base)/issues/$ISSUE" \
      -q '"\(.state)\t\(.assignees|map(.login)|join(","))"' 2>/dev/null)
   if [ -z "$info" ]; then
     echo "claim: cannot read #$ISSUE — refusing to claim on an unreadable state" >&2
@@ -91,7 +110,7 @@ take)
   fi
   state="${info%%$'\t'*}"
   h="${info#*$'\t'}"
-  if [ "$state" != "OPEN" ]; then
+  if [ "$state" != "open" ]; then
     echo "claim: #$ISSUE is not open (state=$state) — not dispatching to $LANE" >&2
     exit 1
   fi
@@ -101,7 +120,9 @@ take)
     echo "claim: #$ISSUE is already claimed by $h — not dispatching to $LANE" >&2
     exit 1
   fi
-  gh issue edit "$ISSUE" ${R[@]+"${R[@]}"} --add-assignee @me >/dev/null 2>&1 || {
+  me=$(me_login)
+  [ -n "$me" ] || { echo "claim: could not resolve the authenticated user" >&2; exit 2; }
+  gh api -X POST "$(api_base)/issues/$ISSUE/assignees" -f "assignees[]=$me" >/dev/null 2>&1 || {
     echo "claim: could not assign #$ISSUE" >&2; exit 2; }
   h=$(holder_of "$ISSUE")
   [ -n "$h" ] || { echo "claim: assignment to #$ISSUE did not stick" >&2; exit 2; }
@@ -109,15 +130,19 @@ take)
   exit 0 ;;
 
 release)
-  gh issue edit "$ISSUE" ${R[@]+"${R[@]}"} --remove-assignee @me >/dev/null 2>&1 || {
+  me=$(me_login)
+  [ -n "$me" ] || { echo "claim: could not resolve the authenticated user" >&2; exit 2; }
+  gh api -X DELETE "$(api_base)/issues/$ISSUE/assignees" -f "assignees[]=$me" >/dev/null 2>&1 || {
     echo "claim: could not unassign #$ISSUE" >&2; exit 2; }
   echo "claim: #$ISSUE released"
   exit 0 ;;
 
 list)
-  # What the dispatch step reads INSTEAD of a bare `gh issue list`.
-  gh issue list ${R[@]+"${R[@]}"} --state open --limit 200 --json number,assignees \
-     -q '.[]|"\(.number)\t\(.assignees|map(.login)|join(","))"' 2>/dev/null \
+  # What the dispatch step reads INSTEAD of a bare `gh issue list`. REST's
+  # /issues endpoint answers for PRs too (they carry a `pull_request` key) --
+  # filtered out here to match `gh issue list`'s issues-only answer.
+  gh api --paginate "$(api_base)/issues?state=open&per_page=100" \
+     -q '.[]|select(has("pull_request")|not)|"\(.number)\t\(.assignees|map(.login)|join(","))"' 2>/dev/null \
     | awk -F'\t' '$2==""{print $1}'
   exit 0 ;;
 
@@ -146,12 +171,12 @@ stale)
     "$HERE/lanes.sh" "$SESSION" 2>/dev/null \
       | awk 'NR>1 && $1 ~ /^[0-9]+$/ && $NF!="dead" && $NF!="stale" && $2 !~ /^free-[0-9]+$/ {print $2}' \
       | sed -E -n 's/^[A-Za-z]+([0-9]+)-.*/\1/p'
-    gh pr list ${R[@]+"${R[@]}"} --state open --limit 200 --json number,body \
+    gh api --paginate "$(api_base)/pulls?state=open&per_page=100" \
        -q '.[]|"\(.number)\t\(.body)"' 2>/dev/null \
       | cut -f2- | grep -oiE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+'
   )
-  gh issue list ${R[@]+"${R[@]}"} --state open --limit 200 --json number,assignees \
-     -q '.[]|"\(.number)\t\(.assignees|map(.login)|join(","))"' 2>/dev/null \
+  gh api --paginate "$(api_base)/issues?state=open&per_page=100" \
+     -q '.[]|select(has("pull_request")|not)|"\(.number)\t\(.assignees|map(.login)|join(","))"' 2>/dev/null \
     | awk -F'\t' '$2!=""{print $1}' \
     | while read -r n; do
         grep -qx "$n" <<<"$live_numbers" || echo "$n"

@@ -29,6 +29,86 @@ ME="${GH_ME:-jonhill90}"
 
 sub="$1"; shift
 case "$sub" in
+  api)
+    # agent-supervisor#144: claim.sh now speaks REST (`gh api repos/...`),
+    # not GraphQL (`gh issue view`/`gh issue list`/`gh pr list`, still
+    # stubbed below for dispatch.sh, which is unconverted). Requires the real
+    # `jq` binary to emulate `gh api`'s own bundled `-q`/`--jq` -- present on
+    # every CI runner this suite runs on.
+    endpoint=""; method="GET"; jqf=""; fields=()
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --paginate) shift ;;
+        -X) method="$2"; shift 2 ;;
+        -q) jqf="$2"; shift 2 ;;
+        -f) fields+=("$2"); shift 2 ;;
+        *) endpoint="$1"; shift ;;
+      esac
+    done
+    path="${endpoint%%\?*}"
+    query=""
+    case "$endpoint" in *\?*) query="${endpoint#*\?}" ;; esac
+    emit() { # emit <json> -- apply -q if given, else print raw
+      if [ -n "$jqf" ]; then jq -r "$jqf" <<<"$1"; else printf '%s\n' "$1"; fi
+    }
+    assignees_json_for() { # assignees_json_for <csv> -> [{"login":"a"},...]
+      local csv="$1"
+      [ -n "$csv" ] || { echo '[]'; return; }
+      tr ',' '\n' <<<"$csv" | jq -R . | jq -sc 'map({login:.})'
+    }
+    case "$path" in
+      user)
+        emit "{\"login\":\"$ME\"}" ;;
+      */issues/*/assignees)
+        num=$(basename "$(dirname "$path")")
+        who=""
+        for f in ${fields[@]+"${fields[@]}"}; do case "$f" in assignees\[\]=*) who="${f#*=}" ;; esac; done
+        tmp=$(mktemp)
+        while IFS='|' read -r n a t st; do
+          if [ "$n" = "$num" ] && [ -n "$who" ]; then
+            if [ "$method" = "POST" ]; then
+              case ",$a," in *",$who,"*) ;; *) a="${a:+$a,}$who" ;; esac
+            elif [ "$method" = "DELETE" ]; then
+              a=$(tr ',' '\n' <<<"$a" | grep -vx "$who" | paste -sd, -)
+            fi
+          fi
+          printf '%s|%s|%s|%s\n' "$n" "$a" "$t" "$st"
+        done < "$I" > "$tmp"
+        mv "$tmp" "$I"
+        emit '[]' ;;
+      repos/*/issues/[0-9]*)
+        num="${path##*/}"
+        line=$(awk -F'|' -v n="$num" '$1==n' "$I")
+        [ -n "$line" ] || { echo "gh: no issue $num" >&2; exit 1; }
+        a=$(cut -d'|' -f2 <<<"$line"); st=$(cut -d'|' -f4 <<<"$line"); st="${st:-OPEN}"
+        st=$(tr 'A-Z' 'a-z' <<<"$st")
+        json=$(jq -nc --argjson number "$num" --arg state "$st" --argjson assignees "$(assignees_json_for "$a")" \
+          '{number:$number, state:$state, assignees:$assignees}')
+        emit "$json" ;;
+      repos/*/issues)
+        state_filter="open"
+        case "$query" in *state=all*) state_filter="all" ;; esac
+        out="[]"
+        while IFS='|' read -r n a t st; do
+          [ -n "$n" ] || continue
+          st="${st:-OPEN}"; st=$(tr 'A-Z' 'a-z' <<<"$st")
+          [ "$state_filter" = "open" ] && [ "$st" != "open" ] && continue
+          entry=$(jq -nc --argjson number "$n" --arg state "$st" --argjson assignees "$(assignees_json_for "$a")" \
+            '{number:$number, state:$state, assignees:$assignees}')
+          out=$(jq -nc --argjson acc "$out" --argjson e "$entry" '$acc + [$e]')
+        done < "$I"
+        emit "$out" ;;
+      repos/*/pulls)
+        out="[]"
+        while IFS='|' read -r n b h c; do
+          [ -n "$n" ] || continue
+          entry=$(jq -nc --argjson number "$n" --arg body "$b" '{number:$number, body:$body}')
+          out=$(jq -nc --argjson acc "$out" --argjson e "$entry" '$acc + [$e]')
+        done < "$P"
+        emit "$out" ;;
+      *) echo "gh-claim stub: unhandled api endpoint $path" >&2; exit 1 ;;
+    esac
+    exit 0 ;;
   issue)
     verb="$1"; shift
     num=""
