@@ -276,6 +276,19 @@ DIRECTOR_INBOX_EPISODE="${SUPERVISOR_DIRECTOR_INBOX_EPISODE:-$STATE/.watchdog-di
 SOURCE_SWEEP_STAMP="${SUPERVISOR_SOURCE_SWEEP_STAMP:-$STATE/.source-task-sweep-last}"
 SOURCE_SWEEP_INTERVAL="${SUPERVISOR_SOURCE_SWEEP_INTERVAL:-3600}"
 
+# agent-supervisor#155: a sibling throttle for the lane-completion sweep.
+# Unlike the source-task sweep this costs no external API call -- `lanes.sh
+# --json` is a handful of local tmux reads -- so it runs far more often; the
+# floor on how SOON a stranded lane can be reclaimed is this interval plus
+# LANE_SWEEP_IDLE_AFTER (below), not an hour.
+LANE_SWEEP_STAMP="${SUPERVISOR_LANE_SWEEP_STAMP:-$STATE/.lane-completion-sweep-last}"
+LANE_SWEEP_INTERVAL="${SUPERVISOR_LANE_SWEEP_INTERVAL:-120}"
+# Matches digest.sh's DIGEST_RECONCILE_IDLE_AFTER default (300s) -- the two
+# already agree on how long a `free` pane must hold before a still-`delivered`
+# task is trusted to mean "finished, never signalled" rather than "between
+# tool calls" (lane-done.sh's own header names this exact danger, #102).
+LANE_SWEEP_IDLE_AFTER="${SUPERVISOR_LANE_SWEEP_IDLE_AFTER:-300}"
+
 # Credentials + NOTIFY_SCRIPT for the escalate path. Sourced here so the
 # LaunchAgent needs no secrets inlined in its plist.
 ENVFILE="${NOTIFY_ENV:-$STATE/notify.env}"
@@ -584,6 +597,16 @@ sweep_note() {                   # sweep_note <line>
   return 0
 }
 
+# Same tmp+rename append shape again, for the lane-completion sweep (#155).
+lane_sweep_note() {              # lane_sweep_note <line>
+  local tmp="$STATUS.lanesweep.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^lane-sweep:' "$STATUS"; printf 'lane-sweep: %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 # Same tmp+rename append shape again, for #112's never-busy lane check.
 # Absent (no line at all) means every worker lane has either gone ready,
 # busy, or is unclassified for a normal reason -- the ordinary case, silent
@@ -856,6 +879,74 @@ print(f"updated={updated} unchanged={unchanged} unresolved={unresolved} errors={
   return 0
 }
 
+# agent-supervisor#155: runs on EVERY exit path, same reasoning as
+# check_source_task_sweep above -- a lane that finishes and never signals
+# does so regardless of which branch of this script's own busy/idle/asleep
+# logic short-circuited this tick. Self-throttled against LANE_SWEEP_STAMP;
+# most ticks return in the first branch below having done nothing, and the
+# interval is short (120s default) because, unlike the source sweep, this
+# one costs no external API call -- see LANE_SWEEP_INTERVAL's own comment.
+check_lane_completion_sweep() {
+  local last=0
+  if [ -r "$LANE_SWEEP_STAMP" ]; then
+    last=$(cat "$LANE_SWEEP_STAMP" 2>/dev/null)
+  fi
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  if [ $(( now - last )) -lt "$LANE_SWEEP_INTERVAL" ]; then
+    return 0
+  fi
+  if [ ! -e "$HERE/cli.py" ]; then
+    log "LANE-SWEEP-MISSING: cli.py is missing beside this watchdog; reinstall or advance the live worktree"
+    lane_sweep_note "missing — cli.py is missing beside this watchdog"
+    return 0
+  fi
+  local out rc
+  out=$("${SUPERVISOR_PYTHON:-python3}" "$HERE/cli.py" --state-dir "$STATE" \
+        reconcile-lane-completions --idle-after "$LANE_SWEEP_IDLE_AFTER" 2>&1)
+  rc=$?
+  # Stamp written whether the sweep succeeded or not -- same reasoning as
+  # SOURCE-SWEEP: a failure already reports itself in `errors` (this
+  # reconciler's own fail-closed contract, see reconcile_lane_completions.py),
+  # and retrying every tick instead of waiting out the interval buys nothing.
+  printf '%s' "$now" >"$LANE_SWEEP_STAMP" 2>/dev/null
+  if [ "$rc" -ne 0 ]; then
+    log "LANE-SWEEP FAILED rc=$rc: $out"
+    lane_sweep_note "failed — rc=$rc: $(printf '%s' "$out" | tr '\n' ' ')"
+    return 0
+  fi
+  local summary py_rc py_err py_err_file
+  py_err_file="$STATUS.lanesweep-fmt-err.$$"
+  summary=$(printf '%s' "$out" | "${SUPERVISOR_PYTHON:-python3}" -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("unparseable report")
+    sys.exit(0)
+completed = d.get("completed", [])
+unresolved = len(d.get("unresolved", []))
+errors = len(d.get("errors", []))
+names = ",".join(completed)
+print(f"completed={len(completed)} unresolved={unresolved} errors={errors}" + (f" ({names})" if names else ""))
+' 2>"$py_err_file")
+  py_rc=$?
+  py_err=$(cat "$py_err_file" 2>/dev/null)
+  rm -f "$py_err_file" 2>/dev/null
+  if [ "$py_rc" -ne 0 ]; then
+    log "LANE-SWEEP-FORMATTER-CRASHED rc=$py_rc: $py_err"
+    lane_sweep_note "formatter crashed — rc=$py_rc: $(printf '%s' "$py_err" | tr '\n' ' ')"
+    return 0
+  fi
+  [ -n "$summary" ] || summary="ran, output not parseable: $(printf '%s' "$out" | tr '\n' ' ')"
+  # Loud on purpose (#155 acceptance point 4, #118's lesson): a completed
+  # lane names itself in the log, not just a count, so a human scanning
+  # watchdog.log can tell which lane this sweep -- not a hand-written
+  # `record-completion` -- released.
+  log "LANE-SWEEP: $summary"
+  lane_sweep_note "$summary"
+  return 0
+}
+
 # agent-supervisor#112. Every check above this one watches a subsystem of
 # THIS watchdog (the loop it restarts, the poller, source_tasks); this is
 # the first to read WORKER lanes -- the panes lanes.sh classifies, in the
@@ -1057,6 +1148,7 @@ on_exit() {
   check_poller_process_count
   check_poller_window
   check_source_task_sweep
+  check_lane_completion_sweep
   check_never_busy_lanes
   advance_on_exit "$rc"
   return $rc
