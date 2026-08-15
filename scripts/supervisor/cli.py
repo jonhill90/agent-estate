@@ -197,6 +197,36 @@ def parser():
     reconstruct.add_argument("--source-url", required=True)
     reconstruct.add_argument("--source-ref", required=True)
 
+    # agent-supervisor#160: `reconstruct` above is gated on a
+    # `hill90-supervisor:v1` marker in the issue body -- `GithubTaskSource`'s
+    # only writer of `source_tasks` rows. Measured across all four repos at
+    # the time #160 was filed: zero issues carry that marker, which is
+    # exactly why `record_dispatch`'s own docstring says the tmux dispatch
+    # path writes its `source_tasks` row itself rather than calling
+    # `reconstruct`. `Ledger.reconstruct_task` was always generic -- task id,
+    # source facts and a summary, no marker requirement -- it just had no
+    # caller that did not also register a lane, assign a task and mark it
+    # delivered in the same breath (`record_dispatch`'s five-write bundle,
+    # built for "record what already physically happened via send-keys").
+    # `dispatch-pi-rpc.sh` needs the opposite shape: create the ledger's
+    # record of the WORK before any RPC call is attempted, then let
+    # `assign` (routed to `PiRPCAdapter`) perform the real, blocking send --
+    # so the two writes cannot be bundled the way `record_dispatch` bundles
+    # them for a delivery that already happened. This subcommand is that
+    # missing direct caller, exposed standalone rather than folded into
+    # `reconstruct` -- widening `reconstruct`'s marker gate was rejected
+    # because the gate is a defensible READ filter (which GitHub issues
+    # this supervisor treats as tasks), not a write restriction, and this
+    # subcommand's caller has already confirmed the issue itself (claim.sh)
+    # before ever reaching here.
+    reconstruct_task_parser = sub.add_parser("reconstruct-task")
+    reconstruct_task_parser.add_argument("--task", required=True)
+    reconstruct_task_parser.add_argument("--source-kind", default="issue")
+    reconstruct_task_parser.add_argument("--source-url", required=True)
+    reconstruct_task_parser.add_argument("--source-ref", required=True)
+    reconstruct_task_parser.add_argument("--summary", required=True)
+    reconstruct_task_parser.add_argument("--evidence", action="append", default=[])
+
     # agent-dotfiles#174: the read side of the seam #140 opened. `dispatch.sh`
     # calls this once per idle-looking candidate instead of trusting the
     # window name. See `lane_free` for the migration story (first-sight
@@ -948,6 +978,18 @@ def main(argv=None):
     elif args.command == "reconstruct":
         value = GithubTaskSource().reconstruct(
             ledger, source_url=args.source_url, source_ref=args.source_ref
+        )
+    elif args.command == "reconstruct-task":
+        value = ledger.reconstruct_task(
+            task_id=args.task,
+            source_kind=args.source_kind,
+            source_url=args.source_url,
+            source_ref=args.source_ref,
+            summary=args.summary,
+            source_state="OPEN",
+            status="created",
+            evidence=args.evidence,
+            status_marker=None,
         )
     elif args.command == "restore-plan":
         value = ledger.restore_plan()
