@@ -364,6 +364,38 @@ class Ledger:
                     updated_at INTEGER NOT NULL,
                     PRIMARY KEY (repo, number)
                 );
+
+                -- agent-supervisor#153. Whether a tmux SESSION (not a lane,
+                -- not a pane) is one this estate may act on -- dispatch to,
+                -- rename windows in, kill windows in. Jon's own sessions
+                -- (`Hill90`, and whatever else he runs) have been destroyed
+                -- three times because nothing recorded this; the ledger's
+                -- prior notion of "which sessions exist" was INFERRED from
+                -- `lanes.lane` strings, and #153 measured that inference
+                -- drifting both ways live: it named two sessions that no
+                -- longer exist and missed three real ones, `Hill90` chief
+                -- among them.
+                --
+                -- A row here is a DECISION, not a measurement -- the
+                -- estate's own authorship test (see AGENTS.md) puts it in
+                -- the ledger for that reason: adopting a session is
+                -- something WE decide and must remember, the same way a
+                -- lane registration is. `bootstrap-session.sh` writes the
+                -- only row a fresh clone ever gets, at the moment it creates
+                -- a session -- see Ledger.adopt_session. A session tmux
+                -- knows about that has no row here is UNKNOWN, never
+                -- supervised: absence of a row must never be read as
+                -- permission (see session_state below, and
+                -- TmuxTransport.session_exists for the live half of that
+                -- check, deliberately kept a separate query rather than
+                -- merged into this table -- a row can outlive the session it
+                -- names, and conflating the two would let a stale row read
+                -- as "supervised" for a session that no longer exists).
+                CREATE TABLE IF NOT EXISTS sessions (
+                    session TEXT PRIMARY KEY,
+                    supervised_at INTEGER NOT NULL,
+                    source TEXT NOT NULL DEFAULT 'bootstrap-session.sh'
+                );
                 """
             )
         os.chmod(self.db_path, 0o600)
@@ -940,6 +972,45 @@ class Ledger:
     def list_lanes(self):
         with contextlib.closing(self._connect()) as connection:
             rows = connection.execute("SELECT * FROM lanes ORDER BY lane").fetchall()
+        return [self._dict(row) for row in rows]
+
+    # agent-supervisor#153. Idempotent by design (`INSERT ... ON CONFLICT DO
+    # UPDATE`, not `INSERT OR IGNORE`): `bootstrap-session.sh --add-lanes`
+    # against a session it already adopted must not fail this call, and a
+    # later re-adopt should refresh `supervised_at` rather than silently keep
+    # whichever timestamp happened to land first.
+    def adopt_session(self, session, *, source="bootstrap-session.sh"):
+        now = int(self.clock())
+        with self._locked(), self._transaction() as connection:
+            connection.execute(
+                "INSERT INTO sessions (session, supervised_at, source) VALUES (?, ?, ?) "
+                "ON CONFLICT(session) DO UPDATE SET supervised_at = excluded.supervised_at, "
+                "source = excluded.source",
+                (session, now, source),
+            )
+        return {"session": session, "supervised_at": now, "source": source}
+
+    def session_marked_supervised(self, session):
+        """The ledger's half of a session's supervision state -- a pure
+        record read, no tmux, no default-true anywhere on this path.
+
+        Absence of a row returns False, never raises and never guesses: a
+        lookup error here (a locked ledger, a missing table on an old copy)
+        must surface as an exception the caller fails closed on, not as this
+        function inventing an answer. See TmuxTransport.session_exists for
+        the other half (does the session actually still exist) and
+        `session_state` in cli.py for where the two are combined into the
+        three-state read #153 asked for.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM sessions WHERE session = ?", (session,)
+            ).fetchone()
+        return row is not None
+
+    def list_sessions(self):
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute("SELECT * FROM sessions ORDER BY session").fetchall()
         return [self._dict(row) for row in rows]
 
     def restore_plan(self):

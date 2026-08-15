@@ -61,3 +61,22 @@ class TmuxTransport:
         against a pane with unflushed state.
         """
         self._run("respawn-pane", "-k", "-t", target)
+
+    def session_exists(self, session):
+        """Does this tmux server currently have a session by this exact name.
+
+        agent-supervisor#153: `has-session -t foo` prefix-matches when no
+        exact `foo` exists (bootstrap-session.sh's #137 finding) -- `=name`
+        is tmux's exact-match target syntax and is required here for the
+        same reason it is required there. This is the live half of a
+        session's supervision state; the ledger (`Ledger.session_marked_
+        supervised`) is the recorded half, and the two are never merged
+        into one query -- a session the ledger marked supervised that no
+        longer exists here must read as drift, not as "supervised", which is
+        exactly what a caller that skipped this check would get wrong.
+        """
+        try:
+            self._run("has-session", "-t", f"={session}")
+            return True
+        except subprocess.CalledProcessError:
+            return False

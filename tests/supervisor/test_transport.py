@@ -17,6 +17,25 @@ class TransportTest(unittest.TestCase):
             TmuxTransport("/opt/homebrew/bin/tmux").capture("%19")
         self.assertEqual(10, run.call_args.kwargs["timeout"])
 
+    # agent-supervisor#153: existence must be checked with the EXACT-match
+    # target (`=name`), the same lesson bootstrap-session.sh's #137 finding
+    # already encodes -- `has-session -t foo` prefix-matches `foo-2`.
+    def test_session_exists_uses_the_exact_match_target(self):
+        with patch("transport.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")) as run:
+            TmuxTransport("tmux").session_exists("Hill90")
+        self.assertEqual(["tmux", "has-session", "-t", "=Hill90"], run.call_args.args[0])
+
+    def test_session_exists_true_when_tmux_finds_it(self):
+        with patch("transport.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")):
+            self.assertTrue(TmuxTransport("tmux").session_exists("Hill90"))
+
+    def test_session_exists_false_when_tmux_reports_no_such_session(self):
+        with patch(
+            "transport.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, ["tmux", "has-session"]),
+        ):
+            self.assertFalse(TmuxTransport("tmux").session_exists("no-such-session"))
+
 
 if __name__ == "__main__":
     unittest.main()

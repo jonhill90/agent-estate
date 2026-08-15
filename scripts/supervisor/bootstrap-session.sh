@@ -271,6 +271,20 @@ if ! session_exists; then
   # recorded anyway for consistency -- nothing downstream should have to
   # special-case "the one window with no harness option".
   [ -z "$HARNESS" ] || run set-option -p -t "=$SESSION:$SUPERVISOR_WINDOW" @hill90_lane_harness "$HARNESS"
+  # agent-supervisor#153: this is the ONLY place a fresh clone's ledger ever
+  # gets a `sessions` row -- the write side of "supervised vs Jon's own".
+  # Only on the branch that actually creates a session, never on
+  # --add-lanes against one that already exists: --add-lanes has no opinion
+  # on supervision, and a pre-existing session (Jon's own, or one this
+  # estate adopted some other way) must not be silently re-decided just
+  # because someone topped up its lane count.
+  if [ "$DRY_RUN" -eq 0 ]; then
+    if ! "${SUPERVISOR_PYTHON:-python3}" "$HERE/cli.py" adopt-session --session "$SESSION" --source "bootstrap-session.sh" >/dev/null; then
+      echo "bootstrap-session: WARNING: session '$SESSION' was created but could not be recorded as supervised -- it will read as unknown/unsupervised until adopted by hand ('cli.py adopt-session --session $SESSION')" >&2
+    fi
+  else
+    echo "  would run: ${SUPERVISOR_PYTHON:-python3} $HERE/cli.py adopt-session --session $SESSION --source bootstrap-session.sh"
+  fi
   created=$((created + 1))
   echo "  window $SUPERVISOR_WINDOW ($SUPERVISOR_NAME): supervisor, created"
 else
