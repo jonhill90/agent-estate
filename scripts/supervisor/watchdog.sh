@@ -207,6 +207,15 @@ INBOX_HEARTBEAT_EPISODE="${SUPERVISOR_HEARTBEAT_EPISODE:-$STATE/.watchdog-heartb
 POLLER_RECOVERY_LAST_SUCCESS="${SUPERVISOR_POLLER_RECOVERY_LAST_SUCCESS:-$STATE/.poller-recovery-last-success}"
 POLLER_RECOVERY_FAIL_STREAK="${SUPERVISOR_POLLER_RECOVERY_FAIL_STREAK:-$STATE/.poller-recovery-fail-streak}"
 POLLER_SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
+# agent-supervisor#112: which never-busy lane names were last notified about,
+# so a lane that is STILL stuck on the next tick does not re-page -- the same
+# episode discipline watchdog_notify.py's escalate/heartbeat modes already
+# use, kept as a plain file here because this check reads WORKER lanes
+# (lanes.sh), a different subsystem from either of those two, and does not
+# share their status-file shape. Content, not a boolean: a SECOND, different
+# lane going never-busy while the first is still stuck must still page, so
+# the dedup key is the actual set of stuck names, not "has this fired before".
+NEVER_BUSY_EPISODE="${SUPERVISOR_NEVER_BUSY_EPISODE:-$STATE/.watchdog-never-busy-episode}"
 # Threshold derived from inbox-poll.sh's own worst-case gap between heartbeat
 # writes while the process is genuinely alive -- not a round number (#163):
 #   - one iteration can block up to POLL_TIMEOUT+20s before giving up
@@ -543,6 +552,19 @@ sweep_note() {                   # sweep_note <line>
   return 0
 }
 
+# Same tmp+rename append shape again, for #112's never-busy lane check.
+# Absent (no line at all) means every worker lane has either gone ready,
+# busy, or is unclassified for a normal reason -- the ordinary case, silent
+# on purpose like poller_note.
+never_busy_note() {              # never_busy_note <line>
+  local tmp="$STATUS.neverbusy.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^never-busy:' "$STATUS"; printf 'never-busy: %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 # Runs on EVERY exit path, regardless of which early `exit 0` above fired --
 # that is the whole reason this lives in the trap rather than in the main
 # body: the supervisor-loop checks below (busy/idle/asleep/...) all return
@@ -779,6 +801,104 @@ print(f"updated={updated} unchanged={unchanged} unresolved={unresolved} errors={
   return 0
 }
 
+# agent-supervisor#112. Every check above this one watches a subsystem of
+# THIS watchdog (the loop it restarts, the poller, source_tasks); this is
+# the first to read WORKER lanes -- the panes lanes.sh classifies, in the
+# same session poller-recover.sh already derives from $PANE
+# (check_poller_window, above). Runs on every exit path for the same reason
+# check_source_task_sweep does: the incident this exists for is the tick
+# where the supervisor loop itself has nothing to say -- no dispatch, no
+# restart, no escalation -- because zero worker capacity produces no signal
+# of its own. If this only ran from inside a busy/idle branch below, the
+# tick that most needed it would be the one skipping it.
+#
+# lanes.sh is the sole authority on the classification (#112's own design:
+# time-based, not a new dialog shape to grep for here too) -- this function
+# only reads its --json output, counts `never-busy` rows, and pages once per
+# distinct set of stuck names via notify.sh, the path #118/#123 restored.
+check_never_busy_lanes() {
+  if [ ! -x "$HERE/lanes.sh" ]; then
+    log "NEVER-BUSY-CHECK-MISSING: lanes.sh is missing beside this watchdog"
+    never_busy_note "unknown — lanes.sh is missing beside this watchdog"
+    return 0
+  fi
+  local session out out_rc names names_rc count message prev notify_script notify_out notify_rc joined
+  session="${LANES_SESSION:-${PANE%%:*}}"
+  out=$("$HERE/lanes.sh" --json "$session" 2>&1)
+  out_rc=$?
+  if [ "$out_rc" -ne 0 ]; then
+    log "NEVER-BUSY-CHECK FAILED: lanes.sh --json $session: $out"
+    never_busy_note "unknown — lanes.sh --json failed: $(printf '%s' "$out" | tr '\n' ' ')"
+    return 0
+  fi
+  # `sort` here is not cosmetic: it makes the dedup key below stable across
+  # ticks even though tmux's own listing order is not guaranteed, so a
+  # notified set does not read as "changed" purely from row reordering.
+  names=$("${SUPERVISOR_PYTHON:-python3}" -c '
+import json, sys
+try:
+    rows = json.loads(sys.argv[1])
+except Exception:
+    sys.exit(1)
+print("\n".join(sorted(r.get("name", "") for r in rows if r.get("state") == "never-busy")))
+' "$out" 2>/dev/null)
+  names_rc=$?
+  if [ "$names_rc" -ne 0 ]; then
+    log "NEVER-BUSY-CHECK FAILED: could not parse lanes.sh --json $session output"
+    never_busy_note "unknown — could not parse lanes.sh --json output"
+    return 0
+  fi
+  if [ -z "$names" ]; then
+    # Recovered (or never stuck): clear the episode so a LATER occurrence,
+    # even of the exact same lane name, pages again rather than reading as
+    # the same episode still in progress.
+    if [ -s "$NEVER_BUSY_EPISODE" ]; then
+      log "NEVER-BUSY-CLEAR: previously stuck lane(s) in $session are no longer never-busy"
+      rm -f "$NEVER_BUSY_EPISODE" 2>/dev/null
+    fi
+    return 0
+  fi
+  count=$(grep -c . <<<"$names")
+  joined=$(tr '\n' ',' <<<"$names" | sed 's/,$//')
+  message="agent-supervisor#112: ${count} lane(s) in ${session} have never gone ready or busy since launch — ${joined}. lanes.sh withholds them from --free; look at the pane directly."
+  never_busy_note "${count} lane(s) stuck since launch — ${joined}"
+  log "NEVER-BUSY: $message"
+
+  prev=""
+  [ -r "$NEVER_BUSY_EPISODE" ] && prev=$(cat "$NEVER_BUSY_EPISODE" 2>/dev/null)
+  if [ "$prev" = "$names" ]; then
+    log "NEVER-BUSY-DEDUP: same stuck lane(s) already paged this episode"
+    return 0
+  fi
+  printf '%s' "$names" >"$NEVER_BUSY_EPISODE" 2>/dev/null
+
+  # Same resolution #123 gave the escalate path: the configured notifier if
+  # it actually resolves, otherwise the one shipped beside this watchdog --
+  # so a relocated tree cannot silently lose this alarm the way #118 found
+  # the escalate one had.
+  notify_script="${NOTIFY_SCRIPT:-}"
+  if [ -z "$notify_script" ] || [ ! -x "$notify_script" ]; then
+    notify_script="$HERE/notify.sh"
+  fi
+  if [ ! -x "$notify_script" ]; then
+    log "NEVER-BUSY-NOTIFY-UNAVAILABLE: no notifier at $notify_script"
+    never_busy_note "${count} lane(s) stuck since launch — FAILED to notify, no notifier at $notify_script"
+    return 0
+  fi
+  notify_out=$(AGENT_NOTIFY_CALLER=supervisor "$notify_script" "Lane(s) stuck since launch" "$message" 2>&1)
+  notify_rc=$?
+  if [ "$notify_rc" -ne 0 ]; then
+    log "NEVER-BUSY-NOTIFY-FAILED rc=$notify_rc: $notify_out"
+    # Same "failure must be visible locally" posture report() takes for the
+    # escalate path: a notifier that cannot deliver must not read as "a
+    # human was told" just because this check ran and found something.
+    never_busy_note "${count} lane(s) stuck since launch — FAILED to reach a human: $(printf '%s' "$notify_out" | tr '\n' ' ')"
+  else
+    log "NEVER-BUSY-NOTIFY: $notify_out"
+  fi
+  return 0
+}
+
 # Runs on EVERY exit path. It must never change this tick's exit status and
 # must never abort it: a refused advance is a report, not a crash -- the tick
 # it rode out on had already succeeded, and failing it would turn "the code is
@@ -881,6 +1001,7 @@ on_exit() {
   check_poller_process_count
   check_poller_window
   check_source_task_sweep
+  check_never_busy_lanes
   advance_on_exit "$rc"
   return $rc
 }
