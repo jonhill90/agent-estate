@@ -56,6 +56,8 @@ fi
 
 # shellcheck source=../../scripts/supervisor/tmux-isolation.sh
 . "$SUP/tmux-isolation.sh"
+# shellcheck source=./lib/reap-verified.sh
+. "$HERE/lib/reap-verified.sh"
 RT=$(mktemp -d "/tmp/inbox-poll-154-tmux.XXXXXX")
 OLD_TMUX="${TMUX-}"
 OLD_TMUX_TMPDIR="${TMUX_TMPDIR-}"
@@ -69,17 +71,40 @@ JOB="$DOMAIN/$LABEL"
 PLIST_PATH=""
 SESSION="inbox-poll-154-$$"
 
+# agent-supervisor#104: this is the one suite that runs the REAL
+# inbox-poll.sh under a real KeepAlive=true LaunchAgent -- if `launchctl
+# bootout` is fired-and-forgotten and does not actually take (a real,
+# reproduced launchd flake, not hypothetical), KeepAlive means launchd keeps
+# relaunching this job forever, worse than a leaked plain process because
+# nothing short of another bootout ever stops it. bootout is now verified: it
+# must not still answer `launchctl print` before this function accepts it as
+# done, and it retries a few times rather than trusting one attempt. The pid
+# reap below is the backstop for the process itself, scoped to $LIVE (this
+# test's own sandbox) so it can never touch a real poller running anywhere
+# else -- same reap_pid_verified primitive #57 and #75 use, never `pkill -f`.
+verify_job_gone() {
+  local tries
+  for tries in 1 2 3 4 5; do
+    launchctl bootout "$JOB" >/dev/null 2>&1
+    launchctl print "$JOB" >/dev/null 2>&1 || return 0
+    sleep 0.3
+  done
+  echo "cleanup: COULD NOT CONFIRM $JOB is gone after 5 bootout attempts -- KeepAlive may still be relaunching it (agent-supervisor#104)" >&2
+  return 1
+}
 cleanup() {
-  launchctl bootout "$JOB" >/dev/null 2>&1
+  verify_job_gone
   [ -n "$PLIST_PATH" ] && rm -f "$PLIST_PATH"
   [ -n "${SECOND_PID:-}" ] && kill -KILL "$SECOND_PID" 2>/dev/null
+  [ -n "${pid1:-}" ] && [ -n "${LIVE:-}" ] && reap_pid_verified "$pid1" "$LIVE" 5
+  [ -n "${pid2:-}" ] && [ -n "${LIVE:-}" ] && reap_pid_verified "$pid2" "$LIVE" 5
   tmux kill-server >/dev/null 2>&1
   [ -n "${A:-}" ] && rm -rf "$A"
   rm -rf "$RT"
   [ -n "$OLD_TMUX_TMPDIR" ] && export TMUX_TMPDIR="$OLD_TMUX_TMPDIR" || unset TMUX_TMPDIR
   [ -n "$OLD_TMUX" ] && export TMUX="$OLD_TMUX"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 if ! assert_isolated_tmux; then
   say_bad "setup: isolated tmux socket for #154" "TMUX_TMPDIR=$TMUX_TMPDIR"

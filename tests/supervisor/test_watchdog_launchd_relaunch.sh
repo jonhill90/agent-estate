@@ -34,6 +34,8 @@ fi
 
 # shellcheck source=../../scripts/supervisor/tmux-isolation.sh
 source "$SUP/tmux-isolation.sh"
+# shellcheck source=./lib/reap-verified.sh
+source "$HERE/lib/reap-verified.sh"
 # Explicitly under /tmp, not "${TMPDIR:-/tmp}": the throwaway LaunchAgent job
 # below must be able to actually exec its script from wherever this points,
 # and a per-user $TMPDIR is not guaranteed launchd-executable in every
@@ -52,11 +54,20 @@ DOMAIN="gui/$UID_N"
 JOB="$DOMAIN/$LABEL"
 PLIST_PATH=""
 
+# agent-supervisor#104: `pkill -KILL -f "$STAND_IN"` (the previous shape here)
+# is fire-and-forget -- it never confirms the process is actually gone and
+# never reports if it is not. It happened to be safe (STAND_IN is a unique
+# path under this test's own $A), but it gave no evidence either way, and
+# `trap cleanup EXIT` alone -- with no INT/TERM registered -- means an
+# untrapped SIGTERM landing while bash is between commands (not blocked in a
+# `wait`) skips this function entirely (see inbox-poll.sh's own header on the
+# same gap, agent-dotfiles#187). PID_HISTORY (recorded by the stand-in itself
+# at spawn) lets cleanup reap by pid, verified, and report if it can't.
 cleanup() {
   launchctl bootout "$JOB" >/dev/null 2>&1
   [ -n "$PLIST_PATH" ] && rm -f "$PLIST_PATH"
   [ -n "${SESSION:-}" ] && tmux kill-session -t "$SESSION" >/dev/null 2>&1
-  [ -n "${STAND_IN:-}" ] && pkill -KILL -f "$STAND_IN" >/dev/null 2>&1
+  [ -n "${PID_HISTORY:-}" ] && [ -n "${A:-}" ] && reap_pid_history_verified "$PID_HISTORY" "$A" 5
   [ -n "${A:-}" ] && [ -n "${SRC:-}" ] && [ -n "${LIVE:-}" ] && {
     git -C "$SRC" worktree remove --force "$LIVE" >/dev/null 2>&1
     git -C "$SRC" worktree prune >/dev/null 2>&1
@@ -67,7 +78,7 @@ cleanup() {
   [ -n "$OLD_TMUX_TMPDIR" ] && export TMUX_TMPDIR="$OLD_TMUX_TMPDIR" || unset TMUX_TMPDIR
   [ -n "$OLD_TMUX" ] && export TMUX="$OLD_TMUX"
 }
-trap cleanup EXIT
+trap cleanup EXIT INT TERM
 
 if ! assert_isolated_tmux; then
   say_bad "setup: isolated tmux socket for #75" "TMUX_TMPDIR=$TMUX_TMPDIR"

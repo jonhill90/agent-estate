@@ -32,6 +32,8 @@ fi
 
 # shellcheck source=../../scripts/supervisor/tmux-isolation.sh
 source "$SUP/tmux-isolation.sh"
+# shellcheck source=./lib/reap-verified.sh
+source "$HERE/lib/reap-verified.sh"
 RT=$(mktemp -d "${TMPDIR:-/tmp}/watchdog-57-tmux.XXXXXX")
 OLD_TMUX="${TMUX-}"
 OLD_TMUX_TMPDIR="${TMUX_TMPDIR-}"
@@ -39,11 +41,34 @@ unset TMUX
 export TMUX_TMPDIR="$RT"
 SESSION="watchdog-57-$$"
 
+# agent-supervisor#104: this suite previously had NO trap at all -- cleanup
+# (including `tmux kill-session`, the only thing that reaches the stand-in
+# poller process below) ran only if every assertion below was reached and the
+# script fell off the end normally. Any early exit -- an unbound variable
+# under `set -u`, this suite's own process being killed by the test harness's
+# timeout -- skipped cleanup entirely and left the stand-in `inbox-poll.sh`
+# process running for as long as the machine stayed up. Two of exactly that
+# shape were measured still alive hours later (#104's own issue). PID_HISTORY
+# is written by the stand-in itself (below) the moment it starts, so even a
+# trap firing on a signal that lands before the rest of setup finishes still
+# has something to reap by pid -- never by name.
+cleanup_all() {
+  [ -n "${PID_HISTORY:-}" ] && reap_pid_history_verified "$PID_HISTORY" "$RT" 5
+  unset TMUX; export TMUX_TMPDIR="$RT"
+  [ -n "${SESSION:-}" ] && tmux kill-session -t "$SESSION" >/dev/null 2>&1
+  [ -n "${SRC:-}" ] && [ -n "${LIVE:-}" ] && {
+    git -C "$SRC" worktree remove --force "$LIVE" >/dev/null 2>&1
+    git -C "$SRC" worktree prune >/dev/null 2>&1
+  }
+  rm -rf "${A:-}" "$RT" "${NOTIFY_DIR:-}"
+  [ "$OLD_TMUX_TMPDIR" ] && export TMUX_TMPDIR="$OLD_TMUX_TMPDIR" || unset TMUX_TMPDIR
+  [ "$OLD_TMUX" ] && export TMUX="$OLD_TMUX"
+}
+trap cleanup_all EXIT INT TERM
+
 if ! assert_isolated_tmux; then
   say_bad "setup: isolated tmux socket for #57" "TMUX_TMPDIR=$TMUX_TMPDIR"
   echo "  $pass passed, $fail failed"
-  [ "$OLD_TMUX_TMPDIR" ] && export TMUX_TMPDIR="$OLD_TMUX_TMPDIR" || unset TMUX_TMPDIR
-  [ "$OLD_TMUX" ] && export TMUX="$OLD_TMUX"
   exit 1
 fi
 say_ok "setup: isolated tmux socket for #57"
@@ -328,12 +353,6 @@ else
   say_bad "the deliberate-stop / prompt-relaunch path never pages Jon" "paged: $(up_calls)"
 fi
 
-tmux kill-session -t "$SESSION" >/dev/null 2>&1
-git -C "$SRC" worktree remove --force "$LIVE" >/dev/null 2>&1
-git -C "$SRC" worktree prune >/dev/null 2>&1
-rm -rf "$A" "$RT" "$NOTIFY_DIR"
-[ "$OLD_TMUX_TMPDIR" ] && export TMUX_TMPDIR="$OLD_TMUX_TMPDIR" || unset TMUX_TMPDIR
-[ "$OLD_TMUX" ] && export TMUX="$OLD_TMUX"
-
+# cleanup_all runs via the EXIT trap above -- no duplicate teardown here.
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
