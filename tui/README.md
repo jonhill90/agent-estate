@@ -27,20 +27,38 @@ landed -- confirm `select source_state, status, count(*) from source_tasks
 group by 1,2` shows a distribution, not one row, before trusting a board
 built on a ledger the sweep hasn't touched).
 
-Two layout variants ship (`internal/board/view.go`), picked live with
-**1-2**, same picker convention as the rail's glyph sets:
+**10 shipped: the board LOOKS like a board.** Real bordered columns with
+cards, not a flat list -- six layout variants ship (`internal/board/
+layout.go`), picked live with **1-6**, same picker convention as the
+rail's glyph sets. Each varies column style (boxed / thin rules /
+whitespace-only), density, card shape (single-line / multi-line with
+metadata), colour theme (restrained / vivid), and grouping (by-column
+across every repo, or by-repo swimlanes -- the evolution of #6's old
+`by-repo` view):
 
 | # | id | what it's for |
 |---|----|----------------|
-| 1 (default) | `by-column` | one WIP-wide question at a time -- "what needs review right now, across every repo" |
-| 2 | `by-repo` | "what does this one repo look like right now" |
+| 1 (default) | `kanban-column` | the eye-candy default -- bordered columns, vivid per-column colour, one card per box |
+| 2 | `kanban-repo` | same look, swimlaned per repo |
+| 3 | `compact-column` | thin rules not boxes, one line per card, muted colour -- speed, or a small terminal |
+| 4 | `compact-repo` | compact's grouping, swimlaned |
+| 5 | `kanban-recent` | kanban, plus Done cards completed in the last 24h |
+| 6 | `whitespace-all` | no border characters at all, every Done card ever -- lightest to render |
+
+Closed items (`Done` cards) default to hidden -- shown only by picking a
+layout that says so (5 or 6 above), never a separate prompt.
+
+**Project selection** toggles which repos' cards show, letter keys beside
+each repo's name in the on-screen legend (`[a]`, `[b]`, ...), `[0]` to show
+every repo again. Selection is a pure filter over the already-fetched
+snapshot -- toggling a repo never triggers a new `gh`/ledger read.
 
 WIP is shown **per tmux session** (the part of a lane name before `:`),
 not globally -- two workers per session is the estate's real capacity, and
 a session running three is flagged `OVER` right on the board. A card that
 has sat in its current column two hours or more (`as#95`'s own case: it
 sat CONFLICTING for two hours before a human noticed) is marked `!` and
-colored.
+colored -- in every layout, restrained theme included.
 
 ```
 go build -o agent-tui ./cmd/agent-tui

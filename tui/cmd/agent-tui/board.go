@@ -2,6 +2,7 @@ package main
 
 import (
 	"fmt"
+	"sort"
 	"time"
 
 	"github.com/jonhill90/agent-tui/internal/board"
@@ -33,6 +34,13 @@ func buildBoardFetch(ledgerPath, ghBin, sqliteBin, reposEnv string, lanesFetch f
 		}
 
 		repos := board.ReposFor(reposEnv, board.DiscoverRepos(taskRows))
+		// Sorted once here, not left to whatever order ReposFor happened to
+		// produce (base list, then discovered appended) -- Snapshot.Repos
+		// drives the project-selection letter legend (internal/board/
+		// model.go's repoLegend), and its letters must be stable across
+		// renders of the SAME repo set, not reshuffle if a discovered repo
+		// changes position.
+		sort.Slice(repos, func(i, j int) bool { return repos[i].GitHubID() < repos[j].GitHubID() })
 
 		issuesByRepo := make(map[string][]board.Issue, len(repos))
 		prsByRepo := make(map[string][]board.PR, len(repos))
@@ -56,7 +64,7 @@ func buildBoardFetch(ledgerPath, ghBin, sqliteBin, reposEnv string, lanesFetch f
 		}
 
 		cards := board.Derive(time.Now(), repos, issuesByRepo, prsByRepo, taskRows, lanes)
-		return board.Snapshot{Cards: cards, WIP: board.ComputeWIP(cards)}, nil
+		return board.Snapshot{Cards: cards, WIP: board.ComputeWIP(cards), Repos: repos}, nil
 	}
 }
 
