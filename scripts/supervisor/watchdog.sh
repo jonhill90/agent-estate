@@ -221,6 +221,23 @@ POLLER_SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
 INBOX_POLL_TIMEOUT_ASSUMED="${INBOX_POLL_TIMEOUT:-25}"
 INBOX_HEARTBEAT_STALE_AFTER="${INBOX_HEARTBEAT_STALE_AFTER:-$(( 2 * (INBOX_POLL_TIMEOUT_ASSUMED + 80) ))}"
 
+# --- as#151: director-inbox staleness, from OUTSIDE the loop ----------------
+# `director-route.sh` already pages Jon when a queued message crosses
+# DIRECTOR_INBOX_STALE_SECONDS (as#34/#42), but that check only runs inside
+# `inbox-poll.sh`'s own flush loop -- once per Telegram long-poll iteration,
+# while that loop is alive and actually reaching it. Measured on this issue:
+# `notify.log`'s entire history has no record of that page ever firing, and
+# if the poller itself is down nothing calls `--flush` at all, so the queue
+# can go stale with nothing watching. This is the same external-observer fix
+# #163 already applied to the poller's own heartbeat, aimed at a different
+# fact: `director-inbox.sh stats`' `oldest_age_s`, read from this watchdog's
+# own unattended tick, independent of the pane, the poller, or the loop.
+# Same threshold variable name director-route.sh already uses, so a deployer
+# setting one sets both.
+DIRECTOR_INBOX_BIN="${SUPERVISOR_DIRECTOR_INBOX_BIN:-$HERE/director-inbox.sh}"
+DIRECTOR_INBOX_STALE_SECONDS="${DIRECTOR_INBOX_STALE_SECONDS:-1800}"
+DIRECTOR_INBOX_EPISODE="${SUPERVISOR_DIRECTOR_INBOX_EPISODE:-$STATE/.watchdog-director-inbox-episode.json}"
+
 # agent-supervisor#133: `source_tasks` is written once at dispatch
 # (`record_dispatch`) and never advanced again unless something calls
 # `cli.py reconcile-source-tasks` -- #130 shipped that sweep, nothing called
@@ -519,6 +536,21 @@ poller_note() {                  # poller_note <line>
   return 0
 }
 
+# Same tmp+rename append shape again, for as#151's director-inbox staleness
+# check. Written EVERY tick, stale or not -- this is the visibility half of
+# the fix (requirement #3), not just the alarm half: a human running
+# `cat watchdog.status` sees the oldest-pending age unconditionally, the
+# same way `heartbeat:`/`poller:` already answer "where are we" without
+# anyone having to reach for digest.sh or wait for a Director tick.
+inbox_note() {                   # inbox_note <line>
+  local tmp="$STATUS.inbox.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^inbox:' "$STATUS"; printf 'inbox:    %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 # Same tmp+rename append shape again, for the recovery mechanism's own
 # availability. Absent is different from present-but-not-runnable: the first is
 # a partial install, the second is a broken install with a concrete chmod fix.
@@ -568,6 +600,29 @@ check_inbox_heartbeat() {
     log "HEARTBEAT-CHECK FAILED rc=$notify_rc: $notify_out"
   else
     log "HEARTBEAT-CHECK: $notify_out"
+  fi
+}
+
+# as#151: runs on EVERY exit path, same reasoning as check_inbox_heartbeat
+# above -- a different subsystem from the busy/idle/asleep checks that
+# return early throughout this file, and it must be read every tick
+# regardless of which of those branches fired, because a busy pane (the
+# common, expected case) is exactly when this needs to keep watching.
+check_director_inbox() {
+  local notify_out notify_rc
+  notify_out=$(python3 "$HERE/watchdog_notify.py" \
+    --mode director-inbox \
+    --director-inbox-bin "$DIRECTOR_INBOX_BIN" \
+    --threshold-seconds "$DIRECTOR_INBOX_STALE_SECONDS" \
+    --episode-state-path "$DIRECTOR_INBOX_EPISODE" \
+    --log-path "$STATE/watchdog-notify.log" \
+    --notify-script "${NOTIFY_SCRIPT:-}" 2>&1)
+  notify_rc=$?
+  inbox_note "$(printf '%s' "$notify_out" | tr '\n' ' ')"
+  if [ "$notify_rc" -ne 0 ]; then
+    log "DIRECTOR-INBOX-CHECK FAILED rc=$notify_rc: $notify_out"
+  else
+    log "DIRECTOR-INBOX-CHECK: $notify_out"
   fi
 }
 
@@ -878,6 +933,7 @@ advance_on_exit() {
 on_exit() {
   local rc=$?
   check_inbox_heartbeat
+  check_director_inbox
   check_poller_process_count
   check_poller_window
   check_source_task_sweep
