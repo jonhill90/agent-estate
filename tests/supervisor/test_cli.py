@@ -1301,6 +1301,53 @@ class IssueLaneCliTest(unittest.TestCase):
 
             self.assertEqual({"issue": "13", "known": False, "lane": None, "task": None}, author)
 
+    def _contributor_issue_lanes(self, root, issue):
+        output = io.StringIO()
+        argv = ["--state-dir", root, "contributor-issue-lanes", "--issue", str(issue)]
+        with contextlib.redirect_stdout(output):
+            rc = cli.main(argv)
+        self.assertEqual(0, rc, output.getvalue())
+        return json.loads(output.getvalue())
+
+    def test_contributor_issue_lanes_returns_every_non_review_task(self):
+        """agent-supervisor#190: unlike `author-issue-lane` (which refuses
+        to pick between two non-review candidates with no head_ref to
+        disambiguate -- see the ambiguous test just above), this returns
+        BOTH -- the full contributor set `dispatch.sh --reviews-pr` excludes
+        a review from, not a single narrowed-down author."""
+        with tempfile.TemporaryDirectory() as root:
+            self._record_dispatch(root, lane="t:3", task="as190-original-author", issue=190)
+            self._record_dispatch(root, lane="t:4", task="as190-fix-pass", issue=190)
+
+            result = self._contributor_issue_lanes(root, 190)
+
+            self.assertEqual("190", result["issue"])
+            self.assertTrue(result["known"])
+            # Order is not asserted: unlike the core-level test above (which
+            # controls a fake clock), these two dispatches race real
+            # wall-clock time, so `created_at` may tie and the tiebreak
+            # (`tasks.id ASC`) is not what this test is about -- only that
+            # BOTH contributors are present, which the set comparison proves.
+            self.assertEqual(
+                {("t:3", "as190-original-author"), ("t:4", "as190-fix-pass")},
+                {(row["lane"], row["task"]) for row in result["contributors"]},
+            )
+
+    def test_contributor_issue_lanes_excludes_review_tasks(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._record_dispatch(root, lane="t:3", task="as76-author-lane-drift", issue=76)
+            self._record_dispatch(root, lane="t:4", task="as76-review-as73", issue=76)
+
+            result = self._contributor_issue_lanes(root, 76)
+
+            self.assertEqual([{"lane": "t:3", "task": "as76-author-lane-drift"}], result["contributors"])
+
+    def test_contributor_issue_lanes_unknown_issue_is_empty_not_an_error(self):
+        with tempfile.TemporaryDirectory() as root:
+            result = self._contributor_issue_lanes(root, 404)
+
+            self.assertEqual({"issue": "404", "known": False, "contributors": []}, result)
+
 
 class WorktreeLaneCliTest(unittest.TestCase):
     """agent-supervisor#117: `dispatch.sh --reviews-pr`'s last-resort read,

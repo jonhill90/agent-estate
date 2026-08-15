@@ -1159,6 +1159,56 @@ class LedgerTest(unittest.TestCase):
             "for a completed author task -- if it found one, this test cannot tell the fix from the bug",
         )
 
+    def test_get_contributor_tasks_for_issue_includes_every_non_review_task(self):
+        """agent-supervisor#190: `get_author_task_for_issue` narrows multiple
+        non-review candidates for the same issue down to one (or `None`
+        when it cannot). `get_contributor_tasks_for_issue` must NOT narrow --
+        a fix-pass task dispatched against the same issue as an original
+        author (both non-review) belongs in the CONTRIBUTOR SET dispatch.sh
+        excludes a review from, even though `get_author_task_for_issue`
+        itself would refuse to pick between them."""
+
+        def dispatch(lane, task_id, summary):
+            self.ledger.record_dispatch(
+                lane=lane,
+                pane_id=f"%{lane.rsplit('-', 1)[-1]}",
+                nonce=f"nonce-{task_id}",
+                harness="claude",
+                repo=f"/repo/{lane}",
+                server_id="server-a",
+                session_id="$3",
+                command="claude.exe",
+                task_id=task_id,
+                source_kind="issue",
+                source_url="https://github.com/jonhill90/agent-supervisor/issues/190",
+                source_ref="190",
+                summary=summary,
+                source_state="OPEN",
+                evidence=[f"claimed by dispatch.sh for lane {lane}"],
+                status_marker=None,
+            )
+            self.clock.value += 1
+
+        dispatch("free-3", "as190-original-author", "#190 original fix")
+        dispatch("free-4", "as190-fix-pass", "#190 fix pass after review findings")
+        dispatch("free-5", "as190-review-only", "#190 review PR #460")
+
+        contributors = self.ledger.get_contributor_tasks_for_issue("190")
+        lanes = {row["lane"] for row in contributors}
+        self.assertEqual({"free-3", "free-4"}, lanes, "both non-review tasks are contributors")
+        task_ids = {row["id"] for row in contributors}
+        self.assertNotIn("as190-review-only", task_ids, "a review task is never a contributor")
+
+        # Unlike get_contributor_tasks_for_issue, the single-author lookup
+        # for the SAME issue is genuinely ambiguous here (two non-review
+        # candidates, no head_ref to disambiguate) and correctly answers
+        # "don't know" -- proving the two methods answer different
+        # questions rather than one silently reusing the other's narrowing.
+        self.assertIsNone(self.ledger.get_author_task_for_issue("190"))
+
+    def test_get_contributor_tasks_for_issue_unknown_issue_is_empty(self):
+        self.assertEqual([], self.ledger.get_contributor_tasks_for_issue("no-such-issue"))
+
     def test_get_task_for_worktree_resolves_when_the_branch_slug_differs_from_the_task_slug(self):
         """agent-supervisor#117: the actual, measured bug. Task
         `as101-pr-inference-fix` produced a PR whose head branch was

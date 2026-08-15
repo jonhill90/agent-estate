@@ -58,10 +58,13 @@
 #              After the worktree is built, its `origin` is compared against
 #              [repo] and the dispatch is refused on mismatch (#17).
 # --reviews-pr <PR>
-#              this dispatch is a review of PR <PR>. dispatch.sh (#212) then
-#              refuses any candidate lane that authored that PR's branch,
-#              fails closed if authorship cannot be determined at all, and
-#              proceeds unchanged if the flag is omitted -- see step 0.5.
+#              this dispatch is a review of PR <PR>. dispatch.sh (#212, widened
+#              by #190) then refuses any candidate lane that CONTRIBUTED to
+#              that PR -- its authoring dispatch, and any later dispatch
+#              (e.g. a fix pass) recorded against the same issue or the same
+#              worktree -- fails closed if that contributor set cannot be
+#              determined at all, and proceeds unchanged if the flag is
+#              omitted -- see step 0.5.
 #              agent-supervisor#70: when omitted, dispatch.sh tries to infer
 #              it from the issue's title, then the brief -- a line naming
 #              both "review" and "PR #<N>" -- so a forgotten flag is not
@@ -496,9 +499,45 @@ fi
 # Measured on this repo's own merged history when #35 shipped: 3 of 11
 # merged PRs, plus open PR #33, were unreviewable through the branch-only
 # path -- see the #35 issue body for the count.
-AUTHOR_LANE=""
-AUTHOR_TASK=""
+# agent-supervisor#190: this used to resolve a SINGLE `AUTHOR_LANE` -- the
+# one task the ledger could name as having produced the PR's branch. Two
+# live dispatches (this issue's own evidence) show why that is not enough:
+# a FIX-PASS task dispatched against the same issue to address review
+# findings (`as178-fix186`, fixing PR #186) is a second, later contributor
+# to the same PR, sitting in the exact same `source_tasks` rows the single
+# lookup below queries -- it was just discarded by the "narrow to one"
+# step, and the lane that wrote it went on to approve its own fix.
+#
+# So this now builds a SET, `AUTHOR_LANES` (with `AUTHOR_TASKS` as its
+# parallel "why" for messages) -- every lane the ledger can show contributed
+# to this PR, not just the one it can name as "the" author. Plain indexed
+# arrays, not `declare -A` (bash 3.2 has none -- see #199's own removal
+# above), so membership is a linear scan (`author_lane_known`, below) and
+# both are guarded with the same `"${arr[@]+"${arr[@]}"}"` bash-3.2-empty-
+# array idiom `POSITIONAL` already established in this file.
+AUTHOR_LANES=()
+AUTHOR_TASKS=()
 FALLBACK_TASK=""
+# True (1) only when `contributor-issue-lanes` (or a fallback below) was
+# consulted and answered with a NON-empty, known set. Distinguishes "no PR
+# review requested, no set was ever needed" (both arrays legitimately empty,
+# no refusal below) from "a review WAS requested and the ledger came back
+# silent" (arrays empty for a reason, and step 4 below must refuse), which an
+# empty-array check alone cannot tell apart.
+CONTRIBUTORS_RESOLVED=""
+author_lane_known() {  # author_lane_known <lane> -> 0 if already in the set
+  local want="$1" have
+  for have in "${AUTHOR_LANES[@]+"${AUTHOR_LANES[@]}"}"; do
+    [ "$have" = "$want" ] && return 0
+  done
+  return 1
+}
+add_contributor() {  # add_contributor <lane> <task> -- dedup by lane
+  local lane="$1" task="$2"
+  author_lane_known "$lane" && return 0
+  AUTHOR_LANES+=("$lane")
+  AUTHOR_TASKS+=("$task")
+}
 if [ -n "$REVIEWS_PR" ]; then
   GH_REPO_ARGS=()
   [ -n "$REPO" ] && GH_REPO_ARGS=(-R "$REPO")
@@ -519,18 +558,20 @@ if [ -n "$REVIEWS_PR" ]; then
   fi
 
   # 1 & 2. THE LEDGER, asked by ISSUE -- never by branch name. Two sources
-  # for "which issue this PR closes", tried in order and pooled (deduped)
+  # for "which issue this PR closes", tried in order and POOLED (deduped)
   # rather than short-circuited on the first that parses, because either can
-  # be empty for a PR that still has a real, ledger-known author:
+  # be empty for a PR that still has real, ledger-known contributors:
   #   1. closingIssuesReferences: GitHub's own parse of the PR body.
   #   2. commit messages: this project's own convention closes issues from
   #      commit trailers too (see this brief's own "Close with `Fixes
   #      #35`"), which a PR body alone would miss.
-  # Each candidate issue number goes to `cli.py author-issue-lane`, which asks
-  # the ledger which non-review task authored that issue -- it never reads a
-  # branch, and a review task can never become the author. The first candidate
-  # the ledger actually knows about wins: silence on one candidate is a reason
-  # to try the next, not to refuse yet.
+  # Each candidate issue number goes to `cli.py contributor-issue-lanes`
+  # (agent-supervisor#190), which asks the ledger for EVERY non-review task
+  # ever dispatched against that issue -- never a branch, and a review task
+  # can never be a contributor. UNLIKE the single-author lookup this
+  # replaces, every candidate issue that answers is UNIONED into the set,
+  # not just the first: a PR can close more than one issue, and each is a
+  # genuine source of contributors, not a fallback for the others.
   CANDIDATE_ISSUES=$(
     {
       grep -oE '"closingIssuesReferences":\[[^]]*\]' <<<"$PR_JSON" \
@@ -540,11 +581,14 @@ if [ -n "$REVIEWS_PR" ]; then
     } | awk '!seen[$0]++'
   )
   for candidate_issue in $CANDIDATE_ISSUES; do
-    ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" author-issue-lane --issue "$candidate_issue" --head-ref "$HEAD_REF" 2>&1) || continue
+    ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" contributor-issue-lanes --issue "$candidate_issue" 2>&1) || continue
     if grep -qF '"known":true' <<<"$ISSUE_JSON"; then
-      AUTHOR_LANE=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$ISSUE_JSON")
-      AUTHOR_TASK=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$ISSUE_JSON")
-      break
+      CONTRIBUTORS_RESOLVED=1
+      while IFS=$'\t' read -r c_lane c_task; do
+        [ -n "$c_lane" ] || continue
+        add_contributor "$c_lane" "$c_task"
+      done < <(grep -oE '"lane":"[^"]*","task":"[^"]*"' <<<"$ISSUE_JSON" \
+        | sed -E 's/"lane":"([^"]*)","task":"([^"]*)"/\1\t\2/')
     fi
   done
 
@@ -565,7 +609,14 @@ if [ -n "$REVIEWS_PR" ]; then
   # in, i.e. the one whose worktrees this can actually see -- REQUIRED for
   # this step; skipped (not refused) when a caller omitted it, exactly like
   # `DISPATCH_ALLOW_CWD_REPO_PATH` skips it above for [repo] alone.
-  if [ -z "$AUTHOR_LANE" ] && [ -n "$REPO_PATH" ]; then
+  #
+  # agent-supervisor#190: UNIONED into the set regardless of whether step 1&2
+  # already found contributors (no longer gated on the set being empty) --
+  # the worktree currently on HEAD_REF can be a lane the issue-based lookup
+  # never named (a legacy task, or a task recorded with a different
+  # `source_ref`), and finding one more contributor is only ever the safe
+  # direction here.
+  if [ -n "$REPO_PATH" ]; then
     WORKTREE_LIST=$(git -C "$REPO_PATH" worktree list --porcelain 2>/dev/null || true)
     if [ -n "$WORKTREE_LIST" ]; then
       MATCHED_WORKTREE=$(awk -v want="branch refs/heads/$HEAD_REF" '
@@ -579,8 +630,10 @@ if [ -n "$REVIEWS_PR" ]; then
       if [ -n "$MATCHED_WORKTREE" ]; then
         WORKTREE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" worktree-lane --path "$MATCHED_WORKTREE" 2>&1)
         if [ $? -eq 0 ] && grep -qF '"known":true' <<<"$WORKTREE_JSON"; then
-          AUTHOR_LANE=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$WORKTREE_JSON")
-          AUTHOR_TASK=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$WORKTREE_JSON")
+          CONTRIBUTORS_RESOLVED=1
+          w_lane=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$WORKTREE_JSON")
+          w_task=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$WORKTREE_JSON")
+          add_contributor "$w_lane" "$w_task"
         fi
       fi
     fi
@@ -590,29 +643,41 @@ if [ -n "$REVIEWS_PR" ]; then
   # worktree path was ever recorded for them, so step 3 above can never
   # match. The branch name IS trusted here, but only as far as the ledger
   # confirms it -- a task id it does not recognise still refuses, same as
-  # always.
-  if [ -z "$AUTHOR_LANE" ] && [[ "$HEAD_REF" =~ ^(lane|fix|feat|chore|docs)/([0-9]+)-(.+)$ ]]; then
+  # always. Only reached when the set is STILL empty -- unlike steps 1-3,
+  # this reconstructs a single task id from the branch name by convention
+  # rather than asking the ledger for a set, so it cannot itself widen an
+  # already-nonempty set the way step 3 does.
+  if [ ${#AUTHOR_LANES[@]} -eq 0 ] && [[ "$HEAD_REF" =~ ^(lane|fix|feat|chore|docs)/([0-9]+)-(.+)$ ]]; then
     FALLBACK_TASK="${PREFIX}${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
     FALLBACK_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" task-lane --task "$FALLBACK_TASK" 2>&1)
     if [ $? -eq 0 ] && grep -qF '"known":true' <<<"$FALLBACK_JSON"; then
-      AUTHOR_LANE=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$FALLBACK_JSON")
-      AUTHOR_TASK="$FALLBACK_TASK"
+      CONTRIBUTORS_RESOLVED=1
+      f_lane=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$FALLBACK_JSON")
+      add_contributor "$f_lane" "$FALLBACK_TASK"
     fi
   fi
 
   # 4. Still silent -> refuse. Every source above answered "no record", not
-  # "safe".
-  if [ -z "$AUTHOR_LANE" ]; then
+  # "safe". agent-supervisor#190's fail-closed requirement: an unresolvable
+  # contributor set must make this dispatch LESS likely to proceed, never
+  # fall back to some narrower, single-author check that would admit a
+  # candidate this wider set does not yet clear (#124/#126).
+  if [ -z "$CONTRIBUTORS_RESOLVED" ]; then
+    # Wording kept verbatim from before #190 ("could not determine PR
+    # #N's author", "authorship unknown") -- both predate the widening and
+    # every earlier caller, including tests, greps for those exact phrases.
+    # The two describe the same fact before and after: nobody the ledger
+    # will vouch for produced (or contributed to) this PR.
     echo "dispatch: could not determine PR #$REVIEWS_PR's author -- the ledger has no record by issue, by commit, or by branch '$HEAD_REF' (task ${FALLBACK_TASK:-none}) -- refusing (authorship unknown, failing closed)" >&2
     # agent-supervisor#101, third red-first item: on the inferred path these
     # are TWO separate findings arriving together -- "this looked like a
-    # review" and "its author is unresolvable" -- and read as one failure
-    # about authorship. An operator whose dispatch was never a review has no
-    # authorship problem to fix; they have an inference to switch off. Say
-    # which of the two is theirs.
+    # review" and "its contributors are unresolvable" -- and read as one
+    # failure about authorship. An operator whose dispatch was never a
+    # review has no authorship problem to fix; they have an inference to
+    # switch off. Say which of the two is theirs.
     if [ -n "$REVIEWS_PR_INFERRED" ]; then
       echo "dispatch: NOTE -- --reviews-pr was never passed; PR #$REVIEWS_PR was INFERRED from $INFERRED_FROM" >&2
-      echo "dispatch: two separate things are true here -- this dispatch LOOKED like a review, and that PR's author cannot be resolved" >&2
+      echo "dispatch: two separate things are true here -- this dispatch LOOKED like a review, and that PR's contributors cannot be resolved" >&2
       echo "dispatch: if it is not a review at all (a rebase, a fix pass, a follow-up), re-run with --not-a-review and the authorship question does not arise" >&2
     fi
     exit 1
@@ -852,29 +917,48 @@ while IFS=$'\t' read -r candidate candidate_target; do
   idx="${candidate##*:}"
   wname="${WINDOW_NAME_BY_INDEX[$idx]:-}"
   # agent-dotfiles#212: excluded BEFORE the ledger's free/occupied query, not
-  # inside it -- a candidate that authored the PR under review is unsafe
-  # regardless of what `lane-free` would say, and this way the exclusion is
-  # visible on its own rather than folded into that check's result. An
-  # ordinary (non-review) dispatch never sets AUTHOR_LANE and never reaches
-  # this branch.
+  # inside it -- a candidate that contributed to the PR under review is
+  # unsafe regardless of what `lane-free` would say, and this way the
+  # exclusion is visible on its own rather than folded into that check's
+  # result. An ordinary (non-review) dispatch never populates AUTHOR_LANES
+  # and never reaches this branch.
   #
   # agent-supervisor#108: the comparison is `lane_relation`, not string
   # equality. A lane id embeds the session's NAME, and renaming the session
   # (done on 2026-08-14 to recover from #102) changed that name for every
-  # window at once -- so the author row `agent-dotfiles:3` stopped matching
-  # the very same window now called `agent-supervisor:3`, and this guard
-  # silently admitted the author. Only a POSITIVE `different` -- both ids
-  # parse and their window indices differ -- lets a candidate through;
-  # `same` and `unknown` both exclude, which is the same fail-closed posture
-  # step 0.5 already takes when authorship cannot be resolved at all.
-  if [ -n "$AUTHOR_LANE" ] && [ "$(lane_relation "$candidate" "$AUTHOR_LANE")" != different ]; then
-    if [ "$candidate" = "$AUTHOR_LANE" ]; then
-      echo "dispatch: skipping $candidate -- it authored task $AUTHOR_TASK, the PR #$REVIEWS_PR under review; an author does not review their own work" >&2
-    else
-      echo "dispatch: skipping $candidate -- it cannot be told apart from author lane $AUTHOR_LANE (task $AUTHOR_TASK, the PR #$REVIEWS_PR under review); a session rename changes a lane's name, not which window it is" >&2
+  # window at once -- so a contributor row `agent-dotfiles:3` stopped
+  # matching the very same window now called `agent-supervisor:3`, and this
+  # guard silently admitted a contributor. Only a POSITIVE `different` --
+  # both ids parse and their window indices differ -- lets a candidate
+  # through; `same` and `unknown` both exclude, which is the same
+  # fail-closed posture step 0.5 already takes when the contributor set
+  # cannot be resolved at all.
+  #
+  # agent-supervisor#190: checked against EVERY lane in the set, not one --
+  # `lane_relation` short-circuits on the first that is not positively
+  # `different` (a match against ANY contributor is disqualifying), so a
+  # candidate that made it through against the first ten contributors but
+  # matches the eleventh is still excluded, not admitted by majority.
+  if [ ${#AUTHOR_LANES[@]} -gt 0 ]; then
+    MATCHED_CONTRIBUTOR_LANE=""
+    MATCHED_CONTRIBUTOR_TASK=""
+    for ai in "${!AUTHOR_LANES[@]}"; do
+      al="${AUTHOR_LANES[$ai]}"
+      if [ "$(lane_relation "$candidate" "$al")" != different ]; then
+        MATCHED_CONTRIBUTOR_LANE="$al"
+        MATCHED_CONTRIBUTOR_TASK="${AUTHOR_TASKS[$ai]}"
+        break
+      fi
+    done
+    if [ -n "$MATCHED_CONTRIBUTOR_LANE" ]; then
+      if [ "$candidate" = "$MATCHED_CONTRIBUTOR_LANE" ]; then
+        echo "dispatch: skipping $candidate -- it contributed task $MATCHED_CONTRIBUTOR_TASK to PR #$REVIEWS_PR under review; a contributor does not review their own work" >&2
+      else
+        echo "dispatch: skipping $candidate -- it cannot be told apart from contributor lane $MATCHED_CONTRIBUTOR_LANE (task $MATCHED_CONTRIBUTOR_TASK, contributed to PR #$REVIEWS_PR under review); a session rename changes a lane's name, not which window it is" >&2
+      fi
+      AUTHOR_SKIPPED=1
+      continue
     fi
-    AUTHOR_SKIPPED=1
-    continue
   fi
   # #241: `--lane` stays the index (the ledger's slot identity) and `--target`
   # becomes the window id. Before this merge both arguments were `$candidate`,
@@ -945,7 +1029,15 @@ done < <("$HERE/lanes.sh" --free "$SESSION" 2>/dev/null)
 
 if [ -z "$LANE" ]; then
   if [ -n "$AUTHOR_SKIPPED" ]; then
-    echo "dispatch: no free lane other than the author of PR #$REVIEWS_PR (task $AUTHOR_TASK) -- not dispatching its review #$ISSUE_ARG" >&2
+    # AUTHOR_TASKS is guaranteed non-empty here: AUTHOR_SKIPPED is only ever
+    # set inside the loop above, which only runs its exclusion branch when
+    # AUTHOR_LANES (and so its parallel AUTHOR_TASKS) is non-empty.
+    # Wording kept verbatim from before #190 ("no free lane other than the
+    # author of PR", "an author never reviews their own PR") -- tests predating
+    # the widening grep for those exact phrases, and they are still literally
+    # true: every excluded candidate matched SOME lane in the contributor set.
+    CONTRIBUTOR_TASKS_JOINED=$(IFS=,; echo "${AUTHOR_TASKS[*]}")
+    echo "dispatch: no free lane other than the author of PR #$REVIEWS_PR (tasks $CONTRIBUTOR_TASKS_JOINED) -- not dispatching its review #$ISSUE_ARG" >&2
     echo "dispatch: an author never reviews their own PR, even when it is the only free lane" >&2
     if [ -n "$REVIEWS_PR_INFERRED" ]; then
       echo "dispatch: --reviews-pr was never passed; PR #$REVIEWS_PR was INFERRED from $INFERRED_FROM -- if this is not a review, re-run with --not-a-review (agent-supervisor#101)" >&2

@@ -1124,6 +1124,27 @@ class Ledger:
             or re.search(r"\breview(ing|s)?\s+(pr|pull request|#[0-9]+)", text)
         )
 
+    def _non_review_tasks_for_issue(self, issue_ref):
+        """Every non-review task ever dispatched against this issue, oldest
+        first -- the raw candidate pool `get_author_task_for_issue` narrows
+        to one and `get_contributor_tasks_for_issue` (agent-supervisor#190)
+        returns whole. One query, so the two callers cannot drift on what
+        counts as a candidate the way #108 already drifted on lane identity.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT tasks.* FROM tasks
+                JOIN source_tasks ON source_tasks.id = tasks.id
+                WHERE source_tasks.source_kind = 'issue' AND source_tasks.source_ref = ?
+                ORDER BY tasks.created_at ASC, tasks.id ASC
+                """,
+                (str(issue_ref),),
+            ).fetchall()
+        return [
+            self._dict(row) for row in rows if not self._task_looks_like_review(row["id"], row["summary"])
+        ]
+
     # `dispatch.sh`/`worktree.sh` mint every branch as `<prefix>/<issue>-<slug>`
     # (or a hand-pushed `fix|feat|chore|docs/<issue>-<slug>`) and the SAME
     # dispatch records that task under id `<window-prefix><issue>-<slug>` --
@@ -1131,6 +1152,42 @@ class Ledger:
     # is therefore a suffix of the authoring task's id, deterministically, for
     # every dispatch that followed the convention.
     _HEAD_REF_RE = re.compile(r"^(?:lane|fix|feat|chore|docs)/([0-9]+)-(.+)$")
+
+    def get_contributor_tasks_for_issue(self, issue_ref):
+        """The full CONTRIBUTOR SET for an issue's PR -- every non-review
+        task ever dispatched against it, not narrowed to a single "author".
+
+        agent-supervisor#190. `get_author_task_for_issue` below deliberately
+        narrows multiple non-review candidates down to the one that produced
+        the PR's branch (or refuses, returning `None`, when it cannot tell).
+        That narrowing is correct for NAMING "the author" but wrong for
+        author-EXCLUSION at a review dispatch: a fix-pass task dispatched
+        against the SAME issue to address review findings (e.g.
+        `as178-fix186`, fixing PR #186) is itself a non-review candidate for
+        that issue's `source_ref`, and #190 recorded two live dispatches
+        where a fix-pass lane was handed the re-review of its own fix
+        because only the single narrowed-down author was excluded -- the
+        fix-pass task was sitting in this exact candidate pool the whole
+        time, just discarded by the narrowing.
+
+        Every non-review candidate for the issue is returned here, unfiltered
+        by branch-name matching. This can over-include (an abandoned prior
+        attempt at the same issue, never actually part of the PR now under
+        review) but that is the SAFE direction: it costs dispatch.sh a
+        candidate lane it would otherwise have picked, never the reverse,
+        and dispatch.sh only refuses the whole dispatch if EVERY free lane
+        is in the excluded set (agent-supervisor#124/#126 -- an unresolvable
+        or over-cautious answer must make a lane less dispatchable, never
+        more).
+
+        Deliberately does NOT read `git log` for author identity: every lane
+        in this estate commits under the same GitHub identity (`Jon Hill` /
+        `jonhill90`, see agent-supervisor#184), so git authorship cannot
+        distinguish one lane's commits from another's on a shared branch --
+        only the ledger, which recorded who each task was dispatched to,
+        can.
+        """
+        return self._non_review_tasks_for_issue(issue_ref)
 
     def get_author_task_for_issue(self, issue_ref, head_ref=None):
         """The task whose dispatch produced this issue's current PR.
@@ -1150,19 +1207,7 @@ class Ledger:
         when exactly one non-review task exists -- anything else is a
         genuine "don't know", returned as `None` rather than guessed at.
         """
-        with contextlib.closing(self._connect()) as connection:
-            rows = connection.execute(
-                """
-                SELECT tasks.* FROM tasks
-                JOIN source_tasks ON source_tasks.id = tasks.id
-                WHERE source_tasks.source_kind = 'issue' AND source_tasks.source_ref = ?
-                ORDER BY tasks.created_at ASC, tasks.id ASC
-                """,
-                (str(issue_ref),),
-            ).fetchall()
-        candidates = [
-            self._dict(row) for row in rows if not self._task_looks_like_review(row["id"], row["summary"])
-        ]
+        candidates = self._non_review_tasks_for_issue(issue_ref)
         if not candidates:
             return None
 
