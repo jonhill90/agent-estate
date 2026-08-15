@@ -145,6 +145,16 @@
 #         INBOX_POLL_RESTART_FLAG     path checked once per iteration; its presence
 #                                     is a deliberate, non-paging restart request
 #                                     (default $STATE/.inbox-poll-restart-requested; #187)
+#
+# QA MODE (agent-supervisor#138): AGENT_NOTIFY_MODE=qa is not read directly by
+# this file -- it is inherited by every `inbox.sh` and `notify.sh` call this
+# loop makes below, so a QA run of this exact script polls the QA bot against
+# the QA offset file (inbox.sh's own MODE handling) and never touches Jon's
+# channels (notify.sh's own MODE handling). What this file DOES own is its
+# heartbeat/log/restart-flag defaults, which are namespaced by MODE too so a
+# standalone QA poller process cannot overwrite the production poller's
+# status/log with its own: `AGENT_NOTIFY_MODE=qa inbox-poll.sh` is the whole
+# invocation, no separate QA script.
 
 set -uo pipefail
 
@@ -153,14 +163,21 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/session-defaults.sh"
 SESSION="${1:-$(lanes_session_or_default)}"
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
-STATUS="${INBOX_POLL_STATUS:-$STATE/inbox-poll.status}"
-LOG="${INBOX_POLL_LOG:-$STATE/inbox-poll.log}"
+# See the QA MODE note above -- this suffix only affects THIS script's own
+# bookkeeping files; inbox.sh and notify.sh derive their own QA behaviour
+# from AGENT_NOTIFY_MODE directly, inherited through the environment.
+case "${AGENT_NOTIFY_MODE:-live}" in
+  qa) MODE_SUFFIX="-qa" ;;
+  *)  MODE_SUFFIX="" ;;
+esac
+STATUS="${INBOX_POLL_STATUS:-$STATE/inbox-poll${MODE_SUFFIX}.status}"
+LOG="${INBOX_POLL_LOG:-$STATE/inbox-poll${MODE_SUFFIX}.log}"
 POLL_TIMEOUT="${INBOX_POLL_TIMEOUT:-25}"
 FAIL_THRESHOLD="${INBOX_POLL_FAIL_THRESHOLD:-3}"
 ITERATIONS="${INBOX_POLL_ITERATIONS:-0}"
 MIN_UPTIME="${INBOX_POLL_MIN_UPTIME:-60}"
 BACKOFF_BASE="${INBOX_POLL_BACKOFF_BASE:-5}"
-RESTART_FLAG="${INBOX_POLL_RESTART_FLAG:-$STATE/.inbox-poll-restart-requested}"
+RESTART_FLAG="${INBOX_POLL_RESTART_FLAG:-$STATE/.inbox-poll-restart-requested${MODE_SUFFIX}}"
 START_TS=$(date +%s)
 # The commit this running process was started from -- written into every
 # status report so an external reader (advance-live.sh) can tell a stale

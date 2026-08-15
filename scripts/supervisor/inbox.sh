@@ -35,6 +35,18 @@
 #         message arrives, instead of Jon's reply sitting unread until the
 #         next tick calls this script on a schedule.
 #
+# QA MODE (agent-supervisor#138). AGENT_NOTIFY_MODE=qa runs this exact
+# script -- same getUpdates call, same lock, same ack semantics -- against a
+# second bot token (AGENT_NOTIFY_TELEGRAM_TOKEN_QA, same env file as the
+# production token) and a second default offset file
+# ($STATE/.telegram-offset-qa instead of $STATE/.telegram-offset). Two bots
+# means two offsets (#21, #52's duplicate-poller hazard in a new costume):
+# a QA poller acking against the production offset file could silently
+# advance past messages the production poller has not read yet, or vice
+# versa. Unset AGENT_NOTIFY_MODE (or any value other than "qa") is
+# unchanged production behaviour. qa mode with no QA token configured
+# refuses outright -- it never falls back to the production token.
+#
 # Locking (agent-dotfiles#142). The whole read-request-acknowledge cycle below
 # -- read the offset, ask Telegram, print, write the new offset -- runs under
 # an exclusive file lock, the same fcntl technique director-inbox.sh already
@@ -50,7 +62,15 @@
 
 set -uo pipefail
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
-OFFSET_FILE="${INBOX_OFFSET:-$STATE/.telegram-offset}"
+
+# Same code path, different credential and different offset (#138): MODE
+# picks both. "live" (unset/default) is unchanged production behaviour.
+MODE="${AGENT_NOTIFY_MODE:-live}"
+case "$MODE" in
+  qa) DEFAULT_OFFSET="$STATE/.telegram-offset-qa" ;;
+  *)  DEFAULT_OFFSET="$STATE/.telegram-offset" ;;
+esac
+OFFSET_FILE="${INBOX_OFFSET:-$DEFAULT_OFFSET}"
 LOCK_FILE="${INBOX_LOCK:-$OFFSET_FILE.lock}"
 ENVFILE="${NOTIFY_ENV:-$STATE/notify.env}"
 # shellcheck source=/dev/null
@@ -59,11 +79,22 @@ ENVFILE="${NOTIFY_ENV:-$STATE/notify.env}"
 PEEK=""
 [ "${1:-}" = "--peek" ] && PEEK=1
 
-token="${AGENT_NOTIFY_TELEGRAM_TOKEN:-}"
-if [ -z "$token" ]; then
-  echo "inbox: no AGENT_NOTIFY_TELEGRAM_TOKEN configured" >&2
-  exit 1
-fi
+case "$MODE" in
+  qa)
+    token="${AGENT_NOTIFY_TELEGRAM_TOKEN_QA:-}"
+    if [ -z "$token" ]; then
+      echo "inbox: QA mode requested (AGENT_NOTIFY_MODE=qa) but AGENT_NOTIFY_TELEGRAM_TOKEN_QA is not configured -- refusing rather than falling back to the production token" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    token="${AGENT_NOTIFY_TELEGRAM_TOKEN:-}"
+    if [ -z "$token" ]; then
+      echo "inbox: no AGENT_NOTIFY_TELEGRAM_TOKEN configured" >&2
+      exit 1
+    fi
+    ;;
+esac
 
 # Telegram's own long-poll timeout, in seconds. 0 (default) is "return
 # immediately" -- the original behaviour. Not validated beyond "is it a
