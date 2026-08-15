@@ -2171,6 +2171,50 @@ class Ledger:
                     (now, key),
                 )
 
+    # agent-tui#14. `session_remove`'s write path -- log every removal to the
+    # ledger with what was running at the time, the literal text of the
+    # issue this exists to satisfy. Reuses the SAME `events` table every
+    # other durable action in this ledger already writes to
+    # (`complete`/`observe_attention`/`record_snapshot` above), rather than a
+    # second table this estate would have to keep in sync with it -- an
+    # `events` row here is queryable by `cli.py events` exactly like a
+    # completion or attention event is.
+    #
+    # `detail` is written to `event_payloads_dir`, the same place
+    # `record_snapshot`'s diff blobs live, rather than packed into a column:
+    # the full `session_guard.remove_guard` payload that authorized a removal
+    # is exactly the kind of unbounded, structured evidence that pattern
+    # already exists for. `task_id` is left NULL -- a session-management
+    # event is not about any one task -- which `events.task_id` already
+    # allows (nullable FK).
+    def record_session_event(self, session, *, event, detail):
+        if not session or not isinstance(session, str):
+            raise ValueError("session is required")
+        if not event or not isinstance(event, str):
+            raise ValueError("event is required")
+        payload = json.dumps(detail, sort_keys=True).encode("utf-8")
+        digest = hashlib.sha256(payload).hexdigest()[:16]
+        now = int(self.clock())
+        # Includes both `now` and a content digest so two removals of the
+        # same session (created, removed, re-created, removed again) each
+        # get their own durable row instead of colliding on `INSERT OR
+        # IGNORE` -- unlike `completion:<task_id>`, a session name is not a
+        # one-shot identity.
+        key = f"session:{event}:{session}:{now}:{digest}"
+        payload_path = self.event_payloads_dir / f"{key.replace(':', '_')}.json"
+        with self._locked():
+            self._atomic_replace(payload_path, payload)
+            with self._transaction() as connection:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO events(key, type, status, payload_path, created_at)
+                    VALUES (?, 'session', 'pending', ?, ?)
+                    """,
+                    (key, str(payload_path), now),
+                )
+                row = connection.execute("SELECT * FROM events WHERE key=?", (key,)).fetchone()
+        return self._dict(row)
+
     def record_component(self, name, *, healthy, snapshot=None, error=None):
         if healthy and snapshot is None:
             raise ValueError("healthy component requires a snapshot")

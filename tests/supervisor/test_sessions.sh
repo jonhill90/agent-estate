@@ -5,9 +5,9 @@
 # CONSTRUCTION -- see that script's own header. This wraps it rather than
 # changing it, so test_lanes.sh's coverage of per-lane state classification
 # is untouched and this file only has to prove AGGREGATION: every session
-# shows up, each keeps its own lane rows, and the interim `supervised`
-# signal (real ledger evidence, not agent-supervisor#153's own marker, which
-# had not landed when this was written -- see sessions.sh's module comment)
+# shows up, each keeps its own lane rows, and the `supervised` signal --
+# agent-supervisor#153's own adopted-session marker, read straight from
+# `cli.py status`'s `sessions` key, not re-derived from lane identities --
 # reads correctly and fails CLOSED.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -138,6 +138,53 @@ if SESSIONS_LEDGER_CMD="$HERE/stubs/cli-sessions" "$SESSIONS_SH" >/dev/null 2>&1
 else
   ok "no-arg call is refused (only --json is supported)"
 fi
+
+# --- agent-supervisor#153: adopted at creation, zero lanes dispatched -------
+# The load-bearing fix this file exists for: a session the ledger has
+# ADOPTED (cli.py adopt-session, written once by bootstrap-session.sh at
+# creation time) must read supervised even if nothing has dispatched a lane
+# into it yet -- the old scan-the-lanes-list heuristic could not see this at
+# all, since it only ever looked at `lanes[].lane` identities.
+NOLANE_ADOPT_CMD="$D/adopted-no-lanes"
+cat > "$NOLANE_ADOPT_CMD" <<'CMD'
+#!/bin/bash
+echo '{"lanes": [], "tasks": [], "sessions": [{"session": "director"}]}'
+CMD
+chmod +x "$NOLANE_ADOPT_CMD"
+
+out=$(SESSIONS_LEDGER_CMD="$NOLANE_ADOPT_CMD" "$SESSIONS_SH" --json)
+python3 - "$out" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+by_session = {row["session"]: row for row in data}
+assert by_session["director"]["supervised"] is True, by_session["director"]
+print("  ok   adopted session with zero dispatched lanes reads supervised (agent-supervisor#153)")
+assert by_session["agent-supervisor"]["supervised"] is False, by_session["agent-supervisor"]
+assert by_session["Hill90"]["supervised"] is False, by_session["Hill90"]
+print("  ok   sessions the ledger never adopted stay unsupervised")
+PY
+[ $? -eq 0 ] && pass=$((pass+2)) || fail=$((fail+1))
+
+# --- a ledger read failure still leaves every session unsupervised ----------
+BROKEN_LEDGER_CMD="$D/broken-ledger"
+cat > "$BROKEN_LEDGER_CMD" <<'CMD'
+#!/bin/bash
+echo 'not json at all'
+exit 1
+CMD
+chmod +x "$BROKEN_LEDGER_CMD"
+
+out=$(SESSIONS_LEDGER_CMD="$BROKEN_LEDGER_CMD" "$SESSIONS_SH" --json)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "aggregate call still exits 0 when the ledger read fails"
+else bad "exit code with a broken ledger read" "got $rc"; fi
+python3 - "$out" <<'PY'
+import json, sys
+data = json.loads(sys.argv[1])
+assert all(row["supervised"] is False for row in data), data
+print("  ok   ledger read failure -> every session unsupervised (fails closed, not open)")
+PY
+[ $? -eq 0 ] && pass=$((pass+1)) || fail=$((fail+1))
 
 # --- no tmux sessions at all: exit 1, not an empty success -------------------
 EMPTY_TMUX="$D/bin3"; mkdir -p "$EMPTY_TMUX"

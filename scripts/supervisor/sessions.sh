@@ -15,30 +15,34 @@
 # untouched -- nothing about that script's behavior, arguments, or single-
 # session output changes here.
 #
-# ## The `supervised` field is NOT agent-supervisor#153
+# ## The `supervised` field IS agent-supervisor#153, now
 #
-# #153 is building the estate's real answer to "is this session mine to act
-# on" -- a marker set at session creation, unknown defaulting to
-# unsupervised. It had not landed as of this file's first version (its
-# branch sat at the same commit as `main`). Shipping a multi-session view
-# with no marker at all reopens exactly the incident #153 exists to prevent:
-# Jon's own `Hill90` session would appear indistinguishable from one the
-# estate dispatches into, and his sessions have been destroyed three times
-# by that exact confusion.
+# #153 landed (PR #157): `bootstrap-session.sh` writes a `sessions` row via
+# `cli.py adopt-session` at the moment it CREATES a session, independent of
+# whether any lane has since been dispatched into it. `cli.py status` already
+# returns that table verbatim as its `"sessions"` key
+# (`ledger.list_sessions()`). This file used to derive `supervised` by
+# scanning `status`'s `lanes` list for any `<session>:<window>` identity --
+# real ledger evidence, but a re-derivation of a DIFFERENT, narrower question
+# ("has dispatch.sh ever claimed a window here") than #153 actually answers
+# ("did the estate decide to adopt this session"), and a session adopted at
+# creation but never yet dispatched into read wrongly unsupervised under that
+# scheme. `KNOWN_JSON` below now reads `sessions[].session` directly instead
+# -- #153's own real signal, not a stand-in for it.
 #
-# So this file computes a NARROWER, evidence-based stand-in: a session is
-# `supervised` here only if the ledger (`cli.py status`) has ever registered
-# a lane whose identity is `<that session>:<window>` -- i.e. `dispatch.sh`
-# has actually claimed a window in it. That is real evidence the estate
-# manages the session, not a guess, but it answers a narrower question than
-# #153 will ("has the estate dispatched here" vs. #153's fuller intent) and
-# every session outside that set reads unsupervised, full stop -- including
-# the supervisor's own well-known sessions if the ledger cannot be read.
-# Fail-closed: a ledger read failure counts every session unsupervised
-# rather than trusting a name.
+# This is still a SIMPLIFIED reading of #153's tri-state `session_state()`
+# (`cli.py`, supervised/unsupervised/unknown), not a duplication of its
+# logic: `session_state()` also checks whether tmux still has the session at
+# all (`transport.session_exists`), collapsing to `unknown` when it does not.
+# That half is moot here by construction -- this script only ever lists
+# sessions `tmux list-sessions` currently returns, so every row already
+# passes the "tmux has it" test before this field is even computed. Only the
+# ledger-adoption half applies, and it is read straight from the table #153
+# writes, not re-derived.
 #
-# When #153 lands its own marker, THAT is the authority and this heuristic
-# should be replaced, not merged with -- see that issue.
+# Fail-closed, unchanged: a ledger read failure (or unparseable JSON) leaves
+# `KNOWN_JSON` empty, so every session reads unsupervised rather than
+# trusting a name.
 #
 # Usage: sessions.sh --json
 #
@@ -82,10 +86,10 @@ if [ "${#SESSIONS[@]}" -eq 0 ]; then
   exit 1
 fi
 
-# Sessions the ledger has ever registered a lane under -- see the module
-# comment above for exactly what this does and does not prove. A failed or
-# unparseable read leaves this empty, which fails every session CLOSED to
-# unsupervised rather than open to supervised.
+# Sessions the ledger has ADOPTED (agent-supervisor#153's own marker) -- see
+# the module comment above for exactly what this does and does not prove. A
+# failed or unparseable read leaves this empty, which fails every session
+# CLOSED to unsupervised rather than open to supervised.
 #
 # SESSIONS_LEDGER_CMD is a test-only override for the whole ledger read (not
 # just the interpreter or the script path, since a stub replacing `cli.py`
@@ -103,11 +107,11 @@ try:
     d = json.load(sys.stdin)
 except Exception:
     d = {}
-lanes = d.get("lanes") or []
+sessions_rows = d.get("sessions") or []
 sessions = sorted({
-    lane["lane"].split(":", 1)[0]
-    for lane in lanes
-    if isinstance(lane.get("lane"), str) and ":" in lane["lane"]
+    row["session"]
+    for row in sessions_rows
+    if isinstance(row, dict) and isinstance(row.get("session"), str) and row["session"]
 })
 print(json.dumps(sessions))
 ' 2>/dev/null)

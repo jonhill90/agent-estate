@@ -62,6 +62,54 @@ class TmuxTransport:
         """
         self._run("respawn-pane", "-k", "-t", target)
 
+    def list_panes(self, session):
+        """Every pane's window name and current working directory, for `session`.
+
+        agent-tui#14's worktree detection (`session_guard.remove_guard`) needs
+        every pane in the session, not just the active one per window -- `-s`
+        ("every pane in the session", not `-t <window>` alone) is what makes
+        that true. `=name` is the same exact-match target discipline
+        `session_exists` already documents; a session removal guard is
+        exactly the kind of caller #137's prefix-match bug would burn.
+        """
+        fmt = "#{window_name}\t#{pane_current_path}"
+        output = self._run("list-panes", "-t", f"={session}", "-s", "-F", fmt).stdout
+        panes = []
+        for line in output.splitlines():
+            if not line:
+                continue
+            window_name, _, path = line.partition("\t")
+            panes.append({"window_name": window_name, "path": path})
+        return panes
+
+    def switch_client(self, session):
+        """Switch the invoking client's attached session to `session`.
+
+        `=name` exact-match, same discipline as `session_exists` -- never a
+        prefix match onto a session this was not asked for.
+        """
+        self._run("switch-client", "-t", f"={session}")
+
+    def detach_client(self):
+        """Detach whatever client is attached to THIS process's own tty.
+
+        Deliberately no `-t`: `tmux detach-client` with no target detaches
+        the client for the invoking process's controlling terminal, which is
+        correct here because `mcp_server.py` runs as a child of whatever
+        TUI/client invoked it and inherits its tty.
+        """
+        self._run("detach-client")
+
+    def kill_session(self, session):
+        """Kill exactly one session, by exact name.
+
+        `=name`, never `kill-server` and never a bare/prefix target -- the
+        same #137 exact-match discipline `session_exists` already documents,
+        load-bearing here because the blast radius of getting this wrong is
+        destroying every session on the box instead of one.
+        """
+        self._run("kill-session", "-t", f"={session}")
+
     def session_exists(self, session):
         """Does this tmux server currently have a session by this exact name.
 

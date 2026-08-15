@@ -106,7 +106,10 @@ removing one is a deletion.
 ## Also here
 
 - **MCP server** (`mcp_server.py`) — exposes lanes, digest and ledger over MCP so
-  any harness can consume the supervisor, not just the one running it.
+  any harness can consume the supervisor, not just the one running it. Also
+  exposes four guarded session-management writes (attach/detach/add/remove;
+  agent-tui#14) — `dispatch`/`merge` remain excluded, see `supervisor_view.py`'s
+  `WRITE_SOURCES` docstring for why these four are different.
 - **Two lane viewers** (`laneview/text.sh`, `laneview/opensessions.sh`) — neither
   required by the other, or by `lanes.sh`.
 - **Watchdog** (`watchdog.sh`) — runs outside the loop from a LaunchAgent, so it

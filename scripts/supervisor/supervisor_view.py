@@ -56,6 +56,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from transport import TmuxTransport
+
 
 HERE = Path(__file__).resolve().parent
 
@@ -211,19 +213,22 @@ class SessionsSource(ReadSource):
     `lanes`'s existing single-session answer is untouched by this source
     existing.
 
-    Each entry's `supervised` field is real ledger evidence (has the estate
-    ever registered a lane in this session), not agent-supervisor#153's own
-    marker -- #153 had not landed when this was written. See `sessions.sh`
-    for exactly what that does and does not prove, and replace this source's
-    reliance on it once #153 lands its own signal.
+    Each entry's `supervised` field is agent-supervisor#153's own marker: the
+    ledger's `sessions` table, written once by `bootstrap-session.sh` (via
+    `cli.py adopt-session`) at the moment it creates a session, independent
+    of whether any lane has since been dispatched into it. See `sessions.sh`
+    for exactly what that does and does not prove -- in particular, that it
+    is a simplified reading of #153's tri-state `session_state()` (the "does
+    tmux still have this session" half is moot here by construction, since
+    this source only ever lists sessions tmux currently returns).
     """
 
     name = "sessions"
     summary = (
         "Worker lane states for every tmux session on the box, grouped by "
-        "session, each with an interim 'supervised' signal (ledger-based, "
-        "not a guess) until agent-supervisor#153's marker lands. Use when "
-        "asked what is happening across sessions, not just one."
+        "session, each with agent-supervisor#153's 'supervised' signal (the "
+        "ledger's adopted-session marker, not a guess). Use when asked what "
+        "is happening across sessions, not just one."
     )
     parameters = ()
 
@@ -412,35 +417,352 @@ class EventsSource(ReadSource):
         return {"events": selected, "count": len(selected), "next_cursor": next_cursor}
 
 
+class SessionRemoveCheckSource(ReadSource):
+    """Would `session_remove` refuse this session, and why -- agent-tui#14.
+
+    A pure read: it evaluates every refusal `session_remove` would evaluate
+    and reports the verdict, but takes no lock and changes nothing, so a
+    caller can check as many times as it wants before ever calling the write.
+    `session_remove` itself re-evaluates the SAME `session_guard.remove_guard`
+    fresh at the moment it actually kills something -- see that source's own
+    docstring for why a cached result from this one is never trusted there.
+    """
+
+    name = "session_remove_check"
+    summary = (
+        "Would removing this tmux session be refused, and why: is it "
+        "supervised, are any of its lanes busy, is every worktree it holds "
+        "clean and fully pushed. Call before session_remove; that write "
+        "re-checks the same thing fresh rather than trusting this result."
+    )
+    parameters = (
+        {
+            "name": "session",
+            "type": "string",
+            "required": True,
+            "help": "tmux session to evaluate for removal.",
+        },
+    )
+
+    def __init__(
+        self,
+        *,
+        transport=None,
+        cli=None,
+        python=None,
+        state_dir=None,
+        lanes_script=None,
+        runner=_subprocess_runner,
+        timeout=DEFAULT_TIMEOUT_SECONDS,
+    ):
+        self.transport = transport if transport is not None else TmuxTransport()
+        self.cli = Path(cli) if cli else HERE / "cli.py"
+        self.python = python or sys.executable or "python3"
+        self.state_dir = Path(state_dir) if state_dir else DEFAULT_STATE_DIR
+        self.lanes_script = Path(lanes_script) if lanes_script else HERE / "lanes.sh"
+        self.runner = runner
+        self.timeout = timeout
+
+    def read(self, *, session):
+        from session_guard import remove_guard
+
+        return remove_guard(
+            session,
+            transport=self.transport,
+            cli=self.cli,
+            python=self.python,
+            state_dir=self.state_dir,
+            lanes_script=self.lanes_script,
+            runner=self.runner,
+            timeout=self.timeout,
+        )
+
+
 READ_SOURCES = {
-    source.name: source for source in (LanesSource, SessionsSource, DigestSource, LedgerSource, EventsSource)
+    source.name: source
+    for source in (LanesSource, SessionsSource, DigestSource, LedgerSource, EventsSource, SessionRemoveCheckSource)
 }
 
-# Intentionally empty, and intentionally present.
-#
-# #198 asks for the read surface first and says dispatch and merge are write
-# operations with real blast radius. They are not in this registry because
-# the authorisation story is not built, not because there is nowhere to put
-# them. What a `WriteSource` needs before it can be added here, none of which
-# exists yet:
+
+class WriteSource:
+    """One MUTATING operation the supervisor can perform, in transport-neutral
+    terms -- the write-side mirror of `ReadSource`.
+
+    `mutates` is fixed `True` here rather than left as a default a subclass
+    could forget to set, the same way `ReadSource.mutates` is fixed `False`:
+    `SupervisorView.__init__` asserts every source built from `WRITE_SOURCES`
+    actually has `mutates is True` (and every `READ_SOURCES` source has it
+    `False`), so a class registered in the wrong dict fails loudly at
+    construction rather than silently over the wire.
+    """
+
+    name = None
+    summary = ""
+    parameters = ()
+    mutates = True
+
+    def write(self, **arguments):
+        raise NotImplementedError
+
+
+class SessionAttachSource(WriteSource):
+    """Switch the invoking client's tmux session -- agent-tui#14.
+
+    The guard is existence, and nothing else: attaching to a session is not
+    destructive, so there is no supervision/busy/worktree check here the way
+    `session_remove` needs one. `SupervisorUnavailable` (not a protocol
+    error) for a missing session, because this tool RAN and could not find
+    it -- the same "ran and could not" channel `LanesSource` etc. already use
+    for a session `lanes.sh` cannot see.
+    """
+
+    name = "session_attach"
+    summary = "Attach the invoking client's tmux session to `session`. Refuses if tmux has no session by that exact name."
+    parameters = (
+        {
+            "name": "session",
+            "type": "string",
+            "required": True,
+            "help": "tmux session to attach to, by exact name.",
+        },
+    )
+
+    def __init__(self, *, transport=None):
+        self.transport = transport if transport is not None else TmuxTransport()
+
+    def write(self, *, session):
+        if not self.transport.session_exists(session):
+            raise SupervisorUnavailable(f"tmux has no session named {session!r}")
+        self.transport.switch_client(session)
+        return {"session": session, "attached": True}
+
+
+class SessionDetachSource(WriteSource):
+    """Detach whatever tmux client is attached to the invoking process's own tty.
+
+    No `session` argument: `tmux detach-client` with no `-t` targets the
+    client for the CALLER's controlling terminal, not a named session --
+    see `TmuxTransport.detach_client`.
+    """
+
+    name = "session_detach"
+    summary = "Detach the tmux client attached to the invoking process's own controlling terminal."
+    parameters = ()
+
+    def __init__(self, *, transport=None):
+        self.transport = transport if transport is not None else TmuxTransport()
+
+    def write(self):
+        self.transport.detach_client()
+        return {"detached": True}
+
+
+class SessionAddSource(WriteSource):
+    """Create a new tmux session by wrapping `bootstrap-session.sh` -- agent-tui#14.
+
+    Never passes `--add-lanes`: that flag lets `bootstrap-session.sh` top up
+    a session that already exists, which is exactly the safety `session_add`
+    relies on that script for -- without it, `bootstrap-session.sh` refuses
+    outright if `session` already exists (see its own SAFETY section), and
+    that refusal is this tool's only guard against silently modifying a
+    session `add` did not create.
+
+    `bootstrap-session.sh` is not a JSON emitter -- its exit code is the
+    signal, and a non-zero one carries its own plain-text explanation on
+    stderr (reused here via `_tail` rather than re-explained). A zero exit is
+    verified, not just trusted: `cli.py session-state` is called afterward to
+    report what the operation actually produced, which should read
+    `supervised` because `bootstrap-session.sh` calls `adopt-session` on the
+    branch that creates a session.
+    """
+
+    name = "session_add"
+    summary = (
+        "Create a new tmux session with worker lanes (bootstrap-session.sh). "
+        "Refuses if the session already exists -- this never modifies one "
+        "that does."
+    )
+    parameters = (
+        {"name": "session", "type": "string", "required": True, "help": "tmux session to create."},
+        {"name": "lanes", "type": "integer", "required": False, "help": "total windows including the supervisor."},
+        {"name": "agent", "type": "string", "required": False, "help": "command started in each lane."},
+        {"name": "cwd", "type": "string", "required": False, "help": "working directory for every window."},
+    )
+
+    def __init__(
+        self,
+        *,
+        script=None,
+        cli=None,
+        python=None,
+        state_dir=None,
+        runner=_subprocess_runner,
+        timeout=DEFAULT_TIMEOUT_SECONDS,
+    ):
+        self.script = Path(script) if script else HERE / "bootstrap-session.sh"
+        self.cli = Path(cli) if cli else HERE / "cli.py"
+        self.python = python or sys.executable or "python3"
+        self.state_dir = Path(state_dir) if state_dir else DEFAULT_STATE_DIR
+        self.runner = runner
+        self.timeout = timeout
+
+    def write(self, *, session, lanes=None, agent=None, cwd=None):
+        command = [str(self.script), "--session", session]
+        if lanes is not None:
+            command += ["--lanes", str(lanes)]
+        if agent is not None:
+            command += ["--agent", agent]
+        if cwd is not None:
+            command += ["--cwd", cwd]
+        completed = self.runner(command, timeout=self.timeout)
+        if completed.returncode != 0:
+            raise SupervisorUnavailable(
+                f"bootstrap-session.sh exited {completed.returncode}: "
+                f"{_tail(completed.stderr) or _tail(completed.stdout) or 'no output'}"
+            )
+        state_command = [
+            self.python, str(self.cli), "--state-dir", str(self.state_dir), "session-state", "--session", session,
+        ]
+        state_payload = _decode(self.runner(state_command, timeout=self.timeout), label="cli.py session-state")
+        if not isinstance(state_payload, dict) or "state" not in state_payload:
+            raise SupervisorUnavailable("cli.py session-state returned something that is not a session-state object")
+        return {
+            "session": session,
+            "created": True,
+            "state": state_payload["state"],
+            "bootstrap_output": _tail(completed.stdout),
+        }
+
+
+class SessionRemoveSource(WriteSource):
+    """Kill exactly one tmux session, after re-checking it is safe -- agent-tui#14.
+
+    `confirm` must be the literal `True`; anything else raises `ValueError`
+    BEFORE the guard is ever evaluated -- "you forgot to confirm" is a caller
+    bug (a protocol-level INVALID_PARAMS over MCP), not a safety verdict, and
+    is deliberately a different failure channel from a guard refusal.
+
+    The guard itself (`session_guard.remove_guard`, the same function
+    `session_remove_check` reads) is evaluated FRESH here, every call --
+    never a cached `session_remove_check` result the caller may be holding,
+    because a lane can go busy or a commit can land in the gap between a
+    check and this confirm.
+
+    On success: the audit event is written to the ledger BEFORE the session
+    is killed, not after -- if the kill itself somehow fails, the record that
+    removal was authorized (and what was running at the time) still exists,
+    which is the direction #14 actually cares about losing. The kill targets
+    `session` by exact name (`TmuxTransport.kill_session`), never
+    `kill-server` and never a prefix match.
+    """
+
+    name = "session_remove"
+    summary = (
+        "Remove a tmux session, but only if it is supervised, has no busy "
+        "lanes, and every worktree it holds is clean and pushed. Logs the "
+        "removal and what authorized it to the ledger before killing "
+        "anything. Requires confirm=true."
+    )
+    parameters = (
+        {"name": "session", "type": "string", "required": True, "help": "tmux session to remove, by exact name."},
+        {
+            "name": "confirm",
+            "type": "boolean",
+            "required": True,
+            "help": "must be true; see session_remove_check first for what will be evaluated.",
+        },
+    )
+
+    def __init__(
+        self,
+        *,
+        transport=None,
+        cli=None,
+        python=None,
+        state_dir=None,
+        lanes_script=None,
+        runner=_subprocess_runner,
+        timeout=DEFAULT_TIMEOUT_SECONDS,
+    ):
+        self.transport = transport if transport is not None else TmuxTransport()
+        self.cli = Path(cli) if cli else HERE / "cli.py"
+        self.python = python or sys.executable or "python3"
+        self.state_dir = Path(state_dir) if state_dir else DEFAULT_STATE_DIR
+        self.lanes_script = Path(lanes_script) if lanes_script else HERE / "lanes.sh"
+        self.runner = runner
+        self.timeout = timeout
+
+    def write(self, *, session, confirm=None):
+        if confirm is not True:
+            raise ValueError(
+                "session_remove requires confirm=true, naming exactly what will be destroyed "
+                "-- see session_remove_check first"
+            )
+        from session_guard import remove_guard
+
+        guard = remove_guard(
+            session,
+            transport=self.transport,
+            cli=self.cli,
+            python=self.python,
+            state_dir=self.state_dir,
+            lanes_script=self.lanes_script,
+            runner=self.runner,
+            timeout=self.timeout,
+        )
+        if not guard["safe_to_remove"]:
+            raise SupervisorUnavailable(f"refuses to remove {session}: " + "; ".join(guard["refusals"]))
+
+        event_command = [
+            self.python, str(self.cli), "--state-dir", str(self.state_dir),
+            "record-session-event", "--session", session, "--event", "removed",
+            "--detail", json.dumps(guard, sort_keys=True),
+        ]
+        _decode(self.runner(event_command, timeout=self.timeout), label="cli.py record-session-event")
+
+        self.transport.kill_session(session)
+        return {"session": session, "removed": True, "guard": guard}
+
+
+# Four writes, and ONLY these four -- not the general write capability #198's
+# own read-surface PR (and the docstring this replaces) refused to build.
+# That refusal stands: `dispatch`/`merge` are still excluded, and still for
+# the three reasons originally written here --
 #
 #   * A caller identity. `cli.py`'s `_verify_caller` authenticates a lane by
 #     the pane nonce it can only know from inside its own pane. An MCP client
-#     is not in a pane and has no such secret, so every write would arrive
-#     unauthenticated -- and the whole point of #198 is that the client may be
-#     on a work laptop, off this machine entirely.
+#     is not in a pane and has no such secret, so `dispatch`/`merge` would
+#     arrive unauthenticated.
 #   * A blast-radius bound. `dispatch.sh` claims a lane, writes a brief and
 #     sends keys into a live terminal; `#184`/`#209` are both about two
-#     dispatchers racing for one lane. A tool that any consuming agent may
-#     call on its own initiative is a third dispatcher.
+#     dispatchers racing for one lane. A tool any consuming agent may call on
+#     its own initiative is a third dispatcher.
 #   * An audit trail that survives the client. The ledger records who
 #     dispatched by pid; an MCP call has no pid on this machine.
 #
-# The seam is here so adding one is a class plus an entry, exactly as in
-# `verdict.py`. `mcp_server.py` builds its tool list from `READ_SOURCES`
-# alone and asserts `mutates is False` on everything it publishes, so adding
-# to this dict does not silently expose it.
-WRITE_SOURCES = {}
+# agent-tui#14's four are a NARROWER, differently-shaped risk, which is why
+# they are safe to add despite the above still holding for dispatch/merge:
+#
+#   * No lane-claim race. None of the four claims a lane the way
+#     `dispatch.sh`/`claim.sh` do -- there is nothing here for a second
+#     dispatcher to race against.
+#   * Every guard is state-based and re-evaluated fresh at call time, never a
+#     cached prior answer. `session_attach` checks `session_exists` at the
+#     moment it runs; `session_remove` re-runs `session_guard.remove_guard`
+#     at the moment it runs, not whatever `session_remove_check` last
+#     reported.
+#   * The blast radius is exactly one named session, addressed by exact
+#     name. Never `kill-server`, never a prefix match -- see
+#     `TmuxTransport.kill_session` and `.session_exists`'s own `=name`
+#     discipline, which every one of these four targets through.
+#   * `session_remove` writes an audit event to the ledger BEFORE acting --
+#     `Ledger.record_session_event` -- so "log every removal with what was
+#     running at the time" (the issue's own words) is satisfied, not merely
+#     implied by the ledger's general event log.
+WRITE_SOURCES = {
+    source.name: source
+    for source in (SessionAttachSource, SessionDetachSource, SessionAddSource, SessionRemoveSource)
+}
 
 
 def build_source(name, **options):
@@ -450,21 +772,56 @@ def build_source(name, **options):
     return READ_SOURCES[name](**options)
 
 
+def build_write_source(name, **options):
+    """Instantiate a write source by name. Unknown names are refused, not guessed."""
+    if name not in WRITE_SOURCES:
+        raise KeyError(f"unknown supervisor write: {name!r} (known: {', '.join(sorted(WRITE_SOURCES))})")
+    return WRITE_SOURCES[name](**options)
+
+
 class SupervisorView:
-    """The read surface as one object -- what a transport is handed.
+    """The whole surface as one object -- what a transport is handed.
 
     Sources are instantiated once and reused, so a transport holds no
-    construction knowledge. `read(name, **arguments)` is the whole interface.
+    construction knowledge. `read(name, **arguments)` and
+    `write(name, **arguments)` are the two halves of the interface;
+    `call(name, **arguments)` looks up whichever registry actually holds
+    `name` so a transport (`mcp_server.py`) needs exactly one call site
+    rather than an if/else that has to know both registries.
+
+    Construction asserts the one invariant this whole split depends on:
+    every source built from `READ_SOURCES` has `mutates is False`, and every
+    source built from `WRITE_SOURCES` has `mutates is True`. A source
+    registered in the wrong dict -- by mistake, or by a future edit that
+    forgot to flip `mutates` -- fails loudly HERE, at construction, instead
+    of silently reaching `mcp_server.py`'s `tool_definitions`, which trusts
+    this assertion rather than re-checking it.
     """
 
-    def __init__(self, sources=None):
+    def __init__(self, sources=None, write_sources=None):
         self.sources = sources if sources is not None else [build_source(name) for name in READ_SOURCES]
+        self.write_sources = (
+            write_sources if write_sources is not None else [build_write_source(name) for name in WRITE_SOURCES]
+        )
+        for source in self.sources:
+            if source.mutates is not False:
+                raise ValueError(
+                    f"{source.name!r} is registered as a read source but mutates={source.mutates!r} -- "
+                    "it belongs in WRITE_SOURCES, not READ_SOURCES"
+                )
+        for source in self.write_sources:
+            if source.mutates is not True:
+                raise ValueError(
+                    f"{source.name!r} is registered as a write source but mutates={source.mutates!r} -- "
+                    "it belongs in READ_SOURCES, not WRITE_SOURCES"
+                )
         self._by_name = {source.name: source for source in self.sources}
+        self._write_by_name = {source.name: source for source in self.write_sources}
 
     def describe(self):
         return [
             {"name": s.name, "summary": s.summary, "parameters": list(s.parameters), "mutates": s.mutates}
-            for s in self.sources
+            for s in (*self.sources, *self.write_sources)
         ]
 
     def read(self, name, **arguments):
@@ -476,3 +833,26 @@ class SupervisorView:
         if unexpected:
             raise ValueError(f"{name}: unknown argument(s) {', '.join(unexpected)}")
         return source.read(**arguments)
+
+    def write(self, name, **arguments):
+        source = self._write_by_name.get(name)
+        if source is None:
+            raise KeyError(f"unknown supervisor write: {name!r} (known: {', '.join(sorted(self._write_by_name))})")
+        known = {parameter["name"] for parameter in source.parameters}
+        unexpected = sorted(set(arguments) - known)
+        if unexpected:
+            raise ValueError(f"{name}: unknown argument(s) {', '.join(unexpected)}")
+        return source.write(**arguments)
+
+    def call(self, name, **arguments):
+        """Route to whichever registry actually holds `name`.
+
+        The one call site `mcp_server.py` needs: it does not have to know
+        which dict a tool came from, only that `SupervisorView` does.
+        """
+        if name in self._by_name:
+            return self.read(name, **arguments)
+        if name in self._write_by_name:
+            return self.write(name, **arguments)
+        known = sorted(set(self._by_name) | set(self._write_by_name))
+        raise KeyError(f"unknown supervisor tool: {name!r} (known: {', '.join(known)})")

@@ -362,6 +362,16 @@ def parser():
     session_state_parser = sub.add_parser("session-state")
     session_state_parser.add_argument("--session", required=True)
 
+    # agent-tui#14: the write `session_remove` calls BEFORE killing anything --
+    # see `Ledger.record_session_event`. `--detail` is a JSON string (the full
+    # `session_guard.remove_guard` payload that authorized the removal), not
+    # a set of flags: it is structured evidence this command only carries
+    # through to the ledger, not something it interprets.
+    record_session_event_parser = sub.add_parser("record-session-event")
+    record_session_event_parser.add_argument("--session", required=True)
+    record_session_event_parser.add_argument("--event", required=True)
+    record_session_event_parser.add_argument("--detail", required=True)
+
     sub.add_parser("status")
     return root
 
@@ -1038,6 +1048,8 @@ def main(argv=None):
         value = ledger.adopt_session(args.session, source=args.source)
     elif args.command == "session-state":
         value = {"session": args.session, "state": session_state(ledger, adapter.transport, session=args.session)}
+    elif args.command == "record-session-event":
+        value = ledger.record_session_event(args.session, event=args.event, detail=json.loads(args.detail))
     elif args.command == "status":
         value = {
             "lanes": ledger.list_lanes(),
