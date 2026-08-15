@@ -233,7 +233,33 @@ case "$1 $2" in
     #   gh api repos/O/R/compare/BASE...HEAD --jq .commits[].sha   (commit list)
     #   gh api -H "Accept: ...v3.diff" repos/O/R/commits/SHA       (one patch)
     if [ "$2" = "-H" ]; then path="$4"; else path="$2"; fi
+    query=""
+    case "$path" in *\?*) query="${path#*\?}"; path="${path%%\?*}" ;; esac
     case "$path" in
+      # agent-supervisor#144: digest.sh's PR list and per-PR mergeable_state
+      # are REST now (`gh api .../pulls`), not `gh pr list` -- these two
+      # cases serve that; `"pr list")` above is now unreachable dead stub
+      # code, kept only because other fixtures still reference pr_list.json
+      # by name.
+      */pulls/[0-9]*)
+        num="${path##*/}"
+        case "$num" in
+          2) echo '{"mergeable_state":"dirty"}' ;;
+          3) echo '{"mergeable_state":"behind"}' ;;
+          *) echo '{"mergeable_state":"clean"}' ;;
+        esac
+        ;;
+      */pulls)
+        case "$query" in
+          *state=closed*)
+            f="$FIX/pr_merged.json"
+            [ -f "$f" ] && cat "$f" || echo "[]"
+            ;;
+          *)
+            jq -c '[.[] | {number, title, head:{sha:.headRefOid, ref:.headRefName}}]' "$FIX/pr_list.json"
+            ;;
+        esac
+        ;;
       */compare/*)
         spec="${path##*/compare/}"
         base="${spec%%...*}"

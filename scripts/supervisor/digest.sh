@@ -411,6 +411,14 @@ lane_relation() {  # lane_relation <lane> <other> -> same|different|unknown
 # dispatch.sh --reviews-pr uses: closing issue -> author-issue-lane, then
 # branch name as a last-resort task-id hint. Missing data is not an error in
 # the digest; it only makes verdict independence unknown for that PR.
+# agent-supervisor#144: left as GraphQL, deliberately. `closingIssuesReferences`
+# -- the "Fixes #N" link GitHub itself resolves -- is a GraphQL-only concept;
+# REST has no endpoint that answers it. Splitting this call (REST for
+# headRefName/commits, GraphQL for closingIssuesReferences alone) would still
+# spend a GraphQL point per PR per tick, the exact cost this issue exists to
+# remove, for no REST-budget saving on the other two fields. A partial
+# conversion that is honest about this edge beats one that quietly re-adds a
+# GraphQL call to "finish" it.
 author_lane_for() {
   local repo_full="$1" number="$2" pr_json head_ref candidates candidate issue_json
   local prefix fallback_task fallback_json
@@ -471,14 +479,28 @@ author_lane_for() {
 # which this field exists to name. `--branch` costs one more call per PR but
 # reads the actual latest run for that branch, not a stale slice of a shared
 # window.
+#
+# agent-supervisor#144: the PR list is REST core (`gh api .../pulls`), not
+# GraphQL (`gh pr list`) -- this is the call that runs every tick, for every
+# repo, and the issue's own reproduction is exactly this failing. `gh run
+# list` above was already REST (Actions has no GraphQL surface); unaffected.
+# REST's list endpoint has no equivalent of GraphQL's `mergeStateStatus`
+# (that field is genuinely GraphQL-only on the list shape), so it costs one
+# more REST call per PR -- `mergeable_state` off the single-PR endpoint,
+# same enum, lowercase -- which is a REST-core call spent to save a GraphQL
+# one, exactly the trade #144 asks for.
 PR_JSON="[]"
 for repo in $REPOS; do
-  list=$(gh pr list -R "$OWNER/$repo" --state open \
-        --json number,title,headRefOid,headRefName,mergeStateStatus 2>/dev/null) || {
+  list=$(gh api "repos/$OWNER/$repo/pulls?state=open&per_page=100" 2>/dev/null) || {
     note_error "gh pr list failed for $OWNER/$repo -- its PRs are NOT in this digest"
     continue
   }
   [ -z "$list" ] && list="[]"
+  if ! jq -e . >/dev/null 2>&1 <<<"$list"; then
+    note_error "gh pr list failed for $OWNER/$repo -- its PRs are NOT in this digest"
+    continue
+  fi
+  list=$(jq -c '[.[] | {number, title, headRefOid: .head.sha, headRefName: .head.ref}]' <<<"$list")
   pr_count=$(jq 'length' <<<"$list")
   for ((i = 0; i < pr_count; i++)); do
     p=$(jq -c ".[$i]" <<<"$list")
@@ -492,6 +514,13 @@ for repo in $REPOS; do
     }
     [ -z "$run" ] && run="[]"
     r=$(jq -c '.[0] // {}' <<<"$run")
+    # REST's `mergeable_state` is null until GitHub finishes computing it (a
+    # known API lag right after a push) -- reads UNKNOWN then, same as any
+    # other unresolved answer here, not a guessed CLEAN.
+    mergeable=$(gh api "repos/$OWNER/$repo/pulls/$num" 2>/dev/null) || mergeable=""
+    [ -z "$mergeable" ] && mergeable="{}"
+    merge_state=$(jq -r '(.mergeable_state // "unknown") | ascii_upcase' <<<"$mergeable" 2>/dev/null)
+    [ -z "$merge_state" ] && merge_state="UNKNOWN"
     # Verdict comes from the adapter, not from this jq -- see verdict_for()
     # above and scripts/supervisor/verdict.py. It used to regex-match the
     # last PR comment's prose here, which read "I cannot approve this, it is
@@ -506,7 +535,7 @@ for repo in $REPOS; do
     if [ -n "$reviewer_lane_id" ] && [ -n "$author_lane_id" ]; then
       lane_rel=$(lane_relation "$author_lane_id" "$reviewer_lane_id")
     fi
-    entry=$(jq -n --argjson p "$p" --argjson r "$r" --arg repo "$repo" --argjson v "$v" --argjson author "$author_lane" --arg lane_rel "$lane_rel" '
+    entry=$(jq -n --argjson p "$p" --argjson r "$r" --arg repo "$repo" --argjson v "$v" --argjson author "$author_lane" --arg lane_rel "$lane_rel" --arg merge_state "$merge_state" '
       def independence:
         if (($v.verdict_kind // "") | IN("comment", "ledger")) and (($v.verdict // "") | IN("approved", "rejected")) then
           if (($v.reviewer_lane // "") | length) == 0 then
@@ -539,7 +568,7 @@ for repo in $REPOS; do
         # the check is stale unless the run was for THIS head -- the field the
         # UI does not distinguish, and a conflicted branch produces no run at all
         ci_is_current: (($r.headSha // "") == $p.headRefOid),
-        merge_state: $p.mergeStateStatus,
+        merge_state: $merge_state,
         verdict: ($v.verdict // "unknown"),
         verdict_independent: $ind.value,
         verdict_detail: (
@@ -553,11 +582,19 @@ for repo in $REPOS; do
 done
 
 # --- merges since ---------------------------------------------------------
+# agent-supervisor#144: REST core again. There is no `state=merged` on the
+# REST list endpoint (only open/closed/all) -- `state=closed` includes PRs
+# closed WITHOUT merging, filtered out here by `merged_at != null`, the same
+# distinction `gh pr list --state merged` drew for free.
 MERGED_JSON="[]"
 if [ -n "$SINCE" ]; then
   for repo in $REPOS; do
-    m=$(gh pr list -R "$OWNER/$repo" --state merged --limit 30 \
-        --json number,title,mergedAt 2>/dev/null) || { note_error "merged-list failed for $repo"; continue; }
+    m=$(gh api "repos/$OWNER/$repo/pulls?state=closed&sort=updated&direction=desc&per_page=50" 2>/dev/null) || {
+      note_error "merged-list failed for $repo"; continue; }
+    if ! jq -e . >/dev/null 2>&1 <<<"${m:-[]}"; then
+      note_error "merged-list failed for $repo"; continue
+    fi
+    m=$(jq -c '[.[] | select(.merged_at != null) | {number, title, mergedAt: .merged_at}]' <<<"${m:-[]}")
     MERGED_JSON=$(jq -n --argjson acc "$MERGED_JSON" --argjson m "${m:-[]}" \
       --arg repo "$repo" --arg since "$SINCE" '
       $acc + [ $m[] | select(.mergedAt > $since) | {repo:$repo, number:.number, title:.title} ]')
