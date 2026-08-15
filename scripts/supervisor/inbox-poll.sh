@@ -31,31 +31,68 @@
 #     seconds defeats the point: the whole value of long polling is that the
 #     request is open and waiting, not that it is retried often.
 #
-# A plain tmux window running this script directly satisfies both today with
-# zero new infrastructure, and is where this should start: `tmux new-window
-# ... 'scripts/supervisor/inbox-poll.sh'`. It is one line, needs no plist, and
-# a crashed pane is as visible in `tmux list-windows` as a dead lane already
-# is.
+# agent-supervisor#154: A PLAIN TMUX WINDOW IS NO LONGER THE RECOMMENDED WAY
+# TO RUN THIS. It is where this script started (one line, no plist, a
+# crashed pane as visible as a dead lane), but nearly every poller incident
+# measured for #154 traced to that hosting, not to this script's own logic:
+# four pollers acking the same offset from duplicate tmux *windows*, a
+# restart loop tied to a *pane* relaunch, a dead *pane* leaving the channel
+# silently down, and a cleanup that killed windows *by index* and took the
+# poller with it. `watchdog.sh` is the counter-example already in this repo:
+# it runs from a LaunchAgent, outside tmux, and survives `tmux kill-server`
+# by construction -- there is no window for the server's death to take with
+# it. Run this script the same way: a LaunchAgent (or systemd user unit on
+# Linux) with `KeepAlive` for restart-on-crash, `RunAtLoad`, and no schedule
+# (see the two bullets above). That adapter, like watchdog.sh's, belongs to
+# the machine-specific repository (Hill90), not here -- this file only needs
+# to be provably correct when launched that way, which
+# `tests/supervisor/test_inbox_poll_service.sh` demonstrates against a real,
+# throwaway LaunchAgent: started, `tmux kill-server`'d out from under it, and
+# still acking on the other side.
 #
-# agent-supervisor#10: that one line was not enough by itself. This script's
-# pane command is `cd '$LIVE' && exec scripts/supervisor/inbox-poll.sh` --
-# `exec` replaces the pane's shell rather than running under one, so when
-# this process exits (this script's own clean paths, a crash, or a signal
-# nothing here can catch) there is nothing left in the pane, and by tmux's
-# default a pane with nothing left in it closes its WINDOW too. The restart
-# mechanisms both this file and advance-live.sh describe elsewhere need a
-# surviving pane to act on; an exited poller left none.
+# SINGLE-INSTANCE IS ENFORCED HERE, NOT ONLY BY THE SERVICE MANAGER. A
+# LaunchAgent job label is unique by construction, but that guarantee is
+# scoped to one launchd domain -- it does nothing during the migration
+# window when an old tmux-hosted poller and a newly-installed service are
+# both reachable, or if this script is ever started by hand alongside
+# either. Two live instances is the ORIGINAL failure this issue exists to
+# retire (four pollers acking the same offset), so this script refuses to
+# become a second instance itself: see LOCK below, acquired before the main
+# loop starts and held for the process's whole life. `inbox.sh`'s own
+# offset lock (see its header) already makes a raced ack impossible even if
+# two instances did somehow run -- this lock exists so that never happens in
+# the first place, and so "start it twice" fails loudly and immediately
+# instead of relying on that second, deeper safety net.
 #
-# The window this script runs in must therefore also carry
-# `remain-on-exit on` (so the window survives the process exiting -- the pane
-# goes dead instead of the window closing) and be watched by
-# `poller-recover.sh`, which watchdog.sh already calls every tick: it
-# recreates the window if it is missing entirely, or respawns the same dead
-# pane with this script if the process is gone. See poller-recover.sh's own
-# header for the full mechanism and its idempotency argument. Promote this to
-# a LaunchAgent (Hill90's adapter) once it has been run this way and proven
-# stable -- the same order watchdog.sh itself went
-# through.
+# MIGRATE BY ATTRITION, NOT BY CUTOVER. The lock above is also what makes an
+# overlap safe: installing the LaunchAgent while the old tmux-hosted poller
+# (window `inbox-poll`, see poller-window.sh) is still running does not
+# start a second consumer -- the new instance finds the lock held and
+# refuses, exactly like any other "start it twice" attempt, and logs why.
+# The window keeps carrying Jon's messages until it is retired by hand (or
+# dies and is not respawned); only then does the service's own restart
+# policy pick the lock up on its next attempt. At every moment across the
+# migration there is at most one lock holder and so at most one poller.
+#
+# THE TMUX-HOSTED PATH STILL WORKS, UNCHANGED, FOR THE ATTRITION WINDOW.
+# `poller-recover.sh` and the `service` state in `lanes.sh` continue to
+# apply to a window-hosted poller exactly as before; nothing here removes
+# them. See this directory's README for the full list of what becomes dead
+# code once every poller is service-hosted and nothing runs the window
+# anymore -- follow-up cleanup, not part of this change.
+#
+# agent-supervisor#10: running under tmux, "one line" was not enough by
+# itself. The pane command was `cd '$LIVE' && exec
+# scripts/supervisor/inbox-poll.sh` -- `exec` replaces the pane's shell
+# rather than running under one, so when this process exits (this script's
+# own clean paths, a crash, or a signal nothing here can catch) there is
+# nothing left in the pane, and by tmux's default a pane with nothing left
+# in it closes its WINDOW too. The window therefore also carries
+# `remain-on-exit on` and is watched by `poller-recover.sh`, which
+# watchdog.sh calls every tick: it recreates the window if missing, or
+# respawns the same dead pane if the process is gone. None of that applies
+# to a LaunchAgent-hosted run -- there is no pane to lose -- which is exactly
+# why the service path above no longer depends on it.
 #
 # A DEAD POLLER MUST NOT LOOK LIKE SILENCE. Two failure shapes, two answers:
 #
@@ -145,6 +182,11 @@
 #         INBOX_POLL_RESTART_FLAG     path checked once per iteration; its presence
 #                                     is a deliberate, non-paging restart request
 #                                     (default $STATE/.inbox-poll-restart-requested; #187)
+#         INBOX_POLL_LOCK             single-instance lock dir; default
+#                                     $STATE/.inbox-poll.lock (#154)
+#         INBOX_POLL_LOCK_MAX_AGE     seconds before a lock with no provably-live
+#                                     holder is reclaimed (default 60; #154, same
+#                                     idiom as poller-recover.sh's own lock)
 #
 # QA MODE (agent-supervisor#138): AGENT_NOTIFY_MODE=qa is not read directly by
 # this file -- it is inherited by every `inbox.sh` and `notify.sh` call this
@@ -178,6 +220,8 @@ ITERATIONS="${INBOX_POLL_ITERATIONS:-0}"
 MIN_UPTIME="${INBOX_POLL_MIN_UPTIME:-60}"
 BACKOFF_BASE="${INBOX_POLL_BACKOFF_BASE:-5}"
 RESTART_FLAG="${INBOX_POLL_RESTART_FLAG:-$STATE/.inbox-poll-restart-requested${MODE_SUFFIX}}"
+LOCK="${INBOX_POLL_LOCK:-$STATE/.inbox-poll${MODE_SUFFIX}.lock}"
+LOCK_MAX_AGE="${INBOX_POLL_LOCK_MAX_AGE:-60}"
 START_TS=$(date +%s)
 # The commit this running process was started from -- written into every
 # status report so an external reader (advance-live.sh) can tell a stale
@@ -189,6 +233,85 @@ POLLER_SHA=$(git -C "$HERE" rev-parse HEAD 2>/dev/null || echo unknown)
 mkdir -p "$(dirname "$STATUS")" 2>/dev/null
 
 log() { printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG" 2>/dev/null; }
+
+# --- agent-supervisor#154: single-instance lock, held for this process's
+# whole life -- see the "SINGLE-INSTANCE IS ENFORCED HERE" header note. Same
+# mkdir-is-atomic idiom as poller-recover.sh's own lock (reused, not
+# reinvented): mkdir either creates the directory and succeeds, or finds it
+# already there and fails, with no window in between where two callers can
+# both see "absent". A holder that recorded its pid and is still alive is a
+# genuine second instance and is refused outright; a holder that is gone (a
+# SIGKILL, a crash -- nothing here ran the release below) is reclaimed once
+# the lock is old enough that no legitimate acquisition could still be
+# mid-write.
+LOCK_HELD=""
+acquire_lock() {
+  # $STATE (and so $LOCK's parent) is not guaranteed to exist yet -- the
+  # $(dirname "$STATUS") mkdir below only creates STATUS's own directory,
+  # which callers are free to point somewhere other than $STATE (tests do
+  # exactly that). Plain `mkdir "$LOCK"` needs its parent to already exist to
+  # tell "genuinely held" apart from "nothing here yet" by exit status alone.
+  mkdir -p "$(dirname "$LOCK")" 2>/dev/null
+  if mkdir "$LOCK" 2>/dev/null; then
+    printf '%s' "$$" >"$LOCK/pid" 2>/dev/null
+    date +%s >"$LOCK/started" 2>/dev/null
+    LOCK_HELD=1
+    return 0
+  fi
+  local holder_pid started now age
+  holder_pid=$(cat "$LOCK/pid" 2>/dev/null)
+  started=$(cat "$LOCK/started" 2>/dev/null)
+  now=$(date +%s)
+  if [ -n "$holder_pid" ] && kill -0 "$holder_pid" 2>/dev/null; then
+    echo "inbox-poll.sh: refusing to start -- $LOCK is held by live pid $holder_pid; exactly one poller may run at a time (agent-supervisor#154)" >&2
+    return 1
+  fi
+  if [ -z "$started" ]; then
+    echo "inbox-poll.sh: refusing to start -- $LOCK exists but its holder has not finished recording pid/started yet (a concurrent start winning the race, not a stale lock)" >&2
+    return 1
+  fi
+  if [ -n "$holder_pid" ]; then
+    # kill -0 above already gave a definitive answer for THIS exact pid: it
+    # is not running. Unlike poller-recover.sh's lock -- which ages out an
+    # unclear holder because it may be reasoning about a record left by a
+    # PAST tick of a different process -- this check is live and local, so
+    # there is no "not sure yet" state left once kill -0 has spoken. Reclaim
+    # immediately; #154's own restart-on-crash requirement depends on this:
+    # a `kill -9`'d poller must be back under a live replacement within the
+    # LaunchAgent's own relaunch latency (low single-digit seconds), not
+    # after waiting out LOCK_MAX_AGE.
+    echo "inbox-poll.sh: RECLAIMING lock $LOCK -- its recorded holder pid $holder_pid is confirmed dead" >&2
+  else
+    # No pid was ever recorded (this process's own write raced or failed) --
+    # kill -0 cannot rule anything out here, so fall back to the age gate:
+    # long enough that no legitimate acquisition could still be mid-write.
+    age=$((now - started))
+    if [ "$age" -lt "$LOCK_MAX_AGE" ]; then
+      echo "inbox-poll.sh: refusing to start -- $LOCK is under ${LOCK_MAX_AGE}s old with no recorded pid; not reclaiming" >&2
+      return 1
+    fi
+    echo "inbox-poll.sh: RECLAIMING stale lock $LOCK (no recorded pid, age ${age}s)" >&2
+  fi
+  rm -rf "$LOCK" 2>/dev/null
+  if ! mkdir "$LOCK" 2>/dev/null; then
+    echo "inbox-poll.sh: refusing to start -- lost the race reclaiming $LOCK" >&2
+    return 1
+  fi
+  printf '%s' "$$" >"$LOCK/pid" 2>/dev/null
+  date +%s >"$LOCK/started" 2>/dev/null
+  LOCK_HELD=1
+  return 0
+}
+release_lock() { [ -n "$LOCK_HELD" ] && rm -rf "$LOCK" 2>/dev/null; LOCK_HELD=""; }
+
+if ! acquire_lock; then
+  # Refused before any status/log heartbeat is written and before the EXIT
+  # traps below are installed -- this process never became the poller, so it
+  # must not report a "stopped" heartbeat (there was nothing running to
+  # stop) or page Jon (#155's same "a preflight is not a death" reasoning,
+  # here applied to "a refusal is not a death" instead).
+  exit 1
+fi
 
 # Heartbeat, written every iteration regardless of outcome -- the same "one
 # file answers where we are" contract watchdog.status keeps. An external
@@ -210,6 +333,11 @@ STOPPING=""
 DELIBERATE=""
 DELIBERATE_REASON=""
 report_stop() {
+  # Released unconditionally, ahead of the STOPPING guard below: even a
+  # process that already ran report_stop once (STOPPING=1, e.g. TERM after
+  # EXIT already fired) must not leave the lock held on any path out.
+  # release_lock is idempotent (rm -rf, gated on ever having acquired it).
+  release_lock
   [ -n "$STOPPING" ] && return
   STOPPING=1
   # The record and the page are different things (#155): the status file and

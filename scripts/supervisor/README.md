@@ -13,6 +13,79 @@ The launchd adapter that drives it for Hill90 specifically —
 `hill90-supervisor` entry-point shim — stayed behind in Hill90 and is not
 part of this directory.
 
+## The poller is a service now, not a tmux window (agent-supervisor#154)
+
+`inbox-poll.sh` is the portable core; how it runs follows the same split as
+`watchdog.sh` above — a LaunchAgent (or systemd user unit) belongs to the
+machine-specific adapter repository, not here. Nearly every poller incident
+measured for #154 traced to hosting it in a tmux window instead: four
+pollers acking the same Telegram offset from duplicate **windows**, a
+restart loop tied to a **pane** relaunch, a dead **pane** leaving the
+channel silently down, and a cleanup that killed windows **by index** and
+took the poller with it. `watchdog.sh`'s own LaunchAgent is the
+counter-example already in this repo: it survives `tmux kill-server` because
+there is no window for the server's death to reach.
+
+`inbox-poll.sh` itself makes no tmux call at all — grep it. It now also
+refuses to become a second running instance (a self-held, reclaimable lock,
+`INBOX_POLL_LOCK`, default `$STATE/.inbox-poll.lock`), so installing a
+LaunchAgent while an old tmux-hosted poller is still running does not double
+the number of live consumers: the new instance finds the lock held and
+refuses to start, exactly like starting it twice by hand. **Migration is by
+attrition, not cutover** — the tmux window keeps carrying Jon's messages
+until it is retired by hand (or dies and nothing respawns it); only then
+does the service's own restart policy pick the lock up. At every moment
+there is at most one lock holder and so at most one consumer of the
+Telegram offset — the correctness property `inbox.sh`'s own offset lock
+(see its header) already gives independently, this is belt-and-suspenders
+so a raced start fails loudly instead of relying on that deeper net.
+
+`tests/supervisor/test_inbox_poll_service.sh` drives the real script through
+a real, throwaway LaunchAgent (same posture as
+`test_watchdog_launchd_relaunch.sh`, #75) and proves: a second instance is
+refused while the lock is held; `tmux kill-server` on an isolated socket
+leaves the poller acking, same pid, heartbeat still advancing (the mutation
+check that is the entire justification for #154); and a `kill -9`'d poller
+is relaunched by `KeepAlive` with a new pid, having routed every message
+exactly once across the crash — no double-ack, nothing dropped.
+
+**What becomes dead code once every poller is service-hosted and no window
+runs it, in the 16 files that currently reference `inbox-poll` (not removed
+in this PR — `lanes.sh` is under active change elsewhere, see its own
+header — but named here so the cleanup is a known follow-up, not a
+discovery):**
+
+- `poller-window.sh` — the whole file is a tmux window lookup. Dead.
+- `poller-recover.sh` — exists entirely to recreate/respawn a window. Dead,
+  once nothing depends on the window path during attrition.
+- `lanes.sh` — the `service` state, `SERVICE_RE`, and the
+  `is_poller_window_name` branch that promotes a dead pane to `service`.
+  Dead, but **not removed here**: #149 adds `never-busy` to this same file
+  and agent-tui#19 covers a guard that cannot see dynamic assignments —
+  removing a state now would collide with both.
+- `advance-live.sh` — `find_poller_pane` and `prompt_poller_relaunch`
+  (queuing `poller-recover.sh`'s tmux respawn). Dead. The sha-comparison and
+  restart-flag write around them **stay** — #154 fixed those to no longer
+  require a window, which is what lets a service-hosted poller keep getting
+  version-triggered restarts at all.
+- `digest.sh` — the `poller_alive` liveness check is scoped to the pane pid
+  of a window (#96). This one does not just go dead, it goes **wrong**: once
+  nothing runs a window, this reads "not alive" forever, a permanent false
+  alarm layered on top of the 278 measured for #154. Flagged here as a
+  correctness follow-up, not a cosmetic one; `inbox-poll.status`'s own
+  `state`/`checked` fields (read separately, a few lines below) already
+  give a host-agnostic answer and do not need this fix to keep working.
+- `loop-tick.md` — the "window 11" prose reference. Stale once true; a doc
+  fix, not a behavior change.
+
+**What stays, unchanged, because it is already host-agnostic:** `inbox.sh`,
+`inbox-route.sh`, `director-route.sh`, `director-inbox.sh` (message
+plumbing, no tmux dependency of its own), `watchdog.sh`'s and
+`watchdog_notify.py`'s inbox-poll **heartbeat staleness** check (#163) —
+reads `inbox-poll.status` directly, which keeps meaning the same thing
+whoever launched the process — and the handful of comments in `core.py` and
+`dispatch.sh` that merely cite `inbox-poll.sh` as signal-handling precedent.
+
 ## Contract
 
 - GitHub Issues and pull requests are the canonical task ID, source, status,
