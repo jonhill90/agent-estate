@@ -769,6 +769,63 @@ else
   say_ok "exactly one live poller is silent"
 fi
 
+# --- #147: a sandboxed test fixture's copy of inbox-poll.sh, still alive
+# under a mktemp'd path, must not be counted as a second poller. This is the
+# exact shape measured live: one real poller (pid 111, installed path) plus
+# one leaked watchdog test fixture (pid 333, launched from underneath
+# /var/folders) -- unrelated by ppid/pgid, so the parent/child suppression
+# above cannot silence it; only excluding it by path can.
+D=$(mktemp -d)
+pc_run "$D/w" "111 333" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
+  STUB_PS_PPID_333=84088 STUB_PS_PGID_333=333 \
+  STUB_PS_COMMAND_333="/bin/bash /var/folders/_b/xxx/T/watchdog-57-tmux.ON5Xcl/inbox-poll.sh"
+if grep -q '^poller:' "$D/w/st" 2>/dev/null || grep -q 'POLLER-DUPLICATE' "$D/w/lg" 2>/dev/null; then
+  say_bad "a real poller plus a sandboxed test fixture is silent" \
+    "$(cat "$D/w/st" 2>/dev/null | tr '\n' ' '); log=$(cat "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
+else
+  say_ok "a real poller plus a sandboxed test fixture is silent"
+fi
+
+MUT_SANDBOX=$(mktemp -d); mkdir -p "$MUT_SANDBOX/scripts/supervisor"
+cp "$WATCHDOG" "$MUT_SANDBOX/scripts/supervisor/watchdog.sh"
+for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh session-defaults.sh; do
+  cp "$HERE/../../scripts/supervisor/$dep" "$MUT_SANDBOX/scripts/supervisor/" 2>/dev/null
+done
+cp -R "$HERE/../../scripts/supervisor/harness" "$MUT_SANDBOX/scripts/supervisor/" 2>/dev/null
+patch_rc=0
+python3 - "$MUT_SANDBOX/scripts/supervisor/watchdog.sh" <<'PY' || patch_rc=$?
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = '''poller_is_sandboxed() {
+  case "$1" in
+    *"/var/folders/"*|*"/tmp/"*) return 0 ;;
+  esac
+  return 1
+}'''
+assert old in text, "sandboxed-poller exclusion not found"
+assert text.count(old) == 1, "sandboxed-poller exclusion not unique"
+open(path, "w").write(text.replace(old, 'poller_is_sandboxed() { return 1; }', 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  say_bad "setup: mutated the sandboxed-poller exclusion away" "patch failed with exit $patch_rc"
+else
+  chmod +x "$MUT_SANDBOX/scripts/supervisor/watchdog.sh"
+  old_watchdog="$WATCHDOG"
+  WATCHDOG="$MUT_SANDBOX/scripts/supervisor/watchdog.sh"
+  D=$(mktemp -d)
+  pc_run "$D/w" "111 333" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
+    STUB_PS_PPID_333=84088 STUB_PS_PGID_333=333 \
+    STUB_PS_COMMAND_333="/bin/bash /var/folders/_b/xxx/T/watchdog-57-tmux.ON5Xcl/inbox-poll.sh"
+  WATCHDOG="$old_watchdog"
+  if grep -q 'DUPLICATE' "$D/w/st" "$D/w/lg" 2>/dev/null; then
+    say_ok "mutation confirmed: removing the sandboxed-poller exclusion counts the leaked fixture (the assertion above would be red)"
+  else
+    say_bad "mutation confirmed: removing the sandboxed-poller exclusion counts the leaked fixture" \
+      "mutant stayed silent: $(cat "$D/w/st" "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
+  fi
+fi
+
 D=$(mktemp -d)
 pc_run "$D/w" ""
 check "zero live pollers are reported as dead, not duplicates" "^poller:.*dead.*zero live" "$D/w/st"

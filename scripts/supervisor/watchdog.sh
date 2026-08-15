@@ -698,6 +698,27 @@ check_director_inbox() {
 # won. The duplicate detector must therefore ask the kernel, not the status
 # file. It reports zero distinctly from more-than-one, and it never reaps: a
 # wrong reap bounces the live inbound channel.
+#
+# agent-supervisor#147: measured live, the "second process" firing this check
+# every ~3 minutes was neither the poller's own child (that pgid-matches its
+# parent and is suppressed below) nor a second estate poller -- it was a
+# watchdog test fixture's copy of inbox-poll.sh, launched from a mktemp'd
+# sandbox and still alive because it survived SIGTERM (#104). Same script,
+# same POLLER_SERVICE_RE match, different path: the estate's own poller runs
+# from an installed checkout, a sandboxed one runs from underneath the
+# system temp directory (/var/folders on macOS, /tmp elsewhere -- both are
+# where mktemp -d and TMUX_TMPDIR sandboxes land in this repo's own tests).
+# It holds no ledger state and acks no production Telegram offset, so
+# counting it teaches the reader to ignore the one shape -- two independent,
+# offset-acking pollers -- this check exists to catch. Excluded by path, not
+# by name, since the process name is identical on purpose.
+poller_is_sandboxed() {
+  case "$1" in
+    *"/var/folders/"*|*"/tmp/"*) return 0 ;;
+  esac
+  return 1
+}
+
 poller_process_rows() {
   command -v pgrep >/dev/null 2>&1 || return 2
   command -v ps >/dev/null 2>&1 || return 2
@@ -706,6 +727,7 @@ poller_process_rows() {
     [ -n "$pid" ] || continue
     cmd=$(ps -o command= -p "$pid" 2>/dev/null) || continue
     [[ "$cmd" =~ $POLLER_SERVICE_RE ]] || continue
+    poller_is_sandboxed "$cmd" && continue
     ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//') || ppid=""
     pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//') || pgid=""
     start=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
