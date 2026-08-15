@@ -11,6 +11,30 @@ Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
 ## Status
 
+**27 shipped: aesthetics are data, not code.** Every look-and-feel literal
+in the render path -- colour, border character, chrome padding, the
+director's "★" mark -- now lives in `internal/theme` as one of two
+`theme.Theme` values (`signal-dark`, today's appearance unchanged, and
+`mono-contrast`, a high-contrast verification theme that exists to prove
+the routing, not to be used day to day). `internal/board`, `internal/rail`,
+`internal/cost` and `internal/gallery` ask for a `theme.Role`
+(`RoleError`, `RoleDirector`, `RoleSelectedBG`, ...) at render time; none of
+them names a hex value any more. Switching the whole look is a one-line
+edit to a user's config (`{"theme": "mono-contrast"}` at
+`$AGENT_TUI_THEME_CONFIG`, or `$XDG_CONFIG_HOME/agent-tui/theme.json`), not
+a change to any of those four packages -- see
+`internal/rail/theme_test.go`'s `TestThemeSwitchChangesEverySurface` for
+the driven, mutation-checked proof, and the matching per-package tests in
+`internal/board`, `internal/cost` and `internal/gallery`. A missing config
+renders exactly as before this existed; a malformed config or an unknown
+theme name renders the default theme and says so visibly, never silently
+(`internal/theme.Load`). Glyph sets (agent-tui#11/#16, Jon's picks from
+#24: Signal and set 5) were already data before this shipped and keep their
+own home in `internal/lane` -- this issue governs the chrome around them,
+not the glyphs themselves. The hill90 palette Jon actually wants is a
+follow-up now that the seam exists, not part of this drop (agent-tui#27:
+"do not invent a palette to ship with").
+
 **6 shipped: the task board, as a projection.** `agent-tui -board` renders
 a second screen -- five columns (Backlog, In progress, In review, Blocked,
 Done), grouped by repo, across every repo the estate touches. **A card's

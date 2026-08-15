@@ -8,6 +8,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 func threeSessions() []lane.Session {
@@ -267,24 +268,26 @@ func TestSessionsFetchErrorWithNoFallbackStillShowsUnavailable(t *testing.T) {
 // makes this fail red; see the PR/commit description for the actual
 // go test output from that mutation.
 func TestUnsupervisedAccentWinsOverDirectorAccent(t *testing.T) {
-	accent, ok := headerAccent(false /* unsupervised */, true /* also the director session */)
+	st := Model{theme: theme.Default}.styles()
+
+	accent, ok := headerAccent(false /* unsupervised */, true /* also the director session */, st)
 	if !ok {
 		t.Fatalf("headerAccent(unsupervised, director) returned no accent at all")
 	}
-	if accent != unsupervisedAccent {
-		t.Errorf("director accent must not win over unsupervised for a session that is both: got %v, want unsupervisedAccent %v", accent, unsupervisedAccent)
+	if accent != st.unsupervisedAccent {
+		t.Errorf("director accent must not win over unsupervised for a session that is both: got %v, want unsupervisedAccent %v", accent, st.unsupervisedAccent)
 	}
 
 	// The two single-condition cases, so a future edit can't satisfy the
 	// combined case above by making both conditions always return the same
 	// accent.
-	if accent, ok := headerAccent(true, true); !ok || accent != directorAccent {
+	if accent, ok := headerAccent(true, true, st); !ok || accent != st.directorAccent {
 		t.Errorf("a supervised director session should get directorAccent, got %v, ok=%v", accent, ok)
 	}
-	if accent, ok := headerAccent(false, false); !ok || accent != unsupervisedAccent {
+	if accent, ok := headerAccent(false, false, st); !ok || accent != st.unsupervisedAccent {
 		t.Errorf("an unsupervised non-director session should get unsupervisedAccent, got %v, ok=%v", accent, ok)
 	}
-	if _, ok := headerAccent(true, false); ok {
+	if _, ok := headerAccent(true, false, st); ok {
 		t.Errorf("a supervised non-director session should get no accent at all")
 	}
 }

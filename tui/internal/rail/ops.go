@@ -318,48 +318,48 @@ func (m Model) handleOpsResult(msg tea.Msg) (Model, tea.Cmd) {
 // renderOpsStatus is View()'s entry point into the write path's own
 // footer section -- the prompt for whichever mode is live, or the last
 // completed operation's one-line result while idle.
-func (m Model) renderOpsStatus(innerWidth int) []string {
+func (m Model) renderOpsStatus(innerWidth int, st railStyles) []string {
 	switch m.opsMode {
 	case opsModeAdding:
 		return []string{
-			legendStyle.Width(innerWidth).Render("new session:"),
-			rowStyle.Width(innerWidth).Render(truncate(m.opsInput+"_", innerWidth)),
-			legendStyle.Width(innerWidth).Render("[enter] create  [esc] cancel"),
+			st.legend.Width(innerWidth).Render("new session:"),
+			st.row.Width(innerWidth).Render(truncate(m.opsInput+"_", innerWidth)),
+			st.legend.Width(innerWidth).Render("[enter] create  [esc] cancel"),
 		}
 	case opsModeConfirmRemove:
-		return m.renderRemoveConfirm(innerWidth)
+		return m.renderRemoveConfirm(innerWidth, st)
 	case opsModeBusy:
-		return []string{legendStyle.Width(innerWidth).Render(truncate(m.opsStatus, innerWidth))}
+		return []string{st.legend.Width(innerWidth).Render(truncate(m.opsStatus, innerWidth))}
 	default:
 		if m.opsStatus == "" {
-			return []string{legendStyle.Width(innerWidth).Render("[a]ttach [d]etach [n]ew [x]remove")}
+			return []string{st.legend.Width(innerWidth).Render("[a]ttach [d]etach [n]ew [x]remove")}
 		}
-		return []string{legendStyle.Width(innerWidth).Render(truncate(m.opsStatus, innerWidth))}
+		return []string{st.legend.Width(innerWidth).Render(truncate(m.opsStatus, innerWidth))}
 	}
 }
 
 // renderRemoveConfirm is agent-tui#14 requirement 4 rendered: what would be
 // destroyed, named, or exactly why it is refused -- never a bare "no".
-func (m Model) renderRemoveConfirm(innerWidth int) []string {
+func (m Model) renderRemoveConfirm(innerWidth int, st railStyles) []string {
 	c := m.opsCheck
 	var lines []string
-	lines = append(lines, errStyle.Width(innerWidth).Render(truncate("remove "+c.Session+"?", innerWidth)))
+	lines = append(lines, st.err.Width(innerWidth).Render(truncate("remove "+c.Session+"?", innerWidth)))
 	if c.SafeToRemove {
-		lines = append(lines, legendStyle.Width(innerWidth).Render("idle, supervised, clean"))
-		lines = append(lines, legendStyle.Width(innerWidth).Render("[y] confirm  [any] cancel"))
+		lines = append(lines, st.legend.Width(innerWidth).Render("idle, supervised, clean"))
+		lines = append(lines, st.legend.Width(innerWidth).Render("[y] confirm  [any] cancel"))
 		return lines
 	}
-	lines = append(lines, dimStyle.Width(innerWidth).Render("refused:"))
+	lines = append(lines, st.dim.Width(innerWidth).Render("refused:"))
 	for _, reason := range c.Refusals {
-		lines = append(lines, dimStyle.Width(innerWidth).Render(truncate("- "+reason, innerWidth)))
+		lines = append(lines, st.dim.Width(innerWidth).Render(truncate("- "+reason, innerWidth)))
 	}
 	if len(c.Refusals) == 0 {
 		// safe_to_remove was false with no named reason -- a contract
 		// violation on the supervisor's side, not something to render as if
 		// nothing were wrong (the same "never a bare no" rule applies to
 		// this program's own bugs, not just the supervisor's refusals).
-		lines = append(lines, dimStyle.Width(innerWidth).Render("- refused, no reason given (bug: report this)"))
+		lines = append(lines, st.dim.Width(innerWidth).Render("- refused, no reason given (bug: report this)"))
 	}
-	lines = append(lines, legendStyle.Width(innerWidth).Render("[any key] dismiss"))
+	lines = append(lines, st.legend.Width(innerWidth).Render("[any key] dismiss"))
 	return lines
 }

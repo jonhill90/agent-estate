@@ -24,6 +24,7 @@ import (
 	"github.com/jonhill90/agent-tui/internal/lane"
 	"github.com/jonhill90/agent-tui/internal/mcp"
 	"github.com/jonhill90/agent-tui/internal/rail"
+	"github.com/jonhill90/agent-tui/internal/theme"
 	// sessionops, not session: the -session flag var below already owns that
 	// name (the tmux session -board reads), and shadowing it would be an
 	// easy read-vs-write mixup in a file that now does both.
@@ -80,6 +81,19 @@ func main() {
 	)
 	flag.Parse()
 
+	// agent-tui#27: the one place a user's theme preference is resolved.
+	// theme.Load's three outcomes (missing/malformed/unknown -- see its own
+	// doc comment) are honored exactly as it returns them: a missing config
+	// renders as today (activeTheme falls back to theme.Default with an
+	// empty notice), while a malformed config or an unknown theme name
+	// still resolves to theme.Default but carries a notice every screen
+	// below renders visibly -- #27 acceptance item 3, "an undeterminable
+	// preference is never silently treated as a valid one." Every screen
+	// (rail, board, cost, gallery) gets the SAME theme -- swapping it is
+	// editing this one Load call or the user's config file, never a
+	// per-screen setting.
+	activeTheme, themeNotice := theme.Load(theme.ConfigPath())
+
 	if *showBoard && *ledger == "" {
 		fmt.Fprintln(os.Stderr, "agent-tui: -board needs -ledger (or $AGENT_TUI_LEDGER) pointed at a COPY of "+
 			"the ledger; refusing to default to the live supervisor ledger (agent-tui#6's rule -- see -ledger's "+
@@ -97,7 +111,7 @@ func main() {
 	// (or require) a supervisor connection to start. Every other screen
 	// (rail, board) needs lanes and connects exactly as before.
 	if *showCost {
-		p := tea.NewProgram(cost.New(costFetch), tea.WithAltScreen())
+		p := tea.NewProgram(cost.New(costFetch).WithTheme(activeTheme, themeNotice), tea.WithAltScreen())
 		if _, err := p.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, "agent-tui:", err)
 			os.Exit(1)
@@ -109,7 +123,7 @@ func main() {
 	// lane.Candidates) and nothing else -- no lanes, no ccusage, no
 	// supervisor connection, same reasoning as -cost above.
 	if *showGallery {
-		p := tea.NewProgram(gallery.New(), tea.WithAltScreen())
+		p := tea.NewProgram(gallery.New().WithTheme(activeTheme, themeNotice), tea.WithAltScreen())
 		if _, err := p.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, "agent-tui:", err)
 			os.Exit(1)
@@ -153,7 +167,7 @@ func main() {
 	var p *tea.Program
 	if *showBoard {
 		boardFetch := buildBoardFetch(*ledger, *ghBin, *sqliteBin, *repositories, lanesFetch)
-		p = tea.NewProgram(board.New(boardFetch), tea.WithAltScreen())
+		p = tea.NewProgram(board.New(boardFetch).WithTheme(activeTheme, themeNotice), tea.WithAltScreen())
 	} else {
 		// NewMultiSession, not NewWithCost: agent-tui#13 is the regression
 		// that shipped a rail showing one session's lanes when six sessions
@@ -172,7 +186,9 @@ func main() {
 		// the exact same MCP connection every read above already uses, never
 		// a second client and never tmux itself (see internal/session's
 		// package doc for why that split is non-negotiable).
-		m := rail.NewMultiSession(sessionsFetch, lanesFetch, costFetch, *directorSession).WithOps(sessionops.New(client))
+		m := rail.NewMultiSession(sessionsFetch, lanesFetch, costFetch, *directorSession).
+			WithOps(sessionops.New(client)).
+			WithTheme(activeTheme, themeNotice)
 		p = tea.NewProgram(m, tea.WithAltScreen())
 	}
 	if _, err := p.Run(); err != nil {

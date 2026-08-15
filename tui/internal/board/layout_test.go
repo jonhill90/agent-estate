@@ -7,6 +7,8 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // TestEveryLayoutRendersEveryColumn is layout.go's equivalent of
@@ -22,7 +24,7 @@ func TestEveryLayoutRendersEveryColumn(t *testing.T) {
 		cards = append(cards, Card{Repo: testRepo, Number: i + 1, Column: col, Title: string(col) + " card"})
 	}
 	for _, l := range Layouts {
-		out := l.Render(cards, nil, 120)
+		out := l.Render(cards, nil, 120, theme.Default)
 		for _, col := range Columns {
 			if col == Done && l.Closed == ClosedHide {
 				continue // the one column a Layout is allowed to omit, and only by its own explicit variant
@@ -88,7 +90,7 @@ func TestLayoutRenderColorsAgedCard(t *testing.T) {
 
 	cards := []Card{{Repo: testRepo, Number: 95, Column: Blocked, Title: "as95 conflicting", Age: 3 * time.Hour, BlockedReason: "PR #95 is conflicting"}}
 	for _, l := range Layouts {
-		out := l.Render(cards, nil, 220)
+		out := l.Render(cards, nil, 220, theme.Default)
 		if !strings.Contains(out, "as95 conflicting") {
 			t.Fatalf("layout %q: aged card title missing entirely:\n%s", l.ID, out)
 		}
@@ -112,7 +114,7 @@ func TestLayoutRenderColorsAgedCard(t *testing.T) {
 func TestLayoutRenderShowsBlockedReason(t *testing.T) {
 	cards := []Card{{Repo: testRepo, Number: 4, Column: Blocked, Title: "conflict", BlockedReason: "PR #40 is conflicting"}}
 	for _, l := range Layouts {
-		out := l.Render(cards, nil, 220)
+		out := l.Render(cards, nil, 220, theme.Default)
 		if l.Card == ShapeMultiLine && !strings.Contains(out, "PR #40 is conflicting") {
 			t.Errorf("layout %q: multi-line card dropped the blocked reason:\n%s", l.ID, out)
 		}
@@ -135,7 +137,7 @@ func TestRenderSwimlanesGroupsByRepo(t *testing.T) {
 			break
 		}
 	}
-	out := repoLayout.Render(cards, nil, 120)
+	out := repoLayout.Render(cards, nil, 120, theme.Default)
 	if !strings.Contains(out, testRepo.GitHubID()) || !strings.Contains(out, repoB.GitHubID()) {
 		t.Fatalf("expected both repo headers in swimlane output:\n%s", out)
 	}

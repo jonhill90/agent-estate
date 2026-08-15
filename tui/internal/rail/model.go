@@ -19,6 +19,7 @@ import (
 	"github.com/jonhill90/agent-tui/internal/cost"
 	"github.com/jonhill90/agent-tui/internal/lane"
 	"github.com/jonhill90/agent-tui/internal/session"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // RailWidth is the target column count for the rail region. Jon asked for
@@ -149,6 +150,26 @@ type Model struct {
 	opsStatus string              // last completed op's one-line result, shown in the footer until the next op starts
 	opsCheck  session.RemoveCheck // the last session_remove_check result, live while opsMode == opsModeConfirmRemove
 	opsTarget string              // the session name an in-flight add/remove/removeCheck names
+
+	// theme is agent-tui#27's seam: every colour, border and padding value
+	// View() draws comes from here, never a literal at the call site.
+	// Defaults to theme.Default (see New/NewMultiSession) so every rail
+	// test built without WithTheme renders exactly as it did before this
+	// field existed.
+	theme theme.Theme
+	// themeNotice is #27 acceptance item 3's "says so visibly" half --
+	// set only when cmd/agent-tui's theme.Load resolved a malformed
+	// config or an unknown theme name, never for a plain missing config.
+	themeNotice string
+}
+
+// WithTheme returns a copy of m with th (and, when non-empty, a visible
+// notice about how th was resolved) wired in -- the one call cmd/agent-tui
+// makes once theme.Load has run, same shape as WithOps above.
+func (m Model) WithTheme(th theme.Theme, notice string) Model {
+	m.theme = th
+	m.themeNotice = notice
+	return m
 }
 
 // WithOps returns a copy of m with ops wired in -- the one call cmd/agent-tui
@@ -164,7 +185,7 @@ func (m Model) WithOps(ops session.Interface) Model {
 // New builds a Model bound to the given fetch function, with no cost line
 // (costFetch is nil). Use NewWithCost to get agent-tui#4's rail line.
 func New(fetch Fetcher) Model {
-	return Model{fetch: fetch, width: RailWidth, height: 24}
+	return Model{fetch: fetch, width: RailWidth, height: 24, theme: theme.Default}
 }
 
 // NewWithCost builds a Model that also renders a compact, per-harness cost
@@ -209,6 +230,7 @@ func NewMultiSession(sessionsFetch SessionsFetcher, lanesFetch Fetcher, costFetc
 		directorSession: directorSession,
 		width:           RailWidth,
 		height:          24,
+		theme:           theme.Default,
 	}
 }
 
@@ -457,24 +479,42 @@ func digitKey(s string) (int, bool) {
 	return int(s[0] - '0'), true
 }
 
-// selectionBackground is the ONE colour a selected row ever gets. It is
-// fixed regardless of the selected lane's state -- as#109 diagnosed the old
-// `Reverse(true)` selection as wonky precisely because reverse video inverts
-// whatever foreground colour the row already carries, so a selected `busy`
-// row highlighted blue and a selected `free` row highlighted green. An
-// explicit, constant background is the fix; never go back to Reverse.
-const selectionBackground = lipgloss.Color("#33475b")
+// railStyles is built fresh from m.theme on every View() call -- there is
+// no package-level var carrying a literal theme.Role colour any more (that
+// was the actual bug agent-tui#27 exists to prevent: a colour baked into a
+// package var at init time cannot change when the active theme does). Every
+// render helper in this package (sessions.go, ops.go included) takes one of
+// these rather than reaching for a package-level style.
+type railStyles struct {
+	title, row, selRow, dim, err, legend lipgloss.Style
+	border                               lipgloss.Style
+	selectionBG, directorAccent          lipgloss.Color
+	unsupervisedAccent                   lipgloss.Color
+}
 
-var (
-	titleStyle  = lipgloss.NewStyle().Bold(true).Padding(0, 1)
-	rowStyle    = lipgloss.NewStyle().Padding(0, 1)
-	selRowStyle = rowStyle.Background(selectionBackground)
-	dimStyle    = lipgloss.NewStyle().Faint(true)
-	errStyle    = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ff5555"))
-	legendStyle = lipgloss.NewStyle().Faint(true)
-	borderStyle = lipgloss.NewStyle().Border(lipgloss.NormalBorder(), false, true, false, false).
-			BorderForeground(lipgloss.Color("#444444"))
-)
+// styles builds m's live style set from m.theme -- selectionBackground's
+// old doc comment about why the selected-row background is a FIXED colour,
+// never `Reverse(true)`, still applies; it is now theme.RoleSelectedBG
+// instead of a literal, but still one constant colour regardless of the
+// selected lane's own state (as#109).
+func (m Model) styles() railStyles {
+	th := m.theme
+	pad := th.Padding
+	row := lipgloss.NewStyle().Padding(0, pad)
+	selectionBG := th.Color(theme.RoleSelectedBG)
+	return railStyles{
+		title:              lipgloss.NewStyle().Bold(true).Padding(0, pad),
+		row:                row,
+		selRow:             row.Background(selectionBG),
+		dim:                lipgloss.NewStyle().Faint(true),
+		err:                lipgloss.NewStyle().Bold(true).Foreground(th.Color(theme.RoleError)),
+		legend:             lipgloss.NewStyle().Faint(true),
+		border:             lipgloss.NewStyle().Border(th.Border, false, true, false, false).BorderForeground(th.Color(theme.RoleBorder)),
+		selectionBG:        selectionBG,
+		directorAccent:     th.Color(theme.RoleDirector),
+		unsupervisedAccent: th.Color(theme.RoleUnsupervised),
+	}
+}
 
 func (m Model) View() string {
 	if m.quitting {
@@ -486,11 +526,15 @@ func (m Model) View() string {
 		width = RailWidth
 	}
 	innerWidth := width - 2 // padding
+	st := m.styles()
 
 	set := lane.Variants[m.glyphSet]
 
 	var b []string
-	b = append(b, titleStyle.Width(innerWidth).Render("lanes"))
+	if m.themeNotice != "" {
+		b = append(b, st.err.Width(innerWidth).Render(truncate("! "+m.themeNotice, innerWidth)))
+	}
+	b = append(b, st.title.Width(innerWidth).Render("lanes"))
 
 	// agent-tui#13: a Model built with NewMultiSession renders every
 	// session, grouped; one built with New/NewWithCost (board.go, every
@@ -500,28 +544,28 @@ func (m Model) View() string {
 	// wired renders that fallback instead -- see fallbackActive.
 	switch {
 	case m.sessionsFetch != nil && m.fallbackActive():
-		b = append(b, m.renderFallbackNote(innerWidth)...)
-		b = append(b, m.renderFlatBody(innerWidth, set)...)
+		b = append(b, m.renderFallbackNote(innerWidth, st)...)
+		b = append(b, m.renderFlatBody(innerWidth, set, st)...)
 	case m.sessionsFetch != nil:
-		b = append(b, m.renderSessionsBody(innerWidth)...)
+		b = append(b, m.renderSessionsBody(innerWidth, st)...)
 	default:
-		b = append(b, m.renderFlatBody(innerWidth, set)...)
+		b = append(b, m.renderFlatBody(innerWidth, set, st)...)
 	}
 
 	// The picker itself: which glyph set is live, and how to change it.
 	// Every option is real and numbered here, not described in prose
 	// elsewhere -- pressing the number is the whole interaction.
-	b = append(b, dimStyle.Width(innerWidth).Render(""))
-	b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("glyphs %d/%d: %s", m.glyphSet+1, len(lane.Variants), set.Name)))
-	b = append(b, legendStyle.Width(innerWidth).Render(truncate(set.Description, innerWidth)))
-	b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("[1-%d] to switch", len(lane.Variants))))
+	b = append(b, st.dim.Width(innerWidth).Render(""))
+	b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("glyphs %d/%d: %s", m.glyphSet+1, len(lane.Variants), set.Name)))
+	b = append(b, st.legend.Width(innerWidth).Render(truncate(set.Description, innerWidth)))
+	b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("[1-%d] to switch", len(lane.Variants))))
 
 	// The grouping-style picker (agent-tui#13 requirement 5) -- only shown
 	// when there is grouping to pick between at all.
 	if m.sessionsFetch != nil && len(groupStyles) > 0 {
 		gs := groupStyles[m.groupStyle]
-		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("group %d/%d: %s", m.groupStyle+1, len(groupStyles), gs.Name)))
-		b = append(b, legendStyle.Width(innerWidth).Render("[g] to switch"))
+		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("group %d/%d: %s", m.groupStyle+1, len(groupStyles), gs.Name)))
+		b = append(b, st.legend.Width(innerWidth).Render("[g] to switch"))
 	}
 
 	// agent-tui#14's write path: the current mode's prompt (typing a new
@@ -529,8 +573,8 @@ func (m Model) View() string {
 	// destroyed) or, when idle, the last operation's one-line result. Only
 	// present when cmd/agent-tui wired ops in (WithOps) -- see ops.go.
 	if m.ops != nil {
-		b = append(b, dimStyle.Width(innerWidth).Render(""))
-		b = append(b, m.renderOpsStatus(innerWidth)...)
+		b = append(b, st.dim.Width(innerWidth).Render(""))
+		b = append(b, m.renderOpsStatus(innerWidth, st)...)
 	}
 
 	// The cost line (agent-tui#4): glanceable, always in the rail, no flag
@@ -538,19 +582,19 @@ func (m Model) View() string {
 	// costFetch in (NewWithCost) -- New() alone still renders nothing here,
 	// same as before this existed.
 	if m.costFetch != nil {
-		b = append(b, dimStyle.Width(innerWidth).Render(""))
-		b = append(b, legendStyle.Width(innerWidth).Render("cost:"))
+		b = append(b, st.dim.Width(innerWidth).Render(""))
+		b = append(b, st.legend.Width(innerWidth).Render("cost:"))
 		for _, line := range cost.RenderCompact(m.costSnap, innerWidth) {
-			b = append(b, legendStyle.Width(innerWidth).Render(truncate(line, innerWidth)))
+			b = append(b, st.legend.Width(innerWidth).Render(truncate(line, innerWidth)))
 		}
 		if !m.costFetched.IsZero() {
 			age := time.Since(m.costFetched).Round(time.Second)
-			b = append(b, legendStyle.Width(innerWidth).Render(truncate(fmt.Sprintf("age: %s", age), innerWidth)))
+			b = append(b, st.legend.Width(innerWidth).Render(truncate(fmt.Sprintf("age: %s", age), innerWidth)))
 		}
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left, b...)
-	return borderStyle.Height(m.height - 1).Render(content)
+	return st.border.Height(m.height - 1).Render(content)
 }
 
 // renderFallbackNote is at#18's visible note: a NewMultiSession Model whose
@@ -559,12 +603,12 @@ func (m Model) View() string {
 // exactly that narrowing going all the way to zero and nothing on screen
 // saying why. Shown above renderFlatBody's single-session render, never in
 // place of it -- the one session that IS readable must still show.
-func (m Model) renderFallbackNote(innerWidth int) []string {
+func (m Model) renderFallbackNote(innerWidth int, st railStyles) []string {
 	return []string{
-		errStyle.Width(innerWidth).Render(truncate("! multi-session unavailable", innerWidth)),
-		dimStyle.Width(innerWidth).Render(truncate("this session only:", innerWidth)),
-		dimStyle.Width(innerWidth).Render(truncate("needs agent-supervisor#158", innerWidth)),
-		dimStyle.Width(innerWidth).Render(truncate(m.sessionsErr.Error(), innerWidth)),
+		st.err.Width(innerWidth).Render(truncate("! multi-session unavailable", innerWidth)),
+		st.dim.Width(innerWidth).Render(truncate("this session only:", innerWidth)),
+		st.dim.Width(innerWidth).Render(truncate("needs agent-supervisor#158", innerWidth)),
+		st.dim.Width(innerWidth).Render(truncate(m.sessionsErr.Error(), innerWidth)),
 	}
 }
 
@@ -572,26 +616,29 @@ func (m Model) renderFallbackNote(innerWidth int) []string {
 // extracted unchanged so at#18's fallback path (renderFallbackNote above)
 // and the plain New/NewWithCost path share exactly one implementation of it
 // instead of two that could drift apart.
-func (m Model) renderFlatBody(innerWidth int, set lane.GlyphSet) []string {
+func (m Model) renderFlatBody(innerWidth int, set lane.GlyphSet, st railStyles) []string {
 	var b []string
 
 	// A fetch failure is the load-bearing case (mirrors
 	// supervisor_view.SupervisorUnavailable): show it, never render a
 	// blank or stale-looking rail as if the estate were quietly idle.
 	if m.fetchErr != nil {
-		b = append(b, errStyle.Width(innerWidth).Render("! unavailable"))
-		b = append(b, dimStyle.Width(innerWidth).Render(truncate(m.fetchErr.Error(), innerWidth)))
+		b = append(b, st.err.Width(innerWidth).Render("! unavailable"))
+		b = append(b, st.dim.Width(innerWidth).Render(truncate(m.fetchErr.Error(), innerWidth)))
 	} else if len(m.lanes) == 0 {
-		b = append(b, dimStyle.Width(innerWidth).Render("(no lanes)"))
+		b = append(b, st.dim.Width(innerWidth).Render("(no lanes)"))
 	}
 
-	// name budget: innerWidth minus the row's own Padding(0,1) (2 cols)
-	// minus the glyph column and the single space after it (2 cols).
-	// Both must be subtracted -- reserving only for the glyph+space and
-	// not for the row's own padding let a name run one cell past the
-	// available width and wrap onto a second line with no glyph or
-	// indent (as#109's second defect).
-	nameWidth := innerWidth - 4
+	// name budget: innerWidth minus the row's own Padding(0, th.Padding)
+	// (2*th.Padding cols) minus the glyph column and the single space
+	// after it (2 cols). Both must be subtracted -- reserving only for the
+	// glyph+space and not for the row's own padding let a name run one
+	// cell past the available width and wrap onto a second line with no
+	// glyph or indent (as#109's second defect). Padding is theme data
+	// (agent-tui#27), so this budget must track it rather than assume the
+	// old Padding(0,1) literal -- fixed at "- 4" it silently drifted wrong
+	// under any theme with a different Padding.
+	nameWidth := innerWidth - 2*m.theme.Padding - 2
 
 	for i, l := range m.lanes {
 		style := lane.StyleFor(set, l.State)
@@ -608,14 +655,14 @@ func (m Model) renderFlatBody(innerWidth int, set lane.GlyphSet) []string {
 			// the trailing " name" text came out with no background at
 			// all. Giving " "+name its own Background()-carrying span
 			// keeps the highlight unbroken across the whole row.
-			g := lipgloss.NewStyle().Foreground(lipgloss.Color(style.Color)).Background(selectionBackground).Render(glyph)
-			rest := lipgloss.NewStyle().Background(selectionBackground).Render(" " + name)
+			g := lipgloss.NewStyle().Foreground(lipgloss.Color(style.Color)).Background(st.selectionBG).Render(glyph)
+			rest := lipgloss.NewStyle().Background(st.selectionBG).Render(" " + name)
 			line = g + rest
-			b = append(b, selRowStyle.Width(innerWidth).Render(line))
+			b = append(b, st.selRow.Width(innerWidth).Render(line))
 		} else {
 			g := lipgloss.NewStyle().Foreground(lipgloss.Color(style.Color)).Render(glyph)
 			line = fmt.Sprintf("%s %s", g, name)
-			b = append(b, rowStyle.Width(innerWidth).Render(line))
+			b = append(b, st.row.Width(innerWidth).Render(line))
 		}
 	}
 
@@ -624,7 +671,7 @@ func (m Model) renderFlatBody(innerWidth int, set lane.GlyphSet) []string {
 	// lane's real state word, verbatim, so a glyph is never the only
 	// source of truth on screen -- the same discipline laneview/text.sh
 	// applies by printing the state name beside its glyph on every row.
-	b = append(b, dimStyle.Width(innerWidth).Render(""))
+	b = append(b, st.dim.Width(innerWidth).Render(""))
 	if len(m.lanes) > 0 && m.selected < len(m.lanes) {
 		sel := m.lanes[m.selected]
 		style := lane.StyleFor(set, sel.State)
@@ -632,12 +679,12 @@ func (m Model) renderFlatBody(innerWidth int, set lane.GlyphSet) []string {
 		if label == "" {
 			label = sel.State // Unmapped: still print the raw word, never blank
 		}
-		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("state: %s", label)))
-		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("idle:  %ds", sel.IdleSeconds)))
+		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("state: %s", label)))
+		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("idle:  %ds", sel.IdleSeconds)))
 	}
 	if !m.lastFetched.IsZero() {
 		age := time.Since(m.lastFetched).Round(time.Second)
-		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("age:   %s", age)))
+		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("age:   %s", age)))
 	}
 	return b
 }

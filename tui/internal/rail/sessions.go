@@ -58,47 +58,26 @@ func (m Model) sessionsFlat() []sessionRow {
 	return rows
 }
 
-// directorAccent is the ONE color the Director's header ever gets --
-// deliberately not part of lane.GlyphSet (glyph variants style lane
-// STATES, not sessions): a constant the same way selectionBackground in
-// model.go is, independent of whichever glyph or grouping variant is live,
-// so the Director reads distinctly under every one of them. Jon: "it should
-// look a bit different. Something to make it special."
-var directorAccent = lipgloss.Color("#ffd166")
-
-// unsupervisedAccent marks a session sessions.sh could not prove the estate
-// manages -- agent-supervisor#153's own marker had not landed when this was
-// written, so this reads sessions.sh's interim, fail-closed signal (see
-// lane.Session's doc comment: unknown reads unsupervised, never the other
-// way). Reuses the amber already in this package's palette for "unsent"
-// rather than inventing a new color for "be careful here". This wins over
-// directorAccent when both apply -- safety over decoration: a Director
-// session the ledger cannot vouch for must still read as unsupervised, not
-// have that fact recolored away by the styling that makes it special.
-var unsupervisedAccent = lipgloss.Color("#e0a94c")
-
-var (
-	sessionHeaderStyle = lipgloss.NewStyle().Bold(true).Padding(0, 1)
-)
-
-// renderSessionHeader renders one session's header row. isDirector adds a
-// "★" marker (a glyph, not just color, so the distinction survives a
-// terminal or profile that drops truecolor) and the gold accent;
-// unsupervised adds a plain-English suffix and the amber accent, and wins
-// the color contest over directorAccent -- see unsupervisedAccent's comment.
-func (m Model) renderSessionHeader(s lane.Session, innerWidth int) string {
+// renderSessionHeader renders one session's header row. isDirector adds
+// theme.DirectorMark (a glyph, not just color, so the distinction survives
+// a terminal or profile that drops truecolor) and theme.RoleDirector's
+// accent; unsupervised adds a plain-English suffix and theme.RoleUnsupervised's
+// accent, and wins the color contest over the director accent -- see
+// headerAccent's doc comment. Both colours and the mark itself are
+// agent-tui#27 theme data now, not literals in this file.
+func (m Model) renderSessionHeader(s lane.Session, innerWidth int, st railStyles) string {
 	isDirector := m.directorSession != "" && s.Name == m.directorSession
 
 	label := s.Name
 	if isDirector {
-		label = "★ " + label
+		label = m.theme.DirectorMark + " " + label
 	}
 	if !s.Supervised {
 		label += " (unsupervised)"
 	}
 
-	style := sessionHeaderStyle
-	if accent, ok := headerAccent(s.Supervised, isDirector); ok {
+	style := lipgloss.NewStyle().Bold(true).Padding(0, m.theme.Padding)
+	if accent, ok := headerAccent(s.Supervised, isDirector, st); ok {
 		style = style.Foreground(accent)
 	}
 	return style.Width(innerWidth).Render(truncate(label, max(0, innerWidth-2)))
@@ -106,21 +85,23 @@ func (m Model) renderSessionHeader(s lane.Session, innerWidth int) string {
 
 // headerAccent picks renderSessionHeader's foreground color in
 // safety-over-decoration order: an unsupervised session must always read
-// unsupervised, even when it is also the configured director session -- see
-// unsupervisedAccent's doc comment above. Pulled out of renderSessionHeader
-// as its own pure function (no lipgloss.Render involved) specifically so
-// this precedence is directly testable: go test runs with no tty, so
-// lipgloss renders no ANSI escapes at all under its default color profile
-// there, and a byte-for-byte comparison of two Render() calls would not
-// have caught #18's own review finding that this precedence had no test.
-// ok is false when neither condition applies -- s gets the header's default
-// (unstyled) look, same as before this existed.
-func headerAccent(supervised, isDirector bool) (lipgloss.Color, bool) {
+// unsupervised, even when it is also the configured director session --
+// theme.RoleUnsupervised wins over theme.RoleDirector when both apply, the
+// same precedence the pre-#27 unsupervisedAccent/directorAccent constants
+// documented. Pulled out of renderSessionHeader as its own pure function
+// (no lipgloss.Render involved) specifically so this precedence is directly
+// testable: go test runs with no tty, so lipgloss renders no ANSI escapes
+// at all under its default color profile there, and a byte-for-byte
+// comparison of two Render() calls would not have caught #18's own review
+// finding that this precedence had no test. ok is false when neither
+// condition applies -- s gets the header's default (unstyled) look, same as
+// before this existed.
+func headerAccent(supervised, isDirector bool, st railStyles) (lipgloss.Color, bool) {
 	switch {
 	case !supervised:
-		return unsupervisedAccent, true
+		return st.unsupervisedAccent, true
 	case isDirector:
-		return directorAccent, true
+		return st.directorAccent, true
 	default:
 		return "", false
 	}
@@ -143,40 +124,42 @@ func indentFor(style int) string {
 // and the same trailing "selected lane" legend the flat view always showed
 // (session name added, since which session is now part of what "selected"
 // means).
-func (m Model) renderSessionsBody(innerWidth int) []string {
+func (m Model) renderSessionsBody(innerWidth int, st railStyles) []string {
 	var b []string
 
 	// Mirrors the flat view's fetchErr/no-lanes branch exactly -- a fetch
 	// failure must be shown, never a blank rail indistinguishable from a
 	// quiet estate.
 	if m.sessionsErr != nil {
-		b = append(b, errStyle.Width(innerWidth).Render("! unavailable"))
-		b = append(b, dimStyle.Width(innerWidth).Render(truncate(m.sessionsErr.Error(), innerWidth)))
+		b = append(b, st.err.Width(innerWidth).Render("! unavailable"))
+		b = append(b, st.dim.Width(innerWidth).Render(truncate(m.sessionsErr.Error(), innerWidth)))
 		return b
 	}
 	if len(m.sessions) == 0 {
-		b = append(b, dimStyle.Width(innerWidth).Render("(no sessions)"))
+		b = append(b, st.dim.Width(innerWidth).Render("(no sessions)"))
 		return b
 	}
 
 	set := lane.Variants[m.glyphSet]
-	nameWidth := innerWidth - 4
+	// See model.go's renderFlatBody for why this tracks m.theme.Padding
+	// rather than a fixed literal.
+	nameWidth := innerWidth - 2*m.theme.Padding - 2
 	indent := indentFor(m.groupStyle)
 	indentWidth := len([]rune(indent))
 
 	rowIdx := 0
 	for _, s := range m.sessions {
-		b = append(b, m.renderSessionHeader(s, innerWidth))
+		b = append(b, m.renderSessionHeader(s, innerWidth, st))
 
 		if s.Error != "" {
 			// The session sessions.sh could not read (see lane.Session's
 			// doc comment) -- shown, not dropped; the whole point of that
 			// field surviving decode.
-			b = append(b, dimStyle.Width(innerWidth).Render(truncate(indent+"! "+s.Error, innerWidth)))
+			b = append(b, st.dim.Width(innerWidth).Render(truncate(indent+"! "+s.Error, innerWidth)))
 			continue
 		}
 		if len(s.Lanes) == 0 {
-			b = append(b, dimStyle.Width(innerWidth).Render(indent+"(no lanes)"))
+			b = append(b, st.dim.Width(innerWidth).Render(indent+"(no lanes)"))
 			continue
 		}
 
@@ -187,14 +170,14 @@ func (m Model) renderSessionsBody(innerWidth int) []string {
 
 			var line string
 			if rowIdx == m.selected {
-				g := lipgloss.NewStyle().Foreground(lipgloss.Color(style.Color)).Background(selectionBackground).Render(glyph)
-				rest := lipgloss.NewStyle().Background(selectionBackground).Render(" " + name)
+				g := lipgloss.NewStyle().Foreground(lipgloss.Color(style.Color)).Background(st.selectionBG).Render(glyph)
+				rest := lipgloss.NewStyle().Background(st.selectionBG).Render(" " + name)
 				line = indent + g + rest
-				b = append(b, selRowStyle.Width(innerWidth).Render(line))
+				b = append(b, st.selRow.Width(innerWidth).Render(line))
 			} else {
 				g := lipgloss.NewStyle().Foreground(lipgloss.Color(style.Color)).Render(glyph)
 				line = fmt.Sprintf("%s%s %s", indent, g, name)
-				b = append(b, rowStyle.Width(innerWidth).Render(line))
+				b = append(b, st.row.Width(innerWidth).Render(line))
 			}
 			rowIdx++
 		}
@@ -204,7 +187,7 @@ func (m Model) renderSessionsBody(innerWidth int) []string {
 	// nameable, issue #107 hard-acceptance item 3), plus which session the
 	// selection is in now that "selected" spans all of them.
 	flat := m.sessionsFlat()
-	b = append(b, dimStyle.Width(innerWidth).Render(""))
+	b = append(b, st.dim.Width(innerWidth).Render(""))
 	if len(flat) > 0 && m.selected >= 0 && m.selected < len(flat) {
 		sel := flat[m.selected]
 		style := lane.StyleFor(set, sel.lane.State)
@@ -213,13 +196,13 @@ func (m Model) renderSessionsBody(innerWidth int) []string {
 			label = sel.lane.State // Unmapped: still print the raw word, never blank
 		}
 		sessName := m.sessions[sel.sessionIdx].Name
-		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("session: %s", truncate(sessName, max(0, innerWidth-9)))))
-		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("state:   %s", label)))
-		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("idle:    %ds", sel.lane.IdleSeconds)))
+		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("session: %s", truncate(sessName, max(0, innerWidth-9)))))
+		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("state:   %s", label)))
+		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("idle:    %ds", sel.lane.IdleSeconds)))
 	}
 	if !m.sessionsFetched.IsZero() {
 		age := time.Since(m.sessionsFetched).Round(time.Second)
-		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("age:     %s", age)))
+		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("age:     %s", age)))
 	}
 	return b
 }

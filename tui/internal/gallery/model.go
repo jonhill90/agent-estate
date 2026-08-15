@@ -5,6 +5,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // Model is the gallery's Bubble Tea program -- a separate screen from
@@ -21,6 +23,11 @@ type Model struct {
 
 	width, height int
 	quitting      bool
+
+	// theme is agent-tui#27's seam -- see board.Model's identical field for
+	// the full rationale.
+	theme       theme.Theme
+	themeNotice string
 }
 
 // New builds a Model with a fresh BuildRows() snapshot. Called once at
@@ -29,7 +36,15 @@ type Model struct {
 // the program runs), so there is no refresh/fetch cycle to wire up here,
 // unlike rail or cost.
 func New() Model {
-	return Model{rows: BuildRows(), width: 100, height: 30}
+	return Model{rows: BuildRows(), width: 100, height: 30, theme: theme.Default}
+}
+
+// WithTheme returns a copy of m with th (and, when non-empty, a visible
+// notice about how th was resolved) wired in.
+func (m Model) WithTheme(th theme.Theme, notice string) Model {
+	m.theme = th
+	m.themeNotice = notice
+	return m
 }
 
 func (m Model) Init() tea.Cmd { return nil }
@@ -69,13 +84,25 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-var (
-	titleStyle  = lipgloss.NewStyle().Bold(true)
-	dimStyle    = lipgloss.NewStyle().Faint(true)
-	stateStyle  = lipgloss.NewStyle().Bold(true)
-	flagStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#e0c34c"))
-	legendStyle = lipgloss.NewStyle().Faint(true)
-)
+var titleStyle = lipgloss.NewStyle().Bold(true)
+
+// galleryStyles are built per-render from m.theme -- see board.boardStyles's
+// doc comment for why there is no package-level var carrying a literal
+// theme.Role colour any more.
+type galleryStyles struct {
+	dim, state, flag, legend, err lipgloss.Style
+}
+
+func (m Model) styles() galleryStyles {
+	th := m.theme
+	return galleryStyles{
+		dim:    lipgloss.NewStyle().Faint(true),
+		state:  lipgloss.NewStyle().Bold(true),
+		flag:   lipgloss.NewStyle().Foreground(th.Color(theme.RoleFlag)),
+		legend: lipgloss.NewStyle().Faint(true),
+		err:    lipgloss.NewStyle().Bold(true).Foreground(th.Color(theme.RoleError)),
+	}
+}
 
 func (m Model) View() string {
 	if m.quitting {
@@ -89,10 +116,14 @@ func (m Model) View() string {
 	if height <= 0 {
 		height = 30
 	}
+	st := m.styles()
 
 	var out string
 	out += titleStyle.Render("glyph gallery") + "\n"
-	out += dimStyle.Render(fmt.Sprintf("state %d/%d -- [j/k] scroll one state, [g/G] top/bottom, [q] quit", m.offset+1, len(m.rows))) + "\n\n"
+	if m.themeNotice != "" {
+		out += st.err.Render("! "+m.themeNotice) + "\n"
+	}
+	out += st.dim.Render(fmt.Sprintf("state %d/%d -- [j/k] scroll one state, [g/G] top/bottom, [q] quit", m.offset+1, len(m.rows))) + "\n\n"
 
 	// Budget: title(1) + subtitle(1) + blank(1) + legend(len) + blank(1) +
 	// footer(1) reserved; whatever remains goes to Render's row content.
@@ -104,12 +135,12 @@ func (m Model) View() string {
 	}
 
 	for _, line := range Render(m.rows, m.offset, bodyLines, width) {
-		out += colorizeFlags(line) + "\n"
+		out += colorizeFlags(line, st) + "\n"
 	}
 
 	out += "\n"
 	for _, l := range legend {
-		out += legendStyle.Render(l) + "\n"
+		out += st.legend.Render(l) + "\n"
 	}
 
 	return out
@@ -121,12 +152,12 @@ func (m Model) View() string {
 // output stays usable in a fixture or a test with no styled terminal, while
 // the interactive Model still gets colour and never renders a state name
 // as anything less than bold.
-func colorizeFlags(line string) string {
+func colorizeFlags(line string, st galleryStyles) string {
 	if len(line) >= 6 && line[:6] == "state:" {
-		return stateStyle.Render(line)
+		return st.state.Render(line)
 	}
 	if containsAny(line, "[NF]", "[emoji]") {
-		return flagStyle.Render(line)
+		return st.flag.Render(line)
 	}
 	return line
 }

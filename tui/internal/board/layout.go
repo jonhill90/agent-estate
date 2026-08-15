@@ -17,6 +17,8 @@ import (
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // ColumnStyle is how a column's boundary is drawn.
@@ -141,35 +143,29 @@ var Layouts = []Layout{
 	},
 }
 
-// vivid/restrained column colours. Vivid gives every column its own accent
-// (#10: "eye candy"); restrained is one muted colour throughout so the
-// theme choice is genuinely decorative -- see cardWarnColor below for why
-// an aged/blocked card still stands out in restrained too.
-var vividColumnColor = map[Column]lipgloss.Color{
-	Backlog:    lipgloss.Color("#7f8c9a"),
-	InProgress: lipgloss.Color("#3b82f6"),
-	InReview:   lipgloss.Color("#eab308"),
-	Blocked:    lipgloss.Color("#ef4444"),
-	Done:       lipgloss.Color("#22c55e"),
+// columnColorRole maps a board Column to the theme.Role its vivid-theme
+// accent uses -- Vivid gives every column its own colour (#10: "eye
+// candy"); Restrained collapses every column to theme.RoleNeutral so the
+// vivid/restrained axis stays genuinely decorative -- see the warn role
+// used by renderCard below for why an aged/blocked card still stands out
+// in Restrained too. The concrete colour behind each role is agent-tui#27
+// data (internal/theme/registry.go), not this file's business.
+var columnColorRole = map[Column]theme.Role{
+	Backlog:    theme.RoleBacklog,
+	InProgress: theme.RoleInProgress,
+	InReview:   theme.RoleInReview,
+	Blocked:    theme.RoleBlocked,
+	Done:       theme.RoleDone,
 }
 
-const restrainedColumnColor = lipgloss.Color("#6b7280")
-
-// cardWarnColor is the one colour every theme uses for an aged or blocked
-// card -- matches board/model.go's warnStyle so the picker's colour theme
-// axis never trades away the one colour that actually matters (#10: "a
-// pretty board that omits stale/menu-blocked/unsent is worse than the flat
-// list it replaces" -- applied here to "omits by de-emphasizing colour").
-const cardWarnColor = lipgloss.Color("#f1c40f")
-
-func columnColor(col Column, theme Theme) lipgloss.Color {
-	if theme == ThemeRestrained {
-		return restrainedColumnColor
+func columnColor(col Column, boardTheme Theme, th theme.Theme) lipgloss.Color {
+	if boardTheme == ThemeRestrained {
+		return th.Color(theme.RoleNeutral)
 	}
-	if c, ok := vividColumnColor[col]; ok {
-		return c
+	if role, ok := columnColorRole[col]; ok {
+		return th.Color(role)
 	}
-	return restrainedColumnColor
+	return th.Color(theme.RoleNeutral)
 }
 
 // filterClosed applies a Layout's ClosedFilter to cards -- pure, no I/O, no
@@ -206,7 +202,7 @@ func filterClosed(cards []Card, mode ClosedFilter) []Card {
 // applied to cards before Render ever sees them, so this stays a pure
 // function of what it's given, same discipline card.go's Derive documents
 // for itself.
-func (l Layout) Render(cards []Card, wip []WIP, width int) string {
+func (l Layout) Render(cards []Card, wip []WIP, width int, th theme.Theme) string {
 	cards = filterClosed(cards, l.Closed)
 
 	var b strings.Builder
@@ -214,9 +210,9 @@ func (l Layout) Render(cards []Card, wip []WIP, width int) string {
 
 	switch l.Grouping {
 	case GroupByRepo:
-		b.WriteString(renderSwimlanes(cards, l, width))
+		b.WriteString(renderSwimlanes(cards, l, width, th))
 	default:
-		b.WriteString(renderColumnRow(cards, l, width, true))
+		b.WriteString(renderColumnRow(cards, l, width, true, th))
 	}
 	return b.String()
 }
@@ -225,7 +221,7 @@ func (l Layout) Render(cards []Card, wip []WIP, width int) string {
 // joined horizontally beneath its header -- real swimlanes, not a flat
 // indented list, over the exact grouping view.go's RenderByRepo already
 // answers (#10: "keep and evolve what variant 2 was").
-func renderSwimlanes(cards []Card, l Layout, width int) string {
+func renderSwimlanes(cards []Card, l Layout, width int, th theme.Theme) string {
 	var repos []string
 	seen := map[string]bool{}
 	for _, c := range cards {
@@ -246,7 +242,7 @@ func renderSwimlanes(cards []Card, l Layout, width int) string {
 			}
 		}
 		fmt.Fprintf(&b, "\n== %s ==\n", repoID)
-		b.WriteString(renderColumnRow(inRepo, l, width, false))
+		b.WriteString(renderColumnRow(inRepo, l, width, false, th))
 	}
 	return b.String()
 }
@@ -257,7 +253,7 @@ func renderSwimlanes(cards []Card, l Layout, width int) string {
 // it would be noise); true for the by-column grouping, where cards from
 // every repo sit in the same column and the tag is the only thing telling
 // them apart.
-func renderColumnRow(cards []Card, l Layout, width int, showRepoTag bool) string {
+func renderColumnRow(cards []Card, l Layout, width int, showRepoTag bool, th theme.Theme) string {
 	n := len(Columns)
 	paneWidth := width / n
 	if paneWidth < 16 {
@@ -276,7 +272,7 @@ func renderColumnRow(cards []Card, l Layout, width int, showRepoTag bool) string
 		// RenderByColumn/RenderByRepo used -- the card that has looked this
 		// way longest is the one most worth seeing without scrolling.
 		sort.SliceStable(inCol, func(i, j int) bool { return inCol[i].Age > inCol[j].Age })
-		panes = append(panes, renderColumnPane(col, inCol, l, paneWidth, showRepoTag))
+		panes = append(panes, renderColumnPane(col, inCol, l, paneWidth, showRepoTag, th))
 	}
 	return lipgloss.JoinHorizontal(lipgloss.Top, panes...) + "\n"
 }
@@ -286,8 +282,8 @@ func renderColumnRow(cards []Card, l Layout, width int, showRepoTag bool) string
 // an empty column (#10's "every state renders" extends to "every column
 // renders", the board-level equivalent of internal/lane's AllStates guard
 // -- see layout_test.go's TestEveryLayoutRendersEveryColumn).
-func renderColumnPane(col Column, cards []Card, l Layout, paneWidth int, showRepoTag bool) string {
-	color := columnColor(col, l.Theme)
+func renderColumnPane(col Column, cards []Card, l Layout, paneWidth int, showRepoTag bool, th theme.Theme) string {
+	color := columnColor(col, l.Theme, th)
 	headerStyle := lipgloss.NewStyle().Bold(true).Foreground(color)
 
 	// innerWidth is the actual usable text width once each ColumnStyle's
@@ -300,14 +296,20 @@ func renderColumnPane(col Column, cards []Card, l Layout, paneWidth int, showRep
 	// TestLayoutRenderShowsBlockedReason and TestLetterKeyTogglesRepo
 	// Selection (model_test.go) both failed against an earlier version of
 	// this function that skipped this and let Width() wrap instead.
+	//
+	// pad is th.Padding (agent-tui#27: the horizontal chrome padding every
+	// pane style applies is theme data, not a literal here); border chars
+	// come from th.Border, but WHETHER a border draws at all -- and how
+	// many sides -- stays l.Column's own axis, unchanged by theme.
+	pad := th.Padding
 	var frameWidth int
 	switch l.Column {
 	case StyleBoxed:
-		frameWidth = 2 /* border */ + 2 /* padding */
+		frameWidth = 2 + 2*pad // border, both sides + padding, both sides
 	case StyleRules:
-		frameWidth = 1 /* border */ + 1 /* padding */
+		frameWidth = 1 + pad // border, one side + padding, one side
 	default: // StyleWhitespace
-		frameWidth = 2 // padding only
+		frameWidth = 2 * pad // padding only, both sides
 	}
 	innerWidth := paneWidth - frameWidth
 	if innerWidth < 8 {
@@ -323,7 +325,7 @@ func renderColumnPane(col Column, cards []Card, l Layout, paneWidth int, showRep
 		if l.Density == DensityRoomy && i > 0 {
 			body.WriteString("\n")
 		}
-		body.WriteString(renderCard(c, l, innerWidth, showRepoTag))
+		body.WriteString(renderCard(c, l, innerWidth, showRepoTag, th))
 	}
 
 	content := strings.TrimRight(body.String(), "\n")
@@ -331,27 +333,30 @@ func renderColumnPane(col Column, cards []Card, l Layout, paneWidth int, showRep
 	switch l.Column {
 	case StyleBoxed:
 		return lipgloss.NewStyle().
-			Border(lipgloss.RoundedBorder()).BorderForeground(color).
-			Padding(0, 1).Width(paneWidth - 2).Render(content)
+			Border(th.Border).BorderForeground(color).
+			Padding(0, pad).Width(paneWidth - 2).Render(content)
 	case StyleRules:
 		return lipgloss.NewStyle().
-			BorderStyle(lipgloss.NormalBorder()).BorderLeft(true).BorderForeground(color).
-			PaddingLeft(1).Width(paneWidth - 1).Render(content)
+			BorderStyle(th.Border).BorderLeft(true).BorderForeground(color).
+			PaddingLeft(pad).Width(paneWidth - 1).Render(content)
 	default: // StyleWhitespace
-		return lipgloss.NewStyle().Padding(0, 1).Width(paneWidth).Render(content)
+		return lipgloss.NewStyle().Padding(0, pad).Width(paneWidth).Render(content)
 	}
 }
 
 // renderCard renders one card, single- or multi-line per l.Card. The aged
-// marker and colour (cardWarnColor) always apply regardless of Theme --
-// see cardWarnColor's own doc comment. Every line is explicitly truncated
-// to innerWidth before it is styled -- see renderColumnPane's own doc
-// comment for why this can't be left to lipgloss's automatic wrap.
-func renderCard(c Card, l Layout, innerWidth int, showRepoTag bool) string {
+// marker and its warn colour (theme.RoleWarn) always apply regardless of
+// l.Theme -- a pretty board that de-emphasizes an aged/blocked card by
+// colour is the same failure #10 already ruled out for omitting one
+// entirely. Every line is explicitly truncated to innerWidth before it is
+// styled -- see renderColumnPane's own doc comment for why this can't be
+// left to lipgloss's automatic wrap.
+func renderCard(c Card, l Layout, innerWidth int, showRepoTag bool, th theme.Theme) string {
 	warn := c.Aged()
+	warnColor := th.Color(theme.RoleWarn)
 	style := lipgloss.NewStyle()
 	if warn {
-		style = style.Bold(true).Foreground(cardWarnColor)
+		style = style.Bold(true).Foreground(warnColor)
 	}
 
 	if l.Card == ShapeSingleLine {
@@ -383,7 +388,7 @@ func renderCard(c Card, l Layout, innerWidth int, showRepoTag bool) string {
 	out.WriteString(lipgloss.NewStyle().Faint(true).Render(truncate(strings.Join(meta, "  "), innerWidth)) + "\n")
 
 	if c.Column == Blocked && c.BlockedReason != "" {
-		out.WriteString(lipgloss.NewStyle().Foreground(cardWarnColor).Render(truncate("-> "+c.BlockedReason, innerWidth)) + "\n")
+		out.WriteString(lipgloss.NewStyle().Foreground(warnColor).Render(truncate("-> "+c.BlockedReason, innerWidth)) + "\n")
 	}
 	return out.String()
 }

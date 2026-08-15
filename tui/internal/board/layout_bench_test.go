@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"testing"
 	"time"
+
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // benchCards builds a synthetic but realistically-shaped fixture: n cards
@@ -59,7 +61,7 @@ func BenchmarkLayoutRender(b *testing.B) {
 			b.Run(fmt.Sprintf("%s/n=%d", l.ID, size), func(b *testing.B) {
 				b.ReportAllocs()
 				for i := 0; i < b.N; i++ {
-					_ = l.Render(cards, nil, 200)
+					_ = l.Render(cards, nil, 200, theme.Default)
 				}
 			})
 		}

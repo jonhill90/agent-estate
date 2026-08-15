@@ -7,6 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 const refreshInterval = 5 * time.Second
@@ -60,10 +62,31 @@ type Model struct {
 	fetchErr    error
 	lastFetched time.Time
 	quitting    bool
+
+	// theme is agent-tui#27's seam: every colour/border/padding value
+	// View() and layout.go's Render use comes from here, never a literal
+	// at the call site. Defaults to theme.Default so every pre-#27 caller
+	// (every test that builds a Model with New) renders exactly as before
+	// this field existed.
+	theme theme.Theme
+	// themeNotice is #27 acceptance item 3's "says so visibly" half: set
+	// only when cmd/agent-tui's theme.Load resolved a malformed config or
+	// an unknown theme name, never for a plain missing config (which is
+	// not an error). Rendered once, right under the title.
+	themeNotice string
 }
 
 func New(fetch Fetcher) Model {
-	return Model{fetch: fetch, width: 100, height: 30}
+	return Model{fetch: fetch, width: 100, height: 30, theme: theme.Default}
+}
+
+// WithTheme returns a copy of m with th (and, when non-empty, a visible
+// notice about how th was resolved) wired in -- the one call cmd/agent-tui
+// makes once theme.Load has run, mirroring rail.Model.WithOps's shape.
+func (m Model) WithTheme(th theme.Theme, notice string) Model {
+	m.theme = th
+	m.themeNotice = notice
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -151,11 +174,24 @@ func letterKey(s string) (int, bool) {
 	return int(s[0] - 'a'), true
 }
 
-var (
-	titleStyle = lipgloss.NewStyle().Bold(true)
-	errStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ff5555"))
-	dimStyle   = lipgloss.NewStyle().Faint(true)
-)
+var titleStyle = lipgloss.NewStyle().Bold(true)
+
+// errStyle/dimStyle are per-render, built from m.theme -- see styles()
+// below. There is no package-level var for either any more: a literal
+// theme.Role color baked into a package var at init time couldn't change
+// when the active theme does, which is exactly the bug agent-tui#27 exists
+// to prevent.
+type boardStyles struct {
+	err, dim lipgloss.Style
+}
+
+func (m Model) styles() boardStyles {
+	th := m.theme
+	return boardStyles{
+		err: lipgloss.NewStyle().Bold(true).Foreground(th.Color(theme.RoleError)),
+		dim: lipgloss.NewStyle().Faint(true),
+	}
+}
 
 func (m Model) View() string {
 	if m.quitting {
@@ -165,27 +201,32 @@ func (m Model) View() string {
 	if width <= 0 {
 		width = 100
 	}
+	st := m.styles()
 
 	var out string
 	out += titleStyle.Render("task board") + "\n"
 
+	if m.themeNotice != "" {
+		out += st.err.Render("! "+m.themeNotice) + "\n"
+	}
+
 	if m.fetchErr != nil {
-		out += errStyle.Render("! unavailable") + "\n"
-		out += dimStyle.Render(m.fetchErr.Error()) + "\n"
+		out += st.err.Render("! unavailable") + "\n"
+		out += st.dim.Render(m.fetchErr.Error()) + "\n"
 	} else if len(m.snap.Cards) == 0 && m.lastFetched.IsZero() {
-		out += dimStyle.Render("(loading)") + "\n"
+		out += st.dim.Render("(loading)") + "\n"
 	}
 
 	layout := Layouts[m.layoutIdx]
-	out += layout.Render(m.visibleCards(), m.snap.WIP, width)
+	out += layout.Render(m.visibleCards(), m.snap.WIP, width, m.theme)
 
 	if !m.lastFetched.IsZero() {
 		age := time.Since(m.lastFetched).Round(time.Second)
-		out += "\n" + dimStyle.Render(fmt.Sprintf("fetched %s ago", age)) + "\n"
+		out += "\n" + st.dim.Render(fmt.Sprintf("fetched %s ago", age)) + "\n"
 	}
-	out += dimStyle.Render(fmt.Sprintf("layout %d/%d: %s -- %s", m.layoutIdx+1, len(Layouts), layout.Name, layout.Description)) + "\n"
-	out += dimStyle.Render(fmt.Sprintf("[1-%d] switch layout  %s", len(Layouts), m.repoLegend())) + "\n"
-	out += dimStyle.Render("[r] refresh  [q] quit")
+	out += st.dim.Render(fmt.Sprintf("layout %d/%d: %s -- %s", m.layoutIdx+1, len(Layouts), layout.Name, layout.Description)) + "\n"
+	out += st.dim.Render(fmt.Sprintf("[1-%d] switch layout  %s", len(Layouts), m.repoLegend())) + "\n"
+	out += st.dim.Render("[r] refresh  [q] quit")
 	return out
 }
 

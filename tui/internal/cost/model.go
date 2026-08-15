@@ -6,6 +6,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // refreshInterval is 5 minutes. This is a status readout, not a live meter
@@ -58,10 +60,24 @@ type Model struct {
 	fetchErr    error
 	lastFetched time.Time
 	quitting    bool
+
+	// theme is agent-tui#27's seam -- see board.Model's identical field for
+	// the full rationale. Defaults to theme.Default so every pre-#27
+	// caller renders exactly as before this field existed.
+	theme       theme.Theme
+	themeNotice string
 }
 
 func New(fetch Fetcher) Model {
-	return Model{fetch: fetch, width: 100, height: 30}
+	return Model{fetch: fetch, width: 100, height: 30, theme: theme.Default}
+}
+
+// WithTheme returns a copy of m with th (and, when non-empty, a visible
+// notice about how th was resolved) wired in.
+func (m Model) WithTheme(th theme.Theme, notice string) Model {
+	m.theme = th
+	m.themeNotice = notice
+	return m
 }
 
 func (m Model) Init() tea.Cmd {
@@ -125,12 +141,23 @@ func digitKey(s string) (int, bool) {
 	return int(s[0] - '0'), true
 }
 
-var (
-	titleStyle = lipgloss.NewStyle().Bold(true)
-	errStyle   = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#ff5555"))
-	dimStyle   = lipgloss.NewStyle().Faint(true)
-	warnStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("#f1c40f"))
-)
+var titleStyle = lipgloss.NewStyle().Bold(true)
+
+// costStyles are built per-render from m.theme -- see board.boardStyles's
+// doc comment for why there is no package-level var carrying a literal
+// theme.Role colour any more.
+type costStyles struct {
+	err, dim, warn lipgloss.Style
+}
+
+func (m Model) styles() costStyles {
+	th := m.theme
+	return costStyles{
+		err:  lipgloss.NewStyle().Bold(true).Foreground(th.Color(theme.RoleError)),
+		dim:  lipgloss.NewStyle().Faint(true),
+		warn: lipgloss.NewStyle().Bold(true).Foreground(th.Color(theme.RoleWarn)),
+	}
+}
 
 func (m Model) View() string {
 	if m.quitting {
@@ -140,27 +167,32 @@ func (m Model) View() string {
 	if width <= 0 {
 		width = 100
 	}
+	st := m.styles()
 
 	var out string
 	out += titleStyle.Render("cost") + "\n"
 
+	if m.themeNotice != "" {
+		out += st.err.Render("! "+m.themeNotice) + "\n"
+	}
+
 	if m.fetchErr != nil {
-		out += errStyle.Render("! unavailable") + "\n"
-		out += dimStyle.Render(m.fetchErr.Error()) + "\n"
+		out += st.err.Render("! unavailable") + "\n"
+		out += st.dim.Render(m.fetchErr.Error()) + "\n"
 	} else if !m.snap.Known && m.lastFetched.IsZero() {
-		out += dimStyle.Render("(loading)") + "\n"
+		out += st.dim.Render("(loading)") + "\n"
 	}
 
 	view := Views[m.viewIdx]
 	body := view.Render(m.snap, width)
-	out += colorizeWarn(body)
+	out += colorizeWarn(body, st.warn)
 
 	if !m.lastFetched.IsZero() {
 		age := time.Since(m.lastFetched).Round(time.Second)
-		out += "\n" + dimStyle.Render(fmt.Sprintf("fetched %s ago -- refreshes every %s", age, refreshInterval)) + "\n"
+		out += "\n" + st.dim.Render(fmt.Sprintf("fetched %s ago -- refreshes every %s", age, refreshInterval)) + "\n"
 	}
-	out += dimStyle.Render(fmt.Sprintf("view %d/%d: %s -- %s", m.viewIdx+1, len(Views), view.Name, view.Description)) + "\n"
-	out += dimStyle.Render(fmt.Sprintf("[1-%d] switch view  [r] refresh  [q] quit", len(Views)))
+	out += st.dim.Render(fmt.Sprintf("view %d/%d: %s -- %s", m.viewIdx+1, len(Views), view.Name, view.Description)) + "\n"
+	out += st.dim.Render(fmt.Sprintf("[1-%d] switch view  [r] refresh  [q] quit", len(Views)))
 	return out
 }
 
@@ -170,7 +202,7 @@ func (m Model) View() string {
 // board.colorizeAged is: the plain-text Render functions stay usable
 // outside a styled terminal (a fixture, a test) while the interactive
 // Model still gets color.
-func colorizeWarn(body string) string {
+func colorizeWarn(body string, warnStyle lipgloss.Style) string {
 	var out string
 	for _, line := range splitLinesKeepEmpty(body) {
 		if containsWarn(line) {
