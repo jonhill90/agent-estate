@@ -260,11 +260,33 @@ def _parse_verdict_comment(body):
       "quote reply" shape) is never consulted -- a reply quoting an EARLIER
       comment's verdict must not be read as this comment restating it.
 
+    #196: the line-scan reaches every qualifying line in the comment, not
+    just the first, so a SINGLE comment can carry more than one verdict
+    line -- a reviewer who drafts `Verdict: APPROVE`, reconsiders, and
+    writes `Verdict: REQUEST CHANGES` further down. Returning on the first
+    match would let that earlier, superseded APPROVE silently win, which is
+    exactly the "REQUEST CHANGES read as approved" failure this module
+    exists to prevent -- so this collects every qualifying line's decision
+    instead of stopping at the first:
+
+    - a line whose decision text is not recognised is SKIPPED, not treated
+      as a terminal failure -- a later line in the same comment still gets
+      a chance to supply a valid decision;
+    - two or more qualifying lines that agree (same decision, repeated) are
+      fine -- restating a verdict is not a conflict, and the comment
+      resolves to that decision;
+    - two or more qualifying lines with DIFFERING decisions make the whole
+      comment ambiguous -- this refuses with None rather than picking
+      either one, first or last: `unknown`/ambiguous must refuse at the
+      merge gate, never resolve to a decision.
+
     Returns "approved", "rejected", or None -- None when no line qualifies,
-    and also when a qualifying line's decision text is not recognised; a
-    comment this module cannot classify must not be guessed at, the same
-    fail-closed stance every other source in this module takes."""
+    when every qualifying line's decision text is unrecognised, or when
+    qualifying lines disagree; a comment this module cannot classify
+    cleanly must not be guessed at, the same fail-closed stance every
+    other source in this module takes."""
     in_fence = False
+    decisions = []
     for raw_line in (body or "").splitlines():
         line = raw_line.strip()
         if line.startswith("```"):
@@ -282,10 +304,14 @@ def _parse_verdict_comment(body):
         decision_text = re.sub(r"[*_`]+$", "", rest.strip()).strip()
         decision_text = decision_text.rstrip(".:;,!").strip().upper()
         if "REQUEST CHANGES" in decision_text:
-            return "rejected"
-        if "APPROVE" in decision_text:
-            return "approved"
-        return None
+            decisions.append("rejected")
+        elif "APPROVE" in decision_text:
+            decisions.append("approved")
+        # else: this line's decision text is unrecognised -- skip it and
+        # keep scanning, a later line may still supply a valid decision.
+    distinct = set(decisions)
+    if len(distinct) == 1:
+        return distinct.pop()
     return None
 
 
