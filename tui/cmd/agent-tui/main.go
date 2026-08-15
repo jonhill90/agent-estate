@@ -24,6 +24,10 @@ import (
 	"github.com/jonhill90/agent-tui/internal/lane"
 	"github.com/jonhill90/agent-tui/internal/mcp"
 	"github.com/jonhill90/agent-tui/internal/rail"
+	// sessionops, not session: the -session flag var below already owns that
+	// name (the tmux session -board reads), and shadowing it would be an
+	// easy read-vs-write mixup in a file that now does both.
+	sessionops "github.com/jonhill90/agent-tui/internal/session"
 )
 
 func main() {
@@ -163,7 +167,13 @@ func main() {
 		// supervisor checkout. Passing lanesFetch here means that case
 		// degrades to the old single-session rail (with a visible note)
 		// instead of going blind.
-		p = tea.NewProgram(rail.NewMultiSession(sessionsFetch, lanesFetch, costFetch, *directorSession), tea.WithAltScreen())
+		// WithOps wires agent-tui#14's write path (attach/detach/add/remove)
+		// in on top of #13's multi-session rail -- session.New(client) shares
+		// the exact same MCP connection every read above already uses, never
+		// a second client and never tmux itself (see internal/session's
+		// package doc for why that split is non-negotiable).
+		m := rail.NewMultiSession(sessionsFetch, lanesFetch, costFetch, *directorSession).WithOps(sessionops.New(client))
+		p = tea.NewProgram(m, tea.WithAltScreen())
 	}
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "agent-tui:", err)

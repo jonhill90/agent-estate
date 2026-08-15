@@ -51,6 +51,7 @@ var signalSet = GlyphSet{
 		"scrolled":     {Motion: MotionBounce, Frames: []string{"↑", "↕", "↓", "↕"}, Color: "#7fa8ff", Label: "scrolled"},
 		"service":      {Motion: MotionStill, Frames: []string{"·"}, Color: "#555555", Label: "service"},
 		"supervisor":   {Motion: MotionStill, Frames: []string{"·"}, Color: "#555555", Label: "supervisor"},
+		"never-busy":   {Motion: MotionPulse, Frames: []string{"⧖", "·"}, Color: "#ff6b6b", Label: "never-busy"},
 		"unknown":      {Motion: MotionStill, Frames: []string{"?"}, Color: "#999999", Label: "unknown"},
 	},
 }
@@ -76,6 +77,7 @@ var asciiSet = GlyphSet{
 		"scrolled":     {Motion: MotionBounce, Frames: []string{"^", "|", "v", "|"}, Color: "#7fa8ff", Label: "scrolled"},
 		"service":      {Motion: MotionStill, Frames: []string{"."}, Color: "#555555", Label: "service"},
 		"supervisor":   {Motion: MotionStill, Frames: []string{"."}, Color: "#555555", Label: "supervisor"},
+		"never-busy":   {Motion: MotionPulse, Frames: []string{"Z", "."}, Color: "#ff6b6b", Label: "never-busy"},
 		"unknown":      {Motion: MotionStill, Frames: []string{"?"}, Color: "#999999", Label: "unknown"},
 	},
 }
@@ -100,6 +102,7 @@ var blocksSet = GlyphSet{
 		"scrolled":     {Motion: MotionBounce, Frames: []string{"▲", "▬", "▼", "▬"}, Color: "#7fa8ff", Label: "scrolled"},
 		"service":      {Motion: MotionStill, Frames: []string{"▪"}, Color: "#555555", Label: "service"},
 		"supervisor":   {Motion: MotionStill, Frames: []string{"▪"}, Color: "#555555", Label: "supervisor"},
+		"never-busy":   {Motion: MotionPulse, Frames: []string{"▤", "▥"}, Color: "#ff6b6b", Label: "never-busy"},
 		"unknown":      {Motion: MotionStill, Frames: []string{"▯"}, Color: "#999999", Label: "unknown"},
 	},
 }
@@ -143,6 +146,7 @@ var nerdSet = GlyphSet{
 		"scrolled":     {Motion: MotionBounce, Frames: []string{"\uf07d", " "}, Color: "#7fa8ff", Label: "scrolled"},    // fa-arrows-v
 		"service":      {Motion: MotionStill, Frames: []string{"\uf013"}, Color: "#555555", Label: "service"},           // fa-cog
 		"supervisor":   {Motion: MotionStill, Frames: []string{"\uf0ad"}, Color: "#555555", Label: "supervisor"},        // fa-wrench
+		"never-busy":   {Motion: MotionPulse, Frames: []string{"\uf252", " "}, Color: "#ff6b6b", Label: "never-busy"},   // fa-hourglass-half, verified against glyphnames.json (code f252)
 		"unknown":      {Motion: MotionStill, Frames: []string{"\uf059"}, Color: "#999999", Label: "unknown"},           // fa-question-circle
 	},
 }
@@ -169,6 +173,7 @@ var emojiSet = GlyphSet{
 		"scrolled":     {Motion: MotionBounce, Frames: []string{"⬆️", "↕️", "⬇️", "↕️"}, Color: "#7fa8ff", Label: "scrolled"},
 		"service":      {Motion: MotionStill, Frames: []string{"⚙️"}, Color: "#555555", Label: "service"},
 		"supervisor":   {Motion: MotionStill, Frames: []string{"🛠️"}, Color: "#555555", Label: "supervisor"},
+		"never-busy":   {Motion: MotionPulse, Frames: []string{"⏳", "·"}, Color: "#ff6b6b", Label: "never-busy"},
 		"unknown":      {Motion: MotionStill, Frames: []string{"❓"}, Color: "#999999", Label: "unknown"},
 	},
 }

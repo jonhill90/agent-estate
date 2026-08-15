@@ -18,6 +18,7 @@ import (
 
 	"github.com/jonhill90/agent-tui/internal/cost"
 	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/session"
 )
 
 // RailWidth is the target column count for the rail region. Jon asked for
@@ -135,6 +136,29 @@ type Model struct {
 	// applies it to glyphs: every candidate is real, numbered, and swapped
 	// live against the same on-screen data, never decided silently.
 	groupStyle int
+
+	// -- agent-tui#14: session management (attach/detach/add/remove). ops
+	// is nil on every Model built without WithOps (every pre-#14 test,
+	// board.go's single-session path) -- Update below guards every one of
+	// the a/d/n/x keys on ops != nil, so a Model with no write path ignores
+	// them exactly as it ignored an unmapped key before #14, rather than
+	// panicking on a nil interface call. See ops.go for the write flow.
+	ops       session.Interface
+	opsMode   opsMode
+	opsInput  string              // session name being typed while opsMode == opsModeAdding
+	opsStatus string              // last completed op's one-line result, shown in the footer until the next op starts
+	opsCheck  session.RemoveCheck // the last session_remove_check result, live while opsMode == opsModeConfirmRemove
+	opsTarget string              // the session name an in-flight add/remove/removeCheck names
+}
+
+// WithOps returns a copy of m with ops wired in -- the one call cmd/agent-tui
+// makes to turn on agent-tui#14's write path (attach/detach/add/remove).
+// Every rail test that does not call this gets a Model with ops == nil,
+// exactly as it did before #14 existed; see the ops field's own doc comment
+// on Model for why that is safe rather than a nil-panic waiting to happen.
+func (m Model) WithOps(ops session.Interface) Model {
+	m.ops = ops
+	return m
 }
 
 // New builds a Model bound to the given fetch function, with no cost line
@@ -247,6 +271,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.KeyMsg:
+		// agent-tui#14: every write-path key (a/d/n/x, plus whatever a live
+		// opsMode is currently intercepting -- typing a new session's name,
+		// or confirming/cancelling a remove) is handled in ops.go, and takes
+		// priority over the read-only keys below so that, e.g., typing a
+		// session name containing 'r' or 'g' cannot be misread as a refresh
+		// or a group-style cycle. handleOpsKey returns handled == false for
+		// every key it has no opinion on (including every key when
+		// m.ops == nil), so a Model with no write path falls straight
+		// through to the exact same switch it used before #14 existed.
+		if next, cmd, handled := m.handleOpsKey(msg); handled {
+			return next, cmd
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			m.quitting = true
@@ -347,6 +383,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		m.costFetched = time.Now()
 		return m, nil
+
+	// agent-tui#14: results of the four write operations. Each is produced
+	// by exactly one doXxx tea.Cmd in ops.go and handled there too, kept out
+	// of this switch's other cases so the write path's state machine lives
+	// in one file end to end.
+	case attachResultMsg, detachResultMsg, addResultMsg, removeCheckResultMsg, removeResultMsg:
+		return m.handleOpsResult(msg)
 	}
 	return m, nil
 }
@@ -479,6 +522,15 @@ func (m Model) View() string {
 		gs := groupStyles[m.groupStyle]
 		b = append(b, legendStyle.Width(innerWidth).Render(fmt.Sprintf("group %d/%d: %s", m.groupStyle+1, len(groupStyles), gs.Name)))
 		b = append(b, legendStyle.Width(innerWidth).Render("[g] to switch"))
+	}
+
+	// agent-tui#14's write path: the current mode's prompt (typing a new
+	// session's name, or a remove confirmation naming exactly what would be
+	// destroyed) or, when idle, the last operation's one-line result. Only
+	// present when cmd/agent-tui wired ops in (WithOps) -- see ops.go.
+	if m.ops != nil {
+		b = append(b, dimStyle.Width(innerWidth).Render(""))
+		b = append(b, m.renderOpsStatus(innerWidth)...)
 	}
 
 	// The cost line (agent-tui#4): glanceable, always in the rail, no flag

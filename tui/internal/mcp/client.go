@@ -7,13 +7,29 @@ package mcp
 
 import (
 	"bufio"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"time"
 )
+
+// callTimeout bounds every request/response round-trip through call --
+// at#22 review: a non-responding supervisor subprocess must surface as a
+// visible, honest error, not an indefinite hang (the prior bare
+// `resp, ok := <-ch` only ever unblocked if the child crashed and closed its
+// pipes). 10s is chosen because every real tool this client calls today
+// (session_attach/detach/add/remove/remove_check, each a subprocess spawn
+// plus a tmux/git round-trip per internal/session's own doc comments) is a
+// local operation with no network hop -- a few seconds is the honest budget
+// for that, and 10s leaves generous headroom above it without leaving a
+// human staring at a frozen "attaching…" footer for minutes. It is a var,
+// not a const, so tests can shrink it rather than actually waiting out a
+// production-length deadline.
+var callTimeout = 10 * time.Second
 
 // Client owns one child process speaking MCP over stdio. Callers must call
 // Close to release it.
@@ -152,17 +168,35 @@ func (c *Client) call(method string, params any) (json.RawMessage, error) {
 	_, writeErr := c.stdin.Write(append(body, '\n'))
 	c.mu.Unlock()
 	if writeErr != nil {
+		c.mu.Lock()
+		delete(c.pend, id)
+		c.mu.Unlock()
 		return nil, fmt.Errorf("mcp: write request: %w", writeErr)
 	}
 
-	resp, ok := <-ch
-	if !ok {
-		return nil, fmt.Errorf("mcp: connection closed before a reply to %q arrived", method)
+	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	defer cancel()
+
+	select {
+	case resp, ok := <-ch:
+		if !ok {
+			return nil, fmt.Errorf("mcp: connection closed before a reply to %q arrived", method)
+		}
+		if resp.Error != nil {
+			return nil, fmt.Errorf("mcp: %s: %s (code %d)", method, resp.Error.Message, resp.Error.Code)
+		}
+		return resp.Result, nil
+	case <-ctx.Done():
+		// The subprocess is still alive (readLoop would have closed every
+		// pending channel and returned if it weren't) -- it simply has not
+		// answered in time. Deregister the id so a late reply, if one ever
+		// arrives, finds nothing in c.pend and is dropped rather than sent
+		// to a channel nobody is reading.
+		c.mu.Lock()
+		delete(c.pend, id)
+		c.mu.Unlock()
+		return nil, fmt.Errorf("mcp: %s: no reply within %s", method, callTimeout)
 	}
-	if resp.Error != nil {
-		return nil, fmt.Errorf("mcp: %s: %s (code %d)", method, resp.Error.Message, resp.Error.Code)
-	}
-	return resp.Result, nil
 }
 
 // CallTool invokes tools/call for the given tool name and returns the decoded
