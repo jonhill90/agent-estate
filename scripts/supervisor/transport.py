@@ -9,6 +9,15 @@ import time
 TMUX_TIMEOUT_SECONDS = 10
 
 
+def _stripped(text):
+    """Whitespace stripped out entirely, not just trimmed -- a real pane
+    wraps a long line across several rows and indents the continuation, so a
+    literal substring check has to compare against text with no spaces or
+    newlines on either side, the same discipline send.sh's bash primitive
+    uses for the same reason."""
+    return "".join(text.split())
+
+
 class TmuxTransport:
     def __init__(self, tmux_bin="tmux", *, timeout=TMUX_TIMEOUT_SECONDS):
         self.tmux_bin = tmux_bin
@@ -45,9 +54,51 @@ class TmuxTransport:
         return self._run("display-message", "-p", "-t", target, f"#{{{name}}}").stdout.rstrip("\n")
 
     def send_literal(self, target, payload):
+        """Type `payload` into `target` and submit it -- verified, not blind.
+
+        agent-supervisor#178: `Enter` does not submit text a PREVIOUS
+        `send-keys` left sitting in the box; `C-u` then retyping submits
+        every time. This used to be `C-u`, type, sleep, `Enter`, sleep, with
+        nothing in between checking that the keys actually landed before
+        `Enter` was risked -- the same gap #178 found in every direct
+        `tmux send-keys` caller. Fixed the same way `send.sh`'s bash
+        primitive is (that file is this method's sibling, not its ancestor;
+        a shell function and a Python method cannot share one body, so the
+        contract is shared instead): type, verify BOTH ends of the message
+        against what the pane actually shows, retry once via `C-u` and a
+        full retype on failure, THEN submit.
+
+        Raises RuntimeError rather than returning if the payload never
+        confirms landed -- #178's fail-closed rule: "cannot tell" must never
+        read as "sent". `assign_task`/`notify_supervisor` already persist
+        the ambiguous `delivery_pending` ledger state before calling this
+        (see their own comments), precisely so an exception here leaves that
+        record in place rather than a lie that says the send happened.
+        """
         self._run("send-keys", "-t", target, "C-u")
-        self._run("send-keys", "-t", target, "-l", "--", payload)
-        time.sleep(0.1)
+        needle = _stripped(payload)
+        # Both ends, not just the head: a dropped prefix is what a repaint
+        # eats first, and it is also what an over-long message hides by
+        # scrolling -- checking only the head conflates "arrived" with
+        # "fits"; checking only the tail would pass a dropped prefix. Both,
+        # or neither is evidence (send.sh's own comment, same reasoning).
+        head, tail = needle[:40], needle[-40:]
+        landed = False
+        for attempt in range(2):
+            self._run("send-keys", "-t", target, "-l", "--", payload)
+            time.sleep(0.1)
+            pane = _stripped(self._run("capture-pane", "-p", "-t", target).stdout)
+            if head in pane and tail in pane:
+                landed = True
+                break
+            if attempt == 0:
+                self._run("send-keys", "-t", target, "C-u")
+                time.sleep(0.1)
+        if not landed:
+            raise RuntimeError(
+                f"TmuxTransport.send_literal: payload did not land in {target} "
+                "after a clear-and-retype -- refusing to send Enter (agent-supervisor#178)"
+            )
         self._run("send-keys", "-t", target, "Enter")
         time.sleep(0.5)
 

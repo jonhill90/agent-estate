@@ -1830,10 +1830,15 @@ import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
 # The brief submit -- the single most consequential target in the script.
-marker = 'tmux send-keys -t "$LANE_TARGET" "$MESSAGE" 2>/dev/null'
-assert marker in text, "the brief's send-keys not found -- script shape changed"
-assert text.count(marker) == 1, "the brief's send-keys not unique -- script shape changed"
-open(dst, "w").write(text.replace(marker, 'tmux send-keys -t "$LANE" "$MESSAGE" 2>/dev/null', 1))
+# agent-supervisor#178 moved the actual `tmux send-keys` call for the brief
+# into send.sh's verified_type (shared by every caller, so mutating it here
+# would mutate them all); what stayed in dispatch.sh, and is now the
+# equivalent regression to reproduce, is the ARGUMENT it hands that shared
+# function -- $LANE_TARGET (a window id) vs $LANE (an index).
+marker = 'verified_type "$LANE_TARGET" "$MESSAGE" \\'
+assert marker in text, "the brief's verified_type call not found -- script shape changed"
+assert text.count(marker) == 1, "the brief's verified_type call not unique -- script shape changed"
+open(dst, "w").write(text.replace(marker, 'verified_type "$LANE" "$MESSAGE" \\', 1))
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh with one index-addressed send-keys" \
