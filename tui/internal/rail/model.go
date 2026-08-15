@@ -16,6 +16,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/jonhill90/agent-tui/internal/board"
 	"github.com/jonhill90/agent-tui/internal/cost"
 	"github.com/jonhill90/agent-tui/internal/lane"
 	"github.com/jonhill90/agent-tui/internal/session"
@@ -151,6 +152,22 @@ type Model struct {
 	opsCheck  session.RemoveCheck // the last session_remove_check result, live while opsMode == opsModeConfirmRemove
 	opsTarget string              // the session name an in-flight add/remove/removeCheck names
 
+	// -- agent-tui#26: ledger-derived rail content. taskFetch is nil in
+	// every test and in any run started without -ledger, exactly the same
+	// "additive, never assumed" discipline costFetch/ops/sessionsFetch above
+	// already follow -- see work.go's package doc comment for why this
+	// reuses board.ReadTaskRows rather than a second ledger reader.
+	taskFetch    TaskFetcher
+	tasks        []board.TaskRow
+	tasksErr     error
+	tasksFetched time.Time
+
+	// reading indexes readings (readings.go) -- the content-variants picker
+	// agent-tui#26 asks for, cycled with 'w' the same live-against-real-data
+	// way glyphSet/groupStyle already are. Starts at 0, readings[0]'s index,
+	// so silence still yields something sane.
+	reading int
+
 	// theme is agent-tui#27's seam: every colour, border and padding value
 	// View() draws comes from here, never a literal at the call site.
 	// Defaults to theme.Default (see New/NewMultiSession) so every rail
@@ -250,6 +267,9 @@ func (m Model) Init() tea.Cmd {
 	if m.costFetch != nil {
 		cmds = append(cmds, costRefreshCmd(), doCostFetch(m.costFetch))
 	}
+	if m.taskFetch != nil {
+		cmds = append(cmds, doTaskFetch(m.taskFetch))
+	}
 	return tea.Batch(cmds...)
 }
 
@@ -345,6 +365,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// untouched until they edit it themselves.
 			m.theme = theme.Cycle(m.theme)
 			return m, nil
+		case "w":
+			// agent-tui#26: cycles the content-reading picker (work-centric
+			// / status-centric) the same live-against-real-data way 'g'
+			// does for grouping -- always available, even with no taskFetch
+			// wired, since both readings render sanely with "(no task)"/
+			// "health: ok" when there is no ledger row behind a lane.
+			if len(readings) > 0 {
+				m.reading = (m.reading + 1) % len(readings)
+			}
+			return m, nil
 		}
 		// Number keys select a glyph set directly, live, against whatever
 		// is already on screen -- the whole picker is this one branch plus
@@ -414,6 +444,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.costFetched = time.Now()
 		return m, nil
 
+	case taskFetchResultMsg:
+		// Same discipline as fetchResultMsg/sessionsFetchResultMsg: a failed
+		// ledger read leaves the prior (possibly stale) rows on screen --
+		// tasksErr is surfaced as a small legend note in View(), never a
+		// silent revert to "(no task)" for every lane that had one a moment
+		// ago.
+		m.tasksErr = msg.err
+		if msg.err == nil {
+			m.tasks = msg.rows
+			m.tasksFetched = time.Now()
+		}
+		return m, nil
+
 	// agent-tui#14: results of the write operations (agent-tui#23: attach
 	// and detach no longer produce one of these -- see ops.go's package doc
 	// comment). Each is produced by exactly one doXxx tea.Cmd in ops.go and
@@ -475,6 +518,9 @@ func (m Model) doFetchAll() tea.Cmd {
 	if m.fallbackActive() {
 		cmds = append(cmds, doFetch(m.lanesFetch))
 	}
+	if m.taskFetch != nil {
+		cmds = append(cmds, doTaskFetch(m.taskFetch))
+	}
 	return tea.Batch(cmds...)
 }
 
@@ -496,9 +542,14 @@ func digitKey(s string) (int, bool) {
 // these rather than reaching for a package-level style.
 type railStyles struct {
 	title, row, selRow, dim, err, legend lipgloss.Style
-	border                               lipgloss.Style
-	selectionBG, directorAccent          lipgloss.Color
-	unsupervisedAccent                   lipgloss.Color
+	// warn is agent-tui#26's "needs human" flag -- theme.RoleWarn, the same
+	// role board's aged/blocked cards use, distinct from err (RoleError,
+	// reserved for fetch failures and refusals) so a lane that merely needs
+	// a look never reads as loud as one this program cannot see at all.
+	warn                        lipgloss.Style
+	border                      lipgloss.Style
+	selectionBG, directorAccent lipgloss.Color
+	unsupervisedAccent          lipgloss.Color
 }
 
 // styles builds m's live style set from m.theme -- selectionBackground's
@@ -517,6 +568,7 @@ func (m Model) styles() railStyles {
 		selRow:             row.Background(selectionBG),
 		dim:                lipgloss.NewStyle().Faint(true),
 		err:                lipgloss.NewStyle().Bold(true).Foreground(th.Color(theme.RoleError)),
+		warn:               lipgloss.NewStyle().Bold(true).Foreground(th.Color(theme.RoleWarn)),
 		legend:             lipgloss.NewStyle().Faint(true),
 		border:             lipgloss.NewStyle().Border(th.Border, false, true, false, false).BorderForeground(th.Color(theme.RoleBorder)),
 		selectionBG:        selectionBG,
@@ -568,6 +620,24 @@ func (m Model) View() string {
 	b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("glyphs %d/%d: %s", m.glyphSet+1, len(lane.Variants), set.Name)))
 	b = append(b, st.legend.Width(innerWidth).Render(truncate(set.Description, innerWidth)))
 	b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("[1-%d] to switch", len(lane.Variants))))
+
+	// agent-tui#26's reading picker: which content variant is live now --
+	// same numbered-and-real discipline as the glyph picker above, one key
+	// ('w') rather than a number since there are, deliberately, only two
+	// candidates today (see readings.go's doc comment on why more than one
+	// exists at all).
+	if len(readings) > 0 {
+		rd := readings[m.reading]
+		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("reading %d/%d: %s", m.reading+1, len(readings), rd.Name)))
+		b = append(b, st.legend.Width(innerWidth).Render(truncate(rd.Description, innerWidth)))
+		b = append(b, st.legend.Width(innerWidth).Render("[w] to switch"))
+	}
+	if m.taskFetch != nil && m.tasksErr != nil {
+		// Never a silent revert to "(no task)" everywhere -- see
+		// taskFetchResultMsg's own comment for why stale rows stay on
+		// screen while this note says why they might be stale.
+		b = append(b, st.err.Width(innerWidth).Render(truncate("! ledger unavailable", innerWidth)))
+	}
 
 	// The grouping-style picker (agent-tui#13 requirement 5) -- only shown
 	// when there is grouping to pick between at all.
@@ -691,12 +761,9 @@ func (m Model) renderFlatBody(innerWidth int, set lane.GlyphSet, st railStyles) 
 	if len(m.lanes) > 0 && m.selected < len(m.lanes) {
 		sel := m.lanes[m.selected]
 		style := lane.StyleFor(set, sel.State)
-		label := style.Label
-		if label == "" {
-			label = sel.State // Unmapped: still print the raw word, never blank
-		}
-		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("state: %s", label)))
-		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("idle:  %ds", sel.IdleSeconds)))
+		// agent-tui#26: was a fixed "state:/idle:" pair -- now the
+		// reading-driven detail block; see readings_view.go.
+		b = append(b, m.renderReadingDetail(sel, style, st, innerWidth)...)
 	}
 	if !m.lastFetched.IsZero() {
 		age := time.Since(m.lastFetched).Round(time.Second)

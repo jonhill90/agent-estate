@@ -7,6 +7,7 @@ import (
 
 	"github.com/jonhill90/agent-tui/internal/board"
 	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/rail"
 )
 
 // buildBoardFetch composes board.board's pure pieces (repo discovery, gh,
@@ -65,6 +66,24 @@ func buildBoardFetch(ledgerPath, ghBin, sqliteBin, reposEnv string, lanesFetch f
 
 		cards := board.Derive(time.Now(), repos, issuesByRepo, prsByRepo, taskRows, lanes)
 		return board.Snapshot{Cards: cards, WIP: board.ComputeWIP(cards), Repos: repos}, nil
+	}
+}
+
+// buildTaskFetch wires agent-tui#26's rail content into the SAME ledger
+// read buildBoardFetch above already uses (board.ReadTaskRows over
+// board.ExecRunner) -- not a second reader. Returns nil when ledgerPath is
+// empty (no -ledger/$AGENT_TUI_LEDGER set): rail.Model.WithTasks(nil) is a
+// no-op, so the rail's default screen keeps working with no ledger
+// configured at all, exactly as -board refuses to start without one but the
+// rail never has (see -ledger's own flag help for why -board is the strict
+// one and this stays additive).
+func buildTaskFetch(ledgerPath, sqliteBin string) rail.TaskFetcher {
+	if ledgerPath == "" {
+		return nil
+	}
+	sqliteRun := board.LedgerRunner(board.ExecRunner(sqliteBin))
+	return func() ([]board.TaskRow, error) {
+		return board.ReadTaskRows(sqliteRun, ledgerPath)
 	}
 }
 

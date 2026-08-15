@@ -191,14 +191,11 @@ func (m Model) renderSessionsBody(innerWidth int, st railStyles) []string {
 	if len(flat) > 0 && m.selected >= 0 && m.selected < len(flat) {
 		sel := flat[m.selected]
 		style := lane.StyleFor(set, sel.lane.State)
-		label := style.Label
-		if label == "" {
-			label = sel.lane.State // Unmapped: still print the raw word, never blank
-		}
 		sessName := m.sessions[sel.sessionIdx].Name
 		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("session: %s", truncate(sessName, max(0, innerWidth-9)))))
-		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("state:   %s", label)))
-		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("idle:    %ds", sel.lane.IdleSeconds)))
+		// agent-tui#26: was a fixed "state:/idle:" pair -- now the
+		// reading-driven detail block; see readings_view.go.
+		b = append(b, m.renderReadingDetail(sel.lane, style, st, innerWidth)...)
 	}
 	if !m.sessionsFetched.IsZero() {
 		age := time.Since(m.sessionsFetched).Round(time.Second)

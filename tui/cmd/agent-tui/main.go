@@ -49,14 +49,16 @@ func main() {
 		showBoard = flag.Bool("board", false, "show the task board (agent-tui#6) instead of the rail -- a separate screen, "+
 			"never a rail restyle. Read-only: derives its columns fresh on every fetch, never stores one.")
 		ledger = flag.String("ledger", envOr("AGENT_TUI_LEDGER", defaultLedgerPath()),
-			"path to a ledger.sqlite3 to read for the board -- must point at a COPY, never the live "+
-				"supervisor's own ledger (agent-tui#6's rule). There is no default: unlike -supervisor-repo, "+
-				"this never falls back to the live state dir, because the board's ledger read (`sqlite3 "+
-				"PRAGMA query_only=1`, not `-readonly` -- see internal/board/ledger.go) would otherwise be "+
-				"free to open the live ledger and write `-wal`/`-shm` sidecars next to it. Set $AGENT_TUI_LEDGER "+
-				"or pass -ledger explicitly, pointed at a copy.")
+			"path to a ledger.sqlite3 to read for the board and the rail's per-lane task/age/needs-human "+
+				"content (agent-tui#26) -- must point at a COPY, never the live supervisor's own ledger "+
+				"(agent-tui#6's rule). There is no default: unlike -supervisor-repo, this never falls back to "+
+				"the live state dir, because the ledger read (`sqlite3 PRAGMA query_only=1`, not `-readonly` "+
+				"-- see internal/board/ledger.go) would otherwise be free to open the live ledger and write "+
+				"`-wal`/`-shm` sidecars next to it. -board still refuses to start with this unset; the rail "+
+				"degrades gracefully instead, rendering \"(no task)\" for every lane rather than refusing to "+
+				"run. Set $AGENT_TUI_LEDGER or pass -ledger explicitly, pointed at a copy.")
 		ghBin        = flag.String("gh-bin", envOr("AGENT_GH_BIN", "gh"), "gh binary for the board's issue/PR reads")
-		sqliteBin    = flag.String("sqlite-bin", envOr("AGENT_SQLITE_BIN", "sqlite3"), "sqlite3 binary for the board's ledger reads")
+		sqliteBin    = flag.String("sqlite-bin", envOr("AGENT_SQLITE_BIN", "sqlite3"), "sqlite3 binary for the board's and rail's ledger reads")
 		repositories = flag.String("repositories", os.Getenv("SUPERVISOR_REPOSITORIES"),
 			"colon-separated name=path=owner/repo entries, same shape as agent-supervisor's SUPERVISOR_REPOSITORIES "+
 				"(.env.example) -- the board unions this with every repo it discovers in the ledger's own source_urls, "+
@@ -197,6 +199,7 @@ func main() {
 		// package doc for why that split is non-negotiable).
 		m := rail.NewMultiSession(sessionsFetch, lanesFetch, costFetch, *directorSession).
 			WithOps(sessionops.New(client)).
+			WithTasks(buildTaskFetch(*ledger, *sqliteBin)).
 			WithTheme(activeTheme, themeNotice)
 		p = tea.NewProgram(m, tea.WithAltScreen())
 	}
