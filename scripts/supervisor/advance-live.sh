@@ -442,25 +442,36 @@ maybe_restart_poller() {
   poller_pid=$(grep -m1 '^pid:' "$INBOX_POLL_STATUS_PATH" 2>/dev/null | awk '{print $2}')
   pane=$(find_poller_pane)
   pane_rc=$?
-  case "$pane_rc" in
-    0) ;;
-    1)
-      log "POLLER-CHECK: poller at $poller_sha, live now $live_sha, but no poller window named '$POLLER_WINDOW_NAME' exists in session '$INBOX_POLL_SESSION' -- not restarting"
-      return 0
-      ;;
-    2)
-      log "POLLER-CHECK: poller at $poller_sha, live now $live_sha, but multiple poller windows named '$POLLER_WINDOW_NAME' exist in session '$INBOX_POLL_SESSION' -- refusing to guess"
-      return 0
-      ;;
-    *)
-      log "POLLER-CHECK: poller at $poller_sha, live now $live_sha, but tmux could not read session '$INBOX_POLL_SESSION' -- not restarting"
-      return 0
-      ;;
-  esac
+  # agent-supervisor#154: a poller window is no longer the only way this
+  # process is hosted. `pane_rc` used to gate the restart-flag write itself,
+  # so a service-hosted poller (no tmux window at all -- rc 1, or no tmux
+  # session/binary to ask -- rc 3) never got flagged for a version-triggered
+  # restart: the whole feature silently stopped working the moment the
+  # window it was written for went away. The flag write below is now
+  # unconditional except for rc 2 (multiple windows -- genuinely ambiguous,
+  # still refused rather than guessed). Only the WINDOW-SPECIFIC prompt
+  # relaunch beneath it -- queuing poller-recover.sh's tmux respawn -- stays
+  # gated on rc 0: a service-hosted poller needs no prompting at all, its own
+  # LaunchAgent/systemd restart policy relaunches it the instant the flagged
+  # process exits, same cadence advantage the prompt path exists to give the
+  # window-hosted one.
+  if [ "$pane_rc" -eq 2 ]; then
+    log "POLLER-CHECK: poller at $poller_sha, live now $live_sha, but multiple poller windows named '$POLLER_WINDOW_NAME' exist in session '$INBOX_POLL_SESSION' -- refusing to guess"
+    return 0
+  fi
 
   mkdir -p "$(dirname "$INBOX_POLL_RESTART_FLAG")" 2>/dev/null
   if ! : >"$INBOX_POLL_RESTART_FLAG" 2>/dev/null; then
     log "POLLER-CHECK: could not write restart flag $INBOX_POLL_RESTART_FLAG -- not restarting"
+    return 0
+  fi
+
+  if [ "$pane_rc" -ne 0 ]; then
+    # No poller window to prompt (service-hosted, or one predating the
+    # window -- rc 1/3 alike): the flag is enough. Whatever relaunches this
+    # process (a LaunchAgent's KeepAlive, poller-recover.sh's next tick for
+    # a window-hosted deployment still mid-attrition) owns picking it up.
+    log "POLLER-RESTART-REQUESTED: no poller window in session '$INBOX_POLL_SESSION' (pane_rc=$pane_rc) -- poller was $poller_sha, live now $live_sha; flag written, its own restart policy (service manager or watchdog poller-recover.sh) owns the relaunch"
     return 0
   fi
 

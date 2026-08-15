@@ -648,9 +648,17 @@ grep -qi 'poller-recover.sh exists but is not executable' "$S_GATE2/advance-live
   && ok "a non-executable prompt poller-recover.sh is logged distinctly" \
   || bad "a non-executable prompt poller-recover.sh is logged distinctly" "$(cat "$S_GATE2/advance-live.log" 2>/dev/null)"
 
-# --- MUTATION: point the shared recognition rule at a name nothing matches -
-# This must make the restart assertion above go red. A missing poller window is
-# a loud refusal, not a quiet "no work" success.
+# --- agent-supervisor#154: a poller with no window (service-hosted, or a
+# recognizer that cannot see it) still gets the restart flag ----------------
+# Before #154, pointing the shared recognizer at a name nothing matches made
+# THIS restart assertion go red too -- the flag write was gated on finding a
+# tmux window, so a service-hosted poller (no window, ever) could never be
+# told to restart on a version change; the whole feature silently died the
+# moment the poller left tmux. #154 splits the two: the flag is written
+# whenever a poller is stale, window or not; only the WINDOW-SPECIFIC prompt
+# relaunch (queuing poller-recover.sh's tmux respawn) is skipped when there
+# is no window to prompt. This is deliberately no longer a "must go red"
+# mutation -- it now proves the flag survives a broken/absent recognizer.
 MUT="$D3/mutant"; mkdir -p "$MUT/scripts/supervisor"
 cp "$ADVANCE" "$MUT/scripts/supervisor/advance-live.sh"
 cp "$HERE/../../scripts/supervisor/poller-window.sh" "$MUT/scripts/supervisor/poller-window.sh"
@@ -675,13 +683,16 @@ else
   printf 'checked: %s\nstate:   ok\nsha:     deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$S_MUT/inbox-poll.status"
   : >"$TMUX_LOG"
   out_mut=$(SUPERVISOR_STATE="$S_MUT" LANES_SESSION="test-session-187" INBOX_POLL_RELAUNCH_WAIT_SECONDS=0 PATH="$STUBS:$PATH" bash "$MUT/scripts/supervisor/advance-live.sh" "$LIVE3" 2>&1); rc_mut=$?
-  if [ ! -f "$S_MUT/.inbox-poll-restart-requested" ] \
+  if [ -f "$S_MUT/.inbox-poll-restart-requested" ] \
      && grep -qi 'no poller window' "$S_MUT/advance-live.log" 2>/dev/null; then
-    ok "mutation confirmed: a recognizer pointed at a missing name cannot restart the stale poller (the assertion above would be red)"
+    ok "agent-supervisor#154: a recognizer pointed at a missing name still gets the stale poller flagged"
   else
-    bad "mutation confirmed: a recognizer pointed at a missing name cannot restart the stale poller" \
+    bad "agent-supervisor#154: a recognizer pointed at a missing name still gets the stale poller flagged" \
       "rc=$rc_mut out=$out_mut log=$(cat "$S_MUT/advance-live.log" 2>/dev/null) files=$(ls "$S_MUT" 2>/dev/null)"
   fi
+  ! grep -q 'send-keys' "$TMUX_LOG" 2>/dev/null \
+    && ok "agent-supervisor#154: no window means no prompt relaunch is queued, but the flag write above is unaffected" \
+    || bad "agent-supervisor#154: no window means no prompt relaunch is queued" "$(cat "$TMUX_LOG" 2>/dev/null)"
 fi
 
 # --- a current poller (sha matches LIVE3) is left alone ---------------------
@@ -704,16 +715,19 @@ out3=$(SUPERVISOR_STATE="$S3" LANES_SESSION="test-session-187" PATH="$STUBS:$PAT
 [ ! -s "$TMUX_LOG" ] && ok "a restart already pending is not requested again" \
   || bad "a restart already pending is not requested again" "$(cat "$TMUX_LOG")"
 
-# --- no window matches the poller: refuses to guess, does not restart ------
+# --- no window matches the poller: still flags it (#154, service-hosted), --
+# --- but queues no window-specific prompt relaunch --------------------------
 kill "$POLLER_PANE_PID" 2>/dev/null; wait "$POLLER_PANE_PID" 2>/dev/null
 S4=$(mktemp -d)
 printf 'checked: %s\nstate:   ok\nsha:     deadbeef\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$S4/inbox-poll.status"
 : >"$TMUX_LOG"
 out4=$(SUPERVISOR_STATE="$S4" LANES_SESSION="test-session-187" LANES_POLLER_WINDOW="missing-poller-window" PATH="$STUBS:$PATH" bash "$ADVANCE" "$LIVE3" 2>&1); rc4=$?
-[ ! -f "$S4/.inbox-poll-restart-requested" ] && ok "no matching window leaves the poller untouched" \
-  || bad "no matching pane leaves the poller untouched" ""
+[ -f "$S4/.inbox-poll-restart-requested" ] && ok "agent-supervisor#154: no matching window still gets the poller flagged (its own restart policy owns the relaunch)" \
+  || bad "agent-supervisor#154: no matching window still gets the poller flagged" ""
 grep -qi 'no poller window' "$S4/advance-live.log" 2>/dev/null && ok "a missing poller window is named in the log" \
   || bad "a missing pane is named in the log" "$(cat "$S4/advance-live.log" 2>/dev/null)"
+! grep -q 'send-keys' "$TMUX_LOG" 2>/dev/null && ok "no window means no send-keys/prompt relaunch is queued" \
+  || bad "no window means no send-keys/prompt relaunch is queued" "$(cat "$TMUX_LOG" 2>/dev/null)"
 
 # --- multiple poller windows: refuses to guess, does not restart ----------
 S5=$(mktemp -d)
