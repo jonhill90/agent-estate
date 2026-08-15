@@ -375,6 +375,61 @@ class CliTest(unittest.TestCase):
             for instance in RecordingPiRPCAdapter.instances:
                 self.assertEqual([], instance.assigned, "the RPC adapter must never be called for a send-keys lane")
 
+    def test_reconstruct_task_writes_an_open_source_task_with_no_marker_required(self):
+        """agent-supervisor#160: `reconstruct` (the GithubTaskSource path) is
+        gated on a `hill90-supervisor:v1` marker no issue in the estate
+        carries; `reconstruct-task` is the generic, unmarked write
+        `dispatch-pi-rpc.sh` needs instead."""
+        with tempfile.TemporaryDirectory() as root:
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                self.assertEqual(
+                    0,
+                    cli.main([
+                        "--state-dir", root, "reconstruct-task",
+                        "--task", "t1",
+                        "--source-url", "https://github.com/acme/repo/issues/160",
+                        "--source-ref", "160",
+                        "--summary", "#160 pi-rpc transport",
+                    ]),
+                )
+            value = json.loads(output.getvalue())
+            self.assertEqual("OPEN", value["source_state"])
+            self.assertEqual("created", value["status"])
+            ledger = Ledger(Path(root))
+            self.assertIsNotNone(ledger.get_source_task("t1"))
+
+    def test_reconstruct_task_then_assign_composes_into_a_full_pi_rpc_dispatch(self):
+        """The exact sequence dispatch-pi-rpc.sh runs: register, then
+        reconstruct-task, then assign -- proven here to compose into one
+        real ledger flow, with delivery routed through PiRPCAdapter."""
+        RecordingPiRPCAdapter.instances.clear()
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            ledger.register_lane(
+                lane="pi-worker", pane_id="sess-1", nonce="nonce-pi", harness="pi",
+                repo="/repo", server_id="pi-rpc", session_id="sess-1", command="pi",
+                transport="pi-rpc",
+            )
+            output = io.StringIO()
+            with patch.object(cli, "PiRPCAdapter", RecordingPiRPCAdapter), contextlib.redirect_stdout(output):
+                self.assertEqual(0, cli.main([
+                    "--state-dir", root, "reconstruct-task",
+                    "--task", "t1",
+                    "--source-url", "https://github.com/acme/repo/issues/160",
+                    "--source-ref", "160",
+                    "--summary", "#160 pi-rpc transport",
+                ]))
+                self.assertEqual(0, cli.main([
+                    "--state-dir", root, "assign",
+                    "--lane", "pi-worker", "--task", "t1", "--summary", "Read the brief",
+                ]))
+            adapter = RecordingPiRPCAdapter.instances[-1]
+            self.assertEqual([("pi-worker", "t1", "Read the brief")], adapter.assigned)
+            ledger = Ledger(Path(root))
+            lane = ledger.get_lane("pi-worker")
+            self.assertEqual("pi-rpc", lane["transport"])
+
     def test_tick_without_the_canonical_sensor_is_also_gated(self):
         with tempfile.TemporaryDirectory() as root:
             ledger = Ledger(Path(root))
