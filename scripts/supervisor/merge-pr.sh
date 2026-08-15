@@ -112,7 +112,21 @@ fi
 IND=$(independence_verdict "$V" "$AUTHOR" "$LANE_REL")
 
 if [ "$(jq -r '.value' <<<"$IND")" != "true" ]; then
-  echo "merge-pr: refused -- $(jq -r '.detail' <<<"$IND")" >&2
+  # agent-supervisor#192: `independence_verdict`'s "not yet reviewed" branch
+  # deliberately returns an empty detail -- #184's reviewer asked for that,
+  # because digest.sh's report otherwise carries an "independence unknown..."
+  # sentence on every never-reviewed PR, which is noise on the single most
+  # common case in that report. That is correct for digest.sh (reporting);
+  # it is not acceptable for THIS caller, where "" means the refusal names
+  # nothing -- indistinguishable from a crash. Rather than repopulate the
+  # shared function's detail (and reintroduce the boilerplate #184 removed
+  # for its OTHER caller), fall back HERE, in the caller that actually needs
+  # a reason: print the raw verdict/author JSON this decision was made from.
+  REASON=$(jq -r '.detail' <<<"$IND")
+  if [ -z "$REASON" ]; then
+    REASON="no reason given by independence_verdict -- raw verdict=$V author=$AUTHOR"
+  fi
+  echo "merge-pr: refused -- $REASON" >&2
   exit 1
 fi
 
