@@ -199,6 +199,7 @@ class Ledger:
         self._migrate_lanes_table(failpoint=_migration_failpoint)
         self._migrate_tasks_table(failpoint=_migration_failpoint)
         self._migrate_source_tasks_table(failpoint=_migration_failpoint)
+        self._migrate_source_tasks_pull_uniqueness(failpoint=_migration_failpoint)
 
     def _connect(self, *, foreign_keys=True):
         connection = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
@@ -755,6 +756,169 @@ class Ledger:
             finally:
                 connection.close()
 
+    ONE_OPEN_PULL_PER_SOURCE_REF = "one_open_pull_per_source_ref"
+
+    def _migrate_source_tasks_pull_uniqueness(self, *, failpoint=None):
+        """Close the PR-duplicate TOCTOU (agent-supervisor#169) at the WRITE,
+        not the read.
+
+        `dispatch.sh`'s step 0.6 (`cli.py pr-lane --pr N`, see
+        `get_open_task_for_pr`) is a plain read, executed once, before a lane
+        is even picked -- the write that actually claims a PR
+        (`record_dispatch`, via `_reconstruct_task_tx`'s INSERT) happens
+        seconds later, after lane selection, worktree creation and the brief
+        being sent. That gap is real wall-clock seconds, not the sub-second
+        window `claim.sh`'s own docstring accepts for the GitHub-assignee
+        race -- reproduced directly (see `tests/supervisor/test_dispatch.sh`'s
+        `run_race` case for this issue): two full dispatches, two lanes, one
+        PR, both `delivered`, and `pr-lane` -- `ORDER BY created_at DESC LIMIT
+        1` -- answers with only the winner, so a third party asking "is this
+        PR claimed" sees one clean holder while a second lane silently works
+        it too. The check cannot see the collision it exists to catch.
+
+        The fix, per the reviewer's own suggestion (option (b) over (a)):
+        make the SECOND writer's INSERT fail, atomically, no matter how
+        close together the two attempts land -- unlike holding
+        `ledger.lock` across step 0.6 through `record_dispatch` (option (a)),
+        this needs no new lock discipline in `dispatch.sh` and holds nothing
+        across worktree creation or a `send-keys`, seconds of I/O in a script
+        whose failure modes include being SIGTERMed mid-dispatch. Step 0.6
+        stays: it is now the friendly, early refusal for the common case
+        (saves a wasted worktree and a stray brief); this is what makes the
+        refusal true even when step 0.6 raced and both readers saw "open".
+
+        NOT a plain partial UNIQUE index, despite `one_open_task_per_lane`
+        being exactly that shape -- measured why it cannot be, here, before
+        assuming this is just that pattern copied: `source_tasks.status` is
+        NEVER advanced past `'created'` by the recording path (see
+        `_migrate_source_tasks_table`'s own docstring, and confirmed by
+        running a dispatch through `complete()` and reading
+        `get_source_task` back -- `status` stays `'created'` forever). A
+        partial index `WHERE status NOT IN (closed)` on `source_tasks`
+        alone is therefore true for every 'pull' row ever written, closed
+        or not, and would refuse a legitimate FRESH dispatch of a PR whose
+        prior review or fix-pass already completed -- exactly the case
+        `get_open_task_for_pr`'s own docstring (and its
+        `test_get_open_task_for_pr_ignores_completed_or_cancelled_tasks`)
+        says must not be blocked. The REAL lifecycle status lives on
+        `tasks.status` (the state machine `_transition_tx` drives), not
+        `source_tasks.status` -- and `tasks.id == source_tasks.id`, written
+        in the same transaction, so a `BEFORE INSERT` trigger that joins
+        `tasks` can ask the right question where a same-table partial index
+        cannot. This is the same atomic-write-time gate the reviewer asked
+        for -- SQLite evaluates a trigger's `RAISE(ABORT, ...)` inside the
+        INSERT itself, so a second writer's transaction still fails exactly
+        as a unique-index violation would, and `sqlite3.IntegrityError` is
+        exactly what Python's `sqlite3` module raises for it (verified
+        directly: `RAISE(ABORT, 'UNIQUE constraint failed: ...')` inside a
+        trigger surfaces to Python as `sqlite3.IntegrityError`, same class
+        as a real index violation) -- callers (`cli.py`'s `record_dispatch`)
+        do not need to know or care which mechanism caught it.
+
+        `id != NEW.id` in the trigger's own EXISTS clause is load-bearing:
+        `_reconstruct_task_tx`'s INSERT is an `ON CONFLICT(id) DO UPDATE`
+        upsert, and re-registering the SAME task id (a legitimate retry) is
+        NOT a second dispatcher -- verified directly (see this migration's
+        own tests) that without the exclusion, SQLite's BEFORE INSERT
+        trigger fires on the initial insert attempt even when the row will
+        end up UPDATEd in place, which would wrongly refuse an idempotent
+        re-registration of a task that is itself the PR's own open holder.
+
+        This never touches `source_tasks` itself -- only
+        `_migrate_source_tasks_table` above does that table-rebuild dance;
+        a trigger, like an index, attaches to an existing table with no
+        rebuild needed. But an existing ledger can carry real pre-#169
+        duplicates: exactly the "b"-suffixed double-dispatch this whole PR
+        is about (#157, #149, and agent-supervisor#181/#182's merged
+        defect) leaves two OPEN pull-kind rows for the same `source_ref`
+        sitting in `source_tasks` right now, on any estate that hit the bug
+        before this migration ran. Creating the trigger over such a ledger
+        would succeed (a trigger only fires on FUTURE inserts, it does not
+        scan existing rows the way `CREATE UNIQUE INDEX` does) -- which
+        would silently leave the pre-existing duplicate in place forever
+        while looking, to a fresh caller, exactly like a clean ledger the
+        guarantee already covers. So this checks for that duplicate BY
+        HAND, joined against `tasks.status` the same way the trigger itself
+        will, before ever creating the trigger.
+
+        Decision, argued once here: on finding such a duplicate, this DOES
+        NOT pick a winner and silently cancel the loser -- that is exactly
+        the silent data loss the brief for this fix pass forbids ("failing
+        to migrate is better than silently dropping a row"), and this layer
+        has no way to know which of two open dispatches is the one actually
+        safe to abandon (a real agent may be mid-brief in either lane's
+        pane). Instead this raises loudly, naming every conflicting id, and
+        creates no trigger -- `Ledger.__init__` propagates the failure, so
+        EVERY ledger operation refuses until a human reconciles the
+        duplicate by hand (`cli.py record-completion` / `cli.py
+        cancel-open-task --lane <lane>` on whichever lane is not actually
+        still working the PR) and reopens the ledger. Blunt, but the same
+        posture `_migrate_tasks_table`'s own failpoint tests already prove
+        this codebase takes for a migration that cannot proceed safely: an
+        unusable ledger until fixed beats a ledger that quietly drops the
+        guarantee this whole fix pass exists to add.
+        """
+        with self._locked():
+            with contextlib.closing(self._connect()) as probe:
+                existing = probe.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?",
+                    (self.ONE_OPEN_PULL_PER_SOURCE_REF,),
+                ).fetchone()
+                if existing is not None:
+                    return
+                dupes = probe.execute(
+                    """
+                    SELECT source_tasks.source_ref AS source_ref,
+                           GROUP_CONCAT(source_tasks.id) AS ids,
+                           COUNT(*) AS n
+                    FROM source_tasks
+                    JOIN tasks ON tasks.id = source_tasks.id
+                    WHERE source_tasks.source_kind = 'pull'
+                      AND tasks.status NOT IN ('complete', 'failed', 'cancelled')
+                    GROUP BY source_tasks.source_ref
+                    HAVING COUNT(*) > 1
+                    """
+                ).fetchall()
+            if dupes:
+                detail = "; ".join(f"PR #{row['source_ref']}: {row['ids']}" for row in dupes)
+                raise RuntimeError(
+                    f"cannot create {self.ONE_OPEN_PULL_PER_SOURCE_REF}: pre-existing duplicate open "
+                    f"pull-kind source_tasks rows for the same PR ({detail}) -- resolve by hand "
+                    "(cli.py record-completion, or cli.py cancel-open-task --lane <lane>, on whichever "
+                    "lane is not actually still working the PR) and reopen the ledger; refusing to "
+                    "silently pick a winner or drop a row"
+                )
+            connection = self._connect(foreign_keys=False)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    self._fail(failpoint, "before_pull_trigger")
+                    connection.execute(
+                        f"""
+                        CREATE TRIGGER IF NOT EXISTS {self.ONE_OPEN_PULL_PER_SOURCE_REF}
+                        BEFORE INSERT ON source_tasks
+                        WHEN NEW.source_kind = 'pull' AND EXISTS (
+                            SELECT 1 FROM source_tasks
+                            JOIN tasks ON tasks.id = source_tasks.id
+                            WHERE source_tasks.source_kind = 'pull'
+                              AND source_tasks.source_ref = NEW.source_ref
+                              AND source_tasks.id != NEW.id
+                              AND tasks.status NOT IN ('complete', 'failed', 'cancelled')
+                        )
+                        BEGIN
+                            SELECT RAISE(ABORT, 'UNIQUE constraint failed: source_tasks.source_ref');
+                        END
+                        """
+                    )
+                    self._fail(failpoint, "after_pull_trigger")
+                except BaseException:
+                    connection.rollback()
+                    raise
+                else:
+                    connection.commit()
+            finally:
+                connection.close()
+
     @staticmethod
     def _dict(row):
         return dict(row) if row is not None else None
@@ -1161,6 +1325,56 @@ class Ledger:
                 LIMIT 1
                 """,
                 (str(issue_ref),),
+            ).fetchone()
+        return self._dict(row)
+
+    def get_open_task_for_pr(self, pr_ref):
+        """The open task (if any) already dispatched FOR a PR, keyed by PR
+        number -- never by issue, never by branch name.
+
+        agent-supervisor#159: `dispatch.sh` used to have no way to represent
+        "work on PR N" as distinct from "work on issue N" -- a review or a
+        fix pass on a PR whose underlying issue was still claimed by the
+        in-flight work that opened the PR had nowhere to record itself
+        except `claim.sh take` on that same issue, which correctly refused
+        (it is claimed) and pushed dispatch to a ledger-invisible tmux
+        hand-off instead. THE HARM #159 measured from that hand-off: a
+        second dispatcher, unable to see the first lane's claim anywhere,
+        minted a second task for the same PR ("...b" suffixed window names
+        on #157's review and #149's fix pass).
+
+        The fix is not a new claim primitive: `record_dispatch` (via
+        `cli.py`'s free function) already writes a `source_tasks` row per
+        dispatch, and that table's `source_kind` column has allowed `'pull'`
+        alongside `'issue'` since #144 -- this is the FIRST caller to ask for
+        one back. A PR-scoped dispatch (`dispatch.sh --pr <N>`, and
+        `--reviews-pr <N>` which now implies it) records `source_kind='pull'`,
+        `source_ref=str(N)` instead of the issue-keyed pair, going through
+        the exact same one-transaction `record_dispatch` write and the same
+        `one_open_task_per_lane` uniqueness every other dispatch already
+        relies on -- no new table, no second bookkeeping mechanism to keep in
+        sync with the first.
+
+        UNLIKE `get_task_for_issue` (which answers with the most recent row
+        regardless of status, because its only caller today is a diagnostic
+        query with no live caller in dispatch.sh), this filters to OPEN
+        status -- the same `NOT IN ('complete','failed','cancelled')` test
+        `get_open_task_for_lane` uses -- because the question this answers is
+        "is somebody working this PR RIGHT NOW", asked by `dispatch.sh`
+        BEFORE it selects a lane, so a finished or cancelled prior review of
+        the same PR does not wrongly refuse a fresh one.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT tasks.* FROM tasks
+                JOIN source_tasks ON source_tasks.id = tasks.id
+                WHERE source_tasks.source_kind = 'pull' AND source_tasks.source_ref = ?
+                  AND tasks.status NOT IN ('complete','failed','cancelled')
+                ORDER BY tasks.created_at DESC
+                LIMIT 1
+                """,
+                (str(pr_ref),),
             ).fetchone()
         return self._dict(row)
 

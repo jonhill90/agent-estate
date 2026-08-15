@@ -7,6 +7,7 @@ import json
 import os
 import re
 import secrets
+import sqlite3
 import sys
 from pathlib import Path
 
@@ -132,6 +133,14 @@ def parser():
     # pre-#172 caller.
     record_dispatch_parser.add_argument("--harness-project-dir", default="")
     record_dispatch_parser.add_argument("--issue", action="append", required=True)
+    # agent-supervisor#159: a PR-scoped dispatch (a review, or a fix pass, on
+    # PR <N> while the issue it closes stays claimed by the in-flight work
+    # that opened it) records itself AGAINST THE PR, not the issue -- see
+    # `Ledger.get_open_task_for_pr`. `--issue` above is still sent and still
+    # required: it is what names the worktree/window and still belongs in
+    # the evidence trail, but when `--pr` is given it is no longer what this
+    # dispatch's `source_tasks` row is keyed by.
+    record_dispatch_parser.add_argument("--pr", default=None)
     record_dispatch_parser.add_argument("--github", default="")
     record_dispatch_parser.add_argument("--harness", choices=("codex", "claude", "copilot", "copilot-acp", "pi"))
     # agent-supervisor#117: the worktree `worktree.sh new` built for this
@@ -319,6 +328,15 @@ def parser():
     # at a branch.
     issue_lane_parser = sub.add_parser("issue-lane")
     issue_lane_parser.add_argument("--issue", required=True)
+
+    # agent-supervisor#159: the PR-scoped sibling of `issue-lane`, asked by
+    # `dispatch.sh` BEFORE it selects a lane -- unlike `issue-lane`, which
+    # answers the most recent row regardless of status (it has no live
+    # caller in dispatch.sh today), this one filters to OPEN so a completed
+    # or cancelled prior task on the same PR does not wrongly refuse a fresh
+    # dispatch. See `Ledger.get_open_task_for_pr`.
+    pr_lane_parser = sub.add_parser("pr-lane")
+    pr_lane_parser.add_argument("--pr", required=True)
 
     # agent-supervisor#108: the ONE comparison of two lane ids in this system,
     # exposed so `dispatch.sh` (the guard) and `digest.sh` (the independence
@@ -613,6 +631,7 @@ def record_dispatch(
     harness_session_id="",
     harness_project_dir="",
     worktree_path="",
+    pr=None,
 ):
     """Record a dispatch that ALREADY happened. Writes; never sends.
 
@@ -665,15 +684,51 @@ def record_dispatch(
     `Ledger.mark_lane_held` before re-raising, so the lane reads occupied
     instead of whatever it read before this call, regardless of which of
     the five writes failed or why.
+
+    agent-supervisor#159: `pr` is the PR-scoped sibling of the issue-keyed
+    write below -- passed by `dispatch.sh` for a review or a fix pass on PR
+    <N> whose underlying issue is deliberately left claimed by the in-flight
+    work that opened it. When given, the `source_tasks` row this writes is
+    keyed `source_kind='pull'`, `source_ref=str(pr)` instead of by the
+    primary issue, so `Ledger.get_open_task_for_pr` can find it -- the same
+    one-transaction write, the same `one_open_task_per_lane` uniqueness,
+    nothing new. `issues` is still recorded in `evidence` either way: this
+    dispatch still names which issue(s) it closes, it is only not claimed as
+    the SOURCE of the task.
+
+    agent-supervisor#169: step 0.6's `pr-lane` read (`dispatch.sh`, before a
+    lane is even picked) is a TOCTOU by itself -- this write, seconds later,
+    is the actual gate. `Ledger._migrate_source_tasks_pull_uniqueness`'s
+    `one_open_pull_per_source_ref` trigger (a `BEFORE INSERT` trigger, not a
+    plain partial index -- `source_tasks.status` never advances, so a
+    same-table index cannot ask the real "is this PR still open" question;
+    see that migration's own docstring) makes a second dispatcher's INSERT
+    for the same open PR raise `sqlite3.IntegrityError`, atomically, no
+    matter how close the two dispatchers' checks landed. When that happens
+    for a PR-scoped call, this prints one recognisable `PR-DUPLICATE:` line
+    (in addition to the generic `mark_lane_held` handling every other
+    failure already gets) naming the lane that actually won, so
+    `dispatch.sh` can tell this collision apart from an ordinary ledger
+    failure and refuse loud instead of folding it into the silent,
+    non-fatal `ledger_record_failed` path every other write failure takes.
     """
     try:
         harness = harness or HARNESS_BY_COMMAND.get(command)
         if harness is None:
             raise RuntimeError(f"cannot tell which harness pane command {command!r} is -- pass --harness")
         primary = issues[0]
-        source_url = (
-            f"https://github.com/{github}/issues/{primary}" if github else f"issue:{primary}@{Path(pane_path).name}"
-        )
+        evidence = [f"claimed by dispatch.sh for lane {lane}", f"issues: {','.join(str(i) for i in issues)}"]
+        if pr:
+            source_kind = "pull"
+            source_url = f"https://github.com/{github}/pull/{pr}" if github else f"pull:{pr}@{Path(pane_path).name}"
+            source_ref = str(pr)
+            evidence.append(f"pr: {pr}")
+        else:
+            source_kind = "issue"
+            source_url = (
+                f"https://github.com/{github}/issues/{primary}" if github else f"issue:{primary}@{Path(pane_path).name}"
+            )
+            source_ref = str(primary)
         return ledger.record_dispatch(
             lane=lane,
             pane_id=pane_id,
@@ -697,17 +752,35 @@ def record_dispatch(
             harness_project_dir=harness_project_dir,
             command=command,
             task_id=task,
-            source_kind="issue",
+            source_kind=source_kind,
             source_url=source_url,
-            source_ref=str(primary),
+            source_ref=source_ref,
             summary=summary,
             source_state="OPEN",
-            evidence=[f"claimed by dispatch.sh for lane {lane}", f"issues: {','.join(str(i) for i in issues)}"],
+            evidence=evidence,
             status_marker=None,
             worktree_path=worktree_path,
         )
     except Exception as error:
         ledger.mark_lane_held(lane, note=f"record_dispatch failed for task {task}: {error}")
+        # agent-supervisor#169: the write-time PR-duplicate collision is a
+        # distinct, expected failure -- not a generic ledger error -- and the
+        # caller (`dispatch.sh`) needs to be able to tell them apart to
+        # refuse loud rather than fold this into the silent non-fatal path
+        # every other record_dispatch failure takes. Detected by the index
+        # name rather than a generic IntegrityError check, so an unrelated
+        # constraint violation (a real bug) still surfaces as an ordinary,
+        # unrecognised failure instead of being misreported as this one.
+        if pr and isinstance(error, sqlite3.IntegrityError) and "source_tasks.source_ref" in str(error):
+            holder = ledger.get_open_task_for_pr(pr)
+            holder_lane = holder["lane"] if holder else "unknown"
+            holder_task = holder["id"] if holder else "unknown"
+            print(
+                f"PR-DUPLICATE: PR #{pr} is already claimed by lane {holder_lane} (task {holder_task}) "
+                f"-- the write refused this second open source_tasks row; lane {lane} (task {task}) "
+                "is marked HELD",
+                file=sys.stderr,
+            )
         raise
 
 
@@ -847,6 +920,7 @@ def main(argv=None):
             github=args.github,
             harness=args.harness,
             worktree_path=args.worktree,
+            pr=args.pr,
         )
     elif args.command == "lane-free":
         value = lane_free(
@@ -915,6 +989,14 @@ def main(argv=None):
         row = ledger.get_task_for_issue(args.issue)
         value = {
             "issue": args.issue,
+            "known": row is not None,
+            "lane": row["lane"] if row is not None else None,
+            "task": row["id"] if row is not None else None,
+        }
+    elif args.command == "pr-lane":
+        row = ledger.get_open_task_for_pr(args.pr)
+        value = {
+            "pr": args.pr,
             "known": row is not None,
             "lane": row["lane"] if row is not None else None,
             "task": row["id"] if row is not None else None,
