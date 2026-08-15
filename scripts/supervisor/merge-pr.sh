@@ -1,8 +1,8 @@
 #!/bin/bash
 # The only path a lane or the supervisor should use to merge a PR in this
-# repo -- so the gate `ci_gate.py` implements cannot be skipped by habit.
+# repo -- so the gates below cannot be skipped by habit.
 #
-# WHY: agent-supervisor#13. Branch protection and rulesets are both
+# WHY (CI gate): agent-supervisor#13. Branch protection and rulesets are both
 # unavailable here without GitHub Pro -- measured, not inferred:
 #
 #   $ gh api repos/jonhill90/agent-supervisor/branches/main/protection
@@ -19,10 +19,28 @@
 # two, and it is still convention that callers use this script rather than
 # `gh pr merge` by hand. That residual is stated here, not hidden.
 #
-# WHAT IT NEVER DOES: fall back to merging when the gate cannot be
+# WHY (authorship/independence gate): agent-supervisor#179. Every guard this
+# estate has for "an author does not review or merge their own work"
+# (dispatch.sh's `--reviews-pr` author exclusion, the one-review ceiling)
+# sits on the DISPATCH path. A prompt reading "merge the PR" was found
+# sitting, unsubmitted, in the input box of the lane that AUTHORED PR #168
+# while its verdict was `none` -- free text typed into a pane walks straight
+# around every dispatch-time guard and reaches `gh pr merge` (via this
+# script) directly. It did not submit only because of an unrelated defect
+# (#178, `Enter` not submitting text a previous `send-keys` left in the box)
+# -- that is luck, not a guard, and #178's own fix removes the thing that
+# saved us. So THIS script -- the one place that "cannot be skipped by
+# habit" -- is where the check belongs, not the dispatcher. See
+# verdict-independence.sh for the actual computation (shared with digest.sh,
+# which already had it for reporting).
+#
+# WHAT IT NEVER DOES: fall back to merging when either gate cannot be
 # evaluated. `ci_gate.py` fails closed (network error, malformed gh
-# response, PR not found -- all refuse), and this script trusts that exit
-# code without re-deriving anything from the gate's stdout.
+# response, PR not found -- all refuse); the authorship/independence gate
+# fails closed the same way -- unresolved authorship, an unreadable verdict,
+# or a verdict with no lane to compare against all refuse, never "proceed
+# anyway". This script trusts each gate's own exit code / decision without
+# re-deriving anything from its output.
 #
 # Usage:
 #   merge-pr.sh <repo> <number> [gh pr merge args...]
@@ -31,9 +49,14 @@
 # verbatim (e.g. --squash, --auto, --delete-branch); this script adds none
 # of its own so it never picks a merge strategy on the caller's behalf.
 #
-# Exit 0    gate passed and `gh pr merge` was run (its own exit code, which
-#           on success is 0).
-# Exit 1    gate refused; nothing was merged. The gate's reason is printed.
+# REQUIRES: jq (already a dependency of digest.sh, which this script now
+# shares its authorship/independence computation with via
+# verdict-independence.sh).
+#
+# Exit 0    both gates passed and `gh pr merge` was run (its own exit code,
+#           which on success is 0).
+# Exit 1    a gate refused; nothing was merged. The refusing gate's reason is
+#           printed.
 # Exit 2    usage error.
 set -uo pipefail
 
@@ -56,5 +79,43 @@ if [ "$gate_rc" -ne 0 ]; then
   exit 1
 fi
 
+# --- authorship / independence gate (agent-supervisor#179) -----------------
+# The SHA `ci_gate.py` just checked is also the SHA the verdict must answer
+# for (agent-dotfiles#218: a verdict filed against an older head must not
+# count) -- read out of $GATE_OUT rather than re-fetched, so this can never
+# disagree with what CI was actually evaluated against.
+STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
+LEDGER_PYTHON="${MERGE_PR_LEDGER_PYTHON:-$PYTHON}"
+LEDGER_CLI="${MERGE_PR_LEDGER_CLI:-$HERE/cli.py}"
+VERDICT_PYTHON="${MERGE_PR_VERDICT_PYTHON:-$PYTHON}"
+# Default "github", matching digest.sh's own default and for the same reason
+# (agent-dotfiles#214): LedgerVerdictSource is a table nothing writes yet.
+VERDICT_SOURCE="${MERGE_PR_VERDICT_SOURCE:-github}"
+VERDICT_BIN="${MERGE_PR_VERDICT_BIN:-}"
+# shellcheck source=./verdict-independence.sh
+. "$HERE/verdict-independence.sh"
+
+SHA=$(jq -r '.sha // ""' 2>/dev/null <<<"$GATE_OUT")
+if [ -z "$SHA" ]; then
+  echo "merge-pr: refused -- CI gate passed but reported no head SHA to check authorship against (failing closed)" >&2
+  exit 1
+fi
+
+V=$(verdict_for "$REPO" "$NUMBER" "$SHA")
+AUTHOR=$(author_lane_for "$REPO" "$NUMBER")
+REVIEWER_LANE_ID=$(jq -r '.reviewer_lane // ""' <<<"$V")
+AUTHOR_LANE_ID=$(jq -r 'if .known == true then (.lane // "") else "" end' <<<"$AUTHOR")
+LANE_REL=unknown
+if [ -n "$REVIEWER_LANE_ID" ] && [ -n "$AUTHOR_LANE_ID" ]; then
+  LANE_REL=$(lane_relation "$AUTHOR_LANE_ID" "$REVIEWER_LANE_ID")
+fi
+IND=$(independence_verdict "$V" "$AUTHOR" "$LANE_REL")
+
+if [ "$(jq -r '.value' <<<"$IND")" != "true" ]; then
+  echo "merge-pr: refused -- $(jq -r '.detail' <<<"$IND")" >&2
+  exit 1
+fi
+
 echo "merge-pr: gate passed -- $GATE_OUT" >&2
+echo "merge-pr: independence confirmed -- $(jq -r '.detail' <<<"$IND")" >&2
 exec "$GH" pr merge "$NUMBER" --repo "$REPO" "$@"
