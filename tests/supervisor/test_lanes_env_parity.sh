@@ -53,10 +53,21 @@ tmux new-session -d -s "$S" -x 200 -y 50 -n one
 tmux new-window -t "$S" -n two -d
 
 # --- Defect 1: tmux is not on PATH at all -----------------------------------
-# Matches the issue's own repro exactly: env -i HOME=... PATH=/usr/bin:/bin.
+# The issue's own repro was env -i HOME=... PATH=/usr/bin:/bin -- but a
+# literal /usr/bin:/bin is not portable proof of "tmux absent": Debian/Ubuntu
+# (this suite's own CI runner) installs tmux to /usr/bin/tmux, so that PATH
+# still resolves it there, and the test silently stopped simulating defect 1
+# at all -- it fell through to a REAL `tmux has-session`, and because this
+# env -i call carries no TMUX_TMPDIR, that call addressed the DEFAULT tmux
+# socket, which CLAUDE.md invariant #4 forbids a test from ever touching. An
+# empty directory is tmux-absent on every platform by construction, and since
+# lanes.sh's own command -v check (#163) must reject it before any tmux call
+# is made, the default socket is never at risk either.
 # The session DOES exist (created above); lanes.sh cannot see tmux to know
 # that, and must say so rather than claim it knows the session is absent.
-out=$(env -i HOME="$HOME" PATH=/usr/bin:/bin "$LANES" --json "$S" 2>"$RT/err1")
+NO_TMUX_PATH="$RT/no-tmux-on-this-path"
+mkdir -p "$NO_TMUX_PATH"
+out=$(env -i HOME="$HOME" PATH="$NO_TMUX_PATH" "$LANES" --json "$S" 2>"$RT/err1")
 rc=$?
 err=$(cat "$RT/err1")
 if [ "$rc" -eq 0 ]; then
