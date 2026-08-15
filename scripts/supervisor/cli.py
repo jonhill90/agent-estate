@@ -122,6 +122,15 @@ def parser():
     # and `restore.sh` refuses such a lane instead of starting a fresh agent
     # in it -- the failure direction #237 names as its primary constraint.
     record_dispatch_parser.add_argument("--harness-session-id", default="")
+    # agent-supervisor#172. The directory `harness-session-id` was resolved
+    # IN, recorded by dispatch.sh at the same moment as the id itself --
+    # never independently, and never NOT required just because
+    # `--harness-session-id` isn't: a caller that passes one without the
+    # other would let `restore.sh` pair a real id with the wrong directory,
+    # which is the exact defect this issue exists to close. Empty means the
+    # same thing an empty `--harness-session-id` means: not resolved, or a
+    # pre-#172 caller.
+    record_dispatch_parser.add_argument("--harness-project-dir", default="")
     record_dispatch_parser.add_argument("--issue", action="append", required=True)
     record_dispatch_parser.add_argument("--github", default="")
     record_dispatch_parser.add_argument("--harness", choices=("codex", "claude", "copilot", "copilot-acp", "pi"))
@@ -602,6 +611,7 @@ def record_dispatch(
     github="",
     harness=None,
     harness_session_id="",
+    harness_project_dir="",
     worktree_path="",
 ):
     """Record a dispatch that ALREADY happened. Writes; never sends.
@@ -681,6 +691,10 @@ def record_dispatch(
             # resolved (`harness-session.sh`), or "" when it could not. Never
             # guessed here -- this function has no way to observe a pane.
             harness_session_id=harness_session_id,
+            # agent-supervisor#172: the directory `harness_session_id` was
+            # resolved in, never guessed here either -- see the matching
+            # argument's docstring above.
+            harness_project_dir=harness_project_dir,
             command=command,
             task_id=task,
             source_kind="issue",
@@ -828,6 +842,7 @@ def main(argv=None):
             server_id=args.server_id,
             session_id=args.session_id,
             harness_session_id=args.harness_session_id,
+            harness_project_dir=args.harness_project_dir,
             issues=args.issue,
             github=args.github,
             harness=args.harness,

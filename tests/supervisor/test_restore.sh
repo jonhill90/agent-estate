@@ -54,7 +54,15 @@ EOF
 # genuinely exercised rather than stubbed around.
 cat > "$D/bin/claude" <<EOF
 #!/bin/bash
-echo "\$@" >> "$D/launched.log"
+# agent-supervisor#172: the cwd this was launched in matters as much as the
+# argv now -- \`claude --resume\` is scoped to it -- so it goes on the front
+# of the line, ahead of argv, rather than in a second file nothing here
+# already greps. Only when args are present: \`start_estate\` below types a
+# bare \`claude\` (no args at all) to stand in for the already-running agent
+# a real pre-kill pane would show, and every "nothing was started" assertion
+# in this suite depends on THAT launch logging an empty line, unchanged from
+# before this column existed.
+if [ "\$#" -gt 0 ]; then echo "\$PWD :: \$@" >> "$D/launched.log"; else echo >> "$D/launched.log"; fi
 exec sleep 600
 EOF
 chmod +x "$D/bin/tmux" "$D/bin/claude"
@@ -73,11 +81,28 @@ for pair in "$LANE2_ID:ad901-first" "$LANE3_ID:ad902-second"; do
     "$id" "$id" "$marker" > "$HOME/.claude/projects/lanes/$id.jsonl"
 done
 
-record() { # record <lane> <task> <harness-session-id>
+record() { # record <lane> <task> <harness-session-id> [harness-project-dir]
+  # agent-supervisor#172: a real dispatch always records the two together
+  # (dispatch.sh resolves both from the same pane read) -- default the
+  # fourth argument to the working repo, but ONLY when a session id was
+  # actually resolved ($3 non-empty), so every EXISTING caller below keeps
+  # exercising "the common case where they coincide" unchanged, and an
+  # unresolved-session call stays an unresolved-session call rather than
+  # gaining a project dir with no session id to pair it with. A caller that
+  # passes a fourth argument explicitly (including "") always wins.
+  local project_dir
+  if [ $# -ge 4 ]; then
+    project_dir="$4"
+  elif [ -n "$3" ]; then
+    project_dir="$D/repo"
+  else
+    project_dir=""
+  fi
   python3 "$SUP/cli.py" record-dispatch \
     --lane "$1" --task "$2" --summary "worktree=$D/repo; brief=$D/brief.md" \
     --pane-id "%$RANDOM" --pane-path "$D/repo" --command claude --harness claude \
     --server-id "socket:1" --session-id "\$0" --harness-session-id "$3" \
+    --harness-project-dir "$project_dir" \
     --issue 901 --github jonhill90/agent-dotfiles >/dev/null
 }
 
@@ -185,6 +210,62 @@ nomatch=$(bash "$SUP/restore.sh" --dry-run 2>&1)
 want "MUTATION: a non-uuid id is refused too, not passed to the harness" \
   "UNRECOVERABLE.*no transcript on disk" "$nomatch"
 
+
+# ---------------------------------------------- ORIGINATING PROJECT DIR -----
+# agent-supervisor#172. `claude --resume` is scoped to the directory the
+# harness process actually LAUNCHED in, not the lane's WORKING directory
+# (`repo`, a worktree rewritten on every dispatch) -- and until now this
+# script only ever knew the latter. This is the case that must go RED on
+# unpatched `restore.sh`: `$D/other-repo` stands in for a lane recorded
+# before a project-directory migration (agent-dotfiles -> agent-supervisor is
+# the real one), where `repo` was rewritten to the new worktree but the
+# running `claude` process -- and the transcript `--resume` needs -- still
+# belongs to the OLD directory. A `restore.sh` that resumes from `repo`
+# (the pre-#172 shape) launches into the wrong directory silently; only
+# checking WHERE the resume command was actually sent from can catch that,
+# which is why the stub harness now records `$PWD`.
+mkdir -p "$D/other-repo"
+rm -rf "$D/state"; : > "$D/launched.log"
+record ad237test:2 ad901-first "$LANE2_ID" "$D/other-repo"
+start_estate
+"$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null
+sleep 0.5
+projdir=$(bash "$SUP/restore.sh" 2>&1); projdirrc=$?
+sleep 1
+want "PROJECT DIR: lane 2 is restored"          "ad237test:2 +RESTORED" "$projdir"
+if [ "$projdirrc" = 0 ]; then ok "PROJECT DIR: restore exits 0"; else bad "PROJECT DIR: exit was $projdirrc, not 0" "$projdir"; fi
+projlaunched=$(cat "$D/launched.log")
+# THE point: launched from the ORIGINATING directory, not the working repo --
+# a restore.sh that still used `repo` here would show "$D/repo :: ..." instead.
+want "PROJECT DIR: resumed from the originating directory, not the working repo" \
+  "^$D/other-repo :: .*--resume $LANE2_ID" "$projlaunched"
+wantnot "PROJECT DIR: never resumed from the working repo instead" \
+  "^$D/repo :: .*--resume" "$projlaunched"
+
+# ------------------------------------- PROJECT DIR ABSENT (pre-#172 row) ----
+# A row with a real, resolvable session id but NO recorded originating
+# directory -- the migration shape every lane dispatched before this issue
+# has. The ratchet this issue names explicitly: ambiguity here must make the
+# lane look LESS recoverable, never more -- so this must NOT fall back to
+# `repo` (that fallback is the bug), and must NOT crash. It refuses, and the
+# refusal must be tellable apart from "no session id recorded" (the other
+# UNRECOVERABLE reason) -- so the message must both say a directory was
+# never recorded AND name `repo`, the one thing on hand it explicitly
+# refuses to guess with.
+rm -rf "$D/state"; : > "$D/launched.log"
+record ad237test:2 ad901-first "$LANE2_ID" ""
+start_estate
+"$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null
+sleep 0.5
+noproj=$(bash "$SUP/restore.sh" 2>&1); noprojrc=$?
+want "NO PROJECT DIR: refused, not silently resumed from the working repo" \
+  "ad237test:2 +UNRECOVERABLE.*no originating project directory" "$noproj"
+want "NO PROJECT DIR: the refusal names the working repo it refused to guess with" \
+  "UNRECOVERABLE.*no originating project directory.*$D/repo" "$noproj"
+wantnot "NO PROJECT DIR: distinct from the 'no session id' refusal" \
+  "no harness session id" "$noproj"
+if [ "$noprojrc" = 2 ]; then ok "NO PROJECT DIR: restore exits 2"; else bad "NO PROJECT DIR: exit was $noprojrc, not 2" "$noproj"; fi
+wantnot "NO PROJECT DIR: nothing was started for it" "." "$(cat "$D/launched.log")"
 
 # --------------------------------------------------- NULL SESSION ID --------
 # agent-supervisor#65: `record()` above always writes `harness_session_id` as
