@@ -19,6 +19,21 @@
 #            harness's shape that is not its adapter's enumerated ready
 #            footer -- see harness/*.sh. #126: this is the default now, not
 #            the exception -- see harness_index_for_command below.)
+#   never-busy  same unrecognised shape as `unknown`, but for NEVER_BUSY_AFTER
+#            seconds straight -- not "not yet classified", stuck since launch
+#            -> needs a human, loudly (#112)
+#
+# #112 split `unknown` a second way. Both worker lanes in the estate sat at a
+# Claude Code first-run dialog for FOUR HOURS -- `lanes.sh` correctly withheld
+# them from `--free` as `unknown`, but nothing distinguished that from a pane
+# merely mid-repaint, so nothing escalated and the estate ran with zero
+# worker capacity in total silence. `unknown`'s ordinary case clears within a
+# tick or two; a pane that has gone NEVER_BUSY_AFTER seconds with no repaint
+# at all, still unrecognised, has done nothing since the window came up. See
+# NEVER_BUSY_AFTER and is_never_busy below for the measurement, and
+# watchdog.sh for how it reaches a human -- deliberately time-based, not a
+# new dialog shape to pattern-match: #164 already spent one incident proving
+# that a marker widened without a real capture is a guess.
 #
 # #141 added `unsent`, and it is worth being precise about what it buys. Two
 # lanes sat for 40 minutes holding a full brief that had been typed in and
@@ -167,6 +182,30 @@ TASK_NAME_RE="${LANES_TASK_NAME_RE:-^[A-Za-z]+[0-9]+-}"
 # without changing a single byte.
 HUNG_AFTER="${LANES_HUNG_AFTER:-180}"
 
+# agent-supervisor#112: `unknown` was doing two jobs. A pane whose shape this
+# probe has never been taught (a marker gap) and a pane that has sat at a
+# first-run dialog since the moment it launched, with no brief ever
+# delivered, both fell through to the same word -- and #112 measured four
+# hours of zero worker capacity hiding behind it. `unknown` is a whitelist
+# miss and usually clears within a tick or two as the pane keeps repainting
+# something, even a shape nothing here recognises; #{window_activity} keeps
+# advancing as long as ANY byte on screen changes. A pane that has gone this
+# long with NO repaint at all, while still unrecognised, has not merely
+# escaped the whitelist -- it has done nothing since the window came up.
+#
+# Deliberately NOT a new marker to pattern-match. #164 already warns against
+# that game: a marker widened without a real capture is a guess, and this
+# issue's own first-run dialog is one dialog among an unbounded set this
+# estate will never finish enumerating. Time is the signal that generalises
+# across every shape nothing here has been shown, present or future.
+#
+# Larger than HUNG_AFTER on purpose: HUNG_AFTER catches a turn that stopped
+# mid-flight, seconds after it was legitimately busy, and needs a tight
+# bound. This catches a lane that never got that far -- a first-run dialog,
+# an update prompt, anything sitting untouched since launch -- so the bound
+# only needs to rule out a slow but normal startup, not a repaint hiccup.
+NEVER_BUSY_AFTER="${LANES_NEVER_BUSY_AFTER:-1200}"
+
 # agent-dotfiles#201: the footer/menu/ready chrome that used to sit here as
 # global constants (BLOCKED_MARKERS, OPTION_ROW_RE, MENU_ENTER_RE,
 # MENU_TAIL_LINES, TEXT_PROMPT_RE, READY_RE) is now per-harness, sourced
@@ -268,6 +307,32 @@ pane_has_live_children() {
   return 1
 }
 
+# agent-supervisor#112. The one seam both `state=unknown` sites share below
+# -- no adapter claims the pane's command at all, and an adapter claims it
+# but nothing in it recognises the pane's shape -- narrowed the same way in
+# both places, so the threshold cannot drift out of sync between them the
+# way two independent `if`s eventually would.
+#
+# A PURE NARROWING of `unknown`, the same shape #141 used for `unsent` and
+# #154/#237 used for `service`/`stale`: the only lane this can move is one
+# that was already going to be called unknown, and the only place it can
+# move it to is never-busy -- never free, never busy, never blocked. A
+# caller that greps this file's output for `unknown` today keeps matching
+# every lane it matched before; the four-hour case in #112 simply stops
+# being one of them.
+# as#149: this used to print the state itself (`state=$(never_busy_or_unknown
+# "$age")`), which is a command substitution, not a bareword after `state=`.
+# agent-tui's cross-repo guard (`states_lanessh_test.go`) parses this file
+# with a regex that requires a literal `state=<word>` -- command substitution
+# returns [] to that parser, so the guard would stay green without ever
+# learning `never-busy` exists, the exact silent-pass failure it exists to
+# catch. Keep this helper for the age decision only; callers assign the
+# literal state themselves so every emitted state stays statically greppable.
+is_never_busy() {
+  local age="$1"
+  [ "$age" -ge "$NEVER_BUSY_AFTER" ]
+}
+
 now_epoch=$(date +%s)
 
 emit_rows() {
@@ -316,6 +381,14 @@ emit_rows() {
     # line, which is the #65 discipline; this does not relax it, and taking a
     # second capture rather than reusing one keeps that impossible to blur.
     box=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_state)
+
+    # Computed once, ahead of the branches below, so both the hung check and
+    # the never-busy check (#112) below read the SAME sample rather than two
+    # tmux queries a scheduling gap could disagree on. Re-read at the bottom
+    # for the printed row rather than trusted verbatim after: it is not
+    # mutated in between, so re-derivation there is only ever the same
+    # number, computed the cheap way (arithmetic, not a second tmux call).
+    age=$(( now_epoch - ${act:-now_epoch} ))
 
     if [ "$w" = "$SUPERVISOR_WINDOW" ]; then
       state=supervisor
@@ -399,7 +472,17 @@ emit_rows() {
       # variant SHELLS above did not already catch. Report what is known and
       # refuse to invent the rest, same posture the pre-#201 Claude-only
       # check had for "not Claude".
-      state=unknown
+      #
+      # #112: this branch cannot even name a harness, so it is the least
+      # informed classification in the file -- and it is exactly where a
+      # lane can sit silently the longest, since no adapter is watching for
+      # ANY shape here, recognised or not. is_never_busy below is the one
+      # narrowing that applies to it.
+      if is_never_busy "$age"; then
+        state=never-busy
+      else
+        state=unknown
+      fi
     elif { [ -n "${H_BLOCKED_MARKERS[$hidx]}" ] && grep -qE "${H_BLOCKED_MARKERS[$hidx]}" <<<"$pane"; } \
       || { [ -n "${H_OPTION_ROW_RE[$hidx]}" ] && grep -qE "${H_OPTION_ROW_RE[$hidx]}" <<<"$pane"; }; then
       # An interactive prompt, not idle: the agent is waiting on a human, not
@@ -449,8 +532,8 @@ emit_rows() {
       # pane_has_live_children above for why window_activity cannot tell
       # these apart, and why the check belongs here rather than on every
       # tick). Only checked once the pane is already past HUNG_AFTER, so a
-      # busy pane inside its normal window never pays the `ps` call.
-      age=$(( now_epoch - ${act:-now_epoch} ))
+      # busy pane inside its normal window never pays the `ps` call. `age`
+      # is the sample taken once, above the whole if/elif chain (#112).
       if [ "$age" -ge "$HUNG_AFTER" ] && ! pane_has_live_children "$pid"; then
         state=hung
       else
@@ -475,7 +558,18 @@ emit_rows() {
       # background subagent and was nowhere near done. Default is now
       # unknown: nothing lands here unless it positively matches the
       # harness's own HARNESS_READY_RE.
-      state=unknown
+      #
+      # #112: THIS is the branch the four-hour incident actually fell into --
+      # a recognised harness (claude.exe) whose first-run dialog matched none
+      # of ready/busy/blocked. is_never_busy narrows it exactly as it
+      # narrowed the no-adapter branch above: a pane this old that has never
+      # painted a recognised shape has not merely dodged the whitelist, it
+      # has not done anything since it came up.
+      if is_never_busy "$age"; then
+        state=never-busy
+      else
+        state=unknown
+      fi
     fi
     # #241 appends the window id as a FIFTH column rather than inserting it,
     # so every awk expression below keeps the field numbers it already had.
@@ -555,6 +649,7 @@ case "$MODE" in
     blocked=$(awk -F'\t' '$4=="menu-blocked" || $4=="text-blocked"' <<<"$rows" | wc -l | tr -d ' ')
     unsent=$(awk -F'\t' '$4=="unsent"' <<<"$rows" | wc -l | tr -d ' ')
     unknown=$(awk -F'\t' '$4=="unknown"' <<<"$rows" | wc -l | tr -d ' ')
+    never_busy=$(awk -F'\t' '$4=="never-busy"' <<<"$rows" | wc -l | tr -d ' ')
     [ "$dead" -gt 0 ] && echo "  ${dead} lane(s) have no agent — restart before dispatching"
     # #237: louder than `dead` on purpose. The danger here is not the missing
     # agent, it is the name, which reads as live work to anyone scanning the
@@ -574,5 +669,10 @@ case "$MODE" in
     # an operator reading only the table would see the same lanes vanish from
     # --free with no clue why.
     [ "$unknown" -gt 0 ] && echo "  ${unknown} lane(s) are unclassified — not a recognised ready shape, --free withholds them"
+    # #112: the four-hour incident. Never withheld silently like plain
+    # `unknown` -- a lane this old that has never painted a recognised shape
+    # needs a human, the same posture `hung`/`blocked`/`unsent` already take,
+    # not just the passive whitelist exclusion `unknown` gets.
+    [ "$never_busy" -gt 0 ] && echo "  ${never_busy} lane(s) have been up ${NEVER_BUSY_AFTER}s+ and have never gone ready or busy — stuck since launch, not merely unclassified; a human must look"
     : ;;
 esac

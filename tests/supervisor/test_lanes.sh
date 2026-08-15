@@ -121,6 +121,8 @@ cat > "$D/fixture" <<'FIX'
 46|w-shell-busy-live-child|claude.exe|⏵⏵ bypass permissions on · 1 shell · ← 1 agent · ↓ to manage|900|0||-zsh|child
 47|w-codex-hung-live-child|codex|• Working (9s • esc to interrupt)\n\n› Improve documentation in @filename\n\n  gpt-5.5 medium · /repo/path|900|0||-zsh|child
 48|w-codex-hung|codex|• Working (9s • esc to interrupt)\n\n› Improve documentation in @filename\n\n  gpt-5.5 medium · /repo/path|900|0
+50|w-firstrun|claude.exe|Paste code here if prompted >|1300|0
+51|w-firstrun-fresh|claude.exe|Paste code here if prompted >|5|0
 FIX
 printf '49|w-missing-cwd|codex|  gpt-5.5 medium · /repo/path|1|0||||%s\n' "$MISSING_CWD" >> "$D/fixture"
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
@@ -240,6 +242,22 @@ want "a bare ready prompt with the real footer is free" w-real-free free "$out"
 # reason #126 exists: the main agent is idle but the lane's work is not
 # done. This is the test that encodes the inversion: under the old
 # blacklist, both of these read free.
+# agent-supervisor#112. Both worker lanes in the real incident sat on
+# exactly this shape -- unrecognised by any harness marker -- for four
+# hours, and `lanes.sh` reported `unknown` the whole time: correctly
+# withheld from `--free`, but indistinguishable from a pane that had been
+# unrecognised for four SECONDS while repainting. w-firstrun has sat this
+# long (1300s, past the default NEVER_BUSY_AFTER=1200) with no repaint at
+# all -- it must read the new state, and it must NOT read free.
+want "a lane stuck at an unrecognised dialog since launch is never-busy, not free" w-firstrun never-busy "$out"
+# The same unrecognised text, moments after the window came up (age=5s),
+# must NOT flip to never-busy -- that would be #124/#126's one-way ratchet
+# run in reverse for the WRONG state (never-busy is exactly as withheld from
+# --free as unknown is, but conflating "just appeared" with "stuck for
+# 20+ minutes" would make the new state as noisy as the old unknown count
+# already was, defeating the reason #112 exists). It must still read plain
+# unknown, exactly as this shape read before this change.
+want "the same unrecognised dialog seconds after launch is still plain unknown" w-firstrun-fresh unknown "$out"
 want "a subagent task-list row is unknown, not free"     w-subagent-task unknown "$out"
 want "a waiting-for-background-agent line is unknown, not free" w-subagent-wait unknown "$out"
 
@@ -444,11 +462,21 @@ fi
 
 # #126: unknown becoming common under the whitelist must be loud, not a
 # silent hole where lanes used to be. w-copilot, w-idle-footer,
-# w-subagent-task, and w-subagent-wait are unknown here -- 4.
-if grep -qE '4 lane\(s\) are unclassified' <<<"$out"; then
+# w-subagent-task, w-subagent-wait, and w-firstrun-fresh are unknown here
+# -- 5. (w-firstrun itself has aged out into never-busy, below, and must
+# NOT be counted here too.)
+if grep -qE '5 lane\(s\) are unclassified' <<<"$out"; then
   echo "  ok   the table prints a count line for unknown lanes"; pass=$((pass+1));
 else
   echo "  FAIL no unknown count line in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
+fi
+
+# #112: the state this issue exists to add. w-firstrun is the only fixture
+# old enough (1300s, past NEVER_BUSY_AFTER=1200) and still unrecognised.
+if grep -qE '1 lane\(s\) have been up 1200s\+ and have never gone ready or busy' <<<"$out"; then
+  echo "  ok   the table prints a count line for never-busy lanes"; pass=$((pass+1));
+else
+  echo "  FAIL no never-busy count line in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
 fi
 
 # #141: withholding the lane was never the missing part -- the whitelist
@@ -468,7 +496,7 @@ for bad in arch w-dead w-hung w-busy w-copilot w-minute-tick w-scrolled w-blocke
            w-text-blocked w-unrecognized-blocked w-codex-busy w-codex-trust w-copilot-busy \
            w-shell-busy w-shell-idle w-shell-idle-hung w-shell-tasks w-shells-plural \
            telegram-poller ad102-renamed-lane free-27 w-hand-run-poller w-mentions-poller \
-           w-missing-cwd; do
+           w-missing-cwd w-firstrun w-firstrun-fresh; do
   bi=$(awk -F'|' -v n="$bad" '$2==n{print $1}' "$D/fixture")
   if grep -qE "^[^	]*:${bi}	" <<<"$free"; then echo "  FAIL --free offered $bad"; fail=$((fail+1));
   else echo "  ok   --free withholds $bad"; pass=$((pass+1)); fi
@@ -551,6 +579,12 @@ if python3 -c 'import json,sys; rows=json.load(sys.stdin); sys.exit(0 if any(r.g
   echo "  ok   --json reports a missing-cwd lane as broken"; pass=$((pass+1));
 else
   echo "  FAIL --json missing the broken lane object:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
+fi
+# #112: --json must carry the new state too, not just the human-readable table.
+if python3 -c 'import json,sys; rows=json.load(sys.stdin); sys.exit(0 if any(r.get("name")=="w-firstrun" and r.get("state")=="never-busy" for r in rows) else 1)' <<<"$json"; then
+  echo "  ok   --json reports the stuck-since-launch lane as never-busy"; pass=$((pass+1));
+else
+  echo "  FAIL --json missing the never-busy lane object:"; sed 's/^/       /' <<<"$json"; fail=$((fail+1));
 fi
 # agent-dotfiles#241: `window` stays the INDEX and stays a JSON number, so no
 # existing consumer of this renderer (supervisor_view.py's LanesSource passes
@@ -853,6 +887,30 @@ else
 fi
 rm -f "$MUTANT92"
 trap - EXIT
+
+# PR #149 review (agent-supervisor#112/as#149): agent-tui's cross-repo guard
+# (states_lanessh_test.go, TestAllStatesCoversLanesShStates) parses THIS
+# file's own state= assignments with a regex requiring a bareword right
+# after `state=` -- `(?:^|[;\s])state=([A-Za-z][A-Za-z0-9_-]*)`. The first
+# draft of never-busy assigned via command substitution,
+# `state=$(never_busy_or_unknown "$age")`, which that regex cannot see at
+# all: it returns [] for those two lines, so the guard would stay green
+# with never-busy (and, worse, the unknown it replaced) invisible to it --
+# a silent pass, not a loud failure. Reproduce the guard's own regex here so
+# a future command-substitution state= regresses this locally, without
+# depending on a second repo to notice.
+STATE_ASSIGN_RE='(^|[;[:space:]])state=([A-Za-z][A-Za-z0-9_-]*)'
+assigned_states=$(grep -oE "$STATE_ASSIGN_RE" "$LANES" | sed -E "s/$STATE_ASSIGN_RE/\\2/")
+if grep -q '^never-busy$' <<<"$assigned_states" && grep -q '^unknown$' <<<"$assigned_states"; then
+  echo "  ok   every never-busy/unknown assignment in lanes.sh is a bareword agent-tui's guard regex can see"; pass=$((pass+1));
+else
+  echo "  FAIL a state=\$(...) (or other non-bareword) assignment made never-busy or unknown invisible to agent-tui's guard regex. Assignments seen:"; sed 's/^/       /' <<<"$assigned_states"; fail=$((fail+1));
+fi
+if grep -vE '^[[:space:]]*#' "$LANES" | grep -qE 'state=\$\('; then
+  echo "  FAIL lanes.sh assigns state via command substitution (state=\$(...)) -- that shape defeats agent-tui's bareword guard regex even when the value happens to match"; fail=$((fail+1));
+else
+  echo "  ok   no state=\$(...) assignment in lanes.sh (comments referencing the retired shape don't count)"; pass=$((pass+1));
+fi
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
