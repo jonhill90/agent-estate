@@ -166,23 +166,76 @@ class TmuxTransport:
             panes.append({"window_name": window_name, "path": path})
         return panes
 
-    def switch_client(self, session):
-        """Switch the invoking client's attached session to `session`.
+    def list_clients(self):
+        """Every tmux client currently attached to this server: its identity
+        and which session it is on right now.
+
+        agent-supervisor#189: `switch_client`/`detach_client` need to know
+        WHICH client they are acting on, and this is the only place that
+        knowledge can come from -- `mcp_server.py`'s own stdio is a pipe
+        with no controlling terminal at all (see those methods' docstrings).
+        `#{client_tty}` is used as the identity because it is exactly the
+        string man tmux's COMMANDS section defines as target-client -- the
+        same value `-c`/`-t` on switch-client/detach-client accept, not an
+        internal id this file would have to translate.
+        """
+        fmt = "#{client_tty}\t#{client_session}"
+        try:
+            output = self._run("list-clients", "-F", fmt).stdout
+        except subprocess.CalledProcessError:
+            return []
+        clients = []
+        for line in output.splitlines():
+            if not line:
+                continue
+            tty, _, session = line.partition("\t")
+            clients.append({"tty": tty, "session": session})
+        return clients
+
+    def switch_client(self, session, client=None):
+        """Switch one client's attached session to `session`.
+
+        agent-supervisor#189: this used to take no client identity and rely
+        on tmux resolving "the client currently in use" from the invoking
+        process's controlling terminal. `mcp_server.py` has none -- its
+        stdio is a pipe, not a tty -- so with more than one client attached
+        that resolution is not "the client currently in use", it is
+        whichever client tmux's fallback happens to pick, and it reports
+        success regardless. `client`, when given, is a target-client string
+        (a tty path, e.g. `/dev/ttys011` -- see `list_clients`) passed as
+        `-c` so THIS call names which client moves.
+
+        `client=None` is still accepted -- callers (`SessionAttachSource`)
+        only pass it once they have confirmed via `list_clients` that
+        exactly one client is attached server-wide, the case the issue
+        establishes as unambiguous (there is nothing else for tmux to
+        resolve to). It is never reached with two or more attached.
 
         `=name` exact-match, same discipline as `session_exists` -- never a
         prefix match onto a session this was not asked for.
         """
-        self._run("switch-client", "-t", f"={session}")
+        args = ["-t", f"={session}"]
+        if client is not None:
+            args = ["-c", client, *args]
+        self._run("switch-client", *args)
 
-    def detach_client(self):
-        """Detach whatever client is attached to THIS process's own tty.
+    def detach_client(self, client=None):
+        """Detach a tmux client.
 
-        Deliberately no `-t`: `tmux detach-client` with no target detaches
-        the client for the invoking process's controlling terminal, which is
-        correct here because `mcp_server.py` runs as a child of whatever
-        TUI/client invoked it and inherits its tty.
+        agent-supervisor#189: `client`, when given, is a target-client tty
+        string (see `list_clients`) passed as `-t` -- detach-client's `-t`
+        names the CLIENT to detach (man tmux COMMANDS), not a session; do
+        not confuse it with switch-client's `-t`, which names the
+        destination session.
+
+        `client=None` detaches whatever client is attached to the invoking
+        process's own controlling terminal, which `mcp_server.py` does not
+        have -- correct only once the caller has confirmed via
+        `list_clients` that at most one client is attached server-wide
+        (see `switch_client`'s docstring for why that case is unambiguous).
         """
-        self._run("detach-client")
+        args = ["-t", client] if client is not None else []
+        self._run("detach-client", *args)
 
     def kill_session(self, session):
         """Kill exactly one session, by exact name.
