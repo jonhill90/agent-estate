@@ -1,0 +1,28 @@
+#!/bin/bash
+# Stub gh for the source-task-sweep invocation test.
+#
+# The sweep (reconcile_sources.py) calls:
+#   gh issue list --repo <owner/repo> --state all --limit 1000 --json number,state
+#   gh pr    list --repo <owner/repo> --state all --limit 1000 --json number,state
+# Answered from STUB_GH_ISSUE_STATE / STUB_GH_PR_STATE, each
+# "<number>=<STATE>" (only one row needed for this test). Any other `gh`
+# shape (the watchdog's own actionable-work count) gets the same "1" the
+# shared stub answers, so a code path this test does not care about still
+# gets a harmless number rather than an empty string.
+verb="$1"
+if [[ " $* " == *" --json number,state "* ]]; then
+  case "$verb" in
+    issue) row="${STUB_GH_ISSUE_STATE:-}" ;;
+    pr)    row="${STUB_GH_PR_STATE:-}" ;;
+    *)     row="" ;;
+  esac
+  if [ -z "$row" ]; then
+    echo "[]"
+  else
+    number="${row%%=*}"
+    state="${row##*=}"
+    printf '[{"number":%s,"state":"%s"}]\n' "$number" "$state"
+  fi
+  exit 0
+fi
+echo 1

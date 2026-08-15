@@ -221,6 +221,35 @@ POLLER_SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
 INBOX_POLL_TIMEOUT_ASSUMED="${INBOX_POLL_TIMEOUT:-25}"
 INBOX_HEARTBEAT_STALE_AFTER="${INBOX_HEARTBEAT_STALE_AFTER:-$(( 2 * (INBOX_POLL_TIMEOUT_ASSUMED + 80) ))}"
 
+# agent-supervisor#133: `source_tasks` is written once at dispatch
+# (`record_dispatch`) and never advanced again unless something calls
+# `cli.py reconcile-source-tasks` -- #130 shipped that sweep, nothing called
+# it, and the row count kept climbing (314 -> 315 -> 322 -> 326) instead of
+# draining. This watchdog is the owner, not `loop-tick.md`'s supervisor loop
+# and not a separate timer:
+#   - it already runs unattended every ${TICK_INTERVAL}s OUTSIDE the loop
+#     (this file's own header), so reconciliation survives exactly the
+#     failure mode -- a dead or wedged loop -- that lets `source_tasks` rot
+#     the longest;
+#   - it costs zero model tokens (a bash subprocess, not an agent turn), so
+#     it cannot repeat the mistake `loop-tick.md` warns about ("a 3-minute
+#     timer driving real work is what exhausted the weekly limit twice");
+#   - a bare cron/LaunchAgent timer would be a second unattended entry point
+#     with its own PATH, credentials and staleness detection to build and
+#     test from scratch -- this file already solved all three for the same
+#     kind of duty (see check_poller_window/check_inbox_heartbeat above).
+# Throttled independently of the ${TICK_INTERVAL}s tick cadence via a stamp
+# file, NOT run on every tick: the sweep is two batched
+# `gh ... list --state all --limit 1000` calls per repo (SUPERVISOR_REPOS,
+# 5 today = 10 calls/sweep) -- cheap against GitHub's 5000/hr authenticated
+# rate limit even at 180s cadence (up to 200 calls/hr), but pointless at that
+# cadence: a dispatched issue/PR closes or merges on the order of hours, not
+# minutes, so nothing but rate-limit budget is bought by sweeping every tick.
+# Default once per hour. A stamp file, not the fixed 180s clock, survives the
+# watchdog itself restarting mid-hour without resetting the throttle.
+SOURCE_SWEEP_STAMP="${SUPERVISOR_SOURCE_SWEEP_STAMP:-$STATE/.source-task-sweep-last}"
+SOURCE_SWEEP_INTERVAL="${SUPERVISOR_SOURCE_SWEEP_INTERVAL:-3600}"
+
 # Credentials + NOTIFY_SCRIPT for the escalate path. Sourced here so the
 # LaunchAgent needs no secrets inlined in its plist.
 ENVFILE="${NOTIFY_ENV:-$STATE/notify.env}"
@@ -502,6 +531,18 @@ recovery_note() {                # recovery_note <line>
   return 0
 }
 
+# Same tmp+rename append shape again, for the source_tasks sweep (#133).
+# Absent (no line at all) means "not due this tick", the ordinary case --
+# only a tick that actually ran the sweep, or found it could not, writes one.
+sweep_note() {                   # sweep_note <line>
+  local tmp="$STATUS.sweep.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^sweep:' "$STATUS"; printf 'sweep:    %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 # Runs on EVERY exit path, regardless of which early `exit 0` above fired --
 # that is the whole reason this lives in the trap rather than in the main
 # body: the supervisor-loop checks below (busy/idle/asleep/...) all return
@@ -656,6 +697,88 @@ check_poller_window() {
   fi
 }
 
+# agent-supervisor#133: runs on EVERY exit path, same reasoning as
+# check_poller_window/check_inbox_heartbeat above -- this is a different
+# subsystem from the supervisor-loop checks (busy/idle/asleep/...) that
+# return early throughout this file, and the whole point of putting it here
+# is that it must still run on the ticks where those checks short-circuit.
+# Self-throttled against SOURCE_SWEEP_STAMP (see that var's definition for
+# the cost/cadence reasoning); most ticks return in the first branch below
+# having done nothing.
+check_source_task_sweep() {
+  local last=0
+  if [ -r "$SOURCE_SWEEP_STAMP" ]; then
+    last=$(cat "$SOURCE_SWEEP_STAMP" 2>/dev/null)
+  fi
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  if [ $(( now - last )) -lt "$SOURCE_SWEEP_INTERVAL" ]; then
+    return 0
+  fi
+  if [ ! -e "$HERE/cli.py" ]; then
+    log "SOURCE-SWEEP-MISSING: cli.py is missing beside this watchdog; reinstall or advance the live worktree"
+    sweep_note "missing — cli.py is missing beside this watchdog"
+    return 0
+  fi
+  local out rc
+  out=$("${SUPERVISOR_PYTHON:-python3}" "$HERE/cli.py" --state-dir "$STATE" reconcile-source-tasks 2>&1)
+  rc=$?
+  # The stamp is written whether the sweep succeeded or not: a repo-fetch
+  # failure inside the sweep already leaves its own rows untouched and
+  # reports itself in `errors` (reconcile_sources.py's own fail-closed
+  # contract) -- retrying every 180s instead of waiting out the interval
+  # would not recover a down `gh`/network any faster, only spend more of the
+  # rate-limit budget finding out again.
+  printf '%s' "$now" >"$SOURCE_SWEEP_STAMP" 2>/dev/null
+  if [ "$rc" -ne 0 ]; then
+    log "SOURCE-SWEEP FAILED rc=$rc: $out"
+    sweep_note "failed — rc=$rc: $(printf '%s' "$out" | tr '\n' ' ')"
+    return 0
+  fi
+  # Review fix (PR #142): this formatter used to build its f-strings with
+  # backslash-escaped double quotes inside the `{...}` expression --
+  # `f"updated={len(d.get(\"updated\", []))} "` -- which is a SyntaxError on
+  # every CPython from 3.9 to 3.14, not a version-specific issue. `python3
+  # -c` therefore failed before running a single line, on every invocation,
+  # success or not. That would have been visible immediately except the next
+  # line redirected the formatter's stderr to /dev/null -- so a SUCCESSFUL
+  # sweep (the row really did flip OPEN -> CLOSED) still rendered "not
+  # parseable" in watchdog.status forever, and nothing short of reading the
+  # Python by eye would have caught it. Fixed two ways: the f-strings below
+  # hold no quote characters at all (values are computed into plain
+  # variables first, so there is nothing left to escape), and the
+  # formatter's stderr is now captured, not discarded -- a crash in the
+  # formatter itself surfaces as FORMATTER-CRASHED, distinct from the sweep's
+  # own report genuinely being unparseable JSON (a real, different outcome
+  # `reconcile_sources.py` can also produce).
+  local summary py_rc py_err py_err_file
+  py_err_file="$STATUS.sweep-fmt-err.$$"
+  summary=$(printf '%s' "$out" | "${SUPERVISOR_PYTHON:-python3}" -c '
+import json, sys
+try:
+    d = json.load(sys.stdin)
+except Exception:
+    print("unparseable report")
+    sys.exit(0)
+updated = len(d.get("updated", []))
+unchanged = len(d.get("unchanged", []))
+unresolved = len(d.get("unresolved", []))
+errors = len(d.get("errors", []))
+print(f"updated={updated} unchanged={unchanged} unresolved={unresolved} errors={errors}")
+' 2>"$py_err_file")
+  py_rc=$?
+  py_err=$(cat "$py_err_file" 2>/dev/null)
+  rm -f "$py_err_file" 2>/dev/null
+  if [ "$py_rc" -ne 0 ]; then
+    log "SOURCE-SWEEP-FORMATTER-CRASHED rc=$py_rc: $py_err"
+    sweep_note "formatter crashed — rc=$py_rc: $(printf '%s' "$py_err" | tr '\n' ' ')"
+    return 0
+  fi
+  [ -n "$summary" ] || summary="ran, output not parseable: $(printf '%s' "$out" | tr '\n' ' ')"
+  log "SOURCE-SWEEP: $summary"
+  sweep_note "$summary"
+  return 0
+}
+
 # Runs on EVERY exit path. It must never change this tick's exit status and
 # must never abort it: a refused advance is a report, not a crash -- the tick
 # it rode out on had already succeeded, and failing it would turn "the code is
@@ -757,6 +880,7 @@ on_exit() {
   check_inbox_heartbeat
   check_poller_process_count
   check_poller_window
+  check_source_task_sweep
   advance_on_exit "$rc"
   return $rc
 }
