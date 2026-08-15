@@ -352,118 +352,14 @@ RECONCILIATION_JSON=$(jq -nc \
       }
   ]')
 
-# Resolves one PR's verdict through the adapter. Always prints SOME JSON --
-# a source failure or a missing/broken stub must read as {"verdict":"unknown"},
-# never as empty output that a caller could mistake for "no verdict field".
-#
-# head_sha is the PR's current headRefOid (already fetched below via `gh pr
-# list`) -- passed through so a source can tell a review or ledger record
-# filed against an OLDER commit apart from one that answers for this head
-# (agent-dotfiles#218). Without it every verdict source is blind to a push
-# that moved the head after the verdict was filed.
-verdict_for() {
-  local repo_full="$1" number="$2" head_sha="$3" out
-  if [ -n "$VERDICT_BIN" ]; then
-    out=$("$VERDICT_BIN" --repo "$repo_full" --number "$number" --head-sha "$head_sha" 2>/dev/null)
-  else
-    out=$("$VERDICT_PYTHON" "$HERE/verdict.py" --state-dir "$STATE" \
-          get --repo "$repo_full" --number "$number" --source "$VERDICT_SOURCE" \
-          --head-sha "$head_sha" 2>/dev/null)
-  fi
-  if ! jq -e . >/dev/null 2>&1 <<<"$out"; then
-    out='{"verdict":"unknown","detail":"verdict source produced no readable output"}'
-  fi
-  printf '%s\n' "$out"
-}
-
-repo_task_prefix() {
-  local repo_full="$1" name part prefix
-  name="${repo_full##*/}"
-  if [[ "$name" == *-* ]]; then
-    prefix=""
-    while IFS= read -r part; do
-      prefix="${prefix}${part:0:1}"
-    done < <(tr '-' '\n' <<<"$name")
-    printf '%s\n' "$prefix"
-  else
-    printf '%s\n' "$name"
-  fi
-}
-
-# agent-supervisor#108: the same single comparison `dispatch.sh`'s guard uses
-# -- `core.lane_relation` via the ledger CLI. Independence was decided by `==`
-# on two lane-id strings, and the session rename on 2026-08-14 made the author
-# row (`agent-dotfiles:3`) stop matching the same window's new id
-# (`agent-supervisor:3`), so a genuine self-review would have been printed as
-# "independent". Anything this cannot positively answer is `unknown`, which the
-# caller renders as independence unknown rather than as independence.
-lane_relation() {  # lane_relation <lane> <other> -> same|different|unknown
-  local json rel
-  json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" lane-relation --lane "$1" --other "$2" 2>/dev/null) || json=""
-  rel=$(jq -r '.relation // ""' 2>/dev/null <<<"$json") || rel=""
-  case "$rel" in
-    same|different) printf '%s\n' "$rel" ;;
-    *) printf 'unknown\n' ;;
-  esac
-}
-
-# Resolve the lane that authored a PR by the same fail-closed chain
-# dispatch.sh --reviews-pr uses: closing issue -> author-issue-lane, then
-# branch name as a last-resort task-id hint. Missing data is not an error in
-# the digest; it only makes verdict independence unknown for that PR.
-# agent-supervisor#144: left as GraphQL, deliberately. `closingIssuesReferences`
-# -- the "Fixes #N" link GitHub itself resolves -- is a GraphQL-only concept;
-# REST has no endpoint that answers it. Splitting this call (REST for
-# headRefName/commits, GraphQL for closingIssuesReferences alone) would still
-# spend a GraphQL point per PR per tick, the exact cost this issue exists to
-# remove, for no REST-budget saving on the other two fields. A partial
-# conversion that is honest about this edge beats one that quietly re-adds a
-# GraphQL call to "finish" it.
-author_lane_for() {
-  local repo_full="$1" number="$2" pr_json head_ref candidates candidate issue_json
-  local prefix fallback_task fallback_json
-  if ! pr_json=$(gh pr view "$number" -R "$repo_full" --json headRefName,closingIssuesReferences,commits 2>/dev/null); then
-    jq -nc --arg detail "independence unknown -- PR author lane unresolved: gh pr view failed" \
-      '{known:false, lane:null, task:null, detail:$detail}'
-    return
-  fi
-  if ! jq -e . >/dev/null 2>&1 <<<"$pr_json"; then
-    jq -nc --arg detail "independence unknown -- PR author lane unresolved: gh pr view produced unreadable JSON" \
-      '{known:false, lane:null, task:null, detail:$detail}'
-    return
-  fi
-  head_ref=$(jq -r '.headRefName // ""' <<<"$pr_json")
-  candidates=$(
-    {
-      jq -r '.closingIssuesReferences[]?.number // empty' <<<"$pr_json"
-      jq -r '.commits[]? | (.messageHeadline // ""), (.messageBody // "")' <<<"$pr_json" \
-        | grep -ioE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+' || true
-    } | awk '!seen[$0]++'
-  )
-  for candidate in $candidates; do
-    if issue_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" author-issue-lane --issue "$candidate" --head-ref "$head_ref" 2>/dev/null) \
-       && jq -e '.known == true' >/dev/null 2>&1 <<<"$issue_json"; then
-      jq -nc --arg lane "$(jq -r '.lane' <<<"$issue_json")" \
-             --arg task "$(jq -r '.task // ""' <<<"$issue_json")" \
-             '{known:true, lane:$lane, task:$task, detail:""}'
-      return
-    fi
-  done
-  prefix=$(repo_task_prefix "$repo_full")
-  if [[ "$head_ref" =~ ^(lane|fix|feat|chore|docs)/([0-9]+)-(.+)$ ]]; then
-    fallback_task="${prefix}${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
-    if fallback_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" task-lane --task "$fallback_task" 2>/dev/null) \
-       && jq -e '.known == true' >/dev/null 2>&1 <<<"$fallback_json"; then
-      jq -nc --arg lane "$(jq -r '.lane' <<<"$fallback_json")" \
-             --arg task "$fallback_task" \
-             '{known:true, lane:$lane, task:$task, detail:""}'
-      return
-    fi
-  fi
-  jq -nc --arg head "$head_ref" \
-         --arg task "${fallback_task:-none}" \
-         '{known:false, lane:null, task:null, detail:("independence unknown -- PR author lane unresolved from ledger issue lookup or branch " + ($head|if length > 0 then . else "unknown" end) + " (task " + $task + ")")}'
-}
+# agent-supervisor#179: `verdict_for`, `author_lane_for`, `lane_relation` and
+# `repo_task_prefix` used to be defined here, purely for this digest's
+# REPORTING of verdict independence. `merge-pr.sh` needed the identical
+# computation for ENFORCEMENT and, rather than grow a second hand-rolled copy
+# (the exact drift agent-supervisor#108 already paid for once), both now
+# source it from one place. See verdict-independence.sh's own header for why.
+# shellcheck source=./verdict-independence.sh
+. "$HERE/verdict-independence.sh"
 
 # --- pull requests --------------------------------------------------------
 # One `gh` call per repo for the PR list, then one `gh run list` per PR,
@@ -535,31 +431,11 @@ for repo in $REPOS; do
     if [ -n "$reviewer_lane_id" ] && [ -n "$author_lane_id" ]; then
       lane_rel=$(lane_relation "$author_lane_id" "$reviewer_lane_id")
     fi
-    entry=$(jq -n --argjson p "$p" --argjson r "$r" --arg repo "$repo" --argjson v "$v" --argjson author "$author_lane" --arg lane_rel "$lane_rel" --arg merge_state "$merge_state" '
-      def independence:
-        if (($v.verdict_kind // "") | IN("comment", "ledger")) and (($v.verdict // "") | IN("approved", "rejected")) then
-          if (($v.reviewer_lane // "") | length) == 0 then
-            {value:null, detail:"independence unknown -- reviewer lane unresolved; comment verdicts must include Review-Lane: <lane-id>"}
-          elif ($author.known == true) then
-            # THREE branches, not two (#108). "not the same lane" is not the
-            # same claim as "a different lane": two ids this system cannot
-            # compare establish nothing, and printing "independent" for them
-            # is how a self-review would be laundered across a session rename.
-            if ($lane_rel == "same") then
-              {value:false, detail:("NOT independent -- author lane " + $author.lane + " reviewed its own PR"
-                + (if ($v.reviewer_lane != $author.lane) then " (reviewed as " + $v.reviewer_lane + " -- the same window, renamed session)" else "" end))}
-            elif ($lane_rel == "different") then
-              {value:true, detail:("independent -- author lane " + $author.lane + ", reviewer lane " + $v.reviewer_lane)}
-            else
-              {value:null, detail:("independence unknown -- author lane " + $author.lane + " and reviewer lane " + $v.reviewer_lane + " are not comparable lane ids")}
-            end
-          else
-            {value:null, detail:$author.detail}
-          end
-        else
-          {value:null, detail:""}
-        end;
-      independence as $ind |
+    # #179: the independence decision itself moved to verdict-independence.sh
+    # (`independence_verdict`) so merge-pr.sh's ENFORCEMENT of it and this
+    # digest's REPORTING of it are the same jq, computed once.
+    ind=$(independence_verdict "$v" "$author_lane" "$lane_rel")
+    entry=$(jq -n --argjson p "$p" --argjson r "$r" --arg repo "$repo" --argjson v "$v" --argjson ind "$ind" --arg merge_state "$merge_state" '
       {
         repo: $repo, number: $p.number, title: $p.title,
         head: $p.headRefOid[0:8],
