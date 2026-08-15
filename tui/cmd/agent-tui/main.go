@@ -18,6 +18,7 @@ import (
 
 	"github.com/jonhill90/agent-tui/internal/board"
 	"github.com/jonhill90/agent-tui/internal/cost"
+	"github.com/jonhill90/agent-tui/internal/gallery"
 	"github.com/jonhill90/agent-tui/internal/lane"
 	"github.com/jonhill90/agent-tui/internal/mcp"
 	"github.com/jonhill90/agent-tui/internal/rail"
@@ -60,6 +61,10 @@ func main() {
 			"token ceiling for Claude's active 5h session block, passed to `ccusage blocks --token-limit`. ccusage "+
 				"has no default of its own (it cannot know your plan's real cap) -- leave unset and the panel shows "+
 				"Claude's limit as \"unknown\", never a fabricated percentage (agent-tui#4's honesty constraint).")
+		showGallery = flag.Bool("gallery", false, "show the glyph gallery (agent-tui#11) instead of the rail -- every "+
+			"lane state against every candidate glyph, including glyphs not yet in any set, each flagged with "+
+			"whether it needs a Nerd Font. A separate screen, never a rail restyle; reads no lanes and needs no "+
+			"supervisor connection, same as -cost.")
 	)
 	flag.Parse()
 
@@ -81,6 +86,18 @@ func main() {
 	// (rail, board) needs lanes and connects exactly as before.
 	if *showCost {
 		p := tea.NewProgram(cost.New(costFetch), tea.WithAltScreen())
+		if _, err := p.Run(); err != nil {
+			fmt.Fprintln(os.Stderr, "agent-tui:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
+	// The gallery reads compiled-in glyph data (lane.Variants,
+	// lane.Candidates) and nothing else -- no lanes, no ccusage, no
+	// supervisor connection, same reasoning as -cost above.
+	if *showGallery {
+		p := tea.NewProgram(gallery.New(), tea.WithAltScreen())
 		if _, err := p.Run(); err != nil {
 			fmt.Fprintln(os.Stderr, "agent-tui:", err)
 			os.Exit(1)

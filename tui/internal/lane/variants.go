@@ -14,7 +14,7 @@ import "fmt"
 //
 // Variants[0] is the DEFAULT: what renders with no selection made, per the
 // addendum's "he must be able to say nothing and still get something sane."
-var Variants = []GlyphSet{signalSet, asciiSet, blocksSet, emojiSet}
+var Variants = []GlyphSet{signalSet, asciiSet, blocksSet, emojiSet, nerdSet}
 
 // Default is Variants[0], named for callers that want it without indexing.
 var Default = Variants[0]
@@ -101,6 +101,49 @@ var blocksSet = GlyphSet{
 		"service":      {Motion: MotionStill, Frames: []string{"▪"}, Color: "#555555", Label: "service"},
 		"supervisor":   {Motion: MotionStill, Frames: []string{"▪"}, Color: "#555555", Label: "supervisor"},
 		"unknown":      {Motion: MotionStill, Frames: []string{"▯"}, Color: "#999999", Label: "unknown"},
+	},
+}
+
+// -- nerd: Private Use Area icons from a patched Nerd Font (agent-tui#11).
+// Codepoints are Font Awesome glyphs as mapped by the Nerd Fonts project --
+// downloaded and checked directly against the project's own
+// glyphnames.json (github.com/ryanoasis/nerd-fonts @ master), not typed
+// from memory: a first pass here recalled fa-pause as U+F04B and fa-skull
+// as U+F1CB, and both were wrong when checked against the source file
+// (fa-pause is U+F04C -- F04B is fa-play; fa-skull is U+EE15, not in the
+// F0xx block the other Font Awesome icons here live in). Written as
+// \uXXXX escapes rather than pasted characters for the same reason: a
+// Private Use Area codepoint has no glyph in the font this file is edited
+// with, so a pasted character can silently become a different,
+// similar-looking codepoint with no visual way to catch it -- an escape is
+// the exact, checkable byte value instead.
+//
+// Every codepoint below is in the Private Use Area (U+E000-U+F8FF) by
+// construction -- that is what makes it a Nerd Font glyph at all, and it is
+// also why gallery.go's Classify flags every one of them as
+// RenderRequiresNerdFont: a PUA codepoint has no meaning to Unicode itself,
+// only to a font that chose to map something onto it, so it is tofu on any
+// font that isn't this one. That is a fact about the codepoint, not a guess
+// about Jon's terminal.
+var nerdSet = GlyphSet{
+	ID:          "nerd",
+	Name:        "Nerd Font",
+	Description: "Font Awesome icons via a patched Nerd Font's Private Use Area glyphs",
+	Unmapped:    Style{Motion: MotionGlitch, Frames: []string{"\uf128", " "}, Color: "#ff00ff", Label: ""}, // fa-question
+	Styles: map[string]Style{
+		"free":         {Motion: MotionStill, Frames: []string{"\uf111"}, Color: "#4caf50", Label: "free"},              // fa-circle
+		"busy":         {Motion: MotionSpin, Frames: []string{"\uf021"}, Color: "#4aa3ff", Label: "busy"},               // fa-refresh
+		"hung":         {Motion: MotionGlitch, Frames: []string{"\uf071", " "}, Color: "#ff5555", Label: "hung"},        // fa-exclamation-triangle
+		"dead":         {Motion: MotionStill, Frames: []string{"\uf00d"}, Color: "#777777", Label: "dead"},              // fa-times
+		"stale":        {Motion: MotionPulse, Frames: []string{"\uee15", "\u00b7"}, Color: "#cc3333", Label: "stale"},   // fa-skull
+		"broken":       {Motion: MotionGlitch, Frames: []string{"\uf188", " "}, Color: "#ff8800", Label: "broken"},      // fa-bug
+		"menu-blocked": {Motion: MotionPulse, Frames: []string{"\uf04c", " "}, Color: "#e0c34c", Label: "menu-blocked"}, // fa-pause
+		"text-blocked": {Motion: MotionPulse, Frames: []string{"\uf11c", " "}, Color: "#e0c34c", Label: "text-blocked"}, // fa-keyboard-o
+		"unsent":       {Motion: MotionPulse, Frames: []string{"\uf0e0", " "}, Color: "#e0a94c", Label: "unsent"},       // fa-envelope
+		"scrolled":     {Motion: MotionBounce, Frames: []string{"\uf07d", " "}, Color: "#7fa8ff", Label: "scrolled"},    // fa-arrows-v
+		"service":      {Motion: MotionStill, Frames: []string{"\uf013"}, Color: "#555555", Label: "service"},           // fa-cog
+		"supervisor":   {Motion: MotionStill, Frames: []string{"\uf0ad"}, Color: "#555555", Label: "supervisor"},        // fa-wrench
+		"unknown":      {Motion: MotionStill, Frames: []string{"\uf059"}, Color: "#999999", Label: "unknown"},           // fa-question-circle
 	},
 }
 
