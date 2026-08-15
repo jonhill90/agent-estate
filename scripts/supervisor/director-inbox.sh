@@ -100,7 +100,16 @@ mkdir -p "$(dirname "$BOX")" 2>/dev/null
 
 now() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 
-case "${1:-read}" in
+# The documented no-argument form defaults to `read` (see the usage comment
+# above). Applied exactly once, here, to $1 itself -- not just to which `case`
+# arm matches. A default embedded only in the case pattern (`"${1:-read}"`)
+# still leaves $1 itself unset, and the read|drain arm below re-reads the
+# literal $1 to tell python which of read/drain it is -- unbound under
+# `set -u` the moment no argument was given. That was #113: the one
+# documented invocation that failed.
+set -- "${1:-read}" "${@:2}"
+
+case "$1" in
   post)
     [ -n "${2:-}" ] || { echo "director-inbox: post needs a message" >&2; exit 1; }
     python3 - "$BOX" "$LOCK" "$(now)" "$2" <<'PY'
