@@ -1774,7 +1774,51 @@ class Ledger:
                     (task_id, lane, lane_row["nonce"], summary, now, now),
                 )
             except sqlite3.IntegrityError:
-                pass
+                # agent-supervisor#174. `id` is this table's PRIMARY KEY, and
+                # `dispatch.sh` derives `token` from the window name -- stable
+                # for a given issue/lane pairing, so a RETRY recomputes the
+                # exact `task_id` an earlier, now-finished dispatch already
+                # used. That earlier row is not deleted when it closes (only
+                # `release_lane_claim`'s still-RESERVED case deletes; a claim
+                # that reached a real dispatch is cancelled in place by
+                # `_register_lane_tx`, same as any completed task), so it is
+                # still sitting on this id, just terminal.
+                #
+                # Two different collisions raise the same `IntegrityError` and
+                # must not be handled alike: this PRIMARY KEY collision on
+                # `task_id` itself (this caller's own dead token, safe to
+                # reuse) versus the `one_open_task_per_lane` partial index
+                # (a DIFFERENT task, still active, genuinely occupying the
+                # lane). Telling them apart is the fix: a dead row under this
+                # exact id is revived as this call's own fresh reservation,
+                # so the SELECT below finds it and this claim succeeds; an
+                # index collision leaves no row at this id, so the row that
+                # collided is a stranger's active claim and the code below
+                # falls through to reporting occupied, with that stranger
+                # correctly named as holder.
+                #
+                # Silently ignoring the collision either way -- the previous
+                # behaviour -- made the two indistinguishable: the SELECT
+                # after an ignored PK collision finds no active row for the
+                # lane at all (there is none; it is free) and reported
+                # `occupied` with `holder: None`, which is the defect this
+                # exists to close. Not a weakening of the check: a lane that
+                # is genuinely held (the index-collision case) is refused
+                # exactly as before, still naming its real holder.
+                existing = connection.execute(
+                    "SELECT status FROM tasks WHERE id = ?", (task_id,)
+                ).fetchone()
+                if existing is not None and existing["status"] in ("complete", "failed", "cancelled"):
+                    connection.execute(
+                        """
+                        UPDATE tasks SET status = 'created', summary = ?, pane_nonce = ?,
+                                         created_at = ?, updated_at = ?, result_path = NULL,
+                                         result_sha256 = NULL, delivery_attempted_at = NULL,
+                                         delivered_at = NULL, accepted_at = NULL, completed_at = NULL
+                        WHERE id = ?
+                        """,
+                        (summary, lane_row["nonce"], now, now, task_id),
+                    )
             row = connection.execute(
                 "SELECT id FROM tasks WHERE lane = ? AND status NOT IN ('complete', 'failed', 'cancelled')",
                 (lane,),
