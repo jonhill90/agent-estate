@@ -1809,16 +1809,37 @@ class Ledger:
                     "SELECT status FROM tasks WHERE id = ?", (task_id,)
                 ).fetchone()
                 if existing is not None and existing["status"] in ("complete", "failed", "cancelled"):
-                    connection.execute(
-                        """
-                        UPDATE tasks SET status = 'created', summary = ?, pane_nonce = ?,
-                                         created_at = ?, updated_at = ?, result_path = NULL,
-                                         result_sha256 = NULL, delivery_attempted_at = NULL,
-                                         delivered_at = NULL, accepted_at = NULL, completed_at = NULL
-                        WHERE id = ?
-                        """,
-                        (summary, lane_row["nonce"], now, now, task_id),
-                    )
+                    # agent-supervisor#182. A terminal placeholder does not
+                    # mean the LANE is free -- the real dispatch that
+                    # superseded it (`record_dispatch`'s `_register_lane_tx`
+                    # cancels the placeholder in place rather than deleting
+                    # it) can still be genuinely active under a different
+                    # task id. Revive-and-succeed only reaches the row above
+                    # via `IntegrityError`, which means SOMETHING collided;
+                    # if it was `one_open_task_per_lane` rather than this
+                    # row's own PRIMARY KEY, that different task is the true
+                    # cause and the UPDATE below would raise the exact same
+                    # index collision a second time, uncaught. Check first
+                    # and, if the lane is genuinely held by someone else,
+                    # skip the revival entirely -- the fall-through SELECT
+                    # reports the real holder, the same refusal this call
+                    # gave before #175.
+                    blocking = connection.execute(
+                        "SELECT id FROM tasks WHERE lane = ? AND id != ? "
+                        "AND status NOT IN ('complete', 'failed', 'cancelled')",
+                        (lane, task_id),
+                    ).fetchone()
+                    if blocking is None:
+                        connection.execute(
+                            """
+                            UPDATE tasks SET status = 'created', summary = ?, pane_nonce = ?,
+                                             created_at = ?, updated_at = ?, result_path = NULL,
+                                             result_sha256 = NULL, delivery_attempted_at = NULL,
+                                             delivered_at = NULL, accepted_at = NULL, completed_at = NULL
+                            WHERE id = ?
+                            """,
+                            (summary, lane_row["nonce"], now, now, task_id),
+                        )
             row = connection.execute(
                 "SELECT id FROM tasks WHERE lane = ? AND status NOT IN ('complete', 'failed', 'cancelled')",
                 (lane,),
