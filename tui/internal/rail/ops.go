@@ -1,10 +1,38 @@
-// agent-tui#14: the write path -- attach, detach, add and remove a tmux
-// session, entirely through internal/session.Interface (an MCP tools/call
-// each), never through tmux directly (see internal/session's own package
-// doc for why that is non-negotiable). Kept in its own file for the same
-// reason sessions.go is: model.go's non-write path (every pre-#14 test,
-// board.go's flat single-session render) stays a diff-free read, and
-// nothing there changes shape because of what is here.
+// agent-tui#14: the write path -- add and remove a tmux session, entirely
+// through internal/session.Interface (an MCP tools/call each), never
+// through tmux directly (see internal/session's own package doc for why
+// that is non-negotiable). Kept in its own file for the same reason
+// sessions.go is: model.go's non-write path (every pre-#14 test, board.go's
+// flat single-session render) stays a diff-free read, and nothing there
+// changes shape because of what is here.
+//
+// agent-tui#23: 'a'ttach and 'd'etach are deliberately NOT wired here,
+// though session.Interface still declares Attach/Detach and Ops still
+// implements them (agent-supervisor#165's session_attach/session_detach
+// tools exist and work). Live testing against a real mcp_server.py +
+// isolated tmux server (see the PR description for the transcript) found
+// that both tools operate on "the client attached to the invoking
+// process's own controlling terminal" -- but mcp_server.py's own stdio is
+// wired to pipes for JSON-RPC (internal/mcp.Client.Start), never a tty, so
+// it has no controlling terminal of its own and therefore no way to know
+// which tmux client issued the call. With exactly one client attached to
+// the whole tmux server, tmux's own "fall back to the only attached
+// client" heuristic happens to make this look like it works. With two or
+// more attached (an ordinary multi-terminal dev setup), the same call
+// reports success but silently moves tmux's own idea of "the most recently
+// active client" -- which is not reliably the one running agent-tui, and
+// there is no parameter on either tool to say which one is meant. That is
+// worse than the "silent no-op" this issue was filed about: it can attach
+// or detach a DIFFERENT terminal than the one the user pressed the key in,
+// while reporting success. Fixing it needs agent-supervisor to thread a
+// client identity through session_attach/session_detach and target it
+// explicitly (TmuxTransport.switch_client/detach_client currently never
+// pass -c/-t for a specific client) -- out of this repo's boundary, filed
+// as jonhill90/agent-supervisor#189. Until that lands, this package
+// declares the control unavailable rather than paint one that can silently
+// do the wrong thing: see TestAttachKeyIsNoLongerWired and
+// TestDetachKeyIsNoLongerWired below, and the footer text change in
+// renderOpsStatus.
 package rail
 
 import (
@@ -44,15 +72,6 @@ const (
 	opsModeConfirmRemove
 )
 
-type attachResultMsg struct {
-	session string
-	err     error
-}
-
-type detachResultMsg struct {
-	err error
-}
-
 type addResultMsg struct {
 	session string
 	result  session.AddResult
@@ -68,14 +87,6 @@ type removeCheckResultMsg struct {
 type removeResultMsg struct {
 	session string
 	err     error
-}
-
-func doAttach(ops session.Interface, target string) tea.Cmd {
-	return func() tea.Msg { return attachResultMsg{session: target, err: ops.Attach(target)} }
-}
-
-func doDetach(ops session.Interface) tea.Cmd {
-	return func() tea.Msg { return detachResultMsg{err: ops.Detach()} }
 }
 
 // doAdd never passes lanes/agent/cwd -- 'n' is deliberately the minimal
@@ -112,10 +123,11 @@ func doRemove(ops session.Interface, target string) tea.Cmd {
 }
 
 // selectedSessionName resolves the row under the cursor to a session name --
-// attach and remove both act on "whatever is selected", the same target
-// up/down already navigates. Returns ok == false when there is nothing
-// selectable (no sessions fetch wired, or an empty list), rather than
-// acting on a stale or zero-value name.
+// remove acts on "whatever is selected", the same target up/down already
+// navigates (agent-tui#23: attach used to share this too; it no longer
+// calls into ops at all -- see this file's package doc). Returns ok ==
+// false when there is nothing selectable (no sessions fetch wired, or an
+// empty list), rather than acting on a stale or zero-value name.
 func (m Model) selectedSessionName() (string, bool) {
 	if m.sessionsFetch == nil {
 		return "", false
@@ -162,19 +174,12 @@ func (m Model) handleOpsKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	}
 
 	switch msg.String() {
-	case "a":
-		target, ok := m.selectedSessionName()
-		if !ok {
-			return m, nil, true
-		}
-		m.opsMode = opsModeBusy
-		m.opsTarget = target
-		m.opsStatus = fmt.Sprintf("attaching to %s…", target)
-		return m, doAttach(m.ops, target), true
-	case "d":
-		m.opsMode = opsModeBusy
-		m.opsStatus = "detaching…"
-		return m, doDetach(m.ops), true
+	// agent-tui#23: 'a' and 'd' are deliberately absent here -- see this
+	// file's package doc comment. Falling through with handled == false
+	// (the final `return m, nil, false` below) means they behave exactly
+	// like any other unbound key: read-only switch below ignores them too
+	// (no lane list has an 'a' or 'd' binding), so pressing either is a
+	// true no-op, not a swallow.
 	case "n":
 		m.opsMode = opsModeAdding
 		m.opsInput = ""
@@ -253,28 +258,11 @@ func (m Model) handleConfirmRemoveKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	return m, nil, true
 }
 
-// handleOpsResult applies one of the five doXxx commands' results. Called
-// from model.go's Update for the matching message types.
+// handleOpsResult applies one of the three doXxx commands' results (agent-
+// tui#23: attach/detach no longer have one -- see this file's package doc).
+// Called from model.go's Update for the matching message types.
 func (m Model) handleOpsResult(msg tea.Msg) (Model, tea.Cmd) {
 	switch msg := msg.(type) {
-	case attachResultMsg:
-		m.opsMode = opsModeIdle
-		if msg.err != nil {
-			m.opsStatus = fmt.Sprintf("attach %s failed: %s", msg.session, msg.err)
-		} else {
-			m.opsStatus = fmt.Sprintf("attached to %s", msg.session)
-		}
-		return m, nil
-
-	case detachResultMsg:
-		m.opsMode = opsModeIdle
-		if msg.err != nil {
-			m.opsStatus = fmt.Sprintf("detach failed: %s", msg.err)
-		} else {
-			m.opsStatus = "detached"
-		}
-		return m, nil
-
 	case addResultMsg:
 		m.opsMode = opsModeIdle
 		m.opsInput = ""
@@ -332,7 +320,11 @@ func (m Model) renderOpsStatus(innerWidth int, st railStyles) []string {
 		return []string{st.legend.Width(innerWidth).Render(truncate(m.opsStatus, innerWidth))}
 	default:
 		if m.opsStatus == "" {
-			return []string{st.legend.Width(innerWidth).Render("[a]ttach [d]etach [n]ew [x]remove")}
+			// agent-tui#23: was "[a]ttach [d]etach [n]ew [x]remove" -- attach
+			// and detach are gone from this line for the same reason they are
+			// gone from handleOpsKey's switch above; see this file's package
+			// doc comment.
+			return []string{st.legend.Width(innerWidth).Render("[n]ew [x]remove")}
 		}
 		return []string{st.legend.Width(innerWidth).Render(truncate(m.opsStatus, innerWidth))}
 	}

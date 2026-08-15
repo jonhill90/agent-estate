@@ -406,11 +406,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.costFetched = time.Now()
 		return m, nil
 
-	// agent-tui#14: results of the four write operations. Each is produced
-	// by exactly one doXxx tea.Cmd in ops.go and handled there too, kept out
-	// of this switch's other cases so the write path's state machine lives
-	// in one file end to end.
-	case attachResultMsg, detachResultMsg, addResultMsg, removeCheckResultMsg, removeResultMsg:
+	// agent-tui#14: results of the write operations (agent-tui#23: attach
+	// and detach no longer produce one of these -- see ops.go's package doc
+	// comment). Each is produced by exactly one doXxx tea.Cmd in ops.go and
+	// handled there too, kept out of this switch's other cases so the write
+	// path's state machine lives in one file end to end.
+	case addResultMsg, removeCheckResultMsg, removeResultMsg:
 		return m.handleOpsResult(msg)
 	}
 	return m, nil

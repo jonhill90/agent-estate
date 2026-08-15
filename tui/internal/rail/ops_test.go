@@ -104,47 +104,72 @@ func TestPlainModelIgnoresOpsKeys(t *testing.T) {
 	}
 }
 
-// TestAttachCallsOpsWithSelectedSession is acceptance item 1's attach half.
-func TestAttachCallsOpsWithSelectedSession(t *testing.T) {
+// TestAttachKeyIsNoLongerWired is agent-tui#23's fix, driven the same way
+// TestAttachCallsOpsWithSelectedSession (this test's pre-#23 self) drove
+// 'a' -- through m.Update(), the real production dispatch entry point, not
+// a direct call to handleOpsKey or any lower handler. Live testing against
+// a real mcp_server.py and an isolated tmux server with more than one
+// client attached (see ops.go's package doc comment and the PR description
+// for the transcript) found that session_attach/session_detach silently
+// move an ARBITRARY tmux client -- not necessarily the one running
+// agent-tui -- because mcp_server.py's own stdio is piped for JSON-RPC and
+// has no controlling terminal to identify "the invoking client" with. That
+// is worse than the "does nothing" this issue was originally filed about,
+// so 'a' (and 'd', below) are no longer wired to ops at all: this asserts
+// the key press reaches Update() and produces neither a command nor a call
+// to the fake, i.e. a genuine no-op, not a swallow with a hidden side
+// effect.
+func TestAttachKeyIsNoLongerWired(t *testing.T) {
 	fake := &fakeOps{}
 	m := modelWithOps(fake)
 	m.selected = 1 // director, per threeSessions()
 
 	updated, cmd := m.Update(key("a"))
 	m = updated.(Model)
-	if cmd == nil {
-		t.Fatal("'a' issued no command")
-	}
-	result := cmd()
-	updated, _ = m.Update(result)
-	m = updated.(Model)
 
-	if len(fake.attachCalls) != 1 || fake.attachCalls[0] != "director" {
-		t.Fatalf("attachCalls = %+v, want [director]", fake.attachCalls)
+	if cmd != nil {
+		t.Fatal("'a' issued a command -- attach must not be wired (agent-tui#23)")
 	}
-	if !strings.Contains(m.View(), "attached to director") {
-		t.Errorf("View() did not report the attach:\n%s", m.View())
+	if len(fake.attachCalls) != 0 {
+		t.Fatalf("attachCalls = %+v, want none -- attach must not be wired (agent-tui#23)", fake.attachCalls)
+	}
+	if m.opsMode != opsModeIdle {
+		t.Fatalf("opsMode = %v, want idle -- 'a' must not start a busy op", m.opsMode)
 	}
 }
 
-// TestDetachCallsOpsWithNoTarget is acceptance item 1's detach half --
-// detach has no selection dependency at all (agent-tui#14: "leaves
-// everything running").
-func TestDetachCallsOpsWithNoTarget(t *testing.T) {
+// TestDetachKeyIsNoLongerWired is TestAttachKeyIsNoLongerWired's detach
+// half. See that test's comment and ops.go's package doc comment for why.
+func TestDetachKeyIsNoLongerWired(t *testing.T) {
 	fake := &fakeOps{}
 	m := modelWithOps(fake)
 
 	updated, cmd := m.Update(key("d"))
 	m = updated.(Model)
-	result := cmd()
-	updated, _ = m.Update(result)
-	m = updated.(Model)
 
-	if fake.detachCalls != 1 {
-		t.Fatalf("detachCalls = %d, want 1", fake.detachCalls)
+	if cmd != nil {
+		t.Fatal("'d' issued a command -- detach must not be wired (agent-tui#23)")
 	}
-	if !strings.Contains(m.View(), "detached") {
-		t.Errorf("View() did not report the detach:\n%s", m.View())
+	if fake.detachCalls != 0 {
+		t.Fatalf("detachCalls = %d, want 0 -- detach must not be wired (agent-tui#23)", fake.detachCalls)
+	}
+	if m.opsMode != opsModeIdle {
+		t.Fatalf("opsMode = %v, want idle -- 'd' must not start a busy op", m.opsMode)
+	}
+}
+
+// TestFooterNoLongerOffersAttachDetach is the rendered half of agent-tui#23:
+// "a painted control that cannot work is worse than an absent one, because
+// it reads as available" -- the footer must say so, not just the dispatch
+// table.
+func TestFooterNoLongerOffersAttachDetach(t *testing.T) {
+	m := modelWithOps(&fakeOps{})
+	out := m.View()
+	if strings.Contains(out, "[a]ttach") || strings.Contains(out, "[d]etach") {
+		t.Fatalf("View() still offers attach/detach -- agent-tui#23 removed both:\n%s", out)
+	}
+	if !strings.Contains(out, "[n]ew") || !strings.Contains(out, "[x]remove") {
+		t.Fatalf("View() lost [n]ew/[x]remove along with attach/detach -- want those to stay:\n%s", out)
 	}
 }
 
