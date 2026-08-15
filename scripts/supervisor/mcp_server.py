@@ -31,18 +31,32 @@ only one is PyYAML would cost more than the ~80 lines of protocol below.
 ## Cost
 
 Tool definitions are always-on context in every session that loads this
-server. Five tools -- `lanes`, `sessions`, `digest`, `ledger`, `events` --
-each wrapping an existing entry point. `--print-tools` emits the exact
+server. Ten tools -- the five read tools (`lanes`, `sessions`, `digest`,
+`ledger`, `events`), one more read (`session_remove_check`), and four writes
+(`session_attach`, `session_detach`, `session_add`, `session_remove`) -- each
+wrapping an existing entry point. `--print-tools` emits the exact
 `tools/list` payload so the cost is measurable rather than argued about; see
 the PR for the measurement.
 
 ## Write operations
 
-None are exposed. `supervisor_view.WRITE_SOURCES` documents what a write
-tool would need first (a caller identity, a blast-radius bound, an audit
-trail) and why none of it exists yet. `_tool_definitions` publishes
-`READ_SOURCES` only and refuses anything whose `mutates` is true, so the
-absence is enforced here rather than remembered.
+Four are exposed: `session_attach`, `session_detach`, `session_add`,
+`session_remove` (agent-tui#14). `supervisor_view.WRITE_SOURCES`'s own
+docstring is the authority on why these four are safe despite `dispatch`/
+`merge` staying excluded (no lane-claim race, every guard re-evaluated
+fresh at call time, blast radius bounded to one named session by exact
+name, `session_remove` logs to the ledger before it acts) -- read it there
+rather than here.
+
+What enforces that the surface published here matches that intent:
+`tool_definitions` publishes `view.describe()` -- both registries -- exactly
+as `SupervisorView` reports them, with no raise on `mutates` in this file at
+all. The check moved to `SupervisorView.__init__`, which asserts every
+`READ_SOURCES` source has `mutates is False` and every `WRITE_SOURCES`
+source has `mutates is True` and refuses to construct otherwise -- so a
+source registered in the wrong dict fails loudly at startup, before this
+file ever sees it, rather than this file having to re-derive the same
+check from a list it did not build.
 """
 
 from __future__ import annotations
@@ -93,24 +107,24 @@ def _json_schema(parameters):
 
 
 def tool_definitions(view):
-    """The `tools/list` payload.
+    """The `tools/list` payload -- `view.describe()`, translated to MCP shape.
 
-    Refuses to publish a mutating source. `WRITE_SOURCES` is empty today, so
-    this can only fire if someone later moves a write source into
-    `READ_SOURCES` -- which is exactly when a silent exposure would happen.
+    Publishes both registries verbatim, `mutates` included in the source
+    dict this reads from but not otherwise consulted here: the gate that
+    used to live in this function (raise on a mutating source, back when
+    `WRITE_SOURCES` was empty by design) moved to `SupervisorView.__init__`,
+    which now asserts the read/write split is honest before this function
+    ever runs. Trusting that assertion here, rather than re-deriving it, is
+    what keeps this file a pure transport with no safety logic of its own.
     """
-    tools = []
-    for source in view.describe():
-        if source["mutates"]:
-            raise ValueError(f"refusing to publish mutating source over MCP: {source['name']}")
-        tools.append(
-            {
-                "name": source["name"],
-                "description": source["summary"],
-                "inputSchema": _json_schema(source["parameters"]),
-            }
-        )
-    return tools
+    return [
+        {
+            "name": source["name"],
+            "description": source["summary"],
+            "inputSchema": _json_schema(source["parameters"]),
+        }
+        for source in view.describe()
+    ]
 
 
 class MCPServer:
@@ -167,7 +181,7 @@ class MCPServer:
         if not isinstance(arguments, dict):
             return self._error(message_id, INVALID_PARAMS, "arguments must be an object")
         try:
-            payload = self.view.read(name, **arguments)
+            payload = self.view.call(name, **arguments)
         except KeyError as error:
             # An unroutable tool name is a bad request, not a tool that ran
             # and failed -- it gets the protocol channel.
@@ -175,13 +189,14 @@ class MCPServer:
         except ValueError as error:
             return self._error(message_id, INVALID_PARAMS, str(error))
         except SupervisorUnavailable as error:
-            # The load-bearing case. The source ran and could not see; the
-            # client is told so in the channel it renders as a failure. It
-            # must never receive an empty payload here.
-            return self._result(message_id, self._content(f"supervisor read failed: {error}", is_error=True))
+            # The load-bearing case. The source ran and could not see (or, for
+            # a write, refused for a reason a guard evaluated); the client is
+            # told so in the channel it renders as a failure. It must never
+            # receive an empty payload here.
+            return self._result(message_id, self._content(f"supervisor call failed: {error}", is_error=True))
         except Exception as error:  # a source bug must still reach the client as a failure
             return self._result(
-                message_id, self._content(f"supervisor read raised {type(error).__name__}: {error}", is_error=True)
+                message_id, self._content(f"supervisor call raised {type(error).__name__}: {error}", is_error=True)
             )
         return self._result(message_id, self._content(json.dumps(payload, sort_keys=True)))
 

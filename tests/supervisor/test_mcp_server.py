@@ -15,7 +15,7 @@ from mcp_server import (  # noqa: E402
     MCPServer,
     tool_definitions,
 )
-from supervisor_view import ReadSource, SupervisorUnavailable, SupervisorView  # noqa: E402
+from supervisor_view import ReadSource, SupervisorUnavailable, SupervisorView, WriteSource  # noqa: E402
 
 
 class StubSource(ReadSource):
@@ -35,17 +35,29 @@ class StubSource(ReadSource):
         return self.payload
 
 
-class MutatingSource(ReadSource):
-    name = "dispatch"
-    summary = "sends work to a lane"
-    mutates = True
+class StubWriteSource(WriteSource):
+    name = "session_attach"
+    summary = "stub write"
+    parameters = ({"name": "session", "type": "string", "required": True, "help": "session"},)
 
-    def read(self, **arguments):
-        return {}
+    def __init__(self, payload=None, error=None):
+        self.payload = payload
+        self.error = error
+        self.calls = []
+
+    def write(self, **arguments):
+        self.calls.append(arguments)
+        if self.error is not None:
+            raise self.error
+        return self.payload
 
 
-def server_for(source):
-    return MCPServer(SupervisorView([source]), stdout=io.StringIO(), stderr=io.StringIO())
+def server_for(source, write_source=None):
+    return MCPServer(
+        SupervisorView([source], [write_source] if write_source is not None else []),
+        stdout=io.StringIO(),
+        stderr=io.StringIO(),
+    )
 
 
 def request(method, params=None, message_id=1):
@@ -107,16 +119,41 @@ class ToolListTest(unittest.TestCase):
         tools = tool_definitions(SupervisorView([Required({})]))
         self.assertEqual(["lane"], tools[0]["inputSchema"]["required"])
 
-    def test_refuses_to_publish_a_mutating_source(self):
-        """The write-tool gate is enforced here, not remembered. #198 asks for
-        reads first; this is what makes 'first' mean something."""
-        with self.assertRaises(ValueError) as caught:
-            tool_definitions(SupervisorView([MutatingSource()]))
-        self.assertIn("dispatch", str(caught.exception))
+    def test_publishes_a_registered_write_source_with_its_mutates_flag(self):
+        """The write-tool gate moved to `SupervisorView.__init__` -- this
+        file just publishes what construction already validated."""
+        tools = tool_definitions(SupervisorView([], [StubWriteSource({})]))
+        self.assertEqual(["session_attach"], [tool["name"] for tool in tools])
 
-    def test_the_real_surface_is_five_read_tools(self):
+    def test_a_misregistered_source_makes_construction_raise_before_publishing(self):
+        """agent-tui#14: a source whose `mutates` flag disagrees with which
+        registry it was built from must fail loudly at `SupervisorView`
+        construction, before `mcp_server.py` (or any transport) ever sees
+        it -- not be silently exposed over the wire."""
+
+        class Misregistered(ReadSource):
+            name = "dispatch"
+            mutates = True
+
+            def read(self, **arguments):
+                return {}
+
+        with self.assertRaises(ValueError):
+            SupervisorView([Misregistered()], [])
+
+    def test_the_real_surface_is_ten_tools_six_read_four_write(self):
         tools = tool_definitions(SupervisorView())
-        self.assertEqual(["lanes", "sessions", "digest", "ledger", "events"], [tool["name"] for tool in tools])
+        self.assertEqual(
+            [
+                "lanes", "sessions", "digest", "ledger", "events", "session_remove_check",
+                "session_attach", "session_detach", "session_add", "session_remove",
+            ],
+            [tool["name"] for tool in tools],
+        )
+        mutates_by_name = {tool["name"]: tool for tool in SupervisorView().describe()}
+        self.assertFalse(mutates_by_name["session_remove_check"]["mutates"])
+        for name in ("session_attach", "session_detach", "session_add", "session_remove"):
+            self.assertTrue(mutates_by_name[name]["mutates"], name)
 
 
 class ToolCallTest(unittest.TestCase):
@@ -130,6 +167,25 @@ class ToolCallTest(unittest.TestCase):
         source = StubSource({"lanes": [], "count": 0})
         server_for(source).handle(request("tools/call", {"name": "lanes", "arguments": {"session": "harness-lab"}}))
         self.assertEqual([{"session": "harness-lab"}], source.calls)
+
+    def test_a_write_tool_call_routes_through_view_call_to_write(self):
+        write_source = StubWriteSource({"session": "work", "attached": True})
+        server = server_for(StubSource({}), write_source)
+        result = server.handle(
+            request("tools/call", {"name": "session_attach", "arguments": {"session": "work"}})
+        )["result"]
+        self.assertFalse(result["isError"])
+        self.assertEqual({"session": "work", "attached": True}, json.loads(result["content"][0]["text"]))
+        self.assertEqual([{"session": "work"}], write_source.calls)
+
+    def test_a_refused_write_reaches_the_client_as_an_error_result(self):
+        write_source = StubWriteSource(error=SupervisorUnavailable("refuses to remove work: lane 'free-1' is busy"))
+        server = server_for(StubSource({}), write_source)
+        result = server.handle(
+            request("tools/call", {"name": "session_attach", "arguments": {"session": "work"}})
+        )["result"]
+        self.assertTrue(result["isError"])
+        self.assertIn("free-1", result["content"][0]["text"])
 
     def test_a_blind_source_is_an_error_result_not_an_empty_one(self):
         """The defect this whole module exists to prevent: a tool answering
@@ -216,9 +272,23 @@ class LiveSurfaceTest(unittest.TestCase):
         self.assertEqual(2, len(frames), process.stdout)
         self.assertEqual("supervisor", frames[0]["result"]["serverInfo"]["name"])
         self.assertEqual(
-            ["lanes", "sessions", "digest", "ledger", "events"],
+            [
+                "lanes", "sessions", "digest", "ledger", "events", "session_remove_check",
+                "session_attach", "session_detach", "session_add", "session_remove",
+            ],
             [tool["name"] for tool in frames[1]["result"]["tools"]],
         )
+
+    def test_session_remove_with_no_confirm_is_invalid_params(self):
+        """`session_remove` without `confirm=true` must reach the client on
+        the protocol channel (a caller bug), never as a guard refusal --
+        agent-tui#14's own distinction between the two failure channels."""
+        process = self.run_server(
+            [json.dumps(request("tools/call", {"name": "session_remove", "arguments": {"session": "work"}}, 1))]
+        )
+        response = json.loads(process.stdout.splitlines()[0])
+        self.assertEqual(-32602, response["error"]["code"])
+        self.assertIn("confirm", response["error"]["message"])
 
     def test_a_missing_session_surfaces_as_an_error_not_an_empty_lane_list(self):
         """End-to-end mutation check: point the tool at a tmux session that
@@ -240,7 +310,7 @@ class LiveSurfaceTest(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(0, process.returncode, process.stderr)
-        self.assertEqual(5, len(json.loads(process.stdout)["tools"]))
+        self.assertEqual(10, len(json.loads(process.stdout)["tools"]))
 
 
 if __name__ == "__main__":

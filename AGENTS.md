@@ -24,7 +24,9 @@ scripts/supervisor/          the system
   look.py                    let an agent SEE a pane: capture / png / navigate / frames
   termshot.py                ANSI-to-SVG rasteriser look.py's `png` renders through
   ui-evidence-gate.sh        CI check: a UI PR must carry a look.py frame
-  mcp_server.py              read surface over MCP
+  mcp_server.py              read surface over MCP, plus four guarded
+                             session-management writes (agent-tui#14)
+  session_guard.py           the one place session removal is judged safe
   watchdog.sh                liveness, from OUTSIDE the loop
   inbox-poll.sh              Telegram poller (a service, never a lane)
 tests/supervisor/            44 files; the suite is the contract

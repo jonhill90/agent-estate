@@ -1,19 +1,22 @@
 #!/bin/bash
 # Stub `cli.py status` for sessions.sh tests. sessions.sh calls
-# `<python> <cli> --state-dir <dir> status` and reads only the `lanes[].lane`
-# identities out of the result -- see SESSIONS_KNOWN in sessions.sh -- so
-# this prints just enough of the real shape to exercise that: lane ids of
-# the form `<session>:<index>`, which is what `cli.py register` actually
-# produces.
+# `<python> <cli> --state-dir <dir> status` and reads only the
+# `sessions[].session` identities out of the result -- see KNOWN_JSON in
+# sessions.sh -- so this prints just enough of the real shape to exercise
+# that: agent-supervisor#153's adopted-session rows, which is what
+# `cli.py adopt-session` (bootstrap-session.sh, at session creation) actually
+# writes and `ledger.list_sessions()` returns verbatim.
 #
 # CLI_SESSIONS_KNOWN, space separated, names which sessions this run of the
-# fixture claims to have a registered lane in.
+# fixture claims the ledger has ADOPTED -- regardless of whether any lane has
+# been dispatched into them, which is exactly the case #153 fixed and this
+# stub now proves: a session can appear here with zero lanes.
 cat <<JSON
-{"lanes": [$(
+{"lanes": [], "tasks": [], "sessions": [$(
   first=1
   for s in ${CLI_SESSIONS_KNOWN:-}; do
     [ "$first" -eq 1 ] && first=0 || printf ','
-    printf '{"lane": "%s:1"}' "$s"
+    printf '{"session": "%s"}' "$s"
   done
-)], "tasks": []}
+)]}
 JSON

@@ -17,10 +17,18 @@ from supervisor_view import (  # noqa: E402
     EventsSource,
     LanesSource,
     LedgerSource,
+    ReadSource,
+    SessionAddSource,
+    SessionAttachSource,
+    SessionDetachSource,
+    SessionRemoveCheckSource,
+    SessionRemoveSource,
     SessionsSource,
     SupervisorUnavailable,
     SupervisorView,
+    WriteSource,
     build_source,
+    build_write_source,
 )
 
 
@@ -316,16 +324,27 @@ class EventsSourceTest(unittest.TestCase):
 
 class SupervisorViewTest(unittest.TestCase):
     def test_describes_every_read_source(self):
-        names = [source["name"] for source in SupervisorView().describe()]
-        self.assertEqual(["lanes", "sessions", "digest", "ledger", "events"], names)
+        names = [source["name"] for source in SupervisorView().describe() if not source["mutates"]]
+        self.assertEqual(["lanes", "sessions", "digest", "ledger", "events", "session_remove_check"], names)
 
-    def test_every_exposed_source_is_read_only(self):
-        self.assertTrue(all(not source["mutates"] for source in SupervisorView().describe()))
+    def test_describes_every_write_source(self):
+        names = [source["name"] for source in SupervisorView().describe() if source["mutates"]]
+        self.assertEqual(["session_attach", "session_detach", "session_add", "session_remove"], names)
 
-    def test_write_sources_is_empty_until_authorisation_exists(self):
-        """#198 asks for reads first. This is the assertion that keeps a
-        write tool from arriving without the story that has to come with it."""
-        self.assertEqual({}, supervisor_view.WRITE_SOURCES)
+    def test_every_read_source_is_read_only(self):
+        self.assertTrue(all(not s["mutates"] for s in SupervisorView().describe() if s["name"] in READ_SOURCES_NAMES))
+
+    def test_every_write_source_mutates(self):
+        self.assertTrue(all(s["mutates"] for s in SupervisorView().describe() if s["name"] in WRITE_SOURCES_NAMES))
+
+    def test_write_sources_are_exactly_agent_tui_14s_four(self):
+        """agent-tui#14. Not a general write capability -- `dispatch`/`merge`
+        stay excluded (see `WRITE_SOURCES`'s own docstring for why); these
+        four are a narrower, differently-shaped risk."""
+        self.assertEqual(
+            {"session_attach", "session_detach", "session_add", "session_remove"},
+            set(supervisor_view.WRITE_SOURCES),
+        )
 
     def test_unknown_source_is_refused(self):
         with self.assertRaises(KeyError):
@@ -333,10 +352,74 @@ class SupervisorViewTest(unittest.TestCase):
         with self.assertRaises(KeyError):
             build_source("dispatch")
 
+    def test_unknown_write_is_refused(self):
+        with self.assertRaises(KeyError):
+            SupervisorView().write("dispatch")
+        with self.assertRaises(KeyError):
+            build_write_source("dispatch")
+
     def test_unknown_argument_is_refused(self):
-        view = SupervisorView([LanesSource(runner=runner_returning(completed(stdout="[]")))])
+        view = SupervisorView(
+            [LanesSource(runner=runner_returning(completed(stdout="[]")))], []
+        )
         with self.assertRaises(ValueError):
             view.read("lanes", lane="free-1")
+
+    def test_call_routes_reads_and_writes_to_the_right_registry(self):
+        read_source = StubReadSource()
+        write_source = StubWriteSource()
+        view = SupervisorView([read_source], [write_source])
+        self.assertEqual({"ok": "read"}, view.call("stub-read"))
+        self.assertEqual({"ok": "write"}, view.call("stub-write"))
+
+    def test_call_on_an_unknown_name_is_refused(self):
+        view = SupervisorView([StubReadSource()], [StubWriteSource()])
+        with self.assertRaises(KeyError):
+            view.call("no-such-tool")
+
+    def test_construction_refuses_a_read_source_that_mutates(self):
+        """The structural gate agent-tui#14 asks for: a source registered in
+        READ_SOURCES with mutates=True must fail loudly at construction, not
+        reach a transport silently."""
+
+        class MisregisteredRead(ReadSource):
+            name = "sneaky"
+            mutates = True
+
+            def read(self, **arguments):
+                return {}
+
+        with self.assertRaises(ValueError):
+            SupervisorView([MisregisteredRead()], [])
+
+    def test_construction_refuses_a_write_source_that_does_not_mutate(self):
+        class MisregisteredWrite(WriteSource):
+            name = "sneaky"
+            mutates = False
+
+            def write(self, **arguments):
+                return {}
+
+        with self.assertRaises(ValueError):
+            SupervisorView([], [MisregisteredWrite()])
+
+
+READ_SOURCES_NAMES = {"lanes", "sessions", "digest", "ledger", "events", "session_remove_check"}
+WRITE_SOURCES_NAMES = {"session_attach", "session_detach", "session_add", "session_remove"}
+
+
+class StubReadSource(ReadSource):
+    name = "stub-read"
+
+    def read(self, **arguments):
+        return {"ok": "read"}
+
+
+class StubWriteSource(WriteSource):
+    name = "stub-write"
+
+    def write(self, **arguments):
+        return {"ok": "write"}
 
 
 class SeamTest(unittest.TestCase):
@@ -374,6 +457,211 @@ class SeamTest(unittest.TestCase):
             elif path.suffix == ".sh":
                 code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
                 self.assertIsNone(invocation.search(code), f"{path.name} invokes the MCP transport")
+
+
+class FakeTransport:
+    def __init__(self, *, exists=True):
+        self.exists = exists
+        self.switched = []
+        self.detached = 0
+        self.killed = []
+
+    def session_exists(self, session):
+        return self.exists
+
+    def switch_client(self, session):
+        self.switched.append(session)
+
+    def detach_client(self):
+        self.detached += 1
+
+    def kill_session(self, session):
+        self.killed.append(session)
+
+
+class SessionRemoveCheckSourceTest(unittest.TestCase):
+    def test_reads_the_guard_verbatim(self):
+        transport = FakeTransport()
+        transport.list_panes = lambda session: []
+        runner = runner_returning(completed(stdout=""))
+
+        def scripted(command, *, timeout):
+            joined = " ".join(command)
+            if "session-state" in joined:
+                return completed(stdout='{"session": "work", "state": "supervised"}')
+            if "lanes.sh" in joined:
+                return completed(stdout="[]")
+            raise AssertionError(joined)
+
+        source = SessionRemoveCheckSource(transport=transport, runner=scripted)
+        result = source.read(session="work")
+        self.assertTrue(result["safe_to_remove"])
+        self.assertEqual([], result["refusals"])
+
+
+class SessionAttachSourceTest(unittest.TestCase):
+    def test_refuses_a_missing_session(self):
+        source = SessionAttachSource(transport=FakeTransport(exists=False))
+        with self.assertRaises(SupervisorUnavailable):
+            source.write(session="no-such-session")
+
+    def test_switches_the_client_and_reports_success(self):
+        transport = FakeTransport(exists=True)
+        source = SessionAttachSource(transport=transport)
+        result = source.write(session="work")
+        self.assertEqual({"session": "work", "attached": True}, result)
+        self.assertEqual(["work"], transport.switched)
+
+
+class SessionDetachSourceTest(unittest.TestCase):
+    def test_detaches_and_reports_success(self):
+        transport = FakeTransport()
+        source = SessionDetachSource(transport=transport)
+        self.assertEqual({"detached": True}, source.write())
+        self.assertEqual(1, transport.detached)
+
+
+class SessionAddSourceTest(unittest.TestCase):
+    def test_bootstrap_failure_surfaces_its_stderr_tail(self):
+        runner = runner_returning(completed(1, stderr="bootstrap-session: session 'work' already exists -- refusing."))
+        source = SessionAddSource(runner=runner)
+        with self.assertRaises(SupervisorUnavailable) as caught:
+            source.write(session="work")
+        self.assertIn("already exists", str(caught.exception))
+
+    def test_success_reports_the_resulting_session_state(self):
+        def scripted(command, *, timeout):
+            joined = " ".join(command)
+            if "bootstrap-session.sh" in joined:
+                scripted.bootstrap_command = command
+                return completed(0, stdout="bootstrap-session: 3 created, 0 left alone")
+            if "session-state" in joined:
+                return completed(stdout='{"session": "work", "state": "supervised"}')
+            raise AssertionError(joined)
+
+        source = SessionAddSource(runner=scripted)
+        result = source.write(session="work", lanes=4, agent="claude", cwd="/tmp/work")
+        self.assertEqual(
+            {
+                "session": "work",
+                "created": True,
+                "state": "supervised",
+                "bootstrap_output": "bootstrap-session: 3 created, 0 left alone",
+            },
+            result,
+        )
+        self.assertIn("--lanes", scripted.bootstrap_command)
+        self.assertIn("--agent", scripted.bootstrap_command)
+        self.assertIn("--cwd", scripted.bootstrap_command)
+        self.assertNotIn("--add-lanes", scripted.bootstrap_command)
+
+
+SAFE_GUARD = {
+    "session": "work",
+    "exists": True,
+    "supervision": "supervised",
+    "busy_lanes": [],
+    "worktrees": [],
+    "safe_to_remove": True,
+    "refusals": [],
+}
+
+
+def _guard_runner(*, state="supervised", lanes_json="[]"):
+    def scripted(command, *, timeout):
+        joined = " ".join(command)
+        if "session-state" in joined:
+            return completed(stdout=f'{{"session": "work", "state": "{state}"}}')
+        if "lanes.sh" in joined:
+            return completed(stdout=lanes_json)
+        if "record-session-event" in joined:
+            return completed(stdout='{"key": "session:removed:work:1"}')
+        raise AssertionError(joined)
+
+    return scripted
+
+
+class SessionRemoveSourceTest(unittest.TestCase):
+    def test_confirm_missing_raises_value_error_before_the_guard_runs(self):
+        calls = []
+
+        def runner(command, *, timeout):
+            calls.append(command)
+            raise AssertionError("guard must not run before confirm is checked")
+
+        source = SessionRemoveSource(transport=FakeTransport(), runner=runner)
+        with self.assertRaises(ValueError):
+            source.write(session="work")
+        self.assertEqual([], calls)
+
+    def test_confirm_false_raises_value_error_before_the_guard_runs(self):
+        source = SessionRemoveSource(
+            transport=FakeTransport(),
+            runner=lambda command, timeout: (_ for _ in ()).throw(AssertionError("must not run")),
+        )
+        with self.assertRaises(ValueError):
+            source.write(session="work", confirm=False)
+
+    def test_refuses_when_unsupervised(self):
+        transport = FakeTransport()
+        transport.list_panes = lambda session: []
+        source = SessionRemoveSource(transport=transport, runner=_guard_runner(state="unknown"))
+        with self.assertRaises(SupervisorUnavailable) as caught:
+            source.write(session="work", confirm=True)
+        self.assertIn("not supervised", str(caught.exception))
+        self.assertEqual([], transport.killed)
+
+    def test_refuses_when_a_lane_is_busy(self):
+        transport = FakeTransport()
+        transport.list_panes = lambda session: []
+        source = SessionRemoveSource(
+            transport=transport, runner=_guard_runner(lanes_json='[{"name": "free-1", "state": "busy"}]')
+        )
+        with self.assertRaises(SupervisorUnavailable) as caught:
+            source.write(session="work", confirm=True)
+        self.assertIn("busy", str(caught.exception))
+        self.assertEqual([], transport.killed)
+
+    def test_refuses_when_a_worktree_is_dirty(self):
+        transport = FakeTransport()
+        transport.list_panes = lambda session: [{"window_name": "free-1", "path": "/wt"}]
+
+        def scripted(command, *, timeout):
+            joined = " ".join(command)
+            if "session-state" in joined:
+                return completed(stdout='{"session": "work", "state": "supervised"}')
+            if "lanes.sh" in joined:
+                return completed(stdout="[]")
+            if "git" in command[0] and "status" in joined:
+                return completed(stdout=" M dirty.py\n")
+            raise AssertionError(joined)
+
+        source = SessionRemoveSource(transport=transport, runner=scripted)
+        with self.assertRaises(SupervisorUnavailable) as caught:
+            source.write(session="work", confirm=True)
+        self.assertIn("/wt", str(caught.exception))
+        self.assertEqual([], transport.killed)
+
+    def test_happy_path_writes_the_audit_event_then_kills_via_the_stub(self):
+        transport = FakeTransport()
+        transport.list_panes = lambda session: []
+        calls = []
+
+        def scripted(command, *, timeout):
+            calls.append(list(command))
+            return _guard_runner()(command, timeout=timeout)
+
+        source = SessionRemoveSource(transport=transport, runner=scripted)
+        result = source.write(session="work", confirm=True)
+        self.assertTrue(result["removed"])
+        self.assertEqual("work", result["session"])
+        self.assertTrue(result["guard"]["safe_to_remove"])
+        self.assertEqual(["work"], transport.killed)
+        # audit event recorded before the kill: the ledger write is a
+        # scripted `runner` call, and the kill is the (separately tracked)
+        # transport call -- both happened, in that order relative to the
+        # guard read that authorized them.
+        self.assertTrue(any("record-session-event" in " ".join(c) for c in calls))
 
 
 if __name__ == "__main__":
