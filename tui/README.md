@@ -11,6 +11,19 @@ Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
 ## Status
 
+**24 shipped: glyph sets 1 (Signal) and 5 (Nerd Font) are the keepers.**
+Jon judged all five variants from the running rail, not the gallery, and
+the verdict was to drop `ascii`, `blocks` and `emoji` outright rather than
+merely deprioritise them -- see `internal/lane/variants.go`'s doc comment
+on `Variants` for the recorded verdict and the reasoning against a
+"deprioritised but still on the cycler" half-measure. The `[1-N]` glyph
+picker's label is derived from `len(lane.Variants)`, so it now reads
+`glyphs 1/2` on its own, with no special-casing needed to keep it honest.
+Nerd Font flagging (agent-tui#11/#16's gallery) is untouched by this --
+`internal/lane/gallery.go`'s `Classify` and `Candidates` don't enumerate
+`Variants` by name, so the `[NF]` flag on the Nerd Font set's glyphs
+still applies exactly as before. See "The glyph picker" below.
+
 **25 shipped: themes, per-user and switchable at runtime.** #27 (below)
 already landed the per-user, persisted half of this issue -- role-based
 colours, `theme.Load`'s config file, and the honest-failure notice were
@@ -154,19 +167,28 @@ hop to a remote supervisor).
 
 ### The glyph picker
 
-Press **1-4** while it's running to switch the state glyph set live, against
+Press **1-2** while it's running to switch the state glyph set live, against
 whatever lanes are actually up — never a mock. This is the one open design
 question this drop answers by letting Jon cycle it himself rather than
 asking in prose (agent-supervisor#107's addendum). Rail width, theme and
 density all keep their defaults this round; the glyph set is the only
 variable.
 
+**24: down to the two keepers.** Jon judged all five variants from the
+running rail, not the gallery, and the verdict was Signal (already the
+recorded default) and the Nerd Font set — drop the rest, don't just
+deprioritise them. `ascii`, `blocks` and `emoji` did their job as
+comparison points at the moment of judging and are deleted outright, not
+merely unlisted, so nothing can silently re-wire them back onto the cycler
+(see `internal/lane/variants.go` for the verdict recorded in code). The
+picker's own label makes this honest for free — it's `fmt.Sprintf("glyphs
+%d/%d", ...)` against `len(lane.Variants)`, so a two-entry slice reads
+`1/2`, never a stale `1/5`.
+
 | # | id | what it looks like |
 |---|----|---------------------|
 | 1 (default) | `signal` | braille spinner, glitch on `hung`/`broken`, pulse on waiting |
-| 2 | `ascii` | plain ASCII only — safe over any terminal, font or SSH hop |
-| 3 | `blocks` | unicode block elements — solid reads filled, hollow reads empty |
-| 4 | `emoji` | color emoji, the only set where `menu-blocked` and `text-blocked` get visually distinct glyphs, not just distinct labels |
+| 2 | `nerd` | Font Awesome icons via a patched Nerd Font's Private Use Area glyphs — flagged `[NF]` in the gallery (#11) since a PUA codepoint is tofu without that font |
 
 Every variant renders all thirteen `lanes.sh` states, `stale`/`menu-blocked`/
 `unsent`/`scrolled` included — a variant that can't is not a candidate, and
@@ -177,9 +199,9 @@ own `state=` assignments rather than letting it drift unnoticed the way it
 did before [agent-tui#3](https://github.com/jonhill90/agent-tui/issues/3).
 **The set itself is data, not code:** `internal/lane/variants.go`
 is a `[]GlyphSet` literal and nothing reads a variant's ID anywhere else, so
-adding a fifth candidate or deleting one Jon dislikes is a one-line change
+adding a candidate or deleting one Jon dislikes is a one-line change
 to that slice — see `internal/lane/glyph.go` for the shape (`Motion`,
-`Style`, `GlyphSet`) and `internal/lane/variants.go` for the four shipped
+`Style`, `GlyphSet`) and `internal/lane/variants.go` for the two shipped
 today.
 
 Run in a narrow tmux pane (~24-32 cols) beside a terminal pane — the rail is

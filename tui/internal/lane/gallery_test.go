@@ -87,7 +87,9 @@ func TestClassifyNerdSetGlyphsRequireNerdFont(t *testing.T) {
 }
 
 func TestClassifyShippedNonNerdGlyphsAreCommon(t *testing.T) {
-	for _, set := range []GlyphSet{signalSet, asciiSet, blocksSet} {
+	// signal is the only remaining non-Nerd-Font shipped variant --
+	// agent-tui#24 dropped ascii and blocks, which made this same claim.
+	for _, set := range []GlyphSet{signalSet} {
 		for state, style := range set.Styles {
 			for _, frame := range style.Frames {
 				if got := Classify(frame); got != RenderCommon {
@@ -98,14 +100,15 @@ func TestClassifyShippedNonNerdGlyphsAreCommon(t *testing.T) {
 	}
 }
 
-func TestClassifyEmojiSetFlagsFallback(t *testing.T) {
-	// Not every emojiSet glyph is in the emoji ranges Classify checks (e.g.
-	// a plain "." for service/supervisor) -- this only asserts that at
-	// least the unambiguous ones (a colour emoji like the moon phases or
-	// the skull) are flagged, not that every single frame is.
-	style := emojiSet.Styles["stale"]
-	if got := Classify(style.Frames[0]); got != RenderEmojiFallback {
-		t.Errorf("Classify(emojiSet[stale] = %q) = %v, want RenderEmojiFallback", style.Frames[0], got)
+func TestClassifyFlagsColorEmojiFallback(t *testing.T) {
+	// Not every emoji-range glyph is unambiguous (e.g. a plain "." would be
+	// used for service/supervisor) -- this only asserts that an
+	// unambiguous one (a supplementary-plane pictograph, here the skull
+	// the dropped agent-tui#24 emoji set used for "stale") is flagged.
+	// Literal rather than referencing that set, which no longer exists.
+	skull := "\U0001F480"
+	if got := Classify(skull); got != RenderEmojiFallback {
+		t.Errorf("Classify(colour skull %q) = %v, want RenderEmojiFallback", skull, got)
 	}
 }
 

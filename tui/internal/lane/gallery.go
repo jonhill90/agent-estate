@@ -23,9 +23,10 @@ type Renderability int
 
 const (
 	// RenderCommon is ASCII or Unicode already shipped in a non-Nerd-Font
-	// Variant (signal/ascii/blocks) -- if it weren't renderable, the rail
-	// Jon already uses would already be showing tofu, which nothing has
-	// reported.
+	// Variant (signal, today's only one -- ascii and blocks made the same
+	// claim before agent-tui#24 dropped them) -- if it weren't renderable,
+	// the rail Jon already uses would already be showing tofu, which
+	// nothing has reported.
 	RenderCommon Renderability = iota
 	// RenderEmojiFallback depends on the terminal's own emoji/colour-font
 	// fallback rather than the monospace font in use -- usually fine on a
@@ -91,8 +92,9 @@ func isPUA(r rune) bool {
 // phases, the skull, the wrench -- U+1F300 and up has no BMP "plain text"
 // meaning at all), or VARIATION SELECTOR-16, which is Unicode's own,
 // unambiguous instruction to render the PRECEDING character as a color
-// emoji rather than plain text (this is what turns emojiSet's warning sign
-// into the glyph Jon actually sees, not the plain "⚠" alone).
+// emoji rather than plain text (this is what turned the emoji set's
+// warning sign, before agent-tui#24 dropped that set, into the glyph Jon
+// actually saw, not the plain "⚠" alone).
 //
 // Deliberately does NOT flag the general Dingbats/Misc-Symbols block
 // (U+2600-27BF) on its own: signalSet's own "✕" (U+2715, plain
@@ -126,7 +128,7 @@ var Candidates = []Candidate{
 	{State: "free", Glyph: "\uf192", Note: "fa-dot-circle-o -- hollow-ring alternative to nerdSet's filled fa-circle"},
 	{State: "busy", Glyph: "\uf110", Note: "fa-spinner -- a dedicated spinner glyph instead of nerdSet's fa-refresh"},
 	{State: "dead", Glyph: "\uf05e", Note: "fa-ban -- a slashed circle, reads more like 'stopped' than fa-times's X"},
-	{State: "stale", Glyph: "☠", Note: "SKULL AND CROSSBONES U+2620 -- a plain-text alternative to emojiSet's colour skull (U+1F480), same meaning without needing an emoji font"},
+	{State: "stale", Glyph: "☠", Note: "SKULL AND CROSSBONES U+2620 -- a plain-text alternative to the emoji set's colour skull (U+1F480, that set dropped by agent-tui#24), same meaning without needing an emoji font"},
 	{State: "broken", Glyph: "\uf12a", Note: "fa-exclamation -- a plainer alternative to nerdSet's fa-bug for 'broken'"},
 	{State: "hung", Glyph: "\u26d4", Note: "NO ENTRY sign U+26D4 -- common Unicode, not Nerd-Font-gated, unlike nerdSet's fa-exclamation-triangle"},
 	{State: "unknown", Glyph: "\uf128", Note: "fa-question (nerdSet's own Unmapped glyph) shown here as a named candidate for 'unknown' itself"},

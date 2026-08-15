@@ -14,7 +14,19 @@ import "fmt"
 //
 // Variants[0] is the DEFAULT: what renders with no selection made, per the
 // addendum's "he must be able to say nothing and still get something sane."
-var Variants = []GlyphSet{signalSet, asciiSet, blocksSet, emojiSet, nerdSet}
+//
+// agent-tui#24: Jon judged all five from the running rail, not the gallery,
+// and the verdict is DROP, not deprioritise. Signal (was set 1) and the
+// Nerd Font set (was set 5) are the keepers; ascii, blocks and emoji did
+// their job as comparison points at the moment of judging and are now cost,
+// not option. They are deleted outright -- not left defined and merely
+// unlisted here -- because a set still in the source but off this slice is
+// still a variant someone can silently re-wire back onto the cycler, and
+// "deleting one costs a line" (this file's own framing, above) means
+// deleting the line, not commenting it out. This verdict is recorded so a
+// future pass does not re-propose the dropped sets on aesthetic grounds;
+// re-open agent-tui#24 if that judgment ever needs revisiting.
+var Variants = []GlyphSet{signalSet, nerdSet}
 
 // Default is Variants[0], named for callers that want it without indexing.
 var Default = Variants[0]
@@ -56,56 +68,9 @@ var signalSet = GlyphSet{
 	},
 }
 
-// -- ascii: portable -- no unicode assumed beyond the box border, safe over
-// any terminal/font/SSH hop --
-
-var asciiSet = GlyphSet{
-	ID:          "ascii",
-	Name:        "ASCII",
-	Description: "plain ASCII only, for terminals or fonts unicode can't be assumed on",
-	Unmapped:    Style{Motion: MotionGlitch, Frames: []string{"%", " "}, Color: "#ff00ff", Label: ""},
-	Styles: map[string]Style{
-		"free":         {Motion: MotionStill, Frames: []string{"o"}, Color: "#4caf50", Label: "free"},
-		"busy":         {Motion: MotionSpin, Frames: []string{"|", "/", "-", "\\"}, Color: "#4aa3ff", Label: "busy"},
-		"hung":         {Motion: MotionGlitch, Frames: []string{"#", " "}, Color: "#ff5555", Label: "hung"},
-		"dead":         {Motion: MotionStill, Frames: []string{"x"}, Color: "#777777", Label: "dead"},
-		"stale":        {Motion: MotionPulse, Frames: []string{"x", "."}, Color: "#cc3333", Label: "stale"},
-		"broken":       {Motion: MotionGlitch, Frames: []string{"!", " "}, Color: "#ff8800", Label: "broken"},
-		"menu-blocked": {Motion: MotionPulse, Frames: []string{"?", "."}, Color: "#e0c34c", Label: "menu-blocked"},
-		"text-blocked": {Motion: MotionPulse, Frames: []string{"?", "."}, Color: "#e0c34c", Label: "text-blocked"},
-		"unsent":       {Motion: MotionPulse, Frames: []string{"~", "-"}, Color: "#e0a94c", Label: "unsent"},
-		"scrolled":     {Motion: MotionBounce, Frames: []string{"^", "|", "v", "|"}, Color: "#7fa8ff", Label: "scrolled"},
-		"service":      {Motion: MotionStill, Frames: []string{"."}, Color: "#555555", Label: "service"},
-		"supervisor":   {Motion: MotionStill, Frames: []string{"."}, Color: "#555555", Label: "supervisor"},
-		"never-busy":   {Motion: MotionPulse, Frames: []string{"Z", "."}, Color: "#ff6b6b", Label: "never-busy"},
-		"unknown":      {Motion: MotionStill, Frames: []string{"?"}, Color: "#999999", Label: "unknown"},
-	},
-}
-
-// -- blocks: unicode block elements -- solid/hollow reads as filled/empty --
-
-var blocksSet = GlyphSet{
-	ID:          "blocks",
-	Name:        "Blocks",
-	Description: "unicode block elements -- solid reads filled, hollow reads empty",
-	Unmapped:    Style{Motion: MotionGlitch, Frames: []string{"▚", "▞"}, Color: "#ff00ff", Label: ""},
-	Styles: map[string]Style{
-		"free":         {Motion: MotionStill, Frames: []string{"█"}, Color: "#4caf50", Label: "free"},
-		"busy":         {Motion: MotionSpin, Frames: []string{"▖", "▘", "▝", "▗"}, Color: "#4aa3ff", Label: "busy"},
-		"hung":         {Motion: MotionGlitch, Frames: []string{"█", "░"}, Color: "#ff5555", Label: "hung"},
-		"dead":         {Motion: MotionStill, Frames: []string{"░"}, Color: "#777777", Label: "dead"},
-		"stale":        {Motion: MotionPulse, Frames: []string{"▒", "░"}, Color: "#cc3333", Label: "stale"},
-		"broken":       {Motion: MotionGlitch, Frames: []string{"▓", " "}, Color: "#ff8800", Label: "broken"},
-		"menu-blocked": {Motion: MotionPulse, Frames: []string{"▨", "▧"}, Color: "#e0c34c", Label: "menu-blocked"},
-		"text-blocked": {Motion: MotionPulse, Frames: []string{"▧", "▨"}, Color: "#e0c34c", Label: "text-blocked"},
-		"unsent":       {Motion: MotionPulse, Frames: []string{"▮", "▯"}, Color: "#e0a94c", Label: "unsent"},
-		"scrolled":     {Motion: MotionBounce, Frames: []string{"▲", "▬", "▼", "▬"}, Color: "#7fa8ff", Label: "scrolled"},
-		"service":      {Motion: MotionStill, Frames: []string{"▪"}, Color: "#555555", Label: "service"},
-		"supervisor":   {Motion: MotionStill, Frames: []string{"▪"}, Color: "#555555", Label: "supervisor"},
-		"never-busy":   {Motion: MotionPulse, Frames: []string{"▤", "▥"}, Color: "#ff6b6b", Label: "never-busy"},
-		"unknown":      {Motion: MotionStill, Frames: []string{"▯"}, Color: "#999999", Label: "unknown"},
-	},
-}
+// ascii and blocks (agent-tui#11's other two comparison sets) were dropped
+// by agent-tui#24 alongside emoji, below -- see the verdict recorded on
+// Variants, above.
 
 // -- nerd: Private Use Area icons from a patched Nerd Font (agent-tui#11).
 // Codepoints are Font Awesome glyphs as mapped by the Nerd Fonts project --
@@ -151,29 +116,8 @@ var nerdSet = GlyphSet{
 	},
 }
 
-// -- emoji: expressive, color-carrying glyphs; also the only variant where
-// menu-blocked and text-blocked get visually distinct (not just labeled)
-// glyphs --
-
-var emojiSet = GlyphSet{
-	ID:          "emoji",
-	Name:        "Emoji",
-	Description: "color emoji glyphs, menu-blocked and text-blocked visually distinct",
-	Unmapped:    Style{Motion: MotionGlitch, Frames: []string{"❔", " "}, Color: "#ff00ff", Label: ""},
-	Styles: map[string]Style{
-		"free":         {Motion: MotionStill, Frames: []string{"🟢"}, Color: "#4caf50", Label: "free"},
-		"busy":         {Motion: MotionSpin, Frames: []string{"🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"}, Color: "#4aa3ff", Label: "busy"},
-		"hung":         {Motion: MotionGlitch, Frames: []string{"⚠️", " "}, Color: "#ff5555", Label: "hung"},
-		"dead":         {Motion: MotionStill, Frames: []string{"⬛"}, Color: "#777777", Label: "dead"},
-		"stale":        {Motion: MotionPulse, Frames: []string{"💀", "·"}, Color: "#cc3333", Label: "stale"},
-		"broken":       {Motion: MotionGlitch, Frames: []string{"💥", " "}, Color: "#ff8800", Label: "broken"},
-		"menu-blocked": {Motion: MotionPulse, Frames: []string{"⏸️", "·"}, Color: "#e0c34c", Label: "menu-blocked"},
-		"text-blocked": {Motion: MotionPulse, Frames: []string{"⌨️", "·"}, Color: "#e0c34c", Label: "text-blocked"},
-		"unsent":       {Motion: MotionPulse, Frames: []string{"✉️", "·"}, Color: "#e0a94c", Label: "unsent"},
-		"scrolled":     {Motion: MotionBounce, Frames: []string{"⬆️", "↕️", "⬇️", "↕️"}, Color: "#7fa8ff", Label: "scrolled"},
-		"service":      {Motion: MotionStill, Frames: []string{"⚙️"}, Color: "#555555", Label: "service"},
-		"supervisor":   {Motion: MotionStill, Frames: []string{"🛠️"}, Color: "#555555", Label: "supervisor"},
-		"never-busy":   {Motion: MotionPulse, Frames: []string{"⏳", "·"}, Color: "#ff6b6b", Label: "never-busy"},
-		"unknown":      {Motion: MotionStill, Frames: []string{"❓"}, Color: "#999999", Label: "unknown"},
-	},
-}
+// emoji (agent-tui#11's fourth comparison set -- expressive, color-carrying
+// glyphs, the only one where menu-blocked and text-blocked got visually
+// distinct glyphs rather than just distinct labels) was dropped by
+// agent-tui#24 alongside ascii and blocks, above -- see the verdict
+// recorded on Variants.

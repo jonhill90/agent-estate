@@ -20,10 +20,10 @@ func TestDigitKeySelectsGlyphSet(t *testing.T) {
 		t.Fatalf("default glyphSet must be 0 (lane.Default) with no selection made, got %d", m.glyphSet)
 	}
 
-	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("3")})
+	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("2")})
 	m = updated.(Model)
-	if m.glyphSet != 2 {
-		t.Fatalf("pressing '3' should select lane.Variants[2], got glyphSet=%d", m.glyphSet)
+	if m.glyphSet != 1 {
+		t.Fatalf("pressing '2' should select lane.Variants[1], got glyphSet=%d", m.glyphSet)
 	}
 }
 
