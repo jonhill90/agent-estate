@@ -888,5 +888,29 @@ fi
 rm -f "$MUTANT92"
 trap - EXIT
 
+# PR #149 review (agent-supervisor#112/as#149): agent-tui's cross-repo guard
+# (states_lanessh_test.go, TestAllStatesCoversLanesShStates) parses THIS
+# file's own state= assignments with a regex requiring a bareword right
+# after `state=` -- `(?:^|[;\s])state=([A-Za-z][A-Za-z0-9_-]*)`. The first
+# draft of never-busy assigned via command substitution,
+# `state=$(never_busy_or_unknown "$age")`, which that regex cannot see at
+# all: it returns [] for those two lines, so the guard would stay green
+# with never-busy (and, worse, the unknown it replaced) invisible to it --
+# a silent pass, not a loud failure. Reproduce the guard's own regex here so
+# a future command-substitution state= regresses this locally, without
+# depending on a second repo to notice.
+STATE_ASSIGN_RE='(^|[;[:space:]])state=([A-Za-z][A-Za-z0-9_-]*)'
+assigned_states=$(grep -oE "$STATE_ASSIGN_RE" "$LANES" | sed -E "s/$STATE_ASSIGN_RE/\\2/")
+if grep -q '^never-busy$' <<<"$assigned_states" && grep -q '^unknown$' <<<"$assigned_states"; then
+  echo "  ok   every never-busy/unknown assignment in lanes.sh is a bareword agent-tui's guard regex can see"; pass=$((pass+1));
+else
+  echo "  FAIL a state=\$(...) (or other non-bareword) assignment made never-busy or unknown invisible to agent-tui's guard regex. Assignments seen:"; sed 's/^/       /' <<<"$assigned_states"; fail=$((fail+1));
+fi
+if grep -vE '^[[:space:]]*#' "$LANES" | grep -qE 'state=\$\('; then
+  echo "  FAIL lanes.sh assigns state via command substitution (state=\$(...)) -- that shape defeats agent-tui's bareword guard regex even when the value happens to match"; fail=$((fail+1));
+else
+  echo "  ok   no state=\$(...) assignment in lanes.sh (comments referencing the retired shape don't count)"; pass=$((pass+1));
+fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

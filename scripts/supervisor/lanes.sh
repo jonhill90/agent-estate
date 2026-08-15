@@ -30,7 +30,7 @@
 # worker capacity in total silence. `unknown`'s ordinary case clears within a
 # tick or two; a pane that has gone NEVER_BUSY_AFTER seconds with no repaint
 # at all, still unrecognised, has done nothing since the window came up. See
-# NEVER_BUSY_AFTER and never_busy_or_unknown below for the measurement, and
+# NEVER_BUSY_AFTER and is_never_busy below for the measurement, and
 # watchdog.sh for how it reaches a human -- deliberately time-based, not a
 # new dialog shape to pattern-match: #164 already spent one incident proving
 # that a marker widened without a real capture is a guess.
@@ -320,13 +320,17 @@ pane_has_live_children() {
 # caller that greps this file's output for `unknown` today keeps matching
 # every lane it matched before; the four-hour case in #112 simply stops
 # being one of them.
-never_busy_or_unknown() {
+# as#149: this used to print the state itself (`state=$(never_busy_or_unknown
+# "$age")`), which is a command substitution, not a bareword after `state=`.
+# agent-tui's cross-repo guard (`states_lanessh_test.go`) parses this file
+# with a regex that requires a literal `state=<word>` -- command substitution
+# returns [] to that parser, so the guard would stay green without ever
+# learning `never-busy` exists, the exact silent-pass failure it exists to
+# catch. Keep this helper for the age decision only; callers assign the
+# literal state themselves so every emitted state stays statically greppable.
+is_never_busy() {
   local age="$1"
-  if [ "$age" -ge "$NEVER_BUSY_AFTER" ]; then
-    printf 'never-busy\n'
-  else
-    printf 'unknown\n'
-  fi
+  [ "$age" -ge "$NEVER_BUSY_AFTER" ]
 }
 
 now_epoch=$(date +%s)
@@ -472,9 +476,13 @@ emit_rows() {
       # #112: this branch cannot even name a harness, so it is the least
       # informed classification in the file -- and it is exactly where a
       # lane can sit silently the longest, since no adapter is watching for
-      # ANY shape here, recognised or not. never_busy_or_unknown below is
-      # the one narrowing that applies to it.
-      state=$(never_busy_or_unknown "$age")
+      # ANY shape here, recognised or not. is_never_busy below is the one
+      # narrowing that applies to it.
+      if is_never_busy "$age"; then
+        state=never-busy
+      else
+        state=unknown
+      fi
     elif { [ -n "${H_BLOCKED_MARKERS[$hidx]}" ] && grep -qE "${H_BLOCKED_MARKERS[$hidx]}" <<<"$pane"; } \
       || { [ -n "${H_OPTION_ROW_RE[$hidx]}" ] && grep -qE "${H_OPTION_ROW_RE[$hidx]}" <<<"$pane"; }; then
       # An interactive prompt, not idle: the agent is waiting on a human, not
@@ -553,11 +561,15 @@ emit_rows() {
       #
       # #112: THIS is the branch the four-hour incident actually fell into --
       # a recognised harness (claude.exe) whose first-run dialog matched none
-      # of ready/busy/blocked. never_busy_or_unknown narrows it exactly as it
+      # of ready/busy/blocked. is_never_busy narrows it exactly as it
       # narrowed the no-adapter branch above: a pane this old that has never
       # painted a recognised shape has not merely dodged the whitelist, it
       # has not done anything since it came up.
-      state=$(never_busy_or_unknown "$age")
+      if is_never_busy "$age"; then
+        state=never-busy
+      else
+        state=unknown
+      fi
     fi
     # #241 appends the window id as a FIFTH column rather than inserting it,
     # so every awk expression below keeps the field numbers it already had.
