@@ -473,21 +473,10 @@ author_lane_for() {
 # window.
 PR_JSON="[]"
 for repo in $REPOS; do
-    # `gh pr list` is GRAPHQL-backed, on a 5,000/hr bucket shared by every
-    # agent and tool on this account. On 2026-08-14 it hit 0/5000 while REST
-    # core sat at 4975/5000 untouched, and this digest went blind for all
-    # five repos at once (#144). Try GraphQL first -- it carries
-    # mergeStateStatus, which REST's list endpoint does not -- then fall back
-    # to REST and DEGRADE HONESTLY rather than reporting nothing.
   list=$(gh pr list -R "$OWNER/$repo" --state open \
         --json number,title,headRefOid,headRefName,mergeStateStatus 2>/dev/null) || {
-    list=$(gh api "repos/$OWNER/$repo/pulls?state=open&per_page=100" \
-           --jq '[.[]|{number,title,headRefOid:.head.sha,headRefName:.head.ref,mergeStateStatus:"UNKNOWN"}]' \
-           2>/dev/null) || {
-      note_error "graphql AND rest both failed for $OWNER/$repo -- its PRs are NOT in this digest"
-      continue
-    }
-    note_error "graphql exhausted for $OWNER/$repo -- REST fallback used; mergeStateStatus is UNKNOWN, not clean"
+    note_error "gh pr list failed for $OWNER/$repo -- its PRs are NOT in this digest"
+    continue
   }
   [ -z "$list" ] && list="[]"
   pr_count=$(jq 'length' <<<"$list")
@@ -568,13 +557,7 @@ MERGED_JSON="[]"
 if [ -n "$SINCE" ]; then
   for repo in $REPOS; do
     m=$(gh pr list -R "$OWNER/$repo" --state merged --limit 30 \
-          --json number,title,mergedAt 2>/dev/null) || {
-        # GraphQL exhaustion fallback (#144): REST returns merged PRs as
-        # closed-with-merged_at, so filter on that.
-        m=$(gh api "repos/$OWNER/$repo/pulls?state=closed&sort=updated&direction=desc&per_page=30" \
-            --jq '[.[]|select(.merged_at!=null)|{number,title,mergedAt:.merged_at}]' 2>/dev/null) \
-          || { note_error "merged-list failed for $repo (graphql AND rest)"; continue; }
-      }
+        --json number,title,mergedAt 2>/dev/null) || { note_error "merged-list failed for $repo"; continue; }
     MERGED_JSON=$(jq -n --argjson acc "$MERGED_JSON" --argjson m "${m:-[]}" \
       --arg repo "$repo" --arg since "$SINCE" '
       $acc + [ $m[] | select(.mergedAt > $since) | {repo:$repo, number:.number, title:.title} ]')

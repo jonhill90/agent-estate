@@ -128,5 +128,71 @@ else
   fi
 fi
 
+# --- a flag-shaped subject is refused, never paged (as#145) -----------------
+# 2026-08-14: a caller used gh-style syntax (`notify.sh --body-file - /dev/stdin`)
+# against this script's positional interface, and ten Telegram messages reached
+# Jon whose entire subject was the literal text `--body-file`. This must fail
+# closed before the caller gate even runs, and touch no channel.
+FLAG="$D/flag"; mkdir -p "$FLAG/.local/state/agent-dotfiles-supervisor"
+CURL_LOG="$FLAG/curl.log"
+HOME="$FLAG" PATH="$D/bin:$PATH" NOTIFY_ENV="$D/notify.env" CURL_LOG="$CURL_LOG" \
+  AGENT_NOTIFY_CALLER=supervisor \
+  bash "$NOTIFY" "--body-file" "-" >"$FLAG/out" 2>"$FLAG/err"
+rc=$?
+if [ "$rc" -eq 2 ]; then echo "  ok   flag-shaped subject exits 2"; pass=$((pass+1));
+else echo "  FAIL flag-shaped subject exited $rc (want 2): $(cat "$FLAG/err")"; fail=$((fail+1)); fi
+if [ ! -s "$CURL_LOG" ]; then echo "  ok   flag-shaped subject never touches curl"; pass=$((pass+1));
+else echo "  FAIL curl was invoked for a flag-shaped subject: $(cat "$CURL_LOG")"; fail=$((fail+1)); fi
+FLAG_LOG="$FLAG/.local/state/agent-dotfiles-supervisor/notify.log"
+if [ ! -s "$FLAG_LOG" ]; then echo "  ok   flag-shaped subject never even reaches notify.log"; pass=$((pass+1));
+else echo "  FAIL a flag-shaped subject was logged: $(cat "$FLAG_LOG")"; fail=$((fail+1)); fi
+check "flag-shaped subject explains the positional usage on stderr" "usage is positional" "$FLAG/err"
+
+# --- a normal positional call is unaffected by the flag guard --------------
+NORMAL="$D/normal-subject"; mkdir -p "$NORMAL/.local/state/agent-dotfiles-supervisor"
+CURL_LOG="$NORMAL/curl.log"
+HOME="$NORMAL" PATH="$D/bin:$PATH" NOTIFY_ENV="$D/notify.env" CURL_LOG="$CURL_LOG" \
+  AGENT_NOTIFY_CALLER=supervisor \
+  bash "$NOTIFY" "a normal subject" "body" >"$NORMAL/out" 2>"$NORMAL/err"
+rc=$?
+if [ "$rc" -eq 0 ]; then echo "  ok   a normal positional subject still exits zero"; pass=$((pass+1));
+else echo "  FAIL a normal positional subject exited $rc: $(cat "$NORMAL/err")"; fail=$((fail+1)); fi
+if [ -s "$CURL_LOG" ]; then echo "  ok   a normal positional subject still reaches curl"; pass=$((pass+1));
+else echo "  FAIL curl was never invoked for a normal positional subject"; fail=$((fail+1)); fi
+
+# --- mutation check: removing the flag guard must turn the refusal test red -
+FLAG_MUTANT="$NOTIFY_DIR/.notify-mutant-no-flag-guard.sh"
+trap 'rm -f "$MUTANT" "$FLAG_MUTANT"' EXIT
+flag_patch_rc=0
+python3 - "$NOTIFY" "$FLAG_MUTANT" <<'PY' || flag_patch_rc=$?
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+pattern = re.compile(r'case "\$\{1:-\}" in\n  --\*\)\n.*?\n    \;\;\n esac\n'.replace(' esac', 'esac'), re.S)
+new_text, n = pattern.subn('', text)
+assert n == 1, f"flag guard case statement not found exactly once (found {n}) -- notify.sh shape changed"
+open(dst, "w").write(new_text)
+PY
+if [ "$flag_patch_rc" -ne 0 ]; then
+  echo "  FAIL setup: patched a no-flag-guard copy of notify.sh"; fail=$((fail+1))
+else
+  echo "  ok   setup: patched a no-flag-guard copy of notify.sh"; pass=$((pass+1))
+  MUT_FLAG="$D/mutant-flag"; mkdir -p "$MUT_FLAG/.local/state/agent-dotfiles-supervisor"
+  MUT_FLAG_CURL="$MUT_FLAG/curl.log"
+  HOME="$MUT_FLAG" PATH="$D/bin:$PATH" NOTIFY_ENV="$D/notify.env" CURL_LOG="$MUT_FLAG_CURL" \
+    AGENT_NOTIFY_CALLER=supervisor \
+    bash "$FLAG_MUTANT" "--body-file" "-" >"$MUT_FLAG/out" 2>"$MUT_FLAG/err"
+  mut_rc=$?
+  echo "  MUTATION: bash \"$FLAG_MUTANT\" \"--body-file\" \"-\" (guard removed) -> exit $mut_rc"
+  echo "  MUTATION OUTPUT: $(cat "$MUT_FLAG/out" 2>/dev/null) $(cat "$MUT_FLAG/err" 2>/dev/null)"
+  if [ "$mut_rc" -ne 2 ]; then
+    echo "  ok   mutation confirmed: without the guard, a flag-shaped subject no longer exits 2 (the 'flag-shaped subject exits 2' assertion above would be red against this mutant)"
+    pass=$((pass+1))
+  else
+    echo "  FAIL mutation confirmed: removing the guard still exited 2 -- guard coverage is decorative"
+    fail=$((fail+1))
+  fi
+fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
