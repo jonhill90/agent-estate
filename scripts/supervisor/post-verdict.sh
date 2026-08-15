@@ -23,6 +23,35 @@
 #     `notify.sh`'s flag-shaped-subject guard, generalised to the body and
 #     to the "@file" form specifically, because that is the shape #167 hit.
 #
+#     WIDENED (finding 2, PR #176 review) to two more confirmed-slipping-
+#     through shapes, both still argument-shaped content delivered as
+#     content while the tool would report success -- #170's exact class,
+#     just not the single-token-plus-real-path shape above:
+#
+#       - a bare TWO-token "FLAG PATH" body, e.g. "--body-file /etc/hosts":
+#         the same #167 mistake, just glued by a space instead of "@".
+#         Refused only when token 1 is long-option-shaped ("--word") AND
+#         token 2 names a real path -- two-word prose that happens to
+#         start with a flag-shaped word but continues into an unrelated
+#         second word is not this shape and is left alone.
+#       - a single BARE LONG-FLAG token that names no file at all, e.g.
+#         "--reviews-pr" (a real flag this repo's own dispatch.sh uses --
+#         see this repo's CLAUDE.md Conventions section -- but no file by
+#         that name exists on disk, so the path-exists check above missed
+#         it). The path-exists requirement is dropped for this one shape:
+#         a verdict/comment body that IS, in its entirety, a bare
+#         long-option token is not a realistic real comment, so the
+#         narrower false-positive risk (a genuine one-word body that
+#         happens to look like a flag) is accepted deliberately.
+#
+#     NOT widened, on purpose: a body with three or more tokens, or a
+#     two-token body whose second token is not an existing path, is left
+#     alone even if the first token is flag-shaped -- see the "still
+#     allowed" cases in test_post_verdict.sh. Bare single-dash short
+#     options ("-x") are also out of scope; #170's two measured instances
+#     were both long-form ("--body-file", "--body"), and short options are
+#     far more likely to appear inside real prose ("-1 to that idea").
+#
 # (b) READ BACK WHAT WAS POSTED AND COMPARE, and only THEN report success.
 #     "gh returned 0" is not evidence -- it is this repository's own
 #     measured-versus-inferred rule, and BOTH instances above returned 0
@@ -88,21 +117,53 @@ BODY="$(cat)"
 # --- (a) refuse argument-shaped content, before anything is posted -------
 # Trim leading/trailing whitespace only -- an interior "@" or "--" (e.g. an
 # email address, or "flags --like-this" inside real prose) is untouched;
-# this guard exists for a body that IS the token, not one that merely
+# this guard exists for a body that IS the token(s), not one that merely
 # contains a substring shaped like one.
 trimmed="$(printf '%s' "$BODY" | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//')"
-case "$trimmed" in
-  *[[:space:]]*|"") : ;;  # more than one token, or empty -- not this shape
-  @*|--*|/*)
-    candidate="$trimmed"
-    case "$candidate" in @*) candidate="${candidate#@}" ;; esac
-    if [ -n "$candidate" ] && [ -e "$candidate" ]; then
-      echo "post-verdict.sh: refusing to post -- body is exactly the argument-shaped token '$trimmed', which names a real path" >&2
-      echo "post-verdict.sh: this is the #170 shape (a body that is really a file path, not the file's content) -- pass the CONTENT on stdin, not a reference to it" >&2
-      exit 3
-    fi
-    ;;
-esac
+
+# Token count and the first two tokens, whitespace-split (spaces, tabs, AND
+# newlines -- same as the old *[[:space:]]* glob test this replaces, so a
+# multi-line body is still never mistaken for a one- or two-token one).
+# Scoped to a function so this does not clobber the script's own $1/$2 --
+# bash gives a function its own positional parameters.
+split_trimmed() {
+  set -f
+  # shellcheck disable=SC2086  # word-splitting is the point
+  set -- $1
+  set +f
+  tok_count=$#
+  tok1="${1:-}"
+  tok2="${2:-}"
+}
+split_trimmed "$trimmed"
+
+if [ -z "$trimmed" ]; then
+  : # empty -- not this shape
+elif [ "$tok_count" -eq 1 ]; then
+  case "$tok1" in
+    @*|--*|/*)
+      candidate="$tok1"
+      case "$candidate" in @*) candidate="${candidate#@}" ;; esac
+      is_bare_flag=""
+      case "$tok1" in --[A-Za-z]*) is_bare_flag=1 ;; esac
+      if { [ -n "$candidate" ] && [ -e "$candidate" ]; } || [ -n "$is_bare_flag" ]; then
+        echo "post-verdict.sh: refusing to post -- body is exactly the argument-shaped token '$trimmed'" >&2
+        echo "post-verdict.sh: this is the #170 shape (a body that is really a file path or a bare flag, not real content) -- pass the CONTENT on stdin, not a reference to it" >&2
+        exit 3
+      fi
+      ;;
+  esac
+elif [ "$tok_count" -eq 2 ]; then
+  case "$tok1" in
+    --[A-Za-z]*)
+      if [ -e "$tok2" ]; then
+        echo "post-verdict.sh: refusing to post -- body is exactly the two-token pair '$trimmed', which looks like a flag-plus-path invocation pasted as content instead of being run" >&2
+        echo "post-verdict.sh: this is the #170 shape widened (finding 2, PR #176 review) -- pass the CONTENT on stdin, not a command line" >&2
+        exit 3
+      fi
+      ;;
+  esac
+fi
 
 # --- post -----------------------------------------------------------------
 post_out="$(printf '%s' "$BODY" | "$GH" "$KIND" comment "$NUMBER" --repo "$REPO" --body-file - 2>&1)"
