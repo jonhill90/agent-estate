@@ -63,7 +63,13 @@ if [ "$MODE" != "--json" ]; then
   exit 2
 fi
 
-declare -a SESSIONS
+# `=()`, not `declare -a` alone: an array that is declared but never
+# assigned reads as UNBOUND under `set -u` in some bash builds when the loop
+# below appends nothing (e.g. tmux has no sessions at all) -- measured in
+# CI, not local (a newer Homebrew bash tolerated it; the CI runner's did
+# not). The empty-literal assignment marks the variable set even with zero
+# elements, which `${#SESSIONS[@]}` below then reads as 0, not an error.
+SESSIONS=()
 while IFS= read -r s; do
   [ -n "$s" ] || continue
   SESSIONS+=("$s")
