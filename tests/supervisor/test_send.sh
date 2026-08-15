@@ -171,5 +171,29 @@ else
   fi
 fi
 
+# --- 5. MULTI-LINE MESSAGES ARE REFUSED, --literal OR NOT ----------------
+# agent-supervisor#186: an embedded newline is read by tmux as a real Enter
+# keystroke mid-type -- with or without `-l` -- so `verified_type` must
+# refuse before ever calling `tmux send-keys`, not attempt the send and let
+# a stray Enter fire partway through. Exercised with `--literal` too,
+# because that is exactly the flag a caller might reach for believing it
+# makes this safe (the finding's whole point: it does not).
+for lit_flag in "" "--literal"; do
+  reset_pane
+  out=$(run_send bash -c "
+    . '$SEND'
+    verified_type '$TARGET' \$'echo pwned-line-one\necho line-two-should-be-unsent' --settle 0 --retries 1 $lit_flag
+    echo \"rc=\$? status=\$SEND_STATUS\"
+  ")
+  label="a multi-line message is refused before any tmux call${lit_flag:+ (even with $lit_flag)}"
+  want_contains "$label" "rc=1 status=send_failed" "$out"
+  [ ! -s "$D/tmux.log" ] \
+    && ok "...and tmux send-keys was never invoked (fail closed, not fail-after-trying)" \
+    || bad "tmux was called despite the refusal -- the whole point is to refuse BEFORE sending" "$(cat "$D/tmux.log")"
+  [ ! -e "$D/panes/1" ] \
+    && ok "...and the box was never touched -- no partial type, no stray Enter" \
+    || bad "the pane buffer should never have been written" "$(cat "$D/panes/1" 2>/dev/null)"
+done
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

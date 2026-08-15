@@ -92,13 +92,36 @@ _send_capture_matches() {
 #   --literal      pass `-l` to `send-keys` -- required whenever `message`
 #                   might contain bytes tmux would otherwise read as a key
 #                   name (`inbox-route.sh`'s reasoning: external text is
-#                   never safe to assume isn't one).
+#                   never safe to assume isn't one). Does NOT cover an
+#                   embedded newline -- see the multi-line note below; `-l`
+#                   only changes whether tmux itself parses the argument as
+#                   a key NAME, and a bare `\n` byte is not a key name, it is
+#                   the same byte a terminal reads as Enter no matter who
+#                   sent it or how.
 #   --proof TOKEN  repeatable. ALL given tokens must appear in the pane
 #                   capture for the send to count as landed. No `--proof` at
 #                   all falls back to `input_box_state` reporting non-empty.
 #
+# MULTI-LINE MESSAGES ARE REFUSED, ALWAYS (agent-supervisor#186). `message`
+# containing an embedded newline is rejected before any `tmux send-keys` is
+# ever run, `--literal` or not: live-reproduced, `send-keys` (with or
+# without `-l`) reads an embedded `\n` as an actual Enter keystroke mid-type,
+# submitting whatever is in the box at that instant. That is a real Enter
+# this function's own header promises it "never sends itself" -- `--literal`
+# cannot make it safe because tmux's `-l` only governs how TMUX parses ITS
+# OWN argument for key names like `Enter`/`C-c`; it says nothing about a raw
+# `\n` byte, which every terminal on the other end reads as Enter regardless.
+# Refusing is the fail-closed choice #178's whole file already commits to:
+# "cannot tell" must never read as "sent", and a message this function
+# cannot type without risking an unintended mid-type submission is exactly
+# that case. A caller with a genuine need to send a multi-line message must
+# split it into single-line `verified_type` calls of its own, joined by an
+# explicit `verified_submit` where it actually wants Enter to fire.
+#
 # Return 0 (SEND_STATUS=landed), 2 (not_landed, retries exhausted), or
-# 1 (send_failed, the `tmux send-keys` call itself errored).
+# 1 (send_failed -- either the `tmux send-keys` call itself errored, or
+# `message` was refused for containing an embedded newline before any
+# `tmux` call was made).
 verified_type() {
   local target="$1" message="$2"; shift 2
   local settle=1 retries=1 preclear=0 literal=0 sent_ok=1
@@ -113,6 +136,12 @@ verified_type() {
       *) echo "verified_type: unknown option $1" >&2; SEND_STATUS=send_failed; return 1 ;;
     esac
   done
+
+  if [[ "$message" == *$'\n'* ]]; then
+    echo "verified_type: message contains an embedded newline -- tmux reads a bare newline as Enter mid-type regardless of --literal; refusing rather than risk an unintended submission (agent-supervisor#186)" >&2
+    SEND_STATUS=send_failed
+    return 1
+  fi
 
   if [ "$preclear" = 1 ]; then
     tmux send-keys -t "$target" C-u 2>/dev/null

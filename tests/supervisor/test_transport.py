@@ -8,7 +8,7 @@ from unittest.mock import patch
 SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "scripts" / "supervisor"
 sys.path.insert(0, str(SUPERVISOR_DIR))
 
-from transport import TmuxTransport  # noqa: E402
+from transport import SUBMIT_CONFIRM_TRIES, TmuxTransport  # noqa: E402
 
 
 class TransportTest(unittest.TestCase):
@@ -73,10 +73,15 @@ class TransportTest(unittest.TestCase):
 # buffer (or does nothing, simulating a dropped/never-landed type), `C-u`
 # clears it, and `capture-pane` reads it back.
 class _FakePane:
-    def __init__(self, *, drop_first_n_attempts=0):
+    def __init__(self, *, drop_first_n_attempts=0, swallow_enter=False):
         self.buf = ""
         self.attempts = 0
         self.drop_first_n_attempts = drop_first_n_attempts
+        # agent-supervisor#186: the literal #178 failure shape -- keys typed
+        # and landed correctly, then `Enter` is swallowed. Before this, the
+        # fake's `Enter` handler unconditionally cleared `buf`, so "typed
+        # correctly, Enter swallowed" could not even be expressed here.
+        self.swallow_enter = swallow_enter
         self.calls = []
 
     def run(self, argv, **kwargs):
@@ -92,7 +97,10 @@ class _FakePane:
             elif "C-u" in argv:
                 self.buf = ""
             elif "Enter" in argv:
-                self.buf = ""
+                if not self.swallow_enter:
+                    self.buf = ""
+                # else: modelled as swallowed -- the box, and therefore the
+                # pane capture, stays exactly what it was before Enter.
         elif sub == "capture-pane":
             return subprocess.CompletedProcess(argv, 0, stdout=self.buf, stderr="")
         return subprocess.CompletedProcess(argv, 0, stdout="", stderr="")
@@ -101,10 +109,13 @@ class _FakePane:
 class SendLiteralTest(unittest.TestCase):
     def test_lands_on_the_first_attempt_and_submits(self):
         pane = _FakePane()
-        with patch("transport.subprocess.run", side_effect=pane.run):
+        with patch("transport.subprocess.run", side_effect=pane.run), patch("transport.time.sleep"):
             TmuxTransport("tmux").send_literal("%1", "hello lane")
         subs = [c[1] for c in pane.calls]
-        self.assertEqual(["send-keys", "send-keys", "capture-pane", "send-keys"], subs)
+        # ...then one submit-confirmation poll: the fake's Enter handler
+        # clears `buf` immediately, so the pane differs from its just-landed
+        # capture on the very first poll and the loop returns right away.
+        self.assertEqual(["send-keys", "send-keys", "capture-pane", "send-keys", "capture-pane"], subs)
         self.assertEqual(["Enter"], [c[-1] for c in pane.calls if c[1] == "send-keys" and c[-1] == "Enter"])
 
     def test_a_dropped_first_type_is_cleared_and_retyped_then_submitted(self):
@@ -112,16 +123,17 @@ class SendLiteralTest(unittest.TestCase):
         # #178 shape -- keys sent, nothing landed), so the post-type capture
         # must NOT show the payload, and Enter must NOT have been sent yet.
         pane = _FakePane(drop_first_n_attempts=1)
-        with patch("transport.subprocess.run", side_effect=pane.run):
+        with patch("transport.subprocess.run", side_effect=pane.run), patch("transport.time.sleep"):
             TmuxTransport("tmux").send_literal("%1", "hello lane")
         subs = [c[1] for c in pane.calls]
-        # C-u, type(dropped), C-u(retry-clear), type(lands), Enter -- the
-        # retry actually fired, which is the whole point of this test.
+        # C-u, type(dropped), C-u(retry-clear), type(lands), Enter, then one
+        # submit-confirmation poll -- the retry actually fired, and the send
+        # was confirmed submitted, not just typed.
         self.assertEqual(
-            ["send-keys", "send-keys", "capture-pane", "send-keys", "send-keys", "capture-pane", "send-keys"],
+            ["send-keys", "send-keys", "capture-pane", "send-keys", "send-keys", "capture-pane", "send-keys", "capture-pane"],
             subs,
         )
-        self.assertEqual("Enter", pane.calls[-1][-1])
+        self.assertEqual("Enter", pane.calls[-2][-1])
 
     def test_fails_closed_and_never_sends_enter_when_it_never_lands(self):
         # The failure #178 is about, reproduced directly: the payload never
@@ -129,10 +141,31 @@ class SendLiteralTest(unittest.TestCase):
         # that cannot confirm submission must report failure, not silently
         # send Enter into a box that may hold nothing, or garbage.
         pane = _FakePane(drop_first_n_attempts=99)
-        with patch("transport.subprocess.run", side_effect=pane.run):
+        with patch("transport.subprocess.run", side_effect=pane.run), patch("transport.time.sleep"):
             with self.assertRaises(RuntimeError):
                 TmuxTransport("tmux").send_literal("%1", "hello lane")
         self.assertNotIn("Enter", [c[-1] for c in pane.calls])
+
+    # --- agent-supervisor#186: the type half landing is not the whole story
+    def test_fails_closed_when_enter_is_swallowed_after_a_good_type(self):
+        # The literal #178 failure, one level further in: typing lands
+        # cleanly (proved by the earlier tests passing), but `Enter` itself
+        # is swallowed -- the pane goes on showing exactly what it showed
+        # before Enter was pressed, forever. Before this fix, `send_literal`
+        # never looked at the pane again after typing, so this returned
+        # normally and the caller (`assign_task`/`notify_supervisor`) marked
+        # the task delivered over a message that never actually submitted.
+        pane = _FakePane(swallow_enter=True)
+        with patch("transport.subprocess.run", side_effect=pane.run), patch("transport.time.sleep"):
+            with self.assertRaises(RuntimeError):
+                TmuxTransport("tmux").send_literal("%1", "hello lane")
+        subs = [c[1] for c in pane.calls]
+        # Enter WAS sent (this is not a case where nothing was tried)...
+        self.assertIn("Enter", [c[-1] for c in pane.calls if c[1] == "send-keys"])
+        # ...and the confirmation loop actually polled the pane afterward,
+        # the configured number of times, rather than trusting a bare return.
+        # (+1 for the capture-pane that confirmed the type landed.)
+        self.assertEqual(1 + SUBMIT_CONFIRM_TRIES, subs.count("capture-pane"))
 
     # --- mutation check: the retry-then-verify loop is the fix ------------
     # agent-supervisor#178's acceptance: remove the clear-and-retype and
