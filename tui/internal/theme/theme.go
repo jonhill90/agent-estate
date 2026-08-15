@@ -41,6 +41,17 @@ const (
 	RoleNeutral      Role = "neutral"      // import cycle back into board.
 )
 
+// AllRoles is every Role a Theme is expected to fill -- theme_test.go's
+// coverage check and config.go's per-role colour-override validation
+// (agent-tui#34) both walk this same list, so a role added to the const
+// block above is automatically covered everywhere rather than needing a
+// second list kept in sync by hand.
+var AllRoles = []Role{
+	RoleError, RoleWarn, RoleFlag, RoleDirector, RoleUnsupervised,
+	RoleSelectedBG, RoleBorder, RoleBacklog, RoleInProgress, RoleInReview,
+	RoleBlocked, RoleDone, RoleNeutral,
+}
+
 // Theme is the one struct every render path file asks for a value from.
 // Everything on it is DATA -- a struct literal in registry.go -- never a
 // value computed or hand-picked at a call site.

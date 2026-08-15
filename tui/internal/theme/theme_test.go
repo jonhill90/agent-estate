@@ -7,13 +7,8 @@ import (
 )
 
 func TestAllThemesCoverEveryRole(t *testing.T) {
-	roles := []Role{
-		RoleError, RoleWarn, RoleFlag, RoleDirector, RoleUnsupervised,
-		RoleSelectedBG, RoleBorder, RoleBacklog, RoleInProgress, RoleInReview,
-		RoleBlocked, RoleDone, RoleNeutral,
-	}
 	for _, th := range All {
-		for _, r := range roles {
+		for _, r := range AllRoles {
 			if th.Color(r) == "" {
 				t.Errorf("theme %q has no colour for role %q", th.ID, r)
 			}

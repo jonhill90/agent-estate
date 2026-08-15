@@ -5,14 +5,136 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+
+	"github.com/charmbracelet/lipgloss"
 )
 
-// config is the on-disk shape of a user's theme preference -- the smallest
-// file that can carry "which theme": #27's per-user half (agent-tui#25)
-// asks for a persisted preference, not a designer's config format, so this
-// has exactly one field.
+// config is the on-disk shape of a user's theme preference. #27 shipped
+// exactly one field -- "theme", a name that selects a whole shipped
+// Theme. Agent-tui#34 adds "colors": a role-name -> hex-string map letting
+// a user define their own per-role colours instead of only picking
+// between shipped ones, which is what #33's review found #27's format
+// could not express ("per-role colours are compile-time data, not
+// user-editable JSON").
+// Colors is decoded as json.RawMessage per entry, not string: a
+// map[string]string forces json.Unmarshal to fail the WHOLE file the
+// moment one entry is a JSON number or object, discarding every other
+// valid "colors" entry and "theme" along with it (agent-tui#36's finding
+// against #34 -- a typo'd colour lost a user's entire theme, not just
+// that one role). Holding each entry as raw JSON until
+// applyColorOverrides inspects it means a wrong-typed entry fails on its
+// own, exactly like a wrong-shaped string already did.
 type config struct {
-	Theme string `json:"theme"`
+	Theme  string                     `json:"theme"`
+	Colors map[string]json.RawMessage `json:"colors"`
+}
+
+// hexColor matches the exact "#RRGGBB" shape every colour in registry.go
+// already uses (see Default/Mono's Colors maps) -- a user-authored value is
+// held to the same shape the shipped themes use, not a looser format this
+// package would then have to special-case at render time.
+var hexColor = regexp.MustCompile(`^#[0-9a-fA-F]{6}$`)
+
+// isKnownRole reports whether name matches a Role this build's Theme
+// struct actually has a slot for -- the check config.go's "unknown role"
+// notice (agent-tui#34) is built on.
+func isKnownRole(name string) bool {
+	for _, r := range AllRoles {
+		if string(r) == name {
+			return true
+		}
+	}
+	return false
+}
+
+// applyColorOverrides layers colors on top of base, replacing only the
+// roles colors names -- agent-tui#34's precedence decision, stated here
+// because Load is where it takes effect:
+//
+// A user who overrides some roles of a shipped theme keeps that theme's
+// colours for every role they did NOT mention. Overriding is additive per
+// role, never a switch to "the user's palette replaces the theme's
+// palette wholesale" -- the alternative (any override discards the rest of
+// the base theme) would make a one-role edit silently blank out every
+// other role to the zero-colour default, which is exactly the "partial
+// override silently behaves like a full one" defect shape the brief for
+// this issue calls out. base's own Colors map is never mutated -- All's
+// shipped Theme values must stay identical across every Load call.
+//
+// Each entry in colors is validated against the three failure modes #33's
+// review named as having "nowhere to fail" before user-authored colours
+// existed: a blank role name, a role name this build's Theme has no slot
+// for, and a value that is not a colour. Each produces its own notice
+// rather than a silent default, and the offending entry is dropped rather
+// than applied -- every other, valid entry in the same file still takes
+// effect. Notices are returned in role-name sorted order so repeated Load
+// calls against the same file produce byte-identical output; Go's map
+// iteration order is randomized and would otherwise make notice order
+// flaky across runs.
+//
+// "not a colour" covers every wrong-typed JSON value, not just a
+// wrong-shaped string: colors holds each entry as json.RawMessage (see
+// config's doc comment), so a JSON number or nested object reaches here
+// as raw bytes rather than failing json.Unmarshal for the whole file.
+// rawValueText decodes each entry as a JSON string first (the valid
+// shape); anything that isn't one -- 42, {"nested":"obj"}, true, null --
+// falls into the same "not a colour" notice a bad string already got,
+// naming the role and the offending value exactly the same way.
+func applyColorOverrides(base Theme, colors map[string]json.RawMessage, path string) (Theme, []string) {
+	if len(colors) == 0 {
+		return base, nil
+	}
+
+	merged := make(map[Role]lipgloss.Color, len(base.Colors))
+	for r, c := range base.Colors {
+		merged[r] = c
+	}
+
+	keys := make([]string, 0, len(colors))
+	for k := range colors {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+
+	var notices []string
+	for _, key := range keys {
+		text, isString := rawValueText(colors[key])
+		display := text
+		if isString {
+			display = fmt.Sprintf("%q", text)
+		}
+		switch {
+		case key == "":
+			notices = append(notices, fmt.Sprintf("theme config at %s has a colour entry with no role name (value %s); ignoring it", path, display))
+		case !isKnownRole(key):
+			notices = append(notices, fmt.Sprintf("theme config at %s names unknown role %q; ignoring it", path, key))
+		case !isString || !hexColor.MatchString(text):
+			notices = append(notices, fmt.Sprintf("theme config at %s role %q has a value that is not a colour (%s, want #RRGGBB); ignoring it", path, key, display))
+		default:
+			merged[Role(key)] = lipgloss.Color(text)
+		}
+	}
+
+	base.Colors = merged
+	return base, notices
+}
+
+// rawValueText decodes raw as a JSON string, returning (value, true) when
+// it is one. Any other JSON shape -- number, object, array, bool, null --
+// is not a colour no matter what it contains, so it is reported back as
+// its literal JSON text (e.g. "42", `{"nested":"obj"}`) and isString is
+// false, letting applyColorOverrides fold it into the same "not a
+// colour" notice a wrong-shaped string already gets rather than a
+// separate type-error path.
+func rawValueText(raw json.RawMessage) (value string, isString bool) {
+	var s string
+	if err := json.Unmarshal(raw, &s); err == nil {
+		return s, true
+	}
+	return strings.TrimSpace(string(raw)), false
 }
 
 // ConfigPath returns where a user's theme preference lives: the
@@ -32,19 +154,31 @@ func ConfigPath() string {
 }
 
 // Load reads path and resolves a Theme plus a notice to show the user, if
-// any. Agent-tui#27 acceptance item 3 fixes exactly three outcomes -- "an
-// undeterminable preference is never silently treated as a valid one":
+// any. Agent-tui#27 acceptance item 3 fixes three outcomes for the
+// "theme" field -- "an undeterminable preference is never silently
+// treated as a valid one":
 //
 //   - no file at path: Default, empty notice. Renders exactly as it did
 //     before this mechanism existed -- a missing config is not an error.
-//   - file exists but isn't readable, isn't valid JSON, or names a theme ID
-//     this build doesn't ship: Default, and a non-empty notice the caller
-//     MUST render somewhere visible. A malformed preference is never
-//     silently treated as "use the default and say nothing" -- that would
-//     be indistinguishable from the file having named the default on
-//     purpose.
+//   - file exists but isn't readable or isn't valid JSON: Default, and a
+//     non-empty notice the caller MUST render somewhere visible. A
+//     malformed preference is never silently treated as "use the default
+//     and say nothing" -- that would be indistinguishable from the file
+//     having named the default on purpose.
+//   - file exists, is valid JSON, but names a theme ID this build doesn't
+//     ship: Default, non-empty notice, same reasoning.
 //   - file exists, is valid JSON, and names a theme this build ships: that
-//     theme, empty notice.
+//     theme, empty notice (before any "colors" override is applied).
+//
+// Agent-tui#34 adds a fourth input, the optional "colors" map, resolved
+// AFTER the theme above: applyColorOverrides layers it onto whichever
+// theme the four cases above already produced (Default, or the named
+// theme) -- see its own doc comment for the precedence this implements
+// and the three colour-entry failure modes it gives their own notices.
+// Every notice this call produces -- a bad "theme" value, and each bad
+// "colors" entry -- is joined into the single notice string this
+// function has always returned; the caller (cmd/agent-tui) renders
+// whatever it gets as one line per #27's existing wiring, unchanged.
 func Load(path string) (Theme, string) {
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -58,17 +192,22 @@ func Load(path string) (Theme, string) {
 	if err := json.Unmarshal(data, &cfg); err != nil {
 		return Default, fmt.Sprintf("theme config at %s is malformed (%s); using default theme %q", path, err, Default.ID)
 	}
-	if cfg.Theme == "" {
-		// Valid JSON that simply doesn't set "theme" -- same as no
-		// preference expressed at all, not a malformed file.
-		return Default, ""
+
+	var notices []string
+	base := Default
+	if cfg.Theme != "" {
+		t, ok := ByID(cfg.Theme)
+		if !ok {
+			notices = append(notices, fmt.Sprintf("unknown theme %q in %s; using default theme %q", cfg.Theme, path, Default.ID))
+		} else {
+			base = t
+		}
 	}
 
-	t, ok := ByID(cfg.Theme)
-	if !ok {
-		return Default, fmt.Sprintf("unknown theme %q in %s; using default theme %q", cfg.Theme, path, Default.ID)
-	}
-	return t, ""
+	th, colorNotices := applyColorOverrides(base, cfg.Colors, path)
+	notices = append(notices, colorNotices...)
+
+	return th, strings.Join(notices, "; ")
 }
 
 // Save persists id as the user's theme preference at path, creating parent
