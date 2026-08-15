@@ -941,6 +941,57 @@ class StrandedClaimRecoveryIsReachable(unittest.TestCase):
             self.assertTrue(json.loads(rel.stdout)["released"])
             self.assertTrue(ledger.lane_available("free-9"))
 
+    def test_release_lane_claim_names_no_claim_when_the_token_was_never_used(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._lane(root)
+            rel = self._run(root, "release-lane-claim", "--lane", "free-9", "--token", "never-claimed")
+            self.assertEqual(0, rel.returncode, rel.stderr)
+            body = json.loads(rel.stdout)
+            self.assertFalse(body["released"])
+            self.assertIn("no claim by this token exists", body["hint"])
+
+    def test_release_lane_claim_on_a_reused_token_says_it_is_already_closed(self):
+        """agent-supervisor#174. `release-lane-claim` used to call this "no
+        reserved claim matched" -- true of the DELETE, but read by an
+        operator as "there is nothing here", when the token it names was
+        exactly the one `dispatch.sh` reported as blocking the lane. Once the
+        row is provably closed, the message must say that instead of leaving
+        the operator to guess whether cancel-open-task still applies."""
+        with tempfile.TemporaryDirectory() as root:
+            ledger = self._lane(root)
+            self.assertEqual(0, self._run(
+                root, "claim-lane", "--lane", "free-9", "--token", "as163-rev168", "--owner-pid", "4242",
+            ).returncode)
+            self.assertTrue(self._run(
+                root, "commit-lane-claim", "--lane", "free-9", "--token", "as163-rev168",
+            ).returncode == 0)
+            ledger.record_dispatch(
+                lane="free-9", pane_id="%9", nonce="nonce-9-b", harness="claude",
+                repo=root, server_id="socket:1", session_id="$0", command="claude.exe",
+                task_id="ad163-rev168", source_kind="issue", source_url="https://example/163",
+                source_ref="163", summary="review #168", source_state="open",
+                evidence=["claimed by dispatch.sh for lane free-9"],
+            )
+            self.assertEqual(
+                "cancelled", Ledger(Path(root)).get_task("ledger-claim:free-9:as163-rev168")["status"]
+            )
+            ledger.complete("ad163-rev168", b"ok", pane_nonce="nonce-9-b")
+
+            rel = self._run(root, "release-lane-claim", "--lane", "free-9", "--token", "as163-rev168")
+            self.assertEqual(0, rel.returncode, rel.stderr)
+            body = json.loads(rel.stdout)
+            self.assertFalse(body["released"])
+            self.assertIn("already closed", body["hint"])
+            self.assertNotIn("cancel-open-task", body["hint"])
+
+            # And the recovery it points at actually works: the lane, freed
+            # by nothing this command did, is still claimable under the same
+            # reused token (the `claim_lane` half of #174's fix).
+            self.assertTrue(Ledger(Path(root)).lane_available("free-9"))
+            retry = self._run(root, "claim-lane", "--lane", "free-9", "--token", "as163-rev168")
+            self.assertEqual(0, retry.returncode, retry.stderr)
+            self.assertTrue(json.loads(retry.stdout)["claimed"])
+
     def test_commit_lane_claim_refuses_a_claim_that_was_never_made(self):
         """`dispatch.sh` treats a non-committed result as fatal and does not
         send, so this refusal has to be visible in the exit-0 JSON rather than

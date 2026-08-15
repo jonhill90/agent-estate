@@ -855,7 +855,29 @@ def main(argv=None):
         released = ledger.release_lane_claim(args.lane, token=args.token)
         value = {"lane": args.lane, "token": args.token, "released": released}
         if not released:
-            value["hint"] = "no reserved claim matched; a claim with a live brief behind it needs cancel-open-task"
+            # agent-supervisor#174: "no reserved claim matched" was written
+            # for exactly one case -- a live brief behind the claim -- and
+            # said it regardless of why the DELETE actually matched nothing.
+            # A row still exists but is uncommitted (contradicts this
+            # method's own contract) is not a real case; the two that are:
+            # a claim already LIVE (still needs cancel-open-task, unchanged),
+            # and no row at all under this id -- which after #174's fix to
+            # `claim_lane` means either nobody ever claimed under this token,
+            # or a previous claim under it already closed. The second used to
+            # be exactly the state that left a lane stuck; it no longer
+            # blocks anything (the next `claim-lane` for this token revives
+            # a closed row itself), so the hint says that instead of
+            # asserting a live brief that is not there.
+            existing = ledger.get_task(f"{CLAIM_TASK_PREFIX}{args.lane}:{args.token}")
+            if existing is None:
+                value["hint"] = "no claim by this token exists; nothing to release"
+            elif existing["status"] not in ("complete", "failed", "cancelled"):
+                value["hint"] = "a claim with a live brief behind it needs cancel-open-task"
+            else:
+                value["hint"] = (
+                    f"this claim already closed ({existing['status']}); "
+                    "it is not blocking dispatch, and a retry under the same token will reclaim it"
+                )
     elif args.command == "reap-lane-claims":
         reaped = ledger.reap_stale_lane_claims()
         value = {"reaped": reaped, "count": len(reaped)}
