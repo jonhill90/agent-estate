@@ -106,17 +106,20 @@ func main() {
 	)
 	flag.Parse()
 
-	// agent-tui#27: the one place a user's theme preference is resolved.
-	// theme.Load's three outcomes (missing/malformed/unknown -- see its own
-	// doc comment) are honored exactly as it returns them: a missing config
-	// renders as today (activeTheme falls back to theme.Default with an
-	// empty notice), while a malformed config or an unknown theme name
-	// still resolves to theme.Default but carries a notice every screen
-	// below renders visibly -- #27 acceptance item 3, "an undeterminable
-	// preference is never silently treated as a valid one." Every screen
-	// (rail, board, cost, gallery) gets the SAME theme -- swapping it is
-	// editing this one Load call or the user's config file, never a
-	// per-screen setting.
+	// agent-tui#27: the one place a user's theme preference is resolved at
+	// startup. theme.Load's three outcomes (missing/malformed/unknown --
+	// see its own doc comment) are honored exactly as it returns them: a
+	// missing config renders as today (activeTheme falls back to
+	// theme.Default with an empty notice), while a malformed config or an
+	// unknown theme name still resolves to theme.Default but carries a
+	// notice every pane renders visibly -- #27 acceptance item 3, "an
+	// undeterminable preference is never silently treated as a valid one."
+	// activeTheme/themeNotice are handed to shell.Model.WithTheme below,
+	// once -- agent-tui#51 moved the RUNTIME half of this (every pane
+	// getting the SAME theme, including after a live 't' cycle) out of
+	// this file and into shell.Model, since main only ever runs Load once
+	// at process start and has no way to keep four independent pane copies
+	// in sync with a keypress it never sees.
 	activeTheme, themeNotice := theme.Load(theme.ConfigPath())
 
 	// agent-tui#38: -board/-cost/-gallery are no longer separate programs --
@@ -221,9 +224,16 @@ func main() {
 	// Skipped entirely when client == nil (agent-tui#49 item 1's degraded
 	// launch): rail.Model's ops field is nil-safe by design (see its own
 	// doc comment) and a nil client would panic the moment any write op ran.
+	//
+	// agent-tui#51: none of the four pane models below get their own
+	// WithTheme(activeTheme, themeNotice) call any more -- shell.Model is
+	// now the single owner of the theme value (see internal/shell's own
+	// theme field doc comment and theme.CycleRequestedMsg), and its own
+	// WithTheme below fans activeTheme/themeNotice out to all four via
+	// applyTheme. Threading it into each pane here AND again in shell
+	// would recreate #48's exact defect the moment the two calls drift.
 	railModel := rail.NewMultiSession(sessionsFetch, lanesFetch, costFetch, *directorSession).
-		WithTasks(buildTaskFetch(ledgerSrc, *sqliteBin)).
-		WithTheme(activeTheme, themeNotice)
+		WithTasks(buildTaskFetch(ledgerSrc, *sqliteBin))
 	if client != nil {
 		railModel = railModel.WithOps(sessionops.New(client))
 	}
@@ -234,10 +244,10 @@ func main() {
 	// shell.Model.unavailableView for how boardUnavailable renders when a
 	// human reaches [f2] with boardOK false.
 	boardFetch := buildBoardFetch(ledgerSrc, *ghBin, *sqliteBin, *repositories, lanesFetch)
-	boardModel := board.NewWithRefreshInterval(boardFetch, *boardRefresh).WithTheme(activeTheme, themeNotice)
+	boardModel := board.NewWithRefreshInterval(boardFetch, *boardRefresh)
 
-	costModel := cost.New(costFetch).WithTheme(activeTheme, themeNotice)
-	galleryModel := gallery.New().WithTheme(activeTheme, themeNotice)
+	costModel := cost.New(costFetch)
+	galleryModel := gallery.New()
 
 	start := shell.PaneHome
 	switch {
@@ -251,7 +261,8 @@ func main() {
 
 	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel).
 		WithStart(start).
-		WithTheme(activeTheme)
+		WithTheme(activeTheme, themeNotice).
+		WithThemeSave(func(th theme.Theme) error { return theme.Save(theme.ConfigPath(), th.ID) })
 
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {

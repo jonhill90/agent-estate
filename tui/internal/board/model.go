@@ -185,10 +185,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "t":
 			// agent-tui#25 scope item 3: runtime theme comparison, same
-			// shape as rail.Model's "t" case -- see its comment for why
-			// this never touches theme.Save.
-			m.theme = theme.Cycle(m.theme)
-			return m, nil
+			// shape as rail.Model's "t" case. Agent-tui#51: this pane no
+			// longer cycles m.theme itself -- see rail's identical case and
+			// theme.CycleRequestedMsg's doc comment for why a per-pane
+			// theme copy is the defect, not the fix.
+			return m, func() tea.Msg { return theme.CycleRequestedMsg{} }
 		}
 		if n, ok := digitKey(msg.String()); ok && n >= 1 && n <= len(Layouts) {
 			m.layoutIdx = n - 1
@@ -347,7 +348,9 @@ func (m Model) View() string {
 	}
 	footer.WriteString(st.dim.Render(fmt.Sprintf("layout %d/%d: %s -- %s", m.layoutIdx+1, len(Layouts), layout.Name, layout.Description)) + "\n")
 	footer.WriteString(st.dim.Render(fmt.Sprintf("[1-%d] switch layout  %s", len(Layouts), m.repoLegend())) + "\n")
-	footer.WriteString(st.dim.Render(fmt.Sprintf("theme: %s  [t] switch (this session only)", m.theme.Name)) + "\n")
+	// Agent-tui#51: 't' persists now (shell.Model owns the write via
+	// theme.Save) -- see rail.Model's identical footer line comment.
+	footer.WriteString(st.dim.Render(fmt.Sprintf("theme: %s  [t] switch", m.theme.Name)) + "\n")
 	footer.WriteString(st.dim.Render("[j/k up/down  pgup/pgdn] scroll  [r] refresh  [q] quit"))
 
 	// agent-tui#29: the viewport is only the body -- header and footer

@@ -208,29 +208,28 @@ func TestThemeNoticeRendersVisibly(t *testing.T) {
 	}
 }
 
-// TestKeyTCyclesThemeAtRuntime is agent-tui#25 scope item 3: "switchable
-// at runtime as well as at startup, if it is cheap... he has consistently
-// wanted to compare rather than commit." theme.TestCycleAdvancesAndWraps
-// proves Cycle's own logic; this proves the same discipline
-// TestThemeSwitchChangesEverySurface documents above -- a real key
-// delivered to a real Model's Update, then the real View() actually
-// differing, not a struct inspected in isolation.
-func TestKeyTCyclesThemeAtRuntime(t *testing.T) {
-	prev := lipgloss.ColorProfile()
-	lipgloss.SetColorProfile(termenv.TrueColor)
-	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
-
+// TestKeyTRequestsThemeCycleWithoutMutatingLocalTheme is agent-tui#51's
+// replacement for the old TestKeyTCyclesThemeAtRuntime: this package no
+// longer owns the theme value (theme.CycleRequestedMsg's doc comment
+// explains why four independent copies -- one per pane -- was the actual
+// defect, not merely unpersisted). Pressing 't' must still be driven
+// through a real Model's Update, but the only thing it may now do is ask,
+// via the returned tea.Cmd's Msg, for shell.Model to cycle the ONE shared
+// theme -- m.theme itself must be untouched, or this pane and shell's
+// value could drift again the moment either one changes it.
+func TestKeyTRequestsThemeCycleWithoutMutatingLocalTheme(t *testing.T) {
 	m := New(func() ([]lane.Lane, error) { return nil, nil }).WithTheme(theme.Default, "")
-	before := m.View()
 
-	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
 	m = next.(Model)
-	after := m.View()
 
-	if before == after {
-		t.Fatal("pressing 't' did not change the rail's render -- runtime theme switch not wired")
+	if m.theme.ID != theme.Default.ID {
+		t.Fatalf("pressing 't' mutated m.theme to %q -- this pane must no longer own the theme value (see theme.CycleRequestedMsg)", m.theme.ID)
 	}
-	if m.theme.ID != theme.Cycle(theme.Default).ID {
-		t.Fatalf("after 't', m.theme = %q, want %q", m.theme.ID, theme.Cycle(theme.Default).ID)
+	if cmd == nil {
+		t.Fatal("pressing 't' returned a nil Cmd -- no theme.CycleRequestedMsg was requested")
+	}
+	if _, ok := cmd().(theme.CycleRequestedMsg); !ok {
+		t.Fatalf("pressing 't' returned a Cmd whose Msg is %T, want theme.CycleRequestedMsg", cmd())
 	}
 }

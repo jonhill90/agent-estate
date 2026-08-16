@@ -394,11 +394,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "t":
 			// agent-tui#25 scope item 3: switchable at runtime, not just at
 			// startup -- "he has consistently wanted to compare rather than
-			// commit." Cycles in memory only; never writes theme.Save, so
-			// the user's persisted preference (theme.ConfigPath) is
-			// untouched until they edit it themselves.
-			m.theme = theme.Cycle(m.theme)
-			return m, nil
+			// commit." Agent-tui#51: this used to cycle m.theme in place,
+			// which is exactly why a keypress here never touched board/
+			// cost/gallery's own copies -- see theme.CycleRequestedMsg's
+			// doc comment. shell.Model is the single owner now; this only
+			// asks for a cycle, reached only when handleOpsKey above has no
+			// opinion (i.e. not mid-typed session name), so a literal 't' in
+			// a session name is still delivered as text, unaffected by this
+			// change.
+			return m, func() tea.Msg { return theme.CycleRequestedMsg{} }
 		case "w":
 			// agent-tui#26: cycles the content-reading picker (work-centric
 			// / status-centric) the same live-against-real-data way 'g'
@@ -719,11 +723,13 @@ func (m Model) View() string {
 	}
 
 	// The theme picker (agent-tui#25 scope item 3): which theme is live,
-	// in-memory, right now -- separate from the persisted preference
-	// theme.ConfigPath names, same as [1-N] above is separate from
-	// whichever glyph set ships as anyone's default.
+	// right now. Agent-tui#51: 't' now persists via theme.Save (shell.Model
+	// owns the write, this pane only asks for a cycle -- see
+	// theme.CycleRequestedMsg), so this line no longer claims the choice is
+	// session-only; it is the same value cmd/agent-tui's theme.Load will
+	// read back on the next launch.
 	b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("theme: %s", m.theme.Name)))
-	b = append(b, st.legend.Width(innerWidth).Render("[t] to switch (this session only)"))
+	b = append(b, st.legend.Width(innerWidth).Render("[t] to switch"))
 
 	// agent-tui#14's write path: the current mode's prompt (typing a new
 	// session's name, or a remove confirmation naming exactly what would be

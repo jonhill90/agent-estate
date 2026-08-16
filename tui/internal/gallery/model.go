@@ -80,10 +80,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "t":
 			// agent-tui#25 scope item 3: runtime theme comparison, same
-			// shape as rail.Model's "t" case -- see its comment for why
-			// this never touches theme.Save.
-			m.theme = theme.Cycle(m.theme)
-			return m, nil
+			// shape as rail.Model's "t" case. Agent-tui#51: this pane no
+			// longer cycles m.theme itself -- see rail's identical case and
+			// theme.CycleRequestedMsg's doc comment for why a per-pane
+			// theme copy is the defect, not the fix.
+			return m, func() tea.Msg { return theme.CycleRequestedMsg{} }
 		}
 		return m, nil
 	}
@@ -129,7 +130,9 @@ func (m Model) View() string {
 	if m.themeNotice != "" {
 		out += st.err.Render("! "+m.themeNotice) + "\n"
 	}
-	out += st.dim.Render(fmt.Sprintf("state %d/%d -- [j/k] scroll one state, [g/G] top/bottom, [t] switch theme (this session only), [q] quit", m.offset+1, len(m.rows))) + "\n"
+	// Agent-tui#51: 't' persists now (shell.Model owns the write via
+	// theme.Save) -- see rail.Model's identical footer line comment.
+	out += st.dim.Render(fmt.Sprintf("state %d/%d -- [j/k] scroll one state, [g/G] top/bottom, [t] switch theme, [q] quit", m.offset+1, len(m.rows))) + "\n"
 	out += st.dim.Render(fmt.Sprintf("theme: %s", m.theme.Name)) + "\n\n"
 
 	// Budget: title(1) + subtitle(1) + blank(1) + legend(len) + blank(1) +

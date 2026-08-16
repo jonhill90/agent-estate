@@ -86,15 +86,58 @@ type Model struct {
 	width, height                          int
 	railWidth, contentWidth, contentHeight int
 
+	// theme is the single shared value agent-tui#51 fixes -- see
+	// theme.CycleRequestedMsg's doc comment for the defect this
+	// replaces: board/cost/gallery/rail (agent-tui#48) each held their
+	// OWN in-memory theme.Theme, so one 't' keypress only ever changed
+	// whichever ONE pane had focus, leaving the rail and the active
+	// content pane able to disagree on screen simultaneously. Model is
+	// the one place that composes every pane (agent-tui#38), so it is
+	// the one place that now owns this value; every pane's own theme
+	// field is kept in sync via WithTheme, called from every place this
+	// value changes (New, WithTheme, and the CycleRequestedMsg case in
+	// Update).
 	theme theme.Theme
+	// themeNotice is the same notice string cmd/agent-tui's theme.Load
+	// already computed once and handed to every pane's own WithTheme
+	// call (main.go: "every screen gets the SAME theme" -- the same is
+	// true of the notice); Model keeps its own copy so a runtime 't'
+	// cycle can re-apply WithTheme to every pane without losing the
+	// startup notice, which none of the four pane packages expose a
+	// getter for.
+	themeNotice string
+	// saveTheme is agent-tui#51's persistence half -- the adapter-
+	// discipline seam (AGENTS.md) over theme.Save, wired by
+	// cmd/agent-tui's main.go to theme.Save(theme.ConfigPath(), ...) so
+	// this package never touches the filesystem itself and every test
+	// in this package can inject a fake that only records what would
+	// have been written. nil is a valid, silent no-op -- every Model
+	// built by New has it unset until WithThemeSave is called, so a
+	// test with no opinion on persistence (most of the pre-existing
+	// navigation tests in this package) is unaffected.
+	saveTheme func(theme.Theme) error
+	// themeSaveErr is the visible half of "absence is a typed value,
+	// never a bare zero" (AGENTS.md) applied to a failed persist: a
+	// theme.Save error (e.g. an unwritable config directory) must not
+	// be swallowed just because the in-memory cycle it rides along with
+	// always succeeds. Empty means either no save has been attempted
+	// yet or the last one succeeded; footer() renders it next to the
+	// theme name exactly like board/cost/gallery already render their
+	// own themeNotice.
+	themeSaveErr string
 }
 
 // New builds a Model from the four already-constructed pane models --
-// cmd/agent-tui wires each one's Fetcher/WithTheme/WithOps/etc. exactly as
-// it did before #38; this constructor changes none of that, it only holds
-// the results. Pass boardOK == false (with a reason) when no -ledger was
-// available to build a real board.Fetcher; board stays reachable by key but
-// renders unavailableView instead of running board's own fetch loop.
+// cmd/agent-tui wires each one's Fetcher/WithOps/etc. exactly as it did
+// before #38; this constructor changes none of that, it only holds the
+// results. Theme is the one exception (agent-tui#51): callers no longer
+// call WithTheme on each pane themselves -- New defaults every pane to
+// whatever theme it already carries (theme.Default, same as a freshly
+// constructed pane always has) until the caller's own WithTheme call
+// fans the real starting theme out via applyTheme. Pass boardOK == false
+// (with a reason) when no -ledger was available to build a real
+// board.Fetcher; board stays reachable by key but renders unavailableView
+// instead of running board's own fetch loop.
 func New(r rail.Model, b board.Model, boardOK bool, boardUnavailable string, c cost.Model, g gallery.Model) Model {
 	return Model{
 		rail:             r,
@@ -118,13 +161,42 @@ func (m Model) WithStart(p Pane) Model {
 	return m
 }
 
-// WithTheme returns a copy of m with th wired in for the shell's OWN chrome
-// (the footer legend and the board-unavailable notice) -- every pane's
-// theme is set independently by cmd/agent-tui before it ever reaches New,
-// same as before #38; this is additive, not a second theme source for
-// them.
-func (m Model) WithTheme(th theme.Theme) Model {
+// WithTheme returns a copy of m with th and notice wired in as the ONE
+// shared theme value -- agent-tui#51: unlike before #51, this is no
+// longer additive-only chrome for the shell's own render (the footer
+// legend and the board-unavailable notice); it is now also pushed into
+// every pane via applyTheme, replacing the pane-by-pane WithTheme calls
+// cmd/agent-tui used to make directly (see main.go's own comment at the
+// call site). notice is theme.Load's own return, the same string every
+// pane was already given -- kept here too so a later runtime cycle
+// (CycleRequestedMsg) can re-apply it without cmd/agent-tui's Load ever
+// running twice.
+func (m Model) WithTheme(th theme.Theme, notice string) Model {
 	m.theme = th
+	m.themeNotice = notice
+	return m.applyTheme()
+}
+
+// WithThemeSave wires save in as the persistence seam theme.Save sits
+// behind (adapter discipline, AGENTS.md) -- cmd/agent-tui's main.go passes
+// a closure over theme.Save(theme.ConfigPath(), ...); every test in this
+// package that does not call this leaves saveTheme nil, which Update
+// treats as "nothing to persist," never a panic.
+func (m Model) WithThemeSave(save func(theme.Theme) error) Model {
+	m.saveTheme = save
+	return m
+}
+
+// applyTheme pushes m's current theme/themeNotice into every pane's own
+// WithTheme -- the one place that fans the single shared value out to all
+// four, called from both WithTheme (construction/startup) and the
+// CycleRequestedMsg case in Update (a runtime 't' press), so those two
+// call sites cannot drift out of sync with each other.
+func (m Model) applyTheme() Model {
+	m.rail = m.rail.WithTheme(m.theme, m.themeNotice)
+	m.board = m.board.WithTheme(m.theme, m.themeNotice)
+	m.cost = m.cost.WithTheme(m.theme, m.themeNotice)
+	m.gallery = m.gallery.WithTheme(m.theme, m.themeNotice)
 	return m
 }
 
@@ -140,6 +212,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		return m.resize(msg)
+
+	case theme.CycleRequestedMsg:
+		// Agent-tui#51: the ONE place a 't' keypress actually takes
+		// effect, however it arrived -- rail's opsMode-gated case or
+		// board/cost/gallery's plain one, all of which now only ask for
+		// this message rather than cycling their own theme field (see
+		// theme.CycleRequestedMsg's doc comment). Cycling here, once,
+		// and re-applying via applyTheme is what makes a single
+		// keypress repaint the rail AND the active content pane
+		// together -- the defect #48's four-owner diff could not fix
+		// even after a rebase.
+		return m.cycleTheme()
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -172,6 +256,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.routeKey(msg)
 	}
 	return m.routeAll(msg)
+}
+
+// cycleTheme advances m.theme by one (theme.Cycle, the same wrap-around
+// logic every pane used to run against its own copy), persists it via
+// saveTheme when one is wired in, and re-applies it to every pane via
+// applyTheme -- the single write, single fan-out this issue asks for. A
+// save failure is recorded in themeSaveErr rather than silently dropped
+// (AGENTS.md's "absence is a typed value" convention) but never blocks
+// the in-memory cycle itself or the panes' repaint: a user comparing
+// themes live must not be stopped by an unwritable config directory,
+// only told about it.
+func (m Model) cycleTheme() (Model, tea.Cmd) {
+	m.theme = theme.Cycle(m.theme)
+	m.themeSaveErr = ""
+	if m.saveTheme != nil {
+		if err := m.saveTheme(m.theme); err != nil {
+			m.themeSaveErr = err.Error()
+		}
+	}
+	return m.applyTheme(), nil
 }
 
 func toggleFocus(f focus) focus {
@@ -379,6 +483,14 @@ func (m Model) footer() string {
 		focusName = "content"
 	}
 	line := "[tab] focus:" + focusName + "  [f1] home [f2] board [f3] cost [f4] gallery  [q/ctrl+c] quit"
+	// themeSaveErr (agent-tui#51) is folded onto this same line rather
+	// than given its own -- footerHeight is a fixed one row every pane's
+	// own size budget is computed against (see resize()), so a second
+	// line here would silently shrink every pane by one row rather than
+	// actually reporting the failure.
+	if m.themeSaveErr != "" {
+		line += "  ! theme not saved: " + m.themeSaveErr
+	}
 	return legendStyle.Width(m.width).Render(truncate(line, m.width))
 }
 

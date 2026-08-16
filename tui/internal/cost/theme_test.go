@@ -55,26 +55,25 @@ func TestThemeSwitchChangesCostRender(t *testing.T) {
 	}
 }
 
-// TestKeyTCyclesThemeAtRuntime is agent-tui#25 scope item 3, driven -- see
-// board's identical test for the full rationale.
-func TestKeyTCyclesThemeAtRuntime(t *testing.T) {
-	prev := lipgloss.ColorProfile()
-	lipgloss.SetColorProfile(termenv.TrueColor)
-	t.Cleanup(func() { lipgloss.SetColorProfile(prev) })
-
+// TestKeyTRequestsThemeCycleWithoutMutatingLocalTheme is agent-tui#51's
+// replacement for the old TestKeyTCyclesThemeAtRuntime -- see rail's
+// identical test and theme.CycleRequestedMsg's doc comment for why this
+// package must no longer own the theme value.
+func TestKeyTRequestsThemeCycleWithoutMutatingLocalTheme(t *testing.T) {
 	m := New(func() (Snapshot, error) { return Snapshot{}, nil }).WithTheme(theme.Default, "")
 	next, _ := m.Update(fetchResultMsg{err: errors.New("fixture: unavailable")})
 	m = next.(Model)
-	before := m.View()
 
-	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
 	m = next.(Model)
-	after := m.View()
 
-	if before == after {
-		t.Fatal("pressing 't' did not change the cost panel's render -- runtime theme switch not wired")
+	if m.theme.ID != theme.Default.ID {
+		t.Fatalf("pressing 't' mutated m.theme to %q -- this pane must no longer own the theme value (see theme.CycleRequestedMsg)", m.theme.ID)
 	}
-	if m.theme.ID != theme.Cycle(theme.Default).ID {
-		t.Fatalf("after 't', m.theme = %q, want %q", m.theme.ID, theme.Cycle(theme.Default).ID)
+	if cmd == nil {
+		t.Fatal("pressing 't' returned a nil Cmd -- no theme.CycleRequestedMsg was requested")
+	}
+	if _, ok := cmd().(theme.CycleRequestedMsg); !ok {
+		t.Fatalf("pressing 't' returned a Cmd whose Msg is %T, want theme.CycleRequestedMsg", cmd())
 	}
 }
