@@ -352,6 +352,55 @@ RECONCILIATION_JSON=$(jq -nc \
       }
   ]')
 
+# --- lane models ------------------------------------------------------------
+# agent-supervisor#115: both worker lanes silently ran Opus instead of
+# Sonnet -- measured 2026-08-12, Opus was $470 of a $552 day against $167 for
+# comparable Sonnet volume -- and nothing caught it until a human read the
+# pane footers by hand. `lanes.sh --json` (LANES_JSON_OUT, already fetched
+# above for the delivered/idle reconciliation) now carries each lane's own
+# `model`, read from the harness's self-report on its VISIBLE screen -- see
+# harness/claude.sh for what that self-report actually is (a startup-splash
+# line, gone once the conversation scrolls it away) and why `unknown` is
+# consequently the common answer, not a bug. This section does NOT re-derive
+# that read; it only reports what lanes.sh already measured, and flags a
+# worker lane whose model is KNOWN and does not match what this estate's
+# harness/claude.sh launches lanes with by default.
+#
+# Report, not enforce (#115's own brief): a mismatch is surfaced as a normal
+# digest ERROR, the same severity `poller recovery: failed` gets above --
+# nothing here kills or restarts a lane. That is a separate decision with
+# its own blast radius.
+#
+# The Director's own lane is deliberately exempt, not flagged: Phase 2's
+# constraint is workers and reviewers on Sonnet, Director on Opus, and
+# `lanes.sh` already names the Director's own window `supervisor` -- a
+# state no worker lane can be classified into (see lanes.sh's
+# `SUPERVISOR_WINDOW` branch). Excluding that one state is enough; it is not
+# a second guess about which window is the Director.
+#
+# `unknown` is a real state and is never flagged as a mismatch -- flagging it
+# would make this section fire on every lane mid-conversation (the ordinary
+# case for Claude, per harness/claude.sh) rather than only on a model this
+# probe could actually read and found wrong. It is still carried in
+# MODEL_JSON below, on every lane, so a reader auditing the JSON directly
+# never sees a lane silently missing its model field -- #115's own "what
+# would make this wrong" #1.
+EXPECTED_WORKER_MODEL="${DIGEST_EXPECTED_MODEL:-sonnet}"
+MODEL_JSON=$(jq -nc --argjson lanes "$LANES_JSON_OUT" --arg expected "$EXPECTED_WORKER_MODEL" '
+  [ $lanes[] | (.model // "unknown") as $m | {
+      lane: (.window|tostring), window: .window, window_id: .window_id,
+      name: .name, state: .state, model: $m,
+      expected: (if .state == "supervisor" then null else $expected end),
+      flagged: (.state != "supervisor" and $m != "unknown" and $m != $expected)
+    }
+  ]')
+MODEL_FLAGGED_COUNT=$(jq '[.[] | select(.flagged)] | length' <<<"$MODEL_JSON")
+if [ "$MODEL_FLAGGED_COUNT" -gt 0 ] 2>/dev/null; then
+  while IFS= read -r line; do
+    note_error "lane model: $line"
+  done < <(jq -r --arg s "$SESSION" '.[] | select(.flagged) | "\($s):\(.window) (\(.name)) is running \(.model), expected \(.expected)"' <<<"$MODEL_JSON")
+fi
+
 # agent-supervisor#179: `verdict_for`, `author_lane_for`, `lane_relation` and
 # `repo_task_prefix` used to be defined here, purely for this digest's
 # REPORTING of verdict independence. `merge-pr.sh` needed the identical
@@ -494,6 +543,7 @@ DIGEST=$(jq -n \
   --arg stale "$(lane_line stale)" \
   --arg unknown "$(lane_line unknown)" \
   --argjson reconciliation "$RECONCILIATION_JSON" \
+  --argjson models "$MODEL_JSON" --arg expected_model "$EXPECTED_WORKER_MODEL" \
   --argjson prs "$PR_JSON" --argjson merged "$MERGED_JSON" --argjson errors "$ERR_JSON" '
   {checked: $checked,
    watchdog: {state:$wd_state, checked:$wd_checked, restarts:$wd_restarts, heartbeat:$wd_heartbeat,
@@ -505,6 +555,7 @@ DIGEST=$(jq -n \
    lanes: {free:$free, busy:$busy, blocked:$blocked, menu_blocked:$menu,
            dead:$dead, stale:$stale, service:$service, unknown:$unknown},
    reconciliation: {delivered_idle: $reconciliation},
+   lane_models: {expected: $expected_model, lanes: $models},
    prs: $prs, merged_since: $merged, errors: $errors,
    ok: ($errors | length == 0)}')
 
@@ -531,6 +582,15 @@ else
     # Printed on its own line rather than folded into `dead` because the
     # action differs -- restore.sh, and do not believe the name.
     "          stale=[\(.lanes.stale)]",
+    # #115: every lane model, always -- `unknown` prints in place rather
+    # than the lane being dropped from this line, the same "never omit, say
+    # unknown" rule the JSON side carries in lane_models. Only a worker lane
+    # (not the Directors own `supervisor` state) with a KNOWN model that
+    # does not match `.lane_models.expected` gets the `!=` marker; the
+    # matching ERROR line (if any) is what actually surfaces it as something
+    # to act on -- this line is the per-lane detail behind that count.
+    "models:   expected=\(.lane_models.expected)",
+    (.lane_models.lanes[] | "  \(.window) (\(.name)) model=\(.model)\(if .flagged then " [!= \(.expected)]" else "" end)"),
     (if (.reconciliation.delivered_idle|length) > 0 then "reconcile:" else empty end),
     (.reconciliation.delivered_idle[] | "  delivered-open \(.task) lane=\(.lane) idle=\(.idle_seconds)s; inspect pane, then record-completion --task \(.task)"),
     (if (.prs|length) == 0 then "prs:      none open" else "prs:" end),

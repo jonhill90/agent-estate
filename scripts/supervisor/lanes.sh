@@ -376,6 +376,7 @@ emit_rows() {
   for i in "${!IDX[@]}"; do
     local w="${IDX[$i]}" name="${NAME[$i]}" cmd="${CMD[$i]}" act="${ACTIVITY[$i]}" mode="${PANEMODE[$i]}" pid="${PANEPID[$i]}" wid="${WID[$i]}" path="${PANE_PATH[$i]}"
     local pane state age pane_lines pane_tail hidx busy_tail target
+    local model model_hidx model_match
     # #241: the captures below address the window by ID, not by index. The
     # list-panes call above and these two captures are separated by a whole
     # loop iteration per lane, and under `renumber-windows on` a window
@@ -417,6 +418,38 @@ emit_rows() {
     # line, which is the #65 discipline; this does not relax it, and taking a
     # second capture rather than reusing one keeps that impossible to blur.
     box=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_state)
+
+    # agent-supervisor#115: which model this pane is ACTUALLY running, read
+    # from the harness's own self-report on the VISIBLE screen ($pane_lines,
+    # the same capture already taken above -- never scrollback, the #65
+    # discipline this whole file is built on). Computed unconditionally here,
+    # independent of the state-classification chain below, so a lane still
+    # shows its model even in states (busy, blocked, unsent, ...) reached
+    # AFTER a harness is identified as well as before. `model_hidx` is a
+    # SEPARATE lookup from the `hidx` the classification chain below
+    # computes as a side effect of one of its own `elif` conditions -- reusing
+    # that one would make this depend on which branch of the chain happened
+    # to run, which is not this file's contract with its harness adapters.
+    #
+    # Fails closed at every step: no adapter for this pane's command, or the
+    # adapter has no HARNESS_MODEL_RE (an honest "not observed yet", see
+    # harness/codex.sh and harness/copilot.sh), or the regex simply does not
+    # match the current screen (Claude's is splash-only -- see
+    # harness/claude.sh for why that is the common case, not a bug) all read
+    # `unknown`. Never a default of "sonnet" or any other guess: an
+    # unreadable model must not look the same as a correct one, per #115.
+    model=unknown
+    if model_hidx=$(harness_index_for_command "$cmd" 2>/dev/null) \
+      && [ -n "${H_MODEL_RE[$model_hidx]:-}" ]; then
+      model_match=$(grep -oE "${H_MODEL_RE[$model_hidx]}" <<<"$pane_lines" | tail -1)
+      if [ -n "$model_match" ]; then
+        # The regex's own first word is the model family (Opus/Sonnet/Haiku
+        # for Claude's HARNESS_MODEL_RE) -- lowercased so a caller can
+        # compare it directly against the estate's own lowercase convention
+        # (`--model sonnet`, CLAUDE_LANE_MODEL).
+        model=$(awk '{print tolower($1)}' <<<"$model_match")
+      fi
+    fi
 
     # Computed once, ahead of the branches below, so both the hung check and
     # the never-busy check (#112) below read the SAME sample rather than two
@@ -615,7 +648,11 @@ emit_rows() {
     # state needs that measured pane age; a task timestamp this system wrote
     # would be a ledger record, not observable pane state.
     age=$(( now_epoch - ${act:-now_epoch} ))
-    printf '%s\t%s\t%s\t%s\t%s\t%s\n' "$w" "$name" "$cmd" "$state" "$wid" "$age"
+    # `model` appended as a SIXTH new column, the same #241 discipline as
+    # `wid`/`age` before it: appended, not inserted, so every existing
+    # positional reader (the plain table, --free, --blocked) keeps the field
+    # numbers it already has.
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$w" "$name" "$cmd" "$state" "$wid" "$age" "$model"
   done
 }
 
@@ -671,10 +708,14 @@ case "$MODE" in
     # malformed-under-launchd bug did, just from a different cause. Guarded
     # here rather than in awk: zero real rows must print `[]`, not run the
     # loop body once for a blank line that was never a lane.
+    # agent-supervisor#115: `model` is the 7th column (appended, not
+    # inserted -- see the comment at its emission above), always present:
+    # `unknown` is a real string here, never an absent key, so a consumer
+    # cannot mistake "the field was omitted" for "the field says unknown".
     printf '['
     if [ -n "$rows" ]; then
       awk -F'\t' 'BEGIN{c=0}
-        {if(c++)printf(",");printf("{\"window\":%s,\"window_id\":\"%s\",\"name\":\"%s\",\"command\":\"%s\",\"state\":\"%s\",\"idle_seconds\":%s}",$1,$5,$2,$3,$4,$6)}
+        {if(c++)printf(",");printf("{\"window\":%s,\"window_id\":\"%s\",\"name\":\"%s\",\"command\":\"%s\",\"state\":\"%s\",\"idle_seconds\":%s,\"model\":\"%s\"}",$1,$5,$2,$3,$4,$6,$7)}
         END{}' <<<"$rows"
     fi
     printf ']\n' ;;

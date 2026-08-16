@@ -69,3 +69,12 @@ HARNESS_OPTION_ROW_RE=
 HARNESS_MENU_ENTER_RE=
 HARNESS_MENU_TAIL=6
 HARNESS_TEXT_PROMPT_RE=
+
+# agent-supervisor#115: NOT WIRED, same posture as harness/codex.sh's note.
+# Copilot's own footer already carries a trailing `Claude Sonnet 5` in both
+# the ready and busy captures quoted above, but #115's incident and this
+# estate's fleet are Claude-only -- left unset rather than guessed at from
+# those captures without re-verifying the exact trailing-text shape live.
+# Unset reads `unknown` for every copilot lane, the correct default until
+# that capture is done.
+HARNESS_MODEL_RE=

@@ -96,3 +96,15 @@ HARNESS_MENU_TAIL=6
 # menu-blocked, lanes.sh's documented safe default, same as an unrecognised
 # Claude one.
 HARNESS_TEXT_PROMPT_RE=
+
+# agent-supervisor#115: NOT WIRED. Codex's own ready-shape footer already
+# carries the model on its last line every tick (`gpt-5.5 medium · <cwd>`,
+# see HARNESS_READY_RE above) -- unlike Claude's splash-only self-report, a
+# real HARNESS_MODEL_RE here would be reliable rather than launch-moment-only.
+# #115's own incident and this estate's fleet are Claude-only, so this is
+# left unset rather than guessed at from the READY_RE comment's captures
+# without re-verifying the exact column split live. An unset H_MODEL_RE
+# reads `unknown` for every codex lane, which is the correct, honest default
+# until that capture is done -- not a regression, since nothing reads model
+# for codex lanes today either.
+HARNESS_MODEL_RE=

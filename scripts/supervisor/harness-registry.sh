@@ -19,7 +19,17 @@
 # Sets, all parallel and keyed by POSITION:
 #   HARNESS_IDS  H_COMMAND_RE  H_READY_RE  H_BUSY_RE  H_BUSY_TAIL
 #   H_BLOCKED_MARKERS  H_OPTION_ROW_RE  H_MENU_ENTER_RE  H_MENU_TAIL
-#   H_TEXT_PROMPT_RE  H_LAUNCH_CMD  H_RESUME_CMD  H_SEND_LITERAL
+#   H_TEXT_PROMPT_RE  H_LAUNCH_CMD  H_RESUME_CMD  H_SEND_LITERAL  H_MODEL_RE
+#
+# agent-supervisor#115: H_MODEL_RE is the harness's own self-report of which
+# model it is actually running, matched against the pane's VISIBLE screen
+# (the same capture lanes.sh already takes, never scrollback -- see #65 for
+# why a wider window matches text the pane merely printed). Empty is a real
+# answer, not a gap to silently paper over: it says this harness has no
+# observed self-report to key on at all, and a caller must read that as
+# "unknown", never assume compliant. See harness/claude.sh for what IS
+# observed (splash-screen only) and why that leaves `unknown` the common
+# case rather than a bug in the matcher.
 # and defines harness_index_for_command / harness_index_for_name.
 #
 # agent-dotfiles#237 loads the two COMMAND fields into arrays for the first
@@ -50,7 +60,7 @@
 HARNESS_REGISTRY_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_IDS=(); H_COMMAND_RE=(); H_READY_RE=(); H_BUSY_RE=(); H_BUSY_TAIL=()
 H_BLOCKED_MARKERS=(); H_OPTION_ROW_RE=(); H_MENU_ENTER_RE=(); H_MENU_TAIL=(); H_TEXT_PROMPT_RE=()
-H_LAUNCH_CMD=(); H_RESUME_CMD=(); H_SEND_LITERAL=()
+H_LAUNCH_CMD=(); H_RESUME_CMD=(); H_SEND_LITERAL=(); H_MODEL_RE=()
 # LANES_HARNESS_DIR is the name `lanes.sh` has always used and its tests still
 # set (they point it at a MUTATED copy of the adapters to prove one adapter's
 # breakage cannot move another harness's lane). Kept as an alias so that
@@ -60,7 +70,8 @@ for _hf in "$HARNESS_DIR"/*.sh; do
   [ -e "$_hf" ] || continue
   unset HARNESS_NAME HARNESS_COMMAND_RE HARNESS_READY_RE HARNESS_BUSY_RE HARNESS_BUSY_TAIL \
         HARNESS_BLOCKED_MARKERS HARNESS_OPTION_ROW_RE HARNESS_MENU_ENTER_RE HARNESS_MENU_TAIL \
-        HARNESS_TEXT_PROMPT_RE HARNESS_LAUNCH_CMD HARNESS_RESUME_CMD HARNESS_SEND_LITERAL
+        HARNESS_TEXT_PROMPT_RE HARNESS_LAUNCH_CMD HARNESS_RESUME_CMD HARNESS_SEND_LITERAL \
+        HARNESS_MODEL_RE
   # shellcheck disable=SC1090
   . "$_hf"
   : "${HARNESS_NAME:?$_hf did not set HARNESS_NAME}"
@@ -79,6 +90,7 @@ for _hf in "$HARNESS_DIR"/*.sh; do
   H_LAUNCH_CMD+=("${HARNESS_LAUNCH_CMD:-}")
   H_RESUME_CMD+=("${HARNESS_RESUME_CMD:-}")
   H_SEND_LITERAL+=("${HARNESS_SEND_LITERAL:-0}")
+  H_MODEL_RE+=("${HARNESS_MODEL_RE:-}")
 done
 unset _hf
 
