@@ -110,14 +110,36 @@ is discoverable by reading the directory.
    done by the same agent.
 
 10. **A lane identifies itself by matching the ledger's `worktree_path`
-    against its own `cwd`, not by asking tmux who it is.** `cli.py
-    worktree-lane --path "$(pwd)"` (`Ledger.get_task_for_worktree`) is the
-    correct self-lookup. `tmux display-message` **without an explicit `-t`**
-    answers for the session's *currently active* window, not the caller's own
-    — a background or non-focused pane gets someone else's answer. That
-    produced six mis-stamped `Review-Lane:` trailers in one day (#187) before
-    the merge gate's independence check caught them as suspicious self-reviews
-    (see invariant 9) rather than silently trusting them.
+    against its own `cwd`, not by asking tmux who it is.** `tmux
+    display-message` **without an explicit `-t`** answers for the session's
+    *currently active* window, not the caller's own — a background or
+    non-focused pane gets someone else's answer. That produced six
+    mis-stamped `Review-Lane:` trailers in one day (#187) before the merge
+    gate's independence check caught them as suspicious self-reviews (see
+    invariant 9) rather than silently trusting them.
+
+    The correct self-lookup is `cli.py worktree-lane --path "$(pwd)"
+    --include-reviews` (`Ledger.get_task_for_worktree(..., include_reviews=
+    True)`). The `--include-reviews` flag matters: `worktree-lane` defaults
+    to `False` because its real caller, `dispatch.sh --reviews-pr`, is
+    asking a DIFFERENT question — "who could plausibly have AUTHORED this
+    PR?" — and a review task can never be its own PR's author (#76), so the
+    default filters review-shaped tasks out. A REVIEWING lane's own
+    worktree is legitimately parked on a task that looks like a review, so
+    that same filter answers `known:false` for a row the ledger actually
+    has if the flag is left off — measured directly (#212), from the exact
+    situation #187 was about, before this flag existed:
+
+    ```
+    $ cli.py worktree-lane --path "$(pwd)"
+    {"known":false,"lane":null,"path":".../ad-211-rev212-14268","task":null}
+    $ cli.py worktree-lane --path "$(pwd)" --include-reviews
+    {"known":true,"lane":"agent-supervisor:6","path":"...","task":"as211-rev212"}
+    ```
+
+    Do not remove the default filter to "fix" this — that reintroduces #76
+    (a review task answering as a PR's author). The flag exists so the two
+    questions share one lookup without sharing one answer.
 
 ## The failure mode this codebase produces most
 
