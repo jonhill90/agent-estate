@@ -17,6 +17,15 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISPATCH="$HERE/../../scripts/supervisor/dispatch.sh"
+# agent-supervisor#227: dispatch.sh now runs the quota gate before doing
+# anything else. Every case in this file is testing something OTHER than the
+# gate, so it needs a deterministic SAFE verdict, not the real quota.sh
+# calling out to codexbar against whatever account state happens to be
+# logged in on this machine. Exported so it covers every "$DISPATCH"
+# invocation below, including the ones outside run() that build their own
+# env block by hand. The dedicated gate tests live in
+# test_dispatch_quota_gate.sh and override this per case.
+export QUOTA_GATE="$HERE/stubs/quota-safe"
 pass=0; fail=0
 
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
