@@ -26,6 +26,14 @@ DISPATCH="$HERE/../../scripts/supervisor/dispatch.sh"
 # env block by hand. The dedicated gate tests live in
 # test_dispatch_quota_gate.sh and override this per case.
 export QUOTA_GATE="$HERE/stubs/quota-safe"
+# agent-supervisor#171: this suite is specifically about the tmux/send-keys
+# flow (window naming, verified_type/verified_submit, the #241 id-vs-index
+# split, ...) -- none of it stubs a `claude` binary, so leaving the new
+# claude-print default on would route every plain single-issue claude case
+# below at whatever REAL `claude` happens to be on this machine's PATH.
+# `DISPATCH_LIVE_PANE=1` is `--live-pane` for every call this file makes;
+# see dispatch.sh's own comment on `LIVE_PANE`'s initialization.
+export DISPATCH_LIVE_PANE=1
 pass=0; fail=0
 
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }

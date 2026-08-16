@@ -104,11 +104,49 @@
 #              SAME PR; naming two different PRs is refused, the same
 #              "neither is an inference this script may resolve" posture
 #              `--reviews-pr`/`--not-a-review` already takes.
+# --live-pane
+#              (DISPATCH_LIVE_PANE=1 in the environment is the same thing
+#              for every call this process makes, not just one -- see that
+#              variable's own comment where LIVE_PANE is initialized.)
+#              agent-supervisor#171: keep this dispatch on tmux/`send-keys`,
+#              the pane the candidate lane already is, even when the winning
+#              candidate's harness is `claude`. Default (this flag omitted):
+#              when step 1 below picks a FREE `claude` lane and this is a
+#              plain, single-issue, non-PR-scoped dispatch, dispatch.sh
+#              releases that candidate untouched and instead mints a brand
+#              NEW `claude-print` lane for #<issue> (same mechanism
+#              `dispatch-claude-print.sh` proved out for #171/#215) -- no
+#              tmux pane, no send-keys, nothing left in an input box to
+#              strand. `--live-pane` is the explicit opt-out for the roles
+#              that genuinely need the candidate's persistent, watchable
+#              pane: one that must be INTERRUPTED mid-turn, one that must
+#              answer an INTERACTIVE PROMPT (a usage-limit dialog, a
+#              permission request, a menu), or one WATCHED AND RESUMED BY A
+#              HUMAN directly (`cli.py`'s own `adapter_for_harness` comment).
+#              Measured against this script's own job (#255): an ordinary
+#              `dispatch.sh <issue>` call is never any of the three -- it
+#              claims an issue, hands a lane a brief, and collects a PR, the
+#              same "dispatch-and-collect" shape as a review or a fix pass --
+#              so there is no lane PROPERTY this script can read back out of
+#              a pane to infer the three roles above; only the human
+#              dispatching knows a given call is one of them, which is why
+#              this is a caller decision, not something lanes.sh classifies.
+#              A review (`--reviews-pr`), a PR-scoped follow-up (`--pr`) or a
+#              multi-issue dispatch (`<issue>,<issue>...`) is left on the
+#              pre-#171 tmux flow regardless of this flag for now --
+#              `dispatch-claude-print.sh` does not yet speak any of those
+#              three shapes, and silently dropping one would be worse than
+#              routing it the old way; see agent-supervisor#171's own
+#              tracked follow-up.
 #
-# Exit 0 only when a lane has been sent a brief. Exit 1 on any refusal --
-# no free lane, an issue someone else already claimed, a worktree that could
-# not be created, a send that failed, or a review whose only free lane wrote
-# the PR under review.
+# Exit 0 only when a lane has been sent a brief -- over tmux/send-keys, or
+# (new, #171, default for a plain single-issue `claude` dispatch) over a
+# freshly minted `claude-print` lane. Exit 1 on any refusal -- no free lane,
+# an issue someone else already claimed, a worktree that could not be
+# created, a send that failed, a `claude-print` register/assign that could
+# not reach `claude` (this NEVER falls back to send-keys -- see
+# `dispatch-claude-print.sh`'s own header), or a review whose only free lane
+# wrote the PR under review.
 
 set -uo pipefail
 
@@ -184,6 +222,21 @@ fi
 REVIEWS_PR=""
 NOT_A_REVIEW=""
 PR=""
+# DISPATCH_LIVE_PANE=1 is `--live-pane` for every call this process makes,
+# without a flag at every call site -- the same "test override, env var,
+# same posture QUOTA_GATE/DISPATCH_SETTLE/DISPATCH_RESPAWN_SETTLE already
+# take elsewhere in this file" shape, not a second, competing mechanism.
+# EXISTS BECAUSE OF WHAT #171 MEASURED BUILDING THIS: pointing this file's
+# own pre-existing test suites (test_dispatch.sh and siblings -- none of
+# them stub a `claude` binary, because before #171 nothing in dispatch.sh's
+# own flow ever ran one) at the new default invoked whatever real `claude`
+# happened to be on this machine's PATH -- a live, billed subprocess call
+# from inside a test, which is never acceptable. Those suites now export
+# this for every case (see their own `run()`), so their hundreds of
+# assertions keep testing the tmux flow they were written for; nothing
+# about their coverage of #241/#212/#159/etc. changed. A real caller with
+# no reason to force the old pane sets nothing and gets the new default.
+LIVE_PANE="${DISPATCH_LIVE_PANE:-}"
 POSITIONAL=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -215,6 +268,15 @@ while [ $# -gt 0 ]; do
       fi
       REVIEWS_PR="$2"
       shift 2
+      ;;
+    --live-pane)
+      # agent-supervisor#171. The opt-OUT: keep this dispatch on the
+      # candidate lane's own tmux pane (the pre-#171 behaviour, unchanged)
+      # instead of the new default below, which routes a fresh `claude`
+      # dispatch over `claude-print` and leaves the candidate pane untouched.
+      # Takes no value, same shape as --not-a-review.
+      LIVE_PANE=1
+      shift
       ;;
     --not-a-review)
       # agent-supervisor#101. Takes no value, so it has none of the dangling-
@@ -1224,6 +1286,72 @@ if [[ ! "$LANE_TARGET" =~ :@[0-9]+$ ]]; then
   echo "dispatch: an empty or index-shaped target is refused: an empty tmux target hits the ACTIVE window, which is the supervisor" >&2
   release_lane_claim
   exit 1
+fi
+
+# --- 1.5. flip the default (agent-supervisor#171): a fresh `claude` dispatch
+# goes over `claude-print`, not this candidate's tmux pane ------------------
+#
+# THE ROLES THAT MUST KEEP A LIVE PANE, NAMED HERE, IN CODE (#171's own
+# brief asks for this, not left in a comment elsewhere): a lane that must be
+# INTERRUPTED mid-turn, a lane that must answer an INTERACTIVE PROMPT (a
+# usage-limit dialog, a permission request, a menu), or a lane WATCHED AND
+# RESUMED BY A HUMAN directly -- `cli.py`'s own `adapter_for_harness` comment
+# names the same three. dispatch.sh's own job -- claim an issue, hand a lane
+# a brief, collect a PR -- is never one of them (#255 measured this: "almost
+# everything in this estate is dispatch-and-collect"), and there is no lane
+# PROPERTY this script can read back out of a pane to auto-detect the three
+# roles above -- only the human dispatching knows a given call is one of
+# them. So `--live-pane` is a CALLER decision (this dispatch keeps the old
+# tmux flow below, unchanged), never something inferred from the pane.
+#
+# WHY THE CANDIDATE IS RELEASED, NOT USED: `$LANE`/`$LANE_TARGET` are a real
+# tmux pane from the fixed, standing pool -- one of the "existing lanes"
+# #171's brief says not to touch. Routing THIS dispatch over `claude-print`
+# instead means that pane is never respawned, never sent a keystroke, and
+# never recorded against -- `release_lane_claim` (already wired to this
+# script's EXIT trap) clears its ledger claim the moment this branch exits,
+# leaving it exactly as free as it was before the loop above found it, for
+# a later dispatch (one that passes --live-pane) to actually use.
+#
+# WHY GATED TO A PLAIN, SINGLE-ISSUE, NON-PR-SCOPED DISPATCH:
+# `dispatch-claude-print.sh` (the mechanism this calls into) does not speak
+# `--reviews-pr`'s author-exclusion bookkeeping, `--pr`'s PR-scoped source
+# recording, or a comma-joined multi-issue list -- see its own usage
+# comment. Falling through to the pre-#171 tmux flow for those three shapes
+# is a known, tracked scope boundary (agent-supervisor#171), not a silent
+# fallback: nothing has failed yet at this point, so this is a routing
+# choice made BEFORE any commitment, the opposite of the forbidden kind of
+# fallback (a REAL claude-print failure below never falls back to send-keys
+# -- see the `exit $?` a few lines down and dispatch-claude-print.sh's own
+# fail-closed header).
+if [ "$LANE_HARNESS" = claude ] && [ -z "$LIVE_PANE" ] \
+    && [ "${#ISSUES[@]}" -eq 1 ] && [ -z "$REVIEWS_PR" ] && [ -z "$PR" ]; then
+  # `dispatch-claude-print.sh` requires <repo> non-empty (its own usage
+  # error otherwise); dispatch.sh itself allows [repo] to be omitted and
+  # left for `gh`/`claim.sh` to resolve from the working directory. Resolved
+  # here the same way, from $REPO_PATH -- and if it cannot be resolved, this
+  # falls through to the pre-#171 tmux flow rather than refusing the whole
+  # dispatch over a routing decision, not a failure.
+  CLAUDE_PRINT_REPO="$REPO"
+  if [ -z "$CLAUDE_PRINT_REPO" ]; then
+    CLAUDE_PRINT_REPO=$(cd "$REPO_PATH" 2>/dev/null && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) || CLAUDE_PRINT_REPO=""
+  fi
+  if [ -z "$CLAUDE_PRINT_REPO" ]; then
+    echo "dispatch: claude lane $LANE selected, but [repo] could not be resolved for claude-print -- falling through to $LANE's own tmux pane for #$ISSUE_ARG (agent-supervisor#171)" >&2
+  elif ! command -v claude >/dev/null 2>&1; then
+    # FAIL CLOSED AND LOUDLY (#171's own guard): no `claude` binary on PATH
+    # means the new default cannot run at all -- this refuses the dispatch
+    # rather than silently falling back to $LANE's tmux pane, which would
+    # make the ledger's absence of a claude-print row look like a choice
+    # instead of a missing binary. `--live-pane` is the way to actually ask
+    # for the tmux pane; a missing binary is not that ask.
+    echo "dispatch: claude lane $LANE selected but no 'claude' binary on PATH -- refusing rather than falling back to send-keys (agent-supervisor#171); #$ISSUE_ARG was NOT dispatched" >&2
+    exit 1
+  else
+    echo "dispatch: claude lane $LANE selected -- routing #$ISSUE_ARG over claude-print instead (agent-supervisor#171); $LANE stays free for --live-pane work" >&2
+    "$HERE/dispatch-claude-print.sh" "$ISSUE_ARG" "$SLUG" "$BRIEF" "$CLAUDE_PRINT_REPO" "$REPO_PATH"
+    exit $?
+  fi
 fi
 
 # --- 2. the claim, before anything else is built --------------------------

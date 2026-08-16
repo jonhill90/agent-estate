@@ -16,6 +16,10 @@ CLI="$HERE/../../scripts/supervisor/cli.py"
 # agent-supervisor#227: give every dispatch here a deterministic SAFE quota
 # verdict instead of calling the real codexbar. See test_dispatch.sh for why.
 export QUOTA_GATE="$HERE/stubs/quota-safe"
+# agent-supervisor#171: this suite exercises the ledger writes a tmux
+# dispatch makes and stubs no `claude` binary -- see test_dispatch.sh's own
+# comment on this same override.
+export DISPATCH_LIVE_PANE=1
 pass=0; fail=0
 
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
