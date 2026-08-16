@@ -373,13 +373,17 @@ def _raising_runner(cmd):
     raise RuntimeError(f"no stub for command: {cmd!r}")
 
 
-def _comment_runner(*, reviews=None, comments=None, author=None):
-    """A `runner` for `gh pr view ... --json reviews,comments,author` --
-    agent-supervisor#53. Raises for anything else, the same discipline
-    `_reviews_runner` uses, so a test that does not opt into the rebase
-    comparison gets a fail-closed "cannot compute" rather than a stub
-    silently answering for a call it was never given."""
-    payload = json.dumps({"reviews": reviews or [], "comments": comments or [], "author": author or {}})
+def _comment_runner(*, reviews=None, comments=None, author=None, commits=None):
+    """A `runner` for `gh pr view ... --json reviews,comments,author,commits`
+    -- agent-supervisor#53, `commits` added by #213 so the comment-verdict
+    freshness backstop has PR commit timestamps to compare against. Raises
+    for anything else, the same discipline `_reviews_runner` uses, so a
+    test that does not opt into the rebase comparison gets a fail-closed
+    "cannot compute" rather than a stub silently answering for a call it
+    was never given."""
+    payload = json.dumps(
+        {"reviews": reviews or [], "comments": comments or [], "author": author or {}, "commits": commits or []}
+    )
 
     def runner(cmd):
         if cmd[:3] == ["gh", "pr", "view"]:
@@ -474,16 +478,168 @@ class GithubCommentVerdictTests(unittest.TestCase):
     def test_a_stale_review_falls_back_to_a_comment_verdict(self):
         """A review filed against a superseded head has nothing decisive to
         say (#218) -- a fresh `**Verdict:` comment must still be found
-        rather than the PR reading `unknown` forever."""
+        rather than the PR reading `unknown` forever. The comment carries a
+        `Reviewed-SHA:` trailer matching `head_sha` (#213) so this test
+        keeps exercising ITS OWN guard -- the review-to-comment fallback --
+        without also tripping the freshness guard #213 added to the comment
+        path itself; that guard has its own tests below."""
         old_sha = "a" * 40
         head_sha = "b" * 40
         reviews = [{"state": "APPROVED", "commit": {"oid": old_sha}}]
-        comments = [{"author": {"login": "codex"}, "body": "**Verdict: REQUEST CHANGES**"}]
+        comments = [{"author": {"login": "codex"}, "body": f"**Verdict: REQUEST CHANGES**\nReviewed-SHA: {head_sha}"}]
         source = GithubReviewVerdictSource(
             runner=_comment_runner(reviews=reviews, comments=comments), patch_id=lambda diff: None
         )
         result = source.verdict(repo=REPO, number=1, head_sha=head_sha)
         self.assertEqual(result["verdict"], "rejected")
+
+    def test_regression_213_stale_comment_approval_survives_a_later_push_reads_unknown_not_approved(self):
+        """agent-supervisor#213's measured shape: PRs #204 and #207 both
+        merged with an APPROVE **comment** (the codex lane's own posting
+        path -- #53) written minutes BEFORE the commit that actually got
+        merged. `_review_verdict` already compared `head_sha` (#218); the
+        comment path never did, so `ci_gate.py`'s reason ("all checks
+        green at <sha>") was the only thing anyone read, and it is true
+        while answering a question nobody asked. No `Reviewed-SHA:`
+        trailer here -- this is the timestamp backstop's job: a commit
+        landed newer than the verdict, so it must refuse and name both."""
+        head_sha = "c" * 40
+        comments = [
+            {
+                "author": {"login": "codex"},
+                "body": "**Verdict: APPROVE**\nReview-Lane: t:4",
+                "createdAt": "2026-08-15T22:48:01Z",
+            }
+        ]
+        commits = [{"oid": head_sha, "committedDate": "2026-08-15T22:56:42Z"}]
+        source = GithubReviewVerdictSource(runner=_comment_runner(comments=comments, commits=commits))
+        result = source.verdict(repo=REPO, number=204, head_sha=head_sha)
+        self.assertEqual(result["verdict"], "unknown")
+        self.assertNotEqual(result["verdict"], "approved")
+        self.assertIn(head_sha, result["detail"])
+
+    def test_mutation_213_a_freshness_check_that_always_passes_must_turn_this_red(self):
+        """The bar #213 sets for the comment path, mirroring #218's own
+        mutation test for the review-object path: the same APPROVE
+        comment, at the same `head_sha`, must answer differently depending
+        only on whether a newer commit exists. A freshness check that
+        always agrees (or is never consulted) collapses these to the same
+        verdict and this test goes red."""
+        head_sha = "c" * 40
+        comments = [
+            {
+                "author": {"login": "codex"},
+                "body": "**Verdict: APPROVE**\nReview-Lane: t:4",
+                "createdAt": "2026-08-15T22:48:01Z",
+            }
+        ]
+        stale = GithubReviewVerdictSource(
+            runner=_comment_runner(comments=comments, commits=[{"oid": head_sha, "committedDate": "2026-08-15T22:56:42Z"}])
+        ).verdict(repo=REPO, number=1, head_sha=head_sha)
+        fresh = GithubReviewVerdictSource(
+            runner=_comment_runner(comments=comments, commits=[{"oid": head_sha, "committedDate": "2026-08-15T20:00:00Z"}])
+        ).verdict(repo=REPO, number=1, head_sha=head_sha)
+        self.assertNotEqual(stale["verdict"], fresh["verdict"])
+
+    def test_regression_213_reviewed_sha_trailer_matching_head_wins_over_timestamp_backstop(self):
+        """The honest mechanism (#213 proposal 1): a reviewer who states the
+        SHA their verdict covers is believed on IDENTITY, not timing -- a
+        commit landing after the comment does not matter once the trailer
+        names the current head."""
+        head_sha = "d" * 40
+        comments = [
+            {
+                "author": {"login": "codex"},
+                "body": f"**Verdict: APPROVE**\nReview-Lane: t:4\nReviewed-SHA: {head_sha}",
+                "createdAt": "2026-08-15T00:00:00Z",
+            }
+        ]
+        commits = [{"oid": head_sha, "committedDate": "2026-08-16T00:00:00Z"}]
+        source = GithubReviewVerdictSource(runner=_comment_runner(comments=comments, commits=commits))
+        result = source.verdict(repo=REPO, number=1, head_sha=head_sha)
+        self.assertEqual(result["verdict"], "approved")
+
+    def test_regression_213_reviewed_sha_trailer_mismatch_refuses_naming_both_shas(self):
+        """Fail closed (#213's explicit requirement): a `Reviewed-SHA:` that
+        does not match `head_sha`, and whose content cannot be confirmed
+        unchanged (no base-branch comparison available to this stub),
+        refuses -- and the refusal names BOTH the SHA the verdict covered
+        and the SHA being merged, not just "all checks green"."""
+        old_sha = "e" * 40
+        head_sha = "f" * 40
+        comments = [
+            {
+                "author": {"login": "codex"},
+                "body": f"**Verdict: APPROVE**\nReview-Lane: t:4\nReviewed-SHA: {old_sha}",
+                "createdAt": "2026-08-15T00:00:00Z",
+            }
+        ]
+        source = GithubReviewVerdictSource(runner=_comment_runner(comments=comments))
+        result = source.verdict(repo=REPO, number=1, head_sha=head_sha)
+        self.assertEqual(result["verdict"], "unknown")
+        self.assertIn(old_sha, result["detail"])
+        self.assertIn(head_sha, result["detail"])
+
+    def test_regression_213_reviewed_sha_trailer_mismatch_but_content_unchanged_since_rebase_promotes(self):
+        """A `Reviewed-SHA:` trailer gets the same rebase tolerance #226 gave
+        the review-object path: identity is about CONTENT, and a pure
+        rebase changes every SHA on a branch without changing what was
+        reviewed."""
+        old_sha, head_sha = "a" * 40, "c" * 40
+        payload = json.dumps(
+            {
+                "reviews": [],
+                "comments": [
+                    {
+                        "author": {"login": "codex"},
+                        "body": f"**Verdict: APPROVE**\nReview-Lane: t:4\nReviewed-SHA: {old_sha}",
+                        "createdAt": "2026-08-15T00:00:00Z",
+                    }
+                ],
+                "commits": [{"oid": head_sha, "committedDate": "2026-08-16T00:00:00Z"}],
+            }
+        )
+        runner = _api_runner(
+            reviews=payload,
+            branches={old_sha: ["old1", old_sha], head_sha: ["new1", head_sha]},
+            patches={
+                "old1": _patch("first", offset=10),
+                old_sha: _patch("second", offset=10),
+                "new1": _patch("first", offset=42),
+                head_sha: _patch("second", offset=77),
+            },
+        )
+        source = GithubReviewVerdictSource(runner=runner)
+        result = source.verdict(repo=REPO, number=1, head_sha=head_sha)
+        self.assertEqual(result["verdict"], "approved")
+        self.assertIn(old_sha, result["detail"])
+        self.assertIn(head_sha, result["detail"])
+
+    def test_regression_213_no_trailer_but_no_commit_newer_than_the_verdict_stays_approved(self):
+        """The timestamp backstop (#213 proposal 2) for a verdict comment
+        posted before this fix existed and therefore carries no
+        `Reviewed-SHA:` trailer: when nothing on the branch is newer than
+        the verdict, it still stands."""
+        head_sha = "d" * 40
+        comments = [
+            {
+                "author": {"login": "codex"},
+                "body": "**Verdict: APPROVE**\nReview-Lane: t:4",
+                "createdAt": "2026-08-15T23:00:00Z",
+            }
+        ]
+        commits = [{"oid": head_sha, "committedDate": "2026-08-15T22:00:00Z"}]
+        result = GithubReviewVerdictSource(runner=_comment_runner(comments=comments, commits=commits)).verdict(
+            repo=REPO, number=1, head_sha=head_sha
+        )
+        self.assertEqual(result["verdict"], "approved")
+
+    def test_regression_213_no_head_sha_given_preserves_pre_213_behaviour(self):
+        """A caller with no head to check against skips the freshness guard
+        entirely, same as the review-object side (#218)."""
+        comments = [{"author": {"login": "codex"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:4"}]
+        result = GithubReviewVerdictSource(runner=_comment_runner(comments=comments)).verdict(repo=REPO, number=1)
+        self.assertEqual(result["verdict"], "approved")
 
 
 class ParseVerdictCommentTests(unittest.TestCase):
