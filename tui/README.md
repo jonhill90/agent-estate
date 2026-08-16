@@ -1,245 +1,226 @@
 # agent-tui
 
-**A terminal application for the agent estate.** Left-rail session navigation,
-live lane state, and — over time — knowledge, memory and sandbox management.
+A terminal UI for the agent estate: reads [`agent-supervisor`](https://github.com/jonhill90/agent-supervisor)'s
+lane and session state over MCP and renders it. Go +
+[Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
-It **consumes** [`agent-supervisor`](https://github.com/jonhill90/agent-supervisor)
-over MCP and the RPC transport. It does not import supervisor internals, and the
-supervisor has no opinion about how a human sees it. Either side is removable.
+It consumes the supervisor; it does not import supervisor internals, and the
+supervisor has no opinion about how a human sees it. Either side is
+removable. Full technical design: `docs/SPEC.md`. What the product is for:
+`docs/PRD.md`. Arrival policy for an agent working in this repo: `AGENTS.md`.
 
-Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea).
+**This section describes what is actually on `main` today, checked against
+`origin/main` `d5e4dab`, verified 2026-08-16T01:21:59Z.** Where intent and
+code diverge, that is said explicitly — see "What this is not, yet" below,
+and `docs/SPEC.md`'s "Gap between intent and code" for the full accounting.
 
-## Status
+*This replaces an earlier README that opened "A terminal application for
+the agent estate" — aspirational, describing the one-app-with-navigation
+intent rather than what shipped. This rewrite leads with the four-programs
+reality instead, per the grounding review's Finding 1 (cited above).*
 
-**24 shipped: glyph sets 1 (Signal) and 5 (Nerd Font) are the keepers.**
-Jon judged all five variants from the running rail, not the gallery, and
-the verdict was to drop `ascii`, `blocks` and `emoji` outright rather than
-merely deprioritise them -- see `internal/lane/variants.go`'s doc comment
-on `Variants` for the recorded verdict and the reasoning against a
-"deprioritised but still on the cycler" half-measure. The `[1-N]` glyph
-picker's label is derived from `len(lane.Variants)`, so it now reads
-`glyphs 1/2` on its own, with no special-casing needed to keep it honest.
-Nerd Font flagging (agent-tui#11/#16's gallery) is untouched by this --
-`internal/lane/gallery.go`'s `Classify` and `Candidates` don't enumerate
-`Variants` by name, so the `[NF]` flag on the Nerd Font set's glyphs
-still applies exactly as before. See "The glyph picker" below.
+## What it is today
 
-**25 shipped: themes, per-user and switchable at runtime.** #27 (below)
-already landed the per-user, persisted half of this issue -- role-based
-colours, `theme.Load`'s config file, and the honest-failure notice were
-all in place before this issue's own lane started. What #25 adds on top:
-a `t` key in every screen (rail, board, cost, gallery) that cycles
-`theme.All` in memory, live against whatever is already on screen -- same
-shape as the existing `[1-N]` glyph-set/layout/view pickers and the rail's
-`[g]` grouping cycle. It is deliberately NOT persistence: pressing `t`
-never calls `theme.Save`, so a user's `theme.json` is untouched until they
-edit it themselves ("a theme that only an agent can change... is not this
-issue" cuts both ways -- a runtime compare that quietly rewrote your
-config would be the same defect from the other direction). This answers
-the issue's scope item 3, "switchable at runtime as well as at startup,
-if it is cheap... he has consistently wanted to compare rather than
-commit." See `theme.Cycle` (`internal/theme/registry.go`) and each
-package's `TestKeyTCyclesThemeAtRuntime` for the driven proof -- a real
-key delivered to a real `Update`, then a real `View()` actually differing,
-not a struct inspected in isolation.
-
-**27 shipped: aesthetics are data, not code.** Every look-and-feel literal
-in the render path -- colour, border character, chrome padding, the
-director's "★" mark -- now lives in `internal/theme` as one of two
-`theme.Theme` values (`signal-dark`, today's appearance unchanged, and
-`mono-contrast`, a high-contrast verification theme that exists to prove
-the routing, not to be used day to day). `internal/board`, `internal/rail`,
-`internal/cost` and `internal/gallery` ask for a `theme.Role`
-(`RoleError`, `RoleDirector`, `RoleSelectedBG`, ...) at render time; none of
-them names a hex value any more. Switching the whole look is a one-line
-edit to a user's config (`{"theme": "mono-contrast"}` at
-`$AGENT_TUI_THEME_CONFIG`, or `$XDG_CONFIG_HOME/agent-tui/theme.json`), not
-a change to any of those four packages -- see
-`internal/rail/theme_test.go`'s `TestThemeSwitchChangesEverySurface` for
-the driven, mutation-checked proof, and the matching per-package tests in
-`internal/board`, `internal/cost` and `internal/gallery`. A missing config
-renders exactly as before this existed; a malformed config or an unknown
-theme name renders the default theme and says so visibly, never silently
-(`internal/theme.Load`). Glyph sets (agent-tui#11/#16, Jon's picks from
-#24: Signal and set 5) were already data before this shipped and keep their
-own home in `internal/lane` -- this issue governs the chrome around them,
-not the glyphs themselves. The hill90 palette Jon actually wants is a
-follow-up now that the seam exists, not part of this drop (agent-tui#27:
-"do not invent a palette to ship with").
-
-**6 shipped: the task board, as a projection.** `agent-tui -board` renders
-a second screen -- five columns (Backlog, In progress, In review, Blocked,
-Done), grouped by repo, across every repo the estate touches. **A card's
-column is computed fresh on every fetch, never stored** -- there is no
-write path from this screen into GitHub or the ledger, and no fourth store:
-Backlog/In progress/Done come from GitHub issues and PRs (`gh issue|pr
-list`), In progress/lane linkage and cycle time come from the ledger's
-`tasks`/`source_tasks` tables (opened `sqlite3 -readonly`, never the live
-file), and Blocked additionally checks the same live `lanes` MCP payload
-the rail already fetches. See `internal/board/card.go`'s `Derive` for the
-whole rule table, and `agent-supervisor#127`/PR#130 for the reconciliation
-sweep this board depends on (`source_tasks` was write-once before that
-landed -- confirm `select source_state, status, count(*) from source_tasks
-group by 1,2` shows a distribution, not one row, before trusting a board
-built on a ledger the sweep hasn't touched).
-
-**10 shipped: the board LOOKS like a board.** Real bordered columns with
-cards, not a flat list -- six layout variants ship (`internal/board/
-layout.go`), picked live with **1-6**, same picker convention as the
-rail's glyph sets. Each varies column style (boxed / thin rules /
-whitespace-only), density, card shape (single-line / multi-line with
-metadata), colour theme (restrained / vivid), and grouping (by-column
-across every repo, or by-repo swimlanes -- the evolution of #6's old
-`by-repo` view):
-
-| # | id | what it's for |
-|---|----|----------------|
-| 1 (default) | `kanban-column` | the eye-candy default -- bordered columns, vivid per-column colour, one card per box |
-| 2 | `kanban-repo` | same look, swimlaned per repo |
-| 3 | `compact-column` | thin rules not boxes, one line per card, muted colour -- speed, or a small terminal |
-| 4 | `compact-repo` | compact's grouping, swimlaned |
-| 5 | `kanban-recent` | kanban, plus Done cards completed in the last 24h |
-| 6 | `whitespace-all` | no border characters at all, every Done card ever -- lightest to render |
-
-Closed items (`Done` cards) default to hidden -- shown only by picking a
-layout that says so (5 or 6 above), never a separate prompt.
-
-**Project selection** toggles which repos' cards show, letter keys beside
-each repo's name in the on-screen legend (`[a]`, `[b]`, ...), `[0]` to show
-every repo again. Selection is a pure filter over the already-fetched
-snapshot -- toggling a repo never triggers a new `gh`/ledger read.
-
-WIP is shown **per tmux session** (the part of a lane name before `:`),
-not globally -- two workers per session is the estate's real capacity, and
-a session running three is flagged `OVER` right on the board. A card that
-has sat in its current column two hours or more (`as#95`'s own case: it
-sat CONFLICTING for two hours before a human noticed) is marked `!` and
-colored -- in every layout, restrained theme included.
+Four separate `tea.NewProgram` entry points in `cmd/agent-tui/main.go`,
+selected by mutually exclusive command-line flags — **not one application
+with in-app navigation.** Switching screens means quitting and relaunching
+with a different flag.
 
 ```
 go build -o agent-tui ./cmd/agent-tui
+
+# the rail (default) -- every tmux session's lanes, live
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./agent-tui
+
+# the task board -- five columns, six layouts, needs a ledger COPY
 AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./agent-tui -board \
   -ledger /path/to/a/COPY/of/ledger.sqlite3
+
+# the cost panel -- no supervisor connection needed
+./agent-tui -cost
+
+# the glyph gallery -- no supervisor connection needed
+./agent-tui -gallery
 ```
 
-`-ledger` is always opened `sqlite3 -readonly` (a second line of defense
-behind pointing it at a copy in the first place), defaults to
-`$AGENT_TUI_LEDGER`, then `$AGENT_SUPERVISOR_STATE_DIR/ledger.sqlite3`.
-`-repositories` accepts the exact `SUPERVISOR_REPOSITORIES` shape
-agent-supervisor's own `.env.example` documents; unset, the board unions
-agent-supervisor's own `DEFAULT_REPOSITORIES` with every repo it discovers
-in the ledger's own `source_tasks.source_url` column, so a repo dispatched
-under an env override that was never persisted (agent-tui itself, measured
-while building this) still shows up without editing a flag.
+Run `./agent-tui -h` for every flag; `cmd/agent-tui/main.go`'s flag help
+strings are the authoritative, current documentation for each one — this
+README does not restate them.
 
-**5a shipped: the left rail.** `cmd/agent-tui` renders a left-anchored
-navigation rail (~28 columns) driven entirely by the supervisor's MCP
-surface — no second reader of tmux, no ledger access. Every state `lanes.sh`
-emits animates: a spinner on `busy`, a settled dot on `free`, glitch/pulse
-motion on `hung`/`dead`/`stale`/`broken` so they read as wrong at a glance
-instead of just printing the word. See `internal/lane/glyph.go` for the full
-state→glyph map and `internal/rail/model.go` for the Bubble Tea program.
+### The rail (default screen)
 
-**13 shipped: every tmux session, not one.** The rail regressed to a
-single-session list before anyone diffed it against the retired Python
-prototype — see [agent-tui#13](https://github.com/jonhill90/agent-tui/issues/13).
-It now reads the supervisor's `sessions` tool (`internal/rail.NewMultiSession`)
-and renders every tmux session grouped, `director` included and styled
-distinctly (`★`, gold accent — "something to make it special"), with an
-interim `supervised`/`unsupervised` marker per session (real ledger
-evidence, not agent-supervisor#153's own marker, which had not landed when
-this shipped — see `sessions.sh` and `lane.Session`'s doc comments for
-exactly what it proves and doesn't). Selection (`j`/`k`) spans every
-session's lanes as one list; `g` cycles the grouping style
-(flat-with-headers / indented tree — collapsible is a named gap, not
-shipped). `-board` is unaffected: it still reads `lanes` for one session.
+A left-anchored navigation rail (~28 columns, `rail.RailWidth`), driven
+entirely by the supervisor's `sessions` and `lanes` MCP tools. No second
+reader of tmux, no ledger access beyond the optional per-lane task text.
+Every state in `internal/lane/states.go`'s `AllStates` (counted, not
+hardcoded here — 14 as of `d5e4dab`; `internal/lane/variants.go`'s
+`init()` guard checks the same list, so a state added later can't fall out
+of sync with this doc) animates distinctly: a spinner on `busy`, a settled
+dot on `free` (`dead`, `service`, `supervisor`, and `unknown` are also
+`MotionStill`), glitch motion on `hung`/`broken`, pulse on `stale` and the
+blocked states — so a wrong state reads as wrong at a glance rather than
+requiring the word to be read. Not verified against a live rendered
+session — this is read from `signalSet`'s `Motion` field per state, not
+watched as animated frames. Sessions are grouped,
+`director` styled distinctly (`★`, gold accent), with an interim
+supervised/unsupervised marker per session.
 
+**Anchor-feature status:** `[n]ew` and `[x]remove` are wired and tested
+through `Model.Update`. `[a]ttach` and `[d]etach` are **not currently
+bound to any key** — they were removed in `3137206` because MCP's stdio
+transport gives the supervisor no client identity to attach/detach
+correctly, so the old bindings silently acted on an arbitrary tmux client
+while reporting success. `session.Interface` still declares both methods;
+`agent-supervisor#189` tracks the fix this needs before they can come back
+honestly. See `AGENTS.md` and `docs/SPEC.md` for the detail.
+
+Live pickers, all driven by real keys against real state (verified through
+`Model.Update` tests, not merely rendered):
+
+- **`[1-2]`** cycles the glyph set — `signal` (default) or `nerd` (Font
+  Awesome glyphs via a Nerd Font's Private Use Area, flagged `[NF]` in the
+  gallery). `ascii`, `blocks`, and `emoji` were judged live against a
+  running rail and deleted outright, not merely deprioritised —
+  `internal/lane/variants.go`.
+- **`[g]`** cycles session grouping (flat-with-headers / indented tree).
+- **`[w]`** cycles the rail's content reading between work-centric and
+  status-centric (`internal/rail/readings.go`).
+- **`[t]`** cycles the active theme in memory, live — never persists; see
+  "Themes and glyphs are data" below.
+
+### The task board (`-board`)
+
+A second screen: five columns (Backlog, In progress, In review, Blocked,
+Done), grouped by repo, across every repo the estate touches. A card's
+column is recomputed fresh on every fetch from three real sources —
+`gh issue|pr list` (intent), the ledger's `tasks`/`source_tasks` tables
+(opened `sqlite3 -readonly`, never the live file), and the live `lanes` MCP
+payload (blocked detection) — never stored as a fourth store. Six layout
+variants (`[1-6]`), picked live (not verified against a live session for
+this doc — read from the `Layouts` literal in `internal/board/layout.go`,
+not watched rendering): boxed columns vs. thin rules vs.
+whitespace-only, single-line vs. multi-line cards, restrained vs. vivid
+colour, by-column vs. by-repo swimlanes. Project selection (`[a]`, `[b]`,
+...) filters the already-fetched snapshot without a new read. `-ledger`
+must point at a copy — `-board` refuses to start otherwise, and the read is
+always `sqlite3 -readonly` regardless.
+
+### The cost panel (`-cost`)
+
+Per-harness spend and quota pressure from `ccusage`, with an explicit
+"unknown" instead of a fabricated zero wherever `ccusage` cannot see a
+figure (`cost.Figure.Known`) — including quota buckets `ccusage` genuinely
+has no local way to compute (verified against `ccusage codex --help` /
+`ccusage pi --help`: no `blocks`/token-limit concept for those harnesses).
+Needs no supervisor connection. A compact form of this panel already
+renders inside the rail's default view (`cost.RenderCompact`) — the one
+place today where two screens are actually composed together.
+
+### The glyph gallery (`-gallery`)
+
+Every state in `AllStates` (14 as of `d5e4dab`) against every candidate glyph,
+flagged `[NF]` where a Nerd Font is required to render as intended. Needs
+no supervisor connection; reads only compiled-in glyph data
+(`lane.Variants`, `lane.Candidates`).
+
+## Themes and glyphs are data, not code
+
+Every look-and-feel literal in the render path — colour, border character,
+chrome padding, the director's `★` mark — lives in `internal/theme` as a
+`theme.Theme` value keyed by semantic `Role` (`RoleError`, `RoleDirector`,
+`RoleSelectedBG`, ...). `internal/board`, `internal/rail`, `internal/cost`
+and `internal/gallery` ask for a role at render time; none names a hex
+value. Two themes ship: `signal-dark` (default) and `mono-contrast` (a
+high-contrast theme that exists to prove the routing works, not for daily
+use). Changing the whole look is a one-line edit to
+`$AGENT_TUI_THEME_CONFIG` (or `$XDG_CONFIG_HOME/agent-tui/theme.json`):
+
+```json
+{"theme": "mono-contrast"}
 ```
-go build -o agent-tui ./cmd/agent-tui
-AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./agent-tui
+
+or an optional per-role colour override layered on top:
+
+```json
+{"theme": "signal-dark", "colors": {"error": "#ff0000"}}
 ```
 
-It spawns `python3 scripts/supervisor/mcp_server.py` from the given
-`agent-supervisor` checkout as a child process and speaks MCP JSON-RPC over
-its stdio — the same protocol Claude Code/Codex/Copilot use, not a private
-wire format. `-mcp-cmd` overrides the launch command entirely (e.g. an SSH
-hop to a remote supervisor).
+A missing config renders exactly as before this existed. A malformed config
+or unknown theme name renders the default theme and **says so visibly** —
+never silently — and, as of `d5e4dab`, a single bad colour entry drops only
+that entry (with a notice naming the role) rather than discarding the whole
+file. `[t]` cycles themes at runtime in every screen, live against whatever
+is already on screen; it never calls `theme.Save`, so a user's own config
+file is untouched until they edit it themselves.
 
-### The glyph picker
+Glyph sets follow the identical pattern one level down, governing which
+rune animates which lane state rather than the chrome around it — see
+`internal/lane/variants.go`.
 
-Press **1-2** while it's running to switch the state glyph set live, against
-whatever lanes are actually up — never a mock. This is the one open design
-question this drop answers by letting Jon cycle it himself rather than
-asking in prose (agent-supervisor#107's addendum). Rail width, theme and
-density all keep their defaults this round; the glyph set is the only
-variable.
+## What this is not, yet
 
-**24: down to the two keepers.** Jon judged all five variants from the
-running rail, not the gallery, and the verdict was Signal (already the
-recorded default) and the Nerd Font set — drop the rest, don't just
-deprioritise them. `ascii`, `blocks` and `emoji` did their job as
-comparison points at the moment of judging and are deleted outright, not
-merely unlisted, so nothing can silently re-wire them back onto the cycler
-(see `internal/lane/variants.go` for the verdict recorded in code). The
-picker's own label makes this honest for free — it's `fmt.Sprintf("glyphs
-%d/%d", ...)` against `len(lane.Variants)`, so a two-entry slice reads
-`1/2`, never a stale `1/5`.
+- **Not one application.** No in-app navigation exists between the four
+  screens above; see `docs/SPEC.md` for the mechanism (`rail.Model.View`
+  clamps to `RailWidth`, so no content region exists for a second view
+  beside it, even on a wide terminal). `internal/shell.Model` — a composed
+  root model with `[tab]`/`[f1-f4]` routing — exists, unwired, zero tests,
+  on unmerged `origin/lane/38-app-shell`.
+- **No chat screen on `main`.** Built and tested standalone
+  (`internal/chat`, thread list + transcript and multi-pane-tail layouts,
+  an ACP-informed design) on unmerged `origin/lane/20-chat-threads`. Its
+  own commit message says it stopped short of wiring in specifically to
+  avoid adding a fifth flag-selected screen — it needs the shell above.
+- **No knowledge/memory viewer, no AgentBox sandboxes.** No code exists for
+  either as of this SHA.
+- **The anchor feature is missing two of its four verbs** — see "The rail"
+  above.
 
-| # | id | what it looks like |
-|---|----|---------------------|
-| 1 (default) | `signal` | braille spinner, glitch on `hung`/`broken`, pulse on waiting |
-| 2 | `nerd` | Font Awesome icons via a patched Nerd Font's Private Use Area glyphs — flagged `[NF]` in the gallery (#11) since a PUA codepoint is tofu without that font |
-
-Every variant renders all thirteen `lanes.sh` states, `stale`/`menu-blocked`/
-`unsent`/`scrolled` included — a variant that can't is not a candidate, and
-`internal/lane/variants.go`'s `init()` refuses to start if one is
-incomplete. `internal/lane/states.go`'s `AllStates` is the count, and
-`internal/lane/states_lanessh_test.go` cross-checks it against `lanes.sh`'s
-own `state=` assignments rather than letting it drift unnoticed the way it
-did before [agent-tui#3](https://github.com/jonhill90/agent-tui/issues/3).
-**The set itself is data, not code:** `internal/lane/variants.go`
-is a `[]GlyphSet` literal and nothing reads a variant's ID anywhere else, so
-adding a candidate or deleting one Jon dislikes is a one-line change
-to that slice — see `internal/lane/glyph.go` for the shape (`Motion`,
-`Style`, `GlyphSet`) and `internal/lane/variants.go` for the two shipped
-today.
-
-Run in a narrow tmux pane (~24-32 cols) beside a terminal pane — the rail is
-a layout region, not a full-screen list, and it never creates that split
-itself (see "own window" below).
-
-`scripts/verify-lanes-unaffected.sh <agent-supervisor-repo> <agent-tui-binary>`
-is the acceptance proof for "lanes.sh output is byte-identical with the app
-running and not running": it spins up an isolated tmux server, snapshots
-`lanes.sh --json` for a few decoy windows, runs agent-tui in its own new
-window of the same session, snapshots again, and diffs.
-
-This repo exists so the boundary is real from the first commit rather than
-extracted later — `agent-supervisor` was split out of `agent-dotfiles` only
-after it reached 25,000 lines, and a coupling missed by that inventory (a
-default tmux session name) survived a full day past the split.
-
-## What it is for
-
-- **A left rail for managing tmux sessions.** The anchor feature, and the one
-  asked for four times.
-- **State you can read at a glance** — glyphs and motion rather than words,
-  without losing the fidelity of the supervisor's thirteen lane states.
-- **Knowledge and memory**, read-first, layered over an existing vault rather
-  than owning a second store.
-- **Sandboxes** — spinning up AgentBoxes to give harnesses isolated
-  environments.
-- Treat this list as **open**. Build for extension.
+`docs/PRD.md` states what the product is for, including these; this
+section exists so the distance between the two is never silently implied
+to be zero.
 
 ## Design constraints, from measurement not taste
 
 - **It renders in its own window. It never injects panes into live ones.**
-  Measured on a real fixture: injecting a fixed-width pane into every window
-  changed two lanes' classification, because the supervisor reads panes. A
-  sidebar built that way corrupts the state it displays.
-- **Acceptance for any renderer:** `lanes.sh` output is byte-identical with the
-  app running and not running.
-- **Every state the supervisor emits must be nameable.** A state with no glyph
-  must not silently read as idle.
-- **Single static binary.** Mac, Linux and eventually Windows, with no runtime
-  to install.
+  Measured on a real fixture: injecting a fixed-width pane into every
+  window changed two lanes' classification, because the supervisor reads
+  panes. A sidebar built that way corrupts the state it displays.
+- **Acceptance for any renderer: `lanes.sh` output is byte-identical with
+  the app running and not running.**
+  `scripts/verify-lanes-unaffected.sh <agent-supervisor-repo> <agent-tui-binary>`
+  is the checked proof — it spins up an isolated tmux server, snapshots
+  `lanes.sh --json`, runs agent-tui in its own window of the same session,
+  snapshots again, and diffs.
+- **Every state the supervisor emits must be nameable.** A state with no
+  glyph must not silently read as idle. `internal/lane/variants.go`'s
+  `init()` refuses to start if a shipped glyph set doesn't cover every
+  state in `internal/lane/states.go`'s `AllStates`.
+- **Single static binary.** Mac and Linux today, Windows eventually, no
+  runtime to install.
+
+It spawns `python3 scripts/supervisor/mcp_server.py` from the given
+`agent-supervisor` checkout as a child process and speaks MCP JSON-RPC over
+its stdio — the same protocol Claude Code/Codex/Copilot use, not a private
+wire format (`internal/mcp`). `-mcp-cmd` overrides the launch command
+entirely, e.g. an SSH hop to a remote supervisor.
+
+## Building and testing
+
+```
+go build ./...
+go vet ./...
+go test ./...
+```
+
+All three verified green at `d5e4dab`, 2026-08-16T01:21:59Z. See
+`AGENTS.md` for what CI runs beyond this (a supervisor-checkout-gated
+cross-check of the lane-state table) and the adapter discipline that keeps
+every package's tests running against fakes rather than real subprocesses.
+
+## Repository split
+
+This repo exists so the boundary between UI and orchestration is real from
+the first commit rather than extracted later — `agent-supervisor` was split
+out of `agent-dotfiles` only after it reached 25,000 lines, and a coupling
+missed by that inventory (a default tmux session name) survived a full day
+past the split.
