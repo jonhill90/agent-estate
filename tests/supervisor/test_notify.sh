@@ -20,6 +20,11 @@ echo "notify.sh"
 
 D=$(mktemp -d)
 mkdir -p "$D/bin"
+# notify.sh does not source anything relative to its own path, so the
+# mutants below have no need to sit beside the real script -- they live
+# under $D and a single recursive cleanup on exit covers all of them
+# (agent-supervisor#220).
+trap 'rm -rf "$D"' EXIT
 cat > "$D/bin/curl" <<'EOF'
 #!/bin/bash
 echo "curl called: $*" >> "$CURL_LOG"
@@ -88,9 +93,7 @@ check "director caller is logged as sent, distinctly from supervisor" "SENT tele
 # statement so it accepts ANY caller, then confirm the very first assertion
 # in this suite ("unauthorized caller exits non-zero") goes RED. If it does
 # not, this suite's gate coverage is decorative.
-NOTIFY_DIR="$(cd "$(dirname "$NOTIFY")" && pwd)"
-MUTANT="$NOTIFY_DIR/.notify-mutant-open-gate.sh"
-trap 'rm -f "$MUTANT"' EXIT
+MUTANT="$D/.notify-mutant-open-gate.sh"
 patch_rc=0
 python3 - "$NOTIFY" "$MUTANT" <<'PY' || patch_rc=$?
 import sys
@@ -161,8 +164,7 @@ if [ -s "$CURL_LOG" ]; then echo "  ok   a normal positional subject still reach
 else echo "  FAIL curl was never invoked for a normal positional subject"; fail=$((fail+1)); fi
 
 # --- mutation check: removing the flag guard must turn the refusal test red -
-FLAG_MUTANT="$NOTIFY_DIR/.notify-mutant-no-flag-guard.sh"
-trap 'rm -f "$MUTANT" "$FLAG_MUTANT"' EXIT
+FLAG_MUTANT="$D/.notify-mutant-no-flag-guard.sh"
 flag_patch_rc=0
 python3 - "$NOTIFY" "$FLAG_MUTANT" <<'PY' || flag_patch_rc=$?
 import re, sys

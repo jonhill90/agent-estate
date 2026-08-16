@@ -22,6 +22,11 @@ echo "QA telegram path (#138)"
 
 D=$(mktemp -d)
 mkdir -p "$D/bin" "$D/state"
+# Every mutant this suite patches together lives under $D, never beside the
+# real scripts -- a single recursive cleanup on exit is then sufficient for
+# all of them, so a second mutant later in the file cannot cost the first
+# one its cleanup the way a second `trap ... EXIT` would (agent-supervisor#220).
+trap 'rm -rf "$D"' EXIT
 
 # Both credentials live in the SAME env file, as the issue requires -- the
 # QA token is not a second secrets store to forget.
@@ -121,9 +126,9 @@ grep -q 'botprod-token' "$CURL_LOG" && ok "notify.sh: unset AGENT_NOTIFY_MODE st
 # token/chat-id instead of refusing, then confirm the "never touches curl"
 # assertion's shape (curl invoked with no QA credential present) goes RED
 # against the mutant -- i.e. the mutant DOES send, silently, through prod.
-NOTIFY_DIR="$(cd "$(dirname "$NOTIFY")" && pwd)"
-MUTANT="$NOTIFY_DIR/.notify-mutant-qa-fallback.sh"
-trap 'rm -f "$MUTANT"' EXIT
+# notify.sh does not source anything relative to its own path, so the
+# mutant has no need to sit next to the real script -- it goes in $D.
+MUTANT="$D/.notify-mutant-qa-fallback.sh"
 patch_rc=0
 python3 - "$NOTIFY" "$MUTANT" <<'PY' || patch_rc=$?
 import sys
@@ -220,9 +225,9 @@ qa_out2=$(HOME="$D/state" SUPERVISOR_STATE="$STATE_B" PATH="$D/bin:$PATH" NOTIFY
 #     the isolation assertion above go red. This is the acceptance criterion
 #     the issue calls "the thing most likely to go wrong" -- break it on
 #     purpose and confirm the suite notices.
-INBOX_DIR="$(cd "$(dirname "$INBOX")" && pwd)"
-MUTANT_INBOX="$INBOX_DIR/.inbox-mutant-shared-offset.sh"
-trap 'rm -f "$MUTANT_INBOX"' EXIT
+# inbox.sh, like notify.sh, does not source anything relative to its own
+# path, so this mutant goes in $D too -- the one trap above covers it.
+MUTANT_INBOX="$D/.inbox-mutant-shared-offset.sh"
 patch_rc=0
 python3 - "$INBOX" "$MUTANT_INBOX" <<'PY' || patch_rc=$?
 import sys
@@ -255,6 +260,16 @@ else
       "expected the QA poll to come back empty once offsets are shared, got: '$mut_qa_out'"
   fi
 fi
+
+# --- both mutants above are gone, and nothing this suite created survives
+#     in the real scripts/supervisor tree -- agent-supervisor#220. A mutant
+#     that leaks there is a live, working copy of notify.sh with the QA
+#     refusal removed, sitting next to the real script where a later
+#     `git add -A` can sweep it into a commit.
+SUPERVISOR_DIR="$(cd "$(dirname "$NOTIFY")" && pwd)"
+leaked=$(find "$SUPERVISOR_DIR" -maxdepth 1 \( -name '.notify-mutant-*' -o -name '.inbox-mutant-*' \) 2>/dev/null)
+[ -z "$leaked" ] && ok "no mutant fixture survives in scripts/supervisor after the run" \
+  || bad "a mutant fixture leaked into scripts/supervisor" "$leaked"
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
