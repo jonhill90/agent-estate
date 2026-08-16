@@ -1989,6 +1989,248 @@ want_contains "names the authoring task, not just the lane" "ad193-telegram-to-d
 if [ -z "$(assignees 206)" ]; then ok "the refused review takes no claim on its own issue"
 else bad "the refused review takes no claim on its own issue" "still assigned: $(assignees 206)"; fi
 
+# --- agent-supervisor#190: a FIX-PASS lane is excluded too, not just the -
+# original author -----------------------------------------------------
+#
+# WHY: this issue's own live evidence. A lane wrote a fix pass for a PR
+# under a SEPARATE tracking issue (the review-findings issue, #178 here --
+# not the PR's own originating issue, #186) and was later free to be handed
+# that PR's re-review. The single-author lookup, resolved by the PR's own
+# issue (#186), never sees a task filed under a DIFFERENT issue at all --
+# and the WORKTREE fallback that COULD have caught it (the fix-pass task's
+# worktree was checked out on the exact branch under review) used to run
+# ONLY when the issue-based lookup came up silent. #186's own author WAS
+# findable there, so the worktree fallback never ran, and the fix-pass
+# lane's contribution went unchecked.
+#
+# Modelled with two REAL dispatches (via `run()`, not a hand-built ledger
+# row) so the worktree-on-branch state is the real thing dispatch.sh's own
+# `git worktree list` will see, the same technique #117's own test above
+# uses: the fix-pass worktree is renamed onto the PR's actual branch after
+# the original author's own worktree is torn down -- exactly what happens
+# when a lane's worktree is replaced by its next dispatch.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+printf '186|| the code PR #460 was written from\n' >> "$D/issues"
+# Deliberately NOT the word "review" anywhere in this title (#70's own
+# inference triggers on "review" next to a PR number) -- this setup dispatch
+# is a fix pass, not a review, and must not be mistaken for one.
+printf '178|| apply findings from PR #460 into a follow-up commit\n' >> "$D/issues"
+
+out=$(LEDGER_STATE="$D/state-190" run 186 original-fix "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch (#186) succeeds" "$rc" 0 "$out"
+WT_186=$(sed -n 's/^  worktree: //p' <<<"$out")
+# HARD abort, not a logged `bad` that lets execution fall through: every git
+# command below this point targets `$WT_186`/`$WT_178` with `-C`, and `git -C
+# ""` silently operates on the CALLER's cwd instead of erroring -- an empty
+# path here previously renamed THIS TEST SUITE's own real working branch
+# (measured directly: agent-supervisor#190's own dev branch got renamed by an
+# earlier, unguarded version of this exact test). A `[ -d ]` check alone is
+# not enough; nothing past this line may run against a path that turned out
+# to be empty.
+if [ -z "$WT_186" ] || [ ! -d "$WT_186" ]; then
+  bad "setup: the authoring dispatch printed a real worktree path" "got: '$WT_186' from: $out"
+  echo "ABORTING the #190 section -- refusing to run 'git -C \"\$WT_186\" ...' against an empty/missing path" >&2
+  WT_186=""
+fi
+
+if [ -n "$WT_186" ]; then
+  # t:3's task is left OPEN (not completed yet) so the fix-pass below cannot
+  # land back on t:3 -- it must go to t:4, a genuinely different lane.
+  out=$(LEDGER_STATE="$D/state-190" run 178 fix186 "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+  want_exit "setup: the fix-pass dispatch (#178, a DIFFERENT issue) succeeds" "$rc" 0 "$out"
+  want_contains "setup: the fix pass landed on t:4, not the author's t:3" "send-keys -t t:@104" "$(tmuxlog)"
+  WT_178=$(sed -n 's/^  worktree: //p' <<<"$out")
+  if [ -z "$WT_178" ] || [ ! -d "$WT_178" ]; then
+    bad "setup: the fix-pass dispatch printed a real worktree path" "got: '$WT_178' from: $out"
+    echo "ABORTING the #190 section -- refusing to run 'git -C \"\$WT_178\" ...' against an empty/missing path" >&2
+    WT_186=""
+  fi
+fi
+
+if [ -n "$WT_186" ]; then
+  # The original author's task completes and its worktree is torn down --
+  # exactly what its OWN next dispatch would do, simulated directly since
+  # this test never redispatches t:3.
+  LEDGER_STATE="$D/state-190" ledger record-completion --task ad186-original-fix --note done >/dev/null
+  git -C "$REPO" worktree remove --force "$WT_186"
+  # `worktree remove` only detaches the worktree -- the branch it was on
+  # survives until deleted separately, and a `branch -m` onto that name below
+  # would otherwise fail with "a branch named ... already exists".
+  git -C "$REPO" branch -D lane/186-original-fix
+
+  # The fix-pass worktree takes over the PR's branch -- the same "renamed to
+  # a slug of the lane's own choosing" move #117's test above performs,
+  # except here it lands on the EXACT branch already under review rather
+  # than an unrelated one, because a fix pass pushes onto the SAME PR.
+  git -C "$WT_178" branch -m lane/186-original-fix
+  LEDGER_STATE="$D/state-190" ledger record-completion --task ad178-fix186 --note done >/dev/null
+
+  printf '460|Fixes #186|lane/186-original-fix\n' >> "$D/prs"
+  printf '211|| re-review PR #460 after the fix pass\n' >> "$D/issues"
+
+  cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+5|free-5|claude.exe|❯ ready|1|0
+FIX
+  out=$(LEDGER_STATE="$D/state-190" run 211 rerev-460 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 460); rc=$?
+  want_exit "a review of PR #460 is still dispatched, after excluding BOTH contributors" "$rc" 0 "$out"
+  want_contains "the ORIGINAL author's lane (t:3) is skipped" "skipping t:3" "$out"
+  want_contains "and names its task" "ad186-original-fix" "$out"
+  want_contains "the FIX-PASS lane (t:4) is ALSO skipped -- agent-supervisor#190's own defect" "skipping t:4" "$out"
+  want_contains "and names the fix-pass task, not just the original author's" "ad178-fix186" "$out"
+  log=$(tmuxlog)
+  want_contains "and the review lands on the one lane that never touched this PR, t:5" "send-keys -t t:@105" "$log"
+  want_missing "never on the original author's lane (t:3, target t:@103)" "send-keys -t t:@103 " "$log"
+  want_missing "never on the fix-pass lane (t:4, target t:@104)" "send-keys -t t:@104 " "$log"
+
+  # MUTATION: run the EXACT SAME scenario through the pre-#190 dispatch.sh --
+  # the widening reverted, not a synthetic patch -- and confirm it goes red.
+  # Read at `merge-base HEAD origin/main`, NOT literal `HEAD`: this test's
+  # own fix is committed on this very branch, so `HEAD` means "after the
+  # widening" the moment that commit lands, and `git show HEAD:...` would
+  # silently fetch the FIXED script instead of the one it means to revert
+  # (measured directly: this exact test read its own fix back once the
+  # commit landed). The merge-base is the shared ancestor with main -- the
+  # pre-widening script -- regardless of how many commits sit on top here.
+  #
+  # `origin/main` is not guaranteed to already resolve. A CI checkout of a
+  # single branch/PR ref leaves no local `origin/main` at all (agent-supervisor
+  # #201: this failed exit-128 in CI, "Not a valid object name origin/main",
+  # while passing on every dev machine that happened to have a full clone --
+  # the second sighting of the shape PR #194's reviewer had already set aside
+  # once, wrongly, as a local-clone artifact). Resolve it ourselves: use an
+  # already-resolvable ref if there is one, else fetch main with an explicit
+  # refspec (a bare `fetch origin main` on a single-branch clone updates
+  # FETCH_HEAD only, never `refs/remotes/origin/main`, and would look like a
+  # no-op success while changing nothing -- measured directly here). If the
+  # ref genuinely cannot be produced, this SKIPS the mutation check with a
+  # stated reason instead of crashing the whole suite or silently passing it.
+  MUTATED_190="$D/dispatch-pre190.sh"
+  patch_rc=0
+  python3 - "$HERE/../../scripts/supervisor/dispatch.sh" "$MUTATED_190" <<'PY' || patch_rc=$?
+import os
+import subprocess
+import sys
+
+dst = sys.argv[2]
+repo_dir = os.path.dirname(os.path.abspath(sys.argv[1]))
+
+
+def git(*args):
+    return subprocess.run(["git", "-C", repo_dir, *args], capture_output=True, text=True)
+
+
+def resolves(ref):
+    return git("rev-parse", "--verify", "-q", ref).returncode == 0
+
+
+target = next((ref for ref in ("origin/main", "main") if resolves(ref)), None)
+
+if target is None:
+    fetch = git("fetch", "-q", "origin", "main:refs/remotes/origin/main")
+    if fetch.returncode == 0 and resolves("origin/main"):
+        target = "origin/main"
+    else:
+        print(
+            "SKIP: no origin/main ref, and fetching one failed -- "
+            f"{fetch.stderr.strip() or 'no route to the remote'}",
+            file=sys.stderr,
+        )
+        sys.exit(3)
+
+mb = git("merge-base", "HEAD", target)
+if mb.returncode != 0 and git("rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+    # A shallow checkout's own history may not reach far enough back to share
+    # an ancestor with main even once the ref exists -- unshallow once, then
+    # give the merge-base one more try before giving up.
+    git("fetch", "-q", "--unshallow", "origin")
+    mb = git("merge-base", "HEAD", target)
+
+if mb.returncode != 0:
+    print(
+        f"SKIP: git merge-base HEAD {target} failed even after fetch/unshallow: "
+        f"{mb.stderr.strip()}",
+        file=sys.stderr,
+    )
+    sys.exit(3)
+
+base_ref = mb.stdout.strip()
+text = subprocess.run(
+    ["git", "-C", repo_dir, "show", f"{base_ref}:scripts/supervisor/dispatch.sh"],
+    check=True, capture_output=True, text=True,
+).stdout
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- pre-#190 script shape unexpected"
+text = text.replace(here, 'HERE=%r' % repo_dir, 1)
+open(dst, "w").write(text)
+PY
+  if [ "$patch_rc" -eq 3 ]; then
+    echo "  SKIP agent-supervisor#190 mutation check: pre-#190 baseline could not be resolved (see stderr above) -- UNVERIFIED, not a pass"
+  elif [ "$patch_rc" -ne 0 ]; then
+    bad "setup: fetched the pre-#190 dispatch.sh from git HEAD" \
+      "could not fetch/patch (exit $patch_rc) -- treating as a failure, not a skip"
+  else
+    ok "setup: fetched the pre-#190 dispatch.sh from git HEAD"
+    chmod +x "$MUTATED_190"
+    # The correct dispatch above already recorded PR #460 as open, under
+    # ad211-rerev-460. That write-time PR-dedup gate (agent-supervisor#159,
+    # landed after #190's own branch point) lives in the ledger, not in
+    # dispatch.sh, so swapping in the pre-#190 SCRIPT does not revert it --
+    # the mutant would collide with its OWN earlier claim and refuse before
+    # ever reaching the code this section means to exercise, reporting a
+    # false red unrelated to #190. Release that claim first: this section
+    # is re-running the identical scenario, not proving the PR is still
+    # open.
+    LEDGER_STATE="$D/state-190" ledger record-completion --task ad211-rerev-460 --note done >/dev/null
+    cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+5|free-5|claude.exe|❯ ready|1|0
+FIX
+    printf '212|| re-review PR #460 against the pre-#190 guard\n' >> "$D/issues"
+    out=$(DISPATCH_SCRIPT="$MUTATED_190" LEDGER_STATE="$D/state-190" \
+          run 212 rerev-460-mutant "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 460); rc=$?
+    want_exit "mutation confirmed: the pre-#190 script still dispatches (it never saw the fix-pass lane)" "$rc" 0 "$out"
+    want_missing "mutation confirmed: the fix-pass lane is NOT named as skipped (the assertion above would now be red)" \
+      "skipping t:4" "$out"
+    log=$(tmuxlog)
+    want_contains "mutation confirmed: the review lands on the fix-pass's own lane, t:4 (target t:@104) -- the exact defect #190 reports" \
+      "send-keys -t t:@104" "$log"
+  fi
+else
+  bad "the agent-supervisor#190 fix-pass-contributor section" \
+    "skipped entirely -- an earlier setup step could not produce a real worktree path"
+fi
+
+# --- agent-supervisor#190: fail closed when the contributor set itself
+# cannot be resolved -----------------------------------------------------
+#
+# WHY (#124/#126): an unresolvable question must make a lane LESS
+# dispatchable, never more. If the ledger cannot say who contributed to a
+# PR at all, this must refuse the whole dispatch -- exactly step 0.5's
+# existing single-author refusal, just restated for the wider question. No
+# separate code path exists for this; it is the same "still silent ->
+# refuse" step 4 the single-author case already used, so this proves it
+# still fires now that step 4 asks about a SET rather than one lane.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+printf '213|| review of a PR the ledger has never heard of\n' >> "$D/issues"
+printf '461|Fixes #920|some-hand-pushed-branch\n' >> "$D/prs"
+out=$(LEDGER_STATE="$D/state-190-closed" run 213 rev-461 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 461); rc=$?
+want_exit "an unresolvable contributor set refuses the whole dispatch" "$rc" 1 "$out"
+want_contains "and says why" "authorship unknown" "$out"
+log=$(tmuxlog)
+want_missing "nothing was sent" "send-keys" "$log"
+
 # --- agent-supervisor#79: cancelled rows still identify the PR author ----
 #
 # `cancel-open-task` is the manual reconciliation hammer for a lane that is
@@ -2358,12 +2600,12 @@ log=$(tmuxlog)
 want_contains "and the review lands on the OTHER free lane, t:4 (target t:@104)" "send-keys -t t:@104" "$log"
 want_missing "never on the author's lane (t:3, target t:@103)" "send-keys -t t:@103 " "$log"
 
-# MUTATION: break the ledger author-issue-lane lookup (return unknown for every
-# issue) and confirm case 2 goes red -- with author-issue-lane silenced, dispatch.sh
-# falls through to the chore/ branch regex, which resolves to nothing (only
-# `lane/` was ever understood there before this brief widened it, and even
-# widened, plain regex matching is not what proves the LEDGER decided this),
-# so the review should refuse instead of skip-and-dispatch.
+# MUTATION: break the ledger contributor-issue-lanes lookup (return unknown
+# for every issue) and confirm case 2 goes red -- with it silenced,
+# dispatch.sh falls through to the chore/ branch regex, which resolves to
+# nothing (only `lane/` was ever understood there before this brief widened
+# it, and even widened, plain regex matching is not what proves the LEDGER
+# decided this), so the review should refuse instead of skip-and-dispatch.
 MUTATED_35=$D/dispatch-no-issue-ledger.sh
 patch_rc=0
 python3 - "$DISPATCH" "$MUTATED_35" <<'PY' || patch_rc=$?
@@ -2371,19 +2613,19 @@ import os
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = 'ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" author-issue-lane --issue "$candidate_issue" --head-ref "$HEAD_REF" 2>&1) || continue'
-assert text.count(marker) == 1, "author-issue-lane lookup not found or not unique -- script shape changed"
-text = text.replace(marker, 'ISSUE_JSON=\'{"known":false}\'  # MUTATED: ledger author-issue-lane never consulted', 1)
+marker = 'ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" contributor-issue-lanes --issue "$candidate_issue" 2>&1) || continue'
+assert text.count(marker) == 1, "contributor-issue-lanes lookup not found or not unique -- script shape changed"
+text = text.replace(marker, 'ISSUE_JSON=\'{"known":false}\'  # MUTATED: ledger contributor-issue-lanes never consulted', 1)
 here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
 assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
 text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
 open(dst, "w").write(text)
 PY
 if [ "$patch_rc" -ne 0 ]; then
-  bad "setup: patched a copy of dispatch.sh whose author-issue-lane lookup is silenced" \
+  bad "setup: patched a copy of dispatch.sh whose contributor-issue-lanes lookup is silenced" \
     "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
 else
-  ok "setup: patched a copy of dispatch.sh whose author-issue-lane lookup is silenced"
+  ok "setup: patched a copy of dispatch.sh whose contributor-issue-lanes lookup is silenced"
   chmod +x "$MUTATED_35"
   cat > "$D/lanes" <<'FIX'
 1|arch|claude.exe|❯ ready|1|0
@@ -2419,7 +2661,7 @@ import os
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = 'if [ -n "$AUTHOR_LANE" ] && [ "$(lane_relation "$candidate" "$AUTHOR_LANE")" != different ]; then'
+marker = 'if [ "$(lane_relation "$candidate" "$al")" != different ]; then'
 assert marker in text, "author-exclusion guard not found -- script shape changed"
 assert text.count(marker) == 1, "author-exclusion guard not unique -- script shape changed"
 text = text.replace(marker, "if false; then  # MUTATED: author-exclusion always skipped", 1)

@@ -364,6 +364,14 @@ def parser():
     # position in the issue's task list. See `Ledger.get_author_task_for_issue`.
     author_issue_lane_parser.add_argument("--head-ref", default=None)
 
+    # agent-supervisor#190: the CONTRIBUTOR SET, not narrowed to one author --
+    # see `Ledger.get_contributor_tasks_for_issue`. `dispatch.sh`'s
+    # `--reviews-pr` guard unions this (over every candidate issue the PR
+    # closes) with the worktree-path lookup below to build the full set of
+    # lanes a review dispatch must exclude.
+    contributor_issue_lanes_parser = sub.add_parser("contributor-issue-lanes")
+    contributor_issue_lanes_parser.add_argument("--issue", required=True)
+
     # agent-supervisor#117: `dispatch.sh`'s `--reviews-pr` last resort, when
     # neither `issue-lane` nor `author-issue-lane` answers. Keyed by the
     # worktree path that currently has the PR's head branch checked out
@@ -1021,6 +1029,13 @@ def main(argv=None):
             "known": row is not None,
             "lane": row["lane"] if row is not None else None,
             "task": row["id"] if row is not None else None,
+        }
+    elif args.command == "contributor-issue-lanes":
+        rows = ledger.get_contributor_tasks_for_issue(args.issue)
+        value = {
+            "issue": args.issue,
+            "known": len(rows) > 0,
+            "contributors": [{"lane": row["lane"], "task": row["id"]} for row in rows],
         }
     elif args.command == "worktree-lane":
         row = ledger.get_task_for_worktree(args.path)
