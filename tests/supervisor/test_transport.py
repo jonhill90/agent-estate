@@ -53,12 +53,49 @@ class TransportTest(unittest.TestCase):
             TmuxTransport("tmux").switch_client("work")
         self.assertEqual(["tmux", "switch-client", "-t", "=work"], run.call_args.args[0])
 
+    # agent-supervisor#189
+    def test_switch_client_with_a_client_passes_dash_c(self):
+        with patch("transport.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")) as run:
+            TmuxTransport("tmux").switch_client("work", client="/dev/ttys000")
+        self.assertEqual(
+            ["tmux", "switch-client", "-c", "/dev/ttys000", "-t", "=work"], run.call_args.args[0]
+        )
+
     def test_detach_client_has_no_target(self):
         """No `-t`: detaches the client on THIS process's own controlling
         terminal, not a named session."""
         with patch("transport.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")) as run:
             TmuxTransport("tmux").detach_client()
         self.assertEqual(["tmux", "detach-client"], run.call_args.args[0])
+
+    # agent-supervisor#189
+    def test_detach_client_with_a_client_passes_dash_t(self):
+        with patch("transport.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")) as run:
+            TmuxTransport("tmux").detach_client(client="/dev/ttys000")
+        self.assertEqual(["tmux", "detach-client", "-t", "/dev/ttys000"], run.call_args.args[0])
+
+    # agent-supervisor#189
+    def test_list_clients_parses_tty_and_session(self):
+        with patch(
+            "transport.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                [], 0, stdout="/dev/ttys000\twork\n/dev/ttys001\tother\n", stderr=""
+            ),
+        ) as run:
+            clients = TmuxTransport("tmux").list_clients()
+        self.assertEqual(
+            ["tmux", "list-clients", "-F", "#{client_tty}\t#{client_session}"], run.call_args.args[0]
+        )
+        self.assertEqual(
+            [{"tty": "/dev/ttys000", "session": "work"}, {"tty": "/dev/ttys001", "session": "other"}], clients
+        )
+
+    def test_list_clients_with_none_attached_is_an_empty_list_not_an_error(self):
+        with patch(
+            "transport.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, ["tmux", "list-clients"]),
+        ):
+            self.assertEqual([], TmuxTransport("tmux").list_clients())
 
     def test_kill_session_uses_the_exact_match_target_never_kill_server(self):
         with patch("transport.subprocess.run", return_value=subprocess.CompletedProcess([], 0, stdout="", stderr="")) as run:

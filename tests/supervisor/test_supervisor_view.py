@@ -460,20 +460,36 @@ class SeamTest(unittest.TestCase):
 
 
 class FakeTransport:
-    def __init__(self, *, exists=True):
+    def __init__(self, *, exists=True, clients=None):
         self.exists = exists
         self.switched = []
         self.detached = 0
         self.killed = []
+        # One attached client by default -- the unambiguous case -- so
+        # existing callers that never pass `client` keep working. Tests of
+        # the agent-supervisor#189 guard override this directly.
+        self._clients = clients if clients is not None else [{"tty": "/dev/ttys000", "session": "elsewhere"}]
 
     def session_exists(self, session):
         return self.exists
 
-    def switch_client(self, session):
-        self.switched.append(session)
+    def list_clients(self):
+        return [dict(c) for c in self._clients]
 
-    def detach_client(self):
+    def switch_client(self, session, client=None):
+        self.switched.append(session)
+        for c in self._clients:
+            if client is None or c["tty"] == client:
+                c["session"] = session
+                if client is not None:
+                    break
+
+    def detach_client(self, client=None):
         self.detached += 1
+        if client is None:
+            self._clients = []
+        else:
+            self._clients = [c for c in self._clients if c["tty"] != client]
 
     def kill_session(self, session):
         self.killed.append(session)
@@ -505,20 +521,85 @@ class SessionAttachSourceTest(unittest.TestCase):
         with self.assertRaises(SupervisorUnavailable):
             source.write(session="no-such-session")
 
-    def test_switches_the_client_and_reports_success(self):
-        transport = FakeTransport(exists=True)
+    def test_single_client_switches_and_reports_success(self):
+        """agent-supervisor#189: exactly one attached client is unambiguous
+        -- no `client` argument required, and the fallback stays."""
+        transport = FakeTransport(exists=True, clients=[{"tty": "/dev/ttys000", "session": "elsewhere"}])
         source = SessionAttachSource(transport=transport)
         result = source.write(session="work")
-        self.assertEqual({"session": "work", "attached": True}, result)
+        self.assertEqual({"session": "work", "client": "/dev/ttys000", "attached": True}, result)
         self.assertEqual(["work"], transport.switched)
+
+    def test_two_clients_with_no_target_refuses(self):
+        """agent-supervisor#189: this is the case that used to switch an
+        arbitrary, unnamed client and still report success."""
+        transport = FakeTransport(
+            exists=True,
+            clients=[{"tty": "/dev/ttys000", "session": "a"}, {"tty": "/dev/ttys001", "session": "b"}],
+        )
+        source = SessionAttachSource(transport=transport)
+        with self.assertRaises(SupervisorUnavailable):
+            source.write(session="work")
+        self.assertEqual([], transport.switched)
+
+    def test_two_clients_with_explicit_target_moves_only_that_client(self):
+        transport = FakeTransport(
+            exists=True,
+            clients=[{"tty": "/dev/ttys000", "session": "a"}, {"tty": "/dev/ttys001", "session": "b"}],
+        )
+        source = SessionAttachSource(transport=transport)
+        result = source.write(session="work", client="/dev/ttys000")
+        self.assertEqual({"session": "work", "client": "/dev/ttys000", "attached": True}, result)
+        self.assertEqual("work", {c["tty"]: c["session"] for c in transport.list_clients()}["/dev/ttys000"])
+        self.assertEqual("b", {c["tty"]: c["session"] for c in transport.list_clients()}["/dev/ttys001"])
+
+    def test_no_client_attached_refuses(self):
+        transport = FakeTransport(exists=True, clients=[])
+        source = SessionAttachSource(transport=transport)
+        with self.assertRaises(SupervisorUnavailable):
+            source.write(session="work")
+
+    def test_read_back_mismatch_is_reported_as_failure(self):
+        """agent-supervisor#189 requirement 3: `attached: true` only once a
+        read of tmux confirms the named client actually moved."""
+        transport = FakeTransport(exists=True, clients=[{"tty": "/dev/ttys000", "session": "elsewhere"}])
+        transport.switch_client = lambda session, client=None: None  # command "succeeds" but nothing moves
+        source = SessionAttachSource(transport=transport)
+        with self.assertRaises(SupervisorUnavailable):
+            source.write(session="work")
 
 
 class SessionDetachSourceTest(unittest.TestCase):
-    def test_detaches_and_reports_success(self):
-        transport = FakeTransport()
+    def test_single_client_detaches_and_reports_success(self):
+        transport = FakeTransport(clients=[{"tty": "/dev/ttys000", "session": "work"}])
         source = SessionDetachSource(transport=transport)
-        self.assertEqual({"detached": True}, source.write())
+        self.assertEqual({"client": "/dev/ttys000", "detached": True}, source.write())
         self.assertEqual(1, transport.detached)
+
+    def test_two_clients_with_no_target_refuses(self):
+        transport = FakeTransport(
+            clients=[{"tty": "/dev/ttys000", "session": "a"}, {"tty": "/dev/ttys001", "session": "b"}]
+        )
+        source = SessionDetachSource(transport=transport)
+        with self.assertRaises(SupervisorUnavailable):
+            source.write()
+        self.assertEqual(0, transport.detached)
+
+    def test_two_clients_with_explicit_target_detaches_only_that_client(self):
+        transport = FakeTransport(
+            clients=[{"tty": "/dev/ttys000", "session": "a"}, {"tty": "/dev/ttys001", "session": "b"}]
+        )
+        source = SessionDetachSource(transport=transport)
+        result = source.write(client="/dev/ttys000")
+        self.assertEqual({"client": "/dev/ttys000", "detached": True}, result)
+        self.assertEqual(["/dev/ttys001"], [c["tty"] for c in transport.list_clients()])
+
+    def test_read_back_mismatch_is_reported_as_failure(self):
+        transport = FakeTransport(clients=[{"tty": "/dev/ttys000", "session": "work"}])
+        transport.detach_client = lambda client=None: None  # command "succeeds" but nothing detaches
+        source = SessionDetachSource(transport=transport)
+        with self.assertRaises(SupervisorUnavailable):
+            source.write()
 
 
 class SessionAddSourceTest(unittest.TestCase):

@@ -505,8 +505,34 @@ class WriteSource:
         raise NotImplementedError
 
 
+def _resolve_unambiguous_client(transport, client, *, verb):
+    """Fail closed instead of letting tmux guess which client an unscoped
+    switch-client/detach-client would act on (agent-supervisor#189).
+
+    `mcp_server.py` has no controlling terminal of its own -- its stdio is a
+    pipe -- so when a caller does not name a `client`, the only way to know
+    whether tmux's own resolution is safe is to look at how many clients are
+    actually attached: exactly one is unambiguous (nothing else for it to
+    pick), zero or more than one is not and must refuse rather than let the
+    write land on a client nobody named. Returns the tty of the one client
+    to act on, for the caller to pass through and later verify against.
+    """
+    if client is not None:
+        return client
+    attached = transport.list_clients()
+    if len(attached) > 1:
+        ttys = ", ".join(sorted(c["tty"] for c in attached))
+        raise SupervisorUnavailable(
+            f"{verb}: more than one tmux client is attached ({ttys}) and no `client` "
+            "was given to say which one -- refusing to guess (agent-supervisor#189)"
+        )
+    if not attached:
+        raise SupervisorUnavailable(f"{verb}: no tmux client is attached")
+    return attached[0]["tty"]
+
+
 class SessionAttachSource(WriteSource):
-    """Switch the invoking client's tmux session -- agent-tui#14.
+    """Switch one tmux client's session -- agent-tui#14.
 
     The guard is existence, and nothing else: attaching to a session is not
     destructive, so there is no supervision/busy/worktree check here the way
@@ -514,10 +540,23 @@ class SessionAttachSource(WriteSource):
     error) for a missing session, because this tool RAN and could not find
     it -- the same "ran and could not" channel `LanesSource` etc. already use
     for a session `lanes.sh` cannot see.
+
+    agent-supervisor#189: `client` names which tmux client moves, as a
+    target-client string (a tty path -- see `TmuxTransport.list_clients`).
+    Omitted, this refuses outright unless exactly one client is attached
+    server-wide (`_resolve_unambiguous_client`) -- previously it silently
+    reused whichever client tmux's own "current client" fallback picked,
+    which with `mcp_server.py`'s pipe stdio and more than one client
+    attached was an arbitrary, unnamed client, reported as success. The
+    single-client case is kept as the one case that fallback is provably
+    unambiguous in (nothing else for it to resolve to), but this now
+    verifies that resolved client's session by reading tmux back, rather
+    than trusting the command's exit code either way -- `attached: true`
+    is only ever returned once the named client is actually on `session`.
     """
 
     name = "session_attach"
-    summary = "Attach the invoking client's tmux session to `session`. Refuses if tmux has no session by that exact name."
+    summary = "Attach one tmux client's session to `session`. Refuses if tmux has no session by that exact name, or if which client should move is ambiguous."
     parameters = (
         {
             "name": "session",
@@ -525,36 +564,66 @@ class SessionAttachSource(WriteSource):
             "required": True,
             "help": "tmux session to attach to, by exact name.",
         },
+        {
+            "name": "client",
+            "type": "string",
+            "required": False,
+            "help": "tmux target-client (tty path, e.g. /dev/ttys011) to attach. Required when more than one client is attached.",
+        },
     )
 
     def __init__(self, *, transport=None):
         self.transport = transport if transport is not None else TmuxTransport()
 
-    def write(self, *, session):
+    def write(self, *, session, client=None):
         if not self.transport.session_exists(session):
             raise SupervisorUnavailable(f"tmux has no session named {session!r}")
-        self.transport.switch_client(session)
-        return {"session": session, "attached": True}
+        target = _resolve_unambiguous_client(self.transport, client, verb="session_attach")
+        self.transport.switch_client(session, client=client)
+        after = {c["tty"]: c["session"] for c in self.transport.list_clients()}
+        if after.get(target) != session:
+            raise SupervisorUnavailable(
+                f"switch-client reported success but {target!r} is not attached to "
+                f"{session!r} on read-back"
+            )
+        return {"session": session, "client": target, "attached": True}
 
 
 class SessionDetachSource(WriteSource):
-    """Detach whatever tmux client is attached to the invoking process's own tty.
+    """Detach one tmux client.
 
-    No `session` argument: `tmux detach-client` with no `-t` targets the
-    client for the CALLER's controlling terminal, not a named session --
-    see `TmuxTransport.detach_client`.
+    agent-supervisor#189: `client` names which client detaches, as a
+    target-client string (a tty path -- see `TmuxTransport.list_clients`).
+    Omitted, this refuses unless exactly one client is attached
+    server-wide, for the same reason and by the same guard as
+    `SessionAttachSource` -- see its docstring. Reports `detached: true`
+    only once a read-back confirms the named client is no longer among
+    tmux's attached clients.
     """
 
     name = "session_detach"
-    summary = "Detach the tmux client attached to the invoking process's own controlling terminal."
-    parameters = ()
+    summary = "Detach one tmux client. Refuses if which client should detach is ambiguous."
+    parameters = (
+        {
+            "name": "client",
+            "type": "string",
+            "required": False,
+            "help": "tmux target-client (tty path, e.g. /dev/ttys011) to detach. Required when more than one client is attached.",
+        },
+    )
 
     def __init__(self, *, transport=None):
         self.transport = transport if transport is not None else TmuxTransport()
 
-    def write(self):
-        self.transport.detach_client()
-        return {"detached": True}
+    def write(self, *, client=None):
+        target = _resolve_unambiguous_client(self.transport, client, verb="session_detach")
+        self.transport.detach_client(client=client)
+        still_attached = {c["tty"] for c in self.transport.list_clients()}
+        if target in still_attached:
+            raise SupervisorUnavailable(
+                f"detach-client reported success but {target!r} is still attached on read-back"
+            )
+        return {"client": target, "detached": True}
 
 
 class SessionAddSource(WriteSource):
