@@ -4,7 +4,8 @@
 Intent, not status — for what has actually shipped, read `README.md`; for
 the gap between the two, read `docs/SPEC.md`'s "Gap between intent and
 code" section. Every dated claim below is checked against `origin/main`
-`d5e4dab`, **verified 2026-08-16T01:21:59Z.**
+`b00db9b`, **verified 2026-08-16.** Naming is unsettled (agent-tui#42);
+this document never names the product — see `AGENTS.md`'s naming note.
 
 ## The one-line framing
 
@@ -32,13 +33,14 @@ remove.** Jon has asked for this specific set of four verbs, by his own
 count, four separate times. It is the anchor — every other feature is
 secondary to this one working completely.
 
-**Status as of `d5e4dab`:** half-shipped. `add` and `remove` exist and are
-wired (`[n]ew`/`[x]remove`, `internal/session.Ops`). `attach` and `detach`
-were removed in commit `3137206` for a reproduced reason, not neglect: MCP's
-stdio transport gives the supervisor no client identity to target, so an
-attach/detach call silently acts on an arbitrary attached tmux client while
-reporting success — worse than no control at all. The fix is filed as
-`agent-supervisor#189` and requires a supervisor-side change
+**Status as of `b00db9b`:** half-shipped. `add` and `remove` exist and are
+wired (`[n]ew`/`[x]remove`, `internal/session.Ops`), now reachable from
+inside the one persistent shell rather than a rail-only program. `attach`
+and `detach` were removed in commit `3137206` for a reproduced reason, not
+neglect: MCP's stdio transport gives the supervisor no client identity to
+target, so an attach/detach call silently acts on an arbitrary attached
+tmux client while reporting success — worse than no control at all. The fix
+is filed as `agent-supervisor#189` and requires a supervisor-side change
 (`TmuxTransport.switch_client`/`detach_client` needs to receive a client
 identity) before the agent-tui side can be restored honestly. See
 `AGENTS.md`'s "What NOT to do here."
@@ -52,8 +54,11 @@ variants trading boxes-vs-rules, density, and grouping. A card's column is
 always recomputed fresh from GitHub + the ledger, never stored — this board
 is a projection, not a fourth data store.
 
-**Status:** shipped as a separate screen behind `-board`, not yet composed
-with the rail (see SPEC's gap section).
+**Status:** shipped as a pane inside the one persistent shell (`[f2]`,
+agent-tui#38/#43), composed with the rail rather than a separate program.
+Navigating to it with no `-ledger` configured currently renders an
+"unavailable" message rather than degrading further or explaining the fix
+in-pane — agent-tui#49, see `docs/SPEC.md`'s "Known defects."
 
 ### Cost panel
 
@@ -62,9 +67,11 @@ explicit "unknown" rendering rather than a fabricated zero when a figure
 can't be determined (`internal/cost.Figure.Known`) — the panel has been
 bitten by silent-zero blindness before and is built not to repeat it.
 
-**Status:** shipped as a separate screen behind `-cost`, and its compact
-form is already composed inside the rail (`cost.RenderCompact`) — the one
-place in the app where two views share a region today.
+**Status:** shipped as a pane inside the one persistent shell (`[f3]`),
+with its compact form also composed inside the rail (`cost.RenderCompact`).
+Its "unknown" quota fallback is honest, but it does not yet read
+`scripts/supervisor/quota.sh` — agent-tui#49, see `docs/SPEC.md`'s "Known
+defects."
 
 ### Glyph gallery, with Nerd Font support
 
@@ -75,8 +82,8 @@ judged all five original candidates live against a running rail, not the
 gallery in isolation, and the other three were deleted outright rather than
 merely deprioritised.
 
-**Status:** shipped as a separate screen behind `-gallery`; the two kept
-glyph sets are live in the rail today.
+**Status:** shipped as a pane inside the one persistent shell (`[f4]`); the
+two kept glyph sets are live in the rail today.
 
 ### Chat with threads, live
 
@@ -90,16 +97,17 @@ capable of showing more than one thing at once.
 **Status:** built and tested standalone (`internal/chat` on
 `origin/lane/20-chat-threads`, unmerged) — `chat.Source`, a fixture
 implementation, and two layouts (thread list + transcript; multi-pane tail
-with focus). Explicitly not wired into `cmd/agent-tui`; its own commit
-message says adding a fifth `-chat` flag "would have repeated that a fourth
-time," which is the same defect this PRD's "app shell" gap names below. Not
-on `main` as of `d5e4dab`.
+with focus). Explicitly not wired into `cmd/keelson`'s shell; its own commit
+message says adding a fifth flag-selected screen "would have repeated that
+a fourth time," which was the same defect the shell (agent-tui#38) was
+built to fix — chat still needs to be composed into it as a pane the same
+way board/cost/gallery now are. Not on `main` as of `b00db9b`.
 
 ### Knowledge / memory viewer
 
 Read-first, layered over the estate's existing memory vault rather than
 owning a second store. **Status:** not started. No package or branch exists
-for this as of `d5e4dab`.
+for this as of `b00db9b`.
 
 ### AgentBox sandboxes
 
@@ -112,7 +120,7 @@ and feel. **Status: currently unfalsifiable.** There is no access to the
 web harness from the estate to compare against, and this repo has never
 claimed to measure the comparison. This is not a claim the product currently
 meets or fails — it is simply not checkable today. (Grounding review,
-2026-08-16T01:21:59Z.)
+2026-08-16.)
 
 ## Non-negotiable constraints, from measurement not taste
 
@@ -139,6 +147,11 @@ carried forward here because they bound every feature above:
 One process. A persistent rail always visible. The other views — board,
 cost, gallery, chat, and whatever comes after — as panes inside that one
 process, not quit-and-relaunch screens behind flags. The anchor feature
-carrying all four of its verbs, safely. This is intent, dated
-2026-08-16T01:21:59Z — see `docs/SPEC.md` for exactly how far the code is
-from it today.
+carrying all four of its verbs, safely. **The first half of this — one
+process, a persistent rail, board/cost/gallery as panes — shipped**
+(agent-tui#38, PR #43, `b00db9b`). What remains: attach/detach, chat, and
+the three defects agent-tui#49 found by driving the shipped shell (bare
+launch fails closed instead of degrading; the board and cost panes fail
+closed rather than helpfully when navigated to without their own
+prerequisites) — see `docs/SPEC.md` for exactly how far the code is from
+the rest of this intent today. This is intent, dated 2026-08-16.

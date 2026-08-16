@@ -1,4 +1,4 @@
-# AGENTS.md — keelson
+# AGENTS.md — agent-tui
 
 Repository policy for an agent arriving here. `CLAUDE.md` is a committed
 symlink to this file — one source, two harness-visible names, no sync step.
@@ -6,22 +6,32 @@ Edit this file; never edit `CLAUDE.md` directly (it will edit the same bytes,
 but say so in the commit message if you do, to avoid a reviewer thinking two
 files drifted).
 
-**Verified against `lane/38-app-keelson`, 2026-08-16 (agent-tui#38's overnight
-brief).** Confirm the branch/SHA in `git log -1` still matches before trusting
-counts below; they are measured, not estimated. The Go module, `cmd/`
-directory and binary are named `keelson` as of this branch; the GitHub repo
-itself is still `jonhill90/agent-tui` (renaming it is a separate, more
-disruptive step left for later — issue references below keep the
-`agent-tui#NN` form because that is the repo they still point at).
+**Verified against `main` `b00db9b`, 2026-08-16 (agent-tui#38's shell PR,
+#43).** Confirm the branch/SHA in `git log -1` still matches before trusting
+counts below; they are measured, not estimated.
+
+**Naming: unsettled, do not treat as decided.** Jon rejected `keelson` as the
+product name (agent-tui#42 tracks the shortlist he is choosing from —
+`steading` verified clean, `loom` his stated fallback, nothing picked yet).
+The Go module, `cmd/` directory and binary are nonetheless *currently* named
+`keelson` as a leftover of agent-tui#38's overnight rename pass — that is a
+fact about the code today, not a settled product name, and prose in this
+repo's docs must not imply otherwise. The GitHub repo itself is still
+`jonhill90/agent-tui`; issue references below keep the `agent-tui#NN` form
+because that is the repo they point at. TODO(name): once agent-tui#42
+resolves, the module/binary/`cmd/` directory should be renamed to match and
+every doc updated in the same change — not before.
 
 ## What this repo is
 
-`keelson` (module `github.com/jonhill90/keelson`, formerly `agent-tui` --
-that name described the rendering technology, Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea),
-not the product) is one terminal application: a persistent left rail over
+This repo (Go module `github.com/jonhill90/keelson` — see the naming note
+above) is one terminal application: a persistent left rail over
 `agent-supervisor`'s lane/session state, with the task board, cost panel and
 glyph gallery reachable as panes in the same process (`internal/shell`,
-agent-tui#38). It is a **viewer with one write path** (session
+agent-tui#38). The name `agent-tui` originally described the rendering
+technology (Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea)),
+not the product, which is why a rename is under discussion — but no
+replacement has been chosen. It is a **viewer with one write path** (session
 attach/detach/add/remove, see below) — same discipline as
 `agent-supervisor`'s own `scripts/supervisor/laneview/`. It never shells out
 to `tmux` directly, never reads or writes the ledger except through the
@@ -98,7 +108,7 @@ go vet ./...
 go test ./...
 ```
 
-All three verified green on `lane/38-app-keelson` (9 packages with tests,
+All three verified green on `main` `b00db9b` (9 packages with tests,
 `cmd/keelson` has none). CI (`.github/workflows/*.yml`) runs the same three
 commands on `ubuntu-latest`, Go 1.26, plus a fourth check gated on a live
 `agent-supervisor` checkout: `internal/lane/states_lanessh_test.go`
@@ -145,6 +155,31 @@ either cite the test that drives it through `Update` (name it) or say
   `internal/theme/registry.go`) — a new visual variant is a struct literal
   addition, never a new code path in a render function.
 
+## Known defects — do not paper over these
+
+agent-tui#49 (open) records three, each confirmed live at `b00db9b`,
+2026-08-16 by running the actual binary, not by reading the source:
+
+1. **Bare launch exits 1.** `./keelson` with no flags and no
+   `$AGENT_SUPERVISOR_REPO` prints `no supervisor to connect to: set
+   -supervisor-repo, $AGENT_SUPERVISOR_REPO, or -mcp-cmd` and exits 1 instead
+   of opening in a degraded state. Confirmed: `go build -o /tmp/keelson-check
+   ./cmd/keelson && /tmp/keelson-check` exits 1 with that message.
+2. **The board pane reports itself unavailable with no `-ledger`.**
+   Reaching it via `[f2]` (rather than `-board`, which refuses to start
+   first) renders `! unavailable` / `no -ledger (or $AGENT_TUI_LEDGER)
+   configured -- point it at a COPY of the ledger to use the board`
+   (`cmd/keelson/main.go`'s `boardUnavailable` string).
+3. **The cost panel's quota line is unwired from the current quota
+   source.** It renders `unknown (no quota source)`
+   (`internal/cost/view.go`) whenever `ccusage` has no local blocks/limit
+   concept for a harness, even though `scripts/supervisor/quota.sh` is
+   the quota source now — confirmed by `grep -rn "quota.sh"
+   --include='*.go' .` returning zero matches anywhere in this module.
+
+Fix or documentation update for any of these is in scope; silently working
+around one in a new feature is not.
+
 ## What NOT to do here
 
 - Do not add a new `tea.NewProgram` call site. `internal/shell.Model` is the
@@ -159,8 +194,9 @@ either cite the test that drives it through `Update` (name it) or say
   because MCP's stdio transport gives the supervisor no way to know which
   tmux client is asking, so `switch-client`/`detach-client` acts on an
   arbitrary attached client while reporting success. `session.Interface`
-  still declares both methods; nothing in `internal/rail` calls them as of
-  `d5e4dab`.
+  still declares both methods; nothing in `internal/rail` or
+  `internal/shell` calls them as of `b00db9b` (`grep -rn "\.Attach(\|\.Detach("
+  --include='*.go' .`, outside test files: zero matches).
 - Do not point `-ledger` at the live supervisor's `ledger.sqlite3`. It is
   always opened read-only, but the flag help and `internal/board/ledger.go`
   both document why a copy is still required.

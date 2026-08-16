@@ -1,12 +1,12 @@
-# keelson
+# agent-tui
 
-*Renamed from `agent-tui`, 2026-08-16 (agent-tui#38's overnight brief) --
-`agent-tui` named the rendering technology (Go + Bubble Tea, "tui"), not
-the product. A keelson is the timber running along the inside of a ship's
-keel, binding all the frames into one structure — the layer above
-orchestration, which is what this actually is. The GitHub repo stays
-`jonhill90/agent-tui` for tonight; only the binary, module path and
-`cmd/` directory moved. See this PR's handoff for what's left.*
+*Naming is unsettled — TODO(name).* Jon rejected `keelson` as the product
+name; `steading` is verified clean and `loom` is his stated fallback, but he
+has not picked and this repo does not pick for him (agent-tui#42 tracks the
+shortlist). The Go module, `cmd/` directory and binary happen to be
+*currently* named `keelson` — a leftover of agent-tui#38's overnight rename
+pass, described below as a fact about the code, not as the product's name.
+The GitHub repo stays `jonhill90/agent-tui`.
 
 A terminal application for the agent estate: reads [`agent-supervisor`](https://github.com/jonhill90/agent-supervisor)'s
 lane and session state over MCP and renders it behind a persistent left
@@ -18,11 +18,10 @@ supervisor has no opinion about how a human sees it. Either side is
 removable. Full technical design: `docs/SPEC.md`. What the product is for:
 `docs/PRD.md`. Arrival policy for an agent working in this repo: `AGENTS.md`.
 
-**This section describes what is actually on this branch, checked against
-`lane/38-app-keelson`.** Where intent and code diverge, that is said
-explicitly — see "What this is not, yet" below, and `docs/SPEC.md`'s "Gap
-between intent and code" for the full accounting (not yet re-verified
-against this branch; treat its specifics as pre-shell).
+**This section describes what is actually on `main`, checked against
+`b00db9b`.** Where intent and code diverge, that is said explicitly — see
+"What this is not, yet" below, and "Known defects" further down for what
+is on `main` but does not work correctly yet.
 
 ## What it is today
 
@@ -171,6 +170,30 @@ Glyph sets follow the identical pattern one level down, governing which
 rune animates which lane state rather than the chrome around it — see
 `internal/lane/variants.go`.
 
+## Known defects
+
+Recorded at agent-tui#49 (open), found by driving the actual binary, not by
+reading the source. Confirmed still present at `b00db9b`, 2026-08-16:
+
+- **Bare launch exits 1 instead of opening.** `./keelson` with no flags and
+  no `$AGENT_SUPERVISOR_REPO` set prints `no supervisor to connect to: set
+  -supervisor-repo, $AGENT_SUPERVISOR_REPO, or -mcp-cmd` and exits 1. Jon's
+  stated acceptance criterion is that the bare command opens the app; this
+  has already caused one false "it doesn't work" conclusion (with a
+  different script) and would repeat it here. Verified: `go build -o
+  /tmp/keelson-check ./cmd/keelson && /tmp/keelson-check` exits 1.
+- **The board pane says it's unavailable with no `-ledger`.** Reaching it
+  by `[f2]` from inside the shell (as opposed to `-board`, which refuses to
+  launch at all without `-ledger`) renders `! unavailable` / `no -ledger
+  (or $AGENT_TUI_LEDGER) configured -- point it at a COPY of the ledger to
+  use the board` (`cmd/keelson/main.go`'s `boardUnavailable` string) rather
+  than degrading further or explaining how to fix it in-pane.
+- **The cost panel's quota line has no current quota source wired in.** It
+  renders `unknown (no quota source)` for harnesses `ccusage` cannot
+  compute a blocks/limit figure for, even though
+  `scripts/supervisor/quota.sh` is the quota source now — confirmed by `grep
+  -rn "quota.sh" --include='*.go' .` returning zero matches in this module.
+
 ## What this is not, yet
 
 - **No chat screen.** Built and tested standalone
@@ -220,7 +243,7 @@ go vet ./...
 go test ./...
 ```
 
-All three verified green at `d5e4dab`, 2026-08-16T01:21:59Z. See
+All three verified green at `b00db9b`, 2026-08-16. See
 `AGENTS.md` for what CI runs beyond this (a supervisor-checkout-gated
 cross-check of the lane-state table) and the adapter discipline that keeps
 every package's tests running against fakes rather than real subprocesses.
