@@ -16,6 +16,11 @@ DISPATCH="$HERE/../../scripts/supervisor/dispatch.sh"
 # agent-supervisor#227: give every dispatch here a deterministic SAFE quota
 # verdict instead of calling the real codexbar. See test_dispatch.sh for why.
 export QUOTA_GATE="$HERE/stubs/quota-safe"
+# agent-supervisor#171: this suite is entirely about which tmux SESSION a
+# send-keys dispatch lands in -- meaningless for a headless claude-print
+# lane, and it stubs no `claude` binary -- see test_dispatch.sh's own
+# comment on this same override.
+export DISPATCH_LIVE_PANE=1
 pass=0; fail=0
 
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }

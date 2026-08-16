@@ -1000,13 +1000,27 @@ class Ledger:
     #
     # agent-supervisor#171: 'claude' widened the same way 'pi' was in #58 --
     # a second, genuinely opt-in transport, not a replacement for the
-    # default. `send-keys` stays first (and stays what an undeclared
-    # registration gets, same rule as every other harness here): the
-    # existing, standing claude/codex lanes Jon watches and interrupts are
-    # untouched. 'claude-print' is for a lane that is dispatched, does not
-    # need to be watched, and reports back once -- `ClaudePrintAdapter`
-    # refuses to register any lane whose harness is not 'claude', same
-    # posture `PiRPCAdapter` already takes for 'pi'.
+    # default. `send-keys` stays first here ON PURPOSE, and this tuple is
+    # NOT where #171's "flip the default" lives -- do not "fix" it by
+    # reordering to ('claude-print', 'send-keys'). This is also `bootstrap-
+    # session.sh`'s and `cli.py register`'s own undeclared-transport default
+    # for a REAL tmux pane (a standing lane Jon watches/interrupts), so
+    # reordering it would make every one of those registrations lie about
+    # its transport -- claiming `claude-print` for a lane still driven by
+    # actual send-keys. The real default flip is in `dispatch.sh`, one layer
+    # up: a plain, single-issue, non-PR-scoped `claude` dispatch now mints a
+    # brand-new `claude-print` lane instead of using a `lane-free` tmux
+    # candidate at all (see dispatch.sh's own "1.5" step) -- so it never
+    # reaches `_register_lane_tx` with `transport=None` for that case, and
+    # this default is simply never consulted for it. What DOES still reach
+    # this default undeclared: `bootstrap-session.sh`, a bare `cli.py
+    # register`, and any `claude` candidate a caller opts back onto tmux
+    # with `--live-pane` -- all genuinely tmux/send-keys lanes, which is
+    # exactly what this tuple's order is for. 'claude-print' is for a lane
+    # that is dispatched, does not need to be watched, and reports back
+    # once -- `ClaudePrintAdapter` refuses to register any lane whose
+    # harness is not 'claude', same posture `PiRPCAdapter` already takes
+    # for 'pi'.
     _TRANSPORTS_BY_HARNESS = {
         "codex": ("send-keys",),
         "claude": ("send-keys", "claude-print"),

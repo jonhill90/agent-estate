@@ -16,6 +16,11 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISPATCH="$HERE/../../scripts/supervisor/dispatch.sh"
+# agent-supervisor#171: this suite is about the gate itself, refusing before
+# a lane is ever picked in most cases -- the tmux flow is what its handful
+# of SAFE-verdict cases exercise, and it stubs no `claude` binary; see
+# test_dispatch.sh's own comment on this same override.
+export DISPATCH_LIVE_PANE=1
 pass=0; fail=0
 
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
