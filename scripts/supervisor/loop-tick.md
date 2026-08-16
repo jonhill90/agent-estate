@@ -3,6 +3,53 @@
 One iteration of the supervisor loop. If your context was lost,
 read `brief.md` in this directory first — it is the full standing context.
 
+## Every tick begins with the quota gate
+
+```bash
+bash scripts/supervisor/quota.sh check
+```
+
+Before the live worktree, before the Director's inbox, before anything else
+in this file — nothing downstream is worth reading if the estate cannot see
+its own quota state. Four exit codes, and only these four are ever read as
+anything but UNKNOWN:
+
+- `0` **SAFE** — proceed with the rest of the tick.
+- `1` **WIND DOWN** — stop dispatching, tell every in-flight lane to push and
+  release, go quiet. This is a *legitimate stop*, not a failure — see "Exit 1
+  is covered, not blocked" immediately below.
+- `2` **UNAVAILABLE** — quota could not be read. Treat as unknown, never as
+  safe.
+- `3` **MISSING** — `codexbar` is not installed. Same treatment as 2.
+
+Any other exit code is UNKNOWN and fails closed exactly like 2 and 3 —
+**including 127**, bash's own "No such file or directory" for a gate that is
+missing or not executable. Do not write `if [ rc -eq 1 ]` or any check that
+treats "not 1" as "proceed": that reads a missing gate as permission to
+spend, which is what actually happened before agent-supervisor#227 got
+`quota.sh` committed to `main` and deployed into `live/` — the gate was
+untracked, a tick following this instruction literally got exit 127, and
+nothing at the time said that code was anything other than safe. Enumerate
+the codes you accept; refuse everything else.
+
+### Exit 1 is covered, not blocked — do not re-arm past it
+
+`scripts/supervisor/quota-watch.sh` runs OUTSIDE this estate (its own
+detached process, started with `nohup`) and watches for the session window's
+quota state to flip back to SAFE. The moment it does, it sends exactly one
+resume message. A quota wind-down is therefore not a silent stop — something
+external is already holding the reason to restart it, which is exactly what
+"Never stop the loop" below is about *not* having. Stop dispatching, tell
+every in-flight lane to push and release, then go quiet **without**
+scheduling a wakeup of your own; `quota-watch.sh` is the wakeup. Re-arming
+into an exhausted window anyway is what burned $80 of usage credits down to
+$8 — the whole reason this gate exists.
+
+This is a different case from "blocked on everything else is gated on Jon"
+below, which has no external watcher and must always re-arm itself. Which
+mechanism applies depends on WHY the tick is stopping: quota exhaustion is
+watched from outside; a Jon-gated backlog is not.
+
 ## Advance the live worktree, before anything else
 
 ```bash
@@ -144,17 +191,37 @@ Then:
 - Say in **one line** that you are blocked and on what, then schedule the
   **longest** wakeup available (3600s).
 
-**Never stop the loop.** Do not call `ScheduleWakeup` with `stop: true`, and do
-not treat "everything is gated on Jon" as a terminating condition. A stopped
-loop cannot notice that Jon unblocked something — it requires him to come back
-and re-arm it by hand, which is the thing this loop exists to avoid. Blocked is
-a *state to sleep through*, not a reason to exit. Only Jon ends the loop.
+**Do not stop the loop for this reason.** Do not call `ScheduleWakeup` with
+`stop: true` because everything is gated on Jon, and do not treat "everything
+is gated on Jon" as a terminating condition. Nothing outside this loop is
+watching for Jon to unblock something — unlike the quota gate's exit 1
+(above), which `quota-watch.sh` watches for from outside. A tick stopped here
+requires Jon to come back and re-arm it by hand, which is the thing this
+loop exists to avoid. Blocked-on-Jon is a *state to sleep through*, not a
+reason to exit.
 
 This is a correction to an earlier version of this file, which said "schedule a
 long wakeup" without forbidding `stop`. On 2026-08-10 the supervisor read that
 as permission to stop, reasoning that further ticks could not make progress. The
 reasoning was sound and the action was wrong: it ended the loop, and Jon's next
 observation was "its not looping."
+
+**Second correction, 2026-08-16 (agent-supervisor#227/#229).** The line above
+used to read "**Never stop the loop... Only Jon ends the loop**," stated as an
+absolute with no exception. It was wrong the moment the quota gate landed:
+that rule, read literally, forbids the wind-down `quota.sh check`'s exit 1
+requires, and a supervisor that "helpfully" re-armed past it anyway is what
+burned $80 of usage credits down to $8. The rule now has exactly one carve-out,
+and it is the only one that gets to exist, because it is the only stop with an
+external party already holding the resume: quota exhaustion, covered by
+`quota-watch.sh` (see "Every tick begins with the quota gate" at the top of
+this file). Every other reason to stop — including "everything is gated on
+Jon," and including a blocked tick — still has nothing watching for it and
+must still re-arm itself. Both halves of this have now actually happened: the
+2026-08-10 silent stop above, and separately a supervisor that re-armed into
+an already-exhausted window on 2026-08-15/16 and spent through it. Neither
+rule was wrong on its own; the estate needed both, scoped to the case each
+one actually covers.
 
 A blocked tick must be **cheap**, which is what makes an hourly sweep
 affordable: list open issues and PRs across the five repos, compare against the
