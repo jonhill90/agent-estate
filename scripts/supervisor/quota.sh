@@ -39,6 +39,45 @@
 # holds, and neither ships GNU coreutils on macOS. `with_timeout` below is the
 # same self-contained `kill -0` poll loop advance-live.sh uses for its fetch,
 # not a dependency on an external binary that may not be on PATH in production.
+#
+# Exit codes -- callers branch on these, never on the text:
+#   0  SAFE       above the threshold; carry on
+#   1  WIND DOWN  below the threshold; stop dispatching, push, release, go quiet
+#   2  UNAVAILABLE quota could not be read. NOT the same as "fine" -- an
+#      instrument that cannot see a thing looks exactly like the thing being
+#      absent, which is this estate's most expensive recurring failure.
+#   3  MISSING    codexbar is not installed.
+#
+# agent-supervisor#262: the underlying `codexbar` fetch is intermittently
+# flaky -- the SAME machine, SAME minute, SAME copy of this file returned
+# UNAVAILABLE and then SAFE seconds apart. A single sample cannot tell a
+# transient network blip from a real reading, and the two ways of "fixing"
+# that are both wrong in opposite directions:
+#   - trust one sample and you get random halts on a blip, or
+#   - retry until you get a clean answer and you have silently turned
+#     fail-closed into fail-open: keep retrying long enough and you WILL get
+#     a lucky 0, including when the true state is WIND DOWN. That loop is
+#     exactly how $80 of usage credits burned down to $8.
+#
+# `check` instead samples a small FIXED number of times (QUOTA_CHECK_SAMPLES,
+# default 3) with a short fixed delay between them (QUOTA_CHECK_DELAY,
+# default 1s) -- never an unbounded retry -- and decides by rule over the
+# whole batch, not by whichever answer arrived last:
+#   - any sample WIND DOWN -> WIND DOWN. A real exhaustion signal must never
+#     be overridden by a later lucky fetch.
+#   - else any sample SAFE -> SAFE. A failed fetch is an absence of
+#     information, not evidence of safety; a successful fetch supersedes it.
+#   - else (every sample failed) -> UNAVAILABLE, and the message says how
+#     many samples could not reach codexbar at all versus how many reached
+#     it and got told the reading itself is unknown -- those are different
+#     conditions (as#228: a rate-limited read is not "issue not open").
+#
+# #264 and #262 compose, they do not stack: each of the (up to) SAMPLES
+# calls below still goes through `with_timeout`/`GUARD_TIMEOUT_SECONDS`, so
+# the worst case for the whole batch is bounded (~SAMPLES x
+# GUARD_TIMEOUT_SECONDS, not unbounded x SAMPLES), and a per-sample timeout
+# (124) falls into the same "could not reach the quota source" bucket as
+# any other unreachable exit code -- it is never read as SAFE.
 set -uo pipefail
 
 BIN="${CODEXBAR_BIN:-codexbar}"
@@ -163,40 +202,100 @@ command -v "$BIN" >/dev/null 2>&1 || {
 
 case "$CMD" in
   check)
-    GUARD_CACHE="$CACHE_DIR/guard-${PROVIDER}-${WINDOW}.json"
-    outfile=$(mktemp "${TMPDIR:-/tmp}/quota-guard.XXXXXX") || { echo "quota: could not create a scratch file -- UNAVAILABLE" >&2; exit 2; }
-    with_timeout "$GUARD_TIMEOUT_SECONDS" "$outfile" \
-      "$BIN" guard --provider "$PROVIDER" --min-remaining "$MIN_REMAINING" --window "$WINDOW" --json
-    # Capture the exit code directly, from with_timeout's return, not
-    # through a pipe -- reading it through a pipe returns the pipe's
-    # status, which has bitten this estate three times.
-    rc=$?
-    out=$(cat "$outfile" 2>/dev/null)
-    rm -f "$outfile"
+    SAMPLES="${QUOTA_CHECK_SAMPLES:-3}"
+    DELAY="${QUOTA_CHECK_DELAY:-1}"
+    case "$SAMPLES" in ''|*[!0-9]*) SAMPLES=3 ;; esac
+    [ "$SAMPLES" -lt 1 ] && SAMPLES=1
 
-    if [ "$rc" -eq 124 ]; then
-      if age=$(cache_fresh "$GUARD_CACHE"); then
-        cached_pct=$(printf '%s' "$(cat "$GUARD_CACHE" 2>/dev/null)" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("remainingPercent","?"))' 2>/dev/null)
-        echo "quota: TIMEOUT after ${GUARD_TIMEOUT_SECONDS}s waiting on $BIN guard -- UNAVAILABLE (last known: ${cached_pct}% remaining in $WINDOW, ${age}s old -- not current, do not treat as safe)" >&2
-      else
-        echo "quota: TIMEOUT after ${GUARD_TIMEOUT_SECONDS}s waiting on $BIN guard -- UNAVAILABLE, no cached reading within ${CACHE_MAX_AGE_SECONDS}s" >&2
+    wind_down_msg=""
+    safe_msg=""
+    safe_sample=""
+    unreachable=0    # "could not reach the quota source" -- no output, a
+                     # timeout, or an exit code this gate has never seen.
+    source_unknown=0 # "the quota source says unknown" -- codexbar answered
+                      # and told us it does not know (unavailableReason).
+
+    i=1
+    while [ "$i" -le "$SAMPLES" ]; do
+      outfile=$(mktemp "${TMPDIR:-/tmp}/quota-guard.XXXXXX") || {
+        echo "quota: sample $i/$SAMPLES -- could not create a scratch file -- could not reach the quota source" >&2
+        unreachable=$((unreachable + 1))
+        i=$((i + 1)); [ "$i" -le "$SAMPLES" ] && sleep "$DELAY"
+        continue
+      }
+      # #264: every codexbar call is bounded, including each sample below --
+      # a per-sample hang must not stall the whole batch past ~SAMPLES x
+      # GUARD_TIMEOUT_SECONDS.
+      with_timeout "$GUARD_TIMEOUT_SECONDS" "$outfile" \
+        "$BIN" guard --provider "$PROVIDER" --min-remaining "$MIN_REMAINING" --window "$WINDOW" --json
+      # Capture the exit code directly, from with_timeout's return, not
+      # through a pipe -- reading it through a pipe returns the pipe's
+      # status, which has bitten this estate three times.
+      rc=$?
+      out=$(cat "$outfile" 2>/dev/null)
+      rm -f "$outfile"
+
+      if [ "$rc" -eq 124 ]; then
+        echo "quota: sample $i/$SAMPLES -- TIMEOUT after ${GUARD_TIMEOUT_SECONDS}s waiting on $BIN guard -- could not reach the quota source" >&2
+        unreachable=$((unreachable + 1))
+        i=$((i + 1)); [ "$i" -le "$SAMPLES" ] && sleep "$DELAY"
+        continue
       fi
-      exit 2
+
+      if [ -z "$out" ]; then
+        echo "quota: sample $i/$SAMPLES -- no output from $BIN guard (exit $rc) -- could not reach the quota source" >&2
+        unreachable=$((unreachable + 1))
+        i=$((i + 1)); [ "$i" -le "$SAMPLES" ] && sleep "$DELAY"
+        continue
+      fi
+
+      pct=$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("remainingPercent","?"))' 2>/dev/null)
+      why=$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("unavailableReason") or "")' 2>/dev/null)
+
+      if [ -n "$why" ]; then
+        echo "quota: sample $i/$SAMPLES -- $BIN says quota unknown ($why) (exit $rc)" >&2
+        source_unknown=$((source_unknown + 1))
+        i=$((i + 1)); [ "$i" -le "$SAMPLES" ] && sleep "$DELAY"
+        continue
+      fi
+
+      case "$rc" in
+        0)
+          echo "quota: sample $i/$SAMPLES -- SAFE ${pct}% (exit 0)" >&2
+          if [ -z "$safe_msg" ]; then
+            safe_msg="quota: SAFE ${pct}% remaining in $WINDOW (floor ${MIN_REMAINING}%)"
+            safe_sample="$i"
+          fi
+          ;;
+        1)
+          echo "quota: sample $i/$SAMPLES -- WIND DOWN ${pct}% (exit 1)" >&2
+          wind_down_msg="quota: WIND DOWN -- ${pct}% remaining in $WINDOW, below ${MIN_REMAINING}%"
+          ;;
+        69)
+          echo "quota: sample $i/$SAMPLES -- $BIN could not read the quota (exit 69) -- could not reach the quota source" >&2
+          unreachable=$((unreachable + 1))
+          ;;
+        *)
+          echo "quota: sample $i/$SAMPLES -- $BIN guard exited $rc -- could not reach the quota source" >&2
+          unreachable=$((unreachable + 1))
+          ;;
+      esac
+      i=$((i + 1))
+      [ "$i" -le "$SAMPLES" ] && sleep "$DELAY"
+    done
+
+    # Decide by rule over the whole batch, never by whichever sample arrived
+    # last. A real WIND DOWN is never overridden by a later lucky SAFE.
+    if [ -n "$wind_down_msg" ]; then
+      echo "$wind_down_msg (pessimistic: at least one of $SAMPLES samples said WIND DOWN)"
+      exit 1
     fi
-    [ -z "$out" ] && { echo "quota: no output from $BIN guard -- UNAVAILABLE" >&2; exit 2; }
-    pct=$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("remainingPercent","?"))' 2>/dev/null)
-    why=$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("unavailableReason") or "")' 2>/dev/null)
-    if [ -n "$why" ]; then
-      echo "quota: UNAVAILABLE ($why) -- treat as unknown, never as safe" >&2
-      exit 2
+    if [ -n "$safe_msg" ]; then
+      echo "$safe_msg (sample $safe_sample/$SAMPLES clean; a clean SAFE supersedes fetch failures)"
+      exit 0
     fi
-    case "$rc" in
-      0) cache_write "$GUARD_CACHE" "$out"; echo "quota: SAFE ${pct}% remaining in $WINDOW (floor ${MIN_REMAINING}%)"; exit 0 ;;
-      1) cache_write "$GUARD_CACHE" "$out"; echo "quota: WIND DOWN -- ${pct}% remaining in $WINDOW, below ${MIN_REMAINING}%"; exit 1 ;;
-      69) echo "quota: UNAVAILABLE -- $BIN could not read the quota" >&2; exit 2 ;;
-      124) echo "quota: TIMEOUT -- UNAVAILABLE" >&2; exit 2 ;;
-      *) echo "quota: $BIN guard exited $rc -- treating as UNAVAILABLE" >&2; exit 2 ;;
-    esac
+    echo "quota: UNAVAILABLE -- all $SAMPLES samples failed ($unreachable could not reach $BIN, $source_unknown reached it and got told unknown) -- treat as unknown, never as safe" >&2
+    exit 2
     ;;
   eta)
     USAGE_CACHE="$CACHE_DIR/usage.json"

@@ -1,0 +1,36 @@
+#!/bin/bash
+# Test stub for quota.sh's sampling loop (agent-supervisor#262). Emits one
+# canned response per call, walking through QUOTA_TEST_SEQUENCE (a
+# comma-separated list) in order, so a test can script exactly what each of
+# the N samples in a single `quota.sh check` returns. QUOTA_TEST_COUNTER
+# names a scratch file this stub uses to remember which call it is on.
+#
+# Tokens:
+#   safe          -- guard exits 0, remainingPercent 80
+#   winddown      -- guard exits 1, remainingPercent 9
+#   empty         -- no output at all (simulates the fetch dying outright)
+#   unavailable   -- guard exits 0 but the JSON carries unavailableReason
+#                    (codexbar reached the network and got told "unknown")
+set -uo pipefail
+
+[ "${1:-}" = "guard" ] || { echo "codexbar-sequence: only 'guard' is stubbed" >&2; exit 64; }
+
+COUNTER="${QUOTA_TEST_COUNTER:?QUOTA_TEST_COUNTER must be set}"
+SEQ="${QUOTA_TEST_SEQUENCE:?QUOTA_TEST_SEQUENCE must be set}"
+
+n=0
+[ -f "$COUNTER" ] && n=$(cat "$COUNTER")
+n=$((n + 1))
+printf '%s' "$n" > "$COUNTER"
+
+IFS=',' read -r -a TOKENS <<< "$SEQ"
+idx=$((n - 1))
+tok="${TOKENS[$idx]:-${TOKENS[-1]}}"
+
+case "$tok" in
+  safe)        printf '{"remainingPercent": 80}\n'; exit 0 ;;
+  winddown)    printf '{"remainingPercent": 9}\n'; exit 1 ;;
+  empty)       exit 2 ;;
+  unavailable) printf '{"unavailableReason": "fetch-failed"}\n'; exit 0 ;;
+  *)           echo "codexbar-sequence: unknown token '$tok'" >&2; exit 70 ;;
+esac
