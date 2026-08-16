@@ -4,7 +4,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/jonhill90/agent-tui/internal/cost"
+	"github.com/jonhill90/keelson/internal/cost"
 )
 
 // buildCostFetch composes cost.ParseDaily/cost.ParseActiveBlockLimit (pure)

@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
-	"github.com/jonhill90/agent-tui/internal/theme"
+	"github.com/jonhill90/keelson/internal/theme"
 )
 
 // TestThemeSwitchChangesBoardRender is agent-tui#27's per-surface half of

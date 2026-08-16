@@ -64,6 +64,22 @@ func TestGoToEndAndTop(t *testing.T) {
 	}
 }
 
+// TestBareQAlsoQuits is TestQuitSetsQuittingAndBlanksView's sibling for
+// the plain "q" case -- the legend promises "[q] quit" alongside ctrl+c,
+// but only ctrl+c was previously sent through Update by any test.
+func TestBareQAlsoQuits(t *testing.T) {
+	m := New()
+	m.width, m.height = 80, 30
+	model, cmd := m.Update(keyMsg("q"))
+	m = model.(Model)
+	if !m.quitting {
+		t.Fatal("\"q\" did not set quitting")
+	}
+	if cmd == nil {
+		t.Fatal("\"q\" did not return tea.Quit")
+	}
+}
+
 func TestQuitSetsQuittingAndBlanksView(t *testing.T) {
 	m := New()
 	m.width, m.height = 80, 30

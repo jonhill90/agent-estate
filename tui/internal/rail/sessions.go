@@ -11,7 +11,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/keelson/internal/lane"
 )
 
 // groupStyleDef is one candidate answer to "how are sessions grouped on

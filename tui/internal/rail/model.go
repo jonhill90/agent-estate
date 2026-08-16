@@ -16,11 +16,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jonhill90/agent-tui/internal/board"
-	"github.com/jonhill90/agent-tui/internal/cost"
-	"github.com/jonhill90/agent-tui/internal/lane"
-	"github.com/jonhill90/agent-tui/internal/session"
-	"github.com/jonhill90/agent-tui/internal/theme"
+	"github.com/jonhill90/keelson/internal/board"
+	"github.com/jonhill90/keelson/internal/cost"
+	"github.com/jonhill90/keelson/internal/lane"
+	"github.com/jonhill90/keelson/internal/session"
+	"github.com/jonhill90/keelson/internal/theme"
 )
 
 // RailWidth is the target column count for the rail region. Jon asked for

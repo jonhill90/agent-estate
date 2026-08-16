@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/agent-tui/internal/lane"
-	"github.com/jonhill90/agent-tui/internal/theme"
+	"github.com/jonhill90/keelson/internal/lane"
+	"github.com/jonhill90/keelson/internal/theme"
 )
 
 func threeSessions() []lane.Session {

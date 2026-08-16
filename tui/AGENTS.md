@@ -1,4 +1,4 @@
-# AGENTS.md — agent-tui
+# AGENTS.md — keelson
 
 Repository policy for an agent arriving here. `CLAUDE.md` is a committed
 symlink to this file — one source, two harness-visible names, no sync step.
@@ -6,19 +6,27 @@ Edit this file; never edit `CLAUDE.md` directly (it will edit the same bytes,
 but say so in the commit message if you do, to avoid a reviewer thinking two
 files drifted).
 
-**Verified 2026-08-16T01:21:59Z against `origin/main` `d5e4dab`.** Confirm the
-SHA in `git log -1` still matches before trusting counts below; they are
-measured, not estimated.
+**Verified against `lane/38-app-keelson`, 2026-08-16 (agent-tui#38's overnight
+brief).** Confirm the branch/SHA in `git log -1` still matches before trusting
+counts below; they are measured, not estimated. The Go module, `cmd/`
+directory and binary are named `keelson` as of this branch; the GitHub repo
+itself is still `jonhill90/agent-tui` (renaming it is a separate, more
+disruptive step left for later — issue references below keep the
+`agent-tui#NN` form because that is the repo they still point at).
 
 ## What this repo is
 
-`agent-tui` is a terminal UI, Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea),
-that reads `agent-supervisor`'s state over MCP and renders it for a human. It
-is a **viewer with one write path** (session attach/detach/add/remove, see
-below) — same discipline as `agent-supervisor`'s own
-`scripts/supervisor/laneview/`. It never shells out to `tmux` directly, never
-reads or writes the ledger except through the adapters listed below, and
-never reimplements `ccusage`'s or `lanes.sh`'s parsing.
+`keelson` (module `github.com/jonhill90/keelson`, formerly `agent-tui` --
+that name described the rendering technology, Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea),
+not the product) is one terminal application: a persistent left rail over
+`agent-supervisor`'s lane/session state, with the task board, cost panel and
+glyph gallery reachable as panes in the same process (`internal/shell`,
+agent-tui#38). It is a **viewer with one write path** (session
+attach/detach/add/remove, see below) — same discipline as
+`agent-supervisor`'s own `scripts/supervisor/laneview/`. It never shells out
+to `tmux` directly, never reads or writes the ledger except through the
+adapters listed below, and never reimplements `ccusage`'s or `lanes.sh`'s
+parsing.
 
 Read `README.md` for what has shipped, `docs/PRD.md` for what the product is
 for, and `docs/SPEC.md` for the technical design. This file is arrival
@@ -44,33 +52,35 @@ policy only.
 ## Layout
 
 ```
-cmd/agent-tui/       four tea.NewProgram entry points, selected by flag (see docs/SPEC.md)
+cmd/keelson/         one tea.NewProgram entry point, running internal/shell.Model (see docs/SPEC.md)
 internal/board/      task board projection — GitHub issues/PRs + ledger tasks + live lanes
 internal/cost/       per-harness spend/quota projection from ccusage
 internal/gallery/    glyph gallery — every lane state × every candidate glyph set
 internal/lane/       lane/session decode, glyph sets (data, not code), state table
 internal/mcp/        minimal MCP JSON-RPC client over a child process's stdio
-internal/rail/       the left-anchored navigation rail — the one shipped anchor feature
+internal/rail/       the left-anchored navigation rail — the one shipped anchor feature, now always visible
 internal/session/    write path: attach/detach/add/remove, all via MCP, no os/exec
+internal/shell/      the application shell -- owns the rail + board/cost/gallery as panes (agent-tui#38)
 internal/theme/      look-and-feel as data — Role-keyed colours, persisted per-user config
 scripts/             verify-lanes-unaffected.sh — the rail's non-interference proof
 ```
 
-`internal/shell` (an unwired application shell, `internal/chat` (an unwired
-chat adapter) exist only on unmerged branches — see `docs/SPEC.md`'s "Gap
-between intent and code" section before assuming either is on `main`.
+`internal/chat` (an unwired chat adapter) exists only on an unmerged branch
+(`lane/20-chat-threads`) — see `docs/SPEC.md`'s "Gap between intent and code"
+section before assuming it is on this branch; it was stopped deliberately to
+avoid becoming a fifth flag-selected screen ahead of the shell landing.
 
 ## Adapter discipline
 
 Every package that touches the outside world is behind a function-typed or
-interface-typed seam, supplied by `cmd/agent-tui/main.go`:
+interface-typed seam, supplied by `cmd/keelson/main.go`:
 
 | seam | package | what it hides |
 |---|---|---|
 | `rail.Fetcher`, `rail.SessionsFetcher` | `internal/rail` | the MCP `lanes`/`sessions` tool calls |
 | `session.Interface` | `internal/session` | attach/detach/add/remove, each one `mcp.Client.CallTool` |
-| `cost.Fetcher` (built in `cmd/agent-tui/cost.go`) | `internal/cost` | shelling out to `ccusage` |
-| `board.Fetcher`-shaped functions (`cmd/agent-tui/board.go`) | `internal/board` | `gh` CLI calls and a read-only `sqlite3` ledger open |
+| `cost.Fetcher` (built in `cmd/keelson/cost.go`) | `internal/cost` | shelling out to `ccusage` |
+| `board.Fetcher`-shaped functions (`cmd/keelson/board.go`) | `internal/board` | `gh` CLI calls and a read-only `sqlite3` ledger open |
 | `theme.Theme` / `theme.Load` | `internal/theme` | every colour, border and chrome literal |
 
 **Why this matters practically:** every package's tests construct a fake
@@ -88,24 +98,24 @@ go vet ./...
 go test ./...
 ```
 
-All three verified green at `d5e4dab`, 2026-08-16T01:21:59Z (8 packages with
-tests, `cmd/agent-tui` has none). CI (`.github/workflows/*.yml`) runs the
-same three commands on `ubuntu-latest`, Go 1.26, plus a fourth check gated on
-a live `agent-supervisor` checkout: `internal/lane/states_lanessh_test.go`
+All three verified green on `lane/38-app-keelson` (9 packages with tests,
+`cmd/keelson` has none). CI (`.github/workflows/*.yml`) runs the same three
+commands on `ubuntu-latest`, Go 1.26, plus a fourth check gated on a live
+`agent-supervisor` checkout: `internal/lane/states_lanessh_test.go`
 cross-checks `lane.AllStates` against `lanes.sh`'s own `state=` assignments
 when `$AGENT_SUPERVISOR_REPO` is set, and skips otherwise — this repo must
 still build and test standalone with no supervisor checkout present.
 
-To run the rail against a real supervisor:
+To run the app against a real supervisor:
 
 ```
-go build -o agent-tui ./cmd/agent-tui
-AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./agent-tui
+go build -o keelson ./cmd/keelson
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson
 ```
 
-The board and cost/gallery screens are separate binaries-by-flag today
-(`-board`, `-cost`, `-gallery`) — see `docs/SPEC.md` for why that is a known
-gap, not the design.
+The board, cost and gallery screens are panes reached with `[f2]`/`[f3]`/
+`[f4]` inside the one running process (`internal/shell`, agent-tui#38);
+`-board`/`-cost`/`-gallery` now only choose which pane the app opens on.
 
 **A binary that builds is not a feature that works.** `go test` exercises
 `Model.Update` with synthetic key messages against fakes; it does not press a
@@ -137,9 +147,11 @@ either cite the test that drives it through `Update` (name it) or say
 
 ## What NOT to do here
 
-- Do not add a fifth `tea.NewProgram` flag-selected screen. The known gap is
-  the missing application shell (see `docs/SPEC.md`); a fifth flag repeats
-  the defect `lane/20-chat-threads` explicitly declined to repeat.
+- Do not add a new `tea.NewProgram` call site. `internal/shell.Model` is the
+  one program now (agent-tui#38); a new view is a pane added to the shell,
+  never a second program selected by a launch flag — the mistake a fifth
+  flag would have repeated, which `lane/20-chat-threads` explicitly declined
+  to make.
 - Do not call `os/exec` for tmux from any package under `internal/`. Every
   tmux-adjacent operation is a supervisor MCP tool call.
 - Do not restore `[a]ttach`/`[d]etach` in the rail without the client-identity

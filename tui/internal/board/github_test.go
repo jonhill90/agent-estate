@@ -12,7 +12,7 @@ func TestFetchIssuesRequestsAllStates(t *testing.T) {
 	var gotArgs []string
 	run := GitHubRunner(func(args []string) ([]byte, error) {
 		gotArgs = args
-		return []byte(`[{"number":6,"title":"task board","state":"open","html_url":"https://github.com/jonhill90/agent-tui/issues/6"}]`), nil
+		return []byte(`[{"number":6,"title":"task board","state":"open","html_url":"https://github.com/jonhill90/keelson/issues/6"}]`), nil
 	})
 	issues, err := FetchIssues(run, testRepo)
 	if err != nil {

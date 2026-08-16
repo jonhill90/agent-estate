@@ -1,49 +1,63 @@
-# agent-tui
+# keelson
 
-A terminal UI for the agent estate: reads [`agent-supervisor`](https://github.com/jonhill90/agent-supervisor)'s
-lane and session state over MCP and renders it. Go +
-[Bubble Tea](https://github.com/charmbracelet/bubbletea).
+*Renamed from `agent-tui`, 2026-08-16 (agent-tui#38's overnight brief) --
+`agent-tui` named the rendering technology (Go + Bubble Tea, "tui"), not
+the product. A keelson is the timber running along the inside of a ship's
+keel, binding all the frames into one structure — the layer above
+orchestration, which is what this actually is. The GitHub repo stays
+`jonhill90/agent-tui` for tonight; only the binary, module path and
+`cmd/` directory moved. See this PR's handoff for what's left.*
+
+A terminal application for the agent estate: reads [`agent-supervisor`](https://github.com/jonhill90/agent-supervisor)'s
+lane and session state over MCP and renders it behind a persistent left
+rail, with the task board, cost panel and glyph gallery reachable as panes
+in the same process. Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
 It consumes the supervisor; it does not import supervisor internals, and the
 supervisor has no opinion about how a human sees it. Either side is
 removable. Full technical design: `docs/SPEC.md`. What the product is for:
 `docs/PRD.md`. Arrival policy for an agent working in this repo: `AGENTS.md`.
 
-**This section describes what is actually on `main` today, checked against
-`origin/main` `d5e4dab`, verified 2026-08-16T01:21:59Z.** Where intent and
-code diverge, that is said explicitly — see "What this is not, yet" below,
-and `docs/SPEC.md`'s "Gap between intent and code" for the full accounting.
-
-*This replaces an earlier README that opened "A terminal application for
-the agent estate" — aspirational, describing the one-app-with-navigation
-intent rather than what shipped. This rewrite leads with the four-programs
-reality instead, per the grounding review's Finding 1 (cited above).*
+**This section describes what is actually on this branch, checked against
+`lane/38-app-keelson`.** Where intent and code diverge, that is said
+explicitly — see "What this is not, yet" below, and `docs/SPEC.md`'s "Gap
+between intent and code" for the full accounting (not yet re-verified
+against this branch; treat its specifics as pre-shell).
 
 ## What it is today
 
-Four separate `tea.NewProgram` entry points in `cmd/agent-tui/main.go`,
-selected by mutually exclusive command-line flags — **not one application
-with in-app navigation.** Switching screens means quitting and relaunching
-with a different flag.
+**One `tea.NewProgram`, one process.** `internal/shell.Model` owns a
+persistent left rail (every tmux session, live lane state) plus a content
+pane that holds the task board, cost panel or glyph gallery — reached with
+a keypress, never a relaunch (agent-tui#38). `-board`/`-cost`/`-gallery`
+still choose which pane the app *opens* on; they stop being the only way to
+reach it.
 
 ```
-go build -o agent-tui ./cmd/agent-tui
+go build -o keelson ./cmd/keelson
 
-# the rail (default) -- every tmux session's lanes, live
-AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./agent-tui
+# opens on the rail with the home pane -- [f2] board, [f3] cost, [f4] gallery,
+# [tab] moves focus between the rail and the content pane
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson
 
-# the task board -- five columns, six layouts, needs a ledger COPY
-AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./agent-tui -board \
+# same app, opens on the task board pane -- needs a ledger COPY
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson -board \
   -ledger /path/to/a/COPY/of/ledger.sqlite3
 
-# the cost panel -- no supervisor connection needed
-./agent-tui -cost
+# same app, opens on the cost pane
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson -cost
 
-# the glyph gallery -- no supervisor connection needed
-./agent-tui -gallery
+# same app, opens on the glyph gallery pane
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson -gallery
 ```
 
-Run `./agent-tui -h` for every flag; `cmd/agent-tui/main.go`'s flag help
+The rail is always on screen now, so every invocation needs a supervisor
+connection (`-supervisor-repo`/`$AGENT_SUPERVISOR_REPO`/`-mcp-cmd`) — even
+one that opens on the cost or gallery pane, which is a change from the
+four-separate-programs era, when `-cost`/`-gallery` needed no connection at
+all because there was no rail beside them to feed.
+
+Run `./keelson -h` for every flag; `cmd/keelson/main.go`'s flag help
 strings are the authoritative, current documentation for each one — this
 README does not restate them.
 
@@ -159,13 +173,7 @@ rune animates which lane state rather than the chrome around it — see
 
 ## What this is not, yet
 
-- **Not one application.** No in-app navigation exists between the four
-  screens above; see `docs/SPEC.md` for the mechanism (`rail.Model.View`
-  clamps to `RailWidth`, so no content region exists for a second view
-  beside it, even on a wide terminal). `internal/shell.Model` — a composed
-  root model with `[tab]`/`[f1-f4]` routing — exists, unwired, zero tests,
-  on unmerged `origin/lane/38-app-shell`.
-- **No chat screen on `main`.** Built and tested standalone
+- **No chat screen.** Built and tested standalone
   (`internal/chat`, thread list + transcript and multi-pane-tail layouts,
   an ACP-informed design) on unmerged `origin/lane/20-chat-threads`. Its
   own commit message says it stopped short of wiring in specifically to
@@ -187,9 +195,9 @@ to be zero.
   panes. A sidebar built that way corrupts the state it displays.
 - **Acceptance for any renderer: `lanes.sh` output is byte-identical with
   the app running and not running.**
-  `scripts/verify-lanes-unaffected.sh <agent-supervisor-repo> <agent-tui-binary>`
+  `scripts/verify-lanes-unaffected.sh <agent-supervisor-repo> <keelson-binary>`
   is the checked proof — it spins up an isolated tmux server, snapshots
-  `lanes.sh --json`, runs agent-tui in its own window of the same session,
+  `lanes.sh --json`, runs keelson in its own window of the same session,
   snapshots again, and diffs.
 - **Every state the supervisor emits must be nameable.** A state with no
   glyph must not silently read as idle. `internal/lane/variants.go`'s

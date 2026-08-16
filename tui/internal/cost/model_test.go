@@ -66,6 +66,53 @@ func TestOnlyRefreshMsgAndKeyRTriggerAFetch(t *testing.T) {
 	}
 }
 
+// TestKeyRSentThroughUpdateActuallyFetches closes the gap
+// TestOnlyRefreshMsgAndKeyRTriggerAFetch left open: that test proves "x"
+// does NOT fetch and refreshMsg DOES, but calls doFetch(m.fetch)() directly
+// rather than sending keyMsg("r") through Update -- the "r" case
+// (agent-tui#38's QA gate: "drive every key... a control that is not
+// pressed is not proven") was never itself exercised. This sends "r",
+// takes Update's returned Cmd exactly as tea.Program would, executes it,
+// and feeds the resulting Msg back in -- proving the whole key-to-fetch
+// path, not just that a fetch function exists.
+func TestKeyRSentThroughUpdateActuallyFetches(t *testing.T) {
+	fetchCount := 0
+	m := New(func() (Snapshot, error) {
+		fetchCount++
+		return Compose(nil, Limit{}), nil
+	})
+
+	model, cmd := m.Update(keyMsg("r"))
+	m = model.(Model)
+	if cmd == nil {
+		t.Fatal("Update(keyMsg(\"r\")) returned a nil Cmd, want doFetch")
+	}
+	msg := cmd()
+	model, _ = m.Update(msg)
+	m = model.(Model)
+	if fetchCount != 1 {
+		t.Fatalf("fetchCount = %d after sending \"r\" through Update and running its Cmd, want 1", fetchCount)
+	}
+}
+
+// TestQAndCtrlCSentThroughUpdateQuit drives the cost pane's own "q"/
+// "ctrl+c" case directly -- neither key was previously sent through
+// Update by any test in this package, only asserted present in legend
+// text.
+func TestQAndCtrlCSentThroughUpdateQuit(t *testing.T) {
+	for _, key := range []tea.KeyMsg{keyMsg("q"), {Type: tea.KeyCtrlC}} {
+		m := New(func() (Snapshot, error) { return Snapshot{}, nil })
+		model, cmd := m.Update(key)
+		m = model.(Model)
+		if !m.quitting {
+			t.Errorf("Update(%v) did not set quitting", key)
+		}
+		if cmd == nil {
+			t.Errorf("Update(%v) returned a nil Cmd, want tea.Quit", key)
+		}
+	}
+}
+
 func TestFetchErrorRendersUnknownNeverStaleData(t *testing.T) {
 	m := New(func() (Snapshot, error) { return Snapshot{}, nil })
 	m.width, m.height = 80, 30

@@ -41,7 +41,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/agent-tui/internal/session"
+	"github.com/jonhill90/keelson/internal/session"
 )
 
 // opsMode is the write path's small state machine. Every value but
