@@ -293,18 +293,33 @@ case "$sub" in
     # brand-new process with nothing typed into it yet, and a stub that left
     # a stale buffer behind could not tell "the harness relaunch actually
     # reset the pane" from "dispatch.sh never called respawn-pane at all".
+    #
+    # agent-supervisor#236: a trailing positional argument is the SHELL
+    # COMMAND respawn-pane starts as the pane's own process -- real tmux's
+    # own `respawn-pane [flags] [shell-command]` syntax. Recorded to its own
+    # file (`.respawn-cmd`), never to the input buffer `send-keys` writes to,
+    # because that is the whole of what #236 asks for: the launch command
+    # becomes the pane's PROCESS, not text sent to whatever the pane already
+    # holds. A test asserting "the launch command never reached send-keys"
+    # checks `.keys`/`.selected` stay untouched; asserting "the harness WAS
+    # launched" reads this file instead.
     printf '%s %s\n' "$sub" "$*" >> "$LOG"
-    win=""; dir=""
+    win=""; dir=""; cmd=""
     while [ $# -gt 0 ]; do
       case "$1" in
         -t) win="${2##*:}"; win="${win%%.*}"; win="$(idx_for "$win")"; shift 2 ;;
         -c) dir="$2"; shift 2 ;;
         -k) shift ;;
-        *) shift ;;
+        *) cmd="$1"; shift ;;
       esac
     done
     [ -n "$dir" ] && printf '%s' "$dir" > "$PANES/$win.path"
     rm -f "$PANES/$win" "$PANES/$win.keys" "$PANES/$win.submitted" "$PANES/$win.dropped"
+    if [ -n "$cmd" ]; then
+      printf '%s' "$cmd" > "$PANES/$win.respawn-cmd"
+    else
+      rm -f "$PANES/$win.respawn-cmd"
+    fi
     exit 0 ;;
 esac
 
