@@ -140,6 +140,12 @@ while :; do
 done
 EOF
 chmod +x "$STAND_IN"
+# agent-supervisor#194: this stand-in is itself a real, unrelated-lineage
+# process named inbox-poll.sh under a mktemp'd path -- exactly the shape
+# poller_process_rows (watchdog.sh) now requires a marker to trust as
+# harmless, since #194 found path alone proved nothing. Mark it so this
+# test's own fixture doesn't add POLLER-DUPLICATE noise to the ticks below.
+touch "$RT/.watchdog-test-fixture"
 
 STATE="$A/state"; mkdir -p "$STATE" "$STATE/transcripts"
 FLAG="$STATE/.inbox-poll-restart-requested"
