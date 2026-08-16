@@ -293,6 +293,42 @@ ISSUE="${ISSUES[0]:-}"
 [ -f "$BRIEF" ] || { echo "dispatch: no brief file at $BRIEF" >&2; exit 1; }
 BRIEF="$(cd "$(dirname "$BRIEF")" && pwd)/$(basename "$BRIEF")"
 
+# --- -0.5. the quota gate. Nothing gets dispatched on a window we cannot see
+# ----------------------------------------------------------------------------
+# agent-supervisor#227: quota.sh -- the thing every tick is required to run
+# before spending anything -- was untracked and absent from the deployed
+# `live/` tree. A caller reading "not 1" as "proceed" turned a missing file
+# (exit 127, bash's own "No such file or directory") into permission to
+# spend, which is the exact inversion the gate exists to prevent and the
+# mechanism behind the $80 -> $8 burn.
+#
+# `quota.sh check` defines exactly four exit codes: 0 SAFE, 1 WIND DOWN, 2
+# UNAVAILABLE, 3 codexbar MISSING. This is the caller, and it enumerates what
+# it accepts rather than testing what it refuses -- `case ... 0) ;; 1) ...;;
+# *) ...;; esac`, never `[ "$rc" -eq 1 ]`. Only 0 proceeds. 1, 2, 3, 127, and
+# anything this dispatcher has never seen all fail closed the same way:
+# refuse to dispatch. QUOTA_GATE is overridable so tests can point it at a
+# path that does not exist and watch this refuse.
+QUOTA_GATE="${QUOTA_GATE:-$HERE/quota.sh}"
+QUOTA_OUT=$("$QUOTA_GATE" check 2>&1)
+QUOTA_RC=$?
+case "$QUOTA_RC" in
+  0)
+    : # SAFE -- proceed
+    ;;
+  1)
+    echo "dispatch: quota gate says WIND DOWN -- refusing to dispatch #$ISSUE_ARG" >&2
+    sed 's/^/  /' <<<"$QUOTA_OUT" >&2
+    echo "dispatch: this is a legitimate stop, not a failure -- quota-watch.sh brings the loop back" >&2
+    exit 1
+    ;;
+  *)
+    echo "dispatch: quota gate exited $QUOTA_RC ($QUOTA_GATE) -- UNKNOWN, never treated as safe" >&2
+    sed 's/^/  /' <<<"$QUOTA_OUT" >&2
+    exit 1
+    ;;
+esac
+
 # --- infer --reviews-pr when the caller forgot it (agent-supervisor#70) ----
 # agent-dotfiles#263's shape: a guard that "proceeds unchanged if the flag is
 # omitted" is a guard that will be omitted. Measured on this estate: a

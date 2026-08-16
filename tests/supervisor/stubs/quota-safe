@@ -1,0 +1,7 @@
+#!/bin/bash
+# Test stub for the quota gate (agent-supervisor#227). Every dispatch.sh test
+# that is not specifically exercising the quota gate needs a deterministic
+# SAFE verdict, not the real quota.sh calling out to codexbar against
+# whatever account state the test happens to run under.
+echo "quota: SAFE 90% remaining in session (floor 15%) [stub]"
+exit 0
