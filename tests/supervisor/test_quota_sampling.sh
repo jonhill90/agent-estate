@@ -29,8 +29,15 @@ D=$(mktemp -d)
 run() {
   local seq="$1"
   local counter="$D/counter-$$-$RANDOM"
+  local state_dir="$D/state-$$-$RANDOM"
+  # Each call gets its own AGENT_SUPERVISOR_STATE_DIR: `check` now writes a
+  # last-good guard reading to the cache on every SAFE/WIND DOWN sample
+  # (#264 composed with #262), and without this a run here would read or
+  # write the real machine's quota-cache dir -- polluting production state
+  # and leaking a stale reading across unrelated cases in this same file.
   QUOTA_TEST_SEQUENCE="$seq" QUOTA_TEST_COUNTER="$counter" \
     CODEXBAR_BIN="$STUB" QUOTA_CHECK_SAMPLES=3 QUOTA_CHECK_DELAY=0 \
+    AGENT_SUPERVISOR_STATE_DIR="$state_dir" \
     bash "$QUOTA" check 2>&1
 }
 
@@ -71,6 +78,7 @@ want_contains "logs sample 3 with its exit code" "sample 3/3" "$OUT"
 COUNTER="$D/bound-counter"
 QUOTA_TEST_SEQUENCE="empty,empty,empty,safe,safe,safe" QUOTA_TEST_COUNTER="$COUNTER" \
   CODEXBAR_BIN="$STUB" QUOTA_CHECK_SAMPLES=3 QUOTA_CHECK_DELAY=0 \
+  AGENT_SUPERVISOR_STATE_DIR="$D/state-bound" \
   bash "$QUOTA" check >/dev/null 2>&1
 CALLS=$(cat "$COUNTER" 2>/dev/null || echo "?")
 if [ "$CALLS" = "3" ]; then

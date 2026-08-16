@@ -207,6 +207,7 @@ case "$CMD" in
     case "$SAMPLES" in ''|*[!0-9]*) SAMPLES=3 ;; esac
     [ "$SAMPLES" -lt 1 ] && SAMPLES=1
 
+    GUARD_CACHE="$CACHE_DIR/guard-${PROVIDER}-${WINDOW}.json"
     wind_down_msg=""
     safe_msg=""
     safe_sample=""
@@ -262,6 +263,7 @@ case "$CMD" in
       case "$rc" in
         0)
           echo "quota: sample $i/$SAMPLES -- SAFE ${pct}% (exit 0)" >&2
+          cache_write "$GUARD_CACHE" "$out"
           if [ -z "$safe_msg" ]; then
             safe_msg="quota: SAFE ${pct}% remaining in $WINDOW (floor ${MIN_REMAINING}%)"
             safe_sample="$i"
@@ -269,6 +271,7 @@ case "$CMD" in
           ;;
         1)
           echo "quota: sample $i/$SAMPLES -- WIND DOWN ${pct}% (exit 1)" >&2
+          cache_write "$GUARD_CACHE" "$out"
           wind_down_msg="quota: WIND DOWN -- ${pct}% remaining in $WINDOW, below ${MIN_REMAINING}%"
           ;;
         69)
@@ -294,7 +297,12 @@ case "$CMD" in
       echo "$safe_msg (sample $safe_sample/$SAMPLES clean; a clean SAFE supersedes fetch failures)"
       exit 0
     fi
-    echo "quota: UNAVAILABLE -- all $SAMPLES samples failed ($unreachable could not reach $BIN, $source_unknown reached it and got told unknown) -- treat as unknown, never as safe" >&2
+    if age=$(cache_fresh "$GUARD_CACHE"); then
+      cached_pct=$(printf '%s' "$(cat "$GUARD_CACHE" 2>/dev/null)" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("remainingPercent","?"))' 2>/dev/null)
+      echo "quota: UNAVAILABLE -- all $SAMPLES samples failed ($unreachable could not reach $BIN, $source_unknown reached it and got told unknown) -- last known: ${cached_pct}% remaining in $WINDOW, ${age}s old -- not current, do not treat as safe" >&2
+    else
+      echo "quota: UNAVAILABLE -- all $SAMPLES samples failed ($unreachable could not reach $BIN, $source_unknown reached it and got told unknown) -- treat as unknown, never as safe" >&2
+    fi
     exit 2
     ;;
   eta)
