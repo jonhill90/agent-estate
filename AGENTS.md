@@ -29,6 +29,9 @@ scripts/supervisor/          the system
   session_guard.py           the one place session removal is judged safe
   watchdog.sh                liveness, from OUTSIDE the loop
   inbox-poll.sh              Telegram poller (a service, never a lane)
+  mine_jon.py                extract Jon's own transcript turns, filtered by
+                             shape (no model, no reasoning) — read-only against
+                             `~/.claude/projects/`; never quote its output
 tests/supervisor/            44 files; the suite is the contract
 ```
 
