@@ -132,7 +132,7 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # placeholder only exists to document that SESSION is not usable yet.
 
 dispatch_rehome_lane() {
-  local target="$1" dir="$2" harness="${3:-}" hidx="" cmd="" launch_cmd="" launch_literal=""
+  local target="$1" dir="$2" harness="${3:-}" hidx="" cmd="" launch_cmd=""
   [ -n "$target" ] || { echo "dispatch: --rehome-lane requires a tmux target" >&2; return 2; }
   [ -n "$dir" ] || dir="${HOME:-/tmp}"
   [ -d "$dir" ] || { echo "dispatch: re-home target directory does not exist: $dir" >&2; return 1; }
@@ -149,17 +149,20 @@ dispatch_rehome_lane() {
   fi
 
   launch_cmd="${H_LAUNCH_CMD[$hidx]}"
-  launch_literal="${H_SEND_LITERAL[$hidx]:-0}"
-  if ! tmux respawn-pane -k -t "$target" -c "$dir" 2>/dev/null; then
+  # agent-supervisor#236: the harness is the pane's PROCESS, handed to
+  # respawn-pane as its own argv -- never typed into whatever the respawn
+  # produces. The prior shape (respawn, sleep, then blind `send-keys
+  # "$launch_cmd" Enter`) is the mechanism #236 reports: a lane was found
+  # blocked on a menu offering to run a pasted launch command, because
+  # nothing checked what was listening for those keystrokes a second later.
+  # One tmux call now does what three did, so there is no window in which
+  # the launch command exists as text and nothing is left to settle for --
+  # H_SEND_LITERAL governed how `send-keys` parsed ITS OWN argument for tmux
+  # key names, which does not apply to a shell command handed to
+  # respawn-pane's own argv.
+  if ! tmux respawn-pane -k -t "$target" -c "$dir" "$launch_cmd" 2>/dev/null; then
     echo "dispatch: tmux respawn-pane failed while re-homing $target to $dir" >&2
     return 1
-  fi
-  sleep "${DISPATCH_RESPAWN_SETTLE:-1}"
-  if [ "$launch_literal" = 1 ]; then
-    tmux send-keys -t "$target" -l "$launch_cmd" 2>/dev/null \
-      && tmux send-keys -t "$target" Enter 2>/dev/null
-  else
-    tmux send-keys -t "$target" "$launch_cmd" Enter 2>/dev/null
   fi
 }
 
@@ -1399,9 +1402,9 @@ fi
 # running (the pool only ever offers this step a FREE lane -- ledger and
 # lanes.sh both said so above -- so there is no live conversation to lose,
 # same as `restore.sh`'s own "no open task -> restore fresh" branch) and
-# start a brand-new shell whose cwd is the worktree. The harness is then
-# relaunched INTO that shell with its adapter's own `HARNESS_LAUNCH_CMD` --
-# a real shell command, typed into a real shell prompt, which is the one
+# start the harness AS the pane's new process, its adapter's own
+# `HARNESS_LAUNCH_CMD` given to the same tmux call as its argv (#236) --
+# a real shell command, run as the pane's process directly, which is the one
 # place in this script's lifetime a `cd`-shaped instruction is actually
 # obeyed by something other than the agent choosing to obey it.
 #
@@ -1417,29 +1420,38 @@ if [ -z "$HARNESS_HIDX" ] || [ -z "${H_LAUNCH_CMD[$HARNESS_HIDX]:-}" ]; then
   abort_send "no launch command recorded for harness '${LANE_HARNESS:-unknown}' in $LANE -- cannot relaunch it in the worktree, so its cwd cannot be verified correct (#15); #$ISSUE_ARG was NOT dispatched"
 fi
 LAUNCH_CMD="${H_LAUNCH_CMD[$HARNESS_HIDX]}"
-LAUNCH_LITERAL="${H_SEND_LITERAL[$HARNESS_HIDX]:-0}"
 
-if ! tmux respawn-pane -k -t "$LANE_TARGET" -c "$WORKTREE" 2>/dev/null; then
+# agent-supervisor#236: LAUNCH_CMD is handed to respawn-pane as its own
+# argv, so it becomes the pane's PROCESS directly -- it is never typed into
+# whatever the respawn produces. The prior shape here was `respawn-pane -k`,
+# sleep one second, then a blind `send-keys "$LAUNCH_CMD" Enter`: exactly the
+# mechanism #236 reports, a lane found blocked on a Claude Code menu offering
+# to run a pasted `claude --dangerously-skip-permissions --model sonnet`,
+# because nothing checked what was listening for those keystrokes a second
+# after the respawn. One tmux call now does what three did. There is no
+# window in which the launch command exists as text for something else to
+# receive, so DISPATCH_RESPAWN_SETTLE -- the sleep that used to buy that
+# window time to become a shell before it was typed into -- has nothing left
+# to settle and is no longer read on this path. H_SEND_LITERAL is likewise
+# moot here: it governed how `send-keys` parsed `$LAUNCH_CMD` for tmux key
+# names, which does not apply to a shell command handed to respawn-pane's
+# own argv.
+#
+# This still only runs against a lane `lanes.sh` and the ledger have already
+# said is FREE (checked above, same as before #236) -- `respawn-pane -k`
+# kills whatever is in the pane, and that hazard is unchanged by this fix;
+# it is guarded by staying on the free-lane path, not by anything new here.
+if ! tmux respawn-pane -k -t "$LANE_TARGET" -c "$WORKTREE" "$LAUNCH_CMD" 2>/dev/null; then
   abort_send "tmux respawn-pane failed for $LANE -- could not put it in its worktree; #$ISSUE_ARG was NOT dispatched"
-fi
-
-# Settle before typing into the freshly spawned shell, same discipline the
-# `/clear` step below already uses for the same reason: a pane that has just
-# been torn down and repainted eats keys sent too soon.
-sleep "${DISPATCH_RESPAWN_SETTLE:-1}"
-
-if [ "$LAUNCH_LITERAL" = 1 ]; then
-  tmux send-keys -t "$LANE_TARGET" -l "$LAUNCH_CMD" 2>/dev/null \
-    && tmux send-keys -t "$LANE_TARGET" Enter 2>/dev/null \
-    || abort_send "could not relaunch harness '$LANE_HARNESS' in $LANE -- #$ISSUE_ARG was NOT dispatched"
-else
-  tmux send-keys -t "$LANE_TARGET" "$LAUNCH_CMD" Enter 2>/dev/null \
-    || abort_send "could not relaunch harness '$LANE_HARNESS' in $LANE -- #$ISSUE_ARG was NOT dispatched"
 fi
 
 # Give the harness time to actually start before anything else is typed at
 # it -- a cold process start is slower than the UI repaint `/clear` waits out
-# below, so this gets its own, longer default.
+# below, so this gets its own, longer default. Still load-bearing after
+# #236: the harness's startup wall-clock is unchanged by how it was started,
+# and `verified_preclear` just below still sends `/clear` + Enter before it
+# has read the pane back even once -- this sleep is what keeps that send
+# from landing on a splash screen instead of a ready input box.
 sleep "${DISPATCH_LAUNCH_SETTLE:-3}"
 
 # --- 4. the lane is told what it is doing, then given the work ------------

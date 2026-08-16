@@ -3600,6 +3600,122 @@ else
     "dispatch: #921 -> " "$RACE_OUT_A"
 fi
 
+# --- agent-supervisor#236: the launch command is the pane's PROCESS, ------
+# never keystrokes typed into whatever the respawn produced ----------------
+#
+# The live incident: a lane was found blocked on a Claude Code menu offering
+# to run a pasted `claude --dangerously-skip-permissions --model sonnet` --
+# option 2 would have spawned a nested Claude session inside the lane.
+# `stubs/tmux-dispatch`'s `STUB_MENU_PANES` models exactly this: a target
+# window whose `send-keys` lands as menu NAVIGATION, never as text, with
+# `Enter` committing whichever option is pending (or `STUB_MENU_DEFAULT` if
+# nothing digit-shaped was ever sent) -- the same model #159's own
+# regression suite (test_inbox_route.sh) already uses for the sibling
+# incident (a reply routed into a menu-blocked lane).
+#
+# `MUTATED_236` is the pre-fix shape of the harness-relaunch step, patched
+# out of the REAL dispatch.sh source (never hand re-implemented) the same
+# way `MUTATED_17`/`MUTATED_169` above prove a check is actually reached: a
+# straight string swap back to `respawn-pane -k`, a settle sleep, then a
+# blind `send-keys "$LAUNCH_CMD" Enter`.
+printf '236|| dispatch.sh must never type its launch command\n' >> "$D/issues"
+printf '238|| dispatch.sh must never type its launch command (fixed run)\n' >> "$D/issues"
+MUTATED_236="$D/dispatch-pre-236-blind-type.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$MUTATED_236" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+
+launch_cmd_marker = 'LAUNCH_CMD="${H_LAUNCH_CMD[$HARNESS_HIDX]}"\n'
+assert text.count(launch_cmd_marker) == 1, "LAUNCH_CMD assignment not found or not unique -- script shape changed"
+text = text.replace(
+    launch_cmd_marker,
+    launch_cmd_marker + 'LAUNCH_LITERAL="${H_SEND_LITERAL[$HARNESS_HIDX]:-0}"\n',
+    1,
+)
+
+respawn_marker = (
+    'if ! tmux respawn-pane -k -t "$LANE_TARGET" -c "$WORKTREE" "$LAUNCH_CMD" 2>/dev/null; then\n'
+    '  abort_send "tmux respawn-pane failed for $LANE -- could not put it in its worktree; #$ISSUE_ARG was NOT dispatched"\n'
+    'fi\n'
+)
+assert text.count(respawn_marker) == 1, "post-#236 respawn-pane call not found or not unique -- script shape changed"
+pre_236_shape = (
+    'if ! tmux respawn-pane -k -t "$LANE_TARGET" -c "$WORKTREE" 2>/dev/null; then\n'
+    '  abort_send "tmux respawn-pane failed for $LANE -- could not put it in its worktree; #$ISSUE_ARG was NOT dispatched"\n'
+    'fi\n'
+    '\n'
+    'sleep "${DISPATCH_RESPAWN_SETTLE:-1}"\n'
+    '\n'
+    'if [ "$LAUNCH_LITERAL" = 1 ]; then\n'
+    '  tmux send-keys -t "$LANE_TARGET" -l "$LAUNCH_CMD" 2>/dev/null \\\n'
+    '    && tmux send-keys -t "$LANE_TARGET" Enter 2>/dev/null \\\n'
+    '    || abort_send "could not relaunch harness \'$LANE_HARNESS\' in $LANE -- #$ISSUE_ARG was NOT dispatched"\n'
+    'else\n'
+    '  tmux send-keys -t "$LANE_TARGET" "$LAUNCH_CMD" Enter 2>/dev/null \\\n'
+    '    || abort_send "could not relaunch harness \'$LANE_HARNESS\' in $LANE -- #$ISSUE_ARG was NOT dispatched"\n'
+    'fi\n'
+)
+text = text.replace(respawn_marker, pre_236_shape, 1)
+
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh in the pre-#236 blind-type shape" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  chmod +x "$MUTATED_236"
+  ok "setup: patched a copy of dispatch.sh in the pre-#236 blind-type shape"
+
+  # RED: the pre-#236 shape, against a lane whose pane is an agent's menu at
+  # the moment the launch would be sent -- STUB_MENU_DEFAULT=2 is the exact
+  # option the live incident's menu had pending (spawn a nested Claude).
+  export STUB_MENU_PANES=3 STUB_MENU_DEFAULT=2
+  pre236_out=$(DISPATCH_SCRIPT="$MUTATED_236" run 236 launch-cmd-typed-blind "$D/brief.md" acme/agent-dotfiles "$REPO" 2>&1)
+  pre236_log=$(tmuxlog)
+  pre236_pre_rename=$(sed -n '1,/^rename-window/{/^rename-window/!p;}' <<<"$pre236_log")
+  want_contains "pre-#236 shape: the launch command IS typed at the pane, before anything checks what is listening" \
+    "send-keys -t t:@103" "$pre236_pre_rename"
+  selected_236=$(cat "$D/panes/3.selected" 2>/dev/null | head -1)
+  want_contains "pre-#236 shape: that blind Enter commits the menu's pending option -- the nested-claude spawn the live incident found" \
+    "2" "$selected_236"
+
+  # GREEN: the real, fixed dispatch.sh, same menu-pane lane, same default.
+  green_out=$(run 238 launch-cmd-typed-fixed "$D/brief.md" acme/agent-dotfiles "$REPO" 2>&1)
+  green_log=$(tmuxlog)
+  green_pre_rename=$(sed -n '1,/^rename-window/{/^rename-window/!p;}' <<<"$green_log")
+  want_missing "fixed: nothing is ever typed at the pane before the rename -- respawn-pane is the only call" \
+    "send-keys" "$green_pre_rename"
+  want_contains "fixed: the harness is the pane's PROCESS -- respawn-pane's own argv carries the launch command" \
+    "respawn-pane -k -t t:@103 -c" "$green_pre_rename"
+  want_contains "...specifically the harness's launch command, not a bare shell" \
+    "claude --model sonnet --dangerously-skip-permissions" "$green_pre_rename"
+  respawn_cmd=$(cat "$D/panes/3.respawn-cmd" 2>/dev/null || true)
+  want_contains "...recorded as the pane's actual respawned process, not as typed keys" \
+    "claude --model sonnet --dangerously-skip-permissions" "$respawn_cmd"
+  unset STUB_MENU_PANES STUB_MENU_DEFAULT
+fi
+
+# --- ...and a normal dispatch (no menu, no mutation) still works end to end,
+# unchanged by #236 -- the very first case in this file (`a dispatch to a
+# free lane succeeds`, issue 81, asserted above) already covers this: it
+# ran against the real $DISPATCH with the #236 fix in place and passed like
+# every other assertion in this run. Reasserted here, by name, as the
+# explicit "and a normal dispatch still works" the issue's acceptance
+# criteria calls for -- not left as an implication of the suite staying
+# green.
+printf '237|| a normal dispatch still works end to end after #236\n' >> "$D/issues"
+normal_out=$(run 237 normal-dispatch-after-236 "$D/brief.md" acme/agent-dotfiles "$REPO"); normal_rc=$?
+want_exit "a normal dispatch (no menu in the way) still succeeds end to end after #236" "$normal_rc" 0 "$normal_out"
+normal_log=$(tmuxlog)
+want_contains "...the brief still lands in the lane" "$D/brief.md" "$normal_log"
+want_contains "...and is still submitted" "send-keys -t t:@103 Enter" "$normal_log"
+
 rm -rf "$D"
 
 
