@@ -148,7 +148,7 @@ cat > "$FIX/author_42.json" <<'S'
 {"headRefName": "fix/42-thing", "closingIssuesReferences": [{"number": 42}], "commits": []}
 S
 cat > "$FIX/reviews_42.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:4", "createdAt": "2026-08-15T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:4\nReviewed-SHA: sha-2", "createdAt": "2026-08-15T00:00:00Z"}]}
 S
 seed_author t:3 as42-author 42
 out=$("$MERGE_PR" "$REPO" 42 2>&1)
@@ -170,7 +170,7 @@ cat > "$FIX/author_43.json" <<'S'
 {"headRefName": "fix/43-thing", "closingIssuesReferences": [{"number": 43}], "commits": []}
 S
 cat > "$FIX/reviews_43.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:3", "createdAt": "2026-08-15T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:3\nReviewed-SHA: sha-10", "createdAt": "2026-08-15T00:00:00Z"}]}
 S
 seed_author t:3 as43-author 43
 out=$("$MERGE_PR" "$REPO" 43 2>&1)
@@ -192,7 +192,7 @@ cat > "$FIX/author_44.json" <<'S'
 {"headRefName": "some-hand-pushed-branch", "closingIssuesReferences": [], "commits": []}
 S
 cat > "$FIX/reviews_44.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:5", "createdAt": "2026-08-15T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:5\nReviewed-SHA: sha-11", "createdAt": "2026-08-15T00:00:00Z"}]}
 S
 out=$("$MERGE_PR" "$REPO" 44 2>&1)
 rc=$?
@@ -223,6 +223,44 @@ rc=$?
 if [ "$rc" -eq 1 ]; then ok "verdict with no Review-Lane trailer refused"; else bad "no-Review-Lane verdict refused" "got rc=$rc: $out"; fi
 if [ ! -f "$MARKER" ]; then ok "no-Review-Lane verdict never merges"; else bad "no-Review-Lane verdict never merges" "$out"; fi
 echo "$out" | grep -q "not a lane-stamped" && ok "no-Review-Lane refusal names the reason" || bad "no-Review-Lane refusal named" "$out"
+
+# --- agent-supervisor#213: a comment APPROVE posted before a later push ---
+# must refuse even though CI is green at the new head -- this is #204/#207's
+# measured shape, driven through the REAL `merge-pr.sh`, not a re-
+# implementation of `_comment_verdict`'s logic. Before this fix,
+# `verdict.py`'s comment path never compared `head_sha` at all, so this PR
+# would have merged with `ci_gate.py`'s reason ("all checks green at
+# sha-47-new") the only thing printed -- true, and silent about the
+# verdict, exactly what the issue measured.
+rm -f "$MARKER"
+cat > "$FIX/head_47.json" <<'S'
+{"headRefOid": "sha-47-new"}
+S
+green_checkruns sha-47-new
+cat > "$FIX/author_47.json" <<'S'
+{"headRefName": "fix/47-thing", "closingIssuesReferences": [{"number": 47}], "commits": []}
+S
+cat > "$FIX/reviews_47.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "codex"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:9", "createdAt": "2026-08-15T22:48:01Z"}], "commits": [{"oid": "sha-47-new", "committedDate": "2026-08-15T22:56:42Z"}]}
+S
+seed_author t:3 as47-author 47
+out=$("$MERGE_PR" "$REPO" 47 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "stale comment verdict refuses even with CI green"; else bad "stale comment verdict refuses even with CI green" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "stale comment verdict never merges"; else bad "stale comment verdict never merges" "$out"; fi
+echo "$out" | grep -q "sha-47-new" && ok "refusal names the head sha being merged" || bad "refusal names the head sha being merged" "$out"
+
+# --- ...and a `Reviewed-SHA:` trailer matching the head merges normally ---
+# the honest mechanism (#213 proposal 1) working end to end: same PR, same
+# author/lane setup, but the reviewer states the SHA their verdict covers
+# and it is the current head.
+rm -f "$MARKER"
+cat > "$FIX/reviews_47.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "codex"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:9\nReviewed-SHA: sha-47-new", "createdAt": "2026-08-15T22:48:01Z"}], "commits": [{"oid": "sha-47-new", "committedDate": "2026-08-15T22:56:42Z"}]}
+S
+out=$("$MERGE_PR" "$REPO" 47 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$MARKER" ]; then ok "Reviewed-SHA matching head merges"; else bad "Reviewed-SHA matching head merges" "got rc=$rc, merged=$([ -f "$MARKER" ] && echo yes || echo no): $out"; fi
 
 # --- a refusal never prints a bare "refused --" (agent-supervisor#192) ----
 # `independence_verdict`'s "not yet reviewed" branch deliberately returns an

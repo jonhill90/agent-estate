@@ -202,6 +202,19 @@ independence_verdict() {  # independence_verdict <verdict-json> <author-json> <l
       # explanation leaked onto this, the single most common case in the
       # digest, as noise nobody asked for.
       {value:null, detail:""}
+    elif (($v.verdict // "unknown") == "unknown") and (($v.detail // "") | length) > 0 then
+      # agent-supervisor#213: an `unknown` verdict already carries a
+      # SPECIFIC reason -- most often now "covers Reviewed-SHA X, not
+      # current head Y" or the timestamp-backstop refusal (#213), but also
+      # the pre-existing review-object staleness message (#218) which was
+      # ALSO being discarded here before this branch existed. The generic
+      # "not a lane-stamped comment or ledger record" text below is correct
+      # for a genuinely undated verdict but actively misleading for one
+      # that failed a SHA/timestamp check -- surface the sources own
+      # detail instead of overwriting it, so merge-pr.sh refusal names
+      # which SHA the verdict covered and which is being merged, not just
+      # "independence unknown".
+      {value:null, detail:("independence unknown -- " + $v.detail)}
     else
       {value:null, detail:("independence unknown -- verdict is " + ($v.verdict // "unknown")
         + (if (($v.verdict_kind // "") | length) > 0 then " (" + $v.verdict_kind + ")" else "" end)

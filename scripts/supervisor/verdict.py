@@ -393,6 +393,51 @@ def _parse_review_lane(body):
     return match.group(1) if match else None
 
 
+# agent-supervisor#213: the SHA a `**Verdict:` comment applies to, beside
+# `Review-Lane:`. Every OTHER verdict source in this module already refuses
+# to answer for a head it never saw (#218's review-object check, extended
+# by #226/#229 to tell a content-preserving rebase from a real change) --
+# the comment path, which is the estate's PRIMARY posting path (the codex
+# lane posts `gh pr comment`, never `gh pr review` -- see this class's own
+# docstring), had NO such check at all. Two PRs (#204, #207) merged on an
+# APPROVE comment written 6-9 minutes before the commit actually merged,
+# one across a rebase, because `_comment_verdict` never compared a SHA.
+_REVIEWED_SHA_RE = re.compile(r"(?im)^\s*Reviewed-SHA:\s*([A-Za-z0-9_.:@/-]+)\s*$")
+
+
+def _parse_reviewed_sha(body):
+    """The SHA a `Reviewed-SHA:` trailer states a comment's verdict covers.
+    None when absent -- a caller must treat that as "unstated", never as
+    "matches"; #213's issue explicitly requires ambiguity to refuse, not to
+    read as fresh. Same permissive token class as `_REVIEW_LANE_RE` --
+    comparison is exact-string equality against `head_sha` either way, so
+    this need not itself validate git SHA shape."""
+    match = _REVIEWED_SHA_RE.search(body or "")
+    return match.group(1) if match else None
+
+
+def _newest_commit_date(commits):
+    """The latest commit timestamp on the PR, from the `commits` field of
+    `gh pr view --json ...,commits` (agent-supervisor#213's timestamp
+    backstop -- proposal 2). Prefers `committedDate` (when the commit
+    actually landed) over `authoredDate` (which a rebase or amend can carry
+    forward unchanged) per commit. Returns None -- never a guess -- unless
+    `commits` is a non-empty list of dicts each carrying a usable date; a
+    caller must fail closed on None, the same discipline every other
+    freshness comparison in this module already takes."""
+    if not isinstance(commits, list) or not commits:
+        return None
+    dates = []
+    for commit in commits:
+        if not isinstance(commit, dict):
+            return None
+        date = commit.get("committedDate") or commit.get("authoredDate")
+        if not isinstance(date, str) or not date:
+            return None
+        dates.append(date)
+    return max(dates)
+
+
 class GithubReviewVerdictSource(VerdictSource):
     """Reads GitHub's own review state, and -- agent-supervisor#53 -- issue
     comments with a `Verdict:` line (any heading/emphasis form -- #192).
@@ -415,11 +460,12 @@ class GithubReviewVerdictSource(VerdictSource):
     def verdict(self, *, repo, number, head_sha=None):
         try:
             raw = self.runner(
-                ["gh", "pr", "view", str(number), "--repo", repo, "--json", "reviews,comments,author"]
+                ["gh", "pr", "view", str(number), "--repo", repo, "--json", "reviews,comments,author,commits"]
             )
             payload = json.loads(raw)
             reviews = payload.get("reviews", [])
             comments = payload.get("comments", [])
+            commits = payload.get("commits", [])
             if not isinstance(reviews, list):
                 raise ValueError("reviews is not a list")
             if not isinstance(comments, list):
@@ -429,12 +475,12 @@ class GithubReviewVerdictSource(VerdictSource):
         review_result = self._review_verdict(reviews, repo=repo, number=number, head_sha=head_sha)
         if review_result["verdict"] in ("approved", "rejected"):
             return review_result
-        comment_result = self._comment_verdict(comments)
+        comment_result = self._comment_verdict(comments, repo=repo, number=number, head_sha=head_sha, commits=commits)
         if comment_result is not None:
             return comment_result
         return review_result
 
-    def _comment_verdict(self, comments):
+    def _comment_verdict(self, comments, *, repo=None, number=None, head_sha=None, commits=None):
         """The LAST comment (chronological, as `gh` returns them) that has
         at least one `Verdict:` line -- a later re-review supersedes an
         earlier one, the same "current state" reading the review side
@@ -455,7 +501,13 @@ class GithubReviewVerdictSource(VerdictSource):
         never a silent fall-through to an older answer or to `none` --
         `none` must mean "nothing was ever posted", not "something was
         posted that this module could not read" (#192's "never refuses
-        without a reason" property, extended to this path)."""
+        without a reason" property, extended to this path).
+
+        agent-supervisor#213: a decisive comment verdict is also checked
+        for FRESHNESS against `head_sha`, via `_comment_freshness` -- the
+        same guard `_review_verdict` has had since #218, missing here until
+        now even though the comment path is this estate's primary posting
+        path. `repo`/`number`/`commits` are only used by that check."""
         last = None
         for comment in comments:
             if not isinstance(comment, dict):
@@ -479,6 +531,15 @@ class GithubReviewVerdictSource(VerdictSource):
         if len(decisions) == 1:
             verdict_value = decisions.pop()
             detail = f"PR comment verdict ({verdict_value}) by {who}{lane}{when}"
+            if head_sha is not None:
+                fresh, note, refusal = self._comment_freshness(
+                    body=body, created_at=created_at, head_sha=head_sha, commits=commits,
+                    repo=repo, number=number,
+                )
+                if not fresh:
+                    return {"verdict": "unknown", "detail": f"{detail} -- {refusal}"}
+                if note:
+                    detail = f"{detail}, {note}"
             result = {"verdict": verdict_value, "detail": detail, "verdict_kind": "comment"}
             if reviewer_lane:
                 result["reviewer_lane"] = reviewer_lane
@@ -492,6 +553,58 @@ class GithubReviewVerdictSource(VerdictSource):
             reason = "conflicting Verdict: lines in one comment"
         detail = f"PR comment verdict unresolved ({reason}) by {who}{lane}{when}"
         return {"verdict": "unknown", "detail": detail}
+
+    def _comment_freshness(self, *, body, created_at, head_sha, commits, repo, number):
+        """Is a `**Verdict:` comment still current at `head_sha`? Two
+        mechanisms (agent-supervisor#213), honest one first:
+
+        1. `Reviewed-SHA:` trailer -- the reviewer states the SHA their
+           verdict covers. Matching `head_sha`: fresh. Differing: fall back
+           to the SAME content-unchanged-since-rebase comparison #218/#226
+           already give the review-object path (`_content_unchanged_since`),
+           so a pure rebase still promotes; anything else refuses, naming
+           both SHAs.
+        2. No trailer -- every verdict comment posted before this existed,
+           and any reviewer who has not adopted the trailer yet -- the
+           timestamp backstop: refuse if the newest commit on the PR is
+           younger than this comment. Weaker (a force-push can rewrite
+           dates; #213's issue says so explicitly) but it is the only
+           signal available for a verdict already on record, and refusing
+           beats trusting a comment that cannot be tied to a SHA at all.
+
+        Returns `(fresh, note, refusal)`. `fresh` False means the caller
+        MUST return `unknown` with `refusal` appended to its own detail --
+        never the decisive verdict. `note`, when non-empty, is a suffix
+        for the caller's own detail (e.g. the rebase basis)."""
+        reviewed_sha = _parse_reviewed_sha(body)
+        if reviewed_sha is not None:
+            if reviewed_sha == head_sha:
+                return True, "", ""
+            unchanged, basis = _content_unchanged_since(
+                runner=self.runner, patch_id_fn=self.patch_id,
+                repo=repo, number=number, old_sha=reviewed_sha, new_sha=head_sha,
+            )
+            if unchanged:
+                return True, f"head moved {reviewed_sha} -> {head_sha}, {basis}", ""
+            return False, "", f"covers Reviewed-SHA {reviewed_sha}, not current head {head_sha}"
+
+        newest = _newest_commit_date(commits)
+        if newest is None:
+            return False, "", (
+                f"no Reviewed-SHA trailer and PR commit timestamps could not be read -- "
+                f"cannot tell whether it covers current head {head_sha}"
+            )
+        if not created_at:
+            return False, "", (
+                f"no Reviewed-SHA trailer and no timestamp of its own -- "
+                f"cannot tell whether it covers current head {head_sha}"
+            )
+        if newest > created_at:
+            return False, "", (
+                f"no Reviewed-SHA trailer, and a commit as recent as {newest} exists -- "
+                f"cannot confirm it covers current head {head_sha}"
+            )
+        return True, f"no Reviewed-SHA trailer, timestamp backstop: newest commit {newest} <= verdict {created_at}", ""
 
     def _review_verdict(self, reviews, *, repo, number, head_sha=None):
         decisive = [r for r in reviews if isinstance(r, dict) and r.get("state") in ("CHANGES_REQUESTED", "APPROVED")]
