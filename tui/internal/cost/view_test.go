@@ -42,22 +42,60 @@ func TestEveryViewIsHonestAboutUnknownFetch(t *testing.T) {
 	}
 }
 
-// TestEveryViewShowsUnknownLimitAsUnknownNotZeroPercent covers the other
-// half of the same rule applied to Limit specifically: a harness ccusage
-// has real cost/token figures for, but no quota source (codex, pi, or
-// Claude with no -claude-block-limit set), must never render as "0%
+// TestEveryViewShowsUnsetLimitAsNotSetNotZeroPercent covers the other half
+// of the same rule applied to Limit specifically: a harness ccusage has
+// real cost/token figures for, but no local block-limit source (codex, pi,
+// or Claude with no -claude-block-limit set), must never render as "0%
 // used" -- that reads as "nothing to worry about", the opposite of the
 // truth ("we don't know").
-func TestEveryViewShowsUnknownLimitAsUnknownNotZeroPercent(t *testing.T) {
+//
+// agent-tui#56: this used to assert the word "unknown" here, the same word
+// renderQuota uses for a genuinely missing quota.sh -- two different fields
+// sharing one word made the panel look like it contradicted itself when a
+// harness had a real quota line right below an "unknown" limit line. Limit
+// now reads "not set" (a configuration state -- see renderLimitBar's own
+// doc comment), which this test asserts instead; the never-a-fabricated-
+// percentage guarantee below is unchanged.
+func TestEveryViewShowsUnsetLimitAsNotSetNotZeroPercent(t *testing.T) {
 	snap := Compose([]Harness{unknownHarness}, Limit{})
 	for _, v := range Views {
 		out := v.Render(snap, 80)
-		if !strings.Contains(out, "unknown") {
-			t.Errorf("view %q: harness with no quota source did not render \"unknown\" limit:\n%s", v.ID, out)
+		if !strings.Contains(out, "not set") {
+			t.Errorf("view %q: harness with no block-limit source did not render \"not set\":\n%s", v.ID, out)
 		}
 		if strings.Contains(out, "0.0%") || strings.Contains(out, "0%") {
-			t.Errorf("view %q: harness with no quota source rendered a 0%% limit:\n%s", v.ID, out)
+			t.Errorf("view %q: harness with no block-limit source rendered a 0%% limit:\n%s", v.ID, out)
 		}
+	}
+}
+
+// TestRenderLimitBarNeverReadsAsMissingQuotaSource is agent-tui#56's own
+// reproduction, at the function renderQuota's own text is drawn from: an
+// unset Limit and a genuinely unavailable Quota used to render the exact
+// same "unknown (no quota source)" words, which is what made
+//
+//	limit:  unknown (no quota source)
+//	quota:  session 22% used, weekly 58% used -- 16% in reserve
+//
+// read as the panel contradicting itself -- only the quota line was ever
+// actually answering a "do we have a quota source" question. Checked at the
+// renderLimitBar/renderQuota level, not by scanning a composite rendered
+// line, because RenderNumeric's single-line-per-harness layout legitimately
+// prints both fields' text adjacent to each other and a substring check
+// over that combined line cannot tell which field "no quota source" belongs
+// to.
+func TestRenderLimitBarNeverReadsAsMissingQuotaSource(t *testing.T) {
+	got := renderLimitBar(Limit{})
+	if strings.Contains(got, "no quota source") {
+		t.Errorf("renderLimitBar(unset) = %q, must not borrow renderQuota's \"no quota source\" wording", got)
+	}
+	if !strings.Contains(got, "not set") {
+		t.Errorf("renderLimitBar(unset) = %q, want it to read as a configuration state (\"not set\")", got)
+	}
+	// renderQuota keeps the honest refusal this fix must not touch: a
+	// genuinely missing quota.sh still says exactly this.
+	if q := renderQuota(Quota{}); q != "unknown (no quota source)" {
+		t.Errorf("renderQuota(unset) = %q, want the unchanged \"no quota source\" honest refusal", q)
 	}
 }
 

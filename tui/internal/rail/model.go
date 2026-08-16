@@ -10,6 +10,7 @@
 package rail
 
 import (
+	"errors"
 	"fmt"
 	"time"
 
@@ -103,6 +104,24 @@ type Model struct {
 	fetchErr    error
 	lastFetched time.Time
 	quitting    bool
+	// fetchInFlight guards m.fetch/m.lanesFetch (both funnel through
+	// doFetch/fetchResultMsg -- see lanesFetch's own doc comment) against
+	// agent-tui#55: refreshMsg fires every refreshInterval (2s) regardless
+	// of whether the PREVIOUS fetch has answered yet, and a real "sessions"/
+	// "lanes" MCP round-trip measured against the live supervisor takes
+	// 4-5s (sessions.sh fans out to lanes.sh once per tmux session) --
+	// slower than the poll interval that re-fires it. mcp_server.py (see
+	// its own package doc comment: "for line in stdin") answers ONE
+	// tools/call at a time, so issuing a new request before the last one
+	// answered does not run them in parallel -- it queues behind the one
+	// already in flight. Every 2s adds another to that queue faster than
+	// the queue drains, so the backlog only grows, and every request
+	// eventually crosses mcp.Client's 10s timeout -- not because the
+	// supervisor or the cost pane starved this client, but because this
+	// package kept asking before the last answer arrived. Set true the
+	// moment a fetch is issued (Init and doFetchAll both do), cleared the
+	// moment its result (success or failure) is handled.
+	fetchInFlight bool
 
 	costSnap    cost.Snapshot
 	costFetched time.Time
@@ -114,6 +133,10 @@ type Model struct {
 	sessions        []lane.Session
 	sessionsErr     error
 	sessionsFetched time.Time
+	// sessionsFetchInFlight is fetchInFlight's twin for m.sessionsFetch --
+	// see fetchInFlight's doc comment for why this exists at all
+	// (agent-tui#55).
+	sessionsFetchInFlight bool
 	// lanesFetch is agent-tui#18's fix for at#13's own blocking finding: a
 	// Model built with NewMultiSession that has no fallback would render
 	// nothing at all -- "! unavailable" with no data -- for as long as the
@@ -202,7 +225,11 @@ func (m Model) WithOps(ops session.Interface) Model {
 // New builds a Model bound to the given fetch function, with no cost line
 // (costFetch is nil). Use NewWithCost to get agent-tui#4's rail line.
 func New(fetch Fetcher) Model {
-	return Model{fetch: fetch, width: RailWidth, height: 24, theme: theme.Default}
+	// fetchInFlight starts true whenever fetch != nil: Init() below always
+	// issues that first fetch unconditionally, so the in-flight guard must
+	// already reflect that before the first refreshMsg (refreshInterval
+	// later) can check it -- see fetchInFlight's doc comment.
+	return Model{fetch: fetch, fetchInFlight: fetch != nil, width: RailWidth, height: 24, theme: theme.Default}
 }
 
 // NewWithCost builds a Model that also renders a compact, per-harness cost
@@ -240,14 +267,21 @@ func NewWithCost(fetch Fetcher, costFetch cost.Fetcher) Model {
 // than have it silently match nothing.
 func NewMultiSession(sessionsFetch SessionsFetcher, lanesFetch Fetcher, costFetch cost.Fetcher, directorSession string) Model {
 	return Model{
-		fetch:           nil,
-		sessionsFetch:   sessionsFetch,
-		lanesFetch:      lanesFetch,
-		costFetch:       costFetch,
-		directorSession: directorSession,
-		width:           RailWidth,
-		height:          24,
-		theme:           theme.Default,
+		fetch:         nil,
+		sessionsFetch: sessionsFetch,
+		// sessionsFetchInFlight mirrors New's fetchInFlight seed: Init()
+		// always issues the first sessions fetch when sessionsFetch != nil,
+		// so the guard must start true to match. fetchInFlight itself stays
+		// false here -- m.fetch is nil on this constructor, and the
+		// lanesFetch fallback it also guards (see lanesFetch's doc comment)
+		// only starts once the first sessions fetch actually fails.
+		sessionsFetchInFlight: sessionsFetch != nil,
+		lanesFetch:            lanesFetch,
+		costFetch:             costFetch,
+		directorSession:       directorSession,
+		width:                 RailWidth,
+		height:                24,
+		theme:                 theme.Default,
 	}
 }
 
@@ -345,7 +379,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "r":
-			return m, m.doFetchAll()
+			return m.doFetchAll()
 		case "g":
 			// Cycles the grouping-style picker (flat-with-headers /
 			// indented-tree) the same live-against-real-data way glyphSet
@@ -390,9 +424,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tickCmd()
 
 	case refreshMsg:
-		return m, tea.Batch(refreshCmd(), m.doFetchAll())
+		next, cmd := m.doFetchAll()
+		return next, tea.Batch(refreshCmd(), cmd)
 
 	case fetchResultMsg:
+		// agent-tui#55: clear the in-flight guard BEFORE anything else in
+		// this case, unconditionally (success or failure) -- see
+		// fetchInFlight's doc comment. This is the one place a fetch this
+		// package issued via m.fetch or the at#18 lanesFetch fallback ever
+		// completes; leaving the flag set on any path would wedge every
+		// future poll into believing one is still outstanding forever.
+		m.fetchInFlight = false
 		m.fetchErr = msg.err
 		if msg.err == nil {
 			m.lanes = msg.lanes
@@ -408,6 +450,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// (possibly stale) sessions on screen alongside a visible error --
 		// see View()'s "! unavailable" branch -- rather than clearing them
 		// to a blank rail a reader could mistake for a quiet estate.
+		m.sessionsFetchInFlight = false
 		m.sessionsErr = msg.err
 		if msg.err == nil {
 			m.sessions = msg.sessions
@@ -422,8 +465,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// can still read RIGHT NOW rather than wait for the next
 		// refreshInterval tick -- the whole point is not to sit on a blank/
 		// error-only rail for up to refreshInterval while a perfectly
-		// readable single session goes unfetched.
-		if m.lanesFetch != nil {
+		// readable single session goes unfetched. Guarded on fetchInFlight
+		// too (agent-tui#55): a refreshMsg's own doFetchAll may already have
+		// a lanesFetch fallback in flight from the PRIOR failure when this
+		// one lands, and firing a second would be exactly the unbounded
+		// pile-up against the supervisor's single-threaded MCP server this
+		// issue exists to stop.
+		if m.lanesFetch != nil && !m.fetchInFlight {
+			m.fetchInFlight = true
 			return m, doFetch(m.lanesFetch)
 		}
 		return m, nil
@@ -503,25 +552,47 @@ func (m Model) fallbackActive() bool {
 // doFetchAll re-issues whichever fetch(es) this Model was built with. "r"
 // and the periodic refreshMsg both go through this so neither has to know
 // which constructor built the Model.
-func (m Model) doFetchAll() tea.Cmd {
+//
+// agent-tui#55: every fetch that funnels through mcp.Client (m.fetch,
+// m.sessionsFetch, and the at#18 lanesFetch fallback, which reuses m.fetch's
+// own doFetch/fetchResultMsg/fetchInFlight -- see lanesFetch's doc comment)
+// is guarded on its own inFlight flag before being reissued. Measured
+// against the real supervisor: a "sessions" call (sessions.sh fanning out to
+// lanes.sh per tmux session) took 4-5s wall clock with six sessions up,
+// slower than refreshInterval (2s) re-firing this method. mcp_server.py
+// answers exactly one tools/call at a time (a plain `for line in stdin`
+// loop, no concurrency of its own) -- so a Model that fired a new request
+// every 2s regardless of whether the last one had answered was not running
+// two requests in parallel, it was queuing a new one behind a backlog that
+// grows every cycle, guaranteeing every request eventually crosses
+// mcp.Client's 10s callTimeout even though the supervisor itself was never
+// unavailable. This is what "! multi-session unavailable ... mcp: no reply"
+// actually was: a self-inflicted request pile-up, not supervisor-side
+// contention or the cost pane's ccusage/quota.sh subprocesses (neither goes
+// through mcp.Client at all -- see cmd/keelson/cost.go). Returns the updated
+// Model because setting these flags is a state change the caller must keep.
+func (m Model) doFetchAll() (Model, tea.Cmd) {
 	var cmds []tea.Cmd
-	if m.fetch != nil {
+	if m.fetch != nil && !m.fetchInFlight {
+		m.fetchInFlight = true
 		cmds = append(cmds, doFetch(m.fetch))
 	}
-	if m.sessionsFetch != nil {
+	if m.sessionsFetch != nil && !m.sessionsFetchInFlight {
+		m.sessionsFetchInFlight = true
 		cmds = append(cmds, doSessionsFetch(m.sessionsFetch))
 	}
 	// at#18: while the fallback is on screen, "r" (and the periodic
 	// refreshMsg, which also calls this) must refresh what is actually
 	// being shown, not just retry the sessions fetch and leave the visible
 	// fallback data to go stale until that retry itself fails again.
-	if m.fallbackActive() {
+	if m.fallbackActive() && !m.fetchInFlight {
+		m.fetchInFlight = true
 		cmds = append(cmds, doFetch(m.lanesFetch))
 	}
 	if m.taskFetch != nil {
 		cmds = append(cmds, doTaskFetch(m.taskFetch))
 	}
-	return tea.Batch(cmds...)
+	return m, tea.Batch(cmds...)
 }
 
 // digitKey reports whether s is a single ASCII digit key and, if so, its
@@ -689,13 +760,46 @@ func (m Model) View() string {
 // exactly that narrowing going all the way to zero and nothing on screen
 // saying why. Shown above renderFlatBody's single-session render, never in
 // place of it -- the one session that IS readable must still show.
+//
+// agent-tui#55: this used to hardcode "needs agent-supervisor#158" -- true
+// the day at#18 shipped (that supervisor checkout genuinely had no
+// "sessions" tool), false the moment as#158 merged, and never re-checked
+// after that: a fixed string cannot know a REAL failure (a timed-out call
+// against a supervisor that has "sessions" and is simply slow, per this
+// file's fetchInFlight fix) from the one it was written to describe. The
+// cause line below is picked from m.sessionsErr AT RENDER TIME via
+// isTimeoutErr, not asserted once and baked in, so it stays honest as the
+// underlying cause changes.
 func (m Model) renderFallbackNote(innerWidth int, st railStyles) []string {
+	cause := "sessions tool unavailable"
+	if isTimeoutErr(m.sessionsErr) {
+		cause = "sessions call timed out"
+	}
 	return []string{
 		st.err.Width(innerWidth).Render(truncate("! multi-session unavailable", innerWidth)),
 		st.dim.Width(innerWidth).Render(truncate("this session only:", innerWidth)),
-		st.dim.Width(innerWidth).Render(truncate("needs agent-supervisor#158", innerWidth)),
+		st.dim.Width(innerWidth).Render(truncate(cause, innerWidth)),
 		st.dim.Width(innerWidth).Render(truncate(m.sessionsErr.Error(), innerWidth)),
 	}
+}
+
+// timeouter matches the standard net.Error convention (Timeout() bool) --
+// internal/mcp's timeout error implements it, and checking the interface
+// here rather than importing internal/mcp keeps this package's own
+// discipline intact (model.go's package doc: rail knows lanes, not MCP).
+// Any other Fetcher/SessionsFetcher this package is ever handed (a fake in
+// a test, a future non-MCP source) gets the same honest classification for
+// free by implementing the same one-method interface.
+type timeouter interface{ Timeout() bool }
+
+// isTimeoutErr reports whether err (or anything it wraps) is a timeout, per
+// timeouter above -- "call timed out" and "tool not available" have
+// different causes and different fixes (agent-tui#55's second, `#158`-
+// shaped defect: one message covering both is why a live concurrency bug
+// read as a stale supervisor-side gap).
+func isTimeoutErr(err error) bool {
+	var t timeouter
+	return errors.As(err, &t) && t.Timeout()
 }
 
 // renderFlatBody is the single-session list every pre-#13 rail render used,

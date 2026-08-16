@@ -112,7 +112,10 @@ func RenderNumeric(snap Snapshot, width int) string {
 
 	var b strings.Builder
 	for _, h := range snap.Harnesses {
-		limit := "limit unknown"
+		// agent-tui#56: matches renderLimitBar's own "not set" wording --
+		// see its doc comment for why this must not say "unknown" the same
+		// way renderQuota does for an actually-missing instrument.
+		limit := "limit not set -- see quota"
 		if h.Limit.Known {
 			warn := ""
 			if h.Limit.Warn {
@@ -132,13 +135,24 @@ func RenderNumeric(snap Snapshot, width int) string {
 	return b.String()
 }
 
-// renderLimitBar draws a fixed-width ascii meter for a Limit, or the word
-// "unknown" when ccusage had no way to compute one (codex, pi, or Claude
-// with no -claude-block-limit configured) -- never an empty or full-looking
-// bar standing in for a percentage nobody measured.
+// renderLimitBar draws a fixed-width ascii meter for a Limit, or a
+// not-set note when ccusage had no way to compute one (codex, pi, or
+// Claude with no -claude-block-limit configured) -- never an empty or
+// full-looking bar standing in for a percentage nobody measured.
+//
+// agent-tui#56: this used to say "unknown (no quota source)" -- the exact
+// phrase renderQuota below uses for a GENUINELY missing instrument
+// (quota.sh absent or failing). Limit is a different, always-optional
+// field (ccusage's own local block-limit computation, which codex/pi never
+// have and Claude only has with -claude-block-limit set); printing the
+// same "no quota source" words for it, one line above a quota line that
+// DOES have a real source and real numbers, read as the panel contradicting
+// itself. "not set" names what this field actually is -- a configuration
+// state -- and points at the line that answers the same underlying
+// question ("how close to a cap") when quota.sh is wired in.
 func renderLimitBar(l Limit) string {
 	if !l.Known {
-		return "unknown (no quota source)"
+		return "not set -- see quota below"
 	}
 	filled := int(l.Percent / 100 * meterWidth)
 	if filled > meterWidth {

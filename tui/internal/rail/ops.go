@@ -274,7 +274,7 @@ func (m Model) handleOpsResult(msg tea.Msg) (Model, tea.Cmd) {
 		// Refresh immediately rather than waiting up to refreshInterval --
 		// agent-tui#14 acceptance item 2 ("add creates a session that reads
 		// supervised") is meant to be visible right away, not after a poll.
-		return m, m.doFetchAll()
+		return m.doFetchAll()
 
 	case removeCheckResultMsg:
 		if msg.err != nil {
@@ -298,7 +298,7 @@ func (m Model) handleOpsResult(msg tea.Msg) (Model, tea.Cmd) {
 			return m, nil
 		}
 		m.opsStatus = fmt.Sprintf("%s removed", msg.session)
-		return m, m.doFetchAll()
+		return m.doFetchAll()
 	}
 	return m, nil
 }

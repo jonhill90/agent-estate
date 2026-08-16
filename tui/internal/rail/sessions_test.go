@@ -231,13 +231,64 @@ func TestSessionsFallbackRendersSingleSessionWithNote(t *testing.T) {
 	if !strings.Contains(out, "solo-lane") {
 		t.Errorf("fallback did not render the single session's lane:\n%s", out)
 	}
-	if !strings.Contains(out, "agent-supervisor#158") {
-		t.Errorf("fallback rendered with no visible note that the multi-session view needs the supervisor half:\n%s", out)
+	// agent-tui#55: this used to assert "agent-supervisor#158" -- as#158
+	// merged 2026-08-15, and a hardcoded reference to a closed issue is
+	// exactly the stale-attribution defect #55 exists to fix. What must
+	// stay true is that a genuinely unavailable tool (errSessionsToolUnavailable
+	// above, a JSON-RPC "unknown tool" error, not a timeout) reads that way,
+	// checked at runtime -- see isTimeoutErr/renderFallbackNote.
+	if !strings.Contains(out, "sessions tool unavailable") {
+		t.Errorf("fallback rendered with no visible, runtime-checked note that the sessions tool is unavailable:\n%s", out)
+	}
+	if strings.Contains(out, "agent-supervisor#158") || strings.Contains(out, "timed out") {
+		t.Errorf("a tool-unavailable error must not read as a live blocker or a timeout:\n%s", out)
 	}
 	// Never silently blank: the rail must never look like a healthy, quiet
 	// estate when it is actually degraded.
 	if strings.Contains(out, "(no lanes)") {
 		t.Errorf("fallback rendered as an empty estate instead of the real fallback data:\n%s", out)
+	}
+}
+
+// fakeTimeoutErr implements the same Timeout() bool convention
+// internal/mcp's real timeout error does (net.Error-style) without this
+// test importing internal/mcp -- this package classifies by interface, not
+// by importing MCP's own error type, so a fake proves the classification
+// itself rather than one concrete implementation of it.
+type fakeTimeoutErr struct{ msg string }
+
+func (e fakeTimeoutErr) Error() string { return e.msg }
+func (e fakeTimeoutErr) Timeout() bool { return true }
+
+// TestSessionsFallbackDistinguishesTimeoutFromUnavailable is agent-tui#55's
+// second required fix: "call timed out / no reply" and "tool not available"
+// have different causes and must render different messages, not the one
+// blanket note that made a live concurrency bug read as a stale
+// supervisor-side gap.
+func TestSessionsFallbackDistinguishesTimeoutFromUnavailable(t *testing.T) {
+	timeoutErr := fakeTimeoutErr{msg: "mcp: tools/call: no reply within 10s"}
+	fallbackLanes := []lane.Lane{{Window: 1, WindowID: "@0", Name: "solo-lane", Command: "claude", State: "busy"}}
+	m := NewMultiSession(
+		func() ([]lane.Session, error) { return nil, timeoutErr },
+		func() ([]lane.Lane, error) { return fallbackLanes, nil },
+		nil, "director",
+	)
+	m.width = RailWidth + 8
+
+	model, cmd := m.Update(sessionsFetchResultMsg{err: timeoutErr})
+	m = model.(Model)
+	if cmd == nil {
+		t.Fatal("a failed sessions fetch with a fallback Fetcher wired must issue the fallback fetch, got a nil command")
+	}
+	model, _ = m.Update(cmd())
+	m = model.(Model)
+
+	out := m.View()
+	if !strings.Contains(out, "sessions call timed out") {
+		t.Errorf("a timeout error did not render as a timeout:\n%s", out)
+	}
+	if strings.Contains(out, "sessions tool unavailable") || strings.Contains(out, "agent-supervisor#158") {
+		t.Errorf("a timeout must not read as a missing tool or name a stale issue:\n%s", out)
 	}
 }
 

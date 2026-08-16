@@ -63,6 +63,24 @@ type rpcError struct {
 	Message string `json:"message"`
 }
 
+// timeoutError reports that call's round trip crossed callTimeout with no
+// reply -- distinct from a JSON-RPC error (the request was routable but
+// refused, e.g. an unknown tool name) and from a tool that ran and could
+// not see (ToolContent.IsError). agent-tui#55: a caller above this package
+// (internal/rail, without importing mcp -- see this package's own doc
+// comment on why nothing above it may know it is talking to a subprocess)
+// needs to tell "no reply within the deadline" apart from "the server
+// rejected this call" to render an honest, runtime-checked message instead
+// of a hardcoded blocker issue that stops being true the day it merges.
+// Implements the standard net.Error-style `Timeout() bool` so that
+// classification, not this error's wording, is the contract callers rely
+// on.
+type timeoutError struct{ err error }
+
+func (e *timeoutError) Error() string { return e.err.Error() }
+func (e *timeoutError) Timeout() bool { return true }
+func (e *timeoutError) Unwrap() error { return e.err }
+
 // ToolContent mirrors the MCP tools/call result shape: a list of content
 // blocks (this server only ever emits one, of type "text") plus isError,
 // the channel mcp_server.py uses for "the tool ran and could not see" per
@@ -195,7 +213,7 @@ func (c *Client) call(method string, params any) (json.RawMessage, error) {
 		c.mu.Lock()
 		delete(c.pend, id)
 		c.mu.Unlock()
-		return nil, fmt.Errorf("mcp: %s: no reply within %s", method, callTimeout)
+		return nil, &timeoutError{fmt.Errorf("mcp: %s: no reply within %s", method, callTimeout)}
 	}
 }
 
