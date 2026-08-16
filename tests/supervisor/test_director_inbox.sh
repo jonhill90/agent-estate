@@ -27,6 +27,10 @@ want_exit() { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected exit $3,
 echo "director-inbox.sh"
 
 D=$(mktemp -d)
+# director-inbox.sh does not source anything relative to its own path, so
+# the mutant below has no need to sit beside the real script -- it lives
+# under $D and is covered by this one recursive cleanup (agent-supervisor#220).
+trap 'rm -rf "$D"' EXIT
 run() { DIRECTOR_INBOX="$D/box.jsonl" bash "$INBOX" "$@"; }
 
 # --- no-argument invocation defaults to "read" (documented) — #113 ---------
@@ -333,9 +337,7 @@ want_not_contains "a drained message never reports as stale" "already delivered"
 # Patch out the `r["escalated"] = True` write so a caller that committed the
 # same message twice would be told to page Jon twice for it -- the exact
 # repeat-page failure the `escalated` field exists to prevent.
-INBOX_DIR="$(cd "$(dirname "$INBOX")" && pwd)"
-MUTANT="$INBOX_DIR/.director-inbox-mutant-noescalated.sh"
-trap 'rm -f "$MUTANT"' EXIT
+MUTANT="$D/.director-inbox-mutant-noescalated.sh"
 patch_rc=0
 python3 - "$INBOX" "$MUTANT" <<'PY' || patch_rc=$?
 import sys

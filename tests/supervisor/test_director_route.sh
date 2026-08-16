@@ -20,6 +20,17 @@ echo "director-route.sh"
 D=$(mktemp -d); mkdir -p "$D/bin" "$D/state/.local/state/agent-dotfiles-supervisor"
 cp "$HERE/stubs/tmux-dispatch" "$D/bin/tmux"
 
+# Mutants below have to live next to the real script, not in $D:
+# director-route.sh resolves input-box.sh/send.sh/session-defaults.sh
+# relative to its OWN path, so a mutated copy dropped in a bare tmp dir
+# fails to source its siblings and the test would be asserting on a script
+# that never ran. One trap set here, before any mutant exists, covers every
+# mutant this file creates -- a later mutant's own `trap ... EXIT` would
+# otherwise replace this one and strand whichever mutant it was protecting
+# (agent-supervisor#220).
+ROUTE_DIR="$(cd "$(dirname "$ROUTE")" && pwd)"
+trap 'rm -f "$ROUTE_DIR"/.director-route-mutant-*.sh' EXIT
+
 cat > "$D/bin/curl" <<'EOF'
 #!/bin/bash
 echo "curl $*" >> "${CURL_LOG:-/dev/null}"
@@ -179,7 +190,6 @@ row_escalated2=$(python3 -c "import json; print(json.loads(open('$INBOX_BOX').re
 # Mutation-check: force the notify result to "success" regardless of what
 # notify_jon actually returned, and confirm the "not escalated on failure"
 # assertion above would go red. The brief's own bar.
-ROUTE_DIR="$(cd "$(dirname "$ROUTE")" && pwd)"
 MUTANT_FORCE="$ROUTE_DIR/.director-route-mutant-forcesuccess.sh"
 patch_rc=0
 python3 - "$ROUTE" "$MUTANT_FORCE" <<'PY' || patch_rc=$?
@@ -238,7 +248,6 @@ chmod +x "$D/bin/curl"
 
 # Mutation-check: drop the escalation block and confirm the above goes red --
 # the brief's own bar ("mutate your fix and watch a test go red").
-ROUTE_DIR="$(cd "$(dirname "$ROUTE")" && pwd)"
 MUTANT_ESC="$ROUTE_DIR/.director-route-mutant-noescalate.sh"
 patch_rc=0
 python3 - "$ROUTE" "$MUTANT_ESC" <<'PY' || patch_rc=$?
@@ -373,9 +382,7 @@ grep -q 'will the queue write fail' <<<"$out" \
 # outright -- nothing in the box, nothing on the pane, exit 2 looks
 # identical to the correct behaviour from the outside. That indistinguishability
 # is exactly why the box assertion above, not the exit code, is load-bearing.
-ROUTE_DIR="$(cd "$(dirname "$ROUTE")" && pwd)"
 MUTANT="$ROUTE_DIR/.director-route-mutant-noqueue.sh"
-trap 'rm -f "$MUTANT"' EXIT
 patch_rc=0
 python3 - "$ROUTE" "$MUTANT" <<'PY' || patch_rc=$?
 import sys
