@@ -454,7 +454,7 @@ S
 cat > "$OK/fixtures/reviews_11.json" <<'S'
 {"reviews":[],"comments":[
   {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:4","createdAt":"2026-08-13T20:57:01Z"}
-],"author":{"login":"jonhill90"}}
+],"author":{"login":"jonhill90"},"commits":[{"oid":"1111111111111111111111111111111111111111","committedDate":"2026-08-13T20:57:01Z"}]}
 S
 cat > "$OK/fixtures/pr_view_12.json" <<'S'
 {"headRefName":"fix/212-comment-verdict-author-lane","closingIssuesReferences":[{"number":212}],"commits":[]}
@@ -462,7 +462,7 @@ S
 cat > "$OK/fixtures/reviews_12.json" <<'S'
 {"reviews":[],"comments":[
   {"author":{"login":"jonhill90"},"body":"**Verdict: REQUEST CHANGES**\nReview-Lane: t:3","createdAt":"2026-08-13T20:58:01Z"}
-],"author":{"login":"jonhill90"}}
+],"author":{"login":"jonhill90"},"commits":[{"oid":"1212121212121212121212121212121212121212","committedDate":"2026-08-13T20:58:01Z"}]}
 S
 cat > "$OK/fixtures/pr_view_13.json" <<'S'
 {"headRefName":"fix/213-comment-verdict-unstamped","closingIssuesReferences":[{"number":213}],"commits":[]}
@@ -470,7 +470,7 @@ S
 cat > "$OK/fixtures/reviews_13.json" <<'S'
 {"reviews":[],"comments":[
   {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**","createdAt":"2026-08-13T20:59:01Z"}
-],"author":{"login":"jonhill90"}}
+],"author":{"login":"jonhill90"},"commits":[{"oid":"1313131313131313131313131313131313131313","committedDate":"2026-08-13T20:59:01Z"}]}
 S
 cat > "$OK/fixtures/pr_view_14.json" <<'S'
 {"headRefName":"fix/214-author-drift","closingIssuesReferences":[{"number":214}],"commits":[]}
@@ -478,7 +478,7 @@ S
 cat > "$OK/fixtures/reviews_14.json" <<'S'
 {"reviews":[],"comments":[
   {"author":{"login":"jonhill90"},"body":"**Verdict: REQUEST CHANGES**\nReview-Lane: t:3","createdAt":"2026-08-13T21:00:01Z"}
-],"author":{"login":"jonhill90"}}
+],"author":{"login":"jonhill90"},"commits":[{"oid":"1414141414141414141414141414141414141414","committedDate":"2026-08-13T21:00:01Z"}]}
 S
 
 # agent-supervisor#77: the reviewer's own reproduction, through the real
@@ -493,7 +493,7 @@ S
 cat > "$OK/fixtures/reviews_15.json" <<'S'
 {"reviews":[],"comments":[
   {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:3","createdAt":"2026-08-13T21:01:01Z"}
-],"author":{"login":"jonhill90"}}
+],"author":{"login":"jonhill90"},"commits":[{"oid":"1515151515151515151515151515151515151515","committedDate":"2026-08-13T21:01:01Z"}]}
 S
 
 # agent-supervisor#108. PR16's author was recorded under the session name the
@@ -509,7 +509,7 @@ S
 cat > "$OK/fixtures/reviews_16.json" <<'S'
 {"reviews":[],"comments":[
   {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:3","createdAt":"2026-08-14T09:00:01Z"}
-],"author":{"login":"jonhill90"}}
+],"author":{"login":"jonhill90"},"commits":[{"oid":"1616161616161616161616161616161616161616","committedDate":"2026-08-14T09:00:01Z"}]}
 S
 cat > "$OK/fixtures/pr_view_17.json" <<'S'
 {"headRefName":"fix/217-unparseable-stamp","closingIssuesReferences":[{"number":217}],"commits":[]}
@@ -517,7 +517,7 @@ S
 cat > "$OK/fixtures/reviews_17.json" <<'S'
 {"reviews":[],"comments":[
   {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: lane/89-rev95","createdAt":"2026-08-14T09:01:01Z"}
-],"author":{"login":"jonhill90"}}
+],"author":{"login":"jonhill90"},"commits":[{"oid":"1717171717171717171717171717171717171717","committedDate":"2026-08-14T09:01:01Z"}]}
 S
 
 run_ok() {
