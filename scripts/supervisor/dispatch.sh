@@ -1426,7 +1426,8 @@ LAUNCH_CMD="${H_LAUNCH_CMD[$HARNESS_HIDX]}"
 # whatever the respawn produces. The prior shape here was `respawn-pane -k`,
 # sleep one second, then a blind `send-keys "$LAUNCH_CMD" Enter`: exactly the
 # mechanism #236 reports, a lane found blocked on a Claude Code menu offering
-# to run a pasted `claude --dangerously-skip-permissions --model sonnet`,
+# to run a pasted, unpinned launch command (the same shape #120/#135 already
+# refuse to let this file's OWN launch literal be -- see harness/claude.sh),
 # because nothing checked what was listening for those keystrokes a second
 # after the respawn. One tmux call now does what three did. There is no
 # window in which the launch command exists as text for something else to
