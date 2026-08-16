@@ -198,9 +198,10 @@ done
 # --- 6. POSITION-AWARE PROOF: a junk-prefixed message must NOT read as
 # landed (agent-supervisor#193) -----------------------------------------
 # `at25-rev33`'s reproduced shape: a `/clear` whose Enter never submitted
-# leaves "/clear" sitting in the box; a retype WITHOUT `--preclear` (exactly
-# how `dispatch.sh` calls `verified_type` -- it relies on the prior `/clear`
-# instead) then lands the brief GLUED onto it: "/clearRead <brief>...".
+# leaves "/clear" sitting in the box; a retype WITHOUT `--preclear` (how
+# `dispatch.sh` called `verified_type` before agent-supervisor#240 -- it
+# relied on the prior `/clear` alone) then lands the brief GLUED onto it:
+# "/clearRead <brief>...".
 # `Read <brief>` is still a true substring of that -- the ORIGINAL bug -- so
 # this is reproduced first against the pre-#193 `--proof` check to show the
 # false positive live, then against `--proof-head` to show the fix.

@@ -137,6 +137,7 @@ run() {
     DISPATCH_SWALLOW_ENTER="${DISPATCH_SWALLOW_ENTER:-0}" \
     DISPATCH_SWALLOW_PRECLEAR_ENTER="${DISPATCH_SWALLOW_PRECLEAR_ENTER:-0}" \
     DISPATCH_SWALLOW_BRIEF_ENTER="${DISPATCH_SWALLOW_BRIEF_ENTER:-0}" \
+    DISPATCH_LEAK_BEFORE_TYPE="${DISPATCH_LEAK_BEFORE_TYPE:-}" \
     DISPATCH_CONFIRM_TRIES="${DISPATCH_CONFIRM_TRIES:-2}" \
     DISPATCH_SESSION_TIMEOUT="${DISPATCH_SESSION_TIMEOUT:-0}" \
     WORKTREE_ROOT="$D/roots" bash "${DISPATCH_SCRIPT:-$DISPATCH}" "$@" 2>&1
@@ -1211,6 +1212,29 @@ status=$(LEDGER_STATE="$D/state-193-preclear" ledger status 2>&1)
 want_contains "...and the ledger agrees the lane is free again" "True" "$(lane_available "$D/state-193-preclear" t:3)"
 want_missing "and records no DISPATCH task in the ledger either" '"id":"ad162-unclearable"' "$status"
 
+# --- agent-supervisor#240: the box can gain text AFTER verified_preclear's
+# own confirming read, before verified_type ever touches the pane -- a gap
+# neither step's own evidence can see into. DISPATCH_LEAK_BEFORE_TYPE models
+# exactly that (see tmux-dispatch's own comment for the mechanics). Without
+# its own upfront `C-u`, verified_type's first literal send glues the brief
+# onto the leak, `--proof-head` correctly refuses that as not landed, and
+# `dispatch.sh`'s own retry (it already asks verified_type for 2 attempts) is
+# what recovers -- at the cost of a second full type attempt every time this
+# happens. `--proof-head` alone was #193's fix for the SAME shape caused by a
+# swallowed pre-clear Enter; this is a second, independent source of the
+# identical corruption, and only an upfront `C-u` closes both at once.
+echo '163|| a dispatch whose box gains text between pre-clear and typing' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-240-leak" DISPATCH_LEAK_BEFORE_TYPE="stray leftover " \
+      run 163 leaky-box "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "the dispatch still succeeds either way -- the retry safety net still recovers it" "$rc" 0 "$out"
+log=$(tmuxlog)
+type_attempts=$(grep -c -- "send-keys .*Read $D/brief.md" <<<"$log")
+if [ "$type_attempts" -eq 1 ]; then
+  ok "the brief lands in exactly ONE literal type attempt -- verified_type's own C-u caught the leak before typing"
+else
+  bad "the brief should land in exactly one type attempt once verified_type pre-clears its own send" \
+    "saw $type_attempts attempt(s); the retry safety net is doing work an upfront C-u should have made unnecessary -- log: $log"
+fi
 
 # --- agent-dotfiles#199: dispatch.sh is silent on stderr under bash 3.2 ---
 # WHY: `declare -A WINDOW_NAME_BY_INDEX` used to be rejected by macOS's real
