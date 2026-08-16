@@ -308,7 +308,17 @@ class Ledger:
                     -- at registration, by the adapter that is actually doing
                     -- the delivering (agent-dotfiles#216 took the same
                     -- position on `harness` itself).
-                    transport TEXT NOT NULL DEFAULT 'send-keys' CHECK (transport IN ('send-keys', 'acp', 'pi-rpc')),
+                    -- agent-supervisor#171: 'claude-print' added the same way
+                    -- 'pi-rpc' was -- opt-in per lane, not a replacement for
+                    -- the default. `claude` lanes still default to
+                    -- 'send-keys' (Jon's persistent, watchable terminals are
+                    -- untouched); this is for a NEW dispatch-and-collect
+                    -- lane that receives a brief and returns a PR with no
+                    -- pane to watch, over `claude -p --output-format json`
+                    -- -- the one harness with real capacity when codex and
+                    -- copilot are both exhausted (see dispatch-claude-
+                    -- print.sh's header for the measurement).
+                    transport TEXT NOT NULL DEFAULT 'send-keys' CHECK (transport IN ('send-keys', 'acp', 'pi-rpc', 'claude-print')),
                     updated_at INTEGER NOT NULL
                 );
 
@@ -445,7 +455,18 @@ class Ledger:
     # column, same reasoning as `harness_session_id` above -- a ledger
     # created before it existed has no way to acquire it short of this
     # rebuild.
-    _LANES_SCHEMA_MARKERS = ("copilot-acp", "'copilot'", "harness_session_id", "'pi'", "transport", "harness_project_dir")
+    # agent-supervisor#171: "'claude-print'" added as its own marker -- an
+    # existing lanes table can carry every marker before it (including
+    # "transport" itself, from the #58 migration) while its CHECK constraint
+    # still only allows 'send-keys'/'acp'/'pi-rpc'. Without a dedicated
+    # marker for the new value, a table that already has a `transport`
+    # column would read as current and never rebuild, leaving the narrower
+    # CHECK in place forever -- the same trap #58's own comment describes
+    # for a narrow harness CHECK.
+    _LANES_SCHEMA_MARKERS = (
+        "copilot-acp", "'copilot'", "harness_session_id", "'pi'", "transport",
+        "harness_project_dir", "'claude-print'",
+    )
 
     def _migrate_lanes_table(self, *, failpoint=None):
         """Widen an existing `lanes` table to the current schema in place.
@@ -528,7 +549,7 @@ class Ledger:
                             -- a gap. See the matching column in `_initialize`.
                             harness_session_id TEXT DEFAULT '',
                             harness_project_dir TEXT DEFAULT '',
-                            transport TEXT NOT NULL DEFAULT 'send-keys' CHECK (transport IN ('send-keys', 'acp', 'pi-rpc')),
+                            transport TEXT NOT NULL DEFAULT 'send-keys' CHECK (transport IN ('send-keys', 'acp', 'pi-rpc', 'claude-print')),
                             updated_at INTEGER NOT NULL
                         )
                         """
@@ -976,9 +997,19 @@ class Ledger:
     # be driven over its documented RPC (`PiRPCAdapter`) or, same as any
     # other harness, over plain `send-keys` if that is what actually
     # dispatched it.
+    #
+    # agent-supervisor#171: 'claude' widened the same way 'pi' was in #58 --
+    # a second, genuinely opt-in transport, not a replacement for the
+    # default. `send-keys` stays first (and stays what an undeclared
+    # registration gets, same rule as every other harness here): the
+    # existing, standing claude/codex lanes Jon watches and interrupts are
+    # untouched. 'claude-print' is for a lane that is dispatched, does not
+    # need to be watched, and reports back once -- `ClaudePrintAdapter`
+    # refuses to register any lane whose harness is not 'claude', same
+    # posture `PiRPCAdapter` already takes for 'pi'.
     _TRANSPORTS_BY_HARNESS = {
         "codex": ("send-keys",),
-        "claude": ("send-keys",),
+        "claude": ("send-keys", "claude-print"),
         "copilot": ("send-keys",),
         "copilot-acp": ("acp",),
         "pi": ("send-keys", "pi-rpc"),
