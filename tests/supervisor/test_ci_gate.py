@@ -38,6 +38,19 @@ def run(check_sha, name="test", conclusion="success", status="completed"):
     return [{"name": name, "head_sha": check_sha, "status": status, "conclusion": conclusion}]
 
 
+def run_at(check_sha, name, *, conclusion, started_at, completed_at=None, status="completed"):
+    entry = {
+        "name": name,
+        "head_sha": check_sha,
+        "status": status,
+        "conclusion": conclusion,
+        "started_at": started_at,
+    }
+    if completed_at is not None:
+        entry["completed_at"] = completed_at
+    return entry
+
+
 class CiGateTest(unittest.TestCase):
     def test_head_sha_failing_check_refuses_and_names_sha_and_job(self):
         runner = FakeRunner(head_sha="deadbeef", check_runs=run("deadbeef", name="test", conclusion="failure"))
@@ -93,6 +106,59 @@ class CiGateTest(unittest.TestCase):
         result = CiGate(boom).evaluate(repo="o/r", number=1)
         self.assertEqual("refuse", result["decision"])
         self.assertIn("network unavailable", result["reason"])
+
+    def test_two_runs_of_one_check_newest_green_allows(self):
+        # An old failing run of `test` plus a newer passing re-run of `test`,
+        # both stamped with the current head SHA. Only the newest matters.
+        runs = [
+            run_at("sha", "test", conclusion="failure",
+                   started_at="2026-08-16T07:46:02Z", completed_at="2026-08-16T08:01:11Z"),
+            run_at("sha", "test", conclusion="success",
+                   started_at="2026-08-16T15:36:24Z", completed_at="2026-08-16T15:46:00Z"),
+            run_at("sha", "gate", conclusion="success",
+                   started_at="2026-08-16T15:36:25Z", completed_at="2026-08-16T15:36:32Z"),
+        ]
+        runner = FakeRunner(head_sha="sha", check_runs=runs)
+        result = CiGate(runner).evaluate(repo="o/r", number=1)
+        self.assertEqual("allow", result["decision"])
+
+    def test_two_runs_of_one_check_newest_red_refuses_even_with_older_green(self):
+        # The important case: the newest run of `test` FAILED and an older
+        # run of the same check PASSED. A careless "any success counts"
+        # implementation would rubber-stamp this. It must refuse.
+        runs = [
+            run_at("sha", "test", conclusion="success",
+                   started_at="2026-08-16T07:46:02Z", completed_at="2026-08-16T08:01:11Z"),
+            run_at("sha", "test", conclusion="failure",
+                   started_at="2026-08-16T15:36:24Z", completed_at="2026-08-16T15:46:00Z"),
+        ]
+        runner = FakeRunner(head_sha="sha", check_runs=runs)
+        result = CiGate(runner).evaluate(repo="o/r", number=1)
+        self.assertEqual("refuse", result["decision"])
+        self.assertIn("test", result["reason"])
+
+    def test_only_an_old_failure_refuses(self):
+        runs = [
+            run_at("sha", "test", conclusion="failure",
+                   started_at="2026-08-16T07:46:02Z", completed_at="2026-08-16T08:01:11Z"),
+        ]
+        runner = FakeRunner(head_sha="sha", check_runs=runs)
+        result = CiGate(runner).evaluate(repo="o/r", number=1)
+        self.assertEqual("refuse", result["decision"])
+
+    def test_queued_newest_run_refuses_even_with_older_green(self):
+        # The newest run of `test` has no completed_at at all (still queued
+        # or in progress) -- it must not be skipped over to reach the older
+        # success.
+        runs = [
+            run_at("sha", "test", conclusion="success",
+                   started_at="2026-08-16T07:46:02Z", completed_at="2026-08-16T08:01:11Z"),
+            run_at("sha", "test", conclusion=None, status="queued",
+                   started_at="2026-08-16T15:36:24Z"),
+        ]
+        runner = FakeRunner(head_sha="sha", check_runs=runs)
+        result = CiGate(runner).evaluate(repo="o/r", number=1)
+        self.assertEqual("refuse", result["decision"])
 
     def test_evaluate_fetches_head_itself_every_call(self):
         # evaluate() takes only repo/number -- there is no head-sha
