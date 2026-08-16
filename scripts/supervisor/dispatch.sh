@@ -1559,8 +1559,20 @@ fi
 # anchors it to the START of the input box's own content instead (see
 # send.sh's `_send_head_matches`), so this exact corruption now fails the
 # check and falls into the C-u-and-retype loop below rather than shipping.
+#
+# `--preclear`, as of agent-supervisor#240: `verified_preclear` above already
+# confirmed this box empty, but that confirmation covers the instant it was
+# taken, not the instant `send-keys` below actually runs -- six lanes were
+# measured holding live unsent text that `lanes.sh` had classified `free`,
+# `busy` or `broken`, never `unsent`, which is exactly the shape of text
+# landing in a gap no earlier check could see. `--proof-head` already
+# detects a glued brief and the retry above already recovers it, but that
+# recovery costs a whole extra type-and-check round trip every time, and it
+# is not the only thing that could go wrong in that gap. A classification --
+# `verified_preclear`'s included -- can be wrong; one more `C-u`, sent
+# immediately before the keys that matter, cannot be.
 if ! verified_type "$LANE_TARGET" "$MESSAGE" \
-     --settle "${DISPATCH_SETTLE:-1}" --retries 2 \
+     --settle "${DISPATCH_SETTLE:-1}" --retries 2 --preclear \
      --proof-head "Read $BRIEF" \
      --proof "$WORKTREE" \
      --proof "never work in the shared checkout at $REPO_PATH."; then

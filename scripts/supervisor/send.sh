@@ -103,10 +103,16 @@ _send_head_matches() {
 #   --preclear     send one `C-u` BEFORE the first attempt too. Needed by any
 #                   caller that cannot promise the box started this send
 #                   empty -- `watchdog.sh` and `director-route.sh`'s pane can
-#                   hold leftover text from anywhere. `dispatch.sh` omits
-#                   this: it always runs `/clear` immediately before, and an
-#                   extra blind `C-u` there would be one more tmux call with
-#                   nothing to clear.
+#                   hold leftover text from anywhere. `dispatch.sh` passes
+#                   this too, as of agent-supervisor#240, even though it
+#                   always runs a VERIFIED `/clear` immediately before: that
+#                   verification covers the instant it was taken, not the
+#                   instant this call's own `send-keys` actually runs, and
+#                   six lanes were measured holding live unsent text whose
+#                   dispatch had trusted exactly that gap to stay empty. The
+#                   `C-u` this flag sends is one more tmux call either way;
+#                   the difference is whether "nothing to clear" is an
+#                   assumption or a thing this call confirms for itself.
 #   --literal      pass `-l` to `send-keys` -- required whenever `message`
 #                   might contain bytes tmux would otherwise read as a key
 #                   name (`inbox-route.sh`'s reasoning: external text is

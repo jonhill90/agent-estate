@@ -106,6 +106,17 @@ case "$sub" in
         esac
       done
       buf="$PANES/$win"
+      # agent-supervisor#240: the leak lands here -- the FIRST send-keys call
+      # this window receives once `leak-pending` is due, whatever that call
+      # turns out to be. If it is `verified_type --preclear`'s own upfront
+      # `C-u`, the leak is wiped before anything is typed over it; if there
+      # is no such `C-u`, it is still sitting there when the literal type
+      # call below appends the message straight onto it.
+      if [ -e "$buf.leak-pending" ]; then
+        rm -f "$buf.leak-pending"
+        printf '%s' "${DISPATCH_LEAK_BEFORE_TYPE:-}" > "$buf"
+        : > "$buf.leaked"
+      fi
       if is_menu_pane "$win"; then
         # #159. A menu does not have a text buffer to append to -- there is
         # no `buf` for it to land in, `-l` or not: real tmux's `-l` only
@@ -199,16 +210,34 @@ case "$sub" in
             # a verified pre-clear ahead of it: the pre-clear succeeds, and
             # only the BRIEF's later submit is swallowed.
             swallow_this=0
+            was_preclear_submit=0
+            [ "$(cat "$buf" 2>/dev/null)" = "/clear" ] && was_preclear_submit=1
             if [ "${DISPATCH_SWALLOW_ENTER:-0}" = 1 ]; then
               swallow_this=1
-            elif [ "${DISPATCH_SWALLOW_PRECLEAR_ENTER:-0}" = 1 ] && [ "$(cat "$buf" 2>/dev/null)" = "/clear" ]; then
+            elif [ "${DISPATCH_SWALLOW_PRECLEAR_ENTER:-0}" = 1 ] && [ "$was_preclear_submit" = 1 ]; then
               swallow_this=1
-            elif [ "${DISPATCH_SWALLOW_BRIEF_ENTER:-0}" = 1 ] && [ "$(cat "$buf" 2>/dev/null)" != "/clear" ]; then
+            elif [ "${DISPATCH_SWALLOW_BRIEF_ENTER:-0}" = 1 ] && [ "$was_preclear_submit" != 1 ]; then
               swallow_this=1
             fi
             if [ "$swallow_this" != 1 ]; then
               if [ -s "$buf" ]; then cat "$buf" >> "$buf.submitted"; printf '\n' >> "$buf.submitted"; fi
               : > "$buf"
+              # agent-supervisor#240: DISPATCH_LEAK_BEFORE_TYPE models text
+              # landing in the box in the gap `verified_preclear`'s OWN
+              # confirmation cannot see past -- AFTER its own confirming read
+              # of this genuinely-blank screen, but BEFORE `dispatch.sh`'s
+              # next step (`verified_type`) ever touches the pane. Armed
+              # here, not injected yet: the capture-pane handler below is
+              # what actually lands it, on the FIRST read after this one --
+              # verified_preclear's own confirming read still sees the true
+              # empty box, exactly as a real pre-clear success would. That is
+              # the whole of what `verified_type --preclear`'s own upfront
+              # `C-u` exists to catch regardless of source; the fixture does
+              # not need to explain WHY text would land there, only that it
+              # can.
+              if [ "$was_preclear_submit" = 1 ] && [ -n "${DISPATCH_LEAK_BEFORE_TYPE:-}" ] && [ ! -e "$buf.leaked" ]; then
+                : > "$buf.leak-armed"
+              fi
             fi
             # agent-dotfiles#209 round 2. Signal the DISPATCHER at the exact
             # instant the brief goes live in the pane -- after the submit has
@@ -401,6 +430,16 @@ case "$sub" in
     # would be testing a pane no harness produces. It is emitted ABOVE the
     # fixture's status line because that is where it sits on screen, and
     # because lanes.sh reads the last non-empty line.
+    # agent-supervisor#240: the FIRST capture-pane after a `leak-armed`
+    # marker is `verified_preclear`'s own confirming read -- it must still
+    # see the genuinely blank screen its `/clear` just produced, so the leak
+    # lands only from here on: this read converts `leak-armed` (queued) into
+    # `leak-pending` (due on the next send-keys, wherever `dispatch.sh` sends
+    # it next), and does not touch the buffer itself.
+    if [ -e "$PANES/$win.leak-armed" ]; then
+      rm -f "$PANES/$win.leak-armed"
+      : > "$PANES/$win.leak-pending"
+    fi
     rule=$(printf '─%.0s' $(seq 1 40))
     printf '%s\n' "$rule"
     if [ -s "$PANES/$win" ]; then

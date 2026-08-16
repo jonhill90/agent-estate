@@ -127,6 +127,12 @@ cat > "$D/fixture" <<'FIX'
 53|w-real-free-plural|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents|1|0
 54|w-busy-plural|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← 2 agents|1|0
 55|w-shell-idle-plural|claude.exe|⏵⏵ bypass permissions on · 1 shell · ← 3 agents · ↓ to manage|1|0
+56|w-unsent-240-1|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0|check for other stranded lanes
+57|w-unsent-240-2|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0|check on the suite run
+58|w-unsent-240-3|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0|check the other lanes for anything else stuck
+59|w-unsent-240-4|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0|check the notify script for any lingering result
+60|w-unsent-240-5|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0|file agent-supervisor#232 as a filed issue reference check
+61|w-unsent-240-6|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0|clean up the pr200-review temp branch and worktree
 FIX
 printf '49|w-missing-cwd|codex|  gpt-5.5 medium · /repo/path|1|0||||%s\n' "$MISSING_CWD" >> "$D/fixture"
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
@@ -332,6 +338,27 @@ want "a lane holding an unsent brief is unsent"          w-unsent unsent "$out"
 # would have called this lane free and dispatched over the brief. `free` now
 # depends on the box being empty, not only on the footer.
 want "a ready footer does not make an unsent lane free"  w-unsent-ready-footer unsent "$out"
+# agent-supervisor#240: six lines measured live, 2026-08-16T06:52Z, off six
+# lanes `lanes.sh` had classified `free`, `busy` or `broken` -- never
+# `unsent` -- while every one of them genuinely held this exact text,
+# unsubmitted, in its input box (`verified_preclear` emptied each box and a
+# following `verified_type` landed cleanly, which is what "genuinely live,
+# not stale paint" means here). Reproduced end to end against the real
+# `input-box.sh`/`lanes.sh` here as regression fixtures, not as evidence a
+# parsing defect was found: driven live against the real Claude Code v2.1.220
+# binary in an isolated tmux server (see this issue's PR for the transcript),
+# every one of these six already read `unsent` from unmodified `input-box.sh`
+# -- so nothing in this file changed to make them pass. What #240 actually
+# fixed is `dispatch.sh`'s own `verified_type` call gaining `--preclear`
+# (send.sh, dispatch.sh); these six rows exist purely so a FUTURE regression
+# in the box-parsing logic itself -- the kind #216 found in the ready-footer
+# regex -- cannot silently return unnoticed.
+want "measured #240 shape 1 (agent-supervisor:5) is unsent" w-unsent-240-1 unsent "$out"
+want "measured #240 shape 2 (agent-supervisor:6) is unsent" w-unsent-240-2 unsent "$out"
+want "measured #240 shape 3 (agent-tui:4) is unsent"        w-unsent-240-3 unsent "$out"
+want "measured #240 shape 4 (skills:3) is unsent"           w-unsent-240-4 unsent "$out"
+want "measured #240 shape 5 (skills:4) is unsent"           w-unsent-240-5 unsent "$out"
+want "measured #240 shape 6 (skills:5) is unsent"           w-unsent-240-6 unsent "$out"
 # The false positive that a first cut of input-box.sh produced. An EMPTY box
 # is not blank: it paints a rotating dim suggestion in the same row an unsent
 # brief occupies, and in a plain-text capture the two are identical. Calling
@@ -542,9 +569,9 @@ else
 fi
 
 # #141: withholding the lane was never the missing part -- the whitelist
-# already did that. Being TOLD is. w-unsent and w-unsent-ready-footer are the
-# two here.
-if grep -qE '2 lane\(s\) hold an unsent prompt' <<<"$out"; then
+# already did that. Being TOLD is. w-unsent, w-unsent-ready-footer and the
+# six agent-supervisor#240 measured rows are the eight here.
+if grep -qE '8 lane\(s\) hold an unsent prompt' <<<"$out"; then
   echo "  ok   the table prints a count line for unsent lanes"; pass=$((pass+1));
 else
   echo "  FAIL no unsent count line in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
@@ -555,6 +582,7 @@ free=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --free 2>&1)
 for bad in arch w-dead w-hung w-busy w-copilot w-minute-tick w-scrolled w-blocked \
            w-trust w-model w-permission w-subagent-task w-subagent-wait \
            w-unsent w-unsent-ready-footer w-typeahead w-optionrow w-optionrow-yes \
+           w-unsent-240-1 w-unsent-240-2 w-unsent-240-3 w-unsent-240-4 w-unsent-240-5 w-unsent-240-6 \
            w-text-blocked w-unrecognized-blocked w-codex-busy w-codex-trust w-copilot-busy \
            w-shell-busy w-shell-idle w-shell-idle-hung w-shell-tasks w-shells-plural \
            w-busy-plural w-shell-idle-plural \

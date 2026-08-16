@@ -45,6 +45,28 @@ want "a brief typed and never submitted is text" text \
   "$(box "${P}Read /brief.md and do exactly what it says.")"
 want "a single stray character is text" text "$(box "${P}x")"
 
+# agent-supervisor#240: the six lines measured live off six stranded lanes,
+# 2026-08-16T06:52Z, verbatim -- `lanes.sh` had classified every one of these
+# `free`, `busy` or `broken`, never `unsent`, while each pane genuinely held
+# this exact text unsubmitted. Reproduced directly against the real Claude
+# Code v2.1.220 binary (isolated tmux server, private TMUX_TMPDIR) rather than
+# assumed: every one of these already reads `text` from this file unmodified
+# -- so the regression #240 reported was never in this parsing logic. These
+# rows exist so a FUTURE regression here -- the shape #216 found in the ready
+# footer -- cannot silently return unnoticed.
+want "#240 measured shape 1 (agent-supervisor:5) is text" text \
+  "$(box "${P}check for other stranded lanes")"
+want "#240 measured shape 2 (agent-supervisor:6) is text" text \
+  "$(box "${P}check on the suite run")"
+want "#240 measured shape 3 (agent-tui:4) is text" text \
+  "$(box "${P}check the other lanes for anything else stuck")"
+want "#240 measured shape 4 (skills:3) is text" text \
+  "$(box "${P}check the notify script for any lingering result")"
+want "#240 measured shape 5 (skills:4) is text" text \
+  "$(box "${P}file agent-supervisor#232 as a filed issue reference check")"
+want "#240 measured shape 6 (skills:5) is text" text \
+  "$(box "${P}clean up the pr200-review temp branch and worktree")"
+
 # --- the false positive that would have broken the estate ------------------
 # An empty box is NOT blank. Claude Code paints a rotating suggestion in the
 # same row, and in a plain-text capture it is indistinguishable from an unsent
