@@ -149,6 +149,16 @@ def parser():
     # that predates this flag (or genuinely has no worktree) still records
     # everything else, same as `--harness-session-id` above.
     record_dispatch_parser.add_argument("--worktree", default="")
+    # agent-supervisor#193: NOT the agent's own self-report (`accept`, below,
+    # is that -- and it is caller-verified against the lane's own pane_id).
+    # This is `dispatch.sh`'s OWN evidence that its send actually landed --
+    # a position-anchored proof check (`verified_type --proof-head`) plus a
+    # confirmed-empty box (`verified_submit`) -- passed straight through so
+    # the ledger can tell "typed and submitted, verified" apart from "the
+    # lane went quiet" the moment the dispatch itself already knows the
+    # difference. Omitted (the default) leaves the task `delivered`, exactly
+    # today's behaviour.
+    record_dispatch_parser.add_argument("--confirm-landed", action="store_true")
 
     # agent-supervisor#36 (second issue comment): a stranded lane's open row
     # is not always a task id an operator has on hand -- `claim_lane` writes
@@ -632,6 +642,7 @@ def record_dispatch(
     harness_project_dir="",
     worktree_path="",
     pr=None,
+    confirm_landed=False,
 ):
     """Record a dispatch that ALREADY happened. Writes; never sends.
 
@@ -760,6 +771,7 @@ def record_dispatch(
             evidence=evidence,
             status_marker=None,
             worktree_path=worktree_path,
+            accepted=confirm_landed,
         )
     except Exception as error:
         ledger.mark_lane_held(lane, note=f"record_dispatch failed for task {task}: {error}")
@@ -921,6 +933,7 @@ def main(argv=None):
             harness=args.harness,
             worktree_path=args.worktree,
             pr=args.pr,
+            confirm_landed=args.confirm_landed,
         )
     elif args.command == "lane-free":
         value = lane_free(

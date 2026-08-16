@@ -688,6 +688,83 @@ class LedgerTest(unittest.TestCase):
         completed = self.ledger.complete("review-870", b"# Result\n\nDone.\n", pane_nonce="nonce-22-a")
         self.assertEqual("complete", completed["status"])
 
+    def test_fail_unaccepted_terminates_a_delivered_task_with_no_accepted_at(self):
+        """agent-supervisor#193's own primitive: a `delivered` task with no
+        `accepted_at` gets terminated `failed`, not `complete` -- see
+        `fail_unaccepted`'s own docstring for why. Mirrors `complete()`'s
+        shape (immutable result, pane-nonce check, idempotent) on purpose."""
+        self.assign()
+        self.ledger.mark_delivery_pending("review-870", pane_nonce="nonce-22-a")
+        self.ledger.mark_delivered("review-870", pane_nonce="nonce-22-a")
+
+        with self.assertRaisesRegex(ValueError, "pane incarnation"):
+            self.ledger.fail_unaccepted("review-870", b"never accepted", pane_nonce="some-other-nonce")
+
+        failed = self.ledger.fail_unaccepted("review-870", b"never accepted", pane_nonce="nonce-22-a")
+        self.assertEqual("failed", failed["status"])
+        self.assertIsNotNone(failed["completed_at"])
+        # Idempotent: a second call with the SAME result is a no-op, not an error.
+        again = self.ledger.fail_unaccepted("review-870", b"never accepted", pane_nonce="nonce-22-a")
+        self.assertEqual("failed", again["status"])
+        # `failed` is terminal -- the lane is free for a fresh dispatch.
+        self.assertTrue(self.ledger.lane_available("app-review"))
+
+    def test_fail_unaccepted_refuses_a_task_that_was_actually_accepted(self):
+        """The one thing this must never do: erase a GENUINE acceptance.
+        `accepted_at` already set is the caller's own evidence being stale or
+        wrong -- refuse rather than silently overwrite the record."""
+        self.assign()
+        self.ledger.mark_delivery_pending("review-870", pane_nonce="nonce-22-a")
+        self.ledger.mark_delivered("review-870", pane_nonce="nonce-22-a")
+        self.ledger.accept("review-870", pane_nonce="nonce-22-a")
+
+        with self.assertRaisesRegex(ValueError, "accepted"):
+            self.ledger.fail_unaccepted("review-870", b"never accepted", pane_nonce="nonce-22-a")
+
+    def test_fail_unaccepted_refuses_a_task_that_is_not_delivered(self):
+        """Only `delivered` is eligible -- a `created` (unsent) or `complete`
+        task has no business going through this path at all."""
+        task = self.assign()
+        with self.assertRaisesRegex(ValueError, "only 'delivered' is eligible"):
+            self.ledger.fail_unaccepted(task["id"], b"x", pane_nonce="nonce-22-a")
+
+    def test_record_dispatch_accepted_flag_sets_accepted_at_but_leaves_status_delivered(self):
+        """agent-supervisor#193: `accepted=True` is dispatch's OWN evidence
+        (see `record_dispatch`'s docstring), stamped as `accepted_at` WITHOUT
+        moving `status` to `accepted` -- that status is the self-report
+        path's (`Ledger.accept`), and `list_delivered_open_tasks` (the
+        completion reconciler's whole candidate set) selects on
+        `status='delivered'`. `accepted=False` (the default) must leave
+        `accepted_at` null, exactly as every caller before this flag
+        existed."""
+        unaccepted = self.ledger.record_dispatch(
+            lane="app-review", pane_id="%22", nonce="nonce-22-a", harness="codex",
+            repo="/repo/app", server_id="server-a", session_id="$2", command="codex",
+            task_id="review-900", source_kind="issue",
+            source_url="https://github.com/acme/app/issues/900",
+            source_ref="900", summary="issue #900", source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane app-review", "issues: 900"],
+        )["task"]
+        self.assertEqual("delivered", unaccepted["status"])
+        self.assertIsNone(unaccepted["accepted_at"])
+
+        self.ledger.cancel_open_task("app-review")
+        accepted = self.ledger.record_dispatch(
+            lane="app-review", pane_id="%22", nonce="nonce-22-b", harness="codex",
+            repo="/repo/app", server_id="server-a", session_id="$3", command="codex",
+            task_id="review-901", source_kind="issue",
+            source_url="https://github.com/acme/app/issues/901",
+            source_ref="901", summary="issue #901", source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane app-review", "issues: 901"],
+            accepted=True,
+        )["task"]
+        self.assertEqual("delivered", accepted["status"])
+        self.assertIsNotNone(accepted["accepted_at"])
+        # Directly observable candidate-set effect: still selected by the
+        # exact query the completion reconciler runs.
+        delivered_ids = {t["id"] for t in self.ledger.list_delivered_open_tasks()}
+        self.assertIn("review-901", delivered_ids)
+
     def test_lane_reregistration_cancels_an_outstanding_non_pending_task_instead_of_rebinding_it(self):
         """register_lane does an unconditional INSERT ... ON CONFLICT UPDATE,
         so re-registering with a CHANGED identity would silently rebind a

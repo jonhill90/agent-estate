@@ -72,6 +72,24 @@ _send_capture_matches() {
   return 0
 }
 
+# _send_head_matches <target> <token>
+#   True iff the input box's OWN content -- not the whole pane, and not "the
+#   token appears somewhere" -- STARTS WITH `token` (both whitespace-
+#   stripped). agent-supervisor#193: `_send_capture_matches` above is an
+#   AND-of-substrings check with no notion of position, and that is exactly
+#   what let `/clearRead <brief>...` (a `/clear` whose Enter never submitted,
+#   glued to the front of the actual brief by the retype that followed) read
+#   as "landed" -- `Read <brief>` was still a true substring, just not the
+#   start of anything. `input_box_text` (input-box.sh) is what makes "the
+#   start of the box" answerable at all; an empty box body is never a match,
+#   matching `input_box_text`'s own fail-closed contract for `unknown`.
+_send_head_matches() {
+  local target="$1" needle="$2" body
+  body=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_text)
+  needle="$(tr -d ' \n' <<<"$needle")"
+  [ -n "$body" ] && [[ "$body" == "$needle"* ]]
+}
+
 # verified_type <target> <message> [--settle N] [--retries N] [--preclear]
 #                                   [--literal] [--proof TOKEN]...
 #
@@ -101,6 +119,18 @@ _send_capture_matches() {
 #   --proof TOKEN  repeatable. ALL given tokens must appear in the pane
 #                   capture for the send to count as landed. No `--proof` at
 #                   all falls back to `input_box_state` reporting non-empty.
+#   --proof-head TOKEN  a SINGLE token that must START the input box's own
+#                   content (agent-supervisor#193) -- position-anchored,
+#                   unlike `--proof`, which only checks whole-pane
+#                   containment and so cannot tell "landed" from "landed
+#                   with garbage glued in front" (see `_send_head_matches`).
+#                   Combines with `--proof`: when both are given, EVERY
+#                   `--proof` token must still appear (the tail, which
+#                   survives scrolling) AND the head token must open the
+#                   box (the head, which a dropped-or-prepended prefix hits
+#                   first) -- `dispatch.sh`'s own comment on checking both
+#                   ends applies here unchanged, just with the head half now
+#                   actually anchored instead of merely present.
 #
 # MULTI-LINE MESSAGES ARE REFUSED, ALWAYS (agent-supervisor#186). `message`
 # containing an embedded newline is rejected before any `tmux send-keys` is
@@ -126,6 +156,7 @@ verified_type() {
   local target="$1" message="$2"; shift 2
   local settle=1 retries=1 preclear=0 literal=0 sent_ok=1
   local -a proof=()
+  local proof_head=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --settle) settle="$2"; shift 2 ;;
@@ -133,6 +164,7 @@ verified_type() {
       --preclear) preclear=1; shift ;;
       --literal) literal=1; shift ;;
       --proof) proof+=("$2"); shift 2 ;;
+      --proof-head) proof_head="$2"; shift 2 ;;
       *) echo "verified_type: unknown option $1" >&2; SEND_STATUS=send_failed; return 1 ;;
     esac
   done
@@ -160,8 +192,9 @@ verified_type() {
     fi
     sleep "$settle"
 
-    if [ "${#proof[@]}" -gt 0 ]; then
-      if _send_capture_matches "$target" "${proof[@]}"; then
+    if [ -n "$proof_head" ] || [ "${#proof[@]}" -gt 0 ]; then
+      if { [ -z "$proof_head" ] || _send_head_matches "$target" "$proof_head"; } \
+         && { [ "${#proof[@]}" -eq 0 ] || _send_capture_matches "$target" "${proof[@]}"; }; then
         SEND_STATUS=landed
         return 0
       fi
@@ -178,6 +211,62 @@ verified_type() {
       # -- retyping ON TOP of a dropped prefix would just compound it.
       tmux send-keys -t "$target" C-u 2>/dev/null
       sleep "$settle"
+    fi
+  done
+  SEND_STATUS=not_landed
+  return 2
+}
+
+# verified_preclear <target> [--settle N] [--retries N]
+#
+# Sends `C-u` then `/clear` + Enter, and confirms the screen actually
+# blanked -- the input box reads `empty`, not `text` or `unknown` -- before
+# returning success. agent-supervisor#193: `/clear`'s own Enter can be
+# swallowed exactly the way #178 already found a brief's Enter can be, and
+# unlike a stranded brief this failure was INVISIBLE downstream -- the next
+# `verified_type` call still found its proof tokens (as true substrings of
+# "/clear" glued onto the front of the retyped brief) and reported `landed`.
+# Confirming the blank HERE, before anything else is ever typed, is the
+# fail-closed fix `dispatch.sh`'s own comment above this call promised and
+# did not yet deliver: "abort the dispatch if it did not [clear], rather
+# than typing over an unsubmitted line."
+#
+# This is deliberately its own primitive, not a `verified_type`/
+# `verified_submit` pair: `/clear` blanks the WHOLE screen, which the
+# `--proof` substring check was never built to read through (see
+# `verified_type`'s header) -- the only thing checkable here is that the box
+# came back empty, so that is the whole of what this function confirms.
+#
+#   --settle N   seconds to sleep after sending before checking (default 1)
+#   --retries N  total attempts; each retry re-sends `C-u` then `/clear`
+#                 Enter (default 1 -- no retry)
+#
+# Return 0 (SEND_STATUS=landed, box confirmed empty), 2 (not_landed -- the
+# box still shows text, or could not be read at all, after every retry), or
+# 1 (send_failed -- the `/clear` send-keys call itself errored).
+verified_preclear() {
+  local target="$1"; shift
+  local settle=1 retries=1
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --settle) settle="$2"; shift 2 ;;
+      --retries) retries="$2"; shift 2 ;;
+      *) echo "verified_preclear: unknown option $1" >&2; SEND_STATUS=send_failed; return 1 ;;
+    esac
+  done
+
+  local attempt
+  for ((attempt = 1; attempt <= retries; attempt++)); do
+    tmux send-keys -t "$target" C-u 2>/dev/null
+    if ! tmux send-keys -t "$target" "/clear" Enter 2>/dev/null; then
+      SEND_STATUS=send_failed
+      return 1
+    fi
+    sleep "$settle"
+    SEND_BOX_STATE=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_state)
+    if [ "$SEND_BOX_STATE" = empty ]; then
+      SEND_STATUS=landed
+      return 0
     fi
   done
   SEND_STATUS=not_landed
@@ -248,7 +337,7 @@ verified_send() {
   while [ $# -gt 0 ]; do
     case "$1" in
       --confirm-tries|--confirm-settle) submit_args+=("$1" "$2"); shift 2 ;;
-      --proof) type_args+=("$1" "$2"); shift 2 ;;
+      --proof|--proof-head) type_args+=("$1" "$2"); shift 2 ;;
       --preclear|--literal) type_args+=("$1"); shift ;;
       --settle|--retries) type_args+=("$1" "$2"); shift 2 ;;
       *) echo "verified_send: unknown option $1" >&2; SEND_STATUS=send_failed; return 1 ;;

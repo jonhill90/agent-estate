@@ -118,6 +118,8 @@ run() {
     AGENT_SUPERVISOR_STATE_DIR="${LEDGER_STATE:-$(mktemp -d "$D/state.XXXXXX")}" \
     STUB_PANE_PATH="${STUB_PANE_PATH:-$REPO}" \
     DISPATCH_SWALLOW_ENTER="${DISPATCH_SWALLOW_ENTER:-0}" \
+    DISPATCH_SWALLOW_PRECLEAR_ENTER="${DISPATCH_SWALLOW_PRECLEAR_ENTER:-0}" \
+    DISPATCH_SWALLOW_BRIEF_ENTER="${DISPATCH_SWALLOW_BRIEF_ENTER:-0}" \
     DISPATCH_CONFIRM_TRIES="${DISPATCH_CONFIRM_TRIES:-2}" \
     DISPATCH_SESSION_TIMEOUT="${DISPATCH_SESSION_TIMEOUT:-0}" \
     WORKTREE_ROOT="$D/roots" bash "${DISPATCH_SCRIPT:-$DISPATCH}" "$@" 2>&1
@@ -1089,13 +1091,20 @@ want_contains "and no task at all" '"tasks":[]' "$status"
 # `dispatch: #N -> lane` and walked away, claim.sh showed the issue claimed,
 # and the work was invisible -- not queued, not running, not lost.
 #
-# DISPATCH_SWALLOW_ENTER models exactly that: the keys arrive, the box keeps
-# the text, nothing runs.
+# DISPATCH_SWALLOW_BRIEF_ENTER models exactly that: the keys arrive, the box
+# keeps the text, nothing runs. NOT DISPATCH_SWALLOW_ENTER (agent-
+# supervisor#193): that swallows every Enter unconditionally, including the
+# pre-clear's own -- which, now that the pre-clear is itself verified (see
+# the NEW case just below this one), would abort the dispatch a full step
+# earlier than this case means to exercise, before the claim ever reaches
+# its point of no return. DISPATCH_SWALLOW_BRIEF_ENTER lets the pre-clear
+# succeed normally and swallows only the BRIEF's later submit -- #141's
+# original shape, isolated from #193's.
 echo '160|| a dispatch whose Enter is swallowed' >> "$D/issues"
 # Successful dispatches earlier in this file leave their worktrees in place,
 # so the assertion is that this one ADDS none -- not that none exist.
 before=$(worktrees)
-out=$(LEDGER_STATE="$D/state-160" DISPATCH_SWALLOW_ENTER=1 \
+out=$(LEDGER_STATE="$D/state-160" DISPATCH_SWALLOW_BRIEF_ENTER=1 \
       run 160 unsent-brief "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "a brief that never submits fails the dispatch" "$rc" 1 "$out"
 want_contains "and says it was typed but never submitted" "never submitted" "$out"
@@ -1153,6 +1162,37 @@ out=$(run 161 submits-fine "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "a brief that submits still exits 0" "$rc" 0 "$out"
 want_contains "and reports the dispatch" "dispatch: #161 -> " "$out"
 want_missing "and warns about nothing" "WARNING" "$out"
+
+# --- agent-supervisor#193: the pre-clear itself must be verified -----------
+# `at25-rev33`'s actual shape: `/clear`'s OWN Enter never submitted, and the
+# retyped brief landed glued onto the unsubmitted "/clear" -- a corruption
+# every proof-token check downstream still read as `landed`, because the
+# check had no notion of position (fixed separately -- see test_send.sh's
+# `--proof-head` coverage). The fix HERE is upstream of all of that: confirm
+# the screen actually blanked before anything else is ever typed, and abort
+# if it did not, rather than type over an unsubmitted "/clear".
+#
+# DISPATCH_SWALLOW_PRECLEAR_ENTER swallows ONLY the pre-clear's own Enter
+# (a buffer holding EXACTLY "/clear"), every attempt -- modelling a
+# persistent failure so the abort direction is unambiguous. Unlike #160
+# above, this must abort BEFORE the claim's point of no return: nothing has
+# been typed into the pane yet, so nothing here is "in flight".
+echo '162|| a dispatch whose /clear never submits' >> "$D/issues"
+before=$(worktrees)
+out=$(LEDGER_STATE="$D/state-193-preclear" DISPATCH_SWALLOW_PRECLEAR_ENTER=1 \
+      run 162 unclearable "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a /clear that never submits fails the dispatch" "$rc" 1 "$out"
+want_contains "and says the screen never blanked" "did not blank" "$out"
+want_missing "and does not print a success line" "dispatch: #162 -> " "$out"
+log=$(tmuxlog)
+want_missing "the brief itself is never typed -- the pre-clear never got that far" "$D/brief.md" "$log"
+if [ "$(worktrees)" = "$before" ]; then ok "no worktree is left behind by an unclearable pre-clear"
+else bad "no worktree is left behind by an unclearable pre-clear" "$before before, $(worktrees) after"; fi
+if [ -z "$(assignees 162)" ]; then ok "the claim is released -- nothing was ever typed into the pane"
+else bad "the claim is released -- nothing was ever typed into the pane" "still assigned: $(assignees 162)"; fi
+status=$(LEDGER_STATE="$D/state-193-preclear" ledger status 2>&1)
+want_contains "...and the ledger agrees the lane is free again" "True" "$(lane_available "$D/state-193-preclear" t:3)"
+want_missing "and records no DISPATCH task in the ledger either" '"id":"ad162-unclearable"' "$status"
 
 
 # --- agent-dotfiles#199: dispatch.sh is silent on stderr under bash 3.2 ---

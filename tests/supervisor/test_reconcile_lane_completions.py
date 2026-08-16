@@ -38,10 +38,20 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.ledger = Ledger(Path(self.tempdir.name), clock=lambda: 1_000)
 
-    def dispatch(self, task_id, *, lane="agent-supervisor:2"):
+    def dispatch(self, task_id, *, lane="agent-supervisor:2", accepted=True):
         """Records one dispatch the way `cli.py record_dispatch` does. Ends
         with `tasks.status == 'delivered'` and no `completed_at` -- exactly
-        the shape #155 measured: a worker finished and never signalled."""
+        the shape #155 measured: a worker finished and never signalled.
+
+        `accepted=True` by default (agent-supervisor#193): in the real,
+        fixed pipeline `record_dispatch` sets `accepted_at` itself the
+        moment its own send is confirmed to have landed (see that method's
+        docstring) -- every test in this file except the #193 regression
+        below is exercising the sweep's OTHER behaviour (pane state, dwell,
+        batching) and should look exactly like a normal, accepted dispatch.
+        `accepted=False` reproduces the #155 scenario as it was measured
+        BEFORE this fix -- see `test_never_accepted_...` below, which is the
+        one place that matters."""
         return self.ledger.record_dispatch(
             lane=lane, pane_id="%2", nonce="nonce-2", harness="claude",
             repo="/repo/agent-supervisor", server_id="server-a", session_id="$2", command="claude",
@@ -50,6 +60,7 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
             source_ref="155", summary="issue #155", source_state="OPEN",
             evidence=[f"claimed by dispatch.sh for lane {lane}", "issues: 155"],
             status_marker=None,
+            accepted=accepted,
         )
 
     def test_lane_free_past_the_dwell_is_completed_from_observed_state(self):
@@ -70,6 +81,78 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         self.assertEqual([], report["unresolved"])
         self.assertEqual([], report["errors"])
         self.assertEqual(1, len(runner.calls))  # one call per SESSION, not per task
+
+    def test_never_accepted_task_is_failed_not_completed(self):
+        """agent-supervisor#193's own regression: `at25-rev33` was dispatched
+        to `agent-tui:3`, its `/clear` Enter never submitted, the retyped
+        brief landed glued onto it as noise the harness discarded as an
+        unknown command, and the lane went quiet exactly like a finished
+        one. `accepted_at` was never set -- nothing about that pane ever
+        confirmed the brief began. The sweep must not certify it `complete`
+        just because the pane reads free past the dwell; the ledger must
+        record what is actually known instead: `failed`."""
+        self.dispatch("as193-never-accepted", accepted=False)
+        runner = FakeLanesRunner(
+            {"agent-supervisor": [{"window": 2, "state": "free", "idle_seconds": 400}]}
+        )
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, idle_after=300).sweep()
+
+        task = self.ledger.get_task("as193-never-accepted")
+        self.assertEqual("failed", task["status"])
+        self.assertNotEqual("complete", task["status"])
+        self.assertEqual([], report["completed"])
+        self.assertEqual(["as193-never-accepted"], report["failed_unaccepted"])
+        self.assertEqual([], report["unresolved"])
+        self.assertEqual([], report["errors"])
+        # And it is loud about WHY, not just terminal (#118's lesson) --
+        # readable from the ledger's own result, the same evidence
+        # `_complete_observed`'s note gives a normal completion.
+        result_bytes = Path(task["result_path"]).read_bytes()
+        self.assertIn(b"accepted_at", result_bytes)
+
+    def test_never_accepted_frees_the_lane_for_a_fresh_dispatch(self):
+        """`failed` is terminal (`one_open_task_per_lane` excludes it) --
+        unlike leaving the task stuck `delivered` forever, a lane whose
+        dispatch was never accepted must be dispatchable again."""
+        self.dispatch("as193-never-accepted", accepted=False)
+        runner = FakeLanesRunner(
+            {"agent-supervisor": [{"window": 2, "state": "free", "idle_seconds": 400}]}
+        )
+
+        LaneCompletionReconciler(self.ledger, runner=runner, idle_after=300).sweep()
+
+        # A second record_dispatch to the SAME lane must not collide with
+        # the `one_open_task_per_lane` unique index -- it would if the
+        # failed task were still open.
+        self.dispatch("as193-redispatch", accepted=False)
+        task = self.ledger.get_task("as193-redispatch")
+        self.assertEqual("delivered", task["status"])
+
+    def test_mutation_ignoring_accepted_at_completes_the_never_accepted_task(self):
+        """Mutation check: if the sweep's `accepted_at is None` gate is
+        removed, THIS test's own scenario (identical to
+        `test_never_accepted_task_is_failed_not_completed`) goes back to
+        `complete` -- proving that gate, not something else, is what makes
+        the test above pass. Exercised here by calling the pre-#193 code
+        path directly (`_complete_observed`), the same way the real sweep
+        used to for every free-and-idle-enough task regardless of
+        acceptance."""
+        self.dispatch("as193-mutant", accepted=False)
+        reconciler = LaneCompletionReconciler(
+            self.ledger,
+            runner=FakeLanesRunner({"agent-supervisor": [{"window": 2, "state": "free", "idle_seconds": 400}]}),
+            idle_after=300,
+        )
+        task = self.ledger.get_task("as193-mutant")
+        report = {"completed": [], "failed_unaccepted": [], "unresolved": [], "errors": []}
+        reconciler._complete_observed(task, session="agent-supervisor", idle_seconds=400, now=1_400, report=report)
+        task = self.ledger.get_task("as193-mutant")
+        self.assertEqual(
+            "complete", task["status"],
+            "MUTATION CONFIRMED (red): without the accepted_at gate, "
+            "_complete_observed alone still completes a never-accepted task",
+        )
 
     def test_idempotent_second_sweep_completes_nothing_new(self):
         self.dispatch("as155-observed-completion")

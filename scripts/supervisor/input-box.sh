@@ -150,3 +150,82 @@ input_box_state() {
     }
   '
 }
+
+# input_box_text < capture-pane -pe output
+#
+# agent-supervisor#193. `input_box_state` above answers "empty or text";
+# this answers "text OF WHAT" -- the box's own content, prompt marker and
+# SGR stripped, whitespace and NBSP collapsed out exactly the way
+# `input_box_state` normalises before comparing to "". Needed wherever a
+# caller must know WHERE something appears in the box, not merely THAT it
+# appears somewhere on the pane: `send.sh`'s `--proof-head` anchors a token
+# to the START of this string, which a whole-pane substring search (the
+# ORIGINAL proof check) cannot do -- that gap is exactly what let a `/clear`
+# glued onto the front of a brief still read as "landed", because
+# `Read <brief>` was still a true substring of `/clearRead <brief>`.
+#
+# Same box-finding rules as `input_box_state` (last prompt row, closed by a
+# rule, everything in between); this is deliberately NOT implemented by
+# calling that function and re-deriving the body from its verdict -- there
+# is no verdict to re-derive FROM, only the underlying awk, so the box-
+# finding logic is repeated here rather than invented differently. Prints
+# the body (possibly empty) when a complete box was found on screen, or
+# NOTHING (not even a newline) when it was not -- `unknown` has no content
+# to report, and a caller must treat empty output the same fail-closed way
+# `input_box_state`'s callers already treat `unknown`: not evidence of
+# anything.
+input_box_text() {
+  awk -v prompt="$INPUT_BOX_PROMPT" -v nbsp="$INPUT_BOX_NBSP" '
+    function strip_sgr(s,   out) {
+      out = s
+      gsub(/\033\[[0-9;?]*[A-Za-z]/, "", out)
+      return out
+    }
+    function undim(s,   out, i, n, esc, params, p, np, j, dim) {
+      out = ""; dim = 0; i = 1; n = length(s)
+      while (i <= n) {
+        if (substr(s, i, 2) == "\033[") {
+          esc = ""; j = i + 2
+          while (j <= n && index("0123456789;?", substr(s, j, 1)) > 0) {
+            esc = esc substr(s, j, 1); j++
+          }
+          if (j <= n) {
+            if (substr(s, j, 1) == "m") {
+              np = split(esc, params, ";")
+              if (np == 0) { dim = 0 }
+              for (p = 1; p <= np; p++) {
+                if (params[p] == "2") dim = 1
+                else if (params[p] == "0" || params[p] == "22" || params[p] == "") dim = 0
+              }
+            }
+            i = j + 1
+          } else {
+            i = n + 1
+          }
+          continue
+        }
+        if (!dim) out = out substr(s, i, 1)
+        i++
+      }
+      return out
+    }
+    { raw[NR] = $0; plain[NR] = strip_sgr($0) }
+    END {
+      p = 0
+      for (i = 1; i <= NR; i++) if (index(plain[i], prompt) == 1) p = i
+      if (p == 0) { exit }
+
+      e = 0
+      for (i = p + 1; i <= NR; i++) if (plain[i] ~ /^[─━]+$/) { e = i; break }
+      if (e == 0) { exit }
+
+      body = undim(raw[p])
+      k = index(body, prompt)
+      if (k > 0) body = substr(body, k + length(prompt))
+      for (i = p + 1; i < e; i++) body = body undim(raw[i])
+      gsub(/[[:space:]]/, "", body)
+      gsub(nbsp, "", body)
+      printf "%s", body
+    }
+  '
+}

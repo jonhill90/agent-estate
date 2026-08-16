@@ -184,7 +184,29 @@ case "$sub" in
           # `delivered` has to mean the reply arrived and went in.
           Enter)
             printf '%s\n' "Enter" >> "$buf.keys"
-            if [ "${DISPATCH_SWALLOW_ENTER:-0}" != 1 ]; then
+            # DISPATCH_SWALLOW_PRECLEAR_ENTER=1 (agent-supervisor#193): the
+            # NARROWER sibling of DISPATCH_SWALLOW_ENTER above -- swallows
+            # only the Enter that would submit a buffer holding EXACTLY
+            # "/clear", i.e. the pre-clear's own submit, and lets every other
+            # Enter (the brief's) through normally. DISPATCH_SWALLOW_ENTER
+            # swallows every Enter unconditionally, including this one --
+            # useful for modelling "nothing here submits, ever", but it
+            # cannot isolate "only the pre-clear failed" from "only the
+            # brief failed", which #193's own regression needs to.
+            # DISPATCH_SWALLOW_BRIEF_ENTER=1: the mirror image -- swallows
+            # every Enter EXCEPT the pre-clear's own (buf == "/clear"
+            # exactly), modelling #141's original shape now that #193 added
+            # a verified pre-clear ahead of it: the pre-clear succeeds, and
+            # only the BRIEF's later submit is swallowed.
+            swallow_this=0
+            if [ "${DISPATCH_SWALLOW_ENTER:-0}" = 1 ]; then
+              swallow_this=1
+            elif [ "${DISPATCH_SWALLOW_PRECLEAR_ENTER:-0}" = 1 ] && [ "$(cat "$buf" 2>/dev/null)" = "/clear" ]; then
+              swallow_this=1
+            elif [ "${DISPATCH_SWALLOW_BRIEF_ENTER:-0}" = 1 ] && [ "$(cat "$buf" 2>/dev/null)" != "/clear" ]; then
+              swallow_this=1
+            fi
+            if [ "$swallow_this" != 1 ]; then
               if [ -s "$buf" ]; then cat "$buf" >> "$buf.submitted"; printf '\n' >> "$buf.submitted"; fi
               : > "$buf"
             fi
