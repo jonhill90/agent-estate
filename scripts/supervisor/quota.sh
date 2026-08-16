@@ -17,18 +17,28 @@
 # needed... build the tool to support the thing." Reading a number and comparing
 # it to a threshold is not reasoning.
 #
-# Usage:
-#   quota.sh check [--window session|weekly] [--min-remaining N]
-#   quota.sh summary          human-readable, all providers
-#   quota.sh eta              seconds until the active window is projected empty
+# agent-supervisor#264: this script had ZERO timeout guards, and it is step 0
+# of every loop tick -- the Director's, every session supervisor's, and the
+# watchdog's. `codexbar guard` measured 14s; `codexbar usage` measured a TIMED
+# OUT at 20s one call and hung past 120s on an earlier one. A hang here stalls
+# every loop in the estate simultaneously from one unreachable dependency, and
+# it fails in the worst direction: an agent blocked on step 0 is
+# indistinguishable from an agent quietly working. Every `codexbar` call below
+# is now bounded (`with_timeout`, `QUOTA_GUARD_TIMEOUT_SECONDS` /
+# `QUOTA_USAGE_TIMEOUT_SECONDS`) and a timeout is normalised to exit 2 --
+# never allowed to read as "not 1, therefore proceed". Do not fix this by
+# retrying: agent-supervisor#262 already found that retry-until-clean turns
+# fail-closed into fail-open, because a long enough retry eventually returns 0
+# including when the true state is WIND DOWN. Bound the call, normalise the
+# failure, let the sampling policy (quota-watch.sh, #262) decide what happens
+# to a genuinely-unknown reading.
 #
-# Exit codes -- callers branch on these, never on the text:
-#   0  SAFE       above the threshold; carry on
-#   1  WIND DOWN  below the threshold; stop dispatching, push, release, go quiet
-#   2  UNAVAILABLE quota could not be read. NOT the same as "fine" -- an
-#      instrument that cannot see a thing looks exactly like the thing being
-#      absent, which is this estate's most expensive recurring failure.
-#   3  MISSING    codexbar is not installed.
+# Not a `timeout`/`gtimeout` wrapper: advance-live.sh's #51 fix already
+# established why -- the watchdog pins PATH deliberately and this repo's own
+# suite runs scripts against a PATH of only /usr/bin:/bin to prove that pin
+# holds, and neither ships GNU coreutils on macOS. `with_timeout` below is the
+# same self-contained `kill -0` poll loop advance-live.sh uses for its fetch,
+# not a dependency on an external binary that may not be on PATH in production.
 set -uo pipefail
 
 BIN="${CODEXBAR_BIN:-codexbar}"
@@ -47,6 +57,76 @@ MIN_REMAINING="${QUOTA_MIN_REMAINING:-15}"
 # branches and go quiet -- but it is not instant, and an unpushed worktree is the
 # only thing a quota boundary actually destroys. 15% buys that margin.
 
+# --- #264: bounded calls, with a last-good cache to degrade into ----------
+GUARD_TIMEOUT_SECONDS="${QUOTA_GUARD_TIMEOUT_SECONDS:-15}"
+USAGE_TIMEOUT_SECONDS="${QUOTA_USAGE_TIMEOUT_SECONDS:-20}"
+# How long a cached reading may be shown as "last known" before it is
+# reported UNKNOWN instead of ageing into fiction. 15 minutes: long enough to
+# survive one bad codexbar call, short enough that nobody dispatches against
+# a number from an hour ago without being told plainly it is stale.
+CACHE_MAX_AGE_SECONDS="${QUOTA_CACHE_MAX_AGE_SECONDS:-900}"
+STATE_DIR="${AGENT_SUPERVISOR_STATE_DIR:-$HOME/.local/state/agent-dotfiles-supervisor}"
+CACHE_DIR="${QUOTA_CACHE_DIR:-$STATE_DIR/quota-cache}"
+mkdir -p "$CACHE_DIR" 2>/dev/null || true
+
+# with_timeout SECONDS OUTFILE CMD...
+# Runs CMD in the background, polls `kill -0` at 1s granularity (same
+# pattern as advance-live.sh's fetch bound, #51), and kills it if it is
+# still alive once SECONDS have elapsed. Prints nothing; CMD's stdout lands
+# in OUTFILE so the caller can read it after the exit code is known -- a
+# background pipeline's exit code is the pipe's, not the command's, which
+# has bitten this estate before (see the header note in `check` below).
+# Returns 124 on timeout (matching GNU `timeout`'s convention, so a reader
+# who knows that tool recognises the code), else CMD's own exit status.
+with_timeout() {
+  local secs="$1" outfile="$2"; shift 2
+  "$@" >"$outfile" 2>/dev/null &
+  local pid=$! waited=0 timed_out=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      timed_out=1
+      kill -TERM "$pid" 2>/dev/null
+      sleep 1
+      kill -KILL "$pid" 2>/dev/null
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid" 2>/dev/null
+  local rc=$?
+  [ "$timed_out" -eq 1 ] && return 124
+  return "$rc"
+}
+
+# cache_age FILE -- prints the file's age in seconds on stdout, or nothing
+# (and a non-zero return) if the file does not exist or its mtime cannot be
+# read. Tries BSD `stat` (macOS) then GNU `stat` (Linux CI) since this
+# script runs on both.
+cache_age() {
+  local f="$1" mtime now
+  [ -f "$f" ] || return 1
+  mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null) || return 1
+  now=$(date +%s)
+  echo $((now - mtime))
+}
+
+# cache_fresh FILE -- exit 0 and print the age if FILE exists and is not
+# older than CACHE_MAX_AGE_SECONDS; exit 1 (silent) otherwise. This is the
+# "beyond a threshold it becomes UNKNOWN rather than silently ageing into
+# fiction" rule from #264.
+cache_fresh() {
+  local f="$1" age
+  age=$(cache_age "$f") || return 1
+  [ "$age" -le "$CACHE_MAX_AGE_SECONDS" ] || return 1
+  echo "$age"
+}
+
+cache_write() {
+  local f="$1" data="$2"
+  printf '%s' "$data" > "$f.tmp.$$" 2>/dev/null && mv -f "$f.tmp.$$" "$f" 2>/dev/null
+}
+
 while [ $# -gt 0 ]; do
   case "$1" in
     check|summary|eta) CMD="$1"; shift ;;
@@ -64,11 +144,26 @@ command -v "$BIN" >/dev/null 2>&1 || {
 
 case "$CMD" in
   check)
-    out=$("$BIN" guard --provider "$PROVIDER" --min-remaining "$MIN_REMAINING" \
-            --window "$WINDOW" --json 2>/dev/null)
-    # Capture the exit code directly. Reading it through a pipe returns the
-    # pipe's status, which has bitten this estate three times.
+    GUARD_CACHE="$CACHE_DIR/guard-${PROVIDER}-${WINDOW}.json"
+    outfile=$(mktemp "${TMPDIR:-/tmp}/quota-guard.XXXXXX") || { echo "quota: could not create a scratch file -- UNAVAILABLE" >&2; exit 2; }
+    with_timeout "$GUARD_TIMEOUT_SECONDS" "$outfile" \
+      "$BIN" guard --provider "$PROVIDER" --min-remaining "$MIN_REMAINING" --window "$WINDOW" --json
+    # Capture the exit code directly, from with_timeout's return, not
+    # through a pipe -- reading it through a pipe returns the pipe's
+    # status, which has bitten this estate three times.
     rc=$?
+    out=$(cat "$outfile" 2>/dev/null)
+    rm -f "$outfile"
+
+    if [ "$rc" -eq 124 ]; then
+      if age=$(cache_fresh "$GUARD_CACHE"); then
+        cached_pct=$(printf '%s' "$(cat "$GUARD_CACHE" 2>/dev/null)" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("remainingPercent","?"))' 2>/dev/null)
+        echo "quota: TIMEOUT after ${GUARD_TIMEOUT_SECONDS}s waiting on $BIN guard -- UNAVAILABLE (last known: ${cached_pct}% remaining in $WINDOW, ${age}s old -- not current, do not treat as safe)" >&2
+      else
+        echo "quota: TIMEOUT after ${GUARD_TIMEOUT_SECONDS}s waiting on $BIN guard -- UNAVAILABLE, no cached reading within ${CACHE_MAX_AGE_SECONDS}s" >&2
+      fi
+      exit 2
+    fi
     [ -z "$out" ] && { echo "quota: no output from $BIN guard -- UNAVAILABLE" >&2; exit 2; }
     pct=$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("remainingPercent","?"))' 2>/dev/null)
     why=$(printf '%s' "$out" | python3 -c 'import json,sys;print(json.load(sys.stdin).get("unavailableReason") or "")' 2>/dev/null)
@@ -77,19 +172,33 @@ case "$CMD" in
       exit 2
     fi
     case "$rc" in
-      0) echo "quota: SAFE ${pct}% remaining in $WINDOW (floor ${MIN_REMAINING}%)"; exit 0 ;;
-      1) echo "quota: WIND DOWN -- ${pct}% remaining in $WINDOW, below ${MIN_REMAINING}%"; exit 1 ;;
+      0) cache_write "$GUARD_CACHE" "$out"; echo "quota: SAFE ${pct}% remaining in $WINDOW (floor ${MIN_REMAINING}%)"; exit 0 ;;
+      1) cache_write "$GUARD_CACHE" "$out"; echo "quota: WIND DOWN -- ${pct}% remaining in $WINDOW, below ${MIN_REMAINING}%"; exit 1 ;;
       69) echo "quota: UNAVAILABLE -- $BIN could not read the quota" >&2; exit 2 ;;
+      124) echo "quota: TIMEOUT -- UNAVAILABLE" >&2; exit 2 ;;
       *) echo "quota: $BIN guard exited $rc -- treating as UNAVAILABLE" >&2; exit 2 ;;
     esac
     ;;
   eta)
-    "$BIN" usage --format json 2>/dev/null | python3 -c '
-import json,sys
+    USAGE_CACHE="$CACHE_DIR/usage.json"
+    outfile=$(mktemp "${TMPDIR:-/tmp}/quota-usage.XXXXXX") || { echo "unavailable" >&2; exit 2; }
+    with_timeout "$USAGE_TIMEOUT_SECONDS" "$outfile" "$BIN" usage --format json
+    rc=$?
+    out=$(cat "$outfile" 2>/dev/null)
+    rm -f "$outfile"
+    if [ "$rc" -eq 124 ]; then
+      echo "quota: TIMEOUT after ${USAGE_TIMEOUT_SECONDS}s waiting on $BIN usage -- UNAVAILABLE" >&2
+      echo "unavailable"
+      exit 2
+    fi
+    [ -n "$out" ] && cache_write "$USAGE_CACHE" "$out"
+    printf '%s' "$out" | PROVIDER="$PROVIDER" python3 -c '
+import json,os,sys
 try: d=json.load(sys.stdin)
 except Exception: print("unavailable"); sys.exit(2)
+provider=os.environ.get("PROVIDER","")
 for p in d if isinstance(d,list) else []:
-    if p.get("provider")!="'"$PROVIDER"'": continue
+    if p.get("provider")!=provider: continue
     pace=(p.get("pace") or {}).get("primary") or {}
     if pace:
         print(f'"'"'{pace.get("etaSeconds","?")} {pace.get("summary","")}'"'"')
@@ -97,7 +206,31 @@ for p in d if isinstance(d,list) else []:
 print("unavailable"); sys.exit(2)'
     ;;
   summary)
-    "$BIN" usage --format json 2>/dev/null | python3 -c '
+    USAGE_CACHE="$CACHE_DIR/usage.json"
+    outfile=$(mktemp "${TMPDIR:-/tmp}/quota-usage.XXXXXX") || { echo "  quota: unavailable -- could not create a scratch file"; exit 2; }
+    with_timeout "$USAGE_TIMEOUT_SECONDS" "$outfile" "$BIN" usage --format json
+    rc=$?
+    out=$(cat "$outfile" 2>/dev/null)
+    rm -f "$outfile"
+    if [ "$rc" -eq 124 ]; then
+      if age=$(cache_fresh "$USAGE_CACHE"); then
+        AGE="$age" python3 -c '
+import json,os,sys
+age=os.environ.get("AGE","?")
+try: d=json.load(sys.stdin)
+except Exception: print("  quota: TIMEOUT -- UNAVAILABLE, no usable cache"); sys.exit(2)
+for p in d if isinstance(d,list) else []:
+    u=p.get("usage") or {}
+    prim=u.get("primary") or {}; sec=u.get("secondary") or {}
+    pace=(p.get("pace") or {}).get("primary") or {}
+    print(f'"'"'  {p.get("provider","?"):8} session={prim.get("usedPercent","-")}% used  weekly={sec.get("usedPercent","-")}% used  {pace.get("summary","")}  [last known, {age}s old -- TIMEOUT, not current]'"'"')' < "$USAGE_CACHE"
+      else
+        echo "  quota: TIMEOUT -- UNAVAILABLE, no cached reading within ${CACHE_MAX_AGE_SECONDS}s"
+      fi
+      exit 2
+    fi
+    [ -n "$out" ] && cache_write "$USAGE_CACHE" "$out"
+    printf '%s' "$out" | python3 -c '
 import json,sys
 try: d=json.load(sys.stdin)
 except Exception: print("  quota: unavailable"); sys.exit(2)
