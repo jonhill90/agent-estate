@@ -41,6 +41,10 @@ def _isolated_env(tmux_tmpdir):
     env = dict(os.environ)
     env["TMUX_TMPDIR"] = tmux_tmpdir
     env.pop("TMUX", None)  # a client's own env leaking in would defeat isolation
+    env.setdefault("TERM", "xterm-256color")  # a CI runner leaves this unset; without
+    # it tmux can't initialize the terminal over the pty and attach-session never
+    # registers as a client at all -- setUp times out with zero clients, before any
+    # code under test runs
     return env
 
 
