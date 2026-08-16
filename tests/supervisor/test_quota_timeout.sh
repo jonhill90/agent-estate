@@ -45,9 +45,13 @@ FIX
 chmod +x "$D/codexbar-ok"
 
 # --- the load-bearing case: a hanging guard returns 2, fast --------------
+# agent-supervisor#262 wraps `check` in a 3x-by-default sample loop, so a
+# per-sample bound is isolated here with QUOTA_CHECK_SAMPLES=1 -- the
+# sampling policy's own cost (SAMPLES x timeout) is covered separately by
+# test_quota_sampling.sh, not conflated with "does one call time out".
 STATE_DIR="$D/state-1"
 start=$(date +%s)
-OUT=$(CODEXBAR_BIN="$D/codexbar-hang" QUOTA_GUARD_TIMEOUT_SECONDS=2 \
+OUT=$(CODEXBAR_BIN="$D/codexbar-hang" QUOTA_GUARD_TIMEOUT_SECONDS=2 QUOTA_CHECK_SAMPLES=1 \
         AGENT_SUPERVISOR_STATE_DIR="$STATE_DIR" bash "$QUOTA" check 2>&1)
 RC=$?
 elapsed=$(( $(date +%s) - start ))
