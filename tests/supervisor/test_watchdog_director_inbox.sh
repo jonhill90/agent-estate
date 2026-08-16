@@ -25,6 +25,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHDOG="$HERE/../../scripts/supervisor/watchdog.sh"
 DIRECTOR_INBOX_BIN="$HERE/../../scripts/supervisor/director-inbox.sh"
 STUBS="$HERE/stubs"
+# agent-supervisor#199/#205: each case below hands watchdog.sh a fresh
+# SUPERVISOR_STATE, so check_worktree_guard_audit's own throttle (a stamp
+# file under that state dir) never has a prior run to find and would run the
+# real worktree-guard-audit.sh -- against whatever repo this worktree
+# happens to be checked out in -- on every single tick. That check has its
+# own dedicated test (test_watchdog_worktree_guard_audit.sh); this file is
+# about director-inbox staleness, so disable it here the same way that test
+# disables the checks it isn't about.
+export SUPERVISOR_GUARD_AUDIT_INTERVAL=99999999999
 pass=0; fail=0
 say_ok()  { echo "  ok   $1"; pass=$((pass+1)); }
 say_bad() { echo "  FAIL $1 — $2"; fail=$((fail+1)); }
