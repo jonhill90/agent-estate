@@ -52,7 +52,25 @@ HARNESS_RESUME_CMD='claude --dangerously-skip-permissions --resume %s'
 # no footer, kept for older captures and fixtures that stand in for "a
 # normal prompt" without spelling out footer chrome. See lanes.sh's own
 # `emit_rows` for the ordering this is checked in.
-HARNESS_READY_RE='^❯ [^←]*$|← 1 agent$'
+# agent-supervisor#216: the count is `[0-9]+`, not a literal 1. `lanes.sh`
+# tests this against the pane's LAST LINE only, so on a Claude pane the
+# footer is the only line it ever sees and the `^❯ ...$` alternative below
+# can never fire -- which made `← 1 agent$` the sole working matcher, and a
+# footer reading `← 2 agents` unclassifiable. Six healthy lanes across both
+# live sessions read `unknown` on 2026-08-16T02:26Z for exactly this, and
+# with `DISPATCH_LANE` removed (#89) there is no override: estate capacity
+# was zero. See the issue for the measurement that established the counter
+# is not a delegation indicator -- a lane holding nothing but the splash
+# screen, with an empty transcript and no child process, still read
+# `← 2 agents`.
+#
+# Widening READY_RE runs against the #124/#126 one-way ratchet, so what
+# bounds it matters: `busy` is decided before `free` (HARNESS_BUSY_RE below
+# -- `esc to interrupt`, `↓ to manage`, the token-count tail), and none of
+# those alternatives involve the agent count. A plural footer that is also
+# mid-turn, or that still has a background shell registered, stays busy.
+# test_lanes.sh pins both.
+HARNESS_READY_RE='^❯ [^←]*$|← [0-9]+ agents?$'
 
 # Busy -- last line only. Claude's elapsed-turn footer IS the last line
 # while a turn runs (`esc to interrupt`), unlike Codex, whose equivalent

@@ -124,6 +124,9 @@ cat > "$D/fixture" <<'FIX'
 50|w-firstrun|claude.exe|Paste code here if prompted >|1300|0
 51|w-firstrun-fresh|claude.exe|Paste code here if prompted >|5|0
 52|w-subagent-busy|claude.exe|✽ Building supervisor-side session write tools… (14m 13s · ↓ 82.3k tokens)\n  ⎿  ◼ Supervisor PR: session write tools + fix #153 marker consumption\n     ◻ agent-tui: rail attach/detach/add/remove UI + MCP client calls\n  ⏵⏵ bypass permissions on · esc to interrupt · ctrl+t to hide tasks · ← 1 agent · ↓ to manage\n  ⏺ main\n  ◯ general-purpose  Build supervisor session write tools   21m 11s · ↓ 243.4k tokens|1|0
+53|w-real-free-plural|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 2 agents|1|0
+54|w-busy-plural|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · esc to interrupt · ← 2 agents|1|0
+55|w-shell-idle-plural|claude.exe|⏵⏵ bypass permissions on · 1 shell · ← 3 agents · ↓ to manage|1|0
 FIX
 printf '49|w-missing-cwd|codex|  gpt-5.5 medium · /repo/path|1|0||||%s\n' "$MISSING_CWD" >> "$D/fixture"
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
@@ -233,10 +236,50 @@ want "an unrecognised blocked shape defaults to menu-blocked, not text-blocked" 
 # real idle footer and asserted free under the blacklist model -- it is kept
 # on the SAME text to prove the inversion changed its classification, not
 # just added a new row next to it.
-want "a footer carrying a background agent count is NOT free, it is unknown" w-idle-footer unknown "$out"
+# agent-supervisor#216 overturned this row's premise. It was asserted
+# `unknown` on the reading that `← 2 agents` meant work had been delegated;
+# that reading is measured false (see the comment below w-real-free). Nothing
+# else about this fixture ever made it unknown -- the same footer with a count
+# of 1 read `free` under the old regex too, so `⏸ manual mode on` was never
+# what withheld it. It is now free, and the #126 inversion it was kept to
+# demonstrate is carried by w-subagent-task and w-subagent-wait below, which
+# are the genuine delegation shapes.
+#
+# `⏸ manual mode on` remains unguarded by any probe: a lane in manual mode
+# accepts a dispatch and then blocks on approval at its first tool call. That
+# is a real hole and it predates this change -- filed separately, not widened
+# here.
+want "a manual-mode footer with a plural agent count is free" w-idle-footer free "$out"
 # The real free shape, captured live off an idle lane on 2026-08-11: the same
 # footer chrome, but the agent count is 1 (self only, nothing delegated).
 want "a bare ready prompt with the real footer is free" w-real-free free "$out"
+# agent-supervisor#216. The `← N agents` counter is NOT a delegation
+# indicator, and the comment two lines above -- "the agent count is 1 (self
+# only, nothing delegated)" -- was wrong about what the field means. Measured
+# 2026-08-16T02:31Z against `agent-supervisor:3`, a lane that had just been
+# renamed `free-3` by lane-done.sh and re-launched: the pane held nothing but
+# Claude Code v2.1.220's splash screen and an empty input box, its process
+# tree had no child below the login shell, and its footer still read
+# `← 2 agents`. A session with an empty transcript cannot have delegated
+# anything, so the count cannot be reporting delegation.
+#
+# What the number DOES count is not established here and is not claimed.
+# What is established is that it varies independently of whether the lane is
+# working, which is the only property this classifier needs from it.
+#
+# The cost of the old reading was total: at 02:26Z, six lanes sat at a bare
+# ready prompt across both live sessions and `--free` offered none of them,
+# because every footer but one said `2`. `dispatch.sh` takes no lane from the
+# environment (#89), so estate capacity was zero with no override.
+#
+# This is a WIDENING of READY_RE, the direction the #124/#126 one-way ratchet
+# guards, so the two rows below it exist to pin what it must not reach: a
+# plural footer that is also mid-turn stays `busy`, and a plural footer with a
+# background shell still registered stays `busy` (#207). Both are decided
+# before `free` is tested, and neither depends on the count.
+want "a plural agent count on an idle footer is free"    w-real-free-plural free "$out"
+want "a plural agent count mid-turn is still busy"       w-busy-plural      busy "$out"
+want "a plural agent count with a live background shell is still busy" w-shell-idle-plural busy "$out"
 # The #126 live cases verbatim: a background subagent's task-list row, and
 # Claude Code's "waiting for background agent" line. Neither contains
 # `esc to interrupt`, so the old code offered both -- and both are the
@@ -477,11 +520,14 @@ else
 fi
 
 # #126: unknown becoming common under the whitelist must be loud, not a
-# silent hole where lanes used to be. w-copilot, w-idle-footer,
-# w-subagent-task, w-subagent-wait, and w-firstrun-fresh are unknown here
-# -- 5. (w-firstrun itself has aged out into never-busy, below, and must
-# NOT be counted here too.)
-if grep -qE '5 lane\(s\) are unclassified' <<<"$out"; then
+# silent hole where lanes used to be. w-copilot, w-subagent-task,
+# w-subagent-wait, and w-firstrun-fresh are unknown here -- 4.
+# (w-firstrun itself has aged out into never-busy, below, and must NOT be
+# counted here too.)
+#
+# Was 5 before agent-supervisor#216: w-idle-footer is now free, because the
+# `← N agents` count it was withheld on does not report delegation.
+if grep -qE '4 lane\(s\) are unclassified' <<<"$out"; then
   echo "  ok   the table prints a count line for unknown lanes"; pass=$((pass+1));
 else
   echo "  FAIL no unknown count line in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
@@ -507,10 +553,11 @@ fi
 # --free must never offer a lane that would swallow the dispatch.
 free=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --free 2>&1)
 for bad in arch w-dead w-hung w-busy w-copilot w-minute-tick w-scrolled w-blocked \
-           w-trust w-model w-permission w-idle-footer w-subagent-task w-subagent-wait \
+           w-trust w-model w-permission w-subagent-task w-subagent-wait \
            w-unsent w-unsent-ready-footer w-typeahead w-optionrow w-optionrow-yes \
            w-text-blocked w-unrecognized-blocked w-codex-busy w-codex-trust w-copilot-busy \
            w-shell-busy w-shell-idle w-shell-idle-hung w-shell-tasks w-shells-plural \
+           w-busy-plural w-shell-idle-plural \
            telegram-poller ad102-renamed-lane free-27 w-hand-run-poller w-mentions-poller \
            w-missing-cwd w-firstrun w-firstrun-fresh; do
   bi=$(awk -F'|' -v n="$bad" '$2==n{print $1}' "$D/fixture")
