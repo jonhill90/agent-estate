@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import time
+import uuid
 from pathlib import Path
 
 
@@ -445,4 +446,117 @@ class PiRPCAdapter:
         """pi-rpc workers never host the supervisor lane -- only
         codex/claude do (SPEC §15.2) -- so there is nothing for this adapter
         to notify."""
+        return False
+
+
+class ClaudePrintAdapter:
+    """`claude -p`-driven sibling to `PiRPCAdapter`/`ACPAdapter`, for `claude`
+    lanes registered with `transport='claude-print'` (agent-supervisor#171).
+    `claude` is the one harness that may be driven either way -- plain
+    `send-keys` via `TmuxAdapter`, the same as every standing, watched lane
+    Jon relies on, or this headless dispatch-and-collect surface -- so, like
+    `PiRPCAdapter` does for `pi`, this class does not own the harness
+    outright; `cli.py` still chooses between the two by the lane's recorded
+    `transport`, never by `harness` alone.
+
+    Unlike `ACPAdapter`/`PiRPCAdapter`, there is no long-lived protocol
+    session to resume mid-call: `claude -p` is a single process that runs a
+    turn to completion and exits (see `claude_print_transport.py`'s module
+    docstring). So `assign_task` does not "load" a session before sending --
+    it hands the recorded `session_id` to a fresh transport as the `--resume`
+    target and lets `ClaudePrintTransport.run` do the one subprocess call.
+    Assignment and completion still happen in one round trip, for the same
+    reason as its siblings: `claude -p` already blocks until the turn is
+    genuinely done, so there is no pane to poll in between.
+    """
+
+    def __init__(self, ledger, transport_factory, *, clock=None):
+        self.ledger = ledger
+        self.transport_factory = transport_factory
+        self.clock = clock or time.time
+
+    def register_lane(self, *, lane, target, harness, repo, nonce):
+        if harness != "claude":
+            raise RuntimeError(f"ClaudePrintAdapter only supports claude lanes, got {harness!r}")
+        session_id = str(uuid.uuid4())
+        transport = self.transport_factory(cwd=repo)
+        try:
+            # Real fail-closed handshake, the same role `PiRPCAdapter.
+            # register_lane`'s `get_state` call and `ACPAdapter.register_
+            # lane`'s `new_session` call both play: a `claude` that cannot
+            # start, crashes, or returns a malformed result makes THIS call
+            # raise, and the lane is never registered.
+            result = transport.start_session(session_id, "Reply with exactly the single word: ready.")
+        finally:
+            transport.terminate()
+        if result.get("is_error"):
+            raise RuntimeError(f"claude -p handshake reported an error: {result!r}")
+        return self.ledger.register_lane(
+            lane=lane,
+            pane_id=session_id,
+            nonce=nonce,
+            harness=harness,
+            repo=repo,
+            server_id="claude-print",
+            session_id=session_id,
+            command="claude",
+            # Explicit, same reasoning as TmuxAdapter/ACPAdapter/PiRPCAdapter:
+            # this class IS the claude-print transport by construction.
+            transport="claude-print",
+        )
+
+    def _verified_lane(self, lane):
+        record = self.ledger.get_lane(lane)
+        if record is None:
+            raise RuntimeError(f"unknown lane: {lane}")
+        if record["harness"] != "claude" or record["transport"] != "claude-print":
+            raise RuntimeError(
+                f"lane {lane} is not a claude-print lane: harness={record['harness']!r} "
+                f"transport={record.get('transport')!r}"
+            )
+        return record
+
+    def assign_task(self, *, lane, task_id, summary):
+        with self.ledger.operation_lock():
+            record = self._verified_lane(lane)
+            existing = self.ledger.get_task(task_id)
+            if existing is not None and existing["status"] == "delivery_pending":
+                raise RuntimeError(
+                    f"delivery already attempted for task {task_id} and is unconfirmed; "
+                    "reconcile the task before it can be assigned again"
+                )
+            self.ledger.assign(task_id=task_id, lane=lane, pane_nonce=record["nonce"], summary=summary)
+            prompt = (
+                f"[Hill90 task {task_id}] {summary}\n\n"
+                "Do not begin unrelated work. Record commands and actual outputs in a compact result."
+            )
+            # Same ambiguous-state-before-physical-send ordering as
+            # ACPAdapter/PiRPCAdapter.assign_task: if the resumed call
+            # raises, the task is left `delivery_pending` rather than
+            # silently eligible for an automatic resend.
+            self.ledger.mark_delivery_pending(task_id, pane_nonce=record["nonce"])
+            transport = self.transport_factory(cwd=record["repo"], session_id=record["session_id"])
+            try:
+                result = transport.run(prompt)
+            finally:
+                transport.terminate()
+            self.ledger.mark_delivered(task_id, pane_nonce=record["nonce"])
+            message = (result.get("result") or "").strip()
+            if not message:
+                message = f"claude -p subtype={result.get('subtype')}"
+            return self.ledger.complete(task_id, message.encode("utf-8"), pane_nonce=record["nonce"])
+
+    def observe_lane(self, lane):
+        """Always None, for the same reason as `ACPAdapter.observe_lane`/
+        `PiRPCAdapter.observe_lane`: `run` already blocks until the turn
+        settles, so a task either completed inline in `assign_task` or the
+        call is still in flight -- there is no pane to poll in between."""
+        self._verified_lane(lane)
+        return None
+
+    def notify_supervisor(self, *, lane, retry_after):
+        """claude-print workers never host the supervisor lane -- it is
+        headless by construction, with no pane for a human to attach to, and
+        the standing supervisor lane needs exactly that (SPEC §15.2) -- so
+        there is nothing for this adapter to notify."""
         return False

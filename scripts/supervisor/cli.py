@@ -12,7 +12,8 @@ import sys
 from pathlib import Path
 
 from acp_transport import ACPTransport
-from adapter import ACPAdapter, PiRPCAdapter, TmuxAdapter, HARNESS_COMMANDS
+from adapter import ACPAdapter, ClaudePrintAdapter, PiRPCAdapter, TmuxAdapter, HARNESS_COMMANDS
+from claude_print_transport import ClaudePrintTransport
 from core import CLAIM_TASK_PREFIX, Ledger, claim_owner_token, lane_relation
 from github_source import GithubTaskSource
 from pi_transport import PiRPCTransport
@@ -95,7 +96,7 @@ def parser():
     # (`core.py`'s `_TRANSPORTS_BY_HARNESS`), so passing this for them would
     # either be redundant or rejected by that same allow-list. Omit it to get
     # `pi`'s default, `send-keys` -- `pi-rpc` is never silently assumed.
-    register.add_argument("--transport", choices=("send-keys", "acp", "pi-rpc"), default=None)
+    register.add_argument("--transport", choices=("send-keys", "acp", "pi-rpc", "claude-print"), default=None)
 
     assign = sub.add_parser("assign")
     assign.add_argument("--lane", required=True)
@@ -896,15 +897,31 @@ def main(argv=None):
     # `pi` lane may be registered either `send-keys` or `pi-rpc`
     # (`core.py`'s `_TRANSPORTS_BY_HARNESS`), so harness alone cannot decide
     # which adapter drives it; the lane's own recorded transport must.
+    #
+    # agent-supervisor#171: `claude-print` is the same shape as pi RPC's
+    # opt-in, one level down -- a `claude` lane may be registered either
+    # `send-keys` (the standing, watched lanes, untouched) or `claude-print`
+    # (a headless dispatch-and-collect lane over `claude -p`), so this too is
+    # decided by the lane's recorded TRANSPORT, never by `harness` alone.
     adapter = TmuxAdapter(ledger, TmuxTransport(args.tmux_bin))
     acp_adapter = ACPAdapter(ledger, ACPTransport.spawn)
     pi_adapter = PiRPCAdapter(ledger, PiRPCTransport.spawn)
+    # `--model sonnet`, same alias `harness/claude.sh` launches every other
+    # claude lane with (CLAUDE.md's own convention: cheaper tiers for
+    # workers) -- a headless claude-print lane must not silently default to
+    # whatever `claude -p` resolves on its own, which measured opus on this
+    # host.
+    claude_print_adapter = ClaudePrintAdapter(
+        ledger, lambda **kwargs: ClaudePrintTransport.spawn(**{"model": "sonnet", **kwargs})
+    )
 
     def adapter_for_harness(harness, transport=None):
         if harness == "copilot-acp":
             return acp_adapter
         if harness == "pi" and transport == "pi-rpc":
             return pi_adapter
+        if harness == "claude" and transport == "claude-print":
+            return claude_print_adapter
         return adapter
 
     def adapter_for_lane(lane):
