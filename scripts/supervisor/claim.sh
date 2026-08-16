@@ -102,14 +102,66 @@ take)
   # unreadable answer being read as permissive.
   # REST's `state` comes back lowercase ("open"/"closed"), unlike GraphQL's
   # "OPEN"/"CLOSED" -- compared lowercase below.
-  info=$(gh api "$(api_base)/issues/$ISSUE" \
-     -q '"\(.state)\t\(.assignees|map(.login)|join(","))"' 2>/dev/null)
-  if [ -z "$info" ]; then
-    echo "claim: cannot read #$ISSUE — refusing to claim on an unreadable state" >&2
+  #
+  # agent-supervisor#228: the mirror-image bug. A rate-limited (or otherwise
+  # failed) response is NOT empty -- gh does not apply the `-q` jq filter to
+  # an error body, it prints the raw error JSON to stdout instead. The old
+  # guard only checked `[ -z "$info" ]`, so that raw `{"message":"API rate
+  # limit exceeded..."}` counted as "readable", its leading `{` became
+  # `state`, and `{ != open` reported a genuinely OPEN issue as closed.
+  # "Cannot tell" became a fact in the other direction.
+  #
+  # Fixed by never trusting the body alone: `-i` captures the HTTP status
+  # line so failure is read off the status, not inferred from what jq did to
+  # a body it never got applied to; and `state` is only ever accepted as
+  # exactly `open` or `closed` -- anything else, including a JSON fragment,
+  # is unreadable, never a state.
+  resp=$(gh api -i "$(api_base)/issues/$ISSUE" 2>&1)
+  status=""
+  first_line="$(head -1 <<<"$resp")"
+  case "$first_line" in
+    HTTP/*) status="$(awk '{print $2}' <<<"$first_line")" ;;
+  esac
+  body=$(awk 'h{print;next} /^\r?$/{h=1;next}' <<<"$resp")
+
+  if [ -z "$status" ]; then
+    echo "claim: cannot read #$ISSUE — no HTTP response — refusing to claim on an unreadable state" >&2
     exit 2
   fi
-  state="${info%%$'\t'*}"
-  h="${info#*$'\t'}"
+
+  if [ "${status:0:1}" != "2" ]; then
+    # Non-2xx: the body's content is never treated as a state answer, only
+    # ever as a diagnostic. A rate limit gets a specific message, because a
+    # bare "rate limited" would send the reader chasing the wrong budget --
+    # `gh api` (this call) spends REST core's 5000/hr; `gh issue
+    # list`/`gh pr view` spend GraphQL's separate 5000/hr, and during the
+    # incident that prompted this fix, GraphQL calls kept succeeding while
+    # every REST read failed. `gh api rate_limit`'s reported remaining count
+    # is not authoritative either -- it does not see the secondary (burst)
+    # limit, so this treats the 403 itself as the signal, never that
+    # endpoint's count.
+    msg=$(jq -r '.message // empty' <<<"$body" 2>/dev/null)
+    if { [ "$status" = "403" ] || [ "$status" = "429" ]; } && grep -qi 'rate limit' <<<"$msg"; then
+      reset=$(grep -i '^x-ratelimit-reset:' <<<"$resp" | head -1 | cut -d: -f2 | tr -d ' \r')
+      retry_after=$(grep -i '^retry-after:' <<<"$resp" | head -1 | cut -d: -f2 | tr -d ' \r')
+      when=""
+      [ -n "$reset" ] && when=" (resets at epoch $reset)"
+      [ -z "$when" ] && [ -n "$retry_after" ] && when=" (retry after ${retry_after}s)"
+      echo "claim: REST core rate limit hit reading #$ISSUE (HTTP $status)$when — GraphQL is a separate 5000/hr budget and may still be fine; this is not a state answer, wait for the reset rather than re-queuing #$ISSUE elsewhere" >&2
+      exit 2
+    fi
+    echo "claim: cannot read #$ISSUE (HTTP $status) — refusing to claim on an unreadable state" >&2
+    exit 2
+  fi
+
+  state=$(jq -r '.state // empty' <<<"$body" 2>/dev/null)
+  case "$state" in
+    open|closed) ;;
+    *)
+      echo "claim: #$ISSUE returned no readable state — refusing to claim on an unreadable state" >&2
+      exit 2 ;;
+  esac
+  h=$(jq -r '(.assignees // [])|map(.login)|join(",")' <<<"$body" 2>/dev/null)
   if [ "$state" != "open" ]; then
     echo "claim: #$ISSUE is not open (state=$state) — not dispatching to $LANE" >&2
     exit 1
