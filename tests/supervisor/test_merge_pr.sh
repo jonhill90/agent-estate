@@ -292,6 +292,119 @@ fi
 echo "$out" | grep -q "merge-pr: refused -- .\+" && ok "refusal message names a reason" || bad "refusal message names a reason" "$out"
 
 # ============================================================================
+# agent-supervisor#292: author exclusion (and this same independence gate)
+# could not tell a claude-print lane apart from a tmux lane -- its id has no
+# `<session>:<index>` shape to compare (it IS its task id, no window to
+# index), so `lane_relation`'s string-shape check answered `unknown` for
+# EVERY pairing that involved one, and `independence_verdict` refuses on
+# `unknown` exactly as hard as on a real self-review. Both directions #292
+# itself requires, run through the REAL `merge-pr.sh`: a tmux lane's verdict
+# on a claude-print-authored PR, and a claude-print lane's verdict on a
+# tmux-authored PR. Both must merge -- the ledger's own `pane_id` registry
+# proves the two differ, whichever population either is in.
+# ============================================================================
+reregister_as_claude_print() {  # reregister_as_claude_print <lane>
+  python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+ledger = Ledger(sys.argv[2])
+lane = sys.argv[3]
+row = ledger.get_lane(lane)
+ledger.register_lane(
+    lane=lane, pane_id="claude-print:" + lane, nonce=row["nonce"], harness=row["harness"],
+    repo=row["repo"], server_id=row["server_id"], session_id=row["session_id"], command=row["command"],
+    harness_session_id=row["harness_session_id"], harness_project_dir=row["harness_project_dir"],
+    transport="claude-print",
+)
+' "$HERE/../../scripts/supervisor" "$STATE" "$1"
+}
+register_tmux_lane() {  # register_tmux_lane <lane> <pane-id>
+  python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+Ledger(sys.argv[2]).register_lane(
+    lane=sys.argv[3], pane_id=sys.argv[4], nonce="nonce-" + sys.argv[3], harness="claude",
+    repo="/tmp/repo", server_id="srv", session_id="sess", command="claude", transport="send-keys",
+)
+' "$HERE/../../scripts/supervisor" "$STATE" "$1" "$2"
+}
+
+# --- direction 1: a tmux lane's verdict on a claude-print-authored PR -----
+# the PR #288 shape itself: the author lane has no tmux window at all.
+rm -f "$MARKER"
+cat > "$FIX/head_48.json" <<'S'
+{"headRefOid": "sha-20"}
+S
+green_checkruns sha-20
+cat > "$FIX/author_48.json" <<'S'
+{"headRefName": "fix/48-thing", "closingIssuesReferences": [{"number": 48}], "commits": []}
+S
+cat > "$FIX/reviews_48.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:20\nReviewed-SHA: sha-20", "createdAt": "2026-08-16T00:00:00Z"}]}
+S
+seed_author ad182-author-b as48-author 48
+reregister_as_claude_print ad182-author-b
+register_tmux_lane t:20 %20
+out=$("$MERGE_PR" "$REPO" 48 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "a tmux reviewer of a claude-print-authored PR merges"; else bad "a tmux reviewer of a claude-print-authored PR merges" "got rc=$rc: $out"; fi
+if [ -f "$MARKER" ]; then ok "...and actually calls gh pr merge"; else bad "...and actually calls gh pr merge" "$out"; fi
+echo "$out" | grep -q "independence confirmed" && ok "...independence confirmed, not just CI green" || bad "...independence confirmed" "$out"
+
+# --- direction 2: a claude-print lane's verdict on a tmux-authored PR -----
+rm -f "$MARKER"
+cat > "$FIX/head_49.json" <<'S'
+{"headRefOid": "sha-21"}
+S
+green_checkruns sha-21
+cat > "$FIX/author_49.json" <<'S'
+{"headRefName": "fix/49-thing", "closingIssuesReferences": [{"number": 49}], "commits": []}
+S
+cat > "$FIX/reviews_49.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: ad182-review-186\nReviewed-SHA: sha-21", "createdAt": "2026-08-16T00:00:00Z"}]}
+S
+seed_author t:22 as49-author 49
+register_tmux_lane t:22 %22
+python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+Ledger(sys.argv[2]).register_lane(
+    lane="ad182-review-186", pane_id="claude-print:ad182-review-186", nonce="nonce-review",
+    harness="claude", repo="/tmp/repo", server_id="srv", session_id="sess", command="claude",
+    transport="claude-print",
+)
+' "$HERE/../../scripts/supervisor" "$STATE"
+out=$("$MERGE_PR" "$REPO" 49 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "a claude-print reviewer of a tmux-authored PR merges"; else bad "a claude-print reviewer of a tmux-authored PR merges" "got rc=$rc: $out"; fi
+if [ -f "$MARKER" ]; then ok "...and actually calls gh pr merge"; else bad "...and actually calls gh pr merge" "$out"; fi
+echo "$out" | grep -q "independence confirmed" && ok "...independence confirmed, not just CI green" || bad "...independence confirmed" "$out"
+
+# --- both populations still refuse when the ledger canNOT prove they differ
+#     -- e.g. a claude-print lane "reviewing" itself. Fail-closed is not
+#     loosened by the widening above. -------------------------------------
+rm -f "$MARKER"
+cat > "$FIX/head_50.json" <<'S'
+{"headRefOid": "sha-22"}
+S
+green_checkruns sha-22
+cat > "$FIX/author_50.json" <<'S'
+{"headRefName": "fix/50-thing", "closingIssuesReferences": [{"number": 50}], "commits": []}
+S
+cat > "$FIX/reviews_50.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: ad182-author-b\nReviewed-SHA: sha-22", "createdAt": "2026-08-16T00:00:00Z"}]}
+S
+seed_author ad182-author-b as50-author 50
+reregister_as_claude_print ad182-author-b
+out=$("$MERGE_PR" "$REPO" 50 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "a claude-print lane reviewing its own PR is still refused"; else bad "a claude-print lane reviewing its own PR is still refused" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "...and never merges"; else bad "...and never merges" "$out"; fi
+
+# ============================================================================
 # MUTATION CHECK: silencing the authorship gate lets the #179 reproduction
 # (case above) through. Confirms the test above is real evidence, not a check
 # that cannot fail -- see this repo's own CLAUDE.md on that requirement.

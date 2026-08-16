@@ -14,7 +14,14 @@ from pathlib import Path
 from acp_transport import ACPTransport
 from adapter import ACPAdapter, ClaudePrintAdapter, PiRPCAdapter, TmuxAdapter, HARNESS_COMMANDS
 from claude_print_transport import ClaudePrintTransport
-from core import CLAIM_TASK_PREFIX, Ledger, claim_owner_token, lane_relation
+from core import (
+    CLAIM_TASK_PREFIX,
+    Ledger,
+    claim_owner_token,
+    lane_population,
+    lane_relation,
+    lane_relation_from_rows,
+)
 from github_source import GithubTaskSource
 from pi_transport import PiRPCTransport
 from reconcile_lane_completions import LaneCompletionReconciler
@@ -874,17 +881,46 @@ def _verify_caller(adapter, ledger, lane):
 
 def main(argv=None):
     args = parser().parse_args(argv)
-    # agent-supervisor#108: answered BEFORE any ledger is opened. Comparing two
-    # lane ids reads no row and writes none, and a comparison that needed a
-    # readable database would make the author-exclusion guard fail on a state
-    # directory it never had to touch -- including in a test harness, or on a
-    # host where the default state dir is another estate's live ledger.
+    # agent-supervisor#108: answered BEFORE any ledger is opened, for the
+    # overwhelming majority of comparisons -- both ids parse as
+    # `<session>:<index>` (a tmux lane, the common case) and the string-shape
+    # check alone gets a positive answer. A comparison that needed a readable
+    # database for THAT case would make the author-exclusion guard fail on a
+    # state directory it never had to touch -- including in a test harness,
+    # or on a host where the default state dir is another estate's live
+    # ledger.
+    #
+    # agent-supervisor#292: `unknown` from the shape check is not the end of
+    # it anymore. A claude-print or pi-rpc lane id has no window to index, so
+    # it can never satisfy `LANE_ID_RE` and the shape check answers `unknown`
+    # for EVERY comparison involving one -- see `core.lane_relation_from_rows`
+    # own comment for the measurement. ONLY when the shape check could not
+    # decide does this open the ledger, to widen through the registry's
+    # `pane_id` instead -- so the common tmux-vs-tmux case still never pays
+    # for a database open, and the claude-print/pi-rpc case finally can be
+    # established rather than reflexively refused.
     if args.command == "lane-relation":
-        _print({
-            "lane": args.lane,
-            "other": args.other,
-            "relation": lane_relation(args.lane, args.other),
-        })
+        relation = lane_relation(args.lane, args.other)
+        result = {"lane": args.lane, "other": args.other, "relation": relation}
+        if relation == "unknown":
+            try:
+                relation_ledger = Ledger(args.state_dir)
+                lane_row = relation_ledger.get_lane(args.lane)
+                other_row = relation_ledger.get_lane(args.other)
+            except Exception:
+                lane_row = other_row = None
+            relation = lane_relation_from_rows(lane_row, other_row)
+            result["relation"] = relation
+            if relation != "different":
+                # agent-supervisor#292 item 3: named only on a refusing
+                # answer (same/unknown) -- the actionable detail a caller
+                # needs to explain WHY it refused, e.g. dispatch.sh's
+                # author-exclusion skip message. The admitting path
+                # (`different`) never needed an explanation and does not
+                # pay for one.
+                result["lane_population"] = lane_population(args.lane, lane_row)
+                result["other_population"] = lane_population(args.other, other_row)
+        _print(result)
         return 0
     ledger = Ledger(args.state_dir)
     # tmux stays the default transport for every existing lane (codex,

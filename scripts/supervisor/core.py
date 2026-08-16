@@ -147,6 +147,78 @@ def lane_relation(one, other):
     return "different"
 
 
+# agent-supervisor#292. `lane_relation` above is ENTIRELY a string-shape
+# check: `<session>:<index>`, minted only for a tmux window. A claude-print
+# or pi-rpc lane has no window to index -- `dispatch-claude-print.sh` and
+# `dispatch-pi-rpc.sh` both set `LANE="$LABEL"`, the task id itself -- so
+# paired against one of those, `lane_relation` can never answer `same` or
+# `different`: it always says `unknown`, and every caller of it (author
+# exclusion in dispatch.sh, verdict independence in merge-pr.sh/digest.sh)
+# treats `unknown` as "refuse". Measured 2026-08-16: three fresh review
+# candidates for PR #288, authored by a claude-print lane, all refused --
+# not because any of them WAS the author, but because none of them could be
+# PROVEN not to be.
+#
+# This is the widening: identity for a pair the shape check could not place
+# comes from the ledger's own registry instead, keyed on `lanes.pane_id` --
+# written once, by EVERY transport, at `register_lane` time. A tmux lane's
+# pane_id is tmux's own pane id (`%12`), stable across a session RENAME
+# (`lane_relation`'s own motivating case, #108) without needing string
+# surgery on the lane id at all. A claude-print lane's pane_id is
+# `claude-print:<lane>` (`dispatch-claude-print.sh` step 4), unique to the
+# one `claude -p` process it names. Two rows sharing a pane_id are positively
+# the SAME lane; two known rows with different pane_id are positively
+# DIFFERENT, whichever population either is in.
+#
+# Pure and DB-free itself -- the fetch (`Ledger.get_lane`) is the caller's --
+# so this is unit-testable without a ledger, the same posture `lane_relation`
+# above takes. Still fails CLOSED: either row missing (lane never registered,
+# or the lookup itself failed) or either `pane_id` empty answers `unknown`,
+# never a guess. This WIDENS what is establishable; it does not loosen what
+# counts as established -- a caller that could not tell two lanes apart
+# before this still cannot, if the ledger has nothing to say either.
+def lane_relation_from_rows(one_row, other_row):
+    """same/different/unknown, comparing two ALREADY-FETCHED `lanes` rows
+    (dicts, or `None` for "not in the ledger") by `pane_id`."""
+    if one_row is None or other_row is None:
+        return "unknown"
+    pane_one = (one_row.get("pane_id") or "").strip()
+    pane_other = (other_row.get("pane_id") or "").strip()
+    if not pane_one or not pane_other:
+        return "unknown"
+    return "same" if pane_one == pane_other else "different"
+
+
+# agent-supervisor#292 item 3: when a candidate is refused, say WHICH
+# population each side is in, so the message is actionable. The pre-existing
+# text ("a session rename changes a lane's name, not which window it is")
+# is right for a same-population rename but actively misleading against a
+# claude-print author -- there was never a window to rename in the first
+# place.
+#
+# Prefers the ledger's own `transport` column when a row is known (an
+# authoritative fact this system wrote, never a guess): `send-keys`/`acp`
+# both drive a live tmux pane, so both read as `tmux`; `claude-print` and
+# `pi-rpc` each name themselves, since both are the population with no pane
+# at all (`dispatch-pi-rpc.sh`'s own header: "there is no tmux pane... no
+# window to rename"). Falls back to the id's own shape only when no row is
+# available -- `LANE_ID_RE` for `tmux`, `off-pane` otherwise -- which is
+# still correct because a tmux lane id can ONLY be minted in that shape.
+def lane_population(lane_id, row=None):
+    """Best-effort population label for one lane id -- for an actionable
+    refusal message ONLY, never for identity (that stays `lane_relation` /
+    `lane_relation_from_rows`)."""
+    if row:
+        transport = row.get("transport") or ""
+        if transport in ("send-keys", "acp"):
+            return "tmux"
+        if transport:
+            return transport
+    if isinstance(lane_id, str) and LANE_ID_RE.match(lane_id.strip()):
+        return "tmux"
+    return "off-pane"
+
+
 def pid_is_alive(pid):
     """True unless `pid` is provably gone on THIS host.
 

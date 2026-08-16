@@ -543,10 +543,26 @@ LEDGER_CLI="$HERE/cli.py"
 # broken, JSON in a shape this cannot read -- prints `unknown`, and every
 # caller treats `unknown` as "do not admit". Failing to run the check must
 # never read as permission.
+#
+# agent-supervisor#292: `cli.py lane-relation` now ALSO widens a shape-check
+# `unknown` through the ledger's registry (a claude-print/pi-rpc lane has no
+# `<session>:<index>` to compare, so the shape check alone can never place it
+# positive of anything -- see `core.lane_relation_from_rows`'s own comment),
+# and on any answer that is still not `different` it names which POPULATION
+# each side is in (`lane_population`/`other_population` in the JSON) so a
+# refusal can say WHY, not just THAT. Both are stashed here as a side effect
+# -- `LANE_REL_POPULATION_CANDIDATE`/`LANE_REL_POPULATION_OTHER` -- so the
+# skip message below does not need a second round-trip to explain itself.
+# Empty when the relation is `different` (never needed there) or the JSON
+# carried no such field (an older cli.py; still safe, just less specific).
+LANE_REL_POPULATION_CANDIDATE=""
+LANE_REL_POPULATION_OTHER=""
 lane_relation() {  # lane_relation <lane> <other> -> same|different|unknown
   local json rel
   json=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-relation --lane "$1" --other "$2" 2>/dev/null) || json=""
   rel=$(sed -n 's/.*"relation":"\([a-z]*\)".*/\1/p' <<<"$json" | head -1)
+  LANE_REL_POPULATION_CANDIDATE=$(sed -n 's/.*"lane_population":"\([a-zA-Z-]*\)".*/\1/p' <<<"$json" | head -1)
+  LANE_REL_POPULATION_OTHER=$(sed -n 's/.*"other_population":"\([a-zA-Z-]*\)".*/\1/p' <<<"$json" | head -1)
   case "$rel" in
     same|different) printf '%s\n' "$rel" ;;
     *) printf 'unknown\n' ;;
@@ -1146,6 +1162,14 @@ while IFS=$'\t' read -r candidate candidate_target; do
     if [ -n "$MATCHED_CONTRIBUTOR_LANE" ]; then
       if [ "$candidate" = "$MATCHED_CONTRIBUTOR_LANE" ]; then
         echo "dispatch: skipping $candidate -- it contributed task $MATCHED_CONTRIBUTOR_TASK to PR #$REVIEWS_PR under review; a contributor does not review their own work" >&2
+      elif [ -n "$LANE_REL_POPULATION_CANDIDATE" ] && [ -n "$LANE_REL_POPULATION_OTHER" ] && [ "$LANE_REL_POPULATION_CANDIDATE" != "$LANE_REL_POPULATION_OTHER" ]; then
+        # agent-supervisor#292: the populations differ (one side has a tmux
+        # window, the other does not), so the pre-#292 "a session rename
+        # changes a lane's name" text would be actively wrong here -- there
+        # was never a window on both sides to rename. The ledger's own
+        # registry (pane_id) could not tell the two apart either, so this is
+        # STILL a refusal, just an honest one about why.
+        echo "dispatch: skipping $candidate ($LANE_REL_POPULATION_CANDIDATE) -- it cannot be told apart from contributor lane $MATCHED_CONTRIBUTOR_LANE ($LANE_REL_POPULATION_OTHER, task $MATCHED_CONTRIBUTOR_TASK, contributed to PR #$REVIEWS_PR under review); the ledger has no pane_id record proving these are different lanes" >&2
       else
         echo "dispatch: skipping $candidate -- it cannot be told apart from contributor lane $MATCHED_CONTRIBUTOR_LANE (task $MATCHED_CONTRIBUTOR_TASK, contributed to PR #$REVIEWS_PR under review); a session rename changes a lane's name, not which window it is" >&2
       fi
