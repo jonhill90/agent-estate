@@ -2091,34 +2091,40 @@ FIX
 
   # MUTATION: run the EXACT SAME scenario through the pre-#190 dispatch.sh --
   # the widening reverted, not a synthetic patch -- and confirm it goes red.
-  # Read at `merge-base HEAD origin/main`, NOT literal `HEAD`: this test's
-  # own fix is committed on this very branch, so `HEAD` means "after the
-  # widening" the moment that commit lands, and `git show HEAD:...` would
-  # silently fetch the FIXED script instead of the one it means to revert
-  # (measured directly: this exact test read its own fix back once the
-  # commit landed). The merge-base is the shared ancestor with main -- the
-  # pre-widening script -- regardless of how many commits sit on top here.
   #
-  # `origin/main` is not guaranteed to already resolve. A CI checkout of a
-  # single branch/PR ref leaves no local `origin/main` at all (agent-supervisor
-  # #201: this failed exit-128 in CI, "Not a valid object name origin/main",
-  # while passing on every dev machine that happened to have a full clone --
-  # the second sighting of the shape PR #194's reviewer had already set aside
-  # once, wrongly, as a local-clone artifact). Resolve it ourselves: use an
-  # already-resolvable ref if there is one, else fetch main with an explicit
-  # refspec (a bare `fetch origin main` on a single-branch clone updates
-  # FETCH_HEAD only, never `refs/remotes/origin/main`, and would look like a
-  # no-op success while changing nothing -- measured directly here). If the
-  # ref genuinely cannot be produced, this SKIPS the mutation check with a
-  # stated reason instead of crashing the whole suite or silently passing it.
+  # This USED to read `merge-base HEAD origin/main`, on the theory that the
+  # #190 fix lived only on this branch and main was still the shared
+  # pre-widening ancestor. That stopped being true the moment #190 merged to
+  # main (agent-supervisor#213/#218, landed as e30697e): once any branch is
+  # cut from current main, `merge-base HEAD origin/main` IS the fixed script,
+  # not a pre-fix one, and this section silently fetched the fix it means to
+  # revert -- want_missing/want_contains below then fail for real, not as
+  # "mutation confirmed" (measured directly: this is what turned CI red).
+  # merge-base can never again recover a pre-#190 state once the fix is
+  # upstream; there is no live ref to compute it from.
+  #
+  # Pin to the actual historical commit instead: d0621eb is #190's own
+  # parent -- the last commit before ANY #190 fix landed, on either pass
+  # (610b97f, then the fix-pass e30697e). This is a fixed point in this
+  # repo's permanent history, not a moving comparison against whatever
+  # currently sits on main, so it survives every future merge to main the
+  # same way the merge-base approach could not.
+  #
+  # A CI checkout of a single branch/PR ref may be shallow and not carry
+  # this commit yet (agent-supervisor#201 hit the analogous shallow-fetch
+  # gap for origin/main). Try to resolve it locally first; unshallow once if
+  # that fails; SKIP with a stated reason rather than crash or silently pass
+  # if it still cannot be produced.
+  PRE_190_SHA="d0621eb68fa22f17407cabe5374913f70a56f556"
   MUTATED_190="$D/dispatch-pre190.sh"
   patch_rc=0
-  python3 - "$HERE/../../scripts/supervisor/dispatch.sh" "$MUTATED_190" <<'PY' || patch_rc=$?
+  python3 - "$HERE/../../scripts/supervisor/dispatch.sh" "$MUTATED_190" "$PRE_190_SHA" <<'PY' || patch_rc=$?
 import os
 import subprocess
 import sys
 
 dst = sys.argv[2]
+base_ref = sys.argv[3]
 repo_dir = os.path.dirname(os.path.abspath(sys.argv[1]))
 
 
@@ -2130,41 +2136,29 @@ def resolves(ref):
     return git("rev-parse", "--verify", "-q", ref).returncode == 0
 
 
-target = next((ref for ref in ("origin/main", "main") if resolves(ref)), None)
-
-if target is None:
-    fetch = git("fetch", "-q", "origin", "main:refs/remotes/origin/main")
-    if fetch.returncode == 0 and resolves("origin/main"):
-        target = "origin/main"
-    else:
-        print(
-            "SKIP: no origin/main ref, and fetching one failed -- "
-            f"{fetch.stderr.strip() or 'no route to the remote'}",
-            file=sys.stderr,
-        )
-        sys.exit(3)
-
-mb = git("merge-base", "HEAD", target)
-if mb.returncode != 0 and git("rev-parse", "--is-shallow-repository").stdout.strip() == "true":
-    # A shallow checkout's own history may not reach far enough back to share
-    # an ancestor with main even once the ref exists -- unshallow once, then
-    # give the merge-base one more try before giving up.
+if not resolves(base_ref) and git("rev-parse", "--is-shallow-repository").stdout.strip() == "true":
+    # A shallow checkout may not carry this commit at all -- unshallow once,
+    # then give resolution one more try before giving up.
     git("fetch", "-q", "--unshallow", "origin")
-    mb = git("merge-base", "HEAD", target)
 
-if mb.returncode != 0:
+if not resolves(base_ref):
     print(
-        f"SKIP: git merge-base HEAD {target} failed even after fetch/unshallow: "
-        f"{mb.stderr.strip()}",
+        f"SKIP: pre-#190 baseline {base_ref} does not resolve even after "
+        "unshallow -- history for this commit is unavailable here",
         file=sys.stderr,
     )
     sys.exit(3)
 
-base_ref = mb.stdout.strip()
-text = subprocess.run(
-    ["git", "-C", repo_dir, "show", f"{base_ref}:scripts/supervisor/dispatch.sh"],
-    check=True, capture_output=True, text=True,
-).stdout
+show = git("show", f"{base_ref}:scripts/supervisor/dispatch.sh")
+if show.returncode != 0:
+    print(
+        f"SKIP: git show {base_ref}:scripts/supervisor/dispatch.sh failed: "
+        f"{show.stderr.strip()}",
+        file=sys.stderr,
+    )
+    sys.exit(3)
+
+text = show.stdout
 here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
 assert text.count(here) == 1, "HERE assignment not found or not unique -- pre-#190 script shape unexpected"
 text = text.replace(here, 'HERE=%r' % repo_dir, 1)
