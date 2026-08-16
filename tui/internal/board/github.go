@@ -113,10 +113,21 @@ type restIssue struct {
 // the previous `gh issue list --limit 1000` cap is dropped rather than
 // reproduced, since --paginate has no equivalent silent truncation to
 // guard against.
+//
+// -X GET is load-bearing, not decorative -- found driving the real binary
+// against a real repo (agent-tui#49's own acceptance table, "f2 shows a
+// populated board"), not by reading this file: `gh api` silently switches
+// its default method from GET to POST the moment ANY -f/--field flag is
+// present, on the theory that fields imply a body to submit. Without -X
+// GET here, this call POSTs to GitHub's "create an issue" endpoint instead
+// of reading the list, and fails with a 422 ("title" wasn't supplied) --
+// never a silent wrong-successful read, at least, but a hard failure that
+// made every board fetch error regardless of how well the ledger/repo
+// discovery worked.
 func FetchIssues(run GitHubRunner, repo Repo) ([]Issue, error) {
 	out, err := run([]string{
 		"api", "repos/" + repo.GitHubID() + "/issues",
-		"--paginate", "-f", "state=all", "-f", "per_page=100",
+		"-X", "GET", "--paginate", "-f", "state=all", "-f", "per_page=100",
 	})
 	if err != nil {
 		return nil, fmt.Errorf("board: gh api repos/%s/issues: %w", repo.GitHubID(), err)

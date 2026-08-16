@@ -2,6 +2,7 @@ package cost
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -80,7 +81,7 @@ func formatFigure(f Figure, format string) string {
 // issue #4's #2 rather than folded into a token total.
 func RenderBars(snap Snapshot, width int) string {
 	if !snap.Known {
-		return "cost: unknown (ccusage unreadable)\n"
+		return "cost: unknown (ccusage unreadable)\n" + renderQuotaOnly(snap.Quotas)
 	}
 	if len(snap.Harnesses) == 0 {
 		return "cost: no usage recorded today\n"
@@ -92,6 +93,7 @@ func RenderBars(snap Snapshot, width int) string {
 		fmt.Fprintf(&b, "  cost:   $%s today\n", formatFigure(h.Cost, "%.2f"))
 		fmt.Fprintf(&b, "  tokens: %s (cache-read: %s)\n", formatCount(h.Tokens), formatCount(h.CacheRead))
 		fmt.Fprintf(&b, "  limit:  %s\n", renderLimitBar(h.Limit))
+		fmt.Fprintf(&b, "  quota:  %s\n", renderQuota(h.Quota))
 	}
 	return b.String()
 }
@@ -102,7 +104,7 @@ func RenderBars(snap Snapshot, width int) string {
 // a glyph.
 func RenderNumeric(snap Snapshot, width int) string {
 	if !snap.Known {
-		return "cost: unknown (ccusage unreadable)\n"
+		return "cost: unknown (ccusage unreadable)\n" + renderQuotaOnly(snap.Quotas)
 	}
 	if len(snap.Harnesses) == 0 {
 		return "cost: no usage recorded today\n"
@@ -118,12 +120,13 @@ func RenderNumeric(snap Snapshot, width int) string {
 			}
 			limit = fmt.Sprintf("limit %.1f%% of %s%s", h.Limit.Percent, h.Limit.Label, warn)
 		}
-		fmt.Fprintf(&b, "%-8s $%-8s %-12s cache-read %-10s %s\n",
+		fmt.Fprintf(&b, "%-8s $%-8s %-12s cache-read %-10s %-28s quota %s\n",
 			h.Name,
 			formatFigure(h.Cost, "%.2f"),
 			formatCount(h.Tokens)+" tok",
 			formatCount(h.CacheRead),
 			limit,
+			renderQuota(h.Quota),
 		)
 	}
 	return b.String()
@@ -150,6 +153,68 @@ func renderLimitBar(l Limit) string {
 		marker = " WARN"
 	}
 	return fmt.Sprintf("[%s] %.1f%% of %s%s", bar, l.Percent, l.Label, marker)
+}
+
+// renderQuota renders codexbar's session/weekly usage window for a harness,
+// read via quota.sh (agent-tui#49 item 3) -- "unknown" whenever quota.sh
+// could not be read, never a guessed percentage, same discipline
+// renderLimitBar already holds ccusage's own block-limit figure to.
+func renderQuota(q Quota) string {
+	if !q.Known {
+		return "unknown (no quota source)"
+	}
+	session := formatFigure(q.SessionPercent, "%.0f%% used")
+	weekly := formatFigure(q.WeeklyPercent, "%.0f%% used")
+	out := fmt.Sprintf("session %s, weekly %s", session, weekly)
+	if q.Note != "" {
+		out += " -- " + q.Note
+	}
+	return out
+}
+
+// renderQuotaOnly renders every provider's quota line when ccusage itself
+// is unknown (Snapshot.Known false) -- the fix for the reopened half of
+// agent-tui#49 item 3: a machine with no working ccusage but a working
+// quota.sh must still show real session/weekly percentages, not just
+// "cost: unknown" with nothing else. Empty when quotas is empty/nil (no
+// quota.sh configured either), so a caller with neither source still
+// renders exactly the old one-line "cost: unknown".
+func renderQuotaOnly(quotas map[string]Quota) string {
+	if len(quotas) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(quotas))
+	for name := range quotas {
+		names = append(names, name)
+	}
+	sortProviderNames(names)
+
+	var b strings.Builder
+	for _, name := range names {
+		fmt.Fprintf(&b, "%-8s quota: %s\n", name, renderQuota(quotas[name]))
+	}
+	return b.String()
+}
+
+// sortProviderNames orders provider names the same way sortHarnesses
+// already orders Harnesses -- claude/codex/pi first (issue #4's own
+// reasoning), everything else alphabetically after -- so this render path
+// and the per-Harness one never disagree about ordering.
+func sortProviderNames(names []string) {
+	sort.SliceStable(names, func(i, j int) bool {
+		oi, iok := harnessOrder[names[i]]
+		oj, jok := harnessOrder[names[j]]
+		switch {
+		case iok && jok:
+			return oi < oj
+		case iok:
+			return true
+		case jok:
+			return false
+		default:
+			return names[i] < names[j]
+		}
+	})
 }
 
 // formatCount renders a token-count Figure without decimals -- tokens are

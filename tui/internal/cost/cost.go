@@ -48,24 +48,46 @@ type Harness struct {
 	Tokens    Figure // totalTokens -- includes cache read/creation, NOT just input+output
 	CacheRead Figure // cacheReadTokens, broken out per issue #4's #2, never folded into Tokens
 	Limit     Limit
+	Quota     Quota // codexbar's session/weekly usage window via quota.sh (agent-tui#49 item 3); zero value is Known false
 }
 
 // Snapshot is one fetch's worth of cost data across every harness ccusage
-// detected today. Known is false only when the fetch itself failed --
-// ccusage unreadable, non-zero exit, unparsable output (see
+// detected today. Known is false only when the ccusage fetch itself failed
+// -- ccusage unreadable, non-zero exit, unparsable output (see
 // cmd/agent-tui/cost.go). An empty Harnesses with Known true means ccusage
 // ran and genuinely found no usage yet today: a real answer, not
 // blindness, and the panel must be able to tell the two apart.
+//
+// Quotas is deliberately a SEPARATE source from Known/Harnesses -- quota.sh
+// (agent-tui#49 item 3) and ccusage are two independent subprocess calls,
+// and one failing must never blank out the other. A machine with no
+// working ccusage but a working quota.sh (the review that reopened #49)
+// must still show real session/weekly percentages; Quotas carries that
+// even when Known is false and Harnesses is empty. When Known is true,
+// this same data has ALSO already been merged onto each Harness.Quota by
+// name (cmd/keelson/cost.go) -- Quotas here exists so the quota-only
+// render path (RenderBars/RenderNumeric's !Known branch) has something to
+// read without needing a Harness to hang it off of.
 type Snapshot struct {
 	Known     bool
 	Harnesses []Harness
+	Quotas    map[string]Quota
 }
 
 // Unknown is the Snapshot cmd/agent-tui returns when the ccusage fetch
-// itself failed. Every figure the panel renders from this must read
-// "unknown", never 0 -- this is the blindness-test acceptance case
-// (agent-tui#4 item 2).
+// itself failed and no quota.sh data is available either. Every figure the
+// panel renders from this must read "unknown", never 0 -- this is the
+// blindness-test acceptance case (agent-tui#4 item 2).
 func Unknown() Snapshot { return Snapshot{Known: false} }
+
+// UnknownWithQuota is Unknown, but for when ccusage failed and quota.sh
+// still produced real data (agent-tui#49's reopened item 3) -- the cost
+// figures read "unknown" exactly as Unknown() renders them, but the quota
+// line(s) still show whatever quotas holds, keyed by provider name the
+// same way Harness.Name/ParseQuotaSummary already agree on.
+func UnknownWithQuota(quotas map[string]Quota) Snapshot {
+	return Snapshot{Known: false, Quotas: quotas}
+}
 
 // harnessOrder ranks the harnesses issue #4 named explicitly first --
 // Claude carries ~94% of spend, codex is the one that went dark, pi is the
@@ -105,5 +127,17 @@ func Compose(harnesses []Harness, claudeLimit Limit) Snapshot {
 		}
 	}
 	sortHarnesses(out)
-	return Snapshot{Known: true, Harnesses: out}
+
+	// Quotas mirrors whatever's already on each Harness.Quota (the caller,
+	// cmd/keelson/cost.go, merges quota.sh's data onto Harnesses by name
+	// before calling Compose) -- kept in sync here too so a reader of
+	// Snapshot.Quotas sees the same answer whether Known is true or false
+	// (UnknownWithQuota's doc comment).
+	quotas := map[string]Quota{}
+	for _, h := range out {
+		if h.Quota.Known {
+			quotas[h.Name] = h.Quota
+		}
+	}
+	return Snapshot{Known: true, Harnesses: out, Quotas: quotas}
 }

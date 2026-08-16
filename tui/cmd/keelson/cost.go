@@ -25,20 +25,59 @@ import (
 // doc comment on Limit). Only when a caller supplies a real number -- from
 // their own plan's known session-block ceiling -- does Claude's limit
 // pressure become Known; until then it renders "unknown", not 0%.
-func buildCostFetch(ccusageBin string, ccusageArgs []string, claudeBlockLimit int64, now func() time.Time) cost.Fetcher {
-	run := cost.ExecRunner(ccusageBin, ccusageArgs...)
+//
+// quotaRun is nil when no quota.sh could be resolved (main.go's
+// resolveQuotaRunner) -- FetchQuotaSummary is simply never called and
+// quotas stays nil, rendering "unknown" exactly as it did before this
+// source existed (agent-tui#49 item 3). When non-nil, quota.sh's own
+// contract decides Known per FetchQuotaSummary/ParseQuotaSummary; this
+// function never guesses a percentage quota.sh did not report.
+//
+// quota.sh and ccusage are fetched as two INDEPENDENT sources, quota.sh
+// first and unconditionally -- a real production machine reviewed for
+// agent-tui#49 had a working quota.sh but no working ccusage ("cost:
+// unknown (ccusage unreadable)" with no quota line at all, because the old
+// code below returned before quota.sh was ever called). Every return path
+// below now carries quotas along regardless of whether ccusage's own daily
+// fetch succeeded, and none of them return a non-nil error for a plain
+// ccusage failure -- cost.Model.Update folds ANY non-nil error into
+// cost.Unknown() (its own blindness-test discipline, model.go), which
+// would silently drop quotas the moment ccusage failed. Known=false on
+// the returned Snapshot already carries "ccusage is unreadable" for the
+// view to render; a Go error here would only lose data, not add
+// information.
+func buildCostFetch(ccusageBin string, ccusageArgs []string, claudeBlockLimit int64, quotaRun cost.QuotaRunner, now func() time.Time) cost.Fetcher {
+	return buildCostFetchFromRunner(cost.ExecRunner(ccusageBin, ccusageArgs...), claudeBlockLimit, quotaRun, now)
+}
 
+// buildCostFetchFromRunner is buildCostFetch's actual logic, split out so
+// tests can inject a fake cost.Runner directly (ccusage_test.go-style
+// fixtures) instead of shelling a real binary out -- cost_test.go's
+// TestBuildCostFetch_QuotaSurvivesCcusageFailure exercises this exact
+// function, not a duplicate of it.
+func buildCostFetchFromRunner(run cost.Runner, claudeBlockLimit int64, quotaRun cost.QuotaRunner, now func() time.Time) cost.Fetcher {
 	return func() (cost.Snapshot, error) {
+		var quotas map[string]cost.Quota
+		if quotaRun != nil {
+			quotas = cost.FetchQuotaSummary(quotaRun)
+		}
+
 		today := now().Format("2006-01-02")
 		dateArgs := []string{"--since", now().Format("20060102"), "--until", now().Format("20060102")}
 
 		dailyOut, err := run(append([]string{"daily", "--json", "--by-agent"}, dateArgs...))
 		if err != nil {
-			return cost.Unknown(), err
+			return cost.UnknownWithQuota(quotas), nil
 		}
 		harnesses, err := cost.ParseDaily(dailyOut, today)
 		if err != nil {
-			return cost.Unknown(), err
+			return cost.UnknownWithQuota(quotas), nil
+		}
+
+		for i := range harnesses {
+			if q, ok := quotas[harnesses[i].Name]; ok {
+				harnesses[i].Quota = q
+			}
 		}
 
 		claudeLimit := cost.Limit{} // unknown by default

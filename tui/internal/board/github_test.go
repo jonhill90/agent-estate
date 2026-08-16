@@ -21,7 +21,7 @@ func TestFetchIssuesRequestsAllStates(t *testing.T) {
 	if len(issues) != 1 || issues[0].Number != 6 || issues[0].State != "OPEN" {
 		t.Fatalf("issues = %+v", issues)
 	}
-	want := []string{"api", "repos/jonhill90/agent-tui/issues", "--paginate", "-f", "state=all", "-f", "per_page=100"}
+	want := []string{"api", "repos/jonhill90/agent-tui/issues", "-X", "GET", "--paginate", "-f", "state=all", "-f", "per_page=100"}
 	if len(gotArgs) != len(want) {
 		t.Fatalf("args = %v, want %v", gotArgs, want)
 	}

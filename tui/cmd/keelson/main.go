@@ -19,6 +19,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -57,15 +58,15 @@ func main() {
 		showBoard = flag.Bool("board", false, "start on the task board pane (agent-tui#6) instead of home -- the "+
 			"persistent rail stays on screen either way (agent-tui#38); [f2] reaches the board pane from any "+
 			"start. Read-only: derives its columns fresh on every fetch, never stores one.")
-		ledger = flag.String("ledger", envOr("AGENT_TUI_LEDGER", defaultLedgerPath()),
+		ledger = flag.String("ledger", envOr("AGENT_TUI_LEDGER", ""),
 			"path to a ledger.sqlite3 to read for the board and the rail's per-lane task/age/needs-human "+
 				"content (agent-tui#26) -- must point at a COPY, never the live supervisor's own ledger "+
-				"(agent-tui#6's rule). There is no default: unlike -supervisor-repo, this never falls back to "+
-				"the live state dir, because the ledger read (`sqlite3 PRAGMA query_only=1`, not `-readonly` "+
-				"-- see internal/board/ledger.go) would otherwise be free to open the live ledger and write "+
-				"`-wal`/`-shm` sidecars next to it. -board still refuses to start with this unset; the rail "+
-				"degrades gracefully instead, rendering \"(no task)\" for every lane rather than refusing to "+
-				"run. Set $AGENT_TUI_LEDGER or pass -ledger explicitly, pointed at a copy.")
+				"(agent-tui#6's rule). Left unset, keelson now auto-discovers the live ledger at "+
+				"~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3 and copies it to a temp path itself, "+
+				"re-copying on every board fetch (including [r]) -- see resolveLedgerSource/ledgerCopier "+
+				"(agent-tui#49 item 2). Set this explicitly only to point at a different ledger or a "+
+				"hand-made copy; the ledger read itself (`sqlite3 PRAGMA query_only=1`, not `-readonly` -- see "+
+				"internal/board/ledger.go) never opens whatever this resolves to more than once per fetch.")
 		ghBin        = flag.String("gh-bin", envOr("AGENT_GH_BIN", "gh"), "gh binary for the board's issue/PR reads")
 		sqliteBin    = flag.String("sqlite-bin", envOr("AGENT_SQLITE_BIN", "sqlite3"), "sqlite3 binary for the board's and rail's ledger reads")
 		repositories = flag.String("repositories", os.Getenv("SUPERVISOR_REPOSITORIES"),
@@ -85,6 +86,14 @@ func main() {
 			"token ceiling for Claude's active 5h session block, passed to `ccusage blocks --token-limit`. ccusage "+
 				"has no default of its own (it cannot know your plan's real cap) -- leave unset and the panel shows "+
 				"Claude's limit as \"unknown\", never a fabricated percentage (agent-tui#4's honesty constraint).")
+		quotaBin = flag.String("quota-bin", os.Getenv("AGENT_TUI_QUOTA_BIN"),
+			"path to agent-supervisor's scripts/supervisor/quota.sh, the one seam allowed to call `codexbar` "+
+				"(agent-tui#49 item 3 -- real session/weekly usage percentages and reset info for the cost panel). "+
+				"Defaults to <supervisor-repo>/scripts/supervisor/quota.sh once -supervisor-repo is resolved "+
+				"(explicitly, by discovery, or by fallback -- see discoverSupervisorRepo); set this to override, "+
+				"or to a path that does not exist to exercise the \"quota.sh may be untracked\" UNKNOWN path "+
+				"(as#227). Never fabricates a percentage: quota.sh missing or any exit code other than 0 renders "+
+				"\"unknown\", the same discipline -claude-block-limit's honesty constraint already holds ccusage to.")
 		showGallery = flag.Bool("gallery", false, "start on the glyph gallery pane (agent-tui#11) instead of home -- "+
 			"every lane state against every candidate glyph, including glyphs not yet in any set, each flagged "+
 			"with whether it needs a Nerd Font. [f4] reaches it from any start (agent-tui#38).")
@@ -112,37 +121,69 @@ func main() {
 
 	// agent-tui#38: -board/-cost/-gallery are no longer separate programs --
 	// they only choose which pane the shell OPENS on (shell.Model.WithStart).
-	// -board keeps its pre-#38 hard refusal (it is the one flag that changes
-	// what data gets read, not just what is shown first): starting there
-	// with no ledger is still an error, never a silent fallback to the live
-	// ledger. Reaching the board pane by [f2] navigation with no ledger is
-	// different -- see boardOK below -- because no data read is attempted at
-	// all in that case.
-	if *showBoard && *ledger == "" {
-		fmt.Fprintln(os.Stderr, "keelson: -board needs -ledger (or $AGENT_TUI_LEDGER) pointed at a COPY of "+
-			"the ledger; refusing to default to the live supervisor ledger (agent-tui#6's rule -- see -ledger's "+
-			"flag help)")
+	// agent-tui#49 item 2 dropped -board's old hard "no -ledger, refuse to
+	// start" refusal: resolveLedgerSource now auto-discovers and copies the
+	// live ledger (defaultLedgerLivePath/ledgerCopier, board.go), so the
+	// only way -board still refuses to start is boardOK == false below --
+	// discovery genuinely found nothing, not merely "you didn't pass -ledger".
+	ledgerSrc, boardOK, boardUnavailable := resolveLedgerSource(*ledger, *sqliteBin)
+	if *showBoard && !boardOK {
+		fmt.Fprintln(os.Stderr, "keelson: -board unavailable --", boardUnavailable)
 		os.Exit(1)
+	}
+
+	// supervisorRepoResolved implements agent-tui#49 item 1: a bare
+	// `keelson` must open, never exit 1, just because -supervisor-repo was
+	// not typed. -mcp-cmd bypasses this entirely (it names its own command
+	// line, no repo path needed); an explicit -supervisor-repo is trusted
+	// as given, unchanged. Only when neither was given does discovery run.
+	supervisorRepoResolved := *supervisorRepo
+	if supervisorRepoResolved == "" && *mcpCmd == "" {
+		if cwd, err := os.Getwd(); err == nil {
+			supervisorRepoResolved = discoverSupervisorRepo(cwd)
+		}
+	}
+
+	// quota.sh lives inside the supervisor checkout -- resolved from
+	// whichever -supervisor-repo this program ends up using (explicit,
+	// discovered, or fallback), same as mcp_server.py already is. -quota-bin
+	// overrides this outright; an -mcp-cmd-only launch (no repo path at
+	// all) leaves this empty, which buildCostFetch treats as "no quota
+	// source" -- unknown, never fabricated (agent-tui#49 item 3).
+	resolvedQuotaBin := *quotaBin
+	if resolvedQuotaBin == "" && supervisorRepoResolved != "" {
+		resolvedQuotaBin = filepath.Join(supervisorRepoResolved, "scripts", "supervisor", "quota.sh")
+	}
+	var quotaRun cost.QuotaRunner
+	if resolvedQuotaBin != "" {
+		quotaRun = cost.ExecQuotaRunner(resolvedQuotaBin)
 	}
 
 	// Built once, used by the cost pane, the rail's default cost line, and
 	// (via buildBoardFetch) nothing else -- one Fetcher, three consumers,
 	// never a second cost implementation.
-	costFetch := buildCostFetch(*ccusageBin, splitArgs(*ccusageArgs), *claudeBlockLimit, time.Now)
+	costFetch := buildCostFetch(*ccusageBin, splitArgs(*ccusageArgs), *claudeBlockLimit, quotaRun, time.Now)
 
 	// The shell's rail is ALWAYS on screen (agent-tui#38 acceptance item 2),
-	// so a supervisor connection is now needed on every launch, including a
-	// bare -cost or -gallery start -- those panes themselves still read
-	// nothing but ccusage/compiled-in glyph data, but the rail beside them
-	// needs "sessions"/"lanes" regardless of which pane is active.
-	client, cleanup, err := connect(*supervisorRepo, *python, *mcpCmd)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "keelson:", err)
-		os.Exit(1)
+	// so every launch tries a supervisor connection, including a bare
+	// -cost or -gallery start -- those panes themselves still read nothing
+	// but ccusage/compiled-in glyph data, but the rail beside them wants
+	// "sessions"/"lanes" regardless of which pane is active. Unlike before
+	// agent-tui#49, a failed connect() no longer exits: client stays nil,
+	// connectErr carries why, and the rail renders that as a visible
+	// notice (its own fetchErr/sessionsErr rendering, unchanged) instead of
+	// the whole program refusing to open -- exactly the "degrade, don't
+	// fail closed" fix item 1 asks for.
+	client, cleanup, connectErr := connect(supervisorRepoResolved, *python, *mcpCmd)
+	if connectErr != nil {
+		cleanup = func() {}
 	}
 	defer cleanup()
 
 	lanesFetch := func() ([]lane.Lane, error) {
+		if client == nil {
+			return nil, fmt.Errorf("no supervisor connection: %w", connectErr)
+		}
 		args := map[string]any{}
 		if *session != "" {
 			args["session"] = *session
@@ -161,6 +202,9 @@ func main() {
 	// still never enumerates or shells out to tmux itself (agent-tui#14):
 	// it calls one more MCP tool, nothing more.
 	sessionsFetch := func() ([]lane.Session, error) {
+		if client == nil {
+			return nil, fmt.Errorf("no supervisor connection: %w", connectErr)
+		}
 		text, err := client.CallTool("sessions", map[string]any{})
 		if err != nil {
 			return nil, err
@@ -174,19 +218,22 @@ func main() {
 	// (attach/detach/add/remove) in on top of #13's multi-session rail --
 	// session.New(client) shares the exact same MCP connection every read
 	// above already uses, never a second client and never tmux itself.
+	// Skipped entirely when client == nil (agent-tui#49 item 1's degraded
+	// launch): rail.Model's ops field is nil-safe by design (see its own
+	// doc comment) and a nil client would panic the moment any write op ran.
 	railModel := rail.NewMultiSession(sessionsFetch, lanesFetch, costFetch, *directorSession).
-		WithOps(sessionops.New(client)).
-		WithTasks(buildTaskFetch(*ledger, *sqliteBin)).
+		WithTasks(buildTaskFetch(ledgerSrc, *sqliteBin)).
 		WithTheme(activeTheme, themeNotice)
+	if client != nil {
+		railModel = railModel.WithOps(sessionops.New(client))
+	}
 
-	// boardOK mirrors -board's own refusal rule but for NAVIGATION rather
-	// than launch: reaching the board pane with [f2]/-board when no ledger
-	// was configured must not run board's fetch loop against an empty path
-	// (agent-tui#6's rule again), so shell.Model renders its own
-	// "unavailable" pane instead -- see shell.Model.unavailableView.
-	boardOK := *ledger != ""
-	boardUnavailable := "no -ledger (or $AGENT_TUI_LEDGER) configured -- point it at a COPY of the ledger to use the board"
-	boardFetch := buildBoardFetch(*ledger, *ghBin, *sqliteBin, *repositories, lanesFetch)
+	// boardOK/boardUnavailable were already resolved above (resolveLedgerSource)
+	// so -board's own refusal (showBoard && !boardOK) and the shell's
+	// navigation-time guard share exactly one source of truth -- see
+	// shell.Model.unavailableView for how boardUnavailable renders when a
+	// human reaches [f2] with boardOK false.
+	boardFetch := buildBoardFetch(ledgerSrc, *ghBin, *sqliteBin, *repositories, lanesFetch)
 	boardModel := board.NewWithRefreshInterval(boardFetch, *boardRefresh).WithTheme(activeTheme, themeNotice)
 
 	costModel := cost.New(costFetch).WithTheme(activeTheme, themeNotice)
