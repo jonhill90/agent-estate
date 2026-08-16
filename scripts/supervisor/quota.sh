@@ -101,12 +101,31 @@ with_timeout() {
 
 # cache_age FILE -- prints the file's age in seconds on stdout, or nothing
 # (and a non-zero return) if the file does not exist or its mtime cannot be
-# read. Tries BSD `stat` (macOS) then GNU `stat` (Linux CI) since this
-# script runs on both.
+# read. Tries GNU `stat` (Linux CI) first, then BSD `stat` (macOS), since
+# this script runs on both -- and the order matters, not just the presence
+# of both branches: GNU coreutils' `-f` means "filesystem status", a
+# different mode entirely, not BSD's "-f FORMAT". `stat -f %m` under GNU
+# stat does not error on an unrecognised filesystem-mode token -- it exits
+# 0 and prints its default multi-line filesystem report ("  File: ..."),
+# so trying the BSD form first silently "succeeded" on Linux CI with that
+# banner as $mtime, which `$((now - mtime))` then tried to evaluate as an
+# arithmetic expression -- bash reads the bare word `File` in that string
+# as a variable reference and, under `set -u`, crashed with `File: unbound
+# variable` instead of falling through to the GNU form (measured on PR
+# #267's CI run, GitHub Actions ubuntu-latest). Trying `-c` (GNU) first
+# means the only way the BSD branch below ever runs is a real, correctly
+# non-zero failure of `-c` on a stat that does not understand it -- which
+# is what BSD stat actually does. The numeric guard below is a second,
+# independent line of defense against the same class of surprise: any
+# stat output that is not a plain non-negative integer is treated as
+# unreadable rather than handed to `$(( ))`.
 cache_age() {
   local f="$1" mtime now
   [ -f "$f" ] || return 1
-  mtime=$(stat -f %m "$f" 2>/dev/null || stat -c %Y "$f" 2>/dev/null) || return 1
+  mtime=$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null) || return 1
+  case "$mtime" in
+    ''|*[!0-9]*) return 1 ;;
+  esac
   now=$(date +%s)
   echo $((now - mtime))
 }
