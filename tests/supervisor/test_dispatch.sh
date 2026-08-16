@@ -2161,10 +2161,55 @@ if mb.returncode != 0:
     sys.exit(3)
 
 base_ref = mb.stdout.strip()
-text = subprocess.run(
-    ["git", "-C", repo_dir, "show", f"{base_ref}:scripts/supervisor/dispatch.sh"],
+
+# agent-supervisor#234: `base_ref` (the merge-base with origin/main) is only
+# pre-#190 while #190's own fix has not yet reached main. The moment it
+# merges, #190's landing commit itself becomes reachable from origin/main
+# forever after -- so for every branch cut from that point on, the
+# merge-base IS AT OR AFTER the fix, and `git show base_ref:...` silently
+# fetches the ALREADY-FIXED script (measured directly: this is exactly what
+# happened once #190 (e30697e) became this repo's own main tip -- the
+# merge-base computed above resolved to e30697e itself). Walk dispatch.sh's
+# own history backward from base_ref, newest first, until finding a
+# revision that predates the widening -- identified by the absence of a
+# marker unique to #190's diff, not by any commit message or SHA, so this
+# keeps working the same way pre-merge (base_ref itself lacks the marker,
+# so the loop uses it unchanged on its first pass) and post-merge alike.
+marker = "AUTHOR_LANES=()"
+
+
+def content_at(rev):
+    return subprocess.run(
+        ["git", "-C", repo_dir, "show", f"{rev}:scripts/supervisor/dispatch.sh"],
+        check=True, capture_output=True, text=True,
+    ).stdout
+
+
+# NOTE: unlike `<rev>:<path>` above (always root-relative), a `git log --
+# <pathspec>` path is resolved relative to `-C`'s directory -- `repo_dir` IS
+# `scripts/supervisor` already, so the pathspec here is just the filename,
+# not the repo-root-relative `scripts/supervisor/dispatch.sh` used above.
+history = subprocess.run(
+    ["git", "-C", repo_dir, "log", "--format=%H", base_ref, "--", "dispatch.sh"],
     check=True, capture_output=True, text=True,
-).stdout
+).stdout.split()
+
+text = None
+for rev in history:
+    candidate = content_at(rev)
+    if marker not in candidate:
+        text = candidate
+        break
+
+if text is None:
+    print(
+        "SKIP: every revision of dispatch.sh reachable from the merge-base "
+        "already has the #190 widening -- no pre-#190 baseline exists in "
+        "this history to mutate",
+        file=sys.stderr,
+    )
+    sys.exit(3)
+
 here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
 assert text.count(here) == 1, "HERE assignment not found or not unique -- pre-#190 script shape unexpected"
 text = text.replace(here, 'HERE=%r' % repo_dir, 1)

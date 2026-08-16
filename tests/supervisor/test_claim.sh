@@ -222,5 +222,55 @@ else
 fi
 want_exit "take without [repo] still claims a genuinely open issue" "$rc" 0
 
+# --- a rate-limited read is unreadable, not closed (#228) ------------------
+# On 2026-08-11, a REST core rate limit made `gh api ... -q '...'` print the
+# raw error JSON (gh does not run -q's jq filter on an error body) instead of
+# the tab-separated state/assignees the old code expected. That body was
+# non-empty, so `[ -z "$info" ]` did not fire; `state` became the body's
+# leading `{`, the `!= open` test was true, and an OPEN issue (#199) was
+# reported as closed and dispatch abandoned correct, available work. Exit 2
+# ("unreadable, retry") is the honest answer here, never exit 1 ("closed").
+printf '228||Open, but the read will be rate limited|RATE_LIMIT\n' >> "$D/issues"
+out=$(run take 228 acme/repo lane-9); rc=$?
+want_exit "a rate-limited read is refused as unreadable, not closed" "$rc" 2
+if grep -q 'not open' <<<"$out"; then
+  bad "a rate-limited read asserts no state" "$out"
+else
+  ok "a rate-limited read asserts no state"
+fi
+want_contains "a rate-limited read names the rate limit" "rate limit" "$out"
+want_contains "a rate-limited read names REST core, not just \"rate limited\"" "REST core" "$out"
+a=$(awk -F'|' '$1==228{print $2}' "$D/issues")
+if [ -z "$a" ]; then ok "a rate-limited read assigns no one"; else bad "a rate-limited read assigns no one" "$a"; fi
+
+# --- a malformed / truncated body is unreadable, not a state (#228) --------
+printf '229||Open, but the body will be truncated|MALFORMED\n' >> "$D/issues"
+out=$(run take 229 acme/repo lane-9); rc=$?
+want_exit "a malformed body is refused as unreadable" "$rc" 2
+if grep -q 'not open' <<<"$out"; then
+  bad "a malformed body asserts no state" "$out"
+else
+  ok "a malformed body asserts no state"
+fi
+
+# --- a completely empty body is unreadable, not a state (#228) -------------
+printf '230||Open, but the body will be empty|EMPTY\n' >> "$D/issues"
+out=$(run take 230 acme/repo lane-9); rc=$?
+want_exit "an empty body is refused as unreadable" "$rc" 2
+if grep -q 'not open' <<<"$out"; then
+  bad "an empty body asserts no state" "$out"
+else
+  ok "an empty body asserts no state"
+fi
+
+# --- a genuinely closed issue must still exit 1, unchanged (#228) ----------
+# The rate-limit fix must not soften the real refusal this mechanism exists
+# to make -- see the #95 case above for the original coverage; this repeats
+# it against the new code path to make sure it did not regress.
+printf '231||Really closed|CLOSED\n' >> "$D/issues"
+out=$(run take 231 acme/repo lane-9); rc=$?
+want_exit "a genuinely closed issue still exits 1 after the fix" "$rc" 1
+want_contains "a genuinely closed issue still names its state" "not open" "$out"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
