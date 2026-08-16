@@ -101,7 +101,13 @@ log() { printf '%s %s\n' "$iso" "$*" >>"$LOG"; }
 # the one bot identity (#57 Part 3: one bot, not one per tier).
 CALLER="${AGENT_NOTIFY_CALLER:-}"
 case "$CALLER" in
-  supervisor|director) ;;
+  # `watchdog` added 2026-08-17. Jon, directly: "use telegram to contact me
+  # if you need me." The watchdog runs OUTSIDE the loop and is the component
+  # that notices the estate has STOPPED -- the one condition worth waking him
+  # for, and the one the supervisor cannot report, because it is the thing
+  # that stopped. Refusing it meant the only caller able to see a total stall
+  # was the only caller unable to say so.
+  supervisor|director|watchdog) ;;
   *)
     log "REFUSED — caller not authorized (AGENT_NOTIFY_CALLER=${CALLER:-<unset>}): $SUBJECT${BODY:+ — $BODY}"
     echo "NOTIFY REFUSED: only an authorized caller may notify Jon (set AGENT_NOTIFY_CALLER=supervisor or director)" >&2
