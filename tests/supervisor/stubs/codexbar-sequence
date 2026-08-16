@@ -11,6 +11,10 @@
 #   empty         -- no output at all (simulates the fetch dying outright)
 #   unavailable   -- guard exits 0 but the JSON carries unavailableReason
 #                    (codexbar reached the network and got told "unknown")
+#   hang          -- sleeps past any sane per-sample timeout, so a caller
+#                    that wraps this stub in with_timeout must be the thing
+#                    that returns, not this process on its own (agent-tui#264
+#                    composed with #262: every sample must be bounded).
 set -uo pipefail
 
 [ "${1:-}" = "guard" ] || { echo "codexbar-sequence: only 'guard' is stubbed" >&2; exit 64; }
@@ -32,5 +36,6 @@ case "$tok" in
   winddown)    printf '{"remainingPercent": 9}\n'; exit 1 ;;
   empty)       exit 2 ;;
   unavailable) printf '{"unavailableReason": "fetch-failed"}\n'; exit 0 ;;
+  hang)        sleep 60 ;;
   *)           echo "codexbar-sequence: unknown token '$tok'" >&2; exit 70 ;;
 esac

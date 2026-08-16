@@ -62,22 +62,40 @@
 # `check` instead samples a small FIXED number of times (QUOTA_CHECK_SAMPLES,
 # default 3) with a short fixed delay between them (QUOTA_CHECK_DELAY,
 # default 1s) -- never an unbounded retry -- and decides by rule over the
-# whole batch, not by whichever answer arrived last:
+# whole batch, not by whichever answer arrived last.
+#
+# THE VOTING RULE (write it down; an undocumented rule inside a spending
+# gate is itself a defect):
 #   - any sample WIND DOWN -> WIND DOWN. A real exhaustion signal must never
-#     be overridden by a later lucky fetch.
-#   - else any sample SAFE -> SAFE. A failed fetch is an absence of
-#     information, not evidence of safety; a successful fetch supersedes it.
-#   - else (every sample failed) -> UNAVAILABLE, and the message says how
-#     many samples could not reach codexbar at all versus how many reached
-#     it and got told the reading itself is unknown -- those are different
-#     conditions (as#228: a rate-limited read is not "issue not open").
+#     be overridden by a later lucky fetch, regardless of where in the batch
+#     it lands -- unanimity is not required, one WIND DOWN outvotes any
+#     number of SAFE samples (e.g. 1 WIND DOWN + 2 SAFE -> WIND DOWN).
+#   - else any sample genuinely SAFE -> SAFE. A failed fetch, a timeout, or
+#     "source says unknown" is an ABSENCE of information, not evidence of
+#     safety -- it can never itself resolve to SAFE and can never veto a
+#     real SAFE reading, but a real SAFE reading always outvotes it (e.g.
+#     2 SAFE + 1 UNKNOWN -> SAFE, and 1 SAFE + 2 UNKNOWN -> SAFE).
+#   - else (every sample failed/timed out/unknown -- zero SAFE, zero WIND
+#     DOWN) -> UNAVAILABLE, and the message says how many samples could not
+#     reach codexbar at all versus how many reached it and got told the
+#     reading itself is unknown -- those are different conditions (as#228:
+#     a rate-limited read is not "issue not open"). Degrades to the last-
+#     good cache if one is still fresh, shown as stale, never as current.
+# This is deliberately asymmetric, not majority vote: reading an UNKNOWN
+# sample as SAFE spends into an exhausted window -- that is the exact
+# mechanism behind $80 -> $8. Latching a wind-down on one bad-but-real
+# sample only stops the estate for a tick. The cheap failure (a false
+# stand-down) is preferred over the expensive one (a false proceed)
+# whenever the batch disagrees.
 #
 # #264 and #262 compose, they do not stack: each of the (up to) SAMPLES
 # calls below still goes through `with_timeout`/`GUARD_TIMEOUT_SECONDS`, so
 # the worst case for the whole batch is bounded (~SAMPLES x
-# GUARD_TIMEOUT_SECONDS, not unbounded x SAMPLES), and a per-sample timeout
-# (124) falls into the same "could not reach the quota source" bucket as
-# any other unreachable exit code -- it is never read as SAFE.
+# GUARD_TIMEOUT_SECONDS + (SAMPLES-1) x QUOTA_CHECK_DELAY -- with the
+# defaults, 3*15 + 2*1 = 47s if codexbar hangs on every sample -- never
+# unbounded), and a per-sample timeout (124) falls into the same "could not
+# reach the quota source" bucket as any other unreachable exit code -- it
+# is never read as SAFE.
 set -uo pipefail
 
 BIN="${CODEXBAR_BIN:-codexbar}"
