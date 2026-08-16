@@ -54,6 +54,11 @@ gate "$D/gate-winddown" 1    # rc 1 WIND DOWN
 gate "$D/gate-unknown2" 2    # rc 2 UNAVAILABLE
 gate "$D/gate-unknown3" 3    # rc 3 MISSING
 gate "$D/gate-127" 127       # rc 127 -- quota.sh absent from the deploy tree, #260
+gate "$D/gate-124" 124       # rc 124 -- codexbar timeout, made first-class by #267
+gate "$D/gate-42" 42         # rc 42 -- ported from #263: an arbitrary code the
+                             # gate has never defined, not one of the curated
+                             # ones above. Proves the `*)` wildcard, not a list
+                             # of special cases this test happens to know about.
 
 tick() {
   # $1 = quota gate path, uses $STATE and $LOG from caller scope
@@ -116,6 +121,37 @@ want_count "...and a genuine wind-down right after still sends exactly one" "QUO
 tick "$D/gate-127"
 tick "$D/gate-safe"
 want_count "...and rc=127 between WIND DOWN and SAFE does not block the resume" "QUOTA IS BACK" "$LOG" 1
+
+# --- case 6: rc=124 is unsafe too, not SAFE and not WIND DOWN --------------
+# #267 makes 124 (codexbar timeout, normalised through `timeout`) a first-class
+# UNAVAILABLE shape. The `*)` wildcard already lands it in UNKNOWN by not
+# matching 0 or 1, but that was implied, not tested -- test it explicitly
+# rather than leaving 124 to ride on the same coverage as an untested code.
+STATE=$(mktemp -d "$D/state.XXXXXX"); LOG="$D/log.6"; : > "$LOG"
+tick "$D/gate-safe"
+tick "$D/gate-124"
+want_empty "rc=124 next to a prior SAFE sends nothing (not read as WIND DOWN)" "$LOG"
+tick "$D/gate-winddown"
+want_count "...and a genuine wind-down right after still sends exactly one" "QUOTA IS LOW" "$LOG" 1
+tick "$D/gate-124"
+tick "$D/gate-safe"
+want_count "...and rc=124 between WIND DOWN and SAFE does not block the resume" "QUOTA IS BACK" "$LOG" 1
+
+# --- case 7: an arbitrary, never-enumerated code is UNKNOWN too ------------
+# Ported from #263 (test_quota_watch_standdown.sh), whose own version this
+# test does not otherwise cover: every case above uses a code this file
+# already knows the meaning of (2, 3, 124, 127). rc=42 is not one of those --
+# it exists only to prove the `*)` branch catches ANY code this script has
+# never seen, not just the ones this suite happens to enumerate.
+STATE=$(mktemp -d "$D/state.XXXXXX"); LOG="$D/log.7"; : > "$LOG"
+tick "$D/gate-safe"
+tick "$D/gate-42"
+want_empty "an arbitrary never-enumerated code (rc=42) sends nothing" "$LOG"
+tick "$D/gate-winddown"
+want_count "...and a genuine wind-down right after still sends exactly one" "QUOTA IS LOW" "$LOG" 1
+tick "$D/gate-42"
+tick "$D/gate-safe"
+want_count "...and rc=42 between WIND DOWN and SAFE does not block the resume" "QUOTA IS BACK" "$LOG" 1
 
 echo
 echo "quota-watch: $pass passed, $fail failed"
