@@ -44,6 +44,17 @@ GithubReviewVerdictSource / LedgerVerdictSource). A SHA with zero check
 runs and zero legacy statuses is refused, not treated as "nothing to
 block on" -- a push that raced past CI, or a workflow that never
 triggered, must not read the same as a green run.
+
+RE-RUNS (#269) -- `commits/{sha}/check-runs` returns every run of every
+check for that SHA, not just the newest: a re-run of `test` after a flaky
+failure leaves both the old failing run and the new passing one in the
+list. `gh pr checks` and GitHub's PR UI evaluate only the latest run per
+check name; `_latest_per_name` does the same here, keyed on `completed_at`
+falling back to `started_at` for a run still in flight. This is
+latest-per-name, never best-per-name -- if the newest run of a check
+failed and an older run of the same check passed, that is red. Only
+narrowing what counts as "the check", never widening what counts as
+green.
 """
 
 from __future__ import annotations
@@ -59,6 +70,31 @@ def subprocess_runner(command):
 
 
 GREEN_CONCLUSIONS = ("success", "neutral", "skipped")
+
+
+def _run_sort_key(run):
+    # `completed_at` is missing while a run is still queued/in_progress --
+    # fall back to `started_at` so an in-progress run still sorts by when it
+    # started, rather than being treated as older than every finished run
+    # (which would let a stale success win the "latest" slot). Both are
+    # ISO-8601 UTC timestamps ("...Z"), so lexical order matches chronological
+    # order without parsing them.
+    return run.get("completed_at") or run.get("started_at") or ""
+
+
+def _latest_per_name(check_runs):
+    """Re-runs of the same check (e.g. `test`) land as separate entries in
+    `check_runs` -- GitHub's own PR UI and `gh pr checks` both evaluate only
+    the newest one per name. Do the same here: a stale failing run must not
+    keep refusing once a newer run of the same check has succeeded, and
+    conversely a fresh failure must not be shadowed by an older success."""
+    latest_by_name = {}
+    for run in check_runs:
+        name = run.get("name", "?")
+        current = latest_by_name.get(name)
+        if current is None or _run_sort_key(run) >= _run_sort_key(current):
+            latest_by_name[name] = run
+    return list(latest_by_name.values())
 
 
 class CiGate:
@@ -115,9 +151,10 @@ class CiGate:
         if not check_runs and not statuses:
             return {"decision": "refuse", "sha": sha, "reason": f"no checks reported for {sha}"}
 
+        latest_runs = _latest_per_name(check_runs)
         failing_runs = [
             run.get("name", "?")
-            for run in check_runs
+            for run in latest_runs
             if not (run.get("status") == "completed" and run.get("conclusion") in GREEN_CONCLUSIONS)
         ]
         failing_statuses = [s.get("context", "?") for s in statuses if s.get("state") != "success"]
