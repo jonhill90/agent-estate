@@ -50,6 +50,22 @@ below, which has no external watcher and must always re-arm itself. Which
 mechanism applies depends on WHY the tick is stopping: quota exhaustion is
 watched from outside; a Jon-gated backlog is not.
 
+**agent-supervisor#261: the SAFE → WINDDOWN half is watched from outside
+too, now.** Until this, the wake-up (WINDDOWN → SAFE, above) was automatic
+but the stand-down was not — `quota-watch.sh` logged the SAFE → WINDDOWN
+transition and did nothing else, so it still depended on a human, or on a
+tick happening to run this gate at the right moment. If a tick was slow,
+crashed, or mid-task when the window closed, nothing stopped the spend.
+`quota-watch.sh` now sends exactly one stand-down message on that
+transition — finish the step in progress, commit, push, post one comment
+saying what is done and the next action, then stop — the same thing this
+section already told a tick to do by hand. You do not need to race it: if
+your own `quota.sh check` returns 1 first, follow the instructions above as
+before; if `quota-watch.sh`'s message arrives first, that already covers it.
+Either way, dispatch.sh's own quota gate (#227) is what actually stops new
+work — it re-checks quota on every call and refuses independent of anything
+`quota-watch.sh` does.
+
 ## Advance the live worktree, before anything else
 
 ```bash
