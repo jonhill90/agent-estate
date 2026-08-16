@@ -379,7 +379,25 @@ def _parse_verdict_comment(body):
     return None
 
 
-_REVIEW_LANE_RE = re.compile(r"(?im)^\s*Review-Lane:\s*([A-Za-z0-9_.:@/-]+)\s*$")
+# agent-supervisor#232: the old regex anchored the WHOLE rest of the line
+# (`\s*$`) to the lane token, so a reviewer explaining how it established its
+# own identity -- exactly what #187 asks reviewers to do -- lost its verdict
+# to a trailing parenthetical the parser had no way to ignore. A lane id is
+# spelled `<session>:<index>` (`core.LANE_ID_RE`'s own shape); this now takes
+# the FIRST token on the line that matches that shape and ignores everything
+# after it. Comparison downstream (`lane_relation`) stays exact-string strict
+# -- only the parse is lenient.
+_REVIEW_LANE_LINE_RE = re.compile(r"(?im)^\s*Review-Lane:(.*)$")
+_LANE_SHAPE_RE = re.compile(r"[^\s()]+:[0-9]+")
+
+
+def _review_lane_line(body):
+    """The raw `Review-Lane:` line, if one exists at all -- independent of
+    whether it parses. Used only to name the offending text in a refusal
+    (agent-supervisor#232: "print the line it could not parse, not just the
+    requirement"); never itself trusted as a lane id."""
+    match = _REVIEW_LANE_LINE_RE.search(body or "")
+    return match.group(0).strip() if match else None
 
 
 def _parse_review_lane(body):
@@ -389,8 +407,11 @@ def _parse_review_lane(body):
     posts through the same account. A comment verdict can only be compared for
     independence when the reviewing lane states its lane id explicitly.
     """
-    match = _REVIEW_LANE_RE.search(body or "")
-    return match.group(1) if match else None
+    match = _REVIEW_LANE_LINE_RE.search(body or "")
+    if not match:
+        return None
+    token = _LANE_SHAPE_RE.search(match.group(1))
+    return token.group(0) if token else None
 
 
 # agent-supervisor#213: the SHA a `**Verdict:` comment applies to, beside
@@ -409,11 +430,26 @@ def _parse_reviewed_sha(body):
     """The SHA a `Reviewed-SHA:` trailer states a comment's verdict covers.
     None when absent -- a caller must treat that as "unstated", never as
     "matches"; #213's issue explicitly requires ambiguity to refuse, not to
-    read as fresh. Same permissive token class as `_REVIEW_LANE_RE` --
-    comparison is exact-string equality against `head_sha` either way, so
-    this need not itself validate git SHA shape."""
+    read as fresh. Same permissive token class the lane parser uses --
+    extraction stays permissive; `_SHA_SHAPE_RE` below is what validates
+    shape, in `_comment_freshness`, not here."""
     match = _REVIEWED_SHA_RE.search(body or "")
     return match.group(1) if match else None
+
+
+# agent-supervisor#232: a git SHA is 40 hex characters, full stop.
+# `_comment_freshness` used to go straight from "not equal to head_sha" to
+# `_content_unchanged_since` -- a real API call comparing branch commits --
+# for ANY mismatch, so a truncated trailer that happened to be a valid
+# prefix of the true head (e.g. 39 of the 40 chars) could resolve to the
+# same commit under git's own forgiving prefix matching and pass as
+# "unchanged since", silently. That is exactly backwards: a malformed
+# trailer is a defect in the TRAILER, not a question about the branch's
+# content, and #218's SHA comparison never even gets to run behind a
+# genuinely wrong-shaped value. Checked only on the mismatch path -- an
+# EXACT match (the common case, and every existing fixture in this repo)
+# still short-circuits before this is ever consulted.
+_SHA_SHAPE_RE = re.compile(r"^[0-9a-fA-F]{40}$")
 
 
 def _newest_commit_date(commits):
@@ -507,7 +543,14 @@ class GithubReviewVerdictSource(VerdictSource):
         for FRESHNESS against `head_sha`, via `_comment_freshness` -- the
         same guard `_review_verdict` has had since #218, missing here until
         now even though the comment path is this estate's primary posting
-        path. `repo`/`number`/`commits` are only used by that check."""
+        path. `repo`/`number`/`commits` are only used by that check.
+
+        agent-supervisor#232: a malformed `Review-Lane:` line (present but
+        unparseable) and a stale/malformed `Reviewed-SHA:` are INDEPENDENT
+        trailer defects -- the issue's own reproduction had both at once,
+        and losing the second behind the first cost a whole re-review.
+        Both are collected into `problems` and reported TOGETHER in one
+        refusal, never one-at-a-time."""
         last = None
         for comment in comments:
             if not isinstance(comment, dict):
@@ -522,6 +565,7 @@ class GithubReviewVerdictSource(VerdictSource):
         body = comment.get("body")
         author = (comment.get("author") or {}).get("login")
         reviewer_lane = _parse_review_lane(body)
+        raw_lane_line = _review_lane_line(body)
         created_at = comment.get("createdAt") or ""
         who = f"@{author}" if author else "an unknown author"
         when = f" at {created_at}" if created_at else ""
@@ -531,15 +575,21 @@ class GithubReviewVerdictSource(VerdictSource):
         if len(decisions) == 1:
             verdict_value = decisions.pop()
             detail = f"PR comment verdict ({verdict_value}) by {who}{lane}{when}"
+            problems = []
+            if raw_lane_line is not None and reviewer_lane is None:
+                problems.append(f"could not parse lane id from: {raw_lane_line}")
+            note = ""
             if head_sha is not None:
                 fresh, note, refusal = self._comment_freshness(
                     body=body, created_at=created_at, head_sha=head_sha, commits=commits,
                     repo=repo, number=number,
                 )
                 if not fresh:
-                    return {"verdict": "unknown", "detail": f"{detail} -- {refusal}"}
-                if note:
-                    detail = f"{detail}, {note}"
+                    problems.append(refusal)
+            if problems:
+                return {"verdict": "unknown", "detail": f"{detail} -- " + "; ".join(problems)}
+            if note:
+                detail = f"{detail}, {note}"
             result = {"verdict": verdict_value, "detail": detail, "verdict_kind": "comment"}
             if reviewer_lane:
                 result["reviewer_lane"] = reviewer_lane
@@ -580,6 +630,17 @@ class GithubReviewVerdictSource(VerdictSource):
         if reviewed_sha is not None:
             if reviewed_sha == head_sha:
                 return True, "", ""
+            if not _SHA_SHAPE_RE.match(reviewed_sha):
+                # #232: shape, not just equality -- a truncated/malformed
+                # trailer is refused HERE, naming the defect in the trailer
+                # itself, rather than being handed to
+                # `_content_unchanged_since` where a value that happens to be
+                # a valid prefix of the real head can resolve to the same
+                # commit and pass silently.
+                return False, "", (
+                    f"malformed Reviewed-SHA ({len(reviewed_sha)} chars, not 40 hex) -- "
+                    f"cannot confirm it covers current head {head_sha}"
+                )
             unchanged, basis = _content_unchanged_since(
                 runner=self.runner, patch_id_fn=self.patch_id,
                 repo=repo, number=number, old_sha=reviewed_sha, new_sha=head_sha,
