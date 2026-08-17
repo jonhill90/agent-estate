@@ -387,8 +387,55 @@ def _parse_verdict_comment(body):
 # the FIRST token on the line that matches that shape and ignores everything
 # after it. Comparison downstream (`lane_relation`) stays exact-string strict
 # -- only the parse is lenient.
+#
+# agent-supervisor#307: that shape check accepted ONLY `core.LANE_ID_RE`'s
+# tmux shape, so it never widened to match #294's own fix. A claude-print
+# (or pi-rpc) lane's id has no window to index -- `dispatch-claude-print.sh`
+# and `dispatch-pi-rpc.sh` both set `LANE="$LABEL"`, the task id itself
+# (`core.TASK_ID_RE`'s shape, e.g. `ad182-review-186`) -- so a `Review-Lane:`
+# line naming one of those lanes could never satisfy the tmux-only shape and
+# every such comment verdict was refused with "could not parse lane id from"
+# before `lane_relation`/`lane_relation_from_rows` (#294's widening) ever ran.
+# Measured: `test_merge_pr.sh`'s "a claude-print reviewer of a tmux-authored
+# PR merges" case (and its two dependants) failed against this file alone,
+# on a worktree carrying #294.
+#
+# The second alternative mirrors `core.TASK_ID_RE`'s own character class --
+# the shape this system actually mints for an off-pane lane -- but requires a
+# leading LETTER (not `TASK_ID_RE`'s own `[a-zA-Z0-9]` first-char class) and a
+# lookahead requiring at least one digit somewhere in the token. Bare
+# `TASK_ID_RE` is too permissive to use as-is here: agent-supervisor#232's own
+# fixture deliberately uses a hand-typed, digit-free phrase
+# ("not-a-lane-id-at-all") as its example of a line that must stay
+# unparseable, and that phrase fits `TASK_ID_RE`'s charset exactly -- the
+# digit lookahead alone refuses it. A real minted label is always
+# `<repo-initials><issue-number>-<slug>` (`dispatch-claude-print.sh`'s own
+# `LABEL="${PREFIX}${ISSUE}-${SLUG}"`), so it always BEGINS with the
+# repo-initials letters, before the issue number's digit run; the leading
+# letter requirement is what `test_digest.sh`'s PR17 fixture needs.
+#
+# PR17 (agent-supervisor#307, a REGRESSION the digit-lookahead-alone fix
+# missed) stamps `Review-Lane: lane/89-rev95` -- titled "reviewer lane
+# stamped with something that is not a lane id" -- and its whole purpose is
+# that the line stays unparseable. `89-rev95` (the part after the slash) has
+# both a leading letter later in the token ("rev95") and digits, so a
+# `.search()` over the whole remainder text found a lane-shaped SUBSTRING
+# starting mid-token, after the slash, and parsed `89-rev95` -- er, `rev95`
+# -- as if it were the stamped lane. That is not a token at all; `/` never
+# separates tokens on this line, `\s` and `()` do (this docstring's own
+# stated contract, and agent-supervisor#232's parenthetical-prose fixture
+# depends on `()` doing that job). So this now enumerates whitespace/paren-
+# delimited tokens in order and requires one to `fullmatch` the shape --
+# never `search` within one -- which is what "first token that matches"
+# actually means, and it rejects `lane/89-rev95` outright: neither the tmux
+# shape nor the claude-print shape can fullmatch a token containing `/`,
+# since `/` is outside both character classes.
 _REVIEW_LANE_LINE_RE = re.compile(r"(?im)^\s*Review-Lane:(.*)$")
-_LANE_SHAPE_RE = re.compile(r"[^\s()]+:[0-9]+")
+_LANE_TOKEN_RE = re.compile(r"[^\s()]+")
+_LANE_SHAPE_RE = re.compile(
+    r"[^\s()]+:[0-9]+"
+    r"|(?=[a-zA-Z0-9._-]*[0-9])[a-zA-Z][a-zA-Z0-9._-]{0,127}"
+)
 
 
 def _review_lane_line(body):
@@ -406,12 +453,22 @@ def _parse_review_lane(body):
     GitHub login cannot identify a lane in this estate because every agent
     posts through the same account. A comment verdict can only be compared for
     independence when the reviewing lane states its lane id explicitly.
+
+    Walks the tokens of the `Review-Lane:` line's remainder in order --
+    `\\s`/`()`-delimited, per this module's own stated contract -- and
+    returns the first one whose ENTIRE text matches the lane shape
+    (`fullmatch`, never `search` within a token: agent-supervisor#307 was a
+    lane-shaped substring found after a `/` inside a token that, as a whole,
+    was not a lane id at all).
     """
     match = _REVIEW_LANE_LINE_RE.search(body or "")
     if not match:
         return None
-    token = _LANE_SHAPE_RE.search(match.group(1))
-    return token.group(0) if token else None
+    for token_match in _LANE_TOKEN_RE.finditer(match.group(1)):
+        token = token_match.group(0)
+        if _LANE_SHAPE_RE.fullmatch(token):
+            return token
+    return None
 
 
 # agent-supervisor#213: the SHA a `**Verdict:` comment applies to, beside
