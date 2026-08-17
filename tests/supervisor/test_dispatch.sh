@@ -3741,6 +3741,11 @@ log=$(tmuxlog)
 want_contains "and the review lands on the one lane that never touched this PR, t:6" "send-keys -t t:@106" "$log"
 want_missing "never on the fix-pass lane's target (t:4, t:@104)" "send-keys -t t:@104 " "$log"
 
+# The review dispatched above is still OPEN against PR #970 -- complete it
+# first, or the unrelated agent-supervisor#169 PR-duplicate guard (step 0.6)
+# refuses the mutation-check dispatch below before authorship is even asked.
+LEDGER_STATE="$D/state-308a" ledger record-completion --task ad926-rev-970 --note done >/dev/null
+
 # MUTATION-CHECK: silence the PR-scoped contributor lookup and confirm the
 # fix-pass lane (t:4) is WRONGLY treated as available -- proving this test
 # actually exercises the new path, not something step 1-3.1 already covered.
