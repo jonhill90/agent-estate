@@ -426,11 +426,34 @@ def parser():
     record_session_event_parser.add_argument("--detail", required=True)
 
     sub.add_parser("status")
+
+    # agent-supervisor#303: the read side of the prompt corpus (#280/#297).
+    # `view` is restricted to the five views by name (`Ledger.PROMPT_VIEWS`)
+    # -- there is no free-form SQL entry point here, same posture as
+    # `Ledger.read_prompt_view` itself.
+    prompts_parser = sub.add_parser("prompts")
+    prompts_parser.add_argument("view", choices=Ledger.PROMPT_VIEWS)
     return root
 
 
 def _print(value):
     print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+
+
+# agent-supervisor#303: "cli.py prompts <view> -- print any of the five views
+# as a table" (the brief's own words). Every other command here prints one
+# JSON line for a script to parse; this one is for a human -- Jon reading
+# `unacknowledged` directly -- so it is deliberately not `_print`.
+def _print_table(rows):
+    if not rows:
+        print("(no rows)")
+        return
+    columns = list(rows[0].keys())
+    widths = {c: max(len(c), max(len(str(row[c])) for row in rows)) for c in columns}
+    print("  ".join(c.ljust(widths[c]) for c in columns))
+    print("  ".join("-" * widths[c] for c in columns))
+    for row in rows:
+        print("  ".join(str(row[c]).ljust(widths[c]) for c in columns))
 
 
 # NARROW inference, for a command that is actually diagnostic on its own
@@ -1241,6 +1264,9 @@ def main(argv=None):
             # which takes a target and actually queries transport.
             "sessions": ledger.list_sessions(),
         }
+    elif args.command == "prompts":
+        _print_table(ledger.read_prompt_view(args.view))
+        return 0
     else:
         raise AssertionError(args.command)
     _print(value)
