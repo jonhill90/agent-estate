@@ -3261,6 +3261,50 @@ class PromptCorpusTest(unittest.TestCase):
         self.assertEqual("dropped", row["status"])
         self.assertEqual("superseded by a later prompt", row["status_reason"])
 
+    def test_get_prompt_returns_none_for_unknown_id(self):
+        self.assertIsNone(self.ledger.get_prompt("nope"))
+
+    def test_get_prompt_round_trips_a_written_row(self):
+        self._seed_prompt("p1")
+        row = self.ledger.get_prompt("p1")
+        self.assertEqual("raw-p1", row["text_raw"])
+        self.assertEqual("context-p1", row["context"])
+
+    def test_read_prompt_view_rejects_an_unknown_view(self):
+        with self.assertRaises(ValueError):
+            self.ledger.read_prompt_view("items")  # a table, not a view -- must not be reachable
+
+    def test_get_item_returns_none_for_unknown_id(self):
+        self.assertIsNone(self.ledger.get_item("nope"))
+
+    def test_get_item_round_trips_a_written_row(self):
+        self._seed_prompt("p1")
+        self.ledger.add_item("i1", prompt_id="p1", kind="directive", body="do it", weight="hard")
+        row = self.ledger.get_item("i1")
+        self.assertEqual("do it", row["body"])
+
+    def test_unitemised_prompts_excludes_prompts_with_any_item(self):
+        self._seed_prompt("p1")
+        self._seed_prompt("p2")
+        self.ledger.add_item("i1", prompt_id="p1", kind="directive", body="do it", weight="hard")
+        ids = [row["id"] for row in self.ledger.list_unitemised_prompts()]
+        self.assertEqual(["p2"], ids)
+
+    def test_unitemised_prompts_respects_limit(self):
+        self._seed_prompt("p1")
+        self._seed_prompt("p2")
+        rows = self.ledger.list_unitemised_prompts(limit=1)
+        self.assertEqual(1, len(rows))
+
+    def test_read_prompt_view_reads_each_of_the_five_by_name(self):
+        self._seed_prompt("p1")
+        self.ledger.add_item("i-open", prompt_id="p1", kind="directive", body="b", weight="hard", status="open")
+        for view in Ledger.PROMPT_VIEWS:
+            rows = self.ledger.read_prompt_view(view)
+            self.assertIsInstance(rows, list)
+        unacked = self.ledger.read_prompt_view("unacknowledged")
+        self.assertEqual(["i-open"], [row["id"] for row in unacked])
+
 
 if __name__ == "__main__":
     unittest.main()

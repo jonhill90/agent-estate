@@ -3107,3 +3107,57 @@ class Ledger:
                 """,
                 (item_id, other_item_id, relation),
             )
+
+    def get_item(self, item_id):
+        """Read one item row, or None -- the same idempotency check
+        `itemize_prompts.py --load` uses before writing, so a re-run over
+        overlapping input never re-inserts (and never fails on) a
+        judgement already recorded."""
+        with contextlib.closing(self._connect()) as connection:
+            return self._dict(connection.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone())
+
+    def list_unitemised_prompts(self, *, limit=None):
+        """Prompts with no `items` row yet -- the itemisation queue for
+        `itemize_prompts.py --extract` (agent-supervisor#303). Item-lessness
+        via LEFT JOIN, not a second `itemised` flag on `prompts` that could
+        drift from what `items` actually holds."""
+        sql = """
+            SELECT p.* FROM prompts p
+            LEFT JOIN items i ON i.prompt_id = p.id
+            WHERE i.id IS NULL
+            ORDER BY p.at
+        """
+        params = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (int(limit),)
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [self._dict(row) for row in rows]
+
+    def get_prompt(self, prompt_id):
+        """Read one prompt row, or None. The idempotency check a loader
+        (`mine_prompts.py --store`, agent-supervisor#303) needs BEFORE
+        calling `record_prompt` again for a turn it has already written --
+        `record_prompt` itself has no INSERT OR IGNORE/UPSERT because
+        `text_raw` must never silently re-write on a second pass; deciding
+        "already have this one" is the caller's job, not a swallowed
+        constraint violation."""
+        with contextlib.closing(self._connect()) as connection:
+            return self._dict(connection.execute("SELECT * FROM prompts WHERE id=?", (prompt_id,)).fetchone())
+
+    # The five views ARE the deliverable (agent-supervisor#280, #303) --
+    # whitelisted by name, the same posture `lanes.sh` takes on offering an
+    # idle shape (CLAUDE.md invariant 6): a view name this does not
+    # recognise is refused, never interpolated into SQL on trust.
+    PROMPT_VIEWS = ("unacknowledged", "live_parameters", "conflicts", "open_questions", "possibility_count")
+
+    def read_prompt_view(self, view):
+        """Read one of the five named views, plain SQL, no model involved --
+        every read against `items`/`links` after itemisation is meant to be
+        exactly this and nothing more."""
+        if view not in self.PROMPT_VIEWS:
+            raise ValueError(f"unknown prompt view: {view}")
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(f"SELECT * FROM {view}").fetchall()  # noqa: S608 -- view is whitelisted above
+        return [self._dict(row) for row in rows]
