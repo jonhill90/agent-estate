@@ -1571,6 +1571,135 @@ class LedgerTest(unittest.TestCase):
         )
         self.assertIsNone(self.ledger.get_task_for_worktree("/tmp/ad-101-review-as114-7"))
 
+    def test_get_contributor_tasks_for_pr_includes_every_non_review_pull_scoped_task(self):
+        """agent-supervisor#308 item 2, resolution path five: a task
+        dispatched DIRECTLY against a PR number (`--pr <N>`/`--reviews-pr
+        <N>`, `source_kind='pull'`) must be found by a later review of the
+        SAME PR even when it shares no issue and never had its own worktree
+        checked out on the PR's real head branch -- the #302 shape, where
+        two `--pr 302` fix-pass tasks sat unconsulted in exactly this table
+        while #302's review refused for six hours."""
+        self.ledger.record_dispatch(
+            lane="free-3",
+            pane_id="%3",
+            nonce="nonce-3",
+            harness="claude",
+            repo="/repo/free-3",
+            server_id="server-a",
+            session_id="$3",
+            command="claude.exe",
+            task_id="as302-fix1",
+            source_kind="pull",
+            source_url="https://github.com/jonhill90/agent-supervisor/pull/302",
+            source_ref="302",
+            summary="fix pass on PR #302",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-3", "pr: 302"],
+            status_marker=None,
+        )
+        # `source_tasks` allows only one OPEN pull-kind row per PR at a time
+        # (agent-supervisor#169) -- complete the fix-pass first, the same
+        # sequence #302 actually went through, before dispatching its review.
+        self.ledger.complete("as302-fix1", b"done", pane_nonce="nonce-3")
+        self.ledger.record_dispatch(
+            lane="free-4",
+            pane_id="%4",
+            nonce="nonce-4",
+            harness="claude",
+            repo="/repo/free-4",
+            server_id="server-a",
+            session_id="$4",
+            command="claude.exe",
+            task_id="as302-review149",
+            source_kind="pull",
+            source_url="https://github.com/jonhill90/agent-supervisor/pull/302",
+            source_ref="302",
+            summary="review PR #302",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-4", "pr: 302"],
+            status_marker=None,
+        )
+
+        contributors = self.ledger.get_contributor_tasks_for_pr("302")
+        lanes = {row["lane"] for row in contributors}
+        self.assertEqual({"free-3"}, lanes, "only the non-review pull-scoped task is a contributor")
+        task_ids = {row["id"] for row in contributors}
+        self.assertNotIn("as302-review149", task_ids, "a review task is never a contributor")
+
+        # An int and its string spelling are the same PR.
+        self.assertEqual({"free-3"}, {row["lane"] for row in self.ledger.get_contributor_tasks_for_pr(302)})
+
+    def test_get_contributor_tasks_for_pr_unknown_pr_is_empty(self):
+        self.assertEqual([], self.ledger.get_contributor_tasks_for_pr("no-such-pr"))
+
+    def test_record_pr_for_task_round_trips_through_get_task_for_pr_number(self):
+        """agent-supervisor#308 item 1: the explicit "task X's own work
+        opened PR N" record, written after the fact for an issue-keyed
+        dispatch that had no PR number yet when it started."""
+        self.ledger.record_dispatch(
+            lane="free-3",
+            pane_id="%3",
+            nonce="nonce-3",
+            harness="claude",
+            repo="/repo/free-3",
+            server_id="server-a",
+            session_id="$3",
+            command="claude.exe",
+            task_id="as308-original",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/308",
+            source_ref="308",
+            summary="#308 original fix",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-3"],
+            status_marker=None,
+        )
+        self.assertIsNone(self.ledger.get_task_for_pr_number(repo="acme/agent-supervisor", pr_number="316"))
+
+        self.ledger.record_pr_for_task(task_id="as308-original", repo="acme/agent-supervisor", pr_number="316")
+        found = self.ledger.get_task_for_pr_number(repo="acme/agent-supervisor", pr_number="316")
+        self.assertIsNotNone(found)
+        self.assertEqual("free-3", found["lane"])
+        self.assertEqual("as308-original", found["id"])
+
+        # An int and its string spelling are the same PR.
+        self.assertEqual(
+            "as308-original",
+            self.ledger.get_task_for_pr_number(repo="acme/agent-supervisor", pr_number=316)["id"],
+        )
+
+        # A second call for the same (repo, pr_number) CORRECTS, not
+        # duplicates -- an operator re-running lane-done.sh's best-effort
+        # write must not raise a primary-key conflict.
+        self.ledger.record_pr_for_task(task_id="as308-original", repo="acme/agent-supervisor", pr_number="316")
+
+    def test_record_pr_for_task_refuses_an_unknown_task(self):
+        with self.assertRaises(ValueError):
+            self.ledger.record_pr_for_task(task_id="no-such-task", repo="acme/agent-supervisor", pr_number="316")
+
+    def test_mark_pr_external_round_trips_through_get_pr_external(self):
+        """agent-supervisor#308 item 3: "no lane contributed" as a
+        first-class, recordable fact distinct from "unresolvable" -- the
+        #316/#301/#300 shape, a PR authored outside the lane system
+        entirely."""
+        self.assertIsNone(self.ledger.get_pr_external(repo="acme/agent-supervisor", pr_number="316"))
+
+        self.ledger.mark_pr_external(
+            repo="acme/agent-supervisor", pr_number="316", note="authored directly, no lane ever dispatched"
+        )
+        found = self.ledger.get_pr_external(repo="acme/agent-supervisor", pr_number="316")
+        self.assertIsNotNone(found)
+        self.assertEqual("authored directly, no lane ever dispatched", found["note"])
+
+        # A second marking corrects (idempotent), not duplicates.
+        self.ledger.mark_pr_external(repo="acme/agent-supervisor", pr_number="316", note="updated note")
+        found = self.ledger.get_pr_external(repo="acme/agent-supervisor", pr_number="316")
+        self.assertEqual("updated note", found["note"])
+
+        # A different, never-marked PR stays unknown -- marking is per-PR,
+        # not a global switch.
+        self.assertIsNone(self.ledger.get_pr_external(repo="acme/agent-supervisor", pr_number="301"))
+
     def test_mark_lane_held_makes_a_free_lane_read_occupied(self):
         """agent-dotfiles#188 finding 1: this is what closes the window a
         rolled-back `record_dispatch` used to leave open -- a lane the ledger
