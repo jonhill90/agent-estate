@@ -499,6 +499,15 @@ class ClaudePrintAdapter:
             repo=repo,
             server_id="claude-print",
             session_id=session_id,
+            # agent-supervisor: for claude-print the harness session id IS this
+            # uuid -- it is what `claude -p --session-id <uuid>` minted and what
+            # `claude -p --resume <uuid>` takes. Omitting it left all 33 migrated
+            # lanes UNRECOVERABLE: restore.sh refuses rather than invents, so a
+            # tmux death would have reported every one of them UNRECOVERABLE
+            # while the conversations sat resumable on disk. The old send-keys
+            # transport stranded prompts but survived a crash; this one delivered
+            # reliably and lost everything, which is the worse trade.
+            harness_session_id=session_id,
             command="claude",
             # Explicit, same reasoning as TmuxAdapter/ACPAdapter/PiRPCAdapter:
             # this class IS the claude-print transport by construction.
