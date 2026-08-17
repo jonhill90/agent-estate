@@ -52,5 +52,59 @@ class ItemizePromptsTests(unittest.TestCase):
         self.assertNotIn("link_items", source)
 
 
+class DropNoiseTests(unittest.TestCase):
+    """agent-supervisor#313: FILTER NON-JON TEXT FIRST, mechanically, no model."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ledger = Ledger(self.tmp.name, clock=lambda: 1_000)
+
+    def test_dispatch_brief_is_dropped_not_extracted(self):
+        self.ledger.record_prompt(
+            "p1", at=1_000, context="dispatch",
+            text_raw="Read /tmp/brief.md and do exactly what it says. "
+                     "That file is your complete brief.",
+        )
+        self.ledger.record_prompt("p2", at=2_000, text_raw="make render LIVE", context="ctx")
+
+        dropped, kept = itemize_prompts.drop_noise(self.ledger)
+        self.assertEqual((1, 1), (dropped, kept))
+
+        rows = itemize_prompts.extract(self.ledger)
+        self.assertEqual(["p2"], [row["id"] for row in rows])
+
+    def test_dropped_row_carries_a_reason_and_never_reaches_open_views(self):
+        self.ledger.record_prompt(
+            "p1", at=1_000, context="cron", text_raw="Supervisor loop tick. Follow loop-tick.md.",
+        )
+        itemize_prompts.drop_noise(self.ledger)
+
+        self.assertEqual([], self.ledger.read_prompt_view("unacknowledged"))
+        self.assertEqual([], self.ledger.read_prompt_view("live_parameters"))
+        item = self.ledger.get_item(itemize_prompts._item_id(
+            "p1", 0, "noise:loop-tick cron text (scripts/supervisor/loop-tick.md)"))
+        self.assertIsNotNone(item)
+        self.assertEqual("dropped", item["status"])
+        self.assertTrue(item["status_reason"])
+
+    def test_drop_noise_is_idempotent(self):
+        self.ledger.record_prompt(
+            "p1", at=1_000, context="ctx", text_raw="## Context Usage\n\n**Model:** x",
+        )
+        first = itemize_prompts.drop_noise(self.ledger)
+        second = itemize_prompts.drop_noise(self.ledger)
+        self.assertEqual((1, 0), first)
+        self.assertEqual((0, 0), second)
+
+    def test_jon_text_that_merely_mentions_a_brief_is_kept(self):
+        self.ledger.record_prompt(
+            "p1", at=1_000, context="ctx",
+            text_raw="did you read the brief I sent? what did it say about scope",
+        )
+        dropped, kept = itemize_prompts.drop_noise(self.ledger)
+        self.assertEqual((0, 1), (dropped, kept))
+
+
 if __name__ == "__main__":
     unittest.main()
