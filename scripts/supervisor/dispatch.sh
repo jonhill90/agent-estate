@@ -754,6 +754,41 @@ if [ -n "$REVIEWS_PR" ]; then
     fi
   done
 
+  # 2.1. agent-supervisor#308 item 1: the EXPLICIT "task X's work opened PR
+  # N" record, written after the fact (`lane-done.sh`, best effort) for an
+  # issue-keyed dispatch whose own PR did not exist yet when it started --
+  # see `Ledger.get_task_for_pr_number`. A direct lookup, not inferred from
+  # a branch or an issue reference at all.
+  PR_TASK_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" pr-task --repo "$REPO" --pr "$REVIEWS_PR" 2>&1) || PR_TASK_JSON=""
+  if grep -qF '"known":true' <<<"$PR_TASK_JSON"; then
+    CONTRIBUTORS_RESOLVED=1
+    p_lane=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$PR_TASK_JSON")
+    p_task=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$PR_TASK_JSON")
+    add_contributor "$p_lane" "$p_task"
+  fi
+
+  # 2.2. agent-supervisor#308 item 2: resolution path five -- the PR's own
+  # `source_tasks` rows (`source_kind='pull'`), asked DIRECTLY by PR number
+  # rather than by the issue(s) it closes. A review or fix-pass dispatched
+  # with `--pr <N>`/`--reviews-pr <N>` (which implies it, see step 6 below)
+  # already writes this record at dispatch time -- exact, structured, no
+  # branch name or live git state involved -- but nothing before this read
+  # it back for authorship. UNIONED regardless of whether steps 1&2/2.1
+  # already found contributors, same reasoning as step 3 below: one more
+  # genuine contributor found is never the wrong direction. See
+  # `Ledger.get_contributor_tasks_for_pr` for the measured case this fixes
+  # (#302: two fix-pass tasks dispatched directly against PR #302, sitting
+  # unconsulted in exactly this table).
+  PR_CONTRIB_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" contributor-pr-lanes --pr "$REVIEWS_PR" 2>&1) || PR_CONTRIB_JSON=""
+  if grep -qF '"known":true' <<<"$PR_CONTRIB_JSON"; then
+    CONTRIBUTORS_RESOLVED=1
+    while IFS=$'\t' read -r c_lane c_task; do
+      [ -n "$c_lane" ] || continue
+      add_contributor "$c_lane" "$c_task"
+    done < <(grep -oE '"lane":"[^"]*","task":"[^"]*"' <<<"$PR_CONTRIB_JSON" \
+      | sed -E 's/"lane":"([^"]*)","task":"([^"]*)"/\1\t\2/')
+  fi
+
   # 3. agent-supervisor#117: which worktree currently has HEAD_REF checked
   # out -- resolved through the ledger by the worktree PATH recorded at
   # dispatch time (`--worktree`, step 6 of a PRIOR dispatch), never by
@@ -819,6 +854,24 @@ if [ -n "$REVIEWS_PR" ]; then
     fi
   fi
 
+  # 3.2. agent-supervisor#308 item 3: "authored outside the lane system" as
+  # a FIRST-CLASS, RECORDABLE state -- checked only when every real
+  # resolution path above came back silent, and NEVER treated as "proceed
+  # when authorship is unknown" (#190 forbids that flag outright; this is
+  # not it). A PR marked here was a DECISION an operator made -- that no
+  # lane wrote it -- so the contributor set is KNOWN-EMPTY, not unresolved:
+  # every free lane is a valid independent reviewer, the safe case. This is
+  # the #316/#301/#300 shape: a PR authored directly by a human or the
+  # watchdog, closing no issue the ledger can name, whose branch fails the
+  # legacy convention outright. See `Ledger.get_pr_external` / `mark-pr-external`.
+  if [ -z "$CONTRIBUTORS_RESOLVED" ]; then
+    EXTERNAL_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" pr-external --repo "$REPO" --pr "$REVIEWS_PR" 2>&1) || EXTERNAL_JSON=""
+    if grep -qF '"known":true' <<<"$EXTERNAL_JSON"; then
+      CONTRIBUTORS_RESOLVED=1
+      echo "dispatch: PR #$REVIEWS_PR is recorded as authored OUTSIDE the lane system (marked external) -- no lane contributors to exclude, every free lane is a valid independent reviewer" >&2
+    fi
+  fi
+
   # 4. Still silent -> refuse. Every source above answered "no record", not
   # "safe". agent-supervisor#190's fail-closed requirement: an unresolvable
   # contributor set must make this dispatch LESS likely to proceed, never
@@ -831,6 +884,7 @@ if [ -n "$REVIEWS_PR" ]; then
     # The two describe the same fact before and after: nobody the ledger
     # will vouch for produced (or contributed to) this PR.
     echo "dispatch: could not determine PR #$REVIEWS_PR's author -- the ledger has no record by issue, by commit, or by branch '$HEAD_REF' (task ${FALLBACK_TASK:-none}) -- refusing (authorship unknown, failing closed)" >&2
+    echo "dispatch: if this PR was genuinely authored outside the lane system (a human, or the watchdog), record that once with: $LEDGER_PYTHON $LEDGER_CLI mark-pr-external --repo '$REPO' --pr $REVIEWS_PR --note '<why>'" >&2
     # agent-supervisor#101, third red-first item: on the inferred path these
     # are TWO separate findings arriving together -- "this looked like a
     # review" and "its contributors are unresolvable" -- and read as one
