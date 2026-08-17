@@ -3710,13 +3710,19 @@ printf '925|| the code a fix pass on PR #970 targets\n' >> "$D/issues"
 
 out=$(LEDGER_STATE="$D/state-308a" run 925 original-970 "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "setup: the authoring dispatch (#925) succeeds" "$rc" 0 "$out"
-LEDGER_STATE="$D/state-308a" ledger record-completion --task ad925-original-970 --note done >/dev/null
+want_contains "setup: it landed on the first free lane, t:3" "send-keys -t t:@103" "$(tmuxlog)"
 
-# `source_tasks` allows only one OPEN pull-kind row per PR at a time
-# (agent-supervisor#169) -- the fix-pass completes before PR #970's review
-# is dispatched below, same as any real sequence.
+# t:3's task is left OPEN (not completed yet) so the fix-pass below cannot
+# land back on t:3 -- it must go to t:4, a genuinely different lane, the
+# same technique agent-supervisor#190's own test above uses.
 out=$(LEDGER_STATE="$D/state-308a" run 925 fix-970 "$D/brief.md" acme/agent-dotfiles "$REPO" --pr 970); rc=$?
 want_exit "setup: the fix-pass dispatch (--pr 970) succeeds" "$rc" 0 "$out"
+want_contains "setup: it landed on t:4, not the original author's t:3" "send-keys -t t:@104" "$(tmuxlog)"
+
+# Both contributing tasks complete before the review below -- their lanes'
+# panes will read idle/ready again, so what excludes them from the review
+# candidate pool must be the CONTRIBUTOR lookup, not "still busy".
+LEDGER_STATE="$D/state-308a" ledger record-completion --task ad925-original-970 --note done >/dev/null
 LEDGER_STATE="$D/state-308a" ledger record-completion --task ad925-fix-970 --note done >/dev/null
 
 # PR #970's real head branch belongs to NEITHER worktree -- it was written
@@ -3748,6 +3754,13 @@ text = open(src).read()
 marker = 'PR_CONTRIB_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" contributor-pr-lanes --pr "$REVIEWS_PR" 2>&1)'
 assert text.count(marker) == 1, "contributor-pr-lanes lookup not found or not unique -- script shape changed"
 text = text.replace(marker, 'PR_CONTRIB_JSON=\'{"known":false}\'  # MUTATED: contributor-pr-lanes never consulted', 1)
+# The copy lands under $D (the test's own tmpdir), not scripts/supervisor --
+# `HERE="$(... ${BASH_SOURCE[0]} ...)"` would otherwise resolve to the COPY's
+# own location and fail to find input-box.sh/send.sh/harness-registry.sh/
+# session-defaults.sh/cli.py, which all live beside the real dispatch.sh.
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
 open(dst, "w").write(text)
 PY
 if [ "$patch_rc" -ne 0 ]; then
