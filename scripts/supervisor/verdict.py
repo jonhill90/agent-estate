@@ -400,7 +400,23 @@ def _review_lane_line(body):
     return match.group(0).strip() if match else None
 
 
-def _parse_review_lane(body):
+# agent-supervisor#292/#276: `_LANE_SHAPE_RE` only recognises a tmux lane id
+# (`<session>:<index>`) -- a claude-print or pi-rpc lane has no window to
+# index, so its id IS its task id (e.g. `ad182-review-186`), a shape this
+# regex can never match. Measured against PR #277: a claude-print reviewer's
+# otherwise-correct `Review-Lane:` trailer was refused as unparseable,
+# indistinguishable from a hand-typed "not-a-lane-id-at-all" -- the two are
+# the same free-text shape and cannot be told apart by regex alone.
+#
+# The same principle #292 used for `lane_relation_from_rows` applies here:
+# when the trailer names no `<session>:<index>` token, take the first
+# whitespace-delimited token on the line and ask the LEDGER, never a guess --
+# a token that is a REGISTERED lane id is trusted; one that is not (whether
+# it is prose, a typo, or nonsense) still refuses, exactly as it did before.
+# `ledger` is optional and defaults to skipping this fallback entirely, so
+# every caller that never had a ledger to offer (unit tests included) keeps
+# its prior behaviour unchanged.
+def _parse_review_lane(body, ledger=None):
     """Lane stamp for comment verdicts.
 
     GitHub login cannot identify a lane in this estate because every agent
@@ -411,7 +427,18 @@ def _parse_review_lane(body):
     if not match:
         return None
     token = _LANE_SHAPE_RE.search(match.group(1))
-    return token.group(0) if token else None
+    if token:
+        return token.group(0)
+    if ledger is not None:
+        rest = match.group(1).strip()
+        first_token = rest.split(None, 1)[0] if rest else ""
+        if first_token:
+            try:
+                if ledger.get_lane(first_token):
+                    return first_token
+            except Exception:
+                pass
+    return None
 
 
 # agent-supervisor#213: the SHA a `**Verdict:` comment applies to, beside
@@ -489,9 +516,13 @@ class GithubReviewVerdictSource(VerdictSource):
     from a stale/superseded review), so PRs with a real review object are
     unaffected by this addition."""
 
-    def __init__(self, runner=None, patch_id=None):
+    def __init__(self, runner=None, patch_id=None, ledger=None):
         self.runner = runner or _subprocess_runner
         self.patch_id = patch_id or _default_patch_id
+        # agent-supervisor#292/#276: optional, and used ONLY as a fallback in
+        # `_parse_review_lane` to recognise a registered claude-print/pi-rpc
+        # lane id -- every other read stays exactly as it was.
+        self.ledger = ledger
 
     def verdict(self, *, repo, number, head_sha=None):
         try:
@@ -564,7 +595,7 @@ class GithubReviewVerdictSource(VerdictSource):
         comment, scan = last
         body = comment.get("body")
         author = (comment.get("author") or {}).get("login")
-        reviewer_lane = _parse_review_lane(body)
+        reviewer_lane = _parse_review_lane(body, ledger=self.ledger)
         raw_lane_line = _review_lane_line(body)
         created_at = comment.get("createdAt") or ""
         who = f"@{author}" if author else "an unknown author"
@@ -777,6 +808,12 @@ def build_source(name, *, state_dir):
         raise ValueError(f"unknown verdict source: {name!r} (known: {', '.join(sorted(SOURCES))})")
     if name == "ledger":
         return LedgerVerdictSource(Ledger(state_dir))
+    if name == "github":
+        # agent-supervisor#292/#276: gives `_parse_review_lane` the ledger it
+        # needs to recognise a claude-print/pi-rpc lane id in a Review-Lane:
+        # trailer -- see that function's own comment for why a regex alone
+        # can never tell one apart from hand-typed nonsense.
+        return GithubReviewVerdictSource(ledger=Ledger(state_dir))
     return SOURCES[name]()
 
 
