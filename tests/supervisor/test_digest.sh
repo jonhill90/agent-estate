@@ -712,9 +712,15 @@ grep -q "the same window, renamed session" <<<"$(jq -r '.verdict_detail' <<<"$p1
 p17=$(lp 17)
 chk "PR17 (agent-supervisor#108): a Review-Lane stamp that is not a lane id reports unknown, never independent" \
   "null" "$(jq -r '.verdict_independent' <<<"$p17")"
-grep -q "not comparable lane ids" <<<"$(jq -r '.verdict_detail' <<<"$p17")" \
-  && ok "PR17 detail says the two ids could not be compared" \
-  || bad "PR17 detail says the two ids could not be compared" "$p17"
+# agent-supervisor#232: the stamp is now rejected at PARSE time -- no
+# lane-shaped (`<session>:<index>`) token anywhere on the line -- rather
+# than being accepted as a lane id and only failing later at the
+# lane_relation() comparison. The detail now names the offending line
+# verbatim (#232's "print the line it could not parse" requirement),
+# which is strictly more useful than the old "not comparable lane ids".
+grep -q "could not parse lane id from: Review-Lane: lane/89-rev95" <<<"$(jq -r '.verdict_detail' <<<"$p17")" \
+  && ok "PR17 detail names the unparseable Review-Lane line" \
+  || bad "PR17 detail names the unparseable Review-Lane line" "$p17"
 
 # 12b. agent-dotfiles#218: a review APPROVED at an old SHA must not answer for
 # a head a push has since moved past. This is the failure #218 exists to
