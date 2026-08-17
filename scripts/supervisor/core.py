@@ -469,6 +469,44 @@ class Ledger:
                     PRIMARY KEY (repo, number)
                 );
 
+                -- agent-supervisor#308: the PR a task's own work OPENED,
+                -- recorded explicitly once known, so a later
+                -- `dispatch.sh --reviews-pr` authorship check is a lookup
+                -- rather than a reconstruction from a branch name or a live
+                -- `git worktree list`. Written best-effort, after the fact
+                -- (`lane-done.sh`), because an issue-keyed dispatch has no
+                -- PR number yet when it starts -- `source_tasks`'
+                -- `source_kind='pull'` rows record the OPPOSITE case (a
+                -- task dispatched AGAINST an already-existing PR, e.g. a
+                -- `--pr`-scoped fix-pass) and are read separately, by
+                -- `get_contributor_tasks_for_pr` below.
+                CREATE TABLE IF NOT EXISTS pr_authorship (
+                    repo TEXT NOT NULL,
+                    pr_number TEXT NOT NULL,
+                    task_id TEXT NOT NULL REFERENCES tasks(id),
+                    recorded_at INTEGER NOT NULL,
+                    PRIMARY KEY (repo, pr_number)
+                );
+
+                -- agent-supervisor#308 item 3: "no lane contributed to this
+                -- PR" as a FIRST-CLASS, RECORDABLE fact, distinct from
+                -- "authorship could not be resolved". A PR opened directly
+                -- by a human or the watchdog has no lane contributors at
+                -- all -- every free lane is a valid independent reviewer,
+                -- the SAFE case -- but with nothing recording that decision
+                -- it read identically to "unresolvable" and dispatch.sh
+                -- refused it exactly the same way (#316/#301/#300: refused
+                -- for hours, PR authored outside the lane system entirely).
+                -- A row here is a DECISION an operator makes once, the same
+                -- authorship test AGENTS.md applies to `sessions` above.
+                CREATE TABLE IF NOT EXISTS pr_external_authorship (
+                    repo TEXT NOT NULL,
+                    pr_number TEXT NOT NULL,
+                    note TEXT,
+                    recorded_at INTEGER NOT NULL,
+                    PRIMARY KEY (repo, pr_number)
+                );
+
                 -- agent-supervisor#153. Whether a tmux SESSION (not a lane,
                 -- not a pane) is one this estate may act on -- dispatch to,
                 -- rename windows in, kill windows in. Jon's own sessions
@@ -1728,6 +1766,126 @@ class Ledger:
         if len(candidates) == 1:
             return candidates[0]
         return None
+
+    def get_contributor_tasks_for_pr(self, pr_ref):
+        """The full CONTRIBUTOR SET dispatched DIRECTLY against this PR --
+        every non-review `source_kind='pull'` task ever recorded for it,
+        unfiltered by status. Resolution path five (agent-supervisor#308),
+        alongside `get_contributor_tasks_for_issue` (by issue),
+        `get_task_for_worktree` (by worktree path) and the legacy
+        branch-name convention dispatch.sh falls back to.
+
+        `get_open_task_for_pr` above answers "is somebody working this PR
+        RIGHT NOW" and deliberately filters to open status for that reason.
+        Authorship exclusion asks a different question -- "has anybody EVER
+        contributed to this PR" -- which a completed or cancelled prior
+        review or fix-pass still answers `yes` to.
+
+        agent-supervisor#308 (#302's own measurement): a fix-pass or review
+        dispatched with `--pr <N>` / `--reviews-pr <N>` writes
+        `source_kind='pull', source_ref=str(N)` at dispatch time -- an
+        exact, structured record of "this task worked PR N directly", no
+        branch name or live git state involved. Before this method, nothing
+        ever read that record back for authorship: `--reviews-pr`'s
+        resolution chain queried `source_kind='issue'` and the
+        worktree/branch fallbacks, but never the PR's own `source_kind='pull'`
+        rows -- the most direct evidence the ledger has. Two live fix-pass
+        tasks dispatched directly against PR #302 sat unconsulted in this
+        exact table while its review refused for six hours.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT tasks.* FROM tasks
+                JOIN source_tasks ON source_tasks.id = tasks.id
+                WHERE source_tasks.source_kind = 'pull' AND source_tasks.source_ref = ?
+                ORDER BY tasks.created_at ASC, tasks.id ASC
+                """,
+                (str(pr_ref),),
+            ).fetchall()
+        return [
+            self._dict(row) for row in rows if not self._task_looks_like_review(row["id"], row["summary"])
+        ]
+
+    def record_pr_for_task(self, *, task_id, repo, pr_number, now=None):
+        """Record explicitly that `task_id`'s own work OPENED `pr_number` in
+        `repo` -- agent-supervisor#308 item 1.
+
+        Distinct from `source_tasks`' `source_kind='pull'` rows (which
+        record a PR-SCOPED DISPATCH, made when the PR already exists): this
+        is written after the fact, for the ORIGINATING dispatch -- one made
+        by issue number, before its own PR existed -- which `source_tasks`
+        never associates with the PR number at all, and which the issue-based
+        resolution path can already answer while it is open but loses once
+        the PR's body/commits stop naming the issue in a form `dispatch.sh`
+        can parse. `INSERT OR REPLACE`: a PR has one recorded author task; a
+        second call for the same (repo, pr_number) corrects rather than
+        duplicates. The caller is trusted to have confirmed the task actually
+        produced this PR (`lane-done.sh`, from the branch its own worktree
+        built) -- this write has no independent way to verify that itself.
+        """
+        if not self.get_task(task_id):
+            raise ValueError(f"unknown task: {task_id}")
+        now = int(now if now is not None else self.clock())
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO pr_authorship (repo, pr_number, task_id, recorded_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (repo, pr_number) DO UPDATE SET
+                    task_id = excluded.task_id, recorded_at = excluded.recorded_at
+                """,
+                (repo, str(pr_number), task_id, now),
+            )
+
+    def get_task_for_pr_number(self, *, repo, pr_number):
+        """The task explicitly recorded (`record_pr_for_task`) as having
+        opened `pr_number` in `repo`, if any -- a lookup, not a heuristic.
+        Regardless of the task's current status: the record is a durable
+        fact about what happened, not a claim about what is happening now.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            link = connection.execute(
+                "SELECT task_id FROM pr_authorship WHERE repo = ? AND pr_number = ?",
+                (repo, str(pr_number)),
+            ).fetchone()
+            if link is None:
+                return None
+            row = connection.execute(
+                "SELECT * FROM tasks WHERE id = ?", (link["task_id"],)
+            ).fetchone()
+        return self._dict(row)
+
+    def mark_pr_external(self, *, repo, pr_number, note, now=None):
+        """Record that `pr_number` in `repo` was authored OUTSIDE the lane
+        system (a human, or the watchdog acting directly) -- a first-class,
+        recordable state distinct from "unknown" (agent-supervisor#308 item
+        3). Once marked, this PR's contributor set resolves to KNOWN-EMPTY:
+        no lane wrote it, so no lane is excluded from reviewing it -- the
+        safe case, not the dangerous one. `INSERT OR REPLACE`: idempotent,
+        the note/timestamp of the most recent marking wins.
+        """
+        now = int(now if now is not None else self.clock())
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO pr_external_authorship (repo, pr_number, note, recorded_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (repo, pr_number) DO UPDATE SET
+                    note = excluded.note, recorded_at = excluded.recorded_at
+                """,
+                (repo, str(pr_number), note, now),
+            )
+
+    def get_pr_external(self, *, repo, pr_number):
+        """The external-authorship marking for `pr_number` in `repo`, if any
+        recorded by `mark_pr_external`."""
+        with contextlib.closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM pr_external_authorship WHERE repo = ? AND pr_number = ?",
+                (repo, str(pr_number)),
+            ).fetchone()
+        return self._dict(row)
 
     def get_task_for_worktree(self, worktree_path):
         """The task recorded against one exact worktree path (agent-supervisor#117).
