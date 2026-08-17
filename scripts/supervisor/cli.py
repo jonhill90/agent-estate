@@ -389,6 +389,38 @@ def parser():
     worktree_lane_parser = sub.add_parser("worktree-lane")
     worktree_lane_parser.add_argument("--path", required=True)
 
+    # agent-supervisor#308 item 2: the fifth resolution path -- the PR's own
+    # `source_tasks` rows (`source_kind='pull'`), asked DIRECTLY by PR number
+    # rather than by the issue(s) it closes. See
+    # `Ledger.get_contributor_tasks_for_pr`.
+    contributor_pr_lanes_parser = sub.add_parser("contributor-pr-lanes")
+    contributor_pr_lanes_parser.add_argument("--pr", required=True)
+
+    # agent-supervisor#308 item 1: the explicit "task X's work opened PR N"
+    # record -- see `Ledger.record_pr_for_task` / `Ledger.get_task_for_pr_number`.
+    # Written after the fact (`lane-done.sh`, best effort), not at dispatch
+    # time -- the PR does not exist yet when an issue-keyed dispatch starts.
+    record_pr_for_task_parser = sub.add_parser("record-pr-for-task")
+    record_pr_for_task_parser.add_argument("--task", required=True)
+    record_pr_for_task_parser.add_argument("--repo", required=True)
+    record_pr_for_task_parser.add_argument("--pr", required=True)
+
+    pr_task_parser = sub.add_parser("pr-task")
+    pr_task_parser.add_argument("--repo", required=True)
+    pr_task_parser.add_argument("--pr", required=True)
+
+    # agent-supervisor#308 item 3: "authored outside the lane system" as a
+    # first-class, recordable state -- see `Ledger.mark_pr_external` /
+    # `Ledger.get_pr_external`.
+    mark_pr_external_parser = sub.add_parser("mark-pr-external")
+    mark_pr_external_parser.add_argument("--repo", required=True)
+    mark_pr_external_parser.add_argument("--pr", required=True)
+    mark_pr_external_parser.add_argument("--note", required=True)
+
+    pr_external_parser = sub.add_parser("pr-external")
+    pr_external_parser.add_argument("--repo", required=True)
+    pr_external_parser.add_argument("--pr", required=True)
+
     # agent-dotfiles#237: the read `restore.sh` runs after a tmux server loss.
     # Deliberately its own command rather than a flag on `status`: it must
     # work when there is no tmux server at all, so it touches no transport.
@@ -1121,6 +1153,31 @@ def main(argv=None):
             "lane": row["lane"] if row is not None else None,
             "task": row["id"] if row is not None else None,
         }
+    elif args.command == "contributor-pr-lanes":
+        rows = ledger.get_contributor_tasks_for_pr(args.pr)
+        value = {
+            "pr": args.pr,
+            "known": len(rows) > 0,
+            "contributors": [{"lane": row["lane"], "task": row["id"]} for row in rows],
+        }
+    elif args.command == "record-pr-for-task":
+        ledger.record_pr_for_task(task_id=args.task, repo=args.repo, pr_number=args.pr)
+        value = {"task": args.task, "repo": args.repo, "pr": args.pr, "recorded": True}
+    elif args.command == "pr-task":
+        row = ledger.get_task_for_pr_number(repo=args.repo, pr_number=args.pr)
+        value = {
+            "repo": args.repo,
+            "pr": args.pr,
+            "known": row is not None,
+            "lane": row["lane"] if row is not None else None,
+            "task": row["id"] if row is not None else None,
+        }
+    elif args.command == "mark-pr-external":
+        ledger.mark_pr_external(repo=args.repo, pr_number=args.pr, note=args.note)
+        value = {"repo": args.repo, "pr": args.pr, "marked_external": True}
+    elif args.command == "pr-external":
+        row = ledger.get_pr_external(repo=args.repo, pr_number=args.pr)
+        value = {"repo": args.repo, "pr": args.pr, "known": row is not None, "note": row["note"] if row else None}
     elif args.command == "record-completion":
         value = record_completion(ledger, task=args.task, lane=args.lane, note=args.note)
     elif args.command == "accept":
