@@ -500,6 +500,127 @@ class Ledger:
                     supervised_at INTEGER NOT NULL,
                     source TEXT NOT NULL DEFAULT 'bootstrap-session.sh'
                 );
+
+                -- agent-supervisor#280 (Jon: "my prompts are supposed to mean
+                -- something ... the system should know"). Second set of
+                -- tables in this SAME ledger -- not a new store, and
+                -- deliberately not a vector database: his queries are
+                -- relational and temporal ("does A conflict with B", "is
+                -- this still live"), which a similarity search answers
+                -- wrong on purpose -- a RETRACTED constraint reads exactly
+                -- like a live one to an embedding.
+                --
+                -- `mine_prompts.py` (agent-supervisor#296) harvests raw
+                -- turns from transcripts; it writes nothing here. A prompt
+                -- becomes a row via a separate loader, out of scope for this
+                -- migration.
+                --
+                -- `text_raw` is NEVER altered after insert -- it is the
+                -- evidence a later query settles disputes against.
+                -- `text_clean` is derived (spelling/grammar fixed) and may
+                -- be updated in place; on any disagreement between the two,
+                -- `text_raw` wins. Enforced by convention here (no writer of
+                -- `text_raw` exists after `record_prompt`), and by
+                -- `tests/supervisor/test_core.py`'s
+                -- `test_text_raw_survives_text_clean_update`.
+                CREATE TABLE IF NOT EXISTS prompts (
+                    id TEXT PRIMARY KEY,
+                    at INTEGER NOT NULL,
+                    text_raw TEXT NOT NULL,
+                    text_clean TEXT,
+                    -- Load-bearing, not decoration: a prompt alone is
+                    -- ambiguous ("Live." means nothing without knowing it
+                    -- answered "live terminal or refreshed preview?"). This
+                    -- records what was being decided at the time so a row
+                    -- is never misread later for lack of it.
+                    context TEXT NOT NULL,
+                    session TEXT,
+                    source_file TEXT
+                );
+
+                -- One row per judgement extracted from a prompt --
+                -- `kind`/`weight`/`status` are the vocabulary Jon asked for
+                -- by name. Itemising a prompt is a model's job, done ONCE
+                -- at write time (see core.py module docstring intent and
+                -- agent-supervisor#280); every read against this table
+                -- after that is SQL, no model involved.
+                CREATE TABLE IF NOT EXISTS items (
+                    id TEXT PRIMARY KEY,
+                    prompt_id TEXT NOT NULL REFERENCES prompts(id),
+                    kind TEXT NOT NULL CHECK (
+                        kind IN ('parameter', 'question', 'directive', 'thought', 'correction')
+                    ),
+                    body TEXT NOT NULL,
+                    weight TEXT NOT NULL CHECK (weight IN ('hard', 'preference', 'retracted')),
+                    status TEXT NOT NULL DEFAULT 'open' CHECK (
+                        status IN ('open', 'acknowledged', 'acted', 'resolved', 'dropped')
+                    ),
+                    -- `dropped(reason)` in the brief: the reason lives here,
+                    -- alongside the status it explains, rather than folded
+                    -- into the status string itself -- the same shape as
+                    -- `pr_verdicts.note` and `source_tasks.status_marker`
+                    -- elsewhere in this ledger. NULL unless status='dropped'.
+                    status_reason TEXT,
+                    -- The parameter this prompt actually produced, e.g.
+                    -- 'render=LIVE'. Turns "what did he mean" from literary
+                    -- interpretation into a lookup -- the entire point.
+                    resolved_to TEXT,
+                    acked_at INTEGER
+                );
+
+                CREATE TABLE IF NOT EXISTS links (
+                    item_id TEXT NOT NULL REFERENCES items(id),
+                    other_item_id TEXT NOT NULL REFERENCES items(id),
+                    relation TEXT NOT NULL CHECK (
+                        relation IN ('conflicts_with', 'supersedes', 'depends_on')
+                    ),
+                    PRIMARY KEY (item_id, other_item_id, relation)
+                );
+
+                -- The views ARE the deliverable (agent-supervisor#280) --
+                -- Jon asked for these five by name. Each is a plain read
+                -- over `items`/`links`; nothing here calls a model, and
+                -- nothing downstream should ever need to.
+
+                -- "The thing he is anxious about": every item nobody has
+                -- acknowledged yet.
+                CREATE VIEW IF NOT EXISTS unacknowledged AS
+                    SELECT * FROM items WHERE status = 'open';
+
+                -- Parameters currently in force. `weight = 'hard'` implies
+                -- not retracted (the three weight values are mutually
+                -- exclusive), so this excludes only explicitly retracted
+                -- rows, hard or soft.
+                CREATE VIEW IF NOT EXISTS live_parameters AS
+                    SELECT * FROM items WHERE kind = 'parameter' AND weight != 'retracted';
+
+                -- Pairs of items Jon (or a later pass) marked as disagreeing,
+                -- with enough of each side to read the conflict without a
+                -- second query.
+                CREATE VIEW IF NOT EXISTS conflicts AS
+                    SELECT
+                        l.item_id,
+                        l.other_item_id,
+                        a.prompt_id AS item_prompt_id,
+                        a.kind AS item_kind,
+                        a.status AS item_status,
+                        b.prompt_id AS other_prompt_id,
+                        b.kind AS other_kind,
+                        b.status AS other_status
+                    FROM links l
+                    JOIN items a ON a.id = l.item_id
+                    JOIN items b ON b.id = l.other_item_id
+                    WHERE l.relation = 'conflicts_with';
+
+                CREATE VIEW IF NOT EXISTS open_questions AS
+                    SELECT * FROM items WHERE kind = 'question' AND status = 'open';
+
+                -- The zero/too-many check: how many live HARD parameters
+                -- exist right now. Zero means nothing is pinned down; more
+                -- than expected means two of them disagree and `conflicts`
+                -- has not been told yet.
+                CREATE VIEW IF NOT EXISTS possibility_count AS
+                    SELECT COUNT(*) AS count FROM live_parameters WHERE weight = 'hard';
                 """
             )
         os.chmod(self.db_path, 0o600)
@@ -2909,3 +3030,80 @@ class Ledger:
                 event = connection.execute("SELECT * FROM events WHERE key=?", (key,)).fetchone()
             self._atomic_replace(baseline_path, snapshot)
         return self._dict(event)
+
+    # -- agent-supervisor#280: the prompt corpus -------------------------
+    #
+    # `record_prompt` is the ONLY writer of `text_raw` -- nothing here ever
+    # updates that column again, which is what makes "raw wins on conflict"
+    # true by construction rather than by convention alone.
+
+    def record_prompt(self, prompt_id, *, at, text_raw, context, text_clean=None, session=None, source_file=None):
+        """Write one prompt row. `text_raw` is set once, here, and never again."""
+        if not prompt_id or not isinstance(prompt_id, str):
+            raise ValueError("prompt_id is required")
+        if not text_raw or not isinstance(text_raw, str):
+            raise ValueError("text_raw is required")
+        if not context or not isinstance(context, str):
+            raise ValueError("context is required -- a prompt with no context will be misread later")
+        with self._locked(), self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO prompts(id, at, text_raw, text_clean, context, session, source_file)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (prompt_id, int(at), text_raw, text_clean, context, session, source_file),
+            )
+            row = connection.execute("SELECT * FROM prompts WHERE id=?", (prompt_id,)).fetchone()
+        return self._dict(row)
+
+    def update_text_clean(self, prompt_id, text_clean):
+        """Replace the derived, cleaned-up text. `text_raw` is untouched --
+        this statement does not even name that column."""
+        with self._locked(), self._transaction() as connection:
+            connection.execute(
+                "UPDATE prompts SET text_clean=? WHERE id=?", (text_clean, prompt_id)
+            )
+            row = connection.execute("SELECT * FROM prompts WHERE id=?", (prompt_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"no such prompt: {prompt_id}")
+        return self._dict(row)
+
+    def add_item(self, item_id, *, prompt_id, kind, body, weight, status="open",
+                 status_reason=None, resolved_to=None, acked_at=None):
+        """Record one judgement extracted from a prompt. This is the
+        itemisation step the brief calls model work done ONCE per prompt --
+        this method just writes the row the model (or a test) hands it."""
+        if kind not in ("parameter", "question", "directive", "thought", "correction"):
+            raise ValueError("invalid kind")
+        if weight not in ("hard", "preference", "retracted"):
+            raise ValueError("invalid weight")
+        if status not in ("open", "acknowledged", "acted", "resolved", "dropped"):
+            raise ValueError("invalid status")
+        if status == "dropped" and not status_reason:
+            raise ValueError("dropped status requires status_reason")
+        with self._locked(), self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO items(id, prompt_id, kind, body, weight, status, status_reason, resolved_to, acked_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (item_id, prompt_id, kind, body, weight, status, status_reason, resolved_to, acked_at),
+            )
+            row = connection.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+        return self._dict(row)
+
+    def link_items(self, item_id, other_item_id, relation):
+        """Record a relation between two items -- `conflicts_with`,
+        `supersedes`, or `depends_on`. Symmetric relations (conflict) are
+        recorded once, in whichever direction the caller names it; the
+        `conflicts` view reports the pair regardless of which side is which."""
+        if relation not in ("conflicts_with", "supersedes", "depends_on"):
+            raise ValueError("invalid relation")
+        with self._locked(), self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO links(item_id, other_item_id, relation)
+                VALUES (?, ?, ?)
+                """,
+                (item_id, other_item_id, relation),
+            )
