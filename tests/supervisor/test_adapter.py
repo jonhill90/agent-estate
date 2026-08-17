@@ -693,6 +693,13 @@ class ClaudePrintRecoverabilityTest(unittest.TestCase):
     --resume <uuid>` would bring it straight back. The estate has died seven
     times. The old send-keys transport stranded prompts but SURVIVED a crash;
     the new one delivered reliably and lost everything, which is the worse trade.
+
+    A second, narrower defect survived the first fix pass: `harness_session_id`
+    was written but its companion `harness_project_dir` was not, and
+    `restore.sh` (~155-175) checks that column INDEPENDENTLY of
+    `harness_session_id` -- an empty `harness_project_dir` refuses regardless of
+    whether a usable session id is sitting right next to it. Both columns are
+    asserted below for that reason.
     """
 
     def test_register_lane_records_a_resumable_harness_session_id(self):
@@ -717,7 +724,7 @@ class ClaudePrintRecoverabilityTest(unittest.TestCase):
 
         db = next(root.rglob("*.sqlite3"))
         row = sqlite3.connect(db).execute(
-            "select transport, session_id, harness_session_id from lanes where lane='t:1'"
+            "select transport, session_id, harness_session_id, harness_project_dir from lanes where lane='t:1'"
         ).fetchone()
 
         self.assertEqual(row[0], "claude-print")
@@ -726,6 +733,17 @@ class ClaudePrintRecoverabilityTest(unittest.TestCase):
             "harness_session_id is empty -- restore.sh will report this lane "
             "UNRECOVERABLE even though `claude -p --resume` could return it",
         )
+        self.assertTrue(
+            row[3],
+            "harness_project_dir is empty -- restore.sh's independent check on "
+            "this column (~155-175) will refuse this lane even though "
+            "harness_session_id above is populated",
+        )
+        # `repo` is the directory `transport_factory(cwd=repo)` actually
+        # launched `claude -p` in -- the same notion dispatch.sh resolves as
+        # `HARNESS_PROJECT_DIR` and records alongside `harness_session_id` in
+        # one call, never independently (core.py ~1284-1294).
+        self.assertEqual(row[3], str(root))
         # For claude-print the two ids are the same uuid by construction: it is
         # what --session-id minted and what --resume takes.
         self.assertEqual(row[1], row[2])

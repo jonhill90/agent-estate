@@ -508,6 +508,18 @@ class ClaudePrintAdapter:
             # transport stranded prompts but survived a crash; this one delivered
             # reliably and lost everything, which is the worse trade.
             harness_session_id=session_id,
+            # core.py's register_lane never lets this diverge from
+            # harness_session_id (agent-supervisor#172): a caller that resolves
+            # a fresh session id must pass the directory it was resolved in
+            # alongside it, in the same call. `repo` IS that directory here --
+            # it is what `transport_factory(cwd=repo)` above actually launched
+            # `claude -p` in, the same notion dispatch.sh resolves as
+            # `HARNESS_PROJECT_DIR` (`$PANE_PATH`, the directory the harness
+            # process was launched in) and passes as `--harness-project-dir`.
+            # Leaving this out is what still left restore.sh's independent
+            # `harness_project_dir` check (~155-175) refusing every claude-print
+            # lane even after `harness_session_id` above started being written.
+            harness_project_dir=repo,
             command="claude",
             # Explicit, same reasoning as TmuxAdapter/ACPAdapter/PiRPCAdapter:
             # this class IS the claude-print transport by construction.
