@@ -812,6 +812,18 @@ widen the ceiling.
 anywhere in this estate to report a real number from, and inventing one
 would be worse than saying so.
 
+**Every shell-out is bounded (agent-supervisor#251).** `state.sh`'s calls to
+`digest.sh --json` and `cli.py status`, and `digest.sh`'s own `gh api`/
+`gh run list` calls, all run through the same self-contained `kill -0` poll
+loop quota.sh (#267) and advance-live.sh (#51) use — not a `timeout`/
+`gtimeout` wrapper, since production PATH is pinned to `/usr/bin:/bin` and
+neither ships on macOS. A timeout degrades the same way any other read
+failure does: `gate: FAIL` with the reason named, never a hang. And every
+section that reads `[]`/empty on failure says so explicitly — `dispatched`
+and `constraints` read `unknown -- <reason>` rather than `none`/empty on a
+read failure, so an unreadable ledger or a missing `loop-tick.md` is never
+indistinguishable from a genuinely idle one.
+
 ## Verification
 
 ```bash

@@ -1281,5 +1281,28 @@ else
   ok "mutation confirmed: disabling the age computation lets an hour-old 'current' replay through unmarked (19b would be red)"
 fi
 
+# agent-supervisor#251: `gh` calls in this file used to run with no timeout
+# guard at all. Reproduced live: `state.sh` (which calls this script) hung
+# past 120s inside this exact call, zero output even to stderr, requiring
+# `kill -9`. A short DIGEST_GH_TIMEOUT_SECONDS proves the bound is real --
+# a `gh` that sleeps far longer than the timeout must still let this script
+# return, with the failure named as a timeout (not a plain "failed", which
+# would read identically to a fast, ordinary API error).
+cat > "$D/bin/gh" <<'EOF'
+#!/bin/bash
+sleep 30
+echo '[]'
+EOF
+chmod +x "$D/bin/gh"
+start=$(date +%s)
+out=$(PATH="$D/bin:$PATH" SUPERVISOR_STATE="$D/state" LANES_SESSION=nosuch DIGEST_GH_TIMEOUT_SECONDS=2 \
+  DIGEST_REPOS=agent-supervisor timeout 20 bash "$DIGEST" 2>&1)
+elapsed=$(( $(date +%s) - start ))
+[ "$elapsed" -lt 15 ] && ok "a hanging gh does not hang digest.sh (returned in ${elapsed}s)" \
+  || bad "hanging gh bounded" "took ${elapsed}s, expected well under the 20s hard test timeout"
+grep -q "gh pr list failed for jonhill90/agent-supervisor.*timed out after 2s" <<<"$out" && \
+  ok "a hanging gh pr list is named as a timeout, not a plain failure" \
+  || bad "hanging gh named as timeout" "$out"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

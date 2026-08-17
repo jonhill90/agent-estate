@@ -98,6 +98,72 @@ fi
 ERRORS=()
 note_error() { ERRORS+=("$1"); }
 
+# agent-supervisor#251: every `gh` call below used to run unbounded. Measured
+# live against this estate: `state.sh` (which calls this script) hung past
+# 120s inside one of these with zero output, even to stderr, and had to be
+# `kill -9`ed. This is the same shape #267 fixed for quota.sh's `codexbar`
+# calls -- `gh api`/`gh run list` are network round-trips against a rate-
+# limited API, and a hang here is not "slow", it stalls every caller that
+# shells out to this digest simultaneously.
+#
+# with_timeout SECONDS OUTFILE CMD... -- same self-contained `kill -0` poll
+# loop as quota.sh's (#267) and advance-live.sh's (#51) fetch bound, not a
+# `timeout`/`gtimeout` wrapper: the watchdog pins PATH deliberately
+# (SUPERVISOR_PATH) and this repo's own suite runs against a PATH of only
+# /usr/bin:/bin to prove that pin holds -- neither ships GNU coreutils on
+# macOS. Prints nothing; CMD's stdout lands in OUTFILE so the caller reads it
+# once the exit code is known, matching quota.sh's own convention exactly.
+# Returns 124 on timeout, else CMD's own exit status.
+with_timeout() {
+  local secs="$1" outfile="$2"; shift 2
+  "$@" >"$outfile" 2>/dev/null &
+  local pid=$! waited=0 timed_out=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      timed_out=1
+      kill -TERM "$pid" 2>/dev/null
+      sleep 1
+      kill -KILL "$pid" 2>/dev/null
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid" 2>/dev/null
+  local rc=$?
+  [ "$timed_out" -eq 1 ] && return 124
+  return "$rc"
+}
+GH_TIMEOUT_SECONDS="${DIGEST_GH_TIMEOUT_SECONDS:-20}"
+
+# gh_call OUTVAR NOTE ARGS... -- runs `gh "${ARGS[@]}"` bounded by
+# GH_TIMEOUT_SECONDS, sets OUTVAR to its stdout (empty on any failure), and
+# returns 0 only when the call both finished in time and exited 0. A timeout
+# is note_error'd with NOTE plus "(timed out after Ns)" so it reads
+# differently from a plain API failure -- the two are not the same defect.
+gh_call() {
+  local __outvar="$1" note="$2"; shift 2
+  local outfile
+  outfile=$(mktemp "${TMPDIR:-/tmp}/digest-gh.XXXXXX") || { note_error "$note -- could not create a scratch file"; printf -v "$__outvar" '%s' ""; return 1; }
+  with_timeout "$GH_TIMEOUT_SECONDS" "$outfile" gh "$@"
+  local rc=$?
+  local out
+  out=$(cat "$outfile" 2>/dev/null)
+  rm -f "$outfile"
+  if [ "$rc" -eq 124 ]; then
+    note_error "$note (timed out after ${GH_TIMEOUT_SECONDS}s)"
+    printf -v "$__outvar" '%s' ""
+    return 1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    note_error "$note"
+    printf -v "$__outvar" '%s' ""
+    return 1
+  fi
+  printf -v "$__outvar" '%s' "$out"
+  return 0
+}
+
 # Splits only the LABEL prefix off a "label: value" status-file line, not
 # every colon in it -- a plain `awk -F': *'` field split truncates any value
 # containing its own colon. Reproduced live against watchdog.status:
@@ -436,10 +502,8 @@ fi
 # one, exactly the trade #144 asks for.
 PR_JSON="[]"
 for repo in $REPOS; do
-  list=$(gh api "repos/$OWNER/$repo/pulls?state=open&per_page=100" 2>/dev/null) || {
-    note_error "gh pr list failed for $OWNER/$repo -- its PRs are NOT in this digest"
-    continue
-  }
+  gh_call list "gh pr list failed for $OWNER/$repo -- its PRs are NOT in this digest" \
+    api "repos/$OWNER/$repo/pulls?state=open&per_page=100" || continue
   [ -z "$list" ] && list="[]"
   if ! jq -e . >/dev/null 2>&1 <<<"$list"; then
     note_error "gh pr list failed for $OWNER/$repo -- its PRs are NOT in this digest"
@@ -452,17 +516,15 @@ for repo in $REPOS; do
     branch=$(jq -r '.headRefName' <<<"$p")
     num=$(jq -r '.number' <<<"$p")
     head_oid=$(jq -r '.headRefOid' <<<"$p")
-    run=$(gh run list -R "$OWNER/$repo" --branch "$branch" --limit 1 \
-          --json headSha,conclusion 2>/dev/null) || {
-      note_error "gh run list failed for $OWNER/$repo#$num -- CI status omitted"
-      run="[]"
-    }
+    gh_call run "gh run list failed for $OWNER/$repo#$num -- CI status omitted" \
+      run list -R "$OWNER/$repo" --branch "$branch" --limit 1 --json headSha,conclusion || run="[]"
     [ -z "$run" ] && run="[]"
     r=$(jq -c '.[0] // {}' <<<"$run")
     # REST's `mergeable_state` is null until GitHub finishes computing it (a
     # known API lag right after a push) -- reads UNKNOWN then, same as any
     # other unresolved answer here, not a guessed CLEAN.
-    mergeable=$(gh api "repos/$OWNER/$repo/pulls/$num" 2>/dev/null) || mergeable=""
+    gh_call mergeable "gh pr view failed for $OWNER/$repo#$num -- merge_state omitted" \
+      api "repos/$OWNER/$repo/pulls/$num" || mergeable=""
     [ -z "$mergeable" ] && mergeable="{}"
     merge_state=$(jq -r '(.mergeable_state // "unknown") | ascii_upcase' <<<"$mergeable" 2>/dev/null)
     [ -z "$merge_state" ] && merge_state="UNKNOWN"
@@ -545,8 +607,8 @@ fi
 MERGED_JSON="[]"
 if [ -n "$SINCE" ]; then
   for repo in $REPOS; do
-    m=$(gh api "repos/$OWNER/$repo/pulls?state=closed&sort=updated&direction=desc&per_page=50" 2>/dev/null) || {
-      note_error "merged-list failed for $repo"; continue; }
+    gh_call m "merged-list failed for $repo" \
+      api "repos/$OWNER/$repo/pulls?state=closed&sort=updated&direction=desc&per_page=50" || continue
     if ! jq -e . >/dev/null 2>&1 <<<"${m:-[]}"; then
       note_error "merged-list failed for $repo"; continue
     fi

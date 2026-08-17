@@ -120,6 +120,62 @@ out=$(STATE_DIGEST_BIN="$D/bin/digest.sh" STATE_LEDGER_CLI="$D/bin/fake_cli.py" 
 grep -q "A brand new rule that did not exist" <<<"$out" && ok "constraints reflect loop-tick.md, not a hardcoded copy" \
   || bad "constraints derived from loop-tick.md" "$out"
 
+# 11. agent-supervisor#251: a HANGING digest.sh must not hang state.sh --
+# reproduced live against this estate (digest.sh --json hung past 120s with
+# zero output, even to stderr). A short STATE_DIGEST_TIMEOUT_SECONDS proves
+# the bound is real, not just documented: the stub sleeps far longer than
+# the timeout, and state.sh must still return within it, with gate reading
+# FAIL and a reason that says "timed out", not a hang or a silent PASS.
+cat > "$D/bin/hanging_digest.sh" <<'EOF'
+#!/bin/bash
+sleep 30
+echo '{"ok":true,"errors":[]}'
+EOF
+chmod +x "$D/bin/hanging_digest.sh"
+start=$(date +%s)
+out=$(STATE_DIGEST_BIN="$D/bin/hanging_digest.sh" STATE_LEDGER_PYTHON=python3 STATE_LEDGER_CLI="$D/bin/fake_cli.py" \
+  STATE_DIGEST_TIMEOUT_SECONDS=2 timeout 20 bash "$STATE_SH" 2>&1)
+elapsed=$(( $(date +%s) - start ))
+[ "$elapsed" -lt 15 ] && ok "a hanging digest.sh does not hang state.sh (returned in ${elapsed}s)" \
+  || bad "hanging digest.sh bounded" "took ${elapsed}s, expected well under the 20s hard test timeout"
+grep -q "gate: FAIL (digest.sh timed out after 2s)" <<<"$out" && ok "a hanging digest.sh reads gate: FAIL with a timeout reason" \
+  || bad "hanging digest gate reason" "$out"
+
+# 12. Same shape for the ledger: a hanging `cli.py status` must not hang
+# state.sh either, and must read "unknown" (not the CAP-crossing failure
+# mode of a stalled document, and not a false "none").
+cat > "$D/bin/hanging_cli.py" <<'EOF'
+import time
+time.sleep(30)
+EOF
+start=$(date +%s)
+out=$(STATE_DIGEST_BIN="$D/bin/digest.sh" STATE_LEDGER_PYTHON=python3 STATE_LEDGER_CLI="$D/bin/hanging_cli.py" \
+  STATE_LEDGER_TIMEOUT_SECONDS=2 timeout 20 bash "$STATE_SH" 2>&1)
+elapsed=$(( $(date +%s) - start ))
+[ "$elapsed" -lt 15 ] && ok "a hanging ledger cli.py does not hang state.sh (returned in ${elapsed}s)" \
+  || bad "hanging ledger bounded" "took ${elapsed}s, expected well under the 20s hard test timeout"
+grep -q "dispatched: unknown -- ledger status timed out after 2s" <<<"$out" && \
+  ok "a hanging ledger reads dispatched: unknown with a timeout reason, not 'none'" \
+  || bad "hanging ledger dispatched unknown" "$out"
+
+# 13. agent-supervisor#251 (gap 2): an UNREADABLE (not hanging) ledger must
+# also read dispatched: unknown, distinguishable from a genuinely empty
+# ledger -- both used to collapse to the same "dispatched: none".
+out=$(STATE_DIGEST_BIN="$D/bin/digest.sh" STATE_LEDGER_CLI="$D/bin/nope-does-not-exist.py" \
+  bash "$STATE_SH" 2>/dev/null)
+grep -q "^dispatched: unknown -- ledger status unreadable" <<<"$out" && \
+  ok "an unreadable ledger reads dispatched: unknown, not 'none'" \
+  || bad "unreadable ledger dispatched unknown" "$out"
+
+# 14. Same discipline for constraints: a missing loop-tick.md must read
+# constraints: unknown, not an empty "constraints:" section that looks like
+# a document with no standing rules at all.
+out=$(STATE_DIGEST_BIN="$D/bin/digest.sh" STATE_LEDGER_CLI="$D/bin/fake_cli.py" \
+  STATE_LOOP_TICK="$D/no-such-loop-tick.md" bash "$STATE_SH" 2>/dev/null)
+grep -q "^constraints: unknown -- .*no-such-loop-tick.md unreadable" <<<"$out" && \
+  ok "a missing loop-tick.md reads constraints: unknown, not an empty section" \
+  || bad "missing loop-tick constraints unknown" "$out"
+
 echo
 echo "state.sh: $pass ok, $fail failed"
 [ "$fail" -eq 0 ]

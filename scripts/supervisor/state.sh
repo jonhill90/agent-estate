@@ -83,6 +83,46 @@ LOOP_TICK="${STATE_LOOP_TICK:-$HERE/loop-tick.md}"
 # the upper edge of that range, not a number picked fresh here.
 TOKEN_CAP="${STATE_TOKEN_CAP:-1500}"
 
+# agent-supervisor#251: this script used to shell out to `digest.sh --json`
+# and `cli.py status` with no timeout wrapper anywhere -- the same shape
+# #267 fixed for quota.sh's `codexbar` calls. Reproduced live, twice: this
+# script hung past 120s inside the `digest.sh --json` subshell with ZERO
+# output, even to stderr, and had to be `kill -9`ed; `cli.py task-lane`
+# against the live ledger separately blew past 120s. A document meant to be
+# reinjected as cheap per-turn state cannot hang on the very reads it exists
+# to replace.
+#
+# with_timeout SECONDS OUTFILE CMD... -- the same self-contained `kill -0`
+# poll loop quota.sh (#267) and advance-live.sh (#51) already use, not a
+# `timeout`/`gtimeout` wrapper: the watchdog pins PATH deliberately
+# (SUPERVISOR_PATH) and this repo's own suite runs scripts against a PATH of
+# only /usr/bin:/bin to prove that pin holds -- neither ships GNU coreutils
+# on macOS. Prints nothing; CMD's stdout lands in OUTFILE so the caller can
+# read it once the exit code is known. Returns 124 on timeout, else CMD's
+# own exit status.
+with_timeout() {
+  local secs="$1" outfile="$2"; shift 2
+  "$@" >"$outfile" 2>/dev/null &
+  local pid=$! waited=0 timed_out=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      timed_out=1
+      kill -TERM "$pid" 2>/dev/null
+      sleep 1
+      kill -KILL "$pid" 2>/dev/null
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid" 2>/dev/null
+  local rc=$?
+  [ "$timed_out" -eq 1 ] && return 124
+  return "$rc"
+}
+DIGEST_TIMEOUT_SECONDS="${STATE_DIGEST_TIMEOUT_SECONDS:-45}"
+LEDGER_TIMEOUT_SECONDS="${STATE_LEDGER_TIMEOUT_SECONDS:-20}"
+
 if ! command -v jq >/dev/null 2>&1; then
   echo "state.sh: jq is required but not installed" >&2
   exit 1
@@ -91,11 +131,18 @@ fi
 # --- pull the live facts from digest.sh, once ------------------------------
 # One subprocess, reused for every section below -- this script holds no
 # knowledge of how to read tmux or gh, only how to distil what digest.sh
-# already read. DIGEST_JSON on empty/malformed output degrades every section
-# below to "unknown", same discipline digest.sh itself uses for a single
-# unreadable source.
-DIGEST_JSON=$("$DIGEST_BIN" --json 2>/dev/null)
-if ! jq -e . >/dev/null 2>&1 <<<"$DIGEST_JSON"; then
+# already read. DIGEST_JSON on empty/malformed output, OR a timeout,
+# degrades every section below to "unknown", same discipline digest.sh
+# itself uses for a single unreadable source.
+digest_outfile=$(mktemp "${TMPDIR:-/tmp}/state-digest.XXXXXX") || { echo "state.sh: could not create a scratch file for digest.sh's output" >&2; exit 1; }
+with_timeout "$DIGEST_TIMEOUT_SECONDS" "$digest_outfile" "$DIGEST_BIN" --json
+digest_rc=$?
+DIGEST_JSON=$(cat "$digest_outfile" 2>/dev/null)
+rm -f "$digest_outfile"
+if [ "$digest_rc" -eq 124 ]; then
+  echo "state.sh: digest.sh --json timed out after ${DIGEST_TIMEOUT_SECONDS}s -- state will be mostly 'unknown'" >&2
+  DIGEST_JSON='{"ok":false,"errors":["digest.sh timed out after '"$DIGEST_TIMEOUT_SECONDS"'s"],"lanes":{},"prs":[],"reconciliation":{"delivered_idle":[]},"watchdog":{},"poller":{}}'
+elif ! jq -e . >/dev/null 2>&1 <<<"$DIGEST_JSON"; then
   echo "state.sh: digest.sh --json produced no readable output -- state will be mostly 'unknown'" >&2
   DIGEST_JSON='{"ok":false,"errors":["digest.sh unreadable"],"lanes":{},"prs":[],"reconciliation":{"delivered_idle":[]},"watchdog":{},"poller":{}}'
 fi
@@ -105,15 +152,33 @@ fi
 # invariant 1) -- digest.sh's lane line only ever prints tmux-derived
 # state/window names, never which issue or task owns a busy lane. This is
 # the one thing `digest.sh` does not already carry that this document needs.
+#
+# DISPATCHED_UNKNOWN distinguishes "the read failed" from "the ledger
+# genuinely has nothing open" -- both used to collapse to the same empty
+# `[]`, which rendered as "dispatched: none", indistinguishable from a
+# clean, idle ledger (agent-supervisor#251, requirement 4: a row is never
+# silently dropped for being unknown).
 DISPATCHED_JSON="[]"
-if status_out=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" status 2>/dev/null) \
-    && jq -e . >/dev/null 2>&1 <<<"$status_out"; then
+DISPATCHED_UNKNOWN="false"
+DISPATCHED_REASON=""
+ledger_outfile=$(mktemp "${TMPDIR:-/tmp}/state-ledger.XXXXXX") || { echo "state.sh: could not create a scratch file for the ledger's output" >&2; exit 1; }
+with_timeout "$LEDGER_TIMEOUT_SECONDS" "$ledger_outfile" "$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" status
+ledger_rc=$?
+status_out=$(cat "$ledger_outfile" 2>/dev/null)
+rm -f "$ledger_outfile"
+if [ "$ledger_rc" -eq 124 ]; then
+  DISPATCHED_UNKNOWN="true"
+  DISPATCHED_REASON="ledger status timed out after ${LEDGER_TIMEOUT_SECONDS}s at $STATE"
+  echo "state.sh: $DISPATCHED_REASON -- dispatched section will read unknown" >&2
+elif [ "$ledger_rc" -eq 0 ] && jq -e . >/dev/null 2>&1 <<<"$status_out"; then
   DISPATCHED_JSON=$(jq -c '
     [ .tasks[] | select(.status | IN("complete","failed","cancelled") | not) |
       {lane, task: .id, status, summary: (.summary // "" | .[0:80])}
     ]' <<<"$status_out")
 else
-  echo "state.sh: ledger status unreadable at $STATE -- dispatched section will read unknown" >&2
+  DISPATCHED_UNKNOWN="true"
+  DISPATCHED_REASON="ledger status unreadable at $STATE"
+  echo "state.sh: $DISPATCHED_REASON -- dispatched section will read unknown" >&2
 fi
 
 # --- standing constraints: derived from loop-tick.md, never hand-maintained -
@@ -121,14 +186,22 @@ fi
 # this is a projection of that section, not a second copy of its wording. A
 # reader who wants the reasoning behind a constraint follows the pointer;
 # this only carries the bullet text so it survives a cap.
+#
+# CONSTRAINTS_UNKNOWN, same distinction as DISPATCHED_UNKNOWN above: an
+# unreadable loop-tick.md used to render identically to a document with no
+# standing rules at all -- "constraints:" with nothing under it.
 CONSTRAINTS_JSON="[]"
+CONSTRAINTS_UNKNOWN="false"
+CONSTRAINTS_REASON=""
 GATED_LINE=""
 if [ -r "$LOOP_TICK" ]; then
   CONSTRAINTS_JSON=$(awk '/^## Boundaries/{f=1;next}/^## /{f=0}f && /^- /{print}' "$LOOP_TICK" \
     | sed 's/^- //' | jq -R . | jq -s .)
   GATED_LINE=$(awk '/^Currently gated:/{print;exit}' "$LOOP_TICK")
 else
-  echo "state.sh: $LOOP_TICK unreadable -- constraints section will read unknown" >&2
+  CONSTRAINTS_UNKNOWN="true"
+  CONSTRAINTS_REASON="$LOOP_TICK unreadable"
+  echo "state.sh: $CONSTRAINTS_REASON -- constraints section will read unknown" >&2
 fi
 
 # --- assemble the full (uncapped) fact set ----------------------------------
@@ -136,7 +209,11 @@ FULL=$(jq -n \
   --arg checked "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
   --argjson digest "$DIGEST_JSON" \
   --argjson dispatched "$DISPATCHED_JSON" \
+  --argjson dispatched_unknown "$DISPATCHED_UNKNOWN" \
+  --arg dispatched_reason "$DISPATCHED_REASON" \
   --argjson constraints "$CONSTRAINTS_JSON" \
+  --argjson constraints_unknown "$CONSTRAINTS_UNKNOWN" \
+  --arg constraints_reason "$CONSTRAINTS_REASON" \
   --arg gated_line "$GATED_LINE" '
   {
     checked: $checked,
@@ -151,10 +228,14 @@ FULL=$(jq -n \
     quota: {state: "unknown", reason: "no quota/usage instrumentation exists in this estate"},
     lanes: ($digest.lanes // {}),
     dispatched: $dispatched,
+    dispatched_unknown: $dispatched_unknown,
+    dispatched_reason: $dispatched_reason,
     unreconciled: ($digest.reconciliation.delivered_idle // []),
     prs: ($digest.prs // []),
     lane_models: ($digest.lane_models.lanes // []),
     constraints: $constraints,
+    constraints_unknown: $constraints_unknown,
+    constraints_reason: $constraints_reason,
     constraints_gated: $gated_line
   }')
 
@@ -189,7 +270,8 @@ render() {
     "  stale: [\(.lanes.stale // "")]",
     "  unknown: [\(.lanes.unknown // "")]",
     "",
-    (if (.dispatched|length) == 0 then "dispatched: none"
+    (if .dispatched_unknown then "dispatched: unknown -- \(.dispatched_reason)"
+     elif (.dispatched|length) == 0 then "dispatched: none"
      else "dispatched:",
        (.dispatched
          | (if $level >= 2 then cap(6; .) else . end)[]
@@ -214,7 +296,8 @@ render() {
            end)
      end),
     "",
-    (if $level >= 1 then
+    (if .constraints_unknown then "constraints: unknown -- \(.constraints_reason)"
+     elif $level >= 1 then
        "constraints: see loop-tick.md#Boundaries (\(.constraints|length) standing rules); \(.constraints_gated)"
      else
        "constraints:",
