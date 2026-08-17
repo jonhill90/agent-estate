@@ -81,8 +81,16 @@ working=0
 free=0
 while read -r w; do
   [ -n "$w" ] || continue
+  # LAST NON-BLANK LINE ONLY -- never a scrollback sweep. This is lanes.sh's
+  # #65 discipline and skipping it broke this file within one hour of writing
+  # it: the nudge text below QUOTES the string `esc to interrupt`, so the
+  # moment the first nudge landed in the Director's pane, a whole-pane grep
+  # matched its own message and every later pass reported "1 pane-working".
+  # The heartbeat fired once and then permanently disabled itself, staying
+  # silent through a 9,223-second stall. A busy marker is a statement about
+  # the CURRENT footer, never about text a pane happens to be displaying.
   p=$(tmux capture-pane -p -t "=$w" 2>/dev/null) || continue
-  if grep -q 'esc to interrupt' <<<"$p"; then
+  if grep -v '^[[:space:]]*$' <<<"$p" | tail -1 | grep -q 'esc to interrupt'; then
     working=$(( working + 1 ))
   fi
 done < <(tmux list-windows -a -F '#{session_name}:#{window_id}' 2>/dev/null | grep -v Hill90)
