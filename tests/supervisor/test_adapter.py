@@ -10,6 +10,7 @@ sys.path.insert(0, str(SUPERVISOR_DIR))
 
 from adapter import ACPAdapter, ClaudePrintAdapter, PiRPCAdapter, TmuxAdapter, classify_capture  # noqa: E402
 from core import Ledger  # noqa: E402
+import sqlite3
 
 
 class FakeTransport:
@@ -675,3 +676,74 @@ class ClaudePrintAdapterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ClaudePrintRecoverabilityTest(unittest.TestCase):
+    """A claude-print lane must be RECOVERABLE, not merely registered.
+
+    Regression for the defect found 2026-08-17: `ClaudePrintAdapter.register_lane`
+    minted a session uuid, handed it to `claude -p --session-id`, and passed it to
+    the ledger as `session_id` -- but NOT as `harness_session_id`. Measured on the
+    live ledger at the time: 33 claude-print lanes, 0 with a usable
+    harness_session_id, against 20 of 20 for send-keys.
+
+    That matters because `restore.sh` refuses rather than invents (AGENTS.md
+    invariant 3): with no harness session id it reports UNRECOVERABLE and leaves
+    the lane, even though the conversation is sitting on disk and `claude -p
+    --resume <uuid>` would bring it straight back. The estate has died seven
+    times. The old send-keys transport stranded prompts but SURVIVED a crash;
+    the new one delivered reliably and lost everything, which is the worse trade.
+
+    A second, narrower defect survived the first fix pass: `harness_session_id`
+    was written but its companion `harness_project_dir` was not, and
+    `restore.sh` (~155-175) checks that column INDEPENDENTLY of
+    `harness_session_id` -- an empty `harness_project_dir` refuses regardless of
+    whether a usable session id is sitting right next to it. Both columns are
+    asserted below for that reason.
+    """
+
+    def test_register_lane_records_a_resumable_harness_session_id(self):
+        root = Path(tempfile.mkdtemp())
+        ledger = Ledger(root, clock=lambda: 2_000)
+
+        class _Transport:
+            def __init__(self, *a, **k):
+                pass
+
+            def start_session(self, session_id, prompt):
+                return {"is_error": False, "session_id": session_id, "result": "ready."}
+
+            def terminate(self):
+                pass
+
+        adapter = ClaudePrintAdapter(ledger=ledger, transport_factory=lambda **k: _Transport())
+        adapter.register_lane(
+            lane="t:1", target="claude-print:t:1", harness="claude",
+            repo=str(root), nonce="n1",
+        )
+
+        db = next(root.rglob("*.sqlite3"))
+        row = sqlite3.connect(db).execute(
+            "select transport, session_id, harness_session_id, harness_project_dir from lanes where lane='t:1'"
+        ).fetchone()
+
+        self.assertEqual(row[0], "claude-print")
+        self.assertTrue(
+            row[2],
+            "harness_session_id is empty -- restore.sh will report this lane "
+            "UNRECOVERABLE even though `claude -p --resume` could return it",
+        )
+        self.assertTrue(
+            row[3],
+            "harness_project_dir is empty -- restore.sh's independent check on "
+            "this column (~155-175) will refuse this lane even though "
+            "harness_session_id above is populated",
+        )
+        # `repo` is the directory `transport_factory(cwd=repo)` actually
+        # launched `claude -p` in -- the same notion dispatch.sh resolves as
+        # `HARNESS_PROJECT_DIR` and records alongside `harness_session_id` in
+        # one call, never independently (core.py ~1284-1294).
+        self.assertEqual(row[3], str(root))
+        # For claude-print the two ids are the same uuid by construction: it is
+        # what --session-id minted and what --resume takes.
+        self.assertEqual(row[1], row[2])
