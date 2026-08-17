@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from pathlib import Path
 
 DEFAULT_TIMEOUT_SECONDS = 900
 # A `claude -p` turn can run tools, read files, edit code and open a PR --
@@ -137,6 +138,54 @@ class ClaudePrintTransport:
         if result.get("type") != "result" or "session_id" not in result:
             raise ClaudePrintProtocolError(f"claude -p returned an unexpected shape: {result!r}")
         return result
+
+    def run_detached(self, prompt, *, log_path=None):
+        """Start one turn and return IMMEDIATELY, without waiting for it.
+
+        agent-supervisor#278. `run()` above waits for the whole turn, so a
+        dispatch does not return until the WORK finishes -- and the caller
+        cannot tell "still working" from "hung". Measured cost on 2026-08-17:
+        two lanes died at the 900s cap, `as308-fix-author-resolution` sat at
+        `delivery_pending` for over two hours with 411 lines of uncommitted
+        work in its worktree, and every one of those lanes had to be salvaged
+        by hand. Dispatch must return once the lane HAS the brief; whether the
+        work then succeeds is a separate question answered by the ledger.
+
+        Returns the Popen object so the caller can record the pid. The child
+        is put in its own process group (`start_new_session=True`) so that a
+        timeout, a Ctrl-C, or the dispatcher exiting does not take the work
+        with it -- the exact way the earlier corpus batch was lost.
+
+        stdout/stderr go to `log_path` when given, never to a pipe: an
+        unread pipe fills its buffer and blocks the child, which would
+        reintroduce the hang this method exists to remove.
+        """
+        command = self._base_command()
+        if self.session_id:
+            command += ["--resume", self.session_id]
+        else:
+            raise ClaudePrintProtocolError(
+                "ClaudePrintTransport.run_detached requires a session_id (mint one before the first call)"
+            )
+        command.append(prompt)
+        if log_path is not None:
+            log_path = Path(log_path)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            sink = open(log_path, "ab", buffering=0)
+        else:
+            sink = subprocess.DEVNULL
+        try:
+            return subprocess.Popen(
+                command,
+                cwd=self.cwd,
+                stdout=sink,
+                stderr=subprocess.STDOUT if log_path is not None else subprocess.DEVNULL,
+                stdin=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        finally:
+            if log_path is not None:
+                sink.close()
 
     def start_session(self, session_id, prompt):
         """The FIRST call for a brand-new session -- unlike `run`, this mints

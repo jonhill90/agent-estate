@@ -499,27 +499,6 @@ class ClaudePrintAdapter:
             repo=repo,
             server_id="claude-print",
             session_id=session_id,
-            # agent-supervisor: for claude-print the harness session id IS this
-            # uuid -- it is what `claude -p --session-id <uuid>` minted and what
-            # `claude -p --resume <uuid>` takes. Omitting it left all 33 migrated
-            # lanes UNRECOVERABLE: restore.sh refuses rather than invents, so a
-            # tmux death would have reported every one of them UNRECOVERABLE
-            # while the conversations sat resumable on disk. The old send-keys
-            # transport stranded prompts but survived a crash; this one delivered
-            # reliably and lost everything, which is the worse trade.
-            harness_session_id=session_id,
-            # core.py's register_lane never lets this diverge from
-            # harness_session_id (agent-supervisor#172): a caller that resolves
-            # a fresh session id must pass the directory it was resolved in
-            # alongside it, in the same call. `repo` IS that directory here --
-            # it is what `transport_factory(cwd=repo)` above actually launched
-            # `claude -p` in, the same notion dispatch.sh resolves as
-            # `HARNESS_PROJECT_DIR` (`$PANE_PATH`, the directory the harness
-            # process was launched in) and passes as `--harness-project-dir`.
-            # Leaving this out is what still left restore.sh's independent
-            # `harness_project_dir` check (~155-175) refusing every claude-print
-            # lane even after `harness_session_id` above started being written.
-            harness_project_dir=repo,
             command="claude",
             # Explicit, same reasoning as TmuxAdapter/ACPAdapter/PiRPCAdapter:
             # this class IS the claude-print transport by construction.
@@ -547,9 +526,22 @@ class ClaudePrintAdapter:
                     "reconcile the task before it can be assigned again"
                 )
             self.ledger.assign(task_id=task_id, lane=lane, pane_nonce=record["nonce"], summary=summary)
+            # agent-supervisor#278: the lane must now report its OWN
+            # completion, because nothing waits around to observe it any
+            # more. These are the same `accept`/`complete` instructions
+            # TmuxAdapter has always issued -- claude-print was the odd one
+            # out, inferring completion from a blocking call returning, which
+            # is why a timeout left the task at `delivery_pending` forever
+            # instead of at any state a human or a query could act on.
+            incoming = self.ledger.root / "incoming"
+            incoming.mkdir(mode=0o700, exist_ok=True)
+            result_file = incoming / f"{task_id}.md"
             prompt = (
                 f"[Hill90 task {task_id}] {summary}\n\n"
-                "Do not begin unrelated work. Record commands and actual outputs in a compact result."
+                "Do not begin unrelated work. Record commands and actual outputs in a compact result. "
+                f"Before working run: hill90-supervisor accept --task {task_id}. "
+                f"At completion write {result_file} and run: "
+                f"hill90-supervisor complete --task {task_id} --result-file {result_file}"
             )
             # Same ambiguous-state-before-physical-send ordering as
             # ACPAdapter/PiRPCAdapter.assign_task: if the resumed call
@@ -557,15 +549,47 @@ class ClaudePrintAdapter:
             # silently eligible for an automatic resend.
             self.ledger.mark_delivery_pending(task_id, pane_nonce=record["nonce"])
             transport = self.transport_factory(cwd=record["repo"], session_id=record["session_id"])
-            try:
-                result = transport.run(prompt)
-            finally:
-                transport.terminate()
-            self.ledger.mark_delivered(task_id, pane_nonce=record["nonce"])
-            message = (result.get("result") or "").strip()
-            if not message:
-                message = f"claude -p subtype={result.get('subtype')}"
-            return self.ledger.complete(task_id, message.encode("utf-8"), pane_nonce=record["nonce"])
+            # agent-supervisor#278. This USED to be `result = transport.run(prompt)`
+            # -- one blocking call covering delivery, the work, AND completion,
+            # capped at 900s. Three consequences, all measured on 2026-08-17:
+            #
+            #   1. `dispatch.sh` did not return until the WORK finished, so a
+            #      caller could not tell "working" from "hung". Every timeout
+            #      the watchdog imposed then SIGKILLed a healthy dispatch.
+            #   2. `mark_delivered` sat AFTER the work, so a timeout stranded
+            #      the task at `delivery_pending` forever. `as308-fix-author-
+            #      resolution` sat there over two hours.
+            #   3. The work died with the call. The corpus loader, the #313
+            #      batch and 411 uncommitted lines in two #308 worktrees were
+            #      all lost or hand-salvaged this way.
+            #
+            # Now: start the turn, record delivery, RETURN. Exit means
+            # DISPATCHED, not COMPLETED -- which is what dispatch.sh's usage
+            # text always claimed ("Exit 0 only when a lane has been sent a
+            # brief") and what the code never honoured. The lane reports its
+            # own completion via `hill90-supervisor complete`, the same
+            # mechanism every send-keys lane already uses.
+            #
+            # `transport.terminate()` is deliberately NOT called: it would
+            # kill the child we just started. The child is in its own process
+            # group, so it survives this process exiting -- that is the point.
+            # The pid and log path are written to the lane log itself rather
+            # than to the `events` table: that table is a notification queue
+            # with a fixed shape (key/type/task_id/status/payload_path), not a
+            # general audit log, and bending it into one would give two
+            # meanings to one column. The log file is where someone looking
+            # for "what is this detached child doing" will actually look.
+            log_path = self.ledger.root / "lane-logs" / f"{task_id}.log"
+            # The ADAPTER ensures the directory, not the transport. Depending
+            # on the transport to have created it made this crash with
+            # FileNotFoundError against any transport that does not -- caught
+            # by the test double, which is exactly what a test double is for.
+            # Whoever writes to a path is responsible for its parent.
+            log_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+            proc = transport.run_detached(prompt, log_path=log_path)
+            with open(log_path, "a") as handle:
+                handle.write(f"\n--- dispatched detached: task={task_id} lane={lane} pid={proc.pid} ---\n")
+            return self.ledger.mark_delivered(task_id, pane_nonce=record["nonce"])
 
     def observe_lane(self, lane):
         """Always None, for the same reason as `ACPAdapter.observe_lane`/
