@@ -200,6 +200,26 @@ ESCALATE_WINDOW=3600 # ...within this window, or stop and escalate
 # closed for inbox-poll.sh, left open here.
 INBOX_POLL_STATUS_PATH="${SUPERVISOR_INBOX_POLL_STATUS:-$STATE/inbox-poll.status}"
 INBOX_HEARTBEAT_EPISODE="${SUPERVISOR_HEARTBEAT_EPISODE:-$STATE/.watchdog-heartbeat-episode.json}"
+
+# --- agent-supervisor#276: quota-watch heartbeat staleness ------------------
+# quota-watch.sh is the estate's ONLY path back to work once a quota window
+# closes (see that file's own header) -- and on 2026-08-16 it hung inside an
+# unbounded `quota.sh check` call for three hours while `pgrep` kept
+# reporting it alive on every tick, because "the process exists" was the
+# only thing anything checked. quota-watch.sh now writes a `checked:`/
+# `state:` heartbeat to $QUOTA_WATCH_STATUS_PATH after each iteration's work
+# (never before), the same shape #163 already gave inbox-poll.status --
+# reused here via the SAME generic `--mode heartbeat` in watchdog_notify.py,
+# not a new parser. A live pid with a stale heartbeat is exactly the case
+# that went undetected for three hours; this check reports it as unhealthy
+# regardless of what the process table says, because the process table is
+# not what this check reads.
+QUOTA_WATCH_STATUS_PATH="${SUPERVISOR_QUOTA_WATCH_STATUS:-$STATE/.quota-watch.state}"
+QUOTA_WATCH_HEARTBEAT_EPISODE="${SUPERVISOR_QUOTA_WATCH_HEARTBEAT_EPISODE:-$STATE/.watchdog-quota-watch-heartbeat-episode.json}"
+# 2x quota-watch.sh's own default poll interval (300s) -- same "under ~2x
+# the loop interval" rule the brief states outright, so one missed tick from
+# scheduling jitter alone never pages, but two in a row does.
+QUOTA_WATCH_HEARTBEAT_STALE_AFTER="${QUOTA_WATCH_HEARTBEAT_STALE_AFTER:-600}"
 # agent-supervisor#41: watchdog.status is rebuilt from scratch every tick
 # (report(), below), so a fact that must survive across ticks -- when
 # poller-recover.sh last actually confirmed the poller alive, and how many
@@ -568,6 +588,19 @@ heartbeat_note() {               # heartbeat_note <line>
   return 0
 }
 
+# Same tmp+rename append shape again, for agent-supervisor#276's quota-watch
+# heartbeat check. A distinct line from `heartbeat:` (which is inbox-poll's)
+# rather than reusing it -- two different subsystems' staleness must both
+# stay visible in one `cat watchdog.status`, not overwrite each other.
+quota_watch_note() {             # quota_watch_note <line>
+  local tmp="$STATUS.qw.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^quota-watch:' "$STATUS"; printf 'quota-watch: %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 # Same tmp+rename append shape again, for the process-table measurement of
 # inbox-poll.sh. This line is intentionally absent in the healthy one-poller
 # case: the detector should be silent when the process table is exactly right.
@@ -602,6 +635,20 @@ recovery_note() {                # recovery_note <line>
   local tmp="$STATUS.recovery.$$"
   [ -f "$STATUS" ] || return 0
   { grep -v '^recovery:' "$STATUS"; printf 'recovery: %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# Same tmp+rename append shape again, for agent-supervisor#276's
+# quota-watch-recover.sh outcome. A separate line from `recovery:` (the
+# inbox poller's) -- two different recovery mechanisms for two different
+# processes, and collapsing them into one field would hide either restart
+# behind whichever ran last.
+quota_watch_recovery_note() {    # quota_watch_recovery_note <line>
+  local tmp="$STATUS.qwrecovery.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^quota-watch-recover:' "$STATUS"; printf 'quota-watch-recover: %s\n' "$1"; } >"$tmp" 2>/dev/null
   if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
   rm -f "$tmp" 2>/dev/null
   return 0
@@ -667,6 +714,33 @@ check_inbox_heartbeat() {
     log "HEARTBEAT-CHECK FAILED rc=$notify_rc: $notify_out"
   else
     log "HEARTBEAT-CHECK: $notify_out"
+  fi
+}
+
+# agent-supervisor#276: runs on EVERY exit path, same reasoning as
+# check_inbox_heartbeat above -- quota-watch.sh is a different subsystem
+# from the supervisor-loop checks (busy/idle/asleep/...) that return early
+# throughout this file, and the whole point of watching it from here is that
+# a hung quota-watch.sh leaves the loop itself looking perfectly healthy (it
+# is the loop's own wake-up path that dies, not the loop). Identical shape to
+# check_inbox_heartbeat, against a different status file and a separate
+# episode -- the two staleness alarms must not share dedup state, the same
+# discipline #163/as#151 already established for every other check here.
+check_quota_watch_heartbeat() {
+  local notify_out notify_rc
+  notify_out=$(python3 "$HERE/watchdog_notify.py" \
+    --mode heartbeat \
+    --heartbeat-status-path "$QUOTA_WATCH_STATUS_PATH" \
+    --threshold-seconds "$QUOTA_WATCH_HEARTBEAT_STALE_AFTER" \
+    --episode-state-path "$QUOTA_WATCH_HEARTBEAT_EPISODE" \
+    --log-path "$STATE/watchdog-notify.log" \
+    --notify-script "${NOTIFY_SCRIPT:-}" 2>&1)
+  notify_rc=$?
+  quota_watch_note "$(printf '%s' "$notify_out" | tr '\n' ' ')"
+  if [ "$notify_rc" -ne 0 ]; then
+    log "QUOTA-WATCH-HEARTBEAT-CHECK FAILED rc=$notify_rc: $notify_out"
+  else
+    log "QUOTA-WATCH-HEARTBEAT-CHECK: $notify_out"
   fi
 }
 
@@ -868,6 +942,42 @@ check_poller_window() {
     if [ -n "$out" ]; then
       log "POLLER-RECOVER: $out"
     fi
+  fi
+}
+
+# agent-supervisor#276: runs on EVERY exit path, same reasoning as
+# check_poller_window above -- restarting a hung quota-watch.sh is a
+# different subsystem from the supervisor-loop checks (busy/idle/asleep/...)
+# that return early throughout this file, and must not depend on the loop
+# itself being idle to get a turn. quota-watch-recover.sh reads the SAME
+# heartbeat stamp check_quota_watch_heartbeat above just alarmed on (or
+# didn't) -- the alarm and the fix act on one fact, not two that could
+# disagree, and the recover script is idempotent (its own mkdir lock, its
+# own "nothing to do" branch on a fresh heartbeat) so calling it every tick
+# is cheap on the ordinary healthy path.
+check_quota_watch_recover() {
+  if [ ! -e "$HERE/quota-watch-recover.sh" ]; then
+    log "QUOTA-WATCH-RECOVER-MISSING: quota-watch-recover.sh is missing beside this watchdog; reinstall or advance the live worktree"
+    quota_watch_recovery_note "missing — quota-watch-recover.sh is missing beside this watchdog; reinstall or advance the live worktree"
+    return 0
+  fi
+  if [ ! -x "$HERE/quota-watch-recover.sh" ]; then
+    log "QUOTA-WATCH-RECOVER-BROKEN: quota-watch-recover.sh exists but is not executable; run chmod +x $HERE/quota-watch-recover.sh or restore the committed 100755 mode"
+    quota_watch_recovery_note "broken — quota-watch-recover.sh exists but is not executable; run chmod +x $HERE/quota-watch-recover.sh or restore the committed 100755 mode"
+    return 0
+  fi
+  local out rc
+  out=$(SUPERVISOR_STATE="$STATE" SUPERVISOR_LIVE="$LIVE" \
+        QUOTA_WATCH_STATUS_PATH="$QUOTA_WATCH_STATUS_PATH" \
+        QUOTA_WATCH_STALE_AFTER="$QUOTA_WATCH_HEARTBEAT_STALE_AFTER" \
+        "$HERE/quota-watch-recover.sh" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "QUOTA-WATCH-RECOVER FAILED rc=$rc: $out"
+    quota_watch_recovery_note "failed — rc=$rc: $(printf '%s' "$out" | tr '\n' ' ')"
+  elif [[ "$out" == *"RESTARTED"* ]]; then
+    log "QUOTA-WATCH-RECOVER: $out"
+    quota_watch_recovery_note "$(printf '%s' "$out" | tr '\n' ' ')"
   fi
 }
 
@@ -1272,9 +1382,11 @@ advance_on_exit() {
 on_exit() {
   local rc=$?
   check_inbox_heartbeat
+  check_quota_watch_heartbeat
   check_director_inbox
   check_poller_process_count
   check_poller_window
+  check_quota_watch_recover
   check_source_task_sweep
   check_lane_completion_sweep
   check_never_busy_lanes

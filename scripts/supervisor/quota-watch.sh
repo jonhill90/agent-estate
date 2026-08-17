@@ -45,6 +45,21 @@
 # QUOTA_GATE below only overrides which quota.sh-shaped binary is asked, never
 # reaches around it.
 #
+# agent-supervisor#276: for three hours this process's own liveness was
+# reported as "healthy" purely because `pgrep` found its pid, while it sat
+# hung inside `quota.sh check` -- the exact instrument error this repository
+# keeps filing against itself (as#228/#230/#259): a process EXISTING is not a
+# process WORKING. $STAMP is now a HEARTBEAT, not a bare state cache: it
+# carries `checked:`/`state:` lines, the same shape `inbox-poll.status`
+# already uses for #163's identical fix, so watchdog.sh's existing generic
+# `--mode heartbeat` check reads it with no new parsing code. It is written
+# AFTER `quota.sh check` returns (never before), so a hang inside that call
+# stops the stamp advancing instead of certifying intent as completion. The
+# stamp's `state:` field is the RAW reading (SAFE/WINDDOWN/UNKNOWN, so a hang
+# is visible as UNKNOWN rather than silently missing) -- edge detection below
+# still keys on a separate `confirmed:` field that only ever holds SAFE or
+# WINDDOWN, for exactly the reason the previous section gives.
+#
 # Usage:
 #   quota-watch.sh [--interval SECONDS] [--target SESSION:WINDOW] [--once]
 #   nohup bash scripts/supervisor/quota-watch.sh >>~/.local/state/agent-dotfiles-supervisor/quota-watch.log 2>&1 &
@@ -104,6 +119,18 @@ Read ~/.local/state/agent-dotfiles-supervisor/QUOTA-HANDOFF.md for what was in f
 
 YOUR LOOP TICK MUST START WITH: bash scripts/supervisor/quota.sh check -- exit 0 proceed, exit 1 wind down and go quiet, exit 2 or 3 quota is UNKNOWN so say so and do not treat it as safe. The instruction "never call stop, always re-arm" is RETIRED; re-arming into an exhausted window is what burned $80 of usage credits down to $8. Do not reinstate it.'
 
+# write_heartbeat RAW CONFIRMED -- overwrites $STAMP with `checked:`/`state:`/
+# `confirmed:` lines, tmp+rename so a reader never sees a half-written file.
+# Called ONLY after this iteration's work is done (see the file header) --
+# never at the top of the loop. `state:` is the raw per-tick reading, for
+# watchdog.sh's staleness check; `confirmed:` is the edge-detection value
+# below, restored from this same file across restarts.
+write_heartbeat() {
+  local tmp="$STAMP.$$"
+  { printf 'checked: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; printf 'state: %s\n' "$1"; printf 'confirmed: %s\n' "$2"; } >"$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$STAMP" 2>/dev/null
+}
+
 log "watching every ${INTERVAL}s, target $TARGET"
 
 # `confirmed` is the CONFIRMED state used for edge detection: it is only ever
@@ -111,7 +138,7 @@ log "watching every ${INTERVAL}s, target $TARGET"
 # UNKNOWN reading is logged (below) but never written here -- see the file
 # header for why that is the whole fix.
 confirmed=""
-[ -f "$STAMP" ] && confirmed="$(cat "$STAMP" 2>/dev/null)"
+[ -f "$STAMP" ] && confirmed="$(sed -n 's/^confirmed: *//p' "$STAMP" 2>/dev/null | head -1)"
 case "$confirmed" in
   SAFE|WINDDOWN) : ;;
   *) confirmed="" ;;
@@ -165,7 +192,7 @@ while :; do
       ;;
   esac
 
-  printf '%s' "$confirmed" > "$STAMP"
+  write_heartbeat "$raw" "$confirmed"
   last_raw="$raw"
   [ "$ONCE" = "1" ] && break
   sleep "$INTERVAL"
