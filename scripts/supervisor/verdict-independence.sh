@@ -178,7 +178,19 @@ AUTHOR_LANE_GH_TIMEOUT_SECONDS="${AUTHOR_LANE_GH_TIMEOUT_SECONDS:-20}"
 # out" shape every caller here needs -- one helper instead of five copies
 # of the same outfile/rc dance `author_lane_for`'s `gh` call above already
 # does once.
-LEDGER_CALL_TIMEOUT_SECONDS="${LEDGER_CALL_TIMEOUT_SECONDS:-15}"
+LEDGER_CALL_TIMEOUT_SECONDS="${LEDGER_CALL_TIMEOUT_SECONDS:-20}"
+# `verdict.py get` is not one query -- a rebase-promotion case
+# (`_content_unchanged_since`, #226) chains several of ITS OWN `gh`/`git`
+# calls, each already bounded at 30s internally (verdict.py's own
+# `_subprocess_runner`). A 15s OUTER bound on the whole process killed that
+# legitimate multi-step work mid-chain under ordinary CI process-spawn
+# overhead -- measured live: this exact shape (agent-supervisor#251's own
+# fix, first attempt) turned "PR7/PR9 verdict" from slow-but-correct into a
+# silent empty result on GitHub's runner, which is the wrong direction for a
+# bound to fail in. Sized well above any realistic chain of 30s-capped
+# internal calls, still far under the 300s hard kill this whole suite runs
+# under.
+VERDICT_CALL_TIMEOUT_SECONDS="${VERDICT_CALL_TIMEOUT_SECONDS:-90}"
 run_bounded() {  # run_bounded SECONDS CMD... -> stdout on success; rc 124 on timeout
   local secs="$1" outfile out rc; shift
   outfile=$(mktemp "${TMPDIR:-/tmp}/vi-bounded.XXXXXX") || return 1
@@ -298,7 +310,7 @@ verdict_for() {
     # the ledger's own lock file -- had no outer bound. A wedged lock is not
     # a network hang, but it is still a hang, and #251's own brief asks for
     # every shell-out on the path, not just the one already caught.
-    out=$(run_bounded "$LEDGER_CALL_TIMEOUT_SECONDS" "$VERDICT_PYTHON" "$HERE/verdict.py" --state-dir "$STATE" \
+    out=$(run_bounded "$VERDICT_CALL_TIMEOUT_SECONDS" "$VERDICT_PYTHON" "$HERE/verdict.py" --state-dir "$STATE" \
           get --repo "$repo_full" --number "$number" --source "$VERDICT_SOURCE" \
           --head-sha "$head_sha" 2>/dev/null)
   fi
