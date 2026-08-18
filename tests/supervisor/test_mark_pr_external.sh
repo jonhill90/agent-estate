@@ -105,6 +105,28 @@ want_contains "...says checked-and-empty is not the same as could-not-check" \
 ext=$(ledger pr-external --repo acme/agent-dotfiles --pr 999)
 want_contains "...and nothing was recorded" '"known":false' "$ext"
 
+# --- RED/refusal: a resolution-chain READ fails mid-chain -----------------
+# PR #331 review, finding 1: a lookup whose ledger CLI call itself errors
+# (not "ran and answered known:false") must never be indistinguishable from
+# a genuinely empty, fully-checked chain. PR #700's body closes issue #40,
+# so resolve_pr_contributors reaches contributor-issue-lanes -- exactly the
+# lookup DISPATCH_PYTHON=python3-fail-reads makes fail, while leaving the
+# final `mark-pr-external` write itself healthy (isolating the resolution
+# chain from the write, same as the review's own repro). Before this fix,
+# every `|| continue` / `|| var=""` swallowed the failure silently and the
+# chain fell through to "no contributor found -- mark external"; it must now
+# refuse instead.
+STATE="$D/state-read-failure"
+printf '700|Fixes #40|fix/40-something-else\n' >> "$D/prs"
+out=$(DISPATCH_PYTHON="$HERE/stubs/python3-fail-reads" mark acme/agent-dotfiles 700 \
+  "should be refused -- the resolution chain never actually completed" "$REPO"); rc=$?
+want_exit "RED: a resolution-chain read failure refuses rather than proceeding" "$rc" 1 "$out"
+want_contains "...names which lookup failed" "contributor-issue-lanes lookup failed" "$out"
+want_contains "...says checked-and-empty is not the same as could-not-check" \
+  "not the same as checked-and-empty" "$out"
+ext=$(ledger pr-external --repo acme/agent-dotfiles --pr 700)
+want_contains "...and nothing was recorded" '"known":false' "$ext"
+
 # --- GREEN: a genuinely external PR is marked, then becomes reviewable ----
 # PR #600 closes no issue any lane ever touched, and no worktree in this repo
 # ever sat on its branch -- the #300/#301/#316 shape from #308's own brief.

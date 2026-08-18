@@ -36,12 +36,20 @@
 #                                   silent".
 #   HEAD_REF, FALLBACK_TASK     -- as resolved along the way.
 #
-# On failure (return 1) the PR or its head branch could not be read at all
-# (`gh` unreachable, no head branch) -- an error message is already printed
-# to stderr. The caller MUST treat this as UNKNOWN, never as "checked, found
-# nothing": proceeding here is exactly the "no lane contributed" claim
-# agent-supervisor#308 item 3 requires POSITIVE evidence for, and this
-# function could not produce any.
+# On failure (return 1) either the PR/head branch could not be read at all
+# (`gh` unreachable, no head branch), OR one of the five ledger lookups
+# below failed mid-chain (the `ledger_cli` process itself errored, not "ran
+# and answered known:false") -- an error message is already printed to
+# stderr either way. The caller MUST treat this as UNKNOWN, never as
+# "checked, found nothing": proceeding here is exactly the "no lane
+# contributed" claim agent-supervisor#308 item 3 requires POSITIVE evidence
+# for, and this function could not produce any. A mid-chain ledger read
+# failure and a genuinely-empty-but-fully-checked chain must never look the
+# same to a caller -- see the PR #331 review that added this failure path:
+# a failed read left CONTRIBUTORS_RESOLVED unset and AUTHOR_LANES empty,
+# byte-for-byte identical to a real "checked every path, found nobody"
+# result, which is exactly the "empty instrument reads as an empty world"
+# defect this file exists to avoid.
 resolve_pr_contributors() {
   local repo="$1" pr="$2" repo_path="$3" prefix="$4" ledger_python="$5" ledger_cli="$6"
 
@@ -94,7 +102,13 @@ resolve_pr_contributors() {
   )
   local candidate_issue issue_json c_lane c_task
   for candidate_issue in $candidate_issues; do
-    issue_json=$("$ledger_python" "$ledger_cli" contributor-issue-lanes --issue "$candidate_issue" 2>&1) || continue
+    issue_json=$("$ledger_python" "$ledger_cli" contributor-issue-lanes --issue "$candidate_issue" 2>&1)
+    if [ $? -ne 0 ]; then
+      echo "dispatch: contributor-issue-lanes lookup failed for issue #$candidate_issue -- refusing (authorship unknown, failing closed)" >&2
+      sed 's/^/  /' <<<"$issue_json" >&2
+      unset -f _rpc_author_lane_known _rpc_add_contributor
+      return 1
+    fi
     if grep -qF '"known":true' <<<"$issue_json"; then
       CONTRIBUTORS_RESOLVED=1
       while IFS=$'\t' read -r c_lane c_task; do
@@ -108,7 +122,13 @@ resolve_pr_contributors() {
   # 2.1. agent-supervisor#308 item 1: the explicit "task X's work opened PR
   # N" record.
   local pr_task_json p_lane p_task
-  pr_task_json=$("$ledger_python" "$ledger_cli" pr-task --repo "$repo" --pr "$pr" 2>&1) || pr_task_json=""
+  pr_task_json=$("$ledger_python" "$ledger_cli" pr-task --repo "$repo" --pr "$pr" 2>&1)
+  if [ $? -ne 0 ]; then
+    echo "dispatch: pr-task lookup failed for PR #$pr -- refusing (authorship unknown, failing closed)" >&2
+    sed 's/^/  /' <<<"$pr_task_json" >&2
+    unset -f _rpc_author_lane_known _rpc_add_contributor
+    return 1
+  fi
   if grep -qF '"known":true' <<<"$pr_task_json"; then
     CONTRIBUTORS_RESOLVED=1
     p_lane=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$pr_task_json")
@@ -119,7 +139,13 @@ resolve_pr_contributors() {
   # 2.2. agent-supervisor#308 item 2: resolution path five, the PR's own
   # source_tasks rows asked directly by PR number.
   local pr_contrib_json
-  pr_contrib_json=$("$ledger_python" "$ledger_cli" contributor-pr-lanes --pr "$pr" 2>&1) || pr_contrib_json=""
+  pr_contrib_json=$("$ledger_python" "$ledger_cli" contributor-pr-lanes --pr "$pr" 2>&1)
+  if [ $? -ne 0 ]; then
+    echo "dispatch: contributor-pr-lanes lookup failed for PR #$pr -- refusing (authorship unknown, failing closed)" >&2
+    sed 's/^/  /' <<<"$pr_contrib_json" >&2
+    unset -f _rpc_author_lane_known _rpc_add_contributor
+    return 1
+  fi
   if grep -qF '"known":true' <<<"$pr_contrib_json"; then
     CONTRIBUTORS_RESOLVED=1
     while IFS=$'\t' read -r c_lane c_task; do
@@ -142,7 +168,13 @@ resolve_pr_contributors() {
       matched_worktree=$(head -n1 <<<"$matched_worktree")
       if [ -n "$matched_worktree" ]; then
         worktree_json=$("$ledger_python" "$ledger_cli" worktree-lane --path "$matched_worktree" 2>&1)
-        if [ $? -eq 0 ] && grep -qF '"known":true' <<<"$worktree_json"; then
+        if [ $? -ne 0 ]; then
+          echo "dispatch: worktree-lane lookup failed for '$matched_worktree' -- refusing (authorship unknown, failing closed)" >&2
+          sed 's/^/  /' <<<"$worktree_json" >&2
+          unset -f _rpc_author_lane_known _rpc_add_contributor
+          return 1
+        fi
+        if grep -qF '"known":true' <<<"$worktree_json"; then
           CONTRIBUTORS_RESOLVED=1
           w_lane=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$worktree_json")
           w_task=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$worktree_json")
@@ -157,7 +189,13 @@ resolve_pr_contributors() {
     FALLBACK_TASK="${prefix}${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
     local fallback_json f_lane
     fallback_json=$("$ledger_python" "$ledger_cli" task-lane --task "$FALLBACK_TASK" 2>&1)
-    if [ $? -eq 0 ] && grep -qF '"known":true' <<<"$fallback_json"; then
+    if [ $? -ne 0 ]; then
+      echo "dispatch: task-lane lookup failed for task '$FALLBACK_TASK' -- refusing (authorship unknown, failing closed)" >&2
+      sed 's/^/  /' <<<"$fallback_json" >&2
+      unset -f _rpc_author_lane_known _rpc_add_contributor
+      return 1
+    fi
+    if grep -qF '"known":true' <<<"$fallback_json"; then
       CONTRIBUTORS_RESOLVED=1
       f_lane=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$fallback_json")
       _rpc_add_contributor "$f_lane" "$FALLBACK_TASK"
