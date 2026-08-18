@@ -55,9 +55,14 @@ lane_relation() {  # lane_relation <lane> <other> [lane-pane-id] -> same|differe
   # exactly the gap #332 closes for merge-pr.sh and digest.sh -- see
   # resolve_lane_relation() below, the one place this file now supplies a
   # pane id for those two callers.
+  #
+  # agent-supervisor#251: the ledger call itself is bounded through
+  # `run_bounded`, same as every other shell-out in this file -- see the
+  # #251 block below for why an unbounded `gh`/ledger call in this file is
+  # the exact defect that blew CI's suite budget.
   local json rel lane_pane_id_args=()
   [ -z "${3:-}" ] || lane_pane_id_args=(--lane-pane-id "$3")
-  json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" lane-relation --lane "$1" --other "$2" "${lane_pane_id_args[@]}" 2>/dev/null) || json=""
+  json=$(run_bounded "$LEDGER_CALL_TIMEOUT_SECONDS" "$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" lane-relation --lane "$1" --other "$2" "${lane_pane_id_args[@]}" 2>/dev/null) || json=""
   rel=$(jq -r '.relation // ""' 2>/dev/null <<<"$json") || rel=""
   case "$rel" in
     same|different) printf '%s\n' "$rel" ;;
@@ -162,6 +167,29 @@ if ! declare -F with_timeout >/dev/null 2>&1; then
 fi
 AUTHOR_LANE_GH_TIMEOUT_SECONDS="${AUTHOR_LANE_GH_TIMEOUT_SECONDS:-20}"
 
+# Every OTHER shell-out in this file -- `cli.py lane-relation`, `cli.py
+# author-issue-lane`, `cli.py task-lane`, `verdict.py get` -- was ALSO
+# unbounded until now. Local sqlite/python calls, not network round-trips,
+# so a hang here is a lock (a stale WAL lock, a wedged process holding the
+# ledger open) rather than a dead TCP connection -- but "local" is not
+# "instant", and #251's own brief is explicit: bound EVERY shell-out on the
+# path, not just the one already caught. `run_bounded` is `with_timeout`
+# wrapped for the "run a command, print its stdout, tell me if it timed
+# out" shape every caller here needs -- one helper instead of five copies
+# of the same outfile/rc dance `author_lane_for`'s `gh` call above already
+# does once.
+LEDGER_CALL_TIMEOUT_SECONDS="${LEDGER_CALL_TIMEOUT_SECONDS:-15}"
+run_bounded() {  # run_bounded SECONDS CMD... -> stdout on success; rc 124 on timeout
+  local secs="$1" outfile out rc; shift
+  outfile=$(mktemp "${TMPDIR:-/tmp}/vi-bounded.XXXXXX") || return 1
+  with_timeout "$secs" "$outfile" "$@"
+  rc=$?
+  out=$(cat "$outfile" 2>/dev/null)
+  rm -f "$outfile"
+  printf '%s' "$out"
+  return "$rc"
+}
+
 # `dispatch.sh`'s task ids are minted `<window-prefix><issue>-<slug>`, where
 # the window prefix is the repo name's initials (hyphen-joined words) or the
 # whole name for a one-word repo -- e.g. "agent-supervisor" -> "as",
@@ -227,7 +255,7 @@ author_lane_for() {
     } | awk '!seen[$0]++'
   )
   for candidate in $candidates; do
-    if issue_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" author-issue-lane --issue "$candidate" --head-ref "$head_ref" 2>/dev/null) \
+    if issue_json=$(run_bounded "$LEDGER_CALL_TIMEOUT_SECONDS" "$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" author-issue-lane --issue "$candidate" --head-ref "$head_ref" 2>/dev/null) \
        && jq -e '.known == true' >/dev/null 2>&1 <<<"$issue_json"; then
       jq -nc --arg lane "$(jq -r '.lane' <<<"$issue_json")" \
              --arg task "$(jq -r '.task // ""' <<<"$issue_json")" \
@@ -238,7 +266,7 @@ author_lane_for() {
   prefix=$(repo_task_prefix "$repo_full")
   if [[ "$head_ref" =~ ^(lane|fix|feat|chore|docs)/([0-9]+)-(.+)$ ]]; then
     fallback_task="${prefix}${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
-    if fallback_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" task-lane --task "$fallback_task" 2>/dev/null) \
+    if fallback_json=$(run_bounded "$LEDGER_CALL_TIMEOUT_SECONDS" "$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" task-lane --task "$fallback_task" 2>/dev/null) \
        && jq -e '.known == true' >/dev/null 2>&1 <<<"$fallback_json"; then
       jq -nc --arg lane "$(jq -r '.lane' <<<"$fallback_json")" \
              --arg task "$fallback_task" \
@@ -262,9 +290,15 @@ author_lane_for() {
 verdict_for() {
   local repo_full="$1" number="$2" head_sha="$3" out
   if [ -n "${VERDICT_BIN:-}" ]; then
-    out=$("$VERDICT_BIN" --repo "$repo_full" --number "$number" --head-sha "$head_sha" 2>/dev/null)
+    out=$(run_bounded "$LEDGER_CALL_TIMEOUT_SECONDS" "$VERDICT_BIN" --repo "$repo_full" --number "$number" --head-sha "$head_sha" 2>/dev/null)
   else
-    out=$("$VERDICT_PYTHON" "$HERE/verdict.py" --state-dir "$STATE" \
+    # #251/#267/#205's own shape: verdict.py's individual `gh`/`git` calls
+    # already carry their own 30s subprocess.run timeouts (verdict.py's
+    # _subprocess_runner), but the PYTHON PROCESS ITSELF -- sqlite opens,
+    # the ledger's own lock file -- had no outer bound. A wedged lock is not
+    # a network hang, but it is still a hang, and #251's own brief asks for
+    # every shell-out on the path, not just the one already caught.
+    out=$(run_bounded "$LEDGER_CALL_TIMEOUT_SECONDS" "$VERDICT_PYTHON" "$HERE/verdict.py" --state-dir "$STATE" \
           get --repo "$repo_full" --number "$number" --source "$VERDICT_SOURCE" \
           --head-sha "$head_sha" 2>/dev/null)
   fi

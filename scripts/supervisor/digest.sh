@@ -136,6 +136,26 @@ with_timeout() {
 }
 GH_TIMEOUT_SECONDS="${DIGEST_GH_TIMEOUT_SECONDS:-20}"
 
+# agent-supervisor#251 (round two, its own fourth instance of this defect):
+# `INBOX_BIN`, `LANES_BIN` (twice) and the ledger's `delivered-open` below
+# were the local shell-outs `gh_call` never covered -- not network calls,
+# but not immune to a hang either (a wedged tmux server for `LANES_BIN`, a
+# stale sqlite lock for the ledger). `run_bounded` is `with_timeout` wrapped
+# for the "run it, print stdout, tell me if it timed out" shape every one of
+# these callers needs -- one helper instead of four copies of the outfile/rc
+# dance `gh_call` already does once for `gh`.
+LOCAL_TIMEOUT_SECONDS="${DIGEST_LOCAL_TIMEOUT_SECONDS:-20}"
+run_bounded() {  # run_bounded SECONDS CMD... -> stdout on success; rc 124 on timeout
+  local secs="$1" outfile out rc; shift
+  outfile=$(mktemp "${TMPDIR:-/tmp}/digest-local.XXXXXX") || return 1
+  with_timeout "$secs" "$outfile" "$@"
+  rc=$?
+  out=$(cat "$outfile" 2>/dev/null)
+  rm -f "$outfile"
+  printf '%s' "$out"
+  return "$rc"
+}
+
 # gh_call OUTVAR NOTE ARGS... -- runs `gh "${ARGS[@]}"` bounded by
 # GH_TIMEOUT_SECONDS, sets OUTVAR to its stdout (empty on any failure), and
 # returns 0 only when the call both finished in time and exited 0. A timeout
@@ -335,8 +355,12 @@ fi
 # `director-route.sh`'s nudge succeeding.
 INBOX_BIN="${DIGEST_INBOX_BIN:-$HERE/director-inbox.sh}"
 INBOX_STALE_SECONDS="${DIGEST_INBOX_STALE_SECONDS:-1800}"
-inbox_json=$("$INBOX_BIN" stats 2>/dev/null)
-if ! jq -e . >/dev/null 2>&1 <<<"$inbox_json"; then
+inbox_json=$(run_bounded "$LOCAL_TIMEOUT_SECONDS" "$INBOX_BIN" stats 2>/dev/null)
+inbox_rc=$?
+if [ "$inbox_rc" -eq 124 ]; then
+  inbox_json='{"pending":null,"oldest_at":null,"oldest_age_s":null}'
+  note_error "director-inbox.sh stats timed out after ${LOCAL_TIMEOUT_SECONDS}s"
+elif ! jq -e . >/dev/null 2>&1 <<<"$inbox_json"; then
   inbox_json='{"pending":null,"oldest_at":null,"oldest_age_s":null}'
   note_error "director-inbox.sh stats produced no readable output"
 fi
@@ -352,7 +376,7 @@ fi
 # Overridable so a test can exercise a lanes.sh shape (e.g. header row, no
 # data rows) without needing a real tmux session.
 LANES_BIN="${DIGEST_LANES_BIN:-$HERE/lanes.sh}"
-LANES_OUT=$("$LANES_BIN" "$SESSION" 2>/dev/null)
+LANES_OUT=$(run_bounded "$LOCAL_TIMEOUT_SECONDS" "$LANES_BIN" "$SESSION" 2>/dev/null)
 lanes_rc=$?
 # Two distinct failure shapes, both invisible to a bare `[ -z ]` check:
 # lanes.sh exiting non-zero (session genuinely gone, caught below already by
@@ -361,7 +385,9 @@ lanes_rc=$?
 # one used to render as "the estate is idle in every category", indistinguishable
 # from a genuinely idle estate.
 lane_rows=$(printf '%s\n' "$LANES_OUT" | awk 'NR>1 && NF' | wc -l | tr -d ' ')
-if [ "$lanes_rc" -ne 0 ] || [ -z "$LANES_OUT" ]; then
+if [ "$lanes_rc" -eq 124 ]; then
+  note_error "lanes.sh timed out after ${LOCAL_TIMEOUT_SECONDS}s for session '$SESSION'"
+elif [ "$lanes_rc" -ne 0 ] || [ -z "$LANES_OUT" ]; then
   note_error "lanes.sh returned nothing for session '$SESSION'"
 elif [ "$lane_rows" -eq 0 ]; then
   note_error "lanes.sh returned no lane rows for session '$SESSION' (header only)"
@@ -378,7 +404,11 @@ lane_line() { awk -v s="$1" 'NR>1 && $NF==s {print $2}' <<<"$LANES_OUT" | paste 
 # belongs in `record-completion` after a human reads the pane.
 DELIVERED_OPEN_JSON="[]"
 RECONCILIATION_JSON="[]"
-if delivered_out=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" delivered-open 2>/dev/null); then
+delivered_out=$(run_bounded "$LOCAL_TIMEOUT_SECONDS" "$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" delivered-open 2>/dev/null)
+delivered_rc=$?
+if [ "$delivered_rc" -eq 124 ]; then
+  note_error "delivered-open timed out after ${LOCAL_TIMEOUT_SECONDS}s for ledger at $STATE"
+elif [ "$delivered_rc" -eq 0 ]; then
   if jq -e . >/dev/null 2>&1 <<<"$delivered_out"; then
     DELIVERED_OPEN_JSON=$(jq -c '.tasks // []' <<<"$delivered_out")
   else
@@ -387,9 +417,12 @@ if delivered_out=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" delivered
 else
   note_error "delivered-open failed for ledger at $STATE"
 fi
-LANES_JSON_OUT=$("$LANES_BIN" --json "$SESSION" 2>/dev/null)
+LANES_JSON_OUT=$(run_bounded "$LOCAL_TIMEOUT_SECONDS" "$LANES_BIN" --json "$SESSION" 2>/dev/null)
 lanes_json_rc=$?
-if [ "$lanes_json_rc" -ne 0 ] || ! jq -e . >/dev/null 2>&1 <<<"$LANES_JSON_OUT"; then
+if [ "$lanes_json_rc" -eq 124 ]; then
+  note_error "lanes.sh --json timed out after ${LOCAL_TIMEOUT_SECONDS}s for session '$SESSION' -- delivered/idle reconciliation omitted"
+  LANES_JSON_OUT="[]"
+elif [ "$lanes_json_rc" -ne 0 ] || ! jq -e . >/dev/null 2>&1 <<<"$LANES_JSON_OUT"; then
   note_error "lanes.sh --json failed for session '$SESSION' -- delivered/idle reconciliation omitted"
   LANES_JSON_OUT="[]"
 fi
