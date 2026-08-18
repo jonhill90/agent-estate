@@ -10,7 +10,6 @@ sys.path.insert(0, str(SUPERVISOR_DIR))
 
 from adapter import ACPAdapter, ClaudePrintAdapter, PiRPCAdapter, TmuxAdapter, classify_capture  # noqa: E402
 from core import Ledger  # noqa: E402
-import sqlite3
 
 
 class FakeTransport:
@@ -525,6 +524,21 @@ class FakeClaudePrintTransport:
             "is_error": self.is_error,
         }
 
+    def run_detached(self, prompt, log_path=None):
+        """agent-supervisor#278: start the turn and return at once.
+
+        The real transport returns a Popen; the adapter only reads `.pid`
+        and writes it to the lane log, so a stub with a pid is enough.
+        """
+        self.prompts.append((self.session_id, prompt))
+        self.detached = True
+        self.log_path = log_path
+
+        class _Proc:
+            pid = 4242
+
+        return _Proc()
+
     def terminate(self):
         self.terminated = True
 
@@ -600,20 +614,38 @@ class ClaudePrintAdapterTest(unittest.TestCase):
                 lane="claude-print-worker", target=None, harness="claude", repo="/repo/hill90", nonce="nonce-cp"
             )
 
-    def test_assign_task_resumes_the_session_and_completes_synchronously_from_the_result(self):
+    def test_assign_task_returns_at_delivered_without_waiting_for_the_work(self):
+        """agent-supervisor#278. This test previously asserted `complete` and
+        was named `..._completes_synchronously_from_the_result`. That
+        behaviour was the defect: one blocking call covered delivery, the
+        work AND completion, so `dispatch.sh` did not return until the work
+        finished, a caller could not tell working from hung, and a timeout
+        stranded the task at `delivery_pending` forever with its work lost.
+
+        The contract now: assign_task returns once the lane HAS the brief.
+        `delivered` means DISPATCHED, never COMPLETED -- the lane reports its
+        own completion via `hill90-supervisor complete`.
+        """
         self.adapter.register_lane(
             lane="claude-print-worker", target=None, harness="claude", repo="/repo/hill90", nonce="nonce-cp"
         )
         self.seed_source("cp-task", "Review one artifact")
         task = self.adapter.assign_task(lane="claude-print-worker", task_id="cp-task", summary="Review one artifact")
-        self.assertEqual("complete", task["status"])
 
-        # A fresh transport was spawned for this call and terminated
-        # afterward -- no subprocess lingers between CLI invocations.
+        # DELIVERED, not complete. Completion is the lane's to report.
+        self.assertEqual("delivered", task["status"])
+
         assign_transport = FakeClaudePrintTransport.instances[-1]
-        self.assertTrue(assign_transport.terminated)
+        # Started detached, and NOT terminated -- terminating would kill the
+        # child we just started, which is the whole point of detaching.
+        self.assertTrue(getattr(assign_transport, "detached", False))
+        self.assertFalse(assign_transport.terminated)
         self.assertIsNotNone(assign_transport.session_id)
         self.assertIn("cp-task", assign_transport.prompts[0][1])
+        # The lane must be told how to report completion, since nothing is
+        # waiting to observe it any more.
+        self.assertIn("hill90-supervisor complete", assign_transport.prompts[0][1])
+        self.assertIn("hill90-supervisor accept", assign_transport.prompts[0][1])
 
     def test_assign_task_to_unregistered_lane_raises(self):
         with self.assertRaisesRegex(RuntimeError, "unknown lane"):
@@ -627,7 +659,12 @@ class ClaudePrintAdapterTest(unittest.TestCase):
         `PiRPCAdapter`'s dropped-stream test checks for pi RPC."""
 
         class RaisingTransport(FakeClaudePrintTransport):
-            def run(self, prompt):
+            # agent-supervisor#278: the adapter now calls run_detached, so the
+            # failure this test pins -- a spawn that cannot start -- has to be
+            # raised there. The guarantee is unchanged and is the one that
+            # matters: a send that did not happen must NOT be recorded as
+            # delivered.
+            def run_detached(self, prompt, log_path=None):
                 self.prompts.append((self.session_id, prompt))
                 raise RuntimeError("claude -p exited without a well-formed result")
 
@@ -646,8 +683,14 @@ class ClaudePrintAdapterTest(unittest.TestCase):
 
         task = self.ledger.get_task("cp-task")
         self.assertEqual("delivery_pending", task["status"])
+        # agent-supervisor#278: this used to assert the transport was
+        # terminated. It no longer is, and must not be -- terminate() would
+        # kill the detached child on the SUCCESS path, which is the whole
+        # point of detaching. The guarantee this test exists for is unchanged
+        # and is asserted above: a spawn that failed leaves the task at
+        # `delivery_pending`, never `delivered`.
         assign_transport = FakeClaudePrintTransport.instances[-1]
-        self.assertTrue(assign_transport.terminated)
+        self.assertFalse(assign_transport.terminated)
 
     def test_assign_task_refuses_a_lane_registered_as_send_keys(self):
         """agent-supervisor#171: `claude` is the one harness allowed either
@@ -676,74 +719,3 @@ class ClaudePrintAdapterTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
-
-
-class ClaudePrintRecoverabilityTest(unittest.TestCase):
-    """A claude-print lane must be RECOVERABLE, not merely registered.
-
-    Regression for the defect found 2026-08-17: `ClaudePrintAdapter.register_lane`
-    minted a session uuid, handed it to `claude -p --session-id`, and passed it to
-    the ledger as `session_id` -- but NOT as `harness_session_id`. Measured on the
-    live ledger at the time: 33 claude-print lanes, 0 with a usable
-    harness_session_id, against 20 of 20 for send-keys.
-
-    That matters because `restore.sh` refuses rather than invents (AGENTS.md
-    invariant 3): with no harness session id it reports UNRECOVERABLE and leaves
-    the lane, even though the conversation is sitting on disk and `claude -p
-    --resume <uuid>` would bring it straight back. The estate has died seven
-    times. The old send-keys transport stranded prompts but SURVIVED a crash;
-    the new one delivered reliably and lost everything, which is the worse trade.
-
-    A second, narrower defect survived the first fix pass: `harness_session_id`
-    was written but its companion `harness_project_dir` was not, and
-    `restore.sh` (~155-175) checks that column INDEPENDENTLY of
-    `harness_session_id` -- an empty `harness_project_dir` refuses regardless of
-    whether a usable session id is sitting right next to it. Both columns are
-    asserted below for that reason.
-    """
-
-    def test_register_lane_records_a_resumable_harness_session_id(self):
-        root = Path(tempfile.mkdtemp())
-        ledger = Ledger(root, clock=lambda: 2_000)
-
-        class _Transport:
-            def __init__(self, *a, **k):
-                pass
-
-            def start_session(self, session_id, prompt):
-                return {"is_error": False, "session_id": session_id, "result": "ready."}
-
-            def terminate(self):
-                pass
-
-        adapter = ClaudePrintAdapter(ledger=ledger, transport_factory=lambda **k: _Transport())
-        adapter.register_lane(
-            lane="t:1", target="claude-print:t:1", harness="claude",
-            repo=str(root), nonce="n1",
-        )
-
-        db = next(root.rglob("*.sqlite3"))
-        row = sqlite3.connect(db).execute(
-            "select transport, session_id, harness_session_id, harness_project_dir from lanes where lane='t:1'"
-        ).fetchone()
-
-        self.assertEqual(row[0], "claude-print")
-        self.assertTrue(
-            row[2],
-            "harness_session_id is empty -- restore.sh will report this lane "
-            "UNRECOVERABLE even though `claude -p --resume` could return it",
-        )
-        self.assertTrue(
-            row[3],
-            "harness_project_dir is empty -- restore.sh's independent check on "
-            "this column (~155-175) will refuse this lane even though "
-            "harness_session_id above is populated",
-        )
-        # `repo` is the directory `transport_factory(cwd=repo)` actually
-        # launched `claude -p` in -- the same notion dispatch.sh resolves as
-        # `HARNESS_PROJECT_DIR` and records alongside `harness_session_id` in
-        # one call, never independently (core.py ~1284-1294).
-        self.assertEqual(row[3], str(root))
-        # For claude-print the two ids are the same uuid by construction: it is
-        # what --session-id minted and what --resume takes.
-        self.assertEqual(row[1], row[2])

@@ -13,8 +13,17 @@
 # by hand), (1) leaves a freshly selected `claude` candidate's tmux pane
 # completely untouched -- no rename-window, no send-keys, still free in the
 # ledger afterward -- and (2) produces a SEPARATE, brand-new lane whose
-# ledger row reads transport=claude-print and whose task reaches complete,
-# purely from `claude`'s own argv, never a keystroke. It also proves the
+# ledger row reads transport=claude-print and whose task reaches delivered,
+# purely from `claude`'s own argv, never a keystroke. `delivered` -- not
+# `complete` -- is deliberate (agent-supervisor#278/#320): dispatch.sh now
+# returns once `run_detached` has handed the brief off, before the detached
+# child does any work, so the ledger status observable at that point is the
+# handoff, not the outcome. The stub `claude` this suite drives is a
+# single-shot subprocess that prints one JSON result and exits -- it never
+# calls `hill90-supervisor complete` the way a real agent session would, so
+# there is no completion signal this suite could wait on even if it wanted
+# to; `delivered` is the only status a plain dispatch can honestly assert
+# here. It also proves the
 # opt-out (--live-pane), that a harness with no claude-print transport at
 # all (codex) is unaffected, that a multi-issue dispatch falls through to
 # the pre-#171 tmux flow (a documented scope boundary, not a silent
@@ -148,10 +157,10 @@ else
 fi
 
 TASK_STATUS=$(task_status "$D/state-171" "$NEW_LANE")
-if [ "$TASK_STATUS" = "complete" ]; then
-  ok "the claude-print task reached complete"
+if [ "$TASK_STATUS" = "delivered" ]; then
+  ok "the claude-print task reached delivered"
 else
-  bad "the claude-print task reached complete" "got status '$TASK_STATUS'"
+  bad "the claude-print task reached delivered" "got status '$TASK_STATUS'"
 fi
 
 want_contains "the real brief pointer crossed claude's argv, never send-keys" \
