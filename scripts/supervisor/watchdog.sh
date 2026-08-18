@@ -220,6 +220,28 @@ QUOTA_WATCH_HEARTBEAT_EPISODE="${SUPERVISOR_QUOTA_WATCH_HEARTBEAT_EPISODE:-$STAT
 # the loop interval" rule the brief states outright, so one missed tick from
 # scheduling jitter alone never pages, but two in a row does.
 QUOTA_WATCH_HEARTBEAT_STALE_AFTER="${QUOTA_WATCH_HEARTBEAT_STALE_AFTER:-600}"
+
+# --- agent-supervisor#341: weekly-watch heartbeat staleness -----------------
+# weekly-watch.sh (from #328/#327) shipped with no liveness instrumentation
+# at all -- no heartbeat on any code path, and no check here. A hung
+# process, a permanently broken meter, or a launchd job that silently
+# stopped firing (launchd reports a job "loaded" even if it has not run
+# since it was loaded -- the specific trap this check exists to avoid) all
+# produced the identical observable state as "everything's fine, below
+# threshold": no file, only a `weekly-watch.log` line nothing scans. Same
+# generic `--mode heartbeat` reuse as check_quota_watch_heartbeat above,
+# against weekly-watch.sh's own `.weekly-watch.state` stamp and a separate
+# episode -- a live pid (or a freshly-loaded launchd job) with a stale
+# heartbeat must read as unhealthy regardless of what launchd's own
+# "loaded" status or the process table says, because neither is what this
+# check reads.
+WEEKLY_WATCH_STATUS_PATH="${SUPERVISOR_WEEKLY_WATCH_STATUS:-$STATE/.weekly-watch.state}"
+WEEKLY_WATCH_HEARTBEAT_EPISODE="${SUPERVISOR_WEEKLY_WATCH_HEARTBEAT_EPISODE:-$STATE/.watchdog-weekly-watch-heartbeat-episode.json}"
+# weekly-watch.sh has no loop of its own -- launchd ticks it every 1800s
+# (StartInterval). 2x that interval, same "under ~2x the loop interval"
+# rule QUOTA_WATCH_HEARTBEAT_STALE_AFTER above uses, so one missed launchd
+# tick from scheduling jitter alone never pages, but two in a row does.
+WEEKLY_WATCH_HEARTBEAT_STALE_AFTER="${WEEKLY_WATCH_HEARTBEAT_STALE_AFTER:-3600}"
 # agent-supervisor#41: watchdog.status is rebuilt from scratch every tick
 # (report(), below), so a fact that must survive across ticks -- when
 # poller-recover.sh last actually confirmed the poller alive, and how many
@@ -601,6 +623,20 @@ quota_watch_note() {             # quota_watch_note <line>
   return 0
 }
 
+# Same tmp+rename append shape again, for agent-supervisor#341's
+# weekly-watch heartbeat check. A distinct line from `quota-watch:` --
+# two different schedulers watching two different quota windows, and
+# collapsing them into one field would hide either one's staleness behind
+# whichever ran last.
+weekly_watch_note() {            # weekly_watch_note <line>
+  local tmp="$STATUS.ww.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^weekly-watch:' "$STATUS"; printf 'weekly-watch: %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 # Same tmp+rename append shape again, for the process-table measurement of
 # inbox-poll.sh. This line is intentionally absent in the healthy one-poller
 # case: the detector should be silent when the process table is exactly right.
@@ -741,6 +777,34 @@ check_quota_watch_heartbeat() {
     log "QUOTA-WATCH-HEARTBEAT-CHECK FAILED rc=$notify_rc: $notify_out"
   else
     log "QUOTA-WATCH-HEARTBEAT-CHECK: $notify_out"
+  fi
+}
+
+# agent-supervisor#341: runs on EVERY exit path, same reasoning as
+# check_quota_watch_heartbeat above -- weekly-watch.sh is a different
+# scheduler watching a different quota window, and the whole point of
+# watching it from here is that a hung or never-firing weekly-watch.sh
+# leaves everything else in this estate looking perfectly healthy (it is
+# the ONLY alarm that tells Jon the weekly quota is nearly gone, and
+# nothing else notices if it goes quiet). Identical shape to
+# check_quota_watch_heartbeat, against a separate status file and episode
+# -- the two staleness alarms must not share dedup state, the same
+# discipline #163/#276 already established for every other check here.
+check_weekly_watch_heartbeat() {
+  local notify_out notify_rc
+  notify_out=$(python3 "$HERE/watchdog_notify.py" \
+    --mode heartbeat \
+    --heartbeat-status-path "$WEEKLY_WATCH_STATUS_PATH" \
+    --threshold-seconds "$WEEKLY_WATCH_HEARTBEAT_STALE_AFTER" \
+    --episode-state-path "$WEEKLY_WATCH_HEARTBEAT_EPISODE" \
+    --log-path "$STATE/watchdog-notify.log" \
+    --notify-script "${NOTIFY_SCRIPT:-}" 2>&1)
+  notify_rc=$?
+  weekly_watch_note "$(printf '%s' "$notify_out" | tr '\n' ' ')"
+  if [ "$notify_rc" -ne 0 ]; then
+    log "WEEKLY-WATCH-HEARTBEAT-CHECK FAILED rc=$notify_rc: $notify_out"
+  else
+    log "WEEKLY-WATCH-HEARTBEAT-CHECK: $notify_out"
   fi
 }
 
@@ -1383,6 +1447,7 @@ on_exit() {
   local rc=$?
   check_inbox_heartbeat
   check_quota_watch_heartbeat
+  check_weekly_watch_heartbeat
   check_director_inbox
   check_poller_process_count
   check_poller_window
