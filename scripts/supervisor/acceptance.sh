@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
 # Re-run a CLOSED issue's acceptance test and reopen it if the symptom is back.
-# agent-supervisor#328.
 #
 # THE FAILURE THIS EXISTS FOR, measured rather than argued.
 #
@@ -49,6 +48,20 @@
 #     counted and reported so coverage is visible.
 #   - An UNREADABLE test is not a pass. If gh cannot fetch the issue, or the
 #     command cannot run at all, say UNKNOWN -- never green.
+#   - A nonzero exit is not automatically a REGRESSION. Two exit codes are
+#     reserved to mean "the test did not run to a verdict", never "the symptom
+#     is back", and neither reopens anything:
+#       124  the command was killed by `timeout` -- it did not finish, so
+#            nothing about the actual assertion was observed
+#       75   EX_TEMPFAIL (sysexits.h) -- the acceptance block's OWN convention
+#            for signalling an environment problem (gh unreachable, a missing
+#            binary, degraded Issues) rather than a real failure. An issue's
+#            acceptance block that can detect its own infra dependency should
+#            exit 75 for that case instead of whatever the failing command
+#            happened to return.
+#     Both are counted as ENVIRONMENT, reported separately from REGRESSED, and
+#     never trigger --reopen. Anything else nonzero on a CLOSED issue is
+#     treated as the real thing: the block ran to completion and failed.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -112,6 +125,15 @@ check_one() {
     PASS=$((PASS+1)); return
   fi
 
+  if [ "$rc" -eq 124 ] || [ "$rc" -eq 75 ]; then
+    # 124: timeout(1) killed it before it finished -- no verdict was reached.
+    # 75:  EX_TEMPFAIL, the block's own signal for "environment problem, not
+    #      a verdict" (see the design-rules comment at the top of this file).
+    # Neither is evidence the symptom is back, so never reopen on either.
+    log "#$num ENVIRONMENT ($state) -- exit $rc means the test didn't reach a verdict, not that it failed"
+    ENVIRONMENT=$((ENVIRONMENT+1)); return
+  fi
+
   if [ "$state" != "CLOSED" ]; then
     # Open issue failing its own test is just work outstanding. Not news.
     log "#$num fails ($state) -- expected, the work is not done"
@@ -126,6 +148,14 @@ check_one() {
     local note
     note="Reopened by \`acceptance.sh\`: this issue is closed but its own acceptance test now fails (exit $rc).
 
+<details><summary>command</summary>
+
+\`\`\`
+$block
+\`\`\`
+
+</details>
+
 <details><summary>output</summary>
 
 \`\`\`
@@ -134,7 +164,7 @@ $(printf '%s' "$out" | tail -40)
 
 </details>
 
-This is not a new bug report -- it is the ORIGINAL symptom, still present after the issue was closed. See #328 for why closure on a claim is not closure."
+This is not a new bug report -- it is the ORIGINAL symptom, still present after the issue was closed. Exit $rc ran to completion (it is neither 124 -- timeout -- nor 75 -- the block's own EX_TEMPFAIL signal for an environment problem), so this is being treated as a real regression, not infra noise. If that reasoning looks wrong for this specific block, say so in a comment rather than trusting this one at face value."
     if gh issue reopen "$num" --repo "$REPO" >/dev/null 2>&1 \
        && gh issue comment "$num" --repo "$REPO" --body "$note" >/dev/null 2>&1; then
       log "#$num reopened with the failing output attached"
@@ -144,7 +174,7 @@ This is not a new bug report -- it is the ORIGINAL symptom, still present after 
   fi
 }
 
-PASS=0; REGRESSED=0; OPENFAIL=0; NOBLOCK=0; HASBLOCK=0; UNKNOWN=0; REGRESSED_LIST=""
+PASS=0; REGRESSED=0; OPENFAIL=0; NOBLOCK=0; HASBLOCK=0; UNKNOWN=0; ENVIRONMENT=0; REGRESSED_LIST=""
 
 if [ -n "$ONLY" ]; then
   state=$(gh issue view "$ONLY" --repo "$REPO" --json state --jq .state 2>/dev/null)
@@ -163,7 +193,7 @@ else
 fi
 
 log "checked $((HASBLOCK+NOBLOCK)) issues: ${HASBLOCK} with an acceptance block, ${NOBLOCK} without"
-log "  pass=${PASS} regressed=${REGRESSED} open-and-failing=${OPENFAIL} unknown=${UNKNOWN}"
+log "  pass=${PASS} regressed=${REGRESSED} open-and-failing=${OPENFAIL} unknown=${UNKNOWN} environment=${ENVIRONMENT}"
 [ "$REGRESSED" -gt 0 ] && log "REGRESSED: ${REGRESSED_LIST}-- closed issues whose symptom is back"
 
 # Exit 1 ONLY on a regression. Coverage gaps and open failures are reported,

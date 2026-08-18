@@ -507,7 +507,7 @@ for repo in $REPOS; do
 done
 
 # --- acceptance regressions ------------------------------------------------
-# agent-supervisor#328. An issue closes on a CLAIM and the claim decays
+# An issue closes on a CLAIM and the claim decays
 # silently: PR #294 "lane identity for author exclusion" merged 2026-08-16 and
 # the symptom was still excluding every free lane on 2026-08-18, with a second
 # task having already completed on the same bug two days earlier. PHASES.md
