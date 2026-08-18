@@ -83,6 +83,13 @@ fi
 
 # Lane capacity, live. Free lanes with work waiting is the actionable number --
 # it is the one that says the estate is idling rather than saturated.
+# A tmux pane is the WRONG instrument for a claude-print lane. Those run as
+# DETACHED processes (`adapter.py`'s run_detached, #320) and never occupy a
+# pane at all -- so counting busy panes reported "0 busy" while nine lanes were
+# genuinely working. Reporting that to Jon would have said the estate was idle
+# at the exact moment it was at its busiest, which is worse than reporting
+# nothing. Count the processes; they are the lanes.
+detached_lanes=$(ps -eo args 2>/dev/null | grep -c '[c]laude -p')
 free_lanes=0; busy_lanes=0; blocked_lanes=0
 for sess in agent-supervisor agent-dotfiles agent-tui skills; do
   out=$(bash "$HERE/lanes.sh" "$sess" 2>/dev/null) || continue
@@ -127,7 +134,7 @@ SHIPPED TODAY: ${closed_today_total} issues closed, ${pr_total} PRs open awaitin
 
 Per repo:
 ${per_repo}
-Lanes: ${free_lanes} free, ${busy_lanes} busy, ${blocked_lanes} blocked on a prompt.
+Lanes: ${detached_lanes} working now, ${free_lanes} tmux panes free, ${blocked_lanes} blocked on a prompt.
 
 FROM YOUR CORPUS -- the second backlog, made of your own words:
   ${corpus_open} hard items still open (${corpus_params} parameters, ${corpus_q} questions/directives)
