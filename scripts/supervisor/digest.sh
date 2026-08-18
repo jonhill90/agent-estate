@@ -124,6 +124,36 @@ note_error() { ERRORS+=("$1"); }
 # so the backgrounded job gets its OWN process group instead of inheriting
 # this script's, then signal the negative pid -- a process-group signal
 # reaches CMD and everything it spawned, group leader included.
+#
+# agent-supervisor#251 (third fix pass -- this PR's own CI failure):
+# the poll interval itself, not any single hang, is what blew the 300s
+# budget. Measured directly: a standalone probe wrapping 17 calls to a
+# no-op `echo` through this exact function, with the poll `sleep` at a fixed
+# one second, took 17s wall-clock -- 1.0s per call, whether the wrapped
+# command takes 2ms or 2s, because the FIRST `kill -0` check races the fork
+# and almost always finds the child still alive, so the loop always paid at
+# least one full `sleep 1` before it could observe the child had exited.
+# `digest.sh`'s own PR loop makes four with_timeout-wrapped calls per PR
+# (gh_call run, gh_call mergeable, verdict_for, author_lane_for) against
+# `gh`/`verdict.py` calls that, once stubbed or answered from cache, return
+# in well under a second -- so this floor, not a genuine hang, is what
+# turned a 17-PR test fixture, exercised three-plus times in
+# `test_digest.sh`, into a run past 300s.
+#
+# A first attempt fixed this by racing a background "watchdog" subshell
+# against `wait "$pid"` instead of polling at all. Discarded: that shape
+# doubles the number of backgrounded jobs per call (target + watchdog), and
+# under this suite's real load -- run alongside several other lanes'
+# concurrent `test_digest.sh` runs on the same shared box, the environment
+# this estate actually runs in -- it reproduced sporadic empty `gh`/
+# `verdict.py` output for individual PRs in an otherwise-successful run,
+# not a hang. That is a job-control race, not a timing win worth the risk.
+# Kept instead: the exact same poll loop, proven correct across two prior
+# fix passes, with the poll interval alone cut from 1s to 0.05s (`sleep`
+# accepts fractional seconds on both this box's `/bin/sleep` and GNU
+# coreutils). `waited`/`secs` move to centiseconds so the comparison stays
+# integer-only. Same probe, same shape, this fix: 17 calls in 0.9s instead
+# of 17s -- the fixed-second floor is gone, timeout behavior is untouched.
 with_timeout() {
   local secs="$1" outfile="$2"; shift 2
   local prev_monitor=0
@@ -132,17 +162,17 @@ with_timeout() {
   "$@" >"$outfile" 2>/dev/null &
   local pid=$!
   [ "$prev_monitor" -eq 1 ] || set +m 2>/dev/null
-  local waited=0 timed_out=0
+  local waited_cs=0 max_cs=$((secs * 100)) timed_out=0
   while kill -0 "$pid" 2>/dev/null; do
-    if [ "$waited" -ge "$secs" ]; then
+    if [ "$waited_cs" -ge "$max_cs" ]; then
       timed_out=1
       kill -TERM -- -"$pid" 2>/dev/null
       sleep 1
       kill -KILL -- -"$pid" 2>/dev/null
       break
     fi
-    sleep 1
-    waited=$((waited + 1))
+    sleep 0.05
+    waited_cs=$((waited_cs + 5))
   done
   wait "$pid" 2>/dev/null
   local rc=$?

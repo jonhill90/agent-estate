@@ -160,6 +160,21 @@ print((row or {}).get("pane_id") or "")
 # process-group signal reaches the child and everything it forked, group
 # leader included. `set -m` is restored to whatever it was before, so this
 # does not change job-control behaviour for the rest of the script.
+# agent-supervisor#251 (third fix pass -- see digest.sh's own copy of this
+# function for the full measurement): the prior `kill -0`-poll-loop shape
+# paid a fixed ~1s floor per with_timeout call regardless of how fast CMD
+# actually finished, because the first poll check races the fork and almost
+# always finds the child still alive. Four calls per PR x 17 PRs x 3+ full
+# passes in test_digest.sh is what blew the 300s budget, not a genuine hang.
+# A first attempt replaced the poll with a `wait "$pid"` raced against a
+# background watchdog subshell; discarded after it reproduced sporadic empty
+# `gh`/`verdict.py` output for individual PRs when run alongside other
+# lanes' concurrent test suites on this shared box -- a job-control race
+# from doubling the backgrounded jobs per call, not worth the timing win.
+# Kept instead: the same poll loop, unchanged in shape, with the interval
+# cut from a fixed 1s to 0.05s (`waited`/`secs` moved to centiseconds so the
+# comparison stays integer-only) -- the fixed-second floor is gone, nothing
+# about the wait/kill/timeout mechanics changed.
 if ! declare -F with_timeout >/dev/null 2>&1; then
   with_timeout() {
     local secs="$1" outfile="$2"; shift 2
@@ -169,17 +184,17 @@ if ! declare -F with_timeout >/dev/null 2>&1; then
     "$@" >"$outfile" 2>/dev/null &
     local pid=$!
     [ "$prev_monitor" -eq 1 ] || set +m 2>/dev/null
-    local waited=0 timed_out=0
+    local waited_cs=0 max_cs=$((secs * 100)) timed_out=0
     while kill -0 "$pid" 2>/dev/null; do
-      if [ "$waited" -ge "$secs" ]; then
+      if [ "$waited_cs" -ge "$max_cs" ]; then
         timed_out=1
         kill -TERM -- -"$pid" 2>/dev/null
         sleep 1
         kill -KILL -- -"$pid" 2>/dev/null
         break
       fi
-      sleep 1
-      waited=$((waited + 1))
+      sleep 0.05
+      waited_cs=$((waited_cs + 5))
     done
     wait "$pid" 2>/dev/null
     local rc=$?
