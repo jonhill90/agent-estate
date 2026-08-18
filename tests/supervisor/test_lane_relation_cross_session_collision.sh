@@ -92,6 +92,13 @@ OUT_SELF=$(relate "agent-tui:3" "agent-tui:3" "%50")
 want_contains "the genuine contributor, identified live, still resolves 'same' and is excluded" \
   '"relation":"same"' "$OUT_SELF"
 
+# The other negative: identity that cannot be resolved must still refuse,
+# never default to admit. A live pane id proves nothing about a contributor
+# the ledger has never heard of.
+OUT_UNKNOWN=$(relate "agent-supervisor:3" "never-registered:9" "%61")
+want_contains "an unresolvable contributor still refuses (unknown), not different" \
+  '"relation":"unknown"' "$OUT_UNKNOWN"
+
 echo
 echo "cli.py lane-relation cross-session collision: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
