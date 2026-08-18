@@ -1700,6 +1700,46 @@ class LedgerTest(unittest.TestCase):
         # not a global switch.
         self.assertIsNone(self.ledger.get_pr_external(repo="acme/agent-supervisor", pr_number="301"))
 
+    def test_get_task_for_worktree_include_reviews_answers_a_reviewing_lanes_own_worktree(self):
+        """agent-supervisor#212: a REVIEWING lane confirming its own
+        identity (AGENTS.md invariant 10, before stamping `Review-Lane:`)
+        asks a different question than `dispatch.sh --reviews-pr` --
+        "which task is THIS worktree" rather than "who authored this PR".
+        The default (exercised by the test just above) correctly refuses to
+        answer for a review task; `include_reviews=True` must answer for
+        the exact same row when the question is self-identification, not
+        authorship -- #212's review measured `known:false` for a row the
+        ledger actually had, because no caller asked this version of the
+        question yet."""
+        self.ledger.record_dispatch(
+            lane="free-6",
+            pane_id="%6",
+            nonce="nonce-rev212",
+            harness="claude",
+            repo="/repo/free-6",
+            server_id="server-a",
+            session_id="$6",
+            command="claude.exe",
+            task_id="as211-rev212",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/211",
+            source_ref="211",
+            summary="#211 review PR #212",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-6"],
+            status_marker=None,
+            worktree_path="/tmp/ad-211-rev212-9",
+        )
+
+        # Unchanged default: still refuses, same as the test above.
+        self.assertIsNone(self.ledger.get_task_for_worktree("/tmp/ad-211-rev212-9"))
+
+        found = self.ledger.get_task_for_worktree("/tmp/ad-211-rev212-9", include_reviews=True)
+
+        self.assertIsNotNone(found)
+        self.assertEqual("free-6", found["lane"])
+        self.assertEqual("as211-rev212", found["id"])
+
     def test_mark_lane_held_makes_a_free_lane_read_occupied(self):
         """agent-dotfiles#188 finding 1: this is what closes the window a
         rolled-back `record_dispatch` used to leave open -- a lane the ledger

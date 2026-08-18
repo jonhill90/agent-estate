@@ -1887,7 +1887,7 @@ class Ledger:
             ).fetchone()
         return self._dict(row)
 
-    def get_task_for_worktree(self, worktree_path):
+    def get_task_for_worktree(self, worktree_path, *, include_reviews=False):
         """The task recorded against one exact worktree path (agent-supervisor#117).
 
         `worktree.sh new` mints a fresh path per dispatch (its destination
@@ -1903,10 +1903,22 @@ class Ledger:
         not get renamed, so its recorded path is stable even when its
         current branch is not.
 
-        A review task can never be its own PR's author (agent-supervisor#76),
-        so review tasks are filtered out here exactly as
-        `get_author_task_for_issue` filters them -- this only ever answers
-        with a task that could plausibly be one.
+        `include_reviews` (agent-supervisor#212) picks which of two
+        different questions this answers:
+
+        - `False` (default) -- "who could plausibly have AUTHORED this PR?"
+          A review task can never be its own PR's author (agent-supervisor#76),
+          so review tasks are filtered out here exactly as
+          `get_author_task_for_issue` filters them. This is what
+          `dispatch.sh --reviews-pr` needs, and the only caller today.
+        - `True` -- "which task is THIS worktree, whatever it is?" A
+          reviewing lane confirming its OWN identity before stamping
+          `Review-Lane:` (AGENTS.md invariant 10) is asking exactly this,
+          and its own worktree is legitimately parked on a task that looks
+          like a review -- filtering it out here answers `known:false` for
+          a row the ledger has, which is #212's own measured bug: invariant
+          10 documented the `False` behaviour as "the correct self-lookup"
+          without ever running it from a reviewing lane's worktree.
 
         Blank `worktree_path` never matches: rows written before this
         column existed carry '' (see `_migrate_tasks_table`), and matching
@@ -1921,7 +1933,8 @@ class Ledger:
                 (worktree_path,),
             ).fetchall()
         candidates = [
-            self._dict(row) for row in rows if not self._task_looks_like_review(row["id"], row["summary"])
+            self._dict(row) for row in rows
+            if include_reviews or not self._task_looks_like_review(row["id"], row["summary"])
         ]
         if len(candidates) == 1:
             return candidates[0]

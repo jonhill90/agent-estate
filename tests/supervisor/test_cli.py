@@ -1535,6 +1535,40 @@ class WorktreeLaneCliTest(unittest.TestCase):
             self.assertEqual("t:3", result["lane"])
             self.assertEqual("as101-pr-inference-fix", result["task"])
 
+    def _worktree_lane_include_reviews(self, root, path):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = cli.main(
+                ["--state-dir", root, "worktree-lane", "--path", path, "--include-reviews"]
+            )
+        self.assertEqual(0, rc, output.getvalue())
+        return json.loads(output.getvalue())
+
+    def test_include_reviews_answers_for_a_reviewing_lanes_own_worktree(self):
+        """agent-supervisor#212: AGENTS.md invariant 10 documented this
+        command as a reviewing lane's own self-lookup, but never ran it
+        from one -- the default filters out exactly the review-shaped task
+        id a reviewing lane's own worktree carries. `--include-reviews` is
+        the flag a self-lookup caller passes; exercised end to end through
+        `cli.main`, the same way the rest of this class does."""
+        with tempfile.TemporaryDirectory() as root:
+            self._record_dispatch(
+                root, lane="t:6", task="as211-rev212", issue=211, worktree="/tmp/ad-211-rev212-9"
+            )
+
+            without_flag = self._worktree_lane(root, "/tmp/ad-211-rev212-9")
+            self.assertEqual(
+                {"path": "/tmp/ad-211-rev212-9", "known": False, "lane": None, "task": None},
+                without_flag,
+                "default behaviour (dispatch.sh --reviews-pr's question) is unchanged",
+            )
+
+            with_flag = self._worktree_lane_include_reviews(root, "/tmp/ad-211-rev212-9")
+            self.assertEqual(
+                {"path": "/tmp/ad-211-rev212-9", "known": True, "lane": "t:6", "task": "as211-rev212"},
+                with_flag,
+            )
+
 
 class AdoptSessionCliTest(unittest.TestCase):
     """agent-supervisor#153: the write side, through `cli.main` -- this is

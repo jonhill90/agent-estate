@@ -388,6 +388,14 @@ def parser():
     # trusted) rather than by reconstructing a task id from that branch name.
     worktree_lane_parser = sub.add_parser("worktree-lane")
     worktree_lane_parser.add_argument("--path", required=True)
+    # agent-supervisor#212: off by default, so this stays the AUTHOR-FINDING
+    # answer `dispatch.sh --reviews-pr` needs (a review task never counts,
+    # #76). A caller asking "which task is THIS worktree, whatever it is" --
+    # a lane confirming its own identity, AGENTS.md invariant 10 -- passes
+    # this so its own review-shaped task id is not filtered out from under
+    # it. See `Ledger.get_task_for_worktree` for the two questions this
+    # flag distinguishes.
+    worktree_lane_parser.add_argument("--include-reviews", action="store_true")
 
     # agent-supervisor#308 item 2: the fifth resolution path -- the PR's own
     # `source_tasks` rows (`source_kind='pull'`), asked DIRECTLY by PR number
@@ -1146,7 +1154,7 @@ def main(argv=None):
             "contributors": [{"lane": row["lane"], "task": row["id"]} for row in rows],
         }
     elif args.command == "worktree-lane":
-        row = ledger.get_task_for_worktree(args.path)
+        row = ledger.get_task_for_worktree(args.path, include_reviews=args.include_reviews)
         value = {
             "path": args.path,
             "known": row is not None,

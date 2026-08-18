@@ -75,6 +75,15 @@ everything is free'." Nothing may ever be the reason a lane becomes
 *available* — an inability to read state degrades to "ask a human"
 (`lanes.sh`'s `unknown` state, `AGENTS.md` item 6), never to "assume free."
 
+**Added `Verified 2026-08-15`, the same rule applied to merging:**
+`merge-pr.sh` — the only path meant to merge a PR here — refuses when either
+of its two gates cannot be evaluated, not just when either evaluates false.
+An unreadable CI status, an unresolved PR author, or a verdict with no lane
+to compare against all refuse the merge (`AGENTS.md`, "Invariants" item 9 on
+lane identity, and its Conventions section on the merge gate). This is the
+same instrument as `dispatch.sh`'s ledger check, applied one step later in
+the lifecycle: "cannot tell" degrades to a refusal, never to "proceed."
+
 ### One fix pass
 
 `AGENTS.md`, Conventions: one independent review per PR, by someone who did

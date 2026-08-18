@@ -19,7 +19,15 @@ cd agent-supervisor
 
 bash scripts/supervisor/digest.sh          # everything at a glance
 bash scripts/supervisor/lanes.sh           # just the lanes
-python3 -m unittest discover -s tests/supervisor   # 349 tests
+python3 -m unittest discover -s tests/supervisor   # 349 tests, as of 2026-08-13 --
+                                                    # not re-run to completion in this sweep
+                                                    # (it did not finish inside this
+                                                    # environment's time budget); 110 tracked
+                                                    # files under tests/supervisor/ today
+                                                    # (`Verified 2026-08-18`, git
+                                                    # ls-files), so the count is likely
+                                                    # stale and should be re-measured, not
+                                                    # assumed
 ```
 
 Nothing needs configuring to run the suite. Every setting has a working default;
@@ -114,6 +122,23 @@ removing one is a deletion.
   required by the other, or by `lanes.sh`.
 - **Watchdog** (`watchdog.sh`) — runs outside the loop from a LaunchAgent, so it
   survives the loop dying. It escalates rather than restart-looping forever.
+- **The merge gate** (`merge-pr.sh`) — the only path that should merge a PR in
+  this repo. It chains `ci_gate.py` (every check green at the PR's live head
+  SHA — GitHub branch protection is unavailable on these private repos
+  without GitHub Pro, so nothing else enforces this) and
+  `verdict-independence.sh` (the reviewing lane really is not the author —
+  see `AGENTS.md` invariant 9 on lane identity). `Verified 2026-08-15`
+  (#184/#196/#198): both gates fail closed — an unreadable verdict or
+  unresolved authorship refuses the merge, never proceeds.
+- **The verified-send primitive** (`send.sh`) — `verified_type`/
+  `verified_submit` type text into a pane's input box and confirm it actually
+  landed before submitting, rather than trusting `send-keys`'s own exit code.
+  `dispatch.sh`, `inbox-route.sh` and `director-route.sh` route the brief/
+  message text they send an agent through it (`Verified 2026-08-15`, #186).
+  It does not replace every `tmux send-keys` call in this repo — launching a
+  harness process and short control sequences (`Enter`, `C-u`) still call
+  `tmux` directly, deliberately; see `AGENTS.md`'s note on an abstraction
+  correctly avoided outside its actual risk.
 
 ## Conventions
 
