@@ -1856,7 +1856,7 @@ class Ledger:
             ).fetchone()
         return self._dict(row)
 
-    def mark_pr_external(self, *, repo, pr_number, note, now=None):
+    def mark_pr_external(self, *, repo, pr_number, note, chain_verified=False, now=None):
         """Record that `pr_number` in `repo` was authored OUTSIDE the lane
         system (a human, or the watchdog acting directly) -- a first-class,
         recordable state distinct from "unknown" (agent-supervisor#308 item
@@ -1865,23 +1865,51 @@ class Ledger:
         safe case, not the dangerous one. `INSERT OR REPLACE`: idempotent,
         the note/timestamp of the most recent marking wins.
 
-        GATED (agent-supervisor#308 item 3 / #321's own review, item 5):
-        this is the one write in this class an operator can call to widen a
-        PR's reviewer pool, and #321's review measured that it had NO caller
-        verification at all -- any lane with shell access could call it
-        against a PR it contributed to itself and launder that PR as
-        "no lane contributed", then have any lane (including itself) review
-        it. `scripts/supervisor/mark-pr-external.sh` is the recommended
-        entry point -- it runs the full exhaustive resolution chain
-        (issue, PR-task, PR-contributor, worktree, legacy branch, all of
-        which need `gh`/`git` and so cannot live here) before ever reaching
-        this method. This method itself refuses independently, on the two
+        GATED (agent-supervisor#308 item 3 / #321's own review, item 5;
+        widened by the PR #331 review's finding 2): this is the one write in
+        this class an operator can call to widen a PR's reviewer pool, and
+        #321's review measured that it had NO caller verification at all --
+        any lane with shell access could call it against a PR it
+        contributed to itself and launder that PR as "no lane contributed",
+        then have any lane (including itself) review it.
+        `scripts/supervisor/mark-pr-external.sh` is the recommended entry
+        point -- it runs the full exhaustive resolution chain (issue,
+        PR-task, PR-contributor, worktree, legacy branch, all of which need
+        `gh`/`git` and so cannot live here) before ever reaching this
+        method. This method itself refuses independently, on the two
         sources it CAN check with no external process: an explicit
         `record_pr_for_task` row, and a PR-scoped `source_tasks` row
-        (`get_contributor_tasks_for_pr`) -- so even a caller that bypasses
-        the shell wrapper cannot launder a PR the ledger already names a
-        real contributor for by either of these two, most-direct records.
+        (`get_contributor_tasks_for_pr`) -- but those two paths do not cover
+        issue-linkage, the most common contributor shape for an ordinary
+        issue-scoped task (its `record_pr_for_task` row is only written by
+        `lane-done.sh` at completion, so it does not exist yet for a task
+        still in progress). A caller that bypassed the shell wrapper and
+        called this directly, before its own completion step ran, sailed
+        straight through that gap -- reproduced in the PR #331 review.
+
+        `chain_verified` must be passed `True` by a caller that has actually
+        run the exhaustive chain (`mark-pr-external.sh` does, and only after
+        `resolve_pr_contributors` completed clean); it is refused when
+        false or omitted, regardless of what the two ledger-only checks
+        below find. This is not an authentication check -- nothing stops a
+        caller from passing `True` without having run the chain -- it
+        converts an unsafe SILENT default (a direct `cli.py
+        mark-pr-external` skipping the chain with no signal that anything
+        was skipped) into a caller having to explicitly claim the chain ran,
+        which is the remedy the #331 review named.
         """
+        if not chain_verified:
+            raise ValueError(
+                f"refusing to mark PR #{pr_number} in {repo} external -- "
+                f"chain_verified was not set. This method can only check two "
+                f"of the five resolution paths (an explicit record_pr_for_task "
+                f"row, and a PR-scoped source_tasks row); the other three "
+                f"(issue-linkage, worktree, legacy branch) need gh/git and "
+                f"cannot run here. Call scripts/supervisor/mark-pr-external.sh, "
+                f"which runs the full exhaustive chain first and passes "
+                f"chain_verified=True only once it completes clean -- a direct "
+                f"call cannot silently skip that chain"
+            )
         existing_task = self.get_task_for_pr_number(repo=repo, pr_number=pr_number)
         if existing_task is not None:
             raise ValueError(

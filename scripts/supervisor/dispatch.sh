@@ -729,7 +729,8 @@ if [ -n "$REVIEWS_PR" ]; then
     # The two describe the same fact before and after: nobody the ledger
     # will vouch for produced (or contributed to) this PR.
     echo "dispatch: could not determine PR #$REVIEWS_PR's author -- the ledger has no record by issue, by commit, or by branch '$HEAD_REF' (task ${FALLBACK_TASK:-none}) -- refusing (authorship unknown, failing closed)" >&2
-    echo "dispatch: if this PR was genuinely authored outside the lane system (a human, or the watchdog), record that once with: $LEDGER_PYTHON $LEDGER_CLI mark-pr-external --repo '$REPO' --pr $REVIEWS_PR --note '<why>'" >&2
+    echo "dispatch: if this PR was genuinely authored outside the lane system (a human, or the watchdog), record that once with: $HERE/mark-pr-external.sh '$REPO' $REVIEWS_PR '<why>' '$REPO_PATH'" >&2
+    echo "dispatch: NOTE -- use mark-pr-external.sh, not cli.py mark-pr-external directly; the CLI now refuses without --chain-verified, which only the wrapper's own exhaustive resolution chain earns (PR #331 review, finding 2)" >&2
     # agent-supervisor#101, third red-first item: on the inferred path these
     # are TWO separate findings arriving together -- "this looked like a
     # review" and "its contributors are unresolvable" -- and read as one

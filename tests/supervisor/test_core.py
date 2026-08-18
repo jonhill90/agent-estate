@@ -1685,14 +1685,17 @@ class LedgerTest(unittest.TestCase):
         self.assertIsNone(self.ledger.get_pr_external(repo="acme/agent-supervisor", pr_number="316"))
 
         self.ledger.mark_pr_external(
-            repo="acme/agent-supervisor", pr_number="316", note="authored directly, no lane ever dispatched"
+            repo="acme/agent-supervisor", pr_number="316", note="authored directly, no lane ever dispatched",
+            chain_verified=True,
         )
         found = self.ledger.get_pr_external(repo="acme/agent-supervisor", pr_number="316")
         self.assertIsNotNone(found)
         self.assertEqual("authored directly, no lane ever dispatched", found["note"])
 
         # A second marking corrects (idempotent), not duplicates.
-        self.ledger.mark_pr_external(repo="acme/agent-supervisor", pr_number="316", note="updated note")
+        self.ledger.mark_pr_external(
+            repo="acme/agent-supervisor", pr_number="316", note="updated note", chain_verified=True
+        )
         found = self.ledger.get_pr_external(repo="acme/agent-supervisor", pr_number="316")
         self.assertEqual("updated note", found["note"])
 
@@ -1762,7 +1765,8 @@ class LedgerTest(unittest.TestCase):
 
         with self.assertRaises(ValueError) as caught:
             self.ledger.mark_pr_external(
-                repo="acme/agent-supervisor", pr_number="316", note="trying to launder my own PR"
+                repo="acme/agent-supervisor", pr_number="316", note="trying to launder my own PR",
+                chain_verified=True,
             )
         self.assertIn("as308-original", str(caught.exception))
         self.assertIn("free-3", str(caught.exception))
@@ -1789,10 +1793,59 @@ class LedgerTest(unittest.TestCase):
 
         with self.assertRaises(ValueError) as caught:
             self.ledger.mark_pr_external(
-                repo="acme/agent-supervisor", pr_number="302", note="trying to launder my own PR"
+                repo="acme/agent-supervisor", pr_number="302", note="trying to launder my own PR",
+                chain_verified=True,
             )
         self.assertIn("as302-fix1", str(caught.exception))
         self.assertIsNone(self.ledger.get_pr_external(repo="acme/agent-supervisor", pr_number="302"))
+
+    def test_mark_pr_external_bypass_via_cli_direct_call_is_refused(self):
+        """PR #331 review, finding 2: `mark_pr_external`'s own backstop only
+        checks two of the five resolution paths (`get_task_for_pr_number`,
+        `get_contributor_tasks_for_pr`) -- it never consults issue-linkage,
+        which needs `gh` and so cannot live here. `record_pr_for_task` is
+        only written by `lane-done.sh` at completion, so an ORDINARY,
+        still-in-progress, issue-scoped task (the most common dispatch
+        shape) has no PR-keyed row yet and no pull-scoped `source_tasks` row
+        either -- neither backstop check can see it. Before this fix, a lane
+        calling `python3 cli.py mark-pr-external` directly (bypassing
+        `mark-pr-external.sh` and its `gh`-based issue-linkage check
+        entirely) sailed straight through for exactly this shape, reproduced
+        in the #331 review. `chain_verified` now gates this regardless of
+        contributor shape -- a direct call that never went through the
+        exhaustive chain has no way to claim it did.
+        """
+        self.ledger.record_dispatch(
+            lane="t:2", pane_id="%2", nonce="nonce-t2", harness="claude", repo="/repo/t2",
+            server_id="server-a", session_id="$2", command="claude.exe",
+            task_id="ad40-fix", source_kind="issue",
+            source_url="https://github.com/acme/agent-dotfiles/issues/40",
+            source_ref="40", summary="genuine fix for #40", source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane t:2"], status_marker=None,
+        )
+        # Neither backstop path can see this contributor: no record_pr_for_task
+        # row (only lane-done.sh writes that, at completion) and no
+        # source_kind='pull' row (this task was dispatched by issue, not by
+        # --pr). The bug this test guards against is proven by the fact that
+        # BOTH checks below pass -- the gap is real, not a setup mistake.
+        self.assertIsNone(self.ledger.get_task_for_pr_number(repo="acme/agent-dotfiles", pr_number="500"))
+        self.assertEqual([], self.ledger.get_contributor_tasks_for_pr("500"))
+
+        proc = subprocess.run(
+            [
+                sys.executable, str(SUPERVISOR_DIR / "cli.py"),
+                "--state-dir", self.tempdir.name,
+                "mark-pr-external", "--repo", "acme/agent-dotfiles", "--pr", "500",
+                "--note", "bypass attempt -- direct cli.py call, no chain run",
+            ],
+            capture_output=True, text=True, timeout=30,
+        )
+        self.assertNotEqual(0, proc.returncode, proc.stdout + proc.stderr)
+        self.assertIn("chain_verified", proc.stdout + proc.stderr)
+        self.assertIsNone(
+            self.ledger.get_pr_external(repo="acme/agent-dotfiles", pr_number="500"),
+            "the bypass attempt must not have written the row",
+        )
 
     def test_mark_lane_held_makes_a_free_lane_read_occupied(self):
         """agent-dotfiles#188 finding 1: this is what closes the window a

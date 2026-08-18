@@ -2721,7 +2721,7 @@ python3 - "$MUTANT_DIR_35/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
 import sys
 target = sys.argv[1]
 text = open(target).read()
-marker = 'issue_json=$("$ledger_python" "$ledger_cli" contributor-issue-lanes --issue "$candidate_issue" 2>&1) || continue'
+marker = 'issue_json=$("$ledger_python" "$ledger_cli" contributor-issue-lanes --issue "$candidate_issue" 2>&1)'
 assert text.count(marker) == 1, "contributor-issue-lanes lookup not found or not unique -- script shape changed"
 text = text.replace(marker, 'issue_json=\'{"known":false}\'  # MUTATED: ledger contributor-issue-lanes never consulted', 1)
 open(target, "w").write(text)
@@ -3821,8 +3821,13 @@ want_contains "...and now names the escape hatch: record it, don't guess it" \
 
 # The escape: an operator explicitly records the fact, auditable, never a
 # flag dispatch.sh itself can flip.
+# PR #331 review, finding 2: cli.py mark-pr-external now refuses without
+# --chain-verified (an explicit claim the exhaustive chain ran) -- an
+# operator using this escape hatch directly, having verified by hand, passes
+# it themselves; mark-pr-external.sh passes it automatically once its own
+# resolve_pr_contributors chain completes clean.
 LEDGER_STATE="$D/state-308b" ledger mark-pr-external --repo acme/agent-dotfiles --pr 930 \
-  --note "authored directly by the watchdog, no lane ever dispatched against it" >/dev/null
+  --note "authored directly by the watchdog, no lane ever dispatched against it" --chain-verified >/dev/null
 
 out=$(LEDGER_STATE="$D/state-308b" run 928 rev-930-green "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 930); rc=$?
 want_exit "GREEN: the SAME PR, same silence from every automatic path, now dispatches once recorded" "$rc" 0 "$out"
@@ -3915,7 +3920,7 @@ python3 - "$MUTANT_DIR_308C/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
 import sys
 target = sys.argv[1]
 text = open(target).read()
-marker = 'pr_task_json=$("$ledger_python" "$ledger_cli" pr-task --repo "$repo" --pr "$pr" 2>&1) || pr_task_json=""'
+marker = 'pr_task_json=$("$ledger_python" "$ledger_cli" pr-task --repo "$repo" --pr "$pr" 2>&1)'
 assert text.count(marker) == 1, "pr-task lookup not found or not unique -- script shape changed"
 text = text.replace(marker, 'pr_task_json=\'{"known":false}\'  # MUTATED: pr-task never consulted', 1)
 open(target, "w").write(text)

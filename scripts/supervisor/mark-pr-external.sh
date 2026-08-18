@@ -92,7 +92,7 @@ if [ -z "$REPO_PATH" ]; then
   echo "mark-pr-external: NOTE -- no [repo-path] given, so the worktree resolution path (step 3) was never consulted; pass one to make this check more exhaustive" >&2
 fi
 
-"$LEDGER_PYTHON" "$LEDGER_CLI" mark-pr-external --repo "$REPO" --pr "$PR" --note "$NOTE"
+"$LEDGER_PYTHON" "$LEDGER_CLI" mark-pr-external --repo "$REPO" --pr "$PR" --note "$NOTE" --chain-verified
 rc=$?
 if [ $rc -ne 0 ]; then
   echo "mark-pr-external: cli.py mark-pr-external failed (exit $rc)" >&2

@@ -424,6 +424,19 @@ def parser():
     mark_pr_external_parser.add_argument("--repo", required=True)
     mark_pr_external_parser.add_argument("--pr", required=True)
     mark_pr_external_parser.add_argument("--note", required=True)
+    # PR #331 review, finding 2: this method's own backstop can only check
+    # two of the five resolution paths (the three needing `gh`/`git` cannot
+    # live here) -- so a direct `cli.py mark-pr-external` call, without ever
+    # going through `mark-pr-external.sh`'s exhaustive chain, sailed through
+    # for the most common (issue-linked) contributor shape. This flag is the
+    # explicit, unmissable claim "the exhaustive chain ran and found nobody"
+    # -- `mark-pr-external.sh` is the only caller that passes it, once its
+    # own `resolve_pr_contributors` chain has actually completed clean.
+    # Omitting it is refused outright (see `Ledger.mark_pr_external`); it is
+    # not a permission check (nothing stops a caller from lying), it is the
+    # difference between an unsafe silent default and a caller having to say
+    # so out loud.
+    mark_pr_external_parser.add_argument("--chain-verified", action="store_true")
 
     pr_external_parser = sub.add_parser("pr-external")
     pr_external_parser.add_argument("--repo", required=True)
@@ -1181,7 +1194,9 @@ def main(argv=None):
             "task": row["id"] if row is not None else None,
         }
     elif args.command == "mark-pr-external":
-        ledger.mark_pr_external(repo=args.repo, pr_number=args.pr, note=args.note)
+        ledger.mark_pr_external(
+            repo=args.repo, pr_number=args.pr, note=args.note, chain_verified=args.chain_verified
+        )
         value = {"repo": args.repo, "pr": args.pr, "marked_external": True}
     elif args.command == "pr-external":
         row = ledger.get_pr_external(repo=args.repo, pr_number=args.pr)
