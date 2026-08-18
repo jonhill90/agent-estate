@@ -349,6 +349,18 @@ GUARD_AUDIT_EPISODE="${SUPERVISOR_GUARD_AUDIT_EPISODE:-$STATE/.watchdog-guard-au
 # forever after one page.
 GUARD_AUDIT_FAIL_STREAK="${SUPERVISOR_GUARD_AUDIT_FAIL_STREAK:-$STATE/.watchdog-guard-audit-fail-streak}"
 GUARD_AUDIT_FAIL_ESCALATE_AFTER="${SUPERVISOR_GUARD_AUDIT_FAIL_ESCALATE_AFTER:-3}"
+# agent-supervisor#205 review (skills:2): the call into worktree-guard-audit.sh
+# below had no bound at all -- #267's shape, and the exact thing f810a64/#276
+# was written to catch a day before this PR's CI ran. worktree-guard-audit.sh
+# itself now bounds each individual `git show`, but this is the outer,
+# whole-invocation backstop: it must never depend on that inner bound being
+# bug-free, because this call runs on EVERY exit path, ahead of
+# advance_on_exit (this file's own comment on check_worktree_guard_audit
+# below), and a hang here would silently wedge the one thing that must not
+# depend on which check fired this tick. 120s default: ~58s measured for the
+# real worktree farm (#205's PR body) plus headroom, well under
+# GUARD_AUDIT_INTERVAL's 1800s cadence.
+GUARD_AUDIT_TIMEOUT="${SUPERVISOR_GUARD_AUDIT_TIMEOUT:-120}"
 
 # Credentials + NOTIFY_SCRIPT for the escalate path. Sourced here so the
 # LaunchAgent needs no secrets inlined in its plist.
@@ -1307,9 +1319,44 @@ check_worktree_guard_audit() {
     return 0
   fi
 
-  local out rc
-  out=$("$HERE/worktree-guard-audit.sh" "$root" 2>&1)
+  # agent-supervisor#205 review (skills:2): bounded the same way
+  # advance-live.sh#51 bounds its `git fetch` -- background + a `kill -0`
+  # poll loop, not a `timeout`/`gtimeout` wrapper, for the same reason that
+  # file's own comment gives: SUPERVISOR_PATH pins a minimal PATH and this
+  # repo's own suite proves scripts under this watchdog run with only
+  # /usr/bin:/bin, which ships neither on macOS. A hang here is a fourth
+  # thing (unknown), not a clean result and not a gap -- it must never fall
+  # through to either.
+  local out out_file rc audit_pid waited timed_out
+  out_file=$(mktemp "${TMPDIR:-/tmp}/watchdog-guard-audit.XXXXXX") || {
+    guard_audit_check_failed "could not create a scratch file for worktree-guard-audit.sh's output"
+    return 0
+  }
+  "$HERE/worktree-guard-audit.sh" "$root" >"$out_file" 2>&1 &
+  audit_pid=$!
+  waited=0
+  timed_out=0
+  while kill -0 "$audit_pid" 2>/dev/null; do
+    if [ "$waited" -ge "$GUARD_AUDIT_TIMEOUT" ]; then
+      timed_out=1
+      kill -TERM "$audit_pid" 2>/dev/null
+      sleep 1
+      kill -KILL "$audit_pid" 2>/dev/null
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$audit_pid" 2>/dev/null
   rc=$?
+  out=$(cat "$out_file" 2>/dev/null)
+  rm -f "$out_file"
+
+  if [ "$timed_out" -eq 1 ]; then
+    guard_audit_check_failed "worktree-guard-audit.sh did not finish within ${GUARD_AUDIT_TIMEOUT}s and was killed -- treating as unknown, not clean"
+    return 0
+  fi
+
   # The script ran and answered -- clean or gaps, either way a real result,
   # not a check failure, so the fail streak resets even when gaps were found.
   printf '0' >"$GUARD_AUDIT_FAIL_STREAK" 2>/dev/null
@@ -1328,12 +1375,16 @@ check_worktree_guard_audit() {
     return 0
   fi
 
-  # Nonzero: the script's own contract is "exit nonzero iff gaps>0" (its own
-  # `[ "$gaps" -eq 0 ]` final line) -- treat any nonzero the same way, gaps
-  # reported or not, rather than silently swallowing an unrecognised failure
-  # shape as if it were the clean case.
+  # Nonzero: the script's own contract is "exit nonzero iff gaps>0 or
+  # unknowns>0" (its own `[ "$gaps" -eq 0 ] && [ "$unknowns" -eq 0 ]` final
+  # line) -- treat any nonzero the same way, gaps and/or unknowns reported or
+  # not, rather than silently swallowing an unrecognised failure shape as if
+  # it were the clean case. UNKNOWN lines (a single `git show` that hit its
+  # own bound, #205 review) are included here on purpose: a per-file timeout
+  # is neither a gap nor clean, and must page the same as a gap rather than
+  # vanish because no GAP line happened to be present.
   local gaps
-  gaps=$(grep '^GAP' <<<"$out")
+  gaps=$(grep -E '^(GAP|UNKNOWN)' <<<"$out")
   log "GUARD-AUDIT-GAP: $summary"
   guard_audit_note "GAP — $summary"
 
