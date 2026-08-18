@@ -677,6 +677,13 @@ fi
 # above), so membership is a linear scan (`author_lane_known`, below) and
 # both are guarded with the same `"${arr[@]+"${arr[@]}"}"` bash-3.2-empty-
 # array idiom `POSITIONAL` already established in this file.
+# agent-supervisor#308 item 4: the resolution chain itself (issue, PR-task,
+# PR-contributor, worktree, legacy branch) now lives in
+# resolve-pr-contributors.sh, shared with mark-pr-external.sh's laundering
+# gate -- see that file's header for why a second, drifted copy is exactly
+# the defect #321's review measured in verdict-independence.sh.
+# shellcheck source=./resolve-pr-contributors.sh
+. "$HERE/resolve-pr-contributors.sh"
 AUTHOR_LANES=()
 AUTHOR_TASKS=()
 FALLBACK_TASK=""
@@ -687,171 +694,9 @@ FALLBACK_TASK=""
 # silent" (arrays empty for a reason, and step 4 below must refuse), which an
 # empty-array check alone cannot tell apart.
 CONTRIBUTORS_RESOLVED=""
-author_lane_known() {  # author_lane_known <lane> -> 0 if already in the set
-  local want="$1" have
-  for have in "${AUTHOR_LANES[@]+"${AUTHOR_LANES[@]}"}"; do
-    [ "$have" = "$want" ] && return 0
-  done
-  return 1
-}
-add_contributor() {  # add_contributor <lane> <task> -- dedup by lane
-  local lane="$1" task="$2"
-  author_lane_known "$lane" && return 0
-  AUTHOR_LANES+=("$lane")
-  AUTHOR_TASKS+=("$task")
-}
 if [ -n "$REVIEWS_PR" ]; then
-  GH_REPO_ARGS=()
-  [ -n "$REPO" ] && GH_REPO_ARGS=(-R "$REPO")
-  # Same bash 3.2 empty-array hazard as POSITIONAL above: [repo] is
-  # documented as optional on this exact flag (`--reviews-pr` with [repo]
-  # omitted), so GH_REPO_ARGS is empty on that path and "${GH_REPO_ARGS[@]}"
-  # alone would abort under 3.2 before `gh` ever runs.
-  PR_JSON=$(gh pr view "$REVIEWS_PR" "${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"}" --json headRefName,closingIssuesReferences,commits 2>&1)
-  if [ $? -ne 0 ]; then
-    echo "dispatch: cannot read PR #$REVIEWS_PR -- refusing to dispatch its review (authorship unknown, failing closed)" >&2
-    sed 's/^/  /' <<<"$PR_JSON" >&2
+  if ! resolve_pr_contributors "$REPO" "$REVIEWS_PR" "$REPO_PATH" "$PREFIX" "$LEDGER_PYTHON" "$LEDGER_CLI"; then
     exit 1
-  fi
-  HEAD_REF=$(sed -n 's/.*"headRefName":"\([^"]*\)".*/\1/p' <<<"$PR_JSON")
-  if [ -z "$HEAD_REF" ]; then
-    echo "dispatch: PR #$REVIEWS_PR's head branch is unreadable -- refusing to dispatch its review (authorship unknown, failing closed)" >&2
-    exit 1
-  fi
-
-  # 1 & 2. THE LEDGER, asked by ISSUE -- never by branch name. Two sources
-  # for "which issue this PR closes", tried in order and POOLED (deduped)
-  # rather than short-circuited on the first that parses, because either can
-  # be empty for a PR that still has real, ledger-known contributors:
-  #   1. closingIssuesReferences: GitHub's own parse of the PR body.
-  #   2. commit messages: this project's own convention closes issues from
-  #      commit trailers too (see this brief's own "Close with `Fixes
-  #      #35`"), which a PR body alone would miss.
-  # Each candidate issue number goes to `cli.py contributor-issue-lanes`
-  # (agent-supervisor#190), which asks the ledger for EVERY non-review task
-  # ever dispatched against that issue -- never a branch, and a review task
-  # can never be a contributor. UNLIKE the single-author lookup this
-  # replaces, every candidate issue that answers is UNIONED into the set,
-  # not just the first: a PR can close more than one issue, and each is a
-  # genuine source of contributors, not a fallback for the others.
-  CANDIDATE_ISSUES=$(
-    {
-      grep -oE '"closingIssuesReferences":\[[^]]*\]' <<<"$PR_JSON" \
-        | grep -oE '"number":[0-9]+' | grep -oE '[0-9]+'
-      grep -oE '"message(Headline|Body)":"[^"]*"' <<<"$PR_JSON" \
-        | grep -ioE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+'
-    } | awk '!seen[$0]++'
-  )
-  for candidate_issue in $CANDIDATE_ISSUES; do
-    ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" contributor-issue-lanes --issue "$candidate_issue" 2>&1) || continue
-    if grep -qF '"known":true' <<<"$ISSUE_JSON"; then
-      CONTRIBUTORS_RESOLVED=1
-      while IFS=$'\t' read -r c_lane c_task; do
-        [ -n "$c_lane" ] || continue
-        add_contributor "$c_lane" "$c_task"
-      done < <(grep -oE '"lane":"[^"]*","task":"[^"]*"' <<<"$ISSUE_JSON" \
-        | sed -E 's/"lane":"([^"]*)","task":"([^"]*)"/\1\t\2/')
-    fi
-  done
-
-  # 2.1. agent-supervisor#308 item 1: the EXPLICIT "task X's work opened PR
-  # N" record, written after the fact (`lane-done.sh`, best effort) for an
-  # issue-keyed dispatch whose own PR did not exist yet when it started --
-  # see `Ledger.get_task_for_pr_number`. A direct lookup, not inferred from
-  # a branch or an issue reference at all.
-  PR_TASK_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" pr-task --repo "$REPO" --pr "$REVIEWS_PR" 2>&1) || PR_TASK_JSON=""
-  if grep -qF '"known":true' <<<"$PR_TASK_JSON"; then
-    CONTRIBUTORS_RESOLVED=1
-    p_lane=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$PR_TASK_JSON")
-    p_task=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$PR_TASK_JSON")
-    add_contributor "$p_lane" "$p_task"
-  fi
-
-  # 2.2. agent-supervisor#308 item 2: resolution path five -- the PR's own
-  # `source_tasks` rows (`source_kind='pull'`), asked DIRECTLY by PR number
-  # rather than by the issue(s) it closes. A review or fix-pass dispatched
-  # with `--pr <N>`/`--reviews-pr <N>` (which implies it, see step 6 below)
-  # already writes this record at dispatch time -- exact, structured, no
-  # branch name or live git state involved -- but nothing before this read
-  # it back for authorship. UNIONED regardless of whether steps 1&2/2.1
-  # already found contributors, same reasoning as step 3 below: one more
-  # genuine contributor found is never the wrong direction. See
-  # `Ledger.get_contributor_tasks_for_pr` for the measured case this fixes
-  # (#302: two fix-pass tasks dispatched directly against PR #302, sitting
-  # unconsulted in exactly this table).
-  PR_CONTRIB_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" contributor-pr-lanes --pr "$REVIEWS_PR" 2>&1) || PR_CONTRIB_JSON=""
-  if grep -qF '"known":true' <<<"$PR_CONTRIB_JSON"; then
-    CONTRIBUTORS_RESOLVED=1
-    while IFS=$'\t' read -r c_lane c_task; do
-      [ -n "$c_lane" ] || continue
-      add_contributor "$c_lane" "$c_task"
-    done < <(grep -oE '"lane":"[^"]*","task":"[^"]*"' <<<"$PR_CONTRIB_JSON" \
-      | sed -E 's/"lane":"([^"]*)","task":"([^"]*)"/\1\t\2/')
-  fi
-
-  # 3. agent-supervisor#117: which worktree currently has HEAD_REF checked
-  # out -- resolved through the ledger by the worktree PATH recorded at
-  # dispatch time (`--worktree`, step 6 of a PRIOR dispatch), never by
-  # reconstructing a task id from the branch name. A lane routinely renames
-  # its worktree's branch to satisfy the type-prefix convention (`fix/`,
-  # `feat/`, ...) with a slug of its OWN choosing, independent of the
-  # dispatch slug the task id was minted from -- exactly the #117 confound
-  # ("as101-reviewspr-inference" produced branch "fix/101-not-a-review-
-  # escape"; the two slugs share nothing). The worktree itself is never
-  # renamed, so `git worktree list` still finds it by its current branch
-  # regardless of how many times that branch was renamed, and the ledger
-  # already knows which task built it.
-  #
-  # `$REPO_PATH` is the local checkout `--reviews-pr`'s caller is running
-  # in, i.e. the one whose worktrees this can actually see -- REQUIRED for
-  # this step; skipped (not refused) when a caller omitted it, exactly like
-  # `DISPATCH_ALLOW_CWD_REPO_PATH` skips it above for [repo] alone.
-  #
-  # agent-supervisor#190: UNIONED into the set regardless of whether step 1&2
-  # already found contributors (no longer gated on the set being empty) --
-  # the worktree currently on HEAD_REF can be a lane the issue-based lookup
-  # never named (a legacy task, or a task recorded with a different
-  # `source_ref`), and finding one more contributor is only ever the safe
-  # direction here.
-  if [ -n "$REPO_PATH" ]; then
-    WORKTREE_LIST=$(git -C "$REPO_PATH" worktree list --porcelain 2>/dev/null || true)
-    if [ -n "$WORKTREE_LIST" ]; then
-      MATCHED_WORKTREE=$(awk -v want="branch refs/heads/$HEAD_REF" '
-        /^worktree / { path = substr($0, 10) }
-        $0 == want { print path }
-      ' <<<"$WORKTREE_LIST")
-      # More than one worktree currently on the same branch cannot happen --
-      # git itself refuses to check the same branch out twice -- but take
-      # only the first match defensively rather than trust that invariant.
-      MATCHED_WORKTREE=$(head -n1 <<<"$MATCHED_WORKTREE")
-      if [ -n "$MATCHED_WORKTREE" ]; then
-        WORKTREE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" worktree-lane --path "$MATCHED_WORKTREE" 2>&1)
-        if [ $? -eq 0 ] && grep -qF '"known":true' <<<"$WORKTREE_JSON"; then
-          CONTRIBUTORS_RESOLVED=1
-          w_lane=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$WORKTREE_JSON")
-          w_task=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$WORKTREE_JSON")
-          add_contributor "$w_lane" "$w_task"
-        fi
-      fi
-    fi
-  fi
-
-  # 3.1. Legacy last resort, kept only for tasks dispatched before #117: no
-  # worktree path was ever recorded for them, so step 3 above can never
-  # match. The branch name IS trusted here, but only as far as the ledger
-  # confirms it -- a task id it does not recognise still refuses, same as
-  # always. Only reached when the set is STILL empty -- unlike steps 1-3,
-  # this reconstructs a single task id from the branch name by convention
-  # rather than asking the ledger for a set, so it cannot itself widen an
-  # already-nonempty set the way step 3 does.
-  if [ ${#AUTHOR_LANES[@]} -eq 0 ] && [[ "$HEAD_REF" =~ ^(lane|fix|feat|chore|docs)/([0-9]+)-(.+)$ ]]; then
-    FALLBACK_TASK="${PREFIX}${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
-    FALLBACK_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" task-lane --task "$FALLBACK_TASK" 2>&1)
-    if [ $? -eq 0 ] && grep -qF '"known":true' <<<"$FALLBACK_JSON"; then
-      CONTRIBUTORS_RESOLVED=1
-      f_lane=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$FALLBACK_JSON")
-      add_contributor "$f_lane" "$FALLBACK_TASK"
-    fi
   fi
 
   # 3.2. agent-supervisor#308 item 3: "authored outside the lane system" as
@@ -884,7 +729,8 @@ if [ -n "$REVIEWS_PR" ]; then
     # The two describe the same fact before and after: nobody the ledger
     # will vouch for produced (or contributed to) this PR.
     echo "dispatch: could not determine PR #$REVIEWS_PR's author -- the ledger has no record by issue, by commit, or by branch '$HEAD_REF' (task ${FALLBACK_TASK:-none}) -- refusing (authorship unknown, failing closed)" >&2
-    echo "dispatch: if this PR was genuinely authored outside the lane system (a human, or the watchdog), record that once with: $LEDGER_PYTHON $LEDGER_CLI mark-pr-external --repo '$REPO' --pr $REVIEWS_PR --note '<why>'" >&2
+    echo "dispatch: if this PR was genuinely authored outside the lane system (a human, or the watchdog), record that once with: $HERE/mark-pr-external.sh '$REPO' $REVIEWS_PR '<why>' '$REPO_PATH'" >&2
+    echo "dispatch: NOTE -- use mark-pr-external.sh, not cli.py mark-pr-external directly; the CLI now refuses without --chain-verified, which only the wrapper's own exhaustive resolution chain earns (PR #331 review, finding 2)" >&2
     # agent-supervisor#101, third red-first item: on the inferred path these
     # are TWO separate findings arriving together -- "this looked like a
     # review" and "its contributors are unresolvable" -- and read as one

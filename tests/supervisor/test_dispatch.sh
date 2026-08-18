@@ -147,6 +147,28 @@ run() {
 # state directory under $HOME -- a test suite writing into the live estate's
 # ledger. LEDGER_STATE overrides it for the cases that need a broken one.
 ledger() { AGENT_SUPERVISOR_STATE_DIR="${LEDGER_STATE:-$D/state}" python3 "$HERE/../../scripts/supervisor/cli.py" "$@"; }
+# agent-supervisor#308 item 4: dispatch.sh's PR-contributor resolution chain
+# now lives in resolve-pr-contributors.sh, sourced by `$HERE/...` (dispatch.sh's
+# OWN directory, resolved from its BASH_SOURCE). A mutation check that used to
+# patch a copy of dispatch.sh's inline text and rewrite its HERE assignment
+# back to the real scripts/ dir (so every OTHER sourced file stayed real) can
+# no longer isolate a mutation to the resolution chain that way -- the thing
+# being mutated is itself one of the sourced files now. This makes a full,
+# real copy of the whole scripts/supervisor/ directory instead: a mutation
+# test overwrites exactly the file it needs to change (resolve-pr-
+# contributors.sh, or dispatch.sh itself for a same-file mutation) in that
+# copy, and every other file -- including the newly-split one when it is NOT
+# the mutation target -- runs unmodified. `__pycache__` is skipped; a stale
+# compiled module from a previous run must never be picked up over the
+# source `.py` this copy just wrote.
+make_mutant_scripts_dir() {
+  local dir
+  dir=$(mktemp -d "$D/mutant.XXXXXX")
+  cp -R "$HERE/../../scripts/supervisor/." "$dir/"
+  rm -rf "$dir/__pycache__"
+  chmod +x "$dir"/*.sh
+  printf '%s' "$dir"
+}
 # Registers a lane as known-and-free directly, the way `cli.py lane-free`'s
 # first-sight backfill would if it ever saw this lane named `free-N` -- used
 # where a case needs the ledger to ALREADY know a lane before dispatch.sh's
@@ -2692,24 +2714,21 @@ want_missing "never on the author's lane (t:3, target t:@103)" "send-keys -t t:@
 # nothing (only `lane/` was ever understood there before this brief widened
 # it, and even widened, plain regex matching is not what proves the LEDGER
 # decided this), so the review should refuse instead of skip-and-dispatch.
-MUTATED_35=$D/dispatch-no-issue-ledger.sh
+MUTANT_DIR_35=$(make_mutant_scripts_dir)
+MUTATED_35="$MUTANT_DIR_35/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$MUTATED_35" <<'PY' || patch_rc=$?
-import os
+python3 - "$MUTANT_DIR_35/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
-marker = 'ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" contributor-issue-lanes --issue "$candidate_issue" 2>&1) || continue'
+target = sys.argv[1]
+text = open(target).read()
+marker = 'issue_json=$("$ledger_python" "$ledger_cli" contributor-issue-lanes --issue "$candidate_issue" 2>&1)'
 assert text.count(marker) == 1, "contributor-issue-lanes lookup not found or not unique -- script shape changed"
-text = text.replace(marker, 'ISSUE_JSON=\'{"known":false}\'  # MUTATED: ledger contributor-issue-lanes never consulted', 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+text = text.replace(marker, 'issue_json=\'{"known":false}\'  # MUTATED: ledger contributor-issue-lanes never consulted', 1)
+open(target, "w").write(text)
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh whose contributor-issue-lanes lookup is silenced" \
-    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+    "could not patch $MUTANT_DIR_35/resolve-pr-contributors.sh (exit $patch_rc) -- treating as a failure, not a skip"
 else
   ok "setup: patched a copy of dispatch.sh whose contributor-issue-lanes lookup is silenced"
   chmod +x "$MUTATED_35"
@@ -2906,31 +2925,32 @@ want_contains "and still fails closed for the documented reason: no ledger recor
 
 # MUTATION-CHECK: put both raw "${arr[@]}" expansions back and confirm the
 # suite actually notices under real /bin/bash.
-MUTATED_225B="$D/dispatch-no-array-guard.sh"
+MUTANT_DIR_225B=$(make_mutant_scripts_dir)
+MUTATED_225B="$MUTANT_DIR_225B/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$MUTATED_225B" <<'PY' || patch_rc=$?
-import os
+python3 - "$MUTANT_DIR_225B/dispatch.sh" "$MUTANT_DIR_225B/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+dispatch_path, resolve_path = sys.argv[1], sys.argv[2]
+
+text = open(dispatch_path).read()
 n = text.count('set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"')
 assert n == 1, "POSITIONAL 3.2-safe expansion not found or not unique -- script shape changed"
 text = text.replace('set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"', 'set -- "${POSITIONAL[@]}"', 1)
-n = text.count('gh pr view "$REVIEWS_PR" "${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"}" --json headRefName')
-assert n == 1, "GH_REPO_ARGS 3.2-safe expansion not found or not unique -- script shape changed"
+open(dispatch_path, "w").write(text)
+
+text = open(resolve_path).read()
+n = text.count('gh pr view "$pr" "${gh_repo_args[@]+"${gh_repo_args[@]}"}" --json headRefName')
+assert n == 1, "gh_repo_args 3.2-safe expansion not found or not unique -- script shape changed"
 text = text.replace(
-    'gh pr view "$REVIEWS_PR" "${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"}" --json headRefName',
-    'gh pr view "$REVIEWS_PR" "${GH_REPO_ARGS[@]}" --json headRefName',
+    'gh pr view "$pr" "${gh_repo_args[@]+"${gh_repo_args[@]}"}" --json headRefName',
+    'gh pr view "$pr" "${gh_repo_args[@]}" --json headRefName',
     1,
 )
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+open(resolve_path, "w").write(text)
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh with both 3.2-safe expansions reverted" \
-    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+    "could not patch $MUTANT_DIR_225B (exit $patch_rc) -- treating as a failure, not a skip"
 else
   ok "setup: patched a copy of dispatch.sh with both 3.2-safe expansions reverted"
   chmod +x "$MUTATED_225B"
@@ -3235,24 +3255,21 @@ want_contains "names the real authoring task" "ad101-pr-inference-fix" "$out"
 # branch means the legacy branch-name fallback cannot pick up the slack
 # either, so this must go from "dispatched, author skipped" to "refused,
 # authorship unknown".
-MUTATED_117="$D/dispatch-no-worktree-lookup.sh"
+MUTANT_DIR_117=$(make_mutant_scripts_dir)
+MUTATED_117="$MUTANT_DIR_117/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$MUTATED_117" <<'PY' || patch_rc=$?
-import os
+python3 - "$MUTANT_DIR_117/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
-marker = 'WORKTREE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" worktree-lane --path "$MATCHED_WORKTREE" 2>&1)'
+target = sys.argv[1]
+text = open(target).read()
+marker = 'worktree_json=$("$ledger_python" "$ledger_cli" worktree-lane --path "$matched_worktree" 2>&1)'
 assert text.count(marker) == 1, "worktree-lane lookup not found or not unique -- script shape changed"
-text = text.replace(marker, 'WORKTREE_JSON=\'{"known":false}\'  # MUTATED: worktree-lane never consulted', 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+text = text.replace(marker, 'worktree_json=\'{"known":false}\'  # MUTATED: worktree-lane never consulted', 1)
+open(target, "w").write(text)
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh whose worktree-lane lookup is silenced" \
-    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+    "could not patch $MUTANT_DIR_117/resolve-pr-contributors.sh (exit $patch_rc) -- treating as a failure, not a skip"
 else
   ok "setup: patched a copy of dispatch.sh whose worktree-lane lookup is silenced"
   chmod +x "$MUTATED_117"
@@ -3749,28 +3766,21 @@ LEDGER_STATE="$D/state-308a" ledger record-completion --task ad926-rev-970 --not
 # MUTATION-CHECK: silence the PR-scoped contributor lookup and confirm the
 # fix-pass lane (t:4) is WRONGLY treated as available -- proving this test
 # actually exercises the new path, not something step 1-3.1 already covered.
-MUTATED_308A="$D/dispatch-no-pr-contributor-lookup.sh"
+MUTANT_DIR_308A=$(make_mutant_scripts_dir)
+MUTATED_308A="$MUTANT_DIR_308A/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$MUTATED_308A" <<'PY' || patch_rc=$?
-import os
+python3 - "$MUTANT_DIR_308A/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
-marker = 'PR_CONTRIB_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" contributor-pr-lanes --pr "$REVIEWS_PR" 2>&1)'
+target = sys.argv[1]
+text = open(target).read()
+marker = 'pr_contrib_json=$("$ledger_python" "$ledger_cli" contributor-pr-lanes --pr "$pr" 2>&1)'
 assert text.count(marker) == 1, "contributor-pr-lanes lookup not found or not unique -- script shape changed"
-text = text.replace(marker, 'PR_CONTRIB_JSON=\'{"known":false}\'  # MUTATED: contributor-pr-lanes never consulted', 1)
-# The copy lands under $D (the test's own tmpdir), not scripts/supervisor --
-# `HERE="$(... ${BASH_SOURCE[0]} ...)"` would otherwise resolve to the COPY's
-# own location and fail to find input-box.sh/send.sh/harness-registry.sh/
-# session-defaults.sh/cli.py, which all live beside the real dispatch.sh.
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+text = text.replace(marker, 'pr_contrib_json=\'{"known":false}\'  # MUTATED: contributor-pr-lanes never consulted', 1)
+open(target, "w").write(text)
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh whose contributor-pr-lanes lookup is silenced" \
-    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+    "could not patch $MUTANT_DIR_308A/resolve-pr-contributors.sh (exit $patch_rc) -- treating as a failure, not a skip"
 else
   ok "setup: patched a copy of dispatch.sh whose contributor-pr-lanes lookup is silenced"
   chmod +x "$MUTATED_308A"
@@ -3811,8 +3821,13 @@ want_contains "...and now names the escape hatch: record it, don't guess it" \
 
 # The escape: an operator explicitly records the fact, auditable, never a
 # flag dispatch.sh itself can flip.
+# PR #331 review, finding 2: cli.py mark-pr-external now refuses without
+# --chain-verified (an explicit claim the exhaustive chain ran) -- an
+# operator using this escape hatch directly, having verified by hand, passes
+# it themselves; mark-pr-external.sh passes it automatically once its own
+# resolve_pr_contributors chain completes clean.
 LEDGER_STATE="$D/state-308b" ledger mark-pr-external --repo acme/agent-dotfiles --pr 930 \
-  --note "authored directly by the watchdog, no lane ever dispatched against it" >/dev/null
+  --note "authored directly by the watchdog, no lane ever dispatched against it" --chain-verified >/dev/null
 
 out=$(LEDGER_STATE="$D/state-308b" run 928 rev-930-green "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 930); rc=$?
 want_exit "GREEN: the SAME PR, same silence from every automatic path, now dispatches once recorded" "$rc" 0 "$out"
@@ -3898,24 +3913,21 @@ LEDGER_STATE="$D/state-308c" ledger record-completion --task ad934-rev-972 --not
 # contributor (t:4) is WRONGLY treated as available -- proving this test
 # actually exercises step 2.1, not something steps 1-2/3 already covered
 # (the PR fixture above was built specifically so they cannot).
-MUTATED_308C="$D/dispatch-no-pr-task-lookup.sh"
+MUTANT_DIR_308C=$(make_mutant_scripts_dir)
+MUTATED_308C="$MUTANT_DIR_308C/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$MUTATED_308C" <<'PY' || patch_rc=$?
-import os
+python3 - "$MUTANT_DIR_308C/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
-marker = 'PR_TASK_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" pr-task --repo "$REPO" --pr "$REVIEWS_PR" 2>&1) || PR_TASK_JSON=""'
+target = sys.argv[1]
+text = open(target).read()
+marker = 'pr_task_json=$("$ledger_python" "$ledger_cli" pr-task --repo "$repo" --pr "$pr" 2>&1)'
 assert text.count(marker) == 1, "pr-task lookup not found or not unique -- script shape changed"
-text = text.replace(marker, 'PR_TASK_JSON=\'{"known":false}\'  # MUTATED: pr-task never consulted', 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+text = text.replace(marker, 'pr_task_json=\'{"known":false}\'  # MUTATED: pr-task never consulted', 1)
+open(target, "w").write(text)
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh whose pr-task lookup is silenced" \
-    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+    "could not patch $MUTANT_DIR_308C/resolve-pr-contributors.sh (exit $patch_rc) -- treating as a failure, not a skip"
 else
   ok "setup: patched a copy of dispatch.sh whose pr-task lookup is silenced"
   chmod +x "$MUTATED_308C"
