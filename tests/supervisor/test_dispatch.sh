@@ -3860,6 +3860,7 @@ cat > "$D/lanes" <<'FIX'
 4|free-4|claude.exe|❯ ready|1|0
 6|free-6|claude.exe|❯ ready|1|0
 FIX
+printf '933|| the code a fix pass on PR #972 targets\n' >> "$D/issues"
 out=$(LEDGER_STATE="$D/state-308c" run 933 original-972 "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "setup: the originating dispatch (task ad933-original-972) succeeds" "$rc" 0 "$out"
 want_contains "setup: it landed on t:4" "send-keys -t t:@104" "$(tmuxlog)"
@@ -3926,9 +3927,24 @@ FIX
   printf '935|| review PR #972 again, against the mutated lookup\n' >> "$D/issues"
   out=$(DISPATCH_SCRIPT="$MUTATED_308C" LEDGER_STATE="$D/state-308c" \
         run 935 rev-972-mutant "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 972); rc=$?
-  want_exit "mutation confirmed: dispatch still succeeds (nothing left to exclude)" "$rc" 0 "$out"
-  want_missing "mutation confirmed: the recorded contributor is NO LONGER skipped -- it reads free" "skipping t:4" "$out"
+  # Unlike #308 item 2's mutation check above, this PR fixture carries no
+  # issue reference and no worktree ever sat on its branch -- deliberately,
+  # so nothing but step 2.1 could ever resolve it. Silencing step 2.1 does
+  # not leave dispatch to proceed with an empty (safe) contributor set; it
+  # removes the ONLY path that resolves this PR at all, so the fail-closed
+  # guard now refuses the whole dispatch -- which is itself the proof: the
+  # real script's earlier success above did not happen "for free".
+  want_exit "mutation confirmed: with step 2.1 silenced, PR #972 has NO resolution path left -- dispatch refuses entirely" "$rc" 1 "$out"
+  want_contains "...fails closed rather than guessing, same posture as the real refusal path" "authorship unknown, failing closed" "$out"
 fi
+
+# Restore the fixture to what the #236 section below expects (only t:3
+# free) -- this section borrowed t:4/t:6 for its own scenarios and must not
+# leak that shape past its own end.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
 
 # --- agent-supervisor#236: the launch command is the pane's PROCESS, ------
 # never keystrokes typed into whatever the respawn produced ----------------
