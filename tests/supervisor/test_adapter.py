@@ -585,6 +585,20 @@ class ClaudePrintAdapterTest(unittest.TestCase):
         self.assertEqual("claude-print", record["transport"])
         self.assertTrue(FakeClaudePrintTransport.instances[0].terminated)
 
+    def test_register_lane_records_the_harness_session_id_and_project_dir(self):
+        """agent-supervisor#302, reintroduced by #320 (agent-supervisor#311):
+        for claude-print the two ids are the same uuid by construction -- it
+        is what `--session-id` minted and what `--resume` takes. Without
+        this, `restore.sh` refuses every claude-print lane as UNRECOVERABLE
+        after a tmux death even though the conversation sits resumable on
+        disk. Mutation-verified: delete either kwarg from
+        `ClaudePrintAdapter.register_lane` and this goes red."""
+        record = self.adapter.register_lane(
+            lane="claude-print-worker", target=None, harness="claude", repo="/repo/hill90", nonce="nonce-cp"
+        )
+        self.assertEqual(record["session_id"], record["harness_session_id"])
+        self.assertEqual("/repo/hill90", record["harness_project_dir"])
+
     def test_register_lane_mints_a_real_uuid_session_id(self):
         """Reproduction: `uuid.uuid4().hex` (no dashes) minted a session id
         `claude --session-id` rejects outright ('Invalid session ID. Must be

@@ -499,6 +499,27 @@ class ClaudePrintAdapter:
             repo=repo,
             server_id="claude-print",
             session_id=session_id,
+            # agent-supervisor#302, reintroduced by #320 (agent-supervisor#311):
+            # for claude-print the harness session id IS this uuid -- it is
+            # what `claude -p --session-id <uuid>` minted and what
+            # `claude -p --resume <uuid>` takes. Omitting it leaves every
+            # migrated lane UNRECOVERABLE: restore.sh refuses rather than
+            # invents, so a tmux death reports each one UNRECOVERABLE while
+            # the conversation sits resumable on disk. #320's rewrite of the
+            # surrounding assign_task method silently dropped this line and
+            # the one below along with it -- the population #311 was meant to
+            # backfill kept growing (41 -> 47) after #302 was already merged
+            # and deployed, because new registrations went right back to
+            # writing nothing here.
+            harness_session_id=session_id,
+            # core.py's register_lane never lets this diverge from
+            # harness_session_id (agent-supervisor#172): a caller resolving a
+            # fresh session id must pass the directory it was resolved in
+            # alongside it. `repo` IS that directory -- what
+            # `transport_factory(cwd=repo)` above actually launched
+            # `claude -p` in. Leaving this out fails restore.sh's independent
+            # harness_project_dir check even when harness_session_id is set.
+            harness_project_dir=repo,
             command="claude",
             # Explicit, same reasoning as TmuxAdapter/ACPAdapter/PiRPCAdapter:
             # this class IS the claude-print transport by construction.
