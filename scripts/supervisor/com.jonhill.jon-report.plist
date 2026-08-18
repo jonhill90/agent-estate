@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jonhill.jon-report</string>
+  <!-- Jon, 2026-08-18: "Every 30 minutes you send me the issues closed on
+       telegram. Not excuses." and "And also send me a phase report at that
+       time as well. That way i can see progress."
+
+       Both in ONE job so the two messages always arrive together and cannot
+       drift apart into two schedules that disagree about what time it is.
+       1800s = the 30 minutes he asked for, exactly.
+
+       Neither script invokes a model. Neither reports effort, blockers, or
+       reasons -- closed-report names issues that closed, phase-report names
+       the size of the pile. That constraint is the specification.
+
+       Points at the shared checkout, not a worktree: per CLAUDE.md, that is
+       where the Director actually runs scripts/supervisor from, and a
+       worktree is temporary. Install with:
+         cp scripts/supervisor/com.jonhill.jon-report.plist \
+           ~/Library/LaunchAgents/com.jonhill.jon-report.plist
+         launchctl load ~/Library/LaunchAgents/com.jonhill.jon-report.plist -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>-c</string>
+    <string>/bin/bash /Users/jon/source/repos/Personal/agent-supervisor/scripts/supervisor/closed-report.sh; /bin/bash /Users/jon/source/repos/Personal/agent-supervisor/scripts/supervisor/phase-report.sh</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>1800</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/jon/.local/bin</string>
+    <key>HOME</key>
+    <string>/Users/jon</string>
+    <key>USER</key>
+    <string>jon</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/jon/.local/state/agent-dotfiles-supervisor/jon-report.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jon/.local/state/agent-dotfiles-supervisor/jon-report.log</string>
+</dict>
+</plist>

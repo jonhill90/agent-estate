@@ -23,6 +23,12 @@
 # window is [last successful send, now]. Recording the send time means a failed
 # send does not lose the issues -- the next run's window still covers them, so
 # a Telegram outage delays the report instead of eating it.
+#
+# #251/#205: every `gh` call here is bounded (`with_timeout`, quota.sh's
+# pattern -- background the call, poll `kill -0`, TERM then KILL past the
+# deadline, no external `timeout`/`gtimeout` binary required). Each repo's
+# call is bounded on its own, not one timeout around the whole loop, so one
+# stuck repo times out and the rest still report.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -30,6 +36,7 @@ STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 STAMP="$STATE/.closed-report.since"
 WINDOW_MINUTES="${CLOSED_REPORT_WINDOW_MINUTES:-30}"
 REPOS="${CLOSED_REPORT_REPOS:-jonhill90/agent-supervisor jonhill90/agent-dotfiles jonhill90/agent-tui jonhill90/skills jonhill90/agent-evals jonhill90/Hill90 jonhill90/hill90-app}"
+GH_TIMEOUT_SECONDS="${CLOSED_REPORT_GH_TIMEOUT_SECONDS:-20}"
 # Send even when nothing closed? Default NO. Jon asked for the issues, and a
 # recurring "0 closed" every 30 minutes is precisely the kind of message that
 # trains a reader to stop opening them -- the failure heartbeat.sh already
@@ -48,6 +55,32 @@ while [ $# -gt 0 ]; do
 done
 
 log() { printf '%s closed-report: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
+
+# with_timeout SECONDS OUTFILE CMD... -- quota.sh's pattern (#264), copied
+# rather than sourced so this script has no import-time dependency on
+# quota.sh. Backgrounds CMD, polls `kill -0` at 1s granularity, TERM then
+# KILL once SECONDS have elapsed. CMD's stdout lands in OUTFILE so the exit
+# code read afterward is CMD's own, never a pipe's. Returns 124 on timeout.
+with_timeout() {
+  local secs="$1" outfile="$2"; shift 2
+  "$@" >"$outfile" 2>/dev/null &
+  local pid=$! waited=0 timed_out=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      timed_out=1
+      kill -TERM "$pid" 2>/dev/null
+      sleep 1
+      kill -KILL "$pid" 2>/dev/null
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid" 2>/dev/null
+  local rc=$?
+  [ "$timed_out" -eq 1 ] && return 124
+  return "$rc"
+}
 
 mkdir -p "$STATE" 2>/dev/null
 
@@ -73,8 +106,21 @@ for repo in $REPOS; do
   # --limit 40 is well above any plausible 30-minute close rate; a window that
   # genuinely closed 40 issues is worth truncating loudly rather than paging
   # silently through the API (see #319, digest.sh's rate-limit burn).
-  raw=$(gh issue list --repo "$repo" --state closed --limit 40 \
-          --json number,title,closedAt 2>/dev/null)
+  gh_out=$(mktemp "${TMPDIR:-/tmp}/closed-report-gh.XXXXXX") || {
+    log "$repo UNREADABLE -- could not create a scratch file; NOT counted as zero"
+    unreadable="${unreadable}${short} "
+    continue
+  }
+  with_timeout "$GH_TIMEOUT_SECONDS" "$gh_out" \
+    gh issue list --repo "$repo" --state closed --limit 40 --json number,title,closedAt
+  gh_rc=$?
+  raw=$(cat "$gh_out" 2>/dev/null)
+  rm -f "$gh_out"
+  if [ "$gh_rc" -eq 124 ]; then
+    log "$repo UNREADABLE -- TIMEOUT after ${GH_TIMEOUT_SECONDS}s waiting on gh issue list; NOT counted as zero"
+    unreadable="${unreadable}${short} "
+    continue
+  fi
   if [ -z "$raw" ]; then
     log "$repo UNREADABLE -- gh returned nothing; NOT counted as zero"
     unreadable="${unreadable}${short} "

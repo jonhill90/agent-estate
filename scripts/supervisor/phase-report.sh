@@ -20,6 +20,11 @@
 # that, rather than inventing a new format.
 #
 # NO MODEL IN THIS PATH.
+#
+# #251/#205: every `gh` call here is bounded (`with_timeout`, quota.sh's
+# pattern). Each of the three gh calls per repo is bounded on its own, not
+# one timeout around the whole loop, so one stuck repo/call times out and the
+# rest still report.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -27,6 +32,7 @@ STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 LEDGER="$STATE/ledger.sqlite3"
 REPOS="${PHASE_REPORT_REPOS:-jonhill90/agent-supervisor jonhill90/agent-dotfiles jonhill90/agent-tui jonhill90/skills jonhill90/agent-evals}"
 DRY="${PHASE_REPORT_DRY:-0}"
+GH_TIMEOUT_SECONDS="${PHASE_REPORT_GH_TIMEOUT_SECONDS:-20}"
 
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -37,6 +43,48 @@ done
 
 log() { printf '%s phase-report: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
+# with_timeout SECONDS OUTFILE CMD... -- quota.sh's pattern (#264), copied
+# rather than sourced so this script has no import-time dependency on
+# quota.sh. Backgrounds CMD, polls `kill -0` at 1s granularity, TERM then
+# KILL once SECONDS have elapsed. CMD's stdout lands in OUTFILE so the exit
+# code read afterward is CMD's own, never a pipe's. Returns 124 on timeout.
+with_timeout() {
+  local secs="$1" outfile="$2"; shift 2
+  "$@" >"$outfile" 2>/dev/null &
+  local pid=$! waited=0 timed_out=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited" -ge "$secs" ]; then
+      timed_out=1
+      kill -TERM "$pid" 2>/dev/null
+      sleep 1
+      kill -KILL "$pid" 2>/dev/null
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$pid" 2>/dev/null
+  local rc=$?
+  [ "$timed_out" -eq 1 ] && return 124
+  return "$rc"
+}
+
+# bounded_gh_jq OUTVAR TIMEOUT gh-args... -- runs `gh ARGS` bounded by
+# with_timeout, printing the captured stdout on success or nothing (silent,
+# matching the `--jq`-failure shape the caller already handles) on a
+# timeout/nonzero exit. Kept separate from with_timeout so each call site
+# below still reads as a single `gh ... --jq ...` invocation.
+bounded_gh() {
+  local secs="$1"; shift
+  local outfile rc
+  outfile=$(mktemp "${TMPDIR:-/tmp}/phase-report-gh.XXXXXX") || return 1
+  with_timeout "$secs" "$outfile" "$@"
+  rc=$?
+  cat "$outfile" 2>/dev/null
+  rm -f "$outfile"
+  return "$rc"
+}
+
 now_iso="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
 today="${now_iso%%T*}"
 
@@ -45,10 +93,10 @@ per_repo=""; unreadable=""
 
 for repo in $REPOS; do
   short="${repo#*/}"
-  oi=$(gh issue list --repo "$repo" --state open  --limit 200 --json number --jq 'length' 2>/dev/null)
-  op=$(gh pr    list --repo "$repo" --state open  --limit 100 --json number --jq 'length' 2>/dev/null)
-  ct=$(gh issue list --repo "$repo" --state closed --limit 100 --json closedAt \
-         --jq "[.[] | select(.closedAt >= \"${today}T00:00:00Z\")] | length" 2>/dev/null)
+  oi=$(bounded_gh "$GH_TIMEOUT_SECONDS" gh issue list --repo "$repo" --state open  --limit 200 --json number --jq 'length')
+  op=$(bounded_gh "$GH_TIMEOUT_SECONDS" gh pr    list --repo "$repo" --state open  --limit 100 --json number --jq 'length')
+  ct=$(bounded_gh "$GH_TIMEOUT_SECONDS" gh issue list --repo "$repo" --state closed --limit 100 --json closedAt \
+         --jq "[.[] | select(.closedAt >= \"${today}T00:00:00Z\")] | length")
 
   case "${oi}${op}${ct}" in
     ''|*[!0-9]*)
