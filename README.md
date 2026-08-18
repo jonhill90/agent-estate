@@ -22,9 +22,9 @@ bash scripts/supervisor/lanes.sh           # just the lanes
 python3 -m unittest discover -s tests/supervisor   # 349 tests, as of 2026-08-13 --
                                                     # not re-run to completion in this sweep
                                                     # (it did not finish inside this
-                                                    # environment's time budget); 92 tracked
+                                                    # environment's time budget); 110 tracked
                                                     # files under tests/supervisor/ today
-                                                    # (`Verified 2026-08-16T01:32Z`, git
+                                                    # (`Verified 2026-08-18`, git
                                                     # ls-files), so the count is likely
                                                     # stale and should be re-measured, not
                                                     # assumed

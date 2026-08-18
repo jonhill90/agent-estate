@@ -43,10 +43,12 @@ scripts/supervisor/          the system
   session_guard.py           the one place session removal is judged safe
   watchdog.sh                liveness, from OUTSIDE the loop
   inbox-poll.sh              Telegram poller (a service, never a lane)
-tests/supervisor/            92 tracked files; the suite is the contract
-                             (`Verified 2026-08-16T01:32Z` by `git ls-files
-                             tests/supervisor/*`; this line was last updated
-                             to 44 by #165 and had gone stale again since)
+tests/supervisor/            110 tracked files; the suite is the contract
+                             (`Verified 2026-08-18` by `git ls-files
+                             tests/supervisor/ | wc -l`; this line was last
+                             updated to 92 during the 2026-08-16 docs sweep
+                             and had gone stale again since — a count this
+                             volatile is worth re-measuring, not trusting)
 ```
 
 This list is a highlight, not an inventory — `ls scripts/supervisor/*.sh
