@@ -70,7 +70,33 @@ HARNESS_RESUME_CMD='claude --dangerously-skip-permissions --resume %s'
 # those alternatives involve the agent count. A plural footer that is also
 # mid-turn, or that still has a background shell registered, stays busy.
 # test_lanes.sh pins both.
-HARNESS_READY_RE='^❯ [^←]*$|← [0-9]+ agents?$'
+#
+# agent-supervisor#314: a THIRD ready shape, `← for agents`, with no count at
+# all. This is the SAME incident the 2026-08-16T02:26Z note above records --
+# estate capacity zero because every idle lane read `unknown` -- recurring
+# with a new footer string, so the lesson is that pinning the agent-count
+# shape is what keeps breaking, not that any one string was wrong.
+#
+# Measured live 2026-08-17, two idle claude panes (`agent-supervisor:@42`
+# post-turn with an empty box, `@43` on the fresh splash), both footers
+# reading:
+#   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
+# `pane` is `tail -1` of the non-blank capture (lanes.sh:411), so the FOOTER
+# is what READY_RE is matched against, never the `❯` line above it -- the
+# first alternative here can only fire when the prompt line is itself last.
+# `← [0-9]+ agents?$` cannot match a footer with no digits, so both panes
+# fell through to `unknown` and `--free` withheld them. Three dispatches
+# (#308, #311, #313) refused with "no free lane" against an estate that had
+# two.
+#
+# Same one-way-ratchet argument as the alternative above, and it holds for
+# the identical reason: `busy` and `blocked` are both decided BEFORE `free`,
+# and neither of those probes involves the agent counter, so a footer that is
+# mid-turn (`esc to interrupt`), has a background shell (`↓ to manage`), or
+# is showing a prompt still classifies ahead of this. Anchored to
+# end-of-line, so a footer with `· ↓ to manage` trailing it fails this
+# alternative exactly as it fails the numeric one.
+HARNESS_READY_RE='^❯ [^←]*$|← [0-9]+ agents?$|← for agents$'
 
 # Busy -- last line only. Claude's elapsed-turn footer IS the last line
 # while a turn runs (`esc to interrupt`), unlike Codex, whose equivalent
