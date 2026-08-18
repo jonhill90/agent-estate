@@ -506,6 +506,32 @@ for repo in $REPOS; do
   done
 done
 
+# --- acceptance regressions ------------------------------------------------
+# agent-supervisor#328. An issue closes on a CLAIM and the claim decays
+# silently: PR #294 "lane identity for author exclusion" merged 2026-08-16 and
+# the symptom was still excluding every free lane on 2026-08-18, with a second
+# task having already completed on the same bug two days earlier. PHASES.md
+# records the general form -- "seven issues closed while their symptom
+# continued". Verification ran once, inside the lane, before the merge, and
+# nothing ever re-ran it.
+#
+# This re-runs the ```acceptance block of CLOSED issues. A failure there is not
+# a new bug, it is the ORIGINAL symptom still present after closure.
+# REPORT-ONLY here: reopening is acceptance.sh --reopen, run deliberately, not
+# a side effect of reading a digest.
+ACCEPTANCE_BIN="${DIGEST_ACCEPTANCE_BIN:-$HERE/acceptance.sh}"
+acceptance_line="not run"
+if [ -x "$ACCEPTANCE_BIN" ]; then
+  acceptance_out=$("$ACCEPTANCE_BIN" --limit "${DIGEST_ACCEPTANCE_LIMIT:-15}" 2>&1)
+  acceptance_rc=$?
+  acceptance_line=$(printf '%s' "$acceptance_out" | grep -E 'pass=|REGRESSED:' | tr '\n' ' ')
+  if [ "$acceptance_rc" -eq 1 ]; then
+    note_error "acceptance: a CLOSED issue's own test is failing again -- $(printf '%s' "$acceptance_out" | grep 'REGRESSED:' | tail -1)"
+  fi
+else
+  note_error "acceptance.sh missing at $ACCEPTANCE_BIN -- cannot tell a healed issue from a rotted one"
+fi
+
 # --- merges since ---------------------------------------------------------
 # agent-supervisor#144: REST core again. There is no `state=merged` on the
 # REST list endpoint (only open/closed/all) -- `state=closed` includes PRs
