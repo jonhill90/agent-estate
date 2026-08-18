@@ -110,11 +110,45 @@ done
 
 log() { printf '%s quota-watch: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
+# RESOLVE THE WINDOW, do not trust the @id in TARGET. tmux window ids are
+# unique within a server but are NOT stable across a server restart
+# (agent-supervisor#346) -- the default here (agent-supervisor:@1) is one of
+# the three instances the issue names, alongside director-loop.sh's
+# director:@3, which hit the identical defect the same night.
+#
+# UNLIKE director-loop.sh's single-purpose `director` session, this script's
+# session legitimately holds many windows -- one per lane -- so "fall back
+# when there is exactly one window" is the wrong rule here: it would find
+# several on every ordinary restart and refuse every time. The durable key
+# for THIS target is the window NAME: bootstrap-session.sh already names the
+# supervisor's own window `supervisor` (LANES_SUPERVISOR_NAME), and a
+# respawned window can be given that name back even though it can never be
+# given its old @id back. Resolve only when exactly one window carries that
+# name; more than one (a rename race) is exactly as unresolvable as zero.
+resolve_target() {
+  tmux capture-pane -p -t "=$TARGET" >/dev/null 2>&1 && return 0
+  local session="${TARGET%%:*}"
+  local name="${LANES_SUPERVISOR_NAME:-supervisor}"
+  local matches count
+  matches=$(tmux list-windows -t "$session" -F '#{window_id}	#{window_name}' 2>/dev/null \
+    | awk -F'\t' -v n="$name" '$2==n{print $1}')
+  count=$(grep -c . <<<"$matches")
+  if [ "$count" -eq 1 ]; then
+    local resolved="$session:$(tr -d '[:space:]' <<<"$matches")"
+    log "configured target $TARGET is gone (tmux renumbered across a restart); resolved to $resolved by window name '$name'"
+    TARGET="$resolved"
+    return 0
+  fi
+  log "configured target $TARGET is gone and $count window(s) in '$session' are named '$name' -- refusing to guess which is the supervisor pane; a human should look"
+  return 1
+}
+
 # Send is C-u then retype then Enter, ALWAYS. Enter alone does not submit text a
 # previous send-keys left in the input box -- that defect stranded seven panes a
 # tick for a full day before it was understood.
 send_message() {
   local msg="$1"
+  resolve_target || return 1
   tmux send-keys -t "=$TARGET" C-u 2>/dev/null || return 1
   sleep 1
   tmux send-keys -t "=$TARGET" -l "$msg" 2>/dev/null || return 1
