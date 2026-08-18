@@ -364,6 +364,15 @@ def parser():
     lane_relation_parser = sub.add_parser("lane-relation")
     lane_relation_parser.add_argument("--lane", required=True)
     lane_relation_parser.add_argument("--other", required=True)
+    # agent-supervisor#235: the caller's own freshly-measured, LIVE pane id
+    # for `--lane` -- dispatch.sh has this for free (it already resolved
+    # `--lane`'s tmux target to pick a candidate) and it is the one fact a
+    # renumber cannot make stale, unlike the `--lane` STRING itself, whose
+    # index half is exactly what a renumber rewrites. Optional and
+    # positional-neutral: a caller that cannot supply it (an offline test,
+    # `digest.sh`'s independence report reasoning about lanes with no pane to
+    # re-measure) gets the pre-#235 behaviour unchanged.
+    lane_relation_parser.add_argument("--lane-pane-id", default=None)
 
     author_issue_lane_parser = sub.add_parser("author-issue-lane")
     author_issue_lane_parser.add_argument("--issue", required=True)
@@ -963,6 +972,33 @@ def main(argv=None):
     # for a database open, and the claude-print/pi-rpc case finally can be
     # established rather than reflexively refused.
     if args.command == "lane-relation":
+        # agent-supervisor#235: `--lane-pane-id` -- a LIVE measurement the
+        # caller took off tmux itself, not a lookup -- is reconciled BEFORE
+        # the string-shape check gets to answer at all, not only when that
+        # check says `unknown`. The shape check would happily answer
+        # `different` for two `<session>:<index>` strings whose indices
+        # differ even when a renumber means they now name the SAME window;
+        # that positive-looking `different` is wrong in exactly the
+        # self-review direction the guard exists to prevent, so it must
+        # never be trusted over a live measurement that can settle the
+        # question directly against the ledger's `pane_id` registry (#292).
+        # `args.other`'s row is still the ledger's own record -- there is no
+        # live pane to re-measure for a lane this call is not the candidate
+        # for -- unchanged from #292's reasoning.
+        if args.lane_pane_id:
+            try:
+                relation_ledger = Ledger(args.state_dir)
+                other_row = relation_ledger.get_lane(args.other)
+            except Exception:
+                other_row = None
+            lane_row = {"pane_id": args.lane_pane_id}
+            relation = lane_relation_from_rows(lane_row, other_row)
+            result = {"lane": args.lane, "other": args.other, "relation": relation}
+            if relation != "different":
+                result["lane_population"] = lane_population(args.lane, lane_row)
+                result["other_population"] = lane_population(args.other, other_row)
+            _print(result)
+            return 0
         relation = lane_relation(args.lane, args.other)
         result = {"lane": args.lane, "other": args.other, "relation": relation}
         if relation == "unknown":
