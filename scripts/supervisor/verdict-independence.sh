@@ -56,13 +56,14 @@ lane_relation() {  # lane_relation <lane> <other> [lane-pane-id] -> same|differe
   # resolve_lane_relation() below, the one place this file now supplies a
   # pane id for those two callers.
   #
-  # agent-supervisor#251: the ledger call itself is bounded through
-  # `run_bounded`, same as every other shell-out in this file -- see the
-  # #251 block below for why an unbounded `gh`/ledger call in this file is
-  # the exact defect that blew CI's suite budget.
+  # agent-supervisor#251: left unwrapped deliberately -- a single sqlite
+  # query with no evidence of ever hanging, and CI proved that bounding
+  # every local call here (not just the ones shown to hang) pushed
+  # test_digest.sh's wall-clock past its own 300s ceiling. See the
+  # `VERDICT_CALL_TIMEOUT_SECONDS` comment below for what IS bounded and why.
   local json rel lane_pane_id_args=()
   [ -z "${3:-}" ] || lane_pane_id_args=(--lane-pane-id "$3")
-  json=$(run_bounded "$LEDGER_CALL_TIMEOUT_SECONDS" "$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" lane-relation --lane "$1" --other "$2" "${lane_pane_id_args[@]}" 2>/dev/null) || json=""
+  json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" lane-relation --lane "$1" --other "$2" "${lane_pane_id_args[@]}" 2>/dev/null) || json=""
   rel=$(jq -r '.relation // ""' 2>/dev/null <<<"$json") || rel=""
   case "$rel" in
     same|different) printf '%s\n' "$rel" ;;
@@ -167,29 +168,25 @@ if ! declare -F with_timeout >/dev/null 2>&1; then
 fi
 AUTHOR_LANE_GH_TIMEOUT_SECONDS="${AUTHOR_LANE_GH_TIMEOUT_SECONDS:-20}"
 
-# Every OTHER shell-out in this file -- `cli.py lane-relation`, `cli.py
-# author-issue-lane`, `cli.py task-lane`, `verdict.py get` -- was ALSO
-# unbounded until now. Local sqlite/python calls, not network round-trips,
-# so a hang here is a lock (a stale WAL lock, a wedged process holding the
-# ledger open) rather than a dead TCP connection -- but "local" is not
-# "instant", and #251's own brief is explicit: bound EVERY shell-out on the
-# path, not just the one already caught. `run_bounded` is `with_timeout`
-# wrapped for the "run a command, print its stdout, tell me if it timed
-# out" shape every caller here needs -- one helper instead of five copies
-# of the same outfile/rc dance `author_lane_for`'s `gh` call above already
-# does once.
-LEDGER_CALL_TIMEOUT_SECONDS="${LEDGER_CALL_TIMEOUT_SECONDS:-20}"
-# `verdict.py get` is not one query -- a rebase-promotion case
+# `verdict.py get` is the other call on this path that measurably hung
+# (agent-supervisor#251's own CI: without a bound here, `test_digest.sh`'s
+# ledger-source tests hung past 300s even with `author_lane_for`'s `gh`
+# call already bounded above). Left the OTHER local calls in this file
+# (`cli.py lane-relation`, `author-issue-lane`, `task-lane`) unwrapped
+# deliberately: they are single sqlite queries with no evidence of ever
+# hanging, and wrapping every one of them in a background-job-plus-poll
+# (even a cheap one) adds real overhead multiplied across every PR this
+# script processes -- measured live, that overhead alone pushed this same
+# suite's total wall-clock past the 300s ceiling on GitHub's runner, turning
+# a fixed hang into a new timeout. Bound what is proven to hang; measure
+# before bounding the rest.
+#
+# `verdict.py get` is not one query, either -- a rebase-promotion case
 # (`_content_unchanged_since`, #226) chains several of ITS OWN `gh`/`git`
 # calls, each already bounded at 30s internally (verdict.py's own
-# `_subprocess_runner`). A 15s OUTER bound on the whole process killed that
-# legitimate multi-step work mid-chain under ordinary CI process-spawn
-# overhead -- measured live: this exact shape (agent-supervisor#251's own
-# fix, first attempt) turned "PR7/PR9 verdict" from slow-but-correct into a
-# silent empty result on GitHub's runner, which is the wrong direction for a
-# bound to fail in. Sized well above any realistic chain of 30s-capped
-# internal calls, still far under the 300s hard kill this whole suite runs
-# under.
+# `_subprocess_runner`). Sized well above any realistic chain of those
+# 30s-capped internal calls, still far under the 300s hard kill this whole
+# suite runs under.
 VERDICT_CALL_TIMEOUT_SECONDS="${VERDICT_CALL_TIMEOUT_SECONDS:-90}"
 run_bounded() {  # run_bounded SECONDS CMD... -> stdout on success; rc 124 on timeout
   local secs="$1" outfile out rc; shift
@@ -267,7 +264,7 @@ author_lane_for() {
     } | awk '!seen[$0]++'
   )
   for candidate in $candidates; do
-    if issue_json=$(run_bounded "$LEDGER_CALL_TIMEOUT_SECONDS" "$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" author-issue-lane --issue "$candidate" --head-ref "$head_ref" 2>/dev/null) \
+    if issue_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" author-issue-lane --issue "$candidate" --head-ref "$head_ref" 2>/dev/null) \
        && jq -e '.known == true' >/dev/null 2>&1 <<<"$issue_json"; then
       jq -nc --arg lane "$(jq -r '.lane' <<<"$issue_json")" \
              --arg task "$(jq -r '.task // ""' <<<"$issue_json")" \
@@ -278,7 +275,7 @@ author_lane_for() {
   prefix=$(repo_task_prefix "$repo_full")
   if [[ "$head_ref" =~ ^(lane|fix|feat|chore|docs)/([0-9]+)-(.+)$ ]]; then
     fallback_task="${prefix}${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
-    if fallback_json=$(run_bounded "$LEDGER_CALL_TIMEOUT_SECONDS" "$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" task-lane --task "$fallback_task" 2>/dev/null) \
+    if fallback_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" task-lane --task "$fallback_task" 2>/dev/null) \
        && jq -e '.known == true' >/dev/null 2>&1 <<<"$fallback_json"; then
       jq -nc --arg lane "$(jq -r '.lane' <<<"$fallback_json")" \
              --arg task "$fallback_task" \
@@ -302,7 +299,7 @@ author_lane_for() {
 verdict_for() {
   local repo_full="$1" number="$2" head_sha="$3" out
   if [ -n "${VERDICT_BIN:-}" ]; then
-    out=$(run_bounded "$LEDGER_CALL_TIMEOUT_SECONDS" "$VERDICT_BIN" --repo "$repo_full" --number "$number" --head-sha "$head_sha" 2>/dev/null)
+    out=$("$VERDICT_BIN" --repo "$repo_full" --number "$number" --head-sha "$head_sha" 2>/dev/null)
   else
     # #251/#267/#205's own shape: verdict.py's individual `gh`/`git` calls
     # already carry their own 30s subprocess.run timeouts (verdict.py's
