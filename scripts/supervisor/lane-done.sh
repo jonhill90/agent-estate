@@ -38,11 +38,28 @@
 #
 # Usage: lane-done.sh <window> <expected-name> <channel> [session]
 #
-# <window>        the lane's tmux WINDOW ID (`@12`) -- what `dispatch.sh`
-#                 prints as `target:` and what `lanes.sh --free` emits in its
-#                 second column. A bare window INDEX is still accepted, for
-#                 the operator typing this by hand off the window list, but it
-#                 is not what a script should pass (#241).
+# <window>        the SAME STRING `dispatch.sh` prints as `target:` and
+#                 `lanes.sh --free` emits in its second column --
+#                 session-qualified, e.g. `agent-dotfiles:@12` (#259). Pass it
+#                 verbatim; this script detects the session prefix and does
+#                 not add its own. A bare window ID (`@12`) or INDEX is still
+#                 accepted, for the operator typing this by hand off the
+#                 window list, in which case [session] (below) supplies the
+#                 session to qualify it with.
+#
+#                 WHY NOT RE-PREFIX (#259): a caller that passes the printed
+#                 `target:` string through the old `${SESSION}:${WINDOW}`
+#                 build got `agent-dotfiles:agent-dotfiles:@12` --
+#                 unparseable as a specific window, so tmux silently fell
+#                 back to the server's ACTIVE window. That window is very
+#                 often the supervisor's own, which is `loop-tick.md`'s
+#                 documented failure family for "an empty tmux target hits
+#                 the ACTIVE window." Only the accidental fact that the
+#                 resolved window's name didn't match <expected-name> stopped
+#                 a rename of the supervisor's window (#259, #239). The
+#                 contract now has exactly one owner of the `session:` prefix
+#                 -- whichever producer already added one -- and this script
+#                 detects that rather than blindly prepending a second.
 #
 #                 WHY THE ID (#241): this script is the longest-lived resolved
 #                 target in the estate. It blocks on `wait-for` for as long as
@@ -102,11 +119,16 @@ if [ -z "$WINDOW" ] || [ -z "$EXPECTED_NAME" ] || [ -z "$CHANNEL" ]; then
 fi
 
 # One string, used for every tmux call below, built once (#241). `$WINDOW` is
-# a window id (`@12`) from a script or an index from a human; `session:@12`
-# and `session:5` are both valid tmux window targets, so no branch is needed
-# to accept either -- what differs is only whether the target can drift, and
-# that is the caller's choice to make correctly.
-TARGET="${SESSION}:${WINDOW}"
+# either bare (`@12` or `5`, from a human off the window list) or already
+# session-qualified (`agent-dotfiles:@12`, the exact string `dispatch.sh` and
+# `lanes.sh --free` print -- #259). A bare form is qualified with $SESSION as
+# before; a qualified form is used exactly as given, so this is the only
+# place `session:` gets prefixed and a caller passing the printed string
+# verbatim can never end up with it twice.
+case "$WINDOW" in
+  *:*) TARGET="$WINDOW" ;;
+  *)   TARGET="${SESSION}:${WINDOW}" ;;
+esac
 
 if ! tmux wait-for "$CHANNEL" 2>/dev/null; then
   echo "lane-done: channel '$CHANNEL' was not signaled -- not renaming ${TARGET}" >&2
