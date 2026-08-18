@@ -33,8 +33,10 @@ cp "$HERE/stubs/tmux-dispatch" "$D/bin/tmux"
 # send.sh under a newer bash than production ever runs, the exact #163 shape
 # the issue asked to check for. Pinning a `bash` shim in front of PATH that
 # is really `/bin/bash` makes every `run_send ... bash -c ...` call below
-# actually run under the interpreter this suite claims to test.
+# actually run under the interpreter this suite claims to test. `zsh` is
+# pinned to `/bin/zsh` for the same reason -- see section 8 below.
 ln -sf /bin/bash "$D/bin/bash"
+ln -sf /bin/zsh "$D/bin/zsh"
 cat > "$D/lanes" <<'FIX'
 1|w|claude.exe|❯ ready|1|0
 FIX
@@ -381,18 +383,31 @@ fi
 
 # --- 8. verified_send REACHES verified_type/verified_submit CLEANLY -----
 # agent-supervisor#209: `verified_send` builds `type_args`/`submit_args` as
-# bash arrays and, when a caller supplies none of a given kind (e.g.
+# shell arrays and, when a caller supplies none of a given kind (e.g.
 # `--proof` only, no `--confirm-tries`/`--confirm-settle`), the array stays
 # genuinely empty. Forwarding an empty array must add ZERO arguments to the
 # downstream call -- not a single empty-string argument, which
 # `verified_submit`'s option parser reads as `unknown option` (with nothing
 # after it: the empty string itself). Exercised for all four combinations,
-# under the `/bin/bash` shim pinned above, with `verified_type`/
-# `verified_submit` wrapped to record exactly what they were called with.
-send_probe() { # send_probe <label> <verified_send-args...>
-  local label="$1"; shift
+# under BOTH the `/bin/bash` and `/bin/zsh` shims pinned above (#178's
+# `send.sh` is sourced by every harness this estate dispatches into, and
+# `${arr[@]+"${arr[@]}"}` -- the idiom this fix replaced -- forwards a
+# genuinely empty array as ZERO expanded words under bash but as ONE
+# phantom empty-string word under zsh; a bash-only probe cannot fail on a
+# zsh-only bug). `verified_type`/`verified_submit` are wrapped to record
+# exactly what they were called with.
+#
+# `send.sh` is sourced with cwd pinned to its own directory: it locates
+# `input-box.sh` via `${BASH_SOURCE[0]}`, which zsh (unlike bash) does not
+# populate for a `.`-sourced file, so an unqualified `${BASH_SOURCE[0]}`
+# resolves to the empty string there and `dirname ""` falls back to `.` --
+# the cwd. Running from `send.sh`'s own directory makes that fallback land
+# correctly under zsh without changing anything `send.sh` itself does.
+SEND_DIR="$(cd "$(dirname "$SEND")" && pwd)"
+send_probe() { # send_probe <interpreter> <label> <verified_send-args...>
+  local interpreter="$1" label="$2"; shift 2
   reset_pane
-  out=$(run_send bash -c "
+  out=$(cd "$SEND_DIR" && run_send "$interpreter" -c "
     . '$SEND'
     orig_type=\$(declare -f verified_type); eval \"real_\${orig_type}\"
     verified_type() { echo \"TYPE_ARGC=\$#\" >> '$D/probe.log'; real_verified_type \"\$@\"; }
@@ -403,16 +418,18 @@ send_probe() { # send_probe <label> <verified_send-args...>
   " 2>&1)
   probe=$(cat "$D/probe.log" 2>/dev/null)
   if grep -q 'unknown option' <<<"$out$probe"; then
-    bad "$label: an empty forwarded array must not read as 'unknown option'" "$out"$'\n'"$probe"
+    bad "$interpreter: $label: an empty forwarded array must not read as 'unknown option'" "$out"$'\n'"$probe"
     return
   fi
-  ok "$label: no phantom empty argument reached verified_type/verified_submit"
+  ok "$interpreter: $label: no phantom empty argument reached verified_type/verified_submit"
 }
 
-: > "$D/probe.log"; send_probe "no options at all"
-: > "$D/probe.log"; send_probe "--proof only (the case #209's live repro broke)" --proof CHECKPOINT
-: > "$D/probe.log"; send_probe "--confirm-tries only" --confirm-tries 2
-: > "$D/probe.log"; send_probe "both --proof and --confirm-tries" --proof CHECKPOINT --confirm-tries 2
+for interpreter in bash zsh; do
+  : > "$D/probe.log"; send_probe "$interpreter" "no options at all"
+  : > "$D/probe.log"; send_probe "$interpreter" "--proof only (the case #209's live repro broke)" --proof CHECKPOINT
+  : > "$D/probe.log"; send_probe "$interpreter" "--confirm-tries only" --confirm-tries 2
+  : > "$D/probe.log"; send_probe "$interpreter" "both --proof and --confirm-tries" --proof CHECKPOINT --confirm-tries 2
+done
 
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
