@@ -307,6 +307,182 @@ else
   fi
 fi
 
+# --- agent-supervisor#308 item 1: PR-authorship recording (WRITE half) -----
+#
+# The mechanism issue #308 asked for by name -- "explicit recording from
+# lane-done.sh" -- had red/green coverage of `Ledger.record_pr_for_task`/
+# `get_task_for_pr_number` in test_core.py only. This is the shell glue
+# around it: `gh repo view`/`gh pr view` from the completed task's own
+# worktree, the `sed` parse of `record-completion`'s JSON for `id`/
+# `worktree_path` that feeds them, and the best-effort call to
+# `record-pr-for-task` itself, driven through the REAL lane-done.sh -- no
+# hand-authored fixture standing in for any of it.
+#
+# The READ half (dispatch.sh step 2.1's `pr-task` lookup) has its own real-
+# `dispatch.sh` integration test in test_dispatch.sh, deliberately NOT
+# chained onto this one through a second script invocation: this file's
+# tmux stub models `wait-for`/`rename-window` rendezvous semantics,
+# dispatch.sh's models `send-keys`/pane-menu shapes, and gluing the two
+# together would prove the STUBS agree with each other, not that either
+# script honours its own contract. `cli.py record-pr-for-task`/`pr-task` is
+# the seam where the two scripts actually meet, and it is exercised for
+# real -- as the write here, as the read there.
+cat >> "$D/lanes" <<'FIX'
+7|ad308-pr-write
+FIX
+
+# A minimal `gh` stub: GH_STUB_REPO/GH_STUB_PR_NUMBER answer `repo view`/
+# `pr view`; either left unset makes that call fail, modelling "gh
+# unreachable" or "no PR yet" -- the exact best-effort cases this block is
+# written to survive.
+cat > "$D/gh" <<'GHSTUB'
+#!/bin/bash
+sub="${1:-}"; verb="${2:-}"
+case "$sub $verb" in
+  "repo view") [ -n "${GH_STUB_REPO:-}" ] && printf '%s\n' "$GH_STUB_REPO" || exit 1 ;;
+  "pr view")   [ -n "${GH_STUB_PR_NUMBER:-}" ] && printf '%s\n' "$GH_STUB_PR_NUMBER" || exit 1 ;;
+  *) exit 1 ;;
+esac
+GHSTUB
+chmod +x "$D/gh"
+
+ledger_pr_task() { AGENT_SUPERVISOR_STATE_DIR="$D/state-308write" python3 "$HERE/../../scripts/supervisor/cli.py" pr-task --repo acme/agent-dotfiles --pr "$1" 2>&1; }
+
+DONE_WT="$D/worktree-308"; mkdir -p "$DONE_WT"
+LEDGER_STATE="$D/state-308write" ledger record-dispatch \
+  --lane t:7 --task ad308-pr-write \
+  --summary "#308 item 1 -- PR-authorship write" \
+  --pane-id '%7' --pane-path "$D" --command claude \
+  --server-id 'socket:1' --session-id '$0' --issue 308 \
+  --worktree "$DONE_WT" >/dev/null 2>&1
+seed_rc=$?
+if [ "$seed_rc" -ne 0 ]; then
+  bad "setup: a dispatched task exists with a worktree, ready to complete" "record-dispatch exited $seed_rc"
+else
+  ok "setup: a dispatched task exists with a worktree, ready to complete"
+
+  # --- happy path: gh answers both, the round trip lands -------------------
+  GH_STUB_REPO="acme/agent-dotfiles" GH_STUB_PR_NUMBER="972"
+  export GH_STUB_REPO GH_STUB_PR_NUMBER
+  signal ad308-done
+  out=$(LEDGER_STATE="$D/state-308write" run 7 ad308-pr-write ad308-done t); rc=$?
+  want_exit "a completed task whose branch is now a PR still exits zero" "$rc" 0 "$out"
+  want_missing "gh succeeding leaves no best-effort failure reported" "could not record PR authorship" "$out"
+  prtask=$(ledger_pr_task 972)
+  want_contains "PR #972's authorship resolves by lookup to the task that opened it" '"known":true' "$prtask"
+  want_contains "...naming the exact task" '"task":"ad308-pr-write"' "$prtask"
+  want_contains "...and the exact lane" '"lane":"t:7"' "$prtask"
+  unset GH_STUB_REPO GH_STUB_PR_NUMBER
+fi
+
+# --- best effort: gh unreachable (repo view fails) never turns a genuine ---
+# completion into a reported failure, and nothing is recorded -----------------
+DONE_WT2="$D/worktree-308-norepo"; mkdir -p "$DONE_WT2"
+LEDGER_STATE="$D/state-308norepo" ledger record-dispatch \
+  --lane t:7 --task ad308-pr-norepo \
+  --summary "#308 item 1 -- gh unreachable" \
+  --pane-id '%7' --pane-path "$D" --command claude \
+  --server-id 'socket:1' --session-id '$0' --issue 308 \
+  --worktree "$DONE_WT2" >/dev/null 2>&1
+seed_rc=$?
+if [ "$seed_rc" -ne 0 ]; then
+  bad "setup: a dispatched task exists, gh about to be unreachable" "record-dispatch exited $seed_rc"
+else
+  ok "setup: a dispatched task exists, gh about to be unreachable"
+  cat > "$D/lanes" <<'FIX'
+7|ad308-pr-norepo
+FIX
+  signal ad308-done
+  out=$(LEDGER_STATE="$D/state-308norepo" run 7 ad308-pr-norepo ad308-done t); rc=$?
+  want_exit "gh unreachable still exits zero -- best effort, not fatal" "$rc" 0 "$out"
+  want_missing "and is silent about it -- dispatch.sh's other paths still apply" "could not record PR authorship" "$out"
+  AGENT_SUPERVISOR_STATE_DIR="$D/state-308norepo" python3 "$HERE/../../scripts/supervisor/cli.py" pr-task --repo acme/agent-dotfiles --pr 973 >/tmp/pr308norepo.$$ 2>&1
+  want_contains "no PR authorship is recorded when gh cannot even name the repo" '"known":false' "$(cat /tmp/pr308norepo.$$)"
+  rm -f /tmp/pr308norepo.$$
+fi
+
+# --- best effort: repo resolves but no PR exists yet (pr view fails) -------
+DONE_WT3="$D/worktree-308-nopr"; mkdir -p "$DONE_WT3"
+LEDGER_STATE="$D/state-308nopr" ledger record-dispatch \
+  --lane t:7 --task ad308-pr-nopr \
+  --summary "#308 item 1 -- no PR yet" \
+  --pane-id '%7' --pane-path "$D" --command claude \
+  --server-id 'socket:1' --session-id '$0' --issue 308 \
+  --worktree "$DONE_WT3" >/dev/null 2>&1
+seed_rc=$?
+if [ "$seed_rc" -ne 0 ]; then
+  bad "setup: a dispatched task exists, no PR opened yet" "record-dispatch exited $seed_rc"
+else
+  ok "setup: a dispatched task exists, no PR opened yet"
+  cat > "$D/lanes" <<'FIX'
+7|ad308-pr-nopr
+FIX
+  export GH_STUB_REPO="acme/agent-dotfiles"
+  signal ad308-done
+  out=$(LEDGER_STATE="$D/state-308nopr" run 7 ad308-pr-nopr ad308-done t); rc=$?
+  want_exit "no PR yet still exits zero -- best effort, not fatal" "$rc" 0 "$out"
+  want_missing "and is silent about it too" "could not record PR authorship" "$out"
+  AGENT_SUPERVISOR_STATE_DIR="$D/state-308nopr" python3 "$HERE/../../scripts/supervisor/cli.py" pr-task --repo acme/agent-dotfiles --pr 974 >/tmp/pr308nopr.$$ 2>&1
+  want_contains "no PR authorship is recorded when there is no PR to record" '"known":false' "$(cat /tmp/pr308nopr.$$)"
+  rm -f /tmp/pr308nopr.$$
+  unset GH_STUB_REPO
+fi
+
+# ...and prove the round trip is load-bearing rather than decorative: patch a
+# copy of lane-done.sh with the #308 item 1 block removed entirely, run it
+# through the same shipped-directory shim the #205 mutation above uses (this
+# block calls `cli.py` from lane-done.sh's OWN directory, so a bare copy
+# under $D would fail to find it for the wrong reason), and confirm the SAME
+# gh-succeeds case that recorded a row above now records nothing.
+SHIPDIR2="$D/shipdir-308"
+rm -rf "$SHIPDIR2"; mkdir -p "$SHIPDIR2"
+for f in "$HERE/../../scripts/supervisor/"*; do
+  ln -s "$f" "$SHIPDIR2/$(basename "$f")"
+done
+rm -f "$SHIPDIR2/lane-done.sh"
+NOPRWRITE="$SHIPDIR2/lane-done.sh"
+patch_rc4=0
+python3 - "$LANE_DONE" "$NOPRWRITE" <<'PY' || patch_rc4=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+start = 'if [ -n "${LEDGER_OUT:-}" ]; then'
+assert text.count(start) == 1, "PR-authorship block start not found or not unique -- script shape changed"
+i0 = text.index(start)
+i1 = text.index("\n\n", i0) + 2
+assert i1 > i0, "PR-authorship block end not found -- script shape changed"
+open(dst, "w").write(text[:i0] + text[i1:])
+PY
+if [ "$patch_rc4" -ne 0 ]; then
+  bad "setup: patched a copy of lane-done.sh with the #308 item 1 block removed" \
+    "could not patch $LANE_DONE (exit $patch_rc4) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of lane-done.sh with the #308 item 1 block removed"
+  chmod +x "$NOPRWRITE"
+  DONE_WT4="$D/worktree-308-mutant"; mkdir -p "$DONE_WT4"
+  MUTSTATE="$D/state-308mutant"
+  ledger record-dispatch \
+    --lane t:7 --task ad308-pr-mutant \
+    --summary "#308 item 1 mutation: block removed" \
+    --pane-id '%7' --pane-path "$D" --command claude \
+    --server-id 'socket:1' --session-id '$0' --issue 308 \
+    --worktree "$DONE_WT4" >/dev/null 2>&1
+  cat > "$D/lanes" <<'FIX'
+7|ad308-pr-mutant
+FIX
+  export GH_STUB_REPO="acme/agent-dotfiles" GH_STUB_PR_NUMBER="975"
+  signal ad308-done
+  out=$(LEDGER_STATE="$MUTSTATE" run_script "$NOPRWRITE" 7 ad308-pr-mutant ad308-done t); rc=$?
+  unset GH_STUB_REPO GH_STUB_PR_NUMBER
+  mutprtask=$(AGENT_SUPERVISOR_STATE_DIR="$MUTSTATE" python3 "$HERE/../../scripts/supervisor/cli.py" pr-task --repo acme/agent-dotfiles --pr 975 2>&1)
+  if [ "$rc" -eq 0 ] && grep -qF '"known":false' <<<"$mutprtask"; then
+    ok "mutation confirmed: removing the #308 item 1 block still completes the lane but records no PR authorship (the assertions above would now be red)"
+  else
+    bad "mutation confirmed: removing the #308 item 1 block records no PR authorship" \
+      "expected exit 0 and known:false; got exit $rc and: $mutprtask / $out"
+  fi
+fi
+
 # --- against REAL tmux, not the stub ---------------------------------------
 # Everything above this line is a claim about tmux made by a file in this
 # repository. This section is the only part that asks tmux itself. It is
