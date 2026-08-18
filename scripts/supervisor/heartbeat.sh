@@ -157,23 +157,48 @@ Do not assume this message is right. VERIFY before acting -- three things tonigh
 
 If work genuinely stopped, dispatch ONE thing and stop. Do not fan out: the WEEKLY quota is the binding constraint, not the session window."
 
-if tmux has-session -t "${TARGET%%:*}" 2>/dev/null; then
-  # C-u then retype then Enter, ALWAYS -- Enter alone does not submit text a
-  # previous send-keys left in the box.
-  tmux send-keys -t "=$TARGET" C-u 2>/dev/null
-  sleep 1
-  tmux send-keys -t "=$TARGET" -l "$MSG" 2>/dev/null
-  sleep 2
-  tmux send-keys -t "=$TARGET" Enter 2>/dev/null
-  sleep 6
-  if tmux capture-pane -p -t "=$TARGET" 2>/dev/null | grep -q 'esc to interrupt'; then
-    log "STALLED ${since}s -- nudged $TARGET, pane is now working"
-  else
-    log "STALLED ${since}s -- nudged $TARGET but the pane did NOT start working; a human should look"
-  fi
-  printf '%s' "$now" > "$STAMP"
-else
-  log "STALLED ${since}s -- target session ${TARGET%%:*} does not exist; a human should look"
+NUDGE_SESSION="${TARGET%%:*}"
+if ! tmux has-session -t "$NUDGE_SESSION" 2>/dev/null; then
+  log "STALLED ${since}s -- target session $NUDGE_SESSION does not exist; a human should look"
+  exit 1
 fi
+
+# RESOLVE THE WINDOW, do not trust the @id in TARGET. tmux window ids are
+# unique within a server but are NOT stable across a server restart
+# (agent-supervisor#346) -- director-loop.sh hit this exact defect with this
+# exact default (director:@3), measured as nearly two hours of silent
+# non-ticking while `launchctl list` reported it healthy.
+#
+# Fall back to the session's own window only when there is EXACTLY ONE.
+# Guessing which of several windows is the Director is the "invent an
+# identity on recovery" failure skills#179 exists to prevent, and a wrong
+# guess here types this nudge into an unrelated pane.
+if ! tmux capture-pane -p -t "=$TARGET" >/dev/null 2>&1; then
+  wins=$(tmux list-windows -t "$NUDGE_SESSION" -F '#{window_id}' 2>/dev/null)
+  count=$(grep -c . <<<"$wins")
+  if [ "$count" -eq 1 ]; then
+    resolved="$NUDGE_SESSION:$(tr -d '[:space:]' <<<"$wins")"
+    log "configured target $TARGET is gone (tmux renumbered across a restart); resolved to $resolved"
+    TARGET="$resolved"
+  else
+    log "STALLED ${since}s -- configured target $TARGET is gone and $NUDGE_SESSION has $count windows -- refusing to guess which is the Director; a human should look"
+    exit 1
+  fi
+fi
+
+# C-u then retype then Enter, ALWAYS -- Enter alone does not submit text a
+# previous send-keys left in the box.
+tmux send-keys -t "=$TARGET" C-u 2>/dev/null
+sleep 1
+tmux send-keys -t "=$TARGET" -l "$MSG" 2>/dev/null
+sleep 2
+tmux send-keys -t "=$TARGET" Enter 2>/dev/null
+sleep 6
+if tmux capture-pane -p -t "=$TARGET" 2>/dev/null | grep -q 'esc to interrupt'; then
+  log "STALLED ${since}s -- nudged $TARGET, pane is now working"
+else
+  log "STALLED ${since}s -- nudged $TARGET but the pane did NOT start working; a human should look"
+fi
+printf '%s' "$now" > "$STAMP"
 
 exit 1
