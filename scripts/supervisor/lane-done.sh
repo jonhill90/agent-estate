@@ -139,12 +139,42 @@ fi
 # Not `cli.py complete`: that verifies $TMUX_PANE owns the lane and wants a
 # --result-file. This script runs in the supervisor's pane and holds no result
 # artifact -- the fact it has is that the worker's channel fired.
+LANE_DONE_CLI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cli.py"
 if ! LEDGER_OUT=$("${LANE_DONE_PYTHON:-python3}" \
-    "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cli.py" \
+    "$LANE_DONE_CLI" \
     record-completion --task "$EXPECTED_NAME" \
     --note "lane-done: ${CHANNEL} signaled for ${TARGET}, still named '$EXPECTED_NAME'" 2>&1); then
   echo "lane-done: LEDGER RECORD FAILED for $EXPECTED_NAME -- the lane IS free, the record is not written" >&2
   sed 's/^/  /' <<<"$LEDGER_OUT" >&2
+fi
+
+# --- agent-supervisor#308 item 1: best-effort PR-authorship recording ------
+# A completed task's branch may by now be an open PR -- record that
+# explicitly, so a later `dispatch.sh --reviews-pr` on it resolves by a
+# straight lookup (`Ledger.get_task_for_pr_number`) instead of only ever
+# reconstructing it from a branch name or a live worktree. BEST EFFORT,
+# NEVER FATAL, same posture as the completion record above: `gh` being
+# unreachable, no PR yet existing for this branch, or the worktree already
+# gone must never turn a genuine completion into a reported failure --
+# dispatch.sh's OTHER resolution paths (issue, PR-scoped dispatch, worktree,
+# legacy branch, the external marking) still apply when this was skipped or
+# failed.
+if [ -n "${LEDGER_OUT:-}" ]; then
+  DONE_TASK_ID=$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' <<<"$LEDGER_OUT" | head -n1)
+  DONE_WORKTREE=$(sed -n 's/.*"worktree_path":"\([^"]*\)".*/\1/p' <<<"$LEDGER_OUT" | head -n1)
+  if [ -n "$DONE_TASK_ID" ] && [ -n "$DONE_WORKTREE" ] && [ -d "$DONE_WORKTREE" ]; then
+    DONE_REPO=$(cd "$DONE_WORKTREE" 2>/dev/null && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) || DONE_REPO=""
+    if [ -n "$DONE_REPO" ]; then
+      DONE_PR=$(cd "$DONE_WORKTREE" 2>/dev/null && gh pr view --json number -q .number 2>/dev/null) || DONE_PR=""
+      if [ -n "$DONE_PR" ]; then
+        if ! RECORD_PR_OUT=$("${LANE_DONE_PYTHON:-python3}" "$LANE_DONE_CLI" \
+            record-pr-for-task --task "$DONE_TASK_ID" --repo "$DONE_REPO" --pr "$DONE_PR" 2>&1); then
+          echo "lane-done: could not record PR authorship (task $DONE_TASK_ID -> $DONE_REPO#$DONE_PR) -- best effort, not fatal" >&2
+          sed 's/^/  /' <<<"$RECORD_PR_OUT" >&2
+        fi
+      fi
+    fi
+  fi
 fi
 
 # Rename back to free-N is now COSMETIC, not the release condition

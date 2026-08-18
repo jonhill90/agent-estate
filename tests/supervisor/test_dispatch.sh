@@ -3686,6 +3686,266 @@ else
     "dispatch: #921 -> " "$RACE_OUT_A"
 fi
 
+# --- agent-supervisor#308 item 2: resolution path five -- a `--pr`-scoped -
+# fix-pass lane is a genuine contributor and must be excluded from later
+# reviewing the SAME PR, even though it was never dispatched by ISSUE and
+# its own worktree was never checked out on the PR's actual head branch.
+#
+# WHY: the motivating incident, reproduced directly. Two fix-pass lanes
+# dispatched directly against PR #970 (`--pr 970`) sat in `source_tasks` as
+# `source_kind='pull'` rows, invisible to the issue-keyed lookup (steps
+# 1&2) -- and its worktree's branch (`worktree.sh new`'s own default,
+# never renamed to the PR's real head branch, which in this shape belongs
+# to nobody's worktree at all) cannot resolve it via step 3 either. So the
+# fix-pass lane would read as a stranger and be handed the review of its
+# own fix -- the exact #190 harm, on a path #190 could not see because #159
+# (PR-scoped dispatch) did not exist yet when #190 shipped.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+6|free-6|claude.exe|❯ ready|1|0
+FIX
+printf '925|| the code a fix pass on PR #970 targets\n' >> "$D/issues"
+
+out=$(LEDGER_STATE="$D/state-308a" run 925 original-970 "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch (#925) succeeds" "$rc" 0 "$out"
+want_contains "setup: it landed on the first free lane, t:3" "send-keys -t t:@103" "$(tmuxlog)"
+
+# t:3's task is left OPEN (not completed yet) so the fix-pass below cannot
+# land back on t:3 -- it must go to t:4, a genuinely different lane, the
+# same technique agent-supervisor#190's own test above uses.
+out=$(LEDGER_STATE="$D/state-308a" run 925 fix-970 "$D/brief.md" acme/agent-dotfiles "$REPO" --pr 970); rc=$?
+want_exit "setup: the fix-pass dispatch (--pr 970) succeeds" "$rc" 0 "$out"
+want_contains "setup: it landed on t:4, not the original author's t:3" "send-keys -t t:@104" "$(tmuxlog)"
+
+# Both contributing tasks complete before the review below -- their lanes'
+# panes will read idle/ready again, so what excludes them from the review
+# candidate pool must be the CONTRIBUTOR lookup, not "still busy".
+LEDGER_STATE="$D/state-308a" ledger record-completion --task ad925-original-970 --note done >/dev/null
+LEDGER_STATE="$D/state-308a" ledger record-completion --task ad925-fix-970 --note done >/dev/null
+
+# PR #970's real head branch belongs to NEITHER worktree -- it was written
+# outside the lane system for the purposes of THIS PR, which the fix-pass
+# lane pushed commits onto without ever checking it out itself. This
+# isolates the assertion to the PR-number path: it cannot be satisfied by
+# step 3 (worktree) or step 3.1 (legacy branch convention) by accident.
+printf '970|Fixes #925|some-preexisting-branch-nobody-worktreed\n' >> "$D/prs"
+printf '926|| review PR #970, must exclude BOTH contributors\n' >> "$D/issues"
+
+out=$(LEDGER_STATE="$D/state-308a" run 926 rev-970 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 970); rc=$?
+want_exit "a review of PR #970 dispatches, excluding every real contributor" "$rc" 0 "$out"
+want_contains "the issue-keyed author (t:3) is skipped" "skipping t:3" "$out"
+want_contains "the --pr-scoped fix-pass contributor (t:4) is ALSO skipped -- the #308 fix" "skipping t:4" "$out"
+log=$(tmuxlog)
+want_contains "and the review lands on the one lane that never touched this PR, t:6" "send-keys -t t:@106" "$log"
+want_missing "never on the fix-pass lane's target (t:4, t:@104)" "send-keys -t t:@104 " "$log"
+
+# The review dispatched above is still OPEN against PR #970 -- complete it
+# first, or the unrelated agent-supervisor#169 PR-duplicate guard (step 0.6)
+# refuses the mutation-check dispatch below before authorship is even asked.
+LEDGER_STATE="$D/state-308a" ledger record-completion --task ad926-rev-970 --note done >/dev/null
+
+# MUTATION-CHECK: silence the PR-scoped contributor lookup and confirm the
+# fix-pass lane (t:4) is WRONGLY treated as available -- proving this test
+# actually exercises the new path, not something step 1-3.1 already covered.
+MUTATED_308A="$D/dispatch-no-pr-contributor-lookup.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$MUTATED_308A" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = 'PR_CONTRIB_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" contributor-pr-lanes --pr "$REVIEWS_PR" 2>&1)'
+assert text.count(marker) == 1, "contributor-pr-lanes lookup not found or not unique -- script shape changed"
+text = text.replace(marker, 'PR_CONTRIB_JSON=\'{"known":false}\'  # MUTATED: contributor-pr-lanes never consulted', 1)
+# The copy lands under $D (the test's own tmpdir), not scripts/supervisor --
+# `HERE="$(... ${BASH_SOURCE[0]} ...)"` would otherwise resolve to the COPY's
+# own location and fail to find input-box.sh/send.sh/harness-registry.sh/
+# session-defaults.sh/cli.py, which all live beside the real dispatch.sh.
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose contributor-pr-lanes lookup is silenced" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh whose contributor-pr-lanes lookup is silenced"
+  chmod +x "$MUTATED_308A"
+  cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+6|free-6|claude.exe|❯ ready|1|0
+FIX
+  printf '927|| review PR #970 again, against the mutated guard\n' >> "$D/issues"
+  out=$(DISPATCH_SCRIPT="$MUTATED_308A" LEDGER_STATE="$D/state-308a" \
+        run 927 rev-970-mutant "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 970); rc=$?
+  want_exit "mutation confirmed: dispatch still succeeds (only issue-keyed author excluded)" "$rc" 0 "$out"
+  want_missing "mutation confirmed: the fix-pass contributor is NO LONGER skipped -- it reads free" "skipping t:4" "$out"
+fi
+
+# --- agent-supervisor#308 item 3: "authored outside the lane system" is a --
+# RECORDABLE, first-class state, distinct from "unresolvable" -- and NEVER
+# inferred automatically from every path above coming up silent.
+#
+# WHY: the #316/#301/#300 shape -- a PR authored by a human or an
+# out-of-band agent, closing no issue the ledger can even name, whose branch
+# fails the legacy `<prefix>/<issue>-<slug>` convention outright. RED FIRST:
+# every resolution path (1-3.1) is silent for this PR, and today that
+# refuses, indistinguishably from a genuinely unresolvable case.
+printf '930|Some fix|fix/lane-ready-footer\n' >> "$D/prs"
+printf '928|| review PR #930, authored outside the lane system entirely\n' >> "$D/issues"
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+
+out=$(LEDGER_STATE="$D/state-308b" run 928 rev-930-red "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 930); rc=$?
+want_exit "RED: a PR with no lane contributor at all is refused just like a genuinely unknown one" "$rc" 1 "$out"
+want_contains "...refusing (authorship unknown, failing closed)" "authorship unknown, failing closed" "$out"
+want_contains "...and now names the escape hatch: record it, don't guess it" \
+  "mark-pr-external" "$out"
+
+# The escape: an operator explicitly records the fact, auditable, never a
+# flag dispatch.sh itself can flip.
+LEDGER_STATE="$D/state-308b" ledger mark-pr-external --repo acme/agent-dotfiles --pr 930 \
+  --note "authored directly by the watchdog, no lane ever dispatched against it" >/dev/null
+
+out=$(LEDGER_STATE="$D/state-308b" run 928 rev-930-green "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 930); rc=$?
+want_exit "GREEN: the SAME PR, same silence from every automatic path, now dispatches once recorded" "$rc" 0 "$out"
+want_contains "...and says explicitly why: recorded, not guessed" \
+  "recorded as authored OUTSIDE the lane system (marked external)" "$out"
+log=$(tmuxlog)
+want_contains "...lands on the one free lane, nothing excluded" "send-keys -t t:@103" "$log"
+
+# The guard must still refuse the genuinely unknown case even after this
+# feature exists -- recording is per-PR, not a global switch.
+printf '931|Another fix|fix/some-other-branch\n' >> "$D/prs"
+printf '929|| review PR #931, still genuinely unknown -- never recorded\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-308b" run 929 rev-931-still-red "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 931); rc=$?
+want_exit "an UNRECORDED PR with no automatic resolution still refuses -- recording is not a global switch" "$rc" 1 "$out"
+want_contains "...still authorship unknown" "authorship unknown, failing closed" "$out"
+
+# --- agent-supervisor#308 item 1 (READ half): dispatch.sh step 2.1's --------
+# `pr-task` lookup resolves a PR's real contributor from the EXPLICIT record
+# `lane-done.sh` writes after the fact (`Ledger.record_pr_for_task`), not
+# from an issue reference, a `--pr`-scoped dispatch row, or a live worktree.
+#
+# WHY: this is the shape #308 item 1 exists for -- a task dispatched by ISSUE
+# NUMBER, whose PR did not exist yet at dispatch time, so nothing in steps
+# 1&2 (issue-keyed) or step 2.2 (`source_kind='pull'`, which only a
+# `--pr`/`--reviews-pr`-scoped dispatch ever writes) can find it once the
+# PR's own body/commits stop naming the issue in a form this script parses.
+# Isolated to exactly that: the PR fixture below carries no `Fixes #`
+# reference at all (steps 1&2 can find nothing) and its branch belongs to no
+# worktree (step 3 can find nothing either) -- the ONLY path that can
+# possibly resolve this PR's contributor is the explicit record.
+#
+# PR-method-level (red/green) coverage of `record_pr_for_task`/
+# `get_task_for_pr_number` already exists in test_core.py; this is the shell
+# glue around it -- the real `dispatch.sh`, the real `cli.py pr-task`, no
+# hand-authored fixture in place of either. The WRITE half of this same
+# mechanism (`lane-done.sh`'s best-effort call to `record-pr-for-task`) has
+# its own real-`lane-done.sh` integration coverage in test_lane_done.sh,
+# deliberately kept separate rather than chained through a second script
+# invocation here -- see that file's comment on why gluing the two stubs
+# together would test stub compatibility, not either script's contract. The
+# CLI command is the seam where the two halves meet, and it is exercised for
+# real on both sides.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+6|free-6|claude.exe|❯ ready|1|0
+FIX
+printf '933|| the code a fix pass on PR #972 targets\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-308c" run 933 original-972 "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the originating dispatch (task ad933-original-972) succeeds" "$rc" 0 "$out"
+want_contains "setup: it landed on t:4" "send-keys -t t:@104" "$(tmuxlog)"
+
+# Completed before its own PR is recorded -- record_pr_for_task's own
+# docstring: the record is a durable fact about what happened, independent
+# of the task's current status.
+LEDGER_STATE="$D/state-308c" ledger record-completion --task ad933-original-972 --note done >/dev/null
+
+# The explicit write lane-done.sh would have made, done here directly with
+# the same CLI command it calls -- this test is about dispatch.sh's READ,
+# not about re-proving the write (test_lane_done.sh owns that).
+record_out=$(LEDGER_STATE="$D/state-308c" ledger record-pr-for-task \
+  --task ad933-original-972 --repo acme/agent-dotfiles --pr 972 2>&1); record_rc=$?
+want_exit "setup: PR #972's authorship is explicitly recorded against ad933-original-972" "$record_rc" 0 "$record_out"
+
+# No "Fixes #" reference (steps 1&2 blind) and a branch no worktree ever
+# checked out (step 3 blind) -- isolates the assertion to step 2.1 alone.
+printf '972|A fix with no issue reference at all|some-branch-nobody-worktreed\n' >> "$D/prs"
+printf '934|| review PR #972, resolved ONLY via the explicit PR-authorship record\n' >> "$D/issues"
+
+out=$(LEDGER_STATE="$D/state-308c" run 934 rev-972 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 972); rc=$?
+want_exit "a review of PR #972 dispatches, excluding the recorded contributor" "$rc" 0 "$out"
+want_contains "the task step 2.1's lookup names is skipped" "skipping t:4" "$out"
+log=$(tmuxlog)
+want_contains "...and lands on the one lane that never touched this PR, t:6" "send-keys -t t:@106" "$log"
+want_missing "never on the recorded contributor's own lane" "send-keys -t t:@104 " "$log"
+
+# The review dispatched above is still OPEN against PR #972 -- complete it
+# first, or the agent-supervisor#169 PR-duplicate guard refuses the
+# mutation-check dispatch below before step 2.1 is even reached.
+LEDGER_STATE="$D/state-308c" ledger record-completion --task ad934-rev-972 --note done >/dev/null
+
+# MUTATION-CHECK: silence the `pr-task` lookup and confirm the recorded
+# contributor (t:4) is WRONGLY treated as available -- proving this test
+# actually exercises step 2.1, not something steps 1-2/3 already covered
+# (the PR fixture above was built specifically so they cannot).
+MUTATED_308C="$D/dispatch-no-pr-task-lookup.sh"
+patch_rc=0
+python3 - "$DISPATCH" "$MUTATED_308C" <<'PY' || patch_rc=$?
+import os
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = 'PR_TASK_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" pr-task --repo "$REPO" --pr "$REVIEWS_PR" 2>&1) || PR_TASK_JSON=""'
+assert text.count(marker) == 1, "pr-task lookup not found or not unique -- script shape changed"
+text = text.replace(marker, 'PR_TASK_JSON=\'{"known":false}\'  # MUTATED: pr-task never consulted', 1)
+here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
+assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
+text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
+open(dst, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose pr-task lookup is silenced" \
+    "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh whose pr-task lookup is silenced"
+  chmod +x "$MUTATED_308C"
+  cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+6|free-6|claude.exe|❯ ready|1|0
+FIX
+  printf '935|| review PR #972 again, against the mutated lookup\n' >> "$D/issues"
+  out=$(DISPATCH_SCRIPT="$MUTATED_308C" LEDGER_STATE="$D/state-308c" \
+        run 935 rev-972-mutant "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 972); rc=$?
+  # Unlike #308 item 2's mutation check above, this PR fixture carries no
+  # issue reference and no worktree ever sat on its branch -- deliberately,
+  # so nothing but step 2.1 could ever resolve it. Silencing step 2.1 does
+  # not leave dispatch to proceed with an empty (safe) contributor set; it
+  # removes the ONLY path that resolves this PR at all, so the fail-closed
+  # guard now refuses the whole dispatch -- which is itself the proof: the
+  # real script's earlier success above did not happen "for free".
+  want_exit "mutation confirmed: with step 2.1 silenced, PR #972 has NO resolution path left -- dispatch refuses entirely" "$rc" 1 "$out"
+  want_contains "...fails closed rather than guessing, same posture as the real refusal path" "authorship unknown, failing closed" "$out"
+fi
+
+# Restore the fixture to what the #236 section below expects (only t:3
+# free) -- this section borrowed t:4/t:6 for its own scenarios and must not
+# leak that shape past its own end.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+
 # --- agent-supervisor#236: the launch command is the pane's PROCESS, ------
 # never keystrokes typed into whatever the respawn produced ----------------
 #
