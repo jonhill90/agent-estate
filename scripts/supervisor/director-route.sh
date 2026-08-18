@@ -142,6 +142,7 @@ fi
 # the other would silently split a target that is not actually split yet.
 PANE="${SUPERVISOR_PANE:-${SESSION}:1.1}"
 
+
 # Window-index form, for the plain (non-`-e`) status-line capture below --
 # `tmux capture-pane -t` accepts either `session:window` or
 # `session:window.pane`; the trailing `.pane` is kept for parity with
