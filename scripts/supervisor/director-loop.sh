@@ -58,9 +58,37 @@ case "$qrc" in
   *) log "quota UNKNOWN (rc=$qrc) -- never treated as safe, not ticking"; exit 0 ;;
 esac
 
-if ! tmux has-session -t "${TARGET%%:*}" 2>/dev/null; then
-  log "target session ${TARGET%%:*} does not exist -- a human should look"
+SESSION="${TARGET%%:*}"
+if ! tmux has-session -t "$SESSION" 2>/dev/null; then
+  log "target session $SESSION does not exist -- a human should look"
   exit 3
+fi
+
+# RESOLVE THE WINDOW, do not trust the id in the default.
+#
+# tmux window ids (@N) are unique within a server but are NOT stable across a
+# server restart. This target defaulted to `director:@3`; the estate's tmux was
+# restarted on 2026-08-18 and the Director's window came back as @35. The loop
+# then failed to capture @3 on every single tick and logged "not ticking" --
+# for nearly two hours, silently, while looking perfectly healthy in
+# `launchctl list`. The same restart broke quota-watch (@1) and restore.sh the
+# same way. A hardcoded @id is a defect, not a configuration.
+#
+# So: if the configured window is not there, fall back to the session's windows
+# -- but only when there is exactly ONE, because guessing which of several
+# windows is the Director is precisely the "invent an identity rather than
+# refuse" failure (skills#179) that has cost this estate real work.
+if ! tmux capture-pane -p -t "=$TARGET" >/dev/null 2>&1; then
+  wins=$(tmux list-windows -t "$SESSION" -F '#{window_id}' 2>/dev/null)
+  count=$(printf '%s\n' "$wins" | grep -c .)
+  if [ "$count" -eq 1 ]; then
+    NEW="$SESSION:$(printf '%s' "$wins" | tr -d '[:space:]')"
+    log "configured target $TARGET is gone (tmux renumbered across a restart); resolved to $NEW"
+    TARGET="$NEW"
+  else
+    log "configured target $TARGET is gone and $SESSION has $count windows -- refusing to guess which is the Director; a human should look"
+    exit 3
+  fi
 fi
 
 # Busy check is the LAST NON-BLANK LINE only, never a scrollback sweep. A
@@ -97,7 +125,13 @@ TICK='Director tick. Keep this turn SHORT -- act, do not plan. A turn that runs 
 
 2. Read the standing brief rather than re-deriving it: ~/.local/state/agent-dotfiles-supervisor/PHASES.md and NOTEBOOK-jon-directives.md.
 
-3. Do ONE thing, then STOP and report one line. One PR per turn. Do not fan out -- the WEEKLY quota is the binding constraint, not the session window.
+3. Keep the TURN short -- act, report one line, stop. That is about turn length, NOT about how much work may be in flight.
+
+FILL THE FREE LANES. If lanes are idle and there is independent work, dispatch to all of them in the same turn. Reviews of different PRs touch different files and do not block each other; there is no coded concurrency cap and none is wanted. An idle lane is waste (lane_default=keep_working_not_idle).
+
+The old instruction here said \"one PR per turn, do not fan out -- the WEEKLY quota is the binding constraint\". That was written when weekly was at 94% and it is now the throttle rather than the protection: the premise expired when the window reset and the sentence outlived it. Judge from the CURRENT reading, never from a remembered one.
+
+Serialise only where there is a REAL dependency. Right now #301, #300 and #205 genuinely queue behind #235, because until lane identity resolves to a stable id the author guard excludes every lane and is right to.
 
 Priority order, unless GitHub state says otherwise -- re-derive from live state, do not trust this list blindly:
   #320 (non-blocking dispatch -- fixes the 900s defect that has been destroying lanes all day)
