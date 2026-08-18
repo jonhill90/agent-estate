@@ -82,6 +82,24 @@ want_exit "already-current exits 0" "$rc" 0 "$out"
 if grep -qi "advanced" <<<"$out"; then bad "already-current does not claim to advance" "$out"; else ok "already-current does not claim to advance"; fi
 if grep -qi "^advance-live: current" <<<"$out"; then ok "already-current says so explicitly (agent-supervisor#11)"; else bad "already-current says so explicitly (agent-supervisor#11)" "$out"; fi
 
+# --- agent-supervisor#312: live edited in place WITHOUT ever moving HEAD --
+# #312 found adapter.py +21 lines against an unchanged live head: cur ==
+# target, behind == 0, but the file on disk did not match either. The old
+# guard ordering checked dirtiness only on the "behind" path, so this exact
+# shape -- dirty at the CURRENT sha -- sailed through the "already current"
+# shortcut silently, forever, until a human read a diff by hand. This must
+# now refuse loudly instead.
+echo "in-place edit at current sha" >>"$LIVE/untouched.txt"
+before_sha312=$(git -C "$LIVE" rev-parse HEAD)
+S=$(mktemp -d)
+out=$(run "$S" 2>&1); rc=$?
+want_exit "dirty-at-current-sha refuses (nonzero exit)" "$rc" 1 "$out"
+after312=$(git -C "$LIVE" rev-parse HEAD)
+if [ "$after312" = "$before_sha312" ]; then ok "dirty-at-current-sha live is not silently reported clean"; else bad "dirty-at-current-sha live is not silently reported clean" "moved to $after312"; fi
+if grep -qi "^advance-live: current" <<<"$out"; then bad "dirty-at-current-sha is never reported as current" "$out"; else ok "dirty-at-current-sha is never reported as current"; fi
+if grep -q "uncommitted changes" <<<"$out"; then ok "dirty-at-current-sha refusal names the dirty tree"; else bad "dirty-at-current-sha refusal names the dirty tree" "$out"; fi
+git -C "$LIVE" checkout -q -- untouched.txt
+
 # --- put a second commit on origin/main so LIVE is genuinely behind -------
 echo two >"$SRC/file.txt"
 git -C "$SRC" add file.txt

@@ -628,13 +628,6 @@ case "$behind" in
   ''|*[!0-9]*) fail "behind-count unreadable in $LIVE -- not advancing" ;;
 esac
 
-if [ "$cur" = "$target" ] || [ "$behind" -eq 0 ]; then
-  log "CURRENT: $cur already matches origin/main after a fresh fetch, nothing to advance"
-  echo "advance-live: current, $cur already matches origin/main (fetched fresh)"
-  maybe_restart_poller "$cur"
-  exit 0
-fi
-
 # --- dirty guard: refuse rather than advance over someone's live edits ----
 # Borrows worktree.sh's `guard`/`done` rule: uncommitted changes in a
 # worktree are someone's unfinished work, not garbage. The reason this has
@@ -646,10 +639,28 @@ fi
 # content plus a local edit that nothing recorded. No stash: a stash
 # sitting on the loop's own advancement guard is state nobody would go
 # looking for. Refuse and report loudly instead.
+#
+# CHECKED BEFORE THE "CURRENT" SHORTCUT BELOW, not after it (agent-supervisor
+# #312): a live tree hand-edited in place without ever moving HEAD -- exactly
+# what #312 found, `adapter.py` +21 lines against an unchanged live head --
+# has cur == target and behind == 0, so the old ordering hit the CURRENT
+# shortcut's `exit 0` and returned before this check ever ran. That let a
+# dirty-but-not-behind live tree sail through silently on every tick
+# forever; #312 was only found by a human reading a diff by hand. Ordering
+# this first means ANY drift from the recorded commit -- ahead, behind, or
+# merely dirty at the same sha -- fails loud instead of depending on someone
+# happening to look.
 dirty=$(dirty_status)
 if [ -n "$dirty" ]; then
   fail "live worktree $LIVE has uncommitted changes -- refusing to advance a dirty tree, not stashing it
 $dirty"
+fi
+
+if [ "$cur" = "$target" ] || [ "$behind" -eq 0 ]; then
+  log "CURRENT: $cur already matches origin/main after a fresh fetch, nothing to advance"
+  echo "advance-live: current, $cur already matches origin/main (fetched fresh)"
+  maybe_restart_poller "$cur"
+  exit 0
 fi
 
 # --- race gate: only advance in the window right after a tick -----------
