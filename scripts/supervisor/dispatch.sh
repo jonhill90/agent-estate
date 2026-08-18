@@ -557,9 +557,18 @@ LEDGER_CLI="$HERE/cli.py"
 # carried no such field (an older cli.py; still safe, just less specific).
 LANE_REL_POPULATION_CANDIDATE=""
 LANE_REL_POPULATION_OTHER=""
-lane_relation() {  # lane_relation <lane> <other> -> same|different|unknown
-  local json rel
-  json=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-relation --lane "$1" --other "$2" 2>/dev/null) || json=""
+lane_relation() {  # lane_relation <lane> <other> [lane-pane-id] -> same|different|unknown
+  # agent-supervisor#235: the optional third argument is a LIVE pane id the
+  # caller just measured off tmux for `$1` -- see the author-exclusion loop
+  # below, which is the one caller that has a real tmux target to measure.
+  # Reconciled through the ledger's `pane_id` registry INSTEAD OF the
+  # `<session>:<index>` shape check, which trusts the window INDEX half of
+  # `$1` and is exactly what `renumber-windows on` (Jon's tmux setting)
+  # rewrites out from under a lane the instant a lower window closes -- see
+  # `core.py`'s own comment on `cli.py lane-relation --lane-pane-id`.
+  local json rel lane_pane_id_args=()
+  [ -z "${3:-}" ] || lane_pane_id_args=(--lane-pane-id "$3")
+  json=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-relation --lane "$1" --other "$2" "${lane_pane_id_args[@]}" 2>/dev/null) || json=""
   rel=$(sed -n 's/.*"relation":"\([a-z]*\)".*/\1/p' <<<"$json" | head -1)
   LANE_REL_POPULATION_CANDIDATE=$(sed -n 's/.*"lane_population":"\([a-zA-Z-]*\)".*/\1/p' <<<"$json" | head -1)
   LANE_REL_POPULATION_OTHER=$(sed -n 's/.*"other_population":"\([a-zA-Z-]*\)".*/\1/p' <<<"$json" | head -1)
@@ -1049,11 +1058,20 @@ while IFS=$'\t' read -r candidate candidate_target; do
   # candidate that made it through against the first ten contributors but
   # matches the eleventh is still excluded, not admitted by majority.
   if [ ${#AUTHOR_LANES[@]} -gt 0 ]; then
+    # agent-supervisor#235: measured HERE, off `$candidate_target` -- the
+    # window-id form `lanes.sh` already gave this candidate, immune to the
+    # renumber that makes `$candidate`'s INDEX half untrustworthy -- so
+    # `lane_relation` below can reconcile against the ledger's `pane_id`
+    # registry instead of trusting that index against a contributor's. Empty
+    # (tmux gone, target stale between `lanes.sh` and here) is passed through
+    # unchanged: `lane_relation` already treats a missing pane id as "cannot
+    # widen", falling back to the pre-#235 shape check, never to admission.
+    candidate_pane_id=$(tmux display-message -p -t "$candidate_target" '#{pane_id}' 2>/dev/null) || candidate_pane_id=""
     MATCHED_CONTRIBUTOR_LANE=""
     MATCHED_CONTRIBUTOR_TASK=""
     for ai in "${!AUTHOR_LANES[@]}"; do
       al="${AUTHOR_LANES[$ai]}"
-      if [ "$(lane_relation "$candidate" "$al")" != different ]; then
+      if [ "$(lane_relation "$candidate" "$al" "$candidate_pane_id")" != different ]; then
         MATCHED_CONTRIBUTOR_LANE="$al"
         MATCHED_CONTRIBUTOR_TASK="${AUTHOR_TASKS[$ai]}"
         break

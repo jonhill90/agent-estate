@@ -107,7 +107,12 @@ REVIEWER_LANE_ID=$(jq -r '.reviewer_lane // ""' <<<"$V")
 AUTHOR_LANE_ID=$(jq -r 'if .known == true then (.lane // "") else "" end' <<<"$AUTHOR")
 LANE_REL=unknown
 if [ -n "$REVIEWER_LANE_ID" ] && [ -n "$AUTHOR_LANE_ID" ]; then
-  LANE_REL=$(lane_relation "$AUTHOR_LANE_ID" "$REVIEWER_LANE_ID")
+  # agent-supervisor#332: resolve_lane_relation(), not the bare
+  # lane_relation() -- see verdict-independence.sh's own comment. This is
+  # the ENFORCEMENT gate (#179); trusting a shape-only "different" here on
+  # two ids a renumber could have collided is exactly the self-merge #235
+  # left open at this call site.
+  LANE_REL=$(resolve_lane_relation "$AUTHOR_LANE_ID" "$REVIEWER_LANE_ID")
 fi
 IND=$(independence_verdict "$V" "$AUTHOR" "$LANE_REL")
 
