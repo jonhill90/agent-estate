@@ -305,7 +305,8 @@ cat > "$OK/fixtures/pr_list.json" <<'S'
   {"number":14,"title":"author lane must not drift to newer reviews","headRefOid":"1414141414141414141414141414141414141414","headRefName":"fix/214-author-drift","mergeStateStatus":"CLEAN"},
   {"number":15,"title":"re-dispatch: head ref, not first-attempt position, names the author","headRefOid":"1515151515151515151515151515151515151515","headRefName":"lane/215-second-attempt","mergeStateStatus":"CLEAN"},
   {"number":16,"title":"self-review across a session rename","headRefOid":"1616161616161616161616161616161616161616","headRefName":"fix/216-renamed-session","mergeStateStatus":"CLEAN"},
-  {"number":17,"title":"reviewer lane stamped with something that is not a lane id","headRefOid":"1717171717171717171717171717171717171717","headRefName":"fix/217-unparseable-stamp","mergeStateStatus":"CLEAN"}
+  {"number":17,"title":"reviewer lane stamped with something that is not a lane id","headRefOid":"1717171717171717171717171717171717171717","headRefName":"fix/217-unparseable-stamp","mergeStateStatus":"CLEAN"},
+  {"number":18,"title":"self-review across a window renumber, not a session rename","headRefOid":"1818181818181818181818181818181818181818","headRefName":"fix/218-renumbered-window","mergeStateStatus":"CLEAN"}
 ]
 S
 cat > "$OK/fixtures/run_b1.json" <<'S'
@@ -520,6 +521,28 @@ cat > "$OK/fixtures/reviews_17.json" <<'S'
 ],"author":{"login":"jonhill90"},"commits":[{"oid":"1717171717171717171717171717171717171717","committedDate":"2026-08-14T09:01:01Z"}]}
 S
 
+# agent-supervisor#332: PR16 above proves the SAME-INDEX rename case (#108) --
+# two lane ids that differ only in session name, the SAME window, correctly
+# read `same` off the string shape alone (index 3 == 3, session ignored).
+# PR18 proves the case #108's fix never covered and #332's reviewer found
+# left open at THIS file's own `lane_relation()` call: a `renumber-windows
+# on` renumber, where the physical window's INDEX itself changes between the
+# author's dispatch and the reviewer's stamp. Index-string shape alone says
+# `different` (8 != 88) -- looks independent -- but the ledger's own
+# `pane_id` registry (both rows %8) proves it is the SAME physical window.
+# Before agent-supervisor#332's widening this reported `verdict_independent:
+# true`; it must now report `false`, matching what merge-pr.sh's ENFORCEMENT
+# gate refuses (this file and that one share resolve_lane_relation()
+# specifically so they cannot disagree -- see verdict-independence.sh).
+cat > "$OK/fixtures/pr_view_18.json" <<'S'
+{"headRefName":"fix/218-renumbered-window","closingIssuesReferences":[{"number":218}],"commits":[]}
+S
+cat > "$OK/fixtures/reviews_18.json" <<'S'
+{"reviews":[],"comments":[
+  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:88","createdAt":"2026-08-18T09:00:01Z"}
+],"author":{"login":"jonhill90"},"commits":[{"oid":"1818181818181818181818181818181818181818","committedDate":"2026-08-18T09:00:01Z"}]}
+S
+
 run_ok() {
   PATH="$OK/bin:$PATH" SUPERVISOR_STATE="$D/state" LANES_SESSION=nosuch \
     DIGEST_REPOS=test-repo DIGEST_OWNER=ownerx GH_STUB_FIXTURES="$OK/fixtures" \
@@ -663,6 +686,25 @@ python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record
   --command claude --server-id srv --session-id sess --issue 217 --github ownerx/test-repo --harness claude >/dev/null
 python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-completion \
   --task as217-unparseable --note done >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-dispatch \
+  --lane t:8 --task as218-author --summary "#218 author" --pane-id %8 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 218 --github ownerx/test-repo --harness claude >/dev/null
+python3 "$HERE/../../scripts/supervisor/cli.py" --state-dir "$LANE_STATE" record-completion \
+  --task as218-author --note done >/dev/null
+# agent-supervisor#332: t:88 is never dispatched a task -- it is the SAME
+# physical window as t:8 after a renumber, registered directly (the way a
+# fresh dispatch to that now-different index would re-register it) rather
+# than through record-dispatch, so its ledger row carries the same pane_id
+# without a second task on top.
+python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+Ledger(sys.argv[2]).register_lane(
+    lane="t:88", pane_id="%8", nonce="nonce-t88", harness="claude",
+    repo="/tmp/repo", server_id="srv", session_id="sess", command="claude", transport="send-keys",
+)
+' "$HERE/../../scripts/supervisor" "$LANE_STATE"
 lane_out=$(PATH="$OK/bin:$PATH" SUPERVISOR_STATE="$LANE_STATE" LANES_SESSION=nosuch \
   DIGEST_REPOS=test-repo DIGEST_OWNER=ownerx GH_STUB_FIXTURES="$OK/fixtures" \
   DIGEST_VERDICT_SOURCE=github \
@@ -721,6 +763,12 @@ chk "PR17 (agent-supervisor#108): a Review-Lane stamp that is not a lane id repo
 grep -q "could not parse lane id from: Review-Lane: lane/89-rev95" <<<"$(jq -r '.verdict_detail' <<<"$p17")" \
   && ok "PR17 detail names the unparseable Review-Lane line" \
   || bad "PR17 detail names the unparseable Review-Lane line" "$p17"
+p18=$(lp 18)
+chk "PR18 (agent-supervisor#332): a reviewer lane with a DIFFERENT index but the ledger's SAME pane_id as the author -- a renumbered self-review, not a session rename -- is NOT independent" \
+  "false" "$(jq -r '.verdict_independent' <<<"$p18")"
+grep -q "NOT independent -- author lane t:8 reviewed its own PR" <<<"$(jq -r '.verdict_detail' <<<"$p18")" \
+  && ok "PR18 detail names the renumbered self-review" \
+  || bad "PR18 detail names the renumbered self-review" "$p18"
 
 # 12b. agent-dotfiles#218: a review APPROVED at an old SHA must not answer for
 # a head a push has since moved past. This is the failure #218 exists to
