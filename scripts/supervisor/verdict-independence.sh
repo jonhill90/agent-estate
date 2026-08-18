@@ -44,14 +44,82 @@
 # 2026-08-14 to recover from #102) changes that name for every window at
 # once without touching which window is which -- comparing raw strings after
 # a rename answers "different lane" for the exact same window.
-lane_relation() {  # lane_relation <lane> <other> -> same|different|unknown
-  local json rel
-  json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" lane-relation --lane "$1" --other "$2" 2>/dev/null) || json=""
+lane_relation() {  # lane_relation <lane> <other> [lane-pane-id] -> same|different|unknown
+  # agent-supervisor#332: the optional third argument mirrors dispatch.sh's
+  # own copy of this function (#235) -- a pane id for `$1`, forwarded as
+  # `cli.py lane-relation --lane-pane-id`, so the answer is reconciled
+  # against the ledger's `pane_id` registry INSTEAD OF trusting `$1`'s
+  # index-shape half, which `renumber-windows on` rewrites out from under a
+  # lane the instant a lower window closes. Omitted (the pre-#332 shape),
+  # this is unchanged: a positive shape-check answer is trusted, which is
+  # exactly the gap #332 closes for merge-pr.sh and digest.sh -- see
+  # resolve_lane_relation() below, the one place this file now supplies a
+  # pane id for those two callers.
+  local json rel lane_pane_id_args=()
+  [ -z "${3:-}" ] || lane_pane_id_args=(--lane-pane-id "$3")
+  json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" lane-relation --lane "$1" --other "$2" "${lane_pane_id_args[@]}" 2>/dev/null) || json=""
   rel=$(jq -r '.relation // ""' 2>/dev/null <<<"$json") || rel=""
   case "$rel" in
     same|different) printf '%s\n' "$rel" ;;
     *) printf 'unknown\n' ;;
   esac
+}
+
+# agent-supervisor#332: `merge-pr.sh` (enforcement) and `digest.sh`
+# (reporting) both compared author/reviewer lane ids through the bare
+# `lane_relation()` above with NO pane id -- the one call shape
+# `dispatch.sh`'s #235 fix never touched, because it lives in a shared
+# author-exclusion loop `dispatch.sh` owns, not here. That leaves a
+# positive-looking shape answer (`same` on matching index, `different` on a
+# mismatched one) trusted at the exact two call sites #179 built specifically
+# because dispatch-time guards can be routed around (this file's own header).
+# A window renumber between an author's dispatch and a reviewer's makes that
+# shape answer wrong in BOTH directions: same index now naming two genuinely
+# different windows reads a legitimate independent review as a self-review
+# (a false refusal), and a self-review whose window picked up a new index
+# reads as independent (the actual security hole -- invariant 9).
+#
+# The fix: a lane id that CONTRIBUTED here (author, or a stamped reviewer)
+# was, by construction, registered by `record-dispatch` at some point, so
+# the ledger's own `pane_id` registry -- not a fresh tmux measurement,
+# dispatch.sh's luxury as the only caller with a live candidate target
+# already resolved (#235's own comment) -- is the fact this file has for
+# free. Try `$1`'s own recorded pane id first; if `$1` was never registered
+# (a hand-typed `Review-Lane:` stamp naming nothing this ledger knows), fall
+# back to `$2`'s. Only when NEITHER side has a registered pane id does this
+# refuse to answer -- `unknown`, never the untrustworthy shape-only guess --
+# which is the AMBIGUOUS/fail-closed posture the rest of this file already
+# holds everywhere else.
+resolve_lane_relation() {  # resolve_lane_relation <lane> <other> -> same|different|unknown
+  local lane="$1" other="$2" pane_id
+  pane_id=$(_lane_own_pane_id "$lane")
+  if [ -n "$pane_id" ]; then
+    lane_relation "$lane" "$other" "$pane_id"
+    return
+  fi
+  pane_id=$(_lane_own_pane_id "$other")
+  if [ -n "$pane_id" ]; then
+    lane_relation "$other" "$lane" "$pane_id"
+    return
+  fi
+  printf 'unknown\n'
+}
+
+# The ledger's own recorded `pane_id` for one lane id, or empty if that lane
+# was never registered (`register_lane`, via `record-dispatch`) or the
+# ledger cannot be read. Not exposed as a `cli.py` subcommand of its own --
+# this is the one place it is needed, and adding argparse surface for a
+# single-field lookup `cli.py lane-relation --lane X --other X` cannot
+# already answer would be a second way to ask the same question (#108's own
+# lesson).
+_lane_own_pane_id() {  # _lane_own_pane_id <lane> -> pane_id or empty
+  "$LEDGER_PYTHON" -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+row = Ledger(sys.argv[2]).get_lane(sys.argv[3])
+print((row or {}).get("pane_id") or "")
+' "$HERE" "$STATE" "$1" 2>/dev/null
 }
 
 # `dispatch.sh`'s task ids are minted `<window-prefix><issue>-<slug>`, where
