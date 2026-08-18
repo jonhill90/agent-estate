@@ -122,6 +122,46 @@ print((row or {}).get("pane_id") or "")
 ' "$HERE" "$STATE" "$1" 2>/dev/null
 }
 
+# agent-supervisor#251 (the same defect its own CI failure was measured
+# against, not a new one): `author_lane_for` below shelled out to `gh pr
+# view` with no bound at all -- the one call in this file with no timer on
+# it, even though every OTHER `gh` call this estate makes (digest.sh's
+# `gh_call`, quota.sh's `codexbar` guard, #267) already learned this lesson.
+# Reproduced live: `tests/supervisor/test_shell_suites.py`'s own harness sends
+# SIGTERM then SIGKILL to the WHOLE process group of a suite that hangs past
+# 300s, and still could not confirm the group dead -- a `gh` blocked on a
+# network round-trip is exactly the shape that produces. `with_timeout` here
+# is the same self-contained `kill -0` poll loop as digest.sh's (#251),
+# quota.sh's (#267) and advance-live.sh's (#51) -- not `timeout`/`gtimeout`,
+# because this file is sourced by both digest.sh and merge-pr.sh and neither
+# script may assume a GNU-coreutils PATH. Redefining the function here (both
+# digest.sh and this file now define it) is harmless -- the two bodies are
+# identical, and a caller that never sources digest.sh (merge-pr.sh) still
+# needs its own copy to be self-contained.
+if ! declare -F with_timeout >/dev/null 2>&1; then
+  with_timeout() {
+    local secs="$1" outfile="$2"; shift 2
+    "$@" >"$outfile" 2>/dev/null &
+    local pid=$! waited=0 timed_out=0
+    while kill -0 "$pid" 2>/dev/null; do
+      if [ "$waited" -ge "$secs" ]; then
+        timed_out=1
+        kill -TERM "$pid" 2>/dev/null
+        sleep 1
+        kill -KILL "$pid" 2>/dev/null
+        break
+      fi
+      sleep 1
+      waited=$((waited + 1))
+    done
+    wait "$pid" 2>/dev/null
+    local rc=$?
+    [ "$timed_out" -eq 1 ] && return 124
+    return "$rc"
+  }
+fi
+AUTHOR_LANE_GH_TIMEOUT_SECONDS="${AUTHOR_LANE_GH_TIMEOUT_SECONDS:-20}"
+
 # `dispatch.sh`'s task ids are minted `<window-prefix><issue>-<slug>`, where
 # the window prefix is the repo name's initials (hyphen-joined words) or the
 # whole name for a one-word repo -- e.g. "agent-supervisor" -> "as",
@@ -152,8 +192,23 @@ repo_task_prefix() {
 # is a GraphQL-only concept; REST has no endpoint that answers it.
 author_lane_for() {
   local repo_full="$1" number="$2" pr_json head_ref candidates candidate issue_json
-  local prefix fallback_task fallback_json
-  if ! pr_json=$(gh pr view "$number" -R "$repo_full" --json headRefName,closingIssuesReferences,commits 2>/dev/null); then
+  local prefix fallback_task fallback_json outfile rc
+  outfile=$(mktemp "${TMPDIR:-/tmp}/author-lane-gh.XXXXXX") || {
+    jq -nc --arg detail "independence unknown -- PR author lane unresolved: could not create a scratch file" \
+      '{known:false, lane:null, task:null, detail:$detail}'
+    return
+  }
+  with_timeout "$AUTHOR_LANE_GH_TIMEOUT_SECONDS" "$outfile" \
+    gh pr view "$number" -R "$repo_full" --json headRefName,closingIssuesReferences,commits
+  rc=$?
+  pr_json=$(cat "$outfile" 2>/dev/null)
+  rm -f "$outfile"
+  if [ "$rc" -eq 124 ]; then
+    jq -nc --arg detail "independence unknown -- PR author lane unresolved: gh pr view timed out after ${AUTHOR_LANE_GH_TIMEOUT_SECONDS}s" \
+      '{known:false, lane:null, task:null, detail:$detail}'
+    return
+  fi
+  if [ "$rc" -ne 0 ] || [ -z "$pr_json" ]; then
     jq -nc --arg detail "independence unknown -- PR author lane unresolved: gh pr view failed" \
       '{known:false, lane:null, task:null, detail:$detail}'
     return
