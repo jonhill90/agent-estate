@@ -45,9 +45,17 @@
 # send-keys` -- there is no tmux handling here at all to fall back to.
 #
 # Usage:
-#   dispatch-claude-print.sh <issue> <slug> <brief-file> <repo> [repo-path]
+#   dispatch-claude-print.sh <issue> <slug> <brief-file> <repo> [repo-path] [--force]
 #
 # Same argument meanings as `dispatch-pi-rpc.sh`.
+#
+# --force  agent-supervisor#291: dispatch anyway when the pre-dispatch
+#          collision check (step 2.5) finds this issue's files overlap an
+#          already in-flight lane's -- see dispatch.sh's own `--force` and
+#          collision-check.sh's header for what "overlap" means. A guard on
+#          one transport only is not a guard, so this script runs the exact
+#          same check dispatch.sh does, at the same point in the flow (right
+#          after the worktree exists).
 #
 # Exit 0 only once a real `claude -p` turn has exited and the task is
 # recorded complete. Exit non-zero on any refusal -- no free `claude` binary,
@@ -60,6 +68,18 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${DISPATCH_PYTHON:-python3}"
 CLI="$HERE/cli.py"
+
+# `--force` is pulled out wherever it appears, same as dispatch.sh's own
+# flag-scanning loop, so the remaining args keep their positional meaning.
+COLLISION_FORCE=""
+POSITIONAL=()
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --force) COLLISION_FORCE=1; shift ;;
+    *) POSITIONAL+=("$1"); shift ;;
+  esac
+done
+set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"
 
 ISSUE="${1:-}"
 SLUG="${2:-}"
@@ -121,6 +141,28 @@ abort() {
   release_claim
   exit 1
 }
+
+# --- 2.5. the pre-dispatch collision check (agent-supervisor#291) ----------
+# The same check dispatch.sh's tmux flow runs at the same point (right after
+# the worktree exists) -- "a guard on one transport only is not a guard".
+# See dispatch.sh's own step 3.2 comment and collision-check.sh's header for
+# what "overlap" means, why UNKNOWN allows, and why a real collision is
+# fatal. `--exclude-lane "$LANE"` is a no-op here in practice (this lane has
+# no prior ledger row -- it does not exist until `register`/`reconstruct-task`
+# below), kept only so this call reads identically to dispatch.sh's.
+COLLISION_OUT=$("$HERE/collision-check.sh" check \
+  --issue "$ISSUE" --brief "$BRIEF" --worktree "$WORKTREE" \
+  --repo-path "$REPO_PATH" --repo "$REPO" \
+  --exclude-lane "$LANE" \
+  ${COLLISION_FORCE:+--force} 2>&1)
+COLLISION_RC=$?
+if [ "$COLLISION_RC" -ne 0 ]; then
+  sed 's/^/dispatch-claude-print: collision-check: /' <<<"$COLLISION_OUT" >&2
+  abort "#$ISSUE's files collide with an in-flight lane -- NOT dispatched. Re-run with --force if this overlap is known and intended (agent-supervisor#291)"
+fi
+# ALLOW (no-conflict, unknown, or forced) -- on stdout, matching this
+# script's own success-path convention (see the final echo block below).
+sed 's/^/dispatch-claude-print: collision-check: /' <<<"$COLLISION_OUT"
 
 # --- 3. the standing deliverable contract, same text dispatch.sh appends --
 CONTRACT_MARKER="<!-- dispatch:deliverable-contract -->"

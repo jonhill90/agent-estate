@@ -138,6 +138,14 @@
 #              three shapes, and silently dropping one would be worse than
 #              routing it the old way; see agent-supervisor#171's own
 #              tracked follow-up.
+# --force
+#              agent-supervisor#291: dispatch anyway when the pre-dispatch
+#              collision check (step 3.2) finds #<issue>'s files overlap an
+#              already in-flight lane's -- for a known and intended overlap.
+#              Never silences an UNKNOWN verdict (there is nothing to force
+#              past there; unknown already allows) and never suppresses the
+#              log line naming what was overridden. See collision-check.sh's
+#              own header for what "overlap" means.
 #
 # Exit 0 only when a lane has been sent a brief -- over tmux/send-keys, or
 # (new, #171, default for a plain single-issue `claude` dispatch) over a
@@ -237,9 +245,19 @@ PR=""
 # about their coverage of #241/#212/#159/etc. changed. A real caller with
 # no reason to force the old pane sets nothing and gets the new default.
 LIVE_PANE="${DISPATCH_LIVE_PANE:-}"
+# agent-supervisor#291: the pre-dispatch collision check's escape hatch, for
+# a known and intended file overlap with an in-flight lane -- see step 3.2,
+# below the worktree, and collision-check.sh's own header for what "overlap"
+# means and why refusing is the default. Takes no value, same shape as
+# --not-a-review.
+COLLISION_FORCE=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --force)
+      COLLISION_FORCE=1
+      shift
+      ;;
     --pr)
       # agent-supervisor#159. Same dangling-flag hazard and same fix as
       # `--reviews-pr` just below -- see that case's own comment.
@@ -1441,6 +1459,48 @@ if [ -n "$REPO" ]; then
     abort_send "worktree $WORKTREE has origin '${WORKTREE_ORIGIN:-<unreadable>}' (repo '${WORKTREE_REPO:-unknown}'), not the claimed repo '$REPO' -- refusing rather than drop a lane claimed against one repository into a worktree of another (#17); #$ISSUE_ARG was NOT dispatched"
   fi
 fi
+
+# --- 3.2 the pre-dispatch collision check (agent-supervisor#291) -----------
+# as#263 and as#266 independently wrote the same fix to the same file
+# (scripts/supervisor/quota-watch.sh) -- one lane's work was entirely
+# wasted, plus a review, plus a merge decision. This is the refusal that
+# catches that shape before it repeats: does #$ISSUE_ARG's own file set (the
+# brief, its branch, and the PR it is scoped to, if any -- see
+# collision-check.sh's own header) overlap the file set an ALREADY in-flight
+# lane is actually touching (measured by `git diff`, not guessed).
+#
+# HERE, not earlier: this is the first point a real worktree exists for
+# `_files_changed_in_worktree` to read (signal 2, a resumed branch's own
+# content) and past step 3.1 so the worktree is already confirmed to BE
+# $REPO. `abort_send` (defined right after the worktree was built, above)
+# is reused rather than reimplemented -- it already unwinds the claim, the
+# lane claim, and the worktree in the right order, and already handles a
+# lane whose pane cwd is somehow already inside $WORKTREE.
+#
+# UNKNOWN (no file signal at all) ALLOWS and says so -- most issues never
+# name a file, and refusing on "I could not tell" would refuse nearly every
+# dispatch; see collision-check.sh's header for why this is the one place
+# the fail-closed posture inverts, deliberately. A real refusal is fatal:
+# a duplicated PR costs far more than a refused dispatch, and `--force`
+# exists for the case an operator genuinely intends the overlap.
+COLLISION_OUT=$("$HERE/collision-check.sh" check \
+  --issue "$ISSUE_ARG" --brief "$BRIEF" --worktree "$WORKTREE" \
+  --repo-path "$REPO_PATH" --repo "$REPO" \
+  --exclude-lane "$LANE" \
+  ${PR_SCOPED:+--pr "$PR_SCOPED"} \
+  ${COLLISION_FORCE:+--force} 2>&1)
+COLLISION_RC=$?
+if [ "$COLLISION_RC" -ne 0 ]; then
+  # A refusal, same as every other guard's stderr above -- agent-dotfiles#199
+  # only requires SILENCE on a SUCCESSFUL dispatch; this one is not one.
+  sed 's/^/dispatch: collision-check: /' <<<"$COLLISION_OUT" >&2
+  abort_send "#$ISSUE_ARG's files collide with an in-flight lane -- NOT dispatched. Re-run with --force if this overlap is known and intended (agent-supervisor#291)"
+fi
+# ALLOW (no-conflict, unknown, or forced) -- on stdout, not stderr:
+# agent-dotfiles#199 requires stderr silent on a successful dispatch, and
+# "say UNKNOWN, don't let it read as nothing" (the issue's own words) only
+# requires this is SAID, not that it is said on stderr specifically.
+sed 's/^/dispatch: collision-check: /' <<<"$COLLISION_OUT"
 
 # WHAT IS TYPED INTO THE PANE STAYS SHORT, AND HERE IS THE MEASURED REASON.
 #

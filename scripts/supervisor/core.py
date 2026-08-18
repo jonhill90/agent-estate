@@ -2020,6 +2020,34 @@ class Ledger:
             ).fetchall()
         return [self._dict(row) for row in rows]
 
+    def list_open_worktrees(self):
+        """(lane, task id, worktree path) for every IN-FLIGHT task with a
+        recorded worktree -- agent-supervisor#291's collision check.
+
+        "In flight" means the same thing `get_open_task_for_lane` already
+        uses: not `complete`, `failed`, or `cancelled`. That covers a lane
+        between claim and delivery (`created`, `delivery_pending`) as well as
+        one already working a delivered brief -- both are lanes a fresh
+        dispatch could collide with; only a task that has actually stopped
+        is excluded.
+
+        `worktree_path` is blank for a placeholder claim row (`claim_lane`
+        writes one under this same table, see `get_open_task_for_lane`'s own
+        docstring) and for any task dispatched before agent-supervisor#117
+        added the column -- both are filtered out here, not left for the
+        caller to notice: neither names a directory `git diff` could read.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM tasks
+                WHERE status NOT IN ('complete','failed','cancelled')
+                  AND worktree_path != ''
+                ORDER BY updated_at, id
+                """
+            ).fetchall()
+        return [self._dict(row) for row in rows]
+
     @staticmethod
     def _source_task_dict(row):
         if row is None:
