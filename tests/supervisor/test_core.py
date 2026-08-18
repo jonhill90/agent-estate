@@ -1740,6 +1740,60 @@ class LedgerTest(unittest.TestCase):
         self.assertEqual("free-6", found["lane"])
         self.assertEqual("as211-rev212", found["id"])
 
+    def test_mark_pr_external_refuses_a_pr_with_an_explicit_authorship_record(self):
+        """agent-supervisor#308 item 3 / #321's own review, item 5: the
+        laundering gate. `mark_pr_external` must not accept a caller's word
+        alone -- it independently refuses when the ledger already records
+        `record_pr_for_task`'s explicit "task X opened PR N" fact, the most
+        direct evidence this method can check with no external process
+        (`gh`/`git`, which only the shell wrapper `mark-pr-external.sh`
+        reaches). Otherwise the contributing lane itself could call this and
+        erase its own record, then have any lane -- including itself --
+        review the PR it just laundered."""
+        self.ledger.record_dispatch(
+            lane="free-3", pane_id="%3", nonce="nonce-3", harness="claude", repo="/repo/free-3",
+            server_id="server-a", session_id="$3", command="claude.exe",
+            task_id="as308-original", source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/308",
+            source_ref="308", summary="#308 original fix", source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-3"], status_marker=None,
+        )
+        self.ledger.record_pr_for_task(task_id="as308-original", repo="acme/agent-supervisor", pr_number="316")
+
+        with self.assertRaises(ValueError) as caught:
+            self.ledger.mark_pr_external(
+                repo="acme/agent-supervisor", pr_number="316", note="trying to launder my own PR"
+            )
+        self.assertIn("as308-original", str(caught.exception))
+        self.assertIn("free-3", str(caught.exception))
+        self.assertIsNone(
+            self.ledger.get_pr_external(repo="acme/agent-supervisor", pr_number="316"),
+            "the refused call must not have written the row",
+        )
+
+    def test_mark_pr_external_refuses_a_pr_with_a_pull_scoped_contributor(self):
+        """Same gate, the other ledger-only source it can check without
+        `gh`/`git`: a task dispatched DIRECTLY against this PR
+        (`source_kind='pull'`, `get_contributor_tasks_for_pr`) -- the #302
+        shape. A review or fix-pass task dispatched with `--pr <N>` is a
+        real, structured contributor record; marking that PR external must
+        not be allowed to erase it."""
+        self.ledger.record_dispatch(
+            lane="free-3", pane_id="%3", nonce="nonce-3", harness="claude", repo="/repo/free-3",
+            server_id="server-a", session_id="$3", command="claude.exe",
+            task_id="as302-fix1", source_kind="pull",
+            source_url="https://github.com/jonhill90/agent-supervisor/pull/302",
+            source_ref="302", summary="fix pass on PR #302", source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-3", "pr: 302"], status_marker=None,
+        )
+
+        with self.assertRaises(ValueError) as caught:
+            self.ledger.mark_pr_external(
+                repo="acme/agent-supervisor", pr_number="302", note="trying to launder my own PR"
+            )
+        self.assertIn("as302-fix1", str(caught.exception))
+        self.assertIsNone(self.ledger.get_pr_external(repo="acme/agent-supervisor", pr_number="302"))
+
     def test_mark_lane_held_makes_a_free_lane_read_occupied(self):
         """agent-dotfiles#188 finding 1: this is what closes the window a
         rolled-back `record_dispatch` used to leave open -- a lane the ledger

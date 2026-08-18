@@ -1864,7 +1864,42 @@ class Ledger:
         no lane wrote it, so no lane is excluded from reviewing it -- the
         safe case, not the dangerous one. `INSERT OR REPLACE`: idempotent,
         the note/timestamp of the most recent marking wins.
+
+        GATED (agent-supervisor#308 item 3 / #321's own review, item 5):
+        this is the one write in this class an operator can call to widen a
+        PR's reviewer pool, and #321's review measured that it had NO caller
+        verification at all -- any lane with shell access could call it
+        against a PR it contributed to itself and launder that PR as
+        "no lane contributed", then have any lane (including itself) review
+        it. `scripts/supervisor/mark-pr-external.sh` is the recommended
+        entry point -- it runs the full exhaustive resolution chain
+        (issue, PR-task, PR-contributor, worktree, legacy branch, all of
+        which need `gh`/`git` and so cannot live here) before ever reaching
+        this method. This method itself refuses independently, on the two
+        sources it CAN check with no external process: an explicit
+        `record_pr_for_task` row, and a PR-scoped `source_tasks` row
+        (`get_contributor_tasks_for_pr`) -- so even a caller that bypasses
+        the shell wrapper cannot launder a PR the ledger already names a
+        real contributor for by either of these two, most-direct records.
         """
+        existing_task = self.get_task_for_pr_number(repo=repo, pr_number=pr_number)
+        if existing_task is not None:
+            raise ValueError(
+                f"refusing to mark PR #{pr_number} in {repo} external -- "
+                f"the ledger already records task {existing_task['id']!r} (lane "
+                f"{existing_task['lane']!r}) as having opened it; marking this "
+                f"external now would erase a known contributor, not record an "
+                f"absent one"
+            )
+        contributor_tasks = self.get_contributor_tasks_for_pr(pr_number)
+        if contributor_tasks:
+            names = ", ".join(f"{t['id']!r} (lane {t['lane']!r})" for t in contributor_tasks)
+            raise ValueError(
+                f"refusing to mark PR #{pr_number} in {repo} external -- "
+                f"the ledger already records {names} dispatched directly against "
+                f"it; marking this external now would erase known contributor(s), "
+                f"not record an absent one"
+            )
         now = int(now if now is not None else self.clock())
         with self._transaction() as connection:
             connection.execute(
