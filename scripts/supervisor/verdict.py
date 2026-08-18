@@ -242,7 +242,18 @@ def _content_unchanged_since(*, runner, patch_id_fn, repo, number, old_sha, new_
 # "Verdict" in any case, then `:`. Liberal in what counts as the LABEL;
 # strict about the DECISION text after it -- see `_classify_decision_text`
 # for what "strict" means (agent-supervisor#198).
-_VERDICT_LINE_RE = re.compile(r"^#{0,6}\s*\*{0,2}verdict:\**\s*(.*)$", re.IGNORECASE)
+#
+# agent-supervisor#213 (this widening): the LABEL used to require "Verdict:"
+# to sit immediately after the optional heading/emphasis markers -- so a
+# reviewer who wrote a lead-in before the label on the same line ("##
+# Independent review verdict: APPROVE", "## Independent review of #333 --
+# verdict: APPROVE") never matched at all, even though "verdict:" is right
+# there in the line. The `.*?` prefix allows arbitrary lead-in text before
+# the label; it stays a fail-closed match because "verdict" mentioned in
+# prose WITHOUT an immediately-following colon (agent-supervisor#53's guard
+# 4, "I think the verdict here should be REQUEST CHANGES") still does not
+# contain the literal substring "verdict:" and so still does not match.
+_VERDICT_LINE_RE = re.compile(r"^#{0,6}\s*.*?\*{0,2}verdict:\**\s*(.*)$", re.IGNORECASE)
 
 
 # agent-supervisor#198: the decision text used to be matched with `in` --
@@ -289,6 +300,50 @@ def _classify_decision_text(decision_text):
     return None
 
 
+# agent-supervisor#213 (this widening): two more DECISION-text shapes real
+# reviewers wrote that the old normalisation mishandled:
+#
+# - bold AROUND the decision (`**APPROVE**`, not just a bold LABEL). The old
+#   code did `rest.find("**")` and cut there -- correct for `**Verdict:
+#   APPROVE**` (rest is `APPROVE**`, the first `**` it finds IS the
+#   closing pair), but wrong for `Verdict: **APPROVE**` (rest is
+#   `**APPROVE**`, the first `**` it finds is the OPENING pair, so it cut
+#   the whole decision down to an empty string -- measured on #331:
+#   `merge-pr: refused ... (decision text not recognised: "")`). Stripping
+#   `**`/`*`/`_`/`` ` `` from BOTH ends, rather than truncating at the first
+#   occurrence, handles emphasis wrapped around either side of the decision.
+# - a trailing action appended after the decision with `+` (`APPROVE +
+#   MERGE`, #321). This is intentionally narrower than the decision-token
+#   match itself staying a whole-token match (see `_classify_decision_text`)
+#   -- only the FIRST `+`-separated segment is classified, so "APPROVE +
+#   MERGE" resolves via its "APPROVE" segment while "APPROVED WITH CHANGES"
+#   (no `+`, a real qualifier reviewers write that changes what was
+#   decided, not a trailing instruction) is untouched by this and stays
+#   unrecognised exactly as before -- `+` reads as "and also do this",
+#   never as a qualifier on the decision word itself.
+def _normalise_decision_text(rest):
+    text = rest.strip()
+    # Strip any OPENING emphasis wrapping the decision (`**APPROVE**` after
+    # a plain, unbolded label -- #331: the old code cut at the first `**`
+    # it found, which for this shape IS the opening pair, truncating the
+    # decision to "" before it was ever classified).
+    text = re.sub(r"^[*_`]+", "", text)
+    # Truncate at the first emphasis marker still remaining -- the closing
+    # half of a wrapped decision once its opening half is already gone
+    # above, OR (when the decision was never wrapped at all) a closing
+    # marker that belongs to the LABEL's own trailing content, e.g.
+    # `REQUEST CHANGES**  head SHA abc123`. Either way, nothing at or past
+    # it is part of the decision.
+    marker = re.search(r"[*_`]", text)
+    if marker:
+        text = text[: marker.start()]
+    text = text.strip().rstrip(".:;,!").strip()
+    text = re.sub(r"\s+", " ", text).upper()
+    if "+" in text:
+        text = text.split("+", 1)[0].strip()
+    return text
+
+
 def _scan_verdict_lines(body):
     """The list of `(decision, decision_text)` for every LINE of `body` that
     matches `_VERDICT_LINE_RE` -- agent-supervisor#53's guard 4 (the word
@@ -329,13 +384,7 @@ def _scan_verdict_lines(body):
         match = _VERDICT_LINE_RE.match(line)
         if not match:
             continue
-        rest = match.group(1)
-        end = rest.find("**")
-        if end != -1:
-            rest = rest[:end]
-        decision_text = re.sub(r"[*_`]+$", "", rest.strip()).strip()
-        decision_text = decision_text.rstrip(".:;,!").strip()
-        decision_text = re.sub(r"\s+", " ", decision_text).upper()
+        decision_text = _normalise_decision_text(match.group(1))
         results.append((_classify_decision_text(decision_text), decision_text))
     return results
 
