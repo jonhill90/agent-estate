@@ -135,16 +135,30 @@ mkdir -p "$CACHE_DIR" 2>/dev/null || true
 # has bitten this estate before (see the header note in `check` below).
 # Returns 124 on timeout (matching GNU `timeout`'s convention, so a reader
 # who knows that tool recognises the code), else CMD's own exit status.
+#
+# agent-supervisor#251 (second fix pass, propagated here for consistency --
+# this file's copy has the same latent defect even though it was not the one
+# CI caught): killing only `$pid` does not take down anything CMD itself
+# forked -- a killed parent's already-running children are reparented, not
+# killed, and keep going to their own completion. `set -m` (restored after)
+# puts the backgrounded job in its OWN process group instead of inheriting
+# this script's, so the timeout path can signal the negative pid -- a
+# process-group signal that reaches CMD and everything it spawned.
 with_timeout() {
   local secs="$1" outfile="$2"; shift 2
+  local prev_monitor=0
+  case $- in *m*) prev_monitor=1 ;; esac
+  set -m
   "$@" >"$outfile" 2>/dev/null &
-  local pid=$! waited=0 timed_out=0
+  local pid=$!
+  [ "$prev_monitor" -eq 1 ] || set +m 2>/dev/null
+  local waited=0 timed_out=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$secs" ]; then
       timed_out=1
-      kill -TERM "$pid" 2>/dev/null
+      kill -TERM -- -"$pid" 2>/dev/null
       sleep 1
-      kill -KILL "$pid" 2>/dev/null
+      kill -KILL -- -"$pid" 2>/dev/null
       break
     fi
     sleep 1

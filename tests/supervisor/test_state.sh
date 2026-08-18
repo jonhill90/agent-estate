@@ -176,6 +176,71 @@ grep -q "^constraints: unknown -- .*no-such-loop-tick.md unreadable" <<<"$out" &
   ok "a missing loop-tick.md reads constraints: unknown, not an empty section" \
   || bad "missing loop-tick constraints unknown" "$out"
 
+# 15. agent-supervisor#251 review, "on the feature itself": the two existing
+# cap tests prove the cap is enforced at its EDGES (unsatisfiable -> exit 2;
+# generous -> full detail) but neither proves the MIDDLE of the ladder --
+# that a cap satisfiable only via reduction actually reduces the least
+# important thing first, not just whatever happens to shrink the string.
+# Fixture: 15 open PRs (each with a verbose verdict_detail) and 10 long
+# standing constraints, but only 3 dispatched tasks -- dispatched is the
+# ledger's own occupancy and the thing state.sh exists to keep truthful, so
+# it must survive intact at the first reduction level while the less
+# essential PR/constraint detail is what gets trimmed.
+python3 - "$D" <<'PYEOF'
+import json, sys
+D = sys.argv[1]
+prs = []
+for i in range(15):
+    prs.append({
+        "repo": "agent-supervisor", "number": 300 + i,
+        "run_conclusion": "success", "merge_state": "clean",
+        "verdict": "approved",
+        "verdict_detail": (
+            f"ledger: lane-{i} recorded a fairly long detail sentence "
+            f"explaining the basis for PR {300 + i}'s verdict so this line is not tiny"
+        ),
+    })
+doc = {
+    "ok": True, "errors": [],
+    "lanes": {"free": "agent-supervisor:3", "busy": "agent-supervisor:5",
+              "blocked": "", "dead": "", "stale": "", "service": "", "unknown": ""},
+    "reconciliation": {"delivered_idle": []},
+    "lane_models": {"lanes": []},
+    "prs": prs,
+}
+with open(f"{D}/bin/heavy_digest.sh", "w") as f:
+    f.write("#!/bin/bash\ncat <<'J'\n" + json.dumps(doc) + "\nJ\n")
+PYEOF
+chmod +x "$D/bin/heavy_digest.sh"
+cat > "$D/bin/heavy_cli.py" <<'EOF'
+import json
+print(json.dumps({"tasks": [
+  {"id": "t1", "lane": "agent-supervisor:2", "status": "delivered", "summary": "a short summary one"},
+  {"id": "t2", "lane": "agent-supervisor:3", "status": "in_progress", "summary": "a short summary two"},
+  {"id": "t3", "lane": "agent-supervisor:4", "status": "delivered", "summary": "a short summary three"},
+]}))
+EOF
+HEAVY_LOOP_TICK="$D/heavy-loop-tick.md"
+{
+  echo "## Boundaries"
+  echo
+  for n in one two three four five six seven eight nine ten; do
+    echo "- Constraint line number $n, moderately long so it adds up across many lines."
+  done
+} > "$HEAVY_LOOP_TICK"
+out=$(STATE_DIGEST_BIN="$D/bin/heavy_digest.sh" STATE_LEDGER_PYTHON=python3 STATE_LEDGER_CLI="$D/bin/heavy_cli.py" \
+  STATE_LOOP_TICK="$HEAVY_LOOP_TICK" STATE_TOKEN_CAP=1000 bash "$STATE_SH" 2>/dev/null)
+grep -q "detail_level=1" <<<"$out" && ok "a cap satisfiable only via reduction fires the ladder's first rung" \
+  || bad "middle-of-ladder cap picks level 1" "$out"
+grep -q "task=t1 status=delivered" <<<"$out" && grep -q "task=t2 status=in_progress" <<<"$out" \
+  && grep -q "task=t3 status=delivered" <<<"$out" \
+  && ok "dispatched (the ledger's own occupancy) survives the first reduction intact" \
+  || bad "dispatched intact at level 1" "$out"
+grep -q "+5 more, omitted to fit the cap" <<<"$out" && ok "open_prs is what gets trimmed first, and says how much" \
+  || bad "open_prs trimmed with a stated count" "$out"
+grep -q "^constraints: see loop-tick.md#Boundaries" <<<"$out" && ok "constraints collapses to a pointer, not silently dropped" \
+  || bad "constraints collapsed to pointer" "$out"
+
 echo
 echo "state.sh: $pass ok, $fail failed"
 [ "$fail" -eq 0 ]

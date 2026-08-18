@@ -144,17 +144,38 @@ print((row or {}).get("pane_id") or "")
 # digest.sh and this file now define it) is harmless -- the two bodies are
 # identical, and a caller that never sources digest.sh (merge-pr.sh) still
 # needs its own copy to be self-contained.
+# agent-supervisor#251 (second fix pass): the version of this function that
+# shipped in the first fix pass killed only the direct backgrounded pid --
+# `kill -TERM "$pid"` -- not any process THAT pid itself spawned (`verdict.py`
+# shelling out to `gh`/`git` for #226's rebase-content check). A killed
+# parent does not take its already-forked children down with it; they are
+# reparented and keep running to their own completion. Reproduced directly:
+# a `with_timeout`-wrapped call whose child backgrounds its own grandchild
+# left that grandchild alive and unkillable through `$pid` after the timeout
+# fired, which is the exact "SIGTERM escalated to SIGKILL, group still not
+# confirmed dead" shape `test_shell_suites.py`'s harness reported against
+# this suite. Fix: turn on job control (`set -m`) only around the
+# backgrounding line, so the child starts its OWN process group instead of
+# inheriting this script's, then signal the negative pid (`-"$pid"`) -- a
+# process-group signal reaches the child and everything it forked, group
+# leader included. `set -m` is restored to whatever it was before, so this
+# does not change job-control behaviour for the rest of the script.
 if ! declare -F with_timeout >/dev/null 2>&1; then
   with_timeout() {
     local secs="$1" outfile="$2"; shift 2
+    local prev_monitor=0
+    case $- in *m*) prev_monitor=1 ;; esac
+    set -m
     "$@" >"$outfile" 2>/dev/null &
-    local pid=$! waited=0 timed_out=0
+    local pid=$!
+    [ "$prev_monitor" -eq 1 ] || set +m 2>/dev/null
+    local waited=0 timed_out=0
     while kill -0 "$pid" 2>/dev/null; do
       if [ "$waited" -ge "$secs" ]; then
         timed_out=1
-        kill -TERM "$pid" 2>/dev/null
+        kill -TERM -- -"$pid" 2>/dev/null
         sleep 1
-        kill -KILL "$pid" 2>/dev/null
+        kill -KILL -- -"$pid" 2>/dev/null
         break
       fi
       sleep 1

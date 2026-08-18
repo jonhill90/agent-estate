@@ -114,16 +114,31 @@ note_error() { ERRORS+=("$1"); }
 # macOS. Prints nothing; CMD's stdout lands in OUTFILE so the caller reads it
 # once the exit code is known, matching quota.sh's own convention exactly.
 # Returns 124 on timeout, else CMD's own exit status.
+#
+# agent-supervisor#251 (second fix pass): killing only `$pid` does not take
+# down anything CMD itself forked (e.g. verdict.py shelling out to `gh`/`git`
+# for #226's rebase-content check) -- a killed parent's already-running
+# children are reparented, not killed, and keep going to their own
+# completion. That is what left `test_digest.sh` unable to confirm its
+# process group dead after SIGTERM/SIGKILL. Fix: `set -m` (restored after)
+# so the backgrounded job gets its OWN process group instead of inheriting
+# this script's, then signal the negative pid -- a process-group signal
+# reaches CMD and everything it spawned, group leader included.
 with_timeout() {
   local secs="$1" outfile="$2"; shift 2
+  local prev_monitor=0
+  case $- in *m*) prev_monitor=1 ;; esac
+  set -m
   "$@" >"$outfile" 2>/dev/null &
-  local pid=$! waited=0 timed_out=0
+  local pid=$!
+  [ "$prev_monitor" -eq 1 ] || set +m 2>/dev/null
+  local waited=0 timed_out=0
   while kill -0 "$pid" 2>/dev/null; do
     if [ "$waited" -ge "$secs" ]; then
       timed_out=1
-      kill -TERM "$pid" 2>/dev/null
+      kill -TERM -- -"$pid" 2>/dev/null
       sleep 1
-      kill -KILL "$pid" 2>/dev/null
+      kill -KILL -- -"$pid" 2>/dev/null
       break
     fi
     sleep 1
