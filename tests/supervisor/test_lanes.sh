@@ -133,6 +133,7 @@ cat > "$D/fixture" <<'FIX'
 59|w-unsent-240-4|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0|check the notify script for any lingering result
 60|w-unsent-240-5|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0|file agent-supervisor#232 as a filed issue reference check
 61|w-unsent-240-6|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0|clean up the pr200-review temp branch and worktree
+62|w-fifth-shape|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 7 helpers standing by|1|0
 FIX
 printf '49|w-missing-cwd|codex|  gpt-5.5 medium · /repo/path|1|0||||%s\n' "$MISSING_CWD" >> "$D/fixture"
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
@@ -286,6 +287,16 @@ want "a bare ready prompt with the real footer is free" w-real-free free "$out"
 want "a plural agent count on an idle footer is free"    w-real-free-plural free "$out"
 want "a plural agent count mid-turn is still busy"       w-busy-plural      busy "$out"
 want "a plural agent count with a live background shell is still busy" w-shell-idle-plural busy "$out"
+# agent-supervisor#353: HARNESS_READY_RE stopped enumerating the suffix and
+# now matches the stable `(shift+tab to cycle)` banner text instead -- #216,
+# #314, #324, #350 and 2026-08-18's fourth shape were all one defect
+# (pinning the decorative text after the counter) wearing different bytes.
+# This fixture is a shape NO alternative ever enumerated -- a made-up
+# five-word decoration standing in for "whatever Claude prints here next" --
+# and it must read free without this file gaining a new alternative for it,
+# proving the fix addresses the defect family, not merely the fourth
+# instance of it.
+want "an unforeseen fifth footer decoration is still free (#353)" w-fifth-shape free "$out"
 # The #126 live cases verbatim: a background subagent's task-list row, and
 # Claude Code's "waiting for background agent" line. Neither contains
 # `esc to interrupt`, so the old code offered both -- and both are the

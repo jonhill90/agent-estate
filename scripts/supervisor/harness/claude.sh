@@ -46,77 +46,45 @@ HARNESS_SEND_LITERAL=1
 # than starting a fresh agent -- which is #237's whole failure direction.
 HARNESS_RESUME_CMD='claude --dangerously-skip-permissions --resume %s'
 
-# Ready shape -- last non-empty line only (the #65 discipline). Two shapes:
-# the real idle footer (`← 1 agent`, the count including the main agent
-# itself so 1 means nothing delegated -- #126) and a bare `❯ ...` line with
-# no footer, kept for older captures and fixtures that stand in for "a
-# normal prompt" without spelling out footer chrome. See lanes.sh's own
-# `emit_rows` for the ordering this is checked in.
-# agent-supervisor#216: the count is `[0-9]+`, not a literal 1. `lanes.sh`
-# tests this against the pane's LAST LINE only, so on a Claude pane the
-# footer is the only line it ever sees and the `^❯ ...$` alternative below
-# can never fire -- which made `← 1 agent$` the sole working matcher, and a
-# footer reading `← 2 agents` unclassifiable. Six healthy lanes across both
-# live sessions read `unknown` on 2026-08-16T02:26Z for exactly this, and
-# with `DISPATCH_LANE` removed (#89) there is no override: estate capacity
-# was zero. See the issue for the measurement that established the counter
-# is not a delegation indicator -- a lane holding nothing but the splash
-# screen, with an empty transcript and no child process, still read
-# `← 2 agents`.
+# Ready shape -- last non-empty line only (the #65 discipline).
 #
-# Widening READY_RE runs against the #124/#126 one-way ratchet, so what
-# bounds it matters: `busy` is decided before `free` (HARNESS_BUSY_RE below
-# -- `esc to interrupt`, `↓ to manage`, the token-count tail), and none of
-# those alternatives involve the agent count. A plural footer that is also
-# mid-turn, or that still has a background shell registered, stays busy.
-# test_lanes.sh pins both.
+# HISTORY, why this is no longer a suffix allowlist: #216, #314, #324, #350
+# and a shape sighted 2026-08-18 were five incidents wearing one defect. The
+# text after the counter marker in Claude's footer (a digit, the bare word
+# "for", nothing at all) is decorative -- #216 measured this directly, live:
+# a lane holding nothing but the splash screen, an empty transcript, and no
+# child process still read a plural count. Pinning each observed suffix as
+# its own alternative is a promise to keep chasing somebody else's UI, and
+# every miss fails toward silence: an unmatched footer reads `unknown`, and
+# `unknown` withholds the lane rather than raising an alarm. Three
+# enumerated alternatives (a literal count, a literal "for", and a fourth
+# with no suffix at all) each fixed one incident and left the shape open for
+# the next.
 #
-# agent-supervisor#314: a THIRD ready shape, `← for agents`, with no count at
-# all. This is the SAME incident the 2026-08-16T02:26Z note above records --
-# estate capacity zero because every idle lane read `unknown` -- recurring
-# with a new footer string, so the lesson is that pinning the agent-count
-# shape is what keeps breaking, not that any one string was wrong.
+# THE FIX matches the PREFIX instead -- the mode banner Claude Code paints
+# only once nothing else occupies that row. Both banners below were captured
+# live, and in every capture on file (see HARNESS_BUSY_RE below) a pane that
+# is mid-turn or still holding a registered background shell drops the
+# `(shift+tab to cycle)` hint entirely -- it is painted only when there is
+# genuinely nothing to interrupt. That makes the banner text itself, not
+# what Claude appends after it, the positive signal: a fifth or sixth suffix
+# variant needs no new alternative here, because nothing here reads the
+# suffix at all.
 #
-# Measured live 2026-08-17, two idle claude panes (`agent-supervisor:@42`
-# post-turn with an empty box, `@43` on the fresh splash), both footers
-# reading:
-#   ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents
-# `pane` is `tail -1` of the non-blank capture (lanes.sh:411), so the FOOTER
-# is what READY_RE is matched against, never the `❯` line above it -- the
-# first alternative here can only fire when the prompt line is itself last.
-# `← [0-9]+ agents?$` cannot match a footer with no digits, so both panes
-# fell through to `unknown` and `--free` withheld them. Three dispatches
-# (#308, #311, #313) refused with "no free lane" against an estate that had
-# two.
+# This still depends on `busy` and `blocked` being decided BEFORE `free`
+# (lanes.sh's classification chain) -- neither of those probes reads this
+# prefix, so a footer that is mid-turn (`esc to interrupt`), carries a live
+# background shell (`↓ to manage`), or is showing a dialog classifies ahead
+# of this regardless of what banner text precedes it; test_lanes.sh pins
+# that ordering. Unanchored on purpose: this regex is matched against the
+# pane's LAST LINE only (lanes.sh:411), never scrollback (the #65
+# discipline), so a substring match here cannot pick up text the pane merely
+# printed elsewhere the way a whole-scrollback sweep could.
 #
-# Same one-way-ratchet argument as the alternative above, and it holds for
-# the identical reason: `busy` and `blocked` are both decided BEFORE `free`,
-# and neither of those probes involves the agent counter, so a footer that is
-# mid-turn (`esc to interrupt`), has a background shell (`↓ to manage`), or
-# is showing a prompt still classifies ahead of this. Anchored to
-# end-of-line, so a footer with `· ↓ to manage` trailing it fails this
-# alternative exactly as it fails the numeric one.
-# A FOURTH shape, found 2026-08-18: the footer with no agents suffix at all.
-#
-#   ⏵⏵ bypass permissions on (shift+tab to cycle)
-#
-# Measured on `agent-supervisor:1.1` while it was demonstrably NOT busy (no
-# `esc to interrupt`) and holding an empty input box. Every existing
-# alternative failed it, so the pane read `unknown` -- and `director-route.sh`,
-# whose `idle()` requires this regex to match before it will deliver anything,
-# could not deliver to the one pane it targets.
-#
-# STATE THE DESIGN PROBLEM PLAINLY, because this is the fourth time: #314 added
-# a shape, #324 added a shape, #350 fixed a stale private copy, and this adds a
-# fourth. An ALLOWLIST of exact footer strings is a promise to keep chasing
-# somebody else's UI forever, and each miss presents as "the estate is idle" or
-# "nothing can be delivered" rather than as a broken matcher. The durable
-# design is negative: a pane is idle when it is NOT busy and its input box is
-# empty -- both of which this file already determines independently, and
-# neither of which depends on the decorative suffix. Changing that is a real
-# change to the #126 evidence posture (absence of evidence must never earn a
-# send), so it is filed rather than smuggled in here.
-HARNESS_READY_RE='^❯ [^←]*$|← [0-9]+ agents?$|← for agents$|^[[:space:]]*⏵⏵ bypass permissions on \(shift\+tab to cycle\)$'
+# A bare `❯ ...` prompt line with no footer at all is the remaining
+# alternative, kept for older captures and fixtures that stand in for "a
+# normal prompt" without spelling out footer chrome.
+HARNESS_READY_RE='^❯ [^←]*$|⏸ manual mode on|⏵⏵ bypass permissions on \(shift\+tab to cycle\)'
 
 # Busy -- last line only. Claude's elapsed-turn footer IS the last line
 # while a turn runs (`esc to interrupt`), unlike Codex, whose equivalent
@@ -141,10 +109,12 @@ HARNESS_READY_RE='^❯ [^←]*$|← [0-9]+ agents?$|← for agents$|^[[:space:]]
 # started is still doing work on the lane's behalf, and #207's acceptance is
 # to treat that as busy (not a new state, and never free) rather than offer
 # it to the dispatcher while the shell runs. Deliberately does NOT touch
-# HARNESS_READY_RE: `← 1 agent$` is anchored to end-of-line, so a footer with
-# `· ↓ to manage` trailing it already fails that anchor on its own -- adding
-# this alternative here cannot make a lane MORE free, only less unknown,
-# which is the #124/#126 one-way ratchet this file is under.
+# HARNESS_READY_RE: neither shape above carries the `(shift+tab to cycle)`
+# hint HARNESS_READY_RE keys on -- Claude drops that hint whenever a
+# background shell is registered, busy or not -- so both already fail the
+# ready match on their own, before busy is even checked. Adding this
+# alternative here cannot make a lane MORE free, only less unknown, which is
+# the #124/#126 one-way ratchet this file is under.
 # agent-supervisor#164: a THIRD busy shape, live off `agent-tui:2` twice ~20
 # minutes apart, PR #22 delivered shortly after -- so the lane was healthy
 # and working the whole time it read `unknown`. A background subagent's task

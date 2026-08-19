@@ -421,5 +421,39 @@ else
   fi
 fi
 
+# --- agent-supervisor#353: harness/claude.sh unreadable -> fail closed -----
+# READY_RE used to fall back to a hardcoded string literal when sourcing
+# harness/claude.sh failed -- a private second copy of the exact value #314
+# and #324 were filed to stop duplicating, and it was ALSO already stale
+# (the pre-#353 suffix allowlist). This proves the replacement -- READY_RE
+# left empty, idle() failing closed -- actually holds: with the harness file
+# unreadable, an otherwise-idle Director pane must be queued, not nudged.
+SOURCE_LESS="$D/no-harness-source"
+rm -rf "$SOURCE_LESS"; mkdir -p "$SOURCE_LESS"
+cp -R "$ROUTE_DIR" "$SOURCE_LESS/supervisor"
+NOSOURCE_ROUTE="$SOURCE_LESS/supervisor/director-route.sh"
+chmod 000 "$SOURCE_LESS/supervisor/harness/claude.sh"
+if [ ! -r "$SOURCE_LESS/supervisor/harness/claude.sh" ] && [ -f "$NOSOURCE_ROUTE" ]; then
+  ok "setup: harness/claude.sh made unreadable in a throwaway copy of the tree"
+  fresh_inbox
+  : > "$D/tmux.log"; rm -rf "$D/panes"; mkdir -p "$D/panes"; : > "$D/curl.log"
+  out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/idle" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+    HOME="$D/state" NOTIFY_ENV="$D/notify.env" CURL_LOG="$D/curl.log" DIRECTOR_INBOX="$INBOX_BOX" \
+    bash "$NOSOURCE_ROUTE" "must still be queued" t 2>&1)
+  rc=$?
+  [ "$rc" -eq 2 ] && ok "an unreadable harness file: exits 2 (queued, not nudged), even though the pane is idle" \
+    || bad "exited $rc, wanted 2" "$out"
+  [ ! -s "$D/panes/1.submitted" ] && ok "an unreadable harness file never nudges the pane" \
+    || bad "the pane was nudged despite READY_RE being unavailable" "$(cat "$D/panes/1.submitted")"
+  grep -q '"text": "Telegram from Jon: must still be queued"' "$INBOX_BOX" 2>/dev/null \
+    && ok "the message is still durably queued even when the pane cannot be checked" \
+    || bad "the message was lost, not just left unnudged" "$(cat "$INBOX_BOX" 2>&1)"
+else
+  bad "setup: harness/claude.sh unreadable in a throwaway copy of the tree" \
+    "could not prepare $SOURCE_LESS -- treating as a failure, not a skip"
+fi
+chmod 644 "$SOURCE_LESS/supervisor/harness/claude.sh" 2>/dev/null
+rm -rf "$SOURCE_LESS"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
