@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": ".claude/hooks/protect-shared-checkout.sh"
+            "command": ".claude/protect-shared-checkout.sh"
           }
         ]
       }
