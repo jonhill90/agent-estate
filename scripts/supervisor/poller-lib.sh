@@ -58,6 +58,51 @@ poller_is_verified_fixture() { # poller_is_verified_fixture <cmd>
   [ -n "$marker" ] && [ -f "$marker" ]
 }
 
+# poller_verify_executing <pid> -- agent-supervisor#387: an independent
+# confirmation that <pid> is ACTUALLY RUNNING inbox-poll.sh as its executed
+# program, not merely carrying the string somewhere on its command line.
+# poller_process_rows/POLLER_SERVICE_RE and poller_script_token both work by
+# scanning the SAME `ps -o command=` text for a token that looks like
+# inbox-poll.sh -- a candidate list built that way and a "confirmation" built
+# the same way share one blind spot: `sleep 300 scripts/supervisor/inbox-poll.sh`
+# or `vim scripts/supervisor/inbox-poll.sh` both carry a token matching
+# */inbox-poll.sh without ever executing it. This function answers a
+# different question, from a different field: `ps -o comm=` names what the
+# kernel actually exec'd, never argv. That resolves to a shell interpreter
+# for a script run via a shebang (e.g. /bin/bash), so it is not enough on its
+# own -- when comm names an interpreter, the check requires inbox-poll.sh to
+# be that interpreter's own script argument (the first non-flag positional
+# token), never "anywhere in the line". A pid whose comm is `sleep` or `vim`
+# fails outright: those are never interpreters, so no positional check even
+# runs.
+poller_verify_executing() {
+  local pid="$1" comm args tok saw_positional
+  comm=$(ps -o comm= -p "$pid" 2>/dev/null)
+  [ -n "$comm" ] || return 1
+  case "$comm" in
+    */inbox-poll.sh|inbox-poll.sh) return 0 ;;
+  esac
+  case "$comm" in
+    */bash|bash|*/sh|sh|*/dash|dash|*/zsh|zsh|*/ksh|ksh) ;;
+    *) return 1 ;;
+  esac
+  args=$(ps -o args= -p "$pid" 2>/dev/null)
+  [ -n "$args" ] || return 1
+  saw_positional=0
+  for tok in $args; do
+    if [ "$saw_positional" -eq 0 ]; then
+      saw_positional=1  # skip argv[0], the interpreter invocation itself
+      continue
+    fi
+    case "$tok" in
+      -*) continue ;;  # an interpreter flag (e.g. -x, -c), not the script
+      */inbox-poll.sh|inbox-poll.sh) return 0 ;;
+      *) return 1 ;;   # first positional token is some other script/arg
+    esac
+  done
+  return 1
+}
+
 # poller_process_rows -- one row per LIVE process whose command line matches
 # POLLER_SERVICE_RE, after excluding a poller's own same-pgid child (the one
 # legitimate child every poller forks -- see watchdog.sh's #147 comment for

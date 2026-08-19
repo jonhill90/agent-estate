@@ -152,10 +152,23 @@ fi
 worst=0
 while IFS=$'\t' read -r pid cmd; do
   [ -n "$pid" ] || continue
-  # The sandbox proof reap_pid_verified requires is this exact process's own
-  # inbox-poll.sh path, taken from what THIS run just observed it running --
-  # never a guessed or shared substring, so a pid reused by an unrelated
-  # process between measurement and reap is refused, not killed.
+  # agent-supervisor#387: candidacy above was decided by a substring match on
+  # this same $cmd text (poller_process_rows/POLLER_SERVICE_RE). Re-deriving
+  # the "sandbox" from that same text and checking it against that same text
+  # again (reap_pid_verified's own check, below) shares that one blind spot --
+  # a process that merely carries "inbox-poll.sh" as an argument (`sleep 300
+  # scripts/supervisor/inbox-poll.sh`, a shellcheck/vim/grep invocation) would
+  # trivially satisfy both. poller_verify_executing answers from an
+  # INDEPENDENT field -- `ps -o comm=`, what the kernel actually exec'd, plus
+  # positional argv for the shebang-interpreter case -- never "does the
+  # string appear anywhere on the line". Only a pid confirmed this way is
+  # even offered to reap_pid_verified, whose own substring check then runs as
+  # a second, belt-and-suspenders gate, not the only one.
+  if ! poller_verify_executing "$pid"; then
+    echo "reap: REFUSING to signal $pid -- not confirmed to be actually running inbox-poll.sh (ps -o comm= and its positional script argument disagree with the candidate match); command was '$cmd'" >&2
+    worst=1
+    continue
+  fi
   sandbox=$(poller_script_token "$cmd")
   if [ -z "$sandbox" ]; then
     echo "reap: REFUSING to signal $pid -- could not re-derive its inbox-poll.sh path from '$cmd'" >&2

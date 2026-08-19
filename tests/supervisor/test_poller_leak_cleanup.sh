@@ -351,5 +351,62 @@ fi
 reap_pid_verified "$attempt1_pid" "$LIVE382" 5 >/dev/null 2>&1
 reap_pid_verified "$leak_pid" "$LEAKDIR" 3 >/dev/null 2>&1  # belt-and-suspenders if 3c's own reap failed
 
+# 3d. agent-supervisor#387: an independent review DEMONSTRATED that
+# reap_pid_verified's only safety check ("does the pid's command line
+# contain the sandbox substring") was trivially satisfied by the very
+# substring match that put a pid on the candidate list in the first place --
+# it killed pid 33757, a real process that merely carried inbox-poll.sh's
+# path as a trailing ARGUMENT and never executed it. Reproduced here the same
+# way: a process that references the path without running it must now be
+# EXCLUDED, and a genuinely leaked poller sitting right next to it in the
+# same pgrep-stub output must still be REAPED -- both assertions required,
+# because a reaper that reaps nothing is not a fix either.
+D387="$RT/fix387"
+mkdir -p "$D387"
+STATE387=$(mktemp -d "$RT/state-387.XXXXXX")
+
+# a process that carries inbox-poll.sh's path as an ARGUMENT it never runs --
+# python3's own interpreter is what's actually executing, not inbox-poll.sh.
+python3 -c "import time; time.sleep(60)" "$SUP/inbox-poll.sh" >/dev/null 2>&1 &
+referencing_pid=$!
+
+# a genuinely leaked poller: inbox-poll.sh really is what got exec'd.
+LEAKDIR387=$(mktemp -d "$RT/leaked-387.XXXXXX")
+cat >"$LEAKDIR387/inbox-poll.sh" <<'EOF'
+#!/bin/bash
+trap 'exit 0' TERM
+while :; do sleep 0.1; done
+EOF
+chmod +x "$LEAKDIR387/inbox-poll.sh"
+"$LEAKDIR387/inbox-poll.sh" & real_leak_pid=$!
+sleep 0.3
+
+STUBBIN387=$(mktemp -d "$RT/stub-bin-387.XXXXXX")
+cat >"$STUBBIN387/pgrep" <<STUBPGREP387
+#!/bin/bash
+# test-only: scoped to agent-supervisor#387's own spawned pids, never the
+# real machine's inbox-poll.sh population.
+printf '%s\n' "$referencing_pid" "$real_leak_pid"
+STUBPGREP387
+chmod +x "$STUBBIN387/pgrep"
+
+fix387_out=$(PATH="$STUBBIN387:$PATH" SUPERVISOR_STATE="$STATE387" bash "$SUP/poller-leak-cleanup.sh" --reap --grace 2 2>&1)
+deadline=$((SECONDS + 5))
+while kill -0 "$real_leak_pid" 2>/dev/null && [ "$SECONDS" -lt "$deadline" ]; do sleep 0.2; done
+
+referencing_excluded=0
+kill -0 "$referencing_pid" 2>/dev/null && grep -q "REFUSING to signal $referencing_pid" <<<"$fix387_out" && referencing_excluded=1
+real_leak_reaped=0; kill -0 "$real_leak_pid" 2>/dev/null || real_leak_reaped=1
+
+if [ "$referencing_excluded" -eq 1 ] && [ "$real_leak_reaped" -eq 1 ]; then
+  say_ok "poller-leak-cleanup.sh --reap: a process merely referencing inbox-poll.sh's path is excluded, a genuinely leaked poller is still reaped (agent-supervisor#387)"
+else
+  say_bad "poller-leak-cleanup.sh --reap: a process merely referencing inbox-poll.sh's path is excluded, a genuinely leaked poller is still reaped (agent-supervisor#387)" \
+    "referencing_excluded=$referencing_excluded(want 1) real_leak_reaped=$real_leak_reaped(want 1) out=$fix387_out"
+fi
+
+kill -KILL "$referencing_pid" 2>/dev/null
+reap_pid_verified "$real_leak_pid" "$LEAKDIR387" 3 >/dev/null 2>&1  # belt-and-suspenders if 3d's own reap failed
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
