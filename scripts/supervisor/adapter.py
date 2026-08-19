@@ -242,7 +242,17 @@ class TmuxAdapter:
                 "Hill90 supervisor events:\n- "
                 + "\n- ".join(event_lines)
                 + "\nRead only these event artifacts, verify evidence, continue bounded work, then acknowledge with: "
-                + "hill90-supervisor ack --event "
+                # agent-supervisor#362, found by the independent review of
+                # #381: the FOURTH live call site of the missing shim, and the
+                # one that matters most here. `ACPAdapter`, `PiRPCAdapter` and
+                # `ClaudePrintAdapter` all short-circuit `notify_supervisor`
+                # to `return False` (SPEC §15.2 -- only tmux-hosted lanes
+                # carry the standing supervisor lane), so THIS is the only
+                # implementation that ever sends the prompt for real. `ack` is
+                # a real cli.py subcommand, so this is live code, not a stale
+                # doc string: every notified lane was being told to run a
+                # binary that is not on PATH, exactly as accept/complete were.
+                + f"python3 {SUPERVISOR_CLI} ack --event "
                 + " --event ".join(keys)
             )
             self.transport.send_literal(record["pane_id"], prompt)
