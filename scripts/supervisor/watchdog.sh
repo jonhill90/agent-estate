@@ -53,6 +53,8 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/session-defaults.sh"
 # shellcheck source=./send.sh
 . "$HERE/send.sh"
+# shellcheck source=./poller-lib.sh
+. "$HERE/poller-lib.sh"
 # Overridable so the script is testable and so a second lane can reuse it.
 PANE="${SUPERVISOR_PANE:-$(lanes_session_or_default):1.1}"
 # Runtime state (logs, status, briefs) stays outside the repo; the CODE
@@ -250,7 +252,7 @@ WEEKLY_WATCH_HEARTBEAT_STALE_AFTER="${WEEKLY_WATCH_HEARTBEAT_STALE_AFTER:-3600}"
 # failed 37 consecutive times while nothing durable recorded either number.
 POLLER_RECOVERY_LAST_SUCCESS="${SUPERVISOR_POLLER_RECOVERY_LAST_SUCCESS:-$STATE/.poller-recovery-last-success}"
 POLLER_RECOVERY_FAIL_STREAK="${SUPERVISOR_POLLER_RECOVERY_FAIL_STREAK:-$STATE/.poller-recovery-fail-streak}"
-POLLER_SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
+# POLLER_SERVICE_RE is defined by poller-lib.sh (sourced above).
 # agent-supervisor#112: which never-busy lane names were last notified about,
 # so a lane that is STILL stuck on the next tick does not re-page -- the same
 # episode discipline watchdog_notify.py's escalate/heartbeat modes already
@@ -928,65 +930,18 @@ check_director_inbox() {
 # reason to ever have, accidentally or otherwise. No marker, no exclusion:
 # per the ratchet direction (#124/#126), an unresolved "is this harmless?"
 # makes the alert fire, never stays quiet.
-poller_fixture_marker() { # poller_fixture_marker <cmd> -- prints the marker
-  # path a genuine watchdog test fixture at this script path would carry, or
-  # nothing if none of <cmd>'s whitespace-separated tokens is an
-  # inbox-poll.sh path (a wrapper like "/bin/bash <path> --flag" still has
-  # the script path as its own token, not necessarily the last one).
-  local cmd="$1" tok dir
-  for tok in $cmd; do
-    case "$tok" in
-      */inbox-poll.sh)
-        dir="${tok%/inbox-poll.sh}"
-        printf '%s/.watchdog-test-fixture' "$dir"
-        return 0
-        ;;
-    esac
-  done
-}
-
-poller_is_verified_fixture() { # poller_is_verified_fixture <cmd>
-  local marker
-  marker=$(poller_fixture_marker "$1")
-  [ -n "$marker" ] && [ -f "$marker" ]
-}
-
-poller_process_rows() {
-  command -v pgrep >/dev/null 2>&1 || return 2
-  command -v ps >/dev/null 2>&1 || return 2
-  local pid cmd start ppid pgid records line parent_pid parent_ppid parent_pgid parent_start skip
-  while IFS= read -r pid; do
-    [ -n "$pid" ] || continue
-    cmd=$(ps -o command= -p "$pid" 2>/dev/null) || continue
-    [[ "$cmd" =~ $POLLER_SERVICE_RE ]] || continue
-    ppid=$(ps -o ppid= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//') || ppid=""
-    pgid=$(ps -o pgid= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//') || pgid=""
-    start=$(ps -o lstart= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    [ -n "$start" ] || start=$(ps -o start= -p "$pid" 2>/dev/null | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-    records="${records:-}${pid}	${ppid:-unknown}	${pgid:-unknown}	${start:-unknown}	${cmd}
-"
-  done < <(pgrep -f inbox-poll.sh 2>/dev/null || true)
-  while IFS=$'\t' read -r pid ppid pgid start cmd; do
-    [ -n "$pid" ] || continue
-    skip=0
-    while IFS=$'\t' read -r parent_pid parent_ppid parent_pgid parent_start; do
-      [ -n "$parent_pid" ] || continue
-      if [ "$ppid" = "$parent_pid" ] && [ "$pgid" != "unknown" ] && [ "$pgid" = "$parent_pgid" ]; then
-        skip=1
-        break
-      fi
-    done <<<"${records:-}"
-    [ "$skip" -eq 1 ] && continue
-    poller_is_verified_fixture "$cmd" && continue
-    printf '%s\t%s\n' "$pid" "${start:-unknown}"
-  done <<<"${records:-}"
-  return 0
-}
-
+#
+# agent-supervisor#382: poller_fixture_marker/poller_is_verified_fixture/
+# poller_process_rows moved to poller-lib.sh (sourced above) so
+# poller-leak-cleanup.sh enumerates the exact same population this alarm
+# does, instead of a second hand-rolled `pgrep -f inbox-poll.sh` that could
+# silently drift from it. This function filters poller_process_rows' fixture
+# column itself -- the ONLY thing that changed is where the rows come from.
 check_poller_process_count() {
-  local rows rows_rc count detail line pid start
-  rows=$(poller_process_rows)
+  local all_rows rows rows_rc count detail pid start fixture cmd
+  all_rows=$(poller_process_rows)
   rows_rc=$?
+  rows=$(awk -F'\t' '$3=="0"' <<<"$all_rows")
   if [ "$rows_rc" -ne 0 ]; then
     log "POLLER-CHECK FAILED rc=$rows_rc: could not measure live inbox-poll.sh processes from pgrep/ps"
     poller_note "unknown — could not measure live inbox-poll.sh processes from pgrep/ps"
@@ -1003,7 +958,7 @@ check_poller_process_count() {
   fi
 
   detail="${count} live inbox-poll.sh processes by pid"
-  while IFS=$'\t' read -r pid start; do
+  while IFS=$'\t' read -r pid start fixture cmd; do
     [ -n "$pid" ] || continue
     detail="$detail; pid $pid started ${start:-unknown}"
   done <<<"$rows"

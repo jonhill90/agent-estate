@@ -109,7 +109,8 @@ mkdir -p "$SRC/scripts/supervisor"
 # relaunch-waiter path is about, and #163's new fail-streak escalation
 # started paging on it, which is what actually broke "pages nobody" below.
 for f in watchdog.sh advance-live.sh poller-window.sh poller-recover.sh session-defaults.sh \
-         sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh lanes.sh input-box.sh; do
+         sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh lanes.sh input-box.sh \
+         poller-lib.sh; do
   cp "$SUP/$f" "$SRC/scripts/supervisor/"
 done
 cp -R "$SUP/harness" "$SRC/scripts/supervisor/"
