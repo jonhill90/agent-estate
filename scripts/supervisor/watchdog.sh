@@ -353,6 +353,57 @@ LANE_SWEEP_INTERVAL="${SUPERVISOR_LANE_SWEEP_INTERVAL:-120}"
 # tool calls" (lane-done.sh's own header names this exact danger, #102).
 LANE_SWEEP_IDLE_AFTER="${SUPERVISOR_LANE_SWEEP_IDLE_AFTER:-300}"
 
+# agent-supervisor#199/#205: worktree-guard-audit.sh (this repo) existed with
+# nothing calling it -- the PR that shipped it was blocked on exactly that:
+# "a tool that fails closed and that nothing calls is a documentation rule
+# with a binary attached" (CLAUDE.md). CI was rejected as the home because
+# the leak this guards against is a LIVE-WORKTREE phenomenon on this machine,
+# not a repo-state one -- a stale worktree that CI never sees is precisely
+# what leaked in #199. This watchdog already runs unattended against the
+# live estate every ${TICK_INTERVAL}s outside the loop (this file's own
+# header), the same reason #112's never-busy check and #133's source-task
+# sweep both live here rather than as bespoke cron entries -- one unattended
+# entry point with PATH/credential/staleness handling already solved, not a
+# second one built from scratch. Read-only, git-plumbing-only (see that
+# script's own header) -- safe to run from here.
+#
+# Throttled like the other sweeps above: 2669 file@worktree pairs measured
+# against the live estate (#205's PR body) is cheap but not free, and a gap
+# does not appear or vanish between one 180s tick and the next -- a worktree
+# only ADVANCES past the guard's commit when something fetches and rebases
+# it, which happens on the order of dispatches, not seconds. Default matches
+# neither sweep exactly: cheaper than the hourly GitHub-bound source sweep
+# (no external API call here), but coarser than the 120s lane sweep (this one
+# walks every worktree's git objects, the lane sweep reads a handful of tmux
+# panes).
+GUARD_AUDIT_STAMP="${SUPERVISOR_GUARD_AUDIT_STAMP:-$STATE/.worktree-guard-audit-last}"
+GUARD_AUDIT_INTERVAL="${SUPERVISOR_GUARD_AUDIT_INTERVAL:-1800}"
+# Dedup key for paging: the actual set of GAP lines the audit reported, not a
+# boolean -- same discipline #112's NEVER_BUSY_EPISODE uses, so a DIFFERENT
+# gap appearing while an earlier one is still open still pages, and the same
+# unchanged gap does not re-page every 30 minutes once a human has been told.
+GUARD_AUDIT_EPISODE="${SUPERVISOR_GUARD_AUDIT_EPISODE:-$STATE/.watchdog-guard-audit-episode}"
+# The check ITSELF failing to run (script missing/not executable, git
+# unreadable) is a different fact from it running and finding gaps -- #163's
+# lesson, applied here the same way #112's NEVER_BUSY_CHECK_FAIL_STREAK
+# already applies it: a safety check that cannot run is itself an alarm
+# condition, escalated every Nth consecutive failure so it cannot go quiet
+# forever after one page.
+GUARD_AUDIT_FAIL_STREAK="${SUPERVISOR_GUARD_AUDIT_FAIL_STREAK:-$STATE/.watchdog-guard-audit-fail-streak}"
+GUARD_AUDIT_FAIL_ESCALATE_AFTER="${SUPERVISOR_GUARD_AUDIT_FAIL_ESCALATE_AFTER:-3}"
+# agent-supervisor#205 review (skills:2): the call into worktree-guard-audit.sh
+# below had no bound at all -- #267's shape, and the exact thing f810a64/#276
+# was written to catch a day before this PR's CI ran. worktree-guard-audit.sh
+# itself now bounds each individual `git show`, but this is the outer,
+# whole-invocation backstop: it must never depend on that inner bound being
+# bug-free, because this call runs on EVERY exit path, ahead of
+# advance_on_exit (this file's own comment on check_worktree_guard_audit
+# below), and a hang here would silently wedge the one thing that must not
+# depend on which check fired this tick. 120s default: ~58s measured for the
+# real worktree farm (#205's PR body) plus headroom, well under
+# GUARD_AUDIT_INTERVAL's 1800s cadence.
+GUARD_AUDIT_TIMEOUT="${SUPERVISOR_GUARD_AUDIT_TIMEOUT:-120}"
+
 # Credentials + NOTIFY_SCRIPT for the escalate path. Sourced here so the
 # LaunchAgent needs no secrets inlined in its plist.
 ENVFILE="${NOTIFY_ENV:-$STATE/notify.env}"
@@ -720,6 +771,19 @@ never_busy_note() {              # never_busy_note <line>
   local tmp="$STATUS.neverbusy.$$"
   [ -f "$STATUS" ] || return 0
   { grep -v '^never-busy:' "$STATUS"; printf 'never-busy: %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# Same tmp+rename append shape again, for agent-supervisor#199/#205's
+# continuous worktree-guard-audit wiring. Written whether the check ran clean,
+# found a gap, or could not run at all -- `cat watchdog.status` is where a
+# human looks first, the same posture every other note function here takes.
+guard_audit_note() {             # guard_audit_note <line>
+  local tmp="$STATUS.guardaudit.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^guard-audit:' "$STATUS"; printf 'guard-audit: %s\n' "$1"; } >"$tmp" 2>/dev/null
   if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
   rm -f "$tmp" 2>/dev/null
   return 0
@@ -1347,6 +1411,192 @@ print("\n".join(sorted(r.get("name", "") for r in rows if r.get("state") == "nev
   return 0
 }
 
+# agent-supervisor#199/#205: the check ITSELF being unable to run (script
+# missing/not executable, this worktree's toplevel unreadable) is a different
+# fact from it running and reporting gaps -- see GUARD_AUDIT_FAIL_STREAK's
+# definition above for why this mirrors never_busy_check_failed rather than
+# just logging.
+guard_audit_check_failed() {
+  local reason="$1" streak=0 notify_script notify_out notify_rc
+  [ -r "$GUARD_AUDIT_FAIL_STREAK" ] && streak=$(cat "$GUARD_AUDIT_FAIL_STREAK" 2>/dev/null)
+  [[ "$streak" =~ ^[0-9]+$ ]] || streak=0
+  streak=$((streak + 1))
+  printf '%s' "$streak" >"$GUARD_AUDIT_FAIL_STREAK" 2>/dev/null
+  log "GUARD-AUDIT-CHECK FAILED (streak ${streak}): $reason"
+  guard_audit_note "unknown — $reason (failed ${streak} check(s) in a row)"
+  if [ $(( streak % GUARD_AUDIT_FAIL_ESCALATE_AFTER )) -ne 0 ]; then
+    return 0
+  fi
+  notify_script="${NOTIFY_SCRIPT:-}"
+  if [ -z "$notify_script" ] || [ ! -x "$notify_script" ]; then
+    notify_script="$HERE/notify.sh"
+  fi
+  if [ ! -x "$notify_script" ]; then
+    log "GUARD-AUDIT-CHECK-ESCALATE-UNAVAILABLE: no notifier at $notify_script"
+    return 0
+  fi
+  notify_out=$(AGENT_NOTIFY_CALLER=supervisor "$notify_script" \
+    "worktree-guard-audit safety check has failed ${streak} times in a row" \
+    "agent-supervisor#199/#205: the continuous worktree-guard-audit.sh check cannot run: ${reason}. This has failed ${streak} consecutive ticks — a stale, unguarded worktree could be leaking tmux sessions with nothing watching for it." 2>&1)
+  notify_rc=$?
+  if [ "$notify_rc" -ne 0 ]; then
+    log "GUARD-AUDIT-CHECK-ESCALATE-FAILED rc=$notify_rc: $notify_out"
+  else
+    log "GUARD-AUDIT-CHECK-ESCALATE: $notify_out"
+  fi
+  return 0
+}
+
+# agent-supervisor#199/#205: runs on EVERY exit path, same reasoning as
+# check_source_task_sweep/check_lane_completion_sweep above -- a stale
+# unguarded worktree does not care which branch of this script's own
+# busy/idle/asleep logic short-circuited this tick. Self-throttled against
+# GUARD_AUDIT_STAMP (see that var's own comment for the cadence reasoning);
+# most ticks return in the first branch below having done nothing.
+#
+# This is the caller #205's review demanded: worktree-guard-audit.sh is
+# read-only against every worktree's PINNED commit (git show only, see that
+# script's own header) -- nothing here mutates a worktree, kills a session,
+# or touches tmux at all.
+check_worktree_guard_audit() {
+  local last=0
+  if [ -r "$GUARD_AUDIT_STAMP" ]; then
+    last=$(cat "$GUARD_AUDIT_STAMP" 2>/dev/null)
+  fi
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  if [ $(( now - last )) -lt "$GUARD_AUDIT_INTERVAL" ]; then
+    return 0
+  fi
+  # Stamped whether the run below succeeds or not, same reasoning the source
+  # and lane sweeps give: retrying every 180s instead of waiting out the
+  # interval buys nothing, since a worktree does not un-advance between ticks.
+  printf '%s' "$now" >"$GUARD_AUDIT_STAMP" 2>/dev/null
+
+  if [ ! -e "$HERE/worktree-guard-audit.sh" ]; then
+    guard_audit_check_failed "worktree-guard-audit.sh is missing beside this watchdog; reinstall or advance the live worktree"
+    return 0
+  fi
+  if [ ! -x "$HERE/worktree-guard-audit.sh" ]; then
+    guard_audit_check_failed "worktree-guard-audit.sh exists but is not executable; run chmod +x $HERE/worktree-guard-audit.sh or restore the committed 100755 mode"
+    return 0
+  fi
+  # SUPERVISOR_GUARD_AUDIT_REPO overrides which repository's worktree list is
+  # audited -- same override shape as SUPERVISOR_STATE/SUPERVISOR_REPOS above.
+  # A test needs this: proving the WIRING means running the real
+  # worktree-guard-audit.sh through the real watchdog.sh (not a stub), but
+  # pointed at a disposable throwaway repo with a deliberately unguarded
+  # worktree, never at the real farm this machine happens to have checked out.
+  local root
+  root="${SUPERVISOR_GUARD_AUDIT_REPO:-$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null)}"
+  if [ -z "$root" ]; then
+    guard_audit_check_failed "cannot resolve this repository's toplevel to audit its worktree list"
+    return 0
+  fi
+
+  # agent-supervisor#205 review (skills:2): bounded the same way
+  # advance-live.sh#51 bounds its `git fetch` -- background + a `kill -0`
+  # poll loop, not a `timeout`/`gtimeout` wrapper, for the same reason that
+  # file's own comment gives: SUPERVISOR_PATH pins a minimal PATH and this
+  # repo's own suite proves scripts under this watchdog run with only
+  # /usr/bin:/bin, which ships neither on macOS. A hang here is a fourth
+  # thing (unknown), not a clean result and not a gap -- it must never fall
+  # through to either.
+  local out out_file rc audit_pid waited timed_out
+  out_file=$(mktemp "${TMPDIR:-/tmp}/watchdog-guard-audit.XXXXXX") || {
+    guard_audit_check_failed "could not create a scratch file for worktree-guard-audit.sh's output"
+    return 0
+  }
+  "$HERE/worktree-guard-audit.sh" "$root" >"$out_file" 2>&1 &
+  audit_pid=$!
+  waited=0
+  timed_out=0
+  while kill -0 "$audit_pid" 2>/dev/null; do
+    if [ "$waited" -ge "$GUARD_AUDIT_TIMEOUT" ]; then
+      timed_out=1
+      kill -TERM "$audit_pid" 2>/dev/null
+      sleep 1
+      kill -KILL "$audit_pid" 2>/dev/null
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$audit_pid" 2>/dev/null
+  rc=$?
+  out=$(cat "$out_file" 2>/dev/null)
+  rm -f "$out_file"
+
+  if [ "$timed_out" -eq 1 ]; then
+    guard_audit_check_failed "worktree-guard-audit.sh did not finish within ${GUARD_AUDIT_TIMEOUT}s and was killed -- treating as unknown, not clean"
+    return 0
+  fi
+
+  # The script ran and answered -- clean or gaps, either way a real result,
+  # not a check failure, so the fail streak resets even when gaps were found.
+  printf '0' >"$GUARD_AUDIT_FAIL_STREAK" 2>/dev/null
+
+  local summary
+  summary=$(grep -m1 '^worktree-guard-audit:' <<<"$out")
+  [ -n "$summary" ] || summary="ran, rc=$rc, no summary line: $(printf '%s' "$out" | tr '\n' ' ')"
+
+  if [ "$rc" -eq 0 ]; then
+    log "GUARD-AUDIT: $summary"
+    guard_audit_note "$summary"
+    if [ -s "$GUARD_AUDIT_EPISODE" ]; then
+      log "GUARD-AUDIT-CLEAR: previously reported gap(s) are gone"
+      rm -f "$GUARD_AUDIT_EPISODE" 2>/dev/null
+    fi
+    return 0
+  fi
+
+  # Nonzero: the script's own contract is "exit nonzero iff gaps>0 or
+  # unknowns>0" (its own `[ "$gaps" -eq 0 ] && [ "$unknowns" -eq 0 ]` final
+  # line) -- treat any nonzero the same way, gaps and/or unknowns reported or
+  # not, rather than silently swallowing an unrecognised failure shape as if
+  # it were the clean case. UNKNOWN lines (a single `git show` that hit its
+  # own bound, #205 review) are included here on purpose: a per-file timeout
+  # is neither a gap nor clean, and must page the same as a gap rather than
+  # vanish because no GAP line happened to be present.
+  local gaps
+  gaps=$(grep -E '^(GAP|UNKNOWN)' <<<"$out")
+  log "GUARD-AUDIT-GAP: $summary"
+  guard_audit_note "GAP — $summary"
+
+  local prev
+  prev=""
+  [ -r "$GUARD_AUDIT_EPISODE" ] && prev=$(cat "$GUARD_AUDIT_EPISODE" 2>/dev/null)
+  if [ "$prev" = "$gaps" ]; then
+    log "GUARD-AUDIT-DEDUP: same gap(s) already paged this episode"
+    return 0
+  fi
+  printf '%s' "$gaps" >"$GUARD_AUDIT_EPISODE" 2>/dev/null
+
+  local notify_script notify_out notify_rc
+  notify_script="${NOTIFY_SCRIPT:-}"
+  if [ -z "$notify_script" ] || [ ! -x "$notify_script" ]; then
+    notify_script="$HERE/notify.sh"
+  fi
+  if [ ! -x "$notify_script" ]; then
+    log "GUARD-AUDIT-NOTIFY-UNAVAILABLE: no notifier at $notify_script"
+    guard_audit_note "GAP — $summary — FAILED to notify, no notifier at $notify_script"
+    return 0
+  fi
+  notify_out=$(AGENT_NOTIFY_CALLER=supervisor "$notify_script" \
+    "worktree-guard-audit found unguarded worktree(s)" \
+    "agent-supervisor#199/#205: $summary. $(printf '%s' "$gaps" | tr '\n' ' ' | sed 's/[[:space:]]*$//')" 2>&1)
+  notify_rc=$?
+  if [ "$notify_rc" -ne 0 ]; then
+    log "GUARD-AUDIT-NOTIFY-FAILED rc=$notify_rc: $notify_out"
+    # Same "failure must be visible locally" posture the escalate/never-busy
+    # paths take: a notifier that cannot deliver must not read as "a human
+    # was told" just because this check ran and found something.
+    guard_audit_note "GAP — $summary — FAILED to reach a human: $(printf '%s' "$notify_out" | tr '\n' ' ')"
+  else
+    log "GUARD-AUDIT-NOTIFY: $notify_out"
+  fi
+  return 0
+}
+
 # Runs on EVERY exit path. It must never change this tick's exit status and
 # must never abort it: a refused advance is a report, not a crash -- the tick
 # it rode out on had already succeeded, and failing it would turn "the code is
@@ -1455,6 +1705,7 @@ on_exit() {
   check_source_task_sweep
   check_lane_completion_sweep
   check_never_busy_lanes
+  check_worktree_guard_audit
   advance_on_exit "$rc"
   return $rc
 }

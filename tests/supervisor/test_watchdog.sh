@@ -8,6 +8,15 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHDOG="$HERE/../../scripts/supervisor/watchdog.sh"
 STUBS="$HERE/stubs"
+# agent-supervisor#199/#205: every case below hands watchdog.sh a fresh
+# SUPERVISOR_STATE, so check_worktree_guard_audit's own throttle (a stamp
+# file under that state dir) never has a prior run to find and would run the
+# real worktree-guard-audit.sh -- against whatever repo this worktree
+# happens to be checked out in -- on every single tick. That check has its
+# own dedicated test (test_watchdog_worktree_guard_audit.sh); this file is
+# about the rest of watchdog.sh's behaviour, so disable it here the same way
+# that test disables the checks it isn't about.
+export SUPERVISOR_GUARD_AUDIT_INTERVAL=99999999999
 pass=0; fail=0
 check() { # check <name> <expected-substring> <file>
   if grep -q "$2" "$3" 2>/dev/null; then echo "  ok   $1"; pass=$((pass+1));

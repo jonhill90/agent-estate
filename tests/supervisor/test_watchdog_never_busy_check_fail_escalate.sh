@@ -11,6 +11,15 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WATCHDOG="$HERE/../../scripts/supervisor/watchdog.sh"
+# agent-supervisor#199/#205: this file hands watchdog.sh a fresh
+# SUPERVISOR_STATE per case, so check_worktree_guard_audit's own throttle
+# (a stamp file under that state dir) never has a prior run to find and
+# would run the real worktree-guard-audit.sh -- against whatever repo this
+# worktree happens to be checked out in -- on every tick. That check has
+# its own dedicated test (test_watchdog_worktree_guard_audit.sh); this file
+# is about something else, so disable it here the same way that test
+# disables the checks it isn't about.
+export SUPERVISOR_GUARD_AUDIT_INTERVAL=99999999999
 STUBS="$HERE/stubs"
 pass=0; fail=0
 
