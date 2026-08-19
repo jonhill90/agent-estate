@@ -98,6 +98,128 @@ fi
 ERRORS=()
 note_error() { ERRORS+=("$1"); }
 
+# agent-supervisor#251: every `gh` call below used to run unbounded. Measured
+# live against this estate: `state.sh` (which calls this script) hung past
+# 120s inside one of these with zero output, even to stderr, and had to be
+# `kill -9`ed. This is the same shape #267 fixed for quota.sh's `codexbar`
+# calls -- `gh api`/`gh run list` are network round-trips against a rate-
+# limited API, and a hang here is not "slow", it stalls every caller that
+# shells out to this digest simultaneously.
+#
+# with_timeout SECONDS OUTFILE CMD... -- same self-contained `kill -0` poll
+# loop as quota.sh's (#267) and advance-live.sh's (#51) fetch bound, not a
+# `timeout`/`gtimeout` wrapper: the watchdog pins PATH deliberately
+# (SUPERVISOR_PATH) and this repo's own suite runs against a PATH of only
+# /usr/bin:/bin to prove that pin holds -- neither ships GNU coreutils on
+# macOS. Prints nothing; CMD's stdout lands in OUTFILE so the caller reads it
+# once the exit code is known, matching quota.sh's own convention exactly.
+# Returns 124 on timeout, else CMD's own exit status.
+#
+# agent-supervisor#251 (second fix pass): killing only `$pid` does not take
+# down anything CMD itself forked (e.g. verdict.py shelling out to `gh`/`git`
+# for #226's rebase-content check) -- a killed parent's already-running
+# children are reparented, not killed, and keep going to their own
+# completion. That is what left `test_digest.sh` unable to confirm its
+# process group dead after SIGTERM/SIGKILL. Fix: `set -m` (restored after)
+# so the backgrounded job gets its OWN process group instead of inheriting
+# this script's, then signal the negative pid -- a process-group signal
+# reaches CMD and everything it spawned, group leader included.
+#
+# agent-supervisor#251 (third fix pass -- this PR's own CI failure):
+# the poll interval itself, not any single hang, is what blew the 300s
+# budget. Measured directly: a standalone probe wrapping 17 calls to a
+# no-op `echo` through this exact function, with the poll `sleep` at a fixed
+# one second, took 17s wall-clock -- 1.0s per call, whether the wrapped
+# command takes 2ms or 2s, because the FIRST `kill -0` check races the fork
+# and almost always finds the child still alive, so the loop always paid at
+# least one full `sleep 1` before it could observe the child had exited.
+# `digest.sh`'s own PR loop makes four with_timeout-wrapped calls per PR
+# (gh_call run, gh_call mergeable, verdict_for, author_lane_for) against
+# `gh`/`verdict.py` calls that, once stubbed or answered from cache, return
+# in well under a second -- so this floor, not a genuine hang, is what
+# turned a 17-PR test fixture, exercised three-plus times in
+# `test_digest.sh`, into a run past 300s.
+#
+# A first attempt fixed this by racing a background "watchdog" subshell
+# against `wait "$pid"` instead of polling at all. Discarded: that shape
+# doubles the number of backgrounded jobs per call (target + watchdog), and
+# under this suite's real load -- run alongside several other lanes'
+# concurrent `test_digest.sh` runs on the same shared box, the environment
+# this estate actually runs in -- it reproduced sporadic empty `gh`/
+# `verdict.py` output for individual PRs in an otherwise-successful run,
+# not a hang. That is a job-control race, not a timing win worth the risk.
+# Kept instead: the exact same poll loop, proven correct across two prior
+# fix passes, with the poll interval alone cut from 1s to 0.05s (`sleep`
+# accepts fractional seconds on both this box's `/bin/sleep` and GNU
+# coreutils). `waited`/`secs` move to centiseconds so the comparison stays
+# integer-only. Same probe, same shape, this fix: 17 calls in 0.9s instead
+# of 17s -- the fixed-second floor is gone, timeout behavior is untouched.
+with_timeout() {
+  local secs="$1" outfile="$2"; shift 2
+  local prev_monitor=0
+  case $- in *m*) prev_monitor=1 ;; esac
+  set -m
+  "$@" >"$outfile" 2>/dev/null &
+  local pid=$!
+  [ "$prev_monitor" -eq 1 ] || set +m 2>/dev/null
+  local waited_cs=0 max_cs=$((secs * 100)) timed_out=0
+  while kill -0 "$pid" 2>/dev/null; do
+    if [ "$waited_cs" -ge "$max_cs" ]; then
+      timed_out=1
+      kill -TERM -- -"$pid" 2>/dev/null
+      sleep 1
+      kill -KILL -- -"$pid" 2>/dev/null
+      break
+    fi
+    sleep 0.05
+    waited_cs=$((waited_cs + 5))
+  done
+  wait "$pid" 2>/dev/null
+  local rc=$?
+  [ "$timed_out" -eq 1 ] && return 124
+  return "$rc"
+}
+GH_TIMEOUT_SECONDS="${DIGEST_GH_TIMEOUT_SECONDS:-20}"
+
+# `INBOX_BIN`, `LANES_BIN` and the ledger's `delivered-open` below are local
+# calls (no network round-trip) left unwrapped deliberately: no CI evidence
+# has ever shown one of these hang, and wrapping every one of them in a
+# background-job-plus-poll -- even a cheap one -- adds real overhead
+# multiplied across every call site. Measured live: doing exactly that to
+# `verdict-independence.sh`'s local calls (agent-supervisor#251's own
+# investigation) pushed this SAME suite's total wall-clock past the 300s
+# ceiling on GitHub's runner, turning a fixed hang into a new timeout. Bound
+# what is proven to hang (`gh` calls, `verdict.py get` -- see
+# verdict-independence.sh); measure before bounding the rest.
+
+# gh_call OUTVAR NOTE ARGS... -- runs `gh "${ARGS[@]}"` bounded by
+# GH_TIMEOUT_SECONDS, sets OUTVAR to its stdout (empty on any failure), and
+# returns 0 only when the call both finished in time and exited 0. A timeout
+# is note_error'd with NOTE plus "(timed out after Ns)" so it reads
+# differently from a plain API failure -- the two are not the same defect.
+gh_call() {
+  local __outvar="$1" note="$2"; shift 2
+  local outfile
+  outfile=$(mktemp "${TMPDIR:-/tmp}/digest-gh.XXXXXX") || { note_error "$note -- could not create a scratch file"; printf -v "$__outvar" '%s' ""; return 1; }
+  with_timeout "$GH_TIMEOUT_SECONDS" "$outfile" gh "$@"
+  local rc=$?
+  local out
+  out=$(cat "$outfile" 2>/dev/null)
+  rm -f "$outfile"
+  if [ "$rc" -eq 124 ]; then
+    note_error "$note (timed out after ${GH_TIMEOUT_SECONDS}s)"
+    printf -v "$__outvar" '%s' ""
+    return 1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    note_error "$note"
+    printf -v "$__outvar" '%s' ""
+    return 1
+  fi
+  printf -v "$__outvar" '%s' "$out"
+  return 0
+}
+
 # Splits only the LABEL prefix off a "label: value" status-file line, not
 # every colon in it -- a plain `awk -F': *'` field split truncates any value
 # containing its own colon. Reproduced live against watchdog.status:
@@ -436,10 +558,8 @@ fi
 # one, exactly the trade #144 asks for.
 PR_JSON="[]"
 for repo in $REPOS; do
-  list=$(gh api "repos/$OWNER/$repo/pulls?state=open&per_page=100" 2>/dev/null) || {
-    note_error "gh pr list failed for $OWNER/$repo -- its PRs are NOT in this digest"
-    continue
-  }
+  gh_call list "gh pr list failed for $OWNER/$repo -- its PRs are NOT in this digest" \
+    api "repos/$OWNER/$repo/pulls?state=open&per_page=100" || continue
   [ -z "$list" ] && list="[]"
   if ! jq -e . >/dev/null 2>&1 <<<"$list"; then
     note_error "gh pr list failed for $OWNER/$repo -- its PRs are NOT in this digest"
@@ -452,17 +572,15 @@ for repo in $REPOS; do
     branch=$(jq -r '.headRefName' <<<"$p")
     num=$(jq -r '.number' <<<"$p")
     head_oid=$(jq -r '.headRefOid' <<<"$p")
-    run=$(gh run list -R "$OWNER/$repo" --branch "$branch" --limit 1 \
-          --json headSha,conclusion 2>/dev/null) || {
-      note_error "gh run list failed for $OWNER/$repo#$num -- CI status omitted"
-      run="[]"
-    }
+    gh_call run "gh run list failed for $OWNER/$repo#$num -- CI status omitted" \
+      run list -R "$OWNER/$repo" --branch "$branch" --limit 1 --json headSha,conclusion || run="[]"
     [ -z "$run" ] && run="[]"
     r=$(jq -c '.[0] // {}' <<<"$run")
     # REST's `mergeable_state` is null until GitHub finishes computing it (a
     # known API lag right after a push) -- reads UNKNOWN then, same as any
     # other unresolved answer here, not a guessed CLEAN.
-    mergeable=$(gh api "repos/$OWNER/$repo/pulls/$num" 2>/dev/null) || mergeable=""
+    gh_call mergeable "gh pr view failed for $OWNER/$repo#$num -- merge_state omitted" \
+      api "repos/$OWNER/$repo/pulls/$num" || mergeable=""
     [ -z "$mergeable" ] && mergeable="{}"
     merge_state=$(jq -r '(.mergeable_state // "unknown") | ascii_upcase' <<<"$mergeable" 2>/dev/null)
     [ -z "$merge_state" ] && merge_state="UNKNOWN"
@@ -545,8 +663,8 @@ fi
 MERGED_JSON="[]"
 if [ -n "$SINCE" ]; then
   for repo in $REPOS; do
-    m=$(gh api "repos/$OWNER/$repo/pulls?state=closed&sort=updated&direction=desc&per_page=50" 2>/dev/null) || {
-      note_error "merged-list failed for $repo"; continue; }
+    gh_call m "merged-list failed for $repo" \
+      api "repos/$OWNER/$repo/pulls?state=closed&sort=updated&direction=desc&per_page=50" || continue
     if ! jq -e . >/dev/null 2>&1 <<<"${m:-[]}"; then
       note_error "merged-list failed for $repo"; continue
     fi

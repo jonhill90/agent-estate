@@ -55,6 +55,12 @@ lane_relation() {  # lane_relation <lane> <other> [lane-pane-id] -> same|differe
   # exactly the gap #332 closes for merge-pr.sh and digest.sh -- see
   # resolve_lane_relation() below, the one place this file now supplies a
   # pane id for those two callers.
+  #
+  # agent-supervisor#251: left unwrapped deliberately -- a single sqlite
+  # query with no evidence of ever hanging, and CI proved that bounding
+  # every local call here (not just the ones shown to hang) pushed
+  # test_digest.sh's wall-clock past its own 300s ceiling. See the
+  # `VERDICT_CALL_TIMEOUT_SECONDS` comment below for what IS bounded and why.
   local json rel lane_pane_id_args=()
   [ -z "${3:-}" ] || lane_pane_id_args=(--lane-pane-id "$3")
   json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" lane-relation --lane "$1" --other "$2" "${lane_pane_id_args[@]}" 2>/dev/null) || json=""
@@ -122,6 +128,113 @@ print((row or {}).get("pane_id") or "")
 ' "$HERE" "$STATE" "$1" 2>/dev/null
 }
 
+# agent-supervisor#251 (the same defect its own CI failure was measured
+# against, not a new one): `author_lane_for` below shelled out to `gh pr
+# view` with no bound at all -- the one call in this file with no timer on
+# it, even though every OTHER `gh` call this estate makes (digest.sh's
+# `gh_call`, quota.sh's `codexbar` guard, #267) already learned this lesson.
+# Reproduced live: `tests/supervisor/test_shell_suites.py`'s own harness sends
+# SIGTERM then SIGKILL to the WHOLE process group of a suite that hangs past
+# 300s, and still could not confirm the group dead -- a `gh` blocked on a
+# network round-trip is exactly the shape that produces. `with_timeout` here
+# is the same self-contained `kill -0` poll loop as digest.sh's (#251),
+# quota.sh's (#267) and advance-live.sh's (#51) -- not `timeout`/`gtimeout`,
+# because this file is sourced by both digest.sh and merge-pr.sh and neither
+# script may assume a GNU-coreutils PATH. Redefining the function here (both
+# digest.sh and this file now define it) is harmless -- the two bodies are
+# identical, and a caller that never sources digest.sh (merge-pr.sh) still
+# needs its own copy to be self-contained.
+# agent-supervisor#251 (second fix pass): the version of this function that
+# shipped in the first fix pass killed only the direct backgrounded pid --
+# `kill -TERM "$pid"` -- not any process THAT pid itself spawned (`verdict.py`
+# shelling out to `gh`/`git` for #226's rebase-content check). A killed
+# parent does not take its already-forked children down with it; they are
+# reparented and keep running to their own completion. Reproduced directly:
+# a `with_timeout`-wrapped call whose child backgrounds its own grandchild
+# left that grandchild alive and unkillable through `$pid` after the timeout
+# fired, which is the exact "SIGTERM escalated to SIGKILL, group still not
+# confirmed dead" shape `test_shell_suites.py`'s harness reported against
+# this suite. Fix: turn on job control (`set -m`) only around the
+# backgrounding line, so the child starts its OWN process group instead of
+# inheriting this script's, then signal the negative pid (`-"$pid"`) -- a
+# process-group signal reaches the child and everything it forked, group
+# leader included. `set -m` is restored to whatever it was before, so this
+# does not change job-control behaviour for the rest of the script.
+# agent-supervisor#251 (third fix pass -- see digest.sh's own copy of this
+# function for the full measurement): the prior `kill -0`-poll-loop shape
+# paid a fixed ~1s floor per with_timeout call regardless of how fast CMD
+# actually finished, because the first poll check races the fork and almost
+# always finds the child still alive. Four calls per PR x 17 PRs x 3+ full
+# passes in test_digest.sh is what blew the 300s budget, not a genuine hang.
+# A first attempt replaced the poll with a `wait "$pid"` raced against a
+# background watchdog subshell; discarded after it reproduced sporadic empty
+# `gh`/`verdict.py` output for individual PRs when run alongside other
+# lanes' concurrent test suites on this shared box -- a job-control race
+# from doubling the backgrounded jobs per call, not worth the timing win.
+# Kept instead: the same poll loop, unchanged in shape, with the interval
+# cut from a fixed 1s to 0.05s (`waited`/`secs` moved to centiseconds so the
+# comparison stays integer-only) -- the fixed-second floor is gone, nothing
+# about the wait/kill/timeout mechanics changed.
+if ! declare -F with_timeout >/dev/null 2>&1; then
+  with_timeout() {
+    local secs="$1" outfile="$2"; shift 2
+    local prev_monitor=0
+    case $- in *m*) prev_monitor=1 ;; esac
+    set -m
+    "$@" >"$outfile" 2>/dev/null &
+    local pid=$!
+    [ "$prev_monitor" -eq 1 ] || set +m 2>/dev/null
+    local waited_cs=0 max_cs=$((secs * 100)) timed_out=0
+    while kill -0 "$pid" 2>/dev/null; do
+      if [ "$waited_cs" -ge "$max_cs" ]; then
+        timed_out=1
+        kill -TERM -- -"$pid" 2>/dev/null
+        sleep 1
+        kill -KILL -- -"$pid" 2>/dev/null
+        break
+      fi
+      sleep 0.05
+      waited_cs=$((waited_cs + 5))
+    done
+    wait "$pid" 2>/dev/null
+    local rc=$?
+    [ "$timed_out" -eq 1 ] && return 124
+    return "$rc"
+  }
+fi
+AUTHOR_LANE_GH_TIMEOUT_SECONDS="${AUTHOR_LANE_GH_TIMEOUT_SECONDS:-20}"
+
+# `verdict.py get` is the other call on this path that measurably hung
+# (agent-supervisor#251's own CI: without a bound here, `test_digest.sh`'s
+# ledger-source tests hung past 300s even with `author_lane_for`'s `gh`
+# call already bounded above). Left the OTHER local calls in this file
+# (`cli.py lane-relation`, `author-issue-lane`, `task-lane`) unwrapped
+# deliberately: they are single sqlite queries with no evidence of ever
+# hanging, and wrapping every one of them in a background-job-plus-poll
+# (even a cheap one) adds real overhead multiplied across every PR this
+# script processes -- measured live, that overhead alone pushed this same
+# suite's total wall-clock past the 300s ceiling on GitHub's runner, turning
+# a fixed hang into a new timeout. Bound what is proven to hang; measure
+# before bounding the rest.
+#
+# `verdict.py get` is not one query, either -- a rebase-promotion case
+# (`_content_unchanged_since`, #226) chains several of ITS OWN `gh`/`git`
+# calls, each already bounded at 30s internally (verdict.py's own
+# `_subprocess_runner`). Sized well above any realistic chain of those
+# 30s-capped internal calls, still far under the 300s hard kill this whole
+# suite runs under.
+VERDICT_CALL_TIMEOUT_SECONDS="${VERDICT_CALL_TIMEOUT_SECONDS:-90}"
+run_bounded() {  # run_bounded SECONDS CMD... -> stdout on success; rc 124 on timeout
+  local secs="$1" outfile out rc; shift
+  outfile=$(mktemp "${TMPDIR:-/tmp}/vi-bounded.XXXXXX") || return 1
+  with_timeout "$secs" "$outfile" "$@"
+  rc=$?
+  out=$(cat "$outfile" 2>/dev/null)
+  rm -f "$outfile"
+  printf '%s' "$out"
+  return "$rc"
+}
+
 # `dispatch.sh`'s task ids are minted `<window-prefix><issue>-<slug>`, where
 # the window prefix is the repo name's initials (hyphen-joined words) or the
 # whole name for a one-word repo -- e.g. "agent-supervisor" -> "as",
@@ -152,8 +265,23 @@ repo_task_prefix() {
 # is a GraphQL-only concept; REST has no endpoint that answers it.
 author_lane_for() {
   local repo_full="$1" number="$2" pr_json head_ref candidates candidate issue_json
-  local prefix fallback_task fallback_json
-  if ! pr_json=$(gh pr view "$number" -R "$repo_full" --json headRefName,closingIssuesReferences,commits 2>/dev/null); then
+  local prefix fallback_task fallback_json outfile rc
+  outfile=$(mktemp "${TMPDIR:-/tmp}/author-lane-gh.XXXXXX") || {
+    jq -nc --arg detail "independence unknown -- PR author lane unresolved: could not create a scratch file" \
+      '{known:false, lane:null, task:null, detail:$detail}'
+    return
+  }
+  with_timeout "$AUTHOR_LANE_GH_TIMEOUT_SECONDS" "$outfile" \
+    gh pr view "$number" -R "$repo_full" --json headRefName,closingIssuesReferences,commits
+  rc=$?
+  pr_json=$(cat "$outfile" 2>/dev/null)
+  rm -f "$outfile"
+  if [ "$rc" -eq 124 ]; then
+    jq -nc --arg detail "independence unknown -- PR author lane unresolved: gh pr view timed out after ${AUTHOR_LANE_GH_TIMEOUT_SECONDS}s" \
+      '{known:false, lane:null, task:null, detail:$detail}'
+    return
+  fi
+  if [ "$rc" -ne 0 ] || [ -z "$pr_json" ]; then
     jq -nc --arg detail "independence unknown -- PR author lane unresolved: gh pr view failed" \
       '{known:false, lane:null, task:null, detail:$detail}'
     return
@@ -209,7 +337,13 @@ verdict_for() {
   if [ -n "${VERDICT_BIN:-}" ]; then
     out=$("$VERDICT_BIN" --repo "$repo_full" --number "$number" --head-sha "$head_sha" 2>/dev/null)
   else
-    out=$("$VERDICT_PYTHON" "$HERE/verdict.py" --state-dir "$STATE" \
+    # #251/#267/#205's own shape: verdict.py's individual `gh`/`git` calls
+    # already carry their own 30s subprocess.run timeouts (verdict.py's
+    # _subprocess_runner), but the PYTHON PROCESS ITSELF -- sqlite opens,
+    # the ledger's own lock file -- had no outer bound. A wedged lock is not
+    # a network hang, but it is still a hang, and #251's own brief asks for
+    # every shell-out on the path, not just the one already caught.
+    out=$(run_bounded "$VERDICT_CALL_TIMEOUT_SECONDS" "$VERDICT_PYTHON" "$HERE/verdict.py" --state-dir "$STATE" \
           get --repo "$repo_full" --number "$number" --source "$VERDICT_SOURCE" \
           --head-sha "$head_sha" 2>/dev/null)
   fi

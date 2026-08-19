@@ -1281,5 +1281,94 @@ else
   ok "mutation confirmed: disabling the age computation lets an hour-old 'current' replay through unmarked (19b would be red)"
 fi
 
+# agent-supervisor#251: `gh` calls in this file used to run with no timeout
+# guard at all. Reproduced live: `state.sh` (which calls this script) hung
+# past 120s inside this exact call, zero output even to stderr, requiring
+# `kill -9`. A short DIGEST_GH_TIMEOUT_SECONDS proves the bound is real --
+# a `gh` that sleeps far longer than the timeout must still let this script
+# return, with the failure named as a timeout (not a plain "failed", which
+# would read identically to a fast, ordinary API error).
+#
+# Scoped to `pr list` only (mirrors the author-lane stub below, which fails
+# fast -- `exit 1` -- on anything it does not recognize). A stub that sleeps
+# on EVERY invocation regardless of subcommand also caught digest.sh's later,
+# unrelated `acceptance.sh --limit 15` call (its own `gh issue list`, a
+# pre-existing and still-unbounded shell-out this PR never touched) in the
+# same 30s sleep, which is what made this case fail: the gh_call bound this
+# PR adds DID fire correctly at 2s (confirmed via `bash -x` trace), but the
+# suite's own overly-broad stub kept the process busy well past that on a
+# call this test was never trying to exercise.
+cat > "$D/bin/gh" <<'EOF'
+#!/bin/bash
+if [ "$1" = "api" ]; then
+  case "$2" in
+    *pulls?state=open*) sleep 30; echo '[]'; exit 0 ;;
+  esac
+fi
+exit 1
+EOF
+chmod +x "$D/bin/gh"
+start=$(date +%s)
+out=$(PATH="$D/bin:$PATH" SUPERVISOR_STATE="$D/state" LANES_SESSION=nosuch DIGEST_GH_TIMEOUT_SECONDS=2 \
+  DIGEST_REPOS=agent-supervisor timeout 20 bash "$DIGEST" 2>&1)
+elapsed=$(( $(date +%s) - start ))
+[ "$elapsed" -lt 15 ] && ok "a hanging gh does not hang digest.sh (returned in ${elapsed}s)" \
+  || bad "hanging gh bounded" "took ${elapsed}s, expected well under the 20s hard test timeout"
+grep -q "gh pr list failed for jonhill90/agent-supervisor.*timed out after 2s" <<<"$out" && \
+  ok "a hanging gh pr list is named as a timeout, not a plain failure" \
+  || bad "hanging gh named as timeout" "$out"
+
+# agent-supervisor#251 (this PR's own CI failure): `author_lane_for`'s `gh pr
+# view --json headRefName,closingIssuesReferences,commits` call ran with NO
+# bound at all -- the one `gh` call digest.sh's own PR loop makes that never
+# went through `gh_call`/`with_timeout`, because `author_lane_for` lives in
+# verdict-independence.sh and calls `gh` directly. Reproduced live:
+# tests/supervisor/test_shell_suites.py's own harness sent SIGTERM then
+# SIGKILL to this suite's whole process group after a 300s timeout and still
+# could not confirm the group dead -- a `gh` blocked forever is exactly that
+# shape. `pr list` and the mergeable/`run list` calls all answer fast here;
+# ONLY the author-lane lookup hangs, so this is the hang case specifically,
+# not a repeat of the gh-list case above.
+cat > "$D/bin/gh" <<'EOF'
+#!/bin/bash
+if [ "$1 $2" = "pr view" ]; then
+  fields=""; prev=""
+  for a in "$@"; do
+    [ "$prev" = "--json" ] && fields="$a"
+    prev="$a"
+  done
+  case "$fields" in
+    *closingIssuesReferences*) sleep 30; echo '{"headRefName":"","closingIssuesReferences":[],"commits":[]}'; exit 0 ;;
+    # A DECISIVE comment verdict (not "none") -- independence_verdict only
+    # ever consults author_lane_for's own detail on this branch (a
+    # lane-stamped comment/ledger verdict whose author lane turns out
+    # unresolved); the far more common "none" (never reviewed) case
+    # deliberately drops it (#184), so a never-reviewed fixture here would
+    # prove the bound without ever proving the timeout is NAMED.
+    *) echo '{"reviews":[],"comments":[{"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\n\nReview-Lane: t:9\nReviewed-SHA: sha1sha1sha1sha1sha1sha1sha1sha1sha1sha1","createdAt":"2026-08-16T00:00:00Z"}]}'; exit 0 ;;
+  esac
+fi
+if [ "$1" = "api" ]; then
+  case "$2" in
+    *pulls?state=open*) echo '[{"number":1,"title":"t","head":{"sha":"sha1sha1sha1sha1sha1sha1sha1sha1sha1sha1","ref":"b1"}}]' ;;
+    *pulls/1) echo '{"mergeable_state":"clean"}' ;;
+    *) echo '[]' ;;
+  esac
+  exit 0
+fi
+if [ "$1 $2" = "run list" ]; then echo '[]'; exit 0; fi
+exit 1
+EOF
+chmod +x "$D/bin/gh"
+start=$(date +%s)
+out=$(PATH="$D/bin:$PATH" SUPERVISOR_STATE="$D/state" LANES_SESSION=nosuch AUTHOR_LANE_GH_TIMEOUT_SECONDS=2 \
+  DIGEST_REPOS=agent-supervisor timeout 20 bash "$DIGEST" 2>&1)
+elapsed=$(( $(date +%s) - start ))
+[ "$elapsed" -lt 15 ] && ok "a hanging author-lane gh pr view does not hang digest.sh (returned in ${elapsed}s)" \
+  || bad "hanging author-lane gh bounded" "took ${elapsed}s, expected well under the 20s hard test timeout"
+grep -q "gh pr view timed out after 2s" <<<"$out" && \
+  ok "a hanging author-lane gh pr view is named as a timeout, not a plain failure" \
+  || bad "hanging author-lane gh named as timeout" "$out"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

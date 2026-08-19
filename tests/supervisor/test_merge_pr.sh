@@ -516,6 +516,62 @@ else
   bad "mutation confirmed: disabling the authorship gate lets the self-merge through" "got rc=$rc, merged=$([ -f "$MARKER" ] && echo yes || echo no): $out"
 fi
 
+# ============================================================================
+# agent-supervisor#251: `author_lane_for`'s `gh pr view` call (the
+# closingIssuesReferences/commits lookup) used to run with NO bound at all --
+# the one `gh` call in verdict-independence.sh that `digest.sh`'s own
+# `gh_call`/`with_timeout` guard never covered, because merge-pr.sh calls
+# `author_lane_for` directly. Reproduced live: `tests/supervisor/
+# test_shell_suites.py`'s own harness sent SIGTERM then SIGKILL to this
+# suite's whole process group after a 300s timeout and still could not
+# confirm the group dead -- a `gh` blocked forever is exactly that shape.
+# This is the hang case, not just the error case: a dependency that never
+# returns, not one that exits non-zero fast.
+# ============================================================================
+rm -f "$MARKER"
+cat > "$FIX/head_51.json" <<'S'
+{"headRefOid": "sha-23"}
+S
+green_checkruns sha-23
+cat > "$FIX/reviews_51.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:9\nReviewed-SHA: sha-23", "createdAt": "2026-08-16T00:00:00Z"}]}
+S
+register_tmux_lane t:9 %9
+
+HANGBIN="$D/hangbin"; mkdir -p "$HANGBIN"
+cat > "$HANGBIN/gh" <<FAKE
+#!/bin/bash
+set -uo pipefail
+if [ "\$1 \$2" = "pr view" ]; then
+  fields=""; prev=""
+  for a in "\$@"; do
+    [ "\$prev" = "--json" ] && fields="\$a"
+    prev="\$a"
+  done
+  case "\$fields" in
+    *closingIssuesReferences*)
+      sleep 30
+      echo '{"headRefName":"","closingIssuesReferences":[],"commits":[]}'
+      exit 0
+      ;;
+  esac
+fi
+exec "$BIN/gh" "\$@"
+FAKE
+chmod +x "$HANGBIN/gh"
+
+start=$(date +%s)
+out=$(PATH="$HANGBIN:$PATH" AUTHOR_LANE_GH_TIMEOUT_SECONDS=2 GH_FIX="$FIX" MARKER="$MARKER" \
+  SUPERVISOR_STATE="$STATE" timeout 60 "$MERGE_PR" "$REPO" 51 2>&1)
+rc=$?
+elapsed=$(( $(date +%s) - start ))
+[ "$elapsed" -lt 30 ] && ok "a hanging author-lane gh pr view does not hang merge-pr.sh (returned in ${elapsed}s)" \
+  || bad "hanging author-lane gh bounded" "took ${elapsed}s, rc=$rc: $out"
+grep -q "gh pr view timed out after 2s" <<<"$out" \
+  && ok "a hanging author-lane gh pr view is named as a timeout, not a plain failure" \
+  || bad "hanging author-lane gh named as timeout" "rc=$rc: $out"
+[ ! -f "$MARKER" ] && ok "a hung author lookup never merges" || bad "a hung author lookup never merges" "$out"
+
 rm -rf "$D"
 
 echo "  -> $pass ok, $fail failed"

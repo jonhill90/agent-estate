@@ -776,6 +776,54 @@ npx @modelcontextprotocol/inspector --cli python3 \
   scripts/supervisor/mcp_server.py --method tools/list
 ```
 
+## Capped state (agent-supervisor#248)
+
+`digest.sh` answers "what is the state of the estate" for a human reading a
+terminal. `state.sh` answers the same question for a prompt: a small,
+**hard-capped** document meant to be reinjected as *current truth* on every
+supervisor turn, replacing conversation-history replay rather than adding to
+it (`sfw/loom`'s `task_state.py` is the prior art this follows, capped at
+roughly 500–1500 tokens).
+
+```bash
+scripts/supervisor/state.sh          # human-readable, capped
+scripts/supervisor/state.sh --json   # the same facts, uncapped, for tooling
+```
+
+It is a projection, not a second implementation: `digest.sh --json` supplies
+every live measurement (watchdog/poller health, lane table, PR verdicts, the
+delivered-vs-pane reconciliation that already covers a #235-shaped stale
+row), `cli.py status` supplies which lane has which task open, and
+`loop-tick.md`'s own `## Boundaries` section is parsed for the standing
+constraints rather than copied by hand — editing that section changes
+`state.sh`'s output without touching the script.
+
+**The cap is enforced, not aspirational.** The token estimate (chars/4,
+named as the crude instrument it is) is always printed. When the full
+document would exceed `STATE_TOKEN_CAP` (default 1500), a fixed reduction
+ladder drops or summarises sections — trimming the dispatched/PR lists,
+then collapsing the constraints list to a pointer — never silently, and a
+row is never dropped for being *unknown*, only for not fitting after every
+reduction. If even the most reduced document still exceeds the cap, `state.sh`
+exits 2 and says `CAP EXCEEDED` rather than emit an over-budget document or
+widen the ceiling.
+
+`quota` reads `unknown` unconditionally — no usage/rate-limit tracker exists
+anywhere in this estate to report a real number from, and inventing one
+would be worse than saying so.
+
+**Every shell-out is bounded (agent-supervisor#251).** `state.sh`'s calls to
+`digest.sh --json` and `cli.py status`, and `digest.sh`'s own `gh api`/
+`gh run list` calls, all run through the same self-contained `kill -0` poll
+loop quota.sh (#267) and advance-live.sh (#51) use — not a `timeout`/
+`gtimeout` wrapper, since production PATH is pinned to `/usr/bin:/bin` and
+neither ships on macOS. A timeout degrades the same way any other read
+failure does: `gate: FAIL` with the reason named, never a hang. And every
+section that reads `[]`/empty on failure says so explicitly — `dispatched`
+and `constraints` read `unknown -- <reason>` rather than `none`/empty on a
+read failure, so an unreadable ledger or a missing `loop-tick.md` is never
+indistinguishable from a genuinely idle one.
+
 ## Verification
 
 ```bash
