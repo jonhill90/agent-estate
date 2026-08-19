@@ -964,7 +964,31 @@ def _is_supervisor_lane(lane_id, configured):
 
 
 def _verify_caller(adapter, ledger, lane):
+    """Confirm the process invoking `accept`/`complete` IS the lane it claims
+    to be, not merely that the lane it claims exists (agent-supervisor#362).
+
+    `adapter` must be the one `adapter_for_lane(lane)` returns, not a bare
+    `TmuxAdapter` -- `ClaudePrintAdapter._verified_lane` does not require a
+    tmux pane at all, while `TmuxAdapter._verified_lane` requires one, and
+    calling the wrong one raises for a transport it was never meant to judge.
+
+    The identity check below is verified BY WHAT THE LANE ACTUALLY HAS: a
+    tmux/send-keys lane has a pane, so it is checked against `TMUX_PANE`, the
+    same as before this fix (that path is unchanged). A claude-print lane has
+    no pane -- `ClaudePrintAdapter`'s own docstring says so -- so there is
+    nothing for `TMUX_PANE` to authenticate; what it does have is the
+    `session_id` its own `claude -p --session-id <id>` process was launched
+    with, which the harness publishes back to that same process as
+    `CLAUDE_CODE_SESSION_ID`. Checked the same way as the pane case: skipped
+    if unset (an operator running this by hand off-harness), refused if set
+    and it disagrees with the lane's recorded session.
+    """
     record = adapter._verified_lane(lane)
+    if record.get("transport") == "claude-print":
+        caller = os.environ.get("CLAUDE_CODE_SESSION_ID")
+        if caller and caller != record["session_id"]:
+            raise RuntimeError(f"caller session {caller} does not own lane {lane}")
+        return record
     caller = os.environ.get("TMUX_PANE")
     if caller and caller != record["pane_id"]:
         raise RuntimeError(f"caller pane {caller} does not own lane {lane}")
@@ -1251,13 +1275,13 @@ def main(argv=None):
         if task is None:
             raise ValueError("unknown task")
         lane = ledger.get_lane(task["lane"])
-        _verify_caller(adapter, ledger, task["lane"])
+        _verify_caller(adapter_for_lane(task["lane"]), ledger, task["lane"])
         value = ledger.accept(args.task, pane_nonce=lane["nonce"])
     elif args.command == "complete":
         task = ledger.get_task(args.task)
         if task is None:
             raise ValueError("unknown task")
-        _verify_caller(adapter, ledger, task["lane"])
+        _verify_caller(adapter_for_lane(task["lane"]), ledger, task["lane"])
         value = ledger.complete(args.task, args.result_file.read_bytes(), pane_nonce=task["pane_nonce"])
     elif args.command == "reconcile":
         # Deliberately not caller-verified and deliberately not the lane's
