@@ -96,7 +96,27 @@ HARNESS_RESUME_CMD='claude --dangerously-skip-permissions --resume %s'
 # is showing a prompt still classifies ahead of this. Anchored to
 # end-of-line, so a footer with `· ↓ to manage` trailing it fails this
 # alternative exactly as it fails the numeric one.
-HARNESS_READY_RE='^❯ [^←]*$|← [0-9]+ agents?$|← for agents$'
+# A FOURTH shape, found 2026-08-18: the footer with no agents suffix at all.
+#
+#   ⏵⏵ bypass permissions on (shift+tab to cycle)
+#
+# Measured on `agent-supervisor:1.1` while it was demonstrably NOT busy (no
+# `esc to interrupt`) and holding an empty input box. Every existing
+# alternative failed it, so the pane read `unknown` -- and `director-route.sh`,
+# whose `idle()` requires this regex to match before it will deliver anything,
+# could not deliver to the one pane it targets.
+#
+# STATE THE DESIGN PROBLEM PLAINLY, because this is the fourth time: #314 added
+# a shape, #324 added a shape, #350 fixed a stale private copy, and this adds a
+# fourth. An ALLOWLIST of exact footer strings is a promise to keep chasing
+# somebody else's UI forever, and each miss presents as "the estate is idle" or
+# "nothing can be delivered" rather than as a broken matcher. The durable
+# design is negative: a pane is idle when it is NOT busy and its input box is
+# empty -- both of which this file already determines independently, and
+# neither of which depends on the decorative suffix. Changing that is a real
+# change to the #126 evidence posture (absence of evidence must never earn a
+# send), so it is filed rather than smuggled in here.
+HARNESS_READY_RE='^❯ [^←]*$|← [0-9]+ agents?$|← for agents$|^[[:space:]]*⏵⏵ bypass permissions on \(shift\+tab to cycle\)$'
 
 # Busy -- last line only. Claude's elapsed-turn footer IS the last line
 # while a turn runs (`esc to interrupt`), unlike Codex, whose equivalent

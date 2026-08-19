@@ -142,11 +142,38 @@ fi
 # the other would silently split a target that is not actually split yet.
 PANE="${SUPERVISOR_PANE:-${SESSION}:1.1}"
 
+
 # Window-index form, for the plain (non-`-e`) status-line capture below --
 # `tmux capture-pane -t` accepts either `session:window` or
 # `session:window.pane`; the trailing `.pane` is kept for parity with
 # `watchdog.sh` but is not required for a read.
-READY_RE='^❯ [^←]*$|← 1 agent$'
+# THE IDLE MATCHER COMES FROM THE HARNESS, never from a private copy here.
+#
+# This line used to hardcode a singular-count agent-footer pattern, and that
+# made `idle()` return false on a genuinely idle pane, because Claude Code now
+# renders its footer as `← for agents` with no count. Measured against a real
+# idle lane rather than argued:
+#
+#   last line: `  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents`
+#   old READY_RE -> NO MATCH      (so idle() is false, always)
+#   fixed RE     -> MATCH
+#
+# `idle()` gates every delivery, so a matcher that never matches meant
+# director-route could NEVER deliver a message to the Director. Jon's replies
+# from Telegram queued behind it and the log filled with "flush -- pane not
+# idle, nothing sent" while the pane sat plainly idle. Two of his instructions
+# were found stranded in the input box, unread, hours old.
+#
+# This is the THIRD recurrence of one bug: #314 and #324 each fixed the footer
+# shape in `harness/claude.sh`, and this private copy was missed both times.
+# So it is not copied again -- it is sourced. A second copy of a value that
+# tracks someone else's UI will always drift; the only fix that holds is having
+# one.
+if [ -z "${HARNESS_READY_RE:-}" ] && [ -r "$HERE/harness/claude.sh" ]; then
+  # shellcheck disable=SC1091
+  . "$HERE/harness/claude.sh" 2>/dev/null || true
+fi
+READY_RE="${HARNESS_READY_RE:-^❯ [^←]*\$|← [0-9]+ agents?\$|← for agents}"
 
 notify_jon() {  # notify_jon <subject> <body>
   AGENT_NOTIFY_CALLER=supervisor "$HERE/notify.sh" "$1" "$2"
