@@ -1261,6 +1261,83 @@ fi
 rm -rf "$HANG_STUB"
 rm -rf "$D6"
 
+# --- agent-supervisor#367: live/ vanished (deleted out from under the ---
+# --- estate) and advance-live.sh could only refuse -- "not a git worktree" --
+# --- with no way to rebuild it. .live-rollback-sha already records where it
+# --- should be; SUPERVISOR_REPO names the shared checkout to recreate it
+# --- from (defaulting to ~/source/repos/Personal/agent-supervisor in the
+# --- real script, overridden here to the test fixture).
+D7=$(mktemp -d)
+git init -q --bare "$D7/origin.git"
+git clone -q "$D7/origin.git" "$D7/src" 2>/dev/null
+SRC7="$D7/src"
+git -C "$SRC7" config user.email test@example.com
+git -C "$SRC7" config user.name "Test"
+git -C "$SRC7" checkout -q -b main
+mkdir -p "$SRC7/scripts/supervisor"
+cat >"$SRC7/scripts/supervisor/watchdog.sh" <<'EOF'
+#!/bin/bash
+set -uo pipefail
+STATUS="${SUPERVISOR_STATUS:?}"
+mkdir -p "$(dirname "$STATUS")"
+printf 'checked:  %s\nstate:    pane_unreadable\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"$STATUS"
+exit 0
+EOF
+chmod +x "$SRC7/scripts/supervisor/watchdog.sh"
+git -C "$SRC7" add -A
+git -C "$SRC7" commit -q -m "base"
+git -C "$SRC7" push -q -u origin main
+recorded_sha=$(git -C "$SRC7" rev-parse HEAD)
+LIVE7="$D7/live"
+
+# --- live/ entirely gone, a rollback sha is recorded: recreate it there ---
+S7=$(mktemp -d)
+mkdir -p "$S7"
+printf '%s\n' "$recorded_sha" >"$S7/.live-rollback-sha"
+out=$(SUPERVISOR_STATE="$S7" SUPERVISOR_REPO="$SRC7" bash "$ADVANCE" "$LIVE7" 2>&1); rc=$?
+want_exit "missing live/ with a recorded rollback sha recreates it (exit 0)" "$rc" 0 "$out"
+if [ -d "$LIVE7" ] && git -C "$LIVE7" rev-parse --git-dir >/dev/null 2>&1; then
+  ok "recreated live/ is a real git worktree"
+else
+  bad "recreated live/ is a real git worktree" "$out"
+fi
+after7=$(git -C "$LIVE7" rev-parse HEAD 2>/dev/null)
+if [ "$after7" = "$recorded_sha" ]; then ok "recreated live/ is checked out at the recorded rollback sha"; else bad "recreated live/ is checked out at the recorded rollback sha" "at $after7, wanted $recorded_sha"; fi
+# Compared with realpath, not a raw string match: mktemp -d on macOS returns
+# a /var/... path that is itself a symlink to /private/var/..., and `git
+# worktree list` always reports the resolved form -- a plain string compare
+# against $LIVE7 fails on every run here for a reason that has nothing to do
+# with whether the worktree is actually registered.
+live7_real=$(cd "$LIVE7" 2>/dev/null && pwd -P)
+if [ -n "$live7_real" ] && git -C "$SRC7" worktree list --porcelain 2>/dev/null | grep -qx "worktree $live7_real"; then
+  ok "recreated live/ is registered in 'git worktree list'"
+else
+  bad "recreated live/ is registered in 'git worktree list'" "$(git -C "$SRC7" worktree list 2>&1)"
+fi
+if grep -qi "RECREATED" "$S7/advance-live.log" 2>/dev/null; then ok "the recreation is logged loudly"; else bad "the recreation is logged loudly" "$(cat "$S7/advance-live.log" 2>/dev/null)"; fi
+rm -rf "$LIVE7"
+git -C "$SRC7" worktree prune >/dev/null 2>&1
+
+# --- live/ gone, no rollback sha recorded anywhere: refuses, does not invent
+S7b=$(mktemp -d)
+out=$(SUPERVISOR_STATE="$S7b" SUPERVISOR_REPO="$SRC7" bash "$ADVANCE" "$LIVE7" 2>&1); rc=$?
+want_exit "missing live/ with no recorded rollback sha refuses (nonzero exit)" "$rc" 1 "$out"
+if [ -e "$LIVE7" ]; then bad "no rollback sha: nothing is invented at $LIVE7" "$out"; else ok "no rollback sha: nothing is invented at $LIVE7"; fi
+if grep -qi "rollback" <<<"$out"; then ok "the refusal names the missing rollback sha"; else bad "the refusal names the missing rollback sha" "$out"; fi
+
+# --- live/ path exists but is a non-empty directory that is not a worktree:
+# --- refuse to overwrite rather than guess it is safe to blow away.
+S7c=$(mktemp -d)
+printf '%s\n' "$recorded_sha" >"$S7c/.live-rollback-sha"
+mkdir -p "$LIVE7"
+echo "not actually a worktree" >"$LIVE7/surprise.txt"
+out=$(SUPERVISOR_STATE="$S7c" SUPERVISOR_REPO="$SRC7" bash "$ADVANCE" "$LIVE7" 2>&1); rc=$?
+want_exit "a non-empty non-worktree live/ refuses rather than overwrites (nonzero exit)" "$rc" 1 "$out"
+if [ -f "$LIVE7/surprise.txt" ]; then ok "the pre-existing directory is left untouched"; else bad "the pre-existing directory is left untouched" "$out"; fi
+rm -rf "$LIVE7"
+
+rm -rf "$D7"
+
 rm -rf "$D"
 
 echo "$pass passed, $fail failed"

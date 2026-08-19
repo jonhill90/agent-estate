@@ -58,6 +58,52 @@ case "$qrc" in
   *) log "quota UNKNOWN (rc=$qrc) -- never treated as safe, not ticking"; exit 0 ;;
 esac
 
+# --- agent-supervisor#367: live/ vanishing must be noticed BY SOMETHING ---
+# --- that keeps running when it does, not discovered by a later command's
+# --- ENOENT. On 2026-08-19 live/ was deleted -- not merely pruned, its own
+# --- `git worktree list` registration was gone too -- and nothing noticed
+# --- until claim.sh/lanes.sh/dispatch* each failed independently. The
+# --- watchdog LaunchAgent runs `watchdog.sh` FROM live/ itself (README:
+# --- "the watchdog LaunchAgent runs watchdog.sh from one pinned worktree"),
+# --- so it cannot be the thing that reports live/'s own absence -- a
+# --- process cd'd into a directory that no longer exists never starts.
+# --- THIS script is the one already on an independent, live/-agnostic
+# --- cadence: its own LaunchAgent invokes it from $HERE, the shared
+# --- checkout (launchd/com.jonhill.director-loop.plist), every 900s,
+# --- regardless of whether live/ exists at all -- exactly the "does the
+# --- caller survive the failure it guards against" property this codebase
+# --- has learned to check for (CLAUDE.md). loop-tick.md's own step 0 already
+# --- tells a human/agent to run advance-live.sh "before anything else"; this
+# --- is that same step, code-invoked instead of remembered, using the
+# --- self-heal advance-live.sh now has (agent-supervisor#367) rather than a
+# --- second detector duplicating its existence check.
+LIVE_PATH="${SUPERVISOR_LIVE:-$STATE/live}"
+# Registration is checked against SUPERVISOR_REPO (the same shared checkout
+# advance-live.sh recreates from), not unconditionally against $HERE: in
+# production the two are the same directory (this script's own LaunchAgent
+# runs it from the shared checkout), but they need not be everywhere this
+# script is invoked from, and hardcoding $HERE here would silently check the
+# wrong repo's `git worktree list` the moment that assumption did not hold.
+REPO_FOR_CHECK="${SUPERVISOR_REPO:-$HERE}"
+if [ ! -d "$LIVE_PATH" ] || ! git -C "$LIVE_PATH" rev-parse --git-dir >/dev/null 2>&1 \
+   || { live_real=$(cd "$LIVE_PATH" 2>/dev/null && pwd -P); \
+        [ -n "$live_real" ] && ! git -C "$REPO_FOR_CHECK" worktree list --porcelain 2>/dev/null | grep -qx "worktree $live_real"; }; then
+  log "LIVE MISSING -- $LIVE_PATH is absent, not a git worktree, or unregistered in 'git worktree list'; attempting recovery via advance-live.sh"
+  if [ -x "$HERE/advance-live.sh" ]; then
+    recover_out=$("$HERE/advance-live.sh" "$LIVE_PATH" 2>&1)
+    recover_rc=$?
+    log "advance-live.sh recovery attempt: rc=$recover_rc $recover_out"
+    if [ "$recover_rc" -ne 0 ] || [ ! -d "$LIVE_PATH" ] || ! git -C "$LIVE_PATH" rev-parse --git-dir >/dev/null 2>&1; then
+      log "LIVE STILL MISSING after recovery attempt -- a human should look"
+      exit 6
+    fi
+    log "LIVE RECOVERED at $LIVE_PATH -- continuing this tick"
+  else
+    log "advance-live.sh not found beside this script ($HERE) -- cannot recover live/ automatically; a human should look"
+    exit 6
+  fi
+fi
+
 SESSION="${TARGET%%:*}"
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
   log "target session $SESSION does not exist -- a human should look"

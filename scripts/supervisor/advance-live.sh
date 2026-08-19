@@ -106,6 +106,9 @@
 # machine layout):
 #   SUPERVISOR_STATE     state dir; default ~/.local/state/agent-dotfiles-supervisor
 #   SUPERVISOR_LIVE       live worktree path; default $SUPERVISOR_STATE/live
+#   SUPERVISOR_REPO       git checkout to recreate a MISSING live worktree
+#                         from (agent-supervisor#367); default
+#                         ~/source/repos/Personal/agent-supervisor
 #   SUPERVISOR_STATUS     the LIVE watchdog's own status file (read, not written)
 #   ADVANCE_LOG           default $SUPERVISOR_STATE/advance-live.log
 #   ADVANCE_ROLLBACK      default $SUPERVISOR_STATE/.live-rollback-sha
@@ -556,7 +559,55 @@ prompt_poller_relaunch() { # prompt_poller_relaunch <pane> <old-sha> <live-sha> 
 
 watchdog_stale_check
 
-git -C "$LIVE" rev-parse --git-dir >/dev/null 2>&1 || fail "not a git worktree: $LIVE"
+# --- agent-supervisor#367: live/ was DELETED, not merely stale -------------
+# Measured on 2026-08-19: live/ vanished entirely -- not pruned, not merely
+# missing from disk, its `git worktree list` registration was gone too --
+# and the only response this script had was "not a git worktree: $LIVE", a
+# correct refusal with no way out. `advance-live.sh` could advance an
+# existing live/ but could not REBUILD one; recovery was done by hand,
+# reading `.live-rollback-sha` and re-running the exact `git worktree add`
+# this block now performs. That does not scale to a 3am incident.
+#
+# RECREATE ONLY, NEVER GUESS THE TARGET: the sha comes from $ROLLBACK, the
+# same file `advance-live.sh` itself writes right before every mutation
+# (see "capture the rollback target before any mutation" below) -- it is
+# already the estate's record of where live/ is SUPPOSED to be, not a new
+# invention. No rollback file means no known-good target, so this fails
+# closed exactly like restore.sh does for an unrecoverable lane (invariant
+# 3, CLAUDE.md): reported, not invented.
+#
+# REFUSE TO OVERWRITE A SURPRISE: a present-but-non-worktree $LIVE could be
+# an interrupted recreate, a hand-mounted directory, or someone's real
+# files under the wrong path. Only an ABSENT or genuinely EMPTY directory is
+# treated as safe to build into -- anything else is the safe-deletion
+# contract's "contents don't match the description" case, and is refused
+# rather than rm -rf'd.
+#
+# THE RECREATE SOURCE is a separate git checkout, not $LIVE itself -- there
+# is nothing at $LIVE to read a remote from once it is gone. SUPERVISOR_REPO
+# names it, defaulting to the shared checkout this whole estate already
+# treats as canonical for agent-supervisor (cli.py's own REPOS table, and
+# CLAUDE.md's "the Director runs scripts/supervisor/ out of the shared
+# checkout at ~/source/repos/Personal/agent-supervisor").
+if ! git -C "$LIVE" rev-parse --git-dir >/dev/null 2>&1; then
+  if [ -e "$LIVE" ] && [ -n "$(ls -A "$LIVE" 2>/dev/null)" ]; then
+    fail "not a git worktree: $LIVE -- and it is a non-empty directory, not merely absent; refusing to overwrite it without a human confirming its contents are not needed"
+  fi
+  [ -f "$ROLLBACK" ] || fail "not a git worktree: $LIVE (missing) -- and no rollback sha recorded at $ROLLBACK, so there is no known-good target to recreate it at; a human must supply one"
+  recreate_sha=$(tr -d '[:space:]' <"$ROLLBACK" 2>/dev/null)
+  [ -n "$recreate_sha" ] || fail "not a git worktree: $LIVE (missing) -- and $ROLLBACK is empty, so there is no known-good target to recreate it at; a human must supply one"
+  RECREATE_REPO="${SUPERVISOR_REPO:-$HOME/source/repos/Personal/agent-supervisor}"
+  git -C "$RECREATE_REPO" rev-parse --git-dir >/dev/null 2>&1 \
+    || fail "not a git worktree: $LIVE (missing) -- and the recreate source $RECREATE_REPO is not a git repository either; set SUPERVISOR_REPO to a working checkout"
+  mkdir -p "$(dirname "$LIVE")" || fail "could not create the parent directory of $LIVE -- not recreating"
+  rmdir "$LIVE" 2>/dev/null # only removes it if empty; a non-empty dir already failed above
+  if ! git -C "$RECREATE_REPO" worktree add --detach "$LIVE" "$recreate_sha" >>"$LOG" 2>&1; then
+    fail "live worktree $LIVE was missing and could not be recreated at recorded sha $recreate_sha from $RECREATE_REPO -- not advancing"
+  fi
+  log "RECREATED $LIVE at $recreate_sha (from $ROLLBACK, via $RECREATE_REPO)"
+  echo "advance-live: recreated $LIVE at ${recreate_sha:0:12} (was missing) -- re-run to advance it further if origin/main has since moved"
+  exit 0
+fi
 
 cur=$(git -C "$LIVE" rev-parse HEAD 2>/dev/null) || fail "cannot read HEAD in $LIVE"
 
