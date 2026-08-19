@@ -750,12 +750,14 @@ fi
 
 MUT_CHILD=$(mktemp -d); mkdir -p "$MUT_CHILD/scripts/supervisor"
 cp "$WATCHDOG" "$MUT_CHILD/scripts/supervisor/watchdog.sh"
-for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh session-defaults.sh; do
+for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh session-defaults.sh poller-lib.sh; do
   cp "$HERE/../../scripts/supervisor/$dep" "$MUT_CHILD/scripts/supervisor/" 2>/dev/null
 done
 cp -R "$HERE/../../scripts/supervisor/harness" "$MUT_CHILD/scripts/supervisor/" 2>/dev/null
 patch_rc=0
-python3 - "$MUT_CHILD/scripts/supervisor/watchdog.sh" <<'PY' || patch_rc=$?
+# agent-supervisor#382: this logic now lives in poller-lib.sh, sourced by
+# watchdog.sh -- the mutation targets that file, not the copied watchdog.sh.
+python3 - "$MUT_CHILD/scripts/supervisor/poller-lib.sh" <<'PY' || patch_rc=$?
 import sys
 path = sys.argv[1]
 text = open(path).read()
@@ -842,12 +844,14 @@ check "the unmarked-independent-poller report is logged loudly" "POLLER-DUPLICAT
 
 MUT_SANDBOX=$(mktemp -d); mkdir -p "$MUT_SANDBOX/scripts/supervisor"
 cp "$WATCHDOG" "$MUT_SANDBOX/scripts/supervisor/watchdog.sh"
-for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh session-defaults.sh; do
+for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh session-defaults.sh poller-lib.sh; do
   cp "$HERE/../../scripts/supervisor/$dep" "$MUT_SANDBOX/scripts/supervisor/" 2>/dev/null
 done
 cp -R "$HERE/../../scripts/supervisor/harness" "$MUT_SANDBOX/scripts/supervisor/" 2>/dev/null
 patch_rc=0
-python3 - "$MUT_SANDBOX/scripts/supervisor/watchdog.sh" <<'PY' || patch_rc=$?
+# agent-supervisor#382: this logic now lives in poller-lib.sh, sourced by
+# watchdog.sh -- the mutation targets that file, not the copied watchdog.sh.
+python3 - "$MUT_SANDBOX/scripts/supervisor/poller-lib.sh" <<'PY' || patch_rc=$?
 import sys
 path = sys.argv[1]
 text = open(path).read()
@@ -892,7 +896,7 @@ fi
 # the brief names. The duplicate assertions above would go red.
 MUT=$(mktemp -d); mkdir -p "$MUT/scripts/supervisor"
 cp "$WATCHDOG" "$MUT/scripts/supervisor/watchdog.sh"
-for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh session-defaults.sh; do
+for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh session-defaults.sh poller-lib.sh; do
   cp "$HERE/../../scripts/supervisor/$dep" "$MUT/scripts/supervisor/" 2>/dev/null
 done
 cp -R "$HERE/../../scripts/supervisor/harness" "$MUT/scripts/supervisor/" 2>/dev/null
