@@ -8,6 +8,7 @@ from pathlib import Path
 SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "scripts" / "supervisor"
 sys.path.insert(0, str(SUPERVISOR_DIR))
 
+import adapter as adapter_module  # noqa: E402
 from adapter import ACPAdapter, ClaudePrintAdapter, PiRPCAdapter, TmuxAdapter, classify_capture  # noqa: E402
 from core import Ledger  # noqa: E402
 
@@ -114,6 +115,31 @@ class AdapterTest(unittest.TestCase):
         self.assertIn("codex-task", self.transport.sends[0][1])
         self.assertIn("claude-task", self.transport.sends[1][1])
         self.assertIn("complete", self.transport.sends[0][1])
+
+    def test_notify_supervisor_prompt_points_at_a_command_that_exists(self):
+        """agent-supervisor#362, found by the independent review of #381.
+
+        `notify_supervisor` was the FOURTH live call site of the missing
+        `hill90-supervisor` shim, and the only one that ever sends for real:
+        ACPAdapter/PiRPCAdapter/ClaudePrintAdapter all short-circuit this to
+        False (SPEC 15.2), so TmuxAdapter is the sole implementation. `ack`
+        is a real cli.py subcommand, so a notified lane was being told to run
+        a binary that is not on PATH -- the identical defect accept/complete
+        had, three lines away from its fix.
+        """
+        self.seed_source("ack-task", "Review")
+        self.adapter.assign_task(lane="infra-claude", task_id="ack-task", summary="Review")
+        self.ledger.complete("ack-task", b"# Result\n\nNo findings.\n", pane_nonce="nonce-8")
+        self.adapter.notify_supervisor(lane="architecture", retry_after=900)
+
+        prompt = self.transport.sends[-1][1]
+        self.assertIn("ack --event", prompt)
+        self.assertIn(str(adapter_module.SUPERVISOR_CLI), prompt)
+        self.assertTrue(
+            adapter_module.SUPERVISOR_CLI.is_file(),
+            f"notify prompts point at {adapter_module.SUPERVISOR_CLI}, which does not exist",
+        )
+        self.assertNotIn("hill90-supervisor ack", prompt)
 
     def test_blocked_lane_gets_no_assignment_input(self):
         self.transport.panes["%8"]["capture"] = "You've hit your weekly limit\n❯ \n"
@@ -658,8 +684,24 @@ class ClaudePrintAdapterTest(unittest.TestCase):
         self.assertIn("cp-task", assign_transport.prompts[0][1])
         # The lane must be told how to report completion, since nothing is
         # waiting to observe it any more.
-        self.assertIn("hill90-supervisor complete", assign_transport.prompts[0][1])
-        self.assertIn("hill90-supervisor accept", assign_transport.prompts[0][1])
+        #
+        # agent-supervisor#362: this used to assert the literal string
+        # `hill90-supervisor complete`, which PINNED THE DEFECT -- that shim
+        # stayed in the Hill90 repo during the split and is not on PATH, so
+        # the assertion passed while every real lane's reporting call died
+        # with `command not found`. Assert the property that actually
+        # matters instead: the command the lane is told to run must EXIST,
+        # by absolute path, because a lane's cwd is its own worktree.
+        prompt = assign_transport.prompts[0][1]
+        self.assertIn("accept --task cp-task", prompt)
+        self.assertIn("complete --task cp-task", prompt)
+        self.assertIn(str(adapter_module.SUPERVISOR_CLI), prompt)
+        self.assertTrue(
+            adapter_module.SUPERVISOR_CLI.is_file(),
+            f"lane prompts point at {adapter_module.SUPERVISOR_CLI}, which does not exist",
+        )
+        self.assertNotIn("hill90-supervisor accept", prompt)
+        self.assertNotIn("hill90-supervisor complete", prompt)
 
     def test_assign_task_to_unregistered_lane_raises(self):
         with self.assertRaisesRegex(RuntimeError, "unknown lane"):
