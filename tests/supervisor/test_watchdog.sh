@@ -76,6 +76,29 @@ D=$(mktemp -d); run idle "$D/w"
 check "idle pane with work restarts" "state:    restarted" "$D/w/st"
 check "restart delivers a /loop"     "/loop" "$D/w/sent"
 
+# agent-supervisor#365: a REAL pane after a REAL /clear paints a dim
+# placeholder in the input box, byte-for-byte the fixture the stub returns
+# for `-pe` under STUB_PANE_STATE=ghost-real (see tests/supervisor/
+# test_input_box.sh, which pins the identical bytes). `input_box_state`
+# must read that as empty and restart same as a bare idle pane -- a test
+# that only fed clean synthetic captures would pass while the ghost-text
+# bug (#141/#351) survived, so this is the real byte sequence, not a
+# stand-in.
+D=$(mktemp -d); run ghost-real "$D/w"
+check "a real ghost placeholder is not mistaken for typed text" "state:    restarted" "$D/w/st"
+check "restart delivers a /loop past a ghost placeholder"       "/loop" "$D/w/sent"
+
+# The other real case: a genuine unsubmitted brief in the box (not dim). Must
+# be left alone -- clobbering it is the #178 corruption this file exists to
+# prevent.
+D=$(mktemp -d); run unsent-real "$D/w"
+check "real un-submitted text in the box is left alone" "state:    human_typing" "$D/w/st"
+if grep -q '/loop' "$D/w/sent" 2>/dev/null; then
+  echo "  FAIL a /loop was sent into a box holding real unsubmitted text: $(cat "$D/w/sent")"; fail=$((fail+1))
+else
+  echo "  ok   no /loop is sent into a box holding real unsubmitted text"; pass=$((pass+1))
+fi
+
 # The race: idle when first checked, busy by the time the /loop is sent.
 # Without the pre-send guard the command is queued as plain text, never
 # parses as a slash command, and the loop silently never re-arms.

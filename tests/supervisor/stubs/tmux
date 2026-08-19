@@ -3,6 +3,7 @@
 #
 # STUB_PANE_STATE: what capture-pane reports.
 #   idle | busy | ghost                     — Claude Code shapes.
+#   ghost-real | unsent-real                — real `-pe` box captures, see below.
 #   copilot-busy | copilot-ready            — real Copilot CLI captures.
 #   codex-busy                              — a real Codex CLI capture.
 #   alien                                   — a pane whose chrome no adapter models.
@@ -33,6 +34,28 @@ case "$1" in
       # STUB_BUSY_SHAPE picks WHICH harness's busy chrome the pane turns into,
       # so the mid-probe race can be driven on a non-Claude harness too.
       [ "$n" -gt "$STUB_BUSY_AFTER" ] && state="${STUB_BUSY_SHAPE:-busy}" || state="${STUB_PANE_STATE:-idle}"
+    fi
+    # agent-supervisor#365: `input_box_state` needs `-e` (SGR attributes) and
+    # the box's closing rule to answer at all -- a plain `-p` capture can
+    # never resolve `ghost-real`/`unsent-real` and must fall through to the
+    # generic shapes below (`unknown`, same as `idle`). These two bytes-exact
+    # rows are what a REAL Claude Code v2.1.220 pane painted after a `/clear`
+    # (dim placeholder) and with a real unsubmitted brief (not dim) -- see
+    # tests/supervisor/test_input_box.sh, which pins the same bytes.
+    has_e=0; for a in "$@"; do case "$a" in -pe|-ep|-e) has_e=1 ;; esac; done
+    if [ "$has_e" = 1 ] && { [ "$state" = ghost-real ] || [ "$state" = unsent-real ]; }; then
+      rule=$(printf '─%.0s' $(seq 1 40))
+      footer='  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent'
+      prompt=$'\033[39m\xe2\x9d\xaf\xc2\xa0'
+      printf '%s\n' "$rule"
+      if [ "$state" = ghost-real ]; then
+        printf '%s%s\n' "$prompt" "$(printf '\033[2mTry "write a test for <filepath>"\033[0m')"
+      else
+        printf '%sRead /brief.md and do exactly what it says.\n' "$prompt"
+      fi
+      printf '%s\n' "$rule"
+      printf '%s\n' "$footer"
+      exit 0
     fi
     case "$state" in
       busy)  printf '  ⏵⏵ bypass permissions on · esc to interrupt · ← 1 agent\n' ;;
