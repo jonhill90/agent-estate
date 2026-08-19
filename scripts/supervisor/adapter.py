@@ -8,6 +8,26 @@ import uuid
 from pathlib import Path
 
 
+# agent-supervisor#362: every lane prompt used to tell the worker to run
+# `hill90-supervisor accept|complete`. That shim is Hill90's launchd adapter
+# and STAYED BEHIND in that repository during the split -- scripts/supervisor/
+# README.md:13 says so, and README.md:139 gives the portable form: invoke the
+# subcommands directly against `cli.py`. cli.py's own docstring already noted
+# the shim is "a binary that is not on PATH (docs/supervisor-disposition.md
+# §1.3)".
+#
+# The consequence was not cosmetic. A lane did its work, then BOTH of its
+# reporting calls failed `command not found`, so the task sat at `delivered`
+# with `completed_at` null forever and its claim was never released. That is
+# the source of the stale-claim floods (#359), the phantom in-flight tasks
+# (21 `delivered` rows against zero running processes), and lanes that look
+# like they produced nothing.
+#
+# An absolute path, not a bare name: a lane's cwd is its own worktree, so a
+# relative path does not resolve, and re-adding a `hill90-supervisor` shim
+# here would re-couple the two repositories the split deliberately separated.
+SUPERVISOR_CLI = Path(__file__).resolve().parent / "cli.py"
+
 BLOCKED_RE = re.compile(r"hit your (?:weekly |usage )?limit|usage limit", re.IGNORECASE)
 APPROVAL_RE = re.compile(r"\[Y/n\]|\(y/N\)|(?:Allow|Approve|Continue|Proceed).*[?]", re.IGNORECASE)
 CODEX_ACTIVE_RE = re.compile(r"^[•◦]\s+(?:Working|Running|Thinking)(?:\s|\()", re.MULTILINE)
@@ -181,9 +201,9 @@ class TmuxAdapter:
             prompt = (
                 f"[Hill90 task {task_id}] {summary}\n\n"
                 "Do not begin unrelated work. Record commands and actual outputs in a compact result. "
-                f"Before working run: hill90-supervisor accept --task {task_id}. "
+                f"Before working run: python3 {SUPERVISOR_CLI} accept --task {task_id}. "
                 f"At completion write {result_file} and run: "
-                f"hill90-supervisor complete --task {task_id} --result-file {result_file}"
+                f"python3 {SUPERVISOR_CLI} complete --task {task_id} --result-file {result_file}"
             )
             # Persist the ambiguous, non-resendable state before the physical
             # send. If send_literal raises, or the ledger write below fails,
@@ -560,9 +580,9 @@ class ClaudePrintAdapter:
             prompt = (
                 f"[Hill90 task {task_id}] {summary}\n\n"
                 "Do not begin unrelated work. Record commands and actual outputs in a compact result. "
-                f"Before working run: hill90-supervisor accept --task {task_id}. "
+                f"Before working run: python3 {SUPERVISOR_CLI} accept --task {task_id}. "
                 f"At completion write {result_file} and run: "
-                f"hill90-supervisor complete --task {task_id} --result-file {result_file}"
+                f"python3 {SUPERVISOR_CLI} complete --task {task_id} --result-file {result_file}"
             )
             # Same ambiguous-state-before-physical-send ordering as
             # ACPAdapter/PiRPCAdapter.assign_task: if the resumed call
