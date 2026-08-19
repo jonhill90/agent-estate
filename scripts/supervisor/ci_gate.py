@@ -82,6 +82,21 @@ def _run_sort_key(run):
     return run.get("completed_at") or run.get("started_at") or ""
 
 
+# agent-supervisor#380: a merge gate that only ever prints "not green" makes
+# `cancelled` (will never go green without a re-run) read identically to
+# `in_progress`/`conclusion: null` (may still go green on its own). Whoever
+# reads this reason -- a human or a lane deciding whether to wait or
+# re-dispatch -- needs that distinction spelled out, even though the
+# decision itself (refuse) is the same either way.
+def _describe_failing_run(run):
+    name = run.get("name", "?")
+    if run.get("status") == "completed" and run.get("conclusion") == "cancelled":
+        return f"{name} (cancelled -- will not go green without a re-run)"
+    if run.get("status") != "completed":
+        return f"{name} ({run.get('status', 'unknown')} -- may still go green)"
+    return f"{name} ({run.get('conclusion', 'unknown')})"
+
+
 def _latest_per_name(check_runs):
     """Re-runs of the same check (e.g. `test`) land as separate entries in
     `check_runs` -- GitHub's own PR UI and `gh pr checks` both evaluate only
@@ -153,7 +168,7 @@ class CiGate:
 
         latest_runs = _latest_per_name(check_runs)
         failing_runs = [
-            run.get("name", "?")
+            _describe_failing_run(run)
             for run in latest_runs
             if not (run.get("status") == "completed" and run.get("conclusion") in GREEN_CONCLUSIONS)
         ]

@@ -89,6 +89,22 @@ class CiGateTest(unittest.TestCase):
         result = CiGate(runner).evaluate(repo="o/r", number=1)
         self.assertEqual("refuse", result["decision"])
 
+    def test_cancelled_check_reason_distinguishes_from_in_progress(self):
+        # agent-supervisor#380: both used to read as plain "not green". A
+        # cancelled run will never go green on its own (needs a re-run); an
+        # in-progress run still might. The reason string must say which.
+        cancelled = FakeRunner(head_sha="sha", check_runs=run("sha", status="completed", conclusion="cancelled"))
+        cancelled_result = CiGate(cancelled).evaluate(repo="o/r", number=1)
+        self.assertEqual("refuse", cancelled_result["decision"])
+        self.assertIn("cancelled", cancelled_result["reason"])
+        self.assertIn("will not go green", cancelled_result["reason"])
+
+        in_progress = FakeRunner(head_sha="sha", check_runs=run("sha", status="in_progress", conclusion=None))
+        in_progress_result = CiGate(in_progress).evaluate(repo="o/r", number=1)
+        self.assertEqual("refuse", in_progress_result["decision"])
+        self.assertIn("in_progress", in_progress_result["reason"])
+        self.assertIn("may still go green", in_progress_result["reason"])
+
     def test_failing_legacy_commit_status_refuses(self):
         runner = FakeRunner(
             head_sha="sha",
