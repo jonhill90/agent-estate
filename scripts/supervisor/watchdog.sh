@@ -1822,8 +1822,23 @@ fi
 # Do not clobber text Jon has typed and not submitted.
 #
 # The harness renders the PREVIOUS prompt as ghost placeholder text on an empty
-# input line, so "the line looks non-empty" proves nothing. Append a character
-# and see whether it lands on top of existing text or replaces the ghost:
+# input line, so "the line looks non-empty" proves nothing, and a plain
+# `capture-pane -p` capture cannot tell the two apart -- the discriminating
+# information (SGR dim around the placeholder) lives in the attributes, which
+# `-p` throws away (agent-supervisor#365). `input_box_state` (input-box.sh,
+# sourced via send.sh above) reads `-pe` and answers `text` / `empty` /
+# `unknown` from that attribute alone, with no need to touch the pane.
+box_state=$(tmux capture-pane -pe -t "$PANE" 2>/dev/null | input_box_state)
+if [ "$box_state" = text ]; then
+  report human_typing "un-submitted text in the pane — left alone"
+  log "real un-submitted text in pane — not touching it"
+  exit 0
+fi
+
+# `unknown` -- no box could be identified on screen -- is the one case a
+# passive read genuinely cannot resolve. Fall back to the active probe: append
+# a character and see whether it lands on top of existing text or replaces
+# the ghost:
 #
 #   real text  ->  "❯ do the thing"  becomes  "❯ do the thingX"
 #   ghost text ->  "❯ do the thing"  becomes  "❯ X"
@@ -1831,15 +1846,17 @@ fi
 # Real iff the new line is the old line with X appended. The first version
 # compared the wrong direction and called every ghost line real, which would
 # have meant the watchdog never restarted anything.
-promptline() { tmux capture-pane -p -t "$PANE" -S -3 2>/dev/null | grep -m1 '^❯' || true; }
-before=$(promptline)
-tmux send-keys -t "$PANE" -l 'X' 2>/dev/null; sleep 1
-after=$(promptline)
-tmux send-keys -t "$PANE" BSpace 2>/dev/null; sleep 1
-if [ -n "$before" ] && [ "$after" = "${before}X" ]; then
-  report human_typing "un-submitted text in the pane — left alone"
-  log "real un-submitted text in pane — not touching it"
-  exit 0
+if [ "$box_state" = unknown ]; then
+  promptline() { tmux capture-pane -p -t "$PANE" -S -3 2>/dev/null | grep -m1 '^❯' || true; }
+  before=$(promptline)
+  tmux send-keys -t "$PANE" -l 'X' 2>/dev/null; sleep 1
+  after=$(promptline)
+  tmux send-keys -t "$PANE" BSpace 2>/dev/null; sleep 1
+  if [ -n "$before" ] && [ "$after" = "${before}X" ]; then
+    report human_typing "un-submitted text in the pane — left alone"
+    log "real un-submitted text in pane — not touching it"
+    exit 0
+  fi
 fi
 
 # Re-check busy IMMEDIATELY before sending. The earlier check is stale by
