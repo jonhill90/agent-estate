@@ -292,6 +292,32 @@ bash "$WT" done "$STAGED_DEST" >/dev/null 2>&1
 rm -f "$UNTRACKED_DEST/scratch.txt"
 bash "$WT" done "$UNTRACKED_DEST" >/dev/null 2>&1
 
+# --- agent-supervisor#367: the live worktree must never be removed, even --
+# --- when it is exactly the shape gc/done would otherwise happily take: ---
+# --- clean, and its branch's content already merged to origin/main. ------
+LIVE_DEST="$D/live"
+git -C "$REPO" worktree add -q --detach "$LIVE_DEST" origin/main
+
+# `done` refuses it directly.
+out=$(SUPERVISOR_LIVE="$LIVE_DEST" bash "$WT" done "$LIVE_DEST" 2>&1); rc=$?
+want_exit "done refuses to remove the live worktree (nonzero exit)" "$rc" 1 "$out"
+if [ -d "$LIVE_DEST" ]; then ok "live worktree survives a 'done' call"; else bad "live worktree survives a 'done' call" "$out"; fi
+if grep -qi "367\|live worktree" <<<"$out"; then ok "the refusal names the live worktree"; else bad "the refusal names the live worktree" "$out"; fi
+
+# `gc` skips it too, even though it is clean and its content is already on
+# origin/main -- exactly the predicate gc otherwise removes on.
+gc_live_out=$(SUPERVISOR_LIVE="$LIVE_DEST" bash "$WT" gc "$REPO" origin/main 2>&1)
+if [ -d "$LIVE_DEST" ]; then ok "live worktree survives a 'gc' sweep"; else bad "live worktree survives a 'gc' sweep" "$gc_live_out"; fi
+
+# The guard is a realpath compare, not a string compare -- prove it still
+# catches a live path reached via a trailing slash.
+out2=$(SUPERVISOR_LIVE="$LIVE_DEST/" bash "$WT" done "$LIVE_DEST" 2>&1); rc2=$?
+want_exit "the live guard survives a trailing slash on SUPERVISOR_LIVE (nonzero exit)" "$rc2" 1 "$out2"
+if [ -d "$LIVE_DEST" ]; then ok "live worktree survives 'done' with a trailing-slash SUPERVISOR_LIVE"; else bad "live worktree survives 'done' with a trailing-slash SUPERVISOR_LIVE" "$out2"; fi
+
+git -C "$REPO" worktree remove --force "$LIVE_DEST" >/dev/null 2>&1
+git -C "$REPO" worktree prune >/dev/null 2>&1
+
 rm -rf "$D"
 
 echo "$pass passed, $fail failed"

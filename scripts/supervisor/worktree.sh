@@ -89,9 +89,36 @@ usage() { sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' 
 # discard work. Never call this on a target that has not already been
 # checked for uncommitted changes belonging to work in progress -- `gc`
 # checks "merged" separately, before this runs.
+# agent-supervisor#367: live/ was deleted by something that walked worktrees
+# and removed one -- unconfirmed which caller, but this is the shape of the
+# guard the estate already trusts for the same class of accident
+# (tmux-isolation.sh's assert_isolated_tmux for kill-server, #247/#258): a
+# destructive verb refuses its one unrecoverable target rather than trusting
+# every caller to know not to pass it. Compared by realpath, not string
+# equality -- $target can arrive with a trailing slash, a relative form, or
+# (on macOS) an unresolved /var/... symlink of the same /private/var/...
+# path `git worktree list` itself would report; string equality would miss
+# all three and wave the removal through.
+is_live_worktree() {
+  local target="$1"
+  local live="${SUPERVISOR_LIVE:-${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}/live}"
+  local target_real live_real
+  target_real=$(cd "$target" 2>/dev/null && pwd -P) || target_real="$target"
+  live_real=$(cd "$live" 2>/dev/null && pwd -P) || live_real="$live"
+  [ -n "$target_real" ] && [ "$target_real" = "$live_real" ]
+}
+
 safe_remove() {
   local target="$1"
   local dry="${2:-}"
+  # The live worktree the watchdog LaunchAgent runs from is not a lane's
+  # disposable tree, gc-eligible or not -- refuse unconditionally, before
+  # any of the checks below that a clean, merged live/ would otherwise sail
+  # through. See is_live_worktree's comment above.
+  if is_live_worktree "$target"; then
+    echo "worktree: $target is the live worktree (agent-supervisor#367) -- refusing to remove it, no matter how clean or merged it looks" >&2
+    return 1
+  fi
   # A worktree with uncommitted changes is someone's unfinished work, not
   # garbage -- refuse rather than guess, same as safe-deletion.
   local status
