@@ -456,6 +456,13 @@ def parser():
     # work when there is no tmux server at all, so it touches no transport.
     sub.add_parser("restore-plan")
 
+    # agent-supervisor#291: the ledger half of the pre-dispatch collision
+    # check -- which worktrees are currently in flight, so collision-
+    # check.sh can `git diff` each one for files without maintaining any
+    # graph of its own. See `Ledger.list_open_worktrees` for what counts as
+    # "in flight" and why blank worktree_path rows are excluded.
+    sub.add_parser("open-worktrees")
+
     sub.add_parser("delivered-open")
 
     # agent-supervisor#153: the write side. `bootstrap-session.sh` is the
@@ -1361,6 +1368,8 @@ def main(argv=None):
         value = ledger.restore_plan()
     elif args.command == "delivered-open":
         value = {"tasks": ledger.list_delivered_open_tasks()}
+    elif args.command == "open-worktrees":
+        value = {"tasks": ledger.list_open_worktrees()}
     elif args.command == "adopt-session":
         value = ledger.adopt_session(args.session, source=args.source)
     elif args.command == "session-state":
