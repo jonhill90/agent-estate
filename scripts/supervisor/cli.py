@@ -8,6 +8,7 @@ import os
 import re
 import secrets
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
@@ -904,6 +905,81 @@ def record_dispatch(
         raise
 
 
+def _release_issue_claim_for_task(ledger, task_id):
+    """Best-effort GH claim release for a task's issue(s), on any terminal
+    completion path (agent-supervisor#359): nothing released the GitHub
+    assignee `claim.sh take` wrote once a lane finished, so the claim
+    outlived the lane and the issue silently locked itself out of dispatch
+    forever -- 16 of 37 claimed issues were measured stale in one audit,
+    including #310 and #313.
+
+    NEVER RAISES: a failed release must not turn a genuine completion into a
+    reported failure -- the same posture `lane-done.sh`'s best-effort
+    PR-authorship recording already takes for its own side write.
+
+    Skips PR-scoped tasks (`source_kind == 'pull'`) outright -- that issue is
+    deliberately left claimed by the ORIGINAL work, per `dispatch.sh`'s own
+    `--reviews-pr`/`--pr` comment (a review or fix-pass task never held the
+    issue's claim to begin with; there is nothing here for it to release).
+    """
+    try:
+        source = ledger.get_source_task(task_id)
+    except Exception as error:
+        print(f"cli.py: could not read source task for {task_id} to release its GitHub claim: {error}", file=sys.stderr)
+        return
+    if not source or source.get("source_kind") != "issue":
+        return
+    source_url = source.get("source_url") or ""
+    match = re.search(r"github\.com/([^/\s]+/[^/\s]+)/issues/", source_url)
+    if not match:
+        # `source_url` is `issue:<n>@<dirname>` when no `--github`/`github`
+        # config was resolvable at dispatch time (record_dispatch's own
+        # fallback) -- no OWNER/NAME to release against. Not an error: the
+        # claim (if any) was never taken through a repo this can name either.
+        return
+    repo = match.group(1)
+    # `record_dispatch` records every issue this task closes in `evidence`
+    # (`"issues: 1,2,3"`, agent-dotfiles#112) even though `source_ref` only
+    # ever names the primary one -- release all of them, the same set
+    # `dispatch.sh`'s own claim loop took at dispatch time.
+    issues = set()
+    ref = source.get("source_ref")
+    if ref:
+        issues.add(str(ref))
+    for line in source.get("evidence") or ():
+        found = re.match(r"issues:\s*(.+)$", line.strip())
+        if found:
+            issues.update(part.strip() for part in found.group(1).split(",") if part.strip())
+    claim_sh = Path(__file__).resolve().parent / "claim.sh"
+    for issue in sorted(issues):
+        try:
+            result = subprocess.run(
+                [str(claim_sh), "release", issue, repo],
+                capture_output=True,
+                text=True,
+                # Bounded well under any test harness's own command timeout:
+                # a caller with no gh stub on PATH (most ledger-only tests)
+                # still makes one real, fast-failing `gh api` round trip per
+                # issue here -- unavoidable without a second, test-only
+                # release path -- so this must not be the thing that makes a
+                # slow CI runner time out.
+                timeout=10,
+                check=False,
+            )
+            if result.returncode != 0:
+                print(
+                    f"cli.py: could not release GitHub claim on {repo}#{issue} for task {task_id} "
+                    f"-- release it by hand: {(result.stderr or result.stdout).strip()}",
+                    file=sys.stderr,
+                )
+        except Exception as error:
+            print(
+                f"cli.py: could not release GitHub claim on {repo}#{issue} for task {task_id} "
+                f"-- release it by hand: {error}",
+                file=sys.stderr,
+            )
+
+
 def record_completion(ledger, *, task, lane, note):
     """Record that a dispatched task finished. Writes; never sends.
 
@@ -945,7 +1021,16 @@ def record_completion(ledger, *, task, lane, note):
         identity = f"task: {task}" if task else f"lane: {lane}"
         raise RuntimeError(f"unknown {identity}")
     allow_claim = row["id"].startswith(CLAIM_TASK_PREFIX)
-    return ledger.complete(row["id"], note.encode("utf-8"), pane_nonce=row["pane_nonce"], allow_claim=allow_claim)
+    # agent-supervisor#359: only a transition INTO 'complete' releases the
+    # GitHub claim -- an idempotent replay of an already-complete row (the
+    # same immutable-result short-circuit `Ledger.complete` itself takes)
+    # must not re-run the release against whatever NEW work has since
+    # legitimately re-claimed the same issue number.
+    already_complete = row["status"] == "complete"
+    value = ledger.complete(row["id"], note.encode("utf-8"), pane_nonce=row["pane_nonce"], allow_claim=allow_claim)
+    if not already_complete:
+        _release_issue_claim_for_task(ledger, row["id"])
+    return value
 
 
 # as#132: the ledger's registered lane id can still be the pre-migration
@@ -1198,7 +1283,17 @@ def main(argv=None):
         reaped = ledger.reap_stale_lane_claims()
         value = {"reaped": reaped, "count": len(reaped)}
     elif args.command == "cancel-open-task":
-        value = {"lane": args.lane, "cancelled": ledger.cancel_open_task(args.lane)}
+        cancelled = ledger.cancel_open_task(args.lane)
+        # agent-supervisor#359: this is an operator recovering a lane a
+        # normal completion never reached (the crash path) -- exactly the
+        # shape #359's own "Done this tick" workaround released by hand.
+        # cancel_open_task always mints a freshly-cancelled row here (never a
+        # replay of one already terminal -- its own SELECT excludes
+        # 'complete'/'failed'/'cancelled'), so no already-terminal guard is
+        # needed the way complete()'s idempotent short-circuit requires one.
+        if cancelled is not None:
+            _release_issue_claim_for_task(ledger, cancelled["id"])
+        value = {"lane": args.lane, "cancelled": cancelled}
     elif args.command == "task-lane":
         row = ledger.get_task(args.task)
         value = {"task": args.task, "known": row is not None, "lane": row["lane"] if row is not None else None}
@@ -1282,7 +1377,14 @@ def main(argv=None):
         if task is None:
             raise ValueError("unknown task")
         _verify_caller(adapter_for_lane(task["lane"]), ledger, task["lane"])
+        # agent-supervisor#359: see record_completion's own comment on
+        # already_complete -- an idempotent replay of an already-complete
+        # task must not re-release a claim that legitimately belongs to
+        # whatever later work has since re-claimed the same issue.
+        already_complete = task["status"] == "complete"
         value = ledger.complete(args.task, args.result_file.read_bytes(), pane_nonce=task["pane_nonce"])
+        if not already_complete:
+            _release_issue_claim_for_task(ledger, args.task)
     elif args.command == "reconcile":
         # Deliberately not caller-verified and deliberately not the lane's
         # *current* nonce: this is the human-operator path for an ambiguous
