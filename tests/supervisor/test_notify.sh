@@ -85,6 +85,24 @@ else echo "  FAIL curl was never invoked for the director caller"; fail=$((fail+
 check "director caller is logged as sent, distinctly from supervisor" "SENT telegram (director)" \
   "$DIR/.local/state/agent-dotfiles-supervisor/notify.log"
 
+# --- a caller identifying as the watchdog is allowed through, and logged ---
+# distinctly from supervisor/director (agent-supervisor#300): the watchdog
+# runs OUTSIDE the loop and is the one caller able to notice the whole
+# estate has stopped, so its authorization needs the same dedicated
+# assertion the director's got in #193 -- not just an inert allow-list entry.
+WD="$D/watchdog"; mkdir -p "$WD/.local/state/agent-dotfiles-supervisor"
+CURL_LOG="$WD/curl.log"
+HOME="$WD" PATH="$D/bin:$PATH" NOTIFY_ENV="$D/notify.env" CURL_LOG="$CURL_LOG" \
+  AGENT_NOTIFY_CALLER=watchdog \
+  bash "$NOTIFY" "subject" "body" >"$WD/out" 2>"$WD/err"
+rc=$?
+if [ "$rc" -eq 0 ]; then echo "  ok   watchdog caller exits zero"; pass=$((pass+1));
+else echo "  FAIL watchdog caller exited $rc: $(cat "$WD/err")"; fail=$((fail+1)); fi
+if [ -s "$CURL_LOG" ]; then echo "  ok   watchdog caller reaches curl"; pass=$((pass+1));
+else echo "  FAIL curl was never invoked for the watchdog caller"; fail=$((fail+1)); fi
+check "watchdog caller is logged as sent, distinctly from supervisor/director" "SENT telegram (watchdog)" \
+  "$WD/.local/state/agent-dotfiles-supervisor/notify.log"
+
 # --- mutation check: the gate must still refuse an unauthorised caller -----
 # agent-dotfiles#193/#52. Extending the gate to a second value is exactly
 # the kind of change that is easy to "fix" into accepting everything -- a
@@ -96,20 +114,21 @@ check "director caller is logged as sent, distinctly from supervisor" "SENT tele
 MUTANT="$D/.notify-mutant-open-gate.sh"
 patch_rc=0
 python3 - "$NOTIFY" "$MUTANT" <<'PY' || patch_rc=$?
+import re
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = '''case "$CALLER" in
-  supervisor|director) ;;
-  *)
-    log "REFUSED — caller not authorized (AGENT_NOTIFY_CALLER=${CALLER:-<unset>}): $SUBJECT${BODY:+ — $BODY}"
-    echo "NOTIFY REFUSED: only an authorized caller may notify Jon (set AGENT_NOTIFY_CALLER=supervisor or director)" >&2
-    exit 1
-    ;;
-esac'''
-assert marker in text, "caller gate case statement not found -- notify.sh shape changed"
-assert text.count(marker) == 1, "caller gate case statement not unique -- notify.sh shape changed"
-open(dst, "w").write(text.replace(marker, 'case "$CALLER" in *) ;; esac', 1))
+# Matched by shape (the case block on $CALLER, ending at the first esac),
+# not by a byte-for-byte literal -- comments and authorized-caller values
+# inside the block are free to change without breaking this mutant setup
+# (agent-supervisor#300: an authorization-comment-only diff false-failed
+# this exact assert on a literal marker).
+matches = list(re.finditer(r'case "\$CALLER" in\n.*?\nesac', text, re.DOTALL))
+assert matches, "caller gate case statement not found -- notify.sh shape changed"
+assert len(matches) == 1, "caller gate case statement not unique -- notify.sh shape changed"
+block = matches[0].group(0)
+assert "REFUSED" in block, "caller gate case statement missing refusal arm -- notify.sh shape changed"
+open(dst, "w").write(text[:matches[0].start()] + 'case "$CALLER" in *) ;; esac' + text[matches[0].end():])
 PY
 if [ "$patch_rc" -ne 0 ]; then
   echo "  FAIL setup: patched an open-gate copy of notify.sh"; fail=$((fail+1))
