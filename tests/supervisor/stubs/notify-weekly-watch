@@ -1,0 +1,11 @@
+#!/bin/bash
+# Stub notify.sh for weekly-watch.sh's tests (agent-supervisor#327). Records
+# every invocation (caller + subject + body) to NOTIFY_LOG so a test can
+# assert exactly how many pages went out and what they said -- including the
+# case that matters most, that nothing paged at all. Exits 0 (channel
+# accepted) unless NOTIFY_FAIL is set, matching notify.sh's real contract:
+# exit 0 only if a channel actually accepted the message.
+LOG="${NOTIFY_LOG:?}"
+printf 'CALLER=%s SUBJECT=%s BODY=%s\n' "${AGENT_NOTIFY_CALLER:-}" "${1:-}" "${2:-}" >> "$LOG"
+[ -n "${NOTIFY_FAIL:-}" ] && exit 1
+exit 0
