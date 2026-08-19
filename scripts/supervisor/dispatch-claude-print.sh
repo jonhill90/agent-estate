@@ -236,7 +236,36 @@ if [ "$ASSIGN_RC" -ne 0 ]; then
 $ASSIGN_OUT"
 fi
 
-echo "dispatch-claude-print: #$ISSUE delivered to $LANE over claude-print, task $TASK_ID complete"
+# agent-supervisor#362: this line used to say "task $TASK_ID complete"
+# unconditionally, derived from nothing. Every claude-print dispatch this
+# window printed it while the task record carried `completed_at: null` --
+# `ledger.complete()` had never been reached -- so a dispatch that delivered a
+# brief and then produced no work read, to a human and to every consumer of
+# this output, as a completed task. Three lanes (#313, #368 and #362 itself)
+# were declared complete on this string having done nothing.
+#
+# The word "complete" must come from the field that records completion, and
+# from nowhere else. This does NOT fix the underlying defect -- the transport
+# still returns before the turn ends -- it stops the report from lying about
+# it, which is the precondition for noticing the defect at all. Reporting and
+# the transport fix are deliberately separate changes.
+COMPLETED_AT=$(printf '%s' "$ASSIGN_OUT" | "$PYTHON" -c '
+import json, re, sys
+raw = sys.stdin.read()
+match = re.search(r"\{.*\}", raw, re.S)
+if not match:
+    sys.exit(0)
+try:
+    print(json.loads(match.group()).get("completed_at") or "")
+except (ValueError, AttributeError):
+    pass
+' 2>/dev/null)
+
+if [ -n "$COMPLETED_AT" ]; then
+  echo "dispatch-claude-print: #$ISSUE delivered to $LANE over claude-print, task $TASK_ID complete"
+else
+  echo "dispatch-claude-print: #$ISSUE DELIVERED to $LANE over claude-print, task $TASK_ID -- delivery only, NOT complete (completed_at is null; verify the artifact the brief asked for before believing this lane ran)"
+fi
 echo "  worktree: $WORKTREE"
 echo "  brief:    $BRIEF"
 echo "$ASSIGN_OUT"
