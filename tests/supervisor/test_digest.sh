@@ -1288,10 +1288,24 @@ fi
 # a `gh` that sleeps far longer than the timeout must still let this script
 # return, with the failure named as a timeout (not a plain "failed", which
 # would read identically to a fast, ordinary API error).
+#
+# Scoped to `pr list` only (mirrors the author-lane stub below, which fails
+# fast -- `exit 1` -- on anything it does not recognize). A stub that sleeps
+# on EVERY invocation regardless of subcommand also caught digest.sh's later,
+# unrelated `acceptance.sh --limit 15` call (its own `gh issue list`, a
+# pre-existing and still-unbounded shell-out this PR never touched) in the
+# same 30s sleep, which is what made this case fail: the gh_call bound this
+# PR adds DID fire correctly at 2s (confirmed via `bash -x` trace), but the
+# suite's own overly-broad stub kept the process busy well past that on a
+# call this test was never trying to exercise.
 cat > "$D/bin/gh" <<'EOF'
 #!/bin/bash
-sleep 30
-echo '[]'
+if [ "$1" = "api" ]; then
+  case "$2" in
+    *pulls?state=open*) sleep 30; echo '[]'; exit 0 ;;
+  esac
+fi
+exit 1
 EOF
 chmod +x "$D/bin/gh"
 start=$(date +%s)
