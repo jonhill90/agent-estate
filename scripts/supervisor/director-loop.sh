@@ -241,6 +241,26 @@ while [ "$waited" -lt "$TICK_ARRIVE_TIMEOUT" ]; do
 done
 
 if [ "$tick_arrived" -eq 1 ]; then
+  # CONTEST A STOP-CONCLUSION, mechanically, without any agent choosing to.
+  #
+  # Jon, 2026-08-19: "I should not be the one pointing this out ... we need sanity
+  # checks outside of this." Every failure he caught that day was a conclusion
+  # that STOPPED work, reached alone and contested by nobody. skills#186 filed the
+  # same complaint on 2026-08-15 and the council skills were never wired to
+  # anything.
+  #
+  # This fires when the previous tick concluded "nothing" -- rate-limited to once
+  # per ~50 minutes by contest-stop.sh itself, and cheap because stop-conclusions
+  # are rare. A wrong "keep working" costs one lane's turn; a wrong "stop" costs
+  # the whole window and looks identical to a finished estate.
+  if grep -qiE 'concluding "?nothing|nothing to dispatch|no .*(surface|work) (left|remains|available)' \
+       <<<"$(tail -40 <<<"$pane")" 2>/dev/null; then
+    claim=$(grep -iE 'concluding "?nothing|nothing to dispatch|no .*(surface|work)' <<<"$pane" | tail -1)
+    "$HERE/contest-stop.sh" --claim "${claim:-the previous tick concluded there was nothing to do}" \
+      --evidence "Read from the Director's own pane at $(date -u '+%Y-%m-%dT%H:%M:%SZ')." \
+      >>"$STATE/contest-stop.log" 2>&1 &
+  fi
+
   log "ticked $TARGET -- pane is now working"
   exit 0
 fi
