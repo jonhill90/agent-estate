@@ -149,8 +149,8 @@ PANE="${SUPERVISOR_PANE:-${SESSION}:1.1}"
 # `watchdog.sh` but is not required for a read.
 # THE IDLE MATCHER COMES FROM THE HARNESS, never from a private copy here.
 #
-# This line used to read `READY_RE='^❯ [^←]*$|← 1 agent$'` and that made
-# `idle()` return false on a genuinely idle pane, because Claude Code now
+# This line used to hardcode a singular-count agent-footer pattern, and that
+# made `idle()` return false on a genuinely idle pane, because Claude Code now
 # renders its footer as `← for agents` with no count. Measured against a real
 # idle lane rather than argued:
 #
