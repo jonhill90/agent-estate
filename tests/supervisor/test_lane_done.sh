@@ -813,6 +813,106 @@ PY
       fi
       rtmux kill-session -t "$RS2" 2>/dev/null
     fi
+
+    # --- 7. THE #259 REGRESSION: a session-qualified target gets re-prefixed
+    #
+    # dispatch.sh prints its `target:` line, and `lanes.sh --free`'s second
+    # column, already session-qualified: `<session>:@<id>`. The OLD
+    # `TARGET="${SESSION}:${WINDOW}"` build blindly prepended $SESSION again
+    # to whatever was passed as $1, so a caller that passed the printed
+    # string through verbatim -- exactly what dispatch.sh's own comment
+    # instructs -- got `<session>:<session>:@<id>`. tmux cannot parse that as
+    # a specific window and falls back to the server's ACTIVE window
+    # (agent-dotfiles#259), which is very often the supervisor's own.
+    #
+    # Reproduced end to end: a session with an active "supervisor" window and
+    # a separate finished lane window, addressed by the exact malformed
+    # target the old build produced.
+    RS3="lanedone259-$$"
+    if ! rtmux new-session -d -s "$RS3" -n supervisor 2>/dev/null; then
+      bad "real tmux #259: started a third throwaway session" "new-session failed"
+    else
+      rtmux new-window -t "$RS3" -n ad259-finished-lane >/dev/null 2>&1
+      rtmux select-window -t "$RS3:supervisor" >/dev/null 2>&1
+      LANE_WID="$(rtmux list-windows -t "$RS3" -F '#{window_name} #{window_id}' | awk '$1=="ad259-finished-lane"{print $2}')"
+      # What dispatch.sh prints as `target:` -- already session-qualified.
+      PRINTED_TARGET="${RS3}:${LANE_WID}"
+
+      run259() {
+        ( sleep 1; rtmux wait-for -S "rt-259-$$" ) &
+        local sigpid=$!
+        env -u TMUX TMUX_TMPDIR="$RT" AGENT_SUPERVISOR_STATE_DIR="$3" \
+          timeout 8 bash "$1" "$2" ad259-finished-lane "rt-259-$$" "$RS3" >"$D/out259" 2>&1
+        rc259=$?
+        wait "$sigpid" 2>/dev/null
+      }
+      seed259() {
+        LEDGER_STATE="$1" ledger record-dispatch \
+          --lane "${RS3}:${LANE_WID}" --task ad259-finished-lane \
+          --summary "#259 single-owner target qualification" \
+          --pane-id '%259' --pane-path "$D" --command claude \
+          --server-id 'socket:1' --session-id '$0' --issue 259 >/dev/null 2>&1
+      }
+
+      # THE PRE-#259 SHAPE: unconditional re-prefix, reverting only the
+      # case-statement this fix adds back to the old one-liner.
+      PRE259="$SHIPDIR/lane-done-pre259.sh"
+      patch_rc259=0
+      python3 - "$LANE_DONE" "$PRE259" <<'PY' || patch_rc259=$?
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+new = 'case "$WINDOW" in\n  *:*) TARGET="$WINDOW" ;;\n  *)   TARGET="${SESSION}:${WINDOW}" ;;\nesac\n'
+assert text.count(new) == 1, "case-statement target build not unique -- script shape changed"
+old = 'TARGET="${SESSION}:${WINDOW}"\n'
+open(dst, "w").write(text.replace(new, old))
+PY
+      if [ "$patch_rc259" -ne 0 ]; then
+        bad "setup: patched a pre-#259 (unconditional re-prefix) copy of lane-done.sh" \
+          "could not patch $LANE_DONE (exit $patch_rc259) -- treating as a failure, not a skip"
+      else
+        ok "setup: patched a pre-#259 (unconditional re-prefix) copy of lane-done.sh"
+        chmod +x "$PRE259"
+
+        # RED: the old shape, given the exact string dispatch.sh printed.
+        # `<session>:<session>:@<id>` is unparseable as a specific window, so
+        # `display-message`'s CURRENT-name read resolves it to the server's
+        # ACTIVE window ("supervisor" -- #259's own measured behaviour, see
+        # the malformed-target repro this issue's fix was based on). That
+        # name does not match EXPECTED_NAME ("ad259-finished-lane"), so the
+        # name-match guard refuses and neither window is touched -- the near
+        # miss the issue reports: only that guard, by luck, stood between
+        # this and a renamed supervisor window. The observable damage is the
+        # one guaranteed either way: a finished lane that is never released.
+        seed259 "$D/state-259-pre"
+        run259 "$PRE259" "$PRINTED_TARGET" "$D/state-259-pre"; out=$(cat "$D/out259")
+        pre_supervisor_name="$(rtmux display-message -p -t "$RS3:supervisor" '#{window_name}')"
+        pre_lane_name="$(rtmux display-message -p -t "$RS3:$LANE_WID" '#{window_name}')"
+        pre_status=$(LEDGER_STATE="$D/state-259-pre" ledger status 2>&1)
+        want_exit "real tmux #259: the re-prefixed shape refuses (name-match guard: resolved the ACTIVE window's name, not the lane's)" \
+          "$rc259" 1 "$out"
+        want_contains "real tmux #259: ...specifically because it read the ACTIVE (supervisor) window's name" \
+          "supervisor" "$out"
+        want_contains "real tmux #259: the supervisor's window is untouched (the guard is what saved it, not a design that couldn't reach it)" \
+          "supervisor" "$pre_supervisor_name"
+        want_contains "real tmux #259: the finished lane's window is left exactly as it was -- never renamed" \
+          "ad259-finished-lane" "$pre_lane_name"
+        want_missing "real tmux #259: the re-prefixed shape never releases the finished lane -- it is stranded 'delivered' (#102's shape, reached via the argument format)" \
+          '"status":"complete"' "$pre_status"
+
+        # GREEN: the shipped script, given the exact same printed string.
+        seed259 "$D/state-259-fix"
+        run259 "$LANE_DONE" "$PRINTED_TARGET" "$D/state-259-fix"; out=$(cat "$D/out259")
+        fix_lane_name="$(rtmux display-message -p -t "$RS3:$LANE_WID" '#{window_name}')"
+        fix_supervisor_name="$(rtmux display-message -p -t "$RS3:supervisor" '#{window_name}')"
+        fix_status=$(LEDGER_STATE="$D/state-259-fix" ledger status 2>&1)
+        want_exit "real tmux #259: the shipped script accepts the printed target verbatim and exits zero" "$rc259" 0 "$out"
+        want_contains "real tmux #259: the finished lane IS released in the ledger" '"status":"complete"' "$fix_status"
+        want_contains "real tmux #259: the lane window is renamed back to free-N" "free-" "$fix_lane_name"
+        want_contains "real tmux #259: the supervisor's window is untouched" "supervisor" "$fix_supervisor_name"
+      fi
+      rtmux kill-session -t "$RS3" 2>/dev/null
+    fi
   fi
   cleanup_rt
   trap - EXIT
