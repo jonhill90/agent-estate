@@ -4,3 +4,9 @@ __pycache__/
 .pytest_cache/
 *.sqlite3-journal
 .env
+
+# Local, personal agent guidance -- never committed. AGENTS.LOCAL.md holds the
+# things that are Jon's rather than the project's (how to quote him publicly,
+# what must never be written down). CLAUDE.LOCAL.md is a symlink to it so the
+# two cannot drift.
+*.LOCAL.md

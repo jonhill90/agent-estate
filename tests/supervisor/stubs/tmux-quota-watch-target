@@ -1,0 +1,39 @@
+#!/bin/bash
+# Stub tmux for quota-watch.sh target-resolution tests (agent-supervisor#346).
+#
+# Unlike tmux-heartbeat-target's session, `agent-supervisor` legitimately
+# holds MANY windows (one per lane) -- "exactly one window" cannot be the
+# resolution rule here the way it is for the single-purpose director
+# session. This stub simulates that: several lane windows plus one named
+# `supervisor` (bootstrap-session.sh's own convention), so a name-based
+# resolve can be told apart from an "exactly one window" guess.
+#
+# TMUX_SESSIONS      space-separated sessions that "exist"
+# TMUX_GOOD_TARGET    the one session:window capture-pane succeeds on
+# TMUX_WINDOWS_NAMED  newline-separated "id<TAB>name" pairs list-windows
+#                     reports for the configured session
+LOG="${TMUX_LOG:?}"
+printf '%s\n' "$*" >> "$LOG"
+
+case "$1" in
+  has-session)
+    sess="$3"
+    for s in $TMUX_SESSIONS; do [ "$s" = "$sess" ] && exit 0; done
+    exit 1
+    ;;
+  list-windows)
+    # $2=-t $3=SESSION $4=-F $5=format
+    printf '%b\n' "$TMUX_WINDOWS_NAMED"
+    ;;
+  capture-pane)
+    # $2=-p $3=-t $4="=session:target"
+    tgt="${4#=}"
+    if [ "$tgt" = "$TMUX_GOOD_TARGET" ]; then
+      echo "esc to interrupt"
+      exit 0
+    fi
+    exit 1
+    ;;
+  send-keys) : ;;
+esac
+exit 0

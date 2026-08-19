@@ -1,0 +1,51 @@
+name: Fixpass evidence
+
+# agent-supervisor#338: a fix pass that claims a defect is gone without
+# pasting the reviewer's own reproduction re-run leaves the re-reviewer to
+# re-derive everything -- a full fresh review where a check would do. This
+# is what makes that enforced rather than remembered: it runs on every PR,
+# and fails one that has a REQUEST CHANGES review or a rejected `Verdict:`
+# comment on record but no populated `<!-- fixpass-evidence:v1 -->` block
+# anywhere in the body or comments. See
+# scripts/supervisor/fixpass_evidence_gate.py for the check itself and
+# tests/supervisor/test_fixpass_evidence_gate.py for its own tests (stubbed
+# `gh`, no network).
+#
+# This is the whole mechanism -- no change to merge-pr.sh was needed.
+# ci_gate.py (agent-supervisor#13) already refuses to merge past any red
+# required check at the live head SHA; wiring this in as a check reuses that
+# refusal instead of duplicating it.
+#
+# Two triggers, not one, mirroring ui-evidence.yml (#110): a push updates the
+# diff, but evidence is commonly posted as a follow-up comment after review
+# -- without issue_comment, a PR that added evidence by commenting would
+# stay red until an unrelated push re-ran the check.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, edited]
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  gate:
+    # issue_comment fires for both issues and PRs; only a PR comment has
+    # `issue.pull_request` set. Skip anything else so this never runs
+    # against a plain issue thread (Issues is degraded in this estate
+    # anyway -- see CLAUDE.md).
+    if: github.event_name == 'pull_request' || github.event.issue.pull_request != null
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Check fixpass evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          PR="${{ github.event.pull_request.number || github.event.issue.number }}"
+          python3 scripts/supervisor/fixpass_evidence_gate.py --repo "${{ github.repository }}" --number "$PR"

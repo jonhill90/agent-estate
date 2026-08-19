@@ -1,0 +1,42 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jonhill.director-loop</string>
+  <!-- agent-supervisor#321. The Director was described as "self-driving on a
+       15-min loop" for weeks and was not: no crontab, no launchd job, no
+       self-scheduled wakeup. Every action came from an external nudge. This
+       is the loop that description assumed existed.
+
+       900s cadence, deliberately SHORTER than heartbeat.sh's 1800s stall
+       threshold: in a healthy estate this always gets there first, and a
+       heartbeat nudge therefore means THIS failed -- a signal worth having.
+
+       director-loop.sh --once does one pass and exits, so a wedged tmux
+       cannot leave a long-lived process that pgrep still reports alive. It
+       refuses to send to a busy pane or over a non-empty input box. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>/Users/jon/source/repos/Personal/agent-supervisor/scripts/supervisor/director-loop.sh</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/jon/.local/bin</string>
+    <key>HOME</key>
+    <string>/Users/jon</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/jon/.local/state/agent-dotfiles-supervisor/director-loop.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jon/.local/state/agent-dotfiles-supervisor/director-loop.log</string>
+</dict>
+</plist>

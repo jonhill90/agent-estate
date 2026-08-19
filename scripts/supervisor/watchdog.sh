@@ -200,6 +200,48 @@ ESCALATE_WINDOW=3600 # ...within this window, or stop and escalate
 # closed for inbox-poll.sh, left open here.
 INBOX_POLL_STATUS_PATH="${SUPERVISOR_INBOX_POLL_STATUS:-$STATE/inbox-poll.status}"
 INBOX_HEARTBEAT_EPISODE="${SUPERVISOR_HEARTBEAT_EPISODE:-$STATE/.watchdog-heartbeat-episode.json}"
+
+# --- agent-supervisor#276: quota-watch heartbeat staleness ------------------
+# quota-watch.sh is the estate's ONLY path back to work once a quota window
+# closes (see that file's own header) -- and on 2026-08-16 it hung inside an
+# unbounded `quota.sh check` call for three hours while `pgrep` kept
+# reporting it alive on every tick, because "the process exists" was the
+# only thing anything checked. quota-watch.sh now writes a `checked:`/
+# `state:` heartbeat to $QUOTA_WATCH_STATUS_PATH after each iteration's work
+# (never before), the same shape #163 already gave inbox-poll.status --
+# reused here via the SAME generic `--mode heartbeat` in watchdog_notify.py,
+# not a new parser. A live pid with a stale heartbeat is exactly the case
+# that went undetected for three hours; this check reports it as unhealthy
+# regardless of what the process table says, because the process table is
+# not what this check reads.
+QUOTA_WATCH_STATUS_PATH="${SUPERVISOR_QUOTA_WATCH_STATUS:-$STATE/.quota-watch.state}"
+QUOTA_WATCH_HEARTBEAT_EPISODE="${SUPERVISOR_QUOTA_WATCH_HEARTBEAT_EPISODE:-$STATE/.watchdog-quota-watch-heartbeat-episode.json}"
+# 2x quota-watch.sh's own default poll interval (300s) -- same "under ~2x
+# the loop interval" rule the brief states outright, so one missed tick from
+# scheduling jitter alone never pages, but two in a row does.
+QUOTA_WATCH_HEARTBEAT_STALE_AFTER="${QUOTA_WATCH_HEARTBEAT_STALE_AFTER:-600}"
+
+# --- agent-supervisor#341: weekly-watch heartbeat staleness -----------------
+# weekly-watch.sh (from #328/#327) shipped with no liveness instrumentation
+# at all -- no heartbeat on any code path, and no check here. A hung
+# process, a permanently broken meter, or a launchd job that silently
+# stopped firing (launchd reports a job "loaded" even if it has not run
+# since it was loaded -- the specific trap this check exists to avoid) all
+# produced the identical observable state as "everything's fine, below
+# threshold": no file, only a `weekly-watch.log` line nothing scans. Same
+# generic `--mode heartbeat` reuse as check_quota_watch_heartbeat above,
+# against weekly-watch.sh's own `.weekly-watch.state` stamp and a separate
+# episode -- a live pid (or a freshly-loaded launchd job) with a stale
+# heartbeat must read as unhealthy regardless of what launchd's own
+# "loaded" status or the process table says, because neither is what this
+# check reads.
+WEEKLY_WATCH_STATUS_PATH="${SUPERVISOR_WEEKLY_WATCH_STATUS:-$STATE/.weekly-watch.state}"
+WEEKLY_WATCH_HEARTBEAT_EPISODE="${SUPERVISOR_WEEKLY_WATCH_HEARTBEAT_EPISODE:-$STATE/.watchdog-weekly-watch-heartbeat-episode.json}"
+# weekly-watch.sh has no loop of its own -- launchd ticks it every 1800s
+# (StartInterval). 2x that interval, same "under ~2x the loop interval"
+# rule QUOTA_WATCH_HEARTBEAT_STALE_AFTER above uses, so one missed launchd
+# tick from scheduling jitter alone never pages, but two in a row does.
+WEEKLY_WATCH_HEARTBEAT_STALE_AFTER="${WEEKLY_WATCH_HEARTBEAT_STALE_AFTER:-3600}"
 # agent-supervisor#41: watchdog.status is rebuilt from scratch every tick
 # (report(), below), so a fact that must survive across ticks -- when
 # poller-recover.sh last actually confirmed the poller alive, and how many
@@ -310,6 +352,57 @@ LANE_SWEEP_INTERVAL="${SUPERVISOR_LANE_SWEEP_INTERVAL:-120}"
 # task is trusted to mean "finished, never signalled" rather than "between
 # tool calls" (lane-done.sh's own header names this exact danger, #102).
 LANE_SWEEP_IDLE_AFTER="${SUPERVISOR_LANE_SWEEP_IDLE_AFTER:-300}"
+
+# agent-supervisor#199/#205: worktree-guard-audit.sh (this repo) existed with
+# nothing calling it -- the PR that shipped it was blocked on exactly that:
+# "a tool that fails closed and that nothing calls is a documentation rule
+# with a binary attached" (CLAUDE.md). CI was rejected as the home because
+# the leak this guards against is a LIVE-WORKTREE phenomenon on this machine,
+# not a repo-state one -- a stale worktree that CI never sees is precisely
+# what leaked in #199. This watchdog already runs unattended against the
+# live estate every ${TICK_INTERVAL}s outside the loop (this file's own
+# header), the same reason #112's never-busy check and #133's source-task
+# sweep both live here rather than as bespoke cron entries -- one unattended
+# entry point with PATH/credential/staleness handling already solved, not a
+# second one built from scratch. Read-only, git-plumbing-only (see that
+# script's own header) -- safe to run from here.
+#
+# Throttled like the other sweeps above: 2669 file@worktree pairs measured
+# against the live estate (#205's PR body) is cheap but not free, and a gap
+# does not appear or vanish between one 180s tick and the next -- a worktree
+# only ADVANCES past the guard's commit when something fetches and rebases
+# it, which happens on the order of dispatches, not seconds. Default matches
+# neither sweep exactly: cheaper than the hourly GitHub-bound source sweep
+# (no external API call here), but coarser than the 120s lane sweep (this one
+# walks every worktree's git objects, the lane sweep reads a handful of tmux
+# panes).
+GUARD_AUDIT_STAMP="${SUPERVISOR_GUARD_AUDIT_STAMP:-$STATE/.worktree-guard-audit-last}"
+GUARD_AUDIT_INTERVAL="${SUPERVISOR_GUARD_AUDIT_INTERVAL:-1800}"
+# Dedup key for paging: the actual set of GAP lines the audit reported, not a
+# boolean -- same discipline #112's NEVER_BUSY_EPISODE uses, so a DIFFERENT
+# gap appearing while an earlier one is still open still pages, and the same
+# unchanged gap does not re-page every 30 minutes once a human has been told.
+GUARD_AUDIT_EPISODE="${SUPERVISOR_GUARD_AUDIT_EPISODE:-$STATE/.watchdog-guard-audit-episode}"
+# The check ITSELF failing to run (script missing/not executable, git
+# unreadable) is a different fact from it running and finding gaps -- #163's
+# lesson, applied here the same way #112's NEVER_BUSY_CHECK_FAIL_STREAK
+# already applies it: a safety check that cannot run is itself an alarm
+# condition, escalated every Nth consecutive failure so it cannot go quiet
+# forever after one page.
+GUARD_AUDIT_FAIL_STREAK="${SUPERVISOR_GUARD_AUDIT_FAIL_STREAK:-$STATE/.watchdog-guard-audit-fail-streak}"
+GUARD_AUDIT_FAIL_ESCALATE_AFTER="${SUPERVISOR_GUARD_AUDIT_FAIL_ESCALATE_AFTER:-3}"
+# agent-supervisor#205 review (skills:2): the call into worktree-guard-audit.sh
+# below had no bound at all -- #267's shape, and the exact thing f810a64/#276
+# was written to catch a day before this PR's CI ran. worktree-guard-audit.sh
+# itself now bounds each individual `git show`, but this is the outer,
+# whole-invocation backstop: it must never depend on that inner bound being
+# bug-free, because this call runs on EVERY exit path, ahead of
+# advance_on_exit (this file's own comment on check_worktree_guard_audit
+# below), and a hang here would silently wedge the one thing that must not
+# depend on which check fired this tick. 120s default: ~58s measured for the
+# real worktree farm (#205's PR body) plus headroom, well under
+# GUARD_AUDIT_INTERVAL's 1800s cadence.
+GUARD_AUDIT_TIMEOUT="${SUPERVISOR_GUARD_AUDIT_TIMEOUT:-120}"
 
 # Credentials + NOTIFY_SCRIPT for the escalate path. Sourced here so the
 # LaunchAgent needs no secrets inlined in its plist.
@@ -568,6 +661,33 @@ heartbeat_note() {               # heartbeat_note <line>
   return 0
 }
 
+# Same tmp+rename append shape again, for agent-supervisor#276's quota-watch
+# heartbeat check. A distinct line from `heartbeat:` (which is inbox-poll's)
+# rather than reusing it -- two different subsystems' staleness must both
+# stay visible in one `cat watchdog.status`, not overwrite each other.
+quota_watch_note() {             # quota_watch_note <line>
+  local tmp="$STATUS.qw.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^quota-watch:' "$STATUS"; printf 'quota-watch: %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# Same tmp+rename append shape again, for agent-supervisor#341's
+# weekly-watch heartbeat check. A distinct line from `quota-watch:` --
+# two different schedulers watching two different quota windows, and
+# collapsing them into one field would hide either one's staleness behind
+# whichever ran last.
+weekly_watch_note() {            # weekly_watch_note <line>
+  local tmp="$STATUS.ww.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^weekly-watch:' "$STATUS"; printf 'weekly-watch: %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 # Same tmp+rename append shape again, for the process-table measurement of
 # inbox-poll.sh. This line is intentionally absent in the healthy one-poller
 # case: the detector should be silent when the process table is exactly right.
@@ -602,6 +722,20 @@ recovery_note() {                # recovery_note <line>
   local tmp="$STATUS.recovery.$$"
   [ -f "$STATUS" ] || return 0
   { grep -v '^recovery:' "$STATUS"; printf 'recovery: %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# Same tmp+rename append shape again, for agent-supervisor#276's
+# quota-watch-recover.sh outcome. A separate line from `recovery:` (the
+# inbox poller's) -- two different recovery mechanisms for two different
+# processes, and collapsing them into one field would hide either restart
+# behind whichever ran last.
+quota_watch_recovery_note() {    # quota_watch_recovery_note <line>
+  local tmp="$STATUS.qwrecovery.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^quota-watch-recover:' "$STATUS"; printf 'quota-watch-recover: %s\n' "$1"; } >"$tmp" 2>/dev/null
   if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
   rm -f "$tmp" 2>/dev/null
   return 0
@@ -642,6 +776,19 @@ never_busy_note() {              # never_busy_note <line>
   return 0
 }
 
+# Same tmp+rename append shape again, for agent-supervisor#199/#205's
+# continuous worktree-guard-audit wiring. Written whether the check ran clean,
+# found a gap, or could not run at all -- `cat watchdog.status` is where a
+# human looks first, the same posture every other note function here takes.
+guard_audit_note() {             # guard_audit_note <line>
+  local tmp="$STATUS.guardaudit.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^guard-audit:' "$STATUS"; printf 'guard-audit: %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 # Runs on EVERY exit path, regardless of which early `exit 0` above fired --
 # that is the whole reason this lives in the trap rather than in the main
 # body: the supervisor-loop checks below (busy/idle/asleep/...) all return
@@ -667,6 +814,61 @@ check_inbox_heartbeat() {
     log "HEARTBEAT-CHECK FAILED rc=$notify_rc: $notify_out"
   else
     log "HEARTBEAT-CHECK: $notify_out"
+  fi
+}
+
+# agent-supervisor#276: runs on EVERY exit path, same reasoning as
+# check_inbox_heartbeat above -- quota-watch.sh is a different subsystem
+# from the supervisor-loop checks (busy/idle/asleep/...) that return early
+# throughout this file, and the whole point of watching it from here is that
+# a hung quota-watch.sh leaves the loop itself looking perfectly healthy (it
+# is the loop's own wake-up path that dies, not the loop). Identical shape to
+# check_inbox_heartbeat, against a different status file and a separate
+# episode -- the two staleness alarms must not share dedup state, the same
+# discipline #163/as#151 already established for every other check here.
+check_quota_watch_heartbeat() {
+  local notify_out notify_rc
+  notify_out=$(python3 "$HERE/watchdog_notify.py" \
+    --mode heartbeat \
+    --heartbeat-status-path "$QUOTA_WATCH_STATUS_PATH" \
+    --threshold-seconds "$QUOTA_WATCH_HEARTBEAT_STALE_AFTER" \
+    --episode-state-path "$QUOTA_WATCH_HEARTBEAT_EPISODE" \
+    --log-path "$STATE/watchdog-notify.log" \
+    --notify-script "${NOTIFY_SCRIPT:-}" 2>&1)
+  notify_rc=$?
+  quota_watch_note "$(printf '%s' "$notify_out" | tr '\n' ' ')"
+  if [ "$notify_rc" -ne 0 ]; then
+    log "QUOTA-WATCH-HEARTBEAT-CHECK FAILED rc=$notify_rc: $notify_out"
+  else
+    log "QUOTA-WATCH-HEARTBEAT-CHECK: $notify_out"
+  fi
+}
+
+# agent-supervisor#341: runs on EVERY exit path, same reasoning as
+# check_quota_watch_heartbeat above -- weekly-watch.sh is a different
+# scheduler watching a different quota window, and the whole point of
+# watching it from here is that a hung or never-firing weekly-watch.sh
+# leaves everything else in this estate looking perfectly healthy (it is
+# the ONLY alarm that tells Jon the weekly quota is nearly gone, and
+# nothing else notices if it goes quiet). Identical shape to
+# check_quota_watch_heartbeat, against a separate status file and episode
+# -- the two staleness alarms must not share dedup state, the same
+# discipline #163/#276 already established for every other check here.
+check_weekly_watch_heartbeat() {
+  local notify_out notify_rc
+  notify_out=$(python3 "$HERE/watchdog_notify.py" \
+    --mode heartbeat \
+    --heartbeat-status-path "$WEEKLY_WATCH_STATUS_PATH" \
+    --threshold-seconds "$WEEKLY_WATCH_HEARTBEAT_STALE_AFTER" \
+    --episode-state-path "$WEEKLY_WATCH_HEARTBEAT_EPISODE" \
+    --log-path "$STATE/watchdog-notify.log" \
+    --notify-script "${NOTIFY_SCRIPT:-}" 2>&1)
+  notify_rc=$?
+  weekly_watch_note "$(printf '%s' "$notify_out" | tr '\n' ' ')"
+  if [ "$notify_rc" -ne 0 ]; then
+    log "WEEKLY-WATCH-HEARTBEAT-CHECK FAILED rc=$notify_rc: $notify_out"
+  else
+    log "WEEKLY-WATCH-HEARTBEAT-CHECK: $notify_out"
   fi
 }
 
@@ -868,6 +1070,42 @@ check_poller_window() {
     if [ -n "$out" ]; then
       log "POLLER-RECOVER: $out"
     fi
+  fi
+}
+
+# agent-supervisor#276: runs on EVERY exit path, same reasoning as
+# check_poller_window above -- restarting a hung quota-watch.sh is a
+# different subsystem from the supervisor-loop checks (busy/idle/asleep/...)
+# that return early throughout this file, and must not depend on the loop
+# itself being idle to get a turn. quota-watch-recover.sh reads the SAME
+# heartbeat stamp check_quota_watch_heartbeat above just alarmed on (or
+# didn't) -- the alarm and the fix act on one fact, not two that could
+# disagree, and the recover script is idempotent (its own mkdir lock, its
+# own "nothing to do" branch on a fresh heartbeat) so calling it every tick
+# is cheap on the ordinary healthy path.
+check_quota_watch_recover() {
+  if [ ! -e "$HERE/quota-watch-recover.sh" ]; then
+    log "QUOTA-WATCH-RECOVER-MISSING: quota-watch-recover.sh is missing beside this watchdog; reinstall or advance the live worktree"
+    quota_watch_recovery_note "missing — quota-watch-recover.sh is missing beside this watchdog; reinstall or advance the live worktree"
+    return 0
+  fi
+  if [ ! -x "$HERE/quota-watch-recover.sh" ]; then
+    log "QUOTA-WATCH-RECOVER-BROKEN: quota-watch-recover.sh exists but is not executable; run chmod +x $HERE/quota-watch-recover.sh or restore the committed 100755 mode"
+    quota_watch_recovery_note "broken — quota-watch-recover.sh exists but is not executable; run chmod +x $HERE/quota-watch-recover.sh or restore the committed 100755 mode"
+    return 0
+  fi
+  local out rc
+  out=$(SUPERVISOR_STATE="$STATE" SUPERVISOR_LIVE="$LIVE" \
+        QUOTA_WATCH_STATUS_PATH="$QUOTA_WATCH_STATUS_PATH" \
+        QUOTA_WATCH_STALE_AFTER="$QUOTA_WATCH_HEARTBEAT_STALE_AFTER" \
+        "$HERE/quota-watch-recover.sh" 2>&1)
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    log "QUOTA-WATCH-RECOVER FAILED rc=$rc: $out"
+    quota_watch_recovery_note "failed — rc=$rc: $(printf '%s' "$out" | tr '\n' ' ')"
+  elif [[ "$out" == *"RESTARTED"* ]]; then
+    log "QUOTA-WATCH-RECOVER: $out"
+    quota_watch_recovery_note "$(printf '%s' "$out" | tr '\n' ' ')"
   fi
 }
 
@@ -1173,6 +1411,192 @@ print("\n".join(sorted(r.get("name", "") for r in rows if r.get("state") == "nev
   return 0
 }
 
+# agent-supervisor#199/#205: the check ITSELF being unable to run (script
+# missing/not executable, this worktree's toplevel unreadable) is a different
+# fact from it running and reporting gaps -- see GUARD_AUDIT_FAIL_STREAK's
+# definition above for why this mirrors never_busy_check_failed rather than
+# just logging.
+guard_audit_check_failed() {
+  local reason="$1" streak=0 notify_script notify_out notify_rc
+  [ -r "$GUARD_AUDIT_FAIL_STREAK" ] && streak=$(cat "$GUARD_AUDIT_FAIL_STREAK" 2>/dev/null)
+  [[ "$streak" =~ ^[0-9]+$ ]] || streak=0
+  streak=$((streak + 1))
+  printf '%s' "$streak" >"$GUARD_AUDIT_FAIL_STREAK" 2>/dev/null
+  log "GUARD-AUDIT-CHECK FAILED (streak ${streak}): $reason"
+  guard_audit_note "unknown — $reason (failed ${streak} check(s) in a row)"
+  if [ $(( streak % GUARD_AUDIT_FAIL_ESCALATE_AFTER )) -ne 0 ]; then
+    return 0
+  fi
+  notify_script="${NOTIFY_SCRIPT:-}"
+  if [ -z "$notify_script" ] || [ ! -x "$notify_script" ]; then
+    notify_script="$HERE/notify.sh"
+  fi
+  if [ ! -x "$notify_script" ]; then
+    log "GUARD-AUDIT-CHECK-ESCALATE-UNAVAILABLE: no notifier at $notify_script"
+    return 0
+  fi
+  notify_out=$(AGENT_NOTIFY_CALLER=supervisor "$notify_script" \
+    "worktree-guard-audit safety check has failed ${streak} times in a row" \
+    "agent-supervisor#199/#205: the continuous worktree-guard-audit.sh check cannot run: ${reason}. This has failed ${streak} consecutive ticks — a stale, unguarded worktree could be leaking tmux sessions with nothing watching for it." 2>&1)
+  notify_rc=$?
+  if [ "$notify_rc" -ne 0 ]; then
+    log "GUARD-AUDIT-CHECK-ESCALATE-FAILED rc=$notify_rc: $notify_out"
+  else
+    log "GUARD-AUDIT-CHECK-ESCALATE: $notify_out"
+  fi
+  return 0
+}
+
+# agent-supervisor#199/#205: runs on EVERY exit path, same reasoning as
+# check_source_task_sweep/check_lane_completion_sweep above -- a stale
+# unguarded worktree does not care which branch of this script's own
+# busy/idle/asleep logic short-circuited this tick. Self-throttled against
+# GUARD_AUDIT_STAMP (see that var's own comment for the cadence reasoning);
+# most ticks return in the first branch below having done nothing.
+#
+# This is the caller #205's review demanded: worktree-guard-audit.sh is
+# read-only against every worktree's PINNED commit (git show only, see that
+# script's own header) -- nothing here mutates a worktree, kills a session,
+# or touches tmux at all.
+check_worktree_guard_audit() {
+  local last=0
+  if [ -r "$GUARD_AUDIT_STAMP" ]; then
+    last=$(cat "$GUARD_AUDIT_STAMP" 2>/dev/null)
+  fi
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  if [ $(( now - last )) -lt "$GUARD_AUDIT_INTERVAL" ]; then
+    return 0
+  fi
+  # Stamped whether the run below succeeds or not, same reasoning the source
+  # and lane sweeps give: retrying every 180s instead of waiting out the
+  # interval buys nothing, since a worktree does not un-advance between ticks.
+  printf '%s' "$now" >"$GUARD_AUDIT_STAMP" 2>/dev/null
+
+  if [ ! -e "$HERE/worktree-guard-audit.sh" ]; then
+    guard_audit_check_failed "worktree-guard-audit.sh is missing beside this watchdog; reinstall or advance the live worktree"
+    return 0
+  fi
+  if [ ! -x "$HERE/worktree-guard-audit.sh" ]; then
+    guard_audit_check_failed "worktree-guard-audit.sh exists but is not executable; run chmod +x $HERE/worktree-guard-audit.sh or restore the committed 100755 mode"
+    return 0
+  fi
+  # SUPERVISOR_GUARD_AUDIT_REPO overrides which repository's worktree list is
+  # audited -- same override shape as SUPERVISOR_STATE/SUPERVISOR_REPOS above.
+  # A test needs this: proving the WIRING means running the real
+  # worktree-guard-audit.sh through the real watchdog.sh (not a stub), but
+  # pointed at a disposable throwaway repo with a deliberately unguarded
+  # worktree, never at the real farm this machine happens to have checked out.
+  local root
+  root="${SUPERVISOR_GUARD_AUDIT_REPO:-$(git -C "$HERE" rev-parse --show-toplevel 2>/dev/null)}"
+  if [ -z "$root" ]; then
+    guard_audit_check_failed "cannot resolve this repository's toplevel to audit its worktree list"
+    return 0
+  fi
+
+  # agent-supervisor#205 review (skills:2): bounded the same way
+  # advance-live.sh#51 bounds its `git fetch` -- background + a `kill -0`
+  # poll loop, not a `timeout`/`gtimeout` wrapper, for the same reason that
+  # file's own comment gives: SUPERVISOR_PATH pins a minimal PATH and this
+  # repo's own suite proves scripts under this watchdog run with only
+  # /usr/bin:/bin, which ships neither on macOS. A hang here is a fourth
+  # thing (unknown), not a clean result and not a gap -- it must never fall
+  # through to either.
+  local out out_file rc audit_pid waited timed_out
+  out_file=$(mktemp "${TMPDIR:-/tmp}/watchdog-guard-audit.XXXXXX") || {
+    guard_audit_check_failed "could not create a scratch file for worktree-guard-audit.sh's output"
+    return 0
+  }
+  "$HERE/worktree-guard-audit.sh" "$root" >"$out_file" 2>&1 &
+  audit_pid=$!
+  waited=0
+  timed_out=0
+  while kill -0 "$audit_pid" 2>/dev/null; do
+    if [ "$waited" -ge "$GUARD_AUDIT_TIMEOUT" ]; then
+      timed_out=1
+      kill -TERM "$audit_pid" 2>/dev/null
+      sleep 1
+      kill -KILL "$audit_pid" 2>/dev/null
+      break
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  wait "$audit_pid" 2>/dev/null
+  rc=$?
+  out=$(cat "$out_file" 2>/dev/null)
+  rm -f "$out_file"
+
+  if [ "$timed_out" -eq 1 ]; then
+    guard_audit_check_failed "worktree-guard-audit.sh did not finish within ${GUARD_AUDIT_TIMEOUT}s and was killed -- treating as unknown, not clean"
+    return 0
+  fi
+
+  # The script ran and answered -- clean or gaps, either way a real result,
+  # not a check failure, so the fail streak resets even when gaps were found.
+  printf '0' >"$GUARD_AUDIT_FAIL_STREAK" 2>/dev/null
+
+  local summary
+  summary=$(grep -m1 '^worktree-guard-audit:' <<<"$out")
+  [ -n "$summary" ] || summary="ran, rc=$rc, no summary line: $(printf '%s' "$out" | tr '\n' ' ')"
+
+  if [ "$rc" -eq 0 ]; then
+    log "GUARD-AUDIT: $summary"
+    guard_audit_note "$summary"
+    if [ -s "$GUARD_AUDIT_EPISODE" ]; then
+      log "GUARD-AUDIT-CLEAR: previously reported gap(s) are gone"
+      rm -f "$GUARD_AUDIT_EPISODE" 2>/dev/null
+    fi
+    return 0
+  fi
+
+  # Nonzero: the script's own contract is "exit nonzero iff gaps>0 or
+  # unknowns>0" (its own `[ "$gaps" -eq 0 ] && [ "$unknowns" -eq 0 ]` final
+  # line) -- treat any nonzero the same way, gaps and/or unknowns reported or
+  # not, rather than silently swallowing an unrecognised failure shape as if
+  # it were the clean case. UNKNOWN lines (a single `git show` that hit its
+  # own bound, #205 review) are included here on purpose: a per-file timeout
+  # is neither a gap nor clean, and must page the same as a gap rather than
+  # vanish because no GAP line happened to be present.
+  local gaps
+  gaps=$(grep -E '^(GAP|UNKNOWN)' <<<"$out")
+  log "GUARD-AUDIT-GAP: $summary"
+  guard_audit_note "GAP — $summary"
+
+  local prev
+  prev=""
+  [ -r "$GUARD_AUDIT_EPISODE" ] && prev=$(cat "$GUARD_AUDIT_EPISODE" 2>/dev/null)
+  if [ "$prev" = "$gaps" ]; then
+    log "GUARD-AUDIT-DEDUP: same gap(s) already paged this episode"
+    return 0
+  fi
+  printf '%s' "$gaps" >"$GUARD_AUDIT_EPISODE" 2>/dev/null
+
+  local notify_script notify_out notify_rc
+  notify_script="${NOTIFY_SCRIPT:-}"
+  if [ -z "$notify_script" ] || [ ! -x "$notify_script" ]; then
+    notify_script="$HERE/notify.sh"
+  fi
+  if [ ! -x "$notify_script" ]; then
+    log "GUARD-AUDIT-NOTIFY-UNAVAILABLE: no notifier at $notify_script"
+    guard_audit_note "GAP — $summary — FAILED to notify, no notifier at $notify_script"
+    return 0
+  fi
+  notify_out=$(AGENT_NOTIFY_CALLER=supervisor "$notify_script" \
+    "worktree-guard-audit found unguarded worktree(s)" \
+    "agent-supervisor#199/#205: $summary. $(printf '%s' "$gaps" | tr '\n' ' ' | sed 's/[[:space:]]*$//')" 2>&1)
+  notify_rc=$?
+  if [ "$notify_rc" -ne 0 ]; then
+    log "GUARD-AUDIT-NOTIFY-FAILED rc=$notify_rc: $notify_out"
+    # Same "failure must be visible locally" posture the escalate/never-busy
+    # paths take: a notifier that cannot deliver must not read as "a human
+    # was told" just because this check ran and found something.
+    guard_audit_note "GAP — $summary — FAILED to reach a human: $(printf '%s' "$notify_out" | tr '\n' ' ')"
+  else
+    log "GUARD-AUDIT-NOTIFY: $notify_out"
+  fi
+  return 0
+}
+
 # Runs on EVERY exit path. It must never change this tick's exit status and
 # must never abort it: a refused advance is a report, not a crash -- the tick
 # it rode out on had already succeeded, and failing it would turn "the code is
@@ -1272,12 +1696,16 @@ advance_on_exit() {
 on_exit() {
   local rc=$?
   check_inbox_heartbeat
+  check_quota_watch_heartbeat
+  check_weekly_watch_heartbeat
   check_director_inbox
   check_poller_process_count
   check_poller_window
+  check_quota_watch_recover
   check_source_task_sweep
   check_lane_completion_sweep
   check_never_busy_lanes
+  check_worktree_guard_audit
   advance_on_exit "$rc"
   return $rc
 }

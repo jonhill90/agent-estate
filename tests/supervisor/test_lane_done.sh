@@ -307,6 +307,182 @@ else
   fi
 fi
 
+# --- agent-supervisor#308 item 1: PR-authorship recording (WRITE half) -----
+#
+# The mechanism issue #308 asked for by name -- "explicit recording from
+# lane-done.sh" -- had red/green coverage of `Ledger.record_pr_for_task`/
+# `get_task_for_pr_number` in test_core.py only. This is the shell glue
+# around it: `gh repo view`/`gh pr view` from the completed task's own
+# worktree, the `sed` parse of `record-completion`'s JSON for `id`/
+# `worktree_path` that feeds them, and the best-effort call to
+# `record-pr-for-task` itself, driven through the REAL lane-done.sh -- no
+# hand-authored fixture standing in for any of it.
+#
+# The READ half (dispatch.sh step 2.1's `pr-task` lookup) has its own real-
+# `dispatch.sh` integration test in test_dispatch.sh, deliberately NOT
+# chained onto this one through a second script invocation: this file's
+# tmux stub models `wait-for`/`rename-window` rendezvous semantics,
+# dispatch.sh's models `send-keys`/pane-menu shapes, and gluing the two
+# together would prove the STUBS agree with each other, not that either
+# script honours its own contract. `cli.py record-pr-for-task`/`pr-task` is
+# the seam where the two scripts actually meet, and it is exercised for
+# real -- as the write here, as the read there.
+cat >> "$D/lanes" <<'FIX'
+7|ad308-pr-write
+FIX
+
+# A minimal `gh` stub: GH_STUB_REPO/GH_STUB_PR_NUMBER answer `repo view`/
+# `pr view`; either left unset makes that call fail, modelling "gh
+# unreachable" or "no PR yet" -- the exact best-effort cases this block is
+# written to survive.
+cat > "$D/gh" <<'GHSTUB'
+#!/bin/bash
+sub="${1:-}"; verb="${2:-}"
+case "$sub $verb" in
+  "repo view") [ -n "${GH_STUB_REPO:-}" ] && printf '%s\n' "$GH_STUB_REPO" || exit 1 ;;
+  "pr view")   [ -n "${GH_STUB_PR_NUMBER:-}" ] && printf '%s\n' "$GH_STUB_PR_NUMBER" || exit 1 ;;
+  *) exit 1 ;;
+esac
+GHSTUB
+chmod +x "$D/gh"
+
+ledger_pr_task() { AGENT_SUPERVISOR_STATE_DIR="$D/state-308write" python3 "$HERE/../../scripts/supervisor/cli.py" pr-task --repo acme/agent-dotfiles --pr "$1" 2>&1; }
+
+DONE_WT="$D/worktree-308"; mkdir -p "$DONE_WT"
+LEDGER_STATE="$D/state-308write" ledger record-dispatch \
+  --lane t:7 --task ad308-pr-write \
+  --summary "#308 item 1 -- PR-authorship write" \
+  --pane-id '%7' --pane-path "$D" --command claude \
+  --server-id 'socket:1' --session-id '$0' --issue 308 \
+  --worktree "$DONE_WT" >/dev/null 2>&1
+seed_rc=$?
+if [ "$seed_rc" -ne 0 ]; then
+  bad "setup: a dispatched task exists with a worktree, ready to complete" "record-dispatch exited $seed_rc"
+else
+  ok "setup: a dispatched task exists with a worktree, ready to complete"
+
+  # --- happy path: gh answers both, the round trip lands -------------------
+  GH_STUB_REPO="acme/agent-dotfiles" GH_STUB_PR_NUMBER="972"
+  export GH_STUB_REPO GH_STUB_PR_NUMBER
+  signal ad308-done
+  out=$(LEDGER_STATE="$D/state-308write" run 7 ad308-pr-write ad308-done t); rc=$?
+  want_exit "a completed task whose branch is now a PR still exits zero" "$rc" 0 "$out"
+  want_missing "gh succeeding leaves no best-effort failure reported" "could not record PR authorship" "$out"
+  prtask=$(ledger_pr_task 972)
+  want_contains "PR #972's authorship resolves by lookup to the task that opened it" '"known":true' "$prtask"
+  want_contains "...naming the exact task" '"task":"ad308-pr-write"' "$prtask"
+  want_contains "...and the exact lane" '"lane":"t:7"' "$prtask"
+  unset GH_STUB_REPO GH_STUB_PR_NUMBER
+fi
+
+# --- best effort: gh unreachable (repo view fails) never turns a genuine ---
+# completion into a reported failure, and nothing is recorded -----------------
+DONE_WT2="$D/worktree-308-norepo"; mkdir -p "$DONE_WT2"
+LEDGER_STATE="$D/state-308norepo" ledger record-dispatch \
+  --lane t:7 --task ad308-pr-norepo \
+  --summary "#308 item 1 -- gh unreachable" \
+  --pane-id '%7' --pane-path "$D" --command claude \
+  --server-id 'socket:1' --session-id '$0' --issue 308 \
+  --worktree "$DONE_WT2" >/dev/null 2>&1
+seed_rc=$?
+if [ "$seed_rc" -ne 0 ]; then
+  bad "setup: a dispatched task exists, gh about to be unreachable" "record-dispatch exited $seed_rc"
+else
+  ok "setup: a dispatched task exists, gh about to be unreachable"
+  cat > "$D/lanes" <<'FIX'
+7|ad308-pr-norepo
+FIX
+  signal ad308-done
+  out=$(LEDGER_STATE="$D/state-308norepo" run 7 ad308-pr-norepo ad308-done t); rc=$?
+  want_exit "gh unreachable still exits zero -- best effort, not fatal" "$rc" 0 "$out"
+  want_missing "and is silent about it -- dispatch.sh's other paths still apply" "could not record PR authorship" "$out"
+  AGENT_SUPERVISOR_STATE_DIR="$D/state-308norepo" python3 "$HERE/../../scripts/supervisor/cli.py" pr-task --repo acme/agent-dotfiles --pr 973 >/tmp/pr308norepo.$$ 2>&1
+  want_contains "no PR authorship is recorded when gh cannot even name the repo" '"known":false' "$(cat /tmp/pr308norepo.$$)"
+  rm -f /tmp/pr308norepo.$$
+fi
+
+# --- best effort: repo resolves but no PR exists yet (pr view fails) -------
+DONE_WT3="$D/worktree-308-nopr"; mkdir -p "$DONE_WT3"
+LEDGER_STATE="$D/state-308nopr" ledger record-dispatch \
+  --lane t:7 --task ad308-pr-nopr \
+  --summary "#308 item 1 -- no PR yet" \
+  --pane-id '%7' --pane-path "$D" --command claude \
+  --server-id 'socket:1' --session-id '$0' --issue 308 \
+  --worktree "$DONE_WT3" >/dev/null 2>&1
+seed_rc=$?
+if [ "$seed_rc" -ne 0 ]; then
+  bad "setup: a dispatched task exists, no PR opened yet" "record-dispatch exited $seed_rc"
+else
+  ok "setup: a dispatched task exists, no PR opened yet"
+  cat > "$D/lanes" <<'FIX'
+7|ad308-pr-nopr
+FIX
+  export GH_STUB_REPO="acme/agent-dotfiles"
+  signal ad308-done
+  out=$(LEDGER_STATE="$D/state-308nopr" run 7 ad308-pr-nopr ad308-done t); rc=$?
+  want_exit "no PR yet still exits zero -- best effort, not fatal" "$rc" 0 "$out"
+  want_missing "and is silent about it too" "could not record PR authorship" "$out"
+  AGENT_SUPERVISOR_STATE_DIR="$D/state-308nopr" python3 "$HERE/../../scripts/supervisor/cli.py" pr-task --repo acme/agent-dotfiles --pr 974 >/tmp/pr308nopr.$$ 2>&1
+  want_contains "no PR authorship is recorded when there is no PR to record" '"known":false' "$(cat /tmp/pr308nopr.$$)"
+  rm -f /tmp/pr308nopr.$$
+  unset GH_STUB_REPO
+fi
+
+# ...and prove the round trip is load-bearing rather than decorative: patch a
+# copy of lane-done.sh with the #308 item 1 block removed entirely, run it
+# through the same shipped-directory shim the #205 mutation above uses (this
+# block calls `cli.py` from lane-done.sh's OWN directory, so a bare copy
+# under $D would fail to find it for the wrong reason), and confirm the SAME
+# gh-succeeds case that recorded a row above now records nothing.
+SHIPDIR2="$D/shipdir-308"
+rm -rf "$SHIPDIR2"; mkdir -p "$SHIPDIR2"
+for f in "$HERE/../../scripts/supervisor/"*; do
+  ln -s "$f" "$SHIPDIR2/$(basename "$f")"
+done
+rm -f "$SHIPDIR2/lane-done.sh"
+NOPRWRITE="$SHIPDIR2/lane-done.sh"
+patch_rc4=0
+python3 - "$LANE_DONE" "$NOPRWRITE" <<'PY' || patch_rc4=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+start = 'if [ -n "${LEDGER_OUT:-}" ]; then'
+assert text.count(start) == 1, "PR-authorship block start not found or not unique -- script shape changed"
+i0 = text.index(start)
+i1 = text.index("\n\n", i0) + 2
+assert i1 > i0, "PR-authorship block end not found -- script shape changed"
+open(dst, "w").write(text[:i0] + text[i1:])
+PY
+if [ "$patch_rc4" -ne 0 ]; then
+  bad "setup: patched a copy of lane-done.sh with the #308 item 1 block removed" \
+    "could not patch $LANE_DONE (exit $patch_rc4) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of lane-done.sh with the #308 item 1 block removed"
+  chmod +x "$NOPRWRITE"
+  DONE_WT4="$D/worktree-308-mutant"; mkdir -p "$DONE_WT4"
+  MUTSTATE="$D/state-308mutant"
+  ledger record-dispatch \
+    --lane t:7 --task ad308-pr-mutant \
+    --summary "#308 item 1 mutation: block removed" \
+    --pane-id '%7' --pane-path "$D" --command claude \
+    --server-id 'socket:1' --session-id '$0' --issue 308 \
+    --worktree "$DONE_WT4" >/dev/null 2>&1
+  cat > "$D/lanes" <<'FIX'
+7|ad308-pr-mutant
+FIX
+  export GH_STUB_REPO="acme/agent-dotfiles" GH_STUB_PR_NUMBER="975"
+  signal ad308-done
+  out=$(LEDGER_STATE="$MUTSTATE" run_script "$NOPRWRITE" 7 ad308-pr-mutant ad308-done t); rc=$?
+  unset GH_STUB_REPO GH_STUB_PR_NUMBER
+  mutprtask=$(AGENT_SUPERVISOR_STATE_DIR="$MUTSTATE" python3 "$HERE/../../scripts/supervisor/cli.py" pr-task --repo acme/agent-dotfiles --pr 975 2>&1)
+  if [ "$rc" -eq 0 ] && grep -qF '"known":false' <<<"$mutprtask"; then
+    ok "mutation confirmed: removing the #308 item 1 block still completes the lane but records no PR authorship (the assertions above would now be red)"
+  else
+    bad "mutation confirmed: removing the #308 item 1 block records no PR authorship" \
+      "expected exit 0 and known:false; got exit $rc and: $mutprtask / $out"
+  fi
+fi
+
 # --- against REAL tmux, not the stub ---------------------------------------
 # Everything above this line is a claim about tmux made by a file in this
 # repository. This section is the only part that asks tmux itself. It is
@@ -636,6 +812,106 @@ PY
         fi
       fi
       rtmux kill-session -t "$RS2" 2>/dev/null
+    fi
+
+    # --- 7. THE #259 REGRESSION: a session-qualified target gets re-prefixed
+    #
+    # dispatch.sh prints its `target:` line, and `lanes.sh --free`'s second
+    # column, already session-qualified: `<session>:@<id>`. The OLD
+    # `TARGET="${SESSION}:${WINDOW}"` build blindly prepended $SESSION again
+    # to whatever was passed as $1, so a caller that passed the printed
+    # string through verbatim -- exactly what dispatch.sh's own comment
+    # instructs -- got `<session>:<session>:@<id>`. tmux cannot parse that as
+    # a specific window and falls back to the server's ACTIVE window
+    # (agent-dotfiles#259), which is very often the supervisor's own.
+    #
+    # Reproduced end to end: a session with an active "supervisor" window and
+    # a separate finished lane window, addressed by the exact malformed
+    # target the old build produced.
+    RS3="lanedone259-$$"
+    if ! rtmux new-session -d -s "$RS3" -n supervisor 2>/dev/null; then
+      bad "real tmux #259: started a third throwaway session" "new-session failed"
+    else
+      rtmux new-window -t "$RS3" -n ad259-finished-lane >/dev/null 2>&1
+      rtmux select-window -t "$RS3:supervisor" >/dev/null 2>&1
+      LANE_WID="$(rtmux list-windows -t "$RS3" -F '#{window_name} #{window_id}' | awk '$1=="ad259-finished-lane"{print $2}')"
+      # What dispatch.sh prints as `target:` -- already session-qualified.
+      PRINTED_TARGET="${RS3}:${LANE_WID}"
+
+      run259() {
+        ( sleep 1; rtmux wait-for -S "rt-259-$$" ) &
+        local sigpid=$!
+        env -u TMUX TMUX_TMPDIR="$RT" AGENT_SUPERVISOR_STATE_DIR="$3" \
+          timeout 8 bash "$1" "$2" ad259-finished-lane "rt-259-$$" "$RS3" >"$D/out259" 2>&1
+        rc259=$?
+        wait "$sigpid" 2>/dev/null
+      }
+      seed259() {
+        LEDGER_STATE="$1" ledger record-dispatch \
+          --lane "${RS3}:${LANE_WID}" --task ad259-finished-lane \
+          --summary "#259 single-owner target qualification" \
+          --pane-id '%259' --pane-path "$D" --command claude \
+          --server-id 'socket:1' --session-id '$0' --issue 259 >/dev/null 2>&1
+      }
+
+      # THE PRE-#259 SHAPE: unconditional re-prefix, reverting only the
+      # case-statement this fix adds back to the old one-liner.
+      PRE259="$SHIPDIR/lane-done-pre259.sh"
+      patch_rc259=0
+      python3 - "$LANE_DONE" "$PRE259" <<'PY' || patch_rc259=$?
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+new = 'case "$WINDOW" in\n  *:*) TARGET="$WINDOW" ;;\n  *)   TARGET="${SESSION}:${WINDOW}" ;;\nesac\n'
+assert text.count(new) == 1, "case-statement target build not unique -- script shape changed"
+old = 'TARGET="${SESSION}:${WINDOW}"\n'
+open(dst, "w").write(text.replace(new, old))
+PY
+      if [ "$patch_rc259" -ne 0 ]; then
+        bad "setup: patched a pre-#259 (unconditional re-prefix) copy of lane-done.sh" \
+          "could not patch $LANE_DONE (exit $patch_rc259) -- treating as a failure, not a skip"
+      else
+        ok "setup: patched a pre-#259 (unconditional re-prefix) copy of lane-done.sh"
+        chmod +x "$PRE259"
+
+        # RED: the old shape, given the exact string dispatch.sh printed.
+        # `<session>:<session>:@<id>` is unparseable as a specific window, so
+        # `display-message`'s CURRENT-name read resolves it to the server's
+        # ACTIVE window ("supervisor" -- #259's own measured behaviour, see
+        # the malformed-target repro this issue's fix was based on). That
+        # name does not match EXPECTED_NAME ("ad259-finished-lane"), so the
+        # name-match guard refuses and neither window is touched -- the near
+        # miss the issue reports: only that guard, by luck, stood between
+        # this and a renamed supervisor window. The observable damage is the
+        # one guaranteed either way: a finished lane that is never released.
+        seed259 "$D/state-259-pre"
+        run259 "$PRE259" "$PRINTED_TARGET" "$D/state-259-pre"; out=$(cat "$D/out259")
+        pre_supervisor_name="$(rtmux display-message -p -t "$RS3:supervisor" '#{window_name}')"
+        pre_lane_name="$(rtmux display-message -p -t "$RS3:$LANE_WID" '#{window_name}')"
+        pre_status=$(LEDGER_STATE="$D/state-259-pre" ledger status 2>&1)
+        want_exit "real tmux #259: the re-prefixed shape refuses (name-match guard: resolved the ACTIVE window's name, not the lane's)" \
+          "$rc259" 1 "$out"
+        want_contains "real tmux #259: ...specifically because it read the ACTIVE (supervisor) window's name" \
+          "supervisor" "$out"
+        want_contains "real tmux #259: the supervisor's window is untouched (the guard is what saved it, not a design that couldn't reach it)" \
+          "supervisor" "$pre_supervisor_name"
+        want_contains "real tmux #259: the finished lane's window is left exactly as it was -- never renamed" \
+          "ad259-finished-lane" "$pre_lane_name"
+        want_missing "real tmux #259: the re-prefixed shape never releases the finished lane -- it is stranded 'delivered' (#102's shape, reached via the argument format)" \
+          '"status":"complete"' "$pre_status"
+
+        # GREEN: the shipped script, given the exact same printed string.
+        seed259 "$D/state-259-fix"
+        run259 "$LANE_DONE" "$PRINTED_TARGET" "$D/state-259-fix"; out=$(cat "$D/out259")
+        fix_lane_name="$(rtmux display-message -p -t "$RS3:$LANE_WID" '#{window_name}')"
+        fix_supervisor_name="$(rtmux display-message -p -t "$RS3:supervisor" '#{window_name}')"
+        fix_status=$(LEDGER_STATE="$D/state-259-fix" ledger status 2>&1)
+        want_exit "real tmux #259: the shipped script accepts the printed target verbatim and exits zero" "$rc259" 0 "$out"
+        want_contains "real tmux #259: the finished lane IS released in the ledger" '"status":"complete"' "$fix_status"
+        want_contains "real tmux #259: the lane window is renamed back to free-N" "free-" "$fix_lane_name"
+        want_contains "real tmux #259: the supervisor's window is untouched" "supervisor" "$fix_supervisor_name"
+      fi
+      rtmux kill-session -t "$RS3" 2>/dev/null
     fi
   fi
   cleanup_rt

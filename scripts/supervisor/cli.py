@@ -364,6 +364,15 @@ def parser():
     lane_relation_parser = sub.add_parser("lane-relation")
     lane_relation_parser.add_argument("--lane", required=True)
     lane_relation_parser.add_argument("--other", required=True)
+    # agent-supervisor#235: the caller's own freshly-measured, LIVE pane id
+    # for `--lane` -- dispatch.sh has this for free (it already resolved
+    # `--lane`'s tmux target to pick a candidate) and it is the one fact a
+    # renumber cannot make stale, unlike the `--lane` STRING itself, whose
+    # index half is exactly what a renumber rewrites. Optional and
+    # positional-neutral: a caller that cannot supply it (an offline test,
+    # `digest.sh`'s independence report reasoning about lanes with no pane to
+    # re-measure) gets the pre-#235 behaviour unchanged.
+    lane_relation_parser.add_argument("--lane-pane-id", default=None)
 
     author_issue_lane_parser = sub.add_parser("author-issue-lane")
     author_issue_lane_parser.add_argument("--issue", required=True)
@@ -388,11 +397,71 @@ def parser():
     # trusted) rather than by reconstructing a task id from that branch name.
     worktree_lane_parser = sub.add_parser("worktree-lane")
     worktree_lane_parser.add_argument("--path", required=True)
+    # agent-supervisor#212: off by default, so this stays the AUTHOR-FINDING
+    # answer `dispatch.sh --reviews-pr` needs (a review task never counts,
+    # #76). A caller asking "which task is THIS worktree, whatever it is" --
+    # a lane confirming its own identity, AGENTS.md invariant 10 -- passes
+    # this so its own review-shaped task id is not filtered out from under
+    # it. See `Ledger.get_task_for_worktree` for the two questions this
+    # flag distinguishes.
+    worktree_lane_parser.add_argument("--include-reviews", action="store_true")
+
+    # agent-supervisor#308 item 2: the fifth resolution path -- the PR's own
+    # `source_tasks` rows (`source_kind='pull'`), asked DIRECTLY by PR number
+    # rather than by the issue(s) it closes. See
+    # `Ledger.get_contributor_tasks_for_pr`.
+    contributor_pr_lanes_parser = sub.add_parser("contributor-pr-lanes")
+    contributor_pr_lanes_parser.add_argument("--pr", required=True)
+
+    # agent-supervisor#308 item 1: the explicit "task X's work opened PR N"
+    # record -- see `Ledger.record_pr_for_task` / `Ledger.get_task_for_pr_number`.
+    # Written after the fact (`lane-done.sh`, best effort), not at dispatch
+    # time -- the PR does not exist yet when an issue-keyed dispatch starts.
+    record_pr_for_task_parser = sub.add_parser("record-pr-for-task")
+    record_pr_for_task_parser.add_argument("--task", required=True)
+    record_pr_for_task_parser.add_argument("--repo", required=True)
+    record_pr_for_task_parser.add_argument("--pr", required=True)
+
+    pr_task_parser = sub.add_parser("pr-task")
+    pr_task_parser.add_argument("--repo", required=True)
+    pr_task_parser.add_argument("--pr", required=True)
+
+    # agent-supervisor#308 item 3: "authored outside the lane system" as a
+    # first-class, recordable state -- see `Ledger.mark_pr_external` /
+    # `Ledger.get_pr_external`.
+    mark_pr_external_parser = sub.add_parser("mark-pr-external")
+    mark_pr_external_parser.add_argument("--repo", required=True)
+    mark_pr_external_parser.add_argument("--pr", required=True)
+    mark_pr_external_parser.add_argument("--note", required=True)
+    # PR #331 review, finding 2: this method's own backstop can only check
+    # two of the five resolution paths (the three needing `gh`/`git` cannot
+    # live here) -- so a direct `cli.py mark-pr-external` call, without ever
+    # going through `mark-pr-external.sh`'s exhaustive chain, sailed through
+    # for the most common (issue-linked) contributor shape. This flag is the
+    # explicit, unmissable claim "the exhaustive chain ran and found nobody"
+    # -- `mark-pr-external.sh` is the only caller that passes it, once its
+    # own `resolve_pr_contributors` chain has actually completed clean.
+    # Omitting it is refused outright (see `Ledger.mark_pr_external`); it is
+    # not a permission check (nothing stops a caller from lying), it is the
+    # difference between an unsafe silent default and a caller having to say
+    # so out loud.
+    mark_pr_external_parser.add_argument("--chain-verified", action="store_true")
+
+    pr_external_parser = sub.add_parser("pr-external")
+    pr_external_parser.add_argument("--repo", required=True)
+    pr_external_parser.add_argument("--pr", required=True)
 
     # agent-dotfiles#237: the read `restore.sh` runs after a tmux server loss.
     # Deliberately its own command rather than a flag on `status`: it must
     # work when there is no tmux server at all, so it touches no transport.
     sub.add_parser("restore-plan")
+
+    # agent-supervisor#291: the ledger half of the pre-dispatch collision
+    # check -- which worktrees are currently in flight, so collision-
+    # check.sh can `git diff` each one for files without maintaining any
+    # graph of its own. See `Ledger.list_open_worktrees` for what counts as
+    # "in flight" and why blank worktree_path rows are excluded.
+    sub.add_parser("open-worktrees")
 
     sub.add_parser("delivered-open")
 
@@ -426,11 +495,34 @@ def parser():
     record_session_event_parser.add_argument("--detail", required=True)
 
     sub.add_parser("status")
+
+    # agent-supervisor#303: the read side of the prompt corpus (#280/#297).
+    # `view` is restricted to the five views by name (`Ledger.PROMPT_VIEWS`)
+    # -- there is no free-form SQL entry point here, same posture as
+    # `Ledger.read_prompt_view` itself.
+    prompts_parser = sub.add_parser("prompts")
+    prompts_parser.add_argument("view", choices=Ledger.PROMPT_VIEWS)
     return root
 
 
 def _print(value):
     print(json.dumps(value, sort_keys=True, separators=(",", ":")))
+
+
+# agent-supervisor#303: "cli.py prompts <view> -- print any of the five views
+# as a table" (the brief's own words). Every other command here prints one
+# JSON line for a script to parse; this one is for a human -- Jon reading
+# `unacknowledged` directly -- so it is deliberately not `_print`.
+def _print_table(rows):
+    if not rows:
+        print("(no rows)")
+        return
+    columns = list(rows[0].keys())
+    widths = {c: max(len(c), max(len(str(row[c])) for row in rows)) for c in columns}
+    print("  ".join(c.ljust(widths[c]) for c in columns))
+    print("  ".join("-" * widths[c] for c in columns))
+    for row in rows:
+        print("  ".join(str(row[c]).ljust(widths[c]) for c in columns))
 
 
 # NARROW inference, for a command that is actually diagnostic on its own
@@ -900,6 +992,33 @@ def main(argv=None):
     # for a database open, and the claude-print/pi-rpc case finally can be
     # established rather than reflexively refused.
     if args.command == "lane-relation":
+        # agent-supervisor#235: `--lane-pane-id` -- a LIVE measurement the
+        # caller took off tmux itself, not a lookup -- is reconciled BEFORE
+        # the string-shape check gets to answer at all, not only when that
+        # check says `unknown`. The shape check would happily answer
+        # `different` for two `<session>:<index>` strings whose indices
+        # differ even when a renumber means they now name the SAME window;
+        # that positive-looking `different` is wrong in exactly the
+        # self-review direction the guard exists to prevent, so it must
+        # never be trusted over a live measurement that can settle the
+        # question directly against the ledger's `pane_id` registry (#292).
+        # `args.other`'s row is still the ledger's own record -- there is no
+        # live pane to re-measure for a lane this call is not the candidate
+        # for -- unchanged from #292's reasoning.
+        if args.lane_pane_id:
+            try:
+                relation_ledger = Ledger(args.state_dir)
+                other_row = relation_ledger.get_lane(args.other)
+            except Exception:
+                other_row = None
+            lane_row = {"pane_id": args.lane_pane_id}
+            relation = lane_relation_from_rows(lane_row, other_row)
+            result = {"lane": args.lane, "other": args.other, "relation": relation}
+            if relation != "different":
+                result["lane_population"] = lane_population(args.lane, lane_row)
+                result["other_population"] = lane_population(args.other, other_row)
+            _print(result)
+            return 0
         relation = lane_relation(args.lane, args.other)
         result = {"lane": args.lane, "other": args.other, "relation": relation}
         if relation == "unknown":
@@ -1091,13 +1210,40 @@ def main(argv=None):
             "contributors": [{"lane": row["lane"], "task": row["id"]} for row in rows],
         }
     elif args.command == "worktree-lane":
-        row = ledger.get_task_for_worktree(args.path)
+        row = ledger.get_task_for_worktree(args.path, include_reviews=args.include_reviews)
         value = {
             "path": args.path,
             "known": row is not None,
             "lane": row["lane"] if row is not None else None,
             "task": row["id"] if row is not None else None,
         }
+    elif args.command == "contributor-pr-lanes":
+        rows = ledger.get_contributor_tasks_for_pr(args.pr)
+        value = {
+            "pr": args.pr,
+            "known": len(rows) > 0,
+            "contributors": [{"lane": row["lane"], "task": row["id"]} for row in rows],
+        }
+    elif args.command == "record-pr-for-task":
+        ledger.record_pr_for_task(task_id=args.task, repo=args.repo, pr_number=args.pr)
+        value = {"task": args.task, "repo": args.repo, "pr": args.pr, "recorded": True}
+    elif args.command == "pr-task":
+        row = ledger.get_task_for_pr_number(repo=args.repo, pr_number=args.pr)
+        value = {
+            "repo": args.repo,
+            "pr": args.pr,
+            "known": row is not None,
+            "lane": row["lane"] if row is not None else None,
+            "task": row["id"] if row is not None else None,
+        }
+    elif args.command == "mark-pr-external":
+        ledger.mark_pr_external(
+            repo=args.repo, pr_number=args.pr, note=args.note, chain_verified=args.chain_verified
+        )
+        value = {"repo": args.repo, "pr": args.pr, "marked_external": True}
+    elif args.command == "pr-external":
+        row = ledger.get_pr_external(repo=args.repo, pr_number=args.pr)
+        value = {"repo": args.repo, "pr": args.pr, "known": row is not None, "note": row["note"] if row else None}
     elif args.command == "record-completion":
         value = record_completion(ledger, task=args.task, lane=args.lane, note=args.note)
     elif args.command == "accept":
@@ -1222,6 +1368,8 @@ def main(argv=None):
         value = ledger.restore_plan()
     elif args.command == "delivered-open":
         value = {"tasks": ledger.list_delivered_open_tasks()}
+    elif args.command == "open-worktrees":
+        value = {"tasks": ledger.list_open_worktrees()}
     elif args.command == "adopt-session":
         value = ledger.adopt_session(args.session, source=args.source)
     elif args.command == "session-state":
@@ -1241,6 +1389,9 @@ def main(argv=None):
             # which takes a target and actually queries transport.
             "sessions": ledger.list_sessions(),
         }
+    elif args.command == "prompts":
+        _print_table(ledger.read_prompt_view(args.view))
+        return 0
     else:
         raise AssertionError(args.command)
     _print(value)

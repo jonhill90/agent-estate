@@ -733,6 +733,64 @@ class Issue232Tests(unittest.TestCase):
         self.assertIn("nonsense with no lane token", result["detail"])
 
 
+class Issue276ClaudePrintReviewLaneTests(unittest.TestCase):
+    """agent-supervisor#292/#276, measured on PR #277: `_LANE_SHAPE_RE` only
+    recognises a tmux lane id (`<session>:<index>`) -- a claude-print/pi-rpc
+    lane's id is its task id, a free-text shape with no colon at all, so a
+    genuinely correct `Review-Lane: ad182-review-186` trailer was refused as
+    unparseable, indistinguishable from hand-typed nonsense. Driven through
+    the REAL `GithubReviewVerdictSource.verdict()` with a real (tempdir)
+    ledger, never a reimplementation of `_parse_review_lane`."""
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._tmp.cleanup)
+        self.ledger = Ledger(self._tmp.name)
+
+    def test_a_registered_claude_print_lane_id_now_parses(self):
+        self.ledger.register_lane(
+            lane="ad182-review-186", pane_id="claude-print:ad182-review-186", nonce="nonce-review",
+            harness="claude", repo="/tmp/repo", server_id="srv", session_id="sess", command="claude",
+            transport="claude-print",
+        )
+        comments = [{
+            "author": {"login": "jonhill90"},
+            "body": "**Verdict: APPROVE**\n\nReview-Lane: ad182-review-186\nReviewed-SHA: sha-21",
+        }]
+        result = GithubReviewVerdictSource(
+            runner=_comment_runner(comments=comments), ledger=self.ledger
+        ).verdict(repo=REPO, number=49)
+        self.assertEqual(result["verdict"], "approved")
+        self.assertEqual(result["reviewer_lane"], "ad182-review-186")
+
+    def test_an_unregistered_token_of_the_same_shape_still_refuses(self):
+        """The ledger check is what tells `ad182-review-186` apart from
+        hand-typed nonsense of the identical shape -- an unregistered token
+        must still refuse, or this widening would just be a guess wearing a
+        ledger lookup."""
+        comments = [{
+            "author": {"login": "jonhill90"},
+            "body": "**Verdict: APPROVE**\nReview-Lane: not-a-lane-id-at-all",
+        }]
+        result = GithubReviewVerdictSource(
+            runner=_comment_runner(comments=comments), ledger=self.ledger
+        ).verdict(repo=REPO, number=1)
+        self.assertEqual(result["verdict"], "unknown")
+        self.assertIn("could not parse lane id", result["detail"])
+
+    def test_no_ledger_given_falls_back_to_the_prior_unparseable_behaviour(self):
+        """`ledger=None` (the default) must not change behaviour for every
+        caller that never had one to offer -- the exact fixture from the
+        #292 reproduction, run with no ledger at all."""
+        comments = [{
+            "author": {"login": "jonhill90"},
+            "body": "**Verdict: APPROVE**\nReview-Lane: ad182-review-186",
+        }]
+        result = GithubReviewVerdictSource(runner=_comment_runner(comments=comments)).verdict(repo=REPO, number=1)
+        self.assertEqual(result["verdict"], "unknown")
+        self.assertIn("could not parse lane id", result["detail"])
+
+
 class ParseVerdictCommentTests(unittest.TestCase):
     """agent-supervisor#192: `**Verdict:` alone missed every reviewer who
     wrote plain `Verdict: APPROVE` or the heading form `## Verdict: ...` --
@@ -759,6 +817,15 @@ class ParseVerdictCommentTests(unittest.TestCase):
         ("verdict line followed by more content on later lines",
          "**Verdict: REQUEST CHANGES**\n\nThe patch-id comparison is wrong.", "rejected"),
         ("request changes, plain", "Verdict: REQUEST CHANGES", "rejected"),
+        # agent-supervisor#213: three real APPROVE verdicts blocked by
+        # formatting alone, measured verbatim off real PRs the day this was
+        # filed.
+        ("#321: prefix text before the label, plus a trailing '+' action",
+         "## Independent review verdict: APPROVE + MERGE", "approved"),
+        ("#331: emphasis wrapped AROUND the decision, not just the label",
+         "## Verdict: **APPROVE**", "approved"),
+        ("#333: prefix text before the label, em-dash separator",
+         "## Independent review of #333 — verdict: APPROVE", "approved"),
     ]
 
     NEGATIVE_CASES = [
@@ -773,6 +840,13 @@ class ParseVerdictCommentTests(unittest.TestCase):
         ("label present, decision word unrecognised", "Verdict: LOOKS OK TO ME"),
         ("empty body", ""),
         ("None body", None),
+        # agent-supervisor#213 verification bar: adversarial cases that must
+        # still refuse.
+        ("empty decision after the colon", "Verdict:"),
+        ("'approve' mentioned in prose, no verdict line at all",
+         "I'd approve this if the tests passed, but they don't yet."),
+        ("'approved with changes' -- a real qualifier, not a trailing action",
+         "Verdict: APPROVED WITH CHANGES"),
     ]
 
     def test_every_real_and_wild_form_is_recognised(self):
@@ -829,6 +903,55 @@ class ParseVerdictCommentTests(unittest.TestCase):
         "Verdict" without a trailing colon must not match at all -- a label
         without ":" is not one of the forms #192 names."""
         self.assertIsNone(_VERDICT_LINE_RE.match("Verdict APPROVE"))
+
+    def test_mutation_restricting_the_label_to_the_line_start_turns_213_cases_red(self):
+        """agent-supervisor#213: mutate `_VERDICT_LINE_RE` back to requiring
+        "verdict:" immediately after the optional heading/emphasis markers
+        (its shape before this widening) and confirm #321's and #333's
+        prefix-text cases -- real APPROVE verdicts that sat blocked a full
+        dispatch cycle -- go red. If they did not, the positive-case table
+        would not be real evidence of the fix."""
+        pre_213_re = re.compile(r"^#{0,6}\s*\*{0,2}verdict:\**\s*(.*)$", re.IGNORECASE)
+
+        def pre_213_parse(body):
+            for raw_line in (body or "").splitlines():
+                line = raw_line.strip()
+                if not pre_213_re.match(line):
+                    continue
+                return "matched"
+            return None
+
+        prefix_cases = [
+            (name, body, expected)
+            for name, body, expected in self.POSITIVE_CASES
+            if "prefix text before the label" in name
+        ]
+        self.assertTrue(prefix_cases, "no prefix-text case in the positive table to prove the mutation against")
+        for name, body, expected in prefix_cases:
+            with self.subTest(name):
+                self.assertIsNone(pre_213_parse(body))
+                self.assertEqual(_parse_verdict_comment(body), expected)
+
+    def test_mutation_truncating_at_the_first_asterisk_turns_331_red(self):
+        """agent-supervisor#213: mutate the decision normaliser back to
+        "cut at the first `**` found anywhere in the rest of the line" --
+        the pre-fix shape, which reads the OPENING emphasis of a decision
+        wrapped like `**APPROVE**` as if it were a closing marker and
+        truncates the decision to "". Confirm #331's case goes red under
+        that shape."""
+        def pre_213_normalise(rest):
+            text = rest.strip()
+            end = text.find("**")
+            if end != -1:
+                text = text[:end]
+            text = re.sub(r"[*_`]+$", "", text.strip()).strip()
+            text = text.rstrip(".:;,!").strip()
+            return re.sub(r"\s+", " ", text).upper()
+
+        match = _VERDICT_LINE_RE.match("## Verdict: **APPROVE**")
+        self.assertIsNotNone(match)
+        self.assertEqual(pre_213_normalise(match.group(1)), "")
+        self.assertEqual(_parse_verdict_comment("## Verdict: **APPROVE**"), "approved")
 
 
 class ParseVerdictCommentAmbiguityTests(unittest.TestCase):

@@ -93,6 +93,27 @@ seed_author() {  # seed_author <lane> <task-id> <issue>
     --harness claude >/dev/null
   python3 "$LEDGER_CLI" --state-dir "$STATE" record-completion --task "$2" --note done >/dev/null
 }
+# agent-supervisor#332: registers a lane directly (no task, no author-lane
+# resolution machinery) with its own `pane_id` -- what a stamped `Review-Lane:`
+# lane must have for resolve_lane_relation() (verdict-independence.sh) to
+# reconcile it against the author's pane id instead of refusing `unknown`.
+# Defined here, ahead of every PR block below that stamps a reviewer lane,
+# because #332 widened the independence gate to require BOTH sides be
+# provably registered -- a reviewer lane the ledger has never heard of can
+# no longer be waved through on index-string shape alone (see PRs 42 and 47
+# below, previously the "known-broken" case this same widening exists to
+# close at #235's OWN call site).
+register_tmux_lane() {  # register_tmux_lane <lane> <pane-id>
+  python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+Ledger(sys.argv[2]).register_lane(
+    lane=sys.argv[3], pane_id=sys.argv[4], nonce="nonce-" + sys.argv[3], harness="claude",
+    repo="/tmp/repo", server_id="srv", session_id="sess", command="claude", transport="send-keys",
+)
+' "$HERE/../../scripts/supervisor" "$STATE" "$1" "$2"
+}
 
 green_checkruns() {  # green_checkruns <sha>
   cat > "$FIX/checkruns_$1.json" <<S
@@ -151,6 +172,7 @@ cat > "$FIX/reviews_42.json" <<'S'
 {"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:4\nReviewed-SHA: sha-2", "createdAt": "2026-08-15T00:00:00Z"}]}
 S
 seed_author t:3 as42-author 42
+register_tmux_lane t:4 %44
 out=$("$MERGE_PR" "$REPO" 42 2>&1)
 rc=$?
 if [ "$rc" -eq 0 ]; then ok "independent review + green CI exits 0"; else bad "independent review + green CI exits 0" "got rc=$rc: $out"; fi
@@ -244,6 +266,7 @@ cat > "$FIX/reviews_47.json" <<'S'
 {"reviews": [], "comments": [{"author": {"login": "codex"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:9", "createdAt": "2026-08-15T22:48:01Z"}], "commits": [{"oid": "sha-47-new", "committedDate": "2026-08-15T22:56:42Z"}]}
 S
 seed_author t:3 as47-author 47
+register_tmux_lane t:9 %99
 out=$("$MERGE_PR" "$REPO" 47 2>&1)
 rc=$?
 if [ "$rc" -eq 1 ]; then ok "stale comment verdict refuses even with CI green"; else bad "stale comment verdict refuses even with CI green" "got rc=$rc: $out"; fi
@@ -319,18 +342,6 @@ ledger.register_lane(
 )
 ' "$HERE/../../scripts/supervisor" "$STATE" "$1"
 }
-register_tmux_lane() {  # register_tmux_lane <lane> <pane-id>
-  python3 -c '
-import sys
-sys.path.insert(0, sys.argv[1])
-from core import Ledger
-Ledger(sys.argv[2]).register_lane(
-    lane=sys.argv[3], pane_id=sys.argv[4], nonce="nonce-" + sys.argv[3], harness="claude",
-    repo="/tmp/repo", server_id="srv", session_id="sess", command="claude", transport="send-keys",
-)
-' "$HERE/../../scripts/supervisor" "$STATE" "$1" "$2"
-}
-
 # --- direction 1: a tmux lane's verdict on a claude-print-authored PR -----
 # the PR #288 shape itself: the author lane has no tmux window at all.
 rm -f "$MARKER"
@@ -403,6 +414,72 @@ out=$("$MERGE_PR" "$REPO" 50 2>&1)
 rc=$?
 if [ "$rc" -eq 1 ]; then ok "a claude-print lane reviewing its own PR is still refused"; else bad "a claude-print lane reviewing its own PR is still refused" "got rc=$rc: $out"; fi
 if [ ! -f "$MARKER" ]; then ok "...and never merges"; else bad "...and never merges" "$out"; fi
+
+# ============================================================================
+# agent-supervisor#332 (PR #332's own reviewer, blocking finding): the
+# MERGE-TIME independence gate -- this file's `verdict-independence.sh`
+# `lane_relation()`, called from merge-pr.sh -- compared author/reviewer
+# lane ids by `<session>:<index>` SHAPE ALONE, with no pane id at all,
+# unlike dispatch.sh's author-exclusion loop (#235). A window renumber
+# between the author's dispatch and the reviewer's makes that shape answer
+# wrong in BOTH directions -- see CLAUDE.md invariant 9. Both cases below
+# are driven through the REAL `merge-pr.sh`, exactly as #235's own
+# `test_lane_relation_renumber.sh`/`test_lane_relation_cross_session_
+# collision.sh` prove the underlying `cli.py lane-relation --lane-pane-id`
+# mechanism, but proving the WIRING at the actual enforcement call site --
+# the gap #235 left and this PR closes.
+# ============================================================================
+
+# --- case 1: index-string SAME (shape says "same" -- self-review), pane ids
+# DIFFER (truth: two unrelated windows that happen to share an index in
+# differently-named sessions). Before this fix: `lane_relation("old:60",
+# "new:60")` shape-checks `same` (index 60 == 60, session name ignored per
+# #108) and refuses a genuinely independent review as a false self-merge
+# block. After: the ledger's own pane ids (%9 vs %77) prove them different,
+# and the PR merges. -------------------------------------------------------
+rm -f "$MARKER"
+cat > "$FIX/head_60.json" <<'S'
+{"headRefOid": "sha-60"}
+S
+green_checkruns sha-60
+cat > "$FIX/author_60.json" <<'S'
+{"headRefName": "fix/60-thing", "closingIssuesReferences": [{"number": 60}], "commits": []}
+S
+cat > "$FIX/reviews_60.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: new:60\nReviewed-SHA: sha-60", "createdAt": "2026-08-18T00:00:00Z"}]}
+S
+seed_author old:60 as60-author 60
+register_tmux_lane new:60 %77
+out=$("$MERGE_PR" "$REPO" 60 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "#332: matching index, different pane -- a genuinely independent review merges"; else bad "#332: matching index, different pane merges" "got rc=$rc: $out"; fi
+if [ -f "$MARKER" ]; then ok "#332: ...and actually calls gh pr merge"; else bad "#332: matching index, different pane -- gh pr merge called" "$out"; fi
+
+# --- case 2 (the converse, and the security-critical direction -- invariant
+# 9): index-string DIFFERENT (shape says "different" -- looks independent),
+# pane id the SAME (truth: the exact same physical window, renumbered
+# between the author's dispatch and the review). Before this fix:
+# `lane_relation("t:3", "t:9")` shape-checks `different` (3 != 9) and MERGES
+# a self-review. After: the ledger's own pane id (%9 shared by both rows)
+# proves them the same lane, and the merge is refused. -------------------
+rm -f "$MARKER"
+cat > "$FIX/head_61.json" <<'S'
+{"headRefOid": "sha-61"}
+S
+green_checkruns sha-61
+cat > "$FIX/author_61.json" <<'S'
+{"headRefName": "fix/61-thing", "closingIssuesReferences": [{"number": 61}], "commits": []}
+S
+cat > "$FIX/reviews_61.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:62\nReviewed-SHA: sha-61", "createdAt": "2026-08-18T00:00:00Z"}]}
+S
+seed_author t:3 as61-author 61
+register_tmux_lane t:62 %9
+out=$("$MERGE_PR" "$REPO" 61 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#332: different index, same pane -- a renumbered self-review is refused"; else bad "#332: different index, same pane refused" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#332: ...and never calls gh pr merge"; else bad "#332: different index, same pane -- gh pr merge never called" "$out"; fi
+echo "$out" | grep -q "reviewed its own PR" && ok "#332: renumbered self-review refusal names the reason" || bad "#332: renumbered self-review refusal named" "$out"
 
 # ============================================================================
 # MUTATION CHECK: silencing the authorship gate lets the #179 reproduction

@@ -1535,6 +1535,40 @@ class WorktreeLaneCliTest(unittest.TestCase):
             self.assertEqual("t:3", result["lane"])
             self.assertEqual("as101-pr-inference-fix", result["task"])
 
+    def _worktree_lane_include_reviews(self, root, path):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            rc = cli.main(
+                ["--state-dir", root, "worktree-lane", "--path", path, "--include-reviews"]
+            )
+        self.assertEqual(0, rc, output.getvalue())
+        return json.loads(output.getvalue())
+
+    def test_include_reviews_answers_for_a_reviewing_lanes_own_worktree(self):
+        """agent-supervisor#212: AGENTS.md invariant 10 documented this
+        command as a reviewing lane's own self-lookup, but never ran it
+        from one -- the default filters out exactly the review-shaped task
+        id a reviewing lane's own worktree carries. `--include-reviews` is
+        the flag a self-lookup caller passes; exercised end to end through
+        `cli.main`, the same way the rest of this class does."""
+        with tempfile.TemporaryDirectory() as root:
+            self._record_dispatch(
+                root, lane="t:6", task="as211-rev212", issue=211, worktree="/tmp/ad-211-rev212-9"
+            )
+
+            without_flag = self._worktree_lane(root, "/tmp/ad-211-rev212-9")
+            self.assertEqual(
+                {"path": "/tmp/ad-211-rev212-9", "known": False, "lane": None, "task": None},
+                without_flag,
+                "default behaviour (dispatch.sh --reviews-pr's question) is unchanged",
+            )
+
+            with_flag = self._worktree_lane_include_reviews(root, "/tmp/ad-211-rev212-9")
+            self.assertEqual(
+                {"path": "/tmp/ad-211-rev212-9", "known": True, "lane": "t:6", "task": "as211-rev212"},
+                with_flag,
+            )
+
 
 class AdoptSessionCliTest(unittest.TestCase):
     """agent-supervisor#153: the write side, through `cli.main` -- this is
@@ -1676,6 +1710,40 @@ class SessionStateTest(unittest.TestCase):
         result = cli.session_state(RaisingLedger(), transport, session="Hill90")
 
         self.assertEqual("unknown", result)
+
+
+class PromptsViewCliTest(unittest.TestCase):
+    """agent-supervisor#303: `cli.py prompts <view>` -- a table for a human
+    to read (Jon reading `unacknowledged` first), unlike every other command
+    here which prints one JSON line for a script."""
+
+    def test_rejects_an_unknown_view_before_touching_the_ledger(self):
+        with tempfile.TemporaryDirectory() as root:
+            with self.assertRaises(SystemExit):
+                cli.main(["--state-dir", root, "prompts", "not-a-real-view"])
+
+    def test_unacknowledged_prints_as_a_table_with_a_header(self):
+        with tempfile.TemporaryDirectory() as root:
+            ledger = Ledger(Path(root))
+            ledger.record_prompt("p1", at=1_000, text_raw="raw", context="ctx")
+            ledger.add_item("i1", prompt_id="p1", kind="directive", body="do it", weight="hard")
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = cli.main(["--state-dir", root, "prompts", "unacknowledged"])
+            self.assertEqual(0, rc)
+            lines = output.getvalue().splitlines()
+            self.assertIn("id", lines[0])
+            self.assertIn("i1", lines[2])
+
+    def test_an_empty_view_says_so_rather_than_printing_nothing(self):
+        with tempfile.TemporaryDirectory() as root:
+            Ledger(Path(root))
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = cli.main(["--state-dir", root, "prompts", "open_questions"])
+            self.assertEqual(0, rc)
+            self.assertEqual("(no rows)", output.getvalue().strip())
 
 
 if __name__ == "__main__":

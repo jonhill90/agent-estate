@@ -138,6 +138,14 @@
 #              three shapes, and silently dropping one would be worse than
 #              routing it the old way; see agent-supervisor#171's own
 #              tracked follow-up.
+# --force
+#              agent-supervisor#291: dispatch anyway when the pre-dispatch
+#              collision check (step 3.2) finds #<issue>'s files overlap an
+#              already in-flight lane's -- for a known and intended overlap.
+#              Never silences an UNKNOWN verdict (there is nothing to force
+#              past there; unknown already allows) and never suppresses the
+#              log line naming what was overridden. See collision-check.sh's
+#              own header for what "overlap" means.
 #
 # Exit 0 only when a lane has been sent a brief -- over tmux/send-keys, or
 # (new, #171, default for a plain single-issue `claude` dispatch) over a
@@ -237,9 +245,19 @@ PR=""
 # about their coverage of #241/#212/#159/etc. changed. A real caller with
 # no reason to force the old pane sets nothing and gets the new default.
 LIVE_PANE="${DISPATCH_LIVE_PANE:-}"
+# agent-supervisor#291: the pre-dispatch collision check's escape hatch, for
+# a known and intended file overlap with an in-flight lane -- see step 3.2,
+# below the worktree, and collision-check.sh's own header for what "overlap"
+# means and why refusing is the default. Takes no value, same shape as
+# --not-a-review.
+COLLISION_FORCE=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
   case "$1" in
+    --force)
+      COLLISION_FORCE=1
+      shift
+      ;;
     --pr)
       # agent-supervisor#159. Same dangling-flag hazard and same fix as
       # `--reviews-pr` just below -- see that case's own comment.
@@ -557,9 +575,18 @@ LEDGER_CLI="$HERE/cli.py"
 # carried no such field (an older cli.py; still safe, just less specific).
 LANE_REL_POPULATION_CANDIDATE=""
 LANE_REL_POPULATION_OTHER=""
-lane_relation() {  # lane_relation <lane> <other> -> same|different|unknown
-  local json rel
-  json=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-relation --lane "$1" --other "$2" 2>/dev/null) || json=""
+lane_relation() {  # lane_relation <lane> <other> [lane-pane-id] -> same|different|unknown
+  # agent-supervisor#235: the optional third argument is a LIVE pane id the
+  # caller just measured off tmux for `$1` -- see the author-exclusion loop
+  # below, which is the one caller that has a real tmux target to measure.
+  # Reconciled through the ledger's `pane_id` registry INSTEAD OF the
+  # `<session>:<index>` shape check, which trusts the window INDEX half of
+  # `$1` and is exactly what `renumber-windows on` (Jon's tmux setting)
+  # rewrites out from under a lane the instant a lower window closes -- see
+  # `core.py`'s own comment on `cli.py lane-relation --lane-pane-id`.
+  local json rel lane_pane_id_args=()
+  [ -z "${3:-}" ] || lane_pane_id_args=(--lane-pane-id "$3")
+  json=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-relation --lane "$1" --other "$2" "${lane_pane_id_args[@]}" 2>/dev/null) || json=""
   rel=$(sed -n 's/.*"relation":"\([a-z]*\)".*/\1/p' <<<"$json" | head -1)
   LANE_REL_POPULATION_CANDIDATE=$(sed -n 's/.*"lane_population":"\([a-zA-Z-]*\)".*/\1/p' <<<"$json" | head -1)
   LANE_REL_POPULATION_OTHER=$(sed -n 's/.*"other_population":"\([a-zA-Z-]*\)".*/\1/p' <<<"$json" | head -1)
@@ -677,6 +704,13 @@ fi
 # above), so membership is a linear scan (`author_lane_known`, below) and
 # both are guarded with the same `"${arr[@]+"${arr[@]}"}"` bash-3.2-empty-
 # array idiom `POSITIONAL` already established in this file.
+# agent-supervisor#308 item 4: the resolution chain itself (issue, PR-task,
+# PR-contributor, worktree, legacy branch) now lives in
+# resolve-pr-contributors.sh, shared with mark-pr-external.sh's laundering
+# gate -- see that file's header for why a second, drifted copy is exactly
+# the defect #321's review measured in verdict-independence.sh.
+# shellcheck source=./resolve-pr-contributors.sh
+. "$HERE/resolve-pr-contributors.sh"
 AUTHOR_LANES=()
 AUTHOR_TASKS=()
 FALLBACK_TASK=""
@@ -687,135 +721,26 @@ FALLBACK_TASK=""
 # silent" (arrays empty for a reason, and step 4 below must refuse), which an
 # empty-array check alone cannot tell apart.
 CONTRIBUTORS_RESOLVED=""
-author_lane_known() {  # author_lane_known <lane> -> 0 if already in the set
-  local want="$1" have
-  for have in "${AUTHOR_LANES[@]+"${AUTHOR_LANES[@]}"}"; do
-    [ "$have" = "$want" ] && return 0
-  done
-  return 1
-}
-add_contributor() {  # add_contributor <lane> <task> -- dedup by lane
-  local lane="$1" task="$2"
-  author_lane_known "$lane" && return 0
-  AUTHOR_LANES+=("$lane")
-  AUTHOR_TASKS+=("$task")
-}
 if [ -n "$REVIEWS_PR" ]; then
-  GH_REPO_ARGS=()
-  [ -n "$REPO" ] && GH_REPO_ARGS=(-R "$REPO")
-  # Same bash 3.2 empty-array hazard as POSITIONAL above: [repo] is
-  # documented as optional on this exact flag (`--reviews-pr` with [repo]
-  # omitted), so GH_REPO_ARGS is empty on that path and "${GH_REPO_ARGS[@]}"
-  # alone would abort under 3.2 before `gh` ever runs.
-  PR_JSON=$(gh pr view "$REVIEWS_PR" "${GH_REPO_ARGS[@]+"${GH_REPO_ARGS[@]}"}" --json headRefName,closingIssuesReferences,commits 2>&1)
-  if [ $? -ne 0 ]; then
-    echo "dispatch: cannot read PR #$REVIEWS_PR -- refusing to dispatch its review (authorship unknown, failing closed)" >&2
-    sed 's/^/  /' <<<"$PR_JSON" >&2
-    exit 1
-  fi
-  HEAD_REF=$(sed -n 's/.*"headRefName":"\([^"]*\)".*/\1/p' <<<"$PR_JSON")
-  if [ -z "$HEAD_REF" ]; then
-    echo "dispatch: PR #$REVIEWS_PR's head branch is unreadable -- refusing to dispatch its review (authorship unknown, failing closed)" >&2
+  if ! resolve_pr_contributors "$REPO" "$REVIEWS_PR" "$REPO_PATH" "$PREFIX" "$LEDGER_PYTHON" "$LEDGER_CLI"; then
     exit 1
   fi
 
-  # 1 & 2. THE LEDGER, asked by ISSUE -- never by branch name. Two sources
-  # for "which issue this PR closes", tried in order and POOLED (deduped)
-  # rather than short-circuited on the first that parses, because either can
-  # be empty for a PR that still has real, ledger-known contributors:
-  #   1. closingIssuesReferences: GitHub's own parse of the PR body.
-  #   2. commit messages: this project's own convention closes issues from
-  #      commit trailers too (see this brief's own "Close with `Fixes
-  #      #35`"), which a PR body alone would miss.
-  # Each candidate issue number goes to `cli.py contributor-issue-lanes`
-  # (agent-supervisor#190), which asks the ledger for EVERY non-review task
-  # ever dispatched against that issue -- never a branch, and a review task
-  # can never be a contributor. UNLIKE the single-author lookup this
-  # replaces, every candidate issue that answers is UNIONED into the set,
-  # not just the first: a PR can close more than one issue, and each is a
-  # genuine source of contributors, not a fallback for the others.
-  CANDIDATE_ISSUES=$(
-    {
-      grep -oE '"closingIssuesReferences":\[[^]]*\]' <<<"$PR_JSON" \
-        | grep -oE '"number":[0-9]+' | grep -oE '[0-9]+'
-      grep -oE '"message(Headline|Body)":"[^"]*"' <<<"$PR_JSON" \
-        | grep -ioE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+'
-    } | awk '!seen[$0]++'
-  )
-  for candidate_issue in $CANDIDATE_ISSUES; do
-    ISSUE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" contributor-issue-lanes --issue "$candidate_issue" 2>&1) || continue
-    if grep -qF '"known":true' <<<"$ISSUE_JSON"; then
+  # 3.2. agent-supervisor#308 item 3: "authored outside the lane system" as
+  # a FIRST-CLASS, RECORDABLE state -- checked only when every real
+  # resolution path above came back silent, and NEVER treated as "proceed
+  # when authorship is unknown" (#190 forbids that flag outright; this is
+  # not it). A PR marked here was a DECISION an operator made -- that no
+  # lane wrote it -- so the contributor set is KNOWN-EMPTY, not unresolved:
+  # every free lane is a valid independent reviewer, the safe case. This is
+  # the #316/#301/#300 shape: a PR authored directly by a human or the
+  # watchdog, closing no issue the ledger can name, whose branch fails the
+  # legacy convention outright. See `Ledger.get_pr_external` / `mark-pr-external`.
+  if [ -z "$CONTRIBUTORS_RESOLVED" ]; then
+    EXTERNAL_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" pr-external --repo "$REPO" --pr "$REVIEWS_PR" 2>&1) || EXTERNAL_JSON=""
+    if grep -qF '"known":true' <<<"$EXTERNAL_JSON"; then
       CONTRIBUTORS_RESOLVED=1
-      while IFS=$'\t' read -r c_lane c_task; do
-        [ -n "$c_lane" ] || continue
-        add_contributor "$c_lane" "$c_task"
-      done < <(grep -oE '"lane":"[^"]*","task":"[^"]*"' <<<"$ISSUE_JSON" \
-        | sed -E 's/"lane":"([^"]*)","task":"([^"]*)"/\1\t\2/')
-    fi
-  done
-
-  # 3. agent-supervisor#117: which worktree currently has HEAD_REF checked
-  # out -- resolved through the ledger by the worktree PATH recorded at
-  # dispatch time (`--worktree`, step 6 of a PRIOR dispatch), never by
-  # reconstructing a task id from the branch name. A lane routinely renames
-  # its worktree's branch to satisfy the type-prefix convention (`fix/`,
-  # `feat/`, ...) with a slug of its OWN choosing, independent of the
-  # dispatch slug the task id was minted from -- exactly the #117 confound
-  # ("as101-reviewspr-inference" produced branch "fix/101-not-a-review-
-  # escape"; the two slugs share nothing). The worktree itself is never
-  # renamed, so `git worktree list` still finds it by its current branch
-  # regardless of how many times that branch was renamed, and the ledger
-  # already knows which task built it.
-  #
-  # `$REPO_PATH` is the local checkout `--reviews-pr`'s caller is running
-  # in, i.e. the one whose worktrees this can actually see -- REQUIRED for
-  # this step; skipped (not refused) when a caller omitted it, exactly like
-  # `DISPATCH_ALLOW_CWD_REPO_PATH` skips it above for [repo] alone.
-  #
-  # agent-supervisor#190: UNIONED into the set regardless of whether step 1&2
-  # already found contributors (no longer gated on the set being empty) --
-  # the worktree currently on HEAD_REF can be a lane the issue-based lookup
-  # never named (a legacy task, or a task recorded with a different
-  # `source_ref`), and finding one more contributor is only ever the safe
-  # direction here.
-  if [ -n "$REPO_PATH" ]; then
-    WORKTREE_LIST=$(git -C "$REPO_PATH" worktree list --porcelain 2>/dev/null || true)
-    if [ -n "$WORKTREE_LIST" ]; then
-      MATCHED_WORKTREE=$(awk -v want="branch refs/heads/$HEAD_REF" '
-        /^worktree / { path = substr($0, 10) }
-        $0 == want { print path }
-      ' <<<"$WORKTREE_LIST")
-      # More than one worktree currently on the same branch cannot happen --
-      # git itself refuses to check the same branch out twice -- but take
-      # only the first match defensively rather than trust that invariant.
-      MATCHED_WORKTREE=$(head -n1 <<<"$MATCHED_WORKTREE")
-      if [ -n "$MATCHED_WORKTREE" ]; then
-        WORKTREE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" worktree-lane --path "$MATCHED_WORKTREE" 2>&1)
-        if [ $? -eq 0 ] && grep -qF '"known":true' <<<"$WORKTREE_JSON"; then
-          CONTRIBUTORS_RESOLVED=1
-          w_lane=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$WORKTREE_JSON")
-          w_task=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$WORKTREE_JSON")
-          add_contributor "$w_lane" "$w_task"
-        fi
-      fi
-    fi
-  fi
-
-  # 3.1. Legacy last resort, kept only for tasks dispatched before #117: no
-  # worktree path was ever recorded for them, so step 3 above can never
-  # match. The branch name IS trusted here, but only as far as the ledger
-  # confirms it -- a task id it does not recognise still refuses, same as
-  # always. Only reached when the set is STILL empty -- unlike steps 1-3,
-  # this reconstructs a single task id from the branch name by convention
-  # rather than asking the ledger for a set, so it cannot itself widen an
-  # already-nonempty set the way step 3 does.
-  if [ ${#AUTHOR_LANES[@]} -eq 0 ] && [[ "$HEAD_REF" =~ ^(lane|fix|feat|chore|docs)/([0-9]+)-(.+)$ ]]; then
-    FALLBACK_TASK="${PREFIX}${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
-    FALLBACK_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" task-lane --task "$FALLBACK_TASK" 2>&1)
-    if [ $? -eq 0 ] && grep -qF '"known":true' <<<"$FALLBACK_JSON"; then
-      CONTRIBUTORS_RESOLVED=1
-      f_lane=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$FALLBACK_JSON")
-      add_contributor "$f_lane" "$FALLBACK_TASK"
+      echo "dispatch: PR #$REVIEWS_PR is recorded as authored OUTSIDE the lane system (marked external) -- no lane contributors to exclude, every free lane is a valid independent reviewer" >&2
     fi
   fi
 
@@ -831,6 +756,8 @@ if [ -n "$REVIEWS_PR" ]; then
     # The two describe the same fact before and after: nobody the ledger
     # will vouch for produced (or contributed to) this PR.
     echo "dispatch: could not determine PR #$REVIEWS_PR's author -- the ledger has no record by issue, by commit, or by branch '$HEAD_REF' (task ${FALLBACK_TASK:-none}) -- refusing (authorship unknown, failing closed)" >&2
+    echo "dispatch: if this PR was genuinely authored outside the lane system (a human, or the watchdog), record that once with: $HERE/mark-pr-external.sh '$REPO' $REVIEWS_PR '<why>' '$REPO_PATH'" >&2
+    echo "dispatch: NOTE -- use mark-pr-external.sh, not cli.py mark-pr-external directly; the CLI now refuses without --chain-verified, which only the wrapper's own exhaustive resolution chain earns (PR #331 review, finding 2)" >&2
     # agent-supervisor#101, third red-first item: on the inferred path these
     # are TWO separate findings arriving together -- "this looked like a
     # review" and "its contributors are unresolvable" -- and read as one
@@ -1149,11 +1076,20 @@ while IFS=$'\t' read -r candidate candidate_target; do
   # candidate that made it through against the first ten contributors but
   # matches the eleventh is still excluded, not admitted by majority.
   if [ ${#AUTHOR_LANES[@]} -gt 0 ]; then
+    # agent-supervisor#235: measured HERE, off `$candidate_target` -- the
+    # window-id form `lanes.sh` already gave this candidate, immune to the
+    # renumber that makes `$candidate`'s INDEX half untrustworthy -- so
+    # `lane_relation` below can reconcile against the ledger's `pane_id`
+    # registry instead of trusting that index against a contributor's. Empty
+    # (tmux gone, target stale between `lanes.sh` and here) is passed through
+    # unchanged: `lane_relation` already treats a missing pane id as "cannot
+    # widen", falling back to the pre-#235 shape check, never to admission.
+    candidate_pane_id=$(tmux display-message -p -t "$candidate_target" '#{pane_id}' 2>/dev/null) || candidate_pane_id=""
     MATCHED_CONTRIBUTOR_LANE=""
     MATCHED_CONTRIBUTOR_TASK=""
     for ai in "${!AUTHOR_LANES[@]}"; do
       al="${AUTHOR_LANES[$ai]}"
-      if [ "$(lane_relation "$candidate" "$al")" != different ]; then
+      if [ "$(lane_relation "$candidate" "$al" "$candidate_pane_id")" != different ]; then
         MATCHED_CONTRIBUTOR_LANE="$al"
         MATCHED_CONTRIBUTOR_TASK="${AUTHOR_TASKS[$ai]}"
         break
@@ -1523,6 +1459,48 @@ if [ -n "$REPO" ]; then
     abort_send "worktree $WORKTREE has origin '${WORKTREE_ORIGIN:-<unreadable>}' (repo '${WORKTREE_REPO:-unknown}'), not the claimed repo '$REPO' -- refusing rather than drop a lane claimed against one repository into a worktree of another (#17); #$ISSUE_ARG was NOT dispatched"
   fi
 fi
+
+# --- 3.2 the pre-dispatch collision check (agent-supervisor#291) -----------
+# as#263 and as#266 independently wrote the same fix to the same file
+# (scripts/supervisor/quota-watch.sh) -- one lane's work was entirely
+# wasted, plus a review, plus a merge decision. This is the refusal that
+# catches that shape before it repeats: does #$ISSUE_ARG's own file set (the
+# brief, its branch, and the PR it is scoped to, if any -- see
+# collision-check.sh's own header) overlap the file set an ALREADY in-flight
+# lane is actually touching (measured by `git diff`, not guessed).
+#
+# HERE, not earlier: this is the first point a real worktree exists for
+# `_files_changed_in_worktree` to read (signal 2, a resumed branch's own
+# content) and past step 3.1 so the worktree is already confirmed to BE
+# $REPO. `abort_send` (defined right after the worktree was built, above)
+# is reused rather than reimplemented -- it already unwinds the claim, the
+# lane claim, and the worktree in the right order, and already handles a
+# lane whose pane cwd is somehow already inside $WORKTREE.
+#
+# UNKNOWN (no file signal at all) ALLOWS and says so -- most issues never
+# name a file, and refusing on "I could not tell" would refuse nearly every
+# dispatch; see collision-check.sh's header for why this is the one place
+# the fail-closed posture inverts, deliberately. A real refusal is fatal:
+# a duplicated PR costs far more than a refused dispatch, and `--force`
+# exists for the case an operator genuinely intends the overlap.
+COLLISION_OUT=$("$HERE/collision-check.sh" check \
+  --issue "$ISSUE_ARG" --brief "$BRIEF" --worktree "$WORKTREE" \
+  --repo-path "$REPO_PATH" --repo "$REPO" \
+  --exclude-lane "$LANE" \
+  ${PR_SCOPED:+--pr "$PR_SCOPED"} \
+  ${COLLISION_FORCE:+--force} 2>&1)
+COLLISION_RC=$?
+if [ "$COLLISION_RC" -ne 0 ]; then
+  # A refusal, same as every other guard's stderr above -- agent-dotfiles#199
+  # only requires SILENCE on a SUCCESSFUL dispatch; this one is not one.
+  sed 's/^/dispatch: collision-check: /' <<<"$COLLISION_OUT" >&2
+  abort_send "#$ISSUE_ARG's files collide with an in-flight lane -- NOT dispatched. Re-run with --force if this overlap is known and intended (agent-supervisor#291)"
+fi
+# ALLOW (no-conflict, unknown, or forced) -- on stdout, not stderr:
+# agent-dotfiles#199 requires stderr silent on a successful dispatch, and
+# "say UNKNOWN, don't let it read as nothing" (the issue's own words) only
+# requires this is SAID, not that it is said on stderr specifically.
+sed 's/^/dispatch: collision-check: /' <<<"$COLLISION_OUT"
 
 # WHAT IS TYPED INTO THE PANE STAYS SHORT, AND HERE IS THE MEASURED REASON.
 #

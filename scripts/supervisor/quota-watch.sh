@@ -45,6 +45,21 @@
 # QUOTA_GATE below only overrides which quota.sh-shaped binary is asked, never
 # reaches around it.
 #
+# agent-supervisor#276: for three hours this process's own liveness was
+# reported as "healthy" purely because `pgrep` found its pid, while it sat
+# hung inside `quota.sh check` -- the exact instrument error this repository
+# keeps filing against itself (as#228/#230/#259): a process EXISTING is not a
+# process WORKING. $STAMP is now a HEARTBEAT, not a bare state cache: it
+# carries `checked:`/`state:` lines, the same shape `inbox-poll.status`
+# already uses for #163's identical fix, so watchdog.sh's existing generic
+# `--mode heartbeat` check reads it with no new parsing code. It is written
+# AFTER `quota.sh check` returns (never before), so a hang inside that call
+# stops the stamp advancing instead of certifying intent as completion. The
+# stamp's `state:` field is the RAW reading (SAFE/WINDDOWN/UNKNOWN, so a hang
+# is visible as UNKNOWN rather than silently missing) -- edge detection below
+# still keys on a separate `confirmed:` field that only ever holds SAFE or
+# WINDDOWN, for exactly the reason the previous section gives.
+#
 # Usage:
 #   quota-watch.sh [--interval SECONDS] [--target SESSION:WINDOW] [--once]
 #   nohup bash scripts/supervisor/quota-watch.sh >>~/.local/state/agent-dotfiles-supervisor/quota-watch.log 2>&1 &
@@ -61,6 +76,29 @@ QUOTA_GATE="${QUOTA_GATE:-$HERE/quota.sh}"
 ONCE=0
 STAMP="$STATE/.quota-watch.state"
 
+# agent-supervisor#305: the reset-boundary blindness fix. Measured 2026-08-17:
+# alive, on schedule, two consecutive UNKNOWN readings straddling a session
+# reset, and nothing distinguished that from a watcher correctly holding a
+# real wind-down -- so nothing alarmed and the estate stayed down until Jon
+# noticed by hand. Two independent readings this file previously threw away:
+#   - UNKNOWN is transient by design (see write-up above `confirmed`) -- but
+#     a RUN of them is not a blip, it is the watcher losing vision, and a
+#     watcher that cannot see must say so louder than a logfile line.
+#   - the poll interval (300s) is right for a steady state, but a watcher
+#     that has lost vision should look again sooner, not wait a full cycle
+#     to find out if it can see yet.
+# Start at 2 (the issue's own number, and what was actually measured) so a
+# single blip -- the correct quiet case -- never pages; two isolated blips
+# never adjoin because a definite SAFE/WINDDOWN reading between them resets
+# the streak below.
+UNKNOWN_ALARM_AFTER="${QUOTA_WATCH_UNKNOWN_ALARM_AFTER:-2}"
+UNKNOWN_INTERVAL="${QUOTA_WATCH_UNKNOWN_INTERVAL:-45}"
+# Overridable so tests can point this at a recording stub instead of the
+# real notify.sh, same convention as QUOTA_GATE above -- this is a PAGE
+# (#273: "escalate on the unrecoverable condition only, and rate-limit it --
+# one message per incident, not one per tick"), not a log line nobody reads.
+NOTIFY_SCRIPT="${QUOTA_WATCH_NOTIFY_SCRIPT:-$HERE/notify.sh}"
+
 while [ $# -gt 0 ]; do
   case "$1" in
     --interval) INTERVAL="${2:-300}"; shift 2 ;;
@@ -72,11 +110,45 @@ done
 
 log() { printf '%s quota-watch: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
+# RESOLVE THE WINDOW, do not trust the @id in TARGET. tmux window ids are
+# unique within a server but are NOT stable across a server restart
+# (agent-supervisor#346) -- the default here (agent-supervisor:@1) is one of
+# the three instances the issue names, alongside director-loop.sh's
+# director:@3, which hit the identical defect the same night.
+#
+# UNLIKE director-loop.sh's single-purpose `director` session, this script's
+# session legitimately holds many windows -- one per lane -- so "fall back
+# when there is exactly one window" is the wrong rule here: it would find
+# several on every ordinary restart and refuse every time. The durable key
+# for THIS target is the window NAME: bootstrap-session.sh already names the
+# supervisor's own window `supervisor` (LANES_SUPERVISOR_NAME), and a
+# respawned window can be given that name back even though it can never be
+# given its old @id back. Resolve only when exactly one window carries that
+# name; more than one (a rename race) is exactly as unresolvable as zero.
+resolve_target() {
+  tmux capture-pane -p -t "=$TARGET" >/dev/null 2>&1 && return 0
+  local session="${TARGET%%:*}"
+  local name="${LANES_SUPERVISOR_NAME:-supervisor}"
+  local matches count
+  matches=$(tmux list-windows -t "$session" -F '#{window_id}	#{window_name}' 2>/dev/null \
+    | awk -F'\t' -v n="$name" '$2==n{print $1}')
+  count=$(grep -c . <<<"$matches")
+  if [ "$count" -eq 1 ]; then
+    local resolved="$session:$(tr -d '[:space:]' <<<"$matches")"
+    log "configured target $TARGET is gone (tmux renumbered across a restart); resolved to $resolved by window name '$name'"
+    TARGET="$resolved"
+    return 0
+  fi
+  log "configured target $TARGET is gone and $count window(s) in '$session' are named '$name' -- refusing to guess which is the supervisor pane; a human should look"
+  return 1
+}
+
 # Send is C-u then retype then Enter, ALWAYS. Enter alone does not submit text a
 # previous send-keys left in the input box -- that defect stranded seven panes a
 # tick for a full day before it was understood.
 send_message() {
   local msg="$1"
+  resolve_target || return 1
   tmux send-keys -t "=$TARGET" C-u 2>/dev/null || return 1
   sleep 1
   tmux send-keys -t "=$TARGET" -l "$msg" 2>/dev/null || return 1
@@ -86,6 +158,19 @@ send_message() {
   # Verify it ARRIVED, not merely that it was sent. "Delivered" is a claim about
   # someone else's state; if you did not ask them, do not say it.
   tmux capture-pane -p -t "=$TARGET" 2>/dev/null | grep -q 'esc to interrupt'
+}
+
+# send_alarm N -- page a human that this watcher has been blind for N
+# consecutive ticks. Exit 0 only if a channel actually accepted it (notify.sh's
+# own contract) -- the caller uses that to decide whether the "already paged
+# this incident" flag may be set, so a send that merely LOGGED but never
+# reached anyone does not get treated as "a human has been told" (#91's rule,
+# reused here).
+send_alarm() {
+  local n="$1"
+  local subject="quota-watch BLIND (#305)"
+  local body="quota-watch.sh has read UNKNOWN $n consecutive times (target $TARGET, confirmed state stuck at ${confirmed:-<none>}). This is not a wind-down -- it is the watcher unable to see the meter at all, which looks identical to a correct quiet wind-down from outside. Check by hand: bash scripts/supervisor/quota.sh check"
+  AGENT_NOTIFY_CALLER=supervisor bash "$NOTIFY_SCRIPT" "$subject" "$body"
 }
 
 # The wind-down instruction is lifted verbatim from loop-tick.md's "Exit 1 is
@@ -104,6 +189,22 @@ Read ~/.local/state/agent-dotfiles-supervisor/QUOTA-HANDOFF.md for what was in f
 
 YOUR LOOP TICK MUST START WITH: bash scripts/supervisor/quota.sh check -- exit 0 proceed, exit 1 wind down and go quiet, exit 2 or 3 quota is UNKNOWN so say so and do not treat it as safe. The instruction "never call stop, always re-arm" is RETIRED; re-arming into an exhausted window is what burned $80 of usage credits down to $8. Do not reinstate it.'
 
+# write_heartbeat RAW CONFIRMED UNKNOWN_STREAK ALARM_SENT -- overwrites
+# $STAMP with `checked:`/`state:`/`confirmed:`/`unknown_streak:`/
+# `blind_alarm_sent:` lines, tmp+rename so a reader never sees a
+# half-written file. Called ONLY after this iteration's work is done (see
+# the file header) -- never at the top of the loop. `state:` is the raw
+# per-tick reading, for watchdog.sh's staleness check; `confirmed:` is the
+# edge-detection value below, restored from this same file across restarts.
+# `unknown_streak:`/`blind_alarm_sent:` are #305's reset-boundary-blindness
+# counters, restored the same way so a restart mid-blind-spell does not
+# reset the count to zero and quietly buy back two more free UNKNOWNs.
+write_heartbeat() {
+  local tmp="$STAMP.$$"
+  { printf 'checked: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')"; printf 'state: %s\n' "$1"; printf 'confirmed: %s\n' "$2"; printf 'unknown_streak: %s\n' "$3"; printf 'blind_alarm_sent: %s\n' "$4"; } >"$tmp" 2>/dev/null \
+    && mv -f "$tmp" "$STAMP" 2>/dev/null
+}
+
 log "watching every ${INTERVAL}s, target $TARGET"
 
 # `confirmed` is the CONFIRMED state used for edge detection: it is only ever
@@ -111,11 +212,22 @@ log "watching every ${INTERVAL}s, target $TARGET"
 # UNKNOWN reading is logged (below) but never written here -- see the file
 # header for why that is the whole fix.
 confirmed=""
-[ -f "$STAMP" ] && confirmed="$(cat "$STAMP" 2>/dev/null)"
+[ -f "$STAMP" ] && confirmed="$(sed -n 's/^confirmed: *//p' "$STAMP" 2>/dev/null | head -1)"
 case "$confirmed" in
   SAFE|WINDDOWN) : ;;
   *) confirmed="" ;;
 esac
+
+# #305: how many consecutive UNKNOWN readings this watcher has seen, and
+# whether a human has already been paged for the CURRENT blind spell.
+# Restored across restarts for the same reason `confirmed` is -- a restart
+# mid-blind-spell must not silently reset the count.
+unknown_streak=0
+[ -f "$STAMP" ] && unknown_streak="$(sed -n 's/^unknown_streak: *//p' "$STAMP" 2>/dev/null | head -1)"
+case "$unknown_streak" in ''|*[!0-9]*) unknown_streak=0 ;; esac
+alarm_sent=0
+[ -f "$STAMP" ] && alarm_sent="$(sed -n 's/^blind_alarm_sent: *//p' "$STAMP" 2>/dev/null | head -1)"
+[ "$alarm_sent" = "1" ] || alarm_sent=0
 
 last_raw=""   # last-seen raw reading, SAFE/WINDDOWN/UNKNOWN, only for log dedup
 
@@ -148,6 +260,14 @@ while :; do
         fi
       fi
       confirmed=WINDDOWN
+      # A genuine WINDDOWN is a DEFINITE reading -- the watcher can see, it
+      # just does not like what it sees. That is not blindness; only a run
+      # of UNKNOWNs is (#305). Clear the streak on this edge too, same as SAFE.
+      if [ "$unknown_streak" -gt 0 ]; then
+        log "vision restored after $unknown_streak consecutive UNKNOWN reading(s)"
+      fi
+      unknown_streak=0
+      alarm_sent=0
       ;;
     SAFE)
       if [ "$confirmed" = "WINDDOWN" ]; then
@@ -159,14 +279,36 @@ while :; do
         fi
       fi
       confirmed=SAFE
+      if [ "$unknown_streak" -gt 0 ]; then
+        log "vision restored after $unknown_streak consecutive UNKNOWN reading(s)"
+      fi
+      unknown_streak=0
+      alarm_sent=0
       ;;
     UNKNOWN)
-      : # transient -- confirmed is left exactly as it was, nothing is sent
+      # #305: a run of UNKNOWNs is the watcher losing vision, not a policy
+      # decision -- it must not silently look identical to a correctly-held
+      # wind-down. `confirmed` is left exactly as it was above; this is
+      # purely "does a human need to be told we cannot see".
+      unknown_streak=$((unknown_streak + 1))
+      if [ "$unknown_streak" -ge "$UNKNOWN_ALARM_AFTER" ] && [ "$alarm_sent" != "1" ]; then
+        log "BLIND: $unknown_streak consecutive UNKNOWN readings, confirmed state stuck at ${confirmed:-<none>} -- paging"
+        if send_alarm "$unknown_streak"; then
+          alarm_sent=1
+          log "blind alarm sent"
+        else
+          log "blind alarm did NOT send -- still blind, will retry next tick"
+        fi
+      fi
       ;;
   esac
 
-  printf '%s' "$confirmed" > "$STAMP"
+  write_heartbeat "$raw" "$confirmed" "$unknown_streak" "$alarm_sent"
   last_raw="$raw"
   [ "$ONCE" = "1" ] && break
-  sleep "$INTERVAL"
+  # #305: a watcher that has lost vision retries sooner than steady-state --
+  # 300s is right when it can see, wrong when it cannot.
+  sleep_for="$INTERVAL"
+  [ "$raw" = "UNKNOWN" ] && sleep_for="$UNKNOWN_INTERVAL"
+  sleep "$sleep_for"
 done

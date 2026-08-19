@@ -38,11 +38,28 @@
 #
 # Usage: lane-done.sh <window> <expected-name> <channel> [session]
 #
-# <window>        the lane's tmux WINDOW ID (`@12`) -- what `dispatch.sh`
-#                 prints as `target:` and what `lanes.sh --free` emits in its
-#                 second column. A bare window INDEX is still accepted, for
-#                 the operator typing this by hand off the window list, but it
-#                 is not what a script should pass (#241).
+# <window>        the SAME STRING `dispatch.sh` prints as `target:` and
+#                 `lanes.sh --free` emits in its second column --
+#                 session-qualified, e.g. `agent-dotfiles:@12` (#259). Pass it
+#                 verbatim; this script detects the session prefix and does
+#                 not add its own. A bare window ID (`@12`) or INDEX is still
+#                 accepted, for the operator typing this by hand off the
+#                 window list, in which case [session] (below) supplies the
+#                 session to qualify it with.
+#
+#                 WHY NOT RE-PREFIX (#259): a caller that passes the printed
+#                 `target:` string through the old `${SESSION}:${WINDOW}`
+#                 build got `agent-dotfiles:agent-dotfiles:@12` --
+#                 unparseable as a specific window, so tmux silently fell
+#                 back to the server's ACTIVE window. That window is very
+#                 often the supervisor's own, which is `loop-tick.md`'s
+#                 documented failure family for "an empty tmux target hits
+#                 the ACTIVE window." Only the accidental fact that the
+#                 resolved window's name didn't match <expected-name> stopped
+#                 a rename of the supervisor's window (#259, #239). The
+#                 contract now has exactly one owner of the `session:` prefix
+#                 -- whichever producer already added one -- and this script
+#                 detects that rather than blindly prepending a second.
 #
 #                 WHY THE ID (#241): this script is the longest-lived resolved
 #                 target in the estate. It blocks on `wait-for` for as long as
@@ -102,11 +119,16 @@ if [ -z "$WINDOW" ] || [ -z "$EXPECTED_NAME" ] || [ -z "$CHANNEL" ]; then
 fi
 
 # One string, used for every tmux call below, built once (#241). `$WINDOW` is
-# a window id (`@12`) from a script or an index from a human; `session:@12`
-# and `session:5` are both valid tmux window targets, so no branch is needed
-# to accept either -- what differs is only whether the target can drift, and
-# that is the caller's choice to make correctly.
-TARGET="${SESSION}:${WINDOW}"
+# either bare (`@12` or `5`, from a human off the window list) or already
+# session-qualified (`agent-dotfiles:@12`, the exact string `dispatch.sh` and
+# `lanes.sh --free` print -- #259). A bare form is qualified with $SESSION as
+# before; a qualified form is used exactly as given, so this is the only
+# place `session:` gets prefixed and a caller passing the printed string
+# verbatim can never end up with it twice.
+case "$WINDOW" in
+  *:*) TARGET="$WINDOW" ;;
+  *)   TARGET="${SESSION}:${WINDOW}" ;;
+esac
 
 if ! tmux wait-for "$CHANNEL" 2>/dev/null; then
   echo "lane-done: channel '$CHANNEL' was not signaled -- not renaming ${TARGET}" >&2
@@ -139,12 +161,42 @@ fi
 # Not `cli.py complete`: that verifies $TMUX_PANE owns the lane and wants a
 # --result-file. This script runs in the supervisor's pane and holds no result
 # artifact -- the fact it has is that the worker's channel fired.
+LANE_DONE_CLI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cli.py"
 if ! LEDGER_OUT=$("${LANE_DONE_PYTHON:-python3}" \
-    "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cli.py" \
+    "$LANE_DONE_CLI" \
     record-completion --task "$EXPECTED_NAME" \
     --note "lane-done: ${CHANNEL} signaled for ${TARGET}, still named '$EXPECTED_NAME'" 2>&1); then
   echo "lane-done: LEDGER RECORD FAILED for $EXPECTED_NAME -- the lane IS free, the record is not written" >&2
   sed 's/^/  /' <<<"$LEDGER_OUT" >&2
+fi
+
+# --- agent-supervisor#308 item 1: best-effort PR-authorship recording ------
+# A completed task's branch may by now be an open PR -- record that
+# explicitly, so a later `dispatch.sh --reviews-pr` on it resolves by a
+# straight lookup (`Ledger.get_task_for_pr_number`) instead of only ever
+# reconstructing it from a branch name or a live worktree. BEST EFFORT,
+# NEVER FATAL, same posture as the completion record above: `gh` being
+# unreachable, no PR yet existing for this branch, or the worktree already
+# gone must never turn a genuine completion into a reported failure --
+# dispatch.sh's OTHER resolution paths (issue, PR-scoped dispatch, worktree,
+# legacy branch, the external marking) still apply when this was skipped or
+# failed.
+if [ -n "${LEDGER_OUT:-}" ]; then
+  DONE_TASK_ID=$(sed -n 's/.*"id":"\([^"]*\)".*/\1/p' <<<"$LEDGER_OUT" | head -n1)
+  DONE_WORKTREE=$(sed -n 's/.*"worktree_path":"\([^"]*\)".*/\1/p' <<<"$LEDGER_OUT" | head -n1)
+  if [ -n "$DONE_TASK_ID" ] && [ -n "$DONE_WORKTREE" ] && [ -d "$DONE_WORKTREE" ]; then
+    DONE_REPO=$(cd "$DONE_WORKTREE" 2>/dev/null && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) || DONE_REPO=""
+    if [ -n "$DONE_REPO" ]; then
+      DONE_PR=$(cd "$DONE_WORKTREE" 2>/dev/null && gh pr view --json number -q .number 2>/dev/null) || DONE_PR=""
+      if [ -n "$DONE_PR" ]; then
+        if ! RECORD_PR_OUT=$("${LANE_DONE_PYTHON:-python3}" "$LANE_DONE_CLI" \
+            record-pr-for-task --task "$DONE_TASK_ID" --repo "$DONE_REPO" --pr "$DONE_PR" 2>&1); then
+          echo "lane-done: could not record PR authorship (task $DONE_TASK_ID -> $DONE_REPO#$DONE_PR) -- best effort, not fatal" >&2
+          sed 's/^/  /' <<<"$RECORD_PR_OUT" >&2
+        fi
+      fi
+    fi
+  fi
 fi
 
 # Rename back to free-N is now COSMETIC, not the release condition

@@ -3,6 +3,29 @@
 One iteration of the supervisor loop. If your context was lost,
 read `brief.md` in this directory first — it is the full standing context.
 
+**Corrections, `Verified 2026-08-16`, added by the docs sweep rather than
+rewriting what they correct:**
+
+- **"In this directory" is wrong.** `brief.md` is not tracked in this repo
+  (`git ls-files scripts/supervisor/brief.md` — nothing) and is not read from
+  beside this file. It is a state-directory artifact,
+  `~/.local/state/agent-dotfiles-supervisor/brief.md`, as `README.md`'s own
+  `recycle.py` section confirms by grepping that exact path. Read it
+  from there.
+- **This file predates the 2026-08-13 extraction into `agent-supervisor`**
+  (its own last content edit is `#114`, before the split) **and was not
+  updated for it.** Every worked `dispatch.sh`/`claim.sh`/`worktree.sh`
+  example below points at `~/source/repos/Personal/agent-dotfiles` and
+  `jonhill90/agent-dotfiles` as the repo being operated on — accurate as one
+  of the five swept repos, but the scripts those examples invoke now live in
+  *this* repo (`agent-supervisor`), not in `agent-dotfiles`. Substitute
+  `agent-supervisor`'s own path when dispatching work in this repo; do not
+  copy an example's repo argument verbatim without checking which repo the
+  work is actually in.
+- Neither correction changes what to *do* — only where to look and which repo
+  an example's literal argument names. Per this project's "correct rather
+  than delete" rule, the examples below are left as written.
+
 ## Every tick begins with the quota gate
 
 ```bash

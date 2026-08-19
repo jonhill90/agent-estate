@@ -478,7 +478,12 @@ for repo in $REPOS; do
     author_lane_id=$(jq -r 'if .known == true then (.lane // "") else "" end' <<<"$author_lane")
     lane_rel=unknown
     if [ -n "$reviewer_lane_id" ] && [ -n "$author_lane_id" ]; then
-      lane_rel=$(lane_relation "$author_lane_id" "$reviewer_lane_id")
+      # agent-supervisor#332: resolve_lane_relation(), the SAME call
+      # merge-pr.sh's enforcement now makes -- this report must not say
+      # "independent" for a pairing the enforcement gate would refuse to
+      # merge, or the two drift on the one comparison #179 built this file
+      # to keep them sharing.
+      lane_rel=$(resolve_lane_relation "$author_lane_id" "$reviewer_lane_id")
     fi
     # #179: the independence decision itself moved to verdict-independence.sh
     # (`independence_verdict`) so merge-pr.sh's ENFORCEMENT of it and this
@@ -505,6 +510,32 @@ for repo in $REPOS; do
     PR_JSON=$(jq -nc --argjson acc "$PR_JSON" --argjson e "$entry" '$acc + [$e]')
   done
 done
+
+# --- acceptance regressions ------------------------------------------------
+# An issue closes on a CLAIM and the claim decays
+# silently: PR #294 "lane identity for author exclusion" merged 2026-08-16 and
+# the symptom was still excluding every free lane on 2026-08-18, with a second
+# task having already completed on the same bug two days earlier. PHASES.md
+# records the general form -- "seven issues closed while their symptom
+# continued". Verification ran once, inside the lane, before the merge, and
+# nothing ever re-ran it.
+#
+# This re-runs the ```acceptance block of CLOSED issues. A failure there is not
+# a new bug, it is the ORIGINAL symptom still present after closure.
+# REPORT-ONLY here: reopening is acceptance.sh --reopen, run deliberately, not
+# a side effect of reading a digest.
+ACCEPTANCE_BIN="${DIGEST_ACCEPTANCE_BIN:-$HERE/acceptance.sh}"
+acceptance_line="not run"
+if [ -x "$ACCEPTANCE_BIN" ]; then
+  acceptance_out=$("$ACCEPTANCE_BIN" --limit "${DIGEST_ACCEPTANCE_LIMIT:-15}" 2>&1)
+  acceptance_rc=$?
+  acceptance_line=$(printf '%s' "$acceptance_out" | grep -E 'pass=|REGRESSED:' | tr '\n' ' ')
+  if [ "$acceptance_rc" -eq 1 ]; then
+    note_error "acceptance: a CLOSED issue's own test is failing again -- $(printf '%s' "$acceptance_out" | grep 'REGRESSED:' | tail -1)"
+  fi
+else
+  note_error "acceptance.sh missing at $ACCEPTANCE_BIN -- cannot tell a healed issue from a rotted one"
+fi
 
 # --- merges since ---------------------------------------------------------
 # agent-supervisor#144: REST core again. There is no `state=merged` on the
