@@ -222,6 +222,54 @@ if [ "$rc" -eq 1 ]; then ok "unknown authorship refused"; else bad "unknown auth
 if [ ! -f "$MARKER" ]; then ok "unknown authorship never merges"; else bad "unknown authorship never merges" "$out"; fi
 echo "$out" | grep -q "unresolved" && ok "unknown-authorship refusal names the reason" || bad "unknown-authorship refusal named" "$out"
 
+# --- agent-supervisor#376: a PR marked external via `cli.py mark-pr-external`
+# merges on an otherwise-independent-looking verdict, even though the ledger
+# has no author lane for it at all -- the exact PR #375 shape (marked
+# external, refused anyway before this fix, because `author_lane_for` never
+# consulted `pr-external` and fell through to the same `known:false` as
+# genuinely unresolved authorship, PR 44 above). No `seed_author` call: the
+# whole point is that no ledger record names a contributor.
+# ============================================================================
+rm -f "$MARKER"
+cat > "$FIX/head_62.json" <<'S'
+{"headRefOid": "sha-62"}
+S
+green_checkruns sha-62
+cat > "$FIX/author_62.json" <<'S'
+{"headRefName": "some-hand-pushed-branch", "closingIssuesReferences": [], "commits": []}
+S
+cat > "$FIX/reviews_62.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:9\nReviewed-SHA: sha-62", "createdAt": "2026-08-19T00:00:00Z"}]}
+S
+register_tmux_lane t:9 %90
+python3 "$LEDGER_CLI" --state-dir "$STATE" mark-pr-external --repo "$REPO" --pr 62 --note "human pushed directly" --chain-verified >/dev/null
+out=$("$MERGE_PR" "$REPO" 62 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "#376: a PR marked external merges on an independent verdict"; else bad "#376: externally-marked PR merges" "got rc=$rc: $out"; fi
+if [ -f "$MARKER" ]; then ok "#376: ...and actually calls gh pr merge"; else bad "#376: externally-marked PR -- gh pr merge called" "$out"; fi
+echo "$out" | grep -q "outside the lane system" && ok "#376: success names the external marking, for auditability" || bad "#376: success names external marking" "$out"
+
+# --- ...and marking a PR external does not weaken the fail-closed default:
+# a PR that is NEITHER resolvable NOR marked external still refuses exactly
+# as PR 44 above did -- reusing that same fixture shape on a fresh PR number
+# with no `mark-pr-external` call at all. ----------------------------------
+rm -f "$MARKER"
+cat > "$FIX/head_63.json" <<'S'
+{"headRefOid": "sha-63"}
+S
+green_checkruns sha-63
+cat > "$FIX/author_63.json" <<'S'
+{"headRefName": "some-other-hand-pushed-branch", "closingIssuesReferences": [], "commits": []}
+S
+cat > "$FIX/reviews_63.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:9\nReviewed-SHA: sha-63", "createdAt": "2026-08-19T00:00:00Z"}]}
+S
+out=$("$MERGE_PR" "$REPO" 63 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#376: unresolved + NOT marked external still refuses (fail-closed unweakened)"; else bad "#376: unresolved + not external still refuses" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#376: ...and never merges"; else bad "#376: unresolved + not external -- never merges" "$out"; fi
+echo "$out" | grep -q "unresolved" && ok "#376: unresolved-and-not-external refusal names the reason" || bad "#376: unresolved-and-not-external refusal named" "$out"
+
 # --- a verdict with no Review-Lane trailer does not count as independent --
 # agent-supervisor#179's acceptance criterion, reproduced literally: a plain
 # GitHub review-state APPROVED, with no `**Verdict:` / `Review-Lane:` comment

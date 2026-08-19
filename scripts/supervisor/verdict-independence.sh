@@ -263,9 +263,30 @@ repo_task_prefix() {
 # agent-supervisor#144: left as GraphQL (`gh pr view`), deliberately.
 # `closingIssuesReferences` -- the "Fixes #N" link GitHub itself resolves --
 # is a GraphQL-only concept; REST has no endpoint that answers it.
+#
+# agent-supervisor#376: `mark-pr-external.sh` records a PR as authored
+# OUTSIDE the lane system entirely (`cli.py pr-external`, gated by its own
+# exhaustive contributor-resolution chain -- see that script's header). Not
+# consulting that record here left every externally-marked PR falling
+# through every ledger-lookup path below to the same `known:false` this
+# function already returns for a genuinely unresolved author, so
+# `merge-pr.sh` refused it with the identical "author lane unresolved"
+# error whether or not anyone had ever marked it external -- the marking
+# was recorded but had no effect on the gate it exists to satisfy. Checked
+# FIRST, before any ledger-lookup path: a PR marked external has, by
+# construction, no lane to find, so there is nothing more specific worth
+# trying first.
 author_lane_for() {
   local repo_full="$1" number="$2" pr_json head_ref candidates candidate issue_json
-  local prefix fallback_task fallback_json outfile rc
+  local prefix fallback_task fallback_json outfile rc external_json external_note
+  external_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" pr-external --repo "$repo_full" --pr "$number" 2>/dev/null)
+  if jq -e '.known == true' >/dev/null 2>&1 <<<"$external_json"; then
+    external_note=$(jq -r '.note // ""' <<<"$external_json")
+    jq -nc --arg note "$external_note" \
+      '{known:true, lane:null, task:null, external:true,
+        detail:("authored outside the lane system" + (if ($note|length) > 0 then " -- " + $note else "" end))}'
+    return
+  fi
   outfile=$(mktemp "${TMPDIR:-/tmp}/author-lane-gh.XXXXXX") || {
     jq -nc --arg detail "independence unknown -- PR author lane unresolved: could not create a scratch file" \
       '{known:false, lane:null, task:null, detail:$detail}'
@@ -384,7 +405,16 @@ independence_verdict() {  # independence_verdict <verdict-json> <author-json> <l
       if (($v.reviewer_lane // "") | length) == 0 then
         {value:null, detail:"independence unknown -- reviewer lane unresolved; comment verdicts must include Review-Lane: <lane-id>"}
       elif ($author.known == true) then
-        if ($lane_rel == "same") then
+        if ($author.external == true) then
+          # agent-supervisor#376: a PR marked external has, by construction,
+          # no author lane to compare against the reviewer -- there is
+          # nothing for $lane_rel to say "same" about. Treated exactly like
+          # a provably-different author (independence = true), carrying the
+          # external note through for auditability rather than the bare
+          # "independent -- author lane X" phrasing the ledger-resolved path
+          # below uses.
+          {value:true, detail:("independent -- PR " + $author.detail + ", reviewer lane " + $v.reviewer_lane)}
+        elif ($lane_rel == "same") then
           {value:false, detail:("NOT independent -- author lane " + $author.lane + " reviewed its own PR"
             + (if ($v.reviewer_lane != $author.lane) then " (reviewed as " + $v.reviewer_lane + " -- the same window, renamed session)" else "" end))}
         elif ($lane_rel == "different") then
