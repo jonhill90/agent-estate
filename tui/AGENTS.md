@@ -10,17 +10,37 @@ files drifted).
 #43).** Confirm the branch/SHA in `git log -1` still matches before trusting
 counts below; they are measured, not estimated.
 
-**Naming: unsettled, do not treat as decided.** Jon rejected `keelson` as the
-product name (agent-tui#42 tracks the shortlist he is choosing from —
-`steading` verified clean, `loom` his stated fallback, nothing picked yet).
-The Go module, `cmd/` directory and binary are nonetheless *currently* named
-`keelson` as a leftover of agent-tui#38's overnight rename pass — that is a
-fact about the code today, not a settled product name, and prose in this
-repo's docs must not imply otherwise. The GitHub repo itself is still
-`jonhill90/agent-tui`; issue references below keep the `agent-tui#NN` form
-because that is the repo they point at. TODO(name): once agent-tui#42
-resolves, the module/binary/`cmd/` directory should be renamed to match and
-every doc updated in the same change — not before.
+**Naming: decided. The product is `steading`** (agent-tui#42, seven rounds,
+~60 candidates checked). Jon rejected `keelson` (real collision:
+`akapril/keelson`, a near-identical local-first AI-session workbench) and
+said to keep looking for "an untaken gem" before falling back to `loom`
+(which collides with three separate agent orchestrators, 12–74 stars each).
+`steading` is that gem: `gh api users/steading` and
+`gh api repos/jonhill90/steading` both 404 (free), `npm view steading`
+404s (free), and `gh search repos steading` returns zero purpose
+collisions — re-verified 2026-08-20, the day this was applied. `steading.com`
+and `steading.dev` are now registered (checked the same day; both were
+reported free as of the 2026-08-16 round-4 check, so this changed in the
+four days between), which is a real cost but not disqualifying — GitHub org,
+`jonhill90/<name>`, npm, and search-purpose-collision are the signals that
+discriminate real conflict from mere squatting, per every round's own
+methodology, and `steading` clears all four. A steading is a farmstead and
+all its outbuildings — the whole working holding, not a single machine —
+which matches what this product actually is (rail, board, cost, gallery,
+memory, chat, workflows) better than a renderer-technology name ever could.
+**This is a naming decision, not a rename.** The Go module, `cmd/`
+directory and binary stay `keelson` — a leftover of agent-tui#38's overnight
+rename pass — and the GitHub repo stays `jonhill90/agent-tui`, both
+deliberately, because mixing the naming call with the mechanical rename
+would make this PR unreviewable (agent-tui#42's own brief). Prose in this
+repo's docs should now say `steading` where the earlier text said "TODO" or
+"unsettled"; code identifiers are unchanged and issue references below keep
+the `agent-tui#NN` form because that is the repo they point at. TODO(rename):
+a follow-on change should move the module path, `cmd/` directory, binary
+name, and GitHub repo to `steading` in one pass — not done here, not
+blocking here. Measured cost: `git grep -o -i agent-tui | wc -l` on this
+branch, 2026-08-20 — 489 occurrences across 81 tracked files (`git grep -l
+-i agent-tui | wc -l`), up from round 1's 438/72.
 
 ## What this repo is
 
@@ -28,10 +48,10 @@ This repo (Go module `github.com/jonhill90/keelson` — see the naming note
 above) is one terminal application: a persistent left rail over
 `agent-supervisor`'s lane/session state, with the task board, cost panel and
 glyph gallery reachable as panes in the same process (`internal/shell`,
-agent-tui#38). The name `agent-tui` originally described the rendering
-technology (Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea)),
-not the product, which is why a rename is under discussion — but no
-replacement has been chosen. It is a **viewer with one write path** (session
+agent-tui#38). The name `agent-tui` describes the rendering technology (Go +
+[Bubble Tea](https://github.com/charmbracelet/bubbletea)), not the product —
+the product's name is `steading` (agent-tui#42; see the naming note above).
+It is a **viewer with one write path** (session
 attach/detach/add/remove, see below) — same discipline as
 `agent-supervisor`'s own `scripts/supervisor/laneview/`. It never shells out
 to `tmux` directly, never reads or writes the ledger except through the

@@ -4,8 +4,9 @@
 Intent, not status — for what has actually shipped, read `README.md`; for
 the gap between the two, read `docs/SPEC.md`'s "Gap between intent and
 code" section. Every dated claim below is checked against `origin/main`
-`b00db9b`, **verified 2026-08-16.** Naming is unsettled (agent-tui#42);
-this document never names the product — see `AGENTS.md`'s naming note.
+`b00db9b`, **verified 2026-08-16.** The product is named `steading`
+(agent-tui#42, decided 2026-08-20) — see `AGENTS.md`'s naming note for the
+reasoning and evidence.
 
 ## The one-line framing
 
@@ -18,7 +19,7 @@ is building — the TUI."
 
 The estate (`agent-supervisor`) already runs and reasons about lanes,
 sessions, cost, and tasks. Nothing renders it as a single coherent
-application a human can sit in front of. `agent-tui` is that surface: it
+application a human can sit in front of. `steading` is that surface: it
 consumes the supervisor over MCP, adds no orchestration logic of its own,
 and is meant to be as removable as it is addable — see `AGENTS.md`'s
 adapter discipline for how that boundary is kept real in code, not just

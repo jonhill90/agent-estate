@@ -1,12 +1,17 @@
 # agent-tui
 
-*Naming is unsettled — TODO(name).* Jon rejected `keelson` as the product
-name; `steading` is verified clean and `loom` is his stated fallback, but he
-has not picked and this repo does not pick for him (agent-tui#42 tracks the
-shortlist). The Go module, `cmd/` directory and binary happen to be
-*currently* named `keelson` — a leftover of agent-tui#38's overnight rename
-pass, described below as a fact about the code, not as the product's name.
-The GitHub repo stays `jonhill90/agent-tui`.
+**The product is named `steading`** (agent-tui#42 — seven rounds, ~60
+candidates checked; see `AGENTS.md`'s naming note for the full reasoning and
+availability evidence). A steading is a farmstead and all its outbuildings —
+the whole working holding, not a single machine — which is what this
+product actually is: rail, board, cost, gallery, and the memory/chat/
+workflow features still landing. This is a naming decision only, not a
+rename: the Go module, `cmd/` directory and binary stay `keelson` — a
+leftover of agent-tui#38's overnight rename pass, described below as a fact
+about the code, not as the product's name — and the GitHub repo stays
+`jonhill90/agent-tui`. TODO(rename): moving the module path, `cmd/`
+directory, binary and repo to `steading` is separate follow-on work,
+tracked at agent-tui#42, not done here.
 
 A terminal application for the agent estate: reads [`agent-supervisor`](https://github.com/jonhill90/agent-supervisor)'s
 lane and session state over MCP and renders it behind a persistent left

@@ -5,10 +5,10 @@
 claim below is checked against `origin/main` `b00db9b`, **verified
 2026-08-16** — `go build ./...`, `go vet ./...`, and `go test ./...` all
 pass at that SHA (output: 9 tested packages, all `ok`; `cmd/keelson` has no
-test files). Naming is unsettled (agent-tui#42); this document refers to
-the binary/module by their current, factual name (`keelson`) only where the
-code itself uses it, never as a claim that the product is named that. See
-`AGENTS.md`'s naming note.
+test files). The product is named `steading` (agent-tui#42, decided
+2026-08-20); this document refers to the binary/module by their current,
+factual name (`keelson`) only where the code itself uses it, never as a
+claim that the product is named that. See `AGENTS.md`'s naming note.
 
 ## Stack
 
