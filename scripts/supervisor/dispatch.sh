@@ -587,6 +587,41 @@ else
 fi
 WINDOW_NAME="${PREFIX}${ISSUE}-${SLUG}"
 
+# --- -1. the session itself must exist before any lane in it can be trusted -
+# agent-supervisor#422: lanes.sh already refuses when $SESSION does not exist
+# ("lanes: session '$SESSION' does not exist", exit 1) but every call site
+# below wants only its stdout classification table and discards stderr
+# (`2>/dev/null`) to get it -- so that message never reaches anyone. What
+# reaches the caller instead is a LATER, generic "no free lane" refusal,
+# worded identically to "every lane is busy" (#111 gives each repo its own
+# session; a repo dispatch.sh has never bootstrapped a session for reads as
+# silently, permanently full). Checked here, before step 0, so a missing
+# session gets its own message and its own fix -- distinguishable from every
+# other refusal below -- instead of falling through the candidate search and
+# reading as ordinary busyness.
+#
+# `=name` is bootstrap-session.sh's own exact-match fix (#137): tmux
+# prefix-matches `has-session -t foo` against an existing `foo-2`, so the
+# same `=` prefix is required here or this probe could pass by matching a
+# DIFFERENT session than the one this dispatch actually needs.
+if ! tmux has-session -t "=$SESSION" 2>/dev/null; then
+  BOOTSTRAP_LANES="${DISPATCH_BOOTSTRAP_LANES:-3}"
+  echo "dispatch: session '$SESSION' does not exist -- #$ISSUE_ARG cannot be dispatched (agent-supervisor#422)" >&2
+  if [ "${DISPATCH_NO_AUTO_BOOTSTRAP:-0}" = 1 ]; then
+    echo "dispatch: DISPATCH_NO_AUTO_BOOTSTRAP=1 -- not auto-bootstrapping. Run by hand:" >&2
+    echo "dispatch:   $HERE/bootstrap-session.sh --session $SESSION --lanes $BOOTSTRAP_LANES --cwd $REPO_PATH" >&2
+    exit 2
+  fi
+  echo "dispatch: auto-bootstrapping session '$SESSION' ($BOOTSTRAP_LANES lanes, cwd $REPO_PATH)" >&2
+  if "$HERE/bootstrap-session.sh" --session "$SESSION" --lanes "$BOOTSTRAP_LANES" --cwd "$REPO_PATH" >&2; then
+    echo "dispatch: session '$SESSION' bootstrapped -- continuing dispatch" >&2
+  else
+    echo "dispatch: auto-bootstrap of session '$SESSION' FAILED -- run by hand:" >&2
+    echo "dispatch:   $HERE/bootstrap-session.sh --session $SESSION --lanes $BOOTSTRAP_LANES --cwd $REPO_PATH" >&2
+    exit 2
+  fi
+fi
+
 # --- 0. the ledger must be readable before any lane is trusted ------------
 # agent-dotfiles#174. Everything below this line asks the LEDGER whether a
 # lane is free, not the window name -- the whole point of the change. That
