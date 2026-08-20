@@ -52,6 +52,43 @@
 #     were both long-form ("--body-file", "--body"), and short options are
 #     far more likely to appear inside real prose ("-1 to that idea").
 #
+# (c) VALIDATE THE Review-Lane: / Verdict: TRAILER PAIR AGAINST THE LEDGER,
+#     before anything is posted -- agent-supervisor#187/#188. The
+#     `Review-Lane:` trailer is the only thing that makes a verdict
+#     attributable to a reviewer (`verdict._parse_review_lane`), and it used
+#     to be hand-typed with nothing checking it at post time. Three
+#     instances measured within 24h, all false refusals at the merge gate
+#     hours later: a task slug instead of a lane id (unresolvable), and
+#     TWICE the reviewing agent named the supervisor's own window instead of
+#     its own lane. #188 found this script itself unwired -- nothing calls
+#     it -- so the check could not have caught any of them even if it
+#     existed. Both are fixed together here: this script is now the thing a
+#     reviewer actually runs, and it now refuses before posting rather than
+#     letting the merge gate discover the mistake later, when a retry costs
+#     a whole extra dispatch instead of one.
+#
+#     Two independent checks, because a pairing mistake and a bad lane value
+#     are different defects with different fixes:
+#
+#       - PAIRING: a `Verdict:` line with no `Review-Lane:` line, or a
+#         `Review-Lane:` line with no `Verdict:` line, is refused outright.
+#         A verdict nobody can attribute, or a lane stamp attributing
+#         nothing, is always a mistake worth catching immediately rather
+#         than at the merge gate.
+#       - RESOLUTION: when both are present, the `Review-Lane:` value (via
+#         `verdict._parse_review_lane`, the SAME parser the merge gate
+#         uses -- no second implementation of "is this a lane" per
+#         agent-supervisor#108's own lesson) must resolve to a lane this
+#         ledger has REGISTERED (`core.Ledger.get_lane`) and must NOT be the
+#         supervisor's own window (`core.LANE_ID_RE`'s index component
+#         compared against the same `LANES_SUPERVISOR_WINDOW` convention
+#         `lanes.sh` already uses, default window 1) -- the exact two
+#         measured false-refusal shapes above.
+#
+#     A body with neither line (an ordinary comment posted through this
+#     script for unrelated reasons -- see `--issue`) is untouched by either
+#     check.
+#
 # (b) READ BACK WHAT WAS POSTED AND COMPARE, and only THEN report success.
 #     "gh returned 0" is not evidence -- it is this repository's own
 #     measured-versus-inferred rule, and BOTH instances above returned 0
@@ -83,9 +120,42 @@
 # Exit 5   posted, but the read-back fetch itself failed.
 # Exit 6   posted, but the read-back body did NOT match what was sent --
 #          the exact failure this script exists to catch.
+# Exit 7   refused -- a Verdict: line with no Review-Lane: line, or a
+#          Review-Lane: line with no Verdict: line (#187/#232's pairing
+#          mistake).
+# Exit 8   refused -- the Review-Lane: value does not resolve to a lane this
+#          ledger has registered, or resolves to the supervisor's own
+#          window (#187's two measured false-refusal shapes).
+#
+# IF YOU ARE WRITING BRIEF TEXT FOR A REVIEW OR FIX-PASS DISPATCH (#412):
+# the class of bug #187 measured was never a committed script calling `gh
+# pr comment` -- it was a reviewing agent hand-typing the verdict trailers
+# because its OWN BRIEF told it to post that way. This script existing does
+# nothing for that class unless the brief's closing instruction actually
+# names it. Tell the lane to run:
+#
+#   printf '%s\n' "$BODY" | post-verdict.sh <repo> <N>
+#
+# never a raw `gh pr comment`/`gh issue comment`. `gh-comment-gate.sh`
+# cannot catch a drift back to raw posting in brief text -- see its own
+# docstring -- so this is enforced by writing the brief correctly, not by
+# CI. `scripts/supervisor/loop-tick.md`'s review-dispatch section is the
+# in-repo doc that generates that text; keep it pointed here.
 set -uo pipefail
 
 usage() { sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2; }
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Same env var and default `quota.sh`/`sessions.sh` already use -- `cli.py`
+# resolves this itself for every OTHER caller, but this script constructs
+# `core.Ledger` directly (the same "no cli.py subcommand fits a single-field
+# read" precedent as `verdict-independence.sh`'s `_lane_own_pane_id`), so it
+# needs the same default in hand.
+STATE="${AGENT_SUPERVISOR_STATE_DIR:-$HOME/.local/state/agent-dotfiles-supervisor}"
+LEDGER_PYTHON="${POST_VERDICT_PYTHON:-python3}"
+# The supervisor's own window index within its session -- `lanes.sh`'s own
+# convention (`SUPERVISOR_WINDOW`), same env var, so the two never drift.
+SUPERVISOR_WINDOW="${LANES_SUPERVISOR_WINDOW:-1}"
 
 GH="${AGENT_GH_BIN:-gh}"
 
@@ -163,6 +233,79 @@ elif [ "$tok_count" -eq 2 ]; then
       fi
       ;;
   esac
+fi
+
+# --- (c) Review-Lane: / Verdict: pairing and lane resolution (#187/#188) --
+lane_check_json="$("$LEDGER_PYTHON" -c '
+import json, sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger, LANE_ID_RE
+from verdict import _parse_review_lane, _review_lane_line, _scan_verdict_lines
+
+body = sys.stdin.read()
+ledger = Ledger(sys.argv[2])
+supervisor_window = sys.argv[3]
+
+has_verdict = bool(_scan_verdict_lines(body))
+raw_line = _review_lane_line(body)
+lane_token = _parse_review_lane(body, ledger=ledger)
+
+known = False
+is_supervisor = False
+if lane_token:
+    known = ledger.get_lane(lane_token) is not None
+    match = LANE_ID_RE.match(lane_token)
+    if match:
+        index = match.group("index")
+        try:
+            is_supervisor = int(index) == int(supervisor_window)
+        except ValueError:
+            is_supervisor = index == supervisor_window
+
+json.dump({
+    "has_verdict": has_verdict,
+    "has_lane_line": raw_line is not None,
+    "raw_lane_line": raw_line or "",
+    "lane_token": lane_token or "",
+    "known": known,
+    "is_supervisor": is_supervisor,
+}, sys.stdout)
+' "$HERE" "$STATE" "$SUPERVISOR_WINDOW" <<<"$BODY" 2>/dev/null)"
+
+if [ -z "$lane_check_json" ] || ! jq -e . >/dev/null 2>&1 <<<"$lane_check_json"; then
+  echo "post-verdict.sh: could not evaluate the Review-Lane:/Verdict: trailers -- refusing to post rather than guess (is python3 able to import verdict.py/core.py from $HERE, and is the ledger at $STATE readable?)" >&2
+  exit 7
+fi
+
+has_verdict=$(jq -r '.has_verdict' <<<"$lane_check_json")
+has_lane_line=$(jq -r '.has_lane_line' <<<"$lane_check_json")
+lane_token=$(jq -r '.lane_token' <<<"$lane_check_json")
+lane_known=$(jq -r '.known' <<<"$lane_check_json")
+lane_is_supervisor=$(jq -r '.is_supervisor' <<<"$lane_check_json")
+raw_lane_line=$(jq -r '.raw_lane_line' <<<"$lane_check_json")
+
+if [ "$has_verdict" = "true" ] && [ "$has_lane_line" != "true" ]; then
+  echo "post-verdict.sh: refusing to post -- body has a Verdict: line but no Review-Lane: line -- add 'Review-Lane: <session>:<index>' naming the reviewing lane (agent-supervisor#187/#232's own pairing mistake)" >&2
+  exit 7
+fi
+if [ "$has_lane_line" = "true" ] && [ "$has_verdict" != "true" ]; then
+  echo "post-verdict.sh: refusing to post -- body has a Review-Lane: line ('$raw_lane_line') but no Verdict: line -- a lane stamp with nothing to attribute is almost always a mistake" >&2
+  exit 7
+fi
+
+if [ "$has_lane_line" = "true" ]; then
+  if [ -z "$lane_token" ] || [ "$lane_token" = "null" ]; then
+    echo "post-verdict.sh: refusing to post -- '$raw_lane_line' does not resolve to a lane id -- pass the exact <session>:<index> this ledger knows" >&2
+    exit 8
+  fi
+  if [ "$lane_known" != "true" ]; then
+    echo "post-verdict.sh: refusing to post -- Review-Lane '$lane_token' is not a lane this ledger has registered -- a lane must have been dispatched at least once before it can review" >&2
+    exit 8
+  fi
+  if [ "$lane_is_supervisor" = "true" ]; then
+    echo "post-verdict.sh: refusing to post -- Review-Lane '$lane_token' names the supervisor's own window (index $SUPERVISOR_WINDOW), which never reviews -- this is the exact false-refusal shape agent-supervisor#187 measured twice" >&2
+    exit 8
+  fi
 fi
 
 # --- post -----------------------------------------------------------------

@@ -14,16 +14,53 @@
 #      match what was sent must be reported as a FAILURE, not a success --
 #      "gh returned 0" was exactly what both #170 instances measured while
 #      delivering garbage.
+#
+# Section 7 below adds the third defense (agent-supervisor#187/#188): a
+# Verdict:/Review-Lane: pairing mistake, or a Review-Lane: that does not
+# resolve to a known, non-supervisor lane, must also be refused before
+# anything is posted. Sections 1-4's existing bodies that carry a `Verdict:`
+# line are updated to also carry a matching, ledger-registered `Review-Lane:`
+# line, so they keep testing what they always tested instead of tripping the
+# new check for an unrelated reason.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POST_VERDICT="$HERE/../../scripts/supervisor/post-verdict.sh"
+SUPERVISOR_DIR="$HERE/../../scripts/supervisor"
 pass=0; fail=0
 ok() { echo "  ok   $1"; pass=$((pass+1)); }
 bad() { echo "  FAIL $1"; fail=$((fail+1)); }
 
 echo "post-verdict.sh"
 
+# seed_lane <lane> <pane-id> -- registers a lane directly in the ledger, the
+# same shape test_lane_relation_renumber.sh uses, so post-verdict.sh's own
+# ledger lookups (core.Ledger.get_lane) find it without needing a real tmux
+# server.
+seed_lane() {
+  python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+ledger = Ledger(sys.argv[2])
+ledger.register_lane(
+    lane=sys.argv[3], pane_id=sys.argv[4], nonce="nonce-" + sys.argv[3],
+    harness="claude", repo="/tmp/repo", server_id="srv", session_id="sess",
+    command="claude", transport="send-keys",
+)
+' "$SUPERVISOR_DIR" "$STATE" "$1" "$2"
+}
+
 D=$(mktemp -d)
+STATE="$D/state"
+export AGENT_SUPERVISOR_STATE_DIR="$STATE"
+
+# The two lanes section 7's new checks (and sections 1-4's updated bodies)
+# need: a real, non-supervisor lane every "good" body's Review-Lane: names,
+# and a lane whose window index IS the supervisor's own (default window 1,
+# `LANES_SUPERVISOR_WINDOW`) for the false-refusal shape agent-supervisor#187
+# measured twice.
+seed_lane "revlane:3" "%501"
+seed_lane "revlane:1" "%502"
 
 # =========================================================================
 # 1. RED: a body of "@/tmp/x.md" -- an existing file -- must be refused,
@@ -75,6 +112,7 @@ if [ "$rc" -ne 0 ]; then ok "a bare existing-path body is also refused"; else ba
 PATH="$D/refuse/bin:$PATH" \
   bash "$POST_VERDICT" o/r 5 <<EOF >"$D/refuse/prose_out" 2>"$D/refuse/prose_err"
 **Verdict:** APPROVE -- see @$D/refuse/does-not-exist.md for detail, plus more words
+Review-Lane: revlane:3
 EOF
 rc=$?
 if [ "$rc" -eq 0 ]; then ok "real prose mentioning an @-path is not refused"; else bad "real prose was wrongly refused (rc=$rc): $(cat "$D/refuse/prose_err")"; fi
@@ -105,6 +143,7 @@ chmod +x "$D/mismatch/bin/gh"
 PATH="$D/mismatch/bin:$PATH" \
   bash "$POST_VERDICT" o/r 9 <<'EOF' >"$D/mismatch/out" 2>"$D/mismatch/err"
 **Verdict:** APPROVE, real findings, none of which is a file path
+Review-Lane: revlane:3
 EOF
 rc=$?
 if [ "$rc" -ne 0 ]; then ok "a read-back mismatch after a successful gh post exits non-zero (got $rc)"; else bad "a read-back mismatch exited 0"; fi
@@ -153,6 +192,7 @@ chmod +x "$D/happy/bin/gh"
 PATH="$D/happy/bin:$PATH" \
   bash "$POST_VERDICT" o/r 11 <<'EOF' >"$D/happy/out" 2>"$D/happy/err"
 **Verdict:** APPROVE -- read back matches what was sent
+Review-Lane: revlane:3
 EOF
 rc=$?
 if [ "$rc" -eq 0 ]; then ok "a matching read-back exits zero"; else bad "a matching read-back exited $rc: $(cat "$D/happy/err")"; fi
@@ -172,6 +212,7 @@ chmod +x "$D/ghfail/bin/gh"
 PATH="$D/ghfail/bin:$PATH" \
   bash "$POST_VERDICT" o/r 3 <<'EOF' >"$D/ghfail/out" 2>"$D/ghfail/err"
 **Verdict:** APPROVE
+Review-Lane: revlane:3
 EOF
 rc=$?
 if [ "$rc" -ne 0 ]; then ok "a gh post failure exits non-zero"; else bad "a gh post failure exited 0"; fi
@@ -263,6 +304,92 @@ PATH="$D/allow/bin:$PATH" \
 EOF
 rc=$?
 if [ "$rc" -eq 0 ]; then ok "a bare short-dash token is not refused (out of scope)"; else bad "a bare short-dash token was wrongly refused (rc=$rc): $(cat "$D/allow/short_err")"; fi
+
+# =========================================================================
+# 7. Review-Lane:/Verdict: pairing and lane resolution (agent-supervisor
+#    #187/#188). "revlane:3" and "revlane:1" were registered above --
+#    "revlane:1" shares its window index with the default supervisor window
+#    (LANES_SUPERVISOR_WINDOW=1), reproducing the exact false-refusal shape
+#    #187 measured twice (a reviewer naming the supervisor's own window).
+# =========================================================================
+mkdir -p "$D/lane/bin"
+LANE_LOG="$D/lane/gh.log"
+LANE_SENT="$D/lane/sent.body"
+cat > "$D/lane/bin/gh" <<EOF
+#!/bin/bash
+echo "gh called: \$*" >> "$LANE_LOG"
+if [ "\$1" = "pr" ] && [ "\$2" = "comment" ]; then
+  cat > "$LANE_SENT"
+  echo "https://github.com/o/r/pull/21#issuecomment-321"
+  exit 0
+elif [ "\$1" = "api" ]; then
+  cat "$LANE_SENT"
+  exit 0
+fi
+exit 9
+EOF
+chmod +x "$D/lane/bin/gh"
+
+# 7a. RED: a Verdict: line with no Review-Lane: line at all is refused,
+#     gh never invoked.
+: > "$LANE_LOG"
+PATH="$D/lane/bin:$PATH" \
+  bash "$POST_VERDICT" o/r 21 <<'EOF' >"$D/lane/noline_out" 2>"$D/lane/noline_err"
+**Verdict:** APPROVE, no lane trailer at all
+EOF
+rc=$?
+if [ "$rc" -eq 7 ]; then ok "a Verdict: line with no Review-Lane: line is refused (got $rc)"; else bad "a Verdict: line with no Review-Lane: line was not refused (rc=$rc)"; fi
+if [ ! -s "$LANE_LOG" ]; then ok "gh is never invoked for the missing-Review-Lane refusal"; else bad "gh was invoked despite the refusal: $(cat "$LANE_LOG")"; fi
+
+# 7b. RED: a Review-Lane: line with no Verdict: line is refused, gh never
+#     invoked -- a lane stamp attributing nothing is also a mistake.
+: > "$LANE_LOG"
+PATH="$D/lane/bin:$PATH" \
+  bash "$POST_VERDICT" o/r 21 <<'EOF' >"$D/lane/noverdict_out" 2>"$D/lane/noverdict_err"
+just a status update, no verdict here
+Review-Lane: revlane:3
+EOF
+rc=$?
+if [ "$rc" -eq 7 ]; then ok "a Review-Lane: line with no Verdict: line is refused (got $rc)"; else bad "a Review-Lane: line with no Verdict: line was not refused (rc=$rc)"; fi
+if [ ! -s "$LANE_LOG" ]; then ok "gh is never invoked for the missing-Verdict refusal"; else bad "gh was invoked despite the refusal: $(cat "$LANE_LOG")"; fi
+
+# 7c. RED: a Review-Lane: value this ledger has never registered (a task
+#     slug, not a lane id -- the agent-tui#30 shape) is refused, gh never
+#     invoked.
+: > "$LANE_LOG"
+PATH="$D/lane/bin:$PATH" \
+  bash "$POST_VERDICT" o/r 21 <<'EOF' >"$D/lane/unknown_out" 2>"$D/lane/unknown_err"
+**Verdict:** APPROVE
+Review-Lane: lane:30-rev-at30
+EOF
+rc=$?
+if [ "$rc" -eq 8 ]; then ok "an unregistered Review-Lane value is refused (got $rc)"; else bad "an unregistered Review-Lane value was not refused (rc=$rc)"; fi
+if [ ! -s "$LANE_LOG" ]; then ok "gh is never invoked for the unresolvable-lane refusal"; else bad "gh was invoked despite the refusal: $(cat "$LANE_LOG")"; fi
+
+# 7d. RED: a Review-Lane: value naming the supervisor's own window -- the
+#     agent-supervisor#165/agent-tui#31 shape, measured twice in 24h.
+: > "$LANE_LOG"
+PATH="$D/lane/bin:$PATH" \
+  bash "$POST_VERDICT" o/r 21 <<'EOF' >"$D/lane/supervisor_out" 2>"$D/lane/supervisor_err"
+**Verdict:** APPROVE
+Review-Lane: revlane:1
+EOF
+rc=$?
+if [ "$rc" -eq 8 ]; then ok "a Review-Lane naming the supervisor's own window is refused (got $rc)"; else bad "a supervisor-window Review-Lane was not refused (rc=$rc)"; fi
+if [ ! -s "$LANE_LOG" ]; then ok "gh is never invoked for the supervisor-window refusal"; else bad "gh was invoked despite the refusal: $(cat "$LANE_LOG")"; fi
+if grep -qi "supervisor" "$D/lane/supervisor_err"; then ok "the supervisor-window refusal names the reason"; else bad "no supervisor-window explanation on stderr: $(cat "$D/lane/supervisor_err")"; fi
+
+# 7e. GREEN: a real, registered, non-supervisor Review-Lane paired with a
+#     Verdict: line posts normally.
+: > "$LANE_LOG"
+PATH="$D/lane/bin:$PATH" \
+  bash "$POST_VERDICT" o/r 21 <<'EOF' >"$D/lane/good_out" 2>"$D/lane/good_err"
+**Verdict:** APPROVE, a real registered non-supervisor lane
+Review-Lane: revlane:3
+EOF
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "a registered, non-supervisor Review-Lane posts normally"; else bad "a valid Review-Lane was wrongly refused (rc=$rc): $(cat "$D/lane/good_err")"; fi
+if grep -q "posted and verified comment 321" "$D/lane/good_out"; then ok "the valid-lane post names the verified comment id"; else bad "no verified-comment confirmation: $(cat "$D/lane/good_out")"; fi
 
 echo
 echo "post-verdict.sh: $pass passed, $fail failed"
