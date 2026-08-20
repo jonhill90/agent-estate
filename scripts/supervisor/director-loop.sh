@@ -163,7 +163,9 @@ case "$box" in
     ;;
 esac
 
-TICK='Director tick. Keep this turn SHORT -- act, do not plan. A turn that runs long with no tool calls is the failure mode that killed the previous session.
+TICK='Director tick. SHORT MEANS SHORT PROSE, NOT FEW ACTIONS. Take as many actions as the work needs; write almost nothing about them.
+
+The previous wording said "act, report one line, stop" twice and "fill the free lanes" once, so every tick resolved toward stopping. Measured 2026-08-19: 29 free lanes, 124 open issues, 49 percent of a quota window in reserve, and TWO dispatches in an hour. The estate was single-threaded by instruction, not by any cap.
 
 1. QUOTA GATE FIRST, with the timeouts the instrument actually needs:
    QUOTA_GUARD_TIMEOUT_SECONDS=45 QUOTA_USAGE_TIMEOUT_SECONDS=45 bash scripts/supervisor/quota.sh check
@@ -171,7 +173,13 @@ TICK='Director tick. Keep this turn SHORT -- act, do not plan. A turn that runs 
 
 2. Read the standing brief rather than re-deriving it: ~/.local/state/agent-dotfiles-supervisor/PHASES.md and NOTEBOOK-jon-directives.md.
 
-3. Keep the TURN short -- act, report one line, stop. That is about turn length, NOT about how much work may be in flight.
+3. DISPATCH UNTIL YOU RUN OUT OF WORK OR LANES. Not one. Not two. Count the free lanes, count the dispatchable issues, and fire until one of them hits zero. Ending a tick with idle lanes and open work is the failure this instruction exists to prevent.
+
+   Run dispatches in PARALLEL, backgrounded -- do not serialise them. Each pays a quota gate and REST reads; serialising ten costs ten times what firing ten at once does, and that cost is exactly why previous ticks stopped at two.
+
+   Gate quota ONCE at the top of the turn, not once per dispatch.
+
+   Use subagents for verification you would otherwise do in sequence. Three lanes needing CI checked is one turn with three subagents, not three turns.
 
 FILL THE FREE LANES. If lanes are idle and there is independent work, dispatch to all of them in the same turn. Reviews of different PRs touch different files and do not block each other; there is no coded concurrency cap and none is wanted. An idle lane is waste (lane_default=keep_working_not_idle).
 
@@ -190,7 +198,11 @@ Standing traps, all measured, all cost real time today:
   - gh pr review --approve CANNOT work here; GitHub rejects it because every lane authenticates as jonhill90. Post evidence as a comment and merge.
   - Run checks synchronously. A lane that backgrounds its work gets recorded complete having delivered nothing.
 
-If there is genuinely nothing worth doing, say so in one line and stop. Concluding "nothing" is a valid tick.'
+BEFORE concluding "nothing", you must have checked ALL of: unclaimed issues in every repo (agent-supervisor, agent-tui, skills, agent-dotfiles), open PRs needing review, and `cli.py prompts unacknowledged` for work Jon asked for that nobody picked up. "Nothing" is valid ONLY with that list checked and named.
+
+Twice on 2026-08-19 a "no surface" conclusion was wrong on inspection: agent-tui#52 was open the whole time, and a poller leak was actionable for three ticks before anyone filed it.
+
+Report as a TABLE -- what you dispatched, to which lane, what you concluded. No narration of reasoning.'
 
 tmux send-keys -t "=$TARGET" C-u 2>/dev/null
 sleep 1
@@ -229,6 +241,26 @@ while [ "$waited" -lt "$TICK_ARRIVE_TIMEOUT" ]; do
 done
 
 if [ "$tick_arrived" -eq 1 ]; then
+  # CONTEST A STOP-CONCLUSION, mechanically, without any agent choosing to.
+  #
+  # Jon, 2026-08-19: "I should not be the one pointing this out ... we need sanity
+  # checks outside of this." Every failure he caught that day was a conclusion
+  # that STOPPED work, reached alone and contested by nobody.
+  # agent-supervisor#150 filed the same complaint on 2026-08-15 and the council
+  # skills were never wired to anything.
+  #
+  # This fires when the previous tick concluded "nothing" -- rate-limited to once
+  # per ~50 minutes by contest-stop.sh itself, and cheap because stop-conclusions
+  # are rare. A wrong "keep working" costs one lane's turn; a wrong "stop" costs
+  # the whole window and looks identical to a finished estate.
+  if grep -qiE 'concluding "?nothing|nothing to dispatch|no .*(surface|work) (left|remains|available)' \
+       <<<"$(tail -40 <<<"$pane")" 2>/dev/null; then
+    claim=$(grep -iE 'concluding "?nothing|nothing to dispatch|no .*(surface|work)' <<<"$pane" | tail -1)
+    "$HERE/contest-stop.sh" --claim "${claim:-the previous tick concluded there was nothing to do}" \
+      --evidence "Read from the Director's own pane at $(date -u '+%Y-%m-%dT%H:%M:%SZ')." \
+      >>"$STATE/contest-stop.log" 2>&1 &
+  fi
+
   log "ticked $TARGET -- pane is now working"
   exit 0
 fi

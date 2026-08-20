@@ -93,8 +93,19 @@ rtmux kill-server 2>/dev/null
 # test is trying to prove. `cat` just echoes stdin back, so a capture-pane
 # afterward is a clean, direct proof that the text arrived at the SURVIVING
 # window and nowhere else.
+#
+# stty -icanon -echo: the pty's default COOKED mode both echoes each typed
+# line itself (kernel-side) AND enforces a per-line canonical buffer limit --
+# `cat` then echoes the SAME bytes again on its own read/write pass. With a
+# tick text this long (#390 widened it well past a single 80-col line), the
+# two independent echoes and the canonical line-length cap raced and
+# interleaved, producing a durably scrambled pane (verified: five re-captures
+# one second apart returned byte-identical garbled content, so it was not a
+# render-lag flake) that intermittently failed the substring check below with
+# nothing wrong in director-loop.sh itself. Raw mode with a single reader
+# removes both confounds so this test measures what it claims to.
 rtmux new-session -d -s director -n the-director-pane -x 80 -y 24 \
-  bash -c 'echo READY; exec cat' >/dev/null 2>&1
+  bash -c 'echo READY; stty -icanon -echo min 1 time 0 2>/dev/null; exec cat' >/dev/null 2>&1
 sleep 1
 NEW_ID=$(rtmux list-windows -t director -F '#{window_name} #{window_id}' | awk '$1=="the-director-pane"{print $2}')
 ok "restart simulated: fresh server, Director window is now $NEW_ID"
