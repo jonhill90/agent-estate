@@ -18,6 +18,7 @@ from claude_print_transport import ClaudePrintTransport
 from core import (
     CLAIM_TASK_PREFIX,
     Ledger,
+    TERMINAL_STATUSES,
     claim_owner_token,
     lane_population,
     lane_relation,
@@ -740,6 +741,44 @@ def lane_free(ledger, transport, *, lane, target, window_name):
     return {"lane": lane, "known": True, "free": True, "backfilled": True, "harness": harness}
 
 
+def _unique_redispatch_task_id(ledger, task_id):
+    """agent-supervisor#140: give a redispatch of the same issue+slug its own
+    row instead of colliding with the finished one already sitting at
+    `task_id`.
+
+    `tasks.id` is `<prefix><issue>-<slug>` (`dispatch.sh`'s `WINDOW_NAME`),
+    which is per issue+slug, not per dispatch ATTEMPT -- `source_tasks`
+    already models one row per attempt (`record_dispatch`'s own docstring
+    for #159/#169 makes the same distinction the issue asks for here). A
+    completed prior attempt's row is the historical record invariant 1
+    requires (do not overwrite it); a fresh attempt needs a row of its own.
+
+    Only a TERMINAL prior row (`complete`/`failed`/`cancelled`) is treated
+    as "this is a redispatch" -- a non-terminal one (still `created`/
+    `delivery_pending`/`delivered`/`accepted`) is a genuine identity
+    collision with a lane that is ACTIVELY working under this id right now,
+    and must still fail loud exactly as before
+    (`tests/supervisor/test_dispatch.sh`'s `ledger-write-broken` case, and
+    `Ledger._assign_tx`'s own "task id already exists with different
+    assignment" refusal, both unchanged): passing through unresolved lets
+    `_assign_tx` raise and `mark_lane_held` fire, same as pre-#140-fix.
+
+    Suffix, not overwrite: `-r2`, `-r3`, ... appended to `task_id` until an
+    id nothing in the ledger holds is found, so `tasks.id == source_tasks.id`
+    (`record_dispatch`'s own invariant) still holds for whatever id this
+    returns.
+    """
+    existing = ledger.get_task(task_id)
+    if existing is None or existing["status"] not in TERMINAL_STATUSES:
+        return task_id
+    attempt = 2
+    while True:
+        candidate = f"{task_id}-r{attempt}"
+        if ledger.get_task(candidate) is None:
+            return candidate
+        attempt += 1
+
+
 def record_dispatch(
     ledger,
     *,
@@ -839,6 +878,7 @@ def record_dispatch(
     failure and refuse loud instead of folding it into the silent,
     non-fatal `ledger_record_failed` path every other write failure takes.
     """
+    task = _unique_redispatch_task_id(ledger, task)
     try:
         harness = harness or HARNESS_BY_COMMAND.get(command)
         if harness is None:
@@ -1013,16 +1053,36 @@ def record_completion(ledger, *, task, lane, note):
     terminal outcome instead of completing it. Resolution order: an exact `--task` id match
     first (unchanged behaviour for an ordinary task); failing that, with
     `--lane` also given, the claim row that token would produce under that
-    lane; failing that, with only `--lane` given, whichever single row is
-    still open for it -- mirroring `cancel_open_task`'s own lookup, so the
-    caller does not have to know the row's shape before asking to close it.
+    lane; failing that, with `--lane` given (whether or not `--task` was
+    also given), whichever single row is still open for it -- mirroring
+    `cancel_open_task`'s own lookup, so the caller does not have to know the
+    row's shape before asking to close it.
+
+    agent-supervisor#140 (fix pass): an exact `--task` match is no longer
+    proof this is the right row. `lane-done.sh` always passes `--task` with
+    the bare window name `dispatch.sh` set (`<prefix><issue>-<slug>`), and
+    that id NEVER stops existing -- it is the historical record of the
+    FIRST dispatch of that issue+slug, forever (invariant 1). A REDISPATCH
+    of the same issue+slug is recorded under a `-r2`/`-r3`/... suffixed id
+    instead (`cli.py`'s `_unique_redispatch_task_id`), precisely so it does
+    not collide with that prior row -- which means the exact `--task` match
+    below will keep resolving to the FIRST attempt's already-`complete`(/
+    `failed`/`cancelled`) row on every later redispatch's own completion,
+    not the one that just finished. When that happens and `--lane` is also
+    given, prefer that lane's own still-open task instead: a TERMINAL row
+    cannot be the one whose worker just signalled completion, and the lane
+    that just finished has exactly one open task to mean.
     """
     if not task and not lane:
         raise RuntimeError("record-completion requires --task or --lane")
     row = ledger.get_task(task) if task else None
+    if row is not None and lane and row["status"] in TERMINAL_STATUSES:
+        open_row = ledger.get_open_task_for_lane(lane)
+        if open_row is not None:
+            row = open_row
     if row is None and lane and task:
         row = ledger.get_task(f"{CLAIM_TASK_PREFIX}{lane}:{task}")
-    if row is None and lane and not task:
+    if row is None and lane:
         row = ledger.get_open_task_for_lane(lane)
     if row is None:
         identity = f"task: {task}" if task else f"lane: {lane}"
