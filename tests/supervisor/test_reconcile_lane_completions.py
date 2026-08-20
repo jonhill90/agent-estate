@@ -334,6 +334,75 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         self.assertEqual("failed", task["status"])
         self.assertEqual(["ad374-accepted-task"], report["failed_stale_delivery"])
 
+    def test_accepted_nonobservable_lane_past_stale_after_is_failed(self):
+        """agent-supervisor#414: a claude-print/pi-rpc worker that calls
+        `cli.py accept` moves its own row to status='accepted' -- outside
+        `list_delivered_open_tasks`, which #374's fix (above) is built on.
+        Reproduces the fix's target directly through `Ledger.accept`, the
+        only real caller, exactly as `cli.py accept` invokes it -- not
+        through `record_dispatch(accepted=True)`, which never changes
+        `status` at all (see the #374 tests above) and so cannot exercise
+        this gap."""
+        self.ledger.register_lane(
+            lane="ad414-headless", pane_id="claude-print:ad414-headless", nonce="nonce-414",
+            harness="claude", repo="/repo/x", server_id="claude-print", session_id="sess-414",
+            command="claude", transport="claude-print",
+        )
+        self.dispatch("ad414-headless-task", lane="ad414-headless", accepted=False)
+        self.ledger.accept("ad414-headless-task", pane_nonce="nonce-2")
+        self.assertEqual("accepted", self.ledger.get_task("ad414-headless-task")["status"])
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, stale_after=300, clock=lambda: 2_000
+        ).sweep()
+
+        task = self.ledger.get_task("ad414-headless-task")
+        self.assertEqual("failed", task["status"])
+        self.assertEqual(["ad414-headless-task"], report["failed_stale_acceptance"])
+        self.assertEqual(0, len(runner.calls))
+
+    def test_accepted_nonobservable_lane_before_stale_after_is_left_unresolved(self):
+        """An accepted headless lane younger than `stale_after` may still be
+        the one live turn about to call `complete` itself -- must not be
+        touched, same posture as the pre-acceptance case."""
+        self.ledger.register_lane(
+            lane="ad414-fresh", pane_id="claude-print:ad414-fresh", nonce="nonce-414f",
+            harness="claude", repo="/repo/x", server_id="claude-print", session_id="sess-414f",
+            command="claude", transport="claude-print",
+        )
+        self.dispatch("ad414-fresh-task", lane="ad414-fresh", accepted=False)
+        self.ledger.accept("ad414-fresh-task", pane_nonce="nonce-2")
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, stale_after=300, clock=lambda: 1_100
+        ).sweep()
+
+        task = self.ledger.get_task("ad414-fresh-task")
+        self.assertEqual("accepted", task["status"])
+        self.assertIn("ad414-fresh-task", report["unresolved"])
+
+    def test_pre_fix_query_never_sees_the_accepted_row(self):
+        """Mutation check, in the other direction from #374's own: proves
+        the defect this fix targets was real by exercising the OLD query
+        directly. If `list_delivered_open_tasks` -- what every sweep before
+        this fix relied on exclusively -- ever starts returning an accepted
+        row, this goes red and something has changed underneath the new
+        query's own reasoning."""
+        self.ledger.register_lane(
+            lane="ad414-mutant", pane_id="claude-print:ad414-mutant", nonce="nonce-414m",
+            harness="claude", repo="/repo/x", server_id="claude-print", session_id="sess-414m",
+            command="claude", transport="claude-print",
+        )
+        self.dispatch("ad414-mutant-task", lane="ad414-mutant", accepted=False)
+        self.ledger.accept("ad414-mutant-task", pane_nonce="nonce-2")
+
+        delivered_ids = [t["id"] for t in self.ledger.list_delivered_open_tasks()]
+        accepted_ids = [t["id"] for t in self.ledger.list_accepted_open_tasks()]
+        self.assertNotIn("ad414-mutant-task", delivered_ids)
+        self.assertIn("ad414-mutant-task", accepted_ids)
+
     def test_batches_one_call_per_session_not_per_task(self):
         """Two delivered tasks in the same session must cost ONE `lanes.sh
         --json` call, not two -- the same batching argument

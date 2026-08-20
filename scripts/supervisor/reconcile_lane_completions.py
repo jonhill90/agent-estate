@@ -71,6 +71,22 @@ absence, not an observation), so it is NEVER used to assert success:
 `failed` via `Ledger.fail_stale_delivery`, never to `complete`. A task
 younger than `stale_after` is left `unresolved`, same as before -- it may
 simply still be the one live turn that will call `complete` itself.
+
+agent-supervisor#414: #374's fix covers a no-pane task stuck at
+`status='delivered'`, but a claude-print/pi-rpc worker that gets far enough
+to call `cli.py accept` moves its own row to `status='accepted'` --
+`Ledger.accept`, the ONE place that happens, is called from nowhere else
+(see `Ledger.list_accepted_open_tasks`'s docstring). That status is outside
+`list_delivered_open_tasks`'s `WHERE status='delivered'` filter, so the
+row vanishes from every sweep above -- including #374's own -- the instant
+it is accepted. Measured live: five claude-print dispatches sat at
+`status=accepted` for 2+ hours, zero commits, zero comments, and this sweep
+never looked at them again. The third pass below is `_sweep_nonobservable`
+applied to `list_accepted_open_tasks()` instead of
+`list_delivered_open_tasks()`, same `stale_after` dwell, terminating via
+`Ledger.fail_stale_acceptance` instead of `fail_stale_delivery` -- the only
+difference is which query feeds it and which terminal write is eligible,
+because the source status differs.
 """
 
 from __future__ import annotations
@@ -174,10 +190,25 @@ class LaneCompletionReconciler:
             session, index = parsed
             by_session.setdefault(session, []).append((task, index))
 
+        # agent-supervisor#414: a second, independent unresolvable set,
+        # fed from `list_accepted_open_tasks()` rather than
+        # `list_delivered_open_tasks()` -- see this module's own docstring
+        # for why a no-pane lane's row moves out of the first query the
+        # instant its worker calls `accept`. Only the non-observable half
+        # applies here: a tmux lane's `accepted_at` never moves `status`
+        # off `delivered` (`record_dispatch`'s own flag, not `Ledger.
+        # accept`), so a lane id that DOES parse as `<session>:<index>`
+        # can never actually reach `status='accepted'` in the first place --
+        # there is no per-session pane-observed half to add.
+        unresolvable_accepted = [
+            task for task in self.ledger.list_accepted_open_tasks() if _parse_lane(task["lane"]) is None
+        ]
+
         report = {
             "completed": [],
             "failed_unaccepted": [],
             "failed_stale_delivery": [],
+            "failed_stale_acceptance": [],
             "unresolved": [],
             "errors": [],
         }
@@ -186,6 +217,8 @@ class LaneCompletionReconciler:
 
         for task in unresolvable:
             self._sweep_nonobservable(task, now=now, report=report)
+        for task in unresolvable_accepted:
+            self._sweep_nonobservable_accepted(task, now=now, report=report)
         for session, entries in by_session.items():
             try:
                 windows = self._fetch_session_lanes(session)
@@ -279,3 +312,36 @@ class LaneCompletionReconciler:
             report["errors"].append({"task": task["id"], "error": str(error)})
             return
         report["failed_stale_delivery"].append(task["id"])
+
+    def _sweep_nonobservable_accepted(self, task, *, now, report):
+        """agent-supervisor#414: `_sweep_nonobservable`'s counterpart for a
+        no-pane task already moved to `status='accepted'` -- same dwell
+        gate against `updated_at`, same `stale_after` threshold, but the
+        source status this method's caller has already filtered for is
+        `accepted`, not `delivered`, so the terminal write is
+        `fail_stale_acceptance`, the one Ledger method eligible for it.
+        """
+        updated_at = task.get("updated_at")
+        if not isinstance(updated_at, (int, float)):
+            report["unresolved"].append(task["id"])
+            return
+        age_seconds = now - updated_at
+        if age_seconds < self.stale_after:
+            report["unresolved"].append(task["id"])
+            return
+        note = (
+            f"reconcile-lane-completions: {task['lane']} has no observable pane "
+            f"(non-tmux lane id) and has sat at status=accepted for "
+            f"{int(age_seconds)}s (>= {self.stale_after}s) as of {int(now)} -- "
+            "accepted but never signalled completion and this transport has no "
+            "pane to poll -- failed, not completed (agent-supervisor#414)"
+        ).encode("utf-8")
+        allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
+        try:
+            self.ledger.fail_stale_acceptance(
+                task["id"], note, pane_nonce=task["pane_nonce"], allow_claim=allow_claim
+            )
+        except Exception as error:
+            report["errors"].append({"task": task["id"], "error": str(error)})
+            return
+        report["failed_stale_acceptance"].append(task["id"])

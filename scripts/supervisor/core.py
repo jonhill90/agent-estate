@@ -2020,6 +2020,37 @@ class Ledger:
             ).fetchall()
         return [self._dict(row) for row in rows]
 
+    def list_accepted_open_tasks(self):
+        """Rows a worker explicitly accepted but never completed.
+
+        agent-supervisor#414. `accept()` is the ONE place `status` ever
+        becomes `'accepted'` -- and it is called from exactly one caller,
+        `cli.py accept`, the self-report step the claude-print/pi-rpc
+        contract hands a worker (`ClaudePrintAdapter.assign_task`'s own
+        delivered prompt: "Before working run: ... accept ..."). A tmux
+        lane's `accepted_at` is set a different way entirely --
+        `record_dispatch`'s own `accepted=True` flag, written in the same
+        transaction as `mark_delivered`, which never touches `status` --
+        so a tmux task stays visible to `list_delivered_open_tasks` for as
+        long as it is open. The instant a no-pane lane's worker calls
+        `accept`, though, its row leaves `list_delivered_open_tasks` for
+        good: `reconcile_lane_completions.py`'s sweep, and every reaper
+        built on that query, stops looking at it forever. That is exactly
+        the shape #414 measured -- five claude-print dispatches sitting at
+        status=accepted for 2+ hours, zero commits, zero comments, and
+        nothing anywhere noticing. This is the parallel query a sweep needs
+        to see that state at all.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM tasks
+                WHERE status='accepted' AND completed_at IS NULL
+                ORDER BY updated_at, id
+                """
+            ).fetchall()
+        return [self._dict(row) for row in rows]
+
     def list_open_worktrees(self):
         """(lane, task id, worktree path) for every IN-FLIGHT task with a
         recorded worktree -- agent-supervisor#291's collision check.
@@ -3078,6 +3109,69 @@ class Ledger:
                 if row["status"] != "delivered":
                     raise ValueError(
                         f"cannot fail-stale-delivery a {row['status']} task -- only 'delivered' is eligible"
+                    )
+                connection.execute(
+                    """
+                    UPDATE tasks SET status='failed', result_path=?, result_sha256=?,
+                                     updated_at=?, completed_at=? WHERE id=?
+                    """,
+                    (str(destination), digest, now, now, task_id),
+                )
+                self._fail(failpoint, "after_task")
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO events(key, type, task_id, status, payload_path, created_at)
+                    VALUES (?, 'completion', ?, 'pending', ?, ?)
+                    """,
+                    (f"completion:{task_id}", task_id, str(destination), now),
+                )
+                self._fail(failpoint, "after_event")
+                row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            return self._dict(row)
+
+    def fail_stale_acceptance(self, task_id, result, *, pane_nonce, failpoint=None, allow_claim=False):
+        """Terminate an `accepted` task whose lane has no pane to observe at all.
+
+        agent-supervisor#414, `fail_stale_delivery`'s (#374) sibling for the
+        state that method's own eligibility check refuses: it requires
+        `status == 'delivered'`, which is exactly wrong for a row that has
+        already moved to `'accepted'` -- see `list_accepted_open_tasks`'s
+        docstring for why that transition happens at all for a no-pane
+        lane and why it is otherwise invisible to every existing sweep.
+        Same absence-not-observation posture as `fail_stale_delivery`: the
+        only fact available is wall-clock dwell since `updated_at`, so the
+        terminal status is always `failed`, never `complete`.
+
+        Mirrors `fail_stale_delivery`'s shape otherwise: same immutable-result
+        write, same idempotency, same pane-nonce check against the row's OWN
+        recorded nonce.
+        """
+        self._require_task_id(task_id, allow_claim=allow_claim)
+        with self._locked():
+            with contextlib.closing(self._connect()) as probe:
+                existing = probe.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if existing is None:
+                    raise ValueError("unknown task")
+                if existing["pane_nonce"] != pane_nonce:
+                    raise ValueError("pane incarnation does not match task")
+            destination, digest = self._write_result(task_id, result)
+            self._fail(failpoint, "after_result")
+            now = int(self.clock())
+            with self._transaction() as connection:
+                row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if row is None:
+                    raise ValueError("unknown task")
+                if row["pane_nonce"] != pane_nonce:
+                    raise ValueError("pane incarnation does not match task")
+                if row["status"] == "failed":
+                    if row["result_sha256"] != digest:
+                        raise ValueError("immutable result conflicts with already-failed task")
+                    return self._dict(row)
+                if row["status"] in ("complete", "cancelled"):
+                    raise ValueError(f"cannot fail-stale-acceptance a {row['status']} task")
+                if row["status"] != "accepted":
+                    raise ValueError(
+                        f"cannot fail-stale-acceptance a {row['status']} task -- only 'accepted' is eligible"
                     )
                 connection.execute(
                     """
