@@ -3003,7 +3003,21 @@ class Ledger:
                 reaped.append(record)
         return reaped
 
-    def _write_result(self, task_id, result):
+    def _write_result(self, task_id, result, *, suffix=""):
+        """`suffix` (agent-supervisor#401) lets a caller that is NOT the
+        lane's own report -- `fail_unaccepted`/`fail_stale_delivery`
+        stamping a verdict the lane never asserted itself -- land in a
+        SIBLING file (`<task_id><suffix>.md`) instead of claiming
+        `<task_id>.md`. That path is otherwise the one and only slot a
+        genuine, late `complete()` from the lane itself can ever write to:
+        this method is immutable-once, so if the reaper's fabricated note
+        gets there first, the lane's real report is later rejected outright
+        (`immutable result conflicts with existing content`) instead of
+        ever being persisted anywhere -- see agent-supervisor#401's
+        ad275-fix275 specimen, where exactly that already-free canonical
+        slot exists to be squatted on. `complete()` never passes a suffix:
+        an OBSERVED completion is what `<task_id>.md` is for.
+        """
         if not isinstance(result, bytes):
             raise TypeError("result must be bytes")
         if not result.strip():
@@ -3011,12 +3025,12 @@ class Ledger:
         if len(result) > MAX_RESULT_BYTES:
             raise ValueError("result exceeds 64 KiB limit")
         digest = hashlib.sha256(result).hexdigest()
-        destination = self.results_dir / f"{task_id}.md"
+        destination = self.results_dir / f"{task_id}{suffix}.md"
         if destination.exists():
             if hashlib.sha256(destination.read_bytes()).hexdigest() != digest:
                 raise ValueError("immutable result conflicts with existing content")
             return destination, digest
-        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{task_id}.", dir=self.results_dir)
+        descriptor, temporary_name = tempfile.mkstemp(prefix=f".{task_id}{suffix}.", dir=self.results_dir)
         try:
             with os.fdopen(descriptor, "wb") as handle:
                 handle.write(result)
@@ -3107,6 +3121,15 @@ class Ledger:
         and only with `accepted_at` still NULL, is eligible -- anything else
         means the caller's own evidence is stale or wrong, and this refuses
         rather than guess), and the terminal status written is `failed`.
+
+        agent-supervisor#401: a third way it must differ -- `_write_result`
+        is given `suffix=".reconcile"`, so this verdict lands at
+        `<task_id>.reconcile.md`, never `<task_id>.md`. That canonical slot
+        is reserved for the LANE's own report; leaving it free means a late,
+        genuine `complete()` call still gets to write its real content
+        there instead of being rejected by the immutability check against a
+        note this method fabricated, or worse, being unable to write at all
+        because a DIFFERENT verdict already got there first.
         """
         self._require_task_id(task_id, allow_claim=allow_claim)
         with self._locked():
@@ -3116,7 +3139,7 @@ class Ledger:
                     raise ValueError("unknown task")
                 if existing["pane_nonce"] != pane_nonce:
                     raise ValueError("pane incarnation does not match task")
-            destination, digest = self._write_result(task_id, result)
+            destination, digest = self._write_result(task_id, result, suffix=".reconcile")
             self._fail(failpoint, "after_result")
             now = int(self.clock())
             with self._transaction() as connection:
@@ -3190,6 +3213,14 @@ class Ledger:
         write, same idempotency, same pane-nonce check against the row's
         OWN recorded nonce (not the lane's current one -- the lane may be
         long gone, same reasoning as `_reconcile_transition`).
+
+        agent-supervisor#401: also mirrors `fail_unaccepted`'s
+        `suffix=".reconcile"` -- this is the exact path 101 of the 133
+        wrong results (agent-supervisor#401) came through, since every
+        claude-print/pi-rpc lane routes here. Writing to `<task_id>.md`
+        directly is what let this method's verdict become the estate's
+        ONLY record of a task whose lane never got the chance to write its
+        own -- see `_write_result`'s docstring.
         """
         self._require_task_id(task_id, allow_claim=allow_claim)
         with self._locked():
@@ -3199,7 +3230,7 @@ class Ledger:
                     raise ValueError("unknown task")
                 if existing["pane_nonce"] != pane_nonce:
                     raise ValueError("pane incarnation does not match task")
-            destination, digest = self._write_result(task_id, result)
+            destination, digest = self._write_result(task_id, result, suffix=".reconcile")
             self._fail(failpoint, "after_result")
             now = int(self.clock())
             with self._transaction() as connection:

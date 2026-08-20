@@ -66,11 +66,12 @@ transports genuinely have nothing to poll (`ClaudePrintAdapter`'s own
 docstring: "there is no long-lived protocol session to resume mid-call"),
 so this sweep's second half judges them on wall-clock dwell since the
 row's own `updated_at` instead of a pane reading -- weaker evidence (an
-absence, not an observation), so it is NEVER used to assert success:
-`stale_after` past due always resolves to
-`failed` via `Ledger.fail_stale_delivery`, never to `complete`. A task
-younger than `stale_after` is left `unresolved`, same as before -- it may
-simply still be the one live turn that will call `complete` itself.
+absence, not an observation), so it is NEVER used to assert success on its
+own: `stale_after` past due with no corroborating evidence (see #401
+below) resolves to `failed` via `Ledger.fail_stale_delivery`, never to
+`complete`. A task younger than `stale_after` is left `unresolved`, same
+as before -- it may simply still be the one live turn that will call
+`complete` itself.
 
 agent-supervisor#414: #374's fix covers a no-pane task stuck at
 `status='delivered'`, but a claude-print/pi-rpc worker that gets far enough
@@ -87,14 +88,48 @@ applied to `list_accepted_open_tasks()` instead of
 `Ledger.fail_stale_acceptance` instead of `fail_stale_delivery` -- the only
 difference is which query feeds it and which terminal write is eligible,
 because the source status differs.
+
+agent-supervisor#401: "no signal arrived" and "the work did not happen" are
+different claims, and the wording this sweep used to write conflated them
+-- `results/ad275-fix275.md` read "failed, not completed" while its own
+lane-log named PR #283, MERGED. Two changes here:
+
+* Before either `_fail_unaccepted` or `_sweep_nonobservable` stamps a
+  failure, `_lane_log_pr_url` checks the one piece of cheap evidence
+  already sitting on disk at stamp time: does this lane's own transport
+  log (`lane-logs/<task_id>.log`, written by `ClaudePrintAdapter.
+  assign_task`) name a pull request it opened? If so, that settles it --
+  `_complete_from_evidence` completes the task instead of failing it. This
+  is deliberately the same check agent-supervisor#401's own acceptance
+  script runs (`grep -qoE '.../pull/[0-9]+' lane-logs/$t.log`): a specimen
+  this sweep would now still fail is a specimen that script would flag.
+* When there is genuinely no evidence either way, the note text no longer
+  asserts "failed, not completed" -- it says only what is actually known
+  (no signal arrived) and says explicitly that this is not a claim the
+  work itself failed. The ledger status written is still `failed` (it has
+  to be: `one_open_task_per_lane` needs a terminal status to free the
+  lane, and there is no weaker terminal status in this schema to reach
+  for) -- but `_write_result` is now given `suffix=".reconcile"`, so this
+  verdict lands at `<task_id>.reconcile.md`, never at `<task_id>.md`. That
+  canonical slot stays free for the lane's own report, if one ever
+  arrives late -- see `Ledger._write_result`'s own docstring for why
+  writing there first was the actual "overwrite" the issue's title named:
+  not a literal overwrite (this method's underlying write is
+  immutable-once), but a late, genuine `complete()` call finding the slot
+  already claimed and its content rejected as conflicting.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 
 from core import CLAIM_TASK_PREFIX
+
+# Mirrors agent-supervisor#401's own acceptance script's grep exactly, so a
+# specimen this finds is a specimen that script would also flag.
+_PR_URL_RE = re.compile(r'https://github\.com/[^\s",]+/pull/[0-9]+')
 
 DEFAULT_IDLE_AFTER_SECONDS = 300
 # agent-supervisor#374: deliberately much longer than DEFAULT_IDLE_AFTER_SECONDS.
@@ -206,6 +241,12 @@ class LaneCompletionReconciler:
 
         report = {
             "completed": [],
+            # agent-supervisor#401: subset of "completed" -- task ids that
+            # would otherwise have been stamped failed, but a PR named in
+            # their lane-log settled it first. Called out separately so a
+            # human reading the report can tell "observed free" apart from
+            # "cheap evidence recovered this one" at a glance.
+            "completed_from_evidence": [],
             "failed_unaccepted": [],
             "failed_stale_delivery": [],
             "failed_stale_acceptance": [],
@@ -258,6 +299,48 @@ class LaneCompletionReconciler:
             return
         report["completed"].append(task["id"])
 
+    def _lane_log_pr_url(self, task_id):
+        """agent-supervisor#401: the cheap evidence check -- does this
+        lane's own transport log already name a pull request it opened?
+        `lane-logs/<task_id>.log` is written by `ClaudePrintAdapter.
+        assign_task` (the detached `claude -p` transcript) and is available
+        at stamp time, no network call needed. Absence (no file, no match)
+        answers `None`, same fail-closed posture as the rest of this
+        module -- it is evidence FOR completion, never evidence against it.
+        """
+        log_path = self.ledger.root / "lane-logs" / f"{task_id}.log"
+        try:
+            text = log_path.read_text(errors="replace")
+        except OSError:
+            return None
+        match = _PR_URL_RE.search(text)
+        return match.group(0) if match else None
+
+    def _complete_from_evidence(self, task, *, pr_url, now, report):
+        """agent-supervisor#401: the lane never signalled, but its own
+        lane-log names a PR it opened -- cheap evidence available at stamp
+        time that settles what neither `_fail_unaccepted` nor
+        `_sweep_nonobservable` can observe directly. Completes the task
+        (via the ordinary `complete()` path, so the note lands at the
+        canonical `<task_id>.md`) instead of stamping a failure the
+        evidence already contradicts.
+        """
+        note = (
+            f"reconcile-lane-completions: {task['lane']} never signalled completion, "
+            f"but its lane-log names {pr_url} as of {int(now)} -- cheap evidence "
+            "available at stamp time settles this before a failure is stamped: "
+            "auto-completed from lane-log PR evidence, not from an observed pane "
+            "(agent-supervisor#401)"
+        ).encode("utf-8")
+        allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
+        try:
+            self.ledger.complete(task["id"], note, pane_nonce=task["pane_nonce"], allow_claim=allow_claim)
+        except Exception as error:
+            report["errors"].append({"task": task["id"], "error": str(error)})
+            return
+        report["completed"].append(task["id"])
+        report["completed_from_evidence"].append(task["id"])
+
     def _fail_unaccepted(self, task, *, session, idle_seconds, now, report):
         """agent-supervisor#193: observed free/idle with no `accepted_at` is
         not a completion -- see `sweep`'s own docstring. Terminated `failed`
@@ -266,11 +349,17 @@ class LaneCompletionReconciler:
         `watchdog.status` can tell this apart from an ordinary completion at
         a glance, not just from the ledger's status column.
         """
+        pr_url = self._lane_log_pr_url(task["id"])
+        if pr_url is not None:
+            self._complete_from_evidence(task, pr_url=pr_url, now=now, report=report)
+            return
         note = (
             f"reconcile-lane-completions: {task['lane']} observed free for "
             f"{int(idle_seconds)}s (>= {self.idle_after}s) as of {int(now)} -- "
             "never signalled completion AND no accepted_at recorded (this dispatch "
-            "was never confirmed to land) -- failed, not completed (agent-supervisor#193)"
+            "was never confirmed to land); no completion signal arrived, which is "
+            "not the same claim as the work having failed -- terminated failed only "
+            "to free the lane for redispatch (agent-supervisor#193, agent-supervisor#401)"
         ).encode("utf-8")
         allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
         try:
@@ -285,10 +374,19 @@ class LaneCompletionReconciler:
         `<session>:<index>` (claude-print, pi-rpc) has no pane at all, so the
         tmux path above can never reach it. Resolve on wall-clock dwell
         since the row's own `updated_at` instead -- an absence of signal,
-        not an observation, so this only ever moves a stale row to `failed`
-        (`fail_stale_delivery`), never asserts `complete`. A row younger
-        than `stale_after` is left `unresolved`, exactly like a session
-        `lanes.sh` could not read.
+        not an observation, so on its own this only ever moves a stale row
+        to `failed` (`fail_stale_delivery`), never asserts `complete`. A row
+        younger than `stale_after` is left `unresolved`, exactly like a
+        session `lanes.sh` could not read.
+
+        agent-supervisor#401: "on its own" is the qualifier that changed --
+        101 of the 133 wrong results this issue measured came through this
+        exact path (every claude-print/pi-rpc lane routes here, and it is
+        the ONLY sweep half with nothing but silence to go on). Before
+        stamping failure from that silence, `_lane_log_pr_url` checks
+        whether the lane's own transport log already names a PR it opened;
+        if so, `_complete_from_evidence` completes the task from THAT
+        instead -- a positive fact, not an absence.
         """
         updated_at = task.get("updated_at")
         if not isinstance(updated_at, (int, float)):
@@ -298,12 +396,18 @@ class LaneCompletionReconciler:
         if age_seconds < self.stale_after:
             report["unresolved"].append(task["id"])
             return
+        pr_url = self._lane_log_pr_url(task["id"])
+        if pr_url is not None:
+            self._complete_from_evidence(task, pr_url=pr_url, now=now, report=report)
+            return
         note = (
             f"reconcile-lane-completions: {task['lane']} has no observable pane "
             f"(non-tmux lane id) and has sat at status=delivered for "
             f"{int(age_seconds)}s (>= {self.stale_after}s) as of {int(now)} -- "
-            "never signalled completion and this transport has no pane to poll -- "
-            "failed, not completed (agent-supervisor#374)"
+            "no completion signal arrived, and this transport has no pane to poll "
+            "for one; that is not the same claim as the work having failed, only "
+            "that nothing was observed -- terminated failed only to free the lane "
+            "for redispatch (agent-supervisor#374, agent-supervisor#401)"
         ).encode("utf-8")
         allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
         try:
