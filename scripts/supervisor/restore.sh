@@ -50,6 +50,8 @@ set -uo pipefail
 RESTORE_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=./harness-registry.sh
 . "$RESTORE_HERE/harness-registry.sh"
+# shellcheck source=./tmux-guard.sh
+. "$RESTORE_HERE/tmux-guard.sh"
 
 SESSION_OVERRIDE=""
 DRY_RUN=0
@@ -61,6 +63,15 @@ while [ $# -gt 0 ]; do
     *) echo "restore: unknown argument '$1'" >&2; exit 1 ;;
   esac
 done
+
+# agent-supervisor#166: a restored lane's agent is launched the same way a
+# freshly bootstrapped one is (see bootstrap-session.sh) -- put the tmux
+# guard ahead of the rest of PATH here too, so a lane restored after a
+# server loss is not restored WITHOUT the protection a fresh lane gets.
+GUARD_BIN=""
+if [ "$DRY_RUN" -eq 0 ]; then
+  GUARD_BIN="$(install_tmux_guard 2>&2)" || GUARD_BIN=""
+fi
 
 PYTHON="${RESTORE_PYTHON:-python3}"
 TMUX_BIN="${AGENT_TMUX_BIN:-tmux}"
@@ -237,7 +248,9 @@ while IFS="$FS" read -r lane harness session_id project_dir repo task; do
   # The rename is a PROJECTION of the ledger, written after the fact and read
   # by nobody here.
   "$TMUX_BIN" rename-window -t "=$target_session:$index" "$want_name" 2>/dev/null
-  if ! "$TMUX_BIN" send-keys -t "=$target_session:$index" "$resume" Enter 2>/dev/null; then
+  resume_cmd="$resume"
+  [ -z "$GUARD_BIN" ] || resume_cmd="PATH=\"$GUARD_BIN:\$PATH\" $resume"
+  if ! "$TMUX_BIN" send-keys -t "=$target_session:$index" "$resume_cmd" Enter 2>/dev/null; then
     refuse "$lane" "could not send the resume command to $target_session:$index"
     continue
   fi

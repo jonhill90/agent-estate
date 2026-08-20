@@ -208,6 +208,25 @@ if [ -z "$HARNESS" ]; then
   echo "  until named by hand (pass --harness, or register the lane with 'cli.py register --harness')" >&2
 fi
 
+# agent-supervisor#166: every lane's agent process gets a `tmux` wrapper
+# ahead of the real binary on its PATH, so a bare `tmux kill-server` (or an
+# untargeted kill-session/kill-window) TYPED into the lane's own shell is
+# refused -- not just a call that reaches a script that calls
+# assert_isolated_tmux (tmux-isolation.sh cannot see a command an agent
+# decides to type). See tmux-guard.sh for the isolation rule and why. Best
+# effort: a guard install failure degrades to launching without the guard
+# (the pre-#166 behaviour) rather than failing the whole bootstrap.
+# shellcheck source=./tmux-guard.sh
+. "$HERE/tmux-guard.sh"
+GUARD_BIN=""
+if [ "$DRY_RUN" -eq 0 ]; then
+  GUARD_BIN="$(install_tmux_guard 2>&2)" || GUARD_BIN=""
+fi
+LAUNCH_CMD="$AGENT_CMD"
+if [ -n "$GUARD_BIN" ]; then
+  LAUNCH_CMD="PATH=\"$GUARD_BIN:\$PATH\" $AGENT_CMD"
+fi
+
 run() {
   if [ "$DRY_RUN" -eq 1 ]; then
     printf '  would run: tmux'; printf ' %q' "$@"; printf '\n'
@@ -266,7 +285,7 @@ if ! session_exists; then
     first="$(tmux list-windows -t "=$SESSION" -F '#{window_index}' | head -1)"
     [ "$first" = "$SUPERVISOR_WINDOW" ] || tmux move-window -s "=$SESSION:$first" -t "=$SESSION:$SUPERVISOR_WINDOW"
   fi
-  run send-keys -t "=$SESSION:$SUPERVISOR_WINDOW" "$AGENT_CMD" Enter
+  run send-keys -t "=$SESSION:$SUPERVISOR_WINDOW" "$LAUNCH_CMD" Enter
   # Not a dispatch target (lanes.sh never offers the supervisor window), but
   # recorded anyway for consistency -- nothing downstream should have to
   # special-case "the one window with no harness option".
@@ -302,7 +321,7 @@ while [ "$idx" -lt "$((SUPERVISOR_WINDOW + LANES - 1))" ]; do
     continue
   fi
   run new-window -d -t "=$SESSION:$idx" -n "free-$idx" -c "$WORKDIR"
-  run send-keys -t "=$SESSION:$idx" "$AGENT_CMD" Enter
+  run send-keys -t "=$SESSION:$idx" "$LAUNCH_CMD" Enter
   # agent-dotfiles#216: the RECORD `lane_free`'s backfill reads instead of
   # inferring harness from `#{pane_current_command}` (see that function and
   # `TmuxAdapter.HARNESS_OPTION`). Skipped when HARNESS is empty -- an
