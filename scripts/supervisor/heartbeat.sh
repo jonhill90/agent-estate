@@ -42,6 +42,10 @@ STALE_AFTER="${HEARTBEAT_STALE_AFTER:-1800}"
 # they were quieting.
 NUDGE_COOLDOWN="${HEARTBEAT_NUDGE_COOLDOWN:-3600}"
 QUOTA_GATE="${QUOTA_GATE:-$HERE/quota.sh}"
+# Overridable so tests can point this at a recording stub instead of the
+# real notify.sh, same convention as quota-watch.sh's QUOTA_WATCH_NOTIFY_SCRIPT
+# (agent-supervisor#273).
+NOTIFY_SCRIPT="${HEARTBEAT_NOTIFY_SCRIPT:-$HERE/notify.sh}"
 ONCE=0
 
 while [ $# -gt 0 ]; do
@@ -54,6 +58,19 @@ while [ $# -gt 0 ]; do
 done
 
 log() { printf '%s heartbeat: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
+
+# send_takeover_alarm SUBJECT BODY -- page a human when this script's own
+# nudge attempt hits a state it cannot recover from itself (agent-supervisor
+# #273: a correct "a human should look" refusal used to go only to a
+# logfile, which produced the same outward silence as no check at all).
+# Reuses notify.sh, the estate's one human-notification path, rather than
+# inventing a second one. Every call site below sits inside the STALLED
+# branch, which this script only enters once per NUDGE_COOLDOWN (see below)
+# -- that is what keeps this to one message per incident, not one per tick.
+send_takeover_alarm() {
+  local subject="$1" body="$2"
+  AGENT_NOTIFY_CALLER=supervisor bash "$NOTIFY_SCRIPT" "$subject" "$body"
+}
 
 now=$(date +%s)
 
@@ -160,6 +177,12 @@ If work genuinely stopped, dispatch ONE thing and stop. Do not fan out: the WEEK
 NUDGE_SESSION="${TARGET%%:*}"
 if ! tmux has-session -t "$NUDGE_SESSION" 2>/dev/null; then
   log "STALLED ${since}s -- target session $NUDGE_SESSION does not exist; a human should look"
+  if send_takeover_alarm "heartbeat: estate STALLED, no target session (#273)" \
+    "No ledger write for ${since}s, nothing pane-working, and the target session '$NUDGE_SESSION' does not exist at all -- there is nowhere to nudge. Check the estate by hand: tmux ls"; then
+    log "escalation sent"
+  else
+    log "escalation did NOT send -- see notify.log"
+  fi
   exit 1
 fi
 
@@ -182,6 +205,12 @@ if ! tmux capture-pane -p -t "=$TARGET" >/dev/null 2>&1; then
     TARGET="$resolved"
   else
     log "STALLED ${since}s -- configured target $TARGET is gone and $NUDGE_SESSION has $count windows -- refusing to guess which is the Director; a human should look"
+    if send_takeover_alarm "heartbeat: estate STALLED, ambiguous Director window (#273)" \
+      "No ledger write for ${since}s, nothing pane-working, and the configured target $TARGET is gone -- $NUDGE_SESSION now has $count windows, so which one is the Director cannot be guessed safely. Check the estate by hand: tmux list-windows -t $NUDGE_SESSION"; then
+      log "escalation sent"
+    else
+      log "escalation did NOT send -- see notify.log"
+    fi
     exit 1
   fi
 fi
@@ -198,6 +227,12 @@ if tmux capture-pane -p -t "=$TARGET" 2>/dev/null | grep -q 'esc to interrupt'; 
   log "STALLED ${since}s -- nudged $TARGET, pane is now working"
 else
   log "STALLED ${since}s -- nudged $TARGET but the pane did NOT start working; a human should look"
+  if send_takeover_alarm "heartbeat: nudge did NOT take (#273)" \
+    "Nudged $TARGET after ${since}s with no ledger write, but the pane never confirmed (no 'esc to interrupt' after send). The pane may be stranded or unresponsive -- check it by hand: tmux attach -t ${TARGET%%:*}"; then
+    log "escalation sent"
+  else
+    log "escalation did NOT send either -- still unverified, see notify.log"
+  fi
 fi
 printf '%s' "$now" > "$STAMP"
 

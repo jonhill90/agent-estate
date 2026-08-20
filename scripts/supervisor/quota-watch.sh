@@ -173,6 +173,20 @@ send_alarm() {
   AGENT_NOTIFY_CALLER=supervisor bash "$NOTIFY_SCRIPT" "$subject" "$body"
 }
 
+# send_takeover_alarm SUBJECT BODY -- page a human that a send this script
+# itself attempted could not be verified. agent-supervisor#273: a correct
+# refusal to claim an unverified delivery ("a human should look") used to go
+# only to a logfile, so it produced the same outward silence as no check at
+# all. Reuses notify.sh (the estate's one human-notification path) rather
+# than inventing a second send mechanism, same as send_alarm above. Each
+# caller fires this at most once per state EDGE (see the case blocks below),
+# never per tick sitting in the same state -- the rate-limiting discipline
+# #273 asks for.
+send_takeover_alarm() {
+  local subject="$1" body="$2"
+  AGENT_NOTIFY_CALLER=supervisor bash "$NOTIFY_SCRIPT" "$subject" "$body"
+}
+
 # The wind-down instruction is lifted verbatim from loop-tick.md's "Exit 1 is
 # covered, not blocked" section -- that text is the estate's one written
 # definition of what a wind-down means, and re-inventing a second version here
@@ -257,6 +271,12 @@ while :; do
           log "wind-down delivered"
         else
           log "wind-down did NOT take -- pane did not confirm after send; a human should look"
+          if send_takeover_alarm "quota-watch wind-down did NOT take (#273)" \
+            "Sent the wind-down message to $TARGET but the pane never confirmed (no 'esc to interrupt' after send). The pane may be stranded or unresponsive -- check it by hand: tmux attach -t ${TARGET%%:*}"; then
+            log "escalation sent"
+          else
+            log "escalation did NOT send either -- still unverified, see notify.log"
+          fi
         fi
       fi
       confirmed=WINDDOWN
@@ -276,6 +296,12 @@ while :; do
           log "resume delivered and the pane is working"
         else
           log "resume did NOT take -- pane is not working after send; a human should look"
+          if send_takeover_alarm "quota-watch resume did NOT take (#273)" \
+            "Sent the resume message to $TARGET but the pane is not working after send (no 'esc to interrupt'). The estate may still be stood down with nobody driving it -- check it by hand: tmux attach -t ${TARGET%%:*}"; then
+            log "escalation sent"
+          else
+            log "escalation did NOT send either -- still unverified, see notify.log"
+          fi
         fi
       fi
       confirmed=SAFE
