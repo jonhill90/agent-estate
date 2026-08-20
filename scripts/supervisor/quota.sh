@@ -92,7 +92,7 @@
 # calls below still goes through `with_timeout`/`GUARD_TIMEOUT_SECONDS`, so
 # the worst case for the whole batch is bounded (~SAMPLES x
 # GUARD_TIMEOUT_SECONDS + (SAMPLES-1) x QUOTA_CHECK_DELAY -- with the
-# defaults, 3*15 + 2*1 = 47s if codexbar hangs on every sample -- never
+# defaults, 3*45 + 2*1 = 137s if codexbar hangs on every sample -- never
 # unbounded), and a per-sample timeout (124) falls into the same "could not
 # reach the quota source" bucket as any other unreachable exit code -- it
 # is never read as SAFE.
@@ -115,7 +115,7 @@ MIN_REMAINING="${QUOTA_MIN_REMAINING:-15}"
 # only thing a quota boundary actually destroys. 15% buys that margin.
 
 # --- #264: bounded calls, with a last-good cache to degrade into ----------
-GUARD_TIMEOUT_SECONDS="${QUOTA_GUARD_TIMEOUT_SECONDS:-15}"
+GUARD_TIMEOUT_SECONDS="${QUOTA_GUARD_TIMEOUT_SECONDS:-45}"
 USAGE_TIMEOUT_SECONDS="${QUOTA_USAGE_TIMEOUT_SECONDS:-20}"
 # How long a cached reading may be shown as "last known" before it is
 # reported UNKNOWN instead of ageing into fiction. 15 minutes: long enough to
