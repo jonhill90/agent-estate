@@ -215,6 +215,58 @@ new)
     echo "worktree: $DEST already exists" >&2
     exit 1
   fi
+  # RECLAIM AN ABANDONED LANE BRANCH, but only when it is provably abandoned.
+  #
+  # WHY. A dispatch that fails AFTER `worktree add` created the branch but
+  # BEFORE the lane starts -- a claim refusal, a quota refusal, a killed
+  # dispatcher -- leaves `lane/<slug>` behind with no worktree attached. Every
+  # later dispatch of that same slug then dies on:
+  #
+  #     fatal: a branch named 'lane/427-fix427' already exists
+  #
+  # and the issue becomes permanently undispatchable under its natural slug.
+  # Measured 2026-08-20: 285 such branches had accumulated across the four
+  # repos -- agent-supervisor alone held 165 -- and #427, #263 and #284 each
+  # failed to dispatch on exactly this.
+  #
+  # WHAT MAKES IT SAFE TO DELETE, and it is the whole of the design:
+  #
+  #   - NO WORKTREE HOLDS IT. A branch checked out in a live worktree is a
+  #     lane that is working right now. `git worktree list --porcelain` is the
+  #     authority; if the branch appears there, we refuse and exit, exactly as
+  #     before. This is the case #73 exists to protect and it is untouched.
+  #   - NO UNIQUE COMMITS. `git cherry <base> <branch>` lists commits on the
+  #     branch that are not on base. If it prints anything, this branch holds
+  #     work nobody merged, and deleting it destroys that work. We refuse.
+  #     Note this is deliberately STRICTER than `git branch -d`'s
+  #     merged-ancestry test: a squash-merged branch is not an ancestor of
+  #     main, so `-d` would refuse it, while cherry correctly sees its patches
+  #     already upstream. We want the content question, not the ancestry one
+  #     (agent-dotfiles#169 established the same distinction for `gc`).
+  #
+  # So the only branch this removes is one with no worktree and no commits of
+  # its own -- an empty placeholder from a dispatch that never started. If
+  # either check cannot be evaluated, we do NOT delete: an unreadable state is
+  # not an abandoned one.
+  if git -C "$REPO" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    held=$(git -C "$REPO" worktree list --porcelain 2>/dev/null \
+             | awk -v b="refs/heads/$BRANCH" '$1=="branch" && $2==b {print "held"}' | head -1)
+    if [ -n "$held" ]; then
+      echo "worktree: $BRANCH is checked out in a live worktree -- refusing to reuse it (#73)" >&2
+      exit 1
+    fi
+    if ! unique=$(git -C "$REPO" cherry "$BASE" "$BRANCH" 2>/dev/null); then
+      echo "worktree: could not compare $BRANCH against $BASE -- refusing to reuse a branch whose state is unreadable" >&2
+      exit 1
+    fi
+    if [ -n "${unique// }" ]; then
+      echo "worktree: $BRANCH has commits not on $BASE -- refusing to delete unmerged work" >&2
+      echo "$unique" | head -5 >&2
+      exit 1
+    fi
+    git -C "$REPO" branch -D "$BRANCH" >/dev/null 2>&1 \
+      && echo "worktree: reclaimed abandoned branch $BRANCH (no worktree, no commits beyond $BASE)" >&2
+  fi
   # git worktree add already writes its progress to stderr; leave stdout
   # clean so a caller can capture exactly the path from the line below.
   git -C "$REPO" worktree add -b "$BRANCH" "$DEST" "$BASE" 1>&2 || exit 1
