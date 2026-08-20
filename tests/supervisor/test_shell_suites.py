@@ -37,7 +37,11 @@ _only_raw = os.environ.get("SHELL_SUITE_ONLY")
 if _only_raw is None:
     SUITES = _ALL_SUITES
 else:
-    _only_names = {n for n in _only_raw.splitlines() if n.strip()}
+    # Comma-separated, not newline-separated: GitHub Actions' `join(arr, sep)`
+    # expression treats '\n' as two literal characters, not an escape -- a
+    # newline-joined SHELL_SUITE_ONLY arrived here as one unsplit string
+    # (agent-supervisor#440, run 32418135347, every shard RuntimeError'd).
+    _only_names = {n.strip() for n in _only_raw.split(",") if n.strip()}
     _all_names = {p.name for p in _ALL_SUITES}
     _missing = _only_names - _all_names
     if _missing:

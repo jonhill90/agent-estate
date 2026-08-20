@@ -93,4 +93,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux
       - run: python -m unittest tests.supervisor.test_shell_suites -v
         env:
-          SHELL_SUITE_ONLY: ${{ join(matrix.shard.suites, '\n') }}
+          # #440 fix: join(..., '\n') emits a literal backslash-n, not a real
+          # newline -- GH Actions expression strings don't interpret escapes.
+          # Confirmed directly against run 32418135347: every shard's
+          # SHELL_SUITE_ONLY was one unsplit string with literal \n bytes, so
+          # every name failed the exists-on-disk check and every shard
+          # RuntimeError'd before running a single suite. Comma has no such
+          # escaping problem and no suite name contains one.
+          SHELL_SUITE_ONLY: ${{ join(matrix.shard.suites, ',') }}
