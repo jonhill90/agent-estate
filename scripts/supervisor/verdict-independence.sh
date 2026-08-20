@@ -276,21 +276,71 @@ repo_task_prefix() {
 # FIRST, before any ledger-lookup path: a PR marked external has, by
 # construction, no lane to find, so there is nothing more specific worth
 # trying first.
+# agent-supervisor#200: returns the FULL contributor set for a PR -- every
+# lane the ledger can show contributed to it, not the single narrowed-down
+# "author" this used to resolve. dispatch.sh's `--reviews-pr` author-
+# exclusion guard was widened to this same shape by #190 (a fix-pass task
+# dispatched against the same issue to address review findings is itself a
+# contributor, not just "the author"); this file's own gate did not follow,
+# so a fix-pass lane could still approve or merge its own fix HERE even
+# though dispatch.sh already refuses to DISPATCH it that same review. See
+# `Ledger.get_contributor_tasks_for_issue` (#190) and `contributor-issue-
+# lanes` for the primitive reused below -- not re-derived a second time,
+# the exact drift #108 already burned a day on.
+#
+# Deliberately does NOT source resolve-pr-contributors.sh (dispatch.sh's own
+# copy of this chain, #308/#321): that helper's `gh pr view` call has no
+# timeout, and merge-pr.sh's own hang protection (#251, `AUTHOR_LANE_GH_
+# TIMEOUT_SECONDS` below) exists specifically because this file's `gh` call
+# is reachable from the one path that must never block a merge decision
+# forever. The ledger-side primitives (`contributor-issue-lanes`, `pr-task`,
+# `contributor-pr-lanes`) are reused directly instead -- single sqlite
+# queries, not `gh`, with no history of hanging (see this file's own comment
+# on `VERDICT_CALL_TIMEOUT_SECONDS` for why those are left unwrapped
+# elsewhere in this file).
 author_lane_for() {
   local repo_full="$1" number="$2" pr_json head_ref candidates candidate issue_json
   local prefix fallback_task fallback_json outfile rc external_json external_note
-  local pr_task_json
+  local pr_task_json pr_contrib_json contrib_json
+  local contrib_lanes=() contrib_tasks=()
+
+  _al_contrib_known() {
+    local want="$1" have
+    for have in "${contrib_lanes[@]+"${contrib_lanes[@]}"}"; do
+      [ "$have" = "$want" ] && return 0
+    done
+    return 1
+  }
+  _al_add_contrib() {
+    local lane="$1" task="$2"
+    [ -n "$lane" ] || return 0
+    _al_contrib_known "$lane" && return 0
+    contrib_lanes+=("$lane")
+    contrib_tasks+=("$task")
+  }
+  _al_contrib_json() {
+    local json="[]" i
+    for i in "${!contrib_lanes[@]}"; do
+      json=$(jq -nc --argjson acc "$json" --arg lane "${contrib_lanes[$i]}" --arg task "${contrib_tasks[$i]:-}" \
+        '$acc + [{lane:$lane, task:$task}]')
+    done
+    printf '%s' "$json"
+  }
+  _al_cleanup() { unset -f _al_contrib_known _al_add_contrib _al_contrib_json _al_cleanup; }
+
   external_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" pr-external --repo "$repo_full" --pr "$number" 2>/dev/null)
   if jq -e '.known == true' >/dev/null 2>&1 <<<"$external_json"; then
     external_note=$(jq -r '.note // ""' <<<"$external_json")
+    _al_cleanup
     jq -nc --arg note "$external_note" \
-      '{known:true, lane:null, task:null, external:true,
+      '{known:true, contributors:[], external:true,
         detail:("authored outside the lane system" + (if ($note|length) > 0 then " -- " + $note else "" end))}'
     return
   fi
   outfile=$(mktemp "${TMPDIR:-/tmp}/author-lane-gh.XXXXXX") || {
+    _al_cleanup
     jq -nc --arg detail "independence unknown -- PR author lane unresolved: could not create a scratch file" \
-      '{known:false, lane:null, task:null, detail:$detail}'
+      '{known:false, contributors:[], detail:$detail}'
     return
   }
   with_timeout "$AUTHOR_LANE_GH_TIMEOUT_SECONDS" "$outfile" \
@@ -299,18 +349,21 @@ author_lane_for() {
   pr_json=$(cat "$outfile" 2>/dev/null)
   rm -f "$outfile"
   if [ "$rc" -eq 124 ]; then
+    _al_cleanup
     jq -nc --arg detail "independence unknown -- PR author lane unresolved: gh pr view timed out after ${AUTHOR_LANE_GH_TIMEOUT_SECONDS}s" \
-      '{known:false, lane:null, task:null, detail:$detail}'
+      '{known:false, contributors:[], detail:$detail}'
     return
   fi
   if [ "$rc" -ne 0 ] || [ -z "$pr_json" ]; then
+    _al_cleanup
     jq -nc --arg detail "independence unknown -- PR author lane unresolved: gh pr view failed" \
-      '{known:false, lane:null, task:null, detail:$detail}'
+      '{known:false, contributors:[], detail:$detail}'
     return
   fi
   if ! jq -e . >/dev/null 2>&1 <<<"$pr_json"; then
+    _al_cleanup
     jq -nc --arg detail "independence unknown -- PR author lane unresolved: gh pr view produced unreadable JSON" \
-      '{known:false, lane:null, task:null, detail:$detail}'
+      '{known:false, contributors:[], detail:$detail}'
     return
   fi
   head_ref=$(jq -r '.headRefName // ""' <<<"$pr_json")
@@ -321,50 +374,107 @@ author_lane_for() {
         | grep -ioE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+' || true
     } | awk '!seen[$0]++'
   )
+  # Path 1&2: every non-review task the ledger holds against each candidate
+  # issue -- #190's widened set, unioned across every issue this PR closes
+  # (dispatch.sh's own resolve_pr_contributors does the same union).
+  # agent-supervisor#146: `--repo "$repo_full"` disambiguates an issue
+  # NUMBER that collides across the repos this estate tracks in parallel
+  # (session-per-repo, #111) -- the same cross-repo scoping #146 gave
+  # `author-issue-lane` applies equally here, since a candidate issue
+  # number alone cannot tell #181 in one repo from #181 in another.
   for candidate in $candidates; do
-    if issue_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" author-issue-lane --issue "$candidate" --head-ref "$head_ref" --repo "$repo_full" 2>/dev/null) \
+    if issue_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" contributor-issue-lanes --issue "$candidate" --repo "$repo_full" 2>/dev/null) \
        && jq -e '.known == true' >/dev/null 2>&1 <<<"$issue_json"; then
-      jq -nc --arg lane "$(jq -r '.lane' <<<"$issue_json")" \
-             --arg task "$(jq -r '.task // ""' <<<"$issue_json")" \
-             '{known:true, lane:$lane, task:$task, detail:""}'
-      return
+      while IFS=$'\t' read -r c_lane c_task; do
+        _al_add_contrib "$c_lane" "$c_task"
+      done < <(jq -r '.contributors[] | "\(.lane)\t\(.task)"' <<<"$issue_json")
     fi
   done
-  # agent-supervisor#415: a PR with no closing-issue reference and a
+  # agent-supervisor#415/#419: a PR with no closing-issue reference and a
   # branch name that doesn't match the legacy `lane/fix/feat/chore/docs`
   # regex (e.g. PR #400, `feat/prior-attempts`) fell through both paths
   # above to `known:false` even when the ledger already holds the real
   # contributor record for it -- `record_pr_for_task`, written by
   # `lane-done.sh` at completion, queried here through `cli.py pr-task`.
-  # Tried AFTER the issue-linkage path (a "fixes #N" reference is a
-  # stronger, human-legible signal than a ledger row) but BEFORE the
-  # branch-regex fallback (a heuristic guess at the task id from the
-  # branch name) -- `pr-task` is an explicit fact the ledger was told,
-  # not a pattern match, so it outranks the regex guess. This surfaces
-  # evidence the ledger already has; it adds no new way to CLAIM
-  # authorship -- `record_pr_for_task` is written once, by
-  # `lane-done.sh`, from the worktree that actually built the PR.
+  # Folded into the contributor-set accumulation (#200) below rather than
+  # returning early with a single lane: a fix-pass task recorded via
+  # `pr-task` is a contributor like any other, not automatically the
+  # PR's sole author.
+  #
+  # Path 3 (agent-supervisor#308 item 1): the explicit "task X's work opened
+  # PR N" record `lane-done.sh` writes -- covers a PR with no closing-issue
+  # reference the branch/commit regexes above can find.
   if pr_task_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" pr-task --repo "$repo_full" --pr "$number" 2>/dev/null) \
      && jq -e '.known == true' >/dev/null 2>&1 <<<"$pr_task_json"; then
-    jq -nc --arg lane "$(jq -r '.lane' <<<"$pr_task_json")" \
-           --arg task "$(jq -r '.task // ""' <<<"$pr_task_json")" \
-           '{known:true, lane:$lane, task:$task, detail:""}'
+    _al_add_contrib "$(jq -r '.lane' <<<"$pr_task_json")" "$(jq -r '.task // ""' <<<"$pr_task_json")"
+  fi
+  # Path 4 (agent-supervisor#308 item 2): the PR's own source_tasks rows,
+  # asked directly by PR number -- a contributor dispatched PR-scoped rather
+  # than issue-scoped (`dispatch.sh --pr`).
+  if pr_contrib_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" contributor-pr-lanes --pr "$number" 2>/dev/null) \
+     && jq -e '.known == true' >/dev/null 2>&1 <<<"$pr_contrib_json"; then
+    while IFS=$'\t' read -r c_lane c_task; do
+      _al_add_contrib "$c_lane" "$c_task"
+    done < <(jq -r '.contributors[] | "\(.lane)\t\(.task)"' <<<"$pr_contrib_json")
+  fi
+  if [ "${#contrib_lanes[@]}" -gt 0 ]; then
+    contrib_json=$(_al_contrib_json)
+    _al_cleanup
+    jq -nc --argjson contributors "$contrib_json" '{known:true, external:false, contributors:$contributors, detail:""}'
     return
   fi
+  # Path 5, legacy last resort: the branch-name convention alone, kept only
+  # for tasks dispatched before #117 gave every dispatch a worktree the
+  # ledger can key on.
   prefix=$(repo_task_prefix "$repo_full")
   if [[ "$head_ref" =~ ^(lane|fix|feat|chore|docs)/([0-9]+)-(.+)$ ]]; then
     fallback_task="${prefix}${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
     if fallback_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" task-lane --task "$fallback_task" 2>/dev/null) \
        && jq -e '.known == true' >/dev/null 2>&1 <<<"$fallback_json"; then
+      _al_cleanup
       jq -nc --arg lane "$(jq -r '.lane' <<<"$fallback_json")" \
              --arg task "$fallback_task" \
-             '{known:true, lane:$lane, task:$task, detail:""}'
+             '{known:true, external:false, contributors:[{lane:$lane, task:$task}], detail:""}'
       return
     fi
   fi
+  _al_cleanup
   jq -nc --arg head "$head_ref" \
          --arg task "${fallback_task:-none}" \
-         '{known:false, lane:null, task:null, detail:("independence unknown -- PR author lane unresolved from ledger issue lookup or branch " + ($head|if length > 0 then . else "unknown" end) + " (task " + $task + ")")}'
+         '{known:false, contributors:[], detail:("independence unknown -- PR author lane unresolved from ledger issue lookup or branch " + ($head|if length > 0 then . else "unknown" end) + " (task " + $task + ")")}'
+}
+
+# agent-supervisor#200: aggregates resolve_lane_relation() (#332) across
+# EVERY lane in author_lane_for's now-widened contributor set, not just a
+# single previously-resolved author -- the merge-time analogue of
+# dispatch.sh's own contributor-exclusion loop (#190). Fails toward "same"
+# over "different": a reviewer matching ANY contributor is a self-review,
+# reported immediately. When no contributor matches but at least one
+# comparison could not be resolved (`unknown`), that also refuses --
+# independence_verdict below treats `unknown` exactly as hard as `same`, the
+# same fail-closed posture this whole file holds everywhere else. Only when
+# the reviewer differs from EVERY contributor, and none of those comparisons
+# came back `unknown`, does this report `different`.
+contributor_lane_relation() {  # contributor_lane_relation <author-json> <reviewer-lane> -> JSON
+  local author_json="$1" reviewer_lane="$2"
+  local n lane task rel overall="different" matched_lane="" matched_task="" i=0
+  n=$(jq '(.contributors // []) | length' <<<"$author_json" 2>/dev/null) || n=0
+  while [ "$i" -lt "$n" ]; do
+    lane=$(jq -r ".contributors[$i].lane" <<<"$author_json")
+    task=$(jq -r ".contributors[$i].task // \"\"" <<<"$author_json")
+    rel=$(resolve_lane_relation "$lane" "$reviewer_lane")
+    if [ "$rel" = "same" ]; then
+      overall="same"; matched_lane="$lane"; matched_task="$task"
+      break
+    elif [ "$rel" = "unknown" ] && [ "$overall" != "same" ]; then
+      overall="unknown"; matched_lane="$lane"; matched_task="$task"
+    fi
+    i=$((i + 1))
+  done
+  jq -nc --arg overall "$overall" --arg lane "$matched_lane" --arg task "$matched_task" \
+    '{overall:$overall,
+      matched_lane: (if ($lane|length) > 0 then $lane else null end),
+      matched_task: (if ($task|length) > 0 then $task else null end)}'
 }
 
 # Resolves one PR's verdict through the `verdict.py` adapter. Always prints
@@ -420,9 +530,9 @@ verdict_for() {
 #     exactly how a self-review gets laundered across the next rename).
 # Anything else is `false` or `null`, and a caller that gates a merge on this
 # must treat both identically: refuse.
-independence_verdict() {  # independence_verdict <verdict-json> <author-json> <lane-relation>
-  local v="$1" author="$2" lane_rel="$3"
-  jq -n --argjson v "$v" --argjson author "$author" --arg lane_rel "$lane_rel" '
+independence_verdict() {  # independence_verdict <verdict-json> <author-json> <lane-rel-json>
+  local v="$1" author="$2" rel="$3"
+  jq -n --argjson v "$v" --argjson author "$author" --argjson rel "$rel" '
     if (($v.verdict_kind // "") | IN("comment", "ledger")) and (($v.verdict // "") | IN("approved", "rejected")) then
       if (($v.reviewer_lane // "") | length) == 0 then
         {value:null, detail:"independence unknown -- reviewer lane unresolved; comment verdicts must include Review-Lane: <lane-id>"}
@@ -430,19 +540,27 @@ independence_verdict() {  # independence_verdict <verdict-json> <author-json> <l
         if ($author.external == true) then
           # agent-supervisor#376: a PR marked external has, by construction,
           # no author lane to compare against the reviewer -- there is
-          # nothing for $lane_rel to say "same" about. Treated exactly like
-          # a provably-different author (independence = true), carrying the
+          # nothing for $rel to say "same" about. Treated exactly like a
+          # provably-different author (independence = true), carrying the
           # external note through for auditability rather than the bare
           # "independent -- author lane X" phrasing the ledger-resolved path
           # below uses.
           {value:true, detail:("independent -- PR " + $author.detail + ", reviewer lane " + $v.reviewer_lane)}
-        elif ($lane_rel == "same") then
-          {value:false, detail:("NOT independent -- author lane " + $author.lane + " reviewed its own PR"
-            + (if ($v.reviewer_lane != $author.lane) then " (reviewed as " + $v.reviewer_lane + " -- the same window, renamed session)" else "" end))}
-        elif ($lane_rel == "different") then
-          {value:true, detail:("independent -- author lane " + $author.lane + ", reviewer lane " + $v.reviewer_lane)}
+        elif ($rel.overall == "same") then
+          # agent-supervisor#200: $rel.matched_lane is whichever contributor
+          # in the WIDENED set (author_lane_for) matched the reviewer -- not
+          # necessarily the single lane a pre-#200 caller would have named
+          # "the author". A fix-pass lane approving its own fix reports its
+          # own lane here, not the original author.
+          {value:false, detail:("NOT independent -- author lane " + $rel.matched_lane + " reviewed its own PR"
+            + (if ($v.reviewer_lane != $rel.matched_lane) then " (reviewed as " + $v.reviewer_lane + " -- the same window, renamed session)" else "" end))}
+        elif ($rel.overall == "different") then
+          {value:true, detail:("independent -- author lane"
+            + (if (($author.contributors // []) | length) > 1 then "s" else "" end) + " "
+            + (($author.contributors // []) | map(.lane) | join(", "))
+            + ", reviewer lane " + $v.reviewer_lane)}
         else
-          {value:null, detail:("independence unknown -- author lane " + $author.lane + " and reviewer lane " + $v.reviewer_lane + " are not comparable lane ids")}
+          {value:null, detail:("independence unknown -- author lane " + ($rel.matched_lane // "?") + " and reviewer lane " + $v.reviewer_lane + " are not comparable lane ids")}
         end
       else
         {value:null, detail:$author.detail}

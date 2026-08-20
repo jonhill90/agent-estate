@@ -622,6 +622,74 @@ else
 fi
 
 # ============================================================================
+# agent-supervisor#200: `author_lane_for` used to narrow a PR's authorship to
+# the single lane that produced its branch. A FIX-PASS task -- dispatched
+# later against the SAME issue to address review findings -- is a second,
+# later CONTRIBUTOR to that same PR (dispatch.sh's own `--reviews-pr` guard
+# already excludes it from being DISPATCHED that PR's review, since #190),
+# but this file's independent MERGE gate never learned that widening: the
+# fix-pass lane itself could still approve/merge its own fix, because
+# `author_lane_for` only ever named the original author. Reproduced here
+# exactly as dispatch.sh's own #190 regression was: issue #70 has TWO
+# non-review contributors -- t:3 (the original author) and t:4 (a later
+# fix-pass) -- and t:4 reviews the PR its own fix-pass produced.
+# ============================================================================
+rm -f "$MARKER"
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane t:3 --task as70-author --summary "#70 author" --pane-id %70 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 70 --github "$REPO" --harness claude >/dev/null
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-completion --task as70-author --note done >/dev/null
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane t:4 --task as70-fixpass --summary "#70 fix pass addressing review findings" --pane-id %71 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 70 --github "$REPO" --harness claude >/dev/null
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-completion --task as70-fixpass --note done >/dev/null
+cat > "$FIX/head_70.json" <<'S'
+{"headRefOid": "sha-70"}
+S
+green_checkruns sha-70
+cat > "$FIX/author_70.json" <<'S'
+{"headRefName": "fix/70-thing", "closingIssuesReferences": [{"number": 70}], "commits": []}
+S
+cat > "$FIX/reviews_70.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:4\nReviewed-SHA: sha-70", "createdAt": "2026-08-20T00:00:00Z"}]}
+S
+out=$("$MERGE_PR" "$REPO" 70 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#200: a fix-pass lane approving its own fix-pass is refused, not just the original author"; else bad "#200: fix-pass self-review refused" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#200: ...and never merges"; else bad "#200: fix-pass self-review never merges" "$out"; fi
+echo "$out" | grep -q "author lane t:4 reviewed its own PR" && ok "#200: refusal names the fix-pass lane (t:4), not the original author (t:3)" || bad "#200: refusal names the fix-pass lane" "$out"
+
+# --- MUTATION: narrowing the contributor set back to a single lane (the
+# pre-#200 shape) lets the fix-pass self-review above through. A shadow copy
+# of the WHOLE scripts/supervisor directory with `cli.py`'s
+# `contributor-issue-lanes`/`contributor-pr-lanes` handlers patched to
+# return only the FIRST contributor row -- the literal narrowing #200
+# removes -- so t:4 (the fix-pass lane) drops out of the set entirely and
+# only t:3 (the original author) remains excluded. -----------------------
+MUTDIR2="$D/mutated-contrib"
+cp -R "$HERE/../../scripts/supervisor" "$MUTDIR2"
+python3 - "$MUTDIR2/cli.py" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+marker = '"contributors": [{"lane": row["lane"], "task": row["id"]} for row in rows],'
+assert text.count(marker) == 2, "contributor-issue-lanes/contributor-pr-lanes shape changed"
+text = text.replace(marker, '"contributors": [{"lane": row["lane"], "task": row["id"]} for row in rows][:1],')
+open(path, "w").write(text)
+PYEOF
+rm -f "$MUTDIR2/__pycache__" 2>/dev/null
+MUTATED2="$MUTDIR2/merge-pr.sh"
+chmod +x "$MUTATED2"
+rm -f "$MARKER"
+out=$("$MUTATED2" "$REPO" 70 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$MARKER" ]; then
+  ok "mutation confirmed: narrowing the contributor set back to one lane lets the fix-pass self-review through (case above would be red)"
+else
+  bad "mutation confirmed: narrowing the contributor set lets the fix-pass self-review through" "got rc=$rc, merged=$([ -f "$MARKER" ] && echo yes || echo no): $out"
+fi
+
+# ============================================================================
 # agent-supervisor#251: `author_lane_for`'s `gh pr view` call (the
 # closingIssuesReferences/commits lookup) used to run with NO bound at all --
 # the one `gh` call in verdict-independence.sh that `digest.sh`'s own
