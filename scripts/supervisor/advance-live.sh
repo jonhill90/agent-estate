@@ -848,7 +848,7 @@ fresh_target=$(git -C "$LIVE" rev-parse origin/main 2>/dev/null || echo "")
 if [ -z "$fresh_target" ]; then
   skip "could not re-resolve origin/main before the mutation -- not advancing on an unverified target"
 fi
-if false; then
+if [ "$fresh_target" != "$target" ]; then
   skip "origin/main moved from $target to $fresh_target while the smoke test ran -- the passing smoke test is evidence about $target, not $fresh_target; not advancing on untested evidence, the next pass will test the new tip"
 fi
 age=$(watchdog_age) || skip "watchdog status became unreadable while the smoke test ran -- not advancing this pass"
