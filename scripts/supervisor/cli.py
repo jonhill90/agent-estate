@@ -209,6 +209,13 @@ def parser():
     reconcile_lane_completions_parser.add_argument(
         "--idle-after", type=int, default=int(os.environ.get("AGENT_LANE_IDLE_AFTER", "300"))
     )
+    # agent-supervisor#374: a claude-print/pi-rpc lane has no pane for
+    # --idle-after's observation to ever apply to -- see
+    # reconcile_lane_completions.py's DEFAULT_STALE_AFTER_SECONDS comment for
+    # why this needs its own, longer, default.
+    reconcile_lane_completions_parser.add_argument(
+        "--stale-after", type=int, default=int(os.environ.get("AGENT_LANE_STALE_AFTER", "3600"))
+    )
 
     observe = sub.add_parser("observe")
     observe.add_argument("--lane", action="append")
@@ -1302,7 +1309,7 @@ def main(argv=None):
     elif args.command == "reconcile-lane-completions":
         lanes_bin = os.environ.get("AGENT_LANES_BIN", str(Path(__file__).resolve().parent / "lanes.sh"))
         value = LaneCompletionReconciler(
-            ledger, lanes_bin=lanes_bin, idle_after=args.idle_after
+            ledger, lanes_bin=lanes_bin, idle_after=args.idle_after, stale_after=args.stale_after
         ).sweep()
     elif args.command == "observe":
         lanes = args.lane or [

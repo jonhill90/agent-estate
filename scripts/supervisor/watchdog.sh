@@ -354,6 +354,11 @@ LANE_SWEEP_INTERVAL="${SUPERVISOR_LANE_SWEEP_INTERVAL:-120}"
 # task is trusted to mean "finished, never signalled" rather than "between
 # tool calls" (lane-done.sh's own header names this exact danger, #102).
 LANE_SWEEP_IDLE_AFTER="${SUPERVISOR_LANE_SWEEP_IDLE_AFTER:-300}"
+# agent-supervisor#374: a claude-print/pi-rpc lane has no pane at all for
+# LANE_SWEEP_IDLE_AFTER to observe -- see reconcile_lane_completions.py's
+# DEFAULT_STALE_AFTER_SECONDS comment. Separate, longer default: this gates
+# an ABSENCE of any signal, not a positive "pane read free" observation.
+LANE_SWEEP_STALE_AFTER="${SUPERVISOR_LANE_SWEEP_STALE_AFTER:-3600}"
 
 # agent-supervisor#199/#205: worktree-guard-audit.sh (this repo) existed with
 # nothing calling it -- the PR that shipped it was blocked on exactly that:
@@ -1169,7 +1174,8 @@ check_lane_completion_sweep() {
   fi
   local out rc
   out=$("${SUPERVISOR_PYTHON:-python3}" "$HERE/cli.py" --state-dir "$STATE" \
-        reconcile-lane-completions --idle-after "$LANE_SWEEP_IDLE_AFTER" 2>&1)
+        reconcile-lane-completions --idle-after "$LANE_SWEEP_IDLE_AFTER" \
+        --stale-after "$LANE_SWEEP_STALE_AFTER" 2>&1)
   rc=$?
   # Stamp written whether the sweep succeeded or not -- same reasoning as
   # SOURCE-SWEEP: a failure already reports itself in `errors` (this
@@ -1200,14 +1206,22 @@ completed = d.get("completed", [])
 # in a single-quoted bash -c string, and a bare apostrophe here ends that
 # string early and breaks the shell parse, not the python one.
 failed_unaccepted = d.get("failed_unaccepted", [])
+# agent-supervisor#374: non-tmux (claude-print/pi-rpc) lanes resolved on
+# wall-clock dwell instead of an observed pane -- named separately from
+# failed_unaccepted above for the same reason: the two are different
+# evidence and a human scanning the log should be able to tell them apart.
+failed_stale_delivery = d.get("failed_stale_delivery", [])
 unresolved = len(d.get("unresolved", []))
 errors = len(d.get("errors", []))
 names = ",".join(completed)
 failed_names = ",".join(failed_unaccepted)
+stale_names = ",".join(failed_stale_delivery)
 print(
-    f"completed={len(completed)} failed_unaccepted={len(failed_unaccepted)} unresolved={unresolved} errors={errors}"
+    f"completed={len(completed)} failed_unaccepted={len(failed_unaccepted)} "
+    f"failed_stale_delivery={len(failed_stale_delivery)} unresolved={unresolved} errors={errors}"
     + (f" ({names})" if names else "")
     + (f" (never-accepted: {failed_names})" if failed_names else "")
+    + (f" (no-pane-stale: {stale_names})" if stale_names else "")
 )
 ' 2>"$py_err_file")
   py_rc=$?
