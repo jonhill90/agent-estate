@@ -56,6 +56,21 @@ its channel fires -- this sweep is the backstop for every dispatch that
 mechanism's own fragility (a brief that never got the line, a background
 waiter lost across a supervisor `/clear`) leaves stranded, on a bounded
 delay instead of "until a human notices".
+
+agent-supervisor#374: everything above assumes a pane to poll. A
+`claude-print`/`pi-rpc` lane id never matches `_parse_lane`'s
+`<session>:<index>` shape -- there is no window to look up -- so every one
+of those tasks fell straight into `unresolved` above and stayed `delivered`
+forever; 101 of them were found stuck this way in one ledger. Those
+transports genuinely have nothing to poll (`ClaudePrintAdapter`'s own
+docstring: "there is no long-lived protocol session to resume mid-call"),
+so this sweep's second half judges them on wall-clock dwell since the
+row's own `updated_at` instead of a pane reading -- weaker evidence (an
+absence, not an observation), so it is NEVER used to assert success:
+`stale_after` past due always resolves to
+`failed` via `Ledger.fail_stale_delivery`, never to `complete`. A task
+younger than `stale_after` is left `unresolved`, same as before -- it may
+simply still be the one live turn that will call `complete` itself.
 """
 
 from __future__ import annotations
@@ -66,6 +81,12 @@ import subprocess
 from core import CLAIM_TASK_PREFIX
 
 DEFAULT_IDLE_AFTER_SECONDS = 300
+# agent-supervisor#374: deliberately much longer than DEFAULT_IDLE_AFTER_SECONDS.
+# The tmux path's dwell gates a POSITIVE observation (pane read free N seconds
+# ago); this one gates the ABSENCE of any observation at all for a transport
+# that never had a pane to poll, so it needs enough headroom that a long-running
+# claude-print/pi-rpc turn is not mistaken for an abandoned one.
+DEFAULT_STALE_AFTER_SECONDS = 3600
 
 
 def subprocess_runner(command):
@@ -92,11 +113,20 @@ def _parse_lane(lane):
 class LaneCompletionReconciler:
     """Sweep every open `delivered` task forward from OBSERVED pane state."""
 
-    def __init__(self, ledger, runner=None, lanes_bin="lanes.sh", idle_after=DEFAULT_IDLE_AFTER_SECONDS, clock=None):
+    def __init__(
+        self,
+        ledger,
+        runner=None,
+        lanes_bin="lanes.sh",
+        idle_after=DEFAULT_IDLE_AFTER_SECONDS,
+        stale_after=DEFAULT_STALE_AFTER_SECONDS,
+        clock=None,
+    ):
         self.ledger = ledger
         self.runner = runner or subprocess_runner
         self.lanes_bin = lanes_bin
         self.idle_after = idle_after
+        self.stale_after = stale_after
         self.clock = clock or ledger.clock
 
     def _fetch_session_lanes(self, session):
@@ -144,12 +174,18 @@ class LaneCompletionReconciler:
             session, index = parsed
             by_session.setdefault(session, []).append((task, index))
 
-        report = {"completed": [], "failed_unaccepted": [], "unresolved": [], "errors": []}
-
-        for task in unresolvable:
-            report["unresolved"].append(task["id"])
+        report = {
+            "completed": [],
+            "failed_unaccepted": [],
+            "failed_stale_delivery": [],
+            "unresolved": [],
+            "errors": [],
+        }
 
         now = self.clock()
+
+        for task in unresolvable:
+            self._sweep_nonobservable(task, now=now, report=report)
         for session, entries in by_session.items():
             try:
                 windows = self._fetch_session_lanes(session)
@@ -210,3 +246,36 @@ class LaneCompletionReconciler:
             report["errors"].append({"task": task["id"], "error": str(error)})
             return
         report["failed_unaccepted"].append(task["id"])
+
+    def _sweep_nonobservable(self, task, *, now, report):
+        """agent-supervisor#374: a lane id `_parse_lane` cannot read as
+        `<session>:<index>` (claude-print, pi-rpc) has no pane at all, so the
+        tmux path above can never reach it. Resolve on wall-clock dwell
+        since the row's own `updated_at` instead -- an absence of signal,
+        not an observation, so this only ever moves a stale row to `failed`
+        (`fail_stale_delivery`), never asserts `complete`. A row younger
+        than `stale_after` is left `unresolved`, exactly like a session
+        `lanes.sh` could not read.
+        """
+        updated_at = task.get("updated_at")
+        if not isinstance(updated_at, (int, float)):
+            report["unresolved"].append(task["id"])
+            return
+        age_seconds = now - updated_at
+        if age_seconds < self.stale_after:
+            report["unresolved"].append(task["id"])
+            return
+        note = (
+            f"reconcile-lane-completions: {task['lane']} has no observable pane "
+            f"(non-tmux lane id) and has sat at status=delivered for "
+            f"{int(age_seconds)}s (>= {self.stale_after}s) as of {int(now)} -- "
+            "never signalled completion and this transport has no pane to poll -- "
+            "failed, not completed (agent-supervisor#374)"
+        ).encode("utf-8")
+        allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
+        try:
+            self.ledger.fail_stale_delivery(task["id"], note, pane_nonce=task["pane_nonce"], allow_claim=allow_claim)
+        except Exception as error:
+            report["errors"].append({"task": task["id"], "error": str(error)})
+            return
+        report["failed_stale_delivery"].append(task["id"])

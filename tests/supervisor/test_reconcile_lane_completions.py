@@ -272,6 +272,68 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         self.assertIn("as155-mystery-lane", report["unresolved"])
         self.assertEqual(0, len(runner.calls))  # never even tried to call lanes.sh for it
 
+    def test_nonobservable_lane_past_stale_after_is_failed(self):
+        """agent-supervisor#374: a claude-print/pi-rpc lane id never parses
+        as `<session>:<index>` -- there is no pane for `lanes.sh` to ever
+        answer for. Past `stale_after` this must resolve to `failed`
+        (never `complete` -- there is no positive observation backing
+        success), and `lanes.sh` must never even be invoked for it."""
+        self.ledger.register_lane(
+            lane="ad374-headless", pane_id="claude-print:ad374-headless", nonce="nonce-h",
+            harness="claude", repo="/repo/x", server_id="claude-print", session_id="sess-h",
+            command="claude", transport="claude-print",
+        )
+        self.dispatch("ad374-headless-task", lane="ad374-headless", accepted=False)
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, stale_after=300, clock=lambda: 2_000
+        ).sweep()
+
+        task = self.ledger.get_task("ad374-headless-task")
+        self.assertEqual("failed", task["status"])
+        self.assertEqual(["ad374-headless-task"], report["failed_stale_delivery"])
+        self.assertEqual(0, len(runner.calls))
+
+    def test_nonobservable_lane_before_stale_after_is_left_unresolved(self):
+        """A headless lane younger than `stale_after` may still be the one
+        live turn about to call `complete` itself -- must not be touched."""
+        self.ledger.register_lane(
+            lane="ad374-fresh", pane_id="claude-print:ad374-fresh", nonce="nonce-f",
+            harness="claude", repo="/repo/x", server_id="claude-print", session_id="sess-f",
+            command="claude", transport="claude-print",
+        )
+        self.dispatch("ad374-fresh-task", lane="ad374-fresh")
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, stale_after=300, clock=lambda: 1_100
+        ).sweep()
+
+        task = self.ledger.get_task("ad374-fresh-task")
+        self.assertEqual("delivered", task["status"])
+        self.assertIn("ad374-fresh-task", report["unresolved"])
+
+    def test_nonobservable_lane_with_accepted_at_still_fails_not_completes(self):
+        """Unlike `fail_unaccepted`, `accepted_at` being set does not divert
+        this path to `complete()` -- there is still no positive observation
+        of success for a transport with no pane, only silence."""
+        self.ledger.register_lane(
+            lane="ad374-accepted", pane_id="claude-print:ad374-accepted", nonce="nonce-a",
+            harness="claude", repo="/repo/x", server_id="claude-print", session_id="sess-a",
+            command="claude", transport="claude-print",
+        )
+        self.dispatch("ad374-accepted-task", lane="ad374-accepted", accepted=True)
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, stale_after=300, clock=lambda: 2_000
+        ).sweep()
+
+        task = self.ledger.get_task("ad374-accepted-task")
+        self.assertEqual("failed", task["status"])
+        self.assertEqual(["ad374-accepted-task"], report["failed_stale_delivery"])
+
     def test_batches_one_call_per_session_not_per_task(self):
         """Two delivered tasks in the same session must cost ONE `lanes.sh
         --json` call, not two -- the same batching argument

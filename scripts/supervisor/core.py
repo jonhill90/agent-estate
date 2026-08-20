@@ -3015,6 +3015,89 @@ class Ledger:
                 row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
             return self._dict(row)
 
+    def fail_stale_delivery(self, task_id, result, *, pane_nonce, failpoint=None, allow_claim=False):
+        """Terminate a `delivered` task whose lane has no pane to observe at all.
+
+        agent-supervisor#374. `fail_unaccepted` and `_complete_observed`
+        (`reconcile_lane_completions.py`) both resolve a stuck `delivered`
+        row from a POSITIVE pane observation -- "free right now", "free for
+        N seconds". A `claude-print`/`pi-rpc` lane has no such pane to poll
+        in between: `ClaudePrintAdapter`'s own docstring is explicit that
+        "there is no long-lived protocol session to resume mid-call" -- the
+        process either is still the one live turn that will itself call
+        `complete`, or it has already exited, in which case there will NEVER
+        be a pane transition for anything to observe. `_parse_lane` already
+        reflects this: a lane id of this shape does not match
+        `<session>:<index>` and every existing sweep routes it straight to
+        `unresolved` forever -- which is exactly how 101 rows went stuck
+        (agent-supervisor#374's own count).
+
+        The only fact available for this transport class is wall-clock
+        dwell since the row's own `updated_at` -- not a pane reading, an
+        ABSENCE of one. That is weaker evidence than `_complete_observed`'s
+        (a `free` pane is a positive fact; long silence from a transport
+        that was never polled is not), so this never asserts success: the
+        terminal status is always `failed`, regardless of `accepted_at` --
+        unlike `fail_unaccepted`, which exists specifically for the
+        never-accepted case and refuses outright if `accepted_at` IS set.
+        A `delivered` row can reach here with `accepted_at` set (the lane
+        picked up the brief and then never called `complete`) or NULL (it
+        never even got that far); both are terminal here because for this
+        transport neither can be distinguished from "genuinely still
+        running" except by how long it has been silent, and by the time a
+        caller reaches for this method that bound has already been checked.
+
+        Mirrors `fail_unaccepted`'s shape otherwise: same immutable-result
+        write, same idempotency, same pane-nonce check against the row's
+        OWN recorded nonce (not the lane's current one -- the lane may be
+        long gone, same reasoning as `_reconcile_transition`).
+        """
+        self._require_task_id(task_id, allow_claim=allow_claim)
+        with self._locked():
+            with contextlib.closing(self._connect()) as probe:
+                existing = probe.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if existing is None:
+                    raise ValueError("unknown task")
+                if existing["pane_nonce"] != pane_nonce:
+                    raise ValueError("pane incarnation does not match task")
+            destination, digest = self._write_result(task_id, result)
+            self._fail(failpoint, "after_result")
+            now = int(self.clock())
+            with self._transaction() as connection:
+                row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+                if row is None:
+                    raise ValueError("unknown task")
+                if row["pane_nonce"] != pane_nonce:
+                    raise ValueError("pane incarnation does not match task")
+                if row["status"] == "failed":
+                    if row["result_sha256"] != digest:
+                        raise ValueError("immutable result conflicts with already-failed task")
+                    return self._dict(row)
+                if row["status"] in ("complete", "cancelled"):
+                    raise ValueError(f"cannot fail-stale-delivery a {row['status']} task")
+                if row["status"] != "delivered":
+                    raise ValueError(
+                        f"cannot fail-stale-delivery a {row['status']} task -- only 'delivered' is eligible"
+                    )
+                connection.execute(
+                    """
+                    UPDATE tasks SET status='failed', result_path=?, result_sha256=?,
+                                     updated_at=?, completed_at=? WHERE id=?
+                    """,
+                    (str(destination), digest, now, now, task_id),
+                )
+                self._fail(failpoint, "after_task")
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO events(key, type, task_id, status, payload_path, created_at)
+                    VALUES (?, 'completion', ?, 'pending', ?, ?)
+                    """,
+                    (f"completion:{task_id}", task_id, str(destination), now),
+                )
+                self._fail(failpoint, "after_event")
+                row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            return self._dict(row)
+
     def observe_attention(self, lane, *, pane_nonce, reason="idle"):
         """Durably record that an outstanding task's lane needs attention.
 
