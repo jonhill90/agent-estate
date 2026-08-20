@@ -16,15 +16,19 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	wishssh "github.com/charmbracelet/ssh"
 
 	"github.com/jonhill90/keelson/internal/board"
 	"github.com/jonhill90/keelson/internal/chat"
@@ -35,6 +39,7 @@ import (
 	"github.com/jonhill90/keelson/internal/mcp"
 	"github.com/jonhill90/keelson/internal/rail"
 	"github.com/jonhill90/keelson/internal/shell"
+	"github.com/jonhill90/keelson/internal/sshserver"
 	"github.com/jonhill90/keelson/internal/theme"
 	// sessionops, not session: the -session flag var below already owns that
 	// name (the tmux session -board reads), and shadowing it would be an
@@ -115,6 +120,26 @@ func main() {
 				"budget, enough to starve agent-supervisor's own dispatch (agent-supervisor#144). This is a "+
 				"screen a human reads, not a control loop; [r] still refreshes on demand. Defaults to "+
 				"$AGENT_TUI_BOARD_REFRESH.")
+		sshAddr = flag.String("ssh-addr", envOr("AGENT_TUI_SSH_ADDR", ""),
+			"agent-tui#67: if set (e.g. \":2222\"), serve the exact same shell over SSH at this address instead of "+
+				"opening a local Bubble Tea program -- every connecting client gets its own program and its own "+
+				"copy of the same shell.Model, reading the same fetchers/MCP connection this process already "+
+				"built. Defaults to $AGENT_TUI_SSH_ADDR; leaving both unset keeps today's local-only behaviour "+
+				"unchanged.")
+		sshHostKeyPath = flag.String("ssh-host-key-path", envOr("AGENT_TUI_SSH_HOST_KEY_PATH", ""),
+			"path to the SSH host key; generated (ed25519) on first run if missing. Defaults to "+
+				"$AGENT_TUI_SSH_HOST_KEY_PATH, or ~/.keelson/ssh_host_ed25519_key if that is unset too. Only "+
+				"read when -ssh-addr is set.")
+		sshAuthorizedKeys = flag.String("ssh-authorized-keys", envOr("AGENT_TUI_SSH_AUTHORIZED_KEYS", ""),
+			"path to an authorized_keys-format file (same format as ~/.ssh/authorized_keys) -- only clients "+
+				"presenting a listed public key may connect. Required for -ssh-addr to start unless "+
+				"-ssh-insecure is passed explicitly; agent-tui#67 makes auth a deliberate choice, never an "+
+				"agent-picked default. Defaults to $AGENT_TUI_SSH_AUTHORIZED_KEYS.")
+		sshInsecure = flag.Bool("ssh-insecure", os.Getenv("AGENT_TUI_SSH_INSECURE") == "1",
+			"agent-tui#67: skip public-key auth entirely -- ANY client that can reach -ssh-addr gets a full "+
+				"attached session, no key check at all. Only takes effect with -ssh-addr set; refuses silently "+
+				"otherwise (there is nothing to be insecure about). Off by default; logs a loud warning to "+
+				"stderr on every start when set. Defaults to $AGENT_TUI_SSH_INSECURE=1.")
 	)
 	flag.Parse()
 
@@ -298,11 +323,67 @@ func main() {
 		WithTheme(activeTheme, themeNotice).
 		WithThemeSave(func(th theme.Theme) error { return theme.Save(theme.ConfigPath(), th.ID) })
 
+	// agent-tui#67: -ssh-addr set means SERVE, not open locally -- one
+	// process is either a local Bubble Tea program or an SSH listener
+	// handing the same shell.Model out per connection, never both, so
+	// there is only ever one place reading os.Stdin's raw mode at a time.
+	if *sshAddr != "" {
+		if err := runSSH(m, *sshAddr, *sshHostKeyPath, *sshAuthorizedKeys, *sshInsecure); err != nil {
+			fmt.Fprintln(os.Stderr, "keelson:", err)
+			os.Exit(1)
+		}
+		return
+	}
+
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "keelson:", err)
 		os.Exit(1)
 	}
+}
+
+// runSSH serves seed (a fully-built shell.Model, identical to the one the
+// local launch path would run) to every connecting SSH client until an
+// interrupt/TERM signal arrives, then shuts the listener down gracefully.
+// hostKeyPath "" resolves to ~/.keelson/ssh_host_ed25519_key so a bare
+// -ssh-addr with no -ssh-host-key-path still has somewhere durable to write
+// the generated key (an empty path would otherwise mean "cwd", surprising
+// for a background-run server).
+func runSSH(seed shell.Model, addr, hostKeyPath, authorizedKeys string, insecure bool) error {
+	if hostKeyPath == "" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return fmt.Errorf("resolve default -ssh-host-key-path: %w", err)
+		}
+		hostKeyPath = filepath.Join(home, ".keelson", "ssh_host_ed25519_key")
+	}
+	if err := os.MkdirAll(filepath.Dir(hostKeyPath), 0o700); err != nil {
+		return fmt.Errorf("create host key directory: %w", err)
+	}
+
+	if insecure {
+		fmt.Fprintln(os.Stderr, "keelson: WARNING -ssh-insecure is set -- any client that can reach", addr,
+			"gets a full attached session with NO key check at all")
+	} else if authorizedKeys == "" {
+		return fmt.Errorf("-ssh-addr requires -ssh-authorized-keys (or the explicit opt-out -ssh-insecure)")
+	}
+
+	fmt.Fprintln(os.Stderr, "keelson: serving SSH at", addr, "(host key:", hostKeyPath+")")
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	cfg := sshserver.Config{
+		Addr:           addr,
+		HostKeyPath:    hostKeyPath,
+		AuthorizedKeys: authorizedKeys,
+		Insecure:       insecure,
+		New: func(sess wishssh.Session) (tea.Model, []tea.ProgramOption) {
+			opts := append(sshserver.MakeOptions(sess), tea.WithAltScreen())
+			return seed, opts
+		},
+	}
+	return sshserver.ListenAndServe(ctx, cfg)
 }
 
 func connect(supervisorRepo, python, mcpCmd string) (*mcp.Client, func(), error) {
