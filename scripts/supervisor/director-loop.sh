@@ -197,13 +197,40 @@ sleep 1
 tmux send-keys -t "=$TARGET" -l "$TICK" 2>/dev/null
 sleep 2
 tmux send-keys -t "=$TARGET" Enter 2>/dev/null
-sleep 6
 
 # Verify it ARRIVED, not merely that it was sent. "Delivered" is a claim about
 # someone else's state; if you did not ask them, do not say it.
-if tmux capture-pane -p -t "=$TARGET" 2>/dev/null | grep -q 'esc to interrupt'; then
+#
+# POLL, do not sleep-once. This was `sleep 6` followed by a single capture, and
+# it produced a FALSE NEGATIVE on 2026-08-20: the Director had genuinely
+# accepted the tick and was mid-`quota.sh check`, but had taken ~11s to show
+# `esc to interrupt`, so the loop logged "the pane did NOT start working -- a
+# human should look" over a pane that was working fine.
+#
+# That failure mode is worse than it sounds. The escalation path exists for a
+# Director that is genuinely wedged; firing it on a slow start trains the
+# reader to discount it, and this estate has already measured what happens when
+# a real page is indistinguishable from a routine one. A model that stops to
+# think before its first tool call is normal, not a fault.
+#
+# So: same total budget as before at minimum, but spent watching rather than
+# waiting. Returns the moment the pane is observably working.
+TICK_ARRIVE_TIMEOUT="${DIRECTOR_TICK_ARRIVE_TIMEOUT:-30}"
+tick_arrived=0
+waited=0
+while [ "$waited" -lt "$TICK_ARRIVE_TIMEOUT" ]; do
+  sleep 2
+  waited=$((waited + 2))
+  if tmux capture-pane -p -t "=$TARGET" 2>/dev/null | grep -q 'esc to interrupt'; then
+    tick_arrived=1
+    log "tick arrived after ${waited}s"
+    break
+  fi
+done
+
+if [ "$tick_arrived" -eq 1 ]; then
   log "ticked $TARGET -- pane is now working"
   exit 0
 fi
-log "ticked $TARGET but the pane did NOT start working -- a human should look"
+log "ticked $TARGET but the pane did NOT start working within ${TICK_ARRIVE_TIMEOUT}s -- a human should look"
 exit 1
