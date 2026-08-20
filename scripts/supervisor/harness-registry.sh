@@ -20,6 +20,17 @@
 #   HARNESS_IDS  H_COMMAND_RE  H_READY_RE  H_BUSY_RE  H_BUSY_TAIL
 #   H_BLOCKED_MARKERS  H_OPTION_ROW_RE  H_MENU_ENTER_RE  H_MENU_TAIL
 #   H_TEXT_PROMPT_RE  H_LAUNCH_CMD  H_RESUME_CMD  H_SEND_LITERAL  H_MODEL_RE
+#   H_LIMIT_RE
+#
+# agent-supervisor#124: H_LIMIT_RE is a harness's own usage-limit banner --
+# the shape it paints when it cannot act at all until some external quota
+# resets. Unlike H_BLOCKED_MARKERS/H_OPTION_ROW_RE (matched against the
+# pane's LAST LINE only, the #65 discipline), lanes.sh matches this one
+# against the same bounded, VISIBLE-pane-only tail it already uses for menu
+# detection (H_MENU_TAIL): #124's own finding is that a harness can print
+# this banner, then repaint its ordinary idle footer below it, so the banner
+# is never the last line by the time lanes.sh samples. Empty is the honest
+# default: no observed banner for this harness, so nothing here is guessed.
 #
 # agent-supervisor#115: H_MODEL_RE is the harness's own self-report of which
 # model it is actually running, matched against the pane's VISIBLE screen
@@ -60,7 +71,7 @@
 HARNESS_REGISTRY_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_IDS=(); H_COMMAND_RE=(); H_READY_RE=(); H_BUSY_RE=(); H_BUSY_TAIL=()
 H_BLOCKED_MARKERS=(); H_OPTION_ROW_RE=(); H_MENU_ENTER_RE=(); H_MENU_TAIL=(); H_TEXT_PROMPT_RE=()
-H_LAUNCH_CMD=(); H_RESUME_CMD=(); H_SEND_LITERAL=(); H_MODEL_RE=()
+H_LAUNCH_CMD=(); H_RESUME_CMD=(); H_SEND_LITERAL=(); H_MODEL_RE=(); H_LIMIT_RE=()
 # LANES_HARNESS_DIR is the name `lanes.sh` has always used and its tests still
 # set (they point it at a MUTATED copy of the adapters to prove one adapter's
 # breakage cannot move another harness's lane). Kept as an alias so that
@@ -71,7 +82,7 @@ for _hf in "$HARNESS_DIR"/*.sh; do
   unset HARNESS_NAME HARNESS_COMMAND_RE HARNESS_READY_RE HARNESS_BUSY_RE HARNESS_BUSY_TAIL \
         HARNESS_BLOCKED_MARKERS HARNESS_OPTION_ROW_RE HARNESS_MENU_ENTER_RE HARNESS_MENU_TAIL \
         HARNESS_TEXT_PROMPT_RE HARNESS_LAUNCH_CMD HARNESS_RESUME_CMD HARNESS_SEND_LITERAL \
-        HARNESS_MODEL_RE
+        HARNESS_MODEL_RE HARNESS_LIMIT_RE
   # shellcheck disable=SC1090
   . "$_hf"
   : "${HARNESS_NAME:?$_hf did not set HARNESS_NAME}"
@@ -91,6 +102,7 @@ for _hf in "$HARNESS_DIR"/*.sh; do
   H_RESUME_CMD+=("${HARNESS_RESUME_CMD:-}")
   H_SEND_LITERAL+=("${HARNESS_SEND_LITERAL:-0}")
   H_MODEL_RE+=("${HARNESS_MODEL_RE:-}")
+  H_LIMIT_RE+=("${HARNESS_LIMIT_RE:-}")
 done
 unset _hf
 
