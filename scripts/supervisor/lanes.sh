@@ -553,7 +553,8 @@ emit_rows() {
         state=unknown
       fi
     elif { [ -n "${H_BLOCKED_MARKERS[$hidx]}" ] && grep -qE "${H_BLOCKED_MARKERS[$hidx]}" <<<"$pane"; } \
-      || { [ -n "${H_OPTION_ROW_RE[$hidx]}" ] && grep -qE "${H_OPTION_ROW_RE[$hidx]}" <<<"$pane"; }; then
+      || { [ -n "${H_OPTION_ROW_RE[$hidx]}" ] && grep -qE "${H_OPTION_ROW_RE[$hidx]}" <<<"$pane"; } \
+      || { [ -n "${H_LIMIT_RE[$hidx]}" ] && grep -qE "${H_LIMIT_RE[$hidx]}" <<<"$(tail -n "${H_MENU_TAIL[$hidx]}" <<<"$pane_lines")"; }; then
       # An interactive prompt, not idle: the agent is waiting on a human, not
       # on work. Must be decided before free, since that is the classification
       # it is stealing from. Match the harness's own footer chrome, not the
@@ -570,6 +571,18 @@ emit_rows() {
       # positive marker, same posture as `free`'s whitelist since #126:
       # observed evidence adds a case, the absence of evidence never removes
       # one -- so absence of MENU evidence no longer defaults to text.
+      #
+      # #124: H_LIMIT_RE (a harness's own usage-limit banner) is the one
+      # alternative in this gate NOT matched against `$pane` (the last line
+      # alone). #124's own finding is that a harness can print this banner
+      # and then repaint its ordinary idle footer below it, so the banner is
+      # never the last line by the time this samples -- a last-line-only
+      # match would miss it exactly like #124 measured live. Widened to the
+      # same bounded, VISIBLE-pane-only window HARNESS_MENU_TAIL already
+      # uses for menu detection below -- not scrollback, so the #65
+      # discipline (never match text the pane merely printed further back)
+      # still holds; this only widens which of the already-visible lines
+      # count.
       pane_tail=$(tail -n "${H_MENU_TAIL[$hidx]}" <<<"$pane_lines")
       if { [ -n "${H_MENU_ENTER_RE[$hidx]}" ] && grep -qE "${H_MENU_ENTER_RE[$hidx]}" <<<"$pane"; } \
         || { [ -n "${H_OPTION_ROW_RE[$hidx]}" ] && grep -qE "${H_OPTION_ROW_RE[$hidx]}" <<<"$pane_tail"; }; then

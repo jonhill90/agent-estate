@@ -97,6 +97,41 @@ HARNESS_MENU_TAIL=6
 # Claude one.
 HARNESS_TEXT_PROMPT_RE=
 
+# agent-supervisor#124: the usage-limit banner. Measured live off a real,
+# stuck codex lane (`agent-supervisor:5`, `codex` 0.147.0, 2026-08-19) after
+# TWO briefs had been typed into it and both answered by this banner instead
+# of the agent, verbatim:
+#
+#   › Read .../rev100.md and do exactly what it says. You are reviewing PR #100 ...
+#   ■ You've hit your usage limit. Upgrade to Pro ... or try again at Aug 20th, 2026 12:11 AM.
+#   › Improve documentation in @filename
+#     gpt-5.5 medium · /private/var/folders/.../ad-96-rev100-13003
+#
+# `lanes.sh --free` reported this lane free: the banner is not a menu (no
+# "Press enter to continue", no numbered option row) and codex repaints its
+# ordinary idle footer below it, so by the time lanes.sh samples, the last
+# line is the SAME footer HARNESS_READY_RE matches for a genuinely idle
+# lane. That is #124's whole finding -- idle-at-the-shell and able-to-work
+# have come apart, and the existing last-line-only probes cannot tell them
+# apart because the banner has already scrolled out of the one line they
+# read.
+#
+# `hit your usage limit` intentionally drops the apostrophe glyph
+# (`You've`) rather than spelling it -- that character's exact byte is not
+# confirmed stable across terminals/fonts, and the surrounding words are
+# distinctive enough on their own that loosening this one byte does not
+# risk matching anything else codex paints.
+#
+# lanes.sh matches this against the SAME bounded, visible-pane-only tail it
+# already uses for menu detection (HARNESS_MENU_TAIL, not scrollback -- the
+# #65 discipline still applies, this only widens which of the visible lines
+# count, not how far back capture-pane looks). Landing on `menu-blocked`
+# (lanes.sh's own default for "blocked, but not one of the positively-typed
+# kinds") is deliberate: a lane pinned here needs a human, exactly the
+# `blocked`/`--blocked` semantics this estate already has, and reads
+# `unknown` under a whitelist-not-guess an inch away from `free`.
+HARNESS_LIMIT_RE='hit your usage limit'
+
 # agent-supervisor#115: NOT WIRED. Codex's own ready-shape footer already
 # carries the model on its last line every tick (`gpt-5.5 medium · <cwd>`,
 # see HARNESS_READY_RE above) -- unlike Claude's splash-only self-report, a

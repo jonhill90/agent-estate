@@ -134,6 +134,8 @@ cat > "$D/fixture" <<'FIX'
 60|w-unsent-240-5|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0|file agent-supervisor#232 as a filed issue reference check
 61|w-unsent-240-6|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 1 agent|1|0|clean up the pr200-review temp branch and worktree
 62|w-fifth-shape|claude.exe|⏵⏵ bypass permissions on (shift+tab to cycle) · ← 7 helpers standing by|1|0
+63|w-codex-usage-limit|codex|› Read .../rev100.md and do exactly what it says. You are reviewing PR #100 ...\n■ You've hit your usage limit. Upgrade to Pro ... or try again at Aug 20th, 2026 12:11 AM.\n› Improve documentation in @filename\n  gpt-5.5 medium · /repo/path|1|0
+64|w-claude-usage-limit|claude.exe|What do you want to do?\n❯ 1. Stop and wait for limit to reset\n  2. Upgrade your plan\n Enter to select · Esc to cancel|1|0
 FIX
 printf '49|w-missing-cwd|codex|  gpt-5.5 medium · /repo/path|1|0||||%s\n' "$MISSING_CWD" >> "$D/fixture"
 out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" 2>&1)
@@ -236,6 +238,23 @@ want "a dismissible free-text prompt is text-blocked, not menu-blocked" w-text-b
 # default for anything this probe cannot positively place, same posture #126
 # already established for `free`.
 want "an unrecognised blocked shape defaults to menu-blocked, not text-blocked" w-unrecognized-blocked menu-blocked "$out"
+
+# #124: a codex lane at its own usage limit was reported free -- the banner
+# ("You've hit your usage limit...") is not the pane's last line by the time
+# lanes.sh samples (codex repaints its ordinary idle footer below it), so a
+# last-line-only probe misses it exactly like the live incident measured.
+# w-codex-usage-limit is verbatim the real capture off `agent-supervisor:5`
+# quoted in the issue (see harness/codex.sh's HARNESS_LIMIT_RE comment).
+want "a codex lane at its usage limit is menu-blocked, not free" w-codex-usage-limit menu-blocked "$out"
+
+# #124: confirming (not assuming) that Claude Code's own "Stop and wait for
+# limit to reset" dialog is already caught by the existing menu-blocked path
+# -- this issue's original report was codex-specific. Modeled on the same
+# "Enter to select · Esc to cancel" chrome every other real Claude Code menu
+# capture in this fixture ends with (w-trust/w-model/w-permission above);
+# not a fresh live capture of this exact dialog (same posture as
+# HARNESS_TEXT_PROMPT_RE's "MODELED, NOT OBSERVED" note in harness/claude.sh).
+want "a Claude lane at its usage limit is menu-blocked, not free" w-claude-usage-limit menu-blocked "$out"
 
 # #126: free inverted from a blacklist to a whitelist. A lane is dispatchable
 # only when its last line is a recognised ready shape; everything else is
@@ -550,8 +569,9 @@ fi
 # #164's w-unrecognized-blocked (menu-blocked by the new default), and
 # #201's w-codex-trust (codex's own startup menu, verified against a real
 # pane). None of #154's fixture rows (service/dead) are blocked, so this
-# total is unaffected by that merge.
-if grep -qE '9 lane\(s\) (is|are) blocked' <<<"$out"; then
+# total is unaffected by that merge. #124 adds two more: a codex lane and a
+# Claude lane, each stuck at its own usage limit -- eleven total.
+if grep -qE '11 lane\(s\) (is|are) blocked' <<<"$out"; then
   echo "  ok   the table prints a count line for blocked lanes"; pass=$((pass+1));
 else
   echo "  FAIL no blocked count line in:"; sed 's/^/       /' <<<"$out"; fail=$((fail+1));
@@ -598,7 +618,8 @@ for bad in arch w-dead w-hung w-busy w-copilot w-minute-tick w-scrolled w-blocke
            w-shell-busy w-shell-idle w-shell-idle-hung w-shell-tasks w-shells-plural \
            w-busy-plural w-shell-idle-plural \
            telegram-poller ad102-renamed-lane free-27 w-hand-run-poller w-mentions-poller \
-           w-missing-cwd w-firstrun w-firstrun-fresh; do
+           w-missing-cwd w-firstrun w-firstrun-fresh \
+           w-codex-usage-limit w-claude-usage-limit; do
   bi=$(awk -F'|' -v n="$bad" '$2==n{print $1}' "$D/fixture")
   if grep -qE "^[^	]*:${bi}	" <<<"$free"; then echo "  FAIL --free offered $bad"; fail=$((fail+1));
   else echo "  ok   --free withholds $bad"; pass=$((pass+1)); fi
@@ -649,7 +670,8 @@ fi
 # and now has a `\tkind` suffix a bare `-x` exact match would never see.
 blocked=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANES" --blocked 2>&1)
 for want_blocked in w-blocked:menu w-trust:menu w-model:menu w-permission:menu w-text-blocked:text \
-                    w-unrecognized-blocked:menu w-codex-trust:menu; do
+                    w-unrecognized-blocked:menu w-codex-trust:menu \
+                    w-codex-usage-limit:menu w-claude-usage-limit:menu; do
   want_blocked_name="${want_blocked%%:*}"; want_blocked_kind="${want_blocked##*:}"
   wi=$(awk -F'|' -v n="$want_blocked_name" '$2==n{print $1}' "$D/fixture")
   if grep -qE "^[^	]*:${wi}	${want_blocked_kind}\$" <<<"$blocked"; then
