@@ -1578,7 +1578,28 @@ class Ledger:
             ).fetchone()
         return self._dict(row)
 
-    def get_task_for_issue(self, issue_ref):
+    # agent-supervisor#146: issue and PR numbers are NOT unique across the
+    # repos this estate tracks in parallel since #111's session-per-repo --
+    # `#181` names both a `skills` issue and an `agent-dotfiles` issue, and
+    # a number-keyed lookup that does not also key on repo silently answers
+    # for whichever repo's row happens to sort first/last. `source_url` is
+    # the one place a dispatch already records which repo it was FOR (see
+    # `record_dispatch` in cli.py, which writes
+    # `https://github.com/<owner>/<name>/issues/<n>` or `.../pull/<n>`) --
+    # this is the same extraction `cli.py`'s own
+    # `_release_issue_claim_for_task` already does for the identical reason,
+    # kept here rather than imported so `core.py` has no dependency on
+    # `cli.py`.
+    _SOURCE_URL_REPO_RE = re.compile(r"github\.com/([^/\s]+/[^/\s]+)/(?:issues|pull)/")
+
+    @classmethod
+    def _repo_from_source_url(cls, source_url):
+        if not source_url:
+            return None
+        match = cls._SOURCE_URL_REPO_RE.search(source_url)
+        return match.group(1) if match else None
+
+    def get_task_for_issue(self, issue_ref, repo=None):
         """The most recent task dispatched for a GitHub issue -- keyed by the
         issue number, never by a branch name.
 
@@ -1590,21 +1611,38 @@ class Ledger:
         DESC: an issue re-dispatched after a prior task finished (recycled,
         or given to a second lane) has more than one row, and the most
         recent dispatch is the one that actually holds the issue now.
+
+        agent-supervisor#146: `repo`, when given (`"<owner>/<name>"`),
+        narrows to rows whose `source_url` names that exact repo -- see
+        `_repo_from_source_url`. When omitted and the issue number resolves
+        in more than one repo, this refuses (`None`) rather than guess which
+        repo's row is "most recent" -- the same fail-closed posture
+        `get_author_task_for_issue` takes for the identical ambiguity.
         """
         with contextlib.closing(self._connect()) as connection:
-            row = connection.execute(
+            rows = connection.execute(
                 """
-                SELECT tasks.* FROM tasks
+                SELECT tasks.*, source_tasks.source_url AS _source_url FROM tasks
                 JOIN source_tasks ON source_tasks.id = tasks.id
                 WHERE source_tasks.source_kind = 'issue' AND source_tasks.source_ref = ?
                 ORDER BY tasks.created_at DESC
-                LIMIT 1
                 """,
                 (str(issue_ref),),
-            ).fetchone()
-        return self._dict(row)
+            ).fetchall()
+        candidates = [self._dict(row) for row in rows]
+        for candidate in candidates:
+            candidate["_repo"] = self._repo_from_source_url(candidate.pop("_source_url", None))
+        if repo is not None:
+            candidates = [c for c in candidates if c["_repo"] == repo]
+        elif len({c["_repo"] for c in candidates}) > 1:
+            return None
+        if not candidates:
+            return None
+        winner = dict(candidates[0])
+        winner.pop("_repo", None)
+        return winner
 
-    def get_open_task_for_pr(self, pr_ref):
+    def get_open_task_for_pr(self, pr_ref, repo=None):
         """The open task (if any) already dispatched FOR a PR, keyed by PR
         number -- never by issue, never by branch name.
 
@@ -1639,11 +1677,21 @@ class Ledger:
         "is somebody working this PR RIGHT NOW", asked by `dispatch.sh`
         BEFORE it selects a lane, so a finished or cancelled prior review of
         the same PR does not wrongly refuse a fresh one.
+
+        agent-supervisor#146: `repo`, when given, narrows to a row whose
+        `source_url` names that exact repo -- see `_repo_from_source_url`.
+        `one_open_pull_per_source_ref` (the trigger backing this table)
+        currently keys ONLY on PR number, not `(repo, number)`, so at most
+        one open row can exist for a given number regardless of repo; this
+        parameter still matters when a caller asks about a specific repo's
+        PR N and the one open row that number has belongs to a DIFFERENT
+        repo's PR N -- without filtering, this answered `known:true` for a
+        PR nobody had actually claimed in the caller's repo.
         """
         with contextlib.closing(self._connect()) as connection:
             row = connection.execute(
                 """
-                SELECT tasks.* FROM tasks
+                SELECT tasks.*, source_tasks.source_url AS _source_url FROM tasks
                 JOIN source_tasks ON source_tasks.id = tasks.id
                 WHERE source_tasks.source_kind = 'pull' AND source_tasks.source_ref = ?
                   AND tasks.status NOT IN ('complete','failed','cancelled')
@@ -1652,7 +1700,13 @@ class Ledger:
                 """,
                 (str(pr_ref),),
             ).fetchone()
-        return self._dict(row)
+        result = self._dict(row)
+        if result is None:
+            return None
+        source_url = result.pop("_source_url", None)
+        if repo is not None and self._repo_from_source_url(source_url) != repo:
+            return None
+        return result
 
     @staticmethod
     def _task_looks_like_review(task_id, summary):
@@ -1668,26 +1722,45 @@ class Ledger:
             or re.search(r"\breview(ing|s)?\s+(pr|pull request|#[0-9]+)", text)
         )
 
-    def _non_review_tasks_for_issue(self, issue_ref):
+    def _non_review_tasks_for_issue(self, issue_ref, repo=None):
         """Every non-review task ever dispatched against this issue, oldest
         first -- the raw candidate pool `get_author_task_for_issue` narrows
         to one and `get_contributor_tasks_for_issue` (agent-supervisor#190)
         returns whole. One query, so the two callers cannot drift on what
         counts as a candidate the way #108 already drifted on lane identity.
+
+        agent-supervisor#146: each candidate carries an internal `_repo` key
+        (the owner/name extracted from its dispatch's `source_url`, `None`
+        when unextractable) so callers can tell a same-numbered issue in a
+        DIFFERENT repo apart from a genuine re-dispatch of the SAME repo's
+        issue. `repo`, when given, narrows the candidate pool to that repo
+        up front; callers strip `_repo` before returning a row to their own
+        caller.
         """
         with contextlib.closing(self._connect()) as connection:
             rows = connection.execute(
                 """
-                SELECT tasks.* FROM tasks
+                SELECT tasks.*, source_tasks.source_url AS _source_url FROM tasks
                 JOIN source_tasks ON source_tasks.id = tasks.id
                 WHERE source_tasks.source_kind = 'issue' AND source_tasks.source_ref = ?
                 ORDER BY tasks.created_at ASC, tasks.id ASC
                 """,
                 (str(issue_ref),),
             ).fetchall()
-        return [
-            self._dict(row) for row in rows if not self._task_looks_like_review(row["id"], row["summary"])
-        ]
+        candidates = []
+        for row in rows:
+            if self._task_looks_like_review(row["id"], row["summary"]):
+                continue
+            candidate = self._dict(row)
+            candidate["_repo"] = self._repo_from_source_url(candidate.pop("_source_url", None))
+            candidates.append(candidate)
+        if repo is not None:
+            candidates = [c for c in candidates if c["_repo"] == repo]
+        return candidates
+
+    @staticmethod
+    def _strip_repo(candidate):
+        return {key: value for key, value in candidate.items() if key != "_repo"}
 
     # `dispatch.sh`/`worktree.sh` mint every branch as `<prefix>/<issue>-<slug>`
     # (or a hand-pushed `fix|feat|chore|docs/<issue>-<slug>`) and the SAME
@@ -1697,7 +1770,7 @@ class Ledger:
     # every dispatch that followed the convention.
     _HEAD_REF_RE = re.compile(r"^(?:lane|fix|feat|chore|docs)/([0-9]+)-(.+)$")
 
-    def get_contributor_tasks_for_issue(self, issue_ref):
+    def get_contributor_tasks_for_issue(self, issue_ref, repo=None):
         """The full CONTRIBUTOR SET for an issue's PR -- every non-review
         task ever dispatched against it, not narrowed to a single "author".
 
@@ -1730,10 +1803,20 @@ class Ledger:
         distinguish one lane's commits from another's on a shared branch --
         only the ledger, which recorded who each task was dispatched to,
         can.
-        """
-        return self._non_review_tasks_for_issue(issue_ref)
 
-    def get_author_task_for_issue(self, issue_ref, head_ref=None):
+        agent-supervisor#146: `repo`, when given, narrows the candidate pool
+        to that repo before anything else runs -- see
+        `_non_review_tasks_for_issue`. Deliberately does NOT fail closed on
+        cross-repo ambiguity when `repo` is omitted, unlike
+        `get_author_task_for_issue`: over-including a same-numbered issue's
+        tasks from a DIFFERENT repo in this SET only costs dispatch.sh an
+        extra excluded candidate lane, the same safe direction the
+        docstring above already documents for an abandoned same-repo
+        attempt.
+        """
+        return [self._strip_repo(c) for c in self._non_review_tasks_for_issue(issue_ref, repo=repo)]
+
+    def get_author_task_for_issue(self, issue_ref, head_ref=None, repo=None):
         """The task whose dispatch produced this issue's current PR.
 
         agent-supervisor#76: a review task must never be eligible as the
@@ -1750,9 +1833,21 @@ class Ledger:
         absent, or it does not disambiguate, this is only safe to answer
         when exactly one non-review task exists -- anything else is a
         genuine "don't know", returned as `None` rather than guessed at.
+
+        agent-supervisor#146: `repo`, when given, narrows to that repo's
+        candidates before anything else runs. When omitted and the SAME
+        issue number resolves in more than one repo -- `#181` is both a
+        `skills` issue and an `agent-dotfiles` issue -- this refuses
+        (`None`) rather than answer for whichever repo's row the ordering
+        or head-ref match happens to favor. This is THE fix for
+        agent-supervisor#146: before it, an unscoped lookup answered
+        `known:true` for a different repo's lane entirely, which the
+        author-exclusion guard could not tell apart from a real answer.
         """
-        candidates = self._non_review_tasks_for_issue(issue_ref)
+        candidates = self._non_review_tasks_for_issue(issue_ref, repo=repo)
         if not candidates:
+            return None
+        if repo is None and len({c["_repo"] for c in candidates}) > 1:
             return None
 
         if head_ref:
@@ -1761,13 +1856,13 @@ class Ledger:
                 suffix = f"{match.group(1)}-{match.group(2)}"
                 by_branch = [task for task in candidates if task["id"].endswith(suffix)]
                 if len(by_branch) == 1:
-                    return by_branch[0]
+                    return self._strip_repo(by_branch[0])
 
         if len(candidates) == 1:
-            return candidates[0]
+            return self._strip_repo(candidates[0])
         return None
 
-    def get_contributor_tasks_for_pr(self, pr_ref):
+    def get_contributor_tasks_for_pr(self, pr_ref, repo=None):
         """The full CONTRIBUTOR SET dispatched DIRECTLY against this PR --
         every non-review `source_kind='pull'` task ever recorded for it,
         unfiltered by status. Resolution path five (agent-supervisor#308),
@@ -1792,20 +1887,33 @@ class Ledger:
         rows -- the most direct evidence the ledger has. Two live fix-pass
         tasks dispatched directly against PR #302 sat unconsulted in this
         exact table while its review refused for six hours.
+
+        agent-supervisor#146: `repo`, when given, narrows to that repo's
+        rows (see `_repo_from_source_url`); omitted, this stays over-inclusive
+        on purpose, the same safe direction `get_contributor_tasks_for_issue`
+        documents -- a same-numbered PR in a different repo costs an extra
+        excluded candidate lane, never a missed one.
         """
         with contextlib.closing(self._connect()) as connection:
             rows = connection.execute(
                 """
-                SELECT tasks.* FROM tasks
+                SELECT tasks.*, source_tasks.source_url AS _source_url FROM tasks
                 JOIN source_tasks ON source_tasks.id = tasks.id
                 WHERE source_tasks.source_kind = 'pull' AND source_tasks.source_ref = ?
                 ORDER BY tasks.created_at ASC, tasks.id ASC
                 """,
                 (str(pr_ref),),
             ).fetchall()
-        return [
-            self._dict(row) for row in rows if not self._task_looks_like_review(row["id"], row["summary"])
-        ]
+        candidates = []
+        for row in rows:
+            if self._task_looks_like_review(row["id"], row["summary"]):
+                continue
+            candidate = self._dict(row)
+            candidate_repo = self._repo_from_source_url(candidate.pop("_source_url", None))
+            if repo is not None and candidate_repo != repo:
+                continue
+            candidates.append(candidate)
+        return candidates
 
     def record_pr_for_task(self, *, task_id, repo, pr_number, now=None):
         """Record explicitly that `task_id`'s own work OPENED `pr_number` in
