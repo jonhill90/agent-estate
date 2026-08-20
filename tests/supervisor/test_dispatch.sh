@@ -48,6 +48,19 @@ D=$(mktemp -d); mkdir -p "$D/bin" "$D/roots"
 cp "$HERE/stubs/gh-claim" "$D/bin/gh"
 cp "$HERE/stubs/tmux-dispatch" "$D/bin/tmux"
 
+# agent-supervisor#400: dispatch.sh now shells out to prior-attempts.sh
+# before sending a brief, and prior-attempts.sh reads $SUPERVISOR_STATE/results
+# by default -- unset, that is $HOME/.local/state/agent-dotfiles-supervisor on
+# whatever machine runs this suite, the exact "test writes into the live
+# estate" problem AGENT_SUPERVISOR_STATE_DIR exists to prevent below, for a
+# different env var this PR added. A results dir that exists but holds one
+# file matching no issue this suite uses makes prior-attempts.sh report
+# "genuinely fresh" (rc=1, silent, brief untouched) for every case here,
+# which is what every case here was already written to assume.
+export SUPERVISOR_STATE="$D/pa-state"
+mkdir -p "$SUPERVISOR_STATE/results"
+: > "$SUPERVISOR_STATE/results/zzz-unrelated-to-any-test-issue.md"
+
 # A minimal origin + clone, standing in for the shared checkout every lane
 # would otherwise share.
 git init -q --bare "$D/origin.git"
