@@ -240,6 +240,56 @@ case "$CMD" in
     [ "$SAMPLES" -lt 1 ] && SAMPLES=1
 
     GUARD_CACHE="$CACHE_DIR/guard-${PROVIDER}-${WINDOW}.json"
+
+    # FAST PATH: a SAFE verdict this recent is still true.
+    #
+    # WHY. `codexbar guard` takes 11-12s on this host (measured 2026-08-20,
+    # three consecutive runs: 11s, 12s, 11s). Three samples plus delays is
+    # ~35s, and this gate is step 0 of EVERY dispatch. The estate was paying
+    # 35s per lane to re-read a number that moves by fractions of a percent
+    # over that span.
+    #
+    # WHAT KEEPS THIS SAFE, and it is the whole design:
+    #
+    #   - Only a SAFE verdict is ever short-circuited. A cached WIND DOWN is
+    #     NOT reused to stand down early, and -- far more important -- a
+    #     cached SAFE is the ONLY thing that can skip sampling. There is no
+    #     path here where a stale reading permits spending; there is only a
+    #     path where a fresh one avoids being re-measured.
+    #   - The TTL is 120s by default against a window measured in hours. The
+    #     fastest burn this estate has recorded could not cross the 15%
+    #     floor from a SAFE reading inside two minutes.
+    #   - It reads the SAME cache the sampling loop writes, so the cached
+    #     value is a real codexbar answer, never a synthesised one.
+    #   - QUOTA_SAFE_CACHE_SECONDS=0 disables it entirely and restores the
+    #     always-sample behaviour, for a caller that wants to pay the 35s.
+    #
+    # This does NOT touch the #262/#264 fail-safe direction: unreachable is
+    # still UNKNOWN, UNKNOWN is still never SAFE, and a real WIND DOWN in any
+    # sample still beats a later lucky SAFE. The cheap failure (a false
+    # stand-down) remains preferred over the expensive one.
+    SAFE_CACHE_SECONDS="${QUOTA_SAFE_CACHE_SECONDS:-120}"
+    case "$SAFE_CACHE_SECONDS" in ''|*[!0-9]*) SAFE_CACHE_SECONDS=120 ;; esac
+    if [ "$SAFE_CACHE_SECONDS" -gt 0 ] && [ -f "$GUARD_CACHE" ]; then
+      if fp_age=$(cache_age "$GUARD_CACHE") && [ "$fp_age" -le "$SAFE_CACHE_SECONDS" ]; then
+        fp_json=$(cat "$GUARD_CACHE" 2>/dev/null)
+        fp_pct=$(printf '%s' "$fp_json" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("remainingPercent","?") if not d.get("unavailableReason") else "?")' 2>/dev/null)
+        case "$fp_pct" in
+          ''|*[!0-9]*) : ;;   # unparseable or unavailable -- fall through and sample
+          *)
+            # Re-apply the floor to the cached number rather than trusting a
+            # cached verdict: MIN_REMAINING may differ from the run that
+            # wrote it, and a caller passing a stricter floor must get the
+            # stricter answer.
+            if [ "$fp_pct" -gt "$MIN_REMAINING" ]; then
+              echo "quota: SAFE ${fp_pct}% remaining in $WINDOW (floor ${MIN_REMAINING}%) (cached ${fp_age}s ago, under the ${SAFE_CACHE_SECONDS}s fast path; re-samples after that)"
+              exit 0
+            fi
+            ;;
+        esac
+      fi
+    fi
+
     wind_down_msg=""
     safe_msg=""
     safe_sample=""
