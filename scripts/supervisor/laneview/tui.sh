@@ -70,7 +70,23 @@ REFRESH_SECS="${LANEVIEW_TUI_REFRESH:-2}"
 # static frame rendered fine, but j/k/enter never registered a single
 # keystroke). The script goes to a temp file instead so stdin stays the
 # actual tty all the way into curses.
-PY_SRC="$(mktemp "${TMPDIR:-/tmp}/laneview-tui.XXXXXX.py")"
+#
+# agent-supervisor#356: a ".py" suffix AFTER the XXXXXX template broke
+# substitution on BSD mktemp (macOS) -- it is not an error there, it is a
+# SILENT no-op: mktemp returns the literal path
+# "$TMPDIR/laneview-tui.XXXXXX.py" with the XXXXXX never replaced, rc=0,
+# indistinguishable from success until you look at the path. That produced
+# a fixed, non-unique path every single invocation shared -- two live
+# tui.sh runs raced to create/write/delete the SAME file ("mktemp: mkstemp
+# failed ... File exists" during a concurrent suite run), and because
+# nothing about that path was actually unique, the two processes agent-
+# supervisor#356 found (three days old) never looked like litter a
+# per-run temp file would. Every other mktemp template in this codebase
+# (grep scripts/supervisor/*.sh) puts XXXXXX LAST with no trailing
+# characters -- that is the convention this now follows too. python3 does
+# not care that the temp file has no ".py" extension; it was never
+# required.
+PY_SRC="$(mktemp "${TMPDIR:-/tmp}/laneview-tui.XXXXXX")"
 trap 'rm -f "$PY_SRC"' EXIT
 cat > "$PY_SRC" <<'PY'
 import json, os, subprocess, sys, time
