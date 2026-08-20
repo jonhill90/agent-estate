@@ -1397,6 +1397,27 @@ if [ "$rc" -ne 0 ] || [ -z "$WORKTREE" ] || [ ! -d "$WORKTREE" ]; then
 fi
 rm -f "$WORKTREE_ERR"
 
+# agent-supervisor#373: `worktree.sh new` just created branch `lane/<slug>`
+# via `git worktree add -b` -- that call FAILS if the branch already existed,
+# so reaching this line means THIS invocation, and no earlier one, created
+# it (worktree.sh's `done` only ever removes the WORKTREE, never the branch
+# -- see its own header -- which is what left `lane/<issue>-<slug>` behind on
+# every refusal below until now). Recorded once, here, so every cleanup path
+# past this point deletes exactly the branch this dispatch made and nothing
+# a caller or an earlier lane already owned.
+DISPATCH_BRANCH="lane/${ISSUE}-${SLUG}"
+cleanup_dispatch_branch() {
+  # Guarded by show-ref, same posture would-revert.sh's own scratch-branch
+  # cleanup already takes: only delete a branch that still exists under the
+  # exact name this dispatch created, never a branch a caller or a later
+  # dispatch retargeted onto (#373 point 3 -- clean up only what THIS
+  # invocation created).
+  if git -C "$REPO_PATH" show-ref --verify --quiet "refs/heads/$DISPATCH_BRANCH"; then
+    git -C "$REPO_PATH" branch -D "$DISPATCH_BRANCH" >/dev/null 2>&1 \
+      || echo "dispatch: could not remove stray branch $DISPATCH_BRANCH -- remove it by hand: git -C $REPO_PATH branch -D $DISPATCH_BRANCH" >&2
+  fi
+}
+
 # `abort_send` is defined here, right after the worktree exists, because step
 # 3.5 below is now the first thing that can fail with both a claim and a
 # worktree already committed -- the same shape every later failure in this
@@ -1419,6 +1440,11 @@ abort_send() {
   esac
   if [ "$cleanup_worktree" = 1 ]; then
     "$HERE/worktree.sh" done "$WORKTREE" >/dev/null 2>&1
+    # agent-supervisor#373: only once the worktree itself is actually gone --
+    # a branch still checked out by a worktree cannot be deleted anyway, and
+    # the branch is left alone (like the worktree) in the "$LANE still
+    # appears to be inside it" case above, since that is not a clean abort.
+    cleanup_dispatch_branch
   fi
   release_claim
   release_lane_claim
@@ -1625,6 +1651,7 @@ sleep "${DISPATCH_LAUNCH_SETTLE:-3}"
 if ! tmux rename-window -t "$LANE_TARGET" "$WINDOW_NAME" 2>/dev/null; then
   echo "dispatch: could not rename $LANE -- not dispatching #$ISSUE_ARG" >&2
   "$HERE/worktree.sh" done "$WORKTREE" >/dev/null 2>&1
+  cleanup_dispatch_branch
   release_claim
   release_lane_claim
   exit 1

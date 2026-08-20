@@ -234,6 +234,11 @@ print(Ledger(sys.argv[2]).lane_available(sys.argv[3]))
 tmuxlog()   { cat "$D/tmux.log"; }
 assignees() { awk -F'|' -v n="$1" '$1==n{print $2}' "$D/issues"; }
 worktrees() { ls "$D/roots" 2>/dev/null | wc -l | tr -d ' '; }
+# agent-supervisor#373: worktree.sh new's `git worktree add -b` creates the
+# branch BEFORE anything downstream can refuse -- `worktrees()` above only
+# proves the WORKTREE is gone after a refusal; the BRANCH `worktree.sh done`
+# never touches (see worktree.sh's own header) is a separate leak.
+branch_exists() { git -C "$REPO" show-ref --verify --quiet "refs/heads/$1"; }
 
 # --- the whole point: dispatch creates the worktree itself ----------------
 # Pinned rather than left to run()'s implicit mktemp default (see #174's own
@@ -1233,6 +1238,52 @@ else bad "the claim is released -- nothing was ever typed into the pane" "still 
 status=$(LEDGER_STATE="$D/state-193-preclear" ledger status 2>&1)
 want_contains "...and the ledger agrees the lane is free again" "True" "$(lane_available "$D/state-193-preclear" t:3)"
 want_missing "and records no DISPATCH task in the ledger either" '"id":"ad162-unclearable"' "$status"
+
+# --- agent-supervisor#373: a refusal AFTER the worktree exists must not
+# leave the branch `worktree.sh new` created behind. Reproduced with a real
+# collision-check.sh REFUSE (agent-supervisor#291's own guard, step 3.2,
+# unconditional -- runs on every dispatch, not just reviews): an in-flight
+# lane is seeded directly in the ledger this dispatch will read, with an
+# uncommitted edit to `file.txt` in its own worktree; the candidate's brief
+# names that same file in backticks, collision-check.sh's own convention for
+# citing a file (see its `_files_named_in`). `abort_send` (dispatch.sh) calls
+# `worktree.sh done "$WORKTREE"`, which only ever removes the WORKTREE --
+# never the BRANCH `git worktree add -b` created (worktree.sh's own header) --
+# so before the fix `lane/373-collides` survives the refusal and a retry of
+# the same issue/slug hits "fatal: a branch named ... already exists", #373's
+# own live reproduction.
+echo '373|| a dispatch whose files collide with an in-flight lane' >> "$D/issues"
+LEDGER_STATE_373="$D/state-373"
+INFLIGHT_WT_373="$D/inflight-373"
+git -C "$REPO" worktree add -q -b lane/373-in-flight "$INFLIGHT_WT_373" main
+echo "in-flight lane's own edit" >> "$INFLIGHT_WT_373/file.txt"
+PYTHONPATH="$HERE/../../scripts/supervisor" python3 -c "
+import core
+l = core.Ledger('$LEDGER_STATE_373')
+l.register_lane(lane='t:99', pane_id='%99', nonce='n99', harness='claude',
+  repo='$REPO', server_id='s99', session_id='sess99', command='claude')
+l.reconstruct_task(task_id='as373-in-flight', source_kind='issue', source_url='https://x',
+  source_ref='9999', summary='an in-flight lane', source_state='OPEN', status='created',
+  evidence=['test'], status_marker=None)
+l.assign(task_id='as373-in-flight', lane='t:99', pane_nonce='n99', summary='test', worktree_path='$INFLIGHT_WT_373')
+"
+echo 'Fix `file.txt` -- collides with the in-flight lane above.' > "$D/brief-373.md"
+before_373=$(worktrees)
+out=$(LEDGER_STATE="$LEDGER_STATE_373" \
+      run 373 collides "$D/brief-373.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a dispatch whose files collide with an in-flight lane is refused" "$rc" 1 "$out"
+want_contains "...says collision-check: REFUSE" "collision-check: REFUSE" "$out"
+if [ "$(worktrees)" = "$before_373" ]; then ok "no worktree is left behind by a collision-refused dispatch"
+else bad "no worktree is left behind by a collision-refused dispatch" "$before_373 before, $(worktrees) after"; fi
+if branch_exists "lane/373-collides"; then
+  bad "no stray lane/373-collides branch survives a collision-refused dispatch" "$out"
+else
+  ok "no stray lane/373-collides branch survives a collision-refused dispatch"
+fi
+if [ -z "$(assignees 373)" ]; then ok "the claim is released when a collision-refused dispatch aborts"
+else bad "the claim is released when a collision-refused dispatch aborts" "still assigned: $(assignees 373)"; fi
+git -C "$REPO" worktree remove --force "$INFLIGHT_WT_373" >/dev/null 2>&1
+git -C "$REPO" branch -D lane/373-in-flight >/dev/null 2>&1
 
 # --- agent-supervisor#240: the box can gain text AFTER verified_preclear's
 # own confirming read, before verified_type ever touches the pane -- a gap
