@@ -15,6 +15,7 @@ into the one command CI already runs, so the README's claim becomes true.
 import os
 import signal
 import subprocess
+import sys
 import time
 import unittest
 from pathlib import Path
@@ -70,6 +71,7 @@ class ShellSuites(unittest.TestCase):
     def test_shell_suites_pass(self):
         for suite in SUITES:
             with self.subTest(suite=suite.name):
+                started = time.monotonic()
                 proc = subprocess.Popen(
                     ["bash", str(suite)],
                     stdout=subprocess.PIPE,
@@ -101,6 +103,18 @@ class ShellSuites(unittest.TestCase):
                         stdout, stderr = proc.communicate(timeout=5)
                     except subprocess.TimeoutExpired:
                         pass
+                finally:
+                    # #440: nothing recorded per-suite wall time, so CI's 22
+                    # minutes had no ranked breakdown -- only a single 1330s
+                    # gap around this entire test in the -v log. Printed
+                    # unconditionally (finally, not just on the passing path)
+                    # so a hang or failure still leaves a timing data point
+                    # instead of silently dropping out of the ranking.
+                    print(
+                        f"[shell-suite-timing] {suite.name} {time.monotonic() - started:.1f}s",
+                        file=sys.stderr,
+                        flush=True,
+                    )
 
                 if timed_out:
                     detail = (
