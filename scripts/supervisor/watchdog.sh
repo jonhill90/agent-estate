@@ -1211,17 +1211,25 @@ failed_unaccepted = d.get("failed_unaccepted", [])
 # failed_unaccepted above for the same reason: the two are different
 # evidence and a human scanning the log should be able to tell them apart.
 failed_stale_delivery = d.get("failed_stale_delivery", [])
+# agent-supervisor#414: a no-pane lane whose worker got as far as `accept`
+# and then went silent -- distinct evidence again from failed_stale_delivery
+# above (that one never even confirmed acceptance), named separately for the
+# same reason.
+failed_stale_acceptance = d.get("failed_stale_acceptance", [])
 unresolved = len(d.get("unresolved", []))
 errors = len(d.get("errors", []))
 names = ",".join(completed)
 failed_names = ",".join(failed_unaccepted)
 stale_names = ",".join(failed_stale_delivery)
+stale_accepted_names = ",".join(failed_stale_acceptance)
 print(
     f"completed={len(completed)} failed_unaccepted={len(failed_unaccepted)} "
-    f"failed_stale_delivery={len(failed_stale_delivery)} unresolved={unresolved} errors={errors}"
+    f"failed_stale_delivery={len(failed_stale_delivery)} "
+    f"failed_stale_acceptance={len(failed_stale_acceptance)} unresolved={unresolved} errors={errors}"
     + (f" ({names})" if names else "")
     + (f" (never-accepted: {failed_names})" if failed_names else "")
     + (f" (no-pane-stale: {stale_names})" if stale_names else "")
+    + (f" (no-pane-accepted-stale: {stale_accepted_names})" if stale_accepted_names else "")
 )
 ' 2>"$py_err_file")
   py_rc=$?
