@@ -810,13 +810,6 @@ if [ "$smoke_rc" -ne 0 ] || [ ! -s "$SMOKE/watchdog.status" ] \
 fi
 log "smoke test at $target passed: $(grep '^state:' "$SMOKE/watchdog.status")"
 
-# --- capture the rollback target before any mutation ---------------------
-mkdir -p "$(dirname "$ROLLBACK")" 2>/dev/null
-tmp="$ROLLBACK.$$"
-if ! { printf '%s\n' "$cur" >"$tmp" && mv -f "$tmp" "$ROLLBACK"; }; then
-  fail "could not record rollback target $cur to $ROLLBACK -- not advancing"
-fi
-
 # --- re-check BOTH guards IMMEDIATELY before the mutation -----------------
 # Same discipline watchdog.sh applies to its own busy check right before it
 # sends: "the earlier check is stale by several seconds." Here it is stale
@@ -858,7 +851,29 @@ if [ "$age" -lt 0 ] || [ "$age" -gt "$safe_until" ]; then
   # not being thrown away: the next tick re-runs against the same target and
   # this check is the only thing that has to fit in the window. What follows
   # it is `git checkout --detach`, a ref update measured in milliseconds.
-  skip "watchdog tick window closed while the smoke test ran (recheck age ${age}s, outside the 0-${safe_until}s window) -- not advancing this pass; the smoke test PASSED, only the mutation waits"
+  skip "watchdog tick window closed while the smoke test ran (recheck age ${age}s, outside the 0-${safe_until}s post-tick window) -- not advancing this pass; the smoke test PASSED, only the mutation waits"
+fi
+
+# --- capture the rollback target, AFTER every skip, before any mutation ----
+#
+# THIS MOVED, and the test suite is why. It used to sit above the guards
+# below. When the freshness/window checks ran BEFORE the smoke test, a stale
+# window skipped early and never reached this write. Moving the smoke test
+# above the window check (this PR's whole point) also moved the skip below
+# this write, so a SKIPPED advance started recording a rollback target for a
+# mutation that never happened:
+#
+#     FAIL a skipped advance records no rollback target -- wrote ab26111...
+#
+# A rollback target that names a sha nothing was moved off is worse than
+# none: the next reader treats it as evidence an advance occurred. So the
+# write now happens after every `skip` path and immediately before the
+# checkout -- still "before any mutation", which is the property that
+# matters, and now also after every decision NOT to mutate.
+mkdir -p "$(dirname "$ROLLBACK")" 2>/dev/null
+tmp="$ROLLBACK.$$"
+if ! { printf '%s\n' "$cur" >"$tmp" && mv -f "$tmp" "$ROLLBACK"; }; then
+  fail "could not record rollback target $cur to $ROLLBACK -- not advancing"
 fi
 
 # --- advance --------------------------------------------------------------
