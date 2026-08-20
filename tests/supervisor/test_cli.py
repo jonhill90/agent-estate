@@ -1386,14 +1386,14 @@ class IssueLaneCliTest(unittest.TestCase):
     through `cli.main`, not `Ledger.get_task_for_issue` directly.
     """
 
-    def _record_dispatch(self, root, *, lane, task, issue, worktree=None):
+    def _record_dispatch(self, root, *, lane, task, issue, worktree=None, github="jonhill90/agent-dotfiles"):
         output = io.StringIO()
         argv = [
             "--state-dir", root, "record-dispatch",
             "--lane", lane, "--task", task, "--summary", f"#{issue} summary",
             "--pane-id", "%3", "--pane-path", root, "--command", "claude.exe",
             "--server-id", "socket:1", "--session-id", "$0",
-            "--issue", str(issue), "--github", "jonhill90/agent-dotfiles",
+            "--issue", str(issue), "--github", github,
         ]
         if worktree is not None:
             argv += ["--worktree", worktree]
@@ -1401,18 +1401,23 @@ class IssueLaneCliTest(unittest.TestCase):
             rc = cli.main(argv)
         self.assertEqual(0, rc, output.getvalue())
 
-    def _issue_lane(self, root, issue):
+    def _issue_lane(self, root, issue, repo=None):
         output = io.StringIO()
+        argv = ["--state-dir", root, "issue-lane", "--issue", str(issue)]
+        if repo is not None:
+            argv += ["--repo", repo]
         with contextlib.redirect_stdout(output):
-            rc = cli.main(["--state-dir", root, "issue-lane", "--issue", str(issue)])
+            rc = cli.main(argv)
         self.assertEqual(0, rc, output.getvalue())
         return json.loads(output.getvalue())
 
-    def _author_issue_lane(self, root, issue, head_ref=None):
+    def _author_issue_lane(self, root, issue, head_ref=None, repo=None):
         output = io.StringIO()
         argv = ["--state-dir", root, "author-issue-lane", "--issue", str(issue)]
         if head_ref is not None:
             argv += ["--head-ref", head_ref]
+        if repo is not None:
+            argv += ["--repo", repo]
         with contextlib.redirect_stdout(output):
             rc = cli.main(argv)
         self.assertEqual(0, rc, output.getvalue())
@@ -1515,6 +1520,39 @@ class IssueLaneCliTest(unittest.TestCase):
             author = self._author_issue_lane(root, 13)
 
             self.assertEqual({"issue": "13", "known": False, "lane": None, "task": None}, author)
+
+    def test_author_issue_lane_cross_repo_collision_resolves_by_repo_and_refuses_when_ambiguous(self):
+        """agent-supervisor#146: the exact measured defect. Issue #181 exists
+        in both `jonhill90/agent-dotfiles` and `jonhill90/skills` --
+        `author-issue-lane --issue 181 --head-ref ...` (no `--repo`) answered
+        `agent-dotfiles:6` with `known:true` when the real author of the
+        `skills` PR was `skills:2`. With `--repo` given, this must resolve to
+        the right repo's lane; with it omitted, the collision must be
+        reproducible as a refusal, not a wrong answer."""
+        with tempfile.TemporaryDirectory() as root:
+            self._record_dispatch(
+                root, lane="agent-dotfiles:6", task="ad181-roster-the-orphaned-skills",
+                issue=181, github="jonhill90/agent-dotfiles",
+            )
+            self._record_dispatch(
+                root, lane="skills:2", task="skills181-declare-fix-conflict",
+                issue=181, github="jonhill90/skills",
+            )
+
+            skills_author = self._author_issue_lane(root, 181, repo="jonhill90/skills")
+            self.assertEqual(
+                {"issue": "181", "known": True, "lane": "skills:2", "task": "skills181-declare-fix-conflict"},
+                skills_author,
+            )
+
+            dotfiles_author = self._author_issue_lane(root, 181, repo="jonhill90/agent-dotfiles")
+            self.assertEqual("agent-dotfiles:6", dotfiles_author["lane"])
+
+            # Remove the repo argument again (the pre-fix call shape) and
+            # show the collision is reproducible as a fail-closed refusal --
+            # never a wrong-repo answer.
+            ambiguous = self._author_issue_lane(root, 181)
+            self.assertEqual({"issue": "181", "known": False, "lane": None, "task": None}, ambiguous)
 
     def _contributor_issue_lanes(self, root, issue):
         output = io.StringIO()

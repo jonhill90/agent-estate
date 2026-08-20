@@ -806,7 +806,9 @@ fi
 # wasted worktree, no stray brief); it is not, by itself, load-bearing for
 # correctness anymore.
 if [ -n "$PR_SCOPED" ]; then
-  PR_LANE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" pr-lane --pr "$PR_SCOPED" 2>&1)
+  PR_LANE_REPO_ARGS=()
+  [ -n "$REPO" ] && PR_LANE_REPO_ARGS=(--repo "$REPO")
+  PR_LANE_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" pr-lane --pr "$PR_SCOPED" "${PR_LANE_REPO_ARGS[@]+"${PR_LANE_REPO_ARGS[@]}"}" 2>&1)
   if [ $? -ne 0 ]; then
     echo "dispatch: could not ask the ledger whether PR #$PR_SCOPED already has a lane -- refusing rather than risk a duplicate" >&2
     sed 's/^/  /' <<<"$PR_LANE_JSON" >&2

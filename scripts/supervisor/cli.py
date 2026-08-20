@@ -355,6 +355,11 @@ def parser():
     # at a branch.
     issue_lane_parser = sub.add_parser("issue-lane")
     issue_lane_parser.add_argument("--issue", required=True)
+    # agent-supervisor#146: optional -- when given, narrows to that repo's
+    # dispatch of this issue number; omitted and the number resolves in more
+    # than one repo, this refuses (`known:false`) rather than guess. See
+    # `Ledger.get_task_for_issue`.
+    issue_lane_parser.add_argument("--repo", default=None)
 
     # agent-supervisor#159: the PR-scoped sibling of `issue-lane`, asked by
     # `dispatch.sh` BEFORE it selects a lane -- unlike `issue-lane`, which
@@ -364,6 +369,9 @@ def parser():
     # dispatch. See `Ledger.get_open_task_for_pr`.
     pr_lane_parser = sub.add_parser("pr-lane")
     pr_lane_parser.add_argument("--pr", required=True)
+    # agent-supervisor#146: optional repo scope, same reasoning as
+    # `issue-lane --repo`. See `Ledger.get_open_task_for_pr`.
+    pr_lane_parser.add_argument("--repo", default=None)
 
     # agent-supervisor#108: the ONE comparison of two lane ids in this system,
     # exposed so `dispatch.sh` (the guard) and `digest.sh` (the independence
@@ -389,6 +397,14 @@ def parser():
     # resolves authorship by what actually produced the branch instead of by
     # position in the issue's task list. See `Ledger.get_author_task_for_issue`.
     author_issue_lane_parser.add_argument("--head-ref", default=None)
+    # agent-supervisor#146: the fix. Issue numbers collide across the repos
+    # this estate tracks in parallel (session-per-repo, #111) -- without
+    # this, `#181` in `skills` and `#181` in `agent-dotfiles` were
+    # indistinguishable and the resolver silently answered for whichever
+    # repo's row won its ordering. Optional so existing single-repo callers
+    # are unaffected; ambiguous-and-omitted still fails closed inside
+    # `Ledger.get_author_task_for_issue`.
+    author_issue_lane_parser.add_argument("--repo", default=None)
 
     # agent-supervisor#190: the CONTRIBUTOR SET, not narrowed to one author --
     # see `Ledger.get_contributor_tasks_for_issue`. `dispatch.sh`'s
@@ -397,6 +413,8 @@ def parser():
     # lanes a review dispatch must exclude.
     contributor_issue_lanes_parser = sub.add_parser("contributor-issue-lanes")
     contributor_issue_lanes_parser.add_argument("--issue", required=True)
+    # agent-supervisor#146: optional repo scope. See `issue-lane --repo`.
+    contributor_issue_lanes_parser.add_argument("--repo", default=None)
 
     # agent-supervisor#117: `dispatch.sh`'s `--reviews-pr` last resort, when
     # neither `issue-lane` nor `author-issue-lane` answers. Keyed by the
@@ -421,6 +439,8 @@ def parser():
     # `Ledger.get_contributor_tasks_for_pr`.
     contributor_pr_lanes_parser = sub.add_parser("contributor-pr-lanes")
     contributor_pr_lanes_parser.add_argument("--pr", required=True)
+    # agent-supervisor#146: optional repo scope. See `issue-lane --repo`.
+    contributor_pr_lanes_parser.add_argument("--repo", default=None)
 
     # agent-supervisor#308 item 1: the explicit "task X's work opened PR N"
     # record -- see `Ledger.record_pr_for_task` / `Ledger.get_task_for_pr_number`.
@@ -1365,7 +1385,7 @@ def main(argv=None):
         row = ledger.get_task(args.task)
         value = {"task": args.task, "known": row is not None, "lane": row["lane"] if row is not None else None}
     elif args.command == "issue-lane":
-        row = ledger.get_task_for_issue(args.issue)
+        row = ledger.get_task_for_issue(args.issue, repo=args.repo)
         value = {
             "issue": args.issue,
             "known": row is not None,
@@ -1373,7 +1393,7 @@ def main(argv=None):
             "task": row["id"] if row is not None else None,
         }
     elif args.command == "pr-lane":
-        row = ledger.get_open_task_for_pr(args.pr)
+        row = ledger.get_open_task_for_pr(args.pr, repo=args.repo)
         value = {
             "pr": args.pr,
             "known": row is not None,
@@ -1381,7 +1401,7 @@ def main(argv=None):
             "task": row["id"] if row is not None else None,
         }
     elif args.command == "author-issue-lane":
-        row = ledger.get_author_task_for_issue(args.issue, head_ref=args.head_ref)
+        row = ledger.get_author_task_for_issue(args.issue, head_ref=args.head_ref, repo=args.repo)
         value = {
             "issue": args.issue,
             "known": row is not None,
@@ -1389,7 +1409,7 @@ def main(argv=None):
             "task": row["id"] if row is not None else None,
         }
     elif args.command == "contributor-issue-lanes":
-        rows = ledger.get_contributor_tasks_for_issue(args.issue)
+        rows = ledger.get_contributor_tasks_for_issue(args.issue, repo=args.repo)
         value = {
             "issue": args.issue,
             "known": len(rows) > 0,
@@ -1404,7 +1424,7 @@ def main(argv=None):
             "task": row["id"] if row is not None else None,
         }
     elif args.command == "contributor-pr-lanes":
-        rows = ledger.get_contributor_tasks_for_pr(args.pr)
+        rows = ledger.get_contributor_tasks_for_pr(args.pr, repo=args.repo)
         value = {
             "pr": args.pr,
             "known": len(rows) > 0,

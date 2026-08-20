@@ -2772,7 +2772,7 @@ python3 - "$MUTANT_DIR_35/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
 import sys
 target = sys.argv[1]
 text = open(target).read()
-marker = 'issue_json=$("$ledger_python" "$ledger_cli" contributor-issue-lanes --issue "$candidate_issue" 2>&1)'
+marker = 'issue_json=$("$ledger_python" "$ledger_cli" contributor-issue-lanes --issue "$candidate_issue" "${repo_args[@]+"${repo_args[@]}"}" 2>&1)'
 assert text.count(marker) == 1, "contributor-issue-lanes lookup not found or not unique -- script shape changed"
 text = text.replace(marker, 'issue_json=\'{"known":false}\'  # MUTATED: ledger contributor-issue-lanes never consulted', 1)
 open(target, "w").write(text)
@@ -3824,7 +3824,7 @@ python3 - "$MUTANT_DIR_308A/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
 import sys
 target = sys.argv[1]
 text = open(target).read()
-marker = 'pr_contrib_json=$("$ledger_python" "$ledger_cli" contributor-pr-lanes --pr "$pr" 2>&1)'
+marker = 'pr_contrib_json=$("$ledger_python" "$ledger_cli" contributor-pr-lanes --pr "$pr" "${repo_args[@]+"${repo_args[@]}"}" 2>&1)'
 assert text.count(marker) == 1, "contributor-pr-lanes lookup not found or not unique -- script shape changed"
 text = text.replace(marker, 'pr_contrib_json=\'{"known":false}\'  # MUTATED: contributor-pr-lanes never consulted', 1)
 open(target, "w").write(text)

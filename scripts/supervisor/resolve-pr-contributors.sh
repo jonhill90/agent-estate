@@ -100,9 +100,12 @@ resolve_pr_contributors() {
         | grep -ioE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+'
     } | awk '!seen[$0]++'
   )
+  local repo_args=()
+  [ -n "$repo" ] && repo_args=(--repo "$repo")
+
   local candidate_issue issue_json c_lane c_task
   for candidate_issue in $candidate_issues; do
-    issue_json=$("$ledger_python" "$ledger_cli" contributor-issue-lanes --issue "$candidate_issue" 2>&1)
+    issue_json=$("$ledger_python" "$ledger_cli" contributor-issue-lanes --issue "$candidate_issue" "${repo_args[@]+"${repo_args[@]}"}" 2>&1)
     if [ $? -ne 0 ]; then
       echo "dispatch: contributor-issue-lanes lookup failed for issue #$candidate_issue -- refusing (authorship unknown, failing closed)" >&2
       sed 's/^/  /' <<<"$issue_json" >&2
@@ -139,7 +142,7 @@ resolve_pr_contributors() {
   # 2.2. agent-supervisor#308 item 2: resolution path five, the PR's own
   # source_tasks rows asked directly by PR number.
   local pr_contrib_json
-  pr_contrib_json=$("$ledger_python" "$ledger_cli" contributor-pr-lanes --pr "$pr" 2>&1)
+  pr_contrib_json=$("$ledger_python" "$ledger_cli" contributor-pr-lanes --pr "$pr" "${repo_args[@]+"${repo_args[@]}"}" 2>&1)
   if [ $? -ne 0 ]; then
     echo "dispatch: contributor-pr-lanes lookup failed for PR #$pr -- refusing (authorship unknown, failing closed)" >&2
     sed 's/^/  /' <<<"$pr_contrib_json" >&2

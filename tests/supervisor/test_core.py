@@ -1554,6 +1554,84 @@ class LedgerTest(unittest.TestCase):
     def test_get_contributor_tasks_for_issue_unknown_issue_is_empty(self):
         self.assertEqual([], self.ledger.get_contributor_tasks_for_issue("no-such-issue"))
 
+    def test_get_author_task_for_issue_cross_repo_collision(self):
+        """agent-supervisor#146: the exact measured defect. Issue #181
+        exists in both `jonhill90/agent-dotfiles` and `jonhill90/skills` --
+        two entirely different tasks, dispatched to two different lanes,
+        both under `source_ref='181'`. An unscoped lookup silently answered
+        for the wrong repo (`agent-dotfiles:6` when the caller meant
+        `skills`'s PR, authored by `skills:2`); this asserts a `repo`-scoped
+        lookup gets the right one, and the unscoped, ambiguous case fails
+        closed rather than picking either."""
+        self.ledger.record_dispatch(
+            lane="agent-dotfiles-6",
+            pane_id="%6",
+            nonce="nonce-ad181",
+            harness="claude",
+            repo="/repo/agent-dotfiles-6",
+            server_id="server-a",
+            session_id="$6",
+            command="claude.exe",
+            task_id="ad181-roster-the-orphaned-skills",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-dotfiles/issues/181",
+            source_ref="181",
+            summary="#181 roster the orphaned skills",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane agent-dotfiles-6"],
+            status_marker=None,
+        )
+        self.clock.value += 1
+        self.ledger.record_dispatch(
+            lane="skills-2",
+            pane_id="%2",
+            nonce="nonce-skills181",
+            harness="claude",
+            repo="/repo/skills-2",
+            server_id="server-b",
+            session_id="$2",
+            command="claude.exe",
+            task_id="skills181-declare-fix-conflict",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/skills/issues/181",
+            source_ref="181",
+            summary="#181 declare fix conflict",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane skills-2"],
+            status_marker=None,
+        )
+
+        # Repo-scoped: each repo's own #181 resolves to its own lane.
+        skills_author = self.ledger.get_author_task_for_issue("181", repo="jonhill90/skills")
+        self.assertEqual("skills-2", skills_author["lane"])
+        self.assertEqual("skills181-declare-fix-conflict", skills_author["id"])
+
+        dotfiles_author = self.ledger.get_author_task_for_issue("181", repo="jonhill90/agent-dotfiles")
+        self.assertEqual("agent-dotfiles-6", dotfiles_author["lane"])
+
+        # The exact defect: with the repo scope removed again, this must be
+        # reproducible as ambiguous -- not silently answer for one repo's
+        # row the way the pre-fix resolver did.
+        self.assertIsNone(
+            self.ledger.get_author_task_for_issue("181"),
+            "an unscoped lookup across a genuine cross-repo issue-number collision "
+            "must fail closed, not guess",
+        )
+
+        # Same fail-closed posture for issue-lane's single-answer lookup.
+        self.assertEqual(
+            "skills-2", self.ledger.get_task_for_issue("181", repo="jonhill90/skills")["lane"]
+        )
+        self.assertIsNone(self.ledger.get_task_for_issue("181"))
+
+        # contributor-issue-lanes is deliberately over-inclusive when unscoped
+        # (the safe direction, per its own docstring) but still narrows
+        # correctly when a repo is given.
+        scoped_contributors = self.ledger.get_contributor_tasks_for_issue("181", repo="jonhill90/skills")
+        self.assertEqual(["skills-2"], [row["lane"] for row in scoped_contributors])
+        unscoped_lanes = {row["lane"] for row in self.ledger.get_contributor_tasks_for_issue("181")}
+        self.assertEqual({"agent-dotfiles-6", "skills-2"}, unscoped_lanes)
+
     def test_get_task_for_worktree_resolves_when_the_branch_slug_differs_from_the_task_slug(self):
         """agent-supervisor#117: the actual, measured bug. Task
         `as101-pr-inference-fix` produced a PR whose head branch was

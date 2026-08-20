@@ -322,7 +322,7 @@ author_lane_for() {
     } | awk '!seen[$0]++'
   )
   for candidate in $candidates; do
-    if issue_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" author-issue-lane --issue "$candidate" --head-ref "$head_ref" 2>/dev/null) \
+    if issue_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" author-issue-lane --issue "$candidate" --head-ref "$head_ref" --repo "$repo_full" 2>/dev/null) \
        && jq -e '.known == true' >/dev/null 2>&1 <<<"$issue_json"; then
       jq -nc --arg lane "$(jq -r '.lane' <<<"$issue_json")" \
              --arg task "$(jq -r '.task // ""' <<<"$issue_json")" \
