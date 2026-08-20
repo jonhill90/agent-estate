@@ -19,10 +19,16 @@
 # later. Adding a third `gate:` would widen a live defect.
 name: completion-gate
 
+# agent-supervisor#407: `push` used to be scoped to `main` only, so a PR
+# whose `pull_request` dispatch GitHub silently drops (any PR it cannot
+# compute `refs/pull/<n>/merge` for -- i.e. `mergeable: CONFLICTING`, see
+# validate.yml's comment for the measured evidence) got no run from this
+# workflow either. `push` with no branch filter dispatches off the pushed
+# SHA directly, independent of merge-ref computation, so it now covers that
+# gap the same way validate.yml's does.
 on:
   pull_request:
   push:
-    branches: [main]
 
 jobs:
   completion-gate-selftest:
