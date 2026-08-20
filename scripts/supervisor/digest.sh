@@ -326,58 +326,34 @@ if [[ "$wd_advance" == *"could not be started"* ]]; then
 fi
 
 # --- poller ---------------------------------------------------------------
-# Liveness by process, health by its own status file. They answer different
-# questions: a wedged poller is alive and not listening, and only the second
-# catches that.
-#
-# agent-supervisor#96: `pgrep -f inbox-poll.sh` matches ANY inbox-poll.sh on
-# the machine, not this estate's poller -- a leaked test poller ran 57
-# minutes holding zero handles on real state (lsof -c
-# agent-dotfiles-supervisor -> 0) and read alive=true here for as long as it
-# existed, which would have masked a genuinely dead poller in THIS session.
-# Scoped instead to the PANE PID of this session's poller window -- a
-# measurement tmux produces directly, which CLAUDE.md's authorship test
-# makes legitimate to read here, and the same discipline #54 applied to the
-# duplicate detector. poller-window.sh is the shared window lookup lanes.sh,
-# poller-recover.sh and advance-live.sh already use, reused rather than
-# writing a second answer. The pid's own argv is still checked against
-# SERVICE_RE: a window merely NAMED inbox-poll with a dead or repurposed
-# pane must not read alive either.
-#
-# inbox-poll.status's own `pid:` field was considered instead and rejected:
-# it is a record this system wrote about itself, i.e. a claim, and #18 is
-# the incident where a status file's claim was believed while reality
-# differed. The pane pid is read straight from tmux, not from that file.
-POLLER_WINDOW_BIN="${DIGEST_POLLER_WINDOW_BIN:-$HERE/poller-window.sh}"
-SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
-poller_alive=false
-if [ -r "$POLLER_WINDOW_BIN" ]; then
-  # shellcheck source=./poller-window.sh
-  . "$POLLER_WINDOW_BIN"
-  poller_target=$(poller_window_target "$SESSION" 2>/dev/null)
-  poller_target_rc=$?
-  case "$poller_target_rc" in
-    0)
-      poller_pid=$(tmux display-message -p -t "$poller_target" '#{pane_pid}' 2>/dev/null)
-      if [ -n "$poller_pid" ]; then
-        poller_argv=$(ps -o command= -p "$poller_pid" 2>/dev/null)
-        [[ "$poller_argv" =~ $SERVICE_RE ]] && poller_alive=true
-      fi
-      ;;
-    1) ;; # confirmed zero poller windows in this session -- not alive, not an error
-    2) note_error "poller liveness: multiple '$POLLER_WINDOW_NAME' windows in session '$SESSION' -- refusing to guess which is the poller" ;;
-    *) note_error "poller liveness: could not determine the poller window in session '$SESSION' (tmux query failed)" ;;
-  esac
-else
-  note_error "poller liveness: $POLLER_WINDOW_BIN not found -- cannot scope the liveness check to this session"
-fi
+# agent-supervisor#154: the poller is a launchd/systemd-hosted service now,
+# not a tmux window (see README.md) -- scoping liveness to a window's pane
+# pid, as this used to, does not go merely dead once nothing runs a window,
+# it goes ACTIVELY WRONG: it would read "not alive" forever, a permanent
+# false alarm layered on top of the 278 duplicate-window alarms #154 was
+# filed over. inbox-poll.status's own `checked:`/`state:` heartbeat is the
+# host-agnostic answer used everywhere else in this estate (watchdog.sh's
+# check_inbox_heartbeat, watchdog_notify.py) -- reused here instead of a
+# second, tmux-only one. A fresh heartbeat means the process is up AND
+# making progress (it is written once per completed poll iteration, never
+# merely on process start); a stale or missing one means not alive, whether
+# that is a crash, a hang, or a poller that was never started.
+INBOX_HEARTBEAT_STALE_AFTER_DEFAULT=$(( 2 * (25 + 80) ))
+POLLER_HEARTBEAT_STALE_AFTER="${INBOX_HEARTBEAT_STALE_AFTER:-$INBOX_HEARTBEAT_STALE_AFTER_DEFAULT}"
 PL_FILE="$STATE/inbox-poll.status"
+poller_alive=false
 if [ -r "$PL_FILE" ]; then
   poller_state=$(status_field "$PL_FILE" state)
   poller_checked=$(status_field "$PL_FILE" checked)
+  if poller_checked_epoch=$(iso_to_epoch "$poller_checked"); then
+    poller_age_s=$(( $(date -u +%s) - poller_checked_epoch ))
+    [ "$poller_age_s" -ge 0 ] || poller_age_s=0
+    if [ "$poller_age_s" -le "$POLLER_HEARTBEAT_STALE_AFTER" ] && [ "$poller_state" != "stopped" ]; then
+      poller_alive=true
+    fi
+  fi
 else
   poller_state="UNREADABLE"; poller_checked=""
-  [ "$poller_alive" = true ] && note_error "inbox-poll.status unreadable while the process is running"
 fi
 
 # --- director inbox --------------------------------------------------------
