@@ -267,6 +267,43 @@ new)
     git -C "$REPO" branch -D "$BRANCH" >/dev/null 2>&1 \
       && echo "worktree: reclaimed abandoned branch $BRANCH (no worktree, no commits beyond $BASE)" >&2
   fi
+  # REFUSE TO ADD A NEW LANE WHILE THE SHARED REPO IS CARRYING AN UNCLAIMED
+  # STASH (agent-supervisor#427).
+  #
+  # `git worktree add` gives every lane its own working directory, but NOT
+  # its own stash: `refs/stash` lives in the repo's common `.git` dir, which
+  # every worktree of `$REPO` shares -- proven directly (not inferred) on
+  # 2026-08-20:
+  #
+  #   $ git -C base stash push -m x        # from worktree A
+  #   $ git -C wt-b stash list             # a DIFFERENT worktree, same repo
+  #   stash@{0}: On lane-a: x
+  #
+  # #427 was filed on exactly this: a lane found `bootstrap-session.sh`
+  # edits for #411 and a `git stash`/`git stash pop` briefly surfaced a
+  # stash belonging to `lane/278-unblock-dispatch` -- inside a worktree that
+  # had nothing to do with either. No script in this repo runs `git stash`
+  # (checked: only comments mention the word), so the leak is not something
+  # our own tooling did wrong; it is what happens the moment more than one
+  # concurrent lane's *agent* touches `git stash` in a repo whose worktrees
+  # share one `.git`. There is no git config that scopes `refs/stash` to a
+  # single worktree (unlike `HEAD`, `refs/bisect/*` or `refs/worktree/*`,
+  # which genuinely are per-worktree) -- the only place this can be caught
+  # is before a SECOND lane starts sharing the danger, which is here.
+  #
+  # A pre-existing stash at dispatch time means somebody's uncommitted work
+  # is sitting in the one namespace every worktree of this repo can see and
+  # mutate. Dispatching into that state hands the new lane a live landmine:
+  # its own future `git stash`/`git stash pop` (or another concurrent
+  # lane's) can silently apply, lose, or leak that entry. Refuse rather than
+  # let it ride, same posture as `safe_remove` refusing to discard
+  # uncommitted work above -- a stash is somebody's unfinished work too.
+  if stash_top=$(git -C "$REPO" rev-parse --verify --quiet refs/stash 2>/dev/null) && [ -n "$stash_top" ]; then
+    echo "worktree: $REPO has an unclaimed git stash -- refusing to dispatch a new lane into it (agent-supervisor#427)" >&2
+    git -C "$REPO" stash list >&2
+    echo "worktree: refs/stash is shared by every worktree of this repo; resolve it first (git -C \"$REPO\" stash pop / drop) before dispatching another lane" >&2
+    exit 1
+  fi
   # git worktree add already writes its progress to stderr; leave stdout
   # clean so a caller can capture exactly the path from the line below.
   git -C "$REPO" worktree add -b "$BRANCH" "$DEST" "$BASE" 1>&2 || exit 1
