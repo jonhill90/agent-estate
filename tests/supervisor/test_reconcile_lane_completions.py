@@ -362,6 +362,72 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         self.assertEqual(["ad414-headless-task"], report["failed_stale_acceptance"])
         self.assertEqual(0, len(runner.calls))
 
+    def test_accepted_nonobservable_lane_with_pr_evidence_completes_instead_of_failing(self):
+        """agent-supervisor#401, found late (review of the #401 fix itself):
+        `_sweep_nonobservable_accepted` had nothing but silence to go on,
+        same as `_sweep_nonobservable`, but never checked the lane-log
+        before this fix -- a claude-print/pi-rpc lane that reached
+        `accept()`, shipped a PR that MERGED (named in its own lane-log),
+        then went quiet, was stamped "failed, not completed" with zero
+        evidence check. Must complete from that evidence instead, exactly
+        like the pre-acceptance path already does."""
+        self.ledger.register_lane(
+            lane="ad401-accepted-headless", pane_id="claude-print:ad401-accepted-headless",
+            nonce="nonce-414e", harness="claude", repo="/repo/x", server_id="claude-print",
+            session_id="sess-414e", command="claude", transport="claude-print",
+        )
+        self.dispatch("ad401-accepted-headless-task", lane="ad401-accepted-headless", accepted=False)
+        self.ledger.accept("ad401-accepted-headless-task", pane_nonce="nonce-2")
+        self._write_lane_log(
+            "ad401-accepted-headless-task",
+            "opened https://github.com/jonhill90/agent-supervisor/pull/9999 -- MERGED\n",
+        )
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, stale_after=300, clock=lambda: 2_000
+        ).sweep()
+
+        task = self.ledger.get_task("ad401-accepted-headless-task")
+        self.assertEqual("complete", task["status"])
+        self.assertEqual([], report["failed_stale_acceptance"])
+        self.assertEqual(["ad401-accepted-headless-task"], report["completed"])
+        self.assertEqual(["ad401-accepted-headless-task"], report["completed_from_evidence"])
+        result_bytes = Path(task["result_path"]).read_bytes()
+        self.assertIn(b"pull/9999", result_bytes)
+        self.assertEqual(
+            self.ledger.results_dir / "ad401-accepted-headless-task.md", Path(task["result_path"])
+        )
+
+    def test_accepted_nonobservable_lane_without_evidence_still_fails(self):
+        """A fix that stops this path stamping anything at all is a
+        regression that looks exactly like success -- a genuinely dead
+        accepted lane with no lane-log evidence must still be terminated
+        `failed`, and the note must not claim the canonical `<task_id>.md`
+        slot a late genuine report might still need."""
+        self.ledger.register_lane(
+            lane="ad401-accepted-dead", pane_id="claude-print:ad401-accepted-dead",
+            nonce="nonce-414d", harness="claude", repo="/repo/x", server_id="claude-print",
+            session_id="sess-414d", command="claude", transport="claude-print",
+        )
+        self.dispatch("ad401-accepted-dead-task", lane="ad401-accepted-dead", accepted=False)
+        self.ledger.accept("ad401-accepted-dead-task", pane_nonce="nonce-2")
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, stale_after=300, clock=lambda: 2_000
+        ).sweep()
+
+        task = self.ledger.get_task("ad401-accepted-dead-task")
+        self.assertEqual("failed", task["status"])
+        self.assertEqual(["ad401-accepted-dead-task"], report["failed_stale_acceptance"])
+        result_path = Path(task["result_path"])
+        self.assertEqual("ad401-accepted-dead-task.reconcile.md", result_path.name)
+        self.assertFalse((self.ledger.results_dir / "ad401-accepted-dead-task.md").exists())
+        note = result_path.read_bytes()
+        self.assertNotIn(b"failed, not completed", note)
+        self.assertIn(b"no completion signal arrived", note)
+
     def test_accepted_nonobservable_lane_before_stale_after_is_left_unresolved(self):
         """An accepted headless lane younger than `stale_after` may still be
         the one live turn about to call `complete` itself -- must not be

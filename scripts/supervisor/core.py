@@ -3284,6 +3284,13 @@ class Ledger:
         Mirrors `fail_stale_delivery`'s shape otherwise: same immutable-result
         write, same idempotency, same pane-nonce check against the row's OWN
         recorded nonce.
+
+        agent-supervisor#401 (found late, in review of the #401 fix itself):
+        also mirrors `fail_unaccepted`/`fail_stale_delivery`'s
+        `suffix=".reconcile"` -- writing straight to `<task_id>.md` here was
+        the same trap those two already closed: a late, genuine `complete()`
+        from an accepted claude-print/pi-rpc lane would find the canonical
+        slot already claimed by this method's fabricated verdict.
         """
         self._require_task_id(task_id, allow_claim=allow_claim)
         with self._locked():
@@ -3293,7 +3300,7 @@ class Ledger:
                     raise ValueError("unknown task")
                 if existing["pane_nonce"] != pane_nonce:
                     raise ValueError("pane incarnation does not match task")
-            destination, digest = self._write_result(task_id, result)
+            destination, digest = self._write_result(task_id, result, suffix=".reconcile")
             self._fail(failpoint, "after_result")
             now = int(self.clock())
             with self._transaction() as connection:

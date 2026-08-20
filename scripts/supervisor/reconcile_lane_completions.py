@@ -424,6 +424,14 @@ class LaneCompletionReconciler:
         source status this method's caller has already filtered for is
         `accepted`, not `delivered`, so the terminal write is
         `fail_stale_acceptance`, the one Ledger method eligible for it.
+
+        agent-supervisor#401 (found late, in review of the #401 fix itself):
+        this path had nothing but silence to reason from too -- a
+        claude-print/pi-rpc lane that got as far as `accept()`, shipped a PR
+        that MERGED (named in its own lane-log), then went quiet, was still
+        stamped "failed, not completed" with zero evidence check. Same
+        `_lane_log_pr_url` check as `_fail_unaccepted`/`_sweep_nonobservable`,
+        applied here for the same reason.
         """
         updated_at = task.get("updated_at")
         if not isinstance(updated_at, (int, float)):
@@ -433,12 +441,18 @@ class LaneCompletionReconciler:
         if age_seconds < self.stale_after:
             report["unresolved"].append(task["id"])
             return
+        pr_url = self._lane_log_pr_url(task["id"])
+        if pr_url is not None:
+            self._complete_from_evidence(task, pr_url=pr_url, now=now, report=report)
+            return
         note = (
             f"reconcile-lane-completions: {task['lane']} has no observable pane "
             f"(non-tmux lane id) and has sat at status=accepted for "
             f"{int(age_seconds)}s (>= {self.stale_after}s) as of {int(now)} -- "
-            "accepted but never signalled completion and this transport has no "
-            "pane to poll -- failed, not completed (agent-supervisor#414)"
+            "no completion signal arrived, and this transport has no pane to poll "
+            "for one; that is not the same claim as the work having failed, only "
+            "that nothing was observed -- terminated failed only to free the lane "
+            "for redispatch (agent-supervisor#414, agent-supervisor#401)"
         ).encode("utf-8")
         allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
         try:
