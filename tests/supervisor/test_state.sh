@@ -17,6 +17,17 @@ command -v jq >/dev/null 2>&1 || { echo "  SKIP no jq"; exit 0; }
 D=$(mktemp -d); mkdir -p "$D/bin"
 trap 'rm -rf "$D"' EXIT INT TERM
 
+# Isolate the quota reader from ambient machine state: state.sh reads
+# $SUPERVISOR_STATE/.quota-watch.state directly (not through a stubbable
+# binary like digest.sh/cli.py), so without this every quota assertion below
+# depends on whether *this machine* happens to have a live quota-watch
+# heartbeat -- exactly the nondeterminism the reviewer caught (25 ok/1 failed
+# on a box with a real heartbeat, vs. 26 ok/0 failed on a CI runner with
+# none). Exported so it applies to every invocation of state.sh in this
+# file, not just calls through run().
+QSTATE_DIR="$D/qstate"; mkdir -p "$QSTATE_DIR"
+export SUPERVISOR_STATE="$QSTATE_DIR"
+
 healthy_digest() {
   cat > "$D/bin/digest.sh" <<'EOF'
 #!/bin/bash
@@ -240,6 +251,75 @@ grep -q "+5 more, omitted to fit the cap" <<<"$out" && ok "open_prs is what gets
   || bad "open_prs trimmed with a stated count" "$out"
 grep -q "^constraints: see loop-tick.md#Boundaries" <<<"$out" && ok "constraints collapses to a pointer, not silently dropped" \
   || bad "constraints collapsed to pointer" "$out"
+
+# 16. Quota reader: the four branches of the .quota-watch.state parse that
+# had no coverage at all -- only manual runs pasted into the PR body. Each
+# writes a fixture state file directly into the isolated $QSTATE_DIR (never
+# the real $HOME state dir) and reads state.sh's rendered quota line, the
+# same discipline the reviewer used to catch the isolation bug in the first
+# place.
+QUOTA_FILE="$QSTATE_DIR/.quota-watch.state"
+write_quota_state() {
+  # $1 state  $2 confirmed  $3 unknown_streak  $4 checked
+  cat > "$QUOTA_FILE" <<EOF
+state: $1
+confirmed: $2
+unknown_streak: $3
+checked: $4
+EOF
+}
+rm_quota_state() { rm -f "$QUOTA_FILE"; }
+
+# 16a. Missing state file: no .quota-watch.state at all reads unknown with a
+# reason naming the file, distinguishable from a parse failure.
+rm_quota_state
+out=$(run)
+grep -q "^quota: unknown -- no readable quota state at" <<<"$out" && \
+  ok "a missing quota state file reads unknown, reason names the path" \
+  || bad "missing quota state file" "$out"
+
+# 16b. Fresh file, well inside the 1800s staleness window: the raw state is
+# reported as current, with an age in seconds.
+fresh_checked=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+write_quota_state "SAFE" "SAFE" "0" "$fresh_checked"
+out=$(run)
+grep -q "^quota: SAFE -- checked ${fresh_checked}, .*s ago; last confirmed SAFE; unknown_streak 0" <<<"$out" && \
+  ok "a fresh quota state reads the raw state as current, with age" \
+  || bad "fresh quota state current" "$out"
+
+# 16c. Stale-vs-fresh boundary: a checked timestamp older than 1800s must
+# degrade to unknown even though the file parses cleanly and the raw state
+# says SAFE -- retaining a stale "last known good" reading is the exact
+# failure class (#80->#8 on 2026-08-15) this reader exists to prevent.
+stale_epoch=$(( $(date -u +%s) - 200000 ))
+stale_checked=$(date -u -r "$stale_epoch" +%Y-%m-%dT%H:%M:%SZ)
+write_quota_state "SAFE" "SAFE" "0" "$stale_checked"
+out=$(run)
+grep -q "^quota: unknown -- STALE: quota-watch last wrote .*s ago (>1800s); refusing to report 'SAFE' as current" <<<"$out" && \
+  ok "a stale checked timestamp degrades quota to unknown, not a retained SAFE" \
+  || bad "stale quota degrades to unknown" "$out"
+
+# 16d. A malformed unknown_streak (non-numeric) must not crash the shell
+# arithmetic later in the script -- it is coerced to 0 rather than treated
+# as a fatal parse error.
+write_quota_state "SAFE" "SAFE" "not-a-number" "$fresh_checked"
+out=$(run)
+grep -q "unknown_streak 0" <<<"$out" && ok "a malformed unknown_streak is coerced to 0, not fatal" \
+  || bad "malformed unknown_streak coerced" "$out"
+
+# 16e. state != confirmed: the RAW state field must be what's reported, not
+# the retained "confirmed" value -- a genuine non-SAFE raw reading (e.g.
+# WINDDOWN) must never be masked behind a last-good confirmed: SAFE. This is
+# the specific masking bug the review verified was fixed; it had no
+# regression test.
+write_quota_state "WINDDOWN" "SAFE" "1" "$fresh_checked"
+out=$(run)
+grep -q "^quota: WINDDOWN --" <<<"$out" && ok "the raw state (WINDDOWN) is reported, not the retained confirmed (SAFE)" \
+  || bad "raw state not masked by confirmed" "$out"
+grep -q "last confirmed SAFE" <<<"$out" && ok "the last confirmed value is still surfaced in the reason text" \
+  || bad "confirmed surfaced in reason" "$out"
+
+rm_quota_state
 
 echo
 echo "state.sh: $pass ok, $fail failed"
