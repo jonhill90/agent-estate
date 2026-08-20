@@ -204,6 +204,73 @@ fi
 # CONSTRAINTS_UNKNOWN, same distinction as DISPATCHED_UNKNOWN above: an
 # unreadable loop-tick.md used to render identically to a document with no
 # standing rules at all -- "constraints:" with nothing under it.
+# --- quota -------------------------------------------------------------------
+# This document used to hardcode `no quota/usage instrumentation exists in this
+# estate`. That was true when written and is now false: quota.sh, quota-watch.sh
+# and quota-watch-recover.sh all exist, quota-watch runs under launchd, and
+# PHASES.md records the work as DONE. A state document whose whole job is to be
+# current truth was asserting a stale claim about the estate's most expensive
+# constraint -- on the same night an exhausted weekly went unnoticed until a
+# human asked.
+#
+# It reads the PERSISTED verdict rather than calling quota.sh, deliberately:
+# quota.sh samples codexbar three times and can take 45s+, and this document is
+# re-read every turn. quota-watch.sh already pays that cost on its own schedule.
+#
+# THE `state` FIELD IS REPORTED, NOT `confirmed`. Those differ, and the
+# difference is a live defect: the file right now reads `state: UNKNOWN` with
+# `confirmed: SAFE`, because the fallback retains the last good reading. Retaining
+# last-good is the one direction a quota meter cannot fail safe in -- a blind
+# meter and a healthy one render identically, which is how $80 of usage credits
+# went to $8 on 2026-08-15. `unknown_streak` is surfaced for the same reason: one
+# unknown is a blip, a streak is blindness.
+QUOTA_STATE="unknown"
+QUOTA_REASON="quota-watch has not written a state file yet"
+QUOTA_FILE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}/.quota-watch.state"
+if [ -r "$QUOTA_FILE" ]; then
+  # sed, not `awk -F': *'`: the value IS a timestamp and contains colons, so a
+  # colon field-split truncates 2026-08-20T03:04:27Z to 2026-08-20T03 -- which
+  # then fails to parse as a date, so the staleness check silently never fires.
+  # Caught by reading the rendered output rather than trusting the code.
+  q_state=$(sed -n 's/^state: *//p'          "$QUOTA_FILE" | head -1)
+  q_conf=$(sed -n 's/^confirmed: *//p'       "$QUOTA_FILE" | head -1)
+  q_streak=$(sed -n 's/^unknown_streak: *//p' "$QUOTA_FILE" | head -1)
+  q_checked=$(sed -n 's/^checked: *//p'      "$QUOTA_FILE" | head -1)
+  case "$q_streak" in ''|*[!0-9]*) q_streak=0 ;; esac
+  q_age=""
+  if [ -n "$q_checked" ]; then
+    # -u matters: without it BSD `date -j -f` parses a UTC stamp as LOCAL time,
+    # so the age came out NEGATIVE by exactly the tz offset (-14248s on EDT) and
+    # the staleness branch could never fire. A negative age is not a small error,
+    # it is a check that cannot fail -- which is the defect class this estate is
+    # remediating. Found by reading the rendered number, not the code.
+    #
+    # BSD `date -j -f` first (macOS ships no GNU date), GNU `date -d` as the
+    # fallback -- the same UTC-ISO8601 -> epoch parse digest.sh's
+    # iso_to_epoch() uses, not a second fallback that could drift from it.
+    # `-j` exits 1 under GNU date rather than parsing, so on ubuntu-latest
+    # (CI) this fell through to an empty epoch and the staleness branch never
+    # fired -- reproduced live in CI (#397).
+    q_epoch=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$q_checked" '+%s' 2>/dev/null \
+            || date -u -d "$q_checked" '+%s' 2>/dev/null || echo "")
+    case "$q_epoch" in ''|*[!0-9]*) : ;; *) q_age=$(( $(date -u +%s) - q_epoch )) ;; esac
+  fi
+  if [ -n "${q_state// }" ]; then
+    QUOTA_STATE="$q_state"
+    q_age_txt=""
+    [ -n "$q_age" ] && q_age_txt=", ${q_age}s ago"
+    QUOTA_REASON="checked ${q_checked:-unknown}${q_age_txt}; last confirmed ${q_conf:-none}; unknown_streak ${q_streak}"
+    # A stale state file is blindness wearing a verdict. 30 min is six
+    # quota-watch intervals; past that the number on the page is not current.
+    if [ -n "$q_age" ] && [ "$q_age" -gt 1800 ]; then
+      QUOTA_STATE="unknown"
+      QUOTA_REASON="STALE: quota-watch last wrote ${q_age}s ago (>1800s); refusing to report '${q_state}' as current"
+    fi
+  fi
+else
+  QUOTA_REASON="no readable quota state at $QUOTA_FILE -- quota-watch may not be running"
+fi
+
 CONSTRAINTS_JSON="[]"
 CONSTRAINTS_UNKNOWN="false"
 CONSTRAINTS_REASON=""
@@ -228,18 +295,20 @@ FULL=$(jq -n \
   --argjson constraints "$CONSTRAINTS_JSON" \
   --argjson constraints_unknown "$CONSTRAINTS_UNKNOWN" \
   --arg constraints_reason "$CONSTRAINTS_REASON" \
+  --arg quota_state "$QUOTA_STATE" \
+  --arg quota_reason "$QUOTA_REASON" \
   --arg gated_line "$GATED_LINE" '
   {
     checked: $checked,
     # requirement 4: the health gate is digest.ok/errors -- a LIVE re-read,
-    # not a persisted verdict. quota has no instrument in this estate at all
-    # (see the header comment) and is unknown-by-construction, not by a
-    # failed read -- the two are named differently in the document itself.
+    # not a persisted verdict. quota IS instrumented (quota.sh + quota-watch.sh
+    # under launchd); this reads the persisted quota-watch state rather than
+    # paying its 45s+ sampling cost on every turn.
     gate: {
       result: (if $digest.ok then "PASS" else "FAIL" end),
       reasons: ($digest.errors // [])
     },
-    quota: {state: "unknown", reason: "no quota/usage instrumentation exists in this estate"},
+    quota: {state: $quota_state, reason: $quota_reason},
     lanes: ($digest.lanes // {}),
     dispatched: $dispatched,
     dispatched_unknown: $dispatched_unknown,
