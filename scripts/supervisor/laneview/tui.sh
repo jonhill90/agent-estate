@@ -95,14 +95,16 @@ session, raw, lanes_sh, refresh_secs, digest_sh = (
     sys.argv[1], sys.argv[2], sys.argv[3], float(sys.argv[4]), sys.argv[5],
 )
 
-# Same 12 states lanes.sh ships today (lanes.sh's header comment enumerates
-# them); kept identical to text.sh's map on purpose -- two renderers naming
-# the same state differently would be a second classifier by another name.
+# Kept identical to text.sh's map on purpose -- two renderers naming the
+# same state differently would be a second classifier by another name.
+# `validate_laneview_state_maps` in scripts/validate_repository.py
+# (agent-supervisor#105) reads these keys and errors if lanes.sh grows a
+# state this dict does not name.
 STATE_GLYPH = {
     "free": "-", "busy": "*", "hung": "!", "dead": "x",
     "menu-blocked": "?", "text-blocked": "?", "unsent": "~",
     "service": ".", "supervisor": ".", "unknown": "?",
-    "scrolled": "^", "stale": "X",
+    "scrolled": "^", "stale": "X", "broken": "B", "never-busy": "?",
 }
 
 

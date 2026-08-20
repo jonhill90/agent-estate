@@ -39,7 +39,8 @@ It must:
    a human or a human-facing process (a tmux plugin, an interactive
    shell).
 4. **Name every state, and never let an unnamed one read as healthy.**
-   `lanes.sh` ships eleven states today. A renderer that maps the ones it
+   `lanes.sh` ships fourteen states today (see `docs/product/SPEC.md`'s
+   table). A renderer that maps the ones it
    recognizes and defaults the rest is not neutral about the others —
    review of #231 measured `scrolled`, a lane `dispatch.sh` will refuse to
    use, drawn in the sidebar as a green idle tick because it fell through
