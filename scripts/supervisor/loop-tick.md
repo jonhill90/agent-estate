@@ -184,6 +184,29 @@ and can be refused on authorship grounds. Pass `--not-a-review`
 rewording the brief until the tool stops matching it. The two flags are
 mutually exclusive; passing both is refused.
 
+### A review or fix-pass brief must tell the lane to post through `post-verdict.sh`
+
+agent-supervisor#187/#412: the false refusals #187 measured were never a
+committed script calling `gh pr comment` directly — they were a reviewing
+agent hand-typing the `Review-Lane:`/`Verdict:` trailers exactly as its own
+brief told it to, via raw `gh pr comment <N> --body "..."` or `-F
+body=@<file>`. `post-verdict.sh` (agent-supervisor#188) validates that
+trailer pair against the ledger and refuses the two shapes #187 measured
+before anything is posted, but it only helps if brief text actually tells
+the lane to run it. When a brief's dispatch is a review (`--reviews-pr`) or
+a fix pass replying with a verdict, its closing instruction must read:
+
+```bash
+printf '%s\n' "$BODY" | scripts/supervisor/post-verdict.sh <repo> <N>
+```
+
+never a raw `gh pr comment`/`gh issue comment` invocation. `gh-comment-gate.sh`
+only greps this repo's own committed `*.sh` files for the raw form — by its
+own docstring it cannot reach brief text, which is generated per-dispatch,
+not committed here. This is the one place in this repo's own docs that
+generates that text, so it is the one place drifting back to raw `gh pr
+comment` would matter.
+
 ## "Blocked on Jon" is often true of an issue and false of a piece of it
 
 Before recording an issue as gated, ask what specifically is gated. The gate is

@@ -126,6 +126,21 @@
 # Exit 8   refused -- the Review-Lane: value does not resolve to a lane this
 #          ledger has registered, or resolves to the supervisor's own
 #          window (#187's two measured false-refusal shapes).
+#
+# IF YOU ARE WRITING BRIEF TEXT FOR A REVIEW OR FIX-PASS DISPATCH (#412):
+# the class of bug #187 measured was never a committed script calling `gh
+# pr comment` -- it was a reviewing agent hand-typing the verdict trailers
+# because its OWN BRIEF told it to post that way. This script existing does
+# nothing for that class unless the brief's closing instruction actually
+# names it. Tell the lane to run:
+#
+#   printf '%s\n' "$BODY" | post-verdict.sh <repo> <N>
+#
+# never a raw `gh pr comment`/`gh issue comment`. `gh-comment-gate.sh`
+# cannot catch a drift back to raw posting in brief text -- see its own
+# docstring -- so this is enforced by writing the brief correctly, not by
+# CI. `scripts/supervisor/loop-tick.md`'s review-dispatch section is the
+# in-repo doc that generates that text; keep it pointed here.
 set -uo pipefail
 
 usage() { sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2; }

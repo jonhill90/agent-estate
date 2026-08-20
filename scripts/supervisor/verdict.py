@@ -563,7 +563,14 @@ class GithubReviewVerdictSource(VerdictSource):
     when it is decisive at the current head: comments are consulted only
     when the review side has nothing decisive to say (`none`, or `unknown`
     from a stale/superseded review), so PRs with a real review object are
-    unaffected by this addition."""
+    unaffected by this addition.
+
+    This class only READS the comment; it has no opinion on how one gets
+    posted. `post-verdict.sh` (#188/#412) is the estate's own posting path
+    for the `Review-Lane:`/`Verdict:` pair this class parses -- see its
+    header comment and `scripts/supervisor/loop-tick.md`'s review-dispatch
+    section for what a brief should tell a reviewing lane to run instead of
+    a raw `gh pr comment`."""
 
     def __init__(self, runner=None, patch_id=None, ledger=None):
         self.runner = runner or _subprocess_runner
