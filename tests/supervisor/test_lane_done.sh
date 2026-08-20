@@ -88,6 +88,65 @@ out=$(run 6 ad102-lane-rename-on-completion ad102-done t); rc=$?
 want_exit "a name mismatch exits non-zero" "$rc" 1 "$out"
 want_missing "a name mismatch is never renamed" "rename-window" "$(tmuxlog)"
 
+# --- #348: refuse a target that resolves to the supervisor's own window, --
+# INDEPENDENTLY of the name-match guard above ------------------------------
+#
+# dispatch.sh already refuses to dispatch INTO the supervisor's window.
+# Nothing stopped lane-done.sh from renaming OUT of it except the incidental
+# fact that a malformed target's resolved name usually did not match
+# $EXPECTED_NAME (agent-dotfiles#259's near miss) -- not a designed check. A
+# test that only fed a MISMATCHED name to the supervisor's window would prove
+# nothing new: the existing name-match guard above would already catch it.
+# So this gives the supervisor's own window (index 1, lanes.sh's
+# LANES_SUPERVISOR_WINDOW default) the CALLER'S OWN $EXPECTED_NAME as its
+# CURRENT name -- $CURRENT == $EXPECTED_NAME, the old guard passes cleanly --
+# and confirms the NEW, identity-based guard still refuses.
+cat > "$D/lanes" <<'FIX'
+1|ad348-supervisor-guard
+5|ad102-lane-rename-on-completion
+6|ad103-something-else
+FIX
+: > "$D/tmux.log"; rm -rf "$D/wait"; mkdir -p "$D/wait"
+signal ad348-supervisor
+out=$(run 1 ad348-supervisor-guard ad348-supervisor t); rc=$?
+want_exit "a target resolving to the supervisor's window is refused even though its name matches" "$rc" 1 "$out"
+want_contains "...and says why" "supervisor's own window" "$out"
+want_missing "the supervisor's window is never renamed" "rename-window" "$(tmuxlog)"
+
+# ...and prove that assertion is load-bearing, not decorative: patch a copy
+# with only the #348 guard removed and confirm the SAME call -- same
+# fixture, same matching name -- now renames the supervisor's window. If it
+# does not, the assertion above was not exercising this guard.
+NOGUARD="$D/lane-done-no348guard.sh"
+patch_rc5=0
+python3 - "$LANE_DONE" "$NOGUARD" <<'PY' || patch_rc5=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+start = 'elif [ "$FREE_IDX" = "${LANES_SUPERVISOR_WINDOW:-1}" ]; then'
+end_marker = 'exit 1\nelif ! tmux rename-window'
+assert text.count(start) == 1, "#348 supervisor-window guard not found -- script shape changed"
+i0 = text.index(start)
+i1 = text.index(end_marker, i0) + len('exit 1\n')
+open(dst, "w").write(text[:i0] + text[i1:])
+PY
+if [ "$patch_rc5" -ne 0 ]; then
+  bad "setup: patched a copy of lane-done.sh with the #348 supervisor-window guard removed" \
+    "could not patch $LANE_DONE (exit $patch_rc5) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of lane-done.sh with the #348 supervisor-window guard removed"
+  chmod +x "$NOGUARD"
+  : > "$D/tmux.log"; rm -rf "$D/wait"; mkdir -p "$D/wait"
+  signal ad348-supervisor
+  out=$(run_script "$NOGUARD" 1 ad348-supervisor-guard ad348-supervisor t)
+  if grep -qF "rename-window -t t:1 free-1" <<<"$(tmuxlog)"; then
+    ok "mutation confirmed: removing the #348 guard renames the supervisor's window whenever the name happens to match (the assertion above would now be red)"
+  else
+    bad "mutation confirmed: removing the #348 guard renames the supervisor's window whenever the name happens to match" \
+      "expected 'rename-window -t t:1 free-1' in the log; got: $(tmuxlog) / $out"
+  fi
+fi
+
 # --- ...and a name mismatch must not RELEASE THE LANE either (#205) --------
 #
 # The two assertions above check the rename and the exit code. Neither looks
@@ -731,10 +790,17 @@ PY
         # NOT called inside a command substitution: `rc241` has to survive
         # into the assertions, and an exit code set in a subshell does not.
         # The output goes to a file for the same reason.
+        # LANES_SUPERVISOR_WINDOW=999: this session models no supervisor
+        # window at all, and #241's whole point is a window landing at
+        # whatever index a prior close shifted it to -- which can coincide
+        # with the #348 guard's default index 1 by pure accident of window
+        # count, unrelated to what this section tests. Pointing the guard at
+        # an index nothing here ever reaches keeps it out of #241's way,
+        # same as any other caller for whom index 1 is not the supervisor.
         run241() {
           ( sleep 1; rtmux wait-for -S "rt-241-$$" ) &
           local sigpid=$!
-          env -u TMUX TMUX_TMPDIR="$RT" AGENT_SUPERVISOR_STATE_DIR="$3" \
+          env -u TMUX TMUX_TMPDIR="$RT" AGENT_SUPERVISOR_STATE_DIR="$3" LANES_SUPERVISOR_WINDOW=999 \
             timeout 8 bash "$1" "$2" ad241-finished-lane "rt-241-$$" "$RS2" >"$D/out241" 2>&1
           rc241=$?
           wait "$sigpid" 2>/dev/null
@@ -838,10 +904,17 @@ PY
       # What dispatch.sh prints as `target:` -- already session-qualified.
       PRINTED_TARGET="${RS3}:${LANE_WID}"
 
+      # LANES_SUPERVISOR_WINDOW=999: this session's "supervisor" window is
+      # identified by NAME (index 0, the first window created), not by the
+      # #348 guard's index-1 default -- the two are unrelated conventions,
+      # and ad259-finished-lane landing at index 1 here is pure window-count
+      # coincidence, not the shape this section tests. Pointing the guard at
+      # an index nothing here reaches keeps #259's own supervisor-name
+      # assertions (below) about the OLD near-miss, not this NEW guard.
       run259() {
         ( sleep 1; rtmux wait-for -S "rt-259-$$" ) &
         local sigpid=$!
-        env -u TMUX TMUX_TMPDIR="$RT" AGENT_SUPERVISOR_STATE_DIR="$3" \
+        env -u TMUX TMUX_TMPDIR="$RT" AGENT_SUPERVISOR_STATE_DIR="$3" LANES_SUPERVISOR_WINDOW=999 \
           timeout 8 bash "$1" "$2" ad259-finished-lane "rt-259-$$" "$RS3" >"$D/out259" 2>&1
         rc259=$?
         wait "$sigpid" 2>/dev/null
