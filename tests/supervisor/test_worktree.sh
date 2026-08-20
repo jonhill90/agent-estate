@@ -66,6 +66,35 @@ if [ "$branch" = "lane/73-test" ]; then ok "new checks out a lane-specific branc
 main_branch=$(git -C "$REPO" branch --show-current 2>/dev/null)
 if [ "$main_branch" = "main" ]; then ok "shared checkout branch is undisturbed"; else bad "shared checkout branch is undisturbed" "got '$main_branch'"; fi
 
+# --- agent-supervisor#427: refs/stash is shared by every worktree of one
+# repo, so `git stash pop` in one lane can silently apply a DIFFERENT lane's
+# uncommitted WIP as its own. `new` must install a guard that refuses to let
+# a lane ADD to that shared stash -- proven against a REAL git stash push,
+# not a mock, so a later change that quietly drops the guard shows up here as
+# a false "ok" turning into a real contamination, not a skipped assertion.
+stashA=$(bash "$WT" new 427-stashA "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "new (stash guard case A) exits 0" "$rc" 0 "$stashA"
+require_dest "new (stash guard case A)" "$stashA"
+stashB=$(bash "$WT" new 427-stashB "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "new (stash guard case B) exits 0" "$rc" 0 "$stashB"
+require_dest "new (stash guard case B)" "$stashB"
+
+echo "lane A work in progress" >> "$stashA/file.txt"
+stash_out=$(git -C "$stashA" stash push -m "427-laneA-wip" 2>&1); stash_rc=$?
+if [ "$stash_rc" -ne 0 ]; then ok "git stash push is refused inside a lane worktree (#427)"; else bad "git stash push is refused inside a lane worktree (#427)" "$stash_out"; fi
+if grep -qi "427" <<<"$stash_out"; then ok "the refusal names #427"; else bad "the refusal names #427" "$stash_out"; fi
+if grep -q "lane A work in progress" "$stashA/file.txt" 2>/dev/null; then ok "the refused stash push left lane A's edit in place, nothing lost"; else bad "the refused stash push left lane A's edit in place, nothing lost" "$(cat "$stashA/file.txt" 2>/dev/null)"; fi
+if git -C "$stashA" stash list 2>/dev/null | grep -q .; then bad "no stash entry exists after the refusal" "$(git -C "$stashA" stash list)"; else ok "no stash entry exists after the refusal"; fi
+
+# Lane B, an entirely different worktree, must never be able to see or pop
+# whatever lane A tried to push -- the load-bearing assertion, since a guard
+# that only complains but still lets the write through would not close #427.
+if git -C "$stashB" stash list 2>/dev/null | grep -q .; then bad "lane B sees no stash entry from lane A" "$(git -C "$stashB" stash list)"; else ok "lane B sees no stash entry from lane A"; fi
+
+git -C "$stashA" checkout -q -- file.txt
+bash "$WT" done "$stashA" >/dev/null 2>&1
+bash "$WT" done "$stashB" >/dev/null 2>&1
+
 # --- done: refuses to discard uncommitted work -----------------------------
 echo "unsaved edit" >> "$DEST/file.txt"
 out=$(bash "$WT" done "$DEST" 2>&1); rc=$?
