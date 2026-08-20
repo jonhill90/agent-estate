@@ -18,9 +18,25 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/x/exp/teatest"
 
 	"github.com/jonhill90/keelson/internal/theme"
 )
+
+// runWide is run (model_teatest_test.go)'s own teatest.NewTestModel call,
+// but at a wider terminal -- 100 columns is model_teatest_test.go's own
+// deliberate choice for its navigation tests, but agent-tui#64's [f5] flow
+// addition to the footer legend pushed TestKeyTSurfacesASaveFailure's
+// "! theme not saved: ..." suffix past truncate()'s 100-column budget, so
+// that one assertion needs the room this gives it -- the footer's actual
+// content and truncation behaviour are unchanged, only this test's own
+// viewport is wider.
+func runWide(t *testing.T, m Model) *teatest.TestModel {
+	t.Helper()
+	tm := teatest.NewTestModel(t, m, teatest.WithInitialTermSize(160, 30))
+	t.Cleanup(func() { _ = tm.Quit() })
+	return tm
+}
 
 // TestKeyTPersistsThemeChoice drives 't' against a real Program with a
 // WithThemeSave fake standing in for theme.Save (adapter discipline,
@@ -99,7 +115,7 @@ func TestKeyTSurfacesASaveFailureWithoutBlockingTheCycle(t *testing.T) {
 		return errors.New("fixture: read-only config dir")
 	})
 
-	tm := run(t, m)
+	tm := runWide(t, m)
 	waitFor(t, tm, "[f2] board")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})

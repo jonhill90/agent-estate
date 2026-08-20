@@ -23,14 +23,15 @@ claim that the product is named that. See `AGENTS.md`'s naming note.
   process (`internal/mcp`), `gh` CLI invocations (`internal/board`), a
   read-only `sqlite3` open (`internal/board`), and `ccusage` (`internal/cost`).
 
-## Today's shape: one process, one shell, four panes
+## Today's shape: one process, one shell, five panes
 
 `cmd/keelson/main.go` constructs exactly **one** `tea.NewProgram` call site,
 running `internal/shell.Model` (agent-tui#38, landed on `main` in PR #43).
 `internal/shell.Model` owns a persistent left rail (`internal/rail`, always
-visible) and a content area that holds one of three panes — board, cost,
-gallery — switched with `[f1]`–`[f4]`, never a relaunch. `[tab]` toggles
-keyboard focus between the rail and whichever pane is active.
+visible) and a content area that holds one of four panes — board, cost,
+gallery, flow (`internal/flow`, agent-tui#64) — switched with `[f1]`–`[f5]`,
+never a relaunch. `[tab]` toggles keyboard focus between the rail and
+whichever pane is active.
 
 | flag | pane it opens on | needs a supervisor connection? |
 |---|---|---|
@@ -38,6 +39,7 @@ keyboard focus between the rail and whichever pane is active.
 | `-board` | `PaneBoard` | yes (rail's own `sessions`/`lanes` fetch, plus the board's `gh`/ledger reads) |
 | `-cost` | `PaneCost` | yes — the rail beside it still needs a connection, even though the cost pane itself reads only `ccusage` |
 | `-gallery` | `PaneGallery` | yes — same reasoning; the gallery pane itself reads only compiled-in glyph data |
+| `-flow` | `PaneFlow` | yes, plus the same `-ledger`/board data `-board` needs — flow reads board's own `Snapshot()` (`shell.Model` pushes it in after every `board.Update`), never a second gh/ledger read; refuses to start under the same `boardOK == false` rule `-board` does |
 
 This is a real change from the pre-#38 shape (four mutually exclusive
 `tea.NewProgram` sites selected by boolean flags, each its own process):
@@ -61,7 +63,7 @@ connection it cannot silently do without, and currently fails closed
   Whatever width is left over — never the raw terminal width — is what
   every content pane is sized to, whether visible or not.
 - **`routeAll`** forwards every non-key, non-resize `tea.Msg` (ticks, fetch
-  results) to all four sub-models unconditionally, so each keeps
+  results) to all five sub-models unconditionally, so each keeps
   refreshing in the background even while a different pane is on screen —
   switching to a pane shows already-fresh data, not a blank first frame.
 - **`routeKey`** sends a `KeyMsg` to exactly one region: the rail if

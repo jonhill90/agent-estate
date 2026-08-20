@@ -85,12 +85,13 @@ policy only.
 cmd/keelson/         one tea.NewProgram entry point, running internal/shell.Model (see docs/SPEC.md)
 internal/board/      task board projection — GitHub issues/PRs + ledger tasks + live lanes
 internal/cost/       per-harness spend/quota projection from ccusage
+internal/flow/       live flow view — the same board.Snapshot re-projected as a moving pipeline (agent-tui#64)
 internal/gallery/    glyph gallery — every lane state × every candidate glyph set
 internal/lane/       lane/session decode, glyph sets (data, not code), state table
 internal/mcp/        minimal MCP JSON-RPC client over a child process's stdio
 internal/rail/       the left-anchored navigation rail — the one shipped anchor feature, now always visible
 internal/session/    write path: attach/detach/add/remove, all via MCP, no os/exec
-internal/shell/      the application shell -- owns the rail + board/cost/gallery as panes (agent-tui#38)
+internal/shell/      the application shell -- owns the rail + board/cost/gallery/flow as panes (agent-tui#38, #64)
 internal/theme/      look-and-feel as data — Role-keyed colours, persisted per-user config
 scripts/             verify-lanes-unaffected.sh — the rail's non-interference proof
 ```

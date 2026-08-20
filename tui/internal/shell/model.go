@@ -18,6 +18,7 @@ import (
 
 	"github.com/jonhill90/keelson/internal/board"
 	"github.com/jonhill90/keelson/internal/cost"
+	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
 	"github.com/jonhill90/keelson/internal/rail"
 	"github.com/jonhill90/keelson/internal/theme"
@@ -34,6 +35,7 @@ const (
 	PaneBoard
 	PaneCost
 	PaneGallery
+	PaneFlow
 )
 
 // focus names which region the keyboard currently drives -- the rail
@@ -69,6 +71,7 @@ type Model struct {
 	board   board.Model
 	cost    cost.Model
 	gallery gallery.Model
+	flow    flow.Model
 
 	// boardOK is false when cmd/agent-tui had no -ledger to build a real
 	// board.Fetcher from -- board.go's own -board flag still refuses to
@@ -76,7 +79,12 @@ type Model struct {
 	// pane is otherwise reachable by navigation alone, so it needs its own
 	// guard: selecting it with boardOK == false renders unavailableView
 	// instead of an unfetchable board.Model that would sit on a permanent
-	// fetch error.
+	// fetch error. internal/flow reads the exact same board.Snapshot --
+	// routeAll/resize push m.board.Snapshot() into flow.Model.WithSnapshot
+	// after every board.Update, so flow runs no Fetcher of its own -- so
+	// this single flag also gates PaneFlow; there is no separate flowOK
+	// because there is no separate data dependency to fail independently
+	// of the board's.
 	boardOK          bool
 	boardUnavailable string
 
@@ -138,7 +146,7 @@ type Model struct {
 // (with a reason) when no -ledger was available to build a real
 // board.Fetcher; board stays reachable by key but renders unavailableView
 // instead of running board's own fetch loop.
-func New(r rail.Model, b board.Model, boardOK bool, boardUnavailable string, c cost.Model, g gallery.Model) Model {
+func New(r rail.Model, b board.Model, boardOK bool, boardUnavailable string, c cost.Model, g gallery.Model, fl flow.Model) Model {
 	return Model{
 		rail:             r,
 		board:            b,
@@ -146,6 +154,7 @@ func New(r rail.Model, b board.Model, boardOK bool, boardUnavailable string, c c
 		boardUnavailable: boardUnavailable,
 		cost:             c,
 		gallery:          g,
+		flow:             fl,
 		active:           PaneHome,
 		focus:            focusRail,
 		theme:            theme.Default,
@@ -197,13 +206,14 @@ func (m Model) applyTheme() Model {
 	m.board = m.board.WithTheme(m.theme, m.themeNotice)
 	m.cost = m.cost.WithTheme(m.theme, m.themeNotice)
 	m.gallery = m.gallery.WithTheme(m.theme, m.themeNotice)
+	m.flow = m.flow.WithTheme(m.theme, m.themeNotice)
 	return m
 }
 
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.rail.Init(), m.cost.Init(), m.gallery.Init()}
 	if m.boardOK {
-		cmds = append(cmds, m.board.Init())
+		cmds = append(cmds, m.board.Init(), m.flow.Init())
 	}
 	return tea.Batch(cmds...)
 }
@@ -251,6 +261,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "f4":
 			m.active = PaneGallery
+			return m, nil
+		case "f5":
+			m.active = PaneFlow
 			return m, nil
 		}
 		return m.routeKey(msg)
@@ -313,6 +326,13 @@ func (m Model) routeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		next, cmd := m.gallery.Update(msg)
 		m.gallery = next.(gallery.Model)
 		return m, cmd
+	case PaneFlow:
+		if !m.boardOK {
+			return m.homeKey(msg)
+		}
+		next, cmd := m.flow.Update(msg)
+		m.flow = next.(flow.Model)
+		return m, cmd
 	default:
 		return m.homeKey(msg)
 	}
@@ -349,6 +369,18 @@ func (m Model) routeAll(msg tea.Msg) (Model, tea.Cmd) {
 		next, cmd := m.board.Update(msg)
 		m.board = next.(board.Model)
 		cmds = append(cmds, cmd)
+
+		// flow.Model.Update still needs msg itself (its own motionMsg
+		// tick), but its DATA comes from board.Model, never a fetch of
+		// its own -- see flow.Model.WithSnapshot's doc comment. Syncing
+		// after every board.Update, unconditionally, is what makes flow
+		// current even while some OTHER pane is on screen, the same
+		// "background refresh while not visible" property every other
+		// pane already has (routeAll's own doc comment above).
+		next, cmd = m.flow.Update(msg)
+		m.flow = next.(flow.Model)
+		cmds = append(cmds, cmd)
+		m.flow = m.flow.WithSnapshot(m.board.Snapshot(), m.board.LastFetched(), m.board.FetchErr())
 	}
 
 	next, cmd = m.cost.Update(msg)
@@ -398,6 +430,11 @@ func (m Model) resize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 		next, cmd := m.board.Update(contentSize)
 		m.board = next.(board.Model)
 		cmds = append(cmds, cmd)
+
+		next, cmd = m.flow.Update(contentSize)
+		m.flow = next.(flow.Model)
+		cmds = append(cmds, cmd)
+		m.flow = m.flow.WithSnapshot(m.board.Snapshot(), m.board.LastFetched(), m.board.FetchErr())
 	}
 
 	next, cmd = m.cost.Update(contentSize)
@@ -459,6 +496,11 @@ func (m Model) contentView() string {
 		return m.cost.View()
 	case PaneGallery:
 		return m.gallery.View()
+	case PaneFlow:
+		if !m.boardOK {
+			return m.unavailableView()
+		}
+		return m.flow.View()
 	default:
 		return m.homeView()
 	}
@@ -482,7 +524,7 @@ func (m Model) footer() string {
 	if m.focus == focusContent {
 		focusName = "content"
 	}
-	line := "[tab] focus:" + focusName + "  [f1] home [f2] board [f3] cost [f4] gallery  [q/ctrl+c] quit"
+	line := "[tab] focus:" + focusName + "  [f1] home [f2] board [f3] cost [f4] gallery [f5] flow  [q/ctrl+c] quit"
 	// themeSaveErr (agent-tui#51) is folded onto this same line rather
 	// than given its own -- footerHeight is a fixed one row every pane's
 	// own size budget is computed against (see resize()), so a second
@@ -501,6 +543,7 @@ func (m Model) homeView() string {
 		"[f2] board    view the task board (agent-tui#6)",
 		"[f3] cost     view the cost panel (agent-tui#4)",
 		"[f4] gallery  view the glyph gallery (agent-tui#11)",
+		"[f5] flow     watch work move through the pipeline (agent-tui#64)",
 		"[tab] move focus into the rail on the left",
 	}
 	return legendStyle.Width(m.contentWidth).Height(m.contentHeight).Render(

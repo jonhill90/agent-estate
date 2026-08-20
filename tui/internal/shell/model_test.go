@@ -43,7 +43,7 @@ func TestClampHeightTruncatesAndPads(t *testing.T) {
 // line, never more, regardless of what any individual pane's own View()
 // returns.
 func TestViewNeverExceedsContentHeightPlusFooter(t *testing.T) {
-	for _, pane := range []Pane{PaneHome, PaneBoard, PaneCost, PaneGallery} {
+	for _, pane := range []Pane{PaneHome, PaneBoard, PaneCost, PaneGallery, PaneFlow} {
 		m := testModel().WithStart(pane)
 		m.width, m.height = 100, 30
 		m.contentWidth, m.contentHeight = 73, 29 // mirrors resize()'s own arithmetic

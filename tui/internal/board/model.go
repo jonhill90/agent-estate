@@ -130,6 +130,24 @@ func NewWithRefreshInterval(fetch Fetcher, interval time.Duration) Model {
 	return Model{fetch: fetch, width: 100, height: 30, refreshInterval: interval, theme: theme.Default}
 }
 
+// Snapshot returns the most recently fetched Snapshot -- the zero Snapshot
+// before the first successful fetch. This is internal/flow's read half of
+// "the exact same already-derived board.Snapshot, never a second gh/ledger
+// read" (that package's own doc comment): shell.Model calls this (plus
+// LastFetched/FetchErr below) after every board.Update and pushes the
+// result into flow.Model.WithSnapshot, so flow.Model runs no Fetcher of its
+// own.
+func (m Model) Snapshot() Snapshot { return m.snap }
+
+// LastFetched returns when Snapshot was last refreshed successfully, the
+// zero time before the first successful fetch -- the same value this
+// pane's own View() already renders as "fetched N ago".
+func (m Model) LastFetched() time.Time { return m.lastFetched }
+
+// FetchErr returns the most recent fetch's error, nil once a fetch has
+// succeeded (including after an earlier failure).
+func (m Model) FetchErr() error { return m.fetchErr }
+
 func (m Model) Init() tea.Cmd {
 	return tea.Batch(refreshCmd(m.refreshInterval), doFetch(m.fetch))
 }

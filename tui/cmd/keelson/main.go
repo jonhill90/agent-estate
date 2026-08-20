@@ -28,6 +28,7 @@ import (
 
 	"github.com/jonhill90/keelson/internal/board"
 	"github.com/jonhill90/keelson/internal/cost"
+	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
 	"github.com/jonhill90/keelson/internal/lane"
 	"github.com/jonhill90/keelson/internal/mcp"
@@ -97,6 +98,10 @@ func main() {
 		showGallery = flag.Bool("gallery", false, "start on the glyph gallery pane (agent-tui#11) instead of home -- "+
 			"every lane state against every candidate glyph, including glyphs not yet in any set, each flagged "+
 			"with whether it needs a Nerd Font. [f4] reaches it from any start (agent-tui#38).")
+		showFlow = flag.Bool("flow", false, "start on the flow pane (agent-tui#64) instead of home -- a live view of "+
+			"work moving between dispatched/working/review/blocked/done, reading the exact same Snapshot -board "+
+			"does (never a second gh/ledger read; needs the same -ledger the board does). [f5] reaches it from "+
+			"any start (agent-tui#38).")
 		boardRefresh = flag.Duration("board-refresh", envOrDuration("AGENT_TUI_BOARD_REFRESH", board.DefaultRefreshInterval),
 			"how often -board re-fetches on its own tick (agent-tui#28). The previous hardcoded 5s measured at "+
 				"~8,160 GitHub GraphQL points/hr against gh issue list/gh pr list -- against a shared 5,000/hr "+
@@ -132,6 +137,12 @@ func main() {
 	ledgerSrc, boardOK, boardUnavailable := resolveLedgerSource(*ledger, *sqliteBin)
 	if *showBoard && !boardOK {
 		fmt.Fprintln(os.Stderr, "keelson: -board unavailable --", boardUnavailable)
+		os.Exit(1)
+	}
+	// -flow needs the exact same board.Snapshot -board does (see flowModel's
+	// own doc comment below) -- same refusal-to-start rule, same reason.
+	if *showFlow && !boardOK {
+		fmt.Fprintln(os.Stderr, "keelson: -flow unavailable --", boardUnavailable)
 		os.Exit(1)
 	}
 
@@ -248,6 +259,10 @@ func main() {
 
 	costModel := cost.New(costFetch)
 	galleryModel := gallery.New()
+	// flowModel reads no Fetcher of its own (internal/flow's own doc
+	// comment) -- shell.Model pushes boardModel's own Snapshot into it
+	// after every board.Update, so this is never a second gh/ledger read.
+	flowModel := flow.New()
 
 	start := shell.PaneHome
 	switch {
@@ -257,9 +272,11 @@ func main() {
 		start = shell.PaneCost
 	case *showGallery:
 		start = shell.PaneGallery
+	case *showFlow:
+		start = shell.PaneFlow
 	}
 
-	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel).
+	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel, flowModel).
 		WithStart(start).
 		WithTheme(activeTheme, themeNotice).
 		WithThemeSave(func(th theme.Theme) error { return theme.Save(theme.ConfigPath(), th.ID) })

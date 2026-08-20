@@ -20,6 +20,7 @@ import (
 
 	"github.com/jonhill90/keelson/internal/board"
 	"github.com/jonhill90/keelson/internal/cost"
+	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
 	"github.com/jonhill90/keelson/internal/lane"
 	"github.com/jonhill90/keelson/internal/rail"
@@ -40,7 +41,8 @@ func testModel() Model {
 	b := board.New(func() (board.Snapshot, error) { return snap, nil })
 	c := cost.New(func() (cost.Snapshot, error) { return cost.Snapshot{}, nil })
 	g := gallery.New()
-	return New(r, b, true, "", c, g)
+	fl := flow.New()
+	return New(r, b, true, "", c, g, fl)
 }
 
 func run(t *testing.T, m Model) *teatest.TestModel {
@@ -90,6 +92,35 @@ func TestF4NavigatesToGalleryPane(t *testing.T) {
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyF4})
 	waitFor(t, tm, "glyph gallery")
+}
+
+// TestF5NavigatesToFlowPane is TestF2NavigatesToBoardPane's sibling for the
+// flow pane (agent-tui#64) -- flow's own title line is the marker.
+func TestF5NavigatesToFlowPane(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "[f2] board")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyF5})
+	waitFor(t, tm, "flow -- work moving")
+}
+
+// TestFlowUnavailableRendersInPlaceOfFlow mirrors
+// TestBoardUnavailableRendersInPlaceOfBoard: flow reads the exact same
+// board.Fetcher, so boardOK == false must gate it the same way, never an
+// unfetchable flow.Model stuck on a permanent fetch error.
+func TestFlowUnavailableRendersInPlaceOfFlow(t *testing.T) {
+	r := rail.New(func() ([]lane.Lane, error) { return nil, nil })
+	b := board.New(func() (board.Snapshot, error) { return board.Snapshot{}, nil })
+	c := cost.New(func() (cost.Snapshot, error) { return cost.Snapshot{}, nil })
+	g := gallery.New()
+	fl := flow.New()
+	m := New(r, b, false, "no -ledger configured", c, g, fl)
+
+	tm := run(t, m)
+	waitFor(t, tm, "[f2] board")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyF5})
+	waitFor(t, tm, "board unavailable")
 }
 
 // TestF1ReturnsToHomePane closes the last shell-footer gap: f2/f3/f4 were
@@ -163,7 +194,8 @@ func TestBoardUnavailableRendersInPlaceOfBoard(t *testing.T) {
 	b := board.New(func() (board.Snapshot, error) { return board.Snapshot{}, nil })
 	c := cost.New(func() (cost.Snapshot, error) { return cost.Snapshot{}, nil })
 	g := gallery.New()
-	m := New(r, b, false, "no -ledger configured", c, g)
+	fl := flow.New()
+	m := New(r, b, false, "no -ledger configured", c, g, fl)
 
 	tm := run(t, m)
 	waitFor(t, tm, "[f2] board")
