@@ -197,7 +197,7 @@ sleep 1
 tmux send-keys -t "=$TARGET" -l "$TICK" 2>/dev/null
 sleep 2
 tmux send-keys -t "=$TARGET" Enter 2>/dev/null
-sleep 6
+sleep 9  # as407-repro: deliberately conflicts with main's rewrite of this exact line
 
 # Verify it ARRIVED, not merely that it was sent. "Delivered" is a claim about
 # someone else's state; if you did not ask them, do not say it.
