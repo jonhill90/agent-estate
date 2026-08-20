@@ -40,6 +40,19 @@
 # blindness as cleanliness.
 set -uo pipefail
 
+# GNU `stat -c` first, BSD `stat -f` fallback -- same order quota.sh's
+# cache_age uses and for the same reason (PR #267's CI run): GNU stat's `-f`
+# means "filesystem status", not "FORMAT", and does not error on the BSD
+# token -- it silently prints its own multi-line filesystem report instead
+# of failing over. Trying `-c` first means the BSD branch only ever runs on
+# a real, correctly non-zero failure of `-c`.
+_pa_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null || echo 0; }
+_pa_mdate() {
+  local ep
+  ep="$(_pa_mtime "$1")"
+  date -d "@$ep" +'%Y-%m-%d %H:%M' 2>/dev/null || date -r "$ep" +'%Y-%m-%d %H:%M' 2>/dev/null
+}
+
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 RESULTS="${PRIOR_ATTEMPTS_RESULTS:-$STATE/results}"
 MAX="${PRIOR_ATTEMPTS_MAX:-4}"
@@ -115,7 +128,7 @@ fi
 # likely still true.
 ordered=$(printf '%s\n' "$matches" | while IFS= read -r f; do
   [ -z "$f" ] && continue
-  printf '%s\t%s\n' "$(stat -f %m "$f" 2>/dev/null || echo 0)" "$f"
+  printf '%s\t%s\n' "$(_pa_mtime "$f")" "$f"
 done | sort -rn | cut -f2- | head -"$MAX")
 
 if [ "$FORMAT" = "brief" ]; then
@@ -158,7 +171,7 @@ EOF
       [ -f "$inc" ] && note="$note and \`$inc\`"
     fi
     printf -- '- `%s` (%s, %s bytes)%s\n' "$f" \
-      "$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$f" 2>/dev/null)" \
+      "$(_pa_mdate "$f")" \
       "$(wc -c < "$f" 2>/dev/null | tr -d ' ')" "$note"
   done
   if [ "$count" -gt "$MAX" ]; then
@@ -171,7 +184,7 @@ else
   printf '%s\n' "$ordered" | while IFS= read -r f; do
     [ -z "$f" ] && continue
     printf '  %s  %6s B  %s\n' \
-      "$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$f" 2>/dev/null)" \
+      "$(_pa_mdate "$f")" \
       "$(wc -c < "$f" 2>/dev/null | tr -d ' ')" "$f"
   done
 fi
