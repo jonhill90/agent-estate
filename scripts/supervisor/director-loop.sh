@@ -49,6 +49,47 @@ export QUOTA_USAGE_TIMEOUT_SECONDS="${QUOTA_USAGE_TIMEOUT_SECONDS:-45}"
 
 log() { printf '%s director-loop: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
+# Overridable so tests can point this at a recording stub instead of the
+# real notify.sh, same convention as quota-watch.sh's QUOTA_WATCH_NOTIFY_SCRIPT
+# (agent-supervisor#273).
+NOTIFY_SCRIPT="${DIRECTOR_LOOP_NOTIFY_SCRIPT:-$HERE/notify.sh}"
+# UNLIKE heartbeat.sh, this script ticks every LOOP_INTERVAL (900s) with no
+# built-in cooldown of its own -- a stall that persists across ticks would
+# otherwise page every 15 minutes, which is exactly the "a repeated alarm
+# becomes a log, and a log becomes ignored" failure #273 exists to prevent.
+# ALARM_STAMP records the last time ANY alarm fired from this script;
+# ALARM_COOLDOWN (default one hour, matching heartbeat.sh's NUDGE_COOLDOWN)
+# suppresses a repeat page for the same standing incident while still
+# paging again once real time has passed.
+ALARM_STAMP="$STATE/.director-loop-alarm.state"
+ALARM_COOLDOWN="${DIRECTOR_LOOP_ALARM_COOLDOWN:-3600}"
+
+# send_takeover_alarm SUBJECT BODY -- page a human when this script hits a
+# state it cannot recover from itself (agent-supervisor#273: a correct "a
+# human should look" refusal used to go only to a logfile, which produced
+# the same outward silence as no check at all). Reuses notify.sh, the
+# estate's one human-notification path, rather than inventing a second one.
+# Exits 0 only when a channel actually accepted the page AND the cooldown
+# stamp was updated -- a suppressed page (still inside cooldown) is not an
+# error, so callers log the outcome rather than branching on this return.
+send_takeover_alarm() {
+  local subject="$1" body="$2"
+  local now_ts last=0
+  now_ts=$(date +%s)
+  [ -f "$ALARM_STAMP" ] && last=$(cat "$ALARM_STAMP" 2>/dev/null)
+  case "$last" in ''|*[!0-9]*) last=0 ;; esac
+  if [ $(( now_ts - last )) -lt "$ALARM_COOLDOWN" ]; then
+    log "alarm suppressed (cooldown, last sent $(( now_ts - last ))s ago): $subject"
+    return 0
+  fi
+  if AGENT_NOTIFY_CALLER=director bash "$NOTIFY_SCRIPT" "$subject" "$body"; then
+    printf '%s' "$now_ts" > "$ALARM_STAMP"
+    log "escalation sent: $subject"
+  else
+    log "escalation did NOT send -- still unverified, see notify.log: $subject"
+  fi
+}
+
 # --- quota gate. Fail closed on anything that is not a definite SAFE.
 "$QUOTA_GATE" check >/dev/null 2>&1
 qrc=$?
@@ -95,11 +136,15 @@ if [ ! -d "$LIVE_PATH" ] || ! git -C "$LIVE_PATH" rev-parse --git-dir >/dev/null
     log "advance-live.sh recovery attempt: rc=$recover_rc $recover_out"
     if [ "$recover_rc" -ne 0 ] || [ ! -d "$LIVE_PATH" ] || ! git -C "$LIVE_PATH" rev-parse --git-dir >/dev/null 2>&1; then
       log "LIVE STILL MISSING after recovery attempt -- a human should look"
+      send_takeover_alarm "director-loop: live/ MISSING and self-heal failed (#273)" \
+        "advance-live.sh ran but $LIVE_PATH is still absent, not a git worktree, or unregistered -- the Director cannot tick without it. Recovery output: $recover_out"
       exit 6
     fi
     log "LIVE RECOVERED at $LIVE_PATH -- continuing this tick"
   else
     log "advance-live.sh not found beside this script ($HERE) -- cannot recover live/ automatically; a human should look"
+    send_takeover_alarm "director-loop: live/ MISSING, no advance-live.sh (#273)" \
+      "$LIVE_PATH is absent, not a git worktree, or unregistered, and advance-live.sh is not present beside $HERE to self-heal it -- the Director cannot tick. Restore live/ by hand."
     exit 6
   fi
 fi
@@ -107,6 +152,8 @@ fi
 SESSION="${TARGET%%:*}"
 if ! tmux has-session -t "$SESSION" 2>/dev/null; then
   log "target session $SESSION does not exist -- a human should look"
+  send_takeover_alarm "director-loop: target session missing (#273)" \
+    "Target session '$SESSION' does not exist at all -- there is nowhere to tick the Director. Check by hand: tmux ls"
   exit 3
 fi
 
@@ -133,6 +180,8 @@ if ! tmux capture-pane -p -t "=$TARGET" >/dev/null 2>&1; then
     TARGET="$NEW"
   else
     log "configured target $TARGET is gone and $SESSION has $count windows -- refusing to guess which is the Director; a human should look"
+    send_takeover_alarm "director-loop: ambiguous Director window (#273)" \
+      "Configured target $TARGET is gone (tmux likely renumbered across a restart) and $SESSION now has $count windows, so which one is the Director cannot be guessed safely. Check by hand: tmux list-windows -t $SESSION"
     exit 3
   fi
 fi
@@ -158,6 +207,8 @@ case "$box" in
   *'❯'*)
     if [ "$(printf '%s' "$box" | sed 's/.*❯ *//' | tr -d '[:space:]')" != "" ]; then
       log "input box is NOT empty -- refusing to type over a stranded prompt; a human should look"
+      send_takeover_alarm "director-loop: stranded prompt in input box (#273)" \
+        "The Director's input box at $TARGET is not empty -- a previous send is sitting unsubmitted. Retyping over it risks sending a half-message. Check by hand: tmux attach -t ${TARGET%%:*}"
       exit 4
     fi
     ;;
@@ -265,4 +316,6 @@ if [ "$tick_arrived" -eq 1 ]; then
   exit 0
 fi
 log "ticked $TARGET but the pane did NOT start working within ${TICK_ARRIVE_TIMEOUT}s -- a human should look"
+send_takeover_alarm "director-loop: tick did NOT take (#273)" \
+  "Ticked $TARGET but the pane never confirmed (no 'esc to interrupt' after send) within ${TICK_ARRIVE_TIMEOUT}s. The pane may be stranded or unresponsive -- check by hand: tmux attach -t ${TARGET%%:*}"
 exit 1
