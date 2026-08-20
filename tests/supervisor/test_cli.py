@@ -702,6 +702,64 @@ class RecordDispatchCliTest(unittest.TestCase):
             # candidate set (the completion reconciler's whole input).
             self.assertEqual("delivered", landed_task["status"])
 
+    def test_redispatching_the_same_issue_and_slug_after_completion_gets_a_distinct_task_id(self):
+        """agent-supervisor#140: `tasks.id` is `<prefix><issue>-<slug>`
+        (dispatch.sh's tmux window-name convention) -- per issue+slug, not
+        per dispatch ATTEMPT. A completed prior attempt's row is the
+        historical record CLAUDE.md invariant 1 requires; it must not be
+        overwritten, and a later re-dispatch of the SAME issue+slug must not
+        collide with it either. Before this fix, the second `_dispatch`
+        below raised `ValueError("task id already exists with different
+        assignment")` inside `Ledger.record_dispatch`, which `cli.py`'s
+        `record_dispatch` only reported as a generic, non-fatal 'LEDGER
+        RECORD FAILED' -- the lane was left working under a HELD placeholder
+        instead of its real task (this repro is the issue's own, confirmed
+        via `sqlite3 ledger.sqlite3` against a live estate)."""
+        with tempfile.TemporaryDirectory() as root:
+            rc1, out1 = self._dispatch(root, lane="free-3", task="as101-review-as114", issue=101)
+            self.assertEqual(0, rc1, out1)
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                rc = cli.main([
+                    "--state-dir", root, "record-completion",
+                    "--task", "as101-review-as114", "--note", "first attempt done",
+                ])
+            self.assertEqual(0, rc, output.getvalue())
+            self.assertEqual("complete", Ledger(Path(root)).get_task("as101-review-as114")["status"])
+
+            # The redispatch: same issue, same slug, same --task -- a
+            # different lane doing the same window-name-convention dispatch
+            # dispatch.sh would perform for a re-briefed retry.
+            rc2, out2 = self._dispatch(root, lane="free-4", task="as101-review-as114", issue=101, pane_id="%4")
+            self.assertEqual(0, rc2, out2)
+            second = json.loads(out2)["task"]
+            # A genuinely NEW row, not a collision with the first.
+            self.assertNotEqual("as101-review-as114", second["id"])
+            self.assertTrue(second["id"].startswith("as101-review-as114-r"), second["id"])
+            self.assertEqual("delivered", second["status"])
+            self.assertEqual("free-4", second["lane"])
+            # The first attempt's row is untouched -- the record of what
+            # actually happened, not silently overwritten.
+            first_after = Ledger(Path(root)).get_task("as101-review-as114")
+            self.assertEqual("complete", first_after["status"])
+            self.assertEqual("free-3", first_after["lane"])
+
+            # lane-done.sh always passes --task with the bare window name
+            # (dispatch.sh never learns the suffixed id) -- record_completion's
+            # own --lane fallback must still resolve the REDISPATCHED task,
+            # not report "unknown task" for a lane that in fact just finished.
+            output2 = io.StringIO()
+            with contextlib.redirect_stdout(output2):
+                rc3 = cli.main([
+                    "--state-dir", root, "record-completion",
+                    "--task", "as101-review-as114", "--lane", "free-4",
+                    "--note", "second attempt done",
+                ])
+            self.assertEqual(0, rc3, output2.getvalue())
+            self.assertEqual(second["id"], json.loads(output2.getvalue())["id"])
+            self.assertEqual("complete", Ledger(Path(root)).get_task(second["id"])["status"])
+
     def test_record_completion_of_an_unknown_task_raises_rather_than_reporting_success(self):
         """agent-dotfiles#144 finding 4: `record_completion` looked up the
         task and raised `RuntimeError(f"unknown task: {task}")` when it was
@@ -757,7 +815,19 @@ class RecordDispatchCliTest(unittest.TestCase):
         method works in isolation. Without that except clause calling
         `mark_lane_held` before re-raising, `lane_available` would still
         read True after the failed call below: this is the mutation this
-        test is written to catch."""
+        test is written to catch.
+
+        The collision seeded below is a task id still ACTIVELY held by a
+        DIFFERENT lane (status `created`, never delivered or completed) --
+        a genuine, unresolved identity conflict, not a redispatch of a
+        finished attempt. agent-supervisor#140's fix pass (`cli.py`'s
+        `_unique_redispatch_task_id`) only steps around a collision with a
+        TERMINAL prior row; a live collision like this one must still fail
+        loud exactly as before. (Before that fix pass this test seeded the
+        collision by cancelling free-9's own task and redispatching under
+        the same id with a mismatched summary -- which the fix now legally
+        resolves with a suffixed id instead of raising, so it no longer
+        exercises this test's actual point.)"""
         with tempfile.TemporaryDirectory() as root:
             ledger = Ledger(Path(root))
             ledger.register_lane(
@@ -765,16 +835,23 @@ class RecordDispatchCliTest(unittest.TestCase):
                 repo=root, server_id="socket:1", session_id="$0", command="claude.exe",
             )
             self.assertTrue(ledger.lane_available("free-9"))
-            rc1, out1 = self._dispatch(root, lane="free-9", task="ad900-collide", issue=900, pane_id="%9")
-            self.assertEqual(0, rc1, out1)
-            self.assertFalse(Ledger(Path(root)).lane_available("free-9"))
-            ledger2 = Ledger(Path(root))
-            ledger2.cancel_open_task("free-9")
-            self.assertTrue(ledger2.lane_available("free-9"))
+            ledger.register_lane(
+                lane="free-8", pane_id="%8", nonce="nonce-8", harness="claude",
+                repo=root, server_id="socket:1", session_id="$0", command="claude.exe",
+            )
+            ledger.reconstruct_task(
+                task_id="ad900-collide", source_kind="issue",
+                source_url="https://github.com/jonhill90/agent-dotfiles/issues/900", source_ref="900",
+                summary="a different lane got here first", source_state="OPEN", status="created",
+                evidence=["seeded by test_cli.py"], status_marker=None,
+            )
+            ledger.assign(
+                task_id="ad900-collide", lane="free-8", pane_nonce="nonce-8",
+                summary="a different lane got here first",
+            )
 
-            # Re-dispatch to the same lane reusing the exact task id, but
-            # under a different issue (so the summary no longer matches the
-            # cancelled row) -- `_assign_tx` refuses this outright (agent-
+            # Dispatch to free-9 reusing the exact task id already live under
+            # free-8 -- `_assign_tx` refuses this outright (agent-
             # dotfiles#144 finding 2's docstring), which is exactly the
             # collision step 6 of `dispatch.sh` can hit against a live pane.
             rc2, err2 = self._dispatch_subprocess(root, lane="free-9", task="ad900-collide", issue=901, pane_id="%9")

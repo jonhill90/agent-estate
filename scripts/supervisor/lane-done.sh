@@ -155,16 +155,37 @@ fi
 # and simply never offers the lane again, rather than risk offering one that
 # is not actually free. That is the safe direction to be wrong in, which is
 # why this stays best-effort rather than turning a genuine completion into a
-# reported failure. Loud on failure, never silent. The task id is the window
-# name dispatch.sh set, which is what it recorded the task under.
+# reported failure. Loud on failure, never silent. The task id is USUALLY the
+# window name dispatch.sh set, which is what it recorded the task under --
+# except a REDISPATCH of the same issue+slug (agent-supervisor#140's fix
+# pass) gets a `-r2`/`-r3`/... suffixed id instead, precisely so its record
+# does not collide with a prior, completed attempt's row under the bare
+# name. `--task "$EXPECTED_NAME"` alone would then miss, so `--lane` is
+# passed too -- `record_completion`'s own fallback chain (cli.py) tries
+# the lane's single open task when the exact id does not match, which
+# resolves a suffixed redispatch id without this script having to know or
+# guess the suffix. Lane identity is `<session>:<window index>` (CLAUDE.md
+# invariant 9), read from the window itself rather than passed in, so this
+# needs no new caller-supplied argument.
+# A distinct read (and variable) from the `FREE_IDX` lookup further down,
+# on purpose: that one is re-read as close to the rename as possible so it
+# reflects the window's CURRENT index (its own comment explains why), and
+# `tests/supervisor/test_lane_done.sh` patches this file by locating the
+# LITERAL `FREE_IDX="$(tmux display-message ...` line -- a second line with
+# that same text would make its `text.count(...) == 1` shape check fail.
+COMPLETION_IDX="$(tmux display-message -p -t "$TARGET" '#{window_index}' 2>/dev/null)"
+LANE_ID=""
+[ -n "$COMPLETION_IDX" ] && LANE_ID="${SESSION}:${COMPLETION_IDX}"
 #
 # Not `cli.py complete`: that verifies $TMUX_PANE owns the lane and wants a
 # --result-file. This script runs in the supervisor's pane and holds no result
 # artifact -- the fact it has is that the worker's channel fired.
 LANE_DONE_CLI="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/cli.py"
+LANE_DONE_ARGS=(record-completion --task "$EXPECTED_NAME")
+[ -n "$LANE_ID" ] && LANE_DONE_ARGS+=(--lane "$LANE_ID")
 if ! LEDGER_OUT=$("${LANE_DONE_PYTHON:-python3}" \
     "$LANE_DONE_CLI" \
-    record-completion --task "$EXPECTED_NAME" \
+    "${LANE_DONE_ARGS[@]}" \
     --note "lane-done: ${CHANNEL} signaled for ${TARGET}, still named '$EXPECTED_NAME'" 2>&1); then
   echo "lane-done: LEDGER RECORD FAILED for $EXPECTED_NAME -- the lane IS free, the record is not written" >&2
   sed 's/^/  /' <<<"$LEDGER_OUT" >&2
