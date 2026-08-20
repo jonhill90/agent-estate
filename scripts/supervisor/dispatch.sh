@@ -172,6 +172,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/harness-registry.sh"
 # shellcheck source=./session-defaults.sh
 . "$HERE/session-defaults.sh"
+# agent-supervisor#166/#421: every site that puts a harness's launch command
+# on a pane's PATH needs the same tmux guard bootstrap-session.sh/restore.sh
+# already install ahead of it -- `dispatch.sh` respawns a lane's process far
+# more often than either of those run (every ordinary dispatch/re-home), so
+# leaving it unwired here left most of a lane's working lifetime unguarded.
+# Best effort, same as the other two call sites: an install failure degrades
+# to launching without the guard rather than refusing to dispatch at all.
+# shellcheck source=./tmux-guard.sh
+. "$HERE/tmux-guard.sh"
 # agent-supervisor#111: SESSION is resolved from the target repo, not a
 # global default -- see the assignment below NAME_PART, once REPO and
 # REPO_PATH are both known. Nothing above that point touches tmux, so this
@@ -206,6 +215,15 @@ dispatch_rehome_lane() {
   # H_SEND_LITERAL governed how `send-keys` parsed ITS OWN argument for tmux
   # key names, which does not apply to a shell command handed to
   # respawn-pane's own argv.
+  #
+  # agent-supervisor#166/#421: re-homing a lane respawns its process the same
+  # way bootstrap-session.sh/restore.sh do, so it gets the same tmux guard on
+  # PATH ahead of the real binary -- best effort, same as those two sites.
+  local guard_bin=""
+  guard_bin="$(install_tmux_guard 2>&2)" || guard_bin=""
+  if [ -n "$guard_bin" ]; then
+    launch_cmd="PATH=\"$guard_bin:\$PATH\" $launch_cmd"
+  fi
   if ! tmux respawn-pane -k -t "$target" -c "$dir" "$launch_cmd" 2>/dev/null; then
     echo "dispatch: tmux respawn-pane failed while re-homing $target to $dir" >&2
     return 1
@@ -1670,6 +1688,18 @@ LAUNCH_CMD="${H_LAUNCH_CMD[$HARNESS_HIDX]}"
 # said is FREE (checked above, same as before #236) -- `respawn-pane -k`
 # kills whatever is in the pane, and that hazard is unchanged by this fix;
 # it is guarded by staying on the free-lane path, not by anything new here.
+#
+# agent-supervisor#166/#421: this is the routine, everyday respawn -- every
+# ordinary dispatch of a free lane onto its next issue goes through here far
+# more often than a lane's first boot or a post-crash restore, so it gets the
+# same tmux guard on PATH ahead of the real binary those two sites already
+# install. Best effort: an install failure degrades to dispatching without
+# the guard rather than refusing the dispatch outright.
+GUARD_BIN=""
+GUARD_BIN="$(install_tmux_guard 2>&2)" || GUARD_BIN=""
+if [ -n "$GUARD_BIN" ]; then
+  LAUNCH_CMD="PATH=\"$GUARD_BIN:\$PATH\" $LAUNCH_CMD"
+fi
 if ! tmux respawn-pane -k -t "$LANE_TARGET" -c "$WORKTREE" "$LAUNCH_CMD" 2>/dev/null; then
   abort_send "tmux respawn-pane failed for $LANE -- could not put it in its worktree; #$ISSUE_ARG was NOT dispatched"
 fi

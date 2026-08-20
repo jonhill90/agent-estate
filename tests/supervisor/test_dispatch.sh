@@ -302,18 +302,41 @@ fi
 want_contains "the harness is relaunched, into the worktree, right after the respawn" "claude --model sonnet --dangerously-skip-permissions" "$log"
 recorded_path=$(AGENT_SUPERVISOR_STATE_DIR="${LEDGER_STATE:-$D/state}" python3 "$HERE/../../scripts/supervisor/cli.py" status 2>/dev/null | grep -oE '"repo":"[^"]*"' | head -1 | sed -E 's/.*:"([^"]*)"/\1/')
 want_contains "the ledger records the lane's cwd as the worktree, not the shared checkout" "${WT:-NO-WORKTREE}" "$recorded_path"
+
+# --- #421: the routine dispatch respawn gets the same tmux guard on PATH ---
+# bootstrap-session.sh/restore.sh already prefix the guard's bin dir onto
+# PATH ahead of the harness launch command; an independent review of #166
+# found this respawn-pane call site (the one every ordinary dispatch goes
+# through) untouched by that fix. Asserted against the SAME recorded
+# process a real respawn would start (`.respawn-cmd`, see #236's own
+# comment on that file above), not the typed-keys log -- the guard has to
+# be part of the pane's actual launched process, not text sent afterward.
+respawn_cmd_81=$(cat "$D/panes/3.respawn-cmd" 2>/dev/null || true)
+want_contains "agent-supervisor#421: the guard's bin dir is prefixed onto PATH ahead of the launch command" \
+  "PATH=\"${LEDGER_STATE}/tmux-guard/bin:\$PATH\" claude" "$respawn_cmd_81"
+
 # Every case after this one relies on run()'s implicit per-call mktemp state
 # dir (see its own comment above) -- unset so LEDGER_STATE pinned just above
 # for this one assertion cannot leak into any of them.
 unset LEDGER_STATE
 
 : > "$D/tmux.log"
+# AGENT_SUPERVISOR_STATE_DIR is pinned here (unlike run()'s implicit mktemp
+# default) so the #421 guard-install this rehome path now triggers writes
+# its wrapper under this test's own sandbox, never the real
+# $HOME/.local/state/agent-dotfiles-supervisor tmux_guard_bin_dir() falls
+# back to when the env var is unset.
+REHOME_STATE="$D/state-rehome"
 rehome_out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/lanes" TMUX_LOG="$D/tmux.log" TMUX_PANES="$D/panes" \
+  AGENT_SUPERVISOR_STATE_DIR="$REHOME_STATE" \
   DISPATCH_RESPAWN_SETTLE=0 "$DISPATCH" --rehome-lane t:@103 "$REPO" claude 2>&1); rehome_rc=$?
 want_exit "the supported re-home verb succeeds" "$rehome_rc" 0 "$rehome_out"
 log=$(tmuxlog)
 want_contains "the supported re-home verb respawns the pane into an existing directory" "respawn-pane -k -t t:@103 -c $REPO" "$log"
 want_contains "the supported re-home verb relaunches the harness" "claude --model sonnet --dangerously-skip-permissions" "$log"
+respawn_cmd_rehome=$(cat "$D/panes/3.respawn-cmd" 2>/dev/null || true)
+want_contains "agent-supervisor#421: re-homing a lane also prefixes the guard's bin dir onto PATH" \
+  "PATH=\"${REHOME_STATE}/tmux-guard/bin:\$PATH\" claude" "$respawn_cmd_rehome"
 pane_path=$(cat "$D/panes/3.path" 2>/dev/null || true)
 want_contains "the supported re-home verb updates the pane cwd" "$REPO" "$pane_path"
 
@@ -4104,8 +4127,24 @@ else
   want_contains "pre-#236 shape: the launch command IS typed at the pane, before anything checks what is listening" \
     "send-keys -t t:@103" "$pre236_pre_rename"
   selected_236=$(cat "$D/panes/3.selected" 2>/dev/null | head -1)
+  # agent-supervisor#421: the guard's bin dir is now prefixed onto LAUNCH_CMD
+  # before this mutation's blind `send-keys -l` ever runs (that prefix sits
+  # ahead of the respawn-pane call this mutation patches out, so the mutation
+  # inherits it same as production would). The stub's literal-send path scans
+  # EVERY character for a digit and treats the last one seen as the pending
+  # menu option -- previously moot because "claude --model sonnet
+  # --dangerously-skip-permissions" has no digits at all, so nothing but
+  # STUB_MENU_DEFAULT was ever pending. The guard's state-dir path (this
+  # sandbox's own mktemp name) can contain digits, so the option actually
+  # committed is now whichever digit was last typed, not necessarily
+  # STUB_MENU_DEFAULT. Derive the expectation from what was actually sent
+  # (the same hazard either way: an unvalidated menu commits blindly) rather
+  # than hard-coding a value this sandbox's own temp-dir naming can change.
+  literal_send_line=$(grep -m1 '^send-keys .*-l ' <<<"$pre236_log")
+  expected_menu_commit=$(grep -o '[0-9]' <<<"$literal_send_line" | tail -1)
+  expected_menu_commit="${expected_menu_commit:-$STUB_MENU_DEFAULT}"
   want_contains "pre-#236 shape: that blind Enter commits the menu's pending option -- the nested-claude spawn the live incident found" \
-    "2" "$selected_236"
+    "$expected_menu_commit" "$selected_236"
 
   # GREEN: the real, fixed dispatch.sh, same menu-pane lane, same default.
   green_out=$(run 238 launch-cmd-typed-fixed "$D/brief.md" acme/agent-dotfiles "$REPO" 2>&1)
