@@ -215,6 +215,95 @@ new)
     echo "worktree: $DEST already exists" >&2
     exit 1
   fi
+  # RECLAIM AN ABANDONED LANE BRANCH, but only when it is provably abandoned.
+  #
+  # WHY. A dispatch that fails AFTER `worktree add` created the branch but
+  # BEFORE the lane starts -- a claim refusal, a quota refusal, a killed
+  # dispatcher -- leaves `lane/<slug>` behind with no worktree attached. Every
+  # later dispatch of that same slug then dies on:
+  #
+  #     fatal: a branch named 'lane/427-fix427' already exists
+  #
+  # and the issue becomes permanently undispatchable under its natural slug.
+  # Measured 2026-08-20: 285 such branches had accumulated across the four
+  # repos -- agent-supervisor alone held 165 -- and #427, #263 and #284 each
+  # failed to dispatch on exactly this.
+  #
+  # WHAT MAKES IT SAFE TO DELETE, and it is the whole of the design:
+  #
+  #   - NO WORKTREE HOLDS IT. A branch checked out in a live worktree is a
+  #     lane that is working right now. `git worktree list --porcelain` is the
+  #     authority; if the branch appears there, we refuse and exit, exactly as
+  #     before. This is the case #73 exists to protect and it is untouched.
+  #   - NO UNIQUE COMMITS. `git cherry <base> <branch>` lists commits on the
+  #     branch that are not on base. If it prints anything, this branch holds
+  #     work nobody merged, and deleting it destroys that work. We refuse.
+  #     Note this is deliberately STRICTER than `git branch -d`'s
+  #     merged-ancestry test: a squash-merged branch is not an ancestor of
+  #     main, so `-d` would refuse it, while cherry correctly sees its patches
+  #     already upstream. We want the content question, not the ancestry one
+  #     (agent-dotfiles#169 established the same distinction for `gc`).
+  #
+  # So the only branch this removes is one with no worktree and no commits of
+  # its own -- an empty placeholder from a dispatch that never started. If
+  # either check cannot be evaluated, we do NOT delete: an unreadable state is
+  # not an abandoned one.
+  if git -C "$REPO" show-ref --verify --quiet "refs/heads/$BRANCH"; then
+    held=$(git -C "$REPO" worktree list --porcelain 2>/dev/null \
+             | awk -v b="refs/heads/$BRANCH" '$1=="branch" && $2==b {print "held"}' | head -1)
+    if [ -n "$held" ]; then
+      echo "worktree: $BRANCH is checked out in a live worktree -- refusing to reuse it (#73)" >&2
+      exit 1
+    fi
+    if ! unique=$(git -C "$REPO" cherry "$BASE" "$BRANCH" 2>/dev/null); then
+      echo "worktree: could not compare $BRANCH against $BASE -- refusing to reuse a branch whose state is unreadable" >&2
+      exit 1
+    fi
+    if [ -n "${unique// }" ]; then
+      echo "worktree: $BRANCH has commits not on $BASE -- refusing to delete unmerged work" >&2
+      echo "$unique" | head -5 >&2
+      exit 1
+    fi
+    git -C "$REPO" branch -D "$BRANCH" >/dev/null 2>&1 \
+      && echo "worktree: reclaimed abandoned branch $BRANCH (no worktree, no commits beyond $BASE)" >&2
+  fi
+  # REFUSE TO ADD A NEW LANE WHILE THE SHARED REPO IS CARRYING AN UNCLAIMED
+  # STASH (agent-supervisor#427).
+  #
+  # `git worktree add` gives every lane its own working directory, but NOT
+  # its own stash: `refs/stash` lives in the repo's common `.git` dir, which
+  # every worktree of `$REPO` shares -- proven directly (not inferred) on
+  # 2026-08-20:
+  #
+  #   $ git -C base stash push -m x        # from worktree A
+  #   $ git -C wt-b stash list             # a DIFFERENT worktree, same repo
+  #   stash@{0}: On lane-a: x
+  #
+  # #427 was filed on exactly this: a lane found `bootstrap-session.sh`
+  # edits for #411 and a `git stash`/`git stash pop` briefly surfaced a
+  # stash belonging to `lane/278-unblock-dispatch` -- inside a worktree that
+  # had nothing to do with either. No script in this repo runs `git stash`
+  # (checked: only comments mention the word), so the leak is not something
+  # our own tooling did wrong; it is what happens the moment more than one
+  # concurrent lane's *agent* touches `git stash` in a repo whose worktrees
+  # share one `.git`. There is no git config that scopes `refs/stash` to a
+  # single worktree (unlike `HEAD`, `refs/bisect/*` or `refs/worktree/*`,
+  # which genuinely are per-worktree) -- the only place this can be caught
+  # is before a SECOND lane starts sharing the danger, which is here.
+  #
+  # A pre-existing stash at dispatch time means somebody's uncommitted work
+  # is sitting in the one namespace every worktree of this repo can see and
+  # mutate. Dispatching into that state hands the new lane a live landmine:
+  # its own future `git stash`/`git stash pop` (or another concurrent
+  # lane's) can silently apply, lose, or leak that entry. Refuse rather than
+  # let it ride, same posture as `safe_remove` refusing to discard
+  # uncommitted work above -- a stash is somebody's unfinished work too.
+  if stash_top=$(git -C "$REPO" rev-parse --verify --quiet refs/stash 2>/dev/null) && [ -n "$stash_top" ]; then
+    echo "worktree: $REPO has an unclaimed git stash -- refusing to dispatch a new lane into it (agent-supervisor#427)" >&2
+    git -C "$REPO" stash list >&2
+    echo "worktree: refs/stash is shared by every worktree of this repo; resolve it first (git -C \"$REPO\" stash pop / drop) before dispatching another lane" >&2
+    exit 1
+  fi
   # git worktree add already writes its progress to stderr; leave stdout
   # clean so a caller can capture exactly the path from the line below.
   git -C "$REPO" worktree add -b "$BRANCH" "$DEST" "$BASE" 1>&2 || exit 1
