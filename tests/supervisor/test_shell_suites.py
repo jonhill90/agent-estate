@@ -21,7 +21,31 @@ import unittest
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-SUITES = sorted(HERE.glob("test_*.sh"))
+_ALL_SUITES = sorted(HERE.glob("test_*.sh"))
+
+# agent-supervisor#440: CI ran all 89 suites serially in this one test,
+# owning ~99% of the 22-minute run. validate.yml now bin-packs suites into
+# balanced parallel shards (scripts/ci/plan_shell_shards.py) and passes each
+# shard's assignment here via SHELL_SUITE_ONLY, so the fast Python job (which
+# sets SHELL_SUITE_SKIP=1) does not also run all 89 serially itself.
+#
+# Discovery (`_ALL_SUITES` above) is always the full glob -- never filtered
+# implicitly -- so SHELL_SUITE_ONLY naming a suite that does not exist on
+# disk is a loud, immediate error below, not a silently-empty shard.
+SHELL_SUITE_SKIP = os.environ.get("SHELL_SUITE_SKIP") == "1"
+_only_raw = os.environ.get("SHELL_SUITE_ONLY")
+if _only_raw is None:
+    SUITES = _ALL_SUITES
+else:
+    _only_names = {n for n in _only_raw.splitlines() if n.strip()}
+    _all_names = {p.name for p in _ALL_SUITES}
+    _missing = _only_names - _all_names
+    if _missing:
+        raise RuntimeError(
+            f"SHELL_SUITE_ONLY names not found among discovered suites under {HERE}: "
+            f"{sorted(_missing)}"
+        )
+    SUITES = [p for p in _ALL_SUITES if p.name in _only_names]
 
 TIMEOUT = 300
 # agent-supervisor#104: a suite that starts a real, long-lived poller-shaped
@@ -64,11 +88,17 @@ def _pgid_alive(pgid):
 
 class ShellSuites(unittest.TestCase):
     def test_suites_are_discovered(self):
+        if SHELL_SUITE_SKIP:
+            self.skipTest("shell suites run in a separate sharded job; see .github/workflows/validate.yml")
         # A glob that silently matches nothing would make every assertion below
         # vacuous, and the suite would go green by running no tests at all.
-        self.assertTrue(SUITES, f"no test_*.sh found under {HERE}")
+        # Also catches a shard whose SHELL_SUITE_ONLY filtered SUITES to empty --
+        # a shard that silently ran zero suites must not read as a fast green one.
+        self.assertTrue(SUITES, f"no suites selected under {HERE} (discovered={len(_ALL_SUITES)})")
 
     def test_shell_suites_pass(self):
+        if SHELL_SUITE_SKIP:
+            self.skipTest("shell suites run in a separate sharded job; see .github/workflows/validate.yml")
         for suite in SUITES:
             with self.subTest(suite=suite.name):
                 started = time.monotonic()
