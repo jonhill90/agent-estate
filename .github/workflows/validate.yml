@@ -1,10 +1,23 @@
 name: Validate
 
+# agent-supervisor#407: `pull_request` alone goes silent -- not slow, not
+# queued, ZERO check runs -- for any PR GitHub cannot compute a merge commit
+# for (`mergeable: CONFLICTING`). `pull_request`'s default dispatch runs
+# against `refs/pull/<n>/merge`; when that ref can't be built, GitHub never
+# fires the event at all, which from outside is indistinguishable from a
+# dropped webhook delivery. Measured directly against PR #404 (2026-08-20):
+# every open PR with `mergeable: MERGEABLE` had 4 check runs at its head
+# SHA; the one PR with `mergeable: CONFLICTING` had 0 -- confirmed across
+# every commit it had received, including a fresh empty "nudge" commit
+# pushed specifically to rule out a one-off dropped delivery. `push` (no
+# `branches:` filter, unlike before) dispatches off the pushed SHA directly,
+# never a computed merge ref, so it fires regardless of the PR's mergeable
+# state -- the fix, not a workaround. A PR that's also mergeable still gets
+# a `pull_request` run; ci_gate.py already collapses same-named check runs
+# to the latest, so the harmless duplicate costs CI minutes, not gate logic.
 on:
   pull_request:
   push:
-    branches:
-      - main
 
 permissions:
   contents: read
