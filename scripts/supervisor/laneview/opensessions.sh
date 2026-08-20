@@ -51,8 +51,10 @@ post() {
 # lanes.sh's states -> OpenSessions' fixed AgentStatus vocabulary
 # (idle/running/stale/waiting/error). Every state lanes.sh ships gets an
 # arm: `validate_laneview_state_maps` in scripts/validate_repository.py
-# reads these arms and errors if lanes.sh grows a state this case does not
-# name, so the next state cannot land here as a silent default.
+# (agent-supervisor#105 -- re-homed here after the pre-#171-split copy in
+# agent-dotfiles was deleted rather than moved) reads these arms and errors
+# if lanes.sh grows a state this case does not name, so the next state
+# cannot land here as a silent default.
 #
 # The mapping is lossy (#173): menu-blocked and text-blocked both collapse
 # to waiting, and unknown/service both read as idle. That loss is
@@ -60,7 +62,8 @@ post() {
 # laneview/README.md. `scrolled` was missing entirely until review of #231:
 # it fell to the old `*) idle` default and rendered a lane lanes.sh will
 # not dispatch to as a healthy green tick. It is now `waiting`, the same as
-# the other blocked-pending-a-human states.
+# the other blocked-pending-a-human states. `broken` and `never-busy` were
+# missing entirely until #105.
 #
 # The fallback is no longer `idle`. A state this script has never heard of
 # is not evidence that a lane is available, and saying so would be the same
@@ -76,14 +79,22 @@ map_status() {
     # error, same as dead, because there is no agent running -- the
     # narrowing is diagnostic (a lying name vs. no name), not a different
     # severity, and OpenSessions has no vocabulary slot for "dead and lying".
-    dead|stale) echo error ;;
+    # `broken` (agent-supervisor#88) joins this group for the same reason:
+    # a pane whose cwd was removed cannot start another turn, so there is
+    # effectively no agent to wait on, same severity as dead/stale.
+    dead|stale|broken) echo error ;;
     # `supervisor` is deliberately unreachable from this script's own path:
     # the python step below drops that row rather than translating it into a
     # vocabulary with no value for "not a lane" (README.md, "Where the two
     # deliberately disagree"). The arm stays anyway -- rule 4 is about what
     # the map NAMES, and if that filter is ever removed this is the only
     # thing keeping `supervisor` off the `*)` stale path.
-    service|supervisor|unknown) echo idle ;;
+    #
+    # `never-busy` (agent-supervisor#112) joins `unknown` here: it is a pure
+    # narrowing of the same "this probe cannot place the pane" branch in
+    # lanes.sh, distinguished only by age, not by a different claim about
+    # whether the lane is available.
+    service|supervisor|unknown|never-busy) echo idle ;;
     *)
       echo "laneview/opensessions.sh: no mapping for lanes.sh state '$1' -- rendering it stale rather than idle" >&2
       echo stale
