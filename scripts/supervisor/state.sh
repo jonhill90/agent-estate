@@ -244,7 +244,15 @@ if [ -r "$QUOTA_FILE" ]; then
     # the staleness branch could never fire. A negative age is not a small error,
     # it is a check that cannot fail -- which is the defect class this estate is
     # remediating. Found by reading the rendered number, not the code.
-    q_epoch=$(date -j -u -f '%Y-%m-%dT%H:%M:%SZ' "$q_checked" '+%s' 2>/dev/null || echo "")
+    #
+    # BSD `date -j -f` first (macOS ships no GNU date), GNU `date -d` as the
+    # fallback -- the same UTC-ISO8601 -> epoch parse digest.sh's
+    # iso_to_epoch() uses, not a second fallback that could drift from it.
+    # `-j` exits 1 under GNU date rather than parsing, so on ubuntu-latest
+    # (CI) this fell through to an empty epoch and the staleness branch never
+    # fired -- reproduced live in CI (#397).
+    q_epoch=$(date -u -j -f '%Y-%m-%dT%H:%M:%SZ' "$q_checked" '+%s' 2>/dev/null \
+            || date -u -d "$q_checked" '+%s' 2>/dev/null || echo "")
     case "$q_epoch" in ''|*[!0-9]*) : ;; *) q_age=$(( $(date -u +%s) - q_epoch )) ;; esac
   fi
   if [ -n "${q_state// }" ]; then

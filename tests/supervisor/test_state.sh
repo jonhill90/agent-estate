@@ -292,7 +292,11 @@ grep -q "^quota: SAFE -- checked ${fresh_checked}, .*s ago; last confirmed SAFE;
 # says SAFE -- retaining a stale "last known good" reading is the exact
 # failure class (#80->#8 on 2026-08-15) this reader exists to prevent.
 stale_epoch=$(( $(date -u +%s) - 200000 ))
-stale_checked=$(date -u -r "$stale_epoch" +%Y-%m-%dT%H:%M:%SZ)
+# BSD `date -r EPOCH` formats an epoch seconds value; GNU `date -r` reads a
+# FILE's mtime instead, so the BSD form must fall back to `date -d @EPOCH`
+# under GNU date -- same two-form parse state.sh's own quota reader uses.
+stale_checked=$(date -u -r "$stale_epoch" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null \
+              || date -u -d "@$stale_epoch" +%Y-%m-%dT%H:%M:%SZ)
 write_quota_state "SAFE" "SAFE" "0" "$stale_checked"
 out=$(run)
 grep -q "^quota: unknown -- STALE: quota-watch last wrote .*s ago (>1800s); refusing to report 'SAFE' as current" <<<"$out" && \
