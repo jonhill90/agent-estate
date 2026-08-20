@@ -110,12 +110,28 @@ laneview_script_or_py_token() {
 # to this leak family: confirm from `ps -o comm=` (what the kernel actually
 # exec'd) that <pid> is genuinely running tui.sh or its scratch python
 # file, never merely carrying either string as an argument.
+#
+# "tui.sh" is itself an accepted comm value below, not just the shell
+# names -- laneview.sh's real launch path is `exec "$IMPL_SCRIPT" ...`
+# (laneview.sh), i.e. tui.sh runs directly via its own `#!/bin/bash`
+# shebang, never as `bash tui.sh`. On Linux (what CI and every real
+# laneview-tui leak run on), a directly shebang-exec'd script gets ITS
+# OWN basename as `comm` -- the kernel/bash renames the process, it does
+# not keep "bash" -- confirmed live:
+#   $ ./laneview/tui.sh & ps -o comm=,args= -p $!
+#   tui.sh   /bin/bash /path/to/laneview/tui.sh
+# `args=` still carries the real "/bin/bash <script>" shape (so the
+# existing positional-argument walk below is untouched), but gating
+# entry to that walk on comm looking like a shell name is what silently
+# refused every real leak on Linux: comm was never "bash" there in the
+# first place. macOS's ps does not rename comm this way, which is why
+# this shipped green on a Mac dev box and red in CI (agent-supervisor#394).
 laneview_verify_executing() {
   local pid="$1" comm args tok saw_positional
   comm=$(ps -o comm= -p "$pid" 2>/dev/null)
   [ -n "$comm" ] || return 1
   case "$comm" in
-    */bash|bash|*/sh|sh|*/dash|dash|*/zsh|zsh|*/ksh|ksh)
+    */bash|bash|*/sh|sh|*/dash|dash|*/zsh|zsh|*/ksh|ksh|tui.sh)
       args=$(ps -o args= -p "$pid" 2>/dev/null)
       [ -n "$args" ] || return 1
       saw_positional=0
