@@ -15,6 +15,8 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ADVANCE="$HERE/../../scripts/supervisor/advance-live.sh"
+# shellcheck source=lib/assert-age-near.sh
+. "$HERE/lib/assert-age-near.sh"
 pass=0; fail=0
 
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
@@ -147,7 +149,16 @@ S=$(mktemp -d); status_at "$S" 5460
 out=$(run "$S" 2>&1); rc=$?
 want_exit "GREEN: a 91-minute-stale watchdog fails loudly (nonzero exit)" "$rc" 1 "$out"
 if grep -qi "WATCHDOG STALE" <<<"$out"; then ok "the failure names itself as watchdog staleness"; else bad "the failure names itself as watchdog staleness" "$out"; fi
-if grep -q "5460" <<<"$out" || grep -qi "91" <<<"$out"; then ok "the failure names the age"; else bad "the failure names the age" "$out"; fi
+# Tolerance, not exact match (agent-supervisor#116): status_at() writes
+# `now - 5460`, but advance-live.sh's watchdog_age() recomputes the age from
+# the CURRENT clock rather than reading back the fixture's written value, so
+# the reported age is `5460 + (elapsed between the fixture write and this
+# read)`. A literal `grep -q "5460"` measured failing in CI off a single
+# second of scheduler delay (#116); reproduced locally here too by injecting
+# an artificial delay between status_at and run(). Extract the actual
+# reported age and accept anything within a few seconds of 5460.
+reported_age=$(grep -oE '\([0-9]+s ago\)' <<<"$out" | head -1 | grep -oE '[0-9]+')
+if assert_age_near "$reported_age" 5460 5; then ok "the failure names the age"; else bad "the failure names the age" "want 5460+/-5, got '$reported_age': $out"; fi
 if grep -qE '[0-9]{4}-[0-9]{2}-[0-9]{2}T' <<<"$out"; then ok "the failure names the last-checked timestamp"; else bad "the failure names the last-checked timestamp" "$out"; fi
 after=$(git -C "$LIVE" rev-parse HEAD)
 before=$(git -C "$LIVE" rev-parse HEAD)
@@ -263,10 +274,15 @@ else
   fi
 fi
 
-# --- default threshold: just past 3x the 180s default tick interval --------
-S=$(mktemp -d); status_at "$S" 541
+# --- default threshold: past 3x the 180s default tick interval -------------
+# Held 10s away from the 540s threshold rather than 1s (agent-supervisor#141):
+# status_at()'s fixture write and advance-live.sh's own age read are two
+# independent wall-clock reads, so a 1s margin here can be erased by ordinary
+# scheduler delay between the two. A delay stacking to 10s on a CI runner
+# would be its own incident, not a flake -- see #116.
+S=$(mktemp -d); status_at "$S" 550
 out=$(run "$S" 2>&1); rc=$?
-want_exit "541s (just over the default 540s threshold) fails" "$rc" 1 "$out"
+want_exit "550s (past the default 540s threshold) fails" "$rc" 1 "$out"
 
 # --- a HEALTHY watchdog must never trip this (#22's lesson) -----------------
 S=$(mktemp -d); status_at "$S" 30
@@ -274,9 +290,13 @@ out=$(run "$S" 2>&1); rc=$?
 want_exit "a fresh (30s-old) watchdog tick does not trip the alarm" "$rc" 0 "$out"
 if grep -qi "WATCHDOG STALE" <<<"$out"; then bad "a fresh tick is not reported as stale" "$out"; else ok "a fresh tick is not reported as stale"; fi
 
-S=$(mktemp -d); status_at "$S" 539
+# Held 10s away from the 540s threshold rather than 1s, same reasoning as
+# the 550s case above (agent-supervisor#141): a 1s margin here flaked when an
+# artificial delay was injected between status_at and run() to reproduce
+# #116's shape directly against this file.
+S=$(mktemp -d); status_at "$S" 530
 out=$(run "$S" 2>&1); rc=$?
-if grep -qi "WATCHDOG STALE" <<<"$out"; then bad "539s (just under the default 540s threshold) is not yet stale" "$out"; else ok "539s (just under the default 540s threshold) is not yet stale"; fi
+if grep -qi "WATCHDOG STALE" <<<"$out"; then bad "530s (under the default 540s threshold) is not yet stale" "$out"; else ok "530s (under the default 540s threshold) is not yet stale"; fi
 
 # --- no watchdog.status at all: not yet ticked, not "dead" ------------------
 S=$(mktemp -d)
