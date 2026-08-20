@@ -14,6 +14,18 @@ CHECK="$HERE/../../scripts/supervisor/collision-check.sh"
 CORE_DIR="$HERE/../../scripts/supervisor"
 pass=0; fail=0
 
+# A stubbed `gh` on PATH -- agent-supervisor#432's own review found this suite
+# hitting REAL gh calls against whatever repo the process's cwd resolved to,
+# so its outcome depended on which PRs happened to be open live. GH_BIN holds
+# only a `gh` symlink to the stub; the rest of PATH is untouched so git,
+# python3 etc. still resolve normally. Default: no open PRs, so cases 1-5
+# (written before the open-PR-holder half existed) see the same "nothing
+# there" result they always did.
+GH_BIN=$(mktemp -d)
+ln -s "$HERE/stubs/gh-collision-check" "$GH_BIN/gh"
+export PATH="$GH_BIN:$PATH"
+export GH_STUB_PR_LIST_JSON="[]"
+
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
 bad()  { echo "  FAIL $1"; sed 's/^/       /' <<<"${2:-}"; fail=$((fail+1)); }
 want_exit()     { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected exit $3, got $2: ${4:-}"; fi }
@@ -115,7 +127,107 @@ out5=$(AGENT_SUPERVISOR_STATE_DIR="$STATE2" DISPATCH_PYTHON=python3 \
 rc5=$?
 want_exit "an unreadable in-flight worktree is skipped rather than failing the whole check" "$rc5" 0 "$out5"
 
-rm -rf "$D"
+# --- 6. self-exclusion on the open-PR holder side, both directions ---------
+#        (the M1/M3 evidence from #432's PR description was a manual one-off
+#        run, never committed -- these are that evidence, committed.)
+STATE3=$(mktemp -d "$D/state3.XXXXXX")
+echo 'Touch `scripts/supervisor/quota-watch.sh` too.' > "$D/brief-selfexcl.md"
+CAND_WT4="$D/laneE"
+git -C "$REPO" worktree add -q -b lane/501-selfexcl "$CAND_WT4" main
+
+export GH_STUB_PR_LIST_JSON='[{"number":501,"files":[{"path":"scripts/supervisor/quota-watch.sh"}]}]'
+out6a=$(AGENT_SUPERVISOR_STATE_DIR="$STATE3" DISPATCH_PYTHON=python3 \
+  "$CHECK" check --issue 501 --brief "$D/brief-selfexcl.md" --worktree "$CAND_WT4" \
+  --repo-path "$REPO" --repo acme/widgets --exclude-lane "agent-supervisor:x" --pr 501 2>&1)
+rc6a=$?
+want_exit "reviewing PR 501 is not blocked by PR 501's own diff" "$rc6a" 0 "$out6a"
+want_contains "...says no-conflict" "no-conflict" "$out6a"
+
+out6b=$(AGENT_SUPERVISOR_STATE_DIR="$STATE3" DISPATCH_PYTHON=python3 \
+  "$CHECK" check --issue 502 --brief "$D/brief-selfexcl.md" --worktree "$CAND_WT4" \
+  --repo-path "$REPO" --repo acme/widgets --exclude-lane "agent-supervisor:x" --pr 777 2>&1)
+rc6b=$?
+want_exit "...but IS still blocked by a DIFFERENT open PR touching the same file" "$rc6b" 1 "$out6b"
+want_contains "...naming that PR as the holder" "PR#501" "$out6b"
+export GH_STUB_PR_LIST_JSON="[]"
+
+# --- 7. a gh outage must be distinguishable from a clean check -------------
+STATE4=$(mktemp -d "$D/state4.XXXXXX")
+echo 'Touch `scripts/supervisor/other.sh` too.' > "$D/brief-outage.md"
+CAND_WT5="$D/laneF"
+git -C "$REPO" worktree add -q -b lane/601-outage "$CAND_WT5" main
+
+out7a=$(AGENT_SUPERVISOR_STATE_DIR="$STATE4" DISPATCH_PYTHON=python3 GH_STUB_FAIL=1 \
+  "$CHECK" check --issue 601 --brief "$D/brief-outage.md" --worktree "$CAND_WT5" \
+  --repo-path "$REPO" --repo acme/widgets --exclude-lane "agent-supervisor:x" 2>&1)
+rc7a=$?
+want_exit "a gh outage still allows the dispatch (best-effort posture preserved)" "$rc7a" 0 "$out7a"
+want_contains "...but says the PR check did not run" "SKIPPED" "$out7a"
+
+out7b=$(AGENT_SUPERVISOR_STATE_DIR="$STATE4" DISPATCH_PYTHON=python3 \
+  "$CHECK" check --issue 602 --brief "$D/brief-outage.md" --worktree "$CAND_WT5" \
+  --repo-path "$REPO" --repo acme/widgets --exclude-lane "agent-supervisor:x" 2>&1)
+rc7b=$?
+want_exit "a real clean check (gh working, no matches) also allows" "$rc7b" 0 "$out7b"
+want_missing "...and carries no skip marker -- blindness is distinguishable from cleanliness" "SKIPPED" "$out7b"
+
+# --- 8. repo scoping: derived from --repo-path's origin when --repo is
+#        omitted, never left to fall through to the caller's ambient cwd;
+#        and when no repo can be identified at all, gh is never invoked ------
+GH_LOG="$D/gh.log"
+git -C "$REPO" remote set-url origin git@github.com:acme/widgets.git
+
+STATE5=$(mktemp -d "$D/state5.XXXXXX")
+echo 'Touch `scripts/supervisor/other.sh` too.' > "$D/brief-scoped.md"
+CAND_WT6="$D/laneG"
+git -C "$REPO" worktree add -q -b lane/701-scoped "$CAND_WT6" main
+
+rm -f "$GH_LOG"
+out8a=$(AGENT_SUPERVISOR_STATE_DIR="$STATE5" DISPATCH_PYTHON=python3 GH_STUB_LOG="$GH_LOG" \
+  "$CHECK" check --issue 701 --brief "$D/brief-scoped.md" --worktree "$CAND_WT6" \
+  --repo-path "$REPO" --exclude-lane "agent-supervisor:x" 2>&1)
+rc8a=$?
+want_exit "--repo omitted still allows a disjoint dispatch" "$rc8a" 0 "$out8a"
+want_contains "...and gh was invoked scoped to --repo-path's own origin, not left unscoped to ambient cwd" \
+  "-R acme/widgets" "$(cat "$GH_LOG" 2>/dev/null)"
+
+# MUTATION-CHECK, direction 2: the SAME derived (not explicit) repo must
+# still catch a genuine overlap -- deriving the repo cannot become a second
+# way to go blind.
+export GH_STUB_PR_LIST_JSON='[{"number":55,"files":[{"path":"scripts/supervisor/other.sh"}]}]'
+out8b=$(AGENT_SUPERVISOR_STATE_DIR="$STATE5" DISPATCH_PYTHON=python3 GH_STUB_LOG="$GH_LOG" \
+  "$CHECK" check --issue 702 --brief "$D/brief-scoped.md" --worktree "$CAND_WT6" \
+  --repo-path "$REPO" --exclude-lane "agent-supervisor:x" 2>&1)
+rc8b=$?
+want_exit "...and a genuine overlap reached through that same derived repo still refuses" "$rc8b" 1 "$out8b"
+want_contains "...naming the holder PR" "PR#55" "$out8b"
+export GH_STUB_PR_LIST_JSON="[]"
+
+# No --repo AND --repo-path has no origin remote at all: must SKIP explicitly
+# (fail open, same posture as every other unknown here) and never invoke gh
+# unscoped -- the exact fallthrough #432's review reproduced live.
+NOREMOTE="$D/noremote"
+mkdir -p "$NOREMOTE"
+git -C "$NOREMOTE" init -q -b main
+git -C "$NOREMOTE" config user.email test@example.com
+git -C "$NOREMOTE" config user.name Test
+echo x > "$NOREMOTE/f.txt"; git -C "$NOREMOTE" add -A; git -C "$NOREMOTE" commit -q -m x
+echo 'Touch `f.txt` too.' > "$D/brief-noremote.md"
+
+rm -f "$GH_LOG"
+out8c=$(AGENT_SUPERVISOR_STATE_DIR="$STATE5" DISPATCH_PYTHON=python3 GH_STUB_LOG="$GH_LOG" \
+  "$CHECK" check --issue 703 --brief "$D/brief-noremote.md" --worktree "$NOREMOTE" \
+  --repo-path "$NOREMOTE" --exclude-lane "agent-supervisor:x" 2>&1)
+rc8c=$?
+want_exit "no repo identifiable at all still allows (fail open)" "$rc8c" 0 "$out8c"
+want_contains "...but says so explicitly, never silence" "SKIPPED" "$out8c"
+if [ -s "$GH_LOG" ]; then
+  bad "...and gh is never invoked when the repo cannot be identified" "$(cat "$GH_LOG")"
+else
+  ok "...and gh is never invoked when the repo cannot be identified"
+fi
+
+rm -rf "$D" "$GH_BIN"
 
 echo
 echo "collision-check.sh: $pass passed, $fail failed"
