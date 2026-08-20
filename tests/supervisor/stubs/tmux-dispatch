@@ -366,7 +366,23 @@ win="${target##*:}"; win="${win%%.*}"
 win="$(idx_for "$win")"
 line=$(awk -F'|' -v w="$win" '$1==w' "$F")
 case "$sub" in
-  has-session) exit 0 ;;
+  # agent-supervisor#422: a test proving dispatch.sh distinguishes "session
+  # missing" from "lanes all busy" needs a stub that can actually SAY the
+  # session is missing, same as real tmux does. STUB_SESSION_MISSING=1
+  # fails has-session for every target (the fixture never has a session to
+  # begin with in that case) until STUB_SESSION_BOOTSTRAPPED is set, which
+  # this stub's own new-session handler below sets -- so a script that
+  # bootstraps mid-run sees the session come into existence, the same as a
+  # real tmux server would.
+  has-session)
+    if [ "${STUB_SESSION_MISSING:-0}" = 1 ] && [ ! -e "${STUB_SESSION_MARKER:-/dev/null}" ]; then
+      exit 1
+    fi
+    exit 0 ;;
+  new-session)
+    [ -n "${STUB_SESSION_MARKER:-}" ] && : > "$STUB_SESSION_MARKER"
+    printf '%s %s\n' "$sub" "$*" >> "$LOG"
+    exit 0 ;;
   list-windows) cut -d'|' -f1 "$F" ;;
   list-panes)
     # Six columns became seven with #241's `#{window_id}`.
