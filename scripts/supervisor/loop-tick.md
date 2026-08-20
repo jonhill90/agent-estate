@@ -482,7 +482,10 @@ these apart, and all of them were misread as "nothing to do" on 2026-08-11:
   `no such file or directory: /clear`, and the work is silently lost. Restart
   the agent with `claude --dangerously-skip-permissions` before using the lane.
 - `service` — a supervisor service that lives in this session and is not a
-  lane, such as the Telegram poller (`inbox-poll.sh`, window 11). Its command
+  lane, such as the Telegram poller (`inbox-poll.sh`) when it is still
+  tmux-hosted (see README.md — as of #154 the poller is normally a
+  launchd/systemd-managed service outside tmux entirely, and this window
+  shape only appears for a legacy poller not yet migrated). Its command
   is a shell because the service is a shell script, so it read `dead` until
   #154 and the restart instruction above pointed straight at it — restarting it
   replaces the poller with an agent and Jon's replies stop arriving silently.
