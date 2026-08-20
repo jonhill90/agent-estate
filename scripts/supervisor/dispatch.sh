@@ -376,6 +376,40 @@ ISSUE="${ISSUES[0]:-}"
 [ -f "$BRIEF" ] || { echo "dispatch: no brief file at $BRIEF" >&2; exit 1; }
 BRIEF="$(cd "$(dirname "$BRIEF")" && pwd)/$(basename "$BRIEF")"
 
+# --- carry forward what the LAST agent on this issue already found ----------
+# Measured 2026-08-20: 184 issues in this estate have been worked more than
+# once -- #308 thirteen times, #284 ten. Every re-dispatch started from zero,
+# because results were written and never read back. The tenth pass on #284
+# concluded "investigation-only, worktree diff is empty" while an attempt three
+# days earlier had already found a real defect in the same area and posted a
+# reject verdict with a mutation check.
+#
+# So the brief is AUGMENTED, not replaced: a section naming the prior result
+# files, newest first. It does not summarise them -- a paraphrase quietly
+# becomes the record, and this estate already carries a corpus that is 30-65%
+# agent-written for exactly that reason. The lane reads the files.
+#
+# Never fatal. rc=1 (fresh issue) and rc=3 (cannot see the results dir) both
+# leave the brief untouched and say so; a dispatcher that refused to dispatch
+# because it could not read history would be worse than one that dispatches
+# blind, which is the status quo.
+if [ -x "$HERE/prior-attempts.sh" ]; then
+  _pa_issue="$(printf '%s' "$ISSUE_ARG" | cut -d, -f1 | tr -cd '0-9')"
+  if [ -n "$_pa_issue" ]; then
+    _pa_section="$("$HERE/prior-attempts.sh" --issue "$_pa_issue" --brief 2>/dev/null)"
+    _pa_rc=$?
+    case "$_pa_rc" in
+      0)
+        _pa_brief="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}/brief-with-history-$SLUG.md"
+        { cat "$BRIEF"; printf '%s
+' "$_pa_section"; } > "$_pa_brief"           && BRIEF="$_pa_brief"           && echo "dispatch: brief augmented with prior attempts on #$_pa_issue -- $_pa_brief"
+        ;;
+      1) : ;;  # genuinely fresh; nothing to carry
+      3) echo "dispatch: could not read prior results -- dispatching without history (NOT the same as none)" >&2 ;;
+    esac
+  fi
+fi
+
 # --- -0.5. the quota gate. Nothing gets dispatched on a window we cannot see
 # ----------------------------------------------------------------------------
 # agent-supervisor#227: quota.sh -- the thing every tick is required to run
