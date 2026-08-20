@@ -149,31 +149,28 @@ PANE="${SUPERVISOR_PANE:-${SESSION}:1.1}"
 # `watchdog.sh` but is not required for a read.
 # THE IDLE MATCHER COMES FROM THE HARNESS, never from a private copy here.
 #
-# This line used to hardcode a singular-count agent-footer pattern, and that
-# made `idle()` return false on a genuinely idle pane, because Claude Code now
-# renders its footer as `← for agents` with no count. Measured against a real
-# idle lane rather than argued:
+# This used to hardcode its own footer pattern, and a hardcoded copy is
+# exactly the shape that drifts: #314 and #324 each fixed the ready shape in
+# `harness/claude.sh` and this private copy was missed both times, so
+# director-route's `idle()` kept returning false on a genuinely idle pane --
+# Jon's replies from Telegram queued behind it while the log read "flush --
+# pane not idle, nothing sent" and the pane sat plainly idle. Two of his
+# instructions were found stranded in the input box, unread, hours old.
 #
-#   last line: `  ⏵⏵ bypass permissions on (shift+tab to cycle) · ← for agents`
-#   old READY_RE -> NO MATCH      (so idle() is false, always)
-#   fixed RE     -> MATCH
-#
-# `idle()` gates every delivery, so a matcher that never matches meant
-# director-route could NEVER deliver a message to the Director. Jon's replies
-# from Telegram queued behind it and the log filled with "flush -- pane not
-# idle, nothing sent" while the pane sat plainly idle. Two of his instructions
-# were found stranded in the input box, unread, hours old.
-#
-# This is the THIRD recurrence of one bug: #314 and #324 each fixed the footer
-# shape in `harness/claude.sh`, and this private copy was missed both times.
-# So it is not copied again -- it is sourced. A second copy of a value that
-# tracks someone else's UI will always drift; the only fix that holds is having
-# one.
+# So it is not copied again -- it is sourced. #353 removed the string
+# literal that used to sit here as a "just in case sourcing fails" fallback
+# too: that fallback WAS a second copy, silently reintroducing exactly the
+# drift this comment is about (it still enumerated the exact suffix strings
+# #314/#324 were filed to stop chasing, so a sourcing failure would fall
+# back to a matcher already known to miss real footers). If claude.sh cannot
+# be read, READY_RE is left empty and `idle()` below fails closed -- refusing
+# to nudge is the same posture #126 established for `lanes.sh --free`: no
+# evidence of idle must never be read as evidence of idle.
 if [ -z "${HARNESS_READY_RE:-}" ] && [ -r "$HERE/harness/claude.sh" ]; then
   # shellcheck disable=SC1091
   . "$HERE/harness/claude.sh" 2>/dev/null || true
 fi
-READY_RE="${HARNESS_READY_RE:-^❯ [^←]*\$|← [0-9]+ agents?\$|← for agents}"
+READY_RE="${HARNESS_READY_RE:-}"
 
 notify_jon() {  # notify_jon <subject> <body>
   AGENT_NOTIFY_CALLER=supervisor "$HERE/notify.sh" "$1" "$2"
@@ -235,6 +232,11 @@ fi
 # --- is it safe to nudge the pane right now? --------------------------
 idle() {
   local last box
+  # #353: an empty READY_RE (harness/claude.sh could not be sourced) must
+  # never be read as "matches everything" -- `grep -E ''` matches every
+  # line, which would make an unreadable matcher look identical to a lane
+  # sitting at a genuinely ready prompt. Fail closed instead.
+  [ -n "$READY_RE" ] || return 1
   last=$(tmux capture-pane -p -t "$PANE" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -1)
   [ -n "$last" ] || return 1
   grep -q 'esc to interrupt' <<<"$last" && return 1
