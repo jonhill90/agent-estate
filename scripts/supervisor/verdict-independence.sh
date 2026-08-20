@@ -279,6 +279,7 @@ repo_task_prefix() {
 author_lane_for() {
   local repo_full="$1" number="$2" pr_json head_ref candidates candidate issue_json
   local prefix fallback_task fallback_json outfile rc external_json external_note
+  local pr_task_json
   external_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" pr-external --repo "$repo_full" --pr "$number" 2>/dev/null)
   if jq -e '.known == true' >/dev/null 2>&1 <<<"$external_json"; then
     external_note=$(jq -r '.note // ""' <<<"$external_json")
@@ -329,6 +330,27 @@ author_lane_for() {
       return
     fi
   done
+  # agent-supervisor#415: a PR with no closing-issue reference and a
+  # branch name that doesn't match the legacy `lane/fix/feat/chore/docs`
+  # regex (e.g. PR #400, `feat/prior-attempts`) fell through both paths
+  # above to `known:false` even when the ledger already holds the real
+  # contributor record for it -- `record_pr_for_task`, written by
+  # `lane-done.sh` at completion, queried here through `cli.py pr-task`.
+  # Tried AFTER the issue-linkage path (a "fixes #N" reference is a
+  # stronger, human-legible signal than a ledger row) but BEFORE the
+  # branch-regex fallback (a heuristic guess at the task id from the
+  # branch name) -- `pr-task` is an explicit fact the ledger was told,
+  # not a pattern match, so it outranks the regex guess. This surfaces
+  # evidence the ledger already has; it adds no new way to CLAIM
+  # authorship -- `record_pr_for_task` is written once, by
+  # `lane-done.sh`, from the worktree that actually built the PR.
+  if pr_task_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" pr-task --repo "$repo_full" --pr "$number" 2>/dev/null) \
+     && jq -e '.known == true' >/dev/null 2>&1 <<<"$pr_task_json"; then
+    jq -nc --arg lane "$(jq -r '.lane' <<<"$pr_task_json")" \
+           --arg task "$(jq -r '.task // ""' <<<"$pr_task_json")" \
+           '{known:true, lane:$lane, task:$task, detail:""}'
+    return
+  fi
   prefix=$(repo_task_prefix "$repo_full")
   if [[ "$head_ref" =~ ^(lane|fix|feat|chore|docs)/([0-9]+)-(.+)$ ]]; then
     fallback_task="${prefix}${BASH_REMATCH[2]}-${BASH_REMATCH[3]}"
