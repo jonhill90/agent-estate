@@ -84,6 +84,7 @@ policy only.
 ```
 cmd/keelson/         one tea.NewProgram entry point, running internal/shell.Model (see docs/SPEC.md)
 internal/board/      task board projection — GitHub issues/PRs + ledger tasks + live lanes
+internal/chat/       ACP thread chat -- Source seam, FixtureSource, two viewport-scrollable layouts (agent-tui#20)
 internal/cost/       per-harness spend/quota projection from ccusage
 internal/flow/       live flow view — the same board.Snapshot re-projected as a moving pipeline (agent-tui#64)
 internal/gallery/    glyph gallery — every lane state × every candidate glyph set
@@ -91,15 +92,20 @@ internal/lane/       lane/session decode, glyph sets (data, not code), state tab
 internal/mcp/        minimal MCP JSON-RPC client over a child process's stdio
 internal/rail/       the left-anchored navigation rail — the one shipped anchor feature, now always visible
 internal/session/    write path: attach/detach/add/remove, all via MCP, no os/exec
-internal/shell/      the application shell -- owns the rail + board/cost/gallery/flow as panes (agent-tui#38, #64)
+internal/shell/      the application shell -- owns the rail + board/cost/gallery/flow/chat as panes (agent-tui#38, #64, #20)
 internal/theme/      look-and-feel as data — Role-keyed colours, persisted per-user config
 scripts/             verify-lanes-unaffected.sh — the rail's non-interference proof
 ```
 
-`internal/chat` (an unwired chat adapter) exists only on an unmerged branch
-(`lane/20-chat-threads`) — see `docs/SPEC.md`'s "Gap between intent and code"
-section before assuming it is on this branch; it was stopped deliberately to
-avoid becoming a fifth flag-selected screen ahead of the shell landing.
+`internal/chat` is wired into the shell as `PaneChat` (`[f6]`, agent-tui#20) --
+`[f5]` was already claimed by `internal/flow`'s `PaneFlow` (agent-tui#64) by
+the time this rebased onto it.
+It renders against `chat.Source`, an adapter seam the same shape as
+`rail.Fetcher`; `chat.FixtureSource` is the only implementation shipped
+today because no lane in this estate runs on a structured transport
+(`acp`/`pi-rpc`) yet — see `internal/chat/fixture.go`'s own doc comment for
+why a screen-scraped transcript was rejected instead, and what a real
+`Source` needs.
 
 ## Adapter discipline
 
@@ -113,6 +119,7 @@ interface-typed seam, supplied by `cmd/keelson/main.go`:
 | `cost.Fetcher` (built in `cmd/keelson/cost.go`) | `internal/cost` | shelling out to `ccusage` |
 | `board.Fetcher`-shaped functions (`cmd/keelson/board.go`) | `internal/board` | `gh` CLI calls and a read-only `sqlite3` ledger open |
 | `theme.Theme` / `theme.Load` | `internal/theme` | every colour, border and chrome literal |
+| `chat.Source` | `internal/chat` | ACP `session/update` thread content -- `chat.FixtureSource` today, a real ACP/pi-rpc client once one exists |
 
 **Why this matters practically:** every package's tests construct a fake
 implementing the seam, not a real subprocess. If you add a feature that needs

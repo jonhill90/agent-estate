@@ -27,6 +27,7 @@ var Default = Theme{
 		RoleBlocked:      lipgloss.Color("#ef4444"), // board vividColumnColor[Blocked]
 		RoleDone:         lipgloss.Color("#22c55e"), // board vividColumnColor[Done]
 		RoleNeutral:      lipgloss.Color("#6b7280"), // board restrainedColumnColor
+		RoleThought:      lipgloss.Color("#8b8fa3"), // internal/chat thought lines
 	},
 	Border:       lipgloss.RoundedBorder(),
 	Padding:      1,
@@ -60,6 +61,7 @@ var Mono = Theme{
 		RoleBlocked:      lipgloss.Color("#ff0000"),
 		RoleDone:         lipgloss.Color("#00ff44"),
 		RoleNeutral:      lipgloss.Color("#aaaaaa"),
+		RoleThought:      lipgloss.Color("#ff00ff"),
 	},
 	Border:       lipgloss.ThickBorder(),
 	Padding:      2,

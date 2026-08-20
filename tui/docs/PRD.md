@@ -95,14 +95,15 @@ any kind. So "watch the agents talk" can only honestly mean every live
 session's transcript rendered together, which requires an application shell
 capable of showing more than one thing at once.
 
-**Status:** built and tested standalone (`internal/chat` on
-`origin/lane/20-chat-threads`, unmerged) — `chat.Source`, a fixture
-implementation, and two layouts (thread list + transcript; multi-pane tail
-with focus). Explicitly not wired into `cmd/keelson`'s shell; its own commit
-message says adding a fifth flag-selected screen "would have repeated that
-a fourth time," which was the same defect the shell (agent-tui#38) was
-built to fix — chat still needs to be composed into it as a pane the same
-way board/cost/gallery now are. Not on `main` as of `b00db9b`.
+**Status:** shipped as a pane inside the shell (`[f6]`, agent-tui#20) —
+`chat.Source`, a fixture implementation (`chat.FixtureSource`), and two
+layouts (thread list + transcript, with a synthetic unified-feed thread;
+multi-pane tail with focus). Scrollable, not clipped: the thread list and
+the selected/focused transcript are `bubbles/viewport`-backed with an
+always-visible "hidden content" indicator, the fix agent-tui#29 already
+paid for once. What remains: a live `chat.Source` — no lane in this estate
+runs on a structured transport (`acp`/`pi-rpc`) yet, so every thread shown
+today is visibly synthetic fixture data, not a real transcript.
 
 ### Knowledge / memory viewer
 
@@ -148,9 +149,9 @@ carried forward here because they bound every feature above:
 One process. A persistent rail always visible. The other views — board,
 cost, gallery, chat, and whatever comes after — as panes inside that one
 process, not quit-and-relaunch screens behind flags. The anchor feature
-carrying all four of its verbs, safely. **The first half of this — one
-process, a persistent rail, board/cost/gallery as panes — shipped**
-(agent-tui#38, PR #43, `b00db9b`). What remains: attach/detach, chat, and
+carrying all four of its verbs, safely. **One process, a persistent rail,
+board/cost/gallery/chat all as panes — shipped** (agent-tui#38 PR #43,
+agent-tui#20). What remains: attach/detach, a live chat transport, and
 the three defects agent-tui#49 found by driving the shipped shell (bare
 launch fails closed instead of degrading; the board and cost panes fail
 closed rather than helpfully when navigated to without their own

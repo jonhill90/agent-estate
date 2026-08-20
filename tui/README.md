@@ -32,16 +32,16 @@ is on `main` but does not work correctly yet.
 
 **One `tea.NewProgram`, one process.** `internal/shell.Model` owns a
 persistent left rail (every tmux session, live lane state) plus a content
-pane that holds the task board, cost panel or glyph gallery — reached with
-a keypress, never a relaunch (agent-tui#38). `-board`/`-cost`/`-gallery`
-still choose which pane the app *opens* on; they stop being the only way to
-reach it.
+pane that holds the task board, cost panel, glyph gallery or chat —
+reached with a keypress, never a relaunch (agent-tui#38). `-board`/`-cost`/
+`-gallery`/`-chat` still choose which pane the app *opens* on; they stop
+being the only way to reach it.
 
 ```
 go build -o keelson ./cmd/keelson
 
 # opens on the rail with the home pane -- [f2] board, [f3] cost, [f4] gallery,
-# [tab] moves focus between the rail and the content pane
+# [f5] flow, [f6] chat -- [tab] moves focus between the rail and the content pane
 AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson
 
 # same app, opens on the task board pane -- needs a ledger COPY
@@ -53,6 +53,9 @@ AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson -cost
 
 # same app, opens on the glyph gallery pane
 AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson -gallery
+
+# same app, opens on the chat pane -- fixture threads today, see below
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson -chat
 ```
 
 The rail is always on screen now, so every invocation needs a supervisor
@@ -141,6 +144,41 @@ flagged `[NF]` where a Nerd Font is required to render as intended. Needs
 no supervisor connection; reads only compiled-in glyph data
 (`lane.Variants`, `lane.Candidates`).
 
+### Chat (`-chat`, `[f6]`)
+
+Threads as ACP sessions, live via `session/update` (agent-tui#20) — a
+thread renders thoughts, tool calls, plans and permission requests as
+those structures, never flattened to prose. Two layouts (`[v]` cycles),
+collapsing the issue's four design options into the two that are
+structurally different renderers (see `internal/chat/layouts.go`'s doc
+comment for why the other two are readings of these, not new screens):
+
+- **Thread list** (default): sessions on the left, the selected thread's
+  transcript on the right. The list's first row is always a synthetic
+  "All (unified)" thread interleaving every real thread chronologically —
+  the issue's "unified activity feed" option, one keypress away rather
+  than a third screen.
+- **Multi-pane** (`[v]` again): every thread tiled and live at once —
+  the direct answer to "see the agents chatting with each other" plural.
+  `[f]` focuses the selected tile into the same scrollable single-thread
+  view the list layout uses, with the rest as a compact peripheral strip
+  (the issue's "focus + peripherals" option).
+
+The thread list and the transcript both scroll (`bubbles/viewport`) rather
+than clipping silently — `[pgup]`/`[pgdn]`, `[home]`/`[end]` move the
+transcript, `[j]`/`[k]`/`[n]`/`[p]`/`[1-9]` move thread selection with the
+list auto-scrolling to keep it visible. Any pane with content past its
+edges renders an explicit "▲/▼ more" or "N more -- [f] to focus" marker —
+never a pane that is quietly shorter than its own content, the exact shape
+of agent-tui#29's board-scroll regression.
+
+**No live `Source` yet.** `chat.FixtureSource` (visibly synthetic data) is
+the only implementation shipped: no lane in this estate runs on a
+structured transport (`acp`/`pi-rpc`) today, and a screen-scraped
+send-keys transcript has no message boundaries to recover into ACP's
+structured shape — see `internal/chat/fixture.go`'s doc comment for what a
+real `Source` needs.
+
 ## Themes and glyphs are data, not code
 
 Every look-and-feel literal in the render path — colour, border character,
@@ -201,11 +239,12 @@ reading the source. Confirmed still present at `b00db9b`, 2026-08-16:
 
 ## What this is not, yet
 
-- **No chat screen.** Built and tested standalone
-  (`internal/chat`, thread list + transcript and multi-pane-tail layouts,
-  an ACP-informed design) on unmerged `origin/lane/20-chat-threads`. Its
-  own commit message says it stopped short of wiring in specifically to
-  avoid adding a fifth flag-selected screen — it needs the shell above.
+- **Chat has no live transport.** `internal/chat` is wired into the shell
+  (`[f6]`, agent-tui#20) and renders against `chat.Source`, but the only
+  `Source` shipped is `chat.FixtureSource` — visibly synthetic data. No
+  lane in this estate runs on a structured transport (`acp`/`pi-rpc`)
+  today, so there is nothing real to read yet; see the "Chat" section
+  above for what a live `Source` needs.
 - **No knowledge/memory viewer, no AgentBox sandboxes.** No code exists for
   either as of this SHA.
 - **The anchor feature is missing two of its four verbs** — see "The rail"

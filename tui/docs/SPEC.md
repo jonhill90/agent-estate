@@ -29,7 +29,7 @@ claim that the product is named that. See `AGENTS.md`'s naming note.
 running `internal/shell.Model` (agent-tui#38, landed on `main` in PR #43).
 `internal/shell.Model` owns a persistent left rail (`internal/rail`, always
 visible) and a content area that holds one of four panes — board, cost,
-gallery, flow (`internal/flow`, agent-tui#64) — switched with `[f1]`–`[f5]`,
+gallery, flow, chat (`internal/flow`, agent-tui#64; `internal/chat`, agent-tui#20) — switched with `[f1]`–`[f6]`,
 never a relaunch. `[tab]` toggles keyboard focus between the rail and
 whichever pane is active.
 
@@ -179,13 +179,17 @@ number or nested object as a colour value previously failed
 runtime in every pane, live; it never calls `theme.Save`, so a user's own
 config file is untouched until they edit it themselves.
 
-### `chat.Source` — **not on `main`**
+### `chat.Source` (agent-tui#20)
 
-`internal/chat` exists only on `origin/lane/20-chat-threads` (unmerged).
-There, `chat.Source` is the fixture-backed read seam (`chat.FixtureSource`
-is the only implementation shipped), with two `Layouts`. It is not part of
-the `b00db9b` tree; do not document it as a current seam without saying so.
-See `docs/PRD.md`'s chat section for status.
+`internal/chat` is wired into `internal/shell` as `PaneChat` (`[f6]` -- `[f5]` was already `PaneFlow`, agent-tui#64, by the time this rebased onto it).
+`chat.Source` is the fixture-backed read seam (`chat.FixtureSource` is the
+only implementation shipped — no lane in this estate runs on a structured
+transport yet, see `internal/chat/fixture.go`'s doc comment), with two
+`Layouts` (`internal/chat/layouts.go`). The thread list and the "big"
+transcript are `bubbles/viewport`-backed rather than a plain string
+clipped to a height, with an always-reserved indicator row so overflowing
+content is both flagged and reachable (`pgup`/`pgdn`, `home`/`end`, or
+`[f]` to focus a grid tile) — see `docs/PRD.md`'s chat section for status.
 
 ## MCP transport
 
@@ -263,10 +267,11 @@ All items below verified 2026-08-16 against `b00db9b` unless noted:
 1. **`[a]ttach`/`[d]etach` are gone from the rail's keybindings.** The
    interface methods remain (`session.Interface`), uncalled. Restoring them
    needs `agent-supervisor#189` (client-identity plumbing) first.
-2. **Chat does not exist on `main`.** Built and tested standalone on
-   unmerged `origin/lane/20-chat-threads`; its own commit message states it
-   stopped specifically to avoid adding a fifth flag-selected screen ahead
-   of the shell landing.
+2. **Chat has no live transport.** `internal/chat` is wired into the shell
+   (agent-tui#20, `[f6]`) and renders correctly, but the only `chat.Source`
+   shipped is `chat.FixtureSource` — no lane in this estate runs on a
+   structured transport (`acp`/`pi-rpc`) yet, so there is nothing live to
+   read.
 3. **The hill90 1:1 comparison is currently unfalsifiable** — no estate
    access to the web harness to compare against, and no measurement has
    ever been attempted.

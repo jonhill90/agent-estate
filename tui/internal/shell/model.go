@@ -17,6 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/jonhill90/keelson/internal/board"
+	"github.com/jonhill90/keelson/internal/chat"
 	"github.com/jonhill90/keelson/internal/cost"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
@@ -36,6 +37,7 @@ const (
 	PaneCost
 	PaneGallery
 	PaneFlow
+	PaneChat
 )
 
 // focus names which region the keyboard currently drives -- the rail
@@ -72,6 +74,7 @@ type Model struct {
 	cost    cost.Model
 	gallery gallery.Model
 	flow    flow.Model
+	chat    chat.Model
 
 	// boardOK is false when cmd/agent-tui had no -ledger to build a real
 	// board.Fetcher from -- board.go's own -board flag still refuses to
@@ -146,7 +149,7 @@ type Model struct {
 // (with a reason) when no -ledger was available to build a real
 // board.Fetcher; board stays reachable by key but renders unavailableView
 // instead of running board's own fetch loop.
-func New(r rail.Model, b board.Model, boardOK bool, boardUnavailable string, c cost.Model, g gallery.Model, fl flow.Model) Model {
+func New(r rail.Model, b board.Model, boardOK bool, boardUnavailable string, c cost.Model, g gallery.Model, fl flow.Model, ch chat.Model) Model {
 	return Model{
 		rail:             r,
 		board:            b,
@@ -155,6 +158,7 @@ func New(r rail.Model, b board.Model, boardOK bool, boardUnavailable string, c c
 		cost:             c,
 		gallery:          g,
 		flow:             fl,
+		chat:             ch,
 		active:           PaneHome,
 		focus:            focusRail,
 		theme:            theme.Default,
@@ -207,11 +211,12 @@ func (m Model) applyTheme() Model {
 	m.cost = m.cost.WithTheme(m.theme, m.themeNotice)
 	m.gallery = m.gallery.WithTheme(m.theme, m.themeNotice)
 	m.flow = m.flow.WithTheme(m.theme, m.themeNotice)
+	m.chat = m.chat.WithTheme(m.theme, m.themeNotice)
 	return m
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.rail.Init(), m.cost.Init(), m.gallery.Init()}
+	cmds := []tea.Cmd{m.rail.Init(), m.cost.Init(), m.gallery.Init(), m.chat.Init()}
 	if m.boardOK {
 		cmds = append(cmds, m.board.Init(), m.flow.Init())
 	}
@@ -264,6 +269,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "f5":
 			m.active = PaneFlow
+			return m, nil
+		case "f6":
+			m.active = PaneChat
 			return m, nil
 		}
 		return m.routeKey(msg)
@@ -333,6 +341,10 @@ func (m Model) routeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		next, cmd := m.flow.Update(msg)
 		m.flow = next.(flow.Model)
 		return m, cmd
+	case PaneChat:
+		next, cmd := m.chat.Update(msg)
+		m.chat = next.(chat.Model)
+		return m, cmd
 	default:
 		return m.homeKey(msg)
 	}
@@ -391,6 +403,10 @@ func (m Model) routeAll(msg tea.Msg) (Model, tea.Cmd) {
 	m.gallery = next.(gallery.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.chat.Update(msg)
+	m.chat = next.(chat.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -443,6 +459,10 @@ func (m Model) resize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 
 	next, cmd = m.gallery.Update(contentSize)
 	m.gallery = next.(gallery.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.chat.Update(contentSize)
+	m.chat = next.(chat.Model)
 	cmds = append(cmds, cmd)
 
 	return m, tea.Batch(cmds...)
@@ -501,6 +521,8 @@ func (m Model) contentView() string {
 			return m.unavailableView()
 		}
 		return m.flow.View()
+	case PaneChat:
+		return m.chat.View()
 	default:
 		return m.homeView()
 	}
@@ -524,7 +546,13 @@ func (m Model) footer() string {
 	if m.focus == focusContent {
 		focusName = "content"
 	}
-	line := "[tab] focus:" + focusName + "  [f1] home [f2] board [f3] cost [f4] gallery [f5] flow  [q/ctrl+c] quit"
+	// Compact by design past "[f2] board" (the one substring model_teatest_test.go
+	// pins exactly): six pane keys plus quit must fit inside a realistic
+	// terminal width alongside a themeSaveErr appended below, or the error
+	// truncates before it says anything -- see this line's own git blame
+	// for the width budget that broke when [f5] flow, then [f6] chat, were
+	// added.
+	line := "[tab] focus:" + focusName + " [f1]home [f2] board [f3]cost [f4]gallery [f5]flow [f6]chat [q]quit"
 	// themeSaveErr (agent-tui#51) is folded onto this same line rather
 	// than given its own -- footerHeight is a fixed one row every pane's
 	// own size budget is computed against (see resize()), so a second
@@ -544,6 +572,7 @@ func (m Model) homeView() string {
 		"[f3] cost     view the cost panel (agent-tui#4)",
 		"[f4] gallery  view the glyph gallery (agent-tui#11)",
 		"[f5] flow     watch work move through the pipeline (agent-tui#64)",
+		"[f6] chat     live ACP session threads (agent-tui#20)",
 		"[tab] move focus into the rail on the left",
 	}
 	return legendStyle.Width(m.contentWidth).Height(m.contentHeight).Render(

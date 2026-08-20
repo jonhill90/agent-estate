@@ -27,6 +27,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jonhill90/keelson/internal/board"
+	"github.com/jonhill90/keelson/internal/chat"
 	"github.com/jonhill90/keelson/internal/cost"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
@@ -102,6 +103,12 @@ func main() {
 			"work moving between dispatched/working/review/blocked/done, reading the exact same Snapshot -board "+
 			"does (never a second gh/ledger read; needs the same -ledger the board does). [f5] reaches it from "+
 			"any start (agent-tui#38).")
+		showChat = flag.Bool("chat", false, "start on the chat pane (agent-tui#20) instead of home -- threads as "+
+			"ACP sessions, live via session/update once a lane runs on a structured transport. [f6] reaches it "+
+			"from any start (agent-tui#38) -- [f5] was already claimed by -flow (agent-tui#64) by the time this "+
+			"landed. No lane in this estate is on 'acp' or 'pi-rpc' today (agent-tui#20's own finding), so this "+
+			"renders internal/chat.FixtureSource -- visibly synthetic data proving the seam, never a live "+
+			"transcript.")
 		boardRefresh = flag.Duration("board-refresh", envOrDuration("AGENT_TUI_BOARD_REFRESH", board.DefaultRefreshInterval),
 			"how often -board re-fetches on its own tick (agent-tui#28). The previous hardcoded 5s measured at "+
 				"~8,160 GitHub GraphQL points/hr against gh issue list/gh pr list -- against a shared 5,000/hr "+
@@ -263,6 +270,14 @@ func main() {
 	// comment) -- shell.Model pushes boardModel's own Snapshot into it
 	// after every board.Update, so this is never a second gh/ledger read.
 	flowModel := flow.New()
+	// chat.NewFixtureSource(), not a live Source: agent-supervisor's MCP
+	// surface has no tool that returns message content (see fixture.go's
+	// own doc comment for the two ways a real one could exist). A
+	// screen-scraped transcript was rejected for the same reason agent-tui#20
+	// itself gives -- send-keys panes have no message boundaries to
+	// recover, so scraping one would misrepresent free-text pane output as
+	// ACP's structured session/update shape.
+	chatModel := chat.New(chat.NewFixtureSource())
 
 	start := shell.PaneHome
 	switch {
@@ -274,9 +289,11 @@ func main() {
 		start = shell.PaneGallery
 	case *showFlow:
 		start = shell.PaneFlow
+	case *showChat:
+		start = shell.PaneChat
 	}
 
-	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel, flowModel).
+	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel, flowModel, chatModel).
 		WithStart(start).
 		WithTheme(activeTheme, themeNotice).
 		WithThemeSave(func(th theme.Theme) error { return theme.Save(theme.ConfigPath(), th.ID) })

@@ -19,6 +19,7 @@ import (
 	"github.com/charmbracelet/x/exp/teatest"
 
 	"github.com/jonhill90/keelson/internal/board"
+	"github.com/jonhill90/keelson/internal/chat"
 	"github.com/jonhill90/keelson/internal/cost"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
@@ -42,7 +43,8 @@ func testModel() Model {
 	c := cost.New(func() (cost.Snapshot, error) { return cost.Snapshot{}, nil })
 	g := gallery.New()
 	fl := flow.New()
-	return New(r, b, true, "", c, g, fl)
+	ch := chat.New(chat.NewFixtureSource())
+	return New(r, b, true, "", c, g, fl, ch)
 }
 
 func run(t *testing.T, m Model) *teatest.TestModel {
@@ -114,13 +116,28 @@ func TestFlowUnavailableRendersInPlaceOfFlow(t *testing.T) {
 	c := cost.New(func() (cost.Snapshot, error) { return cost.Snapshot{}, nil })
 	g := gallery.New()
 	fl := flow.New()
-	m := New(r, b, false, "no -ledger configured", c, g, fl)
+	ch := chat.New(chat.NewFixtureSource())
+	m := New(r, b, false, "no -ledger configured", c, g, fl, ch)
 
 	tm := run(t, m)
 	waitFor(t, tm, "[f2] board")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyF5})
 	waitFor(t, tm, "board unavailable")
+}
+
+// TestF6NavigatesToChatPane is the same drive for the chat pane
+// (agent-tui#20) -- chat.Model.View's own title line ("chat") plus its
+// fixture thread title is the marker, same shape as board/cost/gallery's
+// own navigation tests above. Chat is [f6], not [f5]: #68 (flow,
+// agent-tui#64) landed on main first and already claimed [f5] -- see
+// this rebase's own commit message for the conflict this resolves.
+func TestF6NavigatesToChatPane(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "[f2] board")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyF6})
+	waitFor(t, tm, "lane/20-chat-threads")
 }
 
 // TestF1ReturnsToHomePane closes the last shell-footer gap: f2/f3/f4 were
@@ -195,7 +212,8 @@ func TestBoardUnavailableRendersInPlaceOfBoard(t *testing.T) {
 	c := cost.New(func() (cost.Snapshot, error) { return cost.Snapshot{}, nil })
 	g := gallery.New()
 	fl := flow.New()
-	m := New(r, b, false, "no -ledger configured", c, g, fl)
+	ch := chat.New(chat.NewFixtureSource())
+	m := New(r, b, false, "no -ledger configured", c, g, fl, ch)
 
 	tm := run(t, m)
 	waitFor(t, tm, "[f2] board")
