@@ -241,54 +241,35 @@ case "$CMD" in
 
     GUARD_CACHE="$CACHE_DIR/guard-${PROVIDER}-${WINDOW}.json"
 
-    # FAST PATH: a SAFE verdict this recent is still true.
+    # NO FAST PATH HERE, AND THIS COMMENT IS THE REASON.
     #
-    # WHY. `codexbar guard` takes 11-12s on this host (measured 2026-08-20,
-    # three consecutive runs: 11s, 12s, 11s). Three samples plus delays is
-    # ~35s, and this gate is step 0 of EVERY dispatch. The estate was paying
-    # 35s per lane to re-read a number that moves by fractions of a percent
-    # over that span.
+    # PR #429 added one: serve a SAFE verdict straight from $GUARD_CACHE when
+    # it was under 120s old, to avoid three 11-12s codexbar samples on every
+    # dispatch (34s -> 0s). It shipped, and it broke three assertions in
+    # tests/supervisor/test_quota_timeout.sh:
     #
-    # WHAT KEEPS THIS SAFE, and it is the whole design:
+    #     FAIL a cached-but-stale reading still returns 2, never 0
+    #     FAIL ...and shows the cached reading with its age
+    #     FAIL a cache older than the max age still returns 2
     #
-    #   - Only a SAFE verdict is ever short-circuited. A cached WIND DOWN is
-    #     NOT reused to stand down early, and -- far more important -- a
-    #     cached SAFE is the ONLY thing that can skip sampling. There is no
-    #     path here where a stale reading permits spending; there is only a
-    #     path where a fresh one avoids being re-measured.
-    #   - The TTL is 120s by default against a window measured in hours. The
-    #     fastest burn this estate has recorded could not cross the 15%
-    #     floor from a SAFE reading inside two minutes.
-    #   - It reads the SAME cache the sampling loop writes, so the cached
-    #     value is a real codexbar answer, never a synthesised one.
-    #   - QUOTA_SAFE_CACHE_SECONDS=0 disables it entirely and restores the
-    #     always-sample behaviour, for a caller that wants to pay the 35s.
+    # Those tests encode #264 item 4: "stale-but-dated beats hung, but the
+    # gate's own exit code must never soften to 0 just because a cached number
+    # exists." That rule has a real incident behind it -- a gate that read a
+    # cached number as SAFE and spent into an exhausted window, $80 -> $8.
     #
-    # This does NOT touch the #262/#264 fail-safe direction: unreachable is
-    # still UNKNOWN, UNKNOWN is still never SAFE, and a real WIND DOWN in any
-    # sample still beats a later lucky SAFE. The cheap failure (a false
-    # stand-down) remains preferred over the expensive one.
-    SAFE_CACHE_SECONDS="${QUOTA_SAFE_CACHE_SECONDS:-120}"
-    case "$SAFE_CACHE_SECONDS" in ''|*[!0-9]*) SAFE_CACHE_SECONDS=120 ;; esac
-    if [ "$SAFE_CACHE_SECONDS" -gt 0 ] && [ -f "$GUARD_CACHE" ]; then
-      if fp_age=$(cache_age "$GUARD_CACHE") && [ "$fp_age" -le "$SAFE_CACHE_SECONDS" ]; then
-        fp_json=$(cat "$GUARD_CACHE" 2>/dev/null)
-        fp_pct=$(printf '%s' "$fp_json" | python3 -c 'import json,sys;d=json.load(sys.stdin);print(d.get("remainingPercent","?") if not d.get("unavailableReason") else "?")' 2>/dev/null)
-        case "$fp_pct" in
-          ''|*[!0-9]*) : ;;   # unparseable or unavailable -- fall through and sample
-          *)
-            # Re-apply the floor to the cached number rather than trusting a
-            # cached verdict: MIN_REMAINING may differ from the run that
-            # wrote it, and a caller passing a stricter floor must get the
-            # stricter answer.
-            if [ "$fp_pct" -gt "$MIN_REMAINING" ]; then
-              echo "quota: SAFE ${fp_pct}% remaining in $WINDOW (floor ${MIN_REMAINING}%) (cached ${fp_age}s ago, under the ${SAFE_CACHE_SECONDS}s fast path; re-samples after that)"
-              exit 0
-            fi
-            ;;
-        esac
-      fi
-    fi
+    # The reconciliation I could have argued for -- that #264 is about
+    # degrading to a cache AFTER a failed fetch, while a fast path is about
+    # not fetching when a very recent SUCCESSFUL fetch exists -- is a real
+    # distinction. It is also exactly the kind of narrowing that turns a
+    # safety invariant into a special case, and the test cannot tell the two
+    # apart because a freshly-populated cache looks identical either way.
+    # An invariant with an incident behind it outranks 34 seconds.
+    #
+    # If the sampling cost needs to come down, do it where it is actually
+    # spent: codexbar itself takes 11-12s per call (measured 2026-08-20).
+    # Three samples of a fast call is cheap; three samples of a slow one is
+    # not. Make the call fast, or make SAMPLES configurable per caller -- do
+    # not make the gate answer from memory.
 
     wind_down_msg=""
     safe_msg=""
