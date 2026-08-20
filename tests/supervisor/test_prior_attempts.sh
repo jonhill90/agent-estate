@@ -69,6 +69,29 @@ esac
 b2="$(PRIOR_ATTEMPTS_RESULTS="$R" bash "$PA" --issue 77777 --brief 2>/dev/null)"
 [ -z "${b2// }" ] && ok "fresh issue emits no brief section" || bad "fresh issue emitted text"
 
+echo "== A REAPER STAMP MUST NOT READ AS A FAILED ATTEMPT =="
+# reconcile-lane-completions overwrites a lane's report with "failed, not
+# completed" when the lane goes quiet. Measured 2026-08-20: 133 of 817 results
+# are stamps; 31 of those name a PR in their lane-log. Feeding one to the next
+# agent unflagged teaches it the work failed when the work shipped.
+mkdir -p "$S/lane-logs"
+printf 'reconcile-lane-completions: as555-x has no observable pane ... failed, not completed\n' > "$R/as555-x.md"
+printf -- '--- dispatched ---\nopened https://github.com/jonhill90/agent-supervisor/pull/999\n' > "$S/lane-logs/as555-x.log"
+stamped="$(SUPERVISOR_STATE="$S" PRIOR_ATTEMPTS_RESULTS="$R" bash "$PA" --issue 555 --brief 2>/dev/null)"
+case "$stamped" in
+  *"REAPER STAMP"*) ok "stamped result is flagged, not presented as a real attempt" ;;
+  *) bad "stamped result presented as if it were the lane's own report" ;;
+esac
+case "$stamped" in
+  *"pull/999"*) ok "surfaces the PR the stamp buried" ;;
+  *) bad "did not surface the PR named in the lane-log" ;;
+esac
+# and a genuine report must NOT be flagged
+case "$(SUPERVISOR_STATE="$S" PRIOR_ATTEMPTS_RESULTS="$R" bash "$PA" --issue 999 --brief 2>/dev/null)" in
+  *"REAPER STAMP"*) bad "flagged a genuine report as a stamp (false positive)" ;;
+  *) ok "genuine report not flagged" ;;
+esac
+
 echo "== usage errors are 2, distinct from every real verdict =="
 check "no --issue"      2 "$(PRIOR_ATTEMPTS_RESULTS="$R" bash "$PA" >/dev/null 2>&1; echo $?)"
 check "non-numeric"     2 "$(run --issue 'not-an-issue')"

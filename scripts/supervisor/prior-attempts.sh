@@ -137,9 +137,29 @@ and two on 2026-08-19 had already expired when they were reported.
 EOF
   printf '%s\n' "$ordered" | while IFS= read -r f; do
     [ -z "$f" ] && continue
-    printf -- '- `%s` (%s, %s bytes)\n' "$f" \
+    note=""
+    # A REAPER STAMP IS NOT A RESULT. `reconcile-lane-completions` overwrites a
+    # lane's own report with "failed, not completed" when the lane went quiet --
+    # measured 2026-08-20: 133 of 817 result files are stamps, 101 of those have
+    # a lane-log, and 31 of THOSE name a pull request. One specimen, ad275-fix275,
+    # is stamped "failed, not completed" while its lane-log names PR #283, which
+    # is MERGED. Feeding that to the next agent would teach it the work failed
+    # when the work shipped. Flag it and point at the surviving evidence.
+    if grep -q 'failed, not completed\|never signalled completion' "$f" 2>/dev/null; then
+      t="$(basename "$f" .md)"
+      lg="$STATE/lane-logs/$t.log"
+      inc="$STATE/incoming/$t.md"
+      note=" — **REAPER STAMP, not the lane's own report.** The lane went quiet and this file was overwritten; it does NOT mean the work failed."
+      if [ -f "$lg" ]; then
+        pr="$(grep -oE 'https://github\.com/[^ ",]+/pull/[0-9]+' "$lg" 2>/dev/null | head -1)"
+        [ -n "$pr" ] && note="$note Its lane-log names $pr — check that before believing the stamp."
+        note="$note Real output: \`$lg\`"
+      fi
+      [ -f "$inc" ] && note="$note and \`$inc\`"
+    fi
+    printf -- '- `%s` (%s, %s bytes)%s\n' "$f" \
       "$(stat -f '%Sm' -t '%Y-%m-%d %H:%M' "$f" 2>/dev/null)" \
-      "$(wc -c < "$f" 2>/dev/null | tr -d ' ')"
+      "$(wc -c < "$f" 2>/dev/null | tr -d ' ')" "$note"
   done
   if [ "$count" -gt "$MAX" ]; then
     printf '\n(%s older attempts not listed; `ls %s/%s-*` for the rest.)\n' \
