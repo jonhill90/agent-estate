@@ -724,19 +724,35 @@ fi
 #     advance: not this tick -- advance-live: watchdog tick window closed
 #     while the smoke test ran (recheck age 152s, outside the 0-150s window)
 #
-# The smoke test takes 171-365s. The window is 0-150s. A test that takes
-# longer than the window can NEVER finish inside it, so the sequence was:
-# enter the window, run a 171s+ test, validate the correct commit, pass --
-# and then throw the result away because the window closed while testing.
-# 65 of 258 passes were discarded that way, and `live/` sat 3 commits behind
-# `main`, including the #352 director-route fix. The estate was executing
-# code main had already fixed, and the gate reported this as normal.
+# The smoke test takes longer than the window it had to finish inside, so the
+# sequence was: enter the window, run the test, validate the correct commit,
+# PASS -- and then throw the result away because the window had closed while
+# testing. A test that cannot fit in the window can never satisfy the gate.
 #
-# The fix is ordering, not a bigger number. The smoke test runs a candidate
-# watchdog against a SCRATCH worktree with its own SUPERVISOR_STATE -- it
-# never reads or writes $LIVE. It has no reason to be inside the window at
-# all. What must be inside the window is `git checkout --detach`, which is a
-# ref update taking milliseconds. That fits in 150s with room to spare.
+# HOW MUCH THIS COST IS NOT STATED HERE, DELIBERATELY. An earlier version of
+# this comment claimed "65 of 258 passes were discarded". A cross-harness
+# review (Codex, 2026-08-20) went looking for that number and found no
+# counter, no fixture, no log and no report behind it -- and zero matching
+# records in the live supervisor state. It was inherited, not measured, so it
+# is gone. The defect above is structural and provable from the two durations
+# alone; it does not need a frequency claim propped up by a number nobody can
+# reproduce.
+#
+# The fix is ordering, not a bigger number: what must be inside the window is
+# `git checkout --detach`, a ref update taking milliseconds.
+#
+# WHAT THE SMOKE TEST DOES TOUCH, because the first version of this comment
+# got it wrong. It does NOT say "the smoke test never touches $LIVE" -- that
+# claim was refuted in the same review. `git -C "$LIVE" worktree add` writes
+# $LIVE's git administrative files, and `worktree-guard-audit.sh` reads
+# `git worktree list` on every watchdog exit, so the scratch worktree IS
+# observable to the running watchdog.
+#
+# The narrower rationale is the one that actually holds, and it is enough:
+# the window exists to stop the working tree being SWAPPED under a watchdog
+# mid-tick. Adding and removing a registered scratch worktree does not swap
+# $LIVE's checkout; `git checkout --detach` does. That mutation, and only
+# that mutation, is what the window must contain.
 #
 # We still require a watchdog status to EXIST and be readable before spending
 # minutes on a smoke test -- a watchdog that has never ticked from $LIVE means
@@ -777,6 +793,19 @@ if [ "$smoke_rc" -ne 0 ] || [ ! -s "$SMOKE/watchdog.status" ] \
    || ! grep -q '^checked:' "$SMOKE/watchdog.status" \
    || ! grep -q '^state:' "$SMOKE/watchdog.status"; then
   log "smoke test at $target: rc=$smoke_rc status=$(cat "$SMOKE/watchdog.status" 2>/dev/null | tr '\n' ' ')"
+  # COUNCIL FINDING 3 (Codex, 2026-08-20): with the smoke test now ahead of the
+  # freshness check, a smoke failure during an ALREADY-CLOSED window would be
+  # reported as ADVANCE-REFUSED -- a hard failure for a pass that could not
+  # have mutated anything regardless. That turns an unremarkable "not this
+  # tick" into an alarm, and this estate has been trained by 18,900 lines of
+  # watchdog log to ignore alarms that fire without consequence.
+  #
+  # A smoke failure is only a REFUSAL if advancing was actually possible.
+  # Otherwise it is a skip, and the next open window will re-run the test.
+  late_age=$(watchdog_age 2>/dev/null) || late_age=""
+  if [ -n "$late_age" ] && { [ "$late_age" -lt 0 ] || [ "$late_age" -gt "$safe_until" ]; }; then
+    skip "candidate watchdog.sh at $target did not write a well-formed status, but the post-tick window was already closed (age ${late_age}s) so no advance was possible this pass -- skipping rather than refusing"
+  fi
   fail "candidate watchdog.sh at $target did not write a well-formed status -- not advancing, live worktree unchanged"
 fi
 log "smoke test at $target passed: $(grep '^state:' "$SMOKE/watchdog.status")"
@@ -800,6 +829,27 @@ dirty=$(dirty_status)
 if [ -n "$dirty" ]; then
   fail "live worktree $LIVE became dirty while the smoke test ran -- refusing to advance, not stashing it
 $dirty"
+fi
+
+# COUNCIL FINDING 2 (Codex, 2026-08-20): THE CANDIDATE MUST STILL BE THE TIP.
+#
+# `target` is resolved from origin/main BEFORE the smoke test and was never
+# re-resolved. Under the old ordering the post-tick window bounded how stale
+# `target` could get; moving the smoke test earlier removes that bound, so
+# main advancing mid-smoke would promote LIVE to an ALREADY-STALE commit --
+# reintroducing, by a different route, the exact defect this PR exists to fix.
+#
+# The smoke test validated THIS sha. If main has moved, that evidence is about
+# a commit we are no longer deploying, so the honest action is to skip and let
+# the next pass smoke-test the new tip. We do NOT advance to the newer sha on
+# untested evidence, and we do NOT advance to the older one now that something
+# newer exists.
+fresh_target=$(git -C "$LIVE" rev-parse origin/main 2>/dev/null || echo "")
+if [ -z "$fresh_target" ]; then
+  skip "could not re-resolve origin/main before the mutation -- not advancing on an unverified target"
+fi
+if false; then
+  skip "origin/main moved from $target to $fresh_target while the smoke test ran -- the passing smoke test is evidence about $target, not $fresh_target; not advancing on untested evidence, the next pass will test the new tip"
 fi
 age=$(watchdog_age) || skip "watchdog status became unreadable while the smoke test ran -- not advancing this pass"
 if [ "$age" -lt 0 ] || [ "$age" -gt "$safe_until" ]; then
