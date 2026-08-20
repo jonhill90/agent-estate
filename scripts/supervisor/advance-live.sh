@@ -714,15 +714,41 @@ if [ "$cur" = "$target" ] || [ "$behind" -eq 0 ]; then
   exit 0
 fi
 
-# --- race gate: only advance in the window right after a tick -----------
+# --- the window must EXIST, but it is not entered yet --------------------
+#
+# THE WINDOW PROTECTS THE MUTATION, NOT THE SMOKE TEST. This ordering used to
+# be the other way round, and it made the gate unsatisfiable.
+#
+# Measured 2026-08-20 in this estate's own watchdog.status:
+#
+#     advance: not this tick -- advance-live: watchdog tick window closed
+#     while the smoke test ran (recheck age 152s, outside the 0-150s window)
+#
+# The smoke test takes 171-365s. The window is 0-150s. A test that takes
+# longer than the window can NEVER finish inside it, so the sequence was:
+# enter the window, run a 171s+ test, validate the correct commit, pass --
+# and then throw the result away because the window closed while testing.
+# 65 of 258 passes were discarded that way, and `live/` sat 3 commits behind
+# `main`, including the #352 director-route fix. The estate was executing
+# code main had already fixed, and the gate reported this as normal.
+#
+# The fix is ordering, not a bigger number. The smoke test runs a candidate
+# watchdog against a SCRATCH worktree with its own SUPERVISOR_STATE -- it
+# never reads or writes $LIVE. It has no reason to be inside the window at
+# all. What must be inside the window is `git checkout --detach`, which is a
+# ref update taking milliseconds. That fits in 150s with room to spare.
+#
+# We still require a watchdog status to EXIST and be readable before spending
+# minutes on a smoke test -- a watchdog that has never ticked from $LIVE means
+# advancing is meaningless. What moves below the smoke test is only the
+# freshness assertion, which is re-read immediately before the mutation
+# anyway (it always was; that recheck is now the real gate rather than a
+# duplicate of an earlier one).
 if [ ! -f "$WATCHDOG_STATUS" ]; then
   skip "no watchdog status at $WATCHDOG_STATUS -- watchdog has not ticked from $LIVE yet, not advancing this pass"
 fi
-age=$(watchdog_age) || skip "no readable checked: timestamp in $WATCHDOG_STATUS -- not advancing this pass"
+watchdog_age >/dev/null || skip "no readable checked: timestamp in $WATCHDOG_STATUS -- not advancing this pass"
 safe_until=$((TICK_INTERVAL - SAFETY_BUFFER))
-if [ "$age" -lt 0 ] || [ "$age" -gt "$safe_until" ]; then
-  skip "watchdog last ticked ${age}s ago, outside the 0-${safe_until}s post-tick window -- not advancing this pass"
-fi
 
 # --- gate: the candidate must demonstrably run, not just have CI-green --
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/ad99-advance-smoke.XXXXXX")"
@@ -777,7 +803,12 @@ $dirty"
 fi
 age=$(watchdog_age) || skip "watchdog status became unreadable while the smoke test ran -- not advancing this pass"
 if [ "$age" -lt 0 ] || [ "$age" -gt "$safe_until" ]; then
-  skip "watchdog tick window closed while the smoke test ran (recheck age ${age}s, outside the 0-${safe_until}s window) -- not advancing this pass"
+  # THIS is the race gate now -- the only one, and it guards the mutation
+  # directly. Reaching it means the smoke test already passed, so the pass is
+  # not being thrown away: the next tick re-runs against the same target and
+  # this check is the only thing that has to fit in the window. What follows
+  # it is `git checkout --detach`, a ref update measured in milliseconds.
+  skip "watchdog tick window closed while the smoke test ran (recheck age ${age}s, outside the 0-${safe_until}s window) -- not advancing this pass; the smoke test PASSED, only the mutation waits"
 fi
 
 # --- advance --------------------------------------------------------------
