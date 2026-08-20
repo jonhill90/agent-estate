@@ -831,15 +831,26 @@ python3 -m unittest discover -s tests -v
 python3 -m py_compile scripts/supervisor/*.py
 ```
 
-The first command is this repository's own test command, run from the
-repository root, and `.github/workflows/validate.yml` runs it on every
-`pull_request`; it discovers this core's tests under `tests/supervisor/`
-along with the rest of the suite — including the stub-driven bash suites for
-`lanes.sh`, `watchdog.sh`, `claim.sh`, `worktree.sh` and `dispatch.sh`, which
-`test_shell_suites.py` runs as
+The first command is this repository's own test command, run locally from
+the repository root; it discovers this core's tests under
+`tests/supervisor/` along with the rest of the suite — including the
+stub-driven bash suites for `lanes.sh`, `watchdog.sh`, `claim.sh`,
+`worktree.sh` and `dispatch.sh`, which `test_shell_suites.py` runs as
 subtests. Until that shim existed the sentence above was false for them: they
 were in no workflow and no test shelled out to them, so a regression in
 `lanes.sh` would have reached `main` green.
+
+`.github/workflows/validate.yml` runs the same tests on every `pull_request`,
+but not as that one command (agent-supervisor#440: the 89 bash suites,
+executed serially inside `test_shell_suites_pass`, owned ~99% of a 22-minute
+run). The Python tests run in their own `unit-tests` job
+(`SHELL_SUITE_SKIP=1` so this job does not also run all 89 bash suites);
+`plan-shell-shards` bin-packs the currently-discovered `test_*.sh` files by
+measured wall time (`scripts/ci/plan_shell_shards.py`,
+`tests/supervisor/shell_suite_timings.json`) into 5 balanced `shell-suites`
+matrix shards, each invoking `test_shell_suites.py` directly with
+`SHELL_SUITE_ONLY` set to its assigned subset. All three jobs must be green
+for `ci_gate.py` to allow a merge — see `merge-pr.sh`.
 
 `test_bootstrap_session.sh`, `test_lane_done.sh` and `test_restore.sh` also
 gate real-tmux checks behind `command -v tmux`, skipping loudly

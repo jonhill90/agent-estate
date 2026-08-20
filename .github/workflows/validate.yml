@@ -22,17 +22,68 @@ on:
 permissions:
   contents: read
 
+# agent-supervisor#440: this used to be one `test` job running
+# `python -m unittest discover -s tests -v` -- 801 Python tests plus 89 bash
+# integration suites, the bash ones executed *serially inside a single
+# Python test* (test_shell_suites.py::test_shell_suites_pass). Measured
+# directly against a real run (32415643900, instrumented with a per-suite
+# timing print): the 89 bash suites took 1306.1s of the ~1330s total --
+# 99%+ of CI's 22 minutes was that one test, and within it the distribution
+# was concentrated-with-a-long-tail, not either extreme (top 10 suites =
+# 68% of the time, but the remaining 79 are not negligible at ~5.4s
+# average) -- which is what calls for balanced-by-time bin-packing across
+# several shards, not carving "the slow ones" into their own job while the
+# rest of the 89 stay serial. `plan-shell-shards` bin-packs the *currently
+# discovered* test_*.sh files (never a static list) into 5 shards, each
+# landing within a few tenths of a second of the others
+# (scripts/ci/plan_shell_shards.py). The 801 Python tests run in their own
+# job in parallel with those shards instead of waiting behind them.
 jobs:
-  test:
+  unit-tests:
     runs-on: ubuntu-latest
-    # agent-supervisor#380: no timeout was set, so a stalled run fell back to
-    # GitHub's 360min default -- confirmed against two runs on 2026-08-18
-    # (32093245625, 32087480740) that each ran the full 360.3/360.4min before
-    # being auto-cancelled, with no test output either time. The real suite,
-    # measured across recent completed runs on 2026-08-19, takes 19m33s-21m34s
-    # end to end -- 30 gives headroom above that without leaving a hang
-    # effectively unbounded again.
-    timeout-minutes: 30
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - run: python -m unittest discover -s tests -v
+        env:
+          # The 89 bash suites run in the shell-suites shards below, not
+          # here -- without this, this job would run all 89 serially AGAIN
+          # on top of the sharded jobs, buying nothing.
+          SHELL_SUITE_SKIP: "1"
+
+  plan-shell-shards:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      total_suites: ${{ steps.plan.outputs.total_suites }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - id: plan
+        run: |
+          python3 scripts/ci/plan_shell_shards.py 5 > /tmp/plan.json
+          echo "matrix=$(python3 -c 'import json; print(json.dumps(json.load(open("/tmp/plan.json"))["matrix"]))')" >> "$GITHUB_OUTPUT"
+          echo "total_suites=$(python3 -c 'import json; print(json.load(open("/tmp/plan.json"))["total_suites"])')" >> "$GITHUB_OUTPUT"
+
+  shell-suites:
+    needs: plan-shell-shards
+    runs-on: ubuntu-latest
+    name: shell-suites (shard ${{ matrix.shard.shard }})
+    # agent-supervisor#380: the real suite, measured end to end, ran
+    # 19m33s-21m34s before this split. A single shard's bin-packed share is
+    # ~261s of suite time plus setup/tmux-install overhead -- 15 gives ample
+    # headroom above that without leaving a hang effectively unbounded.
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJson(needs.plan-shell-shards.outputs.matrix) }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
@@ -40,4 +91,13 @@ jobs:
           python-version: "3.12"
       - name: Install tmux
         run: sudo apt-get update && sudo apt-get install -y tmux
-      - run: python -m unittest discover -s tests -v
+      - run: python -m unittest tests.supervisor.test_shell_suites -v
+        env:
+          # #440 fix: join(..., '\n') emits a literal backslash-n, not a real
+          # newline -- GH Actions expression strings don't interpret escapes.
+          # Confirmed directly against run 32418135347: every shard's
+          # SHELL_SUITE_ONLY was one unsplit string with literal \n bytes, so
+          # every name failed the exists-on-disk check and every shard
+          # RuntimeError'd before running a single suite. Comma has no such
+          # escaping problem and no suite name contains one.
+          SHELL_SUITE_ONLY: ${{ join(matrix.shard.suites, ',') }}
