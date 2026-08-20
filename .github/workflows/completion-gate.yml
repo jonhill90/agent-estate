@@ -1,0 +1,60 @@
+# Wire completion-gate.sh into CI.
+#
+# This workflow exists so the gate has a CALLER on the day it is written. The
+# estate has shipped tested code with zero callers at least five times -- a
+# 302-line transport module asked for 23 times and never wired, a 183-line
+# cleanup script run once by hand, a session bootstrap that is the only thing
+# able to create a session and is invoked by nothing. `worktree.sh:79` records
+# the pattern in the repo's own words.
+#
+# Its own test suite asserts this file exists. Delete this workflow and
+# test_completion_gate.sh goes red -- which is the point: the anti-orphan check
+# is mutation-verifiable, not a promise.
+#
+# NOTE ON JOB NAMING. The job is deliberately NOT called `gate:`. Two existing
+# workflows (fixpass-evidence.yml, ui-evidence.yml) both declare `gate:`, and
+# ci_gate.py de-duplicates check runs by name alone -- so the later run erases
+# the earlier one. That was demonstrated against PR #394's real SHA: a genuine
+# ui-evidence FAILURE was discarded because another job succeeded three seconds
+# later. Adding a third `gate:` would widen a live defect.
+name: completion-gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  completion-gate-selftest:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # the gate diffs against origin/main; a shallow clone cannot
+
+      - name: Shell syntax
+        run: bash -n scripts/supervisor/completion-gate.sh
+
+      # The suite asserts the gate FAILS when it should: missing report, empty
+      # report, a report describing work nobody did, an unreadable directory.
+      # An assertion-shaped check that cannot go red is the defect this repo is
+      # remediating; this step is where that is proven, every PR.
+      - name: Gate self-test (must fail when it should)
+        run: bash tests/supervisor/test_completion_gate.sh
+
+      # Mutation check, run in CI rather than trusted from a comment: break the
+      # gate's central rule and prove the suite notices. A test that cannot
+      # detect a broken gate is not a test.
+      - name: Mutation check -- a broken gate must be caught
+        run: |
+          set -uo pipefail
+          cp scripts/supervisor/completion-gate.sh /tmp/gate.orig
+          # Make the gate always succeed -- the failure mode this estate keeps shipping.
+          printf '#!/usr/bin/env bash\nexit 0\n' > scripts/supervisor/completion-gate.sh
+          if bash tests/supervisor/test_completion_gate.sh >/dev/null 2>&1; then
+            cp /tmp/gate.orig scripts/supervisor/completion-gate.sh
+            echo "::error::MUTATION SURVIVED - the suite passes against a gate that always exits 0. The suite is decoration."
+            exit 1
+          fi
+          cp /tmp/gate.orig scripts/supervisor/completion-gate.sh
+          echo "mutation correctly detected"
