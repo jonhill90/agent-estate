@@ -270,6 +270,63 @@ if [ "$rc" -eq 1 ]; then ok "#376: unresolved + NOT marked external still refuse
 if [ ! -f "$MARKER" ]; then ok "#376: ...and never merges"; else bad "#376: unresolved + not external -- never merges" "$out"; fi
 echo "$out" | grep -q "unresolved" && ok "#376: unresolved-and-not-external refusal names the reason" || bad "#376: unresolved-and-not-external refusal named" "$out"
 
+# --- agent-supervisor#415: PR #400's exact shape -- no closing-issue
+# reference AND a branch name that doesn't match the legacy
+# `lane/fix/feat/chore/docs` regex (`feat/prior-attempts`), so both the
+# issue-linkage path and the branch-regex fallback miss. The ledger DOES
+# hold a real contributor record for it, though: `record-pr-for-task`,
+# written the way `lane-done.sh` writes it at completion (not `seed_author`,
+# which links by issue). `author_lane_for`'s new fourth resolution path
+# (`cli.py pr-task`) must find it and merge on an otherwise-independent
+# verdict -- the same PR that used to dead-end at "author lane unresolved".
+# ============================================================================
+rm -f "$MARKER"
+cat > "$FIX/head_64.json" <<'S'
+{"headRefOid": "sha-64"}
+S
+green_checkruns sha-64
+cat > "$FIX/author_64.json" <<'S'
+{"headRefName": "feat/prior-attempts", "closingIssuesReferences": [], "commits": []}
+S
+cat > "$FIX/reviews_64.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:9\nReviewed-SHA: sha-64", "createdAt": "2026-08-20T00:00:00Z"}]}
+S
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane t:8 --task as400-fixpass400 --summary "seed" --pane-id %98 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 400 --github "$REPO" \
+  --harness claude >/dev/null
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-completion --task as400-fixpass400 --note done >/dev/null
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-pr-for-task --task as400-fixpass400 --repo "$REPO" --pr 64 >/dev/null
+register_tmux_lane t:9 %91
+out=$("$MERGE_PR" "$REPO" 64 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "#415: pr-task-only authorship (no issue, non-matching branch) merges"; else bad "#415: pr-task-only authorship merges" "got rc=$rc: $out"; fi
+if [ -f "$MARKER" ]; then ok "#415: ...and actually calls gh pr merge"; else bad "#415: pr-task-only authorship -- gh pr merge called" "$out"; fi
+echo "$out" | grep -q "independence confirmed" && ok "#415: success names independence" || bad "#415: success names independence" "$out"
+
+# --- ...and the same pr-task-resolved authorship still catches a self-review:
+# the reviewer lane IS the recorded contributor lane, so this must refuse
+# exactly like the #179 reproduction (PR 43 above) does -- the new
+# resolution path surfaces evidence, it does not weaken the independence
+# check that consumes it. -----------------------------------------------
+rm -f "$MARKER"
+cat > "$FIX/head_65.json" <<'S'
+{"headRefOid": "sha-65"}
+S
+green_checkruns sha-65
+cat > "$FIX/author_65.json" <<'S'
+{"headRefName": "feat/prior-attempts", "closingIssuesReferences": [], "commits": []}
+S
+cat > "$FIX/reviews_65.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:8\nReviewed-SHA: sha-65", "createdAt": "2026-08-20T00:00:00Z"}]}
+S
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-pr-for-task --task as400-fixpass400 --repo "$REPO" --pr 65 >/dev/null
+out=$("$MERGE_PR" "$REPO" 65 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#415: pr-task-resolved self-review still refused"; else bad "#415: pr-task-resolved self-review refused" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#415: ...and never merges"; else bad "#415: pr-task-resolved self-review -- never merges" "$out"; fi
+echo "$out" | grep -q "reviewed its own PR" && ok "#415: self-review refusal names the reason" || bad "#415: self-review refusal named" "$out"
+
 # --- a verdict with no Review-Lane trailer does not count as independent --
 # agent-supervisor#179's acceptance criterion, reproduced literally: a plain
 # GitHub review-state APPROVED, with no `**Verdict:` / `Review-Lane:` comment
