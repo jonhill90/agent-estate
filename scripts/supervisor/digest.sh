@@ -569,15 +569,17 @@ for repo in $REPOS; do
     # #108: computed HERE, in the shell, because it is a ledger question --
     # jq can only compare the two strings, which is exactly what was wrong.
     reviewer_lane_id=$(jq -r '.reviewer_lane // ""' <<<"$v")
-    author_lane_id=$(jq -r 'if .known == true then (.lane // "") else "" end' <<<"$author_lane")
-    lane_rel=unknown
-    if [ -n "$reviewer_lane_id" ] && [ -n "$author_lane_id" ]; then
+    lane_rel='{"overall":"unknown","matched_lane":null,"matched_task":null}'
+    if [ -n "$reviewer_lane_id" ] && jq -e '.known == true and (.external != true) and ((.contributors // []) | length) > 0' >/dev/null 2>&1 <<<"$author_lane"; then
       # agent-supervisor#332: resolve_lane_relation(), the SAME call
       # merge-pr.sh's enforcement now makes -- this report must not say
       # "independent" for a pairing the enforcement gate would refuse to
       # merge, or the two drift on the one comparison #179 built this file
       # to keep them sharing.
-      lane_rel=$(resolve_lane_relation "$author_lane_id" "$reviewer_lane_id")
+      # agent-supervisor#200: contributor_lane_relation(), the SAME
+      # widened-contributor-set aggregation merge-pr.sh's enforcement now
+      # makes -- see that script's own comment.
+      lane_rel=$(contributor_lane_relation "$author_lane" "$reviewer_lane_id")
     fi
     # #179: the independence decision itself moved to verdict-independence.sh
     # (`independence_verdict`) so merge-pr.sh's ENFORCEMENT of it and this

@@ -104,15 +104,19 @@ fi
 V=$(verdict_for "$REPO" "$NUMBER" "$SHA")
 AUTHOR=$(author_lane_for "$REPO" "$NUMBER")
 REVIEWER_LANE_ID=$(jq -r '.reviewer_lane // ""' <<<"$V")
-AUTHOR_LANE_ID=$(jq -r 'if .known == true then (.lane // "") else "" end' <<<"$AUTHOR")
-LANE_REL=unknown
-if [ -n "$REVIEWER_LANE_ID" ] && [ -n "$AUTHOR_LANE_ID" ]; then
+LANE_REL='{"overall":"unknown","matched_lane":null,"matched_task":null}'
+if [ -n "$REVIEWER_LANE_ID" ] && jq -e '.known == true and (.external != true) and ((.contributors // []) | length) > 0' >/dev/null 2>&1 <<<"$AUTHOR"; then
   # agent-supervisor#332: resolve_lane_relation(), not the bare
   # lane_relation() -- see verdict-independence.sh's own comment. This is
   # the ENFORCEMENT gate (#179); trusting a shape-only "different" here on
   # two ids a renumber could have collided is exactly the self-merge #235
   # left open at this call site.
-  LANE_REL=$(resolve_lane_relation "$AUTHOR_LANE_ID" "$REVIEWER_LANE_ID")
+  # agent-supervisor#200: contributor_lane_relation(), not a single-pair
+  # resolve_lane_relation() call -- AUTHOR now names the FULL contributor
+  # set (author_lane_for's widening), and the reviewer must be proven
+  # different from every one of them, not just the one lane a narrower
+  # resolution used to name "the author".
+  LANE_REL=$(contributor_lane_relation "$AUTHOR" "$REVIEWER_LANE_ID")
 fi
 IND=$(independence_verdict "$V" "$AUTHOR" "$LANE_REL")
 

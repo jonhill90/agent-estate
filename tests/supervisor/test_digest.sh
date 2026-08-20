@@ -736,12 +736,25 @@ chk "PR14 reviewer lane == original author lane stays not independent after late
 grep -q "NOT independent -- author lane t:3 reviewed its own PR" <<<"$(jq -r '.verdict_detail' <<<"$p14")" \
   && ok "PR14 detail proves author did not drift to newer review lanes" \
   || bad "PR14 detail proves author did not drift to newer review lanes" "$p14"
+# agent-supervisor#200: pre-#200, author_lane_for narrowed issue 215's two
+# non-review candidates (as215-first-attempt/t:3, abandoned; as215-second-
+# attempt/t:7, the real author) down to the single lane the head ref names,
+# t:7 -- so a review from the abandoned t:3 attempt read as independent.
+# #200 widens author_lane_for to the FULL contributor set for the issue
+# (contributor-issue-lanes, #190's own primitive), the same over-inclusive
+# set dispatch.sh's `--reviews-pr` guard already refuses to DISPATCH a
+# review to (#190's own docstring: over-including an abandoned attempt is
+# the SAFE direction). t:3 is now correctly recognized as a lane that
+# contributed to issue 215 -- reviewing this PR as t:3 is a self-review by
+# the widened definition, not a stale attempt's independent look-in, and
+# the merge gate must refuse it exactly as it would a fix-pass lane
+# reviewing its own fix.
 p15=$(lp 15)
-chk "PR15 (agent-supervisor#77): a review from the STALE first-attempt lane (t:3) reads independent, because the head ref names t:7 as the real author, not the abandoned t:3 attempt" \
-  "true" "$(jq -r '.verdict_independent' <<<"$p15")"
-grep -q "independent -- author lane t:7, reviewer lane t:3" <<<"$(jq -r '.verdict_detail' <<<"$p15")" \
-  && ok "PR15 detail names the head-ref-resolved author lane (t:7), not the stale first attempt (t:3)" \
-  || bad "PR15 detail names the head-ref-resolved author lane" "$p15"
+chk "PR15 (agent-supervisor#200): a review from t:3 -- an ABANDONED first attempt at issue 215, but still a contributor to it -- is no longer treated as independent, now that the contributor set is widened past just the head-ref-resolved author (t:7)" \
+  "false" "$(jq -r '.verdict_independent' <<<"$p15")"
+grep -q "NOT independent -- author lane t:3 reviewed its own PR" <<<"$(jq -r '.verdict_detail' <<<"$p15")" \
+  && ok "PR15 detail names t:3 as the matched contributor, not the unrelated real author t:7" \
+  || bad "PR15 detail names the matched contributor" "$p15"
 p16=$(lp 16)
 chk "PR16 (agent-supervisor#108): a review from the SAME WINDOW under the post-rename session name is not independent" \
   "false" "$(jq -r '.verdict_independent' <<<"$p16")"
