@@ -362,6 +362,72 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         self.assertEqual(["ad414-headless-task"], report["failed_stale_acceptance"])
         self.assertEqual(0, len(runner.calls))
 
+    def test_accepted_nonobservable_lane_with_pr_evidence_completes_instead_of_failing(self):
+        """agent-supervisor#401, found late (review of the #401 fix itself):
+        `_sweep_nonobservable_accepted` had nothing but silence to go on,
+        same as `_sweep_nonobservable`, but never checked the lane-log
+        before this fix -- a claude-print/pi-rpc lane that reached
+        `accept()`, shipped a PR that MERGED (named in its own lane-log),
+        then went quiet, was stamped "failed, not completed" with zero
+        evidence check. Must complete from that evidence instead, exactly
+        like the pre-acceptance path already does."""
+        self.ledger.register_lane(
+            lane="ad401-accepted-headless", pane_id="claude-print:ad401-accepted-headless",
+            nonce="nonce-414e", harness="claude", repo="/repo/x", server_id="claude-print",
+            session_id="sess-414e", command="claude", transport="claude-print",
+        )
+        self.dispatch("ad401-accepted-headless-task", lane="ad401-accepted-headless", accepted=False)
+        self.ledger.accept("ad401-accepted-headless-task", pane_nonce="nonce-2")
+        self._write_lane_log(
+            "ad401-accepted-headless-task",
+            "opened https://github.com/jonhill90/agent-supervisor/pull/9999 -- MERGED\n",
+        )
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, stale_after=300, clock=lambda: 2_000
+        ).sweep()
+
+        task = self.ledger.get_task("ad401-accepted-headless-task")
+        self.assertEqual("complete", task["status"])
+        self.assertEqual([], report["failed_stale_acceptance"])
+        self.assertEqual(["ad401-accepted-headless-task"], report["completed"])
+        self.assertEqual(["ad401-accepted-headless-task"], report["completed_from_evidence"])
+        result_bytes = Path(task["result_path"]).read_bytes()
+        self.assertIn(b"pull/9999", result_bytes)
+        self.assertEqual(
+            self.ledger.results_dir / "ad401-accepted-headless-task.md", Path(task["result_path"])
+        )
+
+    def test_accepted_nonobservable_lane_without_evidence_still_fails(self):
+        """A fix that stops this path stamping anything at all is a
+        regression that looks exactly like success -- a genuinely dead
+        accepted lane with no lane-log evidence must still be terminated
+        `failed`, and the note must not claim the canonical `<task_id>.md`
+        slot a late genuine report might still need."""
+        self.ledger.register_lane(
+            lane="ad401-accepted-dead", pane_id="claude-print:ad401-accepted-dead",
+            nonce="nonce-414d", harness="claude", repo="/repo/x", server_id="claude-print",
+            session_id="sess-414d", command="claude", transport="claude-print",
+        )
+        self.dispatch("ad401-accepted-dead-task", lane="ad401-accepted-dead", accepted=False)
+        self.ledger.accept("ad401-accepted-dead-task", pane_nonce="nonce-2")
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, stale_after=300, clock=lambda: 2_000
+        ).sweep()
+
+        task = self.ledger.get_task("ad401-accepted-dead-task")
+        self.assertEqual("failed", task["status"])
+        self.assertEqual(["ad401-accepted-dead-task"], report["failed_stale_acceptance"])
+        result_path = Path(task["result_path"])
+        self.assertEqual("ad401-accepted-dead-task.reconcile.md", result_path.name)
+        self.assertFalse((self.ledger.results_dir / "ad401-accepted-dead-task.md").exists())
+        note = result_path.read_bytes()
+        self.assertNotIn(b"failed, not completed", note)
+        self.assertIn(b"no completion signal arrived", note)
+
     def test_accepted_nonobservable_lane_before_stale_after_is_left_unresolved(self):
         """An accepted headless lane younger than `stale_after` may still be
         the one live turn about to call `complete` itself -- must not be
@@ -402,6 +468,92 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         accepted_ids = [t["id"] for t in self.ledger.list_accepted_open_tasks()]
         self.assertNotIn("ad414-mutant-task", delivered_ids)
         self.assertIn("ad414-mutant-task", accepted_ids)
+
+    def _write_lane_log(self, task_id, text):
+        log_dir = self.ledger.root / "lane-logs"
+        log_dir.mkdir(exist_ok=True)
+        (log_dir / f"{task_id}.log").write_text(text)
+
+    def test_nonobservable_lane_with_pr_evidence_completes_instead_of_failing(self):
+        """agent-supervisor#401's own specimen (ad275-fix275): a claude-print
+        lane never signals, but its lane-log already names the PR it opened.
+        That is cheap evidence available at stamp time -- the sweep must
+        complete the task from it rather than stamping the false verdict
+        the issue measured 31 times."""
+        self.ledger.register_lane(
+            lane="ad401-headless", pane_id="claude-print:ad401-headless", nonce="nonce-h",
+            harness="claude", repo="/repo/x", server_id="claude-print", session_id="sess-h",
+            command="claude", transport="claude-print",
+        )
+        self.dispatch("ad401-headless-task", lane="ad401-headless", accepted=False)
+        self._write_lane_log(
+            "ad401-headless-task",
+            'opened https://github.com/jonhill90/agent-dotfiles/pull/283 "done"\n',
+        )
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, stale_after=300, clock=lambda: 2_000
+        ).sweep()
+
+        task = self.ledger.get_task("ad401-headless-task")
+        self.assertEqual("complete", task["status"])
+        self.assertEqual([], report["failed_stale_delivery"])
+        self.assertEqual(["ad401-headless-task"], report["completed"])
+        self.assertEqual(["ad401-headless-task"], report["completed_from_evidence"])
+        result_bytes = Path(task["result_path"]).read_bytes()
+        self.assertIn(b"pull/283", result_bytes)
+        # The canonical slot -- reserved for the lane's own report -- is
+        # exactly where this evidence-backed completion lands.
+        self.assertEqual(self.ledger.results_dir / "ad401-headless-task.md", Path(task["result_path"]))
+
+    def test_nonobservable_lane_without_evidence_does_not_claim_the_work_failed(self):
+        """No lane-log at all -- genuinely no evidence either way. The sweep
+        must still free the lane (`failed`, the only terminal status this
+        schema has for it), but the note it writes must not assert the work
+        failed, and it must not claim the canonical `<task_id>.md` slot the
+        lane's own late report might still need (agent-supervisor#401)."""
+        self.ledger.register_lane(
+            lane="ad401-silent", pane_id="claude-print:ad401-silent", nonce="nonce-s",
+            harness="claude", repo="/repo/x", server_id="claude-print", session_id="sess-s",
+            command="claude", transport="claude-print",
+        )
+        self.dispatch("ad401-silent-task", lane="ad401-silent", accepted=False)
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, stale_after=300, clock=lambda: 2_000
+        ).sweep()
+
+        task = self.ledger.get_task("ad401-silent-task")
+        self.assertEqual("failed", task["status"])
+        self.assertEqual(["ad401-silent-task"], report["failed_stale_delivery"])
+        result_path = Path(task["result_path"])
+        self.assertEqual("ad401-silent-task.reconcile.md", result_path.name)
+        self.assertFalse((self.ledger.results_dir / "ad401-silent-task.md").exists())
+        note = result_path.read_bytes()
+        self.assertNotIn(b"failed, not completed", note)
+        self.assertIn(b"no completion signal arrived", note)
+
+    def test_never_accepted_lane_with_pr_evidence_completes_instead_of_failing(self):
+        """Same cheap-evidence check on the tmux `_fail_unaccepted` path: a
+        lane observed free with no `accepted_at` is not normally evidence of
+        success, but a PR named in its lane-log is a stronger, independent
+        fact and settles it regardless."""
+        self.dispatch("as193-with-pr", accepted=False)
+        self._write_lane_log(
+            "as193-with-pr", "https://github.com/jonhill90/agent-supervisor/pull/9001\n"
+        )
+        runner = FakeLanesRunner(
+            {"agent-supervisor": [{"window": 2, "state": "free", "idle_seconds": 400}]}
+        )
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, idle_after=300).sweep()
+
+        task = self.ledger.get_task("as193-with-pr")
+        self.assertEqual("complete", task["status"])
+        self.assertEqual([], report["failed_unaccepted"])
+        self.assertEqual(["as193-with-pr"], report["completed_from_evidence"])
 
     def test_batches_one_call_per_session_not_per_task(self):
         """Two delivered tasks in the same session must cost ONE `lanes.sh
