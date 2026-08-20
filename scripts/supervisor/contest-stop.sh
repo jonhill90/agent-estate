@@ -5,9 +5,14 @@
 # What about our council we talked about. we need sanity checks outside of this.
 # I mean everything i said is obvious. I should not have needed to say it."
 #
-# He is right, and he said it before: skills#186, filed 2026-08-15 from his own
-# Telegram -- "make collaboration a priority ... sanity check afterwards
-# multiple agents different prompts" -- researched, filed, and never wired.
+# He is right, and he said it before: agent-supervisor#150, filed 2026-08-15
+# from his own Telegram -- "make collaboration a priority ... sanity check
+# afterwards multiple agents different prompts" -- filed, and never wired.
+# (skills#186 is a later, same-day follow-up on the same quote -- it names the
+# concrete gap this script closes ("wire it into the loop, not the prose") but
+# lives in a different repo than the one this dispatch's [repo] arg names, so
+# it cannot be the dispatch's own issue reference. #150 is the agent-supervisor
+# issue asking for exactly this, still open, in the repo this dispatches into.)
 #
 # THE PATTERN THE ESTATE KEEPS REPEATING, of which this is one more instance:
 # build the thing, do not wire it. The corpus exists and no code reads it.
@@ -167,7 +172,7 @@ fi
 if [ -x "$HERE/dispatch.sh" ]; then
   QUOTA_GUARD_TIMEOUT_SECONDS="${QUOTA_GUARD_TIMEOUT_SECONDS:-60}" \
   QUOTA_USAGE_TIMEOUT_SECONDS="${QUOTA_USAGE_TIMEOUT_SECONDS:-60}" \
-  bash "$HERE/dispatch.sh" 186 contest-stop "$BRIEF" jonhill90/agent-supervisor \
+  bash "$HERE/dispatch.sh" 150 contest-stop "$BRIEF" jonhill90/agent-supervisor \
     "$(cd "$HERE/../.." && pwd)" --not-a-review >"$STATE/contest-stop.dispatch.log" 2>&1
   rc=$?
   if [ "$rc" -eq 0 ]; then

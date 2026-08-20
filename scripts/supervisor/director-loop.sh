@@ -245,9 +245,9 @@ if [ "$tick_arrived" -eq 1 ]; then
   #
   # Jon, 2026-08-19: "I should not be the one pointing this out ... we need sanity
   # checks outside of this." Every failure he caught that day was a conclusion
-  # that STOPPED work, reached alone and contested by nobody. skills#186 filed the
-  # same complaint on 2026-08-15 and the council skills were never wired to
-  # anything.
+  # that STOPPED work, reached alone and contested by nobody.
+  # agent-supervisor#150 filed the same complaint on 2026-08-15 and the council
+  # skills were never wired to anything.
   #
   # This fires when the previous tick concluded "nothing" -- rate-limited to once
   # per ~50 minutes by contest-stop.sh itself, and cheap because stop-conclusions
