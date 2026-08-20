@@ -220,6 +220,49 @@ while IFS=$'\t' read -r lane wt; do
   done <<<"$CANDIDATE_FILES"
 done < <(in_flight_lane_files "$EXCLUDE_LANE")
 
+# AN OPEN PR IS A HOLDER TOO, and this half was missing.
+#
+# The loop above asks the LEDGER which lanes hold a worktree. That misses every
+# open PR authored outside the lane system -- by a human, by the watchdog, or by
+# a supervisor working directly. Such a PR has a diff, is unmerged, and is
+# exactly as much of a collision as a live lane: the next lane to touch those
+# files rebases into a conflict, or worse, silently reverts the PR's change.
+#
+# Measured 2026-08-20, and it is why this exists: PR #430 (open, modifying
+# scripts/supervisor/worktree.sh) was invisible here, so #427 -- whose root
+# cause is in that same file -- dispatched clean. Two writers, one file, and the
+# guard said no-conflict. The candidate side already reads `gh pr diff`
+# (`_files_in_pr`); only the holder side did not.
+#
+# Best effort by design, matching this file's existing posture: if `gh` cannot
+# be reached the PR half contributes nothing and the lane half still runs. A
+# collision check that refuses every dispatch when GitHub is slow would be
+# removed within a day, and a guard nobody runs guards nothing.
+open_pr_files() {
+  local repo="$1" exclude_pr="$2" gh_args=() n
+  [ -n "$repo" ] && gh_args=(-R "$repo")
+  command -v gh >/dev/null 2>&1 || return 0
+  gh pr list "${gh_args[@]+"${gh_args[@]}"}" --state open --json number \
+      --jq '.[].number' 2>/dev/null | while IFS= read -r n; do
+    [ -n "$n" ] || continue
+    # Never treat the PR under review as its own holder: a --reviews-pr
+    # dispatch names the PR's files on BOTH sides, so without this every
+    # review of a PR collides with itself and no PR is ever reviewable.
+    [ -n "$exclude_pr" ] && [ "$n" = "$exclude_pr" ] && continue
+    gh pr diff "$n" "${gh_args[@]+"${gh_args[@]}"}" --name-only 2>/dev/null \
+      | while IFS= read -r f; do
+          [ -n "$f" ] && printf 'PR#%s\t%s\n' "$n" "$f"
+        done
+  done
+}
+
+while IFS=$'\t' read -r holder f; do
+  [ -n "$holder" ] || continue
+  if grep -qxF "$f" <<<"$CANDIDATE_FILES"; then
+    COLLISIONS="${COLLISIONS}${holder}	${f}"$'\n'
+  fi
+done < <(open_pr_files "$REPO" "$PR")
+
 if [ -z "$COLLISIONS" ]; then
   echo "ALLOW no-conflict -- #$ISSUE's candidate files (${CANDIDATE_FILES//$'\n'/, }) do not overlap any in-flight lane"
   exit 0
