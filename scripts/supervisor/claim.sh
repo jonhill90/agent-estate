@@ -40,8 +40,27 @@
 #   claim.sh release <issue> [repo]          drop the claim
 #   claim.sh list    [repo]                  open issue numbers with no claim
 #   claim.sh stale   [repo]                  claimed issues whose lane is gone
+#   claim.sh audit   [repo]                  report stale claims; exit 0 iff none
+#   claim.sh reap    [repo]                  release every stale claim, logging each
 #
 # [repo] is OWNER/NAME; omitted, gh resolves it from the working directory.
+#
+# agent-supervisor#359: `release` above (wired into `dispatch.sh`'s pre-send
+# abort paths, and now, via cli.py's `complete`/`record-completion`/
+# `cancel-open-task`, into every terminal completion path too) can never be
+# the WHOLE fix -- a killed tmux server or a SIGKILLed process runs no
+# cleanup at all. `audit`/`reap` are that second half: the same liveness
+# signal `stale` already computes (a claimed issue with no live-looking
+# window and no open PR referencing it), reported with a `stale=<n>` count
+# for `reap` visible before the backlog silently locks itself, and actually
+# released for `reap`, one line logged per release -- silent release is its
+# own hazard (an issue that quietly becomes available twice can be
+# dispatched twice). Both REFUSE outright (exit 2, no `stale=` line, nothing
+# released) if either underlying signal -- `lanes.sh`, or the open-PR read --
+# could not be read at all: an issue this cannot see is UNKNOWN, and UNKNOWN
+# is never treated as safe to report clear or release. `stale` itself keeps
+# its old behaviour unchanged (best-effort, no rc check) for the callers and
+# tests already built on it; `audit`/`reap` are the fail-closed callers.
 #
 # agent-supervisor#144: every gh call in this file is REST core
 # (`gh api repos/...`), not GraphQL (`gh issue view`/`gh issue list`/`gh pr
@@ -60,14 +79,15 @@ SESSION="$(lanes_session_or_default)"
 
 CMD="${1:-}"
 case "$CMD" in
-  check|take|release) ISSUE="${2:-}"; REPO="${3:-}"; LANE="${4:-$(hostname -s 2>/dev/null || echo lane)}" ;;
-  list|stale)         ISSUE=""; REPO="${2:-}" ;;
+  check|take|release)      ISSUE="${2:-}"; REPO="${3:-}"; LANE="${4:-$(hostname -s 2>/dev/null || echo lane)}" ;;
+  list|stale|audit|reap)   ISSUE=""; REPO="${2:-}" ;;
   *) sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2 ;;
 esac
 
-if [ "$CMD" != list ] && [ "$CMD" != stale ] && [ -z "$ISSUE" ]; then
-  echo "claim: $CMD needs an issue number" >&2; exit 2
-fi
+case "$CMD" in
+  list|stale|audit|reap) ;;
+  *) [ -n "$ISSUE" ] || { echo "claim: $CMD needs an issue number" >&2; exit 2; } ;;
+esac
 
 # api_base -> "repos/OWNER/NAME" when [repo] was given, else the same
 # {owner}/{repo} placeholder `gh` itself resolves from the working directory
@@ -84,6 +104,38 @@ me_login() { # the authenticated user's login, for the assignees write endpoints
 
 holder_of() { # holder_of <issue> -> comma-separated logins, empty if unclaimed
   gh api "$(api_base)/issues/$1" -q '.assignees|map(.login)|join(",")' 2>/dev/null
+}
+
+# compute_stale sets three globals -- STALE_CANDIDATES (claimed issue
+# numbers, one per line, whose lane is gone and whose PR is not open),
+# STALE_LANES_RC and STALE_PULLS_RC (the exit codes of the two underlying
+# reads). MUST be called directly, never as `x=$(compute_stale)` -- a caller
+# that must not act on an UNKNOWN answer (agent-supervisor#359's
+# `audit`/`reap`, below) needs STALE_LANES_RC/STALE_PULLS_RC to land in ITS
+# OWN shell, and `$(...)` runs the function in a subshell whose variable
+# assignments vanish the moment it exits. Refactored out of the `stale` case
+# body unchanged -- see that case (still the direct, best-effort caller with
+# no rc check of its own) for the liveness rules themselves: a lane window
+# `lanes.sh` does not report `dead`/`stale`, or an open PR saying
+# `fixes #<n>`.
+compute_stale() {
+  local lanes_out pulls_out live_numbers
+  lanes_out=$("$HERE/lanes.sh" "$SESSION" 2>/dev/null); STALE_LANES_RC=$?
+  pulls_out=$(gh api --paginate "$(api_base)/pulls?state=open&per_page=100" \
+     -q '.[]|"\(.number)\t\(.body)"' 2>/dev/null); STALE_PULLS_RC=$?
+  live_numbers=$(
+    awk 'NR>1 && $1 ~ /^[0-9]+$/ && $NF!="dead" && $NF!="stale" && $2 !~ /^free-[0-9]+$/ {print $2}' <<<"$lanes_out" \
+      | sed -E -n 's/^[A-Za-z]+([0-9]+)-.*/\1/p'
+    cut -f2- <<<"$pulls_out" | grep -oiE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+'
+  )
+  STALE_CANDIDATES=$(
+    gh api --paginate "$(api_base)/issues?state=open&per_page=100" \
+       -q '.[]|select(has("pull_request")|not)|"\(.number)\t\(.assignees|map(.login)|join(","))"' 2>/dev/null \
+      | awk -F'\t' '$2!=""{print $1}' \
+      | while read -r n; do
+          grep -qx "$n" <<<"$live_numbers" || echo "$n"
+        done
+  )
 }
 
 case "$CMD" in
@@ -219,20 +271,59 @@ stale)
   # from skills#70, and the two errors are not symmetric -- leaving a claim in
   # place costs a tick of delay, dropping a live one costs an hour of work.
   # Release deliberately stays a decision, `claim.sh release <n>`.
-  live_numbers=$(
-    "$HERE/lanes.sh" "$SESSION" 2>/dev/null \
-      | awk 'NR>1 && $1 ~ /^[0-9]+$/ && $NF!="dead" && $NF!="stale" && $2 !~ /^free-[0-9]+$/ {print $2}' \
-      | sed -E -n 's/^[A-Za-z]+([0-9]+)-.*/\1/p'
-    gh api --paginate "$(api_base)/pulls?state=open&per_page=100" \
-       -q '.[]|"\(.number)\t\(.body)"' 2>/dev/null \
-      | cut -f2- | grep -oiE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+'
-  )
-  gh api --paginate "$(api_base)/issues?state=open&per_page=100" \
-     -q '.[]|select(has("pull_request")|not)|"\(.number)\t\(.assignees|map(.login)|join(","))"' 2>/dev/null \
-    | awk -F'\t' '$2!=""{print $1}' \
-    | while read -r n; do
-        grep -qx "$n" <<<"$live_numbers" || echo "$n"
-      done
+  compute_stale
+  [ -n "$STALE_CANDIDATES" ] && printf '%s\n' "$STALE_CANDIDATES"
   exit 0 ;;
+
+audit)
+  # agent-supervisor#359: `stale`'s own REPORT, made fail-closed and given a
+  # one-line summary a caller (or a human) can grep for -- the acceptance
+  # check this issue shipped with is exactly `claim.sh audit | grep -q
+  # "stale=0"`. Never releases anything; see `reap` below for that.
+  compute_stale
+  if [ "$STALE_LANES_RC" -ne 0 ] || [ "$STALE_PULLS_RC" -ne 0 ]; then
+    echo "claim: audit: cannot read live state ($SESSION lanes rc=$STALE_LANES_RC, open PRs rc=$STALE_PULLS_RC) -- refusing to report, UNKNOWN is never treated as safe" >&2
+    exit 2
+  fi
+  count=0
+  if [ -n "$STALE_CANDIDATES" ]; then
+    while IFS= read -r n; do
+      [ -n "$n" ] || continue
+      echo "claim: audit: #$n is claimed with no live lane and no open PR referencing it"
+      count=$((count + 1))
+    done <<<"$STALE_CANDIDATES"
+  fi
+  echo "stale=$count"
+  [ "$count" -eq 0 ] ;;
+
+reap)
+  # The second half #359 asks for: `release` (wired into dispatch.sh's
+  # pre-send aborts and, via cli.py, into every terminal completion path)
+  # can never be complete on its own -- a killed tmux server or a SIGKILLed
+  # lane runs no cleanup. This sweeps whatever that still misses. Same
+  # fail-closed refusal as `audit` -- an unreadable liveness signal releases
+  # NOTHING, because a live claim reported stale by mistake is destroyed
+  # in-flight work, the worse failure (#359's own framing).
+  compute_stale
+  if [ "$STALE_LANES_RC" -ne 0 ] || [ "$STALE_PULLS_RC" -ne 0 ]; then
+    echo "claim: reap: cannot read live state ($SESSION lanes rc=$STALE_LANES_RC, open PRs rc=$STALE_PULLS_RC) -- refusing to release anything, UNKNOWN is never treated as safe" >&2
+    exit 2
+  fi
+  released=0
+  failed=0
+  if [ -n "$STALE_CANDIDATES" ]; then
+    while IFS= read -r n; do
+      [ -n "$n" ] || continue
+      if "$HERE/claim.sh" release "$n" "$REPO" >/dev/null 2>&1; then
+        echo "claim: reap: released #$n -- no live lane, no open PR"
+        released=$((released + 1))
+      else
+        echo "claim: reap: could not release #$n -- release it by hand" >&2
+        failed=$((failed + 1))
+      fi
+    done <<<"$STALE_CANDIDATES"
+  fi
+  echo "reaped=$released failed=$failed"
+  [ "$failed" -eq 0 ] ;;
 
 esac
