@@ -64,6 +64,42 @@ NOTIFY_SCRIPT="${DIRECTOR_LOOP_NOTIFY_SCRIPT:-$HERE/notify.sh}"
 ALARM_STAMP="$STATE/.director-loop-alarm.state"
 ALARM_COOLDOWN="${DIRECTOR_LOOP_ALARM_COOLDOWN:-3600}"
 
+# agent-supervisor#466: a fail-closed refusal that only ever writes a log
+# line is indistinguishable from a healthy loop to anything that does not
+# grep the log -- that is how a correct refusal produced 17 hours of silence.
+# STALE_STREAK persists the count of CONSECUTIVE ticks that have refused to
+# resolve the target window, across process invocations (this script runs
+# once and exits every tick, so nothing in memory survives between ticks).
+# It resets the moment resolution succeeds -- this counts a standing
+# incident, not a lifetime total.
+#
+# STALE_ESCALATE_AFTER=3: at the 900s cadence that is ~45 minutes. One tick
+# is not enough -- a tmux restart resolved by name on the very next tick is
+# the expected, self-healing case and should not page. Three consecutive
+# refusals means the SAME ambiguity survived three independent samples, so
+# it is a standing incident, not a blip; 45 minutes of silence is a
+# containable regression compared to the 17 hours this issue measured.
+STALE_STREAK_FILE="$STATE/.director-loop-stale-streak.state"
+STALE_ESCALATE_AFTER="${DIRECTOR_LOOP_STALE_ESCALATE_AFTER:-3}"
+
+read_stale_streak() {
+  local n=0
+  [ -f "$STALE_STREAK_FILE" ] && n=$(cat "$STALE_STREAK_FILE" 2>/dev/null)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s' "$n"
+}
+
+reset_stale_streak() {
+  printf '0' > "$STALE_STREAK_FILE" 2>/dev/null || true
+}
+
+bump_stale_streak() {
+  local n
+  n=$(($(read_stale_streak) + 1))
+  printf '%s' "$n" > "$STALE_STREAK_FILE" 2>/dev/null || true
+  printf '%s' "$n"
+}
+
 # send_takeover_alarm SUBJECT BODY -- page a human when this script hits a
 # state it cannot recover from itself (agent-supervisor#273: a correct "a
 # human should look" refusal used to go only to a logfile, which produced
@@ -167,24 +203,62 @@ fi
 # `launchctl list`. The same restart broke quota-watch (@1) and restore.sh the
 # same way. A hardcoded @id is a defect, not a configuration.
 #
-# So: if the configured window is not there, fall back to the session's windows
-# -- but only when there is exactly ONE, because guessing which of several
-# windows is the Director is precisely the "invent an identity rather than
-# refuse" failure (skills#179) that has cost this estate real work.
-if ! tmux capture-pane -p -t "=$TARGET" >/dev/null 2>&1; then
-  wins=$(tmux list-windows -t "$SESSION" -F '#{window_id}' 2>/dev/null)
-  count=$(printf '%s\n' "$wins" | grep -c .)
-  if [ "$count" -eq 1 ]; then
-    NEW="$SESSION:$(printf '%s' "$wins" | tr -d '[:space:]')"
-    log "configured target $TARGET is gone (tmux renumbered across a restart); resolved to $NEW"
-    TARGET="$NEW"
-  else
-    log "configured target $TARGET is gone and $SESSION has $count windows -- refusing to guess which is the Director; a human should look"
-    send_takeover_alarm "director-loop: ambiguous Director window (#273)" \
-      "Configured target $TARGET is gone (tmux likely renumbered across a restart) and $SESSION now has $count windows, so which one is the Director cannot be guessed safely. Check by hand: tmux list-windows -t $SESSION"
-    exit 3
+# So: if the configured window is not there, re-resolve by STABLE IDENTITY --
+# the window NAME, never the index (agent-supervisor#466: index addressing
+# has misidentified panes here before, and `renumber-windows` is on in this
+# estate). bootstrap-session.sh names the supervisor/Director's own window
+# `supervisor` (LANES_SUPERVISOR_NAME) -- the same marker quota-watch.sh
+# already resolves its own equivalent target by; reused here rather than
+# invented a second time. Falls back to "exactly one window in the session"
+# only when NO window carries that name at all (e.g. a session that predates
+# the naming convention), same last-resort shape as before this fix. Either
+# way, more than one plausible candidate must still refuse -- never guess.
+resolve_director_target() {
+  tmux capture-pane -p -t "=$TARGET" >/dev/null 2>&1 && return 0
+
+  local name="${LANES_SUPERVISOR_NAME:-supervisor}"
+  local by_name name_count
+  by_name=$(tmux list-windows -t "$SESSION" -F '#{window_id}	#{window_name}' 2>/dev/null \
+    | awk -F'\t' -v n="$name" '$2==n{print $1}')
+  name_count=$(printf '%s\n' "$by_name" | grep -c .)
+  if [ "$name_count" -eq 1 ]; then
+    local resolved="$SESSION:$(printf '%s' "$by_name" | tr -d '[:space:]')"
+    log "configured target $TARGET is gone (tmux renumbered across a restart); resolved to $resolved by window name '$name'"
+    TARGET="$resolved"
+    return 0
   fi
+  if [ "$name_count" -gt 1 ]; then
+    log "configured target $TARGET is gone and $name_count windows in $SESSION are named '$name' -- refusing to guess which is the Director; a human should look"
+    return 1
+  fi
+
+  # No window is named '$name' at all -- last-resort fallback to the
+  # session's only window, same rule this script used before #466.
+  local wins wcount
+  wins=$(tmux list-windows -t "$SESSION" -F '#{window_id}' 2>/dev/null)
+  wcount=$(printf '%s\n' "$wins" | grep -c .)
+  if [ "$wcount" -eq 1 ]; then
+    local resolved="$SESSION:$(printf '%s' "$wins" | tr -d '[:space:]')"
+    log "configured target $TARGET is gone, no window named '$name', but $SESSION has exactly one window; resolved to $resolved"
+    TARGET="$resolved"
+    return 0
+  fi
+  log "configured target $TARGET is gone, no window named '$name', and $SESSION has $wcount windows -- refusing to guess which is the Director; a human should look"
+  return 1
+}
+
+if ! resolve_director_target; then
+  streak=$(bump_stale_streak)
+  log "consecutive stale-target refusals: $streak"
+  if [ "$streak" -ge "$STALE_ESCALATE_AFTER" ]; then
+    send_takeover_alarm "director-loop: ambiguous Director window, $streak consecutive refusals (#466)" \
+      "Configured target $TARGET is gone and $SESSION's windows are still ambiguous after $streak consecutive ticks (~$(( streak * 15 )) minutes) -- the loop has been silently refusing to guess which one is the Director. Check by hand: tmux list-windows -t $SESSION"
+  else
+    log "not yet escalating (need $STALE_ESCALATE_AFTER consecutive refusals to page, have $streak)"
+  fi
+  exit 3
 fi
+reset_stale_streak
 
 # Busy check is the LAST NON-BLANK LINE only, never a scrollback sweep. A
 # whole-pane grep matches the phrase `esc to interrupt` wherever it appears --
