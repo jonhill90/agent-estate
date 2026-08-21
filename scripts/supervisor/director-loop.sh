@@ -100,6 +100,44 @@ bump_stale_streak() {
   printf '%s' "$n"
 }
 
+# agent-supervisor#474: the other half of #466's fix. The quota gate below
+# was already fail-closed (correct -- do not weaken it), but a refusal only
+# ever wrote one `log` line while `"$QUOTA_GATE" check`'s own diagnostic
+# output (which of the 3 samples timed out vs answered "unknown", how many
+# seconds, a stale-cache age) went to /dev/null. That is the exact #273/#466
+# shape: a correct refusal that is indistinguishable from a healthy tick to
+# anything not grepping this log by hand -- measured live as the Director's
+# loop going quiet for ~19 hours while its log filled with
+# "quota UNKNOWN (rc=2) -- never treated as safe, not ticking" and nothing
+# else, which was first misread as a mistuned guard rather than a genuine
+# instrument failure worth paging on (issue #474). WIND DOWN (qrc=1) is
+# deliberately NOT escalated here -- it is the gate doing its job, the same
+# reason resolve_director_target's stale streak only tracks refusals, not
+# every non-proceeding outcome. QUOTA_STREAK_FILE is independent of
+# STALE_STREAK_FILE so an ambiguous-window incident and a quota-instrument
+# incident escalate on their own timelines rather than one silently
+# resetting the other's count.
+QUOTA_STREAK_FILE="$STATE/.director-loop-quota-streak.state"
+QUOTA_ESCALATE_AFTER="${DIRECTOR_LOOP_QUOTA_ESCALATE_AFTER:-3}"
+
+read_quota_streak() {
+  local n=0
+  [ -f "$QUOTA_STREAK_FILE" ] && n=$(cat "$QUOTA_STREAK_FILE" 2>/dev/null)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s' "$n"
+}
+
+reset_quota_streak() {
+  printf '0' > "$QUOTA_STREAK_FILE" 2>/dev/null || true
+}
+
+bump_quota_streak() {
+  local n
+  n=$(($(read_quota_streak) + 1))
+  printf '%s' "$n" > "$QUOTA_STREAK_FILE" 2>/dev/null || true
+  printf '%s' "$n"
+}
+
 # send_takeover_alarm SUBJECT BODY -- page a human when this script hits a
 # state it cannot recover from itself (agent-supervisor#273: a correct "a
 # human should look" refusal used to go only to a logfile, which produced
@@ -127,12 +165,36 @@ send_takeover_alarm() {
 }
 
 # --- quota gate. Fail closed on anything that is not a definite SAFE.
-"$QUOTA_GATE" check >/dev/null 2>&1
+# agent-supervisor#474: capture the gate's own diagnostic output instead of
+# discarding it -- it names which samples timed out vs answered "unknown"
+# and how many seconds, the exact detail a human needs to tell a genuine
+# instrument failure from a real WIND DOWN without re-running the gate by
+# hand.
+quota_out=$("$QUOTA_GATE" check 2>&1)
 qrc=$?
 case "$qrc" in
-  0) ;;
-  1) log "quota WIND DOWN -- not ticking the Director"; exit 0 ;;
-  *) log "quota UNKNOWN (rc=$qrc) -- never treated as safe, not ticking"; exit 0 ;;
+  0)
+    reset_quota_streak
+    ;;
+  1)
+    reset_quota_streak
+    log "quota WIND DOWN -- not ticking the Director"
+    while IFS= read -r line; do log "  $line"; done <<<"$quota_out"
+    exit 0
+    ;;
+  *)
+    qstreak=$(bump_quota_streak)
+    log "quota UNKNOWN (rc=$qrc) -- never treated as safe, not ticking (consecutive: $qstreak)"
+    while IFS= read -r line; do log "  $line"; done <<<"$quota_out"
+    if [ "$qstreak" -ge "$QUOTA_ESCALATE_AFTER" ]; then
+      send_takeover_alarm "director-loop: quota gate UNKNOWN, $qstreak consecutive ticks (#474)" \
+        "$QUOTA_GATE check has returned rc=$qrc (not SAFE, not WIND DOWN) for $qstreak consecutive ticks (~$(( qstreak * 15 )) minutes) -- the Director has been silently not-ticking. This is an instrument failure, not a real quota stop. Latest sample output:
+$quota_out"
+    else
+      log "not yet escalating (need $QUOTA_ESCALATE_AFTER consecutive UNKNOWN ticks to page, have $qstreak)"
+    fi
+    exit 0
+    ;;
 esac
 
 # --- agent-supervisor#367: live/ vanishing must be noticed BY SOMETHING ---

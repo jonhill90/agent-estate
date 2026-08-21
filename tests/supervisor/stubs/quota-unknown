@@ -1,0 +1,10 @@
+#!/bin/bash
+# Test stub for the quota gate (agent-supervisor#474). Deterministically
+# answers UNAVAILABLE (rc=2) with the same diagnostic shape the real
+# quota.sh emits on a batch of failed samples -- for tests exercising a
+# genuine instrument failure, not a real WIND DOWN or a missing binary.
+echo "quota: sample 1/3 -- TIMEOUT after 45s waiting on codexbar guard -- could not reach the quota source" >&2
+echo "quota: sample 2/3 -- TIMEOUT after 45s waiting on codexbar guard -- could not reach the quota source" >&2
+echo "quota: sample 3/3 -- TIMEOUT after 45s waiting on codexbar guard -- could not reach the quota source" >&2
+echo "quota: UNAVAILABLE -- all 3 samples failed (3 could not reach codexbar, 0 reached it and got told unknown) -- treat as unknown, never as safe" >&2
+exit 2
