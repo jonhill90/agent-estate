@@ -233,6 +233,65 @@ after5=$(git -C "$LIVE" rev-parse HEAD)
 if [ "$after5" = "$before_sha4" ]; then ok "live is untouched when the re-check catches a closed window"; else bad "live is untouched when the re-check catches a closed window" "moved to $after5"; fi
 if grep -qi "closed while the smoke test ran" <<<"$out"; then ok "the refusal names the mid-smoke-test re-check"; else bad "the refusal names the mid-smoke-test re-check" "$out"; fi
 
+# --- ORIGIN/MAIN MOVES WHILE THE SMOKE TEST RUNS -------------------------
+#
+# Written because a cross-harness review (Codex, 2026-08-20) found this case
+# uncovered and named it as a regression the reordering could introduce:
+# `target` is resolved BEFORE the smoke test, so if main advances during the
+# test, the old code would promote LIVE to an already-stale commit -- the very
+# defect the reordering exists to fix, reintroduced by another route.
+#
+# The candidate watchdog below pushes a NEW commit to origin/main from inside
+# the smoke test, so by the time advance-live reaches the mutation, the sha it
+# validated is no longer the tip. Correct behaviour is to SKIP: the passing
+# smoke test is evidence about the OLD sha, and the new sha has not been
+# tested at all. Advancing to either one would be advancing on evidence that
+# does not describe it.
+echo five >"$SRC/file.txt"
+git -C "$SRC" add file.txt
+cat >"$SRC/scripts/supervisor/watchdog.sh" <<EOF
+#!/bin/bash
+set -uo pipefail
+STATUS="\${SUPERVISOR_STATUS:?}"
+mkdir -p "\$(dirname "\$STATUS")"
+{
+  printf 'checked:  %s\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  printf 'state:    pane_unreadable\n'
+} >"\$STATUS"
+# Advance origin/main mid-smoke: a sixth commit lands while we are "testing".
+if [ -n "\${TEST_ADVANCE_MAIN_MIDSMOKE:-}" ]; then
+  echo six >"$SRC/file.txt"
+  git -C "$SRC" add file.txt
+  git -C "$SRC" commit -q -m "sixth commit, landed DURING the smoke test"
+  git -C "$SRC" push -q origin main
+  git -C "$LIVE" fetch -q origin main
+fi
+exit 0
+EOF
+git -C "$SRC" add scripts/supervisor/watchdog.sh
+git -C "$SRC" commit -q -m "fifth commit, smoke candidate advances main mid-run"
+git -C "$SRC" push -q origin main
+git -C "$LIVE" fetch -q origin main
+validated_sha=$(git -C "$LIVE" rev-parse origin/main)
+before_sha6=$(git -C "$LIVE" rev-parse HEAD)
+
+S=$(mktemp -d); fresh_status "$S"
+export TEST_ADVANCE_MAIN_MIDSMOKE=1
+out=$(run "$S" 2>&1); rc=$?
+unset TEST_ADVANCE_MAIN_MIDSMOKE
+want_exit "origin/main moving mid-smoke-test is a skip, not an advance (exit 0)" "$rc" 0 "$out"
+after6=$(git -C "$LIVE" rev-parse HEAD)
+if [ "$after6" = "$before_sha6" ]; then
+  ok "live is NOT advanced to a sha the smoke test never validated"
+else
+  bad "live is NOT advanced to a sha the smoke test never validated" "moved to $after6 (validated was $validated_sha)"
+fi
+if grep -qi "origin/main moved from" <<<"$out"; then
+  ok "the skip names the moved target explicitly"
+else
+  bad "the skip names the moved target explicitly" "$out"
+fi
+
 # --- agent-supervisor#11: fetch fails -- refuses loudly, never reads as current
 # Deleting the local origin/main ref no longer reproduces "unreadable": the
 # fix fetches first, which recreates it from a reachable remote. The failure
