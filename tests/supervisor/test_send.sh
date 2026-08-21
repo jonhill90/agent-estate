@@ -524,7 +524,7 @@ python3 - "$SEND" "$MUTANT_DISMISS" <<'PY' || patch_rc=$?
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = '''  pane_tail=$(tmux capture-pane -p -t "$target" 2>/dev/null | tail -n "$menu_tail")
+marker = '''  pane_tail=$(tmux capture-pane -p -t "$target" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n "$menu_tail")
   if ! grep -qE "$option_row_re" <<<"$pane_tail"; then
     SEND_STATUS=landed
     return 0
@@ -537,7 +537,9 @@ assert text.count(marker) == 1, "the final re-check is not unique -- send.sh sha
 mutated = '''  SEND_STATUS=not_landed
   return 2
 }'''
-open(dst, "w").write(text.replace(marker, mutated, 1))
+patched = text.replace(marker, mutated, 1)
+assert patched != text, "mutation did not change send.sh -- the replace was a no-op"
+open(dst, "w").write(patched)
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of send.sh with verified_dismiss_menu's final re-check removed" \
