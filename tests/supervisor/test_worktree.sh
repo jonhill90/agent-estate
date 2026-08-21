@@ -350,7 +350,15 @@ git -C "$REPO" worktree prune >/dev/null 2>&1
 # --- agent-supervisor#427: refs/stash is shared by every worktree of one
 # repo -- git has no per-worktree stash. Prove that first, directly, so the
 # rest of this section is provably testing a real hazard and not a phantom
-# one: a stash pushed from worktree A must be visible from worktree B.
+# one: a stash pushed from the shared checkout must be visible from a lane
+# worktree. Pushed from $REPO, not from a lane worktree created by `new` --
+# #433 (agent-supervisor#427, the OTHER half of this same issue number)
+# installs a reference-transaction hook on every worktree `new` hands out
+# that refuses a `git stash push` from inside it, so proving the underlying
+# hazard now has to happen from the one place that hook is never installed:
+# the shared checkout itself. This is also the exact scenario #435 guards --
+# "the shared repo carries an unclaimed stash" -- so pushing from $REPO is
+# not a workaround, it is the real trigger.
 out=$(bash "$WT" new 427-stash-a "$REPO" origin/main 2>/dev/null); rc=$?
 want_exit "new (stash case A) exits 0" "$rc" 0 "$out"
 STASH_A="$out"
@@ -360,8 +368,8 @@ want_exit "new (stash case B) exits 0" "$rc" 0 "$out"
 STASH_B="$out"
 require_dest "new (stash case B)" "$STASH_B"
 
-echo "lane A's uncommitted work" >> "$STASH_A/file.txt"
-git -C "$STASH_A" -c user.email=test@example.com -c user.name=Test stash push -q -m "lane A WIP"
+echo "shared checkout's uncommitted work" >> "$REPO/file.txt"
+git -C "$REPO" -c user.email=test@example.com -c user.name=Test stash push -q -m "shared WIP"
 stash_seen_from_b=$(git -C "$STASH_B" stash list 2>/dev/null)
 if [ -n "$stash_seen_from_b" ]; then
   ok "git worktrees genuinely share refs/stash (the #427 hazard is real, not a phantom)"
@@ -378,13 +386,13 @@ if grep -q "unclaimed git stash" <<<"$out"; then ok "the refusal names the uncla
 if ls "$WORKTREE_ROOT" 2>/dev/null | grep -q "^ad-427-stash-c-"; then bad "no worktree was created for the refused dispatch" "a directory exists"; else ok "no worktree was created for the refused dispatch"; fi
 
 # Resolving the stash clears the way for the next lane again.
-git -C "$STASH_A" stash pop -q
+git -C "$REPO" stash pop -q
 out=$(bash "$WT" new 427-stash-d "$REPO" origin/main 2>/dev/null); rc=$?
 want_exit "new proceeds once the stash is resolved" "$rc" 0 "$out"
 STASH_D="$out"
 require_dest "new (stash resolved case)" "$STASH_D"
 
-git -C "$STASH_A" checkout -q -- file.txt
+git -C "$REPO" checkout -q -- file.txt
 bash "$WT" done "$STASH_A" >/dev/null 2>&1
 bash "$WT" done "$STASH_B" >/dev/null 2>&1
 bash "$WT" done "$STASH_D" >/dev/null 2>&1
