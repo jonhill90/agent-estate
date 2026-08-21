@@ -124,6 +124,11 @@ case "$MODE" in
   *) SESSION="$MODE"; MODE="" ;;
 esac
 
+# agent-dotfiles#239. Empty when neither LANES_SUPERVISOR_WINDOW=@N nor
+# TMUX_PANE resolves one -- the classification loop below falls back to the
+# index compare in that case, same as before this fix.
+SUPERVISOR_WID="$(supervisor_window_id "$SESSION" 2>/dev/null || true)"
+
 # Shells mean "the agent exited and left the pane behind".
 SHELLS="bash|zsh|sh|fish|login"
 # #154: ...with one exception, and it is a NARROW one. `inbox-poll.sh` is
@@ -172,6 +177,12 @@ SERVICE_RE="${LANES_SERVICE_RE:-(^|/)inbox-poll\.sh( |$)}"
 # --free cheerfully offered window 1 while the supervisor sat idle between
 # ticks. "Free" and "yours to take" are different questions.
 SUPERVISOR_WINDOW="${LANES_SUPERVISOR_WINDOW:-1}"
+# agent-dotfiles#239: SUPERVISOR_WINDOW above is an INDEX, and renumber-windows
+# is on -- killing any window below the supervisor shifts it out of that slot,
+# and the `"$w" = "$SUPERVISOR_WINDOW"` compare below then stops recognising
+# it. session-defaults.sh's `supervisor_window_id` resolves the supervisor's
+# `#{window_id}` instead, which survives a renumber. Resolved ONCE here, not
+# per-row: it does not depend on which window is being classified.
 # agent-dotfiles#237: the shape `dispatch.sh` mints for a dispatched lane's
 # window -- `<repo initials><issue number>-<slug>`, e.g. `ad180-status-accuracy`
 # or `sk159-plugin-json` (dispatch.sh:157). A window name matching this is
@@ -459,7 +470,13 @@ emit_rows() {
     # number, computed the cheap way (arithmetic, not a second tmux call).
     age=$(( now_epoch - ${act:-now_epoch} ))
 
-    if [ "$w" = "$SUPERVISOR_WINDOW" ]; then
+    # agent-dotfiles#239: id-based when SUPERVISOR_WID resolved (the common
+    # case -- see supervisor_window_id above), falling back to the pre-#239
+    # index compare only when it didn't. Deliberately NOT "either matches":
+    # once the id is known, a STALE index that renumbering has since handed
+    # to a different, real lane must not also read as the supervisor.
+    if { [ -n "$SUPERVISOR_WID" ] && [ "$wid" = "$SUPERVISOR_WID" ]; } \
+      || { [ -z "$SUPERVISOR_WID" ] && [ "$w" = "$SUPERVISOR_WINDOW" ]; }; then
       state=supervisor
     elif [ "${mode:-0}" != "0" ]; then
       # A pane in copy mode still captures its underlying screen, so an idle

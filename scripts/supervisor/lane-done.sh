@@ -250,15 +250,22 @@ fi
 FREE_IDX="$(tmux display-message -p -t "$TARGET" '#{window_index}' 2>/dev/null)"
 if [ -z "$FREE_IDX" ]; then
   echo "lane-done: could not read the current window index of ${TARGET} -- the lane IS released in the ledger; the window was not renamed (still dispatchable -- see comment above)" >&2
-elif [ "$FREE_IDX" = "${LANES_SUPERVISOR_WINDOW:-1}" ]; then
-  # agent-supervisor#348: the SUPERVISOR-IDENTITY guard, deliberately separate
-  # from the name-match guard above. `lanes.sh` already has one whitelisted
-  # notion of which window is the supervisor's -- SUPERVISOR_WINDOW, index
-  # ${LANES_SUPERVISOR_WINDOW:-1} (see its `--free` exclusion) -- and this
-  # reuses that exact env var and default rather than inventing a second way
-  # to identify it. dispatch.sh already refuses to dispatch INTO this window;
-  # nothing stopped a rename OUT of it here except the incidental fact that a
-  # malformed target's resolved name usually did not match $EXPECTED_NAME
+elif SUPERVISOR_WID="$(supervisor_window_id "$SESSION" 2>/dev/null)" && [ -n "$SUPERVISOR_WID" ] \
+  && [ "$(tmux display-message -p -t "$TARGET" '#{window_id}' 2>/dev/null)" = "$SUPERVISOR_WID" ]; then
+  # agent-supervisor#348, updated by agent-dotfiles#239: the SUPERVISOR-IDENTITY
+  # guard, deliberately separate from the name-match guard above. It used to
+  # compare $FREE_IDX (an INDEX) to LANES_SUPERVISOR_WINDOW, which is exactly
+  # the #239 defect from the other direction: `renumber-windows on` can hand
+  # the supervisor's INDEX to a completed lane's window between dispatch and
+  # this waiter firing, and the old compare would then refuse to free that
+  # real lane -- or worse, once #239's lanes.sh fix landed here too, an index
+  # match with no id resolved could point at neither window. This now asks
+  # session-defaults.sh's `supervisor_window_id` for the SAME id-based handle
+  # lanes.sh uses, rather than inventing a second way to identify it, and
+  # falls back to the index compare only when that id never resolves --
+  # dispatch.sh already refuses to dispatch INTO this window; nothing stopped
+  # a rename OUT of it here except the incidental fact that a malformed
+  # target's resolved name usually did not match $EXPECTED_NAME
   # (agent-dotfiles#259's near miss). A future resolution bug that lands on
   # this window WITH a matching name would sail past that guard and rename
   # the supervisor's own window out from under it -- CLAUDE.md invariant 2
@@ -266,6 +273,9 @@ elif [ "$FREE_IDX" = "${LANES_SUPERVISOR_WINDOW:-1}" ]; then
   # kind of mislabeling as the thing to prevent. So this check runs even when
   # $CURRENT already equals $EXPECTED_NAME, and refuses on window IDENTITY
   # alone, never on name.
+  echo "lane-done: ${TARGET} resolves to the supervisor's own window (id ${SUPERVISOR_WID}) -- refusing to rename it, regardless of what name it currently carries. If a lane is actually stranded, recover with: cli.py record-completion --task '$EXPECTED_NAME'" >&2
+  exit 1
+elif [ -z "${SUPERVISOR_WID:-}" ] && [ "$FREE_IDX" = "${LANES_SUPERVISOR_WINDOW:-1}" ]; then
   echo "lane-done: ${TARGET} resolves to the supervisor's own window (index ${FREE_IDX}, LANES_SUPERVISOR_WINDOW=${LANES_SUPERVISOR_WINDOW:-1}) -- refusing to rename it, regardless of what name it currently carries. If a lane is actually stranded, recover with: cli.py record-completion --task '$EXPECTED_NAME'" >&2
   exit 1
 elif ! tmux rename-window -t "$TARGET" "free-${FREE_IDX}"; then

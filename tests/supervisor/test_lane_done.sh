@@ -123,9 +123,9 @@ python3 - "$LANE_DONE" "$NOGUARD" <<'PY' || patch_rc5=$?
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-start = 'elif [ "$FREE_IDX" = "${LANES_SUPERVISOR_WINDOW:-1}" ]; then'
+start = 'elif SUPERVISOR_WID="$(supervisor_window_id "$SESSION" 2>/dev/null)"'
 end_marker = 'exit 1\nelif ! tmux rename-window'
-assert text.count(start) == 1, "#348 supervisor-window guard not found -- script shape changed"
+assert text.count(start) == 1, "#348/#239 supervisor-window guard not found -- script shape changed"
 i0 = text.index(start)
 i1 = text.index(end_marker, i0) + len('exit 1\n')
 open(dst, "w").write(text[:i0] + text[i1:])

@@ -47,3 +47,56 @@ session_for_repo() {
     lanes_session_or_default
   fi
 }
+
+# agent-dotfiles#239: the supervisor's own window was identified by comparing
+# `#{window_index}` to `LANES_SUPERVISOR_WINDOW` (default 1) -- unstable under
+# `renumber-windows on`, which this estate runs with. Killing any window BELOW
+# the supervisor shifts it out of slot 1, and every caller that used this
+# comparison (lanes.sh's `--free` exclusion, lane-done.sh's rename refusal,
+# dispatch.sh's diagnostic filter) stopped recognising it. Measured live
+# 2026-08-12: the supervisor sat at index 5, renamed by an unrelated dispatch,
+# and `lanes.sh` reported index 1 -- a different pane entirely -- as
+# `supervisor`.
+#
+# `#{window_id}` (`@N`) is tmux's own handle: stable for the window's whole
+# lifetime and never reused, exactly the property #241 already threads
+# through dispatch.sh/lanes.sh/lane-done.sh's lane targets. This resolves the
+# SAME kind of handle for the supervisor's window, in order:
+#
+#   1. LANES_SUPERVISOR_WINDOW itself, when it already looks like an id
+#      (`@N`) -- an explicit override for a caller with no TMUX_PANE of its
+#      own (watchdog.sh, invoked by a LaunchAgent outside tmux entirely; see
+#      lanes.sh's #163 PATH comment for the same caller). An operator sets
+#      this once, by hand, from the supervisor's own pane
+#      (`tmux display-message -p '#{window_id}'`).
+#   2. $TMUX_PANE, when set -- the common case. The supervisor's own tick
+#      invokes lanes.sh/dispatch.sh/lane-done.sh as children of its own
+#      shell, so tmux has already stamped TMUX_PANE with the exact pane whose
+#      window this needs to identify; no config or persistence required. This
+#      is how #239 itself was diagnosed live: `echo $TMUX_PANE` -> `%12`,
+#      resolved from there to the window that mattered.
+#
+# Verified against the target SESSION when one is given, so a caller whose
+# own pane happens to sit in some OTHER tmux session cannot accidentally
+# exclude that other session's window 1.
+#
+# Returns 1 with no output when neither resolves -- the caller's contract is
+# to fall back to its pre-#239 index comparison in that case (degraded, not
+# broken: exactly today's behaviour), never to treat empty as "no supervisor
+# window exists".
+supervisor_window_id() {
+  local session="${1:-}"
+  case "${LANES_SUPERVISOR_WINDOW:-}" in
+    @*) printf '%s\n' "$LANES_SUPERVISOR_WINDOW"; return 0 ;;
+  esac
+  [ -n "${TMUX_PANE:-}" ] || return 1
+  local wid
+  wid="$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}' 2>/dev/null)" || return 1
+  [ -n "$wid" ] || return 1
+  if [ -n "$session" ]; then
+    local pane_session
+    pane_session="$(tmux display-message -p -t "$TMUX_PANE" '#{session_name}' 2>/dev/null)" || return 1
+    [ "$pane_session" = "$session" ] || return 1
+  fi
+  printf '%s\n' "$wid"
+}
