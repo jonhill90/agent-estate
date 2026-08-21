@@ -131,11 +131,50 @@ write_status() {
 }
 write_status ok
 trap 'write_status stopped' TERM
+
+# agent-supervisor#449: a SIGKILL of the test script (WATCHDOG_TEST_GUARDIAN_PID
+# below) skips its own `trap cleanup_all EXIT INT TERM` entirely -- a trap
+# cannot fire on SIGKILL -- so #104's cleanup, which only ever runs INSIDE the
+# dying test process, never runs either. Nothing outside that dead process was
+# watching, so this stand-in was found still running, alone, 5h26m later,
+# under a tmux session whose parent test process no longer existed. The fix
+# has to live HERE, in the thing that outlives the test, not in one more trap
+# on the test: this loop checks its own guardian's liveness every tick and, if
+# the guardian is gone, tears down its own tmux session and exits -- no
+# external sweep to keep running, no cron to wire up, nothing else has to be
+# correctly configured for this to hold. A bounded max lifetime is a second,
+# independent backstop for the case the guardian pid got recycled by an
+# unrelated process before this loop ever checked it again.
+GUARDIAN_PID="${WATCHDOG_TEST_GUARDIAN_PID:-}"
+SELF_SESSION="${WATCHDOG_TEST_SESSION:-}"
+SELF_TMUX_TMPDIR="${WATCHDOG_TEST_TMUX_TMPDIR:-}"
+MAX_LIFETIME="${WATCHDOG_TEST_MAX_LIFETIME_SECS:-180}"
+START_EPOCH=$(date +%s)
+
+self_destruct() { # self_destruct <reason>
+  write_status stopped
+  echo "inbox-poll.sh(#449 stand-in $$): self-terminating -- $1" >&2
+  # Same isolation posture as tmux-isolation.sh's assert_isolated_tmux --
+  # never address the default socket, and never kill a session this fixture
+  # cannot prove is its own isolated one.
+  if [ -n "$SELF_SESSION" ] && [ -n "$SELF_TMUX_TMPDIR" ] && [ -d "$SELF_TMUX_TMPDIR" ]; then
+    env -u TMUX TMUX_TMPDIR="$SELF_TMUX_TMPDIR" tmux kill-session -t "$SELF_SESSION" >/dev/null 2>&1
+  fi
+  exit 0
+}
+
 while :; do
   if [ -f "$FLAG" ]; then
     rm -f "$FLAG"
     write_status stopped
     exit 0
+  fi
+  if [ -n "$GUARDIAN_PID" ] && ! kill -0 "$GUARDIAN_PID" 2>/dev/null; then
+    self_destruct "guardian pid $GUARDIAN_PID (the test script) is no longer alive"
+  fi
+  now=$(date +%s)
+  if [ $((now - START_EPOCH)) -ge "$MAX_LIFETIME" ]; then
+    self_destruct "exceeded max lifetime ${MAX_LIFETIME}s independent of guardian liveness"
   fi
   sleep 0.1
 done
@@ -154,8 +193,12 @@ STATUS_FILE="$STATE/inbox-poll.status"
 PID_FILE="$A/pid"
 PID_HISTORY="$A/pids"
 launch_cmd() { # launch_cmd <sha>
-  printf "INBOX_POLL_STATUS='%s' INBOX_POLL_RESTART_FLAG='%s' POLLER_PID_FILE='%s' POLLER_PID_HISTORY='%s' POLLER_STATUS_SHA='%s' exec '%s'" \
-    "$STATUS_FILE" "$FLAG" "$PID_FILE" "$PID_HISTORY" "$1" "$STAND_IN"
+  # agent-supervisor#449: WATCHDOG_TEST_GUARDIAN_PID is this test script's own
+  # $$, so the stand-in can detect a SIGKILL of its guardian (see the
+  # self_destruct block in the heredoc above) and tear down its own tmux
+  # session itself -- nothing outside the stand-in ever has to notice.
+  printf "INBOX_POLL_STATUS='%s' INBOX_POLL_RESTART_FLAG='%s' POLLER_PID_FILE='%s' POLLER_PID_HISTORY='%s' POLLER_STATUS_SHA='%s' WATCHDOG_TEST_GUARDIAN_PID='%s' WATCHDOG_TEST_SESSION='%s' WATCHDOG_TEST_TMUX_TMPDIR='%s' exec '%s'" \
+    "$STATUS_FILE" "$FLAG" "$PID_FILE" "$PID_HISTORY" "$1" "$$" "$SESSION" "$RT" "$STAND_IN"
 }
 tmux new-window -t "$SESSION" -n inbox-poll -d -- "$(launch_cmd "$live_sha0")"
 tmux set-window-option -t "$SESSION:inbox-poll" remain-on-exit on >/dev/null 2>&1
