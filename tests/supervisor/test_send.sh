@@ -565,5 +565,93 @@ else
   want_contains "RESTORED (green): the real send.sh, same single-retry scenario, reports it dismissed" "rc=0 status=landed" "$out"
 fi
 
+# --- 10. verified_launch_prompt, agent-dotfiles#255 ------------------------
+#
+# The primitive `dispatch.sh` uses for a harness whose fresh-lane path never
+# has its brief-pointer message typed into the pane at all (H_LAUNCH_TAKES_
+# PROMPT -- codex, folded into its own LAUNCH_CMD instead). There is no input
+# box here for this file's box-state checks to read; this primitive polls
+# for a harness-recorded FAILURE signature instead.
+set_pane_status() { # set_pane_status <text> -- the fixture's 4th (status) field
+  cat > "$D/lanes" <<FIX
+1|w|codex|$1|1|0
+FIX
+}
+
+# 9a. No failure-re at all -- fail closed (`unknown`), not a silent pass.
+reset_pane; set_pane_status "  gpt-5 medium · /repo/path"
+out=$(run_send bash -c "
+  . '$SEND_DIR/send.sh'
+  verified_launch_prompt '$TARGET' --tries 1 --settle 0
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+if grep -q 'rc=4 status=unknown' <<<"$out"; then
+  ok "no --failure-re given: fails closed (unknown), not a silent pass"
+else
+  bad "no --failure-re given: fails closed (unknown), not a silent pass" "$out"
+fi
+
+# 9b. The failure signature is on the pane -- REFUSED (stranded), never
+# reported as landed. This is codex's own "Session renamed to" shape,
+# painted when the folded launch prompt was consumed as a title instead of
+# a turn (harness/codex.sh).
+reset_pane; set_pane_status "  Session renamed to whatever the prompt was · /repo/path"
+out=$(run_send bash -c "
+  . '$SEND_DIR/send.sh'
+  verified_launch_prompt '$TARGET' --tries 2 --settle 0 --failure-re 'Session renamed to'
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+if grep -q 'rc=2 status=stranded' <<<"$out"; then
+  ok "the failure signature on the pane is detected -- REFUSED, not landed"
+else
+  bad "the failure signature on the pane is detected -- REFUSED, not landed" "$out"
+fi
+
+# 9c. No failure signature -- SUCCESS (submitted).
+reset_pane; set_pane_status "  gpt-5 medium · /repo/path"
+out=$(run_send bash -c "
+  . '$SEND_DIR/send.sh'
+  verified_launch_prompt '$TARGET' --tries 2 --settle 0 --failure-re 'Session renamed to'
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+if grep -q 'rc=0 status=submitted' <<<"$out"; then
+  ok "an ordinary ready pane with no failure signature reports submitted"
+else
+  bad "an ordinary ready pane with no failure signature reports submitted" "$out"
+fi
+
+# --- MUTATION-CHECK, agent-dotfiles#255 round 2 ---------------------------
+# Reproduced LIVE against a real codex lane, never a mock: a fresh worktree's
+# directory-trust menu ("Press enter to continue") paints no "Session
+# renamed to" at all, so 9c's check alone would have reported this exact
+# pane submitted -- silent success while the harness sits on a menu nobody
+# answered. `--blocked-re`/`--option-row-re` (wired from the same
+# H_BLOCKED_MARKERS/H_OPTION_ROW_RE fields lanes.sh already uses) close that.
+reset_pane; set_pane_status "  Press enter to continue"
+out=$(run_send bash -c "
+  . '$SEND_DIR/send.sh'
+  verified_launch_prompt '$TARGET' --tries 2 --settle 0 \
+    --failure-re 'Session renamed to' --blocked-re '[Pp]ress enter to continue'
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+if grep -q 'rc=3 status=blocked' <<<"$out"; then
+  ok "REPRODUCED then FIXED: a lane still stuck on a menu after the whole budget is refused (blocked), not reported submitted"
+else
+  bad "REPRODUCED then FIXED: a lane still stuck on a menu after the whole budget is refused (blocked), not reported submitted" "$out"
+fi
+# MUTATION CONFIRMED: with --blocked-re withheld (9c's exact shape), the same
+# stuck-menu pane reports submitted -- proving 9c would have missed this and
+# the check above is the thing actually catching it.
+out=$(run_send bash -c "
+  . '$SEND_DIR/send.sh'
+  verified_launch_prompt '$TARGET' --tries 2 --settle 0 --failure-re 'Session renamed to'
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+if grep -q 'rc=0 status=submitted' <<<"$out"; then
+  ok "MUTATION CONFIRMED (red): the same stuck-menu pane reports submitted when --blocked-re is withheld"
+else
+  bad "MUTATION CONFIRMED (red): the same stuck-menu pane reports submitted when --blocked-re is withheld" "$out"
+fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

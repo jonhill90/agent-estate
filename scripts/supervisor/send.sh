@@ -254,8 +254,22 @@ verified_type() {
 # that menu for why a fresh dispatch's very first pane content is often it.
 #
 #   --settle N   seconds to sleep after sending before checking (default 1)
-#   --retries N  total attempts; each retry re-sends `C-u` then `/clear`
-#                 Enter (default 1 -- no retry)
+#   --retries N  total attempts; each retry re-sends `Escape`, `C-u`, then
+#                 `/clear` Enter (default 1 -- no retry)
+#
+# `Escape` before `C-u`, agent-dotfiles#255: reported directly by Jon,
+# 2026-08-20/21 -- under loaded panes, the default settle/retry budget
+# ("DISPATCH_SETTLE=2 DISPATCH_PRECLEAR_RETRIES=2") was refused three
+# dispatches running with "`/clear` did not blank <lane>'s screen", and a
+# manual `Escape` then `C-u` then `Enter` cleared the state reliably where
+# repeated bare `C-u`/`/clear` retries had not. `C-u` alone only clears an
+# ORDINARY line already sitting in the box; `Escape` first cancels whatever
+# else the pane might be mid-way through (a stuck key sequence, a partial
+# escape code from a repaint under load) that `C-u` was never built to
+# reach. Both are real KEYS tmux interprets, not strings sent to the pane
+# the way `/clear` itself is -- see the header above this function's own
+# caller in dispatch.sh for why that distinction is the whole of #255's
+# root cause.
 #
 # Return 0 (SEND_STATUS=landed, box confirmed empty), 2 (not_landed -- the
 # box still shows text, or could not be read at all, after every retry), or
@@ -337,6 +351,108 @@ verified_submit() {
   fi
   SEND_STATUS=unknown
   return 4
+}
+
+# verified_launch_prompt <target> [--settle N] [--tries N] [--failure-re REGEX]
+#                                  [--blocked-re REGEX] [--option-row-re REGEX]
+#
+# agent-dotfiles#255. A harness whose adapter sets H_LAUNCH_TAKES_PROMPT
+# (harness-registry.sh; codex today) never has its brief-pointer message
+# typed into a live pane at all -- `dispatch.sh` folds it into that
+# harness's own LAUNCH_CMD, as its documented launch-time PROMPT argument,
+# because that harness's fresh-lane path does not treat the first message
+# TYPED into a live pane as a real turn (codex: it is consumed as the
+# session's auto-generated title instead -- see harness/codex.sh). There is
+# therefore no input box for `verified_type`/`verified_submit` to poll: no
+# text was ever typed, so "the box went empty" proves nothing here.
+#
+# What this path DOES have is a harness-specific FAILURE signature: the
+# shape that harness paints when the folded prompt was NOT accepted as a
+# turn (codex's `Session renamed to`). This polls for that signature's
+# ABSENCE across the same settle/retry budget verified_submit uses, rather
+# than a box state -- there is no box state to read here, only whatever the
+# harness itself painted.
+#
+# `--blocked-re`/`--option-row-re`, agent-dotfiles#255 round 2: reproduced
+# LIVE, against a real codex lane, never a mock. `respawn-pane -c $WORKTREE`
+# (dispatch.sh, step 3.5) always starts the harness in a WORKTREE it has
+# never seen before, and codex's own directory-trust gate --
+# "Do not trust the contents of this directory? ... Press enter to continue"
+# -- comes up on that first sight regardless of how the prompt reaches it.
+# A folded launch prompt SURVIVES that gate once a human answers it (also
+# verified live: the exact same message that was queued behind the menu ran
+# as a real turn the moment "1. Yes, continue" was accepted) -- but nothing
+# answers it in an unattended dispatch, and the failure-re check above is
+# blind to this: the trust menu contains no "Session renamed to", so a lane
+# stuck there for the whole settle/retry budget reported SEND_STATUS=submitted
+# -- dispatch: #N -> lane, exit 0 -- while the pane sat on a menu nobody had
+# answered. That is #255's exact silent-success shape, produced by the fix
+# meant to close it. These two harness-recorded markers (H_BLOCKED_MARKERS,
+# H_OPTION_ROW_RE -- the same fields `lanes.sh` already uses to classify a
+# lane `menu-blocked`) are checked against the LAST poll only: a menu seen
+# ONCE and then answered is not a failure (the trust prompt during the
+# settle window, in the reproduction above, cleared before the loop's last
+# check); a menu still sitting there when the budget runs out is the one
+# this function was never able to see a real turn behind.
+#
+#   --settle N     seconds between polls (default 1); the first poll also
+#                   sleeps this long before its first check
+#   --tries N      how many times to poll (default 10)
+#   --failure-re REGEX   this harness's own recorded failure signature
+#                   (H_LAUNCH_PROMPT_FAILURE_RE). Empty means no such
+#                   signature is known for this harness -- fail closed
+#                   (`unknown`) rather than report a success this file has
+#                   no evidence for, same posture `verified_submit` already
+#                   takes for an unreadable box.
+#   --blocked-re REGEX     this harness's H_BLOCKED_MARKERS, checked against
+#                   the whole final pane capture. Empty (no marker recorded)
+#                   is never checked -- same posture as --failure-re.
+#   --option-row-re REGEX  this harness's H_OPTION_ROW_RE, checked the same
+#                   way. Either given and matching the LAST poll is a block.
+#
+# Return 0 (SEND_STATUS=submitted, no failure or still-blocked signature seen),
+# 2 (SEND_STATUS=stranded, the failure signature appeared -- the folded
+# prompt was not accepted as a turn), 3 (SEND_STATUS=blocked, the harness is
+# still sitting on a menu/prompt after the whole budget -- the folded prompt
+# may be queued behind it, unconfirmed either way), or 4 (SEND_STATUS=unknown
+# -- no failure-re was given to check at all).
+verified_launch_prompt() {
+  local target="$1"; shift
+  local settle=1 tries=10 failure_re="" blocked_re="" option_row_re=""
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --settle) settle="$2"; shift 2 ;;
+      --tries) tries="$2"; shift 2 ;;
+      --failure-re) failure_re="$2"; shift 2 ;;
+      --blocked-re) blocked_re="$2"; shift 2 ;;
+      --option-row-re) option_row_re="$2"; shift 2 ;;
+      *) echo "verified_launch_prompt: unknown option $1" >&2; SEND_STATUS=send_failed; return 1 ;;
+    esac
+  done
+
+  if [ -z "$failure_re" ]; then
+    SEND_STATUS=unknown
+    return 4
+  fi
+
+  local attempt pane
+  for ((attempt = 1; attempt <= tries; attempt++)); do
+    sleep "$settle"
+    pane=$(tmux capture-pane -p -t "$target" 2>/dev/null)
+    if grep -qE "$failure_re" <<<"$pane"; then
+      SEND_STATUS=stranded
+      return 2
+    fi
+  done
+
+  if { [ -n "$blocked_re" ] && grep -qE "$blocked_re" <<<"$pane"; } \
+     || { [ -n "$option_row_re" ] && grep -qE "$option_row_re" <<<"$pane"; }; then
+    SEND_STATUS=blocked
+    return 3
+  fi
+
+  SEND_STATUS=submitted
+  return 0
 }
 
 # verified_send <target> <message> [every verified_type/verified_submit flag]

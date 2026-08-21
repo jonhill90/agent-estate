@@ -170,3 +170,50 @@ HARNESS_LIMIT_RE='hit your usage limit'
 # until that capture is done -- not a regression, since nothing reads model
 # for codex lanes today either.
 HARNESS_MODEL_RE=
+
+# agent-dotfiles#255. Measured 2026-08-12 on a real fresh codex lane: the
+# FIRST message `dispatch.sh` typed into a just-launched codex pane was
+# consumed as the session's auto-generated TITLE, not a real turn --
+# verbatim capture:
+#
+#   • Session renamed to Read /Users/jon/.local/state/.../ph1-247-codex-brief.md
+#     and do exactly what it says. That file is your complete brief. ...
+#   › Explain this codebase
+#     gpt-5.5 medium · ~/source/repos/Personal/agent-dotfiles
+#
+# `dispatch.sh` reported success (window renamed, worktree created, ledger
+# updated, exit 0) and the lane sat idle at codex's own placeholder prompt --
+# silent, not loud. Sending the identical message a SECOND time worked.
+#
+# Re-verified live 2026-08-21 (codex-cli 0.148.0, throwaway tmux socket
+# `ad255lab2`, never a live estate session) that a message TYPED into a
+# freshly-launched, already-trusted pane and then submitted with Enter is
+# processed as a real turn (`• Working (Ns ...)`, then a real reply) -- so
+# the defect above is not reproducible against every codex build off a
+# clean type-then-submit, and the corrupted-`/clear`-glued-line mechanism
+# `send.sh`'s `verified_preclear` guards against (agent-supervisor#178/#193)
+# is a more likely proximate cause for what #255 actually saw. Regardless of
+# which build-specific quirk produced it, codex's own CLI has a structural
+# fix that removes the pane-typing step -- and the corruption class with
+# it -- entirely for this harness's fresh-lane path:
+#
+#   codex [OPTIONS] [PROMPT]    Optional user prompt to start the session
+#
+# Verified live, same session, same build: launching straight into
+#   codex -a never -s read-only 'Say hello and nothing else.'
+# started a real turn immediately (`• Working (1s ...)`, then `• Hello`) --
+# never a "Session renamed to" line. A prompt given at LAUNCH is read as the
+# session's first turn, unconditionally; there is no live pane for a
+# corrupted `/clear`, a bracketed-paste stall, or a title-eating quirk to
+# land on, because nothing is ever typed into one.
+#
+# `dispatch.sh` folds the short "Read $BRIEF ..." pointer message into this
+# harness's LAUNCH_CMD as that trailing PROMPT argument instead of typing it
+# in after launch. `HARNESS_LAUNCH_PROMPT_FAILURE_RE` below is the fail-closed
+# side of that: `Session renamed to` is the one signature a real accepted
+# turn is never observed to paint, so its presence after the launch settle is
+# proof the fold did NOT work (whatever codex build or reason), and
+# `dispatch.sh` refuses the dispatch rather than reporting the silent
+# success #255 is about.
+HARNESS_LAUNCH_TAKES_PROMPT=1
+HARNESS_LAUNCH_PROMPT_FAILURE_RE='Session renamed to'

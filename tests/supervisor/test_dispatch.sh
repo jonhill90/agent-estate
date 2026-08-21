@@ -865,6 +865,71 @@ want_missing "the old ambiguous codex shortcut is not relaunched" \
 status=$(LEDGER_STATE="$D/state-30" ledger status 2>&1)
 want_contains "the codex harness is recorded" '"harness":"codex"' "$status"
 
+# --- agent-dotfiles#255: codex folds the brief pointer into its LAUNCH_CMD --
+#
+# codex's own CLI accepts the initial user prompt as a launch argument
+# (`codex [OPTIONS] [PROMPT]`), and a prompt given that way starts a real
+# turn immediately -- verified live against codex-cli 0.148.0, never
+# reproduced against a mock, because codex's fresh-lane path does NOT treat
+# the first message TYPED into a live pane as a real turn (it is consumed as
+# the session's auto-generated title instead). harness/codex.sh's
+# HARNESS_LAUNCH_TAKES_PROMPT tells dispatch.sh to fold the short
+# "Read $BRIEF ..." pointer into codex's own LAUNCH_CMD instead of typing it
+# into the pane after launch, so there is no separate typed message left for
+# a title-eating quirk, a corrupted `/clear`, or a bracketed-paste stall to
+# land on.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+5|free-5|codex|  gpt-5.5 medium · /repo/path|1|0
+FIX
+printf '255|| dispatch.sh must fold the brief into codex launch, not type it\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-255" run 255 codex-launch-prompt "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a dispatch to a fresh codex lane succeeds" "$rc" 0 "$out"
+log=$(tmuxlog)
+want_contains "the brief pointer is folded into codex's own LAUNCH_CMD, not typed after" \
+  "codex -a never -s danger-full-access Read" "$log"
+want_missing "the folded prompt is never typed into the pane as a separate send-keys" \
+  "send-keys -t t:@105 Read" "$log"
+
+# --- MUTATION-CHECK, agent-dotfiles#255 -----------------------------------
+# codex paints its own known failure signature ("Session renamed to") when
+# the folded launch prompt was NOT accepted as a turn. dispatch.sh must
+# refuse, not report success -- exactly the silent-success shape #255 is
+# about: window renamed, worktree created, ledger updated, exit 0, no work
+# ever started.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+6|free-6|codex|  Session renamed to whatever the launch prompt was · /repo/path|1|0
+FIX
+printf '256|| a codex lane that ate the launch prompt as a title must refuse\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-256" run 256 codex-title-eaten "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "dispatch refuses when codex's own title-eaten signature is on the pane" "$rc" 1 "$out"
+want_contains "the refusal names what happened" \
+  "did not accept the folded launch prompt" "$out"
+status=$(LEDGER_STATE="$D/state-256" ledger status 2>&1)
+# NOT '"status":"delivered"' -- that string legitimately appears on the
+# CLAIM placeholder itself (`commit_lane_claim`'s CLAIM_STATUS_LIVE == the
+# literal string "delivered"), set at step 4.5's point of no return, BEFORE
+# verified_launch_prompt ever runs (agent-dotfiles#209: so a killed
+# dispatcher never loses track of a possibly-live brief). What a refused
+# dispatch must never produce is the REAL dispatch record `record_dispatch`
+# writes under the window name -- same convention #162's own check above
+# already uses.
+want_missing "the issue has no real DISPATCH record, only the held claim placeholder" \
+  '"id":"ad256-codex-title-eaten"' "$status"
+
+# agent-dotfiles#255 round 2's OTHER finding -- a codex lane still stuck on
+# its own directory-trust menu after the folded-launch settle, reproduced
+# LIVE against a real codex lane -- is covered in tests/supervisor/test_send.sh
+# (section 9, `verified_launch_prompt`'s `--blocked-re`/`--option-row-re`),
+# not here: this stub's lane fixture is one static line read BOTH at lane
+# SELECTION (this file's `lanes.sh --free` step) and by any later capture-pane
+# this dispatch takes, so it cannot model "read free, then painted a menu
+# only after respawn-pane relaunched it" -- the exact shape a real dispatch
+# hits and the earlier "codex-title-eaten" case above does not. `test_send.sh`
+# calls `verified_launch_prompt` directly, without a lane-selection step in
+# front of it, so it can set that pane content on its own terms.
+
 # --- agent-dotfiles#216: a copilot lane, GREEN against the stub -----------
 #
 # The bug's own reproduction, against a stub instead of the live
