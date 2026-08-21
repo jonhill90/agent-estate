@@ -198,12 +198,21 @@ case "$1 $2" in
   "pr list")
     cat "$FIX/pr_list.json" ;;
   "run list")
-    branch=""; prev=""
+    branch=""; workflow=""; prev=""
     for a in "$@"; do
       [ "$prev" = "--branch" ] && branch="$a"
+      [ "$prev" = "--workflow" ] && workflow="$a"
       prev="$a"
     done
-    f="$FIX/run_${branch}.json"
+    # agent-supervisor#463: a fixture keyed on branch+workflow, when present,
+    # wins over the plain branch-only one -- this is what lets PR19 below pin
+    # the exact defect. `--workflow` absent (the pre-#463 shape, and what a
+    # mutation reverting the fix reproduces) falls through to the plain
+    # run_<branch>.json, which PR19's fixtures deliberately make the WRONG
+    # (later, unrelated, successful) answer.
+    f=""
+    [ -n "$workflow" ] && f="$FIX/run_${branch}__workflow_${workflow}.json"
+    [ -n "$f" ] && [ -f "$f" ] || f="$FIX/run_${branch}.json"
     [ -f "$f" ] && cat "$f" || echo "[]"
     ;;
   "pr view")
@@ -306,7 +315,8 @@ cat > "$OK/fixtures/pr_list.json" <<'S'
   {"number":15,"title":"re-dispatch: head ref, not first-attempt position, names the author","headRefOid":"1515151515151515151515151515151515151515","headRefName":"lane/215-second-attempt","mergeStateStatus":"CLEAN"},
   {"number":16,"title":"self-review across a session rename","headRefOid":"1616161616161616161616161616161616161616","headRefName":"fix/216-renamed-session","mergeStateStatus":"CLEAN"},
   {"number":17,"title":"reviewer lane stamped with something that is not a lane id","headRefOid":"1717171717171717171717171717171717171717","headRefName":"fix/217-unparseable-stamp","mergeStateStatus":"CLEAN"},
-  {"number":18,"title":"self-review across a window renumber, not a session rename","headRefOid":"1818181818181818181818181818181818181818","headRefName":"fix/218-renumbered-window","mergeStateStatus":"CLEAN"}
+  {"number":18,"title":"self-review across a window renumber, not a session rename","headRefOid":"1818181818181818181818181818181818181818","headRefName":"fix/218-renumbered-window","mergeStateStatus":"CLEAN"},
+  {"number":19,"title":"agent-supervisor#463: a later unrelated workflow must not mask an earlier failing CI run","headRefOid":"1919191919191919191919191919191919191919","headRefName":"b19","mergeStateStatus":"CLEAN"}
 ]
 S
 cat > "$OK/fixtures/run_b1.json" <<'S'
@@ -320,6 +330,23 @@ cat > "$OK/fixtures/run_b4.json" <<'S'
 S
 # b3 deliberately has no run_b3.json -- stub falls back to "[]", i.e. no run.
 # b6 deliberately has no run_b6.json either -- CI freshness is not this PR's point.
+
+# agent-supervisor#463 THE BLOCKING FINDING itself: PR19's branch carries TWO
+# workflow runs against the SAME (current) head -- `Validate` (the workflow
+# with the `shell-suites` job, i.e. real CI) failed, but `UI evidence` was
+# triggered later and finished with a success. The unscoped `gh run list
+# --branch --limit 1` this issue was filed over returns whichever of the two
+# is newest-CREATED regardless of which workflow it belongs to -- encoded
+# here as the plain run_b19.json (no --workflow filter), which is what a
+# caller that drops `--workflow` (the mutation below) falls back to and
+# reads as a masking success. `--workflow validate.yml` must reach the
+# scoped fixture instead and read the real failure.
+cat > "$OK/fixtures/run_b19.json" <<'S'
+[{"headSha":"1919191919191919191919191919191919191919","conclusion":"success"}]
+S
+cat > "$OK/fixtures/run_b19__workflow_validate.yml.json" <<'S'
+[{"headSha":"1919191919191919191919191919191919191919","conclusion":"failure"}]
+S
 
 # PR6's review was APPROVED, but at the OLD head -- a push since moved
 # headRefOid to "newnewnew...". This is agent-dotfiles#218: a review filed
@@ -596,6 +623,19 @@ chk "PR4 ci_is_current true (the failing run IS for this head)" "true" "$(jq -r 
 # bodies instead of review state, this would read "approved", not "rejected".
 chk "PR4 verdict reads rejected from real GitHub review state, not comment prose" \
   "rejected" "$(jq -r '.verdict' <<<"$p4")"
+
+# 12b. agent-supervisor#463 THE PINNED REGRESSION: PR19's branch has a LATER,
+# unrelated, SUCCESSFUL workflow run and an EARLIER failing CI run, both
+# against the current head. `ci=success` here is the exact false green #463
+# was filed over -- this must read "failure", not "success".
+p19=$(pr 19)
+chk "PR19 run_conclusion reads the CI workflow's failure, not the later unrelated success" \
+  "failure" "$(jq -r '.run_conclusion' <<<"$p19")"
+chk "PR19 ci_is_current true (the CI workflow's own run IS for this head)" \
+  "true" "$(jq -r '.ci_is_current' <<<"$p19")"
+[ "$(jq -r '.run_conclusion' <<<"$p19")" != "success" ] \
+  && ok "PR19 ci=success is FALSE" \
+  || bad "PR19 ci=success must be false" "$p19"
 
 # 12c/12d. agent-dotfiles#226 MUTATION CHECK, both directions (real
 # digest.sh + verdict.py output, not just verdict.py's unit tests):
