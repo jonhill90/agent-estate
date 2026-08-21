@@ -57,14 +57,21 @@ for r in rows:
 # lands on index 2 -- neither its ORIGINAL index (3) nor the hardcoded
 # default (1) -- so no check here can pass by coincidentally landing back on
 # that default, the way a fixture with only one lane below it would risk.
-tmux new-session -d -s "$S" -n free-1 -c /tmp
-# This estate runs with `renumber-windows on` (session-defaults.sh's own
-# comment, lanes.sh:71) -- that option is what makes the supervisor's index
-# move in the first place. Without setting it here too, killing window 1
-# below just leaves a gap; nothing renumbers, and every check past that
-# point is comparing against windows that never moved -- the fixture would
-# pass or fail for reasons unrelated to #239's actual hazard.
-tmux set-option -t "$S" renumber-windows on
+#
+# Both options below are set via `-f` on the FIRST command that starts the
+# server, not `set-option` after `new-session` -- `new-session` creates its
+# first window using whatever base-index the server already has at that
+# instant, so setting it afterward is too late for window 1 itself. Measured
+# directly (agent-supervisor#459): base-index is Jon's personal tmux.conf
+# setting, not tmux's own default (which is 0) -- on a bare server (this
+# isolated one, and every GitHub Actions runner) `-n free-1` lands on index
+# 0, the literal "=$S:2"/"=$S:3"/"=$S:4" targets below create the rest with
+# a gap at index 1, and `kill-window -t "=$S:1"` two lines down then fails
+# outright ("can't find window: 1") because nothing was ever created there.
+CONF="$(mktemp "${TMPDIR:-/tmp}/lanes-sup-id-tmux-conf.XXXXXX")"
+printf 'set -g base-index 1\nset -g renumber-windows on\n' > "$CONF"
+tmux -f "$CONF" new-session -d -s "$S" -n free-1 -c /tmp
+rm -f "$CONF"
 tmux new-window -d -t "=$S:2" -n free-2 -c /tmp
 tmux new-window -d -t "=$S:3" -n supervisor -c /tmp
 tmux new-window -d -t "=$S:4" -n free-4 -c /tmp
