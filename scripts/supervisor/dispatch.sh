@@ -710,10 +710,12 @@ fi
 # OTHER pid -- never against the mere absence of one. A ledger that has never
 # seen `take-supervisor-lease` (every existing test fixture, and any manual
 # `dispatch.sh` run outside the loop) has no row to conflict with, so this
-# warns and proceeds rather than demanding every caller adopt lease tracking
+# proceeds silently rather than demanding every caller adopt lease tracking
 # before it dispatches anything -- the loop is what negotiates the lease with
 # the WHOLE estate; a lone `dispatch.sh` invocation reading no lease at all
-# has nothing to conflict with and nothing to protect against.
+# has nothing to conflict with and nothing to protect against. Per
+# agent-dotfiles#199, stderr on a dispatch that is not failing stays clean --
+# an absent or unreadable lease is not, by itself, a failure.
 SUPERVISOR_LEASE_OWNER_PID="${SUPERVISOR_LEASE_OWNER_PID:-$PPID}"
 if LEASE_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" supervisor-lease 2>&1); then
   if grep -qF '"held":true' <<<"$LEASE_OUT"; then
@@ -724,12 +726,7 @@ if LEASE_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" supervisor-lease 2>&1); then
       echo "dispatch: a second supervisor instance must stand down, not dispatch; see agent-dotfiles#238" >&2
       exit 1
     fi
-  else
-    echo "dispatch: WARNING -- no supervisor lease is held at all (ledger has never seen take-supervisor-lease) -- proceeding, but this dispatch is not protected against a concurrent supervisor instance" >&2
   fi
-else
-  echo "dispatch: WARNING -- could not read the supervisor lease; proceeding without the agent-dotfiles#238 guard" >&2
-  sed 's/^/  /' <<<"$LEASE_OUT" >&2
 fi
 
 # --- 0.5 clear claims whose dispatcher died where nothing could clean up ---
