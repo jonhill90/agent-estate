@@ -327,6 +327,23 @@ def parser():
     # step 0.5 for why the dispatcher itself is the right caller.
     sub.add_parser("reap-lane-claims")
 
+    # agent-dotfiles#238: the supervisor ROLE, not a lane -- see
+    # `Ledger.take_supervisor_lease` for why this is its own table rather
+    # than a `claim-lane` placeholder. `--owner-pid` is required (unlike
+    # `claim-lane`'s optional one): an unowned lease can never be reaped, so
+    # taking one without an owner would be permanent until a human cleared it
+    # by hand.
+    take_lease_parser = sub.add_parser("take-supervisor-lease")
+    take_lease_parser.add_argument("--owner-pid", type=int, required=True)
+    take_lease_parser.add_argument("--note", default="supervisor loop")
+
+    sub.add_parser("supervisor-lease")
+
+    release_lease_parser = sub.add_parser("release-supervisor-lease")
+    release_lease_parser.add_argument("--owner-pid", type=int, required=True)
+
+    sub.add_parser("reap-supervisor-lease")
+
     # agent-dotfiles#209, from the #144 finding that never got a caller:
     # `Ledger.cancel_open_task` had no CLI wiring at all, so the recovery it
     # exists for -- an operator freeing a lane held by something the automatic
@@ -1369,6 +1386,17 @@ def main(argv=None):
     elif args.command == "reap-lane-claims":
         reaped = ledger.reap_stale_lane_claims()
         value = {"reaped": reaped, "count": len(reaped)}
+    elif args.command == "take-supervisor-lease":
+        value = ledger.take_supervisor_lease(owner=claim_owner_token(args.owner_pid), note=args.note)
+    elif args.command == "supervisor-lease":
+        row = ledger.supervisor_lease()
+        value = {"held": row is not None, "owner": row["owner"] if row is not None else None, "lease": row}
+    elif args.command == "release-supervisor-lease":
+        released = ledger.release_supervisor_lease(owner=claim_owner_token(args.owner_pid))
+        value = {"released": released}
+    elif args.command == "reap-supervisor-lease":
+        reaped = ledger.reap_stale_supervisor_lease()
+        value = {"reaped": reaped}
     elif args.command == "cancel-open-task":
         cancelled = ledger.cancel_open_task(args.lane)
         # agent-supervisor#359: this is an operator recovering a lane a
