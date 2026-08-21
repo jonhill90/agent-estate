@@ -173,6 +173,22 @@ for row in data.get("tasks", []):
 ' "$exclude_lane" <<<"$json"
 }
 
+# owner/name for a git checkout at $1, derived from its `origin` remote --
+# `git@host:owner/name.git`, `https://host/owner/name`, or a bare
+# `owner/name` all collapse to the same `owner/name`. Exit 1 (nothing
+# printed) means unresolvable: no `origin` remote, or not a git checkout at
+# all. Used for BOTH halves of this check -- the open-PR holder side (below)
+# and the lane-holder side (the loop above this function's call sites) --
+# deliberately the same mechanism so the two halves cannot disagree about
+# what repo a path belongs to (agent-supervisor#441).
+_repo_from_path() {
+  local repo_path="$1" origin owner_name
+  origin=$(git -C "$repo_path" remote get-url origin 2>/dev/null) || return 1
+  owner_name=$(sed 's/\.git$//' <<<"$origin" | awk -F'[:/]' 'NF>=2{print $(NF-1)"/"$NF}')
+  [ -n "$owner_name" ] || return 1
+  printf '%s\n' "$owner_name"
+}
+
 # --- orchestration -----------------------------------------------------------
 
 cmd="${1:-}"
@@ -207,9 +223,32 @@ if [ $? -ne 0 ] || [ -z "$CANDIDATE_FILES" ]; then
   exit 0
 fi
 
+# WHICH REPO IS THE CANDIDATE IN, agent-supervisor#441: a bare-path
+# comparison against every in-flight lane's files, with no repo scope, means
+# two DIFFERENT repos sharing a same-named file (`skills` and
+# `agent-dotfiles` both have `scripts/validate_repository.py`) collide here
+# even though neither can touch the other's copy. `--repo` is defined for the
+# open-PR half (`gh -R owner/name`) but a lane's worktree is a real git
+# checkout too, so the same `_repo_from_path` this script already trusts for
+# the PR half resolves it here -- one repo-resolution mechanism, not two that
+# can disagree (see this file's own note on `_repo_from_path` above).
+#
+# FAIL CLOSED on an unresolvable repo: if the candidate's own repo, or a
+# given lane's repo, cannot be determined, that lane is NOT skipped -- it
+# falls back to the old bare-path comparison for that one lane. A false
+# refusal costs one dispatch; a missed overlap costs two lanes writing one
+# file (see this file's header). Only a CONFIRMED cross-repo pair -- both
+# sides resolved, and different -- is excused from the comparison.
+CANDIDATE_REPO="$REPO"
+[ -n "$CANDIDATE_REPO" ] || CANDIDATE_REPO=$(_repo_from_path "$REPO_PATH") || CANDIDATE_REPO=""
+
 COLLISIONS=""
 while IFS=$'\t' read -r lane wt; do
   [ -n "$lane" ] || continue
+  lane_repo=$(_repo_from_path "$wt") || lane_repo=""
+  if [ -n "$CANDIDATE_REPO" ] && [ -n "$lane_repo" ] && [ "$CANDIDATE_REPO" != "$lane_repo" ]; then
+    continue
+  fi
   lane_files=$(_files_changed_in_worktree "$wt")
   [ -n "$lane_files" ] || continue
   while IFS= read -r f; do
@@ -258,13 +297,8 @@ done < <(in_flight_lane_files "$EXCLUDE_LANE")
 # here. If the repo cannot be determined either way, the PR half is skipped --
 # not silently: see PR_CHECK_STATUS below, which must be readable in the
 # output so this failure mode never reads as "checked, found nothing."
-_repo_from_path() {
-  local repo_path="$1" origin owner_name
-  origin=$(git -C "$repo_path" remote get-url origin 2>/dev/null) || return 1
-  owner_name=$(sed 's/\.git$//' <<<"$origin" | awk -F'[:/]' 'NF>=2{print $(NF-1)"/"$NF}')
-  [ -n "$owner_name" ] || return 1
-  printf '%s\n' "$owner_name"
-}
+# (Defined up near the other helpers, above the lane-holder loop that now
+# also calls it -- agent-supervisor#441.)
 
 # stdout: "PR#<n>\t<file>" per file in every open PR's diff, excluding
 # $exclude_pr. Exit 1 (nothing printed) means the PR half could not run --
