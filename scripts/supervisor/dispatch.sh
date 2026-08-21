@@ -1748,6 +1748,27 @@ fi
 # from landing on a splash screen instead of a ready input box.
 sleep "${DISPATCH_LAUNCH_SETTLE:-3}"
 
+# --- 3.6 accept a fresh harness's own one-time menu, if it has one --------
+# agent-dotfiles#255. A cold codex process launched into a directory it has
+# never seen (every worktree this dispatch just created, every time) opens
+# on its own directory-trust menu, not the ordinary chat box the next steps
+# expect -- see `send.sh`'s `verified_dismiss_menu` for the live-measured
+# mechanics and why this is #255's actual root cause: the pane's first
+# Enter goes to that menu's default selection, not to `/clear` or a brief,
+# which is the same "first Enter lands somewhere else" shape #255 reported
+# as a whole brief consumed as a session TITLE.
+#
+# `H_OPTION_ROW_RE`/`H_MENU_TAIL` are the SAME per-harness adapter values
+# `lanes.sh` already keys its own menu-blocked reading on -- nothing new is
+# defined here, and a harness whose adapter names no such menu (Claude,
+# Copilot today) gets an empty regex, which returns success on the first
+# read without sending anything at all. Fails closed: a menu still showing
+# after every retry aborts the dispatch rather than typing a brief onto it.
+if ! verified_dismiss_menu "$LANE_TARGET" "${H_OPTION_ROW_RE[$HARNESS_HIDX]:-}" "${H_MENU_TAIL[$HARNESS_HIDX]:-6}" \
+     --settle "${DISPATCH_MENU_SETTLE:-2}" --retries "${DISPATCH_MENU_RETRIES:-5}"; then
+  abort_send "a startup menu never cleared in $LANE -- #$ISSUE_ARG was NOT dispatched (check the pane by hand)"
+fi
+
 # --- 4. the lane is told what it is doing, then given the work ------------
 if ! tmux rename-window -t "$LANE_TARGET" "$WINDOW_NAME" 2>/dev/null; then
   echo "dispatch: could not rename $LANE -- not dispatching #$ISSUE_ARG" >&2
@@ -1829,8 +1850,20 @@ DISPATCH_SEND_EPOCH=$(date +%s)
 # `verified_submit`: `/clear` blanks the whole screen, which the proof-token
 # check was never built to read through (see that function's own header) --
 # confirming the blank is the whole of what can be confirmed here.
+#
+# Defaults raised 2->5 / 2->6, agent-dotfiles#255: the guard above was
+# correct and firing -- three consecutive real dispatches on 2026-08-21 were
+# refused with "/clear did not blank <lane>'s screen", all on loaded panes.
+# Jon's own measurement that day: `DISPATCH_SETTLE=2 DISPATCH_PRECLEAR_RETRIES=2`
+# (the prior defaults) was not enough under that load; raising to
+# `DISPATCH_SETTLE=5 DISPATCH_PRECLEAR_RETRIES=6` made all three succeed, and
+# a manual `Escape`+`C-u`+`Enter` recovered them by hand in the meantime (see
+# `verified_preclear`'s own header for that half of the fix). This is a
+# refusal getting a bigger budget, not a refusal getting weaker: a pre-clear
+# that still never blanks after 6 tries at 5s apiece (30s) still aborts the
+# dispatch exactly as before.
 if ! verified_preclear "$LANE_TARGET" \
-     --settle "${DISPATCH_SETTLE:-2}" --retries "${DISPATCH_PRECLEAR_RETRIES:-2}"; then
+     --settle "${DISPATCH_SETTLE:-5}" --retries "${DISPATCH_PRECLEAR_RETRIES:-6}"; then
   if [ "$SEND_STATUS" = send_failed ]; then
     abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
   fi

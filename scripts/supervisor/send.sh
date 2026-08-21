@@ -225,9 +225,9 @@ verified_type() {
 
 # verified_preclear <target> [--settle N] [--retries N]
 #
-# Sends `C-u` then `/clear` + Enter, and confirms the screen actually
-# blanked -- the input box reads `empty`, not `text` or `unknown` -- before
-# returning success. agent-supervisor#193: `/clear`'s own Enter can be
+# Sends `Escape` then `C-u` then `/clear` + Enter, and confirms the screen
+# actually blanked -- the input box reads `empty`, not `text` or `unknown` --
+# before returning success. agent-supervisor#193: `/clear`'s own Enter can be
 # swallowed exactly the way #178 already found a brief's Enter can be, and
 # unlike a stranded brief this failure was INVISIBLE downstream -- the next
 # `verified_type` call still found its proof tokens (as true substrings of
@@ -242,6 +242,16 @@ verified_type() {
 # `--proof` substring check was never built to read through (see
 # `verified_type`'s header) -- the only thing checkable here is that the box
 # came back empty, so that is the whole of what this function confirms.
+#
+# `Escape` before `C-u`, agent-dotfiles#255: Jon's own recovery from three
+# consecutive real refusals on 2026-08-21 was manual `Escape` then `C-u`
+# then `Enter`, not `C-u` alone -- `C-u` only clears an editable input box,
+# and does nothing to a pane stuck showing a menu or an in-progress turn,
+# which is exactly the shape a leftover state can take. Sending it here
+# costs nothing on the ordinary path: a no-op on an already-empty box, and
+# (measured live against a real, never-before-trusted codex pane) a no-op
+# on codex's own directory-trust menu too -- see harness/codex.sh's note on
+# that menu for why a fresh dispatch's very first pane content is often it.
 #
 #   --settle N   seconds to sleep after sending before checking (default 1)
 #   --retries N  total attempts; each retry re-sends `C-u` then `/clear`
@@ -263,6 +273,7 @@ verified_preclear() {
 
   local attempt
   for ((attempt = 1; attempt <= retries; attempt++)); do
+    tmux send-keys -t "$target" Escape 2>/dev/null
     tmux send-keys -t "$target" C-u 2>/dev/null
     if ! tmux send-keys -t "$target" "/clear" Enter 2>/dev/null; then
       SEND_STATUS=send_failed
@@ -359,6 +370,104 @@ verified_send() {
   else
     verified_submit "$target"
   fi
+}
+
+# verified_dismiss_menu <target> <option_row_re> [menu_tail] [--settle N]
+#                        [--retries N]
+#
+# agent-dotfiles#255's actual root cause, reproduced live: a fresh codex
+# process, launched into a directory codex has never been given before
+# (every `dispatch.sh` worktree, every time -- `worktree.sh new` never
+# reuses a path), opens on its OWN one-time menu:
+#
+#   › 1. Yes, continue
+#     2. No, quit
+#
+#     Press enter to continue
+#
+# not on the ordinary chat box `verified_preclear`/`verified_type` expect.
+# Measured 2026-08-20/21 against real codex 0.148.0 in a throwaway tmux
+# socket, a directory it had never seen: `/clear` (dispatch.sh's own first
+# send) typed onto this menu does nothing -- none of its characters are `1`,
+# `2` or Enter -- and the Enter that follows accepts the DEFAULT option
+# ("1. Yes, continue"), not a clear. The screen then repaints to a genuinely
+# empty, ready chat box, so `verified_preclear` reads `empty` and reports
+# success -- but that success was luck: the pane's very first Enter went to
+# a menu selection, not a submit, and a slower render (a colder process, a
+# loaded machine) can easily put `/clear`'s Enter a beat ahead of the menu
+# even existing yet, landing it nowhere. #255's original shape -- the whole
+# brief consumed as a session TITLE rather than a turn -- is the same first-
+# Enter-goes-somewhere-else failure with a different landing spot.
+#
+# So this is a discrete step BEFORE `verified_preclear`, not a change to it:
+# confirm no such menu is showing (or accept it, if it is) using the SAME
+# harness-adapter regex `lanes.sh` already keys its own menu-blocked reading
+# on -- `H_OPTION_ROW_RE`, sourced from `harness/<name>.sh` via
+# `harness-registry.sh`. Generic across harnesses by construction: called
+# with an empty or non-matching `option_row_re` (Claude, Copilot, any lane
+# whose adapter defines no such menu), this returns success on the very
+# first pane read and sends nothing at all.
+#
+#   option_row_re  a harness's `H_OPTION_ROW_RE`. Empty means "this harness
+#                   has no such menu" -- always succeeds without touching
+#                   the pane.
+#   menu_tail      lines from the end of the capture to search, matching
+#                   `lanes.sh`'s own bounded menu read (`H_MENU_TAIL`,
+#                   default 6) -- the #65 discipline: search the visible
+#                   pane, never full scrollback. Blank lines are stripped
+#                   BEFORE the tail is taken, the same as `lanes.sh`'s own
+#                   `pane_lines` -- caught live against a real codex pane
+#                   sized 100x40: the menu prints near the TOP of the pane,
+#                   so a plain `tail -n 6` of the raw capture returns six
+#                   trailing BLANK rows below it and never sees the menu at
+#                   all. `grep -v` for whitespace-only lines first is what
+#                   makes "last N lines" mean "last N lines of content".
+#   --settle N     seconds to sleep after accepting before re-checking
+#                   (default 2 -- a menu's own repaint, not a text box's)
+#   --retries N    total ACCEPT attempts, i.e. Enters sent (default 5 -- a
+#                   cold process start plus this menu's own render can be
+#                   slower than a text box's ordinary repaint; see
+#                   `dispatch.sh`'s `DISPATCH_LAUNCH_SETTLE` note)
+#
+# Return 0 (SEND_STATUS=landed) whether a menu was ever present: "nothing to
+# dismiss" and "dismissed it" are the same success to a caller about to type
+# into this pane next. Return 2 (SEND_STATUS=not_landed) only if the menu is
+# STILL showing after every retry -- typing a brief onto an unresolved menu
+# is exactly the failure this exists to refuse.
+verified_dismiss_menu() {
+  local target="$1" option_row_re="$2" menu_tail="${3:-6}"; shift 3
+  local settle=2 retries=5
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --settle) settle="$2"; shift 2 ;;
+      --retries) retries="$2"; shift 2 ;;
+      *) echo "verified_dismiss_menu: unknown option $1" >&2; SEND_STATUS=send_failed; return 1 ;;
+    esac
+  done
+
+  if [ -z "$option_row_re" ]; then
+    SEND_STATUS=landed
+    return 0
+  fi
+
+  local attempt pane_tail
+  for ((attempt = 1; attempt <= retries; attempt++)); do
+    pane_tail=$(tmux capture-pane -p -t "$target" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n "$menu_tail")
+    if ! grep -qE "$option_row_re" <<<"$pane_tail"; then
+      SEND_STATUS=landed
+      return 0
+    fi
+    tmux send-keys -t "$target" Enter 2>/dev/null
+    sleep "$settle"
+  done
+
+  pane_tail=$(tmux capture-pane -p -t "$target" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n "$menu_tail")
+  if ! grep -qE "$option_row_re" <<<"$pane_tail"; then
+    SEND_STATUS=landed
+    return 0
+  fi
+  SEND_STATUS=not_landed
+  return 2
 }
 
 # blind_send <target> <message> [--preclear-settle N] [--type-settle N] [--literal]
