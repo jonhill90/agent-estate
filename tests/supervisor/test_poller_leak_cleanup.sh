@@ -275,14 +275,33 @@ while [ ! -d "$STATE382/.inbox-poll.lock" ] && [ "$SECONDS" -lt "$deadline" ]; d
 
 out2=$(env SUPERVISOR_STATE="$STATE382" INBOX_POLL_BACKOFF_BASE=0 timeout 5 \
   "$LIVE382/scripts/supervisor/inbox-poll.sh" "poller-owner-382-$$" 2>&1); rc2=$?
-# The refused attempt's own process can take a brief moment to fully exit
-# after printing its refusal and returning from command substitution above
-# (a kernel-scheduling race, not a lock bug) -- poll briefly rather than
-# trusting a single immediate snapshot.
+# agent-supervisor#444: raw `pgrep -f <path> | wc -l` is not a live-poller
+# count -- it is a *cmdline-substring* count, and attempt1's own main loop
+# forks a child (the `$(... inbox.sh)` command substitution, the
+# director-route.sh call) every iteration. Between fork() and the child's
+# own exec(), the kernel still shows the CHILD carrying attempt1's inherited
+# argv -- the full "bash .../inbox-poll.sh poller-owner-..." command line --
+# so pgrep -f matches it too, for a window measured in microseconds. This
+# was reproduced live against the real, on-machine Telegram poller (not a
+# fixture): a `ppid`-labelled sample caught its transient fork child
+# matching the same pattern the instant before the child exec'd into `cat`/
+# `date`/etc. and stopped matching. That is reading (a) from #444's brief --
+# a test race in the counting method -- not reading (b): the guard's own
+# refusal (rc2, the "refusing to start" message) is correct on every
+# sample; only the black-box process count was unreliable. Excluding any
+# match whose ppid is attempt1_pid removes exactly that transient noise
+# without weakening what the count is meant to prove (that no SECOND
+# process is running the poll loop) -- a real second live poller would
+# never have attempt1_pid as its parent.
 live_count=99
 count_deadline=$((SECONDS + 3))
 while [ "$SECONDS" -lt "$count_deadline" ]; do
-  live_count=$(pgrep -f "$LIVE382/scripts/supervisor/inbox-poll.sh" 2>/dev/null | grep -c . || true)
+  live_count=0
+  for cand_pid in $(pgrep -f "$LIVE382/scripts/supervisor/inbox-poll.sh" 2>/dev/null); do
+    cand_ppid=$(ps -o ppid= -p "$cand_pid" 2>/dev/null | tr -d ' ')
+    [ "$cand_ppid" = "$attempt1_pid" ] && continue
+    live_count=$((live_count + 1))
+  done
   [ "$live_count" -eq 1 ] && break
   sleep 0.1
 done
