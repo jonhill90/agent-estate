@@ -4242,6 +4242,80 @@ normal_log=$(tmuxlog)
 want_contains "...the brief still lands in the lane" "$D/brief.md" "$normal_log"
 want_contains "...and is still submitted" "send-keys -t t:@103 Enter" "$normal_log"
 
+# --- agent-supervisor#456: VerifySurvived -----------------------------------
+# Gastown's `StartSession` re-checks `HasSession` AFTER startup and refuses
+# to trust the launch command's own exit code; #453 mined this as the fix for
+# our own "dispatch reports success, the agent never started" shape
+# (agent-dotfiles#255, #178/#179's swallowed submits). The property under
+# test: a ledger row must not read live until the pane has been RE-OBSERVED
+# running the agent, not merely "tmux accepted the send".
+#
+# The ledger's own answer for a specific task's `accepted_at` -- the exact
+# column `record_dispatch(confirm_landed=...)` stamps, and the one a
+# reconciler reads instead of taking "the lane went quiet" as a stand-in for
+# "the work began" (see core.py's `record_dispatch` docstring, agent-
+# supervisor#193). No tmux in the path, same posture as `lane_available`
+# above.
+task_accepted_at() {  # task_accepted_at <state-dir> <task-id>
+  AGENT_SUPERVISOR_STATE_DIR="$1" python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+task = Ledger(sys.argv[2]).get_task(sys.argv[3])
+print(task["accepted_at"] if task else "NO-SUCH-TASK")
+' "$HERE/../../scripts/supervisor" "$1" "$2" 2>&1
+}
+
+# --- 1. THE KILL: the pane is gone right after the brief was submitted -----
+# STUB_KILL_ON_SUBMIT marks the window dead at the SAME send-keys call that
+# submits the brief (see stubs/tmux-dispatch's own comment on the hook point)
+# -- `verified_submit`'s own capture-pane read still sees a real, empty box
+# (a real crash empties the box on its way out too), so SEND_STATUS reads
+# `submitted` exactly as a healthy dispatch would. Only the LATER
+# `verified_survived` read (display-message, not capture-pane) finds the
+# window gone. That ordering is the whole point: this is not distinguishable
+# from a healthy dispatch by verified_submit alone, which is exactly why
+# #456 says nothing before it could have caught this.
+printf '456|| verify the pane survived startup before trusting ledger success\n' >> "$D/issues"
+STATE_456="$D/state-456"
+before_456=$(worktrees)
+died_out=$(LEDGER_STATE="$STATE_456" STUB_KILL_ON_SUBMIT=1 DISPATCH_SURVIVE_SETTLE=0 DISPATCH_SURVIVE_RETRIES=1 \
+  run 456 survive-456 "$D/brief.md" acme/agent-dotfiles "$REPO"); died_rc=$?
+want_exit "dispatch.sh exits non-zero when the pane died right after submit -- not a clean success" "$died_rc" 1 "$died_out"
+want_contains "...the warning names the lane and says the pane is GONE" "pane is GONE" "$died_out"
+want_missing "...and the success line is never printed over it" "dispatch: #456 -> " "$died_out"
+
+died_status=$(LEDGER_STATE="$STATE_456" ledger status 2>&1)
+# The pane is genuinely gone by this point (`.killed` fired at the submit
+# Enter, before LANE_META's own read) -- `LANE_META` reads every field
+# blank, exactly as real tmux does for an unresolvable target (see
+# verified_survived's own header), and `record_dispatch`'s PRE-EXISTING
+# `_register_lane_tx` guard already refuses to register a lane from blank
+# identity fields. So no fresh task row is ever created for this
+# dispatch -- only the step-4.5 claim placeholder remains -- which is a
+# STRONGER "the ledger does not record success" than a row with
+# accepted_at unset would be: there is no dispatch-shaped row at all.
+died_accepted=$(task_accepted_at "$STATE_456" "ad456-survive-456")
+want_contains "...no fresh task row is ever created for the dead dispatch -- not even an unaccepted one" "NO-SUCH-TASK" "$died_accepted"
+want_missing "...specifically: the ledger's own id for what record-dispatch WOULD have written never appears" '"id":"ad456-survive-456"' "$died_status"
+want_contains "...only the pre-existing claim placeholder survives, still held" '"status":"delivered"' "$died_status"
+if [ "$(lane_available "$STATE_456" "t:3")" = False ]; then
+  ok "...and the lane stays HELD, per #456's own invariant (a lane wrongly freed costs a running lane's work)"
+else
+  bad "...and the lane stays HELD, per #456's own invariant" "lane_available: $(lane_available "$STATE_456" "t:3")"
+fi
+
+# --- 2. A HEALTHY DISPATCH STILL SUCCEEDS, ACCEPTED AND ALL -----------------
+# The other direction the brief asks for: this new re-check must not turn a
+# genuinely fine dispatch into a false refusal. Same lane fixture, no kill.
+printf '457|| a healthy dispatch still survives and is accepted\n' >> "$D/issues"
+STATE_457="$D/state-457"
+alive_out=$(LEDGER_STATE="$STATE_457" DISPATCH_SURVIVE_SETTLE=0 DISPATCH_SURVIVE_RETRIES=1 \
+  run 457 survive-457-healthy "$D/brief.md" acme/agent-dotfiles "$REPO"); alive_rc=$?
+want_exit "a healthy dispatch (pane never dies) still exits 0 with verified_survived in place" "$alive_rc" 0 "$alive_out"
+alive_accepted=$(task_accepted_at "$STATE_457" "ad457-survive-457-healthy")
+want_missing "...and IS marked accepted -- verified_survived does not weaken #193's confirm-landed signal" "None" "$alive_accepted"
+
 rm -rf "$D"
 
 

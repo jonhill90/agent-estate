@@ -2101,15 +2101,101 @@ elif ! verified_submit "$LANE_TARGET" \
   esac
 fi
 
+# --- 5.5 THE PANE ACTUALLY SURVIVED, NOT JUST "TMUX ACCEPTED THE SEND" ----
+# agent-supervisor#456, mined from Gastown's `VerifySurvived` (`internal/
+# session/lifecycle.go`, `StartSession` step 12) via #453. Step 5 above
+# proves the input box went EMPTY; it does not prove the process behind it
+# is still THERE. Both read identically to `verified_submit`: a turn that
+# just started empties the box, and so does a process that crashed and took
+# the whole tmux window down with it -- codex eating a whole brief as a
+# session title (agent-dotfiles#255) and a lane running for an hour inside a
+# worktree that no longer existed are both this same shape, "success" was
+# read off the send, not off the agent. Only checked when SEND_STATUS is
+# still `submitted` -- true whichever of the two branches just above set it:
+# `verified_submit`'s ordinary box-empty read, or `verified_launch_prompt`'s
+# own no-failure-signature read for a `PROMPT_IN_LAUNCH` harness
+# (agent-dotfiles#255's codex fold). Every other value either branch can
+# leave behind (`stranded`/`send_failed`/`blocked` already aborted above,
+# `unknown` already means "could not observe") is left alone here -- this
+# step cannot improve on "could not observe" and must not run at all on a
+# path that already aborted.
+#
+# Deliberately does NOT release the claim -- CLAIM_COMMITTED was set at step
+# 4.5, before this pane was ever typed into, and step 4.5's own comment is
+# unchanged by this: a lane wrongly freed here costs a running lane's work
+# and is recovered by nothing, while a lane wrongly left HELD costs only
+# capacity and is recovered by the command printed below. What a dead pane
+# never gets is ACCEPTED (see `DISPATCH_CONFIRM_LANDED_ARGS` immediately
+# below, which reads `DISPATCH_DIED`) -- and, in practice, no fresh
+# task row at all: `LANE_META` (step 6, further down) reads the pane's own
+# identity fields, which read BLANK for a target that no longer exists
+# (measured, see `verified_survived`'s own header), and `record_dispatch`'s
+# existing, pre-#456 guard already refuses to register a lane from blank
+# fields -- falling into the existing `ledger_record_failed`/`mark_lane_held`
+# path rather than a new one. Either way, dispatch.sh's own exit code goes
+# non-zero (see `DISPATCH_DIED`, checked at the very end) so a caller does
+# not read a clean "dispatch: #N -> lane" success line over a lane that is
+# not running anything.
+# `--settle` defaults to `$DISPATCH_SETTLE` itself (1s in production, the
+# same knob step 5 above already tunes), not a fresh number -- measured
+# 2026-08-21 against a real, throwaway isolated tmux socket: `kill-pane`
+# takes a killed window out of `list-windows` synchronously (no propagation
+# lag to wait out; see `verified_survived`'s own header in send.sh for the
+# measurement), so this settle only has to cover a crash landing a beat
+# AFTER the box drained, not tmux's own latency. Reusing `DISPATCH_SETTLE`
+# also means `tests/supervisor/test_dispatch.sh`'s existing `DISPATCH_SETTLE=0`
+# already keeps this step instant in the suite, the same way it already
+# keeps steps 3-5 instant, without a second env var every test call site
+# would otherwise need to remember to zero.
+#
+# ADDED LATENCY UNDER LOAD (agent-dotfiles#255, same live session that raised
+# verified_preclear's own default 2s/2 -> 5s/6, and that Jon reports needed
+# `DISPATCH_SETTLE=12-14`/`DISPATCH_PRECLEAR_RETRIES=14-16` by hand to clear
+# reliably that day): this loop sleeps ONE `--settle` period before its FIRST
+# check and returns the instant that check finds the pane alive -- it only
+# burns a second retry's worth of sleep for a pane that is ACTUALLY not there
+# yet. So a heavier `DISPATCH_SETTLE`, however high an operator has to raise
+# it for `verified_preclear`'s box-CONTENT reads to stop false-refusing under
+# load, costs this step only that same single settle period on the ordinary,
+# healthy path -- not `settle x retries`. And because this check is
+# existence-only (no content read at all, see the header above), a harness
+# that is merely SLOW to render under load is not what this loop is
+# watching for in the first place: the window still exists the whole time a
+# slow-but-fine harness is starting, so raising DISPATCH_SETTLE for
+# verified_preclear's sake does not make this step more likely to
+# false-positive the way it would a content-matching check.
+# Saved BEFORE calling verified_survived, which overwrites SEND_STATUS with
+# its own vocabulary (survived/died) on return -- `DISPATCH_CONFIRM_LANDED_ARGS`
+# just below still needs to know verified_submit's own answer, not
+# verified_survived's, and reading `$SEND_STATUS` there unsaved would silently
+# read the WRONG check's status by the time it runs.
+DISPATCH_SUBMIT_STATUS="$SEND_STATUS"
+if [ "$SEND_STATUS" = submitted ]; then
+  if ! verified_survived "$LANE_TARGET" \
+       --settle "${DISPATCH_SURVIVE_SETTLE:-${DISPATCH_SETTLE:-1}}" --retries "${DISPATCH_SURVIVE_RETRIES:-2}"; then
+    DISPATCH_DIED=1
+    echo "dispatch: WARNING -- $LANE's pane is GONE after the brief was submitted (#$ISSUE_ARG)" >&2
+    echo "dispatch: the brief looked delivered (the input box went empty) but nothing survived to run it -- the process or its window died during startup." >&2
+    echo "dispatch: $LANE STAYS HELD; this dispatch is NOT recorded as accepted (step 6 below may not even find pane identity left to record). CHECK THE PANE BY HAND." >&2
+    echo "dispatch:   $LEDGER_PYTHON $LEDGER_CLI record-completion --lane $LANE --note <note>   # once you know what actually happened" >&2
+  fi
+fi
+
 # agent-supervisor#193: the ledger's own record of "was this genuinely
-# accepted" (`--confirm-landed`, step 6 below), set ONLY when `SEND_STATUS`
-# reads `submitted` -- the box actually confirmed empty after a
-# position-anchored, proof-checked send. The `unknown` case just above is
-# explicitly NOT that: the brief may well be running, but nothing here
+# accepted" (`--confirm-landed`, step 6 below), set ONLY when
+# `DISPATCH_SUBMIT_STATUS` reads `submitted` -- the box actually confirmed
+# empty after a position-anchored, proof-checked send -- AND the pane
+# survived to be re-observed running it (step 5.5, agent-supervisor#456,
+# `DISPATCH_DIED` unset). `DISPATCH_SUBMIT_STATUS`, not `$SEND_STATUS`:
+# verified_survived overwrote the latter with its own `survived`/`died`
+# vocabulary above, so reading `$SEND_STATUS` here would silently compare
+# against the WRONG check's answer. The `unknown` case above is explicitly
+# NOT `submitted` either: the brief may well be running, but nothing here
 # CONFIRMED it, and #193's whole point is that the reconciler must not take
-# "the lane went quiet" as a stand-in for that confirmation.
+# "the lane went quiet" as a stand-in for that confirmation -- #456 extends
+# the same rule to "the lane went quiet because it is gone".
 DISPATCH_CONFIRM_LANDED_ARGS=()
-[ "$SEND_STATUS" = submitted ] && DISPATCH_CONFIRM_LANDED_ARGS=(--confirm-landed)
+[ "$DISPATCH_SUBMIT_STATUS" = submitted ] && [ -z "${DISPATCH_DIED:-}" ] && DISPATCH_CONFIRM_LANDED_ARGS=(--confirm-landed)
 
 # The dispatch was committed at step 4.5, not here. This comment used to
 # introduce a `CLAIM_COMMITTED=1` on this line, and that placement was
@@ -2318,6 +2404,19 @@ else
     fi
     ledger_record_failed "$LEDGER_OUT"
   fi
+fi
+
+# agent-supervisor#456: a died pane never gets this block's own success-
+# shaped lines -- step 5.5 already printed a loud, specific warning to
+# stderr, and printing "dispatch: #N -> lane" on top of it here would read as
+# a clean success to any caller that only checks stdout, exactly the
+# mismatch #456 exists to close. The lane IS still claimed and the worktree
+# IS still real (nothing above unwinds either, per step 4.5's own
+# invariant) -- only "this looks like an ordinary successful dispatch" is
+# withheld.
+if [ -n "${DISPATCH_DIED:-}" ]; then
+  echo "dispatch: #$ISSUE_ARG was claimed against $LANE ($WINDOW_NAME) but the pane DID NOT SURVIVE -- see the WARNING above" >&2
+  exit 1
 fi
 
 # The target is printed as well as the lane (#241) because the caller's very

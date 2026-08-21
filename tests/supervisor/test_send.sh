@@ -653,5 +653,30 @@ else
   bad "MUTATION CONFIRMED (red): the same stuck-menu pane reports submitted when --blocked-re is withheld" "$out"
 fi
 
+# --- 11. verified_survived: agent-supervisor#456 -------------------------
+# `verified_submit` only proves the input box went empty -- true the instant
+# a turn starts AND the instant the whole pane dies taking the window with
+# it. `verified_survived` re-observes the pane a beat later, the way
+# Gastown's `VerifySurvived` re-checks `HasSession` after `StartSession`
+# instead of trusting the launch command's own exit code.
+reset_pane
+out=$(run_send bash -c "
+  . '$SEND'
+  verified_survived '$TARGET' --settle 0 --retries 1
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+want_contains "a live pane (the fixture's own window 1) is confirmed to have survived" "rc=0 status=survived" "$out"
+
+# STUB_KILLED_PANES=1 models real tmux's own measured behaviour for a target
+# that no longer resolves: `display-message` still exits 0, but every
+# `#{...}` field comes back blank -- so this is also proof `verified_survived`
+# does not trust a zero exit status on its own.
+out=$(run_send env STUB_KILLED_PANES=1 bash -c "
+  . '$SEND'
+  verified_survived '$TARGET' --settle 0 --retries 2
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+want_contains "a killed pane (window gone, tmux still exits 0 with blank fields) is DETECTED as died, not reported survived" "rc=5 status=died" "$out"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
