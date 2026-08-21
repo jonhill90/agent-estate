@@ -78,6 +78,7 @@ demonstrated:
 | `text.sh` | one line per lane to stdout | none — no daemon, no plugin | proves "apart": works in a bare shell, in cron, over SSH, with the supervisor never running |
 | `opensessions.sh` | a tmux sidebar pane, via OpenSessions' `/api/agent-event` + `/set-status` HTTP API | a Rust daemon + sidebar client per tmux client (TPM-installed plugin) | proves "together": the tmux-plugin path #173 measured live, unchanged in mechanism from `lanebridge.sh` |
 | `tui.sh` | a curses screen: a `digest.sh --json` header line, one line per lane below it, selectable, `enter` jumps to it | none when not running — no daemon, plain Python stdlib (`curses`); one extra subprocess (`digest.sh --json`) per refresh tick | jonhill90/agent-supervisor#7's "a TUI he owns" — no third-party program, unlike `opensessions.sh`; the header is agent-dotfiles#67 |
+| `dock.sh` | a docked, refreshing vertical pane: one line per lane, redrawn on a timer, meant to be opened once with `tmux split-window` and left in view | none while not running — no daemon, no plugin; one `lanes.sh --json` subprocess every 5s (`LANEVIEW_DOCK_REFRESH`) while a pane is running it | agent-supervisor#464 / agent-dotfiles#197: a docked sidebar is reachable from tmux primitives already in this estate's dependency graph, so the zero-dependency option did not require `opensessions.sh`'s daemon+plugin to clear #173's "must show state, not just names" bar |
 
 ### Where the two deliberately disagree: the supervisor row
 
