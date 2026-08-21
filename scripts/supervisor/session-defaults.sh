@@ -80,6 +80,36 @@ session_for_repo() {
 # own pane happens to sit in some OTHER tmux session cannot accidentally
 # exclude that other session's window 1.
 #
+# agent-supervisor#459 follow-up: the session-name check above is NOT
+# sufficient on its own -- pane ids are unique per tmux SERVER, not
+# globally. A caller whose ambient $TMUX_PANE was minted on one server (its
+# own personal tmux session, say) while $TMUX_TMPDIR points at a DIFFERENT
+# server -- exactly this codebase's own documented isolation shape,
+# `env -u TMUX TMUX_TMPDIR=...` (tmux-guard.sh's "Isolated form"; every
+# real-tmux test in this suite does this) -- can have that stale
+# $TMUX_PANE number coincidentally alias a REAL pane on the server actually
+# being queried. If that alias happens to sit in a same-named session, the
+# check above passes on a window that has nothing to do with the caller.
+# Measured live: test_lane_done.sh's #259 fixture, run from a shell already
+# inside its own tmux session, leaked that shell's ambient `%6` past the
+# fixture's `env -u TMUX` isolation (TMUX_PANE was never part of that
+# isolation); the isolated test server had its own, unrelated `%6` sitting
+# in the very session under test, and a finished lane's window was
+# misidentified as the supervisor's own -- lane-done.sh then refused to
+# rename it back to free-N (agent-supervisor#459).
+#
+# $TMUX is only ever set BY tmux itself for a process that is truly a
+# child of a real pane, and its presence is what makes every plain `tmux`
+# command in THIS process consistently address that pane's own server:
+# tmux's own connection precedence prefers $TMUX's embedded socket path
+# over $TMUX_TMPDIR whenever both are set (verified directly,
+# agent-supervisor#459). Requiring it here guarantees $TMUX_PANE is
+# resolved on the exact server it was minted on -- not merely "whatever
+# server $TMUX_TMPDIR happens to name today". A caller that legitimately
+# wants to address a DIFFERENT session/server always unsets $TMUX to do
+# so; by unsetting it, it also correctly forfeits this function's trust in
+# whatever stale $TMUX_PANE it separately inherited.
+#
 # Returns 1 with no output when neither resolves -- the caller's contract is
 # to fall back to its pre-#239 index comparison in that case (degraded, not
 # broken: exactly today's behaviour), never to treat empty as "no supervisor
@@ -90,6 +120,7 @@ supervisor_window_id() {
     @*) printf '%s\n' "$LANES_SUPERVISOR_WINDOW"; return 0 ;;
   esac
   [ -n "${TMUX_PANE:-}" ] || return 1
+  [ -n "${TMUX:-}" ] || return 1
   local wid
   wid="$(tmux display-message -p -t "$TMUX_PANE" '#{window_id}' 2>/dev/null)" || return 1
   [ -n "$wid" ] || return 1

@@ -77,6 +77,17 @@ tmux new-window -d -t "=$S:3" -n supervisor -c /tmp
 tmux new-window -d -t "=$S:4" -n free-4 -c /tmp
 SUP_WID="$(tmux display-message -p -t "=$S:3" '#{window_id}')"
 SUP_PANE="$(tmux list-panes -t "=$S:3" -F '#{pane_id}')"
+# agent-supervisor#459 follow-up: supervisor_window_id() now also requires
+# $TMUX to be set (not just $TMUX_PANE) -- a genuine child of the
+# supervisor's own pane inherits BOTH from tmux itself, never TMUX_PANE
+# alone. This script's top-level `unset TMUX; export TMUX_TMPDIR="$RT"`
+# is the isolation shape a caller uses to address a DIFFERENT server on
+# purpose (tmux-guard.sh's "Isolated form"), which is exactly the shape
+# that must NOT carry an inherited TMUX_PANE's trust across servers -- so
+# simulating "really is a child of this pane" below has to hand back a
+# real, valid $TMUX for THIS isolated server, not merely set TMUX_PANE.
+SUP_SOCKET="$(tmux display-message -p -t "=$S:3" '#{socket_path}')"
+SUP_TMUX="$SUP_SOCKET,$$,0"
 
 # 1. Before any renumbering: an explicit index override recognises it, same
 #    as pre-#239 behaviour -- this is not what's broken.
@@ -124,7 +135,7 @@ fi
 #    post-renumber index (2) deliberately does not equal
 #    LANES_SUPERVISOR_WINDOW's hardcoded default (1), so this cannot pass by
 #    accidentally landing on the pre-#239 fallback's literal.
-fixed_pane="$(TMUX_PANE="$SUP_PANE" state_of 2)"
+fixed_pane="$(TMUX="$SUP_TMUX" TMUX_PANE="$SUP_PANE" state_of 2)"
 if [ "$fixed_pane" = supervisor ]; then
   ok "fix (TMUX_PANE): running as a child of the supervisor's own pane recognises it after the renumber, with no override configured"
 else
@@ -138,7 +149,7 @@ fi
 #    these are plain shells, not live agents; the point is it is not
 #    misclassified as supervisor).
 other_id="$(LANES_SUPERVISOR_WINDOW="$SUP_WID" state_of 3)"
-other_pane="$(TMUX_PANE="$SUP_PANE" state_of 3)"
+other_pane="$(TMUX="$SUP_TMUX" TMUX_PANE="$SUP_PANE" state_of 3)"
 if [ "$other_id" != supervisor ] && [ "$other_pane" != supervisor ]; then
   ok "the other lane (free-4) is not swept into the supervisor exclusion under either fix path"
 else
