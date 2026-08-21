@@ -117,6 +117,25 @@ MIN_REMAINING="${QUOTA_MIN_REMAINING:-15}"
 # --- #264: bounded calls, with a last-good cache to degrade into ----------
 GUARD_TIMEOUT_SECONDS="${QUOTA_GUARD_TIMEOUT_SECONDS:-45}"
 USAGE_TIMEOUT_SECONDS="${QUOTA_USAGE_TIMEOUT_SECONDS:-20}"
+# agent-supervisor#474: `codexbar guard`'s OWN --timeout defaults to 60s
+# (its --help: "0 = safe, 1 = insufficient quota, 64 = invalid arguments, 69
+# = quota unavailable or fetch timed out ... --timeout accepts 0...86400 and
+# defaults to 60 seconds"). GUARD_TIMEOUT_SECONDS defaults to 45, so without
+# telling codexbar its own deadline, `with_timeout` below always SIGKILLs it
+# first -- codexbar never gets to hit its internal 60s and self-report a
+# clean 69. Measured directly (2026-08-21): `codexbar guard --timeout 1`
+# returns, within budget, rc=69 and
+#   {"decision":"unknown","remainingPercent":null,"exitCode":69,
+#    "unavailableReason":"timeout", ...}
+# -- a diagnosable answer. SIGKILLed instead, the same call yields empty
+# stdout, which this script can only report as "no output ... could not
+# reach the quota source" -- true, but it throws away the reason codexbar
+# already knew. GUARD_INNER_TIMEOUT_SECONDS is kept a few seconds under the
+# outer bound so codexbar's own clean-timeout path (write JSON, exit 69) has
+# room to run and flush before the outer `with_timeout` would SIGKILL it;
+# the outer bound remains the hard backstop for a codexbar that ignores its
+# own --timeout.
+GUARD_INNER_TIMEOUT_SECONDS=$((GUARD_TIMEOUT_SECONDS > 5 ? GUARD_TIMEOUT_SECONDS - 3 : GUARD_TIMEOUT_SECONDS))
 # How long a cached reading may be shown as "last known" before it is
 # reported UNKNOWN instead of ageing into fiction. 15 minutes: long enough to
 # survive one bad codexbar call, short enough that nobody dispatches against
@@ -291,7 +310,8 @@ case "$CMD" in
       # a per-sample hang must not stall the whole batch past ~SAMPLES x
       # GUARD_TIMEOUT_SECONDS.
       with_timeout "$GUARD_TIMEOUT_SECONDS" "$outfile" \
-        "$BIN" guard --provider "$PROVIDER" --min-remaining "$MIN_REMAINING" --window "$WINDOW" --json
+        "$BIN" guard --provider "$PROVIDER" --min-remaining "$MIN_REMAINING" --window "$WINDOW" \
+          --timeout "$GUARD_INNER_TIMEOUT_SECONDS" --json
       # Capture the exit code directly, from with_timeout's return, not
       # through a pipe -- reading it through a pipe returns the pipe's
       # status, which has bitten this estate three times.
@@ -338,7 +358,17 @@ case "$CMD" in
           wind_down_msg="quota: WIND DOWN -- ${pct}% remaining in $WINDOW, below ${MIN_REMAINING}%"
           ;;
         69)
-          echo "quota: sample $i/$SAMPLES -- $BIN could not read the quota (exit 69) -- could not reach the quota source" >&2
+          # agent-supervisor#474: per `codexbar guard --help`, 69 is a stable,
+          # documented code -- "quota unavailable or fetch timed out" -- not
+          # an unexplained failure. It is codexbar's own catch-all for
+          # "could not determine quota" (fetch timeout, rate limit, expired
+          # or missing OAuth credential, etc). Normal successful JSON parses
+          # land in the `why`-non-empty branch above with the specific
+          # reason (`unavailableReason`); this bare case only fires if
+          # codexbar exited 69 without setting that field, which is still
+          # "could not reach the quota source", just without a reason string
+          # to relay.
+          echo "quota: sample $i/$SAMPLES -- $BIN could not read the quota (exit 69, \"quota unavailable or fetch timed out\" per codexbar --help) -- could not reach the quota source" >&2
           unreachable=$((unreachable + 1))
           ;;
         *)
