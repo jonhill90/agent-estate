@@ -689,6 +689,46 @@ if ! LEDGER_STATUS_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" status 2>&1); then
   exit 1
 fi
 
+# --- 0.2 refuse to dispatch for a supervisor that does not hold the lease -
+# agent-dotfiles#238. On 2026-08-12 a second, fully legitimate supervisor
+# instance resumed in an ordinary tmux window (identity had only ever been
+# INFERRED from a window index, never recorded) and dispatched the same five
+# issues a first instance had claimed seconds earlier. `claim.sh`'s per-issue
+# claim could not catch it: both instances authenticate as the same GitHub
+# user, so an assignee one took reads as claimed to the other too, not as a
+# collision signal. This is the ledger-recorded fact that closes the gap one
+# level up, at the supervisor ROLE itself -- see `Ledger.take_supervisor_lease`.
+#
+# `SUPERVISOR_LEASE_OWNER_PID` names the process that is supposed to hold the
+# lease -- defaults to `$PPID`, the process that invoked this script, which
+# in production is the long-lived supervisor loop itself (loop-tick.md takes
+# the lease with its own `$$` at tick start, before calling this script; see
+# that file's lease gate). Overridable for a caller that is not its own
+# direct parent (none, today).
+#
+# Fails CLOSED only against a genuine conflict -- a lease recorded for some
+# OTHER pid -- never against the mere absence of one. A ledger that has never
+# seen `take-supervisor-lease` (every existing test fixture, and any manual
+# `dispatch.sh` run outside the loop) has no row to conflict with, so this
+# proceeds silently rather than demanding every caller adopt lease tracking
+# before it dispatches anything -- the loop is what negotiates the lease with
+# the WHOLE estate; a lone `dispatch.sh` invocation reading no lease at all
+# has nothing to conflict with and nothing to protect against. Per
+# agent-dotfiles#199, stderr on a dispatch that is not failing stays clean --
+# an absent or unreadable lease is not, by itself, a failure.
+SUPERVISOR_LEASE_OWNER_PID="${SUPERVISOR_LEASE_OWNER_PID:-$PPID}"
+if LEASE_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" supervisor-lease 2>&1); then
+  if grep -qF '"held":true' <<<"$LEASE_OUT"; then
+    LEASE_OWNER=$(sed -n 's/.*"owner":"\([^"]*\)".*/\1/p' <<<"$LEASE_OUT" | head -1)
+    LEASE_PID="${LEASE_OWNER##*:}"
+    if [ -n "$LEASE_PID" ] && [ "$LEASE_PID" != "$SUPERVISOR_LEASE_OWNER_PID" ]; then
+      echo "dispatch: the supervisor lease is held by $LEASE_OWNER, not this process (expected pid $SUPERVISOR_LEASE_OWNER_PID) -- refusing to dispatch #$ISSUE_ARG" >&2
+      echo "dispatch: a second supervisor instance must stand down, not dispatch; see agent-dotfiles#238" >&2
+      exit 1
+    fi
+  fi
+fi
+
 # --- 0.5 clear claims whose dispatcher died where nothing could clean up ---
 # agent-dotfiles#209. Step 1's claim is released on every abort path below and
 # by the EXIT/TERM/INT trap installed with it -- but SIGKILL, an OOM kill and

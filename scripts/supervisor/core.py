@@ -38,6 +38,9 @@ MAX_RESULT_BYTES = 64 * 1024
 # holds awaiting a human and must never be reaped.
 CLAIM_TASK_PREFIX = "ledger-claim:"
 
+# agent-dotfiles#238. The single row `supervisor_lease` may ever hold.
+SUPERVISOR_LEASE_ID = "supervisor"
+
 # The claiming process's identity, recorded in the placeholder's `summary`.
 # A suffix on an existing column rather than a new one: a `tasks` column would
 # mean a schema migration (see `_migrate_tasks_table`) for a field exactly one
@@ -391,6 +394,30 @@ class Ledger:
                     -- copilot are both exhausted (see dispatch-claude-
                     -- print.sh's header for the measurement).
                     transport TEXT NOT NULL DEFAULT 'send-keys' CHECK (transport IN ('send-keys', 'acp', 'pi-rpc', 'claude-print')),
+                    updated_at INTEGER NOT NULL
+                );
+
+                -- agent-dotfiles#238. WHICH process is the supervisor was
+                -- never a recorded fact -- `lanes.sh`/`dispatch.sh` inferred
+                -- it from a tmux window index, and on 2026-08-12 a second,
+                -- fully legitimate instance resumed in an ordinary window,
+                -- inherited the full loop prompt, and dispatched the same
+                -- five issues a first instance had just claimed seconds
+                -- earlier. Not piggybacked onto `tasks`/`CLAIM_TASK_PREFIX`
+                -- (the `lane_claim` shape this is modelled on) because
+                -- `tasks.lane` is `NOT NULL REFERENCES lanes(lane)` and the
+                -- supervisor is not a dispatched pane -- forcing a fake
+                -- `lanes` row to hang a claim off of would make `lanes.sh`,
+                -- `lane_free` and every lane-shaped reader answer questions
+                -- about a pane that does not exist. A dedicated singleton
+                -- table keeps the SAME pattern (owner=host:pid, INSERT-or-
+                -- refuse under `_locked`+`BEGIN IMMEDIATE`, pid-liveness-
+                -- gated reap, no TTL) without overloading lane semantics.
+                CREATE TABLE IF NOT EXISTS supervisor_lease (
+                    id TEXT PRIMARY KEY CHECK (id = 'supervisor'),
+                    owner TEXT NOT NULL,
+                    note TEXT NOT NULL DEFAULT '',
+                    taken_at INTEGER NOT NULL,
                     updated_at INTEGER NOT NULL
                 );
 
@@ -3002,6 +3029,100 @@ class Ledger:
                 record["owner"] = f"{match.group('host')}:{match.group('pid')}"
                 reaped.append(record)
         return reaped
+
+    def take_supervisor_lease(self, *, owner, note="supervisor loop"):
+        """Atomically take the single `supervisor` role, or refuse and name the holder.
+
+        agent-dotfiles#238. Mirrors `claim_lane`'s INSERT-or-refuse shape
+        (INSERT under `_locked`+`BEGIN IMMEDIATE`; the second writer's INSERT
+        raises `IntegrityError` and is refused, never merged) but against the
+        singleton `supervisor_lease` row rather than a per-lane placeholder --
+        see that table's own comment for why lane claims are not reused
+        directly. `owner` is `claim_owner_token(pid)` (`host:pid`), always
+        required: an unowned lease can never be told apart from a dead one, so
+        `reap_stale_supervisor_lease` below would never have anything to
+        compare against.
+
+        Returns `{"leased": True, "owner": owner}` on success, or
+        `{"leased": False, "holder": <existing owner>}` when another owner
+        already holds it -- including when THIS `owner` already holds it
+        (idempotent by identity, not `True` for a stranger).
+        """
+        now = int(self.clock())
+        with self._locked(), self._transaction() as connection:
+            try:
+                connection.execute(
+                    "INSERT INTO supervisor_lease(id, owner, note, taken_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+                    (SUPERVISOR_LEASE_ID, owner, note, now, now),
+                )
+            except sqlite3.IntegrityError:
+                row = connection.execute(
+                    "SELECT owner FROM supervisor_lease WHERE id = ?", (SUPERVISOR_LEASE_ID,)
+                ).fetchone()
+                holder = row["owner"] if row is not None else None
+                return {"leased": holder == owner, "holder": holder, "owner": owner}
+            return {"leased": True, "holder": owner, "owner": owner}
+
+    def supervisor_lease(self):
+        """The current lease row, or `None` if nobody holds it."""
+        with self._locked(), self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM supervisor_lease WHERE id = ?", (SUPERVISOR_LEASE_ID,)
+            ).fetchone()
+            return None if row is None else self._dict(row)
+
+    def release_supervisor_lease(self, *, owner):
+        """Undo a `take_supervisor_lease` this same `owner` holds, and ONLY that one.
+
+        Scoped to `owner` for the same reason `release_lane_claim` is scoped
+        to `token`: a graceful shutdown always releases its own lease, but the
+        DELETE must never be able to clear a lease some OTHER, still-live
+        owner holds -- e.g. a caller that raced `take_supervisor_lease`,
+        lost, and cleans up anyway. Returns whether a row actually went away.
+        """
+        with self._locked(), self._transaction() as connection:
+            cursor = connection.execute(
+                "DELETE FROM supervisor_lease WHERE id = ? AND owner = ?",
+                (SUPERVISOR_LEASE_ID, owner),
+            )
+            return cursor.rowcount > 0
+
+    def reap_stale_supervisor_lease(self, *, host=None, is_alive=None):
+        """Clear the supervisor lease iff its owning process is provably gone.
+
+        agent-dotfiles#238. The other half of the property this table exists
+        for: a lease that outlives a crashed supervisor with no way to
+        reclaim it would make the estate strictly worse than two dispatchers
+        -- it could never be restarted at all. Same liveness rule and same
+        one-way ratchet as `reap_stale_lane_claims` (see that method's
+        docstring): no TTL, because elapsed time cannot tell a supervisor
+        mid-tool-call from a dead one, only a pid can; only the recorded
+        owner's HOST is compared, and only when its PID is provably gone
+        (`pid_is_alive` resolves every ambiguity -- a foreign-host owner, a
+        permission error, a recycled pid -- as alive, never as dead).
+
+        Returns the reaped row (with `owner` split back out for the caller's
+        log line) or `None` if there was nothing to reap, including when the
+        held lease's owner is still alive.
+        """
+        host = host or socket.gethostname()
+        alive = pid_is_alive if is_alive is None else is_alive
+        with self._locked(), self._transaction() as connection:
+            row = connection.execute(
+                "SELECT * FROM supervisor_lease WHERE id = ?", (SUPERVISOR_LEASE_ID,)
+            ).fetchone()
+            if row is None:
+                return None
+            match = re.match(r"^(?P<host>[^\]\s:]+):(?P<pid>[1-9][0-9]*)$", row["owner"] or "")
+            if match is None or match.group("host") != host:
+                return None
+            if alive(int(match.group("pid"))):
+                return None
+            connection.execute("DELETE FROM supervisor_lease WHERE id = ?", (SUPERVISOR_LEASE_ID,))
+            record = self._dict(row)
+            record["reaped_host"] = match.group("host")
+            record["reaped_pid"] = match.group("pid")
+            return record
 
     def _write_result(self, task_id, result, *, suffix=""):
         """`suffix` (agent-supervisor#401) lets a caller that is NOT the

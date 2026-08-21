@@ -26,6 +26,48 @@ rewriting what they correct:**
   an example's literal argument names. Per this project's "correct rather
   than delete" rule, the examples below are left as written.
 
+## Before the quota gate: hold the supervisor lease, or stop entirely
+
+agent-dotfiles#238. Nothing below this line establishes WHO the supervisor
+is — it was never a recorded fact, only an inference from which tmux window
+a process happened to occupy, and on 2026-08-12 a second, fully legitimate
+instance resumed elsewhere, inherited this whole file's context, and
+dispatched the same five issues a first instance had claimed seconds
+earlier. `claim.sh`'s per-issue claim did not catch it (both instances
+share one GitHub identity), and nothing checked the ROLE itself.
+
+Run this before anything else, every tick, using `$$` — this process's own
+pid, stable for the life of this conversation:
+
+```bash
+python3 scripts/supervisor/cli.py take-supervisor-lease --owner-pid $$
+```
+
+- **`"leased":true`** — you hold it (freshly, or still, if this is a later
+  tick re-affirming the same pid). Proceed to the quota gate.
+- **`"leased":false`** — you are NOT the supervisor. `"holder"` names who is.
+  Before standing down, check whether that holder is actually dead — a
+  legitimate restart must still work, and a lease that outlives a crashed
+  supervisor with no way to reclaim it would be strictly worse than two
+  dispatchers:
+
+  ```bash
+  python3 scripts/supervisor/cli.py reap-supervisor-lease
+  ```
+
+  If this reports a reaped record (the holder's pid was provably gone on
+  this host), retry `take-supervisor-lease` once — it should now succeed.
+  If `reap-supervisor-lease` reports nothing reaped (`"reaped":null`), the
+  holder is alive: **stop.** Do not run the quota gate, do not read the
+  Director's inbox, do not dispatch anything. Notify Jon (`notify.sh`) that
+  a second instance detected a live supervisor and is standing down, the
+  same way agent-dotfiles#238's own incident was handled, and end this tick.
+
+Every `dispatch.sh` call also re-checks this lease against `$PPID` (its own
+invoking process) before dispatching anything — see that script's step 0.2 —
+so a lease taken here is enforced again at the point of dispatch, not just
+trusted for the rest of the tick.
+
 ## Every tick begins with the quota gate
 
 ```bash
