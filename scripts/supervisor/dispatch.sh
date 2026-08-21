@@ -1702,6 +1702,24 @@ if [ -z "$HARNESS_HIDX" ] || [ -z "${H_LAUNCH_CMD[$HARNESS_HIDX]:-}" ]; then
 fi
 LAUNCH_CMD="${H_LAUNCH_CMD[$HARNESS_HIDX]}"
 
+# agent-dotfiles#255: a harness whose adapter sets H_LAUNCH_TAKES_PROMPT
+# (codex, see harness/codex.sh) does not treat the first message TYPED into
+# a live pane as a real turn -- so for this harness's fresh-lane path there
+# is no typed message at all. The short "Read $BRIEF ..." pointer built
+# above (MESSAGE) is folded into LAUNCH_CMD itself, as the harness's own
+# documented launch-time PROMPT argument, and step 4 below skips typing
+# entirely for it -- see PROMPT_IN_LAUNCH.
+#
+# `printf %q` quotes MESSAGE for re-parsing by the shell respawn-pane hands
+# LAUNCH_CMD to (it contains no embedded newline -- MESSAGE is built as one
+# line above -- so this is a plain single-token quoting job, not the
+# newline-as-Enter hazard send.sh's verified_type refuses).
+PROMPT_IN_LAUNCH=0
+if [ "${H_LAUNCH_TAKES_PROMPT[$HARNESS_HIDX]:-0}" = 1 ]; then
+  PROMPT_IN_LAUNCH=1
+  LAUNCH_CMD="$LAUNCH_CMD $(printf '%q' "$MESSAGE")"
+fi
+
 # agent-supervisor#236: LAUNCH_CMD is handed to respawn-pane as its own
 # argv, so it becomes the pane's PROCESS directly -- it is never typed into
 # whatever the respawn produces. The prior shape here was `respawn-pane -k`,
@@ -1851,23 +1869,32 @@ DISPATCH_SEND_EPOCH=$(date +%s)
 # check was never built to read through (see that function's own header) --
 # confirming the blank is the whole of what can be confirmed here.
 #
-# Defaults raised 2->5 / 2->6, agent-dotfiles#255: the guard above was
-# correct and firing -- three consecutive real dispatches on 2026-08-21 were
-# refused with "/clear did not blank <lane>'s screen", all on loaded panes.
-# Jon's own measurement that day: `DISPATCH_SETTLE=2 DISPATCH_PRECLEAR_RETRIES=2`
-# (the prior defaults) was not enough under that load; raising to
-# `DISPATCH_SETTLE=5 DISPATCH_PRECLEAR_RETRIES=6` made all three succeed, and
-# a manual `Escape`+`C-u`+`Enter` recovered them by hand in the meantime (see
-# `verified_preclear`'s own header for that half of the fix). This is a
-# refusal getting a bigger budget, not a refusal getting weaker: a pre-clear
-# that still never blanks after 6 tries at 5s apiece (30s) still aborts the
-# dispatch exactly as before.
-if ! verified_preclear "$LANE_TARGET" \
-     --settle "${DISPATCH_SETTLE:-5}" --retries "${DISPATCH_PRECLEAR_RETRIES:-6}"; then
-  if [ "$SEND_STATUS" = send_failed ]; then
-    abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
+# Defaults raised 2 -> 5 (settle) and 2 -> 6 (retries), agent-dotfiles#255,
+# landed by #447: Jon reported three consecutive dispatches refused today
+# with "`/clear` did not blank <lane>'s screen" at the old defaults, on real,
+# loaded panes -- the guard firing correctly (#193's whole point), just
+# against too small a budget to survive the load it was actually up against.
+# Raising to these values, by hand, made all three succeed. The
+# `Escape`-before-`C-u` fix just above (send.sh) targets the same failure by
+# a different mechanism -- a real key instead of a bigger budget -- and may
+# make some of this margin unnecessary; it is kept anyway because it costs
+# latency only on the preclear path (2-5s x up to 6 retries, worst case, once
+# per dispatch), and a lane wrongly refused here costs nothing a retry
+# doesn't fix, while a `/clear` this guard incorrectly waved through is
+# exactly #255's silent-success shape.
+#
+# agent-dotfiles#255: skipped entirely when PROMPT_IN_LAUNCH -- that harness's
+# pane was just started fresh by respawn-pane above with the brief-pointer
+# message already folded into its own argv, so there is no live conversation
+# to clear and nothing typed yet for a corrupted `/clear` to glue onto.
+if [ "$PROMPT_IN_LAUNCH" != 1 ]; then
+  if ! verified_preclear "$LANE_TARGET" \
+       --settle "${DISPATCH_SETTLE:-5}" --retries "${DISPATCH_PRECLEAR_RETRIES:-6}"; then
+    if [ "$SEND_STATUS" = send_failed ]; then
+      abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
+    fi
+    abort_send "/clear did not blank $LANE's screen -- #$ISSUE_ARG was NOT dispatched (check the pane by hand)"
   fi
-  abort_send "/clear did not blank $LANE's screen -- #$ISSUE_ARG was NOT dispatched (check the pane by hand)"
 fi
 
 # Type, verify, THEN submit -- send.sh's verified_type, extracted from what
@@ -1911,15 +1938,20 @@ fi
 # is not the only thing that could go wrong in that gap. A classification --
 # `verified_preclear`'s included -- can be wrong; one more `C-u`, sent
 # immediately before the keys that matter, cannot be.
-if ! verified_type "$LANE_TARGET" "$MESSAGE" \
-     --settle "${DISPATCH_SETTLE:-1}" --retries 2 --preclear \
-     --proof-head "Read $BRIEF" \
-     --proof "$WORKTREE" \
-     --proof "never work in the shared checkout at $REPO_PATH."; then
-  if [ "$SEND_STATUS" = send_failed ]; then
-    abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
+# agent-dotfiles#255: skipped when PROMPT_IN_LAUNCH, same reason as the
+# preclear above -- the message is already this harness's launch argv, never
+# a live pane's typed input, so there is nothing here to type or verify.
+if [ "$PROMPT_IN_LAUNCH" != 1 ]; then
+  if ! verified_type "$LANE_TARGET" "$MESSAGE" \
+       --settle "${DISPATCH_SETTLE:-1}" --retries 2 --preclear \
+       --proof-head "Read $BRIEF" \
+       --proof "$WORKTREE" \
+       --proof "never work in the shared checkout at $REPO_PATH."; then
+    if [ "$SEND_STATUS" = send_failed ]; then
+      abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
+    fi
+    abort_send "the brief did not land intact in $LANE -- #$ISSUE_ARG was NOT dispatched (check the pane by hand)"
   fi
-  abort_send "the brief did not land intact in $LANE -- #$ISSUE_ARG was NOT dispatched (check the pane by hand)"
 fi
 
 # --- 4.5 THE POINT OF NO RETURN, AND IT IS THE SEND -----------------------
@@ -1997,7 +2029,43 @@ CLAIM_COMMITTED=1
 # it into send.sh changed nothing about WHEN it fires (still immediately
 # after the ledger commit above, still fatal if the send-keys call itself
 # errors), only where the code that fires it lives.
-if ! verified_submit "$LANE_TARGET" \
+# agent-dotfiles#255: PROMPT_IN_LAUNCH has no Enter to send and no box to
+# poll for empty -- the message left as this harness's launch argv, so
+# `verified_submit`'s box-state check has nothing to read. `verified_launch_prompt`
+# is its replacement for this path: it polls for that harness's OWN recorded
+# failure signature (H_LAUNCH_PROMPT_FAILURE_RE -- codex's `Session renamed
+# to`, see harness/codex.sh) instead of a box state, because there is no box
+# state here for a title-eating quirk to leave behind -- only that
+# signature, painted by the harness itself.
+# `--blocked-re`/`--option-row-re` below, agent-dotfiles#255 round 2: LIVE
+# reproduction, real codex, never a mock -- `respawn-pane -c $WORKTREE`
+# always starts the harness in a worktree it has never seen, so codex's own
+# directory-trust menu ("Press enter to continue") came up on THIS dispatch
+# before the folded prompt was ever read, and nothing above would have
+# caught it: the menu contains no `Session renamed to`, so an unanswered
+# codex lane would have reported SEND_STATUS=submitted -- silent success,
+# #255's exact shape, out of the very fix meant to close it. Wired from the
+# same H_BLOCKED_MARKERS/H_OPTION_ROW_RE fields `lanes.sh` already reads to
+# classify a lane `menu-blocked`.
+if [ "$PROMPT_IN_LAUNCH" = 1 ]; then
+  if ! verified_launch_prompt "$LANE_TARGET" \
+       --tries "${DISPATCH_CONFIRM_TRIES:-10}" \
+       --settle "${DISPATCH_SETTLE:-1}" \
+       --failure-re "${H_LAUNCH_PROMPT_FAILURE_RE[$HARNESS_HIDX]:-}" \
+       --blocked-re "${H_BLOCKED_MARKERS[$HARNESS_HIDX]:-}" \
+       --option-row-re "${H_OPTION_ROW_RE[$HARNESS_HIDX]:-}"; then
+    case "$SEND_STATUS" in
+      stranded)
+        abort_send "$LANE's harness did not accept the folded launch prompt as a turn (${H_LAUNCH_PROMPT_FAILURE_RE[$HARNESS_HIDX]:-} matched) -- #$ISSUE_ARG was NOT dispatched (check the pane by hand)" ;;
+      blocked)
+        abort_send "$LANE is still stuck on a menu/prompt after the folded launch (e.g. a first-sight directory-trust gate) -- the brief may be queued behind it, unconfirmed either way; #$ISSUE_ARG was NOT dispatched (answer the prompt by hand, then re-dispatch)" ;;
+      unknown)
+        echo "dispatch: WARNING -- $LANE's harness has H_LAUNCH_TAKES_PROMPT set but no H_LAUNCH_PROMPT_FAILURE_RE, so the folded launch prompt could not be confirmed either way" >&2
+        echo "dispatch: #$ISSUE_ARG is claimed and the worktree exists; CHECK THE PANE BY HAND." >&2
+        ;;
+    esac
+  fi
+elif ! verified_submit "$LANE_TARGET" \
      --confirm-tries "${DISPATCH_CONFIRM_TRIES:-10}" \
      --confirm-settle "${DISPATCH_SETTLE:-1}"; then
   case "$SEND_STATUS" in
