@@ -138,6 +138,38 @@ bump_quota_streak() {
   printf '%s' "$n"
 }
 
+# agent-supervisor#470: the remaining half of #466's pattern, applied to the
+# other silent-skip gate #470 named -- not the quota gate (#474/#476 already
+# fixed that half), but advance-live.sh's recovery attempt below. Its own
+# `git fetch` has a hard ADVANCE_FETCH_TIMEOUT_SECONDS bound (20s default) and
+# can time out under load exactly like a slow codexbar sample can; before this,
+# a failed recovery attempt paged on the very FIRST occurrence, which meant a
+# single flaky fetch escalated immediately -- as noisy in the other direction
+# as the quota gate's old silence was. Same streak-and-cooldown shape as
+# QUOTA_STREAK_FILE, kept in its own file so a standing live/-recovery
+# incident and a standing quota-instrument incident escalate on independent
+# timelines rather than one resetting the other's count.
+ADVANCE_STREAK_FILE="$STATE/.director-loop-advance-streak.state"
+ADVANCE_ESCALATE_AFTER="${DIRECTOR_LOOP_ADVANCE_ESCALATE_AFTER:-3}"
+
+read_advance_streak() {
+  local n=0
+  [ -f "$ADVANCE_STREAK_FILE" ] && n=$(cat "$ADVANCE_STREAK_FILE" 2>/dev/null)
+  case "$n" in ''|*[!0-9]*) n=0 ;; esac
+  printf '%s' "$n"
+}
+
+reset_advance_streak() {
+  printf '0' > "$ADVANCE_STREAK_FILE" 2>/dev/null || true
+}
+
+bump_advance_streak() {
+  local n
+  n=$(($(read_advance_streak) + 1))
+  printf '%s' "$n" > "$ADVANCE_STREAK_FILE" 2>/dev/null || true
+  printf '%s' "$n"
+}
+
 # send_takeover_alarm SUBJECT BODY -- page a human when this script hits a
 # state it cannot recover from itself (agent-supervisor#273: a correct "a
 # human should look" refusal used to go only to a logfile, which produced
@@ -233,11 +265,17 @@ if [ ! -d "$LIVE_PATH" ] || ! git -C "$LIVE_PATH" rev-parse --git-dir >/dev/null
     recover_rc=$?
     log "advance-live.sh recovery attempt: rc=$recover_rc $recover_out"
     if [ "$recover_rc" -ne 0 ] || [ ! -d "$LIVE_PATH" ] || ! git -C "$LIVE_PATH" rev-parse --git-dir >/dev/null 2>&1; then
-      log "LIVE STILL MISSING after recovery attempt -- a human should look"
-      send_takeover_alarm "director-loop: live/ MISSING and self-heal failed (#273)" \
-        "advance-live.sh ran but $LIVE_PATH is still absent, not a git worktree, or unregistered -- the Director cannot tick without it. Recovery output: $recover_out"
+      astreak=$(bump_advance_streak)
+      log "LIVE STILL MISSING after recovery attempt -- a human should look (consecutive: $astreak)"
+      if [ "$astreak" -ge "$ADVANCE_ESCALATE_AFTER" ]; then
+        send_takeover_alarm "director-loop: live/ MISSING and self-heal failed, $astreak consecutive ticks (#470)" \
+          "advance-live.sh ran but $LIVE_PATH is still absent, not a git worktree, or unregistered for $astreak consecutive ticks (~$(( astreak * 15 )) minutes) -- the Director cannot tick without it. Latest recovery output: $recover_out"
+      else
+        log "not yet escalating (need $ADVANCE_ESCALATE_AFTER consecutive recovery failures to page, have $astreak)"
+      fi
       exit 6
     fi
+    reset_advance_streak
     log "LIVE RECOVERED at $LIVE_PATH -- continuing this tick"
   else
     log "advance-live.sh not found beside this script ($HERE) -- cannot recover live/ automatically; a human should look"
