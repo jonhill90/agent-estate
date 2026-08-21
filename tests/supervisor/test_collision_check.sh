@@ -309,6 +309,94 @@ rc9c=$?
 want_exit "an unresolvable candidate repo fails closed and still refuses" "$rc9c" 1 "$out9c"
 want_contains "...naming the colliding lane" "skills:3" "$out9c"
 
+# --- 10. AUTOMATIC self-exclusion, agent-supervisor#483: the ORDINARY
+#         dispatch path (`dispatch.sh <n> <lane> <brief> <repo> <path>`,
+#         with no --pr/--reviews-pr) never told collision-check.sh which PR
+#         it was for, so a plain fix or review dispatch onto an open PR N
+#         always saw N as a holder of its own files -- self-collision, every
+#         time. collision-check.sh must now resolve this itself, via a
+#         dedicated `gh pr view` lookup, never via membership in the
+#         already-fetched open-PR list (10c is exactly why: that list can
+#         legitimately contain an unrelated PR sharing the dispatch target's
+#         number). No --pr is passed in any case below. --------------------
+STATE10=$(mktemp -d "$D/state10.XXXXXX")
+echo 'Touch `scripts/supervisor/quota-watch.sh` too.' > "$D/brief-483.md"
+
+# 10a MUTATION 1 (self-exclusion): PR 801 is confirmed OPEN by `gh pr view`
+#     and touches the same file the brief names -- must NOT self-collide.
+#     Breaking self-exclusion (always skipping this resolution) turns this
+#     RED.
+CAND_WT10A=$(mktemp -d "$D/cand10a.XXXXXX")
+git -C "$REPO" worktree add -q -b lane/801-selfauto "$CAND_WT10A" main
+export GH_STUB_PR_VIEW_JSON='{"801":"OPEN"}'
+export GH_STUB_PR_LIST_JSON='[{"number":801,"files":[{"path":"scripts/supervisor/quota-watch.sh"}]}]'
+out10a=$(AGENT_SUPERVISOR_STATE_DIR="$STATE10" DISPATCH_PYTHON=python3 \
+  "$CHECK" check --issue 801 --brief "$D/brief-483.md" --worktree "$CAND_WT10A" \
+  --repo-path "$REPO" --repo acme/widgets --exclude-lane "agent-supervisor:x" 2>&1)
+rc10a=$?
+want_exit "dispatching onto open PR 801 with no --pr does not refuse on 801's own files" "$rc10a" 0 "$out10a"
+want_contains "...says no-conflict" "no-conflict" "$out10a"
+
+# 10b MUTATION 2, THE DANGEROUS DIRECTION: a DIFFERENT open PR (802) touches
+#     the same file. Self-exclusion of 801 must not swallow 802's genuine
+#     overlap -- if self-exclusion over-matches (excludes every PR, not just
+#     801), this goes RED instead of refusing.
+export GH_STUB_PR_LIST_JSON='[{"number":801,"files":[{"path":"scripts/supervisor/quota-watch.sh"}]},{"number":802,"files":[{"path":"scripts/supervisor/quota-watch.sh"}]}]'
+out10b=$(AGENT_SUPERVISOR_STATE_DIR="$STATE10" DISPATCH_PYTHON=python3 \
+  "$CHECK" check --issue 801 --brief "$D/brief-483.md" --worktree "$CAND_WT10A" \
+  --repo-path "$REPO" --repo acme/widgets --exclude-lane "agent-supervisor:x" 2>&1)
+rc10b=$?
+want_exit "...but IS still blocked by a DIFFERENT open PR (802) touching the same file" "$rc10b" 1 "$out10b"
+want_contains "...naming the other PR as holder" "PR#802" "$out10b"
+want_missing "...never names 801 (its own PR) as a holder" "PR#801" "$out10b"
+
+# 10c THE NUMBER-COLLISION CASE: ISSUE 803 is a genuine issue -- `gh pr view
+#     803` reports it is not a PR at all -- even though the open-PR list
+#     happens to contain an UNRELATED entry numbered 803. List membership
+#     must never be the resolution mechanism: must still refuse, not
+#     silently exclude the unrelated PR's files.
+unset GH_STUB_PR_VIEW_JSON
+export GH_STUB_PR_LIST_JSON='[{"number":803,"files":[{"path":"scripts/supervisor/quota-watch.sh"}]}]'
+CAND_WT10C=$(mktemp -d "$D/cand10c.XXXXXX")
+git -C "$REPO" worktree add -q -b lane/803-issue "$CAND_WT10C" main
+out10c=$(AGENT_SUPERVISOR_STATE_DIR="$STATE10" DISPATCH_PYTHON=python3 \
+  "$CHECK" check --issue 803 --brief "$D/brief-483.md" --worktree "$CAND_WT10C" \
+  --repo-path "$REPO" --repo acme/widgets --exclude-lane "agent-supervisor:x" 2>&1)
+rc10c=$?
+want_exit "an issue whose number coincidentally matches an unrelated open PR is still refused" "$rc10c" 1 "$out10c"
+want_contains "...naming PR#803 as the (unrelated) holder" "PR#803" "$out10c"
+
+# 10d VERIFY THE INSTRUMENT'S FAILURE MODE: `gh pr list` succeeds (so the
+#     holder set is genuinely known) but the dedicated per-number lookup for
+#     THIS dispatch target is ambiguous -- neither "found" nor a clean "not
+#     found". Resolving must not guess "not self" and then report clean: if
+#     #806 truly is the open PR sitting in that list, the pre-existing
+#     self-collision refusal still fires (loud), never a false ALLOW.
+export GH_STUB_PR_VIEW_FAIL=1
+export GH_STUB_PR_LIST_JSON='[{"number":806,"files":[{"path":"scripts/supervisor/quota-watch.sh"}]}]'
+CAND_WT10D=$(mktemp -d "$D/cand10d.XXXXXX")
+git -C "$REPO" worktree add -q -b lane/806-ambiguous "$CAND_WT10D" main
+out10d=$(AGENT_SUPERVISOR_STATE_DIR="$STATE10" DISPATCH_PYTHON=python3 \
+  "$CHECK" check --issue 806 --brief "$D/brief-483.md" --worktree "$CAND_WT10D" \
+  --repo-path "$REPO" --repo acme/widgets --exclude-lane "agent-supervisor:x" 2>&1)
+rc10d=$?
+want_exit "an unresolvable self-lookup does not silently allow a genuine self-collision" "$rc10d" 1 "$out10d"
+want_contains "...naming PR#806 as the (unconfirmed-self) holder" "PR#806" "$out10d"
+unset GH_STUB_PR_VIEW_FAIL
+export GH_STUB_PR_LIST_JSON="[]"
+
+# 10e a TOTAL gh outage (the list fetch itself fails) must still ALLOW --
+#     best-effort posture preserved. The new self-resolution step must not
+#     turn a full outage into a stricter refusal than the file already had.
+CAND_WT10E=$(mktemp -d "$D/cand10e.XXXXXX")
+git -C "$REPO" worktree add -q -b lane/807-outage "$CAND_WT10E" main
+out10e=$(AGENT_SUPERVISOR_STATE_DIR="$STATE10" DISPATCH_PYTHON=python3 GH_STUB_FAIL=1 \
+  "$CHECK" check --issue 807 --brief "$D/brief-483.md" --worktree "$CAND_WT10E" \
+  --repo-path "$REPO" --repo acme/widgets --exclude-lane "agent-supervisor:x" 2>&1)
+rc10e=$?
+want_exit "a total gh outage still allows (best-effort posture unaffected by self-resolution)" "$rc10e" 0 "$out10e"
+want_contains "...says the PR check did not run" "SKIPPED" "$out10e"
+
 rm -rf "$D" "$GH_BIN"
 
 echo
