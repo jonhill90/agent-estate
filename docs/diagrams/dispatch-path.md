@@ -81,6 +81,16 @@ worktree does (`dispatch.sh:1634-1636`). A refusal at that point unwinds
 both the claim and the worktree (`dispatch.sh:1655-1659`) — the estate is
 left exactly as it found it, not holding a half-built lane.
 
+**Caveat: that unwind is unconditional for the claim, not for the
+worktree.** `abort_send` (`dispatch.sh:1562-1584`) always releases the
+lane claim, but only tears down the worktree when `cleanup_worktree`
+stays `1`. If the lane's own pane still appears to be inside `$WORKTREE`
+and `dispatch_rehome_lane` cannot move it out, `cleanup_worktree` is set
+to `0` and the worktree is deliberately left in place with a
+`--rehome-lane` recovery hint printed to the operator (`dispatch.sh:1571-
+1573`) — "the estate is left exactly as it found it" holds for the claim,
+not for the worktree, in that one case.
+
 ---
 
 ## 2. #414 and #401: where `delivered_at` and `completed_at` diverge
@@ -173,7 +183,7 @@ flowchart TD
       Winner["winner proceeds"]
       LoserRefused["loser's INSERT raises IntegrityError<br/>-> claim_lane refuses, not merges"]
       HistoricalRace["historical shape closed by the guard above<br/>(agent-supervisor#183 round 3):<br/>record_dispatch used to CANCEL whatever task<br/>was outstanding instead of refusing --<br/>'the second writer always wins silently'<br/>core.py:2746-2749"]
-      PRRace["PR-scoped variant: dispatch.sh step 0.6<br/>pr-lane check is a plain read (TOCTOU)<br/>dispatch.sh:846-859"]
+      PRRace["PR-scoped variant: dispatch.sh step 0.6<br/>pr-lane check is a plain read (TOCTOU)<br/>dispatch.sh:903-934, pr-lane call at 938"]
       PRTrigger["real guarantee: ONE_OPEN_PULL_PER_SOURCE_REF<br/>BEFORE INSERT trigger at write time<br/>agent-supervisor#169, core.py:1038-1094<br/>reproduced by test_dispatch.sh's run_race case"]
       TodayUnknown["Jon measured this race TWICE on 2026-08-21<br/>(a refused dispatch on a dead lane's claim,<br/>and a cancelled row racing its own process).<br/>UNKNOWN: no ledger/log citation in the code itself<br/>ties those two specific live incidents to a line --<br/>the mechanisms above are what the code shows,<br/>not a trace of that day's two events."]
 
@@ -217,7 +227,8 @@ second writer, so "the second writer always wins silently" (measured,
 `agent-supervisor#183` round 3, `core.py:2746-2749`). The PR-scoped
 variant is a second, later fix: `dispatch.sh`'s own step 0.6 (`pr-lane`
 check) is admitted in its own comments to be a plain read with a real,
-multi-second TOCTOU window (`dispatch.sh:846-859`) — what actually closes
+multi-second TOCTOU window (`dispatch.sh:903-934`, the `pr-lane` call
+itself at line 938) — what actually closes
 that race is the `ONE_OPEN_PULL_PER_SOURCE_REF` trigger firing at INSERT
 time (`agent-supervisor#169`, `core.py:1038-1094`), reproduced directly by
 `test_dispatch.sh`'s own `run_race` case: two full dispatches, two lanes,
