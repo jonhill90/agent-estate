@@ -91,21 +91,60 @@ resolve_pr_contributors() {
   # 1 & 2. THE LEDGER, asked by ISSUE -- see dispatch.sh's own long-form
   # comment (preserved there) for why by-issue, pooled across both
   # candidate sources, comes first.
-  local candidate_issues
-  candidate_issues=$(
-    {
-      grep -oE '"closingIssuesReferences":\[[^]]*\]' <<<"$pr_json" \
-        | grep -oE '"number":[0-9]+' | grep -oE '[0-9]+'
-      grep -oE '"message(Headline|Body)":"[^"]*"' <<<"$pr_json" \
-        | grep -ioE '(fixes|closes|resolves) #[0-9]+' | grep -oE '[0-9]+'
-    } | awk '!seen[$0]++'
-  )
+  #
+  # agent-supervisor#473: the issue a PR closes can live in a DIFFERENT repo
+  # than the PR itself -- a lane dispatched against an issue in repo A opens
+  # its PR in repo B because the code it touches lives there (#472 is the
+  # live case: PR here in agent-supervisor, closing issue #299 in
+  # agent-dotfiles). `closingIssuesReferences` already names each
+  # reference's own repository; querying `contributor-issue-lanes` with
+  # THIS PR's repo (`$repo`) regardless -- what this used to do -- does not
+  # just fail to find the cross-repo contributor, it makes
+  # `get_contributor_tasks_for_issue`'s own repo-narrowing (#146) filter the
+  # true contributor OUT, working exactly as documented against the WRONG
+  # repo. So each candidate below carries the repo it was actually closed
+  # FROM. Only the commit-message fallback (`fixes #N`, no owner/repo
+  # prefix to read) has no repo of its own to name and is scoped to this
+  # PR's own repo, same as before.
+  local candidate_pairs
+  candidate_pairs=$(python3 -c '
+import json, re, sys
+
+own_repo = sys.argv[1]
+data = json.loads(sys.argv[2])
+seen = set()
+
+def emit(repo, number):
+    key = (repo, number)
+    if key in seen:
+        return
+    seen.add(key)
+    print(f"{repo}\t{number}")
+
+for ref in data.get("closingIssuesReferences") or []:
+    repository = ref.get("repository") or {}
+    owner = (repository.get("owner") or {}).get("login")
+    name = repository.get("name")
+    number = ref.get("number")
+    if number is None:
+        continue
+    emit(f"{owner}/{name}" if owner and name else own_repo, number)
+
+for commit in data.get("commits") or []:
+    for field in ("messageHeadline", "messageBody"):
+        text = commit.get(field) or ""
+        for m in re.finditer(r"(?i)(?:fixes|closes|resolves)\s+#([0-9]+)", text):
+            emit(own_repo, int(m.group(1)))
+' "$repo" "$pr_json")
   local repo_args=()
   [ -n "$repo" ] && repo_args=(--repo "$repo")
 
-  local candidate_issue issue_json c_lane c_task
-  for candidate_issue in $candidate_issues; do
-    issue_json=$("$ledger_python" "$ledger_cli" contributor-issue-lanes --issue "$candidate_issue" "${repo_args[@]+"${repo_args[@]}"}" 2>&1)
+  local candidate_repo candidate_issue issue_json c_lane c_task
+  while IFS=$'\t' read -r candidate_repo candidate_issue; do
+    [ -n "$candidate_issue" ] || continue
+    local issue_repo_args=()
+    [ -n "$candidate_repo" ] && issue_repo_args=(--repo "$candidate_repo")
+    issue_json=$("$ledger_python" "$ledger_cli" contributor-issue-lanes --issue "$candidate_issue" "${issue_repo_args[@]+"${issue_repo_args[@]}"}" 2>&1)
     if [ $? -ne 0 ]; then
       echo "dispatch: contributor-issue-lanes lookup failed for issue #$candidate_issue -- refusing (authorship unknown, failing closed)" >&2
       sed 's/^/  /' <<<"$issue_json" >&2
@@ -120,7 +159,7 @@ resolve_pr_contributors() {
       done < <(grep -oE '"lane":"[^"]*","task":"[^"]*"' <<<"$issue_json" \
         | sed -E 's/"lane":"([^"]*)","task":"([^"]*)"/\1\t\2/')
     fi
-  done
+  done <<<"$candidate_pairs"
 
   # 2.1. agent-supervisor#308 item 1: the explicit "task X's work opened PR
   # N" record.

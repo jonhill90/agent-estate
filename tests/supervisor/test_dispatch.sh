@@ -2873,7 +2873,7 @@ python3 - "$MUTANT_DIR_35/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
 import sys
 target = sys.argv[1]
 text = open(target).read()
-marker = 'issue_json=$("$ledger_python" "$ledger_cli" contributor-issue-lanes --issue "$candidate_issue" "${repo_args[@]+"${repo_args[@]}"}" 2>&1)'
+marker = 'issue_json=$("$ledger_python" "$ledger_cli" contributor-issue-lanes --issue "$candidate_issue" "${issue_repo_args[@]+"${issue_repo_args[@]}"}" 2>&1)'
 assert text.count(marker) == 1, "contributor-issue-lanes lookup not found or not unique -- script shape changed"
 text = text.replace(marker, 'issue_json=\'{"known":false}\'  # MUTATED: ledger contributor-issue-lanes never consulted', 1)
 open(target, "w").write(text)
@@ -2952,6 +2952,163 @@ FIX
   want_exit "mutation confirmed: the unguarded copy dispatches a self-review" "$rc" 0 "$out"
   log=$(tmuxlog)
   want_contains "mutation confirmed: it lands on the author's own lane, t:3 (target t:@103)" "send-keys -t t:@103" "$log"
+fi
+
+# --- agent-supervisor#473: cross-repo authorship -- an issue in repo A,
+# a PR in repo B ---------------------------------------------------------
+#
+# WHY: #472 is the live case. A lane is dispatched against an issue in one
+# repo (agent-dotfiles) but its PR is opened in a DIFFERENT repo
+# (agent-supervisor) because that is where the code it touches lives.
+# `closingIssuesReferences` names each reference's own repository -- but
+# steps 1&2 used to discard that and query `contributor-issue-lanes` with
+# the PR's OWN repo regardless, which does not just fail to find the
+# cross-repo contributor, it makes `get_contributor_tasks_for_issue`'s own
+# repo-narrowing (#146) filter the TRUE contributor OUT, correctly, against
+# the WRONG repo -- so the review refused "authorship unknown" for a PR
+# whose author the ledger actually knew.
+#
+# A second local checkout stands in for repo B: repo.sh's own origin check
+# (#17) means a dispatch claiming to be for "acme/agent-supervisor" must run
+# against a checkout whose remote actually reads that.
+git init -q --bare "$D/origin-b.git"
+git clone -q "$D/origin-b.git" "$D/repo-b" 2>/dev/null
+git -C "$D/repo-b" config user.email test@example.com
+git -C "$D/repo-b" config user.name "Test"
+git -C "$D/repo-b" checkout -q -b main
+echo one > "$D/repo-b/file.txt"
+git -C "$D/repo-b" add file.txt
+git -C "$D/repo-b" commit -q -m "initial"
+git -C "$D/repo-b" push -q -u origin main
+git -C "$D/repo-b" remote set-url origin "git@github.com:acme/agent-supervisor.git"
+
+# Case 1: the author IS recorded (repo A's ledger dispatched issue #1001,
+# whose closing PR #1002 lives in repo B) -> the review DISPATCHES, skipping
+# the true cross-repo author, landing on the other free lane -- proving both
+# resolution AND exclusion, not just a refusal indistinguishable from #212's
+# "unknown" case.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+printf '1001|| the code PR #1002 was written from (repo A, agent-dotfiles)\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-473" run 1001 xrepo-diagram "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch (issue #1001, repo A) succeeds" "$rc" 0 "$out"
+LEDGER_STATE="$D/state-473" ledger record-completion --task ad1001-xrepo-diagram --note done >/dev/null
+
+# The PR's body closes #1001 with an explicit cross-repo qualifier, exactly
+# as GitHub renders "Fixes jonhill90/agent-dotfiles#299" in the live case.
+printf '1002|Fixes acme/agent-dotfiles#1001|docs/1001-xrepo|\n' >> "$D/prs"
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+printf '1003|| review PR #1002 (repo B), whose closing issue lives in repo A\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-473" run 1003 rev-1002 "$D/brief.md" acme/agent-supervisor "$D/repo-b" --reviews-pr 1002); rc=$?
+want_exit "a cross-repo PR's review IS dispatched once authorship resolves via the issue's OWN repo" "$rc" 0 "$out"
+want_contains "the cross-repo author (ad1001-xrepo-diagram, repo A) is named and skipped" "ad1001-xrepo-diagram" "$out"
+want_contains "...and skipped, via the ledger, not assumed absent" "skipping t:3" "$out"
+log=$(tmuxlog)
+want_contains "and lands on the OTHER free lane, t:4 (target t:@104)" "send-keys -t t:@104" "$log"
+want_missing "never on the cross-repo author's own lane (t:3, target t:@103)" "send-keys -t t:@103 " "$log"
+
+# The review dispatched above is still OPEN against PR #1002 -- complete it,
+# or the #169 PR-duplicate guard refuses the mutation-check re-dispatch below
+# before the cross-repo resolution is even reached.
+LEDGER_STATE="$D/state-473" ledger record-completion --task as1003-rev-1002 --note done >/dev/null
+
+# MUTATION-CHECK, direction 1 (agent-supervisor#473 requirement 3a): break
+# the cross-repo resolution -- discard `closingIssuesReferences`' own
+# `repository` field and query every candidate issue against the PR's OWN
+# repo again, exactly what this file did before the fix. The live case (and
+# the case above) must go RED: refused "authorship unknown" instead of
+# dispatched.
+MUTANT_DIR_473A=$(make_mutant_scripts_dir)
+MUTATED_473A="$MUTANT_DIR_473A/dispatch.sh"
+patch_rc=0
+python3 - "$MUTANT_DIR_473A/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
+import sys
+target = sys.argv[1]
+text = open(target).read()
+marker = '    emit(f"{owner}/{name}" if owner and name else own_repo, number)'
+assert text.count(marker) == 1, "cross-repo emit() not found or not unique -- script shape changed"
+text = text.replace(marker, '    emit(own_repo, number)  # MUTATED: cross-repo repository field discarded', 1)
+open(target, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose cross-repo resolution is reverted" \
+    "could not patch $MUTANT_DIR_473A/resolve-pr-contributors.sh (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh whose cross-repo resolution is reverted"
+  chmod +x "$MUTATED_473A"
+  cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+  printf '1006|| review PR #1002 again, against the mutated (reverted) resolution\n' >> "$D/issues"
+  out=$(DISPATCH_SCRIPT="$MUTATED_473A" LEDGER_STATE="$D/state-473" \
+        run 1006 rev-1002-mutant "$D/brief.md" acme/agent-supervisor "$D/repo-b" --reviews-pr 1002); rc=$?
+  want_exit "mutation confirmed: reverting the cross-repo fix refuses the live case again" "$rc" 1 "$out"
+  want_contains "mutation confirmed: back to authorship unknown" "authorship unknown" "$out"
+fi
+
+# Case 2: the author is GENUINELY unknown (repo B's PR closes an issue in
+# repo A that no lane ever touched) -> STILL REFUSES. This is the dangerous
+# direction agent-supervisor#473 calls out by name: a fix that makes cross-
+# repo resolution too eager must not turn "nobody wrote this" into "assume
+# safe".
+printf '1005|| an issue in repo A that nothing was ever dispatched against\n' >> "$D/issues"
+printf '1004|Fixes acme/agent-dotfiles#1005|some-branch-nobody-worktreed|\n' >> "$D/prs"
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+printf '1007|| review PR #1004, cross-repo but genuinely unauthored\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-473b" run 1007 rev-1004 "$D/brief.md" acme/agent-supervisor "$D/repo-b" --reviews-pr 1004); rc=$?
+want_exit "a cross-repo PR whose author is genuinely unknown STILL REFUSES" "$rc" 1 "$out"
+want_contains "and says authorship is unknown, not assumed safe" "authorship unknown" "$out"
+
+# MUTATION-CHECK, direction 2 (agent-supervisor#473 requirement 3b, "the
+# dangerous direction"): remove the `known:true` gate on the cross-repo
+# lookup's response -- any response (including a genuine `known:false`) is
+# then treated as a resolved, EMPTY contributor set, which is exactly the
+# "empty instrument reads as an empty world" defect this file's own header
+# warns about. The refusal above MUST go RED -- an unauthored PR must not
+# become reviewable by every free lane.
+MUTANT_DIR_473B=$(make_mutant_scripts_dir)
+MUTATED_473B="$MUTANT_DIR_473B/dispatch.sh"
+patch_rc=0
+python3 - "$MUTANT_DIR_473B/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
+import sys
+target = sys.argv[1]
+text = open(target).read()
+marker = '''    if grep -qF '"known":true' <<<"$issue_json"; then
+      CONTRIBUTORS_RESOLVED=1
+      while IFS=$'\\t' read -r c_lane c_task; do'''
+assert text.count(marker) == 1, "cross-repo known:true gate not found or not unique -- script shape changed"
+mutated = '''    if true; then  # MUTATED: known:true gate removed, any response treated as resolved
+      CONTRIBUTORS_RESOLVED=1
+      while IFS=$'\\t' read -r c_lane c_task; do'''
+text = text.replace(marker, mutated, 1)
+open(target, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose known:true gate is removed" \
+    "could not patch $MUTANT_DIR_473B/resolve-pr-contributors.sh (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh whose known:true gate is removed"
+  cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+  printf '1008|| review PR #1004 again, against the mutated (over-eager) gate\n' >> "$D/issues"
+  out=$(DISPATCH_SCRIPT="$MUTATED_473B" LEDGER_STATE="$D/state-473b" \
+        run 1008 rev-1004-mutant "$D/brief.md" acme/agent-supervisor "$D/repo-b" --reviews-pr 1004); rc=$?
+  want_exit "mutation confirmed: removing the known:true gate WRONGLY dispatches the genuinely-unauthored PR" "$rc" 0 "$out"
+  log=$(tmuxlog)
+  want_contains "mutation confirmed: it lands on the only free lane, t:3 (target t:@103), no author excluded" "send-keys -t t:@103" "$log"
 fi
 
 # --- agent-dotfiles#225: --reviews-pr with no value must refuse, not hang -

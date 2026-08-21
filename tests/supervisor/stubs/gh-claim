@@ -16,7 +16,11 @@
 # `pr view --json commits` for the authorship guard's commit-message
 # fallback. `pr view --json closingIssuesReferences` is synthesized from
 # <body> the same way real GitHub derives it: a `Fixes|Closes|Resolves #N`
-# match, case-insensitive.
+# match, case-insensitive. agent-supervisor#473: a cross-repo reference,
+# `Fixes owner/repo#N`, is matched too and carries its own `repository` in
+# the synthesized JSON, exactly like the real API -- a bare `#N` match omits
+# `repository` entirely (dispatch.sh's own resolution defaults an absent
+# `repository` to the PR's own repo, never guesses one).
 #
 # Writes land back in GH_ISSUES, so a claim taken by one invocation is visible
 # to the next -- which is the whole point of the test: a SECOND dispatcher must
@@ -216,11 +220,29 @@ case "$sub" in
         body=$(cut -d'|' -f2 <<<"$line")
         href=$(cut -d'|' -f3 <<<"$line")
         commit_msgs=$(cut -d'|' -f4 <<<"$line")
+        # agent-supervisor#473: plain grep/bash-regex extraction, not a
+        # python3 subprocess -- this stub sits on the hot path of nearly
+        # every dispatch.sh test case, several of them timing-sensitive
+        # (DISPATCH_TEST_RACE_HOOK, the #190 pane-respawn mutation check).
+        # A python3 startup per `gh pr view` call measurably perturbed one
+        # of those (confirmed: identical mutant script bytes, identical
+        # preceding output, only the added subprocess latency differed) --
+        # `jq`, a compiled binary already required by this stub's `api`
+        # case above, costs orders of magnitude less.
         issues_json="[]"
-        issue_nums=$(grep -ioE '(fixes|closes|resolves) #[0-9]+' <<<"$body" | grep -oE '[0-9]+')
-        if [ -n "$issue_nums" ]; then
-          issues_json="[$(awk '{printf "%s{\"number\":%s}", (NR>1?",":""), $0}' <<<"$issue_nums")]"
-        fi
+        while IFS= read -r match; do
+          [ -n "$match" ] || continue
+          if [[ "$match" =~ ([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([0-9]+)$ ]]; then
+            entry=$(jq -nc --arg owner "${BASH_REMATCH[1]}" --arg name "${BASH_REMATCH[2]}" \
+              --argjson number "${BASH_REMATCH[3]}" \
+              '{number:$number, repository:{name:$name, owner:{login:$owner}}}')
+          elif [[ "$match" =~ \#([0-9]+)$ ]]; then
+            entry=$(jq -nc --argjson number "${BASH_REMATCH[1]}" '{number:$number}')
+          else
+            continue
+          fi
+          issues_json=$(jq -nc --argjson acc "$issues_json" --argjson e "$entry" '$acc + [$e]')
+        done < <(grep -oiE '(fixes|closes|resolves) +([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#|#)[0-9]+' <<<"$body")
         commits_json="[]"
         if [ -n "$commit_msgs" ]; then
           commits_json="[$(tr ';' '\n' <<<"$commit_msgs" | awk 'NF{printf "%s{\"messageHeadline\":\"%s\"}", (n++>0?",":""), $0}')]"
