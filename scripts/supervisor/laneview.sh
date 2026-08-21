@@ -72,6 +72,21 @@ if [ ! -x "$IMPL_SCRIPT" ]; then
   exit 1
 fi
 
+# agent-dotfiles#239's $TMUX_PANE fallback (session-defaults.sh's
+# `supervisor_window_id`) assumes its caller runs as a child of the
+# SUPERVISOR's own pane -- true for the supervisor's own tick, never true
+# for a viewer. laneview.sh is read-only by contract (rule 1 above) and is
+# routinely run from inside an ordinary lane's own pane (a human popping
+# open the tmux plugin, or `laneview.sh tui` driven live, as
+# test_laneview_tui_interactive.sh does) -- left alone, that pane's own
+# $TMUX_PANE would be handed straight to lanes.sh, which would then report
+# THIS viewer's own window as `supervisor` instead of the real one. Cleared
+# here, once, before the first lanes.sh call, so every downstream read this
+# script or an exec'd renderer makes (including tui.sh's own periodic
+# re-fetch, a fresh `bash lanes.sh --json` subprocess each refresh tick)
+# inherits an environment with no $TMUX_PANE to misread.
+unset TMUX_PANE
+
 # lanes.sh is the one reader of tmux measurements and the ledger (#178
 # brief, "tmux is not a database"); every implementation gets state only
 # through this json, never by polling tmux or the ledger itself.

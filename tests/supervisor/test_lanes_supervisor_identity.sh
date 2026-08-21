@@ -58,6 +58,13 @@ for r in rows:
 # default (1) -- so no check here can pass by coincidentally landing back on
 # that default, the way a fixture with only one lane below it would risk.
 tmux new-session -d -s "$S" -n free-1 -c /tmp
+# This estate runs with `renumber-windows on` (session-defaults.sh's own
+# comment, lanes.sh:71) -- that option is what makes the supervisor's index
+# move in the first place. Without setting it here too, killing window 1
+# below just leaves a gap; nothing renumbers, and every check past that
+# point is comparing against windows that never moved -- the fixture would
+# pass or fail for reasons unrelated to #239's actual hazard.
+tmux set-option -t "$S" renumber-windows on
 tmux new-window -d -t "=$S:2" -n free-2 -c /tmp
 tmux new-window -d -t "=$S:3" -n supervisor -c /tmp
 tmux new-window -d -t "=$S:4" -n free-4 -c /tmp
