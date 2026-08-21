@@ -261,7 +261,7 @@ class FixpassEvidenceGateTest(unittest.TestCase):
         # rejection of the PR carrying it.
         body = (
             "The original wording literally contained\n"
-            "`Verdict: Changes requested` as an example, which read as a real "
+            "`Verdict: REQUEST CHANGES` as an example, which read as a real "
             "rejection\non this PR itself."
         )
         runner = FakeRunner(reviews=[], body=body, comments=[])
@@ -276,7 +276,7 @@ class FixpassEvidenceGateTest(unittest.TestCase):
         # verdict.
         comment = (
             "Heads up -- this PR's body used to contain the literal phrase "
-            "`Verdict: Changes requested` as an example, which the gate's "
+            "`Verdict: REQUEST CHANGES` as an example, which the gate's "
             "classifier misread as a real rejection of this PR."
         )
         runner = FakeRunner(reviews=[], body="", comments=[comment])
@@ -288,7 +288,7 @@ class FixpassEvidenceGateTest(unittest.TestCase):
         # The body must never count as a rejection source even when a real
         # review DOES require evidence -- otherwise the body's prose could
         # still be misread as a second, independent rejection round.
-        body = "Discussing `Verdict: Changes requested` as example text here."
+        body = "Discussing `Verdict: REQUEST CHANGES` as example text here."
         runner = FakeRunner(reviews=[{"state": "CHANGES_REQUESTED"}], body=body, comments=[])
         result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=481)
         self.assertEqual("refuse", result["decision"])
