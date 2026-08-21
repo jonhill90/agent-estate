@@ -75,7 +75,14 @@ class FixpassEvidenceGateTest(unittest.TestCase):
         self.assertIn(EVIDENCE_MARKER, result["reason"])
 
     def test_rejected_verdict_comment_with_no_marker_refuses(self):
-        runner = FakeRunner(reviews=[], body="", comments=["Verdict: REQUEST CHANGES\n\nthe bug is still there"])
+        # A real posted verdict (#53's comment-posted path) carries both
+        # trailers `post-verdict.sh` requires before it will post one --
+        # agent-supervisor#484.
+        runner = FakeRunner(
+            reviews=[],
+            body="",
+            comments=["Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\n\nthe bug is still there"],
+        )
         result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=1)
         self.assertEqual("refuse", result["decision"])
 
@@ -123,10 +130,11 @@ class FixpassEvidenceGateTest(unittest.TestCase):
         runner = FakeRunner(
             reviews=[],
             body="",
-            comments=["Verdict: REQUEST CHANGES\nstill broken", GOOD_BLOCK],
+            comments=["Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\nstill broken", GOOD_BLOCK],
         )
         result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=1)
         self.assertEqual("allow", result["decision"])
+        self.assertIn("evidence present", result["reason"])
 
     def test_gh_read_failure_refuses_rather_than_allows(self):
         def broken_runner(command, *, timeout=None):
@@ -208,10 +216,16 @@ class FixpassEvidenceGateTest(unittest.TestCase):
         runner = FakeRunner(
             reviews=[],
             comments=[
-                {"body": "Verdict: REQUEST CHANGES\nround 1: old_bug is broken", "createdAt": "2026-08-01T00:00:00Z"},
+                {
+                    "body": "Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\nround 1: old_bug is broken",
+                    "createdAt": "2026-08-01T00:00:00Z",
+                },
                 {"body": GOOD_BLOCK, "createdAt": "2026-08-01T01:00:00Z"},
                 {
-                    "body": "Verdict: REQUEST CHANGES\nround 2: unrelated new_bug is broken, nothing pasted yet",
+                    "body": (
+                        "Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\n"
+                        "round 2: unrelated new_bug is broken, nothing pasted yet"
+                    ),
                     "createdAt": "2026-08-10T00:00:00Z",
                 },
             ],
@@ -223,14 +237,63 @@ class FixpassEvidenceGateTest(unittest.TestCase):
         runner = FakeRunner(
             reviews=[],
             comments=[
-                {"body": "Verdict: REQUEST CHANGES\nround 1: old_bug is broken", "createdAt": "2026-08-01T00:00:00Z"},
+                {
+                    "body": "Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\nround 1: old_bug is broken",
+                    "createdAt": "2026-08-01T00:00:00Z",
+                },
                 {"body": GOOD_BLOCK, "createdAt": "2026-08-01T01:00:00Z"},
-                {"body": "Verdict: REQUEST CHANGES\nround 2: new_bug is broken", "createdAt": "2026-08-10T00:00:00Z"},
+                {
+                    "body": "Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\nround 2: new_bug is broken",
+                    "createdAt": "2026-08-10T00:00:00Z",
+                },
                 {"body": GOOD_BLOCK, "createdAt": "2026-08-10T01:00:00Z"},
             ],
         )
         result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=1)
         self.assertEqual("allow", result["decision"])
+
+    # --- self-referential false positive (agent-supervisor#484) ------------
+    def test_body_quoting_example_verdict_text_does_not_trip_the_gate(self):
+        # PR #481's real (pre-reword) body text: documenting a bug in the
+        # verdict parser by quoting the exact phrase it misclassified. The
+        # PR itself carried no review and no comment from anyone -- the
+        # body merely discussed the phrase, and used to read as a genuine
+        # rejection of the PR carrying it.
+        body = (
+            "The original wording literally contained\n"
+            "`Verdict: REQUEST CHANGES` as an example, which read as a real "
+            "rejection\non this PR itself."
+        )
+        runner = FakeRunner(reviews=[], body=body, comments=[])
+        result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=481)
+        self.assertEqual("allow", result["decision"])
+        self.assertIn("nothing to gate", result["reason"])
+
+    def test_comment_quoting_verdict_text_as_prose_does_not_trip_the_gate(self):
+        # The other half of #484: a REVIEWER'S OWN comment explaining this
+        # exact false positive by quoting the offending phrase, with no
+        # Review-Lane: trailer -- prose about verdict text, not a posted
+        # verdict.
+        comment = (
+            "Heads up -- this PR's body used to contain the literal phrase "
+            "`Verdict: REQUEST CHANGES` as an example, which the gate's "
+            "classifier misread as a real rejection of this PR."
+        )
+        runner = FakeRunner(reviews=[], body="", comments=[comment])
+        result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=481)
+        self.assertEqual("allow", result["decision"])
+        self.assertIn("nothing to gate", result["reason"])
+
+    def test_body_with_verdict_text_still_ignored_even_when_review_requires_evidence(self):
+        # The body must never count as a rejection source even when a real
+        # review DOES require evidence -- otherwise the body's prose could
+        # still be misread as a second, independent rejection round.
+        body = "Discussing `Verdict: REQUEST CHANGES` as example text here."
+        runner = FakeRunner(reviews=[{"state": "CHANGES_REQUESTED"}], body=body, comments=[])
+        result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=481)
+        self.assertEqual("refuse", result["decision"])
+        self.assertIn(EVIDENCE_MARKER, result["reason"])
+        self.assertNotIn("predate", result["reason"])
 
     def test_missing_timestamps_still_allow_evidence_as_before(self):
         # Backward compatibility: when timestamps aren't available (older
