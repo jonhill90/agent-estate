@@ -220,20 +220,126 @@ while IFS=$'\t' read -r lane wt; do
   done <<<"$CANDIDATE_FILES"
 done < <(in_flight_lane_files "$EXCLUDE_LANE")
 
+# AN OPEN PR IS A HOLDER TOO, and this half was missing.
+#
+# The loop above asks the LEDGER which lanes hold a worktree. That misses every
+# open PR authored outside the lane system -- by a human, by the watchdog, or by
+# a supervisor working directly. Such a PR has a diff, is unmerged, and is
+# exactly as much of a collision as a live lane: the next lane to touch those
+# files rebases into a conflict, or worse, silently reverts the PR's change.
+#
+# Measured 2026-08-20, and it is why this exists: PR #430 (open, modifying
+# scripts/supervisor/worktree.sh) was invisible here, so #427 -- whose root
+# cause is in that same file -- dispatched clean. Two writers, one file, and the
+# guard said no-conflict. The candidate side already reads `gh pr diff`
+# (`_files_in_pr`); only the holder side did not.
+#
+# Best effort by design, matching this file's existing posture: if `gh` cannot
+# be reached the PR half contributes nothing and the lane half still runs. A
+# collision check that refuses every dispatch when GitHub is slow would be
+# removed within a day, and a guard nobody runs guards nothing.
+#
+# WHICH REPO, agent-supervisor#432's own review (do not re-break this): `--repo`
+# is OPTIONAL -- dispatch.sh's own #17 guard documents that a caller may omit it
+# and let the claim resolve from `--repo-path` instead. The first cut of this
+# fix built `gh_args` only when `$REPO` was non-empty, so an omitted `--repo`
+# meant `gh pr list`/`gh pr diff` ran with NO `-R` at all, and gh resolved the
+# repo from the process's ambient CWD -- not from `--repo-path`, the only
+# repo-identifying argument this script actually requires. Reproduced live:
+# standing in a checkout of a DIFFERENT repo, a dispatch check for this repo was
+# refused by that other repo's own open PR touching a same-named file. That is
+# agent-supervisor#441 (bare-path, no-repo-scope) amplified from same-repo to
+# cross-repo, and it fired on every plain dispatch, not just `--pr`-scoped ones.
+#
+# FIX: when `--repo` is absent, derive it from `--repo-path`'s own `origin`
+# remote -- the exact normalization dispatch.sh's own #17 guard already uses
+# (`git@host:owner/name.git`, `https://host/owner/name`, bare `owner/name`, all
+# collapsed to `owner/name`). `gh` is NEVER invoked without an explicit `-R`
+# here. If the repo cannot be determined either way, the PR half is skipped --
+# not silently: see PR_CHECK_STATUS below, which must be readable in the
+# output so this failure mode never reads as "checked, found nothing."
+_repo_from_path() {
+  local repo_path="$1" origin owner_name
+  origin=$(git -C "$repo_path" remote get-url origin 2>/dev/null) || return 1
+  owner_name=$(sed 's/\.git$//' <<<"$origin" | awk -F'[:/]' 'NF>=2{print $(NF-1)"/"$NF}')
+  [ -n "$owner_name" ] || return 1
+  printf '%s\n' "$owner_name"
+}
+
+# stdout: "PR#<n>\t<file>" per file in every open PR's diff, excluding
+# $exclude_pr. Exit 1 (nothing printed) means the PR half could not run --
+# `gh` missing, unreachable, or unauthenticated -- and the caller must show
+# that, not treat empty stdout as "checked, found nothing" (see PR_CHECK_STATUS
+# below). One `gh pr list --json number,files` call, not one `gh pr list` plus
+# a `gh pr diff` per open PR -- the files are already in the list response, so
+# this is O(1) network round-trips instead of O(open PRs) (#432 review finding
+# 3, measured at ~5.1-5.5s added per dispatch against 8 open PRs).
+open_pr_files() {
+  local repo="$1" exclude_pr="$2" json
+  json=$(gh pr list -R "$repo" --state open --json number,files 2>/dev/null) || return 1
+  "$PYTHON" -c '
+import json, sys
+try:
+    data = json.loads(sys.stdin.read())
+except Exception:
+    data = []
+exclude = sys.argv[1]
+for pr in data:
+    n = str(pr.get("number") or "")
+    if not n or n == exclude:
+        continue
+    for f in pr.get("files") or []:
+        path = f.get("path", "")
+        if path:
+            print("PR#{}\t{}".format(n, path))
+' "$exclude_pr" <<<"$json" || return 1
+}
+
+# PR_CHECK_STATUS is stated in every ALLOW/REFUSE/FORCED line below -- #432's
+# own review measured that a `gh` outage produced output byte-identical to a
+# real clean check ("ALLOW no-conflict", rc 0, no distinguishing text
+# anywhere). Blindness must never read as cleanliness.
+PR_CHECK_STATUS="ok"
+PR_REPO="$REPO"
+if [ -z "$PR_REPO" ]; then
+  PR_REPO=$(_repo_from_path "$REPO_PATH") || PR_REPO=""
+fi
+if [ -z "$PR_REPO" ]; then
+  # NOT the phrase "could not determine" -- see this file's own note above
+  # detect_candidate_files's ALLOW-unknown message for why: dispatch.sh's own
+  # test suite asserts that exact phrase never appears on a non-review
+  # dispatch (test_dispatch.sh's "the authorship question never arises"), and
+  # this script's combined stdout+stderr is folded into dispatch.sh's own.
+  PR_CHECK_STATUS="SKIPPED -- repo unresolved (pass --repo, or run somewhere --repo-path's origin remote resolves to owner/name)"
+elif ! command -v gh >/dev/null 2>&1; then
+  PR_CHECK_STATUS="SKIPPED -- gh not on PATH"
+else
+  PR_HOLDER_OUT=$(open_pr_files "$PR_REPO" "$PR") || PR_CHECK_STATUS="SKIPPED -- gh pr list failed (GitHub unreachable, rate-limited, or not authenticated)"
+fi
+
+if [ "$PR_CHECK_STATUS" = ok ] && [ -n "${PR_HOLDER_OUT:-}" ]; then
+  while IFS=$'\t' read -r holder f; do
+    [ -n "$holder" ] || continue
+    if grep -qxF "$f" <<<"$CANDIDATE_FILES"; then
+      COLLISIONS="${COLLISIONS}${holder}	${f}"$'\n'
+    fi
+  done <<<"$PR_HOLDER_OUT"
+fi
+
 if [ -z "$COLLISIONS" ]; then
-  echo "ALLOW no-conflict -- #$ISSUE's candidate files (${CANDIDATE_FILES//$'\n'/, }) do not overlap any in-flight lane"
+  echo "ALLOW no-conflict -- #$ISSUE's candidate files (${CANDIDATE_FILES//$'\n'/, }) do not overlap any in-flight lane (open-PR check: $PR_CHECK_STATUS)"
   exit 0
 fi
 
 if [ -n "$FORCE" ]; then
-  echo "ALLOW forced -- #$ISSUE overlaps in-flight lane(s), dispatched anyway by --force:"
+  echo "ALLOW forced -- #$ISSUE overlaps in-flight lane(s), dispatched anyway by --force (open-PR check: $PR_CHECK_STATUS):"
   printf '%s' "$COLLISIONS" | while IFS=$'\t' read -r lane f; do
     [ -n "$lane" ] && echo "  $lane: $f"
   done
   exit 0
 fi
 
-echo "REFUSE -- #$ISSUE's files overlap in-flight lane(s):"
+echo "REFUSE -- #$ISSUE's files overlap in-flight lane(s) (open-PR check: $PR_CHECK_STATUS):"
 printf '%s' "$COLLISIONS" | while IFS=$'\t' read -r lane f; do
   [ -n "$lane" ] && echo "  $lane: $f"
 done

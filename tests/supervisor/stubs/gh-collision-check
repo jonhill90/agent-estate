@@ -1,0 +1,31 @@
+#!/bin/bash
+# Stub gh for collision-check.sh tests -- no network, entirely env-controlled.
+#
+# agent-supervisor#432's own review: test_collision_check.sh never mocked gh,
+# so every case hit a REAL `gh pr list` against whatever repo the test
+# process's cwd happened to resolve to. One of the real, currently-open PRs in
+# that live repo touched the exact file a fixture used, and the suite failed
+# -- nondeterministically, depending on what was open in GitHub at the moment
+# the test ran, ~10x slower (network round-trips) than a hermetic run. This
+# stub replaces gh entirely so the suite depends on nothing but its own
+# fixtures.
+#
+# GH_STUB_FAIL=1            every invocation exits 1 (gh unreachable/failed)
+# GH_STUB_PR_LIST_JSON      body for `gh pr list ... --json number,files`
+#                           (defaults to "[]" -- no open PRs)
+# GH_STUB_LOG               if set, every invocation's argv is appended here,
+#                           one line per call -- lets a test assert on the
+#                           exact -R value gh was invoked with (or that it was
+#                           never invoked at all).
+[ -n "${GH_STUB_LOG:-}" ] && printf '%s\n' "$*" >>"$GH_STUB_LOG"
+
+if [ -n "${GH_STUB_FAIL:-}" ]; then
+  exit 1
+fi
+
+if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
+  printf '%s' "${GH_STUB_PR_LIST_JSON:-[]}"
+  exit 0
+fi
+
+exit 1
