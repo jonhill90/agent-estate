@@ -227,6 +227,88 @@ else
   ok "...and gh is never invoked when the repo cannot be identified"
 fi
 
+# --- 9. LANE-holder repo scoping (agent-supervisor#441): both `skills` and
+#        `agent-dotfiles` contain `scripts/validate_repository.py` -- a lane
+#        working one must not block a dispatch in the other. Two distinct
+#        repos, same relative path, each with its own `origin` remote so
+#        `_repo_from_path` can tell them apart. --------------------------
+REPO_SKILLS="$D/skills"
+git init -q --bare "$D/skills-origin.git"
+git clone -q "$D/skills-origin.git" "$REPO_SKILLS" 2>/dev/null
+git -C "$REPO_SKILLS" config user.email test@example.com
+git -C "$REPO_SKILLS" config user.name Test
+git -C "$REPO_SKILLS" checkout -q -b main
+mkdir -p "$REPO_SKILLS/scripts"
+echo original > "$REPO_SKILLS/scripts/validate_repository.py"
+git -C "$REPO_SKILLS" add -A
+git -C "$REPO_SKILLS" commit -q -m initial
+git -C "$REPO_SKILLS" remote set-url origin git@github.com:acme/skills.git
+
+REPO_DOTFILES="$D/agent-dotfiles"
+git init -q --bare "$D/dotfiles-origin.git"
+git clone -q "$D/dotfiles-origin.git" "$REPO_DOTFILES" 2>/dev/null
+git -C "$REPO_DOTFILES" config user.email test@example.com
+git -C "$REPO_DOTFILES" config user.name Test
+git -C "$REPO_DOTFILES" checkout -q -b main
+mkdir -p "$REPO_DOTFILES/scripts"
+echo original > "$REPO_DOTFILES/scripts/validate_repository.py"
+git -C "$REPO_DOTFILES" add -A
+git -C "$REPO_DOTFILES" commit -q -m initial
+git -C "$REPO_DOTFILES" remote set-url origin git@github.com:acme/agent-dotfiles.git
+
+# A lane holding scripts/validate_repository.py, but in `skills`.
+STATE9=$(mktemp -d "$D/state9.XXXXXX")
+LANE_SKILLS_WT="$D/lane-skills"
+git -C "$REPO_SKILLS" worktree add -q -b lane/skills-work "$LANE_SKILLS_WT" main
+echo "skills-side change" >> "$LANE_SKILLS_WT/scripts/validate_repository.py"
+register_lane "$STATE9" "skills-task" "skills:3" "$LANE_SKILLS_WT"
+
+# --- 9a CROSS-REPO: dispatching in agent-dotfiles for the same-named file
+#        must NOT be blocked by the skills lane -- the exact case measured
+#        in the issue. ---------------------------------------------------
+CAND_DOTFILES_WT="$D/cand-dotfiles"
+git -C "$REPO_DOTFILES" worktree add -q -b lane/286-dotfiles "$CAND_DOTFILES_WT" main
+echo 'Fix `scripts/validate_repository.py` in this repo.' > "$D/brief-286.md"
+out9a=$(AGENT_SUPERVISOR_STATE_DIR="$STATE9" DISPATCH_PYTHON=python3 \
+  "$CHECK" check --issue 286 --brief "$D/brief-286.md" --worktree "$CAND_DOTFILES_WT" \
+  --repo-path "$REPO_DOTFILES" --exclude-lane "agent-dotfiles:x" 2>&1)
+rc9a=$?
+want_exit "cross-repo same-named-file dispatch is allowed" "$rc9a" 0 "$out9a"
+want_contains "...says no-conflict" "no-conflict" "$out9a"
+want_missing "...never names the other repo's lane as a holder" "skills:3" "$out9a"
+
+# --- 9b SAME-REPO: a genuine overlap within `skills` itself must STILL
+#        refuse -- the fix must not stop refusing everything. -------------
+CAND_SKILLS_WT="$D/cand-skills"
+git -C "$REPO_SKILLS" worktree add -q -b lane/287-skills "$CAND_SKILLS_WT" main
+echo 'Fix `scripts/validate_repository.py` here too.' > "$D/brief-287.md"
+out9b=$(AGENT_SUPERVISOR_STATE_DIR="$STATE9" DISPATCH_PYTHON=python3 \
+  "$CHECK" check --issue 287 --brief "$D/brief-287.md" --worktree "$CAND_SKILLS_WT" \
+  --repo-path "$REPO_SKILLS" --exclude-lane "skills:x" 2>&1)
+rc9b=$?
+want_exit "a genuine same-repo overlap still refuses" "$rc9b" 1 "$out9b"
+want_contains "...naming the colliding lane" "skills:3" "$out9b"
+want_contains "...naming the colliding file" "scripts/validate_repository.py" "$out9b"
+
+# --- 9c UNRESOLVABLE REPO: the candidate's own repo cannot be resolved (no
+#        origin remote) -- must fail CLOSED (still compare, still refuse),
+#        not skip the lane just because one side's repo is unknown. -------
+NOREPO_CAND="$D/norepo-cand"
+mkdir -p "$NOREPO_CAND/scripts"
+git -C "$NOREPO_CAND" init -q -b main
+git -C "$NOREPO_CAND" config user.email test@example.com
+git -C "$NOREPO_CAND" config user.name Test
+echo original > "$NOREPO_CAND/scripts/validate_repository.py"
+git -C "$NOREPO_CAND" add -A
+git -C "$NOREPO_CAND" commit -q -m initial
+echo 'Fix `scripts/validate_repository.py` from an unresolvable repo.' > "$D/brief-288.md"
+out9c=$(AGENT_SUPERVISOR_STATE_DIR="$STATE9" DISPATCH_PYTHON=python3 \
+  "$CHECK" check --issue 288 --brief "$D/brief-288.md" --worktree "$NOREPO_CAND" \
+  --repo-path "$NOREPO_CAND" --exclude-lane "none:x" 2>&1)
+rc9c=$?
+want_exit "an unresolvable candidate repo fails closed and still refuses" "$rc9c" 1 "$out9c"
+want_contains "...naming the colliding lane" "skills:3" "$out9c"
+
 rm -rf "$D" "$GH_BIN"
 
 echo
