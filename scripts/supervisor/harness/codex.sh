@@ -99,6 +99,23 @@ HARNESS_BLOCKED_MARKERS='[Pp]ress enter to continue'
 HARNESS_OPTION_ROW_RE='^[[:space:]]*› [0-9]+\.[[:space:]]'
 HARNESS_MENU_ENTER_RE='[Ee]nter to [a-z]+'
 HARNESS_MENU_TAIL=6
+
+# agent-dotfiles#255: this is the same menu, and it is the actual root cause
+# of #255's original defect -- a fresh codex process consuming a dispatched
+# brief as a session TITLE rather than a turn. It was documented here (the
+# lines directly above) for `lanes.sh`'s own PASSIVE menu-blocked reading,
+# but nothing in `dispatch.sh`'s send path ever ACTED on it before this --
+# `/clear`'s Enter (dispatch.sh's own first send into a fresh lane) landed
+# on this menu instead of a chat box, selected its default option ("1. Yes,
+# continue") by luck of Enter being the dismissal key too, and the screen's
+# resulting genuinely-empty ready state read as a successful pre-clear even
+# though `/clear` itself was never processed. `dispatch.sh` now calls
+# `verified_dismiss_menu` (send.sh) against exactly this regex BEFORE
+# `verified_preclear` ever runs, so the menu is confirmed gone -- not
+# assumed dismissed by an Enter that happened to land there -- before
+# anything else is typed. `worktree.sh new` mints a fresh, never-before-seen
+# path on every dispatch, so this menu is not a rare cold-start case for a
+# dispatched codex lane; it is the ordinary first thing on the screen.
 # No genuine free-text-blocked prompt has been observed on a real codex pane
 # (same posture as Claude's #164 note in harness/claude.sh, and the estate's
 # own rule: absence of evidence never adds a case). Left unset rather than

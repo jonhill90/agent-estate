@@ -431,5 +431,139 @@ for interpreter in bash zsh; do
   : > "$D/probe.log"; send_probe "$interpreter" "both --proof and --confirm-tries" --proof CHECKPOINT --confirm-tries 2
 done
 
+# --- 9. VERIFIED_DISMISS_MENU (agent-dotfiles#255) ------------------------
+# codex's own directory-trust menu, reproduced live against real codex
+# 0.148.0 in a throwaway tmux socket -- see send.sh's own header on this
+# function for the full mechanics. Derived from codex's real regex
+# (harness/codex.sh's HARNESS_OPTION_ROW_RE) minus its `^[[:space:]]*`
+# anchor: this stub's capture-pane always draws Claude's own editable-box
+# chrome (`❯`+NBSP) ahead of whatever text a window holds -- it was built to
+# model a text buffer, not a menu-only screen, and a real codex pane never
+# has that prefix (see codex.sh's own note that codex uses `›`, not
+# Claude's `❯`, for exactly this reason). De-anchoring here is a concession
+# to the stub's fixed chrome, not a weaker regex being smuggled into
+# production: `dispatch.sh` always passes the harness's OWN, anchored
+# `H_OPTION_ROW_RE` -- this constant exists only in this test file.
+CODEX_OPTION_ROW_RE='› [0-9]+\.[[:space:]]'
+
+# A harness with no such menu (empty regex, e.g. Claude/Copilot today):
+# succeeds immediately and never touches the pane at all.
+reset_pane
+out=$(run_send bash -c "
+  . '$SEND'
+  verified_dismiss_menu '$TARGET' '' 6 --settle 0 --retries 3
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+want_contains "an empty option-row regex (no such menu) succeeds immediately" "rc=0 status=landed" "$out"
+[ ! -s "$D/tmux.log" ] \
+  && ok "...and never touches the pane at all" \
+  || bad "an empty regex should send nothing" "$(cat "$D/tmux.log")"
+
+# A harness WITH the menu regex, but no menu actually showing: succeeds on
+# the first read, no Enter sent -- the ordinary case for every OTHER
+# dispatch to a lane whose worktree happens to already be trusted.
+reset_pane
+out=$(run_send bash -c "
+  . '$SEND'
+  verified_dismiss_menu '$TARGET' '$CODEX_OPTION_ROW_RE' 6 --settle 0 --retries 3
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+want_contains "a matching regex against a pane with no menu also succeeds immediately" "rc=0 status=landed" "$out"
+[ ! -s "$D/tmux.log" ] \
+  && ok "...and still sends nothing -- a real menu is confirmed absent, not assumed" \
+  || bad "no Enter should be sent when no menu is showing" "$(cat "$D/tmux.log")"
+
+# A menu genuinely showing: one Enter dismisses it (the stub's ordinary
+# Enter behaviour clears the buffer, modelling the menu going away), and
+# the function reports landed.
+reset_pane
+printf '%s' '› 1. Yes, continue' > "$D/panes/1"
+out=$(run_send bash -c "
+  . '$SEND'
+  verified_dismiss_menu '$TARGET' '$CODEX_OPTION_ROW_RE' 6 --settle 0 --retries 3
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+want_contains "a genuine menu is detected and accepted" "rc=0 status=landed" "$out"
+enter_count=$(grep -c '^send-keys -t t:1 Enter$' "$D/tmux.log" 2>/dev/null || echo 0)
+[ "$enter_count" -eq 1 ] \
+  && ok "...with exactly ONE Enter, not a blind flood of them" \
+  || bad "expected exactly 1 Enter, got $enter_count" "$(cat "$D/tmux.log")"
+[ ! -s "$D/panes/1" ] \
+  && ok "...and the box is confirmed empty afterward" \
+  || bad "the menu should be gone after Enter" "$(cat "$D/panes/1" 2>/dev/null)"
+
+# A menu that never clears (DISPATCH_SWALLOW_ENTER=1 -- every Enter this
+# stub sees is swallowed, modelling a menu stuck on a loaded pane): retries
+# exhausted, fail closed, not reported as landed.
+reset_pane
+printf '%s' '› 1. Yes, continue' > "$D/panes/1"
+out=$(run_send env DISPATCH_SWALLOW_ENTER=1 bash -c "
+  . '$SEND'
+  verified_dismiss_menu '$TARGET' '$CODEX_OPTION_ROW_RE' 6 --settle 0 --retries 3
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+want_contains "a menu that never clears is DETECTED, not reported as dismissed" "rc=2 status=not_landed" "$out"
+enter_count=$(grep -c '^send-keys -t t:1 Enter$' "$D/tmux.log" 2>/dev/null || echo 0)
+[ "$enter_count" -eq 3 ] \
+  && ok "...and it actually retried (--retries 3), not just given up after one try" \
+  || bad "expected 3 Enter attempts logged, got $enter_count" "$(cat "$D/tmux.log")"
+
+# --- MUTATION CHECK: skip the final re-check after retries exhaust --------
+# The loop above checks-THEN-acts: each iteration confirms the menu is
+# showing BEFORE sending that attempt's Enter, so the Enter sent on the
+# LAST iteration is never itself re-checked inside the loop -- only after
+# it, by the block below the loop. Without that final read, a menu
+# dismissed by the very last permitted Enter would be reported not_landed
+# even though it genuinely cleared -- a false negative, and with
+# `--retries 1` (dispatch.sh's own `DISPATCH_MENU_RETRIES` default is 5, but
+# the mechanism is the same at any N) that false negative fires on the
+# single most common real case: a menu accepted on the first try.
+MUTANT_DISMISS="$D/send-mutant-dismiss.sh"
+patch_rc=0
+python3 - "$SEND" "$MUTANT_DISMISS" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''  pane_tail=$(tmux capture-pane -p -t "$target" 2>/dev/null | grep -v '^[[:space:]]*$' | tail -n "$menu_tail")
+  if ! grep -qE "$option_row_re" <<<"$pane_tail"; then
+    SEND_STATUS=landed
+    return 0
+  fi
+  SEND_STATUS=not_landed
+  return 2
+}'''
+assert marker in text, "verified_dismiss_menu's final re-check not found -- send.sh shape changed"
+assert text.count(marker) == 1, "the final re-check is not unique -- send.sh shape changed"
+mutated = '''  SEND_STATUS=not_landed
+  return 2
+}'''
+patched = text.replace(marker, mutated, 1)
+assert patched != text, "mutation did not change send.sh -- the replace was a no-op"
+open(dst, "w").write(patched)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of send.sh with verified_dismiss_menu's final re-check removed" \
+    "could not patch $SEND (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of send.sh with verified_dismiss_menu's final re-check removed"
+  reset_pane
+  printf '%s' '› 1. Yes, continue' > "$D/panes/1"
+  out=$(run_send bash -c "
+    . '$MUTANT_DISMISS'
+    verified_dismiss_menu '$TARGET' '$CODEX_OPTION_ROW_RE' 6 --settle 0 --retries 1
+    echo \"rc=\$? status=\$SEND_STATUS\"
+  ")
+  want_contains "MUTATION CONFIRMED (red): without the final re-check, a menu dismissed by the last permitted Enter is wrongly reported not dismissed" "rc=2 status=not_landed" "$out"
+
+  reset_pane
+  printf '%s' '› 1. Yes, continue' > "$D/panes/1"
+  out=$(run_send bash -c "
+    . '$SEND'
+    verified_dismiss_menu '$TARGET' '$CODEX_OPTION_ROW_RE' 6 --settle 0 --retries 1
+    echo \"rc=\$? status=\$SEND_STATUS\"
+  ")
+  want_contains "RESTORED (green): the real send.sh, same single-retry scenario, reports it dismissed" "rc=0 status=landed" "$out"
+fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
