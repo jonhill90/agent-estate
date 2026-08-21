@@ -19,15 +19,28 @@ already fails closed on any red check.
 WHAT TRIGGERS THE REQUIREMENT -- "required" vs "none required", never
 guessed. A PR requires fixpass evidence only when it carries POSITIVE
 evidence a reviewer found something to fix: a native GitHub review with
-state `CHANGES_REQUESTED`, or a comment with a `Verdict:` line that
-`verdict.py`'s own (already-tested) line-scanner classifies as `rejected`.
-Reusing `verdict.py`'s `_scan_verdict_lines`/`_classify_decision_text`
-instead of re-deriving a second regex is deliberate: this estate's own
-history (#53, #192, #198, #232) is a long list of that classifier getting
-subtler than it looks, and a second, slightly different copy would drift.
-A PR with neither signal has nothing to gate -- "no rejection found" is a
-looked-up, explicit `False`, not an absence read as an all-clear (the same
-positive-evidence-vs-lookup-miss distinction #308 turned on).
+state `CHANGES_REQUESTED`, or a COMMENT carrying a real posted verdict --
+a `Verdict:` line that `verdict.py`'s own (already-tested) line-scanner
+classifies as `rejected`, paired with a `Review-Lane:` trailer identifying
+the reviewing lane. Reusing `verdict.py`'s `_scan_verdict_lines`/
+`_classify_decision_text` instead of re-deriving a second regex is
+deliberate: this estate's own history (#53, #192, #198, #232) is a long
+list of that classifier getting subtler than it looks, and a second,
+slightly different copy would drift. A PR with neither signal has nothing
+to gate -- "no rejection found" is a looked-up, explicit `False`, not an
+absence read as an all-clear (the same positive-evidence-vs-lookup-miss
+distinction #308 turned on).
+
+NEITHER SIGNAL IS THE PR'S OWN BODY (agent-supervisor#484). `_gather_documents`
+still scans the body for EVIDENCE (a fix pass may paste its proof there),
+but the body is never a rejection source, and a comment counts as a
+rejection only when it carries the `Review-Lane:`/`Verdict:` trailer pair
+`post-verdict.sh` requires before it will post one at all -- see
+`_is_rejected_verdict_comment`. Measured twice on PR #481: a PR body (and,
+separately, a reviewer's own comment) that merely QUOTED or DISCUSSED
+example verdict text -- documenting this exact bug -- was misread by the
+same classifier as a genuine rejection of the PR carrying it, demanding a
+fixpass-evidence marker nobody had any real rejection to answer.
 
 WHAT COUNTS AS EVIDENCE, once required -- structure, not content. This
 module cannot judge whether a pasted reproduction actually demonstrates the
@@ -63,7 +76,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from verdict import _scan_verdict_lines  # noqa: E402 -- reuse the tested Verdict: line classifier
+from verdict import _review_lane_line, _scan_verdict_lines  # noqa: E402 -- reuse the tested classifiers
 
 
 EVIDENCE_MARKER = "<!-- fixpass-evidence:v1 -->"
@@ -83,14 +96,23 @@ def subprocess_runner(command):
     return subprocess.run(command, check=True, capture_output=True, text=True, timeout=30).stdout
 
 
-def _any_rejected_verdict(bodies):
-    """True when at least one body has a `Verdict:` line that classifies as
-    `rejected` -- the comment-posted path (#53), same classifier `verdict.py`
-    uses for the estate's real merge decisions."""
-    for body in bodies:
-        for decision, _ in _scan_verdict_lines(body or ""):
-            if decision == "rejected":
-                return True
+def _any_rejected_verdict(comment_bodies):
+    """True when at least one COMMENT carries a real posted verdict --
+    agent-supervisor#484: a `Verdict:` line that classifies as `rejected`
+    is not enough on its own, because prose that merely quotes or discusses
+    verdict-shaped text (a bug report about the parser, a PR body
+    describing this exact false positive) matches the same classifier a
+    real reviewer's comment does. `post-verdict.sh` never posts a
+    `Verdict:` line without a paired `Review-Lane:` trailer identifying the
+    reviewing lane (#187/#188) -- that pairing is what makes a comment a
+    real posted verdict rather than text that happens to contain the
+    phrase, so both must be present. This is the comment-posted path
+    (#53), still using the same tested `_scan_verdict_lines` classifier
+    `verdict.py` uses for the estate's real merge decisions -- just no
+    longer trusting a bare, unattributed match."""
+    for body in comment_bodies:
+        if _is_rejected_verdict_comment(body):
+            return True
     return False
 
 
@@ -104,10 +126,19 @@ def _has_changes_requested_review(reviews):
     )
 
 
-def _is_rejected_verdict_text(text):
+def _is_rejected_verdict_comment(text):
     """Single-document version of `_any_rejected_verdict`, used to tag one
-    document (a body, a review, a comment) as a rejection round on its own,
-    so it can be matched against its own timestamp."""
+    COMMENT as a rejection round on its own, so it can be matched against
+    its own timestamp. Never applied to the PR body (#484: the body is
+    never a rejection source -- see `_gather_documents`); a comment counts
+    only when it classifies as `rejected` AND carries a `Review-Lane:`
+    trailer, the shape `post-verdict.sh` requires before it will post a
+    `Verdict:` line at all. Requiring the raw trailer LINE (not that it
+    resolves to a registered lane) is deliberate: this module has no
+    ledger to resolve against, and the pairing itself -- not the lane's
+    validity -- is what tells a real posted verdict apart from prose."""
+    if _review_lane_line(text) is None:
+        return False
     for decision, _ in _scan_verdict_lines(text or ""):
         if decision == "rejected":
             return True
@@ -120,8 +151,15 @@ def _gather_documents(*, body, body_timestamp, reviews, comments):
     be bound to the rejection round it answers (agent-supervisor#340 finding
     2): `evaluate()` no longer asks "is there a rejection anywhere" and "is
     there evidence anywhere" as two independent questions over pooled text,
-    it asks whether evidence exists AFTER the most recent rejection."""
-    documents = [{"text": body, "timestamp": body_timestamp, "is_rejection": _is_rejected_verdict_text(body)}]
+    it asks whether evidence exists AFTER the most recent rejection.
+
+    The PR body is still scanned for EVIDENCE (a fix pass may paste its
+    proof directly into the body) but is never a rejection source
+    (agent-supervisor#484) -- an author writes the body, so a body that
+    quotes or discusses verdict-shaped text can never be a genuine
+    third-party rejection the way a comment carrying a real
+    `Review-Lane:`/`Verdict:` trailer pair can."""
+    documents = [{"text": body, "timestamp": body_timestamp, "is_rejection": False}]
     for review in reviews:
         if not isinstance(review, dict):
             continue
@@ -133,7 +171,7 @@ def _gather_documents(*, body, body_timestamp, reviews, comments):
             continue
         text = comment.get("body") or ""
         documents.append(
-            {"text": text, "timestamp": comment.get("createdAt"), "is_rejection": _is_rejected_verdict_text(text)}
+            {"text": text, "timestamp": comment.get("createdAt"), "is_rejection": _is_rejected_verdict_comment(text)}
         )
     return documents
 
@@ -209,7 +247,7 @@ class FixpassEvidenceGate:
         except Exception as error:
             return {"decision": "refuse", "reason": f"could not read PR #{number}: {error}"}
 
-        required = _has_changes_requested_review(reviews) or _any_rejected_verdict([body] + comment_bodies)
+        required = _has_changes_requested_review(reviews) or _any_rejected_verdict(comment_bodies)
         if not required:
             return {
                 "decision": "allow",
