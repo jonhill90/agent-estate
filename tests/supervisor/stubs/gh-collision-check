@@ -13,6 +13,17 @@
 # GH_STUB_FAIL=1            every invocation exits 1 (gh unreachable/failed)
 # GH_STUB_PR_LIST_JSON      body for `gh pr list ... --json number,files`
 #                           (defaults to "[]" -- no open PRs)
+# GH_STUB_PR_VIEW_JSON      maps PR number -> state for `gh pr view <n> ...
+#                           --json state` (agent-supervisor#483's self-
+#                           resolution lookup), e.g. '{"501":"OPEN"}'. A
+#                           number absent from the map behaves like a real
+#                           `gh pr view` on a number that is not a PR at all
+#                           (issue numbers and PR numbers share one
+#                           namespace) -- exit 1, "could not resolve".
+# GH_STUB_PR_VIEW_FAIL=1    `gh pr view` specifically fails ambiguously (not
+#                           "not found") even though `gh pr list` still
+#                           works -- the narrow ambiguous-lookup case, as
+#                           opposed to GH_STUB_FAIL's total outage.
 # GH_STUB_LOG               if set, every invocation's argv is appended here,
 #                           one line per call -- lets a test assert on the
 #                           exact -R value gh was invoked with (or that it was
@@ -26,6 +37,31 @@ fi
 if [ "$1" = "pr" ] && [ "$2" = "list" ]; then
   printf '%s' "${GH_STUB_PR_LIST_JSON:-[]}"
   exit 0
+fi
+
+if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
+  n="$3"
+  if [ -n "${GH_STUB_PR_VIEW_FAIL:-}" ]; then
+    echo "gh: request failed (rate limited)" >&2
+    exit 1
+  fi
+  state=""
+  if [ -n "${GH_STUB_PR_VIEW_JSON:-}" ]; then
+    state=$(printf '%s' "$GH_STUB_PR_VIEW_JSON" | python3 -c '
+import json, sys
+try:
+    d = json.loads(sys.stdin.read())
+except Exception:
+    d = {}
+print(d.get(sys.argv[1], ""))
+' "$n" 2>/dev/null)
+  fi
+  if [ -n "$state" ]; then
+    printf '{"number":%s,"state":"%s"}' "$n" "$state"
+    exit 0
+  fi
+  echo "GraphQL: Could not resolve to a PullRequest with the number $n. (repository.pullRequest)" >&2
+  exit 1
 fi
 
 exit 1

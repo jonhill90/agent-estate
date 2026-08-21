@@ -329,6 +329,42 @@ for pr in data:
 ' "$exclude_pr" <<<"$json" || return 1
 }
 
+# Is $2 (the dispatch target's own number, ISSUE) itself an open PR in $1 --
+# agent-supervisor#483. A dedicated per-number lookup, NOT membership in the
+# open-PR list already fetched below for the holder check: issue numbers and
+# PR numbers share one namespace, so "N appears in the open-PR list" does not
+# mean "N is THIS dispatch's own PR" -- it could be an unrelated PR that
+# happens to share the number. Excluding on list-membership alone would
+# silently turn off a real collision check for that unrelated PR; a `gh pr
+# view N` lookup answers the narrower, correct question directly.
+#
+# stdout: the PR's state (OPEN/CLOSED/MERGED), or empty for "not found",
+# "gh could not answer", or any other ambiguous outcome -- callers never
+# distinguish those from each other, because the safe default is the same
+# for all of them: do not exclude. That is not a silent "checked, found
+# nothing" the way an unresolved holder-list fetch is (this file already has
+# PR_CHECK_STATUS/SKIPPED for that): if #$ISSUE genuinely IS the open PR
+# sitting in the holder set and this lookup could not confirm it, the
+# pre-existing self-collision REFUSE still fires below, loud, exactly as it
+# did before this function existed -- never a false ALLOW. Hard-refusing the
+# WHOLE DISPATCH on an inconclusive per-number lookup was considered and
+# rejected: this file already states the reason once, at the top of the
+# open-PR-holder section below ("a collision check that refuses every
+# dispatch when GitHub is slow would be removed within a day"), and a lookup
+# that fails for the same reasons `gh pr list` can fail deserves the same
+# posture, not a stricter one.
+_resolve_self_pr() {
+  local repo="$1" issue="$2" out
+  out=$(gh pr view "$issue" -R "$repo" --json state 2>/dev/null) || { echo ""; return 0; }
+  "$PYTHON" -c '
+import json, sys
+try:
+    print(json.loads(sys.argv[1]).get("state", ""))
+except Exception:
+    print("")
+' "$out" 2>/dev/null
+}
+
 # PR_CHECK_STATUS is stated in every ALLOW/REFUSE/FORCED line below -- #432's
 # own review measured that a `gh` outage produced output byte-identical to a
 # real clean check ("ALLOW no-conflict", rc 0, no distinguishing text
@@ -338,6 +374,13 @@ PR_REPO="$REPO"
 if [ -z "$PR_REPO" ]; then
   PR_REPO=$(_repo_from_path "$REPO_PATH") || PR_REPO=""
 fi
+# EFFECTIVE_PR is what actually gets excluded from the holder set below --
+# $PR verbatim when the caller (dispatch.sh, via --pr/--reviews-pr) already
+# named it explicitly, trusted as before. Only when the caller gave NOTHING
+# (the ordinary `dispatch.sh <n> <lane> <brief> <repo> <path>` path,
+# agent-supervisor#483) do we ask whether $ISSUE is itself the PR being
+# dispatched onto -- never assumed, only resolved.
+EFFECTIVE_PR="$PR"
 if [ -z "$PR_REPO" ]; then
   # NOT the phrase "could not determine" -- see this file's own note above
   # detect_candidate_files's ALLOW-unknown message for why: dispatch.sh's own
@@ -348,7 +391,11 @@ if [ -z "$PR_REPO" ]; then
 elif ! command -v gh >/dev/null 2>&1; then
   PR_CHECK_STATUS="SKIPPED -- gh not on PATH"
 else
-  PR_HOLDER_OUT=$(open_pr_files "$PR_REPO" "$PR") || PR_CHECK_STATUS="SKIPPED -- gh pr list failed (GitHub unreachable, rate-limited, or not authenticated)"
+  if [ -z "$EFFECTIVE_PR" ]; then
+    SELF_PR_STATE=$(_resolve_self_pr "$PR_REPO" "$ISSUE")
+    [ "$SELF_PR_STATE" = "OPEN" ] && EFFECTIVE_PR="$ISSUE"
+  fi
+  PR_HOLDER_OUT=$(open_pr_files "$PR_REPO" "$EFFECTIVE_PR") || PR_CHECK_STATUS="SKIPPED -- gh pr list failed (GitHub unreachable, rate-limited, or not authenticated)"
 fi
 
 if [ "$PR_CHECK_STATUS" = ok ] && [ -n "${PR_HOLDER_OUT:-}" ]; then
