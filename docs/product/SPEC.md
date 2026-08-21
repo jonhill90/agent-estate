@@ -68,7 +68,7 @@ distinct states:
 | `scrolled` | Pane is in tmux copy mode; keys sent are eaten by copy-mode bindings rather than reaching the agent. |
 | `broken` | The pane's working directory no longer exists on disk. |
 | `service` | Running a supervisor service (e.g. `inbox-poll.sh`), not a worker — never offered, never dispatched to (see [`docs/decisions/`](../decisions/) and `AGENTS.md` invariant 8, "the poller is a service, not a lane"). |
-| `supervisor` | The window index matches `LANES_SUPERVISOR_WINDOW` (default window 1) — the supervisor's own pane. |
+| `supervisor` | The window's own `#{window_id}` matches the supervisor's, resolved by `session-defaults.sh`'s `supervisor_window_id` (agent-dotfiles#239) — falls back to comparing `#{window_index}` against `LANES_SUPERVISOR_WINDOW` (default window 1) only when no id resolves. The supervisor's own pane. |
 | `unknown` | Shape matches no adapter and no other rule above — left alone, reported, never guessed at. |
 
 Every renderer under `laneview/` is required to name every one of these

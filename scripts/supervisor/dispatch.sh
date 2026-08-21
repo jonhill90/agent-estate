@@ -1293,7 +1293,14 @@ if [ -z "$LANE" ]; then
   LANE_ROWS_JSON=$("$HERE/lanes.sh" --json "$SESSION" 2>/dev/null || printf '[]')
   while IFS=$'\t' read -r diag_idx diag_state; do
     [ -n "$diag_idx" ] || continue
-    [ "$diag_idx" = "${LANES_SUPERVISOR_WINDOW:-1}" ] && continue
+    # agent-dotfiles#239: this used to compare $diag_idx to
+    # ${LANES_SUPERVISOR_WINDOW:-1} -- a window INDEX, unstable under
+    # renumber-windows on, the exact defect this issue is about. lanes.sh is
+    # the sole authority on which window is the supervisor's (session-defaults.sh's
+    # id-based `supervisor_window_id`, #239's fix there) and already emits
+    # `state=supervisor` for it; asking IT rather than re-deriving a second,
+    # independently stale answer here is the fix, not a workaround.
+    [ "$diag_state" = supervisor ] && continue
     [ "$diag_state" = free ] && continue
     describe_excluded_lane "$SESSION:$diag_idx" "$diag_state"
   done < <(printf '%s' "$LANE_ROWS_JSON" | "$LEDGER_PYTHON" -c 'import json,sys
