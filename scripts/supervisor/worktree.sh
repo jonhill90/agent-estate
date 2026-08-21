@@ -200,6 +200,122 @@ branch_content_is_on_base() {
   [ "$rc" -eq 0 ] && [ -z "$out" ]
 }
 
+# agent-supervisor#427: `refs/stash` is REPO-COMMON, not per-worktree -- every
+# linked worktree of one repo (`git worktree add`'s whole model) shares one
+# `.git` and therefore one stash LIFO stack. `git stash pop`/`apply` with no
+# argument always resolves `stash@{0}`, the most recently pushed entry
+# ACROSS EVERY WORKTREE, not "this worktree's own". Measured directly: push a
+# stash in worktree A, `git stash pop` in a completely unrelated worktree B
+# (clean tree, no conflict) applies A's WIP into B's working directory and
+# reports success -- exactly what #427 observed (a lane's own `git stash`
+# surfaced `lane/278-unblock-dispatch`'s stash instead of its own).
+#
+# `refs/worktree/*` refs ARE genuinely private per worktree (confirmed:
+# `git update-ref refs/worktree/x ...` in one worktree is invisible via
+# `git rev-parse` in another) -- but `git stash` is hardcoded to `refs/stash`
+# and offers no way to point it at a different ref, so that mechanism cannot
+# be borrowed to scope stash itself.
+#
+# Two interception strategies were tried and rejected, both for reasons that
+# would silently defeat them in exactly the environment lanes actually run
+# in:
+#   - `git config --worktree alias.stash '!...'`: reads back fine via
+#     `git config`, but is NOT consulted by git's own command dispatch (the
+#     aliased verb still runs the real builtin) -- config.worktree is
+#     honored for ordinary variables, not for overriding a builtin verb this
+#     way. Measured, not assumed.
+#   - Shadowing the `git` binary itself via a PATH-prepended wrapper: works
+#     under a plain interactive shell, but a sandboxed agent's own command
+#     execution can resolve `git` to a fixed real binary regardless of PATH
+#     (measured in this environment) -- silently defeating the guard in the
+#     one execution context (an autonomous coding agent's own shell calls)
+#     that matters most, with no error to say so.
+#
+# The mechanism that DOES fire reliably, because git invokes it directly
+# rather than via PATH lookup, is the `reference-transaction` hook (git
+# 2.28+) -- it is called by git's own ref-transaction machinery for every ref
+# write, and `core.hooksPath` set via `git config --worktree` (unlike
+# `alias.*`) IS honored per worktree. Refusing any transaction that touches
+# `refs/stash` closes the vulnerability for every worktree built after this
+# change: if no lane can ever ADD to the shared stash, `stash pop`/`apply`
+# has nothing foreign left to silently apply, ever again, without needing to
+# distinguish "my own entry" from "someone else's".
+#
+# What this does NOT close, documented rather than silently assumed away: it
+# cannot stop `stash pop`/`apply` from reading an entry that was already
+# pushed by a worktree from BEFORE this fix landed (git applies the patch to
+# the working tree as a merge -- that step is not a ref write and the hook
+# never sees it; only the final `drop` is a ref write, and by then the
+# working tree is already contaminated). The fix is preventive, not
+# detective: it guarantees the pool stays empty going forward, it does not
+# retroactively clean an already-populated one. `git -C "$REPO" stash clear`
+# drains any pre-existing entries once, by hand, if this is rolled out onto
+# a repo that already has some.
+install_stash_guard() {
+  local dest="$1" repo="$2"
+  # extensions.worktreeConfig is repository-wide, not per-worktree -- set on
+  # $repo (the common dir every worktree, including $dest, reads extensions
+  # from), not $dest. Setting it anywhere else would be a no-op the first
+  # time a worktree that predates this call reads it.
+  git -C "$repo" config extensions.worktreeConfig true
+  # Inside $dest's own git-dir (`.git/worktrees/<name>`, resolved via
+  # `rev-parse --git-dir` rather than assumed), never inside the WORKING
+  # tree: a hooks directory sitting in $dest itself is an untracked path
+  # `git status` reports, which makes `safe_remove` (worktree.sh's own
+  # `done`/`gc` dirty-check, shared with the safe-deletion contract this
+  # whole file exists to keep) refuse to ever remove a worktree it just
+  # created for having "uncommitted changes" that are nothing but this
+  # guard's own installation. Measured, not assumed: the first version of
+  # this fix put the hooks dir inside $dest and broke `gc removes a merged,
+  # clean worktree` in test_worktree.sh, every single run.
+  local git_dir hooks_dir
+  git_dir=$(git -C "$dest" rev-parse --git-dir 2>/dev/null) || { echo "worktree: could not resolve $dest's git-dir" >&2; return 1; }
+  case "$git_dir" in
+    /*) : ;;
+    *) git_dir="$dest/$git_dir" ;;
+  esac
+  hooks_dir="$git_dir/supervisor-stash-guard"
+  mkdir -p "$hooks_dir"
+  cat >"$hooks_dir/reference-transaction" <<'HOOK'
+#!/bin/bash
+# Installed by worktree.sh (agent-supervisor#427). Refuses any ref write
+# touching refs/stash -- refs/stash is shared by every worktree of this
+# repo, so a stash pushed here is visible, and poppable, from any of them.
+[ "$1" = "prepared" ] || exit 0
+blocked=0
+while read -r _old _new ref; do
+  if [ "$ref" = "refs/stash" ]; then
+    blocked=1
+  fi
+done
+if [ "$blocked" -eq 1 ]; then
+  echo "worktree: git stash is refused in this worktree (agent-supervisor#427) -- refs/stash is shared by every worktree of this repo, so a stash pushed here could later be silently popped into (or silently pop in) a DIFFERENT lane's worktree. Commit your work in progress instead: git add -A && git commit -m wip --no-verify -- this worktree's branch is private, unlike the stash stack." >&2
+  exit 1
+fi
+exit 0
+HOOK
+  chmod +x "$hooks_dir/reference-transaction"
+  # Preserve any other hook this repo already ships (there are none as of
+  # #427, but a future one added to $repo/.git/hooks should not silently
+  # stop firing in every new worktree just because this only replaces the
+  # DIRECTORY git looks hooks up in, not the hooks it had). reference-
+  # transaction itself is deliberately excluded -- it is ours, not copied.
+  local repo_hooks
+  repo_hooks=$(git -C "$repo" rev-parse --git-path hooks 2>/dev/null) || repo_hooks=""
+  if [ -n "$repo_hooks" ] && [ -d "$repo_hooks" ]; then
+    local f name
+    for f in "$repo_hooks"/*; do
+      [ -e "$f" ] || continue
+      name=$(basename "$f")
+      case "$name" in
+        *.sample|reference-transaction) continue ;;
+      esac
+      ln -sf "$f" "$hooks_dir/$name"
+    done
+  fi
+  git -C "$dest" config --worktree core.hooksPath "$hooks_dir"
+}
+
 CMD="${1:-}"
 case "$CMD" in
 
@@ -307,6 +423,11 @@ new)
   # git worktree add already writes its progress to stderr; leave stdout
   # clean so a caller can capture exactly the path from the line below.
   git -C "$REPO" worktree add -b "$BRANCH" "$DEST" "$BASE" 1>&2 || exit 1
+  install_stash_guard "$DEST" "$REPO" 1>&2 || {
+    echo "worktree: could not install the stash guard on $DEST (agent-supervisor#427) -- NOT handing out an unguarded worktree" >&2
+    git -C "$REPO" worktree remove --force "$DEST" >/dev/null 2>&1
+    exit 1
+  }
   echo "$DEST"
   exit 0 ;;
 
