@@ -63,6 +63,15 @@ VERDICT_BIN="${DIGEST_VERDICT_BIN:-}"
 LEDGER_PYTHON="${DIGEST_LEDGER_PYTHON:-python3}"
 LEDGER_CLI="${DIGEST_LEDGER_CLI:-$HERE/cli.py}"
 RECONCILE_IDLE_AFTER="${DIGEST_RECONCILE_IDLE_AFTER:-300}"
+# agent-supervisor#463: which workflow this digest treats as "CI" when it
+# scopes `gh run list` below -- see that call site's own comment for the
+# false-green this fixes. `gh run list --workflow` accepts either the
+# workflow's file name or its display name; the file name is used here
+# because it is the more stable identifier (a display name is free-text
+# that can be edited without changing which file it is) and because it is
+# what every REPOS entry's own workflow file is expected to be named unless
+# overridden.
+DIGEST_CI_WORKFLOW="${DIGEST_CI_WORKFLOW:-validate.yml}"
 
 # agent-supervisor#89: the `advance:` line watchdog.status carries is only
 # rewritten when watchdog.sh itself ticks (advance_on_exit runs on every
@@ -510,7 +519,8 @@ fi
 
 # --- pull requests --------------------------------------------------------
 # One `gh` call per repo for the PR list, then one `gh run list` per PR,
-# scoped to that PR's own branch.
+# scoped to that PR's own branch AND to the one workflow this digest treats
+# as CI (agent-supervisor#463 below).
 #
 # It used to be one `gh run list --limit 40` per REPO, matched against every
 # PR by branch name. That call is not scoped to a branch -- it's the 40 most
@@ -522,6 +532,52 @@ fi
 # which this field exists to name. `--branch` costs one more call per PR but
 # reads the actual latest run for that branch, not a stale slice of a shared
 # window.
+#
+# agent-supervisor#463: `--branch` alone was NOT enough -- it scopes to the
+# branch, not to a workflow, and `--limit 1` still returned the single
+# newest run across EVERY workflow that ran on that branch. Measured live on
+# #462: the branch's workflows were, by creation order, `UI evidence,
+# Fixpass evidence, Fixpass evidence, Validate, completion-gate` -- "Validate"
+# is the workflow that contains the `shell-suites` job, i.e. the actual
+# test run, but it was not the newest-CREATED, so `--limit 1` picked
+# `completion-gate`'s (or whichever ran last) conclusion instead and printed
+# `ci=success` while `shell-suites` was failing on two consecutive runs. A
+# later, unrelated, successful workflow silently masked an earlier, still-red
+# CI run -- exactly the failure mode #463's own title names.
+#
+# Fix chosen: `--workflow "$DIGEST_CI_WORKFLOW"` (default `validate.yml`),
+# scoping the SAME `gh run list --branch --limit 1` call to the one workflow
+# that runs `shell-suites`, rather than switching this section to the
+# check-runs API. The check-runs API (`commits/{sha}/check-runs`, aggregated
+# across every workflow) IS the more correct answer in the abstract -- and
+# this estate already has it, at `ci_gate.py`, which `merge-pr.sh` consults
+# as the actual merge gate (agent-supervisor#13). That is deliberately NOT
+# reused here: `ci_gate.py` is the enforcement path and is correct today;
+# rerouting this digest through it would mean re-deriving PR3/PR#149's
+# "no run at all" distinction and PR2's "a run exists but not for this head"
+# distinction against a completely different API shape, for a section whose
+# job is a cheap per-tick REPORT, not the gate itself. `--workflow` fixes the
+# exact defect measured (an unrelated workflow's run masking the CI
+# workflow's) with a one-argument change to a call this section already
+# makes, and leaves `ci_gate.py` as the single place a merge decision is
+# actually computed -- unifying the two would be the #108/#179 DRY move IF
+# this digest were also making a merge decision, but it is not; it disagreeing
+# with `ci_gate.py`'s SHA-scoped, multi-workflow-aware answer is possible in
+# principle (this digest only ever asks about `$DIGEST_CI_WORKFLOW`) and is
+# an accepted, documented gap: this digest's `ci=` line is "what did the CI
+# workflow's own last run on this branch say", not "is this PR mergeable" --
+# `merge-pr.sh` never reads this digest to decide that, it calls `ci_gate.py`
+# directly every time.
+#
+# What `ci_is_current` means, now stated explicitly (it was not before,
+# which is what let #463's root cause hide): a PR's branch can carry several
+# workflows sitting at DIFFERENT SHAs (e.g. `Fixpass evidence` from before a
+# later push, `Validate` from the push after). `ci_is_current` answers for
+# `$DIGEST_CI_WORKFLOW` ONLY -- true iff that ONE workflow's newest run on
+# this branch was triggered by the PR's current `headRefOid`. It says nothing
+# about whether any OTHER workflow on the branch is current for this head;
+# reconciling every workflow against every SHA is the job `ci_gate.py`
+# already does at merge time, not this line.
 #
 # agent-supervisor#144: the PR list is REST core (`gh api .../pulls`), not
 # GraphQL (`gh pr list`) -- this is the call that runs every tick, for every
@@ -549,7 +605,7 @@ for repo in $REPOS; do
     num=$(jq -r '.number' <<<"$p")
     head_oid=$(jq -r '.headRefOid' <<<"$p")
     gh_call run "gh run list failed for $OWNER/$repo#$num -- CI status omitted" \
-      run list -R "$OWNER/$repo" --branch "$branch" --limit 1 --json headSha,conclusion || run="[]"
+      run list -R "$OWNER/$repo" --branch "$branch" --workflow "$DIGEST_CI_WORKFLOW" --limit 1 --json headSha,conclusion || run="[]"
     [ -z "$run" ] && run="[]"
     r=$(jq -c '.[0] // {}' <<<"$run")
     # REST's `mergeable_state` is null until GitHub finishes computing it (a
