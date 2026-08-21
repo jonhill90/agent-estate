@@ -13,9 +13,12 @@ from core import Ledger  # noqa: E402
 from verdict import (  # noqa: E402
     GithubReviewVerdictSource,
     LedgerVerdictSource,
+    _APPROVED_TOKENS,
+    _bare_decision_line,
     _classify_decision_text,
     _content_unchanged_since,
     _default_patch_id,
+    _normalise_decision_text,
     _parse_verdict_comment,
     _scan_verdict_lines,
     _VERDICT_LINE_RE,
@@ -826,6 +829,12 @@ class ParseVerdictCommentTests(unittest.TestCase):
          "## Verdict: **APPROVE**", "approved"),
         ("#333: prefix text before the label, em-dash separator",
          "## Independent review of #333 — verdict: APPROVE", "approved"),
+        # agent-supervisor#475: three real verdicts measured 2026-08-21 that
+        # a human reader would call unambiguous and this module refused.
+        ("#475 case 1 (agent-supervisor#472, round 1): title case, reversed word order",
+         "## Verdict: Changes requested", "rejected"),
+        ("#475 case 2 (jonhill90/skills#228, round 1): lowercase, hyphenated, reversed order",
+         "Verdict: changes-requested", "rejected"),
     ]
 
     NEGATIVE_CASES = [
@@ -953,6 +962,46 @@ class ParseVerdictCommentTests(unittest.TestCase):
         self.assertEqual(pre_213_normalise(match.group(1)), "")
         self.assertEqual(_parse_verdict_comment("## Verdict: **APPROVE**"), "approved")
 
+    def test_mutation_475_a_rejected_token_set_without_the_reversed_forms_turns_cases_1_and_2_red(self):
+        """agent-supervisor#475: mutate `_REJECTED_TOKENS` back to its
+        pre-fix shape -- no "CHANGES REQUESTED" entry -- and confirm the two
+        reversed-word-order cases (measured verbatim off real PR comments)
+        go red. If they did not, the positive-case table would not be real
+        evidence of the fix."""
+        pre_475_rejected_tokens = frozenset({"REQUEST CHANGES", "REQUEST-CHANGES", "REJECTED"})
+
+        def pre_475_classify(decision_text):
+            if any(marker in decision_text for marker in ("NOT", "DIS", "NO", "N'T")):
+                return None
+            if decision_text in _APPROVED_TOKENS:
+                return "approved"
+            if decision_text in pre_475_rejected_tokens:
+                return "rejected"
+            return None
+
+        cases_475 = [
+            (name, body, expected)
+            for name, body, expected in self.POSITIVE_CASES
+            if name.startswith("#475 case")
+        ]
+        self.assertTrue(cases_475, "no #475 case in the positive table to prove the mutation against")
+        for name, body, expected in cases_475:
+            with self.subTest(name):
+                match = _VERDICT_LINE_RE.match(body.strip())
+                self.assertIsNotNone(match)
+                decision_text = _normalise_decision_text(match.group(1))
+                self.assertIsNone(pre_475_classify(decision_text))
+                self.assertEqual(_parse_verdict_comment(body), expected)
+
+    def test_475_case_2_hyphenated_reversed_order_normalises_via_hyphen_folding(self):
+        """`_normalise_decision_text` folds hyphens to spaces before the
+        token compare, so "changes-requested" reaches the same normalised
+        form as "changes requested" and needs no separate hyphenated entry
+        in `_REJECTED_TOKENS` (agent-supervisor#475 case 2, jonhill90/skills#228)."""
+        match = _VERDICT_LINE_RE.match("Verdict: changes-requested")
+        self.assertIsNotNone(match)
+        self.assertEqual(_normalise_decision_text(match.group(1)), "CHANGES REQUESTED")
+
 
 class ParseVerdictCommentAmbiguityTests(unittest.TestCase):
     """agent-supervisor#196: the line-scan #192 introduced reaches every
@@ -1046,6 +1095,114 @@ class ParseVerdictCommentAmbiguityTests(unittest.TestCase):
                 self.assertEqual(_parse_verdict_comment(body), expected)
 
 
+class BareDecisionLineTests(unittest.TestCase):
+    """agent-supervisor#475 case 3 (agent-supervisor#472, round 2): a lane
+    wrote `Verdict:` on its own line at the top of a long comment and
+    `APPROVE` as a standalone line at the very end -- both individually
+    unambiguous to a human reader, but the old parser read the decision
+    text as "" (immediately after the label) and never looked further,
+    so a genuine approval refused as unrecognised. The fix only activates
+    the fallback scan when a `Verdict:` label is present with EMPTY text --
+    a comment with no label at all still resolves to `none`/unrecognised
+    exactly as before, so a stray `APPROVE`-shaped line in ordinary prose
+    is not newly promoted into a verdict."""
+
+    POSITIVE_CASES = [
+        (
+            "#475 case 3 itself: empty label at the top, bare APPROVE at the end",
+            "Verdict:\n\nThe patch-id comparison looks right, tests pass, "
+            "and the freshness check covers the rebase case correctly.\n\nAPPROVE",
+            "approved",
+        ),
+        (
+            "empty label, bare REQUEST CHANGES at the end",
+            "Verdict:\n\nThe freshness check does not compare the base branch correctly.\n\nREQUEST CHANGES",
+            "rejected",
+        ),
+        (
+            "empty label, bare decision immediately below it",
+            "Verdict:\nAPPROVE",
+            "approved",
+        ),
+    ]
+
+    NEGATIVE_CASES = [
+        (
+            "no Verdict: label at all -- a bare APPROVE alone must not become a verdict",
+            "Looks fine to me.\n\nAPPROVE",
+        ),
+        (
+            "empty label, two conflicting bare lines -- refuses as ambiguous",
+            "Verdict:\n\nAPPROVE\n\nOn reflection:\n\nREQUEST CHANGES",
+        ),
+        (
+            "empty label, bare decision only inside a fenced code block -- not consulted",
+            "Verdict:\n\n```\nAPPROVE\n```",
+        ),
+        (
+            "empty label, bare decision only inside a blockquote -- not consulted",
+            "Verdict:\n\n> APPROVE",
+        ),
+        (
+            "empty label, no bare decision anywhere -- unchanged from before the fix",
+            "Verdict:\n\nStill reviewing, no conclusion yet.",
+        ),
+    ]
+
+    def test_every_positive_case_resolves(self):
+        for name, body, expected in self.POSITIVE_CASES:
+            with self.subTest(name):
+                self.assertEqual(_parse_verdict_comment(body), expected)
+
+    def test_every_negative_case_reads_none(self):
+        for name, body in self.NEGATIVE_CASES:
+            with self.subTest(name):
+                self.assertIsNone(_parse_verdict_comment(body))
+
+    def test_mutation_skipping_the_bare_scan_turns_case_3_red(self):
+        """Mutate back to the pre-fix shape -- `_scan_verdict_lines` with no
+        `_bare_decision_line` fallback, an empty-text label is just an
+        unrecognised line -- and confirm #475 case 3 goes red. If it did
+        not, the positive-case table above would not be real evidence of
+        the fix."""
+
+        def pre_475_scan(body):
+            in_fence = False
+            results = []
+            for raw_line in (body or "").splitlines():
+                line = raw_line.strip()
+                if line.startswith("```"):
+                    in_fence = not in_fence
+                    continue
+                if in_fence or line.startswith(">"):
+                    continue
+                match = _VERDICT_LINE_RE.match(line)
+                if not match:
+                    continue
+                decision_text = _normalise_decision_text(match.group(1))
+                results.append((_classify_decision_text(decision_text), decision_text))
+            return results
+
+        def pre_475_parse(body):
+            decisions = {d for d, _ in pre_475_scan(body) if d is not None}
+            if len(decisions) == 1:
+                return decisions.pop()
+            return None
+
+        case_3 = next(body for name, body, _ in self.POSITIVE_CASES if "case 3 itself" in name)
+        self.assertIsNone(pre_475_parse(case_3))
+        self.assertEqual(_parse_verdict_comment(case_3), "approved")
+
+    def test_bare_decision_line_ignores_lines_with_their_own_label(self):
+        """A line that already carries its own `Verdict:` label is never a
+        BARE candidate -- it is handled (and classified) by the label scan
+        itself; treating it as bare too would double-count it."""
+        self.assertIsNone(_bare_decision_line(["Verdict: APPROVE"]))
+
+    def test_bare_decision_line_empty_input_reads_none(self):
+        self.assertIsNone(_bare_decision_line([]))
+
+
 class DecisionTokenTests(unittest.TestCase):
     """agent-supervisor#198: the decision half of `_parse_verdict_comment`
     was an `in` substring test -- `"APPROVE" in decision_text` reads
@@ -1073,6 +1230,9 @@ class DecisionTokenTests(unittest.TestCase):
         ("request changes, space form", "REQUEST CHANGES", "rejected"),
         ("request changes, hyphen form", "REQUEST-CHANGES", "rejected"),
         ("rejected, one word", "REJECTED", "rejected"),
+        # agent-supervisor#475: the reversed, natural word order.
+        ("reversed order, changes requested", "CHANGES REQUESTED", "rejected"),
+        ("reversed order, lowercase", "changes requested", "rejected"),
         ("lowercase approve", "approve", "approved"),
         ("lowercase request changes", "request changes", "rejected"),
         ("extra internal whitespace", "REQUEST   CHANGES", "rejected"),

@@ -279,9 +279,25 @@ _VERDICT_LINE_RE = re.compile(r"^#{0,6}\s*.*?\*{0,2}verdict:\**\s*(.*)$", re.IGN
 # a single token that is not in either list) -- named explicitly here
 # because this module does not attempt sentiment analysis on a negation
 # and must not be "improved" into trying to.
+#
+# agent-supervisor#475: two more REJECTED tokens, both measured verbatim off
+# real review comments (#472, skills#228) that a human reader would call an
+# unambiguous rejection and this module refused as unrecognised:
+#   "CHANGES REQUESTED"  -- title case, the natural reversed word order
+#                            ("changes were requested" reads more naturally
+#                            than "request changes" as a past-tense verdict).
+#   "CHANGES-REQUESTED"  -- the same reversed order, hyphenated. Reached via
+#                            `_normalise_decision_text` folding hyphens to
+#                            spaces before the token compare (see there), so
+#                            it never needs its own literal entry here --
+#                            named anyway so a reader auditing this set does
+#                            not have to go re-derive that path.
+# Whole-token matching keeps this safe the same way it already was:
+# "CHANGES REQUESTED" is still an exact-token entry, not a substring probe,
+# so nothing gets more lenient than case 1/2 specifically ask for.
 _NEGATION_MARKERS = ("NOT", "DIS", "NO", "N'T")
 _APPROVED_TOKENS = frozenset({"APPROVE", "APPROVED"})
-_REJECTED_TOKENS = frozenset({"REQUEST CHANGES", "REQUEST-CHANGES", "REJECTED"})
+_REJECTED_TOKENS = frozenset({"REQUEST CHANGES", "REQUEST-CHANGES", "REJECTED", "CHANGES REQUESTED"})
 
 
 def _classify_decision_text(decision_text):
@@ -338,6 +354,11 @@ def _normalise_decision_text(rest):
     if marker:
         text = text[: marker.start()]
     text = text.strip().rstrip(".:;,!").strip()
+    # agent-supervisor#475: "changes-requested" (hyphenated) is the same
+    # decision as "changes requested" (spaced) -- fold before the whitespace
+    # collapse below so both land on one normalised form and need only one
+    # token in `_REJECTED_TOKENS`, not a hyphenated duplicate of every entry.
+    text = text.replace("-", " ")
     text = re.sub(r"\s+", " ", text).upper()
     if "+" in text:
         text = text.split("+", 1)[0].strip()
@@ -369,11 +390,26 @@ def _scan_verdict_lines(body):
     an unrecognised or absent line means, this function only reports what
     is on each qualifying line.
 
+    agent-supervisor#475 (case 3): a `Verdict:` label with nothing after it
+    on the same line -- decision text normalises to "" -- used to just be
+    an unrecognised line, even when the rest of the comment plainly states
+    a decision on its own ("Verdict:" at the top, "APPROVE" as a standalone
+    line at the end; a completely natural way to structure a review that
+    gives its reasoning before its conclusion). When an EMPTY label is
+    found, `_bare_decision_line` scans the same fence/quote-filtered lines
+    for a standalone decision -- a line that, once run through the same
+    normaliser as a label's decision text, IS one of the known tokens with
+    nothing else on the line. Every empty-label entry adopts that finding.
+    This only fires for a label that is present but empty; it does not turn
+    every bare `APPROVE` line in a comment into a verdict, because a
+    comment with no `Verdict:` label at all still has nothing for this
+    scan to attach to (agent-supervisor#53's whole point).
+
     Shared by `_parse_verdict_comment` (one comment, may reference several
     lines) and `GithubReviewVerdictSource._comment_verdict` (several
     comments, needs the raw text of an unrecognised LAST verdict line)."""
+    lines = []
     in_fence = False
-    results = []
     for raw_line in (body or "").splitlines():
         line = raw_line.strip()
         if line.startswith("```"):
@@ -381,12 +417,57 @@ def _scan_verdict_lines(body):
             continue
         if in_fence or line.startswith(">"):
             continue
+        lines.append(line)
+
+    results = []
+    has_empty_label = False
+    for line in lines:
         match = _VERDICT_LINE_RE.match(line)
         if not match:
             continue
         decision_text = _normalise_decision_text(match.group(1))
+        if decision_text == "":
+            has_empty_label = True
         results.append((_classify_decision_text(decision_text), decision_text))
+
+    if has_empty_label:
+        bare = _bare_decision_line(lines)
+        if bare is not None:
+            bare_decision, bare_text = bare
+            results = [
+                (bare_decision, bare_text) if decision is None and text == "" else (decision, text)
+                for decision, text in results
+            ]
     return results
+
+
+def _bare_decision_line(lines):
+    """Among `lines` (already fence/quote-filtered), the one standalone
+    decision -- a line with no `Verdict:` label of its own that, run through
+    the same normaliser a label's decision text gets, is exactly one of the
+    known APPROVE/REQUEST-CHANGES tokens and nothing else. Returns
+    `(decision, decision_text)`, or None when no such line exists or more
+    than one DISTINCT decision is found among candidate lines -- the same
+    "disagreement refuses, never guesses" rule `_parse_verdict_comment`
+    already applies across multiple labelled lines (agent-supervisor#196),
+    applied here across multiple bare ones.
+
+    Only called when a `Verdict:` label was found with empty text
+    (agent-supervisor#475 case 3) -- this never promotes a bare decision
+    word on its own; the label is what marks the comment as containing a
+    verdict at all."""
+    found = {}
+    for line in lines:
+        if _VERDICT_LINE_RE.match(line):
+            continue
+        candidate = _normalise_decision_text(line)
+        decision = _classify_decision_text(candidate)
+        if decision is not None:
+            found[decision] = candidate
+    if len(found) == 1:
+        ((decision, text),) = found.items()
+        return decision, text
+    return None
 
 
 def _parse_verdict_comment(body):
