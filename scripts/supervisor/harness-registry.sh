@@ -20,7 +20,17 @@
 #   HARNESS_IDS  H_COMMAND_RE  H_READY_RE  H_BUSY_RE  H_BUSY_TAIL
 #   H_BLOCKED_MARKERS  H_OPTION_ROW_RE  H_MENU_ENTER_RE  H_MENU_TAIL
 #   H_TEXT_PROMPT_RE  H_LAUNCH_CMD  H_RESUME_CMD  H_SEND_LITERAL  H_MODEL_RE
-#   H_LIMIT_RE
+#   H_LIMIT_RE  H_UNATTENDED_CMD
+#
+# agent-dotfiles#256: H_UNATTENDED_CMD is DELIBERATELY separate from
+# H_LAUNCH_CMD, even though today it happens to equal it for claude and
+# codex. H_LAUNCH_CMD is "what this harness launches with by default";
+# H_UNATTENDED_CMD is "the launch line this harness's own adapter file
+# affirmatively records as measured not to prompt a human" -- a narrower,
+# opt-in claim. Empty is the honest default (harness/copilot.sh's --allow-all
+# is `--help`-documented but never driven through a live pane, so it stays
+# empty) -- bootstrap-session.sh's --unattended refuses rather than falling
+# back to H_LAUNCH_CMD, which would silently promote an unmeasured guess.
 #
 # agent-supervisor#124: H_LIMIT_RE is a harness's own usage-limit banner --
 # the shape it paints when it cannot act at all until some external quota
@@ -72,6 +82,7 @@ HARNESS_REGISTRY_HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HARNESS_IDS=(); H_COMMAND_RE=(); H_READY_RE=(); H_BUSY_RE=(); H_BUSY_TAIL=()
 H_BLOCKED_MARKERS=(); H_OPTION_ROW_RE=(); H_MENU_ENTER_RE=(); H_MENU_TAIL=(); H_TEXT_PROMPT_RE=()
 H_LAUNCH_CMD=(); H_RESUME_CMD=(); H_SEND_LITERAL=(); H_MODEL_RE=(); H_LIMIT_RE=()
+H_UNATTENDED_CMD=()
 # LANES_HARNESS_DIR is the name `lanes.sh` has always used and its tests still
 # set (they point it at a MUTATED copy of the adapters to prove one adapter's
 # breakage cannot move another harness's lane). Kept as an alias so that
@@ -82,7 +93,7 @@ for _hf in "$HARNESS_DIR"/*.sh; do
   unset HARNESS_NAME HARNESS_COMMAND_RE HARNESS_READY_RE HARNESS_BUSY_RE HARNESS_BUSY_TAIL \
         HARNESS_BLOCKED_MARKERS HARNESS_OPTION_ROW_RE HARNESS_MENU_ENTER_RE HARNESS_MENU_TAIL \
         HARNESS_TEXT_PROMPT_RE HARNESS_LAUNCH_CMD HARNESS_RESUME_CMD HARNESS_SEND_LITERAL \
-        HARNESS_MODEL_RE HARNESS_LIMIT_RE
+        HARNESS_MODEL_RE HARNESS_LIMIT_RE HARNESS_UNATTENDED_CMD
   # shellcheck disable=SC1090
   . "$_hf"
   : "${HARNESS_NAME:?$_hf did not set HARNESS_NAME}"
@@ -103,6 +114,7 @@ for _hf in "$HARNESS_DIR"/*.sh; do
   H_SEND_LITERAL+=("${HARNESS_SEND_LITERAL:-0}")
   H_MODEL_RE+=("${HARNESS_MODEL_RE:-}")
   H_LIMIT_RE+=("${HARNESS_LIMIT_RE:-}")
+  H_UNATTENDED_CMD+=("${HARNESS_UNATTENDED_CMD:-}")
 done
 unset _hf
 

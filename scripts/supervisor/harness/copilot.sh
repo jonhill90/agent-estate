@@ -27,6 +27,18 @@ HARNESS_COMMAND_RE='^node$'
 # Claude's `--dangerously-skip-permissions`; not exercised live for the same
 # reason codex's analogue wasn't (see harness/codex.sh).
 HARNESS_LAUNCH_CMD='copilot --allow-all'
+
+# agent-dotfiles#256: H_UNATTENDED_CMD is DELIBERATELY LEFT UNSET here.
+# `copilot --help` (checked 2026-08-20, v1.0.80) documents `--allow-all` as
+# "Enable all permissions (equivalent to --allow-all-tools --allow-all-paths
+# --allow-all-urls)", the same shape as claude's/codex's own unattended
+# flags -- but unlike those two, this has never been driven through a live
+# copilot pane to confirm no prompt survives it (this file's own header
+# above already says so: "not exercised live"). #256's own bar is refuse
+# rather than guess: bootstrap-session.sh's `--unattended` errors naming
+# this harness instead of assuming --help's description holds in practice.
+# Measure it live, the way #30 measured codex's, before setting this.
+HARNESS_UNATTENDED_CMD=
 # Verified live: `tmux send-keys -l` delivered a literal prompt to a running
 # copilot pane and it appeared in the transcript unmodified.
 HARNESS_SEND_LITERAL=1

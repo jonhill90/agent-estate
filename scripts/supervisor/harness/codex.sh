@@ -25,6 +25,16 @@ HARNESS_COMMAND_RE='^codex$'
 # the CLI rejects combining it with `--ask-for-approval never`, and keeping
 # it alone leaves the actual approval policy implicit.
 HARNESS_LAUNCH_CMD='codex -a never -s danger-full-access'
+
+# agent-dotfiles#256: this IS codex's unattended posture, measured live above
+# (#30) -- the old `--dangerously-bypass-approvals-and-sandbox` shortcut
+# still stalled on prompts; this explicit `-a never -s danger-full-access`
+# pair is the one that did not. Recorded again under its own name so
+# bootstrap-session.sh's `--unattended` resolves it explicitly per harness,
+# the same way harness/claude.sh does, instead of a caller having to assume
+# H_LAUNCH_CMD is always the unattended answer (it is not, for every
+# harness -- see harness/copilot.sh).
+HARNESS_UNATTENDED_CMD="$HARNESS_LAUNCH_CMD"
 # Verified live: typing a literal `$1` into a running codex pane via
 # `tmux send-keys -l` reproduced it byte-for-byte in the transcript --
 # codex does not need anything Claude's `-l` doesn't already give it.
