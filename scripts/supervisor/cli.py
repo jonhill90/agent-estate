@@ -1419,6 +1419,17 @@ def main(argv=None):
             "known": row is not None,
             "lane": row["lane"] if row is not None else None,
             "task": row["id"] if row is not None else None,
+            # agent-supervisor#480: `claim.sh stale` has no tmux window to
+            # check for a claude-print lane (it runs as a plain subprocess,
+            # not a tmux pane) -- these two let it ask the ledger instead
+            # whether the most recent dispatch for this issue is still
+            # genuinely open (`status` in `delivered`/`accepted` and
+            # `completed_at` unset) before reporting the issue stale.
+            # `row["status"]`/`row["completed_at"]` were already fetched by
+            # `get_task_for_issue`'s `SELECT tasks.*, ...`; this just exposes
+            # them the same way `lane`/`task` already are.
+            "status": row["status"] if row is not None else None,
+            "completed_at": row["completed_at"] if row is not None else None,
         }
     elif args.command == "pr-lane":
         row = ledger.get_open_task_for_pr(args.pr, repo=args.repo)

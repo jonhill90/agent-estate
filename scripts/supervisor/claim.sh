@@ -106,6 +106,37 @@ holder_of() { # holder_of <issue> -> comma-separated logins, empty if unclaimed
   gh api "$(api_base)/issues/$1" -q '.assignees|map(.login)|join(",")' 2>/dev/null
 }
 
+# agent-supervisor#480: `claim.sh stale` reported EVERY claude-print
+# dispatch (a plain `claude -p` subprocess, dispatch-claude-print.sh, no
+# tmux window at all by design) as stale from the moment it started until a
+# PR opened -- the tmux-window half of `compute_stale`'s liveness check can
+# never be true for it, and the PR half is naturally false for anything
+# still in progress. Reproduced live against #473 and #470: both genuinely
+# `accepted`/`delivered` in the ledger (confirmed via `cli.py task-lane` and
+# a live `ps`), both reported stale anyway.
+#
+# `issue-lane` is the ledger's own answer for "what is the most recent
+# dispatch of this issue number" (already used by dispatch.sh's authorship
+# guard) -- asked here as a THIRD liveness signal alongside the tmux window
+# and the open PR: a task whose most recent dispatch is `delivered` or
+# `accepted` with no `completed_at` yet is a lane genuinely still working,
+# tmux window or not. Best-effort like the rest of `compute_stale` (no rc
+# check here, same as the tmux/PR reads) -- python3 or cli.py being
+# unavailable just forfeits this extra signal rather than blocking `stale`
+# outright; STALE_LANES_RC/STALE_PULLS_RC below are still the only things
+# `audit`/`reap` refuse on.
+ledger_claims_live() { # ledger_claims_live <issue-number> -> 0 if the ledger says a dispatch of this issue is still open
+  local n="$1" json repo_args=()
+  [ -n "${REPO:-}" ] && repo_args=(--repo "$REPO")
+  json=$(python3 "$HERE/cli.py" issue-lane --issue "$n" "${repo_args[@]+"${repo_args[@]}"}" 2>/dev/null) || return 1
+  grep -qF '"known":true' <<<"$json" || return 1
+  case "$json" in
+    *'"status":"delivered"'*|*'"status":"accepted"'*) ;;
+    *) return 1 ;;
+  esac
+  grep -qF '"completed_at":null' <<<"$json"
+}
+
 # compute_stale sets three globals -- STALE_CANDIDATES (claimed issue
 # numbers, one per line, whose lane is gone and whose PR is not open),
 # STALE_LANES_RC and STALE_PULLS_RC (the exit codes of the two underlying
@@ -116,8 +147,9 @@ holder_of() { # holder_of <issue> -> comma-separated logins, empty if unclaimed
 # assignments vanish the moment it exits. Refactored out of the `stale` case
 # body unchanged -- see that case (still the direct, best-effort caller with
 # no rc check of its own) for the liveness rules themselves: a lane window
-# `lanes.sh` does not report `dead`/`stale`, or an open PR saying
-# `fixes #<n>`.
+# `lanes.sh` does not report `dead`/`stale`, an open PR saying `fixes #<n>`,
+# or (agent-supervisor#480) the ledger saying this issue's most recent
+# dispatch is still `delivered`/`accepted` with no `completed_at`.
 compute_stale() {
   local lanes_out pulls_out live_numbers
   lanes_out=$("$HERE/lanes.sh" "$SESSION" 2>/dev/null); STALE_LANES_RC=$?
@@ -133,7 +165,9 @@ compute_stale() {
        -q '.[]|select(has("pull_request")|not)|"\(.number)\t\(.assignees|map(.login)|join(","))"' 2>/dev/null \
       | awk -F'\t' '$2!=""{print $1}' \
       | while read -r n; do
-          grep -qx "$n" <<<"$live_numbers" || echo "$n"
+          grep -qx "$n" <<<"$live_numbers" && continue
+          ledger_claims_live "$n" && continue
+          echo "$n"
         done
   )
 }

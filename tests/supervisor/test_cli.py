@@ -1511,7 +1511,15 @@ class IssueLaneCliTest(unittest.TestCase):
             result = self._issue_lane(root, 195)
 
             self.assertEqual(
-                {"issue": "195", "known": True, "lane": "t:3", "task": "ad195-scrub-secrets"}, result
+                {
+                    "issue": "195",
+                    "known": True,
+                    "lane": "t:3",
+                    "task": "ad195-scrub-secrets",
+                    "status": "delivered",
+                    "completed_at": None,
+                },
+                result,
             )
 
     def test_the_answer_survives_cancel_open_task_freeing_the_lane(self):
@@ -1557,7 +1565,17 @@ class IssueLaneCliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             result = self._issue_lane(root, 404)
 
-            self.assertEqual({"issue": "404", "known": False, "lane": None, "task": None}, result)
+            self.assertEqual(
+                {
+                    "issue": "404",
+                    "known": False,
+                    "lane": None,
+                    "task": None,
+                    "status": None,
+                    "completed_at": None,
+                },
+                result,
+            )
 
     def test_author_issue_lane_skips_later_review_tasks(self):
         """agent-supervisor#76: the authorship read exposed to shell callers
