@@ -545,6 +545,23 @@ prompt_poller_relaunch() { # prompt_poller_relaunch <pane> <old-sha> <live-sha> 
         sleep 0.2
       done
     fi
+    # agent-supervisor#450: $poller_pid can already be dead the moment this
+    # waiter starts -- not from the flag just written above, but from an
+    # earlier, unrelated exit (a crash, or a prior restart request whose own
+    # relaunch never landed). When that happens the `while kill -0` loop
+    # above runs zero iterations, so nothing ever reached the one place this
+    # flag is normally consumed: inbox-poll.sh's own "see it, remove it, exit"
+    # sequence on ITS way out. Left in place, the flag survives into the
+    # brand-new poller poller-recover.sh is about to launch and is the first
+    # thing that poller's own loop checks -- it reads a request meant for the
+    # corpse it replaced, not for itself, and exits within its first ~0.1s
+    # tick. Measured directly (agent-supervisor#450): a "RESPAWNED" pid
+    # recorded in poller-recover.log and gone by the next liveness check,
+    # exactly the shape test_watchdog_poller_copy.sh's "two quick restart
+    # requests" caught in CI. Clearing it here -- once the old poller is
+    # confirmed gone by any means, not only by its own hand -- guarantees the
+    # flag can never outlive the process it was written for.
+    rm -f "$INBOX_POLL_RESTART_FLAG" 2>/dev/null
     out=$(SUPERVISOR_STATE="$STATE" SUPERVISOR_LIVE="$LIVE" LANES_SESSION="$INBOX_POLL_SESSION" \
           "$HERE/poller-recover.sh" 2>&1)
     rc=$?
