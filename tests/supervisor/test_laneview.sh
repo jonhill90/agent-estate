@@ -335,5 +335,59 @@ else
   bad "the supervisor window is never rendered as a lane by tui.sh" "$out"
 fi
 
+# dock.sh -- agent-supervisor#464's docked vertical sidebar. It has no
+# curses/tty-driven interactive path to test (unlike tui.sh): the only
+# behaviour to exercise headlessly is its static-frame branch, which is
+# also the ONLY branch a non-interactive caller (this suite, cron, a piped
+# `laneview.sh dock session > file`) can ever reach -- the live refresh
+# loop only runs when stdout is a real tty.
+DOCK_IMPL="$HERE/../../scripts/supervisor/laneview/dock.sh"
+
+out=$(PATH=/usr/bin:/bin bash "$DOCK_IMPL" demo-session \
+  '[{"window":1,"name":"free-2","command":"claude.exe","state":"free"}]' </dev/null 2>&1)
+if grep -qE '^\s*- free-2\s+free$' <<<"$out"; then
+  ok "dock.sh renders with no tmux, no daemon, and no tty reachable"
+else
+  bad "dock.sh renders with no tmux, no daemon, and no tty reachable" "$out"
+fi
+
+out=$(PATH=/usr/bin:/bin bash "$DOCK_IMPL" demo-session "$SCROLLED_JSON" </dev/null 2>&1)
+if grep -qE '^\s*\^ w-scroll\s+scrolled$' <<<"$out"; then
+  ok "dock.sh gives scrolled a glyph of its own, not unknown's"
+else
+  bad "dock.sh gives scrolled a glyph of its own, not unknown's" "$out"
+fi
+
+out=$(PATH=/usr/bin:/bin bash "$DOCK_IMPL" demo-session "$UNMAPPED_JSON" </dev/null 2>&1)
+if grep -qE '^\s*# w-future\s+future-state$' <<<"$out"; then
+  ok "dock.sh gives an unheard-of state a glyph of its own, not blocked's ?"
+else
+  bad "dock.sh gives an unheard-of state a glyph of its own, not blocked's ?" "$out"
+fi
+
+# A name longer than the sidebar's narrow column is truncated, not left to
+# blow out the column width a docked pane depends on staying narrow.
+LONG_JSON='[{"window":5,"name":"a-name-longer-than-sixteen-chars","command":"claude.exe","state":"free"}]'
+out=$(PATH=/usr/bin:/bin bash "$DOCK_IMPL" demo-session "$LONG_JSON" </dev/null 2>&1)
+if grep -qE '^\s*- a-name-longer-t…\s+free$' <<<"$out"; then
+  ok "dock.sh truncates a name too long for the sidebar column"
+else
+  bad "dock.sh truncates a name too long for the sidebar column" "$out"
+fi
+
+# Through the full laneview.sh path, same fixture test_lanes.sh, text.sh,
+# and tui.sh's cases above use.
+out=$(PATH="$D/bin:$PATH" LANES_FIXTURE="$D/fixture" bash "$LANEVIEW" dock fixture </dev/null 2>&1)
+if grep -qE 'w-real-free +free' <<<"$out"; then
+  ok "a free lane renders as free through the full laneview.sh dock path"
+else
+  bad "a free lane renders as free through the full laneview.sh dock path" "$out"
+fi
+if grep -qE 'arch +supervisor' <<<"$out"; then
+  ok "the supervisor window is never rendered as a lane by dock.sh"
+else
+  bad "the supervisor window is never rendered as a lane by dock.sh" "$out"
+fi
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

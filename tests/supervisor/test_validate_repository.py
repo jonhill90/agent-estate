@@ -29,9 +29,11 @@ class ValidateLaneviewStateMapsTest(unittest.TestCase):
         ):
             self.assertIn(expected, states)
 
-    def test_discovers_all_three_shipped_renderers(self):
+    def test_discovers_all_shipped_renderers(self):
         names = {p.name for p in vr.renderer_scripts()}
-        self.assertEqual(names, {"text.sh", "opensessions.sh", "tui.sh"})
+        self.assertEqual(
+            names, {"text.sh", "opensessions.sh", "tui.sh", "dock.sh"}
+        )
 
     def test_a_state_missing_from_a_renderers_map_is_reported_by_name(self):
         # #231's own failure shape, reproduced without editing the real
