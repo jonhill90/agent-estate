@@ -36,6 +36,15 @@ HARNESS_COMMAND_RE='^(claude|claude\.exe)$'
 HARNESS_LAUNCH_CMD="claude --model ${CLAUDE_LANE_MODEL:-sonnet} --dangerously-skip-permissions"
 HARNESS_SEND_LITERAL=1
 
+# agent-dotfiles#256: the launch command above IS already claude's unattended
+# posture -- Jon's own `cdsp` alias (`~/.zshrc:123`) is this same
+# `--dangerously-skip-permissions` flag. Recorded again here, under its own
+# name, so bootstrap-session.sh's `--unattended` has an explicit, per-harness
+# answer to resolve rather than assuming H_LAUNCH_CMD is always safe to reuse
+# for that (harness/copilot.sh's H_UNATTENDED_CMD is deliberately empty for
+# exactly the case where that assumption would not hold).
+HARNESS_UNATTENDED_CMD="$HARNESS_LAUNCH_CMD"
+
 # agent-dotfiles#237: how this harness is told to come back to an EXISTING
 # conversation. `%s` is the session id the ledger recorded at dispatch;
 # `restore.sh` is the only caller. Checked against the shipped CLI, not

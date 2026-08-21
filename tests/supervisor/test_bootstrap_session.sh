@@ -332,5 +332,61 @@ PATH="$FAKE_BIN:$PATH" env -u LANES_AGENT_CMD bash "$BOOT" --session "$S" --lane
 check "19. explicit --agent still overrides the registry default" "0" "$?"
 rm -rf "$FAKE_BIN"
 
+# --- agent-dotfiles#256: --unattended maps a bare harness name to the
+#     harness's OWN recorded unattended launch command, per-harness, opt-in
+#     only. This is the flag whose absence let a codex lane come up as bare
+#     `codex` (no flags) and stall on a sandbox prompt a human had to answer.
+FAKE_BIN2="$(mktemp -d)"
+for h in claude codex copilot; do
+  cp "$(command -v bash)" "$FAKE_BIN2/$h"
+  chmod +x "$FAKE_BIN2/$h"
+done
+
+# 20. --unattended --agent claude resolves to claude's registered unattended
+#     command -- same string #135/#17 already prove is claude's registry
+#     default, reached this time through the explicit flag, not the no-agent
+#     fallback.
+out20="$(PATH="$FAKE_BIN2:$PATH" env -u CLAUDE_LANE_MODEL \
+  bash "$BOOT" --session "$S" --lanes 2 --agent claude --unattended --dry-run 2>&1)"
+agent_line20="$(printf '%s\n' "$out20" | grep -o 'agent=.* cwd=' | sed 's/ cwd=$//')"
+check "20. --unattended --agent claude resolves claude's bypass flag" \
+  "agent=claude --model sonnet --dangerously-skip-permissions" "$agent_line20"
+
+# 21. --unattended --agent codex resolves to codex's OWN bypass flag, not
+#     claude's -- the exact defect #256 reports: the flag differs per harness
+#     and must not be hardcoded to one of them.
+out21="$(PATH="$FAKE_BIN2:$PATH" bash "$BOOT" --session "$S" --lanes 2 --agent codex --unattended --dry-run 2>&1)"
+agent_line21="$(printf '%s\n' "$out21" | grep -o 'agent=.* cwd=' | sed 's/ cwd=$//')"
+check "21. --unattended --agent codex resolves codex's own bypass flag" \
+  "agent=codex -a never -s danger-full-access" "$agent_line21"
+
+# 22. --unattended with no --agent at all defaults to the same harness
+#     bootstrap-session.sh already defaults to with no --agent (claude).
+out22="$(PATH="$FAKE_BIN2:$PATH" env -u LANES_AGENT_CMD -u CLAUDE_LANE_MODEL \
+  bash "$BOOT" --session "$S" --lanes 2 --unattended --dry-run 2>&1)"
+agent_line22="$(printf '%s\n' "$out22" | grep -o 'agent=.* cwd=' | sed 's/ cwd=$//')"
+check "22. --unattended with no --agent defaults to claude's bypass flag" \
+  "agent=claude --model sonnet --dangerously-skip-permissions" "$agent_line22"
+
+# 23. --unattended against a harness with no MEASURED unattended command
+#     (copilot's --allow-all has never been driven through a live pane, see
+#     harness/copilot.sh) refuses and names the harness, rather than guessing.
+PATH="$FAKE_BIN2:$PATH" bash "$BOOT" --session "$S" --lanes 2 --agent copilot --unattended --dry-run >/tmp/ad256-out23.$$ 2>&1
+check "23. --unattended refuses a harness with no recorded unattended command" "1" "$?"
+grep -q "copilot" /tmp/ad256-out23.$$
+check "23. the refusal names the harness it does not know" "0" "$?"
+rm -f /tmp/ad256-out23.$$
+
+# 24. --unattended cannot be mapped onto a full command line -- inferring an
+#     unattended posture for an arbitrary command is exactly the guess #256
+#     says must not happen.
+PATH="$FAKE_BIN2:$PATH" bash "$BOOT" --session "$S" --lanes 2 --agent "claude --model opus" --unattended --dry-run >/tmp/ad256-out24.$$ 2>&1
+check "24. --unattended refuses a full --agent command line" "1" "$?"
+grep -q "bare harness name" /tmp/ad256-out24.$$
+check "24. the refusal explains a bare harness name is required" "0" "$?"
+rm -f /tmp/ad256-out24.$$
+
+rm -rf "$FAKE_BIN2"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

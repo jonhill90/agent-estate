@@ -55,6 +55,18 @@
 #   --cwd DIR       working directory for every window; default $PWD.
 #   --add-lanes     if the session exists, ADD windows up to --lanes. Never
 #                   touches windows that already exist.
+#   --unattended    replace --agent (or its default) with the target
+#                   harness's OWN recorded unattended launch command --
+#                   agent-dotfiles#256. Opt-in only, never inferred: maps a
+#                   BARE harness name (claude/codex/copilot, from --agent or
+#                   from its no-agent default) to that harness's measured
+#                   no-human-prompt launch line. Refuses, naming what it does
+#                   not know, when --agent is a full command line (its
+#                   unattended posture cannot be inferred) or when the target
+#                   harness has no such command recorded (harness/*.sh's
+#                   HARNESS_UNATTENDED_CMD is unset) -- a wrong guess here
+#                   disables a safety prompt, which is worse than a lane that
+#                   still asks.
 #   --dry-run       print what would run, change nothing.
 #
 # Exit 0 when the session exists with at least --lanes windows and every lane
@@ -83,6 +95,7 @@ HARNESS=""
 WORKDIR="$PWD"
 ADD_LANES=0
 DRY_RUN=0
+UNATTENDED=0
 # Keep in step with lanes.sh's own default; a supervisor window in a different
 # slot would be offered as a dispatch target, which lanes.sh exists to prevent.
 SUPERVISOR_WINDOW="${LANES_SUPERVISOR_WINDOW:-1}"
@@ -103,6 +116,7 @@ while [ $# -gt 0 ]; do
     --harness)   HARNESS="${2:?--harness needs a value}"; shift 2 ;;
     --cwd)       WORKDIR="${2:?--cwd needs a value}"; shift 2 ;;
     --add-lanes) ADD_LANES=1; shift ;;
+    --unattended) UNATTENDED=1; shift ;;
     --dry-run)   DRY_RUN=1; shift ;;
     -h|--help)   usage; exit 0 ;;
     *) echo "bootstrap-session: unknown argument: $1" >&2; usage; exit 1 ;;
@@ -121,6 +135,45 @@ if [ "$LANES" -lt 2 ]; then
 fi
 
 command -v tmux >/dev/null 2>&1 || { echo "bootstrap-session: tmux not on PATH" >&2; exit 1; }
+
+# agent-dotfiles#256: --unattended resolves BEFORE the no-agent default below,
+# on the RAW value of --agent/LANES_AGENT_CMD -- once the default-resolution
+# block runs, AGENT_CMD is already a full command line (claude's registry
+# default), and bare-name detection here would never fire. Refuses rather
+# than guesses: a wrong flag produces a lane that will not start, which #256
+# calls out as worse than one that still prompts.
+if [ "$UNATTENDED" -eq 1 ]; then
+  UNATTENDED_TARGET=""
+  case "$HARNESS" in
+    claude|codex|copilot) UNATTENDED_TARGET="$HARNESS" ;;
+  esac
+  if [ -n "$AGENT_CMD" ]; then
+    case "$AGENT_CMD" in
+      claude|codex|copilot) UNATTENDED_TARGET="$AGENT_CMD" ;;
+      *)
+        echo "bootstrap-session: --unattended requires --agent to be a bare harness name (claude, codex, copilot), got '$AGENT_CMD'" >&2
+        echo "  a full command line's unattended posture cannot be inferred -- pass --agent as the bare harness name, or drop --unattended" >&2
+        exit 1
+        ;;
+    esac
+  fi
+  # No --agent and no --harness: match this script's OWN no-agent default
+  # (claude), so --unattended alone behaves the same as the plain no-agent
+  # path, just resolved through H_UNATTENDED_CMD instead of H_LAUNCH_CMD.
+  [ -n "$UNATTENDED_TARGET" ] || UNATTENDED_TARGET=claude
+
+  # shellcheck source=./harness-registry.sh
+  . "$HERE/harness-registry.sh"
+  _unattended_hidx="$(harness_index_for_name "$UNATTENDED_TARGET" || true)"
+  if [ -z "$_unattended_hidx" ] || [ -z "${H_UNATTENDED_CMD[$_unattended_hidx]:-}" ]; then
+    echo "bootstrap-session: no unattended launch command recorded for harness '$UNATTENDED_TARGET'" >&2
+    echo "  check harness/$UNATTENDED_TARGET.sh -- either nobody has measured this harness unattended yet, or HARNESS_UNATTENDED_CMD needs setting there" >&2
+    exit 1
+  fi
+  AGENT_CMD="${H_UNATTENDED_CMD[$_unattended_hidx]}"
+  HARNESS="$UNATTENDED_TARGET"
+  unset _unattended_hidx UNATTENDED_TARGET
+fi
 
 # agent-supervisor#135: neither LANES_AGENT_CMD nor --agent supplied a
 # command, so ask the harness registry for the one dispatch.sh already
