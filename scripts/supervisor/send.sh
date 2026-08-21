@@ -455,6 +455,67 @@ verified_launch_prompt() {
   return 0
 }
 
+# verified_survived <target> [--settle N] [--retries N]
+#
+# agent-supervisor#456, Gastown's `VerifySurvived` (`internal/session/
+# lifecycle.go`, `StartSession` step 12). Everything above this function
+# proves the brief was TYPED and the input box went EMPTY -- `verified_submit`
+# returning SEND_STATUS=submitted. Neither proves the pane is still there a
+# moment later: an input box reads empty the instant a turn STARTS and it
+# also reads empty (because there is no box left to read at all) the instant
+# the whole process dies and tmux takes the window down with it. #456's own
+# property: a ledger row must not read live until the pane has been
+# RE-OBSERVED running the agent -- not "tmux accepted the send".
+#
+# tmux does NOT error on a target that no longer exists. MEASURED live
+# (2026-08-21, throwaway isolated socket, a killed pane's window gone from
+# `list-windows`): `tmux display-message -p -t <dead-window-id> 'FMT'`
+# returns exit 0 and every `#{...}` substitution BLANK -- never a non-zero
+# exit code. A caller trusting `$?` here would never see this fail; this
+# checks the substituted FIELDS for emptiness instead, the same discipline
+# dispatch.sh's own `LANE_META` check already applies one block down.
+#
+# Deliberately does NOT match `#{pane_current_command}` against the
+# harness's own H_COMMAND_RE. A live, healthy turn can shell out to a tool
+# (git, ls, a test runner) within the very settle window this sleeps
+# through, and misreading a WORKING lane's first tool call as a dead one is
+# exactly the "refuses every dispatch under load" flakiness #456's brief
+# warned against manufacturing. Existence and `#{pane_dead}` are what
+# Gastown's own `HasSession` checks too -- a session/window boolean, not a
+# process-identity match -- this mirrors that scope, not a wider one.
+#
+#   --settle N    seconds to sleep before each check (default 2 here; the
+#                 only caller, dispatch.sh, passes its own DISPATCH_SETTLE
+#                 instead -- see that call site for the measurement behind
+#                 the number)
+#   --retries N   total checks (default 2)
+#
+# Return 0 (SEND_STATUS=survived) as soon as one check finds the pane
+# alive. Return 5 (SEND_STATUS=died) if every retry finds it gone.
+verified_survived() {
+  local target="$1"; shift
+  local settle=2 retries=2
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --settle) settle="$2"; shift 2 ;;
+      --retries) retries="$2"; shift 2 ;;
+      *) echo "verified_survived: unknown option $1" >&2; SEND_STATUS=send_failed; return 1 ;;
+    esac
+  done
+
+  local attempt cmd dead
+  for ((attempt = 1; attempt <= retries; attempt++)); do
+    sleep "$settle"
+    IFS='|' read -r cmd dead < <(tmux display-message -p -t "$target" '#{pane_current_command}|#{pane_dead}' 2>/dev/null)
+    if [ -n "$cmd" ] && [ "$dead" != "1" ]; then
+      SEND_STATUS=survived
+      return 0
+    fi
+  done
+  SEND_STATUS=died
+  return 5
+}
+
 # verified_send <target> <message> [every verified_type/verified_submit flag]
 #
 # Convenience wrapper for a caller with no work to do between "typed and

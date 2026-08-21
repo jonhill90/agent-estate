@@ -239,6 +239,21 @@ case "$sub" in
                 : > "$buf.leak-armed"
               fi
             fi
+            # agent-supervisor#456: STUB_KILL_ON_SUBMIT models the exact
+            # failure `verified_survived` exists to catch -- a pane that dies
+            # right after accepting the brief's own submit Enter, the same
+            # "the box went empty because there is no box left to read"
+            # shape a real crashed harness produces. Same hook point
+            # DISPATCH_TEST_SEND_SIGNAL uses just below (a bare Enter, after
+            # `.renamed`, i.e. the BRIEF's submit, not the pre-clear's) --
+            # marking the window dead here, not earlier, is what lets
+            # `verified_submit`'s own capture-pane read still see the box go
+            # genuinely empty (a real crash does empty the box on its way
+            # out) before `verified_survived`'s later display-message read
+            # finds the window gone.
+            if [ -n "${STUB_KILL_ON_SUBMIT:-}" ] && [ "${#keys[@]}" -eq 1 ] && [ -e "$buf.renamed" ]; then
+              : > "$buf.killed"
+            fi
             # agent-dotfiles#209 round 2. Signal the DISPATCHER at the exact
             # instant the brief goes live in the pane -- after the submit has
             # landed, before the dispatcher's next statement runs. That is the
@@ -365,6 +380,25 @@ done
 win="${target##*:}"; win="${win%%.*}"
 win="$(idx_for "$win")"
 line=$(awk -F'|' -v w="$win" '$1==w' "$F")
+# agent-supervisor#456: STUB_KILLED_PANES (space-separated fixture indices)
+# models a pane whose window tmux has already destroyed -- `verified_survived`'s
+# own test needs to prove a killed pane is detected, not just that a live one
+# passes. Blanking `line` here reproduces what real tmux does for an
+# unresolvable target, MEASURED live 2026-08-21 in a throwaway isolated
+# socket: `display-message -p -t <gone-window-id> 'FMT'` returns exit 0 with
+# every `#{...}` substitution empty, never a non-zero exit or an error
+# string -- so every field expansion below empties out exactly the way a
+# real dead pane's would, rather than this stub inventing its own failure
+# shape.
+for _killed in ${STUB_KILLED_PANES:-}; do
+  [ "$_killed" = "$win" ] && line=""
+done
+# The dynamic sibling of STUB_KILLED_PANES: a window `send-keys`'s own
+# STUB_KILL_ON_SUBMIT branch (above) marked dead AT the brief's submit
+# Enter, rather than dead for the whole test from the start -- so
+# `verified_submit`'s earlier capture-pane read still sees a real pane, and
+# only `verified_survived`'s LATER read (this one) finds it gone.
+[ -e "$PANES/$win.killed" ] && line=""
 case "$sub" in
   # agent-supervisor#422: a test proving dispatch.sh distinguishes "session
   # missing" from "lanes all busy" needs a stub that can actually SAY the
@@ -443,6 +477,12 @@ case "$sub" in
         value="${value//'#{socket_path}'/${STUB_SOCKET_PATH:-/tmp/stub-tmux-socket}}"
         value="${value//'#{session_created}'/${STUB_SESSION_CREATED:-1700000000}}"
         value="${value//'#{session_id}'/${STUB_SESSION_ID:-\$0}}"
+        # agent-supervisor#456: `#{pane_dead}` -- '0' for a window the
+        # fixture actually has (real tmux's ordinary "alive" reading), empty
+        # for one `STUB_KILLED_PANES` blanked `line` for above, matching real
+        # tmux leaving every field empty for a target it cannot resolve
+        # rather than reporting a dead-but-present pane.
+        value="${value//'#{pane_dead}'/$([ -n "$line" ] && echo 0)}"
         # agent-dotfiles#216: a pane option read (`cli.py`'s `get_option`
         # always asks for exactly one bare `#{@name}` token, never combined
         # with other fields) -- read back whatever `set-option` persisted for
