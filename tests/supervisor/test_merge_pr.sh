@@ -690,6 +690,60 @@ else
 fi
 
 # ============================================================================
+# agent-supervisor#486 (THE REPRODUCTION): a REJECTED, independently-reviewed
+# PR with a green CI gate must be refused -- reproduced live on PR #485,
+# which `merge-pr.sh jonhill90/agent-supervisor 485 --squash` actually
+# merged with a recorded verdict of "rejected". `independence_verdict`
+# answers "was this reviewed independently", not "was it approved" -- both
+# `approved` and `rejected` satisfy its own `IN("approved","rejected")`
+# branch, so a rejected-but-independent review used to pass the same
+# `value == true` gate as an approved one. Same shape as PR 42's
+# independent-approve case above (different author lane, registered
+# reviewer lane, green CI) -- the ONLY variable changed is the verdict
+# comment itself, REQUEST CHANGES instead of APPROVE.
+# ============================================================================
+rm -f "$MARKER"
+cat > "$FIX/head_485.json" <<'S'
+{"headRefOid": "sha-485"}
+S
+green_checkruns sha-485
+cat > "$FIX/author_485.json" <<'S'
+{"headRefName": "fix/485-thing", "closingIssuesReferences": [{"number": 485}], "commits": []}
+S
+cat > "$FIX/reviews_485.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: REQUEST CHANGES**\n\nReview-Lane: t:5\nReviewed-SHA: sha-485", "createdAt": "2026-08-21T19:14:14Z"}]}
+S
+seed_author t:2 as485-author 485
+register_tmux_lane t:5 %85
+out=$("$MERGE_PR" "$REPO" 485 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#486: rejected + independent + green CI is refused"; else bad "#486: rejected + independent + green CI is refused" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#486: ...and never calls gh pr merge"; else bad "#486: rejected + independent + green CI -- gh pr merge NOT called" "$out"; fi
+echo "$out" | grep -q "rejected" && ok "#486: refusal names the rejected verdict" || bad "#486: refusal names rejected verdict" "$out"
+
+# --- the opposite case must still work: an APPROVED, independently-reviewed
+# PR with green CI still merges -- same fixture shape as immediately above,
+# only the verdict comment differs, proving the new rejected-check does not
+# also snag the working approve path. ---------------------------------------
+rm -f "$MARKER"
+cat > "$FIX/head_486.json" <<'S'
+{"headRefOid": "sha-486"}
+S
+green_checkruns sha-486
+cat > "$FIX/author_486.json" <<'S'
+{"headRefName": "fix/486-thing", "closingIssuesReferences": [{"number": 486}], "commits": []}
+S
+cat > "$FIX/reviews_486.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:5\nReviewed-SHA: sha-486", "createdAt": "2026-08-21T19:14:14Z"}]}
+S
+seed_author t:2 as486-author 486
+out=$("$MERGE_PR" "$REPO" 486 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "#486: approved + independent + green CI still merges"; else bad "#486: approved + independent + green CI still merges" "got rc=$rc: $out"; fi
+if [ -f "$MARKER" ]; then ok "#486: ...and actually calls gh pr merge"; else bad "#486: approved + independent + green CI -- gh pr merge called" "$out"; fi
+echo "$out" | grep -q "independence confirmed" && ok "#486: success still names independence" || bad "#486: success names independence" "$out"
+
+# ============================================================================
 # agent-supervisor#251: `author_lane_for`'s `gh pr view` call (the
 # closingIssuesReferences/commits lookup) used to run with NO bound at all --
 # the one `gh` call in verdict-independence.sh that `digest.sh`'s own

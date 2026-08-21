@@ -120,6 +120,20 @@ if [ -n "$REVIEWER_LANE_ID" ] && jq -e '.known == true and (.external != true) a
 fi
 IND=$(independence_verdict "$V" "$AUTHOR" "$LANE_REL")
 
+# agent-supervisor#486: independence_verdict answers "was this reviewed
+# independently", not "was it approved" -- both an approved AND a rejected
+# verdict satisfy its own IN("approved","rejected") branch, so a
+# rejected-but-independent review passed this gate's `value == true` the
+# same as an approved one (reproduced live on PR #485). Refuse outright on
+# a rejected verdict here, independent of and before the independence
+# check -- do not fold this into independence_verdict itself, since
+# digest.sh's own call to it (reporting "independently rejected" as a fact)
+# still needs the unchanged semantics.
+if [ "$(jq -r '.verdict // ""' <<<"$V")" = "rejected" ]; then
+  echo "merge-pr: refused -- verdict is rejected -- $(jq -r '.detail // ""' <<<"$V")" >&2
+  exit 1
+fi
+
 if [ "$(jq -r '.value' <<<"$IND")" != "true" ]; then
   # agent-supervisor#192: `independence_verdict`'s "not yet reviewed" branch
   # deliberately returns an empty detail -- #184's reviewer asked for that,
