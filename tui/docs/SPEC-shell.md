@@ -44,6 +44,16 @@ Groups:
 Plus **Lanes** at top level — the one item with no web equivalent, because it
 is what the web app cannot do.
 
+**Deviation, w5f.md (post-S1):** Connect's own `Models` entry above was
+REMOVED from `internal/nav`'s actual tree, not merely left unwired.
+`internal/connectors.View` (S10) already renders a `-- models --` section
+inside `Connections`, the exact same `AvailableModel` catalog data a
+dedicated `Models` route would show -- confirmed by reading that view
+directly. A nav entry that will never carry content of its own is worse
+than no entry. This list is kept as written above for historical fidelity
+to `ui_fidelity=1:1`'s own source (`nav-items.ts`); `internal/nav/tree.go`'s
+own doc comment on that Group's `Children` is the current, accurate state.
+
 ## S2 — Sidebar component
 
 Renders S1's tree in a left column. Collapsible groups; the group containing

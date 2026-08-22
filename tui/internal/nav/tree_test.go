@@ -7,6 +7,12 @@ import "testing"
 // below is transcribed from the spec's own bullet list, independently of
 // tree.go's literal values, so a typo or a dropped/renamed item in Build
 // fails this test rather than only "looking right" on screen.
+//
+// Connect's children below have three entries, not S1's original four:
+// "Models" was removed by w5f.md (tree.go's own doc comment on that
+// Group's Children for why) -- this is a deliberate, later departure from
+// S1's own bullet list, not a transcription error, so this comment
+// documents it rather than leaving a silent mismatch with the spec text.
 func TestBuildMatchesSpec(t *testing.T) {
 	tr := Build()
 
@@ -31,7 +37,7 @@ func TestBuildMatchesSpec(t *testing.T) {
 		children []string
 	}{
 		{"Build", []string{"Skills", "Workflows", "MCP Servers"}},
-		{"Connect", []string{"Connections", "Models", "Storage", "Discord", "Secrets"}},
+		{"Connect", []string{"Connections", "Storage", "Discord", "Secrets"}},
 		{"Observe", []string{"Usage", "Monitoring"}},
 		{"Docs", []string{"API Docs", "Platform Docs"}},
 		{"Admin", []string{"Services", "Profiles", "Users", "Dependencies", "Settings"}},

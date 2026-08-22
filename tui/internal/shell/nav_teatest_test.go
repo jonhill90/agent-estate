@@ -42,19 +42,17 @@ func TestDownArrowEnterNavigatesToTasksRoute(t *testing.T) {
 
 // TestEnterOnAnUnwiredRouteRendersStub confirms a nav route routeToPane
 // does not map to a real Pane falls through to internal/stub.View (S5)
-// rather than rendering nothing -- "Workflows" (Build's second child:
-// Skills, Workflows, MCP Servers), confirmed still unwired by actually
-// entering it (`grep -rn "\"workflows\"" internal/shell/model.go` is
-// empty). Was "Knowledge" until w3e.md's own fix wired that route to the
-// real internal/knowledge.Model (agent-tui#87 had shipped the package
-// standalone-first, same as every S6/S8-S11 pane before its own later
-// wiring PR, but never got that wiring PR itself -- confirmed from git
-// history, not assumed: `git log --oneline -- internal/shell/model.go`
-// shows no commit touching this file for #87, and #93's own commit
-// message says so explicitly: "Unlike Knowledge (#87), shipped
-// standalone-first" / "Did not touch internal/knowledge -- its own
-// standalone-first precedent"). This test moved to the next still-unwired
-// route rather than asserting a route this build now renders for real.
+// rather than rendering nothing -- "Storage" (Connect's second child:
+// Connections, Storage, Discord, Secrets -- "Models" was REMOVED from this
+// group entirely by w5f.md, see internal/nav/tree.go's own doc comment),
+// confirmed still unwired by actually entering it (`grep -rn "\"storage\""
+// internal/shell/model.go` is empty). Was "Workflows" until w5f.md's own
+// fix wired that route to the real internal/workflows.Model, and
+// "Knowledge" before that until w3e.md's own fix did the same for
+// internal/knowledge.Model -- each time this test moved to the next
+// still-unwired route rather than asserting a route the build now renders
+// for real (this file's own git history is the record of each move, not
+// re-derived here).
 //
 // The stub's own content, not merely "not built yet" appearing somewhere
 // in the frame, is what's asserted: the sidebar's OWN row labels ("Library",
@@ -66,18 +64,18 @@ func TestEnterOnAnUnwiredRouteRendersStub(t *testing.T) {
 	tm := run(t, testModel())
 	waitFor(t, tm, "⌂ Home")
 
-	for i := 0; i < 8; i++ { // Home..Build header
+	for i := 0; i < 9; i++ { // Home..Connect header (Build stays collapsed, its 3 children skipped)
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
-	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // expand Build
-	waitFor(t, tm, "Workflows")
-	for i := 0; i < 2; i++ { // onto Workflows (Skills, then Workflows)
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // expand Connect
+	waitFor(t, tm, "Storage")
+	for i := 0; i < 2; i++ { // onto Storage (Connections, then Storage)
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 	out := waitFor(t, tm, "not built yet")
-	if !bytes.Contains(out, []byte("│ workflows")) {
-		t.Fatalf("stub view's own content missing the \"workflows\" route title (stub.go renders m.nav.Active(), lowercase, inside its own bordered box):\n%s", out)
+	if !bytes.Contains(out, []byte("│ storage")) {
+		t.Fatalf("stub view's own content missing the \"storage\" route title (stub.go renders m.nav.Active(), lowercase, inside its own bordered box):\n%s", out)
 	}
 }
 
@@ -241,6 +239,37 @@ func TestMCPServersRouteShowsRealMCPServersPane(t *testing.T) {
 	}
 }
 
+// TestWorkflowsRouteShowsRealWorkflowsPane reaches "Workflows," Build's
+// second child (Skills, Workflows, MCP Servers) -- w5f.md's own pane
+// (internal/workflows), wired here for the first time: `grep -rln
+// "PaneWorkflows\|workflows\." internal/shell/*_test.go` returned nothing
+// before this test, the same gap TestLibraryRouteShowsRealLibraryPane's own
+// doc comment found and closed for Library.
+func TestWorkflowsRouteShowsRealWorkflowsPane(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "⌂ Home")
+
+	for i := 0; i < 8; i++ { // Home..Build header
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // expand Build
+	waitFor(t, tm, "Workflows")
+	for i := 0; i < 2; i++ { // onto Workflows (Skills, then Workflows)
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	// "test-marker-lane" (the LANE column) rather than the TaskID marker --
+	// view.go's fixed-width TASK column truncates the 17-char TaskID to
+	// "test-marke…" at this terminal size, the same truncation
+	// TestLibraryRouteShowsRealLibraryPane's own doc comment already
+	// documents for BodySnippet, so LANE (not column-width-limited here) is
+	// the marker that survives.
+	out := waitFor(t, tm, "test-marker-lane")
+	if bytes.Contains(out, []byte("not built yet")) {
+		t.Fatalf("Workflows route still rendering the S5 stub:\n%s", out)
+	}
+}
+
 // TestConnectionsRouteShowsRealConnectorsPane reaches "Connections,"
 // Connect's first child -- Connect is the group header right after Build
 // (whether or not Build is expanded in THIS test, which never expands it).
@@ -262,6 +291,33 @@ func TestConnectionsRouteShowsRealConnectorsPane(t *testing.T) {
 	out := waitFor(t, tm, "openai")
 	if bytes.Contains(out, []byte("not built yet")) {
 		t.Fatalf("Connections route still rendering the S5 stub:\n%s", out)
+	}
+}
+
+// TestMonitoringRouteShowsRealMonitorPane reaches "Monitoring," Observe's
+// second child (Usage, Monitoring) -- w5f.md's own pane (internal/monitor),
+// wired here for the first time (same gap TestWorkflowsRouteShowsRealWorkflowsPane's
+// own doc comment closes for Workflows). Connect's own 4 children (Models
+// was REMOVED by w5f.md -- internal/nav/tree.go's own doc comment) stay
+// collapsed the whole time, skipped by Down the same way visitable()
+// (internal/shell/model.go's routeNavKey) skips any collapsed group's
+// children.
+func TestMonitoringRouteShowsRealMonitorPane(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "⌂ Home")
+
+	for i := 0; i < 10; i++ { // Home..Build header..Connect header..Observe header
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // expand Observe
+	waitFor(t, tm, "Monitoring")
+	for i := 0; i < 2; i++ { // onto Monitoring (Usage, then Monitoring)
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	out := waitFor(t, tm, "CLAUDE PROCESSES")
+	if bytes.Contains(out, []byte("not built yet")) {
+		t.Fatalf("Monitoring route still rendering the S5 stub:\n%s", out)
 	}
 }
 

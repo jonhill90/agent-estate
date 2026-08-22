@@ -31,8 +31,10 @@ import (
 	"github.com/jonhill90/keelson/internal/lane"
 	"github.com/jonhill90/keelson/internal/library"
 	"github.com/jonhill90/keelson/internal/mcpservers"
+	"github.com/jonhill90/keelson/internal/monitor"
 	"github.com/jonhill90/keelson/internal/rail"
 	"github.com/jonhill90/keelson/internal/skills"
+	"github.com/jonhill90/keelson/internal/workflows"
 )
 
 // testModel builds a Model wired to fakes only -- no MCP, no ccusage, no
@@ -88,6 +90,15 @@ func testModel() Model {
 		},
 		func() (int, error) { return 1, nil },
 	)
+	mo := monitor.New(func() (monitor.Snapshot, error) {
+		return monitor.Snapshot{
+			Host:   monitor.Host{Cores: 4, ClaudeProcesses: monitor.KnownCount(2)},
+			Agents: monitor.AgentHealth{Known: true, ByState: map[string]int{"busy": 1}, Total: 1},
+		}, nil
+	})
+	wf := workflows.New(func() ([]board.TaskRow, error) {
+		return []board.TaskRow{{TaskID: "test-marker-task", Lane: "test-marker-lane", TaskStatus: "complete", CreatedAt: 1}}, nil
+	})
 
 	return New(r, b, true, "", c, g, fl, ch).
 		WithAgents(ag).
@@ -97,7 +108,9 @@ func testModel() Model {
 		WithAdmin(ad).
 		WithDashboard(da).
 		WithKnowledge(kn).
-		WithLibrary(lb)
+		WithLibrary(lb).
+		WithMonitor(mo).
+		WithWorkflows(wf)
 }
 
 func run(t *testing.T, m Model) *teatest.TestModel {

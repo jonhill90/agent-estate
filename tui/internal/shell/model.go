@@ -29,11 +29,13 @@ import (
 	"github.com/jonhill90/keelson/internal/knowledge"
 	"github.com/jonhill90/keelson/internal/library"
 	"github.com/jonhill90/keelson/internal/mcpservers"
+	"github.com/jonhill90/keelson/internal/monitor"
 	"github.com/jonhill90/keelson/internal/nav"
 	"github.com/jonhill90/keelson/internal/rail"
 	"github.com/jonhill90/keelson/internal/skills"
 	"github.com/jonhill90/keelson/internal/stub"
 	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/keelson/internal/workflows"
 )
 
 // Pane names which model currently occupies the content area. paneHome is
@@ -80,6 +82,16 @@ const (
 	// "library" route's counterpart to Knowledge (agent-tui#87, Jon's
 	// personal vault).
 	PaneLibrary
+	// PaneMonitor/PaneWorkflows are w5f.md's two real panes replacing two
+	// of the nine STUBs w5e.md's own nav walk found (agent-tui#94) -- host
+	// and agent health (internal/monitor) for "monitoring", and ledger
+	// dispatch history (internal/workflows) for "workflows". w5f.md's third
+	// target, "models", is NOT a new Pane: it is REMOVED from
+	// internal/nav's tree instead (see nav.Build's own doc comment), since
+	// internal/connectors' existing "-- models --" section already renders
+	// the same data a dedicated Models pane would.
+	PaneMonitor
+	PaneWorkflows
 	// PaneKnowledge is agent-tui#87's own pane (internal/knowledge, Jon's
 	// personal vault at $AGENT_MEMORY_VAULT) -- merged standalone, same
 	// "ship the pane, wire the route later" precedent S6/S8-S11 and
@@ -139,6 +151,8 @@ var routeToPane = map[string]Pane{
 	"settings":       PaneAdmin,
 	"dashboard":      PaneDashboard,
 	"library":        PaneLibrary,
+	"monitoring":     PaneMonitor,
+	"workflows":      PaneWorkflows,
 	"knowledge":      PaneKnowledge,
 }
 
@@ -221,6 +235,10 @@ type Model struct {
 	// wired via With*" shape as the five above it, not New's own parameter
 	// list.
 	library library.Model
+	// monitor/workflows are w5f.md's two panes (PaneMonitor/PaneWorkflows,
+	// above) -- same "optional, wired via With*" shape as library.
+	monitor   monitor.Model
+	workflows workflows.Model
 	// knowledge is agent-tui#87's own pane (PaneKnowledge, above) -- same
 	// "optional, wired via With*" shape.
 	knowledge knowledge.Model
@@ -408,6 +426,16 @@ func (m Model) WithLibrary(l library.Model) Model {
 	return m
 }
 
+func (m Model) WithMonitor(mo monitor.Model) Model {
+	m.monitor = mo
+	return m
+}
+
+func (m Model) WithWorkflows(w workflows.Model) Model {
+	m.workflows = w
+	return m
+}
+
 func (m Model) WithKnowledge(k knowledge.Model) Model {
 	m.knowledge = k
 	return m
@@ -433,6 +461,8 @@ func (m Model) applyTheme() Model {
 	m.admin = m.admin.WithTheme(m.theme, m.themeNotice)
 	m.dashboard = m.dashboard.WithTheme(m.theme, m.themeNotice)
 	m.library = m.library.WithTheme(m.theme, m.themeNotice)
+	m.monitor = m.monitor.WithTheme(m.theme, m.themeNotice)
+	m.workflows = m.workflows.WithTheme(m.theme, m.themeNotice)
 	m.knowledge = m.knowledge.WithTheme(m.theme, m.themeNotice)
 	return m
 }
@@ -441,7 +471,7 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		m.nav.Init(), m.rail.Init(), m.cost.Init(), m.gallery.Init(), m.chat.Init(),
 		m.agents.Init(), m.skills.Init(), m.mcpservers.Init(), m.connectors.Init(), m.admin.Init(),
-		m.dashboard.Init(), m.library.Init(), m.knowledge.Init(),
+		m.dashboard.Init(), m.library.Init(), m.monitor.Init(), m.workflows.Init(), m.knowledge.Init(),
 	}
 	if m.boardOK {
 		cmds = append(cmds, m.board.Init(), m.flow.Init())
@@ -624,6 +654,14 @@ func (m Model) routeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case PaneLibrary:
 		next, cmd := m.library.Update(msg)
 		m.library = next.(library.Model)
+		return m, cmd
+	case PaneMonitor:
+		next, cmd := m.monitor.Update(msg)
+		m.monitor = next.(monitor.Model)
+		return m, cmd
+	case PaneWorkflows:
+		next, cmd := m.workflows.Update(msg)
+		m.workflows = next.(workflows.Model)
 		return m, cmd
 	case PaneKnowledge:
 		next, cmd := m.knowledge.Update(msg)
@@ -834,6 +872,14 @@ func (m Model) routeAll(msg tea.Msg) (Model, tea.Cmd) {
 	m.library = next.(library.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.monitor.Update(msg)
+	m.monitor = next.(monitor.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.workflows.Update(msg)
+	m.workflows = next.(workflows.Model)
+	cmds = append(cmds, cmd)
+
 	next, cmd = m.knowledge.Update(msg)
 	m.knowledge = next.(knowledge.Model)
 	cmds = append(cmds, cmd)
@@ -928,6 +974,14 @@ func (m Model) resize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 	m.library = next.(library.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.monitor.Update(contentSize)
+	m.monitor = next.(monitor.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.workflows.Update(contentSize)
+	m.workflows = next.(workflows.Model)
+	cmds = append(cmds, cmd)
+
 	next, cmd = m.knowledge.Update(contentSize)
 	m.knowledge = next.(knowledge.Model)
 	cmds = append(cmds, cmd)
@@ -1014,6 +1068,10 @@ func (m Model) contentView() string {
 		return m.dashboard.View()
 	case PaneLibrary:
 		return m.library.View()
+	case PaneMonitor:
+		return m.monitor.View()
+	case PaneWorkflows:
+		return m.workflows.View()
 	case PaneKnowledge:
 		return m.knowledge.View()
 	case PaneStub:

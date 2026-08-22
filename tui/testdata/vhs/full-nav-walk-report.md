@@ -1,82 +1,108 @@
 # Full nav-tree walk — honest render report
 
-Produced by `testdata/vhs/full-nav-walk.tape` against a binary built from this
-branch (`go build -o /tmp/atui-navwalk ./cmd/keelson`), run with
+**Re-run #2, agent-b5.md.** Original walk: agent-tui#94 (25 destinations,
+14 RENDERS/9 STUB/2 EMPTY/0 BROKEN). This re-run drives the SAME tape
+pattern (`testdata/vhs/full-nav-walk.tape`, rewritten for the current tree
+shape) after merging `origin/main` into `feat/three-stubs` (PR #96) --
+main had moved twice underneath that branch (#95's Knowledge wiring, plus
+this same merge's own two-file conflict resolution in
+`cmd/keelson/main.go`/`internal/shell/model.go`), so this re-run exists to
+catch any route the MERGE regressed, not just the two/three this branch's
+own change touched. **24 destinations now, not 25** — one fewer: `Connect
+-> Models` was removed from `internal/nav`'s tree entirely (not
+re-stubbed), see `internal/nav/tree.go`'s own doc comment on that Group's
+`Children` for the evidence.
+
+Produced against a binary built from the merged branch
+(`go build -o /tmp/atui-navwalk ./cmd/keelson`), run with
 `$AGENT_SUPERVISOR_REPO` set to a real local `agent-supervisor` checkout and
 no other flags (no `-ledger`, no `-mcp-cmd` override). One screenshot per
-destination in `testdata/vhs/out/`, walking `internal/nav`'s own `Flatten()`
-order exactly (`internal/nav/tree.go`) — see the tape's own header comment for
-the walk mechanics (sidebar keeps focus after `Enter`; `Right` expands a
-group header without moving the cursor).
-
-Two destinations (Dashboard, Tasks) looked ambiguous at the walk's normal 2s
-settle time — possibly still loading, possibly stuck. Both were re-checked
-with a dedicated 8s-settle tape (`testdata/vhs/out/01b-dashboard-recheck.png`,
-`testdata/vhs/out/04d-tasks-recheck.png`) before being called EMPTY below;
-8s did not change either screen, so this is not "still loading," it's stuck.
+destination in `testdata/vhs/out/` (gitignored, not committed), walking the
+CURRENT `internal/nav` tree's on-screen order (top-level items, then each
+group expanded and every child visited in source order) -- see the tape's
+own header comment for the walk mechanics.
 
 Legend: **RENDERS** real content, looks right · **EMPTY** renders but shows
 nothing (correct or bug, stated) · **STUB** still the placeholder ·
 **BROKEN** error/panic/garbage · **could not measure** unreachable.
 
-| # | Destination | Result | Notes |
-|---|---|---|---|
-| 00 | Home | RENDERS | |
-| 01 | Dashboard | **EMPTY — likely a bug** | All five stat rows (AGENTS/OPEN PRS/MERGED TODAY/SPEND TODAY/VAULT FACTS) show `unknown`, footer says "not fetched yet." Re-checked at 8s settle (`01b-dashboard-recheck.png`): unchanged. No error, no timeout message, no visible fetch-in-progress indicator — it just never fetches. |
-| 02 | Agents | RENDERS | Real STATE/MODE data for live lanes (e.g. `estate:build-2..5 busy`, `Hill90:supervisor`), MODE column showing `local` for real running lanes — the agent-tui#86 column fill is live. |
-| 03 | Chat | RENDERS | Real UI, but content is `chat.FixtureSource` (documented — no ACP/pi-rpc transport exists yet per `internal/chat/fixture.go`). Expected non-live, not a bug. |
-| 04 | Tasks | **EMPTY — likely a bug** | Header says "(loading)", all five kanban columns show `(0)`/`(empty)`. Re-checked at 8s settle (`04d-tasks-recheck.png`): unchanged, still "(loading)" forever. This run had no `-ledger` flag — AGENTS.md's known defect #2 documents the board pane as "unavailable" with no `-ledger`, but this run shows a permanently stuck "(loading)" state instead of the documented `! unavailable / no -ledger... configured` message. Either the documented message path isn't being hit, or there's a second, undocumented stuck-loading path when reached via the nav sidebar rather than `-board`. |
-| 05 | Knowledge | STUB | "not built yet -- no description recorded for this route." |
-| 06 | Library | RENDERS | Real `live_parameters` (200 rows), `possibility_count: 931`. |
-| 07 | Lanes | RENDERS | Real rail data, real cost figures ($525.34 claude, $0.13 codex). |
-| 08 | Build → Skills | RENDERS | Real list, ~35 skills, honestly labelled "unknown/unevaluated/unknown" where data isn't known. |
-| 09 | Build → Workflows | STUB | |
-| 10 | Build → MCP Servers | RENDERS | Real 3 servers (deepwiki, context7, microsoft-learn). |
-| 11 | Connect → Connections | RENDERS | Real connector/model data — claude/codex/pi harnesses, codex model list. |
-| 12 | Connect → Models | STUB | Same model data is already visible under Connections (11) but this dedicated route is unwired. |
-| 13 | Connect → Storage | STUB | |
-| 14 | Connect → Discord | STUB | |
-| 15 | Connect → Secrets | STUB | |
-| 16 | Observe → Usage | RENDERS | Real cost/quota data: claude $525.34 today, codex $0.13, session/weekly quota percentages, "fetched 20s ago." Note: this appears to contradict `AGENTS.md`'s known defect #3 ("quota line unwired... renders unknown (no quota source)") — quota IS rendering real percentages here. Worth a follow-up doc check; not fixed in this pass. |
-| 17 | Observe → Monitoring | STUB | |
-| 18 | Docs → API Docs | STUB | |
-| 19 | Docs → Platform Docs | STUB | (`KindExternal` in the nav tree, but the route itself still renders the stub pane rather than an external-link affordance.) |
-| 20 | Admin → Services | RENDERS | Real docker container list (bold_diffie, agentbox, basic-memory-mcp) and real dependency check (gh/sqlite3/npx/tmux/docker/python3 all `yes`). |
-| 21 | Admin → Profiles | RENDERS | Same shared admin page as #20 (all 5 Admin children route to one `PaneAdmin`, confirmed via `routeToPane` in `internal/shell/model.go`) — correctly renders "no per-user profiles in this estate -- one operator, no accounts" rather than fabricating fake profiles. Correct by design. |
-| 22 | Admin → Users | RENDERS | Same shared page; correctly renders "no user/role accounts in this estate -- one operator, no multi-tenant concept." Correct by design. |
-| 23 | Admin → Dependencies | RENDERS | Same shared page, dependency table visible. |
-| 24 | Admin → Settings | RENDERS | Same shared page, `theme: Signal (default)` visible. |
+| # | Destination | Result | Changed since #94's walk? | Notes |
+|---|---|---|---|---|
+| 00 | Home | RENDERS | no | Unchanged. |
+| 01 | Dashboard | **EMPTY — likely a bug** | no | Still stuck. All five stat rows show `unknown`, footer says "not fetched yet" at 4s settle (up from #94's 2s, matching #94's own 8s-recheck finding that this is a permanent stuck state, not slow loading). This branch does not touch `internal/dashboard` or its fetch wiring -- unrelated pre-existing bug, not a merge regression. |
+| 02 | Agents | RENDERS | no | Unchanged -- real STATE/MODE/data for live lanes. |
+| 03 | Chat | RENDERS | no | Unchanged -- real UI over `chat.FixtureSource` (documented, expected non-live). |
+| 04 | Tasks | **EMPTY — likely a bug** | no | Still stuck. "(loading)" forever, all kanban columns `(0)`/`(empty)` at 4s settle. Same pre-existing bug #94 found (`internal/board`, untouched by this branch) -- not a merge regression. |
+| 05 | Knowledge | **RENDERS** | **yes — fixed since #94 (not by this branch)** | Was STUB in #94's walk. Fixed by #95 (`fix(shell): wire the "knowledge" nav route to internal/knowledge`, merged into main while this branch's PR #96 was open) -- confirmed still real after this merge: 64 real vault facts listed (`memory-conventions`, `python-package-manager-uv`, ...), `sort: index (64 facts)` footer. |
+| 06 | Library | RENDERS | no | Unchanged -- real `live_parameters`, `possibility_count: 931 hard constraints live`. |
+| 07 | Lanes | RENDERS | no | Unchanged -- real rail/session data. |
+| 08 | Build → Skills | RENDERS | no | Unchanged -- real skills list. |
+| 09 | Build → Workflows | **RENDERS** | **yes — this branch's own fix (w5f.md/PR #96)** | Was STUB in #94's walk. Now `internal/workflows` -- real dispatch history from the ledger, ~30 rows, real lanes/statuses/timestamps, confirmed still correct after the merge conflict resolution (`internal/shell/model.go`'s routing arm for `PaneWorkflows` survived the merge, verified both by this screenshot and by `TestWorkflowsRouteShowsRealWorkflowsPane`, added this pass). |
+| 10 | Build → MCP Servers | RENDERS | no | Unchanged -- real 3 servers. |
+| 11 | Connect → Connections | RENDERS | no | Unchanged -- real connector/model data; still shows its own `-- models --` section (the redundancy evidence for #12's removal, below). |
+| 12 | Connect → Models | **REMOVED (not a destination)** | **yes — this branch's own removal (w5f.md/PR #96)** | Was STUB in #94's walk (`"Same model data is already visible under Connections (11) but this dedicated route is unwired"` -- #94's own flagged follow-up, item 3). Removed from `internal/nav`'s tree entirely rather than re-stubbed -- confirmed the sidebar's Connect group now lists exactly four children (Connections, Storage, Discord, Secrets), no Models row, in this walk's own screenshots. |
+| 13 | Connect → Storage | STUB | no | Unchanged. Renumbered from #94's item 13 (no content change). |
+| 14 | Connect → Discord | STUB | no | Unchanged. Renumbered from #94's item 14. |
+| 15 | Connect → Secrets | STUB | no | Unchanged. Renumbered from #94's item 15. |
+| 16 | Observe → Usage | RENDERS | no | Unchanged -- real cost/quota data. |
+| 17 | Observe → Monitoring | **RENDERS** | **yes — this branch's own fix (w5f.md/PR #96)** | Was STUB in #94's walk. Now `internal/monitor` -- real host data (`CORES 11`, `LOAD AVG 14.41, 10.37, 9.03`, `SWAP USED 0.0%`, `CLAUDE PROCESSES 22`), confirmed still correct after the merge. One partial-data note: this particular capture's `-- agents -- BY STATE` line read `unknown` (Host figures rendered fine) -- Snapshot's own design means Host and Agents fail independently (`internal/monitor/host.go`'s own doc comment), so this is the sessions sub-fetch being slow/unlucky at this exact 2s capture, not a routing regression; the dedicated `testdata/vhs/monitoring.tape` (PR #96, unchanged by this merge) shows real agent counts (`10 total (free:1 busy:3 supervisor:6)`) at its own longer settle time. |
+| 18 | Docs → API Docs | STUB | no | Unchanged. Renumbered from #94's item 18. |
+| 19 | Docs → Platform Docs | STUB | no | Unchanged. Renumbered from #94's item 19. |
+| 20 | Admin → Services | RENDERS | no | Unchanged -- real docker container list, real dependency check. |
+| 21 | Admin → Profiles | RENDERS | no | Unchanged -- same shared admin page, correct-by-design honest "no per-user profiles" text. |
+| 22 | Admin → Users | RENDERS | no | Unchanged -- same shared page, correct-by-design honest "no user/role accounts" text. |
+| 23 | Admin → Dependencies | RENDERS | no | Unchanged -- same shared page. |
+| 24 | Admin → Settings | RENDERS | no | Confirmed by a separate targeted tape after the main walk's own last screenshot needed a re-run (`vhs`'s own flakiness on a walk's final `Screenshot` command -- same symptom `testdata/vhs/monitoring.tape` hit and worked around during PR #96, not a shell bug: the same key sequence reproduced cleanly in a live `tmux` check). Same shared page, `theme: Signal (default)` visible. |
 
 ## Summary
 
-- **RENDERS (real content): 14** — Home, Agents, Chat, Library, Lanes,
-  Build/Skills, Build/MCP Servers, Connect/Connections, Observe/Usage,
-  Admin×5.
-- **STUB (honest placeholder): 9** — Knowledge, Build/Workflows,
-  Connect/Models, Connect/Storage, Connect/Discord, Connect/Secrets,
-  Observe/Monitoring, Docs/API Docs, Docs/Platform Docs.
-- **EMPTY, likely bugs: 2** — Dashboard, Tasks. Both show a permanent
-  "not fetched" / "(loading)" state with zero progress at 8s, not a slow
-  fetch. Neither errors, panics, or renders garbage — they just never
-  resolve. Worth its own targeted fix pass (out of scope here per this
-  task's brief).
+- **RENDERS (real content): 17** — Home, Agents, Chat, Knowledge (fixed by
+  #95), Library, Lanes, Build/Skills, Build/Workflows (fixed by this
+  branch), Build/MCP Servers, Connect/Connections, Observe/Usage,
+  Observe/Monitoring (fixed by this branch), Admin×5.
+- **STUB (honest placeholder): 5** — Connect/Storage, Connect/Discord,
+  Connect/Secrets, Docs/API Docs, Docs/Platform Docs.
+- **EMPTY, likely bugs: 2** — Dashboard, Tasks. Both unchanged from #94's
+  walk -- neither is touched by this branch or by this merge; still a
+  permanent stuck state, not a slow fetch.
 - **BROKEN: 0.**
-- **Could not measure: 0** — every one of the 25 destinations in the
-  Flatten() walk was reachable and screenshotted.
+- **Could not measure: 0** — every one of the 24 destinations in the
+  current tree was reachable and screenshotted (Settings needed a second,
+  targeted tape run after the main walk's last screenshot silently
+  dropped -- a `vhs` capture flake, not an app failure -- confirmed live
+  via `tmux` before treating it as such rather than guessing).
+- **Net change vs #94's walk: +2 RENDERS (Workflows, Monitoring, this
+  branch's own fixes) +1 RENDERS from an unrelated merge (Knowledge, #95)
+  -1 destination (Models, removed rather than left stub) -3 STUB. Zero
+  regressions found** -- every route #94 called RENDERS still RENDERS
+  after the merge; the two pre-existing EMPTY bugs (Dashboard, Tasks) are
+  unchanged, not new.
 
-## Not fixed here, flagged for the next pass
+## Route-table completeness, verified by test not by eye
+
+Per agent-b5.md's own requirement ("confirm against origin/main's own
+list that no route present there is missing from your resolved file"):
+diffed `origin/main`'s `routeToPane` map (17 keys, including `knowledge`
+from #95) against the merged, conflict-resolved map in
+`internal/shell/model.go` -- all 17 of main's keys are present, plus this
+branch's own two additions (`monitoring`, `workflows`). Zero missing.
+This check is now also a permanent Go test
+(`TestRouteToPaneNeverLosesAWiredRoute`, `internal/shell/model_test.go`),
+mutation-checked by temporarily deleting the `monitoring` entry and
+confirming the test fails, then restoring it and confirming green --
+so a future merge that drops a route fails `go test`, not just this
+manual walk. A second test, `TestEveryNavRouteHasAPaneOrIsAnHonestStub`,
+cross-checks the other direction: every `KindRoute` leaf in
+`nav.Build()`'s current tree is either wired or explicitly named as an
+expected stub, so a route nobody wired AND nobody flagged cannot go
+unnoticed either.
+
+## Not fixed here, carried forward from #94's walk
 
 1. Dashboard and Tasks both hang in a perpetual loading state rather than
-   erroring or completing — needs its own investigation (likely the
-   `board.Fetcher`/dashboard aggregator seam not being invoked, or invoked
-   but never returning, when reached via nav routing rather than the
-   `-board` launch flag).
-2. `AGENTS.md`'s documented known defect #3 (quota line unwired, renders
-   "unknown (no quota source)") does not match what `16-observe-usage.png`
-   shows — real session/weekly quota percentages render. This doc claim may
-   be stale; worth a re-verify and, if stale, an update to `AGENTS.md`'s
-   "Verified" stamp and defect list (not done here — this pass is
-   observation-only per the brief).
-3. `Connect → Models` is a STUB even though the same model data already
-   renders under `Connect → Connections` (11) — the dedicated route just
-   isn't wired to reuse it.
+   erroring or completing -- unchanged since #94's walk, not touched by
+   this branch or this merge. Still needs its own targeted fix pass.
+2. `AGENTS.md`'s documented known defect #3 (quota line unwired) still
+   appears stale against `16-observe-usage.png`'s real quota percentages --
+   #94's own flagged item 2, not re-verified here (out of scope for this
+   merge-resolution pass).

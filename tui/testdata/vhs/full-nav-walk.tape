@@ -1,9 +1,11 @@
-# Full nav-tree walk, w5e.md's own brief: every destination has a view now
-# (agent-tui#93 was the last), but nobody has driven ALL of them in one
-# pass since main moved five times under each PR. Walks internal/nav's
-# own Flatten() order exactly (internal/nav/tree.go) -- top-level items
-# first, then each group expanded and every child visited in source order
-# -- one screenshot per destination, 25 total (8 top-level + 17 children).
+# Full nav-tree walk, re-run for agent-b5.md: PR #96 (feat/three-stubs) was
+# rebased onto main after #95 (Knowledge wiring) landed underneath it, and
+# main's Connect group lost a child (Models -- w5f.md removed it, see
+# internal/nav/tree.go's own doc comment) while gaining Knowledge as a
+# routed destination elsewhere. This walk is #94's own tape (24
+# destinations now, not 25 -- one fewer: Models is gone, nothing replaced
+# it) re-run against the POST-MERGE tree to catch any route this merge's
+# resolution regressed, not just the two this branch fixed.
 #
 # Selecting a route leaves keyboard focus on the SIDEBAR (no auto-switch
 # to the content pane -- confirmed building testdata/vhs/library.tape),
@@ -31,7 +33,7 @@ Screenshot testdata/vhs/out/00-home.png
 
 Down
 Enter
-Sleep 2s
+Sleep 4s
 Screenshot testdata/vhs/out/01-dashboard.png
 
 Down
@@ -46,7 +48,7 @@ Screenshot testdata/vhs/out/03-chat.png
 
 Down
 Enter
-Sleep 2s
+Sleep 4s
 Screenshot testdata/vhs/out/04-tasks.png
 
 Down
@@ -84,7 +86,7 @@ Enter
 Sleep 2s
 Screenshot testdata/vhs/out/10-build-mcp-servers.png
 
-# --- Connect group: Connections, Models, Storage, Discord, Secrets ---
+# --- Connect group: Connections, Storage, Discord, Secrets (Models removed) ---
 
 Down
 Right
@@ -97,22 +99,17 @@ Screenshot testdata/vhs/out/11-connect-connections.png
 Down
 Enter
 Sleep 2s
-Screenshot testdata/vhs/out/12-connect-models.png
+Screenshot testdata/vhs/out/12-connect-storage.png
 
 Down
 Enter
 Sleep 2s
-Screenshot testdata/vhs/out/13-connect-storage.png
+Screenshot testdata/vhs/out/13-connect-discord.png
 
 Down
 Enter
 Sleep 2s
-Screenshot testdata/vhs/out/14-connect-discord.png
-
-Down
-Enter
-Sleep 2s
-Screenshot testdata/vhs/out/15-connect-secrets.png
+Screenshot testdata/vhs/out/14-connect-secrets.png
 
 # --- Observe group: Usage, Monitoring ---
 
@@ -122,12 +119,12 @@ Sleep 300ms
 Down
 Enter
 Sleep 2s
-Screenshot testdata/vhs/out/16-observe-usage.png
+Screenshot testdata/vhs/out/15-observe-usage.png
 
 Down
 Enter
 Sleep 2s
-Screenshot testdata/vhs/out/17-observe-monitoring.png
+Screenshot testdata/vhs/out/16-observe-monitoring.png
 
 # --- Docs group: API Docs, Platform Docs ---
 
@@ -137,12 +134,12 @@ Sleep 300ms
 Down
 Enter
 Sleep 2s
-Screenshot testdata/vhs/out/18-docs-api-docs.png
+Screenshot testdata/vhs/out/17-docs-api-docs.png
 
 Down
 Enter
 Sleep 2s
-Screenshot testdata/vhs/out/19-docs-platform-docs.png
+Screenshot testdata/vhs/out/18-docs-platform-docs.png
 
 # --- Admin group: Services, Profiles, Users, Dependencies, Settings ---
 
@@ -152,24 +149,24 @@ Sleep 300ms
 Down
 Enter
 Sleep 2s
-Screenshot testdata/vhs/out/20-admin-services.png
+Screenshot testdata/vhs/out/19-admin-services.png
 
 Down
 Enter
 Sleep 2s
-Screenshot testdata/vhs/out/21-admin-profiles.png
+Screenshot testdata/vhs/out/20-admin-profiles.png
 
 Down
 Enter
 Sleep 2s
-Screenshot testdata/vhs/out/22-admin-users.png
+Screenshot testdata/vhs/out/21-admin-users.png
 
 Down
 Enter
 Sleep 2s
-Screenshot testdata/vhs/out/23-admin-dependencies.png
+Screenshot testdata/vhs/out/22-admin-dependencies.png
 
 Down
 Enter
 Sleep 2s
-Screenshot testdata/vhs/out/24-admin-settings.png
+Screenshot testdata/vhs/out/23-admin-settings.png

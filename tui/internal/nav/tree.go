@@ -97,7 +97,21 @@ func Build() Tree {
 				Label: "Connect",
 				Children: []Item{
 					{ID: "connections", Label: "Connections", Icon: "Plug", Kind: KindRoute},
-					{ID: "models", Label: "Models", Icon: "Cpu", Kind: KindRoute},
+					// "models" (Icon "Cpu") REMOVED here, w5f.md: the full nav
+					// walk (agent-tui#94) found it was still a permanent STUB,
+					// and internal/connectors.View's own "-- models --"
+					// section already renders the exact same data
+					// (connectors.Load's AvailableModel catalog) a dedicated
+					// route would show -- confirmed by reading that view
+					// directly, not assumed. This is a deliberate, evidenced
+					// departure from this file's own ui_fidelity=1:1 claim
+					// against hill90-app's nav-items.ts (the same kind of
+					// documented exception Lanes' own KindNative already is,
+					// just in the other direction: Lanes ADDS a route the web
+					// nav has none for, this REMOVES one this terminal client
+					// cannot justify duplicating) -- a nav entry that will
+					// never carry content of its own is worse than no entry
+					// (w5f.md's own instruction).
 					{ID: "storage", Label: "Storage", Icon: "HardDrive", Kind: KindRoute},
 					{ID: "discord", Label: "Discord", Icon: "MessageSquare", Kind: KindRoute},
 					{ID: "secrets", Label: "Secrets", Icon: "Shield", Kind: KindRoute},

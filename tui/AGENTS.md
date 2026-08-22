@@ -97,6 +97,7 @@ internal/flow/       live flow view — the same board.Snapshot re-projected as 
 internal/gallery/    glyph gallery — every lane state × every candidate glyph set
 internal/lane/       lane/session decode, glyph sets (data, not code), state table
 internal/mcp/        minimal MCP JSON-RPC client over a child process's stdio
+internal/monitor/    host health (load/swap/process count) + agent state counts (w5f.md, Observe -> Monitoring)
 internal/nav/        the 1:1-with-hill90 nav tree + sidebar component -- now the fixed left column (SPEC-shell.md S1-S3)
 internal/rail/       the lane rail -- content behind the sidebar's "Lanes" route (PaneLanes) since SPEC-shell.md S3/S4, no longer a fixed column
 internal/session/    write path: attach/detach/add/remove, all via MCP, no os/exec
@@ -104,6 +105,7 @@ internal/shell/      the application shell -- owns the sidebar (internal/nav) + 
 internal/sshserver/  serves shell.Model over SSH via charmbracelet/wish (agent-tui#67) -- one Model per connection
 internal/stub/       honest "not built yet" placeholder for any nav route with no real pane wired (SPEC-shell.md S5)
 internal/theme/      look-and-feel as data — Role-keyed colours, persisted per-user config
+internal/workflows/  ledger dispatch history -- a task's own path through the estate (w5f.md, Build -> Workflows)
 scripts/             verify-lanes-unaffected.sh — the rail's non-interference proof (rail's own render/key logic is unchanged by SPEC-shell.md S3; only its screen position moved)
 ```
 

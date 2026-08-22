@@ -45,11 +45,13 @@ import (
 	"github.com/jonhill90/keelson/internal/library"
 	"github.com/jonhill90/keelson/internal/mcp"
 	"github.com/jonhill90/keelson/internal/mcpservers"
+	"github.com/jonhill90/keelson/internal/monitor"
 	"github.com/jonhill90/keelson/internal/rail"
 	"github.com/jonhill90/keelson/internal/shell"
 	"github.com/jonhill90/keelson/internal/skills"
 	"github.com/jonhill90/keelson/internal/sshserver"
 	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/keelson/internal/workflows"
 	// sessionops, not session: the -session flag var below already owns that
 	// name (the tmux session -board reads), and shadowing it would be an
 	// easy read-vs-write mixup in a file that now does both.
@@ -414,6 +416,12 @@ func main() {
 		buildLibraryCountFetch(ledgerSrc, *sqliteBin),
 	)
 
+	// monitorModel/workflowsModel are w5f.md's two new panes -- see
+	// monitor.go/workflows.go's own doc comments for what each reuses
+	// (sessionsFetch and the ledger task-fetch seam, respectively) and what
+	// is genuinely new (monitor.ExecHostRunner, this machine's own reads).
+	monitorModel := monitor.New(buildMonitorFetch(monitor.ExecHostRunner(), sessionsFetch))
+	workflowsModel := workflows.New(buildWorkflowsFetch(ledgerSrc, *sqliteBin))
 	// knowledgeModel reads $AGENT_MEMORY_VAULT -- the same env var
 	// dashboardModel's own VaultFacts figure already reads (see the
 	// comment at that call site) -- via internal/knowledge's own
@@ -434,6 +442,8 @@ func main() {
 		WithAdmin(adminModel).
 		WithDashboard(dashboardModel).
 		WithLibrary(libraryModel).
+		WithMonitor(monitorModel).
+		WithWorkflows(workflowsModel).
 		WithKnowledge(knowledgeModel).
 		WithStart(start).
 		WithTheme(activeTheme, themeNotice).

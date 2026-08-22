@@ -11,10 +11,19 @@ package stub
 //
 // Each description says what the destination WILL show, sourced from its
 // own numbered item below where one exists (S6-S11); destinations with no
-// numbered item of their own (Home, Dashboard, Knowledge, Library,
-// Workflows, Storage, Discord, Secrets, API Docs, Platform Docs) get a
-// description inferred from S1's grouping and the hill90 nav's own naming,
-// since no later item specs them individually yet.
+// numbered item of their own (Home, Dashboard, Knowledge, Library, Storage,
+// Discord, Secrets, API Docs, Platform Docs) get a description inferred
+// from S1's grouping and the hill90 nav's own naming, since no later item
+// specs them individually yet.
+//
+// Workflows and Monitoring are REMOVED from this map, not merely
+// unlisted: w5f.md gave each a real pane (internal/workflows,
+// internal/monitor), wired into internal/shell's routeToPane, so a stub
+// here would now hide a real screen -- the exact failure this doc comment's
+// own opening sentence says Tasks/Usage/Lanes are excluded to avoid.
+// "Models" is gone entirely, from both this map and internal/nav's own
+// tree (nav.Build's own doc comment on why) -- there is no destination left
+// for it to describe.
 var Descriptions = map[string]string{
 	// Top level
 	"Home":      "a landing overview with quick links across the estate.",
@@ -26,18 +35,13 @@ var Descriptions = map[string]string{
 
 	// Build
 	"Skills":      "skills from ~/.claude/skills and the skills repo: name, description, last eval result, invocation count. (S8)",
-	"Workflows":   "configured multi-agent workflows and their run history.",
 	"MCP Servers": "configured MCP servers, scope (global/project) and reachability. (S9)",
 
 	// Connect
 	"Connections": "provider connections available to agents. (S10)",
-	"Models":      "models available per connection. (S10)",
 	"Storage":     "storage backends configured for the estate.",
 	"Discord":     "Discord integration configuration.",
 	"Secrets":     "secret values and the scopes that can read them.",
-
-	// Observe
-	"Monitoring": "health and alerting for running agents and services.",
 
 	// Docs
 	"API Docs":      "generated API reference for the estate's services.",
