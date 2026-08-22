@@ -33,7 +33,33 @@ HARNESS_COMMAND_RE='^(claude|claude\.exe)$'
 # forever. Default to the cheap model; `CLAUDE_LANE_MODEL` lets a lane that
 # genuinely needs Opus have it deliberately, by explicit env, not by
 # omission.
-HARNESS_LAUNCH_CMD="claude --model ${CLAUDE_LANE_MODEL:-sonnet} --dangerously-skip-permissions"
+# agent-supervisor#494: every lane also inherited the OPERATOR's whole MCP
+# surface, because claude with no `--strict-mcp-config` loads the global
+# `mcpServers` from ~/.claude.json plus any project-scoped block matching the
+# lane's cwd. A lane does git, gh and bash; it has never needed Mintlify,
+# Linear, Cloudflare, Playwright, context7, microsoft-learn or deepwiki. Each
+# server is a process the lane pays for at launch and holds for its whole
+# life, multiplied by every concurrent lane -- on 2026-08-21 the machine sat
+# at 3% free memory with 8.7GB swapped and typing lag in the terminal.
+#
+# Same posture as `--model` above and for the same reason: this is the one
+# line dispatch.sh types on every relaunch, so a default here is inherited
+# forever, and an omission is inherited forever too. Default to NO MCP;
+# `CLAUDE_LANE_MCP_CONFIG` lets a lane that genuinely needs a server have
+# exactly that one, deliberately, by explicit env rather than by inheriting
+# the operator's entire desktop configuration.
+#
+# Checked against the shipped CLI, not assumed (v2.1.220 `claude --help`):
+# `--strict-mcp-config` is documented as "Only use MCP servers from
+# --mcp-config, ignoring all other MCP configurations", and `--mcp-config
+# <configs...>` as the way to name them. `--strict-mcp-config` with no
+# `--mcp-config` therefore means zero servers, which is the default here.
+CLAUDE_LANE_MCP_FLAGS="--strict-mcp-config"
+if [ -n "${CLAUDE_LANE_MCP_CONFIG:-}" ]; then
+  CLAUDE_LANE_MCP_FLAGS="--strict-mcp-config --mcp-config ${CLAUDE_LANE_MCP_CONFIG}"
+fi
+
+HARNESS_LAUNCH_CMD="claude --model ${CLAUDE_LANE_MODEL:-sonnet} --dangerously-skip-permissions ${CLAUDE_LANE_MCP_FLAGS}"
 HARNESS_SEND_LITERAL=1
 
 # agent-dotfiles#256: the launch command above IS already claude's unattended

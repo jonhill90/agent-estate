@@ -63,7 +63,7 @@ class ClaudePrintTransport:
 
     def __init__(
         self, *, cwd, session_id=None, model=None, claude_bin="claude", timeout=None,
-        dangerously_skip_permissions=True,
+        dangerously_skip_permissions=True, mcp_config=None,
     ):
         self.cwd = cwd
         self.session_id = session_id
@@ -80,6 +80,19 @@ class ClaudePrintTransport:
         # a lane that cannot read its own brief is not a lane that can do
         # dispatch-and-collect work at all.
         self.dangerously_skip_permissions = dangerously_skip_permissions
+        # agent-supervisor#494: the SECOND launch site. `harness/claude.sh`
+        # covers tmux lanes; this covers print-mode ones, and a fix applied to
+        # only one of them is the #135 shape repeating -- #120 was closed as
+        # "fixed" after patching a single file while a second launch literal
+        # went on shipping the old behaviour.
+        #
+        # With no `--strict-mcp-config`, `claude -p` loads the operator's
+        # global `mcpServers` plus any project-scoped block matching `cwd`.
+        # A print-mode lane runs one turn and exits, so it pays every one of
+        # those servers' startup cost for a process it immediately discards.
+        # Default to none; pass `mcp_config` for a lane that genuinely needs
+        # a specific server.
+        self.mcp_config = mcp_config
 
     @classmethod
     def spawn(cls, *, cwd, session_id=None, model=None, **kwargs):
@@ -94,6 +107,12 @@ class ClaudePrintTransport:
             command += ["--model", self.model]
         if self.dangerously_skip_permissions:
             command += ["--dangerously-skip-permissions"]
+        # Always strict (agent-supervisor#494): with no `--mcp-config` this
+        # means zero servers, and with one it means exactly that one and
+        # nothing inherited. Never omitted -- omitting it is the bug.
+        command += ["--strict-mcp-config"]
+        if self.mcp_config:
+            command += ["--mcp-config", self.mcp_config]
         return command
 
     def run(self, prompt):
