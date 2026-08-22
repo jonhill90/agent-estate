@@ -469,14 +469,19 @@ func (m Model) routeNavKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			}
 		}
 	}
+	// syncCursor pushes the shell's cursor into nav so View can RENDER it.
+	// Without this the cursor moves and nothing on screen changes -- which is
+	// exactly the bug: pressing Down twice left the highlight on Home, so you
+	// could not tell what Enter would open.
+	syncCursor := func(mm Model) Model { mm.nav = mm.nav.WithCursor(mm.navCursor); return mm }
 
 	switch msg.String() {
 	case "up":
 		step(-1)
-		return m, nil
+		return syncCursor(m), nil
 	case "down":
 		step(1)
-		return m, nil
+		return syncCursor(m), nil
 	case "left":
 		n := nodes[m.navCursor]
 		gid := n.GroupID
@@ -486,22 +491,22 @@ func (m Model) routeNavKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		if gid != "" {
 			m.nav = m.nav.WithCollapsed(gid)
 		}
-		return m, nil
+		return syncCursor(m), nil
 	case "enter", "right":
 		n := nodes[m.navCursor]
 		if n.IsGroupHeader() {
 			m.nav = m.nav.WithExpandedToggled(n.Group.ID)
-			return m, nil
+			return syncCursor(m), nil
 		}
 		m.nav = m.nav.WithActive(n.Item.ID)
 		if p, ok := routeToPane[n.Item.ID]; ok {
 			m.active = p
-			return m, nil
+			return syncCursor(m), nil
 		}
 		// A real destination with no pane built yet renders a stub, so every
 		// entry in the tree shows something the moment this lands (S5).
 		m.active = PaneStub
-		return m, nil
+		return syncCursor(m), nil
 	}
 
 	// [b] is nav's own (icons-only). Anything else is NOT the sidebar's --

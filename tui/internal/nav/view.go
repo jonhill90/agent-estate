@@ -77,7 +77,8 @@ func (m Model) View() string {
 	selectedStyle := lipgloss.NewStyle().Background(m.theme.Color(theme.RoleSelectedBG))
 
 	var lines []string
-	for _, n := range m.tree.Flatten() {
+	for i, n := range m.tree.Flatten() {
+		cursored := i == m.cursor
 		switch {
 		case n.IsGroupHeader():
 			if m.iconsOnly {
@@ -87,12 +88,17 @@ func (m Model) View() string {
 			if m.expanded[n.Group.ID] {
 				disclosure = "▾ "
 			}
-			lines = append(lines, groupHeaderStyle.Render(disclosure+n.Group.Label))
+			hdr := disclosure + n.Group.Label
+			if cursored {
+				lines = append(lines, m.cursorStyle().Render("▌"+hdr))
+			} else {
+				lines = append(lines, groupHeaderStyle.Render(" "+hdr))
+			}
 		case n.GroupID != "" && !m.expanded[n.GroupID]:
 			// Collapsed group: skip its children entirely.
 			continue
 		default:
-			lines = append(lines, m.renderItem(n, selectedStyle))
+			lines = append(lines, m.renderItem(n, selectedStyle, cursored))
 		}
 	}
 
@@ -111,7 +117,15 @@ func (m Model) View() string {
 	return lipgloss.NewStyle().Width(m.Width()).Height(m.height).Render(body)
 }
 
-func (m Model) renderItem(n Node, selectedStyle lipgloss.Style) string {
+// cursorStyle is the CURSOR signal, deliberately different in kind from the
+// active-route highlight: bold + accent foreground + a left bar, never a
+// background fill, so both can be read at a glance when they sit on
+// different rows.
+func (m Model) cursorStyle() lipgloss.Style {
+	return lipgloss.NewStyle().Bold(true).Foreground(m.theme.Color(theme.RoleDirector))
+}
+
+func (m Model) renderItem(n Node, selectedStyle lipgloss.Style, cursored bool) string {
 	glyph := glyphFor(n.Item.Icon)
 
 	var text string
@@ -125,8 +139,28 @@ func (m Model) renderItem(n Node, selectedStyle lipgloss.Style) string {
 		text = indent + glyph + " " + n.Item.Label
 	}
 
-	if n.Item.ID == m.active {
-		return selectedStyle.Render(text)
+	// CURSOR vs ACTIVE are two different things and both must be visible.
+	//
+	// Found by DRIVING it, not reading it: pressing Down twice left the
+	// highlight sitting on Home, because the only styled state was
+	// m.active. The cursor lived in the shell and was rendered nowhere, so
+	// keyboard traversal was invisible -- you could not tell what Enter
+	// would open. That is the whole point of a sidebar.
+	//
+	// active   = the route currently on screen  -> filled highlight
+	// cursored = where Enter would take you     -> bar + bold + accent
+	// both     = filled highlight AND the bar
+	marker := " "
+	if cursored {
+		marker = "▌"
 	}
-	return text
+	switch {
+	case n.Item.ID == m.active && cursored:
+		return selectedStyle.Bold(true).Render(marker + text)
+	case n.Item.ID == m.active:
+		return selectedStyle.Render(marker + text)
+	case cursored:
+		return m.cursorStyle().Render(marker + text)
+	}
+	return marker + text
 }

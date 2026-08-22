@@ -39,6 +39,11 @@ type Model struct {
 	// shell routes in from outside.
 	iconsOnly bool
 
+	// cursor is the flat index (over tree.Flatten()) the keyboard is on.
+	// The shell drives it; this Model only renders it. Kept here rather than
+	// passed to View so the render stays a pure method on Model.
+	cursor int
+
 	width, height int
 
 	theme       theme.Theme
@@ -86,6 +91,13 @@ func (m Model) Active() string { return m.active }
 // Tree exposes the underlying tree so the shell can walk Flatten() to drive
 // the cursor -- this Model deliberately owns no cursor (see Update).
 func (m Model) Tree() Tree { return m.tree }
+
+// WithCursor sets the flat index the keyboard is on, so View can show WHERE
+// ENTER WOULD GO -- distinct from Active(), which is what is already on screen.
+func (m Model) WithCursor(i int) Model { m.cursor = i; return m }
+
+// Cursor reports the current cursor index.
+func (m Model) Cursor() int { return m.cursor }
 
 // IsExpanded reports whether a group is open, so a cursor walk can skip the
 // children of a collapsed group.
