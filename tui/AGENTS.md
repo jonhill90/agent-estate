@@ -7,7 +7,11 @@ but say so in the commit message if you do, to avoid a reviewer thinking two
 files drifted).
 
 **Verified against `main` `b00db9b`, 2026-08-16 (agent-tui#38's shell PR,
-#43).** Confirm the branch/SHA in `git log -1` still matches before trusting
+#43), except the "What this repo is" paragraph and this file's `internal/
+nav`/`internal/rail`/`internal/shell`/`internal/stub` layout lines, updated
+2026-08-22 for `docs/SPEC-shell.md` S1-S3/S5 (this branch's own PR --
+`feat/s3-shell-routing` -- not yet on `main` as of this edit).** Confirm the
+branch/SHA in `git log -1` still matches before trusting
 counts below; they are measured, not estimated.
 
 **Naming: decided. The product is `steading`** (agent-tui#42, seven rounds,
@@ -45,10 +49,13 @@ branch, 2026-08-20 — 489 occurrences across 81 tracked files (`git grep -l
 ## What this repo is
 
 This repo (Go module `github.com/jonhill90/keelson` — see the naming note
-above) is one terminal application: a persistent left rail over
-`agent-supervisor`'s lane/session state, with the task board, cost panel and
-glyph gallery reachable as panes in the same process (`internal/shell`,
-agent-tui#38). The name `agent-tui` describes the rendering technology (Go +
+above) is one terminal application: a left nav sidebar modelled 1:1 on the
+hill90 web app's own nav (`internal/nav`, `docs/SPEC-shell.md`), with the
+task board, cost panel, glyph gallery and the lane rail over
+`agent-supervisor`'s lane/session state all reachable as routed panes in the
+same process (`internal/shell`, agent-tui#38; the nav sidebar replacing the
+rail as the fixed left column is `docs/SPEC-shell.md`'s S3). The name
+`agent-tui` describes the rendering technology (Go +
 [Bubble Tea](https://github.com/charmbracelet/bubbletea)), not the product —
 the product's name is `steading` (agent-tui#42; see the naming note above).
 It is a **viewer with one write path** (session
@@ -90,12 +97,14 @@ internal/flow/       live flow view — the same board.Snapshot re-projected as 
 internal/gallery/    glyph gallery — every lane state × every candidate glyph set
 internal/lane/       lane/session decode, glyph sets (data, not code), state table
 internal/mcp/        minimal MCP JSON-RPC client over a child process's stdio
-internal/rail/       the left-anchored navigation rail — the one shipped anchor feature, now always visible
+internal/nav/        the 1:1-with-hill90 nav tree + sidebar component -- now the fixed left column (SPEC-shell.md S1-S3)
+internal/rail/       the lane rail -- content behind the sidebar's "Lanes" route (PaneLanes) since SPEC-shell.md S3/S4, no longer a fixed column
 internal/session/    write path: attach/detach/add/remove, all via MCP, no os/exec
-internal/shell/      the application shell -- owns the rail + board/cost/gallery/flow/chat as panes (agent-tui#38, #64, #20)
+internal/shell/      the application shell -- owns the sidebar (internal/nav) + board/cost/gallery/flow/chat/rail as routed panes (agent-tui#38, #64, #20; SPEC-shell.md S3)
 internal/sshserver/  serves shell.Model over SSH via charmbracelet/wish (agent-tui#67) -- one Model per connection
+internal/stub/       honest "not built yet" placeholder for any nav route with no real pane wired (SPEC-shell.md S5)
 internal/theme/      look-and-feel as data — Role-keyed colours, persisted per-user config
-scripts/             verify-lanes-unaffected.sh — the rail's non-interference proof
+scripts/             verify-lanes-unaffected.sh — the rail's non-interference proof (rail's own render/key logic is unchanged by SPEC-shell.md S3; only its screen position moved)
 ```
 
 `internal/chat` is wired into the shell as `PaneChat` (`[f6]`, agent-tui#20) --

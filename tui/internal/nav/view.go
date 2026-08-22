@@ -1,6 +1,7 @@
 package nav
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/charmbracelet/lipgloss"
@@ -82,7 +83,11 @@ func (m Model) View() string {
 			if m.iconsOnly {
 				continue
 			}
-			lines = append(lines, groupHeaderStyle.Render(n.Group.Label))
+			disclosure := "▸ "
+			if m.expanded[n.Group.ID] {
+				disclosure = "▾ "
+			}
+			lines = append(lines, groupHeaderStyle.Render(disclosure+n.Group.Label))
 		case n.GroupID != "" && !m.expanded[n.GroupID]:
 			// Collapsed group: skip its children entirely.
 			continue
@@ -90,6 +95,17 @@ func (m Model) View() string {
 			lines = append(lines, m.renderItem(n, selectedStyle))
 		}
 	}
+
+	// The sidebar is now the ONE always-visible column (SPEC-shell.md S3
+	// replaced internal/rail with this Model in that role) -- rail's own
+	// "theme: <name>" footer line (rail's Model.View) is what used to prove
+	// a [t] cycle repainted the always-visible surface; with rail routed
+	// behind "Lanes" instead of fixed on screen, this Model must carry that
+	// same proof itself, or a [t] press from PaneHome/PaneStub/any
+	// non-Lanes pane has no always-visible surface left to show it
+	// happened at all. Kept icons-only-safe (rendered even then, since
+	// iconsOnly only ever hid group headers, never other footer lines).
+	lines = append(lines, groupHeaderStyle.Render(fmt.Sprintf("theme: %s", m.theme.Name)))
 
 	body := strings.Join(lines, "\n")
 	return lipgloss.NewStyle().Width(m.Width()).Height(m.height).Render(body)

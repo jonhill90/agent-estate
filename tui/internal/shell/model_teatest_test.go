@@ -147,7 +147,7 @@ func TestF1ReturnsToHomePane(t *testing.T) {
 	// homeMarker is homeView's own line, not the footer's -- the footer's
 	// "[f2] board" is present on EVERY pane, so it cannot tell "we are on
 	// home" apart from "we are on gallery with the footer still showing".
-	const homeMarker = "[tab] move focus into the rail"
+	const homeMarker = "[tab] move focus into the sidebar"
 
 	tm := run(t, testModel())
 	waitFor(t, tm, homeMarker)

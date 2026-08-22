@@ -21,7 +21,9 @@ import (
 	"github.com/jonhill90/keelson/internal/cost"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
+	"github.com/jonhill90/keelson/internal/nav"
 	"github.com/jonhill90/keelson/internal/rail"
+	"github.com/jonhill90/keelson/internal/stub"
 	"github.com/jonhill90/keelson/internal/theme"
 )
 
@@ -38,18 +40,63 @@ const (
 	PaneGallery
 	PaneFlow
 	PaneChat
+	// PaneLanes is SPEC-shell.md S3/S4: the lane rail (internal/rail),
+	// reached as the nav sidebar's "Lanes" route instead of always
+	// occupying the left column -- see this file's own doc comment for why
+	// that changed. rail.Model's own render/key logic is unchanged; only
+	// its screen position moved.
+	PaneLanes
+	// PaneStub renders any nav route S3/S4 has not wired to a real pane --
+	// internal/stub.View (S5) over m.nav.ActiveItem()'s Label and
+	// internal/stub.Descriptions.
+	PaneStub
 )
 
-// focus names which region the keyboard currently drives -- the rail
-// (lane selection, glyph/grouping/reading pickers, session ops) or
-// whichever pane is mounted in the content area. Exactly one is true at a
-// time; toggled with [tab].
+// focus names which region the keyboard currently drives -- the nav
+// sidebar (↑/↓/Enter/→/←, the icons-only toggle) or whichever pane is
+// mounted in the content area. Exactly one is true at a time; toggled with
+// [tab]. Named focusRail for agent-tui#38's original rail-vs-content split;
+// kept unrenamed here even though the sidebar it now drives is
+// internal/nav, not internal/rail -- see routeKey's own doc comment.
 type focus int
 
 const (
 	focusRail focus = iota
 	focusContent
 )
+
+// routeToPane maps a nav route ID (internal/nav.Item.ID) to the Pane that
+// already renders it for real -- SPEC-shell.md S4's three ("Tasks" ->
+// board, "Usage" -> cost, "Lanes" -> rail) plus "home" and "chat", which
+// already had working panes before S3 existed (PaneHome, PaneChat) and
+// cost nothing extra to wire the same way. Every OTHER route in
+// nav.Build()'s tree has no entry here and falls through to PaneStub.
+var routeToPane = map[string]Pane{
+	"home":  PaneHome,
+	"tasks": PaneBoard,
+	"usage": PaneCost,
+	"lanes": PaneLanes,
+	"chat":  PaneChat,
+}
+
+// paneToRoute is routeToPane's inverse, used to keep the nav sidebar's own
+// highlight in sync when a Pane is chosen some way OTHER than confirming a
+// nav row -- the -board/-cost startup flags (WithStart) and the legacy
+// f1-f6 keys both bypass m.nav entirely, so without this the sidebar could
+// show "Home" highlighted while the content pane is actually Board.
+// PaneGallery and PaneFlow have no entry: neither is in nav.Build()'s tree
+// (agent-tui#64's flow and the glyph gallery predate SPEC-shell.md and are
+// not part of the hill90 nav this spec mirrors), so reaching them via their
+// own f4/f5 keys leaves the sidebar's highlight exactly where it was --
+// documented, not silently wrong, until a future item decides whether they
+// get a route of their own.
+var paneToRoute = map[Pane]string{
+	PaneHome:  "home",
+	PaneBoard: "tasks",
+	PaneCost:  "usage",
+	PaneLanes: "lanes",
+	PaneChat:  "chat",
+}
 
 // footerHeight is the one row Model reserves at the bottom of the terminal
 // for its own nav legend (footer() below) -- rail and every content pane
@@ -69,6 +116,15 @@ const footerHeight = 1
 // pane must show live data immediately, not a fetch that only started on
 // the keypress that revealed it.
 type Model struct {
+	// navCursor is the sidebar cursor. It lives here, not in nav.Model,
+	// because #73's nav owns no cursor by design (see its Update doc).
+	navCursor int
+
+	// nav is SPEC-shell.md S3's app shell change: the persistent left
+	// column is now the hill90-mirrored sidebar (internal/nav, S1/S2), not
+	// internal/rail. rail.Model is unchanged and still held here -- it is
+	// simply no longer rendered unconditionally; see PaneLanes.
+	nav     nav.Model
 	rail    rail.Model
 	board   board.Model
 	cost    cost.Model
@@ -94,8 +150,8 @@ type Model struct {
 	active Pane
 	focus  focus
 
-	width, height                          int
-	railWidth, contentWidth, contentHeight int
+	width, height                         int
+	navWidth, contentWidth, contentHeight int
 
 	// theme is the single shared value agent-tui#51 fixes -- see
 	// theme.CycleRequestedMsg's doc comment for the defect this
@@ -151,6 +207,7 @@ type Model struct {
 // instead of running board's own fetch loop.
 func New(r rail.Model, b board.Model, boardOK bool, boardUnavailable string, c cost.Model, g gallery.Model, fl flow.Model, ch chat.Model) Model {
 	return Model{
+		nav:              nav.New(),
 		rail:             r,
 		board:            b,
 		boardOK:          boardOK,
@@ -168,9 +225,15 @@ func New(r rail.Model, b board.Model, boardOK bool, boardUnavailable string, c c
 // WithStart returns a copy of m starting on p instead of PaneHome -- how
 // cmd/agent-tui's -board/-cost/-gallery flags now express "start on this
 // view" (agent-tui#38 acceptance: they stop being the ONLY way to reach it,
-// but still choose where the app opens).
+// but still choose where the app opens). Also syncs the nav sidebar's own
+// highlight via paneToRoute (SPEC-shell.md S3) so a -board/-cost launch
+// shows "Tasks"/"Usage" already selected in the sidebar, not "Home" beside
+// a content pane that disagrees with it.
 func (m Model) WithStart(p Pane) Model {
 	m.active = p
+	if route, ok := paneToRoute[p]; ok {
+		m.nav = m.nav.WithActive(route)
+	}
 	return m
 }
 
@@ -206,6 +269,7 @@ func (m Model) WithThemeSave(save func(theme.Theme) error) Model {
 // CycleRequestedMsg case in Update (a runtime 't' press), so those two
 // call sites cannot drift out of sync with each other.
 func (m Model) applyTheme() Model {
+	m.nav = m.nav.WithTheme(m.theme, m.themeNotice)
 	m.rail = m.rail.WithTheme(m.theme, m.themeNotice)
 	m.board = m.board.WithTheme(m.theme, m.themeNotice)
 	m.cost = m.cost.WithTheme(m.theme, m.themeNotice)
@@ -216,7 +280,7 @@ func (m Model) applyTheme() Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.rail.Init(), m.cost.Init(), m.gallery.Init(), m.chat.Init()}
+	cmds := []tea.Cmd{m.nav.Init(), m.rail.Init(), m.cost.Init(), m.gallery.Init(), m.chat.Init()}
 	if m.boardOK {
 		cmds = append(cmds, m.board.Init(), m.flow.Init())
 	}
@@ -255,24 +319,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab":
 			m.focus = toggleFocus(m.focus)
 			return m, nil
+		// f1-f6 are agent-tui#38's pre-nav keys, kept working unchanged
+		// (nothing that scripts them may break, SPEC-shell.md S3) --
+		// syncPane below is the same route<->Pane switch Confirm below
+		// drives, called here too so the sidebar's own highlight does not
+		// go stale the moment one of these bypasses it.
 		case "f1":
-			m.active = PaneHome
-			return m, nil
+			return m.syncPane(PaneHome), nil
 		case "f2":
-			m.active = PaneBoard
-			return m, nil
+			return m.syncPane(PaneBoard), nil
 		case "f3":
-			m.active = PaneCost
-			return m, nil
+			return m.syncPane(PaneCost), nil
 		case "f4":
-			m.active = PaneGallery
-			return m, nil
+			return m.syncPane(PaneGallery), nil
 		case "f5":
-			m.active = PaneFlow
-			return m, nil
+			return m.syncPane(PaneFlow), nil
 		case "f6":
-			m.active = PaneChat
-			return m, nil
+			return m.syncPane(PaneChat), nil
 		}
 		return m.routeKey(msg)
 	}
@@ -306,17 +369,29 @@ func toggleFocus(f focus) focus {
 	return focusRail
 }
 
-// routeKey sends a KeyMsg to whichever single region has focus -- the rail,
-// or the currently active content pane. Every pane already quits on its own
-// "q"/"ctrl+c" (agent-tui#22's trap applies here too: routing, not
-// intercepting, is what keeps that true for a pane this package did not
-// write). PaneHome and an unavailable PaneBoard have no live sub-model to
-// route to; homeKey below covers both.
+// syncPane sets m.active to p and, when p has a nav route (routeToPane's
+// inverse, paneToRoute), moves the sidebar's own highlight to match --
+// the f1-f6 legacy keys and any future non-nav way of choosing a Pane
+// should go through this rather than assigning m.active directly, so the
+// sidebar cannot silently disagree with what is on screen.
+func (m Model) syncPane(p Pane) Model {
+	m.active = p
+	if route, ok := paneToRoute[p]; ok {
+		m.nav = m.nav.WithActive(route)
+	}
+	return m
+}
+
+// routeKey sends a KeyMsg to whichever single region has focus -- the nav
+// sidebar, or the currently active content pane. Every pane already quits
+// on its own "q"/"ctrl+c" (agent-tui#22's trap applies here too: routing,
+// not intercepting, is what keeps that true for a pane this package did
+// not write). PaneHome and an unavailable PaneBoard/PaneFlow have no live
+// sub-model to route to; homeKey below covers both, and so does PaneStub
+// (no sub-model at all, ever).
 func (m Model) routeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	if m.focus == focusRail {
-		next, cmd := m.rail.Update(msg)
-		m.rail = next.(rail.Model)
-		return m, cmd
+		return m.routeNavKey(msg)
 	}
 	switch m.active {
 	case PaneBoard:
@@ -345,19 +420,124 @@ func (m Model) routeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		next, cmd := m.chat.Update(msg)
 		m.chat = next.(chat.Model)
 		return m, cmd
+	case PaneLanes:
+		next, cmd := m.rail.Update(msg)
+		m.rail = next.(rail.Model)
+		return m, cmd
 	default:
 		return m.homeKey(msg)
 	}
 }
 
-// homeKey is the key handling for PaneHome and an unavailable PaneBoard --
-// neither has a live sub-model to route to, so "q" must be handled here
-// directly rather than silently doing nothing (agent-tui#38's "q/ctrl+c
-// quits from every pane" acceptance item applies to this placeholder pane
-// too, not just the four real ones).
+// routeNavKey is SPEC-shell.md S3's keyboard contract for the sidebar:
+// "↑/↓ move, Enter/→ selects, ← collapses." Everything else (today, only
+// [b], the icons-only toggle S2 itself owns) falls through to
+// m.nav.Update unchanged. Confirming a route that routeToPane does not
+// know how to render for real (routeToPane, above) becomes PaneStub,
+// rendered from m.nav.ActiveItem() and internal/stub.Descriptions (S5) --
+// this is what makes every OTHER destination in nav.Build()'s tree show
+// something the moment this lands, rather than nothing at all until each
+// one's own later item (S6-S12) is built.
+func (m Model) routeNavKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	// CONFLICT RESOLUTION, 2026-08-22. S1/S2 (#73) and S3 (#74) were built in
+	// parallel by two agents and each created its own internal/nav. The merged
+	// tree keeps #73's, which deliberately owns NO cursor -- its Update doc
+	// says the shell drives up/down/enter/left and nav only handles [b]. So
+	// the cursor lives here, over Tree.Flatten(), which #73 documents as
+	// existing for exactly this traversal.
+	nodes := m.nav.Tree().Flatten()
+	if len(nodes) == 0 {
+		return m, nil
+	}
+	if m.navCursor < 0 || m.navCursor >= len(nodes) {
+		m.navCursor = 0
+	}
+	// visitable skips the children of collapsed groups, so ↓ does not walk
+	// into a group the user has closed.
+	visitable := func(i int) bool {
+		n := nodes[i]
+		if n.IsGroupHeader() || n.GroupID == "" {
+			return true
+		}
+		return m.nav.IsExpanded(n.GroupID)
+	}
+	step := func(dir int) {
+		for i := m.navCursor + dir; i >= 0 && i < len(nodes); i += dir {
+			if visitable(i) {
+				m.navCursor = i
+				return
+			}
+		}
+	}
+
+	switch msg.String() {
+	case "up":
+		step(-1)
+		return m, nil
+	case "down":
+		step(1)
+		return m, nil
+	case "left":
+		n := nodes[m.navCursor]
+		gid := n.GroupID
+		if n.IsGroupHeader() {
+			gid = n.Group.ID
+		}
+		if gid != "" {
+			m.nav = m.nav.WithCollapsed(gid)
+		}
+		return m, nil
+	case "enter", "right":
+		n := nodes[m.navCursor]
+		if n.IsGroupHeader() {
+			m.nav = m.nav.WithExpandedToggled(n.Group.ID)
+			return m, nil
+		}
+		m.nav = m.nav.WithActive(n.Item.ID)
+		if p, ok := routeToPane[n.Item.ID]; ok {
+			m.active = p
+			return m, nil
+		}
+		// A real destination with no pane built yet renders a stub, so every
+		// entry in the tree shows something the moment this lands (S5).
+		m.active = PaneStub
+		return m, nil
+	}
+
+	// [b] is nav's own (icons-only). Anything else is NOT the sidebar's --
+	// forward it to the same handler an unfocused pane would use, so global
+	// keys keep working while the sidebar has focus. Swallowing them here is
+	// the agent-tui#22 trap (a mode that ate every key, quit included), and
+	// it is exactly what broke the theme and quit tests when this resolution
+	// first routed everything into nav.Update.
+	if msg.String() == "b" {
+		next, cmd := m.nav.Update(msg)
+		m.nav = next.(nav.Model)
+		return m, cmd
+	}
+	return m.homeKey(msg)
+}
+
+// homeKey is the key handling for PaneHome, an unavailable PaneBoard/
+// PaneFlow, and PaneStub -- none has a live sub-model to route to, so "q"
+// must be handled here directly rather than silently doing nothing
+// (agent-tui#38's "q/ctrl+c quits from every pane" acceptance item applies
+// to every placeholder pane, not just the four real ones it was written
+// against).
 func (m Model) homeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
-	if msg.String() == "q" {
+	switch msg.String() {
+	case "q":
 		return m, tea.Quit
+	case "t":
+		// Ask for a theme cycle rather than cycling here -- Update's
+		// theme.CycleRequestedMsg case is the ONE owner (agent-tui#51), which
+		// is what makes a single press repaint the sidebar and the content
+		// pane together. Panes with their own sub-model already emit this;
+		// PaneHome, PaneStub and a focused sidebar have no sub-model to emit
+		// it for them, so without this line [t] was silently dead in exactly
+		// those states. Found by the theme suite going red after S3's
+		// resolution, not by reading.
+		return m, func() tea.Msg { return theme.CycleRequestedMsg{} }
 	}
 	return m, nil
 }
@@ -373,7 +553,16 @@ func (m Model) homeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 func (m Model) routeAll(msg tea.Msg) (Model, tea.Cmd) {
 	var cmds []tea.Cmd
 
-	next, cmd := m.rail.Update(msg)
+	next, cmd := m.nav.Update(msg)
+	m.nav = next.(nav.Model)
+	cmds = append(cmds, cmd)
+
+	// rail still gets every message even though it is no longer the
+	// always-visible left column (PaneLanes, above) -- its own fetch loop
+	// must keep running while some OTHER route is on screen, the same
+	// "background refresh while not visible" property every other pane
+	// already has (see this function's own doc comment).
+	next, cmd = m.rail.Update(msg)
 	m.rail = next.(rail.Model)
 	cmds = append(cmds, cmd)
 
@@ -412,14 +601,14 @@ func (m Model) routeAll(msg tea.Msg) (Model, tea.Cmd) {
 
 // resize is the fix for agent-tui#38's named trap: every mounted view
 // assumed it owned the whole terminal, so a WindowSizeMsg carrying the
-// terminal's own dimensions broke every pane it hit. Here the rail is sized
-// first, to its own fixed rail.RailWidth; its ACTUAL rendered width (border
-// and padding included) is then measured with lipgloss.Width rather than
-// recomputed by hand, so this file never has to track rail's internal
-// padding/border arithmetic to stay correct. Whatever terminal width is
-// left over -- never the raw terminal width -- is what every content pane
-// is sized to, whether it is the one currently visible or not (see
-// routeAll's doc comment for why every pane is kept live).
+// terminal's own dimensions broke every pane it hit. Here the nav sidebar
+// is sized first, to its own fixed nav.Model.Width() (SPEC-shell.md S3:
+// the sidebar replaces rail as the left column -- see Model's own doc
+// comment); whatever terminal width is left over -- never the raw
+// terminal width -- is what every content pane is sized to, including
+// rail now that it is one (PaneLanes), whether it is the one currently
+// visible or not (see routeAll's doc comment for why every pane is kept
+// live).
 func (m Model) resize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 	m.width, m.height = msg.Width, msg.Height
 	innerHeight := m.height - footerHeight
@@ -429,18 +618,22 @@ func (m Model) resize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 
 	var cmds []tea.Cmd
 
-	next, cmd := m.rail.Update(tea.WindowSizeMsg{Width: rail.RailWidth, Height: innerHeight})
-	m.rail = next.(rail.Model)
+	next, cmd := m.nav.Update(tea.WindowSizeMsg{Width: m.nav.Width(), Height: innerHeight})
+	m.nav = next.(nav.Model)
 	cmds = append(cmds, cmd)
 
-	m.railWidth = lipgloss.Width(m.rail.View())
-	m.contentWidth = m.width - m.railWidth
+	m.navWidth = m.nav.Width()
+	m.contentWidth = m.width - m.navWidth
 	if m.contentWidth < 0 {
 		m.contentWidth = 0
 	}
 	m.contentHeight = innerHeight
 
 	contentSize := tea.WindowSizeMsg{Width: m.contentWidth, Height: innerHeight}
+
+	next, cmd = m.rail.Update(contentSize)
+	m.rail = next.(rail.Model)
+	cmds = append(cmds, cmd)
 
 	if m.boardOK {
 		next, cmd := m.board.Update(contentSize)
@@ -468,19 +661,19 @@ func (m Model) resize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 	return m, tea.Batch(cmds...)
 }
 
-// View joins the rail, the active content pane, and the shell's own footer
-// -- clampHeight is load-bearing here, not cosmetic: a pane package that
-// renders one line taller than the height it was GIVEN (a trailing "\n" on
-// its last output line is enough) would otherwise push m.footer() past the
-// bottom of the terminal, since this whole composed string is one
-// tea.WithAltScreen() frame with no scrollback to fall back on. The rail
-// and every content pane already receive an exact height budget in
+// View joins the nav sidebar, the active content pane, and the shell's own
+// footer -- clampHeight is load-bearing here, not cosmetic: a pane package
+// that renders one line taller than the height it was GIVEN (a trailing
+// "\n" on its last output line is enough) would otherwise push m.footer()
+// past the bottom of the terminal, since this whole composed string is one
+// tea.WithAltScreen() frame with no scrollback to fall back on. The
+// sidebar and every content pane already receive an exact height budget in
 // resize(); View() is where that budget is actually enforced, once, rather
 // than trusted to every pane's own internal line arithmetic (gallery's
 // View() was measured to overrun its budget by exactly one blank trailing
 // line -- see this package's teatest coverage).
 func (m Model) View() string {
-	left := clampHeight(m.rail.View(), m.contentHeight)
+	left := clampHeight(m.nav.View(), m.contentHeight)
 	right := clampHeight(m.contentView(), m.contentHeight)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	return lipgloss.JoinVertical(lipgloss.Left, body, m.footer())
@@ -523,9 +716,33 @@ func (m Model) contentView() string {
 		return m.flow.View()
 	case PaneChat:
 		return m.chat.View()
+	case PaneLanes:
+		return m.rail.View()
+	case PaneStub:
+		return m.stubView()
 	default:
 		return m.homeView()
 	}
+}
+
+// stubView renders internal/stub.View (S5) for whatever nav route
+// routeToPane has no real Pane for -- title and description come from
+// m.nav.ActiveItem()/internal/stub.Descriptions, keyed by Label (S5's own
+// choice, made before S1's Item.ID existed as a stable key). A route with
+// no Descriptions entry (should not happen for anything in nav.Build()'s
+// tree, but a future addition to that tree could outrun this map) still
+// renders a real stub, just with a generic description rather than a
+// blank one -- "a visible stub beats a hidden screen" (S5) applies here
+// too.
+func (m Model) stubView() string {
+	// #73's nav exposes the active route id, not the item; Descriptions is
+	// keyed by the same ids nav.Build() emits, so the id is the lookup key.
+	title := m.nav.Active()
+	desc, ok := stub.Descriptions[title]
+	if !ok {
+		desc = "not built yet -- no description recorded for this route."
+	}
+	return lipgloss.Place(m.contentWidth, m.contentHeight, lipgloss.Left, lipgloss.Top, stub.View(m.theme, title, desc))
 }
 
 // legendStyle is Faint-only, deliberately: every OTHER style in this
@@ -551,8 +768,11 @@ func (m Model) footer() string {
 	// terminal width alongside a themeSaveErr appended below, or the error
 	// truncates before it says anything -- see this line's own git blame
 	// for the width budget that broke when [f5] flow, then [f6] chat, were
-	// added.
-	line := "[tab] focus:" + focusName + " [f1]home [f2] board [f3]cost [f4]gallery [f5]flow [f6]chat [q]quit"
+	// added. [↑↓] [enter] [←] [b] (SPEC-shell.md S3) are only meaningful
+	// while focus is on the sidebar -- shown always anyway, same as the
+	// f-keys above being shown while a different pane is active, rather
+	// than churning the legend's own width budget on every [tab] press.
+	line := "[tab] focus:" + focusName + " [↑↓] [enter] [←] [b] [f1]home [f2] board [f3]cost [f4]gallery [f5]flow [f6]chat [q]quit"
 	// themeSaveErr (agent-tui#51) is folded onto this same line rather
 	// than given its own -- footerHeight is a fixed one row every pane's
 	// own size budget is computed against (see resize()), so a second
@@ -573,7 +793,7 @@ func (m Model) homeView() string {
 		"[f4] gallery  view the glyph gallery (agent-tui#11)",
 		"[f5] flow     watch work move through the pipeline (agent-tui#64)",
 		"[f6] chat     live ACP session threads (agent-tui#20)",
-		"[tab] move focus into the rail on the left",
+		"[tab] move focus into the sidebar on the left",
 	}
 	return legendStyle.Width(m.contentWidth).Height(m.contentHeight).Render(
 		lipgloss.JoinVertical(lipgloss.Left, lines...),

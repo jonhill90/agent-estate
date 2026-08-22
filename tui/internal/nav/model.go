@@ -83,6 +83,40 @@ func (m Model) WithActive(id string) Model {
 // Active returns the currently highlighted item's ID.
 func (m Model) Active() string { return m.active }
 
+// Tree exposes the underlying tree so the shell can walk Flatten() to drive
+// the cursor -- this Model deliberately owns no cursor (see Update).
+func (m Model) Tree() Tree { return m.tree }
+
+// IsExpanded reports whether a group is open, so a cursor walk can skip the
+// children of a collapsed group.
+func (m Model) IsExpanded(groupID string) bool { return m.expanded[groupID] }
+
+// WithCollapsed closes a group.
+func (m Model) WithCollapsed(groupID string) Model {
+	next := make(map[string]bool, len(m.expanded))
+	for k, v := range m.expanded {
+		next[k] = v
+	}
+	delete(next, groupID)
+	m.expanded = next
+	return m
+}
+
+// WithExpandedToggled opens a closed group or closes an open one.
+func (m Model) WithExpandedToggled(groupID string) Model {
+	next := make(map[string]bool, len(m.expanded)+1)
+	for k, v := range m.expanded {
+		next[k] = v
+	}
+	if next[groupID] {
+		delete(next, groupID)
+	} else {
+		next[groupID] = true
+	}
+	m.expanded = next
+	return m
+}
+
 // WithTheme returns a copy of m painted with th -- the same per-pane seam
 // every other package in this repo exposes (internal/shell.applyTheme's
 // doc comment) so wiring this into the shell in S3 needs no signature
