@@ -28,9 +28,14 @@
 #   worktree.sh gc [--dry-run] [repo] [base]
 #                                           remove every worktree whose
 #                                            branch's content is already on
-#                                            [base] and whose tree is clean;
-#                                            --dry-run reports what it would
-#                                            remove and changes nothing
+#                                            [base], whose tree is clean, and
+#                                            that is not LIVE -- no tmux pane
+#                                            or process references it, and it
+#                                            is older than
+#                                            $WORKTREE_GC_MIN_AGE_SECONDS
+#                                            (default 3600); --dry-run reports
+#                                            what it would remove and changes
+#                                            nothing
 #
 # [repo] defaults to the current directory; [base] defaults to origin/main.
 # <slug> becomes branch `lane/<slug>` -- pass the issue and a short reason,
@@ -55,9 +60,24 @@
 # `gc` is a sweep, not a completion hook: it removes a worktree only once
 # both are true -- [base] already contains the branch's content (see
 # `branch_content_is_on_base` below; this was tip-ancestry until #169, which
-# a squash merge never satisfies) and its tree is clean (the same guard
-# `done` already applies, reused rather than reimplemented). Anything
-# unmerged or dirty is left alone and reported, not retried or forced.
+# a squash merge never satisfies), its tree is clean (the same guard `done`
+# already applies, reused rather than reimplemented), and it is not LIVE (see
+# `_gc_is_live` below, agent-supervisor#478). Anything unmerged, dirty, or
+# live is left alone and reported, not retried or forced.
+#
+# agent-supervisor#478: clean+merged is NOT the same question as "is anyone
+# using this tree right now". Measured 2026-08-21, twice in one tick: a lane
+# holding text typed-but-not-yet-submitted in its pane, or one that had just
+# started, has written nothing to disk yet -- a perfectly clean tree -- and
+# if its branch's content already landed on `base` (e.g. gc ran between a
+# stalled dispatch and a retry that claimed the same slug), the old predicate
+# matched exactly and reclaimed the worktree out from under the live pane.
+# `lanes.sh` then reports the lane `broken`; the same class of bug destroyed
+# a live lane's worktree mid-task on 2026-08-21, losing ~20 minutes of work
+# on PR #489. `_gc_is_live` adds three liveness signals, ANDed as "keep if
+# any one says maybe live" -- including "could not check": an uncollected
+# worktree costs disk, a deleted one costs work, and blindness must never
+# read as permission.
 #
 # What `gc` does NOT reach, measured on the live checkout 2026-08-11 and
 # stated here so the next reader does not re-derive it: of 44 non-ancestor
@@ -147,6 +167,88 @@ safe_remove() {
   [ -n "$dry" ] && return 0
   git -C "$target" worktree remove "$target" >&2 || return 1
   return 0
+}
+
+# agent-supervisor#478: is worktree $1 LIVE -- occupied by a tmux pane,
+# referenced by a running process, or simply too young to trust either signal
+# between tool calls? `gc`'s clean+merged predicate says nothing about this;
+# see the header comment above for the incident this closes.
+#
+# Three independent checks, each one able to say "keep" on its own:
+#   1. a tmux pane's #{pane_current_path} is inside it -- the direct signal.
+#   2. a running process's command line references it.
+#   3. it is younger than $WORKTREE_GC_MIN_AGE_SECONDS -- neither signal
+#      above is sufficient alone: a lane between tool calls holds no process
+#      reference at that instant, and a pane can be momentarily elsewhere.
+#      60 minutes (3600s) is what the supervisor's own sweep uses for the
+#      same kind of staleness floor (SUPERVISOR_LANE_SWEEP_STALE_AFTER).
+#
+# Bias to keeping, always: when a signal cannot be read at all -- tmux not
+# running, `ps` unreadable, the worktree's own mtime unreadable -- this
+# returns "live" (keep), the same direction as every check above it. An
+# uncollected worktree costs disk; a deleted one costs someone's work.
+#
+# Prints its reasoning to stderr (gc reports it as the skip reason) and
+# returns 0 if the worktree must be kept, 1 if it is clear to move on to the
+# existing clean/merged checks.
+GC_MIN_AGE_SECONDS="${WORKTREE_GC_MIN_AGE_SECONDS:-3600}"
+
+_gc_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
+
+# 0 = a pane's cwd is inside $1; 1 = tmux answered and none matched;
+# 2 = tmux itself could not be asked (no server, tmux missing, ...).
+_gc_tmux_occupies() {
+  local target_real="$1" panes pane pane_real
+  panes=$(tmux list-panes -a -F '#{pane_current_path}' 2>/dev/null) || return 2
+  while IFS= read -r pane; do
+    [ -n "$pane" ] || continue
+    pane_real=$(cd "$pane" 2>/dev/null && pwd -P) || continue
+    case "$pane_real" in
+      "$target_real"|"$target_real"/*) return 0 ;;
+    esac
+  done <<<"$panes"
+  return 1
+}
+
+# 0 = some process's command line references $1; 1 = ps answered and none
+# did; 2 = ps itself could not be asked.
+_gc_process_refs() {
+  local target_real="$1" out
+  out=$(ps -eo command 2>/dev/null) || return 2
+  [ -n "$out" ] || return 2
+  grep -F -q "$target_real" <<<"$out" && return 0
+  return 1
+}
+
+_gc_is_live() {
+  local p="$1" target_real mtime now age rc
+  target_real=$(cd "$p" 2>/dev/null && pwd -P) || target_real="$p"
+
+  _gc_tmux_occupies "$target_real"; rc=$?
+  case $rc in
+    0) echo "worktree: gc skipping $p -- a tmux pane's cwd is inside it (#478)" >&2; return 0 ;;
+    2) echo "worktree: gc skipping $p -- could not query tmux panes; refusing to guess whether it is live (#478)" >&2; return 0 ;;
+  esac
+
+  _gc_process_refs "$target_real"; rc=$?
+  case $rc in
+    0) echo "worktree: gc skipping $p -- a running process references it (#478)" >&2; return 0 ;;
+    2) echo "worktree: gc skipping $p -- could not query running processes; refusing to guess whether it is live (#478)" >&2; return 0 ;;
+  esac
+
+  mtime=$(_gc_mtime "$p")
+  if [ -z "$mtime" ]; then
+    echo "worktree: gc skipping $p -- could not read its age; refusing to guess whether it is live (#478)" >&2
+    return 0
+  fi
+  now=$(date +%s)
+  age=$((now - mtime))
+  if [ "$age" -lt "$GC_MIN_AGE_SECONDS" ]; then
+    echo "worktree: gc skipping $p -- only ${age}s old, younger than the ${GC_MIN_AGE_SECONDS}s liveness floor (#478)" >&2
+    return 0
+  fi
+
+  return 1
 }
 
 # Does <base> already contain branch <b>'s work? (agent-dotfiles#169)
@@ -492,6 +594,10 @@ gc)
     fi
     if [ -n "$SELF" ] && [ "$p" = "$SELF" ]; then
       echo "worktree: gc skipping $p -- this is the worktree gc is running in" >&2
+      skipped=$((skipped + 1))
+      continue
+    fi
+    if _gc_is_live "$p"; then
       skipped=$((skipped + 1))
       continue
     fi

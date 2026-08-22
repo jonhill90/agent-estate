@@ -9,6 +9,7 @@
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WT="$HERE/../../scripts/supervisor/worktree.sh"
+source "$HERE/../../scripts/supervisor/tmux-isolation.sh"
 pass=0; fail=0
 
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
@@ -33,6 +34,23 @@ echo "worktree.sh"
 D=$(mktemp -d)
 export WORKTREE_ROOT="$D/roots"
 mkdir -p "$WORKTREE_ROOT"
+
+# gc (agent-supervisor#478) now checks tmux pane occupancy before removing
+# anything. Every gc call in this suite runs against a private, throwaway
+# tmux server -- never this test process's own attached session, if any --
+# so "unoccupied" is measured for real instead of silently degrading to
+# "tmux unavailable, keep everything" whenever this suite happens to run
+# outside tmux. `-f /dev/null` skips the operator's own tmux.conf, same as
+# test_lane_done.sh's real-tmux fixture.
+RT="$D/tmux-rt"
+mkdir -p "$RT"
+rtmux() { env -u TMUX TMUX_TMPDIR="$RT" tmux -f /dev/null "$@"; }
+cleanup_rt() { unset TMUX; export TMUX_TMPDIR="$RT"; assert_isolated_tmux && tmux -f /dev/null kill-server 2>/dev/null; }
+ANCHOR="wt478-anchor-$$"
+if ! rtmux new-session -d -s "$ANCHOR" -c "$D" 2>/dev/null; then
+  echo "  FATAL: could not start a throwaway tmux server under \$RT -- gc's occupancy checks cannot be tested for real" >&2
+  exit 2
+fi
 
 # A minimal origin + clone, standing in for the real shared checkout.
 git init -q --bare "$D/origin.git"
@@ -257,8 +275,13 @@ git -C "$UNTRACKED_DEST" fetch -q origin
 echo "someone's unsaved scratch file" > "$UNTRACKED_DEST/scratch.txt"
 
 # --- gc --dry-run: says what a real run would do, changes nothing ----------
+# This section is about the merge/dirty predicate, not liveness -- run
+# against the isolated tmux server (so occupancy reads as a real "no" rather
+# than "unavailable") with the age floor lowered to 0 so these freshly
+# created fixtures clear it immediately, same as gc did before #478.
+gc478() { env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=0 bash "$WT" "$@"; }
 before=$(git -C "$REPO" worktree list)
-dry_out=$(bash "$WT" gc --dry-run "$REPO" origin/main 2>&1); dry_rc=$?
+dry_out=$(gc478 gc --dry-run "$REPO" origin/main 2>&1); dry_rc=$?
 after=$(git -C "$REPO" worktree list)
 want_exit "gc --dry-run exits 0" "$dry_rc" 0 "$dry_out"
 if [ "$before" = "$after" ]; then ok "gc --dry-run leaves 'git worktree list' byte-identical"; else bad "gc --dry-run leaves 'git worktree list' byte-identical" "$(diff <(echo "$before") <(echo "$after"))"; fi
@@ -273,7 +296,7 @@ if grep -q "would remove $SQUASH_REAL" <<<"$dry_out"; then ok "gc --dry-run name
 if grep -q "would remove $UNMERGED_REAL" <<<"$dry_out"; then bad "gc --dry-run does not offer to remove the unmerged worktree" "$dry_out"; else ok "gc --dry-run does not offer to remove the unmerged worktree"; fi
 if grep -q "would remove $DIRTY_REAL" <<<"$dry_out"; then bad "gc --dry-run does not offer to remove the dirty worktree" "$dry_out"; else ok "gc --dry-run does not offer to remove the dirty worktree"; fi
 
-gc_out=$(bash "$WT" gc "$REPO" origin/main 2>&1); gc_rc=$?
+gc_out=$(gc478 gc "$REPO" origin/main 2>&1); gc_rc=$?
 # What the dry run promised is what the real run did.
 dry_would=$(grep -o "gc would remove [^ ]*" <<<"$dry_out" | sed 's/.*gc would remove //' | sort)
 gc_did=$(grep -o "gc removed [^ ]*" <<<"$gc_out" | sed 's/.*gc removed //' | sort)
@@ -307,7 +330,7 @@ fi
 
 # Idempotent: a second run over the same repo changes nothing further -- the
 # unmerged and dirty candidates are still there, and gc reports 0 removed.
-gc_out2=$(bash "$WT" gc "$REPO" origin/main 2>&1); gc_rc2=$?
+gc_out2=$(gc478 gc "$REPO" origin/main 2>&1); gc_rc2=$?
 want_exit "gc second run exits 0" "$gc_rc2" 0 "$gc_out2"
 if grep -q "removed 0" <<<"$gc_out2"; then ok "gc is idempotent -- second run removes nothing"; else bad "gc is idempotent -- second run removes nothing" "$gc_out2"; fi
 if [ -d "$UNMERGED_DEST" ] && [ -d "$DIRTY_DEST" ]; then ok "gc second run left the same worktrees untouched"; else bad "gc second run left the same worktrees untouched" "one of them disappeared"; fi
@@ -320,6 +343,181 @@ git -C "$STAGED_DEST" reset -q --hard
 bash "$WT" done "$STAGED_DEST" >/dev/null 2>&1
 rm -f "$UNTRACKED_DEST/scratch.txt"
 bash "$WT" done "$UNTRACKED_DEST" >/dev/null 2>&1
+
+# --- gc (agent-supervisor#478): clean+merged is not the same question as
+# "is anyone using this tree right now". Measured 2026-08-21, twice in one
+# tick: a lane holding text typed-but-not-yet-submitted, or one that had just
+# started, has a perfectly clean and often already-merged tree -- the old
+# predicate matched it exactly and reclaimed a live lane's worktree mid-task,
+# costing ~20 minutes of in-progress work on PR #489.
+# Candidate G: clean, merged, UNOCCUPIED, YOUNG (just created) -> the age
+# backstop keeps it, with the real default 3600s floor -- no override here.
+out=$(bash "$WT" new 478-young "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "gc setup: new (young case) exits 0" "$rc" 0 "$out"
+YOUNG_DEST="$out"
+require_dest "new (young case)" "$YOUNG_DEST"
+echo "young change" >> "$YOUNG_DEST/file.txt"
+git -C "$YOUNG_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "young merged work"
+git -C "$YOUNG_DEST" push -q origin lane/478-young
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/478-young
+git -C "$REPO" push -q origin main
+git -C "$YOUNG_DEST" fetch -q origin
+
+young_out=$(env -u TMUX TMUX_TMPDIR="$RT" bash "$WT" gc "$REPO" origin/main 2>&1); young_rc=$?
+want_exit "gc (young case) exits 0" "$young_rc" 0 "$young_out"
+if [ -d "$YOUNG_DEST" ]; then ok "gc leaves a clean, merged, unoccupied worktree in place while it is too young (age backstop, #478)"; else bad "gc leaves a clean, merged, unoccupied worktree in place while it is too young (age backstop, #478)" "$young_out"; fi
+if grep -q "liveness floor" <<<"$young_out"; then ok "the skip names the liveness floor"; else bad "the skip names the liveness floor" "$young_out"; fi
+
+# Candidate H: clean, merged, UNOCCUPIED, OLD ENOUGH (floor lowered to 1s and
+# given time to clear it) -> gc DOES remove it. This is the "gc must still
+# collect something" direction -- mutation-checked below.
+out=$(bash "$WT" new 478-old "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "gc setup: new (old-enough case) exits 0" "$rc" 0 "$out"
+OLD_DEST="$out"
+require_dest "new (old-enough case)" "$OLD_DEST"
+echo "old-enough change" >> "$OLD_DEST/file.txt"
+git -C "$OLD_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "old-enough merged work"
+git -C "$OLD_DEST" push -q origin lane/478-old
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/478-old
+git -C "$REPO" push -q origin main
+git -C "$OLD_DEST" fetch -q origin
+sleep 2
+
+old_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=1 bash "$WT" gc "$REPO" origin/main 2>&1); old_rc=$?
+want_exit "gc (old-enough case) exits 0" "$old_rc" 0 "$old_out"
+if [ -d "$OLD_DEST" ]; then bad "gc removes a clean, merged, unoccupied worktree once it clears the age floor (#478)" "$OLD_DEST still present: $old_out"; else ok "gc removes a clean, merged, unoccupied worktree once it clears the age floor (#478)"; fi
+
+# Candidate I: clean, merged, OLD ENOUGH, but OCCUPIED by a REAL tmux pane
+# -> gc must NOT remove it, no matter how clean/merged/old it looks. This is
+# the dangerous direction -- #478's actual incident -- and "verify the
+# instrument" means proving a real pane is actually detected, not assuming
+# an occupancy check that always answers "unoccupied" would look the same.
+out=$(bash "$WT" new 478-occupied "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "gc setup: new (occupied case) exits 0" "$rc" 0 "$out"
+OCC_DEST="$out"
+require_dest "new (occupied case)" "$OCC_DEST"
+echo "occupied change" >> "$OCC_DEST/file.txt"
+git -C "$OCC_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "occupied merged work"
+git -C "$OCC_DEST" push -q origin lane/478-occupied
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/478-occupied
+git -C "$REPO" push -q origin main
+git -C "$OCC_DEST" fetch -q origin
+sleep 2
+
+OCC_SESSION="wt478-occupied-$$"
+if rtmux new-session -d -s "$OCC_SESSION" -c "$OCC_DEST" 2>/dev/null; then
+  ok "verify the instrument: a scratch tmux pane was pointed at the candidate worktree"
+  occ_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=1 bash "$WT" gc "$REPO" origin/main 2>&1); occ_rc=$?
+  want_exit "gc (occupied case) exits 0" "$occ_rc" 0 "$occ_out"
+  if [ -d "$OCC_DEST" ]; then ok "gc refuses to remove a worktree a live tmux pane is pointed at (#478)"; else bad "gc refuses to remove a worktree a live tmux pane is pointed at (#478)" "$occ_out"; fi
+  if grep -q "tmux pane's cwd is inside it" <<<"$occ_out"; then ok "the refusal names the occupying pane as the reason"; else bad "the refusal names the occupying pane as the reason" "$occ_out"; fi
+  rtmux kill-session -t "$OCC_SESSION" 2>/dev/null
+else
+  bad "verify the instrument: a scratch tmux pane was pointed at the candidate worktree" "tmux new-session failed -- occupancy could not be proven for real"
+fi
+
+# Candidate J: same shape as H (clean/merged/old-enough/unoccupied) but tmux
+# itself is UNAVAILABLE -- an empty TMUX_TMPDIR with no server ever started
+# there -- so gc must KEEP it and say why, not read blindness as permission.
+out=$(bash "$WT" new 478-unavail "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "gc setup: new (tmux-unavailable case) exits 0" "$rc" 0 "$out"
+UNAVAIL_DEST="$out"
+require_dest "new (tmux-unavailable case)" "$UNAVAIL_DEST"
+echo "unavailable-signal change" >> "$UNAVAIL_DEST/file.txt"
+git -C "$UNAVAIL_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "tmux-unavailable merged work"
+git -C "$UNAVAIL_DEST" push -q origin lane/478-unavail
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/478-unavail
+git -C "$REPO" push -q origin main
+git -C "$UNAVAIL_DEST" fetch -q origin
+sleep 2
+
+NO_TMUX_DIR="$D/tmux-empty"
+mkdir -p "$NO_TMUX_DIR"
+unavail_out=$(env -u TMUX TMUX_TMPDIR="$NO_TMUX_DIR" WORKTREE_GC_MIN_AGE_SECONDS=1 bash "$WT" gc "$REPO" origin/main 2>&1); unavail_rc=$?
+want_exit "gc (tmux-unavailable case) exits 0" "$unavail_rc" 0 "$unavail_out"
+if [ -d "$UNAVAIL_DEST" ]; then ok "gc keeps a clean/merged/old/unoccupied worktree when tmux itself cannot be asked (#478)"; else bad "gc keeps a clean/merged/old/unoccupied worktree when tmux itself cannot be asked (#478)" "$unavail_out"; fi
+if grep -q "could not query tmux panes" <<<"$unavail_out"; then ok "the skip says tmux could not be asked, not that the tree is unoccupied"; else bad "the skip says tmux could not be asked, not that the tree is unoccupied" "$unavail_out"; fi
+
+# --- MUTATION: disable the occupancy check -> candidate I must go RED. ------
+# Proves that assertion is actually pinned to the occupancy check, not to
+# the age floor or something else already refusing removal.
+MUT_OCC="$D/worktree-mutant-occupancy.sh"
+mut_rc=0
+python3 - "$WT" "$MUT_OCC" <<'PY' || mut_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '  _gc_tmux_occupies "$target_real"; rc=$?'
+replacement = '  _gc_tmux_occupies "$target_real"; rc=$?; rc=1'
+assert marker in text, "occupancy call not found -- script shape changed"
+assert text.count(marker) == 1, "occupancy call not unique -- script shape changed"
+open(dst, "w").write(text.replace(marker, replacement, 1))
+PY
+if [ "$mut_rc" -ne 0 ]; then
+  bad "setup: patched a copy of worktree.sh with the occupancy check forced to 'not occupied'" "could not patch $WT (exit $mut_rc)"
+else
+  ok "setup: patched a copy of worktree.sh with the occupancy check forced to 'not occupied'"
+  chmod +x "$MUT_OCC"
+  if rtmux new-session -d -s "$OCC_SESSION" -c "$OCC_DEST" 2>/dev/null; then
+    mut_occ_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=1 bash "$MUT_OCC" gc "$REPO" origin/main 2>&1)
+    rtmux kill-session -t "$OCC_SESSION" 2>/dev/null
+    if [ ! -d "$OCC_DEST" ]; then
+      ok "mutation confirmed: disabling the occupancy check lets gc remove a worktree a live pane is pointed at (candidate I's GREEN assertion would now be RED)"
+    else
+      bad "mutation confirmed: disabling the occupancy check lets gc remove a worktree a live pane is pointed at" "expected removal on the mutant, $OCC_DEST is still present: $mut_occ_out"
+    fi
+  else
+    bad "mutation confirmed: disabling the occupancy check lets gc remove a worktree a live pane is pointed at" "tmux new-session failed on the mutant run"
+  fi
+fi
+
+# --- MUTATION: force the whole liveness predicate to always say "live" -----
+# (the shape of a gc that appears to run but collects nothing, same failure
+# the header warns caused an M3 Pro's 829-worktree pile-up) -> candidate H
+# must go RED.
+MUT_NONE="$D/worktree-mutant-nogc.sh"
+mut_rc=0
+python3 - "$WT" "$MUT_NONE" <<'PY' || mut_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '_gc_is_live() {'
+replacement = '_gc_is_live() { return 0; }\n_gc_is_live_disabled() {'
+assert marker in text, "_gc_is_live definition not found -- script shape changed"
+assert text.count(marker) == 1, "_gc_is_live definition not unique -- script shape changed"
+open(dst, "w").write(text.replace(marker, replacement, 1))
+PY
+if [ "$mut_rc" -ne 0 ]; then
+  bad "setup: patched a copy of worktree.sh whose liveness check always says 'live'" "could not patch $WT (exit $mut_rc)"
+else
+  ok "setup: patched a copy of worktree.sh whose liveness check always says 'live'"
+  chmod +x "$MUT_NONE"
+  out=$(bash "$WT" new 478-nogc "$REPO" origin/main 2>/dev/null); rc=$?
+  if [ "$rc" -eq 0 ] && [ -n "$out" ] && [ -d "$out" ]; then
+    NOGC_DEST="$out"
+    echo "nogc change" >> "$NOGC_DEST/file.txt"
+    git -C "$NOGC_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "nogc merged work"
+    git -C "$NOGC_DEST" push -q origin lane/478-nogc
+    git -C "$REPO" fetch -q origin
+    git -C "$REPO" merge -q --no-edit origin/lane/478-nogc
+    git -C "$REPO" push -q origin main
+    git -C "$NOGC_DEST" fetch -q origin
+    sleep 2
+    mut_none_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=1 bash "$MUT_NONE" gc "$REPO" origin/main 2>&1)
+    if [ -d "$NOGC_DEST" ]; then
+      ok "mutation confirmed: a liveness check that always says 'live' collects nothing, even a clean/merged/old/unoccupied worktree (candidate H's GREEN assertion would now be RED)"
+    else
+      bad "mutation confirmed: a liveness check that always says 'live' collects nothing" "expected $NOGC_DEST to survive the mutant, it was removed: $mut_none_out"
+    fi
+    bash "$WT" done "$NOGC_DEST" >/dev/null 2>&1
+  else
+    bad "mutation confirmed: a liveness check that always says 'live' collects nothing" "setup: new (nogc case) failed, rc=$rc: $out"
+  fi
+fi
 
 # --- agent-supervisor#367: the live worktree must never be removed, even --
 # --- when it is exactly the shape gc/done would otherwise happily take: ---
@@ -396,6 +594,10 @@ git -C "$REPO" checkout -q -- file.txt
 bash "$WT" done "$STASH_A" >/dev/null 2>&1
 bash "$WT" done "$STASH_B" >/dev/null 2>&1
 bash "$WT" done "$STASH_D" >/dev/null 2>&1
+
+# Tear down the private throwaway tmux server -- never the default socket,
+# scoped to $RT and gated by assert_isolated_tmux, same as test_lane_done.sh.
+cleanup_rt
 
 rm -rf "$D"
 
