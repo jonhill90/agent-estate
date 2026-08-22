@@ -23,7 +23,7 @@ import (
 // warnings: the estate's failures came from checks that reported a problem and
 // carried on anyway.
 type Gates struct {
-	Budget   *budget.Tracker // nil disables
+	Budget   *budget.Tracker  // nil disables
 	Pressure *pressure.Limits // nil disables
 }
 
@@ -61,23 +61,37 @@ type Outcome struct {
 // On timeout the task is deliberately left NON-terminal. A turn that has not
 // come back is UNKNOWN, not failed -- the distinction #488 was filed over. A
 // human or a later liveness check resolves it; this function will not guess.
-func Run(ctx context.Context, l *ledger.DB, a *agent.Claude, taskID, lane, brief string) Outcome {
-	return RunGated(ctx, l, a, taskID, lane, brief, Gates{})
+func Run(ctx context.Context, l *ledger.DB, a agent.Adapter, cwd, harness, taskID, lane, brief string) Outcome {
+	return RunGated(ctx, l, a, cwd, harness, taskID, lane, brief, Gates{})
 }
 
-// RunGated is Run with pre-spawn gates.
-func RunGated(ctx context.Context, l *ledger.DB, a *agent.Claude, taskID, lane, brief string, g Gates) Outcome {
+// RunGated is Run with pre-spawn gates. `a` is an agent.Adapter, not a
+// *agent.Claude -- this is the one place the daemon becomes multi-harness:
+// whatever the caller passed (Claude, Codex, or a future adapter) is driven
+// through the exact same lifecycle, gates, ledger stamps and Liveness
+// classification. Nothing below this line knows or cares which vendor CLI
+// `a` wraps.
+//
+// `cwd` and `harness` are passed explicitly rather than read off the
+// adapter (a.Cwd, as the old *agent.Claude-typed signature did) because
+// Adapter is deliberately narrow -- Run(ctx, prompt) only, see adapter.go's
+// own doc comment -- and every caller already has both in hand from the
+// same Job/flag it used to build `a`. `harness` flows straight into
+// ledger.EnsureLane so the lane's own `harness` column records which
+// adapter actually ran, not a hardcoded 'claude' regardless of `a`'s real
+// type (see EnsureLane's own doc comment for the bug this replaces).
+func RunGated(ctx context.Context, l *ledger.DB, a agent.Adapter, cwd, harness, taskID, lane, brief string, g Gates) Outcome {
 	start := time.Now()
 	if err := g.Check(); err != nil {
 		// Refused before anything was created: no ledger row, no process, no
 		// cost. A refusal is not a failed task.
 		return Outcome{TaskID: taskID, Err: err, Liveness: agent.LivenessBlocked}
 	}
-	if err := l.EnsureLane(lane, a.Cwd); err != nil {
+	if err := l.EnsureLane(lane, cwd, harness); err != nil {
 		return Outcome{TaskID: taskID, Err: err}
 	}
 	if err := l.Create(ledger.Task{
-		ID: taskID, Lane: lane, Summary: firstLine(brief), WorktreePath: a.Cwd,
+		ID: taskID, Lane: lane, Summary: firstLine(brief), WorktreePath: cwd,
 	}); err != nil {
 		return Outcome{TaskID: taskID, Err: err}
 	}

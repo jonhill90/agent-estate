@@ -88,17 +88,43 @@ func (l *DB) Task(id string) (*Task, error) {
 // rather than quietly fixed, because "I ran it and it failed" is the evidence
 // that separates this from code that merely compiles.
 //
-// `transport='claude-print'` is the honest value: this daemon drives a
-// subprocess, it does not type into a pane. The enum already had the value --
-// the shell supervisor just rarely used it.
-func (l *DB) EnsureLane(lane, repo string) error {
+// `transport='claude-print'` is the honest value for EVERY adapter this
+// daemon drives, Codex included: it names "this daemon drives a subprocess,
+// it does not type into a pane", not literally "claude". The enum has no
+// slot for a second non-interactive subprocess transport (`send-keys`,
+// `acp`, `pi-rpc`, `claude-print` are the only legal values -- see
+// ledger_test.go's schema mirror) and widening it is a live-ledger schema
+// migration this package's own top-of-file comment rules out ("The schema
+// is NOT redesigned"). Reusing `claude-print` for Codex is the same
+// "closest honest thing, not a fabricated shape" call codex.go's own doc
+// comment makes about CostUSD -- flagged here, not silently done, and
+// tracked as a real gap: a reader of `lanes.transport` cannot currently
+// tell a Claude-driven lane from a Codex-driven one from that column alone.
+// `lanes.harness`, below, is the column that CAN and DOES tell them apart.
+//
+// `harness` (the parameter, not just the column) is what makes the ledger
+// match what actually ran: before this, EnsureLane hardcoded harness='claude'
+// unconditionally, so a lane dispatched by the (then nonexistent) Codex
+// adapter would have recorded a false 'claude' in a column whose own CHECK
+// constraint already listed 'codex' as legal -- caught by running a real
+// Codex dispatch end-to-end against a scratch ledger and reading the row
+// back, not by inspection.
+func (l *DB) EnsureLane(lane, repo, harness string) error {
 	now := time.Now().Unix()
+	h := harness
+	if h == "" {
+		h = "claude"
+	}
+	command := "claude -p"
+	if h == "codex" {
+		command = "codex exec"
+	}
 	_, err := l.db.Exec(`INSERT INTO lanes
 		(lane, pane_id, nonce, harness, repo, server_id, session_id, command,
 		 harness_session_id, harness_project_dir, transport, updated_at)
-		VALUES (?, '', '', 'claude', ?, 'supervisord', '', 'claude -p', '', '', 'claude-print', ?)
-		ON CONFLICT(lane) DO UPDATE SET updated_at=excluded.updated_at`,
-		lane, repo, now)
+		VALUES (?, '', '', ?, ?, 'supervisord', '', ?, '', '', 'claude-print', ?)
+		ON CONFLICT(lane) DO UPDATE SET harness=excluded.harness, command=excluded.command, updated_at=excluded.updated_at`,
+		lane, h, repo, command, now)
 	if err != nil {
 		return fmt.Errorf("ledger: ensure lane %s: %w", lane, err)
 	}

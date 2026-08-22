@@ -15,6 +15,13 @@ type Job struct {
 	Lane   string
 	Brief  string
 	Cwd    string
+	// Harness names which agent.Adapter this job dispatches through --
+	// "claude", "codex", or empty (caller's mk decides the default). This is
+	// the field that makes adapter selection PER JOB rather than per batch:
+	// a mk func keyed on Job.Harness can hand back a *agent.Claude for one
+	// row of a batch file and a *agent.Codex for the next, so one -file can
+	// mix harnesses across a genuinely multi-harness estate.
+	Harness string
 }
 
 // DefaultConcurrency leaves headroom rather than saturating the machine.
@@ -42,14 +49,25 @@ func DefaultConcurrency() int {
 //
 // Ordering of the returned slice matches the input, so a caller can pair
 // outcomes to jobs without threading an index through.
-func RunPool(ctx context.Context, l *ledger.DB, mk func(Job) *agent.Claude, jobs []Job, workers int) []Outcome {
+func RunPool(ctx context.Context, l *ledger.DB, mk func(Job) (agent.Adapter, string), jobs []Job, workers int) []Outcome {
 	return RunPoolGated(ctx, l, mk, jobs, workers, Gates{})
 }
 
 // RunPoolGated is RunPool with pre-spawn gates evaluated PER JOB, not once for
 // the batch. Spend accumulates while the batch runs, so a cap checked only at
 // the start is a cap that does not bind.
-func RunPoolGated(ctx context.Context, l *ledger.DB, mk func(Job) *agent.Claude, jobs []Job, workers int, g Gates) []Outcome {
+//
+// `mk` returns (agent.Adapter, harness) rather than just an adapter -- this
+// is what makes per-job adapter selection possible AND keeps the ledger
+// honest: mk reads j.Harness (or applies its own default when a job leaves
+// it empty) and hands back both the concrete adapter it built and the
+// harness NAME it actually resolved to, so RunGated's EnsureLane call
+// records what really ran rather than trusting j.Harness verbatim -- a job
+// that left Harness empty and got mk's default adapter must not record an
+// empty/wrong harness column just because the Job itself never named one.
+// RunPoolGated itself never branches on harness; it drives whatever mk
+// handed back through the same RunGated call every other job uses.
+func RunPoolGated(ctx context.Context, l *ledger.DB, mk func(Job) (agent.Adapter, string), jobs []Job, workers int, g Gates) []Outcome {
 	if workers <= 0 {
 		workers = DefaultConcurrency()
 	}
@@ -72,8 +90,8 @@ func RunPoolGated(ctx context.Context, l *ledger.DB, mk func(Job) *agent.Claude,
 			}
 			defer func() { <-sem }()
 
-			a := mk(j)
-			out[i] = RunGated(ctx, l, a, j.TaskID, j.Lane, j.Brief, g)
+			a, resolvedHarness := mk(j)
+			out[i] = RunGated(ctx, l, a, j.Cwd, resolvedHarness, j.TaskID, j.Lane, j.Brief, g)
 		}(i, j)
 	}
 	wg.Wait()

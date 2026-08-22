@@ -83,6 +83,19 @@ var (
 	ErrTimeout = errors.New("agent: turn did not complete before the deadline")
 )
 
+// DryRunArgv returns the exact argv Run would exec (bin first, then every
+// flag), for callers that only want to show what would run -- `supervisord
+// run -dry-run` (cmd/supervisord/main.go) -- without duplicating args()'s
+// flag-building logic a second time and risking the printout drifting from
+// what Run actually execs.
+func (c *Claude) DryRunArgv(prompt string) []string {
+	bin := c.Bin
+	if bin == "" {
+		bin = "claude"
+	}
+	return append([]string{bin}, c.args(prompt)...)
+}
+
 func (c *Claude) args(prompt string) []string {
 	a := []string{"-p", "--output-format", "json"}
 	if c.Model != "" {
