@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/ssh v0.0.0-20250128164007-98fd5ae11894
 	github.com/charmbracelet/wish v1.4.7
 	github.com/charmbracelet/x/exp/teatest v0.0.0-20260813141921-f091cedeaf78
+	github.com/lrstanley/bubblezone v1.0.0
 	github.com/muesli/termenv v0.16.0
 )
 

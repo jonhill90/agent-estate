@@ -103,6 +103,16 @@ func (m Model) Cursor() int { return m.cursor }
 // children of a collapsed group.
 func (m Model) IsExpanded(groupID string) bool { return m.expanded[groupID] }
 
+// IconsOnly reports whether [b] has collapsed the sidebar to icons-only.
+// A caller that needs to reconstruct View()'s own visible-line layout from
+// the outside (internal/shell's mouse zone marking, feat/mouse-nav) needs
+// this: icons-only mode skips every group header LINE entirely (View()'s
+// own `if m.iconsOnly { continue }` on the header case), so the mapping
+// from Flatten() index to rendered line number is not the same in both
+// modes, and nothing outside this package can tell "b" was pressed
+// without asking.
+func (m Model) IconsOnly() bool { return m.iconsOnly }
+
 // WithCollapsed closes a group.
 func (m Model) WithCollapsed(groupID string) Model {
 	next := make(map[string]bool, len(m.expanded))

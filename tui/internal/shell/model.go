@@ -15,6 +15,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/jonhill90/keelson/internal/admin"
 	"github.com/jonhill90/keelson/internal/agents"
@@ -246,6 +247,15 @@ type Model struct {
 	// yet or the last one succeeded; footer() renders it next to the
 	// theme name exactly like board/cost/gallery already render their
 	// own themeNotice.
+	// zones is this model's OWN bubblezone manager, not the package global.
+	// Per-instance because the global has to be initialised by whoever builds
+	// the program, and every shell test constructs a Model directly -- with a
+	// nil global, Mark and Scan silently no-op and every nav item renders
+	// perfectly while being unclickable. That failure is indistinguishable
+	// from "this terminal has no mouse", which is exactly the kind of silent
+	// wrong-but-green this estate keeps paying for.
+	zones *zone.Manager
+
 	themeSaveErr string
 }
 
@@ -262,6 +272,7 @@ type Model struct {
 // instead of running board's own fetch loop.
 func New(r rail.Model, b board.Model, boardOK bool, boardUnavailable string, c cost.Model, g gallery.Model, fl flow.Model, ch chat.Model) Model {
 	return Model{
+		zones:            zone.New(),
 		nav:              nav.New(),
 		rail:             r,
 		board:            b,
@@ -398,6 +409,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// together -- the defect #48's four-owner diff could not fix
 		// even after a rebase.
 		return m.cycleTheme()
+
+	case tea.MouseMsg:
+		// Nav clicks first; anything the shell does not own falls through to
+		// the focused pane, which may have its own clickable regions.
+		if next, cmd, handled := m.handleMouse(msg); handled {
+			return next, cmd
+		}
+		// Not a nav click: hand it to the focused pane, which may own its
+		// own clickable regions.
+		next, cmd := m.routeAll(msg)
+		return next, cmd
 
 	case tea.KeyMsg:
 		switch msg.String() {
@@ -833,10 +855,14 @@ func (m Model) resize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 // View() was measured to overrun its budget by exactly one blank trailing
 // line -- see this package's teatest coverage).
 func (m Model) View() string {
-	left := clampHeight(m.nav.View(), m.contentHeight)
+	left := clampHeight(m.renderNavWithZones(), m.contentHeight)
 	right := clampHeight(m.contentView(), m.contentHeight)
 	body := lipgloss.JoinHorizontal(lipgloss.Top, left, right)
-	return lipgloss.JoinVertical(lipgloss.Left, body, m.footer())
+	// zone.Scan MUST wrap the outermost render, once. It strips the markers
+	// and records where each zone landed, so InBounds can answer on the next
+	// mouse event. Forgetting it makes every zone silently unclickable --
+	// which looks exactly like a mouse that is not enabled.
+	return m.zones.Scan(lipgloss.JoinVertical(lipgloss.Left, body, m.footer()))
 }
 
 // clampHeight forces s to exactly n lines: extra trailing lines are
@@ -942,16 +968,42 @@ func (m Model) footer() string {
 	// while focus is on the sidebar -- shown always anyway, same as the
 	// f-keys above being shown while a different pane is active, rather
 	// than churning the legend's own width budget on every [tab] press.
-	line := "[tab] focus:" + focusName + " [↑↓] [enter] [←] [b] [f1]home [f2] board [f3]cost [f4]gallery [f5]flow [f6]chat [q]quit"
-	// themeSaveErr (agent-tui#51) is folded onto this same line rather
-	// than given its own -- footerHeight is a fixed one row every pane's
-	// own size budget is computed against (see resize()), so a second
-	// line here would silently shrink every pane by one row rather than
-	// actually reporting the failure.
+	//
+	// The footer is built TWICE: once plain, once with zone markers.
+	//
+	// WHY, and it is not premature: bubblezone's markers are zero-width when
+	// rendered but are real bytes in the Go string, so truncate() measured the
+	// marked line and cut the themeSaveErr off before it could be read. Found
+	// by running the suite, not by reading it -- TestKeyTSurfacesASaveFailure
+	// went red on exactly that. Width decisions are made on the PLAIN text;
+	// markers are only added once the line is known to fit.
+	//
+	// At a width too narrow for the full legend the marked version is dropped
+	// entirely: the text truncates and stays readable, and the nav simply is
+	// not clickable at that size. Degrading the mouse rather than the words is
+	// the right way round -- an unreadable footer helps nobody, and the
+	// keyboard still works.
+	//
+	// Only [f4]gallery/[f5]flow are marked here -- home/board/cost/chat now
+	// have real rows in the sidebar (nav.Build()'s tree) and are clicked
+	// there instead (handleMouse's sidebar-row zones); gallery and flow
+	// predate SPEC-shell.md and have no sidebar route (routeToPane's own
+	// doc comment), so the footer is still their only click target.
+	plain := "[tab] focus:" + focusName + " [↑↓] [enter] [←] [b] [f1]home [f2] board [f3]cost [f4]gallery [f5]flow [f6]chat [q]quit"
+	marked := m.zones.Mark(zoneFocus, "[tab] focus:"+focusName) + " [↑↓] [enter] [←] [b] [f1]home [f2] board [f3]cost " +
+		m.zones.Mark(zoneGallery, "[f4]gallery") + " " +
+		m.zones.Mark(zoneFlow, "[f5]flow") + " [f6]chat " +
+		m.zones.Mark(zoneQuit, "[q]quit")
+
+	suffix := ""
 	if m.themeSaveErr != "" {
-		line += "  ! theme not saved: " + m.themeSaveErr
+		suffix = "  ! theme not saved: " + m.themeSaveErr
 	}
-	return legendStyle.Width(m.width).Render(truncate(line, m.width))
+
+	if m.width > 0 && len(plain)+len(suffix) > m.width {
+		return legendStyle.Width(m.width).Render(truncate(plain+suffix, m.width))
+	}
+	return legendStyle.Width(m.width).Render(marked + suffix)
 }
 
 // homeView used to advertise the f1-f6 keys as if they were the only way

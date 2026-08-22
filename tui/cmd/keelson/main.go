@@ -399,7 +399,11 @@ func main() {
 		return
 	}
 
-	p := tea.NewProgram(m, tea.WithAltScreen())
+	// WithMouseCellMotion, not WithMouseAllMotion: cell motion reports press,
+	// release and drag, which is everything a click needs. All-motion adds an
+	// event per pixel of pointer movement, which floods Update for no gain
+	// here -- and a flooded Update is how a TUI starts feeling slow.
+	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		fmt.Fprintln(os.Stderr, "keelson:", err)
 		os.Exit(1)
