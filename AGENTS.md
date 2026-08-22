@@ -3,6 +3,36 @@
 *(`AGENTS.md` and `CLAUDE.md` are the same file — one is a symlink, so there is
 no second copy to drift.)*
 
+## Before you ask Jon anything — read this first
+
+Jon has stated this more than twenty times. It is a **hard** parameter in his
+corpus and it keeps being broken, so it goes at the top of the file rather than
+somewhere polite.
+
+**Exhaust the record before a question reaches him**, in this order:
+
+1. **Query the corpus.** `~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3`
+   — 3,700+ of his own prompts, 900+ live hard constraints. Views:
+   `live_parameters`, `open_questions`, `unacknowledged`, `possibility_count`.
+   If you have not queried it this session, you have not earned the question.
+2. **Read the docs and the code.** `agent-dotfiles/docs/` carries ~2,467 lines
+   of spec — PRD, SPEC, loop-engineering, supervisor-disposition, loop-signals.
+   A loop was once declared "never planned" because someone searched the wrong
+   repository.
+3. **Convene a council** (`ask-a-council`) when the failure modes are plural.
+4. **`sanity-check` or `devils-advocate`** when it is one decision that needs
+   attacking rather than several lenses.
+
+**Only INTENT questions reach him.** His words, weight hard: *"the right move is
+to ask questions that determine intent, not to ask him to make your decisions."*
+Architecture, sequencing, which-PR-next, how-to-implement — those are yours.
+Deciding them is the job.
+
+**Why this fails, so you can catch yourself:** asking is safe. If he picks, you
+cannot have picked wrong. It is the same instinct that ships a stub reading
+"not built yet" instead of a populated view — the defensible option over the
+useful one. Choose the useful one.
+
 Read this before changing anything. It is short on purpose. [`README.md`](README.md)
 explains what the system is; this explains what will bite you.
 
