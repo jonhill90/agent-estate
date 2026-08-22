@@ -22,6 +22,11 @@ type Job struct {
 	// row of a batch file and a *agent.Codex for the next, so one -file can
 	// mix harnesses across a genuinely multi-harness estate.
 	Harness string
+	// Issue is this job's own GitHub issue, or nil for a task with no issue
+	// behind it (a demo/proof task, e.g.) -- passed straight to RunGated;
+	// see IssueRef's own doc comment for why nil is a real, distinct state
+	// here, not a zero value standing in for "issue 0".
+	Issue *IssueRef
 }
 
 // DefaultConcurrency leaves headroom rather than saturating the machine.
@@ -91,7 +96,7 @@ func RunPoolGated(ctx context.Context, l *ledger.DB, mk func(Job) (agent.Adapter
 			defer func() { <-sem }()
 
 			a, resolvedHarness := mk(j)
-			out[i] = RunGated(ctx, l, a, j.Cwd, resolvedHarness, j.TaskID, j.Lane, j.Brief, g)
+			out[i] = RunGated(ctx, l, a, j.Cwd, resolvedHarness, j.TaskID, j.Lane, j.Brief, j.Issue, g)
 		}(i, j)
 	}
 	wg.Wait()
