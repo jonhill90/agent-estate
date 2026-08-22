@@ -23,6 +23,7 @@ import (
 	"github.com/jonhill90/keelson/internal/chat"
 	"github.com/jonhill90/keelson/internal/connectors"
 	"github.com/jonhill90/keelson/internal/cost"
+	"github.com/jonhill90/keelson/internal/dashboard"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
 	"github.com/jonhill90/keelson/internal/mcpservers"
@@ -66,6 +67,11 @@ const (
 	PaneMCPServers
 	PaneConnectors
 	PaneAdmin
+	// PaneDashboard is the estate-at-a-glance view (internal/dashboard),
+	// wired to the "dashboard" nav route the same way this whole S6/S8-S11
+	// block already wires its own routes -- see routeToPane's own doc
+	// comment.
+	PaneDashboard
 )
 
 // focus names which region the keyboard currently drives -- the nav
@@ -111,6 +117,7 @@ var routeToPane = map[string]Pane{
 	"admin-users":    PaneAdmin,
 	"dependencies":   PaneAdmin,
 	"settings":       PaneAdmin,
+	"dashboard":      PaneDashboard,
 }
 
 // paneToRoute is routeToPane's inverse, used to keep the nav sidebar's own
@@ -187,6 +194,7 @@ type Model struct {
 	mcpservers mcpservers.Model
 	connectors connectors.Model
 	admin      admin.Model
+	dashboard  dashboard.Model
 
 	// boardOK is false when cmd/agent-tui had no -ledger to build a real
 	// board.Fetcher from -- board.go's own -board flag still refuses to
@@ -361,6 +369,11 @@ func (m Model) WithAdmin(a admin.Model) Model {
 	return m
 }
 
+func (m Model) WithDashboard(d dashboard.Model) Model {
+	m.dashboard = d
+	return m
+}
+
 // applyTheme pushes m's current theme/themeNotice into every pane's own
 // WithTheme -- the one place that fans the single shared value out to all
 // four, called from both WithTheme (construction/startup) and the
@@ -379,6 +392,7 @@ func (m Model) applyTheme() Model {
 	m.mcpservers = m.mcpservers.WithTheme(m.theme, m.themeNotice)
 	m.connectors = m.connectors.WithTheme(m.theme, m.themeNotice)
 	m.admin = m.admin.WithTheme(m.theme, m.themeNotice)
+	m.dashboard = m.dashboard.WithTheme(m.theme, m.themeNotice)
 	return m
 }
 
@@ -386,6 +400,7 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		m.nav.Init(), m.rail.Init(), m.cost.Init(), m.gallery.Init(), m.chat.Init(),
 		m.agents.Init(), m.skills.Init(), m.mcpservers.Init(), m.connectors.Init(), m.admin.Init(),
+		m.dashboard.Init(),
 	}
 	if m.boardOK {
 		cmds = append(cmds, m.board.Init(), m.flow.Init())
@@ -560,6 +575,10 @@ func (m Model) routeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case PaneAdmin:
 		next, cmd := m.admin.Update(msg)
 		m.admin = next.(admin.Model)
+		return m, cmd
+	case PaneDashboard:
+		next, cmd := m.dashboard.Update(msg)
+		m.dashboard = next.(dashboard.Model)
 		return m, cmd
 	default:
 		return m.homeKey(msg)
@@ -758,6 +777,10 @@ func (m Model) routeAll(msg tea.Msg) (Model, tea.Cmd) {
 	m.admin = next.(admin.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.dashboard.Update(msg)
+	m.dashboard = next.(dashboard.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -840,6 +863,10 @@ func (m Model) resize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 	m.admin = next.(admin.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.dashboard.Update(contentSize)
+	m.dashboard = next.(dashboard.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -914,6 +941,8 @@ func (m Model) contentView() string {
 		return m.connectors.View()
 	case PaneAdmin:
 		return m.admin.View()
+	case PaneDashboard:
+		return m.dashboard.View()
 	case PaneStub:
 		return m.stubView()
 	default:

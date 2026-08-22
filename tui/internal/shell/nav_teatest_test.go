@@ -42,20 +42,48 @@ func TestDownArrowEnterNavigatesToTasksRoute(t *testing.T) {
 
 // TestEnterOnAnUnwiredRouteRendersStub confirms a nav route routeToPane
 // does not map to a real Pane falls through to internal/stub.View (S5)
-// rather than rendering nothing -- "Dashboard" (row 1: Home, Dashboard)
-// with its own S5 description as the marker. Was "Agents" until S6 gave
-// that route a real pane (internal/agents) -- this test moved to the next
-// still-unwired route rather than asserting a route this build now
-// renders for real.
+// rather than rendering nothing -- "Knowledge" (row 5: Home, Dashboard,
+// Agents, Chat, Tasks, Knowledge), confirmed still unwired by actually
+// entering it (internal/knowledge exists on main since #87 but nothing in
+// routeToPane maps "knowledge" to it yet -- grep confirms, not assumed:
+// `grep -rn "\"knowledge\"" internal/shell/model.go` is empty). Was
+// "Dashboard" until this change gave that route a real pane
+// (internal/dashboard) -- this test moved to the next still-unwired route
+// rather than asserting a route this build now renders for real.
+//
+// The stub's own content, not merely "not built yet" appearing somewhere
+// in the frame, is what's asserted: the sidebar's OWN row labels ("Library",
+// "Knowledge", ...) are always on screen regardless of which pane is
+// active, so a substring check against a sidebar label alone would pass
+// no matter which route was actually entered -- exactly the mistake this
+// test's own history made once already resolving this same rename.
 func TestEnterOnAnUnwiredRouteRendersStub(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "⌂ Home")
+
+	for i := 0; i < 5; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	out := waitFor(t, tm, "not built yet")
+	if !bytes.Contains(out, []byte("│ knowledge")) {
+		t.Fatalf("stub view's own content missing the \"knowledge\" route title (stub.go renders m.nav.Active(), lowercase, inside its own bordered box):\n%s", out)
+	}
+}
+
+// TestDashboardRouteShowsRealDashboardPane reaches "Dashboard," the 2nd
+// top-level row (Home, Dashboard) -- it must now render the real
+// internal/dashboard.Model testModel() wires in, not a stub and not home's
+// own text.
+func TestDashboardRouteShowsRealDashboardPane(t *testing.T) {
 	tm := run(t, testModel())
 	waitFor(t, tm, "⌂ Home")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
-	out := waitFor(t, tm, "not built yet")
-	if !bytes.Contains(out, []byte("Dashboard")) {
-		t.Fatalf("stub view missing the \"Dashboard\" title:\n%s", out)
+	out := waitFor(t, tm, "AGENTS")
+	if bytes.Contains(out, []byte("not built yet")) {
+		t.Fatalf("Dashboard route still rendering the S5 stub:\n%s", out)
 	}
 }
 

@@ -24,6 +24,7 @@ import (
 	"github.com/jonhill90/keelson/internal/chat"
 	"github.com/jonhill90/keelson/internal/connectors"
 	"github.com/jonhill90/keelson/internal/cost"
+	"github.com/jonhill90/keelson/internal/dashboard"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
 	"github.com/jonhill90/keelson/internal/lane"
@@ -65,13 +66,17 @@ func testModel() Model {
 	ad := admin.New(func() (admin.Snapshot, error) {
 		return admin.Snapshot{Services: []admin.Service{{Name: "test-marker-container", Image: "x", Status: "Up"}}}, nil
 	})
+	da := dashboard.New(func() (dashboard.Stats, error) {
+		return dashboard.Stats{AgentsKnown: true, AgentsByState: map[string]int{"busy": 1}}, nil
+	})
 
 	return New(r, b, true, "", c, g, fl, ch).
 		WithAgents(ag).
 		WithSkills(sk).
 		WithMCPServers(mc).
 		WithConnectors(co).
-		WithAdmin(ad)
+		WithAdmin(ad).
+		WithDashboard(da)
 }
 
 func run(t *testing.T, m Model) *teatest.TestModel {

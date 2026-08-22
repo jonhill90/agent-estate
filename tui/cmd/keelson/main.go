@@ -37,6 +37,7 @@ import (
 	"github.com/jonhill90/keelson/internal/chat"
 	"github.com/jonhill90/keelson/internal/connectors"
 	"github.com/jonhill90/keelson/internal/cost"
+	"github.com/jonhill90/keelson/internal/dashboard"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
 	"github.com/jonhill90/keelson/internal/lane"
@@ -380,6 +381,17 @@ func main() {
 	}
 	connectorsModel := connectors.New(connectors.NewFetcher(connectorsPaths))
 
+	// dashboardModel reuses sessionsFetch/costFetch (the same closures
+	// railModel/agentsModel/costModel already call) and board.FetchPRs
+	// over the same gh runner shape buildBoardFetch already builds -- see
+	// buildDashboardFetch's own doc comment (dashboard.go) for why none of
+	// this is a second reader. $AGENT_MEMORY_VAULT resolved once, the same
+	// env var internal/knowledge's own package doc names as the source of
+	// truth -- empty is a real, silent "no vault configured" (VaultFacts
+	// stays unknown), not an error, matching every other optional input
+	// in this file.
+	dashboardModel := dashboard.New(buildDashboardFetch(*ghBin, *repositories, sessionsFetch, costFetch, os.Getenv("AGENT_MEMORY_VAULT")))
+
 	start := shell.PaneHome
 	switch {
 	case *showBoard:
@@ -400,6 +412,7 @@ func main() {
 		WithMCPServers(mcpserversModel).
 		WithConnectors(connectorsModel).
 		WithAdmin(adminModel).
+		WithDashboard(dashboardModel).
 		WithStart(start).
 		WithTheme(activeTheme, themeNotice).
 		WithThemeSave(func(th theme.Theme) error { return theme.Save(theme.ConfigPath(), th.ID) })
