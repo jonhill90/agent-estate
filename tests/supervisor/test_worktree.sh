@@ -445,17 +445,28 @@ if grep -q "could not query tmux panes" <<<"$unavail_out"; then ok "the skip say
 # --- MUTATION: disable the occupancy check -> candidate I must go RED. ------
 # Proves that assertion is actually pinned to the occupancy check, not to
 # the age floor or something else already refusing removal.
+#
+# Disables BOTH _gc_tmux_occupies and _gc_process_refs, not tmux alone.
+# `rtmux new-session -c "$OCC_DEST"` starts a real shell whose CWD is
+# $OCC_DEST -- before 2026-08-22 the process-cwd check was a `ps` argv grep
+# and never saw that shell (its argv is just `-bash`/`zsh`, no path in it),
+# so mutating tmux alone was sufficient to flip this candidate. The lsof-cwd
+# rewrite (this same PR) sees that shell's cwd directly and independently
+# refuses to remove it -- correct, and worth exactly this: proof that
+# occupancy is now caught two ways, not a reason to leave the mutation
+# testing a single-point-of-failure that no longer exists.
 MUT_OCC="$D/worktree-mutant-occupancy.sh"
 mut_rc=0
 python3 - "$WT" "$MUT_OCC" <<'PY' || mut_rc=$?
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = '  _gc_tmux_occupies "$target_real"; rc=$?'
-replacement = '  _gc_tmux_occupies "$target_real"; rc=$?; rc=1'
-assert marker in text, "occupancy call not found -- script shape changed"
-assert text.count(marker) == 1, "occupancy call not unique -- script shape changed"
-open(dst, "w").write(text.replace(marker, replacement, 1))
+markers = ['  _gc_tmux_occupies "$target_real"; rc=$?', '  _gc_process_refs "$target_real"; rc=$?']
+for marker in markers:
+    assert marker in text, f"occupancy call not found -- script shape changed: {marker!r}"
+    assert text.count(marker) == 1, f"occupancy call not unique -- script shape changed: {marker!r}"
+    text = text.replace(marker, marker + "; rc=1", 1)
+open(dst, "w").write(text)
 PY
 if [ "$mut_rc" -ne 0 ]; then
   bad "setup: patched a copy of worktree.sh with the occupancy check forced to 'not occupied'" "could not patch $WT (exit $mut_rc)"
@@ -517,6 +528,116 @@ else
   else
     bad "mutation confirmed: a liveness check that always says 'live' collects nothing" "setup: new (nogc case) failed, rc=$rc: $out"
   fi
+fi
+
+# --- Candidate K: clean, merged, old enough, OCCUPIED by a real process ---
+# whose CWD is the worktree but whose ARGV never names it -- the exact miss
+# measured 2026-08-22: `ps -eo command | grep -o '/[^ ]*worktrees[^ ]*'`
+# found nothing for a live `claude` process sitting in a worktree it was
+# `cd`'d into rather than launched against, while
+# `lsof -a -d cwd -c claude -c node -c bash` found it immediately. `sleep`
+# launched via `exec` after a `cd` reproduces the same shape without
+# depending on any particular CLI being installed: its argv is just
+# `sleep 90`, nothing that a `grep -F "$target_real"` over `ps` output could
+# ever match.
+#
+# Same portability stance as test_poller_recover.sh's own lsof-off-PATH
+# suite: `_gc_process_refs` itself fails CLOSED with no lsof (rc=2, "keep"),
+# so a machine without it would not silently mis-collect anything -- but the
+# EXACT skip message this candidate greps for only prints when lsof actually
+# ran, so this candidate SKIPs rather than FAILs there instead of asserting
+# a string that machine cannot produce.
+if command -v lsof >/dev/null 2>&1 || [ -x /usr/sbin/lsof ]; then
+out=$(bash "$WT" new 502-cwd-only "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "gc setup: new (cwd-only occupancy case) exits 0" "$rc" 0 "$out"
+CWD_DEST="$out"
+require_dest "new (cwd-only occupancy case)" "$CWD_DEST"
+echo "cwd-only change" >> "$CWD_DEST/file.txt"
+git -C "$CWD_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "cwd-only merged work"
+git -C "$CWD_DEST" push -q origin lane/502-cwd-only
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/502-cwd-only
+git -C "$REPO" push -q origin main
+git -C "$CWD_DEST" fetch -q origin
+sleep 2
+
+( cd "$CWD_DEST" && exec sleep 90 ) &
+CWD_PID=$!
+sleep 1
+if kill -0 "$CWD_PID" 2>/dev/null; then
+  ok "verify the instrument: a real process is running with its cwd inside the candidate worktree"
+else
+  bad "verify the instrument: a real process is running with its cwd inside the candidate worktree" "background sleep did not start"
+fi
+cwd_occ_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=1 bash "$WT" gc "$REPO" origin/main 2>&1); cwd_occ_rc=$?
+want_exit "gc (cwd-only occupancy case) exits 0" "$cwd_occ_rc" 0 "$cwd_occ_out"
+if [ -d "$CWD_DEST" ]; then ok "gc refuses to remove a worktree a real process's cwd is inside, even with no path in its argv (2026-08-22)"; else bad "gc refuses to remove a worktree a real process's cwd is inside, even with no path in its argv (2026-08-22)" "$cwd_occ_out"; fi
+if grep -q "a running process's cwd is inside it" <<<"$cwd_occ_out"; then ok "the refusal names the occupying process's cwd as the reason"; else bad "the refusal names the occupying process's cwd as the reason" "$cwd_occ_out"; fi
+if grep -qF "$CWD_DEST" <<<"$(ps -eo command)"; then bad "sanity: this scenario's argv genuinely does not name the worktree (if this fails, the test stopped reproducing the bug)" "ps -eo command unexpectedly contains the path"; else ok "sanity: this scenario's argv genuinely does not name the worktree -- ps -eo command | grep would have missed this exactly as measured"; fi
+
+# With the occupying process actually gone (real kill, real unmutated gc --
+# done BEFORE the mutation test below, which consumes this same worktree by
+# actually removing it), the same worktree must now be free to collect --
+# the "no process there -> ALLOW" half of the same guard.
+kill "$CWD_PID" 2>/dev/null; wait "$CWD_PID" 2>/dev/null
+gone_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=1 bash "$WT" gc "$REPO" origin/main 2>&1)
+if [ ! -d "$CWD_DEST" ]; then ok "gc removes the same worktree once the occupying process is actually gone (real code, no mutation)"; else bad "gc removes the same worktree once the occupying process is actually gone" "$gone_out"; fi
+
+# --- MUTATION: force the process-cwd check to always say "not occupied" ---
+# (the pre-2026-08-22 shape, minus even the argv grep) -> a fresh instance
+# of candidate K must go RED while a real sleep process is running in it.
+# Fresh worktree because the previous one was just genuinely removed above
+# -- reusing it here would prove nothing about the mutant, only that an
+# already-gone directory stays gone.
+out=$(bash "$WT" new 502-cwd-only-mut "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "gc setup: new (cwd-only mutation case) exits 0" "$rc" 0 "$out"
+CWD_DEST2="$out"
+require_dest "new (cwd-only mutation case)" "$CWD_DEST2"
+echo "cwd-only mutation change" >> "$CWD_DEST2/file.txt"
+git -C "$CWD_DEST2" -c user.email=test@example.com -c user.name=Test commit -q -am "cwd-only mutation merged work"
+git -C "$CWD_DEST2" push -q origin lane/502-cwd-only-mut
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/502-cwd-only-mut
+git -C "$REPO" push -q origin main
+git -C "$CWD_DEST2" fetch -q origin
+sleep 2
+
+( cd "$CWD_DEST2" && exec sleep 90 ) &
+CWD_PID2=$!
+sleep 1
+
+MUT_PROC="$D/worktree-mutant-proc.sh"
+mut_rc=0
+python3 - "$WT" "$MUT_PROC" <<'PY' || mut_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '  _gc_process_refs "$target_real"; rc=$?'
+replacement = '  _gc_process_refs "$target_real"; rc=$?; rc=1'
+assert marker in text, "process-cwd call not found -- script shape changed"
+assert text.count(marker) == 1, "process-cwd call not unique -- script shape changed"
+open(dst, "w").write(text.replace(marker, replacement, 1))
+PY
+if [ "$mut_rc" -ne 0 ]; then
+  bad "setup: patched a copy of worktree.sh with the process-cwd check forced to 'not occupied'" "could not patch $WT (exit $mut_rc)"
+else
+  ok "setup: patched a copy of worktree.sh with the process-cwd check forced to 'not occupied'"
+  chmod +x "$MUT_PROC"
+  if kill -0 "$CWD_PID2" 2>/dev/null; then
+    mut_proc_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=1 bash "$MUT_PROC" gc "$REPO" origin/main 2>&1)
+    if [ ! -d "$CWD_DEST2" ]; then
+      ok "mutation confirmed: disabling the process-cwd check lets gc remove a worktree a real process is sitting in (candidate K's GREEN assertion would now be RED)"
+    else
+      bad "mutation confirmed: disabling the process-cwd check lets gc remove a worktree a real process is sitting in" "expected removal on the mutant, $CWD_DEST2 is still present: $mut_proc_out"
+    fi
+  else
+    bad "mutation confirmed: disabling the process-cwd check lets gc remove a worktree a real process is sitting in" "the background sleep process died before the mutant run -- cannot prove anything"
+  fi
+fi
+kill "$CWD_PID2" 2>/dev/null; wait "$CWD_PID2" 2>/dev/null
+[ -d "$CWD_DEST2" ] && rm -rf "$CWD_DEST2" 2>/dev/null   # mutant may have left it if the mutation itself failed above
+else
+  echo "  SKIP candidate K (cwd-only occupancy) -- no lsof on this machine (checked PATH and /usr/sbin/lsof)"
 fi
 
 # --- agent-supervisor#367: the live worktree must never be removed, even --

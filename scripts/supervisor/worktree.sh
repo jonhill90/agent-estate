@@ -169,14 +169,17 @@ safe_remove() {
   return 0
 }
 
-# agent-supervisor#478: is worktree $1 LIVE -- occupied by a tmux pane,
-# referenced by a running process, or simply too young to trust either signal
-# between tool calls? `gc`'s clean+merged predicate says nothing about this;
-# see the header comment above for the incident this closes.
+# agent-supervisor#478: is worktree $1 LIVE -- occupied by a tmux pane, a
+# running process's cwd, or simply too young to trust either signal between
+# tool calls? `gc`'s clean+merged predicate says nothing about this; see the
+# header comment above for the incident this closes.
 #
 # Three independent checks, each one able to say "keep" on its own:
 #   1. a tmux pane's #{pane_current_path} is inside it -- the direct signal.
-#   2. a running process's command line references it.
+#   2. a running process's ACTUAL CWD (via lsof, not its argv) is inside it
+#      -- see _gc_process_refs's own comment for the 2026-08-22 miss this
+#      replaced (a `ps -eo command` grep, blind to a process cwd'd into the
+#      worktree with no path in its argv).
 #   3. it is younger than $WORKTREE_GC_MIN_AGE_SECONDS -- neither signal
 #      above is sufficient alone: a lane between tool calls holds no process
 #      reference at that instant, and a pane can be momentarily elsewhere.
@@ -195,6 +198,17 @@ GC_MIN_AGE_SECONDS="${WORKTREE_GC_MIN_AGE_SECONDS:-3600}"
 
 _gc_mtime() { stat -c %Y "$1" 2>/dev/null || stat -f %m "$1" 2>/dev/null; }
 
+# agent-supervisor#25 (poller-recover.sh, quota-watch-recover.sh): lsof lives
+# at /usr/sbin/lsof on macOS, and /usr/sbin is not on every caller's PATH
+# (watchdog.sh's LaunchAgent PATH override is the measured case). Resolved
+# the same way those two scripts already resolve it, so this is a third
+# caller of one lookup, not a third slightly-different one.
+_gc_lsof_bin() {
+  if command -v lsof >/dev/null 2>&1; then printf '%s' lsof; return 0; fi
+  if [ -x /usr/sbin/lsof ]; then printf '%s' /usr/sbin/lsof; return 0; fi
+  return 1
+}
+
 # 0 = a pane's cwd is inside $1; 1 = tmux answered and none matched;
 # 2 = tmux itself could not be asked (no server, tmux missing, ...).
 _gc_tmux_occupies() {
@@ -210,13 +224,38 @@ _gc_tmux_occupies() {
   return 1
 }
 
-# 0 = some process's command line references $1; 1 = ps answered and none
-# did; 2 = ps itself could not be asked.
+# 0 = some process's ACTUAL CWD is inside $1; 1 = lsof answered and none
+# is; 2 = lsof itself could not be asked (no binary, or the query failed).
+#
+# This used to be `ps -eo command | grep -F "$target_real"` -- argv text,
+# not cwd. Measured 2026-08-22: a live `claude` process sitting in
+# agent-tui/.worktrees/mouse (launched with no path argument, `cd`'d into
+# the worktree by its caller) was invisible to that grep --
+# `ps -eo command | grep -o '/[^ ]*worktrees[^ ]*'` returned nothing for it
+# -- and immediately visible to `lsof -a -d cwd`, which reports what a
+# process's file descriptor table actually says its cwd is rather than
+# what its argv happened to spell out. The failure mode is exactly #478's:
+# a live occupant read as absent, because the check asked the wrong
+# question about it. `_gc_tmux_occupies` already gets this right for tmux
+# panes (`#{pane_current_path}`, not the pane's command line) -- this
+# brings the bare-process signal to the same standard rather than leaving
+# one of the two "keep if any one says maybe live" checks blind to a class
+# of occupant the other one catches fine.
 _gc_process_refs() {
-  local target_real="$1" out
-  out=$(ps -eo command 2>/dev/null) || return 2
+  local target_real="$1" lsof_bin out line path
+  lsof_bin=$(_gc_lsof_bin) || return 2
+  out=$("$lsof_bin" -a -d cwd -Fn 2>/dev/null) || return 2
   [ -n "$out" ] || return 2
-  grep -F -q "$target_real" <<<"$out" && return 0
+  while IFS= read -r line; do
+    case "$line" in
+      n*)
+        path="${line#n}"
+        case "$path" in
+          "$target_real"|"$target_real"/*) return 0 ;;
+        esac
+        ;;
+    esac
+  done <<<"$out"
   return 1
 }
 
@@ -232,8 +271,8 @@ _gc_is_live() {
 
   _gc_process_refs "$target_real"; rc=$?
   case $rc in
-    0) echo "worktree: gc skipping $p -- a running process references it (#478)" >&2; return 0 ;;
-    2) echo "worktree: gc skipping $p -- could not query running processes; refusing to guess whether it is live (#478)" >&2; return 0 ;;
+    0) echo "worktree: gc skipping $p -- a running process's cwd is inside it (#478)" >&2; return 0 ;;
+    2) echo "worktree: gc skipping $p -- could not query process cwd via lsof; refusing to guess whether it is live (#478)" >&2; return 0 ;;
   esac
 
   mtime=$(_gc_mtime "$p")
@@ -277,6 +316,22 @@ _gc_is_live() {
 #   - Empty input to xargs is not portable: GNU runs the command once with
 #     no pathspec (whole-tree diff), BSD/macOS does not run it at all (empty
 #     output, read as "merged"). Decided here instead, before xargs sees it.
+#
+# Checked while auditing every "is this worktree unused" decision in this
+# file (2026-08-22): nothing here, or anywhere else in scripts/supervisor,
+# calls `git branch --merged` (`grep -rn -- "--merged" scripts/` is empty).
+# It would be a near-no-op if it did -- confirmed live the same day:
+# `git branch --merged origin/main | wc -l` against 360 local branches
+# reports 3. Squash merges are why -- a squashed branch's tip is never an
+# ancestor of `origin/main`, so `--merged` stays blind to almost everything
+# this repo actually lands, which is exactly why this function diffs
+# CONTENT instead. Left alone deliberately: rewriting it into a PR-state
+# check (`gh pr view --json merged`) to make it "see" those branches would
+# flip a near-no-op into a sweep over the ~357 branches it currently leaves
+# alone, most with no configured remote tracking at all -- a much bigger,
+# unrelated, and unreviewed blast radius than this fix's actual job (cwd
+# liveness detection, above). Do that as its own deliberate, reviewed change
+# if it's ever wanted -- not as a side effect of this one.
 branch_content_is_on_base() {
   local repo="$1" b="$2" base="$3"
   # Ancestry still answers yes cheaply when it survives (a rebase-merged or
