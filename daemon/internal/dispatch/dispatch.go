@@ -14,8 +14,33 @@ import (
 	"time"
 
 	"agent-supervisor/daemon/internal/agent"
+	"agent-supervisor/daemon/internal/budget"
 	"agent-supervisor/daemon/internal/ledger"
+	"agent-supervisor/daemon/internal/pressure"
 )
+
+// Gates are checked BEFORE a process is spawned. Both are refusals, not
+// warnings: the estate's failures came from checks that reported a problem and
+// carried on anyway.
+type Gates struct {
+	Budget   *budget.Tracker // nil disables
+	Pressure *pressure.Limits // nil disables
+}
+
+// Check runs every gate. First refusal wins and names itself.
+func (g Gates) Check() error {
+	if g.Pressure != nil {
+		if r := pressure.Check(*g.Pressure); !r.OK {
+			return fmt.Errorf("host pressure gate: %s", r.Reason)
+		}
+	}
+	if g.Budget != nil {
+		if v := g.Budget.Check(); v.Decision == budget.Block {
+			return fmt.Errorf("budget gate: %s", v)
+		}
+	}
+	return nil
+}
 
 type Outcome struct {
 	TaskID    string
@@ -23,7 +48,11 @@ type Outcome struct {
 	SessionID string
 	Turns     int
 	Elapsed   time.Duration
-	Err       error
+	// Liveness is the QUALITY verdict, orthogonal to OK. "exit 0" is not
+	// "did work" -- agent-supervisor#414 in one field.
+	Liveness agent.Liveness
+	CostUSD  float64
+	Err      error
 }
 
 // Run creates the task, starts the agent, waits for the process to exit, and
@@ -33,7 +62,17 @@ type Outcome struct {
 // come back is UNKNOWN, not failed -- the distinction #488 was filed over. A
 // human or a later liveness check resolves it; this function will not guess.
 func Run(ctx context.Context, l *ledger.DB, a *agent.Claude, taskID, lane, brief string) Outcome {
+	return RunGated(ctx, l, a, taskID, lane, brief, Gates{})
+}
+
+// RunGated is Run with pre-spawn gates.
+func RunGated(ctx context.Context, l *ledger.DB, a *agent.Claude, taskID, lane, brief string, g Gates) Outcome {
 	start := time.Now()
+	if err := g.Check(); err != nil {
+		// Refused before anything was created: no ledger row, no process, no
+		// cost. A refusal is not a failed task.
+		return Outcome{TaskID: taskID, Err: err, Liveness: agent.LivenessBlocked}
+	}
 	if err := l.EnsureLane(lane, a.Cwd); err != nil {
 		return Outcome{TaskID: taskID, Err: err}
 	}
@@ -48,6 +87,15 @@ func Run(ctx context.Context, l *ledger.DB, a *agent.Claude, taskID, lane, brief
 
 	res, err := a.Run(ctx, brief)
 	el := time.Since(start)
+	live := agent.Classify(res, err)
+
+	// Record spend from the CLI's own figure, as soon as the turn returns and
+	// BEFORE the next gate check. Paperclip's own caveat applies: the cap is
+	// evaluated between cost events, so one expensive call can overshoot --
+	// the bound on overshoot is this granularity.
+	if g.Budget != nil && res != nil && res.CostUSD > 0 {
+		g.Budget.Record(res.CostUSD)
+	}
 
 	if err != nil {
 		// UNKNOWN, not failed. Leave the row `running` for a liveness check.
@@ -58,7 +106,7 @@ func Run(ctx context.Context, l *ledger.DB, a *agent.Claude, taskID, lane, brief
 		if ferr := l.Finish(taskID, false); ferr != nil {
 			return Outcome{TaskID: taskID, Elapsed: el, Err: fmt.Errorf("%v (and stamp failed: %v)", err, ferr)}
 		}
-		return Outcome{TaskID: taskID, OK: false, Elapsed: el, Err: err}
+		return Outcome{TaskID: taskID, OK: false, Elapsed: el, Liveness: live, Err: err}
 	}
 
 	if ferr := l.Finish(taskID, true); ferr != nil {
@@ -66,7 +114,7 @@ func Run(ctx context.Context, l *ledger.DB, a *agent.Claude, taskID, lane, brief
 	}
 	return Outcome{
 		TaskID: taskID, OK: true, SessionID: res.SessionID,
-		Turns: res.NumTurns, Elapsed: el,
+		Turns: res.NumTurns, Elapsed: el, Liveness: live, CostUSD: res.CostUSD,
 	}
 }
 

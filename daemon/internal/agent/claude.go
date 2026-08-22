@@ -46,6 +46,10 @@ type Result struct {
 	SessionID string `json:"session_id"`
 	Text      string `json:"result"`
 	NumTurns  int    `json:"num_turns"`
+	// CostUSD is the CLI's own reported cost for this turn. Without it the
+	// budget cap sums to zero forever and never binds -- found by running the
+	// gate and watching it fail to block, not by reading the code.
+	CostUSD float64 `json:"total_cost_usd"`
 }
 
 // Claude runs `claude -p --output-format json` for one turn.
@@ -113,6 +117,8 @@ func (c *Claude) Run(ctx context.Context, prompt string) (*Result, error) {
 
 	cmd := exec.CommandContext(ctx, c.Bin, c.args(prompt)...)
 	cmd.Dir = c.Cwd
+	// Own process group, so the whole tree can be signalled (paperclip).
+	setProcGroup(cmd)
 	var stdout, stderr strings.Builder
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr

@@ -12,7 +12,9 @@ import (
 	"time"
 
 	"agent-supervisor/daemon/internal/agent"
+	"agent-supervisor/daemon/internal/budget"
 	"agent-supervisor/daemon/internal/dispatch"
+	"agent-supervisor/daemon/internal/pressure"
 	"agent-supervisor/daemon/internal/ledger"
 	"agent-supervisor/daemon/internal/vault"
 )
@@ -38,6 +40,10 @@ func cmdBatch(argv []string) int {
 		model   = fs.String("model", "sonnet", "model")
 		bin     = fs.String("bin", "claude", "agent binary")
 		workers = fs.Int("workers", 0, "max concurrent agents (0 = cores-2, capped 8)")
+		capUSD  = fs.Float64("budget-usd", 50, "HARD spend cap over -budget-window; 0 disables (explicitly)")
+		capWin  = fs.Duration("budget-window", 24*time.Hour, "rolling window for the spend cap")
+		maxLoad = fs.Float64("max-load-per-core", 3.0, "refuse to spawn above this load/core; 0 disables")
+		minMem  = fs.Float64("min-free-mem-gb", 1.5, "refuse to spawn below this free memory; 0 disables")
 		timeout = fs.Duration("timeout", agent.DefaultTimeout, "per-turn timeout")
 	)
 	fs.Parse(argv)
@@ -110,9 +116,19 @@ func cmdBatch(argv []string) int {
 	defer stop()
 
 	start := time.Now()
-	outs := dispatch.RunPool(ctx, l, func(j dispatch.Job) *agent.Claude {
+	lim := pressure.Limits{MaxLoadPerCore: *maxLoad, MinFreeMemGB: *minMem}
+	if r := pressure.Check(lim); !r.OK {
+		fmt.Fprintf(os.Stderr, "supervisord: refusing to start -- %s\n", r.Reason)
+		return 1
+	} else {
+		fmt.Printf("host: %s\n", r)
+	}
+	gates := dispatch.Gates{Budget: budget.New(budget.Policy{LimitUSD: *capUSD, Window: *capWin}), Pressure: &lim}
+	fmt.Printf("gates: cap $%.2f/%s, load/core<%.1f, freeMem>%.1fGB\n", *capUSD, *capWin, *maxLoad, *minMem)
+
+	outs := dispatch.RunPoolGated(ctx, l, func(j dispatch.Job) *agent.Claude {
 		return &agent.Claude{Bin: *bin, Model: *model, Cwd: j.Cwd, Timeout: *timeout, StrictMCP: true}
-	}, jobs, w)
+	}, jobs, w, gates)
 
 	ok, bad := 0, 0
 	for _, o := range outs {
@@ -122,9 +138,10 @@ func cmdBatch(argv []string) int {
 			continue
 		}
 		ok++
-		fmt.Printf("  ok   %-24s %s turns=%d\n", o.TaskID, o.Elapsed.Round(time.Millisecond), o.Turns)
+		fmt.Printf("  ok   %-24s %s turns=%d liveness=%s $%.4f\n", o.TaskID, o.Elapsed.Round(time.Millisecond), o.Turns, o.Liveness, o.CostUSD)
 	}
-	fmt.Printf("batch: %d ok, %d failed, wall %s\n", ok, bad, time.Since(start).Round(time.Millisecond))
+	fmt.Printf("batch: %d ok, %d failed, wall %s, spend $%.4f of $%.2f cap\n",
+		ok, bad, time.Since(start).Round(time.Millisecond), gates.Budget.SpentUSD(), *capUSD)
 	if bad > 0 {
 		return 1
 	}
