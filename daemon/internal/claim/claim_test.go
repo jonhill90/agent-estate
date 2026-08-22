@@ -79,53 +79,17 @@ func TestScriptGate_NoScriptPathRefuses(t *testing.T) {
 	}
 }
 
-// fakeClaimStore is claim.sh's own take/release verbs, reproduced as a
-// stub over a plain lock-file directory -- real enough to exercise
-// ScriptGate's actual subprocess path (argv, exit code, stdout), and
-// deliberately reproducing claim.sh's OWN documented race (check, THEN
-// write, no compare-and-swap) via a configurable sleep between the two,
-// so the mutation-check tests below can actually widen or close that
-// window rather than asserting against an idealised atomic fake.
-func fakeClaimStore(t *testing.T, lockDir string, raceDelay time.Duration) string {
-	t.Helper()
-	if runtime.GOOS == "windows" {
-		t.Skip("fake binary is a POSIX shell script")
-	}
-	dir := t.TempDir()
-	path := filepath.Join(dir, "fake-claim-store")
-	sleep := ""
-	if raceDelay > 0 {
-		sleep = "sleep " + raceDelay.String() + "\n"
-	}
-	script := `#!/bin/sh
-verb="$1"; issue="$2"; repo="$3"; lane="${4:-}"
-file="` + lockDir + `/issue-$issue"
-case "$verb" in
-  take)
-    if [ -f "$file" ]; then echo "claimed by $(cat "$file")"; exit 1; fi
-` + sleep + `    if [ -f "$file" ]; then echo "claimed by $(cat "$file")"; exit 1; fi
-    echo "$lane" > "$file"
-    echo "taken by $lane"
-    exit 0 ;;
-  release)
-    rm -f "$file"
-    echo "released"
-    exit 0 ;;
-  *) echo "unknown verb $verb" >&2; exit 2 ;;
-esac
-`
-	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
-		t.Fatalf("write fake claim store: %v", err)
-	}
-	return path
-}
+// fakeClaimStore lives in fakestore_test.go -- it is the same check-then-write
+// stub over a lock-file directory, driven as a helper process rather than a
+// shell script so the mutation-check pair below can hold both attempts inside
+// its window on purpose.
 
 // TestTakeThenTake_SecondRefuses is the ordinary, non-concurrent case:
 // once an issue is taken, a second Take for the same issue must refuse,
 // naming who holds it.
 func TestTakeThenTake_SecondRefuses(t *testing.T) {
 	lockDir := t.TempDir()
-	g := &ScriptGate{ScriptPath: fakeClaimStore(t, lockDir, 0)}
+	g := &ScriptGate{ScriptPath: fakeClaimStore(t, lockDir, storeOpts{})}
 	if err := g.Take(context.Background(), 1, "", "lane-a"); err != nil {
 		t.Fatalf("first Take: %v", err)
 	}
@@ -140,7 +104,7 @@ func TestTakeThenTake_SecondRefuses(t *testing.T) {
 
 func TestRelease_ThenTakeAgain_Succeeds(t *testing.T) {
 	lockDir := t.TempDir()
-	g := &ScriptGate{ScriptPath: fakeClaimStore(t, lockDir, 0)}
+	g := &ScriptGate{ScriptPath: fakeClaimStore(t, lockDir, storeOpts{})}
 	if err := g.Take(context.Background(), 1, "", "lane-a"); err != nil {
 		t.Fatalf("Take: %v", err)
 	}
@@ -155,12 +119,23 @@ func TestRelease_ThenTakeAgain_Succeeds(t *testing.T) {
 // MUTATION-CHECK, direction (a) — the guard fires: two goroutines dispatch
 // the SAME issue near-simultaneously through the real ScriptGate.Take
 // (per-issue mutex engaged). Exactly one must succeed; the other must
-// refuse with a real reason. raceDelay widens the fake store's own
-// check-then-write window well past normal goroutine scheduling jitter,
-// so this is not passing by accident of timing.
+// refuse with a real reason.
+//
+// This direction does NOT need timing to hold: the per-issue mutex means the
+// second attempt cannot start until the first has finished writing, so it
+// reads a claimed issue under any schedule at any load. It cannot use the
+// store's barrier either -- serialization is precisely what stops two
+// attempts being in the read phase together, so a two-party barrier here
+// would wait for a peer the mutex is holding back. The delay is what makes
+// REMOVING the mutex visible: it widens the store's check-then-write window
+// so an unguarded pair overlaps in it. Measured with Take's lock deleted at
+// ~2.7 load/core: 6 of 20 runs red, against 0 of 20 with the lock in place.
+// That is enough to see the guard go, but it is a property of the MUTATED
+// state only -- an unserialized pair still has to be scheduled together,
+// which is precisely the dependence direction (b) below no longer has.
 func TestConcurrentTake_SameIssue_ExactlyOneWins(t *testing.T) {
 	lockDir := t.TempDir()
-	g := &ScriptGate{ScriptPath: fakeClaimStore(t, lockDir, 50*time.Millisecond)}
+	g := &ScriptGate{ScriptPath: fakeClaimStore(t, lockDir, storeOpts{delay: 50 * time.Millisecond})}
 
 	var wg sync.WaitGroup
 	results := make([]error, 2)
@@ -196,9 +171,20 @@ func TestConcurrentTake_SameIssue_ExactlyOneWins(t *testing.T) {
 // happening to be safe on its own (it is not; this is its own documented
 // race, reproduced deliberately, same as claim.sh's real header comment
 // describes for the underlying GitHub API it wraps).
+//
+// The overlap is FORCED, not hoped for: the store holds each take at a
+// barrier once it has finished its read and releases both only when both have
+// arrived, so "the two attempts were inside the window together" is true by
+// construction under any scheduling. The previous version of this control
+// launched two goroutines into a 50 ms sleep and relied on both landing in it;
+// under CPU contention one was scheduled late, saw the other's write, and only
+// one won -- 7 failures in 10 at ~1.3 load/core (#504). A control that is red
+// most of the time gets re-run until green, which is the path a real
+// regression walks through, so the timing dependence had to go rather than be
+// widened.
 func TestConcurrentTake_SameIssue_WithoutTheGuard_RaceReproduces(t *testing.T) {
 	lockDir := t.TempDir()
-	scriptPath := fakeClaimStore(t, lockDir, 50*time.Millisecond)
+	scriptPath := fakeClaimStore(t, lockDir, storeOpts{barrierN: 2})
 
 	var wg sync.WaitGroup
 	results := make([]error, 2)
@@ -223,6 +209,6 @@ func TestConcurrentTake_SameIssue_WithoutTheGuard_RaceReproduces(t *testing.T) {
 	if wins != 2 {
 		t.Fatalf("wins=%d, want 2 (both should have won without the mutex -- "+
 			"if this fails, the fake store stopped reproducing the race this "+
-			"test exists to prove ScriptGate's mutex actually closes)", wins)
+			"test exists to prove ScriptGate's mutex actually closes) -- results=%v", wins, results)
 	}
 }
