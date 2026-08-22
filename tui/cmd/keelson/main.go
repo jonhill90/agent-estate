@@ -41,6 +41,7 @@ import (
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
 	"github.com/jonhill90/keelson/internal/lane"
+	"github.com/jonhill90/keelson/internal/library"
 	"github.com/jonhill90/keelson/internal/mcp"
 	"github.com/jonhill90/keelson/internal/mcpservers"
 	"github.com/jonhill90/keelson/internal/rail"
@@ -406,6 +407,12 @@ func main() {
 		start = shell.PaneChat
 	}
 
+	libraryModel := library.New(
+		buildLibraryFetch(ledgerSrc, *sqliteBin),
+		buildLibraryDetailLoader(ledgerSrc, *sqliteBin),
+		buildLibraryCountFetch(ledgerSrc, *sqliteBin),
+	)
+
 	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel, flowModel, chatModel).
 		WithAgents(agentsModel).
 		WithSkills(skillsModel).
@@ -413,6 +420,7 @@ func main() {
 		WithConnectors(connectorsModel).
 		WithAdmin(adminModel).
 		WithDashboard(dashboardModel).
+		WithLibrary(libraryModel).
 		WithStart(start).
 		WithTheme(activeTheme, themeNotice).
 		WithThemeSave(func(th theme.Theme) error { return theme.Save(theme.ConfigPath(), th.ID) })

@@ -26,6 +26,7 @@ import (
 	"github.com/jonhill90/keelson/internal/dashboard"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
+	"github.com/jonhill90/keelson/internal/library"
 	"github.com/jonhill90/keelson/internal/mcpservers"
 	"github.com/jonhill90/keelson/internal/nav"
 	"github.com/jonhill90/keelson/internal/rail"
@@ -72,6 +73,15 @@ const (
 	// block already wires its own routes -- see routeToPane's own doc
 	// comment.
 	PaneDashboard
+	// PaneLibrary is w5c.md's own pane -- the shared corpus
+	// (~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3's own
+	// live_parameters/open_questions/unacknowledged views), the sidebar's
+	// "library" route's counterpart to Knowledge (agent-tui#87, Jon's
+	// personal vault) -- unlike Knowledge, wired into the shell in the same
+	// change that built it, since driving it with a real vhs pty needs a
+	// real route to reach (AGENTS.md: "do not add a new tea.NewProgram call
+	// site... a new view is a pane added to the shell").
+	PaneLibrary
 )
 
 // focus names which region the keyboard currently drives -- the nav
@@ -118,6 +128,7 @@ var routeToPane = map[string]Pane{
 	"dependencies":   PaneAdmin,
 	"settings":       PaneAdmin,
 	"dashboard":      PaneDashboard,
+	"library":        PaneLibrary,
 }
 
 // paneToRoute is routeToPane's inverse, used to keep the nav sidebar's own
@@ -195,6 +206,10 @@ type Model struct {
 	connectors connectors.Model
 	admin      admin.Model
 	dashboard  dashboard.Model
+	// library is w5c.md's own pane (PaneLibrary, above) -- same "optional,
+	// wired via With*" shape as the five above it, not New's own parameter
+	// list.
+	library library.Model
 
 	// boardOK is false when cmd/agent-tui had no -ledger to build a real
 	// board.Fetcher from -- board.go's own -board flag still refuses to
@@ -374,6 +389,11 @@ func (m Model) WithDashboard(d dashboard.Model) Model {
 	return m
 }
 
+func (m Model) WithLibrary(l library.Model) Model {
+	m.library = l
+	return m
+}
+
 // applyTheme pushes m's current theme/themeNotice into every pane's own
 // WithTheme -- the one place that fans the single shared value out to all
 // four, called from both WithTheme (construction/startup) and the
@@ -393,6 +413,7 @@ func (m Model) applyTheme() Model {
 	m.connectors = m.connectors.WithTheme(m.theme, m.themeNotice)
 	m.admin = m.admin.WithTheme(m.theme, m.themeNotice)
 	m.dashboard = m.dashboard.WithTheme(m.theme, m.themeNotice)
+	m.library = m.library.WithTheme(m.theme, m.themeNotice)
 	return m
 }
 
@@ -400,7 +421,7 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		m.nav.Init(), m.rail.Init(), m.cost.Init(), m.gallery.Init(), m.chat.Init(),
 		m.agents.Init(), m.skills.Init(), m.mcpservers.Init(), m.connectors.Init(), m.admin.Init(),
-		m.dashboard.Init(),
+		m.dashboard.Init(), m.library.Init(),
 	}
 	if m.boardOK {
 		cmds = append(cmds, m.board.Init(), m.flow.Init())
@@ -579,6 +600,10 @@ func (m Model) routeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case PaneDashboard:
 		next, cmd := m.dashboard.Update(msg)
 		m.dashboard = next.(dashboard.Model)
+		return m, cmd
+	case PaneLibrary:
+		next, cmd := m.library.Update(msg)
+		m.library = next.(library.Model)
 		return m, cmd
 	default:
 		return m.homeKey(msg)
@@ -781,6 +806,10 @@ func (m Model) routeAll(msg tea.Msg) (Model, tea.Cmd) {
 	m.dashboard = next.(dashboard.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.library.Update(msg)
+	m.library = next.(library.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -867,6 +896,10 @@ func (m Model) resize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 	m.dashboard = next.(dashboard.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.library.Update(contentSize)
+	m.library = next.(library.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -947,6 +980,8 @@ func (m Model) contentView() string {
 		return m.admin.View()
 	case PaneDashboard:
 		return m.dashboard.View()
+	case PaneLibrary:
+		return m.library.View()
 	case PaneStub:
 		return m.stubView()
 	default:
