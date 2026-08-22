@@ -204,3 +204,164 @@ func TestGridTileFlagsHiddenMessages(t *testing.T) {
 		t.Errorf("gridLayout View() has no hidden-content marker for the long thread:\n%s", out)
 	}
 }
+
+// TestIKeyEntersComposeModeOnARealThread is S7's own composer, "[i]" the
+// key -- fetched(t, ...) leaves selection on threads[0], the synthetic
+// "All" thread (TestFetchPrependsAllThread), so this jumps to a real one
+// first with "1" (the first real thread, threads[1]) before pressing "i".
+func TestIKeyEntersComposeModeOnARealThread(t *testing.T) {
+	m := fetched(t, 100, 30)
+	m = sendKey(t, m, "1") // jumpTo(0) -- "1" jumps to threads[0], "2" to threads[1]... see jumpTo
+	m = sendKey(t, m, "2")
+	if m.threads[m.selected].ID == "all" {
+		t.Fatalf("test setup: selection is still the \"All\" thread")
+	}
+
+	m = sendKey(t, m, "i")
+	if !m.composing {
+		t.Fatal("\"i\" did not enter compose mode on a real thread")
+	}
+	if !m.composer.Focused() {
+		t.Fatal("composer is not focused after \"i\"")
+	}
+}
+
+// TestIKeyRefusesOnTheAllThread guards Sender's own precondition: the
+// synthetic "All" thread (AggregateAll, ID "all") has no single lane
+// behind it to address -- composing against it would have nowhere real
+// to send.
+func TestIKeyRefusesOnTheAllThread(t *testing.T) {
+	m := fetched(t, 100, 30)
+	if m.threads[m.selected].ID != "all" {
+		t.Fatalf("test setup: selection is not the \"All\" thread")
+	}
+	m = sendKey(t, m, "i")
+	if m.composing {
+		t.Fatal("\"i\" entered compose mode against the synthetic \"All\" thread")
+	}
+}
+
+// TestIKeyRefusesInGridLayout matches composer/composing's own doc
+// comment: the composer is scoped to listLayout.
+func TestIKeyRefusesInGridLayout(t *testing.T) {
+	m := fetched(t, 100, 30)
+	m = sendKey(t, m, "2") // a real thread selected
+	m = sendKey(t, m, "v") // -> gridLayout
+	if Layouts[m.layout].ID != gridLayout.ID {
+		t.Fatalf("test assumes \"v\" reaches gridLayout, got %q", Layouts[m.layout].ID)
+	}
+	m = sendKey(t, m, "i")
+	if m.composing {
+		t.Fatal("\"i\" entered compose mode in gridLayout")
+	}
+}
+
+// TestEnterWithNoSenderShowsHonestError is Sender's own contract: no
+// caller in this repo wires a non-nil Sender yet (no live transport
+// exists), so [enter] must say so visibly rather than silently accepting
+// the keypress and doing nothing -- AGENTS.md's "blind, not quiet."
+func TestEnterWithNoSenderShowsHonestError(t *testing.T) {
+	m := fetched(t, 100, 30)
+	m = sendKey(t, m, "2")
+	m = sendKey(t, m, "i")
+	m.composer.SetValue("hello")
+
+	next, _ := m.handleComposerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("enter")})
+	m = next.(Model)
+
+	if m.sendErr == "" {
+		t.Fatal("[enter] with no Sender wired produced no error")
+	}
+	if !strings.Contains(m.View(), "cannot send") {
+		t.Fatalf("send error not rendered:\n%s", m.View())
+	}
+}
+
+// TestEnterWithSenderCallsItAndClearsComposer is the success path, driven
+// against a fake Sender (adapter discipline, AGENTS.md) -- no real
+// transport exists to test against, matching FixtureSource's own reason
+// for existing.
+func TestEnterWithSenderCallsItAndClearsComposer(t *testing.T) {
+	var gotThread, gotText string
+	m := fetched(t, 100, 30).WithSender(func(threadID, text string) error {
+		gotThread, gotText = threadID, text
+		return nil
+	})
+	m = sendKey(t, m, "2")
+	wantThread := m.threads[m.selected].ID
+	m = sendKey(t, m, "i")
+	m.composer.SetValue("hello agent")
+
+	next, _ := m.handleComposerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("enter")})
+	m = next.(Model)
+
+	if gotThread != wantThread || gotText != "hello agent" {
+		t.Fatalf("Sender called with (%q, %q), want (%q, %q)", gotThread, gotText, wantThread, "hello agent")
+	}
+	if m.composing {
+		t.Fatal("still composing after a successful send")
+	}
+	if m.composer.Value() != "" {
+		t.Fatalf("composer.Value() = %q after a successful send, want empty", m.composer.Value())
+	}
+	if m.sendErr != "" {
+		t.Fatalf("sendErr = %q after a successful send, want empty", m.sendErr)
+	}
+}
+
+// TestEscCancelsComposing covers the other way out of compose mode.
+func TestEscCancelsComposing(t *testing.T) {
+	m := fetched(t, 100, 30)
+	m = sendKey(t, m, "2")
+	m = sendKey(t, m, "i")
+	m.composer.SetValue("unsent draft")
+
+	next, _ := m.handleComposerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("esc")})
+	m = next.(Model)
+
+	if m.composing {
+		t.Fatal("still composing after \"esc\"")
+	}
+	if m.composer.Value() != "" {
+		t.Fatalf("composer.Value() = %q after \"esc\", want cleared", m.composer.Value())
+	}
+}
+
+// TestCtrlCQuitsWhileComposing is agent-tui#22's own lesson, applied to
+// this new mode: quitting must never be swallowed by a key-capturing state.
+func TestCtrlCQuitsWhileComposing(t *testing.T) {
+	m := fetched(t, 100, 30)
+	m = sendKey(t, m, "2")
+	m = sendKey(t, m, "i")
+
+	next, cmd := m.handleComposerKey(tea.KeyMsg{Type: tea.KeyCtrlC})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("ctrl+c while composing did not return tea.Quit")
+	}
+	if !m.quitting {
+		t.Fatal("ctrl+c while composing did not set quitting")
+	}
+}
+
+// TestComposerBudgetIsIdenticalComposingOrNot is this package's own "fixed
+// budget in, fixed budget out" discipline (renderList's doc comment) made
+// a test for the two rows this file's composer change added: View()'s
+// total line count (measured at 29 for a 30-row terminal -- one under
+// height, true before this change too; shell.Model's own clampHeight pads
+// the difference, same as every other pane in this module) must be
+// IDENTICAL whether or not compose mode is active, so toggling [i]/[esc]
+// never shifts anything below it on screen -- the exact regression class
+// agent-tui#29/#38 already found once (gallery's View() overrunning its
+// own budget by one line, in the other direction).
+func TestComposerBudgetIsIdenticalComposingOrNot(t *testing.T) {
+	atRest := fetched(t, 100, 30)
+	restLines := strings.Count(atRest.View(), "\n") + 1
+
+	composing := sendKey(t, sendKey(t, atRest, "2"), "i")
+	composingLines := strings.Count(composing.View(), "\n") + 1
+
+	if restLines != composingLines {
+		t.Fatalf("View() line count = %d at rest, %d while composing -- composerHeight's own budget is not being held constant", restLines, composingLines)
+	}
+}

@@ -6,12 +6,37 @@ import (
 	"strings"
 	"time"
 
+	"github.com/charmbracelet/bubbles/textinput"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
 	"github.com/jonhill90/keelson/internal/theme"
 )
+
+// Sender posts text into a live thread -- SPEC-shell.md S7's own
+// requirement ("sends go through the daemon (subprocess transport), never
+// tmux send-keys"), expressed as this package's adapter seam, the same
+// shape Source (thread.go) already is. No implementation ships in this
+// repo yet: agent-supervisor's MCP surface -- session_attach/detach/add/
+// remove, the only four write tools that exist -- has no tool that posts a
+// prompt into an already-running lane; see Source's own doc comment for
+// the identical, already-documented reason no live Source exists either.
+// A real Sender needs the same thing a real Source does: a lane on a
+// structured transport ('acp'/'pi-rpc') plus a client speaking
+// session/prompt over its stdio, or a new agent-supervisor MCP write tool
+// -- either way, a second implementation of this type, nothing in this
+// file changing. Nil (New's default) is what makes the composer's own
+// [enter] key say so honestly instead of pretending to succeed.
+type Sender func(threadID, text string) error
+
+// composerHeight is the two fixed rows the composer always reserves in
+// listLayout's own budget -- the input line and one status/hint line
+// below it -- reserved unconditionally (composing or not) so the frame's
+// total height never changes when [i]/[esc] toggle compose mode. Same
+// "fixed budget in, fixed budget out" discipline sync/renderList already
+// document for scrollIndicator.
+const composerHeight = 2
 
 // Model is the chat pane's Bubble Tea sub-model -- internal/shell mounts it
 // as one of the panes beside board/cost/gallery (agent-tui#38's shape),
@@ -59,6 +84,22 @@ type Model struct {
 	width, height int
 	quitting      bool
 
+	// composer/composing/sendErr are S7's own addition (SPEC-shell.md:
+	// "List pane + transcript pane + composer"). Scoped to listLayout only
+	// -- gridLayout's own tiled/focused reading has no single "the thread
+	// I am typing into" without adding a mode this file's own doc comment
+	// does not otherwise need; see startComposing.
+	composer  textinput.Model
+	composing bool
+	// sendErr is the visible half of a failed or impossible send --
+	// AGENTS.md's "absence is a typed value" convention applied to
+	// sender == nil specifically: a composer that accepted [enter] and
+	// did nothing would be the exact silent failure this repo's own
+	// "blind, not quiet" rule (rail/board's Fetcher doc comments) warns
+	// against, applied here to writes instead of reads.
+	sendErr string
+	sender  Sender
+
 	theme       theme.Theme
 	themeNotice string
 }
@@ -69,12 +110,16 @@ type Model struct {
 // shape rail/board use for MCP reads; see fixture.go for what stands in
 // for that today.
 func New(source Source) Model {
+	ti := textinput.New()
+	ti.Prompt = "> "
+	ti.CharLimit = 4000
 	return Model{
 		source:       source,
 		theme:        theme.Default,
 		focused:      -1,
 		transcriptVP: viewport.New(0, 0),
 		listVP:       viewport.New(0, 0),
+		composer:     ti,
 	}
 }
 
@@ -84,6 +129,16 @@ func New(source Source) Model {
 func (m Model) WithTheme(th theme.Theme, notice string) Model {
 	m.theme = th
 	m.themeNotice = notice
+	return m
+}
+
+// WithSender wires in a real Sender -- nil (never called) is New's
+// default and a perfectly valid, silent state, the same "wiring is
+// optional" convention WithTasks/WithThemeSave document elsewhere in this
+// module. No caller in this repo passes a non-nil one yet: see Sender's
+// own doc comment for why.
+func (m Model) WithSender(s Sender) Model {
+	m.sender = s
 	return m
 }
 
@@ -128,10 +183,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.composing {
+		return m.handleComposerKey(msg)
+	}
 	switch msg.String() {
 	case "q", "ctrl+c":
 		m.quitting = true
 		return m, tea.Quit
+
+	case "i":
+		return m.startComposing()
 
 	case "t":
 		// agent-tui#25 scope item 3: runtime theme comparison -- same shape
@@ -200,6 +261,81 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	}
+}
+
+// startComposing enters compose mode -- [i], unused elsewhere in this
+// package's keymap. Refuses when there is no real selected thread to send
+// into (the synthetic "All" thread, AggregateAll's ID "all", has no
+// single lane behind it to address) or while gridLayout is active (this
+// file's own doc comment on composer/composing: scoped to listLayout).
+func (m Model) startComposing() (tea.Model, tea.Cmd) {
+	if Layouts[m.layout].ID == gridLayout.ID {
+		return m, nil
+	}
+	if m.selected < 0 || m.selected >= len(m.threads) || m.threads[m.selected].ID == "all" {
+		return m, nil
+	}
+	m.composing = true
+	m.sendErr = ""
+	m.composer.SetValue("")
+	m.composer.Focus()
+	return m, textinput.Blink
+}
+
+// handleComposerKey is where every key goes while m.composing is true.
+// "ctrl+c" is handled here explicitly rather than falling through to
+// composer.Update's own rune capture -- agent-tui#22's lesson (a mode that
+// swallows every key, quit included, must never be able to recur)
+// requires quitting to work mid-type, the same carve-out
+// internal/rail/ops.go's opsModeBusy makes for the same reason. "q" is
+// deliberately NOT caught here: unlike ctrl+c, a literal 'q' is ordinary
+// text a user may want to type into a message.
+func (m Model) handleComposerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c":
+		m.quitting = true
+		return m, tea.Quit
+	case "esc":
+		m.composing = false
+		m.composer.Blur()
+		m.composer.SetValue("")
+		m.sendErr = ""
+		return m, nil
+	case "enter":
+		return m.trySend()
+	}
+	var cmd tea.Cmd
+	m.composer, cmd = m.composer.Update(msg)
+	return m, cmd
+}
+
+// trySend is [enter] while composing. An empty (post-trim) message is a
+// no-op, not an error -- pressing enter on a blank line should not surface
+// "cannot send" chrome for text that was never going to go anywhere. A
+// real send success clears the composer and leaves compose mode; the sent
+// text is NOT echoed locally -- there is no live Source today for it to
+// diverge from (see Sender's own doc comment), and a future real Source's
+// next fetch is what will actually show it, exactly like every other
+// message already on screen.
+func (m Model) trySend() (tea.Model, tea.Cmd) {
+	text := strings.TrimSpace(m.composer.Value())
+	if text == "" {
+		return m, nil
+	}
+	if m.sender == nil {
+		m.sendErr = "cannot send -- no lane on a structured transport yet (agent-tui#20)"
+		return m, nil
+	}
+	thread := m.threads[m.selected]
+	if err := m.sender(thread.ID, text); err != nil {
+		m.sendErr = err.Error()
+		return m, nil
+	}
+	m.composer.SetValue("")
+	m.composing = false
+	m.composer.Blur()
+	m.sendErr = ""
+	return m, nil
 }
 
 func (m *Model) moveSelection(delta int) {
@@ -320,7 +456,7 @@ func (m Model) sync() Model {
 	// silently push the footer down instead, the same failure class as
 	// #29's untruncated board.
 	m.listVP.Width = mx.listWidth
-	m.listVP.Height = mx.bodyHeight - 1
+	m.listVP.Height = mx.bodyHeight - composerHeight - 1
 	var listLines []string
 	for i, t := range m.threads {
 		row := RenderThreadRow(t, m.fetched)
@@ -343,7 +479,7 @@ func (m Model) sync() Model {
 	// budget every render function's outer lipgloss.Height box assumes
 	// never depends on whether this particular frame happens to overflow.
 	width := mx.transcriptW
-	height := mx.bodyHeight - 2
+	height := mx.bodyHeight - composerHeight - 2
 	if Layouts[m.layout].ID == gridLayout.ID {
 		width = mx.width
 		height = mx.focusedMainHeight(len(m.threads)) - 2
@@ -420,7 +556,7 @@ func (m Model) View() string {
 
 	out += st.dim.Render(fmt.Sprintf(
 		"layout %d/%d: %s -- [j/k] move, [1-9] jump, [v] switch layout, [f] focus (grid), "+
-			"[pgup/pgdn] scroll, [home/end] top/bottom, [t] theme, [q] quit",
+			"[i] compose (list), [pgup/pgdn] scroll, [home/end] top/bottom, [t] theme, [q] quit",
 		m.layout+1, len(Layouts), Layouts[m.layout].Description,
 	)) + "\n\n"
 
@@ -504,9 +640,14 @@ func scrollIndicator(vp viewport.Model, st chatStyles) string {
 // silently push everything below (including the shell's own footer) down
 // by one line instead of erroring. Fixed budget in, fixed budget out.
 func (m Model) renderList(mx metrics, st chatStyles) string {
+	contentHeight := mx.bodyHeight - composerHeight
+	if contentHeight < 1 {
+		contentHeight = 1
+	}
+
 	listInd := scrollIndicator(m.listVP, st)
 	left := m.listVP.View() + "\n" + truncate(listInd, mx.listWidth)
-	left = lipgloss.NewStyle().Width(mx.listWidth).Height(mx.bodyHeight).Render(left)
+	left = lipgloss.NewStyle().Width(mx.listWidth).Height(contentHeight).Render(left)
 
 	var header string
 	if m.selected >= 0 && m.selected < len(m.threads) {
@@ -515,9 +656,39 @@ func (m Model) renderList(mx metrics, st chatStyles) string {
 	}
 	transcriptInd := scrollIndicator(m.transcriptVP, st)
 	right := header + "\n" + m.transcriptVP.View() + "\n" + truncate(transcriptInd, mx.transcriptW)
-	right = lipgloss.NewStyle().Width(mx.transcriptW).Height(mx.bodyHeight).Render(right)
+	right = lipgloss.NewStyle().Width(mx.transcriptW).Height(contentHeight).Render(right)
 
-	return lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
+	body := lipgloss.JoinHorizontal(lipgloss.Top, left, " ", right)
+	return lipgloss.NewStyle().Width(mx.width).Height(mx.bodyHeight).Render(body + "\n" + m.renderComposer(mx, st))
+}
+
+// renderComposer is the composer's own two rows (composerHeight): the
+// input line, and a status line whose content depends on state -- an
+// active send error, the compose-mode hint, or the at-rest "[i] compose"
+// hint. Always exactly two lines, composing or not (see composerHeight's
+// own doc comment).
+func (m Model) renderComposer(mx metrics, st chatStyles) string {
+	canCompose := m.selected >= 0 && m.selected < len(m.threads) && m.threads[m.selected].ID != "all"
+
+	input := st.dim.Render(truncate("> (press [i] to compose)", mx.width))
+	if m.composing {
+		input = truncate(m.composer.View(), mx.width)
+	}
+
+	var status string
+	switch {
+	case m.sendErr != "":
+		status = st.errS.Render(truncate("! "+m.sendErr, mx.width))
+	case m.composing:
+		status = st.dim.Render("[enter] send  [esc] cancel")
+	case !canCompose:
+		status = st.dim.Render("[i] compose -- select a real thread first")
+	default:
+		status = st.dim.Render("[i] compose a message")
+	}
+
+	return lipgloss.NewStyle().Width(mx.width).Height(1).Render(input) + "\n" +
+		lipgloss.NewStyle().Width(mx.width).Height(1).Render(status)
 }
 
 func (m Model) renderGrid(mx metrics, st chatStyles) string {
