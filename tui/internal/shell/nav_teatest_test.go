@@ -40,20 +40,22 @@ func TestDownArrowEnterNavigatesToTasksRoute(t *testing.T) {
 	waitFor(t, tm, "#7 ")
 }
 
-// TestEnterOnAnUnwiredRouteRendersStub confirms a nav route S3/S4 do not
-// map to a real Pane (routeToPane) falls through to internal/stub.View
-// (S5) rather than rendering nothing -- "Agents" (row 2: Home, Dashboard,
-// Agents) with its own S5 description as the marker.
+// TestEnterOnAnUnwiredRouteRendersStub confirms a nav route routeToPane
+// does not map to a real Pane falls through to internal/stub.View (S5)
+// rather than rendering nothing -- "Dashboard" (row 1: Home, Dashboard)
+// with its own S5 description as the marker. Was "Agents" until S6 gave
+// that route a real pane (internal/agents) -- this test moved to the next
+// still-unwired route rather than asserting a route this build now
+// renders for real.
 func TestEnterOnAnUnwiredRouteRendersStub(t *testing.T) {
 	tm := run(t, testModel())
 	waitFor(t, tm, "⌂ Home")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
-	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 	out := waitFor(t, tm, "not built yet")
-	if !bytes.Contains(out, []byte("Agents")) {
-		t.Fatalf("stub view missing the \"Agents\" title:\n%s", out)
+	if !bytes.Contains(out, []byte("Dashboard")) {
+		t.Fatalf("stub view missing the \"Dashboard\" title:\n%s", out)
 	}
 }
 
@@ -91,6 +93,108 @@ func TestRightArrowOnGroupHeaderExpandsThenLeftCollapses(t *testing.T) {
 	out := waitFor(t, tm, "▸ Build")
 	if bytes.Contains(out, []byte("Skills")) {
 		t.Fatalf("Skills still visible after ← collapsed its group:\n%s", out)
+	}
+}
+
+// TestAgentsRouteShowsRealAgentsPane is this change's own job: "Agents"
+// (row 2: Home, Dashboard, Agents) used to fall through to PaneStub
+// (TestEnterOnAnUnwiredRouteRendersStub, above, before it moved to
+// Dashboard) -- it must now render the real internal/agents.Model
+// testModel() wires in, not a stub and not home's own text.
+func TestAgentsRouteShowsRealAgentsPane(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "⌂ Home")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	out := waitFor(t, tm, "director:w1")
+	if bytes.Contains(out, []byte("not built yet")) {
+		t.Fatalf("Agents route still rendering the S5 stub:\n%s", out)
+	}
+}
+
+// TestSkillsRouteShowsRealSkillsPane reaches "Skills," Build's first
+// child: expand Build (→), then ↓ once more onto Skills, then Enter.
+func TestSkillsRouteShowsRealSkillsPane(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "⌂ Home")
+
+	for i := 0; i < 8; i++ { // Home..Build header
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // expand Build
+	waitFor(t, tm, "Skills")
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // onto the Skills row itself
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	out := waitFor(t, tm, "test-marker-skill")
+	if bytes.Contains(out, []byte("not built yet")) {
+		t.Fatalf("Skills route still rendering the S5 stub:\n%s", out)
+	}
+}
+
+// TestMCPServersRouteShowsRealMCPServersPane reaches "MCP Servers," Build's
+// third child: expand Build, then ↓↓↓ (Skills, Workflows, MCP Servers).
+func TestMCPServersRouteShowsRealMCPServersPane(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "⌂ Home")
+
+	for i := 0; i < 8; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight})
+	waitFor(t, tm, "MCP Servers")
+	for i := 0; i < 3; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	out := waitFor(t, tm, "test-marker-server")
+	if bytes.Contains(out, []byte("not built yet")) {
+		t.Fatalf("MCP Servers route still rendering the S5 stub:\n%s", out)
+	}
+}
+
+// TestConnectionsRouteShowsRealConnectorsPane reaches "Connections,"
+// Connect's first child -- Connect is the group header right after Build
+// (whether or not Build is expanded in THIS test, which never expands it).
+func TestConnectionsRouteShowsRealConnectorsPane(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "⌂ Home")
+
+	for i := 0; i < 9; i++ { // Home..Build header..Connect header
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight})
+	waitFor(t, tm, "Connections")
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	// "openai" is testModel()'s fake Connection's Provider -- connectors is
+	// the one pane here with no arbitrary "test-marker-*" string of its
+	// own to key off; its View renders real field values (harness/
+	// provider/configured/model), so a real one doubles as the marker.
+	out := waitFor(t, tm, "openai")
+	if bytes.Contains(out, []byte("not built yet")) {
+		t.Fatalf("Connections route still rendering the S5 stub:\n%s", out)
+	}
+}
+
+// TestAdminServicesRouteShowsRealAdminPane reaches "Services," the Admin
+// group's first child -- Admin is the last group header (Build, Connect,
+// Observe, Docs, Admin).
+func TestAdminServicesRouteShowsRealAdminPane(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "⌂ Home")
+
+	for i := 0; i < 12; i++ { // Home..Build..Connect..Observe..Docs..Admin header
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight})
+	waitFor(t, tm, "Services")
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	out := waitFor(t, tm, "test-marker-container")
+	if bytes.Contains(out, []byte("not built yet")) {
+		t.Fatalf("Admin route still rendering the S5 stub:\n%s", out)
 	}
 }
 

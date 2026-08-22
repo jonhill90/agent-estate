@@ -27,3 +27,18 @@ build.
 **Verified, not assumed:** this tape was run against the real binary on
 2026-08-22 and produced a correct 1400x800 capture of the rail plus the
 function-key nav bar.
+
+**Rewritten 2026-08-22 (BUILD-2, "wire the sidebar routes"):** the tape
+above typed bare digit keys ("2"/"3"/...), which drove `internal/rail`'s
+own pre-S3 glyph-set picker -- against today's shell (the nav sidebar is
+the fixed left column, SPEC-shell.md S3) those keys hit nothing bound, so
+every "different" screenshot it produced was the same home frame five
+times over. `shell.tape` now drives the real sidebar keys (↓/→/enter) to
+five distinct routes -- Home, Agents, Skills, MCP Servers, Admin -- run
+against a real `agent-supervisor` checkout and this box's own
+`~/.claude/skills`, `~/.claude.json` and docker daemon, confirming each
+one renders its real pane (`internal/agents`/`skills`/`mcpservers`/
+`admin`), not the S5 stub. Also fixed the build step: `go build ./cmd/...`
+stopped resolving to a single `-o` path once `cmd/demo` (agent-tui#83)
+added a second main package alongside `cmd/keelson` -- narrowed to
+`./cmd/keelson`, the one binary this tape has ever actually driven.

@@ -20,6 +20,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/signal"
 	"path/filepath"
 	"strconv"
@@ -30,15 +31,20 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	wishssh "github.com/charmbracelet/ssh"
 
+	"github.com/jonhill90/keelson/internal/admin"
+	"github.com/jonhill90/keelson/internal/agents"
 	"github.com/jonhill90/keelson/internal/board"
 	"github.com/jonhill90/keelson/internal/chat"
+	"github.com/jonhill90/keelson/internal/connectors"
 	"github.com/jonhill90/keelson/internal/cost"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
 	"github.com/jonhill90/keelson/internal/lane"
 	"github.com/jonhill90/keelson/internal/mcp"
+	"github.com/jonhill90/keelson/internal/mcpservers"
 	"github.com/jonhill90/keelson/internal/rail"
 	"github.com/jonhill90/keelson/internal/shell"
+	"github.com/jonhill90/keelson/internal/skills"
 	"github.com/jonhill90/keelson/internal/sshserver"
 	"github.com/jonhill90/keelson/internal/theme"
 	// sessionops, not session: the -session flag var below already owns that
@@ -304,6 +310,59 @@ func main() {
 	// ACP's structured session/update shape.
 	chatModel := chat.New(chat.NewFixtureSource())
 
+	// agentsModel/skillsModel/mcpserversModel/connectorsModel/adminModel
+	// are S6/S8/S9/S10/S11's own panes -- this is the first time any of
+	// the five is wired into the shell (previously each shipped
+	// standalone, driven only by its own throwaway demo binary). Each
+	// reuses a seam this file already built for another pane rather than
+	// opening a second connection to the same source:
+	//   - agentsModel reuses sessionsFetch (the same "sessions" MCP call
+	//     the rail already makes) and the same ledger task fetch the rail
+	//     uses via WithTasks.
+	//   - skillsModel/mcpserversModel/adminModel each read a real local
+	//     path (no MCP, no supervisor) -- homeDir resolves once, below,
+	//     and an unresolvable one (os.UserHomeDir erroring) degrades each
+	//     of these three to "not wired" rather than failing the whole
+	//     program, the same "wiring is optional" convention every other
+	//     optional pane input in this file already follows (boardFetch's
+	//     own ledgerSrc, costFetch's own quotaRun).
+	//   - connectorsModel reads the three harness config paths ccusage
+	//     already knows about (claude/codex/pi), independent of homeDir
+	//     resolving or not.
+	homeDir, homeDirErr := os.UserHomeDir()
+
+	agentsModel := agents.New(sessionsFetch).WithTasks(agents.TaskFetcher(buildTaskFetch(ledgerSrc, *sqliteBin)))
+
+	var skillsModel skills.Model
+	var mcpserversModel mcpservers.Model
+	var adminModel admin.Model
+	if homeDirErr == nil {
+		skillsModel = skills.New(skills.ScanFetcher(filepath.Join(homeDir, ".claude", "skills")))
+
+		cwd, cwdErr := os.Getwd()
+		if cwdErr != nil {
+			cwd = ""
+		}
+		mcpserversModel = mcpservers.New(mcpservers.NewFetcher(filepath.Join(homeDir, ".claude.json"), cwd, exec.LookPath))
+
+		adminModel = admin.New(admin.NewFetcher(admin.DockerExecRunner("docker"), exec.LookPath, theme.ConfigPath()))
+	} else {
+		skillsModel = skills.New(nil)
+		mcpserversModel = mcpservers.New(nil)
+		adminModel = admin.New(nil)
+	}
+
+	var connectorsPaths connectors.Paths
+	if homeDir != "" {
+		connectorsPaths = connectors.Paths{
+			ClaudeConfig:     filepath.Join(homeDir, ".claude.json"),
+			CodexConfig:      filepath.Join(homeDir, ".codex", "config.toml"),
+			CodexModelsCache: filepath.Join(homeDir, ".codex", "models_cache.json"),
+			PiSettings:       filepath.Join(homeDir, ".pi", "agent", "settings.json"),
+		}
+	}
+	connectorsModel := connectors.New(connectors.NewFetcher(connectorsPaths))
+
 	start := shell.PaneHome
 	switch {
 	case *showBoard:
@@ -319,6 +378,11 @@ func main() {
 	}
 
 	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel, flowModel, chatModel).
+		WithAgents(agentsModel).
+		WithSkills(skillsModel).
+		WithMCPServers(mcpserversModel).
+		WithConnectors(connectorsModel).
+		WithAdmin(adminModel).
 		WithStart(start).
 		WithTheme(activeTheme, themeNotice).
 		WithThemeSave(func(th theme.Theme) error { return theme.Save(theme.ConfigPath(), th.ID) })

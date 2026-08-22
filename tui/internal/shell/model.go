@@ -16,13 +16,18 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/jonhill90/keelson/internal/admin"
+	"github.com/jonhill90/keelson/internal/agents"
 	"github.com/jonhill90/keelson/internal/board"
 	"github.com/jonhill90/keelson/internal/chat"
+	"github.com/jonhill90/keelson/internal/connectors"
 	"github.com/jonhill90/keelson/internal/cost"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
+	"github.com/jonhill90/keelson/internal/mcpservers"
 	"github.com/jonhill90/keelson/internal/nav"
 	"github.com/jonhill90/keelson/internal/rail"
+	"github.com/jonhill90/keelson/internal/skills"
 	"github.com/jonhill90/keelson/internal/stub"
 	"github.com/jonhill90/keelson/internal/theme"
 )
@@ -50,6 +55,16 @@ const (
 	// internal/stub.View (S5) over m.nav.ActiveItem()'s Label and
 	// internal/stub.Descriptions.
 	PaneStub
+	// PaneAgents, PaneSkills, PaneMCPServers, PaneConnectors and PaneAdmin
+	// are S6/S8/S9/S10/S11's own panes, each shipped standalone (its own
+	// PR, its own teatest drive) before this change wires any of them into
+	// a route -- see routeToPane's own doc comment for which nav route id
+	// reaches each one.
+	PaneAgents
+	PaneSkills
+	PaneMCPServers
+	PaneConnectors
+	PaneAdmin
 )
 
 // focus names which region the keyboard currently drives -- the nav
@@ -71,12 +86,30 @@ const (
 // already had working panes before S3 existed (PaneHome, PaneChat) and
 // cost nothing extra to wire the same way. Every OTHER route in
 // nav.Build()'s tree has no entry here and falls through to PaneStub.
+// This mapping grew with S6/S8/S9/S10/S11: "agents" -> PaneAgents (S6),
+// "skills" -> PaneSkills (S8), "mcp-servers" -> PaneMCPServers (S9),
+// "connections" -> PaneConnectors (S10). S11's own five nav leaves
+// ("admin-services", "admin-profiles", "admin-users", "dependencies",
+// "settings") all map to the SAME PaneAdmin -- internal/admin.Model
+// renders all five of S11's named sections in one view rather than a
+// fifth of a view per route, so whichever admin-group item is confirmed,
+// the content pane shows the one real admin.Model, not five separate
+// screens for a section split that exists on the web only.
 var routeToPane = map[string]Pane{
-	"home":  PaneHome,
-	"tasks": PaneBoard,
-	"usage": PaneCost,
-	"lanes": PaneLanes,
-	"chat":  PaneChat,
+	"home":           PaneHome,
+	"tasks":          PaneBoard,
+	"usage":          PaneCost,
+	"lanes":          PaneLanes,
+	"chat":           PaneChat,
+	"agents":         PaneAgents,
+	"skills":         PaneSkills,
+	"mcp-servers":    PaneMCPServers,
+	"connections":    PaneConnectors,
+	"admin-services": PaneAdmin,
+	"admin-profiles": PaneAdmin,
+	"admin-users":    PaneAdmin,
+	"dependencies":   PaneAdmin,
+	"settings":       PaneAdmin,
 }
 
 // paneToRoute is routeToPane's inverse, used to keep the nav sidebar's own
@@ -90,6 +123,13 @@ var routeToPane = map[string]Pane{
 // own f4/f5 keys leaves the sidebar's highlight exactly where it was --
 // documented, not silently wrong, until a future item decides whether they
 // get a route of their own.
+// PaneAgents/PaneSkills/PaneMCPServers/PaneConnectors/PaneAdmin have no
+// entry here, the same reason PaneGallery/PaneFlow don't: nothing bypasses
+// the nav sidebar to reach them (no f-key, no WithStart case) -- selecting
+// one always goes through routeNavKey, which sets the sidebar's own
+// active route directly before consulting routeToPane, so there is no
+// "highlight could disagree with content" case for this five to guard
+// against yet.
 var paneToRoute = map[Pane]string{
 	PaneHome:  "home",
 	PaneBoard: "tasks",
@@ -131,6 +171,21 @@ type Model struct {
 	gallery gallery.Model
 	flow    flow.Model
 	chat    chat.Model
+
+	// agents/skills/mcpservers/connectors/admin are S6/S8/S9/S10/S11's
+	// panes, wired in via the With* methods below rather than New's own
+	// parameter list -- New already has eight positional parameters, and
+	// every one of these five is optional in exactly the way saveTheme/
+	// TaskFetcher already are elsewhere in this struct: a zero-value
+	// pane.Model has a nil Fetcher, whose own Init/Update already treat
+	// that as "nothing to fetch" (each package's own doFetch nil-check),
+	// so an un-wired pane still renders (an empty list, not a panic) --
+	// wiring is additive, never required for the shell to build or run.
+	agents     agents.Model
+	skills     skills.Model
+	mcpservers mcpservers.Model
+	connectors connectors.Model
+	admin      admin.Model
 
 	// boardOK is false when cmd/agent-tui had no -ledger to build a real
 	// board.Fetcher from -- board.go's own -board flag still refuses to
@@ -263,6 +318,38 @@ func (m Model) WithThemeSave(save func(theme.Theme) error) Model {
 	return m
 }
 
+// WithAgents/WithSkills/WithMCPServers/WithConnectors/WithAdmin wire
+// S6/S8/S9/S10/S11's own panes in, each already built standalone by its
+// own item -- cmd/keelson passes an already-constructed pane.Model
+// exactly as it does for board/cost/gallery/flow/chat via New, just
+// through a With* method instead of New's own parameter list (New's
+// signature is deliberately left unchanged; see Model's own struct doc
+// comment for why these five are optional).
+func (m Model) WithAgents(a agents.Model) Model {
+	m.agents = a
+	return m
+}
+
+func (m Model) WithSkills(s skills.Model) Model {
+	m.skills = s
+	return m
+}
+
+func (m Model) WithMCPServers(s mcpservers.Model) Model {
+	m.mcpservers = s
+	return m
+}
+
+func (m Model) WithConnectors(c connectors.Model) Model {
+	m.connectors = c
+	return m
+}
+
+func (m Model) WithAdmin(a admin.Model) Model {
+	m.admin = a
+	return m
+}
+
 // applyTheme pushes m's current theme/themeNotice into every pane's own
 // WithTheme -- the one place that fans the single shared value out to all
 // four, called from both WithTheme (construction/startup) and the
@@ -276,11 +363,19 @@ func (m Model) applyTheme() Model {
 	m.gallery = m.gallery.WithTheme(m.theme, m.themeNotice)
 	m.flow = m.flow.WithTheme(m.theme, m.themeNotice)
 	m.chat = m.chat.WithTheme(m.theme, m.themeNotice)
+	m.agents = m.agents.WithTheme(m.theme, m.themeNotice)
+	m.skills = m.skills.WithTheme(m.theme, m.themeNotice)
+	m.mcpservers = m.mcpservers.WithTheme(m.theme, m.themeNotice)
+	m.connectors = m.connectors.WithTheme(m.theme, m.themeNotice)
+	m.admin = m.admin.WithTheme(m.theme, m.themeNotice)
 	return m
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.nav.Init(), m.rail.Init(), m.cost.Init(), m.gallery.Init(), m.chat.Init()}
+	cmds := []tea.Cmd{
+		m.nav.Init(), m.rail.Init(), m.cost.Init(), m.gallery.Init(), m.chat.Init(),
+		m.agents.Init(), m.skills.Init(), m.mcpservers.Init(), m.connectors.Init(), m.admin.Init(),
+	}
 	if m.boardOK {
 		cmds = append(cmds, m.board.Init(), m.flow.Init())
 	}
@@ -423,6 +518,26 @@ func (m Model) routeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case PaneLanes:
 		next, cmd := m.rail.Update(msg)
 		m.rail = next.(rail.Model)
+		return m, cmd
+	case PaneAgents:
+		next, cmd := m.agents.Update(msg)
+		m.agents = next.(agents.Model)
+		return m, cmd
+	case PaneSkills:
+		next, cmd := m.skills.Update(msg)
+		m.skills = next.(skills.Model)
+		return m, cmd
+	case PaneMCPServers:
+		next, cmd := m.mcpservers.Update(msg)
+		m.mcpservers = next.(mcpservers.Model)
+		return m, cmd
+	case PaneConnectors:
+		next, cmd := m.connectors.Update(msg)
+		m.connectors = next.(connectors.Model)
+		return m, cmd
+	case PaneAdmin:
+		next, cmd := m.admin.Update(msg)
+		m.admin = next.(admin.Model)
 		return m, cmd
 	default:
 		return m.homeKey(msg)
@@ -601,6 +716,26 @@ func (m Model) routeAll(msg tea.Msg) (Model, tea.Cmd) {
 	m.chat = next.(chat.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.agents.Update(msg)
+	m.agents = next.(agents.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.skills.Update(msg)
+	m.skills = next.(skills.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.mcpservers.Update(msg)
+	m.mcpservers = next.(mcpservers.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.connectors.Update(msg)
+	m.connectors = next.(connectors.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.admin.Update(msg)
+	m.admin = next.(admin.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -663,6 +798,26 @@ func (m Model) resize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 	m.chat = next.(chat.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.agents.Update(contentSize)
+	m.agents = next.(agents.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.skills.Update(contentSize)
+	m.skills = next.(skills.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.mcpservers.Update(contentSize)
+	m.mcpservers = next.(mcpservers.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.connectors.Update(contentSize)
+	m.connectors = next.(connectors.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.admin.Update(contentSize)
+	m.admin = next.(admin.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -723,6 +878,16 @@ func (m Model) contentView() string {
 		return m.chat.View()
 	case PaneLanes:
 		return m.rail.View()
+	case PaneAgents:
+		return m.agents.View()
+	case PaneSkills:
+		return m.skills.View()
+	case PaneMCPServers:
+		return m.mcpservers.View()
+	case PaneConnectors:
+		return m.connectors.View()
+	case PaneAdmin:
+		return m.admin.View()
 	case PaneStub:
 		return m.stubView()
 	default:
@@ -789,15 +954,24 @@ func (m Model) footer() string {
 	return legendStyle.Width(m.width).Render(truncate(line, m.width))
 }
 
+// homeView used to advertise the f1-f6 keys as if they were the only way
+// to reach a pane -- true before SPEC-shell.md S3, stale the moment the
+// nav sidebar became the real navigation surface (S1-S4) and S6/S8/S9/
+// S10/S11 gave most of those f-keys' destinations, and many more besides,
+// a real sidebar route of their own. f1-f6 still work (S3's own "nothing
+// that scripts them may break" acceptance line), so they are not removed
+// from the footer below -- only no longer the thing home's own content
+// teaches a human to press first.
 func (m Model) homeView() string {
 	lines := []string{
 		"agent-tui",
 		"",
-		"[f2] board    view the task board (agent-tui#6)",
-		"[f3] cost     view the cost panel (agent-tui#4)",
-		"[f4] gallery  view the glyph gallery (agent-tui#11)",
-		"[f5] flow     watch work move through the pipeline (agent-tui#64)",
-		"[f6] chat     live ACP session threads (agent-tui#20)",
+		"Use the sidebar on the left to navigate: Agents, Chat, Tasks,",
+		"Skills, MCP Servers, Connections, Usage, Admin, and every other",
+		"destination in the tree -- an unwired one still renders an honest",
+		"\"not built yet\" placeholder rather than nothing at all.",
+		"",
+		"[↑↓] move   [enter]/[→] select   [←] collapse   [b] icons-only",
 		"[tab] move focus into the sidebar on the left",
 	}
 	return legendStyle.Width(m.contentWidth).Height(m.contentHeight).Render(

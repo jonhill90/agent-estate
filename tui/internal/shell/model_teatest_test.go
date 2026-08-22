@@ -18,13 +18,18 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
 
+	"github.com/jonhill90/keelson/internal/admin"
+	"github.com/jonhill90/keelson/internal/agents"
 	"github.com/jonhill90/keelson/internal/board"
 	"github.com/jonhill90/keelson/internal/chat"
+	"github.com/jonhill90/keelson/internal/connectors"
 	"github.com/jonhill90/keelson/internal/cost"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
 	"github.com/jonhill90/keelson/internal/lane"
+	"github.com/jonhill90/keelson/internal/mcpservers"
 	"github.com/jonhill90/keelson/internal/rail"
+	"github.com/jonhill90/keelson/internal/skills"
 )
 
 // testModel builds a Model wired to fakes only -- no MCP, no ccusage, no
@@ -44,7 +49,29 @@ func testModel() Model {
 	g := gallery.New()
 	fl := flow.New()
 	ch := chat.New(chat.NewFixtureSource())
-	return New(r, b, true, "", c, g, fl, ch)
+
+	ag := agents.New(func() ([]lane.Session, error) {
+		return []lane.Session{{Name: "director", Lanes: []lane.Lane{{Name: "w1", State: "busy"}}}}, nil
+	})
+	sk := skills.New(func() ([]skills.Skill, error) {
+		return []skills.Skill{{Dir: "test-marker-skill", Name: "test-marker-skill", Description: "a fake skill for shell-level routing tests"}}, nil
+	})
+	mc := mcpservers.New(func() ([]mcpservers.Server, error) {
+		return []mcpservers.Server{{Name: "test-marker-server", Scope: mcpservers.ScopeGlobal, Transport: mcpservers.TransportStdio, Command: "python3"}}, nil
+	})
+	co := connectors.New(func() ([]connectors.Connection, []connectors.AvailableModel, error) {
+		return []connectors.Connection{{Harness: connectors.HarnessCodex, Provider: "openai", Configured: true}}, nil, nil
+	})
+	ad := admin.New(func() (admin.Snapshot, error) {
+		return admin.Snapshot{Services: []admin.Service{{Name: "test-marker-container", Image: "x", Status: "Up"}}}, nil
+	})
+
+	return New(r, b, true, "", c, g, fl, ch).
+		WithAgents(ag).
+		WithSkills(sk).
+		WithMCPServers(mc).
+		WithConnectors(co).
+		WithAdmin(ad)
 }
 
 func run(t *testing.T, m Model) *teatest.TestModel {
