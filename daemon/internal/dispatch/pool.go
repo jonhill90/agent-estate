@@ -43,6 +43,13 @@ func DefaultConcurrency() int {
 // Ordering of the returned slice matches the input, so a caller can pair
 // outcomes to jobs without threading an index through.
 func RunPool(ctx context.Context, l *ledger.DB, mk func(Job) *agent.Claude, jobs []Job, workers int) []Outcome {
+	return RunPoolGated(ctx, l, mk, jobs, workers, Gates{})
+}
+
+// RunPoolGated is RunPool with pre-spawn gates evaluated PER JOB, not once for
+// the batch. Spend accumulates while the batch runs, so a cap checked only at
+// the start is a cap that does not bind.
+func RunPoolGated(ctx context.Context, l *ledger.DB, mk func(Job) *agent.Claude, jobs []Job, workers int, g Gates) []Outcome {
 	if workers <= 0 {
 		workers = DefaultConcurrency()
 	}
@@ -66,7 +73,7 @@ func RunPool(ctx context.Context, l *ledger.DB, mk func(Job) *agent.Claude, jobs
 			defer func() { <-sem }()
 
 			a := mk(j)
-			out[i] = Run(ctx, l, a, j.TaskID, j.Lane, j.Brief)
+			out[i] = RunGated(ctx, l, a, j.TaskID, j.Lane, j.Brief, g)
 		}(i, j)
 	}
 	wg.Wait()
