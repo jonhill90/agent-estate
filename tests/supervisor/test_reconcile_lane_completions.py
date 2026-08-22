@@ -1,6 +1,8 @@
 import json
+import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -62,6 +64,36 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
             status_marker=None,
             accepted=accepted,
         )
+
+    def dispatch_claude_print(self, task_id, *, lane):
+        """Records one dispatch the way `ClaudePrintAdapter.assign_task`
+        actually does -- `register_lane`, `reconstruct_task`, `assign`,
+        `mark_delivery_pending`, `mark_delivered` as four independent calls,
+        never `record_dispatch` (agent-supervisor#488: `record_dispatch`
+        never forwards its own `transport` kwarg to `_register_lane_tx`, so
+        routing a claude-print scenario through it silently reverts the
+        lane's `transport` column back to `send-keys` -- harmless before
+        this fix, since nothing read that column, but it would now defeat
+        the very gate these tests exist to exercise. `record_dispatch` is
+        only ever reachable from `cli.py record-dispatch`, which has no
+        `--transport` flag at all -- this path is never how a real
+        claude-print lane is dispatched, so faithfully reproducing THAT
+        flow, not patching `record_dispatch`, is the right fix here)."""
+        nonce = f"nonce-{lane}"
+        self.ledger.register_lane(
+            lane=lane, pane_id=f"claude-print:{lane}", nonce=nonce, harness="claude",
+            repo="/repo/x", server_id="claude-print", session_id=f"sess-{lane}",
+            command="claude", transport="claude-print",
+        )
+        self.ledger.reconstruct_task(
+            task_id=task_id, source_kind="issue",
+            source_url=f"https://github.com/jonhill90/agent-supervisor/issues/{task_id}",
+            source_ref=task_id, summary=f"issue {task_id}", source_state="OPEN",
+            status="created", evidence=[f"claimed by dispatch.sh for lane {lane}"], status_marker=None,
+        )
+        self.ledger.assign(task_id=task_id, lane=lane, pane_nonce=nonce, summary=f"issue {task_id}")
+        self.ledger.mark_delivery_pending(task_id, pane_nonce=nonce)
+        return self.ledger.mark_delivered(task_id, pane_nonce=nonce)
 
     def test_lane_free_past_the_dwell_is_completed_from_observed_state(self):
         """The #155 acceptance case: a lane never ran `wait-for -S`. The pane
@@ -402,16 +434,14 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
     def test_accepted_nonobservable_lane_without_evidence_still_fails(self):
         """A fix that stops this path stamping anything at all is a
         regression that looks exactly like success -- a genuinely dead
-        accepted lane with no lane-log evidence must still be terminated
-        `failed`, and the note must not claim the canonical `<task_id>.md`
-        slot a late genuine report might still need."""
-        self.ledger.register_lane(
-            lane="ad401-accepted-dead", pane_id="claude-print:ad401-accepted-dead",
-            nonce="nonce-414d", harness="claude", repo="/repo/x", server_id="claude-print",
-            session_id="sess-414d", command="claude", transport="claude-print",
-        )
-        self.dispatch("ad401-accepted-dead-task", lane="ad401-accepted-dead", accepted=False)
-        self.ledger.accept("ad401-accepted-dead-task", pane_nonce="nonce-2")
+        accepted lane (agent-supervisor#488: its lane-log names a pid that
+        has actually exited, the same evidence `pid_is_alive` checks) with
+        no PR evidence must still be terminated `failed`, and the note must
+        not claim the canonical `<task_id>.md` slot a late genuine report
+        might still need."""
+        self.dispatch_claude_print("ad401-accepted-dead-task", lane="ad401-accepted-dead")
+        self.ledger.accept("ad401-accepted-dead-task", pane_nonce="nonce-ad401-accepted-dead")
+        self._write_dispatched_pid_log("ad401-accepted-dead-task", self._dead_pid(), lane="ad401-accepted-dead")
         runner = FakeLanesRunner({})
 
         report = LaneCompletionReconciler(
@@ -507,18 +537,14 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         # exactly where this evidence-backed completion lands.
         self.assertEqual(self.ledger.results_dir / "ad401-headless-task.md", Path(task["result_path"]))
 
-    def test_nonobservable_lane_without_evidence_does_not_claim_the_work_failed(self):
-        """No lane-log at all -- genuinely no evidence either way. The sweep
-        must still free the lane (`failed`, the only terminal status this
-        schema has for it), but the note it writes must not assert the work
-        failed, and it must not claim the canonical `<task_id>.md` slot the
-        lane's own late report might still need (agent-supervisor#401)."""
-        self.ledger.register_lane(
-            lane="ad401-silent", pane_id="claude-print:ad401-silent", nonce="nonce-s",
-            harness="claude", repo="/repo/x", server_id="claude-print", session_id="sess-s",
-            command="claude", transport="claude-print",
-        )
-        self.dispatch("ad401-silent-task", lane="ad401-silent", accepted=False)
+    def test_nonobservable_lane_with_dead_pid_and_no_pr_still_fails(self):
+        """agent-supervisor#488: a genuinely dead lane-logged pid, with no
+        PR evidence either, must still be terminated `failed` -- the sweep
+        stopping to stamp anything at all whenever it cannot prove aliveness
+        would be exactly as wrong as stamping a live one, and this is the
+        codepath that proves the fix does not overcorrect into that."""
+        self.dispatch_claude_print("ad401-silent-task", lane="ad401-silent")
+        self._write_dispatched_pid_log("ad401-silent-task", self._dead_pid(), lane="ad401-silent")
         runner = FakeLanesRunner({})
 
         report = LaneCompletionReconciler(
@@ -534,6 +560,90 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         note = result_path.read_bytes()
         self.assertNotIn(b"failed, not completed", note)
         self.assertIn(b"no completion signal arrived", note)
+
+    def test_nonobservable_lane_with_no_pid_evidence_is_indeterminate_not_failed(self):
+        """agent-supervisor#488: no lane-log at all means this sweep has no
+        way to check liveness, not that the work is confirmed gone -- the
+        dangerous direction #488 measured (a LIVE `as473-as473x` stamped
+        `failed`) was reached through exactly this kind of blind spot.
+        Indeterminate liveness must leave the row alone AND say so in the
+        report, distinctly from an ordinary too-young `unresolved`."""
+        self.dispatch_claude_print("ad488-no-log-task", lane="ad488-no-log")
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, stale_after=300, clock=lambda: 2_000
+        ).sweep()
+
+        task = self.ledger.get_task("ad488-no-log-task")
+        self.assertEqual("delivered", task["status"])
+        self.assertIsNone(task["completed_at"])
+        self.assertEqual([], report["failed_stale_delivery"])
+        self.assertIn("ad488-no-log-task", report["unresolved"])
+        self.assertEqual(["ad488-no-log-task"], report["liveness_indeterminate"])
+
+    def test_accepted_nonobservable_lane_with_no_pid_evidence_is_indeterminate_not_failed(self):
+        """Same indeterminate-liveness gate as the delivered-path test above,
+        exercised through `_sweep_nonobservable_accepted` -- the exact
+        method the measured `as473-as473x` specimen went through."""
+        self.dispatch_claude_print("ad488-accepted-no-log-task", lane="ad488-accepted-no-log")
+        self.ledger.accept("ad488-accepted-no-log-task", pane_nonce="nonce-ad488-accepted-no-log")
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, stale_after=300, clock=lambda: 2_000
+        ).sweep()
+
+        task = self.ledger.get_task("ad488-accepted-no-log-task")
+        self.assertEqual("accepted", task["status"])
+        self.assertEqual([], report["failed_stale_acceptance"])
+        self.assertIn("ad488-accepted-no-log-task", report["unresolved"])
+        self.assertEqual(["ad488-accepted-no-log-task"], report["liveness_indeterminate"])
+
+    def test_accepted_nonobservable_lane_with_live_process_is_not_failed(self):
+        """agent-supervisor#488's measured specimen, reproduced directly:
+        `as473-as473x` read `status=accepted` (per #480's own measurement)
+        and its lane-log named a pid that was still alive an hour past the
+        sweep's `stale_after` threshold -- the sweep must not stamp it
+        `failed`. Uses a real, still-running subprocess (VERIFY THE
+        INSTRUMENT: this liveness check must actually see a live process,
+        not just fail to see a dead one)."""
+        self.dispatch_claude_print("ad488-accepted-live-task", lane="ad488-accepted-live")
+        self.ledger.accept("ad488-accepted-live-task", pane_nonce="nonce-ad488-accepted-live")
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(proc.kill)
+        self.addCleanup(proc.wait)
+        try:
+            self._write_dispatched_pid_log(
+                "ad488-accepted-live-task", proc.pid, lane="ad488-accepted-live"
+            )
+            runner = FakeLanesRunner({})
+
+            report = LaneCompletionReconciler(
+                self.ledger, runner=runner, stale_after=300, clock=lambda: 2_000
+            ).sweep()
+
+            task = self.ledger.get_task("ad488-accepted-live-task")
+            self.assertEqual("accepted", task["status"])
+            self.assertEqual([], report["failed_stale_acceptance"])
+            self.assertIn("ad488-accepted-live-task", report["unresolved"])
+            self.assertEqual(["ad488-accepted-live-task"], report["liveness_alive"])
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def _dead_pid(self):
+        """A real, definitely-finished process -- not a number picked for
+        being unlikely to exist (same convention `test_core.py`'s
+        `test_pid_liveness_reports_a_dead_child` uses)."""
+        proc = subprocess.Popen([sys.executable, "-c", "pass"])
+        proc.wait()
+        return proc.pid
+
+    def _write_dispatched_pid_log(self, task_id, pid, *, lane):
+        """Mirrors the exact line `ClaudePrintAdapter.assign_task` appends
+        to `lane-logs/<task_id>.log` at dispatch time."""
+        self._write_lane_log(task_id, f"\n--- dispatched detached: task={task_id} lane={lane} pid={pid} ---\n")
 
     def test_never_accepted_lane_with_pr_evidence_completes_instead_of_failing(self):
         """Same cheap-evidence check on the tmux `_fail_unaccepted` path: a

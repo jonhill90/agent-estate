@@ -1216,12 +1216,22 @@ failed_stale_delivery = d.get("failed_stale_delivery", [])
 # above (that one never even confirmed acceptance), named separately for the
 # same reason.
 failed_stale_acceptance = d.get("failed_stale_acceptance", [])
+# agent-supervisor#488: a claude-print liveness check blocked a failure
+# stamp this sweep would otherwise have written -- named separately from
+# unresolved below (which also covers ordinary too-young rows) for the
+# same reason the other categories are: a human scanning watchdog.log must
+# be able to tell "still genuinely running" and "could not tell" apart from
+# an unremarkable dwell.
+liveness_alive = d.get("liveness_alive", [])
+liveness_indeterminate = d.get("liveness_indeterminate", [])
 unresolved = len(d.get("unresolved", []))
 errors = len(d.get("errors", []))
 names = ",".join(completed)
 failed_names = ",".join(failed_unaccepted)
 stale_names = ",".join(failed_stale_delivery)
 stale_accepted_names = ",".join(failed_stale_acceptance)
+alive_names = ",".join(liveness_alive)
+indeterminate_names = ",".join(liveness_indeterminate)
 print(
     f"completed={len(completed)} failed_unaccepted={len(failed_unaccepted)} "
     f"failed_stale_delivery={len(failed_stale_delivery)} "
@@ -1230,6 +1240,8 @@ print(
     + (f" (never-accepted: {failed_names})" if failed_names else "")
     + (f" (no-pane-stale: {stale_names})" if stale_names else "")
     + (f" (no-pane-accepted-stale: {stale_accepted_names})" if stale_accepted_names else "")
+    + (f" (liveness-blocked-failure: {alive_names})" if alive_names else "")
+    + (f" (liveness-indeterminate: {indeterminate_names})" if indeterminate_names else "")
 )
 ' 2>"$py_err_file")
   py_rc=$?
