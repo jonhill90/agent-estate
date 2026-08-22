@@ -89,6 +89,30 @@ applied to `list_accepted_open_tasks()` instead of
 difference is which query feeds it and which terminal write is eligible,
 because the source status differs.
 
+agent-supervisor#488: "no signal arrived" is not "the process has exited",
+either. `_sweep_nonobservable`/`_sweep_nonobservable_accepted` judge a
+claude-print/pi-rpc row on wall-clock dwell since `updated_at` alone --
+measured live, that stamped `as473-as473x` `failed` (`completed_at`
+recorded) while `ps` showed its `claude -p ... [Hill90 task as473-as473x]`
+subprocess still alive and accumulating CPU roughly an hour past that
+timestamp. A supervisor trusting that stamp would redispatch the same
+issue to a second lane, or reclaim the first lane's worktree out from under
+a still-running process -- exactly the two outcomes agent-supervisor#401's
+own `_complete_from_evidence` exists to avoid on the completion side. The
+fix: before either method writes a failure, `_lane_log_pid` reads the pid
+`ClaudePrintAdapter.assign_task` already wrote to this same lane-log at
+dispatch time (`--- dispatched detached: task=... lane=... pid=... ---`)
+and `core.pid_is_alive` checks it with `os.kill(pid, 0)`. A pid that
+answers alive blocks the failure stamp outright (`unresolved`, named in
+`report["liveness_alive"]` so it reads distinctly from a merely-too-young
+row). A row whose log never named a pid at all (missing log, unreadable,
+no dispatch line) is liveness-INDETERMINATE, not assumed alive or dead --
+also left `unresolved`, named separately in `report["liveness_indeterminate"]`
+so the two reasons are never conflated in what gets reported. Only a row
+with a demonstrably dead pid (`pid_is_alive` returns `False`) reaches the
+`_lane_log_pr_url` evidence check and, failing that, the failure stamp
+below -- unchanged from before this fix in that case.
+
 agent-supervisor#401: "no signal arrived" and "the work did not happen" are
 different claims, and the wording this sweep used to write conflated them
 -- `results/ad275-fix275.md` read "failed, not completed" while its own
@@ -125,11 +149,17 @@ import json
 import re
 import subprocess
 
-from core import CLAIM_TASK_PREFIX
+from core import CLAIM_TASK_PREFIX, pid_is_alive
 
 # Mirrors agent-supervisor#401's own acceptance script's grep exactly, so a
 # specimen this finds is a specimen that script would also flag.
 _PR_URL_RE = re.compile(r'https://github\.com/[^\s",]+/pull/[0-9]+')
+
+# agent-supervisor#488: mirrors the exact line `ClaudePrintAdapter.
+# assign_task` (`adapter.py`) writes to `lane-logs/<task_id>.log` right
+# after `run_detached` returns -- the only place this sweep can learn the
+# pid of the subprocess it is about to judge.
+_DISPATCHED_PID_RE = re.compile(r"dispatched detached: task=\S+ lane=\S+ pid=(\d+)")
 
 DEFAULT_IDLE_AFTER_SECONDS = 300
 # agent-supervisor#374: deliberately much longer than DEFAULT_IDLE_AFTER_SECONDS.
@@ -251,6 +281,14 @@ class LaneCompletionReconciler:
             "failed_stale_delivery": [],
             "failed_stale_acceptance": [],
             "unresolved": [],
+            # agent-supervisor#488: subsets of "unresolved" -- task ids left
+            # alone specifically because a liveness check blocked a failure
+            # stamp, named separately so a human (or watchdog.log) can tell
+            # "this one is too young" apart from "this one is provably still
+            # running" or "this one could not be checked at all" without
+            # reading the note text.
+            "liveness_alive": [],
+            "liveness_indeterminate": [],
             "errors": [],
         }
 
@@ -315,6 +353,68 @@ class LaneCompletionReconciler:
             return None
         match = _PR_URL_RE.search(text)
         return match.group(0) if match else None
+
+    def _lane_log_pid(self, task_id):
+        """agent-supervisor#488: the pid `ClaudePrintAdapter.assign_task`
+        recorded in this lane's own transport log at dispatch time, or
+        `None` if the log is missing, unreadable, or never got that far
+        (no `--- dispatched detached: ... ---` line). `None` is NOT the
+        same claim as "no pid" -- it means this sweep has no way to check
+        liveness at all, and callers must treat it as indeterminate, not
+        as a stand-in for either alive or dead. When a lane-log records
+        more than one dispatch (a rare retried send), the LAST one is the
+        pid actually running now.
+        """
+        log_path = self.ledger.root / "lane-logs" / f"{task_id}.log"
+        try:
+            text = log_path.read_text(errors="replace")
+        except OSError:
+            return None
+        matches = _DISPATCHED_PID_RE.findall(text)
+        return int(matches[-1]) if matches else None
+
+    def _liveness_blocks_failure(self, task, *, now, report):
+        """agent-supervisor#488: the gate `_sweep_nonobservable`/
+        `_sweep_nonobservable_accepted` both run before writing a failure
+        stamp. Returns `True` (and records why in `report`) when the
+        subprocess this row's lane-log named is demonstrably still alive,
+        OR when a `claude-print` lane's liveness cannot be determined at
+        all -- the safe answer in both cases is to leave the row alone
+        rather than guess, because stamping a LIVE task failed destroys
+        work (see this module's top-level docstring); only a DEMONSTRABLY
+        dead pid, or a lane transport with no live subprocess to protect in
+        the first place, lets the caller proceed to `_lane_log_pr_url` and,
+        failing that, the failure write.
+
+        Scoped to `transport == 'claude-print'` deliberately: that is the
+        ONE transport whose `assign_task` starts a detached, genuinely
+        long-running subprocess and returns before it finishes (`adapter.py`'s
+        own comment: "the child is in its own process group, so it survives
+        this process exiting"). A `pi-rpc` lane's transport is terminated
+        before `assign_task` ever returns (`PiRPCAdapter`'s own docstring:
+        "the resulting transport is always terminated before returning"), so
+        by the time this sweep's `stale_after` dwell has even elapsed there
+        is no live process left to protect -- treating an unreadable pid as
+        indeterminate for THAT transport would just resurrect the #374/#414
+        stuck-forever shape this module's own fix history already closed.
+        A lane this method cannot even look up (`get_lane` returns `None`)
+        is treated the same as non-`claude-print`, for the same reason
+        `_parse_lane` already fails closed elsewhere in this module: an
+        absent record is not evidence of a live claude-print subprocess.
+        """
+        lane = self.ledger.get_lane(task["lane"])
+        if lane is None or lane.get("transport") != "claude-print":
+            return False
+        pid = self._lane_log_pid(task["id"])
+        if pid is None:
+            report["unresolved"].append(task["id"])
+            report["liveness_indeterminate"].append(task["id"])
+            return True
+        if pid_is_alive(pid):
+            report["unresolved"].append(task["id"])
+            report["liveness_alive"].append(task["id"])
+            return True
+        return False
 
     def _complete_from_evidence(self, task, *, pr_url, now, report):
         """agent-supervisor#401: the lane never signalled, but its own
@@ -396,6 +496,12 @@ class LaneCompletionReconciler:
         if age_seconds < self.stale_after:
             report["unresolved"].append(task["id"])
             return
+        # agent-supervisor#488: a demonstrably alive (or unknowable) pid
+        # blocks this failure stamp outright, before any evidence check --
+        # see `_liveness_blocks_failure`'s own docstring for why both
+        # directions resolve to "leave the row alone".
+        if self._liveness_blocks_failure(task, now=now, report=report):
+            return
         pr_url = self._lane_log_pr_url(task["id"])
         if pr_url is not None:
             self._complete_from_evidence(task, pr_url=pr_url, now=now, report=report)
@@ -440,6 +546,12 @@ class LaneCompletionReconciler:
         age_seconds = now - updated_at
         if age_seconds < self.stale_after:
             report["unresolved"].append(task["id"])
+            return
+        # agent-supervisor#488: same liveness gate as `_sweep_nonobservable`
+        # -- the measured case (`as473-as473x`) reached exactly this method
+        # via `status='accepted'`, stamped `failed` while its `claude -p`
+        # subprocess was still alive and accumulating CPU an hour later.
+        if self._liveness_blocks_failure(task, now=now, report=report):
             return
         pr_url = self._lane_log_pr_url(task["id"])
         if pr_url is not None:
