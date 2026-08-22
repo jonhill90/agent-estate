@@ -14,8 +14,8 @@ import (
 	"agent-supervisor/daemon/internal/agent"
 	"agent-supervisor/daemon/internal/budget"
 	"agent-supervisor/daemon/internal/dispatch"
-	"agent-supervisor/daemon/internal/pressure"
 	"agent-supervisor/daemon/internal/ledger"
+	"agent-supervisor/daemon/internal/pressure"
 	"agent-supervisor/daemon/internal/vault"
 )
 
@@ -25,6 +25,11 @@ type jobSpec struct {
 	Lane  string `json:"lane"`
 	Brief string `json:"brief"` // path to a brief file
 	Cwd   string `json:"cwd"`
+	// Harness selects the adapter this ONE job dispatches through --
+	// "claude" (default, unchanged) or "codex". Per-line, not per-batch:
+	// one -file can mix harnesses, which is the actual point of adding a
+	// second adapter (see agent.Adapter's own doc comment).
+	Harness string `json:"harness"`
 }
 
 // cmdBatch dispatches many tasks CONCURRENTLY.
@@ -36,9 +41,10 @@ func cmdBatch(argv []string) int {
 	fs := flag.NewFlagSet("batch", flag.ExitOnError)
 	var (
 		lp      = fs.String("ledger", defaultLedger(), "path to ledger.sqlite3")
-		file    = fs.String("file", "", "JSON-lines file of {task,lane,brief,cwd} (required)")
-		model   = fs.String("model", "sonnet", "model")
-		bin     = fs.String("bin", "claude", "agent binary")
+		file    = fs.String("file", "", "JSON-lines file of {task,lane,brief,cwd,harness} (required)")
+		harness = fs.String("harness", "claude", "default harness for a line with no \"harness\" of its own: claude | codex")
+		model   = fs.String("model", "", "model applied to every job (default: \"sonnet\" for a claude job; each CLI's own default otherwise)")
+		bin     = fs.String("bin", "", "agent binary (default: \"claude\" or \"codex\", per each job's harness)")
 		workers = fs.Int("workers", 0, "max concurrent agents (0 = cores-2, capped 8)")
 		capUSD  = fs.Float64("budget-usd", 50, "HARD spend cap over -budget-window; 0 disables (explicitly)")
 		capWin  = fs.Duration("budget-window", 24*time.Hour, "rolling window for the spend cap")
@@ -92,6 +98,7 @@ func cmdBatch(argv []string) int {
 		}
 		jobs = append(jobs, dispatch.Job{
 			TaskID: s.Task, Lane: s.Lane, Brief: pre + string(body), Cwd: cwd,
+			Harness: s.Harness,
 		})
 	}
 	if len(jobs) == 0 {
@@ -126,8 +133,34 @@ func cmdBatch(argv []string) int {
 	gates := dispatch.Gates{Budget: budget.New(budget.Policy{LimitUSD: *capUSD, Window: *capWin}), Pressure: &lim}
 	fmt.Printf("gates: cap $%.2f/%s, load/core<%.1f, freeMem>%.1fGB\n", *capUSD, *capWin, *maxLoad, *minMem)
 
-	outs := dispatch.RunPoolGated(ctx, l, func(j dispatch.Job) *agent.Claude {
-		return &agent.Claude{Bin: *bin, Model: *model, Cwd: j.Cwd, Timeout: *timeout, StrictMCP: true}
+	outs := dispatch.RunPoolGated(ctx, l, func(j dispatch.Job) (agent.Adapter, string) {
+		h := j.Harness
+		if h == "" {
+			h = *harness
+		}
+		// Same per-harness default as `supervisord run` (main.go): a bare
+		// -model default of "sonnet" (a Claude model name) must not reach a
+		// codex job just because -model was left unset for the WHOLE batch.
+		m := *model
+		if m == "" && h == "claude" {
+			m = "sonnet"
+		}
+		a, aerr := newAdapter(h, *bin, m, j.Cwd, *timeout)
+		if aerr != nil {
+			// newAdapter only fails on an unknown harness name -- a bad
+			// batch line, not a dispatch failure. failAdapter turns that
+			// into an Adapter whose Run always returns aerr unchanged, so
+			// RunGated's own error path (not a panic, not a silently
+			// skipped job) is what reports it per-job. The harness
+			// returned here is "claude" (the schema's own safe default),
+			// NOT the unrecognised `h` -- EnsureLane's harness column has
+			// a CHECK constraint (see ledger.go) and a garbage `h` would
+			// fail THAT insert too, replacing aerr's clear "unknown
+			// -harness" message with a confusing SQL error before the
+			// caller ever sees why the job really failed.
+			return failAdapter{err: aerr}, "claude"
+		}
+		return a, h
 	}, jobs, w, gates)
 
 	ok, bad := 0, 0
