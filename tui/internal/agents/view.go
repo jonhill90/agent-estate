@@ -18,9 +18,12 @@ var legendStyle = lipgloss.NewStyle().Faint(true)
 // cannot attribute per lane (Row's own doc comment).
 const unknown = "unknown"
 
-// View renders a flat table -- ID | STATE | MODEL | TASK | COST -- one row
-// per Row (Derive's output, via m.Rows()). A quitting Model renders
-// nothing, the same convention internal/cost.Model.View follows.
+// View renders a flat table -- ID | STATE | MODE | MODEL | TASK | COST --
+// one row per Row (Derive's output, via m.Rows()). MODE (SPEC-shell.md
+// S12) is the one column here that is never "unknown": Row.Mode is always
+// a real, known ExecutionMode (Row's own doc comment says why). A
+// quitting Model renders nothing, the same convention internal/cost.Model.View
+// follows.
 func (m Model) View() string {
 	if m.quitting {
 		return ""
@@ -38,7 +41,7 @@ func (m Model) View() string {
 	if len(rows) == 0 {
 		b.WriteString(legendStyle.Render("(no agents)") + "\n")
 	} else {
-		b.WriteString(legendStyle.Render(fmt.Sprintf("%-28s %-10s %-10s %-16s %s", "ID", "STATE", "MODEL", "TASK", "COST")) + "\n")
+		b.WriteString(legendStyle.Render(fmt.Sprintf("%-28s %-10s %-9s %-10s %-16s %s", "ID", "STATE", "MODE", "MODEL", "TASK", "COST")) + "\n")
 		for _, r := range rows {
 			model := unknown
 			if r.Model != nil {
@@ -48,7 +51,7 @@ func (m Model) View() string {
 			if r.Cost != nil {
 				cost = *r.Cost
 			}
-			b.WriteString(fmt.Sprintf("%-28s %-10s %-10s %-16s %s", truncate(r.ID, 28), truncate(r.State, 10), truncate(model, 10), truncate(r.Task, 16), cost) + "\n")
+			b.WriteString(fmt.Sprintf("%-28s %-10s %-9s %-10s %-16s %s", truncate(r.ID, 28), truncate(r.State, 10), truncate(string(r.Mode), 9), truncate(model, 10), truncate(r.Task, 16), cost) + "\n")
 		}
 	}
 

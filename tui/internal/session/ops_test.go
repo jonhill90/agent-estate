@@ -207,3 +207,58 @@ func TestRemoveSurfacesRefusalError(t *testing.T) {
 		t.Fatal("expected a refusal error, got nil")
 	}
 }
+
+// TestAddWithModeLocalCallsSessionAddIdentically covers SPEC-shell.md
+// S12's own explicit requirement -- ExecutionLocal is not a second code
+// path, it is the same session_add call Add already makes.
+func TestAddWithModeLocalCallsSessionAddIdentically(t *testing.T) {
+	fake := &fakeCallTooler{text: `{"session":"scratch","created":true,"state":"supervised","bootstrap_output":""}`}
+	o := New(fake)
+	if _, err := o.AddWithMode("scratch", 4, "claude", "/work", ExecutionLocal); err != nil {
+		t.Fatalf("AddWithMode: %v", err)
+	}
+	if fake.gotName != "session_add" {
+		t.Fatalf("gotName = %q, want %q", fake.gotName, "session_add")
+	}
+	if fake.gotArgs["lanes"] != 4 || fake.gotArgs["agent"] != "claude" || fake.gotArgs["cwd"] != "/work" {
+		t.Fatalf("args = %+v, want lanes=4 agent=claude cwd=/work", fake.gotArgs)
+	}
+}
+
+// TestAddWithModeEmptyStringDefaultsToLocal is ExecutionMode's own zero
+// value contract -- a caller that never sets Mode at all must behave
+// exactly like ExecutionLocal, not fail or take a third path.
+func TestAddWithModeEmptyStringDefaultsToLocal(t *testing.T) {
+	fake := &fakeCallTooler{text: `{"session":"scratch","created":true,"state":"supervised","bootstrap_output":""}`}
+	o := New(fake)
+	if _, err := o.AddWithMode("scratch", 0, "", "", ""); err != nil {
+		t.Fatalf("AddWithMode with the zero-value ExecutionMode: %v", err)
+	}
+	if fake.gotName != "session_add" {
+		t.Fatalf("gotName = %q, want %q", fake.gotName, "session_add")
+	}
+}
+
+// TestAddWithModeContainerIsNotImplemented is execution_mode.go's own
+// central contract: no CallTool at all, and the specific typed error, not
+// a generic failure or (worse) a session created as local while claiming
+// container.
+func TestAddWithModeContainerIsNotImplemented(t *testing.T) {
+	fake := &fakeCallTooler{text: `{"session":"scratch","created":true,"state":"supervised","bootstrap_output":""}`}
+	o := New(fake)
+	_, err := o.AddWithMode("scratch", 0, "", "", ExecutionContainer)
+	if !errors.Is(err, ErrContainerNotImplemented) {
+		t.Fatalf("AddWithMode(..., ExecutionContainer) error = %v, want ErrContainerNotImplemented", err)
+	}
+	if fake.gotName != "" {
+		t.Fatalf("gotName = %q, want no CallTool at all for an unimplemented mode", fake.gotName)
+	}
+}
+
+func TestAddWithModeUnknownModeIsARealError(t *testing.T) {
+	fake := &fakeCallTooler{}
+	o := New(fake)
+	if _, err := o.AddWithMode("scratch", 0, "", "", ExecutionMode("quantum")); err == nil {
+		t.Fatal("expected an error for an unknown ExecutionMode, got nil")
+	}
+}

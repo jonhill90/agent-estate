@@ -29,6 +29,22 @@ func TestFetchResultPopulatesRows(t *testing.T) {
 	}
 }
 
+// TestViewRendersModeColumnAsLocalNeverUnknown is SPEC-shell.md S12's own
+// distinction from Model/Cost, made visible: the MODE column must show
+// "local," never this package's "unknown" placeholder.
+func TestViewRendersModeColumnAsLocalNeverUnknown(t *testing.T) {
+	m := New(nil)
+	next, _ := m.Update(fetchResultMsg{sessions: []lane.Session{
+		{Name: "s", Lanes: []lane.Lane{{Name: "w1", State: "busy"}}},
+	}})
+	m = next.(Model)
+
+	out := m.View()
+	if !strings.Contains(out, "local") {
+		t.Fatalf("View() does not render \"local\" in the MODE column:\n%s", out)
+	}
+}
+
 // TestFetchErrorRendersVisibly is this pane's own "blind, not quiet" case
 // (AGENTS.md: never look like a healthy, empty estate when the read
 // failed) -- a fetchResultMsg carrying an error must show it, not render

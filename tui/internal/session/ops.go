@@ -42,6 +42,14 @@ type Interface interface {
 	// one). lanes <= 0 means "let bootstrap-session.sh use its own
 	// default"; agent and cwd empty means the same for those flags.
 	Add(session string, lanes int, agent, cwd string) (AddResult, error)
+	// AddWithMode is Add plus SPEC-shell.md S12's ExecutionMode -- see
+	// execution_mode.go's own doc comment for why ExecutionContainer
+	// returns ErrContainerNotImplemented rather than silently behaving
+	// like ExecutionLocal. Add itself is unchanged and still the minimal
+	// entry point rail's own "n" key uses (see internal/rail/ops.go's own
+	// doc comment on doAdd for why that flow deliberately stays minimal);
+	// this method exists for a caller that DOES want to name a mode.
+	AddWithMode(session string, lanes int, agent, cwd string, mode ExecutionMode) (AddResult, error)
 	// RemoveCheck reports, without mutating anything, whether session is
 	// safe to remove right now and names every reason it is not.
 	RemoveCheck(session string) (RemoveCheck, error)
@@ -124,6 +132,27 @@ func (o Ops) Detach() error {
 }
 
 func (o Ops) Add(session string, lanes int, agent, cwd string) (AddResult, error) {
+	return o.addSession(session, lanes, agent, cwd)
+}
+
+// AddWithMode implements Interface.AddWithMode -- see that method's own
+// doc comment and execution_mode.go's package comment for
+// ErrContainerNotImplemented's rationale. ExecutionLocal (including the
+// zero value, "") delegates to the exact same session_add call Add
+// already makes -- there is no separate "local" tool, because local IS
+// what session_add has only ever done.
+func (o Ops) AddWithMode(session string, lanes int, agent, cwd string, mode ExecutionMode) (AddResult, error) {
+	switch mode {
+	case "", ExecutionLocal:
+		return o.addSession(session, lanes, agent, cwd)
+	case ExecutionContainer:
+		return AddResult{}, ErrContainerNotImplemented
+	default:
+		return AddResult{}, fmt.Errorf("session: unknown ExecutionMode %q", mode)
+	}
+}
+
+func (o Ops) addSession(session string, lanes int, agent, cwd string) (AddResult, error) {
 	args := map[string]any{"session": session}
 	if lanes > 0 {
 		args["lanes"] = lanes

@@ -50,6 +50,15 @@ func (f *fakeOps) Add(s string, lanes int, agent, cwd string) (session.AddResult
 	return f.addOut, f.addErr
 }
 
+// AddWithMode satisfies session.Interface's SPEC-shell.md S12 addition --
+// nothing in this package calls it (rail's own "n" key stays on plain Add,
+// see doAdd's own doc comment), so this just delegates to the same fake
+// state Add already uses, matching Ops.AddWithMode's own
+// ExecutionLocal-delegates-to-Add behaviour.
+func (f *fakeOps) AddWithMode(s string, lanes int, agent, cwd string, mode session.ExecutionMode) (session.AddResult, error) {
+	return f.Add(s, lanes, agent, cwd)
+}
+
 func (f *fakeOps) RemoveCheck(s string) (session.RemoveCheck, error) {
 	f.checkCalls = append(f.checkCalls, s)
 	return f.checkOut, f.checkErr

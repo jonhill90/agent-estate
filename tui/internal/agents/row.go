@@ -36,6 +36,7 @@ package agents
 
 import "github.com/jonhill90/keelson/internal/board"
 import "github.com/jonhill90/keelson/internal/lane"
+import "github.com/jonhill90/keelson/internal/session"
 
 // Row is one agent -- one tmux window inside one supervised session, the
 // same unit internal/rail calls a "lane." ID is "<session>:<name>" (unique
@@ -62,6 +63,17 @@ type Row struct {
 	// Cost is nil -- see this file's own doc comment for why no seam in
 	// this codebase can attribute spend to one lane yet.
 	Cost *string
+
+	// Mode is SPEC-shell.md S12's ExecutionMode -- unlike Model/Cost, this
+	// is a KNOWN fact, not a gap: Derive always sets ExecutionLocal,
+	// because nothing in agent-supervisor integrates with AgentBox today
+	// (grepped agent-supervisor/scripts for "agentbox"/"docker", zero
+	// matches, 2026-08-22) -- every lane this estate has ever created IS a
+	// local subprocess. This will stop being a constant the day a
+	// container driver actually exists (S12's own "later item"); until
+	// then, rendering anything other than ExecutionLocal here would be
+	// inventing a capability, not reporting one.
+	Mode session.ExecutionMode
 }
 
 // Derive assembles Row from lane.Session (the "sessions" MCP tool,
@@ -99,6 +111,7 @@ func Derive(sessions []lane.Session, tasks []board.TaskRow) []Row {
 				Model:   nil,
 				Task:    taskSummary(t, haveTask),
 				Cost:    nil,
+				Mode:    session.ExecutionLocal,
 			})
 		}
 	}

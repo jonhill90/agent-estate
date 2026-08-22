@@ -6,6 +6,7 @@ import (
 
 	"github.com/jonhill90/keelson/internal/board"
 	"github.com/jonhill90/keelson/internal/lane"
+	"github.com/jonhill90/keelson/internal/session"
 )
 
 func TestDeriveJoinsSessionsAndTasksByLaneName(t *testing.T) {
@@ -24,8 +25,8 @@ func TestDeriveJoinsSessionsAndTasksByLaneName(t *testing.T) {
 
 	got := Derive(sessions, tasks)
 	want := []Row{
-		{ID: "director:w1", Session: "director", State: "busy", Command: "claude", Task: "#26"},
-		{ID: "director:w2", Session: "director", State: "free", Command: "codex", Task: "(no task)"},
+		{ID: "director:w1", Session: "director", State: "busy", Command: "claude", Task: "#26", Mode: session.ExecutionLocal},
+		{ID: "director:w2", Session: "director", State: "free", Command: "codex", Task: "(no task)", Mode: session.ExecutionLocal},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Derive() =\n%+v\nwant\n%+v", got, want)
@@ -44,7 +45,7 @@ func TestDeriveSkipsUnreadableSessionsWithoutDroppingOthers(t *testing.T) {
 	}
 
 	got := Derive(sessions, nil)
-	want := []Row{{ID: "ok:w1", Session: "ok", State: "busy", Task: "(no task)"}}
+	want := []Row{{ID: "ok:w1", Session: "ok", State: "busy", Task: "(no task)", Mode: session.ExecutionLocal}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Derive() =\n%+v\nwant\n%+v", got, want)
 	}
@@ -89,5 +90,24 @@ func TestDeriveModelAndCostAreAlwaysUnknown(t *testing.T) {
 func TestDeriveEmptyInputsProduceNoRows(t *testing.T) {
 	if got := Derive(nil, nil); got != nil {
 		t.Errorf("Derive(nil, nil) = %+v, want nil", got)
+	}
+}
+
+// TestDeriveModeIsAlwaysExecutionLocal is SPEC-shell.md S12's own
+// contrast with TestDeriveModelAndCostAreAlwaysUnknown above: unlike
+// Model/Cost, Mode is a KNOWN fact today (Row's own doc comment says
+// why -- no AgentBox integration exists in agent-supervisor at all), so
+// it must never render as this package's "unknown" -- pinned here so a
+// future change cannot silently start guessing at a mode instead of
+// stating the one this estate actually has.
+func TestDeriveModeIsAlwaysExecutionLocal(t *testing.T) {
+	sessions := []lane.Session{
+		{Name: "s", Lanes: []lane.Lane{{Name: "w1", State: "busy"}, {Name: "w2", State: "free"}}},
+	}
+	got := Derive(sessions, nil)
+	for _, r := range got {
+		if r.Mode != session.ExecutionLocal {
+			t.Errorf("Row %q Mode = %q, want %q", r.ID, r.Mode, session.ExecutionLocal)
+		}
 	}
 }
