@@ -57,6 +57,16 @@
 // touched in this change (SPEC-shell.md S6/S7 depth is this package's own
 // scope); flagged here because whoever looks at that file next should not
 // have to re-derive this from nothing.
+//
+// 2026-08-22 update (SPEC-shell.md S12 depth, LOCAL side): Mode joins
+// Model/Task/Cost as a real per-row read instead of a permanent gap --
+// except this one arrived the other direction. It used to be hardcoded to
+// session.ExecutionLocal for every row unconditionally (no reference to
+// that row's own Command/State at all); modeFor now reads the same two
+// fields Model/Task already derive from and answers "unknown" when
+// neither Command nor State supports a real answer. See modeFor's own doc
+// comment for the evidence and Row.Mode's for why the old constant was
+// wrong even though it happened to be correct for every row seen so far.
 package agents
 
 import (
@@ -101,16 +111,17 @@ type Row struct {
 	// file's own package doc comment for the join Derive performs.
 	Cost *string
 
-	// Mode is SPEC-shell.md S12's ExecutionMode -- unlike Model/Cost, this
-	// is a KNOWN fact, not a gap: Derive always sets ExecutionLocal,
-	// because nothing in agent-supervisor integrates with AgentBox today
-	// (grepped agent-supervisor/scripts for "agentbox"/"docker", zero
-	// matches, 2026-08-22) -- every lane this estate has ever created IS a
-	// local subprocess. This will stop being a constant the day a
-	// container driver actually exists (S12's own "later item"); until
-	// then, rendering anything other than ExecutionLocal here would be
-	// inventing a capability, not reporting one.
-	Mode session.ExecutionMode
+	// Mode is SPEC-shell.md S12's ExecutionMode, READ from this row's own
+	// evidence (modeFor), not assumed. nil means the evidence available
+	// for THIS row does not support either answer -- see modeFor's own
+	// doc comment for exactly what is checked and why. Never defaulted to
+	// ExecutionLocal: an earlier version of this file did that
+	// unconditionally, for every row, regardless of what that row's own
+	// Command/State said, and estate-loop/w2d.md called it out by name as
+	// the fabricated-value failure AGENTS.md's "never a fabricated
+	// metric" rule exists to stop -- a value that would not have changed
+	// no matter what the read returned was never a read.
+	Mode *session.ExecutionMode
 }
 
 // Derive assembles Row from lane.Session (the "sessions" MCP tool,
@@ -157,7 +168,7 @@ func Derive(sessions []lane.Session, tasks []board.TaskRow, costsByLedgerLane ma
 				Model:   modelPtr(l.Model),
 				Task:    taskSummary(t, haveTask),
 				Cost:    costPtr(costsByLedgerLane[ledgerLane]),
-				Mode:    session.ExecutionLocal,
+				Mode:    modeFor(l),
 			})
 		}
 	}
@@ -191,6 +202,54 @@ func costPtr(f cost.Figure) *string {
 	}
 	s := fmt.Sprintf("$%.2f", f.Value)
 	return &s
+}
+
+// modeFor is SPEC-shell.md S12 depth: Row.Mode read from this row's own
+// evidence, in place of the session.ExecutionLocal every row got
+// unconditionally before this change (see Row.Mode's and this package's
+// own doc comments for why that was wrong even though it never once
+// printed something false in practice).
+//
+// The only two fields this package has that speak to "is a process
+// actually running here, and where" are Command (lanes.sh's own
+// pane_current_command -- tmux's own live introspection of the pane's
+// foreground process, not this package's guess) and State
+// (lane.Lane.State, lanes.sh's own classification):
+//
+//   - Command == "" -- lanes.sh reported no foreground process for this
+//     pane at all. No process, no evidence: unknown.
+//   - State == "dead" or "stale" -- lanes.sh's own verdict that the
+//     harness process itself is gone (a bare shell left behind, per
+//     lanes.sh's own state= comments for both). Nothing is running to
+//     attribute a location to: unknown, not local.
+//   - Otherwise: Command names a real process tmux -- running on the
+//     SAME host as the supervisor this MCP call reached -- just reported
+//     as this pane's own foreground command. That is mechanically what
+//     execution_mode.go's ExecutionLocal doc comment defines ("a
+//     subprocess in a worktree, today's behaviour"), not an assumption
+//     about what usually runs here.
+//
+// Deliberately never ExecutionContainer: nothing in lanes.sh's --json
+// payload (window/window_id/name/command/state/idle_seconds/model --
+// confirmed by reading lanes.sh's own --json emission directly,
+// 2026-08-22) can distinguish a container-wrapped process from a native
+// one, and nothing in agent-supervisor dispatches into AgentBox today
+// (grepped agent-supervisor/scripts for "agentbox"/"docker", zero
+// matches, 2026-08-22 -- the same check execution_mode.go's own doc
+// comment already cites). Inventing a detection rule for a signal that
+// does not exist yet would repeat the exact mistake this function exists
+// to stop making, just one layer further in. See
+// docs/SPEC-agentbox-execution-mode.md for what container mode actually
+// needs before this function could ever honestly return it.
+func modeFor(l lane.Lane) *session.ExecutionMode {
+	if l.Command == "" {
+		return nil
+	}
+	if l.State == "dead" || l.State == "stale" {
+		return nil
+	}
+	m := session.ExecutionLocal
+	return &m
 }
 
 // taskSummary mirrors internal/rail/work.go's own taskSummary exactly --

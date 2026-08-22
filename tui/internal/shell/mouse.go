@@ -2,9 +2,12 @@ package shell
 
 import (
 	"fmt"
+	"runtime"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	zone "github.com/lrstanley/bubblezone"
 
 	"github.com/jonhill90/keelson/internal/nav"
 )
@@ -117,6 +120,12 @@ func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd, bool) {
 		return m, nil, false
 	}
 
+	// settleZones closes a real race between the last View()'s zone.Scan()
+	// and this InBounds check -- see that function's own doc comment. A
+	// click is a human-timescale event; this cost belongs here, not on
+	// every render.
+	settleZones(m.zones, m.allZoneIDs())
+
 	nodes := m.nav.Tree().Flatten()
 	for _, i := range m.visibleNavNodeIndices() {
 		if !m.zones.Get(navRowZone(i)).InBounds(msg) {
@@ -143,6 +152,95 @@ func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd, bool) {
 		return m, tea.Quit, true
 	}
 	return m, nil, false
+}
+
+// allZoneIDs returns every zone id THIS render marks -- the sidebar rows
+// visibleNavNodeIndices() names, plus the footer's own zoneFocus/zoneQuit
+// and footerPaneZones (model.go's own footer()). settleZones (below) uses
+// this to know exactly what to wait for, not to guess at "however many
+// zones there probably are." Kept in lockstep with renderNavWithZones()'s
+// and footer()'s own Mark() calls by the same discipline
+// visibleNavNodeIndices() already documents for itself -- if either drifts
+// from what actually gets marked, settleZones degrades to waiting out its
+// own deadline every render rather than silently doing nothing, which is
+// the direction this kind of drift should fail in.
+func (m Model) allZoneIDs() []string {
+	visible := m.visibleNavNodeIndices()
+	ids := make([]string, 0, len(visible)+2+len(footerPaneZones))
+	for _, i := range visible {
+		ids = append(ids, navRowZone(i))
+	}
+	ids = append(ids, zoneFocus, zoneQuit)
+	for _, z := range footerPaneZones {
+		ids = append(ids, z.id)
+	}
+	return ids
+}
+
+// zoneSettleDeadline bounds settleZones -- see that function's own doc
+// comment for why it exists at all and why this is a wall-clock bound,
+// not an iteration count or a blind sleep.
+const zoneSettleDeadline = 50 * time.Millisecond
+
+// settleZones waits for bubblezone's own Manager to actually record every
+// id in ids before returning -- working around a real race in how this
+// package uses that library, not a guess.
+//
+// zone.Manager.Scan() (called once, from View(), wrapping this render's
+// whole output) parses each Mark()'d zone's bounds and enqueues them onto
+// an internal channel for a background goroutine (zoneWorker(), started by
+// zone.New()) to apply to the map Get() reads -- then returns immediately,
+// WITHOUT waiting for that goroutine to run. Get() only ever sees whatever
+// is already in the map at the moment it is called (manager.go's own
+// Get(): a plain locked map read, no wait). In real interactive use this
+// never bites: the bubbletea runtime always waits for a fresh terminal
+// input event before the next Update/handleMouse call, and that gap is
+// vastly longer than one map write takes. It bites exactly the shape this
+// package's own mouse_test.go uses -- render, then simulate a click in the
+// SAME goroutine with zero gap -- and, per estate-loop/w2e.md, it bites
+// unpredictably depending on host scheduling: reproduced reliably on
+// linux/amd64 (Docker, golang:1.26, matching this repo's own CI image),
+// never reproduced on darwin/arm64 locally across 20 runs of the same
+// tests against the same commit. Not a rendering bug, not a row that
+// moved -- the zones this render marks are computed correctly (bubblezone
+// itself measures each one with ansi-aware width math, scanner.go's own
+// ansi.PrintableRuneWidth); they just are not always VISIBLE to Get() the
+// instant Scan() returns.
+//
+// Called from handleMouse, NOT from View(): View() runs on every repaint
+// (every keystroke, every cursor-blink tick, far more often than a human
+// clicks anything), and settling there was tried first -- it fixed the
+// race but cost enough added latency on that hot path to shift a
+// completely unrelated real-Program test's timing
+// (TestRightArrowOnGroupHeaderExpandsThenLeftCollapses, which never sends
+// a mouse event at all) into failing. handleMouse only runs when an
+// actual MouseMsg arrives, so paying this cost there -- confining it to
+// the one path that actually needs a fresh answer -- fixes the same race
+// without slowing down a render loop that never asked for it.
+//
+// Bounded by wall-clock time, not an iteration count or a fixed sleep:
+// returns the moment every id in ids resolves, so the common case (the
+// worker goroutine gets a scheduling slot almost immediately) costs at
+// most a few runtime.Gosched() calls, and gives up after
+// zoneSettleDeadline rather than hanging forever if an id is never
+// produced at all (a real caller bug -- allZoneIDs drifting from what
+// View() actually marks -- which this must surface as "clicks don't work"
+// exactly like today, never as a hang).
+func settleZones(zones *zone.Manager, ids []string) {
+	deadline := time.Now().Add(zoneSettleDeadline)
+	for {
+		allSet := true
+		for _, id := range ids {
+			if zones.Get(id).IsZero() {
+				allSet = false
+				break
+			}
+		}
+		if allSet || time.Now().After(deadline) {
+			return
+		}
+		runtime.Gosched()
+	}
 }
 
 // selectNavRow is a click on sidebar row i -- the exact same effect

@@ -67,10 +67,27 @@ func TestCostFetchErrorLeavesCostsUnchanged(t *testing.T) {
 	}
 }
 
-// TestViewRendersModeColumnAsLocalNeverUnknown is SPEC-shell.md S12's own
-// distinction from Model/Cost, made visible: the MODE column must show
-// "local," never this package's "unknown" placeholder.
-func TestViewRendersModeColumnAsLocalNeverUnknown(t *testing.T) {
+// TestViewRendersModeColumnAsLocalWhenEvidenceSupportsIt is SPEC-shell.md
+// S12 depth: the MODE column shows "local" once modeFor's own evidence
+// (a real Command, a live-ish State) supports it -- read, not asserted
+// regardless of the row.
+func TestViewRendersModeColumnAsLocalWhenEvidenceSupportsIt(t *testing.T) {
+	m := New(nil)
+	next, _ := m.Update(fetchResultMsg{sessions: []lane.Session{
+		{Name: "s", Lanes: []lane.Lane{{Name: "w1", State: "busy", Command: "claude"}}},
+	}})
+	m = next.(Model)
+
+	out := m.View()
+	if !strings.Contains(out, "local") {
+		t.Fatalf("View() does not render \"local\" in the MODE column:\n%s", out)
+	}
+}
+
+// TestViewRendersModeColumnAsUnknownWithoutEvidence is the mutation-check
+// contrast: a lane lanes.sh reports no Command for renders MODE as
+// "unknown," never as a guessed "local" -- see modeFor's own doc comment.
+func TestViewRendersModeColumnAsUnknownWithoutEvidence(t *testing.T) {
 	m := New(nil)
 	next, _ := m.Update(fetchResultMsg{sessions: []lane.Session{
 		{Name: "s", Lanes: []lane.Lane{{Name: "w1", State: "busy"}}},
@@ -78,8 +95,8 @@ func TestViewRendersModeColumnAsLocalNeverUnknown(t *testing.T) {
 	m = next.(Model)
 
 	out := m.View()
-	if !strings.Contains(out, "local") {
-		t.Fatalf("View() does not render \"local\" in the MODE column:\n%s", out)
+	if !strings.Contains(out, "unknown") {
+		t.Fatalf("View() does not render \"unknown\" in the MODE column for a Command-less lane:\n%s", out)
 	}
 }
 

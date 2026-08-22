@@ -36,8 +36,8 @@ func TestDeriveJoinsSessionsAndTasksByLedgerLaneKey(t *testing.T) {
 
 	got := Derive(sessions, tasks, nil)
 	want := []Row{
-		{ID: "director:w1", Session: "director", State: "busy", Command: "claude", Task: "#26", Mode: session.ExecutionLocal},
-		{ID: "director:w2", Session: "director", State: "free", Command: "codex", Task: "(no task)", Mode: session.ExecutionLocal},
+		{ID: "director:w1", Session: "director", State: "busy", Command: "claude", Task: "#26", Mode: modePtr(session.ExecutionLocal)},
+		{ID: "director:w2", Session: "director", State: "free", Command: "codex", Task: "(no task)", Mode: modePtr(session.ExecutionLocal)},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Derive() =\n%+v\nwant\n%+v", got, want)
@@ -72,11 +72,11 @@ func TestDeriveDoesNotJoinByDescriptiveName(t *testing.T) {
 func TestDeriveSkipsUnreadableSessionsWithoutDroppingOthers(t *testing.T) {
 	sessions := []lane.Session{
 		{Name: "broken", Error: "tmux: no such session"},
-		{Name: "ok", Lanes: []lane.Lane{{Name: "w1", State: "busy"}}},
+		{Name: "ok", Lanes: []lane.Lane{{Name: "w1", State: "busy", Command: "claude"}}},
 	}
 
 	got := Derive(sessions, nil, nil)
-	want := []Row{{ID: "ok:w1", Session: "ok", State: "busy", Task: "(no task)", Mode: session.ExecutionLocal}}
+	want := []Row{{ID: "ok:w1", Session: "ok", State: "busy", Command: "claude", Task: "(no task)", Mode: modePtr(session.ExecutionLocal)}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Derive() =\n%+v\nwant\n%+v", got, want)
 	}
@@ -167,21 +167,57 @@ func TestDeriveEmptyInputsProduceNoRows(t *testing.T) {
 	}
 }
 
-// TestDeriveModeIsAlwaysExecutionLocal is SPEC-shell.md S12's own
-// documented gap: unlike Model/Cost (real seams as of this change), Mode is
-// a KNOWN fact today (Row's own doc comment says why -- no AgentBox
-// integration exists in agent-supervisor at all), so it must never render
-// as this package's "unknown" -- pinned here so a future change cannot
-// silently start guessing at a mode instead of stating the one this estate
-// actually has.
-func TestDeriveModeIsAlwaysExecutionLocal(t *testing.T) {
+// modePtr is this test file's own convenience for a session.ExecutionMode
+// literal used as *session.ExecutionMode -- session.ExecutionLocal is a
+// const and therefore not addressable directly in a struct literal.
+func modePtr(m session.ExecutionMode) *session.ExecutionMode { return &m }
+
+// TestDeriveModeLocalFromLiveProcessEvidence is modeFor's affirmative case:
+// a real Command and a live-ish State together are what execution_mode.go's
+// own ExecutionLocal doc comment defines as "local" -- read from this row's
+// own fields, not asserted regardless of them.
+func TestDeriveModeLocalFromLiveProcessEvidence(t *testing.T) {
 	sessions := []lane.Session{
-		{Name: "s", Lanes: []lane.Lane{{Name: "w1", State: "busy"}, {Name: "w2", State: "free"}}},
+		{Name: "s", Lanes: []lane.Lane{{Name: "w1", State: "busy", Command: "claude"}}},
+	}
+	got := Derive(sessions, nil, nil)
+	if got[0].Mode == nil || *got[0].Mode != session.ExecutionLocal {
+		t.Fatalf("Mode = %v, want a pointer to ExecutionLocal", got[0].Mode)
+	}
+}
+
+// TestDeriveModeUnknownWhenNoCommand is the mutation-check contrast this
+// package's own history needed: estate-loop/w2d.md called out a Mode that
+// was ExecutionLocal for every row regardless of the row's own data as the
+// fabricated-value failure AGENTS.md forbids for a read. A pane lanes.sh
+// reports NO foreground process for at all is exactly the case that
+// constant could never have distinguished -- modeFor must render nil
+// (unknown) here, not silently keep calling it local.
+func TestDeriveModeUnknownWhenNoCommand(t *testing.T) {
+	sessions := []lane.Session{
+		{Name: "s", Lanes: []lane.Lane{{Name: "w1", State: "busy", Command: ""}}},
+	}
+	got := Derive(sessions, nil, nil)
+	if got[0].Mode != nil {
+		t.Fatalf("Mode = %v, want nil -- no Command means no process evidence to read", *got[0].Mode)
+	}
+}
+
+// TestDeriveModeUnknownWhenDeadOrStale: lanes.sh's own "dead"/"stale"
+// verdict means the harness process itself is gone (a bare shell left
+// behind) -- there is nothing left running to call "local", so Mode must
+// be unknown even though Command is still a real (residual) shell name.
+func TestDeriveModeUnknownWhenDeadOrStale(t *testing.T) {
+	sessions := []lane.Session{
+		{Name: "s", Lanes: []lane.Lane{
+			{Name: "w1", State: "dead", Command: "-zsh"},
+			{Name: "w2", State: "stale", Command: "-zsh"},
+		}},
 	}
 	got := Derive(sessions, nil, nil)
 	for _, r := range got {
-		if r.Mode != session.ExecutionLocal {
-			t.Errorf("Row %q Mode = %q, want %q", r.ID, r.Mode, session.ExecutionLocal)
+		if r.Mode != nil {
+			t.Errorf("Row %q Mode = %q, want nil for a %q lane", r.ID, *r.Mode, r.State)
 		}
 	}
 }

@@ -113,6 +113,20 @@ behaviour) or `container` (AgentBox docker sandbox). Surface the mode in the
 Agents view and make it selectable at creation. **Spec the interface in this
 item; implementing the container driver is its own later item.**
 
+**2026-08-22 update (interface + LOCAL depth):** the interface
+(`internal/session/execution_mode.go`, `AddWithMode`) and the Agents view's
+MODE column both shipped in #79. The column's own initial cut hardcoded
+every row to `ExecutionLocal` regardless of that row's own data — a
+fabricated value, not a read — and was replaced with `internal/agents.modeFor`,
+which reads real per-row evidence (`Command`, `State`) and renders `unknown`
+when that evidence does not support an answer (never a guessed default). No
+signal exists yet, anywhere in agent-supervisor's `lanes.sh --json` payload,
+that can positively identify a container-wrapped process, so `modeFor` can
+only ever emit `local` or `unknown` today — never `container` from
+inference. Container-side design (what AgentBox needs before a driver can
+exist at all) is `docs/SPEC-agentbox-execution-mode.md`, spec only, no code
+— still its own later item, not started here.
+
 ---
 
 ## Rules for every item

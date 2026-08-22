@@ -20,10 +20,10 @@ const unknown = "unknown"
 
 // View renders a flat table -- ID | STATE | MODE | MODEL | TASK | COST --
 // one row per Row (Derive's output, via m.Rows()). MODE (SPEC-shell.md
-// S12) is the one column here that is never "unknown": Row.Mode is always
-// a real, known ExecutionMode (Row's own doc comment says why). A
-// quitting Model renders nothing, the same convention internal/cost.Model.View
-// follows.
+// S12) reads like MODEL and COST now: "unknown" for a nil Row.Mode,
+// never a guessed value -- see Row.Mode's and modeFor's own doc comments
+// for exactly when that is. A quitting Model renders nothing, the same
+// convention internal/cost.Model.View follows.
 func (m Model) View() string {
 	if m.quitting {
 		return ""
@@ -43,6 +43,10 @@ func (m Model) View() string {
 	} else {
 		b.WriteString(legendStyle.Render(fmt.Sprintf("%-28s %-10s %-9s %-10s %-16s %s", "ID", "STATE", "MODE", "MODEL", "TASK", "COST")) + "\n")
 		for _, r := range rows {
+			mode := unknown
+			if r.Mode != nil {
+				mode = string(*r.Mode)
+			}
 			model := unknown
 			if r.Model != nil {
 				model = *r.Model
@@ -51,7 +55,7 @@ func (m Model) View() string {
 			if r.Cost != nil {
 				cost = *r.Cost
 			}
-			b.WriteString(fmt.Sprintf("%-28s %-10s %-9s %-10s %-16s %s", truncate(r.ID, 28), truncate(r.State, 10), truncate(string(r.Mode), 9), truncate(model, 10), truncate(r.Task, 16), cost) + "\n")
+			b.WriteString(fmt.Sprintf("%-28s %-10s %-9s %-10s %-16s %s", truncate(r.ID, 28), truncate(r.State, 10), truncate(mode, 9), truncate(model, 10), truncate(r.Task, 16), cost) + "\n")
 		}
 	}
 

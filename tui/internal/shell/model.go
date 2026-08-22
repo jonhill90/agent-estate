@@ -888,7 +888,11 @@ func (m Model) View() string {
 	// zone.Scan MUST wrap the outermost render, once. It strips the markers
 	// and records where each zone landed, so InBounds can answer on the next
 	// mouse event. Forgetting it makes every zone silently unclickable --
-	// which looks exactly like a mouse that is not enabled.
+	// which looks exactly like a mouse that is not enabled. settleZones is
+	// NOT called here -- handleMouse (mouse.go) calls it instead, right
+	// before it needs an answer; see that function's own doc comment for
+	// why the wait belongs on the rare mouse-event path, not on every
+	// render (View() runs far more often than a human clicks anything).
 	return m.zones.Scan(lipgloss.JoinVertical(lipgloss.Left, body, m.footer()))
 }
 
