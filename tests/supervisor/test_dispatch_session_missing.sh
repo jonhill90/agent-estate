@@ -17,6 +17,11 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 DISPATCH_SRC="$HERE/../../scripts/supervisor/dispatch.sh"
 export QUOTA_GATE="$HERE/stubs/quota-safe"
+# agent-supervisor#500: same reason as the line above -- disable the
+# host-pressure gate dispatch.sh now runs before the quota gate, so this
+# suite is not sensitive to a CI runner's real load/free-memory.
+export SUPERVISOR_MAX_LOAD_PER_CORE=0
+export SUPERVISOR_MIN_FREE_MEM_GB=0
 export DISPATCH_LIVE_PANE=1
 pass=0; fail=0
 
