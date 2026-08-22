@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"agent-supervisor/daemon/internal/agent"
+	"agent-supervisor/daemon/internal/claim"
 	"agent-supervisor/daemon/internal/dispatch"
 	"agent-supervisor/daemon/internal/ledger"
 	"agent-supervisor/daemon/internal/vault"
@@ -84,6 +85,26 @@ func defaultLedger() string {
 	return filepath.Join(home, ".local", "state", "agent-dotfiles-supervisor", "ledger.sqlite3")
 }
 
+// defaultClaimScript resolves scripts/supervisor/claim.sh -- the SAME
+// tested claim mechanism the tmux/cli.py side of this estate already uses
+// (see internal/claim's own doc comment for why this reuses it rather
+// than reimplementing in Go). $AGENT_SUPERVISOR_REPO is the estate-wide
+// convention other tools already use to find this checkout from outside
+// it (agent-tui's own CLAUDE.md documents it the same way); reused here
+// rather than inventing a second "where is agent-supervisor" variable.
+// Empty means unresolved -- cmdRun/cmdBatch refuse outright (not silently
+// disable the claim) when an -issue was given but no script path could be
+// found, per this task's own "refuse, don't silently proceed" rule.
+func defaultClaimScript() string {
+	if p := os.Getenv("AGENT_SUPERVISOR_CLAIM_SCRIPT"); p != "" {
+		return p
+	}
+	if repo := os.Getenv("AGENT_SUPERVISOR_REPO"); repo != "" {
+		return filepath.Join(repo, "scripts", "supervisor", "claim.sh")
+	}
+	return ""
+}
+
 func main() {
 	if len(os.Args) < 2 {
 		usage()
@@ -108,10 +129,17 @@ func usage() {
   supervisord status [-ledger PATH]
   supervisord run -task ID -brief FILE [-lane L] [-cwd DIR] [-model M]
                   [-timeout DUR] [-ledger PATH] [-dry-run]
+                  [-issue N] [-issue-repo OWNER/NAME] [-claim-script PATH]
 
 Delivery is proven by a process exit and a parsed JSON result, never by
 reading a terminal. A turn that times out leaves its task NON-terminal on
 purpose: unknown is not failed.
+
+-issue N claims the GitHub issue (via scripts/supervisor/claim.sh, the
+same mechanism the tmux/cli.py side already uses) before writing anything
+to the ledger, and refuses the dispatch outright if the claim fails.
+Omitted or 0: no claim is taken, same as before this flag existed -- not
+every task this daemon dispatches corresponds to a real issue.
 `)
 }
 
@@ -150,16 +178,19 @@ func cmdStatus(argv []string) int {
 func cmdRun(argv []string) int {
 	fs := flag.NewFlagSet("run", flag.ExitOnError)
 	var (
-		lp      = fs.String("ledger", defaultLedger(), "path to ledger.sqlite3")
-		task    = fs.String("task", "", "task id (required)")
-		brief   = fs.String("brief", "", "path to the brief file (required)")
-		lane    = fs.String("lane", "daemon", "lane name")
-		cwd     = fs.String("cwd", ".", "working directory for the agent")
-		harness = fs.String("harness", "claude", "which vendor CLI to drive: claude | codex")
-		model   = fs.String("model", "", "model (default: \"sonnet\" for -harness claude; each CLI's own default for any other harness)")
-		bin     = fs.String("bin", "", "agent binary (default: \"claude\" or \"codex\", per -harness)")
-		timeout = fs.Duration("timeout", agent.DefaultTimeout, "per-turn timeout")
-		dry     = fs.Bool("dry-run", false, "print the command and exit without dispatching")
+		lp          = fs.String("ledger", defaultLedger(), "path to ledger.sqlite3")
+		task        = fs.String("task", "", "task id (required)")
+		brief       = fs.String("brief", "", "path to the brief file (required)")
+		lane        = fs.String("lane", "daemon", "lane name")
+		cwd         = fs.String("cwd", ".", "working directory for the agent")
+		harness     = fs.String("harness", "claude", "which vendor CLI to drive: claude | codex")
+		model       = fs.String("model", "", "model (default: \"sonnet\" for -harness claude; each CLI's own default for any other harness)")
+		bin         = fs.String("bin", "", "agent binary (default: \"claude\" or \"codex\", per -harness)")
+		timeout     = fs.Duration("timeout", agent.DefaultTimeout, "per-turn timeout")
+		dry         = fs.Bool("dry-run", false, "print the command and exit without dispatching")
+		issue       = fs.Int("issue", 0, "GitHub issue number this task closes (0 = no issue, no claim taken)")
+		issueRepo   = fs.String("issue-repo", "", "OWNER/NAME for -issue; empty lets claim.sh resolve it from cwd")
+		claimScript = fs.String("claim-script", defaultClaimScript(), "path to scripts/supervisor/claim.sh (required when -issue is set)")
 	)
 	fs.Parse(argv)
 	// -model's default depends on -harness, not a fixed flag literal: a
@@ -174,6 +205,15 @@ func cmdRun(argv []string) int {
 
 	if *task == "" || *brief == "" {
 		fmt.Fprintln(os.Stderr, "supervisord run: -task and -brief are required")
+		return 2
+	}
+	// An -issue with no resolvable claim.sh refuses outright -- silently
+	// skipping the claim would reopen the exact collision gap this flag
+	// exists to close (agent-supervisor#28: dispatched twice, once by the
+	// Director, once by the supervisor, because nothing recorded a claim).
+	if *issue != 0 && *claimScript == "" {
+		fmt.Fprintln(os.Stderr, "supervisord run: -issue given but claim.sh could not be resolved -- "+
+			"set -claim-script, $AGENT_SUPERVISOR_CLAIM_SCRIPT, or $AGENT_SUPERVISOR_REPO")
 		return 2
 	}
 	body, err := os.ReadFile(*brief)
@@ -216,6 +256,9 @@ func cmdRun(argv []string) int {
 		fmt.Printf("  task:    %s\n", *task)
 		fmt.Printf("  brief:   %s (%d bytes)\n", *brief, len(body))
 		fmt.Printf("  timeout: %s\n", *timeout)
+		if *issue != 0 {
+			fmt.Printf("  claim:   issue #%d (repo=%q, script=%s)\n", *issue, *issueRepo, *claimScript)
+		}
 		return 0
 	}
 
@@ -232,7 +275,14 @@ func cmdRun(argv []string) int {
 	defer stop()
 
 	fmt.Printf("dispatch %s -> %s/%s (cwd=%s, timeout=%s)\n", *task, *harness, *model, abscwd, *timeout)
-	out := dispatch.Run(ctx, l, a, abscwd, *harness, *task, *lane, prompt)
+	var issueRef *dispatch.IssueRef
+	var gates dispatch.Gates
+	if *issue != 0 {
+		issueRef = &dispatch.IssueRef{Number: *issue, Repo: *issueRepo}
+		gates.Claim = &claim.ScriptGate{ScriptPath: *claimScript}
+		fmt.Printf("claim: taking issue #%d before dispatch\n", *issue)
+	}
+	out := dispatch.RunGated(ctx, l, a, abscwd, *harness, *task, *lane, prompt, issueRef, gates)
 
 	fmt.Printf("elapsed: %s\n", out.Elapsed.Round(time.Millisecond))
 	if out.Err != nil {

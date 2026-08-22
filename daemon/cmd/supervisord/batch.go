@@ -13,6 +13,7 @@ import (
 
 	"agent-supervisor/daemon/internal/agent"
 	"agent-supervisor/daemon/internal/budget"
+	"agent-supervisor/daemon/internal/claim"
 	"agent-supervisor/daemon/internal/dispatch"
 	"agent-supervisor/daemon/internal/ledger"
 	"agent-supervisor/daemon/internal/pressure"
@@ -30,6 +31,12 @@ type jobSpec struct {
 	// one -file can mix harnesses, which is the actual point of adding a
 	// second adapter (see agent.Adapter's own doc comment).
 	Harness string `json:"harness"`
+	// Issue and Repo name the GitHub issue this ONE job closes, if any --
+	// per-line, same reasoning as Harness: a batch can mix issue-backed
+	// jobs with issue-less ones (a demo/proof task has no issue at all).
+	// 0/empty means no claim is taken for this job, same as today.
+	Issue int    `json:"issue"`
+	Repo  string `json:"repo"`
 }
 
 // cmdBatch dispatches many tasks CONCURRENTLY.
@@ -40,17 +47,18 @@ type jobSpec struct {
 func cmdBatch(argv []string) int {
 	fs := flag.NewFlagSet("batch", flag.ExitOnError)
 	var (
-		lp      = fs.String("ledger", defaultLedger(), "path to ledger.sqlite3")
-		file    = fs.String("file", "", "JSON-lines file of {task,lane,brief,cwd,harness} (required)")
-		harness = fs.String("harness", "claude", "default harness for a line with no \"harness\" of its own: claude | codex")
-		model   = fs.String("model", "", "model applied to every job (default: \"sonnet\" for a claude job; each CLI's own default otherwise)")
-		bin     = fs.String("bin", "", "agent binary (default: \"claude\" or \"codex\", per each job's harness)")
-		workers = fs.Int("workers", 0, "max concurrent agents (0 = cores-2, capped 8)")
-		capUSD  = fs.Float64("budget-usd", 50, "HARD spend cap over -budget-window; 0 disables (explicitly)")
-		capWin  = fs.Duration("budget-window", 24*time.Hour, "rolling window for the spend cap")
-		maxLoad = fs.Float64("max-load-per-core", 3.0, "refuse to spawn above this load/core; 0 disables")
-		minMem  = fs.Float64("min-free-mem-gb", 1.5, "refuse to spawn below this free memory; 0 disables")
-		timeout = fs.Duration("timeout", agent.DefaultTimeout, "per-turn timeout")
+		lp          = fs.String("ledger", defaultLedger(), "path to ledger.sqlite3")
+		file        = fs.String("file", "", "JSON-lines file of {task,lane,brief,cwd,harness} (required)")
+		harness     = fs.String("harness", "claude", "default harness for a line with no \"harness\" of its own: claude | codex")
+		model       = fs.String("model", "", "model applied to every job (default: \"sonnet\" for a claude job; each CLI's own default otherwise)")
+		bin         = fs.String("bin", "", "agent binary (default: \"claude\" or \"codex\", per each job's harness)")
+		workers     = fs.Int("workers", 0, "max concurrent agents (0 = cores-2, capped 8)")
+		capUSD      = fs.Float64("budget-usd", 50, "HARD spend cap over -budget-window; 0 disables (explicitly)")
+		capWin      = fs.Duration("budget-window", 24*time.Hour, "rolling window for the spend cap")
+		maxLoad     = fs.Float64("max-load-per-core", 3.0, "refuse to spawn above this load/core; 0 disables")
+		minMem      = fs.Float64("min-free-mem-gb", 1.5, "refuse to spawn below this free memory; 0 disables")
+		timeout     = fs.Duration("timeout", agent.DefaultTimeout, "per-turn timeout")
+		claimScript = fs.String("claim-script", defaultClaimScript(), "path to scripts/supervisor/claim.sh (required if any job carries \"issue\")")
 	)
 	fs.Parse(argv)
 	if *file == "" {
@@ -96,14 +104,28 @@ func cmdBatch(argv []string) int {
 		if s.Lane == "" {
 			s.Lane = "d-" + s.Task
 		}
+		var issueRef *dispatch.IssueRef
+		if s.Issue != 0 {
+			issueRef = &dispatch.IssueRef{Number: s.Issue, Repo: s.Repo}
+		}
 		jobs = append(jobs, dispatch.Job{
 			TaskID: s.Task, Lane: s.Lane, Brief: pre + string(body), Cwd: cwd,
-			Harness: s.Harness,
+			Harness: s.Harness, Issue: issueRef,
 		})
 	}
 	if len(jobs) == 0 {
 		fmt.Fprintln(os.Stderr, "supervisord batch: no jobs parsed")
 		return 2
+	}
+	// Same refusal as `supervisord run`'s own -issue check: an issue-backed
+	// job with no resolvable claim.sh refuses the WHOLE batch outright
+	// rather than silently dispatching that one job without a claim.
+	for _, j := range jobs {
+		if j.Issue != nil && *claimScript == "" {
+			fmt.Fprintf(os.Stderr, "supervisord batch: job %s carries issue #%d but claim.sh could not be resolved -- "+
+				"set -claim-script, $AGENT_SUPERVISOR_CLAIM_SCRIPT, or $AGENT_SUPERVISOR_REPO\n", j.TaskID, j.Issue.Number)
+			return 2
+		}
 	}
 
 	l, err := ledger.Open(*lp)
@@ -131,6 +153,9 @@ func cmdBatch(argv []string) int {
 		fmt.Printf("host: %s\n", r)
 	}
 	gates := dispatch.Gates{Budget: budget.New(budget.Policy{LimitUSD: *capUSD, Window: *capWin}), Pressure: &lim}
+	if *claimScript != "" {
+		gates.Claim = &claim.ScriptGate{ScriptPath: *claimScript}
+	}
 	fmt.Printf("gates: cap $%.2f/%s, load/core<%.1f, freeMem>%.1fGB\n", *capUSD, *capWin, *maxLoad, *minMem)
 
 	outs := dispatch.RunPoolGated(ctx, l, func(j dispatch.Job) (agent.Adapter, string) {
