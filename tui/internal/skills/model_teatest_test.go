@@ -54,6 +54,9 @@ func TestInitialFrameShowsSkillsFromTheFakeFetch(t *testing.T) {
 	if !bytes.Contains(out, []byte("unknown")) {
 		t.Fatalf("last-eval/invocations columns not rendered as \"unknown\":\n%s", out)
 	}
+	if !bytes.Contains(out, []byte(VerdictUnevaluated)) {
+		t.Fatalf("verdict column not rendered as %q:\n%s", VerdictUnevaluated, out)
+	}
 }
 
 // TestEKeyShowsEvalLoopNoticeAgainstARealProgram is the pty-level half of
@@ -66,7 +69,7 @@ func TestEKeyShowsEvalLoopNoticeAgainstARealProgram(t *testing.T) {
 	waitFor(t, tm, "alpha")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("e")})
-	waitFor(t, tm, "eval loop not built yet")
+	waitFor(t, tm, "eval harness exists (agent-evals#21) but persists no results store yet")
 }
 
 // TestQQuitsARealProgram matches every other pane's own convention.

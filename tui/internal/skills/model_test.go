@@ -26,6 +26,27 @@ func TestFetchResultPopulatesSkills(t *testing.T) {
 	if !strings.Contains(m.View(), unknown) {
 		t.Fatalf("View() does not render the unknown eval/invocation columns:\n%s", m.View())
 	}
+	if !strings.Contains(m.View(), VerdictUnevaluated) {
+		t.Fatalf("View() does not render the unevaluated verdict column:\n%s", m.View())
+	}
+}
+
+// TestVerdictRendersWhenSet is the other half of the same column: a Skill
+// carrying a real Verdict (once some future Fetcher can set one) must show
+// THAT value, not fall back to "unevaluated" just because a fallback
+// exists.
+func TestVerdictRendersWhenSet(t *testing.T) {
+	m := New(nil)
+	next, _ := m.Update(fetchResultMsg{skills: []Skill{
+		{Dir: "sanity-check", Name: "sanity-check", Description: "x", Verdict: "keep"},
+	}})
+	m = next.(Model)
+	if !strings.Contains(m.View(), "keep") {
+		t.Fatalf("View() did not render the real verdict \"keep\":\n%s", m.View())
+	}
+	if strings.Contains(m.View(), VerdictUnevaluated) {
+		t.Fatalf("View() rendered the unevaluated fallback over a real verdict:\n%s", m.View())
+	}
 }
 
 // TestFetchErrorRendersVisibly is this pane's own "blind, not quiet" case,
@@ -51,7 +72,7 @@ func TestEKeySetsANamedNoticeRatherThanSilentlyDoingNothing(t *testing.T) {
 	if cmd != nil {
 		t.Fatal("[e] returned a non-nil cmd, want nil (no eval harness to call)")
 	}
-	if !strings.Contains(m.View(), "eval loop not built yet") {
+	if !strings.Contains(m.View(), "eval harness exists (agent-evals#21) but persists no results store yet") {
 		t.Fatalf("[e] did not render a visible notice:\n%s", m.View())
 	}
 }

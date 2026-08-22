@@ -25,14 +25,13 @@ type fetchResultMsg struct {
 }
 
 // Model is S8's Bubble Tea program: a flat, name-sorted list of skills
-// (Scan's own output, via Fetcher) with last-eval-result and
-// invocation-count always shown as unknown (Skill's own doc comment says
-// why) and "[e]" reserved for the eval loop the S8 design note says is the
-// actual missing piece, not the skills themselves. Not wired into
-// internal/shell yet -- matches internal/stub (S5) and internal/agents
-// (S6)'s own precedent of shipping a standalone, driveable pane before its
-// route exists (SPEC-shell.md's own build order leaves that wiring to a
-// later item).
+// (Scan's own output, via Fetcher) with last-eval-result, verdict, and
+// invocation-count always shown honestly -- "unknown" or "unevaluated",
+// never a fabricated value (Skill's own doc comment says why) -- and "[e]"
+// reserved for the eval loop the S8 design note originally called the
+// actual missing piece. That loop now exists (agent-evals#21) but persists
+// no results yet, so "[e]" stays a visible, named no-op. Wired into
+// internal/shell as PaneSkills (agent-tui#85, "skills" nav route).
 type Model struct {
 	fetch Fetcher
 
@@ -131,10 +130,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		case "e":
-			// S8's own design note: "the missing piece is the eval loop,
-			// not the skills themselves" -- a visible, named no-op rather
-			// than a keypress that silently does nothing.
-			m.notice = "eval loop not built yet"
+			// agent-evals#21 (checked 2026-08-22) built the eval loop S8's
+			// design note called the missing piece -- but it persists no
+			// results anywhere this pane could read, only stdout and a
+			// throwaway tempdir (Skill's own doc comment). [e] is still a
+			// visible, named no-op rather than a silent one, updated to
+			// say WHY rather than repeat the now-stale "not built yet."
+			m.notice = "eval harness exists (agent-evals#21) but persists no results store yet"
 			return m, nil
 		case "t":
 			return m, func() tea.Msg { return theme.CycleRequestedMsg{} }

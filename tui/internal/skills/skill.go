@@ -11,21 +11,36 @@
 // Two of S8's four columns have no source to fill in today, measured
 // rather than assumed, exactly the shape S6 (internal/agents) already
 // found for model/cost:
-//   - Last eval result: the skills repo's own eval methodology was
-//     deliberately removed (`git log --oneline --all | grep -i eval`
-//     there: "chore: strip this repo's eval methodology out of a portable
-//     skill", PRs #125/#131) -- there is no results store anywhere in that
-//     repo to read from today. S8's own design note says this out loud:
-//     "the missing piece is the eval loop, not the skills themselves."
+//   - Last eval result / verdict: RE-CHECKED 2026-08-22 against
+//     agent-evals@a7f61ce (the jonhill90/skills#230 harness this doc
+//     comment used to say did not exist at all -- it now does:
+//     scripts/eval_skill.py runs a real with/without comparison for one
+//     named skill and prints a keep/improve/rename/drop verdict). What has
+//     NOT changed: it persists nothing. Its own `main()` prints JSON to
+//     stdout and writes only to `--outdir` (a fresh tempdir by default,
+//     never a stable path); there is no committed results file, no
+//     `tests/evals/results/skill-verdicts.*`, nothing this package could
+//     open. A verdict was produced for `research-the-limit` by hand three
+//     times on 2026-08-22 (agent-evals#21's own PR body) -- that value
+//     lives in a PR description and a chat transcript, neither of which is
+//     a file this package may read (AGENTS.md's adapter discipline: no
+//     second reader of an out-of-repo source improvised in place of a
+//     real seam). Until agent-evals adds a persistence layer, every skill
+//     is honestly Verdict "unevaluated", not a guess at what it might be.
 //   - Invocation count: nothing in this estate counts skill invocations.
 //     `mine-transcripts` (a skill in this same repo) is a deliberate,
 //     periodic, human-triggered review of transcripts for new skill
 //     CANDIDATES -- not a counter, and not run automatically.
 //
-// Both are therefore always nil (Skill.LastEval/InvocationCount) --
-// absence as a typed value, never a bare zero (AGENTS.md), the same
-// pattern internal/agents.Row.Model/Cost already established for this
-// exact shape of gap.
+// LastEval/InvocationCount are therefore always nil, and Verdict is
+// therefore always its zero value (rendered "unevaluated" by View, never
+// silently blank) -- absence as a typed value, never a bare zero
+// (AGENTS.md), the same pattern internal/agents.Row.Model/Cost already
+// established for this exact shape of gap. "Unevaluated" is a real,
+// positive fact, not a filler string: SPEC-shell.md S8's own model is
+// explicit that a skill with no recorded invocations is UNEVALUATED, not
+// dead, and this field exists to say that in words rather than let an
+// empty cell be misread as "looks unused."
 package skills
 
 import (
@@ -59,7 +74,22 @@ type Skill struct {
 	// internal/agents.Row's identical fields already require.
 	LastEval        *string
 	InvocationCount *int
+
+	// Verdict is agent-evals#21's own vocabulary (keep/improve/rename/drop)
+	// plus "unevaluated" -- its zero value, since agent-evals persists no
+	// store yet (see this file's own doc comment). Deliberately a plain
+	// string, not a *string: "unevaluated" is the true, positive value for
+	// every skill today, not a placeholder standing in for a real one this
+	// package failed to fetch -- View renders VerdictUnevaluated whenever
+	// this is empty, so Scan never has to set it explicitly.
+	Verdict string
 }
+
+// VerdictUnevaluated is Skill.Verdict's zero-value meaning, exported so a
+// caller (a future eval-store Fetcher, this package's own tests) can
+// compare against the same constant View renders rather than the literal
+// "unevaluated" string in two places.
+const VerdictUnevaluated = "unevaluated"
 
 // Fetcher retrieves the current skill list -- the adapter seam
 // (AGENTS.md's own discipline) a Model is built around. ScanFetcher below

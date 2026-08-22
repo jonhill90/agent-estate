@@ -25,9 +25,10 @@ func selectedStyle(th theme.Theme) lipgloss.Style {
 	return lipgloss.NewStyle().Background(th.Color(theme.RoleSelectedBG))
 }
 
-// View renders a flat table -- NAME | DESCRIPTION | LAST EVAL | INVOCATIONS
-// -- one row per Skill, selected row highlighted. A quitting Model renders
-// nothing, the same convention every other pane in this module follows.
+// View renders a flat table -- NAME | DESCRIPTION | LAST EVAL | VERDICT |
+// INVOCATIONS -- one row per Skill, selected row highlighted. A quitting
+// Model renders nothing, the same convention every other pane in this
+// module follows.
 func (m Model) View() string {
 	if m.quitting {
 		return ""
@@ -44,7 +45,7 @@ func (m Model) View() string {
 	if len(m.skills) == 0 {
 		b.WriteString(legendStyle.Render("(no skills)") + "\n")
 	} else {
-		b.WriteString(legendStyle.Render(fmt.Sprintf("%-28s %-48s %-10s %s", "NAME", "DESCRIPTION", "LAST EVAL", "INVOCATIONS")) + "\n")
+		b.WriteString(legendStyle.Render(fmt.Sprintf("%-28s %-40s %-10s %-11s %s", "NAME", "DESCRIPTION", "LAST EVAL", "VERDICT", "INVOCATIONS")) + "\n")
 		for i, s := range m.skills {
 			name := s.Name
 			if s.ParseErr != "" {
@@ -54,11 +55,15 @@ func (m Model) View() string {
 			if s.LastEval != nil {
 				lastEval = *s.LastEval
 			}
+			verdict := s.Verdict
+			if verdict == "" {
+				verdict = VerdictUnevaluated
+			}
 			invocations := unknown
 			if s.InvocationCount != nil {
 				invocations = fmt.Sprintf("%d", *s.InvocationCount)
 			}
-			line := fmt.Sprintf("%-28s %-48s %-10s %s", truncate(name, 28), truncate(s.Description, 48), truncate(lastEval, 10), invocations)
+			line := fmt.Sprintf("%-28s %-40s %-10s %-11s %s", truncate(name, 28), truncate(s.Description, 40), truncate(lastEval, 10), truncate(verdict, 11), invocations)
 			if i == m.selected {
 				line = selectedStyle(m.theme).Render(line)
 			}
