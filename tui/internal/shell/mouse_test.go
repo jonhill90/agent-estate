@@ -29,16 +29,53 @@ func clickAt(t *testing.T, m Model, x, y int) (Model, bool) {
 // is exactly the collision agent-tui's own mouse-nav history already
 // flagged once, which is why this comment names the direction on purpose
 // rather than leaving it to be re-discovered.
+// locate finds a label IN THE SIDEBAR and returns its coordinates from the
+// real render.
+//
+// It takes the LEFTMOST match, not the first line-wise. The sidebar occupies
+// the left columns; the content pane repeats several of the same words
+// ("Tasks", "Home", "Chat") much further right. A top-down scan returned
+// column 83 -- inside the content pane, where no zone exists -- so the click
+// correctly went unhandled and the test correctly failed. The test's idea of
+// where the sidebar was, was wrong; the nav was not.
+//
+// This is the second time this exact mistake has been made in this file, in the
+// opposite direction (an earlier version searched bottom-up for the footer and
+// found the home pane's own key hints). Hence the rule, written down rather
+// than left to be rediscovered a third time: match on POSITION, never on
+// first-occurrence.
+// sidebarWidth bounds what counts as "in the sidebar" for these tests. The
+// nav column is narrow; anything past this is the content pane.
+const sidebarWidth = 40
+
+// sidebarHas reports whether a label appears in the SIDEBAR columns, which is
+// a different question from whether it appears on screen.
+func sidebarHas(m Model, label string) bool {
+	for _, line := range strings.Split(m.View(), "\n") {
+		if c := strings.Index(line, label); c >= 0 && c < sidebarWidth {
+			return true
+		}
+	}
+	return false
+}
+
 func locate(t *testing.T, m Model, label string) (x, y int) {
 	t.Helper()
 	lines := strings.Split(m.View(), "\n")
+	bestX, bestY := -1, -1
 	for i, line := range lines {
-		if c := strings.Index(line, label); c >= 0 {
-			return c, i
+		c := strings.Index(line, label)
+		if c < 0 {
+			continue
+		}
+		if bestX == -1 || c < bestX {
+			bestX, bestY = c, i
 		}
 	}
-	t.Fatalf("label %q not found in rendered view", label)
-	return 0, 0
+	if bestX == -1 {
+		t.Fatalf("label %q not found in rendered view", label)
+	}
+	return bestX, bestY
 }
 
 // TestClickingTasksInSidebarSwitchesPane is the sidebar-row half of this
@@ -101,8 +138,12 @@ func TestClickingGroupHeaderExpandsThenChildRowNavigates(t *testing.T) {
 	m, _ = m.resize(tea.WindowSizeMsg{Width: 160, Height: 40})
 	_ = m.View()
 
-	if strings.Contains(m.View(), "Usage") {
-		t.Fatal("test setup: \"Usage\" already visible before its group was expanded")
+	// Check the SIDEBAR for "Usage", not the whole frame. The content pane
+	// carries the word too, so a whole-view Contains asserts something this
+	// test does not mean and fails for the wrong reason. Same lesson as
+	// locate(): match on position, not on presence anywhere on screen.
+	if sidebarHas(m, "Usage") {
+		t.Fatal("test setup: \"Usage\" already visible in the sidebar before its group was expanded")
 	}
 
 	x, y := locate(t, m, "Observe")
@@ -113,9 +154,8 @@ func TestClickingGroupHeaderExpandsThenChildRowNavigates(t *testing.T) {
 	if m.active != PaneHome {
 		t.Fatalf("clicking a GROUP HEADER must not change the active pane, got %v", m.active)
 	}
-	out := m.View()
-	if !strings.Contains(out, "Usage") {
-		t.Fatalf("\"Observe\" did not expand after being clicked:\n%s", out)
+	if !sidebarHas(m, "Usage") {
+		t.Fatalf("\"Observe\" did not expand after being clicked:\n%s", m.View())
 	}
 
 	x, y = locate(t, m, "Usage")
