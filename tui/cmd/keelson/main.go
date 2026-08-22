@@ -282,7 +282,19 @@ func main() {
 	// applyTheme. Threading it into each pane here AND again in shell
 	// would recreate #48's exact defect the moment the two calls drift.
 	railModel := rail.NewMultiSession(sessionsFetch, lanesFetch, costFetch, *directorSession).
-		WithTasks(buildTaskFetch(ledgerSrc, *sqliteBin))
+		WithTasks(buildTaskFetch(ledgerSrc, *sqliteBin)).
+		// *session is the same flag lanesFetch (above) already reads to
+		// build the "lanes" MCP call -- rail.Model's own single-session
+		// render path (New/NewWithCost's flat view, and NewMultiSession's
+		// at#18 sessions-fetch-failed fallback, both lanesFetch feeds) has
+		// no other way to learn which tmux session its own lane.Lane
+		// values came from, and needs that name to build the ledger's own
+		// "<session>:<window-index>" task-join key (rail.Model.sessionName's
+		// own doc comment). Empty -session (the flag's own documented
+		// "supervisor's default" case) degrades WithSessionName("") to the
+		// same honest "(no task)" a lane the ledger never tracked already
+		// renders -- never a guessed session name.
+		WithSessionName(*session)
 	if client != nil {
 		railModel = railModel.WithOps(sessionops.New(client))
 	}

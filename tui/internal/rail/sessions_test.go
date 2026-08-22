@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/jonhill90/keelson/internal/board"
 	"github.com/jonhill90/keelson/internal/lane"
 	"github.com/jonhill90/keelson/internal/theme"
 )
@@ -136,6 +137,58 @@ func TestSelectionSpansSessions(t *testing.T) {
 	m = updated.(Model)
 	if m.selected != total-2 {
 		t.Fatalf("up should move back across the session boundary, got selected=%d", m.selected)
+	}
+}
+
+// TestMultiSessionTaskJoinUsesWindowIndexNotDescriptiveName is
+// agent-tui#86's own fix shape applied to THIS package's copy of the same
+// bug: the ledger's third lane in threeSessions() is
+// {Window: 2, Name: "at13-multi-session-rail"} inside session
+// "agent-supervisor" -- its real ledger join key is "agent-supervisor:2",
+// never "agent-supervisor:at13-multi-session-rail". Selects that exact lane
+// (the 4th flat row) and asserts the work reading shows the real task.
+func TestMultiSessionTaskJoinUsesWindowIndexNotDescriptiveName(t *testing.T) {
+	rows := []board.TaskRow{{
+		Lane: "agent-supervisor:2", TaskStatus: "running",
+		Repo: board.Repo{Owner: "jonhill90", Name: "agent-supervisor"}, Number: "13",
+	}}
+	m := NewMultiSession(func() ([]lane.Session, error) { return threeSessions(), nil }, nil, nil, "director").
+		WithTasks(func() ([]board.TaskRow, error) { return rows, nil })
+	m.sessions = threeSessions()
+	m.tasks = rows
+
+	total := len(m.sessionsFlat())
+	for i := 0; i < total-1; i++ { // walk down to the last flat row (session 3's 2nd lane, Window 2)
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = updated.(Model)
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "on:    agent-supervisor#13") {
+		t.Errorf("real ledger task did not join by window index:\n%s", out)
+	}
+}
+
+// TestMultiSessionTaskJoinDoesNotMatchByDescriptiveName is the
+// mutation-check contrast: a TaskRow keyed by the pane's descriptive NAME
+// (the pre-fix, never-matches-a-real-dispatch shape) must not join even
+// though a lane with that exact name is selected.
+func TestMultiSessionTaskJoinDoesNotMatchByDescriptiveName(t *testing.T) {
+	rows := []board.TaskRow{{Lane: "agent-supervisor:at13-multi-session-rail", TaskStatus: "running"}}
+	m := NewMultiSession(func() ([]lane.Session, error) { return threeSessions(), nil }, nil, nil, "director").
+		WithTasks(func() ([]board.TaskRow, error) { return rows, nil })
+	m.sessions = threeSessions()
+	m.tasks = rows
+
+	total := len(m.sessionsFlat())
+	for i := 0; i < total-1; i++ {
+		updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyDown})
+		m = updated.(Model)
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "on:    (no task)") {
+		t.Errorf("a lane key of bare descriptive name must not match:\n%s", out)
 	}
 }
 

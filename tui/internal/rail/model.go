@@ -185,6 +185,21 @@ type Model struct {
 	tasksErr     error
 	tasksFetched time.Time
 
+	// sessionName is the tmux session lanesFetch/fetch's OWN lanes belong
+	// to -- needed only by the single-session render path (renderFlatBody,
+	// used directly by New/NewWithCost and as NewMultiSession's at#18
+	// fallback), because that path's own lane.Lane values (unlike
+	// lane.Session's) carry no session name of their own to build the
+	// ledger's "<session>:<window-index>" task-join key from (see work.go's
+	// tasksByLane doc comment). Empty is a real, honest state -- the
+	// "-session" flag this mirrors (cmd/agent-tui) documents itself as
+	// "empty uses the supervisor's default", which this program is never
+	// told the resolved name of -- and ledgerLaneKey (below) returns "" for
+	// it, which tasksByLane's own map (keyed by real, never-empty ledger
+	// strings) can never match: the task column degrades to "(no task)",
+	// the same degradation a genuinely-untracked lane already renders.
+	sessionName string
+
 	// reading indexes readings (readings.go) -- the content-variants picker
 	// agent-tui#26 asks for, cycled with 'w' the same live-against-real-data
 	// way glyphSet/groupStyle already are. Starts at 0, readings[0]'s index,
@@ -873,7 +888,7 @@ func (m Model) renderFlatBody(innerWidth int, set lane.GlyphSet, st railStyles) 
 		style := lane.StyleFor(set, sel.State)
 		// agent-tui#26: was a fixed "state:/idle:" pair -- now the
 		// reading-driven detail block; see readings_view.go.
-		b = append(b, m.renderReadingDetail(sel, style, st, innerWidth)...)
+		b = append(b, m.renderReadingDetail(sel, m.ledgerLaneKey(sel), style, st, innerWidth)...)
 	}
 	if !m.lastFetched.IsZero() {
 		age := time.Since(m.lastFetched).Round(time.Second)

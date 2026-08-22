@@ -61,13 +61,20 @@ func deliverLane(t *testing.T, m Model, lanes []lane.Lane, rows []board.TaskRow)
 // twice.
 func TestReadingsRenderDifferentContent(t *testing.T) {
 	dispatched := time.Now().Add(-90 * time.Minute).Unix()
-	lanes := []lane.Lane{{Name: "agent-tui:2", State: "busy", IdleSeconds: 5}}
+	// Window (2) is the join key; Name ("fix225-brief") is deliberately a
+	// DIFFERENT-looking descriptive display name, not the numeric index --
+	// see work.go's tasksByLane doc comment. If the join ever regresses to
+	// keying by Name again, this fixture would not coincidentally still
+	// pass the way a Name-equals-index fixture could.
+	lanes := []lane.Lane{{Window: 2, Name: "fix225-brief", State: "busy", IdleSeconds: 5}}
 	rows := []board.TaskRow{{
 		Lane: "agent-tui:2", TaskStatus: "running", CreatedAt: dispatched, UpdatedAt: dispatched,
 		Repo: board.Repo{Owner: "jonhill90", Name: "agent-tui"}, Number: "26",
 	}}
 
-	m := New(func() ([]lane.Lane, error) { return nil, nil }).WithTasks(func() ([]board.TaskRow, error) { return nil, nil })
+	m := New(func() ([]lane.Lane, error) { return nil, nil }).
+		WithTasks(func() ([]board.TaskRow, error) { return nil, nil }).
+		WithSessionName("agent-tui")
 	m = deliverLane(t, m, lanes, rows)
 
 	work := m.View()
@@ -102,7 +109,7 @@ func TestReadingsRenderDifferentContent(t *testing.T) {
 // only in delivered_at/accepted_at, and the rendered health line must
 // differ with it.
 func TestNeedsHumanReflectsDeliveredNotAccepted(t *testing.T) {
-	lanes := []lane.Lane{{Name: "agent-tui:3", State: "free", IdleSeconds: 12}}
+	lanes := []lane.Lane{{Window: 3, Name: "fix225-brief", State: "free", IdleSeconds: 12}}
 	delivered := time.Now().Add(-30 * time.Minute).Unix()
 
 	running := []board.TaskRow{{Lane: "agent-tui:3", TaskStatus: "running", CreatedAt: delivered - 3600}}
@@ -111,7 +118,9 @@ func TestNeedsHumanReflectsDeliveredNotAccepted(t *testing.T) {
 		DeliveredAt: &delivered,
 	}}
 
-	base := New(func() ([]lane.Lane, error) { return nil, nil }).WithTasks(func() ([]board.TaskRow, error) { return nil, nil })
+	base := New(func() ([]lane.Lane, error) { return nil, nil }).
+		WithTasks(func() ([]board.TaskRow, error) { return nil, nil }).
+		WithSessionName("agent-tui")
 
 	mRunning := deliverLane(t, base, lanes, running)
 	mRunning = driveKey(t, mRunning, "w") // switch to the status reading
@@ -135,6 +144,45 @@ func TestNeedsHumanReflectsDeliveredNotAccepted(t *testing.T) {
 
 	if runningOut == deliveredOut {
 		t.Fatalf("changing only delivered_at/accepted_at produced identical output -- the render is reading a fixture, not the record")
+	}
+}
+
+// TestTaskJoinUsesWindowIndexNotDescriptiveName is the mutation-check
+// direction on the fix itself: a TaskRow keyed by the pane's DESCRIPTIVE
+// name (the pre-fix shape every real dispatch would have failed to match --
+// see work.go's tasksByLane doc comment and agent-tui#86) must NOT join,
+// even though a lane with that exact name exists. If ledgerLaneKey/the
+// sessions.go call site regress to l.Name, this goes red the other
+// direction: "on:" would read the task ref instead of "(no task)".
+func TestTaskJoinUsesWindowIndexNotDescriptiveName(t *testing.T) {
+	lanes := []lane.Lane{{Window: 5, Name: "fix225-brief", State: "busy"}}
+	rows := []board.TaskRow{{Lane: "agent-tui:fix225-brief", TaskStatus: "running"}} // old, wrong shape
+
+	m := New(func() ([]lane.Lane, error) { return nil, nil }).
+		WithTasks(func() ([]board.TaskRow, error) { return nil, nil }).
+		WithSessionName("agent-tui")
+	m = deliverLane(t, m, lanes, rows)
+
+	if !strings.Contains(m.View(), "on:    (no task)") {
+		t.Errorf("a lane key of bare descriptive name must not match:\n%s", m.View())
+	}
+}
+
+// TestTaskJoinDegradesHonestlyWithNoSessionName covers the single-session
+// render path's own real gap (rail.Model.sessionName's doc comment):
+// without WithSessionName, ledgerLaneKey cannot build a real join key at
+// all, and the task column must degrade to "(no task)" -- never guess a
+// session name, and never crash on an empty lookup key.
+func TestTaskJoinDegradesHonestlyWithNoSessionName(t *testing.T) {
+	lanes := []lane.Lane{{Window: 2, Name: "fix225-brief", State: "busy"}}
+	rows := []board.TaskRow{{Lane: "agent-tui:2", TaskStatus: "running"}}
+
+	m := New(func() ([]lane.Lane, error) { return nil, nil }).
+		WithTasks(func() ([]board.TaskRow, error) { return nil, nil }) // no WithSessionName
+	m = deliverLane(t, m, lanes, rows)
+
+	if !strings.Contains(m.View(), "on:    (no task)") {
+		t.Errorf("with no session name known, the task column must read \"(no task)\", not guess:\n%s", m.View())
 	}
 }
 

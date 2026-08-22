@@ -20,11 +20,13 @@
 package rail
 
 import (
+	"strconv"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jonhill90/keelson/internal/board"
+	"github.com/jonhill90/keelson/internal/lane"
 )
 
 // TaskFetcher retrieves every source_tasks/tasks row the ledger currently
@@ -56,12 +58,48 @@ func (m Model) WithTasks(fetch TaskFetcher) Model {
 	return m
 }
 
-// tasksByLane indexes m.tasks by lanes.sh's own "<session>:<window>" name
-// (TaskRow.Lane, the same string card.go's bestTaskRow already trusts as the
-// join key) picking, per lane, the row with the latest updated_at -- the
+// WithSessionName returns a copy of m with the single-session render path's
+// own tmux session name wired in -- see the sessionName field's own doc
+// comment for why this is needed at all and why "" is a safe, honest
+// default. cmd/agent-tui calls this with the same -session flag value
+// lanesFetch (main.go) already reads to build the "lanes" MCP call.
+func (m Model) WithSessionName(name string) Model {
+	m.sessionName = name
+	return m
+}
+
+// ledgerLaneKey builds the ledger's own "<session>:<window-index>" task-join
+// key for a lane.Lane read from the single-session Fetcher -- l.Window
+// (numeric), never l.Name (the descriptive one), matching dispatch.sh's own
+// "$SESSION:$idx" (see tasksByLane's own doc comment for the confirmation).
+// Returns "" when m.sessionName is unknown (WithSessionName never called, or
+// called with ""); tasksByLane's map is keyed by real, non-empty ledger
+// strings, so an "" lookup key can never match a row -- the task column
+// degrades to "(no task)", never a wrong or a guessed one.
+func (m Model) ledgerLaneKey(l lane.Lane) string {
+	if m.sessionName == "" {
+		return ""
+	}
+	return m.sessionName + ":" + strconv.Itoa(l.Window)
+}
+
+// tasksByLane indexes m.tasks by the ledger's own "<session>:<window INDEX>"
+// key (TaskRow.Lane, the same string card.go's bestTaskRow already trusts as
+// the join key) picking, per lane, the row with the latest updated_at -- the
 // exact "freshest wins" rule bestTaskRow uses for retried issues, applied
 // here by lane instead of by (repo, issue number) since a lane has at most
 // one ledger task open against it at a time.
+//
+// The key is the tmux window's numeric INDEX (lanes.sh's own first JSON
+// column, lane.Lane.Window), never its descriptive display name --
+// confirmed against agent-supervisor's own dispatch.sh
+// (`WINDOW_NAME_BY_INDEX["$idx"]="$wname"`, `--lane "$LANE"` where
+// `$LANE="$SESSION:$idx"`) and against a live ledger.sqlite3 copy
+// (`tasks.lane` values observed: "agent-supervisor:3", never a descriptive
+// name). A caller building a lookup key against this map MUST use
+// session+Window (ledgerLaneKey, readings_view.go), not session+Name --
+// agent-tui#86 found and fixed the identical bug in internal/agents' own
+// copy of this join; this file had the same defect.
 func (m Model) tasksByLane() map[string]board.TaskRow {
 	out := make(map[string]board.TaskRow, len(m.tasks))
 	for _, t := range m.tasks {

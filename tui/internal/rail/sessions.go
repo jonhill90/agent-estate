@@ -7,6 +7,7 @@ package rail
 
 import (
 	"fmt"
+	"strconv"
 	"time"
 
 	"github.com/charmbracelet/lipgloss"
@@ -194,8 +195,14 @@ func (m Model) renderSessionsBody(innerWidth int, st railStyles) []string {
 		sessName := m.sessions[sel.sessionIdx].Name
 		b = append(b, st.legend.Width(innerWidth).Render(fmt.Sprintf("session: %s", truncate(sessName, max(0, innerWidth-9)))))
 		// agent-tui#26: was a fixed "state:/idle:" pair -- now the
-		// reading-driven detail block; see readings_view.go.
-		b = append(b, m.renderReadingDetail(sel.lane, style, st, innerWidth)...)
+		// reading-driven detail block; see readings_view.go. The ledger
+		// join key is built HERE, from sessName (already on hand for the
+		// "session: ..." legend above) + sel.lane.Window -- agent-tui#86
+		// found and fixed the identical sel.Name-keyed bug in
+		// internal/agents' own copy of this join; this was the same
+		// defect in this package.
+		ledgerLane := sessName + ":" + strconv.Itoa(sel.lane.Window)
+		b = append(b, m.renderReadingDetail(sel.lane, ledgerLane, style, st, innerWidth)...)
 	}
 	if !m.sessionsFetched.IsZero() {
 		age := time.Since(m.sessionsFetched).Round(time.Second)

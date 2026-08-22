@@ -14,13 +14,22 @@ import (
 // changes what is drawn, not just how. Called with sel already resolved to
 // one lane.Lane and its lane.Style (StyleFor's result), the same way both
 // callers already had both values on hand.
-func (m Model) renderReadingDetail(sel lane.Lane, style lane.Style, st railStyles, innerWidth int) []string {
+//
+// ledgerLane is the caller's own "<session>:<window-index>" task-join key
+// (each caller builds it differently -- renderFlatBody has only m.sessionName
+// and must go through ledgerLaneKey; renderSessionsBody already has the
+// session name AND the window index on hand from its own sessionRow, so it
+// builds the key directly) -- this function never re-derives it from sel,
+// which is exactly the agent-tui#86-shaped bug (joining by sel.Name, the
+// pane's descriptive display name, against a ledger keyed by numeric window
+// index) this signature exists to make impossible to reintroduce here.
+func (m Model) renderReadingDetail(sel lane.Lane, ledgerLane string, style lane.Style, st railStyles, innerWidth int) []string {
 	label := style.Label
 	if label == "" {
 		label = sel.State // Unmapped: still print the raw word, never blank
 	}
 
-	t, haveTask := m.tasksByLane()[sel.Name]
+	t, haveTask := m.tasksByLane()[ledgerLane]
 	needsHuman, reason := taskNeedsHuman(t, haveTask, sel.State)
 	age, haveAge := taskOpenAge(t, haveTask, time.Now())
 
