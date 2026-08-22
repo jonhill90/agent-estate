@@ -91,6 +91,39 @@ func TestReadTaskRowsPropagatesRunnerError(t *testing.T) {
 	}
 }
 
+func TestReadLaneSessionsSetsQueryOnly(t *testing.T) {
+	run := fakeRunner(t, []string{"-json", "/tmp/copy.sqlite3", "PRAGMA query_only=1;\n" + laneSessionsQuery}, `[]`, nil)
+	rows, err := ReadLaneSessions(run, "/tmp/copy.sqlite3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("got %d rows, want 0", len(rows))
+	}
+}
+
+// TestReadLaneSessionsDecodes uses the exact shape a live query returns
+// (agent-supervisor:4|claude|014b3e7e-7944-4e5a-be0c-dddce37edbb0, read
+// from this box's own ledger.sqlite3 copy, 2026-08-22).
+func TestReadLaneSessionsDecodes(t *testing.T) {
+	out := `[{"lane":"agent-supervisor:4","harness_session_id":"014b3e7e-7944-4e5a-be0c-dddce37edbb0"}]`
+	run := fakeRunner(t, []string{"-json", "x.sqlite3", "PRAGMA query_only=1;\n" + laneSessionsQuery}, out, nil)
+	rows, err := ReadLaneSessions(run, "x.sqlite3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Lane != "agent-supervisor:4" || rows[0].HarnessSessionID != "014b3e7e-7944-4e5a-be0c-dddce37edbb0" {
+		t.Fatalf("got %+v", rows)
+	}
+}
+
+func TestReadLaneSessionsPropagatesRunnerError(t *testing.T) {
+	run := fakeRunner(t, []string{"-json", "x.sqlite3", "PRAGMA query_only=1;\n" + laneSessionsQuery}, "", errors.New("boom"))
+	if _, err := ReadLaneSessions(run, "x.sqlite3"); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
 func TestDiscoverReposDedupesAndSkipsUnresolved(t *testing.T) {
 	rows := []TaskRow{
 		{Repo: Repo{Owner: "jonhill90", Name: "agent-tui"}},

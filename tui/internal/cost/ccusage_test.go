@@ -127,6 +127,66 @@ func TestParseDailyRejectsGarbage(t *testing.T) {
 	}
 }
 
+// realSessionSample is a trimmed, byte-faithful excerpt of `ccusage session
+// --json` run live against this box's own usage logs, 2026-08-22 -- the
+// same session id ("014b3e7e-...") that this box's own ledger.sqlite3
+// records as agent-supervisor:4's harness_session_id (internal/agents/
+// row_test.go's own doc comment cites the same live cross-check).
+const realSessionSample = `{
+  "session": [
+    {
+      "agent": "claude",
+      "period": "014b3e7e-7944-4e5a-be0c-dddce37edbb0",
+      "totalCost": 0.5612212000000001,
+      "totalTokens": 1462244
+    },
+    {
+      "agent": "pi",
+      "period": "some-pi-session-id",
+      "totalCost": 0.02,
+      "totalTokens": 500
+    }
+  ]
+}`
+
+func TestParseSessionCostsKeysByPeriod(t *testing.T) {
+	got, err := ParseSessionCosts([]byte(realSessionSample))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	fig, ok := got["014b3e7e-7944-4e5a-be0c-dddce37edbb0"]
+	if !ok {
+		t.Fatal("no entry for the known session id")
+	}
+	if !fig.Known || fig.Value != 0.5612212000000001 {
+		t.Errorf("fig = %+v", fig)
+	}
+	if len(got) != 2 {
+		t.Errorf("got %d entries, want 2", len(got))
+	}
+}
+
+func TestParseSessionCostsMissingIDIsNotAnError(t *testing.T) {
+	// A caller looking up a session id ParseSessionCosts never saw (no
+	// usage logged for it, or it belongs to a lane whose harness has no
+	// resolver) must get a plain map miss, never a parse failure -- the
+	// same "no matching row is not an error" rule ParseDaily's own test
+	// pins for the daily report shape.
+	got, err := ParseSessionCosts([]byte(realSessionSample))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if _, ok := got["not-a-real-session-id"]; ok {
+		t.Fatal("expected a miss for an unknown session id")
+	}
+}
+
+func TestParseSessionCostsRejectsGarbage(t *testing.T) {
+	if _, err := ParseSessionCosts([]byte("not json")); err == nil {
+		t.Error("expected a decode error for unparsable ccusage output")
+	}
+}
+
 func TestParseActiveBlockLimitReadsRealWarningStatus(t *testing.T) {
 	limit, err := ParseActiveBlockLimit([]byte(realActiveBlockWarningSample))
 	if err != nil {

@@ -86,6 +86,49 @@ func ParseDaily(data []byte, period string) ([]Harness, error) {
 	return nil, nil
 }
 
+// rawSessionReport/rawSessionRow mirror only the fields this package reads
+// from `ccusage session --json`'s real output (captured running ccusage
+// against live usage logs, 2026-08-22). ccusage overloads its "period"
+// field across report modes: for `daily`/`monthly`/`weekly` it is a date
+// string (ParseDaily, above); for `session` it is the harness's own
+// session/conversation id (a Claude Code session UUID, observed live) --
+// exactly the id `agent-supervisor`'s ledger records per lane in
+// lanes.harness_session_id (board.LaneSession). This is the ONLY seam in
+// either codebase that attributes a dollar figure to one agent rather than
+// a whole harness -- see internal/agents/row.go's own doc comment for why
+// ccusage's `daily --by-agent` total (ParseDaily) cannot be shown per lane.
+type rawSessionReport struct {
+	Session []rawSessionRow `json:"session"`
+}
+
+type rawSessionRow struct {
+	Period    string  `json:"period"` // the session id in this report mode, not a date
+	TotalCost float64 `json:"totalCost"`
+}
+
+// ParseSessionCosts extracts every session's total cost from `ccusage
+// session --json`, keyed by session id. A session ccusage reports with no
+// id (should not happen; defensive) is skipped rather than collapsed onto
+// an empty-string key some caller could accidentally look up. No matching
+// session for a given id is NOT this function's problem to report --
+// exactly ParseDaily's own "no matching row is not an error" rule -- the
+// caller (internal/agents' Derive) treats a missing key as "unknown," not
+// as a parse failure.
+func ParseSessionCosts(data []byte) (map[string]Figure, error) {
+	var report rawSessionReport
+	if err := json.Unmarshal(data, &report); err != nil {
+		return nil, fmt.Errorf("cost: decode ccusage session --json: %w", err)
+	}
+	out := make(map[string]Figure, len(report.Session))
+	for _, s := range report.Session {
+		if s.Period == "" {
+			continue
+		}
+		out[s.Period] = KnownFigure(s.TotalCost)
+	}
+	return out, nil
+}
+
 // rawBlocksReport/rawBlock/rawTokenLimitStatus mirror `ccusage blocks
 // --active --token-limit N --json`'s real output. tokenLimitStatus only
 // appears at all when --token-limit was passed with a real number --

@@ -6,6 +6,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jonhill90/keelson/internal/board"
+	"github.com/jonhill90/keelson/internal/cost"
 	"github.com/jonhill90/keelson/internal/lane"
 	"github.com/jonhill90/keelson/internal/theme"
 )
@@ -27,6 +28,17 @@ type Fetcher func() ([]lane.Session, error)
 // nil is a valid, silent "no -ledger configured" the same way there.
 type TaskFetcher func() ([]board.TaskRow, error)
 
+// CostFetcher retrieves per-lane cost, pre-joined by the caller (see
+// cmd/keelson/agents.go's buildAgentCostFetch) from the ledger's own
+// lanes.harness_session_id column and `ccusage session --json`'s
+// per-session totals -- Row.go's own package doc comment explains the
+// join. Keyed by the ledger's "<session>:<window-index>" lane string, the
+// same key board.TaskRow.Lane already uses -- NOT by Row.ID. nil is a
+// valid, silent "no -ledger configured" the same way TaskFetcher's is;
+// Derive already treats a missing map entry as "unknown" for a lane it did
+// find, so a nil map from a nil fetch degrades identically.
+type CostFetcher func() (map[string]cost.Figure, error)
+
 type refreshMsg time.Time
 type fetchResultMsg struct {
 	sessions []lane.Session
@@ -35,6 +47,10 @@ type fetchResultMsg struct {
 type taskFetchResultMsg struct {
 	rows []board.TaskRow
 	err  error
+}
+type costFetchResultMsg struct {
+	costs map[string]cost.Figure
+	err   error
 }
 
 // Model is S6's Bubble Tea program: a flat, estate-wide list of agents
@@ -49,9 +65,11 @@ type taskFetchResultMsg struct {
 type Model struct {
 	fetch     Fetcher
 	taskFetch TaskFetcher
+	costFetch CostFetcher
 
 	sessions    []lane.Session
 	tasks       []board.TaskRow
+	costs       map[string]cost.Figure
 	fetchErr    error
 	lastFetched time.Time
 
@@ -84,6 +102,14 @@ func (m Model) WithTasks(fetch TaskFetcher) Model {
 	return m
 }
 
+// WithCosts wires in the ledger+ccusage join for the Cost column -- see
+// CostFetcher's own doc comment; nil is a safe, silent default, same as
+// WithTasks(nil).
+func (m Model) WithCosts(fetch CostFetcher) Model {
+	m.costFetch = fetch
+	return m
+}
+
 // WithTheme returns a copy of m painted with th -- the same per-pane seam
 // every other package in this repo exposes.
 func (m Model) WithTheme(th theme.Theme, notice string) Model {
@@ -92,16 +118,19 @@ func (m Model) WithTheme(th theme.Theme, notice string) Model {
 	return m
 }
 
-// Rows returns Derive's own output over m's current sessions/tasks --
+// Rows returns Derive's own output over m's current sessions/tasks/costs --
 // exported so a caller (a future shell wiring, or this package's own
 // teatest) can assert on the derived list without depending on View's
 // rendered string.
-func (m Model) Rows() []Row { return Derive(m.sessions, m.tasks) }
+func (m Model) Rows() []Row { return Derive(m.sessions, m.tasks, m.costs) }
 
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{refreshCmd(), doFetch(m.fetch)}
 	if m.taskFetch != nil {
 		cmds = append(cmds, doTaskFetch(m.taskFetch))
+	}
+	if m.costFetch != nil {
+		cmds = append(cmds, doCostFetch(m.costFetch))
 	}
 	return tea.Batch(cmds...)
 }
@@ -127,6 +156,13 @@ func doTaskFetch(fetch TaskFetcher) tea.Cmd {
 	}
 }
 
+func doCostFetch(fetch CostFetcher) tea.Cmd {
+	return func() tea.Msg {
+		costs, err := fetch()
+		return costFetchResultMsg{costs: costs, err: err}
+	}
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -137,6 +173,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds := []tea.Cmd{refreshCmd(), doFetch(m.fetch)}
 		if m.taskFetch != nil {
 			cmds = append(cmds, doTaskFetch(m.taskFetch))
+		}
+		if m.costFetch != nil {
+			cmds = append(cmds, doCostFetch(m.costFetch))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -151,6 +190,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case taskFetchResultMsg:
 		if msg.err == nil {
 			m.tasks = msg.rows
+		}
+		return m, nil
+
+	case costFetchResultMsg:
+		if msg.err == nil {
+			m.costs = msg.costs
 		}
 		return m, nil
 

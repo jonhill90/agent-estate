@@ -317,8 +317,11 @@ func main() {
 	// reuses a seam this file already built for another pane rather than
 	// opening a second connection to the same source:
 	//   - agentsModel reuses sessionsFetch (the same "sessions" MCP call
-	//     the rail already makes) and the same ledger task fetch the rail
-	//     uses via WithTasks.
+	//     the rail already makes), the same ledger task fetch the rail
+	//     uses via WithTasks, and (new, S6/S7 depth) a ledger+ccusage join
+	//     for per-lane Cost -- buildAgentCostFetch (agents.go), reusing the
+	//     same sqliteBin/ccusageBin/ccusageArgs this file already resolved
+	//     for buildTaskFetch/buildCostFetch, not a third binary.
 	//   - skillsModel/mcpserversModel/adminModel each read a real local
 	//     path (no MCP, no supervisor) -- homeDir resolves once, below,
 	//     and an unresolvable one (os.UserHomeDir erroring) degrades each
@@ -331,7 +334,9 @@ func main() {
 	//     resolving or not.
 	homeDir, homeDirErr := os.UserHomeDir()
 
-	agentsModel := agents.New(sessionsFetch).WithTasks(agents.TaskFetcher(buildTaskFetch(ledgerSrc, *sqliteBin)))
+	agentsModel := agents.New(sessionsFetch).
+		WithTasks(agents.TaskFetcher(buildTaskFetch(ledgerSrc, *sqliteBin))).
+		WithCosts(buildAgentCostFetch(ledgerSrc, *sqliteBin, *ccusageBin, splitArgs(*ccusageArgs)))
 
 	var skillsModel skills.Model
 	var mcpserversModel mcpservers.Model

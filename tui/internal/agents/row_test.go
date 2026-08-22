@@ -5,31 +5,62 @@ import (
 	"testing"
 
 	"github.com/jonhill90/keelson/internal/board"
+	"github.com/jonhill90/keelson/internal/cost"
 	"github.com/jonhill90/keelson/internal/lane"
 	"github.com/jonhill90/keelson/internal/session"
 )
 
-func TestDeriveJoinsSessionsAndTasksByLaneName(t *testing.T) {
+// TestDeriveJoinsSessionsAndTasksByLedgerLaneKey pins the fix this file's
+// own package doc comment describes: the join key is "<session>:<window
+// INDEX>" (dispatch.sh's own "$LANE", built from lanes.sh's numeric window
+// column), never the pane's descriptive Name. w1/w2 below stand for real
+// descriptive names (e.g. "fix225-brief") on purpose -- if Derive ever
+// regresses to joining by l.Name again, this still passes only by
+// coincidence for a fixture using Name as the join key, which is exactly
+// why Window is set to a DIFFERENT-looking value (1, 2) than Name (w1, w2)
+// here: a l.Name-keyed join would produce "director:w1" and never match
+// "director:1", the real ledger's own key.
+func TestDeriveJoinsSessionsAndTasksByLedgerLaneKey(t *testing.T) {
 	sessions := []lane.Session{
 		{
 			Name: "director",
 			Lanes: []lane.Lane{
-				{Name: "w1", State: "busy", Command: "claude"},
-				{Name: "w2", State: "free", Command: "codex"},
+				{Window: 1, Name: "w1", State: "busy", Command: "claude"},
+				{Window: 2, Name: "w2", State: "free", Command: "codex"},
 			},
 		},
 	}
 	tasks := []board.TaskRow{
-		{Lane: "w1", SourceRef: "26", UpdatedAt: 100},
+		{Lane: "director:1", SourceRef: "26", UpdatedAt: 100},
 	}
 
-	got := Derive(sessions, tasks)
+	got := Derive(sessions, tasks, nil)
 	want := []Row{
 		{ID: "director:w1", Session: "director", State: "busy", Command: "claude", Task: "#26", Mode: session.ExecutionLocal},
 		{ID: "director:w2", Session: "director", State: "free", Command: "codex", Task: "(no task)", Mode: session.ExecutionLocal},
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Derive() =\n%+v\nwant\n%+v", got, want)
+	}
+}
+
+// TestDeriveDoesNotJoinByDescriptiveName is the mutation-check direction on
+// the fix above: a task row keyed by the pane's descriptive NAME ("w1", the
+// pre-fix shape) must NOT match, because the real ledger never writes a
+// lane key that way (see this file's own package doc comment, "confirmed
+// against a live ledger.sqlite3 copy"). If Derive's join reverts to l.Name,
+// this goes red the other direction -- Task would read "#26" instead of
+// staying "(no task)".
+func TestDeriveDoesNotJoinByDescriptiveName(t *testing.T) {
+	sessions := []lane.Session{
+		{Name: "director", Lanes: []lane.Lane{{Window: 1, Name: "w1", State: "busy"}}},
+	}
+	tasks := []board.TaskRow{
+		{Lane: "w1", SourceRef: "26", UpdatedAt: 100}, // old, wrong shape
+	}
+	got := Derive(sessions, tasks, nil)
+	if len(got) != 1 || got[0].Task != "(no task)" {
+		t.Fatalf("Derive() = %+v, want Task=\"(no task)\" -- a lane key of bare descriptive name must not match", got)
 	}
 }
 
@@ -44,7 +75,7 @@ func TestDeriveSkipsUnreadableSessionsWithoutDroppingOthers(t *testing.T) {
 		{Name: "ok", Lanes: []lane.Lane{{Name: "w1", State: "busy"}}},
 	}
 
-	got := Derive(sessions, nil)
+	got := Derive(sessions, nil, nil)
 	want := []Row{{ID: "ok:w1", Session: "ok", State: "busy", Task: "(no task)", Mode: session.ExecutionLocal}}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("Derive() =\n%+v\nwant\n%+v", got, want)
@@ -56,55 +87,98 @@ func TestDeriveSkipsUnreadableSessionsWithoutDroppingOthers(t *testing.T) {
 // its lifetime (retried tasks); the one with the latest UpdatedAt wins.
 func TestDerivePicksFreshestTaskRowPerLane(t *testing.T) {
 	sessions := []lane.Session{
-		{Name: "s", Lanes: []lane.Lane{{Name: "w1", State: "busy"}}},
+		{Name: "s", Lanes: []lane.Lane{{Window: 1, Name: "w1", State: "busy"}}},
 	}
 	tasks := []board.TaskRow{
-		{Lane: "w1", SourceRef: "1", UpdatedAt: 100},
-		{Lane: "w1", SourceRef: "2", UpdatedAt: 200}, // freshest
+		{Lane: "s:1", SourceRef: "1", UpdatedAt: 100},
+		{Lane: "s:1", SourceRef: "2", UpdatedAt: 200}, // freshest
 	}
 
-	got := Derive(sessions, tasks)
+	got := Derive(sessions, tasks, nil)
 	if len(got) != 1 || got[0].Task != "#2" {
 		t.Fatalf("Derive() = %+v, want the freshest task row (#2) to win", got)
 	}
 }
 
-// TestDeriveModelAndCostAreAlwaysUnknown is this file's own doc comment,
-// made a test: nothing in this codebase can fill either in yet, and a
-// future accidental fabrication (e.g. an "improvement" that guesses a
-// model from Command) should fail this test loudly rather than silently
-// start showing a made-up value.
-func TestDeriveModelAndCostAreAlwaysUnknown(t *testing.T) {
+// TestDeriveModelFromLaneReport pins the fix: lane.Lane.Model, when it is a
+// real reported name, flows straight to Row.Model.
+func TestDeriveModelFromLaneReport(t *testing.T) {
 	sessions := []lane.Session{
-		{Name: "s", Lanes: []lane.Lane{{Name: "w1", State: "busy", Command: "claude"}}},
+		{Name: "s", Lanes: []lane.Lane{{Name: "w1", State: "busy", Model: "sonnet"}}},
 	}
-	got := Derive(sessions, nil)
-	if got[0].Model != nil {
-		t.Errorf("Model = %v, want nil (unknown) -- no seam in this codebase reports a per-lane model", *got[0].Model)
+	got := Derive(sessions, nil, nil)
+	if got[0].Model == nil || *got[0].Model != "sonnet" {
+		t.Fatalf("Model = %v, want \"sonnet\"", got[0].Model)
 	}
+}
+
+// TestDeriveModelUnknownSentinelStaysNil is the mutation-check contrast:
+// lanes.sh's own "unknown" sentinel (never a real model name) must still
+// render as Row.Model == nil, not as a pointer to the literal word
+// "unknown" -- see modelPtr's own doc comment for why that distinction
+// matters.
+func TestDeriveModelUnknownSentinelStaysNil(t *testing.T) {
+	sessions := []lane.Session{
+		{Name: "s", Lanes: []lane.Lane{
+			{Name: "w1", State: "busy", Model: "unknown"},
+			{Name: "w2", State: "busy", Model: ""},
+		}},
+	}
+	got := Derive(sessions, nil, nil)
+	for _, r := range got {
+		if r.Model != nil {
+			t.Errorf("Row %q Model = %q, want nil", r.ID, *r.Model)
+		}
+	}
+}
+
+// TestDeriveCostFromLedgerLaneJoin pins Cost's own join: costsByLedgerLane
+// is keyed by the SAME "<session>:<window-index>" string tasks use, not by
+// Row.ID -- exactly the shape cmd/keelson/agents.go's buildAgentCostFetch
+// produces.
+func TestDeriveCostFromLedgerLaneJoin(t *testing.T) {
+	sessions := []lane.Session{
+		{Name: "s", Lanes: []lane.Lane{{Window: 4, Name: "w1", State: "busy"}}},
+	}
+	costs := map[string]cost.Figure{"s:4": cost.KnownFigure(0.561221)}
+	got := Derive(sessions, nil, costs)
+	if got[0].Cost == nil || *got[0].Cost != "$0.56" {
+		t.Fatalf("Cost = %v, want \"$0.56\"", got[0].Cost)
+	}
+}
+
+// TestDeriveCostMissingFromJoinStaysNil is the mutation-check contrast: a
+// lane with no entry in costsByLedgerLane (no resolved harness session id,
+// or ccusage has no session total for the one it has) must render Cost as
+// nil, never as "$0.00" or any other fabricated figure.
+func TestDeriveCostMissingFromJoinStaysNil(t *testing.T) {
+	sessions := []lane.Session{
+		{Name: "s", Lanes: []lane.Lane{{Window: 9, Name: "w1", State: "busy"}}},
+	}
+	got := Derive(sessions, nil, map[string]cost.Figure{"s:1": cost.KnownFigure(1.23)})
 	if got[0].Cost != nil {
-		t.Errorf("Cost = %v, want nil (unknown) -- ccusage totals per harness, not per lane", *got[0].Cost)
+		t.Errorf("Cost = %v, want nil -- no join entry for this lane's own key", *got[0].Cost)
 	}
 }
 
 func TestDeriveEmptyInputsProduceNoRows(t *testing.T) {
-	if got := Derive(nil, nil); got != nil {
-		t.Errorf("Derive(nil, nil) = %+v, want nil", got)
+	if got := Derive(nil, nil, nil); got != nil {
+		t.Errorf("Derive(nil, nil, nil) = %+v, want nil", got)
 	}
 }
 
 // TestDeriveModeIsAlwaysExecutionLocal is SPEC-shell.md S12's own
-// contrast with TestDeriveModelAndCostAreAlwaysUnknown above: unlike
-// Model/Cost, Mode is a KNOWN fact today (Row's own doc comment says
-// why -- no AgentBox integration exists in agent-supervisor at all), so
-// it must never render as this package's "unknown" -- pinned here so a
-// future change cannot silently start guessing at a mode instead of
-// stating the one this estate actually has.
+// documented gap: unlike Model/Cost (real seams as of this change), Mode is
+// a KNOWN fact today (Row's own doc comment says why -- no AgentBox
+// integration exists in agent-supervisor at all), so it must never render
+// as this package's "unknown" -- pinned here so a future change cannot
+// silently start guessing at a mode instead of stating the one this estate
+// actually has.
 func TestDeriveModeIsAlwaysExecutionLocal(t *testing.T) {
 	sessions := []lane.Session{
 		{Name: "s", Lanes: []lane.Lane{{Name: "w1", State: "busy"}, {Name: "w2", State: "free"}}},
 	}
-	got := Derive(sessions, nil)
+	got := Derive(sessions, nil, nil)
 	for _, r := range got {
 		if r.Mode != session.ExecutionLocal {
 			t.Errorf("Row %q Mode = %q, want %q", r.ID, r.Mode, session.ExecutionLocal)

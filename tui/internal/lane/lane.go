@@ -2,8 +2,8 @@
 // each state it names to a glyph. It knows nothing about tmux, lanes.sh, or
 // how the payload was fetched -- that is internal/mcp and cmd/agent-tui's
 // job. This package only knows the JSON shape lanes.sh --json produces
-// (window, window_id, name, command, state, idle_seconds), because that is
-// what mcp_server.py's "lanes" tool passes straight through.
+// (window, window_id, name, command, state, idle_seconds, model), because
+// that is what mcp_server.py's "lanes" tool passes straight through.
 package lane
 
 import "encoding/json"
@@ -16,6 +16,18 @@ type Lane struct {
 	Command     string `json:"command"`
 	State       string `json:"state"`
 	IdleSeconds int    `json:"idle_seconds"`
+
+	// Model is agent-supervisor#115's own self-report field, the 7th column
+	// lanes.sh --json appends (scripts/supervisor/lanes.sh's own emit_rows):
+	// the harness's OWN status-line text, matched against a per-harness
+	// regex (claude.sh's HARNESS_MODEL_RE) and lowercased to its first word
+	// ("opus"/"sonnet"/"haiku"). Literal string "unknown" -- lanes.sh's own
+	// sentinel, not this package's -- whenever the harness has no such
+	// regex (codex.sh/copilot.sh both leave HARNESS_MODEL_RE empty, verified
+	// against those files directly, 2026-08-22) or the pane's own text has
+	// not yet shown a match. A caller MUST treat "unknown" the same as
+	// empty, never render it as if it were a real model name.
+	Model string `json:"model"`
 }
 
 type lanesPayload struct {

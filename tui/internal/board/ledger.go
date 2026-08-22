@@ -132,6 +132,47 @@ func ReadTaskRows(run LedgerRunner, dbPath string) ([]TaskRow, error) {
 	return rows, nil
 }
 
+// laneSessionsQuery reads the ledger's own lanes table directly (not
+// source_tasks/tasks, tasksQuery's join) -- lanes.harness_session_id is
+// where dispatch.sh's own record-dispatch (--harness-session-id) writes the
+// harness's OWN conversation/session id once it resolves one, per lane. A
+// lane with no resolved session id (codex has no resolver at all -- the
+// schema's own comment on this column says so; a claude lane that has not
+// completed a turn yet) is EXCLUDED here rather than returned with an empty
+// string, so a caller never has to re-derive "no session id" from an empty
+// field the way ReadTaskRows' callers already must for TaskRow.Lane == "".
+const laneSessionsQuery = `SELECT lane, harness_session_id FROM lanes WHERE harness_session_id != '';`
+
+// LaneSession is one lanes-table row narrowed to the two columns
+// internal/agents needs to attribute cost per lane: the ledger's own lane
+// key (identical format to TaskRow.Lane -- "<session>:<window-index>",
+// lanes.sh's own numeric window column, NOT the pane's display name) and
+// the harness's resolved session id, the join key into `ccusage session
+// --json`'s own per-session totals (see internal/cost.ParseSessionCosts).
+type LaneSession struct {
+	Lane             string `json:"lane"`
+	HarnessSessionID string `json:"harness_session_id"`
+}
+
+// ReadLaneSessions queries dbPath (a ledger.sqlite3 file, same "copy, never
+// the live file" rule ReadTaskRows' own doc comment states) for every lane
+// with a resolved harness session id. Same PRAGMA query_only=1 write guard
+// as ReadTaskRows -- see that function's own doc comment for why -readonly
+// cannot be used here.
+func ReadLaneSessions(run LedgerRunner, dbPath string) ([]LaneSession, error) {
+	out, err := run([]string{"-json", dbPath, "PRAGMA query_only=1;\n" + laneSessionsQuery})
+	if err != nil {
+		return nil, fmt.Errorf("board: read ledger %s: %w", dbPath, err)
+	}
+	var rows []LaneSession
+	if len(out) > 0 {
+		if err := json.Unmarshal(out, &rows); err != nil {
+			return nil, fmt.Errorf("board: decode lane sessions: %w", err)
+		}
+	}
+	return rows, nil
+}
+
 // DiscoverRepos returns the distinct repos named by every row's source_url
 // that sourceURLRE could resolve -- the real-data half of ReposFor's union
 // (repo.go). A row left unresolved by parseSourceURL contributes nothing;

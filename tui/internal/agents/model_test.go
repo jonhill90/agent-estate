@@ -7,6 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/jonhill90/keelson/internal/cost"
 	"github.com/jonhill90/keelson/internal/lane"
 )
 
@@ -26,6 +27,43 @@ func TestFetchResultPopulatesRows(t *testing.T) {
 	}
 	if !strings.Contains(m.View(), "s:w1") {
 		t.Fatalf("View() missing the fetched row:\n%s", m.View())
+	}
+}
+
+// TestCostFetchResultPopulatesCostColumn drives Update directly, mirroring
+// TestFetchResultPopulatesRows above, to confirm a costFetchResultMsg
+// actually reaches View() through Rows()/m.costs.
+func TestCostFetchResultPopulatesCostColumn(t *testing.T) {
+	m := New(nil)
+	next, _ := m.Update(fetchResultMsg{sessions: []lane.Session{
+		{Name: "s", Lanes: []lane.Lane{{Window: 4, Name: "w1", State: "busy"}}},
+	}})
+	m = next.(Model)
+	next, _ = m.Update(costFetchResultMsg{costs: map[string]cost.Figure{"s:4": cost.KnownFigure(1.5)}})
+	m = next.(Model)
+
+	rows := m.Rows()
+	if len(rows) != 1 || rows[0].Cost == nil || *rows[0].Cost != "$1.50" {
+		t.Fatalf("Rows() = %+v, want Cost \"$1.50\"", rows)
+	}
+	if !strings.Contains(m.View(), "$1.50") {
+		t.Fatalf("View() missing the fetched cost:\n%s", m.View())
+	}
+}
+
+// TestCostFetchErrorLeavesCostsUnchanged mirrors taskFetchResultMsg's own
+// silent-degrade rule (model.go's Update case): an error must not stamp a
+// stale/zero costs map over one already populated from a prior successful
+// fetch.
+func TestCostFetchErrorLeavesCostsUnchanged(t *testing.T) {
+	m := New(nil)
+	next, _ := m.Update(costFetchResultMsg{costs: map[string]cost.Figure{"s:4": cost.KnownFigure(1.5)}})
+	m = next.(Model)
+	next, _ = m.Update(costFetchResultMsg{err: errors.New("ccusage unreadable")})
+	m = next.(Model)
+
+	if len(m.costs) != 1 {
+		t.Fatalf("costs = %+v, want the prior successful fetch preserved", m.costs)
 	}
 }
 

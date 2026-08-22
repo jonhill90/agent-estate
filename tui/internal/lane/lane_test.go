@@ -23,6 +23,34 @@ func TestDecodeInvalidJSON(t *testing.T) {
 	}
 }
 
+// TestDecodeReadsModel pins agent-supervisor#115's 7th column, live-shaped
+// against a real `lanes.sh --json` capture, 2026-08-22.
+func TestDecodeReadsModel(t *testing.T) {
+	text := `{"lanes":[{"window":1,"window_id":"@58","name":"director","command":"claude.exe","state":"free","idle_seconds":53,"model":"sonnet"}],"count":1}`
+	lanes, err := Decode(text)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if lanes[0].Model != "sonnet" {
+		t.Fatalf("Model = %q, want %q", lanes[0].Model, "sonnet")
+	}
+}
+
+// TestDecodeModelDefaultsToZeroValueWhenAbsent -- a lanes.sh from before
+// #115 (or a fixture that omits the field) must decode to Go's zero value,
+// not a JSON error, so this stays as backward-compatible as every other
+// field here.
+func TestDecodeModelDefaultsToZeroValueWhenAbsent(t *testing.T) {
+	text := `{"lanes":[{"window":1,"name":"x","command":"claude","state":"busy","idle_seconds":0}],"count":1}`
+	lanes, err := Decode(text)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if lanes[0].Model != "" {
+		t.Fatalf("Model = %q, want \"\"", lanes[0].Model)
+	}
+}
+
 // TestEveryVariantNamesEveryState is the addendum's rule 2 applied to every
 // entry in Variants, not just the default: "stale, menu-blocked and unsent
 // are the forgotten ones -- a variant that cannot show them is not a
