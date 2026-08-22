@@ -42,14 +42,19 @@ func TestDownArrowEnterNavigatesToTasksRoute(t *testing.T) {
 
 // TestEnterOnAnUnwiredRouteRendersStub confirms a nav route routeToPane
 // does not map to a real Pane falls through to internal/stub.View (S5)
-// rather than rendering nothing -- "Knowledge" (row 5: Home, Dashboard,
-// Agents, Chat, Tasks, Knowledge), confirmed still unwired by actually
-// entering it (internal/knowledge exists on main since #87 but nothing in
-// routeToPane maps "knowledge" to it yet -- grep confirms, not assumed:
-// `grep -rn "\"knowledge\"" internal/shell/model.go` is empty). Was
-// "Dashboard" until this change gave that route a real pane
-// (internal/dashboard) -- this test moved to the next still-unwired route
-// rather than asserting a route this build now renders for real.
+// rather than rendering nothing -- "Workflows" (Build's second child:
+// Skills, Workflows, MCP Servers), confirmed still unwired by actually
+// entering it (`grep -rn "\"workflows\"" internal/shell/model.go` is
+// empty). Was "Knowledge" until w3e.md's own fix wired that route to the
+// real internal/knowledge.Model (agent-tui#87 had shipped the package
+// standalone-first, same as every S6/S8-S11 pane before its own later
+// wiring PR, but never got that wiring PR itself -- confirmed from git
+// history, not assumed: `git log --oneline -- internal/shell/model.go`
+// shows no commit touching this file for #87, and #93's own commit
+// message says so explicitly: "Unlike Knowledge (#87), shipped
+// standalone-first" / "Did not touch internal/knowledge -- its own
+// standalone-first precedent"). This test moved to the next still-unwired
+// route rather than asserting a route this build now renders for real.
 //
 // The stub's own content, not merely "not built yet" appearing somewhere
 // in the frame, is what's asserted: the sidebar's OWN row labels ("Library",
@@ -61,13 +66,67 @@ func TestEnterOnAnUnwiredRouteRendersStub(t *testing.T) {
 	tm := run(t, testModel())
 	waitFor(t, tm, "⌂ Home")
 
-	for i := 0; i < 5; i++ {
+	for i := 0; i < 8; i++ { // Home..Build header
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // expand Build
+	waitFor(t, tm, "Workflows")
+	for i := 0; i < 2; i++ { // onto Workflows (Skills, then Workflows)
 		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
 	}
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 	out := waitFor(t, tm, "not built yet")
-	if !bytes.Contains(out, []byte("│ knowledge")) {
-		t.Fatalf("stub view's own content missing the \"knowledge\" route title (stub.go renders m.nav.Active(), lowercase, inside its own bordered box):\n%s", out)
+	if !bytes.Contains(out, []byte("│ workflows")) {
+		t.Fatalf("stub view's own content missing the \"workflows\" route title (stub.go renders m.nav.Active(), lowercase, inside its own bordered box):\n%s", out)
+	}
+}
+
+// TestKnowledgeRouteShowsRealKnowledgePane is w3e.md's own regression test:
+// "Knowledge" (row 5: Home, Dashboard, Agents, Chat, Tasks, Knowledge) used
+// to fall through to PaneStub even though internal/knowledge (#87) had been
+// on main the whole time -- routeToPane simply never got a "knowledge" ->
+// PaneKnowledge arm (see TestEnterOnAnUnwiredRouteRendersStub's doc comment
+// for the git-history-verified root cause). It must now render the real
+// internal/knowledge.Model testModel() wires in, keyed off its fake vault
+// fact's own slug, not a stub and not home's own text.
+func TestKnowledgeRouteShowsRealKnowledgePane(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "⌂ Home")
+
+	for i := 0; i < 5; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	out := waitFor(t, tm, "test-marker-fact")
+	if bytes.Contains(out, []byte("not built yet")) {
+		t.Fatalf("Knowledge route still rendering the S5 stub:\n%s", out)
+	}
+}
+
+// TestLibraryRouteShowsRealLibraryPane closes a gap found while checking
+// the SAME class of bug the Knowledge regression was: routeToPane already
+// maps "library" -> PaneLibrary (added alongside Knowledge's own nav row in
+// #93), but nothing in this package had ever driven the route through a
+// real Program to prove it -- `grep -rln "PaneLibrary\|library\."
+// internal/shell/*_test.go` returned nothing before this test. "Library" is
+// row 6 (Home, Dashboard, Agents, Chat, Tasks, Knowledge, Library).
+func TestLibraryRouteShowsRealLibraryPane(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "⌂ Home")
+
+	for i := 0; i < 6; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	// "it-deadbeef" is testModel()'s fake ItemRow's own ID -- its
+	// BodySnippet ("test-marker-item") is truncated off-screen by the list
+	// view's fixed column widths at this terminal size, so the ID is the
+	// marker that survives truncation, the same reasoning
+	// TestConnectionsRouteShowsRealConnectorsPane gives for using a real
+	// field value instead of an arbitrary "test-marker-*" string.
+	out := waitFor(t, tm, "it-deadbeef")
+	if bytes.Contains(out, []byte("not built yet")) {
+		t.Fatalf("Library route still rendering the S5 stub:\n%s", out)
 	}
 }
 

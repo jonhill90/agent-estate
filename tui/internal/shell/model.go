@@ -26,6 +26,7 @@ import (
 	"github.com/jonhill90/keelson/internal/dashboard"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
+	"github.com/jonhill90/keelson/internal/knowledge"
 	"github.com/jonhill90/keelson/internal/library"
 	"github.com/jonhill90/keelson/internal/mcpservers"
 	"github.com/jonhill90/keelson/internal/nav"
@@ -77,11 +78,20 @@ const (
 	// (~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3's own
 	// live_parameters/open_questions/unacknowledged views), the sidebar's
 	// "library" route's counterpart to Knowledge (agent-tui#87, Jon's
-	// personal vault) -- unlike Knowledge, wired into the shell in the same
-	// change that built it, since driving it with a real vhs pty needs a
-	// real route to reach (AGENTS.md: "do not add a new tea.NewProgram call
-	// site... a new view is a pane added to the shell").
+	// personal vault).
 	PaneLibrary
+	// PaneKnowledge is agent-tui#87's own pane (internal/knowledge, Jon's
+	// personal vault at $AGENT_MEMORY_VAULT) -- merged standalone, same
+	// "ship the pane, wire the route later" precedent S6/S8-S11 and
+	// dashboard/library all followed at some point, but its own wiring
+	// step never landed: #93 (library.go's own commit message) says so
+	// explicitly ("unlike Knowledge, wired into the shell in the same
+	// change that built it" -- Library's, not Knowledge's), and `git log
+	// --oneline -- internal/shell/model.go` shows #87 itself never
+	// touched this file at all. #94's nav walk caught the resulting gap:
+	// the "knowledge" route rendered PaneStub the whole time. This is
+	// that wiring, agent-tui#94's own fix.
+	PaneKnowledge
 )
 
 // focus names which region the keyboard currently drives -- the nav
@@ -129,6 +139,7 @@ var routeToPane = map[string]Pane{
 	"settings":       PaneAdmin,
 	"dashboard":      PaneDashboard,
 	"library":        PaneLibrary,
+	"knowledge":      PaneKnowledge,
 }
 
 // paneToRoute is routeToPane's inverse, used to keep the nav sidebar's own
@@ -210,6 +221,9 @@ type Model struct {
 	// wired via With*" shape as the five above it, not New's own parameter
 	// list.
 	library library.Model
+	// knowledge is agent-tui#87's own pane (PaneKnowledge, above) -- same
+	// "optional, wired via With*" shape.
+	knowledge knowledge.Model
 
 	// boardOK is false when cmd/agent-tui had no -ledger to build a real
 	// board.Fetcher from -- board.go's own -board flag still refuses to
@@ -394,6 +408,11 @@ func (m Model) WithLibrary(l library.Model) Model {
 	return m
 }
 
+func (m Model) WithKnowledge(k knowledge.Model) Model {
+	m.knowledge = k
+	return m
+}
+
 // applyTheme pushes m's current theme/themeNotice into every pane's own
 // WithTheme -- the one place that fans the single shared value out to all
 // four, called from both WithTheme (construction/startup) and the
@@ -414,6 +433,7 @@ func (m Model) applyTheme() Model {
 	m.admin = m.admin.WithTheme(m.theme, m.themeNotice)
 	m.dashboard = m.dashboard.WithTheme(m.theme, m.themeNotice)
 	m.library = m.library.WithTheme(m.theme, m.themeNotice)
+	m.knowledge = m.knowledge.WithTheme(m.theme, m.themeNotice)
 	return m
 }
 
@@ -421,7 +441,7 @@ func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{
 		m.nav.Init(), m.rail.Init(), m.cost.Init(), m.gallery.Init(), m.chat.Init(),
 		m.agents.Init(), m.skills.Init(), m.mcpservers.Init(), m.connectors.Init(), m.admin.Init(),
-		m.dashboard.Init(), m.library.Init(),
+		m.dashboard.Init(), m.library.Init(), m.knowledge.Init(),
 	}
 	if m.boardOK {
 		cmds = append(cmds, m.board.Init(), m.flow.Init())
@@ -604,6 +624,10 @@ func (m Model) routeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case PaneLibrary:
 		next, cmd := m.library.Update(msg)
 		m.library = next.(library.Model)
+		return m, cmd
+	case PaneKnowledge:
+		next, cmd := m.knowledge.Update(msg)
+		m.knowledge = next.(knowledge.Model)
 		return m, cmd
 	default:
 		return m.homeKey(msg)
@@ -810,6 +834,10 @@ func (m Model) routeAll(msg tea.Msg) (Model, tea.Cmd) {
 	m.library = next.(library.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.knowledge.Update(msg)
+	m.knowledge = next.(knowledge.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -900,6 +928,10 @@ func (m Model) resize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 	m.library = next.(library.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.knowledge.Update(contentSize)
+	m.knowledge = next.(knowledge.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -982,6 +1014,8 @@ func (m Model) contentView() string {
 		return m.dashboard.View()
 	case PaneLibrary:
 		return m.library.View()
+	case PaneKnowledge:
+		return m.knowledge.View()
 	case PaneStub:
 		return m.stubView()
 	default:

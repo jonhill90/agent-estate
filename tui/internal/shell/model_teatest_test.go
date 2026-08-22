@@ -27,7 +27,9 @@ import (
 	"github.com/jonhill90/keelson/internal/dashboard"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
+	"github.com/jonhill90/keelson/internal/knowledge"
 	"github.com/jonhill90/keelson/internal/lane"
+	"github.com/jonhill90/keelson/internal/library"
 	"github.com/jonhill90/keelson/internal/mcpservers"
 	"github.com/jonhill90/keelson/internal/rail"
 	"github.com/jonhill90/keelson/internal/skills"
@@ -69,6 +71,23 @@ func testModel() Model {
 	da := dashboard.New(func() (dashboard.Stats, error) {
 		return dashboard.Stats{AgentsKnown: true, AgentsByState: map[string]int{"busy": 1}}, nil
 	})
+	kn := knowledge.New(
+		func() ([]knowledge.IndexEntry, error) {
+			return []knowledge.IndexEntry{{Slug: "test-marker-fact", Title: "test marker fact", Description: "a fake vault fact for shell-level routing tests"}}, nil
+		},
+		func(slug string) (knowledge.Fact, error) {
+			return knowledge.Fact{Slug: slug, Title: "test marker fact", Body: "fake body"}, nil
+		},
+	)
+	lb := library.New(
+		func(view library.View, weight, status string) ([]library.ItemRow, error) {
+			return []library.ItemRow{{ID: "it-deadbeef", Kind: "fact", Weight: "hard", Status: "open", BodySnippet: "test-marker-item"}}, nil
+		},
+		func(id string) (library.ItemDetail, error) {
+			return library.ItemDetail{ID: id, Kind: "fact"}, nil
+		},
+		func() (int, error) { return 1, nil },
+	)
 
 	return New(r, b, true, "", c, g, fl, ch).
 		WithAgents(ag).
@@ -76,7 +95,9 @@ func testModel() Model {
 		WithMCPServers(mc).
 		WithConnectors(co).
 		WithAdmin(ad).
-		WithDashboard(da)
+		WithDashboard(da).
+		WithKnowledge(kn).
+		WithLibrary(lb)
 }
 
 func run(t *testing.T, m Model) *teatest.TestModel {

@@ -40,6 +40,7 @@ import (
 	"github.com/jonhill90/keelson/internal/dashboard"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
+	"github.com/jonhill90/keelson/internal/knowledge"
 	"github.com/jonhill90/keelson/internal/lane"
 	"github.com/jonhill90/keelson/internal/library"
 	"github.com/jonhill90/keelson/internal/mcp"
@@ -413,6 +414,18 @@ func main() {
 		buildLibraryCountFetch(ledgerSrc, *sqliteBin),
 	)
 
+	// knowledgeModel reads $AGENT_MEMORY_VAULT -- the same env var
+	// dashboardModel's own VaultFacts figure already reads (see the
+	// comment at that call site) -- via internal/knowledge's own
+	// Fetcher/FactLoader seams. Empty is a real, silent "no vault
+	// configured" the package's own LoadIndex already turns into a
+	// visible notice, not an error this file needs to guard against.
+	vaultDir := os.Getenv("AGENT_MEMORY_VAULT")
+	knowledgeModel := knowledge.New(
+		knowledge.NewFetcher(vaultDir),
+		knowledge.NewFactLoader(vaultDir),
+	)
+
 	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel, flowModel, chatModel).
 		WithAgents(agentsModel).
 		WithSkills(skillsModel).
@@ -421,6 +434,7 @@ func main() {
 		WithAdmin(adminModel).
 		WithDashboard(dashboardModel).
 		WithLibrary(libraryModel).
+		WithKnowledge(knowledgeModel).
 		WithStart(start).
 		WithTheme(activeTheme, themeNotice).
 		WithThemeSave(func(th theme.Theme) error { return theme.Save(theme.ConfigPath(), th.ID) })
