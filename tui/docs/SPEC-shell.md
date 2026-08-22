@@ -6,9 +6,9 @@ yet built, builds exactly that, opens a PR, stops.
 
 ## The target
 
-Jon: *"i want a real TUI. with a nav barr on left similar to the hill90. i want
-admin setion. a way to make agents threads. skills. mcps. connectors."*
-And: *"lets make it 1:1 with what i have then we will move things around."*
+The requirement: a real TUI with a left nav bar modelled on the hill90 web app —
+including an admin section, agent threads, skills, MCP servers and connectors.
+Build it 1:1 with the existing web nav first; rearranging comes after.
 
 `ui_fidelity=1:1` is a **hard** parameter in the corpus. The source of truth is
 `hill90-app/services/ui/src/components/nav-items.ts`, read as admin — Jon is
@@ -84,10 +84,10 @@ send-keys**.
 List skills from `~/.claude/skills` and the `skills` repo: name, description,
 last eval result, invocation count. `[e]` runs its eval.
 
-**Jon, 2026-08-22:** *"your supposed to dynamically build skill then eval them.
-they either get better or droped or renamed based on evals. so i understand why
-we have skill that are not used yet. you need to eval them."* Unused skills are
-BY DESIGN. The missing piece is the eval loop, not the skills.
+**Design note, 2026-08-22.** Skills are built dynamically and then evaluated;
+each one is improved, renamed, or dropped on the strength of its evals. Skills
+that are not yet in use are therefore expected — the missing piece is the eval
+loop, not the skills themselves. Do not treat an uninvoked skill as dead code.
 
 ## S9 — MCP servers view
 
@@ -105,8 +105,8 @@ Services, Profiles, Users, Dependencies, Settings. Read-only first.
 
 ## S12 — Execution mode (AgentBox)
 
-Jon: *"the agent box idea is good for docker yea? maybe we should have it have
-a mode."*
+The AgentBox container sandbox should be selectable as an execution mode
+rather than being a separate product.
 
 A per-agent `ExecutionMode`: `local` (subprocess in a worktree, today's
 behaviour) or `container` (AgentBox docker sandbox). Surface the mode in the
