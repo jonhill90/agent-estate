@@ -26,6 +26,18 @@ DISPATCH="$HERE/../../scripts/supervisor/dispatch.sh"
 # env block by hand. The dedicated gate tests live in
 # test_dispatch_quota_gate.sh and override this per case.
 export QUOTA_GATE="$HERE/stubs/quota-safe"
+# agent-supervisor#500: dispatch.sh now runs a host-pressure gate before
+# even the quota gate above -- same reasoning as #227's: every case in this
+# file is testing something OTHER than the gate, and a CI runner's real
+# load/free-memory at test time is neither controlled nor this suite's
+# concern. 0 disables a check entirely (host-pressure.sh's own documented
+# convention, mirroring daemon/internal/pressure.Limits). The dedicated
+# gate tests live in test_host_pressure.sh (the gate's own logic, faked
+# sysctl/vm_stat) and test_dispatch_host_pressure.sh (dispatch.sh's
+# integration with it, mutation-checked both directions) and override these
+# per case.
+export SUPERVISOR_MAX_LOAD_PER_CORE=0
+export SUPERVISOR_MIN_FREE_MEM_GB=0
 # agent-supervisor#171: this suite is specifically about the tmux/send-keys
 # flow (window naming, verified_type/verified_submit, the #241 id-vs-index
 # split, ...) -- none of it stubs a `claude` binary, so leaving the new

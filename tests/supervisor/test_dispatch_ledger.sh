@@ -16,6 +16,11 @@ CLI="$HERE/../../scripts/supervisor/cli.py"
 # agent-supervisor#227: give every dispatch here a deterministic SAFE quota
 # verdict instead of calling the real codexbar. See test_dispatch.sh for why.
 export QUOTA_GATE="$HERE/stubs/quota-safe"
+# agent-supervisor#500: same reason as this line above -- disable the
+# host-pressure gate dispatch.sh now runs before the quota gate, so this
+# suite is not sensitive to a CI runner's real load/free-memory.
+export SUPERVISOR_MAX_LOAD_PER_CORE=0
+export SUPERVISOR_MIN_FREE_MEM_GB=0
 # agent-supervisor#171: this suite exercises the ledger writes a tmux
 # dispatch makes and stubs no `claude` binary -- see test_dispatch.sh's own
 # comment on this same override.

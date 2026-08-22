@@ -394,6 +394,29 @@ ISSUE="${ISSUES[0]:-}"
 [ -f "$BRIEF" ] || { echo "dispatch: no brief file at $BRIEF" >&2; exit 1; }
 BRIEF="$(cd "$(dirname "$BRIEF")" && pwd)/$(basename "$BRIEF")"
 
+# agent-supervisor#500 / corpus directive it-ef548e51e71daebe: a NEW dispatch
+# is the actual resource-multiplying step in this estate (a new worktree, a
+# new agent process) -- director-loop.sh's own tick only sends a nudge to an
+# EXISTING pane, so this is the one place in the live shell/tmux control
+# plane that can refuse before adding load, not after. Checked here, before
+# claim.sh or worktree.sh run (both below), for the same "cheapest failure
+# first" reason the brief-file check above already gives: a refused dispatch
+# must leave the estate exactly as it found it, and claiming an issue or
+# building a worktree it then has to unwind would be strictly worse than
+# never starting. See host-pressure.sh's own header for the thresholds and
+# why they live in a second bash implementation rather than shelling out to
+# daemon/internal/pressure's Go binary.
+if [ -x "$HERE/host-pressure.sh" ]; then
+  HOST_PRESSURE_OUT=$("$HERE/host-pressure.sh"); HOST_PRESSURE_RC=$?
+  if [ "$HOST_PRESSURE_RC" -ne 0 ]; then
+    echo "dispatch: $HOST_PRESSURE_OUT -- NOT dispatching #$ISSUE_ARG" >&2
+    exit 1
+  fi
+else
+  echo "dispatch: host-pressure.sh missing or not executable at $HERE -- refusing to guess whether this host can take another dispatch" >&2
+  exit 1
+fi
+
 # --- carry forward what the LAST agent on this issue already found ----------
 # Measured 2026-08-20: 184 issues in this estate have been worked more than
 # once -- #308 thirteen times, #284 ten. Every re-dispatch started from zero,

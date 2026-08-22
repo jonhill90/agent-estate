@@ -20,6 +20,12 @@ DISPATCH="$HERE/../../scripts/supervisor/dispatch.sh"
 # a lane is ever picked in most cases -- the tmux flow is what its handful
 # of SAFE-verdict cases exercise, and it stubs no `claude` binary; see
 # test_dispatch.sh's own comment on this same override.
+# agent-supervisor#500: dispatch.sh now runs the host-pressure gate BEFORE
+# the quota gate this file is about -- disabled here for the same reason
+# test_dispatch.sh disables it (this file's own concern is quota, not host
+# resources, and a real CI runner's load/free-memory is uncontrolled).
+export SUPERVISOR_MAX_LOAD_PER_CORE=0
+export SUPERVISOR_MIN_FREE_MEM_GB=0
 export DISPATCH_LIVE_PANE=1
 pass=0; fail=0
 
