@@ -1,3 +1,5 @@
 /keelson
 /bin/
 *.test
+/AGENTS.LOCAL.md
+/CLAUDE.LOCAL.md
