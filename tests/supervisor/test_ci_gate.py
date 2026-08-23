@@ -176,6 +176,65 @@ class CiGateTest(unittest.TestCase):
         result = CiGate(runner).evaluate(repo="o/r", number=1)
         self.assertEqual("refuse", result["decision"])
 
+    def test_stale_gate_failure_superseded_by_later_green_ui_evidence_allows(self):
+        # agent-supervisor#518 / #516: `ui-evidence.yml`'s `gate` job runs
+        # only on `push` and never re-triggers when a PR satisfies UI
+        # evidence via a follow-up comment (the #468 pattern). The
+        # separately-named, `issue_comment`-triggered `ui-evidence`
+        # check-run goes green afterward, at the same head SHA, and is the
+        # one that actually reflects reality. Measured on #516
+        # (e9ceb89d4dda6a19c7e934f6d0abeae328b95f34): `gate` FAILURE
+        # completed 07:33:24Z, `ui-evidence` SUCCESS completed 07:46:04Z.
+        runs = [
+            run_at("sha", "gate", conclusion="failure",
+                   started_at="2026-08-23T07:33:17Z", completed_at="2026-08-23T07:33:24Z"),
+            run_at("sha", "ui-evidence", conclusion="success",
+                   started_at="2026-08-23T07:46:04Z", completed_at="2026-08-23T07:46:04Z"),
+        ]
+        runner = FakeRunner(head_sha="sha", check_runs=runs)
+        result = CiGate(runner).evaluate(repo="o/r", number=1)
+        self.assertEqual("allow", result["decision"])
+
+    def test_stale_gate_failure_without_any_ui_evidence_run_still_refuses(self):
+        # No superseding check at all -- the OLD-code behaviour, and it must
+        # stay the behaviour here too: a `gate` failure with nothing to
+        # supersede it is a genuine failure.
+        runs = [
+            run_at("sha", "gate", conclusion="failure",
+                   started_at="2026-08-23T07:33:17Z", completed_at="2026-08-23T07:33:24Z"),
+        ]
+        runner = FakeRunner(head_sha="sha", check_runs=runs)
+        result = CiGate(runner).evaluate(repo="o/r", number=1)
+        self.assertEqual("refuse", result["decision"])
+        self.assertIn("gate", result["reason"])
+
+    def test_gate_failure_with_also_failing_ui_evidence_still_refuses(self):
+        # The superseding check exists but is itself red -- a failing
+        # "supersede" clears nothing.
+        runs = [
+            run_at("sha", "gate", conclusion="failure",
+                   started_at="2026-08-23T07:33:17Z", completed_at="2026-08-23T07:33:24Z"),
+            run_at("sha", "ui-evidence", conclusion="failure",
+                   started_at="2026-08-23T07:46:04Z", completed_at="2026-08-23T07:46:04Z"),
+        ]
+        runner = FakeRunner(head_sha="sha", check_runs=runs)
+        result = CiGate(runner).evaluate(repo="o/r", number=1)
+        self.assertEqual("refuse", result["decision"])
+
+    def test_gate_failure_after_an_earlier_ui_evidence_success_still_refuses(self):
+        # The `ui-evidence` success happened FIRST and the `gate` failure
+        # came later -- that is a real, later failure, not a stale earlier
+        # one being superseded by a fresher green run. Must still refuse.
+        runs = [
+            run_at("sha", "ui-evidence", conclusion="success",
+                   started_at="2026-08-23T07:20:00Z", completed_at="2026-08-23T07:20:00Z"),
+            run_at("sha", "gate", conclusion="failure",
+                   started_at="2026-08-23T07:33:17Z", completed_at="2026-08-23T07:33:24Z"),
+        ]
+        runner = FakeRunner(head_sha="sha", check_runs=runs)
+        result = CiGate(runner).evaluate(repo="o/r", number=1)
+        self.assertEqual("refuse", result["decision"])
+
     def test_evaluate_fetches_head_itself_every_call(self):
         # evaluate() takes only repo/number -- there is no head-sha
         # parameter a caller could pass to substitute a cached snapshot for
