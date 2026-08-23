@@ -27,3 +27,7 @@ okf_version: "0.2"
 # Test evidence
 
 * [Nav-walk docs captures](navwalk-docs/README.md) - Nav-walk frame captures proving the Docs section's two destinations stopped being stubs (2026-08-22).
+
+# CI / Guards
+
+* [Tape-build guard](vhscheck-guard.md) - What `internal/vhscheck` checks, why it exists (#132/#133), how it tells a live `go build` from a comment mentioning a path, and how to run it.
