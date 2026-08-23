@@ -414,3 +414,52 @@ func TestPlatformDocsRouteShowsExternalDestination(t *testing.T) {
 		t.Fatalf("Platform Docs route still rendering the S5 stub:\n%s", out)
 	}
 }
+
+// TestConnectCredentialStubsShowTheirOwnSpecificDescription is a
+// regression guard for a real, live bug agent-b3.md's own brief found by
+// actually driving the Discord stub, not by reading source: stub.View's
+// title/description come from stub.Descriptions, looked up by
+// `m.nav.Active()` (a route id, e.g. "discord") -- but stub.Descriptions
+// used to be keyed by Label ("Discord"), so the lookup always missed and
+// every stub silently fell back to the generic
+// "not built yet -- no description recorded for this route." regardless
+// of what specific text lived in the map. Fixed by re-keying
+// stub.Descriptions to route ids. This test presses Enter on Storage,
+// Discord and Secrets in turn and asserts each one's own specific,
+// route-id-keyed description text is on screen -- not just "not built
+// yet" (which the generic fallback ALSO renders, so a weaker assertion
+// would pass against the very bug this test exists to catch).
+func TestConnectCredentialStubsShowTheirOwnSpecificDescription(t *testing.T) {
+	cases := []struct {
+		route string
+		downs int // additional downs after expanding Connect, onto this route
+		want  string
+	}{
+		{"Storage", 2, "hill90-app"},
+		{"Discord", 3, "notify.sh listing"},
+		{"Secrets", 4, "never its value"},
+	}
+	for _, c := range cases {
+		t.Run(c.route, func(t *testing.T) {
+			tm := run(t, testModel())
+			waitFor(t, tm, "⌂ Home")
+
+			for i := 0; i < 9; i++ { // Home..Build header..Connect header
+				tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+			}
+			tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // expand Connect
+			waitFor(t, tm, c.route)
+			for i := 0; i < c.downs; i++ {
+				tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+			}
+			tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+			out := waitFor(t, tm, "not built yet")
+			if bytes.Contains(out, []byte("no description recorded for this route")) {
+				t.Fatalf("%s route fell through to the GENERIC stub fallback -- stub.Descriptions lookup missed (the Label/id bug this test exists to catch):\n%s", c.route, out)
+			}
+			if !bytes.Contains(out, []byte(c.want)) {
+				t.Fatalf("%s route missing its own specific description text %q:\n%s", c.route, c.want, out)
+			}
+		})
+	}
+}
