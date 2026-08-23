@@ -7,8 +7,22 @@ brings the conversation back with full context, and nothing in tmux can. This
 module is how `dispatch.sh` learns that id at the one moment it is knowable
 and cheap: immediately after the brief has been submitted into the pane.
 
-HOW THE ID IS FOUND, and what that costs (agent-dotfiles#237 asks for this to
-be stated rather than assumed):
+agent-supervisor#(codex adapter gap, 2026-08-23): `resolve()` used to refuse
+outright for every harness but `claude` ("no session resolver ... only claude
+is implemented"), unconditionally, on every single codex dispatch -- not a
+theoretical gap, a live one: `dispatch.sh` calls this after every dispatch
+regardless of harness, and every codex lane hit this refusal, every time,
+printing "no harness session id recorded" to dispatch's own stdout and
+leaving that lane permanently `UNRECOVERABLE` to `restore.sh` (see its own
+header) for the rest of its life. Codex has never been resumable in this
+estate, not because `codex` lacks a resume dialect -- verified live,
+`codex resume <SESSION_ID>` reopens the exact prior conversation, no picker,
+2026-08-23 -- but because nothing here ever looked. `candidates_codex` below
+closes that; see its own docstring for what codex's own on-disk layout gives
+for free that Claude's did not.
+
+HOW THE CLAUDE ID IS FOUND, and what that costs (agent-dotfiles#237 asks for
+this to be stated rather than assumed):
 
 * This is an INFERENCE FROM A FILE LAYOUT, not a documented interface. Claude
   Code writes one JSONL transcript per conversation under
@@ -146,7 +160,7 @@ def _carries(path, marker):
 
 
 def candidates(*, home, marker, since):
-    """Every transcript that satisfies all three tests above. Never guesses."""
+    """Every Claude transcript that satisfies all three tests above. Never guesses."""
     projects = Path(home) / ".claude" / "projects"
     if not projects.is_dir():
         return []
@@ -174,6 +188,103 @@ def candidates(*, home, marker, since):
     return found
 
 
+def _codex_session_meta(path):
+    """Read a codex rollout file's own `session_meta` record: (id, cwd, epoch)
+    or None.
+
+    MEASURED, not inferred (isolated tmux socket, real codex-cli 0.149.0,
+    2026-08-23): unlike Claude's transcript, which scatters `sessionId`
+    across many lines and never states its own cwd at all, codex writes
+    EXACTLY ONE `session_meta` event, always first in the file, carrying
+    `session_id` (== the filename's own uuid), `cwd` (the directory codex was
+    launched in -- a lane's worktree, unique per dispatch, so it is a better
+    discriminator than Claude's substring-in-body `marker` check: an exact
+    field match, not "appears somewhere in this file"), and `timestamp`
+    (ISO-8601, matching `since` the same way `_first_timestamp` does for
+    Claude). Reading only the first line is deliberate and cheap: a real
+    rollout file was 75KB in this measurement, and everything this function
+    needs is in the header a caller would otherwise have to scan for.
+    """
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            first = handle.readline()
+    except OSError:
+        return None
+    try:
+        rec = json.loads(first)
+    except (ValueError, TypeError):
+        return None
+    if rec.get("type") != "session_meta":
+        return None
+    payload = rec.get("payload") or {}
+    session_id = payload.get("session_id")
+    cwd = payload.get("cwd")
+    stamp = payload.get("timestamp")
+    if not session_id or not cwd or not stamp:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return session_id, cwd, parsed.timestamp()
+
+
+def candidates_codex(*, home, marker, since):
+    """Every codex rollout that satisfies the codex analogue of the three
+    Claude tests above. Never guesses.
+
+    Codex writes one JSONL rollout per conversation under
+    `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<timestamp>-<uuid>.jsonl` --
+    an on-disk layout this module infers from the shipped CLI the same way
+    it already does for Claude's, and just as unpromised by codex's own
+    interface: a future codex that moves or renames these files breaks this
+    resolver CLOSED, the same failure direction as Claude's.
+
+    `marker` here is `$WORKTREE` (dispatch.sh's own caller), and codex's own
+    `cwd` field is checked for EQUALITY against it, not substring containment
+    -- `respawn-pane -c "$WORKTREE"` launches codex directly in that
+    directory (harness/codex.sh: `HARNESS_LAUNCH_TAKES_PROMPT`, the prompt is
+    codex's own launch argv, not a typed message), so cwd is exactly the
+    worktree path codex was started in, not merely a string that might
+    appear in conversation text somewhere.
+    """
+    sessions = Path(home) / ".codex" / "sessions"
+    if not sessions.is_dir():
+        return []
+    found = []
+    for rollout in sorted(sessions.glob("*/*/*/rollout-*.jsonl")):
+        meta = _codex_session_meta(rollout)
+        if meta is None:
+            continue
+        session_id, cwd, began = meta
+        if not UUID_RE.match(session_id):
+            continue
+        if cwd != marker:
+            continue
+        if began < since - BEGAN_SLACK_SECONDS:
+            continue
+        if not rollout.stem.endswith(session_id):
+            # The filename's own trailing uuid must agree with the payload's
+            # `session_id` -- the same "content agrees with name" discipline
+            # `_declares_own_id` applies for Claude, so a rollout whose
+            # header was hand-edited or corrupted is never handed to a
+            # restore. `endswith`, not a split on the last `-`: a uuid is
+            # itself hyphenated (8-4-4-4-12), so splitting on one hyphen
+            # truncates it to its final 8 hex digits, a bug this test caught
+            # (session_id `01a0...037c` vs. the split's `4741037c`).
+            continue
+        found.append(session_id)
+    return found
+
+
+_RESOLVERS = {
+    "claude": candidates,
+    "codex": candidates_codex,
+}
+
+
 def resolve(*, harness, marker, since, home=None, timeout=0.0, sleep=time.sleep, clock=time.time):
     """Resolve one session id, or raise LookupError naming why it refused.
 
@@ -183,12 +294,15 @@ def resolve(*, harness, marker, since, home=None, timeout=0.0, sleep=time.sleep,
     immediately rather than waited on, because more time can only add
     candidates.
     """
-    if harness != "claude":
-        raise LookupError(f"no session resolver for harness {harness!r} -- only claude is implemented")
+    finder = _RESOLVERS.get(harness)
+    if finder is None:
+        raise LookupError(
+            f"no session resolver for harness {harness!r} -- only {', '.join(sorted(_RESOLVERS))} implemented"
+        )
     home = home or os.environ.get("HOME") or str(Path.home())
     deadline = clock() + timeout
     while True:
-        found = candidates(home=home, marker=marker, since=since)
+        found = finder(home=home, marker=marker, since=since)
         if len(found) == 1:
             return found[0]
         if len(found) > 1:

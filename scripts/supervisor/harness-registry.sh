@@ -21,6 +21,7 @@
 #   H_BLOCKED_MARKERS  H_OPTION_ROW_RE  H_MENU_ENTER_RE  H_MENU_TAIL
 #   H_TEXT_PROMPT_RE  H_LAUNCH_CMD  H_RESUME_CMD  H_SEND_LITERAL  H_MODEL_RE
 #   H_LIMIT_RE  H_UNATTENDED_CMD  H_LAUNCH_TAKES_PROMPT  H_LAUNCH_PROMPT_FAILURE_RE
+#   H_TRANSCRIPT_GLOB
 #
 # agent-dotfiles#256: H_UNATTENDED_CMD is DELIBERATELY separate from
 # H_LAUNCH_CMD, even though today it happens to equal it for claude and
@@ -109,6 +110,16 @@ H_BLOCKED_MARKERS=(); H_OPTION_ROW_RE=(); H_MENU_ENTER_RE=(); H_MENU_TAIL=(); H_
 H_LAUNCH_CMD=(); H_RESUME_CMD=(); H_SEND_LITERAL=(); H_MODEL_RE=(); H_LIMIT_RE=()
 H_UNATTENDED_CMD=()
 H_LAUNCH_TAKES_PROMPT=(); H_LAUNCH_PROMPT_FAILURE_RE=()
+# agent-supervisor#(codex adapter gap, 2026-08-23): H_TRANSCRIPT_GLOB is the
+# per-harness shape `restore.sh` globs for before trusting a recorded
+# H_RESUME_CMD session id -- moved here from a Claude-only literal
+# (`$HOME/.claude/projects/*/$session_id.jsonl`) previously hardcoded in
+# restore.sh's own body, the same externalisation every other resume-time
+# field in this file already gets. Empty is the honest default: a harness
+# with H_RESUME_CMD set but no recorded glob shape has never had this
+# checked, and restore.sh refuses rather than resuming against an
+# unconfirmed transcript.
+H_TRANSCRIPT_GLOB=()
 # LANES_HARNESS_DIR is the name `lanes.sh` has always used and its tests still
 # set (they point it at a MUTATED copy of the adapters to prove one adapter's
 # breakage cannot move another harness's lane). Kept as an alias so that
@@ -120,7 +131,8 @@ for _hf in "$HARNESS_DIR"/*.sh; do
         HARNESS_BLOCKED_MARKERS HARNESS_OPTION_ROW_RE HARNESS_MENU_ENTER_RE HARNESS_MENU_TAIL \
         HARNESS_TEXT_PROMPT_RE HARNESS_LAUNCH_CMD HARNESS_RESUME_CMD HARNESS_SEND_LITERAL \
         HARNESS_MODEL_RE HARNESS_LIMIT_RE HARNESS_UNATTENDED_CMD \
-        HARNESS_LAUNCH_TAKES_PROMPT HARNESS_LAUNCH_PROMPT_FAILURE_RE
+        HARNESS_LAUNCH_TAKES_PROMPT HARNESS_LAUNCH_PROMPT_FAILURE_RE \
+        HARNESS_TRANSCRIPT_GLOB
   # shellcheck disable=SC1090
   . "$_hf"
   : "${HARNESS_NAME:?$_hf did not set HARNESS_NAME}"
@@ -144,6 +156,7 @@ for _hf in "$HARNESS_DIR"/*.sh; do
   H_UNATTENDED_CMD+=("${HARNESS_UNATTENDED_CMD:-}")
   H_LAUNCH_TAKES_PROMPT+=("${HARNESS_LAUNCH_TAKES_PROMPT:-0}")
   H_LAUNCH_PROMPT_FAILURE_RE+=("${HARNESS_LAUNCH_PROMPT_FAILURE_RE:-}")
+  H_TRANSCRIPT_GLOB+=("${HARNESS_TRANSCRIPT_GLOB:-}")
 done
 unset _hf
 

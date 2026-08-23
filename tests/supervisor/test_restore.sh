@@ -65,7 +65,17 @@ cat > "$D/bin/claude" <<EOF
 if [ "\$#" -gt 0 ]; then echo "\$PWD :: \$@" >> "$D/launched.log"; else echo >> "$D/launched.log"; fi
 exec sleep 600
 EOF
-chmod +x "$D/bin/tmux" "$D/bin/claude"
+# The codex stub, sibling of the claude one above -- agent-supervisor#(codex
+# adapter gap, 2026-08-23). Same recording contract (`$PWD :: argv` on a real
+# launch, a bare empty line for the already-running stand-in `start_estate`
+# types), so the same assertions this suite already makes against `claude`'s
+# launched.log apply unchanged to a codex row.
+cat > "$D/bin/codex" <<EOF
+#!/bin/bash
+if [ "\$#" -gt 0 ]; then echo "\$PWD :: \$@" >> "$D/launched.log"; else echo >> "$D/launched.log"; fi
+exec sleep 600
+EOF
+chmod +x "$D/bin/tmux" "$D/bin/claude" "$D/bin/codex"
 export PATH="$D/bin:$PATH"
 export HOME="$D/home"
 export AGENT_SUPERVISOR_STATE_DIR="$D/state"
@@ -293,6 +303,69 @@ want "NULL: a genuine SQL NULL session id is UNRECOVERABLE, not a crash" \
   "ad237test:2 +UNRECOVERABLE.*no harness session id" "$nullcase"
 if [ "$nullrc" = 2 ]; then ok "NULL: restore exits 2, same as the empty-string case"; else bad "NULL: exit was $nullrc, not 2" "$nullcase"; fi
 wantnot "NULL: nothing was started for it" "." "$(cat "$D/launched.log")"
+
+# ------------------------------------------------- CODEX RESUME (real) -----
+# agent-supervisor#(codex adapter gap, 2026-08-23). Before this change,
+# EVERY codex lane's `harness_session_id` was permanently empty
+# (`harness_session.py` refused to resolve one for any harness but claude),
+# so every codex lane hit the "no harness session id recorded" branch above
+# -- UNRECOVERABLE, unconditionally, regardless of what codex itself had on
+# disk. This exercises the fix end-to-end through the REAL (unpatched)
+# harness/codex.sh this repository ships, not a stub adapter file, so a
+# regression to either `HARNESS_RESUME_CMD` or `HARNESS_TRANSCRIPT_GLOB`
+# going missing/wrong there fails this suite too.
+CODEX_ID="55555555-5555-4555-8555-555555555555"
+mkdir -p "$D/home/.codex/sessions/2026/08/23"
+cat > "$D/home/.codex/sessions/2026/08/23/rollout-2026-08-23T11-31-13-$CODEX_ID.jsonl" <<JSONL
+{"timestamp":"2026-08-23T15:31:13.303Z","ordinal":0,"type":"session_meta","payload":{"session_id":"$CODEX_ID","cwd":"$D/repo","timestamp":"2026-08-23T15:31:13.303Z"}}
+{"type":"turn.completed"}
+JSONL
+
+record_codex() { # record_codex <lane> <task> <harness-session-id> [harness-project-dir]
+  local project_dir
+  if [ $# -ge 4 ]; then project_dir="$4"; elif [ -n "$3" ]; then project_dir="$D/repo"; else project_dir=""; fi
+  python3 "$SUP/cli.py" record-dispatch \
+    --lane "$1" --task "$2" --summary "worktree=$D/repo; brief=$D/brief.md" \
+    --pane-id "%$RANDOM" --pane-path "$D/repo" --command codex --harness codex \
+    --server-id "socket:1" --session-id "\$0" --harness-session-id "$3" \
+    --harness-project-dir "$project_dir" \
+    --issue 903 --github jonhill90/agent-dotfiles >/dev/null
+}
+
+rm -rf "$D/state"; : > "$D/launched.log"
+record_codex ad237test:2 ad903-codex "$CODEX_ID"
+start_estate
+"$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null
+sleep 0.5
+codexcase=$(bash "$SUP/restore.sh" 2>&1); codexrc=$?
+sleep 1
+want "CODEX: a codex lane with a resolved session id is RESTORED, not UNRECOVERABLE" \
+  "ad237test:2 +RESTORED" "$codexcase"
+if [ "$codexrc" = 0 ]; then ok "CODEX: restore exits 0"; else bad "CODEX: exit was $codexrc, not 0" "$codexcase"; fi
+codexlaunched=$(cat "$D/launched.log")
+# The stub's own argv omits argv[0] (it logs "$@", and codex is the binary
+# name itself, not an argument) -- "resume $ID" is codex's own subcommand
+# shape (`codex resume %s`), distinct from claude's `--resume %s` flag, so
+# this also confirms the right harness's resume dialect fired, not the
+# other one silently reused.
+if grep -qF -- "resume $CODEX_ID" <<<"$codexlaunched"; then
+  ok "CODEX: resumed with codex's own resume dialect, not claude's"
+else
+  bad "CODEX: did not resume $CODEX_ID with 'codex resume'" "$codexlaunched"
+fi
+
+# MUTATION: the same session id, but no rollout file on disk for it (the
+# #237 corruption case, reproduced for codex's own transcript shape).
+rm -rf "$D/state" "$D/home/.codex"; : > "$D/launched.log"
+record_codex ad237test:2 ad903-codex "$CODEX_ID"
+start_estate
+"$REAL_TMUX" -L "$SOCKET" kill-server 2>/dev/null
+sleep 0.5
+codexmut=$(bash "$SUP/restore.sh" 2>&1); codexmutrc=$?
+want "CODEX MUTATION: no rollout on disk is UNRECOVERABLE, not resumed anyway" \
+  "ad237test:2 +UNRECOVERABLE.*no transcript on disk" "$codexmut"
+if [ "$codexmutrc" = 2 ]; then ok "CODEX MUTATION: restore exits 2"; else bad "CODEX MUTATION: exit was $codexmutrc, not 2" "$codexmut"; fi
+wantnot "CODEX MUTATION: nothing was started for the missing-transcript lane" "." "$(cat "$D/launched.log")"
 
 echo "  $pass passed, $fail failed"
 [ "$fail" = 0 ]

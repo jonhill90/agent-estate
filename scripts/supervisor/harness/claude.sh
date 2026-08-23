@@ -114,6 +114,18 @@ HARNESS_UNATTENDED_CMD="$HARNESS_LAUNCH_CMD"
 # this would silently reopen the bug for every restore.
 HARNESS_RESUME_CMD='CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --resume %s'
 
+# agent-supervisor#(codex adapter gap, 2026-08-23): the glob `restore.sh`
+# checks before trusting a recorded session id is really on disk -- moved
+# out of restore.sh's own body (previously a Claude-only literal hardcoded
+# there) so a second harness (harness/codex.sh) can record its own,
+# differently-shaped, transcript path instead of restore.sh growing a
+# per-harness `if` for something every other resume-capable field already
+# externalises here. `%s` is the session id; Claude's own filename IS the
+# id (`<session-id>.jsonl`, no prefix), unlike codex's timestamp-prefixed
+# rollout files -- see harness/codex.sh's own HARNESS_TRANSCRIPT_GLOB for
+# the contrast.
+HARNESS_TRANSCRIPT_GLOB='.claude/projects/*/%s.jsonl'
+
 # Ready shape -- last non-empty line only (the #65 discipline).
 #
 # HISTORY, why this is no longer a suffix allowlist: #216, #314, #324, #350

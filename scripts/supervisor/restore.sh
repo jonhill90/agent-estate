@@ -158,7 +158,25 @@ while IFS="$FS" read -r lane harness session_id project_dir repo task; do
     # a session id that was corrupted, truncated, or whose file was deleted --
     # the #237 mutation case. Without it, `claude --resume <garbage>` starts
     # something, and what it starts wears this lane's name.
-    if [ -z "$HOME_DIR" ] || ! compgen -G "$HOME_DIR/.claude/projects/*/$session_id.jsonl" >/dev/null 2>&1; then
+    #
+    # agent-supervisor#(codex adapter gap, 2026-08-23): this used to be a
+    # Claude-only literal (`$HOME_DIR/.claude/projects/*/$session_id.jsonl`)
+    # here in restore.sh's own body -- harmless for Claude, but it meant NO
+    # harness other than Claude could ever pass this check even if it had a
+    # resume dialect and a real recorded session id, because the glob it was
+    # checked against was always Claude's shape. `H_TRANSCRIPT_GLOB`
+    # (harness-registry.sh) externalises the shape the same way
+    # `H_RESUME_CMD` already externalises the resume command itself; an
+    # empty value here (a harness with a resume dialect but no recorded
+    # transcript shape) refuses the same as a missing glob match, never
+    # falls back to Claude's.
+    if [ -z "${H_TRANSCRIPT_GLOB[$hidx]:-}" ]; then
+      refuse "$lane" "harness '$harness' has no recorded transcript shape -- task '$task' cannot be confirmed on disk"
+      continue
+    fi
+    # shellcheck disable=SC2059
+    transcript_glob=$(printf "${H_TRANSCRIPT_GLOB[$hidx]}" "$session_id")
+    if [ -z "$HOME_DIR" ] || ! compgen -G "$HOME_DIR/$transcript_glob" >/dev/null 2>&1; then
       refuse "$lane" "no transcript on disk for session $session_id -- task '$task' cannot be resumed"
       continue
     fi
