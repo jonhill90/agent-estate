@@ -296,6 +296,31 @@ func TestConnectionsRouteShowsRealConnectorsPane(t *testing.T) {
 	}
 }
 
+// TestSecretsRouteShowsRealSecretsPane reaches "Secrets," the Connect
+// group's fourth and last child (Connections, Storage, Discord, Secrets)
+// -- agent-tui#101's decision, wired here for the first time. "test-
+// marker-key" is testModel()'s fake secrets.Inventory's own key name; a
+// pane still rendering internal/stub's generic fallback would show
+// neither it nor a "not built yet" string this test also checks for.
+func TestSecretsRouteShowsRealSecretsPane(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "⌂ Home")
+
+	for i := 0; i < 9; i++ { // Home..Build header..Connect header
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // expand Connect
+	waitFor(t, tm, "Secrets")
+	for i := 0; i < 4; i++ { // onto Secrets (Connections, Storage, Discord, then Secrets)
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	out := waitFor(t, tm, "test-marker-key")
+	if bytes.Contains(out, []byte("not built yet")) {
+		t.Fatalf("Secrets route still rendering the S5 stub:\n%s", out)
+	}
+}
+
 // TestMonitoringRouteShowsRealMonitorPane reaches "Monitoring," Observe's
 // second child (Usage, Monitoring) -- w5f.md's own pane (internal/monitor),
 // wired here for the first time (same gap TestWorkflowsRouteShowsRealWorkflowsPane's
@@ -424,11 +449,14 @@ func TestPlatformDocsRouteShowsExternalDestination(t *testing.T) {
 // every stub silently fell back to the generic
 // "not built yet -- no description recorded for this route." regardless
 // of what specific text lived in the map. Fixed by re-keying
-// stub.Descriptions to route ids. This test presses Enter on Storage,
-// Discord and Secrets in turn and asserts each one's own specific,
-// route-id-keyed description text is on screen -- not just "not built
-// yet" (which the generic fallback ALSO renders, so a weaker assertion
-// would pass against the very bug this test exists to catch).
+// stub.Descriptions to route ids. This test presses Enter on Storage and
+// Discord in turn and asserts each one's own specific, route-id-keyed
+// description text is on screen -- not just "not built yet" (which the
+// generic fallback ALSO renders, so a weaker assertion would pass against
+// the very bug this test exists to catch). Secrets used to be a third
+// case here; agent-tui#101 decided it and it is a real pane now
+// (TestSecretsRouteShowsRealSecretsPane, below), not a stub, so it is
+// gone from this table.
 func TestConnectCredentialStubsShowTheirOwnSpecificDescription(t *testing.T) {
 	cases := []struct {
 		route string
@@ -437,7 +465,6 @@ func TestConnectCredentialStubsShowTheirOwnSpecificDescription(t *testing.T) {
 	}{
 		{"Storage", 2, "hill90-app"},
 		{"Discord", 3, "notify.sh listing"},
-		{"Secrets", 4, "never its value"},
 	}
 	for _, c := range cases {
 		t.Run(c.route, func(t *testing.T) {

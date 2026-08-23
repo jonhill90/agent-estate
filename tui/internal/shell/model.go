@@ -34,6 +34,7 @@ import (
 	"github.com/jonhill90/keelson/internal/monitor"
 	"github.com/jonhill90/keelson/internal/nav"
 	"github.com/jonhill90/keelson/internal/rail"
+	"github.com/jonhill90/keelson/internal/secrets"
 	"github.com/jonhill90/keelson/internal/skills"
 	"github.com/jonhill90/keelson/internal/stub"
 	"github.com/jonhill90/keelson/internal/theme"
@@ -107,11 +108,12 @@ const (
 	// that wiring, agent-tui#94's own fix.
 	PaneKnowledge
 	// PaneAPIDocs and PaneExternal are the Docs group's two destinations,
-	// the last STUB rows in agent-tui#94's nav walk that have a real
-	// answer available (the Connect trio -- Storage, Discord, Secrets --
-	// deliberately does not: each is a credential surface, and what a
-	// viewer is allowed to READ of one is a decision, not a stub-clearing
-	// change).
+	// the last STUB rows in agent-tui#94's nav walk that had a real answer
+	// available at the time. The Connect trio -- Storage, Discord, Secrets
+	// -- did not: each is a credential surface, and what a viewer is
+	// allowed to READ of one was a decision, not a stub-clearing change
+	// (agent-tui#101). That decision landed for one of the three --
+	// PaneSecrets, below.
 	//
 	// PaneAPIDocs (internal/apidocs) renders the estate's own OpenAPI
 	// document, the same file the web app's /docs/api page renders.
@@ -123,6 +125,16 @@ const (
 	// yet" -- a pane that is never coming.
 	PaneAPIDocs
 	PaneExternal
+	// PaneSecrets (internal/secrets) is agent-tui#101's Secrets decision,
+	// implemented: hill90-app's platform/vault/secrets-schema.yaml,
+	// projected to levels 1-4 of that issue's own exposure scale, never
+	// level 5 (see internal/secrets' own package doc comment). Storage and
+	// Discord stay PaneStub -- #101 found no credential-free, local
+	// equivalent of schema.yaml for either (Storage's real backend is a
+	// live, credential-bearing S3/MinIO call; Discord has no backend in
+	// this estate at all) -- see internal/stub.Descriptions' "storage"/
+	// "discord" entries for the reasoning specific to each.
+	PaneSecrets
 )
 
 // focus names which region the keyboard currently drives -- the nav
@@ -175,6 +187,7 @@ var routeToPane = map[string]Pane{
 	"knowledge":      PaneKnowledge,
 	"api-docs":       PaneAPIDocs,
 	"platform-docs":  PaneExternal,
+	"secrets":        PaneSecrets,
 }
 
 // paneToRoute is routeToPane's inverse, used to keep the nav sidebar's own
@@ -270,6 +283,9 @@ type Model struct {
 	// pretending [o] works.
 	apidocs  apidocs.Model
 	external external.Model
+	// secrets is agent-tui#101's Secrets decision (PaneSecrets, above) --
+	// same "optional, wired via With*" shape as apidocs/external.
+	secrets secrets.Model
 
 	// boardOK is false when cmd/agent-tui had no -ledger to build a real
 	// board.Fetcher from -- board.go's own -board flag still refuses to
@@ -483,6 +499,12 @@ func (m Model) WithExternal(e external.Model) Model {
 	return m
 }
 
+// WithSecrets wires agent-tui#101's Secrets pane in.
+func (m Model) WithSecrets(s secrets.Model) Model {
+	m.secrets = s
+	return m
+}
+
 // applyTheme pushes m's current theme/themeNotice into every pane's own
 // WithTheme -- the one place that fans the single shared value out to all
 // four, called from both WithTheme (construction/startup) and the
@@ -508,6 +530,7 @@ func (m Model) applyTheme() Model {
 	m.knowledge = m.knowledge.WithTheme(m.theme, m.themeNotice)
 	m.apidocs = m.apidocs.WithTheme(m.theme, m.themeNotice)
 	m.external = m.external.WithTheme(m.theme, m.themeNotice)
+	m.secrets = m.secrets.WithTheme(m.theme, m.themeNotice)
 	return m
 }
 
@@ -516,7 +539,7 @@ func (m Model) Init() tea.Cmd {
 		m.nav.Init(), m.rail.Init(), m.cost.Init(), m.gallery.Init(), m.chat.Init(),
 		m.agents.Init(), m.skills.Init(), m.mcpservers.Init(), m.connectors.Init(), m.admin.Init(),
 		m.dashboard.Init(), m.library.Init(), m.monitor.Init(), m.workflows.Init(), m.knowledge.Init(),
-		m.apidocs.Init(), m.external.Init(),
+		m.apidocs.Init(), m.external.Init(), m.secrets.Init(),
 	}
 	if m.boardOK {
 		cmds = append(cmds, m.board.Init(), m.flow.Init())
@@ -719,6 +742,10 @@ func (m Model) routeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case PaneExternal:
 		next, cmd := m.external.Update(msg)
 		m.external = next.(external.Model)
+		return m, cmd
+	case PaneSecrets:
+		next, cmd := m.secrets.Update(msg)
+		m.secrets = next.(secrets.Model)
 		return m, cmd
 	default:
 		return m.homeKey(msg)
@@ -951,6 +978,10 @@ func (m Model) routeAll(msg tea.Msg) (Model, tea.Cmd) {
 	m.external = next.(external.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.secrets.Update(msg)
+	m.secrets = next.(secrets.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -1061,6 +1092,10 @@ func (m Model) resize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 	m.external = next.(external.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.secrets.Update(contentSize)
+	m.secrets = next.(secrets.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -1153,6 +1188,8 @@ func (m Model) contentView() string {
 		return m.apidocs.View()
 	case PaneExternal:
 		return m.external.View()
+	case PaneSecrets:
+		return m.secrets.View()
 	case PaneStub:
 		return m.stubView()
 	default:

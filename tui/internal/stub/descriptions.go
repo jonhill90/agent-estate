@@ -2,9 +2,10 @@ package stub
 
 // Descriptions is one line per SPEC-shell.md destination that S4 does not
 // wire to an existing screen -- Tasks (internal/board), Usage
-// (internal/cost) and Lanes (internal/rail) are excluded here on purpose,
-// since a real view already exists for those and a stub would hide it,
-// the exact failure S5 exists to fix.
+// (internal/cost), Lanes (internal/rail) and, since agent-tui#101's
+// decision landed, Secrets (internal/secrets) are excluded here on
+// purpose, since a real view already exists for those and a stub would
+// hide it, the exact failure S5 exists to fix.
 //
 // Keyed by internal/nav.Item.ID (e.g. "discord", "mcp-servers"), NOT by
 // Label -- and this was a real, live bug until now, not a hypothetical
@@ -29,24 +30,32 @@ var Descriptions = map[string]string{
 	"skills":      "skills from ~/.claude/skills and the skills repo: name, description, last eval result, invocation count. (S8)",
 	"mcp-servers": "configured MCP servers, scope (global/project) and reachability. (S9)",
 
-	// Connect. Storage/Discord/Secrets follow agent-b3.md's own template --
-	// what it would show, what would have to exist, and that nothing of
-	// the kind exists in this estate today -- rather than the generic,
-	// presupposing text these three carried before ("Discord integration
-	// configuration.", as though one existed to configure).
+	// Connect. Storage/Discord follow agent-b3.md's own template -- what
+	// each would show, what would have to exist, and why nothing wires it
+	// today -- rather than the generic, presupposing text they carried
+	// before ("Discord integration configuration.", as though one existed
+	// to configure). Secrets used to be a third entry here; agent-tui#101
+	// decided it and internal/secrets is now a real pane (routeToPane's
+	// own "secrets" entry), so it is gone from this map entirely, the same
+	// way Workflows and Monitoring left it when w5f.md gave them real
+	// panes.
 	"connections": "provider connections available to agents. (S10)",
 
-	"storage": "would show object storage: buckets, sizes, and (a separate,\n" +
-		"undecided question -- see agent-tui#101) object listings or\n" +
-		"contents. For this to show anything, agent-tui would need a wired\n" +
-		"adapter reading a real bucket API. No such adapter exists in this\n" +
-		"codebase today -- verified: `git grep -i storage` turns up only\n" +
-		"this nav entry, this stub, and their own tests, nothing that opens\n" +
-		"a connection to anything. A real backend DOES exist elsewhere in\n" +
-		"this estate (hill90-app's own MinIO/S3 deployment, its\n" +
-		"services/api/src/routes/storage.ts), but whether and how much of\n" +
-		"it this viewer may show is a decision about a credential surface,\n" +
-		"not a stub-clearing change (agent-tui#101).",
+	"storage": "would show object storage: bucket names/sizes/counts, then\n" +
+		"per-bucket object listings (names/sizes/timestamps, never\n" +
+		"contents) -- agent-tui#101's decision approved exactly that much,\n" +
+		"the same buckets-then-listings shape Secrets got for its own two\n" +
+		"lowest levels. Still a stub, though, for a reason distinct from\n" +
+		"the decision itself: unlike Secrets' schema.yaml (a plain,\n" +
+		"credential-free file this estate already keeps in git), Storage's\n" +
+		"real backend (hill90-app's own MinIO/S3 deployment,\n" +
+		"services/api/src/routes/storage.ts) has no local, credential-free\n" +
+		"equivalent -- every level, even bucket names, requires a live,\n" +
+		"authenticated S3 client call this repo has no seam for (see\n" +
+		"internal/connectors' own doc comment for why this repo declines\n" +
+		"to invent one). Object contents (agent-tui#101's level 3) remain\n" +
+		"deliberately out of scope regardless -- not decided here, not\n" +
+		"waiting only on a seam.",
 
 	"discord": "would show connected channels and their status, the same\n" +
 		"shape cmd/demo's own fixture uses to illustrate it. For this to\n" +
@@ -61,19 +70,6 @@ var Descriptions = map[string]string{
 		"only because the web app's own nav-items.ts lists it and this tree\n" +
 		"is required to mirror that 1:1 -- not because anything behind it\n" +
 		"is real or planned.",
-
-	"secrets": "would show, at most, that a secret exists, its name/path,\n" +
-		"its age and its last rotation -- never its value (see\n" +
-		"agent-tui#101 for why). For this to show anything, agent-tui would\n" +
-		"need a wired adapter reading a real secrets store. No such adapter\n" +
-		"exists in this codebase today -- verified: `git grep -i secrets`\n" +
-		"turns up only this nav entry, this stub, and their own tests. A\n" +
-		"real backend DOES exist elsewhere in this estate (hill90-app's own\n" +
-		"OpenBao/Vault-backed platform/vault/secrets-schema.yaml and its\n" +
-		"services/api/src/routes/secrets.ts, which already draws the same\n" +
-		"never-show-a-value line this stub recommends), but whether and how\n" +
-		"much of it this viewer may show is a decision about a credential\n" +
-		"surface, not a stub-clearing change (agent-tui#101).",
 
 	// Admin
 	"admin-services": "running services and their health. (S11)",

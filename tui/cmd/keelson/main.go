@@ -50,6 +50,7 @@ import (
 	"github.com/jonhill90/keelson/internal/mcpservers"
 	"github.com/jonhill90/keelson/internal/monitor"
 	"github.com/jonhill90/keelson/internal/rail"
+	"github.com/jonhill90/keelson/internal/secrets"
 	"github.com/jonhill90/keelson/internal/shell"
 	"github.com/jonhill90/keelson/internal/skills"
 	"github.com/jonhill90/keelson/internal/sshserver"
@@ -100,6 +101,11 @@ func main() {
 				"showing an empty table.")
 		hill90AppRepo = flag.String("hill90-app-repo", os.Getenv("HILL90_APP_REPO"),
 			"local hill90-app checkout, used only to find the OpenAPI document above")
+		secretsSchema = flag.String("secrets-schema", envOr("AGENT_TUI_SECRETS_SCHEMA", ""),
+			"secrets-schema.yaml rendered by the Connect -> Secrets pane (agent-tui#101) -- key names, vault "+
+				"paths and consuming services only, never a value. Empty falls back to "+
+				"$HILL90_APP_REPO/"+secretsSchemaRelPath+"; with neither, that pane says so rather than "+
+				"showing an empty inventory.")
 		ghBin        = flag.String("gh-bin", envOr("AGENT_GH_BIN", "gh"), "gh binary for the board's issue/PR reads")
 		sqliteBin    = flag.String("sqlite-bin", envOr("AGENT_SQLITE_BIN", "sqlite3"), "sqlite3 binary for the board's and rail's ledger reads")
 		repositories = flag.String("repositories", os.Getenv("SUPERVISOR_REPOSITORIES"),
@@ -486,6 +492,12 @@ func main() {
 	apidocsModel := apidocs.New(buildAPIDocsFetch(resolveOpenAPISpec(*openAPISpec, *hill90AppRepo)))
 	externalModel := external.New(browserOpener())
 
+	// secretsModel is Connect -> Secrets: agent-tui#101's decision,
+	// implemented (internal/secrets' own package doc comment traces the
+	// levels 1-4/never-5 boundary and why hill90-app's schema.yaml, not
+	// its live OpenBao deployment, is the source).
+	secretsModel := secrets.New(buildSecretsFetch(resolveSecretsSchema(*secretsSchema, *hill90AppRepo)))
+
 	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel, flowModel, chatModel).
 		WithAgents(agentsModel).
 		WithSkills(skillsModel).
@@ -499,6 +511,7 @@ func main() {
 		WithKnowledge(knowledgeModel).
 		WithAPIDocs(apidocsModel).
 		WithExternal(externalModel).
+		WithSecrets(secretsModel).
 		WithStart(start).
 		WithTheme(activeTheme, themeNotice).
 		WithThemeSave(func(th theme.Theme) error { return theme.Save(theme.ConfigPath(), th.ID) })

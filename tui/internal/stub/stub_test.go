@@ -24,7 +24,7 @@ import (
 var wantDestinations = []string{
 	"home", "dashboard", "agents", "chat", "knowledge", "library",
 	"skills", "mcp-servers",
-	"connections", "storage", "discord", "secrets",
+	"connections", "storage", "discord",
 	"admin-services", "admin-profiles", "admin-users", "dependencies", "settings",
 }
 
@@ -47,8 +47,10 @@ func TestDescriptions_ExcludesWiredScreens(t *testing.T) {
 	// OpenAPI document, the second is an external destination that opens
 	// in a browser. A stub for either would now hide something real, and
 	// for Platform Docs it would also claim a pane is coming that never
-	// is.
-	for _, wired := range []string{"tasks", "usage", "lanes", "workflows", "monitoring", "api-docs", "platform-docs"} {
+	// is. secrets joins the same list for the same reason -- agent-tui#101's
+	// decision, internal/secrets.Model over hill90-app's own
+	// secrets-schema.yaml.
+	for _, wired := range []string{"tasks", "usage", "lanes", "workflows", "monitoring", "api-docs", "platform-docs", "secrets"} {
 		if _, ok := Descriptions[wired]; ok {
 			t.Errorf("Descriptions contains %q, which is wired to a real screen -- a stub here would hide it", wired)
 		}

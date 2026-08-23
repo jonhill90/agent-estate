@@ -35,6 +35,7 @@ import (
 	"github.com/jonhill90/keelson/internal/mcpservers"
 	"github.com/jonhill90/keelson/internal/monitor"
 	"github.com/jonhill90/keelson/internal/rail"
+	"github.com/jonhill90/keelson/internal/secrets"
 	"github.com/jonhill90/keelson/internal/skills"
 	"github.com/jonhill90/keelson/internal/workflows"
 )
@@ -116,6 +117,16 @@ func testModel() Model {
 	// tests assert on.
 	ex := external.New(nil)
 
+	se := secrets.New(func() (secrets.Inventory, error) {
+		return secrets.Inventory{
+			SourcePath: "/fake/secrets-schema.yaml",
+			TotalKeys:  1,
+			Paths: []secrets.Path{
+				{VaultPath: "secret/test", Keys: []secrets.Key{{Name: "test-marker-key", Consumers: []string{"api"}}}},
+			},
+		}, nil
+	})
+
 	return New(r, b, true, "", c, g, fl, ch).
 		WithAgents(ag).
 		WithSkills(sk).
@@ -128,7 +139,8 @@ func testModel() Model {
 		WithMonitor(mo).
 		WithWorkflows(wf).
 		WithAPIDocs(ap).
-		WithExternal(ex)
+		WithExternal(ex).
+		WithSecrets(se)
 }
 
 func run(t *testing.T, m Model) *teatest.TestModel {
