@@ -86,32 +86,30 @@ gate now, before step 1's rename and step 2/4's file moves and module-path
 rewrite, gives a known-good green baseline — without one, a post-migration
 daemon compile break can't be told apart from a pre-existing gap.
 
-```yaml
-# .github/workflows/daemon-ci.yml -- new file, same shape as agent-tui's
-# existing single-job ci.yml
-name: Daemon CI
-on: { push: { branches: [main] }, pull_request: {} }
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with: { go-version: "1.24" }
-      - run: go build ./...
-        working-directory: daemon
-      - run: go vet ./...
-        working-directory: daemon
-      - run: go test ./...
-        working-directory: daemon
-```
+**Land `agent-supervisor#543`, and confirm it's green — do not write a
+second copy of this workflow.** An earlier draft of this section embedded
+its own inline YAML here; `estate:5`'s review of this runbook caught that
+`#543` had since landed as the real implementation, with two deliberate
+improvements a hand-copied version would silently lose:
 
-**Verify:** open a throwaway PR touching a `daemon/` comment, confirm the
-new check appears and passes; then confirm it actually gates by
-introducing a deliberate compile error on a scratch branch and confirming
-the check goes red (mutation-check the gate itself before trusting it).
+- `#543` deliberately omits a `push: { branches: [main] }` filter —
+  `agent-supervisor#407`'s own measured finding is that scoping `push` to
+  `main` only leaves a `CONFLICTING`-mergeable PR's own branch with zero
+  check runs until it happens to land, a real blackout window `#543`
+  avoids by triggering on `pull_request` unfiltered.
+- `#543` sets `cache-dependency-path: daemon/go.sum` after a real run
+  showed the default Go module cache key misses for this repo's layout
+  (confirmed live on `#543`'s own first uncached run: "Restore cache
+  failed... go.sum").
 
-**Rollback:** delete the one new workflow file.
+Mutation-check it per `#543`'s own review before trusting it, the same
+standard this runbook holds every other step to: on a scratch branch,
+introduce a deliberate compile error in `daemon/`, confirm the check goes
+red; separately, a failing test with no compile error, confirm `go test`
+alone blocks; revert both, confirm green. `#543`'s own review already did
+this and it held — re-run it here only if time has passed since.
+
+**Rollback:** revert `#543`'s single workflow-file commit.
 
 ---
 
@@ -223,9 +221,21 @@ trusting the merge command's exit code:**
 grep "^557255a" /tmp/agent-tui-rewrite/.git/filter-repo/commit-map
 # -> 557255a... <new-sha>
 
-git log --oneline | grep <new-sha>
-# expect: found, with the same commit message ("rename(keelson): the
-# product is the Estate...")
+git log --format=%H | grep <new-sha>
+# expect: found. Use --format=%H (full 40-char SHA), NOT --oneline --
+# --oneline prints abbreviated 7-char hashes, and grepping a full SHA from
+# the commit-map against that output can never match regardless of whether
+# the merge actually worked (estate:2's review of this runbook, #541,
+# caught this live: the commit was genuinely present -- `git log --oneline
+# | grep <short-sha>` finds it immediately -- but the literal command as
+# first written here would report "not found" for a merge that fully
+# succeeded, which is exactly the false-negative this step exists to
+# prevent).
+
+git log --format=%H%n%s | grep -A1 <new-sha>
+# same lookup, paired with the commit message on the next line, so you
+# also see "rename(keelson): the product is the Estate..." without a
+# separate command
 
 git show <new-sha>:tui/go.mod
 # expect: module github.com/jonhill90/agent-tui (not yet rewritten -- that's step 4)
@@ -263,9 +273,13 @@ not twice, in the merged file.
 
 `docs/index.md`: write one new index at the root, grouped by area
 (`supervisor/`, `tui/`), replacing both repos' separate indexes
-(`agent-supervisor#537`'s sibling PR added one; `agent-tui`'s own
-`docs/index.md` — agent-tui#136 — becomes `docs/tui/index.md`'s content,
-folded into the new root index rather than kept as a second competing map).
+(`agent-supervisor#533` added `agent-supervisor`'s own `docs/index.md` —
+corrected here from an earlier misattribution to `#537`, caught by
+`estate:2`'s review of this runbook: `#537` is the PR/issue metadata
+archive, `docs/archive/agent-tui/...`, and adds no `index.md` anywhere;
+`agent-tui`'s own `docs/index.md` — `agent-tui#136` — becomes
+`docs/tui/index.md`'s content, folded into the new root index rather than
+kept as a second competing map).
 
 **Verify:** `find . -maxdepth 2 -iname "index.md"` returns exactly one
 hit (root). `git status` shows no remaining path under bare `tui/docs` or
