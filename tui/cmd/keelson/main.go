@@ -33,11 +33,13 @@ import (
 
 	"github.com/jonhill90/keelson/internal/admin"
 	"github.com/jonhill90/keelson/internal/agents"
+	"github.com/jonhill90/keelson/internal/apidocs"
 	"github.com/jonhill90/keelson/internal/board"
 	"github.com/jonhill90/keelson/internal/chat"
 	"github.com/jonhill90/keelson/internal/connectors"
 	"github.com/jonhill90/keelson/internal/cost"
 	"github.com/jonhill90/keelson/internal/dashboard"
+	"github.com/jonhill90/keelson/internal/external"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
 	"github.com/jonhill90/keelson/internal/knowledge"
@@ -91,6 +93,12 @@ func main() {
 				"(agent-tui#49 item 2). Set this explicitly only to point at a different ledger or a "+
 				"hand-made copy; the ledger read itself (`sqlite3 PRAGMA query_only=1`, not `-readonly` -- see "+
 				"internal/board/ledger.go) never opens whatever this resolves to more than once per fetch.")
+		openAPISpec = flag.String("openapi", envOr("AGENT_TUI_OPENAPI", ""),
+			"OpenAPI document rendered by the Docs -> API Docs pane. Empty falls back to "+
+				"$HILL90_APP_REPO/"+openAPIRelPath+"; with neither, that pane says so rather than "+
+				"showing an empty table.")
+		hill90AppRepo = flag.String("hill90-app-repo", os.Getenv("HILL90_APP_REPO"),
+			"local hill90-app checkout, used only to find the OpenAPI document above")
 		ghBin        = flag.String("gh-bin", envOr("AGENT_GH_BIN", "gh"), "gh binary for the board's issue/PR reads")
 		sqliteBin    = flag.String("sqlite-bin", envOr("AGENT_SQLITE_BIN", "sqlite3"), "sqlite3 binary for the board's and rail's ledger reads")
 		repositories = flag.String("repositories", os.Getenv("SUPERVISOR_REPOSITORIES"),
@@ -445,6 +453,15 @@ func main() {
 		knowledge.NewFactLoader(vaultDir),
 	)
 
+	// apidocsModel is Docs -> API Docs: hill90-app's own OpenAPI document
+	// (internal/apidocs' package doc comment traces why that file is the
+	// real source and not a list kept here). externalModel is Docs ->
+	// Platform Docs and any future nav.KindExternal entry -- it holds no
+	// data, only the destination the nav tree carries and the one seam
+	// that can open it.
+	apidocsModel := apidocs.New(buildAPIDocsFetch(resolveOpenAPISpec(*openAPISpec, *hill90AppRepo)))
+	externalModel := external.New(browserOpener())
+
 	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel, flowModel, chatModel).
 		WithAgents(agentsModel).
 		WithSkills(skillsModel).
@@ -456,6 +473,8 @@ func main() {
 		WithMonitor(monitorModel).
 		WithWorkflows(workflowsModel).
 		WithKnowledge(knowledgeModel).
+		WithAPIDocs(apidocsModel).
+		WithExternal(externalModel).
 		WithStart(start).
 		WithTheme(activeTheme, themeNotice).
 		WithThemeSave(func(th theme.Theme) error { return theme.Save(theme.ConfigPath(), th.ID) })

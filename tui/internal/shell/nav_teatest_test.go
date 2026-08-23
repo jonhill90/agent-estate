@@ -10,6 +10,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/jonhill90/keelson/internal/nav"
 )
 
 // TestInitialFrameShowsSidebarNotRail is S3's own headline change: the nav
@@ -350,5 +352,65 @@ func TestWithStartPaneBoardHighlightsTasksInSidebar(t *testing.T) {
 	m := testModel().WithStart(PaneBoard)
 	if m.nav.Active() != "tasks" {
 		t.Fatalf("nav.Active() = %q after WithStart(PaneBoard), want %q", m.nav.Active(), "tasks")
+	}
+}
+
+// TestAPIDocsRouteShowsRealAPIDocsPane reaches "API Docs," the Docs
+// group's first child. Docs is the fourth group header (Build, Connect,
+// Observe, Docs), all collapsed, so ↓ from Home passes each header the
+// same way TestMonitoringRouteShowsRealMonitorPane's own doc comment
+// describes.
+//
+// Both this test and the Platform Docs one below assert the ABSENCE of
+// "not built yet" as well as the presence of real content: agent-tui#94's
+// walk recorded rows 18 and 19 as STUB, and a route that renders a real
+// pane while some other path still falls back to the stub would satisfy
+// only half of that.
+func TestAPIDocsRouteShowsRealAPIDocsPane(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "⌂ Home")
+
+	for i := 0; i < 11; i++ { // Home..Build..Connect..Observe..Docs header
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // expand Docs
+	waitFor(t, tm, "API Docs")
+	tm.Send(tea.KeyMsg{Type: tea.KeyDown}) // onto API Docs itself
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	out := waitFor(t, tm, "test-marker-endpoint")
+	if bytes.Contains(out, []byte("not built yet")) {
+		t.Fatalf("API Docs route still rendering the S5 stub:\n%s", out)
+	}
+}
+
+// TestPlatformDocsRouteShowsExternalDestination reaches "Platform Docs,"
+// the Docs group's second child, and asserts the pane names the real
+// destination from internal/nav's tree rather than a stub. The URL is not
+// hardcoded here: it is read back out of nav.Build() so this test cannot
+// pass against a tree that lost or changed the href.
+func TestPlatformDocsRouteShowsExternalDestination(t *testing.T) {
+	item, ok := nav.Build().ItemByID("platform-docs")
+	if !ok {
+		t.Fatal("nav.Build() has no platform-docs item")
+	}
+	if item.Kind != nav.KindExternal || item.URL == "" {
+		t.Fatalf("platform-docs = %+v, want KindExternal with a URL", item)
+	}
+
+	tm := run(t, testModel())
+	waitFor(t, tm, "⌂ Home")
+
+	for i := 0; i < 11; i++ {
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyRight}) // expand Docs
+	waitFor(t, tm, "Platform Docs")
+	for i := 0; i < 2; i++ { // onto Platform Docs (API Docs, then Platform Docs)
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	out := waitFor(t, tm, item.URL)
+	if bytes.Contains(out, []byte("not built yet")) {
+		t.Fatalf("Platform Docs route still rendering the S5 stub:\n%s", out)
 	}
 }

@@ -147,3 +147,50 @@ func TestGroupContaining(t *testing.T) {
 		}
 	}
 }
+
+// TestPlatformDocsCarriesItsExternalURL pins the two facts internal/shell's
+// external pane depends on: the entry is KindExternal, and it carries the
+// href nav-items.ts gives it. Before this, the Kind was declared and the
+// destination was not recorded anywhere, so the shell had nothing to route
+// to and rendered an "not built yet" stub for a page that exists.
+func TestPlatformDocsCarriesItsExternalURL(t *testing.T) {
+	item, ok := Build().ItemByID("platform-docs")
+	if !ok {
+		t.Fatal("Build() has no platform-docs item")
+	}
+	if item.Kind != KindExternal {
+		t.Errorf("platform-docs Kind = %v, want KindExternal", item.Kind)
+	}
+	if item.URL != "https://docs.hill90.com" {
+		t.Errorf("platform-docs URL = %q, want hill90-app nav-items.ts's own href", item.URL)
+	}
+}
+
+// TestOnlyExternalItemsCarryAURL: a KindRoute's href is a web path this
+// TUI does not navigate to, so carrying one would be data nothing reads
+// and a reader could mistake for a destination.
+func TestOnlyExternalItemsCarryAURL(t *testing.T) {
+	for _, n := range Build().Flatten() {
+		if n.IsGroupHeader() {
+			continue
+		}
+		if n.Item.Kind != KindExternal && n.Item.URL != "" {
+			t.Errorf("%s is %v but carries URL %q", n.Item.ID, n.Item.Kind, n.Item.URL)
+		}
+		if n.Item.Kind == KindExternal && n.Item.URL == "" {
+			t.Errorf("%s is KindExternal with no URL -- nothing could open it", n.Item.ID)
+		}
+	}
+}
+
+func TestItemByIDFindsTopLevelAndGroupedItems(t *testing.T) {
+	if it, ok := Build().ItemByID("home"); !ok || it.Label != "Home" {
+		t.Errorf("ItemByID(home) = %+v, %v", it, ok)
+	}
+	if it, ok := Build().ItemByID("api-docs"); !ok || it.Label != "API Docs" {
+		t.Errorf("ItemByID(api-docs) = %+v, %v", it, ok)
+	}
+	if _, ok := Build().ItemByID("models"); ok {
+		t.Error("ItemByID(models) found an item -- Models was removed from the tree (w5f.md)")
+	}
+}

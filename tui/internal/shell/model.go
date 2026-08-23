@@ -19,11 +19,13 @@ import (
 
 	"github.com/jonhill90/keelson/internal/admin"
 	"github.com/jonhill90/keelson/internal/agents"
+	"github.com/jonhill90/keelson/internal/apidocs"
 	"github.com/jonhill90/keelson/internal/board"
 	"github.com/jonhill90/keelson/internal/chat"
 	"github.com/jonhill90/keelson/internal/connectors"
 	"github.com/jonhill90/keelson/internal/cost"
 	"github.com/jonhill90/keelson/internal/dashboard"
+	"github.com/jonhill90/keelson/internal/external"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
 	"github.com/jonhill90/keelson/internal/knowledge"
@@ -104,6 +106,23 @@ const (
 	// the "knowledge" route rendered PaneStub the whole time. This is
 	// that wiring, agent-tui#94's own fix.
 	PaneKnowledge
+	// PaneAPIDocs and PaneExternal are the Docs group's two destinations,
+	// the last STUB rows in agent-tui#94's nav walk that have a real
+	// answer available (the Connect trio -- Storage, Discord, Secrets --
+	// deliberately does not: each is a credential surface, and what a
+	// viewer is allowed to READ of one is a decision, not a stub-clearing
+	// change).
+	//
+	// PaneAPIDocs (internal/apidocs) renders the estate's own OpenAPI
+	// document, the same file the web app's /docs/api page renders.
+	// PaneExternal (internal/external) is not a content pane at all: it is
+	// how a nav.KindExternal destination behaves -- it names the URL and
+	// opens it in a browser. Platform Docs was declared KindExternal in
+	// internal/nav from the day that tree was written, but nothing routed
+	// it, so it fell through to PaneStub and claimed to be "not built
+	// yet" -- a pane that is never coming.
+	PaneAPIDocs
+	PaneExternal
 )
 
 // focus names which region the keyboard currently drives -- the nav
@@ -154,6 +173,8 @@ var routeToPane = map[string]Pane{
 	"monitoring":     PaneMonitor,
 	"workflows":      PaneWorkflows,
 	"knowledge":      PaneKnowledge,
+	"api-docs":       PaneAPIDocs,
+	"platform-docs":  PaneExternal,
 }
 
 // paneToRoute is routeToPane's inverse, used to keep the nav sidebar's own
@@ -242,6 +263,13 @@ type Model struct {
 	// knowledge is agent-tui#87's own pane (PaneKnowledge, above) -- same
 	// "optional, wired via With*" shape.
 	knowledge knowledge.Model
+	// apidocs/external are the Docs group's two panes (PaneAPIDocs/
+	// PaneExternal, above) -- same "optional, wired via With*" shape. A
+	// zero-value external.Model has a nil Opener, which its own view
+	// renders as "no browser opener is wired in this build" rather than
+	// pretending [o] works.
+	apidocs  apidocs.Model
+	external external.Model
 
 	// boardOK is false when cmd/agent-tui had no -ledger to build a real
 	// board.Fetcher from -- board.go's own -board flag still refuses to
@@ -441,6 +469,20 @@ func (m Model) WithKnowledge(k knowledge.Model) Model {
 	return m
 }
 
+func (m Model) WithAPIDocs(a apidocs.Model) Model {
+	m.apidocs = a
+	return m
+}
+
+// WithExternal wires the pane every nav.KindExternal destination is
+// rendered by. The Model is shared across destinations rather than one
+// per URL -- syncExternal below points it at whichever external route was
+// just selected.
+func (m Model) WithExternal(e external.Model) Model {
+	m.external = e
+	return m
+}
+
 // applyTheme pushes m's current theme/themeNotice into every pane's own
 // WithTheme -- the one place that fans the single shared value out to all
 // four, called from both WithTheme (construction/startup) and the
@@ -464,6 +506,8 @@ func (m Model) applyTheme() Model {
 	m.monitor = m.monitor.WithTheme(m.theme, m.themeNotice)
 	m.workflows = m.workflows.WithTheme(m.theme, m.themeNotice)
 	m.knowledge = m.knowledge.WithTheme(m.theme, m.themeNotice)
+	m.apidocs = m.apidocs.WithTheme(m.theme, m.themeNotice)
+	m.external = m.external.WithTheme(m.theme, m.themeNotice)
 	return m
 }
 
@@ -472,6 +516,7 @@ func (m Model) Init() tea.Cmd {
 		m.nav.Init(), m.rail.Init(), m.cost.Init(), m.gallery.Init(), m.chat.Init(),
 		m.agents.Init(), m.skills.Init(), m.mcpservers.Init(), m.connectors.Init(), m.admin.Init(),
 		m.dashboard.Init(), m.library.Init(), m.monitor.Init(), m.workflows.Init(), m.knowledge.Init(),
+		m.apidocs.Init(), m.external.Init(),
 	}
 	if m.boardOK {
 		cmds = append(cmds, m.board.Init(), m.flow.Init())
@@ -667,6 +712,14 @@ func (m Model) routeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		next, cmd := m.knowledge.Update(msg)
 		m.knowledge = next.(knowledge.Model)
 		return m, cmd
+	case PaneAPIDocs:
+		next, cmd := m.apidocs.Update(msg)
+		m.apidocs = next.(apidocs.Model)
+		return m, cmd
+	case PaneExternal:
+		next, cmd := m.external.Update(msg)
+		m.external = next.(external.Model)
+		return m, cmd
 	default:
 		return m.homeKey(msg)
 	}
@@ -744,6 +797,12 @@ func (m Model) routeNavKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 		m.nav = m.nav.WithActive(n.Item.ID)
 		if p, ok := routeToPane[n.Item.ID]; ok {
 			m.active = p
+			// An external destination is rendered by one shared
+			// external.Model, so the selected item's own Label/URL have to
+			// be pushed into it here -- see syncExternal.
+			if p == PaneExternal {
+				m = m.syncExternal(n.Item)
+			}
 			return syncCursor(m), nil
 		}
 		// A real destination with no pane built yet renders a stub, so every
@@ -884,6 +943,14 @@ func (m Model) routeAll(msg tea.Msg) (Model, tea.Cmd) {
 	m.knowledge = next.(knowledge.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.apidocs.Update(msg)
+	m.apidocs = next.(apidocs.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.external.Update(msg)
+	m.external = next.(external.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -986,6 +1053,14 @@ func (m Model) resize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 	m.knowledge = next.(knowledge.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.apidocs.Update(contentSize)
+	m.apidocs = next.(apidocs.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.external.Update(contentSize)
+	m.external = next.(external.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -1074,11 +1149,26 @@ func (m Model) contentView() string {
 		return m.workflows.View()
 	case PaneKnowledge:
 		return m.knowledge.View()
+	case PaneAPIDocs:
+		return m.apidocs.View()
+	case PaneExternal:
+		return m.external.View()
 	case PaneStub:
 		return m.stubView()
 	default:
 		return m.homeView()
 	}
+}
+
+// syncExternal points the shared external pane at one nav destination.
+// The Item is passed rather than looked up by id because routeNavKey
+// already holds it; Model.WithStart and any future non-nav path into
+// PaneExternal should call this too, via nav.Tree.ItemByID -- an external
+// pane with no destination renders its own "no URL recorded" state rather
+// than a blank screen, so a missed call is visible instead of silent.
+func (m Model) syncExternal(item nav.Item) Model {
+	m.external = m.external.WithDestination(item.Label, item.URL)
+	return m
 }
 
 // stubView renders internal/stub.View (S5) for whatever nav route

@@ -90,9 +90,11 @@ policy only.
 
 ```
 cmd/keelson/         one tea.NewProgram entry point, running internal/shell.Model (see docs/SPEC.md)
+internal/apidocs/    Docs -> API Docs -- hill90-app's own OpenAPI document as an operation table
 internal/board/      task board projection — GitHub issues/PRs + ledger tasks + live lanes
 internal/chat/       ACP thread chat -- Source seam, FixtureSource, two viewport-scrollable layouts (agent-tui#20)
 internal/cost/       per-harness spend/quota projection from ccusage
+internal/external/   Docs -> Platform Docs -- how a nav.KindExternal destination behaves (names the URL, opens a browser)
 internal/flow/       live flow view — the same board.Snapshot re-projected as a moving pipeline (agent-tui#64)
 internal/gallery/    glyph gallery — every lane state × every candidate glyph set
 internal/lane/       lane/session decode, glyph sets (data, not code), state table

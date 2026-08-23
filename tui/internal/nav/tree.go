@@ -39,6 +39,16 @@ type Item struct {
 	Label string
 	Icon  string
 	Kind  Kind
+
+	// URL is nav-items.ts's own `href` for a KindExternal item, and empty
+	// for everything else -- a KindRoute's href is a web path this TUI
+	// does not navigate to (it routes to a pane instead), so carrying it
+	// would be data nothing reads. It exists because internal/shell's
+	// external pane has to be able to NAME the destination: the route was
+	// declared external here from the day this tree was written while the
+	// shell rendered it as an unbuilt stub, and a pane cannot say where a
+	// link goes if the tree does not carry it.
+	URL string
 }
 
 // Group is one collapsible section (nav-items.ts's NavGroup). Children are
@@ -130,7 +140,15 @@ func Build() Tree {
 				Label: "Docs",
 				Children: []Item{
 					{ID: "api-docs", Label: "API Docs", Icon: "FileText", Kind: KindRoute},
-					{ID: "platform-docs", Label: "Platform Docs", Icon: "ExternalLink", Kind: KindExternal},
+					// URL is nav-items.ts's own href for this entry, read
+					// from that file 2026-08-22:
+					// `{ type: 'link', id: 'platform-docs', label: 'Platform
+					// Docs', href: 'https://docs.hill90.com', icon:
+					// ExternalLink, external: true }`. The Kind was always
+					// right; what was missing was the destination itself,
+					// so the shell had nothing to route to and fell through
+					// to a stub (internal/external's package doc comment).
+					{ID: "platform-docs", Label: "Platform Docs", Icon: "ExternalLink", Kind: KindExternal, URL: "https://docs.hill90.com"},
 				},
 			},
 			{
@@ -181,6 +199,26 @@ func (t Tree) Flatten() []Node {
 		}
 	}
 	return nodes
+}
+
+// ItemByID returns the Item with the given ID -- top-level or inside any
+// group -- and whether one was found. internal/shell needs the whole Item
+// (not just the id its own routing table is keyed by) for a KindExternal
+// destination, whose Label and URL are the two things its pane shows.
+func (t Tree) ItemByID(id string) (Item, bool) {
+	for _, it := range t.Items {
+		if it.ID == id {
+			return it, true
+		}
+	}
+	for _, g := range t.Groups {
+		for _, child := range g.Children {
+			if child.ID == id {
+				return child, true
+			}
+		}
+	}
+	return Item{}, false
 }
 
 // GroupContaining returns the ID of the Group whose Children contains id,

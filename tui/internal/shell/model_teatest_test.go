@@ -20,11 +20,13 @@ import (
 
 	"github.com/jonhill90/keelson/internal/admin"
 	"github.com/jonhill90/keelson/internal/agents"
+	"github.com/jonhill90/keelson/internal/apidocs"
 	"github.com/jonhill90/keelson/internal/board"
 	"github.com/jonhill90/keelson/internal/chat"
 	"github.com/jonhill90/keelson/internal/connectors"
 	"github.com/jonhill90/keelson/internal/cost"
 	"github.com/jonhill90/keelson/internal/dashboard"
+	"github.com/jonhill90/keelson/internal/external"
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
 	"github.com/jonhill90/keelson/internal/knowledge"
@@ -99,6 +101,20 @@ func testModel() Model {
 	wf := workflows.New(func() ([]board.TaskRow, error) {
 		return []board.TaskRow{{TaskID: "test-marker-task", Lane: "test-marker-lane", TaskStatus: "complete", CreatedAt: 1}}, nil
 	})
+	ap := apidocs.New(func() (apidocs.Reference, error) {
+		return apidocs.Reference{
+			Title:      "Test API",
+			Version:    "0.0.1",
+			SourcePath: "/fake/openapi.yaml",
+			PathCount:  1,
+			Endpoints:  []apidocs.Endpoint{{Method: "GET", Path: "/test-marker-endpoint", Summary: "a fake operation for shell-level routing tests"}},
+		}, nil
+	})
+	// The external pane's opener is nil here on purpose: a shell routing
+	// test must never be able to launch a browser on the machine running
+	// it. Its view still renders the destination, which is what these
+	// tests assert on.
+	ex := external.New(nil)
 
 	return New(r, b, true, "", c, g, fl, ch).
 		WithAgents(ag).
@@ -110,7 +126,9 @@ func testModel() Model {
 		WithKnowledge(kn).
 		WithLibrary(lb).
 		WithMonitor(mo).
-		WithWorkflows(wf)
+		WithWorkflows(wf).
+		WithAPIDocs(ap).
+		WithExternal(ex)
 }
 
 func run(t *testing.T, m Model) *teatest.TestModel {

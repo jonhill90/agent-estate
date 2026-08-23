@@ -24,6 +24,14 @@ package stub
 // "Models" is gone entirely, from both this map and internal/nav's own
 // tree (nav.Build's own doc comment on why) -- there is no destination left
 // for it to describe.
+//
+// The Docs group's two entries ("API Docs", "Platform Docs") are removed
+// for the same reason, one change later: API Docs is now internal/apidocs
+// (the estate's real OpenAPI document) and Platform Docs is now
+// internal/external (nav.KindExternal, the destination it was always
+// declared to be). Neither is a stub any more, and leaving a description
+// here would let a routing mistake fall back to a placeholder that reads
+// as deliberate.
 var Descriptions = map[string]string{
 	// Top level
 	"Home":      "a landing overview with quick links across the estate.",
@@ -42,10 +50,6 @@ var Descriptions = map[string]string{
 	"Storage":     "storage backends configured for the estate.",
 	"Discord":     "Discord integration configuration.",
 	"Secrets":     "secret values and the scopes that can read them.",
-
-	// Docs
-	"API Docs":      "generated API reference for the estate's services.",
-	"Platform Docs": "platform documentation and guides.",
 
 	// Admin
 	"Services":     "running services and their health. (S11)",

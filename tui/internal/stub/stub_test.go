@@ -14,12 +14,13 @@ import (
 // render, which is exactly the "hidden screen" failure S5 exists to close.
 // "Models" is absent from this list entirely -- w5f.md removed it from
 // internal/nav's own tree, so it is no longer a destination at all
-// (nav.Build's own doc comment on why).
+// (nav.Build's own doc comment on why). The Docs group's two ("API Docs",
+// "Platform Docs") are absent for the newer reason the wired list below
+// names: both now have real destinations of their own.
 var wantDestinations = []string{
 	"Home", "Dashboard", "Agents", "Chat", "Knowledge", "Library",
 	"Skills", "MCP Servers",
 	"Connections", "Storage", "Discord", "Secrets",
-	"API Docs", "Platform Docs",
 	"Services", "Profiles", "Users", "Dependencies", "Settings",
 }
 
@@ -37,7 +38,13 @@ func TestDescriptions_CoversEveryUnwiredDestination(t *testing.T) {
 }
 
 func TestDescriptions_ExcludesWiredScreens(t *testing.T) {
-	for _, wired := range []string{"Tasks", "Usage", "Lanes", "Workflows", "Monitoring"} {
+	// API Docs and Platform Docs join this list with internal/apidocs and
+	// internal/external: the first is a real pane over the estate's own
+	// OpenAPI document, the second is an external destination that opens
+	// in a browser. A stub for either would now hide something real, and
+	// for Platform Docs it would also claim a pane is coming that never
+	// is.
+	for _, wired := range []string{"Tasks", "Usage", "Lanes", "Workflows", "Monitoring", "API Docs", "Platform Docs"} {
 		if _, ok := Descriptions[wired]; ok {
 			t.Errorf("Descriptions contains %q, which is wired to a real screen -- a stub here would hide it", wired)
 		}
