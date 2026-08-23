@@ -1,3 +1,10 @@
+---
+type: Spec
+description: Design brief for the AgentBox container execution driver, verified against the sibling AgentBox repo.
+generated:
+  at: 2026-08-23T08:51:53-04:00
+---
+
 # SPEC: container execution mode (AgentBox)
 
 Verified against the sibling `AgentBox` repo (`github.com/jonhill90/AgentBox`)

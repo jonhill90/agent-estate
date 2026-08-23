@@ -1,3 +1,10 @@
+---
+type: PRD
+description: What agent-tui is for, in Jon's own framing -- not the technical design.
+generated:
+  at: 2026-08-23T13:43:05-04:00
+---
+
 # PRD — agent-tui
 
 **What this document is:** what the product is FOR, in Jon's own framing.

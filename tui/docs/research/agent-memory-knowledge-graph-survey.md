@@ -1,3 +1,10 @@
+---
+type: Research
+description: Prior-art survey on agent memory, knowledge graphs, and the OKF+RAG router pattern (agent-tui#116) -- a survey, not an adoption recommendation.
+generated:
+  at: 2026-08-23T13:28:07-04:00
+---
+
 # Survey: prior art on agent memory, knowledge graphs, and OKF+RAG (agent-tui#116)
 
 `2026-08-23`. Answers Jon's question — are there more logic-gems out there in

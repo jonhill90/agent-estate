@@ -1,3 +1,10 @@
+---
+type: Test Evidence
+description: Nav-walk frame captures proving the Docs section's two destinations stopped being stubs (2026-08-22).
+generated:
+  at: 2026-08-22T20:30:48-04:00
+---
+
 # Docs group captures — nav walk rows 18 and 19
 
 Frames produced by `testdata/vhs/docs.tape` on 2026-08-22, when

@@ -1,3 +1,10 @@
+---
+type: UI Variants
+description: Six real rendered rail+board UI variants over hardcoded fake state, for Jon to pick from (agent-tui#62).
+generated:
+  at: 2026-08-18T18:28:12-04:00
+---
+
 # agent-tui#62: rail + board UI variants
 
 Six images, real Bubble Tea/lipgloss output over hardcoded fake state (no

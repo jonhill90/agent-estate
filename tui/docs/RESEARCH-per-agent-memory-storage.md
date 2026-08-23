@@ -1,3 +1,10 @@
+---
+type: Research
+description: Evidence for the per-agent memory storage-format decision (agent-tui#116) -- does not choose a format; that stays reserved to Jon.
+generated:
+  at: 2026-08-23T07:10:03-04:00
+---
+
 # agent-tui#116: evidence for the per-agent memory storage decision
 
 **This document does not choose a storage format.** How per-agent memory is

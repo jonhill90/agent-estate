@@ -1,3 +1,10 @@
+---
+type: UI Spike
+description: Knowledge-graph view of agent memory -- variants and a spike, gated BACKLOG behind agent-tui#61's own do-not-start condition.
+generated:
+  at: 2026-08-23T13:43:05-04:00
+---
+
 # agent-tui#61: knowledge graph view of agent memory -- variants + spike
 
 **The issue's own gate is still real.** #61 is filed BACKLOG, "do not

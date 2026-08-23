@@ -1,3 +1,10 @@
+---
+type: Spec
+description: The TUI shell build order, 1:1 with the hill90 web nav -- one independently shippable item per PR.
+generated:
+  at: 2026-08-23T13:43:05-04:00
+---
+
 # SPEC: the TUI shell — 1:1 with the hill90 web nav
 
 Build order is the item order. **Each item is independently shippable as one

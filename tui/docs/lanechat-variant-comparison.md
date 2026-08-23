@@ -1,3 +1,10 @@
+---
+type: UI Variants
+description: Three real, working screens for the combined Lanes+Chat surface, side by side for Jon to pick from (agent-tui#122).
+generated:
+  at: 2026-08-23T13:43:05-04:00
+---
+
 # agent-tui#122 follow-up: lanechat variant screenshots
 
 Three real, working screens for the combined Lanes+Chat surface

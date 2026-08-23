@@ -1,3 +1,10 @@
+---
+type: Spec
+description: The technical design of what is actually built in agent-tui today.
+generated:
+  at: 2026-08-23T13:43:05-04:00
+---
+
 # SPEC — agent-tui, technical design as it exists
 
 **What this document is:** the technical design of what is ACTUALLY on
