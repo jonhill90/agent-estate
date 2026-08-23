@@ -64,6 +64,37 @@ rather than quietly fixed:
 The #488 write-once guard is mutation-checked in both directions: remove it and
 `TestFinishRefusesToRestampTerminal` goes red; restore it and the suite passes.
 
+## `cmd/ciflake` — is a CI verdict from this repo trustworthy?
+
+Not part of the daemon; it lives here because this is the repository's Go
+tree. It answers the question agent-supervisor#461 asks, with a number:
+
+```
+go run ./cmd/ciflake -runs 120            # markdown, ready to paste into an issue
+go run ./cmd/ciflake -runs 40 -logs=false # skip per-failure log reads
+```
+
+It reports two things that are easy to conflate:
+
+- **failure rate per shard** — how often a shard job went red. High is not
+  the same as flaky; a branch with a real defect fails its shard on every
+  attempt, and that is CI working.
+- **ambiguity rate** — of the (commit, shard) cells executed more than
+  once, how many returned *disagreeing* verdicts for the same unmodified
+  tree. That is the figure #461 is about, because it is what makes a
+  regression and a runner artifact indistinguishable.
+
+Measured over 120 runs (2026-08-21 → 2026-08-22), shard 3 had the highest
+failure rate and **zero** ambiguity — every one of its failures reproduced
+on rerun. Reporting only the first table would have called it the worst
+shard; it was the clearest signal in the set.
+
+The jobs endpoint is queried with `filter=all` on purpose: its default
+returns only the latest attempt, which drops every rerun — and a rerun is
+the only place a disagreeing verdict can be seen. A test pins that, because
+getting it wrong reports a repository as stable precisely when it is flaky
+enough to be re-run.
+
 ## Not done yet
 
 - codex/copilot adapters (the interface is there; only claude is implemented)
