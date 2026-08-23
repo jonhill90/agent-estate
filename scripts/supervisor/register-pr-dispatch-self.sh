@@ -41,13 +41,20 @@
 # lane, so `author_lane_for` can find it and the fail-closed refusal it
 # would otherwise return correctly turns into a resolved contributor set.
 #
-# SAME SELF-ATTESTATION DISCIPLINE AS register-lane-self.sh. No flag names
-# a lane, a worktree, or a pane from outside -- everything but `--pr` and
-# `--repo` (the two facts this pane genuinely cannot observe about itself:
-# which PR it opened, and which repo it is in without a `gh` round-trip
-# this script deliberately does not make) is measured off `$TMUX_PANE`.
-# `--repo` is required rather than inferred so this never guesses which of
-# several repos a shared checkout's `origin` might actually mean.
+# SAME SELF-ATTESTATION DISCIPLINE AS register-lane-self.sh -- NOW ALSO FOR
+# THE PR CLAIM, NOT JUST THE LANE. `--pr` and `--repo` still name WHICH PR
+# is being claimed (a caller has to say that; the pane cannot know it
+# without being told), but the claim itself is now VERIFIED, not merely
+# recorded: this script cross-checks `git branch --show-current` in the
+# pane's own worktree against `gh pr view <PR> --json headRefName` and
+# refuses on any disagreement or ambiguity, closing agent-supervisor#539's
+# review finding -- earlier versions took "this pane authored PR N" purely
+# on the caller's word, which made the ledger record a claim as fact with
+# nothing to back it. `--repo` is still required rather than inferred, so
+# this never guesses which of several repos a shared checkout's `origin`
+# might mean, but it now anchors a real comparison rather than a label.
+# No flag lets a caller assert the branch or skip the comparison -- doing
+# so would reopen the hole through the front door.
 #
 # Usage:
 #   register-pr-dispatch-self.sh --pr <N> --repo <owner/name> [--task <slug>] [--harness NAME]
@@ -76,6 +83,7 @@ usage() { sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${AGENT_PYTHON_BIN:-python3}"
 TMUX_BIN="${AGENT_TMUX_BIN:-tmux}"
+GH_BIN="${AGENT_GH_BIN:-gh}"
 STATE="${AGENT_SUPERVISOR_STATE_DIR:-${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}}"
 REGISTER_SELF="${REGISTER_LANE_SELF_BIN:-$HERE/register-lane-self.sh}"
 
@@ -150,6 +158,41 @@ if [ -z "$HARNESS" ]; then
 fi
 
 WORKTREE=$(cd "$PANE_PATH" 2>/dev/null && pwd -P) || WORKTREE="$PANE_PATH"
+
+# --- cross-check: does this pane's own worktree actually sit on PR's branch?
+# agent-supervisor#539: `--pr` and `--repo` name WHICH PR is being claimed,
+# but until this check existed nothing verified the claim was true -- every
+# other field above is measured off the pane; this was the one exception,
+# taken purely on the caller's word. That is worse than no guard at all: a
+# false claim here becomes TRUSTED, load-bearing input to the merge gate's
+# independence check (`author_lane_for`'s Path 4 reads it as fact, not as an
+# assertion). Closed the same way every other fact in this script is closed
+# -- measure it, don't ask for it. `git branch --show-current` is a real
+# fact about the pane's own worktree; `gh pr view --json headRefName` is the
+# PR's own stated branch. They must agree, or this refuses -- no flag lets a
+# caller assert either one and skip the comparison.
+#
+# Fails closed on every ambiguity, not just a straight mismatch: a detached
+# HEAD (`branch --show-current` prints nothing), a `git` that cannot run in
+# this worktree at all, or a `gh pr view` that cannot resolve the PR (wrong
+# number, no network, not authenticated) all refuse rather than proceed on
+# an unknown. "Cannot determine" is never treated as "assume it's fine."
+WORKTREE_BRANCH=$(git -C "$WORKTREE" branch --show-current 2>/dev/null)
+GIT_RC=$?
+if [ "$GIT_RC" -ne 0 ] || [ -z "$WORKTREE_BRANCH" ]; then
+  echo "register-pr-dispatch-self.sh: refusing -- could not determine a checked-out branch for worktree $WORKTREE (detached HEAD, not a git worktree, or git failed) -- cannot verify this pane produced PR #$PR" >&2
+  exit 1
+fi
+PR_BRANCH=$("$GH_BIN" pr view "$PR" --repo "$REPO" --json headRefName -q .headRefName 2>&1)
+GH_RC=$?
+if [ "$GH_RC" -ne 0 ] || [ -z "$PR_BRANCH" ]; then
+  echo "register-pr-dispatch-self.sh: refusing -- could not resolve PR #$PR's own branch via gh (exit $GH_RC): $PR_BRANCH" >&2
+  exit 1
+fi
+if [ "$WORKTREE_BRANCH" != "$PR_BRANCH" ]; then
+  echo "register-pr-dispatch-self.sh: refusing -- this pane's worktree ($WORKTREE) is on branch '$WORKTREE_BRANCH', but $REPO#$PR is on branch '$PR_BRANCH' -- these do not match, so this pane cannot honestly claim to have produced that PR" >&2
+  exit 1
+fi
 
 if [ -z "$TASK" ]; then
   LANE_SLUG=$(tr -c 'A-Za-z0-9' '-' <<<"$LANE")

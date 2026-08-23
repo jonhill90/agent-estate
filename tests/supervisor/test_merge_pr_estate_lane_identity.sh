@@ -58,6 +58,15 @@ RT="$(mktemp -d "${TMPDIR:-/tmp}/merge-estate-tmux.XXXXXX")"
 D="$(mktemp -d "${TMPDIR:-/tmp}/merge-estate.XXXXXX")"
 BIN="$D/bin"; FIX="$D/fixtures"; STATE="$D/state"; WORK="$D/work"
 mkdir -p "$BIN" "$FIX" "$STATE" "$WORK"
+# register-pr-dispatch-self.sh's own branch cross-check (#539) reads
+# `git branch --show-current` in the pane's cwd -- WORK needs to be a real
+# repo on the SAME branch every PR fixture below claims (`fix/estate-thing`),
+# or the setup calls further down refuse before the merge-gate scenarios
+# they exist to set up ever run.
+git -C "$WORK" init -q -b fix/estate-thing
+git -C "$WORK" config user.email t@example.com
+git -C "$WORK" config user.name Test
+echo one > "$WORK/f"; git -C "$WORK" add f; git -C "$WORK" commit -q -m one
 MARKER="$D/merged"
 unset TMUX TMUX_PANE
 export TMUX_TMPDIR="$RT"
@@ -81,6 +90,10 @@ if [ "$1 $2" = "pr view" ]; then
   for a in "$@"; do [ "$prev" = "--json" ] && fields="$a"; prev="$a"; done
   case "$fields" in
     headRefOid) f="$FIX/head_$num.json"; [ -f "$f" ] && cat "$f" || echo '{"headRefOid":null}' ;;
+    # register-pr-dispatch-self.sh's own branch cross-check (#539):
+    # `gh pr view <N> --repo ... --json headRefName -q .headRefName` --
+    # single field, `-q` makes real gh print the plain string, not JSON.
+    headRefName) f="$FIX/branch_$num.txt"; [ -f "$f" ] && cat "$f" || { echo "fake gh: no branch fixture for pr view $num" >&2; exit 1; } ;;
     *closingIssuesReferences*) f="$FIX/author_$num.json"; [ -f "$f" ] && cat "$f" || echo '{"headRefName":"","closingIssuesReferences":[],"commits":[]}' ;;
     *) f="$FIX/reviews_$num.json"; [ -f "$f" ] && cat "$f" || echo '{"reviews":[],"comments":[]}' ;;
   esac
@@ -110,7 +123,11 @@ S
 head_is() { printf '{"headRefOid": "%s"}\n' "$2" > "$FIX/head_$1.json"; }
 # #531's own shape: closingIssuesReferences is EMPTY and there are no commits
 # to grep a "fixes #N" out of either -- a PR that closes nothing.
-closes_nothing() { printf '{"headRefName": "fix/estate-thing", "closingIssuesReferences": [], "commits": []}\n' > "$FIX/author_$1.json"; }
+closes_nothing() {
+  printf '{"headRefName": "fix/estate-thing", "closingIssuesReferences": [], "commits": []}\n' > "$FIX/author_$1.json"
+  # Same branch WORK is actually on -- see the git init above.
+  printf 'fix/estate-thing\n' > "$FIX/branch_$1.txt"
+}
 verdict_comment() {  # verdict_comment <pr> <lane> <reviewed-sha>
   cat > "$FIX/reviews_$1.json" <<S
 {"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: $2\nReviewed-SHA: $3", "createdAt": "2026-08-23T00:00:00Z"}]}
@@ -153,7 +170,10 @@ AUTHOR_PANE=$(tmux display-message -p -t "$S:$W1" '#{pane_id}')
 REVIEWER_PANE=$(tmux display-message -p -t "$S:$W2" '#{pane_id}')
 
 # The author lane registers ITSELF as PR #531's author -- exactly the fix,
-# exactly how a real estate lane would run it, no --issue anywhere.
+# exactly how a real estate lane would run it, no --issue anywhere. The
+# branch fixture has to exist before this call: SELF's own cross-check
+# (#539) reads it immediately, before closes_nothing (below) would write it.
+printf 'fix/estate-thing\n' > "$FIX/branch_531.txt"
 OUT=$(TMUX_PANE="$AUTHOR_PANE" LANES_SUPERVISOR_WINDOW="$SUP_IDX" \
       bash "$SELF" --pr 531 --repo "$REPO" --harness codex 2>&1); RC=$?
 [ "$RC" -eq 0 ] || { echo "  FAIL setup: register-pr-dispatch-self.sh for PR 531"; echo "$OUT"; exit 1; }
