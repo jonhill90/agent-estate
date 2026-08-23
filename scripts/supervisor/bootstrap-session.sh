@@ -218,7 +218,23 @@ fi
 # no PATH-resident binary and are not harnesses. Review of #137 showed
 # `--agent cd` sailing through this guard and producing exactly the all-`dead`
 # session the guard exists to prevent. Require a real executable path.
-AGENT_BIN="${AGENT_CMD%% *}"
+#
+# agent-supervisor#521: harness/claude.sh's HARNESS_LAUNCH_CMD/
+# HARNESS_RESUME_CMD now lead with an inline `VAR=value` env assignment
+# (CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false) ahead of the real binary --
+# a bare `${AGENT_CMD%% *}` took THAT token for AGENT_BIN, so every no-
+# --agent bootstrap started failing this guard with "agent command not on
+# PATH: CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false" (measured live, #522).
+# Skip any number of leading `NAME=value` assignment words first, the same
+# way a shell resolves the command of a simple command line with a
+# temporary environment prefix, so this guard checks the actual binary
+# regardless of how many env vars a harness's launch command carries.
+_agent_bin_search="$AGENT_CMD"
+while [[ "$_agent_bin_search" =~ ^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*([[:space:]]+.*)?$ ]]; do
+  _agent_bin_search="${_agent_bin_search#*[[:space:]]}"
+done
+AGENT_BIN="${_agent_bin_search%% *}"
+unset _agent_bin_search
 AGENT_PATH="$(command -v "$AGENT_BIN" 2>/dev/null || true)"
 case "$AGENT_PATH" in
   /*) ;;

@@ -324,8 +324,13 @@ want_contains "the ledger records the lane's cwd as the worktree, not the shared
 # comment on that file above), not the typed-keys log -- the guard has to
 # be part of the pane's actual launched process, not text sent afterward.
 respawn_cmd_81=$(cat "$D/panes/3.respawn-cmd" 2>/dev/null || true)
+# agent-supervisor#521 prefixed harness/claude.sh's own launch command with
+# CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false ahead of `claude` -- the guard's
+# PATH assignment above stays the FIRST word (it is prepended onto whatever
+# HARNESS_LAUNCH_CMD already is), so this moves with it the same way #494's
+# --strict-mcp-config did, not weakened to tolerate it.
 want_contains "agent-supervisor#421: the guard's bin dir is prefixed onto PATH ahead of the launch command" \
-  "PATH=\"${LEDGER_STATE}/tmux-guard/bin:\$PATH\" claude" "$respawn_cmd_81"
+  "PATH=\"${LEDGER_STATE}/tmux-guard/bin:\$PATH\" CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" "$respawn_cmd_81"
 
 # Every case after this one relies on run()'s implicit per-call mktemp state
 # dir (see its own comment above) -- unset so LEDGER_STATE pinned just above
@@ -347,8 +352,10 @@ log=$(tmuxlog)
 want_contains "the supported re-home verb respawns the pane into an existing directory" "respawn-pane -k -t t:@103 -c $REPO" "$log"
 want_contains "the supported re-home verb relaunches the harness" "claude --model sonnet --dangerously-skip-permissions" "$log"
 respawn_cmd_rehome=$(cat "$D/panes/3.respawn-cmd" 2>/dev/null || true)
+# Same #521 shape as the assertion above -- moves with harness/claude.sh's
+# launch command, not weakened.
 want_contains "agent-supervisor#421: re-homing a lane also prefixes the guard's bin dir onto PATH" \
-  "PATH=\"${REHOME_STATE}/tmux-guard/bin:\$PATH\" claude" "$respawn_cmd_rehome"
+  "PATH=\"${REHOME_STATE}/tmux-guard/bin:\$PATH\" CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude" "$respawn_cmd_rehome"
 pane_path=$(cat "$D/panes/3.path" 2>/dev/null || true)
 want_contains "the supported re-home verb updates the pane cwd" "$REPO" "$pane_path"
 

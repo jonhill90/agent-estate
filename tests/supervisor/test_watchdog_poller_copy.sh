@@ -87,9 +87,15 @@ mkdir -p "$SRC/scripts/supervisor"
 # "lanes.sh is missing beside this watchdog" was never the scenario #57's
 # poller-copy path is about, and #163's new fail-streak escalation started
 # paging on it, which is what actually broke "pages nobody" below.
+# agent-supervisor#521: input-box.sh gained its own dependency on
+# dim-strip.sh -- without it beside input-box.sh here too, sourcing it
+# fails ("No such file or directory"), the error text lands in lanes.sh
+# --json's stdout (captured with 2>&1), json.loads chokes on it, and THAT
+# is what pages: "could not parse lanes.sh --json ... output", not
+# anything about the deliberate-stop path itself. Measured live (#522).
 for f in watchdog.sh advance-live.sh poller-window.sh poller-recover.sh session-defaults.sh \
          sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh lanes.sh input-box.sh \
-         poller-lib.sh; do
+         dim-strip.sh poller-lib.sh; do
   cp "$SUP/$f" "$SRC/scripts/supervisor/"
 done
 cp -R "$SUP/harness" "$SRC/scripts/supervisor/"
