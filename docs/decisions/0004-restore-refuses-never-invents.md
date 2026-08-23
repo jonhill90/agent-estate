@@ -1,3 +1,10 @@
+---
+type: Decision
+description: Decision record: restore reports UNRECOVERABLE rather than starting a fresh agent under a lost lane's name.
+generated:
+  at: 2026-08-20T07:40:40-04:00
+---
+
 # 0004 — Restore refuses an unrecoverable lane; it never invents one
 
 `agent-dotfiles#237`, carried forward into `restore.sh` in this repo,

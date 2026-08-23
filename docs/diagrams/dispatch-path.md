@@ -1,3 +1,10 @@
+---
+type: Diagram
+description: Annotated walk of the dispatch path end to end -- where each guard sits, and four places the happy path diverges.
+generated:
+  at: 2026-08-23T06:03:43-04:00
+---
+
 # The dispatch path
 
 `2026-08-21`, first of three diagrams (loop-and-its-guards and memory are

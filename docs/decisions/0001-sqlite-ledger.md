@@ -1,3 +1,10 @@
+---
+type: Decision
+description: Decision record: the ledger is SQLite, not tmux state -- what is decided and remembered versus what is merely observed on screen.
+generated:
+  at: 2026-08-23T06:03:43-04:00
+---
+
 # 0001 — The ledger is SQLite, not tmux state
 
 `2026-08-10` (the ledger's move into this codebase), reasoning current as

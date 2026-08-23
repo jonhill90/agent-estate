@@ -1,3 +1,10 @@
+---
+type: Runbook
+description: Step-by-step recovery after a tmux server loss, including how to tell a real loss from a lane that only looks wrong, and what UNRECOVERABLE means.
+generated:
+  at: 2026-08-23T06:03:43-04:00
+---
+
 # Runbook: restore after a tmux server loss
 
 `Verified 2026-08-15` unless a step says otherwise. Verified means: the

@@ -1,3 +1,10 @@
+---
+type: Spec
+description: The eleven contracts agent-supervisor enforces in code -- ledger schema, lane states, dispatch, completion, merge gate, harness adapters, renderer, MCP surface, worktrees, restore, session ids.
+generated:
+  at: 2026-08-23T06:03:43-04:00
+---
+
 # agent-supervisor — SPEC
 
 Historical record, not a live spec. It gathers the contracts that already

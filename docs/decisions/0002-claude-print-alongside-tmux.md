@@ -1,3 +1,10 @@
+---
+type: Decision
+description: Decision record: `claude-print` dispatch exists alongside the standing tmux lanes rather than replacing them.
+generated:
+  at: 2026-08-20T07:40:40-04:00
+---
+
 # 0002 — `claude-print` dispatch exists alongside tmux lanes, not instead of them
 
 `2026-08-16` (agent-supervisor#171/#215/#274), `Verified 2026-08-20`.

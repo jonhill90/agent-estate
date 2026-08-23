@@ -1,3 +1,10 @@
+---
+type: Decision
+description: Decision record: independent review is enforced at merge by `merge-pr.sh`, not only at dispatch -- an author lane cannot merge its own PR.
+generated:
+  at: 2026-08-20T07:40:40-04:00
+---
+
 # 0003 — Independent review is enforced at merge, not just at dispatch
 
 `2026-08-15` (agent-supervisor#179/#184/#196/#198), `Verified 2026-08-20`.

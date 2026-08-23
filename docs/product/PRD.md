@@ -1,3 +1,10 @@
+---
+type: PRD
+description: What agent-supervisor is for and what it refuses to do -- a historical record of the boundaries it was designed against, not a live spec.
+generated:
+  at: 2026-08-23T06:03:43-04:00
+---
+
 # agent-supervisor — PRD
 
 Historical record, not a live spec. It describes the boundaries this project

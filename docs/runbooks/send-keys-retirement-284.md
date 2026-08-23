@@ -1,3 +1,10 @@
+---
+type: Measurement
+description: Measured enumeration of the 29 `send-keys` ledger rows retired under agent-supervisor#284, with method and before/after evidence.
+generated:
+  at: 2026-08-16T19:40:11-04:00
+---
+
 # Retiring the `send-keys` lanes (agent-supervisor#284)
 
 This is the enumeration #284 asked for -- the 29 `send-keys` rows measured

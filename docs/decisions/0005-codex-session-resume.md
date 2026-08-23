@@ -1,3 +1,10 @@
+---
+type: Decision
+description: Decision record: Codex lanes are resumable after a tmux server loss, the same way Claude lanes already were.
+generated:
+  at: 2026-08-23T12:25:06-04:00
+---
+
 # 0005 — Codex lanes are resumable, the same as Claude's
 
 `2026-08-23` (scoping pass on "the daemon is meant to be genuinely
