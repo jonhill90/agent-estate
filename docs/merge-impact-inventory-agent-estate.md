@@ -69,12 +69,21 @@ and the grep mechanism.
   `grep -rl '"github.com/jonhill90/agent-tui/' --include="*.go" agent-tui | wc -l`).
   Every one breaks **loudly** (`go build` fails) the moment the module path
   changes — this is the easy half the brief itself names.
-- **30 distinct import prefixes**, one per `internal/` package plus
-  `internal/lanechat`'s three sub-packages:
+- **34 distinct import prefixes** (corrected from an earlier draft's `30` —
+  flagged independently by two reviewers, `estate:2` and `estate:3`, and
+  re-verified here a third time before fixing it): 31 base `internal/`
+  packages —
   `internal/admin agents apidocs board chat connectors cost dashboard
   external flow gallery knowledge lane lanechat library mcp mcpservers
   mergepr monitor nav navwalk prverdict rail secrets session shell skills
-  sshserver stub theme workflows`.
+  sshserver stub theme workflows`
+  — (31 names; counted programmatically, not by eye, this time:
+  `python3 -c "print(len('<the list above>'.split()))"` → `31`) plus
+  `internal/lanechat`'s own three sub-packages
+  (`laneprimary`/`roomprimary`/`unifiedlist`), 31 + 3 = 34. Ground truth,
+  independent of the enumerated list above: `grep -rho
+  '"github.com/jonhill90/agent-tui/[a-zA-Z0-9_/]*"' --include="*.go" .
+  | sort -u | wc -l` → `34`, exact match.
 - **agent-supervisor side: 0 real imports.** `grep -rl "agent-tui"
   --include="*.go" agent-supervisor` matches exactly 2 files
   (`daemon/cmd/supervisord/main.go`, `daemon/internal/sendmsg/sendmsg.go`),
