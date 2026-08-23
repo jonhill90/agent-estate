@@ -66,8 +66,52 @@ pins). Module paths chosen in step 4.
       list` in both, cross-checked against `tmux capture-pane` for every
       live `estate:N` pane — a worktree with no live pane behind it is
       abandoned, not active; one with a live pane is not safe to touch.
+- [ ] Step 0.5 (below) landed and is green — this repo's daemon has never
+      had a CI gate; add one before, not after, the one change most likely
+      to break an unguarded compile silently.
 
 If any box is unchecked, stop. Do not proceed on "probably fine."
+
+---
+
+## Step 0.5 — gate the daemon build, before anything else moves
+
+**Decided separately** (`agent-supervisor#542`, filed alongside this
+runbook): `daemon/` has never had a `go build`/`go vet`/`go test` gate in
+CI, verified by reading all four workflow files and confirmed zero-cost so
+far (the daemon has built clean at every one of the 7 commits that have
+ever touched it, checked directly via `git archive` + `go build`, not
+inferred from an absence of "fix the daemon build" commits). Adding the
+gate now, before step 1's rename and step 2/4's file moves and module-path
+rewrite, gives a known-good green baseline — without one, a post-migration
+daemon compile break can't be told apart from a pre-existing gap.
+
+```yaml
+# .github/workflows/daemon-ci.yml -- new file, same shape as agent-tui's
+# existing single-job ci.yml
+name: Daemon CI
+on: { push: { branches: [main] }, pull_request: {} }
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with: { go-version: "1.24" }
+      - run: go build ./...
+        working-directory: daemon
+      - run: go vet ./...
+        working-directory: daemon
+      - run: go test ./...
+        working-directory: daemon
+```
+
+**Verify:** open a throwaway PR touching a `daemon/` comment, confirm the
+new check appears and passes; then confirm it actually gates by
+introducing a deliberate compile error on a scratch branch and confirming
+the check goes red (mutation-check the gate itself before trusting it).
+
+**Rollback:** delete the one new workflow file.
 
 ---
 
