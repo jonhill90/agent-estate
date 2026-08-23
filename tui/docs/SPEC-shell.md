@@ -125,7 +125,20 @@ A thread is a conversation with an agent. List pane + transcript pane +
 composer. Sends go through the daemon (subprocess transport), **never tmux
 send-keys**.
 
-**Status, 2026-08-23 (estate-loop/agent-b3.md).** Read-only half done:
+**Corrected 2026-08-23 (agent-tui SPEC-shell.md audit).** This section used to
+present its stale "blocked, not built" status ahead of the note that
+supersedes it, in that order — a reader skimming top-to-bottom for unbuilt
+items could stop at the first block and miss the second. **Current status:
+S7 is fully built, both read and send** — see the `Superseded` block below
+for the evidence chain (`cmd/estate/main.go`'s `chat.WithSender` →
+`internal/session.Ops.Send` → the real `session_send` MCP tool registered in
+`agent-supervisor`, independently re-verified against the current tree).
+The `Status` block immediately below is kept verbatim as investigative
+history, per this estate's convention of correcting rather than deleting a
+stale claim; treat it as superseded, not current.
+
+**Status, 2026-08-23 (estate-loop/agent-b3.md) — historical, superseded
+below.** Read-only half done:
 `internal/chat` has a real `Source` (agent-tui#99) backed by Claude Code
 CLI's own local session transcripts; the nav walk records Chat as RENDERS.
 Sending is **blocked, not built** — investigated, not skipped: neither
