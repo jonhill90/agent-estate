@@ -24,10 +24,33 @@ try: print((json.load(sys.stdin).get("tool_input") or {}).get("command",""))
 except Exception: print("")' 2>/dev/null)
 [ -z "$cmd" ] && exit 0
 
-# Only care about branch-changing git verbs.
-printf '%s' "$cmd" | grep -qE 'git +(checkout|switch)( |$)' || exit 0
+# agent-supervisor#511: grep-matching the raw command text false-positives when
+# `git checkout`/`git switch` appears inside a QUOTED STRING argument (a commit
+# message, a PR body, an echoed string) rather than a real shell invocation. A
+# full tokenizer is out of scope; truncating at the first unescaped quote or
+# backtick is enough -- everything a real git verb needs appears before any
+# quoting starts, and prose inside a string argument never gets there.
+cmd_prefix=$(printf '%s' "$cmd" | python3 -c 'import sys
+s = sys.stdin.read()
+i = 0
+n = len(s)
+while i < n:
+    c = s[i]
+    if c == "\\":
+        i += 2
+        continue
+    if c in ("\x27", "\"", "`"):
+        sys.stdout.write(s[:i])
+        break
+    i += 1
+else:
+    sys.stdout.write(s)
+' 2>/dev/null)
+
+# Only care about branch-changing git verbs, checked against the unquoted prefix.
+printf '%s' "$cmd_prefix" | grep -qE 'git +(checkout|switch)( |$)' || exit 0
 # `git checkout -- <path>` and `checkout <file>` restore files; they do not move HEAD.
-printf '%s' "$cmd" | grep -qE 'git +checkout +--( |$)' && exit 0
+printf '%s' "$cmd_prefix" | grep -qE 'git +checkout +--( |$)' && exit 0
 
 # Is this command aimed at the shared checkout? Either it cd's there explicitly,
 # or the session is already there.
