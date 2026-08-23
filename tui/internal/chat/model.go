@@ -12,7 +12,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // Sender posts text into a live thread -- SPEC-shell.md S7's own
@@ -33,7 +33,7 @@ import (
 // throw away the reason that capability was built at all). Any other
 // non-nil error is a confirmed failure, shown with its own text.
 //
-// cmd/keelson wires the real implementation: session.Ops.Send translated
+// cmd/estate wires the real implementation: session.Ops.Send translated
 // into this shape, with session.ErrSendUnknown mapped to ErrUnknown at
 // that seam so this package never needs to import internal/session.
 type Sender func(threadID, text string) error

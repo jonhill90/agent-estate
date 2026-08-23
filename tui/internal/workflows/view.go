@@ -7,8 +7,8 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jonhill90/keelson/internal/board"
-	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 var titleStyle = lipgloss.NewStyle().Bold(true)

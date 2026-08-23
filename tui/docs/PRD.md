@@ -4,9 +4,9 @@
 Intent, not status — for what has actually shipped, read `README.md`; for
 the gap between the two, read `docs/SPEC.md`'s "Gap between intent and
 code" section. Every dated claim below is checked against `origin/main`
-`b00db9b`, **verified 2026-08-16.** The product is named `steading`
-(agent-tui#42, decided 2026-08-20) — see `AGENTS.md`'s naming note for the
-reasoning and evidence.
+`b00db9b`, **verified 2026-08-16.** The product is named the Estate
+(binary `estate`, decided 2026-08-23, superseding `steading` — see
+`AGENTS.md`'s naming note for the full history and reasoning).
 
 **First full re-verification, 2026-08-23 (estate-loop/b-docs-stale sweep,
 pass 2, against `56513a2`) — never previously touched by a truth pass.**
@@ -27,7 +27,7 @@ is building — the TUI."
 
 The estate (`agent-supervisor`) already runs and reasons about lanes,
 sessions, cost, and tasks. Nothing renders it as a single coherent
-application a human can sit in front of. `steading` is that surface: it
+application a human can sit in front of. The Estate is that surface: it
 consumes the supervisor over MCP, adds no orchestration logic of its own,
 and is meant to be as removable as it is addable — see `AGENTS.md`'s
 adapter discipline for how that boundary is kept real in code, not just
@@ -79,7 +79,7 @@ in-pane — agent-tui#49, see `docs/SPEC.md`'s "Known defects."
 
 **False as of `56513a2`, corrected 2026-08-23 (pass 2).** agent-tui#49 is
 closed; this defect is fixed. `resolveLedgerSource`
-(`cmd/keelson/board.go`) now auto-discovers and stages a copy of the live
+(`cmd/estate/board.go`) now auto-discovers and stages a copy of the live
 ledger when `-ledger`/`$AGENT_TUI_LEDGER` is unset — the "unavailable"
 render now only fires when discovery genuinely finds nothing, not merely
 because the flag was omitted. See `AGENTS.md`'s "Known defects" for the
@@ -101,9 +101,9 @@ defects."
 **False as of `56513a2`, corrected 2026-08-23 (pass 2).** agent-tui#49 is
 closed; this defect is fixed. `internal/cost/quota.go` now shells
 `quota.sh` out via `QuotaRunner`/`ExecQuotaRunner`, wired from
-`cmd/keelson/main.go`'s `resolvedQuotaBin` — `grep -rn "quota.sh"
+`cmd/estate/main.go`'s `resolvedQuotaBin` — `grep -rn "quota.sh"
 --include='*.go' .` now returns matches throughout `internal/cost` and
-`cmd/keelson` (zero matches when this status was written).
+`cmd/estate` (zero matches when this status was written).
 
 ### Glyph gallery, with Nerd Font support
 
@@ -139,7 +139,7 @@ today is visibly synthetic fixture data, not a real transcript.
 **False as of `56513a2`, corrected 2026-08-23 (pass 2).** The "what
 remains" line is no longer accurate. `chat.ClaudeCodeSource`
 (agent-tui#99, commit `5997399`) reads real Claude Code CLI session
-transcripts and is what `cmd/keelson` wires in via `FallbackSource`,
+transcripts and is what `cmd/estate` wires in via `FallbackSource`,
 falling back to `FixtureSource` only when genuinely unconfigured — threads
 shown today are real, not synthetic, whenever a Claude Code project
 directory resolves. Sending is also built (agent-tui#104, commit

@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/jonhill90/keelson/internal/board"
-	"github.com/jonhill90/keelson/internal/workflows"
+	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-tui/internal/workflows"
 )
 
 // buildWorkflowsFetch composes the SAME ledger seam buildTaskFetch (board.go)

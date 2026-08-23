@@ -11,7 +11,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/keelson/internal/nav"
+	"github.com/jonhill90/agent-tui/internal/nav"
 )
 
 // TestInitialFrameShowsSidebarNotRail is S3's own headline change: the nav

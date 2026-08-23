@@ -40,5 +40,5 @@ against a real `agent-supervisor` checkout and this box's own
 one renders its real pane (`internal/agents`/`skills`/`mcpservers`/
 `admin`), not the S5 stub. Also fixed the build step: `go build ./cmd/...`
 stopped resolving to a single `-o` path once `cmd/demo` (agent-tui#83)
-added a second main package alongside `cmd/keelson` -- narrowed to
-`./cmd/keelson`, the one binary this tape has ever actually driven.
+added a second main package alongside `cmd/estate` -- narrowed to
+`./cmd/estate`, the one binary this tape has ever actually driven.

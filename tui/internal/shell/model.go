@@ -17,31 +17,31 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	zone "github.com/lrstanley/bubblezone"
 
-	"github.com/jonhill90/keelson/internal/admin"
-	"github.com/jonhill90/keelson/internal/agents"
-	"github.com/jonhill90/keelson/internal/apidocs"
-	"github.com/jonhill90/keelson/internal/board"
-	"github.com/jonhill90/keelson/internal/chat"
-	"github.com/jonhill90/keelson/internal/connectors"
-	"github.com/jonhill90/keelson/internal/cost"
-	"github.com/jonhill90/keelson/internal/dashboard"
-	"github.com/jonhill90/keelson/internal/external"
-	"github.com/jonhill90/keelson/internal/flow"
-	"github.com/jonhill90/keelson/internal/gallery"
-	"github.com/jonhill90/keelson/internal/knowledge"
-	"github.com/jonhill90/keelson/internal/lanechat/laneprimary"
-	"github.com/jonhill90/keelson/internal/lanechat/roomprimary"
-	"github.com/jonhill90/keelson/internal/lanechat/unifiedlist"
-	"github.com/jonhill90/keelson/internal/library"
-	"github.com/jonhill90/keelson/internal/mcpservers"
-	"github.com/jonhill90/keelson/internal/monitor"
-	"github.com/jonhill90/keelson/internal/nav"
-	"github.com/jonhill90/keelson/internal/rail"
-	"github.com/jonhill90/keelson/internal/secrets"
-	"github.com/jonhill90/keelson/internal/skills"
-	"github.com/jonhill90/keelson/internal/stub"
-	"github.com/jonhill90/keelson/internal/theme"
-	"github.com/jonhill90/keelson/internal/workflows"
+	"github.com/jonhill90/agent-tui/internal/admin"
+	"github.com/jonhill90/agent-tui/internal/agents"
+	"github.com/jonhill90/agent-tui/internal/apidocs"
+	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-tui/internal/chat"
+	"github.com/jonhill90/agent-tui/internal/connectors"
+	"github.com/jonhill90/agent-tui/internal/cost"
+	"github.com/jonhill90/agent-tui/internal/dashboard"
+	"github.com/jonhill90/agent-tui/internal/external"
+	"github.com/jonhill90/agent-tui/internal/flow"
+	"github.com/jonhill90/agent-tui/internal/gallery"
+	"github.com/jonhill90/agent-tui/internal/knowledge"
+	"github.com/jonhill90/agent-tui/internal/lanechat/laneprimary"
+	"github.com/jonhill90/agent-tui/internal/lanechat/roomprimary"
+	"github.com/jonhill90/agent-tui/internal/lanechat/unifiedlist"
+	"github.com/jonhill90/agent-tui/internal/library"
+	"github.com/jonhill90/agent-tui/internal/mcpservers"
+	"github.com/jonhill90/agent-tui/internal/monitor"
+	"github.com/jonhill90/agent-tui/internal/nav"
+	"github.com/jonhill90/agent-tui/internal/rail"
+	"github.com/jonhill90/agent-tui/internal/secrets"
+	"github.com/jonhill90/agent-tui/internal/skills"
+	"github.com/jonhill90/agent-tui/internal/stub"
+	"github.com/jonhill90/agent-tui/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/workflows"
 )
 
 // Pane names which model currently occupies the content area. paneHome is
@@ -144,7 +144,7 @@ const (
 	// pane (internal/lanechat/{laneprimary,roomprimary,unifiedlist}), NOT a
 	// replacement for PaneLanes/PaneChat above, which stay exactly as they
 	// are. Reached only via [f7]/[f8]/[f9] and the -lanechat-* startup
-	// flags (cmd/keelson/main.go) -- none has a nav.Build() route, the same
+	// flags (cmd/estate/main.go) -- none has a nav.Build() route, the same
 	// "no sidebar route yet" state PaneGallery/PaneFlow are already in (see
 	// paneToRoute's own doc comment), because wiring one into the nav tree
 	// would be picking a shape, which this issue explicitly forbids.
@@ -309,7 +309,7 @@ type Model struct {
 	// "optional, wired via With*" shape as every other pane in this list,
 	// except each is ALWAYS constructible with no fetcher at all (its own
 	// package's New(), no arguments -- internal/gallery's own shape), so
-	// cmd/keelson wires all three unconditionally rather than guarding on
+	// cmd/estate wires all three unconditionally rather than guarding on
 	// homeDir/client the way agents/skills/mcpservers above have to.
 	laneChatLanePrimary laneprimary.Model
 	laneChatRoomPrimary roomprimary.Model
@@ -458,7 +458,7 @@ func (m Model) WithThemeSave(save func(theme.Theme) error) Model {
 
 // WithAgents/WithSkills/WithMCPServers/WithConnectors/WithAdmin wire
 // S6/S8/S9/S10/S11's own panes in, each already built standalone by its
-// own item -- cmd/keelson passes an already-constructed pane.Model
+// own item -- cmd/estate passes an already-constructed pane.Model
 // exactly as it does for board/cost/gallery/flow/chat via New, just
 // through a With* method instead of New's own parameter list (New's
 // signature is deliberately left unchanged; see Model's own struct doc

@@ -2,7 +2,7 @@ package chat
 
 import "errors"
 
-// FallbackSource is the Source cmd/keelson actually wires in: try real
+// FallbackSource is the Source cmd/estate actually wires in: try real
 // first, and only reach for the fixture when real reports itself
 // UNCONFIGURED (ErrNoProjectDir, or any Source's own equivalent -- see
 // Threads below). This is the one place in the package that decides

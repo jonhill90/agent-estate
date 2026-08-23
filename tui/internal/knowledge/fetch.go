@@ -11,7 +11,7 @@ type Fetcher func() ([]IndexEntry, error)
 // os.Getenv("AGENT_MEMORY_VAULT") read here: this package takes an
 // explicit path the same way every other adapter in this module does
 // (internal/mcpservers.NewFetcher takes configPath, not a getenv call);
-// cmd/keelson resolves the environment variable once and passes the
+// cmd/estate resolves the environment variable once and passes the
 // result in, empty string and all -- LoadIndex's own doc comment is what
 // turns an empty vaultDir into the visible "not set" error this view
 // requires.

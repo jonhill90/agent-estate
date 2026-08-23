@@ -1,9 +1,9 @@
 package main
 
 import (
-	"github.com/jonhill90/keelson/internal/agents"
-	"github.com/jonhill90/keelson/internal/board"
-	"github.com/jonhill90/keelson/internal/cost"
+	"github.com/jonhill90/agent-tui/internal/agents"
+	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-tui/internal/cost"
 )
 
 // buildAgentCostFetch composes two real seams this file already opens for

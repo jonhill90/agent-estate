@@ -73,10 +73,10 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/jonhill90/keelson/internal/board"
-	"github.com/jonhill90/keelson/internal/cost"
-	"github.com/jonhill90/keelson/internal/lane"
-	"github.com/jonhill90/keelson/internal/session"
+	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-tui/internal/cost"
+	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/session"
 )
 
 // Row is one agent -- one tmux window inside one supervised session, the
@@ -128,7 +128,7 @@ type Row struct {
 // estate-wide), board.TaskRow (the ledger's task rows, the same read
 // internal/rail's WithTasks wires in), and costsByLedgerLane (the ledger's
 // lanes table joined to ccusage's per-session totals, pre-computed by the
-// caller -- see cmd/keelson/agents.go's buildAgentCostFetch -- and keyed by
+// caller -- see cmd/estate/agents.go's buildAgentCostFetch -- and keyed by
 // the SAME "<session>:<window-index>" string board.TaskRow.Lane already
 // uses, not by Row.ID). No fetch of its own; Model (below) owns when each
 // of those reads happens. A session with a non-empty Error still

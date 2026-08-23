@@ -34,7 +34,7 @@ type Quota struct {
 type QuotaRunner func(args []string) (stdout []byte, exitCode int, err error)
 
 // ExecQuotaRunner shells quota.sh out via os/exec -- the real
-// implementation. bin is quota.sh's own path (cmd/keelson resolves it
+// implementation. bin is quota.sh's own path (cmd/estate resolves it
 // relative to -supervisor-repo); quota.sh, not this package, is the one
 // place `codexbar` may be invoked.
 func ExecQuotaRunner(bin string) QuotaRunner {

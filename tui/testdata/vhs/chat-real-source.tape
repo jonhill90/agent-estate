@@ -1,6 +1,6 @@
 # Visual QA for agent-b3.md's fix: Chat's real Source
 # (chat.ClaudeCodeSource, wrapped in chat.FallbackSource), driven through
-# the real shell binary (cmd/keelson) -- not a unit test claiming it
+# the real shell binary (cmd/estate) -- not a unit test claiming it
 # works. Reads THIS machine's own real ~/.claude/projects transcripts, no
 # fixture, no fake data -- the screenshot shows real session titles and
 # real message content across real project directories.

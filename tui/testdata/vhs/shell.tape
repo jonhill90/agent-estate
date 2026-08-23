@@ -15,7 +15,7 @@
 #
 # Also fixed: `go build ./cmd/...` stopped being buildable to a single -o
 # path once cmd/demo (agent-tui#83) added a second main package alongside
-# cmd/keelson -- narrowed to ./cmd/keelson, the one binary this tape has
+# cmd/estate -- narrowed to ./cmd/estate, the one binary this tape has
 # ever actually driven.
 Output testdata/vhs/out/shell.gif
 Set FontSize 14
@@ -25,7 +25,7 @@ Set Shell "bash"
 
 Hide
 Type "export AGENT_SUPERVISOR_REPO=${AGENT_SUPERVISOR_REPO:-$HOME/source/repos/Personal/agent-supervisor}" Enter
-Type "go build -o /tmp/atui ./cmd/keelson && clear" Enter
+Type "go build -o /tmp/atui ./cmd/estate && clear" Enter
 Sleep 3s
 Show
 

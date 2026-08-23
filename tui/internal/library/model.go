@@ -6,7 +6,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // refreshInterval matches internal/knowledge's own reasoning: the corpus
@@ -107,7 +107,7 @@ type Model struct {
 }
 
 // New builds a Model with fetch/loadDetail/fetchCount wired in. fetch == nil
-// (cmd/keelson had no ledger to build one from) is a distinct, VISIBLE
+// (cmd/estate had no ledger to build one from) is a distinct, VISIBLE
 // state from "fetch ran and found zero rows" -- w5c.md's own hard
 // requirement -- tracked here as unconfigured rather than left to read as
 // an empty (Init never issues doFetch, so m.fetchErr would otherwise stay

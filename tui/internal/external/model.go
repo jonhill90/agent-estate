@@ -19,11 +19,11 @@ package external
 import (
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // Opener hands a URL to the host's browser. It is the adapter seam
-// (AGENTS.md): nothing under internal/ may call os/exec, so cmd/keelson
+// (AGENTS.md): nothing under internal/ may call os/exec, so cmd/estate
 // supplies the real one and every test here supplies a fake. A nil Opener
 // is a real state -- the view says opening is unavailable and still shows
 // the URL, which is the part a human can act on by hand.

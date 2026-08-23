@@ -5,11 +5,11 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // Fetcher retrieves the current Stats -- the one adapter seam this package
-// exposes (AGENTS.md's discipline). cmd/keelson composes the real
+// exposes (AGENTS.md's discipline). cmd/estate composes the real
 // implementation out of already-existing sources (agents' sessions fetch,
 // board's gh runner, cost's ccusage fetch, knowledge's vault index); every
 // test in this package builds a fake instead. The returned error is for a

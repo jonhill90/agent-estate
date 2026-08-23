@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/jonhill90/keelson/internal/board"
-	"github.com/jonhill90/keelson/internal/library"
+	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-tui/internal/library"
 )
 
 // buildLibraryFetch/buildLibraryDetailLoader/buildLibraryCountFetch compose

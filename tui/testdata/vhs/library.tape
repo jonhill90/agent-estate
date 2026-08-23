@@ -3,7 +3,7 @@
 # screen. Run: vhs testdata/vhs/library.tape
 #
 # Drives the REAL binary against a COPY of this box's own live
-# ledger.sqlite3 (auto-discovered the same way cmd/keelson/main.go's
+# ledger.sqlite3 (auto-discovered the same way cmd/estate/main.go's
 # resolveLedgerSource does for any bare launch -- agent-tui#49 item 2). No
 # fixture, no fake rows -- every row on screen is a real judged item from
 # the real corpus.
@@ -14,7 +14,7 @@ Set Height 850
 Set Shell "bash"
 
 Hide
-Type "go build -o /tmp/atui-library ./cmd/keelson && clear" Enter
+Type "go build -o /tmp/atui-library ./cmd/estate && clear" Enter
 Sleep 3s
 Show
 

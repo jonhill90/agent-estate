@@ -1,10 +1,15 @@
-// keelson is one application -- a persistent left-anchored navigation rail
+// estate is one application -- a persistent left-anchored navigation rail
 // over agent-supervisor's lane state, with the task board, cost panel and
 // glyph gallery reachable as panes in the same process (agent-tui#38; see
-// internal/shell). Renamed from agent-tui, which named the rendering
-// technology (Bubble Tea, "tui") rather than the product -- this is the
-// layer above orchestration, binding the panes into one structure, the
-// way a ship's keelson binds its frames to the keel.
+// internal/shell). The binary has had two earlier names, both retired: it
+// was first called agent-tui, which named the rendering technology
+// (Bubble Tea, "tui") rather than the product; agent-tui#42 then named the
+// product "steading" in prose only, deliberately without touching this
+// binary or the module path (a ship's keelson binds its frames to the
+// keel -- the layer above orchestration, binding the panes into one
+// structure, which is what the leftover name had described since
+// agent-tui#38); the product is now called the Estate, and this rename
+// finally moves the module path, cmd/ directory, and binary to match.
 //
 // It reads the supervisor's MCP surface -- "sessions" (agent-tui#13, every
 // tmux session grouped) for the rail, "lanes" (one session) for -board --
@@ -32,37 +37,37 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	wishssh "github.com/charmbracelet/ssh"
 
-	"github.com/jonhill90/keelson/internal/admin"
-	"github.com/jonhill90/keelson/internal/agents"
-	"github.com/jonhill90/keelson/internal/apidocs"
-	"github.com/jonhill90/keelson/internal/board"
-	"github.com/jonhill90/keelson/internal/chat"
-	"github.com/jonhill90/keelson/internal/connectors"
-	"github.com/jonhill90/keelson/internal/cost"
-	"github.com/jonhill90/keelson/internal/dashboard"
-	"github.com/jonhill90/keelson/internal/external"
-	"github.com/jonhill90/keelson/internal/flow"
-	"github.com/jonhill90/keelson/internal/gallery"
-	"github.com/jonhill90/keelson/internal/knowledge"
-	"github.com/jonhill90/keelson/internal/lane"
-	"github.com/jonhill90/keelson/internal/lanechat/laneprimary"
-	"github.com/jonhill90/keelson/internal/lanechat/roomprimary"
-	"github.com/jonhill90/keelson/internal/lanechat/unifiedlist"
-	"github.com/jonhill90/keelson/internal/library"
-	"github.com/jonhill90/keelson/internal/mcp"
-	"github.com/jonhill90/keelson/internal/mcpservers"
-	"github.com/jonhill90/keelson/internal/monitor"
-	"github.com/jonhill90/keelson/internal/rail"
-	"github.com/jonhill90/keelson/internal/secrets"
-	"github.com/jonhill90/keelson/internal/shell"
-	"github.com/jonhill90/keelson/internal/skills"
-	"github.com/jonhill90/keelson/internal/sshserver"
-	"github.com/jonhill90/keelson/internal/theme"
-	"github.com/jonhill90/keelson/internal/workflows"
+	"github.com/jonhill90/agent-tui/internal/admin"
+	"github.com/jonhill90/agent-tui/internal/agents"
+	"github.com/jonhill90/agent-tui/internal/apidocs"
+	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-tui/internal/chat"
+	"github.com/jonhill90/agent-tui/internal/connectors"
+	"github.com/jonhill90/agent-tui/internal/cost"
+	"github.com/jonhill90/agent-tui/internal/dashboard"
+	"github.com/jonhill90/agent-tui/internal/external"
+	"github.com/jonhill90/agent-tui/internal/flow"
+	"github.com/jonhill90/agent-tui/internal/gallery"
+	"github.com/jonhill90/agent-tui/internal/knowledge"
+	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/lanechat/laneprimary"
+	"github.com/jonhill90/agent-tui/internal/lanechat/roomprimary"
+	"github.com/jonhill90/agent-tui/internal/lanechat/unifiedlist"
+	"github.com/jonhill90/agent-tui/internal/library"
+	"github.com/jonhill90/agent-tui/internal/mcp"
+	"github.com/jonhill90/agent-tui/internal/mcpservers"
+	"github.com/jonhill90/agent-tui/internal/monitor"
+	"github.com/jonhill90/agent-tui/internal/rail"
+	"github.com/jonhill90/agent-tui/internal/secrets"
+	"github.com/jonhill90/agent-tui/internal/shell"
+	"github.com/jonhill90/agent-tui/internal/skills"
+	"github.com/jonhill90/agent-tui/internal/sshserver"
+	"github.com/jonhill90/agent-tui/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/workflows"
 	// sessionops, not session: the -session flag var below already owns that
 	// name (the tmux session -board reads), and shadowing it would be an
 	// easy read-vs-write mixup in a file that now does both.
-	sessionops "github.com/jonhill90/keelson/internal/session"
+	sessionops "github.com/jonhill90/agent-tui/internal/session"
 )
 
 func main() {
@@ -92,7 +97,7 @@ func main() {
 		ledger = flag.String("ledger", envOr("AGENT_TUI_LEDGER", ""),
 			"path to a ledger.sqlite3 to read for the board and the rail's per-lane task/age/needs-human "+
 				"content (agent-tui#26) -- must point at a COPY, never the live supervisor's own ledger "+
-				"(agent-tui#6's rule). Left unset, keelson now auto-discovers the live ledger at "+
+				"(agent-tui#6's rule). Left unset, estate now auto-discovers the live ledger at "+
 				"~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3 and copies it to a temp path itself, "+
 				"re-copying on every board fetch (including [r]) -- see resolveLedgerSource/ledgerCopier "+
 				"(agent-tui#49 item 2). Set this explicitly only to point at a different ledger or a "+
@@ -175,7 +180,7 @@ func main() {
 				"unchanged.")
 		sshHostKeyPath = flag.String("ssh-host-key-path", envOr("AGENT_TUI_SSH_HOST_KEY_PATH", ""),
 			"path to the SSH host key; generated (ed25519) on first run if missing. Defaults to "+
-				"$AGENT_TUI_SSH_HOST_KEY_PATH, or ~/.keelson/ssh_host_ed25519_key if that is unset too. Only "+
+				"$AGENT_TUI_SSH_HOST_KEY_PATH, or ~/.estate/ssh_host_ed25519_key if that is unset too. Only "+
 				"read when -ssh-addr is set.")
 		sshAuthorizedKeys = flag.String("ssh-authorized-keys", envOr("AGENT_TUI_SSH_AUTHORIZED_KEYS", ""),
 			"path to an authorized_keys-format file (same format as ~/.ssh/authorized_keys) -- only clients "+
@@ -215,18 +220,18 @@ func main() {
 	// discovery genuinely found nothing, not merely "you didn't pass -ledger".
 	ledgerSrc, boardOK, boardUnavailable := resolveLedgerSource(*ledger, *sqliteBin)
 	if *showBoard && !boardOK {
-		fmt.Fprintln(os.Stderr, "keelson: -board unavailable --", boardUnavailable)
+		fmt.Fprintln(os.Stderr, "estate: -board unavailable --", boardUnavailable)
 		os.Exit(1)
 	}
 	// -flow needs the exact same board.Snapshot -board does (see flowModel's
 	// own doc comment below) -- same refusal-to-start rule, same reason.
 	if *showFlow && !boardOK {
-		fmt.Fprintln(os.Stderr, "keelson: -flow unavailable --", boardUnavailable)
+		fmt.Fprintln(os.Stderr, "estate: -flow unavailable --", boardUnavailable)
 		os.Exit(1)
 	}
 
 	// supervisorRepoResolved implements agent-tui#49 item 1: a bare
-	// `keelson` must open, never exit 1, just because -supervisor-repo was
+	// `estate` must open, never exit 1, just because -supervisor-repo was
 	// not typed. -mcp-cmd bypasses this entirely (it names its own command
 	// line, no repo path needed); an explicit -supervisor-repo is trusted
 	// as given, unchanged. Only when neither was given does discovery run.
@@ -558,7 +563,7 @@ func main() {
 	// there is only ever one place reading os.Stdin's raw mode at a time.
 	if *sshAddr != "" {
 		if err := runSSH(m, *sshAddr, *sshHostKeyPath, *sshAuthorizedKeys, *sshInsecure); err != nil {
-			fmt.Fprintln(os.Stderr, "keelson:", err)
+			fmt.Fprintln(os.Stderr, "estate:", err)
 			os.Exit(1)
 		}
 		return
@@ -570,7 +575,7 @@ func main() {
 	// here -- and a flooded Update is how a TUI starts feeling slow.
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "keelson:", err)
+		fmt.Fprintln(os.Stderr, "estate:", err)
 		os.Exit(1)
 	}
 }
@@ -578,7 +583,7 @@ func main() {
 // runSSH serves seed (a fully-built shell.Model, identical to the one the
 // local launch path would run) to every connecting SSH client until an
 // interrupt/TERM signal arrives, then shuts the listener down gracefully.
-// hostKeyPath "" resolves to ~/.keelson/ssh_host_ed25519_key so a bare
+// hostKeyPath "" resolves to ~/.estate/ssh_host_ed25519_key so a bare
 // -ssh-addr with no -ssh-host-key-path still has somewhere durable to write
 // the generated key (an empty path would otherwise mean "cwd", surprising
 // for a background-run server).
@@ -588,20 +593,20 @@ func runSSH(seed shell.Model, addr, hostKeyPath, authorizedKeys string, insecure
 		if err != nil {
 			return fmt.Errorf("resolve default -ssh-host-key-path: %w", err)
 		}
-		hostKeyPath = filepath.Join(home, ".keelson", "ssh_host_ed25519_key")
+		hostKeyPath = filepath.Join(home, ".estate", "ssh_host_ed25519_key")
 	}
 	if err := os.MkdirAll(filepath.Dir(hostKeyPath), 0o700); err != nil {
 		return fmt.Errorf("create host key directory: %w", err)
 	}
 
 	if insecure {
-		fmt.Fprintln(os.Stderr, "keelson: WARNING -ssh-insecure is set -- any client that can reach", addr,
+		fmt.Fprintln(os.Stderr, "estate: WARNING -ssh-insecure is set -- any client that can reach", addr,
 			"gets a full attached session with NO key check at all")
 	} else if authorizedKeys == "" {
 		return fmt.Errorf("-ssh-addr requires -ssh-authorized-keys (or the explicit opt-out -ssh-insecure)")
 	}
 
-	fmt.Fprintln(os.Stderr, "keelson: serving SSH at", addr, "(host key:", hostKeyPath+")")
+	fmt.Fprintln(os.Stderr, "estate: serving SSH at", addr, "(host key:", hostKeyPath+")")
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()

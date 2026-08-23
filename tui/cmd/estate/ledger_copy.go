@@ -24,7 +24,7 @@ func staticLedgerSource(path string) ledgerSource {
 }
 
 // backupRunner performs a consistent, online copy of a live sqlite3
-// database (source) into dest. cmd/keelson supplies execBackupRunner (real
+// database (source) into dest. cmd/estate supplies execBackupRunner (real
 // sqlite3 ".backup"); tests supply a fixture -- same seam shape as every
 // other Runner in this program (board.LedgerRunner, cost.Runner, ...).
 type backupRunner func(source, dest string) error
@@ -87,7 +87,7 @@ func execBackupRunner(sqliteBin string) backupRunner {
 // racing to write the SAME dest file is exactly what produced "database is
 // locked" during PR #50's second review round -- NOT contention with the
 // live supervisor's own writer (a standalone repro loop against the real
-// live ledger, with no second keelson-side backup running, did not
+// live ledger, with no second estate-side backup running, did not
 // reproduce the failure at all; a concurrent second Refresh always did).
 // mu serializes Refresh calls so the second caller simply waits for the
 // first backup to finish and reads the same freshly-written dest, rather
@@ -105,7 +105,7 @@ type ledgerCopier struct {
 // board's own reads already use (main.go) -- one sqlite3, not a second one
 // this package would have to keep in sync.
 func newLedgerCopier(source, sqliteBin string) (*ledgerCopier, error) {
-	f, err := os.CreateTemp("", "keelson-ledger-*.sqlite3")
+	f, err := os.CreateTemp("", "estate-ledger-*.sqlite3")
 	if err != nil {
 		return nil, fmt.Errorf("stage ledger copy: %w", err)
 	}

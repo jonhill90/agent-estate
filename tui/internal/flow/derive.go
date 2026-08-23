@@ -1,6 +1,6 @@
 // Package flow is agent-tui#64's live flow view -- work MOVING between
 // states, not a static list. It reads the exact same already-derived
-// board.Snapshot the board pane (internal/board) fetches: cmd/keelson wires
+// board.Snapshot the board pane (internal/board) fetches: cmd/estate wires
 // literally the same board.Fetcher value into both panes, so this package
 // is never a second reader of gh, the ledger, or live lanes -- it only
 // re-projects board.Card (whose own Column already prefers gh/live-lane
@@ -14,7 +14,7 @@ package flow
 import (
 	"sort"
 
-	"github.com/jonhill90/keelson/internal/board"
+	"github.com/jonhill90/agent-tui/internal/board"
 )
 
 // Stage is one node of the flow pipeline. Unlike board.Column (five

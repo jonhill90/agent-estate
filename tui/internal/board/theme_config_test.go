@@ -9,7 +9,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
-	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // TestUserDefinedColorsDrivenThroughLoadAndRender is agent-tui#34's driven

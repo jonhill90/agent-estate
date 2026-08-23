@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/keelson/internal/cost"
-	"github.com/jonhill90/keelson/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/cost"
+	"github.com/jonhill90/agent-tui/internal/lane"
 )
 
 // TestFetchResultPopulatesRows drives Update directly (cheaper than a full

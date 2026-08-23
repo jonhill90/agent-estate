@@ -4,11 +4,12 @@
 `main` today, not the intended end state (that is `docs/PRD.md`). Every
 claim below is checked against `origin/main` `b00db9b`, **verified
 2026-08-16** — `go build ./...`, `go vet ./...`, and `go test ./...` all
-pass at that SHA (output: 9 tested packages, all `ok`; `cmd/keelson` has no
-test files). The product is named `steading` (agent-tui#42, decided
-2026-08-20); this document refers to the binary/module by their current,
-factual name (`keelson`) only where the code itself uses it, never as a
-claim that the product is named that. See `AGENTS.md`'s naming note.
+pass at that SHA (output: 9 tested packages, all `ok`; `cmd/estate` has no
+test files). The product is named the Estate, binary `estate` (decided
+2026-08-23, superseding `steading`, agent-tui#42's prose-only name, and
+`keelson`, the module/binary's own earlier name before this document's own
+distinction between the two collapsed). See `AGENTS.md`'s naming note for
+the full history.
 
 **Partially re-verified against `390c99a`, 2026-08-23
 (estate-loop/b-docs-stale, docs-stale-sweep worktree).** The `b00db9b`
@@ -64,7 +65,7 @@ no f-key of its own. The paragraph originally here is kept below for
 historical shape (four-pane, rail-fixed) but is no longer accurate; treat
 the correction above as current.
 
-`cmd/keelson/main.go` constructs exactly **one** `tea.NewProgram` call site,
+`cmd/estate/main.go` constructs exactly **one** `tea.NewProgram` call site,
 running `internal/shell.Model` (agent-tui#38, landed on `main` in PR #43).
 `internal/shell.Model` owns a persistent left rail (`internal/rail`, always
 visible) and a content area that holds one of four panes — board, cost,
@@ -83,7 +84,7 @@ whichever pane is active.
 This is a real change from the pre-#38 shape (four mutually exclusive
 `tea.NewProgram` sites selected by boolean flags, each its own process):
 every flag above now only chooses which pane the ONE process opens on
-(`shell.Model.WithStart`, `cmd/keelson/main.go`'s `start` switch). Because
+(`shell.Model.WithStart`, `cmd/estate/main.go`'s `start` switch). Because
 the rail is now always on screen, every launch needs a supervisor
 connection — including a bare `-cost`/`-gallery` start, which needed none
 before #38 because there was no rail beside it to feed. This is the
@@ -129,7 +130,7 @@ other file in the package unchanged.
   `-ledger` was configured renders `shell.Model.unavailableView` — `"!
   board unavailable"` plus the reason string — instead of running the
   board's fetch loop against an empty path. Verified live: `go build -o
-  /tmp/keelson-check ./cmd/keelson`, run with `-board` and no `-ledger`, and
+  /tmp/estate-check ./cmd/estate`, run with `-board` and no `-ledger`, and
   the flag-parse refusal fires before the program starts at all (see
   "Known defects").
 
@@ -142,7 +143,7 @@ frames.
 ## Adapter seams
 
 Every package that reaches outside the process is behind a narrow,
-function- or interface-typed seam supplied by `cmd/keelson`. This is the
+function- or interface-typed seam supplied by `cmd/estate`. This is the
 mechanism that makes "enable, disable, or remove a piece" mean something —
 today it means "the shell composes a different set of already-typed
 `Model`s and `Fetcher`s," never a raw `os/exec.Command` inside `internal/`.
@@ -182,9 +183,9 @@ no client identity for `switch-client`/`detach-client` to target correctly.
 `session.RemoveCheck`/`Remove` back `[x]remove`'s two-step confirm;
 `session.Add` backs `[n]ew`.
 
-### `cost.Fetcher` (built in `cmd/keelson/cost.go`, consumed by `internal/cost`)
+### `cost.Fetcher` (built in `cmd/estate/cost.go`, consumed by `internal/cost`)
 
-`internal/cost` does no I/O itself; `cmd/keelson` shells `ccusage` and
+`internal/cost` does no I/O itself; `cmd/estate` shells `ccusage` and
 hands the package only its already-parsed JSON. `cost.Figure{Known, Value}`
 is the pattern every "may be absent" value in this repo follows — `Known`
 is the only field a caller may branch on; a caller must never read a zero
@@ -192,12 +193,12 @@ is the only field a caller may branch on; a caller must never read a zero
 `scripts/supervisor/quota.sh`** — confirmed by `grep -rn "quota.sh"
 --include='*.go' .` returning zero matches — see "Known defects." **Fixed,
 stale as of `390c99a`:** `internal/cost/quota.go` now shells `quota.sh` out
-via `QuotaRunner`/`ExecQuotaRunner`, wired from `cmd/keelson/main.go`'s
+via `QuotaRunner`/`ExecQuotaRunner`, wired from `cmd/estate/main.go`'s
 `resolvedQuotaBin`; `grep -rn "quota.sh" --include='*.go' .` now returns
-matches throughout `internal/cost` and `cmd/keelson` (re-run 2026-08-23,
+matches throughout `internal/cost` and `cmd/estate` (re-run 2026-08-23,
 non-empty). See "Known defects" below, also corrected.
 
-### `board.Fetcher`-shaped functions (`cmd/keelson/board.go`)
+### `board.Fetcher`-shaped functions (`cmd/estate/board.go`)
 
 Composes `gh issue|pr list` (intent), the ledger's `tasks`/`source_tasks`
 tables (`sqlite3 PRAGMA query_only=1`, never `-readonly` — see
@@ -245,7 +246,7 @@ against `390c99a`:** `chat.FixtureSource` is no longer the only
 implementation. `agent-tui#99` (commit `5997399`) shipped
 `internal/chat/claudecode.go`'s `ClaudeCodeSource`, which reads real Claude
 Code CLI session transcripts from the local project directory, and
-`internal/chat/fallback.go`'s `FallbackSource`, which `cmd/keelson` actually
+`internal/chat/fallback.go`'s `FallbackSource`, which `cmd/estate` actually
 wires in: try `ClaudeCodeSource` first, and only fall back to the fixture
 when the real source reports itself genuinely unconfigured
 (`ErrNoProjectDir`), never on a real read error or real emptiness.
@@ -267,7 +268,7 @@ tmux, or any other supervisor internal; it only knows MCP's wire shape.
 request/response round trip so a non-responding supervisor subprocess
 surfaces as a visible error rather than an indefinite hang.
 
-`cmd/keelson/main.go`'s `connect()` chooses how to start the child:
+`cmd/estate/main.go`'s `connect()` chooses how to start the child:
 `-mcp-cmd` (full override, e.g. an SSH hop to a remote supervisor) takes
 precedence over `-supervisor-repo` (spawns
 `python3 <repo>/scripts/supervisor/mcp_server.py`). With neither set and
@@ -300,7 +301,7 @@ Two data models, kept deliberately separate:
 **All three closed, `6942926`/`390c99a`, 2026-08-23.** `agent-tui#49` is
 closed; the three defects below are historical, kept for record with their
 fixes noted rather than deleted. See `AGENTS.md`'s own "Known defects"
-section for the fix evidence (`cmd/keelson/main.go`'s `supervisorRepoResolved`
+section for the fix evidence (`cmd/estate/main.go`'s `supervisorRepoResolved`
 handling for #1, `resolveLedgerSource`/`defaultLedgerLivePath`/
 `newLedgerCopier` for #2, `internal/cost/quota.go`'s `QuotaRunner`/
 `ExecQuotaRunner` wiring for #3) — the same evidence, not re-derived here.
@@ -308,17 +309,17 @@ handling for #1, `resolveLedgerSource`/`defaultLedgerLivePath`/
 agent-tui#49 (open) records three; all three were confirmed here by
 running the built binary, not by reading source:
 
-1. **Bare launch exits 1.** `go build -o /tmp/keelson-check ./cmd/keelson
-   && /tmp/keelson-check` with no flags and no `$AGENT_SUPERVISOR_REPO`
+1. **Bare launch exits 1.** `go build -o /tmp/estate-check ./cmd/estate
+   && /tmp/estate-check` with no flags and no `$AGENT_SUPERVISOR_REPO`
    prints `no supervisor to connect to: set -supervisor-repo,
    $AGENT_SUPERVISOR_REPO, or -mcp-cmd` and exits 1 (`connect()`'s default
-   case, `cmd/keelson/main.go`) instead of opening in a degraded state.
+   case, `cmd/estate/main.go`) instead of opening in a degraded state.
 2. **The board pane's unavailable message.** Reaching `PaneBoard` via
    `[f2]` with no `-ledger` renders `shell.Model.unavailableView`'s `"!
    board unavailable"` plus `main.go`'s `boardUnavailable` string
    (`"no -ledger (or $AGENT_TUI_LEDGER) configured -- point it at a COPY of
    the ledger to use the board"`) — confirmed present in
-   `cmd/keelson/main.go` and `internal/shell/model.go`.
+   `cmd/estate/main.go` and `internal/shell/model.go`.
 3. **The cost panel's quota line has no live quota source.** It renders
    `"unknown (no quota source)"` (`internal/cost/view.go`) for any harness
    `ccusage` cannot compute a blocks/limit figure for. `scripts/supervisor/quota.sh`
@@ -356,7 +357,7 @@ All items below verified 2026-08-16 against `b00db9b` unless noted:
    read. **False as of `390c99a`, corrected 2026-08-23** — same correction
    as the `chat.Source` section above: `ClaudeCodeSource` (agent-tui#99,
    commit `5997399`) reads real Claude Code CLI transcripts, and
-   `FallbackSource` is what `cmd/keelson` actually wires in.
+   `FallbackSource` is what `cmd/estate` actually wires in.
    `chat.Sender` also now has a real implementation over `session_send`
    (agent-tui#104, commit `6942926`) — see the S7 correction in
    `docs/SPEC-shell.md`.

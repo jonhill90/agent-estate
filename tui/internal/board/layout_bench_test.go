@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // benchCards builds a synthetic but realistically-shaped fixture: n cards

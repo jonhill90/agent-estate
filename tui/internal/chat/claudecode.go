@@ -64,7 +64,7 @@ const (
 // Read-only, per agent-b3.md's own scope: this type never writes to
 // anything under projectsDir.
 type ClaudeCodeSource struct {
-	// projectsDir is the resolved directory to scan -- cmd/keelson
+	// projectsDir is the resolved directory to scan -- cmd/estate
 	// resolves $CLAUDE_PROJECTS_DIR / os.UserHomeDir()+"/.claude/projects"
 	// the same way every other seam in this module takes an
 	// already-resolved path (knowledge.NewFetcher(vaultDir), the ledger

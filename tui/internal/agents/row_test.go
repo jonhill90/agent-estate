@@ -4,10 +4,10 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/jonhill90/keelson/internal/board"
-	"github.com/jonhill90/keelson/internal/cost"
-	"github.com/jonhill90/keelson/internal/lane"
-	"github.com/jonhill90/keelson/internal/session"
+	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-tui/internal/cost"
+	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/session"
 )
 
 // TestDeriveJoinsSessionsAndTasksByLedgerLaneKey pins the fix this file's
@@ -134,7 +134,7 @@ func TestDeriveModelUnknownSentinelStaysNil(t *testing.T) {
 
 // TestDeriveCostFromLedgerLaneJoin pins Cost's own join: costsByLedgerLane
 // is keyed by the SAME "<session>:<window-index>" string tasks use, not by
-// Row.ID -- exactly the shape cmd/keelson/agents.go's buildAgentCostFetch
+// Row.ID -- exactly the shape cmd/estate/agents.go's buildAgentCostFetch
 // produces.
 func TestDeriveCostFromLedgerLaneJoin(t *testing.T) {
 	sessions := []lane.Session{

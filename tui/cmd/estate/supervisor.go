@@ -24,7 +24,7 @@ func hasSupervisorScript(dir string) bool {
 }
 
 // discoverSupervisorRepo implements agent-tui#49 item 1's fix: a bare
-// `keelson` must never exit 1 just because -supervisor-repo was not typed.
+// `estate` must never exit 1 just because -supervisor-repo was not typed.
 // It walks up from start looking for a checkout containing
 // scripts/supervisor/mcp_server.py (the file connect() itself requires),
 // then falls back to fallbackSupervisorRepo under $HOME. Returns "" -- not

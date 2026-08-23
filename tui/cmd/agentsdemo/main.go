@@ -34,9 +34,9 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jonhill90/keelson/internal/agents"
-	"github.com/jonhill90/keelson/internal/lane"
-	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/agents"
+	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // bannerStyle reuses RoleWarn, the same role board/cost already use for
@@ -54,7 +54,7 @@ var bannerStyle = lipgloss.NewStyle().Bold(true).Foreground(theme.Default.Color(
 // column can be judged as it actually looks, not a stand-in. Wrapping here,
 // the way cmd/demo wraps a purpose-built model of its own, keeps the
 // disclaimer a property of the demo binary rather than of the shared,
-// real internal/agents package every other caller (cmd/keelson included)
+// real internal/agents package every other caller (cmd/estate included)
 // also renders.
 type disclaimerModel struct {
 	inner agents.Model

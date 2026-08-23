@@ -10,7 +10,7 @@ package connectors
 // failure if one is ever needed.
 type Fetcher func() ([]Connection, []AvailableModel, error)
 
-// NewFetcher composes Load into the one Fetcher cmd/keelson would wire in
+// NewFetcher composes Load into the one Fetcher cmd/estate would wire in
 // for a real environment -- e.g.
 // connectors.NewFetcher(connectors.Paths{ClaudeConfig: home+"/.claude.json",
 // CodexConfig: home+"/.codex/config.toml", CodexModelsCache:

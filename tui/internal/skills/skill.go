@@ -98,10 +98,10 @@ const VerdictUnevaluated = "unevaluated"
 // pattern every other package's Fetcher-shaped type follows).
 type Fetcher func() ([]Skill, error)
 
-// ScanFetcher builds a Fetcher over Scan(dir) -- the adapter cmd/keelson
+// ScanFetcher builds a Fetcher over Scan(dir) -- the adapter cmd/estate
 // would wire in for a real ~/.claude/skills path, kept as a one-line
 // constructor (mirroring internal/board's own Fetcher-building functions
-// in cmd/keelson/board.go) so a caller never has to write the closure
+// in cmd/estate/board.go) so a caller never has to write the closure
 // itself.
 func ScanFetcher(dir string) Fetcher {
 	return func() ([]Skill, error) { return Scan(dir) }

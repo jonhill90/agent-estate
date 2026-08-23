@@ -8,7 +8,7 @@ import (
 
 // DockerExecRunner builds a DockerRunner over a real docker binary --
 // mirrors internal/board.ExecRunner's own shape exactly (name the binary,
-// return a func running it), the one real implementation cmd/keelson
+// return a func running it), the one real implementation cmd/estate
 // would wire in.
 func DockerExecRunner(name string) DockerRunner {
 	return func(args []string) ([]byte, error) {

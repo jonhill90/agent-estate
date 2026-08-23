@@ -49,7 +49,7 @@ func TestFetchErrorRendersVisibly(t *testing.T) {
 }
 
 // TestNilFetchRendersVisibleConfigError is w5c.md's own hard requirement,
-// pinned at the Model level rather than just cmd/keelson's: a Model built
+// pinned at the Model level rather than just cmd/estate's: a Model built
 // with fetch == nil (no -ledger, ever) must render a visible error on
 // screen from the FIRST frame, before any fetchResultMsg could possibly
 // arrive -- Init() never issues a fetch for a nil Fetcher, so m.fetchErr

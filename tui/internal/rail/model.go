@@ -17,11 +17,11 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jonhill90/keelson/internal/board"
-	"github.com/jonhill90/keelson/internal/cost"
-	"github.com/jonhill90/keelson/internal/lane"
-	"github.com/jonhill90/keelson/internal/session"
-	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-tui/internal/cost"
+	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/session"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // RailWidth is the target column count for the rail region. Jon asked for
@@ -588,7 +588,7 @@ func (m Model) fallbackActive() bool {
 // unavailable. This is what "! multi-session unavailable ... mcp: no reply"
 // actually was: a self-inflicted request pile-up, not supervisor-side
 // contention or the cost pane's ccusage/quota.sh subprocesses (neither goes
-// through mcp.Client at all -- see cmd/keelson/cost.go). Returns the updated
+// through mcp.Client at all -- see cmd/estate/cost.go). Returns the updated
 // Model because setting these flags is a state change the caller must keep.
 func (m Model) doFetchAll() (Model, tea.Cmd) {
 	var cmds []tea.Cmd

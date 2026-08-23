@@ -1,5 +1,5 @@
 # Visual QA for agent-tui#101's decision, driven through the real shell
-# binary (cmd/keelson), not internal/secrets in isolation. Reads the REAL
+# binary (cmd/estate), not internal/secrets in isolation. Reads the REAL
 # hill90-app checkout's platform/vault/secrets-schema.yaml on this
 # machine via $HILL90_APP_REPO -- no fixture, no fake data -- so the
 # screenshot shows real vault paths and key names, and confirms level 5
@@ -16,7 +16,7 @@ Set Shell "bash"
 Hide
 Type "export AGENT_SUPERVISOR_REPO=${AGENT_SUPERVISOR_REPO:-$HOME/source/repos/Personal/agent-supervisor}" Enter
 Type "export HILL90_APP_REPO=${HILL90_APP_REPO:-$HOME/source/repos/Personal/hill90-app}" Enter
-Type "go build -o /tmp/atui-secrets ./cmd/keelson" Enter
+Type "go build -o /tmp/atui-secrets ./cmd/estate" Enter
 Sleep 15s
 Show
 

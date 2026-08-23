@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonhill90/keelson/internal/board"
+	"github.com/jonhill90/agent-tui/internal/board"
 )
 
 func TestLedgerCopier_RefreshCallsBackupWithSourceAndDest(t *testing.T) {

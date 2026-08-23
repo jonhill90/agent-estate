@@ -1,12 +1,12 @@
 # Visual QA for internal/knowledge -- Jon's real memory vault, rendered in
-# the TUI -- driven through the real shell binary (cmd/keelson) via the
+# the TUI -- driven through the real shell binary (cmd/estate) via the
 # Knowledge nav route, not a standalone demo binary.
 #
 # agent-tui#132: this tape's own build target, cmd/knowledgedemo, never
 # existed in this repository's history (`git log --all -- cmd/knowledgedemo`
 # returns zero commits across every ref) -- unlike agents-mode.tape/#130,
 # this was never a restore; the tape was unrunnable from the day it landed
-# in #87. Repointed at cmd/keelson with the Knowledge route selected, the
+# in #87. Repointed at cmd/estate with the Knowledge route selected, the
 # same target testdata/vhs/knowledge-route.tape (#95) already proved out --
 # that tape is deleted by the same change that adds this fix, folded in
 # here rather than kept separately (see below).
@@ -54,7 +54,7 @@ Set Shell "bash"
 
 Hide
 Type "export AGENT_SUPERVISOR_REPO=${AGENT_SUPERVISOR_REPO:-$HOME/source/repos/Personal/agent-supervisor}" Enter
-Type "go build -o /tmp/atui-knowledge ./cmd/keelson && clear" Enter
+Type "go build -o /tmp/atui-knowledge ./cmd/estate && clear" Enter
 Wait
 Show
 
@@ -80,7 +80,7 @@ Screenshot testdata/vhs/out/knowledge-01-list.png
 # [tab] moves keyboard focus from the sidebar to the content pane --
 # without it, Down/Enter below drive the SIDEBAR's own nav tree, not the
 # knowledge list's row selection (confirmed empirically: this is the
-# first tape to drill into a fact via cmd/keelson's real nav rather than
+# first tape to drill into a fact via cmd/estate's real nav rather than
 # a standalone binary, and pressing Enter with focus still on the rail
 # never opened a fact -- Wait+Screen for the reading pane's footer just
 # timed out instead, at this exact point, before this fix).

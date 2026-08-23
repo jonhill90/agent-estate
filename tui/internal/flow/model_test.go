@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/keelson/internal/board"
+	"github.com/jonhill90/agent-tui/internal/board"
 )
 
 func TestArrowTrackMarkerMovesWithFrame(t *testing.T) {
@@ -48,11 +48,11 @@ func TestFormatDuration(t *testing.T) {
 
 func fakeSnap() board.Snapshot {
 	return board.Snapshot{Cards: []board.Card{
-		{Repo: board.Repo{Label: "keelson"}, Number: 1, Title: "in progress", Column: board.InProgress, Age: 3 * time.Hour, CycleTime: 3 * time.Hour},
-		{Repo: board.Repo{Label: "keelson"}, Number: 2, Title: "in review", Column: board.InReview, Age: 10 * time.Minute, PRNumber: 9},
-		{Repo: board.Repo{Label: "keelson"}, Number: 3, Title: "blocked one", Column: board.Blocked, Age: 5 * time.Hour, BlockedReason: "lane x is hung"},
-		{Repo: board.Repo{Label: "keelson"}, Number: 4, Title: "queued", Column: board.Backlog},
-		{Repo: board.Repo{Label: "keelson"}, Number: 5, Title: "done", Column: board.Done, PRNumber: 11},
+		{Repo: board.Repo{Label: "estate"}, Number: 1, Title: "in progress", Column: board.InProgress, Age: 3 * time.Hour, CycleTime: 3 * time.Hour},
+		{Repo: board.Repo{Label: "estate"}, Number: 2, Title: "in review", Column: board.InReview, Age: 10 * time.Minute, PRNumber: 9},
+		{Repo: board.Repo{Label: "estate"}, Number: 3, Title: "blocked one", Column: board.Blocked, Age: 5 * time.Hour, BlockedReason: "lane x is hung"},
+		{Repo: board.Repo{Label: "estate"}, Number: 4, Title: "queued", Column: board.Backlog},
+		{Repo: board.Repo{Label: "estate"}, Number: 5, Title: "done", Column: board.Done, PRNumber: 11},
 	}}
 }
 

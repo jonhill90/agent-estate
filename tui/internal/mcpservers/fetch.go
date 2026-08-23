@@ -7,7 +7,7 @@ package mcpservers
 type Fetcher func() ([]Server, error)
 
 // NewFetcher composes Load and WithReachability into the one Fetcher
-// cmd/keelson would wire in for a real ~/.claude.json -- e.g.
+// cmd/estate would wire in for a real ~/.claude.json -- e.g.
 // mcpservers.NewFetcher(theme.ConfigDir()+"/.claude.json", cwd,
 // exec.LookPath). lookPath == nil is a valid, silent "no reachability
 // check" default (WithReachability's own doc comment).

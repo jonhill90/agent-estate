@@ -9,7 +9,7 @@
 # anything -- there is no supervisor connection, no $HOME, no repo path.
 #
 # This is deliberately a different tape from full-nav-walk.tape, which
-# drives the real `keelson` binary against a live agent-supervisor
+# drives the real `estate` binary against a live agent-supervisor
 # checkout and DOES surface real state -- correct for QA-ing a change,
 # wrong for a public README. Re-run this one to refresh the README images:
 #

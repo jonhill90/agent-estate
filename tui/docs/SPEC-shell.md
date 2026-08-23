@@ -7,7 +7,7 @@ yet built, builds exactly that, opens a PR, stops.
 **Status note, 2026-08-23 (estate-loop/b-docs-stale sweep, pass 2).** The
 "lowest-numbered item not yet built" instruction above describes this
 file's original state; it is no longer the situation on `main`. Checked
-against `cmd/keelson/main.go`'s own wiring (`56513a2`): **S1 through S11
+against `cmd/estate/main.go`'s own wiring (`56513a2`): **S1 through S11
 are all built and composed into the one running shell** —
 `internal/nav`/`internal/shell` (S1-S3), `internal/board`/`internal/cost`/
 `internal/rail` (S4), `internal/stub` (S5), `internal/agents` (S6),
@@ -45,7 +45,7 @@ pre-S1 baseline this spec was written against and are kept for that
 record, but every S-item below has since shipped — the bug they describe
 no longer exists on `main` (see the per-item status notes below, and
 `AGENTS.md`'s "Not wired into CI, deliberately"'s sibling note for how
-`cmd/keelson/main.go` composes them). Re-measured LOC (`find internal/<pkg>
+`cmd/estate/main.go` composes them). Re-measured LOC (`find internal/<pkg>
 -name '*.go' -not -name '*_test.go' | xargs wc -l`, non-test): `internal/rail`
 1,782 (was 1,369), `internal/board` 1,829 (was 2,391 — net smaller despite
 new features, consistent with logic moving out into `internal/flow`/
@@ -147,7 +147,7 @@ resolved the same day it was written. `agent-supervisor#509` (merged) added
 `session_send` to the MCP tool surface, closing the gap `agent-supervisor#508`
 proposed. `internal/chat.Sender` is now implemented against `session_send`
 (`internal/session.Ops.Send`, `internal/session/ops.go`) and wired into the
-composer from `cmd/keelson/main.go` via `chat.WithSender` — reached entirely
+composer from `cmd/estate/main.go` via `chat.WithSender` — reached entirely
 through the existing MCP boundary, no second subprocess transport and no
 `supervisord run`/`send-keys` workaround, exactly as this section's own hard
 constraint required. Sending is built, not merely unblocked.

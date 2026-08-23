@@ -9,10 +9,10 @@
 // of every dispatch this estate has made.
 package workflows
 
-import "github.com/jonhill90/keelson/internal/board"
+import "github.com/jonhill90/agent-tui/internal/board"
 
 // Fetcher retrieves the current dispatch history -- the one adapter seam
-// this package's Model depends on. cmd/keelson composes the real
+// this package's Model depends on. cmd/estate composes the real
 // implementation from the SAME ledger seam buildTaskFetch (board.go)
 // already builds for internal/rail; every test in this package builds a
 // fake instead (AGENTS.md's adapter discipline). Read-only, always against

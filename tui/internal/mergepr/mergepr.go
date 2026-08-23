@@ -6,7 +6,7 @@ import (
 	"os/exec"
 	"time"
 
-	"github.com/jonhill90/keelson/internal/prverdict"
+	"github.com/jonhill90/agent-tui/internal/prverdict"
 )
 
 // MergeDecision is Evaluate's whole answer, before Merge ever shells out

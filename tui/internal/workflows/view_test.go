@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jonhill90/keelson/internal/board"
+	"github.com/jonhill90/agent-tui/internal/board"
 )
 
 func TestView_UnconfiguredRendersVisibleError(t *testing.T) {

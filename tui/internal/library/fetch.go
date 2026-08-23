@@ -1,7 +1,7 @@
 package library
 
 // Fetcher retrieves the current list for one view+filter combination -- the
-// adapter seam (AGENTS.md) Model's list is built around. cmd/keelson/
+// adapter seam (AGENTS.md) Model's list is built around. cmd/estate/
 // library.go is the one real implementation this repo ships; every test in
 // this package builds a fake instead.
 type Fetcher func(view View, weight, status string) ([]ItemRow, error)

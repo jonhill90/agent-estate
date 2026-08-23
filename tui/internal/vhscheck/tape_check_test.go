@@ -144,7 +144,7 @@ func TestNoTapeReferencesAMissingCmdDirectory(t *testing.T) {
 		t.Fatalf("ScanTapes: %v", err)
 	}
 	if len(refs) == 0 {
-		t.Fatal("ScanTapes found zero go-build references across every .tape file -- almost certainly a scan bug, not reality (this repo has many tapes that build cmd/keelson alone)")
+		t.Fatal("ScanTapes found zero go-build references across every .tape file -- almost certainly a scan bug, not reality (this repo has many tapes that build cmd/estate alone)")
 	}
 
 	missing := MissingCmdDirs(repoRoot, refs)

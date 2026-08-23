@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jonhill90/keelson/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/lane"
 )
 
 func TestBuildRowsCoversEveryState(t *testing.T) {

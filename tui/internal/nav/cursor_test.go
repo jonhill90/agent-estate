@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // The cursor and the active route are DIFFERENT things and both must be

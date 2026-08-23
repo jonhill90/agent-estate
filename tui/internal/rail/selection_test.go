@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
-	"github.com/jonhill90/keelson/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/lane"
 )
 
 // as#109: the selection used reverse video, which inverts whatever

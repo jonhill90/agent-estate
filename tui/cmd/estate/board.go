@@ -7,9 +7,9 @@ import (
 	"sort"
 	"time"
 
-	"github.com/jonhill90/keelson/internal/board"
-	"github.com/jonhill90/keelson/internal/lane"
-	"github.com/jonhill90/keelson/internal/rail"
+	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/rail"
 )
 
 // buildBoardFetch composes board.board's pure pieces (repo discovery, gh,

@@ -6,7 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // refreshInterval matches internal/knowledge/internal/skills' slow poll,
@@ -57,7 +57,7 @@ type Model struct {
 }
 
 // New builds a Model with fetch wired in. A nil fetch is the "no spec
-// configured" state, not a crash -- cmd/keelson passes nil when neither
+// configured" state, not a crash -- cmd/estate passes nil when neither
 // -openapi nor $HILL90_APP_REPO resolves to a file.
 func New(fetch Fetcher) Model {
 	return Model{fetch: fetch, unconfigured: fetch == nil, width: 100, height: 30, theme: theme.Default}

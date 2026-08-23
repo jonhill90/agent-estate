@@ -29,8 +29,8 @@ package lanechat
 import (
 	"time"
 
-	"github.com/jonhill90/keelson/internal/chat"
-	"github.com/jonhill90/keelson/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/chat"
+	"github.com/jonhill90/agent-tui/internal/lane"
 )
 
 // FixtureLanes returns the same five lanes every call -- deterministic by
@@ -160,7 +160,7 @@ func itoa(n int) string {
 }
 
 // FixtureParticipants projects FixtureLanes into chat.Participant the exact
-// same way cmd/keelson/chat.go's buildParticipantsFetch projects real
+// same way cmd/estate/chat.go's buildParticipantsFetch projects real
 // lane.Session data: Running is false only for "dead"/"stale" (the same
 // evidence internal/agents' modeFor and buildParticipantsFetch both already
 // use), true otherwise. Reused rather than re-derived so

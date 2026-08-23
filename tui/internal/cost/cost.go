@@ -65,7 +65,7 @@ type Harness struct {
 // must still show real session/weekly percentages; Quotas carries that
 // even when Known is false and Harnesses is empty. When Known is true,
 // this same data has ALSO already been merged onto each Harness.Quota by
-// name (cmd/keelson/cost.go) -- Quotas here exists so the quota-only
+// name (cmd/estate/cost.go) -- Quotas here exists so the quota-only
 // render path (RenderBars/RenderNumeric's !Known branch) has something to
 // read without needing a Harness to hang it off of.
 type Snapshot struct {
@@ -129,7 +129,7 @@ func Compose(harnesses []Harness, claudeLimit Limit) Snapshot {
 	sortHarnesses(out)
 
 	// Quotas mirrors whatever's already on each Harness.Quota (the caller,
-	// cmd/keelson/cost.go, merges quota.sh's data onto Harnesses by name
+	// cmd/estate/cost.go, merges quota.sh's data onto Harnesses by name
 	// before calling Compose) -- kept in sync here too so a reader of
 	// Snapshot.Quotas sees the same answer whether Known is true or false
 	// (UnknownWithQuota's doc comment).

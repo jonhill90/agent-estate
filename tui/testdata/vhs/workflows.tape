@@ -6,7 +6,7 @@
 # Run: vhs testdata/vhs/workflows.tape
 #
 # Drives the REAL binary against a COPY of this box's own live
-# ledger.sqlite3 (auto-discovered the same way cmd/keelson/main.go's
+# ledger.sqlite3 (auto-discovered the same way cmd/estate/main.go's
 # resolveLedgerSource does for any bare launch, same as
 # testdata/vhs/library.tape) -- every row on screen is a real dispatch from
 # the real ledger, not a fixture.
@@ -17,7 +17,7 @@ Set Height 850
 Set Shell "bash"
 
 Hide
-Type "go build -o /tmp/atui-workflows ./cmd/keelson && clear" Enter
+Type "go build -o /tmp/atui-workflows ./cmd/estate && clear" Enter
 Sleep 3s
 Show
 

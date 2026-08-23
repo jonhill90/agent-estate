@@ -5,10 +5,10 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/keelson/internal/board"
-	"github.com/jonhill90/keelson/internal/cost"
-	"github.com/jonhill90/keelson/internal/lane"
-	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-tui/internal/cost"
+	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // refreshInterval matches internal/rail's own 2s cadence for the exact
@@ -20,7 +20,7 @@ const refreshInterval = 2 * time.Second
 // internal/rail.SessionsFetcher's own signature, repeated here rather than
 // imported: this package's seam is its own (AGENTS.md's adapter
 // discipline), even though today's only real implementation
-// (cmd/keelson's "sessions" MCP call) happens to be shared.
+// (cmd/estate's "sessions" MCP call) happens to be shared.
 type Fetcher func() ([]lane.Session, error)
 
 // TaskFetcher retrieves every ledger task row -- internal/rail.TaskFetcher's
@@ -29,7 +29,7 @@ type Fetcher func() ([]lane.Session, error)
 type TaskFetcher func() ([]board.TaskRow, error)
 
 // CostFetcher retrieves per-lane cost, pre-joined by the caller (see
-// cmd/keelson/agents.go's buildAgentCostFetch) from the ledger's own
+// cmd/estate/agents.go's buildAgentCostFetch) from the ledger's own
 // lanes.harness_session_id column and `ccusage session --json`'s
 // per-session totals -- Row.go's own package doc comment explains the
 // join. Keyed by the ledger's "<session>:<window-index>" lane string, the

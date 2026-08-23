@@ -17,7 +17,7 @@ Set Shell "bash"
 
 Hide
 Type "export AGENT_SUPERVISOR_REPO=${AGENT_SUPERVISOR_REPO:-$HOME/source/repos/Personal/agent-supervisor}" Enter
-Type "go build -o /tmp/atui-monitoring ./cmd/keelson && clear" Enter
+Type "go build -o /tmp/atui-monitoring ./cmd/estate && clear" Enter
 Sleep 3s
 Show
 

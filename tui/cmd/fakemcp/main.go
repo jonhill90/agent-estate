@@ -12,7 +12,7 @@
 //
 // sessions (added for agent-tui#114's chat-mentions.tape) answers a fixed,
 // deterministic roster -- one running lane ("alice") and one dead one
-// ("bob") -- so cmd/keelson's real buildParticipantsFetch (chat.go) has
+// ("bob") -- so cmd/estate's real buildParticipantsFetch (chat.go) has
 // something real to join against without a live agent-supervisor daemon.
 // The message argument to session_send itself picks the canned outcome,
 // so one fixture drives all three send states this PR adds:
@@ -31,7 +31,7 @@
 // cannot offer safely (a real session_send genuinely takes minutes; this
 // fixture takes seconds, on purpose).
 //
-// Never wired into cmd/keelson's own launch path -- only ever named via
+// Never wired into cmd/estate's own launch path -- only ever named via
 // `-mcp-cmd "go run ./cmd/fakemcp"` for a VHS run. Not a second MCP
 // server implementation of anything real: it understands one tool name
 // and nothing else, and exists solely so testdata/vhs/chat-send.tape can

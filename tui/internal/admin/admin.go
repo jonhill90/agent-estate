@@ -115,7 +115,7 @@ type LookPath func(file string) (string, error)
 // application or its MCP servers rely on, in the order they're checked.
 // Not discovered at runtime -- this is a short, stable list this
 // codebase's own flags and doc comments already name elsewhere
-// (cmd/keelson's -gh-bin/-sqlite-bin/-ccusage-bin defaults, and the
+// (cmd/estate's -gh-bin/-sqlite-bin/-ccusage-bin defaults, and the
 // docker/python3/npx commands internal/mcpservers' own real config
 // entries use), so hardcoding it here is recording a known fact, not
 // guessing one.

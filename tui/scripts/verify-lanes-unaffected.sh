@@ -4,17 +4,17 @@
 # screenshot. It runs against an ISOLATED tmux server (never the machine's
 # real one -- agent-supervisor's own AGENTS.md rule 4, and #173's fixture is
 # exactly what a fixed-width injected pane broke) and diffs lanes.sh --json
-# for a set of decoy windows before and after keelson runs in its OWN
+# for a set of decoy windows before and after estate runs in its OWN
 # window of the same session.
 #
-# Usage: verify-lanes-unaffected.sh <path-to-agent-supervisor-checkout> [keelson-binary]
+# Usage: verify-lanes-unaffected.sh <path-to-agent-supervisor-checkout> [estate-binary]
 #
 # Exit 0 and prints PASS when the pre-existing windows classify identically
 # with the app running; exit 1 and prints the diff otherwise.
 set -euo pipefail
 
-SUPERVISOR_REPO="${1:?usage: verify-lanes-unaffected.sh <agent-supervisor-repo> [keelson-binary]}"
-BINARY="${2:-keelson}"
+SUPERVISOR_REPO="${1:?usage: verify-lanes-unaffected.sh <agent-supervisor-repo> [estate-binary]}"
+BINARY="${2:-estate}"
 LANES_SH="$SUPERVISOR_REPO/scripts/supervisor/lanes.sh"
 MCP_SERVER="$SUPERVISOR_REPO/scripts/supervisor/mcp_server.py"
 
@@ -27,7 +27,7 @@ if [ ! -f "$MCP_SERVER" ]; then
   exit 1
 fi
 if ! command -v "$BINARY" >/dev/null 2>&1 && [ ! -x "$BINARY" ]; then
-  echo "verify-lanes-unaffected: keelson binary not found: $BINARY (build it first: go build -o keelson ./cmd/keelson)" >&2
+  echo "verify-lanes-unaffected: estate binary not found: $BINARY (build it first: go build -o estate ./cmd/estate)" >&2
   exit 1
 fi
 
@@ -56,8 +56,8 @@ sleep 1
 
 BEFORE_RAW="$("$LANES_SH" --json "$SESSION")"
 
-# Only the windows that existed before keelson ran are part of the claim --
-# keelson's own window is expected to appear as a new row (it is a real
+# Only the windows that existed before estate ran are part of the claim --
+# estate's own window is expected to appear as a new row (it is a real
 # window, own-window by design), not to be invisible. What must not change
 # is everything that was already there.
 BEFORE_IDS="$(echo "$BEFORE_RAW" | python3 -c 'import json,sys; print("\n".join(r["window_id"] for r in json.load(sys.stdin)))')"
@@ -68,7 +68,7 @@ filter_to_before() {
   #
   # idle_seconds is dropped from the comparison, deliberately: it is wall
   # clock time since the pane last drew, and it advances whether or not
-  # keelson exists -- the wait between BEFORE and AFTER moves it on its
+  # estate exists -- the wait between BEFORE and AFTER moves it on its
   # own. What the acceptance item is actually about is CLASSIFICATION
   # (state, and the other fields lanes.sh derives from the pane), which
   # must not move; a monotonically increasing counter is not evidence of
@@ -86,12 +86,12 @@ print(json.dumps(kept, sort_keys=True, indent=2))
 
 BEFORE="$(echo "$BEFORE_RAW" | filter_to_before)"
 
-# keelson in ITS OWN window of the same isolated session -- never a pane
+# estate in ITS OWN window of the same isolated session -- never a pane
 # injected into decoy1/2/3. AGENT_SUPERVISOR_REPO and TMUX_TMPDIR both need
 # to reach the binary's mcp_server.py subprocess, which is why they are
 # exported rather than passed as flags only.
 export AGENT_SUPERVISOR_REPO="$SUPERVISOR_REPO"
-tmux new-window -d -t "$SESSION" -n keelson-under-test \
+tmux new-window -d -t "$SESSION" -n estate-under-test \
   "$BINARY -supervisor-repo '$SUPERVISOR_REPO' -session '$SESSION'; sleep 30"
 
 # Let it connect, fetch once, and render.
@@ -101,10 +101,10 @@ AFTER_RAW="$(TMUX_TMPDIR="$TMUX_TMPDIR" "$LANES_SH" --json "$SESSION")"
 AFTER="$(echo "$AFTER_RAW" | filter_to_before)"
 
 if [ "$BEFORE" = "$AFTER" ]; then
-  echo "PASS: lanes.sh --json is byte-identical for pre-existing windows with keelson running"
+  echo "PASS: lanes.sh --json is byte-identical for pre-existing windows with estate running"
   exit 0
 fi
 
-echo "FAIL: lanes.sh --json changed for a pre-existing window while keelson ran" >&2
+echo "FAIL: lanes.sh --json changed for a pre-existing window while estate ran" >&2
 diff <(echo "$BEFORE") <(echo "$AFTER") >&2 || true
 exit 1

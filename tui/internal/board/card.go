@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonhill90/keelson/internal/lane"
+	"github.com/jonhill90/agent-tui/internal/lane"
 )
 
 // Column is one of the board's five projected states. Nothing assigns a

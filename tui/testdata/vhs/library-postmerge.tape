@@ -13,7 +13,7 @@ Set Height 850
 Set Shell "bash"
 
 Hide
-Type "go build -o /tmp/atui-postmerge ./cmd/keelson && clear" Enter
+Type "go build -o /tmp/atui-postmerge ./cmd/estate && clear" Enter
 Sleep 3s
 Show
 

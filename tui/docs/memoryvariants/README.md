@@ -81,11 +81,13 @@ PASS
 ok  	github.com/jonhill90/keelson/tools/memoryvariants/spike	0.643s
 ```
 
+(Verbatim historical output — the module path was `github.com/jonhill90/keelson` at the time this was run; it is `github.com/jonhill90/agent-tui` as of the 2026-08-23 rename. Left unedited rather than rewritten to match today's path, since this is a quote of what actually printed, not a current claim.)
+
 **Not verified, and said so rather than assumed**: real terminal
 mouse-event rate/resolution and how a drag actually feels over tmux/SSH.
 `tmux new-session` cannot start a server in this dispatch's sandbox --
 `server exited unexpectedly` on every attempt, including a trivial `sleep
-30` pane with no `keelson` involved at all, with and without the sandbox
+30` pane with no `estate` involved at all, with and without the sandbox
 disabled. This is an environment limitation, not a finding about the
 spike itself. **Whoever picks this up next needs one real terminal
 session** (`go run ./tools/memoryvariants/spike`, drag a node, watch

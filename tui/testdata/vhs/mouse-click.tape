@@ -24,7 +24,7 @@ Set Height 850
 Set Shell "bash"
 
 Hide
-Type "go build -o /tmp/atui-mouse ./cmd/keelson && clear" Enter
+Type "go build -o /tmp/atui-mouse ./cmd/estate && clear" Enter
 Sleep 5s
 Show
 

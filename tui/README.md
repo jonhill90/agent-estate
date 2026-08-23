@@ -1,17 +1,13 @@
 # agent-tui
 
-**The product is named `steading`** (agent-tui#42 — seven rounds, ~60
-candidates checked; see `AGENTS.md`'s naming note for the full reasoning and
-availability evidence). A steading is a farmstead and all its outbuildings —
-the whole working holding, not a single machine — which is what this
-product actually is: rail, board, cost, gallery, and the memory/chat/
-workflow features still landing. This is a naming decision only, not a
-rename: the Go module, `cmd/` directory and binary stay `keelson` — a
-leftover of agent-tui#38's overnight rename pass, described below as a fact
-about the code, not as the product's name — and the GitHub repo stays
-`jonhill90/agent-tui`. TODO(rename): moving the module path, `cmd/`
-directory, binary and repo to `steading` is separate follow-on work,
-tracked at agent-tui#42, not done here.
+**The product is the Estate**, binary `estate` (see `AGENTS.md`'s naming
+note for the full history: `keelson`, rejected agent-tui#42 for a real
+collision; `steading`, chosen agent-tui#42 as a prose-only name while the
+module path and binary stayed `keelson`; the Estate, chosen 2026-08-23,
+which finally moves the module path and `cmd/` directory to match and
+retires both earlier names). The GitHub repo stays `jonhill90/agent-tui`
+deliberately — repository visibility and the repo's own name are Jon's
+separate, reserved calls, not part of this rename.
 
 A terminal application for the agent estate: reads [`agent-supervisor`](https://github.com/jonhill90/agent-supervisor)'s
 lane and session state over MCP and renders it behind a persistent left
@@ -53,7 +49,7 @@ pass.
 ## Screenshots
 
 These are the real shell's real rendering code (`internal/nav`, the same
-sidebar and pane layout `keelson` ships), driven by `cmd/demo` — a build
+sidebar and pane layout `estate` ships), driven by `cmd/demo` — a build
 wired to invented data instead of live sources, so every frame carries an
 "ALL DATA ON THIS SCREEN IS FAKE" footer and none of it is mistakable for
 a real estate's state. Home alone is the least informative screen in the
@@ -100,24 +96,24 @@ reached with a keypress, never a relaunch (agent-tui#38). `-board`/`-cost`/
 being the only way to reach it.
 
 ```
-go build -o keelson ./cmd/keelson
+go build -o estate ./cmd/estate
 
 # opens on the rail with the home pane -- [f2] board, [f3] cost, [f4] gallery,
 # [f5] flow, [f6] chat -- [tab] moves focus between the rail and the content pane
-AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./estate
 
 # same app, opens on the task board pane -- needs a ledger COPY
-AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson -board \
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./estate -board \
   -ledger /path/to/a/COPY/of/ledger.sqlite3
 
 # same app, opens on the cost pane
-AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson -cost
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./estate -cost
 
 # same app, opens on the glyph gallery pane
-AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson -gallery
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./estate -gallery
 
 # same app, opens on the chat pane -- fixture threads today, see below
-AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson -chat
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./estate -chat
 ```
 
 The rail is always on screen now, so every invocation needs a supervisor
@@ -126,7 +122,7 @@ one that opens on the cost or gallery pane, which is a change from the
 four-separate-programs era, when `-cost`/`-gallery` needed no connection at
 all because there was no rail beside them to feed.
 
-Run `./keelson -h` for every flag; `cmd/keelson/main.go`'s flag help
+Run `./estate -h` for every flag; `cmd/estate/main.go`'s flag help
 strings are the authoritative, current documentation for each one — this
 README does not restate them.
 
@@ -258,7 +254,7 @@ real `Source` needs.
 **False as of `390c99a`, corrected 2026-08-23.** `agent-tui#99` (commit
 `5997399`) shipped `internal/chat/claudecode.go`'s `ClaudeCodeSource`,
 which reads real Claude Code CLI session transcripts, and
-`internal/chat/fallback.go`'s `FallbackSource`, which `cmd/keelson` wires
+`internal/chat/fallback.go`'s `FallbackSource`, which `cmd/estate` wires
 in: try `ClaudeCodeSource` first, fall back to `FixtureSource` only when
 the real source reports itself genuinely unconfigured. `FixtureSource` is
 now the last-resort fallback, not the only implementation. Sending is also
@@ -304,7 +300,7 @@ rune animates which lane state rather than the chrome around it — see
 
 **All three closed, `6942926`, 2026-08-23 (agent-tui#49 closed 2026-08-16).**
 See `AGENTS.md`'s own "Known defects" section for the fix evidence
-(`cmd/keelson/main.go`'s `supervisorRepoResolved` handling for the bare
+(`cmd/estate/main.go`'s `supervisorRepoResolved` handling for the bare
 launch, `resolveLedgerSource`/`defaultLedgerLivePath`/`newLedgerCopier` for
 the board pane, `internal/cost/quota.go`'s `QuotaRunner`/`ExecQuotaRunner`
 wiring for the quota line) — kept below for record, not as an open list.
@@ -312,18 +308,18 @@ wiring for the quota line) — kept below for record, not as an open list.
 Recorded at agent-tui#49 (open), found by driving the actual binary, not by
 reading the source. Confirmed still present at `b00db9b`, 2026-08-16:
 
-- **Bare launch exits 1 instead of opening.** `./keelson` with no flags and
+- **Bare launch exits 1 instead of opening.** `./estate` with no flags and
   no `$AGENT_SUPERVISOR_REPO` set prints `no supervisor to connect to: set
   -supervisor-repo, $AGENT_SUPERVISOR_REPO, or -mcp-cmd` and exits 1. Jon's
   stated acceptance criterion is that the bare command opens the app; this
   has already caused one false "it doesn't work" conclusion (with a
   different script) and would repeat it here. Verified: `go build -o
-  /tmp/keelson-check ./cmd/keelson && /tmp/keelson-check` exits 1.
+  /tmp/estate-check ./cmd/estate && /tmp/estate-check` exits 1.
 - **The board pane says it's unavailable with no `-ledger`.** Reaching it
   by `[f2]` from inside the shell (as opposed to `-board`, which refuses to
   launch at all without `-ledger`) renders `! unavailable` / `no -ledger
   (or $AGENT_TUI_LEDGER) configured -- point it at a COPY of the ledger to
-  use the board` (`cmd/keelson/main.go`'s `boardUnavailable` string) rather
+  use the board` (`cmd/estate/main.go`'s `boardUnavailable` string) rather
   than degrading further or explaining how to fix it in-pane.
 - **The cost panel's quota line has no current quota source wired in.** It
   renders `unknown (no quota source)` for harnesses `ccusage` cannot
@@ -343,7 +339,7 @@ reading the source. Confirmed still present at `b00db9b`, 2026-08-16:
   **False as of `56513a2`, corrected 2026-08-23 (estate-loop/b-docs-stale
   sweep, pass 2) — same correction as the "Chat" section above, missed
   here on the first sweep pass.** `chat.ClaudeCodeSource` (agent-tui#99)
-  reads real Claude Code CLI session transcripts and is what `cmd/keelson`
+  reads real Claude Code CLI session transcripts and is what `cmd/estate`
   actually wires in, falling back to `FixtureSource` only when genuinely
   unconfigured; sending is built (agent-tui#104) and Chat is a
   multi-participant room with `@`-mentions (agent-tui#114). This bullet's
@@ -372,9 +368,9 @@ to be zero.
   panes. A sidebar built that way corrupts the state it displays.
 - **Acceptance for any renderer: `lanes.sh` output is byte-identical with
   the app running and not running.**
-  `scripts/verify-lanes-unaffected.sh <agent-supervisor-repo> <keelson-binary>`
+  `scripts/verify-lanes-unaffected.sh <agent-supervisor-repo> <estate-binary>`
   is the checked proof — it spins up an isolated tmux server, snapshots
-  `lanes.sh --json`, runs keelson in its own window of the same session,
+  `lanes.sh --json`, runs estate in its own window of the same session,
   snapshots again, and diffs.
 - **Every state the supervisor emits must be nameable.** A state with no
   glyph must not silently read as idle. `internal/lane/variants.go`'s

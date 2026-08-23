@@ -1,4 +1,4 @@
-module github.com/jonhill90/keelson
+module github.com/jonhill90/agent-tui
 
 go 1.25.0
 

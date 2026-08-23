@@ -1,6 +1,6 @@
 // Package sshserver serves an existing tea.Model over SSH using
 // charmbracelet/wish (agent-tui#67) -- it never renders anything itself and
-// never knows this is keelson's shell.Model specifically; cmd/keelson wires
+// never knows this is estate's shell.Model specifically; cmd/estate wires
 // that in as a Handler. wish is the adopt-vs-build answer named by #67's own
 // brief: it exists specifically to serve Bubble Tea apps over SSH, is in the
 // same GitHub org as Bubble Tea (github.com/charmbracelet), MIT licensed,
@@ -53,7 +53,7 @@ type Config struct {
 	// Insecure, if true, admits any client with no key check at all.
 	// ListenAndServe requires this to be set explicitly when AuthorizedKeys
 	// is empty specifically so an open listener can never be the silent
-	// default -- see cmd/keelson's -ssh-insecure flag, which logs a loud
+	// default -- see cmd/estate's -ssh-insecure flag, which logs a loud
 	// warning every time this is true.
 	Insecure bool
 	// New builds the model+options for each connecting session.
@@ -104,7 +104,7 @@ func ListenAndServe(ctx context.Context, cfg Config) error {
 }
 
 // MakeOptions exposes wish/bubbletea's per-session tea.ProgramOptions (pty
-// size, output writer, etc.) so cmd/keelson's Handler can append its own
+// size, output writer, etc.) so cmd/estate's Handler can append its own
 // (tea.WithAltScreen, matching the local launch path in main.go) without
 // this package needing to know what those are.
 func MakeOptions(sess ssh.Session) []tea.ProgramOption {

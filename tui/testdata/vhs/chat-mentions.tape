@@ -1,11 +1,11 @@
 # Visual QA for agent-tui#114: Chat as a room -- the composer's @-mention
-# gate, driven through the real shell binary (cmd/keelson), not asserted
+# gate, driven through the real shell binary (cmd/estate), not asserted
 # from a unit test alone.
 #
 # fakemcp (cmd/fakemcp) now answers "sessions" as well as "session_send" --
 # see its own doc comment -- with a fixed, deterministic two-lane roster:
 # "alice" (state busy -- running) and "bob" (state dead -- known, but not
-# running). That gives buildParticipantsFetch (cmd/keelson/chat.go) a real
+# running). That gives buildParticipantsFetch (cmd/estate/chat.go) a real
 # participant list to join against, without a live agent-supervisor daemon.
 #
 # Mutation-checked in both directions, per agent-tui#114's own verification
@@ -22,7 +22,7 @@
 #
 # Run:
 #   go build -o /tmp/fakemcp ./cmd/fakemcp
-#   go build -o /tmp/atui-chat-mentions ./cmd/keelson
+#   go build -o /tmp/atui-chat-mentions ./cmd/estate
 #   vhs testdata/vhs/chat-mentions.tape
 Output testdata/vhs/out/chat-mentions.gif
 Set FontSize 13

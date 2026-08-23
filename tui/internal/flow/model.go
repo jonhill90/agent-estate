@@ -9,8 +9,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jonhill90/keelson/internal/board"
-	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 // motionInterval drives ONLY the pipeline header's travelling marker -- a
@@ -19,7 +19,7 @@ import (
 // the cheap way to give it without repeating #28's mistake (a faster
 // gh/ledger poll starving agent-supervisor#144's shared budget). Model owns
 // NO Fetcher of its own and runs no fetch loop at all -- see WithSnapshot
-// below and this package's own doc comment: cmd/keelson's board.Fetcher is
+// below and this package's own doc comment: cmd/estate's board.Fetcher is
 // read exactly once per tick, by board.Model, and shell.Model pushes its
 // result into this pane too. A second independent fetch loop here would
 // double every gh/ledger call agent-tui#28 already sized against a shared

@@ -1,6 +1,6 @@
 # Visual QA for agent-b3.md's fix: SPEC-shell.md S7's sending half --
 # internal/chat.Sender wired against agent-supervisor#508/#509's
-# session_send, driven through the real shell binary (cmd/keelson), not a
+# session_send, driven through the real shell binary (cmd/estate), not a
 # unit test claiming it works.
 #
 # The MCP side is cmd/fakemcp (this repo's own new fixture, see its own
@@ -16,7 +16,7 @@
 #
 # Run:
 #   go build -o /tmp/fakemcp ./cmd/fakemcp
-#   go build -o /tmp/atui-chat-send ./cmd/keelson
+#   go build -o /tmp/atui-chat-send ./cmd/estate
 #   vhs testdata/vhs/chat-send.tape
 Output testdata/vhs/out/chat-send.gif
 Set FontSize 13

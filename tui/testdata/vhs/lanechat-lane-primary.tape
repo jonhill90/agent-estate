@@ -23,7 +23,7 @@
 #     constraint that fake data must never be mistakable for live state.
 #
 # Run:
-#   go build -o /tmp/atui-lanechat-lp ./cmd/keelson
+#   go build -o /tmp/atui-lanechat-lp ./cmd/estate
 #   vhs testdata/vhs/lanechat-lane-primary.tape
 Output testdata/vhs/out/lanechat-lane-primary.gif
 Set FontSize 13

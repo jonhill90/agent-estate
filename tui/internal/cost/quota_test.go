@@ -52,7 +52,7 @@ func TestParseQuotaSummary_NoMatchingLinesIsEmptyNotNil(t *testing.T) {
 
 // TestFetchQuotaSummary_ExecFailureIsUnknown covers "quota.sh may be
 // untracked on this machine" (as#227, the brief's own citation): a runner
-// that cannot even exec the binary must not crash keelson, and must not be
+// that cannot even exec the binary must not crash estate, and must not be
 // mistaken for a harness with legitimately zero quota pressure.
 func TestFetchQuotaSummary_ExecFailureIsUnknown(t *testing.T) {
 	run := func(args []string) ([]byte, int, error) {

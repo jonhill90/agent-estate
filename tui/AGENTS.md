@@ -23,35 +23,47 @@ docs-stale-sweep worktree).** Re-checked in this pass: the Layout table below
 The Known defects section's `6942926` re-verification above still stands
 unchanged; not re-walked in this pass.
 
-**Naming: decided. The product is `steading`** (agent-tui#42, seven rounds,
-~60 candidates checked). Jon rejected `keelson` (real collision:
-`akapril/keelson`, a near-identical local-first AI-session workbench) and
-said to keep looking for "an untaken gem" before falling back to `loom`
-(which collides with three separate agent orchestrators, 12–74 stars each).
-`steading` is that gem: `gh api users/steading` and
-`gh api repos/jonhill90/steading` both 404 (free), `npm view steading`
-404s (free), and `gh search repos steading` returns zero purpose
-collisions — re-verified 2026-08-20, the day this was applied. `steading.com`
-and `steading.dev` are now registered (checked the same day; both were
-reported free as of the 2026-08-16 round-4 check, so this changed in the
-four days between), which is a real cost but not disqualifying — GitHub org,
-`jonhill90/<name>`, npm, and search-purpose-collision are the signals that
-discriminate real conflict from mere squatting, per every round's own
-methodology, and `steading` clears all four. A steading is a farmstead and
-all its outbuildings — the whole working holding, not a single machine —
-which matches what this product actually is (rail, board, cost, gallery,
-memory, chat, workflows) better than a renderer-technology name ever could.
-**This is a naming decision, not a rename.** The Go module, `cmd/`
-directory and binary stay `keelson` — a leftover of agent-tui#38's overnight
-rename pass — and the GitHub repo stays `jonhill90/agent-tui`, both
-deliberately, because mixing the naming call with the mechanical rename
-would make this PR unreviewable (agent-tui#42's own brief). Prose in this
-repo's docs should now say `steading` where the earlier text said "TODO" or
-"unsettled"; code identifiers are unchanged and issue references below keep
-the `agent-tui#NN` form because that is the repo they point at. TODO(rename):
-a follow-on change should move the module path, `cmd/` directory, binary
-name, and GitHub repo to `steading` in one pass — not done here, not
-blocking here. Measured cost: `git grep -o -i agent-tui | wc -l` on this
+**Naming: superseded, 2026-08-23. The product is the Estate**, binary
+`estate`. Full history, kept rather than erased, because a naming decision
+worth recording once is worth recording twice:
+
+Round one (agent-tui#42, seven rounds, ~60 candidates checked): Jon
+rejected `keelson` (real collision: `akapril/keelson`, a near-identical
+local-first AI-session workbench) and said to keep looking for "an untaken
+gem" before falling back to `loom` (which collides with three separate
+agent orchestrators, 12–74 stars each). `steading` was that gem: `gh api
+users/steading` and `gh api repos/jonhill90/steading` both 404 (free),
+`npm view steading` 404s (free), and `gh search repos steading` returned
+zero purpose collisions — verified 2026-08-20, the day it was applied.
+`steading.com` and `steading.dev` were registered by then (a real cost, not
+disqualifying — GitHub org, `jonhill90/<name>`, npm, and
+search-purpose-collision are the signals that discriminate real conflict
+from mere squatting). A steading is a farmstead and all its
+outbuildings — the whole working holding, not a single machine — which
+matched what this product is (rail, board, cost, gallery, memory, chat,
+workflows) better than a renderer-technology name. That round was
+deliberately a **naming decision, not a rename**: the Go module, `cmd/`
+directory and binary stayed `keelson` — a leftover of agent-tui#38's
+overnight rename pass — and the GitHub repo stayed `jonhill90/agent-tui`,
+both on purpose, because mixing the naming call with the mechanical rename
+would have made that PR unreviewable. A `TODO(rename)` was left for the
+follow-on mechanical move, explicitly not done in that pass.
+
+Round two, today: Jon retired `keelson` outright (he named it as something
+he actively dislikes) and chose **the Estate** over bare "Estate" and over
+"Agent Estate" — `gh search repos agent-estate` returns
+`brightdata/real-estate-ai-agent`, `prolinkinfo/RealEstateCRM`,
+`liberusoftware/real-estate-laravel`; "estate agent" reads as *realtor* in
+British English to anyone outside this estate, which "Agent Estate" would
+too. This is the mechanical rename round one's own `TODO(rename)` asked
+for — module path, `cmd/` directory, and binary — done in one PR
+(agent-tui#117's go-public checklist forced the timing: publishing pins the
+module path, and renaming after the flip breaks any consumer import),
+landing on `estate` rather than `steading`, because `steading` is retired
+by the same decision that retires `keelson`. Prose in this repo's docs now
+says "the Estate" (capital E, lowercase article) wherever it said
+`steading`; code identifiers use `estate`. Issue references below keep the
+`agent-tui#NN` form because that is the repo they point at. Measured cost: `git grep -o -i agent-tui | wc -l` on this
 branch, 2026-08-20 — 489 occurrences across 81 tracked files (`git grep -l
 -i agent-tui | wc -l`), up from round 1's 438/72. **Re-measured 2026-08-23
 against `390c99a`: 696 occurrences across 154 tracked files** — the repo has
@@ -65,7 +77,7 @@ retraction of the earlier count.
 
 ## What this repo is
 
-This repo (Go module `github.com/jonhill90/keelson` — see the naming note
+This repo (Go module `github.com/jonhill90/agent-tui` — see the naming note
 above) is one terminal application: a left nav sidebar modelled 1:1 on the
 hill90 web app's own nav (`internal/nav`, `docs/SPEC-shell.md`), with the
 task board, cost panel, glyph gallery and the lane rail over
@@ -74,7 +86,7 @@ same process (`internal/shell`, agent-tui#38; the nav sidebar replacing the
 rail as the fixed left column is `docs/SPEC-shell.md`'s S3). The name
 `agent-tui` describes the rendering technology (Go +
 [Bubble Tea](https://github.com/charmbracelet/bubbletea)), not the product —
-the product's name is `steading` (agent-tui#42; see the naming note above).
+the product's name is the Estate (see the naming note above).
 It is a **viewer with one write path** (session
 attach/detach/add/remove, see below) — same discipline as
 `agent-supervisor`'s own `scripts/supervisor/laneview/`. It never shells out
@@ -106,7 +118,7 @@ policy only.
 ## Layout
 
 ```
-cmd/keelson/         one tea.NewProgram entry point, running internal/shell.Model (see docs/SPEC.md)
+cmd/estate/         one tea.NewProgram entry point, running internal/shell.Model (see docs/SPEC.md)
 internal/admin/      Admin section -- Services/Profiles/Users/Dependencies/Settings, read-only first (SPEC-shell.md S11)
 internal/agents/     Agents view -- id, model, state, current task, cost, assembled from the same seams internal/rail already reads (SPEC-shell.md S6)
 internal/apidocs/    Docs -> API Docs -- hill90-app's own OpenAPI document as an operation table
@@ -141,7 +153,7 @@ scripts/             verify-lanes-unaffected.sh — the rail's non-interference 
 ```
 
 `cmd/` also now has `cmd/demo`, `cmd/fakemcp`, `cmd/mergepr`, `cmd/navwalk`
-and `cmd/prverdict` alongside `cmd/keelson` — the CLI entry points for
+and `cmd/prverdict` alongside `cmd/estate` — the CLI entry points for
 `internal/mergepr`, `internal/navwalk` and `internal/prverdict` above, plus
 a demo harness and a fake MCP server used by tests. None of the five is a
 second `tea.NewProgram` site (see "What NOT to do here" below); they are
@@ -162,7 +174,7 @@ sweep, pass 2) — the Layout table row above this paragraph was already
 fixed by the prior sweep pass (#119); this specific paragraph was missed.**
 `agent-tui#99` (commit `5997399`) shipped `internal/chat/claudecode.go`'s
 `ClaudeCodeSource`, which reads real Claude Code CLI session transcripts,
-and `internal/chat/fallback.go`'s `FallbackSource`, which `cmd/keelson`
+and `internal/chat/fallback.go`'s `FallbackSource`, which `cmd/estate`
 wires in: try `ClaudeCodeSource` first, fall back to `FixtureSource` only
 when the real source reports itself genuinely unconfigured.
 `FixtureSource` is the last-resort fallback now, not the only
@@ -174,14 +186,14 @@ fuller history.
 ## Adapter discipline
 
 Every package that touches the outside world is behind a function-typed or
-interface-typed seam, supplied by `cmd/keelson/main.go`:
+interface-typed seam, supplied by `cmd/estate/main.go`:
 
 | seam | package | what it hides |
 |---|---|---|
 | `rail.Fetcher`, `rail.SessionsFetcher` | `internal/rail` | the MCP `lanes`/`sessions` tool calls |
 | `session.Interface` | `internal/session` | attach/detach/add/remove, each one `mcp.Client.CallTool` |
-| `cost.Fetcher` (built in `cmd/keelson/cost.go`) | `internal/cost` | shelling out to `ccusage` |
-| `board.Fetcher`-shaped functions (`cmd/keelson/board.go`) | `internal/board` | `gh` CLI calls and a read-only `sqlite3` ledger open |
+| `cost.Fetcher` (built in `cmd/estate/cost.go`) | `internal/cost` | shelling out to `ccusage` |
+| `board.Fetcher`-shaped functions (`cmd/estate/board.go`) | `internal/board` | `gh` CLI calls and a read-only `sqlite3` ledger open |
 | `theme.Theme` / `theme.Load` | `internal/theme` | every colour, border and chrome literal |
 | `chat.Source` | `internal/chat` | ACP `session/update` thread content -- **false as of `56513a2`, corrected 2026-08-23 (pass 2): `chat.ClaudeCodeSource` + `chat.FallbackSource` are the real implementations shipped (agent-tui#99); `chat.FixtureSource` is now only the last-resort fallback, not "today's" source** |
 
@@ -201,9 +213,9 @@ go test ./...
 ```
 
 All three verified green on `main` `6942926` (29 packages with tests,
-`cmd/keelson`, `internal/sshserver`, and the `tools/` spikes have none).
+`cmd/estate`, `internal/sshserver`, and the `tools/` spikes have none).
 **Stale as of `390c99a`, re-measured 2026-08-23 (`find . -name '*_test.go'`):**
-`cmd/keelson` now has five `_test.go` files (`ledger_copy_test.go`,
+`cmd/estate` now has five `_test.go` files (`ledger_copy_test.go`,
 `cost_test.go`, `docs_test.go`, `secrets_test.go`, `supervisor_test.go`) and
 `tools/memoryvariants/spike` has one (`main_test.go`); only
 `internal/sshserver` still genuinely has none. CI
@@ -217,8 +229,8 @@ still build and test standalone with no supervisor checkout present.
 To run the app against a real supervisor:
 
 ```
-go build -o keelson ./cmd/keelson
-AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./keelson
+go build -o estate ./cmd/estate
+AGENT_SUPERVISOR_REPO=/path/to/agent-supervisor ./estate
 ```
 
 The board, cost and gallery screens are panes reached with `[f2]`/`[f3]`/
@@ -330,28 +342,30 @@ agent-tui#49 is **closed** (2026-08-16). All three of the defects it
 originally recorded are fixed as of `6942926`, 2026-08-23 — re-confirmed by
 running the actual binary and by grep, not by memory of the issue text:
 
-1. ~~**Bare launch exits 1.**~~ Fixed. `./keelson` with no flags and no
+1. ~~**Bare launch exits 1.**~~ Fixed. `./estate` with no flags and no
    `$AGENT_SUPERVISOR_REPO` now opens in a degraded state on the Home pane
-   instead of exiting (`cmd/keelson/main.go`'s `supervisorRepoResolved`
-   handling, commented "agent-tui#49 item 1: a bare `keelson` must open,
-   never exit 1"). Confirmed by running the built binary under a real TTY
-   (`script -q ... ./keelson`): it renders the sidebar and Home pane rather
-   than printing the old `no supervisor to connect to` message and exiting.
+   instead of exiting (`cmd/estate/main.go`'s `supervisorRepoResolved`
+   handling, commented "agent-tui#49 item 1: a bare `estate` must open,
+   never exit 1" — comment text updated for the rename; the issue's own
+   original wording said `keelson`). Confirmed by running the built binary
+   under a real TTY (`script -q ... ./estate`): it renders the sidebar and
+   Home pane rather than printing the old `no supervisor to connect to`
+   message and exiting.
 2. ~~**The board pane reports itself unavailable with no `-ledger`.**~~
-   Fixed. `resolveLedgerSource` (`cmd/keelson/board.go`) now auto-discovers
+   Fixed. `resolveLedgerSource` (`cmd/estate/board.go`) now auto-discovers
    and stages a copy of the live ledger when `-ledger`/`$AGENT_TUI_LEDGER`
    is unset (`defaultLedgerLivePath` + `newLedgerCopier`); the old hard
    `boardOK == false` refusal only fires now when discovery genuinely finds
    nothing, not merely because the flag was omitted.
 3. ~~**The cost panel's quota line is unwired from the current quota
    source.**~~ Fixed. `internal/cost/quota.go` now shells `quota.sh` out via
-   `QuotaRunner`/`ExecQuotaRunner`, wired from `cmd/keelson/main.go`'s
+   `QuotaRunner`/`ExecQuotaRunner`, wired from `cmd/estate/main.go`'s
    `resolvedQuotaBin` (`<supervisor-repo>/scripts/supervisor/quota.sh`).
    `renderQuota`'s `unknown (no quota source)` string (`internal/cost/
    view.go`) is now the honest fallback for a genuinely missing/failing
    `quota.sh`, not a structurally unwired source — confirmed by `grep -rn
    "quota.sh" --include='*.go' .`, which now returns matches throughout
-   `internal/cost` and `cmd/keelson`.
+   `internal/cost` and `cmd/estate`.
 
 This section is now a clean bill of health for agent-tui#49, not an open
 punch list — if a regression reopens any of the three, restore the numbered

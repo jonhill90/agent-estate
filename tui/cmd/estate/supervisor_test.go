@@ -7,7 +7,7 @@ import (
 )
 
 // TestDiscoverSupervisorRepo_WalksUpFromCWD reproduces agent-tui#49 item 1's
-// blocking defect: `keelson` run bare, from a directory unrelated to any
+// blocking defect: `estate` run bare, from a directory unrelated to any
 // repo checkout except that a supervisor checkout happens to be an
 // ancestor, must find it rather than requiring -supervisor-repo.
 func TestDiscoverSupervisorRepo_WalksUpFromCWD(t *testing.T) {

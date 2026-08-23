@@ -12,9 +12,9 @@
 // tasks) -- not a second ledger reader, a second projection of the one
 // this module already knows how to open safely. Reuses board.LedgerRunner/
 // board.ExecRunner (the same `sqlite3 -json` + `PRAGMA query_only=1`
-// pattern board.ReadTaskRows documents) and cmd/keelson's own ledgerSource
+// pattern board.ReadTaskRows documents) and cmd/estate's own ledgerSource
 // (the auto-copying "must be a copy, never the live file" seam agent-tui#49
-// item 2 built) -- see cmd/keelson/library.go for the composition.
+// item 2 built) -- see cmd/estate/library.go for the composition.
 //
 // PROGRESSIVE DISCLOSURE is a hard constraint here, the same one
 // internal/knowledge's own package doc comment states for the vault: this
@@ -32,7 +32,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/jonhill90/keelson/internal/board"
+	"github.com/jonhill90/agent-tui/internal/board"
 )
 
 // View names one of the ledger's own three item-listing views -- these are
@@ -157,7 +157,7 @@ FROM %s i JOIN prompts p ON p.id = i.prompt_id`, view)
 	return q
 }
 
-// ReadItems queries dbPath (a ledger.sqlite3 COPY -- see cmd/keelson/
+// ReadItems queries dbPath (a ledger.sqlite3 COPY -- see cmd/estate/
 // library.go's own doc comment for why this package never opens the live
 // file) for one view, optionally narrowed by weight/status. view/weight/
 // status are checked against this file's own allow-lists before they ever

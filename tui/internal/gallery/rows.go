@@ -13,7 +13,7 @@
 // toward ccusage, applied here to data that was already in the binary.
 package gallery
 
-import "github.com/jonhill90/keelson/internal/lane"
+import "github.com/jonhill90/agent-tui/internal/lane"
 
 // Cell is one glyph shown for one state from one source (a shipped
 // Variant, or a not-yet-shipped Candidate).

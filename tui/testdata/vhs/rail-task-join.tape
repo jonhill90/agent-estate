@@ -3,7 +3,7 @@
 #
 # Drives the REAL binary against the REAL agent-supervisor MCP server and a
 # COPY of this box's own live ledger.sqlite3 (auto-discovered the same way
-# cmd/keelson/main.go's resolveLedgerSource does for any bare launch --
+# cmd/estate/main.go's resolveLedgerSource does for any bare launch --
 # agent-tui#49 item 2). No fixture, no fake sessions/lanes source.
 Output testdata/vhs/out/rail-task-join.gif
 Set FontSize 14
@@ -13,7 +13,7 @@ Set Shell "bash"
 
 Hide
 Type "export AGENT_SUPERVISOR_REPO=${AGENT_SUPERVISOR_REPO:-$HOME/source/repos/Personal/agent-supervisor}" Enter
-Type "go build -o /tmp/atui-rail ./cmd/keelson && clear" Enter
+Type "go build -o /tmp/atui-rail ./cmd/estate && clear" Enter
 Sleep 3s
 Show
 

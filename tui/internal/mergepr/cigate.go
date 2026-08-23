@@ -36,7 +36,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/jonhill90/keelson/internal/prverdict"
+	"github.com/jonhill90/agent-tui/internal/prverdict"
 )
 
 // Runner is the same seam shape as prverdict.Runner and internal/board's

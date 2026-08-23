@@ -56,9 +56,9 @@ pushing later rows down.
 ## Regenerating
 
 ```
-go build -o /tmp/atui-lanechat-lp ./cmd/keelson && vhs testdata/vhs/lanechat-lane-primary.tape
-go build -o /tmp/atui-lanechat-rp ./cmd/keelson && vhs testdata/vhs/lanechat-room-primary.tape
-go build -o /tmp/atui-lanechat-ul ./cmd/keelson && vhs testdata/vhs/lanechat-unified-list.tape
+go build -o /tmp/atui-lanechat-lp ./cmd/estate && vhs testdata/vhs/lanechat-lane-primary.tape
+go build -o /tmp/atui-lanechat-rp ./cmd/estate && vhs testdata/vhs/lanechat-room-primary.tape
+go build -o /tmp/atui-lanechat-ul ./cmd/estate && vhs testdata/vhs/lanechat-unified-list.tape
 ```
 
 Tapes write to `testdata/vhs/out/` (gitignored, scratch); the copies embedded

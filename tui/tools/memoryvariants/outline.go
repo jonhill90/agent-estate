@@ -7,7 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jonhill90/keelson/internal/theme"
+	"github.com/jonhill90/agent-tui/internal/theme"
 )
 
 const outlineImplies = "not spatial at all -- grouped by type, each fact's Related links nested one level under it, collapsed by default. Implies: zero layout/physics/drag code, scrolls naturally (bubbles/viewport territory, agent-tui#29's own fix), reads fastest for 'what does X relate to' -- but it is a list, not the grabbable graph Jon actually asked for, and this is the honest 'the terminal wants a list here, not a graph' answer the issue's own open question invites"

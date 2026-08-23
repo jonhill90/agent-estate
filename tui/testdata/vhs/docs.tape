@@ -28,7 +28,7 @@ Set Shell "bash"
 Hide
 Type "export AGENT_SUPERVISOR_REPO=${AGENT_SUPERVISOR_REPO:-$HOME/source/repos/Personal/agent-supervisor}" Enter
 Type "export HILL90_APP_REPO=${HILL90_APP_REPO:-$HOME/source/repos/Personal/hill90-app}" Enter
-Type "go build -o /tmp/atui-docs ./cmd/keelson && clear" Enter
+Type "go build -o /tmp/atui-docs ./cmd/estate && clear" Enter
 Sleep 3s
 Show
 

@@ -16,7 +16,7 @@ import (
 // model, richer than "the one agent this thread belongs to" (#114's own
 // framing). Built from the estate's live lane state, the same "sessions"
 // MCP read internal/agents.Fetcher already projects into a Row (see
-// cmd/keelson/chat.go's buildParticipantsFetch) -- never a hardcoded list,
+// cmd/estate/chat.go's buildParticipantsFetch) -- never a hardcoded list,
 // per the issue's own explicit requirement.
 type Participant struct {
 	Name    string // the mention token, without "@" -- lane.Lane.Name
@@ -32,7 +32,7 @@ type Participant struct {
 }
 
 // ParticipantsFetcher retrieves every addressable participant in the
-// estate right now. cmd/keelson wires this from the exact same "sessions"
+// estate right now. cmd/estate wires this from the exact same "sessions"
 // MCP call internal/rail and internal/agents already make (AGENTS.md's
 // adapter discipline: never a second reader of the same tmux/ledger state).
 // nil is a valid, silent "no participant source configured" default -- the

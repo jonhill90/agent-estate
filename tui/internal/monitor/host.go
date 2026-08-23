@@ -12,7 +12,7 @@
 // no host metrics at all. This package is new plumbing, not a second
 // reader of a source another pane already owns -- the one exception is
 // agent state counts, which reuse rail.SessionsFetcher exactly as
-// internal/dashboard.Stats.AgentsByState already does (cmd/keelson's own
+// internal/dashboard.Stats.AgentsByState already does (cmd/estate's own
 // buildMonitorFetch composes it, never a second MCP connection).
 package monitor
 
@@ -88,7 +88,7 @@ type Snapshot struct {
 }
 
 // Fetcher retrieves the current Snapshot -- the one adapter seam this
-// package's Model depends on (AGENTS.md's discipline). cmd/keelson composes
+// package's Model depends on (AGENTS.md's discipline). cmd/estate composes
 // the real implementation from ExecHostRunner plus an existing
 // rail.SessionsFetcher; every test in this package builds a fake instead.
 type Fetcher func() (Snapshot, error)

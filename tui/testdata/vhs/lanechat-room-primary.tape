@@ -17,7 +17,7 @@
 #   - "FIXTURE DATA" is visible on screen.
 #
 # Run:
-#   go build -o /tmp/atui-lanechat-rp ./cmd/keelson
+#   go build -o /tmp/atui-lanechat-rp ./cmd/estate
 #   vhs testdata/vhs/lanechat-room-primary.tape
 Output testdata/vhs/out/lanechat-room-primary.gif
 Set FontSize 13

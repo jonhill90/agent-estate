@@ -80,7 +80,7 @@ type AvailableModel struct {
 }
 
 // Paths names every file this package reads -- one field per harness, so
-// a caller (cmd/keelson, or a test) can point each at a fixture
+// a caller (cmd/estate, or a test) can point each at a fixture
 // independently rather than this package hardcoding "~/.codex/..." itself.
 // An empty path means "do not read this one" -- Load treats it exactly
 // like a missing file (Connection.Configured == false), never an error.
