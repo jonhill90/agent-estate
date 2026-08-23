@@ -48,10 +48,9 @@ if [ -z "${BODY// }" ]; then
   exit 2
 fi
 
-BODY="$BODY" RAW="$RAW" CONTEXT="$CONTEXT" TAG="$TAG" STATE="$STATE" python3 - <<'PY'
+BODY="$BODY" RAW="$RAW" CONTEXT="$CONTEXT" TAG="$TAG" STATE="$STATE" HERE="$HERE" python3 - <<'PY'
 import os, sys, time, hashlib
-sys.path.insert(0, os.path.join(os.path.dirname(os.environ.get("STATE","")), ""))
-sys.path.insert(0, "/Users/jon/source/repos/Personal/agent-supervisor/scripts/supervisor")
+sys.path.insert(0, os.environ["HERE"])
 from core import Ledger
 
 body    = os.environ["BODY"].strip()
