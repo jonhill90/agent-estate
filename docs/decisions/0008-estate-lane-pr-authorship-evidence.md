@@ -5,19 +5,26 @@ generated:
   at: 2026-08-23T18:50:00-04:00
 ---
 
-# 0007 — An estate-lane's PR authorship: self-run cross-check now, an independent poller as the real fix, on an explicit trigger
+# 0008 — An estate-lane's PR authorship: self-run cross-check now, an independent poller as the real fix, on an explicit trigger
 
 `2026-08-23`. Decided by the director loop
 (`estate-loop/director-authorship-design.md`), not implemented here — see
 "Sequencing" for what's delegated and to whom.
 
-**Numbering note:** `agent-supervisor#539`'s own branch also adds a
-`0006` (`docs/decisions/0006-estate-lane-dispatch-identity.md`), and this
-repo's `main` only goes up to `0005` as of this writing. Whichever of
-`#539` and `agent-supervisor#533` merges second will collide on `0006` —
-flagging this here so the merging lane renumbers rather than silently
-overwriting the other's file. This document takes `0007` since both `0006`
-candidates are still open.
+**Numbering note, resolved:** three decision docs forked from the same
+`origin/main` (still at `0005`) all claimed low numbers —
+`agent-supervisor#533`'s `0006-agent-tui-merges-into-agent-supervisor.md`,
+`agent-supervisor#539`'s `0006-estate-lane-dispatch-identity.md`, and this
+one. Tiebreak: **whichever PR was opened first keeps the number it
+claimed; every later one increments.** By `gh pr view --json createdAt`:
+`#533` (21:24 UTC) keeps `0006`; `#539` (21:46 UTC) becomes `0007` —
+stated on both PRs so the losing side renumbers rather than both waiting
+on the other; this document (`#547`, 22:52 UTC) is `0008`. On the general
+case: this is the first collision of its kind in this repo's five prior
+decision docs, and it happened on an unusually high-velocity day
+(concurrent migration decisions). Treating it as an **accepted, occasional
+cost** — a rename-and-recommit when it happens — rather than adding a
+reservation convention for something that has occurred once.
 
 ## The question
 
@@ -130,21 +137,67 @@ structurally identical deferral.
    deliberately preserves") — restated here as a condition of this
    decision, not just a description of the diff, so it is checked at
    review time, not assumed.
-3. **File the independent-poller work now, with an owner and a trigger —
-   not "later."** Filed alongside this document:
-   `agent-supervisor#546`. Learn from the `worktree.sh gc` precedent
-   directly: the trigger is not a date, it is **"before the next
-   migration or bulk-PR event that would put load-bearing weight on this
-   mechanism again"** — the `agent-estate` migration currently gated on
-   quiesce is itself that event, so this should land before step 7 of
-   `agent-supervisor#541`'s runbook (repo deletion), not after.
+3. **File the independent-poller work now, with a single, checkable
+   trigger — not "later," not "when we get round to it."** Filed
+   alongside this document: `agent-supervisor#546`, due **before
+   `agent-supervisor#541`'s step 7 runs** (`agent-tui` repo deletion —
+   the migration's own point of no return). This is checkable by anyone,
+   pass or fail, at any time: has step 7 run yet, and if so, is `#546`
+   merged. Learned directly from the `worktree.sh gc` precedent, which
+   had no such condition and sat unwired for 12 days.
 4. **A lane running `register-pr-dispatch-self.sh` on itself remains
    observable, not just trusted.** `test_merge_pr_estate_lane_identity.sh`'s
    existing case 3 (unregistered PRs still refuse byte-for-byte) is the
    right shape of evidence; ask whoever reviews `#539` to also confirm a
-   case where the branch/SHA cross-check itself fails (a lane's worktree
-   is NOT on the claimed PR's branch) and the registration correctly
-   refuses rather than silently degrading to "trust the number."
+   case where the cross-check itself fails (a lane's worktree does not
+   hold the claimed PR's commits) and the registration correctly refuses
+   rather than silently degrading to "trust the number."
+
+## What the stopgap does not prove, even after the SHA fix
+
+**Found after this decision was first written, and it sharpens rather than
+overturns it:** `estate:2` built a working attack against the
+branch-*name* version of the cross-check — `git checkout -b
+<the-PR's-branch-name>` on an unrelated local branch satisfies a name
+comparison with no relationship to the PR's actual content, and a
+*reviewing* lane doing the completely ordinary `git worktree add <path>
+<branch>` to read a diff would register itself as that PR's author under
+the same check. `estate:5` is switching to a commit-SHA comparison in
+response.
+
+**The SHA fix closes the name-forgery attack. It does not close the
+second one, and this document should not pretend otherwise:** a worktree
+holding the PR's exact commits proves the worktree *has* them — it does
+not prove *this lane produced them*. A reviewing lane's worktree, checked
+out from the PR's own branch specifically so it *can* read the diff (the
+completely normal shape of every review this session — `estate:3`'s own
+`/tmp/at140-review` worktree earlier today is exactly this pattern),
+satisfies a SHA comparison identically to the lane that actually authored
+those commits. **This residual gap is accepted, not solved, by this
+decision** — accepted because `#539`'s reviewers are not the ones running
+`register-pr-dispatch-self.sh` on themselves as a matter of the tool's
+intended use (a reviewer's own worktree registering itself as a PR's
+author would require someone to run the authorship-claiming script from a
+review worktree, which is a misuse of the tool, not its normal path) — but
+it is a real, load-bearing reason `#546`'s independent poller is not
+optional follow-up work, and whoever reviews `#539` should confirm the
+tool's own usage guidance says plainly not to run it from a worktree
+checked out to review someone else's work.
+
+## What happens to the stopgap once `#546` lands
+
+**Removed, not kept as a second source.** A self-run check and an
+independent poller answering the same question is not defense in depth —
+it is two mechanisms of different evidentiary strength both feeding the
+same trusted fact, where the weaker one can still be the one consulted.
+Once `#546`'s poller is live and has resolved `agent-supervisor#531`
+(the concretely-confirmed case) and passed its own review,
+`register-pr-dispatch-self.sh`'s self-run path should be retired —
+either removed outright or demoted to a diagnostic a lane can run to
+predict what the poller will find, never itself the fact `merge-pr.sh`
+trusts. State this now rather than let "we'll decide later" become the
+reason the weaker mechanism outlives its reason for existing, the exact
+failure this whole decision is trying to avoid.
 
 ## Sequencing
 
