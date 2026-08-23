@@ -1,1 +1,2 @@
 {"date":"2026-08-22","source":"PR #96 (w5f.md)","verdict":"RENDERS","notes":"Was STUB in agent-tui#94's walk. Now internal/workflows -- real dispatch history from the ledger, ~30 rows, real lanes/statuses/timestamps, confirmed correct via TestWorkflowsRouteShowsRealWorkflowsPane."}
+{"date":"2026-08-23","source":"navcheck.md full-walk re-drive (main)","verdict":"RENDERS","notes":"Unchanged -- real dispatch history rows from the ledger."}

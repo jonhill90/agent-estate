@@ -1,1 +1,2 @@
 {"date":"2026-08-22","source":"walk agent-b5.md re-run (main)","verdict":"RENDERS","notes":"Unchanged -- real docker container list, real dependency check (gh/sqlite3/npx/tmux/docker/python3 all yes)."}
+{"date":"2026-08-23","source":"navcheck.md full-walk re-drive (main)","verdict":"RENDERS","notes":"Unchanged -- real docker container list, real dependency check."}

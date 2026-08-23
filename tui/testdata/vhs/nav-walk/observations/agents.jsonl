@@ -1,1 +1,2 @@
 {"date":"2026-08-22","source":"walk agent-b5.md re-run (main)","verdict":"RENDERS","notes":"Unchanged -- real STATE/MODE data for live lanes (e.g. estate:build-2..5 busy, Hill90:supervisor), MODE column showing local for real running lanes."}
+{"date":"2026-08-23","source":"navcheck.md full-walk re-drive (main)","verdict":"RENDERS","notes":"Unchanged -- real live lane rows (estate:director, build-2..5, tui-demo:bash), real STATE/MODE columns."}

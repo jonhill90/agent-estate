@@ -1,1 +1,2 @@
 {"date":"2026-08-22","source":"walk agent-b5.md re-run (main)","verdict":"RENDERS","notes":"Unchanged -- same shared page, dependency table visible."}
+{"date":"2026-08-23","source":"navcheck.md full-walk re-drive (main)","verdict":"RENDERS","notes":"Unchanged -- same shared admin page, rail highlight correctly on Dependencies."}

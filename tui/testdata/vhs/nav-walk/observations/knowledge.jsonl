@@ -1,1 +1,2 @@
 {"date":"2026-08-22","source":"PR #95 / walk agent-b5.md re-run","verdict":"RENDERS","notes":"Was STUB in agent-tui#94's walk. Fixed by PR #95 (wire the \"knowledge\" nav route to internal/knowledge) -- confirmed still real after later merges: 64 real vault facts listed (memory-conventions, python-package-manager-uv, ...), \"sort: index (64 facts)\" footer."}
+{"date":"2026-08-23","source":"navcheck.md full-walk re-drive (main)","verdict":"RENDERS","notes":"Unchanged -- 69 real vault facts now (was 64), expected drift in a continuously-written vault, not a regression."}

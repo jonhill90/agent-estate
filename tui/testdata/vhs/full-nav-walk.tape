@@ -33,7 +33,11 @@ Screenshot testdata/vhs/out/00-home.png
 
 Down
 Enter
-Sleep 4s
+# agent-tui#94/#97's own root-cause writeup measured real elapsed time at
+# 17s-25s+ (gh-latency-bound, never hangs) -- 4s only ever caught
+# "not fetched yet", not a rendering bug. Confirmed live during
+# navcheck.md: a 30s recheck showed real figures every time 4s did not.
+Sleep 30s
 Screenshot testdata/vhs/out/01-dashboard.png
 
 Down
@@ -48,7 +52,9 @@ Screenshot testdata/vhs/out/03-chat.png
 
 Down
 Enter
-Sleep 4s
+# Same board.ExecRunner fetch path and the same gh-latency timing as
+# Dashboard above -- 4s only ever caught "(loading)".
+Sleep 30s
 Screenshot testdata/vhs/out/04-tasks.png
 
 Down
@@ -170,3 +176,4 @@ Down
 Enter
 Sleep 2s
 Screenshot testdata/vhs/out/23-admin-settings.png
+Sleep 1s
