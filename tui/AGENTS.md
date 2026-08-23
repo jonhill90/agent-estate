@@ -384,10 +384,10 @@ in place.
   the blocker is no longer "the fix does not exist." What's still true,
   re-confirmed live against `56513a2`: `grep -rn "\.Attach(\|\.Detach("
   --include='*.go' .` outside test files is still zero matches — agent-tui
-  itself has not added a caller since #202 landed. Restoring the keys is
-  now unblocked on the supervisor side but still not done here; do not
-  read this note as permission to restore them without checking #202's own
-  shape first.
+  itself has not added a caller since `agent-supervisor#202` landed.
+  Restoring the keys is now unblocked on the supervisor side but still not
+  done here; do not read this note as permission to restore them without
+  checking `agent-supervisor#202`'s own shape first.
 - Do not point `-ledger` at the live supervisor's `ledger.sqlite3`. It is
   always opened read-only, but the flag help and `internal/board/ledger.go`
   both document why a copy is still required.

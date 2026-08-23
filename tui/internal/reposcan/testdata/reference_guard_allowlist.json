@@ -1,0 +1,4 @@
+{
+  "_doc": "Escape hatch for internal/reposcan's cross-repo reference guard (TestBareIssueReferencesResolveInThisRepository). Add an entry only when a bare '#N' citation is a legitimate historical reference to a number that no longer resolves in this repository (e.g. the issue/PR it named was later deleted, not merely renumbered) -- not for numbers that are simply missing from testdata/known_references.txt because that manifest is stale (refresh it instead, see scripts/refresh-known-references.sh). Each entry must explain why the number cannot resolve.",
+  "allowed": []
+}

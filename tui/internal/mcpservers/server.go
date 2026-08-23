@@ -5,8 +5,11 @@
 // application uses to talk to agent-supervisor) -- this package never
 // imports it and is not related to it beyond the three letters.
 //
-// S9's own note: "lanes launch --strict-mcp-config (agent-tui#494), so
-// this is about what a lane MAY be given, not what it inherits." That is
+// S9's own note: "lanes launch --strict-mcp-config
+// (jonhill90/agent-supervisor#494), so this is about what a lane MAY be
+// given, not what it inherits." (Corrected 2026-08-23: previously cited as
+// `agent-tui#494`, which 404s in this repo -- wrong repo, not just a
+// missing prefix.) That is
 // a claim about CONFIGURATION, not about a live session's actual runtime
 // environment -- Load (below) reads exactly the configuration Claude Code
 // itself reads before it ever launches an agent, the same file

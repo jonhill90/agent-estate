@@ -165,18 +165,23 @@ loop, not the skills themselves. Do not treat an uninvoked skill as dead code.
 ## S9 — MCP servers view
 
 List configured MCP servers, scope (global/project), and reachability. Note
-lanes launch `--strict-mcp-config` (#494), so this is about what a lane *may*
-be given, not what it inherits.
+lanes launch `--strict-mcp-config` (`jonhill90/agent-supervisor#494`), so
+this is about what a lane *may* be given, not what it inherits.
 
-**Correction, 2026-08-23 (estate-loop/b-docs-stale sweep, pass 2):** `#494`
-above is a bare, unqualified issue number — it does not exist in this repo
-(`gh issue view 494` here 404s; this repo's own issues top out around
-#117). It resolves in `agent-supervisor` (`jonhill90/agent-supervisor#494`,
-"Lanes inherit the operator's entire MCP surface at launch", closed by
-`agent-supervisor#495`, merged). Same defect already present in
-`internal/mcpservers/server.go`'s own doc comment, which cites it as
-`agent-tui#494` — wrong repo, not just missing the prefix; not corrected
-here since that is a `.go` file, out of this sweep's scope.
+**Correction, 2026-08-23 (estate-loop/b-docs-stale sweep, pass 2):** the
+citation above was previously a bare, unqualified `#494` — it does not
+exist in this repo (`gh issue view 494` here 404s; this repo's own issues
+top out around #117). It resolves in `agent-supervisor`
+(`jonhill90/agent-supervisor#494`, "Lanes inherit the operator's entire MCP
+surface at launch", closed by `agent-supervisor#495`, merged). Same defect
+was present in `internal/mcpservers/server.go`'s own doc comment, which
+cited it as `agent-tui#494` — wrong repo, not just missing the prefix.
+
+**Fixed in place, 2026-08-23 (agent-tui#117 go-public checklist):** both
+this line and `internal/mcpservers/server.go`'s comment now cite
+`jonhill90/agent-supervisor#494` directly; `internal/reposcan`'s
+cross-repo reference guard (`TestBareIssueReferencesResolveInThisRepository`)
+guards the Markdown side against this recurring.
 
 ## S10 — Connectors view
 
