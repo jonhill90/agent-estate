@@ -605,6 +605,21 @@ gc)
   # own tree. `git worktree remove` refuses it anyway; refusing here says so
   # in gc's own words rather than as a git error.
   SELF=$(git -C "$PWD" rev-parse --show-toplevel 2>/dev/null || true)
+  # Scope every candidate to $REPO/.worktrees/ before any liveness/age/dirty/
+  # merged check runs (agent-supervisor#527 follow-up). `git worktree list`
+  # answers for every worktree git knows about for this repo, wherever on
+  # disk it was registered -- a temp dir, or an unrelated state directory
+  # another loop uses for its own operational memory. Measured on the live
+  # estate: two registered worktrees sat outside any repo's .worktrees/ tree,
+  # one under a macOS temp dir, one under ~/.local/state/estate-loop holding
+  # a DIFFERENT loop's own check.log/briefs/owner.md -- a live sweep reaching
+  # that one would delete state, not disposable code. Scoped to .worktrees/
+  # -- sweeping outside it (temp dirs, other loops' state directories) is a
+  # separate decision, not made here. Resolved with `cd ... && pwd -P`, same
+  # as `_gc_is_live`'s `target_real`, so a symlinked path (e.g. macOS's
+  # /var -> /private/var) compares equal rather than failing the scope check
+  # for a candidate that is genuinely inside .worktrees/.
+  WORKTREES_ROOT_REAL=$(cd "$REPO/.worktrees" 2>/dev/null && pwd -P) || WORKTREES_ROOT_REAL=""
   # Parse `worktree list --porcelain`: records are blank-line separated,
   # each starting with `worktree <path>`, optionally followed by a
   # `branch refs/heads/<name>` line (absent for detached/bare entries).
@@ -644,6 +659,28 @@ gc)
     fi
     if [ ! -d "$p" ]; then
       echo "worktree: gc skipping $p -- registered but missing on disk (run 'git worktree prune')" >&2
+      skipped=$((skipped + 1))
+      continue
+    fi
+    # Scope filter, before any liveness/age/dirty/merged check -- see the
+    # comment on WORKTREES_ROOT_REAL above for why this exists and what it
+    # deliberately leaves undecided. An empty WORKTREES_ROOT_REAL (no
+    # .worktrees/ under $REPO at all) must never be treated as "matches
+    # everything" -- an unquoted empty pattern with a trailing /* glob is
+    # just "/*", which would match any absolute path. Nothing is in scope
+    # when the root itself does not exist.
+    p_real=$(cd "$p" 2>/dev/null && pwd -P) || p_real="$p"
+    in_scope=1
+    if [ -z "$WORKTREES_ROOT_REAL" ]; then
+      in_scope=0
+    else
+      case "$p_real" in
+        "$WORKTREES_ROOT_REAL"|"$WORKTREES_ROOT_REAL"/*) : ;;
+        *) in_scope=0 ;;
+      esac
+    fi
+    if [ "$in_scope" -eq 0 ]; then
+      echo "worktree: gc skipping $p -- outside $REPO/.worktrees/ (scoped to .worktrees/ -- sweeping outside it is a separate decision, not made here)" >&2
       skipped=$((skipped + 1))
       continue
     fi

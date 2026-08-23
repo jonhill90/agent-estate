@@ -32,8 +32,6 @@ require_dest() {
 echo "worktree.sh"
 
 D=$(mktemp -d)
-export WORKTREE_ROOT="$D/roots"
-mkdir -p "$WORKTREE_ROOT"
 
 # gc (agent-supervisor#478) now checks tmux pane occupancy before removing
 # anything. Every gc call in this suite runs against a private, throwaway
@@ -64,6 +62,25 @@ git -C "$REPO" add file.txt
 git -C "$REPO" commit -q -m "initial"
 git -C "$REPO" push -q -u origin main
 git -C "$REPO" remote set-head origin main >/dev/null 2>&1 || true
+
+# `new`'s worktrees must land inside $REPO/.worktrees/ -- gc's scope filter
+# (agent-supervisor#527 follow-up) now refuses anything outside it, so every
+# fixture below that goes through `new` has to actually resolve there for
+# the rest of this suite's gc assertions to mean what they say. Set only now
+# that $REPO exists: an earlier `mkdir -p "$WORKTREE_ROOT"` would make `git
+# clone` above refuse a non-empty target directory.
+export WORKTREE_ROOT="$REPO/.worktrees"
+mkdir -p "$WORKTREE_ROOT"
+# Ignore .worktrees/ in $REPO's own status -- confirmed directly that git
+# reports a directory holding a linked worktree as an untracked path in the
+# repo that owns it (`?? .worktrees/`), which would make every `guard`
+# assertion below see the shared checkout as permanently dirty the moment
+# the first .worktrees/ fixture exists, for a reason unrelated to what
+# `guard` is meant to catch.
+echo ".worktrees/" >> "$REPO/.gitignore"
+git -C "$REPO" add .gitignore
+git -C "$REPO" commit -q -m "ignore .worktrees/"
+git -C "$REPO" push -q origin main
 
 # --- new: produces an isolated, checked-out worktree on its own branch ----
 # stdout only -- git worktree's own progress text goes to stderr and must not
@@ -715,6 +732,96 @@ git -C "$REPO" checkout -q -- file.txt
 bash "$WT" done "$STASH_A" >/dev/null 2>&1
 bash "$WT" done "$STASH_B" >/dev/null 2>&1
 bash "$WT" done "$STASH_D" >/dev/null 2>&1
+
+# --- gc: scoped to $REPO/.worktrees/ (agent-supervisor#527 follow-up) ------
+# `git worktree list --porcelain` answers for every worktree git knows about
+# for this repo, wherever it was registered on disk -- not just
+# $REPO/.worktrees/. Measured on the live estate: two registered worktrees
+# sat outside any repo's .worktrees/ tree, one under a macOS temp dir, one
+# under an unrelated loop's own state directory holding that loop's own
+# operational memory files -- a live sweep reaching either would delete
+# state or an unrelated tree, not disposable code.
+#
+# Two REAL registered worktrees, both otherwise fully gc-eligible (clean,
+# merged, unoccupied, old enough via the same age-floor-lowered gc478
+# helper the rest of this file already uses): one registered OUTSIDE
+# $REPO/.worktrees/ (a sibling mktemp -d, standing in for a temp dir or
+# another loop's own state directory), one INSIDE it. The outside one must
+# never be offered, even though it would otherwise qualify for removal; the
+# inside one must still be.
+OUTSIDE_ROOT=$(mktemp -d)
+OUTSIDE_DEST="$OUTSIDE_ROOT/scope-outside"
+git -C "$REPO" worktree add -q -b lane/527-scope-outside "$OUTSIDE_DEST" origin/main
+echo "outside-scope change" >> "$OUTSIDE_DEST/file.txt"
+git -C "$OUTSIDE_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "outside-scope merged work"
+git -C "$OUTSIDE_DEST" push -q origin lane/527-scope-outside
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/527-scope-outside
+git -C "$REPO" push -q origin main
+git -C "$OUTSIDE_DEST" fetch -q origin
+
+INSIDE_DEST="$WORKTREE_ROOT/scope-inside"
+git -C "$REPO" worktree add -q -b lane/527-scope-inside "$INSIDE_DEST" origin/main
+echo "inside-scope change" >> "$INSIDE_DEST/file.txt"
+git -C "$INSIDE_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "inside-scope merged work"
+git -C "$INSIDE_DEST" push -q origin lane/527-scope-inside
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/527-scope-inside
+git -C "$REPO" push -q origin main
+git -C "$INSIDE_DEST" fetch -q origin
+
+OUTSIDE_REAL=$(cd "$OUTSIDE_DEST" && pwd -P)
+INSIDE_REAL=$(cd "$INSIDE_DEST" && pwd -P)
+
+scope_dry=$(gc478 gc --dry-run "$REPO" origin/main 2>&1); scope_dry_rc=$?
+want_exit "gc --dry-run (scope test) exits 0" "$scope_dry_rc" 0 "$scope_dry"
+if grep -q "would remove $OUTSIDE_REAL" <<<"$scope_dry"; then bad "gc --dry-run never offers a worktree registered outside \$REPO/.worktrees/" "$scope_dry"; else ok "gc --dry-run never offers a worktree registered outside \$REPO/.worktrees/"; fi
+if grep -q "gc skipping $OUTSIDE_REAL -- outside .*\.worktrees/" <<<"$scope_dry"; then ok "the skip names the .worktrees/ scope, not some other reason"; else bad "the skip names the .worktrees/ scope, not some other reason" "$scope_dry"; fi
+if grep -q "would remove $INSIDE_REAL" <<<"$scope_dry"; then ok "gc --dry-run still offers a worktree registered inside \$REPO/.worktrees/"; else bad "gc --dry-run still offers a worktree registered inside \$REPO/.worktrees/" "$scope_dry"; fi
+
+scope_out=$(gc478 gc "$REPO" origin/main 2>&1); scope_rc=$?
+want_exit "gc (scope test) exits 0" "$scope_rc" 0 "$scope_out"
+if [ -d "$OUTSIDE_DEST" ]; then ok "gc leaves the outside-.worktrees/ worktree in place, no matter how clean/merged/old/unoccupied it looks"; else bad "gc leaves the outside-.worktrees/ worktree in place" "$OUTSIDE_DEST was removed: $scope_out"; fi
+if [ -d "$INSIDE_DEST" ]; then bad "gc removes the inside-.worktrees/ worktree" "$INSIDE_DEST still present: $scope_out"; else ok "gc removes the inside-.worktrees/ worktree"; fi
+
+# --- MUTATION: disable the .worktrees/ scope filter -> the outside
+# candidate (still on disk -- correctly preserved above) must go RED,
+# proving the assertion above is pinned to the scope filter and not to
+# something else already refusing this candidate (e.g. liveness or the
+# merge predicate).
+MUT_SCOPE="$D/worktree-mutant-scope.sh"
+mut_rc=0
+python3 - "$WT" "$MUT_SCOPE" <<'PY' || mut_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''    in_scope=1
+    if [ -z "$WORKTREES_ROOT_REAL" ]; then
+      in_scope=0
+    else
+      case "$p_real" in
+        "$WORKTREES_ROOT_REAL"|"$WORKTREES_ROOT_REAL"/*) : ;;
+        *) in_scope=0 ;;
+      esac
+    fi'''
+assert marker in text, "scope-filter block not found -- script shape changed"
+assert text.count(marker) == 1, "scope-filter block not unique -- script shape changed"
+open(dst, "w").write(text.replace(marker, "    in_scope=1", 1))
+PY
+if [ "$mut_rc" -ne 0 ]; then
+  bad "setup: patched a copy of worktree.sh with the .worktrees/ scope filter disabled" "could not patch $WT (exit $mut_rc)"
+else
+  ok "setup: patched a copy of worktree.sh with the .worktrees/ scope filter disabled"
+  chmod +x "$MUT_SCOPE"
+  mut_scope_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=0 bash "$MUT_SCOPE" gc "$REPO" origin/main 2>&1)
+  if [ ! -d "$OUTSIDE_DEST" ]; then
+    ok "mutation confirmed: disabling the .worktrees/ scope filter lets gc remove a worktree registered outside it (the outside candidate's GREEN assertion would now be RED)"
+  else
+    bad "mutation confirmed: disabling the .worktrees/ scope filter lets gc remove a worktree registered outside it" "expected removal on the mutant, $OUTSIDE_DEST is still present: $mut_scope_out"
+  fi
+fi
+rm -rf "$OUTSIDE_ROOT" 2>/dev/null
+git -C "$REPO" worktree prune >/dev/null 2>&1
 
 # Tear down the private throwaway tmux server -- never the default socket,
 # scoped to $RT and gated by assert_isolated_tmux, same as test_lane_done.sh.
