@@ -44,7 +44,17 @@ on screen — its own render/key logic is unchanged, only its screen
 position moved (`scripts/verify-lanes-unaffected.sh`). There are now 20
 `Pane*` constants in `internal/shell/model.go` (`PaneHome` through
 `PaneSecrets`, counted directly from the `const ( ... )` block), most
-reached via the nav sidebar rather than an f-key. `[f1]`-`[f6]` still map
+reached via the nav sidebar rather than an f-key.
+
+**Stale, re-measured 2026-08-23 (estate-loop/b-docs-stale sweep, pass 2,
+against `56513a2`):** the `const ( ... )` block now has **24** `Pane*`
+constants, not 20 (counted directly, same method as before). At least
+three of the four-constant growth is `agent-tui#115`/`#122`'s
+`PaneLaneChatLanePrimary`, `PaneLaneChatRoomPrimary`, and
+`PaneLaneChatUnifiedList` (the combined Lanes+Chat surface variants),
+added since this count was last taken; not re-deriving whether the
+original 20 was itself exact at the time it was written, only that 24 is
+the live count now. `[f1]`-`[f6]` still map
 to exactly the original six — Home/Board/Cost/Gallery/Flow/Chat
 (`internal/shell/model.go`'s key-handling `switch`, `case "f1"` through
 `case "f6"`) — everything added since (Agents, Skills, MCP Servers,
@@ -90,6 +100,12 @@ now 7 files, 2,926 lines total — `model.go` (1,349), `model_test.go` (120),
 `model_teatest_test.go` (352), `mouse.go` (272), `mouse_test.go` (214),
 `nav_teatest_test.go` (492), `theme_test.go` (127). `mouse.go`/`mouse_test.go`
 and the two `_teatest_test.go` files did not exist at `b00db9b`:
+
+**Stale again, re-measured 2026-08-23 (estate-loop/b-docs-stale sweep, pass
+2, against `56513a2`):** same 7 files, now **3,022 lines total** —
+`model.go` grew from 1,349 to **1,445** (the `agent-tui#114`/`#115`/`#122`
+chat-room and lanechat-variant wiring landed since the count above), every
+other file in the package unchanged.
 
 - **`resize`** sizes the rail first, to its fixed `rail.RailWidth` (28
   columns); the rail's own *rendered* width (border/padding included) is
@@ -326,6 +342,13 @@ All items below verified 2026-08-16 against `b00db9b` unless noted:
    needs `agent-supervisor#189` (client-identity plumbing) first. Still
    true as of `390c99a` — see `AGENTS.md`'s "What NOT to do here", which
    re-confirms zero `.Attach(`/`.Detach(` callers outside test files.
+   **Partially stale, corrected 2026-08-23 (estate-loop/b-docs-stale
+   sweep, pass 2):** `agent-supervisor#189` closed 2026-08-16, fixed by
+   `agent-supervisor#202` — the client-identity prerequisite this item
+   names is resolved. Zero `.Attach(`/`.Detach(` callers still holds as of
+   `56513a2` (re-grepped), so the keys are still not restored — just no
+   longer blocked on the supervisor side, only on someone doing the
+   agent-tui-side work.
 2. **Chat has no live transport.** `internal/chat` is wired into the shell
    (agent-tui#20, `[f6]`) and renders correctly, but the only `chat.Source`
    shipped is `chat.FixtureSource` — no lane in this estate runs on a

@@ -45,6 +45,18 @@ table/list are scrolling widgets, not layout. `tools/memoryvariants/layout.go`
 is a ~90-line Fruchterman-Reingold spring embedder (same algorithm family
 d3-force implements), not a library gap papered over.
 
+**First half false as of `56513a2`, corrected 2026-08-23 (estate-loop/
+b-docs-stale sweep, pass 2) — flagged but left unfixed by the prior sweep
+pass (#119) as low priority given this doc's own throwaway-spike framing;
+fixed now since the brief for this pass asks for every false claim
+corrected, not just high-priority ones.** `bubbles` is now in `go.mod`
+(`github.com/charmbracelet/bubbles v1.0.0`) — added for `internal/chat`'s
+viewport-scrollable transcript/thread list (agent-tui#20), unrelated to
+this spike. The second half of the sentence stands: `bubbles` still ships
+no graph/force-layout primitive, so the point this paragraph is making
+(hand-rolling the spring embedder was necessary, not a library gap papered
+over) is unaffected.
+
 ## The spike: is mouse drag usable in Bubble Tea on a character grid?
 
 `tools/memoryvariants/spike/` is a real interactive `tea.NewProgram` (not

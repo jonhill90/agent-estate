@@ -157,6 +157,20 @@ today because no lane in this estate runs on a structured transport
 why a screen-scraped transcript was rejected instead, and what a real
 `Source` needs.
 
+**False as of `56513a2`, corrected 2026-08-23 (estate-loop/b-docs-stale
+sweep, pass 2) — the Layout table row above this paragraph was already
+fixed by the prior sweep pass (#119); this specific paragraph was missed.**
+`agent-tui#99` (commit `5997399`) shipped `internal/chat/claudecode.go`'s
+`ClaudeCodeSource`, which reads real Claude Code CLI session transcripts,
+and `internal/chat/fallback.go`'s `FallbackSource`, which `cmd/keelson`
+wires in: try `ClaudeCodeSource` first, fall back to `FixtureSource` only
+when the real source reports itself genuinely unconfigured.
+`FixtureSource` is the last-resort fallback now, not the only
+implementation. Sending is also built (`agent-tui#104`, commit `6942926`)
+and Chat is a multi-participant room with `@`-mention addressing
+(`agent-tui#114`, commit `a0ad626`) — see `docs/SPEC-shell.md`'s S7 for the
+fuller history.
+
 ## Adapter discipline
 
 Every package that touches the outside world is behind a function-typed or
@@ -169,7 +183,7 @@ interface-typed seam, supplied by `cmd/keelson/main.go`:
 | `cost.Fetcher` (built in `cmd/keelson/cost.go`) | `internal/cost` | shelling out to `ccusage` |
 | `board.Fetcher`-shaped functions (`cmd/keelson/board.go`) | `internal/board` | `gh` CLI calls and a read-only `sqlite3` ledger open |
 | `theme.Theme` / `theme.Load` | `internal/theme` | every colour, border and chrome literal |
-| `chat.Source` | `internal/chat` | ACP `session/update` thread content -- `chat.FixtureSource` today, a real ACP/pi-rpc client once one exists |
+| `chat.Source` | `internal/chat` | ACP `session/update` thread content -- **false as of `56513a2`, corrected 2026-08-23 (pass 2): `chat.ClaudeCodeSource` + `chat.FallbackSource` are the real implementations shipped (agent-tui#99); `chat.FixtureSource` is now only the last-resort fallback, not "today's" source** |
 
 **Why this matters practically:** every package's tests construct a fake
 implementing the seam, not a real subprocess. If you add a feature that needs
@@ -361,6 +375,19 @@ in place.
   still declares both methods; nothing in `internal/rail` or
   `internal/shell` calls them as of `6942926` (`grep -rn "\.Attach(\|\.Detach("
   --include='*.go' .`, outside test files: zero matches).
+
+  **Status update, 2026-08-23 (estate-loop/b-docs-stale sweep, pass 2):**
+  `agent-supervisor#189` is now **closed** (`stateReason: COMPLETED`,
+  2026-08-16), fixed by `agent-supervisor#202` ("session_attach/
+  session_detach name which tmux client acts, and refuse to guess",
+  merged). The supervisor-side prerequisite this bullet names is resolved —
+  the blocker is no longer "the fix does not exist." What's still true,
+  re-confirmed live against `56513a2`: `grep -rn "\.Attach(\|\.Detach("
+  --include='*.go' .` outside test files is still zero matches — agent-tui
+  itself has not added a caller since #202 landed. Restoring the keys is
+  now unblocked on the supervisor side but still not done here; do not
+  read this note as permission to restore them without checking #202's own
+  shape first.
 - Do not point `-ledger` at the live supervisor's `ledger.sqlite3`. It is
   always opened read-only, but the flag help and `internal/board/ledger.go`
   both document why a copy is still required.

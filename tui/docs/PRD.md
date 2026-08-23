@@ -8,6 +8,14 @@ code" section. Every dated claim below is checked against `origin/main`
 (agent-tui#42, decided 2026-08-20) — see `AGENTS.md`'s naming note for the
 reasoning and evidence.
 
+**First full re-verification, 2026-08-23 (estate-loop/b-docs-stale sweep,
+pass 2, against `56513a2`) — never previously touched by a truth pass.**
+This file is ~40 commits and a week behind its `b00db9b` stamp; every
+per-feature "Status" block below was checked against the current tree, not
+against another doc. Corrections are inline, dated, next to what they
+replace, per this repo's own "Dated claims" convention — the paragraph
+above is kept as the original baseline.
+
 ## The one-line framing
 
 A real terminal application — like Claude Code, Codex CLI, or `pi` — for
@@ -46,6 +54,14 @@ is filed as `agent-supervisor#189` and requires a supervisor-side change
 identity) before the agent-tui side can be restored honestly. See
 `AGENTS.md`'s "What NOT to do here."
 
+**Status update, 2026-08-23 (pass 2):** `agent-supervisor#189` is closed
+(fixed by `agent-supervisor#202`, merged 2026-08-16) — the supervisor-side
+prerequisite this paragraph names now exists. `attach`/`detach` are still
+not restored on the agent-tui side (`grep -rn "\.Attach(\|\.Detach("
+--include='*.go' .` outside test files: zero matches, re-checked against
+`56513a2`) — still half-shipped, but the remaining half is agent-tui-side
+work now, not a wait on the supervisor.
+
 ### Kanban board
 
 "A fancy GUI that looks like a kanban board. I am really going for some eye
@@ -61,6 +77,14 @@ Navigating to it with no `-ledger` configured currently renders an
 "unavailable" message rather than degrading further or explaining the fix
 in-pane — agent-tui#49, see `docs/SPEC.md`'s "Known defects."
 
+**False as of `56513a2`, corrected 2026-08-23 (pass 2).** agent-tui#49 is
+closed; this defect is fixed. `resolveLedgerSource`
+(`cmd/keelson/board.go`) now auto-discovers and stages a copy of the live
+ledger when `-ledger`/`$AGENT_TUI_LEDGER` is unset — the "unavailable"
+render now only fires when discovery genuinely finds nothing, not merely
+because the flag was omitted. See `AGENTS.md`'s "Known defects" for the
+fix evidence.
+
 ### Cost panel
 
 Per-harness spend and quota pressure, sourced from `ccusage`, with an
@@ -73,6 +97,13 @@ with its compact form also composed inside the rail (`cost.RenderCompact`).
 Its "unknown" quota fallback is honest, but it does not yet read
 `scripts/supervisor/quota.sh` — agent-tui#49, see `docs/SPEC.md`'s "Known
 defects."
+
+**False as of `56513a2`, corrected 2026-08-23 (pass 2).** agent-tui#49 is
+closed; this defect is fixed. `internal/cost/quota.go` now shells
+`quota.sh` out via `QuotaRunner`/`ExecQuotaRunner`, wired from
+`cmd/keelson/main.go`'s `resolvedQuotaBin` — `grep -rn "quota.sh"
+--include='*.go' .` now returns matches throughout `internal/cost` and
+`cmd/keelson` (zero matches when this status was written).
 
 ### Glyph gallery, with Nerd Font support
 
@@ -105,15 +136,48 @@ paid for once. What remains: a live `chat.Source` — no lane in this estate
 runs on a structured transport (`acp`/`pi-rpc`) yet, so every thread shown
 today is visibly synthetic fixture data, not a real transcript.
 
+**False as of `56513a2`, corrected 2026-08-23 (pass 2).** The "what
+remains" line is no longer accurate. `chat.ClaudeCodeSource`
+(agent-tui#99, commit `5997399`) reads real Claude Code CLI session
+transcripts and is what `cmd/keelson` wires in via `FallbackSource`,
+falling back to `FixtureSource` only when genuinely unconfigured — threads
+shown today are real, not synthetic, whenever a Claude Code project
+directory resolves. Sending is also built (agent-tui#104, commit
+`6942926`): `chat.Sender` is implemented over `session_send`
+(`agent-supervisor#509`). Chat is further a multi-participant room with
+`@`-mention addressing (agent-tui#114, commit `a0ad626`), not just
+one-thread-per-lane. What remains now: nothing structural — see
+`docs/SPEC-shell.md`'s S7 for the fuller history.
+
 ### Knowledge / memory viewer
 
 Read-first, layered over the estate's existing memory vault rather than
 owning a second store. **Status:** not started. No package or branch exists
 for this as of `b00db9b`.
 
+**False as of `56513a2`, corrected 2026-08-23 (pass 2).** `internal/knowledge`
+exists and is wired as `PaneKnowledge` (agent-tui#87, commit `922400b`) —
+reads `$AGENT_MEMORY_VAULT`'s `agent/index.md` + `agent/facts/<slug>.md`,
+progressive disclosure. Read-first, no write path, matching the "layered
+over" framing above. Status is now shipped, not not-started.
+
 ### AgentBox sandboxes
 
 Spinning up isolated environments for harnesses. **Status:** not started.
+
+**Partially stale as of `56513a2`, corrected 2026-08-23 (pass 2).** The
+container driver itself is still not started — no code exists anywhere in
+this repo, `agent-supervisor`, or `AgentBox` that runs a supervised agent
+inside a container (`docs/SPEC-agentbox-execution-mode.md` is the design
+brief for that, not an implementation). What has shipped since this line
+was written: the *interface* a driver would plug into —
+`internal/session/execution_mode.go`'s `ExecutionMode`
+(`local`/`container`) and `AddWithMode` — plus the Agents view's MODE
+column (`internal/agents.modeFor`), both from `docs/SPEC-shell.md`'s S12.
+`AddWithMode(..., ExecutionContainer)` returns `ErrContainerNotImplemented`
+rather than silently faking a local subprocess, so "not started" is still
+the honest read for the actual sandbox capability — only the seam it will
+eventually plug into now exists.
 
 ### As close to 1:1 with the hill90 web harness as possible
 
@@ -157,3 +221,15 @@ launch fails closed instead of degrading; the board and cost panes fail
 closed rather than helpfully when navigated to without their own
 prerequisites) — see `docs/SPEC.md` for exactly how far the code is from
 the rest of this intent today. This is intent, dated 2026-08-16.
+
+**Stale, corrected 2026-08-23 (pass 2).** "One process, a persistent rail"
+is itself now the outdated architecture — the fixed left column is
+`internal/nav`'s sidebar (`docs/SPEC-shell.md` S1-S3), with the rail
+reached as a routed pane. Of the "what remains" list: all three of
+agent-tui#49's defects are closed (see the Kanban board / cost panel
+corrections above and `AGENTS.md`'s "Known defects"), and chat has a live
+transport, sending, and multi-participant rooms (see the Chat correction
+above). Only attach/detach genuinely remains, and only on the agent-tui
+side — the supervisor-side blocker (`agent-supervisor#189`) closed
+2026-08-16. What "done" looks like for the anchor feature specifically has
+not changed; everything else in this list has been reached.

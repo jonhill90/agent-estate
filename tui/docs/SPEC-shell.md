@@ -4,6 +4,21 @@ Build order is the item order. **Each item is independently shippable as one
 PR.** An agent picks the lowest-numbered item that is specified here and not
 yet built, builds exactly that, opens a PR, stops.
 
+**Status note, 2026-08-23 (estate-loop/b-docs-stale sweep, pass 2).** The
+"lowest-numbered item not yet built" instruction above describes this
+file's original state; it is no longer the situation on `main`. Checked
+against `cmd/keelson/main.go`'s own wiring (`56513a2`): **S1 through S11
+are all built and composed into the one running shell** —
+`internal/nav`/`internal/shell` (S1-S3), `internal/board`/`internal/cost`/
+`internal/rail` (S4), `internal/stub` (S5), `internal/agents` (S6),
+`internal/chat` (S7, sending included — see its own section below),
+`internal/skills` (S8), `internal/mcpservers` (S9), `internal/connectors`
+(S10), `internal/admin` (S11). S12 (execution mode) has its interface
+shipped, with the container driver itself still unbuilt by design — see
+S12's own note. An agent picking up this file next has no lowest-numbered
+unbuilt item to start from; check with a project owner before treating any
+section below as a live work queue.
+
 ## The target
 
 The requirement: a real TUI with a left nav bar modelled on the hill90 web app —
@@ -23,6 +38,20 @@ Build it 1:1 with the existing web nav first; rearranging comes after.
 - The three screens are selected by mutually-exclusive process flags
   (`-board`, `-cost`), so only one is reachable per launch and nothing on
   screen says the others exist. **That is the bug this spec fixes.**
+
+**Stale, corrected 2026-08-23 (estate-loop/b-docs-stale sweep, pass 2, against
+`56513a2`).** The three LOC counts above and the bug description are the
+pre-S1 baseline this spec was written against and are kept for that
+record, but every S-item below has since shipped — the bug they describe
+no longer exists on `main` (see the per-item status notes below, and
+`AGENTS.md`'s "Not wired into CI, deliberately"'s sibling note for how
+`cmd/keelson/main.go` composes them). Re-measured LOC (`find internal/<pkg>
+-name '*.go' -not -name '*_test.go' | xargs wc -l`, non-test): `internal/rail`
+1,782 (was 1,369), `internal/board` 1,829 (was 2,391 — net smaller despite
+new features, consistent with logic moving out into `internal/flow`/
+`internal/agents` since this baseline), `internal/cost` 992 (was 1,170).
+Not re-measuring `internal/gallery`/`internal/lane`/`internal/mcp` — this
+spec never gave them a baseline number to check.
 
 ---
 
@@ -139,6 +168,16 @@ List configured MCP servers, scope (global/project), and reachability. Note
 lanes launch `--strict-mcp-config` (#494), so this is about what a lane *may*
 be given, not what it inherits.
 
+**Correction, 2026-08-23 (estate-loop/b-docs-stale sweep, pass 2):** `#494`
+above is a bare, unqualified issue number — it does not exist in this repo
+(`gh issue view 494` here 404s; this repo's own issues top out around
+#117). It resolves in `agent-supervisor` (`jonhill90/agent-supervisor#494`,
+"Lanes inherit the operator's entire MCP surface at launch", closed by
+`agent-supervisor#495`, merged). Same defect already present in
+`internal/mcpservers/server.go`'s own doc comment, which cites it as
+`agent-tui#494` — wrong repo, not just missing the prefix; not corrected
+here since that is a `.go` file, out of this sweep's scope.
+
 ## S10 — Connectors view
 
 Provider connections and models. Mirrors web **Connect**.
@@ -176,7 +215,16 @@ exist at all) is `docs/SPEC-agentbox-execution-mode.md`, spec only, no code
 ## Rules for every item
 
 - **Go only.** No shell scripts. The current TUI is 7,010 LOC Go and 110 LOC
-  shell; keep that ratio.
+  shell; keep that ratio. **Stale, re-measured 2026-08-23 (estate-loop/
+  b-docs-stale sweep, pass 2, against `56513a2`):** `find . -name '*.go' |
+  xargs wc -l` now totals **39,741 LOC Go**, `find . -name '*.sh' | xargs wc
+  -l` **183 LOC shell** — the repo has grown roughly 5.7x in Go since this
+  ratio was written (12+ new `internal/` packages: admin, agents,
+  connectors, dashboard, knowledge, lanechat, library, mcpservers, navwalk,
+  prverdict, secrets, skills, and their `cmd/` entry points), while the
+  shell-script side barely moved. The **ratio's intent** — keep new work in
+  Go, do not grow shell scripts — still holds and is not what's stale; only
+  the absolute numbers are.
 - **`go build ./... && go test ./... && go vet ./...` must pass.**
 - **Drive what you build** before claiming it works — launch it in a pty and
   press the keys. Screenshots of the pane in the PR body.

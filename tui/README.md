@@ -18,6 +18,18 @@ lane and session state over MCP and renders it behind a persistent left
 rail, with the task board, cost panel and glyph gallery reachable as panes
 in the same process. Go + [Bubble Tea](https://github.com/charmbracelet/bubbletea).
 
+**False as of `56513a2`, corrected 2026-08-23 (estate-loop/b-docs-stale
+sweep, pass 2) — same staleness as "What it is today" below, missed here
+on the first sweep pass.** The "persistent left rail" framing is the
+pre-`docs/SPEC-shell.md` architecture. The fixed left column today is
+`internal/nav`'s sidebar, modelled 1:1 on the hill90 web app's own nav; the
+rail is a routed pane behind that sidebar's "Lanes" entry, and the content
+reachable as panes now spans board/cost/gallery/chat plus roughly twenty
+more destinations (agents, skills, MCP servers, connectors, admin,
+dashboard, library, monitor, workflows, knowledge, API/platform docs,
+secrets) — see "What it is today" below for the full correction and
+`AGENTS.md`'s Layout table for the complete list.
+
 It consumes the supervisor; it does not import supervisor internals, and the
 supervisor has no opinion about how a human sees it. Either side is
 removable. Full technical design: `docs/SPEC.md`. What the product is for:
@@ -144,6 +156,13 @@ correctly, so the old bindings silently acted on an arbitrary tmux client
 while reporting success. `session.Interface` still declares both methods;
 `agent-supervisor#189` tracks the fix this needs before they can come back
 honestly. See `AGENTS.md` and `docs/SPEC.md` for the detail.
+
+**Status update, 2026-08-23 (estate-loop/b-docs-stale sweep, pass 2):**
+`agent-supervisor#189` is closed (fixed by `agent-supervisor#202`,
+merged) — the supervisor-side client-identity fix this paragraph names as
+the prerequisite now exists. The keys are still not restored (zero
+`.Attach(`/`.Detach(` callers, re-confirmed against `56513a2`); the
+remaining work is on the agent-tui side, not a wait on the supervisor.
 
 Live pickers, all driven by real keys against real state (verified through
 `Model.Update` tests, not merely rendered):
@@ -313,6 +332,15 @@ reading the source. Confirmed still present at `b00db9b`, 2026-08-16:
   lane in this estate runs on a structured transport (`acp`/`pi-rpc`)
   today, so there is nothing real to read yet; see the "Chat" section
   above for what a live `Source` needs.
+
+  **False as of `56513a2`, corrected 2026-08-23 (estate-loop/b-docs-stale
+  sweep, pass 2) — same correction as the "Chat" section above, missed
+  here on the first sweep pass.** `chat.ClaudeCodeSource` (agent-tui#99)
+  reads real Claude Code CLI session transcripts and is what `cmd/keelson`
+  actually wires in, falling back to `FixtureSource` only when genuinely
+  unconfigured; sending is built (agent-tui#104) and Chat is a
+  multi-participant room with `@`-mentions (agent-tui#114). This bullet's
+  premise no longer holds.
 - **No knowledge/memory viewer, no AgentBox sandboxes.** No code exists for
   either as of this SHA. **The knowledge-viewer half is false as of
   `390c99a`, corrected 2026-08-23:** `internal/knowledge` exists and is
