@@ -29,6 +29,9 @@ import (
 	"github.com/jonhill90/keelson/internal/flow"
 	"github.com/jonhill90/keelson/internal/gallery"
 	"github.com/jonhill90/keelson/internal/knowledge"
+	"github.com/jonhill90/keelson/internal/lanechat/laneprimary"
+	"github.com/jonhill90/keelson/internal/lanechat/roomprimary"
+	"github.com/jonhill90/keelson/internal/lanechat/unifiedlist"
 	"github.com/jonhill90/keelson/internal/library"
 	"github.com/jonhill90/keelson/internal/mcpservers"
 	"github.com/jonhill90/keelson/internal/monitor"
@@ -135,6 +138,19 @@ const (
 	// this estate at all) -- see internal/stub.Descriptions' "storage"/
 	// "discord" entries for the reasoning specific to each.
 	PaneSecrets
+	// PaneLaneChatLanePrimary/PaneLaneChatRoomPrimary/PaneLaneChatUnifiedList
+	// are agent-tui#115's three decide-by-variant prototypes for combining
+	// Lanes and Chat into one surface -- each its own real, fixture-backed
+	// pane (internal/lanechat/{laneprimary,roomprimary,unifiedlist}), NOT a
+	// replacement for PaneLanes/PaneChat above, which stay exactly as they
+	// are. Reached only via [f7]/[f8]/[f9] and the -lanechat-* startup
+	// flags (cmd/keelson/main.go) -- none has a nav.Build() route, the same
+	// "no sidebar route yet" state PaneGallery/PaneFlow are already in (see
+	// paneToRoute's own doc comment), because wiring one into the nav tree
+	// would be picking a shape, which this issue explicitly forbids.
+	PaneLaneChatLanePrimary
+	PaneLaneChatRoomPrimary
+	PaneLaneChatUnifiedList
 )
 
 // focus names which region the keyboard currently drives -- the nav
@@ -286,6 +302,18 @@ type Model struct {
 	// secrets is agent-tui#101's Secrets decision (PaneSecrets, above) --
 	// same "optional, wired via With*" shape as apidocs/external.
 	secrets secrets.Model
+
+	// laneChatLanePrimary/laneChatRoomPrimary/laneChatUnifiedList are
+	// agent-tui#115's three variant panes (PaneLaneChatLanePrimary/
+	// PaneLaneChatRoomPrimary/PaneLaneChatUnifiedList, above) -- same
+	// "optional, wired via With*" shape as every other pane in this list,
+	// except each is ALWAYS constructible with no fetcher at all (its own
+	// package's New(), no arguments -- internal/gallery's own shape), so
+	// cmd/keelson wires all three unconditionally rather than guarding on
+	// homeDir/client the way agents/skills/mcpservers above have to.
+	laneChatLanePrimary laneprimary.Model
+	laneChatRoomPrimary roomprimary.Model
+	laneChatUnifiedList unifiedlist.Model
 
 	// boardOK is false when cmd/agent-tui had no -ledger to build a real
 	// board.Fetcher from -- board.go's own -board flag still refuses to
@@ -505,6 +533,17 @@ func (m Model) WithSecrets(s secrets.Model) Model {
 	return m
 }
 
+// WithLaneChatVariants wires agent-tui#115's three decide-by-variant panes
+// in at once (all three always exist, per this file's own doc comment on
+// the fields above) -- one call rather than three With* methods, since a
+// caller wiring one is always wiring all three together.
+func (m Model) WithLaneChatVariants(lp laneprimary.Model, rp roomprimary.Model, ul unifiedlist.Model) Model {
+	m.laneChatLanePrimary = lp
+	m.laneChatRoomPrimary = rp
+	m.laneChatUnifiedList = ul
+	return m
+}
+
 // applyTheme pushes m's current theme/themeNotice into every pane's own
 // WithTheme -- the one place that fans the single shared value out to all
 // four, called from both WithTheme (construction/startup) and the
@@ -531,6 +570,9 @@ func (m Model) applyTheme() Model {
 	m.apidocs = m.apidocs.WithTheme(m.theme, m.themeNotice)
 	m.external = m.external.WithTheme(m.theme, m.themeNotice)
 	m.secrets = m.secrets.WithTheme(m.theme, m.themeNotice)
+	m.laneChatLanePrimary = m.laneChatLanePrimary.WithTheme(m.theme, m.themeNotice)
+	m.laneChatRoomPrimary = m.laneChatRoomPrimary.WithTheme(m.theme, m.themeNotice)
+	m.laneChatUnifiedList = m.laneChatUnifiedList.WithTheme(m.theme, m.themeNotice)
 	return m
 }
 
@@ -540,6 +582,7 @@ func (m Model) Init() tea.Cmd {
 		m.agents.Init(), m.skills.Init(), m.mcpservers.Init(), m.connectors.Init(), m.admin.Init(),
 		m.dashboard.Init(), m.library.Init(), m.monitor.Init(), m.workflows.Init(), m.knowledge.Init(),
 		m.apidocs.Init(), m.external.Init(), m.secrets.Init(),
+		m.laneChatLanePrimary.Init(), m.laneChatRoomPrimary.Init(), m.laneChatUnifiedList.Init(),
 	}
 	if m.boardOK {
 		cmds = append(cmds, m.board.Init(), m.flow.Init())
@@ -607,6 +650,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m.syncPane(PaneFlow), nil
 		case "f6":
 			return m.syncPane(PaneChat), nil
+		// f7-f9 are agent-tui#115's three decide-by-variant panes -- reached
+		// only by key (and their own -lanechat-* startup flags), the same
+		// "no sidebar route" state PaneGallery/PaneFlow's f4/f5 are already
+		// in, deliberately: giving one a nav.Build() route would be picking
+		// a shape, which this issue exists to NOT do.
+		case "f7":
+			return m.syncPane(PaneLaneChatLanePrimary), nil
+		case "f8":
+			return m.syncPane(PaneLaneChatRoomPrimary), nil
+		case "f9":
+			return m.syncPane(PaneLaneChatUnifiedList), nil
 		}
 		return m.routeKey(msg)
 	}
@@ -746,6 +800,18 @@ func (m Model) routeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 	case PaneSecrets:
 		next, cmd := m.secrets.Update(msg)
 		m.secrets = next.(secrets.Model)
+		return m, cmd
+	case PaneLaneChatLanePrimary:
+		next, cmd := m.laneChatLanePrimary.Update(msg)
+		m.laneChatLanePrimary = next.(laneprimary.Model)
+		return m, cmd
+	case PaneLaneChatRoomPrimary:
+		next, cmd := m.laneChatRoomPrimary.Update(msg)
+		m.laneChatRoomPrimary = next.(roomprimary.Model)
+		return m, cmd
+	case PaneLaneChatUnifiedList:
+		next, cmd := m.laneChatUnifiedList.Update(msg)
+		m.laneChatUnifiedList = next.(unifiedlist.Model)
 		return m, cmd
 	default:
 		return m.homeKey(msg)
@@ -982,6 +1048,18 @@ func (m Model) routeAll(msg tea.Msg) (Model, tea.Cmd) {
 	m.secrets = next.(secrets.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.laneChatLanePrimary.Update(msg)
+	m.laneChatLanePrimary = next.(laneprimary.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.laneChatRoomPrimary.Update(msg)
+	m.laneChatRoomPrimary = next.(roomprimary.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.laneChatUnifiedList.Update(msg)
+	m.laneChatUnifiedList = next.(unifiedlist.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -1096,6 +1174,18 @@ func (m Model) resize(msg tea.WindowSizeMsg) (Model, tea.Cmd) {
 	m.secrets = next.(secrets.Model)
 	cmds = append(cmds, cmd)
 
+	next, cmd = m.laneChatLanePrimary.Update(contentSize)
+	m.laneChatLanePrimary = next.(laneprimary.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.laneChatRoomPrimary.Update(contentSize)
+	m.laneChatRoomPrimary = next.(roomprimary.Model)
+	cmds = append(cmds, cmd)
+
+	next, cmd = m.laneChatUnifiedList.Update(contentSize)
+	m.laneChatUnifiedList = next.(unifiedlist.Model)
+	cmds = append(cmds, cmd)
+
 	return m, tea.Batch(cmds...)
 }
 
@@ -1190,6 +1280,12 @@ func (m Model) contentView() string {
 		return m.external.View()
 	case PaneSecrets:
 		return m.secrets.View()
+	case PaneLaneChatLanePrimary:
+		return m.laneChatLanePrimary.View()
+	case PaneLaneChatRoomPrimary:
+		return m.laneChatRoomPrimary.View()
+	case PaneLaneChatUnifiedList:
+		return m.laneChatUnifiedList.View()
 	case PaneStub:
 		return m.stubView()
 	default:

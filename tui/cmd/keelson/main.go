@@ -45,6 +45,9 @@ import (
 	"github.com/jonhill90/keelson/internal/gallery"
 	"github.com/jonhill90/keelson/internal/knowledge"
 	"github.com/jonhill90/keelson/internal/lane"
+	"github.com/jonhill90/keelson/internal/lanechat/laneprimary"
+	"github.com/jonhill90/keelson/internal/lanechat/roomprimary"
+	"github.com/jonhill90/keelson/internal/lanechat/unifiedlist"
 	"github.com/jonhill90/keelson/internal/library"
 	"github.com/jonhill90/keelson/internal/mcp"
 	"github.com/jonhill90/keelson/internal/mcpservers"
@@ -146,6 +149,18 @@ func main() {
 			"landed. No lane in this estate is on 'acp' or 'pi-rpc' today (agent-tui#20's own finding), so this "+
 			"renders internal/chat.FixtureSource -- visibly synthetic data proving the seam, never a live "+
 			"transcript.")
+		showLaneChatLanePrimary = flag.Bool("lanechat-lane-primary", false, "start on agent-tui#115's "+
+			"lane-primary decide-by-variant pane instead of home -- the rail stays the spine, a conversation "+
+			"opens against the selected lane. [f7] reaches it from any start. Fixture data only, same as "+
+			"-gallery -- this does not replace or change -lanes or -chat.")
+		showLaneChatRoomPrimary = flag.Bool("lanechat-room-primary", false, "start on agent-tui#115's "+
+			"room-primary decide-by-variant pane instead of home -- one room per lane, the lane's live state "+
+			"rendered as room metadata on the same row. [f8] reaches it from any start. Fixture data only, "+
+			"does not replace or change -lanes or -chat.")
+		showLaneChatUnifiedList = flag.Bool("lanechat-unified-list", false, "start on agent-tui#115's "+
+			"unified-list decide-by-variant pane instead of home -- lanes and threads as one list of agents "+
+			"you can talk to, each row expandable in place. [f9] reaches it from any start. Fixture data "+
+			"only, does not replace or change -lanes or -chat.")
 		boardRefresh = flag.Duration("board-refresh", envOrDuration("AGENT_TUI_BOARD_REFRESH", board.DefaultRefreshInterval),
 			"how often -board re-fetches on its own tick (agent-tui#28). The previous hardcoded 5s measured at "+
 				"~8,160 GitHub GraphQL points/hr against gh issue list/gh pr list -- against a shared 5,000/hr "+
@@ -467,6 +482,12 @@ func main() {
 		start = shell.PaneFlow
 	case *showChat:
 		start = shell.PaneChat
+	case *showLaneChatLanePrimary:
+		start = shell.PaneLaneChatLanePrimary
+	case *showLaneChatRoomPrimary:
+		start = shell.PaneLaneChatRoomPrimary
+	case *showLaneChatUnifiedList:
+		start = shell.PaneLaneChatUnifiedList
 	}
 
 	libraryModel := library.New(
@@ -522,6 +543,11 @@ func main() {
 		WithAPIDocs(apidocsModel).
 		WithExternal(externalModel).
 		WithSecrets(secretsModel).
+		// agent-tui#115's three decide-by-variant panes -- always
+		// constructible with no fetcher at all (each package's own New(),
+		// internal/gallery's own shape), so wired here unconditionally
+		// rather than behind a homeDir/client guard.
+		WithLaneChatVariants(laneprimary.New(), roomprimary.New(), unifiedlist.New()).
 		WithStart(start).
 		WithTheme(activeTheme, themeNotice).
 		WithThemeSave(func(th theme.Theme) error { return theme.Save(theme.ConfigPath(), th.ID) })
