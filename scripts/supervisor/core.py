@@ -274,6 +274,11 @@ class Ledger:
         self._migrate_lanes_table(failpoint=_migration_failpoint)
         self._migrate_tasks_table(failpoint=_migration_failpoint)
         self._migrate_source_tasks_table(failpoint=_migration_failpoint)
+        # Must run BEFORE pull_uniqueness -- see this migration's own
+        # "ORDERING NOTE" docstring for why (it drops and rebuilds
+        # source_tasks, which drops that migration's trigger too; running
+        # first lets that migration's own existence-check rebuild it).
+        self._migrate_source_tasks_kind_informal(failpoint=_migration_failpoint)
         self._migrate_source_tasks_pull_uniqueness(failpoint=_migration_failpoint)
 
     def _connect(self, *, foreign_keys=True):
@@ -451,7 +456,12 @@ class Ledger:
 
                 CREATE TABLE IF NOT EXISTS source_tasks (
                     id TEXT PRIMARY KEY,
-                    source_kind TEXT NOT NULL CHECK (source_kind IN ('issue', 'pull')),
+                    -- agent-supervisor#553: 'informal' is an estate-loop
+                    -- brief dispatch recorded before any issue/PR exists --
+                    -- see record_dispatch's own `informal` parameter and
+                    -- _migrate_source_tasks_kind_informal for an existing
+                    -- ledger reaching the same shape.
+                    source_kind TEXT NOT NULL CHECK (source_kind IN ('issue', 'pull', 'informal')),
                     source_url TEXT NOT NULL,
                     source_ref TEXT NOT NULL,
                     summary TEXT NOT NULL,
@@ -1190,6 +1200,98 @@ class Ledger:
                         """
                     )
                     self._fail(failpoint, "after_pull_trigger")
+                except BaseException:
+                    connection.rollback()
+                    raise
+                else:
+                    connection.commit()
+            finally:
+                connection.close()
+
+    def _migrate_source_tasks_kind_informal(self, *, failpoint=None):
+        """Widen `source_tasks.source_kind`'s CHECK to also allow `'informal'`.
+
+        agent-supervisor#553/#0009: dispatch-time authorship recording for an
+        estate-loop brief dispatch (a director typing a brief-file path into
+        an already-existing pane -- never `dispatch.sh`, never a GitHub issue
+        or PR) has neither an issue nor a PR number to record at the moment
+        the dispatch actually happens; both prior `source_kind` values assume
+        one already exists. `'informal'` is a third, honest kind for exactly
+        that case -- see `record_dispatch`'s own `informal` parameter for
+        what gets written into `source_url`/`source_ref` for it. This is
+        additive only: every existing 'issue'/'pull' row, and every existing
+        caller that never passes `informal=True`, is unaffected.
+
+        Same SQLite limitation as every other CHECK-widening migration in
+        this file (`_migrate_lanes_table`, `_migrate_tasks_table`,
+        `_migrate_source_tasks_table`): no `ALTER TABLE ... DROP CONSTRAINT`,
+        so the only way to widen a CHECK is to rebuild the table. Every row
+        is preserved; the rebuild is one transaction, rolled back whole on
+        any failure.
+
+        ORDERING NOTE, load-bearing: this runs BEFORE
+        `_migrate_source_tasks_pull_uniqueness` in `__init__`. SQLite drops a
+        table's triggers when the table itself is dropped (part of this
+        rebuild), so the `one_open_pull_per_source_ref` trigger would not
+        survive this migration running on a ledger that already has it. Not
+        recreated here -- the next migration in `__init__`'s own sequence
+        already checks "does a trigger by that name exist" and creates it if
+        not, so running this one first makes that check correctly find it
+        missing and rebuild it, rather than duplicating that logic here.
+        Verified by this migration's own tests running both migrations in
+        `__init__`'s real order against a ledger that already had the
+        trigger, and confirming it still exists afterward.
+        """
+        with self._locked():
+            with contextlib.closing(self._connect()) as probe:
+                existing = probe.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='source_tasks'"
+                ).fetchone()
+                if existing is None:
+                    return
+                if "'informal'" in (existing["sql"] or ""):
+                    return
+
+            connection = self._connect(foreign_keys=False)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    connection.execute(
+                        """
+                        CREATE TABLE source_tasks_migrated (
+                            id TEXT PRIMARY KEY,
+                            source_kind TEXT NOT NULL CHECK (source_kind IN ('issue', 'pull', 'informal')),
+                            source_url TEXT NOT NULL,
+                            source_ref TEXT NOT NULL,
+                            summary TEXT NOT NULL,
+                            source_state TEXT NOT NULL,
+                            status TEXT NOT NULL CHECK (
+                                status IN ('created', 'delivered', 'accepted', 'running',
+                                           'complete', 'failed', 'cancelled')
+                            ),
+                            evidence_json TEXT NOT NULL,
+                            status_marker TEXT,
+                            updated_at INTEGER NOT NULL
+                        )
+                        """
+                    )
+                    self._fail(failpoint, "after_create")
+                    connection.execute(
+                        """
+                        INSERT INTO source_tasks_migrated (
+                            id, source_kind, source_url, source_ref, summary, source_state,
+                            status, evidence_json, status_marker, updated_at
+                        )
+                        SELECT id, source_kind, source_url, source_ref, summary, source_state,
+                               status, evidence_json, status_marker, updated_at
+                        FROM source_tasks
+                        """
+                    )
+                    self._fail(failpoint, "after_copy")
+                    connection.execute("DROP TABLE source_tasks")
+                    self._fail(failpoint, "after_drop")
+                    connection.execute("ALTER TABLE source_tasks_migrated RENAME TO source_tasks")
+                    self._fail(failpoint, "after_rename")
                 except BaseException:
                     connection.rollback()
                     raise
@@ -2250,7 +2352,13 @@ class Ledger:
         now,
     ):
         self._require_task_id(task_id)
-        if source_kind not in ("issue", "pull"):
+        # agent-supervisor#553: 'informal' added alongside the CHECK
+        # constraint's own widening (_migrate_source_tasks_kind_informal) --
+        # this method's own validation is a SEPARATE check, not derived from
+        # the CHECK, and had to be updated here too or a caller passing the
+        # new kind would still hit this generic-sounding refusal instead of
+        # actually being written.
+        if source_kind not in ("issue", "pull", "informal"):
             raise ValueError("unsupported GitHub source kind")
         if status not in ("created", "delivered", "accepted", "running", "complete", "failed", "cancelled"):
             raise ValueError("unsupported source task status")

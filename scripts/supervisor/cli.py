@@ -142,7 +142,14 @@ def parser():
     # same thing an empty `--harness-session-id` means: not resolved, or a
     # pre-#172 caller.
     record_dispatch_parser.add_argument("--harness-project-dir", default="")
-    record_dispatch_parser.add_argument("--issue", action="append", required=True)
+    # agent-supervisor#553: NOT required at the argparse layer any more --
+    # an `--informal` dispatch (see that flag below) has neither an issue
+    # nor a PR to name at the moment it happens. Every existing caller still
+    # passes `--issue` (dispatch.sh's own two call sites, unconditionally),
+    # so this is unenforced-but-unaffected for them; the free function below
+    # enforces "issue, pr, or informal -- pick exactly one shape" itself,
+    # naming what is actually missing rather than argparse's generic error.
+    record_dispatch_parser.add_argument("--issue", action="append", default=[])
     # agent-supervisor#159: a PR-scoped dispatch (a review, or a fix pass, on
     # PR <N> while the issue it closes stays claimed by the in-flight work
     # that opened it) records itself AGAINST THE PR, not the issue -- see
@@ -159,6 +166,14 @@ def parser():
     # that predates this flag (or genuinely has no worktree) still records
     # everything else, same as `--harness-session-id` above.
     record_dispatch_parser.add_argument("--worktree", default="")
+    # agent-supervisor#553/0009: an estate-loop brief dispatch (a director
+    # typing a brief-file path into an already-existing pane, never
+    # `dispatch.sh`) has no issue and no PR to name at the moment it
+    # happens -- that is the whole reason it needs recording at dispatch
+    # time rather than after the fact (see `docs/decisions/0009-...md`).
+    # Mutually exclusive with `--issue`/`--pr`, enforced in the free
+    # function below, not here.
+    record_dispatch_parser.add_argument("--informal", action="store_true")
     # agent-supervisor#193: NOT the agent's own self-report (`accept`, below,
     # is that -- and it is caller-verified against the lane's own pane_id).
     # This is `dispatch.sh`'s OWN evidence that its send actually landed --
@@ -471,6 +486,20 @@ def parser():
     pr_task_parser = sub.add_parser("pr-task")
     pr_task_parser.add_argument("--repo", required=True)
     pr_task_parser.add_argument("--pr", required=True)
+
+    # agent-supervisor#553/0009: the PR-attachment half of dispatch-time
+    # authorship recording. Deliberately takes NO `--task` -- unlike
+    # `record-pr-for-task` above (whose caller, `lane-done.sh`, already
+    # resolved the task id off a ledger read of its own), this command
+    # resolves the task itself, server-side, from `--lane` alone
+    # (`Ledger.get_open_task_for_lane`) so a caller can never name a task
+    # id that is not genuinely its own currently-open one. See
+    # `register-pr-for-lane-self.sh`, this command's only sanctioned
+    # caller, for the trust chain this closes.
+    attach_pr_parser = sub.add_parser("attach-pr-to-open-task")
+    attach_pr_parser.add_argument("--lane", required=True)
+    attach_pr_parser.add_argument("--repo", required=True)
+    attach_pr_parser.add_argument("--pr", required=True)
 
     # agent-supervisor#308 item 3: "authored outside the lane system" as a
     # first-class, recordable state -- see `Ledger.mark_pr_external` /
@@ -835,6 +864,7 @@ def record_dispatch(
     worktree_path="",
     pr=None,
     confirm_landed=False,
+    informal=False,
 ):
     """Record a dispatch that ALREADY happened. Writes; never sends.
 
@@ -914,25 +944,59 @@ def record_dispatch(
     `dispatch.sh` can tell this collision apart from an ordinary ledger
     failure and refuse loud instead of folding it into the silent,
     non-fatal `ledger_record_failed` path every other write failure takes.
+
+    agent-supervisor#553/0009: `informal=True` is the third, dispatch-time-
+    only shape -- an estate-loop brief dispatch, which has no issue and no
+    PR to name yet. `register-lane-dispatch-self.sh` is this shape's own
+    caller, not `dispatch.sh` (see that script's own header for why the
+    trust model differs from the self-run authorship check it replaces:
+    this records BEFORE any commit or PR exists, so there is nothing yet
+    to falsely claim credit for). Mutually exclusive with `issues`/`pr` --
+    exactly one of the three shapes must be given, enforced here by name
+    rather than left to `primary = issues[0]` raising an opaque `IndexError`
+    for a caller that gave none. `source_kind='informal'`, `source_url`
+    names the brief-dispatch itself (never a GitHub URL -- there is no
+    GitHub object yet), `source_ref` is the task id, so
+    `Ledger.get_task_for_pr_number`/`record_pr_for_task` (the later,
+    separate step that attaches a real PR to this task once one exists --
+    see `register-pr-for-lane-self.sh`) has a real row to attach to.
     """
     task = _unique_redispatch_task_id(ledger, task)
     try:
         harness = harness or HARNESS_BY_COMMAND.get(command)
         if harness is None:
             raise RuntimeError(f"cannot tell which harness pane command {command!r} is -- pass --harness")
-        primary = issues[0]
-        evidence = [f"claimed by dispatch.sh for lane {lane}", f"issues: {','.join(str(i) for i in issues)}"]
-        if pr:
+        if informal:
+            if issues or pr:
+                raise ValueError(
+                    "record-dispatch: --informal is mutually exclusive with --issue/--pr -- "
+                    "an informal dispatch has neither yet"
+                )
+            source_kind = "informal"
+            source_url = f"estate-loop:{task}@{Path(pane_path).name}"
+            source_ref = task
+            evidence = [f"informal (estate-loop brief) dispatch for lane {lane}, no issue or PR at dispatch time"]
+        elif issues:
+            primary = issues[0]
+            evidence = [f"claimed by dispatch.sh for lane {lane}", f"issues: {','.join(str(i) for i in issues)}"]
+            if pr:
+                source_kind = "pull"
+                source_url = f"https://github.com/{github}/pull/{pr}" if github else f"pull:{pr}@{Path(pane_path).name}"
+                source_ref = str(pr)
+                evidence.append(f"pr: {pr}")
+            else:
+                source_kind = "issue"
+                source_url = (
+                    f"https://github.com/{github}/issues/{primary}" if github else f"issue:{primary}@{Path(pane_path).name}"
+                )
+                source_ref = str(primary)
+        elif pr:
             source_kind = "pull"
             source_url = f"https://github.com/{github}/pull/{pr}" if github else f"pull:{pr}@{Path(pane_path).name}"
             source_ref = str(pr)
-            evidence.append(f"pr: {pr}")
+            evidence = [f"claimed by dispatch.sh for lane {lane}", f"pr: {pr}"]
         else:
-            source_kind = "issue"
-            source_url = (
-                f"https://github.com/{github}/issues/{primary}" if github else f"issue:{primary}@{Path(pane_path).name}"
-            )
-            source_ref = str(primary)
+            raise ValueError("record-dispatch requires --issue, --pr, or --informal -- none was given")
         return ledger.record_dispatch(
             lane=lane,
             pane_id=pane_id,
@@ -1327,6 +1391,7 @@ def main(argv=None):
             worktree_path=args.worktree,
             pr=args.pr,
             confirm_landed=args.confirm_landed,
+            informal=args.informal,
         )
     elif args.command == "lane-free":
         value = lane_free(
@@ -1481,6 +1546,22 @@ def main(argv=None):
             "lane": row["lane"] if row is not None else None,
             "task": row["id"] if row is not None else None,
         }
+    elif args.command == "attach-pr-to-open-task":
+        # agent-supervisor#553/0009: the task id is RESOLVED, never taken
+        # from the caller -- see the parser's own comment for why. A lane
+        # with no open task (never ran register-lane-dispatch-self.sh, or
+        # its task was already marked complete/cancelled) refuses here,
+        # fail-closed, rather than silently doing nothing or guessing which
+        # task the caller meant.
+        open_task = ledger.get_open_task_for_lane(args.lane)
+        if open_task is None:
+            raise RuntimeError(
+                f"attach-pr-to-open-task: lane {args.lane!r} has no open task -- "
+                "run register-lane-dispatch-self.sh before opening a PR, or this "
+                "lane's task was already marked complete/cancelled"
+            )
+        ledger.record_pr_for_task(task_id=open_task["id"], repo=args.repo, pr_number=args.pr)
+        value = {"lane": args.lane, "task": open_task["id"], "repo": args.repo, "pr": args.pr, "recorded": True}
     elif args.command == "mark-pr-external":
         ledger.mark_pr_external(
             repo=args.repo, pr_number=args.pr, note=args.note, chain_verified=args.chain_verified
