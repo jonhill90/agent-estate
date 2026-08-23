@@ -34,6 +34,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.24"
+          # go.sum lives at daemon/go.sum, not the repo root -- without this,
+          # setup-go's default cache key can't find it and every run pays a
+          # full, uncached module download (observed directly: "Restore
+          # cache failed: Dependencies file is not found ... go.sum" on the
+          # first real run of this workflow).
+          cache-dependency-path: daemon/go.sum
       - run: go build ./...
         working-directory: daemon
       - run: go vet ./...
