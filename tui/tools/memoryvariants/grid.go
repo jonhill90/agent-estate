@@ -72,7 +72,7 @@ func grid(g graphData, th theme.Theme) string {
 	for _, nd := range g.nodes {
 		x, y := cell(nd.id)
 		canvas[y][x] = []rune(glyphFor(nd.typ))[0]
-		colors[y][x] = typeColor[nd.typ]
+		colors[y][x] = colorFor(nd.typ)
 	}
 
 	var rows []string

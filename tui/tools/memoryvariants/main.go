@@ -14,6 +14,7 @@ package main
 
 import (
 	"fmt"
+	"hash/fnv"
 	"os"
 
 	"github.com/charmbracelet/lipgloss"
@@ -53,32 +54,66 @@ var variantList = []variant{
 	{"grid", gridImplies, func() string { return grid(fakeGraph(), theme.Default) }},
 }
 
-var typeColor = map[nodeType]lipgloss.Color{
-	typeUser:      lipgloss.Color("#c026d3"),
-	typeFeedback:  lipgloss.Color("#f1c40f"),
-	typeProject:   lipgloss.Color("#3b82f6"),
-	typeReference: lipgloss.Color("#22c55e"),
+// knownTypeColor/knownTypeGlyph are recognized-vocabulary lookups for the
+// OKF-shaped demo data (fakeGraph, graph.go) -- NOT an exhaustive legal
+// set. typ is an open-ended string (graph.go); colorFor/glyphFor below
+// fall back to a deterministic hash-derived choice for anything not
+// listed here, the same way Hill90's KnowledgeGraph.tsx colors an unknown
+// type by hash rather than refusing to render it.
+var knownTypeColor = map[string]lipgloss.Color{
+	"user":      lipgloss.Color("#c026d3"),
+	"feedback":  lipgloss.Color("#f1c40f"),
+	"project":   lipgloss.Color("#3b82f6"),
+	"reference": lipgloss.Color("#22c55e"),
 }
 
-func glyphFor(t nodeType) string {
-	switch t {
-	case typeUser:
-		return "◆"
-	case typeFeedback:
-		return "●"
-	case typeProject:
-		return "■"
-	default:
-		return "▲"
+var knownTypeGlyph = map[string]string{
+	"user":      "◆",
+	"feedback":  "●",
+	"project":   "■",
+	"reference": "▲",
+}
+
+// fallbackPalette/fallbackGlyphs back colorFor/glyphFor for any typ string
+// outside knownTypeColor/knownTypeGlyph -- picked by a stable hash of the
+// type string, so the same unrecognized type always renders the same way
+// across a run without needing to be added to a fixed enum first.
+var fallbackPalette = []lipgloss.Color{
+	lipgloss.Color("#f97316"), lipgloss.Color("#06b6d4"), lipgloss.Color("#a855f7"),
+	lipgloss.Color("#84cc16"), lipgloss.Color("#ec4899"), lipgloss.Color("#64748b"),
+}
+
+var fallbackGlyphs = []string{"◇", "○", "□", "△", "◈", "✦"}
+
+func hashIndex(t string, n int) int {
+	h := fnv.New32a()
+	_, _ = h.Write([]byte(t))
+	return int(h.Sum32()) % n
+}
+
+func colorFor(t string) lipgloss.Color {
+	if c, ok := knownTypeColor[t]; ok {
+		return c
 	}
+	return fallbackPalette[hashIndex(t, len(fallbackPalette))]
+}
+
+func glyphFor(t string) string {
+	if g, ok := knownTypeGlyph[t]; ok {
+		return g
+	}
+	if t == "" {
+		return "·" // uncategorized: distinct from any hashed unknown type
+	}
+	return fallbackGlyphs[hashIndex(t, len(fallbackGlyphs))]
 }
 
 func legend(th theme.Theme) string {
-	order := []nodeType{typeUser, typeFeedback, typeProject, typeReference}
+	order := []string{"user", "feedback", "project", "reference"}
 	var b []string
 	for _, t := range order {
-		style := lipgloss.NewStyle().Foreground(typeColor[t])
-		b = append(b, style.Render(glyphFor(t)+" "+string(t)))
+		style := lipgloss.NewStyle().Foreground(colorFor(t))
+		b = append(b, style.Render(glyphFor(t)+" "+t))
 	}
 	return lipgloss.NewStyle().Faint(true).Render("legend: ") + lipgloss.JoinHorizontal(lipgloss.Top, joinPad(b, "   ")...)
 }

@@ -95,6 +95,37 @@ which is private and does not belong committed into a public repo (see
 | ![orbit](orbit.png) | **2. Orbit** -- no free-form drag: one node is FOCUS, its neighbours ring around it by hop distance, arrow keys re-centre. Implies: cheapest to build and read (a hub with N spokes never overlaps), but you only ever see one node's neighbourhood, never the whole graph -- the "grab-and-move isn't the right primitive here" answer. |
 | ![outline](outline.png) | **3. Outline** -- not spatial at all: grouped by OKF type, each fact's related links nested one level under it. Implies: zero layout/physics/drag code, the natural next step is `bubbles/viewport` for scrolling (the same fix agent-tui#29 needs for the board), reads fastest for "what relates to X" -- but it's a list, not the grabbable graph Jon actually asked for, which is the honest "the terminal wants a list here" answer to the issue's own open question. |
 
+## Follow-up: the fixture's data model was OKF-shaped, now genericized
+
+A gate check on this issue (before any further view work resumed) found
+`tools/memoryvariants/graph.go`'s node/edge model, not just its demo
+content, was candidate-shaped rather than generic: node `typ` was a fixed
+four-value OKF enum and edges had no room for a weighted similarity link
+-- building the draggable view against it as-is would have been a soft
+vote for OKF markdown+wikilinks before #116 (reserved for Jon) picks a
+storage format.
+
+That model is now candidate-neutral: `node.typ` is an open-ended string
+(`""` for uncategorized, any tag a caller wants), and `edge.weight` is an
+optional float, zero-value for a plain binary link. `graph_test.go`'s
+`TestGenericModelFitsNonOKFCandidate` builds a second graph shaped like
+#116's candidate 2 (vector-embedding neighborhoods -- opaque cluster-id
+types, real similarity weights) through the exact same `graphData`/
+`node`/`edge` types the OKF-shaped demo below uses, with no special case
+for either shape. `colorFor`/`glyphFor` (`main.go`) render any type tag,
+known or not, falling back to a deterministic hash-derived color/glyph --
+the same device Hill90's `KnowledgeGraph.tsx` uses for an unrecognized
+type.
+
+The three variants below, and their PNGs, are unchanged: `fakeGraph()` is
+now one CALLER of the generic model rather than the model itself, still
+building the same 14-node/15-edge OKF-shaped scenario (pinned by
+`graph_test.go`'s `TestFakeGraphUnchangedShape`). Regenerating the PNGs
+against the new model reproduced byte-identical output to what was
+already committed here -- genericizing the types changed nothing a
+viewer of these images can see. No storage format was picked; no view
+code changed.
+
 ## Scope: one graph or one per project
 
 Untouched here on purpose. #61 says the graph must render whatever the

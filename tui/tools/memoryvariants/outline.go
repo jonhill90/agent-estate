@@ -23,7 +23,12 @@ const outlineImplies = "not spatial at all -- grouped by type, each fact's Relat
 // step for this one specifically, since it is bounded-height content that
 // needs scrolling, not sub-cell interaction.
 func outline(g graphData, th theme.Theme) string {
-	order := []nodeType{typeUser, typeFeedback, typeProject, typeReference}
+	// order is this variant's own grouping choice for the OKF-shaped demo
+	// data (graph.go's fakeGraph) -- not a constraint the graph model
+	// (node.typ) imposes. A node with a typ outside this list (or "") just
+	// wouldn't get a header here; that's a limitation of this one grouped-
+	// list view, not of graphData.
+	order := []string{"user", "feedback", "project", "reference"}
 	var b []string
 	for _, t := range order {
 		var inType []node
@@ -35,20 +40,20 @@ func outline(g graphData, th theme.Theme) string {
 		if len(inType) == 0 {
 			continue
 		}
-		sort.Slice(inType, func(i, j int) bool { return inType[i].title < inType[j].title })
-		header := lipgloss.NewStyle().Bold(true).Foreground(typeColor[t]).Render(strings.ToUpper(string(t)) + " (" + strconv.Itoa(len(inType)) + ")")
+		sort.Slice(inType, func(i, j int) bool { return inType[i].label < inType[j].label })
+		header := lipgloss.NewStyle().Bold(true).Foreground(colorFor(t)).Render(strings.ToUpper(t) + " (" + strconv.Itoa(len(inType)) + ")")
 		b = append(b, header)
 		for _, nd := range inType {
-			style := lipgloss.NewStyle().Foreground(typeColor[nd.typ])
+			style := lipgloss.NewStyle().Foreground(colorFor(nd.typ))
 			neigh := g.neighbors(nd.id)
 			suffix := ""
 			if len(neigh) == 0 {
 				suffix = lipgloss.NewStyle().Faint(true).Render("  (orphan -- no links)")
 			}
-			b = append(b, "  "+style.Render(glyphFor(nd.typ)+" "+nd.title)+suffix)
+			b = append(b, "  "+style.Render(glyphFor(nd.typ)+" "+nd.label)+suffix)
 			for _, nid := range neigh {
 				n2, _ := g.byID(nid)
-				b = append(b, "    "+lipgloss.NewStyle().Faint(true).Render("-> related: ")+lipgloss.NewStyle().Foreground(typeColor[n2.typ]).Faint(true).Render(n2.title))
+				b = append(b, "    "+lipgloss.NewStyle().Faint(true).Render("-> related: ")+lipgloss.NewStyle().Foreground(colorFor(n2.typ)).Faint(true).Render(n2.label))
 			}
 		}
 		b = append(b, "")

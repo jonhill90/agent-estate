@@ -52,28 +52,28 @@ func orbit(g graphData, th theme.Theme) string {
 			}
 		}
 
-		focusStyle := lipgloss.NewStyle().Bold(true).Foreground(typeColor[focus.typ]).Padding(0, 2)
+		focusStyle := lipgloss.NewStyle().Bold(true).Foreground(colorFor(focus.typ)).Padding(0, 2)
 		var b []string
-		b = append(b, focusStyle.Render(fmt.Sprintf("[%s %s]  focus (%d links)", glyphFor(focus.typ), focus.title, deg[focus.id])))
+		b = append(b, focusStyle.Render(fmt.Sprintf("[%s %s]  focus (%d links)", glyphFor(focus.typ), focus.label, deg[focus.id])))
 		b = append(b, "")
 		b = append(b, lipgloss.NewStyle().Faint(true).Render("  1 hop --"))
 		for _, id := range ring1 {
 			nd, _ := g.byID(id)
-			s := lipgloss.NewStyle().Foreground(typeColor[nd.typ])
-			b = append(b, fmt.Sprintf("    %s %s  (%d links)", s.Render(glyphFor(nd.typ)), s.Render(nd.title), deg[nd.id]))
+			s := lipgloss.NewStyle().Foreground(colorFor(nd.typ))
+			b = append(b, fmt.Sprintf("    %s %s  (%d links)", s.Render(glyphFor(nd.typ)), s.Render(nd.label), deg[nd.id]))
 		}
 		if len(ring2) > 0 {
 			b = append(b, "")
 			b = append(b, lipgloss.NewStyle().Faint(true).Render("  2 hops --"))
 			for _, id := range ring2 {
 				nd, _ := g.byID(id)
-				s := lipgloss.NewStyle().Foreground(typeColor[nd.typ]).Faint(true)
-				b = append(b, fmt.Sprintf("      %s %s", s.Render(glyphFor(nd.typ)), s.Render(nd.title)))
+				s := lipgloss.NewStyle().Foreground(colorFor(nd.typ)).Faint(true)
+				b = append(b, fmt.Sprintf("      %s %s", s.Render(glyphFor(nd.typ)), s.Render(nd.label)))
 			}
 		}
 		if len(unreached) > 0 {
 			b = append(b, "")
-			b = append(b, lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("  unreached from here (%d) -- ", len(unreached))+strings.Join(titlesOf(g, unreached), ", ")))
+			b = append(b, lipgloss.NewStyle().Faint(true).Render(fmt.Sprintf("  unreached from here (%d) -- ", len(unreached))+strings.Join(labelsOf(g, unreached), ", ")))
 		}
 		content := lipgloss.JoinVertical(lipgloss.Left, b...)
 		return lipgloss.NewStyle().Border(th.Border).BorderForeground(th.Color(theme.RoleBorder)).Padding(0, 1).Width(70).Render(content)
@@ -88,11 +88,11 @@ func orbit(g graphData, th theme.Theme) string {
 	return out.String()
 }
 
-func titlesOf(g graphData, ids []string) []string {
+func labelsOf(g graphData, ids []string) []string {
 	var out []string
 	for _, id := range ids {
 		nd, _ := g.byID(id)
-		out = append(out, nd.title)
+		out = append(out, nd.label)
 	}
 	return out
 }
