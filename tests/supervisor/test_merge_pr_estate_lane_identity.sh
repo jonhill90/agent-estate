@@ -58,15 +58,18 @@ RT="$(mktemp -d "${TMPDIR:-/tmp}/merge-estate-tmux.XXXXXX")"
 D="$(mktemp -d "${TMPDIR:-/tmp}/merge-estate.XXXXXX")"
 BIN="$D/bin"; FIX="$D/fixtures"; STATE="$D/state"; WORK="$D/work"
 mkdir -p "$BIN" "$FIX" "$STATE" "$WORK"
-# register-pr-dispatch-self.sh's own branch cross-check (#539) reads
-# `git branch --show-current` in the pane's cwd -- WORK needs to be a real
-# repo on the SAME branch every PR fixture below claims (`fix/estate-thing`),
-# or the setup calls further down refuse before the merge-gate scenarios
-# they exist to set up ever run.
+# register-pr-dispatch-self.sh's own commit cross-check (#539 round 2) reads
+# `git rev-parse HEAD` in the pane's cwd -- WORK needs to be a real repo
+# whose actual HEAD commit is the SAME commit every PR fixture below claims
+# as its `headRefOid`, or the setup calls further down refuse before the
+# merge-gate scenarios they exist to set up ever run. $WORK_SHA is threaded
+# through head_is/green/verdict_comment below so ci_gate, the verdict
+# freshness check, and this cross-check all agree on one real commit.
 git -C "$WORK" init -q -b fix/estate-thing
 git -C "$WORK" config user.email t@example.com
 git -C "$WORK" config user.name Test
 echo one > "$WORK/f"; git -C "$WORK" add f; git -C "$WORK" commit -q -m one
+WORK_SHA=$(git -C "$WORK" rev-parse HEAD)
 MARKER="$D/merged"
 unset TMUX TMUX_PANE
 export TMUX_TMPDIR="$RT"
@@ -86,14 +89,27 @@ cat > "$BIN/gh" <<'FAKE'
 set -uo pipefail
 FIX="${GH_FIX:?}"
 if [ "$1 $2" = "pr view" ]; then
-  num="$3"; fields=""; prev=""
-  for a in "$@"; do [ "$prev" = "--json" ] && fields="$a"; prev="$a"; done
+  num="$3"; fields=""; prev=""; has_q=""
+  for a in "$@"; do
+    [ "$prev" = "--json" ] && fields="$a"
+    [ "$a" = "-q" ] && has_q=1
+    prev="$a"
+  done
   case "$fields" in
-    headRefOid) f="$FIX/head_$num.json"; [ -f "$f" ] && cat "$f" || echo '{"headRefOid":null}' ;;
-    # register-pr-dispatch-self.sh's own branch cross-check (#539):
-    # `gh pr view <N> --repo ... --json headRefName -q .headRefName` --
-    # single field, `-q` makes real gh print the plain string, not JSON.
-    headRefName) f="$FIX/branch_$num.txt"; [ -f "$f" ] && cat "$f" || { echo "fake gh: no branch fixture for pr view $num" >&2; exit 1; } ;;
+    headRefOid)
+      f="$FIX/head_$num.json"
+      if [ -n "$has_q" ]; then
+        # register-pr-dispatch-self.sh's own commit cross-check (#539 round
+        # 2): `gh pr view <N> --repo ... --json headRefOid -q .headRefOid`
+        # -- `-q` makes real gh print the plain SHA string, not JSON. Same
+        # fixture ci_gate.py's own (JSON, no `-q`) call below reads -- both
+        # ask the same real fact (the PR's real head commit), so sharing
+        # one fixture file is correct, not a coincidence.
+        [ -f "$f" ] && jq -r '.headRefOid' "$f" || { echo "fake gh: no head fixture for pr view $num" >&2; exit 1; }
+      else
+        [ -f "$f" ] && cat "$f" || echo '{"headRefOid":null}'
+      fi
+      ;;
     *closingIssuesReferences*) f="$FIX/author_$num.json"; [ -f "$f" ] && cat "$f" || echo '{"headRefName":"","closingIssuesReferences":[],"commits":[]}' ;;
     *) f="$FIX/reviews_$num.json"; [ -f "$f" ] && cat "$f" || echo '{"reviews":[],"comments":[]}' ;;
   esac
@@ -125,8 +141,6 @@ head_is() { printf '{"headRefOid": "%s"}\n' "$2" > "$FIX/head_$1.json"; }
 # to grep a "fixes #N" out of either -- a PR that closes nothing.
 closes_nothing() {
   printf '{"headRefName": "fix/estate-thing", "closingIssuesReferences": [], "commits": []}\n' > "$FIX/author_$1.json"
-  # Same branch WORK is actually on -- see the git init above.
-  printf 'fix/estate-thing\n' > "$FIX/branch_$1.txt"
 }
 verdict_comment() {  # verdict_comment <pr> <lane> <reviewed-sha>
   cat > "$FIX/reviews_$1.json" <<S
@@ -170,10 +184,11 @@ AUTHOR_PANE=$(tmux display-message -p -t "$S:$W1" '#{pane_id}')
 REVIEWER_PANE=$(tmux display-message -p -t "$S:$W2" '#{pane_id}')
 
 # The author lane registers ITSELF as PR #531's author -- exactly the fix,
-# exactly how a real estate lane would run it, no --issue anywhere. The
-# branch fixture has to exist before this call: SELF's own cross-check
-# (#539) reads it immediately, before closes_nothing (below) would write it.
-printf 'fix/estate-thing\n' > "$FIX/branch_531.txt"
+# exactly how a real estate lane would run it, no --issue anywhere. The head
+# fixture has to exist before this call: SELF's own cross-check (#539 round
+# 2) reads it immediately, before head_is (below) would write it for the
+# rest of the scenario.
+printf '{"headRefOid": "%s"}\n' "$WORK_SHA" > "$FIX/head_531.json"
 OUT=$(TMUX_PANE="$AUTHOR_PANE" LANES_SUPERVISOR_WINDOW="$SUP_IDX" \
       bash "$SELF" --pr 531 --repo "$REPO" --harness codex 2>&1); RC=$?
 [ "$RC" -eq 0 ] || { echo "  FAIL setup: register-pr-dispatch-self.sh for PR 531"; echo "$OUT"; exit 1; }
@@ -190,8 +205,8 @@ merged() { [ -f "$MARKER" ]; }
 # ============================================================================
 # 1. PR closes no issue, self-registered author, DIFFERENT reviewer -> MERGES
 # ============================================================================
-head_is 531 sha-531; green sha-531; closes_nothing 531
-verdict_comment 531 "$REVIEWER_LANE" sha-531
+head_is 531 "$WORK_SHA"; green "$WORK_SHA"; closes_nothing 531
+verdict_comment 531 "$REVIEWER_LANE" "$WORK_SHA"
 run_merge 531
 { [ "$RC" -eq 0 ] && merged; } \
   && ok "1/3 #531's own shape (no closing issue), independent review: merges" \
@@ -202,14 +217,14 @@ grep -q "independence confirmed" <<<"$OUT" \
 # ============================================================================
 # 2. same shape, reviewer IS the author lane -> REFUSES
 # ============================================================================
-head_is 532 sha-532; green sha-532; closes_nothing 532
+head_is 532 "$WORK_SHA"; green "$WORK_SHA"; closes_nothing 532
 # Re-register the author lane against PR #532 too (a second PR from the same
 # lane) -- this proves the gate is refusing the SAME-LANE relationship, not
 # merely "no registration for 532".
 OUT=$(TMUX_PANE="$AUTHOR_PANE" LANES_SUPERVISOR_WINDOW="$SUP_IDX" \
       bash "$SELF" --pr 532 --repo "$REPO" --harness codex 2>&1); RC=$?
 [ "$RC" -eq 0 ] || { echo "  FAIL setup: register-pr-dispatch-self.sh for PR 532"; echo "$OUT"; exit 1; }
-verdict_comment 532 "$AUTHOR_LANE" sha-532
+verdict_comment 532 "$AUTHOR_LANE" "$WORK_SHA"
 run_merge 532
 { [ "$RC" -eq 1 ] && ! merged; } \
   && ok "2/3 issue-less PR, self-review (author lane == reviewer lane): refuses" \
@@ -221,8 +236,8 @@ grep -q "reviewed its own PR" <<<"$OUT" \
 # ============================================================================
 # 3. same shape, nobody ever self-registered -> REFUSES (unchanged default)
 # ============================================================================
-head_is 533 sha-533; green sha-533; closes_nothing 533
-verdict_comment 533 "$REVIEWER_LANE" sha-533
+head_is 533 "$WORK_SHA"; green "$WORK_SHA"; closes_nothing 533
+verdict_comment 533 "$REVIEWER_LANE" "$WORK_SHA"
 run_merge 533
 { [ "$RC" -eq 1 ] && ! merged; } \
   && ok "3/3 issue-less PR with NO self-registration at all: still refuses (fail-closed unchanged)" \

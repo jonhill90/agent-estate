@@ -69,16 +69,22 @@ literally what `cli.py record_dispatch`'s own docstring says it is for
 
 ## Verified
 
-`test_cli_record_dispatch_issue_optional.sh` (9 cases, no tmux): the
+`test_cli_record_dispatch_issue_optional.sh` (11 cases, no tmux): the
 argument-matrix change itself, including that `--issue`+`--pr` together and
 `--issue` alone are both unaffected, and that the issue-less record's
-evidence honestly says "issues: none" rather than inventing one.
+evidence honestly says "issues: none" rather than inventing one, and does
+not claim `dispatch.sh` performed a call it did not make.
 
-`test_register_pr_dispatch_self.sh` (10 cases, live isolated tmux): the
+`test_register_pr_dispatch_self.sh` (16 cases, live isolated tmux): the
 wrapper script directly — refuses with no `$TMUX_PANE`, refuses a
 non-numeric `--pr`, refuses to register the supervisor's own window,
 registers and self-confirms a real pane as a real PR's contributor,
-idempotent on re-run.
+idempotent on re-run. Round 2 (see "what this does not fix" below) replaced
+the branch-name comparison with a commit-SHA comparison after an
+adversarial review broke the first version; this suite's mutation pair is
+now built from that exact attack — a from-scratch worktree sharing the
+PR's branch NAME but not its commits is refused; one genuinely holding the
+PR's real head commit registers.
 
 `test_merge_pr_estate_lane_identity.sh` (7 cases, live isolated tmux) —
 the mutation check both directions, against `merge-pr.sh` itself:
@@ -130,3 +136,33 @@ real PR before #531 itself merges through the sanctioned path.
   than starting a fresh agent under its name) — this is the same accepted,
   documented degraded mode `register-lane-self.sh` itself already lives in,
   not a new gap this decision introduces.
+- **Possession of a PR's commits is not proof this lane produced them, and
+  this is not a hypothetical edge case.** `register-pr-dispatch-self.sh`'s
+  cross-check (round 2, `git rev-parse HEAD` against `gh pr view --json
+  headRefOid`) proves the calling pane's worktree genuinely HAS the PR's
+  real head commit — round 1's branch-name check did not even prove that
+  much, and an adversarial review (estate:2) broke it with one command: a
+  throwaway local repo, `git init -b <the-real-branch-name>`, one unrelated
+  commit, never fetched or pushed, satisfied it for any PR number readable
+  off GitHub. The commit comparison closes exactly that attack — a
+  fabricated branch cannot produce the real head commit without actually
+  fetching it. It does not close the broader question. A REVIEWING lane
+  that runs `git worktree add <path> <the-real-branch>` to read a diff —
+  the normal, correct way to review — puts its own pane's worktree on the
+  PR's real branch, genuinely, with the real commits, and would satisfy
+  this check too. Possession and authorship are the same fact to this
+  script and are not the same fact in reality. Not closed by this decision;
+  named so a later reader does not treat commit-matching as proof of
+  authorship rather than proof of possession.
+- **`cli.py record-dispatch --pr` performs zero verification, by design,
+  for anyone who calls it directly.** The branch/commit cross-check above
+  lives entirely in the `register-pr-dispatch-self.sh` wrapper; `cli.py`
+  itself trusts its caller completely — correctly, for `dispatch.sh`, which
+  is recording an action it just performed. Anyone invoking `cli.py
+  record-dispatch --pr` directly — no wrapper, no tmux pane, no branch or
+  commit check — writes the identical ledger row this whole decision is
+  about, with nothing checking it. Not this decision's job to close (the
+  wrapper is the sanctioned path, and closing the CLI layer itself would
+  mean pushing the cross-check down into `cli.py`, a larger change than
+  either round of this fix made); named here so "the sanctioned wrapper
+  checks it" is not mistaken for "the ledger write is checked."

@@ -45,16 +45,35 @@
 # THE PR CLAIM, NOT JUST THE LANE. `--pr` and `--repo` still name WHICH PR
 # is being claimed (a caller has to say that; the pane cannot know it
 # without being told), but the claim itself is now VERIFIED, not merely
-# recorded: this script cross-checks `git branch --show-current` in the
-# pane's own worktree against `gh pr view <PR> --json headRefName` and
-# refuses on any disagreement or ambiguity, closing agent-supervisor#539's
-# review finding -- earlier versions took "this pane authored PR N" purely
-# on the caller's word, which made the ledger record a claim as fact with
-# nothing to back it. `--repo` is still required rather than inferred, so
+# recorded: this script requires the pane's worktree to be on a real,
+# attached branch (never detached -- same ambiguous-worktree refusal this
+# always had), then compares that worktree's ACTUAL HEAD COMMIT
+# (`git rev-parse HEAD`) against `gh pr view <PR> --json headRefOid` and
+# refuses on any disagreement or ambiguity.
+#
+# agent-supervisor#539, round 2: the first version of this check compared
+# BRANCH NAMES (`git branch --show-current` vs `--json headRefName`), which
+# an adversarial review (estate:2) broke with one command -- a throwaway
+# local repo, `git init -b <the-real-PR's-branch-name>`, one unrelated
+# commit, never fetched, never pushed, satisfied the check for any PR
+# number readable off GitHub, with zero relationship to that PR's real
+# content. Comparing the commit instead closes exactly that: a fabricated
+# local branch cannot produce the PR's real head commit without actually
+# fetching it, which requires the repo to be real and reachable, not
+# merely a name typed by the caller.
+#
+# THE RESIDUAL GAP, NAMED RATHER THAN IMPLIED CLOSED (same review, its
+# sharpest point): matching the PR's real head commit proves this
+# worktree HAS those commits, never that THIS LANE PRODUCED them. A
+# reviewing lane that runs `git worktree add <path> <the-real-branch>` to
+# read a diff -- the normal, correct way to review -- would satisfy this
+# check too; possession of a PR's commits and authorship of them are the
+# same fact to this script and are not the same fact in reality. See
+# docs/decisions/0006-estate-lane-dispatch-identity.md's "what this does
+# not fix" section. `--repo` is still required rather than inferred, so
 # this never guesses which of several repos a shared checkout's `origin`
-# might mean, but it now anchors a real comparison rather than a label.
-# No flag lets a caller assert the branch or skip the comparison -- doing
-# so would reopen the hole through the front door.
+# might mean. No flag lets a caller assert the branch, the commit, or skip
+# the comparison -- doing so would reopen the hole through the front door.
 #
 # Usage:
 #   register-pr-dispatch-self.sh --pr <N> --repo <owner/name> [--task <slug>] [--harness NAME]
@@ -159,7 +178,8 @@ fi
 
 WORKTREE=$(cd "$PANE_PATH" 2>/dev/null && pwd -P) || WORKTREE="$PANE_PATH"
 
-# --- cross-check: does this pane's own worktree actually sit on PR's branch?
+# --- cross-check: does this pane's own worktree actually HOLD PR's real
+# head commit, not merely a branch sharing its name? -----------------------
 # agent-supervisor#539: `--pr` and `--repo` name WHICH PR is being claimed,
 # but until this check existed nothing verified the claim was true -- every
 # other field above is measured off the pane; this was the one exception,
@@ -167,30 +187,50 @@ WORKTREE=$(cd "$PANE_PATH" 2>/dev/null && pwd -P) || WORKTREE="$PANE_PATH"
 # false claim here becomes TRUSTED, load-bearing input to the merge gate's
 # independence check (`author_lane_for`'s Path 4 reads it as fact, not as an
 # assertion). Closed the same way every other fact in this script is closed
-# -- measure it, don't ask for it. `git branch --show-current` is a real
-# fact about the pane's own worktree; `gh pr view --json headRefName` is the
-# PR's own stated branch. They must agree, or this refuses -- no flag lets a
-# caller assert either one and skip the comparison.
+# -- measure it, don't ask for it.
+#
+# Round 1 of this check compared BRANCH NAMES and an adversarial review
+# broke it with one command (`git init -b <the-real-branch-name>` in a
+# throwaway repo -- see this script's header). Round 2 compares the actual
+# HEAD COMMIT instead: `git rev-parse HEAD` in the worktree against
+# `gh pr view --json headRefOid`. A fabricated local branch cannot produce
+# the PR's real head commit without actually fetching it from the real
+# repo. The branch-attachment check stays as a PRECONDITION (a real,
+# non-detached branch must exist) purely to preserve the existing,
+# already-verified detached-HEAD refusal -- it no longer decides pass/fail
+# on its own; the commit comparison does.
 #
 # Fails closed on every ambiguity, not just a straight mismatch: a detached
 # HEAD (`branch --show-current` prints nothing), a `git` that cannot run in
 # this worktree at all, or a `gh pr view` that cannot resolve the PR (wrong
 # number, no network, not authenticated) all refuse rather than proceed on
 # an unknown. "Cannot determine" is never treated as "assume it's fine."
+#
+# THIS STILL DOES NOT PROVE AUTHORSHIP -- see the header's "residual gap"
+# paragraph. It proves the worktree possesses the PR's real commits, which
+# a reviewing lane's own `git worktree add` onto the real branch also does,
+# legitimately. Named, not hidden, in docs/decisions/0006-estate-lane-
+# dispatch-identity.md.
 WORKTREE_BRANCH=$(git -C "$WORKTREE" branch --show-current 2>/dev/null)
 GIT_RC=$?
 if [ "$GIT_RC" -ne 0 ] || [ -z "$WORKTREE_BRANCH" ]; then
   echo "register-pr-dispatch-self.sh: refusing -- could not determine a checked-out branch for worktree $WORKTREE (detached HEAD, not a git worktree, or git failed) -- cannot verify this pane produced PR #$PR" >&2
   exit 1
 fi
-PR_BRANCH=$("$GH_BIN" pr view "$PR" --repo "$REPO" --json headRefName -q .headRefName 2>&1)
-GH_RC=$?
-if [ "$GH_RC" -ne 0 ] || [ -z "$PR_BRANCH" ]; then
-  echo "register-pr-dispatch-self.sh: refusing -- could not resolve PR #$PR's own branch via gh (exit $GH_RC): $PR_BRANCH" >&2
+WORKTREE_SHA=$(git -C "$WORKTREE" rev-parse HEAD 2>/dev/null)
+GIT_SHA_RC=$?
+if [ "$GIT_SHA_RC" -ne 0 ] || [ -z "$WORKTREE_SHA" ]; then
+  echo "register-pr-dispatch-self.sh: refusing -- could not resolve this worktree's own HEAD commit ($WORKTREE) -- cannot verify this pane produced PR #$PR" >&2
   exit 1
 fi
-if [ "$WORKTREE_BRANCH" != "$PR_BRANCH" ]; then
-  echo "register-pr-dispatch-self.sh: refusing -- this pane's worktree ($WORKTREE) is on branch '$WORKTREE_BRANCH', but $REPO#$PR is on branch '$PR_BRANCH' -- these do not match, so this pane cannot honestly claim to have produced that PR" >&2
+PR_SHA=$("$GH_BIN" pr view "$PR" --repo "$REPO" --json headRefOid -q .headRefOid 2>&1)
+GH_RC=$?
+if [ "$GH_RC" -ne 0 ] || [ -z "$PR_SHA" ]; then
+  echo "register-pr-dispatch-self.sh: refusing -- could not resolve PR #$PR's own head commit via gh (exit $GH_RC): $PR_SHA" >&2
+  exit 1
+fi
+if [ "$WORKTREE_SHA" != "$PR_SHA" ]; then
+  echo "register-pr-dispatch-self.sh: refusing -- this pane's worktree HEAD ($WORKTREE_SHA) is not $REPO#$PR's real head commit ($PR_SHA) -- a branch named the same thing is not the same thing, so this pane cannot honestly claim to have produced that PR" >&2
   exit 1
 fi
 
