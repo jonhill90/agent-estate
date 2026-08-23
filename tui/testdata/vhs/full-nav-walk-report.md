@@ -22,6 +22,16 @@ CURRENT `internal/nav` tree's on-screen order (top-level items, then each
 group expanded and every child visited in source order) -- see the tape's
 own header comment for the walk mechanics.
 
+**Update (agent-b3.md + agent2.md, PR #97, merged on top of this file):**
+rows 01 (Dashboard) and 04 (Tasks) below — carried forward here as "EMPTY,
+likely a bug" from #94's original walk, unchanged by PR #96's own
+re-walk above since neither Dashboard nor Tasks was in scope for that
+branch — are now fixed. Both rows, the Summary counts, and the "Net
+change"/"Not fixed here" sections below are updated with the fix and a
+fresh re-check; everything else on this page (rows 00, 02-03, 05-24, and
+PR #96's own "Route-table completeness" section) is left exactly as that
+re-walk recorded it.
+
 Legend: **RENDERS** real content, looks right · **EMPTY** renders but shows
 nothing (correct or bug, stated) · **STUB** still the placeholder ·
 **BROKEN** error/panic/garbage · **could not measure** unreachable.
@@ -29,10 +39,10 @@ nothing (correct or bug, stated) · **STUB** still the placeholder ·
 | # | Destination | Result | Changed since #94's walk? | Notes |
 |---|---|---|---|---|
 | 00 | Home | RENDERS | no | Unchanged. |
-| 01 | Dashboard | **EMPTY — likely a bug** | no | Still stuck. All five stat rows show `unknown`, footer says "not fetched yet" at 4s settle (up from #94's 2s, matching #94's own 8s-recheck finding that this is a permanent stuck state, not slow loading). This branch does not touch `internal/dashboard` or its fetch wiring -- unrelated pre-existing bug, not a merge regression. |
+| 01 | Dashboard | **RENDERS (fixed, PR #97)** | **yes — fixed since this re-walk (not by this branch)** | Was "EMPTY — likely a bug" above. Root cause: `board.ExecRunner`/`cost.ExecRunner` (the seam `buildDashboardFetch` composes `gh`/`ccusage` calls through) had no timeout at all — the only external-process seam in this program without one. A first fix (a bare `execTimeout` context) did not actually work on Linux (CI caught it: `exec.CommandContext`'s default cancellation only signals the direct child; a shell-forked grandchild survives and keeps `Output()`'s pipes open). Real fix: put every subprocess in its own process group and kill the group on cancellation. Re-walked twice after the real fix: real figures both times (`AGENTS 11 total`, `SPEND TODAY $676.97`, `VAULT FACTS 64`, ...), though real elapsed time varies (~17s to >25s, genuinely `gh`-latency-bound under today's heavier concurrent estate load) — never hangs indefinitely, which is the only thing this fix claims. |
 | 02 | Agents | RENDERS | no | Unchanged -- real STATE/MODE/data for live lanes. |
 | 03 | Chat | RENDERS | no | Unchanged -- real UI over `chat.FixtureSource` (documented, expected non-live). |
-| 04 | Tasks | **EMPTY — likely a bug** | no | Still stuck. "(loading)" forever, all kanban columns `(0)`/`(empty)` at 4s settle. Same pre-existing bug #94 found (`internal/board`, untouched by this branch) -- not a merge regression. |
+| 04 | Tasks | **RENDERS an honest error (fixed, PR #97)** | **yes — fixed since this re-walk (not by this branch)** | Was "EMPTY — likely a bug" above. Same root cause and fix as row 01 (`board.ExecRunner`, shared by `buildBoardFetch`). Re-walked after the fix: `! unavailable` / `board: mcp: lanes: supervisor call failed: lanes.sh --json exited 1: lanes: session 'agent-supervisor' does not exist` — a real, bounded error resolved within seconds, never "(loading)" forever. (This box's default `-session` had no live tmux session by that literal name at re-check time; `boardOK` was true via the live-ledger auto-discovery path, agent-tui#49 item 2.) |
 | 05 | Knowledge | **RENDERS** | **yes — fixed since #94 (not by this branch)** | Was STUB in #94's walk. Fixed by #95 (`fix(shell): wire the "knowledge" nav route to internal/knowledge`, merged into main while this branch's PR #96 was open) -- confirmed still real after this merge: 64 real vault facts listed (`memory-conventions`, `python-package-manager-uv`, ...), `sort: index (64 facts)` footer. |
 | 06 | Library | RENDERS | no | Unchanged -- real `live_parameters`, `possibility_count: 931 hard constraints live`. |
 | 07 | Lanes | RENDERS | no | Unchanged -- real rail/session data. |
@@ -56,15 +66,16 @@ nothing (correct or bug, stated) · **STUB** still the placeholder ·
 
 ## Summary
 
-- **RENDERS (real content): 17** — Home, Agents, Chat, Knowledge (fixed by
-  #95), Library, Lanes, Build/Skills, Build/Workflows (fixed by this
-  branch), Build/MCP Servers, Connect/Connections, Observe/Usage,
+- **RENDERS (real content): 19** — Home, Dashboard (fixed by #97), Agents,
+  Chat, Tasks (real error, fixed by #97), Knowledge (fixed by #95),
+  Library, Lanes, Build/Skills, Build/Workflows (fixed by this branch),
+  Build/MCP Servers, Connect/Connections, Observe/Usage,
   Observe/Monitoring (fixed by this branch), Admin×5.
 - **STUB (honest placeholder): 5** — Connect/Storage, Connect/Discord,
   Connect/Secrets, Docs/API Docs, Docs/Platform Docs.
-- **EMPTY, likely bugs: 2** — Dashboard, Tasks. Both unchanged from #94's
-  walk -- neither is touched by this branch or by this merge; still a
-  permanent stuck state, not a slow fetch.
+- **EMPTY, likely bugs: 0.** Dashboard and Tasks (both listed above as
+  EMPTY at the time of this re-walk) are fixed by #97 — see rows 01/04
+  above.
 - **BROKEN: 0.**
 - **Could not measure: 0** — every one of the 24 destinations in the
   current tree was reachable and screenshotted (Settings needed a second,
@@ -73,10 +84,11 @@ nothing (correct or bug, stated) · **STUB** still the placeholder ·
   via `tmux` before treating it as such rather than guessing).
 - **Net change vs #94's walk: +2 RENDERS (Workflows, Monitoring, this
   branch's own fixes) +1 RENDERS from an unrelated merge (Knowledge, #95)
+  +2 RENDERS from a second unrelated merge (Dashboard, Tasks, #97)
   -1 destination (Models, removed rather than left stub) -3 STUB. Zero
   regressions found** -- every route #94 called RENDERS still RENDERS
-  after the merge; the two pre-existing EMPTY bugs (Dashboard, Tasks) are
-  unchanged, not new.
+  after both merges; the two pre-existing EMPTY bugs (Dashboard, Tasks)
+  are now fixed, not merely unchanged.
 
 ## Route-table completeness, verified by test not by eye
 
@@ -97,12 +109,31 @@ cross-checks the other direction: every `KindRoute` leaf in
 expected stub, so a route nobody wired AND nobody flagged cannot go
 unnoticed either.
 
-## Not fixed here, carried forward from #94's walk
+## Fixed since this re-walk (PR #97, agent-b3.md + agent2.md)
 
-1. Dashboard and Tasks both hang in a perpetual loading state rather than
-   erroring or completing -- unchanged since #94's walk, not touched by
-   this branch or this merge. Still needs its own targeted fix pass.
+1. **Dashboard and Tasks both resolve now, bounded, instead of hanging
+   indefinitely** (rows 01/04 above). Root cause: `board.ExecRunner`/
+   `cost.ExecRunner` — the one seam every `gh`/`sqlite3`/`ccusage` call in
+   this program shells through — had no timeout at all, the only
+   external-process seam in this program without one (`internal/mcp`'s
+   `callTimeout`, the ledger `.backup`'s own `busy_timeout` pragma both
+   already had theirs). A first fix (a bare `execTimeout` passed to
+   `exec.CommandContext`) did not actually bound anything on Linux — CI
+   caught it (`TestExecRunnerSurfacesATimeoutInsteadOfHangingForever`
+   failed both packages, ~3.0s instead of a 200ms test bound). Root cause,
+   instrumented rather than assumed: `exec.CommandContext`'s default
+   cancellation only signals the direct child; a shell-wrapped command
+   that forks (rather than exec-replaces) leaves a grandchild alive
+   holding `Output()`'s pipes open, so `Output()` blocks until that
+   grandchild exits on its own. Real fix: put every subprocess in its own
+   process group (`SysProcAttr.Setpgid`) and kill the whole group on
+   cancellation — the same fix `agent-supervisor`'s own
+   `daemon/internal/agent/procgroup.go` uses for this identical class of
+   orphaned-child hang. Reproduced red, then green, in a `golang:1.26`
+   Linux container matching CI exactly; mutation-checked in the same
+   container by reverting to the exact prior commit (red, byte-for-byte
+   matching CI's own failure) and restoring the fix (green).
 2. `AGENTS.md`'s documented known defect #3 (quota line unwired) still
    appears stale against `16-observe-usage.png`'s real quota percentages --
-   #94's own flagged item 2, not re-verified here (out of scope for this
-   merge-resolution pass).
+   #94's own flagged item 2, not re-verified here (out of scope for both
+   this merge-resolution pass and #97).

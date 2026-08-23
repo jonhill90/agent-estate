@@ -1,15 +1,29 @@
 package cost
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
+	"syscall"
+	"time"
 )
 
 // Runner executes an external command and returns its stdout, mirroring
 // board.LedgerRunner/board.GitHubRunner exactly -- same seam, same reason:
 // cmd/agent-tui supplies the real exec.Command, tests supply a fixture.
 type Runner func(args []string) ([]byte, error)
+
+// execTimeout bounds every ExecRunner invocation -- the same gap
+// board.ExecRunner's own execTimeout closes, for the same reason: a
+// stalled `npx ccusage` (npm registry stall, a wedged node process, any
+// hang short of the process actually exiting) blocked Dashboard's own
+// SPEND TODAY fetch (buildDashboardFetch's costFetch call) forever, with
+// no bound and no way for the pane to ever say so (agent-b3.md's own
+// finding). A package var, not a literal, so a test can shrink it the same
+// way internal/mcp's own callTimeout test does.
+var execTimeout = 15 * time.Second
 
 // ExecRunner shells a command out via os/exec. bin is the full command
 // (cmd/agent-tui defaults it to "npx", with baseArgs ["ccusage"], so the
@@ -18,8 +32,27 @@ type Runner func(args []string) ([]byte, error)
 func ExecRunner(bin string, baseArgs ...string) Runner {
 	return func(args []string) ([]byte, error) {
 		full := append(append([]string{}, baseArgs...), args...)
-		out, err := exec.Command(bin, full...).Output()
+		ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, bin, full...)
+		// Setpgid + a custom Cancel -- see board.ExecRunner's own doc
+		// comment for the full instrumented root cause (exec.CommandContext's
+		// default cmd.Process.Kill() only signals the direct child; a shell
+		// or wrapper that forks rather than exec-replaces leaves a
+		// grandchild alive holding Output()'s stdout/stderr pipes open, so
+		// Wait() blocks on a pipe read until that grandchild exits on its
+		// own). Same fix agent-supervisor's own daemon/internal/agent/
+		// procgroup.go uses: put the whole tree in its own process group,
+		// kill the group (negative pid) on cancellation.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		out, err := cmd.Output()
 		if err != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return nil, fmt.Errorf("%s: timed out after %s -- process was killed rather than left to hang the fetch forever", bin, execTimeout)
+			}
 			if ee, ok := err.(*exec.ExitError); ok {
 				return nil, fmt.Errorf("%s: %w: %s", bin, err, ee.Stderr)
 			}

@@ -1,10 +1,14 @@
 package board
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os/exec"
 	"regexp"
+	"syscall"
+	"time"
 )
 
 // sourceURLRE mirrors agent-supervisor's github_source.SOURCE_URL_RE
@@ -83,11 +87,57 @@ LEFT JOIN tasks t ON t.id = st.id;
 // cmd/agent-tui supplies exec.Command; tests supply a fixture.
 type LedgerRunner func(args []string) ([]byte, error)
 
+// execTimeout bounds every ExecRunner invocation -- this same seam backs
+// BOTH LedgerRunner's sqlite3 reads (ReadTaskRows) and, via
+// GitHubRunner(ExecRunner(ghBin)), every `gh` call FetchIssues/FetchPRs
+// make, one repo at a time, in a loop (buildBoardFetch, buildDashboardFetch
+// in cmd/agent-tui). Before this, none of those three call sites had ANY
+// bound: a stalled `gh` process (a network stall, an SSO prompt with no
+// stdin to answer it, anything short of the process actually exiting)
+// blocked the whole fetch's tea.Cmd forever, with the pane's own "(loading)"/
+// "not fetched yet" legend -- already honest about "no data yet" -- unable
+// to say "and it is never coming" (agent-b3.md's own finding: Dashboard and
+// Tasks both walked as permanently empty, never erroring). Every OTHER
+// external call in this program already has a bound of its own --
+// internal/mcp's callTimeout, the ledger ".backup" pragma's busy_timeout --
+// this was the one gap. A package var, not a literal, so a test can shrink
+// it the same way internal/mcp's own callTimeout test does.
+var execTimeout = 15 * time.Second
+
 // ExecRunner shells a command out via os/exec -- the real implementation.
 func ExecRunner(name string) LedgerRunner {
 	return func(args []string) ([]byte, error) {
-		out, err := exec.Command(name, args...).Output()
+		ctx, cancel := context.WithTimeout(context.Background(), execTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, name, args...)
+		// Setpgid + a custom Cancel, not exec.CommandContext's default
+		// cmd.Process.Kill(): the default only signals the direct child
+		// ("sh" for a shell-wrapped runner), and instrumenting the actual
+		// return path (not assumed) showed that alone does NOT bound
+		// Output() on Linux -- `sh -c "sleep N"` forks a real "sleep"
+		// child rather than exec-replacing itself (confirmed via `ps
+		// --ppid` inside the exact CI image, golang:1.26), so killing only
+		// "sh" leaves "sleep" alive holding the stdout/stderr pipes'
+		// write ends open; Output()'s own io.Copy goroutines then block on
+		// those pipes until "sleep" exits on its own -- signal sent (to
+		// the wrong process), not ignored, not never-sent: the block is a
+		// pipe read waiting on a SURVIVING grandchild, the third case
+		// agent-b3.md's own brief named, confirmed by comparing a bare
+		// cmd.Wait() (returns bounded, no output captured) against
+		// cmd.Output() (blocks the full subprocess runtime) in the same
+		// process. Setpgid puts the whole tree in its own process group;
+		// Cancel kills the GROUP (negative pid), the same fix
+		// agent-supervisor's own daemon/internal/agent/procgroup.go uses
+		// for this identical class of orphaned-child hang.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error {
+			return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		}
+		out, err := cmd.Output()
 		if err != nil {
+			if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+				return nil, fmt.Errorf("%s: timed out after %s -- process was killed rather than left to hang the fetch forever", name, execTimeout)
+			}
 			if ee, ok := err.(*exec.ExitError); ok {
 				return nil, fmt.Errorf("%s: %w: %s", name, err, ee.Stderr)
 			}
