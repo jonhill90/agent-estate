@@ -175,6 +175,52 @@ key against a live tmux session. Before documenting a control as working,
 either cite the test that drives it through `Update` (name it) or say
 "not verified against a live session."
 
+## Merging PRs you did not author
+
+When more than one agent lane works this repository at once, every lane
+pushes through the same shared GitHub login — `gh pr review --approve` is
+refused as self-review regardless of who is actually asking, so a real
+cross-lane review has to be recorded another way: a reviewing lane posts a
+plain PR comment, not a GitHub review object, carrying
+
+```
+Verdict: APPROVE            (or REQUEST CHANGES, with specifics)
+Review-Lane: <reviewing lane's own name>
+Reviewed-SHA: <the exact head commit SHA reviewed>
+```
+
+and the PR's own body states which lane opened it:
+
+```
+Author-Lane: <authoring lane's own name>
+```
+
+Before merging a PR you did not author, run
+
+```
+go run ./cmd/prverdict -repo <owner/name> -number <N>
+```
+
+and merge only on exit code `0` (`approved`) — every other exit code
+(`1` rejected, `2` no verdict on record, `3` unknown/unresolved: same
+lane, stale SHA, a missing trailer) means do not merge, full stop, same
+as CI being red. See `internal/prverdict`'s own doc comment for exactly
+what this checks and why: it is a Go port of `jonhill90/skills#255`'s
+`pr_verdict.py`, itself ported from `jonhill90/agent-supervisor`'s
+`verdict.py`/`verdict-independence.sh` — this repo is Go-only
+(AGENTS.md's own "Go, not shell, for new code" convention, matched here
+rather than adding this repo's first Python script), so the port is Go
+rather than a second-language copy of skills#255's Python.
+
+**Not wired into CI, deliberately.** This repository's own CI
+(`.github/workflows/ci.yml`) builds, vets and tests every push and PR; it
+never merges one — merging is always a separate `gh pr merge` an operator
+or an agent lane runs directly, outside any workflow. There is no
+merge-time CI job to attach this gate to without inventing one that does
+not otherwise exist; `cmd/prverdict` is the check that invocation must run
+first, by convention stated here, the same posture `jonhill90/skills`
+took for the same structural reason.
+
 ## Conventions
 
 - **Code comments cite functions and behaviours, never line numbers.** A
