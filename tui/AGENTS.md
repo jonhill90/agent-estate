@@ -6,13 +6,14 @@ Edit this file; never edit `CLAUDE.md` directly (it will edit the same bytes,
 but say so in the commit message if you do, to avoid a reviewer thinking two
 files drifted).
 
-**Verified against `main` `b00db9b`, 2026-08-16 (agent-tui#38's shell PR,
-#43), except the "What this repo is" paragraph and this file's `internal/
-nav`/`internal/rail`/`internal/shell`/`internal/stub` layout lines, updated
-2026-08-22 for `docs/SPEC-shell.md` S1-S3/S5 (this branch's own PR --
-`feat/s3-shell-routing` -- not yet on `main` as of this edit).** Confirm the
-branch/SHA in `git log -1` still matches before trusting
-counts below; they are measured, not estimated.
+**Verified against `main` `6942926`, 2026-08-23 (agent-tui#38's shell PR,
+#43, plus everything through #104's chat-send wiring), except the "What this
+repo is" paragraph and this file's `internal/nav`/`internal/rail`/
+`internal/shell`/`internal/stub` layout lines, updated 2026-08-22 for
+`docs/SPEC-shell.md` S1-S3/S5.** The "Known defects" section below was
+re-verified separately against `6942926` on 2026-08-23 (agent-tui#49 closed).
+Confirm the branch/SHA in `git log -1` still matches before trusting counts
+below; they are measured, not estimated.
 
 **Naming: decided. The product is `steading`** (agent-tui#42, seven rounds,
 ~60 candidates checked). Jon rejected `keelson` (real collision:
@@ -150,8 +151,9 @@ go vet ./...
 go test ./...
 ```
 
-All three verified green on `main` `b00db9b` (9 packages with tests,
-`cmd/keelson` has none). CI (`.github/workflows/*.yml`) runs the same three
+All three verified green on `main` `6942926` (29 packages with tests,
+`cmd/keelson`, `internal/sshserver`, and the `tools/` spikes have none). CI
+(`.github/workflows/*.yml`) runs the same three
 commands on `ubuntu-latest`, Go 1.26, plus a fourth check gated on a live
 `agent-supervisor` checkout: `internal/lane/states_lanessh_test.go`
 cross-checks `lane.AllStates` against `lanes.sh`'s own `state=` assignments
@@ -245,28 +247,37 @@ took for the same structural reason.
 
 ## Known defects — do not paper over these
 
-agent-tui#49 (open) records three, each confirmed live at `b00db9b`,
-2026-08-16 by running the actual binary, not by reading the source:
+agent-tui#49 is **closed** (2026-08-16). All three of the defects it
+originally recorded are fixed as of `6942926`, 2026-08-23 — re-confirmed by
+running the actual binary and by grep, not by memory of the issue text:
 
-1. **Bare launch exits 1.** `./keelson` with no flags and no
-   `$AGENT_SUPERVISOR_REPO` prints `no supervisor to connect to: set
-   -supervisor-repo, $AGENT_SUPERVISOR_REPO, or -mcp-cmd` and exits 1 instead
-   of opening in a degraded state. Confirmed: `go build -o /tmp/keelson-check
-   ./cmd/keelson && /tmp/keelson-check` exits 1 with that message.
-2. **The board pane reports itself unavailable with no `-ledger`.**
-   Reaching it via `[f2]` (rather than `-board`, which refuses to start
-   first) renders `! unavailable` / `no -ledger (or $AGENT_TUI_LEDGER)
-   configured -- point it at a COPY of the ledger to use the board`
-   (`cmd/keelson/main.go`'s `boardUnavailable` string).
-3. **The cost panel's quota line is unwired from the current quota
-   source.** It renders `unknown (no quota source)`
-   (`internal/cost/view.go`) whenever `ccusage` has no local blocks/limit
-   concept for a harness, even though `scripts/supervisor/quota.sh` is
-   the quota source now — confirmed by `grep -rn "quota.sh"
-   --include='*.go' .` returning zero matches anywhere in this module.
+1. ~~**Bare launch exits 1.**~~ Fixed. `./keelson` with no flags and no
+   `$AGENT_SUPERVISOR_REPO` now opens in a degraded state on the Home pane
+   instead of exiting (`cmd/keelson/main.go`'s `supervisorRepoResolved`
+   handling, commented "agent-tui#49 item 1: a bare `keelson` must open,
+   never exit 1"). Confirmed by running the built binary under a real TTY
+   (`script -q ... ./keelson`): it renders the sidebar and Home pane rather
+   than printing the old `no supervisor to connect to` message and exiting.
+2. ~~**The board pane reports itself unavailable with no `-ledger`.**~~
+   Fixed. `resolveLedgerSource` (`cmd/keelson/board.go`) now auto-discovers
+   and stages a copy of the live ledger when `-ledger`/`$AGENT_TUI_LEDGER`
+   is unset (`defaultLedgerLivePath` + `newLedgerCopier`); the old hard
+   `boardOK == false` refusal only fires now when discovery genuinely finds
+   nothing, not merely because the flag was omitted.
+3. ~~**The cost panel's quota line is unwired from the current quota
+   source.**~~ Fixed. `internal/cost/quota.go` now shells `quota.sh` out via
+   `QuotaRunner`/`ExecQuotaRunner`, wired from `cmd/keelson/main.go`'s
+   `resolvedQuotaBin` (`<supervisor-repo>/scripts/supervisor/quota.sh`).
+   `renderQuota`'s `unknown (no quota source)` string (`internal/cost/
+   view.go`) is now the honest fallback for a genuinely missing/failing
+   `quota.sh`, not a structurally unwired source — confirmed by `grep -rn
+   "quota.sh" --include='*.go' .`, which now returns matches throughout
+   `internal/cost` and `cmd/keelson`.
 
-Fix or documentation update for any of these is in scope; silently working
-around one in a new feature is not.
+This section is now a clean bill of health for agent-tui#49, not an open
+punch list — if a regression reopens any of the three, restore the numbered
+form above with fresh confirmation evidence rather than editing this prose
+in place.
 
 ## What NOT to do here
 
@@ -283,7 +294,7 @@ around one in a new feature is not.
   tmux client is asking, so `switch-client`/`detach-client` acts on an
   arbitrary attached client while reporting success. `session.Interface`
   still declares both methods; nothing in `internal/rail` or
-  `internal/shell` calls them as of `b00db9b` (`grep -rn "\.Attach(\|\.Detach("
+  `internal/shell` calls them as of `6942926` (`grep -rn "\.Attach(\|\.Detach("
   --include='*.go' .`, outside test files: zero matches).
 - Do not point `-ledger` at the live supervisor's `ledger.sqlite3`. It is
   always opened read-only, but the flag help and `internal/board/ledger.go`
