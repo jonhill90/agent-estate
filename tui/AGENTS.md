@@ -197,31 +197,48 @@ and the PR's own body states which lane opened it:
 Author-Lane: <authoring lane's own name>
 ```
 
-Before merging a PR you did not author, run
+**`cmd/mergepr` is THE way to merge a PR in this repo. Do not `gh pr merge`
+directly, and do not run `cmd/prverdict` as a manual pre-check and then
+merge by hand** — that is exactly the gap agent-tui#109 recorded: a tool
+nobody is told to use is exactly how agent-tui#107 happened (a
+comment-verdict gate merged by its own author, unreviewed, within
+minutes — the second confirmed instance of that anti-pattern after
+`jonhill90/skills#255`'s own). `cmd/mergepr` is modelled directly on
+`agent-supervisor`'s own working pattern
+(`scripts/supervisor/merge-pr.sh` + `ci_gate.py`): it chains a CI gate and
+the comment-verdict gate itself, fails closed on either, and only then
+calls `gh pr merge` — the same "cannot be skipped by habit" role
+merge-pr.sh plays there.
 
 ```
-go run ./cmd/prverdict -repo <owner/name> -number <N>
+go run ./cmd/mergepr -repo <owner/name> -number <N>
+go run ./cmd/mergepr -repo <owner/name> -number <N> -- --squash --delete-branch
 ```
 
-and merge only on exit code `0` (`approved`) — every other exit code
-(`1` rejected, `2` no verdict on record, `3` unknown/unresolved: same
-lane, stale SHA, a missing trailer) means do not merge, full stop, same
-as CI being red. See `internal/prverdict`'s own doc comment for exactly
-what this checks and why: it is a Go port of `jonhill90/skills#255`'s
-`pr_verdict.py`, itself ported from `jonhill90/agent-supervisor`'s
-`verdict.py`/`verdict-independence.sh` — this repo is Go-only
-(AGENTS.md's own "Go, not shell, for new code" convention, matched here
-rather than adding this repo's first Python script), so the port is Go
-rather than a second-language copy of skills#255's Python.
+Exit `0` means it merged. Exit `1` means a gate refused (CI not green at
+the current head, or `internal/prverdict`'s gate did not resolve to a
+genuine cross-lane approval — the refusing gate's own reason is always
+printed to stderr) or `gh pr merge` itself failed; nothing was merged
+either way. Exit `2` is a usage error. See `internal/mergepr`'s own
+doc comment for exactly what the two gates check, and
+`internal/prverdict`'s doc comment for the comment-verdict gate
+specifically — a Go port of `jonhill90/skills#255`'s `pr_verdict.py`,
+itself ported from `jonhill90/agent-supervisor`'s
+`verdict.py`/`verdict-independence.sh` (this repo is Go-only, AGENTS.md's
+own "Go, not shell, for new code" convention, so the port is Go rather
+than a second-language copy of skills#255's Python).
 
 **Not wired into CI, deliberately.** This repository's own CI
 (`.github/workflows/ci.yml`) builds, vets and tests every push and PR; it
-never merges one — merging is always a separate `gh pr merge` an operator
-or an agent lane runs directly, outside any workflow. There is no
-merge-time CI job to attach this gate to without inventing one that does
-not otherwise exist; `cmd/prverdict` is the check that invocation must run
-first, by convention stated here, the same posture `jonhill90/skills`
-took for the same structural reason.
+never merges one — merging is always a separate command an operator or an
+agent lane runs directly, outside any workflow. There is no merge-time CI
+job to attach this gate to without inventing one that does not otherwise
+exist; `cmd/mergepr` is the command that invocation must be, by convention
+stated here, the same posture `jonhill90/skills` took for the same
+structural reason. Nothing on GitHub's side stops a caller from running
+`gh pr merge` directly instead and skipping both gates entirely — the same
+residual `merge-pr.sh`'s own doc comment states for `agent-supervisor`,
+stated here rather than left implicit.
 
 ## Conventions
 
