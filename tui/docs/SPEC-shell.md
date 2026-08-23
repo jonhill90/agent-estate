@@ -112,6 +112,17 @@ done. Proposed shape of the missing daemon capability filed as
 `Source`/`Sender` seam) stays declared and `nil` by default until that
 capability exists to implement it against.
 
+**Superseded, `6942926`, 2026-08-23 (agent-tui#104).** The blocked
+conclusion above is investigative history, not the current state: it was
+resolved the same day it was written. `agent-supervisor#509` (merged) added
+`session_send` to the MCP tool surface, closing the gap `agent-supervisor#508`
+proposed. `internal/chat.Sender` is now implemented against `session_send`
+(`internal/session.Ops.Send`, `internal/session/ops.go`) and wired into the
+composer from `cmd/keelson/main.go` via `chat.WithSender` — reached entirely
+through the existing MCP boundary, no second subprocess transport and no
+`supervisord run`/`send-keys` workaround, exactly as this section's own hard
+constraint required. Sending is built, not merely unblocked.
+
 ## S8 — Skills view
 
 List skills from `~/.claude/skills` and the `skills` repo: name, description,

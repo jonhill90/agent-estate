@@ -15,6 +15,14 @@ re-verified separately against `6942926` on 2026-08-23 (agent-tui#49 closed).
 Confirm the branch/SHA in `git log -1` still matches before trusting counts
 below; they are measured, not estimated.
 
+**Re-verified against `main` `390c99a`, 2026-08-23 (estate-loop/b-docs-stale,
+docs-stale-sweep worktree).** Re-checked in this pass: the Layout table below
+(missing package rows added — see the table itself for what was added), the
+`agent-tui` grep count in the naming note (re-measured, see below), and the
+"Running the tests" section's no-tests claim (re-measured, see that section).
+The Known defects section's `6942926` re-verification above still stands
+unchanged; not re-walked in this pass.
+
 **Naming: decided. The product is `steading`** (agent-tui#42, seven rounds,
 ~60 candidates checked). Jon rejected `keelson` (real collision:
 `akapril/keelson`, a near-identical local-first AI-session workbench) and
@@ -45,7 +53,15 @@ a follow-on change should move the module path, `cmd/` directory, binary
 name, and GitHub repo to `steading` in one pass — not done here, not
 blocking here. Measured cost: `git grep -o -i agent-tui | wc -l` on this
 branch, 2026-08-20 — 489 occurrences across 81 tracked files (`git grep -l
--i agent-tui | wc -l`), up from round 1's 438/72.
+-i agent-tui | wc -l`), up from round 1's 438/72. **Re-measured 2026-08-23
+against `390c99a`: 696 occurrences across 154 tracked files** — the repo has
+grown substantially since the 2026-08-20 count (new `internal/admin`,
+`internal/agents`, `internal/connectors`, `internal/dashboard`,
+`internal/knowledge`, `internal/library`, `internal/mcpservers`,
+`internal/navwalk`, `internal/skills`, `internal/prverdict`,
+`internal/secrets`, `internal/mergepr` packages and their `cmd/` entry
+points, each carrying its own `agent-tui#NN` issue references), not a
+retraction of the earlier count.
 
 ## What this repo is
 
@@ -91,26 +107,45 @@ policy only.
 
 ```
 cmd/keelson/         one tea.NewProgram entry point, running internal/shell.Model (see docs/SPEC.md)
+internal/admin/      Admin section -- Services/Profiles/Users/Dependencies/Settings, read-only first (SPEC-shell.md S11)
+internal/agents/     Agents view -- id, model, state, current task, cost, assembled from the same seams internal/rail already reads (SPEC-shell.md S6)
 internal/apidocs/    Docs -> API Docs -- hill90-app's own OpenAPI document as an operation table
 internal/board/      task board projection — GitHub issues/PRs + ledger tasks + live lanes
-internal/chat/       ACP thread chat -- Source seam, FixtureSource, two viewport-scrollable layouts (agent-tui#20)
+internal/chat/       ACP thread chat -- Source/Sender seams, ClaudeCodeSource + FallbackSource (agent-tui#99) with FixtureSource as last resort, two viewport-scrollable layouts (agent-tui#20)
+internal/connectors/ Connect group -- provider connections and models, mirrors web Connect (SPEC-shell.md S10)
 internal/cost/       per-harness spend/quota projection from ccusage
+internal/dashboard/  estate-at-a-glance view -- re-projects figures already established by internal/agents/internal/cost/internal/knowledge plus a small gh read of its own
 internal/external/   Docs -> Platform Docs -- how a nav.KindExternal destination behaves (names the URL, opens a browser)
 internal/flow/       live flow view — the same board.Snapshot re-projected as a moving pipeline (agent-tui#64)
 internal/gallery/    glyph gallery — every lane state × every candidate glyph set
+internal/knowledge/  Jon's personal memory vault viewer -- reads $AGENT_MEMORY_VAULT's agent/index.md + agent/facts/<slug>.md, progressive disclosure (agent-tui#87)
 internal/lane/       lane/session decode, glyph sets (data, not code), state table
+internal/library/    shared prompt/decision corpus viewer -- agent-dotfiles-supervisor's ledger.sqlite3 live_parameters/open_questions/unacknowledged views (w5c.md)
 internal/mcp/        minimal MCP JSON-RPC client over a child process's stdio
+internal/mcpservers/ configured MCP servers -- name, scope (global/project), reachability (SPEC-shell.md S9)
+internal/mergepr/    merge-time gate for this repo -- chains the CI gate and internal/prverdict's comment-verdict gate, fails closed, then calls gh pr merge (agent-tui#109)
 internal/monitor/    host health (load/swap/process count) + agent state counts (w5f.md, Observe -> Monitoring)
 internal/nav/        the 1:1-with-hill90 nav tree + sidebar component -- now the fixed left column (SPEC-shell.md S1-S3)
+internal/navwalk/    one JSONL file per nav destination, replacing the single hand-merged testdata/vhs/full-nav-walk-report.md (agent-b3.md)
+internal/prverdict/  reads a PR's own comments and decides whether it carries an independent, current APPROVE -- Go port of skills#255's pr_verdict.py
 internal/rail/       the lane rail -- content behind the sidebar's "Lanes" route (PaneLanes) since SPEC-shell.md S3/S4, no longer a fixed column
-internal/session/    write path: attach/detach/add/remove, all via MCP, no os/exec
-internal/shell/      the application shell -- owns the sidebar (internal/nav) + board/cost/gallery/flow/chat/rail as routed panes (agent-tui#38, #64, #20; SPEC-shell.md S3)
+internal/secrets/    Connect -> Secrets -- levels 1-4 of agent-tui#101's exposure scale from hill90-app's secrets-schema.yaml, never level 5 (the value)
+internal/session/    write path: attach/detach/add/remove/send, all via MCP, no os/exec
+internal/shell/      the application shell -- owns the sidebar (internal/nav) + ~20 routed panes (agent-tui#38, #64, #20; SPEC-shell.md S3)
+internal/skills/     skills view -- name, description, last eval result, invocation count, from ~/.claude/skills (SPEC-shell.md S8)
 internal/sshserver/  serves shell.Model over SSH via charmbracelet/wish (agent-tui#67) -- one Model per connection
 internal/stub/       honest "not built yet" placeholder for any nav route with no real pane wired (SPEC-shell.md S5)
 internal/theme/      look-and-feel as data — Role-keyed colours, persisted per-user config
 internal/workflows/  ledger dispatch history -- a task's own path through the estate (w5f.md, Build -> Workflows)
 scripts/             verify-lanes-unaffected.sh — the rail's non-interference proof (rail's own render/key logic is unchanged by SPEC-shell.md S3; only its screen position moved)
 ```
+
+`cmd/` also now has `cmd/demo`, `cmd/fakemcp`, `cmd/mergepr`, `cmd/navwalk`
+and `cmd/prverdict` alongside `cmd/keelson` — the CLI entry points for
+`internal/mergepr`, `internal/navwalk` and `internal/prverdict` above, plus
+a demo harness and a fake MCP server used by tests. None of the five is a
+second `tea.NewProgram` site (see "What NOT to do here" below); they are
+plain CLI commands.
 
 `internal/chat` is wired into the shell as `PaneChat` (`[f6]`, agent-tui#20) --
 `[f5]` was already claimed by `internal/flow`'s `PaneFlow` (agent-tui#64) by
@@ -152,7 +187,12 @@ go test ./...
 ```
 
 All three verified green on `main` `6942926` (29 packages with tests,
-`cmd/keelson`, `internal/sshserver`, and the `tools/` spikes have none). CI
+`cmd/keelson`, `internal/sshserver`, and the `tools/` spikes have none).
+**Stale as of `390c99a`, re-measured 2026-08-23 (`find . -name '*_test.go'`):**
+`cmd/keelson` now has five `_test.go` files (`ledger_copy_test.go`,
+`cost_test.go`, `docs_test.go`, `secrets_test.go`, `supervisor_test.go`) and
+`tools/memoryvariants/spike` has one (`main_test.go`); only
+`internal/sshserver` still genuinely has none. CI
 (`.github/workflows/*.yml`) runs the same three
 commands on `ubuntu-latest`, Go 1.26, plus a fourth check gated on a live
 `agent-supervisor` checkout: `internal/lane/states_lanessh_test.go`
@@ -226,7 +266,15 @@ specifically — a Go port of `jonhill90/skills#255`'s `pr_verdict.py`,
 itself ported from `jonhill90/agent-supervisor`'s
 `verdict.py`/`verdict-independence.sh` (this repo is Go-only, AGENTS.md's
 own "Go, not shell, for new code" convention, so the port is Go rather
-than a second-language copy of skills#255's Python).
+than a second-language copy of skills#255's Python). `390c99a` (#113)
+fixed a blank-`Review-Lane:`-trailer self-approval bypass in this gate: a
+same-lane author posting a comment with an empty `Review-Lane:` value and
+a real head SHA on the next line was previously resolved as `approved`
+because the post-colon regex's greedy whitespace consumed the newline and
+captured the next line's text instead of an empty string; it now resolves
+to `unknown` with an explicit "no Review-Lane: trailer" reason — see
+`internal/prverdict`'s own `BlankReviewLaneSelfApprovalBypass` regression
+test.
 
 **Not wired into CI, deliberately.** This repository's own CI
 (`.github/workflows/ci.yml`) builds, vets and tests every push and PR; it

@@ -28,7 +28,26 @@ removable. Full technical design: `docs/SPEC.md`. What the product is for:
 "What this is not, yet" below, and "Known defects" further down for what
 is on `main` but does not work correctly yet.
 
+**Stale, partially corrected 2026-08-23 against `390c99a`
+(estate-loop/b-docs-stale, docs-stale-sweep worktree).** This README is
+~35 commits behind `b00db9b` and describes the pre-nav-sidebar
+architecture throughout; this pass corrects the specific sections flagged
+below in place (architecture/rail, chat's live Source, Known defects,
+knowledge viewer) rather than rewriting the whole file — a fuller
+re-verification pass against `390c99a` is still needed and is explicitly
+out of scope here. Sections not flagged below were not re-checked in this
+pass.
+
 ## What it is today
+
+**Stale, corrected 2026-08-23 against `390c99a`.** The "persistent left
+rail" description below is the pre-`docs/SPEC-shell.md` architecture.
+`internal/nav.Model` (a sidebar modelled 1:1 on the hill90 web nav) is now
+the fixed left column; `internal/rail` is reached as a routed pane
+(`PaneLanes`, behind the sidebar's "Lanes" route) rather than always being
+on screen — see `docs/SPEC-shell.md`'s S1-S3 and `AGENTS.md`'s Layout
+table. The paragraph below is kept for the flags/keys it still documents
+correctly but its "persistent left rail" framing is no longer current.
 
 **One `tea.NewProgram`, one process.** `internal/shell.Model` owns a
 persistent left rail (every tmux session, live lane state) plus a content
@@ -69,6 +88,13 @@ strings are the authoritative, current documentation for each one — this
 README does not restate them.
 
 ### The rail (default screen)
+
+**Stale, corrected 2026-08-23 against `390c99a`:** the rail is no longer
+the default screen or a fixed left-anchored column — the nav sidebar
+(`internal/nav`) is the fixed left column now, and the rail is reached via
+the sidebar's "Lanes" route (`PaneLanes`). The rail's own render/key logic
+described below is otherwise unchanged (`scripts/verify-lanes-unaffected.sh`
+is the checked proof of that).
 
 A left-anchored navigation rail (~28 columns, `rail.RailWidth`), driven
 entirely by the supervisor's `sessions` and `lanes` MCP tools. No second
@@ -179,6 +205,17 @@ send-keys transcript has no message boundaries to recover into ACP's
 structured shape — see `internal/chat/fixture.go`'s doc comment for what a
 real `Source` needs.
 
+**False as of `390c99a`, corrected 2026-08-23.** `agent-tui#99` (commit
+`5997399`) shipped `internal/chat/claudecode.go`'s `ClaudeCodeSource`,
+which reads real Claude Code CLI session transcripts, and
+`internal/chat/fallback.go`'s `FallbackSource`, which `cmd/keelson` wires
+in: try `ClaudeCodeSource` first, fall back to `FixtureSource` only when
+the real source reports itself genuinely unconfigured. `FixtureSource` is
+now the last-resort fallback, not the only implementation. Sending is also
+now built (agent-tui#104, commit `6942926`): `chat.Sender` is implemented
+over `session_send` (`agent-supervisor#509`) and wired into the composer —
+see `docs/SPEC-shell.md`'s S7 for the fuller history.
+
 ## Themes and glyphs are data, not code
 
 Every look-and-feel literal in the render path — colour, border character,
@@ -215,6 +252,13 @@ rune animates which lane state rather than the chrome around it — see
 
 ## Known defects
 
+**All three closed, `6942926`, 2026-08-23 (agent-tui#49 closed 2026-08-16).**
+See `AGENTS.md`'s own "Known defects" section for the fix evidence
+(`cmd/keelson/main.go`'s `supervisorRepoResolved` handling for the bare
+launch, `resolveLedgerSource`/`defaultLedgerLivePath`/`newLedgerCopier` for
+the board pane, `internal/cost/quota.go`'s `QuotaRunner`/`ExecQuotaRunner`
+wiring for the quota line) — kept below for record, not as an open list.
+
 Recorded at agent-tui#49 (open), found by driving the actual binary, not by
 reading the source. Confirmed still present at `b00db9b`, 2026-08-16:
 
@@ -246,7 +290,14 @@ reading the source. Confirmed still present at `b00db9b`, 2026-08-16:
   today, so there is nothing real to read yet; see the "Chat" section
   above for what a live `Source` needs.
 - **No knowledge/memory viewer, no AgentBox sandboxes.** No code exists for
-  either as of this SHA.
+  either as of this SHA. **The knowledge-viewer half is false as of
+  `390c99a`, corrected 2026-08-23:** `internal/knowledge` exists and is
+  wired as `PaneKnowledge` (agent-tui#87, commit `922400b`) — Jon's own
+  memory vault, reachable from the nav sidebar. The AgentBox half still
+  holds for the container driver itself (no driver code exists), though
+  `internal/session/execution_mode.go`'s `ExecutionMode`/`AddWithMode`
+  interface has landed since this SHA — an interface, not a driver; see
+  `docs/SPEC-shell.md`'s S12 for the current state.
 - **The anchor feature is missing two of its four verbs** — see "The rail"
   above.
 

@@ -10,6 +10,14 @@ test files). The product is named `steading` (agent-tui#42, decided
 factual name (`keelson`) only where the code itself uses it, never as a
 claim that the product is named that. See `AGENTS.md`'s naming note.
 
+**Partially re-verified against `390c99a`, 2026-08-23
+(estate-loop/b-docs-stale, docs-stale-sweep worktree).** The `b00db9b`
+stamp above is stale for several sections below — corrected in place where
+found false, each correction dated and cited with its own evidence rather
+than a blanket restamp. Sections not called out as corrected below were not
+re-walked in this pass and should still be treated as `b00db9b`-era until
+someone does.
+
 ## Stack
 
 - **Go 1.25** (`go.mod`; CI pins the toolchain to 1.26 in
@@ -24,6 +32,27 @@ claim that the product is named that. See `AGENTS.md`'s naming note.
   read-only `sqlite3` open (`internal/board`), and `ccusage` (`internal/cost`).
 
 ## Today's shape: one process, one shell, five panes
+
+**Stale, corrected 2026-08-23 against `390c99a`.** The paragraph below
+describes the pre-`docs/SPEC-shell.md` shape: a persistent `internal/rail`
+left column with a handful of panes behind it. That is no longer the
+architecture. `SPEC-shell.md`'s S1-S3 replaced the rail with
+`internal/nav.Model` as the fixed left column (a sidebar modelled 1:1 on
+the hill90 web nav); `internal/rail` is now reached as a routed pane
+(`PaneLanes`, behind the sidebar's "Lanes" route) rather than always being
+on screen — its own render/key logic is unchanged, only its screen
+position moved (`scripts/verify-lanes-unaffected.sh`). There are now 20
+`Pane*` constants in `internal/shell/model.go` (`PaneHome` through
+`PaneSecrets`, counted directly from the `const ( ... )` block), most
+reached via the nav sidebar rather than an f-key. `[f1]`-`[f6]` still map
+to exactly the original six — Home/Board/Cost/Gallery/Flow/Chat
+(`internal/shell/model.go`'s key-handling `switch`, `case "f1"` through
+`case "f6"`) — everything added since (Agents, Skills, MCP Servers,
+Connectors, Admin, Dashboard, Library, Monitor, Workflows, Knowledge, API
+Docs, Platform Docs, Secrets, plus the Lanes/Stub panes) is nav-sidebar-only,
+no f-key of its own. The paragraph originally here is kept below for
+historical shape (four-pane, rail-fixed) but is no longer accurate; treat
+the correction above as current.
 
 `cmd/keelson/main.go` constructs exactly **one** `tea.NewProgram` call site,
 running `internal/shell.Model` (agent-tui#38, landed on `main` in PR #43).
@@ -55,7 +84,12 @@ connection it cannot silently do without, and currently fails closed
 ### `internal/shell.Model`: how panes compose
 
 `internal/shell/model.go` — 4 files, 690 lines including tests
-(`model.go`, `model_test.go`, `model_teatest_test.go`):
+(`model.go`, `model_test.go`, `model_teatest_test.go`). **Stale, re-measured
+2026-08-23 against `390c99a`** (`wc -l internal/shell/*.go`): the package is
+now 7 files, 2,926 lines total — `model.go` (1,349), `model_test.go` (120),
+`model_teatest_test.go` (352), `mouse.go` (272), `mouse_test.go` (214),
+`nav_teatest_test.go` (492), `theme_test.go` (127). `mouse.go`/`mouse_test.go`
+and the two `_teatest_test.go` files did not exist at `b00db9b`:
 
 - **`resize`** sizes the rail first, to its fixed `rail.RailWidth` (28
   columns); the rail's own *rendered* width (border/padding included) is
@@ -140,7 +174,12 @@ is the pattern every "may be absent" value in this repo follows — `Known`
 is the only field a caller may branch on; a caller must never read a zero
 `Value` as "zero spent" when `Known` is false. **Not wired to
 `scripts/supervisor/quota.sh`** — confirmed by `grep -rn "quota.sh"
---include='*.go' .` returning zero matches — see "Known defects."
+--include='*.go' .` returning zero matches — see "Known defects." **Fixed,
+stale as of `390c99a`:** `internal/cost/quota.go` now shells `quota.sh` out
+via `QuotaRunner`/`ExecQuotaRunner`, wired from `cmd/keelson/main.go`'s
+`resolvedQuotaBin`; `grep -rn "quota.sh" --include='*.go' .` now returns
+matches throughout `internal/cost` and `cmd/keelson` (re-run 2026-08-23,
+non-empty). See "Known defects" below, also corrected.
 
 ### `board.Fetcher`-shaped functions (`cmd/keelson/board.go`)
 
@@ -185,11 +224,21 @@ config file is untouched until they edit it themselves.
 `chat.Source` is the fixture-backed read seam (`chat.FixtureSource` is the
 only implementation shipped — no lane in this estate runs on a structured
 transport yet, see `internal/chat/fixture.go`'s doc comment), with two
-`Layouts` (`internal/chat/layouts.go`). The thread list and the "big"
-transcript are `bubbles/viewport`-backed rather than a plain string
-clipped to a height, with an always-reserved indicator row so overflowing
-content is both flagged and reachable (`pgup`/`pgdn`, `home`/`end`, or
-`[f]` to focus a grid tile) — see `docs/PRD.md`'s chat section for status.
+`Layouts` (`internal/chat/layouts.go`). **Stale, corrected 2026-08-23
+against `390c99a`:** `chat.FixtureSource` is no longer the only
+implementation. `agent-tui#99` (commit `5997399`) shipped
+`internal/chat/claudecode.go`'s `ClaudeCodeSource`, which reads real Claude
+Code CLI session transcripts from the local project directory, and
+`internal/chat/fallback.go`'s `FallbackSource`, which `cmd/keelson` actually
+wires in: try `ClaudeCodeSource` first, and only fall back to the fixture
+when the real source reports itself genuinely unconfigured
+(`ErrNoProjectDir`), never on a real read error or real emptiness.
+`FixtureSource` is now the last-resort fallback, not the only source. The
+thread list and the "big" transcript are `bubbles/viewport`-backed rather
+than a plain string clipped to a height, with an always-reserved indicator
+row so overflowing content is both flagged and reachable (`pgup`/`pgdn`,
+`home`/`end`, or `[f]` to focus a grid tile) — see `docs/PRD.md`'s chat
+section for status.
 
 ## MCP transport
 
@@ -232,6 +281,14 @@ Two data models, kept deliberately separate:
 
 ## Known defects, verified live against `b00db9b`
 
+**All three closed, `6942926`/`390c99a`, 2026-08-23.** `agent-tui#49` is
+closed; the three defects below are historical, kept for record with their
+fixes noted rather than deleted. See `AGENTS.md`'s own "Known defects"
+section for the fix evidence (`cmd/keelson/main.go`'s `supervisorRepoResolved`
+handling for #1, `resolveLedgerSource`/`defaultLedgerLivePath`/
+`newLedgerCopier` for #2, `internal/cost/quota.go`'s `QuotaRunner`/
+`ExecQuotaRunner` wiring for #3) — the same evidence, not re-derived here.
+
 agent-tui#49 (open) records three; all three were confirmed here by
 running the built binary, not by reading source:
 
@@ -266,20 +323,34 @@ All items below verified 2026-08-16 against `b00db9b` unless noted:
 
 1. **`[a]ttach`/`[d]etach` are gone from the rail's keybindings.** The
    interface methods remain (`session.Interface`), uncalled. Restoring them
-   needs `agent-supervisor#189` (client-identity plumbing) first.
+   needs `agent-supervisor#189` (client-identity plumbing) first. Still
+   true as of `390c99a` — see `AGENTS.md`'s "What NOT to do here", which
+   re-confirms zero `.Attach(`/`.Detach(` callers outside test files.
 2. **Chat has no live transport.** `internal/chat` is wired into the shell
    (agent-tui#20, `[f6]`) and renders correctly, but the only `chat.Source`
    shipped is `chat.FixtureSource` — no lane in this estate runs on a
    structured transport (`acp`/`pi-rpc`) yet, so there is nothing live to
-   read.
+   read. **False as of `390c99a`, corrected 2026-08-23** — same correction
+   as the `chat.Source` section above: `ClaudeCodeSource` (agent-tui#99,
+   commit `5997399`) reads real Claude Code CLI transcripts, and
+   `FallbackSource` is what `cmd/keelson` actually wires in.
+   `chat.Sender` also now has a real implementation over `session_send`
+   (agent-tui#104, commit `6942926`) — see the S7 correction in
+   `docs/SPEC-shell.md`.
 3. **The hill90 1:1 comparison is currently unfalsifiable** — no estate
    access to the web harness to compare against, and no measurement has
    ever been attempted.
 4. **Knowledge/memory viewer and AgentBox sandboxes have no code or branch**
-   as of this SHA.
+   as of this SHA. **The Knowledge-viewer half is false as of `390c99a`,
+   corrected 2026-08-23:** `internal/knowledge` exists and is wired as
+   `PaneKnowledge` (agent-tui#87, commit `922400b`). The AgentBox half still
+   holds — no container driver code exists (`docs/SPEC-shell.md` S12's own
+   2026-08-22 update: only the `ExecutionMode` interface and the Agents
+   view's MODE column shipped, never a container driver).
 5. **The three defects in "Known defects" above** are gaps between the
    shell composing correctly and the panes it composes behaving well when
-   navigated to rather than launched into directly.
+   navigated to rather than launched into directly. **All three closed as
+   of `6942926`** — see the "Known defects" section's own correction above.
 
 None of items 1–4 is a defect in what shipped; each named item works as
 built and is tested at the `Model.Update` level with synthetic key
