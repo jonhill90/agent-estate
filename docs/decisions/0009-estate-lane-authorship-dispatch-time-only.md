@@ -145,10 +145,23 @@ relaxed here.
    `estate:5`**, which has now patched this exact mechanism three times
    in one review cycle and should not be the one to also build its
    replacement.
-3. **Once built and independently reviewed**: retroactively resolve the
-   PRs actually stuck on this gap (`#531`, `#534`, and whichever of
-   `#543`/`#544` still are) through the new mechanism. Also resolves
-   `agent-supervisor#532` as a side effect — no separate fix needed there.
+3. **Retroactive resolution for the 14 currently-open PRs is its own
+   decision, not a free consequence of step 2 — corrected here before the
+   builder reached it** (`director-retroactive-tension.md`). Writing a
+   dispatch-time-shaped row for a dispatch nobody actually observed is
+   the identical evidentiary hazard this document just retired, wearing
+   the new mechanism's name. A retroactive row, if written at all, must
+   be (a) backed by real evidence — the session transcript that actually
+   shows the dispatch, not a lane's bare say-so, (b) confirmed by a lane
+   independent of both the one being resolved and the one that built the
+   mechanism, and (c) permanently, visibly distinguishable in the ledger
+   from a real dispatch-time-observed row (a distinct `dispatch_kind`,
+   never a bare boolean easy to drop later). A PR whose dispatch cannot
+   be found or confirmed this way stays unresolved — fail-closed applies
+   to the reconstruction exactly as to everything else. This also
+   resolves `agent-supervisor#532`'s recovery gap for dispatches from
+   here forward; it does not retroactively grant the director a `lanes`
+   row for past work by the same reasoning.
 4. **`agent-supervisor#546`** (the independent poller, filed against the
    self-check's residual gap) is folded into this work rather than
    pursued separately — a poller answering "does this worktree have the
