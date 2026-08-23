@@ -236,8 +236,10 @@ product naming.
   checked): `agent-supervisor` 12/30 mention `agent-tui`/`keelson`/
   `estate`; `agent-tui` 15/30 mention `agent-supervisor`.
 - Two independently shipped drift bugs caused by the repo boundary:
-  `agent-tui#3` (`AllStates` missing the `never-busy` state
-  `agent-supervisor` had already split out), `agent-supervisor#490`
+  `agent-tui#19` (`AllStates`'s guard passed while blind on dynamic
+  assignments -- found during independent review of `agent-supervisor#149`,
+  which had just added the `never-busy` lane state `AllStates` didn't know
+  about), `agent-supervisor#490`
   (cross-repo PR authorship unresolvable when a lane's issue and PR live in
   different repos, `#472`/`#473`).
 - `agent-tui/internal/reposcan` (`agent-tui#131`/`#132`): a 199-line
