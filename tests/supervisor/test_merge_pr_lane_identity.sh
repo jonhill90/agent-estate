@@ -39,13 +39,27 @@ ok()  { echo "  ok   $1"; pass=$((pass+1)); }
 bad() { echo "  FAIL $1"; sed 's/^/       /' <<<"${2:-}"; fail=$((fail+1)); }
 
 echo "merge-pr.sh x lane identity (live tmux)"
-command -v tmux >/dev/null 2>&1 || { echo "  SKIP no tmux on PATH"; exit 0; }
-command -v jq   >/dev/null 2>&1 || { echo "  SKIP no jq"; exit 0; }
+# A SKIP is honest on a laptop without tmux; on CI it is the defect this
+# repo names most -- an instrument that cannot see a thing looks exactly like
+# the thing being absent, and a suite that silently skips every run is green
+# forever while testing nothing. On CI the dependencies are installed by
+# validate.yml, so a missing one is a broken workflow, not an environment to
+# tolerate: skip locally, FAIL there.
+missing() {  # missing <what>
+  if [ -n "${CI:-}" ]; then
+    echo "  FAIL $1 -- required on CI, where validate.yml installs it; a silent skip here would be a suite that tests nothing"
+    exit 1
+  fi
+  echo "  SKIP $1"
+  exit 0
+}
+command -v tmux >/dev/null 2>&1 || missing "no tmux on PATH"
+command -v jq   >/dev/null 2>&1 || missing "no jq"
 # See test_lane_identity.sh's own note: the pane's command must be a real
 # entry in `adapter.HARNESS_COMMANDS`, and `node` is the one reliably
 # available here (a copied binary dies to code-signing on macOS, a symlink
 # reports its target's name).
-command -v node >/dev/null 2>&1 || { echo "  SKIP no node on PATH"; exit 0; }
+command -v node >/dev/null 2>&1 || missing "no node on PATH"
 
 S="merge-identity-test-$$"
 RT="$(mktemp -d "${TMPDIR:-/tmp}/merge-identity-tmux.XXXXXX")"

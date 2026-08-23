@@ -31,8 +31,22 @@ bad() { echo "  FAIL $1"; sed 's/^/       /' <<<"${2:-}"; fail=$((fail+1)); }
 
 echo "lane_identity.py / register-lane-self.sh"
 
-command -v tmux >/dev/null 2>&1 || { echo "  SKIP no tmux on PATH"; exit 0; }
-command -v jq   >/dev/null 2>&1 || { echo "  SKIP no jq"; exit 0; }
+# A SKIP is honest on a laptop without tmux; on CI it is the defect this
+# repo names most -- an instrument that cannot see a thing looks exactly like
+# the thing being absent, and a suite that silently skips every run is green
+# forever while testing nothing. On CI the dependencies are installed by
+# validate.yml, so a missing one is a broken workflow, not an environment to
+# tolerate: skip locally, FAIL there.
+missing() {  # missing <what>
+  if [ -n "${CI:-}" ]; then
+    echo "  FAIL $1 -- required on CI, where validate.yml installs it; a silent skip here would be a suite that tests nothing"
+    exit 1
+  fi
+  echo "  SKIP $1"
+  exit 0
+}
+command -v tmux >/dev/null 2>&1 || missing "no tmux on PATH"
+command -v jq   >/dev/null 2>&1 || missing "no jq"
 # A pane whose `#{pane_current_command}` is a REAL entry in
 # `adapter.HARNESS_COMMANDS` is needed, because `cli.py register` refuses a
 # harness the live pane contradicts and this suite must not route around that.
@@ -42,7 +56,7 @@ command -v jq   >/dev/null 2>&1 || { echo "  SKIP no jq"; exit 0; }
 # Copying or symlinking some other binary under a harness name was tried
 # first and does not work on macOS: a copied system binary fails code-signing
 # and the pane dies instantly, and a symlink reports the TARGET name.
-command -v node >/dev/null 2>&1 || { echo "  SKIP no node on PATH (needed for a pane whose command names a real harness)"; exit 0; }
+command -v node >/dev/null 2>&1 || missing "no node on PATH (needed for a pane whose command names a real harness)"
 
 S="lane-identity-test-$$"
 RT="$(mktemp -d "${TMPDIR:-/tmp}/lane-identity-tmux.XXXXXX")"
@@ -90,7 +104,7 @@ for _ in $(seq 1 40); do
   sleep 0.25
 done
 if [ "$(tmux display-message -p -t "$S" '#{pane_current_command}' 2>/dev/null)" != "node" ]; then
-  echo "  SKIP the isolated pane never settled on a node command"; exit 0
+  missing "the isolated pane never settled on a node command"
 fi
 
 # `list-windows`, not `display-message -t "$S"`: targeting a SESSION answers
