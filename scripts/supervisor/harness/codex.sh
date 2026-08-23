@@ -217,3 +217,33 @@ HARNESS_MODEL_RE=
 # success #255 is about.
 HARNESS_LAUNCH_TAKES_PROMPT=1
 HARNESS_LAUNCH_PROMPT_FAILURE_RE='Session renamed to'
+
+# agent-supervisor#(codex adapter gap, 2026-08-23): how this harness is told
+# to come back to an EXISTING conversation. Left unset until now, which meant
+# `restore.sh` refused EVERY codex lane as unrecoverable after a tmux server
+# loss, unconditionally -- the same "no resume dialect here" default
+# harness/claude.sh's own comment on HARNESS_RESUME_CMD describes, just never
+# closed for this harness. Checked against the shipped CLI, not assumed:
+# `codex --help` lists `resume` as a subcommand and `codex resume --help` on
+# codex-cli 0.149.0 documents `codex resume [OPTIONS] [SESSION_ID] [PROMPT]`
+# -- a SESSION_ID given directly resumes THAT session with no picker shown.
+# Verified LIVE (isolated tmux socket, private TMUX_TMPDIR, never a live
+# lane): a fresh pane sent `codex resume <uuid>` from an earlier killed
+# session repainted that exact prior conversation -- the earlier turns
+# (a real prompt and its real reply) were on screen immediately, no picker,
+# no "no session found". `%s` is the session id `harness_session.py` records
+# at dispatch (see its own `candidates_codex` for how that id is found from
+# codex's own on-disk rollout files); `restore.sh` is the only caller.
+HARNESS_RESUME_CMD='codex resume %s'
+
+# agent-supervisor#(codex adapter gap, 2026-08-23): the glob `restore.sh`
+# checks before trusting a recorded session id -- a corrupted, truncated, or
+# deleted transcript must refuse, never resume "successfully" into whatever
+# `codex resume` does with a bad id. `%s` is the session id; `*` either side
+# of it matches codex's real on-disk filename shape, measured live:
+# `~/.codex/sessions/<YYYY>/<MM>/<DD>/rollout-<timestamp>-<uuid>.jsonl` --
+# unlike Claude's `<session-id>.jsonl` (the id IS the whole stem), codex's
+# id is only the TRAILING segment of a longer, timestamp-prefixed filename,
+# so the glob needs a leading `*` that Claude's own (see harness/claude.sh)
+# does not.
+HARNESS_TRANSCRIPT_GLOB='.codex/sessions/*/*/*/*%s.jsonl'
