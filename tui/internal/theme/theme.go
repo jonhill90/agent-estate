@@ -40,6 +40,7 @@ const (
 	RoleDone         Role = "done"         // this package stays free of an
 	RoleNeutral      Role = "neutral"      // import cycle back into board.
 	RoleThought      Role = "thought"      // internal/chat's thought lines -- "the interesting part to watch" (agent-tui#20)
+	RoleMention      Role = "mention"      // internal/chat's @-mention highlight (agent-tui#114)
 )
 
 // AllRoles is every Role a Theme is expected to fill -- theme_test.go's
@@ -50,7 +51,7 @@ const (
 var AllRoles = []Role{
 	RoleError, RoleWarn, RoleFlag, RoleDirector, RoleUnsupervised,
 	RoleSelectedBG, RoleBorder, RoleBacklog, RoleInProgress, RoleInReview,
-	RoleBlocked, RoleDone, RoleNeutral, RoleThought,
+	RoleBlocked, RoleDone, RoleNeutral, RoleThought, RoleMention,
 }
 
 // Theme is the one struct every render path file asks for a value from.

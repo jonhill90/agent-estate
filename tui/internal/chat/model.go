@@ -121,6 +121,14 @@ type Model struct {
 	sendErr     string
 	sender      Sender
 
+	// participants/participantsFetch are agent-tui#114's room model --
+	// see Participant's own doc comment for why this is a separate seam
+	// from Source rather than a field on Thread: @-mentions must resolve
+	// against every lane currently in the estate, including ones with no
+	// thread in this pane at all, not just the one Lane a Thread names.
+	participants      []Participant
+	participantsFetch ParticipantsFetcher
+
 	theme       theme.Theme
 	themeNotice string
 }
@@ -163,6 +171,16 @@ func (m Model) WithSender(s Sender) Model {
 	return m
 }
 
+// WithParticipants wires in a real ParticipantsFetcher -- nil (New's
+// default) is a valid, silent "no room roster configured yet" state, same
+// convention WithSender/WithTasks document elsewhere in this module.
+// ValidateMentions then refuses every @-mention as unknown against an
+// empty participants slice, which is the honest answer, not a crash.
+func (m Model) WithParticipants(fetch ParticipantsFetcher) Model {
+	m.participantsFetch = fetch
+	return m
+}
+
 // sendOutcome is the composer's own answer to SPEC-shell.md S7's "three
 // states in the UI, never two": in flight (sent, outcome not yet known),
 // delivered (the daemon confirmed it, as a fact -- collapses straight
@@ -197,6 +215,20 @@ type sendMsg struct {
 	err      error
 }
 
+// participantsFetchMsg/participantsTickMsg are the room roster's own
+// "Cmd now, Msg later" pair -- participantsRefreshInterval matches
+// internal/agents' own refreshInterval for the same "sessions" MCP read
+// (internal/agents/model.go's own doc comment), since a participant going
+// dead/stale mid-compose must be visible to ValidateMentions before it is
+// visible in the Agents pane, not after.
+type participantsFetchMsg struct {
+	participants []Participant
+	err          error
+}
+type participantsTickMsg time.Time
+
+const participantsRefreshInterval = 2 * time.Second
+
 func (m Model) fetchCmd() tea.Cmd {
 	src := m.source
 	return func() tea.Msg {
@@ -205,7 +237,33 @@ func (m Model) fetchCmd() tea.Cmd {
 	}
 }
 
-func (m Model) Init() tea.Cmd { return m.fetchCmd() }
+func (m Model) participantsFetchCmd() tea.Cmd {
+	fetch := m.participantsFetch
+	if fetch == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		participants, err := fetch()
+		return participantsFetchMsg{participants: participants, err: err}
+	}
+}
+
+func participantsTickCmd() tea.Cmd {
+	return tea.Tick(participantsRefreshInterval, func(t time.Time) tea.Msg { return participantsTickMsg(t) })
+}
+
+// Init fetches threads exactly as before when no ParticipantsFetcher is
+// wired (WithParticipants never called) -- preserved as a single Cmd, not
+// tea.Batch, so every existing caller driving Init()'s returned Cmd
+// synchronously (this package's own fetched() test helper) keeps working
+// unchanged. Only a Model with a real participants seam pays for the extra
+// fetch + recurring tick.
+func (m Model) Init() tea.Cmd {
+	if m.participantsFetch == nil {
+		return m.fetchCmd()
+	}
+	return tea.Batch(m.fetchCmd(), m.participantsFetchCmd(), participantsTickCmd())
+}
 
 // usingFixture reports whether m.threads came from FixtureSource (Thread's
 // own Fixture field, set only there -- see thread.go/fallback.go). Checked
@@ -268,6 +326,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.sendErr = msg.err.Error()
 		}
 		return m, nil
+
+	case participantsFetchMsg:
+		// A failed fetch leaves m.participants at its last-known value
+		// rather than clearing it -- the same "blind, not quiet" choice
+		// internal/rail's own Fetcher failures make: a stale roster that
+		// still refuses a genuinely-gone participant is safer than an
+		// empty one that would refuse every mention as "not in this room,"
+		// including ones that still are.
+		if msg.err == nil {
+			m.participants = msg.participants
+		}
+		return m, nil
+
+	case participantsTickMsg:
+		return m, tea.Batch(participantsTickCmd(), m.participantsFetchCmd())
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -426,6 +499,17 @@ func (m Model) handleComposerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 func (m Model) trySend() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.composer.Value())
 	if text == "" {
+		return m, nil
+	}
+	// agent-tui#114's failure mode to engineer against: an @-mention that
+	// names a participant not in the room, or not running, must say so
+	// HERE -- before m.sender is ever called -- not be sent and silently
+	// go nowhere. sendFailed is the correct outcome, not a fourth state:
+	// this is a confirmed refusal, exactly as final as any other failed
+	// send, just decided locally instead of by the daemon.
+	if err := ValidateMentions(text, m.participants); err != nil {
+		m.sendOutcome = sendFailed
+		m.sendErr = err.Error()
 		return m, nil
 	}
 	if m.sender == nil {
@@ -602,7 +686,8 @@ func (m Model) sync() Model {
 	if idx >= 0 && idx < len(m.threads) {
 		var lines []string
 		for _, msg := range m.threads[idx].Messages {
-			lines = append(lines, colorizeMessage(msg, RenderMessage(msg), st)...)
+			rendered := highlightMentions(RenderMessage(msg), st)
+			lines = append(lines, colorizeMessage(msg, rendered, st)...)
 		}
 		for i, l := range lines {
 			lines[i] = truncate(l, width)
@@ -686,7 +771,7 @@ func (m Model) View() string {
 var titleStyle = lipgloss.NewStyle().Bold(true)
 
 type chatStyles struct {
-	dim, sel, unread, thought, toolFail, warn, errS lipgloss.Style
+	dim, sel, unread, thought, toolFail, warn, errS, mention lipgloss.Style
 }
 
 func (m Model) styles() chatStyles {
@@ -699,7 +784,32 @@ func (m Model) styles() chatStyles {
 		toolFail: lipgloss.NewStyle().Foreground(th.Color(theme.RoleError)),
 		warn:     lipgloss.NewStyle().Bold(true).Foreground(th.Color(theme.RoleWarn)),
 		errS:     lipgloss.NewStyle().Bold(true).Foreground(th.Color(theme.RoleError)),
+		// mention is agent-tui#114's own requirement made visible: "mentions
+		// must be visible in the rendered transcript as mentions, not as
+		// plain text that happens to start with @" -- see highlightMentions.
+		mention: lipgloss.NewStyle().Bold(true).Foreground(th.Color(theme.RoleMention)),
 	}
+}
+
+// highlightMentions re-renders every @-mention token (mentionPattern,
+// mention.go) inside lines in st.mention -- agent-tui#114's own rendering
+// requirement. Runs on every line RenderMessage produced, not just the
+// first, because a mention can land anywhere a message's own text does
+// (KindPlan's step text, for instance). Deliberately does not consult
+// m.participants: a transcript can carry a message sent, or received, from
+// a real source before this pane's own roster last refreshed -- refusing
+// to highlight a mention merely because the roster is momentarily stale
+// would repeat, at render time, the exact "quietly wrong" failure
+// ValidateMentions exists to catch at compose time, where at least there is
+// a gate to catch it with; here there is none, so this stays permissive.
+func highlightMentions(lines []string, st chatStyles) []string {
+	out := make([]string, len(lines))
+	for i, l := range lines {
+		out[i] = mentionPattern.ReplaceAllStringFunc(l, func(tok string) string {
+			return st.mention.Render(tok)
+		})
+	}
+	return out
 }
 
 // colorizeMessage applies m's per-Kind theme role over RenderMessage's

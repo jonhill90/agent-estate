@@ -8,9 +8,14 @@
 //
 // It speaks just enough of MCP's JSON-RPC-over-stdio wire shape
 // (internal/mcp/client.go's own rpcRequest/rpcResponse) to answer
-// "initialize" and "tools/call" for exactly one tool, session_send. The
-// message argument itself picks the canned outcome, so one fixture drives
-// all three states this PR adds:
+// "initialize" and "tools/call" for two tools, session_send and sessions.
+//
+// sessions (added for agent-tui#114's chat-mentions.tape) answers a fixed,
+// deterministic roster -- one running lane ("alice") and one dead one
+// ("bob") -- so cmd/keelson's real buildParticipantsFetch (chat.go) has
+// something real to join against without a live agent-supervisor daemon.
+// The message argument to session_send itself picks the canned outcome,
+// so one fixture drives all three send states this PR adds:
 //
 //   - message containing "FAKE_FAIL"    -> an isError tools/call result,
 //     the same text shape SessionSendSource.write() raises for a
@@ -118,7 +123,14 @@ func reply(out *bufio.Writer, req rpcRequest) {
 
 func handleToolsCall(raw json.RawMessage) toolContent {
 	var params toolCallParams
-	if err := json.Unmarshal(raw, &params); err != nil || params.Name != "session_send" {
+	if err := json.Unmarshal(raw, &params); err != nil {
+		return toolContent{IsError: true, Content: []contentBlock{{Type: "text", Text: "fakemcp: bad tools/call params"}}}
+	}
+
+	if params.Name == "sessions" {
+		return sessionsResult()
+	}
+	if params.Name != "session_send" {
 		return toolContent{IsError: true, Content: []contentBlock{{Type: "text", Text: "fakemcp: unknown tool"}}}
 	}
 	message, _ := params.Arguments["message"].(string)
@@ -143,4 +155,30 @@ func handleToolsCall(raw json.RawMessage) toolContent {
 		})
 		return toolContent{Content: []contentBlock{{Type: "text", Text: string(body)}}}
 	}
+}
+
+// sessionsResult answers the "sessions" tool -- lane.DecodeSessions's own
+// {"sessions": [...], "count": N} shape, one session with two lanes: a
+// real, RUNNING one ("alice", state "busy") and a real, NOT-running one
+// ("bob", state "dead" -- agent-supervisor's own verdict that the harness
+// process itself is gone, per internal/agents/row.go's modeFor). Fixed and
+// deterministic, same discipline as session_send's own canned replies:
+// testdata/vhs/chat-mentions.tape needs one real participant to resolve an
+// @-mention against and one real, known-but-not-running one to refuse,
+// without a live agent-supervisor daemon to read either state from.
+func sessionsResult() toolContent {
+	body, _ := json.Marshal(map[string]any{
+		"sessions": []map[string]any{
+			{
+				"session":    "fakemcp",
+				"supervised": true,
+				"lanes": []map[string]any{
+					{"window": 1, "window_id": "@1", "name": "alice", "command": "claude", "state": "busy", "idle_seconds": 0, "model": "unknown"},
+					{"window": 2, "window_id": "@2", "name": "bob", "command": "", "state": "dead", "idle_seconds": 999, "model": "unknown"},
+				},
+			},
+		},
+		"count": 1,
+	})
+	return toolContent{Content: []contentBlock{{Type: "text", Text: string(body)}}}
 }

@@ -375,6 +375,16 @@ func main() {
 			return err
 		})
 	}
+	// chat.WithParticipants wires agent-tui#114's room model in --
+	// buildParticipantsFetch (chat.go) reuses sessionsFetch, the exact same
+	// "sessions" MCP call agentsModel (below) and the rail already make,
+	// never a second read. Unlike WithSender above, this is NOT gated on
+	// client != nil: buildParticipantsFetch itself returns nil when
+	// sessionsFetch is nil, and chatModel.WithParticipants(nil) is the same
+	// safe no-op WithSender(nil) already is (ValidateMentions then refuses
+	// every mention as "not in this room" against an empty roster, the
+	// honest answer for a degraded launch, not a crash).
+	chatModel = chatModel.WithParticipants(buildParticipantsFetch(sessionsFetch))
 
 	// agentsModel/skillsModel/mcpserversModel/connectorsModel/adminModel
 	// are S6/S8/S9/S10/S11's own panes -- this is the first time any of

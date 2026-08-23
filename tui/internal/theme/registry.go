@@ -28,6 +28,7 @@ var Default = Theme{
 		RoleDone:         lipgloss.Color("#22c55e"), // board vividColumnColor[Done]
 		RoleNeutral:      lipgloss.Color("#6b7280"), // board restrainedColumnColor
 		RoleThought:      lipgloss.Color("#8b8fa3"), // internal/chat thought lines
+		RoleMention:      lipgloss.Color("#61afef"), // internal/chat @-mention highlight (agent-tui#114)
 	},
 	Border:       lipgloss.RoundedBorder(),
 	Padding:      1,
@@ -62,6 +63,7 @@ var Mono = Theme{
 		RoleDone:         lipgloss.Color("#00ff44"),
 		RoleNeutral:      lipgloss.Color("#aaaaaa"),
 		RoleThought:      lipgloss.Color("#ff00ff"),
+		RoleMention:      lipgloss.Color("#00ff88"),
 	},
 	Border:       lipgloss.ThickBorder(),
 	Padding:      2,
