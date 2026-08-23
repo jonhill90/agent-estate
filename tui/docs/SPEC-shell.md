@@ -89,6 +89,29 @@ A thread is a conversation with an agent. List pane + transcript pane +
 composer. Sends go through the daemon (subprocess transport), **never tmux
 send-keys**.
 
+**Status, 2026-08-23 (estate-loop/agent-b3.md).** Read-only half done:
+`internal/chat` has a real `Source` (agent-tui#99) backed by Claude Code
+CLI's own local session transcripts; the nav walk records Chat as RENDERS.
+Sending is **blocked, not built** — investigated, not skipped: neither
+`agent-supervisor`'s MCP tool surface (`lanes`/`sessions`/`digest`/`ledger`/
+`events`/`session_remove_check` reads, `session_attach`/`session_detach`/
+`session_add`/`session_remove` writes — ten sources total, verified against
+`supervisor_view.py`'s own `READ_SOURCES`/`WRITE_SOURCES`) nor
+`daemon/cmd/supervisord run` (requires `-task ID -brief FILE`, shaped for
+fresh ledger dispatch, not "continue this thread") nor any RPC/HTTP/socket
+surface (`grep -rl "net/http\|http.ListenAndServe\|net.Listen" daemon/` is
+empty) currently exposes a way to send an ad-hoc message to an existing
+thread through the daemon's own subprocess-transport contract
+(`daemon/internal/agent/claude.go`: a nil error means delivered, as a fact,
+never a third state). Building a workaround (an agent-tui-side `os/exec`
+reimplementing that transport, or shelling out to `supervisord run`) would
+duplicate the transport a second time or route around the MCP boundary —
+exactly what S7's own hard constraint exists to prevent, so neither was
+done. Proposed shape of the missing daemon capability filed as
+`agent-supervisor#508`. `internal/chat.Sender` (the write half of the
+`Source`/`Sender` seam) stays declared and `nil` by default until that
+capability exists to implement it against.
+
 ## S8 — Skills view
 
 List skills from `~/.claude/skills` and the `skills` repo: name, description,
