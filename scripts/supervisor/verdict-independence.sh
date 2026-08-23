@@ -297,6 +297,31 @@ repo_task_prefix() {
   fi
 }
 
+# agent-supervisor#513: the PR body's own self-attested `Author-Lane:`
+# trailer, parsed via `verdict._parse_author_lane` (see that function's own
+# comment for the asymmetry -- REFUSE-only, never PERMIT). Shells to python
+# the same way `_lane_own_pane_id` above does for a single-field lookup that
+# does not warrant its own `cli.py` subcommand. Reads the PR body from
+# stdin rather than an argument -- a PR body is arbitrary-length free text
+# and the estate's own convention (`with_timeout`'s command construction,
+# `_al_*` helpers above) already avoids putting untrusted multi-line text on
+# a command line anywhere else in this file.
+_claimed_author_lane() {  # _claimed_author_lane <pr-body-on-stdin> -> lane id or empty
+  "$LEDGER_PYTHON" -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+from verdict import _parse_author_lane
+try:
+    ledger = Ledger(sys.argv[2])
+except Exception:
+    ledger = None
+body = sys.stdin.read()
+lane = _parse_author_lane(body, ledger=ledger)
+print(lane or "")
+' "$HERE" "$STATE" 2>/dev/null
+}
+
 # Resolve the lane that authored a PR by the same fail-closed chain
 # dispatch.sh --reviews-pr uses: closing issue -> author-issue-lane, then
 # branch name as a last-resort task-id hint. Missing data is not an error to
@@ -346,6 +371,20 @@ author_lane_for() {
   local prefix fallback_task fallback_json outfile rc external_json external_note
   local pr_task_json pr_contrib_json contrib_json
   local contrib_lanes=() contrib_tasks=()
+  # agent-supervisor#513: the PR body's self-attested `Author-Lane:` trailer
+  # (`claimed_lane`, via `_claimed_author_lane` above) -- populated once the
+  # body is available, `null` on every return path before that (the gh call
+  # itself failed or timed out, or the PR is marked external and has no body
+  # worth reading). NEVER added to `contrib_lanes`/`contributors` -- that
+  # array is what the permit path (`independence_verdict`, through
+  # `contributor_lane_relation`) reads to decide `known`/`different`, and a
+  # self-attested claim must never be able to WIDEN that set (see
+  # `verdict._parse_author_lane`'s own comment for why). It is carried on
+  # every returned object purely so `claimed_author_conflict` below -- the
+  # REFUSE-only check -- has it even on the `known:false` path, which is
+  # exactly the agent-dotfiles#308 shape this closes: ledger genuinely does
+  # not know the author, but the PR's own body does.
+  local claimed_lane=""
 
   _al_contrib_known() {
     local want="$1" have
@@ -376,40 +415,46 @@ author_lane_for() {
     external_note=$(jq -r '.note // ""' <<<"$external_json")
     _al_cleanup
     jq -nc --arg note "$external_note" \
-      '{known:true, contributors:[], external:true,
+      '{known:true, contributors:[], external:true, claimed_lane:null,
         detail:("authored outside the lane system" + (if ($note|length) > 0 then " -- " + $note else "" end))}'
     return
   fi
   outfile=$(mktemp "${TMPDIR:-/tmp}/author-lane-gh.XXXXXX") || {
     _al_cleanup
     jq -nc --arg detail "independence unknown -- PR author lane unresolved: could not create a scratch file" \
-      '{known:false, contributors:[], detail:$detail}'
+      '{known:false, contributors:[], claimed_lane:null, detail:$detail}'
     return
   }
+  # agent-supervisor#513: `body` added to the field list already fetched
+  # here -- one `gh pr view` call, not a second round-trip -- so
+  # `claimed_lane` below can be computed from the SAME response the rest of
+  # this function reads, never a separately-timed fetch that could disagree
+  # with it about which revision of the PR it is describing.
   with_timeout "$AUTHOR_LANE_GH_TIMEOUT_SECONDS" "$outfile" \
-    gh pr view "$number" -R "$repo_full" --json headRefName,closingIssuesReferences,commits
+    gh pr view "$number" -R "$repo_full" --json headRefName,closingIssuesReferences,commits,body
   rc=$?
   pr_json=$(cat "$outfile" 2>/dev/null)
   rm -f "$outfile"
   if [ "$rc" -eq 124 ]; then
     _al_cleanup
     jq -nc --arg detail "independence unknown -- PR author lane unresolved: gh pr view timed out after ${AUTHOR_LANE_GH_TIMEOUT_SECONDS}s" \
-      '{known:false, contributors:[], detail:$detail}'
+      '{known:false, contributors:[], claimed_lane:null, detail:$detail}'
     return
   fi
   if [ "$rc" -ne 0 ] || [ -z "$pr_json" ]; then
     _al_cleanup
     jq -nc --arg detail "independence unknown -- PR author lane unresolved: gh pr view failed" \
-      '{known:false, contributors:[], detail:$detail}'
+      '{known:false, contributors:[], claimed_lane:null, detail:$detail}'
     return
   fi
   if ! jq -e . >/dev/null 2>&1 <<<"$pr_json"; then
     _al_cleanup
     jq -nc --arg detail "independence unknown -- PR author lane unresolved: gh pr view produced unreadable JSON" \
-      '{known:false, contributors:[], detail:$detail}'
+      '{known:false, contributors:[], claimed_lane:null, detail:$detail}'
     return
   fi
   head_ref=$(jq -r '.headRefName // ""' <<<"$pr_json")
+  claimed_lane=$(jq -r '.body // ""' <<<"$pr_json" | _claimed_author_lane)
   candidates=$(
     {
       jq -r '.closingIssuesReferences[]?.number // empty' <<<"$pr_json"
@@ -463,7 +508,9 @@ author_lane_for() {
   if [ "${#contrib_lanes[@]}" -gt 0 ]; then
     contrib_json=$(_al_contrib_json)
     _al_cleanup
-    jq -nc --argjson contributors "$contrib_json" '{known:true, external:false, contributors:$contributors, detail:""}'
+    jq -nc --argjson contributors "$contrib_json" --arg claimed "$claimed_lane" \
+      '{known:true, external:false, contributors:$contributors,
+        claimed_lane:(if ($claimed|length) > 0 then $claimed else null end), detail:""}'
     return
   fi
   # Path 5, legacy last resort: the branch-name convention alone, kept only
@@ -477,14 +524,64 @@ author_lane_for() {
       _al_cleanup
       jq -nc --arg lane "$(jq -r '.lane' <<<"$fallback_json")" \
              --arg task "$fallback_task" \
-             '{known:true, external:false, contributors:[{lane:$lane, task:$task}], detail:""}'
+             --arg claimed "$claimed_lane" \
+             '{known:true, external:false, contributors:[{lane:$lane, task:$task}],
+               claimed_lane:(if ($claimed|length) > 0 then $claimed else null end), detail:""}'
       return
     fi
   fi
   _al_cleanup
+  # agent-supervisor#513: this is the agent-dotfiles#308 shape -- ledger
+  # authorship genuinely unresolved (every path above missed), but
+  # `claimed_lane` may still carry the PR body's own admission. Reported
+  # honestly here (`known` stays false -- see the field comment above this
+  # function for why that must not change) rather than silently dropped the
+  # way it was before this fix, when nothing in this file ever read the
+  # trailer at all.
   jq -nc --arg head "$head_ref" \
          --arg task "${fallback_task:-none}" \
-         '{known:false, contributors:[], detail:("independence unknown -- PR author lane unresolved from ledger issue lookup or branch " + ($head|if length > 0 then . else "unknown" end) + " (task " + $task + ")")}'
+         --arg claimed "$claimed_lane" \
+         '{known:false, contributors:[],
+           claimed_lane:(if ($claimed|length) > 0 then $claimed else null end),
+           detail:("independence unknown -- PR author lane unresolved from ledger issue lookup or branch " + ($head|if length > 0 then . else "unknown" end) + " (task " + $task + ")")}'
+}
+
+# agent-supervisor#513: the REFUSE-only complement to contributor_lane_
+# relation() below. That function (and the permit path built on it,
+# independence_verdict) is only ever CALLED by merge-pr.sh when
+# `author.known == true` -- by design, `known:false` already refuses
+# unconditionally (independence_verdict's own `else {value:null, ...}`
+# branch), so the ledger-driven machinery has nothing left to check. That is
+# exactly the gap agent-dotfiles#308 measured: a PR whose ledger authorship
+# is genuinely unresolved gets a generic "unresolved" refusal today, and
+# nothing ever looks at whether the PR's OWN body admits who wrote it and
+# compares that against the reviewer -- not because doing so would be
+# unsafe, but because nothing was wired to try.
+#
+# Called unconditionally by merge-pr.sh, independent of `author.known` --
+# this must run in exactly the case contributor_lane_relation() is skipped.
+# Fails toward NO CONFLICT when it cannot establish `same` -- an empty or
+# unparseable claimed_lane, or one `resolve_lane_relation` cannot place,
+# reports no conflict, never a refusal of its own; the ledger-driven checks
+# already carry the fail-closed "refuse when unknown" posture for those
+# cases, and doubling it here would let a self-attested claim that merely
+# COULD NOT BE CONFIRMED start acting like evidence, which is the exact
+# asymmetry this file's own author_lane_for comment forbids.
+claimed_author_conflict() {  # claimed_author_conflict <author-json> <reviewer-lane> -> JSON
+  local author_json="$1" reviewer_lane="$2" claimed rel
+  claimed=$(jq -r '.claimed_lane // ""' <<<"$author_json" 2>/dev/null) || claimed=""
+  if [ -z "$claimed" ] || [ -z "$reviewer_lane" ]; then
+    printf '{"conflict":false}\n'
+    return
+  fi
+  rel=$(resolve_lane_relation "$claimed" "$reviewer_lane")
+  if [ "$rel" = "same" ]; then
+    jq -nc --arg claimed "$claimed" --arg reviewer "$reviewer_lane" \
+      '{conflict:true, detail:("NOT independent -- PR body claims Author-Lane: " + $claimed
+        + ", reviewed by lane " + $reviewer + " -- the same lane, self-attested (Author-Lane trailer)")}'
+  else
+    printf '{"conflict":false}\n'
+  fi
 }
 
 # agent-supervisor#200: aggregates resolve_lane_relation() (#332) across
