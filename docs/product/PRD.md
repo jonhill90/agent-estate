@@ -63,8 +63,15 @@ harness session id is missing, whose harness has no resume dialect, or whose
 transcript is gone from disk is reported `UNRECOVERABLE` (exit 2) and left
 alone. `restore.sh`'s own header calls the alternative "the worst outcome
 available — it wears the right window name, looks fully recovered, and has
-none of the context." This project would rather tell an operator "I can't"
-than hand them something that looks like a successful recovery and isn't one.
+none of the context." (Checked 2026-08-23 against `restore.sh:19-22`
+directly: the exact quoted clause order is `README.md`'s own "Recovery"
+section, line 109 — `restore.sh`'s header states the same claim with the
+first two clauses transposed, "it looks fully recovered, wears the right
+window name, and has none of the context." Not a substantive difference,
+but the quote above is `README.md`'s wording, not a verbatim excerpt of
+`restore.sh` as attributed.) This project would rather tell an operator "I
+can't" than hand them something that looks like a successful recovery and
+isn't one.
 
 ### Fail closed
 

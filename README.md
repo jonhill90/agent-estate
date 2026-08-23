@@ -22,12 +22,17 @@ bash scripts/supervisor/lanes.sh           # just the lanes
 python3 -m unittest discover -s tests/supervisor   # 349 tests, as of 2026-08-13 --
                                                     # not re-run to completion in this sweep
                                                     # (it did not finish inside this
-                                                    # environment's time budget); 110 tracked
+                                                    # environment's time budget, both in the
+                                                    # 2026-08-18 sweep and again in the
+                                                    # 2026-08-23 truth pass); 171 tracked
                                                     # files under tests/supervisor/ today
-                                                    # (`Verified 2026-08-18`, git
-                                                    # ls-files), so the count is likely
-                                                    # stale and should be re-measured, not
-                                                    # assumed
+                                                    # (`Verified 2026-08-23`, git ls-files,
+                                                    # `25135ae` -- this line previously said
+                                                    # 110, `Verified 2026-08-18`), so the
+                                                    # count is volatile and should be
+                                                    # re-measured, not assumed; the 349-test
+                                                    # figure specifically could not be
+                                                    # re-verified this pass
 ```
 
 Nothing needs configuring to run the suite. Every setting has a working default;
@@ -62,6 +67,12 @@ text, showing a menu, sitting idle. Read those from the pane.
 *decided* and must *remember*: which lane is available, who owns a task, which
 conversation belongs to which lane. Six tables — `lanes`, `tasks`,
 `source_tasks`, `pr_verdicts`, `events`, `components`.
+(Stale: `grep -n 'CREATE TABLE IF NOT EXISTS' scripts/supervisor/core.py`
+on `25135ae`, 2026-08-23, finds THIRTEEN tables in the same
+`_initialize` executescript today — the original six plus
+`supervisor_lease`, `pr_authorship`, `pr_external_authorship`, `sessions`,
+`prompts`, `items`, `links`. The six named above are still real tables;
+the count "six" is what's no longer current.)
 
 The test is authorship: **did this system write the value, or did tmux produce it
 as a byproduct?**
@@ -118,8 +129,15 @@ removing one is a deletion.
   exposes four guarded session-management writes (attach/detach/add/remove;
   agent-tui#14) — `dispatch`/`merge` remain excluded, see `supervisor_view.py`'s
   `WRITE_SOURCES` docstring for why these four are different.
+  (Stale: `supervisor_view.WRITE_SOURCES` on `25135ae`, 2026-08-23, now
+  registers FIVE writes, not four — `session_send` (agent-supervisor#508,
+  landed in #509, `b30b70e`) was added alongside attach/detach/add/remove
+  and, unlike them, can send input to an already-running session.)
 - **Two lane viewers** (`laneview/text.sh`, `laneview/opensessions.sh`) — neither
   required by the other, or by `lanes.sh`.
+  (Stale: `ls scripts/supervisor/laneview/` on `25135ae`, 2026-08-23, shows
+  FOUR renderers today — the original two plus `tui.sh` and `dock.sh` —
+  still none required by another.)
 - **Watchdog** (`watchdog.sh`) — runs outside the loop from a LaunchAgent, so it
   survives the loop dying. It escalates rather than restart-looping forever.
 - **The merge gate** (`merge-pr.sh`) — the only path that should merge a PR in
@@ -149,3 +167,8 @@ where the non-obvious rules live. `CLAUDE.md` is a symlink to it.
 
 Extracted 2026-08-13 with full history. The suite passes standalone. Interfaces
 are still moving; treat the scripts as the contract, not any given internal.
+(Could not measure "the suite passes standalone" this pass, 2026-08-23:
+`python3 -m unittest discover -s tests/supervisor` did not finish inside
+either a 300s foreground run or the time available to a backgrounded run
+against `25135ae` — see the same caveat on the Quick start block above.
+Not asserting it is false, only that it was not re-confirmed here.)

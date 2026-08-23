@@ -41,6 +41,15 @@ explains what the system is; this explains what will bite you.
 ```
 scripts/supervisor/          the system
   lanes.sh                   classify every pane into one of ELEVEN states
+                             (stale: `grep -n 'state=' scripts/supervisor/
+                             lanes.sh | sed -E 's/.*state=([a-z-]+).*/\1/' |
+                             sort -u` on `25135ae`, 2026-08-23, finds
+                             FOURTEEN distinct states now emitted: broken,
+                             busy, dead, free, hung, menu-blocked,
+                             never-busy, scrolled, service, stale,
+                             supervisor, text-blocked, unknown, unsent —
+                             `menu-blocked`/`text-blocked` split what was
+                             one `blocked` state, and `supervisor` is new)
   dispatch.sh                hand an issue to a lane; records the ledger row
   lane-done.sh               completion, in the safe order
   claim.sh                   atomic lane claim
@@ -65,20 +74,39 @@ scripts/supervisor/          the system
                              requires before any destructive tmux verb,
                              including session creation (#185)
   laneview/                  two viewers, neither required
+                             (stale: `ls scripts/supervisor/laneview/` on
+                             `25135ae`, 2026-08-23, shows FOUR renderers now
+                             — `text.sh`, `tui.sh`, `opensessions.sh`,
+                             `dock.sh` — `dock.sh` is new since this line
+                             was written; none is required by another)
   look.py                    let an agent SEE a pane: capture / png / navigate / frames
   termshot.py                ANSI-to-SVG rasteriser look.py's `png` renders through
   ui-evidence-gate.sh        CI check: a UI PR must carry a look.py frame
   mcp_server.py              read surface over MCP, plus four guarded
                              session-management writes (agent-tui#14)
+                             (stale: `grep -n 'WRITE_SOURCES = {' -A8
+                             scripts/supervisor/supervisor_view.py` on
+                             `25135ae`, 2026-08-23, shows FIVE now —
+                             `session_attach`, `session_detach`,
+                             `session_add`, `session_remove`, and
+                             `session_send` (agent-supervisor#508, #509,
+                             `b30b70e`) — session_send can now drive an
+                             existing session, unlike when this line was
+                             written)
   session_guard.py           the one place session removal is judged safe
   watchdog.sh                liveness, from OUTSIDE the loop
   inbox-poll.sh              Telegram poller (a service, never a lane)
-tests/supervisor/            110 tracked files; the suite is the contract
-                             (`Verified 2026-08-18` by `git ls-files
-                             tests/supervisor/ | wc -l`; this line was last
-                             updated to 92 during the 2026-08-16 docs sweep
-                             and had gone stale again since — a count this
-                             volatile is worth re-measuring, not trusting)
+tests/supervisor/            171 tracked files; the suite is the contract
+                             (`Verified 2026-08-23` by `git ls-files
+                             tests/supervisor/ | wc -l` on `25135ae` — this
+                             line previously said 110, `Verified 2026-08-18`,
+                             and had gone stale again since; a count this
+                             volatile is worth re-measuring, not trusting.
+                             Could not measure a current full pass/fail
+                             count: `python3 -m unittest discover -s
+                             tests/supervisor` did not finish inside this
+                             pass's time budget either, same as noted in
+                             README.md)
 ```
 
 This list is a highlight, not an inventory — `ls scripts/supervisor/*.sh

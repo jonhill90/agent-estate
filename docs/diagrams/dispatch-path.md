@@ -15,6 +15,28 @@ line, it says so instead of drawing a clean arrow. The happy path is five
 boxes; the failure exits are the point, and they take up most of this
 page on purpose.
 
+**Line-number drift, checked against `main` `25135ae` on 2026-08-23 (23
+commits after `14c2904`, `git log --oneline 14c2904..25135ae`):** every
+`dispatch.sh` line citation from roughly line 765 onward in the original is
+now off by a uniform **+23 lines** — one commit,
+`568eed2` ("host-pressure gate", agent-supervisor#502), inserted exactly 23
+lines earlier in the file (`git show --stat 568eed2 -- scripts/supervisor/
+dispatch.sh`: `23 insertions(+)`, no deletions) and nothing else touched
+`dispatch.sh` in that range since. `collision-check.sh` citations from
+roughly line 330 onward are separately off by **+47 lines** (commit
+`2fc832f`, agent-supervisor#483/#491, `48 insertions(+), 1 deletion(-)`).
+`core.py` is completely unchanged since `14c2904` for this page's purposes
+(`git log --oneline 14c2904..25135ae -- scripts/supervisor/core.py` is
+empty) — every `core.py:NNNN` citation below was re-checked directly and
+still points at the same line. `reconcile_lane_completions.py` changed
+substantially (commit `92228eb`, agent-supervisor#488/#492, `113
+insertions(+), 1 deletion(-)`, landed 2026-08-21T21:51, after `14c2904`'s
+10:10 timestamp the same day) — corrected inline in diagram 2's own section
+below rather than here, because it is a structural change (a new gate), not
+just a line shift. Corrected line numbers are given below each affected
+diagram; the original numbers are kept alongside them rather than silently
+replaced, per this pass's own instructions.
+
 ## Where this lives, and why
 
 This diagram lands in `agent-supervisor/docs/`, not `agent-dotfiles/docs/`,
@@ -46,18 +68,18 @@ stateDiagram-v2
     classDef normal fill:#f5f5f5,stroke:#2d3142,color:#2d3142
     classDef muted fill:#ececec,stroke:#4f5d75,color:#4f5d75
 
-    [*] --> ClaimReserved: claim.sh take succeeds\ndispatch.sh:1485
-    ClaimReserved --> WorktreeBuilt: worktree.sh new\ndispatch.sh:1523
-    WorktreeBuilt --> CollisionChecked: collision-check.sh check\ndispatch.sh:1648
-    CollisionChecked --> Refused: REFUSE overlap, no --force\ncollision-check.sh:376
-    CollisionChecked --> ClaimLive: ALLOW (no-conflict / unknown / forced)\ncommit-lane-claim, dispatch.sh:2042\ncore.py:2864 status->delivered
-    ClaimLive --> Delivered: brief lands in pane / claude-print\nmark_delivered, core.py:2460\ndelivered_at stamped
-    Delivered --> Accepted: cli.py accept (no-pane transports only)\ncore.py:2510, accepted_at stamped
-    Delivered --> Complete: lane calls complete() directly\ncore.py:3177, completed_at stamped
+    [*] --> ClaimReserved: claim.sh take succeeds\ndispatch.sh:1485 (now 1508, +23 drift, see note above)
+    ClaimReserved --> WorktreeBuilt: worktree.sh new\ndispatch.sh:1523 (now 1546, +23 drift)
+    WorktreeBuilt --> CollisionChecked: collision-check.sh check\ndispatch.sh:1648 (now 1671, +23 drift)
+    CollisionChecked --> Refused: REFUSE overlap, no --force\ncollision-check.sh:376 (now 423, +47 drift)
+    CollisionChecked --> ClaimLive: ALLOW (no-conflict / unknown / forced)\ncommit-lane-claim, dispatch.sh:2042 (now 2065-2066, +23 drift)\ncore.py:2864 status->delivered (unchanged)
+    ClaimLive --> Delivered: brief lands in pane / claude-print\nmark_delivered, core.py:2460 (unchanged)\ndelivered_at stamped
+    Delivered --> Accepted: cli.py accept (no-pane transports only)\ncore.py:2510 (unchanged), accepted_at stamped
+    Delivered --> Complete: lane calls complete() directly\ncore.py:3177 (unchanged), completed_at stamped
     Accepted --> Complete: lane calls complete() directly
-    Complete --> ReviewDispatched: PR opened, --reviews-pr dispatch\ndispatch.sh:1229 contributor exclusion
-    ReviewDispatched --> Merged: merge-pr.sh: ci_gate.py + verdict-independence.sh\ndocs/decisions/0003
-    Refused --> [*]: claim + worktree unwound\ndispatch.sh:1655-1659
+    Complete --> ReviewDispatched: PR opened, --reviews-pr dispatch\ndispatch.sh:1229 (now 1252, +23 drift) contributor exclusion
+    ReviewDispatched --> Merged: merge-pr.sh: ci_gate.py + verdict-independence.sh\ndocs/decisions/0003 -- ALSO now refuses outright on a rejected verdict (agent-supervisor#486, PR #487, commit cb54804, landed 2026-08-21 after this diagram's own 14c2904 citation) BEFORE the independence check; not drawn as a separate edge here, see diagram 5's own section below
+    Refused --> [*]: claim + worktree unwound\ndispatch.sh:1655-1659 (now 1678-1682, +23 drift)
 
     class ClaimLive,Delivered focal
     class ClaimReserved,WorktreeBuilt,CollisionChecked,Accepted,Complete,ReviewDispatched,Merged normal
@@ -75,20 +97,23 @@ what diagram 3 goes wrong.
 
 **Ordering note, confirmed by reading the script rather than assumed:**
 the collision check runs *after* the worktree is built (`dispatch.sh:1648`,
-step 3.2), not before the claim. It has to — `_files_changed_in_worktree`
-needs a real `git diff` to read, and that diff does not exist until the
-worktree does (`dispatch.sh:1634-1636`). A refusal at that point unwinds
-both the claim and the worktree (`dispatch.sh:1655-1659`) — the estate is
-left exactly as it found it, not holding a half-built lane.
+now `dispatch.sh:1671` — see the +23-line drift note above the first
+diagram; re-verified 2026-08-23 against `25135ae`), step 3.2, not before
+the claim. It has to — `_files_changed_in_worktree` needs a real `git diff`
+to read, and that diff does not exist until the worktree does
+(`dispatch.sh:1634-1636`, now `1657-1659`). A refusal at that point unwinds
+both the claim and the worktree (`dispatch.sh:1655-1659`, now `1678-1682`)
+— the estate is left exactly as it found it, not holding a half-built
+lane.
 
 **Caveat: that unwind is unconditional for the claim, not for the
-worktree.** `abort_send` (`dispatch.sh:1562-1584`) always releases the
+worktree.** `abort_send` (`dispatch.sh:1562-1584`, now `1585-1607`) always releases the
 lane claim, but only tears down the worktree when `cleanup_worktree`
 stays `1`. If the lane's own pane still appears to be inside `$WORKTREE`
 and `dispatch_rehome_lane` cannot move it out, `cleanup_worktree` is set
 to `0` and the worktree is deliberately left in place with a
 `--rehome-lane` recovery hint printed to the operator (`dispatch.sh:1571-
-1573`) — "the estate is left exactly as it found it" holds for the claim,
+1573`, now `1594-1596`) — "the estate is left exactly as it found it" holds for the claim,
 not for the worktree, in that one case.
 
 ---
@@ -106,23 +131,49 @@ flowchart TD
     Accepted["Accepted<br/>accepted_at set, no-pane transports only<br/>core.py:2510"]
     StuckAccepted["#414: stuck at status=accepted<br/>completed_at NEVER set<br/>worker backgrounded a command, returned control<br/>reconcile_lane_completions.py:76-90"]
     OldSweep["414's own fix: list_delivered_open_tasks sweep<br/>never sees this row again once accepted<br/>(accept() moved it out of that query)"]
-    Sweep3["3rd reconciler sweep<br/>_sweep_nonobservable(list_accepted_open_tasks())<br/>stale_after=3600s dwell<br/>reconcile_lane_completions.py:85-90"]
-    Evidence{"_lane_log_pr_url:<br/>does lane-logs/&lt;task&gt;.log<br/>name a PR URL?<br/>reconcile_lane_completions.py:97-105,302"}
-    CompleteEvidence["Complete (from evidence)<br/>_complete_from_evidence<br/>reconcile_lane_completions.py:105,319"]
-    FailReconcile["status=failed<br/>note: 'no signal arrived' (not 'failed, not completed')<br/>written to &lt;task&gt;.reconcile.md, NOT &lt;task&gt;.md<br/>fail_stale_acceptance, reconcile_lane_completions.py:106-119"]
+    Sweep3["3rd reconciler sweep<br/>_sweep_nonobservable_accepted(list_accepted_open_tasks())<br/>stale_after=3600s dwell<br/>reconcile_lane_completions.py:85-90 (description); function itself now at line 526"]
+    Liveness{"NEW, not in original diagram (agent-supervisor#488, PR #492,<br/>commit 92228eb, landed 2026-08-21 21:51, AFTER this<br/>diagram's own 14c2904 citation earlier the same day):<br/>_liveness_blocks_failure --<br/>is the claude-print subprocess still alive,<br/>or is liveness indeterminate?<br/>reconcile_lane_completions.py:376-395"}
+    Evidence{"_lane_log_pr_url:<br/>does lane-logs/&lt;task&gt;.log<br/>name a PR URL?<br/>reconcile_lane_completions.py:97-105,302 (stale, see below) -- def now at line 340, call site now at line 556"}
+    CompleteEvidence["Complete (from evidence)<br/>_complete_from_evidence<br/>reconcile_lane_completions.py:105,319 (stale) -- def now at line 419"]
+    FailReconcile["status=failed<br/>note: 'no signal arrived' (not 'failed, not completed')<br/>written to &lt;task&gt;.reconcile.md, NOT &lt;task&gt;.md<br/>fail_stale_acceptance, reconcile_lane_completions.py:106-119 (stale) -- write now around line 570"]
     Historical["#401 (fixed, PR agent-supervisor#424, merged 2026-08-20):<br/>before this evidence check existed, both fail paths<br/>stamped 'failed, not completed' straight to the<br/>canonical &lt;task&gt;.md with no PR check --<br/>133/817 result files carried it, 31 named a merged PR"]
 
     Delivered --> Accepted --> StuckAccepted
     StuckAccepted -.-> OldSweep
-    StuckAccepted --> Sweep3 --> Evidence
+    StuckAccepted --> Sweep3 --> Liveness
+    Liveness -->|"alive or indeterminate: leave unresolved"| StuckAccepted
+    Liveness -->|"demonstrably dead"| Evidence
     Evidence -->|"yes"| CompleteEvidence
     Evidence -->|"no"| FailReconcile
     FailReconcile -.->|superseded by| Historical
 
     class StuckAccepted,FailReconcile focal
-    class Delivered,Accepted,Sweep3,Evidence,CompleteEvidence normal
+    class Delivered,Accepted,Sweep3,Evidence,CompleteEvidence,Liveness normal
     class OldSweep,Historical historical
 ```
+
+**Post-`14c2904` correction (added 2026-08-23, re-verified against `main`
+`25135ae`):** the `Sweep3 --> Evidence` edge drawn in the original diagram
+skipped a step that did not exist yet when this page was written. commit
+`92228eb` (agent-supervisor#488, PR #492) landed at 2026-08-21T21:51,
+roughly 11.5 hours after this diagram's own cited commit `14c2904`
+(2026-08-21T10:10) — both on the same day, so easy to miss. It inserted
+`_liveness_blocks_failure` (`reconcile_lane_completions.py:376-395`),
+called from both `_sweep_nonobservable`
+(`reconcile_lane_completions.py:503`) and `_sweep_nonobservable_accepted`
+(`reconcile_lane_completions.py:554`) immediately after the `stale_after`
+dwell check and *before* the `_lane_log_pr_url` evidence check. A row whose
+named pid is demonstrably alive, or whose liveness cannot be determined at
+all, is now left `unresolved` — the evidence check and failure stamp below
+it are never reached for that row on this sweep. This closes
+agent-supervisor#488, measured live: `as473-as473x` was stamped `failed`
+while its `claude -p` subprocess was still alive and accumulating CPU an
+hour later. All of the other reconcile_lane_completions.py line numbers in
+this section (97-105/302, 105/319, 106-119) are stale for the same reason
+this file changed by 113 net lines; corrected line numbers are given inline
+above. The docstring text at lines 76-90 and 85-90 that the diagram quotes
+is unaffected content-wise (that paragraph sits before commit `92228eb`'s
+insertion point) and was re-read directly to confirm it still matches.
 
 **#414's exact shape** (`reconcile_lane_completions.py:76-90`): `accept()`
 is the one place `status` ever becomes `'accepted'`
@@ -140,7 +191,12 @@ brief describing this diagram was written against the defect, not the
 fix. `git log --oneline --all | grep 401` on this repo turns up five
 commits and one PR (`#424`, merged `2026-08-20T23:53:24Z`) closing it. The
 code today runs the evidence check shown above *before* either failure
-path stamps anything (`reconcile_lane_completions.py:92-119`), and the
+path stamps anything (`reconcile_lane_completions.py:92-119` at the time
+this page was written against `14c2904`; re-verified 2026-08-23 against
+`25135ae` — the same evidence-before-failure ordering still holds, but the
+actual code implementing it has moved to `_sweep_nonobservable`/
+`_sweep_nonobservable_accepted` around lines 505 and 556 respectively,
+after commit `92228eb`'s 113-line insertion described above), and the
 verdict — when there is genuinely no PR evidence — no longer claims the
 work failed, only that no signal arrived, written to a sibling
 `.reconcile.md` path so a late, genuine `complete()` from the lane itself
@@ -227,8 +283,10 @@ second writer, so "the second writer always wins silently" (measured,
 `agent-supervisor#183` round 3, `core.py:2746-2749`). The PR-scoped
 variant is a second, later fix: `dispatch.sh`'s own step 0.6 (`pr-lane`
 check) is admitted in its own comments to be a plain read with a real,
-multi-second TOCTOU window (`dispatch.sh:903-934`, the `pr-lane` call
-itself at line 938) — what actually closes
+multi-second TOCTOU window (`dispatch.sh:903-934`, now `926-957` after the
++23-line drift noted above the first diagram — re-verified 2026-08-23, the
+`PR_SCOPED` guard block starts at line 954 in `25135ae`; the `pr-lane` call
+itself at line 938, now line 961) — what actually closes
 that race is the `ONE_OPEN_PULL_PER_SOURCE_REF` trigger firing at INSERT
 time (`agent-supervisor#169`, `core.py:1038-1094`), reproduced directly by
 `test_dispatch.sh`'s own `run_race` case: two full dispatches, two lanes,
@@ -245,7 +303,7 @@ flowchart TD
     classDef normal fill:#f5f5f5,stroke:#2d3142,color:#2d3142
     classDef muted fill:#ececec,stroke:#4f5d75,color:#4f5d75
 
-    Start["worktree already built for #ISSUE<br/>(collision-check.sh runs AFTER the worktree,<br/>dispatch.sh:1648 -- first point a real<br/>git diff can be read)"]
+    Start["worktree already built for #ISSUE<br/>(collision-check.sh runs AFTER the worktree,<br/>dispatch.sh:1648 (now 1671, +23 drift, see note above diagram 1) -- first point a real<br/>git diff can be read)"]
     Detect["detect_candidate_files:<br/>union of --<br/>1. backtick paths in issue/brief<br/>2. candidate's own branch content, if resumed<br/>3. gh pr diff --name-only, if --pr/--reviews-pr<br/>collision-check.sh:31-47"]
     Empty{"candidate file set empty?"}
     AllowUnknown["ALLOW unknown -- no file signal found ...<br/>allowing rather than blocking most dispatches<br/>on a signal most issues never give<br/>exit 0, collision-check.sh:222-223"]
@@ -254,7 +312,7 @@ flowchart TD
     AllowClean["ALLOW no-conflict<br/>exit 0"]
     Forced{"--force passed?<br/>agent-supervisor#291<br/>dispatch.sh:141-148"}
     AllowForced["ALLOW forced -- &lt;lane&gt; &lt;file&gt; ...<br/>exit 0, collision-check.sh:69-72"]
-    Refuse["REFUSE &lt;lane&gt; &lt;file&gt; ...<br/>exit 1, collision-check.sh:376<br/>dispatch unwinds: claim + worktree released"]
+    Refuse["REFUSE &lt;lane&gt; &lt;file&gt; ...<br/>exit 1, collision-check.sh:376 (now 423, +47 drift, agent-supervisor#483/PR #491)<br/>dispatch unwinds: claim + worktree released"]
 
     Start --> Detect --> Empty
     Empty -->|yes| AllowUnknown
@@ -297,15 +355,17 @@ flowchart TD
 
     PROpened["PR N opened by lane A<br/>source_kind='pull', source_ref=N<br/>recorded at dispatch time, core.py:1908"]
     ReviewReq["review requested: dispatch.sh --reviews-pr N<br/>(or a fix-pass, --pr N, after REQUEST CHANGES)"]
-    Resolve["resolve AUTHOR_LANES = FULL contributor set for PR N<br/>-- every lane that EVER contributed, not just 'the' author<br/>resolve-pr-contributors.sh via dispatch.sh:765-826<br/>core.py:1902 'has anybody EVER contributed'"]
+    Resolve["resolve AUTHOR_LANES = FULL contributor set for PR N<br/>-- every lane that EVER contributed, not just 'the' author<br/>resolve-pr-contributors.sh sourced dispatch.sh:863, called dispatch.sh:875<br/>(doc originally cited dispatch.sh:765-826 -- checked directly against the diagram's own<br/>cited commit 14c2904: that citation did not match even there, not just drift;<br/>corrected 2026-08-23 against 25135ae)<br/>core.py:1902 'has anybody EVER contributed'"]
     Unresolvable{"contributor set<br/>resolvable?"}
-    RefuseAuthorship["refuse the WHOLE dispatch<br/>fail closed -- unresolved authorship is<br/>never treated as 'no author, safe to admit'<br/>dispatch.sh:799-825"]
+    RefuseAuthorship["refuse the WHOLE dispatch<br/>fail closed -- unresolved authorship is<br/>never treated as 'no author, safe to admit'<br/>dispatch.sh:897-911 (doc originally cited 799-825,<br/>also wrong against 14c2904 itself, not just drift)"]
     IsContributor{"candidate lane IN AUTHOR_LANES?<br/>(includes a fix-pass lane dispatched<br/>with --pr N against the same PR --<br/>widened by #190, core.py:1902-1913)"}
-    Excluded["candidate excluded:<br/>'a contributor does not review their own work'<br/>dispatch.sh:1229"]
+    Excluded["candidate excluded:<br/>'a contributor does not review their own work'<br/>dispatch.sh:1229 (now 1252, +23 drift, see note above diagram 1)"]
     FreeLane["a lane with NO contribution to PR N<br/>is picked as the reviewer"]
     Verdict["review lane posts a verdict<br/>(APPROVE / REQUEST CHANGES)"]
     MergeAttempt["merge-pr.sh &lt;repo&gt; N<br/>-- the only path meant to merge a PR"]
     CiGate["ci_gate.py: PR must be green<br/>(gh pr merge alone does not check this)"]
+    RejectedGate{"NEW, not in original diagram (agent-supervisor#486, PR #487,<br/>commit cb54804, landed 2026-08-21 16:10 -- AFTER this diagram's<br/>own authoring commit 75c1d91, which landed 13:29 the same day, and<br/>after its cited 14c2904 (10:10) too; a genuine post-diagram change,<br/>not a citation the diagram simply missed):<br/>is the recorded verdict itself 'rejected'?<br/>merge-pr.sh:123-135, checked BEFORE the independence gate"}
+    RefuseRejected["merge refused outright --<br/>independence_verdict() answers 'reviewed independently',<br/>NOT 'approved'; a rejected-but-independent review<br/>used to pass the old value==true gate (PR #485, live)<br/>merge-pr.sh:132-135"]
     VerdictIndep["verdict-independence.sh:<br/>author_lane_for() ALSO widened to the FULL<br/>contributor set (#200) -- a fix-pass lane<br/>cannot approve/merge its own fix here either<br/>verdict-independence.sh:279-289"]
     WhyMergeGate["THIS is why merge-time enforcement exists<br/>separately from the dispatch-time exclusion above:<br/>free text typed into a lane's pane can reach<br/>'gh pr merge' directly, walking around every<br/>dispatch-time guard -- docs/decisions/0003"]
     Merged["merge proceeds"]
@@ -315,14 +375,16 @@ flowchart TD
     Unresolvable -->|no| RefuseAuthorship
     Unresolvable -->|yes| IsContributor
     IsContributor -->|yes| Excluded
-    IsContributor -->|no| FreeLane --> Verdict --> MergeAttempt --> CiGate --> VerdictIndep
+    IsContributor -->|no| FreeLane --> Verdict --> MergeAttempt --> CiGate --> RejectedGate
+    RejectedGate -->|"rejected"| RefuseRejected
+    RejectedGate -->|"not rejected"| VerdictIndep
     VerdictIndep -.-> WhyMergeGate
     VerdictIndep -->|independent, green| Merged
     VerdictIndep -->|same lane / unresolved| RefuseMerge
 
-    class Excluded,RefuseAuthorship,RefuseMerge focal
+    class Excluded,RefuseAuthorship,RefuseMerge,RefuseRejected focal
     class PROpened,ReviewReq,Resolve,FreeLane,Verdict,MergeAttempt,CiGate,VerdictIndep,Merged normal
-    class Unresolvable,IsContributor,WhyMergeGate muted
+    class Unresolvable,IsContributor,WhyMergeGate,RejectedGate muted
 ```
 
 **A fix lane is not an independent review, and the code says so twice, at
@@ -342,8 +404,23 @@ merge` without going through `dispatch.sh` at all
 contributor set independently at merge time (also widened to include a
 fix-pass lane, by `agent-supervisor#200`,
 `verdict-independence.sh:279-289`) rather than trusting that dispatch
-already enforced it — `merge-pr.sh` is, in its own words, "the one place
-in the system that cannot be skipped by habit."
+already enforced it — `merge-pr.sh` is, in its own words, "the only path a
+lane or the supervisor should use to merge a PR in this repo -- so the
+gates below cannot be skipped by habit" (`merge-pr.sh:2-3`; the quoted text
+above was a paraphrase of this line, not verbatim -- corrected 2026-08-23,
+unaffected by any drift since `merge-pr.sh` itself is unchanged since
+`14c2904`).
+
+**Also not in the original diagram:** `merge-pr.sh` gained a third check,
+between the CI gate and the independence gate, after this diagram was
+drawn — see the `RejectedGate`/`RefuseRejected` nodes added above. A
+verdict recorded as `rejected` is now refused outright, before
+`verdict-independence.sh` ever runs, because `independence_verdict()`
+answers "was this reviewed independently" (both `approved` and `rejected`
+satisfy its own `IN("approved","rejected")` branch), not "was it approved"
+— a rejected-but-independent review previously passed the old
+`value == true` gate the same as an approved one, reproduced live on PR
+#485 before the fix (agent-supervisor#486, PR #487, commit `cb54804`).
 
 ---
 
@@ -354,6 +431,19 @@ Every citation above is checked against `jonhill90/agent-supervisor`
 `scripts/supervisor/dispatch.sh`, `claim.sh`, `collision-check.sh`,
 `core.py`, `reconcile_lane_completions.py`, `merge-pr.sh`,
 `verdict-independence.sh`, and `docs/decisions/0003-independent-review-required.md`.
+
+**Re-verified 2026-08-23 against `main` `25135ae` (23 commits later,
+`git log --oneline 14c2904..25135ae`).** Per-file result: `core.py`,
+`verdict-independence.sh`, `cli.py` and `lane-done.sh` are byte-identical
+to `14c2904` for every line this page cites (`git log --oneline
+14c2904..25135ae -- <file>` empty for all four) — every citation into
+those four files below and above stands unchanged. `dispatch.sh`,
+`collision-check.sh`, `reconcile_lane_completions.py` and `merge-pr.sh`
+all changed; the drift and the corrected line numbers are noted inline
+next to each affected citation above rather than repeated here. `claim.sh`
+also changed (commit `b6f6b16`, agent-supervisor#480/#489, claude-print
+lane staleness) but this page never cites a `claim.sh` line number, only
+its behavior ("claim.sh take succeeds"), which that commit does not touch.
 
 `lane-done.sh` is a *third* path into `Complete`, not drawn as a separate
 node above to stay inside the diagram's own budget: it runs in the
@@ -369,4 +459,6 @@ the worker-driven path does: no `completion:<task>` notification event
 reaches the supervisor lane through this route (`cli.py:1079-1083`). That
 is a real, cited gap this page is marking rather than smoothing over: a
 completion recorded this way is durable in the ledger but silent to
-whatever reads that notification channel.
+whatever reads that notification channel. (Both `cli.py` and
+`lane-done.sh` confirmed unchanged since `14c2904`, so these line numbers
+were re-verified directly and stand as written.)

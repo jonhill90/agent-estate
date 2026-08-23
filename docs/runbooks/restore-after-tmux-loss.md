@@ -19,12 +19,22 @@ section before running anything.
 ## Step 1 — tell a real loss from a lane that only looks wrong
 
 Run `lanes.sh` (or `digest.sh`, which wraps it) first. It classifies every
-pane into one of eleven states (`AGENTS.md`/`CLAUDE.md`, repo-layout
-section). `lanes.sh`'s own header comment (lines 7–20) only enumerates ten —
-it omits `scrolled`, which the script still assigns at
-`scripts/supervisor/lanes.sh:328` (agent-supervisor#131 tracks fixing the
-header itself). Two of the eleven are the ones this runbook cares about, and
-they mean different things:
+pane into one of several states (`AGENTS.md`/`CLAUDE.md`, repo-layout
+section). [Corrected 2026-08-23: this used to say the header comment (lines
+7–20) only enumerated ten and omitted `scrolled`, with agent-supervisor#131
+tracking the fix. That fix has since landed — the current header
+(`scripts/supervisor/lanes.sh` lines 7–29) explicitly lists `scrolled` and
+even documents its own prior omission ("#65, #131: this state was already
+emitted below but missing from this list"); the assignment itself is now at
+`lanes.sh:487`, not line 328. The header today names twelve states (free,
+busy, hung, blocked, unsent, dead, stale, scrolled, broken, service, unknown,
+never-busy); the running code also emits `menu-blocked`/`text-blocked` as a
+finer split of `blocked` and an internal `supervisor` marker for the
+supervisor's own window, none of which the header enumerates separately —
+so "eleven" was already imprecise before #131 and a single fixed number is
+harder to keep current than the header itself; read `lanes.sh`'s header
+directly rather than trusting a count here.] Two of these are the ones this
+runbook cares about, and they mean different things:
 
 - **`dead`** — no agent process in the pane, and the window name carries no
   task claim (`free-N`, or something restore.sh itself would ever have
