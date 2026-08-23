@@ -127,13 +127,27 @@ for _ in $(seq 1 40); do
 done
 # Neither window here is the supervisor's own -- both are real lanes going
 # through register-lane-self.sh (via register-pr-dispatch-self.sh), which
-# refuses to register `LANES_SUPERVISOR_WINDOW`'s index (default "1", which
-# this session's first window would otherwise collide with). Point it at an
-# index neither window uses.
-SUP_IDX=0
-export LANES_SUPERVISOR_WINDOW="$SUP_IDX"
+# refuses to register `LANES_SUPERVISOR_WINDOW`'s index. This must be an
+# index NEITHER real window uses -- and which one that is depends on the
+# server's own `base-index`, which this test cannot assume: a hardcoded
+# `SUP_IDX=0` (this test's own prior shape) only avoids the two real
+# windows on a server configured `base-index 1` (a common but NOT universal
+# `.tmux.conf` setting -- true on at least one dev machine this was
+# verified against). CI's runner installs tmux fresh with no `.tmux.conf`
+# at all, so it runs on tmux's own actual default, `base-index 0` -- there,
+# the first `tmux new-session` window IS index 0, colliding with the
+# hardcoded value and refusing the author's own registration 100% of the
+# time (measured: shell-suites shard 3 failed on exactly this, both CI
+# runs, "pane %0 is window index 0, the supervisor's own window"). Fixed by
+# reading the two real indices FIRST, then picking a sentinel far outside
+# any index a 2-window session can ever produce -- the same "99" sentinel
+# already proven safe on CI by this same PR's own
+# test_lanes_execution_mode.sh, rather than reasoning about base-index at
+# all.
 W1=$(tmux list-windows -t "$S" -F '#{window_index}' | head -n1)
 W2=$(tmux list-windows -t "$S" -F '#{window_index}' | tail -n1)
+SUP_IDX=99
+export LANES_SUPERVISOR_WINDOW="$SUP_IDX"
 AUTHOR_LANE="$S:$W1"; REVIEWER_LANE="$S:$W2"
 AUTHOR_PANE=$(tmux display-message -p -t "$S:$W1" '#{pane_id}')
 REVIEWER_PANE=$(tmux display-message -p -t "$S:$W2" '#{pane_id}')
