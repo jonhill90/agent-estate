@@ -397,6 +397,18 @@ while [ "$idx" -lt "$((SUPERVISOR_WINDOW + LANES - 1))" ]; do
   # unrecognised --agent leaves the lane usable but unidentified, not
   # mis-identified.
   [ -z "$HARNESS" ] || run set-option -p -t "=$SESSION:$idx" @hill90_lane_harness "$HARNESS"
+  # S12 container signal (agent-tui docs/SPEC-shell.md, docs/SPEC-agentbox-
+  # execution-mode.md): this script's own launch above ("$LAUNCH_CMD" started
+  # directly in a tmux pane on this host, no container involved anywhere in
+  # this function) is genuinely, positively local -- not a guess, a fact
+  # about what this script just did. Recorded the same way @hill90_lane_
+  # harness already is, so lanes.sh's `execution_mode` column can read it
+  # back instead of inferring from the pane's command. There is no container
+  # driver yet (that column would be written by IT, not by this script --
+  # see docs/SPEC-agentbox-execution-mode.md for why that does not exist
+  # today), so every lane bootstrap-session.sh creates reads `local` here,
+  # never `container`, honestly.
+  run set-option -p -t "=$SESSION:$idx" @hill90_lane_execution_mode local
   created=$((created + 1))
   echo "  window $idx (free-$idx): lane, created"
 done
