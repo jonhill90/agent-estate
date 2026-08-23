@@ -41,7 +41,23 @@ the live thread is gone.
 
 Both captured via `gh pr view`/`gh issue view --json ...`, one call per
 item, 30s timeout each, zero failures on either pass (92/92 PRs, 50/50
-issues — see the commit this file ships with for the exact command).
+issues). Exact commands, reproducible verbatim:
+
+```
+$ gh pr list --repo jonhill90/agent-tui --state all --limit 500 --json number -q '.[].number' | sort -n > numbers.txt
+$ while read -r n; do
+    timeout 30 gh pr view "$n" --repo jonhill90/agent-tui --json \
+      number,title,body,state,mergedAt,mergeCommit,headRefName,baseRefName,author,createdAt,closedAt,comments,reviews \
+      >> agent-tui-pr-archive.jsonl
+  done < numbers.txt
+
+$ gh issue list --repo jonhill90/agent-tui --state all --limit 500 --json number -q '.[].number' | sort -n > issue-numbers.txt
+$ while read -r n; do
+    timeout 30 gh issue view "$n" --repo jonhill90/agent-tui --json \
+      number,title,body,state,createdAt,closedAt,author,comments,stateReason \
+      >> agent-tui-issue-archive.jsonl
+  done < issue-numbers.txt
+```
 
 ## Verified, not assumed
 
@@ -55,9 +71,13 @@ The four numbers this job named as cited elsewhere all resolve:
 | 139 | issue | Cost pane stampedes ccusage | OPEN (has a fix PR, #140, in flight as of this capture) |
 
 ```
-$ zcat agent-tui-pr-archive.jsonl.gz | jq -c 'select(.number==79) | {number,title,state}'
-$ zcat agent-tui-issue-archive.jsonl.gz | jq -c 'select(.number==101) | {number,title,state}'
+$ gzip -dc agent-tui-pr-archive.jsonl.gz | jq -c 'select(.number==79) | {number,title,state}'
+$ gzip -dc agent-tui-issue-archive.jsonl.gz | jq -c 'select(.number==101) | {number,title,state}'
 ```
+
+(`gzip -dc`, not `zcat` — BSD/macOS `zcat` expects a `.Z`-suffixed file and
+errors on a plain `.gz`; `gzip -dc` decompresses to stdout on both GNU and
+BSD gzip and is the portable form.)
 
 ## What this does not capture
 
