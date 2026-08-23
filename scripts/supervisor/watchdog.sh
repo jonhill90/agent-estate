@@ -411,6 +411,49 @@ GUARD_AUDIT_FAIL_ESCALATE_AFTER="${SUPERVISOR_GUARD_AUDIT_FAIL_ESCALATE_AFTER:-3
 # GUARD_AUDIT_INTERVAL's 1800s cadence.
 GUARD_AUDIT_TIMEOUT="${SUPERVISOR_GUARD_AUDIT_TIMEOUT:-120}"
 
+# agent-supervisor#526: `worktree.sh gc` (agent-dotfiles#165/#169,
+# agent-supervisor#478) is a tool that fails closed and that nothing calls --
+# the exact shape that file's own header warns about, and worktree.sh says so
+# explicitly: "deliberately NOT wired into the dispatch/lane-done pair or the
+# Director tick... a separate decision for whoever owns the Director tick".
+# 64 worktrees measured accumulated across the estate's repos with nothing
+# ever sweeping them. This is that separate decision, made the same way
+# #199/#205 wired worktree-guard-audit.sh in above: this watchdog already
+# runs unattended every ${TICK_INTERVAL}s outside the loop, so it is the one
+# entry point that survives the failure mode (a dead or wedged loop) that lets
+# stale worktrees accumulate the longest, costs zero model tokens, and reuses
+# the PATH/credential/staleness handling already solved here rather than a
+# second bespoke cron entry.
+#
+# DRY-RUN BY DEFAULT, on purpose, unlike the source/lane sweeps above. `gc`
+# actually deletes a worktree once both its content-containment check and its
+# three liveness checks pass (see worktree.sh's own header) -- and this same
+# class of automatic sweep already destroyed ~20 minutes of live work once
+# (agent-supervisor#478, PR #489), before those liveness checks existed. They
+# exist now and this PR's own test fixtures prove the content check itself is
+# sound (see test_watchdog_worktree_gc_sweep.sh), but running unattended and
+# destructively across the whole estate on day one, with no human having
+# watched what it would actually decide, is a second decision this PR does
+# NOT make. SUPERVISOR_GC_LIVE=1 flips it from reporting what it would remove
+# to actually removing -- a deliberate, later, reviewable flip once the
+# dry-run verdicts have been read, not a default this change ships with.
+GC_SWEEP_STAMP="${SUPERVISOR_GC_STAMP:-$STATE/.worktree-gc-sweep-last}"
+# 3600s: sweeping more often buys nothing -- `gc`'s own liveness floor
+# (GC_MIN_AGE_SECONDS in worktree.sh, also 3600s by default) means a worktree
+# cannot newly qualify faster than once an hour regardless of tick cadence.
+GC_SWEEP_INTERVAL="${SUPERVISOR_GC_INTERVAL:-3600}"
+GC_SWEEP_BASE="${SUPERVISOR_GC_BASE:-origin/main}"
+# Reused rather than reinvented: cli.py's own DEFAULT_REPOSITORIES table
+# (agent-supervisor#179 §3) is already the estate's one canonical
+# name/path/github list, honoring SUPERVISOR_REPOSITORIES itself. A second,
+# separately-maintained path list here would be exactly the kind of drift
+# CLAUDE.md warns about. SUPERVISOR_GC_REPOS overrides with a colon-separated
+# list of raw local paths -- same override shape as SUPERVISOR_GUARD_AUDIT_REPO
+# above, plural because this sweep is meant to reach every repo in the farm,
+# not one. This is how a test points the real check_worktree_gc_sweep at a
+# disposable throwaway repo instead of the real estate.
+GC_SWEEP_LIVE="${SUPERVISOR_GC_LIVE:-}"
+
 # Credentials + NOTIFY_SCRIPT for the escalate path. Sourced here so the
 # LaunchAgent needs no secrets inlined in its plist.
 ENVFILE="${NOTIFY_ENV:-$STATE/notify.env}"
@@ -791,6 +834,18 @@ guard_audit_note() {             # guard_audit_note <line>
   local tmp="$STATUS.guardaudit.$$"
   [ -f "$STATUS" ] || return 0
   { grep -v '^guard-audit:' "$STATUS"; printf 'guard-audit: %s\n' "$1"; } >"$tmp" 2>/dev/null
+  if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
+# Same tmp+rename append shape again, for agent-supervisor#526's worktree-gc
+# sweep. Written whether the sweep ran dry, ran live, or could not run at all
+# -- same posture every other note function here takes.
+gc_sweep_note() {                # gc_sweep_note <line>
+  local tmp="$STATUS.gcsweep.$$"
+  [ -f "$STATUS" ] || return 0
+  { grep -v '^worktree-gc:' "$STATUS"; printf 'worktree-gc: %s\n' "$1"; } >"$tmp" 2>/dev/null
   if [ -s "$tmp" ]; then mv -f "$tmp" "$STATUS" 2>/dev/null; fi
   rm -f "$tmp" 2>/dev/null
   return 0
@@ -1586,6 +1641,110 @@ check_worktree_guard_audit() {
   return 0
 }
 
+# agent-supervisor#526: the "separate decision" worktree.sh's own header says
+# wiring `gc` in requires. Self-throttled against GC_SWEEP_STAMP (see that
+# var's own comment for the cadence reasoning), same shape as every sweep
+# above -- most ticks return in the first branch having done nothing.
+#
+# DRY-RUN unless SUPERVISOR_GC_LIVE is set (see GC_SWEEP_LIVE's own comment):
+# this call reports what `gc` would remove across every repo in the estate,
+# never removes anything itself, until that flag is deliberately flipped.
+check_worktree_gc_sweep() {
+  local last=0
+  if [ -r "$GC_SWEEP_STAMP" ]; then
+    last=$(cat "$GC_SWEEP_STAMP" 2>/dev/null)
+  fi
+  [[ "$last" =~ ^[0-9]+$ ]] || last=0
+  if [ $(( now - last )) -lt "$GC_SWEEP_INTERVAL" ]; then
+    return 0
+  fi
+  # Stamped whether the sweep below succeeds or not -- same reasoning every
+  # other sweep here gives: a worktree does not un-qualify between ticks, so
+  # retrying sooner than the interval buys nothing.
+  printf '%s' "$now" >"$GC_SWEEP_STAMP" 2>/dev/null
+
+  if [ ! -e "$HERE/worktree.sh" ]; then
+    log "GC-SWEEP-MISSING: worktree.sh is missing beside this watchdog; reinstall or advance the live worktree"
+    gc_sweep_note "missing — worktree.sh is missing beside this watchdog"
+    return 0
+  fi
+
+  # Repo paths: SUPERVISOR_GC_REPOS (colon-separated) overrides for tests --
+  # see that var's own comment. Production reads cli.py's own
+  # DEFAULT_REPOSITORIES table rather than a second hardcoded path list.
+  local repos_raw
+  if [ -n "${SUPERVISOR_GC_REPOS:-}" ]; then
+    repos_raw="$SUPERVISOR_GC_REPOS"
+  elif [ -e "$HERE/cli.py" ]; then
+    repos_raw=$("${SUPERVISOR_PYTHON:-python3}" -c '
+import sys
+sys.path.insert(0, "'"$HERE"'")
+try:
+    import cli
+except Exception:
+    sys.exit(1)
+print(":".join(r["path"] for r in cli.DEFAULT_REPOSITORIES))
+' 2>/dev/null)
+  fi
+  if [ -z "${repos_raw:-}" ]; then
+    log "GC-SWEEP-MISSING: could not resolve a repository list (cli.py missing or unimportable, and SUPERVISOR_GC_REPOS unset)"
+    gc_sweep_note "missing — could not resolve a repository list"
+    return 0
+  fi
+
+  local mode="dry-run"
+  local dry_flag="--dry-run"
+  if [ -n "$GC_SWEEP_LIVE" ]; then
+    mode="live"
+    dry_flag=""
+  fi
+
+  local total_removed=0 total_skipped=0 failed=""
+  local repo out rc line removed skipped
+  local saved_ifs="$IFS"
+  IFS=':'
+  for repo in $repos_raw; do
+    IFS="$saved_ifs"
+    [ -n "$repo" ] || continue
+    # A repo named in the table but not checked out on THIS machine is not a
+    # failure -- the estate's canonical list is shared across machines, this
+    # sweep only reaches what is actually present here.
+    if [ ! -d "$repo" ] || ! git -C "$repo" rev-parse --show-toplevel >/dev/null 2>&1; then
+      continue
+    fi
+    if [ -n "$dry_flag" ]; then
+      out=$(bash "$HERE/worktree.sh" gc "$dry_flag" "$repo" "$GC_SWEEP_BASE" 2>&1)
+    else
+      out=$(bash "$HERE/worktree.sh" gc "$repo" "$GC_SWEEP_BASE" 2>&1)
+    fi
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      failed="${failed}${repo} "
+      log "GC-SWEEP FAILED for $repo rc=$rc: $(printf '%s' "$out" | tr '\n' ' ')"
+      continue
+    fi
+    line=$(grep -m1 -E 'gc (dry run )?done' <<<"$out")
+    # Two distinct phrasings share this line: a live run says "removed N,
+    # skipped M", --dry-run says "would remove N, skipped M" -- no "d". Match
+    # both rather than assuming the live wording everywhere.
+    removed=$(sed -n 's/.*remove[d]* \([0-9]\{1,\}\).*/\1/p' <<<"$line")
+    skipped=$(sed -n 's/.*skipped \([0-9]\{1,\}\).*/\1/p' <<<"$line")
+    [[ "$removed" =~ ^[0-9]+$ ]] || removed=0
+    [[ "$skipped" =~ ^[0-9]+$ ]] || skipped=0
+    total_removed=$((total_removed + removed))
+    total_skipped=$((total_skipped + skipped))
+  done
+  IFS="$saved_ifs"
+
+  local summary="mode=$mode removed=$total_removed skipped=$total_skipped"
+  if [ -n "$failed" ]; then
+    summary="$summary failed=${failed% }"
+  fi
+  log "GC-SWEEP: $summary"
+  gc_sweep_note "$summary"
+  return 0
+}
+
 # Runs on EVERY exit path. It must never change this tick's exit status and
 # must never abort it: a refused advance is a report, not a crash -- the tick
 # it rode out on had already succeeded, and failing it would turn "the code is
@@ -1695,6 +1854,7 @@ on_exit() {
   check_lane_completion_sweep
   check_never_busy_lanes
   check_worktree_guard_audit
+  check_worktree_gc_sweep
   advance_on_exit "$rc"
   return $rc
 }
