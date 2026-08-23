@@ -76,6 +76,12 @@ func main() {
 		showBoard = flag.Bool("board", false, "start on the task board pane (agent-tui#6) instead of home -- the "+
 			"persistent rail stays on screen either way (agent-tui#38); [f2] reaches the board pane from any "+
 			"start. Read-only: derives its columns fresh on every fetch, never stores one.")
+		claudeProjectsDir = flag.String("claude-projects-dir", os.Getenv("AGENT_TUI_CLAUDE_PROJECTS_DIR"),
+			"directory holding Claude Code CLI's own per-project session transcripts (chat.ClaudeCodeSource's "+
+				"real source -- see its own doc comment for why this and not agent-supervisor's ledger). "+
+				"Left unset, defaults to $HOME/.claude/projects; left unresolvable (no $HOME either) or "+
+				"pointed at a path that does not exist, the chat pane falls back to chat.FixtureSource and "+
+				"says so on screen (chat.FallbackSource) rather than rendering fixture content silently.")
 		ledger = flag.String("ledger", envOr("AGENT_TUI_LEDGER", ""),
 			"path to a ledger.sqlite3 to read for the board and the rail's per-lane task/age/needs-human "+
 				"content (agent-tui#26) -- must point at a COPY, never the live supervisor's own ledger "+
@@ -318,14 +324,19 @@ func main() {
 	// comment) -- shell.Model pushes boardModel's own Snapshot into it
 	// after every board.Update, so this is never a second gh/ledger read.
 	flowModel := flow.New()
-	// chat.NewFixtureSource(), not a live Source: agent-supervisor's MCP
-	// surface has no tool that returns message content (see fixture.go's
-	// own doc comment for the two ways a real one could exist). A
-	// screen-scraped transcript was rejected for the same reason agent-tui#20
-	// itself gives -- send-keys panes have no message boundaries to
-	// recover, so scraping one would misrepresent free-text pane output as
-	// ACP's structured session/update shape.
-	chatModel := chat.New(chat.NewFixtureSource())
+	// chat.FallbackSource, agent-b3.md's own fix: agent-supervisor's MCP
+	// surface still has no tool that returns message content (a
+	// screen-scraped transcript was rejected for the same reason
+	// agent-tui#20 itself gives -- send-keys panes have no message
+	// boundaries to recover), but Claude Code CLI's own local session
+	// transcripts under resolveClaudeProjectsDir's own path ARE a real,
+	// already-recorded session/update-shaped conversation -- see
+	// chat.ClaudeCodeSource's own doc comment for why this beats the
+	// other two candidates considered (agent-supervisor's ledger.sqlite3
+	// `prompts` table, its daemon's own task-only ledger). Falls back to
+	// chat.FixtureSource, visibly, when no project directory can be
+	// resolved at all -- chat.FallbackSource's own doc comment.
+	chatModel := chat.New(chat.NewFallbackSource(chat.NewClaudeCodeSource(resolveClaudeProjectsDir(*claudeProjectsDir))))
 
 	// agentsModel/skillsModel/mcpserversModel/connectorsModel/adminModel
 	// are S6/S8/S9/S10/S11's own panes -- this is the first time any of
@@ -543,6 +554,25 @@ func envOr(key, fallback string) string {
 		return v
 	}
 	return fallback
+}
+
+// resolveClaudeProjectsDir returns explicit unchanged when set (a human
+// or $AGENT_TUI_CLAUDE_PROJECTS_DIR chose it deliberately); otherwise
+// $HOME/.claude/projects, the same directory Claude Code CLI itself
+// writes every session transcript into. Empty return (no $HOME either) is
+// a legitimate, typed "could not resolve anything" -- chat.ClaudeCodeSource
+// reports it as chat.ErrNoProjectDir and chat.FallbackSource falls back to
+// the fixture, visibly, rather than this function guessing a path that
+// may not exist.
+func resolveClaudeProjectsDir(explicit string) string {
+	if explicit != "" {
+		return explicit
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".claude", "projects")
 }
 
 // envOrDuration parses $key as a Go duration string (e.g. "60s", "5m"); an

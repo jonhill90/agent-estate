@@ -157,6 +157,21 @@ func (m Model) fetchCmd() tea.Cmd {
 
 func (m Model) Init() tea.Cmd { return m.fetchCmd() }
 
+// usingFixture reports whether m.threads came from FixtureSource (Thread's
+// own Fixture field, set only there -- see thread.go/fallback.go). Checked
+// against every thread rather than just the first: a Source is a single
+// value per Model, so in practice all of them agree, but a check that only
+// looked at index 0 would silently stop being true the moment index 0 (the
+// synthetic "All" thread, render.go) diverges from the rest.
+func (m Model) usingFixture() bool {
+	for _, t := range m.threads {
+		if t.Fixture {
+			return true
+		}
+	}
+	return false
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -552,6 +567,15 @@ func (m Model) View() string {
 	if m.err != nil {
 		out += st.errS.Render("! "+m.err.Error()) + "\n"
 		return out
+	}
+	if m.usingFixture() {
+		// agent-b3.md's own rule: never let fixture data render as
+		// though it were real. Every thread FixtureSource returns is
+		// tagged Fixture (thread.go) -- this is the ONE place that
+		// notice becomes visible, so a real, configured Source's empty
+		// or erroring answer (which never sets Fixture) never triggers
+		// it by accident.
+		out += st.warn.Render("! showing fixture data -- no real chat source is configured") + "\n"
 	}
 
 	out += st.dim.Render(fmt.Sprintf(

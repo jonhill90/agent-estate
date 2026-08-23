@@ -116,6 +116,15 @@ type Thread struct {
 	// once a thread is viewed) owns clearing it; this package's Model
 	// clears it on selection -- see model.go.
 	Unread bool
+
+	// Fixture is true only for threads FixtureSource itself returns --
+	// FallbackSource (fallback.go) sets it when it falls back to the
+	// fixture because no real Source is configured, so a caller (view.go)
+	// can render a visible notice and never let synthetic sample data be
+	// mistaken for a live conversation (agent-b3.md's own rule: "never
+	// let fixture data render as though it were real"). Every real
+	// Source (ClaudeCodeSource included) must leave this false.
+	Fixture bool
 }
 
 // Source is the adapter seam: anything that can hand back a live snapshot

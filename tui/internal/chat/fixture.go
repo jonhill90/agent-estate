@@ -105,6 +105,13 @@ func (FixtureSource) Threads() ([]Thread, error) {
 			Unread:       false,
 		},
 	}
+	// Every thread FixtureSource itself hands back is tagged Fixture --
+	// set once here rather than on each literal above, so nothing can add
+	// a fifth thread later and forget it (see Thread.Fixture's own doc
+	// comment).
+	for i := range threads {
+		threads[i].Fixture = true
+	}
 	return threads, nil
 }
 
