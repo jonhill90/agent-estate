@@ -84,46 +84,21 @@
 INPUT_BOX_PROMPT=$'\xe2\x9d\xaf\xc2\xa0'
 INPUT_BOX_NBSP=$'\xc2\xa0'
 
+# agent-supervisor#521: the dim-stripping SGR walk this file pioneered now
+# lives in `dim-strip.sh`, factored out so `tick-scan.sh` and `look.py`
+# reuse the exact same rule instead of re-deriving or half-deriving it. This
+# file sources it rather than keeping its own copy -- see that file's own
+# doc comment for the full rationale.
+. "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dim-strip.sh"
+
 # input_box_state < capture-pane -pe output
 input_box_state() {
-  awk -v prompt="$INPUT_BOX_PROMPT" -v nbsp="$INPUT_BOX_NBSP" '
-    function strip_sgr(s,   out) {
-      out = s
-      gsub(/\033\[[0-9;?]*[A-Za-z]/, "", out)
-      return out
-    }
-    # Everything the box shows that is NOT inside a dim (SGR 2) span. The
-    # placeholder is the whole dim span; typed text is never dim.
-    function undim(s,   out, i, n, esc, params, p, np, j, dim) {
-      out = ""; dim = 0; i = 1; n = length(s)
-      while (i <= n) {
-        if (substr(s, i, 2) == "\033[") {
-          esc = ""; j = i + 2
-          while (j <= n && index("0123456789;?", substr(s, j, 1)) > 0) {
-            esc = esc substr(s, j, 1); j++
-          }
-          # j now sits on the final byte of the sequence (or past the end).
-          if (j <= n) {
-            if (substr(s, j, 1) == "m") {
-              np = split(esc, params, ";")
-              if (np == 0) { dim = 0 }
-              for (p = 1; p <= np; p++) {
-                if (params[p] == "2") dim = 1
-                else if (params[p] == "0" || params[p] == "22" || params[p] == "") dim = 0
-              }
-            }
-            i = j + 1
-          } else {
-            i = n + 1
-          }
-          continue
-        }
-        if (!dim) out = out substr(s, i, 1)
-        i++
-      }
-      return out
-    }
-    { raw[NR] = $0; plain[NR] = strip_sgr($0) }
+  strip_dim_sgr | awk -v prompt="$INPUT_BOX_PROMPT" -v nbsp="$INPUT_BOX_NBSP" '
+    # dim spans are already gone (strip_dim_sgr ran first) -- what is left
+    # is plain text: the box marker and any typed content, never the
+    # placeholder. Same detection rule as before: the marker is not itself
+    # painted dim, so its position is unaffected by that upstream step.
+    { plain[NR] = $0 }
     END {
       # The LAST prompt row on the visible screen. A pane can hold more than
       # one only if the harness repainted mid-capture; the live box is the
@@ -140,10 +115,10 @@ input_box_state() {
       if (e == 0) { print "unknown"; exit }
 
       # Drop everything up to and including the prompt marker itself.
-      body = undim(raw[p])
+      body = plain[p]
       k = index(body, prompt)
       if (k > 0) body = substr(body, k + length(prompt))
-      for (i = p + 1; i < e; i++) body = body undim(raw[i])
+      for (i = p + 1; i < e; i++) body = body plain[i]
       gsub(/[[:space:]]/, "", body)
       gsub(nbsp, "", body)
       print (body == "" ? "empty" : "text")
@@ -175,41 +150,8 @@ input_box_state() {
 # `input_box_state`'s callers already treat `unknown`: not evidence of
 # anything.
 input_box_text() {
-  awk -v prompt="$INPUT_BOX_PROMPT" -v nbsp="$INPUT_BOX_NBSP" '
-    function strip_sgr(s,   out) {
-      out = s
-      gsub(/\033\[[0-9;?]*[A-Za-z]/, "", out)
-      return out
-    }
-    function undim(s,   out, i, n, esc, params, p, np, j, dim) {
-      out = ""; dim = 0; i = 1; n = length(s)
-      while (i <= n) {
-        if (substr(s, i, 2) == "\033[") {
-          esc = ""; j = i + 2
-          while (j <= n && index("0123456789;?", substr(s, j, 1)) > 0) {
-            esc = esc substr(s, j, 1); j++
-          }
-          if (j <= n) {
-            if (substr(s, j, 1) == "m") {
-              np = split(esc, params, ";")
-              if (np == 0) { dim = 0 }
-              for (p = 1; p <= np; p++) {
-                if (params[p] == "2") dim = 1
-                else if (params[p] == "0" || params[p] == "22" || params[p] == "") dim = 0
-              }
-            }
-            i = j + 1
-          } else {
-            i = n + 1
-          }
-          continue
-        }
-        if (!dim) out = out substr(s, i, 1)
-        i++
-      }
-      return out
-    }
-    { raw[NR] = $0; plain[NR] = strip_sgr($0) }
+  strip_dim_sgr | awk -v prompt="$INPUT_BOX_PROMPT" -v nbsp="$INPUT_BOX_NBSP" '
+    { plain[NR] = $0 }
     END {
       p = 0
       for (i = 1; i <= NR; i++) if (index(plain[i], prompt) == 1) p = i
@@ -219,10 +161,10 @@ input_box_text() {
       for (i = p + 1; i <= NR; i++) if (plain[i] ~ /^[─━]+$/) { e = i; break }
       if (e == 0) { exit }
 
-      body = undim(raw[p])
+      body = plain[p]
       k = index(body, prompt)
       if (k > 0) body = substr(body, k + length(prompt))
-      for (i = p + 1; i < e; i++) body = body undim(raw[i])
+      for (i = p + 1; i < e; i++) body = body plain[i]
       gsub(/[[:space:]]/, "", body)
       gsub(nbsp, "", body)
       printf "%s", body

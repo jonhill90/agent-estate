@@ -127,7 +127,12 @@ MUTANT="$D/send-mutant.sh"
 # send.sh sources ./input-box.sh relative to its OWN location -- the mutant
 # needs a copy sitting next to it so that resolves, not the real send.sh's
 # directory.
+# agent-supervisor#521: input-box.sh now sources ./dim-strip.sh relative to
+# its OWN location too -- without a copy of that sitting beside it here, the
+# source fails ("No such file or directory") and strip_dim_sgr is left
+# undefined, so input_box_state/input_box_text silently misread every box.
 cp "$HERE/../../scripts/supervisor/input-box.sh" "$D/input-box.sh"
+cp "$HERE/../../scripts/supervisor/dim-strip.sh" "$D/dim-strip.sh"
 patch_rc=0
 python3 - "$SEND" "$MUTANT" <<'PY' || patch_rc=$?
 import sys
@@ -255,7 +260,12 @@ want_contains "the retry recovers a junk-prefixed message into a clean, anchored
 # confirm it goes back to a false "landed" (red), proving the anchor, not
 # something else, is what makes that assertion pass.
 MUTANT_HEAD="$D/send-mutant-head.sh"
+# agent-supervisor#521: input-box.sh now sources ./dim-strip.sh relative to
+# its OWN location too -- without a copy of that sitting beside it here, the
+# source fails ("No such file or directory") and strip_dim_sgr is left
+# undefined, so input_box_state/input_box_text silently misread every box.
 cp "$HERE/../../scripts/supervisor/input-box.sh" "$D/input-box.sh"
+cp "$HERE/../../scripts/supervisor/dim-strip.sh" "$D/dim-strip.sh"
 patch_rc=0
 python3 - "$SEND" "$MUTANT_HEAD" <<'PY' || patch_rc=$?
 import sys

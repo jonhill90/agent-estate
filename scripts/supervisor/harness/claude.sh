@@ -59,7 +59,36 @@ if [ -n "${CLAUDE_LANE_MCP_CONFIG:-}" ]; then
   CLAUDE_LANE_MCP_FLAGS="--strict-mcp-config --mcp-config ${CLAUDE_LANE_MCP_CONFIG}"
 fi
 
-HARNESS_LAUNCH_CMD="claude --model ${CLAUDE_LANE_MODEL:-sonnet} --dangerously-skip-permissions ${CLAUDE_LANE_MCP_FLAGS}"
+# agent-supervisor#521: Claude Code's own "prompt suggestion" feature paints
+# a dim, unsubmitted predicted-next-message into an empty input box after
+# every turn -- on by default. #521's investigation (a comment on the issue,
+# not code) reproduced this live and traced it to the root cause of
+# recurring unattributed text seen in idle build panes: nobody typed it, the
+# harness painted it.
+#
+# `claude --help` (v2.1.220) documents a CLI flag for this,
+# `--prompt-suggestions [value]` (`choices: "true", "false", ...`) -- tried
+# first, since a documented flag is the more obvious answer than an
+# undocumented env var. It does NOT work: `--prompt-suggestions=false`,
+# tried live in an isolated tmux socket (`tmux -L agent521-repro`, never the
+# shared `estate` session), still painted a dim post-turn suggestion
+# identical to the unflagged pane -- confirmed on two separate turns. The
+# flag is real (it appears in `--help` and is accepted, no CLI error) but
+# does not reach whatever gates this specific TUI behavior; recorded here
+# rather than left for the next reader to also discover the hard way.
+# `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false` (named in the shipped
+# binary's own strings, not in `--help` at all) is what actually works --
+# verified live in the same isolated session: an idle box painted nothing
+# after each of two separate turns, versus the unflagged pane's dim
+# suggestion appearing after every turn including before any turn ran at
+# all. This is the primary fix: no suggestion ever painted means nothing
+# for any reader (`send.sh`, `tick-scan.sh`, `look.py capture`) to misread
+# as real text. `input-box.sh`'s dim-stripping rule (agent-dotfiles#141,
+# agent-supervisor#193) and `dim-strip.sh`'s shared version of it
+# (agent-supervisor#521 part 2) stay in place regardless, as defense in
+# depth for a harness release where this env var stops working the way the
+# CLI flag already turned out not to.
+HARNESS_LAUNCH_CMD="CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model ${CLAUDE_LANE_MODEL:-sonnet} --dangerously-skip-permissions ${CLAUDE_LANE_MCP_FLAGS}"
 HARNESS_SEND_LITERAL=1
 
 # agent-dotfiles#256: the launch command above IS already claude's unattended
@@ -79,7 +108,11 @@ HARNESS_UNATTENDED_CMD="$HARNESS_LAUNCH_CMD"
 # separate flag for choosing one up front. A harness file that leaves this
 # unset says "no resume dialect here", and restore refuses its lanes rather
 # than starting a fresh agent -- which is #237's whole failure direction.
-HARNESS_RESUME_CMD='claude --dangerously-skip-permissions --resume %s'
+# agent-supervisor#521: carries the same CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
+# as HARNESS_LAUNCH_CMD above -- a resumed lane repaints the same idle-box
+# suggestion a freshly launched one does, so a resume dialect that omitted
+# this would silently reopen the bug for every restore.
+HARNESS_RESUME_CMD='CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --dangerously-skip-permissions --resume %s'
 
 # Ready shape -- last non-empty line only (the #65 discipline).
 #

@@ -315,15 +315,18 @@ out17="$(PATH="$FAKE_BIN:$PATH" env -u LANES_AGENT_CMD -u CLAUDE_LANE_MODEL \
   bash "$BOOT" --session "$S" --lanes 2 --dry-run 2>&1)"
 agent_line="$(printf '%s\n' "$out17" | grep -o 'agent=.* cwd=' | sed 's/ cwd=$//')"
 # agent-supervisor#494 appended `--strict-mcp-config` to the registry's launch
-# command, so these four expectations move with it. They are NOT weakened to
-# accommodate the change -- they are still exact-match against the whole
-# resolved string, which is the entire point of #135: bootstrap must derive
-# its command from the registry rather than carry a second definition. That
-# these four went red on a harness/claude.sh change is the check WORKING --
-# it proves bootstrap-session.sh really does read the registry, so the MCP
-# scoping reaches a third launch path without that path being patched.
+# command, and agent-supervisor#521 then prefixed it with
+# `CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false `, so these four expectations
+# move with it. They are NOT weakened to accommodate the change -- they are
+# still exact-match against the whole resolved string, which is the entire
+# point of #135: bootstrap must derive its command from the registry rather
+# than carry a second definition. That these four went red on a
+# harness/claude.sh change is the check WORKING -- it proves
+# bootstrap-session.sh really does read the registry, so both the MCP
+# scoping and the prompt-suggestion env var reach a third launch path
+# without that path being patched.
 check "17. with no --agent/LANES_AGENT_CMD, the default is registry-derived, not a bare literal" \
-  "agent=claude --model sonnet --dangerously-skip-permissions --strict-mcp-config" "$agent_line"
+  "agent=CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model sonnet --dangerously-skip-permissions --strict-mcp-config" "$agent_line"
 
 # 18. CLAUDE_LANE_MODEL is honoured through the SAME path dispatch.sh reads
 #     -- if only dispatch.sh's harness/claude.sh honoured it, bootstrap would
@@ -332,7 +335,7 @@ out18="$(PATH="$FAKE_BIN:$PATH" env -u LANES_AGENT_CMD CLAUDE_LANE_MODEL=haiku \
   bash "$BOOT" --session "$S" --lanes 2 --dry-run 2>&1)"
 agent_line18="$(printf '%s\n' "$out18" | grep -o 'agent=.* cwd=' | sed 's/ cwd=$//')"
 check "18. CLAUDE_LANE_MODEL overrides the derived default (bootstrap path)" \
-  "agent=claude --model haiku --dangerously-skip-permissions --strict-mcp-config" "$agent_line18"
+  "agent=CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model haiku --dangerously-skip-permissions --strict-mcp-config" "$agent_line18"
 
 # 19. --agent still wins outright over the registry default -- the override
 #     this script documents as how a site without Claude runs codex/copilot.
@@ -358,7 +361,7 @@ out20="$(PATH="$FAKE_BIN2:$PATH" env -u CLAUDE_LANE_MODEL \
   bash "$BOOT" --session "$S" --lanes 2 --agent claude --unattended --dry-run 2>&1)"
 agent_line20="$(printf '%s\n' "$out20" | grep -o 'agent=.* cwd=' | sed 's/ cwd=$//')"
 check "20. --unattended --agent claude resolves claude's bypass flag" \
-  "agent=claude --model sonnet --dangerously-skip-permissions --strict-mcp-config" "$agent_line20"
+  "agent=CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model sonnet --dangerously-skip-permissions --strict-mcp-config" "$agent_line20"
 
 # 21. --unattended --agent codex resolves to codex's OWN bypass flag, not
 #     claude's -- the exact defect #256 reports: the flag differs per harness
@@ -374,7 +377,7 @@ out22="$(PATH="$FAKE_BIN2:$PATH" env -u LANES_AGENT_CMD -u CLAUDE_LANE_MODEL \
   bash "$BOOT" --session "$S" --lanes 2 --unattended --dry-run 2>&1)"
 agent_line22="$(printf '%s\n' "$out22" | grep -o 'agent=.* cwd=' | sed 's/ cwd=$//')"
 check "22. --unattended with no --agent defaults to claude's bypass flag" \
-  "agent=claude --model sonnet --dangerously-skip-permissions --strict-mcp-config" "$agent_line22"
+  "agent=CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false claude --model sonnet --dangerously-skip-permissions --strict-mcp-config" "$agent_line22"
 
 # 23. --unattended against a harness with no MEASURED unattended command
 #     (copilot's --allow-all has never been driven through a live pane, see
