@@ -195,6 +195,47 @@ func TestIndependenceEdgeCases(t *testing.T) {
 	})
 }
 
+// TestBlankReviewLaneSelfApprovalBypass ports jonhill90/skills#260's
+// BlankReviewLaneSelfApprovalBypass regression test class near-verbatim:
+// a security regression found by build-3 in jonhill90/skills's
+// pr_verdict.py (fixed there in #260) and independently confirmed present
+// here in this Go port under the identical bug shape. A BLANK
+// `Review-Lane:` value let reviewLaneRE's post-colon `\s*` consume the
+// line break and capture the NEXT line's text (`Reviewed-SHA: ...`)
+// instead of matching empty. That non-empty garbage never equals a real
+// Author-Lane: value, so the same-lane self-review check below it
+// silently never fired -- a same-lane author posting a comment with a
+// blank Review-Lane: trailer got treated as a valid, different reviewer
+// and the PR resolved approved. This exact shape -- blank trailer, same
+// lane as Author-Lane, real head SHA on the very next line -- must never
+// again resolve to anything but unknown.
+func TestBlankReviewLaneSelfApprovalBypass(t *testing.T) {
+	t.Run("blank_review_lane_same_author_lane_is_not_approved", func(t *testing.T) {
+		p := payload("Author-Lane: build-3\n", []Comment{
+			comment("Verdict: APPROVE\nAuthor-Lane: build-3\nReview-Lane: \nReviewed-SHA: " + head + "\n"),
+		}, "")
+		got := Resolve(p)
+		if got.Decision != Unknown {
+			t.Fatalf("decision = %q, want unknown (detail: %s)", got.Decision, got.Detail)
+		}
+		if !contains(got.Detail, "Review-Lane") {
+			t.Fatalf("detail = %q, want it to mention Review-Lane", got.Detail)
+		}
+	})
+
+	t.Run("blank_review_lane_does_not_capture_the_next_line", func(t *testing.T) {
+		// Direct regression on the regex itself, not just Resolve's
+		// outcome -- pins the exact failure mode build-3 reported so a
+		// future refactor of the pattern can't silently reopen it while
+		// still passing the Resolve-level test above by coincidence.
+		body := "Verdict: APPROVE\nAuthor-Lane: build-3\nReview-Lane: \nReviewed-SHA: abc123\n"
+		_, ok := parseTrailer(reviewLaneRE, body)
+		if ok {
+			t.Fatalf("parseTrailer(reviewLaneRE, ...) matched, want no match for a blank trailer")
+		}
+	})
+}
+
 func TestMissingHeadSHAFailsClosed(t *testing.T) {
 	got := Resolve(Payload{Body: "", Comments: nil})
 	if got.Decision != Unknown {

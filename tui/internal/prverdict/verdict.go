@@ -242,9 +242,23 @@ func scanVerdictLines(body string) []verdictLine {
 // comment, because the author cannot post a comment on their own PR to
 // state it any differently from writing it into the description at open
 // time.
+// jonhill90/skills#258/#260: the whitespace after the colon is restricted
+// to `[ \t]*`, never `\s*` -- `\s*` matches a newline, so a BLANK trailer
+// value (`Review-Lane:` with nothing after it) let the pattern's greedy
+// post-colon whitespace consume the line break and its capture group
+// swallow the NEXT line's text instead of matching an empty string. That
+// garbage capture (e.g. "Reviewed-SHA: abc123") is non-empty, so
+// parseTrailer returned it as a real lane id -- one that never equals a
+// real Author-Lane: value -- which silently defeated the same-lane
+// self-review check below. Anchoring to `[ \t]*` keeps the match on the
+// trailer's own line; `(.*)$` still can't cross a line boundary on its
+// own (Go's regexp/RE2 `.` never matches `\n` without `(?s)`, which this
+// package does not set), so this was the only gap. Same bug, same fix,
+// ported from skills#260 (Python) which fixed the identical pattern in
+// jonhill90/skills's own pr_verdict.py.
 var (
-	reviewLaneRE  = regexp.MustCompile(`(?im)^\s*Review-Lane:\s*(.*)$`)
-	authorLaneRE  = regexp.MustCompile(`(?im)^\s*Author-Lane:\s*(.*)$`)
+	reviewLaneRE  = regexp.MustCompile(`(?im)^[ \t]*Review-Lane:[ \t]*(.*)$`)
+	authorLaneRE  = regexp.MustCompile(`(?im)^[ \t]*Author-Lane:[ \t]*(.*)$`)
 	reviewedSHARE = regexp.MustCompile(`(?im)^\s*Reviewed-SHA:\s*([A-Za-z0-9]+)\s*$`)
 )
 
