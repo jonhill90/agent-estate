@@ -55,6 +55,21 @@ latest-per-name, never best-per-name -- if the newest run of a check
 failed and an older run of the same check passed, that is red. Only
 narrowing what counts as "the check", never widening what counts as
 green.
+
+STALE `gate` SUPERSEDED BY `ui-evidence` (#518, surfaced by #516) --
+`_latest_per_name` collapses re-runs of the SAME name, but `ui-evidence.yml`'s
+`gate` job (push-triggered) and the separately-named `ui-evidence`
+check-run (issue_comment-triggered, satisfying a follow-up-comment #468
+evidence pattern) are two DIFFERENT names for what is really the same
+requirement -- `_latest_per_name` has no relationship between them to
+collapse, so a `gate` job that only ever runs on push stays a permanent
+FAILURE even after the PR is genuinely green.
+`_gate_superseded_by_ui_evidence` is the one narrow exception to "only
+narrowing what counts as green" above: a FAILURE `gate` run is excluded
+from the failing list ONLY when a same-SHA `ui-evidence` run is itself
+green and completed strictly later than the `gate` failure. This is named
+explicitly for this one relationship, not a general "an unrelated green
+check clears an unrelated red one" rule.
 """
 
 from __future__ import annotations
@@ -112,6 +127,44 @@ def _latest_per_name(check_runs):
     return list(latest_by_name.values())
 
 
+def _gate_superseded_by_ui_evidence(latest_runs):
+    """agent-supervisor#518 / #516: `ui-evidence.yml`'s `gate` job runs only
+    on `pull_request` (push) and is never re-triggered when a PR satisfies
+    UI evidence via a follow-up comment -- the #468 pattern this repo's own
+    docs describe as valid. That leaves a permanently stale FAILURE `gate`
+    run sitting at the head SHA even after the PR is genuinely green,
+    because the separately-named, `issue_comment`-triggered `ui-evidence`
+    check-run (workflow "Validate") that actually reflects reality lands
+    under a different name and `_latest_per_name` has no relationship
+    between the two names to collapse.
+
+    This is narrowly the one stale/superseding relationship named in
+    agent-supervisor#518 -- a FAILURE `gate` run superseded ONLY by a
+    same-SHA `ui-evidence` run that is itself green AND completed strictly
+    later than the stale failure. It does not become a general "ignore old
+    failures" rule:
+      - no same-SHA `ui-evidence` run at all -> not superseded, still refuse
+      - the `ui-evidence` run exists but is not itself green -> not
+        superseded, still refuse (a failing superseding check clears nothing)
+      - the `ui-evidence` run completed BEFORE the `gate` failure (i.e. the
+        `gate` failure is a real, later failure, not a stale earlier one)
+        -> not superseded, still refuse
+    """
+    gate = next((run for run in latest_runs if run.get("name") == "gate"), None)
+    if gate is None:
+        return False
+    if not (gate.get("status") == "completed" and gate.get("conclusion") == "failure"):
+        return False
+
+    ui_evidence = next((run for run in latest_runs if run.get("name") == "ui-evidence"), None)
+    if ui_evidence is None:
+        return False
+    if not (ui_evidence.get("status") == "completed" and ui_evidence.get("conclusion") in GREEN_CONCLUSIONS):
+        return False
+
+    return _run_sort_key(ui_evidence) > _run_sort_key(gate)
+
+
 class CiGate:
     def __init__(self, runner=None):
         self.runner = runner or subprocess_runner
@@ -167,10 +220,12 @@ class CiGate:
             return {"decision": "refuse", "sha": sha, "reason": f"no checks reported for {sha}"}
 
         latest_runs = _latest_per_name(check_runs)
+        gate_superseded = _gate_superseded_by_ui_evidence(latest_runs)
         failing_runs = [
             _describe_failing_run(run)
             for run in latest_runs
             if not (run.get("status") == "completed" and run.get("conclusion") in GREEN_CONCLUSIONS)
+            and not (gate_superseded and run.get("name") == "gate")
         ]
         failing_statuses = [s.get("context", "?") for s in statuses if s.get("state") != "success"]
         failing = failing_runs + failing_statuses
