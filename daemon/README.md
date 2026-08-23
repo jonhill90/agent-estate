@@ -28,6 +28,16 @@ INFERRED from pixels instead of OBSERVED from a process.
 | concurrency | one transition per tick | bounded pool, cores-2, capped 8 |
 | language | 44,794 lines of bash | ~700 lines of Go |
 
+[Could not measure 2026-08-23: this row's scope (which files each side
+counted, and on which date) isn't stated, so the original 44,794/~700
+figures can't be directly reproduced. Measured today instead, for
+context, not as a replacement: `find . -name '*.sh' -not -path
+'./.git/*' | xargs wc -l` over the whole repo totals 52,121 lines;
+`scripts/supervisor/*.sh` alone totals 21,400. `find daemon -name '*.go'
+! -name '*_test.go' | xargs wc -l` totals 3,021 lines — well past "~700",
+consistent with the daemon having grown substantially since this table
+was written (codex adapter, budget, ciflake, sendmsg all landed after).]
+
 ## Use
 
 ```
@@ -53,6 +63,14 @@ $ supervisord batch -workers 4
 batch: 4 ok, 0 failed, wall 2.826s     # sum of parts 10.6s => genuinely parallel
 ```
 
+[Corrected 2026-08-23: this transcript predates the spend-cap feature
+(#499). `daemon/cmd/supervisord/batch.go`'s current format string is
+`"batch: %d ok, %d failed, wall %s, spend $%.4f of $%.2f cap\n"` — a
+real run today prints spend/cap figures this pasted line does not show.
+Not re-run here (a real `supervisord batch` invocation shells out to
+`claude`/`codex`, which this pass avoided); the format-string mismatch
+is confirmed from source, not by re-running the command.]
+
 Two bugs were found by RUNNING it, and both are recorded in source comments
 rather than quietly fixed:
 
@@ -60,6 +78,12 @@ rather than quietly fixed:
    foreign key. `EnsureLane` fixes it.
 2. `UNIQUE(tasks.lane)` — a lane holds at most one task, so concurrent jobs
    need distinct lanes. "One agent per lane" is the real model.
+   [Corrected 2026-08-23: the actual constraint, in both `core.py` and
+   `ledger_test.go`'s schema mirror, is `CREATE UNIQUE INDEX
+   one_open_task_per_lane` — a partial index over OPEN tasks, not a blanket
+   `UNIQUE(tasks.lane)` (a lane accumulates many tasks over its life; only
+   one may be open at once). The behavioral claim above ("a lane holds at
+   most one task [at a time]") is what's true; the literal SQL name is not.]
 
 The #488 write-once guard is mutation-checked in both directions: remove it and
 `TestFinishRefusesToRestampTerminal` goes red; restore it and the suite passes.
@@ -97,7 +121,16 @@ enough to be re-run.
 
 ## Not done yet
 
-- codex/copilot adapters (the interface is there; only claude is implemented)
-- per-agent spend caps
+- ~~codex/copilot adapters (the interface is there; only claude is
+  implemented)~~ [Corrected 2026-08-23: `daemon/internal/agent/codex.go`
+  (233 lines) is a real, verified-against-the-shipped-CLI adapter, wired via
+  `-harness codex` in `daemon/cmd/supervisord/main.go` (#497/#499, landed
+  2026-08-22). Copilot still has no adapter — `grep -rn copilot
+  daemon --include='*.go'` outside comments returns nothing.]
+- per-agent spend caps [Corrected 2026-08-23: `daemon/internal/budget`
+  landed (#499) and `supervisord batch` wires a `budget.Tracker` through
+  `dispatch.Gates` — but it is one shared tracker for the whole batch
+  (`-budget-usd`/`-budget-window` flags), not a cap scoped per individual
+  agent, so this item is still open in the sense originally meant.]
 - blocked-on-permission-prompt as a first-class state
 - the review-independence gate

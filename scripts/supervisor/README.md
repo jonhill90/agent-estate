@@ -516,8 +516,12 @@ missing one: the lane acts on it anyway. So the brief is typed, the pane is
 read back, and only a pane showing both the head of the message and the
 worktree path gets an `Enter`. One retype is attempted; if it still has not
 landed, the dispatch aborts and rolls back rather than submitting whatever is
-in the input. `DISPATCH_SETTLE` (default 2s) is the pause that gives the
-harness time to finish repainting.
+in the input. `DISPATCH_SETTLE` (**default 1s, not 2s as this line
+previously said** — `dispatch.sh`'s own comment states "`--settle` defaults
+to `$DISPATCH_SETTLE` itself (1s in production...)", and every call site
+grepped (`grep -n 'DISPATCH_SETTLE' scripts/supervisor/dispatch.sh`) falls
+back to `:-1`) is the pause that gives the harness time to finish
+repainting.
 
 ### It records what it dispatched (#140), and now reads it back (#174)
 
@@ -667,19 +671,36 @@ Each source WRAPS an existing entry point (`lanes.sh --json`, `digest.sh
 --json`, `cli.py status`) rather than reimplementing it. There is no second
 behaviour to drift.
 
-### Four tools, and why only four
+### Eleven tools today, not four
+
+**This table originally said "Four tools, and why only four" (`lanes`,
+`digest`, `ledger`, `events`) and the "Reads only" section below it said
+`WRITE_SOURCES` was empty. Both are false as of this pass (re-checked
+2026-08-23 with `python3 scripts/supervisor/mcp_server.py --print-tools`,
+piped through `jq '.tools | length'` and `jq '.tools[].name'`): the surface
+is now eleven tools, six reads and five writes.**
 
 | tool | source | answers |
 | --- | --- | --- |
 | `lanes` | `lanes.sh --json` | lane states, optionally for a named session |
+| `sessions` | (see `supervisor_view.py`'s `SessionsSource`) | session-level view alongside `lanes` |
 | `digest` | `digest.sh --json` | watchdog, poller, director inbox pending/age, lane counts, open PRs (CI + verdict), merges |
 | `ledger` | `cli.py status` | registered lanes (harness, repo, **transport**), availability, outstanding tasks per lane |
 | `events` | `cli.py events` | the ledger's event log (completion, attention), cursor-resumable |
+| `session_remove_check` | (read half of the remove guard) | what `session_remove` would evaluate, without removing anything |
+| `session_attach` | write | agent-tui#14, see `supervisor_view.WRITE_SOURCES`'s own docstring |
+| `session_detach` | write | agent-tui#14 |
+| `session_add` | write | agent-tui#14 |
+| `session_remove` | write | agent-tui#14; refuses unless the guard says safe, logs to the ledger before killing anything |
+| `session_send` | write | agent-supervisor#508: send an ad-hoc message to an EXISTING session (`--resume`, via `supervisord send`), never raw `tmux send-keys`; reports delivered/failed/unknown, never launders a timeout into delivered |
 
 Tool definitions are always-on context in every consuming session, which cuts
-directly against the estate's token aim — so the surface is deliberately small.
-`mcp_server.py --print-tools` emits the exact `tools/list` payload, so the cost
-is measurable rather than argued about.
+directly against the estate's token aim — so the surface is deliberately kept
+to what earns its keep, not literally minimal. `mcp_server.py --print-tools`
+emits the exact `tools/list` payload, so the cost is measurable rather than
+argued about. (`mcp_server.py`'s own module docstring still says "Ten tools"
+as of this pass — also stale by the same `session_send` addition; fix
+belongs with that file, not repeated here.)
 
 `ledger` now projects `transport` (`send-keys` / `acp` / `pi-rpc`) alongside
 each lane (agent-supervisor#87). It was already a ledger column — every lane
@@ -741,16 +762,25 @@ this carries it across the process boundary.
 exits 0 with the failures named in `errors` and `ok: false`, and throwing away
 the readable half would lose more than it protects.
 
-### Reads only
+### Reads and writes
 
-No write tool is exposed, and `WRITE_SOURCES` is empty. `tool_definitions`
-refuses to publish any source whose `mutates` is true, so the absence is
-enforced rather than remembered. What a write tool needs first, none of which
-exists: a caller identity (`cli.py`'s `_verify_caller` authenticates a lane by a
-pane nonce an off-machine client cannot have), a blast-radius bound (a tool any
-agent may call on its own initiative is a third dispatcher, and #184/#209 are
-both about two), and an audit trail that survives the client. The seam is
-there; the authorisation story is not, so the tools are not.
+**This section used to say "No write tool is exposed, and `WRITE_SOURCES` is
+empty" — true when written, false now.** `WRITE_SOURCES` currently holds
+five sources (`session_attach`, `session_detach`, `session_add`,
+`session_remove`, `session_send` — see the table above), confirmed by
+reading `supervisor_view.py`'s `WRITE_SOURCES` dict directly. `mcp_server.py`
+still enforces the read/write split structurally — `SupervisorView.__init__`
+asserts every `READ_SOURCES` source has `mutates is False` and every
+`WRITE_SOURCES` source has `mutates is True`, refusing to construct
+otherwise — the assertion just no longer means "so there are no writes"; it
+means "so a source can't land in the wrong registry." `session_attach`,
+`session_detach`, `session_add` and `session_remove` were added for
+agent-tui#14; `session_send` (agent-supervisor#508) is the newest and a
+different risk shape — the first write here that runs a live agent turn
+rather than a tmux control-plane operation — see `SessionSendSource`'s own
+docstring in `supervisor_view.py` for why it is still bounded the same way
+(one exact, caller-supplied `session_id`, no lane-claim race, delivery
+observed rather than inferred).
 
 Nonces never leave. `LedgerSource` projects rows through explicit
 `LANE_FIELDS`/`TASK_FIELDS` allowlists — a column added to the schema later is
@@ -808,9 +838,19 @@ reduction. If even the most reduced document still exceeds the cap, `state.sh`
 exits 2 and says `CAP EXCEEDED` rather than emit an over-budget document or
 widen the ceiling.
 
-`quota` reads `unknown` unconditionally — no usage/rate-limit tracker exists
-anywhere in this estate to report a real number from, and inventing one
-would be worse than saying so.
+**This line used to say `quota` reads `unknown` unconditionally because no
+usage/rate-limit tracker exists anywhere in this estate — that is now
+false, and `state.sh`'s own comment says so:** `quota.sh`, `quota-watch.sh`
+and `quota-watch-recover.sh` all exist, `quota-watch.sh` runs under
+launchd, and `state.sh` reads quota-watch's *persisted* verdict (not a live
+`quota.sh` call, deliberately — `quota.sh` can take 45s+ and this document
+is re-read every turn) from `$SUPERVISOR_STATE/.quota-watch.state`. It
+still falls back to `unknown` when that file is missing, unreadable, or
+stale (>1800s old, i.e. more than six quota-watch intervals), and the
+`state` field it reports is explicitly the *reported* value, not
+`confirmed` — see `state.sh`'s own comment block above `QUOTA_STATE=` for
+why that distinction is load-bearing (a blind meter and a healthy one must
+not render identically).
 
 **Every shell-out is bounded (agent-supervisor#251).** `state.sh`'s calls to
 `digest.sh --json` and `cli.py status`, and `digest.sh`'s own `gh api`/
@@ -843,7 +883,12 @@ were in no workflow and no test shelled out to them, so a regression in
 `.github/workflows/validate.yml` runs the same tests on every `pull_request`,
 but not as that one command (agent-supervisor#440: the 89 bash suites,
 executed serially inside `test_shell_suites_pass`, owned ~99% of a 22-minute
-run). The Python tests run in their own `unit-tests` job
+run — that count is #440's own historical measurement at the time of that
+PR, not a claim about today; re-counted for this pass with `find
+tests/supervisor -name 'test_*.sh' | wc -l` and confirmed against
+`plan_shell_shards.py`'s own discovery: **106** suites now, not 89 — the
+suite has grown since #440, this is not a retraction of #440's number). The
+Python tests run in their own `unit-tests` job
 (`SHELL_SUITE_SKIP=1` so this job does not also run all 89 bash suites);
 `plan-shell-shards` bin-packs the currently-discovered `test_*.sh` files by
 measured wall time (`scripts/ci/plan_shell_shards.py`,

@@ -57,4 +57,12 @@ across machines or needs network access to function.
 
 `2026-08-20`: `core.py`'s `_initialize` still creates `ledger.sqlite3`
 with the tables described in `docs/product/SPEC.md` §1; the file's own
-provenance comment (`bb1412d`) still names Hill90 as the source.
+docstring still names Hill90 as the source ("Transactional task/event
+ledger for the Hill90 supervisor"). [Corrected 2026-08-23: "provenance
+comment (`bb1412d`)" overstated this — `grep -n "bb1412d" scripts/supervisor/
+core.py` and a full `git log -p` over the file's history both return zero
+matches; that hash never appeared as literal text inside `core.py`, only as
+the commit hash of the "Move portable supervisor core from Hill90 into
+agent-dotfiles" commit cited in this doc's own "Why" section above. The
+Hill90 attribution in the file itself is real; the specific in-file hash
+citation was not.]

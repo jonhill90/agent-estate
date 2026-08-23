@@ -160,6 +160,19 @@ $ rm scripts/supervisor/laneview/text.sh && bash tests/supervisor/test_laneview.
   ... 14 passed, 5 failed
 ```
 
+**Re-measured for this pass (2026-08-23): the suite has grown since the
+count above was written, and the same deletion now fails 6 of 34 cases, not
+5 of 19:**
+
+```
+$ rm scripts/supervisor/laneview/text.sh && bash tests/supervisor/test_laneview.sh
+  ... 28 passed, 6 failed
+```
+
+Same shape as the "four implementations" figure a few paragraphs below —
+right when written, uncounted since — so the number is corrected here
+rather than left to drift again unnoticed.
+
 That is deliberate and is not coupling between implementations: the "apart"
 guarantee is a property of `text.sh` specifically (it renders with no tmux
 binary and no daemon reachable), so the test proving it has to name it.

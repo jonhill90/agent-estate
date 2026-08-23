@@ -34,6 +34,7 @@ never loses one silently. `Verified 2026-08-20` against `core.py:320-620`.
 | `pr_external_authorship` | `(repo, pr_number)` | A PR explicitly marked as authored outside the lane system (`mark-pr-external.sh`), so the independence gate does not refuse a PR it was never meant to evaluate. |
 | `sessions` | `session` | Which tmux sessions are under supervision, and since when. |
 | `prompts`, `items`, `links` | — | Jon's prompt/decision tracking system (agent-supervisor#280); unrelated to lane dispatch. |
+| `supervisor_lease` | `id` (singleton, `CHECK (id = 'supervisor')`) | Not in this table originally — added here 2026-08-23. A single-row lease (`owner`, `taken_at`, `updated_at`) for the supervisor process itself, same INSERT-or-refuse-under-lock/pid-liveness-reap pattern as a lane claim, deliberately kept out of `lanes` because the supervisor has no pane for a lane row to describe (`core.py:404-422`). |
 
 `harness` is constrained to `codex`, `claude`, `copilot`, `copilot-acp`,
 `pi`. `transport` is constrained to `send-keys`, `acp`, `pi-rpc`,
@@ -135,23 +136,33 @@ directly bypasses it; that is convention, not a platform block, because
 GitHub branch protection and rulesets are both unavailable on these
 private repos without GitHub Pro (`gh api .../branches/main/protection` →
 403, measured in `merge-pr.sh`'s own header, agent-supervisor#13). It
-chains two gates, both fail-closed — refusing when a gate returns false
-*or* when a gate cannot be evaluated at all:
+chains **three** gates (originally documented as two here; corrected
+2026-08-23 — see item 2 below), all fail-closed — refusing when a gate
+returns false *or* when a gate cannot be evaluated at all:
 
 1. **`ci_gate.py`** — re-fetches the PR's head SHA fresh (never a cached
    one), checks every check-run and legacy status at that exact SHA, and
    refuses if any is outside `GREEN_CONCLUSIONS` (`success`, `neutral`,
    `skipped`) or if the SHA has zero check results (absent is not
    passing).
-2. **`verdict-independence.sh`** — reads the PR's verdict
+2. **The rejected-verdict check** (`merge-pr.sh:123-135`, added by
+   agent-supervisor#486/PR #487, commit `cb54804`, 2026-08-21 — not in this
+   document before this pass) — refuses outright when the recorded verdict
+   itself is `rejected`, checked before independence. Added because
+   `independence_verdict()` answers "was this reviewed independently", not
+   "was it approved": both `approved` and `rejected` satisfy its own
+   `IN("approved","rejected")` branch, so a rejected-but-independent review
+   used to pass the old `value == true` gate the same as an approved one —
+   reproduced live on PR #485 before the fix.
+3. **`verdict-independence.sh`** — reads the PR's verdict
    (`verdict.py`, ledger or GitHub, never inverts an unreadable result
    into a pass) and the lane that authored it, resolves whether reviewer
    and author are the *same lane* via `resolve_lane_relation` (comparing
    lane identity, not task ids or window names — `AGENTS.md` invariant
    9), and refuses an unreviewed, self-reviewed, or unresolvable pairing.
 
-Exit 0 = both gates passed and `gh pr merge` ran; exit 1 = a gate refused
-(reason printed); exit 2 = usage error.
+Exit 0 = all three gates passed and `gh pr merge` ran; exit 1 = a gate
+refused (reason printed); exit 2 = usage error.
 
 ## 6. Harness adapters (`adapter.py`, `harness/*.sh`)
 
@@ -200,23 +211,41 @@ here rather than restated. A renderer is `laneview/<name>.sh`, invoked as
    process.
 4. **Name every state.** See §2 above.
 
-Two renderers exist today: `text.sh` (a plain stdout table — works over
-SSH or cron, no tmux client needed) and `opensessions.sh` (a tmux-plugin
-bridge). Neither is required by the other, or by `lanes.sh`.
+**Four renderers exist today** (originally documented as two here;
+corrected 2026-08-23, `ls scripts/supervisor/laneview/`): `text.sh` (a
+plain stdout table — works over SSH or cron, no tmux client needed),
+`opensessions.sh` (a tmux-plugin bridge), `dock.sh` (a docked vertical
+tmux-pane sidebar refreshing on a timer, zero extra dependency — built on
+tmux primitives already in this estate rather than a plugin, per its own
+header), and `tui.sh` (a curses TUI Jon owns directly — select a lane,
+enter jumps to it — distinct from `opensessions.sh`'s third-party daemon,
+per its own header). None is required by any other, or by `lanes.sh`.
 
 ## 8. The MCP read surface (`mcp_server.py`)
 
-Exposes `lanes`, `sessions`, `digest`, `ledger`, and `events` as read
-tools, so a harness other than the one running the supervisor can still
-consume its state. Additionally exposes four guarded, explicitly-scoped
-session-management writes (agent-tui#14): `session_attach`,
-`session_detach`, `session_add`, `session_remove` — each takes an exact
-session name, logs to the ledger before mutating, and re-checks its guard
-at call time. `dispatch` and `merge` are deliberately excluded:
-`supervisor_view.py`'s `WRITE_SOURCES` docstring reasons that dispatch
-requires an atomic lane claim under a race, and merge carries the
+**Eleven tools total today, not the nine originally documented here**
+(corrected 2026-08-23; counted directly from `supervisor_view.py`'s
+`READ_SOURCES`/`WRITE_SOURCES` dicts, `scripts/supervisor/supervisor_view.py:512-515,1010-1019`).
+Six read tools: `lanes`, `sessions`, `digest`, `ledger`, `events`, and
+`session_remove_check` (not documented here before this pass — a pure
+read, evaluates every refusal `session_remove` would, so a caller can
+check repeatedly before ever writing), so a harness other than the one
+running the supervisor can still consume its state. Five guarded,
+explicitly-scoped session-management writes (agent-tui#14 for the
+original four; agent-supervisor#508/PR #509, commit `b30b70e`, for the
+fifth): `session_attach`, `session_detach`, `session_add`,
+`session_remove`, and **`session_send`** — each takes an exact session
+name, logs to the ledger before mutating, and re-checks its guard at call
+time. `session_send` closes what its own docstring calls "the capability
+agent-tui's SPEC-shell.md S7 is blocked on": sending one ad-hoc message to
+an *existing* agent session, via `supervisord send -session-id ID -message
+TEXT` (`daemon/cmd/supervisord`) — before this, nothing in the MCP surface
+could resume an existing session; any earlier claim that no such write
+path exists is now false. `dispatch` and `merge` are still deliberately
+excluded: `supervisor_view.py`'s `WRITE_SOURCES` docstring reasons that
+dispatch requires an atomic lane claim under a race, and merge carries the
 independence requirement in §5 above — neither reduces to a scoped,
-logged, single-session mutation the way session add/remove does.
+logged, single-session mutation the way session add/remove/send does.
 
 ## 9. Worktrees (`worktree.sh`)
 
