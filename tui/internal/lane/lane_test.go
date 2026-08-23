@@ -51,6 +51,35 @@ func TestDecodeModelDefaultsToZeroValueWhenAbsent(t *testing.T) {
 	}
 }
 
+// TestDecodeReadsExecutionMode pins S12's container signal, lanes.sh's own
+// 8th column -- live-shaped, matching TestDecodeReadsModel's own precedent
+// for the 7th.
+func TestDecodeReadsExecutionMode(t *testing.T) {
+	text := `{"lanes":[{"window":1,"window_id":"@58","name":"director","command":"claude.exe","state":"free","idle_seconds":53,"model":"sonnet","execution_mode":"local"}],"count":1}`
+	lanes, err := Decode(text)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if lanes[0].ExecutionMode != "local" {
+		t.Fatalf("ExecutionMode = %q, want %q", lanes[0].ExecutionMode, "local")
+	}
+}
+
+// TestDecodeExecutionModeDefaultsToZeroValueWhenAbsent -- a lanes.sh from
+// before this field existed (or a fixture that omits it) must decode to
+// Go's zero value, not a JSON error, same backward-compatibility contract
+// TestDecodeModelDefaultsToZeroValueWhenAbsent already pins for Model.
+func TestDecodeExecutionModeDefaultsToZeroValueWhenAbsent(t *testing.T) {
+	text := `{"lanes":[{"window":1,"name":"x","command":"claude","state":"busy","idle_seconds":0}],"count":1}`
+	lanes, err := Decode(text)
+	if err != nil {
+		t.Fatalf("Decode: %v", err)
+	}
+	if lanes[0].ExecutionMode != "" {
+		t.Fatalf("ExecutionMode = %q, want \"\"", lanes[0].ExecutionMode)
+	}
+}
+
 // TestEveryVariantNamesEveryState is the addendum's rule 2 applied to every
 // entry in Variants, not just the default: "stale, menu-blocked and unsent
 // are the forgotten ones -- a variant that cannot show them is not a

@@ -67,6 +67,22 @@
 // neither Command nor State supports a real answer. See modeFor's own doc
 // comment for the evidence and Row.Mode's for why the old constant was
 // wrong even though it happened to be correct for every row seen so far.
+//
+// 2026-08-23 update (SPEC-shell.md S12 depth, CONTAINER side,
+// estate-loop/b2-s12-container-signal.md): the gap the LOCAL-side update
+// above named -- "no signal exists yet, anywhere in agent-supervisor's
+// lanes.sh --json payload, that can positively identify a container-
+// wrapped process" -- is closed. lane.Lane.ExecutionMode (lanes.sh --json's
+// new 8th column, agent-supervisor's own change) is a RECORDED fact,
+// written by whatever created the lane, never inferred from Command --
+// modeFor now checks it first, before falling back to the same Command/
+// State evidence this file used exclusively before today. ExecutionContainer
+// is reachable through Row.Mode for the first time; no container DRIVER
+// exists yet to ever actually set it (docs/SPEC-agentbox-execution-mode.md
+// is still spec-only, deliberately, per S12's own "implementing the
+// container driver is its own later item"), so this is real infrastructure
+// with nothing live plugged into its container arm today, not a claim that
+// a container-mode lane can be created.
 package agents
 
 import (
@@ -210,11 +226,39 @@ func costPtr(f cost.Figure) *string {
 // own doc comments for why that was wrong even though it never once
 // printed something false in practice).
 //
-// The only two fields this package has that speak to "is a process
-// actually running here, and where" are Command (lanes.sh's own
-// pane_current_command -- tmux's own live introspection of the pane's
-// foreground process, not this package's guess) and State
-// (lane.Lane.State, lanes.sh's own classification):
+// S12's own container signal (estate-loop/b2-s12-container-signal.md,
+// docs/SPEC-agentbox-execution-mode.md): lane.Lane.ExecutionMode is now the
+// PRIMARY read, checked first, because it is the only evidence this
+// function has that is RECORDED by whatever created the lane rather than
+// inferred after the fact:
+//
+//   - ExecutionMode == "container" -- agent-supervisor positively wrote
+//     this down (lanes.sh's own execmode_for reads the
+//     `@hill90_lane_execution_mode` tmux pane option verbatim only for
+//     this exact string). ExecutionContainer, finally reachable -- no
+//     driver exists yet to ever set this in practice (docs/SPEC-agentbox-
+//     execution-mode.md), but the field is real infrastructure, not a
+//     guess dressed up as one.
+//   - ExecutionMode == "local" -- the same positive record, for the
+//     overwhelmingly common case: bootstrap-session.sh writes this on
+//     every lane it creates today, because every lane it creates today
+//     genuinely is a local subprocess.
+//
+// Neither of those two strings is ever produced by pattern-matching
+// Command -- doing that was the exact mistake this function existed to
+// stop making for the ORIGINAL hardcoded-ExecutionLocal bug, and inventing
+// a second, subtler version of it (guessing "local" vs "container" from
+// what the pane's foreground process happens to be named) would be the
+// same mistake one layer further in. A container entrypoint can re-exec
+// into a harness process whose Command is indistinguishable from a native
+// one -- that is this file's own reason ExecutionMode had to be a written
+// fact, not a read of the pane.
+//
+// FALLBACK, for any lane ExecutionMode does not positively place ("unknown"
+// -- the option was never set, e.g. every lane bootstrapped before this
+// change landed, or a hand-created window outside bootstrap-session.sh
+// entirely): the same Command/State evidence this function used exclusively
+// before ExecutionMode existed, unchanged from that shape --
 //
 //   - Command == "" -- lanes.sh reported no foreground process for this
 //     pane at all. No process, no evidence: unknown.
@@ -229,19 +273,21 @@ func costPtr(f cost.Figure) *string {
 //     subprocess in a worktree, today's behaviour"), not an assumption
 //     about what usually runs here.
 //
-// Deliberately never ExecutionContainer: nothing in lanes.sh's --json
-// payload (window/window_id/name/command/state/idle_seconds/model --
-// confirmed by reading lanes.sh's own --json emission directly,
-// 2026-08-22) can distinguish a container-wrapped process from a native
-// one, and nothing in agent-supervisor dispatches into AgentBox today
-// (grepped agent-supervisor/scripts for "agentbox"/"docker", zero
-// matches, 2026-08-22 -- the same check execution_mode.go's own doc
-// comment already cites). Inventing a detection rule for a signal that
-// does not exist yet would repeat the exact mistake this function exists
-// to stop making, just one layer further in. See
-// docs/SPEC-agentbox-execution-mode.md for what container mode actually
-// needs before this function could ever honestly return it.
+// This fallback can still only ever emit `local` or `unknown`, never
+// `container` -- exactly the property the standing gap named: nothing
+// short of a positive record can ever prove a pane is container-wrapped,
+// so a lane with no record stays exactly as legible as it was before this
+// field existed, never silently downgraded to unknown just because the
+// option has not been backfilled onto it yet.
 func modeFor(l lane.Lane) *session.ExecutionMode {
+	switch l.ExecutionMode {
+	case "container":
+		m := session.ExecutionContainer
+		return &m
+	case "local":
+		m := session.ExecutionLocal
+		return &m
+	}
 	if l.Command == "" {
 		return nil
 	}

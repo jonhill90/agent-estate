@@ -2,8 +2,9 @@
 // each state it names to a glyph. It knows nothing about tmux, lanes.sh, or
 // how the payload was fetched -- that is internal/mcp and cmd/agent-tui's
 // job. This package only knows the JSON shape lanes.sh --json produces
-// (window, window_id, name, command, state, idle_seconds, model), because
-// that is what mcp_server.py's "lanes" tool passes straight through.
+// (window, window_id, name, command, state, idle_seconds, model,
+// execution_mode), because that is what mcp_server.py's "lanes" tool passes
+// straight through.
 package lane
 
 import "encoding/json"
@@ -28,6 +29,23 @@ type Lane struct {
 	// not yet shown a match. A caller MUST treat "unknown" the same as
 	// empty, never render it as if it were a real model name.
 	Model string `json:"model"`
+
+	// ExecutionMode is SPEC-shell.md S12's container signal, the 8th column
+	// lanes.sh --json appends (scripts/supervisor/lanes.sh's own execmode_for):
+	// the `@hill90_lane_execution_mode` tmux pane USER OPTION, verbatim,
+	// whenever it is exactly "local" or "container" -- and the literal
+	// string "unknown" for every other case (the option was never set, the
+	// common case for any lane bootstrap-session.sh has not yet touched;
+	// or it holds a value neither side has agreed to). This is a RECORDED
+	// fact, written by whatever created the lane (bootstrap-session.sh
+	// today; a future container driver later -- see docs/SPEC-agentbox-
+	// execution-mode.md), never inferred from Command or any other pane
+	// content -- the same "written down, not pattern-matched" discipline
+	// Model above does not have and this field specifically exists to add,
+	// because a container entrypoint can re-exec into a harness process
+	// whose Command looks identical to a native one. A caller MUST treat
+	// "unknown" the same as empty, exactly as for Model.
+	ExecutionMode string `json:"execution_mode"`
 }
 
 type lanesPayload struct {

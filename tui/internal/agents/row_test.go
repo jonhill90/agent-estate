@@ -221,3 +221,95 @@ func TestDeriveModeUnknownWhenDeadOrStale(t *testing.T) {
 		}
 	}
 }
+
+// --- S12 container signal (estate-loop/b2-s12-container-signal.md) --------
+//
+// Three-way mutation check, deliberately: a test proving only the happy
+// path (a lane recorded "local" reads local) would have passed on the
+// original hardcoded-ExecutionLocal bug too. All three directions below
+// are driven purely through lane.Lane.ExecutionMode -- the new, RECORDED
+// field -- not through Command/State, which the tests above already cover
+// as modeFor's separate fallback path.
+//
+// COULD NOT MEASURE, stated plainly: no real container-wrapped lane exists
+// anywhere in this estate (docs/SPEC-agentbox-execution-mode.md -- no
+// dispatch path into AgentBox exists today), so
+// TestDeriveModeContainerFromRecordedSignal is SYNTHETIC -- it proves the
+// plumbing (lane.Lane.ExecutionMode == "container" -> Row.Mode ==
+// ExecutionContainer) works for a value a real container driver would
+// produce, not that a real container lane produces it. The local and
+// unknown cases below are real: TestDeriveModeLocalFromRecordedSignal is
+// exactly what agent-supervisor's bootstrap-session.sh writes for every
+// lane it creates today, and TestDeriveModeUnknownWhenExecutionModeUnset is
+// exactly what a lane bootstrapped before this change (or the ledger's
+// lane-free backfill path from an old session) looks like right now.
+
+// TestDeriveModeContainerFromRecordedSignal -- SYNTHETIC, see note above.
+// The one assertion in this package that ExecutionContainer is reachable
+// at all: before this change, no code path in this file could ever produce
+// it (modeFor's own prior doc comment said so explicitly, "Deliberately
+// never ExecutionContainer").
+func TestDeriveModeContainerFromRecordedSignal(t *testing.T) {
+	sessions := []lane.Session{
+		{Name: "s", Lanes: []lane.Lane{
+			{Name: "w1", State: "busy", Command: "claude", ExecutionMode: "container"},
+		}},
+	}
+	got := Derive(sessions, nil, nil)
+	if got[0].Mode == nil || *got[0].Mode != session.ExecutionContainer {
+		t.Fatalf("Mode = %v, want a pointer to ExecutionContainer -- lane.Lane.ExecutionMode=\"container\" must be read positively, not ignored", got[0].Mode)
+	}
+}
+
+// TestDeriveModeLocalFromRecordedSignal -- REAL, see note above. Proves the
+// recorded signal is read even when Command/State ALSO agree (the ordinary
+// case for every real lane in this estate today) -- not incidentally
+// correct because the fallback would have said the same thing.
+func TestDeriveModeLocalFromRecordedSignal(t *testing.T) {
+	sessions := []lane.Session{
+		{Name: "s", Lanes: []lane.Lane{
+			{Name: "w1", State: "busy", Command: "claude", ExecutionMode: "local"},
+		}},
+	}
+	got := Derive(sessions, nil, nil)
+	if got[0].Mode == nil || *got[0].Mode != session.ExecutionLocal {
+		t.Fatalf("Mode = %v, want a pointer to ExecutionLocal", got[0].Mode)
+	}
+}
+
+// TestDeriveModeUnknownWhenExecutionModeUnset -- REAL, see note above.
+// lanes.sh's own execmode_for emits the literal string "unknown" for a
+// pane whose option was never set; this pins that modeFor treats it the
+// same way it always treated an absent Model: never a guessed default.
+// Command/State evidence still supports "local" here on purpose -- proving
+// the fallback is reachable, not merely present in the source.
+func TestDeriveModeUnknownWhenExecutionModeUnset(t *testing.T) {
+	sessions := []lane.Session{
+		{Name: "s", Lanes: []lane.Lane{
+			{Name: "w1", State: "busy", Command: "claude", ExecutionMode: "unknown"},
+		}},
+	}
+	got := Derive(sessions, nil, nil)
+	if got[0].Mode == nil || *got[0].Mode != session.ExecutionLocal {
+		t.Fatalf("Mode = %v, want a pointer to ExecutionLocal -- ExecutionMode=\"unknown\" must fall back to Command/State evidence, the same as before this field existed", got[0].Mode)
+	}
+}
+
+// TestDeriveModeContainerNeverProducedByCommandGuessing is the mutation
+// check this file's own brief demands: a lane whose ExecutionMode is
+// genuinely unset must NEVER read container, no matter what its Command
+// says -- even a Command literally naming "docker" or "container" must not
+// be pattern-matched into a positive answer. This is the property that
+// makes the field trustworthy: only a RECORDED "container" can ever produce
+// ExecutionContainer.
+func TestDeriveModeContainerNeverProducedByCommandGuessing(t *testing.T) {
+	sessions := []lane.Session{
+		{Name: "s", Lanes: []lane.Lane{
+			{Name: "w1", State: "busy", Command: "docker exec -it agentbox claude"},
+		}},
+	}
+	got := Derive(sessions, nil, nil)
+	if got[0].Mode == nil || *got[0].Mode != session.ExecutionLocal {
+		t.Fatalf("Mode = %v, want a pointer to ExecutionLocal -- a Command that merely LOOKS like a container entrypoint must never be read as one; only a recorded ExecutionMode may", got[0].Mode)
+	}
+}

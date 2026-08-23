@@ -227,13 +227,36 @@ MODE column both shipped in #79. The column's own initial cut hardcoded
 every row to `ExecutionLocal` regardless of that row's own data — a
 fabricated value, not a read — and was replaced with `internal/agents.modeFor`,
 which reads real per-row evidence (`Command`, `State`) and renders `unknown`
-when that evidence does not support an answer (never a guessed default). No
-signal exists yet, anywhere in agent-supervisor's `lanes.sh --json` payload,
-that can positively identify a container-wrapped process, so `modeFor` can
-only ever emit `local` or `unknown` today — never `container` from
-inference. Container-side design (what AgentBox needs before a driver can
-exist at all) is `docs/SPEC-agentbox-execution-mode.md`, spec only, no code
-— still its own later item, not started here.
+when that evidence does not support an answer (never a guessed default).
+
+**Corrected 2026-08-23 (estate-loop/b2-s12-container-signal.md) — the
+paragraph below is historical, superseded by this note.** The gap the
+2026-08-22 update named — "no signal exists yet, anywhere in
+agent-supervisor's `lanes.sh --json` payload, that can positively identify
+a container-wrapped process" — is closed. `lanes.sh --json` now carries an
+8th column, `execution_mode`, sourced from a `@hill90_lane_execution_mode`
+tmux pane user option: a fact RECORDED by whatever created the lane
+(`bootstrap-session.sh` writes `local` on every lane it creates today; a
+future container driver would write `container`), never inferred from the
+pane's command — the same "written down, not pattern-matched" discipline
+`@hill90_lane_harness` already established for harness identity
+(agent-dotfiles#216). `internal/agents.modeFor` now checks this field
+first; `ExecutionContainer` is reachable through `Row.Mode` for the first
+time. **This does not mean a container-mode lane can be created** — no
+driver exists (`docs/SPEC-agentbox-execution-mode.md` is still spec-only,
+still its own later item, not started here) — only that the signal a
+driver would need to report itself through now exists and is wired end to
+end, verified with a synthetic value (no real container lane exists
+anywhere in this estate to test against; stated as synthetic in both
+repos' own tests, not hidden).
+
+**Status, 2026-08-22 (original text, historical, superseded above).** No
+signal exists yet, anywhere in agent-supervisor's `lanes.sh --json`
+payload, that can positively identify a container-wrapped process, so
+`modeFor` can only ever emit `local` or `unknown` today — never
+`container` from inference. Container-side design (what AgentBox needs
+before a driver can exist at all) is `docs/SPEC-agentbox-execution-
+mode.md`, spec only, no code — still its own later item, not started here.
 
 ---
 

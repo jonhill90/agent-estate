@@ -15,11 +15,21 @@
 // Fixture lanes are chosen to exercise every value internal/agents.modeFor
 // can currently produce (row.go's own doc comment): a live lane with a
 // Command reports ExecutionLocal, and a dead/stale or command-less lane
-// reports nil ("unknown" in the MODE column) -- container mode is
-// deliberately absent from this fixture because modeFor cannot produce it
-// yet (session.ErrContainerNotImplemented's own doc comment; no signal in
-// lanes.sh --json can positively identify one), and a fixture claiming
-// otherwise would be exactly the fabricated-value AGENTS.md forbids.
+// reports nil ("unknown" in the MODE column).
+//
+// 2026-08-23 update (S12 container signal, estate-loop/b2-s12-container-
+// signal.md): a container row is now INCLUDED, deliberately marked
+// SYNTHETIC -- see w6 below. This is not the same fabrication AGENTS.md
+// forbids: lane.Lane.ExecutionMode is a real field this binary's caller is
+// entitled to set to whatever it wants, exactly as every other fixture row
+// here sets Command/State/Model to values nobody captured from a live
+// pane. What would be fabrication is claiming a REAL container-wrapped
+// lane exists anywhere in this estate today -- it does not
+// (docs/SPEC-agentbox-execution-mode.md: no dispatch path into AgentBox
+// exists) -- so w6 is visually flagged as fake-within-the-fake, on top of
+// this whole binary's own "ALL DATA ON THIS SCREEN IS FAKE" banner, rather
+// than presented as an ordinary row a viewer might mistake for something
+// this estate can actually produce yet.
 //
 // agent-tui#130 review (estate:2): the rendered frame's own row values
 // (session names, states, models) are realistic-looking fixture data with
@@ -90,6 +100,15 @@ func fixtureFetch() ([]lane.Session, error) {
 				// modeFor returns nil for the same reason a dead lane
 				// does: no positive evidence to report.
 				{Window: 5, Name: "w5", State: "free", Command: "", Model: "unknown"},
+				// SYNTHETIC, see this file's own comment above: no real
+				// container-wrapped lane exists anywhere in this estate.
+				// This row exists only to prove the MODE column CAN
+				// render "container" when lane.Lane.ExecutionMode says
+				// so -- the lane name itself carries that caveat, so a
+				// viewer of the table (not just this binary's disclaimer
+				// footer) can tell this one apart from the four real
+				// arms above it.
+				{Window: 6, Name: "w6-synthetic-container", State: "busy", Command: "claude", Model: "sonnet", ExecutionMode: "container"},
 			},
 		},
 	}, nil
