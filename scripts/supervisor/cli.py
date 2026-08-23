@@ -142,14 +142,22 @@ def parser():
     # same thing an empty `--harness-session-id` means: not resolved, or a
     # pre-#172 caller.
     record_dispatch_parser.add_argument("--harness-project-dir", default="")
-    record_dispatch_parser.add_argument("--issue", action="append", required=True)
+    record_dispatch_parser.add_argument("--issue", action="append", default=[])
     # agent-supervisor#159: a PR-scoped dispatch (a review, or a fix pass, on
     # PR <N> while the issue it closes stays claimed by the in-flight work
     # that opened it) records itself AGAINST THE PR, not the issue -- see
-    # `Ledger.get_open_task_for_pr`. `--issue` above is still sent and still
-    # required: it is what names the worktree/window and still belongs in
-    # the evidence trail, but when `--pr` is given it is no longer what this
-    # dispatch's `source_tasks` row is keyed by.
+    # `Ledger.get_open_task_for_pr`. `--issue` is what names the worktree/
+    # window and belongs in the evidence trail for `dispatch.sh`'s own
+    # callers, which always pass it alongside `--pr`.
+    #
+    # agent-supervisor#538 (lane-identity-in-ledger): NOT required when `--pr`
+    # is also given. A dispatch recorded retroactively, after the PR already
+    # exists, for work that was never claimed against a GitHub issue at all
+    # (the estate loop's brief-file dispatches -- see register-pr-dispatch-
+    # self.sh) has no issue to name. `--issue` stays required in every OTHER
+    # shape (no `--pr`): a plain issue-scoped dispatch cannot record itself
+    # with no source at all, and `record_dispatch()` below refuses rather
+    # than silently defaulting when both are empty.
     record_dispatch_parser.add_argument("--pr", default=None)
     record_dispatch_parser.add_argument("--github", default="")
     record_dispatch_parser.add_argument("--harness", choices=("codex", "claude", "copilot", "copilot-acp", "pi"))
@@ -920,8 +928,31 @@ def record_dispatch(
         harness = harness or HARNESS_BY_COMMAND.get(command)
         if harness is None:
             raise RuntimeError(f"cannot tell which harness pane command {command!r} is -- pass --harness")
-        primary = issues[0]
-        evidence = [f"claimed by dispatch.sh for lane {lane}", f"issues: {','.join(str(i) for i in issues)}"]
+        # agent-supervisor#538: `--issue` is no longer required at the
+        # argparse layer (see that flag's own comment) -- enforced here
+        # instead, in the one shape it still must hold: no `--pr` and no
+        # `--issue` names nothing this dispatch closes at all, which is not
+        # a case `source_tasks` (CHECK source_kind IN ('issue','pull')) can
+        # represent either way.
+        if not issues and not pr:
+            raise RuntimeError("record-dispatch requires --issue, --pr, or both -- neither was given")
+        primary = issues[0] if issues else None
+        # agent-supervisor#538: "claimed by dispatch.sh" is only true when
+        # dispatch.sh's own claim.sh step actually ran, which is exactly
+        # `--issue` being present -- an issue-less, `--pr`-only call comes
+        # from a retroactive self-registration (register-pr-dispatch-self.sh)
+        # that never touched claim.sh at all. The ledger is the record; this
+        # string is read back as evidence, so it must not claim a caller it
+        # was not.
+        claim_note = (
+            f"claimed by dispatch.sh for lane {lane}"
+            if issues
+            else f"recorded retroactively by lane {lane} (no dispatch.sh claim -- issue-less dispatch)"
+        )
+        evidence = [
+            claim_note,
+            f"issues: {','.join(str(i) for i in issues) if issues else 'none'}",
+        ]
         if pr:
             source_kind = "pull"
             source_url = f"https://github.com/{github}/pull/{pr}" if github else f"pull:{pr}@{Path(pane_path).name}"

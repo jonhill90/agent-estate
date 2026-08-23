@@ -76,6 +76,14 @@ scripts/supervisor/          the system
   register-lane-self.sh      how a hand-attached lane registers ITSELF, from
                              `$TMUX_PANE` and explicit `-t` reads only; no
                              flag names a lane from outside, on purpose (#520)
+  register-pr-dispatch-self.sh   how a lane dispatched OUTSIDE dispatch.sh
+                             (the estate loop's brief-file lanes) records,
+                             retroactively, that its own worktree opened a
+                             PR -- wraps register-lane-self.sh, then
+                             `cli.py record-dispatch --pr` with no `--issue`,
+                             so author_lane_for can resolve a PR that closes
+                             no GitHub issue at all (#538, docs/decisions/
+                             0006-estate-lane-dispatch-identity.md)
   tmux-isolation.sh          `assert_isolated_tmux`, the function Invariant 4
                              requires before any destructive tmux verb,
                              including session creation (#185)
