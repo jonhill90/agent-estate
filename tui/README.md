@@ -56,7 +56,10 @@ These are the real shell's real rendering code (`internal/nav`, the same
 sidebar and pane layout `keelson` ships), driven by `cmd/demo` — a build
 wired to invented data instead of live sources, so every frame carries an
 "ALL DATA ON THIS SCREEN IS FAKE" footer and none of it is mistakable for
-a real estate's state. Regenerate them with:
+a real estate's state. Home alone is the least informative screen in the
+app, so Dashboard, Agents, Lanes, Chat, Tasks and Library are shown
+instead — the destinations with real column data rather than a bare
+placeholder. Regenerate them with:
 
 ```
 vhs testdata/vhs/readme-demo.tape
@@ -64,15 +67,19 @@ vhs testdata/vhs/readme-demo.tape
 
 | Home | Dashboard |
 |---|---|
-| ![Home](docs/screenshots/home.png) | ![Dashboard](docs/screenshots/dashboard.png) |
+| ![Home sidebar and placeholder content pane](docs/screenshots/home.png) | ![Dashboard pane showing invented agent count, PR, and spend figures](docs/screenshots/dashboard.png) |
+
+| Agents | Lanes |
+|---|---|
+| ![Agents view listing invented lanes with model, state, task, execution mode and cost columns](docs/screenshots/agents.png) | ![Lanes view showing invented tmux sessions and windows with lane state glyphs -- the one pane with no web equivalent](docs/screenshots/lanes.png) |
 
 | Chat | Tasks |
 |---|---|
-| ![Chat](docs/screenshots/chat.png) | ![Tasks](docs/screenshots/tasks.png) |
+| ![Chat thread list with invented conversations between agents](docs/screenshots/chat.png) | ![Tasks board showing invented columns and cards](docs/screenshots/tasks.png) |
 
 | Library |
 |---|
-| ![Library](docs/screenshots/library.png) |
+| ![Library view of invented shared collections](docs/screenshots/library.png) |
 
 ## What it is today
 

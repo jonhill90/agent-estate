@@ -15,6 +15,17 @@
 #
 #   vhs testdata/vhs/readme-demo.tape
 #
+# 2026-08-23 (estate-loop/b5-readme-screenshots): added Agents and Lanes
+# captures -- the brief that follows this one asked specifically for those
+# two alongside Dashboard/Chat, on the grounds that Home alone is the
+# least informative screen. Both destinations already had real fixture
+# data in cmd/demo/data.go; no new fixture content was needed, only two
+# more stops on the same walk. Cursor position carries forward between
+# screenshots (Down moves relative to wherever Enter last landed), so the
+# down-counts below are relative, not absolute indices -- see
+# internal/nav/tree.go's Flatten() order (every top-level Item, then every
+# Group) for why Lanes is reached from Library with a single Down: Lanes
+# is nav.Build()'s last top-level Item, immediately after Library.
 Output testdata/vhs/out/readme-demo.gif
 Set FontSize 13
 Set Width 1400
@@ -36,6 +47,10 @@ Sleep 500ms
 Screenshot docs/screenshots/dashboard.png
 
 Down
+Enter
+Sleep 500ms
+Screenshot docs/screenshots/agents.png
+
 Down
 Enter
 Sleep 500ms
@@ -51,5 +66,10 @@ Down
 Enter
 Sleep 500ms
 Screenshot docs/screenshots/library.png
+
+Down
+Enter
+Sleep 500ms
+Screenshot docs/screenshots/lanes.png
 
 Type "q"
