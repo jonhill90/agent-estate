@@ -127,6 +127,10 @@ func defaultClaimScript() string {
 }
 
 func main() {
+	// DELIBERATE MUTATION-CHECK BREAK, agent-supervisor#542 -- proves the
+	// new daemon-ci.yml gate can actually fail before trusting it. Reverted
+	// in the very next commit; never meant to reach main.
+	this_identifier_does_not_exist()
 	if len(os.Args) < 2 {
 		usage()
 		os.Exit(2)
