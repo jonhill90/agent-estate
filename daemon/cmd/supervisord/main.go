@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
@@ -23,6 +24,7 @@ import (
 	"agent-supervisor/daemon/internal/claim"
 	"agent-supervisor/daemon/internal/dispatch"
 	"agent-supervisor/daemon/internal/ledger"
+	"agent-supervisor/daemon/internal/sendmsg"
 	"agent-supervisor/daemon/internal/vault"
 )
 
@@ -61,6 +63,25 @@ func newAdapter(harness, bin, model, cwd string, timeout time.Duration) (agent.A
 type failAdapter struct{ err error }
 
 func (f failAdapter) Run(context.Context, string) (*agent.Result, error) { return nil, f.err }
+
+// setSessionID is the one place a -session-id flag turns into the
+// resume field the underlying adapter already exposes for exactly this
+// (agent.Claude.SessionID / agent.Codex.SessionID -- "" means fresh
+// session, non-"" means --resume). Adapter is deliberately narrow
+// (Run(ctx, prompt) only, adapter.go's own doc comment), so setting a
+// vendor-specific field needs the same type switch dryArgv below already
+// uses rather than widening the interface for one flag.
+func setSessionID(a agent.Adapter, sessionID string) error {
+	switch v := a.(type) {
+	case *agent.Claude:
+		v.SessionID = sessionID
+	case *agent.Codex:
+		v.SessionID = sessionID
+	default:
+		return fmt.Errorf("supervisord send: %T has no session to resume", a)
+	}
+	return nil
+}
 
 // dryArgv asks the adapter itself for the argv it would exec (DryRunArgv,
 // defined alongside each adapter's own args()) rather than a second
@@ -117,6 +138,8 @@ func main() {
 		os.Exit(cmdBatch(os.Args[2:]))
 	case "run":
 		os.Exit(cmdRun(os.Args[2:]))
+	case "send":
+		os.Exit(cmdSend(os.Args[2:]))
 	default:
 		usage()
 		os.Exit(2)
@@ -130,6 +153,8 @@ func usage() {
   supervisord run -task ID -brief FILE [-lane L] [-cwd DIR] [-model M]
                   [-timeout DUR] [-ledger PATH] [-dry-run]
                   [-issue N] [-issue-repo OWNER/NAME] [-claim-script PATH]
+  supervisord send -session-id ID -message TEXT [-cwd DIR] [-harness H]
+                   [-model M] [-timeout DUR]
 
 Delivery is proven by a process exit and a parsed JSON result, never by
 reading a terminal. A turn that times out leaves its task NON-terminal on
@@ -140,6 +165,13 @@ same mechanism the tmux/cli.py side already uses) before writing anything
 to the ledger, and refuses the dispatch outright if the claim fails.
 Omitted or 0: no claim is taken, same as before this flag existed -- not
 every task this daemon dispatches corresponds to a real issue.
+
+send resumes an EXISTING session (--resume under the hood, agent-tui's
+SPEC-shell.md S7 / agent-supervisor#508) rather than starting new ledger
+work: no -task, no -brief, no ledger row, no claim. Its outcome is one of
+three states on stdout/exit code -- delivered (exit 0), failed (exit 1),
+or unknown (exit 3, a timeout left non-terminal on purpose, never stamped
+failed).
 `)
 }
 
@@ -291,4 +323,82 @@ func cmdRun(argv []string) int {
 	}
 	fmt.Printf("OUTCOME: delivered and complete (session=%s turns=%d)\n", out.SessionID, out.Turns)
 	return 0
+}
+
+// sendReport is the one JSON shape `send` ever prints to stdout -- a
+// Python WriteSource (scripts/supervisor/supervisor_view.py's
+// SessionSendSource, agent-supervisor#508) parses this rather than
+// scraping the human-readable OUTCOME lines cmdRun prints, the same
+// "structured I/O, not a screen" posture claude.go's own doc comment
+// states as this whole daemon's reason to exist.
+type sendReport struct {
+	Status    string  `json:"status"` // "delivered" | "failed" | "unknown", sendmsg.Status's own vocabulary
+	SessionID string  `json:"session_id,omitempty"`
+	Turns     int     `json:"turns,omitempty"`
+	CostUSD   float64 `json:"cost_usd,omitempty"`
+	Error     string  `json:"error,omitempty"`
+}
+
+func cmdSend(argv []string) int {
+	fs := flag.NewFlagSet("send", flag.ExitOnError)
+	var (
+		sessionID = fs.String("session-id", "", "harness session id to resume (required)")
+		message   = fs.String("message", "", "message to send (required)")
+		cwd       = fs.String("cwd", ".", "working directory for the agent")
+		harness   = fs.String("harness", "claude", "which vendor CLI to drive: claude | codex")
+		model     = fs.String("model", "", "model (default: \"sonnet\" for -harness claude; each CLI's own default for any other harness)")
+		bin       = fs.String("bin", "", "agent binary (default: \"claude\" or \"codex\", per -harness)")
+		timeout   = fs.Duration("timeout", agent.DefaultTimeout, "per-turn timeout")
+	)
+	fs.Parse(argv)
+	if *model == "" && (*harness == "" || *harness == "claude") {
+		*model = "sonnet"
+	}
+
+	if *sessionID == "" || *message == "" {
+		fmt.Fprintln(os.Stderr, "supervisord send: -session-id and -message are required")
+		return 2
+	}
+
+	abscwd, err := filepath.Abs(*cwd)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "supervisord: cwd: %v\n", err)
+		return 1
+	}
+
+	a, err := newAdapter(*harness, *bin, *model, abscwd, *timeout)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "supervisord: %v\n", err)
+		return 2
+	}
+	if err := setSessionID(a, *sessionID); err != nil {
+		fmt.Fprintf(os.Stderr, "supervisord: %v\n", err)
+		return 2
+	}
+
+	// Ctrl-C leaves the outcome unknown, same posture as `run` -- an
+	// interrupted send must not look like a failed one.
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	result := sendmsg.Send(ctx, a, *message)
+
+	report := sendReport{Status: string(result.Status), SessionID: result.SessionID, Turns: result.Turns, CostUSD: result.CostUSD}
+	if result.Err != nil {
+		report.Error = result.Err.Error()
+	}
+	enc, _ := json.Marshal(report)
+	fmt.Println(string(enc))
+
+	switch result.Status {
+	case sendmsg.StatusDelivered:
+		return 0
+	case sendmsg.StatusUnknown:
+		// A distinct exit code from "failed": a caller that only checks
+		// exit != 0 still must not treat this the same as a confirmed
+		// failure without reading the JSON body's own status field.
+		return 3
+	default: // StatusFailed
+		return 1
+	}
 }

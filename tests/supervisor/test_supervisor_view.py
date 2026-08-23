@@ -23,6 +23,7 @@ from supervisor_view import (  # noqa: E402
     SessionDetachSource,
     SessionRemoveCheckSource,
     SessionRemoveSource,
+    SessionSendSource,
     SessionsSource,
     SupervisorUnavailable,
     SupervisorView,
@@ -329,7 +330,9 @@ class SupervisorViewTest(unittest.TestCase):
 
     def test_describes_every_write_source(self):
         names = [source["name"] for source in SupervisorView().describe() if source["mutates"]]
-        self.assertEqual(["session_attach", "session_detach", "session_add", "session_remove"], names)
+        self.assertEqual(
+            ["session_attach", "session_detach", "session_add", "session_remove", "session_send"], names
+        )
 
     def test_every_read_source_is_read_only(self):
         self.assertTrue(all(not s["mutates"] for s in SupervisorView().describe() if s["name"] in READ_SOURCES_NAMES))
@@ -337,12 +340,12 @@ class SupervisorViewTest(unittest.TestCase):
     def test_every_write_source_mutates(self):
         self.assertTrue(all(s["mutates"] for s in SupervisorView().describe() if s["name"] in WRITE_SOURCES_NAMES))
 
-    def test_write_sources_are_exactly_agent_tui_14s_four(self):
-        """agent-tui#14. Not a general write capability -- `dispatch`/`merge`
-        stay excluded (see `WRITE_SOURCES`'s own docstring for why); these
-        four are a narrower, differently-shaped risk."""
+    def test_write_sources_are_exactly_agent_tui_14s_four_plus_508s_send(self):
+        """agent-tui#14's original four, plus session_send (agent-supervisor#508)
+        -- still not a general write capability; `dispatch`/`merge` stay
+        excluded (see `WRITE_SOURCES`'s own docstring for why)."""
         self.assertEqual(
-            {"session_attach", "session_detach", "session_add", "session_remove"},
+            {"session_attach", "session_detach", "session_add", "session_remove", "session_send"},
             set(supervisor_view.WRITE_SOURCES),
         )
 
@@ -405,7 +408,7 @@ class SupervisorViewTest(unittest.TestCase):
 
 
 READ_SOURCES_NAMES = {"lanes", "sessions", "digest", "ledger", "events", "session_remove_check"}
-WRITE_SOURCES_NAMES = {"session_attach", "session_detach", "session_add", "session_remove"}
+WRITE_SOURCES_NAMES = {"session_attach", "session_detach", "session_add", "session_remove", "session_send"}
 
 
 class StubReadSource(ReadSource):
@@ -635,6 +638,67 @@ class SessionAddSourceTest(unittest.TestCase):
         self.assertIn("--agent", scripted.bootstrap_command)
         self.assertIn("--cwd", scripted.bootstrap_command)
         self.assertNotIn("--add-lanes", scripted.bootstrap_command)
+
+
+class SessionSendSourceTest(unittest.TestCase):
+    """agent-supervisor#508. Mirrors `daemon/internal/sendmsg`'s own three
+    states one layer up: `supervisord send`'s stdout JSON, not tmux, is what
+    this class trusts -- and NEVER by exit code alone (see the class's own
+    docstring for why `_decode()` is not used here)."""
+
+    def test_delivered_reports_success(self):
+        runner = runner_returning(
+            completed(0, stdout=json.dumps({"status": "delivered", "session_id": "s1", "turns": 2, "cost_usd": 0.03}))
+        )
+        source = SessionSendSource(binary="/opt/supervisord", runner=runner)
+        result = source.write(session_id="s1", message="keep going")
+        self.assertEqual({"session_id": "s1", "delivered": True, "turns": 2, "cost_usd": 0.03}, result)
+        self.assertEqual(["/opt/supervisord", "send", "-session-id", "s1", "-message", "keep going"], runner.command)
+
+    def test_failed_is_never_reported_as_delivered(self):
+        """The direction the issue calls out as mattering more: a confirmed
+        failure must raise, not return a delivered=True-shaped dict. This is
+        the mutation-check's RED case -- flip the `status == "delivered"`
+        branch to `if True` and this test is what catches it."""
+        runner = runner_returning(
+            completed(1, stdout=json.dumps({"status": "failed", "error": "agent: turn reported is_error"}))
+        )
+        source = SessionSendSource(binary="/opt/supervisord", runner=runner)
+        with self.assertRaises(SupervisorUnavailable) as caught:
+            source.write(session_id="s1", message="keep going")
+        self.assertIn("is_error", str(caught.exception))
+
+    def test_unknown_timeout_is_distinguished_from_failed(self):
+        """agent-supervisor#488: a timeout must not be stamped as a definite
+        failure. Both raise (write() has no third return shape), but the
+        raised text must say UNKNOWN, not reuse the failed-send wording --
+        the one thing a caller reading the exception can still tell apart."""
+        runner = runner_returning(
+            completed(3, stdout=json.dumps({"status": "unknown", "error": "did not complete before the deadline"}))
+        )
+        source = SessionSendSource(binary="/opt/supervisord", runner=runner)
+        with self.assertRaises(SupervisorUnavailable) as caught:
+            source.write(session_id="s1", message="keep going")
+        message = str(caught.exception)
+        self.assertIn("UNKNOWN", message)
+        self.assertNotIn("send failed", message)
+
+    def test_no_output_at_all_is_an_error_not_a_silent_success(self):
+        runner = runner_returning(completed(1, stderr="exec: \"supervisord\": file not found"))
+        source = SessionSendSource(binary="/opt/supervisord", runner=runner)
+        with self.assertRaises(SupervisorUnavailable) as caught:
+            source.write(session_id="s1", message="keep going")
+        self.assertIn("file not found", str(caught.exception))
+
+    def test_optional_arguments_are_passed_through(self):
+        runner = runner_returning(completed(0, stdout=json.dumps({"status": "delivered", "session_id": "s1"})))
+        source = SessionSendSource(binary="/opt/supervisord", runner=runner)
+        source.write(session_id="s1", message="hi", harness="codex", cwd="/tmp/w", model="o1", timeout=30)
+        self.assertIn("-harness", runner.command)
+        self.assertIn("-cwd", runner.command)
+        self.assertIn("-model", runner.command)
+        self.assertIn("-timeout", runner.command)
+        self.assertIn("30s", runner.command)
 
 
 SAFE_GUARD = {

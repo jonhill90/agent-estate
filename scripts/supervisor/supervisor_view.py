@@ -63,6 +63,37 @@ HERE = Path(__file__).resolve().parent
 
 DEFAULT_TIMEOUT_SECONDS = 60
 
+# session_send drives a live agent turn through `supervisord send`, not a
+# shell script -- DEFAULT_TIMEOUT_SECONDS above (60s) is sized for lanes.sh/
+# digest.sh/bootstrap-session.sh, not for a Claude Code turn that can run
+# tools and edit code. Sized past agent.DefaultTimeout (15 minutes, Go side)
+# with headroom, so the SUBPROCESS RUNNER never kills `supervisord send`
+# before it can observe its own deadline and report -- a Python-side kill
+# here would produce no JSON at all, the one outcome this source exists to
+# avoid (see SessionSendSource.write's own comment on this).
+SEND_DEFAULT_TIMEOUT_SECONDS = 960
+
+
+def _default_supervisord_binary():
+    """Where `supervisord send` (agent-supervisor#508) actually lives.
+
+    No prior WriteSource has ever shelled out to the Go binary -- the other
+    four all call a shell script or `cli.py`. $AGENT_SUPERVISOR_SUPERVISORD_BIN
+    is the explicit override; $AGENT_SUPERVISOR_REPO (the same estate-wide
+    "where is this checkout" variable main.go's own defaultClaimScript and
+    agent-tui's CLAUDE.md already use) resolves a locally built
+    `daemon/supervisord`; bare `supervisord` falls through to PATH as a last
+    resort. Never silently substitutes a script or a tmux command -- if none
+    of these resolves to a real binary, SessionSendSource.write's own runner
+    reports that as FileNotFoundError -> SupervisorUnavailable, the same as
+    every other source's missing-script case.
+    """
+    if env := os.environ.get("AGENT_SUPERVISOR_SUPERVISORD_BIN"):
+        return env
+    if repo := os.environ.get("AGENT_SUPERVISOR_REPO"):
+        return str(Path(repo) / "daemon" / "supervisord")
+    return "supervisord"
+
 # Mirrors `cli.py`'s DEFAULT_STATE so a view and the CLI it shells out to
 # always read the same ledger without the caller spelling either out.
 DEFAULT_STATE_DIR = Path(
@@ -793,7 +824,125 @@ class SessionRemoveSource(WriteSource):
         return {"session": session, "removed": True, "guard": guard}
 
 
-# Four writes, and ONLY these four -- not the general write capability #198's
+class SessionSendSource(WriteSource):
+    """Send one ad-hoc message to an EXISTING agent session -- agent-supervisor#508.
+
+    This is the capability agent-tui's SPEC-shell.md S7 is blocked on: none
+    of the other nine sources (six reads, three writes before this one) nor
+    `supervisord run` (shaped for fresh ledger-task dispatch, `-task ID
+    -brief FILE`, not "continue thread T") can resume an existing session.
+    `supervisord send -session-id ID -message TEXT` (daemon/cmd/supervisord,
+    built for this issue) is the missing half -- this class is its Python
+    write-source wrapper, the SAME shape `SessionAddSource` above already
+    takes: shell out via `self.runner`, decode the result, never trust an
+    exit code alone.
+
+    **Why NOT `_decode()`:** every other write in this file treats a
+    non-zero exit as an opaque failure (`_decode` raises before even
+    looking at stdout). `supervisord send` deliberately uses THREE exit
+    codes (0 delivered, 1 failed, 3 unknown/timeout) and prints a
+    `{"status": ...}` JSON object on stdout for all three, because the
+    distinction between "failed" and "unknown, not confirmed" is the whole
+    point of daemon/internal/sendmsg (agent-supervisor#488: a timeout must
+    never be stamped as a definite failure). Using `_decode()` here would
+    throw that distinction away before this method ever saw it. So this
+    parses stdout directly, regardless of exit code, and only falls back to
+    a bare `_tail(stderr)` message if `supervisord send` produced no JSON
+    at all (a crash before it could report on itself).
+
+    `write()` still has the same two-outcome contract every WriteSource
+    has -- a dict on success or a raised SupervisorUnavailable, nothing
+    else, per `SupervisorView`'s own registration assert -- so "unknown"
+    is a raise too, exactly as `supervisord run`'s own CLI output collapses
+    a timeout and a real failure into one "OUTCOME: NOT DELIVERED" at its
+    own layer. What is preserved is the MESSAGE: an unknown outcome says so
+    explicitly ("outcome UNKNOWN, not failed") rather than reusing the
+    failed-send wording, so a caller reading the raised text (the only
+    thing an MCP client sees) can still tell the two apart and react
+    differently -- retry a real failure, but not stack a second turn on
+    top of one that may still be running.
+    """
+
+    name = "session_send"
+    summary = (
+        "Send an ad-hoc message to an EXISTING agent session (--resume under "
+        "the hood, via supervisord send). Never tmux send-keys. Reports "
+        "delivered, failed, or unknown -- a send that cannot be confirmed is "
+        "never reported as delivered."
+    )
+    parameters = (
+        {
+            "name": "session_id",
+            "type": "string",
+            "required": True,
+            "help": "the harness's own session id to resume (e.g. Claude Code's session_id) -- not a tmux session name.",
+        },
+        {"name": "message", "type": "string", "required": True, "help": "the message to send to that session."},
+        {"name": "harness", "type": "string", "required": False, "help": "which vendor CLI drives the session: claude | codex. Defaults to claude."},
+        {"name": "cwd", "type": "string", "required": False, "help": "working directory for the agent turn."},
+        {"name": "model", "type": "string", "required": False, "help": "model override."},
+        {"name": "timeout", "type": "integer", "required": False, "help": "per-turn timeout in seconds. Defaults to the daemon's own 15-minute default."},
+    )
+
+    def __init__(self, *, binary=None, runner=_subprocess_runner, timeout=SEND_DEFAULT_TIMEOUT_SECONDS):
+        self.binary = binary or _default_supervisord_binary()
+        self.runner = runner
+        self.timeout = timeout
+
+    def write(self, *, session_id, message, harness=None, cwd=None, model=None, timeout=None):
+        command = [self.binary, "send", "-session-id", session_id, "-message", message]
+        if harness:
+            command += ["-harness", harness]
+        if cwd:
+            command += ["-cwd", cwd]
+        if model:
+            command += ["-model", model]
+        # The Python-side runner timeout must outlive the Go side's own
+        # deadline -- see SEND_DEFAULT_TIMEOUT_SECONDS's own comment. If the
+        # caller asks for a longer -timeout than this instance's default,
+        # widen the runner's own ceiling to match, with the same headroom.
+        runner_timeout = self.timeout
+        if timeout is not None:
+            command += ["-timeout", f"{int(timeout)}s"]
+            runner_timeout = max(self.timeout, int(timeout) + 60)
+
+        completed = self.runner(command, timeout=runner_timeout)
+        stdout = (completed.stdout or "").strip()
+        if not stdout:
+            raise SupervisorUnavailable(
+                f"supervisord send exited {completed.returncode} with no output: "
+                f"{_tail(completed.stderr) or 'no stderr'}"
+            )
+        try:
+            # supervisord send prints exactly one JSON object; take the last
+            # line defensively in case anything upstream of it ever writes
+            # to stdout first.
+            report = json.loads(stdout.splitlines()[-1])
+        except json.JSONDecodeError as error:
+            raise SupervisorUnavailable(
+                f"supervisord send did not return JSON ({error}): {_tail(stdout, 200)}"
+            ) from error
+
+        status = report.get("status")
+        if status == "delivered":
+            return {
+                "session_id": report.get("session_id") or session_id,
+                "delivered": True,
+                "turns": report.get("turns", 0),
+                "cost_usd": report.get("cost_usd", 0.0),
+            }
+        if status == "unknown":
+            raise SupervisorUnavailable(
+                "send outcome UNKNOWN, not failed -- a turn did not confirm before its "
+                f"deadline (agent-supervisor#488): {report.get('error', 'no detail')}"
+            )
+        # status == "failed" (sendmsg.StatusFailed), or an unrecognised value
+        # from a future daemon build this Python has not caught up with --
+        # either way, never laundered into delivered=True.
+        raise SupervisorUnavailable(f"send failed: {report.get('error') or _tail(completed.stderr) or 'no detail'}")
+
+
+# Five writes, and ONLY these five -- not the general write capability #198's
 # own read-surface PR (and the docstring this replaces) refused to build.
 # That refusal stands: `dispatch`/`merge` are still excluded, and still for
 # the three reasons originally written here --
@@ -828,9 +977,45 @@ class SessionRemoveSource(WriteSource):
 #     `Ledger.record_session_event` -- so "log every removal with what was
 #     running at the time" (the issue's own words) is satisfied, not merely
 #     implied by the ledger's general event log.
+#
+# `session_send` (agent-supervisor#508) is a DIFFERENT risk shape from the
+# four above, and is called out here rather than folded into the bullets
+# above as if it were another `session_attach`:
+#
+#   * It is the first write in this file that runs a live agent turn, not a
+#     tmux control-plane operation -- real cost and real side effects (the
+#     turn can edit code, same as any other Claude Code turn), not a
+#     metadata change to who is attached to what.
+#   * It is still bounded the same way the four above are: one exact,
+#     caller-supplied `session_id`, resumed via `--resume` (never an
+#     implicit "current" session the way the pre-#189 attach/detach bug
+#     picked an arbitrary client) -- there is no session-name ambiguity to
+#     resolve, because the caller must already know which session it means.
+#   * No lane-claim race either: sending to an existing session claims
+#     nothing new in the ledger, the same "nothing here for a second
+#     dispatcher to race against" property `session_attach`/`session_detach`
+#     already have.
+#   * Delivery is OBSERVED, not inferred, same as `supervisord run` --
+#     `daemon/internal/sendmsg` never reports delivered unless the
+#     underlying process actually returned a result, and a timeout is
+#     surfaced as unknown, never laundered into delivered=True. That is the
+#     one property that makes this safe to add: a caller cannot get a false
+#     "yes, that was sent."
+#
+# This is still additive to the ten-source MCP surface, not a side door: a
+# properly typed, properly registered WriteSource, the same
+# `WRITE_SOURCES`/`SupervisorView.__init__` assert every other write already
+# goes through -- see `SessionSendSource`'s own docstring for why it does
+# not (and structurally cannot, per that assert) bypass this mechanism.
 WRITE_SOURCES = {
     source.name: source
-    for source in (SessionAttachSource, SessionDetachSource, SessionAddSource, SessionRemoveSource)
+    for source in (
+        SessionAttachSource,
+        SessionDetachSource,
+        SessionAddSource,
+        SessionRemoveSource,
+        SessionSendSource,
+    )
 }
 
 
