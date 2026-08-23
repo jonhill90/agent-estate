@@ -571,6 +571,63 @@ def _parse_review_lane(body, ledger=None):
     return None
 
 
+# agent-supervisor#513: the PR-body complement to `_parse_review_lane` above.
+# `git grep -rn 'Author-Lane' -- scripts/` found nothing reads this trailer
+# at all (measured against agent-dotfiles#308, which carries one) --
+# authorship resolved only from a ledger dispatch row, so any PR opened
+# outside `dispatch.sh` has no attributable author regardless of what its own
+# body says. Parsed the same permissive way as `_parse_review_lane` (lane-
+# shaped token first, ledger-recognised free-text token as fallback) for the
+# same reason: a claude-print/pi-rpc lane id has no `<session>:<index>`
+# shape for `_LANE_SHAPE_RE` to find (#292's own reasoning applies equally
+# to a self-attesting AUTHOR as to a self-attesting reviewer).
+#
+# THE ASYMMETRY THIS EXISTS TO HOLD, stated once here because every caller
+# of this function must honour it: the trailer is self-attested, so it can
+# only ever be used to REFUSE a merge (a lane admitting it authored a PR is
+# trustworthy, because lying that way costs the liar), never to PERMIT one
+# (a lane not claiming authorship, or claiming a DIFFERENT lane than the
+# reviewer, proves nothing -- it may simply have omitted the trailer, and
+# treating that absence as evidence of independence is exactly the
+# blindness-reads-as-clean failure this estate keeps having). Concretely:
+# `author_lane_for` (verdict-independence.sh) surfaces this parse as its own
+# `claimed_lane` field, kept OUT of the `contributors` array the permit path
+# (`independence_verdict`) reads -- so a self-attested claim can never widen
+# who counts as "the known author" for the purpose of granting independence,
+# only narrow who can be caught self-reviewing when the ledger has nothing.
+_AUTHOR_LANE_LINE_RE = re.compile(r"(?im)^\s*Author-Lane:(.*)$")
+
+
+def _author_lane_line(body):
+    """The raw `Author-Lane:` line, if one exists at all -- independent of
+    whether it parses. Mirrors `_review_lane_line`; used only to name the
+    offending text in a refusal, never trusted as a lane id itself."""
+    match = _AUTHOR_LANE_LINE_RE.search(body or "")
+    return match.group(0).strip() if match else None
+
+
+def _parse_author_lane(body, ledger=None):
+    """Self-attested `Author-Lane:` trailer in a PR body, or `None` when
+    absent or unparseable. See the module comment above `_AUTHOR_LANE_LINE_RE`
+    for the asymmetry a caller must hold: this is a REFUSE-only signal."""
+    match = _AUTHOR_LANE_LINE_RE.search(body or "")
+    if not match:
+        return None
+    token = _LANE_SHAPE_RE.search(match.group(1))
+    if token:
+        return token.group(0)
+    if ledger is not None:
+        rest = match.group(1).strip()
+        first_token = rest.split(None, 1)[0] if rest else ""
+        if first_token:
+            try:
+                if ledger.get_lane(first_token):
+                    return first_token
+            except Exception:
+                pass
+    return None
+
+
 # agent-supervisor#213: the SHA a `**Verdict:` comment applies to, beside
 # `Review-Lane:`. Every OTHER verdict source in this module already refuses
 # to answer for a head it never saw (#218's review-object check, extended

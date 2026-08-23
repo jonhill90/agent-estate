@@ -744,6 +744,167 @@ if [ -f "$MARKER" ]; then ok "#486: ...and actually calls gh pr merge"; else bad
 echo "$out" | grep -q "independence confirmed" && ok "#486: success still names independence" || bad "#486: success names independence" "$out"
 
 # ============================================================================
+# agent-supervisor#513: the `Author-Lane:` trailer -- agent-dotfiles#308
+# carried `Author-Lane: estate:4` in its PR body, and its actual reviewer
+# (`estate:5`) genuinely was independent, but `cli.py pr-task` and `git grep
+# -rn 'Author-Lane' -- scripts/` both proved nothing in this repo ever read
+# that trailer: authorship resolved from a ledger dispatch row ONLY, so any
+# PR opened outside `dispatch.sh` had no attributable author regardless of
+# what its own body said. THE ASYMMETRY this file's own comments hold: the
+# trailer is self-attested, so it can only ever REFUSE a merge (an
+# admission costs the liar), never PERMIT one (absence, or a differing
+# claim, proves nothing).
+# ============================================================================
+
+# --- THE #513 REPRODUCTION: ledger genuinely does not know the author (no
+# seed_author call at all, reproducing agent-dotfiles#308's own shape), but
+# the PR body admits it via `Author-Lane:`, and the reviewer IS that same
+# lane. `contributor_lane_relation()` is never even called here (AUTHOR.known
+# is false) -- this must be caught by `claimed_author_conflict()` instead,
+# which runs unconditionally. ------------------------------------------
+rm -f "$MARKER"
+cat > "$FIX/head_90.json" <<'S'
+{"headRefOid": "sha-90"}
+S
+green_checkruns sha-90
+cat > "$FIX/author_90.json" <<'S'
+{"headRefName": "some-hand-pushed-branch", "closingIssuesReferences": [], "commits": [], "body": "Opened by hand.\n\nAuthor-Lane: estate:4\n"}
+S
+cat > "$FIX/reviews_90.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: estate:4\nReviewed-SHA: sha-90", "createdAt": "2026-08-23T00:00:00Z"}]}
+S
+register_tmux_lane estate:4 %900
+out=$("$MERGE_PR" "$REPO" 90 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#513: ledger-blind self-attested Author-Lane == Review-Lane is refused"; else bad "#513: ledger-blind self-attestation refused" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#513: ...and never merges"; else bad "#513: ledger-blind self-attestation never merges" "$out"; fi
+if echo "$out" | grep -q "Author-Lane: estate:4" && echo "$out" | grep -q "reviewed by lane estate:4"; then
+  ok "#513: refusal names both the claimed author lane and the reviewer lane"
+else
+  bad "#513: refusal names both lanes" "$out"
+fi
+
+# --- MUST PASS: different lanes, `Reviewed-SHA` at head, CI green -- a
+# ledger-KNOWN author, a trailer present and naming that SAME (different-
+# from-reviewer) lane, still merges. Proves the trailer's presence does not
+# perturb the existing permit path -- a gate that refuses everything is not
+# a fix. -------------------------------------------------------------------
+rm -f "$MARKER"
+cat > "$FIX/head_91.json" <<'S'
+{"headRefOid": "sha-91"}
+S
+green_checkruns sha-91
+cat > "$FIX/author_91.json" <<'S'
+{"headRefName": "fix/91-thing", "closingIssuesReferences": [{"number": 91}], "commits": [], "body": "Fixes #91.\n\nAuthor-Lane: t:3\n"}
+S
+cat > "$FIX/reviews_91.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:4\nReviewed-SHA: sha-91", "createdAt": "2026-08-23T00:00:00Z"}]}
+S
+seed_author t:3 as91-author 91
+register_tmux_lane t:4 %910
+out=$("$MERGE_PR" "$REPO" 91 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "#513: different lanes + Author-Lane trailer present and different from reviewer still merges"; else bad "#513: different-lane Author-Lane trailer still merges" "got rc=$rc: $out"; fi
+if [ -f "$MARKER" ]; then ok "#513: ...and actually calls gh pr merge"; else bad "#513: different-lane Author-Lane trailer -- gh pr merge called" "$out"; fi
+
+# --- MUST PASS (no trailer at all): already proven by PR 42's own case
+# above, re-verified unaffected by this change (no `body` field in that
+# fixture at all, so `.body // ""` reads empty and `claimed_lane` is null) --
+# not re-run here to avoid asserting the same fixture twice.
+
+# --- the newline-swallow regression, at the integration level: a genuine
+# self-review (ledger KNOWS t:9 authored it, and t:9 is also the reviewer --
+# ordinary #179-shaped detection, untouched by this fix) whose PR body ALSO
+# happens to contain a blank `Author-Lane:` line immediately followed by a
+# `Review-Lane:` line -- exactly the shape that swallowed the next line
+# under the historical `^\s*Author-Lane:\s*(.*)$` pattern (skills#260,
+# agent-tui#113, agent-dotfiles#305's own defect, for its Review-Lane
+# sibling). Confirms that noise does not perturb the correct refusal --
+# `test_verdict.py`'s own `Issue513AuthorLaneTrailerTests` proves at the
+# regex/parse level that the FIXED pattern never manufactures a false claim
+# from it in the first place. ---------------------------------------------
+rm -f "$MARKER"
+cat > "$FIX/head_92.json" <<'S'
+{"headRefOid": "sha-92"}
+S
+green_checkruns sha-92
+cat > "$FIX/author_92.json" <<'S'
+{"headRefName": "fix/92-thing", "closingIssuesReferences": [{"number": 92}], "commits": [], "body": "Notes.\n\nAuthor-Lane:\nReview-Lane: t:9\n"}
+S
+cat > "$FIX/reviews_92.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:9\nReviewed-SHA: sha-92", "createdAt": "2026-08-23T00:00:00Z"}]}
+S
+seed_author t:9 as92-author 92
+out=$("$MERGE_PR" "$REPO" 92 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#513: swallow-shaped body text does not block the ordinary self-review refusal"; else bad "#513: swallow-shaped body -- self-review still refused" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#513: ...and never merges"; else bad "#513: swallow-shaped body -- never merges" "$out"; fi
+echo "$out" | grep -q "reviewed its own PR" && ok "#513: refusal is the ordinary ledger-based self-review reason, not a hallucinated trailer claim" || bad "#513: refusal names the ordinary self-review reason" "$out"
+
+# --- the case that actually PROVES the defense-in-depth value, not just a
+# second unreachable-in-practice refusal: the ledger's OWN contributor
+# resolution is incomplete -- it knows t:5 wrote SOMETHING toward this PR,
+# but has no record of t:6, the lane that is ACTUALLY reviewing its own
+# work here. Without claimed_author_conflict(), `contributor_lane_relation`
+# would compare reviewer t:6 against the ledger's only known contributor
+# (t:5), find them different, and PERMIT -- exactly "every [ledger] gate
+# passes" this issue's brief describes. The PR body's own `Author-Lane: t:6`
+# admission is the only thing that catches it. --------------------------
+rm -f "$MARKER"
+cat > "$FIX/head_93.json" <<'S'
+{"headRefOid": "sha-93"}
+S
+green_checkruns sha-93
+cat > "$FIX/author_93.json" <<'S'
+{"headRefName": "fix/93-thing", "closingIssuesReferences": [{"number": 93}], "commits": [], "body": "Fixes #93.\n\nAuthor-Lane: t:6\n"}
+S
+cat > "$FIX/reviews_93.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:6\nReviewed-SHA: sha-93", "createdAt": "2026-08-23T00:00:00Z"}]}
+S
+seed_author t:5 as93-author 93
+register_tmux_lane t:6 %930
+out=$("$MERGE_PR" "$REPO" 93 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#513: ledger's incomplete contributor set is overridden by the PR's own self-attestation"; else bad "#513: incomplete-ledger self-attestation refused" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#513: ...and never merges"; else bad "#513: incomplete-ledger self-attestation never merges" "$out"; fi
+if echo "$out" | grep -q "Author-Lane: t:6" && echo "$out" | grep -q "reviewed by lane t:6"; then
+  ok "#513: refusal names both the claimed author lane and the reviewer lane (incomplete-ledger case)"
+else
+  bad "#513: refusal names both lanes (incomplete-ledger case)" "$out"
+fi
+
+# ============================================================================
+# MUTATION CHECK: disabling claimed_author_conflict() lets PR 93 above --
+# where the ledger's own contributor set is incomplete and would otherwise
+# PERMIT -- through. Proves that test is real evidence, not a check that
+# cannot fail: PR 90 above refuses either way (ledger-blind authorship is
+# already fail-closed on its own), so PR 93 is the case that actually
+# demonstrates this check's value, not just a second unreachable-in-practice
+# refusal.
+# ============================================================================
+MUTDIR3="$D/mutated-claim"
+cp -R "$HERE/../../scripts/supervisor" "$MUTDIR3"
+python3 - "$MUTDIR3/merge-pr.sh" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+marker = 'CLAIM_CONFLICT=$(claimed_author_conflict "$AUTHOR" "$REVIEWER_LANE_ID")'
+assert text.count(marker) == 1, "claimed_author_conflict call not found or not unique -- script shape changed"
+text = text.replace(marker, 'CLAIM_CONFLICT=\'{"conflict":false}\'  # MUTATED: agent-supervisor#513 check disabled', 1)
+open(path, "w").write(text)
+PYEOF
+MUTATED3="$MUTDIR3/merge-pr.sh"
+chmod +x "$MUTATED3"
+rm -f "$MARKER"
+out=$("$MUTATED3" "$REPO" 93 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$MARKER" ]; then
+  ok "mutation confirmed: disabling claimed_author_conflict lets the incomplete-ledger self-review (PR 93) through (case above would be red)"
+else
+  bad "mutation confirmed: disabling claimed_author_conflict lets the incomplete-ledger self-review through" "got rc=$rc, merged=$([ -f "$MARKER" ] && echo yes || echo no): $out"
+fi
+
+# ============================================================================
 # agent-supervisor#251: `author_lane_for`'s `gh pr view` call (the
 # closingIssuesReferences/commits lookup) used to run with NO bound at all --
 # the one `gh` call in verdict-independence.sh that `digest.sh`'s own

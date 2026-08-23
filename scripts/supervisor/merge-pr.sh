@@ -34,6 +34,22 @@
 # verdict-independence.sh for the actual computation (shared with digest.sh,
 # which already had it for reporting).
 #
+# WHY (self-attested Author-Lane, on top of the above): agent-supervisor#513.
+# The ledger-driven independence gate above only runs when the ledger can
+# resolve authorship at all -- a PR opened outside `dispatch.sh` (measured
+# on agent-dotfiles#308, which carried a `Author-Lane:` trailer nothing in
+# this repo ever read) falls through to a generic "unresolved" refusal that
+# cannot tell a genuine self-review apart from a genuinely-independent one
+# it simply has no record of. `claimed_author_conflict()` reads that
+# trailer as a SECOND, independent signal, checked unconditionally -- but
+# only ever to REFUSE (an admission costs the liar), never to PERMIT
+# (absence, or a differing claim, proves nothing). See verdict-
+# independence.sh's own comments on `author_lane_for`'s `claimed_lane`
+# field and `claimed_author_conflict` for the asymmetry this holds, and
+# what remains structurally unprovable even with it: under this estate's
+# one shared GitHub login, no check here can verify that the agent POSTING
+# a trailer is really the occupant of the pane it names.
+#
 # WHAT IT NEVER DOES: fall back to merging when either gate cannot be
 # evaluated. `ci_gate.py` fails closed (network error, malformed gh
 # response, PR not found -- all refuse); the authorship/independence gate
@@ -119,6 +135,22 @@ if [ -n "$REVIEWER_LANE_ID" ] && jq -e '.known == true and (.external != true) a
   LANE_REL=$(contributor_lane_relation "$AUTHOR" "$REVIEWER_LANE_ID")
 fi
 IND=$(independence_verdict "$V" "$AUTHOR" "$LANE_REL")
+
+# agent-supervisor#513: the PR body's own self-attested `Author-Lane:`
+# trailer, checked UNCONDITIONALLY -- not gated on `$AUTHOR`'s `known`, the
+# way the block above is. That gating is exactly the hole: when the ledger
+# cannot resolve authorship at all (agent-dotfiles#308's own shape),
+# contributor_lane_relation() above is never even called, so nothing checks
+# whether the PR's own body admits the reviewer wrote it. This runs in
+# EXACTLY that gap, and only ever refuses -- see verdict-independence.sh's
+# claimed_author_conflict() and author_lane_for() comments for the
+# asymmetry (a claim can convict its own author; absence or a differing
+# claim proves nothing and is never treated as permission).
+CLAIM_CONFLICT=$(claimed_author_conflict "$AUTHOR" "$REVIEWER_LANE_ID")
+if [ "$(jq -r '.conflict // false' <<<"$CLAIM_CONFLICT")" = "true" ]; then
+  echo "merge-pr: refused -- $(jq -r '.detail' <<<"$CLAIM_CONFLICT")" >&2
+  exit 1
+fi
 
 # agent-supervisor#486: independence_verdict answers "was this reviewed
 # independently", not "was it approved" -- both an approved AND a rejected
