@@ -210,7 +210,7 @@ failure this whole decision is trying to avoid.
    everyone. Retroactively resolve `agent-supervisor#531` (the one
    concretely-confirmed blocked PR) through the new mechanism, reviewed
    by an independent lane the same as any other merge.
-4. `#543` lands before `agent-supervisor#541`'s step 7 (the point of no
+4. `#546` lands before `agent-supervisor#541`'s step 7 (the point of no
    return — `agent-tui` deletion). This is the actual trigger, not a date
    picked out of the air: the migration is exactly the kind of load the
    devils-advocate pass's own "smallest change that would make [a
@@ -219,7 +219,7 @@ failure this whole decision is trying to avoid.
 
 ## What this does not decide
 
-- Whether `#543`'s poller design is exactly "watch `watchdog.sh`'s
+- Whether `#546`'s poller design is exactly "watch `watchdog.sh`'s
   existing sweep" or something else — that is real engineering work for
   whoever picks it up, scoped by the issue, not fixed here.
 - Any code review of `#539` itself — its correctness is `#539`'s own
