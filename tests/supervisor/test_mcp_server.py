@@ -141,18 +141,20 @@ class ToolListTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             SupervisorView([Misregistered()], [])
 
-    def test_the_real_surface_is_ten_tools_six_read_four_write(self):
+    def test_the_real_surface_is_eleven_tools_six_read_five_write(self):
+        """agent-supervisor#508 added `session_send` as a fifth write --
+        ten tools became eleven; six reads did not change."""
         tools = tool_definitions(SupervisorView())
         self.assertEqual(
             [
                 "lanes", "sessions", "digest", "ledger", "events", "session_remove_check",
-                "session_attach", "session_detach", "session_add", "session_remove",
+                "session_attach", "session_detach", "session_add", "session_remove", "session_send",
             ],
             [tool["name"] for tool in tools],
         )
         mutates_by_name = {tool["name"]: tool for tool in SupervisorView().describe()}
         self.assertFalse(mutates_by_name["session_remove_check"]["mutates"])
-        for name in ("session_attach", "session_detach", "session_add", "session_remove"):
+        for name in ("session_attach", "session_detach", "session_add", "session_remove", "session_send"):
             self.assertTrue(mutates_by_name[name]["mutates"], name)
 
 
@@ -274,7 +276,7 @@ class LiveSurfaceTest(unittest.TestCase):
         self.assertEqual(
             [
                 "lanes", "sessions", "digest", "ledger", "events", "session_remove_check",
-                "session_attach", "session_detach", "session_add", "session_remove",
+                "session_attach", "session_detach", "session_add", "session_remove", "session_send",
             ],
             [tool["name"] for tool in frames[1]["result"]["tools"]],
         )
@@ -310,7 +312,7 @@ class LiveSurfaceTest(unittest.TestCase):
             timeout=60,
         )
         self.assertEqual(0, process.returncode, process.stderr)
-        self.assertEqual(10, len(json.loads(process.stdout)["tools"]))
+        self.assertEqual(11, len(json.loads(process.stdout)["tools"]))
 
 
 if __name__ == "__main__":
