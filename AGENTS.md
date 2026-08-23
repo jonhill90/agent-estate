@@ -70,6 +70,12 @@ scripts/supervisor/          the system
                              ledger, fail closed to "unknown", never invert
   verdict-independence.sh    is the reviewing lane really not the author —
                              see "Lane identity" below (#184/#192/#196/#198)
+  lane_identity.py           is a lane's REGISTRATION still true of the live
+                             tmux server it names — verified / contradicted /
+                             unverifiable, never a bare yes/no (#520)
+  register-lane-self.sh      how a hand-attached lane registers ITSELF, from
+                             `$TMUX_PANE` and explicit `-t` reads only; no
+                             flag names a lane from outside, on purpose (#520)
   tmux-isolation.sh          `assert_isolated_tmux`, the function Invariant 4
                              requires before any destructive tmux verb,
                              including session creation (#185)

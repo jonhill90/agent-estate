@@ -124,8 +124,9 @@
 #          Review-Lane: line with no Verdict: line (#187/#232's pairing
 #          mistake).
 # Exit 8   refused -- the Review-Lane: value does not resolve to a lane this
-#          ledger has registered, or resolves to the supervisor's own
-#          window (#187's two measured false-refusal shapes).
+#          ledger has registered, resolves to the supervisor's own window
+#          (#187's two measured false-refusal shapes), or resolves to a lane
+#          whose registration the live tmux server contradicts (#520).
 #
 # IF YOU ARE WRITING BRIEF TEXT FOR A REVIEW OR FIX-PASS DISPATCH (#412):
 # the class of bug #187 measured was never a committed script calling `gh
@@ -300,6 +301,22 @@ if [ "$has_lane_line" = "true" ]; then
   fi
   if [ "$lane_known" != "true" ]; then
     echo "post-verdict.sh: refusing to post -- Review-Lane '$lane_token' is not a lane this ledger has registered -- a lane must have been dispatched at least once before it can review" >&2
+    exit 8
+  fi
+  # agent-supervisor#520: "a row exists" was the whole of the check above, and
+  # a row can be stale or never-measured -- four of this estate's own lanes
+  # carried rows naming panes that did not exist on the running server, and
+  # every one of them satisfied the check above. `lane_identity.py` refuses
+  # only on `contradicted` (the server the row itself names is reachable and
+  # disagrees with it); `unverifiable` is left alone, for the reasons
+  # `verdict-independence.sh`'s `_lane_identity_status` states in full. Caught
+  # HERE as well as at the merge gate for the same reason every other check in
+  # this script is: a retry now costs one command, at the merge gate it costs
+  # a whole extra dispatch.
+  identity_json="$("$LEDGER_PYTHON" "$HERE/lane_identity.py" --lane "$lane_token" --state-dir "$STATE" 2>/dev/null)"
+  if [ "$(jq -r '.status // ""' 2>/dev/null <<<"$identity_json")" = "contradicted" ]; then
+    echo "post-verdict.sh: refusing to post -- Review-Lane '$lane_token' is registered, but the live tmux server contradicts that registration: $(jq -r '.detail // ""' <<<"$identity_json")" >&2
+    echo "post-verdict.sh: re-register from that lane's own pane (register-lane-self.sh) before posting a verdict as it -- a stale registration is worse than none, because the merge gate reads it as an identity" >&2
     exit 8
   fi
   if [ "$lane_is_supervisor" = "true" ]; then

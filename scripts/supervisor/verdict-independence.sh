@@ -128,6 +128,49 @@ print((row or {}).get("pane_id") or "")
 ' "$HERE" "$STATE" "$1" 2>/dev/null
 }
 
+# agent-supervisor#520 / the false-pass half of #513. Everything above turns
+# on `lanes.pane_id`: two rows with different pane ids read as positively
+# DIFFERENT lanes, and that is the single fact separating an independent
+# review from a self-merge. Nothing ever asked whether a row is still TRUE.
+#
+# Measured on this estate 2026-08-23: all four of `estate:2`..`estate:5` held
+# rows whose `pane_id` (`%38`, `%39`, `%51`, `%52`) named no pane on the
+# running tmux server (whose panes were `%1`..`%5`), whose `repo` named a
+# different checkout than the panes were in, and whose `server_id` named a
+# session created the previous day. Every one satisfied `post-verdict.sh`'s
+# "is this lane registered" check and handed THIS file a `pane_id` it treated
+# as an identity. A registration nobody re-measures is not a weaker guard than
+# no registration -- it is the opposite guard, because it converts a refusal
+# into a pass.
+#
+# `lane_identity.py` answers three ways, and only one of them is acted on
+# here. `contradicted` -- the tmux server the row itself names is reachable
+# and disagrees with the row -- refuses. `unverifiable` does NOT refuse, and
+# that boundary is deliberate and is the honest limit of this check:
+#   * an off-pane lane (`claude-print`, `pi-rpc`, `acp`) has no tmux pane by
+#     construction, and #292 exists specifically so those can be compared at
+#     all -- refusing them here would undo it;
+#   * a lane registered against a tmux server that is simply GONE (socket
+#     removed, host rebooted) cannot be checked by anything;
+#   * a fixture ledger with no live server behind it -- every shell test in
+#     this repo -- is the same shape.
+# So this narrows what a stale-or-fabricated row can do; it does not turn
+# "cannot check" into a refusal. Stated rather than implied, because a gate
+# that reports green on a case it structurally cannot see is the exact defect
+# #513 filed.
+_lane_identity_status() {  # _lane_identity_status <lane> -> "<status>\t<detail>"
+  local out status detail
+  out=$("$LEDGER_PYTHON" "$HERE/lane_identity.py" --lane "$1" --state-dir "$STATE" \
+        --tmux-bin "${VERDICT_TMUX_BIN:-tmux}" 2>/dev/null)
+  status=$(jq -r '.status // "unverifiable"' 2>/dev/null <<<"$out") || status="unverifiable"
+  detail=$(jq -r '.detail // ""' 2>/dev/null <<<"$out") || detail=""
+  case "$status" in
+    verified|contradicted|unverifiable) : ;;
+    *) status="unverifiable"; detail="lane_identity.py produced no readable status" ;;
+  esac
+  printf '%s\t%s\n' "$status" "$detail"
+}
+
 # agent-supervisor#251 (the same defect its own CI failure was measured
 # against, not a new one): `author_lane_for` below shelled out to `gh pr
 # view` with no bound at all -- the one call in this file with no timer on
@@ -455,9 +498,27 @@ author_lane_for() {
 # same fail-closed posture this whole file holds everywhere else. Only when
 # the reviewer differs from EVERY contributor, and none of those comparisons
 # came back `unknown`, does this report `different`.
+#
+# agent-supervisor#520: before any of that, the REVIEWER's own registration
+# must not be contradicted by the live tmux server it claims to be on (see
+# `_lane_identity_status` above for what that means and what it deliberately
+# does not cover). Checked first and short-circuiting, because a `pane_id`
+# the server disagrees with is not weaker evidence of independence -- it is
+# not evidence at all, and every comparison below would be reading it.
 contributor_lane_relation() {  # contributor_lane_relation <author-json> <reviewer-lane> -> JSON
   local author_json="$1" reviewer_lane="$2"
   local n lane task rel overall="different" matched_lane="" matched_task="" i=0
+  local identity id_status id_detail
+
+  identity=$(_lane_identity_status "$reviewer_lane")
+  id_status="${identity%%$'\t'*}"
+  id_detail="${identity#*$'\t'}"
+  if [ "$id_status" = "contradicted" ]; then
+    jq -nc --arg lane "$reviewer_lane" --arg detail "$id_detail" \
+      '{overall:"contradicted", matched_lane:$lane, matched_task:null, detail:$detail}'
+    return
+  fi
+
   n=$(jq '(.contributors // []) | length' <<<"$author_json" 2>/dev/null) || n=0
   while [ "$i" -lt "$n" ]; do
     lane=$(jq -r ".contributors[$i].lane" <<<"$author_json")
@@ -528,6 +589,12 @@ verdict_for() {
 #     under a renamed session), and `unknown` ALSO refuses (two ids this
 #     system cannot compare establish nothing; treating that as permission is
 #     exactly how a self-review gets laundered across the next rename).
+#   - the reviewer lane's own registration is not CONTRADICTED by the live
+#     tmux server it names (agent-supervisor#520) -- a row recording a pane
+#     that server does not have is not a weaker identity, it is a false one,
+#     and it is what four of this estate's lanes were carrying when #513 was
+#     filed. `unverifiable` is not a refusal here; see `_lane_identity_status`
+#     above for exactly where that line is drawn and why.
 # Anything else is `false` or `null`, and a caller that gates a merge on this
 # must treat both identically: refuse.
 independence_verdict() {  # independence_verdict <verdict-json> <author-json> <lane-rel-json>
@@ -554,6 +621,16 @@ independence_verdict() {  # independence_verdict <verdict-json> <author-json> <l
           # own lane here, not the original author.
           {value:false, detail:("NOT independent -- author lane " + $rel.matched_lane + " reviewed its own PR"
             + (if ($v.reviewer_lane != $rel.matched_lane) then " (reviewed as " + $v.reviewer_lane + " -- the same window, renamed session)" else "" end))}
+        elif ($rel.overall == "contradicted") then
+          # agent-supervisor#520: the reviewer lane IS registered, but the
+          # tmux server named by its own row disagrees with that row -- a
+          # stale or never-measured registration. Reported as value:false,
+          # not null: this is a positive finding about the evidence, not an
+          # absence of it, and the remedy is concrete (re-register from the
+          # pane belonging to that lane, then obtain a fresh review).
+          {value:false, detail:("NOT independent -- reviewer lane " + $v.reviewer_lane
+            + " has a registration the live tmux server contradicts: " + ($rel.detail // "no detail")
+            + " -- re-register from the pane belonging to that lane (register-lane-self.sh) and obtain a fresh review")}
         elif ($rel.overall == "different") then
           {value:true, detail:("independent -- author lane"
             + (if (($author.contributors // []) | length) > 1 then "s" else "" end) + " "
