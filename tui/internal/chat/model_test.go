@@ -1,6 +1,8 @@
 package chat
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -277,10 +279,33 @@ func TestEnterWithNoSenderShowsHonestError(t *testing.T) {
 	}
 }
 
-// TestEnterWithSenderCallsItAndClearsComposer is the success path, driven
-// against a fake Sender (adapter discipline, AGENTS.md) -- no real
-// transport exists to test against, matching FixtureSource's own reason
-// for existing.
+// runSend drives [enter] through the full async round trip: trySend's own
+// Cmd (the send itself, running the fake Sender), then the sendMsg that
+// Cmd produces, fed back into Update -- the same two-step shape a real
+// bubbletea runtime drives, and the reason this cannot be a single
+// handleComposerKey call the way the no-Sender path still is (that path
+// never returns a Cmd at all). Returns the model immediately after
+// trySend (still sendInFlight) and the model after sendMsg lands, so a
+// caller can assert either point.
+func runSend(t *testing.T, m Model, text string) (inFlight, resolved Model) {
+	t.Helper()
+	m.composer.SetValue(text)
+	next, cmd := m.handleComposerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("enter")})
+	inFlight = next.(Model)
+	if cmd == nil {
+		t.Fatal("trySend returned no Cmd -- a real Sender must run async, never inline in Update")
+	}
+	msg := cmd()
+	next, _ = inFlight.Update(msg)
+	resolved = next.(Model)
+	return inFlight, resolved
+}
+
+// TestEnterWithSenderCallsItAndClearsComposer is the success/delivered
+// path, driven against a fake Sender (adapter discipline, AGENTS.md) -- no
+// real transport exists to test against, matching FixtureSource's own
+// reason for existing. Also asserts the in-flight state trySend itself
+// produces, before the fake Sender's result lands.
 func TestEnterWithSenderCallsItAndClearsComposer(t *testing.T) {
 	var gotThread, gotText string
 	m := fetched(t, 100, 30).WithSender(func(threadID, text string) error {
@@ -290,22 +315,122 @@ func TestEnterWithSenderCallsItAndClearsComposer(t *testing.T) {
 	m = sendKey(t, m, "2")
 	wantThread := m.threads[m.selected].ID
 	m = sendKey(t, m, "i")
-	m.composer.SetValue("hello agent")
 
-	next, _ := m.handleComposerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("enter")})
-	m = next.(Model)
+	inFlight, resolved := runSend(t, m, "hello agent")
+
+	if inFlight.sendOutcome != sendInFlight {
+		t.Fatalf("sendOutcome after trySend = %v, want sendInFlight -- SPEC-shell.md S7's own 'in flight' state", inFlight.sendOutcome)
+	}
+	if !inFlight.composing {
+		t.Fatal("composer left compose mode before the send even resolved")
+	}
+	if !strings.Contains(inFlight.View(), "sending") {
+		t.Fatalf("in-flight state not rendered:\n%s", inFlight.View())
+	}
 
 	if gotThread != wantThread || gotText != "hello agent" {
 		t.Fatalf("Sender called with (%q, %q), want (%q, %q)", gotThread, gotText, wantThread, "hello agent")
 	}
-	if m.composing {
+	if resolved.sendOutcome != sendIdle {
+		t.Fatalf("sendOutcome after delivery = %v, want sendIdle", resolved.sendOutcome)
+	}
+	if resolved.composing {
 		t.Fatal("still composing after a successful send")
 	}
-	if m.composer.Value() != "" {
-		t.Fatalf("composer.Value() = %q after a successful send, want empty", m.composer.Value())
+	if resolved.composer.Value() != "" {
+		t.Fatalf("composer.Value() = %q after a successful send, want empty", resolved.composer.Value())
 	}
-	if m.sendErr != "" {
-		t.Fatalf("sendErr = %q after a successful send, want empty", m.sendErr)
+	if resolved.sendErr != "" {
+		t.Fatalf("sendErr = %q after a successful send, want empty", resolved.sendErr)
+	}
+}
+
+// TestFailedSendRendersFailureWithItsError is the mutation-checked
+// failure direction (agent-b3.md: "the failure direction matters more --
+// a send that silently reports success is the defect this whole
+// transport exists to eliminate"). A Sender returning a plain error (not
+// ErrUnknown) must resolve to sendFailed, stay in compose mode (so the
+// draft is not lost), and show the error text on screen.
+func TestFailedSendRendersFailureWithItsError(t *testing.T) {
+	m := fetched(t, 100, 30).WithSender(func(threadID, text string) error {
+		return errors.New("daemon: turn reported is_error")
+	})
+	m = sendKey(t, m, "2")
+	m = sendKey(t, m, "i")
+
+	_, resolved := runSend(t, m, "hello agent")
+
+	if resolved.sendOutcome != sendFailed {
+		t.Fatalf("sendOutcome = %v, want sendFailed", resolved.sendOutcome)
+	}
+	if !resolved.composing {
+		t.Fatal("left compose mode after a failed send -- the draft should stay editable")
+	}
+	if !strings.Contains(resolved.View(), "is_error") {
+		t.Fatalf("failure text not rendered:\n%s", resolved.View())
+	}
+}
+
+// TestUnknownSendIsDistinguishableFromFailedAndDelivered is SPEC-shell.md
+// S7's central requirement: errors.Is(err, ErrUnknown) must render as a
+// THIRD state, never collapsed into "failed" (agent-supervisor#488's own
+// lesson) and never silently treated as delivered.
+func TestUnknownSendIsDistinguishableFromFailedAndDelivered(t *testing.T) {
+	m := fetched(t, 100, 30).WithSender(func(threadID, text string) error {
+		return fmt.Errorf("%w: mcp: session_send: no reply within 20m0s", ErrUnknown)
+	})
+	m = sendKey(t, m, "2")
+	m = sendKey(t, m, "i")
+
+	_, resolved := runSend(t, m, "hello agent")
+
+	if resolved.sendOutcome != sendUnknown {
+		t.Fatalf("sendOutcome = %v, want sendUnknown", resolved.sendOutcome)
+	}
+	if resolved.sendOutcome == sendFailed {
+		t.Fatal("an unconfirmed outcome must never be reported as sendFailed")
+	}
+	view := resolved.View()
+	if !strings.Contains(view, "unknown") {
+		t.Fatalf("unknown state not rendered:\n%s", view)
+	}
+	if strings.Contains(view, "! "+resolved.sendErr) {
+		// renderComposer's failed branch renders exactly "! "+sendErr --
+		// must not appear when the outcome is unknown, not failed (the
+		// unknown branch renders "? unknown -- "+sendErr instead).
+		t.Fatalf("unknown state rendered with the failed-state's own '! <err>' text:\n%s", view)
+	}
+}
+
+// TestSecondEnterWhileInFlightIsANoOp guards against racing two sends to
+// the same thread while the first has not resolved yet.
+func TestSecondEnterWhileInFlightIsANoOp(t *testing.T) {
+	calls := 0
+	block := make(chan struct{})
+	m := fetched(t, 100, 30).WithSender(func(threadID, text string) error {
+		calls++
+		<-block
+		return nil
+	})
+	m = sendKey(t, m, "2")
+	m = sendKey(t, m, "i")
+	m.composer.SetValue("hello agent")
+
+	next, cmd := m.handleComposerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("enter")})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("first enter returned no Cmd")
+	}
+
+	next, secondCmd := m.handleComposerKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("enter")})
+	m = next.(Model)
+	if secondCmd != nil {
+		t.Fatal("a second [enter] while sendInFlight returned a Cmd -- must be a no-op")
+	}
+	close(block)
+	_ = cmd() // drain the first Sender's goroutine-equivalent so it does not leak past the test
+	if calls != 1 {
+		t.Fatalf("Sender called %d times, want exactly 1", calls)
 	}
 }
 

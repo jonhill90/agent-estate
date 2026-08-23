@@ -16,15 +16,21 @@ package session
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"strings"
+	"time"
 )
 
-// CallTooler is the one method this package needs from *mcp.Client --
+// CallTooler is the two methods this package needs from *mcp.Client --
 // naming it here (instead of importing internal/mcp) keeps this package's
 // tests free of a real MCP subprocess, the same reason internal/rail's own
 // Fetcher/SessionsFetcher types take a plain function rather than a client.
+// CallToolTimeout is the second method, added for Send alone (see its own
+// doc comment): every other method here still calls CallTool, unchanged.
 type CallTooler interface {
 	CallTool(name string, arguments map[string]any) (string, error)
+	CallToolTimeout(name string, arguments map[string]any, timeout time.Duration) (string, error)
 }
 
 // Interface is what internal/rail depends on -- Ops below is the only
@@ -57,6 +63,17 @@ type Interface interface {
 	// moment of this call (never trusting a prior RemoveCheck) and refuses
 	// unless confirm is literally true.
 	Remove(session string, confirm bool) (RemoveResult, error)
+	// Send posts an ad-hoc message into an EXISTING agent session --
+	// agent-supervisor#508/#509's session_send, and the capability
+	// SPEC-shell.md S7 was blocked on. sessionID is the harness's own
+	// session id (e.g. Claude Code's session_id -- internal/chat.Thread.ID
+	// already is exactly this, per that field's own doc comment), never a
+	// tmux session name. A nil error means the daemon confirmed delivery
+	// as an observed fact; errors.Is(err, ErrSendUnknown) means the
+	// daemon (or this client's own round trip) could not confirm the
+	// outcome before its deadline -- see ErrSendUnknown's own doc comment.
+	// Any other non-nil error is a confirmed failure.
+	Send(sessionID, message string) (SendResult, error)
 }
 
 // Worktree is one lane's working directory as agent-supervisor's
@@ -103,6 +120,59 @@ type RemoveResult struct {
 	Removed bool        `json:"removed"`
 	Guard   RemoveCheck `json:"guard"`
 }
+
+// SendResult is session_send's response on confirmed delivery -- mirrors
+// agent-supervisor's own SessionSendSource.write() success dict
+// (scripts/supervisor/supervisor_view.py).
+type SendResult struct {
+	SessionID string  `json:"session_id"`
+	Delivered bool    `json:"delivered"`
+	Turns     int     `json:"turns"`
+	CostUSD   float64 `json:"cost_usd"`
+}
+
+// ErrSendUnknown marks a Send outcome that could not be confirmed as
+// either delivered or failed -- agent-supervisor#488's own distinction,
+// which daemon/internal/sendmsg (agent-supervisor#509) already makes on
+// the far side of this call and which this package must not throw away.
+// errors.Is(err, ErrSendUnknown) is true in exactly two cases, both
+// genuinely "we do not know", never "it failed":
+//
+//  1. SessionSendSource.write() itself raised because the daemon's own
+//     `supervisord send` reported {"status":"unknown"} (a turn that did
+//     not confirm before ITS deadline) -- detected by unknownMarker
+//     below, the literal substring that source's exception text always
+//     carries for this case (there is no structured field for it: MCP's
+//     write-tool contract is return-a-dict-or-raise, nothing between).
+//  2. This client's OWN round trip did not get a reply within sendTimeout
+//     (mcp.Client's timeoutError, Timeout() == true) -- e.g. the
+//     supervisor's own Python process hung. Genuinely unknown for the
+//     exact same reason: nothing here observed a definite outcome.
+var ErrSendUnknown = errors.New("session_send: outcome could not be confirmed")
+
+// unknownMarker is the literal substring agent-supervisor's own
+// SessionSendSource.write() puts in the exception text it raises for a
+// timeout (scripts/supervisor/supervisor_view.py: "send outcome UNKNOWN,
+// not failed"). This is a real, brittle coupling to that file's own
+// wording -- recorded here rather than hidden -- because the write-tool
+// contract this client calls through (SupervisorView: return a dict, or
+// raise, nothing else) has no structured field to carry a third state
+// across the MCP boundary. If agent-supervisor's own wording changes,
+// TestSend_UnknownOutcome... in ops_test.go is what goes red first.
+const unknownMarker = "outcome UNKNOWN"
+
+// sendTimeout bounds Send's own round trip. Wider than mcp.callTimeout's
+// 10s (CallToolTimeout's own doc comment: session_send drives a live
+// agent turn, not a local op) and wider than agent-supervisor's own
+// SEND_DEFAULT_TIMEOUT_SECONDS (960s, scripts/supervisor/
+// supervisor_view.py) plus its own headroom over the daemon's 15-minute
+// agent.DefaultTimeout -- so THIS client is never what times out first;
+// the daemon (or the Python runner wrapping it) always gets to answer
+// before this deadline does, and an ErrSendUnknown from THIS timeout
+// firing anyway is a genuinely separate, worse signal (the round trip
+// itself is stuck) worth keeping distinct in the doc comment above even
+// though both map to the same typed error.
+const sendTimeout = 20 * time.Minute
 
 // Ops is the production Interface implementation: five tools/call
 // invocations against whatever CallTooler it is built with (in practice a
@@ -194,6 +264,32 @@ func (o Ops) Remove(session string, confirm bool) (RemoveResult, error) {
 	var result RemoveResult
 	if err := json.Unmarshal([]byte(text), &result); err != nil {
 		return RemoveResult{}, fmt.Errorf("session_remove %s: decode: %w", session, err)
+	}
+	return result, nil
+}
+
+// timeouter mirrors mcp's own net.Error-style Timeout() bool contract
+// (internal/mcp/client.go's timeoutError) -- named locally rather than
+// importing internal/mcp, the same "seam, not a concrete dependency"
+// reason CallTooler above exists at all.
+type timeouter interface{ Timeout() bool }
+
+func (o Ops) Send(sessionID, message string) (SendResult, error) {
+	text, err := o.client.CallToolTimeout("session_send", map[string]any{
+		"session_id": sessionID, "message": message,
+	}, sendTimeout)
+	if err != nil {
+		if te, ok := err.(timeouter); ok && te.Timeout() {
+			return SendResult{}, fmt.Errorf("%w: session_send %s: %v", ErrSendUnknown, sessionID, err)
+		}
+		if strings.Contains(err.Error(), unknownMarker) {
+			return SendResult{}, fmt.Errorf("%w: session_send %s: %v", ErrSendUnknown, sessionID, err)
+		}
+		return SendResult{}, fmt.Errorf("session_send %s: %w", sessionID, err)
+	}
+	var result SendResult
+	if err := json.Unmarshal([]byte(text), &result); err != nil {
+		return SendResult{}, fmt.Errorf("session_send %s: decode: %w", sessionID, err)
 	}
 	return result, nil
 }

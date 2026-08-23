@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 // fakeCallTooler is a CallTooler with no MCP subprocess involved at all --
@@ -11,10 +12,11 @@ import (
 // internal/mcp.Client's own tests use for the transport layer one level
 // down.
 type fakeCallTooler struct {
-	gotName string
-	gotArgs map[string]any
-	text    string
-	err     error
+	gotName    string
+	gotArgs    map[string]any
+	gotTimeout time.Duration
+	text       string
+	err        error
 }
 
 func (f *fakeCallTooler) CallTool(name string, arguments map[string]any) (string, error) {
@@ -22,6 +24,26 @@ func (f *fakeCallTooler) CallTool(name string, arguments map[string]any) (string
 	f.gotArgs = arguments
 	return f.text, f.err
 }
+
+// CallToolTimeout satisfies CallTooler's Send-only second method -- every
+// test below that does NOT exercise Send uses plain CallTool and never
+// touches this, matching Ops' own "everything but Send still calls
+// CallTool" split.
+func (f *fakeCallTooler) CallToolTimeout(name string, arguments map[string]any, timeout time.Duration) (string, error) {
+	f.gotName = name
+	f.gotArgs = arguments
+	f.gotTimeout = timeout
+	return f.text, f.err
+}
+
+// fakeTimeoutErr mirrors mcp.Client's own timeoutError shape (Timeout()
+// bool == true) without importing internal/mcp -- Ops.Send's own
+// `timeouter` type-assertion is what this proves works, the same "seam,
+// not a concrete dependency" reason the package itself avoids that import.
+type fakeTimeoutErr struct{ msg string }
+
+func (e fakeTimeoutErr) Error() string { return e.msg }
+func (e fakeTimeoutErr) Timeout() bool { return true }
 
 func TestAttachCallsSessionAttachWithSessionName(t *testing.T) {
 	fake := &fakeCallTooler{text: `{"session":"scratch","attached":true}`}
@@ -260,5 +282,85 @@ func TestAddWithModeUnknownModeIsARealError(t *testing.T) {
 	o := New(fake)
 	if _, err := o.AddWithMode("scratch", 0, "", "", ExecutionMode("quantum")); err == nil {
 		t.Fatal("expected an error for an unknown ExecutionMode, got nil")
+	}
+}
+
+// TestSendCallsSessionSendWithSessionIDAndMessage pins the exact tool name
+// and argument shape agent-supervisor's own SessionSendSource expects
+// (scripts/supervisor/supervisor_view.py's `parameters`).
+func TestSendCallsSessionSendWithSessionIDAndMessage(t *testing.T) {
+	fake := &fakeCallTooler{text: `{"session_id":"sess-1","delivered":true,"turns":2,"cost_usd":0.05}`}
+	o := New(fake)
+	if _, err := o.Send("sess-1", "keep going"); err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	if fake.gotName != "session_send" {
+		t.Fatalf("gotName = %q, want %q", fake.gotName, "session_send")
+	}
+	if fake.gotArgs["session_id"] != "sess-1" || fake.gotArgs["message"] != "keep going" {
+		t.Fatalf("gotArgs = %+v, want session_id/message set", fake.gotArgs)
+	}
+	if fake.gotTimeout != sendTimeout {
+		t.Fatalf("gotTimeout = %s, want sendTimeout (%s) -- Send must use the wide budget, never CallTool's 10s", fake.gotTimeout, sendTimeout)
+	}
+}
+
+// TestSendDeliveredReportsSuccess is the delivered direction: a nil error
+// and a decoded SendResult, nothing collapsed or dropped.
+func TestSendDeliveredReportsSuccess(t *testing.T) {
+	fake := &fakeCallTooler{text: `{"session_id":"sess-1","delivered":true,"turns":3,"cost_usd":0.12}`}
+	o := New(fake)
+	result, err := o.Send("sess-1", "keep going")
+	if err != nil {
+		t.Fatalf("Send: %v", err)
+	}
+	want := SendResult{SessionID: "sess-1", Delivered: true, Turns: 3, CostUSD: 0.12}
+	if result != want {
+		t.Fatalf("Send result = %+v, want %+v", result, want)
+	}
+}
+
+// TestSendFailedIsNeverErrSendUnknown is the direction that matters most
+// (agent-supervisor#508's own words): a confirmed failure must be a plain
+// error, and specifically must NOT satisfy errors.Is(err, ErrSendUnknown)
+// -- collapsing the two would let a real failure render as "we don't know"
+// instead of visibly failing.
+func TestSendFailedIsNeverErrSendUnknown(t *testing.T) {
+	fake := &fakeCallTooler{err: errors.New(`mcp: session_send: send failed: agent: turn reported is_error`)}
+	o := New(fake)
+	_, err := o.Send("sess-1", "keep going")
+	if err == nil {
+		t.Fatal("expected an error for a confirmed failure")
+	}
+	if errors.Is(err, ErrSendUnknown) {
+		t.Fatalf("a confirmed failure must not be ErrSendUnknown: %v", err)
+	}
+}
+
+// TestSendUnknownOutcome_DaemonMarker is one of the two ErrSendUnknown
+// paths ErrSendUnknown's own doc comment names: the daemon (via
+// SessionSendSource.write()) reported {"status":"unknown"} and this
+// package recognises its own exception text for that case.
+func TestSendUnknownOutcome_DaemonMarker(t *testing.T) {
+	fake := &fakeCallTooler{err: errors.New(
+		`mcp: session_send: send outcome UNKNOWN, not failed -- a turn did not confirm before its deadline (agent-supervisor#488): agent: turn did not complete before the deadline after 15m0s`,
+	)}
+	o := New(fake)
+	_, err := o.Send("sess-1", "keep going")
+	if !errors.Is(err, ErrSendUnknown) {
+		t.Fatalf("Send error = %v, want it to wrap ErrSendUnknown for a daemon-reported unknown outcome", err)
+	}
+}
+
+// TestSendUnknownOutcome_ClientRoundTripTimeout is ErrSendUnknown's other
+// path: THIS client's own round trip did not get a reply at all (a
+// mcp.Client-shaped Timeout() bool error) -- also genuinely unknown, never
+// failed, per ErrSendUnknown's own doc comment.
+func TestSendUnknownOutcome_ClientRoundTripTimeout(t *testing.T) {
+	fake := &fakeCallTooler{err: fakeTimeoutErr{msg: "mcp: tools/call: no reply within 20m0s"}}
+	o := New(fake)
+	_, err := o.Send("sess-1", "keep going")
+	if !errors.Is(err, ErrSendUnknown) {
+		t.Fatalf("Send error = %v, want it to wrap ErrSendUnknown for a client-side round-trip timeout", err)
 	}
 }

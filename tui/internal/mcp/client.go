@@ -170,6 +170,14 @@ func (c *Client) readLoop() {
 }
 
 func (c *Client) call(method string, params any) (json.RawMessage, error) {
+	return c.callTimeout(method, params, callTimeout)
+}
+
+// callTimeout is call with an explicit round-trip budget -- see
+// CallToolTimeout's own doc comment for why one tool (session_send) needs
+// a budget minutes wide instead of callTimeout's 10s, without touching
+// what every other tool call waits for.
+func (c *Client) callTimeout(method string, params any, timeout time.Duration) (json.RawMessage, error) {
 	id := atomic.AddInt64(&c.nextID, 1)
 	req := rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
 	body, err := json.Marshal(req)
@@ -192,7 +200,7 @@ func (c *Client) call(method string, params any) (json.RawMessage, error) {
 		return nil, fmt.Errorf("mcp: write request: %w", writeErr)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), callTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	select {
@@ -213,7 +221,7 @@ func (c *Client) call(method string, params any) (json.RawMessage, error) {
 		c.mu.Lock()
 		delete(c.pend, id)
 		c.mu.Unlock()
-		return nil, &timeoutError{fmt.Errorf("mcp: %s: no reply within %s", method, callTimeout)}
+		return nil, &timeoutError{fmt.Errorf("mcp: %s: no reply within %s", method, timeout)}
 	}
 }
 
@@ -223,7 +231,25 @@ func (c *Client) call(method string, params any) (json.RawMessage, error) {
 // an error too -- this client treats IsError the same as a transport error,
 // because a caller polling for lane state has no use for the distinction.
 func (c *Client) CallTool(name string, arguments map[string]any) (string, error) {
-	raw, err := c.call("tools/call", map[string]any{"name": name, "arguments": arguments})
+	return c.CallToolTimeout(name, arguments, callTimeout)
+}
+
+// CallToolTimeout is CallTool with an explicit round-trip budget instead of
+// callTimeout's fixed 10s. Every tool this client calls today except one
+// (session_attach/detach/add/remove/remove_check, lanes, sessions, digest,
+// ledger, events) is a local, no-network-hop operation -- callTimeout's own
+// doc comment explains why 10s is the honest budget for those. session_send
+// (agent-supervisor#508/#509) is not one of those: it drives a live agent
+// turn through `supervisord send`, which can legitimately run for the
+// daemon's own per-turn budget (agent.DefaultTimeout, 15 minutes, on the
+// agent-supervisor side) before it can even report an honest "unknown".
+// Forcing that call through callTimeout's 10s window would not surface a
+// real problem -- it would misreport nearly every real send as a client-side
+// timeout well before the daemon ever gets the chance to answer honestly.
+// internal/session.Ops.Send is the one caller that uses this; every other
+// caller keeps using CallTool's fixed budget unchanged.
+func (c *Client) CallToolTimeout(name string, arguments map[string]any, timeout time.Duration) (string, error) {
+	raw, err := c.callTimeout("tools/call", map[string]any{"name": name, "arguments": arguments}, timeout)
 	if err != nil {
 		return "", err
 	}

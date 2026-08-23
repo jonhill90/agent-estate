@@ -17,6 +17,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
@@ -345,6 +346,29 @@ func main() {
 	// chat.FixtureSource, visibly, when no project directory can be
 	// resolved at all -- chat.FallbackSource's own doc comment.
 	chatModel := chat.New(chat.NewFallbackSource(chat.NewClaudeCodeSource(resolveClaudeProjectsDir(*claudeProjectsDir))))
+	// chat.WithSender wires SPEC-shell.md S7's sending half --
+	// agent-supervisor#508/#509's session_send, reached the exact way
+	// #103's own investigation said it had to be: through the supervisor
+	// MCP surface, sessionops.New(client) (already built above for the
+	// rail's own write path), never a second subprocess transport in this
+	// repo. session.ErrSendUnknown is translated to chat.ErrUnknown right
+	// here at the seam boundary -- the one place this program is allowed
+	// to know about both packages -- so internal/chat itself never needs
+	// to import internal/session (Sender's own doc comment). Skipped
+	// entirely when client == nil, the same degraded-launch guard
+	// WithOps above already follows: chatModel.sender stays nil, and
+	// trySend's own honest "cannot send" message covers it (Sender's own
+	// doc comment; no code change needed here for that case).
+	if client != nil {
+		sessionOps := sessionops.New(client)
+		chatModel = chatModel.WithSender(func(threadID, text string) error {
+			_, err := sessionOps.Send(threadID, text)
+			if err != nil && errors.Is(err, sessionops.ErrSendUnknown) {
+				return fmt.Errorf("%w: %v", chat.ErrUnknown, err)
+			}
+			return err
+		})
+	}
 
 	// agentsModel/skillsModel/mcpserversModel/connectorsModel/adminModel
 	// are S6/S8/S9/S10/S11's own panes -- this is the first time any of

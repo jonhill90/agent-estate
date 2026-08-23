@@ -33,6 +33,10 @@ type fakeOps struct {
 	removeCalls   []string
 	removeConfirm []bool
 	removeErr     error
+
+	sendCalls []string
+	sendErr   error
+	sendOut   session.SendResult
 }
 
 func (f *fakeOps) Attach(s string) error {
@@ -68,6 +72,15 @@ func (f *fakeOps) Remove(s string, confirm bool) (session.RemoveResult, error) {
 	f.removeCalls = append(f.removeCalls, s)
 	f.removeConfirm = append(f.removeConfirm, confirm)
 	return session.RemoveResult{Session: s, Removed: f.removeErr == nil}, f.removeErr
+}
+
+// Send satisfies session.Interface's agent-supervisor#508 addition --
+// nothing in this package calls it yet (rail has no composer; that is
+// internal/chat's own S7 write path), so this just records the call the
+// same way every other fake method here does.
+func (f *fakeOps) Send(sessionID, message string) (session.SendResult, error) {
+	f.sendCalls = append(f.sendCalls, sessionID)
+	return f.sendOut, f.sendErr
 }
 
 var _ session.Interface = (*fakeOps)(nil)

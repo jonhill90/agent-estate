@@ -1,6 +1,7 @@
 package chat
 
 import (
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -17,18 +18,33 @@ import (
 // Sender posts text into a live thread -- SPEC-shell.md S7's own
 // requirement ("sends go through the daemon (subprocess transport), never
 // tmux send-keys"), expressed as this package's adapter seam, the same
-// shape Source (thread.go) already is. No implementation ships in this
-// repo yet: agent-supervisor's MCP surface -- session_attach/detach/add/
-// remove, the only four write tools that exist -- has no tool that posts a
-// prompt into an already-running lane; see Source's own doc comment for
-// the identical, already-documented reason no live Source exists either.
-// A real Sender needs the same thing a real Source does: a lane on a
-// structured transport ('acp'/'pi-rpc') plus a client speaking
-// session/prompt over its stdio, or a new agent-supervisor MCP write tool
-// -- either way, a second implementation of this type, nothing in this
-// file changing. Nil (New's default) is what makes the composer's own
-// [enter] key say so honestly instead of pretending to succeed.
+// shape Source (thread.go) already is. Called from inside a tea.Cmd
+// (trySend below), never inline in Update -- a real Sender's own round
+// trip can legitimately run minutes (agent-supervisor#508/#509's
+// session_send drives a live agent turn), and blocking Update for that
+// long would freeze the whole shell, not just this pane.
+//
+// A nil error means the daemon confirmed delivery as an observed fact.
+// errors.Is(err, ErrUnknown) means the outcome could not be confirmed
+// either way -- a timeout on the daemon's own side, or on the round trip
+// to it -- and must render as neither delivered nor failed (see
+// ErrUnknown's own doc comment; this is the exact distinction
+// agent-supervisor#488 exists to preserve, and collapsing it here would
+// throw away the reason that capability was built at all). Any other
+// non-nil error is a confirmed failure, shown with its own text.
+//
+// cmd/keelson wires the real implementation: session.Ops.Send translated
+// into this shape, with session.ErrSendUnknown mapped to ErrUnknown at
+// that seam so this package never needs to import internal/session.
 type Sender func(threadID, text string) error
+
+// ErrUnknown marks a Sender outcome that could not be confirmed as either
+// delivered or failed -- SPEC-shell.md S7's own requirement ("map a
+// timeout to unknown, not failed... a message whose fate is unknown must
+// not render as either delivered or failed"). Model's sendMsg handling
+// (Update below) is the one place this is checked, via errors.Is, never
+// by inspecting error text.
+var ErrUnknown = errors.New("chat: send outcome could not be confirmed")
 
 // composerHeight is the two fixed rows the composer always reserves in
 // listLayout's own budget -- the input line and one status/hint line
@@ -91,14 +107,19 @@ type Model struct {
 	// does not otherwise need; see startComposing.
 	composer  textinput.Model
 	composing bool
-	// sendErr is the visible half of a failed or impossible send --
-	// AGENTS.md's "absence is a typed value" convention applied to
-	// sender == nil specifically: a composer that accepted [enter] and
-	// did nothing would be the exact silent failure this repo's own
-	// "blind, not quiet" rule (rail/board's Fetcher doc comments) warns
-	// against, applied here to writes instead of reads.
-	sendErr string
-	sender  Sender
+	// sendOutcome/sendErr are the composer's three-state tracker
+	// (SPEC-shell.md S7: "in flight / delivered / failed, never two" --
+	// see sendOutcome's own doc comment for why "unknown" is the fourth
+	// value this type actually needs). sendErr carries the visible text
+	// for sendFailed and sendUnknown; AGENTS.md's "absence is a typed
+	// value" convention applied to sender == nil specifically: a composer
+	// that accepted [enter] and did nothing would be the exact silent
+	// failure this repo's own "blind, not quiet" rule (rail/board's
+	// Fetcher doc comments) warns against, applied here to writes instead
+	// of reads.
+	sendOutcome sendOutcome
+	sendErr     string
+	sender      Sender
 
 	theme       theme.Theme
 	themeNotice string
@@ -142,9 +163,38 @@ func (m Model) WithSender(s Sender) Model {
 	return m
 }
 
+// sendOutcome is the composer's own answer to SPEC-shell.md S7's "three
+// states in the UI, never two": in flight (sent, outcome not yet known),
+// delivered (the daemon confirmed it, as a fact -- collapses straight
+// back to sendIdle, see the sendMsg case in Update), failed (with the
+// error text visible), or unknown (a timeout the sender could not
+// confirm -- see Sender/ErrUnknown's own doc comments for why this must
+// never be reported as failed). sendIdle (the zero value) is "nothing
+// sent since the composer was last cleared or opened".
+type sendOutcome int
+
+const (
+	sendIdle sendOutcome = iota
+	sendInFlight
+	sendFailed
+	sendUnknown
+)
+
 type fetchMsg struct {
 	threads []Thread
 	err     error
+}
+
+// sendMsg is trySend's async result, posted once m.sender's Cmd returns --
+// the same "Cmd now, Msg later" shape fetchMsg already uses for
+// source.Threads(). threadID names which thread the send was FOR (not
+// necessarily the one still selected by the time this arrives -- a user
+// is free to move on while a send is in flight); this package has one
+// composer and applies the result to it regardless, rather than silently
+// dropping a result for a thread no longer on screen.
+type sendMsg struct {
+	threadID string
+	err      error
 }
 
 func (m Model) fetchCmd() tea.Cmd {
@@ -190,6 +240,34 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.selected = 0
 		}
 		return m.sync(), nil
+
+	case sendMsg:
+		switch {
+		case msg.err == nil:
+			// Delivered, as an observed fact -- back to idle. The sent
+			// text is not echoed as a new transcript line here for the
+			// same reason trySend never echoed it synchronously: no live
+			// Source exists yet for it to diverge from (see Sender's own
+			// doc comment); a future real Source's next fetch is what
+			// will actually show it.
+			m.sendOutcome = sendIdle
+			m.sendErr = ""
+			m.composer.SetValue("")
+			m.composing = false
+			m.composer.Blur()
+		case errors.Is(msg.err, ErrUnknown):
+			// SPEC-shell.md S7's own rule, checked with errors.Is and
+			// never by inspecting msg.err's text: an unconfirmed outcome
+			// renders as unknown, not failed. Stays in compose mode (same
+			// as sendFailed below) -- there is nothing safe to auto-clear
+			// when delivery itself was never confirmed.
+			m.sendOutcome = sendUnknown
+			m.sendErr = msg.err.Error()
+		default:
+			m.sendOutcome = sendFailed
+			m.sendErr = msg.err.Error()
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -291,6 +369,7 @@ func (m Model) startComposing() (tea.Model, tea.Cmd) {
 		return m, nil
 	}
 	m.composing = true
+	m.sendOutcome = sendIdle
 	m.sendErr = ""
 	m.composer.SetValue("")
 	m.composer.Focus()
@@ -314,9 +393,16 @@ func (m Model) handleComposerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.composing = false
 		m.composer.Blur()
 		m.composer.SetValue("")
+		m.sendOutcome = sendIdle
 		m.sendErr = ""
 		return m, nil
 	case "enter":
+		if m.sendOutcome == sendInFlight {
+			// A send already in flight -- refuse a second one rather than
+			// racing two calls to the same thread. Not an error: the
+			// composer's own status line already says "sending...".
+			return m, nil
+		}
 		return m.trySend()
 	}
 	var cmd tea.Cmd
@@ -326,31 +412,35 @@ func (m Model) handleComposerKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 // trySend is [enter] while composing. An empty (post-trim) message is a
 // no-op, not an error -- pressing enter on a blank line should not surface
-// "cannot send" chrome for text that was never going to go anywhere. A
-// real send success clears the composer and leaves compose mode; the sent
-// text is NOT echoed locally -- there is no live Source today for it to
-// diverge from (see Sender's own doc comment), and a future real Source's
-// next fetch is what will actually show it, exactly like every other
-// message already on screen.
+// "cannot send" chrome for text that was never going to go anywhere.
+//
+// The actual send runs inside the returned tea.Cmd, never inline here --
+// see Sender's own doc comment for why (a real Sender's round trip can
+// legitimately run minutes). This method's only job is to record
+// sendInFlight and hand back the Cmd; sendMsg's own case in Update is
+// where delivered/failed/unknown is decided. The sent text is NOT echoed
+// locally on delivery -- there is no live Source today for it to diverge
+// from (see Sender's own doc comment), and a future real Source's next
+// fetch is what will actually show it, exactly like every other message
+// already on screen.
 func (m Model) trySend() (tea.Model, tea.Cmd) {
 	text := strings.TrimSpace(m.composer.Value())
 	if text == "" {
 		return m, nil
 	}
 	if m.sender == nil {
+		m.sendOutcome = sendFailed
 		m.sendErr = "cannot send -- no lane on a structured transport yet (agent-tui#20)"
 		return m, nil
 	}
 	thread := m.threads[m.selected]
-	if err := m.sender(thread.ID, text); err != nil {
-		m.sendErr = err.Error()
-		return m, nil
-	}
-	m.composer.SetValue("")
-	m.composing = false
-	m.composer.Blur()
+	m.sendOutcome = sendInFlight
 	m.sendErr = ""
-	return m, nil
+	sender := m.sender
+	return m, func() tea.Msg {
+		err := sender(thread.ID, text)
+		return sendMsg{threadID: thread.ID, err: err}
+	}
 }
 
 func (m *Model) moveSelection(delta int) {
@@ -687,10 +777,12 @@ func (m Model) renderList(mx metrics, st chatStyles) string {
 }
 
 // renderComposer is the composer's own two rows (composerHeight): the
-// input line, and a status line whose content depends on state -- an
-// active send error, the compose-mode hint, or the at-rest "[i] compose"
-// hint. Always exactly two lines, composing or not (see composerHeight's
-// own doc comment).
+// input line, and a status line whose content depends on state. The
+// status line is SPEC-shell.md S7's three-state requirement made visible
+// -- in flight, failed (with its error), and unknown (with its own,
+// differently-styled text) are three distinct branches below, never
+// collapsed into one "something went wrong" line. Always exactly two
+// rows, composing or not (see composerHeight's own doc comment).
 func (m Model) renderComposer(mx metrics, st chatStyles) string {
 	canCompose := m.selected >= 0 && m.selected < len(m.threads) && m.threads[m.selected].ID != "all"
 
@@ -701,7 +793,15 @@ func (m Model) renderComposer(mx metrics, st chatStyles) string {
 
 	var status string
 	switch {
-	case m.sendErr != "":
+	case m.sendOutcome == sendInFlight:
+		status = st.dim.Render(truncate("sending... (delivery not yet confirmed)", mx.width))
+	case m.sendOutcome == sendUnknown:
+		// Deliberately not st.errS (failed's own style) and deliberately
+		// says "unknown", not "failed" -- SPEC-shell.md S7's own rule: "a
+		// message whose fate is unknown must not render as either
+		// delivered or failed."
+		status = st.warn.Render(truncate("? unknown -- "+m.sendErr, mx.width))
+	case m.sendOutcome == sendFailed:
 		status = st.errS.Render(truncate("! "+m.sendErr, mx.width))
 	case m.composing:
 		status = st.dim.Render("[enter] send  [esc] cancel")
