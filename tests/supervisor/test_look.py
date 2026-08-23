@@ -85,16 +85,33 @@ class AnnotateTests(unittest.TestCase):
 
 
 class CapturePaneTests(unittest.TestCase):
-    def test_plain_capture_omits_e_flag(self):
+    def test_plain_capture_still_fetches_e_flag(self):
+        # agent-supervisor#521: the plain path now ALWAYS fetches -e --
+        # there is nothing to strip a suggestion out of without it. What
+        # changed is that the escapes are then discarded (dim spans
+        # removed, everything else destyled) rather than never fetched.
         runner = FakeRunner(stdout="frame\n")
         out = look.capture_pane("sess:0", escapes=False, runner=runner)
         self.assertEqual(out, "frame\n")
-        self.assertEqual(runner.calls[0], ["tmux", "capture-pane", "-p", "-t", "sess:0"])
+        self.assertEqual(runner.calls[0], ["tmux", "capture-pane", "-p", "-e", "-t", "sess:0"])
 
     def test_escaped_capture_includes_e_flag(self):
         runner = FakeRunner(stdout="frame\n")
         look.capture_pane("sess:0", escapes=True, runner=runner)
         self.assertEqual(runner.calls[0], ["tmux", "capture-pane", "-p", "-e", "-t", "sess:0"])
+
+    def test_plain_capture_drops_a_dim_suggestion_the_escaped_capture_keeps(self):
+        # The #521 regression itself: a frame carrying a dim (SGR 2)
+        # suggestion after the real prompt marker. The plain path must not
+        # let it read as real content; the escaped path must still show it
+        # (a caller who asked for the DOM gets the real bytes).
+        dim_frame = "\x1b[39m\xe2\x9d\xaf\xc2\xa0\x1b[2mTry \"write a test\"\x1b[0m\n"
+        runner = FakeRunner(stdout=dim_frame)
+        plain = look.capture_pane("sess:0", escapes=False, runner=runner)
+        self.assertNotIn("write a test", plain)
+        runner2 = FakeRunner(stdout=dim_frame)
+        escaped = look.capture_pane("sess:0", escapes=True, runner=runner2)
+        self.assertIn("write a test", escaped)
 
     def test_nonzero_exit_raises(self):
         def failing_runner(cmd, **kwargs):
@@ -121,7 +138,7 @@ class NavigateTests(unittest.TestCase):
         self.assertEqual(kinds, ["tmux", "sleep", "tmux"])
         self.assertEqual(events[0][1], ["tmux", "send-keys", "-t", "sess:0", "j", "Enter"])
         self.assertEqual(events[1][1], 0.7)
-        self.assertEqual(events[2][1], ["tmux", "capture-pane", "-p", "-t", "sess:0"])
+        self.assertEqual(events[2][1], ["tmux", "capture-pane", "-p", "-e", "-t", "sess:0"])
 
 
 class FramesTests(unittest.TestCase):

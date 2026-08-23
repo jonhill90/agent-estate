@@ -228,12 +228,58 @@ def _tmux(args, runner=None, timeout=DEFAULT_TIMEOUT):
 
 def capture_pane(target, escapes=False, runner=None, timeout=DEFAULT_TIMEOUT):
     """Read-only. Never sends input -- capture-pane is a read, and this
-    stays one (#110's constraint: "capturing must not disturb the pane")."""
-    args = ["capture-pane", "-p"]
+    stays one (#110's constraint: "capturing must not disturb the pane").
+
+    agent-supervisor#521: the plain (escapes=False) path used to be a bare
+    `capture-pane -p` -- no escapes fetched at all, so a Claude Code
+    prompt-suggestion (painted dim, SGR 2, into an idle input box) and real
+    typed content were byte-for-byte indistinguishable through it. That
+    made this the exact read path #521's investigation found producing
+    recurring unattributed text in idle build panes: an agent calling
+    `look.py capture` to see a pane read a suggestion nobody typed as if it
+    were real. Fixed the same way `input-box.sh` (agent-dotfiles#141,
+    agent-supervisor#193) already solved this for `send.sh`: always fetch
+    `-e` so the dim styling exists to check, then run it through
+    `dim-strip.sh` -- the SAME awk rule `input-box.sh` uses, not a
+    reimplementation -- which removes SGR codes and drops any span that was
+    painted dim ENTIRELY. `escapes=True` is unaffected and still returns
+    the raw frame verbatim: a caller asking for the DOM (#109's own
+    reverse-video diagnosis, `annotate()`, `png`) needs the real bytes,
+    dim spans included, not a filtered view.
+    """
+    args = ["capture-pane", "-p", "-e", "-t", target]
+    raw = _tmux(args, runner=runner, timeout=timeout)
     if escapes:
-        args.append("-e")
-    args += ["-t", target]
-    return _tmux(args, runner=runner, timeout=timeout)
+        return raw
+    return _strip_dim(raw, timeout=timeout)
+
+
+_DIM_STRIP_SH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dim-strip.sh")
+
+
+def _strip_dim(escaped_text, timeout=DEFAULT_TIMEOUT):
+    """Run an escaped capture-pane frame through dim-strip.sh's shared
+    `strip_dim_sgr` filter -- see capture_pane's own doc comment for why
+    this shells out rather than reimplementing the SGR walk in Python.
+
+    Deliberately does NOT take a `runner` override the way `_tmux` does:
+    this is a pure, local, no-side-effect filter (no tmux, no pane, no
+    network), so tests exercise the real script rather than a fake -- the
+    thing worth mocking is the tmux boundary, not this one.
+    """
+    proc = subprocess.run(["bash", _DIM_STRIP_SH], input=escaped_text, capture_output=True, text=True, timeout=timeout)
+    if proc.returncode != 0:
+        raise RuntimeError(f"look.py: dim-strip.sh failed: {proc.stderr.strip()}")
+    out = proc.stdout
+    # awk's per-line `print` always terminates its last line with a
+    # newline, even when the input's didn't (capture-pane -p's own output
+    # on a short/no-scrollback pane sometimes doesn't). Match the input's
+    # own trailing-newline shape rather than silently adding one --
+    # callers (capture_frames' equality checks, `frames --assert-motion`'s
+    # diffing) compare captured text byte-for-byte.
+    if not escaped_text.endswith("\n") and out.endswith("\n"):
+        out = out[:-1]
+    return out
 
 
 def send_keys(target, keys, runner=None, timeout=DEFAULT_TIMEOUT):

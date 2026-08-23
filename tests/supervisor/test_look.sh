@@ -65,6 +65,40 @@ else
   bad "capture --escapes carries the real reverse-video byte" "$escaped"
 fi
 
+# --- capture: agent-supervisor#521's own red/green -----------------------
+# A dim (SGR 2) span painted onto a real pane -- the exact shape Claude
+# Code's prompt-suggestion feature paints into an idle input box. The
+# pre-#521 plain path (`capture-pane -p`, no escapes fetched at all) could
+# not have told this apart from real typed content; this is the RED half.
+# `look.py capture`'s plain path must now drop it entirely (GREEN); the
+# escaped path must still show it, since a caller asking for the DOM wants
+# the real bytes.
+# The shell echoes the command line it was given BEFORE running it, so
+# "DIM-SUGGESTION" is on screen twice under the un-fixed behavior: once as
+# the echoed source text (never dim, unaffected either way) and once as the
+# rendered dim output capture-pane -p would previously have returned
+# unfiltered. Counting occurrences (not a bare substring match) is what
+# actually isolates the RENDERED instance from the echoed one.
+tmux send-keys -t "$S:shell" "printf '\\033[2mDIM-SUGGESTION\\033[0m real-text\\n'"
+sleep 0.3
+tmux send-keys -t "$S:shell" Enter
+sleep 1
+dim_plain="$(python3 "$LOOK" capture -t "$S:shell")"
+dim_plain_hits="$(grep -oc 'DIM-SUGGESTION' <<<"$dim_plain")"
+if [ "$dim_plain_hits" -eq 1 ] && grep -q 'real-text' <<<"$dim_plain"; then
+  ok "capture (plain) drops the rendered dim suggestion, keeps the echoed command + real text (#521)"
+else
+  bad "capture (plain) drops dim-styled suggestion text (#521)" "hits=$dim_plain_hits body=$dim_plain"
+fi
+
+dim_escaped="$(python3 "$LOOK" capture -t "$S:shell" --escapes)"
+dim_escaped_hits="$(grep -oc 'DIM-SUGGESTION' <<<"$dim_escaped")"
+if [ "$dim_escaped_hits" -eq 2 ]; then
+  ok "capture --escapes still carries the dim span for a caller who wants the real bytes"
+else
+  bad "capture --escapes still carries the dim span" "hits=$dim_escaped_hits body=$dim_escaped"
+fi
+
 annotated="$(python3 "$LOOK" capture -t "$S:shell" --annotate)"
 if grep -q 'reverse' <<<"$annotated" && grep -q 'SELECTED' <<<"$annotated"; then
   ok "capture --annotate names the reverse-video run in text, not just bytes"
