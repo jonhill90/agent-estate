@@ -1,7 +1,7 @@
 # SPEC: container execution mode (AgentBox)
 
-Verified against `/Users/jon/source/repos/Personal/AgentBox` at its
-current `main` tip, 2026-08-22, by reading its own docs/architecture/overview.md,
+Verified against the sibling `AgentBox` repo (`github.com/jonhill90/AgentBox`)
+at its current `main` tip, 2026-08-22, by reading its own docs/architecture/overview.md,
 docker-compose.yml, src/jumpbox_tools.py and src/policy.py directly, not by
 recalling what the project is expected to do. This is a **spec, not code** —
 `docs/SPEC-shell.md` S12 named implementing the container driver as its own

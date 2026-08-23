@@ -38,6 +38,30 @@ re-verification pass against `390c99a` is still needed and is explicitly
 out of scope here. Sections not flagged below were not re-checked in this
 pass.
 
+## Screenshots
+
+These are the real shell's real rendering code (`internal/nav`, the same
+sidebar and pane layout `keelson` ships), driven by `cmd/demo` — a build
+wired to invented data instead of live sources, so every frame carries an
+"ALL DATA ON THIS SCREEN IS FAKE" footer and none of it is mistakable for
+a real estate's state. Regenerate them with:
+
+```
+vhs testdata/vhs/readme-demo.tape
+```
+
+| Home | Dashboard |
+|---|---|
+| ![Home](docs/screenshots/home.png) | ![Dashboard](docs/screenshots/dashboard.png) |
+
+| Chat | Tasks |
+|---|---|
+| ![Chat](docs/screenshots/chat.png) | ![Tasks](docs/screenshots/tasks.png) |
+
+| Library |
+|---|
+| ![Library](docs/screenshots/library.png) |
+
 ## What it is today
 
 **Stale, corrected 2026-08-23 against `390c99a`.** The "persistent left

@@ -3,3 +3,4 @@
 *.test
 /AGENTS.LOCAL.md
 /CLAUDE.LOCAL.md
+/testdata/vhs/out/
