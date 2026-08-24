@@ -266,12 +266,17 @@ record needs to name what happened to the work it once conditioned.
 **`agent-supervisor#555`** is the live, active path — a per-PR,
 human-authorized exception — for the PRs stuck behind the now-retired
 mechanism. As measured directly against the current board (not
-estimated): **seven** — `#531`, `#533`, `#534`, `#535`, `#536`, `#537`,
-`#557`. Three others once thought to be in the same group (`#541`,
+estimated): **eight** — `#531`, `#533`, `#534`, `#535`, `#536`, `#537`,
+`#557`, `#561`. **Corrected from seven, caught by a later review round
+(`estate:3`): `#561` already qualified — APPROVE'd, no commissioning
+issue — before this section was first written, not added to the count
+afterward. That was an omission at push time, not staleness the section's
+own hedge covers; naming it rather than letting the correction pass
+silently.** Three others once thought to be in the same group (`#541`,
 `#547` — this document itself — `#553`) are blocked on their own review
 content, not authorship, and aren't part of this count. Check `#555`
 directly for the current number; this section will go stale the moment
-it changes.
+it changes again.
 
 ## What this does not decide
 
