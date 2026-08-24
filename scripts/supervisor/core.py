@@ -192,6 +192,83 @@ def lane_relation_from_rows(one_row, other_row):
     return "same" if pane_one == pane_other else "different"
 
 
+# agent-supervisor#605. `daemon`/`d-<task>` (`daemon/internal/ledger/
+# ledger.go`'s `EnsureLane`, called from `main.go:216`'s hardcoded `-lane`
+# default and `batch.go:103`'s per-job `d-<task>`) and `<session>:<index>`
+# (`LANE_ID_RE`, a tmux window) are two namespaces that can never denote the
+# same actor BY CONSTRUCTION: a tmux lane has no write path into the
+# daemon's own author-lane field, and `EnsureLane` is the only thing in this
+# estate that ever inserts a `lanes` row with `pane_id=''` and
+# `server_id='supervisord'` -- nothing on the tmux dispatch path can produce
+# that combination (`register_lane`'s tmux callers always pass a real pane
+# id). Recognizing that disjointness is different in kind from #539/#552/
+# #556, each of which tried to ESTABLISH identity from a gameable
+# self-declared signal and was rejected for exactly that; this widens
+# nothing about what "same" means; it only lets `different` be told apart
+# from `unknown` for a pair whose respective shape/pane-id checks
+# (`lane_relation`, `lane_relation_from_rows`) were never built with the
+# other's namespace in mind.
+DAEMON_LANE_RE = re.compile(r"^(daemon|d-.+)$")
+
+
+def is_daemon_shaped(lane_id):
+    """String-shape only -- exactly as untrustworthy standing alone as any
+    other self-declared id. See `daemon_lane_verified` for the actual proof;
+    nothing here is ever treated as identity by itself."""
+    return isinstance(lane_id, str) and bool(DAEMON_LANE_RE.match(lane_id.strip()))
+
+
+def daemon_lane_verified(lane_id, row):
+    """True only when `lane_id` is daemon-shaped AND the ledger's OWN row for
+    it carries the exact signature `EnsureLane` writes and nothing else in
+    this estate ever writes: `server_id == 'supervisord'`,
+    `transport == 'claude-print'`, `pane_id == ''`. This is the "real ledger
+    row for the daemon-authored task" #605's decision requires -- a
+    hand-typed `Author-Lane: daemon` trailer (or a PR body claiming it)
+    names no such row, or names one with a different signature, so it
+    cannot satisfy this and falls through to the existing fail-closed
+    `unknown` unchanged.
+    """
+    if not is_daemon_shaped(lane_id) or not row:
+        return False
+    return (
+        row.get("server_id") == "supervisord"
+        and row.get("transport") == "claude-print"
+        and (row.get("pane_id") or "") == ""
+    )
+
+
+def cross_namespace_lane_relation(one_id, one_row, other_id, other_row):
+    """`different` when exactly one side is a VERIFIED daemon lane (see
+    `daemon_lane_verified`) and the other is a genuine tmux lane id
+    (matches `LANE_ID_RE`) with a resolvable ledger `pane_id`. `None` when
+    this rule does not apply -- the caller must fall through to
+    `lane_relation`/`lane_relation_from_rows` unchanged in that case.
+
+    Daemon-vs-daemon (or any pair where neither/both sides verify as a
+    daemon lane) is deliberately OUT of scope here and always returns
+    `None`: same-namespace comparison keeps using the existing same/
+    different/unknown machinery, per #605's decision.
+
+    Never answers `same`: a verified daemon lane and a genuine tmux lane
+    cannot be the same actor by construction, so this function's only
+    possible answers are `different` (the cross-namespace case resolves)
+    or `None` (it does not apply).
+    """
+    one_is_daemon = daemon_lane_verified(one_id, one_row)
+    other_is_daemon = daemon_lane_verified(other_id, other_row)
+    if one_is_daemon == other_is_daemon:
+        return None  # both daemon, or neither -- not this rule's case
+    _, tmux_id, tmux_row = (
+        (one_id, other_id, other_row) if one_is_daemon else (other_id, one_id, one_row)
+    )
+    if not isinstance(tmux_id, str) or not LANE_ID_RE.match(tmux_id.strip()):
+        return None
+    if not tmux_row or not (tmux_row.get("pane_id") or "").strip():
+        return None
+    return "different"
+
+
 # agent-supervisor#292 item 3: when a candidate is refused, say WHICH
 # population each side is in, so the message is actionable. The pre-existing
 # text ("a session rename changes a lane's name, not which window it is")
