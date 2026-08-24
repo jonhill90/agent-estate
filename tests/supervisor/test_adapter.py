@@ -116,6 +116,19 @@ class AdapterTest(unittest.TestCase):
         self.assertIn("claude-task", self.transport.sends[1][1])
         self.assertIn("complete", self.transport.sends[0][1])
 
+    def test_assign_task_records_the_lanes_registered_worktree(self):
+        """agent-supervisor#611: `Ledger.assign` defaults `worktree_path` to
+        "" -- something must pass the real one through, or the column is
+        silently blank for every task assigned via this direct `assign_task`
+        call (as opposed to `dispatch.sh`'s `record-dispatch`, the only
+        other writer of this column). Mutation-check: drop
+        `worktree_path=record["repo"]` from `TmuxAdapter.assign_task` and
+        this goes red -- `codex["worktree_path"]` reverts to "".
+        """
+        self.seed_source("codex-task", "Review one artifact")
+        codex = self.adapter.assign_task(lane="architecture", task_id="codex-task", summary="Review one artifact")
+        self.assertEqual("/repo/hill90", codex["worktree_path"])
+
     def test_notify_supervisor_prompt_points_at_a_command_that_exists(self):
         """agent-supervisor#362, found by the independent review of #381.
 
@@ -339,6 +352,19 @@ class ACPAdapterTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "unknown lane"):
             self.adapter.assign_task(lane="missing", task_id="t1", summary="x")
 
+    def test_assign_task_records_the_lanes_registered_worktree(self):
+        """agent-supervisor#611: see the matching test on `AdapterTest`
+        (TmuxAdapter). Mutation-check: drop `worktree_path=record["repo"]`
+        from `ACPAdapter.assign_task` and `task["worktree_path"]` reverts to
+        "".
+        """
+        self.adapter.register_lane(
+            lane="copilot-worker", target=None, harness="copilot-acp", repo="/repo/hill90", nonce="nonce-acp"
+        )
+        self.seed_source("acp-task", "Review one artifact")
+        task = self.adapter.assign_task(lane="copilot-worker", task_id="acp-task", summary="Review one artifact")
+        self.assertEqual("/repo/hill90", task["worktree_path"])
+
     def test_observe_lane_is_a_no_op_because_prompts_are_synchronous(self):
         self.adapter.register_lane(
             lane="copilot-worker", target=None, harness="copilot-acp", repo="/repo/hill90", nonce="nonce-acp"
@@ -452,6 +478,19 @@ class PiRPCAdapterTest(unittest.TestCase):
     def test_assign_task_to_unregistered_lane_raises(self):
         with self.assertRaisesRegex(RuntimeError, "unknown lane"):
             self.adapter.assign_task(lane="missing", task_id="t1", summary="x")
+
+    def test_assign_task_records_the_lanes_registered_worktree(self):
+        """agent-supervisor#611: see the matching test on `AdapterTest`
+        (TmuxAdapter). Mutation-check: drop `worktree_path=record["repo"]`
+        from `PiRPCAdapter.assign_task` and `task["worktree_path"]` reverts
+        to "".
+        """
+        self.adapter.register_lane(
+            lane="pi-worker", target=None, harness="pi", repo="/repo/hill90", nonce="nonce-pi"
+        )
+        self.seed_source("pi-task", "Review one artifact")
+        task = self.adapter.assign_task(lane="pi-worker", task_id="pi-task", summary="Review one artifact")
+        self.assertEqual("/repo/hill90", task["worktree_path"])
 
     def test_assign_task_does_not_mark_delivered_when_the_transport_reports_a_dropped_stream(self):
         """agent-supervisor#61: `send_literal` on a stream that closed before
@@ -674,6 +713,15 @@ class ClaudePrintAdapterTest(unittest.TestCase):
 
         # DELIVERED, not complete. Completion is the lane's to report.
         self.assertEqual("delivered", task["status"])
+
+        # agent-supervisor#611: `tasks.worktree_path` was left at `assign`'s
+        # own default ("") for every claude-print completion -- the exact
+        # gap that left `as531-as531-fixpass` (real disk evidence, verifiable
+        # reflog) unresolvable by the independence gate while
+        # `as605-as605-daemon-ns` (dispatched the same way) happened to carry
+        # it. Mutation-check: drop `worktree_path=record["repo"]` from
+        # `ClaudePrintAdapter.assign_task` and this goes red.
+        self.assertEqual("/repo/hill90", task["worktree_path"])
 
         assign_transport = FakeClaudePrintTransport.instances[-1]
         # Started detached, and NOT terminated -- terminating would kill the

@@ -189,11 +189,24 @@ class TmuxAdapter:
             if state != "idle":
                 raise RuntimeError(f"lane is {state}; assignment not sent")
 
+            # agent-supervisor#611: `worktree_path` was left at `assign`'s
+            # own default ("") on every path that reaches `Ledger.assign`
+            # through an adapter's own `assign_task` rather than through
+            # `dispatch.sh`'s `record-dispatch` (the only OTHER writer of
+            # this column -- see `record_dispatch`'s call into
+            # `Ledger._assign_tx`). `record["repo"]` is the worktree: every
+            # `register_lane` above requires it (`TmuxAdapter.register_lane`
+            # checks `metadata["path"] != repo`; the headless adapters pass
+            # the worktree `worktree.sh` just built straight through as
+            # `repo`), so it is already sitting on the lane record this
+            # call just verified -- not guessed, not re-derived, the exact
+            # value `register_lane` recorded for THIS lane.
             task = self.ledger.assign(
                 task_id=task_id,
                 lane=lane,
                 pane_nonce=record["nonce"],
                 summary=summary,
+                worktree_path=record["repo"],
             )
             incoming = self.ledger.root / "incoming"
             incoming.mkdir(mode=0o700, exist_ok=True)
@@ -330,7 +343,16 @@ class ACPAdapter:
                     f"delivery already attempted for task {task_id} and is unconfirmed; "
                     "reconcile the task before it can be assigned again"
                 )
-            self.ledger.assign(task_id=task_id, lane=lane, pane_nonce=record["nonce"], summary=summary)
+            # agent-supervisor#611: see the matching comment on
+            # `TmuxAdapter.assign_task` -- `record["repo"]` is the worktree
+            # `register_lane` recorded for this lane, not a guess.
+            self.ledger.assign(
+                task_id=task_id,
+                lane=lane,
+                pane_nonce=record["nonce"],
+                summary=summary,
+                worktree_path=record["repo"],
+            )
             prompt = (
                 f"[Hill90 task {task_id}] {summary}\n\n"
                 "Do not begin unrelated work. Record commands and actual outputs in a compact result."
@@ -443,7 +465,16 @@ class PiRPCAdapter:
                     f"delivery already attempted for task {task_id} and is unconfirmed; "
                     "reconcile the task before it can be assigned again"
                 )
-            self.ledger.assign(task_id=task_id, lane=lane, pane_nonce=record["nonce"], summary=summary)
+            # agent-supervisor#611: see the matching comment on
+            # `TmuxAdapter.assign_task` -- `record["repo"]` is the worktree
+            # `register_lane` recorded for this lane, not a guess.
+            self.ledger.assign(
+                task_id=task_id,
+                lane=lane,
+                pane_nonce=record["nonce"],
+                summary=summary,
+                worktree_path=record["repo"],
+            )
             prompt = (
                 f"[Hill90 task {task_id}] {summary}\n\n"
                 "Do not begin unrelated work. Record commands and actual outputs in a compact result."
@@ -576,7 +607,23 @@ class ClaudePrintAdapter:
                     f"delivery already attempted for task {task_id} and is unconfirmed; "
                     "reconcile the task before it can be assigned again"
                 )
-            self.ledger.assign(task_id=task_id, lane=lane, pane_nonce=record["nonce"], summary=summary)
+            # agent-supervisor#611: `worktree_path` used to fall through to
+            # `assign`'s own default (""), the same as every other adapter's
+            # `assign_task` -- `dispatch.sh`'s tmux flow is the only OTHER
+            # writer of this column (`record_dispatch`'s call into
+            # `Ledger._assign_tx`, forwarding the `--worktree` it was given),
+            # and this class never went through it. `record["repo"]` is the
+            # worktree `register_lane` recorded for this lane (`worktree.sh
+            # new`'s own output, passed straight through as `repo` by
+            # `dispatch-claude-print.sh`'s `register` call) -- not guessed,
+            # not re-derived, the exact value this lane was registered with.
+            self.ledger.assign(
+                task_id=task_id,
+                lane=lane,
+                pane_nonce=record["nonce"],
+                summary=summary,
+                worktree_path=record["repo"],
+            )
             # agent-supervisor#278: the lane must now report its OWN
             # completion, because nothing waits around to observe it any
             # more. These are the same `accept`/`complete` instructions
