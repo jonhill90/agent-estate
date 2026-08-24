@@ -97,9 +97,14 @@ three that doesn't converge back onto its own prerequisite.** It was
 raised when this design was first debated (`0008`) and set aside for
 timing, not for being wrong — nothing in this document or `#552` disputes
 its soundness, only its speed. That speed advantage is gone (see above).
-It also closes `agent-supervisor#532` (the director's own missing `lanes`
+It also closes `agent-supervisor#538` (the director's own missing `lanes`
 row — the exact defect `#549` traced the false-positive incident to) with
 the same mechanism, rather than needing a separate fix for that case.
+**Corrected citation, caught by review**: earlier drafts of this document
+cited `#532` for this fact — `#532` is the tmux-server-crash incident
+report; the "`estate:1` has no `lanes` row" claim is `#538`'s own body
+text, not `#532`'s. Verified by reading both directly rather than
+re-trusting the earlier citation.
 
 ## Decision
 
@@ -159,7 +164,7 @@ relaxed here.
    never a bare boolean easy to drop later). A PR whose dispatch cannot
    be found or confirmed this way stays unresolved — fail-closed applies
    to the reconstruction exactly as to everything else. This also
-   resolves `agent-supervisor#532`'s recovery gap for dispatches from
+   resolves `agent-supervisor#538`'s recovery gap for dispatches from
    here forward; it does not retroactively grant the director a `lanes`
    row for past work by the same reasoning.
 4. **`agent-supervisor#546`** (the independent poller, filed against the
@@ -171,6 +176,22 @@ relaxed here.
 5. **`agent-supervisor#550`** (the cheap interim guard — refuse
    `mark-pr-external` when the caller is an estate participant) still
    stands, unaffected by this reversal; it addresses a different tool.
+
+## The residual — added because this document, retiring the mechanism, owes a path for the work stuck behind it
+
+This gap was found by review, not self-caught: a decision record retiring
+a mechanism has to say what happens to the work that was depending on it,
+not just that the mechanism is retired. **`agent-supervisor#555`** is
+that path — a per-PR, human-authorized exception, live and active now,
+not a future contingency. As measured directly (`merge-pr.sh` re-run
+against every open PR, not estimated): **seven** PRs currently have no
+honest `dispatch.sh` route and sit on `#555` — `#531`, `#533`, `#534`,
+`#535`, `#536`, `#537`, `#557`. Three others that were briefly thought to
+be in the same boat (`#541`, `#547`, `#553` — this document itself) are
+blocked on their own review content, not on authorship, and are not part
+of this accounting. This section will go stale the moment the seven
+change; check `#555` directly for the current count rather than trusting
+the number restated here.
 
 ## What this does not decide
 
