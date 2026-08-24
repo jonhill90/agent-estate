@@ -305,6 +305,50 @@ class FixpassEvidenceGateTest(unittest.TestCase):
         result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=1)
         self.assertEqual("allow", result["decision"])
 
+    # --- agent-supervisor#571: second shape of #484/#540 ---------------------
+    def test_547_diagnosis_comment_alone_is_not_a_rejection(self):
+        # The real #547 comment (`2026-08-24T02:20:57Z`, verbatim) diagnoses
+        # the failing `gate` check by quoting its own assertion sentence --
+        # "a REQUEST CHANGES review or a rejected Verdict: line" -- inside a
+        # fenced code block, plus two more `Verdict:`/`Review-Lane:` mentions
+        # each single-backtick-quoted elsewhere in the comment. None of these
+        # is a real posted verdict: no trailer block, no `Review-Lane:` line
+        # at all. This is THIS module's own `_is_rejected_verdict_comment`,
+        # not just `verdict.py`'s (both reuse `_scan_verdict_lines`, per this
+        # module's own docstring) -- with nothing else on the PR, the gate
+        # must find nothing to require evidence for.
+        diagnosis_comment = (
+            "## Diagnosed the failing `gate` check — it's Fixpass evidence, not UI evidence (`#565`)\n"
+            "\n"
+            "`gh pr checks 547` shows two checks both named `gate` — exactly the `#565`\n"
+            "ambiguity. Resolved which is which by checking each run's own workflow\n"
+            "name, not the display label:\n"
+            "\n"
+            "```\n"
+            'run 32681427761  conclusion=failure  name="Fixpass evidence"   headSha=becbbaa4\n'
+            'run 32681427793  conclusion=success  name="UI evidence"        headSha=becbbaa4\n'
+            "```\n"
+            "\n"
+            "**The failing one is `Fixpass evidence`.** Its job log (`Check fixpass\n"
+            "evidence` step) prints the actual assertion:\n"
+            "\n"
+            "```\n"
+            "PR #547 had a REQUEST CHANGES review or a rejected Verdict: line, but\n"
+            "carries no <!-- fixpass-evidence:v1 --> marker.\n"
+            "```\n"
+            "\n"
+            "The `01:57:52Z` evidence block is real, but it's dated *before* the\n"
+            "`02:01:28Z` `Verdict: REQUEST CHANGES` / `Review-Lane: estate:4` comment\n"
+            "— which is itself a re-post. The gate has no way to know that\n"
+            "re-post's substance was already addressed before it was even reposted —\n"
+            "it only sees a `Verdict:`/`Review-Lane:` pair with a later timestamp than\n"
+            "any existing evidence block, and refuses on that basis.\n"
+        )
+        runner = FakeRunner(reviews=[], body="", comments=[diagnosis_comment])
+        result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=547)
+        self.assertEqual("allow", result["decision"])
+        self.assertIn("nothing to gate", result["reason"])
+
 
 if __name__ == "__main__":
     unittest.main()
