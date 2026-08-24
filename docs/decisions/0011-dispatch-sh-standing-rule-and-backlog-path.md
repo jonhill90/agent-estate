@@ -178,6 +178,23 @@ repo, per cause, not a restated intention:
    failed once tonight, and the backup is `#555`'s human-authorized
    exception catching what the discipline misses — not a closed loop.**
 
+## Companion rule for existing work — second proof landed, `#543`
+
+`agent-supervisor#543` merged the same way `#560` did: a genuine fix-pass
+dispatched through `dispatch.sh` against a real issue (`#542`), not this
+document's new-work rule, but the same mechanism applied backward to a
+PR that already existed. **The standing companion rule for the current
+backlog: before any of them reaches `#555`'s human-authorized exception,
+try a genuine `dispatch.sh --pr <N>` fix-pass against a real issue first
+— existing if one already applies, freshly filed if not (see `#555` for
+the measured routing: `#544`→`#540`, `#551`→`#548`, `#559`→`#550` already
+have one; the rest need a real issue filed before dispatching, which is
+itself legitimate work, not a formality, given how much this repo's own
+state has drifted tonight).** `#555`'s fallback stays available and is
+not being retired — it is the backstop for whatever a genuine fix-pass
+finds nothing to do on and cannot get a fresh independent verdict for, not
+the default first move.
+
 ## What this does not decide
 
 - Which specific lane dispatches each fix-pass, or the exact brief
