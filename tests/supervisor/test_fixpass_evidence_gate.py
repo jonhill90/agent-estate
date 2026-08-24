@@ -77,11 +77,18 @@ class FixpassEvidenceGateTest(unittest.TestCase):
     def test_rejected_verdict_comment_with_no_marker_refuses(self):
         # A real posted verdict (#53's comment-posted path) carries both
         # trailers `post-verdict.sh` requires before it will post one --
-        # agent-supervisor#484.
+        # agent-supervisor#484. agent-supervisor#595: `verdict.py`'s
+        # `_scan_verdict_lines` now requires the complete, ADJACENT
+        # Verdict:/Review-Lane:/Reviewed-SHA: block to consider a line
+        # operative at all -- this comment's own `Reviewed-SHA:` line is
+        # added so it stays a real rejection under the shared classifier.
         runner = FakeRunner(
             reviews=[],
             body="",
-            comments=["Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\n\nthe bug is still there"],
+            comments=[
+                "Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\n"
+                "Reviewed-SHA: " + "a" * 40 + "\nthe bug is still there"
+            ],
         )
         result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=1)
         self.assertEqual("refuse", result["decision"])
@@ -127,10 +134,16 @@ class FixpassEvidenceGateTest(unittest.TestCase):
     def test_populated_block_in_a_followup_comment_passes(self):
         # #338's whole point: evidence posted as a follow-up after the fix
         # pass, not necessarily present when the PR was first opened.
+        # agent-supervisor#595: `Reviewed-SHA:` added, adjacent, so this
+        # stays a real rejection under the shared classifier.
         runner = FakeRunner(
             reviews=[],
             body="",
-            comments=["Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\nstill broken", GOOD_BLOCK],
+            comments=[
+                "Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\n"
+                "Reviewed-SHA: " + "a" * 40 + "\nstill broken",
+                GOOD_BLOCK,
+            ],
         )
         result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=1)
         self.assertEqual("allow", result["decision"])
@@ -213,17 +226,27 @@ class FixpassEvidenceGateTest(unittest.TestCase):
 
     # --- round-binding (agent-supervisor#340 finding 2) ---------------------
     def test_evidence_from_a_resolved_earlier_round_should_not_cover_a_new_unrelated_rejection(self):
+        # agent-supervisor#595: `Reviewed-SHA:` added, adjacent, to both
+        # rejection comments so they stay real rejections under the shared
+        # classifier -- without it neither round is found at all, and this
+        # test would pass ("refuse" happens to also be the "nothing to gate"
+        # outcome) for a reason unrelated to round-binding, which is what
+        # this test is actually about.
         runner = FakeRunner(
             reviews=[],
             comments=[
                 {
-                    "body": "Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\nround 1: old_bug is broken",
+                    "body": (
+                        "Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\n"
+                        "Reviewed-SHA: " + "a" * 40 + "\nround 1: old_bug is broken"
+                    ),
                     "createdAt": "2026-08-01T00:00:00Z",
                 },
                 {"body": GOOD_BLOCK, "createdAt": "2026-08-01T01:00:00Z"},
                 {
                     "body": (
                         "Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\n"
+                        "Reviewed-SHA: " + "b" * 40 + "\n"
                         "round 2: unrelated new_bug is broken, nothing pasted yet"
                     ),
                     "createdAt": "2026-08-10T00:00:00Z",
@@ -234,16 +257,26 @@ class FixpassEvidenceGateTest(unittest.TestCase):
         self.assertEqual("refuse", result["decision"])
 
     def test_fresh_evidence_posted_after_the_latest_rejection_is_allowed(self):
+        # agent-supervisor#595: `Reviewed-SHA:` added, adjacent, for the same
+        # reason as the test above -- this test's whole point is that a real
+        # rejection exists and fresh evidence answers it, which requires
+        # both rejections to actually be found as rejections.
         runner = FakeRunner(
             reviews=[],
             comments=[
                 {
-                    "body": "Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\nround 1: old_bug is broken",
+                    "body": (
+                        "Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\n"
+                        "Reviewed-SHA: " + "a" * 40 + "\nround 1: old_bug is broken"
+                    ),
                     "createdAt": "2026-08-01T00:00:00Z",
                 },
                 {"body": GOOD_BLOCK, "createdAt": "2026-08-01T01:00:00Z"},
                 {
-                    "body": "Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\nround 2: new_bug is broken",
+                    "body": (
+                        "Verdict: REQUEST CHANGES\nReview-Lane: agent-supervisor:3\n"
+                        "Reviewed-SHA: " + "b" * 40 + "\nround 2: new_bug is broken"
+                    ),
                     "createdAt": "2026-08-10T00:00:00Z",
                 },
                 {"body": GOOD_BLOCK, "createdAt": "2026-08-10T01:00:00Z"},

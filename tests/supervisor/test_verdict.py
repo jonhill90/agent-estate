@@ -408,8 +408,15 @@ class GithubCommentVerdictTests(unittest.TestCase):
 
     def test_verdict_comment_alone_is_reported_not_none(self):
         """Guard 1: a PR whose only verdict is a `**Verdict:` comment must
-        be reported, not read as `none`."""
-        comments = [{"author": {"login": "codex"}, "body": "**Verdict: REQUEST CHANGES**  head SHA abc123", "createdAt": "2026-08-13T18:03:05Z"}]
+        be reported, not read as `none`. agent-supervisor#595: a
+        `Review-Lane:`/`Reviewed-SHA:` pair is appended immediately after the
+        label line so this stays an operative comment under the new
+        complete-block requirement."""
+        comments = [{
+            "author": {"login": "codex"},
+            "body": "**Verdict: REQUEST CHANGES**  head SHA abc123\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40,
+            "createdAt": "2026-08-13T18:03:05Z",
+        }]
         source = GithubReviewVerdictSource(
             runner=_comment_runner(comments=comments, author={"login": "jonhill90"})
         )
@@ -453,7 +460,10 @@ class GithubCommentVerdictTests(unittest.TestCase):
         self.assertEqual(result["verdict"], "none")
 
     def test_verdict_comment_exposes_a_review_lane_stamp(self):
-        comments = [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:4"}]
+        comments = [{
+            "author": {"login": "jonhill90"},
+            "body": "**Verdict: APPROVE**\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40,
+        }]
         source = GithubReviewVerdictSource(
             runner=_comment_runner(comments=comments, author={"login": "jonhill90"})
         )
@@ -463,19 +473,39 @@ class GithubCommentVerdictTests(unittest.TestCase):
         self.assertEqual(result["verdict_kind"], "comment")
 
     def test_unstamped_verdict_comment_does_not_guess_independence_from_login(self):
+        """This case's own name and shape changed under agent-supervisor#595
+        -- it used to prove a `Verdict:` comment with NO `Review-Lane:` at
+        all still resolved to `approved` (just without a `reviewer_lane`
+        field), i.e. that the source never guessed independence from the
+        comment author's GitHub login. Per #595's decision, a bare
+        `Verdict:` label with nothing genuine following it (no trailer at
+        all) is no longer operative -- it is exactly one of the poisoning
+        shapes #595 closes -- so this now correctly resolves to `none`, not
+        `approved`. The property this test still protects (never inferring
+        independence from `author.login`) is now proven by the ABSENCE of
+        a decisive verdict rather than by the absence of a `reviewer_lane`
+        field on a decisive one."""
         comments = [{"author": {"login": "codex"}, "body": "**Verdict: APPROVE**"}]
         source = GithubReviewVerdictSource(
             runner=_comment_runner(comments=comments, author={"login": "jonhill90"})
         )
         result = source.verdict(repo=REPO, number=1)
-        self.assertEqual(result["verdict"], "approved")
+        self.assertEqual(result["verdict"], "none")
         self.assertNotIn("reviewer_lane", result)
-        self.assertNotIn("independent", result["detail"])
+        self.assertNotIn("independent", result.get("detail", ""))
 
     def test_the_most_recent_matching_comment_wins(self):
         comments = [
-            {"author": {"login": "codex"}, "body": "**Verdict: REQUEST CHANGES**", "createdAt": "2026-08-13T10:00:00Z"},
-            {"author": {"login": "codex"}, "body": "**Verdict: APPROVE**", "createdAt": "2026-08-13T18:00:00Z"},
+            {
+                "author": {"login": "codex"},
+                "body": "**Verdict: REQUEST CHANGES**\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40,
+                "createdAt": "2026-08-13T10:00:00Z",
+            },
+            {
+                "author": {"login": "codex"},
+                "body": "**Verdict: APPROVE**\nReview-Lane: t:4\nReviewed-SHA: " + "b" * 40,
+                "createdAt": "2026-08-13T18:00:00Z",
+            },
         ]
         source = GithubReviewVerdictSource(runner=_comment_runner(comments=comments))
         result = source.verdict(repo=REPO, number=1)
@@ -488,11 +518,17 @@ class GithubCommentVerdictTests(unittest.TestCase):
         `Reviewed-SHA:` trailer matching `head_sha` (#213) so this test
         keeps exercising ITS OWN guard -- the review-to-comment fallback --
         without also tripping the freshness guard #213 added to the comment
-        path itself; that guard has its own tests below."""
+        path itself; that guard has its own tests below. agent-supervisor
+        #595: a `Review-Lane:` line is now also required, immediately
+        between `Verdict:` and `Reviewed-SHA:`, for the block to be
+        operative at all."""
         old_sha = "a" * 40
         head_sha = "b" * 40
         reviews = [{"state": "APPROVED", "commit": {"oid": old_sha}}]
-        comments = [{"author": {"login": "codex"}, "body": f"**Verdict: REQUEST CHANGES**\nReviewed-SHA: {head_sha}"}]
+        comments = [{
+            "author": {"login": "codex"},
+            "body": f"**Verdict: REQUEST CHANGES**\nReview-Lane: t:4\nReviewed-SHA: {head_sha}",
+        }]
         source = GithubReviewVerdictSource(
             runner=_comment_runner(reviews=reviews, comments=comments), patch_id=lambda diff: None
         )
@@ -508,21 +544,31 @@ class GithubCommentVerdictTests(unittest.TestCase):
         green at <sha>") was the only thing anyone read, and it is true
         while answering a question nobody asked. No `Reviewed-SHA:`
         trailer here -- this is the timestamp backstop's job: a commit
-        landed newer than the verdict, so it must refuse and name both."""
+        landed newer than the verdict, so it must refuse and name both.
+
+        agent-supervisor#595: a comment with NO `Reviewed-SHA:` trailer at
+        all is no longer operative through `GithubReviewVerdictSource
+        .verdict()` -- `_scan_verdict_lines` requires the complete
+        three-line block for a `Verdict:` line to be found at all, so this
+        body (label + `Review-Lane:` only) now resolves `none` end-to-end,
+        never reaching `_comment_freshness`'s timestamp backstop. That
+        mechanism is still real, correct code (see its own docstring in
+        `verdict.py` for why it is kept), so this test now exercises it
+        DIRECTLY, the same way `BareDecisionLineTests` exercises
+        `_bare_decision_line` directly after its own end-to-end wiring was
+        retired."""
         head_sha = "c" * 40
-        comments = [
-            {
-                "author": {"login": "codex"},
-                "body": "**Verdict: APPROVE**\nReview-Lane: t:4",
-                "createdAt": "2026-08-15T22:48:01Z",
-            }
-        ]
-        commits = [{"oid": head_sha, "committedDate": "2026-08-15T22:56:42Z"}]
-        source = GithubReviewVerdictSource(runner=_comment_runner(comments=comments, commits=commits))
-        result = source.verdict(repo=REPO, number=204, head_sha=head_sha)
-        self.assertEqual(result["verdict"], "unknown")
-        self.assertNotEqual(result["verdict"], "approved")
-        self.assertIn(head_sha, result["detail"])
+        source = GithubReviewVerdictSource(runner=lambda cmd: (_ for _ in ()).throw(RuntimeError("no gh call expected")))
+        fresh, note, refusal = source._comment_freshness(
+            body="**Verdict: APPROVE**\nReview-Lane: t:4",
+            created_at="2026-08-15T22:48:01Z",
+            head_sha=head_sha,
+            commits=[{"oid": head_sha, "committedDate": "2026-08-15T22:56:42Z"}],
+            repo=REPO,
+            number=204,
+        )
+        self.assertFalse(fresh)
+        self.assertIn(head_sha, refusal)
 
     def test_mutation_213_a_freshness_check_that_always_passes_must_turn_this_red(self):
         """The bar #213 sets for the comment path, mirroring #218's own
@@ -530,22 +576,31 @@ class GithubCommentVerdictTests(unittest.TestCase):
         comment, at the same `head_sha`, must answer differently depending
         only on whether a newer commit exists. A freshness check that
         always agrees (or is never consulted) collapses these to the same
-        verdict and this test goes red."""
+        verdict and this test goes red.
+
+        agent-supervisor#595: exercised directly against `_comment_freshness`
+        now, for the same reason the test above is -- an untrailered
+        comment is no longer reachable through the end-to-end `.verdict()`
+        path at all."""
         head_sha = "c" * 40
-        comments = [
-            {
-                "author": {"login": "codex"},
-                "body": "**Verdict: APPROVE**\nReview-Lane: t:4",
-                "createdAt": "2026-08-15T22:48:01Z",
-            }
-        ]
-        stale = GithubReviewVerdictSource(
-            runner=_comment_runner(comments=comments, commits=[{"oid": head_sha, "committedDate": "2026-08-15T22:56:42Z"}])
-        ).verdict(repo=REPO, number=1, head_sha=head_sha)
-        fresh = GithubReviewVerdictSource(
-            runner=_comment_runner(comments=comments, commits=[{"oid": head_sha, "committedDate": "2026-08-15T20:00:00Z"}])
-        ).verdict(repo=REPO, number=1, head_sha=head_sha)
-        self.assertNotEqual(stale["verdict"], fresh["verdict"])
+        source = GithubReviewVerdictSource(runner=lambda cmd: (_ for _ in ()).throw(RuntimeError("no gh call expected")))
+        stale, _, _ = source._comment_freshness(
+            body="**Verdict: APPROVE**\nReview-Lane: t:4",
+            created_at="2026-08-15T22:48:01Z",
+            head_sha=head_sha,
+            commits=[{"oid": head_sha, "committedDate": "2026-08-15T22:56:42Z"}],
+            repo=REPO,
+            number=1,
+        )
+        fresh, _, _ = source._comment_freshness(
+            body="**Verdict: APPROVE**\nReview-Lane: t:4",
+            created_at="2026-08-15T22:48:01Z",
+            head_sha=head_sha,
+            commits=[{"oid": head_sha, "committedDate": "2026-08-15T20:00:00Z"}],
+            repo=REPO,
+            number=1,
+        )
+        self.assertNotEqual(stale, fresh)
 
     def test_regression_213_reviewed_sha_trailer_matching_head_wins_over_timestamp_backstop(self):
         """The honest mechanism (#213 proposal 1): a reviewer who states the
@@ -625,25 +680,34 @@ class GithubCommentVerdictTests(unittest.TestCase):
         """The timestamp backstop (#213 proposal 2) for a verdict comment
         posted before this fix existed and therefore carries no
         `Reviewed-SHA:` trailer: when nothing on the branch is newer than
-        the verdict, it still stands."""
+        the verdict, it still stands.
+
+        agent-supervisor#595: exercised directly against `_comment_freshness`
+        -- an untrailered comment cannot reach this mechanism through the
+        end-to-end `.verdict()` path anymore (see the two tests above)."""
         head_sha = "d" * 40
-        comments = [
-            {
-                "author": {"login": "codex"},
-                "body": "**Verdict: APPROVE**\nReview-Lane: t:4",
-                "createdAt": "2026-08-15T23:00:00Z",
-            }
-        ]
-        commits = [{"oid": head_sha, "committedDate": "2026-08-15T22:00:00Z"}]
-        result = GithubReviewVerdictSource(runner=_comment_runner(comments=comments, commits=commits)).verdict(
-            repo=REPO, number=1, head_sha=head_sha
+        source = GithubReviewVerdictSource(runner=lambda cmd: (_ for _ in ()).throw(RuntimeError("no gh call expected")))
+        fresh, note, refusal = source._comment_freshness(
+            body="**Verdict: APPROVE**\nReview-Lane: t:4",
+            created_at="2026-08-15T23:00:00Z",
+            head_sha=head_sha,
+            commits=[{"oid": head_sha, "committedDate": "2026-08-15T22:00:00Z"}],
+            repo=REPO,
+            number=1,
         )
-        self.assertEqual(result["verdict"], "approved")
+        self.assertTrue(fresh)
+        self.assertEqual(refusal, "")
 
     def test_regression_213_no_head_sha_given_preserves_pre_213_behaviour(self):
         """A caller with no head to check against skips the freshness guard
-        entirely, same as the review-object side (#218)."""
-        comments = [{"author": {"login": "codex"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:4"}]
+        entirely, same as the review-object side (#218). agent-supervisor
+        #595: `Reviewed-SHA:` is added so this stays operative at all under
+        the new complete-block requirement -- unaffected by which freshness
+        branch would fire, since `head_sha=None` skips the guard entirely."""
+        comments = [{
+            "author": {"login": "codex"},
+            "body": "**Verdict: APPROVE**\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40,
+        }]
         result = GithubReviewVerdictSource(runner=_comment_runner(comments=comments)).verdict(repo=REPO, number=1)
         self.assertEqual(result["verdict"], "approved")
 
@@ -653,7 +717,24 @@ class Issue232Tests(unittest.TestCase):
     correct APPROVE was refused for two independent trailer defects at once.
     The verdict body and both SHAs below are quoted from the issue verbatim
     -- driven through the REAL `GithubReviewVerdictSource.verdict()`, never a
-    reimplementation of the parsing."""
+    reimplementation of the parsing.
+
+    agent-supervisor#595's ADJACENCY FINDING, surfaced here rather than
+    quietly worked around: the real, verbatim #232 body has a BLANK LINE
+    between `**Verdict: APPROVE**` and `Review-Lane:` -- and #595's decision
+    is explicit that the three trailer lines must be consecutive with
+    NOTHING between them, not even a blank line. Measured directly below
+    (`test_the_real_232_body_no_longer_resolves_under_the_stricter_595_rule`):
+    the real #232 fixture, unmodified, now resolves `none` instead of
+    `approved`. This is a genuine, real consequence of #595's decision, not
+    a bug in this fix -- #595's own text weighs this tradeoff explicitly
+    ("three consecutive lines, nothing between them") against the risk a
+    looser rule reopens (a comment illustrating someone else's trailer for
+    reference would itself parse as operative). `MEASURED_BODY_ADJACENT`
+    below is the SAME real content with only that one blank line closed up,
+    used by the rest of this class so #232's own guards (the trailing-
+    parenthetical lane parse, the truncated-vs-malformed SHA distinction)
+    stay covered by a fixture that is still operative under the new rule."""
 
     REAL_HEAD = "e7b7ac103e66f3a9f1d54998c3203dba2e54ab42"
     TRUNCATED_SHA = "e7b7ac103e66f3a9f1d54998c3203dba2e54ab4"  # one char short
@@ -666,13 +747,32 @@ class Issue232Tests(unittest.TestCase):
         "agent-supervisor#76/#212)\n"
         f"Reviewed-SHA: {TRUNCATED_SHA}"
     )
+    MEASURED_BODY_ADJACENT = (
+        "**Verdict: APPROVE**\n"
+        "Review-Lane: skills:2 (task `skills190-rev193`, worktree "
+        "`/var/.../ad-190-rev193-94816`, confirmed against the ledger "
+        "directly — not `tmux display-message`, and not `cli.py "
+        "worktree-lane`, which refuses to answer for a review task per "
+        "agent-supervisor#76/#212)\n"
+        f"Reviewed-SHA: {TRUNCATED_SHA}"
+    )
+
+    def test_the_real_232_body_no_longer_resolves_under_the_stricter_595_rule(self):
+        """agent-supervisor#595's own accepted tradeoff, measured against the
+        exact real #232 fixture rather than asserted in prose: a blank line
+        between `Verdict:` and `Review-Lane:` -- present in the real,
+        unedited #232 body -- now means the block is not adjacent, so
+        nothing in this comment is operative at all."""
+        comments = [{"author": {"login": "jonhill90"}, "body": self.MEASURED_BODY}]
+        result = GithubReviewVerdictSource(runner=_comment_runner(comments=comments)).verdict(repo=REPO, number=193)
+        self.assertEqual(result["verdict"], "none")
 
     def test_review_lane_with_trailing_parenthetical_now_parses(self):
         """Guard 1: the lane id is extracted despite the trailing prose --
         this is the parse the old whole-line-anchored regex could not make;
         it must now succeed even before the SHA is considered at all (no
         `head_sha` given, so the freshness guard is skipped)."""
-        comments = [{"author": {"login": "jonhill90"}, "body": self.MEASURED_BODY}]
+        comments = [{"author": {"login": "jonhill90"}, "body": self.MEASURED_BODY_ADJACENT}]
         result = GithubReviewVerdictSource(runner=_comment_runner(comments=comments)).verdict(repo=REPO, number=193)
         self.assertEqual(result["verdict"], "approved")
         self.assertEqual(result["reviewer_lane"], "skills:2")
@@ -685,7 +785,7 @@ class Issue232Tests(unittest.TestCase):
         `REAL_HEAD` -- proof the old mismatch-only path could not be trusted
         to catch this even if it ran, since a git ref lookup would happily
         resolve a valid prefix to the very commit being compared against."""
-        comments = [{"author": {"login": "jonhill90"}, "body": self.MEASURED_BODY}]
+        comments = [{"author": {"login": "jonhill90"}, "body": self.MEASURED_BODY_ADJACENT}]
         result = GithubReviewVerdictSource(runner=_comment_runner(comments=comments)).verdict(
             repo=REPO, number=193, head_sha=self.REAL_HEAD
         )
@@ -699,7 +799,7 @@ class Issue232Tests(unittest.TestCase):
         """Confirms guard 2 refuses the TRUNCATION specifically, not the SHA
         trailer mechanism in general -- fix only the missing character and
         the same fixture is accepted."""
-        body = self.MEASURED_BODY.replace(self.TRUNCATED_SHA, self.REAL_HEAD)
+        body = self.MEASURED_BODY_ADJACENT.replace(self.TRUNCATED_SHA, self.REAL_HEAD)
         comments = [{"author": {"login": "jonhill90"}, "body": body}]
         result = GithubReviewVerdictSource(runner=_comment_runner(comments=comments)).verdict(
             repo=REPO, number=193, head_sha=self.REAL_HEAD
@@ -711,9 +811,11 @@ class Issue232Tests(unittest.TestCase):
         """"Report every trailer problem found in one pass, not just the
         first" -- a comment with BOTH an unparseable Review-Lane line (no
         lane-shaped token anywhere on it) and a malformed Reviewed-SHA must
-        name both in the one refusal, not just whichever is checked first."""
+        name both in the one refusal, not just whichever is checked first.
+        No blank line here (agent-supervisor#595) -- the block must be
+        adjacent for either trailer defect to even be considered."""
         body = (
-            "**Verdict: APPROVE**\n\n"
+            "**Verdict: APPROVE**\n"
             "Review-Lane: not-a-lane-id-at-all\n"
             f"Reviewed-SHA: {self.TRUNCATED_SHA}"
         )
@@ -730,10 +832,15 @@ class Issue232Tests(unittest.TestCase):
     def test_a_genuinely_unparseable_review_lane_line_is_quoted_in_the_refusal(self):
         """"Print the line it could not parse, not just the requirement" --
         a `Review-Lane:` line present but carrying no lane-shaped token at
-        all must name the actual line text in the refusal."""
-        comments = [
-            {"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: nonsense with no lane token"}
-        ]
+        all must name the actual line text in the refusal. agent-supervisor
+        #595: a `Reviewed-SHA:` line is appended so the block is complete
+        enough to be operative at all -- without it this comment would now
+        resolve `none`, not `unknown`, for an unrelated reason (block
+        incompleteness, not the unparseable lane this test is about)."""
+        comments = [{
+            "author": {"login": "jonhill90"},
+            "body": "**Verdict: APPROVE**\nReview-Lane: nonsense with no lane token\nReviewed-SHA: " + "a" * 40,
+        }]
         result = GithubReviewVerdictSource(runner=_comment_runner(comments=comments)).verdict(repo=REPO, number=1)
         self.assertEqual(result["verdict"], "unknown")
         self.assertIn("nonsense with no lane token", result["detail"])
@@ -831,7 +938,9 @@ class Issue276ClaudePrintReviewLaneTests(unittest.TestCase):
         )
         comments = [{
             "author": {"login": "jonhill90"},
-            "body": "**Verdict: APPROVE**\n\nReview-Lane: ad182-review-186\nReviewed-SHA: sha-21",
+            # agent-supervisor#595: no blank line between the label and its
+            # trailer pair -- the three lines must be strictly consecutive.
+            "body": "**Verdict: APPROVE**\nReview-Lane: ad182-review-186\nReviewed-SHA: sha-21",
         }]
         result = GithubReviewVerdictSource(
             runner=_comment_runner(comments=comments), ledger=self.ledger
@@ -843,10 +952,11 @@ class Issue276ClaudePrintReviewLaneTests(unittest.TestCase):
         """The ledger check is what tells `ad182-review-186` apart from
         hand-typed nonsense of the identical shape -- an unregistered token
         must still refuse, or this widening would just be a guess wearing a
-        ledger lookup."""
+        ledger lookup. agent-supervisor#595: a `Reviewed-SHA:` line is
+        appended so the block is complete enough to be operative at all."""
         comments = [{
             "author": {"login": "jonhill90"},
-            "body": "**Verdict: APPROVE**\nReview-Lane: not-a-lane-id-at-all",
+            "body": "**Verdict: APPROVE**\nReview-Lane: not-a-lane-id-at-all\nReviewed-SHA: " + "a" * 40,
         }]
         result = GithubReviewVerdictSource(
             runner=_comment_runner(comments=comments), ledger=self.ledger
@@ -857,10 +967,12 @@ class Issue276ClaudePrintReviewLaneTests(unittest.TestCase):
     def test_no_ledger_given_falls_back_to_the_prior_unparseable_behaviour(self):
         """`ledger=None` (the default) must not change behaviour for every
         caller that never had one to offer -- the exact fixture from the
-        #292 reproduction, run with no ledger at all."""
+        #292 reproduction, run with no ledger at all. agent-supervisor#595:
+        a `Reviewed-SHA:` line is appended so the block is complete enough
+        to be operative at all."""
         comments = [{
             "author": {"login": "jonhill90"},
-            "body": "**Verdict: APPROVE**\nReview-Lane: ad182-review-186",
+            "body": "**Verdict: APPROVE**\nReview-Lane: ad182-review-186\nReviewed-SHA: " + "a" * 40,
         }]
         result = GithubReviewVerdictSource(runner=_comment_runner(comments=comments)).verdict(repo=REPO, number=1)
         self.assertEqual(result["verdict"], "unknown")
@@ -877,37 +989,48 @@ class ParseVerdictCommentTests(unittest.TestCase):
     (a comment-scan is reachable from inside quoted/fenced material in a way
     a whole-body-anchored check never was)."""
 
+    # agent-supervisor#595: every POSITIVE_CASES body below now carries a
+    # `Review-Lane:`/`Reviewed-SHA:` pair immediately after its `Verdict:`
+    # line -- a lone label is no longer operative on its own (see
+    # `_scan_verdict_lines`'s own docstring). The pair is inserted right
+    # after the label line specifically, not merely appended to the end of
+    # the body, so a case that puts more prose AFTER the verdict line
+    # ("verdict line followed by more content on later lines") still tests
+    # what it always tested: the label plus its block, with unrelated
+    # trailing prose after the block, not inside it.
+    _TRAILER = "\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40
+
     POSITIVE_CASES = [
-        ("plain", "Verdict: APPROVE", "approved"),
-        ("plain lowercase label", "verdict: APPROVE", "approved"),
-        ("bold, no closing stars", "**Verdict: APPROVE**", "approved"),
-        ("bold label only, decision outside", "**Verdict:** APPROVE", "approved"),
-        ("bold, closing stars immediately after word", "**Verdict: APPROVE**", "approved"),
-        ("heading form (#169's 18:45 REQUEST CHANGES)", "## Verdict: REQUEST CHANGES", "rejected"),
-        ("heading, bold decision", "## **Verdict: REQUEST CHANGES**", "rejected"),
-        ("indented", "    Verdict: APPROVE", "approved"),
-        ("trailing punctuation", "Verdict: APPROVE.", "approved"),
-        ("trailing period, bold", "**Verdict: APPROVE.**", "approved"),
+        ("plain", "Verdict: APPROVE" + _TRAILER, "approved"),
+        ("plain lowercase label", "verdict: APPROVE" + _TRAILER, "approved"),
+        ("bold, no closing stars", "**Verdict: APPROVE**" + _TRAILER, "approved"),
+        ("bold label only, decision outside", "**Verdict:** APPROVE" + _TRAILER, "approved"),
+        ("bold, closing stars immediately after word", "**Verdict: APPROVE**" + _TRAILER, "approved"),
+        ("heading form (#169's 18:45 REQUEST CHANGES)", "## Verdict: REQUEST CHANGES" + _TRAILER, "rejected"),
+        ("heading, bold decision", "## **Verdict: REQUEST CHANGES**" + _TRAILER, "rejected"),
+        ("indented", "    Verdict: APPROVE" + _TRAILER, "approved"),
+        ("trailing punctuation", "Verdict: APPROVE." + _TRAILER, "approved"),
+        ("trailing period, bold", "**Verdict: APPROVE.**" + _TRAILER, "approved"),
         ("verdict line after prose (real reviews explain themselves first)",
-         "Looks correct, tests pass.\n\nVerdict: APPROVE", "approved"),
+         "Looks correct, tests pass.\n\nVerdict: APPROVE" + _TRAILER, "approved"),
         ("verdict line followed by more content on later lines",
-         "**Verdict: REQUEST CHANGES**\n\nThe patch-id comparison is wrong.", "rejected"),
-        ("request changes, plain", "Verdict: REQUEST CHANGES", "rejected"),
+         "**Verdict: REQUEST CHANGES**" + _TRAILER + "\n\nThe patch-id comparison is wrong.", "rejected"),
+        ("request changes, plain", "Verdict: REQUEST CHANGES" + _TRAILER, "rejected"),
         # agent-supervisor#213: three real APPROVE verdicts blocked by
         # formatting alone, measured verbatim off real PRs the day this was
         # filed.
         ("#321: prefix text before the label, plus a trailing '+' action",
-         "## Independent review verdict: APPROVE + MERGE", "approved"),
+         "## Independent review verdict: APPROVE + MERGE" + _TRAILER, "approved"),
         ("#331: emphasis wrapped AROUND the decision, not just the label",
-         "## Verdict: **APPROVE**", "approved"),
+         "## Verdict: **APPROVE**" + _TRAILER, "approved"),
         ("#333: prefix text before the label, em-dash separator",
-         "## Independent review of #333 — verdict: APPROVE", "approved"),
+         "## Independent review of #333 — verdict: APPROVE" + _TRAILER, "approved"),
         # agent-supervisor#475: three real verdicts measured 2026-08-21 that
         # a human reader would call unambiguous and this module refused.
         ("#475 case 1 (agent-supervisor#472, round 1): title case, reversed word order",
-         "## Verdict: Changes requested", "rejected"),
+         "## Verdict: Changes requested" + _TRAILER, "rejected"),
         ("#475 case 2 (jonhill90/skills#228, round 1): lowercase, hyphenated, reversed order",
-         "Verdict: changes-requested", "rejected"),
+         "Verdict: changes-requested" + _TRAILER, "rejected"),
     ]
 
     NEGATIVE_CASES = [
@@ -1033,7 +1156,11 @@ class ParseVerdictCommentTests(unittest.TestCase):
         match = _VERDICT_LINE_RE.match("## Verdict: **APPROVE**")
         self.assertIsNotNone(match)
         self.assertEqual(pre_213_normalise(match.group(2)), "")
-        self.assertEqual(_parse_verdict_comment("## Verdict: **APPROVE**"), "approved")
+        # agent-supervisor#595: `_parse_verdict_comment` now requires a
+        # complete trailer block, so the label alone (used above to test the
+        # regex/normaliser directly) needs its own Review-Lane:/Reviewed-SHA:
+        # pair to reach a decision at all.
+        self.assertEqual(_parse_verdict_comment("## Verdict: **APPROVE**" + self._TRAILER), "approved")
 
     def test_mutation_475_a_rejected_token_set_without_the_reversed_forms_turns_cases_1_and_2_red(self):
         """agent-supervisor#475: mutate `_REJECTED_TOKENS` back to its
@@ -1060,7 +1187,14 @@ class ParseVerdictCommentTests(unittest.TestCase):
         self.assertTrue(cases_475, "no #475 case in the positive table to prove the mutation against")
         for name, body, expected in cases_475:
             with self.subTest(name):
-                match = _VERDICT_LINE_RE.match(body.strip())
+                # agent-supervisor#595: `body` now carries a trailer block
+                # after the label line, so matching the WHOLE body no longer
+                # works (`_VERDICT_LINE_RE` has no DOTALL/MULTILINE, so `.*$`
+                # cannot span the newline into the trailer) -- match just the
+                # label's own first line, exactly what the real per-line scan
+                # in `_scan_verdict_lines` does.
+                first_line = body.strip().splitlines()[0]
+                match = _VERDICT_LINE_RE.match(first_line)
                 self.assertIsNotNone(match)
                 decision_text = _normalise_decision_text(match.group(2))
                 self.assertIsNone(pre_475_classify(decision_text))
@@ -1089,30 +1223,38 @@ class ParseVerdictCommentAmbiguityTests(unittest.TestCase):
     across two. Table-driven over every combination the docstring commits
     to a rule for."""
 
+    # agent-supervisor#595: every `Verdict:` line below now carries its OWN
+    # `Review-Lane:`/`Reviewed-SHA:` pair immediately after it, so each one
+    # stays a qualifying line under the new complete-block requirement -- a
+    # comment with two conflicting verdict BLOCKS must still refuse as
+    # ambiguous, the same as it did with two bare labels before this fix.
+    _TRAILER_A = "\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40
+    _TRAILER_B = "\nReview-Lane: t:5\nReviewed-SHA: " + "b" * 40
+
     CASES = [
         (
             "conflicting lines, approve then reject, refuse as ambiguous",
-            "Verdict: APPROVE\n\nActually wait.\n\nVerdict: REQUEST CHANGES",
+            "Verdict: APPROVE" + _TRAILER_A + "\n\nActually wait.\n\nVerdict: REQUEST CHANGES" + _TRAILER_B,
             None,
         ),
         (
             "conflicting lines, reject then approve, refuse as ambiguous",
-            "Verdict: REQUEST CHANGES\n\nOn reflection.\n\nVerdict: APPROVE",
+            "Verdict: REQUEST CHANGES" + _TRAILER_A + "\n\nOn reflection.\n\nVerdict: APPROVE" + _TRAILER_B,
             None,
         ),
         (
             "two identical decisions, not a conflict",
-            "Verdict: APPROVE\n\nStill true after re-reading.\n\nVerdict: APPROVE",
+            "Verdict: APPROVE" + _TRAILER_A + "\n\nStill true after re-reading.\n\nVerdict: APPROVE" + _TRAILER_B,
             "approved",
         ),
         (
             "first line's decision word is unrecognised, a later line is valid",
-            "Verdict: LOOKS OK TO ME\n\nOn second thought:\n\nVerdict: REQUEST CHANGES",
+            "Verdict: LOOKS OK TO ME" + _TRAILER_A + "\n\nOn second thought:\n\nVerdict: REQUEST CHANGES" + _TRAILER_B,
             "rejected",
         ),
         (
             "one line only, unaffected by the multi-line rule",
-            "Verdict: REQUEST CHANGES",
+            "Verdict: REQUEST CHANGES" + _TRAILER_A,
             "rejected",
         ),
     ]
@@ -1169,33 +1311,48 @@ class ParseVerdictCommentAmbiguityTests(unittest.TestCase):
 
 
 class BareDecisionLineTests(unittest.TestCase):
-    """agent-supervisor#475 case 3 (agent-supervisor#472, round 2): a lane
-    wrote `Verdict:` on its own line at the top of a long comment and
-    `APPROVE` as a standalone line at the very end -- both individually
-    unambiguous to a human reader, but the old parser read the decision
-    text as "" (immediately after the label) and never looked further,
-    so a genuine approval refused as unrecognised. The fix only activates
-    the fallback scan when a `Verdict:` label is present with EMPTY text --
-    a comment with no label at all still resolves to `none`/unrecognised
-    exactly as before, so a stray `APPROVE`-shaped line in ordinary prose
-    is not newly promoted into a verdict."""
+    """agent-supervisor#475 case 3 (agent-supervisor#472, round 2) used to be
+    a FEATURE here: a lane wrote `Verdict:` on its own line at the top of a
+    long comment and `APPROVE` as a standalone line at the very end, and
+    `_bare_decision_line` scanned the rest of the comment for that standalone
+    decision to adopt when the label's own text was empty.
 
-    POSITIVE_CASES = [
+    agent-supervisor#595 RETIRES that feature, not merely leaves it alone.
+    `_scan_verdict_lines` now requires an operative `Verdict:` match to be
+    the first line of an unbroken three-line `Verdict:`/`Review-Lane:`/
+    `Reviewed-SHA:` block -- and the #475 case-3 shape structurally can
+    never satisfy that: an empty `Verdict:` label is, by definition, not
+    immediately followed by a `Review-Lane:` line (it is followed by prose,
+    then eventually a bare decision word many lines later). Keeping the old
+    fallback wired in would have meant a bare, untrailered label could still
+    manufacture an operative verdict by scanning forward for a decision
+    word -- exactly the kind of unanchored inference #595 closes off. See
+    the comment at `_scan_verdict_lines`'s own (removed) call site in
+    `scripts/supervisor/verdict.py` for the same reasoning stated next to
+    the code.
+
+    What used to be `POSITIVE_CASES` (shapes that used to resolve to a
+    decision) now correctly resolve to `None` -- an empty `Verdict:` label
+    is just another unrecognised/incomplete line now, the same fail-closed
+    answer any other label with nothing genuine following it gets. The two
+    tests exercising `_bare_decision_line` directly are kept: that function
+    is still defined (only its WIRING into `_scan_verdict_lines` was
+    removed), and its own pure-function behaviour is still real code worth
+    covering."""
+
+    RETIRED_CASES = [
         (
-            "#475 case 3 itself: empty label at the top, bare APPROVE at the end",
+            "#475 case 3 itself: empty label at the top, bare APPROVE at the end -- now None",
             "Verdict:\n\nThe patch-id comparison looks right, tests pass, "
             "and the freshness check covers the rebase case correctly.\n\nAPPROVE",
-            "approved",
         ),
         (
-            "empty label, bare REQUEST CHANGES at the end",
+            "empty label, bare REQUEST CHANGES at the end -- now None",
             "Verdict:\n\nThe freshness check does not compare the base branch correctly.\n\nREQUEST CHANGES",
-            "rejected",
         ),
         (
-            "empty label, bare decision immediately below it",
+            "empty label, bare decision immediately below it -- now None",
             "Verdict:\nAPPROVE",
-            "approved",
         ),
     ]
 
@@ -1222,26 +1379,31 @@ class BareDecisionLineTests(unittest.TestCase):
         ),
     ]
 
-    def test_every_positive_case_resolves(self):
-        for name, body, expected in self.POSITIVE_CASES:
+    def test_every_retired_case_now_resolves_to_none(self):
+        """agent-supervisor#595 supersedes #475 case 3: an empty `Verdict:`
+        label with a bare decision word elsewhere in the comment is no
+        longer promoted to a verdict -- it never had a complete trailer
+        block, so it was never operative under the new rule."""
+        for name, body in self.RETIRED_CASES:
             with self.subTest(name):
-                self.assertEqual(_parse_verdict_comment(body), expected)
+                self.assertIsNone(_parse_verdict_comment(body))
 
     def test_every_negative_case_reads_none(self):
         for name, body in self.NEGATIVE_CASES:
             with self.subTest(name):
                 self.assertIsNone(_parse_verdict_comment(body))
 
-    def test_mutation_skipping_the_bare_scan_turns_case_3_red(self):
-        """Mutate back to the pre-fix shape -- `_scan_verdict_lines` with no
-        `_bare_decision_line` fallback, an empty-text label is just an
-        unrecognised line -- and confirm #475 case 3 goes red. If it did
-        not, the positive-case table above would not be real evidence of
-        the fix."""
+    def test_mutation_reintroducing_the_bare_scan_wiring_would_turn_case_3_green_again(self):
+        """The inverse of this file's usual mutation-test idiom: this class
+        asserts a FEATURE was removed, so the "mutation" that would turn the
+        RETIRED_CASES table's own outcome around is re-wiring the retired
+        `_bare_decision_line` fallback back into a from-scratch scan --
+        proving the retired case's `None` result actually depends on the
+        wiring being gone, not on some unrelated accident."""
 
-        def pre_475_scan(body):
+        def pre_595_scan_with_bare_fallback(body):
             in_fence = False
-            results = []
+            lines = []
             for raw_line in (body or "").splitlines():
                 line = raw_line.strip()
                 if line.startswith("```"):
@@ -1249,27 +1411,49 @@ class BareDecisionLineTests(unittest.TestCase):
                     continue
                 if in_fence or line.startswith(">"):
                     continue
+                lines.append(line)
+
+            results = []
+            has_empty_label = False
+            for line in lines:
                 match = _VERDICT_LINE_RE.match(line)
                 if not match:
                     continue
                 decision_text = _normalise_decision_text(match.group(2))
+                if decision_text == "":
+                    has_empty_label = True
                 results.append((_classify_decision_text(decision_text), decision_text))
+
+            if has_empty_label:
+                bare = _bare_decision_line(lines)
+                if bare is not None:
+                    bare_decision, bare_text = bare
+                    results = [
+                        (bare_decision, bare_text) if decision is None and text == "" else (decision, text)
+                        for decision, text in results
+                    ]
             return results
 
-        def pre_475_parse(body):
-            decisions = {d for d, _ in pre_475_scan(body) if d is not None}
+        def pre_595_parse(body):
+            decisions = {d for d, _ in pre_595_scan_with_bare_fallback(body) if d is not None}
             if len(decisions) == 1:
                 return decisions.pop()
             return None
 
-        case_3 = next(body for name, body, _ in self.POSITIVE_CASES if "case 3 itself" in name)
-        self.assertIsNone(pre_475_parse(case_3))
-        self.assertEqual(_parse_verdict_comment(case_3), "approved")
+        case_3 = next(body for name, body in self.RETIRED_CASES if "case 3 itself" in name)
+        self.assertIsNone(_parse_verdict_comment(case_3), "the real, current parser must NOT resolve this")
+        self.assertEqual(
+            pre_595_parse(case_3), "approved",
+            "re-wiring the old fallback must still resolve this -- proving the retirement, not an accident, is why the real parser now refuses",
+        )
 
     def test_bare_decision_line_ignores_lines_with_their_own_label(self):
         """A line that already carries its own `Verdict:` label is never a
         BARE candidate -- it is handled (and classified) by the label scan
-        itself; treating it as bare too would double-count it."""
+        itself; treating it as bare too would double-count it. This tests
+        `_bare_decision_line` directly, as a pure function -- it is no
+        longer called from `_scan_verdict_lines` (agent-supervisor#595), but
+        the function itself is still real code."""
         self.assertIsNone(_bare_decision_line(["Verdict: APPROVE"]))
 
     def test_bare_decision_line_empty_input_reads_none(self):
@@ -1335,10 +1519,15 @@ class DecisionTokenTests(unittest.TestCase):
 
     def test_every_decision_token_case_through_a_full_verdict_line(self):
         """Same table, exercised through the real entry point (a whole
-        `Verdict:` line), not just the normalised-text helper."""
+        `Verdict:` line), not just the normalised-text helper. agent-
+        supervisor#595: a `Review-Lane:`/`Reviewed-SHA:` pair is appended so
+        the label is even CONSIDERED under the new complete-block
+        requirement -- without it every case in this table would resolve
+        `None` for a reason unrelated to what this test is actually
+        checking (decision-token classification, not block completeness)."""
         for name, decision_text, expected in self.CASES:
             with self.subTest(name):
-                body = f"Verdict: {decision_text}"
+                body = f"Verdict: {decision_text}\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40
                 self.assertEqual(_parse_verdict_comment(body), expected)
 
     def test_mutation_reverting_to_a_substring_test_turns_the_negation_cases_red(self):
@@ -1379,7 +1568,20 @@ class CommentVerdictUnrecognisedTextTests(unittest.TestCase):
     module actually returns to a caller, not on an internal helper."""
 
     def test_unrecognised_last_comment_refuses_with_the_offending_text_named(self):
-        comments = [{"author": {"login": "codex"}, "body": "Verdict: NOT APPROVED", "createdAt": "2026-08-15T12:00:00Z"}]
+        """agent-supervisor#595: a `Review-Lane:`/`Reviewed-SHA:` pair is
+        added so this stays the shape it was always meant to test -- a
+        comment that LOOKS LIKE a genuine, complete verdict attempt (label
+        AND both trailer lines present) but whose decision word this module
+        cannot classify. Per #595's decision, that shape must still refuse
+        loudly with the text named, not silently resolve to `none` (a bare
+        label with no trailer at all is the DIFFERENT, newly-introduced
+        `none` case -- see `Issue595TrailerBlockRequiredTests` for that
+        one)."""
+        comments = [{
+            "author": {"login": "codex"},
+            "body": "Verdict: NOT APPROVED\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40,
+            "createdAt": "2026-08-15T12:00:00Z",
+        }]
         source = GithubReviewVerdictSource(runner=_comment_runner(comments=comments))
         result = source.verdict(repo=REPO, number=1)
         self.assertEqual(result["verdict"], "unknown")
@@ -1391,8 +1593,16 @@ class CommentVerdictUnrecognisedTextTests(unittest.TestCase):
         this module cannot classify. The rejection must win as a refusal --
         it must NOT silently resolve to the earlier, superseded approval."""
         comments = [
-            {"author": {"login": "codex"}, "body": "Verdict: APPROVE", "createdAt": "2026-08-15T10:00:00Z"},
-            {"author": {"login": "codex"}, "body": "Verdict: DISAPPROVE", "createdAt": "2026-08-15T11:00:00Z"},
+            {
+                "author": {"login": "codex"},
+                "body": "Verdict: APPROVE\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40,
+                "createdAt": "2026-08-15T10:00:00Z",
+            },
+            {
+                "author": {"login": "codex"},
+                "body": "Verdict: DISAPPROVE\nReview-Lane: t:4\nReviewed-SHA: " + "b" * 40,
+                "createdAt": "2026-08-15T11:00:00Z",
+            },
         ]
         source = GithubReviewVerdictSource(runner=_comment_runner(comments=comments))
         result = source.verdict(repo=REPO, number=1)
@@ -1410,7 +1620,11 @@ class CommentVerdictUnrecognisedTextTests(unittest.TestCase):
         self.assertEqual(result, {"verdict": "none", "detail": ""})
 
     def test_scan_verdict_lines_pairs_each_line_with_its_raw_decision_text(self):
-        scan = _scan_verdict_lines("Verdict: NOT APPROVED\n\nVerdict: APPROVE")
+        body = (
+            "Verdict: NOT APPROVED\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40
+            + "\n\nVerdict: APPROVE\nReview-Lane: t:5\nReviewed-SHA: " + "b" * 40
+        )
+        scan = _scan_verdict_lines(body)
         self.assertEqual(scan, [(None, "NOT APPROVED"), ("approved", "APPROVE")])
 
 
@@ -1916,17 +2130,20 @@ class Issue540ShadowingTests(unittest.TestCase):
         backticks ("Verdict: `APPROVE`") must still resolve -- the label
         itself ("Verdict:") sits outside any backtick span here, only the
         value after it does, and `_normalise_decision_text` already
-        strips that wrapping on its own."""
-        self.assertEqual(_scan_verdict_lines("Verdict: `APPROVE`"), [("approved", "APPROVE")])
+        strips that wrapping on its own. agent-supervisor#595: a
+        `Review-Lane:`/`Reviewed-SHA:` pair is appended so this stays a
+        qualifying line under the new complete-block requirement."""
+        body = "Verdict: `APPROVE`\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40
+        self.assertEqual(_scan_verdict_lines(body), [("approved", "APPROVE")])
 
     def test_leadin_prose_without_backticks_still_matches(self):
         """#213's own widening -- lead-in text before the label with NO
         backticks anywhere -- must be unaffected by this fix; only a
-        BACKTICK-QUOTED label is excluded, not any lead-in text at all."""
-        self.assertEqual(
-            _scan_verdict_lines("## Independent review of #333 -- verdict: APPROVE"),
-            [("approved", "APPROVE")],
-        )
+        BACKTICK-QUOTED label is excluded, not any lead-in text at all.
+        agent-supervisor#595: trailer pair appended for the same reason as
+        the test above."""
+        body = "## Independent review of #333 -- verdict: APPROVE\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40
+        self.assertEqual(_scan_verdict_lines(body), [("approved", "APPROVE")])
 
     # --- end-to-end: the actual refusal path ------------------------------
 
@@ -1973,7 +2190,13 @@ class Issue540ShadowingTests(unittest.TestCase):
         and refuse, exactly as #198 established. This is what tells
         "prose that merely quotes the syntax" (this issue) apart from "a
         genuine but garbled decision" (#198) -- only the FIRST is now
-        excluded."""
+        excluded. agent-supervisor#595: the garbled attempt now needs its
+        OWN complete `Review-Lane:`/`Reviewed-SHA:` trailer to be operative
+        at all under the new rule -- without one, `_comment_verdict` would
+        simply skip past it (never finding it a qualifying line) straight
+        to the earlier APPROVE, which is a real behaviour change #595
+        causes but not the one this test is about; giving the garbled
+        attempt its own trailer keeps this test on ITS OWN guard."""
         comments = [
             {
                 "author": {"login": "jonhill90"},
@@ -1982,7 +2205,7 @@ class Issue540ShadowingTests(unittest.TestCase):
             },
             {
                 "author": {"login": "jonhill90"},
-                "body": "Verdict: I am genuinely unsure, leaning against",
+                "body": "Verdict: I am genuinely unsure, leaning against\nReview-Lane: estate:4\nReviewed-SHA: " + "b" * 40,
                 "createdAt": "2026-08-23T22:00:39Z",
             },
         ]
@@ -2180,6 +2403,247 @@ class Issue571DiagnosisCommentShadowingTests(unittest.TestCase):
         source = GithubReviewVerdictSource(runner=_comment_runner(comments=comments))
         result = source.verdict(repo=REPO, number=547, head_sha=head_sha)
         self.assertEqual(result["verdict"], "rejected")
+
+
+def _pre_595_scan(body):
+    """Reimplementation of `_scan_verdict_lines` AS IT WAS before
+    agent-supervisor#595/#609: fenced code blocks and blockquotes excluded,
+    the inline-code label guard (#540) applied, but NO three-line block
+    requirement -- a bare `Verdict:`-shaped label alone was enough. Used
+    only by this class's mutation tests, to prove each poisoning fixture
+    below actually fooled the OLD code (not merely that it fails to fool
+    the new code, which could be true for an unrelated reason)."""
+    lines = []
+    in_fence = False
+    for raw_line in (body or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith("```"):
+            in_fence = not in_fence
+            continue
+        if in_fence or line.startswith(">"):
+            continue
+        lines.append(line)
+
+    results = []
+    for line in lines:
+        match = _VERDICT_LINE_RE.match(line)
+        if not match:
+            continue
+        if _label_inside_inline_code(line, match.start(1), match.end(1)):
+            continue
+        decision_text = _normalise_decision_text(match.group(2))
+        results.append((_classify_decision_text(decision_text), decision_text))
+    return results
+
+
+def _pre_595_parse(body):
+    decisions = {d for d, _ in _pre_595_scan(body) if d is not None}
+    if len(decisions) == 1:
+        return decisions.pop()
+    return None
+
+
+class Issue595TrailerBlockRequiredTests(unittest.TestCase):
+    """agent-supervisor#595: the director's decision, implemented directly --
+    an operative verdict requires `Verdict:`/`Review-Lane:`/`Reviewed-SHA:`
+    as three consecutive raw lines, nothing between them. The poisoning
+    fixtures below are quoted VERBATIM from the two real incidents named in
+    #595's own issue body (both PR comments were later edited by their
+    authors with a note pointing back to #595 -- the historical record is
+    untouched here; these are reconstructed standalone repros, not edits to
+    anyone's real comment) plus the fourth shape #595's issue body names
+    directly. Every "must resolve" fixture here is proven with a mutation
+    test showing the OLD code (`_pre_595_scan`, no block requirement) DOES
+    resolve it or DOES fool the parser -- the same "prove the check can
+    fail" standard this file already holds itself to everywhere else."""
+
+    # --- #553: a stale-SHA discussion whose own prose contains "verdict:" -
+
+    POISON_553_SENTENCE = (
+        "A stale `Reviewed-SHA` does not automatically sink a verdict: "
+        "`verdict.py` can promote"
+    )
+    # #553's OWN separate illustrative line: label AND a SHA-shaped trailer
+    # combined on one line, but explicitly NO `Review-Lane:` at all.
+    POISON_553_ILLUSTRATIVE_LINE = "verdict   Verdict: APPROVE   Reviewed-SHA: 912f2aa1"
+
+    # --- #531: the same label wrapped at end-of-line ----------------------
+
+    POISON_531_WRAPPED = "...covered is the verdict:"
+
+    # --- #595's own issue body: a bold-wrapped MID-SENTENCE QUOTE ---------
+
+    POISON_QUOTE_VARIANTS = [
+        'I saw "**Verdict: APPROVE**" in the log',
+        "the comment said **Verdict: APPROVE** but the reviewer had not filed one",
+        "| **Verdict: APPROVE** | shadowed |",
+        "Do not write **Verdict: APPROVE** in a diagnosis",
+    ]
+
+    def test_553_mid_sentence_poisoning_sentence_produces_no_decision(self):
+        self.assertIsNone(_parse_verdict_comment(self.POISON_553_SENTENCE))
+
+    def test_mutation_553_sentence_without_the_block_requirement_would_have_poisoned(self):
+        """Proves the OLD code was actually vulnerable to this exact text --
+        the substring "verdict:" mid-sentence matched the label regex and
+        normalised to a garbage decision (measured on `main` as
+        `VERDICT.PY` in #595's own incident report)."""
+        old_scan = _pre_595_scan(self.POISON_553_SENTENCE)
+        self.assertTrue(old_scan, "the old, unfixed scan must find a matching line here -- that IS the bug")
+        self.assertIsNone(_parse_verdict_comment(self.POISON_553_SENTENCE), "the real, current parser must refuse")
+
+    def test_553_illustrative_line_with_no_review_lane_produces_no_decision(self):
+        """#553's own comment ALSO separately contained a single line
+        combining the label and a SHA-shaped trailer with NO `Review-Lane:`
+        at all -- must not resolve on its own either."""
+        self.assertIsNone(_parse_verdict_comment(self.POISON_553_ILLUSTRATIVE_LINE))
+
+    def test_mutation_553_illustrative_line_is_refused_under_both_old_and_new_logic(self):
+        """Measured, not assumed: this specific line does NOT turn out to
+        fool the OLD code either -- `Reviewed-SHA: 912f2aa1` trailing on the
+        SAME line as the decision becomes part of the decision TEXT once
+        normalised (`APPROVE REVIEWED SHA: 912F2AA1`), which is not an exact
+        token match under either regime, so it was already refused before
+        #595 too. Kept here (not dropped) as a fixture, with the honest
+        measured result, rather than asserting a vulnerability this line
+        does not actually demonstrate -- #553's real vulnerability is the
+        mid-sentence sentence above, not this line."""
+        self.assertIsNone(_pre_595_parse(self.POISON_553_ILLUSTRATIVE_LINE))
+        self.assertIsNone(_parse_verdict_comment(self.POISON_553_ILLUSTRATIVE_LINE))
+
+    def test_531_end_of_line_wrap_produces_no_decision(self):
+        self.assertIsNone(_parse_verdict_comment(self.POISON_531_WRAPPED))
+
+    def test_mutation_531_without_the_block_requirement_would_have_poisoned(self):
+        """#531's own incident: the label matched with an EMPTY decision
+        text (nothing after the colon on that line), which the OLD code's
+        `_bare_decision_line` fallback (wired into `_scan_verdict_lines`
+        before #595) could then have gone hunting for a standalone decision
+        word elsewhere in the comment to adopt -- exactly the shape #475
+        case 3 introduced and #595 retires. Confirmed here on the label
+        match alone: it exists, with empty text, under the old code."""
+        old_scan = _pre_595_scan(self.POISON_531_WRAPPED)
+        self.assertTrue(old_scan, "the old scan must still find the label line -- that IS the exposure")
+        self.assertEqual(old_scan[0][1], "", "the decision text is empty, exactly #531's own measured shape")
+        self.assertIsNone(_parse_verdict_comment(self.POISON_531_WRAPPED))
+
+    def test_bold_wrapped_mid_sentence_quote_variants_produce_no_decision(self):
+        for variant in self.POISON_QUOTE_VARIANTS[:2]:
+            with self.subTest(variant):
+                self.assertIsNone(_parse_verdict_comment(variant))
+
+    def test_mutation_bold_quote_variants_without_the_block_requirement_would_have_poisoned(self):
+        for variant in self.POISON_QUOTE_VARIANTS[:2]:
+            with self.subTest(variant):
+                old_result = _pre_595_parse(variant)
+                self.assertEqual(old_result, "approved", "the old, unfixed parser must resolve this -- that IS the bug")
+                self.assertIsNone(_parse_verdict_comment(variant))
+
+    # --- shapes that must still resolve, with a real trailer block --------
+
+    def test_540_leadin_prose_with_a_trailer_block_still_resolves_approved(self):
+        body = "Final call — Verdict: APPROVE\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40
+        self.assertEqual(_parse_verdict_comment(body), "approved")
+
+    def test_mutation_540_leadin_prose_without_the_fix_also_resolves_the_same_way(self):
+        """Unlike the poisoning fixtures, this one is not SUPPOSED to flip --
+        #213's lead-in tolerance was never the bug; #595 only narrows which
+        MATCH counts as operative, and this fixture already carries a real,
+        complete block. Both the old (bare-label) and new (block-required)
+        logic resolve it the same way -- proving #595 did not accidentally
+        narrow this legitimate shape."""
+        body = "Final call — Verdict: APPROVE\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40
+        self.assertEqual(_pre_595_parse(body), "approved")
+        self.assertEqual(_parse_verdict_comment(body), "approved")
+
+    def test_544_bold_label_outside_decision_with_a_trailer_block_still_resolves_approved(self):
+        body = "**Verdict:** APPROVE\nReview-Lane: t:4\nReviewed-SHA: " + "a" * 40
+        self.assertEqual(_parse_verdict_comment(body), "approved")
+
+
+class Issue609FencedTrailerBlockTests(unittest.TestCase):
+    """agent-supervisor#609: the mirror-image bug, closed by the SAME fix
+    (#595's decision comment says so explicitly) -- a real, correct,
+    approving verdict trailer sitting inside a fenced code block on PR
+    `#608` was invisible to the old parser, which excluded every fenced
+    line unconditionally. `REAL_FENCED_COMMENT` and
+    `REAL_UNFENCED_REPOST` below are the exact two real comments on PR
+    `#608` (`gh pr view 608 --json comments,commits,headRefOid --repo
+    jonhill90/agent-supervisor`, fetched live for this fix, not
+    paraphrased) -- the second comment is the author's own re-post after
+    discovering the fenced one did not parse, itself now a live example of
+    the same shape without a fence."""
+
+    REAL_HEAD = "0e7e21c0550af0e4c712e1f778a723c6beff12e5"
+
+    REAL_FENCED_COMMENT = (
+        "## Independent review — verified, not just re-run\n\n"
+        "Read the prior attempt's own report (`as605-as605-daemon-ns.md`) but "
+        "re-derived every claim in it directly rather than trusting the "
+        "writeup — confirmed all of it, nothing superseded or contradicted.\n\n"
+        "**Diff scope** (`origin/main`..`pr608`, after refreshing my local "
+        "`main` — my first diff was stale and wrongly included the unrelated "
+        "#572 trap commit already in history on both sides): only `core.py` "
+        "(+77), `cli.py` (+19), `test_core.py` (+104), `test_merge_pr.sh` "
+        "(+196). Narrow, as the issue asked.\n\n"
+        "### The three constraints, checked myself against the real "
+        "functions (not the tests' own assertions):\n\n"
+        "1. **No new self-assertion path.** `daemon_lane_verified` requires "
+        "the ledger's own row for the id to carry `server_id='supervisord'`, "
+        "`transport='claude-print'`, `pane_id=''` — the exact signature only "
+        "`EnsureLane` writes.\n\n"
+        "No findings. This is a narrow, correctly-scoped fix that does "
+        "exactly what #605's decision asked and nothing more.\n\n"
+        "```\n"
+        "Verdict: APPROVE\n"
+        "Review-Lane: agent-supervisor:2\n"
+        f"Reviewed-SHA: {REAL_HEAD}\n"
+        "```"
+    )
+
+    REAL_UNFENCED_REPOST = (
+        "Reposting the recorded decision from my prior comment without a "
+        "code fence around the trailers — the merge gate's parser skips "
+        "fenced content, so it saw no decision at all (filed as #609). "
+        "Substance unchanged: same head SHA as my earlier review, so "
+        "nothing to re-assess.\n\n"
+        "Verdict: APPROVE\n"
+        "Review-Lane: agent-supervisor:2\n"
+        f"Reviewed-SHA: {REAL_HEAD}"
+    )
+
+    def test_the_real_608_fenced_trailer_now_resolves_approved(self):
+        self.assertEqual(_parse_verdict_comment(self.REAL_FENCED_COMMENT), "approved")
+
+    def test_mutation_reverting_the_fence_exclusion_turns_608_red(self):
+        """Proves the fence exclusion specifically, not a coincidence of
+        this text, is what used to hide this real trailer -- the OLD scan
+        (fences excluded) finds nothing at all in this comment; the current
+        one resolves it."""
+        old_scan = _pre_595_scan(self.REAL_FENCED_COMMENT)
+        self.assertEqual(old_scan, [], "the old, fence-excluding scan must find nothing here -- that IS the #609 bug")
+        self.assertEqual(_parse_verdict_comment(self.REAL_FENCED_COMMENT), "approved")
+
+    def test_the_real_608_unfenced_repost_also_resolves_approved(self):
+        """The author's own re-post (after discovering the fenced version
+        did not parse) is a live, real example of the same trailer without
+        a fence -- must resolve the same way."""
+        self.assertEqual(_parse_verdict_comment(self.REAL_UNFENCED_REPOST), "approved")
+
+    def test_both_608_comments_end_to_end_through_the_real_source_resolve_approved(self):
+        """Driven through the real `GithubReviewVerdictSource.verdict()`,
+        with both real PR #608 comments present in chronological order (the
+        fenced original, then the unfenced re-post) and the PR's real
+        `headRefOid` -- confirms the fenced comment is not merely
+        parseable in isolation but is what the estate's own merge gate
+        would now read for this PR."""
+        comments = [
+            {"author": {"login": "jonhill90"}, "body": self.REAL_FENCED_COMMENT, "createdAt": "2026-08-24T05:00:00Z"},
+            {"author": {"login": "jonhill90"}, "body": self.REAL_UNFENCED_REPOST, "createdAt": "2026-08-24T05:10:00Z"},
+        ]
+        source = GithubReviewVerdictSource(runner=_comment_runner(comments=comments))
+        result = source.verdict(repo="jonhill90/agent-supervisor", number=608, head_sha=self.REAL_HEAD)
+        self.assertEqual(result["verdict"], "approved")
 
 
 if __name__ == "__main__":

@@ -410,61 +410,83 @@ def _normalise_decision_text(rest):
 
 def _scan_verdict_lines(body):
     """The list of `(decision, decision_text)` for every LINE of `body` that
-    matches `_VERDICT_LINE_RE` -- agent-supervisor#53's guard 4 (the word
-    "verdict" merely mentioned mid-sentence, e.g. "I think the verdict here
-    should be ...") still does not match, because the regex is anchored to
-    the start of the line, not a substring search. Two more exclusions #192
-    adds, because the line-scan (rather than "body starts with") makes a
-    verdict line reachable from inside quoted material:
+    is the FIRST line of a genuine, unbroken three-line trailer block: a
+    `Verdict:`-matching line immediately followed by a `Review-Lane:` line
+    and then immediately by a `Reviewed-SHA:` line -- three consecutive raw
+    lines, nothing (not even a blank line) between them
+    (agent-supervisor#595).
 
-    - a line inside a fenced code block (```...```) is never consulted --
-      a verdict quoted as an EXAMPLE must not be read as a real one;
-    - a line that is a markdown blockquote (starts with `>`, GitHub's own
-      "quote reply" shape) is never consulted -- a reply quoting an EARLIER
-      comment's verdict must not be read as this comment restating it.
+    `_VERDICT_LINE_RE` itself is a SUBSTRING match, NOT anchored to the
+    start of the line -- #213 deliberately allows arbitrary lead-in prose
+    before the label ("Final call -- Verdict: APPROVE", "## Independent
+    review of #333 -- verdict: APPROVE") so a verdict written after a
+    reviewer's own reasoning still matches. That looseness is exactly what
+    let ordinary prose manufacture a fake verdict: #595 measured a
+    stale-SHA discussion ("A stale `Reviewed-SHA` does not automatically
+    sink a verdict: `verdict.py` can promote") and a sentence wrapped
+    mid-line ("...covered is the verdict:"), each matching the label with
+    nothing genuine following at all, and #595's own issue body named a
+    fourth shape -- a bold-wrapped mid-sentence QUOTE, `**Verdict:
+    APPROVE**` (e.g. `I saw "**Verdict: APPROVE**" in the log`), that reads
+    as a real approval under a bare label match even though it is plainly a
+    quotation. A lone `Verdict:`-shaped line was never enough on its own to
+    answer "is this a real decision" -- what makes a match OPERATIVE, per
+    #595's decision, is being the first line of a complete three-line
+    block, not the label match by itself. This function still does not
+    narrow `_VERDICT_LINE_RE` -- narrowing it to line-start was considered
+    and disproven earlier in #595's own thread: it breaks the lead-in-prose
+    shape above and #544's bold-label-outside-decision shape (`**Verdict:**
+    APPROVE`).
+
+    agent-supervisor#609: fenced code blocks (```...```) are NO LONGER
+    excluded from this scan -- a genuinely operative trailer block that
+    happens to be wrapped in a fence for formatting (PR #608's own comment)
+    was previously invisible here. Once "does a complete three-line block
+    exist" is the discriminator, being inside a fence stops being a safe
+    universal signal for "this is just a quotation" -- a bare fence marker
+    line does not itself match any of the three trailer regexes, so it
+    still naturally breaks the three-line chain the one time it actually
+    matters (a fence marker landing INSIDE what would otherwise be a
+    block). Named risk, accepted, not attempted here (per #595's own
+    decision comment): a comment that deliberately quotes someone else's
+    genuine three-line trailer for illustration will, under this rule,
+    itself parse as a fresh operative verdict.
+
+    A markdown blockquote line (starts with `>`, GitHub's own "quote
+    reply" shape) is still excluded from consideration entirely (#192) --
+    a reply quoting an EARLIER comment's verdict must not be read as this
+    comment restating it; that exclusion was never named as something to
+    remove.
 
     `decision_text` is normalised (markup/punctuation stripped, whitespace
     collapsed, upper-cased) before being classified by
     `_classify_decision_text`, and is returned RAW-normalised alongside the
     classification either way -- callers that need to name an unrecognised
     decision in a refusal reason (agent-supervisor#198) get the text to
-    name without re-deriving it. `decision` is None for a line whose text
-    `_classify_decision_text` does not recognise; the caller decides what
-    an unrecognised or absent line means, this function only reports what
-    is on each qualifying line.
+    name without re-deriving it. `decision` is None for a qualifying line
+    whose text `_classify_decision_text` does not recognise; the caller
+    decides what an unrecognised or absent line means, this function only
+    reports what is on each qualifying line.
 
-    agent-supervisor#475 (case 3): a `Verdict:` label with nothing after it
-    on the same line -- decision text normalises to "" -- used to just be
-    an unrecognised line, even when the rest of the comment plainly states
-    a decision on its own ("Verdict:" at the top, "APPROVE" as a standalone
-    line at the end; a completely natural way to structure a review that
-    gives its reasoning before its conclusion). When an EMPTY label is
-    found, `_bare_decision_line` scans the same fence/quote-filtered lines
-    for a standalone decision -- a line that, once run through the same
-    normaliser as a label's decision text, IS one of the known tokens with
-    nothing else on the line. Every empty-label entry adopts that finding.
-    This only fires for a label that is present but empty; it does not turn
-    every bare `APPROVE` line in a comment into a verdict, because a
-    comment with no `Verdict:` label at all still has nothing for this
-    scan to attach to (agent-supervisor#53's whole point).
+    agent-supervisor#475's "empty `Verdict:` label, standalone decision
+    word later in the comment" fallback is RETIRED by this change, not
+    merely left unchanged -- see the comment at `_bare_decision_line`'s
+    (former) call site below for why that shape can never satisfy the
+    three-line requirement, and `BareDecisionLineTests` in
+    `tests/supervisor/test_verdict.py` for the updated coverage.
 
     Shared by `_parse_verdict_comment` (one comment, may reference several
     lines) and `GithubReviewVerdictSource._comment_verdict` (several
     comments, needs the raw text of an unrecognised LAST verdict line)."""
     lines = []
-    in_fence = False
     for raw_line in (body or "").splitlines():
         line = raw_line.strip()
-        if line.startswith("```"):
-            in_fence = not in_fence
-            continue
-        if in_fence or line.startswith(">"):
+        if line.startswith(">"):
             continue
         lines.append(line)
 
     results = []
-    has_empty_label = False
-    for line in lines:
+    for index, line in enumerate(lines):
         match = _VERDICT_LINE_RE.match(line)
         if not match:
             continue
@@ -475,37 +497,102 @@ def _scan_verdict_lines(body):
         # span (group 1), not the whole line, is checked.
         if _label_inside_inline_code(line, match.start(1), match.end(1)):
             continue
+        # agent-supervisor#595: this match is OPERATIVE only when it is the
+        # first line of an unbroken three-line block -- immediately
+        # followed by a `Review-Lane:` line and then immediately by a
+        # `Reviewed-SHA:` line. A label with nothing genuine following it
+        # (the #553/#531/#595-issue-body poisoning shapes) is skipped, not
+        # collected -- see this function's own docstring for the incidents
+        # this closes. agent-supervisor#475's empty-label/bare-decision-word
+        # fallback (`_bare_decision_line`) used to be wired in here for a
+        # label found with no decision text on its own line; it is not
+        # called from here anymore, on purpose -- that shape (an empty
+        # `Verdict:` label followed by prose, then a standalone decision
+        # word much later) never has `Review-Lane:`/`Reviewed-SHA:`
+        # immediately after the empty label, so it structurally can never
+        # satisfy the requirement above. `_bare_decision_line` itself is
+        # left defined only because its own pure-function unit tests still
+        # exercise it directly.
+        if index + 2 >= len(lines):
+            continue
+        if not _REVIEW_LANE_LINE_RE.match(lines[index + 1]):
+            continue
+        if not _REVIEWED_SHA_RE.match(lines[index + 2]):
+            continue
         decision_text = _normalise_decision_text(match.group(2))
-        if decision_text == "":
-            has_empty_label = True
         results.append((_classify_decision_text(decision_text), decision_text))
-
-    if has_empty_label:
-        bare = _bare_decision_line(lines)
-        if bare is not None:
-            bare_decision, bare_text = bare
-            results = [
-                (bare_decision, bare_text) if decision is None and text == "" else (decision, text)
-                for decision, text in results
-            ]
     return results
 
 
+def _unblocked_verdict_labels(body):
+    """The write-time mirror of agent-supervisor#595's read-time fix. Every
+    line matching `_VERDICT_LINE_RE` that is NOT the first line of a
+    complete, unbroken `Verdict:`/`Review-Lane:`/`Reviewed-SHA:` block,
+    returned raw (stripped) -- an empty list means every `Verdict:`-shaped
+    line in `body` is already part of a genuine block.
+
+    Deliberately ignores `_label_inside_inline_code` -- `_scan_verdict_lines`
+    excludes a label inside single backticks because that shape is very
+    often prose QUOTING the trailer's own syntax when it is being READ back
+    off GitHub after the fact. At WRITE time, the body being checked is the
+    one this repo's own `post-verdict.sh` is about to post; if it types
+    `` `Verdict: APPROVE` `` with backticks around the label but no real
+    trailer following, that is far more likely to be a mistake (a stray
+    backtick, a half-finished draft) than a deliberate quotation of
+    something else's syntax, so this check does not give it the same pass.
+
+    Used by `post-verdict.sh`'s embedded lint to refuse posting a bare
+    `Verdict:` label before it goes out -- cheap defense-in-depth for
+    agent-authored comments specifically. This does not, and is not meant
+    to, cover every posting path (a human typing directly into the GitHub
+    web UI, or a codex lane posting via its own `gh pr comment` outside
+    this script) -- see `post-verdict.sh`'s own header comment for that
+    scope."""
+    lines = []
+    for raw_line in (body or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith(">"):
+            continue
+        lines.append(line)
+
+    offenders = []
+    for index, line in enumerate(lines):
+        if not _VERDICT_LINE_RE.match(line):
+            continue
+        complete = (
+            index + 2 < len(lines)
+            and bool(_REVIEW_LANE_LINE_RE.match(lines[index + 1]))
+            and bool(_REVIEWED_SHA_RE.match(lines[index + 2]))
+        )
+        if not complete:
+            offenders.append(line)
+    return offenders
+
+
 def _bare_decision_line(lines):
-    """Among `lines` (already fence/quote-filtered), the one standalone
-    decision -- a line with no `Verdict:` label of its own that, run through
-    the same normaliser a label's decision text gets, is exactly one of the
-    known APPROVE/REQUEST-CHANGES tokens and nothing else. Returns
-    `(decision, decision_text)`, or None when no such line exists or more
-    than one DISTINCT decision is found among candidate lines -- the same
+    """Among `lines` (already quote-filtered), the one standalone decision --
+    a line with no `Verdict:` label of its own that, run through the same
+    normaliser a label's decision text gets, is exactly one of the known
+    APPROVE/REQUEST-CHANGES tokens and nothing else. Returns `(decision,
+    decision_text)`, or None when no such line exists or more than one
+    DISTINCT decision is found among candidate lines -- the same
     "disagreement refuses, never guesses" rule `_parse_verdict_comment`
     already applies across multiple labelled lines (agent-supervisor#196),
     applied here across multiple bare ones.
 
-    Only called when a `Verdict:` label was found with empty text
-    (agent-supervisor#475 case 3) -- this never promotes a bare decision
-    word on its own; the label is what marks the comment as containing a
-    verdict at all."""
+    agent-supervisor#595: `_scan_verdict_lines` no longer calls this
+    function. It used to fire for a `Verdict:` label found with empty text
+    (agent-supervisor#475 case 3), scanning the rest of the comment for a
+    standalone decision word to adopt. That shape is structurally
+    incompatible with #595's three-consecutive-line requirement -- an empty
+    `Verdict:` label followed immediately by `Review-Lane:`/`Reviewed-SHA:`
+    lines would have nothing FOR this function to find (there is no
+    trailing prose to search), and an empty label followed by prose (the
+    #475 shape this function was written for) never has a genuine trailer
+    pair immediately after it either. #475's case 3 is superseded, not
+    ported forward. `_bare_decision_line` is left defined, unwired, only
+    because its own pure-function behaviour (not the retired wiring) is
+    still directly unit-tested in `tests/supervisor/test_verdict.py`."""
     found = {}
     for line in lines:
         if _VERDICT_LINE_RE.match(line):
@@ -523,7 +610,14 @@ def _bare_decision_line(lines):
 def _parse_verdict_comment(body):
     """A comment counts as a verdict when `_scan_verdict_lines` finds at
     least one qualifying line with a RECOGNISED decision (see
-    `_classify_decision_text`).
+    `_classify_decision_text`). "Qualifying", per agent-supervisor#595, means
+    the `Verdict:` label is the first line of a complete, unbroken
+    `Verdict:`/`Review-Lane:`/`Reviewed-SHA:` block -- the underlying label
+    match (`_VERDICT_LINE_RE`) is a substring match with no anchor to the
+    start of the line (see `_scan_verdict_lines`'s own docstring for why
+    that stays loose on purpose); a bare `Verdict:`-shaped line with nothing
+    genuine following it is never enough on its own to make this function
+    see a decision at all, fenced or not (agent-supervisor#609).
 
     #196: every qualifying line in the comment is consulted, not just the
     first, so a SINGLE comment can carry more than one verdict line -- a
@@ -742,8 +836,16 @@ class GithubReviewVerdictSource(VerdictSource):
     """Reads GitHub's own review state, and -- agent-supervisor#53 -- issue
     comments with a `Verdict:` line (any heading/emphasis form -- #192).
     Never comment PROSE: a comment only counts through
-    `_parse_verdict_comment`'s line-anchored match, the same fail-closed
-    discipline #203 established for reviews.
+    `_parse_verdict_comment`'s match, the same fail-closed discipline #203
+    established for reviews. That match is NOT anchored to the start of the
+    line -- `_VERDICT_LINE_RE` is a deliberate substring match, so a lead-in
+    before the label ("Final call -- Verdict: APPROVE") still counts -- what
+    makes a match OPERATIVE, per agent-supervisor#595, is being the first
+    line of a complete, unbroken `Verdict:`/`Review-Lane:`/`Reviewed-SHA:`
+    block (fenced or not, per #609); a bare `Verdict:`-shaped line with
+    nothing genuine following it is never enough on its own. See
+    `_scan_verdict_lines`'s own docstring for the poisoning incidents this
+    closes.
 
     The codex lane posts its verdicts as `gh pr comment`, not `gh pr
     review` -- a review object alone missed exactly the reviews that
@@ -896,6 +998,24 @@ class GithubReviewVerdictSource(VerdictSource):
            dates; #213's issue says so explicitly) but it is the only
            signal available for a verdict already on record, and refusing
            beats trusting a comment that cannot be tied to a SHA at all.
+
+           agent-supervisor#595: this method is only ever reached from
+           `_comment_verdict` for a comment `_scan_verdict_lines` already
+           found OPERATIVE -- which, since #595, means the comment's body
+           necessarily contains a genuine `Reviewed-SHA:` line (it is
+           required, immediately after `Verdict:`/`Review-Lane:`, for the
+           label to be operative at all). So mechanism 2 above is, in
+           practice, no longer reachable through THIS call site: `reviewed_sha
+           is None` cannot happen when `body` is the body of a comment
+           `_comment_verdict` already decided was operative. The mechanism
+           itself is left in place, correct in isolation, and still directly
+           unit-tested (`tests/supervisor/test_verdict.py`'s
+           `GithubCommentVerdictTests` calls this method directly for that
+           reason) -- not deleted, because a caller reaching this method with
+           a body that never went through `_scan_verdict_lines` at all (none
+           exists today, but nothing prevents one tomorrow) would still need
+           it. Named here so a future reader does not mistake the dead path
+           for an oversight.
 
         Returns `(fresh, note, refusal)`. `fresh` False means the caller
         MUST return `unknown` with `refusal` appended to its own detail --

@@ -127,6 +127,14 @@
 #          ledger has registered, resolves to the supervisor's own window
 #          (#187's two measured false-refusal shapes), or resolves to a lane
 #          whose registration the live tmux server contradicts (#520).
+# Exit 9   refused -- the body contains a `Verdict:`-shaped line that is not
+#          the first line of a complete, unbroken Verdict:/Review-Lane:/
+#          Reviewed-SHA: block (agent-supervisor#595's write-time mirror: a
+#          bare label an agent is ABOUT TO POST is much more likely to be a
+#          half-finished draft or a poisoning shape than a deliberate quote
+#          of somebody else's trailer -- see `verdict._unblocked_verdict_labels`
+#          for the exact check and why it does not give this the same
+#          inline-code pass `_scan_verdict_lines` gives a comment being READ).
 #
 # IF YOU ARE WRITING BRIEF TEXT FOR A REVIEW OR FIX-PASS DISPATCH (#412):
 # the class of bug #187 measured was never a committed script calling `gh
@@ -241,7 +249,7 @@ lane_check_json="$("$LEDGER_PYTHON" -c '
 import json, sys
 sys.path.insert(0, sys.argv[1])
 from core import Ledger, LANE_ID_RE
-from verdict import _parse_review_lane, _review_lane_line, _scan_verdict_lines
+from verdict import _parse_review_lane, _review_lane_line, _scan_verdict_lines, _unblocked_verdict_labels
 
 body = sys.stdin.read()
 ledger = Ledger(sys.argv[2])
@@ -250,6 +258,7 @@ supervisor_window = sys.argv[3]
 has_verdict = bool(_scan_verdict_lines(body))
 raw_line = _review_lane_line(body)
 lane_token = _parse_review_lane(body, ledger=ledger)
+bare_labels = _unblocked_verdict_labels(body)
 
 known = False
 is_supervisor = False
@@ -270,6 +279,7 @@ json.dump({
     "lane_token": lane_token or "",
     "known": known,
     "is_supervisor": is_supervisor,
+    "bare_labels": bare_labels,
 }, sys.stdout)
 ' "$HERE" "$STATE" "$SUPERVISOR_WINDOW" <<<"$BODY" 2>/dev/null)"
 
@@ -323,6 +333,20 @@ if [ "$has_lane_line" = "true" ]; then
     echo "post-verdict.sh: refusing to post -- Review-Lane '$lane_token' names the supervisor's own window (index $SUPERVISOR_WINDOW), which never reviews -- this is the exact false-refusal shape agent-supervisor#187 measured twice" >&2
     exit 8
   fi
+fi
+
+# --- write-time mirror of agent-supervisor#595's read-time fix -----------
+# A `Verdict:`-shaped line that is not the first line of a complete,
+# unbroken Verdict:/Review-Lane:/Reviewed-SHA: block is refused before it
+# is ever posted -- see `verdict._unblocked_verdict_labels` for why this
+# does not give a bare label the same inline-code pass a comment being READ
+# gets, and this script's own header comment (Exit 9) for the scope this
+# does not attempt to cover (human web UI, a codex lane posting directly).
+bare_label_count=$(jq -r '.bare_labels | length' <<<"$lane_check_json")
+if [ "$bare_label_count" != "0" ]; then
+  echo "post-verdict.sh: refusing to post -- body has a Verdict:-shaped line that is not the first line of a complete Verdict:/Review-Lane:/Reviewed-SHA: block (agent-supervisor#595's write-time mirror):" >&2
+  jq -r '.bare_labels[] | "  " + .' <<<"$lane_check_json" >&2
+  exit 9
 fi
 
 # --- post -----------------------------------------------------------------

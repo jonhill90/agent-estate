@@ -22,7 +22,24 @@
 # line are updated to also carry a matching, ledger-registered `Review-Lane:`
 # line, so they keep testing what they always tested instead of tripping the
 # new check for an unrelated reason.
+#
+# Section 8 adds the fourth defense (agent-supervisor#595's write-time
+# mirror): a body containing a `Verdict:`-shaped line that is not the first
+# line of a complete, unbroken Verdict:/Review-Lane:/Reviewed-SHA: block is
+# refused at exit 9, before anything is posted. `verdict._scan_verdict_lines`
+# now requires that same complete block to consider a line operative at all
+# (agent-supervisor#595/#609), which means `has_verdict` below can only be
+# true when a Review-Lane: line is ALSO present -- so section 7a's original
+# "Verdict: line with no Review-Lane: line" fixture no longer reaches the
+# exit-7 pairing branch it used to; it is caught earlier, by the new
+# completeness lint, at exit 9. 7a is updated in place to say so. Every
+# `Verdict:`/`Review-Lane:` body elsewhere in this file that did not
+# previously carry a `Reviewed-SHA:` trailer now gets one added, so it stays
+# testing what it always tested instead of tripping the new lint for an
+# unrelated reason -- same discipline #595's own fixture updates in
+# `tests/supervisor/test_verdict.py` follow.
 set -uo pipefail
+REVIEWED_SHA="a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1"
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POST_VERDICT="$HERE/../../scripts/supervisor/post-verdict.sh"
 SUPERVISOR_DIR="$HERE/../../scripts/supervisor"
@@ -113,6 +130,7 @@ PATH="$D/refuse/bin:$PATH" \
   bash "$POST_VERDICT" o/r 5 <<EOF >"$D/refuse/prose_out" 2>"$D/refuse/prose_err"
 **Verdict:** APPROVE -- see @$D/refuse/does-not-exist.md for detail, plus more words
 Review-Lane: revlane:3
+Reviewed-SHA: $REVIEWED_SHA
 EOF
 rc=$?
 if [ "$rc" -eq 0 ]; then ok "real prose mentioning an @-path is not refused"; else bad "real prose was wrongly refused (rc=$rc): $(cat "$D/refuse/prose_err")"; fi
@@ -141,9 +159,10 @@ EOF
 chmod +x "$D/mismatch/bin/gh"
 
 PATH="$D/mismatch/bin:$PATH" \
-  bash "$POST_VERDICT" o/r 9 <<'EOF' >"$D/mismatch/out" 2>"$D/mismatch/err"
+  bash "$POST_VERDICT" o/r 9 <<EOF >"$D/mismatch/out" 2>"$D/mismatch/err"
 **Verdict:** APPROVE, real findings, none of which is a file path
 Review-Lane: revlane:3
+Reviewed-SHA: $REVIEWED_SHA
 EOF
 rc=$?
 if [ "$rc" -ne 0 ]; then ok "a read-back mismatch after a successful gh post exits non-zero (got $rc)"; else bad "a read-back mismatch exited 0"; fi
@@ -190,9 +209,10 @@ EOF
 chmod +x "$D/happy/bin/gh"
 
 PATH="$D/happy/bin:$PATH" \
-  bash "$POST_VERDICT" o/r 11 <<'EOF' >"$D/happy/out" 2>"$D/happy/err"
+  bash "$POST_VERDICT" o/r 11 <<EOF >"$D/happy/out" 2>"$D/happy/err"
 **Verdict:** APPROVE -- read back matches what was sent
 Review-Lane: revlane:3
+Reviewed-SHA: $REVIEWED_SHA
 EOF
 rc=$?
 if [ "$rc" -eq 0 ]; then ok "a matching read-back exits zero"; else bad "a matching read-back exited $rc: $(cat "$D/happy/err")"; fi
@@ -210,9 +230,10 @@ exit 1
 EOF
 chmod +x "$D/ghfail/bin/gh"
 PATH="$D/ghfail/bin:$PATH" \
-  bash "$POST_VERDICT" o/r 3 <<'EOF' >"$D/ghfail/out" 2>"$D/ghfail/err"
+  bash "$POST_VERDICT" o/r 3 <<EOF >"$D/ghfail/out" 2>"$D/ghfail/err"
 **Verdict:** APPROVE
 Review-Lane: revlane:3
+Reviewed-SHA: $REVIEWED_SHA
 EOF
 rc=$?
 if [ "$rc" -ne 0 ]; then ok "a gh post failure exits non-zero"; else bad "a gh post failure exited 0"; fi
@@ -331,14 +352,20 @@ EOF
 chmod +x "$D/lane/bin/gh"
 
 # 7a. RED: a Verdict: line with no Review-Lane: line at all is refused,
-#     gh never invoked.
+#     gh never invoked. Was exit 7 (the pairing check) before
+#     agent-supervisor#595: `verdict._scan_verdict_lines` now requires a
+#     complete Verdict:/Review-Lane:/Reviewed-SHA: block before `has_verdict`
+#     is true at all, so `has_verdict` can never be true here while
+#     `has_lane_line` is false -- the pairing check's "verdict but no lane"
+#     branch is unreachable for this fixture now. The earlier write-time
+#     completeness lint (section 8) catches it first, at exit 9.
 : > "$LANE_LOG"
 PATH="$D/lane/bin:$PATH" \
   bash "$POST_VERDICT" o/r 21 <<'EOF' >"$D/lane/noline_out" 2>"$D/lane/noline_err"
 **Verdict:** APPROVE, no lane trailer at all
 EOF
 rc=$?
-if [ "$rc" -eq 7 ]; then ok "a Verdict: line with no Review-Lane: line is refused (got $rc)"; else bad "a Verdict: line with no Review-Lane: line was not refused (rc=$rc)"; fi
+if [ "$rc" -eq 9 ]; then ok "a Verdict: line with no Review-Lane: line is refused by the completeness lint (got $rc)"; else bad "a Verdict: line with no Review-Lane: line was not refused (rc=$rc)"; fi
 if [ ! -s "$LANE_LOG" ]; then ok "gh is never invoked for the missing-Review-Lane refusal"; else bad "gh was invoked despite the refusal: $(cat "$LANE_LOG")"; fi
 
 # 7b. RED: a Review-Lane: line with no Verdict: line is refused, gh never
@@ -358,9 +385,10 @@ if [ ! -s "$LANE_LOG" ]; then ok "gh is never invoked for the missing-Verdict re
 #     invoked.
 : > "$LANE_LOG"
 PATH="$D/lane/bin:$PATH" \
-  bash "$POST_VERDICT" o/r 21 <<'EOF' >"$D/lane/unknown_out" 2>"$D/lane/unknown_err"
+  bash "$POST_VERDICT" o/r 21 <<EOF >"$D/lane/unknown_out" 2>"$D/lane/unknown_err"
 **Verdict:** APPROVE
 Review-Lane: lane:30-rev-at30
+Reviewed-SHA: $REVIEWED_SHA
 EOF
 rc=$?
 if [ "$rc" -eq 8 ]; then ok "an unregistered Review-Lane value is refused (got $rc)"; else bad "an unregistered Review-Lane value was not refused (rc=$rc)"; fi
@@ -370,9 +398,10 @@ if [ ! -s "$LANE_LOG" ]; then ok "gh is never invoked for the unresolvable-lane 
 #     agent-supervisor#165/agent-tui#31 shape, measured twice in 24h.
 : > "$LANE_LOG"
 PATH="$D/lane/bin:$PATH" \
-  bash "$POST_VERDICT" o/r 21 <<'EOF' >"$D/lane/supervisor_out" 2>"$D/lane/supervisor_err"
+  bash "$POST_VERDICT" o/r 21 <<EOF >"$D/lane/supervisor_out" 2>"$D/lane/supervisor_err"
 **Verdict:** APPROVE
 Review-Lane: revlane:1
+Reviewed-SHA: $REVIEWED_SHA
 EOF
 rc=$?
 if [ "$rc" -eq 8 ]; then ok "a Review-Lane naming the supervisor's own window is refused (got $rc)"; else bad "a supervisor-window Review-Lane was not refused (rc=$rc)"; fi
@@ -383,13 +412,93 @@ if grep -qi "supervisor" "$D/lane/supervisor_err"; then ok "the supervisor-windo
 #     Verdict: line posts normally.
 : > "$LANE_LOG"
 PATH="$D/lane/bin:$PATH" \
-  bash "$POST_VERDICT" o/r 21 <<'EOF' >"$D/lane/good_out" 2>"$D/lane/good_err"
+  bash "$POST_VERDICT" o/r 21 <<EOF >"$D/lane/good_out" 2>"$D/lane/good_err"
 **Verdict:** APPROVE, a real registered non-supervisor lane
 Review-Lane: revlane:3
+Reviewed-SHA: $REVIEWED_SHA
 EOF
 rc=$?
 if [ "$rc" -eq 0 ]; then ok "a registered, non-supervisor Review-Lane posts normally"; else bad "a valid Review-Lane was wrongly refused (rc=$rc): $(cat "$D/lane/good_err")"; fi
 if grep -q "posted and verified comment 321" "$D/lane/good_out"; then ok "the valid-lane post names the verified comment id"; else bad "no verified-comment confirmation: $(cat "$D/lane/good_out")"; fi
+
+# =========================================================================
+# 8. Write-time mirror of agent-supervisor#595's read-time fix: a body
+#    containing a `Verdict:`-shaped line that is not the first line of a
+#    complete, unbroken Verdict:/Review-Lane:/Reviewed-SHA: block is
+#    refused at exit 9, before anything is posted.
+# =========================================================================
+mkdir -p "$D/block/bin"
+BLOCK_LOG="$D/block/gh.log"
+BLOCK_SENT="$D/block/sent.body"
+cat > "$D/block/bin/gh" <<EOF
+#!/bin/bash
+echo "gh called: \$*" >> "$BLOCK_LOG"
+if [ "\$1" = "pr" ] && [ "\$2" = "comment" ]; then
+  cat > "$BLOCK_SENT"
+  echo "https://github.com/o/r/pull/31#issuecomment-31"
+  exit 0
+elif [ "\$1" = "api" ]; then
+  cat "$BLOCK_SENT"
+  exit 0
+fi
+exit 9
+EOF
+chmod +x "$D/block/bin/gh"
+
+# 8a. RED: a Verdict: label immediately followed by Review-Lane: but with no
+#     Reviewed-SHA: line after it -- two of the three lines, not a complete
+#     block. This body's has_verdict/has_lane_line pair (false/true) still
+#     also trips the older pairing check (exit 7) FIRST, since that check
+#     runs before this lint -- named here, not asserted as exit 9, so this
+#     suite documents the priority rather than silently depending on it.
+: > "$BLOCK_LOG"
+PATH="$D/block/bin:$PATH" \
+  bash "$POST_VERDICT" o/r 31 <<'EOF' >"$D/block/twoline_out" 2>"$D/block/twoline_err"
+**Verdict:** APPROVE
+Review-Lane: revlane:3
+EOF
+rc=$?
+if [ "$rc" -ne 0 ]; then ok "a Verdict:/Review-Lane: pair with no Reviewed-SHA: is refused (got $rc)"; else bad "a two-line-only trailer was not refused"; fi
+if [ ! -s "$BLOCK_LOG" ]; then ok "gh is never invoked for the incomplete-block refusal"; else bad "gh was invoked despite the refusal: $(cat "$BLOCK_LOG")"; fi
+
+# 8b. RED: a bare `Verdict:`-shaped label with nothing following it at all
+#     (no Review-Lane:, no Reviewed-SHA:) -- section 7a's original fixture,
+#     now caught here instead of by the pairing check (see 7a's comment).
+: > "$BLOCK_LOG"
+PATH="$D/block/bin:$PATH" \
+  bash "$POST_VERDICT" o/r 31 <<'EOF' >"$D/block/bare_out" 2>"$D/block/bare_err"
+**Verdict:** APPROVE, no trailer at all
+EOF
+rc=$?
+if [ "$rc" -eq 9 ]; then ok "a bare Verdict: label with nothing following is refused by the completeness lint (got $rc)"; else bad "a bare Verdict: label was not refused at exit 9 (rc=$rc)"; fi
+if [ ! -s "$BLOCK_LOG" ]; then ok "gh is never invoked for the bare-label refusal"; else bad "gh was invoked despite the refusal: $(cat "$BLOCK_LOG")"; fi
+if grep -q "not the first line of a complete" "$D/block/bare_err"; then ok "the bare-label refusal names the reason"; else bad "no completeness-lint explanation on stderr: $(cat "$D/block/bare_err")"; fi
+
+# 8c. RED: the agent-supervisor#553 poisoning shape -- ordinary prose that
+#     happens to contain the substring "verdict:" mid-sentence, with nothing
+#     resembling a trailer anywhere in the body. Proves the write-time lint
+#     catches the exact incident #595 was filed over, not just a synthetic
+#     two/three-line shape.
+: > "$BLOCK_LOG"
+PATH="$D/block/bin:$PATH" \
+  bash "$POST_VERDICT" o/r 31 <<'EOF' >"$D/block/poison_out" 2>"$D/block/poison_err"
+A stale `Reviewed-SHA` does not automatically sink a verdict: `verdict.py` can promote
+EOF
+rc=$?
+if [ "$rc" -eq 9 ]; then ok "the #553 mid-sentence poisoning shape is refused by the completeness lint (got $rc)"; else bad "the #553 poisoning shape was not refused at exit 9 (rc=$rc)"; fi
+if [ ! -s "$BLOCK_LOG" ]; then ok "gh is never invoked for the #553-shape refusal"; else bad "gh was invoked despite the refusal: $(cat "$BLOCK_LOG")"; fi
+
+# 8d. GREEN: a complete three-line block posts normally -- the lint does not
+#     refuse a genuinely well-formed trailer.
+: > "$BLOCK_LOG"
+PATH="$D/block/bin:$PATH" \
+  bash "$POST_VERDICT" o/r 31 <<EOF >"$D/block/good_out" 2>"$D/block/good_err"
+**Verdict:** APPROVE, a complete trailer block
+Review-Lane: revlane:3
+Reviewed-SHA: $REVIEWED_SHA
+EOF
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "a complete Verdict:/Review-Lane:/Reviewed-SHA: block is not refused by the completeness lint"; else bad "a complete trailer block was wrongly refused (rc=$rc): $(cat "$D/block/good_err")"; fi
 
 echo
 echo "post-verdict.sh: $pass passed, $fail failed"
