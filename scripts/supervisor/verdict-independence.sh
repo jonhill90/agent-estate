@@ -584,6 +584,76 @@ claimed_author_conflict() {  # claimed_author_conflict <author-json> <reviewer-l
   fi
 }
 
+# agent-supervisor#605: `daemon`/`d-<task>` (supervisord's own author-lane
+# shapes, `daemon/cmd/supervisord/main.go:216`'s hardcoded default and
+# `batch.go:103`'s `d-<task>`) and `session:window` (a tmux lane) are two
+# DISJOINT namespaces -- neither can ever denote the same actor, because a
+# tmux lane resolves to a registered pane and the daemon never has one. That
+# is a different shape of fact than everything else in this file establishes
+# `same`/`different` from: it does not need a live measurement or a ledger
+# registry lookup to RECONCILE two candidate identities (`resolve_lane_
+# relation`'s whole job) -- it only needs to confirm the two sides could not
+# possibly be the same actor by construction, which is knowable from the
+# NAMESPACE alone once the namespace itself is verified.
+#
+# "Verified", not pattern-matched: `_is_verified_daemon_lane` below does NOT
+# regex the string `daemon` -- it asks the ledger whether THIS EXACT lane
+# row's `server_id` column reads `supervisord`, the literal value only
+# `daemon/internal/ledger/ledger.go`'s `EnsureLane` ever writes (grepped: no
+# other writer of the `lanes` table, Python or Go, ever sets `server_id` to
+# that string). A `Review-Lane: daemon` trailer typed by hand into a comment
+# does not change what that lookup returns for the string "daemon" -- it
+# either finds the real, genuinely-daemon-authored row or it does not -- so
+# there is no new self-assertion path here: nothing a reviewer types can make
+# an unregistered or non-daemon lane id start passing this check.
+#
+# That still leaves one asymmetry to close, because "the STRING `daemon`
+# really is supervisord's" is not the same claim as "the actor who typed
+# `Review-Lane: daemon` on a comment really is the daemon" -- a self-
+# reviewing tmux lane could type that trailer on its own PR hoping the
+# cross-namespace rule launders it. So this is called with the roles fixed,
+# never symmetrically: `contributor` must be a lane FROM THE TRUSTED,
+# LEDGER-RESOLVED CONTRIBUTOR SET (`author_lane_for`'s own chain -- closing
+# issue, `pr-task`, `contributor-pr-lanes`, never a self-attested trailer),
+# and `reviewer` must carry ITS OWN registered `pane_id` (a live/ledger fact
+# a hand-typed string cannot manufacture; every daemon-shaped lane's own
+# `pane_id` is unconditionally empty -- `EnsureLane`'s own INSERT). A
+# self-reviewing tmux lane typing `Review-Lane: daemon` never reaches this as
+# the CONTRIBUTOR side (the real contributor is its own real tmux lane, which
+# fails the daemon-shape check and falls through unchanged), and a daemon
+# lane cannot satisfy the REVIEWER half either (its own pane_id is always
+# empty) -- so `daemon` vs `daemon` and `d-X` vs `d-X` both fall through to
+# the existing `resolve_lane_relation`, unchanged (constraint 2). A daemon
+# contributor whose row does not verify (deleted, malformed, or simply not
+# actually daemon-authored) falls through the same way, to the same
+# fail-closed `unknown` default this file has always used (constraint 3).
+_is_verified_daemon_lane() {  # _is_verified_daemon_lane <lane> -> "1" or ""
+  local server_id
+  server_id=$("$LEDGER_PYTHON" -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+row = Ledger(sys.argv[2]).get_lane(sys.argv[3])
+print((row or {}).get("server_id") or "")
+' "$HERE" "$STATE" "$1" 2>/dev/null) || server_id=""
+  [ "$server_id" = "supervisord" ] && printf '1\n' || printf '\n'
+}
+
+# agent-supervisor#605: the one narrow widening described above -- `different`
+# when (and only when) `contributor` verifies as a real supervisord-written
+# lane AND `reviewer` carries its own registered (non-empty) `pane_id`.
+# Prints nothing (never "unknown") when either half does not hold, so the
+# caller's existing `resolve_lane_relation` fallback -- and its fail-closed
+# posture -- is completely unchanged for every case this does not narrowly
+# resolve.
+_daemon_cross_namespace_relation() {  # _daemon_cross_namespace_relation <contributor> <reviewer> -> "different" or empty
+  local contributor="$1" reviewer="$2" reviewer_pane_id
+  [ -n "$(_is_verified_daemon_lane "$contributor")" ] || { printf '\n'; return; }
+  reviewer_pane_id=$(_lane_own_pane_id "$reviewer")
+  [ -n "$reviewer_pane_id" ] || { printf '\n'; return; }
+  printf 'different\n'
+}
+
 # agent-supervisor#200: aggregates resolve_lane_relation() (#332) across
 # EVERY lane in author_lane_for's now-widened contributor set, not just a
 # single previously-resolved author -- the merge-time analogue of
@@ -620,7 +690,15 @@ contributor_lane_relation() {  # contributor_lane_relation <author-json> <review
   while [ "$i" -lt "$n" ]; do
     lane=$(jq -r ".contributors[$i].lane" <<<"$author_json")
     task=$(jq -r ".contributors[$i].task // \"\"" <<<"$author_json")
-    rel=$(resolve_lane_relation "$lane" "$reviewer_lane")
+    # agent-supervisor#605: the daemon/tmux cross-namespace widening is tried
+    # FIRST and only ever narrows toward "different" -- it prints nothing for
+    # every case it does not positively resolve, in which case the existing
+    # resolve_lane_relation call below runs exactly as it did before this
+    # existed.
+    rel=$(_daemon_cross_namespace_relation "$lane" "$reviewer_lane")
+    if [ -z "$rel" ]; then
+      rel=$(resolve_lane_relation "$lane" "$reviewer_lane")
+    fi
     if [ "$rel" = "same" ]; then
       overall="same"; matched_lane="$lane"; matched_task="$task"
       break
