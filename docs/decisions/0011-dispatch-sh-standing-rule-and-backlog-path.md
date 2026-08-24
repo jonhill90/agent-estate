@@ -178,22 +178,54 @@ repo, per cause, not a restated intention:
    failed once tonight, and the backup is `#555`'s human-authorized
    exception catching what the discipline misses — not a closed loop.**
 
-## Companion rule for existing work — second proof landed, `#543`
+## Companion rule for existing work — second proof landed, `#543`, and a mistake caught before it shipped
 
 `agent-supervisor#543` merged the same way `#560` did: a genuine fix-pass
-dispatched through `dispatch.sh` against a real issue (`#542`), not this
-document's new-work rule, but the same mechanism applied backward to a
-PR that already existed. **The standing companion rule for the current
-backlog: before any of them reaches `#555`'s human-authorized exception,
-try a genuine `dispatch.sh --pr <N>` fix-pass against a real issue first
-— existing if one already applies, freshly filed if not (see `#555` for
-the measured routing: `#544`→`#540`, `#551`→`#548`, `#559`→`#550` already
-have one; the rest need a real issue filed before dispatching, which is
-itself legitimate work, not a formality, given how much this repo's own
-state has drifted tonight).** `#555`'s fallback stays available and is
-not being retired — it is the backstop for whatever a genuine fix-pass
-finds nothing to do on and cannot get a fresh independent verdict for, not
-the default first move.
+dispatched through `dispatch.sh` against a real issue (`#542`), applied
+backward to a PR that already existed. The first version of this section
+said the companion rule was "an existing issue if one applies, a freshly
+filed one if not" — **that was wrong, and reversed before any lane acted
+on it.**
+
+**Verified, not assumed:** `#544`, `#551`, `#559` each reference a real
+issue (`#540`, `#548`, `#550`) whose `createdAt` genuinely predates the
+PR's own `createdAt` — confirmed via `gh issue view`/`gh pr view
+--json createdAt`, not inferred from the number appearing in a title.
+Those three route through a genuine `dispatch.sh --pr <N>` fix-pass, same
+as `#543`.
+
+**The other eleven — `#561`, `#557`, `#553`, `#547`, `#541`, `#537`,
+`#536`, `#535`, `#534`, `#533`, `#531` — do not, and the losing argument
+is answered, not just noted:**
+
+The case for allowing a freshly-filed issue: the fix-pass lane would do
+genuine, checkable verification work, and that work's authorship is real
+regardless of when the issue was filed — which is exactly what made
+`#543`'s merge trustworthy in the first place, so why should the issue's
+birthdate matter more than the work's honesty?
+
+**It loses, on the property that actually makes the existing pattern
+sound, not on a technicality:** `dispatch.sh`'s issue-first ordering is
+trustworthy specifically because the dispatcher commits to a scope of
+work *before* anyone knows what the result will look like — the issue
+existing first is what proves the work wasn't shaped to fit a
+predetermined, already-known-good outcome. An already-open,
+already-independently-APPROVE'd PR is a known-good outcome. Filing an
+issue afterward and dispatching a "verification" against it is not blind
+in the way a real dispatch is — the fix-pass is checking work everyone
+involved already believes is correct, which is a structurally weaker
+form of scrutiny than the blind case even when the individual lane
+verifies honestly and adversarially. That is the same shape — an
+after-the-fact link constructed to satisfy the guard — as the three
+mechanisms this estate has already rejected tonight, not a new one;
+the fact that the *specific* link this time is a real GitHub issue rather
+than a self-run script doesn't change which property is missing.
+
+**`agent-supervisor#555`'s human-authorized exception is the only route
+for those eleven.** Stated plainly rather than left implied: this makes
+`#555` the answer for most of the current backlog, not a narrow backstop
+— eleven of fourteen open PRs, as measured, have no `dispatch.sh` route
+at all without reversing the property that makes the tool trustworthy.
 
 ## What this does not decide
 
