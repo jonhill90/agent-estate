@@ -399,5 +399,27 @@ rm -f /tmp/ad256-out24.$$
 
 rm -rf "$FAKE_BIN2"
 
+# --- S12 container signal: execution_mode is RECORDED at bootstrap ---------
+# (docs/SPEC-shell.md S12, docs/SPEC-agentbox-execution-mode.md). Same
+# "written by whatever created the lane" discipline as @hill90_lane_harness
+# above (#216) -- lanes.sh's own execmode_for reads this back.
+
+# 25. Every LANE window this script creates is genuinely, positively local --
+#     it just started "$LAUNCH_CMD" directly in a tmux pane on this host, no
+#     container involved -- and that fact is recorded, not left for a reader
+#     to infer from the pane's command.
+bash "$BOOT" --session "$S" --lanes 3 --agent bash >/dev/null 2>&1
+check "25. creates cleanly" "0" "$?"
+execmode() { tmux show-options -p -t "=$S:$1" -v @hill90_lane_execution_mode 2>/dev/null; }
+check "25. execution_mode recorded 'local' on lane window 2" "local" "$(execmode 2)"
+check "25. execution_mode recorded 'local' on lane window 3" "local" "$(execmode 3)"
+# The supervisor window is not a dispatch target and lanes.sh never offers
+# it as a lane -- this script deliberately does not write the option there,
+# so a reader of the option's presence alone can tell "a lane bootstrap-
+# session.sh created" from "the supervisor's own window" without also
+# checking the window's name/index.
+check "25. execution_mode NOT recorded on the supervisor window (not a lane)" "" "$(execmode 1)"
+cleanup
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

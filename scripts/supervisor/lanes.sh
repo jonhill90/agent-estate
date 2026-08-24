@@ -280,13 +280,49 @@ SEP=$'\001'
 # guarantee that -- a window closing between them is the very race this is
 # being read for. It is appended last so every existing positional read of
 # this list keeps its column.
-declare -a IDX NAME CMD ACTIVITY PANEMODE PANEPID WID PANE_PATH
-while IFS=$'\t' read -r w n c a m p wid path; do
+#
+# S12/agent-tui#136-container-signal: `#{@hill90_lane_execution_mode}` is a
+# per-pane tmux USER OPTION -- not a probe of anything on screen, unlike
+# every other field this call reads. It exists only when something that
+# CREATED this lane wrote it (bootstrap-session.sh today; a future container
+# driver later), the identical "RECORDED, never inferred" discipline
+# `@hill90_lane_harness` already established for harness identity
+# (agent-dotfiles#216). tmux expands an option nobody ever set to the empty
+# string, which is exactly the "no evidence" case this file must fail closed
+# on -- see execmode_for below, not this read, for how that empty string
+# becomes the honest `unknown`. Appended last, same #241 discipline as
+# `window_id`/`pane_current_path` before it.
+declare -a IDX NAME CMD ACTIVITY PANEMODE PANEPID WID PANE_PATH EXECMODE_RAW
+while IFS=$'\t' read -r w n c a m p wid path execmode_raw; do
   [ -n "$w" ] || continue
-  IDX+=("$w"); NAME+=("$n"); CMD+=("$c"); ACTIVITY+=("$a"); PANEMODE+=("$m"); PANEPID+=("$p"); WID+=("$wid"); PANE_PATH+=("$path")
+  IDX+=("$w"); NAME+=("$n"); CMD+=("$c"); ACTIVITY+=("$a"); PANEMODE+=("$m"); PANEPID+=("$p"); WID+=("$wid"); PANE_PATH+=("$path"); EXECMODE_RAW+=("$execmode_raw")
 done < <(tmux list-panes -s -t "$SESSION" -f '#{pane_active}' \
-           -F "#{window_index}${SEP}#{window_name}${SEP}#{pane_current_command}${SEP}#{window_activity}${SEP}#{pane_in_mode}${SEP}#{pane_pid}${SEP}#{window_id}${SEP}#{pane_current_path}" 2>/dev/null \
+           -F "#{window_index}${SEP}#{window_name}${SEP}#{pane_current_command}${SEP}#{window_activity}${SEP}#{pane_in_mode}${SEP}#{pane_pid}${SEP}#{window_id}${SEP}#{pane_current_path}${SEP}#{@hill90_lane_execution_mode}" 2>/dev/null \
          | sed "s/\\\\001/${TAB}/g")
+
+# execmode_for turns the raw `@hill90_lane_execution_mode` option value into
+# the one this file ever emits. POSITIVE identification only -- see this
+# repo's estate-loop brief (S12 container signal) for why a substring guess
+# at the pane's command is explicitly the wrong shape: a container entrypoint
+# can re-exec into a harness process indistinguishable from a native one, so
+# the only trustworthy signal is one the process's own creator wrote down.
+#
+# Exactly two values are ever trusted: `local` and `container`, both written
+# by bootstrap-session.sh (local, every lane it creates today -- there is no
+# container driver yet, agent-tui's docs/SPEC-agentbox-execution-mode.md) or
+# a future container-mode dispatch path (container, not built here). ANYTHING
+# else -- unset (ordinary tmux empty-string expansion), or garbage from a
+# hand-edited option, or a value neither side has agreed to yet -- reads
+# `unknown`, the same fail-closed default #115 already established for
+# `model`: a caller must never be able to mistake "this file could not tell"
+# for a real answer, and widening this case-statement to accept a third
+# value is the one operation that could ever make that happen by accident.
+execmode_for() {
+  case "$1" in
+    local|container) printf '%s' "$1" ;;
+    *) printf 'unknown' ;;
+  esac
+}
 
 # #154. Answers one question about a pane whose command is a shell: is that
 # shell one of this directory's services, or is it the wreckage of an agent
@@ -385,9 +421,13 @@ now_epoch=$(date +%s)
 emit_rows() {
   local i
   for i in "${!IDX[@]}"; do
-    local w="${IDX[$i]}" name="${NAME[$i]}" cmd="${CMD[$i]}" act="${ACTIVITY[$i]}" mode="${PANEMODE[$i]}" pid="${PANEPID[$i]}" wid="${WID[$i]}" path="${PANE_PATH[$i]}"
+    local w="${IDX[$i]}" name="${NAME[$i]}" cmd="${CMD[$i]}" act="${ACTIVITY[$i]}" mode="${PANEMODE[$i]}" pid="${PANEPID[$i]}" wid="${WID[$i]}" path="${PANE_PATH[$i]}" execmode_raw="${EXECMODE_RAW[$i]}"
     local pane state age pane_lines pane_tail hidx busy_tail target
     local model model_hidx model_match
+    local execmode
+    # Computed unconditionally, same posture as `model` below: a lane still
+    # reports its execution mode in every state, not only `free`/`busy`.
+    execmode=$(execmode_for "$execmode_raw")
     # #241: the captures below address the window by ID, not by index. The
     # list-panes call above and these two captures are separated by a whole
     # loop iteration per lane, and under `renumber-windows on` a window
@@ -682,7 +722,11 @@ emit_rows() {
     # `wid`/`age` before it: appended, not inserted, so every existing
     # positional reader (the plain table, --free, --blocked) keeps the field
     # numbers it already has.
-    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$w" "$name" "$cmd" "$state" "$wid" "$age" "$model"
+    #
+    # `execmode` appended as a SEVENTH new column, same discipline again --
+    # S12's container signal. `--free`/`--blocked`/the plain table read only
+    # $1-$5, so none of them see or are affected by this field existing.
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' "$w" "$name" "$cmd" "$state" "$wid" "$age" "$model" "$execmode"
   done
 }
 
@@ -742,10 +786,18 @@ case "$MODE" in
     # inserted -- see the comment at its emission above), always present:
     # `unknown` is a real string here, never an absent key, so a consumer
     # cannot mistake "the field was omitted" for "the field says unknown".
+    #
+    # S12 container signal: `execution_mode` is the 8th column (`execmode`,
+    # appended after `model` -- see execmode_for above), same "always
+    # present, unknown is a real string" contract. agent-tui's
+    # internal/agents.modeFor is the one consumer this exists for: it may
+    # now read this field directly instead of the Command/State inference it
+    # was limited to before this field existed (docs/SPEC-agentbox-execution-
+    # mode.md, docs/SPEC-shell.md S12).
     printf '['
     if [ -n "$rows" ]; then
       awk -F'\t' 'BEGIN{c=0}
-        {if(c++)printf(",");printf("{\"window\":%s,\"window_id\":\"%s\",\"name\":\"%s\",\"command\":\"%s\",\"state\":\"%s\",\"idle_seconds\":%s,\"model\":\"%s\"}",$1,$5,$2,$3,$4,$6,$7)}
+        {if(c++)printf(",");printf("{\"window\":%s,\"window_id\":\"%s\",\"name\":\"%s\",\"command\":\"%s\",\"state\":\"%s\",\"idle_seconds\":%s,\"model\":\"%s\",\"execution_mode\":\"%s\"}",$1,$5,$2,$3,$4,$6,$7,$8)}
         END{}' <<<"$rows"
     fi
     printf ']\n' ;;
