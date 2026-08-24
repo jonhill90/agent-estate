@@ -20,6 +20,15 @@ name: Fixpass evidence
 # diff, but evidence is commonly posted as a follow-up comment after review
 # -- without issue_comment, a PR that added evidence by commenting would
 # stay red until an unrelated push re-ran the check.
+#
+# agent-supervisor#565: this job used to be named `gate`, same as
+# ui-evidence.yml's job -- both check-runs then displayed as the bare name
+# `gate` in `gh pr checks`'s flat output, indistinguishable without opening
+# each run's URL. Renamed to `fixpass-gate` so the two are unambiguous.
+# ui-evidence.yml's job stays `gate`: ci_gate.py's
+# `_gate_superseded_by_ui_evidence` matches that literal name, and renaming
+# it would require updating that function (and its tests) too -- out of
+# scope for this small fix.
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
@@ -31,7 +40,7 @@ permissions:
   pull-requests: read
 
 jobs:
-  gate:
+  fixpass-gate:
     # issue_comment fires for both issues and PRs; only a PR comment has
     # `issue.pull_request` set. Skip anything else so this never runs
     # against a plain issue thread (Issues is degraded in this estate

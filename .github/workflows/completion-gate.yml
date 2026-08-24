@@ -11,12 +11,18 @@
 # test_completion_gate.sh goes red -- which is the point: the anti-orphan check
 # is mutation-verifiable, not a promise.
 #
-# NOTE ON JOB NAMING. The job is deliberately NOT called `gate:`. Two existing
-# workflows (fixpass-evidence.yml, ui-evidence.yml) both declare `gate:`, and
-# ci_gate.py de-duplicates check runs by name alone -- so the later run erases
-# the earlier one. That was demonstrated against PR #394's real SHA: a genuine
-# ui-evidence FAILURE was discarded because another job succeeded three seconds
-# later. Adding a third `gate:` would widen a live defect.
+# NOTE ON JOB NAMING. The job is deliberately NOT called `gate:`. Before
+# agent-supervisor#565, fixpass-evidence.yml and ui-evidence.yml both
+# declared `gate:`, and ci_gate.py de-duplicates check runs by name alone --
+# so the later run erases the earlier one. That was demonstrated against PR
+# #394's real SHA: a genuine ui-evidence FAILURE was discarded because
+# another job succeeded three seconds later. #565 renamed
+# fixpass-evidence.yml's job to `fixpass-gate` to fix a separate problem
+# (both showing as the bare name `gate` in `gh pr checks`), but the
+# collision risk this note warns about is about `ci_gate.py`'s
+# de-duplication-by-name, not display -- a fourth job reusing any existing
+# check-run name (`gate`, `fixpass-gate`, `ui-evidence`, ...) would still
+# widen that live defect.
 name: completion-gate
 
 # agent-supervisor#407: `push` used to be scoped to `main` only, so a PR
