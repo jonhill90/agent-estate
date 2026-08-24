@@ -52,6 +52,8 @@ scripts/supervisor/          the system
                              one `blocked` state, and `supervisor` is new)
   dispatch.sh                hand an issue to a lane; records the ledger row
   lane-done.sh               completion, in the safe order
+  lane-retire.sh             administrative retirement -- unregister and
+                             restore the window's name, never kill it (#564)
   claim.sh                   atomic lane claim
   worktree.sh                one git worktree per lane
   restore.sh                 rebuild every lane after a tmux server loss
@@ -102,15 +104,16 @@ scripts/supervisor/          the system
   session_guard.py           the one place session removal is judged safe
   watchdog.sh                liveness, from OUTSIDE the loop
   inbox-poll.sh              Telegram poller (a service, never a lane)
-tests/supervisor/            171 tracked files; the suite is the contract
+tests/supervisor/            177 tracked files; the suite is the contract
                              (`Verified 2026-08-23` by `git ls-files
-                             tests/supervisor/ | wc -l` on `25135ae` — this
-                             line previously said 110, `Verified 2026-08-18`,
-                             and had gone stale again since; a count this
-                             volatile is worth re-measuring, not trusting.
-                             Could not measure a current full pass/fail
-                             count: `python3 -m unittest discover -s
-                             tests/supervisor` did not finish inside this
+                             tests/supervisor/ | wc -l` after adding
+                             `test_lane_retire.sh` (#564) — this line
+                             previously said 171 the same day, and 110
+                             before that (`Verified 2026-08-18`); a count
+                             this volatile is worth re-measuring, not
+                             trusting. Could not measure a current full
+                             pass/fail count: `python3 -m unittest discover
+                             -s tests/supervisor` did not finish inside this
                              pass's time budget either, same as noted in
                              README.md)
 ```
