@@ -1,4 +1,5 @@
 /estate
+/agent-tui
 /bin/
 *.test
 /AGENTS.LOCAL.md
