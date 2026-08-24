@@ -1,0 +1,48 @@
+name: Daemon CI
+
+# agent-supervisor#542: daemon/ (the Go control plane, #499) has never had a
+# go build/go vet/go test gate anywhere in this repo's CI -- confirmed by
+# reading all four pre-existing workflow files directly, zero Go invocations
+# in any of them, across this repo's full workflow history (#542's own
+# issue body). Adding this before the agent-estate migration starts moving
+# files, per #541 step 0.5.
+#
+# `push` has no `branches:` filter, matching validate.yml/completion-gate.yml
+# rather than a naive `branches: [main]` -- agent-supervisor#407 measured
+# that `pull_request`'s default dispatch runs against a computed
+# `refs/pull/<n>/merge` ref, which GitHub cannot build for a PR in
+# `CONFLICTING` mergeable state, and drops the event entirely: zero check
+# runs, not a slow one. Scoping `push` to `main` only would still leave a
+# CONFLICTING PR's own branch with no daemon-CI signal at all until it
+# happened to land on main -- the exact blackout #407 already fixed for
+# every other gate in this repo. An unscoped `push` dispatches off the
+# pushed SHA directly, independent of merge-ref computation, closing the
+# same gap here.
+on:
+  pull_request:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+          # go.sum lives at daemon/go.sum, not the repo root -- without this,
+          # setup-go's default cache key can't find it and every run pays a
+          # full, uncached module download (observed directly: "Restore
+          # cache failed: Dependencies file is not found ... go.sum" on the
+          # first real run of this workflow).
+          cache-dependency-path: daemon/go.sum
+      - run: go build ./...
+        working-directory: daemon
+      - run: go vet ./...
+        working-directory: daemon
+      - run: go test ./...
+        working-directory: daemon
