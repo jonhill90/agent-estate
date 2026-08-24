@@ -253,7 +253,50 @@ def _content_unchanged_since(*, runner, patch_id_fn, repo, number, old_sha, new_
 # prose WITHOUT an immediately-following colon (agent-supervisor#53's guard
 # 4, "I think the verdict here should be REQUEST CHANGES") still does not
 # contain the literal substring "verdict:" and so still does not match.
-_VERDICT_LINE_RE = re.compile(r"^#{0,6}\s*.*?\*{0,2}verdict:\**\s*(.*)$", re.IGNORECASE)
+#
+# agent-supervisor#540: that same `.*?` lead-in tolerance let a REVIEW
+# COMMENT DISCUSSING THE GATE ITSELF shadow a real verdict elsewhere on the
+# same PR -- "2. **Gate accepts an independent `Verdict:` trailer as a
+# second source of authorship truth" matched this regex (the literal
+# substring "verdict:" is right there, immediately followed by a colon,
+# exactly what #213 asks this regex to accept), producing a "decision text
+# not recognised" refusal for a line that was never a verdict attempt at
+# all -- it was prose QUOTING the trailer's own name inside inline code
+# span backticks, mid-sentence, in a numbered list item about how the gate
+# ought to work. The label itself is now a captured group (group 1) so
+# `_scan_verdict_lines` can check whether THAT SPAN specifically -- not the
+# whole line -- falls inside a pair of single backticks; see
+# `_label_inside_inline_code` for why this is checked on the label alone
+# and not by stripping every backtick span from the line (a genuine
+# decision VALUE wrapped in backticks, e.g. "Verdict: `APPROVE`", must keep
+# matching -- `_normalise_decision_text` already strips that wrapping
+# itself, unaffected by this change since it only ever sees text AFTER the
+# label).
+_VERDICT_LINE_RE = re.compile(r"^#{0,6}\s*.*?\*{0,2}(verdict:)\**\s*(.*)$", re.IGNORECASE)
+
+
+_INLINE_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+
+
+def _label_inside_inline_code(line, label_start, label_end):
+    """True when `line[label_start:label_end]` -- the literal "verdict:"
+    text a `_VERDICT_LINE_RE` match found -- sits inside a single-backtick
+    inline-code span on that same line (agent-supervisor#540). A FENCED
+    (triple-backtick) code block is already excluded before any line
+    reaches here (`_scan_verdict_lines`'s own `in_fence` tracking); this
+    catches the narrower case a fence can't: a single line of ordinary
+    prose that quotes the trailer's own syntax inline, e.g. `` `Verdict:`
+    `` inside a sentence. Only the LABEL's own span is checked, not the
+    whole line -- a decision value wrapped in backticks after a real,
+    unquoted label ("Verdict: `APPROVE`") must still match; stripping
+    every inline-code span from the line before matching would silently
+    eat that value instead, which `_normalise_decision_text` already
+    handles correctly on its own and this function must not interfere
+    with."""
+    for span in _INLINE_CODE_SPAN_RE.finditer(line):
+        if span.start() <= label_start and label_end <= span.end():
+            return True
+    return False
 
 
 # agent-supervisor#198: the decision text used to be matched with `in` --
@@ -425,7 +468,14 @@ def _scan_verdict_lines(body):
         match = _VERDICT_LINE_RE.match(line)
         if not match:
             continue
-        decision_text = _normalise_decision_text(match.group(1))
+        # agent-supervisor#540: a label whose own "verdict:" text sits
+        # inside a pair of single backticks is prose QUOTING the trailer's
+        # syntax, not a real label -- see `_label_inside_inline_code`'s own
+        # doc comment for the shape this excludes and why only the label's
+        # span (group 1), not the whole line, is checked.
+        if _label_inside_inline_code(line, match.start(1), match.end(1)):
+            continue
+        decision_text = _normalise_decision_text(match.group(2))
         if decision_text == "":
             has_empty_label = True
         results.append((_classify_decision_text(decision_text), decision_text))
