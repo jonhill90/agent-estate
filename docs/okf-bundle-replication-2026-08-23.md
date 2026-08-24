@@ -18,9 +18,12 @@ content was rewritten.
 The brief stated: 18 md files, 246 KB, 0 stale over 14 days. Measured
 directly on `origin/main` at `35988b5`:
 
-**Read every corpus figure below as of that commit.** `main` has moved since:
-the tracked `.md` count is 27 and the `docs/` corpus 18 files at this branch's
-tip. The measurement is dated on purpose and is not restated as current.
+**Read every corpus figure below as of that commit.** `main` has moved since,
+to a single consistent count rather than two conventions read as if they
+disagreed: 27 tracked `.md` files at this branch's tip, of which 19 sit under
+`docs/` (including `index.md` itself) and 18 are the entries `index.md` indexes
+(excluding itself). The measurement is dated on purpose and is not restated as
+current.
 
 ```
 $ git ls-files '*.md' | wc -l
@@ -125,10 +128,11 @@ file — a uniform, honest gap beats an inconsistently-filled field.
 had nothing.** #136's values were `PRD`, `Spec`, `Research`,
 `UI Variants`, `Test Evidence`, `Measurement`. `PRD`, `Spec` and
 `Measurement` are reused verbatim. agent-supervisor has kinds agent-tui
-had none of, so three values are new: `Decision` (the five ADRs),
-`Runbook`, and `Diagram`. #136's vocabulary is descriptive and open, not a
+had none of, so four values are new: `Decision` (the ADRs), `Runbook`,
+`Diagram`, and `Archive` (added when `docs/archive/agent-tui/README.md`
+landed in the rebase). #136's vocabulary is descriptive and open, not a
 declared closed set, so extending it is not a conflict — but it is an
-extension, named here so nobody later reads six values as the whole
+extension, named here so nobody later reads seven values as the whole
 vocabulary.
 
 **One judgement call worth naming.**
@@ -149,8 +153,8 @@ gives three numbered clauses; the brief splits the first into two
 (enumerable, and separate from content). Against the shipped file:
 
 1. **Enumerable — a reader can see everything that exists.** One line per
-   `.md` under `docs/`, no exceptions, mechanically verified below: 11
-   files, 11 links, 0 missing, 0 dangling. The index also carries a
+   `.md` under `docs/`, no exceptions, mechanically verified below: 18
+   files, 18 links, 0 missing, 0 dangling. The index also carries a
    closing **"Not covered by this index"** section naming the eight
    tracked `.md` files outside `docs/`. **This is a divergence from
    #136**, whose index was silent about what it excluded. It is here
@@ -162,19 +166,36 @@ gives three numbered clauses; the brief splits the first into two
    descriptions only. It states no fact about the system that isn't in the
    doc it points at, so it cannot be a source anyone cites, and it cannot
    drift on its own — the failure mode it could have would be pointing
-   wrongly, not saying something false. Its descriptions are copied
-   verbatim from each file's own `description` frontmatter, so there is
-   exactly one place a description is authored.
-3. **Loadable before search.** 2,745 bytes / 40 lines — cheap enough to
+   wrongly, not saying something false.
+
+   **"Copied verbatim from frontmatter" does not hold for every entry, and
+   is corrected here rather than restated.** Checked all 18 entries against
+   their file's own `description` frontmatter directly
+   (`git ls-files 'docs/*.md' 'docs/**/*.md' | grep -v index.md`, then a
+   description-for-description diff): **11 of 18 match verbatim; 7 do
+   not.** Six are a deliberate departure, not drift — `0006`, `0008`,
+   `0010`, `0011`, the agent-estate migration runbook, and the archive
+   README all carry an index description that states the file's outcome or
+   status rather than the question its frontmatter poses, because
+   frontmatter states what a document is *about* and not always what it
+   *decided* (see `0008`'s own correction, below). The seventh,
+   `merge-impact-inventory-agent-estate.md`, has no `description`
+   frontmatter key at all, so its index line cannot be "copied" from
+   anything — it was written directly. The property this clause actually
+   holds is narrower than first stated: descriptions are *sourced from* the
+   document, never invented independently of it, not that they are a
+   mechanical copy in every case.
+3. **Loadable before search.** 4,578 bytes / 50 lines — cheap enough to
    read in full before deciding anything, which is the whole point of
    loading it first. It answers "what exists here" without a query, which
    is clause 2 of the contract's own wording: browsable, not only
    searchable.
 4. **Bounded, with detection.** The index declares its own ceiling in a
    comment on line 5: **60 lines / 6 KB**. Today it sits at **50/60 lines
-   (83.3%) and 4,423/6,144 bytes (72.0%)** -- larger than the
+   (83.3%) and 4,578/6,144 bytes (74.5%)** -- larger than the
    40/2,745 this section first recorded, because the rebase onto `main` had
-   to index eight documents that landed after the measurement commit. The bound is meaningful rather
+   to index seven more documents that landed after the measurement commit
+   (11 entries -> 18 is a seven-document delta). The bound is meaningful rather
    than decorative because the index grows one line per doc: 60 lines caps
    this corpus at roughly 45 documents before the ceiling forces a
    decision about grouping.
@@ -193,14 +214,23 @@ Mechanically verified for this snapshot (a script comparing
 CI guard would automate, not eyeballed):
 
 ```
-files under docs/ (excl. index.md): 11
-linked from index.md: 11
-missing from index (file exists, no entry): []
-dangling index links (points at nothing): []
-cap: 40/60 lines (66.7%), 2745/6144 bytes (44.7%)
+$ git ls-files 'docs/*.md' 'docs/**/*.md' | grep -v '^docs/index.md$' | wc -l
+18
+$ wc -lc docs/index.md
+50  4578 docs/index.md
 ```
 
-(11, not 10 — this report is the 11th file, indexed under "Measurement.")
+```
+files under docs/ (excl. index.md): 18
+linked from index.md: 18
+missing from index (file exists, no entry): []
+dangling index links (points at nothing): []
+cap: 50/60 lines (83.3%), 4578/6144 bytes (74.5%)
+```
+
+(18, not 10 — Step 2's in-scope set is 10 files; the other 8 under `docs/`
+are this report plus the seven documents that landed in the rebase and the
+completeness fix that followed it.)
 
 ## Step 4 — three real questions, measured three ways
 
@@ -226,7 +256,7 @@ three are things someone actually working on this repo needs:
   files — verified directly rather than assumed, by re-summing agent-tui's
   10 shipped docs at `origin/main` and reproducing its stated 109,821
   exactly.
-- **With the map** = `docs/index.md` (2,745 B) plus only the file(s) the
+- **With the map** = `docs/index.md` (4,578 B) plus only the file(s) the
   index actually points at for that question.
 - **Grep** = an actual `grep -rli` run against `docs/`, with the byte
   count of every file it returns, because a file grep names is a file the
@@ -241,25 +271,40 @@ gives the command, Step 4 is titled "what `UNRECOVERABLE` means and what
 to do about it."
 
 ```
+$ git cat-file -s HEAD:docs/index.md HEAD:docs/runbooks/restore-after-tmux-loss.md
+4578
+16332
+$ python3 -c "print(107664/(4578+16332))"
+5.148923959827833
+```
+
+```
 without map: 107,664 B   -- all 10 docs
-with map:     19,077 B   -- index.md (2,745) + restore-after-tmux-loss.md (16,332)
-ratio: 5.6x fewer bytes with the map
+with map:     20,910 B   -- index.md (4,578) + restore-after-tmux-loss.md (16,332)
+ratio: 5.15x fewer bytes with the map
 ```
 
 **Grep: the map beats grep here, unlike in #136.** The obvious term finds
-the right file but drowns it:
+the right file but drowns it. Re-run against the current `docs/` corpus, not
+the 10 this report first measured against — `docs/` gained seven documents in
+the rebase, so the grep result sets moved too. Scoped to the 17 files under
+`docs/` excluding `index.md` **and this report**, for the same
+self-referential reason Step 2 excludes the report from the in-scope
+baseline: a grep sweep that counts this document's own bytes moves every
+time this document is edited, including by this fix:
 
 ```
-grep -rli 'restore' docs/      -> 6 of 10 files, 58,344 B  (3.1x worse than the map)
-grep -rli 'server loss' docs/  -> 3 files,       28,790 B  (1.5x worse than the map)
+grep -rli 'restore' docs/      -> 8 of 17 files, 102,638 B  (4.91x worse than the map)
+grep -rli 'server loss' docs/  -> 3 files,        28,790 B  (1.38x worse than the map)
 ```
 
 Even the sharper two-word phrase leaves three candidate files. This is a
 genuine divergence from #136, where Q1's grep (13,972 B) nearly tied its
 map (14,721 B). The reason is structural, not luck: agent-supervisor's
-corpus is *about* restore in five of ten documents — one ADR, the runbook,
-plus passing mentions in the PRD, the SPEC and ADR-0005. A keyword common
-to the corpus's central subject cannot discriminate within it.
+corpus is *about* restore in a large share of its documents — one ADR, the
+runbook, plus passing mentions across the PRD, the SPEC, ADR-0005 and the
+newer decision/runbook docs. A keyword common to the corpus's central
+subject cannot discriminate within it.
 
 ### Q2 — why a lane can't merge its own reviewed PR
 
@@ -268,24 +313,33 @@ alone — its title is the decision, and its `## Fail closed` section covers
 the enforcement point.
 
 ```
+$ git cat-file -s HEAD:docs/index.md HEAD:docs/decisions/0003-independent-review-required.md
+4578
+3373
+$ python3 -c "print(107664/(4578+3373))"
+13.540938246761414
+```
+
+```
 without map: 107,664 B   -- all 10 docs
-with map:      6,118 B   -- index.md (2,745) + 0003-independent-review-required.md (3,373)
-ratio: 17.6x fewer bytes with the map
+with map:      7,951 B   -- index.md (4,578) + 0003-independent-review-required.md (3,373)
+ratio: 13.54x fewer bytes with the map
 ```
 
-**Grep: the map beats grep, by a lot.**
+**Grep: the map beats grep, by a lot — and grew wider on the current corpus.**
+Re-run against the same 17-file `docs/` scope as Q1 (excluding `index.md` and
+this report):
 
 ```
-grep -rli 'review' docs/       -> 6 of 10 files, 75,114 B  (12.3x worse than the map)
-grep -rli 'self-review' docs/  -> 2 files,       22,103 B  (3.6x worse than the map)
+grep -rli 'review' docs/       -> 13 of 17 files, 196,980 B  (24.77x worse than the map)
+grep -rli 'self-review' docs/  ->  2 files,        22,103 B  ( 2.78x worse than the map)
 ```
 
-`review` is close to useless here — it returns 70% of the corpus by byte,
-because independent review is one of this system's core invariants and
-nearly every document mentions it. `self-review` is much sharper, but it
-is a term the question doesn't contain; an asker who hasn't already
-internalised the vocabulary won't reach for it, and it still costs 3.6x
-the map.
+`review` is close to useless here — independent review is one of this
+system's core invariants and most of the corpus mentions it. `self-review`
+is much sharper, but it is a term the question doesn't contain; an asker who
+hasn't already internalised the vocabulary won't reach for it, and it still
+costs 2.78x the map.
 
 ### Q3 — how does an agent visually inspect a pane? **Could not measure.**
 
@@ -340,9 +394,9 @@ agent-supervisor's knowledge. That is a finding about the method: **"every
 that keeps its docs in `docs/`, and mis-measures one that doesn't.**
 
 **One asymmetry, reported without a number attached.** The shipped index
-does let a reader establish in 2,745 bytes that `docs/` has nothing on
+does let a reader establish in 4,578 bytes that `docs/` has nothing on
 this, *and* points at the out-of-`docs/` set where it lives — an
-authoritative negative for a fifth of what the misleading grep cost. That
+authoritative negative for a fraction of what the misleading grep cost. That
 is a real advantage over both baselines, but it is **not** counted as a
 ratio, for two reasons: neither path produced an answer to the question
 asked, and the property comes entirely from the "Not covered by this
@@ -353,68 +407,92 @@ not part of the thing being replicated.
 
 | Question | Without map | With map | Ratio | Grep verdict |
 |---|---:|---:|---:|---|
-| Q1 restore after tmux loss | 107,664 B | 19,077 B | **5.6x** | map beats grep (grep 28,790–58,344 B) |
-| Q2 self-review at merge | 107,664 B | 6,118 B | **17.6x** | map beats grep (grep 22,103–75,114 B) |
+| Q1 restore after tmux loss | 107,664 B | 20,910 B | **5.15x** | map beats grep (grep 28,790–102,638 B) |
+| Q2 self-review at merge | 107,664 B | 7,951 B | **13.54x** | map beats grep (grep 22,103–196,980 B) |
 | Q3 pane inspection / `look.py` | — | — | **could not measure** | grep **misleads** — 35,062 B of confident, irrelevant hits |
 
 Per-question ratios are the numbers of record, reported separately, as
-#136 reported its two. For completeness and not as a headline: across the
-two measurable questions the aggregate is 215,328 / 25,195 = **8.5x**, and
-the mean of the two ratios is **11.6x**. Neither is "the" number.
+#136 reported its two. For completeness and not as a headline:
+
+```
+$ python3 -c "print((107664*2)/(20910+7951), (107664/20910 + 107664/7951)/2)"
+7.460864141921625 9.344931103294623
+```
+
+across the two measurable questions the aggregate is 215,328 / 28,861 =
+**7.46x**, and the mean of the two ratios is **9.34x**. Neither is "the"
+number.
 
 ## Step 5 — arithmetic reproduced against the committed file
 
 This is the specific defect #136's review caught: its write-up used
 `index.md` at 1,766 bytes while the file that actually shipped was 1,955,
 because a self-referential entry landed after the measurement and the
-arithmetic was never re-run.
-
-**Avoided structurally, not by remembering to check.** `docs/index.md` was
-written with its own entry for this report present from the first save, so
-there was no later edit to invalidate the count. Then verified anyway,
-against the staged file rather than a draft:
+arithmetic was never re-run. This report shipped the same defect once
+already, at a larger magnitude: an independent adversarial review (see the
+issue thread, `2026-08-24T09:09:52Z`) found `index.md` had grown to
+4,578 bytes across a rebase that indexed seven more documents, while this
+section still quoted the abandoned pre-rebase blob's 2,745 bytes, and every
+ratio downstream of it was stale as a result. Re-run in full against the file as it actually ships, not the one number a
+prior pass happened to notice:
 
 ```
-$ git add -A && wc -c docs/index.md
-2745 docs/index.md
+$ git cat-file -s 6607623:docs/index.md
+4578
 
-$ python3 -c "print(107664/(2745+16332), 107664/(2745+3373))"
-5.643759...  17.597908...
+$ wc -lc docs/index.md
+50  4578 docs/index.md
+
+$ python3 -c "print(107664/(4578+16332), 107664/(4578+3373))"
+5.148923959827833 13.540938246761414
 ```
 
-**2,745 bytes staged = 2,745 bytes in every calculation above.** 5.6x and
-17.6x reproduce exactly from the committed artifact.
+**4,578 bytes at the committed head = 4,578 bytes in every calculation
+above.** 5.15x and 13.54x reproduce exactly from the committed artifact —
+not the 5.6x / 17.6x this section quoted before, which were computed
+against a blob (`5d79513`) this branch abandoned in its rebase.
 
 ## Does #136's result hold? Yes in direction, weaker in magnitude
 
 | | agent-tui#136 | agent-supervisor (this) |
 |---|---:|---:|
 | In-scope docs | 10 files, 109,821 B | 10 files, 107,664 B |
-| `index.md` | 1,955 B | 2,745 B |
-| Ratio, question A | 7.5x | **5.6x** |
-| Ratio, question B | 20.4x | **17.6x** |
+| `index.md` | 1,955 B | 4,578 B |
+| Ratio, question A | 7.5x | **5.15x** |
+| Ratio, question B | 20.4x | **13.54x** |
 | Could not measure | 1 of 3 | 1 of 3 |
 
 **The pilot's finding replicates.** Two measurable questions, both large
 wins, one could-not-measure — the same shape, on a repo with a
 near-identical corpus size but entirely different content.
 
-**Both ratios come in 14–25% lower** (7.5x → 5.6x is −25%; 20.4x → 17.6x
-is −14%). The cause is diagnosable and unflattering to the method, not to
-this repo: agent-supervisor's index is **40% larger** (2,745 vs 1,955 B)
-over the same number of documents, because its descriptions are longer and
-it carries the extra "Not covered" section. The index is the fixed cost
-paid on *every* question, so a bigger index lowers every ratio. **This is
-the first evidence that #136's numbers are index-size-sensitive and should
-not be quoted as a constant.** A third repo would be worth measuring
-before anyone treats "roughly 10x" as a property of the technique.
+```
+$ python3 -c "
+q1_old, q1_new = 7.5, 107664/20910
+q2_old, q2_new = 20.4, 107664/7951
+print((q1_new-q1_old)/q1_old*100, (q2_new-q2_old)/q2_old*100)
+"
+-31.347680535628893 -33.622851731561695
+```
+
+**Both ratios come in 31–34% lower** (7.5x → 5.15x is −31.3%; 20.4x →
+13.54x is −33.6%). The cause is diagnosable and unflattering to the
+method, not to this repo: agent-supervisor's index is **134% larger**
+(4,578 vs 1,955 B) over the same number of in-scope documents, because the
+rebase had to fold in seven more documents' worth of entries as well as
+carrying longer descriptions and the extra "Not covered" section. The
+index is the fixed cost paid on *every* question, so a bigger index lowers
+every ratio. **This is the first evidence that #136's numbers are
+index-size-sensitive and should not be quoted as a constant.** A third
+repo would be worth measuring before anyone treats "roughly 10x" as a
+property of the technique.
 
 **The grep comparison did not replicate, and diverged in the map's
 favour.** #136's most careful finding was that grep nearly ties the map
 when the answer's vocabulary matches the question's, so the map's real
 advantage is narrower than the headline. On agent-supervisor that
 qualifier did not hold: the map beat grep on *both* measurable questions,
-by 1.5x–12.3x. The reason is a corpus property #136 had no way to see from
+by 1.38x–24.77x. The reason is a corpus property #136 had no way to see from
 one repo — agent-supervisor's documents are densely cross-referential, and
 its most natural search terms (`restore`, `review`) are the names of its
 central invariants, so they appear in most documents and discriminate
@@ -426,7 +504,7 @@ skeptical second data point.
 ## What this does not settle
 
 - **Whether to do this anywhere else.** Two repos is two data points, and
-  they disagree by 14–25% on magnitude and disagree qualitatively on
+  they disagree by 31–34% on magnitude and disagree qualitatively on
   whether grep is competitive. Sequencing is the director's; approval is
   Jon's.
 - **The index-freshness guard.** Both #136 and this replication ship a

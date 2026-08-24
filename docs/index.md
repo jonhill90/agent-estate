@@ -23,7 +23,7 @@ okf_version: "0.2"
 * [0005 — Codex session resume](decisions/0005-codex-session-resume.md) - Decision record: Codex lanes are resumable after a tmux server loss, the same way Claude lanes already were.
 * [0006 — agent-tui merges into agent-supervisor, in one step with going public](decisions/0006-agent-tui-merges-into-agent-supervisor.md) - The repo-merge question Jon floated, decided: merge, direction matches the measured dependency, sequenced with (not before) the go-public flip.
 * [0008 — Estate-lane PR authorship evidence](decisions/0008-estate-lane-pr-authorship-evidence.md) - Decision record: whether a lane may self-assert its own PR authorship -- its decision is SUPERSEDED by 0010 and kept for the record.
-* [0010 — Three authorship attempts, three failures](decisions/0010-estate-authorship-three-failures.md) - Decision record: what changes after three ledger-authorship attempts failed differently, and what is documented as a limit rather than solved.
+* [0010 — Three authorship attempts, three failures](decisions/0010-estate-authorship-three-failures.md) - Decision record: what changes after three ledger-authorship attempts failed differently, and what is documented as a limit rather than solved -- 0011 downgrades its primary decision (`#557`'s redesigned dispatch-time mechanism) from urgent to "unnecessary for the authorship problem specifically."
 * [0011 — `dispatch.sh` is the standing rule](decisions/0011-dispatch-sh-standing-rule-and-backlog-path.md) - Decision record: dispatch.sh proven end to end, what it retires, and the established path for the already-open PRs.
 
 # Diagrams
