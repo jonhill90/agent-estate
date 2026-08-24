@@ -150,7 +150,7 @@ relaxed here.
    `estate:5`**, which has now patched this exact mechanism three times
    in one review cycle and should not be the one to also build its
    replacement.
-3. **Retroactive resolution for the 14 currently-open PRs is its own
+3. **Retroactive resolution for the PRs stuck behind this gap is its own
    decision, not a free consequence of step 2 — corrected here before the
    builder reached it** (`director-retroactive-tension.md`). Writing a
    dispatch-time-shaped row for a dispatch nobody actually observed is
@@ -184,12 +184,14 @@ a mechanism has to say what happens to the work that was depending on it,
 not just that the mechanism is retired. **`agent-supervisor#555`** is
 that path — a per-PR, human-authorized exception, live and active now,
 not a future contingency. As measured directly (`merge-pr.sh` re-run
-against every open PR, not estimated): **seven** PRs currently have no
+against every open PR, not estimated): **eight** PRs currently have no
 honest `dispatch.sh` route and sit on `#555` — `#531`, `#533`, `#534`,
-`#535`, `#536`, `#537`, `#557`. Three others that were briefly thought to
+`#535`, `#536`, `#537`, `#557`, `#561`. (Corrected from seven — `#561`
+qualified before this section was first written, an omission caught by
+review, not later drift.) Three others that were briefly thought to
 be in the same boat (`#541`, `#547`, `#553` — this document itself) are
 blocked on their own review content, not on authorship, and are not part
-of this accounting. This section will go stale the moment the seven
+of this accounting. This section will go stale the moment the eight
 change; check `#555` directly for the current count rather than trusting
 the number restated here.
 
