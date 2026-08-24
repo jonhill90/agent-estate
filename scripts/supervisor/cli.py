@@ -20,6 +20,7 @@ from core import (
     Ledger,
     TERMINAL_STATUSES,
     claim_owner_token,
+    cross_namespace_lane_relation,
     lane_population,
     lane_relation,
     lane_relation_from_rows,
@@ -1226,6 +1227,16 @@ def main(argv=None):
                 other_row = None
             lane_row = {"pane_id": args.lane_pane_id}
             relation = lane_relation_from_rows(lane_row, other_row)
+            if relation == "unknown":
+                # agent-supervisor#605: the shape/pane-id check above cannot
+                # place a daemon-shaped id positive of anything -- its
+                # ledger row carries pane_id='' (EnsureLane's own write), so
+                # `lane_relation_from_rows` answers `unknown` for it every
+                # time, same as it did for every daemon-authored PR before
+                # this. Tried only when that check has already given up.
+                cross = cross_namespace_lane_relation(args.lane, lane_row, args.other, other_row)
+                if cross is not None:
+                    relation = cross
             result = {"lane": args.lane, "other": args.other, "relation": relation}
             if relation != "different":
                 result["lane_population"] = lane_population(args.lane, lane_row)
@@ -1242,6 +1253,14 @@ def main(argv=None):
             except Exception:
                 lane_row = other_row = None
             relation = lane_relation_from_rows(lane_row, other_row)
+            if relation == "unknown":
+                # agent-supervisor#605: same widening as the --lane-pane-id
+                # branch above, for the case where neither side arrived
+                # with a live-measured pane id and both rows came straight
+                # from the ledger.
+                cross = cross_namespace_lane_relation(args.lane, lane_row, args.other, other_row)
+                if cross is not None:
+                    relation = cross
             result["relation"] = relation
             if relation != "different":
                 # agent-supervisor#292 item 3: named only on a refusing

@@ -121,6 +121,79 @@ green_checkruns() {  # green_checkruns <sha>
 S
 }
 
+# agent-supervisor#605: raw SQL, not `Ledger.register_lane`/`record_dispatch`
+# -- Python's own `_register_lane_tx` REFUSES an empty `pane_id`/`session_id`
+# ("lane registration fields must be non-empty"), so it cannot reproduce
+# what the daemon's own writer actually puts in the shared ledger. The
+# daemon is a SEPARATE Go binary (`daemon/internal/ledger/ledger.go`) that
+# writes to the exact same sqlite file with its own driver and no such
+# check -- `EnsureLane` inserts `pane_id=''`, `session_id=''`,
+# `server_id='supervisord'`, `transport='claude-print'` directly. Mirroring
+# THAT statement (not Python's validated wrapper around it) is the only way
+# to reproduce the real row `core.daemon_lane_verified` has to recognize.
+# `tasks` similarly mirrors `ledger.go`'s `Create` (`main.go`'s own -task/
+# -brief flow), just enough columns for `record-pr-for-task` (`author_lane_
+# for`'s Path 3, agent-supervisor#308 item 1) to find it afterward -- the
+# same resolution path #605's own decision comment cites for how a daemon
+# contributor lane reaches the independence gate at all.
+seed_daemon_author() {  # seed_daemon_author <lane> <task-id> <issue> <pr>
+  python3 -c '
+import sqlite3, sys
+db_path, lane, task, issue, repo, pr = sys.argv[1:7]
+conn = sqlite3.connect(db_path)
+now = 1787600000
+conn.execute(
+    """INSERT INTO lanes
+       (lane, pane_id, nonce, harness, repo, server_id, session_id, command,
+        harness_session_id, harness_project_dir, transport, updated_at)
+       VALUES (?, "", "", ?, ?, "supervisord", "", ?, "", "", "claude-print", ?)
+       ON CONFLICT(lane) DO UPDATE SET harness=excluded.harness, command=excluded.command, updated_at=excluded.updated_at""",
+    (lane, "claude", repo, "claude -p", now),
+)
+conn.execute(
+    """INSERT INTO tasks (id, lane, pane_nonce, summary, status, created_at, updated_at)
+       VALUES (?, ?, "", "daemon dispatch", "complete", ?, ?)""",
+    (task, lane, now, now),
+)
+conn.commit()
+conn.close()
+' "$STATE/ledger.sqlite3" "$1" "$2" "$3" "$REPO" "$4"
+  python3 "$LEDGER_CLI" --state-dir "$STATE" record-pr-for-task --task "$2" --repo "$REPO" --pr "$4" >/dev/null
+}
+
+# The negative control #605 explicitly requires be mutation-tested: a row
+# that is daemon-SHAPED and even carries the empty pane_id `EnsureLane`
+# writes, but NOT the rest of its exact signature (`server_id`, here an
+# impostor value instead of 'supervisord') -- i.e. something that
+# superficially resembles a daemon registration but did not actually come
+# from supervisord's own `EnsureLane`. This must NOT verify:
+# `daemon_lane_verified` checks every field of the ledger row's own
+# signature, never the shape or the empty pane_id alone.
+seed_fake_daemon_author() {  # seed_fake_daemon_author <lane> <task-id> <issue> <pr>
+  python3 -c '
+import sqlite3, sys
+db_path, lane, task, issue, repo, pr = sys.argv[1:7]
+conn = sqlite3.connect(db_path)
+now = 1787600000
+conn.execute(
+    """INSERT INTO lanes
+       (lane, pane_id, nonce, harness, repo, server_id, session_id, command,
+        harness_session_id, harness_project_dir, transport, updated_at)
+       VALUES (?, "", "", ?, ?, "impostor", "", ?, "", "", "claude-print", ?)
+       ON CONFLICT(lane) DO UPDATE SET harness=excluded.harness, command=excluded.command, updated_at=excluded.updated_at""",
+    (lane, "claude", repo, "claude -p", now),
+)
+conn.execute(
+    """INSERT INTO tasks (id, lane, pane_nonce, summary, status, created_at, updated_at)
+       VALUES (?, ?, "", "daemon-shaped, but not supervisords own write", "complete", ?, ?)""",
+    (task, lane, now, now),
+)
+conn.commit()
+conn.close()
+' "$STATE/ledger.sqlite3" "$1" "$2" "$3" "$REPO" "$4"
+  python3 "$LEDGER_CLI" --state-dir "$STATE" record-pr-for-task --task "$2" --repo "$REPO" --pr "$4" >/dev/null
+}
+
 # ============================================================================
 # CI gate, unaffected by authorship (agent-supervisor#13) -- both of these
 # refuse at the CI check itself and must never reach the authorship gate at
@@ -959,6 +1032,129 @@ grep -q "gh pr view timed out after 2s" <<<"$out" \
   && ok "a hanging author-lane gh pr view is named as a timeout, not a plain failure" \
   || bad "hanging author-lane gh named as timeout" "rc=$rc: $out"
 [ ! -f "$MARKER" ] && ok "a hung author lookup never merges" || bad "a hung author lookup never merges" "$out"
+
+# ============================================================================
+# agent-supervisor#605: daemon-authored PRs. `daemon`/`d-<task>` (written
+# exclusively by supervisord's own `EnsureLane`) and `<session>:<index>`
+# (a tmux lane) are disjoint namespaces -- see `verdict-independence.sh`'s
+# and `core.py`'s own #605 comments. This reproduces #604's exact refusal
+# ("author lane daemon and reviewer lane estate:5 are not comparable lane
+# ids") end to end through the real `merge-pr.sh`, then confirms the fix
+# does NOT degrade into a general permissive parse.
+# ============================================================================
+
+# --- a genuine daemon-authored PR, reviewed by a genuine tmux lane: merges -
+rm -f "$MARKER"
+cat > "$FIX/head_70.json" <<'S'
+{"headRefOid": "sha-70"}
+S
+green_checkruns sha-70
+cat > "$FIX/author_70.json" <<'S'
+{"headRefName": "d-as70-daemon", "closingIssuesReferences": [{"number": 70}], "commits": []}
+S
+cat > "$FIX/reviews_70.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: estate:5\nReviewed-SHA: sha-70", "createdAt": "2026-08-24T00:00:00Z"}]}
+S
+seed_daemon_author daemon as70-daemon 70 70
+register_tmux_lane estate:5 %39
+out=$("$MERGE_PR" "$REPO" 70 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "#605: daemon-authored PR + independent tmux review merges"; else bad "#605: daemon-authored PR merges" "got rc=$rc: $out"; fi
+if [ -f "$MARKER" ]; then ok "#605: ...and actually calls gh pr merge"; else bad "#605: daemon-authored PR -- gh pr merge called" "$out"; fi
+echo "$out" | grep -q "independence confirmed" && ok "#605: success names independence" || bad "#605: success names independence" "$out"
+
+# --- the reverse pairing: a batch d-<task> daemon lane, reviewed by tmux --
+rm -f "$MARKER"
+cat > "$FIX/head_71.json" <<'S'
+{"headRefOid": "sha-71"}
+S
+green_checkruns sha-71
+cat > "$FIX/author_71.json" <<'S'
+{"headRefName": "d-as71-daemon", "closingIssuesReferences": [{"number": 71}], "commits": []}
+S
+cat > "$FIX/reviews_71.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: estate:3\nReviewed-SHA: sha-71", "createdAt": "2026-08-24T00:00:00Z"}]}
+S
+seed_daemon_author d-as71-daemon as71-daemon 71 71
+register_tmux_lane estate:3 %40
+out=$("$MERGE_PR" "$REPO" 71 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "#605: batch d-<task>-authored PR + independent tmux review merges"; else bad "#605: d-<task>-authored PR merges" "got rc=$rc: $out"; fi
+if [ -f "$MARKER" ]; then ok "#605: ...and actually calls gh pr merge"; else bad "#605: d-<task>-authored PR -- gh pr merge called" "$out"; fi
+
+# --- a self-review through the daemon lane must still refuse (same-namespace
+# machinery, unchanged): the reviewer stamps Review-Lane: daemon, matching
+# the author exactly. -------------------------------------------------------
+rm -f "$MARKER"
+cat > "$FIX/head_72.json" <<'S'
+{"headRefOid": "sha-72"}
+S
+green_checkruns sha-72
+cat > "$FIX/author_72.json" <<'S'
+{"headRefName": "d-as72-daemon", "closingIssuesReferences": [{"number": 72}], "commits": []}
+S
+cat > "$FIX/reviews_72.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: daemon\nReviewed-SHA: sha-72", "createdAt": "2026-08-24T00:00:00Z"}]}
+S
+seed_daemon_author daemon as72-daemon 72 72
+out=$("$MERGE_PR" "$REPO" 72 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#605: daemon reviewing its own daemon-authored PR still refused"; else bad "#605: daemon self-review refused" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#605: ...and never merges"; else bad "#605: daemon self-review -- never merges" "$out"; fi
+
+# --- #605's own explicit constraint: "do not touch the reviewer-side
+# invented-id refusal path... an invented reviewer id was correctly refused
+# today -- that must keep refusing". A hand-typed, never-registered
+# daemon-shaped reviewer stamp (`Review-Lane: d-as73-neverdispatched`) is
+# exactly that invented-id shape -- it must still refuse, and it refuses at
+# the SAME place it always did (`_parse_review_lane` finding no registered
+# lane for the token), never reaching this fix's new comparison at all. A
+# DIFFERENT daemon-shaped string than the earlier PRs' -- "daemon" itself is
+# already genuinely registered by seed_daemon_author above, in this same
+# shared ledger, and reusing it here would test nothing.
+rm -f "$MARKER"
+cat > "$FIX/head_73.json" <<'S'
+{"headRefOid": "sha-73"}
+S
+green_checkruns sha-73
+cat > "$FIX/author_73.json" <<'S'
+{"headRefName": "fix/73-thing", "closingIssuesReferences": [{"number": 73}], "commits": []}
+S
+cat > "$FIX/reviews_73.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: d-as73-neverdispatched\nReviewed-SHA: sha-73", "createdAt": "2026-08-24T00:00:00Z"}]}
+S
+seed_author estate:5 as73-author 73
+out=$("$MERGE_PR" "$REPO" 73 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#605: unregistered daemon-shaped reviewer id refuses unknown"; else bad "#605: unregistered daemon-shaped reviewer refuses" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#605: ...and never merges"; else bad "#605: unregistered daemon-shaped reviewer -- never merges" "$out"; fi
+echo "$out" | grep -q "could not parse lane id" && ok "#605: unregistered daemon-shaped reviewer refusal names the reason (the pre-existing invented-id path, untouched)" || bad "#605: unregistered daemon-shaped reviewer refusal named" "$out"
+
+# --- THE mutation the decision explicitly forbids: a lane that is daemon-
+# SHAPED (`d-as74-fake`) and even carries the empty pane_id EnsureLane
+# writes, but was NOT actually written by supervisord's own EnsureLane
+# (server_id='impostor', not 'supervisord') -- proves this fix checks the
+# ledger row's own signature, not the shape or the string "daemon"/"d-"
+# appearing anywhere. Must still refuse unknown against a genuine tmux
+# reviewer, exactly as before this fix. ------------------------------------
+rm -f "$MARKER"
+cat > "$FIX/head_74.json" <<'S'
+{"headRefOid": "sha-74"}
+S
+green_checkruns sha-74
+cat > "$FIX/author_74.json" <<'S'
+{"headRefName": "d-as74-fake", "closingIssuesReferences": [{"number": 74}], "commits": []}
+S
+cat > "$FIX/reviews_74.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: estate:9\nReviewed-SHA: sha-74", "createdAt": "2026-08-24T00:00:00Z"}]}
+S
+seed_fake_daemon_author d-as74-fake as74-fake-daemon 74 74
+register_tmux_lane estate:9 %41
+out=$("$MERGE_PR" "$REPO" 74 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#605: a daemon-shaped lane with no supervisord signature does not verify"; else bad "#605: unverified daemon-named lane refuses" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#605: ...and never merges"; else bad "#605: unverified daemon-named lane -- never merges" "$out"; fi
+echo "$out" | grep -q "not comparable lane ids" && ok "#605: unverified daemon-named lane refusal names the reason" || bad "#605: unverified daemon-named lane refusal named" "$out"
 
 rm -rf "$D"
 
