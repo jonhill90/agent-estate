@@ -76,7 +76,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from verdict import _review_lane_line, _scan_verdict_lines  # noqa: E402 -- reuse the tested classifiers
+from verdict import (  # noqa: E402 -- reuse the tested classifiers
+    _parse_review_lane,
+    _parse_reviewed_sha,
+    _review_lane_line,
+    _scan_verdict_lines,
+)
 
 
 EVIDENCE_MARKER = "<!-- fixpass-evidence:v1 -->"
@@ -145,6 +150,64 @@ def _is_rejected_verdict_comment(text):
     return False
 
 
+def _rejection_key(text):
+    """`(Review-Lane, Reviewed-SHA)` for a rejection COMMENT, or `None` when
+    either half cannot be parsed -- agent-supervisor#566. A rejection with
+    no key cannot be matched against a repost of itself and is left to
+    count on its own raw timestamp, exactly as before this existed (see
+    `_rejection_effective_timestamps`). Reuses `verdict.py`'s own trailer
+    parsers rather than a second implementation of either shape; `Verdict:`
+    and `Review-Lane:` are already required before a comment counts as a
+    rejection at all (`_is_rejected_verdict_comment`), so only
+    `Reviewed-SHA:` -- optional, and absent from any verdict posted before
+    agent-supervisor#213 added the trailer -- can be missing here."""
+    lane = _parse_review_lane(text)
+    sha = _parse_reviewed_sha(text)
+    if not lane or not sha:
+        return None
+    return (lane, sha)
+
+
+def _rejection_effective_timestamps(documents):
+    """The timestamp each rejection document counts for when computing the
+    operative cutoff -- agent-supervisor#566: live on `agent-supervisor#547`,
+    a lane that lost its registered identity RE-POSTED an unchanged
+    REQUEST-CHANGES verdict (same Review-Lane, same Reviewed-SHA) under its
+    newly re-registered identity. The repost carries a LATER wall-clock
+    timestamp than the original -- it is a re-registration event, not a new
+    review -- and the gate's prior "latest rejection by raw timestamp" logic
+    let that later timestamp stale-out evidence that had already answered
+    the ORIGINAL round.
+
+    When a rejection carries a parseable `(Review-Lane, Reviewed-SHA)`
+    pair (`_rejection_key`), its EFFECTIVE timestamp is the EARLIEST
+    timestamp seen among every rejection sharing that exact pair -- so a
+    repost can never push the round's cutoff past its own original. A
+    rejection with no key (no `Reviewed-SHA:` trailer) cannot be deduped
+    this way and keeps its own raw timestamp, the same behaviour this gate
+    had before repost-dedup existed. A genuinely NEW rejection -- same
+    lane, but a DIFFERENT Reviewed-SHA because a fresh look happened at a
+    later head -- is never merged into an earlier round by this: the pair
+    only matches when both halves are identical."""
+    earliest_by_key = {}
+    for doc in documents:
+        if not doc["is_rejection"] or doc["timestamp"] is None:
+            continue
+        key = doc.get("rejection_key")
+        if key is None:
+            continue
+        if key not in earliest_by_key or doc["timestamp"] < earliest_by_key[key]:
+            earliest_by_key[key] = doc["timestamp"]
+
+    effective = []
+    for doc in documents:
+        if not doc["is_rejection"] or doc["timestamp"] is None:
+            continue
+        key = doc.get("rejection_key")
+        effective.append(earliest_by_key[key] if key is not None else doc["timestamp"])
+    return effective
+
+
 def _gather_documents(*, body, body_timestamp, reviews, comments):
     """Every place evidence -- or a rejection -- could be posted, each tagged
     with the timestamp of that specific posting. This is what lets evidence
@@ -170,8 +233,16 @@ def _gather_documents(*, body, body_timestamp, reviews, comments):
         if not isinstance(comment, dict):
             continue
         text = comment.get("body") or ""
+        is_rejection = _is_rejected_verdict_comment(text)
         documents.append(
-            {"text": text, "timestamp": comment.get("createdAt"), "is_rejection": _is_rejected_verdict_comment(text)}
+            {
+                "text": text,
+                "timestamp": comment.get("createdAt"),
+                "is_rejection": is_rejection,
+                # agent-supervisor#566: only meaningful when this document
+                # is itself a rejection -- see `_rejection_key`.
+                "rejection_key": _rejection_key(text) if is_rejection else None,
+            }
         )
     return documents
 
@@ -259,10 +330,15 @@ class FixpassEvidenceGate:
         )
 
         # The round this evidence must answer: the LATEST qualifying
-        # rejection's timestamp. A rejection with no recorded timestamp
-        # cannot anchor a cutoff -- it is dropped rather than treated as
-        # "now", which would stale-out every prior evidence block.
-        rejection_timestamps = [d["timestamp"] for d in documents if d["is_rejection"] and d["timestamp"]]
+        # rejection's EFFECTIVE timestamp. A rejection with no recorded
+        # timestamp cannot anchor a cutoff -- it is dropped rather than
+        # treated as "now", which would stale-out every prior evidence
+        # block. agent-supervisor#566: "effective" (not raw) so a REPOST of
+        # an earlier rejection -- same Review-Lane, same Reviewed-SHA, a
+        # later wall-clock timestamp only because of a re-registration, not
+        # a new review -- cannot push the cutoff past the original round it
+        # is a repost of; see `_rejection_effective_timestamps`.
+        rejection_timestamps = _rejection_effective_timestamps(documents)
         cutoff = max(rejection_timestamps) if rejection_timestamps else None
 
         qualifying = []
