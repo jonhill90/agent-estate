@@ -114,18 +114,19 @@ LABEL="${PREFIX}${ISSUE}-${SLUG}"
 LANE="$LABEL"
 TASK_ID="$LABEL"
 
-# --- 1. claim the issue on GitHub, same tool dispatch.sh uses --------------
-if ! "$HERE/claim.sh" take "$ISSUE" "$REPO" "$LANE"; then
-  echo "dispatch-claude-print: could not claim #$ISSUE -- not dispatching" >&2
-  exit 1
-fi
-
-# agent-supervisor#572: every INTENTIONAL failure below already releases this
-# claim inline (each `abort` call, and the explicit `release_claim` calls it
-# wraps), but a `kill`, a timeout wrapper, or a closed terminal hits none of
-# those lines -- the same gap #209 closed for dispatch.sh's lane claim, and
-# dispatch.sh's own trap now closes for its issue claim too. This script had
-# no trap at all.
+# agent-supervisor#572/#576: every INTENTIONAL failure below already
+# releases this claim inline (each `abort` call, and the explicit
+# `release_claim` calls it wraps), but a `kill`, a timeout wrapper, or a
+# closed terminal hits none of those lines -- the same gap #209 closed for
+# dispatch.sh's lane claim, and dispatch.sh's own trap now closes for its
+# issue claim too. This script originally had no trap at all, and #576's
+# first attempt at one still left a gap: it declared this block AFTER
+# `claim.sh take` below, so a signal landing between that call succeeding
+# and this block installing its trap still stranded the claim -- the same
+# class of gap this fix exists to close, just shrunk to a few statements.
+# Declared here, BEFORE the claim is even taken, so no window is open at
+# all -- mirrors exactly how dispatch.sh's own fix orders it (declared
+# hundreds of lines before its claim loop ever runs).
 #
 # release_claim (below, unchanged) is what every DETERMINED failure calls --
 # by the time any of those lines run, `assign`'s subprocess has already
@@ -154,6 +155,12 @@ release_claim_on_signal() {
 trap release_claim_on_signal EXIT
 trap 'release_claim_on_signal; exit 143' TERM   # 128 + 15
 trap 'release_claim_on_signal; exit 130' INT    # 128 + 2
+
+# --- 1. claim the issue on GitHub, same tool dispatch.sh uses --------------
+if ! "$HERE/claim.sh" take "$ISSUE" "$REPO" "$LANE"; then
+  echo "dispatch-claude-print: could not claim #$ISSUE -- not dispatching" >&2
+  exit 1
+fi
 
 # --- 2. give the lane its own worktree, same tool dispatch.sh uses --------
 WORKTREE_ERR=$(mktemp)
