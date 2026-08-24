@@ -26,6 +26,27 @@
 # -- "no lane contributed" becomes a POSITIVE, evidenced claim instead of an
 # operator's unchecked assertion.
 #
+# agent-supervisor#550: the five-path chain above can only prove "no
+# REGISTERED lane contributed" -- it cannot tell that apart from "an
+# unregistered internal actor (the director, agent-supervisor#532 -- no
+# `lanes` row exists for it at all) contributed." Four rows were written on
+# that exact confusion (#549) before this guard existed. Closed here, ahead
+# of #532's real fix, with the same observed-not-asserted anchor every
+# other `*-self.sh` tool in this repo uses: `$TMUX_PANE`. Every estate
+# actor -- every lane AND the director -- runs inside a tmux pane; nothing
+# that operates this repo from outside one exists today (`watchdog.sh` is a
+# `launchd` job, no controlling tmux session at all; a human's own `gh`/git
+# session run from their own terminal, #472/#495's own shape, has no
+# `TMUX_PANE` either). So `$TMUX_PANE` being set at all -- regardless of
+# whether the ledger has ever heard of that pane, which is exactly the
+# director's own gap -- is treated as "an estate participant is asking,"
+# and refused outright, before the five-path chain even runs. Fail-closed:
+# this cannot positively confirm the caller is external, only that it does
+# not look like an internal one from the one signal it can observe; an
+# unset `$TMUX_PANE` is not proof of external authorship either, which is
+# exactly why the five-path chain below still runs regardless and still
+# has the final word on the PR's own content.
+#
 # Usage:
 #   mark-pr-external.sh <repo> <pr> <note> [repo-path]
 #
@@ -60,6 +81,19 @@ REPO_PATH="${4:-}"
 if [ -z "$REPO" ] || [ -z "$PR" ] || [ -z "$NOTE" ]; then
   echo "usage: mark-pr-external.sh <repo> <pr> <note> [repo-path]" >&2
   exit 2
+fi
+
+# --- agent-supervisor#550: refuse an estate participant outright ---------
+# Same $TMUX_PANE anchor register-lane-self.sh uses, so a caller cannot
+# assert its way past this by passing an argument -- there is no flag here
+# to name a caller from outside, on purpose. Checked BEFORE the five-path
+# resolution chain (cheap, local, no network/ledger round-trip) so a
+# participant is refused without ever touching gh or the ledger.
+if [ -n "${TMUX_PANE:-}" ]; then
+  echo "mark-pr-external: refusing -- \$TMUX_PANE is set ($TMUX_PANE), so this call is coming from inside the estate's own tmux system" >&2
+  echo "mark-pr-external: every lane and the director both run inside a tmux pane; a genuinely external actor (a human's own terminal, the watchdog's launchd job) never has \$TMUX_PANE set -- see this script's own header on agent-supervisor#550/#532" >&2
+  echo "mark-pr-external: this is refused regardless of whether the ledger has ever registered this pane as a lane -- that gap (an unregistered internal actor reading as 'nobody') is exactly what this check exists to close" >&2
+  exit 1
 fi
 
 NAME_PART="${REPO##*/}"
