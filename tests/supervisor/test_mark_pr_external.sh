@@ -61,9 +61,17 @@ git -C "$REPO" remote set-url origin "git@github.com:acme/agent-dotfiles.git"
 echo "do the thing" > "$D/brief.md"
 
 mark() {
+  # agent-supervisor#550: every case in this file except the dedicated
+  # "estate participant" block below is testing the pre-existing
+  # resolution-chain gate, not the new caller-identity guard -- so this
+  # helper explicitly presents as a caller OUTSIDE the estate's tmux system
+  # (env -u TMUX_PANE), regardless of whether THIS test suite itself
+  # happens to be running inside a tmux pane (interactively, it is; on CI,
+  # it is not -- the suite must pass identically either way, not depend on
+  # its own caller's environment leaking through).
   PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
     AGENT_SUPERVISOR_STATE_DIR="$STATE" \
-    bash "$MARK" "$@" 2>&1
+    env -u TMUX_PANE bash "$MARK" "$@" 2>&1
 }
 ledger() { AGENT_SUPERVISOR_STATE_DIR="$STATE" python3 "$HERE/../../scripts/supervisor/cli.py" "$@"; }
 
@@ -160,6 +168,41 @@ out=$(PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
       DISPATCH_CONFIRM_TRIES=2 DISPATCH_SESSION_TIMEOUT=0 WORKTREE_ROOT="$D/roots" \
       bash "$DISPATCH" 41 rev-600 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 600 2>&1); rc=$?
 want_exit "end to end: the review dispatches once the gate marked it external" "$rc" 0 "$out"
+
+# --- agent-supervisor#550: refuse an estate participant outright ----------
+# Mutation-checked in both directions against the IDENTICAL fixture (PR
+# #601, the same #472/#495 shape as #600 above -- closes no issue any lane
+# touched, no worktree ever held its branch): only the caller's own
+# $TMUX_PANE changes between the two calls below, and the outcome must flip
+# with it. A guard proving only one direction would either break every
+# genuinely external case (#472/#495 themselves) or fail to close #549's
+# actual incident (four rows written by an unregistered internal actor).
+STATE="$D/state-participant"
+printf '601|Some other fix, no issue reference at all|feat/also-nobody-dispatched-this\n' >> "$D/prs"
+
+# RED: the caller is inside the estate's own tmux system (director's pane
+# or any lane's -- this check does not and cannot tell those apart, by
+# design; see the script's own header on why that's the point).
+out=$(PATH="$D/bin:$PATH" GH_ISSUES="$D/issues" GH_PRS="$D/prs" \
+      AGENT_SUPERVISOR_STATE_DIR="$STATE" \
+      TMUX_PANE="%7" bash "$MARK" acme/agent-dotfiles 601 \
+      "an estate lane trying to mark its own work external" "$REPO" 2>&1); rc=$?
+want_exit "RED: refuses outright when \$TMUX_PANE is set -- caller looks like an estate participant" "$rc" 1 "$out"
+want_contains "...names the actual signal, not a vague refusal" "\$TMUX_PANE is set" "$out"
+want_contains "...says this holds regardless of ledger registration (the director's own gap, #532)" \
+  "regardless of whether the ledger has ever registered this pane" "$out"
+ext=$(ledger pr-external --repo acme/agent-dotfiles --pr 601)
+want_contains "...and nothing was recorded -- refused before the resolution chain, or gh, was ever touched" \
+  '"known":false' "$ext"
+
+# GREEN: the identical PR, the identical fixture, no ledger trace of any
+# lane -- only difference is the caller no longer looks like it is running
+# from inside the estate's tmux system. Must still succeed, or this guard
+# would have broken the #472/#495 case it exists to preserve.
+out=$(mark acme/agent-dotfiles 601 "authored directly by a human, no lane ever dispatched against it" "$REPO"); rc=$?
+want_exit "GREEN: the identical case still succeeds once \$TMUX_PANE is unset" "$rc" 0 "$out"
+ext=$(ledger pr-external --repo acme/agent-dotfiles --pr 601)
+want_contains "...and the row exists now" '"known":true' "$ext"
 
 echo "mark-pr-external.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
