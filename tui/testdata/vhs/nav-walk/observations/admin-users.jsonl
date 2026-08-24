@@ -1,2 +1,4 @@
 {"date":"2026-08-22","source":"walk agent-b5.md re-run (main)","verdict":"RENDERS","notes":"Unchanged -- same shared page. Correctly renders \"no user/role accounts in this estate -- one operator, no multi-tenant concept.\""}
 {"date":"2026-08-23","source":"navcheck.md full-walk re-drive (main)","verdict":"RENDERS","notes":"Unchanged -- same shared admin page, rail highlight correctly on Users."}
+{"date":"2026-08-23","source":"estate-loop/b4-tui-postmerge-vhs.md full-walk re-drive, post #140/#141 (main bffb08c) (2026-08-23)","verdict":"RENDERS","notes":"Unchanged -- same shared admin page, rail highlight correctly on Users."}
+{"date":"2026-08-23","source":"estate-loop/b4-tui-postmerge-vhs.md full-walk re-drive, post #140/#141 (main bffb08c)","verdict":"RENDERS","notes":"Unchanged -- same shared admin page, rail highlight correctly on Users."}

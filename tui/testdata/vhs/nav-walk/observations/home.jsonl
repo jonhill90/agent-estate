@@ -1,2 +1,4 @@
 {"date":"2026-08-22","source":"walk agent-b5.md re-run (main)","verdict":"RENDERS","notes":"Unchanged."}
 {"date":"2026-08-23","source":"navcheck.md full-walk re-drive (main)","verdict":"RENDERS","notes":"Unchanged. Title 'agent-tui' plus the sidebar-navigation blurb, confirmed against a real live capture -- this is the exact fingerprint the queue's stale-home-text claim would show elsewhere if true, and it does not appear on any other destination."}
+{"date":"2026-08-23","source":"estate-loop/b4-tui-postmerge-vhs.md full-walk re-drive, post #140/#141 (main bffb08c) (2026-08-23)","verdict":"RENDERS","notes":"Unchanged -- title 'agent-tui' plus sidebar-navigation blurb."}
+{"date":"2026-08-23","source":"estate-loop/b4-tui-postmerge-vhs.md full-walk re-drive, post #140/#141 (main bffb08c)","verdict":"RENDERS","notes":"Unchanged -- title 'agent-tui' plus sidebar-navigation blurb."}
