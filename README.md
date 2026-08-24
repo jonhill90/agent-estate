@@ -24,11 +24,11 @@ python3 -m unittest discover -s tests/supervisor   # 349 tests, as of 2026-08-13
                                                     # (it did not finish inside this
                                                     # environment's time budget, both in the
                                                     # 2026-08-18 sweep and again in the
-                                                    # 2026-08-23 truth pass); 171 tracked
+                                                    # 2026-08-23 truth pass); 176 tracked
                                                     # files under tests/supervisor/ today
                                                     # (`Verified 2026-08-23`, git ls-files,
-                                                    # `25135ae` -- this line previously said
-                                                    # 110, `Verified 2026-08-18`), so the
+                                                    # `35988b5` -- this line previously said
+                                                    # 171, `Verified 2026-08-23`), so the
                                                     # count is volatile and should be
                                                     # re-measured, not assumed; the 349-test
                                                     # figure specifically could not be
