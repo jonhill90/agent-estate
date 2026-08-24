@@ -2454,6 +2454,66 @@ class Ledger:
             row = connection.execute("SELECT * FROM source_tasks WHERE id = ?", (task_id,)).fetchone()
         return self._source_task_dict(row)
 
+    def list_complete_tasks_missing_worktree_path(self):
+        """Every `tasks` row a backfill sweep may have work to do on --
+        agent-supervisor#611. Scoped to `status='complete'` (a task still in
+        flight has no final worktree to confirm yet) and `worktree_path=''`
+        (a populated row is the historical record invariant 1 requires; this
+        never overwrites one).
+        """
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(
+                "SELECT * FROM tasks WHERE status = 'complete' AND worktree_path = '' ORDER BY created_at, id"
+            ).fetchall()
+        return [self._dict(row) for row in rows]
+
+    def get_pr_for_task(self, task_id):
+        """The `(repo, pr_number)` a `record_pr_for_task` call recorded for
+        this task, if any -- the reverse lookup `get_task_for_pr_number`
+        does not provide. Read-only, and returns `None` rather than guessing
+        when no such row exists: a task with no recorded PR link has no
+        answer here, not an inferred one.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT repo, pr_number FROM pr_authorship WHERE task_id = ?", (task_id,)
+            ).fetchone()
+        return {"repo": row["repo"], "pr_number": row["pr_number"]} if row is not None else None
+
+    def backfill_task_worktree_path(self, task_id, worktree_path):
+        """Write `worktree_path` for exactly one row, and only into the gap
+        this issue describes -- agent-supervisor#611's sweep is the one
+        caller.
+
+        Refuses outright (does not silently no-op) unless the row is
+        `status='complete'` with `worktree_path=''` right now: a non-empty
+        column is the historical record invariant 1 requires (never
+        overwrite it), and a non-complete task's worktree may still be
+        live. Idempotent by construction the same way
+        `update_source_task_state` is: a second call after this one already
+        wrote finds `worktree_path` no longer empty and refuses too, so a
+        sweep re-run against an already-fixed row performs zero writes
+        rather than raising -- callers check `list_complete_tasks_missing_
+        worktree_path()` first, which already excludes it.
+        """
+        if not worktree_path:
+            raise ValueError("backfill_task_worktree_path requires a non-empty worktree_path")
+        now = int(self.clock())
+        with self._locked(), self._transaction() as connection:
+            row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+            if row is None:
+                raise ValueError("unknown task")
+            if row["status"] != "complete":
+                raise ValueError(f"task {task_id} is not complete (status={row['status']!r})")
+            if row["worktree_path"]:
+                raise ValueError(f"task {task_id} already has a recorded worktree_path -- refusing to overwrite it")
+            connection.execute(
+                "UPDATE tasks SET worktree_path = ?, updated_at = ? WHERE id = ?",
+                (worktree_path, now, task_id),
+            )
+            row = connection.execute("SELECT * FROM tasks WHERE id = ?", (task_id,)).fetchone()
+        return self._dict(row)
+
     def _assign_tx(self, connection, *, task_id, lane, pane_nonce, summary, now, worktree_path=""):
         self._require_task_id(task_id)
         if not summary.strip():

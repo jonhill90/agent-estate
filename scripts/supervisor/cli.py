@@ -29,6 +29,7 @@ from github_source import GithubTaskSource
 from pi_transport import PiRPCTransport
 from reconcile_lane_completions import LaneCompletionReconciler
 from reconcile_sources import SourceTaskReconciler
+from reconcile_worktree_paths import WorktreePathReconciler
 from sensor import StateSensor
 from transport import TmuxTransport
 
@@ -201,6 +202,17 @@ def parser():
     # table -- see `reconcile_sources.py`'s module docstring for why they
     # are separate commands rather than one overloaded.
     sub.add_parser("reconcile-source-tasks")
+
+    # agent-supervisor#611: a third sibling sweep, same read-only-projection
+    # shape as `reconcile-source-tasks`, a different column -- see
+    # `reconcile_worktree_paths.py`'s module docstring for the two
+    # independent checks this refuses to backfill a row without.
+    reconcile_worktree_paths_parser = sub.add_parser("reconcile-worktree-paths")
+    reconcile_worktree_paths_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would be backfilled without writing anything",
+    )
 
     # agent-supervisor#155: a sibling sweep, same shape, a different table.
     # `reconcile-source-tasks` advances `source_tasks` from GitHub state this
@@ -1546,6 +1558,10 @@ def main(argv=None):
         value = SourceTaskReconciler(
             ledger, gh_bin=os.environ.get("AGENT_GH_BIN", "gh")
         ).sweep()
+    elif args.command == "reconcile-worktree-paths":
+        value = WorktreePathReconciler(
+            ledger, gh_bin=os.environ.get("AGENT_GH_BIN", "gh")
+        ).sweep(dry_run=args.dry_run)
     elif args.command == "reconcile-lane-completions":
         lanes_bin = os.environ.get("AGENT_LANES_BIN", str(Path(__file__).resolve().parent / "lanes.sh"))
         value = LaneCompletionReconciler(
