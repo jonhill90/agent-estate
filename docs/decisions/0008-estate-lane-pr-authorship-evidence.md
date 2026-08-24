@@ -184,6 +184,22 @@ optional follow-up work, and whoever reviews `#539` should confirm the
 tool's own usage guidance says plainly not to run it from a worktree
 checked out to review someone else's work.
 
+**A second, structurally different gap surfaced after this document was
+written, named here rather than left silent — `estate:2`'s review of this
+document caught the omission:** `agent-supervisor#552` found the
+SHA-comparison check itself produces a **false negative** for a
+cross-repo estate lane (pane anchored in one repo's worktree, committing
+to another via absolute-path tool calls) — a real, currently-running
+lane shape, not a hypothetical, refused by the exact mechanism this
+document blesses. That finding, and the decision it led to — retire the
+self-run check rather than patch it a fourth time, pursue a genuinely
+dispatcher-recorded mechanism instead — is recorded in
+`agent-supervisor#557`/`docs/decisions/0010-estate-authorship-three-failures.md`,
+not here. This document's approval of `#539`'s design should be read as
+superseded by `0010` on that point; leaving it unstated here would risk
+this document being read as "the residual-possession gap is the only one
+on record," which stopped being true the moment `#552` was filed.
+
 ## What happens to the stopgap once `#546` lands
 
 **Removed, not kept as a second source.** A self-run check and an
