@@ -102,6 +102,13 @@
 # crashes or wedges before reaching its final action leaves this blocked
 # forever, same as the underlying mechanism today. That is an accepted,
 # already-documented limit of `wait-for`, not a new one introduced here.
+#
+# SUPERVISOR_LANE_FLOOR (default 1): the minimum number of free lanes this
+# script will leave standing in $SESSION. A completed lane's agent process
+# is retired (ended, window kept) only when the session already has MORE
+# than this many other free lanes without it -- see the #563 block below
+# for the full reasoning. Set to a large number to disable retirement
+# entirely for a session that needs every lane always warm.
 
 set -uo pipefail
 
@@ -216,6 +223,117 @@ if [ -n "${LEDGER_OUT:-}" ]; then
           sed 's/^/  /' <<<"$RECORD_PR_OUT" >&2
         fi
       fi
+    fi
+  fi
+fi
+
+# --- agent-supervisor#563: retire this lane's PROCESS, down to a FLOOR -----
+# WHY: every completed task used to come straight back as a live free-N lane
+# holding a running agent process forever -- lanes accumulate one per
+# completion, across every repo session, until the host guard trips
+# (#563's own filed evidence: 23 claude processes against a ceiling of 20,
+# two restarts). The naive fix -- reclaim every idle lane -- was tried the
+# same night and broke `dispatch.sh` outright ("no lane rows were readable
+# from lanes.sh"), because the reclaimed lanes WERE the entire dispatch
+# pool. Neither failure announces itself as what it is.
+#
+# THE FLOOR: only retire a completed lane's process when the session
+# already has MORE than SUPERVISOR_LANE_FLOOR other free lanes without it --
+# i.e. this one is surplus capacity, not the last (or only) thing dispatch
+# has to offer. At or under the floor, this block does nothing and the
+# unconditional rename-to-free-N below runs exactly as it always has,
+# leaving the process alive and dispatchable. A floor of 1 free lane per
+# session is the working hypothesis from #563's own two observations, not a
+# measured minimum -- SUPERVISOR_LANE_FLOOR overrides it if that turns out
+# wrong for a given session.
+#
+# WHY THIS IS SAFE WHERE #564/#570's administrative lane-retire.sh
+# DELIBERATELY IS NOT: lane-retire.sh's target can be an operator-chosen
+# lane mid-task, so it never touches the pane or its process (#570) --
+# there is no way to know from outside whether killing it would discard
+# live work. This block only ever runs AFTER the worker's own `wait-for`
+# signal has fired and the name-match guard above has already confirmed
+# nothing else has claimed the window since -- the task is positively
+# finished, not merely idle, so ending its process cannot lose a turn in
+# flight. It can still lose UNCOMMITTED OR UNPUSHED work the worker forgot
+# to ship despite signaling done, which is exactly what the guard below
+# checks before touching anything -- the same conditions worktree.sh's
+# `safe_remove`/`gc` and lane-retire.sh's own guard already apply, reused
+# here rather than reinvented, and fail closed (never retire) on anything
+# unreadable.
+#
+# THE MECHANISM: `tmux respawn-pane -k`, never `kill-window` or
+# `kill-pane` -- CLAUDE.md invariant 4 and #564's own lesson both bar
+# addressing a live window with a destructive verb from here. `-k` kills
+# the pane's CURRENT process and replaces it with a fresh one; the WINDOW
+# and its slot in `lanes.sh`'s table survive untouched, so a later dispatch
+# or an operator's `--rehome-lane` can still find and reuse it -- the
+# opposite of #564's failure, where retiring the lane took the window with
+# it. The pane reads as `dead` afterward (lanes.sh's own "no agent, just a
+# shell" state), same as any other idle-but-unlaunched lane; renamed to
+# free-N below, which lanes.sh already documents as the "no claim"
+# convention a dead pane can safely wear.
+SUPERVISOR_LANE_FLOOR="${SUPERVISOR_LANE_FLOOR:-1}"
+if [ -n "$LANE_ID" ] && [[ "$SUPERVISOR_LANE_FLOOR" =~ ^[0-9]+$ ]]; then
+  # LANE_DONE_LANES_SH override exists for tests: computing the free-lane
+  # count for real means running the full lanes.sh classifier (real tmux
+  # pane content, a recognised harness's ready-shape), which is what
+  # tests/supervisor/test_lanes.sh already exercises on its own. This
+  # script's own tests substitute a trivial stand-in that prints N lines,
+  # so they can pin the FLOOR decision and the retire/refuse guard below
+  # deterministically without re-deriving lanes.sh's classification rules.
+  LANES_SH="${LANE_DONE_LANES_SH:-$(dirname "${BASH_SOURCE[0]}")/lanes.sh}"
+  FREE_ROWS="$("$LANES_SH" --free "$SESSION" 2>/dev/null)"
+  FREE_COUNT=0
+  [ -n "$FREE_ROWS" ] && FREE_COUNT=$(grep -c . <<<"$FREE_ROWS")
+  if [ "$FREE_COUNT" -gt "$SUPERVISOR_LANE_FLOOR" ]; then
+    # Surplus capacity: this lane is retirement-eligible. Guard first --
+    # never retire a lane holding uncommitted or unpushed work (#563,
+    # same conditions as lane-retire.sh/#564).
+    RETIRE_CWD="$(tmux display-message -p -t "$TARGET" '#{pane_current_path}' 2>/dev/null)"
+    RETIRE_REFUSAL=""
+    if [ -z "$RETIRE_CWD" ] || [ ! -d "$RETIRE_CWD" ]; then
+      RETIRE_REFUSAL="could not read a usable working directory"
+    elif ! git -C "$RETIRE_CWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+      RETIRE_REFUSAL="$RETIRE_CWD is not inside a git worktree"
+    else
+      RETIRE_STATUS="$(git -C "$RETIRE_CWD" status --porcelain 2>&1)"
+      if [ -n "$RETIRE_STATUS" ]; then
+        RETIRE_REFUSAL="uncommitted changes in $RETIRE_CWD"
+      else
+        RETIRE_HEAD="$(git -C "$RETIRE_CWD" rev-parse HEAD 2>/dev/null)"
+        RETIRE_BRANCH="$(git -C "$RETIRE_CWD" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+        RETIRE_UPSTREAM="$(git -C "$RETIRE_CWD" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"
+        if [ -n "$RETIRE_UPSTREAM" ]; then
+          RETIRE_COMPARE="$RETIRE_UPSTREAM"
+        elif [ -n "$RETIRE_BRANCH" ] && [ "$RETIRE_BRANCH" != HEAD ] \
+          && git -C "$RETIRE_CWD" show-ref --verify --quiet "refs/remotes/origin/$RETIRE_BRANCH"; then
+          RETIRE_COMPARE="origin/$RETIRE_BRANCH"
+        else
+          RETIRE_COMPARE=""
+        fi
+        if [ -z "$RETIRE_COMPARE" ]; then
+          RETIRE_REFUSAL="no upstream and no matching branch on origin (HEAD $RETIRE_HEAD) -- commits nobody else has a copy of"
+        else
+          RETIRE_UNPUSHED="$(git -C "$RETIRE_CWD" rev-list --count "${RETIRE_COMPARE}..HEAD" 2>&1)"
+          if ! [[ "$RETIRE_UNPUSHED" =~ ^[0-9]+$ ]]; then
+            RETIRE_REFUSAL="could not compare against $RETIRE_COMPARE -- push state unreadable"
+          elif [ "$RETIRE_UNPUSHED" != 0 ]; then
+            RETIRE_REFUSAL="$RETIRE_UNPUSHED commit(s) not on $RETIRE_COMPARE"
+          fi
+        fi
+      fi
+    fi
+    if [ -n "$RETIRE_REFUSAL" ]; then
+      echo "lane-done: ${TARGET} has $FREE_COUNT free lane(s) (floor $SUPERVISOR_LANE_FLOOR) but retirement refused -- $RETIRE_REFUSAL -- keeping the process alive as free-N" >&2
+    elif tmux respawn-pane -k -t "$TARGET" -c "$RETIRE_CWD" "${SUPERVISOR_LANE_RETIRE_SHELL:-${SHELL:-/bin/bash}}" 2>/dev/null; then
+      REMAINING=$(( FREE_COUNT - 1 ))
+      echo "lane-done: ${TARGET} retired to the floor -- its agent process was ended (window kept, renamed to free-N below); $REMAINING free lane(s) remain in ${SESSION} after this one" >&2
+      if [ "$REMAINING" -le 0 ]; then
+        echo "lane-done: WARNING -- this was the last free lane in ${SESSION}; dispatch will refuse until another exists" >&2
+      fi
+    else
+      echo "lane-done: ${TARGET} was eligible for retirement but 'tmux respawn-pane -k' failed -- keeping the process alive as free-N" >&2
     fi
   fi
 fi
