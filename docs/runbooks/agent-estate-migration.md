@@ -41,7 +41,12 @@ agent-estate/
     tui/             agent-tui's docs/*, moved under this
     index.md         ONE merged index, replacing both repos' separate ones
   tests/             unmoved — agent-supervisor's suite; agent-tui's *_test.go stay beside their .go files under tui/
-  .github/workflows/ union — agent-supervisor's 4 + agent-tui's ci.yml, no filename collisions (verified, inventory §3)
+  .github/workflows/ union — agent-supervisor's 5 (`completion-gate.yml`,
+  `daemon-ci.yml`, `fixpass-evidence.yml`, `ui-evidence.yml`,
+  `validate.yml` — `daemon-ci.yml` landed with `#543` after the inventory's
+  own count of 4 was taken; corrected here, caught by review) + agent-tui's
+  `ci.yml`, no filename collisions (re-verified against current
+  `origin/main`, not the inventory's original count)
   README.md / AGENTS.md / CLAUDE.md   merged content, one file each — a decision, not a mechanical move (inventory §6)
 ```
 
@@ -86,8 +91,11 @@ gate now, before step 1's rename and step 2/4's file moves and module-path
 rewrite, gives a known-good green baseline — without one, a post-migration
 daemon compile break can't be told apart from a pre-existing gap.
 
-**Land `agent-supervisor#543`, and confirm it's green — do not write a
-second copy of this workflow.** An earlier draft of this section embedded
+**`agent-supervisor#543` has merged (`2026-08-24T00:57:53Z`) — confirm it's
+green, don't land it.** ("Land" was accurate when this section was first
+written; it's stale now and reads as a pending action an operator might
+try to redo. Caught by review at this exact head.) Do not write a
+second copy of this workflow. An earlier draft of this section embedded
 its own inline YAML here; `estate:5`'s review of this runbook caught that
 `#543` had since landed as the real implementation, with two deliberate
 improvements a hand-copied version would silently lose:
@@ -350,6 +358,7 @@ touch (a) and (b). Never touch (c).**
 | 4 | `~/.local/state/estate-loop/{check.sh,tick-scan.sh,status.sh}` | Un-versioned, outside both repos — edit the paths and repo-name literals directly, no PR. `check.sh:115`'s `cd .../agent-tui \|\| exit 0` becomes moot once `agent-tui` is deleted (step 7) — repoint at nothing, or delete the check, rather than pointing it at a directory that will stop existing |
 | 5 | `scripts/supervisor/cli.py:83-88` `DEFAULT_REPOSITORIES` | One edit: `agent-supervisor` entry's `path` and `github` fields become the `agent-estate` equivalents. This is the highest-leverage single edit in this whole sweep — everything resolving `--repo <name>` through `cli.py` inherits the fix |
 | 6 | `closed-report.sh:50`, `watchdog.sh:74`, `digest.sh:42`, `refresh_brief_resume.py:56`, `acceptance.sh:69`, `contest-stop.sh:175` | Same rename, one literal each, one PR |
+| 11 | `scripts/supervisor/verdict.py`, `scripts/supervisor/ci_gate.py` (agent-supervisor); `internal/prverdict`, `internal/mergepr` (agent-tui) | **Found missing from this list by review, added here rather than left absent.** These query `ledger.pr_verdicts.repo`/`pr_authorship.repo` by exact repo-name match. 4c's own historical rows keep the OLD name (`agent-supervisor`/`agent-tui`) permanently — so this code must match on **both** the old and new (`agent-estate`) names, not just switch to the new one, or every pre-migration row becomes silently unmatchable the moment this code stops recognizing the name that's actually stored |
 
 **Verify each:** for the launchd jobs, `launchctl list | grep com.jonhill`
 shows each loaded with no error, and `log show --predicate 'process ==
