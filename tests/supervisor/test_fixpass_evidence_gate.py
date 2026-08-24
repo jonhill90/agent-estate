@@ -295,6 +295,112 @@ class FixpassEvidenceGateTest(unittest.TestCase):
         self.assertIn(EVIDENCE_MARKER, result["reason"])
         self.assertNotIn("predate", result["reason"])
 
+    # --- repost recency (agent-supervisor#566) ------------------------------
+    def test_repost_of_an_old_rejection_does_not_stale_out_evidence_that_already_answered_it(self):
+        # Live shape measured on #547: `estate:4` posts REQUEST CHANGES at
+        # SHA a75de30 (round 1), the author posts evidence answering it, and
+        # `estate:4` later RE-POSTS the identical verdict -- same
+        # Review-Lane, same Reviewed-SHA -- under a newly re-registered
+        # identity after losing its lane registration. The repost carries a
+        # LATER timestamp than the original but is not a new round; the
+        # evidence that already answered the original round must still
+        # count.
+        runner = FakeRunner(
+            reviews=[],
+            comments=[
+                {
+                    "body": (
+                        "Verdict: REQUEST CHANGES\nReview-Lane: estate:4\n"
+                        "Reviewed-SHA: a75de30a75de30a75de30a75de30a75de30a75d\n"
+                        "the bug is still there"
+                    ),
+                    "createdAt": "2026-08-23T01:00:00Z",
+                },
+                {"body": GOOD_BLOCK, "createdAt": "2026-08-23T02:00:00Z"},
+                {
+                    # The repost: identical Review-Lane/Reviewed-SHA pair,
+                    # much later timestamp (the re-registration, not a new
+                    # review).
+                    "body": (
+                        "Verdict: REQUEST CHANGES\nReview-Lane: estate:4\n"
+                        "Reviewed-SHA: a75de30a75de30a75de30a75de30a75de30a75d\n"
+                        "the bug is still there"
+                    ),
+                    "createdAt": "2026-08-23T05:00:00Z",
+                },
+            ],
+        )
+        result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=547)
+        self.assertEqual("allow", result["decision"])
+        self.assertIn("evidence present", result["reason"])
+
+    def test_a_genuinely_new_rejection_at_a_different_sha_still_stales_old_evidence(self):
+        # The dedupe must not blur a REAL second round into the first --
+        # same lane, but a DIFFERENT Reviewed-SHA (a fresh look at a later
+        # head) is a new round the earlier evidence never answered.
+        runner = FakeRunner(
+            reviews=[],
+            comments=[
+                {
+                    "body": (
+                        "Verdict: REQUEST CHANGES\nReview-Lane: estate:4\n"
+                        "Reviewed-SHA: a75de30a75de30a75de30a75de30a75de30a75d\n"
+                        "round 1: old_bug is broken"
+                    ),
+                    "createdAt": "2026-08-23T01:00:00Z",
+                },
+                {"body": GOOD_BLOCK, "createdAt": "2026-08-23T02:00:00Z"},
+                {
+                    "body": (
+                        "Verdict: REQUEST CHANGES\nReview-Lane: estate:4\n"
+                        "Reviewed-SHA: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\n"
+                        "round 2: unrelated new_bug is broken, nothing pasted yet"
+                    ),
+                    "createdAt": "2026-08-23T05:00:00Z",
+                },
+            ],
+        )
+        result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=547)
+        self.assertEqual("refuse", result["decision"])
+
+    def test_a_second_distinct_finding_from_the_same_lane_at_the_same_sha_still_refuses(self):
+        # agent-supervisor#569's own reviewer finding, confirmed as a real
+        # regression the (Review-Lane, Reviewed-SHA)-only dedupe introduces:
+        # two DIFFERENT findings from the SAME lane at the IDENTICAL
+        # Reviewed-SHA are not a repost of each other. Evidence posted
+        # between them answers only the first finding; the second is a
+        # genuinely new, still-unaddressed rejection that happens to share
+        # the same key. Collapsing by (lane, SHA) alone -- with no check
+        # that the two rejections' TEXT actually matches -- let the
+        # evidence answering bug A satisfy the gate for bug B too.
+        runner = FakeRunner(
+            reviews=[],
+            comments=[
+                {
+                    "body": (
+                        "Verdict: REQUEST CHANGES\nReview-Lane: estate:4\n"
+                        "Reviewed-SHA: a75de30a75de30a75de30a75de30a75de30a75d\n"
+                        "bug A is present"
+                    ),
+                    "createdAt": "2026-08-23T01:00:00Z",
+                },
+                {"body": GOOD_BLOCK, "createdAt": "2026-08-23T02:00:00Z"},
+                {
+                    # Same lane, same SHA -- but a substantively different
+                    # finding, not a repost of the first. Nothing has
+                    # answered this one yet.
+                    "body": (
+                        "Verdict: REQUEST CHANGES\nReview-Lane: estate:4\n"
+                        "Reviewed-SHA: a75de30a75de30a75de30a75de30a75de30a75d\n"
+                        "actually bug B also present, distinct new finding"
+                    ),
+                    "createdAt": "2026-08-23T03:00:00Z",
+                },
+            ],
+        )
+        result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=547)
+        self.assertEqual("refuse", result["decision"])
+
     def test_missing_timestamps_still_allow_evidence_as_before(self):
         # Backward compatibility: when timestamps aren't available (older
         # `gh` payloads, or a rejection/evidence pair with no recorded
