@@ -103,6 +103,14 @@
 # Director tick, not bundled into landing the tool.
 set -uo pipefail
 
+# `install_dispatch_origin_guard` (agent-supervisor#562) needs an absolute
+# path to THIS repo's own `cli.py` -- not the target repo's, since `new`
+# routinely hands out a worktree of a DIFFERENT repo (agent-dotfiles,
+# agent-tui, skills) that carries no `scripts/supervisor/` tree of its own
+# at all. Resolved once, here, the same way every other script in this
+# directory resolves its own location.
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
 usage() { sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2; exit 2; }
 
 # Shared by `done` and `gc`: remove TARGET, refusing anything that would
@@ -473,6 +481,128 @@ HOOK
   git -C "$dest" config --worktree core.hooksPath "$hooks_dir"
 }
 
+# agent-supervisor#562: twelve PRs across agent-supervisor and agent-tui
+# ended one night reviewed, green, independently approved at head, and
+# unmergeable -- every one refusing merge-pr.sh's existing independence
+# gate with "PR author lane unresolved". Not one was defective; every one
+# was started by writing a brief straight into a pane instead of dispatching
+# through `dispatch.sh`, so the ledger never got a row for it. That gate
+# already existed and already worked -- the defect is WHEN it fires: at
+# merge time, after a reviewer has already spent a full pass on work nobody
+# can vouch for. `#561`'s own standing rule ("all future work dispatches
+# through dispatch.sh") was itself pane-authored while being written down,
+# which is the concrete proof a restated rule does not bind -- see that
+# issue and CLAUDE.md's own top section on why this needs a mechanism, not
+# another sentence.
+#
+# WHERE THIS FIRES, and why not a CI check or an earlier point in
+# merge-pr.sh: the actual dispatch record lives in this machine's own
+# `ledger.sqlite3` (`~/.local/state/agent-dotfiles-supervisor`) -- nothing
+# reachable from GitHub Actions' hosted runners can read it, so a required
+# CI check (the pattern `fixpass-evidence.yml`/`ui-evidence.yml` already
+# use) cannot answer this question at all, only guess from GitHub-visible
+# signals a retroactive issue could fake. `merge-pr.sh` CAN read the
+# ledger, but by the time anything reaches it a reviewer has already spent
+# their pass -- exactly the cost this issue measures and wants moved
+# earlier. The one place on this machine that sees EVERY push out of a
+# lane's own worktree, before a PR exists for anyone to review, is a
+# `pre-push` hook -- and `install_stash_guard` above already proved hooks
+# installed here are not something a lane can forget to wire up, because
+# `new` (this function's own caller) installs them on every worktree it
+# hands out, whether or not that worktree's own dispatch went through
+# `dispatch.sh`.
+#
+# WHAT IT CHECKS: `cli.py worktree-lane --path <dest> --include-reviews` --
+# the exact self-lookup CLAUDE.md's invariant 10 already documents as the
+# correct way for a lane to ask "does the ledger know this worktree",
+# keyed on the worktree's own PATH rather than its branch name or task id.
+# A worktree `dispatch.sh` created writes this row at DISPATCH time (before
+# the first commit, let alone the first push) via `record-dispatch
+# --worktree` -- so a legitimately dispatched task, including a fix-pass
+# dispatched against a pre-existing issue (`--pr`), already has a known
+# row the moment this hook runs, no matter how many pushes follow. A
+# worktree nobody ever dispatched -- this function's own `new` caller was
+# invoked by hand, or the work started as a pane-typed brief and was only
+# LATER stuffed into a worktree -- never gets that row, because nothing
+# ever called `record-dispatch` against ITS path. Filing a retroactive
+# issue after the fact does not help: the row this hook reads is keyed on
+# the worktree's path, not on whether some issue exists somewhere that a
+# PR could later be pointed at -- see CLAUDE.md's own "the dispatcher must
+# commit to scope before the outcome is known" line (#557/#561), which is
+# exactly what a path-keyed, dispatch-time row proves and a same-day
+# retroactive issue cannot fake.
+#
+# THE ESCAPE HATCH, and why it needs no code of its own: a genuinely
+# human-authored PR (`#472`, `#495` -- real commits under Jon's own
+# identity) is never pushed out of a lane worktree at all; CLAUDE.md
+# records both as carrying "no worktree ever holding either branch." This
+# hook is installed inside `$dest`'s own `.git/worktrees/.../` hooks
+# directory (`core.hooksPath`, scoped to that one worktree by
+# `install_stash_guard`'s own extensions.worktreeConfig above) -- it is
+# physically absent from Jon's own regular checkout, so a human's own push
+# never runs it. Nothing here has to recognise "this is a human" as a
+# case; the human's push structurally never reaches this code, the same
+# shape `mark-pr-external.sh`'s own `$TMUX_PANE` check already uses to
+# tell an estate participant from an outside actor without an argument
+# that could be spoofed.
+#
+# FAILS CLOSED, and says which failure it hit -- `cli.py` itself failing
+# (a wedged lock, a missing state dir, a broken interpreter) is refused
+# with a message naming that as unreadable ledger state, never silently
+# treated as "no record" (which is a different, positive finding). A
+# caller cannot tell "the ledger says no" apart from "the ledger could not
+# be asked" by exit code alone (both refuse the push) -- but can by the
+# printed reason, which is the fail-closed-but-not-mute-about-it posture
+# the rest of this file already holds (`resolve-pr-contributors.sh`'s own
+# header makes the identical distinction for its own callers).
+#
+# What this does NOT catch: `git push --no-verify` skips every local hook,
+# same residual `merge-pr.sh`'s own header already documents for `gh pr
+# merge` run by hand -- convention enforced by a mechanism, not a platform
+# block that cannot be bypassed at all. And a worktree whose branch is
+# later PUSHED FROM A DIFFERENT WORKTREE (its own `.git` dir copied or its
+# ref pushed by tooling outside this hook's reach) is not something a
+# per-worktree hook can see -- documented rather than silently assumed
+# closed.
+install_dispatch_origin_guard() {
+  local dest="$1"
+  local git_dir hooks_dir
+  git_dir=$(git -C "$dest" rev-parse --git-dir 2>/dev/null) || { echo "worktree: could not resolve $dest's git-dir" >&2; return 1; }
+  case "$git_dir" in
+    /*) : ;;
+    *) git_dir="$dest/$git_dir" ;;
+  esac
+  # Same hooks_dir install_stash_guard already pointed core.hooksPath at --
+  # a second hook NAME (git only ever runs one script per hook name, but
+  # `pre-push` and `reference-transaction` are different names, so both
+  # live in the one directory without colliding).
+  hooks_dir="$git_dir/supervisor-stash-guard"
+  mkdir -p "$hooks_dir"
+  cat >"$hooks_dir/pre-push" <<HOOK
+#!/bin/bash
+# Installed by worktree.sh (agent-supervisor#562). See install_dispatch_origin_guard's
+# own comment in that file for the full reasoning -- this is the mechanism half.
+LEDGER_PYTHON="\${AGENT_PYTHON_BIN:-python3}"
+OUT=\$("\$LEDGER_PYTHON" "$HERE/cli.py" worktree-lane --path "$dest" --include-reviews 2>&1)
+RC=\$?
+if [ "\$RC" -ne 0 ]; then
+  echo "worktree: pre-push refused -- could not read the dispatch ledger to check this worktree's origin (ambiguous, NOT the same as 'determined undispatched'; agent-supervisor#562):" >&2
+  echo "\$OUT" | sed 's/^/  /' >&2
+  exit 1
+fi
+if grep -qF '"known":true' <<<"\$OUT"; then
+  exit 0
+fi
+echo "worktree: pre-push refused -- $dest has no dispatch record in the ledger (agent-supervisor#562)." >&2
+echo "worktree: this push is coming from a lane worktree the ledger never saw dispatch.sh register --" >&2
+echo "worktree: dispatch this work through dispatch.sh against a real issue before pushing it." >&2
+echo "worktree: genuinely human-authored work does not use a lane worktree at all -- push it from your own clone instead." >&2
+exit 1
+HOOK
+  chmod +x "$hooks_dir/pre-push"
+  git -C "$dest" config --worktree core.hooksPath "$hooks_dir"
+}
+
 CMD="${1:-}"
 case "$CMD" in
 
@@ -582,6 +712,11 @@ new)
   git -C "$REPO" worktree add -b "$BRANCH" "$DEST" "$BASE" 1>&2 || exit 1
   install_stash_guard "$DEST" "$REPO" 1>&2 || {
     echo "worktree: could not install the stash guard on $DEST (agent-supervisor#427) -- NOT handing out an unguarded worktree" >&2
+    git -C "$REPO" worktree remove --force "$DEST" >/dev/null 2>&1
+    exit 1
+  }
+  install_dispatch_origin_guard "$DEST" 1>&2 || {
+    echo "worktree: could not install the dispatch-origin guard on $DEST (agent-supervisor#562) -- NOT handing out an unguarded worktree" >&2
     git -C "$REPO" worktree remove --force "$DEST" >/dev/null 2>&1
     exit 1
   }

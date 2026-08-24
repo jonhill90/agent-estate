@@ -63,6 +63,29 @@ git -C "$REPO" commit -q -m "initial"
 git -C "$REPO" push -q -u origin main
 git -C "$REPO" remote set-head origin main >/dev/null 2>&1 || true
 
+# agent-supervisor#562: `new` now installs a pre-push hook on every worktree
+# it hands out (install_dispatch_origin_guard), refusing a push unless the
+# ledger has a dispatch record for that worktree's own path. Every OTHER
+# fixture in this file below (`gc`'s "already merged upstream" simulations,
+# the dirty/staged/untracked cases, ...) pushes straight out of a `new`
+# worktree as scaffolding for a concern that has nothing to do with #562 --
+# none of them dispatch through the ledger first, and rewriting fourteen
+# unrelated fixtures to seed a dispatch record each would make this file
+# about #562 instead of about worktree.sh's other, older contracts. Stub
+# `AGENT_PYTHON_BIN` globally to a fake interpreter that reports every
+# worktree as known-dispatched, so this file's PRE-EXISTING pushes keep
+# working unchanged; the "--- agent-supervisor#562" section below overrides
+# this back to the real interpreter for its own pushes, because proving the
+# real refusal/pass/ambiguous behavior against the real cli.py and a real
+# scratch ledger is the entire point of that section.
+mkdir -p "$D/bin"
+cat >"$D/bin/allow-python3" <<'STUB'
+#!/bin/bash
+echo '{"known":true,"lane":"stub:0","path":"stub","task":"stub"}'
+STUB
+chmod +x "$D/bin/allow-python3"
+export AGENT_PYTHON_BIN="$D/bin/allow-python3"
+
 # `new`'s worktrees must land inside $REPO/.worktrees/ -- gc's scope filter
 # (agent-supervisor#527 follow-up) now refuses anything outside it, so every
 # fixture below that goes through `new` has to actually resolve there for
@@ -129,6 +152,115 @@ if git -C "$stashB" stash list 2>/dev/null | grep -q .; then bad "lane B sees no
 git -C "$stashA" checkout -q -- file.txt
 bash "$WT" done "$stashA" >/dev/null 2>&1
 bash "$WT" done "$stashB" >/dev/null 2>&1
+
+# --- agent-supervisor#562: `new` must also install a pre-push guard that
+# refuses to push a lane worktree the ledger never saw dispatch.sh register
+# -- built from the real shape of the twelve PRs this issue measures:
+# started by writing a brief straight into a pane, never dispatched, still
+# green-and-approved, still refused at merge -- just far too late. This
+# proves the refusal fires at PUSH TIME instead, before any review is spent.
+DOG_STATE="$D/state-562"
+export AGENT_SUPERVISOR_STATE_DIR="$DOG_STATE"
+dog_out=$(bash "$WT" new 562-dispatch-origin "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "new (dispatch-origin guard case) exits 0" "$rc" 0 "$dog_out"
+DOG_DEST="$dog_out"
+require_dest "new (dispatch-origin guard case)" "$DOG_DEST"
+
+echo "undispatched work" >> "$DOG_DEST/file.txt"
+git -C "$DOG_DEST" add file.txt
+git -C "$DOG_DEST" commit -q -m "562: work nobody dispatched"
+
+# --- negative case: no dispatch record for this worktree's own path -> the
+# push itself is refused, naming the actual remedy (dispatch it, or push it
+# from outside a lane worktree if it is genuinely human-authored). The real
+# interpreter, not this file's global allow-stub (see the note above where
+# that stub is installed) -- proving the real hook's real logic is the whole
+# point from here through the mutation check below.
+push_out=$(AGENT_PYTHON_BIN=python3 git -C "$DOG_DEST" push origin lane/562-dispatch-origin 2>&1); push_rc=$?
+want_exit "push from an undispatched worktree is refused" "$push_rc" 1 "$push_out"
+if grep -qi "562" <<<"$push_out"; then ok "the refusal names #562"; else bad "the refusal names #562" "$push_out"; fi
+if grep -q "dispatch this work through dispatch.sh" <<<"$push_out"; then
+  ok "the refusal names the remedy (dispatch.sh)"
+else
+  bad "the refusal names the remedy (dispatch.sh)" "$push_out"
+fi
+if git -C "$D/origin.git" show-ref --verify --quiet refs/heads/lane/562-dispatch-origin; then
+  bad "the refused push did not land on the remote" "refs/heads/lane/562-dispatch-origin exists on \$D/origin.git"
+else
+  ok "the refused push did not land on the remote"
+fi
+
+# --- ambiguous case: the ledger genuinely cannot be read (a broken
+# interpreter, standing in for a wedged lock or missing state dir) -> also
+# refused, but the boundary this issue names explicitly: "cannot determine"
+# must print as distinguishable from "determined to be undispatched", never
+# the same sentence.
+amb_out=$(AGENT_PYTHON_BIN=/definitely/does/not/exist git -C "$DOG_DEST" push origin lane/562-dispatch-origin 2>&1); amb_rc=$?
+want_exit "push is refused when the ledger cannot be read at all" "$amb_rc" 1 "$amb_out"
+if grep -q "ambiguous" <<<"$amb_out" && ! grep -q "has no dispatch record" <<<"$amb_out"; then
+  ok "an unreadable ledger reads as ambiguous, not as 'determined undispatched'"
+else
+  bad "an unreadable ledger reads as ambiguous, not as 'determined undispatched'" "$amb_out"
+fi
+
+# --- positive case: a real dispatch record for THIS worktree's own path (the
+# same field record-dispatch --worktree writes, agent-supervisor#117) lets
+# the identical push through unchanged. A guard that blocks real work is
+# worse than the gap it closes -- this is the arm that proves it doesn't.
+AGENT_SUPERVISOR_STATE_DIR="$DOG_STATE" python3 - "$HERE/../../scripts/supervisor" <<PY
+import sys, os
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+ledger = Ledger(os.environ["AGENT_SUPERVISOR_STATE_DIR"])
+ledger.register_lane(lane="t:562", pane_id="%562", nonce="n562", harness="claude",
+                      repo="$REPO", server_id="seed:1700000000", session_id="s0",
+                      command="claude.exe")
+ledger.reconstruct_task(task_id="as562-fix", source_kind="issue",
+                         source_url="https://github.com/acme/agent-supervisor/issues/562",
+                         source_ref="562", summary="dispatched, real work", source_state="OPEN",
+                         status="created", evidence=["seed"], status_marker=None)
+ledger.assign(task_id="as562-fix", lane="t:562", pane_nonce="n562",
+              summary="dispatched, real work", worktree_path="$DOG_DEST")
+PY
+dispatched_out=$(AGENT_PYTHON_BIN=python3 git -C "$DOG_DEST" push origin lane/562-dispatch-origin 2>&1); dispatched_rc=$?
+want_exit "push from a worktree the ledger DOES have a dispatch record for passes" "$dispatched_rc" 0 "$dispatched_out"
+if git -C "$D/origin.git" show-ref --verify --quiet refs/heads/lane/562-dispatch-origin; then
+  ok "the now-permitted push landed on the remote"
+else
+  bad "the now-permitted push landed on the remote" "$dispatched_out"
+fi
+
+# --- mutation check: prove the refusal above is load-bearing, not vacuous --
+# Flip the installed hook itself (not worktree.sh's source -- the hook is
+# already materialised on disk per-worktree) to always allow, on a THIRD,
+# still-undispatched worktree, and confirm the same push that was refused
+# above now succeeds. If this passed even with the real guard already
+# broken, the earlier "refused" assertions would be proving nothing.
+mut_out=$(bash "$WT" new 562-mutation "$REPO" origin/main 2>/dev/null); mut_rc=$?
+want_exit "new (mutation case) exits 0" "$mut_rc" 0 "$mut_out"
+MUT_DEST="$mut_out"
+require_dest "new (mutation case)" "$MUT_DEST"
+MUT_GIT_DIR=$(git -C "$MUT_DEST" rev-parse --git-dir)
+case "$MUT_GIT_DIR" in
+  /*) : ;;
+  *) MUT_GIT_DIR="$MUT_DEST/$MUT_GIT_DIR" ;;
+esac
+MUT_HOOKS_DIR=$(git -C "$MUT_DEST" config --worktree core.hooksPath)
+printf '#!/bin/bash\nexit 0\n' > "$MUT_HOOKS_DIR/pre-push"
+chmod +x "$MUT_HOOKS_DIR/pre-push"
+echo "still undispatched" >> "$MUT_DEST/file.txt"
+git -C "$MUT_DEST" add file.txt
+git -C "$MUT_DEST" commit -q -m "562: mutation case, still undispatched"
+mut_push_out=$(git -C "$MUT_DEST" push origin lane/562-mutation 2>&1); mut_push_rc=$?
+if [ "$mut_push_rc" -eq 0 ]; then
+  ok "mutation confirmed: disabling the pre-push hook lets an undispatched worktree's push through (the negative-case assertions above would now be RED)"
+else
+  bad "mutation confirmed: disabling the pre-push hook lets an undispatched worktree's push through" "expected the disabled hook to let this through, still refused: $mut_push_out"
+fi
+
+unset AGENT_SUPERVISOR_STATE_DIR
+bash "$WT" done "$DOG_DEST" >/dev/null 2>&1
+bash "$WT" done "$MUT_DEST" >/dev/null 2>&1
 
 # --- done: refuses to discard uncommitted work -----------------------------
 echo "unsaved edit" >> "$DEST/file.txt"
