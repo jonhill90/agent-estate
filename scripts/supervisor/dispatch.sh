@@ -1052,6 +1052,63 @@ release_lane_claim() {
   "$LEDGER_PYTHON" "$LEDGER_CLI" release-lane-claim --lane "$CLAIM_LANE" --token "$CLAIM_TOKEN" >/dev/null 2>&1
 }
 
+# agent-supervisor#572: the GitHub issue claim (`claim.sh take`, step 2 below)
+# is the same shape of held resource the lane claim above is -- and until now
+# it had exactly the gap #209 closed for the lane claim: every INTENTIONAL
+# refusal this script enumerates (CLAIM_FAILED, a failed worktree, every
+# abort_send) already released it inline, but a `kill`, a timeout wrapper, a
+# closed terminal or a crashed shell hit none of those lines, same as #209
+# found for release_lane_claim. Measured against #571: the issue was left
+# assigned by a run that never reached one of the explicit release_claim call
+# sites, and every retry after that read "already claimed" -- indistinguishable
+# from someone else genuinely working it.
+#
+# CLAIMED and this function are declared here, BEFORE the trap below, rather
+# than at step 2 where the claim itself is taken -- a signal landing before
+# step 2 must find `release_claim` already callable and `$CLAIMED` already
+# empty (a no-op), not an undefined function. Step 2 (below) only ever
+# APPENDS to $CLAIMED; it does not redeclare it.
+#
+# release_claim itself stays UNGATED -- unlike release_lane_claim, it is not
+# only the trap's cleanup, it is also every abort_send's own explicit call,
+# and abort_send is reached AFTER step 4.5 too (the swallowed-Enter and
+# never-cleared-menu cases: the commit moved before the send on purpose,
+# #209 round 2). Those refusals deliberately release the ISSUE claim even
+# with CLAIM_COMMITTED set -- an unconfirmed lane stays HELD (nothing may
+# free the LANE once the brief might be live), but the ISSUE goes back to
+# the pool so another lane can pick it up while this one is investigated;
+# "the claim is released when the brief never starts" (test_dispatch.sh)
+# pins exactly this asymmetry. Gating release_claim itself on
+# CLAIM_COMMITTED would have silently turned that release into a no-op.
+#
+# release_claim_on_signal, below, is the ONLY thing gated: the trap must not
+# release a claim out from under a signal landing while the brief may
+# genuinely be live and unconfirmed, the same #102 shape release_lane_claim
+# already guards against -- but it has to be a SEPARATE function so the
+# explicit abort_send call sites above keep their existing, deliberate
+# behaviour unchanged.
+CLAIMED=()
+release_claim() {
+  local failed=() i
+  # Reverse of claim order; the order itself has no observable effect on
+  # GitHub state, but unwinding newest-first mirrors how the failure was hit.
+  for ((idx = ${#CLAIMED[@]} - 1; idx >= 0; idx--)); do
+    i="${CLAIMED[idx]}"
+    "$HERE/claim.sh" release "$i" "$REPO" >/dev/null 2>&1 || failed+=("$i")
+  done
+  if [ "${#failed[@]}" -gt 0 ]; then
+    # Loud and unambiguous: a claim nobody can see is worse than no claim,
+    # and a silently half-undone abort is exactly that -- issues in $failed
+    # are still assigned even though this dispatch is telling its caller it
+    # sent nothing.
+    echo "dispatch: could not release the claim on #${failed[*]} -- release ${failed[*]} by hand" >&2
+  fi
+}
+release_claim_on_signal() {
+  [ -z "${CLAIM_COMMITTED:-}" ] || return 0
+  release_claim
+}
+
 # The claim is a held resource, and every sibling script in this directory
 # that holds one guards it with a trap: `advance-live.sh:296`,
 # `would-revert.sh:138-140`, `watchdog.sh:428`, `inbox-poll.sh:200,215-217`.
@@ -1068,20 +1125,27 @@ release_lane_claim() {
 # SIGKILL CANNOT BE TRAPPED BY ANY SHELL, and neither can a host crash. This
 # trap does not cover them and does not claim to; step 0.5's reap is what
 # covers what the trap cannot, and the two together are the whole of #209's
-# cleanup. Neither alone is sufficient.
+# cleanup. Neither alone is sufficient. `claim.sh audit`/`reap` (#359) is the
+# same second half for the issue claim -- SIGKILL leaves it stale, not
+# released, exactly like the lane claim.
 #
 # And neither is allowed past step 4.5 (agent-dotfiles#209 round 2). A SIGKILL
 # AFTER the brief goes live leaves a claim the reap deliberately will not
 # clear, so that one case ends at the documented manual recovery rather than
 # at an automatic cleanup -- because the alternative is handing the next
 # dispatcher a lane with a worker in it, and that is the loss this whole
-# subsystem exists to prevent.
+# subsystem exists to prevent. release_claim_on_signal's own CLAIM_COMMITTED
+# gate, above, is the same protection for the issue claim -- the trap below
+# calls THAT, never the ungated release_claim directly, or every clean
+# successful dispatch's own EXIT would try to release the claim it just
+# delivered on.
 #
-# release_lane_claim is idempotent (a scoped DELETE that matches no row the
-# second time), so the TERM/INT handlers re-entering it via EXIT is a no-op.
-trap release_lane_claim EXIT
-trap 'release_lane_claim; exit 143' TERM   # 128 + 15
-trap 'release_lane_claim; exit 130' INT    # 128 + 2
+# release_lane_claim and release_claim_on_signal are both idempotent (a
+# scoped DELETE/no-CLAIMED-left that matches nothing the second time), so
+# the TERM/INT handlers re-entering them via EXIT is a no-op.
+trap 'release_claim_on_signal; release_lane_claim' EXIT
+trap 'release_claim_on_signal; release_lane_claim; exit 143' TERM   # 128 + 15
+trap 'release_claim_on_signal; release_lane_claim; exit 130' INT    # 128 + 2
 
 # agent-dotfiles#199: NOT `declare -A`. macOS ships /bin/bash 3.2, which has
 # no associative arrays -- `declare -A` is rejected there and prints
@@ -1497,40 +1561,35 @@ fi
 # by the in-flight work that opened the PR under review/fix), and that
 # correct refusal was what pushed dispatch to a ledger-invisible tmux
 # hand-off. Step 0.6 above is this dispatch's real ownership check, against
-# the PR, not the issue; `CLAIMED` stays empty so `release_claim` below is
-# already a correct no-op for this path with no special-casing needed there.
-CLAIMED=()
+# the PR, not the issue; `CLAIMED` stays empty so `release_claim` (declared
+# earlier, alongside the trap that now also covers it -- #572) is already a
+# correct no-op for this path with no special-casing needed there.
 CLAIM_FAILED=""
 if [ -n "$PR_SCOPED" ]; then
   echo "dispatch: PR-scoped dispatch (PR #$PR_SCOPED) -- issue(s) ${ISSUES[*]} left claimed by the original work, no GitHub assignee taken" >&2
 else
   for i in "${ISSUES[@]}"; do
+    # agent-supervisor#572, the same shape #209 round 2 found for CLAIM_LANE:
+    # `$i` is appended to CLAIMED BEFORE `claim.sh take` runs, not after it
+    # returns true. `claim.sh take` is a foreground child, so a TERM landing
+    # while dispatch.sh is blocked in `wait()` on it is only delivered once
+    # that child exits -- and bash runs the pending trap right then, before
+    # this loop body gets to resume at `CLAIMED+=("$i")`. Appending first
+    # means the trap's release_claim always finds the issue it just claimed,
+    # even when the signal lands in that exact gap; popped back off below if
+    # the claim never actually landed, so a failed/refused claim is never
+    # handed to release_claim as something to unwind.
+    CLAIMED+=("$i")
     if "$HERE/claim.sh" take "$i" "$REPO" "$WINDOW_NAME"; then
-      CLAIMED+=("$i")
+      :
     else
+      unset 'CLAIMED[${#CLAIMED[@]}-1]'
       echo "dispatch: #$i is not available -- pick different work" >&2
       CLAIM_FAILED=1
       break
     fi
   done
 fi
-
-release_claim() {
-  local failed=() i
-  # Reverse of claim order; the order itself has no observable effect on
-  # GitHub state, but unwinding newest-first mirrors how the failure was hit.
-  for ((idx = ${#CLAIMED[@]} - 1; idx >= 0; idx--)); do
-    i="${CLAIMED[idx]}"
-    "$HERE/claim.sh" release "$i" "$REPO" >/dev/null 2>&1 || failed+=("$i")
-  done
-  if [ "${#failed[@]}" -gt 0 ]; then
-    # Loud and unambiguous: a claim nobody can see is worse than no claim,
-    # and a silently half-undone abort is exactly that -- issues in $failed
-    # are still assigned even though this dispatch is telling its caller it
-    # sent nothing.
-    echo "dispatch: could not release the claim on #${failed[*]} -- release ${failed[*]} by hand" >&2
-  fi
-}
 
 if [ -n "$CLAIM_FAILED" ]; then
   release_claim

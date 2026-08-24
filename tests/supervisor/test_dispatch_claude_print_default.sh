@@ -96,7 +96,7 @@ run() {
     STUB_PANE_PATH="${STUB_PANE_PATH:-$REPO}" \
     CLAUDE_PRINT_BROKEN="${CLAUDE_PRINT_BROKEN:-}" \
     CLAUDE_PRINT_LOG="${CLAUDE_PRINT_LOG:-}" \
-    WORKTREE_ROOT="$D/roots" bash "$DISPATCH" "$@" 2>&1
+    WORKTREE_ROOT="$D/roots" bash "${DISPATCH_SCRIPT:-$DISPATCH}" "$@" 2>&1
 }
 lane_row() {  # lane_row <state-dir> <lane> -> transport, or '' if unregistered
   AGENT_SUPERVISOR_STATE_DIR="$1" python3 -c '
@@ -232,6 +232,121 @@ if [ "$AVAIL" = "True" ]; then
   ok "the candidate lane t:3 is still free after the refusal"
 else
   bad "the candidate lane t:3 is still free after the refusal" "lane_available: $AVAIL"
+fi
+
+# --- 6. agent-supervisor#576's fix-pass gap (closes #572 for real): the
+#        first attempt's trap block landed AFTER `claim.sh take`, not
+#        before it -- a signal in that window still stranded the GitHub
+#        issue claim, the same shape #572 exists to close, just shrunk to a
+#        few bash statements. Exercised directly here, not inferred from
+#        reading the diff, and this must NOT depend on `claude` happening
+#        to be on the test runner's PATH -- that exact environmental
+#        difference (present on the reviewer's machine, absent on CI) is
+#        what let the gap ship past the bundled suite the first time
+#        (`test_dispatch.sh`'s own #572 assertions only reach this script's
+#        internals when `command -v claude` succeeds).
+#
+# WHY A FULL MUTANT scripts/supervisor/ COPY, not a lone modified
+# dispatch-claude-print.sh: dispatch.sh resolves dispatch-claude-print.sh
+# from its OWN $HERE (dispatch.sh's own directory, from BASH_SOURCE), so
+# reaching it at all through this file's own convention -- "never
+# dispatch-claude-print.sh by hand" (see the header above) -- means a real,
+# self-consistent scripts/supervisor/ tree, the same technique
+# test_dispatch.sh's own #572 mutation checks use (make_mutant_scripts_dir).
+make_mutant_scripts_dir() {
+  local dir
+  dir=$(mktemp -d "$D/mutant.XXXXXX")
+  cp -R "$HERE/../../scripts/supervisor/." "$dir/"
+  rm -rf "$dir/__pycache__"
+  chmod +x "$dir"/*.sh
+  printf '%s' "$dir"
+}
+assignees() { awk -F'|' -v n="$1" '$1==n{print $2}' "$D/issues"; }
+
+# The kill is delivered the same way test_dispatch.sh's own #572 arm
+# delivers it: a wrapped claim.sh that runs the real thing, then signals its
+# own parent the instant `take` succeeds. Here that parent IS
+# dispatch-claude-print.sh (claim.sh is its direct child, no subshell) --
+# exactly the process whose trap ordering this test is about.
+ICP_KILL_DIR=$(make_mutant_scripts_dir)
+mv "$ICP_KILL_DIR/claim.sh" "$ICP_KILL_DIR/claim-real.sh"
+cat > "$ICP_KILL_DIR/claim.sh" <<'WRAP'
+#!/bin/bash
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+out=$("$HERE/claim-real.sh" "$@" 2>&1); rc=$?
+printf '%s\n' "$out"
+if [ "${1:-}" = take ] && [ "$rc" -eq 0 ]; then
+  kill "-${DISPATCH_TEST_KILL_SIGNAL:-TERM}" "$PPID" 2>/dev/null
+  sleep 1
+fi
+exit $rc
+WRAP
+chmod +x "$ICP_KILL_DIR/claim.sh" "$ICP_KILL_DIR/claim-real.sh"
+
+one_claude_lane
+echo '901|| a dispatcher signalled right after the ISSUE claim (claude-print)' > "$D/issues"
+LEDGER_STATE="$D/state-icp-term"
+icp_out=$(DISPATCH_SCRIPT="$ICP_KILL_DIR/dispatch.sh" \
+  run 901 icp-term "$D/brief.md" acme/agent-dotfiles "$REPO"); icp_rc=$?
+want_exit "a dispatch-claude-print.sh dispatcher SIGTERMed right after the ISSUE claim exits through its trap" \
+  "$icp_rc" 143 "$icp_out"
+if [ -z "$(assignees 901)" ]; then
+  ok "...and the TRAP released the GitHub claim immediately -- no assignee left behind"
+else
+  bad "...and the TRAP released the GitHub claim immediately" "still assigned: $(assignees 901)"
+fi
+
+# --- MUTATION: put the trap block back AFTER claim.sh take -- #576's own
+#     original, too-late ordering -- and confirm the claim strands again.
+#     Only worth trusting the assertion above if deleting the fix actually
+#     breaks it (same discipline test_dispatch.sh's own #572 mutation check
+#     uses).
+ICP_NOFIX_DIR=$(make_mutant_scripts_dir)
+cp "$ICP_KILL_DIR/claim.sh" "$ICP_KILL_DIR/claim-real.sh" "$ICP_NOFIX_DIR/"
+chmod +x "$ICP_NOFIX_DIR/claim.sh" "$ICP_NOFIX_DIR/claim-real.sh"
+patch_rc=0
+python3 - "$ICP_NOFIX_DIR/dispatch-claude-print.sh" <<'PY' || patch_rc=$?
+import sys
+path = sys.argv[1]
+text = open(path).read()
+
+trap_start = text.index('# agent-supervisor#572/#576: every INTENTIONAL failure below already')
+take_start = text.index('# --- 1. claim the issue on GitHub, same tool dispatch.sh uses')
+take_end_marker = 'fi\n\n'
+take_end = text.index(take_end_marker, take_start) + len(take_end_marker)
+
+assert trap_start < take_start, "trap block already after the claim call -- script shape changed"
+
+trap_block = text[trap_start:take_start]
+take_block = text[take_start:take_end]
+
+# Reassemble with the claim call FIRST and the trap block installed only
+# after it returns -- the exact too-late ordering #576's own diff shipped
+# and this whole test exists to catch.
+new_text = text[:trap_start] + take_block + trap_block + text[take_end:]
+assert new_text != text, "mutation produced no change -- markers matched the same span"
+open(path, "w").write(new_text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch-claude-print.sh with the trap moved back after claim.sh take" \
+    "could not patch $ICP_NOFIX_DIR/dispatch-claude-print.sh (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch-claude-print.sh with the trap moved back after claim.sh take"
+  bash -n "$ICP_NOFIX_DIR/dispatch-claude-print.sh" \
+    || bad "setup: mutant dispatch-claude-print.sh is still valid bash" "bash -n failed"
+  one_claude_lane
+  echo '902|| a dispatcher signalled right after the ISSUE claim, trap reverted to too-late' > "$D/issues"
+  NOFIX_STATE="$D/state-icp-nofix"
+  nofix_out=$(DISPATCH_SCRIPT="$ICP_NOFIX_DIR/dispatch.sh" \
+    LEDGER_STATE="$NOFIX_STATE" DISPATCH_TEST_KILL_SIGNAL=TERM \
+    run 902 icp-nofix "$D/brief.md" acme/agent-dotfiles "$REPO"); nofix_rc=$?
+  if [ -n "$(assignees 902)" ]; then
+    ok "mutation confirmed: with the trap reverted to its too-late position, a SIGTERMed dispatcher strands the GitHub claim (the assertion above would now be red)"
+  else
+    bad "mutation confirmed: with the trap reverted to its too-late position, a SIGTERMed dispatcher strands the GitHub claim" \
+      "expected #902 to still show an assignee, got none; rc=$nofix_rc out=$nofix_out"
+  fi
 fi
 
 echo
