@@ -54,53 +54,6 @@ want_exit()     { if [ "$2" = "$3" ]; then ok "$1"; else bad "$1" "expected exit
 want_contains() { if grep -qF -- "$2" <<<"$3"; then ok "$1"; else bad "$1" "want '$2' in: $3"; fi }
 want_missing()  { if grep -qF -- "$2" <<<"$3"; then bad "$1" "unwanted '$2' in: $3"; else ok "$1"; fi }
 
-# --- TEMPORARY instrumentation for agent-supervisor#548 --------------------
-# NOT A FIX. This function changes nothing about what any assertion checks
-# or how `pass`/`fail` are counted -- it only writes evidence to disk,
-# unconditionally, before the #236 mutation-check's own real assertion runs
-# (see that block below, the only call site). #548's own lead is that
-# `expected_menu_commit` is derived with `grep -m1` (first matching '-l'
-# send-keys line), which could mispredict the stub's actual `.menu-pending`
-# value if a second matching line lands first on a loaded shared runner --
-# but that has never been confirmed against a real failing run, because no
-# failing run has ever left behind more than a red square. This captures the
-# FULL ordered set of matching lines (not just the first) and the full
-# per-run log, on both pass and fail, so the next occurrence -- or the next
-# 50 passing runs -- settles the question with evidence instead of another
-# guess.
-#
-# Remove this function and its one call site once agent-supervisor#548 is
-# closed with a captured failure explaining the mechanism (or ruled out by
-# enough clean captures that the -m1 lead is dropped). Instrumentation that
-# outlives its own question is noise, not evidence.
-CAPTURE_236_DIR="${RUNNER_TEMP:-${TMPDIR:-/tmp}}/agent-supervisor-236-capture"
-capture_236_evidence() {  # capture_236_evidence <log> <selected> <expected> <verdict>
-  local log="$1" selected="$2" expected="$3" verdict="$4"
-  mkdir -p "$CAPTURE_236_DIR" 2>/dev/null || return 0
-  local stamp
-  stamp="$(date +%s 2>/dev/null || echo 0)"
-  local f="$CAPTURE_236_DIR/236-capture-${verdict}-$$-${stamp}.txt"
-  {
-    echo "agent-supervisor#548 -- temporary capture, see test_dispatch.sh's own comment on capture_236_evidence"
-    echo "verdict: $verdict"
-    echo "STUB_MENU_DEFAULT: ${STUB_MENU_DEFAULT:-<unset>}"
-    echo "selected_236 (actual value read from \$D/panes/3.selected): $selected"
-    echo "expected_menu_commit (current -m1-derived prediction, unchanged logic): $expected"
-    echo
-    echo "--- every '-l' send-keys line in pre236_log, IN ORDER -- this is what -m1 discards after the first ---"
-    if grep -n '^send-keys .*-l ' <<<"$log"; then :; else echo "(no matching line found)"; fi
-    echo
-    echo "--- digits extracted per matching line, in order, so a second/later line's own last digit is visible ---"
-    grep -n '^send-keys .*-l ' <<<"$log" | while IFS= read -r matched_line; do
-      digits=$(grep -o '[0-9]' <<<"$matched_line" | tr '\n' ',')
-      printf '%s  ->  digits-in-order: %s\n' "$matched_line" "${digits:-<none>}"
-    done
-    echo
-    echo "--- full pre236_log (every tmux call this dispatch made, in order) ---"
-    printf '%s\n' "$log"
-  } > "$f" 2>/dev/null
-}
-
 echo "dispatch.sh"
 
 D=$(mktemp -d); mkdir -p "$D/bin" "$D/roots"
@@ -4428,19 +4381,20 @@ else
   # STUB_MENU_DEFAULT. Derive the expectation from what was actually sent
   # (the same hazard either way: an unvalidated menu commits blindly) rather
   # than hard-coding a value this sandbox's own temp-dir naming can change.
+  #
+  # agent-supervisor#548: derive the digits from the KEYS only (everything
+  # after `-l `), not the whole send-keys line. The whole line also carries
+  # `-t t:@103`, the tmux pane target -- digits tmux consumes as an option,
+  # never keystrokes the stub sees. Scanning the whole line let the pane
+  # id's own last digit stand in for the pending menu option, so the
+  # assertion only passed when the pane id happened to end in
+  # STUB_MENU_DEFAULT and flaked on every other pane id (confirmed via a
+  # captured failing run: pane `@103`, STUB_MENU_DEFAULT=2, predicted 3,
+  # actually committed 2).
   literal_send_line=$(grep -m1 '^send-keys .*-l ' <<<"$pre236_log")
-  expected_menu_commit=$(grep -o '[0-9]' <<<"$literal_send_line" | tail -1)
+  literal_keys=${literal_send_line#*-l }
+  expected_menu_commit=$(grep -o '[0-9]' <<<"$literal_keys" | tail -1)
   expected_menu_commit="${expected_menu_commit:-$STUB_MENU_DEFAULT}"
-  # agent-supervisor#548 -- TEMPORARY, see capture_236_evidence's own
-  # comment above. Computed independently, read-only, purely for the
-  # capture's filename -- does not feed back into `expected_menu_commit`,
-  # `selected_236`, or the real assertion immediately below, which is
-  # byte-for-byte unchanged.
-  if grep -qF -- "$expected_menu_commit" <<<"$selected_236"; then
-    capture_236_evidence "$pre236_log" "$selected_236" "$expected_menu_commit" "pass"
-  else
-    capture_236_evidence "$pre236_log" "$selected_236" "$expected_menu_commit" "fail"
-  fi
   want_contains "pre-#236 shape: that blind Enter commits the menu's pending option -- the nested-claude spawn the live incident found" \
     "$expected_menu_commit" "$selected_236"
 
