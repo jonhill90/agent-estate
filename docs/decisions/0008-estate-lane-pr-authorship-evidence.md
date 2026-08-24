@@ -106,7 +106,21 @@ verbatim.** It did not survive intact:
   no issue, no owner, and no forcing function is not a hypothetical risk
   in this repo — it is the default outcome, measured.
 
-## Decision
+## Decision — SUPERSEDED, kept for the record rather than rewritten quietly
+
+**This section describes an outcome that did not happen, and is left
+intact below (not deleted or rewritten) so the record shows what was
+decided and why it changed, rather than looking as if this was always
+the plan.** `#539` never landed — `gh pr view 539 --json
+state,closed,mergedAt` → `{"closed":true,"mergedAt":null,"state":
+"CLOSED"}`, confirmed directly, not assumed. `agent-supervisor#557`/
+`docs/decisions/0010-estate-authorship-three-failures.md` reverses this
+decision: the self-run cross-check is retired, not merged in any form,
+after `estate:2` demonstrated a further attack (`#552`) this document's
+own conditions did not anticipate. **`0010` is the document that governs
+now for whether `#539`'s design lands — it does not.** What follows below
+is the original reasoning, preserved as the record of what was believed
+and why, not a live decision.
 
 **`#539`, as it now stands post-`127930b7` (the real branch/head-SHA
 cross-check, not the earlier numeric-only version), may land as the
@@ -215,10 +229,14 @@ trusts. State this now rather than let "we'll decide later" become the
 reason the weaker mechanism outlives its reason for existing, the exact
 failure this whole decision is trying to avoid.
 
-## Sequencing
+## Sequencing — the sections below are also part of the original,
+## now-superseded plan; `0010` supersedes item 1 specifically ("#539
+## continues review... merges"), which did not happen
 
-1. `#539` continues review through the normal, independent path (not by
-   me — I am sequencing this, not reviewing or merging it).
+1. ~~`#539` continues review through the normal, independent path (not by
+   me — I am sequencing this, not reviewing or merging it).~~ Did not
+   happen — `#539` was closed by its own author after `0010`'s finding,
+   not merged.
 2. `agent-supervisor#546` (the independent-poller issue) is filed now,
    assigned no lane yet — pick one once the board's current review load
    clears, not before, matching the standing PR-drain freeze.
@@ -232,6 +250,28 @@ failure this whole decision is trying to avoid.
    devils-advocate pass's own "smallest change that would make [a
    deferred design] survive" named — ship the stronger mechanism before
    the event that most needs it, not after.
+
+**Superseded, per the note at the top of this document**: items 1, 3, and
+4 above describe the original, now-reversed plan (`#539` landing, `#546`
+as a standalone poller). `0010` is what actually happened; `#546` itself
+was folded into the redesign rather than pursued separately (`0010`'s own
+text). Left unedited here as the historical record of the original
+sequence, not as current guidance.
+
+## The residual — added because this document, whatever its own status,
+## still needs to say where the dependent work landed
+
+Found by review (`estate:5`), not self-caught: even a superseded decision
+record needs to name what happened to the work it once conditioned.
+**`agent-supervisor#555`** is the live, active path — a per-PR,
+human-authorized exception — for the PRs stuck behind the now-retired
+mechanism. As measured directly against the current board (not
+estimated): **seven** — `#531`, `#533`, `#534`, `#535`, `#536`, `#537`,
+`#557`. Three others once thought to be in the same group (`#541`,
+`#547` — this document itself — `#553`) are blocked on their own review
+content, not authorship, and aren't part of this count. Check `#555`
+directly for the current number; this section will go stale the moment
+it changes.
 
 ## What this does not decide
 
