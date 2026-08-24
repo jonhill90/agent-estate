@@ -21,6 +21,24 @@ name: Fixpass evidence
 # -- without issue_comment, a PR that added evidence by commenting would
 # stay red until an unrelated push re-ran the check.
 #
+# agent-supervisor#597: for an issue_comment event, GitHub associates the
+# run's own status with the DEFAULT BRANCH TIP at trigger time (github.sha
+# and the run's head_sha both resolve there), never the PR's actual head --
+# the same #468 finding ui-evidence.yml already corrected for its own gate.
+# Relying on the job's implicit pass/fail therefore posted this gate's
+# result on a commit nobody was merging, leaving fixpass-gate red for nine
+# hours across three evidence comments on #576 even though the evidence had
+# already answered the rejection 44 seconds after it was measured -- proven
+# by re-running the same failed job by hand and getting SUCCESS with no
+# change to the branch. The issue_comment step below does not rely on that
+# implicit status: it reuses ui-evidence-report.sh (already generic over
+# which gate it drives, via UI_EVIDENCE_GATE_BIN) through the
+# fixpass-evidence-gate.sh adapter, which resolves the PR's head SHA itself
+# and explicitly publishes a check-run against it via the Checks API --
+# that is the only thing ci_gate.py reads (commits/{sha}/check-runs,
+# SHA-scoped), so it is what actually makes a comment-only evidence post
+# turn this PR's gate green.
+#
 # agent-supervisor#565: this job used to be named `gate`, same as
 # ui-evidence.yml's job -- both check-runs then displayed as the bare name
 # `gate` in `gh pr checks`'s flat output, indistinguishable without opening
@@ -38,6 +56,9 @@ on:
 permissions:
   contents: read
   pull-requests: read
+  # Needed only by the issue_comment step, to publish an explicit
+  # check-run against the PR's real head SHA (see #597 above).
+  checks: write
 
 jobs:
   fixpass-gate:
@@ -47,14 +68,27 @@ jobs:
     # anyway -- see CLAUDE.md).
     if: github.event_name == 'pull_request' || github.event.issue.pull_request != null
     runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
-      - name: Check fixpass evidence
-        env:
-          GH_TOKEN: ${{ github.token }}
+      # pull_request: github.sha already is the PR's head at trigger time,
+      # so the job's own implicit status-to-commit association is correct
+      # here -- no need to route around it.
+      - name: Check fixpass evidence (pull_request)
+        if: github.event_name == 'pull_request'
         run: |
-          PR="${{ github.event.pull_request.number || github.event.issue.number }}"
-          python3 scripts/supervisor/fixpass_evidence_gate.py --repo "${{ github.repository }}" --number "$PR"
+          python3 scripts/supervisor/fixpass_evidence_gate.py --repo "${{ github.repository }}" --number "${{ github.event.pull_request.number }}"
+      # issue_comment: see the #597 correction above -- publish the result
+      # explicitly against the PR's real head SHA instead of trusting the
+      # run's own (wrong) head_sha.
+      - name: Check fixpass evidence (issue_comment, explicit head SHA)
+        if: github.event_name == 'issue_comment'
+        env:
+          UI_EVIDENCE_GATE_BIN: scripts/supervisor/fixpass-evidence-gate.sh
+          UI_EVIDENCE_CHECK_NAME: fixpass-gate
+        run: |
+          bash scripts/supervisor/ui-evidence-report.sh "${{ github.event.issue.number }}"
