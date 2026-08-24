@@ -101,3 +101,24 @@ jobs:
           # RuntimeError'd before running a single suite. Comma has no such
           # escaping problem and no suite name contains one.
           SHELL_SUITE_ONLY: ${{ join(matrix.shard.suites, ',') }}
+      # agent-supervisor#548 -- TEMPORARY. test_dispatch.sh's own
+      # capture_236_evidence writes to $RUNNER_TEMP/agent-supervisor-236-
+      # capture/ on every #236 mutation-check run, pass or fail (see that
+      # function's own comment in tests/supervisor/test_dispatch.sh for
+      # what it captures and why). This step is the other half: without it
+      # the evidence exists only inside this ephemeral runner and is gone
+      # the moment the job ends. `if: always()` so a shard that FAILS still
+      # uploads -- the failing case is the one this instrumentation exists
+      # to catch. `if-no-files-found: ignore` because only whichever shard
+      # happens to draw test_dispatch.sh ever writes anything here; the
+      # other four shards finding nothing is expected, not an error.
+      # Remove this step alongside capture_236_evidence once #548 is closed
+      # with a captured failure (or enough clean captures to drop the lead).
+      - name: Upload #548 capture (temporary)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: agent-supervisor-236-capture-shard-${{ matrix.shard.shard }}
+          path: ${{ runner.temp }}/agent-supervisor-236-capture/
+          if-no-files-found: ignore
+          retention-days: 14
