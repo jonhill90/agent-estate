@@ -564,6 +564,36 @@ would type a second, competing task at a lane that has just been given its
 brief. `record_dispatch` in `cli.py` documents that and the rest of the
 routing.
 
+### Retiring a lane administratively, without killing its window (#564)
+
+`lane-done.sh` frees a lane only once its worker signals completion. There was
+no tool for the other case — an operator who decides mid-task that a lane
+should come out of rotation right now — until retiring three dispatched lanes
+by hand (`tmux kill-window`) destroyed the underlying tmux windows, 2026-08-23.
+Two of those windows (`build-2`, `build-3`) predated the dispatch that had
+claimed and renamed them: `dispatch.sh` respawns whatever idle pane the ledger
+says is free (lane identity is `<session>:<index>`, never the window's name —
+CLAUDE.md invariant 9), so a window a human had put unrelated, non-lane work
+into is exactly as claimable as a genuine pool window. The estate went from
+five windows to two, silently — nothing announced it, and only luck (every
+lane idle, every branch already pushed) kept the destruction from taking live
+work with it.
+
+```bash
+lane-retire.sh <window> [session]
+```
+
+`lane-retire.sh` unregisters the lane from the ledger (the same
+`record-completion` call `lane-done.sh` makes) and renames the window back to
+`free-N` — the exact rename-back `lane-done.sh` performs on ordinary
+completion. It **never** runs `kill-window` or any other verb that can
+destroy a pane. Before doing either, it refuses outright when the target's
+worktree has uncommitted changes, or commits that exist nowhere but that
+worktree (no upstream, and no same-named branch already on `origin`) — the
+same class of check `worktree.sh`'s `safe_remove`/`gc` already apply before
+discarding a worktree, for the identical reason: reclaiming a lane's window is
+never license to discard whatever work is sitting in it.
+
 ## Scheduled session recycling
 
 `recycle.py` decides when a long-lived supervisor session should checkpoint
