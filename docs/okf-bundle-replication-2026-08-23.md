@@ -18,6 +18,10 @@ content was rewritten.
 The brief stated: 18 md files, 246 KB, 0 stale over 14 days. Measured
 directly on `origin/main` at `35988b5`:
 
+**Read every corpus figure below as of that commit.** `main` has moved since:
+the tracked `.md` count is 27 and the `docs/` corpus 18 files at this branch's
+tip. The measurement is dated on purpose and is not restated as current.
+
 ```
 $ git ls-files '*.md' | wc -l
 18
@@ -167,8 +171,10 @@ gives three numbered clauses; the brief splits the first into two
    is clause 2 of the contract's own wording: browsable, not only
    searchable.
 4. **Bounded, with detection.** The index declares its own ceiling in a
-   comment on line 5: **60 lines / 6 KB**. Today it sits at **40/60 lines
-   (66.7%) and 2,745/6,144 bytes (44.7%)**. The bound is meaningful rather
+   comment on line 5: **60 lines / 6 KB**. Today it sits at **50/60 lines
+   (83.3%) and 4,423/6,144 bytes (72.0%)** -- larger than the
+   40/2,745 this section first recorded, because the rebase onto `main` had
+   to index eight documents that landed after the measurement commit. The bound is meaningful rather
    than decorative because the index grows one line per doc: 60 lines caps
    this corpus at roughly 45 documents before the ceiling forces a
    decision about grouping.
