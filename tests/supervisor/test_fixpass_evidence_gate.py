@@ -363,6 +363,44 @@ class FixpassEvidenceGateTest(unittest.TestCase):
         result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=547)
         self.assertEqual("refuse", result["decision"])
 
+    def test_a_second_distinct_finding_from_the_same_lane_at_the_same_sha_still_refuses(self):
+        # agent-supervisor#569's own reviewer finding, confirmed as a real
+        # regression the (Review-Lane, Reviewed-SHA)-only dedupe introduces:
+        # two DIFFERENT findings from the SAME lane at the IDENTICAL
+        # Reviewed-SHA are not a repost of each other. Evidence posted
+        # between them answers only the first finding; the second is a
+        # genuinely new, still-unaddressed rejection that happens to share
+        # the same key. Collapsing by (lane, SHA) alone -- with no check
+        # that the two rejections' TEXT actually matches -- let the
+        # evidence answering bug A satisfy the gate for bug B too.
+        runner = FakeRunner(
+            reviews=[],
+            comments=[
+                {
+                    "body": (
+                        "Verdict: REQUEST CHANGES\nReview-Lane: estate:4\n"
+                        "Reviewed-SHA: a75de30a75de30a75de30a75de30a75de30a75d\n"
+                        "bug A is present"
+                    ),
+                    "createdAt": "2026-08-23T01:00:00Z",
+                },
+                {"body": GOOD_BLOCK, "createdAt": "2026-08-23T02:00:00Z"},
+                {
+                    # Same lane, same SHA -- but a substantively different
+                    # finding, not a repost of the first. Nothing has
+                    # answered this one yet.
+                    "body": (
+                        "Verdict: REQUEST CHANGES\nReview-Lane: estate:4\n"
+                        "Reviewed-SHA: a75de30a75de30a75de30a75de30a75de30a75d\n"
+                        "actually bug B also present, distinct new finding"
+                    ),
+                    "createdAt": "2026-08-23T03:00:00Z",
+                },
+            ],
+        )
+        result = FixpassEvidenceGate(runner).evaluate(repo="o/r", number=547)
+        self.assertEqual("refuse", result["decision"])
+
     def test_missing_timestamps_still_allow_evidence_as_before(self):
         # Backward compatibility: when timestamps aren't available (older
         # `gh` payloads, or a rejection/evidence pair with no recorded

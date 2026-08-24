@@ -168,6 +168,39 @@ def _rejection_key(text):
     return (lane, sha)
 
 
+_TRAILER_LINE_RE = re.compile(r"(?i)^\s*(?:verdict|review-lane|reviewed-sha)\s*:")
+
+
+def _rejection_content_signature(text):
+    """Normalized rejection content, protocol trailers stripped --
+    agent-supervisor#569's reviewer finding on top of #566's own fix: a
+    `(Review-Lane, Reviewed-SHA)` match alone is not proof of a REPOST.
+    Two rejections from the same lane at the same SHA can be substantively
+    DIFFERENT findings -- a second look that turns up a distinct, still-
+    unaddressed bug without a new commit landing in between. Only a
+    rejection whose CONTENT also matches is the byte-identical repost
+    `_rejection_key` was built to catch (#547's re-registration shape);
+    two rejections sharing a key with different content must never
+    collapse into one round, or evidence answering the first silently
+    satisfies the gate for the second too.
+
+    `Verdict:`/`Review-Lane:`/`Reviewed-SHA:` lines are `post-verdict.sh`'s
+    own protocol scaffolding, present and identical on every rejection
+    regardless of what was actually found -- they're stripped before
+    comparing, or every rejection at the same key would trivially "match"
+    on the trailers alone even when the finding underneath differs.
+    Whitespace is collapsed so a repost that differs only by incidental
+    formatting (a trailing space, a re-wrapped line) still counts as the
+    same content."""
+    lines = []
+    for line in (text or "").splitlines():
+        stripped = line.strip()
+        if not stripped or _TRAILER_LINE_RE.match(stripped):
+            continue
+        lines.append(" ".join(stripped.split()))
+    return "\n".join(lines)
+
+
 def _rejection_effective_timestamps(documents):
     """The timestamp each rejection document counts for when computing the
     operative cutoff -- agent-supervisor#566: live on `agent-supervisor#547`,
@@ -180,31 +213,41 @@ def _rejection_effective_timestamps(documents):
     the ORIGINAL round.
 
     When a rejection carries a parseable `(Review-Lane, Reviewed-SHA)`
-    pair (`_rejection_key`), its EFFECTIVE timestamp is the EARLIEST
-    timestamp seen among every rejection sharing that exact pair -- so a
-    repost can never push the round's cutoff past its own original. A
-    rejection with no key (no `Reviewed-SHA:` trailer) cannot be deduped
-    this way and keeps its own raw timestamp, the same behaviour this gate
-    had before repost-dedup existed. A genuinely NEW rejection -- same
-    lane, but a DIFFERENT Reviewed-SHA because a fresh look happened at a
-    later head -- is never merged into an earlier round by this: the pair
-    only matches when both halves are identical."""
-    earliest_by_key = {}
+    pair (`_rejection_key`) AND its content matches another rejection
+    sharing that exact pair (`_rejection_content_signature`), its
+    EFFECTIVE timestamp is the EARLIEST timestamp seen among every
+    rejection sharing both the pair and the content -- so a repost can
+    never push the round's cutoff past its own original. A rejection with
+    no key (no `Reviewed-SHA:` trailer) cannot be deduped this way and
+    keeps its own raw timestamp, the same behaviour this gate had before
+    repost-dedup existed. A genuinely NEW rejection -- same lane, but a
+    DIFFERENT Reviewed-SHA because a fresh look happened at a later head,
+    OR the identical pair with DIFFERENT content because a second,
+    distinct finding turned up without a new commit landing in between
+    (agent-supervisor#569) -- is never merged into an earlier round by
+    this: the (key, content) pair only matches when every part is
+    identical."""
+    earliest_by_group = {}
     for doc in documents:
         if not doc["is_rejection"] or doc["timestamp"] is None:
             continue
         key = doc.get("rejection_key")
         if key is None:
             continue
-        if key not in earliest_by_key or doc["timestamp"] < earliest_by_key[key]:
-            earliest_by_key[key] = doc["timestamp"]
+        group = (key, doc.get("rejection_signature"))
+        if group not in earliest_by_group or doc["timestamp"] < earliest_by_group[group]:
+            earliest_by_group[group] = doc["timestamp"]
 
     effective = []
     for doc in documents:
         if not doc["is_rejection"] or doc["timestamp"] is None:
             continue
         key = doc.get("rejection_key")
-        effective.append(earliest_by_key[key] if key is not None else doc["timestamp"])
+        if key is None:
+            effective.append(doc["timestamp"])
+        else:
+            group = (key, doc.get("rejection_signature"))
+            effective.append(earliest_by_group[group])
     return effective
 
 
@@ -239,9 +282,12 @@ def _gather_documents(*, body, body_timestamp, reviews, comments):
                 "text": text,
                 "timestamp": comment.get("createdAt"),
                 "is_rejection": is_rejection,
-                # agent-supervisor#566: only meaningful when this document
-                # is itself a rejection -- see `_rejection_key`.
+                # agent-supervisor#566/#569: both only meaningful when this
+                # document is itself a rejection -- see `_rejection_key`
+                # and `_rejection_content_signature`. A rejection is only
+                # deduped against another sharing BOTH.
                 "rejection_key": _rejection_key(text) if is_rejection else None,
+                "rejection_signature": _rejection_content_signature(text) if is_rejection else None,
             }
         )
     return documents
