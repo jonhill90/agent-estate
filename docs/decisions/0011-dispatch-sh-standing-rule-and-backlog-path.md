@@ -57,6 +57,41 @@ plus delivered directly to every live `estate:N` pane the same way
 `director-freeze-agent-supervisor.md` was — confirmed landed, not just
 filed.
 
+## This document broke its own rule, said plainly rather than left for someone else to find
+
+**This PR — `#561` itself, the document recording "always dispatch through
+`dispatch.sh`" — was not dispatched through `dispatch.sh`.** Branch
+`docs/estate-dispatch-sh-standing-rule`, no `Author-Lane:` trailer,
+authored the same way every director decision doc has been all session:
+a worktree created directly, committed directly, a PR opened directly.
+Confirmed by `gh pr view 561 --json body`, not assumed clean because I
+wrote it. **This is the strongest evidence for the rule, not a
+contradiction of it** — the habit is ingrained enough to have captured the
+document meant to end it.
+
+**Why, honestly, not excused:** the rule as first stated addressed *lane*
+dispatch — `dispatch.sh` finds a free `estate:N` pane, claims an issue,
+builds a worktree, hands over a brief. **The director has no
+self-dispatch mode in that tool, and no `lanes` row to dispatch as
+(`agent-supervisor#532`).** Writing this document was never a case of
+"the director chose the pane-write habit over `dispatch.sh`" — there was
+no `dispatch.sh` invocation shape that fit "the director does its own
+analysis and writes its own finding." That is a real, distinct gap from
+the one this document's Decision 1 closes, not the same gap wearing the
+director's name. Conflating them would let this document claim a fix it
+doesn't provide.
+
+**The actual fix, available now, without waiting on `#532`:** the
+director stops authoring decision-doc PRs directly. Where a decision
+needs to be written up as a document (not just a comment recording an
+already-made call), **the director files the issue and dispatches the
+writing itself through `dispatch.sh` to a free lane**, the same as any
+other task — the lane gets a real `Author-Lane:` trailer, a real
+worktree, a real ledger row, because it went through the mechanism that
+is now proven to work. The director's role becomes deciding and briefing,
+not typing the commit. This document does not retroactively fix itself
+under this rule; the next one should not need this section.
+
 ## Decision 2 — the fifteen do not retroactively unblock; the real path, established not assumed
 
 **`#560` does not retroactively resolve any of the fifteen.** Its own
@@ -104,6 +139,44 @@ each of the fifteen:
 **Per-PR judgment, not a blanket rule** — whoever executes this should
 assess each of the fifteen individually and say, for each, which path
 applies and why, rather than defaulting all fifteen to either option.
+
+## The enforcement point — a statement alone is not enough, measured directly
+
+**Two more PRs joined the backlog after `#560` proved the path**:
+`#557` and `#559` (`estate:3`'s `#550` work — one of the two named freeze
+exceptions, and it still ended up pane-write dispatched), both APPROVE at
+head, both refusing identically. The rule as a sentence in a document does
+not stop new backlog from forming; it needs a real enforcement point, per
+repo, per cause, not a restated intention:
+
+1. **For lane pane-writes** (what closed `#557`/`#559`'s gap, and every
+   `estate:N` PR before them): the correct enforcement point is the
+   send mechanism itself refusing to deliver a **new-work** brief (per
+   this document's own new-work/operational-message distinction) unless
+   it already names a `dispatch.sh`-created issue and worktree. **Named,
+   not built here** — the director does not have full visibility into
+   every path that delivers briefs to lanes in this estate (stated
+   plainly in `agent-supervisor#553`/`0009` already; still true). What
+   the director *can* enforce unilaterally, starting now: **every future
+   brief the director itself sends that starts new work is preceded by a
+   real `dispatch.sh` call** — the director becomes the enforcement point
+   for its own dispatches, a behavioral commitment, checkable after the
+   fact by whether the resulting PR carries a real `Author-Lane:` trailer.
+2. **For director self-authorship** (what `#561` itself is an instance
+   of): the fix stated above — the director stops opening decision-doc
+   PRs directly and dispatches the writing through `dispatch.sh` instead.
+   Same enforcement shape: checkable after the fact, per PR, by whether
+   an `Author-Lane:` trailer exists.
+3. **Accepted cost, stated rather than hidden**: neither of the above is
+   a tooling-level refusal yet — both are the director's own discipline,
+   which this document already showed, of itself, is not automatically
+   reliable (`#561` broke the rule it was busy writing). A real tooling
+   refusal — a CI check at PR-open time, not just `merge-pr.sh`'s
+   merge-time catch — is filed as `agent-supervisor#562`, scoped, not
+   assigned yet, not implemented here. Until it lands, **the honest state
+   is: this is enforced by the director remembering, which has already
+   failed once tonight, and the backup is `#555`'s human-authorized
+   exception catching what the discipline misses — not a closed loop.**
 
 ## What this does not decide
 
