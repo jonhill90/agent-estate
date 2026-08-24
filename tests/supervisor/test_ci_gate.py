@@ -7,7 +7,7 @@ from pathlib import Path
 SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "scripts" / "supervisor"
 sys.path.insert(0, str(SUPERVISOR_DIR))
 
-from ci_gate import CiGate  # noqa: E402
+from ci_gate import CiGate, _gate_superseded_by_ui_evidence  # noqa: E402
 
 
 class FakeRunner:
@@ -234,6 +234,38 @@ class CiGateTest(unittest.TestCase):
         runner = FakeRunner(head_sha="sha", check_runs=runs)
         result = CiGate(runner).evaluate(repo="o/r", number=1)
         self.assertEqual("refuse", result["decision"])
+
+    def test_gate_superseded_by_ui_evidence_requires_ui_evidence_itself_green(self):
+        # agent-supervisor#599 (M2): a failing superseding check clears
+        # nothing, per the docstring's own words. Asserted directly against
+        # `_gate_superseded_by_ui_evidence` rather than through
+        # `evaluate()` -- the equivalent evaluate()-level fixture
+        # (test_gate_failure_with_also_failing_ui_evidence_still_refuses)
+        # still refuses even if this narrowing were deleted, because the
+        # FAILURE `ui-evidence` run itself stays in the failing-checks list
+        # regardless of whether `gate` is superseded. Only a direct call
+        # isolates the "ui-evidence must itself be green" condition.
+        runs = [
+            run_at("sha", "gate", conclusion="failure",
+                   started_at="2026-08-23T07:33:17Z", completed_at="2026-08-23T07:33:24Z"),
+            run_at("sha", "ui-evidence", conclusion="failure",
+                   started_at="2026-08-23T07:46:04Z", completed_at="2026-08-23T07:46:04Z"),
+        ]
+        self.assertFalse(_gate_superseded_by_ui_evidence(runs))
+
+    def test_gate_superseded_by_ui_evidence_scoped_to_gate_by_name(self):
+        # agent-supervisor#599 (M4): the docstring names this narrowly the
+        # `gate`/`ui-evidence` relationship from #518, not a general "an
+        # unrelated green check clears an unrelated red one" rule. A
+        # FAILURE run under any other name (e.g. `tests`) must not be
+        # supersedable by a later green `ui-evidence` run.
+        runs = [
+            run_at("sha", "tests", conclusion="failure",
+                   started_at="2026-08-23T07:33:17Z", completed_at="2026-08-23T07:33:24Z"),
+            run_at("sha", "ui-evidence", conclusion="success",
+                   started_at="2026-08-23T07:46:04Z", completed_at="2026-08-23T07:46:04Z"),
+        ]
+        self.assertFalse(_gate_superseded_by_ui_evidence(runs))
 
     def test_evaluate_fetches_head_itself_every_call(self):
         # evaluate() takes only repo/number -- there is no head-sha
