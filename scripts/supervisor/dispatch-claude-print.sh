@@ -120,7 +120,40 @@ if ! "$HERE/claim.sh" take "$ISSUE" "$REPO" "$LANE"; then
   exit 1
 fi
 
+# agent-supervisor#572: every INTENTIONAL failure below already releases this
+# claim inline (each `abort` call, and the explicit `release_claim` calls it
+# wraps), but a `kill`, a timeout wrapper, or a closed terminal hits none of
+# those lines -- the same gap #209 closed for dispatch.sh's lane claim, and
+# dispatch.sh's own trap now closes for its issue claim too. This script had
+# no trap at all.
+#
+# release_claim (below, unchanged) is what every DETERMINED failure calls --
+# by the time any of those lines run, `assign`'s subprocess has already
+# exited (it is a blocking foreground call), so there is nothing left running
+# and releasing is always correct there, exactly as before this fix.
+#
+# release_claim_on_signal is what the trap calls instead, gated on
+# CLAIM_COMMITTED. That gate matters only around step 6: while `assign`
+# blocks on a real `claude -p` turn, a signal reaching this shell does not
+# prove the turn stopped too (a `kill` targeting only this pid, as opposed to
+# its process group, orphans the child rather than killing it) -- so this
+# script cannot tell "nothing happened" from "work may still be running" the
+# way it can once a call has actually returned. CLAIM_COMMITTED is set right
+# before that call, the same "point of no return" line dispatch.sh draws at
+# its own step 4.5: past it, an ambiguous signal leaves the claim held rather
+# than risk releasing one that is genuinely still being worked. SIGKILL
+# cannot be trapped by any shell either way; that gap is `claim.sh
+# audit`/`reap` (#359) to cover, same as dispatch.sh's own header says of its
+# lane claim.
+CLAIM_COMMITTED=""
 release_claim() { "$HERE/claim.sh" release "$ISSUE" "$REPO" >/dev/null 2>&1; }
+release_claim_on_signal() {
+  [ -z "${CLAIM_COMMITTED:-}" ] || return 0
+  release_claim
+}
+trap release_claim_on_signal EXIT
+trap 'release_claim_on_signal; exit 143' TERM   # 128 + 15
+trap 'release_claim_on_signal; exit 130' INT    # 128 + 2
 
 # --- 2. give the lane its own worktree, same tool dispatch.sh uses --------
 WORKTREE_ERR=$(mktemp)
@@ -217,6 +250,12 @@ $RECONSTRUCT_OUT"
 fi
 
 # --- 6. deliver -- a REAL, blocking claude -p call --------------------------
+# CLAIM_COMMITTED set HERE, before the call, not after it returns -- exactly
+# dispatch.sh's step 4.5 posture (agent-supervisor#572): a signal landing
+# while `assign` blocks is landing on a turn that may already be running, and
+# the claim must not be released out from under it just because this shell
+# never saw the call finish.
+CLAIM_COMMITTED=1
 # `assign` routes to `ClaudePrintAdapter.assign_task` because the lane it
 # just registered carries transport=claude-print: it re-spawns
 # `claude -p --resume <session>` against $WORKTREE, sends this message as the

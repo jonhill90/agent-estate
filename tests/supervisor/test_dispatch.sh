@@ -1828,12 +1828,12 @@ import os
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = '''trap release_lane_claim EXIT
-trap 'release_lane_claim; exit 143' TERM   # 128 + 15
-trap 'release_lane_claim; exit 130' INT    # 128 + 2'''
+marker = '''trap 'release_claim_on_signal; release_lane_claim' EXIT
+trap 'release_claim_on_signal; release_lane_claim; exit 143' TERM   # 128 + 15
+trap 'release_claim_on_signal; release_lane_claim; exit 130' INT    # 128 + 2'''
 assert marker in text, "claim-release traps not found -- script shape changed"
 assert text.count(marker) == 1, "claim-release traps not unique -- script shape changed"
-text = text.replace(marker, ': # MUTATED: no trap -- only the four enumerated abort paths release', 1)
+text = text.replace(marker, ': # MUTATED: no trap -- only the enumerated abort paths release', 1)
 here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
 assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
 text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
@@ -1949,6 +1949,21 @@ want_contains "...so the lane stays HELD: a brief is live in it and no cleanup m
 live_term_status=$(LEDGER_STATE="$LIVE_TERM_STATE" ledger status)
 want_contains "...and the claim placeholder is still there holding it" \
   '"id":"ledger-claim:t:3:ad701-live-then-term"' "$live_term_status"
+# agent-supervisor#572: the ISSUE claim (GitHub assignee, distinct from the
+# lane placeholder above) must survive this signal too, for the same reason
+# -- release_claim is now trapped alongside release_lane_claim (#572), and
+# both share the CLAIM_COMMITTED gate, so a signal past step 4.5 must not
+# release either. This is "genuinely concurrent work in progress must still
+# read as claimed" from the other side: nothing here proves a SECOND
+# dispatcher was refused, but it proves the mechanism that refusal depends on
+# (the assignee) was not wiped out from under the first one by its own
+# signal handler -- a fix that cleared this on any signal would have traded
+# #572's stall for a race the moment two dispatchers ever crossed paths here.
+if [ "$(assignees 701)" = "jonhill90" ]; then
+  ok "...and the GitHub issue claim also stays HELD -- the signal did not release work that is live"
+else
+  bad "...and the GitHub issue claim also stays HELD" "assignees: $(assignees 701)"
+fi
 
 # --- SIGKILL at the submit: the reap must NOT free a working lane ---------
 # The dangerous half, and the one moving an in-process flag cannot fix: a
@@ -4548,6 +4563,135 @@ alive_out=$(LEDGER_STATE="$STATE_457" DISPATCH_SURVIVE_SETTLE=0 DISPATCH_SURVIVE
 want_exit "a healthy dispatch (pane never dies) still exits 0 with verified_survived in place" "$alive_rc" 0 "$alive_out"
 alive_accepted=$(task_accepted_at "$STATE_457" "ad457-survive-457-healthy")
 want_missing "...and IS marked accepted -- verified_survived does not weaken #193's confirm-landed signal" "None" "$alive_accepted"
+
+# --- agent-supervisor#572: a failed dispatch must not leave the ISSUE claim
+# behind, poisoning every retry as "already claimed" -----------------------
+#
+# WHY THIS IS DIFFERENT FROM #209's LANE-CLAIM TESTS ABOVE: every failure
+# dispatch.sh ENUMERATES already released the issue claim inline (`claim.sh
+# release`, wired into CLAIM_FAILED, the worktree check and every abort_send
+# call, long before this issue existed) -- so a busy-lane-style ordinary
+# refusal was never the gap. #571's own measured sequence names the actual
+# one: an issue claimed by a run that never reached one of those enumerated
+# lines. release_lane_claim already had a signal trap for exactly that shape
+# (#209); release_claim (this same claim, for the GitHub issue) did not, so a
+# `kill`, a timeout wrapper or a closed terminal after step 2 stranded the
+# assignee forever -- the next attempt, and every attempt after it, read
+# "already claimed by jonhill90" with no way to tell that apart from someone
+# else genuinely working it.
+#
+# The kill is delivered the same way #209's lane-claim tests deliver theirs
+# (standing in for the thing that is called right after the commit, killing
+# the dispatcher the instant it returns success) -- here that thing is
+# claim.sh, not cli.py claim-lane, so the stand-in is a wrapped copy of
+# claim.sh in a full mutant scripts/ directory, not a DISPATCH_PYTHON shim.
+CLAIM_KILL_DIR=$(make_mutant_scripts_dir)
+mv "$CLAIM_KILL_DIR/claim.sh" "$CLAIM_KILL_DIR/claim-real.sh"
+cat > "$CLAIM_KILL_DIR/claim.sh" <<'WRAP'
+#!/bin/bash
+# Stands in for claim.sh in the #572 mutant scripts dir: runs the real
+# claim.sh unchanged, and once a `take` has actually succeeded, signals its
+# own parent -- dispatch.sh calls claim.sh directly (no subshell), so $PPID
+# here IS the dispatcher, the same way `--owner-pid $$` names it for
+# cli.py claim-lane above.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+out=$("$HERE/claim-real.sh" "$@" 2>&1); rc=$?
+printf '%s\n' "$out"
+if [ "${1:-}" = take ] && [ "$rc" -eq 0 ]; then
+  kill "-${DISPATCH_TEST_KILL_SIGNAL:-KILL}" "$PPID" 2>/dev/null
+  sleep 1
+fi
+exit $rc
+WRAP
+chmod +x "$CLAIM_KILL_DIR/claim.sh" "$CLAIM_KILL_DIR/claim-real.sh"
+
+run_issue_claim_killed() {  # run_issue_claim_killed <state> <issue> <slug> <signal> <dispatch-script>
+  local state="$1" issue="$2" slug="$3" signal="$4" script="$5"
+  printf '%s|| a dispatcher signalled right after the ISSUE claim\n' "$issue" >> "$D/issues"
+  ICLAIM_OUT=$(LEDGER_STATE="$state" DISPATCH_TEST_KILL_SIGNAL="$signal" DISPATCH_SCRIPT="$script" \
+               run "$issue" "$slug" "$D/brief.md" acme/agent-dotfiles "$REPO")
+  ICLAIM_RC=$?
+}
+
+# --- ARM 1 (exercised directly): SIGTERM right after the issue claim -------
+# Trappable, so the new trap must release it AT ONCE -- no reap, no second
+# dispatch needed to notice.
+IC_TERM_STATE="$D/state-issue-claim-term"
+run_issue_claim_killed "$IC_TERM_STATE" 801 issue-claim-term TERM "$CLAIM_KILL_DIR/dispatch.sh"
+want_exit "a dispatcher SIGTERMed right after the ISSUE claim exits through its trap" "$ICLAIM_RC" 143 "$ICLAIM_OUT"
+if [ -z "$(assignees 801)" ]; then
+  ok "...and the TRAP released the GitHub claim immediately -- no assignee left behind"
+else
+  bad "...and the TRAP released the GitHub claim immediately" "still assigned: $(assignees 801)"
+fi
+
+# THE ARM THE BRIEF ASKS FOR: a genuine retry of the SAME issue, against a
+# fresh dispatch (a fresh state dir, same as every other lane in this file
+# reclaims between cases) -- this is exactly #571's attempt 4, minus the
+# manual `gh issue edit --remove-assignee` that used to be the only way to
+# get there.
+IC_RETRY_STATE="$D/state-issue-claim-retry"
+retry_out=$(LEDGER_STATE="$IC_RETRY_STATE" run 801 issue-claim-retry "$D/brief.md" acme/agent-dotfiles "$REPO"); retry_rc=$?
+want_exit "...so a RETRY of #801 succeeds instead of refusing as already claimed" "$retry_rc" 0 "$retry_out"
+want_missing "...no 'already claimed' mystery for the operator to chase" "already claimed" "$retry_out"
+
+# --- MUTATION: remove the issue-claim trap, and the retry must go red -----
+# Same discipline as #209's own mutation checks above: the assertion is only
+# worth anything if deleting the fix actually breaks it. A SECOND full mutant
+# directory (not a lone-file patch like #209's own mutation checks use) so
+# `HERE` still resolves to a real, complete scripts/supervisor/ tree of its
+# own -- including this test's kill-wrapper claim.sh, copied in unchanged.
+NO_ICLAIM_TRAP_DIR=$(make_mutant_scripts_dir)
+cp "$CLAIM_KILL_DIR/claim.sh" "$CLAIM_KILL_DIR/claim-real.sh" "$NO_ICLAIM_TRAP_DIR/"
+chmod +x "$NO_ICLAIM_TRAP_DIR/claim.sh" "$NO_ICLAIM_TRAP_DIR/claim-real.sh"
+patch_rc=0
+python3 - "$NO_ICLAIM_TRAP_DIR/dispatch.sh" <<'PY' || patch_rc=$?
+import sys
+path = sys.argv[1]
+text = open(path).read()
+marker = """trap 'release_claim_on_signal; release_lane_claim' EXIT
+trap 'release_claim_on_signal; release_lane_claim; exit 143' TERM   # 128 + 15
+trap 'release_claim_on_signal; release_lane_claim; exit 130' INT    # 128 + 2"""
+assert marker in text, "combined claim-release traps not found -- script shape changed"
+assert text.count(marker) == 1, "combined claim-release traps not unique -- script shape changed"
+text = text.replace(
+    marker,
+    "trap release_lane_claim EXIT\n"
+    "trap 'release_lane_claim; exit 143' TERM   # 128 + 15  -- MUTATED: issue claim no longer trapped (#572)\n"
+    "trap 'release_lane_claim; exit 130' INT    # 128 + 2",
+    1,
+)
+open(path, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh with no issue-claim trap" \
+    "could not patch $NO_ICLAIM_TRAP_DIR/dispatch.sh (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh with no issue-claim trap"
+  NO_TRAP_STATE="$D/state-no-iclaim-trap"
+  run_issue_claim_killed "$NO_TRAP_STATE" 802 issue-claim-no-trap TERM "$NO_ICLAIM_TRAP_DIR/dispatch.sh"
+  if [ -n "$(assignees 802)" ]; then
+    ok "mutation confirmed: with no issue-claim trap, a SIGTERMed dispatcher strands the GitHub claim (the assertion above would now be red)"
+  else
+    bad "mutation confirmed: with no issue-claim trap, a SIGTERMed dispatcher strands the GitHub claim" \
+      "expected #802 to still show an assignee, got none; rc=$ICLAIM_RC out=$ICLAIM_OUT"
+  fi
+fi
+
+# --- ARM 2 (exercised directly): a genuinely concurrent claim is still
+# refused -- the fix must not have traded #572's stall for a race ----------
+# The other side of #209's own two-guard split (dispatch.sh's comment on
+# CLAIM_LANE vs CLAIM_COMMITTED, above): nothing about gating release_claim
+# on CLAIM_COMMITTED touches claim.sh's own "already claimed" read-then-write
+# check, so an issue a DIFFERENT lane genuinely holds must still refuse here,
+# exactly as it did before #572.
+printf '803|someone-else| still being worked by another lane\n' >> "$D/issues"
+concurrent_out=$(run 803 concurrent-claim "$D/brief.md" acme/agent-dotfiles "$REPO"); concurrent_rc=$?
+want_exit "a dispatch against an issue another lane genuinely holds is still refused" "$concurrent_rc" 1 "$concurrent_out"
+want_contains "...naming the real holder, same as before this fix" "someone-else" "$concurrent_out"
+want_contains "...and that lane's claim is left completely alone" "someone-else" "$(assignees 803)"
+want_missing "...no brief sent to any lane over a claim this dispatch does not hold" "send-keys" "$(cat "$D/tmux.log")"
 
 rm -rf "$D"
 
