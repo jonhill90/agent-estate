@@ -109,6 +109,10 @@ func main() {
 				"showing an empty table.")
 		hill90AppRepo = flag.String("hill90-app-repo", os.Getenv("HILL90_APP_REPO"),
 			"local hill90-app checkout, used only to find the OpenAPI document above")
+		skillsRepo = flag.String("skills-repo", os.Getenv("AGENT_TUI_SKILLS_REPO"),
+			"local jonhill90/skills checkout, used only to find "+skillsEvalStatusRelPath+" (agent-tui#151) -- "+
+				"the Skills pane's LAST EVAL/VERDICT columns. Empty or a checkout with no eval-status.json "+
+				"degrades those columns to today's honest \"unknown\"/\"unevaluated\" rather than erroring.")
 		secretsSchema = flag.String("secrets-schema", envOr("AGENT_TUI_SECRETS_SCHEMA", ""),
 			"secrets-schema.yaml rendered by the Connect -> Secrets pane (agent-tui#101) -- key names, vault "+
 				"paths and consuming services only, never a value. Empty falls back to "+
@@ -438,7 +442,7 @@ func main() {
 	var mcpserversModel mcpservers.Model
 	var adminModel admin.Model
 	if homeDirErr == nil {
-		skillsModel = skills.New(skills.ScanFetcher(filepath.Join(homeDir, ".claude", "skills")))
+		skillsModel = skills.New(skills.EvalStatusFetcher(filepath.Join(homeDir, ".claude", "skills"), resolveSkillsEvalStatus(*skillsRepo)))
 
 		cwd, cwdErr := os.Getwd()
 		if cwdErr != nil {

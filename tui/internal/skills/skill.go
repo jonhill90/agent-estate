@@ -8,33 +8,30 @@
 // .../Personal/Skills/skills/adopt-or-build) -- one directory scan reaches
 // both halves of S8's own "from X and Y" phrasing, not two reads.
 //
-// Two of S8's four columns have no source to fill in today, measured
-// rather than assumed, exactly the shape S6 (internal/agents) already
-// found for model/cost:
-//   - Last eval result / verdict: RE-CHECKED 2026-08-22 against
-//     agent-evals@a7f61ce (the jonhill90/skills#230 harness this doc
-//     comment used to say did not exist at all -- it now does:
-//     scripts/eval_skill.py runs a real with/without comparison for one
-//     named skill and prints a keep/improve/rename/drop verdict). What has
-//     NOT changed: it persists nothing. Its own `main()` prints JSON to
-//     stdout and writes only to `--outdir` (a fresh tempdir by default,
-//     never a stable path); there is no committed results file, no
-//     `tests/evals/results/skill-verdicts.*`, nothing this package could
-//     open. A verdict was produced for `research-the-limit` by hand three
-//     times on 2026-08-22 (agent-evals#21's own PR body) -- that value
-//     lives in a PR description and a chat transcript, neither of which is
-//     a file this package may read (AGENTS.md's adapter discipline: no
-//     second reader of an out-of-repo source improvised in place of a
-//     real seam). Until agent-evals adds a persistence layer, every skill
-//     is honestly Verdict "unevaluated", not a guess at what it might be.
-//   - Invocation count: nothing in this estate counts skill invocations.
-//     `mine-transcripts` (a skill in this same repo) is a deliberate,
-//     periodic, human-triggered review of transcripts for new skill
-//     CANDIDATES -- not a counter, and not run automatically.
+// Of S8's four columns, one now has a real source and one still does not,
+// measured rather than assumed, exactly the shape S6 (internal/agents)
+// already found for model/cost:
+//   - Last eval result / verdict: WIRED 2026-08-24 (agent-tui#151).
+//     jonhill90/skills#230's harness (scripts/eval_skill.py) persists its
+//     verdicts now -- docs/eval-status.json, one {verdict, date, evidence}
+//     record per skill, landed in that repo's commit e6c33a5 the day after
+//     this doc comment first said no persistence layer existed.
+//     EvalStatusFetcher (evalstatus.go) reads it and merges by Dir; a
+//     skill with no matching record, or no store configured/reachable at
+//     all, still renders Verdict "unevaluated" and LastEval nil -- the
+//     same honest values Scan alone has always produced, now a genuine
+//     "checked, nothing found" rather than "never wired to check."
+//     could_not_measure (an eval that ran but produced no reliable
+//     signal) is carried as its own VerdictCouldNotMeasure value, never
+//     flattened onto "unevaluated" -- see that const's own doc comment.
+//   - Invocation count: still no source. Nothing in this estate counts
+//     skill invocations. `mine-transcripts` (a skill in this same repo) is
+//     a deliberate, periodic, human-triggered review of transcripts for
+//     new skill CANDIDATES -- not a counter, and not run automatically.
 //
-// LastEval/InvocationCount are therefore always nil, and Verdict is
-// therefore always its zero value (rendered "unevaluated" by View, never
-// silently blank) -- absence as a typed value, never a bare zero
+// InvocationCount is therefore always nil; LastEval is nil and Verdict is
+// its zero value ("unevaluated") for any skill EvalStatusFetcher's store
+// has no record for -- absence as a typed value, never a bare zero
 // (AGENTS.md), the same pattern internal/agents.Row.Model/Cost already
 // established for this exact shape of gap. "Unevaluated" is a real,
 // positive fact, not a filler string: SPEC-shell.md S8's own model is
@@ -86,9 +83,9 @@ type Skill struct {
 }
 
 // VerdictUnevaluated is Skill.Verdict's zero-value meaning, exported so a
-// caller (a future eval-store Fetcher, this package's own tests) can
-// compare against the same constant View renders rather than the literal
-// "unevaluated" string in two places.
+// caller (EvalStatusFetcher, this package's own tests) can compare against
+// the same constant View renders rather than the literal "unevaluated"
+// string in two places.
 const VerdictUnevaluated = "unevaluated"
 
 // Fetcher retrieves the current skill list -- the adapter seam

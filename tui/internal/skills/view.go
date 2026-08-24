@@ -45,7 +45,13 @@ func (m Model) View() string {
 	if len(m.skills) == 0 {
 		b.WriteString(legendStyle.Render("(no skills)") + "\n")
 	} else {
-		b.WriteString(legendStyle.Render(fmt.Sprintf("%-28s %-40s %-10s %-11s %s", "NAME", "DESCRIPTION", "LAST EVAL", "VERDICT", "INVOCATIONS")) + "\n")
+		// VERDICT is 18 wide, not 11: "could_not_measure" (agent-tui#151's
+		// own largest bucket, distinct from "unevaluated" -- see
+		// VerdictCouldNotMeasure's doc comment) is 18 characters, and
+		// truncating this estate's own honest "we could not measure this"
+		// value down to "could_not_m…" would read as a different, wronger
+		// kind of blindness than the one it's naming.
+		b.WriteString(legendStyle.Render(fmt.Sprintf("%-28s %-40s %-10s %-18s %s", "NAME", "DESCRIPTION", "LAST EVAL", "VERDICT", "INVOCATIONS")) + "\n")
 		for i, s := range m.skills {
 			name := s.Name
 			if s.ParseErr != "" {
@@ -63,7 +69,7 @@ func (m Model) View() string {
 			if s.InvocationCount != nil {
 				invocations = fmt.Sprintf("%d", *s.InvocationCount)
 			}
-			line := fmt.Sprintf("%-28s %-40s %-10s %-11s %s", truncate(name, 28), truncate(s.Description, 40), truncate(lastEval, 10), truncate(verdict, 11), invocations)
+			line := fmt.Sprintf("%-28s %-40s %-10s %-18s %s", truncate(name, 28), truncate(s.Description, 40), truncate(lastEval, 10), truncate(verdict, 18), invocations)
 			if i == m.selected {
 				line = selectedStyle(m.theme).Render(line)
 			}
