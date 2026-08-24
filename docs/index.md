@@ -34,7 +34,7 @@ okf_version: "0.2"
 
 * [Restore after a tmux server loss](runbooks/restore-after-tmux-loss.md) - Step-by-step recovery after a tmux server loss, including how to tell a real loss from a lane that only looks wrong, and what UNRECOVERABLE means.
 * [Retiring the send-keys lanes (#284)](runbooks/send-keys-retirement-284.md) - Measured enumeration of the 29 `send-keys` ledger rows retired under agent-supervisor#284, with method and before/after evidence.
-* [The agent-estate migration](runbooks/agent-estate-migration.md) - Executable command sequence for merging agent-tui into agent-supervisor as agent-estate, with a verification and a rollback after every step.
+* [The agent-estate migration](runbooks/agent-estate-migration.md) - Command sequence for merging agent-tui into agent-supervisor as agent-estate, a verification and rollback after every step -- written, NOT yet executed.
 
 # Archive
 
