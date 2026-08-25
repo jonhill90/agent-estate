@@ -147,7 +147,19 @@ TASK_ID="$LABEL"
 # audit`/`reap` (#359) to cover, same as dispatch.sh's own header says of its
 # lane claim.
 CLAIM_COMMITTED=""
-release_claim() { "$HERE/claim.sh" release "$ISSUE" "$REPO" >/dev/null 2>&1; }
+# agent-supervisor#647: this call used to be UNGATED and its failure UNCHECKED
+# -- exactly the same shape #572 fixed for a signal landing mid-dispatch, but
+# for the ordinary case where `claim.sh release`'s own `gh api -X DELETE` call
+# simply fails (rate limit, network blip). Before this fix that left the issue
+# claimed with the refusal already printed and nothing to say the release
+# itself did not land -- indistinguishable, from outside, from a healthy
+# rollback. `dispatch.sh`'s own release_claim (its tmux flow) has reported
+# this loudly since #209; this mirrors that wording so the same failure is
+# never silent on either transport.
+release_claim() {
+  "$HERE/claim.sh" release "$ISSUE" "$REPO" >/dev/null 2>&1 \
+    || echo "dispatch-claude-print: could not release the claim on #$ISSUE -- release it by hand: $HERE/claim.sh release $ISSUE $REPO" >&2
+}
 release_claim_on_signal() {
   [ -z "${CLAIM_COMMITTED:-}" ] || return 0
   release_claim

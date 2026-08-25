@@ -124,7 +124,16 @@ if ! "$HERE/claim.sh" take "$ISSUE" "$REPO" "$LANE"; then
   exit 1
 fi
 
-release_claim() { "$HERE/claim.sh" release "$ISSUE" "$REPO" >/dev/null 2>&1; }
+# agent-supervisor#647: same fix as dispatch-claude-print.sh's own release_claim
+# -- this used to be ungated, so a `claim.sh release` failure (its `gh api -X
+# DELETE` call hitting a rate limit or network blip) left the issue claimed
+# with nothing said about it. Reported the same way dispatch.sh's own
+# release_claim has since #209, so the failure is never silent on any
+# transport.
+release_claim() {
+  "$HERE/claim.sh" release "$ISSUE" "$REPO" >/dev/null 2>&1 \
+    || echo "dispatch-pi-rpc: could not release the claim on #$ISSUE -- release it by hand: $HERE/claim.sh release $ISSUE $REPO" >&2
+}
 
 # --- 2. give the lane its own worktree, same tool dispatch.sh uses --------
 WORKTREE_ERR=$(mktemp)
