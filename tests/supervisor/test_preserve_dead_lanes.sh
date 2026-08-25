@@ -27,13 +27,26 @@ bad() { echo "  FAIL $1"; sed 's/^/       /' <<<"${2:-}"; fail=$((fail+1)); }
 echo "preserve-dead-lanes.sh"
 
 D=$(mktemp -d)
-trap 'kill $LIVE_PID 2>/dev/null; unset TMUX; TMUX_TMPDIR="$D/tmux-rt" tmux -f /dev/null kill-server 2>/dev/null; rm -rf "$D"' EXIT
 
 # A private tmux server, never the operator's own attached one (invariant 4)
 # -- `-f /dev/null` skips ~/.tmux.conf the same way test_worktree.sh's own
-# rtmux() does.
+# rtmux() does. Established (and verified via assert_isolated_tmux, not just
+# claimed) BEFORE the EXIT trap is armed, so the guard's own static scanner
+# (tmux_verb_guard.py) sees isolation in effect above the trap's
+# `kill-server`, not merely inline env-var scoping it cannot parse as proof.
 RT="$D/tmux-rt"
 mkdir -p "$RT"
+# This test's own shell may itself be running inside an attached tmux
+# session (a lane IS a tmux pane) -- unset TMUX here, once, so
+# assert_isolated_tmux judges the throwaway server we are about to start,
+# never the operator's own. Every tmux call this script makes from here on
+# already scopes TMUX_TMPDIR/-u TMUX per-invocation (rtmux(), run_sweep());
+# this only removes the ambient TMUX so the precheck itself is honest.
+unset TMUX
+TMUX_TMPDIR="$RT" assert_isolated_tmux || { echo "  FATAL: tmux isolation precheck failed" >&2; rm -rf "$D"; exit 2; }
+
+trap 'kill $LIVE_PID 2>/dev/null; unset TMUX; TMUX_TMPDIR="$RT" tmux -f /dev/null kill-server 2>/dev/null; rm -rf "$D"' EXIT
+
 rtmux() { env -u TMUX TMUX_TMPDIR="$RT" tmux -f /dev/null "$@"; }
 if ! rtmux new-session -d -s anchor -c "$D" 2>/dev/null; then
   echo "  FATAL: could not start a throwaway tmux server -- tmux-pane liveness cannot be tested for real" >&2
