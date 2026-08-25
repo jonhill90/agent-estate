@@ -68,6 +68,8 @@ import re
 import subprocess
 from pathlib import Path
 
+from core import normalize_worktree_path
+
 # Matches both dispatch shapes that ever wrote a worktree path into task
 # summary text (see this module's own docstring, point 1):
 #   "...Do all of your work in the worktree at /var/.../ad-531-... -- ..."
@@ -199,9 +201,24 @@ class WorktreePathReconciler:
                 )
                 continue
 
+            # agent-supervisor#624: write the CANONICAL spelling, not the raw
+            # text the summary happened to carry. The candidate above came
+            # from a brief's own "worktree at <path>" / "worktree=<path>"
+            # text, written before this sweep ever ran and never resolved --
+            # on macOS that is `/var/folders/...`, sometimes with a doubled
+            # separator, never `/private/var/...`. `dispatch.sh`'s own
+            # `record-dispatch` writes the `pwd -P`-resolved form (see its
+            # own comment on agent-supervisor#117); a sweep writing the
+            # unresolved form into the same column is exactly the "two
+            # writers disagree" defect #624 measured, not a hygiene nit --
+            # `normalize_worktree_path` is the one already used to READ this
+            # column back (`Ledger.get_task_for_worktree`), so writing
+            # through it here keeps every row in the shape reads expect
+            # without needing reads to keep compensating for writes forever.
+            canonical = normalize_worktree_path(candidate)
             evidence = {
                 "task": task_id,
-                "worktree_path": candidate,
+                "worktree_path": canonical,
                 "pr": f"{pr_link['repo']}#{pr_link['pr_number']}",
                 "pr_head_sha": pr_head_sha,
                 "reflog_sha": corroborating_sha,
@@ -210,7 +227,7 @@ class WorktreePathReconciler:
                 report["would_backfill"].append(evidence)
                 continue
 
-            self.ledger.backfill_task_worktree_path(task_id, candidate)
+            self.ledger.backfill_task_worktree_path(task_id, canonical)
             report["backfilled"].append(evidence)
 
         return report

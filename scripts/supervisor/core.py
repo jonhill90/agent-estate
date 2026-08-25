@@ -299,6 +299,33 @@ def lane_population(lane_id, row=None):
     return "off-pane"
 
 
+def normalize_worktree_path(path):
+    """Canonical spelling of a worktree path, for comparison only
+    (agent-supervisor#624).
+
+    `os.path.realpath` both collapses repeated/doubled separators (`//`
+    inside `$TMPDIR`, seen live in `#624`'s own report) and resolves
+    symlinks in the path's existing prefix -- on macOS `/var` and `/tmp`
+    are themselves symlinks into `/private`, so an unresolved
+    `/var/folders/...` and a resolved `/private/var/folders/...` naming
+    the same directory come out identical here. `os.path.realpath` does
+    not require the path to exist: a worktree already torn down still
+    normalizes consistently from whatever prefix does exist, it just
+    cannot resolve symlink components inside the missing tail -- fine for
+    a pure string-equality comparison, which is all any caller of this
+    does.
+
+    Blank stays blank, on purpose: `get_task_for_worktree` relies on this
+    to keep refusing a blank/NULL `worktree_path` rather than having
+    `realpath('')` (which resolves to the CURRENT directory) turn "no
+    path recorded" into "matches wherever this process happens to be
+    running from."
+    """
+    if not path:
+        return ""
+    return os.path.realpath(path)
+
+
 def pid_is_alive(pid):
     """True unless `pid` is provably gone on THIS host.
 
@@ -2199,17 +2226,30 @@ class Ledger:
         column existed carry '' (see `_migrate_tasks_table`), and matching
         one blank against another would wrongly declare every pre-#117 task
         the same worktree.
+
+        Compared through `normalize_worktree_path` on BOTH sides
+        (agent-supervisor#624): `dispatch.sh`'s `record-dispatch` and
+        `reconcile_worktree_paths.py`'s backfill sweep have been observed
+        writing two different spellings of the same directory (resolved
+        `/private/var/...` vs. the unresolved, sometimes doubled-separator
+        `/var/...` a brief's own text carries) -- a bare `=` comparison
+        cannot see they name the same place, so a correctly-dispatched
+        lane reads as undispatched depending on which shape its row
+        happened to get. This is a point lookup either way: `worktree.sh
+        new` mints a fresh path per dispatch, so at most one row is
+        expected to normalize to the same value.
         """
-        if not worktree_path:
+        normalized_query = normalize_worktree_path(worktree_path)
+        if not normalized_query:
             return None
         with contextlib.closing(self._connect()) as connection:
             rows = connection.execute(
-                "SELECT * FROM tasks WHERE worktree_path = ? ORDER BY created_at ASC, id ASC",
-                (worktree_path,),
+                "SELECT * FROM tasks WHERE worktree_path != ''",
             ).fetchall()
         candidates = [
             self._dict(row) for row in rows
-            if include_reviews or not self._task_looks_like_review(row["id"], row["summary"])
+            if normalize_worktree_path(row["worktree_path"]) == normalized_query
+            and (include_reviews or not self._task_looks_like_review(row["id"], row["summary"]))
         ]
         if len(candidates) == 1:
             return candidates[0]
