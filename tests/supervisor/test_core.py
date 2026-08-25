@@ -4656,6 +4656,50 @@ class PromptCorpusTest(unittest.TestCase):
         unacked = self.ledger.read_prompt_view("unacknowledged")
         self.assertEqual(["i-open"], [row["id"] for row in unacked])
 
+    def test_drop_item_requires_a_reason(self):
+        self._seed_prompt("p1")
+        self.ledger.add_item("i1", prompt_id="p1", kind="directive", body="b", weight="hard")
+        with self.assertRaises(ValueError):
+            self.ledger.drop_item("i1", "")
+
+    def test_drop_item_rejects_an_unknown_id(self):
+        with self.assertRaises(ValueError):
+            self.ledger.drop_item("nope", "reason")
+
+    def test_drop_item_corrects_status_in_place_without_touching_judgement_fields(self):
+        """agent-supervisor#583: reclassification must change status/status_reason
+        only -- kind, body, weight and the item's id are the original judgement
+        and stay put, so the record remains reviewable, not rewritten."""
+        self._seed_prompt("p1")
+        self.ledger.add_item("i1", prompt_id="p1", kind="directive", body="do it", weight="hard")
+        row = self.ledger.drop_item("i1", "synthetic eval fixture")
+        self.assertEqual("dropped", row["status"])
+        self.assertEqual("synthetic eval fixture", row["status_reason"])
+        self.assertEqual("directive", row["kind"])
+        self.assertEqual("do it", row["body"])
+        self.assertEqual("hard", row["weight"])
+        self.assertEqual([], self.ledger.read_prompt_view("unacknowledged"))
+
+    def test_list_open_items_excludes_dropped_and_carries_prompt_context(self):
+        self._seed_prompt("p1")
+        self._seed_prompt("p2")
+        self.ledger.add_item("i-open", prompt_id="p1", kind="directive", body="b", weight="hard", status="open")
+        self.ledger.add_item(
+            "i-dropped", prompt_id="p2", kind="directive", body="b", weight="hard",
+            status="dropped", status_reason="already excluded",
+        )
+        rows = self.ledger.list_open_items()
+        self.assertEqual(["i-open"], [row["id"] for row in rows])
+        self.assertEqual("context-p1", rows[0]["prompt_context"])
+
+    def test_list_open_items_respects_limit(self):
+        self._seed_prompt("p1")
+        self._seed_prompt("p2")
+        self.ledger.add_item("i1", prompt_id="p1", kind="directive", body="b", weight="hard")
+        self.ledger.add_item("i2", prompt_id="p2", kind="directive", body="b", weight="hard")
+        rows = self.ledger.list_open_items(limit=1)
+        self.assertEqual(1, len(rows))
+
 
 if __name__ == "__main__":
     unittest.main()

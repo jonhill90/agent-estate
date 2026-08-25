@@ -4426,6 +4426,47 @@ class Ledger:
         with contextlib.closing(self._connect()) as connection:
             return self._dict(connection.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone())
 
+    def drop_item(self, item_id, status_reason):
+        """Correct an already-recorded item's status to 'dropped' in place --
+        `itemize_prompts.py --reclassify`'s write (agent-supervisor#583). A
+        prompt itemised before a structural filter existed keeps its
+        original id, kind, body and weight (the judgement record itself is
+        evidence); only `status`/`status_reason` change, so the item leaves
+        `unacknowledged` without being deleted -- the same "reviewable and
+        reversible" contract `add_item`'s dropped rows already honour."""
+        if not status_reason:
+            raise ValueError("status_reason is required")
+        with self._locked(), self._transaction() as connection:
+            connection.execute(
+                "UPDATE items SET status='dropped', status_reason=? WHERE id=?",
+                (status_reason, item_id),
+            )
+            row = connection.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"no such item: {item_id}")
+        return self._dict(row)
+
+    def list_open_items(self, *, limit=None):
+        """Every currently-open item, each carrying its originating prompt's
+        `context` -- the reclassification queue `itemize_prompts.py
+        --reclassify` reads (agent-supervisor#583). This re-reads the same
+        structural marker `drop_noise` keys on at itemisation time; it never
+        re-judges body/kind/weight, only whether an item that predates the
+        filter should have been dropped."""
+        sql = """
+            SELECT i.*, p.context AS prompt_context
+            FROM items i JOIN prompts p ON p.id = i.prompt_id
+            WHERE i.status = 'open'
+            ORDER BY p.at
+        """
+        params = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (int(limit),)
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [self._dict(row) for row in rows]
+
     def list_unitemised_prompts(self, *, limit=None):
         """Prompts with no `items` row yet -- the itemisation queue for
         `itemize_prompts.py --extract` (agent-supervisor#303). Item-lessness
