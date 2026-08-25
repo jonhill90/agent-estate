@@ -1760,15 +1760,32 @@ COLLISION_OUT=$("$HERE/collision-check.sh" check \
   ${COLLISION_FORCE:+--force} 2>&1)
 COLLISION_RC=$?
 if [ "$COLLISION_RC" -ne 0 ]; then
-  # A refusal, same as every other guard's stderr above -- agent-dotfiles#199
-  # only requires SILENCE on a SUCCESSFUL dispatch; this one is not one.
-  sed 's/^/dispatch: collision-check: /' <<<"$COLLISION_OUT" >&2
-  abort_send "#$ISSUE_ARG's files collide with an in-flight lane -- NOT dispatched. Re-run with --force if this overlap is known and intended (agent-supervisor#291)"
+  if [ -n "$REVIEWS_PR" ]; then
+    # agent-supervisor#645: collision-check.sh's REFUSE means "an in-flight
+    # lane already holds these files", which is only a hazard for a dispatch
+    # that is going to WRITE them. A `--reviews-pr` dispatch's deliverable is
+    # a PR comment -- it reads the files under review, never commits to them
+    # -- so it cannot produce the two-writers-one-file collision #291 exists
+    # to catch, no matter whose files it overlaps (the PR's own author lane,
+    # another review lane, anyone). The overlap is still worth knowing, so
+    # it is downgraded to the same informational stdout line ALLOW already
+    # gets below, not silenced -- only the refusal (stderr + abort_send)
+    # goes away. A plain (write) dispatch with REVIEWS_PR unset still hits
+    # the abort_send branch below, unchanged.
+    :
+  else
+    # A refusal, same as every other guard's stderr above -- agent-dotfiles#199
+    # only requires SILENCE on a SUCCESSFUL dispatch; this one is not one.
+    sed 's/^/dispatch: collision-check: /' <<<"$COLLISION_OUT" >&2
+    abort_send "#$ISSUE_ARG's files collide with an in-flight lane -- NOT dispatched. Re-run with --force if this overlap is known and intended (agent-supervisor#291)"
+  fi
 fi
-# ALLOW (no-conflict, unknown, or forced) -- on stdout, not stderr:
-# agent-dotfiles#199 requires stderr silent on a successful dispatch, and
-# "say UNKNOWN, don't let it read as nothing" (the issue's own words) only
-# requires this is SAID, not that it is said on stderr specifically.
+# ALLOW (no-conflict, unknown, or forced), or a REFUSE downgraded to
+# information for a review dispatch (see the REVIEWS_PR branch above) -- on
+# stdout, not stderr: agent-dotfiles#199 requires stderr silent on a
+# successful dispatch, and "say UNKNOWN, don't let it read as nothing" (the
+# issue's own words) only requires this is SAID, not that it is said on
+# stderr specifically.
 sed 's/^/dispatch: collision-check: /' <<<"$COLLISION_OUT"
 
 # WHAT IS TYPED INTO THE PANE STAYS SHORT, AND HERE IS THE MEASURED REASON.
