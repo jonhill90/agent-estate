@@ -4016,12 +4016,12 @@ shutil.copytree(
 )
 
 core_text = (mutated_dir / "core.py").read_text()
-marker = "                        WHEN NEW.source_kind = 'pull' AND EXISTS ("
+marker = "            WHEN NEW.source_kind = 'pull' AND EXISTS ("
 assert core_text.count(marker) == 1, "pull-uniqueness trigger WHEN clause not found or not unique -- script shape changed"
 mutated_core = core_text.replace(
     marker,
-    "                        -- MUTATED: agent-supervisor#169 write-time gate defeated\n"
-    "                        WHEN 0 AND EXISTS (",
+    "            -- MUTATED: agent-supervisor#169 write-time gate defeated\n"
+    "            WHEN 0 AND EXISTS (",
     1,
 )
 assert mutated_core != core_text, "mutation did not change core.py"
