@@ -299,31 +299,64 @@ def lane_population(lane_id, row=None):
     return "off-pane"
 
 
+_MACOS_PRIVATE_SYMLINK_PREFIXES = ("/tmp", "/var", "/etc")
+
+
 def normalize_worktree_path(path):
     """Canonical spelling of a worktree path, for comparison only
-    (agent-supervisor#624).
+    (agent-supervisor#624, fix-pass #632).
 
-    `os.path.realpath` both collapses repeated/doubled separators (`//`
-    inside `$TMPDIR`, seen live in `#624`'s own report) and resolves
-    symlinks in the path's existing prefix -- on macOS `/var` and `/tmp`
-    are themselves symlinks into `/private`, so an unresolved
-    `/var/folders/...` and a resolved `/private/var/folders/...` naming
-    the same directory come out identical here. `os.path.realpath` does
-    not require the path to exist: a worktree already torn down still
-    normalizes consistently from whatever prefix does exist, it just
-    cannot resolve symlink components inside the missing tail -- fine for
-    a pure string-equality comparison, which is all any caller of this
-    does.
+    `#624`'s first cut called `os.path.realpath`, which resolves symlinks
+    by asking the LOCAL filesystem -- and that is exactly what made it
+    wrong. Two things broke it, both found by #632's failing test:
+
+    1. This repo's own CI (`.github/workflows/*.yml`, `runs-on:
+       ubuntu-latest`) has no `/var` -> `/private/var` symlink at all --
+       that mapping is a macOS convention, not a universal one. `realpath`
+       on Linux is a no-op for these paths, so the unresolved and resolved
+       spellings compared UNEQUAL there even though they name the same
+       directory on the macOS host that actually wrote them. A comparison
+       whose correctness depends on which machine happens to run it is not
+       a fix, it just moves where the bug hides.
+    2. Even on macOS, a worktree the dispatching host has since torn down
+       (`worktree.sh done`/`gc`) still has a `tasks.worktree_path` row
+       naming it -- and MUST still resolve to its lane, because #632's own
+       cross-check items (`lane-retire.sh` reading `worktree_path` after
+       `#628`, `#629`'s authorship resolution) both read this column long
+       after the directory that could still corroborate its plumbing is
+       often already gone. `realpath` degrading gracefully for a missing
+       PATH is not the same guarantee as the SYMLINK PREFIX itself still
+       being resolvable -- and relying on either was never necessary: the
+       set of macOS symlinks this defect actually turns on is small,
+       fixed, and well-known, so it is spelled out explicitly here instead
+       of asked of a filesystem that may not agree, may not still hold the
+       directory, or may not even be macOS.
+
+    So this now does its own two, purely textual, steps:
+
+    - `os.path.normpath` collapses repeated separators (`//` inside
+      `$TMPDIR`, seen live in `#624`'s own report) -- string manipulation,
+      no filesystem access, no existence requirement.
+    - A literal prefix rewrite maps `/tmp`, `/var`, `/etc` to their
+      `/private/...` spelling -- the exact, closed set of top-level
+      symlinks macOS ships by default (`/private/tmp`, `/private/var`,
+      `/private/etc` are the real directories; `/tmp`, `/var`, `/etc` are
+      the symlinks). Deliberately NOT `os.path.realpath`: this holds
+      identically whether the path still exists, whether it ever existed
+      on THIS host, and whether this process is running on macOS or the
+      Linux CI runner reading the same ledger row in a test.
 
     Blank stays blank, on purpose: `get_task_for_worktree` relies on this
-    to keep refusing a blank/NULL `worktree_path` rather than having
-    `realpath('')` (which resolves to the CURRENT directory) turn "no
-    path recorded" into "matches wherever this process happens to be
-    running from."
+    to keep refusing a blank/NULL `worktree_path` rather than having an
+    empty path normalize to something that could spuriously match.
     """
     if not path:
         return ""
-    return os.path.realpath(path)
+    normalized = os.path.normpath(path)
+    for prefix in _MACOS_PRIVATE_SYMLINK_PREFIXES:
+        if normalized == prefix or normalized.startswith(prefix + "/"):
+            return "/private" + normalized
+    return normalized
 
 
 def pid_is_alive(pid):

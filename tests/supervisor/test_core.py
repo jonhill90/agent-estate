@@ -1755,10 +1755,14 @@ class LedgerTest(unittest.TestCase):
         """agent-supervisor#624's third verification case: a task row that
         exists but never had its worktree_path recorded (still '', same as
         the pre-#117 rows `test_get_task_for_worktree_unknown_for_a_blank_
-        path` covers) must stay refused after normalization -- `realpath('')`
-        resolves to the current directory, so this only holds because
-        `normalize_worktree_path` special-cases blank input rather than
-        running it through `realpath`."""
+        path` covers) must stay refused after normalization -- an empty
+        path must never come out matching whatever this process's own
+        cwd happens to be, so `normalize_worktree_path` special-cases
+        blank input explicitly rather than running it through the
+        general prefix-rewrite (#632's fix-pass moved this off
+        `os.path.realpath`, whose own blank-input behavior -- resolving
+        to the current directory -- was the original hazard this same
+        case existed to catch)."""
         self.ledger.record_dispatch(
             lane="free-624c",
             pane_id="%624c",
