@@ -538,6 +538,82 @@ func TestRemoveServerRefusalAfterConfirmIsShown(t *testing.T) {
 	}
 }
 
+// --- agent-tui#153: the nil-ops guard at the top of handleOpsKey ---
+
+// TestNilOpsGuardPreventsAddCommandPanic is agent-tui#153's fix: the guard
+// `if m.ops == nil { return m, nil, false }` at the top of handleOpsKey is
+// the only thing standing between a degraded launch (cmd/agent-tui skips
+// WithOps when there is no client -- see ops.go's package doc and
+// cmd/agent-tui's own comment) and a nil-interface panic. The issue's own
+// measurement is the reason this test cannot stop at checking cmd == nil
+// after one or two keys: pressing 'n' or 'x' alone never panics even with
+// the guard deleted, because opsModeAdding/opsModeBusy only *record*
+// intent -- the actual nil-interface call is inside the tea.Cmd that
+// 'enter' returns, and that Cmd only panics once bubbletea (or this test)
+// RUNS it. A test that reads "handled/cmd" after 'n' and 'x' and stops
+// there is exactly the false negative the issue reports.
+//
+// So this drives the whole add sequence through m.Update -- the real
+// production entry point, not handleOpsKey directly -- on a Model with
+// ops == nil, then explicitly calls whatever tea.Cmd 'enter' returns:
+//
+//   - Guard PRESENT (this file as it ships): 'n' never enters
+//     opsModeAdding (handleOpsKey returns handled == false at the guard,
+//     same as any other unmapped key), so every subsequent typed key and
+//     'enter' fall through the same way, and 'enter' returns cmd == nil.
+//     Nothing to run; the test passes.
+//   - Guard ABSENT: 'n' falls through the guard's spot straight into the
+//     switch below it and sets opsModeAdding regardless of m.ops, typed
+//     runes accumulate exactly as they would with a real ops wired in, and
+//     'enter' reaches doAdd(m.ops, ...) -- returning a real tea.Cmd that
+//     closes over the nil m.ops. Calling that Cmd here calls Add on a nil
+//     session.Interface and panics, exactly as the issue's own transcript
+//     shows ("PANIC: runtime error: invalid memory address or nil pointer
+//     dereference"), failing this test the moment go test's runtime
+//     reports the unrecovered panic.
+//
+// The typed name ("sample") is deliberately free of every letter this
+// package's read-only switch binds (q/r/g/t/w/k/j) -- with the guard
+// removed those letters are consumed by handleAddingKey same as any other
+// rune, but proving that is not the point of this test, and a stray 'r' or
+// 'q' landing in the read-only switch on a guard-present run would issue
+// an unrelated fetch/quit command and make a failure here harder to read.
+func TestNilOpsGuardPreventsAddCommandPanic(t *testing.T) {
+	m := New(func() ([]lane.Lane, error) { return nil, nil })
+	if m.ops != nil {
+		t.Fatal("test setup: Model has ops wired -- this test's whole point is m.ops == nil")
+	}
+
+	updated, cmd := m.Update(key("n"))
+	m = updated.(Model)
+	if cmd != nil {
+		t.Fatal("'n' with nil ops issued a command")
+	}
+
+	for _, r := range "sample" {
+		updated, cmd = m.Update(key(string(r)))
+		m = updated.(Model)
+		if cmd != nil {
+			t.Fatalf("typing %q with nil ops issued a command", string(r))
+		}
+	}
+
+	updated, cmd = m.Update(key("enter"))
+	m = updated.(Model)
+
+	if cmd == nil {
+		// This is the guard doing its job: 'n' never entered opsModeAdding,
+		// so 'enter' had nothing queued to submit. Nothing to run.
+		return
+	}
+
+	// The guard is absent. Running this is the whole point (see the doc
+	// comment above) -- it calls session.Interface.Add on m.ops == nil and
+	// panics, failing this test.
+	cmd()
+	t.Fatal("nil-ops guard did not prevent handleOpsKey from queuing an add command -- running the returned command should have panicked on the nil ops.Add call")
+}
+
 // --- mutation check: break one refusal, prove the test goes red, restore it ---
 //
 // agent-tui#14 acceptance item 7. This is expressed as a single test that
