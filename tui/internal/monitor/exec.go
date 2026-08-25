@@ -138,19 +138,102 @@ func parseLinuxMeminfo(data string) Figure {
 	return KnownFigure((total - free) / total * 100)
 }
 
-// readClaudeProcesses counts `ps aux` lines mentioning "claude"
-// (case-insensitive) -- `ps aux` is the one invocation both BSD/macOS's and
-// GNU's ps accept identically, avoiding the `-eo`/`-Ao` flag split between
-// them (Host's own doc comment on what this figure does and does not
-// claim).
+// claudeExecutableRE matches `ps aux`'s COMMAND column against the actual
+// executable name, not any occurrence anywhere in argv (agent-tui#147: the
+// old rule counted any line containing the substring "claude" anywhere,
+// which meant the desktop app's chrome-native-host helper -- a different
+// product that merely lives under /Applications/Claude.app -- a zsh
+// wrapper spawned only to source ~/.claude/shell-snapshots/..., and even a
+// grep/ugrep whose own arguments searched for "claude" all counted as
+// agents; that last one meant the gauge moved when someone ran a search).
+// "claude.exe" is included deliberately, not excluded as a Windows binary
+// mismatched to this doc's platform: it is the literal executable name
+// @anthropic-ai/claude-code's Node CLI installs as on this machine
+// (`/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe`,
+// confirmed live via `ps aux | grep -i claude`), and every process running
+// it is a real agent.
+var claudeExecutableRE = regexp.MustCompile(`(?i)(^|/)claude(\.exe)?$`)
+
+// isClaudePoolHelper reports whether a claudeExecutableRE-matched line is
+// one of the background-session daemon's own pool helpers rather than an
+// agent: `claude bg-spare`/`claude.exe --bg-spare` (an idle spare process
+// the daemon keeps warm so a new background session doesn't pay cold-start
+// cost) and `claude bg-pty-host`/`claude.exe --bg-pty-host` (the pty
+// bridge a background session runs under), plus `claude(.exe) daemon run`
+// (the daemon process that owns the pool itself). Named explicitly on the
+// issue thread (agent-tui#147, comment at 09:37:22Z, ~90s before this
+// fix's first commit) as "daemon pool infrastructure, not agents" --
+// confirmed against this host's own `ps aux`, where exactly these three
+// shapes appear alongside real agent lines. All three scale with the
+// pool's own size (roughly constant, independent of active work) rather
+// than with agents actually doing anything, so counting them inflates the
+// gauge by a near-constant offset right at the halt threshold this issue
+// exists to protect.
+//
+// Rule chosen, stated deliberately (agent-tui#147 fix-pass item 2):
+// excluded by argv[1] (the subcommand token), matched with any leading
+// dashes stripped so both the bare-subcommand form (`claude bg-spare ...`)
+// and the flag form (`claude.exe --bg-spare ...`) match the same rule,
+// never by a substring of the whole line -- the same discipline
+// claudeExecutableRE already applies to argv[0]. `daemon run` DOES count
+// as a pool helper here, not an agent: it hosts detached background
+// sessions rather than doing work of its own, the same reasoning that
+// excludes bg-spare/bg-pty-host. This is a real trade-off, stated rather
+// than hidden: `daemon run` is also the process an over-eager reaper would
+// want to kill to tear down the whole pool, and excluding it from *this*
+// gauge does not itself protect it from that -- this fix only says it
+// should not read as an agent for the halt-threshold count, not that it is
+// safe to kill.
+var claudePoolHelperRE = regexp.MustCompile(`(?i)^-*(bg-spare|bg-pty-host)$`)
+
+func isClaudePoolHelper(fields []string) bool {
+	if len(fields) < 12 {
+		return false
+	}
+	if claudePoolHelperRE.MatchString(fields[11]) {
+		return true
+	}
+	if strings.EqualFold(fields[11], "daemon") && len(fields) >= 13 && strings.EqualFold(fields[12], "run") {
+		return true
+	}
+	return false
+}
+
+// readClaudeProcesses counts `ps aux` lines whose own executable is
+// "claude"/"claude.exe" -- `ps aux` is the one invocation both BSD/macOS's
+// and GNU's ps accept identically, avoiding the `-eo`/`-Ao` flag split
+// between them (Host's own doc comment on what this figure does and does
+// not claim). Parsing is factored into parseClaudeProcesses below so it is
+// testable against a captured fixture, the same split readSwap already
+// uses for parseDarwinSwap/parseLinuxMeminfo.
 func readClaudeProcesses() Count {
 	out, err := exec.Command("ps", "aux").Output()
 	if err != nil {
 		return Count{}
 	}
+	return parseClaudeProcesses(string(out))
+}
+
+// parseClaudeProcesses counts `ps aux` lines whose COMMAND column's
+// argv[0] -- the first whitespace-delimited token, stripped of any
+// leading path -- matches claudeExecutableRE. Because this reads argv[0]
+// specifically and never the rest of the command line, a process whose
+// *arguments* merely mention "claude" (a search for the string, a path
+// under ~/.claude/) is never counted, and this package never shells a
+// `grep`/`ugrep` of its own into the pipeline to begin with -- there is no
+// self-match to guard against here, only the argv[0]-vs-argv confusion the
+// old substring rule made (agent-tui#147's own issue thread walked back an
+// earlier claim that the monitor counted its own grep; it doesn't, because
+// it has none -- this comment states the corrected reasoning directly
+// rather than repeating the retracted one).
+func parseClaudeProcesses(out string) Count {
 	n := 0
-	for _, line := range strings.Split(string(out), "\n") {
-		if strings.Contains(strings.ToLower(line), "claude") {
+	for _, line := range strings.Split(out, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 11 {
+			continue
+		}
+		if claudeExecutableRE.MatchString(fields[10]) && !isClaudePoolHelper(fields) {
 			n++
 		}
 	}
