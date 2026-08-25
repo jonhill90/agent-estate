@@ -341,21 +341,32 @@ def _label_inside_inline_code(line, label_start, label_end):
 _NEGATION_MARKERS = ("NOT", "DIS", "NO", "N'T")
 _APPROVED_TOKENS = frozenset({"APPROVE", "APPROVED"})
 _REJECTED_TOKENS = frozenset({"REQUEST CHANGES", "REQUEST-CHANGES", "REJECTED", "CHANGES REQUESTED"})
+# agent-supervisor#639: a third decision, RETRACTED -- a reviewing lane
+# withdrawing a verdict IT posted, in the same complete-block shape a real
+# verdict takes (`Verdict: RETRACTED` / `Review-Lane:` / `Reviewed-SHA:`),
+# so a retraction gets #595's "must be a complete unbroken block"
+# discipline, the same as any real decision, rather than free-text prose
+# the gate would have to guess at. `_comment_verdict` is what acts on this
+# value -- see its docstring for how a RETRACTED comment supersedes an
+# earlier decision from the SAME review lane and nothing else.
+_RETRACTED_TOKENS = frozenset({"RETRACTED", "RETRACT"})
 
 
 def _classify_decision_text(decision_text):
     """`decision_text` is already normalised (trailing markup/punctuation
     stripped, whitespace collapsed, upper-cased) by the caller. Returns
-    "approved", "rejected", or None -- None for anything not an exact match
-    to the lists above, including a negated one; a decision text this
-    module cannot classify must not be guessed at, the same fail-closed
-    stance the rest of this module takes."""
+    "approved", "rejected", "retracted", or None -- None for anything not
+    an exact match to the lists above, including a negated one; a decision
+    text this module cannot classify must not be guessed at, the same
+    fail-closed stance the rest of this module takes."""
     if any(marker in decision_text for marker in _NEGATION_MARKERS):
         return None
     if decision_text in _APPROVED_TOKENS:
         return "approved"
     if decision_text in _REJECTED_TOKENS:
         return "rejected"
+    if decision_text in _RETRACTED_TOKENS:
+        return "retracted"
     return None
 
 
@@ -894,12 +905,33 @@ class GithubReviewVerdictSource(VerdictSource):
         return review_result
 
     def _comment_verdict(self, comments, *, repo=None, number=None, head_sha=None, commits=None):
-        """The LAST comment (chronological, as `gh` returns them) that has
-        at least one `Verdict:` line -- a later re-review supersedes an
-        earlier one, the same "current state" reading the review side
-        already gives a fresh review over a stale one. Returns None only
-        when NO comment has a qualifying line at all, so the caller falls
-        back to `review_result` unchanged.
+        """The most recent OPERATIVE comment verdict, scanning newest to
+        oldest (chronological, as `gh` returns `comments`, reversed here) --
+        a later re-review supersedes an earlier one, the same "current
+        state" reading the review side already gives a fresh review over a
+        stale one. Returns None only when nothing operative is found at
+        all, so the caller falls back to `review_result` unchanged.
+
+        agent-supervisor#639: `Verdict: RETRACTED` is a decision like any
+        other -- same complete, unbroken `Verdict:`/`Review-Lane:`/
+        `Reviewed-SHA:` block #595 already requires, nothing loosened for
+        it. Walking newest to oldest, a RETRACTED comment adds its own
+        `Review-Lane:` lane to `retracted_lanes` and is itself skipped --
+        never reported as the PR's verdict -- and every OLDER decision from
+        that SAME lane is then skipped as it is reached, so a retracted
+        APPROVE never resurfaces as operative regardless of how it was
+        posted. A decision from a DIFFERENT lane, or the SAME lane posted
+        AFTER the retraction (a genuine re-review), is untouched --
+        retraction reaches backward only, and only within its own lane, so
+        a reviewer's own later comment can never accidentally void a
+        genuine approval from someone else, or a fresh one of its own
+        (#639's own "a genuine verdict must still count" bar). A retraction
+        whose OWN `Review-Lane:` cannot be parsed can never be trusted to
+        know what it is retracting -- it is reported `unknown` instead of
+        silently dropped, the same refusal shape #232 gives any other
+        malformed trailer; silently dropping it would let the very
+        approval it meant to withdraw stand, exactly the "fails safe only
+        by accident" shape #639 was filed over.
 
         agent-supervisor#198: this used to track only the last comment with
         a RECOGNISED decision, silently skipping past one whose decision
@@ -907,14 +939,15 @@ class GithubReviewVerdictSource(VerdictSource):
         rejection phrased in words this module could not classify would
         have resolved to the reviewer's own earlier, since-superseded
         approval, the same "stale answer silently wins" failure #196 fixed
-        for two lines inside one comment. So the LAST verdict-bearing
-        comment is authoritative even when its decision cannot be
-        classified: an unrecognised or internally-ambiguous last comment
-        returns a decisive `unknown` result naming the unrecognised text,
-        never a silent fall-through to an older answer or to `none` --
-        `none` must mean "nothing was ever posted", not "something was
-        posted that this module could not read" (#192's "never refuses
-        without a reason" property, extended to this path).
+        for two lines inside one comment. So the most recent verdict-
+        bearing comment reached (after any retraction skipping above) is
+        authoritative even when its decision cannot be classified: an
+        unrecognised or internally-ambiguous comment returns a decisive
+        `unknown` result naming the unrecognised text, never a silent
+        fall-through to an older answer or to `none` -- `none` must mean
+        "nothing was ever posted", not "something was posted that this
+        module could not read" (#192's "never refuses without a reason"
+        property, extended to this path).
 
         agent-supervisor#213: a decisive comment verdict is also checked
         for FRESHNESS against `head_sha`, via `_comment_freshness` -- the
@@ -928,17 +961,31 @@ class GithubReviewVerdictSource(VerdictSource):
         and losing the second behind the first cost a whole re-review.
         Both are collected into `problems` and reported TOGETHER in one
         refusal, never one-at-a-time."""
-        last = None
-        for comment in comments:
+        retracted_lanes = set()
+        winner = None  # (comment, scan, unattributed_retraction)
+        for comment in reversed(comments):
             if not isinstance(comment, dict):
                 continue
             scan = _scan_verdict_lines(comment.get("body"))
             if not scan:
                 continue
-            last = (comment, scan)
-        if last is None:
+            decisions = {decision for decision, _ in scan if decision is not None}
+            if len(decisions) == 1 and next(iter(decisions)) == "retracted":
+                lane = _parse_review_lane(comment.get("body"), ledger=self.ledger)
+                if lane is not None:
+                    retracted_lanes.add(lane)
+                    continue
+                winner = (comment, scan, True)
+                break
+            if len(decisions) == 1:
+                lane = _parse_review_lane(comment.get("body"), ledger=self.ledger)
+                if lane is not None and lane in retracted_lanes:
+                    continue
+            winner = (comment, scan, False)
+            break
+        if winner is None:
             return None
-        comment, scan = last
+        comment, scan, unattributed_retraction = winner
         body = comment.get("body")
         author = (comment.get("author") or {}).get("login")
         reviewer_lane = _parse_review_lane(body, ledger=self.ledger)
@@ -947,6 +994,15 @@ class GithubReviewVerdictSource(VerdictSource):
         who = f"@{author}" if author else "an unknown author"
         when = f" at {created_at}" if created_at else ""
         lane = f", review lane {reviewer_lane}" if reviewer_lane else ""
+
+        if unattributed_retraction:
+            return {
+                "verdict": "unknown",
+                "detail": (
+                    f"PR comment retraction by {who}{lane}{when} -- "
+                    f"could not parse lane id from: {raw_lane_line}"
+                ),
+            }
 
         decisions = {decision for decision, _ in scan if decision is not None}
         if len(decisions) == 1:
