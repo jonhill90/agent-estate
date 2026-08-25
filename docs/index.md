@@ -36,3 +36,7 @@ okf_version: "0.2"
 # Other
 
 * [Merge impact inventory — agent-tui + agent-supervisor → agent-estate](merge-impact-inventory-agent-estate.md) - Pre-flight list of everything the agent-tui/agent-supervisor repo merge will break, with a file/line locator per entry -- has no `description` frontmatter key of its own to copy from.
+
+# Measurements
+
+* [OKF index measurement (2026-08-24)](okf-index-measurement-2026-08-24.md) - Does `docs/index.md` hold up as a complete, accurate map of `docs/`? Redoes agent-supervisor#531 through the dispatch path.

@@ -16,10 +16,30 @@ would be independent and fails closed. Per the precedent at
 `agent-supervisor#607` (three agent-tui PRs hit the same defect; decision was
 redo, not launder with `mark-pr-external.sh`), this is a fresh piece of work
 dispatched through the normal path, on a fresh branch from current
-`origin/main`. **Every figure below comes from a command run against this
-worktree at `f21a09e35aa0a40ca6043bbcfbce8788974c8702`** -- none is copied
-from #531's branch or its comments. #531's branch was read for structure
-only (its report's shape, not its numbers).
+`origin/main`. None of the figures below are copied from #531's branch or
+its comments; #531's branch was read for structure only (its report's
+shape, not its numbers).
+
+**Which tree each figure is measured against, stated explicitly.** This
+report is measured in two passes against two different trees, and the
+numbers differ because of it, not because of an arithmetic or method error:
+
+- **Step 1's corpus** (`git ls-files 'docs/*.md' ...`) was captured
+  *before this report file itself existed* -- at
+  `f21a09e35aa0a40ca6043bbcfbce8788974c8702`, the pre-report snapshot of
+  `origin/main`. That step's figures (18 total under `docs/`, 17 excluding
+  the index, 26 tracked `.md` repo-wide) describe that earlier tree only.
+- **Every figure from "Final committed tree" onward** (added below, and in
+  the "What CI does and does not check" / index-completeness re-check) is
+  measured against the tree this PR actually ships -- the one a merge
+  produces, which includes this report file as a tracked `docs/*.md` path.
+  A merge produces the second tree, never the first, so those are the
+  figures that describe reality after this lands.
+
+An independent review at head `a70f9480` (`gh pr view 620 --comments`)
+caught that the first pass's "zero missing entries" claim did not hold
+against the second tree -- see "Self-check: did this measurement commit the
+defect it measures?" below.
 
 **Scope note, stated up front.** #531's own report scoped its OKF-bundle
 replication (frontmatter additions, byte-cost comparisons) to a 10-file
@@ -183,7 +203,8 @@ $ grep -L '^description:' docs/archive/agent-tui/README.md \
 docs/merge-impact-inventory-agent-estate.md
 ```
 
-After the fix:
+After adding those six entries (this section's original state, before the
+self-check below), measured against the pre-report-file tree:
 
 ```
 $ wc -lc docs/index.md
@@ -192,29 +213,84 @@ $ grep -cE '^\* \[' docs/index.md
 17
 ```
 
-**All four properties re-verified against the new file:**
+That pass re-ran the same four checks and found zero duplicates, zero
+dangling links, and zero missing entries -- but "zero missing" was true
+only against the 17-file corpus Step 1 measured, which was captured before
+this report file (`docs/okf-index-measurement-2026-08-24.md`) existed. See
+the self-check immediately below for what that snapshot ordering hid, and
+"Final committed tree" for the numbers that actually describe what ships.
+
+## Self-check: did this measurement commit the defect it measures?
+
+**Yes.** An independent review of this PR at head `a70f9480`
+(`gh pr view 620 --comments`) found that `docs/index.md`, as this PR
+originally left it, did not have an entry for the one file the PR itself
+adds -- this report. That is the exact defect class Step 2's headline
+finding is about (a `.md` file landing under `docs/` with no index entry),
+reproduced in miniature inside the same PR that exists to document and fix
+it:
 
 ```
-$ grep -oE '\]\(([^)]+)\)' docs/index.md | sed -E 's/^\]\(//; s/\)$//' | sort | uniq -d
-# (empty -- no duplicate link targets)
-
-$ for t in $(grep -oE '\]\(([^)]+)\)' docs/index.md | sed -E 's/^\]\(//; s/\)$//'); do
-    git cat-file -e HEAD:docs/$t 2>/dev/null || echo "MISSING docs/$t"
-  done
-# (no output -- every one of the 17 targets resolves with git cat-file -e)
-
 $ comm -23 \
     <(git ls-files 'docs/*.md' 'docs/**/*.md' | grep -v '^docs/index.md$' | sed 's#^docs/##' | sort) \
     <(grep -oE '\]\(([^)]+)\)' docs/index.md | sed -E 's/^\]\(//; s/\)$//' | sort)
-# (empty -- no file under docs/ is missing an entry)
+okf-index-measurement-2026-08-24.md
+```
 
+This happened because Step 1's corpus was captured *before* this file was
+written, and the "17 files, all indexed" claim was never re-checked against
+the tree the commit actually adds this file to. The fix (a new
+`# Measurements` entry in `docs/index.md`) is applied below, and every
+figure from here on is re-measured against the tree this PR ships, not the
+pre-report snapshot. This paragraph is left in place rather than quietly
+edited away, because the fact that a measurement of index-completeness
+initially failed to index itself is more informative than a clean report
+would have been.
+
+## Final committed tree — every figure re-measured against what this PR ships
+
+```
+$ git ls-files '*.md' | wc -l
+27
+$ git ls-files 'docs/*.md' 'docs/**/*.md' | wc -l
+19
+$ git ls-files 'docs/*.md' 'docs/**/*.md' | grep -v '^docs/index.md$' | wc -l
+18
+```
+
+**27 tracked `.md` paths repo-wide** (26 in Step 1's pre-report snapshot,
+plus this report file itself). **19 `.md` files under `docs/` including the
+index** (18 in Step 1's snapshot, plus this file). **18 excluding the
+index** -- the corpus `index.md` is now responsible for covering, one more
+than Step 1's 17.
+
+With the `# Measurements` entry added for this report file:
+
+```
+$ wc -lc docs/index.md
+42 4050 docs/index.md
+$ grep -cE '^\* \[' docs/index.md
+18
+$ grep -oE '\]\(([^)]+)\)' docs/index.md | sed -E 's/^\]\(//; s/\)$//' | sort | uniq -d
+# (empty -- no duplicate link targets)
+$ for t in $(grep -oE '\]\(([^)]+)\)' docs/index.md | sed -E 's/^\]\(//; s/\)$//'); do
+    git cat-file -e HEAD:docs/$t 2>/dev/null || echo "MISSING docs/$t"
+  done
+# (no output -- all 18 targets resolve with git cat-file -e)
+$ comm -23 \
+    <(git ls-files 'docs/*.md' 'docs/**/*.md' | grep -v '^docs/index.md$' | sed 's#^docs/##' | sort) \
+    <(grep -oE '\]\(([^)]+)\)' docs/index.md | sed -E 's/^\]\(//; s/\)$//' | sort)
+# (empty -- no file under docs/, including this report, is missing an entry)
 $ grep -oE '\]\(([^)]+)\)' docs/index.md | sed -E 's/^\]\(//; s/\)$//' | sort | uniq -c | awk '$1!=1'
 # (empty -- every linked file has exactly one entry)
 ```
 
-`docs/index.md` is now **38 lines / 3,831 bytes**, indexing all 17
-non-index `.md` files under `docs/`, zero duplicates, zero dangling links,
-zero missing entries.
+`docs/index.md` is now **42 lines / 4,050 bytes**, indexing all 18
+non-index `.md` files under `docs/` in the tree this PR ships -- including
+this report -- with zero duplicates, zero dangling links, and zero missing
+entries. This is the figure that describes reality after merge; the 17/38-line/
+3,831-byte figures above describe a tree that will not exist once this PR
+lands.
 
 ## What CI does and does not check
 
