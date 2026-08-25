@@ -29,12 +29,24 @@ name: completion-gate
 # whose `pull_request` dispatch GitHub silently drops (any PR it cannot
 # compute `refs/pull/<n>/merge` for -- i.e. `mergeable: CONFLICTING`, see
 # validate.yml's comment for the measured evidence) got no run from this
-# workflow either. `push` with no branch filter dispatches off the pushed
-# SHA directly, independent of merge-ref computation, so it now covers that
-# gap the same way validate.yml's does.
+# workflow either. `push` with no branch filter dispatched off the pushed
+# SHA directly, independent of merge-ref computation, so it covered that
+# gap the same way validate.yml's did.
+#
+# agent-supervisor#579: that unfiltered `push` also duplicated every
+# ordinary (mergeable) PR push against the `pull_request` run of the same
+# SHA -- steady-state `push=1 pull_request=1` on every sampled branch-push
+# SHA. Back to `branches: [main]`, same trade-off validate.yml now
+# documents: `main` still gets a run on every push, PR branches get exactly
+# one (`pull_request`), and a PR branch push that is itself unmergeable
+# (`mergeable: CONFLICTING`) loses the #407 fallback and goes back to zero
+# check runs until a later commit resolves the conflict. Flagged, not
+# silently reintroduced -- see validate.yml's comment and the #579 PR for
+# the full reasoning.
 on:
   pull_request:
   push:
+    branches: [main]
 
 jobs:
   completion-gate-selftest:

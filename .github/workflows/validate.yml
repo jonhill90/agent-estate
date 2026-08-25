@@ -9,15 +9,30 @@ name: Validate
 # every open PR with `mergeable: MERGEABLE` had 4 check runs at its head
 # SHA; the one PR with `mergeable: CONFLICTING` had 0 -- confirmed across
 # every commit it had received, including a fresh empty "nudge" commit
-# pushed specifically to rule out a one-off dropped delivery. `push` (no
-# `branches:` filter, unlike before) dispatches off the pushed SHA directly,
-# never a computed merge ref, so it fires regardless of the PR's mergeable
-# state -- the fix, not a workaround. A PR that's also mergeable still gets
-# a `pull_request` run; ci_gate.py already collapses same-named check runs
-# to the latest, so the harmless duplicate costs CI minutes, not gate logic.
+# pushed specifically to rule out a one-off dropped delivery. `push` used to
+# carry no `branches:` filter at all so it would dispatch off the pushed SHA
+# directly, independent of the merge-ref computation, regardless of the
+# PR's mergeable state.
+#
+# agent-supervisor#579: that unfiltered `push` also fires for every ordinary
+# (mergeable) PR push, on top of the `pull_request` run the same SHA already
+# gets -- measured as steady-state `push=1 pull_request=1` on every sampled
+# branch-push SHA, not an occasional flake. Restricting `push` to `main`
+# fixes that: PR branches now get exactly one run (`pull_request`), and
+# `main` -- which never carries an open PR against itself -- keeps running
+# on every push, squash-merged or not.
+#
+# This DOES narrow the #407 fix: a push to a PR branch that is *itself*
+# unmergeable (`mergeable: CONFLICTING`) no longer has `push` as a fallback,
+# so it is back to zero check runs until a later commit resolves the
+# conflict -- the original #407 symptom, for that one case only. Flagged
+# explicitly rather than silently reintroduced; see the PR that made this
+# change for the reasoning on why that residual gap was accepted rather
+# than closed with a same-SHA dedup guard.
 on:
   pull_request:
   push:
+    branches: [main]
 
 permissions:
   contents: read
