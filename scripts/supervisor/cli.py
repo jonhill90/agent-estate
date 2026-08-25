@@ -1375,6 +1375,16 @@ def main(argv=None):
             "created_at": task["created_at"] if task is not None else None,
             "updated_at": task["updated_at"] if task is not None else None,
             "delivered_at": task["delivered_at"] if task is not None else None,
+            # agent-supervisor#615: `lane-retire.sh` needs the LEDGER's
+            # recorded worktree for this lane, not whatever directory its
+            # pane happens to be sitting in (`tasks.worktree_path`, written
+            # by `record-dispatch` at dispatch time). Exposed as `""` rather
+            # than `None` for a task row that predates the column or that
+            # never had a worktree recorded (a claim-lane placeholder row) --
+            # matches the column's own `NOT NULL DEFAULT ''`, so a caller can
+            # treat "blank" and "column absent" identically instead of
+            # branching on two different falsy shapes.
+            "worktree_path": (task.get("worktree_path") or "") if task is not None else "",
         }
     elif args.command == "claim-lane":
         owner = None if args.owner_pid is None else claim_owner_token(args.owner_pid)

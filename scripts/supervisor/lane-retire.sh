@@ -81,79 +81,25 @@ case "$WINDOW" in
   *)   TARGET="${SESSION}:${WINDOW}" ;;
 esac
 
-# --- 1. resolve the pane's cwd; nothing below can be verified without it --
-PANE_CWD="$(tmux display-message -p -t "$TARGET" '#{pane_current_path}' 2>/dev/null)"
-if [ -z "$PANE_CWD" ] || [ ! -d "$PANE_CWD" ]; then
-  echo "lane-retire: could not read a usable working directory for ${TARGET} -- refusing (cannot verify it is safe to reclaim)" >&2
-  exit 1
-fi
+LANE_RETIRE_CLI="$HERE/cli.py"
+LANE_RETIRE_PYTHON="${LANE_RETIRE_PYTHON:-python3}"
 
-# --- 2. refuse on uncommitted changes -- worktree.sh safe_remove's own check
-if ! git -C "$PANE_CWD" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-  echo "lane-retire: ${PANE_CWD} (${TARGET}) is not inside a git worktree -- refusing (cannot verify it holds no unsaved work)" >&2
-  exit 1
-fi
-STATUS="$(git -C "$PANE_CWD" status --porcelain 2>&1)"
-if [ -n "$STATUS" ]; then
-  echo "lane-retire: ${TARGET}'s worktree ($PANE_CWD) has uncommitted changes -- refusing to retire" >&2
-  echo "$STATUS" >&2
-  exit 1
-fi
-
-# --- 3. refuse on commits nobody else has a copy of -----------------------
-# Same question worktree.sh's detached-HEAD check answers for `gc` -- "does
-# any ref outside this tree already contain HEAD" -- but asked of the
-# upstream specifically, since the brief calls out UNPUSHED, not merely
-# unmerged: a branch with a real PR open on `origin` is not what this guard
-# exists to catch, but one whose tip only this worktree has a copy of is.
-if ! HEAD_REV="$(git -C "$PANE_CWD" rev-parse HEAD 2>&1)"; then
-  echo "lane-retire: ${TARGET}'s worktree ($PANE_CWD) has no readable HEAD -- refusing to retire" >&2
-  echo "$HEAD_REV" >&2
-  exit 1
-fi
-BRANCH="$(git -C "$PANE_CWD" rev-parse --abbrev-ref HEAD 2>/dev/null)"
-UPSTREAM="$(git -C "$PANE_CWD" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"
-if [ -n "$UPSTREAM" ]; then
-  COMPARE_AGAINST="$UPSTREAM"
-elif [ -n "$BRANCH" ] && [ "$BRANCH" != HEAD ] \
-  && git -C "$PANE_CWD" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
-  # No tracking branch recorded, but a same-named branch already exists on
-  # origin -- compare against that rather than declare every commit unpushed.
-  COMPARE_AGAINST="origin/$BRANCH"
-else
-  COMPARE_AGAINST=""
-fi
-if [ -n "$COMPARE_AGAINST" ]; then
-  UNPUSHED="$(git -C "$PANE_CWD" rev-list --count "${COMPARE_AGAINST}..HEAD" 2>&1)"
-  if ! [[ "$UNPUSHED" =~ ^[0-9]+$ ]]; then
-    echo "lane-retire: could not compare ${TARGET}'s worktree against ${COMPARE_AGAINST} -- refusing to retire a lane whose push state is unreadable" >&2
-    echo "$UNPUSHED" >&2
-    exit 1
-  fi
-  if [ "$UNPUSHED" != 0 ]; then
-    echo "lane-retire: ${TARGET}'s worktree ($PANE_CWD) has $UNPUSHED commit(s) not on ${COMPARE_AGAINST} -- refusing to retire" >&2
-    git -C "$PANE_CWD" log --oneline "${COMPARE_AGAINST}..HEAD" 2>/dev/null | head -5 >&2
-    exit 1
-  fi
-else
-  # No upstream, and no same-named branch on origin either: HEAD is either on
-  # a detached checkout or a local-only branch nobody has a copy of. Fail
-  # closed exactly as worktree.sh's own detached-HEAD guard does -- an
-  # unreadable push state is not a pushed one.
-  echo "lane-retire: ${TARGET}'s worktree ($PANE_CWD) has no upstream and no matching branch on origin (HEAD $HEAD_REV) -- refusing to retire a lane whose commits nobody else has a copy of" >&2
-  exit 1
-fi
-
-# --- 4. never the supervisor's own window ----------------------------------
-# Same identity-based guard lane-done.sh applies before its own rename,
-# reused verbatim rather than reimplemented (agent-supervisor#348/#239): a
-# malformed target resolving to the supervisor's window must be refused on
-# window IDENTITY, never on name.
+# --- 1. resolve the window's identity; nothing below can be verified
+#        without it -- moved ahead of every git guard (agent-supervisor#615)
+#        so the supervisor's-own-window refusal below never has to touch git
+#        first, and so LANE_ID exists before the ledger lookup that replaces
+#        it needs one.
 CURRENT_IDX="$(tmux display-message -p -t "$TARGET" '#{window_index}' 2>/dev/null)"
 if [ -z "$CURRENT_IDX" ]; then
   echo "lane-retire: could not read the current window index of ${TARGET} -- refusing to retire" >&2
   exit 1
 fi
+
+# --- 2. never the supervisor's own window ----------------------------------
+# Same identity-based guard lane-done.sh applies before its own rename,
+# reused verbatim rather than reimplemented (agent-supervisor#348/#239): a
+# malformed target resolving to the supervisor's window must be refused on
+# window IDENTITY, never on name.
 if SUPERVISOR_WID="$(supervisor_window_id "$SESSION" 2>/dev/null)" && [ -n "$SUPERVISOR_WID" ] \
   && [ "$(tmux display-message -p -t "$TARGET" '#{window_id}' 2>/dev/null)" = "$SUPERVISOR_WID" ]; then
   echo "lane-retire: ${TARGET} resolves to the supervisor's own window (id ${SUPERVISOR_WID}) -- refusing to retire it" >&2
@@ -163,24 +109,131 @@ elif [ -z "${SUPERVISOR_WID:-}" ] && [ "$CURRENT_IDX" = "${LANES_SUPERVISOR_WIND
   exit 1
 fi
 
-# --- 5. unregister the lane from the ledger --------------------------------
+LANE_ID="${SESSION}:${CURRENT_IDX}"
+
+# --- 3. resolve the lane's WORKTREE FROM THE LEDGER, never from the pane --
+# agent-supervisor#615: every guard below used to run against
+# `tmux display-message ... pane_current_path` -- whatever directory the
+# pane happened to be sitting in at the moment retire was called. That is an
+# OBSERVED fact tmux produces as a byproduct, not a DECIDED one this system
+# wrote (CLAUDE.md invariant 1) -- a pane resting in the shared checkout (its
+# permanently-untracked `.worktrees/`/`unused/` entries) jammed retire for
+# every lane whose pane happened to be parked there, and the inverse is
+# worse: a pane resting in some clean, unrelated directory passed every
+# check while the lane's REAL worktree held uncommitted or unpushed work.
+#
+# `tasks.worktree_path`, written by `record-dispatch` at dispatch time, is
+# the authoritative record of where this lane's work actually lives --
+# `lane-diagnostic` exposes it for exactly this lookup. A lane with no open
+# task, or an open task with no worktree recorded (a claim-lane placeholder
+# row, or a task that predates a worktree ever being assigned), gets a blank
+# reading and IS REFUSED here rather than falling back to the pane's cwd --
+# "cannot resolve the tree to protect" is not the same finding as "the tree
+# is clean", and this script fails closed on it exactly as its own header
+# always has for an unreadable state.
+if ! DIAG="$("$LANE_RETIRE_PYTHON" "$LANE_RETIRE_CLI" lane-diagnostic --lane "$LANE_ID" 2>&1)"; then
+  echo "lane-retire: could not read the ledger to resolve ${LANE_ID}'s worktree -- refusing to retire (ambiguous, not the same as 'no worktree recorded')" >&2
+  echo "$DIAG" | sed 's/^/  /' >&2
+  exit 1
+fi
+diag_field() {
+  # Same tiny extractor dispatch.sh's own json_field uses -- this script has
+  # no other JSON consumer, so it is kept local rather than sourced from
+  # dispatch.sh, which is not a library other scripts are meant to source.
+  local key="$1" json="$2"
+  sed -n "s/.*\"$key\":\\([^,}]*\\).*/\\1/p" <<<"$json" | head -1 | sed -E 's/^"//; s/"$//'
+}
+DIAG_TASK="$(diag_field task "$DIAG")"
+
+# A lane with no OPEN task -- never dispatched, or already freed by hand --
+# has no worktree of its own to protect; step 6 below already treats that as
+# a no-op release, and the guards have nothing to check it against. Only a
+# lane WITH an open task, and that task's worktree unresolvable, is the
+# unverifiable case this issue asks to fail closed on.
+if [ -n "$DIAG_TASK" ] && [ "$DIAG_TASK" != null ]; then
+  WORKTREE="$(diag_field worktree_path "$DIAG")"
+  if [ -z "$WORKTREE" ] || [ "$WORKTREE" = null ]; then
+    echo "lane-retire: ${LANE_ID}'s open task ($DIAG_TASK) has no worktree recorded in the ledger -- refusing to retire (cannot verify it holds no unsaved work)" >&2
+    exit 1
+  fi
+  if [ ! -d "$WORKTREE" ]; then
+    echo "lane-retire: ${LANE_ID}'s recorded worktree ($WORKTREE) does not exist on disk -- refusing to retire" >&2
+    exit 1
+  fi
+
+  # --- 4. refuse on uncommitted changes -- worktree.sh safe_remove's own check
+  if ! git -C "$WORKTREE" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    echo "lane-retire: ${WORKTREE} (${LANE_ID}'s recorded worktree) is not inside a git worktree -- refusing (cannot verify it holds no unsaved work)" >&2
+    exit 1
+  fi
+  STATUS="$(git -C "$WORKTREE" status --porcelain 2>&1)"
+  if [ -n "$STATUS" ]; then
+    echo "lane-retire: ${TARGET}'s worktree ($WORKTREE) has uncommitted changes -- refusing to retire" >&2
+    echo "$STATUS" >&2
+    exit 1
+  fi
+
+  # --- 5. refuse on commits nobody else has a copy of -----------------------
+  # Same question worktree.sh's detached-HEAD check answers for `gc` -- "does
+  # any ref outside this tree already contain HEAD" -- but asked of the
+  # upstream specifically, since the brief calls out UNPUSHED, not merely
+  # unmerged: a branch with a real PR open on `origin` is not what this guard
+  # exists to catch, but one whose tip only this worktree has a copy of is.
+  if ! HEAD_REV="$(git -C "$WORKTREE" rev-parse HEAD 2>&1)"; then
+    echo "lane-retire: ${TARGET}'s worktree ($WORKTREE) has no readable HEAD -- refusing to retire" >&2
+    echo "$HEAD_REV" >&2
+    exit 1
+  fi
+  BRANCH="$(git -C "$WORKTREE" rev-parse --abbrev-ref HEAD 2>/dev/null)"
+  UPSTREAM="$(git -C "$WORKTREE" rev-parse --abbrev-ref --symbolic-full-name '@{u}' 2>/dev/null)"
+  if [ -n "$UPSTREAM" ]; then
+    COMPARE_AGAINST="$UPSTREAM"
+  elif [ -n "$BRANCH" ] && [ "$BRANCH" != HEAD ] \
+    && git -C "$WORKTREE" show-ref --verify --quiet "refs/remotes/origin/$BRANCH"; then
+    # No tracking branch recorded, but a same-named branch already exists on
+    # origin -- compare against that rather than declare every commit unpushed.
+    COMPARE_AGAINST="origin/$BRANCH"
+  else
+    COMPARE_AGAINST=""
+  fi
+  if [ -n "$COMPARE_AGAINST" ]; then
+    UNPUSHED="$(git -C "$WORKTREE" rev-list --count "${COMPARE_AGAINST}..HEAD" 2>&1)"
+    if ! [[ "$UNPUSHED" =~ ^[0-9]+$ ]]; then
+      echo "lane-retire: could not compare ${TARGET}'s worktree against ${COMPARE_AGAINST} -- refusing to retire a lane whose push state is unreadable" >&2
+      echo "$UNPUSHED" >&2
+      exit 1
+    fi
+    if [ "$UNPUSHED" != 0 ]; then
+      echo "lane-retire: ${TARGET}'s worktree ($WORKTREE) has $UNPUSHED commit(s) not on ${COMPARE_AGAINST} -- refusing to retire" >&2
+      git -C "$WORKTREE" log --oneline "${COMPARE_AGAINST}..HEAD" 2>/dev/null | head -5 >&2
+      exit 1
+    fi
+  else
+    # No upstream, and no same-named branch on origin either: HEAD is either on
+    # a detached checkout or a local-only branch nobody has a copy of. Fail
+    # closed exactly as worktree.sh's own detached-HEAD guard does -- an
+    # unreadable push state is not a pushed one.
+    echo "lane-retire: ${TARGET}'s worktree ($WORKTREE) has no upstream and no matching branch on origin (HEAD $HEAD_REV) -- refusing to retire a lane whose commits nobody else has a copy of" >&2
+    exit 1
+  fi
+fi
+
+# --- 6. unregister the lane from the ledger --------------------------------
 # Same call `lane-done.sh` makes on ordinary completion (agent-dotfiles#194):
 # the ledger release is the authoritative operation, best effort and never
 # fatal -- a lane the ledger never had an open task for (never dispatched,
 # or already freed by hand) is not an error here, just nothing to release.
-LANE_ID="${SESSION}:${CURRENT_IDX}"
-LANE_RETIRE_CLI="$HERE/cli.py"
-if ! LEDGER_OUT=$("${LANE_RETIRE_PYTHON:-python3}" "$LANE_RETIRE_CLI" \
+if ! LEDGER_OUT=$("$LANE_RETIRE_PYTHON" "$LANE_RETIRE_CLI" \
     record-completion --lane "$LANE_ID" \
     --note "lane-retire: administrative retirement of ${TARGET}" 2>&1); then
   echo "lane-retire: no open task to release for $LANE_ID (already free, or never dispatched) -- continuing to restore the window" >&2
   sed 's/^/  /' <<<"$LEDGER_OUT" >&2
 fi
 
-# --- 6. rename back to free-N -- NEVER kill the window ----------------------
+# --- 7. rename back to free-N -- NEVER kill the window ----------------------
 # Cosmetic, same as lane-done.sh's own rename-back: the ledger release above
 # is what actually frees the lane. Re-read the index rather than trust
-# $CURRENT_IDX from step 4 -- renumber-windows can move it between here and
+# $CURRENT_IDX from step 1 -- renumber-windows can move it between here and
 # there, and the window is what this must still be naming correctly.
 FREE_IDX="$(tmux display-message -p -t "$TARGET" '#{window_index}' 2>/dev/null)"
 if [ -z "$FREE_IDX" ]; then
