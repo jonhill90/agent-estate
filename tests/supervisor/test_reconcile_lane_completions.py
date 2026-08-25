@@ -1,3 +1,4 @@
+import hashlib
 import json
 import subprocess
 import sys
@@ -113,6 +114,62 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         self.assertEqual([], report["unresolved"])
         self.assertEqual([], report["errors"])
         self.assertEqual(1, len(runner.calls))  # one call per SESSION, not per task
+
+    def test_sweep_adopts_an_orphaned_result_file_with_no_recorded_hash(self):
+        """agent-supervisor#623: this sweep exists precisely to rescue a
+        lane that finished without signalling (#155), but it could not
+        rescue THIS shape of that same failure -- a lane whose real result
+        file already sits on disk (a prior `complete()` wrote the file and
+        crashed before the row update that follows a write) with no row
+        that ever recorded a hash for it. `_complete_observed` writes its
+        own fabricated note text, which will not match the orphaned file's
+        bytes -- it must adopt the file already there rather than die on
+        the immutability guard, the exact `as531-rev620b` specimen the
+        issue measured live."""
+        self.dispatch("as623-orphaned")
+        orphaned = b"# Result\n\nThe lane's real, already-written report.\n"
+        (self.ledger.results_dir / "as623-orphaned.md").write_bytes(orphaned)
+        runner = FakeLanesRunner(
+            {"agent-supervisor": [{"window": 2, "state": "free", "idle_seconds": 400}]}
+        )
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, idle_after=300).sweep()
+
+        self.assertEqual(["as623-orphaned"], report["completed"])
+        self.assertEqual([], report["errors"])
+        task = self.ledger.get_task("as623-orphaned")
+        self.assertEqual("complete", task["status"])
+        self.assertEqual(hashlib.sha256(orphaned).hexdigest(), task["result_sha256"])
+        # The orphaned file itself was never touched.
+        self.assertEqual(orphaned, Path(task["result_path"]).read_bytes())
+
+    def test_sweep_still_refuses_a_genuine_overwrite_once_a_hash_is_recorded(self):
+        """The direction the immutability guard exists for must survive
+        through THIS caller too, not only `record-completion` -- both hit
+        `Ledger.complete` and both must keep refusing a real conflict.
+        Calls `_complete_observed` directly (mirroring `test_mutation_
+        ignoring_accepted_at_...` below) so the second, genuinely
+        conflicting write is forced rather than short-circuited by the
+        row already reading `complete`."""
+        self.dispatch("as623-recorded")
+        task = self.ledger.get_task("as623-recorded")
+        reconciler = LaneCompletionReconciler(self.ledger, runner=FakeLanesRunner({}), idle_after=300)
+        report = {"completed": [], "errors": [], "unresolved": []}
+        reconciler._complete_observed(task, session="agent-supervisor", idle_seconds=400, now=1_400, report=report)
+        self.assertEqual(["as623-recorded"], report["completed"])
+        recorded = self.ledger.get_task("as623-recorded")
+
+        # A later, genuinely different note -- the same row, re-read fresh --
+        # must still be refused, not silently adopted over the recorded hash.
+        report2 = {"completed": [], "errors": [], "unresolved": []}
+        reconciler._complete_observed(
+            recorded, session="agent-supervisor", idle_seconds=999, now=9_999, report=report2
+        )
+        self.assertEqual([], report2["completed"])
+        self.assertEqual(1, len(report2["errors"]))
+        self.assertIn("immutable result", report2["errors"][0]["error"])
+        reloaded = self.ledger.get_task("as623-recorded")
+        self.assertEqual(recorded["result_sha256"], reloaded["result_sha256"])
 
     def test_never_accepted_task_is_failed_not_completed(self):
         """agent-supervisor#193's own regression: `at25-rev33` was dispatched

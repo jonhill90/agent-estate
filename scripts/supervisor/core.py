@@ -3261,7 +3261,7 @@ class Ledger:
             record["reaped_pid"] = match.group("pid")
             return record
 
-    def _write_result(self, task_id, result, *, suffix=""):
+    def _write_result(self, task_id, result, *, suffix="", known_hash=None):
         """`suffix` (agent-supervisor#401) lets a caller that is NOT the
         lane's own report -- `fail_unaccepted`/`fail_stale_delivery`
         stamping a verdict the lane never asserted itself -- land in a
@@ -3275,6 +3275,23 @@ class Ledger:
         ad275-fix275 specimen, where exactly that already-free canonical
         slot exists to be squatted on. `complete()` never passes a suffix:
         an OBSERVED completion is what `<task_id>.md` is for.
+
+        `known_hash` (agent-supervisor#623): the ROW's own already-recorded
+        `result_sha256`, fetched by the caller before this write, or `None`
+        if the row has never recorded one. This is what tells a genuine
+        overwrite attempt (the row already has a recorded result and the
+        caller now supplies different bytes -- still refuse, that is what
+        the immutability guard is for) apart from an ORPHANED file: one
+        that is already on disk but that no row has ever recorded a hash
+        for, because a prior call to this same method wrote it and then
+        crashed before the row update that follows a write ever ran
+        (`complete()`/`fail_unaccepted`/etc. each write the file, then
+        update the row, in that order, and are not atomic across the two).
+        In the orphan case the file on disk IS the lane's own genuine
+        result -- there is no recorded hash to compare the caller's bytes
+        against, so refusing would strand the task forever (#623) even
+        though nothing has actually been overwritten. Adopt the file's own
+        hash instead of raising.
         """
         if not isinstance(result, bytes):
             raise TypeError("result must be bytes")
@@ -3285,8 +3302,15 @@ class Ledger:
         digest = hashlib.sha256(result).hexdigest()
         destination = self.results_dir / f"{task_id}{suffix}.md"
         if destination.exists():
-            if hashlib.sha256(destination.read_bytes()).hexdigest() != digest:
-                raise ValueError("immutable result conflicts with existing content")
+            existing_digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+            if existing_digest != digest:
+                if known_hash is not None:
+                    raise ValueError("immutable result conflicts with existing content")
+                # No row has ever recorded a result for this task -- the file
+                # on disk predates any completion this ledger row knows
+                # about and is the lane's genuine, orphaned output. Adopt it
+                # rather than treat the caller's bytes as canonical.
+                return destination, existing_digest
             return destination, digest
         descriptor, temporary_name = tempfile.mkstemp(prefix=f".{task_id}{suffix}.", dir=self.results_dir)
         try:
@@ -3320,7 +3344,7 @@ class Ledger:
                     raise ValueError("unknown task")
                 if existing["pane_nonce"] != pane_nonce:
                     raise ValueError("pane incarnation does not match task")
-            destination, digest = self._write_result(task_id, result)
+            destination, digest = self._write_result(task_id, result, known_hash=existing["result_sha256"])
             self._fail(failpoint, "after_result")
             now = int(self.clock())
             with self._transaction() as connection:
@@ -3397,7 +3421,9 @@ class Ledger:
                     raise ValueError("unknown task")
                 if existing["pane_nonce"] != pane_nonce:
                     raise ValueError("pane incarnation does not match task")
-            destination, digest = self._write_result(task_id, result, suffix=".reconcile")
+            destination, digest = self._write_result(
+                task_id, result, suffix=".reconcile", known_hash=existing["result_sha256"]
+            )
             self._fail(failpoint, "after_result")
             now = int(self.clock())
             with self._transaction() as connection:
@@ -3488,7 +3514,9 @@ class Ledger:
                     raise ValueError("unknown task")
                 if existing["pane_nonce"] != pane_nonce:
                     raise ValueError("pane incarnation does not match task")
-            destination, digest = self._write_result(task_id, result, suffix=".reconcile")
+            destination, digest = self._write_result(
+                task_id, result, suffix=".reconcile", known_hash=existing["result_sha256"]
+            )
             self._fail(failpoint, "after_result")
             now = int(self.clock())
             with self._transaction() as connection:
@@ -3558,7 +3586,9 @@ class Ledger:
                     raise ValueError("unknown task")
                 if existing["pane_nonce"] != pane_nonce:
                     raise ValueError("pane incarnation does not match task")
-            destination, digest = self._write_result(task_id, result, suffix=".reconcile")
+            destination, digest = self._write_result(
+                task_id, result, suffix=".reconcile", known_hash=existing["result_sha256"]
+            )
             self._fail(failpoint, "after_result")
             now = int(self.clock())
             with self._transaction() as connection:
