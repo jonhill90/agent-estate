@@ -39,6 +39,24 @@ type Model struct {
 
 	theme       theme.Theme
 	themeNotice string
+
+	// section is which of S11's five nav routes is currently active --
+	// internal/nav.Item.ID values ("admin-services", "admin-profiles",
+	// "admin-users", "dependencies", "settings"), see Section* below.
+	// Empty (the New() default) means "not wired to a route" and renders
+	// every section, the same all-five behaviour this Model has always had
+	// -- kept as the default so every existing standalone caller and test
+	// built before agent-tui#150 keeps passing unchanged. A caller wired
+	// into internal/shell's nav (WithSection) narrows View to just the one
+	// section the sidebar highlighted, which is agent-tui#150's actual fix:
+	// the five Admin nav entries are five real hill90 web destinations
+	// (nav-items.ts's own /admin/services, /admin/profiles, /admin/users,
+	// /harness/tools, /settings hrefs -- ui_fidelity=1:1, SPEC-shell.md S1),
+	// so collapsing them into one nav entry would break that fidelity
+	// requirement; the fix instead makes the content pane actually respond
+	// to which of the five is selected, using data this Model already
+	// fetches (no new fabricated section).
+	section string
 }
 
 // New builds a Model with fetch wired in.
@@ -53,6 +71,37 @@ func (m Model) WithTheme(th theme.Theme, notice string) Model {
 	m.themeNotice = notice
 	return m
 }
+
+// Section* are the internal/nav.Item.ID values for S11's five nav
+// destinations -- named here so internal/shell can pass one to WithSection
+// without either package guessing at the other's string literals.
+const (
+	SectionServices     = "admin-services"
+	SectionProfiles     = "admin-profiles"
+	SectionUsers        = "admin-users"
+	SectionDependencies = "dependencies"
+	SectionSettings     = "settings"
+)
+
+// WithSection returns a copy of m scoped to id, one of the Section*
+// constants above -- the shell's own routeNavKey calls this (mirroring
+// syncExternal's WithDestination) whenever an Admin nav child is
+// confirmed, so View renders only the section that was actually selected
+// instead of always rendering all five (agent-tui#150). An id this Model
+// does not recognize (including "") falls back to rendering every
+// section -- the pre-agent-tui#150 behaviour -- rather than rendering
+// nothing, matching the "absence is a typed value, never a bare zero"
+// pattern this package's own Snapshot doc comment already follows: an
+// unrecognized section is "not scoped," not "scoped to emptiness."
+func (m Model) WithSection(id string) Model {
+	m.section = id
+	return m
+}
+
+// Section reports which of Section* m is currently scoped to, or "" if
+// unscoped (rendering all five). Exported so a caller or test can assert
+// on it without depending on View's rendered string.
+func (m Model) Section() string { return m.section }
 
 // Snapshot returns m's current Snapshot -- exported so a caller (a future
 // shell wiring, or this package's own teatest) can assert on it without

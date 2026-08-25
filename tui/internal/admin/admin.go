@@ -32,6 +32,18 @@
 //     Snapshot.ProfilesNote/UsersNote say so explicitly rather than
 //     rendering an empty, "checked, zero" list for a concept this estate
 //     does not have at all.
+//
+// The five areas above map 1:1 onto S11's five nav.Build() routes
+// ("admin-services", "admin-profiles", "admin-users", "dependencies",
+// "settings" -- Section* in model.go), the same five hrefs hill90's own
+// nav-items.ts carries (/admin/services, /admin/profiles, /admin/users,
+// /harness/tools, /settings). agent-tui#150 found the content pane did not
+// respond to which of the five was selected -- Model.View rendered all
+// five stacked regardless of route. Given that fidelity requirement and
+// this existing per-area split, the fix (Model.WithSection) narrows View
+// to the one selected area rather than collapsing the five nav entries
+// into one: each area was already real, distinct data this package
+// fetches, not a title to invent.
 package admin
 
 // Service is one docker container this estate's MCP servers depend on.

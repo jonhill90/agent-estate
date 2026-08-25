@@ -176,11 +176,12 @@ const (
 // "skills" -> PaneSkills (S8), "mcp-servers" -> PaneMCPServers (S9),
 // "connections" -> PaneConnectors (S10). S11's own five nav leaves
 // ("admin-services", "admin-profiles", "admin-users", "dependencies",
-// "settings") all map to the SAME PaneAdmin -- internal/admin.Model
-// renders all five of S11's named sections in one view rather than a
-// fifth of a view per route, so whichever admin-group item is confirmed,
-// the content pane shows the one real admin.Model, not five separate
-// screens for a section split that exists on the web only.
+// "settings") all map to the SAME PaneAdmin -- one internal/admin.Model
+// instance, not five -- because the pane, not the routing table, is what
+// tells the five apart: routeNavKey's syncAdmin call scopes that shared
+// Model to whichever child was actually confirmed (admin.WithSection,
+// agent-tui#150), so the content pane renders only that one section
+// rather than always stacking all five.
 var routeToPane = map[string]Pane{
 	"home":           PaneHome,
 	"tasks":          PaneBoard,
@@ -896,6 +897,14 @@ func (m Model) routeNavKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 			if p == PaneExternal {
 				m = m.syncExternal(n.Item)
 			}
+			// Admin's five nav children are one shared admin.Model
+			// (routeToPane's own doc comment), so the selected child's ID
+			// has to be pushed into it the same way, or the content pane
+			// cannot tell which of the five was actually confirmed
+			// (agent-tui#150) -- see syncAdmin.
+			if p == PaneAdmin {
+				m = m.syncAdmin(n.Item)
+			}
 			return syncCursor(m), nil
 		}
 		// A real destination with no pane built yet renders a stub, so every
@@ -1301,6 +1310,17 @@ func (m Model) contentView() string {
 // than a blank screen, so a missed call is visible instead of silent.
 func (m Model) syncExternal(item nav.Item) Model {
 	m.external = m.external.WithDestination(item.Label, item.URL)
+	return m
+}
+
+// syncAdmin scopes the shared admin.Model to whichever of S11's five nav
+// children was just confirmed (item.ID is already one of admin.Section*'s
+// values -- routeToPane's map keys and admin.Section*'s constants are both
+// nav.Build()'s own "admin-services"/"admin-profiles"/"admin-users"/
+// "dependencies"/"settings" IDs), so the content pane renders only that
+// section instead of always rendering all five (agent-tui#150).
+func (m Model) syncAdmin(item nav.Item) Model {
+	m.admin = m.admin.WithSection(item.ID)
 	return m
 }
 

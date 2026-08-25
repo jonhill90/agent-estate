@@ -168,6 +168,48 @@ func TestClickingGroupHeaderExpandsThenChildRowNavigates(t *testing.T) {
 	}
 }
 
+// TestClickingEachAdminChildScopesTheSharedAdminPane is agent-tui#150's own
+// regression test at the shell-integration layer (internal/admin's own
+// model_test.go covers the rendering half): all five Admin children map to
+// the SAME PaneAdmin (routeToPane's own doc comment), so this proves the
+// content pane actually distinguishes which one was clicked rather than
+// showing the same composite pane five times over.
+func TestClickingEachAdminChildScopesTheSharedAdminPane(t *testing.T) {
+	m := testModel()
+	m, _ = m.resize(tea.WindowSizeMsg{Width: 160, Height: 40})
+	_ = m.View()
+
+	x, y := locate(t, m, "Admin")
+	m, ok := clickAt(t, m, x, y)
+	if !ok {
+		t.Fatalf("click on \"Admin\" header was not handled")
+	}
+	if !sidebarHas(m, "Services") {
+		t.Fatalf("\"Admin\" did not expand after being clicked:\n%s", m.View())
+	}
+
+	children := []string{"Services", "Profiles", "Users", "Dependencies", "Settings"}
+	views := make(map[string]string, len(children))
+	for _, label := range children {
+		_ = m.View() // re-scan zones: content changed, so labels may have moved.
+		x, y := locate(t, m, label)
+		next, ok := clickAt(t, m, x, y)
+		if !ok || next.active != PaneAdmin {
+			t.Fatalf("click %s: handled=%v active=%v", label, ok, next.active)
+		}
+		m = next
+		views[label] = m.View()
+	}
+
+	seen := map[string]string{}
+	for label, out := range views {
+		if prior, ok := seen[out]; ok {
+			t.Fatalf("clicking %q and %q rendered byte-identical content panes:\n%s", label, prior, out)
+		}
+		seen[out] = label
+	}
+}
+
 // A click nowhere near the nav must NOT be swallowed -- it has to fall
 // through to the focused pane, or panes with their own clickables go dead.
 // This coordinate is deliberately well past the sidebar's own fixed width
