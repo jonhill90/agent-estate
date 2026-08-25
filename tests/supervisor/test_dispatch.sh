@@ -3184,9 +3184,10 @@ guarded = '''      if [ $# -lt 2 ]; then
         exit 1
       fi
       REVIEWS_PR="$2"
+      REVIEWS_PR_EXPLICIT=1
       shift 2'''
 assert text.count(guarded) == 1, "flag-value guard not found or not unique -- script shape changed"
-text = text.replace(guarded, '      REVIEWS_PR="${2:-}"\n      shift 2', 1)
+text = text.replace(guarded, '      REVIEWS_PR="${2:-}"\n      REVIEWS_PR_EXPLICIT=1\n      shift 2', 1)
 here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
 assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
 text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
