@@ -473,9 +473,13 @@ mkpatch add0add0add0add0add0add0add0add0add0add0 extra 10 "new line"
 # comment.author.login == pr.author.login is a constant. These PRs exercise
 # lane identity instead: the PR author comes from the ledger's author-issue-lane
 # lookup, and the reviewing lane comes from an explicit Review-Lane stamp in the
-# verdict comment. PR13 keeps the #55 behaviour (a `**Verdict:` comment still
-# counts) while refusing to guess independence when the comment has no lane
-# stamp.
+# verdict comment. PR13 USED TO keep the #55 behaviour (a `**Verdict:` comment
+# still counts, independence just stays unknown without a lane stamp) -- #595's
+# decision (director's final comment on that issue) deliberately retires that:
+# an operative verdict now requires the complete Verdict:/Review-Lane:/
+# Reviewed-SHA: block, so a bare, unstamped `**Verdict:` line no longer counts
+# as a decision at all. PR13 is kept as the fixture proving that, not proving
+# #55 anymore -- see its own assertions below for what changed and why.
 cat > "$OK/fixtures/pr_view_11.json" <<'S'
 {"headRefName":"fix/211-comment-verdict-other-lane","closingIssuesReferences":[{"number":211}],"commits":[]}
 S
@@ -762,14 +766,25 @@ chk "PR12 comment verdict from the author lane is not independent" \
 grep -q "NOT independent -- author lane t:3 reviewed its own PR" <<<"$(jq -r '.verdict_detail' <<<"$p12")" \
   && ok "PR12 detail names the self-review by lane" \
   || bad "PR12 detail names the self-review by lane" "$p12"
+# agent-supervisor#595 RETIRES #55's contract here, deliberately (director's
+# final decision comment on #595): an operative verdict now requires the
+# complete Verdict:/Review-Lane:/Reviewed-SHA: block, so a bare, unstamped
+# `**Verdict: APPROVE**` with nothing else no longer counts as a decision at
+# all -- it used to read "approved" with independence left "unknown"; #595
+# reads it "none", identically to a PR nobody has ever reviewed. That is a
+# real loss of information (a genuine, if unstamped, decision now looks
+# exactly like silence) which #595's own decision thread accepts as the cost
+# of closing the prose-shadowing family (#531/#553/#595's own bold-quote
+# incidents) -- #55/#63 are never mentioned there, so this was very likely an
+# unconsidered side effect rather than a deliberately intended one, but it is
+# #595's decision text, not a bug in this PR, that produces it.
 p13=$(lp 13)
-chk "PR13 unstamped comment verdict still counts as a verdict (#55)" \
-  "approved" "$(jq -r '.verdict' <<<"$p13")"
-chk "PR13 unstamped comment verdict reports independence unknown, not not-independent" \
+chk "PR13 unstamped comment verdict is retired by #595 -- reads none, not approved (was #55)" \
+  "none" "$(jq -r '.verdict' <<<"$p13")"
+chk "PR13 unstamped comment verdict_independent is null, indistinguishable from never-reviewed" \
   "null" "$(jq -r '.verdict_independent' <<<"$p13")"
-grep -q "independence unknown" <<<"$(jq -r '.verdict_detail' <<<"$p13")" \
-  && ok "PR13 detail says independence unknown" \
-  || bad "PR13 detail says independence unknown" "$p13"
+chk "PR13 detail is empty, exactly like a never-reviewed PR -- #595 leaves no trace an unstamped decision was ever posted" \
+  "" "$(jq -r '.verdict_detail' <<<"$p13")"
 p14=$(lp 14)
 chk "PR14 reviewer lane == original author lane stays not independent after later reviews" \
   "false" "$(jq -r '.verdict_independent' <<<"$p14")"
@@ -1373,7 +1388,7 @@ if [ "$1 $2" = "pr view" ]; then
     # unresolved); the far more common "none" (never reviewed) case
     # deliberately drops it (#184), so a never-reviewed fixture here would
     # prove the bound without ever proving the timeout is NAMED.
-    *) echo '{"reviews":[],"comments":[{"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\n\nReview-Lane: t:9\nReviewed-SHA: sha1sha1sha1sha1sha1sha1sha1sha1sha1sha1","createdAt":"2026-08-16T00:00:00Z"}]}'; exit 0 ;;
+    *) echo '{"reviews":[],"comments":[{"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:9\nReviewed-SHA: sha1sha1sha1sha1sha1sha1sha1sha1sha1sha1","createdAt":"2026-08-16T00:00:00Z"}]}'; exit 0 ;;
   esac
 fi
 if [ "$1" = "api" ]; then

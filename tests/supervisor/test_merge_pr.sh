@@ -432,6 +432,20 @@ echo "$out" | grep -q "not a lane-stamped" && ok "no-Review-Lane refusal names t
 # would have merged with `ci_gate.py`'s reason ("all checks green at
 # sha-47-new") the only thing printed -- true, and silent about the
 # verdict, exactly what the issue measured.
+#
+# agent-supervisor#595 RETIRES the third assertion this block used to make,
+# deliberately (same decision as PR13 in test_digest.sh): this comment
+# carries `Verdict:`/`Review-Lane:` but -- on purpose, to exercise #213's
+# ORIGINAL mechanism 2, the timestamp backstop for a reviewer who has not
+# adopted `Reviewed-SHA:` -- no `Reviewed-SHA:` line. #595 requires the
+# complete three-line block for ANY operative decision, so this comment is no
+# longer recognised as a decision AT ALL (verdict "none", not "unknown"), and
+# `verdict.py`'s own `_comment_freshness` docstring already documents mechanism
+# 2 as dead code through this real call site for exactly this reason. The
+# SAFETY property #213 exists for is intact -- this still refuses and still
+# never merges, both asserted below and unchanged -- but the refusal can no
+# longer name the specific stale SHA, because no decision was ever recognised
+# to check freshness on. Asserting "no decision" is the honest replacement.
 rm -f "$MARKER"
 cat > "$FIX/head_47.json" <<'S'
 {"headRefOid": "sha-47-new"}
@@ -449,7 +463,8 @@ out=$("$MERGE_PR" "$REPO" 47 2>&1)
 rc=$?
 if [ "$rc" -eq 1 ]; then ok "stale comment verdict refuses even with CI green"; else bad "stale comment verdict refuses even with CI green" "got rc=$rc: $out"; fi
 if [ ! -f "$MARKER" ]; then ok "stale comment verdict never merges"; else bad "stale comment verdict never merges" "$out"; fi
-echo "$out" | grep -q "sha-47-new" && ok "refusal names the head sha being merged" || bad "refusal names the head sha being merged" "$out"
+echo "$out" | grep -q '"verdict": "none"' && ok "refusal names no recognised decision (was: names the stale head sha -- #595 retired that path, see comment above)" \
+  || bad "refusal names no recognised decision" "$out"
 
 # --- ...and a `Reviewed-SHA:` trailer matching the head merges normally ---
 # the honest mechanism (#213 proposal 1) working end to end: same PR, same
