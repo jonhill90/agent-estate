@@ -72,6 +72,20 @@ resolve_pr_contributors() {
     AUTHOR_LANES+=("$lane")
     AUTHOR_TASKS+=("$task")
   }
+  # agent-supervisor#619: is `$1` already in the candidate-path list passed
+  # as the remaining args? Only used to dedupe the two independent worktree-
+  # path sources (git-worktree-list, and the ledger's open-worktrees) before
+  # looking each one up -- looking the same path up twice would not be
+  # wrong (both `_rpc_add_contributor` and the ledger's own point lookup are
+  # idempotent), just wasted work.
+  _rpc_path_known() {
+    local want="$1" have
+    shift
+    for have in "$@"; do
+      [ "$have" = "$want" ] && return 0
+    done
+    return 1
+  }
 
   local gh_repo_args=()
   [ -n "$repo" ] && gh_repo_args=(-R "$repo")
@@ -148,7 +162,7 @@ for commit in data.get("commits") or []:
     if [ $? -ne 0 ]; then
       echo "dispatch: contributor-issue-lanes lookup failed for issue #$candidate_issue -- refusing (authorship unknown, failing closed)" >&2
       sed 's/^/  /' <<<"$issue_json" >&2
-      unset -f _rpc_author_lane_known _rpc_add_contributor
+      unset -f _rpc_author_lane_known _rpc_add_contributor _rpc_path_known
       return 1
     fi
     if grep -qF '"known":true' <<<"$issue_json"; then
@@ -168,7 +182,7 @@ for commit in data.get("commits") or []:
   if [ $? -ne 0 ]; then
     echo "dispatch: pr-task lookup failed for PR #$pr -- refusing (authorship unknown, failing closed)" >&2
     sed 's/^/  /' <<<"$pr_task_json" >&2
-    unset -f _rpc_author_lane_known _rpc_add_contributor
+    unset -f _rpc_author_lane_known _rpc_add_contributor _rpc_path_known
     return 1
   fi
   if grep -qF '"known":true' <<<"$pr_task_json"; then
@@ -185,7 +199,7 @@ for commit in data.get("commits") or []:
   if [ $? -ne 0 ]; then
     echo "dispatch: contributor-pr-lanes lookup failed for PR #$pr -- refusing (authorship unknown, failing closed)" >&2
     sed 's/^/  /' <<<"$pr_contrib_json" >&2
-    unset -f _rpc_author_lane_known _rpc_add_contributor
+    unset -f _rpc_author_lane_known _rpc_add_contributor _rpc_path_known
     return 1
   fi
   if grep -qF '"known":true' <<<"$pr_contrib_json"; then
@@ -198,9 +212,34 @@ for commit in data.get("commits") or []:
   fi
 
   # 3. agent-supervisor#117: which worktree currently has HEAD_REF checked
-  # out.
+  # out. Two INDEPENDENT sources of candidate paths, unioned -- not a single
+  # source with a fallback, because agent-supervisor#619 measured a real PR
+  # (as531-redo531 / #618) where the FIRST source alone came back silent for
+  # a worktree the ledger still knew about and could open directly in one
+  # call (`worktree-lane --path ...`). A lane that renamed its branch inside
+  # its own dispatched worktree already defeats branch- and commit-based
+  # lookup above; #619's case additionally shows `git worktree list` on
+  # `$repo_path` is not guaranteed to still know about that worktree by the
+  # time a review is requested (it depends on THIS repo_path's own worktree
+  # admin state agreeing with reality) -- so a second, independent source is
+  # consulted too.
+  #
+  # Source A: `git worktree list --porcelain` on `$repo_path`, exactly as
+  # before #619. Cheap, and correct whenever repo_path's own registry is
+  # current.
+  #
+  # Source B (agent-supervisor#619): the LEDGER's own record of every
+  # in-flight worktree (`open-worktrees`, agent-supervisor#291's collision
+  # check already relies on the same query). This does not depend on
+  # `$repo_path` at all -- only on the ledger row `#611` guarantees exists --
+  # so a candidate from here is checked directly on disk (`git -C <path>
+  # rev-parse --abbrev-ref HEAD`) rather than through repo_path's registry.
+  # This is the path #619's issue names as "the record was there the whole
+  # time": `tasks.worktree_path` survives a branch rename because the
+  # worktree itself is never renamed, only its branch.
   if [ -n "$repo_path" ]; then
-    local worktree_list matched_worktree worktree_json w_lane w_task
+    local worktree_list matched_worktree
+    local -a candidate_worktree_paths=()
     worktree_list=$(git -C "$repo_path" worktree list --porcelain 2>/dev/null || true)
     if [ -n "$worktree_list" ]; then
       matched_worktree=$(awk -v want="branch refs/heads/$HEAD_REF" '
@@ -208,22 +247,48 @@ for commit in data.get("commits") or []:
         $0 == want { print path }
       ' <<<"$worktree_list")
       matched_worktree=$(head -n1 <<<"$matched_worktree")
-      if [ -n "$matched_worktree" ]; then
-        worktree_json=$("$ledger_python" "$ledger_cli" worktree-lane --path "$matched_worktree" 2>&1)
-        if [ $? -ne 0 ]; then
-          echo "dispatch: worktree-lane lookup failed for '$matched_worktree' -- refusing (authorship unknown, failing closed)" >&2
-          sed 's/^/  /' <<<"$worktree_json" >&2
-          unset -f _rpc_author_lane_known _rpc_add_contributor
-          return 1
-        fi
-        if grep -qF '"known":true' <<<"$worktree_json"; then
-          CONTRIBUTORS_RESOLVED=1
-          w_lane=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$worktree_json")
-          w_task=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$worktree_json")
-          _rpc_add_contributor "$w_lane" "$w_task"
-        fi
-      fi
+      [ -n "$matched_worktree" ] && candidate_worktree_paths+=("$matched_worktree")
     fi
+
+    local open_worktrees_json ow_path ow_branch
+    open_worktrees_json=$("$ledger_python" "$ledger_cli" open-worktrees 2>&1)
+    if [ $? -eq 0 ]; then
+      while IFS= read -r ow_path; do
+        [ -n "$ow_path" ] || continue
+        [ -d "$ow_path" ] || continue
+        _rpc_path_known "$ow_path" "${candidate_worktree_paths[@]+"${candidate_worktree_paths[@]}"}" && continue
+        ow_branch=$(git -C "$ow_path" rev-parse --abbrev-ref HEAD 2>/dev/null) || continue
+        [ "$ow_branch" = "$HEAD_REF" ] || continue
+        candidate_worktree_paths+=("$ow_path")
+      done < <(python3 -c '
+import json, sys
+try:
+    data = json.loads(sys.argv[1])
+except Exception:
+    data = {"tasks": []}
+for row in data.get("tasks", []):
+    wt = row.get("worktree_path", "")
+    if wt:
+        print(wt)
+' "$open_worktrees_json")
+    fi
+
+    local worktree_json w_lane w_task
+    for matched_worktree in "${candidate_worktree_paths[@]+"${candidate_worktree_paths[@]}"}"; do
+      worktree_json=$("$ledger_python" "$ledger_cli" worktree-lane --path "$matched_worktree" 2>&1)
+      if [ $? -ne 0 ]; then
+        echo "dispatch: worktree-lane lookup failed for '$matched_worktree' -- refusing (authorship unknown, failing closed)" >&2
+        sed 's/^/  /' <<<"$worktree_json" >&2
+        unset -f _rpc_author_lane_known _rpc_add_contributor _rpc_path_known
+        return 1
+      fi
+      if grep -qF '"known":true' <<<"$worktree_json"; then
+        CONTRIBUTORS_RESOLVED=1
+        w_lane=$(sed -n 's/.*"lane":"\([^"]*\)".*/\1/p' <<<"$worktree_json")
+        w_task=$(sed -n 's/.*"task":"\([^"]*\)".*/\1/p' <<<"$worktree_json")
+        _rpc_add_contributor "$w_lane" "$w_task"
+      fi
+    done
   fi
 
   # 3.1. Legacy last resort, kept only for tasks dispatched before #117.
@@ -234,7 +299,7 @@ for commit in data.get("commits") or []:
     if [ $? -ne 0 ]; then
       echo "dispatch: task-lane lookup failed for task '$FALLBACK_TASK' -- refusing (authorship unknown, failing closed)" >&2
       sed 's/^/  /' <<<"$fallback_json" >&2
-      unset -f _rpc_author_lane_known _rpc_add_contributor
+      unset -f _rpc_author_lane_known _rpc_add_contributor _rpc_path_known
       return 1
     fi
     if grep -qF '"known":true' <<<"$fallback_json"; then
@@ -244,6 +309,6 @@ for commit in data.get("commits") or []:
     fi
   fi
 
-  unset -f _rpc_author_lane_known _rpc_add_contributor
+  unset -f _rpc_author_lane_known _rpc_add_contributor _rpc_path_known
   return 0
 }
