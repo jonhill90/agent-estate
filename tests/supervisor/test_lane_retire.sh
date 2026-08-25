@@ -20,6 +20,16 @@
 #      the same way, even with a perfectly clean tree.
 #   4. the supervisor's own window is refused on IDENTITY, independent of
 #      what state its tree happens to be in.
+#
+# agent-supervisor#615 adds the property the original suite could not see at
+# all: every guard above reads `tasks.worktree_path`, the ledger's own
+# recorded fact, never `pane_current_path` -- what the pane happens to be
+# sitting in right now. Cases 5-7 below are load-bearing in the direction
+# that matters: a lane whose pane cwd is dirty or unrelated must still
+# retire when its RECORDED worktree is clean (5, the jam this issue fixes),
+# and a lane whose pane cwd is clean must still be REFUSED when its RECORDED
+# worktree is dirty (6, the dangerous direction that silently passed
+# before), plus the no-worktree-on-record case (7).
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 RETIRE="$HERE/../../scripts/supervisor/lane-retire.sh"
@@ -99,7 +109,12 @@ register_open_task() {
   # `cli.py record-dispatch` calls, rather than reassembling dispatch.sh's
   # full multi-flag CLI surface for a fixture that only cares the row exists
   # and is open.
-  local idx="$1" task="$2"
+  #
+  # agent-supervisor#615: `worktree_path` is now the field lane-retire.sh's
+  # guards actually read (never the pane's cwd), so this fixture must record
+  # one to exercise the retire path at all -- omitted (5th arg blank) for a
+  # fixture that deliberately wants an open task with NO recorded worktree.
+  local idx="$1" task="$2" worktree="${3:-}"
   local lane="${SESS}:${idx}"
   python3 -c '
 import sys
@@ -111,8 +126,9 @@ ledger.record_dispatch(
     harness="claude", repo="test/repo", server_id="srv", session_id="sess",
     command="claude", task_id=sys.argv[4], source_kind="issue", source_url="https://example/1",
     source_ref="1", summary="test fixture", source_state="OPEN", evidence=["test fixture seed"],
+    worktree_path=sys.argv[5],
 )
-' "$HERE/../../scripts/supervisor" "$D/state" "$lane" "$task"
+' "$HERE/../../scripts/supervisor" "$D/state" "$lane" "$task" "$worktree"
 }
 
 # ============================================================================
@@ -123,7 +139,7 @@ git -C "$D/repo" worktree list --porcelain >/dev/null
 rtmux new-window -t "$SESS:2" -n as564-clean-lane -c "$CLEAN_WT"
 wait_pane_cwd 2
 IDX1=$(rtmux list-windows -t "$SESS" -F '#{window_index} #{window_name}' | awk '/as564-clean-lane/{print $1}')
-register_open_task "$IDX1" as564-clean-lane
+register_open_task "$IDX1" as564-clean-lane "$CLEAN_WT"
 
 out=$(run "$IDX1"); rc=$?
 want_exit "a clean, pushed lane is retired (exit 0)" "$rc" 0 "$out"
@@ -154,7 +170,7 @@ echo "unsaved" > "$DIRTY_WT/scratch.txt"
 rtmux new-window -t "$SESS:3" -n as564-dirty-lane -c "$DIRTY_WT"
 wait_pane_cwd 3
 IDX2=$(rtmux list-windows -t "$SESS" -F '#{window_index} #{window_name}' | awk '/as564-dirty-lane/{print $1}')
-register_open_task "$IDX2" as564-dirty-lane
+register_open_task "$IDX2" as564-dirty-lane "$DIRTY_WT"
 
 out=$(run "$IDX2"); rc=$?
 want_exit "a dirty worktree is refused (exit 1)" "$rc" 1 "$out"
@@ -171,7 +187,7 @@ git -C "$UNPUSHED_WT" commit -q -m "local only, never pushed"
 rtmux new-window -t "$SESS:4" -n as564-unpushed-lane -c "$UNPUSHED_WT"
 wait_pane_cwd 4
 IDX3=$(rtmux list-windows -t "$SESS" -F '#{window_index} #{window_name}' | awk '/as564-unpushed-lane/{print $1}')
-register_open_task "$IDX3" as564-unpushed-lane
+register_open_task "$IDX3" as564-unpushed-lane "$UNPUSHED_WT"
 
 out=$(run "$IDX3"); rc=$?
 want_exit "unpushed commits are refused (exit 1)" "$rc" 1 "$out"
@@ -198,6 +214,58 @@ out=$(AGENT_SUPERVISOR_STATE_DIR="$D/state" TMUX_TMPDIR="$RT" LANES_SUPERVISOR_W
 want_exit "the supervisor's own window is refused (exit 1)" "$rc" 1 "$out"
 want_contains "...and says why" "supervisor's own window" "$out"
 want_contains "the window keeps its original name" "as564-sup-lane" "$(wname "$IDXS")"
+
+# ============================================================================
+# 5. agent-supervisor#615, direction 1 (the jam): the RECORDED worktree is
+#    clean and pushed, but the pane's cwd resolves to some dirty, unrelated
+#    tree (standing in for the shared checkout's permanently-untracked
+#    `.worktrees/`/`unused/` entries). Must retire -- this is the case that
+#    was permanently jammed before this fix, because the old guards read
+#    `pane_current_path` instead of `tasks.worktree_path`.
+# ============================================================================
+JAM_WT=$(mk_worktree jam push)
+rtmux new-window -t "$SESS:6" -n as615-jam-lane -c "$DIRTY_WT"
+wait_pane_cwd 6
+IDX5=$(rtmux list-windows -t "$SESS" -F '#{window_index} #{window_name}' | awk '/as615-jam-lane/{print $1}')
+register_open_task "$IDX5" as615-jam-lane "$JAM_WT"
+
+out=$(run "$IDX5"); rc=$?
+want_exit "clean recorded worktree retires despite a dirty, unrelated pane cwd" "$rc" 0 "$out"
+want_contains "renamed back to free-N" "free-${IDX5}" "$(wname "$IDX5")"
+
+# ============================================================================
+# 6. agent-supervisor#615, direction 2 (the dangerous one): the pane's cwd is
+#    some clean, unrelated tree, but the lane's RECORDED worktree holds
+#    uncommitted work. Must refuse -- before this fix, a clean pane cwd
+#    passed every guard while the real worktree's dirty state was never
+#    consulted at all.
+# ============================================================================
+DANGER_WT=$(mk_worktree danger push)
+echo "unsaved, and the pane never sees this directory" > "$DANGER_WT/scratch.txt"
+rtmux new-window -t "$SESS:7" -n as615-danger-lane -c "$CLEAN_WT"
+wait_pane_cwd 7
+IDX6=$(rtmux list-windows -t "$SESS" -F '#{window_index} #{window_name}' | awk '/as615-danger-lane/{print $1}')
+register_open_task "$IDX6" as615-danger-lane "$DANGER_WT"
+
+out=$(run "$IDX6"); rc=$?
+want_exit "a dirty RECORDED worktree is refused despite a clean pane cwd" "$rc" 1 "$out"
+want_contains "...and says why, naming the recorded worktree" "$DANGER_WT" "$out"
+want_contains "...and says why" "uncommitted changes" "$out"
+want_contains "the window keeps its original name" "as615-danger-lane" "$(wname "$IDX6")"
+
+# ============================================================================
+# 7. worktree path absent from the ledger -- refused, with a message
+#    distinct from every other refusal reason above.
+# ============================================================================
+rtmux new-window -t "$SESS:8" -n as615-unknown-lane -c "$CLEAN_WT"
+wait_pane_cwd 8
+IDX7=$(rtmux list-windows -t "$SESS" -F '#{window_index} #{window_name}' | awk '/as615-unknown-lane/{print $1}')
+register_open_task "$IDX7" as615-unknown-lane ""
+
+out=$(run "$IDX7"); rc=$?
+want_exit "an open task with no recorded worktree is refused" "$rc" 1 "$out"
+want_contains "...with a message distinct from a dirty-tree or unpushed-commit refusal" "no worktree recorded in the ledger" "$out"
+want_contains "the window keeps its original name" "as615-unknown-lane" "$(wname "$IDX7")"
 
 echo "lane-retire.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
