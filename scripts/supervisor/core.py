@@ -446,6 +446,8 @@ class Ledger:
         self._migrate_source_tasks_review_column(failpoint=_migration_failpoint)
         self._backfill_known_misclassified_review_tasks(failpoint=_migration_failpoint)
         self._migrate_source_tasks_pull_uniqueness(failpoint=_migration_failpoint)
+        self._migrate_items_table(failpoint=_migration_failpoint)
+        self._restore_items_dropped_on_context_alone(failpoint=_migration_failpoint)
 
     def _connect(self, *, foreign_keys=True):
         connection = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
@@ -818,13 +820,14 @@ class Ledger:
                     body TEXT NOT NULL,
                     weight TEXT NOT NULL CHECK (weight IN ('hard', 'preference', 'retracted')),
                     status TEXT NOT NULL DEFAULT 'open' CHECK (
-                        status IN ('open', 'acknowledged', 'acted', 'resolved', 'dropped')
+                        status IN ('open', 'acknowledged', 'acted', 'resolved', 'dropped', 'needs_review')
                     ),
                     -- `dropped(reason)` in the brief: the reason lives here,
                     -- alongside the status it explains, rather than folded
                     -- into the status string itself -- the same shape as
                     -- `pr_verdicts.note` and `source_tasks.status_marker`
-                    -- elsewhere in this ledger. NULL unless status='dropped'.
+                    -- elsewhere in this ledger. NULL unless status='dropped'
+                    -- or status='needs_review' (agent-supervisor#652 below).
                     status_reason TEXT,
                     -- The parameter this prompt actually produced, e.g.
                     -- 'render=LIVE'. Turns "what did he mean" from literary
@@ -886,6 +889,22 @@ class Ledger:
                 -- has not been told yet.
                 CREATE VIEW IF NOT EXISTS possibility_count AS
                     SELECT COUNT(*) AS count FROM live_parameters WHERE weight = 'hard';
+
+                -- agent-supervisor#652: the confirmation queue for a
+                -- structural marker (`context` = CONTEXT_UNDETERMINED,
+                -- #583) that flags a CANDIDATE synthetic-fixture prompt but
+                -- cannot, by itself, prove one -- a real post-`/clear`
+                -- operator turn stamps the identical marker (#652's own
+                -- finding) and reads identically to a fixture by content
+                -- (#583's own point). Items land here instead of going
+                -- straight to `dropped` so an unconfirmed guess never
+                -- silently removes a real directive; they leave
+                -- `unacknowledged` (so the view still shrinks) without
+                -- leaving the ledger (so nothing is lost pending a human or
+                -- a later pass with a real second signal confirming which
+                -- way it goes).
+                CREATE VIEW IF NOT EXISTS needs_review AS
+                    SELECT * FROM items WHERE status = 'needs_review';
                 """
             )
         os.chmod(self.db_path, 0o600)
@@ -1612,6 +1631,174 @@ class Ledger:
                     connection.commit()
             finally:
                 connection.close()
+
+    # agent-supervisor#652: `'needs_review'` widens `items.status`'s CHECK.
+    # Same SQLite limitation as `_migrate_lanes_table` -- no `ALTER TABLE
+    # ... ADD CHECK` / widen -- so a ledger created before this value existed
+    # needs its `items` table rebuilt to accept it at all.
+    _ITEMS_SCHEMA_MARKERS = ("'needs_review'",)
+
+    # Every view that reads `items` directly or transitively (`possibility_count`
+    # reads `live_parameters`, which reads `items`) -- SQLite validates a
+    # view's SELECT against the live schema at `ALTER TABLE ... RENAME`,
+    # so a view still pointing at the pre-rebuild `items` makes the rename
+    # itself fail with "no such table: main.items" mid-rebuild. These must
+    # be dropped before `DROP TABLE items` and recreated, verbatim, after
+    # the rename -- see `_migrate_items_table` below.
+    _ITEMS_DEPENDENT_VIEWS = (
+        ("unacknowledged", "SELECT * FROM items WHERE status = 'open'"),
+        ("live_parameters", "SELECT * FROM items WHERE kind = 'parameter' AND weight != 'retracted'"),
+        ("open_questions", "SELECT * FROM items WHERE kind = 'question' AND status = 'open'"),
+        ("needs_review", "SELECT * FROM items WHERE status = 'needs_review'"),
+        ("possibility_count", "SELECT COUNT(*) AS count FROM live_parameters WHERE weight = 'hard'"),
+        (
+            "conflicts",
+            """
+            SELECT
+                l.item_id,
+                l.other_item_id,
+                a.prompt_id AS item_prompt_id,
+                a.kind AS item_kind,
+                a.status AS item_status,
+                b.prompt_id AS other_prompt_id,
+                b.kind AS other_kind,
+                b.status AS other_status
+            FROM links l
+            JOIN items a ON a.id = l.item_id
+            JOIN items b ON b.id = l.other_item_id
+            WHERE l.relation = 'conflicts_with'
+            """,
+        ),
+    )
+
+    def _migrate_items_table(self, *, failpoint=None):
+        """Widen an existing `items` table's `status` CHECK to accept
+        'needs_review' (agent-supervisor#652). Same rebuild-in-place shape
+        as `_migrate_lanes_table`: every row preserved, one transaction,
+        rolled back whole on any failure. `links.item_id`/`other_item_id`
+        REFERENCE `items(id)`, so foreign keys are off for the duration of
+        the rebuild, same reasoning as `_migrate_lanes_table`'s `tasks.lane`
+        note -- the table is named `items` again by the time this returns,
+        and so is every view in `_ITEMS_DEPENDENT_VIEWS` (dropped and
+        recreated around the rebuild; see that tuple's own comment for why
+        this cannot just rely on `_initialize`'s `CREATE VIEW IF NOT
+        EXISTS` running again -- IF NOT EXISTS never touches a view that
+        already exists, and by the time this runs, in `__init__`, it
+        already does)."""
+        with self._locked():
+            with contextlib.closing(self._connect()) as probe:
+                existing = probe.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='items'"
+                ).fetchone()
+                if existing is None:
+                    return
+                if all(marker in existing["sql"] for marker in self._ITEMS_SCHEMA_MARKERS):
+                    return
+
+            connection = self._connect(foreign_keys=False)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                try:
+                    for view_name, _ in self._ITEMS_DEPENDENT_VIEWS:
+                        connection.execute(f"DROP VIEW IF EXISTS {view_name}")
+                    self._fail(failpoint, "after_drop_views")
+                    connection.execute(
+                        """
+                        CREATE TABLE items_migrated (
+                            id TEXT PRIMARY KEY,
+                            prompt_id TEXT NOT NULL REFERENCES prompts(id),
+                            kind TEXT NOT NULL CHECK (
+                                kind IN ('parameter', 'question', 'directive', 'thought', 'correction')
+                            ),
+                            body TEXT NOT NULL,
+                            weight TEXT NOT NULL CHECK (weight IN ('hard', 'preference', 'retracted')),
+                            status TEXT NOT NULL DEFAULT 'open' CHECK (
+                                status IN ('open', 'acknowledged', 'acted', 'resolved', 'dropped', 'needs_review')
+                            ),
+                            status_reason TEXT,
+                            resolved_to TEXT,
+                            acked_at INTEGER
+                        )
+                        """
+                    )
+                    self._fail(failpoint, "after_create")
+                    connection.execute(
+                        """
+                        INSERT INTO items_migrated (
+                            id, prompt_id, kind, body, weight, status, status_reason, resolved_to, acked_at
+                        )
+                        SELECT id, prompt_id, kind, body, weight, status, status_reason, resolved_to, acked_at
+                        FROM items
+                        """
+                    )
+                    self._fail(failpoint, "after_copy")
+                    connection.execute("DROP TABLE items")
+                    self._fail(failpoint, "after_drop")
+                    connection.execute("ALTER TABLE items_migrated RENAME TO items")
+                    self._fail(failpoint, "after_rename")
+                    for view_name, view_sql in self._ITEMS_DEPENDENT_VIEWS:
+                        connection.execute(f"CREATE VIEW {view_name} AS {view_sql}")
+                    self._fail(failpoint, "after_recreate_views")
+                except BaseException:
+                    connection.rollback()
+                    raise
+                else:
+                    connection.commit()
+            finally:
+                connection.close()
+
+    # agent-supervisor#652: the reason string `itemize_prompts.py` wrote
+    # (via `Ledger.drop_item`) for a #583-marker match BEFORE this fix pass
+    # existed -- every item carrying it was dropped on `context` alone, with
+    # no corroborating signal, which #652 measured drops real operator
+    # directives (see this migration's own docstring). Matched by prefix so
+    # this survives the reason text picking up detail later without needing
+    # a second migration for the same defect.
+    _PRE_652_SYNTHETIC_DROP_REASON_PREFIX = "agent-supervisor#583: synthetic eval-scenario fixture"
+
+    def _restore_items_dropped_on_context_alone(self, *, failpoint=None):
+        """One-time-per-row, idempotent correction for agent-supervisor#652:
+        every item `reclassify_synthetic` moved straight to `status='dropped'`
+        before this fix pass existed is moved to `status='needs_review'`
+        instead -- unconfirmed, not un-dropped into `open`/`unacknowledged`
+        either, because nothing about this batch was VERIFIED real; #652
+        traced exactly one of them (the `AGENTS.md` defect-note update) to a
+        genuine post-`/clear` operator turn by hand, in the raw transcript --
+        a check that does not scale to the other ~36 by any structural
+        signal this ledger currently captures (see `synthetic_provenance_reason`
+        and `itemize_prompts.SYNTHETIC_REASON`'s own comments). Restoring the
+        whole batch to a confirmation queue, rather than guessing which of
+        the 37 are real, is the same "refuse rather than invent" posture
+        CLAUDE.md's invariant 3 (`restore.sh`) already takes: report
+        unrecoverable/unconfirmed and stop, never invent a confident answer
+        this data cannot support.
+
+        Idempotent by construction: only touches rows still
+        `status='dropped'` with this exact reason prefix, and this method's
+        own write always leaves the reason on a NEW prefix (see
+        `itemize_prompts.NEEDS_REVIEW_REASON`), so a second run finds
+        nothing left to match. Runs every `__init__`, not just once -- cheap
+        (bounded by how many rows the pre-#652 `reclassify_synthetic` ever
+        touched, 37 on the live ledger) and safe to repeat on a ledger that
+        never had the defect at all (0 rows matched, 0 rows changed)."""
+        restored_reason = (
+            "agent-supervisor#652: restored from a #583 context-alone drop -- "
+            "context=CONTEXT_UNDETERMINED alone is not proof of a synthetic fixture "
+            "(a real post-/clear operator turn carries the same marker); needs a "
+            "confirming read before this can be dropped or reopened"
+        )
+        with self._locked(), self._transaction() as connection:
+            self._fail(failpoint, "before_restore")
+            connection.execute(
+                """
+                UPDATE items
+                SET status = 'needs_review',
+                    status_reason = ?
+                WHERE status = 'dropped'
+                  AND status_reason LIKE ?
+                """,
+                (restored_reason, f"{self._PRE_652_SYNTHETIC_DROP_REASON_PREFIX}%"),
+            )
 
     @staticmethod
     def _dict(row):
@@ -4456,10 +4643,10 @@ class Ledger:
             raise ValueError("invalid kind")
         if weight not in ("hard", "preference", "retracted"):
             raise ValueError("invalid weight")
-        if status not in ("open", "acknowledged", "acted", "resolved", "dropped"):
+        if status not in ("open", "acknowledged", "acted", "resolved", "dropped", "needs_review"):
             raise ValueError("invalid status")
-        if status == "dropped" and not status_reason:
-            raise ValueError("dropped status requires status_reason")
+        if status in ("dropped", "needs_review") and not status_reason:
+            raise ValueError(f"{status} status requires status_reason")
         with self._locked(), self._transaction() as connection:
             connection.execute(
                 """
@@ -4495,6 +4682,72 @@ class Ledger:
         with contextlib.closing(self._connect()) as connection:
             return self._dict(connection.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone())
 
+    def drop_item(self, item_id, status_reason):
+        """Correct an already-recorded item's status to 'dropped' in place --
+        `itemize_prompts.py --reclassify`'s write (agent-supervisor#583). A
+        prompt itemised before a structural filter existed keeps its
+        original id, kind, body and weight (the judgement record itself is
+        evidence); only `status`/`status_reason` change, so the item leaves
+        `unacknowledged` without being deleted -- the same "reviewable and
+        reversible" contract `add_item`'s dropped rows already honour."""
+        if not status_reason:
+            raise ValueError("status_reason is required")
+        with self._locked(), self._transaction() as connection:
+            connection.execute(
+                "UPDATE items SET status='dropped', status_reason=? WHERE id=?",
+                (status_reason, item_id),
+            )
+            row = connection.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"no such item: {item_id}")
+        return self._dict(row)
+
+    def flag_needs_review(self, item_id, status_reason):
+        """Correct an already-recorded item's status to 'needs_review' in
+        place -- the agent-supervisor#652 counterpart to `drop_item`, for a
+        structural marker that is a CANDIDATE, not a confirmed drop (see the
+        `needs_review` view's own comment for why: `context` =
+        CONTEXT_UNDETERMINED alone cannot tell a synthetic eval fixture from
+        a real post-`/clear` operator turn). Same shape as `drop_item`:
+        kind/body/weight untouched, no delete, no duplicate row -- only
+        `status`/`status_reason` change, so the item leaves `unacknowledged`
+        without leaving the ledger. A later pass (human review, or a real
+        second signal if one is ever found) moves it on from here via
+        `drop_item` (confirmed synthetic) or back to 'open' (confirmed
+        real) -- this method only ever produces 'needs_review'."""
+        if not status_reason:
+            raise ValueError("status_reason is required")
+        with self._locked(), self._transaction() as connection:
+            connection.execute(
+                "UPDATE items SET status='needs_review', status_reason=? WHERE id=?",
+                (status_reason, item_id),
+            )
+            row = connection.execute("SELECT * FROM items WHERE id=?", (item_id,)).fetchone()
+        if row is None:
+            raise ValueError(f"no such item: {item_id}")
+        return self._dict(row)
+
+    def list_open_items(self, *, limit=None):
+        """Every currently-open item, each carrying its originating prompt's
+        `context` -- the reclassification queue `itemize_prompts.py
+        --reclassify` reads (agent-supervisor#583). This re-reads the same
+        structural marker `drop_noise` keys on at itemisation time; it never
+        re-judges body/kind/weight, only whether an item that predates the
+        filter should have been dropped."""
+        sql = """
+            SELECT i.*, p.context AS prompt_context
+            FROM items i JOIN prompts p ON p.id = i.prompt_id
+            WHERE i.status = 'open'
+            ORDER BY p.at
+        """
+        params = ()
+        if limit is not None:
+            sql += " LIMIT ?"
+            params = (int(limit),)
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(sql, params).fetchall()
+        return [self._dict(row) for row in rows]
+
     def list_unitemised_prompts(self, *, limit=None):
         """Prompts with no `items` row yet -- the itemisation queue for
         `itemize_prompts.py --extract` (agent-supervisor#303). Item-lessness
@@ -4525,11 +4778,15 @@ class Ledger:
         with contextlib.closing(self._connect()) as connection:
             return self._dict(connection.execute("SELECT * FROM prompts WHERE id=?", (prompt_id,)).fetchone())
 
-    # The five views ARE the deliverable (agent-supervisor#280, #303) --
-    # whitelisted by name, the same posture `lanes.sh` takes on offering an
-    # idle shape (CLAUDE.md invariant 6): a view name this does not
-    # recognise is refused, never interpolated into SQL on trust.
-    PROMPT_VIEWS = ("unacknowledged", "live_parameters", "conflicts", "open_questions", "possibility_count")
+    # The original five views ARE the deliverable (agent-supervisor#280,
+    # #303) -- whitelisted by name, the same posture `lanes.sh` takes on
+    # offering an idle shape (CLAUDE.md invariant 6): a view name this does
+    # not recognise is refused, never interpolated into SQL on trust.
+    # `needs_review` (agent-supervisor#652) is a sixth, added the same way.
+    PROMPT_VIEWS = (
+        "unacknowledged", "live_parameters", "conflicts", "open_questions",
+        "possibility_count", "needs_review",
+    )
 
     def read_prompt_view(self, view):
         """Read one of the five named views, plain SQL, no model involved --

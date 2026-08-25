@@ -593,9 +593,9 @@ def parser():
     sub.add_parser("status")
 
     # agent-supervisor#303: the read side of the prompt corpus (#280/#297).
-    # `view` is restricted to the five views by name (`Ledger.PROMPT_VIEWS`)
-    # -- there is no free-form SQL entry point here, same posture as
-    # `Ledger.read_prompt_view` itself.
+    # `view` is restricted to the named views (`Ledger.PROMPT_VIEWS`,
+    # `needs_review` added by #652) -- there is no free-form SQL entry point
+    # here, same posture as `Ledger.read_prompt_view` itself.
     prompts_parser = sub.add_parser("prompts")
     prompts_parser.add_argument("view", choices=Ledger.PROMPT_VIEWS)
     return root

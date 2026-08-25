@@ -68,8 +68,8 @@ class DropNoiseTests(unittest.TestCase):
         )
         self.ledger.record_prompt("p2", at=2_000, text_raw="make render LIVE", context="ctx")
 
-        dropped, kept = itemize_prompts.drop_noise(self.ledger)
-        self.assertEqual((1, 1), (dropped, kept))
+        dropped, needs_review, kept = itemize_prompts.drop_noise(self.ledger)
+        self.assertEqual((1, 0, 1), (dropped, needs_review, kept))
 
         rows = itemize_prompts.extract(self.ledger)
         self.assertEqual(["p2"], [row["id"] for row in rows])
@@ -94,16 +94,151 @@ class DropNoiseTests(unittest.TestCase):
         )
         first = itemize_prompts.drop_noise(self.ledger)
         second = itemize_prompts.drop_noise(self.ledger)
-        self.assertEqual((1, 0), first)
-        self.assertEqual((0, 0), second)
+        self.assertEqual((1, 0, 0), first)
+        self.assertEqual((0, 0, 0), second)
 
     def test_jon_text_that_merely_mentions_a_brief_is_kept(self):
         self.ledger.record_prompt(
             "p1", at=1_000, context="ctx",
             text_raw="did you read the brief I sent? what did it say about scope",
         )
-        dropped, kept = itemize_prompts.drop_noise(self.ledger)
-        self.assertEqual((0, 1), (dropped, kept))
+        dropped, needs_review, kept = itemize_prompts.drop_noise(self.ledger)
+        self.assertEqual((0, 0, 1), (dropped, needs_review, kept))
+
+
+class SyntheticProvenanceTests(unittest.TestCase):
+    """agent-supervisor#583/#652: eval-scenario fixture prompts, itemised as
+    if Jon had typed them, are FLAGGED structurally on `context` -- never on
+    how the text reads, per #583's own point that a well-written fixture is
+    indistinguishable from a real directive by content alone. #652: that
+    marker is a candidate, not proof (a real post-`/clear` turn carries the
+    same marker), so a match lands in `needs_review`, never straight in
+    `dropped` -- see `itemize_prompts.synthetic_provenance_reason`'s own
+    comment for the measurement that forced this."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ledger = Ledger(self.tmp.name, clock=lambda: 1_000)
+
+    def test_drop_noise_flags_a_known_eval_fixture_prompt_for_review(self):
+        """Mutation direction 1: a known eval-fixture-shaped prompt (names a
+        file, `reconcile.py`, that exists only under
+        skills/*/references/eval-scenario*/) must be flagged needs_review --
+        pulled out of `unacknowledged` -- when its transcript carries no
+        prior-turn context. Not dropped outright: #652 found this same
+        marker also matches a real directive (see
+        test_drop_noise_keeps_the_real_post_clear_directive_agent_supervisor_652_found
+        below), so nothing routes straight to `dropped` on this signal
+        alone any more."""
+        self.ledger.record_prompt(
+            "p1", at=1_000, context=itemize_prompts.CONTEXT_UNDETERMINED,
+            text_raw="Find and fix the bug in reconcile.py that let a mid-reconcile "
+                     "crash leave some claims marked released while their result "
+                     "files are missing.",
+        )
+        dropped, needs_review, kept = itemize_prompts.drop_noise(self.ledger)
+        self.assertEqual((0, 1, 0), (dropped, needs_review, kept))
+        item = self.ledger.get_item(itemize_prompts._item_id(
+            "p1", 0, f"noise:{itemize_prompts.NEEDS_REVIEW_REASON}"))
+        self.assertIsNotNone(item)
+        self.assertEqual("needs_review", item["status"])
+        self.assertIn("652", item["status_reason"])
+        self.assertEqual([], self.ledger.read_prompt_view("unacknowledged"))
+        self.assertEqual(1, len(self.ledger.read_prompt_view("needs_review")))
+
+    def test_drop_noise_keeps_a_real_directive_with_the_same_shape_of_content(self):
+        """Mutation direction 2: a real operator directive -- same
+        directive-shaped phrasing naming a real file -- must survive when its
+        transcript carries genuine prior-turn context. Content alone must
+        not be what trips the filter."""
+        self.ledger.record_prompt(
+            "p2", at=2_000, context="deciding how the transcript-mining pass should run",
+            text_raw="Find and fix the bug in send_input.sh that drops keystrokes "
+                     "when the pane is scrolled.",
+        )
+        dropped, needs_review, kept = itemize_prompts.drop_noise(self.ledger)
+        self.assertEqual((0, 0, 1), (dropped, needs_review, kept))
+        rows = itemize_prompts.extract(self.ledger)
+        self.assertEqual(["p2"], [row["id"] for row in rows])
+
+    def test_drop_noise_keeps_the_real_post_clear_directive_agent_supervisor_652_found(self):
+        """The exact counter-example agent-supervisor#652 traced by hand: a
+        real operator turn that is the FIRST turn of its transcript file
+        because the session opened with `/clear`, so it carries the identical
+        CONTEXT_UNDETERMINED marker a synthetic fixture does. It must not be
+        dropped -- it may be flagged for review (same as any other
+        context-alone match), but never silently removed."""
+        self.ledger.record_prompt(
+            "p1", at=1_000, context=itemize_prompts.CONTEXT_UNDETERMINED,
+            text_raw="Update the stale defect note in AGENTS.md referencing commit b00db9b.",
+        )
+        itemize_prompts.drop_noise(self.ledger)
+        item = self.ledger.get_item(itemize_prompts._item_id(
+            "p1", 0, f"noise:{itemize_prompts.NEEDS_REVIEW_REASON}"))
+        self.assertIsNotNone(item)
+        self.assertNotEqual("dropped", item["status"])
+        self.assertEqual("needs_review", item["status"])
+
+    def test_drop_noise_on_synthetic_fixture_is_idempotent(self):
+        self.ledger.record_prompt(
+            "p1", at=1_000, context=itemize_prompts.CONTEXT_UNDETERMINED,
+            text_raw="Review finalize.py's two-write crash sequence.",
+        )
+        first = itemize_prompts.drop_noise(self.ledger)
+        second = itemize_prompts.drop_noise(self.ledger)
+        self.assertEqual((0, 1, 0), first)
+        self.assertEqual((0, 0, 0), second)
+
+    def test_reclassify_synthetic_flags_an_already_itemised_open_item_for_review(self):
+        """A prompt itemised BEFORE this filter existed (already has an open
+        `directive`/`hard` item) gets that item corrected to needs_review,
+        not deleted and not duplicated with a second item, and never
+        straight to dropped (agent-supervisor#652)."""
+        self.ledger.record_prompt(
+            "p1", at=1_000, context=itemize_prompts.CONTEXT_UNDETERMINED,
+            text_raw="Review finalize.py's two-write crash sequence and fix "
+                     "anything that could leave the record wrong.",
+        )
+        self.ledger.add_item(
+            "it-preexisting", prompt_id="p1", kind="directive",
+            body="Review finalize.py's two-write crash sequence.", weight="hard",
+        )
+        reclassified, kept = itemize_prompts.reclassify_synthetic(self.ledger)
+        self.assertEqual((1, 0), (reclassified, kept))
+        item = self.ledger.get_item("it-preexisting")
+        self.assertEqual("needs_review", item["status"])
+        self.assertIn("652", item["status_reason"])
+        # Judgement fields are untouched -- only status/status_reason changed.
+        self.assertEqual("directive", item["kind"])
+        self.assertEqual("hard", item["weight"])
+        self.assertEqual([], self.ledger.read_prompt_view("unacknowledged"))
+        self.assertEqual(1, len(self.ledger.read_prompt_view("needs_review")))
+
+    def test_reclassify_synthetic_leaves_a_real_open_item_alone(self):
+        self.ledger.record_prompt(
+            "p2", at=2_000, context="a watchdog report from earlier in the session",
+            text_raw="the worktree sweep should run by content, not ancestry",
+        )
+        self.ledger.add_item(
+            "it-real", prompt_id="p2", kind="question",
+            body="should the worktree sweep run by content or ancestry", weight="hard",
+        )
+        reclassified, kept = itemize_prompts.reclassify_synthetic(self.ledger)
+        self.assertEqual((0, 1), (reclassified, kept))
+        item = self.ledger.get_item("it-real")
+        self.assertEqual("open", item["status"])
+
+    def test_reclassify_synthetic_is_idempotent(self):
+        self.ledger.record_prompt(
+            "p1", at=1_000, context=itemize_prompts.CONTEXT_UNDETERMINED,
+            text_raw="Confirm the credential check in check-credential.sh.",
+        )
+        self.ledger.add_item("it-1", prompt_id="p1", kind="directive", body="b", weight="hard")
+        first = itemize_prompts.reclassify_synthetic(self.ledger)
+        second = itemize_prompts.reclassify_synthetic(self.ledger)
+        self.assertEqual((1, 0), first)
+        self.assertEqual((0, 0), second)
 
 
 if __name__ == "__main__":
