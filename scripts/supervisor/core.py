@@ -1043,6 +1043,31 @@ class Ledger:
         dropping the original table while rows still reference it; the
         table this rebuild produces is named `tasks` again by the time this
         returns, so that reference is satisfied exactly as before.
+
+        agent-supervisor#635: on an estate old enough to already carry
+        `ONE_OPEN_PULL_PER_SOURCE_REF` (created by
+        `_migrate_source_tasks_pull_uniqueness`, which runs AFTER this
+        migration in `__init__` but may have run in a PRIOR `__init__` call
+        against this same file), that trigger's body joins `tasks` --
+        so `ALTER TABLE tasks_migrated RENAME TO tasks` below momentarily
+        renames a table the trigger references while `tasks` itself does
+        not exist (it was just dropped). SQLite >= 3.25 validates every
+        schema object's references during a rename, not just the renamed
+        table's own, and aborts the whole rename with `error in trigger
+        one_open_pull_per_source_ref: no such table: main.tasks` --
+        reproduced directly against a throwaway copy of the live ledger.
+        The fix is to make the trigger not exist for the moment `tasks`
+        doesn't, and exist again the moment it does: drop it before the
+        rebuild, recreate it (byte-for-byte the same body, via
+        `_pull_trigger_sql`) after `tasks` is back under its real name --
+        all inside this same transaction, so a rollback restores both the
+        table and the trigger together. This only fires when the trigger
+        was ALREADY there; a ledger that has never created it yet (a
+        genuinely fresh one, or one still short of
+        `_migrate_source_tasks_pull_uniqueness`'s own duplicate-refusal
+        gate) must not have it installed here, bypassing that gate --
+        see this migration's own regression test for the duplicate-bypass
+        case this guards against.
         """
         with self._locked():
             with contextlib.closing(self._connect()) as probe:
@@ -1054,6 +1079,10 @@ class Ledger:
                 if all(marker in existing["sql"] for marker in self._TASKS_SCHEMA_MARKERS):
                     return
                 columns = {info["name"] for info in probe.execute("PRAGMA table_info(tasks)").fetchall()}
+                trigger_existed = probe.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?",
+                    (self.ONE_OPEN_PULL_PER_SOURCE_REF,),
+                ).fetchone() is not None
             attempted_column = "delivery_attempted_at" if "delivery_attempted_at" in columns else "NULL"
             # agent-supervisor#117: a pre-existing row recorded no worktree
             # path anywhere structured -- only as free text inside `summary`
@@ -1079,6 +1108,14 @@ class Ledger:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 try:
+                    if trigger_existed:
+                        # agent-supervisor#635: must be gone before `tasks`
+                        # is, so the rename below never sees a trigger body
+                        # referencing a table that doesn't exist yet.
+                        connection.execute(
+                            f"DROP TRIGGER IF EXISTS {self.ONE_OPEN_PULL_PER_SOURCE_REF}"
+                        )
+                        self._fail(failpoint, "after_drop_pull_trigger")
                     connection.execute(
                         """
                         CREATE TABLE tasks_migrated (
@@ -1129,6 +1166,13 @@ class Ledger:
                             WHERE status NOT IN ('complete', 'failed', 'cancelled')
                         """
                     )
+                    if trigger_existed:
+                        # `tasks` is back under its real name -- the trigger's
+                        # reference to it resolves again. Byte-for-byte the
+                        # same body it had before, via `_pull_trigger_sql`,
+                        # so the duplicate-open-PR guard is never weakened.
+                        connection.execute(self._pull_trigger_sql())
+                        self._fail(failpoint, "after_recreate_pull_trigger")
                 except BaseException:
                     connection.rollback()
                     raise
@@ -1176,6 +1220,26 @@ class Ledger:
         there is no `ALTER TABLE ... DROP CONSTRAINT`, so the only way to widen
         a column is to rebuild the table. Every row is preserved; the rebuild
         is one transaction, rolled back whole on any failure.
+
+        agent-supervisor#635: `ONE_OPEN_PULL_PER_SOURCE_REF` is itself a
+        `BEFORE INSERT ON source_tasks` trigger, so on an estate old enough
+        to already carry it, `DROP TABLE source_tasks` below takes the
+        trigger down with it (SQLite drops a table's own triggers when the
+        table goes) -- silently, no error, unlike `_migrate_tasks_table`'s
+        case where the trigger merely REFERENCES the dropped table. Left
+        alone, the duplicate-open-PR guard would vanish the moment this
+        migration runs and never come back on its own within this
+        `__init__` unless the later `_migrate_source_tasks_pull_uniqueness`
+        step happens to still run after it (it does today, but that is
+        this method's implementation detail to rely on, not this one's).
+        Recreated explicitly here instead, byte-for-byte the same body via
+        `_pull_trigger_sql`, so this rebuild is self-contained and the
+        guard's presence does not depend on migration ordering elsewhere.
+        Only when it was already there -- a source_tasks table old enough
+        to need this rebuild but too old to have the trigger yet must NOT
+        get it installed here, bypassing
+        `_migrate_source_tasks_pull_uniqueness`'s own duplicate-refusal
+        gate.
         """
         with self._locked():
             with contextlib.closing(self._connect()) as probe:
@@ -1186,11 +1250,25 @@ class Ledger:
                     return
                 if self._SOURCE_TASKS_OLD_UNIQUE_MARKER not in existing["sql"]:
                     return
+                trigger_existed = probe.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name=?",
+                    (self.ONE_OPEN_PULL_PER_SOURCE_REF,),
+                ).fetchone() is not None
 
             connection = self._connect(foreign_keys=False)
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 try:
+                    if trigger_existed:
+                        # Explicit, not relied-on-implicitly: `DROP TABLE`
+                        # below would take this trigger with it anyway
+                        # (it's attached to `source_tasks`), but naming it
+                        # here keeps this rebuild's trigger handling
+                        # symmetric with `_migrate_tasks_table`'s.
+                        connection.execute(
+                            f"DROP TRIGGER IF EXISTS {self.ONE_OPEN_PULL_PER_SOURCE_REF}"
+                        )
+                        self._fail(failpoint, "after_drop_pull_trigger")
                     connection.execute(
                         """
                         CREATE TABLE source_tasks_migrated (
@@ -1227,6 +1305,12 @@ class Ledger:
                     self._fail(failpoint, "after_drop")
                     connection.execute("ALTER TABLE source_tasks_migrated RENAME TO source_tasks")
                     self._fail(failpoint, "after_rename")
+                    if trigger_existed:
+                        # `source_tasks` exists again under its real name --
+                        # the trigger can attach to it again. Byte-for-byte
+                        # the same body it had before, via `_pull_trigger_sql`.
+                        connection.execute(self._pull_trigger_sql())
+                        self._fail(failpoint, "after_recreate_pull_trigger")
                 except BaseException:
                     connection.rollback()
                     raise
@@ -1236,6 +1320,31 @@ class Ledger:
                 connection.close()
 
     ONE_OPEN_PULL_PER_SOURCE_REF = "one_open_pull_per_source_ref"
+
+    @classmethod
+    def _pull_trigger_sql(cls):
+        """The `CREATE TRIGGER` statement for `ONE_OPEN_PULL_PER_SOURCE_REF`.
+
+        Factored out so `_migrate_tasks_table` and `_migrate_source_tasks_table`
+        can drop-and-recreate the SAME trigger body around their own rebuilds
+        (see their docstrings) instead of hand-copying this SQL a second and
+        third time -- one definition, three call sites, agent-supervisor#635.
+        """
+        return f"""
+            CREATE TRIGGER IF NOT EXISTS {cls.ONE_OPEN_PULL_PER_SOURCE_REF}
+            BEFORE INSERT ON source_tasks
+            WHEN NEW.source_kind = 'pull' AND EXISTS (
+                SELECT 1 FROM source_tasks
+                JOIN tasks ON tasks.id = source_tasks.id
+                WHERE source_tasks.source_kind = 'pull'
+                  AND source_tasks.source_ref = NEW.source_ref
+                  AND source_tasks.id != NEW.id
+                  AND tasks.status NOT IN ('complete', 'failed', 'cancelled')
+            )
+            BEGIN
+                SELECT RAISE(ABORT, 'UNIQUE constraint failed: source_tasks.source_ref');
+            END
+        """
 
     def _migrate_source_tasks_pull_uniqueness(self, *, failpoint=None):
         """Close the PR-duplicate TOCTOU (agent-supervisor#169) at the WRITE,
@@ -1372,23 +1481,7 @@ class Ledger:
                 connection.execute("BEGIN IMMEDIATE")
                 try:
                     self._fail(failpoint, "before_pull_trigger")
-                    connection.execute(
-                        f"""
-                        CREATE TRIGGER IF NOT EXISTS {self.ONE_OPEN_PULL_PER_SOURCE_REF}
-                        BEFORE INSERT ON source_tasks
-                        WHEN NEW.source_kind = 'pull' AND EXISTS (
-                            SELECT 1 FROM source_tasks
-                            JOIN tasks ON tasks.id = source_tasks.id
-                            WHERE source_tasks.source_kind = 'pull'
-                              AND source_tasks.source_ref = NEW.source_ref
-                              AND source_tasks.id != NEW.id
-                              AND tasks.status NOT IN ('complete', 'failed', 'cancelled')
-                        )
-                        BEGIN
-                            SELECT RAISE(ABORT, 'UNIQUE constraint failed: source_tasks.source_ref');
-                        END
-                        """
-                    )
+                    connection.execute(self._pull_trigger_sql())
                     self._fail(failpoint, "after_pull_trigger")
                 except BaseException:
                     connection.rollback()
