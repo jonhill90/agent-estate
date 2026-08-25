@@ -1,3 +1,10 @@
+---
+type: Inventory
+description: Pre-flight inventory of everything the agent-tui/agent-supervisor merge into agent-estate will break, each entry locatable to a file, line, or equivalent exact locator an executor can act on.
+generated:
+  at: 2026-08-24T21:18:37-04:00
+---
+
 # Merge impact inventory — agent-tui + agent-supervisor → agent-estate
 
 Author-Lane: estate:4

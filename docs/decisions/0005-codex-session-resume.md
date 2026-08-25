@@ -1,3 +1,10 @@
+---
+type: Decision
+description: Decision record -- `harness_session.py` now resolves a codex lane's own session id from codex's on-disk rollout files, giving codex lanes the same tmux-server-loss resume path Claude lanes already had.
+generated:
+  at: 2026-08-24T21:18:37-04:00
+---
+
 # 0005 — Codex lanes are resumable, the same as Claude's
 
 `2026-08-23` (scoping pass on "the daemon is meant to be genuinely

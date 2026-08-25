@@ -1,3 +1,10 @@
+---
+type: Diagram
+description: Mermaid diagrams of the dispatch path end to end, each node cited to a file and line, with the failure exits given as much space as the five-box happy path.
+generated:
+  at: 2026-08-24T21:18:37-04:00
+---
+
 # The dispatch path
 
 `2026-08-21`, first of three diagrams (loop-and-its-guards and memory are

@@ -1,3 +1,10 @@
+---
+type: Decision
+description: Decision record -- `restore.sh` only resumes a lane whose session id, harness resume dialect, transcript, and project dir all check out; if any is missing it reports UNRECOVERABLE rather than starting a fresh agent under the old lane's name.
+generated:
+  at: 2026-08-24T21:18:37-04:00
+---
+
 # 0004 — Restore refuses an unrecoverable lane; it never invents one
 
 `agent-dotfiles#237`, carried forward into `restore.sh` in this repo,
