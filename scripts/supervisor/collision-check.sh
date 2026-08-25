@@ -44,7 +44,24 @@
 #      (`--pr`/`--reviews-pr` review or fix-pass work) -- `gh pr diff
 #      --name-only`, the most precise signal available because the diff
 #      already exists.
-# The union of whatever those three produce is the candidate's file set.
+#
+# agent-supervisor#617: (2) and (3) are ARTIFACTS -- a real diff already
+# exists, so what it touches is a measurement, not a guess. (1) is PROSE --
+# a path merely quoted in discussion, which a docs-only PR (#531) proved can
+# name a file it never touches (twelve `docs/**` paths changed; the issue
+# text also quoted `scripts/supervisor/dispatch.sh` and
+# `.../mark-pr-external.sh` as context, and neither was in the diff). #531
+# HAD a diff (it was already a PR), so rule 1's prose union inflated its file
+# set past what the diff actually showed and produced a false collision.
+#
+# THE FIX: prose is never UNIONED on top of an artifact -- when (2) or (3)
+# finds anything, (1) is not consulted at all for this candidate. Prose (1)
+# is used only when NEITHER (2) nor (3) exists, which is unchanged from
+# before this fix: a plain fresh dispatch has no diff of its own yet (the
+# work has not started), so the brief's own words are still the only signal
+# available, and a real collision found that way still REFUSEs, exactly as
+# #291's motivating case required -- see CANDIDATE_SOURCE below and the note
+# beside the REFUSE/FORCE block.
 #
 # WHAT COUNTS AS AN IN-FLIGHT LANE'S FILES: its own worktree's actual diff --
 # committed-since-merge-base plus uncommitted -- never a guess from that
@@ -134,17 +151,32 @@ _files_changed_in_worktree() {
   git -C "$worktree" status --porcelain 2>/dev/null | awk '{print $NF}'
 }
 
-# stdout: the candidate's file set (one path per line, de-duplicated).
-# Nothing printed and exit 1 means UNKNOWN -- every signal came up silent.
-detect_candidate_files() {
-  local brief="$1" repo_path="$2" worktree="$3" pr="$4" repo="$5" found
+# stdout: files from the ARTIFACT signals only (rules 2+3: the candidate's
+# own worktree diff, and the PR diff it is scoped to). Nothing printed and
+# exit 1 means neither artifact exists yet.
+detect_artifact_files() {
+  local worktree="$1" pr="$2" repo="$3" found
   found=$(
     {
-      _files_named_in "$brief" "$repo_path"
       [ -n "$worktree" ] && _files_changed_in_worktree "$worktree"
       [ -n "$pr" ] && _files_in_pr "$repo" "$pr"
     } | sort -u
   )
+  found=$(grep -v '^[[:space:]]*$' <<<"$found" || true)
+  [ -n "$found" ] || return 1
+  printf '%s\n' "$found"
+}
+
+# stdout: files named in the issue/brief prose (rule 1) -- agent-supervisor#617:
+# kept separate from detect_artifact_files and never merged with it, because
+# prose is the weakest of the three signals (see this file's header): a real
+# diff (rule 2 or 3), when one exists, is used ALONE, and this is consulted
+# only when neither does. A collision found through this alone still REFUSEs
+# -- it is the SAME signal #291's original candidate side always ran on, for
+# the ordinary case where no diff exists yet. See CANDIDATE_SOURCE below.
+detect_prose_files() {
+  local brief="$1" repo_path="$2" found
+  found=$(_files_named_in "$brief" "$repo_path" | sort -u)
   found=$(grep -v '^[[:space:]]*$' <<<"$found" || true)
   [ -n "$found" ] || return 1
   printf '%s\n' "$found"
@@ -211,8 +243,23 @@ while [ $# -gt 0 ]; do
 done
 [ -n "$ISSUE" ] && [ -n "$BRIEF" ] && [ -n "$WORKTREE" ] && [ -n "$REPO_PATH" ] || usage
 
-CANDIDATE_FILES=$(detect_candidate_files "$BRIEF" "$REPO_PATH" "$WORKTREE" "$PR" "$REPO")
-if [ $? -ne 0 ] || [ -z "$CANDIDATE_FILES" ]; then
+# agent-supervisor#617: artifact (rules 2+3) is tried first and, if it finds
+# anything, is used ALONE -- prose (rule 1) is never merged in on top of a
+# real diff. Prose is consulted only when no artifact exists at all, and
+# CANDIDATE_SOURCE remembers which case this was so the REFUSE/ALLOW decision
+# below can tell a measured overlap from a merely-quoted one.
+CANDIDATE_SOURCE=""
+CANDIDATE_FILES=$(detect_artifact_files "$WORKTREE" "$PR" "$REPO")
+if [ $? -eq 0 ] && [ -n "$CANDIDATE_FILES" ]; then
+  CANDIDATE_SOURCE="artifact"
+else
+  CANDIDATE_FILES=$(detect_prose_files "$BRIEF" "$REPO_PATH")
+  if [ $? -eq 0 ] && [ -n "$CANDIDATE_FILES" ]; then
+    CANDIDATE_SOURCE="prose"
+  fi
+fi
+
+if [ -z "$CANDIDATE_SOURCE" ]; then
   # Deliberately NOT the phrase "could not determine" -- dispatch.sh's own
   # `--reviews-pr` authorship guard uses that exact phrase for an unrelated
   # refusal ("could not determine PR #N's author"), and a caller that greps
@@ -383,7 +430,7 @@ fi
 EFFECTIVE_PR="$PR"
 if [ -z "$PR_REPO" ]; then
   # NOT the phrase "could not determine" -- see this file's own note above
-  # detect_candidate_files's ALLOW-unknown message for why: dispatch.sh's own
+  # the CANDIDATE_SOURCE ALLOW-unknown message for why: dispatch.sh's own
   # test suite asserts that exact phrase never appears on a non-review
   # dispatch (test_dispatch.sh's "the authorship question never arises"), and
   # this script's combined stdout+stderr is folded into dispatch.sh's own.
@@ -408,10 +455,20 @@ if [ "$PR_CHECK_STATUS" = ok ] && [ -n "${PR_HOLDER_OUT:-}" ]; then
 fi
 
 if [ -z "$COLLISIONS" ]; then
-  echo "ALLOW no-conflict -- #$ISSUE's candidate files (${CANDIDATE_FILES//$'\n'/, }) do not overlap any in-flight lane (open-PR check: $PR_CHECK_STATUS)"
+  echo "ALLOW no-conflict -- #$ISSUE's candidate files (${CANDIDATE_FILES//$'\n'/, }, source: $CANDIDATE_SOURCE) do not overlap any in-flight lane (open-PR check: $PR_CHECK_STATUS)"
   exit 0
 fi
 
+# agent-supervisor#617 note: CANDIDATE_SOURCE=prose reaches here only when NO
+# artifact existed at all for this candidate (detect_artifact_files came up
+# empty) -- rule 1 is then the only signal available, exactly the "nothing
+# else available" case this file's header already reserves prose for, and a
+# collision found through it is exactly as real as #291's original motivating
+# case (a brief naming the file it is about to touch, colliding with a lane
+# already mid-write on that file) -- it still REFUSEs/records-as-FORCEd below,
+# same as before this fix. What changed is narrower: prose is never UNIONED
+# on top of an existing diff (see CANDIDATE_SOURCE selection above) -- see
+# #531 in this issue for the false positive that produced.
 if [ -n "$FORCE" ]; then
   echo "ALLOW forced -- #$ISSUE overlaps in-flight lane(s), dispatched anyway by --force (open-PR check: $PR_CHECK_STATUS):"
   printf '%s' "$COLLISIONS" | while IFS=$'\t' read -r lane f; do
