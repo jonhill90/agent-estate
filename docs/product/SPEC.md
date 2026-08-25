@@ -1,3 +1,10 @@
+---
+type: Spec
+description: The contracts agent-supervisor enforces in code -- ledger schema, lane states, dispatch, completion, merge gate, harness adapters, and more -- gathered from the headers, docstrings, and schema comments that already state them.
+generated:
+  at: 2026-08-24T21:18:37-04:00
+---
+
 # agent-supervisor — SPEC
 
 Historical record, not a live spec. It gathers the contracts that already

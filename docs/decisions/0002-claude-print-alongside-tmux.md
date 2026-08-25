@@ -1,3 +1,10 @@
+---
+type: Decision
+description: Decision record -- `claude-print` dispatch-and-collect exists as an opt-in default for fresh, single-issue dispatches, alongside standing tmux lanes rather than replacing or converting them.
+generated:
+  at: 2026-08-24T21:18:37-04:00
+---
+
 # 0002 — `claude-print` dispatch exists alongside tmux lanes, not instead of them
 
 `2026-08-16` (agent-supervisor#171/#215/#274), `Verified 2026-08-20`.

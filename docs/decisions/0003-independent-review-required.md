@@ -1,3 +1,10 @@
+---
+type: Decision
+description: Decision record -- `merge-pr.sh` refuses to merge a PR whose author and reviewing lane resolve to the same identity or whose verdict can't be read, enforcing independent review at the merge gate itself, not only at dispatch.
+generated:
+  at: 2026-08-24T21:18:37-04:00
+---
+
 # 0003 — Independent review is enforced at merge, not just at dispatch
 
 `2026-08-15` (agent-supervisor#179/#184/#196/#198), `Verified 2026-08-20`.

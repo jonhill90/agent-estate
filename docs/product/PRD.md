@@ -1,3 +1,10 @@
+---
+type: PRD
+description: Historical record of who agent-supervisor serves and what it refuses to do, as of its verification date -- not a live spec; where the code has moved past this, the code wins.
+generated:
+  at: 2026-08-24T21:18:37-04:00
+---
+
 # agent-supervisor — PRD
 
 Historical record, not a live spec. It describes the boundaries this project
