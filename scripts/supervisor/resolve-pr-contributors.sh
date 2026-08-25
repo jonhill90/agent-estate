@@ -23,6 +23,25 @@
 #                                   CONTRIBUTORS_RESOLVED below for how a
 #                                   caller tells that apart from "the check
 #                                   itself never ran").
+#   AUTHOR_PANE_IDS              -- agent-supervisor#631: a THIRD parallel
+#                                   array -- each contributor task's frozen
+#                                   `tasks.pane_id` snapshot (`task-lane`'s
+#                                   own `pane_id` field), or '' when the task
+#                                   predates that column. Populated in one
+#                                   finishing pass over AUTHOR_TASKS so every
+#                                   resolution path above shares it, rather
+#                                   than each one threading it through
+#                                   separately. See dispatch.sh's
+#                                   author-exclusion loop for why this
+#                                   matters: comparing a stale contributor
+#                                   LANE STRING against a live candidate
+#                                   re-resolves through the ledger's mutable
+#                                   `lanes` table, which a later, unrelated
+#                                   dispatch can silently overwrite for that
+#                                   same string (`renumber-windows on`
+#                                   reassigning a closed window's index).
+#                                   The frozen snapshot is immune to that by
+#                                   construction.
 #   CONTRIBUTORS_RESOLVED       -- "1" once any resolution path below
 #                                   answered with a KNOWN fact (a
 #                                   contributor found, or a path that
@@ -55,6 +74,7 @@ resolve_pr_contributors() {
 
   AUTHOR_LANES=()
   AUTHOR_TASKS=()
+  AUTHOR_PANE_IDS=()
   FALLBACK_TASK=""
   CONTRIBUTORS_RESOLVED=""
   HEAD_REF=""
@@ -308,6 +328,21 @@ for row in data.get("tasks", []):
       _rpc_add_contributor "$f_lane" "$FALLBACK_TASK"
     fi
   fi
+
+  # agent-supervisor#631: one finishing pass over the now-final AUTHOR_TASKS
+  # -- not folded into `_rpc_add_contributor` above -- because that function
+  # is called from several different resolution paths above and this way the
+  # pane_id lookup runs exactly once per DISTINCT contributor, after
+  # dedup, rather than once per raw hit before it.
+  local at_task at_pane_id_json at_pid
+  for at_task in "${AUTHOR_TASKS[@]+"${AUTHOR_TASKS[@]}"}"; do
+    at_pid=""
+    if [ -n "$at_task" ]; then
+      at_pane_id_json=$("$ledger_python" "$ledger_cli" task-lane --task "$at_task" 2>/dev/null)
+      at_pid=$(sed -n 's/.*"pane_id":"\([^"]*\)".*/\1/p' <<<"$at_pane_id_json" | head -1)
+    fi
+    AUTHOR_PANE_IDS+=("$at_pid")
+  done
 
   unset -f _rpc_author_lane_known _rpc_add_contributor _rpc_path_known
   return 0

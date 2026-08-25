@@ -192,6 +192,38 @@ def lane_relation_from_rows(one_row, other_row):
     return "same" if pane_one == pane_other else "different"
 
 
+# agent-supervisor#631. `lane_relation_from_rows` above compares two
+# `lanes` rows -- fetched by the mutable lane STRING, `Ledger.get_lane`.
+# That is exactly the lookup a later, unrelated dispatch can silently
+# invalidate for a HISTORICAL contributor: `_register_lane_tx` upserts
+# `lanes` keyed on the string, so a task assigned under `agent-supervisor:4`
+# yesterday and a task assigned under the same string today, after a window
+# closed and `renumber-windows on` handed that index to a different pane,
+# both resolve `get_lane("agent-supervisor:4")` to the SAME row -- today's.
+#
+# `tasks.pane_id` (see `_assign_tx`) is this task's own frozen snapshot,
+# immune to that overwrite by construction: it is written once, at
+# assignment time, and never touched again. This is the read side of that
+# snapshot -- pure, like `lane_relation_from_rows`, so the caller's fetch
+# (`Ledger.get_task`) stays swappable and this stays unit-testable without a
+# ledger.
+#
+# '' for a task unknown to the ledger, or one dispatched before this column
+# existed (`_migrate_tasks_table` backfills those to '', never a guess) --
+# a caller must treat that exactly like a missing `pane_id` on a `lanes`
+# row: fall back to the live `Ledger.get_lane(lane)` lookup this function
+# exists to bypass, not fail or invent one.
+def pane_id_for_task(ledger, task_id):
+    """The frozen `pane_id` snapshot recorded on `task_id` at assignment
+    time, or `''` if the task is unknown or predates this column."""
+    if not task_id:
+        return ""
+    row = ledger.get_task(task_id)
+    if row is None:
+        return ""
+    return (row.get("pane_id") or "").strip()
+
+
 # agent-supervisor#605. `daemon`/`d-<task>` (`daemon/internal/ledger/
 # ledger.go`'s `EnsureLane`, called from `main.go:216`'s hardcoded `-lane`
 # default and `batch.go:103`'s per-job `d-<task>`) and `<session>:<index>`
@@ -579,7 +611,23 @@ class Ledger:
                     -- branch actually lives in, recorded once at dispatch
                     -- time. '' (never NULL) for a task dispatched before
                     -- this column existed -- see `_migrate_tasks_table`.
-                    worktree_path TEXT NOT NULL DEFAULT ''
+                    worktree_path TEXT NOT NULL DEFAULT '',
+                    -- agent-supervisor#631: an IMMUTABLE snapshot of
+                    -- `lanes.pane_id`, taken once at assignment time
+                    -- (`_assign_tx`), exactly the same pattern `pane_nonce`
+                    -- already uses. `lanes` is keyed on the lane STRING and
+                    -- `_register_lane_tx` upserts it -- a window closing and
+                    -- `renumber-windows on` reassigning that same string to
+                    -- a later, unrelated dispatch silently overwrites the
+                    -- `lanes` row a historical task's `lane` column still
+                    -- names. This column is this task's OWN record of which
+                    -- pane it actually ran in, independent of whatever the
+                    -- `lanes` row for that string says later. '' (never
+                    -- NULL) for a task dispatched before this column
+                    -- existed -- see `_migrate_tasks_table` -- and a caller
+                    -- must fall back to the mutable `lanes` lookup for
+                    -- those rows, never guess.
+                    pane_id TEXT NOT NULL DEFAULT ''
                 );
 
                 CREATE UNIQUE INDEX IF NOT EXISTS one_open_task_per_lane
@@ -832,7 +880,10 @@ class Ledger:
     # lane and task id but, before this, carried only as unstructured text
     # inside `summary` (see `cli.py`'s `record_dispatch` docstring) -- so
     # nothing could look it back up. See `Ledger.get_task_for_worktree`.
-    _TASKS_SCHEMA_MARKERS = ("delivery_pending", "delivery_attempted_at", "worktree_path")
+    # agent-supervisor#631 adds a seventh marker: `pane_id` is a new column,
+    # same reasoning as `worktree_path` above -- a ledger created before it
+    # existed has no way to acquire it short of this rebuild.
+    _TASKS_SCHEMA_MARKERS = ("delivery_pending", "delivery_attempted_at", "worktree_path", "pane_id")
     # agent-dotfiles#216 added 'copilot' (a plain tmux/Node lane, distinct
     # from the ACP-driven 'copilot-acp' already here) to the same CHECK
     # constraint this migration widens -- both markers must be present or a
@@ -1012,6 +1063,17 @@ class Ledger:
             # parse it: an old row reads '', the same "not recorded" answer
             # `get_task_for_worktree` already gives for any unmatched path.
             worktree_path_column = "worktree_path" if "worktree_path" in columns else "''"
+            # agent-supervisor#631: a pre-existing row recorded no frozen
+            # pane_id snapshot at all -- the column did not exist yet, so
+            # there was nothing to capture at assignment time. Backfilling
+            # it by looking up the CURRENT `lanes` row for that lane string
+            # would be writing exactly the guess this column exists to
+            # replace (that live row may since have been reused by a later
+            # dispatch, agent-supervisor#631's whole point) -- so an old row
+            # reads '', the same "not recorded" answer `worktree_path`
+            # already gives, and callers fall back to the live `lanes`
+            # lookup unchanged for it.
+            pane_id_column = "pane_id" if "pane_id" in columns else "''"
 
             connection = self._connect(foreign_keys=False)
             try:
@@ -1036,7 +1098,8 @@ class Ledger:
                             delivered_at INTEGER,
                             accepted_at INTEGER,
                             completed_at INTEGER,
-                            worktree_path TEXT NOT NULL DEFAULT ''
+                            worktree_path TEXT NOT NULL DEFAULT '',
+                            pane_id TEXT NOT NULL DEFAULT ''
                         )
                         """
                     )
@@ -1046,11 +1109,11 @@ class Ledger:
                         INSERT INTO tasks_migrated (
                             id, lane, pane_nonce, summary, status, result_path, result_sha256,
                             created_at, updated_at, delivery_attempted_at, delivered_at,
-                            accepted_at, completed_at, worktree_path
+                            accepted_at, completed_at, worktree_path, pane_id
                         )
                         SELECT id, lane, pane_nonce, summary, status, result_path, result_sha256,
                                created_at, updated_at, {attempted_column}, delivered_at,
-                               accepted_at, completed_at, {worktree_path_column}
+                               accepted_at, completed_at, {worktree_path_column}, {pane_id_column}
                         FROM tasks
                         """
                     )
@@ -1366,11 +1429,20 @@ class Ledger:
 
     @staticmethod
     def _verify_lane_nonce(connection, lane, pane_nonce):
-        row = connection.execute("SELECT nonce FROM lanes WHERE lane = ?", (lane,)).fetchone()
+        """Raises unless `pane_nonce` matches the lane's CURRENT registration.
+
+        Returns that same row's `pane_id` (agent-supervisor#631) so a caller
+        already paying for this lookup -- `_assign_tx` is the one that
+        matters -- can snapshot it onto a task row without a second query.
+        Every other caller ignores the return value; adding it here changes
+        nothing for them.
+        """
+        row = connection.execute("SELECT nonce, pane_id FROM lanes WHERE lane = ?", (lane,)).fetchone()
         if row is None:
             raise ValueError(f"unknown lane: {lane}")
         if row["nonce"] != pane_nonce:
             raise ValueError("pane incarnation does not match registered lane")
+        return row["pane_id"]
 
     @staticmethod
     def _cancel_task_row(connection, task_id, now):
@@ -2591,7 +2663,15 @@ class Ledger:
         self._require_task_id(task_id)
         if not summary.strip():
             raise ValueError("task summary must be non-empty")
-        self._verify_lane_nonce(connection, lane, pane_nonce)
+        # agent-supervisor#631: the lane's CURRENT pane_id, read from the
+        # same `lanes` row `_verify_lane_nonce` already fetches for the
+        # nonce check -- frozen onto this task row below so this task's own
+        # identity never depends on that `lanes` row surviving unmodified
+        # after a later dispatch reuses the same lane STRING for a
+        # different, unrelated pane (`renumber-windows on` reassigning a
+        # closed window's index; see the `tasks.pane_id` column comment in
+        # `_initialize`).
+        lane_pane_id = self._verify_lane_nonce(connection, lane, pane_nonce) or ""
         source = connection.execute("SELECT * FROM source_tasks WHERE id = ?", (task_id,)).fetchone()
         if source is None:
             raise ValueError("task requires a reconstructed GitHub source")
@@ -2607,10 +2687,10 @@ class Ledger:
         try:
             connection.execute(
                 """
-                INSERT INTO tasks(id, lane, pane_nonce, summary, status, created_at, updated_at, worktree_path)
-                VALUES (?, ?, ?, ?, 'created', ?, ?, ?)
+                INSERT INTO tasks(id, lane, pane_nonce, summary, status, created_at, updated_at, worktree_path, pane_id)
+                VALUES (?, ?, ?, ?, 'created', ?, ?, ?, ?)
                 """,
-                (task_id, lane, pane_nonce, summary, now, now, worktree_path),
+                (task_id, lane, pane_nonce, summary, now, now, worktree_path, lane_pane_id),
             )
         except sqlite3.IntegrityError as error:
             if "tasks.lane" in str(error):
