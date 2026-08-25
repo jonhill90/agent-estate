@@ -36,6 +36,39 @@ equivalent mutation-proven Python test
 (`test_complete_refuses_to_restamp_a_task_already_failed_or_cancelled` in
 `tests/supervisor/test_core.py`) -- see that PR for the port itself.
 
+A second package survived the same way, per agent-supervisor#627's
+follow-up decision (Option B) and carried out by agent-supervisor#643:
+`internal/pressure` -- the host load/free-memory safety gate that addresses
+the 2026-08-21 incident recorded in `internal/pressure/pressure.go`'s own
+comments (this tree, unchanged) -- was translated into
+`scripts/supervisor/host_pressure.py`, with mutation-checked tests
+(`tests/supervisor/test_host_pressure.py`) since the Go source had none to
+inherit. It is wired into the two dispatch entry points that, measured
+directly while doing the port, had no host-pressure check of any kind --
+`scripts/supervisor/dispatch-claude-print.sh` and
+`scripts/supervisor/dispatch-pi-rpc.sh` (see their own "host-pressure gate"
+comments, and `tests/supervisor/test_dispatch_claude_print_host_pressure.sh`
+/ `test_dispatch_pi_rpc_host_pressure.sh`). It does not replace
+`scripts/supervisor/host-pressure.sh`, the bash port of the same design that
+already existed and was already the live, tested gate on `dispatch.sh`'s
+own tmux flow (agent-supervisor#502, merged 2026-08-22, three days before
+this one) -- see `host_pressure.py`'s own module docstring for why a third
+implementation of the same numbers was not added there.
+
+This archive tree itself was already complete before agent-supervisor#643
+started: all 20 files `feat/supervisord-rebased` (tip `d72dbc5`) held under
+`daemon/` were confirmed present here byte-for-byte-or-superset (checked
+directly, file by file, against the fetched branch) -- `#630` had already
+archived the full, later 33-file daemon tree (including `internal/claim`,
+`internal/ciflake`, and `internal/sendmsg`, all of which landed on `main`'s
+daemon after `feat/supervisord-rebased`'s rebase point and so aren't in that
+branch at all). The brief that dispatched #643 described the archive as
+still missing 17 of 20 files; that was accurate against `origin/main` before
+`#630` merged (2026-08-24 23:03) but stale by the time #643 was written and
+dispatched -- recorded here rather than silently reconciled, per this
+repo's own "an instrument that cannot see a thing looks exactly like the
+thing being absent" caution, applied to a premise instead of a check.
+
 Nothing in this tree was rewritten or stripped for the archive, including
 its incident-history comments -- `internal/claim/claim.go`'s package doc
 (the raw-SQL, no-claim-logic gap `ebec9b3` fixed) and the two bugs "found
