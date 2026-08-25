@@ -123,6 +123,32 @@ type DockerRunner func(args []string) ([]byte, error)
 // callers pass in.
 type LookPath func(file string) (string, error)
 
+// KeychainRunner runs one read-only keychain-reachability probe --
+// agent-tui#149's own finding that "every binary on $PATH" and "an agent
+// can actually work" are different questions; the outage that issue
+// documents left every row in this section green while every lane was
+// locked out. The seam returns three distinguishable answers, matching
+// the same "absence is a typed value" discipline Dependency.Reachable
+// already established (AGENTS.md):
+//
+//   - (true, nil): the probe ran to completion and the item was read --
+//     readable.
+//   - (false, nil): the probe ran to completion and got a definite
+//     refusal (locked, denied, or the item does not exist) --
+//     locked-or-denied.
+//   - (_, non-nil err): the probe itself could not produce either answer
+//     (it timed out, or could not even start) -- could not determine.
+//     This is deliberately a THIRD state, never collapsed onto
+//     locked-or-denied -- see agent-tui#163, which fixed exactly this
+//     collapse for the skills eval store, and this issue's own "the pane
+//     was not wrong about what it measured; it measured the wrong thing"
+//     framing.
+//
+// A real implementation is a read probe only -- see ExecKeychainProbe's
+// own doc comment for the hard "never write" constraint this repo's
+// AGENTS.md states for any credential store.
+type KeychainRunner func() (readable bool, err error)
+
 // KnownDependencies is the fixed list of external binaries this
 // application or its MCP servers rely on, in the order they're checked.
 // Not discovered at runtime -- this is a short, stable list this
@@ -134,11 +160,11 @@ type LookPath func(file string) (string, error)
 var KnownDependencies = []string{"gh", "sqlite3", "npx", "tmux", "docker", "python3"}
 
 // NewFetcher composes the three real sections into one Fetcher.
-// dockerRun/lookPath nil is a valid, silent "section not wired" default --
-// the same "wiring is optional" convention WithTasks/WithReachability
-// document elsewhere in this module -- rendering that section empty with
-// no error, not a synthesized one.
-func NewFetcher(dockerRun DockerRunner, lookPath LookPath, themeConfigPath string) Fetcher {
+// dockerRun/lookPath/keychainProbe nil is a valid, silent "section not
+// wired" default -- the same "wiring is optional" convention
+// WithTasks/WithReachability document elsewhere in this module --
+// rendering that section empty with no error, not a synthesized one.
+func NewFetcher(dockerRun DockerRunner, lookPath LookPath, keychainProbe KeychainRunner, themeConfigPath string) Fetcher {
 	return func() (Snapshot, error) {
 		snap := Snapshot{
 			ProfilesNote: noProfilesNote,
@@ -150,6 +176,13 @@ func NewFetcher(dockerRun DockerRunner, lookPath LookPath, themeConfigPath strin
 		}
 		if lookPath != nil {
 			snap.Dependencies, snap.DependenciesErr = fetchDependencies(KnownDependencies, lookPath)
+		}
+		if keychainProbe != nil {
+			// Appended as one more Dependencies row, not a new section --
+			// agent-tui#149's own "no new rendering, no new vocabulary"
+			// framing: Dependency.Reachable's existing three-state nil
+			// convention already says everything this row needs to say.
+			snap.Dependencies = append(snap.Dependencies, fetchKeychain(keychainProbe))
 		}
 		snap.Settings, snap.SettingsErr = fetchSettings(themeConfigPath)
 

@@ -64,6 +64,46 @@ func TestInitialFrameShowsAllFiveSectionsFromTheFakeFetch(t *testing.T) {
 	}
 }
 
+// TestKeychainRow_RendersReadableThenLockedOrDenied drives a real Program
+// twice -- agent-tui#149's own "drive the tape and read the rendered
+// Admin pane, do not assert what it would show" requirement -- once with
+// a fake Fetcher reporting the keychain readable, once reporting a
+// definite refusal, and asserts the actual rendered Dependencies row
+// differs between the two runs.
+func TestKeychainRow_RendersReadableThenLockedOrDenied(t *testing.T) {
+	readable := true
+	before := func() (Snapshot, error) {
+		return Snapshot{
+			Dependencies: []Dependency{{Name: keychainRowName, Reachable: &readable}},
+			ProfilesNote: noProfilesNote,
+			UsersNote:    noUsersNote,
+		}, nil
+	}
+	tmBefore := run(t, New(before))
+	outBefore := waitFor(t, tmBefore, keychainRowName)
+	if !bytes.Contains(outBefore, []byte(keychainRowName+" yes")) {
+		t.Fatalf("readable run did not render %q as yes:\n%s", keychainRowName, outBefore)
+	}
+
+	locked := false
+	after := func() (Snapshot, error) {
+		return Snapshot{
+			Dependencies: []Dependency{{Name: keychainRowName, Reachable: &locked}},
+			ProfilesNote: noProfilesNote,
+			UsersNote:    noUsersNote,
+		}, nil
+	}
+	tmAfter := run(t, New(after))
+	outAfter := waitFor(t, tmAfter, keychainRowName)
+	if !bytes.Contains(outAfter, []byte(keychainRowName+" no")) {
+		t.Fatalf("locked-or-denied run did not render %q as no:\n%s", keychainRowName, outAfter)
+	}
+
+	if bytes.Equal(outBefore, outAfter) {
+		t.Fatal("readable and locked-or-denied runs rendered byte-identical frames")
+	}
+}
+
 // TestQQuitsARealProgram matches every other pane's own convention.
 func TestQQuitsARealProgram(t *testing.T) {
 	tm := run(t, New(nil))

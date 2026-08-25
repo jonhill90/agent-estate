@@ -450,7 +450,12 @@ func main() {
 		}
 		mcpserversModel = mcpservers.New(mcpservers.NewFetcher(filepath.Join(homeDir, ".claude.json"), cwd, exec.LookPath))
 
-		adminModel = admin.New(admin.NewFetcher(admin.DockerExecRunner("docker"), exec.LookPath, theme.ConfigPath()))
+		adminModel = admin.New(admin.NewFetcher(
+			admin.DockerExecRunner("docker"),
+			exec.LookPath,
+			admin.ExecKeychainProbe("Claude Code-credentials", 3*time.Second),
+			theme.ConfigPath(),
+		))
 	} else {
 		skillsModel = skills.New(nil)
 		mcpserversModel = mcpservers.New(nil)
