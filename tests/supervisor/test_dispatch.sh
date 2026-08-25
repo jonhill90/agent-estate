@@ -4819,6 +4819,116 @@ FIX
     "authorship unknown" "$out"
 fi
 
+# --- agent-supervisor#640: dispatch.sh records review-ness as a FACT, not -
+# a name it hopes a regex will guess back correctly later ------------------
+#
+# WHY: `Ledger.get_contributor_tasks_for_pr` used to infer review-ness
+# entirely from `_task_looks_like_review`, a regex over the task id and
+# summary. It requires "rev"/"review" right after `^`, `-` or `_` --
+# `rerev636` never matches (the "re" right before "rev" has no separator),
+# so a `--reviews-pr` dispatch named that way silently scored as an AUTHOR
+# of the PR it reviewed, and `merge-pr.sh` refused its own verdict as a
+# self-review. `dispatch.sh` now forwards `--is-review` to `record-dispatch`
+# whenever `$REVIEWS_PR` (not just `$PR_SCOPED`) is set -- the exact fact
+# this script already knows -- so `source_tasks.is_review` records the
+# truth regardless of what the dispatch ends up named.
+read_is_review() {  # read_is_review <state-dir> <task-id>
+  AGENT_SUPERVISOR_STATE_DIR="$1" python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+print(Ledger(sys.argv[2]).get_source_task(sys.argv[3])["is_review"])
+' "$HERE/../../scripts/supervisor" "$1" "$2"
+}
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+
+# case 1: a --reviews-pr dispatch named exactly the shape that defeated the
+# old regex ("rerev...", "re" running straight into "rev" with no `-`/`_`
+# between them). Routed through mark-pr-external so the dispatch succeeds
+# without the author-exclusion chain needing to resolve anything -- this
+# case is only about what gets RECORDED, not about who gets skipped.
+printf '6402|Some fix|fix/rev640-branch\n' >> "$D/prs"
+printf '6404|| review PR #6402, entirely external\n' >> "$D/issues"
+LEDGER_STATE="$D/state-640a" ledger mark-pr-external --repo acme/agent-dotfiles --pr 6402 \
+  --note "authored outside the lane system, for agent-supervisor#640's own test" --chain-verified >/dev/null
+
+out=$(LEDGER_STATE="$D/state-640a" run 6404 rerev6402 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 6402); rc=$?
+want_exit "a --reviews-pr dispatch named rerev... (the exact shape the old regex missed) succeeds" "$rc" 0 "$out"
+recorded=$(read_is_review "$D/state-640a" ad6404-rerev6402)
+if [ "$recorded" = "1" ]; then
+  ok "dispatch.sh recorded is_review=1 -- the FACT --reviews-pr carried, not a name guess"
+else
+  bad "dispatch.sh recorded is_review=1 -- the FACT --reviews-pr carried, not a name guess" "got: $recorded"
+fi
+
+# case 2: a --pr fix-pass (no --reviews-pr) named like a review must record
+# is_review=0 explicitly -- not leave it NULL for the regex to mishandle in
+# the OTHER direction (`revamp-parser` matches `_task_looks_like_review`
+# directly; see that method's own docstring).
+printf '6405|| the code a fix pass on PR #6406 targets\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D/state-640b" run 6405 original-6406 "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the original dispatch (#6405) succeeds" "$rc" 0 "$out"
+
+out=$(LEDGER_STATE="$D/state-640b" run 6405 revamp-parser-6406 "$D/brief.md" acme/agent-dotfiles "$REPO" --pr 6406); rc=$?
+want_exit "a --pr fix-pass named revamp-parser (no --reviews-pr) still dispatches" "$rc" 0 "$out"
+recorded=$(read_is_review "$D/state-640b" ad6405-revamp-parser-6406)
+if [ "$recorded" = "0" ]; then
+  ok "dispatch.sh recorded is_review=0 -- explicitly NOT a review, whatever it's named"
+else
+  bad "dispatch.sh recorded is_review=0 -- explicitly NOT a review, whatever it's named" "got: $recorded"
+fi
+
+# case 3 -- mutation check: revert dispatch.sh's own --is-review forwarding
+# and confirm case 1's assertion above would go red.
+#
+# What "red" looks like here is worth being precise about: `cli.py`'s
+# `--pr` alone (no `--is-review`) records a KNOWN `0`, not `NULL` -- that is
+# case 2's own point, and it holds regardless of WHY the flag was omitted.
+# So reverting the forwarding line does not put this row back to "unknown,
+# ask the regex" -- it makes dispatch.sh silently record `is_review=0`, a
+# CONFIDENT "not a review", for a dispatch that was actually a review. That
+# is worse than the pre-#640 regex miss, not equivalent to it: the old
+# behaviour left `get_contributor_tasks_for_pr` free to consult
+# `_task_looks_like_review` for a legacy row; a wrongly-recorded `0` is
+# trusted outright and never falls back to anything. This is exactly why
+# this one forwarding line is load-bearing and gets its own mutation check.
+MUTANT_DIR_640=$(make_mutant_scripts_dir)
+MUTATED_640="$MUTANT_DIR_640/dispatch.sh"
+patch_rc=0
+python3 - "$MUTATED_640" <<'PY' || patch_rc=$?
+import sys
+target = sys.argv[1]
+text = open(target).read()
+marker = '  [ -z "$REVIEWS_PR" ] || LEDGER_ARGS+=(--is-review)\n'
+assert text.count(marker) == 1, "--is-review forwarding not found or not unique -- script shape changed"
+text = text.replace(marker, "", 1)
+open(target, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh with --is-review forwarding removed" \
+    "could not patch $MUTATED_640 (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh with --is-review forwarding removed"
+  printf '6408|Some fix|fix/rev640c-branch\n' >> "$D/prs"
+  LEDGER_STATE="$D/state-640c" ledger mark-pr-external --repo acme/agent-dotfiles --pr 6408 \
+    --note "authored outside the lane system, for agent-supervisor#640's mutation check" --chain-verified >/dev/null
+  printf '6409|| review PR #6408, entirely external\n' >> "$D/issues"
+  out=$(DISPATCH_SCRIPT="$MUTATED_640" LEDGER_STATE="$D/state-640c" \
+        run 6409 rerev6408 "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 6408); rc=$?
+  want_exit "mutation setup: the review still dispatches (only the recorded fact changes)" "$rc" 0 "$out"
+  recorded=$(read_is_review "$D/state-640c" ad6409-rerev6408)
+  if [ "$recorded" = "0" ]; then
+    ok "mutation confirmed: with --is-review forwarding reverted, the same review now silently records is_review=0 (the assertion above would now be red)"
+  else
+    bad "mutation confirmed: with --is-review forwarding reverted, the same review now silently records is_review=0" \
+      "expected 0 (a review wrongly recorded as confidently NOT one), got: $recorded"
+  fi
+fi
+
 # Restore the fixture to what any section appended after this one expects.
 cat > "$D/lanes" <<'FIX'
 1|arch|claude.exe|❯ ready|1|0

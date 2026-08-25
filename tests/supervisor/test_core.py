@@ -452,6 +452,96 @@ def _seed_pre_source_tasks_migration_database(root: Path):
         connection.close()
 
 
+def _seed_pre_is_review_column_database(root: Path):
+    """Build a ledger.sqlite3 with the CURRENT lanes/tasks schema (and the
+    `one_open_pull_per_source_ref` trigger, if this run created one) but a
+    `source_tasks` table that predates `is_review` (agent-supervisor#640).
+
+    Built by opening a real `Ledger` first -- so lanes/tasks and the trigger
+    match production exactly, rather than a hand-copied schema that can
+    drift from it -- then rebuilding ONLY `source_tasks` back down to the
+    pre-#640 shape, the one piece this migration actually touches. Two rows
+    are seeded, both `source_kind='pull'` and both terminal (closed) so a
+    later dispatch in the SAME test against a different PR never trips
+    `one_open_pull_per_source_ref`:
+
+    * `as637-rerev636` (PR 636) -- one of the two rows agent-supervisor#640
+      measured by hand and named in `_KNOWN_MISCLASSIFIED_REVIEW_TASK_IDS`;
+      must come back `is_review=1` after `Ledger.__init__`'s backfill runs.
+    * `as1-fix-999` (PR 999) -- an ordinary, NOT-known-mislabelled row;
+      must come back `is_review IS NULL` (untouched) after the same
+      `__init__`, proving the backfill is scoped to the two named ids and
+      does not touch every legacy row.
+    """
+    root.mkdir(parents=True, exist_ok=True)
+    ledger = Ledger(root, clock=lambda: 1_000)
+    ledger.record_dispatch(
+        lane="free-1", pane_id="%1", nonce="nonce-1", harness="claude", repo="/repo/free-1",
+        server_id="server-a", session_id="$1", command="claude.exe",
+        task_id="as637-rerev636", source_kind="pull",
+        source_url="https://github.com/jonhill90/agent-supervisor/pull/636", source_ref="636",
+        summary="re-review of PR 636's fix", source_state="OPEN",
+        evidence=["claimed by dispatch.sh for lane free-1", "pr: 636"], status_marker=None,
+    )
+    ledger.complete("as637-rerev636", b"done", pane_nonce="nonce-1")
+    ledger.record_dispatch(
+        lane="free-2", pane_id="%2", nonce="nonce-2", harness="claude", repo="/repo/free-2",
+        server_id="server-a", session_id="$2", command="claude.exe",
+        task_id="as1-fix-999", source_kind="pull",
+        source_url="https://github.com/jonhill90/agent-supervisor/pull/999", source_ref="999",
+        summary="fix pass on PR 999", source_state="OPEN",
+        evidence=["claimed by dispatch.sh for lane free-2", "pr: 999"], status_marker=None,
+    )
+    ledger.complete("as1-fix-999", b"done", pane_nonce="nonce-2")
+
+    connection = sqlite3.connect(root / "ledger.sqlite3")
+    connection.row_factory = sqlite3.Row
+    try:
+        connection.execute("PRAGMA foreign_keys = OFF")
+        trigger_row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='one_open_pull_per_source_ref'"
+        ).fetchone()
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DROP TRIGGER IF EXISTS one_open_pull_per_source_ref")
+        connection.execute(
+            """
+            CREATE TABLE source_tasks_pre640 (
+                id TEXT PRIMARY KEY,
+                source_kind TEXT NOT NULL CHECK (source_kind IN ('issue', 'pull')),
+                source_url TEXT NOT NULL,
+                source_ref TEXT NOT NULL,
+                summary TEXT NOT NULL,
+                source_state TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (
+                    status IN ('created', 'delivered', 'accepted', 'running',
+                               'complete', 'failed', 'cancelled')
+                ),
+                evidence_json TEXT NOT NULL,
+                status_marker TEXT,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO source_tasks_pre640 (
+                id, source_kind, source_url, source_ref, summary, source_state,
+                status, evidence_json, status_marker, updated_at
+            )
+            SELECT id, source_kind, source_url, source_ref, summary, source_state,
+                   status, evidence_json, status_marker, updated_at
+            FROM source_tasks
+            """
+        )
+        connection.execute("DROP TABLE source_tasks")
+        connection.execute("ALTER TABLE source_tasks_pre640 RENAME TO source_tasks")
+        if trigger_row is not None:
+            connection.execute(trigger_row["sql"])
+        connection.commit()
+    finally:
+        connection.close()
+
+
 class MutableClock:
     def __init__(self, value=1_000):
         self.value = value
@@ -1949,6 +2039,86 @@ class LedgerTest(unittest.TestCase):
     def test_get_contributor_tasks_for_pr_unknown_pr_is_empty(self):
         self.assertEqual([], self.ledger.get_contributor_tasks_for_pr("no-such-pr"))
 
+    def _dispatch_pull_scoped(self, *, lane, pane_id, nonce, session_id, task_id, summary, is_review, pr="640"):
+        self.ledger.record_dispatch(
+            lane=lane,
+            pane_id=pane_id,
+            nonce=nonce,
+            harness="claude",
+            repo=f"/repo/{lane}",
+            server_id="server-a",
+            session_id=session_id,
+            command="claude.exe",
+            task_id=task_id,
+            source_kind="pull",
+            source_url=f"https://github.com/jonhill90/agent-supervisor/pull/{pr}",
+            source_ref=pr,
+            summary=summary,
+            source_state="OPEN",
+            evidence=[f"claimed by dispatch.sh for lane {lane}", f"pr: {pr}"],
+            status_marker=None,
+            is_review=is_review,
+        )
+        # `one_open_pull_per_source_ref` (agent-supervisor#169) allows only
+        # ONE open pull-kind row per PR at a time, and every case in this
+        # class dispatches several tasks against the same `pr` in a row --
+        # closing each one immediately mirrors #302's own real sequence
+        # (`test_get_contributor_tasks_for_pr_includes_every_non_review_
+        # pull_scoped_task`, above) and `get_contributor_tasks_for_pr` is
+        # documented as "unfiltered by status", so completing here does not
+        # weaken what any of these tests actually check.
+        self.ledger.complete(task_id, b"done", pane_nonce=nonce)
+
+    def test_get_contributor_tasks_for_pr_excludes_a_recorded_review_whatever_it_is_named(self):
+        """agent-supervisor#640: once `is_review=1` is RECORDED (what
+        `dispatch.sh --reviews-pr` now does), exclusion no longer depends on
+        `_task_looks_like_review`'s regex at all -- so it holds even for the
+        exact names that regex silently failed on (`rerev...`,
+        `re-review...`, `rereview...`) and for a name with no review-ish
+        substring whatsoever."""
+        for index, task_id in enumerate(
+            ["as637-rerev636", "as1-re-review-640", "as2-rereview640", "as3-totally-unrelated-name"]
+        ):
+            with self.subTest(task_id=task_id):
+                lane = f"free-r{index}"
+                self._dispatch_pull_scoped(
+                    lane=lane, pane_id=f"%{index}", nonce=f"nonce-r{index}", session_id=f"$r{index}",
+                    task_id=task_id, summary="dispatch summary", is_review=1,
+                )
+                lanes = {row["lane"] for row in self.ledger.get_contributor_tasks_for_pr("640")}
+                self.assertNotIn(lane, lanes, f"{task_id} must be excluded once is_review=1 is recorded")
+
+    def test_get_contributor_tasks_for_pr_includes_a_recorded_fix_pass_even_named_like_a_review(self):
+        """The overshoot direction agent-supervisor#640's own verification
+        bar names explicitly: a `--pr` fix-pass recorded `is_review=0` must
+        stay a contributor even when its name would trip the regex fallback
+        (`revamp-parser`, `reverse-index` both match `_task_looks_like_review`
+        directly -- see that method's own docstring)."""
+        for index, task_id in enumerate(["as1-revamp-parser", "as2-reverse-index"]):
+            with self.subTest(task_id=task_id):
+                lane = f"free-f{index}"
+                self._dispatch_pull_scoped(
+                    lane=lane, pane_id=f"%f{index}", nonce=f"nonce-f{index}", session_id=f"$f{index}",
+                    task_id=task_id, summary="dispatch summary", is_review=0,
+                )
+                lanes = {row["lane"] for row in self.ledger.get_contributor_tasks_for_pr("640")}
+                self.assertIn(lane, lanes, f"{task_id} must stay a contributor once is_review=0 is recorded")
+
+    def test_get_contributor_tasks_for_pr_falls_back_to_the_regex_when_is_review_was_never_recorded(self):
+        """A row written before `is_review` existed reads `NULL` --
+        `get_contributor_tasks_for_pr` must resolve it exactly as it did
+        before this column existed (agent-supervisor#640's verification bar
+        3), including the regex's own known blind spot: `rerev284` is NOT
+        excluded here, because nothing ever recorded the fact and the
+        fallback regex misses it -- this test pins that (unfixed, on
+        purpose) behaviour rather than asserting it is correct."""
+        self._dispatch_pull_scoped(
+            lane="free-legacy", pane_id="%legacy", nonce="nonce-legacy", session_id="$legacy",
+            task_id="Skills266-rerev284", summary="dispatch summary", is_review=None,
+        )
+        lanes = {row["lane"] for row in self.ledger.get_contributor_tasks_for_pr("640")}
+        self.assertIn("free-legacy", lanes, "unrecorded is_review still falls back to the (imperfect) regex")
+
     def test_record_pr_for_task_round_trips_through_get_task_for_pr_number(self):
         """agent-supervisor#308 item 1: the explicit "task X's own work
         opened PR N" record, written after the fact for an issue-keyed
@@ -3137,6 +3307,164 @@ class SourceTasksMigrationTest(unittest.TestCase):
             summary="two", source_state="OPEN", status="created", evidence=[], status_marker=None,
         )
         self.assertEqual("two", second["summary"])
+
+
+class SourceTasksReviewColumnMigrationTest(unittest.TestCase):
+    """agent-supervisor#640: `source_tasks.is_review` is added with
+    `ALTER TABLE ... ADD COLUMN`, not the drop-and-recreate dance
+    `_migrate_tasks_table`/`_migrate_source_tasks_table` need -- see
+    `Ledger._migrate_source_tasks_review_column`'s own docstring for why
+    that suffices here and never risks agent-supervisor#635/#636's
+    trigger-rename hazard. This class proves the mechanics directly: the
+    column appears, every pre-existing row (other than the two named
+    backfill exceptions, covered by `KnownMisclassifiedReviewBackfillTest`
+    below) reads `NULL`, and the `one_open_pull_per_source_ref` trigger --
+    deliberately never touched by this migration -- survives untouched."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+        _seed_pre_is_review_column_database(self.root)
+
+    def _table_info(self, root=None):
+        connection = sqlite3.connect((root or self.root) / "ledger.sqlite3")
+        connection.row_factory = sqlite3.Row
+        try:
+            return {row["name"]: row for row in connection.execute("PRAGMA table_info(source_tasks)").fetchall()}
+        finally:
+            connection.close()
+
+    def test_column_is_absent_before_migration_runs(self):
+        """Pins what the seed helper actually built, so a failure in the
+        test below is legible as a migration bug, not a bad fixture."""
+        self.assertNotIn("is_review", self._table_info())
+
+    def test_opening_migrates_the_column_and_preserves_every_row(self):
+        ledger = Ledger(self.root, clock=lambda: 2_000)
+
+        self.assertIn("is_review", self._table_info())
+        self.assertEqual(2, len(ledger.list_source_tasks()))
+
+        # The known-mislabelled id is backfilled (KnownMisclassifiedReview-
+        # BackfillTest below covers this in depth); the ordinary row next to
+        # it is NOT -- proving the backfill is scoped, not a blanket sweep.
+        self.assertEqual(1, ledger.get_source_task("as637-rerev636")["is_review"])
+        self.assertIsNone(ledger.get_source_task("as1-fix-999")["is_review"])
+
+        # `one_open_pull_per_source_ref` is deliberately untouched by this
+        # migration (`ADD COLUMN` never renames the table, unlike
+        # `_migrate_tasks_table`/`_migrate_source_tasks_table`, which must
+        # drop and recreate it around their own rebuilds) -- still present
+        # after `__init__` runs.
+        connection = sqlite3.connect(self.root / "ledger.sqlite3")
+        try:
+            trigger = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='trigger' AND name='one_open_pull_per_source_ref'"
+            ).fetchone()
+            self.assertIsNotNone(trigger, "the pull-uniqueness trigger must survive this migration untouched")
+        finally:
+            connection.close()
+
+    def test_migration_failure_rolls_back_leaving_column_absent(self):
+        for failpoint in ("before_add_is_review_column", "after_add_is_review_column"):
+            with self.subTest(failpoint=failpoint):
+                root = Path(tempfile.mkdtemp())
+                self.addCleanup(lambda r=root: __import__("shutil").rmtree(r, ignore_errors=True))
+                _seed_pre_is_review_column_database(root)
+
+                with self.assertRaisesRegex(RuntimeError, failpoint):
+                    Ledger(root, clock=lambda: 2_000, _migration_failpoint=failpoint)
+
+                self.assertNotIn("is_review", self._table_info(root))
+                connection = sqlite3.connect(root / "ledger.sqlite3")
+                try:
+                    self.assertEqual(2, connection.execute("SELECT COUNT(*) FROM source_tasks").fetchone()[0])
+                finally:
+                    connection.close()
+
+                # And migration recovers cleanly on the very next open.
+                recovered = Ledger(root, clock=lambda: 3_000)
+                self.assertIn("is_review", self._table_info(root))
+                self.assertEqual(1, recovered.get_source_task("as637-rerev636")["is_review"])
+
+    def test_fresh_ledger_already_carries_the_column(self):
+        fresh_root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(fresh_root, ignore_errors=True))
+        Ledger(fresh_root, clock=lambda: 1_000)
+        self.assertIn("is_review", self._table_info(fresh_root))
+
+
+class KnownMisclassifiedReviewBackfillTest(unittest.TestCase):
+    """agent-supervisor#640's own measurement named two live rows the regex
+    fallback gets wrong forever (`_task_looks_like_review`'s docstring
+    explains why, in both directions, and why the regex itself is left
+    unfixed): `as637-rerev636` and `Skills266-rerev284`. Backfilled by id,
+    not by a widened regex -- see `Ledger._KNOWN_MISCLASSIFIED_REVIEW_
+    TASK_IDS`'s own comment for why a general regex fix was rejected."""
+
+    def test_both_known_ids_are_backfilled_to_is_review_1(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        ledger = Ledger(root, clock=lambda: 1_000)
+        ledger.record_dispatch(
+            lane="free-1", pane_id="%1", nonce="nonce-1", harness="claude", repo="/repo/free-1",
+            server_id="server-a", session_id="$1", command="claude.exe",
+            task_id="as637-rerev636", source_kind="pull",
+            source_url="https://github.com/jonhill90/agent-supervisor/pull/636", source_ref="636",
+            summary="re-review of PR 636's fix", source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-1", "pr: 636"], status_marker=None,
+        )
+        ledger.complete("as637-rerev636", b"done", pane_nonce="nonce-1")
+        ledger.record_dispatch(
+            lane="free-2", pane_id="%2", nonce="nonce-2", harness="claude", repo="/repo/free-2",
+            server_id="server-a", session_id="$2", command="claude.exe",
+            task_id="Skills266-rerev284", source_kind="pull",
+            source_url="https://github.com/jonhill90/Skills/pull/284", source_ref="284",
+            summary="re-review of PR 284's fix", source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-2", "pr: 284"], status_marker=None,
+        )
+        ledger.complete("Skills266-rerev284", b"done", pane_nonce="nonce-2")
+
+        # Both rows were written with the column already present and
+        # `is_review` unspecified (defaults `None`, exactly what a caller
+        # that has not been told about this backfill would send) -- the
+        # backfill still catches them because it re-runs, idempotently,
+        # every `__init__`, not only immediately after the column migration.
+        self.assertIsNone(ledger.get_source_task("as637-rerev636")["is_review"])
+        reopened = Ledger(root, clock=lambda: 2_000)
+        self.assertEqual(1, reopened.get_source_task("as637-rerev636")["is_review"])
+        self.assertEqual(1, reopened.get_source_task("Skills266-rerev284")["is_review"])
+
+    def test_backfill_never_touches_an_issue_scoped_row_of_the_same_id(self):
+        """`_backfill_known_misclassified_review_tasks`'s own `WHERE` clause
+        requires `source_kind = 'pull'` -- an issue-scoped row that happens
+        to reuse one of the two known ids (implausible, but not the same
+        guarantee as a real PR-scoped collision) must not be silently
+        reclassified as a review."""
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        ledger = Ledger(root, clock=lambda: 1_000)
+        ledger.reconstruct_task(
+            task_id="as637-rerev636", source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/637", source_ref="637",
+            summary="unrelated issue-scoped row reusing the same id", source_state="OPEN",
+            status="created", evidence=["x"], status_marker=None,
+        )
+
+        reopened = Ledger(root, clock=lambda: 2_000)
+
+        self.assertIsNone(reopened.get_source_task("as637-rerev636")["is_review"])
+
+    def test_idempotent_across_repeated_opens(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(lambda: __import__("shutil").rmtree(root, ignore_errors=True))
+        _seed_pre_is_review_column_database(root)
+        Ledger(root, clock=lambda: 2_000)
+        second = Ledger(root, clock=lambda: 3_000)
+        third = Ledger(root, clock=lambda: 4_000)
+        self.assertEqual(1, second.get_source_task("as637-rerev636")["is_review"])
+        self.assertEqual(1, third.get_source_task("as637-rerev636")["is_review"])
 
 
 class SourceTasksPullUniquenessMigrationTest(unittest.TestCase):

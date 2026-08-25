@@ -153,6 +153,14 @@ def parser():
     # the evidence trail, but when `--pr` is given it is no longer what this
     # dispatch's `source_tasks` row is keyed by.
     record_dispatch_parser.add_argument("--pr", default=None)
+    # agent-supervisor#640: `dispatch.sh` passes this ONLY when `--reviews-pr`
+    # (explicit or inferred) is what actually put `--pr` on this call --
+    # never for a plain `--pr`-scoped fix pass. Meaningless without `--pr`
+    # (an issue-scoped dispatch has no `source_kind='pull'` row for
+    # `is_review` to describe); `record_dispatch` below only consults it
+    # when `--pr` is also present. See `Ledger.record_dispatch`'s own
+    # docstring for what the recorded value means downstream.
+    record_dispatch_parser.add_argument("--is-review", action="store_true")
     record_dispatch_parser.add_argument("--github", default="")
     record_dispatch_parser.add_argument("--harness", choices=("codex", "claude", "copilot", "copilot-acp", "pi"))
     # agent-supervisor#117: the worktree `worktree.sh new` built for this
@@ -857,6 +865,7 @@ def record_dispatch(
     harness_project_dir="",
     worktree_path="",
     pr=None,
+    is_review=False,
     confirm_landed=False,
 ):
     """Record a dispatch that ALREADY happened. Writes; never sends.
@@ -937,6 +946,17 @@ def record_dispatch(
     `dispatch.sh` can tell this collision apart from an ordinary ledger
     failure and refuse loud instead of folding it into the silent,
     non-fatal `ledger_record_failed` path every other write failure takes.
+
+    agent-supervisor#640: `is_review` is `dispatch.sh`'s own `--reviews-pr`
+    (explicit or inferred) flag, forwarded verbatim -- the exact fact this
+    call knows and `source_tasks` never used to record, leaving
+    `Ledger._task_looks_like_review`'s regex to guess it back later from
+    `task`/`summary` text and get it wrong for a task named `rerev...`.
+    Only meaningful when `pr` is also given (`source_kind='pull'`, the only
+    row shape `Ledger.get_contributor_tasks_for_pr` reads it for): recorded
+    as `1` when `is_review` is truthy, `0` -- an explicit, known "not a
+    review" -- otherwise. An issue-scoped dispatch (`pr` falsy) records
+    `None`; the property does not apply to that row shape at all.
     """
     task = _unique_redispatch_task_id(ledger, task)
     try:
@@ -950,12 +970,14 @@ def record_dispatch(
             source_url = f"https://github.com/{github}/pull/{pr}" if github else f"pull:{pr}@{Path(pane_path).name}"
             source_ref = str(pr)
             evidence.append(f"pr: {pr}")
+            recorded_is_review = 1 if is_review else 0
         else:
             source_kind = "issue"
             source_url = (
                 f"https://github.com/{github}/issues/{primary}" if github else f"issue:{primary}@{Path(pane_path).name}"
             )
             source_ref = str(primary)
+            recorded_is_review = None
         return ledger.record_dispatch(
             lane=lane,
             pane_id=pane_id,
@@ -988,6 +1010,7 @@ def record_dispatch(
             status_marker=None,
             worktree_path=worktree_path,
             accepted=confirm_landed,
+            is_review=recorded_is_review,
         )
     except Exception as error:
         ledger.mark_lane_held(lane, note=f"record_dispatch failed for task {task}: {error}")
@@ -1399,6 +1422,7 @@ def main(argv=None):
             harness=args.harness,
             worktree_path=args.worktree,
             pr=args.pr,
+            is_review=args.is_review,
             confirm_landed=args.confirm_landed,
         )
     elif args.command == "lane-free":
