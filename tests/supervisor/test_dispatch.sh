@@ -4647,6 +4647,184 @@ want_contains "...naming the real holder, same as before this fix" "someone-else
 want_contains "...and that lane's claim is left completely alone" "someone-else" "$(assignees 803)"
 want_missing "...no brief sent to any lane over a claim this dispatch does not hold" "send-keys" "$(cat "$D/tmux.log")"
 
+# --- agent-supervisor#619: worktree resolution must not depend on
+# repo_path's own `git worktree list` still knowing about the worktree ------
+#
+# WHY: #618 was a real PR (task as531-redo531) whose lane renamed its
+# worktree's branch to a slug sharing no text with the dispatch (the exact
+# shape #117's own test above already covers via `git branch -m`, run from
+# the SAME repo_path that created the worktree). #619 measured that #117's
+# fix alone was not enough: `python3 cli.py worktree-lane --path <path>`
+# resolved the worktree directly, on the FIRST try, even though the SAME
+# review dispatch's `git worktree list` on the repo_path IT was given came
+# back with no record at all. This reproduces that gap: the worktree is
+# created against one clone ($REPO), but the review is dispatched with a
+# SECOND, independent clone of the same origin ($D/repo2) as its repo_path --
+# `git worktree list` on repo2 has never heard of a worktree rooted under
+# $REPO and never will, exactly like a review dispatched against a
+# repo_path whose own worktree admin state has drifted from reality. Only
+# the ledger's OWN record of the worktree (`open-worktrees`, checked
+# directly against the worktree's own on-disk branch) can resolve this.
+D619="$D/state-619"
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+printf '619|| the code PR #6190 was written from\n' >> "$D/issues"
+printf '620|| review PR #6190, branch renamed to an unrelated slug, resolved via repo2\n' >> "$D/issues"
+
+out=$(LEDGER_STATE="$D619" run 619 pr-619-author "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the authoring dispatch (#619) succeeds" "$rc" 0 "$out"
+WT_619=$(sed -n 's/^  worktree: //p' <<<"$out")
+if [ -z "$WT_619" ] || [ ! -d "$WT_619" ]; then
+  bad "setup: the authoring dispatch printed a real worktree path" "got: '$WT_619' from: $out"
+else
+  ok "setup: the authoring dispatch printed a real worktree path"
+fi
+# `git checkout -b`, not `git branch -m` -- a NEW branch, exactly the
+# reflog shape #619's issue quotes ("checkout: moving from ... to ..."),
+# sharing no text with the dispatch slug and not matching the legacy
+# `(lane|fix|feat|chore|docs)/<n>-<slug>` convention either.
+git -C "$WT_619" checkout -q -b "docs/okf-index-measurement-redo619"
+
+# The PR's own "Fixes #<N>" names an issue (990) nothing in this ledger was
+# ever dispatched for, same technique #117's test above uses -- steps 1/2
+# (issue-keyed lookup) must come up silent, so only a worktree-based path
+# can resolve this.
+printf '6190|Fixes #990|docs/okf-index-measurement-redo619\n' >> "$D/prs"
+
+# A second, INDEPENDENT clone of the same origin -- never shares a `.git`
+# with $REPO, so `git worktree list` run against it can never enumerate a
+# worktree rooted under $REPO no matter what branch that worktree is on.
+REPO2="$D/repo2"
+git clone -q "$REPO" "$REPO2" 2>/dev/null
+git -C "$REPO2" remote set-url origin "git@github.com:acme/agent-dotfiles.git"
+
+out=$(LEDGER_STATE="$D619" run 620 rev-6190 "$D/brief.md" acme/agent-dotfiles "$REPO2" --reviews-pr 6190); rc=$?
+want_exit "a review of PR #6190 is still dispatched, resolved by the ledger's own worktree record even though repo_path's git worktree list never heard of it" "$rc" 0 "$out"
+want_contains "the author's lane is named and skipped" "skipping t:3" "$out"
+want_contains "the skip names the real authoring task, not a reconstruction from the branch" \
+  "ad619-pr-619-author" "$out"
+want_missing "never the legacy fallback's wrong reconstruction" "ad619-not-a-review-escape" "$out"
+log=$(tmuxlog)
+want_contains "and the review lands on the OTHER free lane, t:4 (target t:@104)" "send-keys -t t:@104" "$log"
+want_missing "never on the author's lane (t:3, target t:@103)" "send-keys -t t:@103 " "$log"
+
+# --- verification bar item 2: a PR from a worktree with NO dispatch record
+# still fails closed, even against the SAME repo2 path used above -----------
+printf '6191|Fixes #991|some-branch-nobody-ever-dispatched-619\n' >> "$D/prs"
+printf '621|| review PR #6191, nothing in the ledger names it\n' >> "$D/issues"
+out=$(LEDGER_STATE="$D619" run 621 rev-6191-unknown "$D/brief.md" acme/agent-dotfiles "$REPO2" --reviews-pr 6191); rc=$?
+want_exit "a PR with no dispatch record anywhere still fails closed" "$rc" 1 "$out"
+want_contains "...refusing on authorship unknown, not guessing" "authorship unknown, failing closed" "$out"
+
+# --- verification bar item 3: a worktree whose ledger row exists but whose
+# worktree_path is NULL (blank) still fails closed ---------------------------
+#
+# Simulates a task dispatched before agent-supervisor#117 added the column
+# (or one #611 could not backfill): the row is real, the lane is real, but
+# the one field this whole chain depends on was never written. Blanking it
+# directly is the only way to construct that state -- `#611` (see this
+# worktree's own CLAUDE.md entry) guarantees every fresh `assign_task` now
+# writes it, so there is no dispatch-level knob left to leave it empty.
+printf '622|| the code PR #6192 was written from\n' >> "$D/issues"
+printf '623|| review PR #6192, but its worktree_path row was blanked\n' >> "$D/issues"
+# t:3 and t:4 are both still occupied by the #619/#620 tasks above (neither
+# was completed or cancelled) -- a fresh free lane so this authoring
+# dispatch has somewhere to land.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+6|free-6|claude.exe|❯ ready|1|0
+FIX
+out=$(LEDGER_STATE="$D619" run 622 pr-622-author "$D/brief.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "setup: the second authoring dispatch (#622) succeeds" "$rc" 0 "$out"
+WT_622=$(sed -n 's/^  worktree: //p' <<<"$out")
+# Task id convention every other case in this file already relies on
+# (`ad81-dispatch-worktree`, `ad101-pr-inference-fix`, ...): "<prefix><issue>-<slug>".
+TASK_622="ad622-pr-622-author"
+if [ -z "$WT_622" ] || [ ! -d "$WT_622" ]; then
+  bad "setup: the second authoring dispatch printed a real worktree path" "got: '$WT_622' from: $out"
+else
+  ok "setup: the second authoring dispatch printed a real worktree path"
+fi
+git -C "$WT_622" checkout -q -b "docs/okf-index-measurement-redo622"
+printf '6192|Fixes #992|docs/okf-index-measurement-redo622\n' >> "$D/prs"
+blank_rc=0
+AGENT_SUPERVISOR_STATE_DIR="$D619" python3 - "$HERE/../../scripts/supervisor" "$TASK_622" <<'PY' || blank_rc=$?
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+
+task_id = sys.argv[2]
+ledger = Ledger(Path(os.environ["AGENT_SUPERVISOR_STATE_DIR"]))
+connection = sqlite3.connect(ledger.db_path)
+try:
+    cur = connection.execute("UPDATE tasks SET worktree_path = '' WHERE id = ?", (task_id,))
+    assert cur.rowcount == 1, f"expected exactly one row for task {task_id!r}, updated {cur.rowcount}"
+    connection.commit()
+finally:
+    connection.close()
+PY
+if [ "$blank_rc" -ne 0 ]; then
+  bad "setup: blanked task $TASK_622's worktree_path directly in the ledger" "exit $blank_rc"
+else
+  blanked=$(AGENT_SUPERVISOR_STATE_DIR="$D619" python3 "$HERE/../../scripts/supervisor/cli.py" worktree-lane --path "$WT_622")
+  want_contains "setup: worktree-lane no longer resolves this path (worktree_path blanked)" '"known":false' "$blanked"
+fi
+out=$(LEDGER_STATE="$D619" run 623 rev-6192-blank "$D/brief.md" acme/agent-dotfiles "$REPO2" --reviews-pr 6192); rc=$?
+want_exit "a worktree whose ledger row exists but whose worktree_path was blanked still fails closed" "$rc" 1 "$out"
+want_contains "...refusing on authorship unknown, not guessing from the branch it is sitting on" "authorship unknown, failing closed" "$out"
+
+# MUTATION-CHECK: silence Source B (the ledger's open-worktrees consultation)
+# and confirm the FIRST scenario above goes red -- with repo_path's own git
+# worktree list still blind to the worktree (repo2, as above), and Source B
+# disabled, nothing is left that can resolve PR #6190.
+MUTANT_DIR_619=$(make_mutant_scripts_dir)
+MUTATED_619="$MUTANT_DIR_619/dispatch.sh"
+patch_rc=0
+python3 - "$MUTANT_DIR_619/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
+import sys
+target = sys.argv[1]
+text = open(target).read()
+marker = 'open_worktrees_json=$("$ledger_python" "$ledger_cli" open-worktrees 2>&1)'
+assert text.count(marker) == 1, "open-worktrees lookup not found or not unique -- script shape changed"
+text = text.replace(
+    marker,
+    'open_worktrees_json=\'{"tasks":[]}\'  # MUTATED (#619): ledger open-worktrees never consulted',
+    1,
+)
+open(target, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of dispatch.sh whose open-worktrees lookup is silenced" \
+    "could not patch $MUTANT_DIR_619/resolve-pr-contributors.sh (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of dispatch.sh whose open-worktrees lookup is silenced"
+  chmod +x "$MUTATED_619"
+  cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+4|free-4|claude.exe|❯ ready|1|0
+FIX
+  printf '624|| review PR #6190 again, against the mutated guard\n' >> "$D/issues"
+  out=$(DISPATCH_SCRIPT="$MUTATED_619" LEDGER_STATE="$D619" \
+        run 624 rev-6190-mutant "$D/brief.md" acme/agent-dotfiles "$REPO2" --reviews-pr 6190); rc=$?
+  want_exit "mutation confirmed: with the ledger's open-worktrees source silenced, the same review now refuses" "$rc" 1 "$out"
+  want_contains "mutation confirmed: back to authorship unknown (the assertions above would now be red)" \
+    "authorship unknown" "$out"
+fi
+
+# Restore the fixture to what any section appended after this one expects.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+3|free-3|claude.exe|❯ ready|1|0
+FIX
+
 rm -rf "$D"
 
 
