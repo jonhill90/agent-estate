@@ -271,6 +271,7 @@ seed_row "$LANE" "%99999" "$SERVER_ID"
 rm -f "$GH_CALLED"
 out=$(printf 'Verdict: APPROVE
 Review-Lane: %s
+Reviewed-SHA: 0000000000000000000000000000000000000000
 ' "$LANE"   | LANES_SUPERVISOR_WINDOW="$SUP_IDX" bash "$SUP/post-verdict.sh" acme/repo 1 2>&1); rc=$?
 [ "$rc" -eq 8 ] && ok "#520: post-verdict refuses a Review-Lane whose registration the server contradicts (exit 8)"   || bad "post-verdict refuses a contradicted Review-Lane" "rc=$rc: $out"
 [ ! -f "$GH_CALLED" ] && ok "...and nothing was posted" || bad "nothing posted for a contradicted lane" "$out"
@@ -281,6 +282,7 @@ seed_row "$LANE" "$LANE_PANE" "$SERVER_ID"
 rm -f "$GH_CALLED"
 out=$(printf 'Verdict: APPROVE
 Review-Lane: %s
+Reviewed-SHA: 0000000000000000000000000000000000000000
 ' "$LANE"   | LANES_SUPERVISOR_WINDOW="$SUP_IDX" bash "$SUP/post-verdict.sh" acme/repo 1 2>&1); rc=$?
 [ -f "$GH_CALLED" ] && ok "...and the identical body posts once the registration is verified"   || bad "verified lane posts normally" "rc=$rc: $out"
 
