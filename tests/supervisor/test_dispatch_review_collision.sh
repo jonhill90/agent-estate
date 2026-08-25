@@ -22,6 +22,10 @@
 #      REFUSE (case 1) -- unaffected by this fix.
 #   3. `--reviews-pr` combined with `--force` still dispatches (case 4) --
 #      the pre-existing escape hatch is not the mechanism this fix relies on.
+#   4. a plain (write) dispatch with NO `--reviews-pr` flag, whose issue
+#      title happens to match the agent-supervisor#70 inference pattern,
+#      must still REFUSE (case 5, agent-supervisor#650) -- the downgrade is
+#      earned by the explicit flag, never by the inference alone.
 # A mutation check (reverting the fix) confirms case 2/3 go back to refusing,
 # proving the assertions above are actually exercising the fix and not
 # passing by construction.
@@ -115,6 +119,11 @@ echo '300|| authoring issue for PR 500' >> "$D/issues"
 echo '302|| unrelated write issue' >> "$D/issues"
 printf '500|Fixes #300|lane/300-authloop\n' >> "$D/prs"
 echo '501|| review PR #500' >> "$D/issues"
+# agent-supervisor#650's own reproduction, verbatim: #101's cited
+# false-positive title -- matches the agent-supervisor#70 inference pattern
+# ("review" + "PR #500") but is a rebase request, not a review. No
+# `--reviews-pr` flag is passed for this case; only the title infers one.
+echo '303|| rebase it so it can be reviewed, PR #500' >> "$D/issues"
 printf 'Read the diff for PR #500 in `file.txt`.\n' > "$D/brief-review.md"
 printf 'Fix the double-counting in `file.txt`.\n' > "$D/brief-write.md"
 printf 'Read the diff for PR #500, and cross-check `other.txt`.\n' > "$D/brief-review-other.md"
@@ -187,6 +196,24 @@ out_rev_force=$(LEDGER_STATE="$LEDGER_STATE" run --force 501 rev-500-c "$D/brief
 want_exit "case 4: --reviews-pr with --force also dispatches" "$rc_rev_force" 0 "$out_rev_force"
 
 # ============================================================================
+# case 5 (agent-supervisor#650's own reproduction): a plain WRITE dispatch,
+# NO `--reviews-pr` flag, whose issue title happens to match the
+# agent-supervisor#70 inference pattern ("review" + "PR #500") must still
+# REFUSE. The downgrade in case 2/3 is earned by an operator's EXPLICIT
+# `--reviews-pr`, never by the inference alone -- keying it on the inferred
+# value silently removed the writer-vs-writer collision guard for a
+# dispatch that really was going to write (the exact bypass #650 reported,
+# reproduced with #101's own cited false-positive title).
+# ============================================================================
+lanes_two_free
+LEDGER_STATE="$D/state-write-infer"; mkdir -p "$LEDGER_STATE"
+register_author "$LEDGER_STATE"
+
+out_write_infer=$(LEDGER_STATE="$LEDGER_STATE" run 303 write-infer-collides "$D/brief-write.md" acme/agent-dotfiles "$REPO"); rc_write_infer=$?
+want_exit "case 5: a write dispatch with an inference-matching title, no --reviews-pr flag, still REFUSES" "$rc_write_infer" 1 "$out_write_infer"
+want_contains "...naming the colliding file" "file.txt" "$out_write_infer"
+
+# ============================================================================
 # MUTATION CHECK: revert the fix (drop the REVIEWS_PR downgrade, restore the
 # unconditional abort_send) and confirm case 2's exact scenario goes back to
 # refusing -- proving the assertions above are exercising the fix, not
@@ -202,7 +229,7 @@ import sys
 path = sys.argv[1]
 text = open(path).read()
 needle = '''if [ "$COLLISION_RC" -ne 0 ]; then
-  if [ -n "$REVIEWS_PR" ]; then'''
+  if [ -n "$REVIEWS_PR_EXPLICIT" ]; then'''
 assert needle in text, "the REVIEWS_PR downgrade branch is not where this test expects -- update the mutation marker"
 # Replace the whole if/else block with the pre-fix unconditional abort_send,
 # byte-for-byte what dispatch.sh had before agent-supervisor#645.

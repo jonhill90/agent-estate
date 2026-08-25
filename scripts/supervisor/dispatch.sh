@@ -246,6 +246,15 @@ fi
 # -- see the lane-selection loop below -- it names which PR is under review,
 # it never names which lane to use.
 REVIEWS_PR=""
+# agent-supervisor#650: set ONLY when `--reviews-pr` is passed explicitly on
+# the command line, at the same point REVIEWS_PR itself is set below --
+# never touched by the agent-supervisor#70 inference block further down.
+# This is what step 3.2's collision downgrade keys on, not REVIEWS_PR: an
+# operator passing the flag is asserting "this is a review" and accepting
+# that a real overlap will not be re-checked; a title merely matching the
+# inference pattern is not the same assertion (see that downgrade's own
+# comment for the reproduced bypass this exists to close).
+REVIEWS_PR_EXPLICIT=""
 NOT_A_REVIEW=""
 PR=""
 # DISPATCH_LIVE_PANE=1 is `--live-pane` for every call this process makes,
@@ -303,6 +312,7 @@ while [ $# -gt 0 ]; do
         exit 1
       fi
       REVIEWS_PR="$2"
+      REVIEWS_PR_EXPLICIT=1
       shift 2
       ;;
     --live-pane)
@@ -1760,7 +1770,7 @@ COLLISION_OUT=$("$HERE/collision-check.sh" check \
   ${COLLISION_FORCE:+--force} 2>&1)
 COLLISION_RC=$?
 if [ "$COLLISION_RC" -ne 0 ]; then
-  if [ -n "$REVIEWS_PR" ]; then
+  if [ -n "$REVIEWS_PR_EXPLICIT" ]; then
     # agent-supervisor#645: collision-check.sh's REFUSE means "an in-flight
     # lane already holds these files", which is only a hazard for a dispatch
     # that is going to WRITE them. A `--reviews-pr` dispatch's deliverable is
@@ -1770,8 +1780,26 @@ if [ "$COLLISION_RC" -ne 0 ]; then
     # another review lane, anyone). The overlap is still worth knowing, so
     # it is downgraded to the same informational stdout line ALLOW already
     # gets below, not silenced -- only the refusal (stderr + abort_send)
-    # goes away. A plain (write) dispatch with REVIEWS_PR unset still hits
-    # the abort_send branch below, unchanged.
+    # goes away.
+    #
+    # agent-supervisor#650 (a real bypass, reproduced): this keys on
+    # REVIEWS_PR_EXPLICIT, never on REVIEWS_PR itself. REVIEWS_PR is also
+    # set by the agent-supervisor#70 inference block below (a title merely
+    # matching "review" + "PR #N"), and that inference is deliberately wide
+    # -- "annoying, not dangerous" is what its own comment calls a false
+    # positive, on the assumption that misinferring costs at most a wrongly
+    # excluded lane or a refused dispatch. Keying the downgrade on the
+    # inferred value turned that same misinference into a silent bypass of
+    # the writer-vs-writer collision guard for a dispatch that really is
+    # going to write: a plain write dispatch, no `--reviews-pr` flag, whose
+    # issue title happens to match the inference pattern (e.g. "rebase it
+    # so it can be reviewed, PR #500", #101's own cited false-positive
+    # example) proceeded against a file an in-flight lane was actively
+    # editing. Only an operator's EXPLICIT `--reviews-pr` -- "this dispatch
+    # is a review, and I accept a real overlap will not be re-checked" -- is
+    # the assertion this downgrade is entitled to trust. A plain (write)
+    # dispatch, whether or not REVIEWS_PR ends up inferred, still hits the
+    # abort_send branch below, unchanged.
     :
   else
     # A refusal, same as every other guard's stderr above -- agent-dotfiles#199
@@ -1781,10 +1809,11 @@ if [ "$COLLISION_RC" -ne 0 ]; then
   fi
 fi
 # ALLOW (no-conflict, unknown, or forced), or a REFUSE downgraded to
-# information for a review dispatch (see the REVIEWS_PR branch above) -- on
-# stdout, not stderr: agent-dotfiles#199 requires stderr silent on a
-# successful dispatch, and "say UNKNOWN, don't let it read as nothing" (the
-# issue's own words) only requires this is SAID, not that it is said on
+# information for an EXPLICIT `--reviews-pr` dispatch (see the
+# REVIEWS_PR_EXPLICIT branch above) -- on stdout, not stderr:
+# agent-dotfiles#199 requires stderr silent on a successful dispatch, and
+# "say UNKNOWN, don't let it read as nothing" (the issue's own words) only
+# requires this is SAID, not that it is said on
 # stderr specifically.
 sed 's/^/dispatch: collision-check: /' <<<"$COLLISION_OUT"
 
