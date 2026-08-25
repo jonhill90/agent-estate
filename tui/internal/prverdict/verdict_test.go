@@ -13,6 +13,7 @@
 package prverdict
 
 import (
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -234,6 +235,70 @@ func TestBlankReviewLaneSelfApprovalBypass(t *testing.T) {
 			t.Fatalf("parseTrailer(reviewLaneRE, ...) matched, want no match for a blank trailer")
 		}
 	})
+}
+
+// TestTrailerRegexTableCases pins the shape every trailer regex must
+// handle, per agent-tui#112: a blank value, a value with trailing spaces,
+// a value on the same line, a trailer block with a blank line inside it,
+// and CRLF line endings. Run directly against parseTrailer/the regex
+// vars, not through Resolve, so a failure names exactly which regex and
+// which shape broke.
+func TestTrailerRegexTableCases(t *testing.T) {
+	cases := []struct {
+		name      string
+		re        *regexp.Regexp
+		body      string
+		wantOK    bool
+		wantValue string
+	}{
+		// Review-Lane: -- (.*) capture, TrimSpace-based empty check.
+		{"review_lane_blank_does_not_capture_next_line", reviewLaneRE,
+			"Review-Lane: \nReviewed-SHA: " + head + "\n", false, ""},
+		{"review_lane_trailing_spaces_trimmed", reviewLaneRE,
+			"Review-Lane: build-5   \n", true, "build-5"},
+		{"review_lane_same_line_value", reviewLaneRE,
+			"Review-Lane: build-5\n", true, "build-5"},
+		{"review_lane_blank_line_inside_trailer_block", reviewLaneRE,
+			"Verdict: APPROVE\n\nReview-Lane: \n\nReviewed-SHA: " + head + "\n", false, ""},
+		{"review_lane_crlf_blank_does_not_capture_next_line", reviewLaneRE,
+			"Verdict: APPROVE\r\nReview-Lane:\r\nReviewed-SHA: " + head + "\r\n", false, ""},
+		{"review_lane_crlf_value", reviewLaneRE,
+			"Review-Lane: build-5\r\n", true, "build-5"},
+
+		// Author-Lane: -- same regex shape as Review-Lane.
+		{"author_lane_blank_does_not_capture_next_line", authorLaneRE,
+			"Author-Lane: \nReview-Lane: build-5\n", false, ""},
+		{"author_lane_crlf_value", authorLaneRE,
+			"Author-Lane: build-2\r\n", true, "build-2"},
+
+		// Reviewed-SHA: -- [A-Za-z0-9]+ capture, the regex this PR fixes.
+		{"reviewed_sha_blank_does_not_capture_next_line", reviewedSHARE,
+			"Reviewed-SHA:\n" + head + "\n", false, ""},
+		{"reviewed_sha_blank_does_not_capture_bare_alnum_next_line", reviewedSHARE,
+			"Verdict: APPROVE\nAuthor-Lane: build3\nReview-Lane: build5\nReviewed-SHA:\nbuild5\n", false, ""},
+		{"reviewed_sha_trailing_spaces_trimmed", reviewedSHARE,
+			"Reviewed-SHA: " + head + "   \n", true, head},
+		{"reviewed_sha_same_line_value", reviewedSHARE,
+			"Reviewed-SHA: " + head + "\n", true, head},
+		{"reviewed_sha_blank_line_inside_trailer_block", reviewedSHARE,
+			"Verdict: APPROVE\n\nReviewed-SHA:\n\n" + head + "\n", false, ""},
+		{"reviewed_sha_crlf_blank_does_not_capture_next_line", reviewedSHARE,
+			"Verdict: APPROVE\r\nReviewed-SHA:\r\n" + head + "\r\n", false, ""},
+		{"reviewed_sha_crlf_value", reviewedSHARE,
+			"Reviewed-SHA: " + head + "\r\n", true, head},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			value, ok := parseTrailer(tc.re, tc.body)
+			if ok != tc.wantOK {
+				t.Fatalf("parseTrailer ok = %v, want %v (value %q)", ok, tc.wantOK, value)
+			}
+			if ok && value != tc.wantValue {
+				t.Fatalf("parseTrailer value = %q, want %q", value, tc.wantValue)
+			}
+		})
+	}
 }
 
 func TestMissingHeadSHAFailsClosed(t *testing.T) {

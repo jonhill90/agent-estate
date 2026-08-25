@@ -256,10 +256,30 @@ func scanVerdictLines(body string) []verdictLine {
 // package does not set), so this was the only gap. Same bug, same fix,
 // ported from skills#260 (Python) which fixed the identical pattern in
 // jonhill90/skills's own pr_verdict.py.
+// agent-tui#112: 390c99a's own commit message claimed "reviewedSHARE
+// never had this bug -- its capture group ([A-Za-z0-9]+) can't match
+// whitespace at all." True of the capture group, false of the `\s*`
+// surrounding it: the pre-capture `\s*` between the colon and
+// `[A-Za-z0-9]+` still crosses a newline exactly like reviewLaneRE's did.
+// A blank `Reviewed-SHA:` immediately followed by a line that is itself
+// pure alnum (a bare lane name with no hyphen, or any other bare token) is
+// walked onto and captured as if it were the SHA. Proven before this fix:
+//
+//	body := "Verdict: APPROVE\nAuthor-Lane: build3\nReview-Lane: build5\nReviewed-SHA:\nbuild5\n"
+//	reviewedSHARE.FindStringSubmatch(body) -> captured "build5"
+//
+// Fixed the same way: anchor to `[ \t]*`, same line only. `\r?` is added
+// before `$` on all three trailer regexes here (not only reviewedSHARE)
+// because a CRLF body's final `\r` sits between the last real character
+// and `$` in `(?m)` mode; reviewLaneRE/authorLaneRE tolerated it only by
+// accident, since their `(.*)$` capture swallows the `\r` and
+// parseTrailer's strings.TrimSpace then strips it back off --
+// reviewedSHARE's `[A-Za-z0-9]+` capture group cannot swallow a `\r` the
+// same way, so it needs the explicit `\r?` to match a CRLF line at all.
 var (
-	reviewLaneRE  = regexp.MustCompile(`(?im)^[ \t]*Review-Lane:[ \t]*(.*)$`)
-	authorLaneRE  = regexp.MustCompile(`(?im)^[ \t]*Author-Lane:[ \t]*(.*)$`)
-	reviewedSHARE = regexp.MustCompile(`(?im)^\s*Reviewed-SHA:\s*([A-Za-z0-9]+)\s*$`)
+	reviewLaneRE  = regexp.MustCompile(`(?im)^[ \t]*Review-Lane:[ \t]*(.*)\r?$`)
+	authorLaneRE  = regexp.MustCompile(`(?im)^[ \t]*Author-Lane:[ \t]*(.*)\r?$`)
+	reviewedSHARE = regexp.MustCompile(`(?im)^[ \t]*Reviewed-SHA:[ \t]*([A-Za-z0-9]+)[ \t]*\r?$`)
 )
 
 func parseTrailer(re *regexp.Regexp, body string) (string, bool) {
