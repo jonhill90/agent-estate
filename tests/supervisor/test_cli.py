@@ -1,4 +1,5 @@
 import contextlib
+import hashlib
 import io
 import json
 import os
@@ -1231,17 +1232,106 @@ class StrandedClaimRecoveryIsReachable(unittest.TestCase):
             self.assertEqual(0, self._run(root, "reap-lane-claims").returncode)
             self.assertFalse(ledger.lane_available("free-9"), "the reap must not touch a deliberate hold")
 
-            proc = self._run(root, "cancel-open-task", "--lane", "free-9")
+            proc = self._run(root, "cancel-open-task", "--lane", "free-9", "--abandoned")
             self.assertEqual(0, proc.returncode, proc.stderr)
             self.assertEqual("cancelled", json.loads(proc.stdout)["cancelled"]["status"])
+            self.assertIsNone(json.loads(proc.stdout)["cancelled"]["result_path"])
             self.assertTrue(Ledger(Path(root)).lane_available("free-9"))
 
     def test_cancel_open_task_on_an_already_free_lane_is_a_no_op(self):
         with tempfile.TemporaryDirectory() as root:
             self._lane(root)
-            proc = self._run(root, "cancel-open-task", "--lane", "free-9")
+            proc = self._run(root, "cancel-open-task", "--lane", "free-9", "--abandoned")
             self.assertEqual(0, proc.returncode, proc.stderr)
             self.assertIsNone(json.loads(proc.stdout)["cancelled"])
+
+    def test_cancel_open_task_requires_saying_which(self):
+        """agent-supervisor#649: no default. A caller that supplies none of
+        --result-file/--note/--abandoned must be refused, not silently
+        treated as an abandonment -- that silent default is exactly how all
+        951 of the ledger's cancelled rows ended up with a null result."""
+        with tempfile.TemporaryDirectory() as root:
+            self._lane(root)
+            proc = self._run(root, "cancel-open-task", "--lane", "free-9")
+            self.assertNotEqual(0, proc.returncode)
+            self.assertIn("requires --result-file, --note, or --abandoned", proc.stderr)
+
+    def test_cancel_open_task_refuses_a_result_and_abandoned_together(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._lane(root)
+            proc = self._run(root, "cancel-open-task", "--lane", "free-9", "--note", "shipped", "--abandoned")
+            self.assertNotEqual(0, proc.returncode)
+            self.assertIn("exactly one of", proc.stderr)
+
+    def _record_dispatch(self, root, *, lane, task, issue=649, pr=None):
+        output = io.StringIO()
+        argv = [
+            "--state-dir", root, "record-dispatch",
+            "--lane", lane, "--task", task, "--summary", f"{task} summary",
+            "--pane-id", "%9", "--pane-path", root, "--command", "claude.exe",
+            "--server-id", "socket:1", "--session-id", "$0",
+            "--issue", str(issue), "--github", "jonhill90/agent-supervisor",
+        ]
+        if pr is not None:
+            argv += ["--pr", str(pr)]
+        with contextlib.redirect_stdout(output):
+            rc = cli.main(argv)
+        self.assertEqual(0, rc, output.getvalue())
+
+    def test_cancel_open_task_can_record_a_result_via_note(self):
+        """agent-supervisor#649's core fix: a cancel that carries a result
+        must persist it -- with a hash, the same as `record-completion`
+        writes -- rather than looking identical to an abandonment."""
+        with tempfile.TemporaryDirectory() as root:
+            self._lane(root)
+            self._record_dispatch(root, lane="free-9", task="as649-shipped", pr=649)
+            proc = self._run(root, "cancel-open-task", "--lane", "free-9", "--note", "PR #649 merged; pane was gone")
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            cancelled = json.loads(proc.stdout)["cancelled"]
+            self.assertEqual("cancelled", cancelled["status"])
+            self.assertIsNotNone(cancelled["result_path"])
+            self.assertIsNotNone(cancelled["result_sha256"])
+            self.assertEqual(
+                cancelled["result_sha256"],
+                hashlib.sha256(b"PR #649 merged; pane was gone").hexdigest(),
+            )
+            # And the regression the issue named: a PR-scoped task whose PR
+            # merged never ends up cancelled with no result -- it is not
+            # even reachable through this call without one of the three
+            # flags, and this one has a result.
+            missing = self._run(root, "missing-results")
+            self.assertEqual(0, missing.returncode, missing.stderr)
+            self.assertNotIn(
+                "as649-shipped", [task["id"] for task in json.loads(missing.stdout)["tasks"]]
+            )
+
+    def test_cancel_open_task_with_result_file_writes_the_files_bytes(self):
+        with tempfile.TemporaryDirectory() as root:
+            self._lane(root)
+            self._record_dispatch(root, lane="free-9", task="as649-file-result")
+            result_file = Path(root) / "result.md"
+            result_file.write_text("# delivered before the pane went away\n")
+            proc = self._run(root, "cancel-open-task", "--lane", "free-9", "--result-file", str(result_file))
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            cancelled = json.loads(proc.stdout)["cancelled"]
+            self.assertEqual(
+                hashlib.sha256(result_file.read_bytes()).hexdigest(), cancelled["result_sha256"]
+            )
+
+    def test_missing_results_surfaces_an_abandoned_cancel_but_not_a_result_bearing_one(self):
+        """agent-supervisor#649: the discoverability half of the fix -- a
+        terminal row with no result must be findable without knowing the
+        schema."""
+        with tempfile.TemporaryDirectory() as root:
+            self._lane(root)
+            self._record_dispatch(root, lane="free-9", task="as649-abandoned")
+            proc = self._run(root, "cancel-open-task", "--lane", "free-9", "--abandoned")
+            self.assertEqual(0, proc.returncode, proc.stderr)
+            self.assertEqual("cancelled", json.loads(proc.stdout)["cancelled"]["status"])
+
+            missing = self._run(root, "missing-results")
+            self.assertEqual(0, missing.returncode, missing.stderr)
+            self.assertIn("as649-abandoned", [task["id"] for task in json.loads(missing.stdout)["tasks"]])
 
     def test_cancel_open_task_on_an_unknown_lane_errors_distinctly(self):
         """agent-supervisor#17. `cancel-open-task --lane 2` against a lane id
@@ -1253,11 +1343,11 @@ class StrandedClaimRecoveryIsReachable(unittest.TestCase):
         exit-0 JSON indistinguishable from the no-op case above."""
         with tempfile.TemporaryDirectory() as root:
             self._lane(root)
-            proc = self._run(root, "cancel-open-task", "--lane", "no-such-lane")
+            proc = self._run(root, "cancel-open-task", "--lane", "no-such-lane", "--abandoned")
             self.assertNotEqual(0, proc.returncode)
             self.assertIn("unknown lane", proc.stderr)
             # The two refusals must be told apart, not just both non-null.
-            noop = self._run(root, "cancel-open-task", "--lane", "free-9")
+            noop = self._run(root, "cancel-open-task", "--lane", "free-9", "--abandoned")
             self.assertEqual(0, noop.returncode, noop.stderr)
             self.assertNotEqual(proc.stdout, noop.stdout)
 
@@ -1552,7 +1642,7 @@ class IssueLaneCliTest(unittest.TestCase):
             proc = subprocess.run(
                 [
                     sys.executable, str(SUPERVISOR_DIR / "cli.py"),
-                    "--state-dir", root, "cancel-open-task", "--lane", "t:3",
+                    "--state-dir", root, "cancel-open-task", "--lane", "t:3", "--abandoned",
                 ],
                 text=True,
                 capture_output=True,

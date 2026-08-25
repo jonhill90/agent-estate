@@ -2544,7 +2544,7 @@ out=$(LEDGER_STATE="$D/state-79" run 279 cancel-auth "$D/brief.md" acme/agent-do
 want_exit "setup: the authoring dispatch (#279) succeeds" "$rc" 0 "$out"
 log=$(tmuxlog)
 want_contains "setup: the authoring dispatch lands on t:3 (target t:@103)" "send-keys -t t:@103" "$log"
-LEDGER_STATE="$D/state-79" ledger cancel-open-task --lane t:3 >/dev/null
+LEDGER_STATE="$D/state-79" ledger cancel-open-task --lane t:3 --abandoned >/dev/null
 
 out=$(LEDGER_STATE="$D/state-79" run 280 rev-279-after-cancel "$D/brief.md" acme/agent-dotfiles "$REPO" --reviews-pr 279); rc=$?
 want_exit "a review after cancel-open-task is still dispatched to a non-author lane" "$rc" 0 "$out"

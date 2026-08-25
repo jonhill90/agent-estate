@@ -375,6 +375,18 @@ def parser():
     # its id. Reach for `release-lane-claim` first; it is the scoped one.
     cancel_open_task_parser = sub.add_parser("cancel-open-task")
     cancel_open_task_parser.add_argument("--lane", required=True)
+    # agent-supervisor#649: exactly one of these three is required (enforced
+    # in `main`, not argparse, so the error names the actual gap the same
+    # way `record-completion --task/--lane` already does). `--result-file`/
+    # `--note` let a caller who has recovered what the lane actually
+    # delivered -- before the pane died -- record that instead of losing it;
+    # `--abandoned` is the explicit "there genuinely is nothing" this issue
+    # asked for. No default: a caller that does not say which is not allowed
+    # to have this silently guessed for them, which is exactly how all 951
+    # of the ledger's cancelled rows ended up with a null result.
+    cancel_open_task_parser.add_argument("--result-file", type=Path, default=None)
+    cancel_open_task_parser.add_argument("--note", default=None)
+    cancel_open_task_parser.add_argument("--abandoned", action="store_true")
 
     # agent-dotfiles#212: the read `dispatch.sh` needs to refuse a review
     # dispatched back to the lane that wrote the code under review. The
@@ -541,6 +553,13 @@ def parser():
     sub.add_parser("open-worktrees")
 
     sub.add_parser("delivered-open")
+
+    # agent-supervisor#649: the discoverable half of the fix. Before this, a
+    # terminal row with no result -- what every `cancelled` row in the ledger
+    # turned out to be -- was invisible unless someone queried
+    # ledger.sqlite3 by hand, which is how the issue's own measurement was
+    # taken. See `Ledger.list_terminal_tasks_missing_result`.
+    sub.add_parser("missing-results")
 
     # agent-supervisor#153: the write side. `bootstrap-session.sh` is the
     # only caller today -- called once, at the moment it creates a session,
@@ -1505,7 +1524,25 @@ def main(argv=None):
         reaped = ledger.reap_stale_supervisor_lease()
         value = {"reaped": reaped}
     elif args.command == "cancel-open-task":
-        cancelled = ledger.cancel_open_task(args.lane)
+        # agent-supervisor#649: pick exactly one of the three ways a caller
+        # can answer "was there a result?" -- argparse cannot express this
+        # mutual exclusion (each flag is independently optional) without
+        # losing the specific error message, so it is checked here, the same
+        # way `record_completion` checks its own --task/--lane requirement.
+        given = [name for name, value in (
+            ("--result-file", args.result_file), ("--note", args.note), ("--abandoned", args.abandoned or None)
+        ) if value]
+        if len(given) == 0:
+            raise RuntimeError("cancel-open-task requires --result-file, --note, or --abandoned")
+        if len(given) > 1:
+            raise RuntimeError(f"cancel-open-task takes exactly one of --result-file/--note/--abandoned, got {given}")
+        if args.result_file is not None:
+            result = args.result_file.read_bytes()
+        elif args.note is not None:
+            result = args.note.encode("utf-8")
+        else:
+            result = None
+        cancelled = ledger.cancel_open_task(args.lane, result=result, abandoned=args.abandoned)
         # agent-supervisor#359: this is an operator recovering a lane a
         # normal completion never reached (the crash path) -- exactly the
         # shape #359's own "Done this tick" workaround released by hand.
@@ -1741,6 +1778,8 @@ def main(argv=None):
         value = ledger.restore_plan()
     elif args.command == "delivered-open":
         value = {"tasks": ledger.list_delivered_open_tasks()}
+    elif args.command == "missing-results":
+        value = {"tasks": ledger.list_terminal_tasks_missing_result()}
     elif args.command == "open-worktrees":
         value = {"tasks": ledger.list_open_worktrees()}
     elif args.command == "adopt-session":
