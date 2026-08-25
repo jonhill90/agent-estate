@@ -22,8 +22,8 @@
 // token list, the negation guard, the fence/blockquote exclusion) matches
 // skills#255's pr_verdict.py close to line-for-line, translated to Go --
 // that logic is pure text processing, proven against real reviewer prose
-// across a dozen-plus agent-supervisor issues (#53, #192, #196, #198,
-// #213, #232, #475 -- cited inline below at the rule each one fixed), and
+// across a dozen-plus agent-supervisor issues (agent-supervisor#53, agent-supervisor#192, agent-supervisor#196, agent-supervisor#198,
+// agent-supervisor#213, agent-supervisor#232, agent-supervisor#475 -- cited inline below at the rule each one fixed), and
 // re-deriving it worse from scratch would throw that history away. What is
 // NOT ported is agent-supervisor's verdict-independence.sh lane-identity
 // resolution (author_lane_for, lane_relation): that machinery answers
@@ -242,7 +242,7 @@ func scanVerdictLines(body string) []verdictLine {
 // comment, because the author cannot post a comment on their own PR to
 // state it any differently from writing it into the description at open
 // time.
-// jonhill90/skills#258/#260: the whitespace after the colon is restricted
+// jonhill90/skills#258/jonhill90/skills#260: the whitespace after the colon is restricted
 // to `[ \t]*`, never `\s*` -- `\s*` matches a newline, so a BLANK trailer
 // value (`Review-Lane:` with nothing after it) let the pattern's greedy
 // post-colon whitespace consume the line break and its capture group

@@ -191,7 +191,7 @@ this is about what a lane *may* be given, not what it inherits.
 **Correction, 2026-08-23 (estate-loop/b-docs-stale sweep, pass 2):** the
 citation above was previously a bare, unqualified `#494` — it does not
 exist in this repo (`gh issue view 494` here 404s; this repo's own issues
-top out around #117). It resolves in `agent-supervisor`
+top out around agent-tui#117). It resolves in `agent-supervisor`
 (`jonhill90/agent-supervisor#494`, "Lanes inherit the operator's entire MCP
 surface at launch", closed by `agent-supervisor#495`, merged). Same defect
 was present in `internal/mcpservers/server.go`'s own doc comment, which
@@ -223,7 +223,7 @@ item; implementing the container driver is its own later item.**
 
 **2026-08-22 update (interface + LOCAL depth):** the interface
 (`internal/session/execution_mode.go`, `AddWithMode`) and the Agents view's
-MODE column both shipped in #79. The column's own initial cut hardcoded
+MODE column both shipped in agent-tui#79. The column's own initial cut hardcoded
 every row to `ExecutionLocal` regardless of that row's own data — a
 fabricated value, not a read — and was replaced with `internal/agents.modeFor`,
 which reads real per-row evidence (`Command`, `State`) and renders `unknown`

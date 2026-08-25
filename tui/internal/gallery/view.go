@@ -12,7 +12,7 @@ import "fmt"
 // this package's case) over the literal text this returns.
 //
 // The renderability flag (Cell.Flag) is always printed as a suffix on its
-// own glyph's line, in plain ASCII ("[NF]", "[emoji]") -- issue #11's own
+// own glyph's line, in plain ASCII ("[NF]", "[emoji]") -- issue agent-tui#11's own
 // acceptance item 3, "unrenderable glyphs are flagged... demonstrably":
 // the flag must never be silent, and it must never itself be a glyph that
 // could go unrendered.

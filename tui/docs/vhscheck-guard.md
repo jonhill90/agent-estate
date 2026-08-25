@@ -1,6 +1,6 @@
 ---
 type: Guard
-description: What internal/vhscheck checks, why it exists (#132/#133), how it tells a live go build from a comment mentioning a path, and how to run it.
+description: What internal/vhscheck checks, why it exists (agent-tui#132/agent-tui#133), how it tells a live go build from a comment mentioning a path, and how to run it.
 generated:
   at: 2026-08-23T16:06:08-04:00
 ---
@@ -22,15 +22,15 @@ reference, and fails if the directory it names doesn't exist.
 Found while auditing `docs/SPEC-shell.md`'s own build-status claims
 (agent-tui#130): `testdata/vhs/agents-mode.tape` had referenced
 `go build -o /tmp/agentsdemo ./cmd/agentsdemo` since the tape was added
-in #91, but `cmd/agentsdemo` had never been committed — the tape was
-unrunnable from day one, silently, until #130 restored the binary.
+in agent-tui#91, but `cmd/agentsdemo` had never been committed — the tape was
+unrunnable from day one, silently, until agent-tui#130 restored the binary.
 
 Checking the scope of that finding (agent-tui#132) found two more:
 `testdata/vhs/knowledge.tape` and `testdata/vhs/knowledge-route.tape`
 both referenced `cmd/knowledgedemo`. `git log --all --
 'cmd/knowledgedemo*'` returns **zero commits across every ref** — this
 one wasn't a regression from a deletion, the directory had *never*
-existed at all, since `knowledge.tape` first landed in #87. Three tapes,
+existed at all, since `knowledge.tape` first landed in agent-tui#87. Three tapes,
 found only because a human swept every `.tape` file by hand after the
 first one turned up — exactly the kind of check that shouldn't depend
 on a human remembering to look.

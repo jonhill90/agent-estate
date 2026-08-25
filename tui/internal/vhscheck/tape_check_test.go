@@ -149,7 +149,7 @@ func TestNoTapeReferencesAMissingCmdDirectory(t *testing.T) {
 
 	missing := MissingCmdDirs(repoRoot, refs)
 	for _, m := range missing {
-		t.Errorf("%s:%d references %s, which does not exist -- go build inside this tape fails silently, producing no screenshot (agent-tui#130/#132)",
+		t.Errorf("%s:%d references %s, which does not exist -- go build inside this tape fails silently, producing no screenshot (agent-tui#130/agent-tui#132)",
 			m.TapePath, m.Line, m.CmdDir())
 	}
 }

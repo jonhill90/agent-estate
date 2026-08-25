@@ -53,7 +53,7 @@ prompts about the force-directed rendering of an *existing* graph
 rather than quoted, since neither row has a cleaned form yet and the raw
 form is not for publishing per this estate's own quoting convention).
 Nothing in that record names it as a candidate for *how per-agent memory
-gets stored*; #116 is the first place it appears as a storage option rather
+gets stored*; agent-tui#116 is the first place it appears as a storage option rather
 than a look-and-feel reference. That doesn't disqualify it, but it changes
 what "adopting graphify" would mean here: Graphify is an
 extractor that turns *source material* (a codebase) into a graph via parsing,
@@ -220,7 +220,7 @@ per-agent storage format.
 ## What this document is not
 
 Not a recommendation. Not a design. No storage code is proposed or written
-here or in this PR. The next step is Jon's, per #116 and per
+here or in this PR. The next step is Jon's, per agent-tui#116 and per
 `docs/memoryvariants/README.md`'s own precedent for how this estate treats
 gated/undecided work: evidence lands, the decision does not get made for
 him.

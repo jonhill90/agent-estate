@@ -94,7 +94,7 @@ func TestParseDailyExtractsPerHarnessFigures(t *testing.T) {
 	}
 	// The load-bearing field: cache-read must come through as its own
 	// figure, distinct from the token total it is folded INTO by ccusage
-	// but must never be folded into by this panel (issue #4's #2).
+	// but must never be folded into by this panel (issue agent-tui#4's agent-tui#2).
 	if !claude.CacheRead.Known || claude.CacheRead.Value != 787642179 {
 		t.Errorf("claude cache-read = %+v", claude.CacheRead)
 	}

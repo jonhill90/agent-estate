@@ -1,10 +1,10 @@
 // agent-tui#61 follow-up (gate check, same issue): the generic graph model
-// this file defines is deliberately candidate-neutral. #61's own gate
+// this file defines is deliberately candidate-neutral. agent-tui#61's own gate
 // check found the ORIGINAL version of this file baked in one storage
 // candidate -- OKF markdown + wikilinks -- as if it were the only shape a
 // memory graph could take: a node's type pinned to a fixed four-value OKF
 // enum, an edge with no room for a weighted similarity link. That was a
-// soft vote for OKF markdown before #116 (reserved for Jon) picks a
+// soft vote for OKF markdown before agent-tui#116 (reserved for Jon) picks a
 // storage format. This file fixes the MODEL; fakeGraph() below is one
 // CALLER of it -- an OKF-shaped demo instance, not the model itself. See
 // graph_test.go for a second caller (a non-OKF, vector-weighted instance)
@@ -28,7 +28,7 @@ type node struct {
 // edge is an opaque link between two node ids, with an optional weight.
 // weight is the zero value (0) for a plain binary link -- e.g. an OKF
 // "Related: [[wikilink]]" line, which only asserts a link exists, not how
-// strong it is. A similarity-neighborhood source (candidate 2 in #116)
+// strong it is. A similarity-neighborhood source (candidate 2 in agent-tui#116)
 // populates weight with a real distance/score instead of needing a
 // different edge type; an AST-derived graph (candidate 3) can likewise
 // leave it at zero or use it for e.g. call-count. Nothing here treats an

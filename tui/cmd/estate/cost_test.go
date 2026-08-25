@@ -6,7 +6,7 @@ import (
 	"time"
 )
 
-// TestBuildCostFetch_QuotaSurvivesCcusageFailure reproduces PR #50's
+// TestBuildCostFetch_QuotaSurvivesCcusageFailure reproduces PR agent-tui#50's
 // reopened review finding verbatim: a real machine had a working quota.sh
 // but no working ccusage, and f3 showed "cost: unknown (ccusage
 // unreadable)" with no quota line at all. buildCostFetch must fetch

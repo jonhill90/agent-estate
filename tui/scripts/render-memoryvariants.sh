@@ -4,7 +4,7 @@
 # real terminal, ANSI colour and all) -- agent-tui#61. See
 # tools/memoryvariants/main.go's package doc comment for why this is real
 # Bubble Tea/lipgloss output over hardcoded fake data, not an HTML mock,
-# same device as scripts/render-uivariants.sh (agent-tui#62/#63).
+# same device as scripts/render-uivariants.sh (agent-tui#62/agent-tui#63).
 #
 # The live mouse-drag spike (tools/memoryvariants/spike) is NOT rendered
 # here -- it needs a real interactive terminal, not a single frozen frame.

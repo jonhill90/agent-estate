@@ -8,7 +8,7 @@
 // grid?
 //
 // Throwaway, like its parent package -- not imported by cmd/ or
-// internal/, deleted alongside tools/memoryvariants/ once #61 is decided.
+// internal/, deleted alongside tools/memoryvariants/ once agent-tui#61 is decided.
 //
 // Usage: go run ./tools/memoryvariants/spike
 // Keys: q or ctrl+c to quit and print the drag event log to stderr.

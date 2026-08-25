@@ -15,7 +15,7 @@ import (
 // internal/lane's TestAllStatesCoversLanesShStates and view.go's own
 // (now-retired) TestEveryViewRendersEveryColumn: a Layout that silently
 // drops an empty column -- including via its own ClosedFilter, which must
-// only ever touch Done -- is the "forgotten state" failure #10 explicitly
+// only ever touch Done -- is the "forgotten state" failure agent-tui#10 explicitly
 // warns against ("a pretty board that omits stale, menu-blocked or unsent
 // is worse than the flat list it replaces").
 func TestEveryLayoutRendersEveryColumn(t *testing.T) {
@@ -52,7 +52,7 @@ func TestClosedHideOmitsDoneOnly(t *testing.T) {
 }
 
 // TestClosedRecentKeepsOnlyWithinWindow pins "last 24h" to Card.Age, not a
-// wall-clock read (layout.go's closedRecentWindow doc comment / #10 item
+// wall-clock read (layout.go's closedRecentWindow doc comment / agent-tui#10 item
 // 4: data fetching stays off the render path).
 func TestClosedRecentKeepsOnlyWithinWindow(t *testing.T) {
 	cards := []Card{
@@ -88,7 +88,7 @@ func TestLayoutRenderColorsAgedCard(t *testing.T) {
 	lipgloss.SetColorProfile(termenv.ANSI)
 	t.Cleanup(func() { lipgloss.SetColorProfile(prevProfile) })
 
-	cards := []Card{{Repo: testRepo, Number: 95, Column: Blocked, Title: "as95 conflicting", Age: 3 * time.Hour, BlockedReason: "PR #95 is conflicting"}}
+	cards := []Card{{Repo: testRepo, Number: 95, Column: Blocked, Title: "as95 conflicting", Age: 3 * time.Hour, BlockedReason: "PR agent-tui#95 is conflicting"}}
 	for _, l := range Layouts {
 		out := l.Render(cards, nil, 220, theme.Default)
 		if !strings.Contains(out, "as95 conflicting") {
@@ -108,21 +108,21 @@ func TestLayoutRenderColorsAgedCard(t *testing.T) {
 }
 
 // TestLayoutRenderShowsBlockedReason: the blocked-reason line must survive
-// every card shape, not just the multi-line one -- #10's "ugly states"
+// every card shape, not just the multi-line one -- agent-tui#10's "ugly states"
 // rule applied to the reason text specifically, since a Blocked card with
 // no reason shown is barely more useful than an unlabeled red box.
 func TestLayoutRenderShowsBlockedReason(t *testing.T) {
-	cards := []Card{{Repo: testRepo, Number: 4, Column: Blocked, Title: "conflict", BlockedReason: "PR #40 is conflicting"}}
+	cards := []Card{{Repo: testRepo, Number: 4, Column: Blocked, Title: "conflict", BlockedReason: "PR agent-tui#40 is conflicting"}}
 	for _, l := range Layouts {
 		out := l.Render(cards, nil, 220, theme.Default)
-		if l.Card == ShapeMultiLine && !strings.Contains(out, "PR #40 is conflicting") {
+		if l.Card == ShapeMultiLine && !strings.Contains(out, "PR agent-tui#40 is conflicting") {
 			t.Errorf("layout %q: multi-line card dropped the blocked reason:\n%s", l.ID, out)
 		}
 	}
 }
 
 // TestRenderSwimlanesGroupsByRepo is GroupByRepo's own contract -- the
-// evolved "variant 2" (#10's own framing): each repo gets its own labeled
+// evolved "variant 2" (agent-tui#10's own framing): each repo gets its own labeled
 // section, and a card never appears outside its repo's section.
 func TestRenderSwimlanesGroupsByRepo(t *testing.T) {
 	repoB := Repo{Label: "other-repo", Owner: "jonhill90", Name: "other-repo"}

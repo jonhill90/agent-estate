@@ -7,7 +7,7 @@ but say so in the commit message if you do, to avoid a reviewer thinking two
 files drifted).
 
 **Verified against `main` `6942926`, 2026-08-23 (agent-tui#38's shell PR,
-#43, plus everything through #104's chat-send wiring), except the "What this
+agent-tui#43, plus everything through agent-tui#104's chat-send wiring), except the "What this
 repo is" paragraph and this file's `internal/nav`/`internal/rail`/
 `internal/shell`/`internal/stub` layout lines, updated 2026-08-22 for
 `docs/SPEC-shell.md` S1-S3/S5.** The "Known defects" section below was
@@ -171,7 +171,7 @@ why a screen-scraped transcript was rejected instead, and what a real
 
 **False as of `56513a2`, corrected 2026-08-23 (estate-loop/b-docs-stale
 sweep, pass 2) — the Layout table row above this paragraph was already
-fixed by the prior sweep pass (#119); this specific paragraph was missed.**
+fixed by the prior sweep pass (agent-tui#119); this specific paragraph was missed.**
 `agent-tui#99` (commit `5997399`) shipped `internal/chat/claudecode.go`'s
 `ClaudeCodeSource`, which reads real Claude Code CLI session transcripts,
 and `internal/chat/fallback.go`'s `FallbackSource`, which `cmd/estate`
@@ -292,7 +292,7 @@ specifically — a Go port of `jonhill90/skills#255`'s `pr_verdict.py`,
 itself ported from `jonhill90/agent-supervisor`'s
 `verdict.py`/`verdict-independence.sh` (this repo is Go-only, AGENTS.md's
 own "Go, not shell, for new code" convention, so the port is Go rather
-than a second-language copy of skills#255's Python). `390c99a` (#113)
+than a second-language copy of skills#255's Python). `390c99a` (agent-tui#113)
 fixed a blank-`Review-Lane:`-trailer self-approval bypass in this gate: a
 same-lane author posting a comment with an empty `Review-Lane:` value and
 a real head SHA on the next line was previously resolved as `approved`

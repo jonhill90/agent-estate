@@ -1,4 +1,4 @@
-# Post-merge QA for w5d.md: confirms the #93/#91/#92/#90 conflict resolution
+# Post-merge QA for w5d.md: confirms the agent-tui#93/agent-tui#91/agent-tui#92/agent-tui#90 conflict resolution
 # didn't silently revert anything -- Dashboard, Agents' MODE column, and
 # Library all render for real. Run: vhs testdata/vhs/library-postmerge.tape
 #
@@ -20,20 +20,20 @@ Show
 Type "/tmp/atui-postmerge" Enter
 Sleep 3s
 
-# Home(0) -> Dashboard(1): 1 down. Enter: #92's real pane, not reverted.
+# Home(0) -> Dashboard(1): 1 down. Enter: agent-tui#92's real pane, not reverted.
 Down
 Enter
 Sleep 3s
 Screenshot testdata/vhs/out/01-postmerge-dashboard.png
 
-# Dashboard(1) -> Agents(2): 1 down. Enter: #91's real MODE column, not
+# Dashboard(1) -> Agents(2): 1 down. Enter: agent-tui#91's real MODE column, not
 # reverted.
 Down
 Enter
 Sleep 3s
 Screenshot testdata/vhs/out/02-postmerge-agents-mode.png
 
-# Agents(2) -> Library(6): 4 downs. Enter: #93's own pane, still real.
+# Agents(2) -> Library(6): 4 downs. Enter: agent-tui#93's own pane, still real.
 Down
 Down
 Down

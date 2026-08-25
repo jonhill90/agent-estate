@@ -16,7 +16,7 @@ import (
 // (internal/rail/theme_test.go) documents the full "driven, not a struct
 // unit test" rationale; this proves the SAME theme value changes the
 // board's render too, "every surface, not just the one you were thinking
-// about" (#27 acceptance item 2).
+// about" (agent-tui#27 acceptance item 2).
 func TestThemeSwitchChangesBoardRender(t *testing.T) {
 	prev := lipgloss.ColorProfile()
 	lipgloss.SetColorProfile(termenv.TrueColor)
@@ -77,7 +77,7 @@ func TestThemeSwitchChangesBoardRender(t *testing.T) {
 // replacement for the old TestKeyTCyclesThemeAtRuntime -- see rail's
 // identical test and theme.CycleRequestedMsg's doc comment for why this
 // package must no longer own the theme value: four independent per-pane
-// copies is the defect #51 fixes, not merely the missing Save. Pressing
+// copies is the defect agent-tui#51 fixes, not merely the missing Save. Pressing
 // 't' must still be driven through a real Model's Update, but it may only
 // ask for a cycle via the returned Cmd's Msg, never mutate m.theme itself.
 func TestKeyTRequestsThemeCycleWithoutMutatingLocalTheme(t *testing.T) {

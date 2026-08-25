@@ -1,5 +1,5 @@
 # Visual QA for agent-b3.md's fix: SPEC-shell.md S7's sending half --
-# internal/chat.Sender wired against agent-supervisor#508/#509's
+# internal/chat.Sender wired against agent-supervisor#508/agent-supervisor#509's
 # session_send, driven through the real shell binary (cmd/estate), not a
 # unit test claiming it works.
 #

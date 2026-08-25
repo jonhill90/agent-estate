@@ -55,7 +55,7 @@ func TestFetchIssuesSkipsPullRequests(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(issues) != 1 || issues[0].Number != 6 {
-		t.Fatalf("issues = %+v, want only #6 (a real issue, not the PR at #7)", issues)
+		t.Fatalf("issues = %+v, want only agent-tui#6 (a real issue, not the PR at agent-tui#7)", issues)
 	}
 }
 

@@ -477,7 +477,7 @@ func TestCtrlCQuitsWhileComposing(t *testing.T) {
 // the difference, same as every other pane in this module) must be
 // IDENTICAL whether or not compose mode is active, so toggling [i]/[esc]
 // never shifts anything below it on screen -- the exact regression class
-// agent-tui#29/#38 already found once (gallery's View() overrunning its
+// agent-tui#29/agent-tui#38 already found once (gallery's View() overrunning its
 // own budget by one line, in the other direction).
 func TestComposerBudgetIsIdenticalComposingOrNot(t *testing.T) {
 	atRest := fetched(t, 100, 30)

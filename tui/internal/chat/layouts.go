@@ -48,7 +48,7 @@ type layoutDef struct {
 // in render.go), so the unified-feed reading is one keypress away, not a
 // separate screen. Both columns are viewport-backed (model.go) so a list
 // or a transcript taller than the pane scrolls rather than truncating --
-// the #29 defect this package is built not to repeat.
+// the agent-tui#29 defect this package is built not to repeat.
 var listLayout = layoutDef{
 	ID:          "list",
 	Name:        "Thread list",

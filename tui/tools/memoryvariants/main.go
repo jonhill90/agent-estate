@@ -1,6 +1,6 @@
 // Command memoryvariants is a THROWAWAY rendering harness for
 // agent-tui#61 (knowledge graph view of agent memory), following
-// tools/uivariants' own pattern from agent-tui#62/#63: hardcoded fake
+// tools/uivariants' own pattern from agent-tui#62/agent-tui#63: hardcoded fake
 // data, no MCP client, no vault access, no tea.NewProgram for the static
 // variants below -- nothing under cmd/ or internal/ imports this package.
 // Delete this directory once Jon has picked a variant (or picked none);

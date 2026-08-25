@@ -33,9 +33,9 @@ func (m Model) header() []string {
 // pipeline renders the aggregate flow diagram: queued -> working -> review
 // -> done, each node counted, joined by a travelling marker (arrowTrack)
 // that advances every motionMsg so the diagram reads as motion between
-// fetches, not a static count that only changes once a minute (#64's own
+// fetches, not a static count that only changes once a minute (agent-tui#64's own
 // acceptance test: "it will seem like watching a company work"). Blocked is
-// drawn as its own line looping back into working/review, per #64's "the
+// drawn as its own line looping back into working/review, per agent-tui#64's "the
 // loop edges" requirement -- review -> fix -> re-review is a cycle, and a
 // side-by-side column (board.Model's own layout) hides that; this line
 // makes it explicit.
@@ -60,7 +60,7 @@ func (m Model) pipeline() string {
 }
 
 // arrowTrack is a fixed-width dash track with one travelling '>' -- the
-// pipeline's own "position AND motion" element (#64's own phrase for what
+// pipeline's own "position AND motion" element (agent-tui#64's own phrase for what
 // a kanban card can't show: not just where something is, but that it is
 // moving). width < 3 is clamped so the marker always has somewhere to be.
 func arrowTrack(width, frame int) string {
@@ -86,7 +86,7 @@ func arrowTrack(width, frame int) string {
 // how long since it was first dispatched (Card.CycleTime) -- a card in
 // review for 90 minutes after three trips round the fix loop reads
 // differently here than one that just arrived, which board.Model's kanban
-// columns cannot show (#64's own "position AND motion" example).
+// columns cannot show (agent-tui#64's own "position AND motion" example).
 func (m Model) bodyContent() string {
 	items := InFlight(m.items)
 	if m.showAll {

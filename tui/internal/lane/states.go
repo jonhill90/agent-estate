@@ -31,19 +31,19 @@ package lane
 // never-busy is the newest one, and the reason it belongs on this same
 // "easy to forget" list rather than folded silently into "unknown": found
 // while verifying agent-tui#14's dependencies had landed -- agent-supervisor
-// split "unknown" into "unknown" and "never-busy" (as#112/#149), and this
+// split "unknown" into "unknown" and "never-busy" (as#112/agent-supervisor#149), and this
 // repo's CI (which cross-checks AllStates against a live lanes.sh -- see
 // states_lanessh_test.go) went red on that drift before this PR's own
-// changes touched anything. Unrelated to #14's own scope, fixed here anyway
-// because "CI green by SHA" is #14's own bar, not a separate ticket to file
+// changes touched anything. Unrelated to agent-tui#14's own scope, fixed here anyway
+// because "CI green by SHA" is agent-tui#14's own bar, not a separate ticket to file
 // and wait on.
 var AllStates = []string{
 	"free", "busy", "hung",
 	"menu-blocked", "text-blocked", "unsent", // the ones easy to forget
 	"dead", "stale", // stale: also easy to forget, and distinct from dead
 	"broken", "service", "supervisor",
-	"scrolled",   // #3: the one this list was missing -- pane in tmux copy-mode
-	"never-busy", // as#112/#149: split out of "unknown", never patched in here
+	"scrolled",   // agent-tui#3: the one this list was missing -- pane in tmux copy-mode
+	"never-busy", // as#112/agent-supervisor#149: split out of "unknown", never patched in here
 	"unknown",
 }
 

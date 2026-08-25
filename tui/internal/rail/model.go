@@ -25,7 +25,7 @@ import (
 )
 
 // RailWidth is the target column count for the rail region. Jon asked for
-// "roughly 24-32 columns" (issue #107); 28 sits in the middle of that band.
+// "roughly 24-32 columns" (issue agent-tui#107); 28 sits in the middle of that band.
 const RailWidth = 28
 
 const tickInterval = 120 * time.Millisecond
@@ -44,7 +44,7 @@ const costRefreshInterval = 5 * time.Minute
 // implementation (an MCP tools/call("lanes")); this package knows nothing
 // about MCP, tmux, or lanes.sh -- only that it can ask for []lane.Lane and
 // might get an error back, which it must show, never swallow into a blank
-// rail (issue #107 hard-acceptance item 3, applied to the fetch path too:
+// rail (issue agent-tui#107 hard-acceptance item 3, applied to the fetch path too:
 // an instrument that cannot see must not look like a healthy empty estate).
 type Fetcher func() ([]lane.Lane, error)
 
@@ -53,7 +53,7 @@ type Fetcher func() ([]lane.Lane, error)
 // sessions.sh wrapping lanes.sh once per session; see that script's header
 // for why lanes.sh alone cannot answer this). Additive to Fetcher above,
 // which stays exactly as it is: board.go's single-session read and every
-// pre-#13 rail test still build a Model with New/NewWithCost and never see
+// pre-agent-tui#13 rail test still build a Model with New/NewWithCost and never see
 // this type. NewMultiSession is the only constructor that sets it.
 type SessionsFetcher func() ([]lane.Session, error)
 
@@ -141,7 +141,7 @@ type Model struct {
 	// Model built with NewMultiSession that has no fallback would render
 	// nothing at all -- "! unavailable" with no data -- for as long as the
 	// supervisor side (agent-supervisor#158, the "sessions" tool) lags
-	// behind this program, which is the normal state until #158 merges and
+	// behind this program, which is the normal state until agent-supervisor#158 merges and
 	// stays true for anyone running an older supervisor checkout after
 	// that. When set, a failed sessions fetch falls back to this single-
 	// session Fetcher (the same "lanes" tool board.go already reads) and
@@ -163,10 +163,10 @@ type Model struct {
 	groupStyle int
 
 	// -- agent-tui#14: session management (attach/detach/add/remove). ops
-	// is nil on every Model built without WithOps (every pre-#14 test,
+	// is nil on every Model built without WithOps (every pre-agent-tui#14 test,
 	// board.go's single-session path) -- Update below guards every one of
 	// the a/d/n/x keys on ops != nil, so a Model with no write path ignores
-	// them exactly as it ignored an unmapped key before #14, rather than
+	// them exactly as it ignored an unmapped key before agent-tui#14, rather than
 	// panicking on a nil interface call. See ops.go for the write flow.
 	ops       session.Interface
 	opsMode   opsMode
@@ -212,7 +212,7 @@ type Model struct {
 	// test built without WithTheme renders exactly as it did before this
 	// field existed.
 	theme theme.Theme
-	// themeNotice is #27 acceptance item 3's "says so visibly" half --
+	// themeNotice is agent-tui#27 acceptance item 3's "says so visibly" half --
 	// set only when cmd/agent-tui's theme.Load resolved a malformed
 	// config or an unknown theme name, never for a plain missing config.
 	themeNotice string
@@ -230,7 +230,7 @@ func (m Model) WithTheme(th theme.Theme, notice string) Model {
 // WithOps returns a copy of m with ops wired in -- the one call cmd/agent-tui
 // makes to turn on agent-tui#14's write path (attach/detach/add/remove).
 // Every rail test that does not call this gets a Model with ops == nil,
-// exactly as it did before #14 existed; see the ops field's own doc comment
+// exactly as it did before agent-tui#14 existed; see the ops field's own doc comment
 // on Model for why that is safe rather than a nil-panic waiting to happen.
 func (m Model) WithOps(ops session.Interface) Model {
 	m.ops = ops
@@ -249,7 +249,7 @@ func New(fetch Fetcher) Model {
 
 // NewWithCost builds a Model that also renders a compact, per-harness cost
 // line (agent-tui#4) below the lane list -- the default-visible spot issue
-// #4 asked for, no flag required. costFetch follows the same "unknown,
+// agent-tui#4 asked for, no flag required. costFetch follows the same "unknown,
 // never zero" discipline as internal/cost.Fetcher; pass nil to fall back to
 // New's behavior (no cost line at all) when there is genuinely nothing to
 // read it from.
@@ -261,7 +261,7 @@ func NewWithCost(fetch Fetcher, costFetch cost.Fetcher) Model {
 
 // NewMultiSession builds a Model that renders lanes grouped by tmux session
 // (agent-tui#13) instead of one session's flat list -- cmd/agent-tui's
-// default screen, replacing what New/NewWithCost rendered before #13.
+// default screen, replacing what New/NewWithCost rendered before agent-tui#13.
 // fetch is left nil deliberately: this Model reads sessionsFetch (and,
 // on failure, lanesFetch) only, and Init/Update below never call a nil
 // fetch because of that, not because of a special case for this
@@ -274,7 +274,7 @@ func NewWithCost(fetch Fetcher, costFetch cost.Fetcher) Model {
 // that one session instead of an empty/error-only rail, with a visible
 // note that the multi-session view needs the supervisor half. Pass nil to
 // get at#13's original behavior (an unavailable sessions fetch renders
-// only "! unavailable", no fallback) -- every pre-#18 rail test still
+// only "! unavailable", no fallback) -- every pre-agent-tui#18 rail test still
 // builds Models this way.
 //
 // directorSession names the one session styled distinctly (Jon: "something
@@ -370,7 +370,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// or a group-style cycle. handleOpsKey returns handled == false for
 		// every key it has no opinion on (including every key when
 		// m.ops == nil), so a Model with no write path falls straight
-		// through to the exact same switch it used before #14 existed.
+		// through to the exact same switch it used before agent-tui#14 existed.
 		if next, cmd, handled := m.handleOpsKey(msg); handled {
 			return next, cmd
 		}
@@ -401,7 +401,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			// does for glyphs -- agent-tui#13 requirement 5, applied only
 			// when there is something to group: a Model built with
 			// New/NewWithCost has no sessions and ignores this key, exactly
-			// as it ignored an unmapped key before #13.
+			// as it ignored an unmapped key before agent-tui#13.
 			if m.sessionsFetch != nil && len(groupStyles) > 0 {
 				m.groupStyle = (m.groupStyle + 1) % len(groupStyles)
 			}
@@ -561,7 +561,7 @@ func (m Model) rowCount() int {
 // fallbackActive reports whether View()/rowCount() should be drawing at#18's
 // single-session fallback instead of the grouped multi-session body: the
 // sessions fetch has failed AND a fallback Fetcher was wired in via
-// NewMultiSession. A Model with no lanesFetch (every pre-#18 test) never
+// NewMultiSession. A Model with no lanesFetch (every pre-agent-tui#18 test) never
 // activates it -- a failed sessions fetch there still renders exactly what
 // it always did, "! unavailable" and nothing else.
 func (m Model) fallbackActive() bool {
@@ -689,7 +689,7 @@ func (m Model) View() string {
 
 	// agent-tui#13: a Model built with NewMultiSession renders every
 	// session, grouped; one built with New/NewWithCost (board.go, every
-	// pre-#13 test) renders the flat single-session list exactly as before
+	// pre-agent-tui#13 test) renders the flat single-session list exactly as before
 	// -- see sessions.go for the grouped path. at#18: a NewMultiSession
 	// Model whose sessions fetch has failed AND has a fallback Fetcher
 	// wired renders that fallback instead -- see fallbackActive.
@@ -815,7 +815,7 @@ type timeouter interface{ Timeout() bool }
 
 // isTimeoutErr reports whether err (or anything it wraps) is a timeout, per
 // timeouter above -- "call timed out" and "tool not available" have
-// different causes and different fixes (agent-tui#55's second, `#158`-
+// different causes and different fixes (agent-tui#55's second, `agent-supervisor#158`-
 // shaped defect: one message covering both is why a live concurrency bug
 // read as a stale supervisor-side gap).
 func isTimeoutErr(err error) bool {
@@ -823,7 +823,7 @@ func isTimeoutErr(err error) bool {
 	return errors.As(err, &t) && t.Timeout()
 }
 
-// renderFlatBody is the single-session list every pre-#13 rail render used,
+// renderFlatBody is the single-session list every pre-agent-tui#13 rail render used,
 // extracted unchanged so at#18's fallback path (renderFallbackNote above)
 // and the plain New/NewWithCost path share exactly one implementation of it
 // instead of two that could drift apart.
@@ -877,7 +877,7 @@ func (m Model) renderFlatBody(innerWidth int, set lane.GlyphSet, st railStyles) 
 		}
 	}
 
-	// The legend: every state must be nameable (issue #107
+	// The legend: every state must be nameable (issue agent-tui#107
 	// hard-acceptance item 3). This line always shows the SELECTED
 	// lane's real state word, verbatim, so a glyph is never the only
 	// source of truth on screen -- the same discipline laneview/text.sh

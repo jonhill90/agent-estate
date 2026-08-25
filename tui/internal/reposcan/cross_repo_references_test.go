@@ -2,6 +2,7 @@ package reposcan
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -116,5 +117,132 @@ func TestBareReferenceGuardIgnoresCodeSpans(t *testing.T) {
 
 	if len(got) != 0 {
 		t.Fatalf("expected a reference inside a code span to be ignored, got violations: %v", got)
+	}
+}
+
+// --- agent-tui#157: the Go-comment extension. extractGoComments must scan
+// comment text and ONLY comment text -- a bare '#N' inside a Go string
+// literal is routinely not a citation at all (a rendered UI marker,
+// board's own "#1 " card-number prefix; a hex colour in a JSON fixture),
+// and flagging those would make the guard un-runnable in this repository.
+
+func TestExtractGoCommentsFindsBareReferenceInLineComment(t *testing.T) {
+	src := []byte(`package p
+
+// fixed by #999999, not yet qualified
+func f() {}
+`)
+	comments, err := extractGoComments(src)
+	if err != nil {
+		t.Fatalf("extractGoComments: %v", err)
+	}
+	got := FindBareReferenceViolations("fixture.go", comments, map[int]bool{}, map[int]bool{})
+	if len(got) != 1 || got[0].Ref != "#999999" {
+		t.Fatalf("expected exactly one violation for the line-comment reference, got %v", got)
+	}
+	if got[0].Line != 3 {
+		t.Fatalf("expected the violation on line 3 (comment line, positions preserved), got line %d", got[0].Line)
+	}
+}
+
+func TestExtractGoCommentsFindsBareReferenceInBlockComment(t *testing.T) {
+	src := []byte(`package p
+
+/*
+See #999999 for context.
+*/
+func f() {}
+`)
+	comments, err := extractGoComments(src)
+	if err != nil {
+		t.Fatalf("extractGoComments: %v", err)
+	}
+	got := FindBareReferenceViolations("fixture.go", comments, map[int]bool{}, map[int]bool{})
+	if len(got) != 1 || got[0].Ref != "#999999" {
+		t.Fatalf("expected exactly one violation inside the block comment, got %v", got)
+	}
+}
+
+// TestExtractGoCommentsIgnoresStringLiterals is the regression this
+// extension exists to prevent: internal/board's own tests assert against a
+// REAL running Program's rendered output, which legitimately contains bare
+// '#N' card-number markers (view.go's fmt.Sprintf("#%d", ...)) -- those are
+// not citations and scanning string literals for them would make the guard
+// fire on the application's own correct behaviour, not a defect.
+func TestExtractGoCommentsIgnoresStringLiterals(t *testing.T) {
+	src := []byte(`package p
+
+func f() string {
+	// this comment is fine, cites nothing
+	return "card #999999 rendered"
+}
+`)
+	comments, err := extractGoComments(src)
+	if err != nil {
+		t.Fatalf("extractGoComments: %v", err)
+	}
+	got := FindBareReferenceViolations("fixture.go", comments, map[int]bool{}, map[int]bool{})
+	if len(got) != 0 {
+		t.Fatalf("expected the string literal's bare reference to be ignored, got violations: %v", got)
+	}
+}
+
+func TestExtractGoCommentsPreservesLineNumbersAroundMultiLineStrings(t *testing.T) {
+	src := []byte(`package p
+
+func f() string {
+	return "line one #999999" +
+		"line two"
+}
+
+// #999999 real citation, three lines below the multi-line expression above
+func g() {}
+`)
+	comments, err := extractGoComments(src)
+	if err != nil {
+		t.Fatalf("extractGoComments: %v", err)
+	}
+	got := FindBareReferenceViolations("fixture.go", comments, map[int]bool{}, map[int]bool{})
+	if len(got) != 1 {
+		t.Fatalf("expected exactly one violation (the comment, not either string literal), got %v", got)
+	}
+	if got[0].Line != 8 {
+		t.Fatalf("expected the violation on line 8, got line %d -- line numbers drifted", got[0].Line)
+	}
+}
+
+// TestScanRepositoryScansGoCommentsToo is the wiring check: ScanRepository
+// itself, not just extractGoComments in isolation, must reach *.go files.
+// Uses this repository's own real manifest/allowlist against a scratch
+// checkout so a genuinely unresolved bare reference in a Go comment is
+// caught end to end.
+func TestScanRepositoryScansGoCommentsToo(t *testing.T) {
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "known.txt"), []byte("1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "allow.json"), []byte(`{"allowed":[]}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	goSrc := "package p\n\n// unresolved reference #999999\nfunc f() {}\n"
+	if err := os.WriteFile(filepath.Join(root, "f.go"), []byte(goSrc), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		{"init", "-q"},
+		{"add", "."},
+	} {
+		cmd := exec.Command("git", append([]string{"-C", root}, args...)...)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v\n%s", args, err, out)
+		}
+	}
+
+	got, err := ScanRepository(root, filepath.Join(root, "known.txt"), filepath.Join(root, "allow.json"))
+	if err != nil {
+		t.Fatalf("ScanRepository: %v", err)
+	}
+	if len(got) != 1 || got[0].Path != "f.go" || got[0].Ref != "#999999" {
+		t.Fatalf("expected ScanRepository to catch the Go-comment reference, got %v", got)
 	}
 }

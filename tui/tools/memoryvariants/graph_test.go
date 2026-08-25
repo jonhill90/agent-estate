@@ -3,7 +3,7 @@ package main
 import "testing"
 
 // vectorNeighborhoodGraph is a SECOND caller of the generic model in
-// graph.go, deliberately shaped like #116's candidate 2 (vector-embedding
+// graph.go, deliberately shaped like agent-tui#116's candidate 2 (vector-embedding
 // neighborhoods) rather than candidate 1 (OKF markdown+wikilinks, which
 // fakeGraph in graph.go models): opaque cluster-id node types that are
 // not one of the four OKF fact types, and edges carrying a real

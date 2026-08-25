@@ -4,10 +4,10 @@
 #
 # agent-tui#132: this tape's own build target, cmd/knowledgedemo, never
 # existed in this repository's history (`git log --all -- cmd/knowledgedemo`
-# returns zero commits across every ref) -- unlike agents-mode.tape/#130,
+# returns zero commits across every ref) -- unlike agents-mode.tape/agent-tui#130,
 # this was never a restore; the tape was unrunnable from the day it landed
-# in #87. Repointed at cmd/estate with the Knowledge route selected, the
-# same target testdata/vhs/knowledge-route.tape (#95) already proved out --
+# in agent-tui#87. Repointed at cmd/estate with the Knowledge route selected, the
+# same target testdata/vhs/knowledge-route.tape (agent-tui#95) already proved out --
 # that tape is deleted by the same change that adds this fix, folded in
 # here rather than kept separately (see below).
 #
@@ -44,7 +44,7 @@
 # content 4/4, `knowledge-02-fact-opened.png` (the second, after the
 # Tab+drill-down below) real content 2/4 -- Wait+Screen confirmed the
 # reading pane's own content was on screen both times it still captured
-# stale, the same disconnect #130's own investigation found between vhs's
+# stale, the same disconnect agent-tui#130's own investigation found between vhs's
 # Wait and its Screenshot pipeline.
 Output testdata/vhs/out/knowledge.gif
 Set FontSize 13
@@ -62,7 +62,7 @@ Type "/tmp/atui-knowledge" Enter
 Wait+Screen /Home/
 
 # Home -> Dashboard -> Agents -> Chat -> Tasks -> Knowledge (5 downs),
-# Enter -- the same route knowledge-route.tape (#95) already proved
+# Enter -- the same route knowledge-route.tape (agent-tui#95) already proved
 # reaches internal/knowledge, not internal/stub's placeholder.
 Down
 Down

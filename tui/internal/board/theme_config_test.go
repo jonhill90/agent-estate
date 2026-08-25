@@ -25,7 +25,7 @@ import (
 // innerWidth)), so a long notice string is only ever partially present
 // there, while board's header renders the notice in full (model.go:325).
 //
-// This covers #34's acceptance list in one pass: a user defines a colour
+// This covers agent-tui#34's acceptance list in one pass: a user defines a colour
 // by editing only a config file (no rebuild), each of the three failure
 // modes produces a visible notice, and a partial override behaves per the
 // documented precedence (unmentioned roles keep the base theme's own

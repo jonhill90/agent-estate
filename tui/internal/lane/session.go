@@ -5,15 +5,15 @@ import "encoding/json"
 // Session is one row of the supervisor's "sessions" MCP tool -- agent-tui#13,
 // wrapping agent-supervisor's sessions.sh --json, which itself wraps
 // lanes.sh --json once per tmux session (see that script's header for the
-// full trace: lanes.sh is single-session BY CONSTRUCTION, and #13 is the
+// full trace: lanes.sh is single-session BY CONSTRUCTION, and agent-tui#13 is the
 // regression that shipped a rail that could not show more than one).
 //
 // Supervised is NOT agent-supervisor#153's own supervised/unsupervised
-// marker -- #153 had not landed when this was written. It is sessions.sh's
+// marker -- agent-supervisor#153 had not landed when this was written. It is sessions.sh's
 // interim, evidence-based stand-in (has the ledger ever registered a lane
 // in this session), and it fails CLOSED: unknown reads false, never true.
 // See sessions.sh's own module comment for exactly what it does and does
-// not prove. Replace this doc (and the renderer that reads it) once #153
+// not prove. Replace this doc (and the renderer that reads it) once agent-supervisor#153
 // lands its own signal -- do not silently keep both.
 //
 // Error and a nil Lanes together mean sessions.sh could not read this one

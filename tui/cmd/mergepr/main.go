@@ -7,10 +7,10 @@
 // This exists because agent-tui#109 recorded two confirmed instances of
 // the same anti-pattern -- a comment-verdict gate merged by its own
 // author, unreviewed, within minutes (skills#255, agent-tui#107) -- and a
-// tool nobody is told to use is exactly how #107 happened. AGENTS.md's own
+// tool nobody is told to use is exactly how agent-tui#107 happened. AGENTS.md's own
 // "Merging PRs you did not author" section says to run cmd/prverdict
 // before merging; this command is what actually enforces that, plus the
-// CI gate agent-supervisor's own history (PR #56, #49) shows is needed
+// CI gate agent-supervisor's own history (PR agent-supervisor#56, agent-supervisor#49) shows is needed
 // alongside it.
 //
 //	go run ./cmd/mergepr -repo jonhill90/agent-tui -number 123

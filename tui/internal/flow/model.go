@@ -14,9 +14,9 @@ import (
 )
 
 // motionInterval drives ONLY the pipeline header's travelling marker -- a
-// local animation tick, never a fetch. #64 asks for a view where "work
+// local animation tick, never a fetch. agent-tui#64 asks for a view where "work
 // VISIBLY MOVES," which a 60s-refreshed static diagram cannot give; this is
-// the cheap way to give it without repeating #28's mistake (a faster
+// the cheap way to give it without repeating agent-tui#28's mistake (a faster
 // gh/ledger poll starving agent-supervisor#144's shared budget). Model owns
 // NO Fetcher of its own and runs no fetch loop at all -- see WithSnapshot
 // below and this package's own doc comment: cmd/estate's board.Fetcher is
@@ -222,7 +222,7 @@ func (m Model) footer() []string {
 	lines = append(lines, st.dim.Render(fmt.Sprintf(
 		"[a] toggle %s  [j/k up/down  pgup/pgdn] scroll  [t] theme  [q] quit  (refreshes with the board pane)", mode,
 	)))
-	// scrollIndicator is #64's own "confirm content taller than the pane is
+	// scrollIndicator is agent-tui#64's own "confirm content taller than the pane is
 	// reachable and that the user can tell something is hidden"
 	// requirement (AGENTS.md's verification section) -- bubbles/viewport,
 	// unlike board.Model's hand-rolled scrollBody, renders no such line on

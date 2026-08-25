@@ -7,7 +7,7 @@
 //     appending one line to that route's own file:
 //
 //     go run ./cmd/navwalk -record -id chat -date 2026-08-23 \
-//     -source "PR #101 (my-brief.md)" -verdict RENDERS \
+//     -source "PR agent-tui#101 (my-brief.md)" -verdict RENDERS \
 //     -notes "real thread titles, no fixture banner"
 //
 //  2. Regenerate the human-readable table from every route's own latest
@@ -41,7 +41,7 @@ func main() {
 		record  = flag.Bool("record", false, "append one observation instead of regenerating the report")
 		id      = flag.String("id", "", "-record: the nav route id (internal/nav.Item.ID, e.g. \"chat\")")
 		date    = flag.String("date", "", "-record: YYYY-MM-DD the observation was made")
-		source  = flag.String("source", "", "-record: what produced this observation, e.g. \"PR #101 (my-brief.md)\"")
+		source  = flag.String("source", "", "-record: what produced this observation, e.g. \"PR agent-tui#101 (my-brief.md)\"")
 		verdict = flag.String("verdict", "", "-record: RENDERS | STUB | EMPTY | BROKEN | REMOVED | \"could not measure\"")
 		notes   = flag.String("notes", "", "-record: what was actually seen, specific enough for a stranger to check")
 	)

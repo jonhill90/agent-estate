@@ -30,7 +30,7 @@
 #     v0.11.0, the current latest release (charmbracelet/vhs, checked
 #     2026-08-23) -- there is no newer version to try.
 #   - This corroborates, independently and on different content, what
-#     estate:4 measured on `tight/lanes.png` during the #129 review: the
+#     estate:4 measured on `tight/lanes.png` during the agent-tui#129 review: the
 #     same class of flake, firing on roughly the same order of frequency,
 #     self-resolving on retry. Both findings point at `vhs`'s own
 #     Screenshot/frame-capture pipeline, not at any one tape's content or

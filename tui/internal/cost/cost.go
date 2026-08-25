@@ -13,7 +13,7 @@ import "sort"
 // Figure is one usage number that may not be known. ccusage failing to run
 // -- or, for Limit specifically, ccusage having no local way to see a
 // harness's real quota at all -- must never collapse to a bare 0: issue
-// #4's own postmortem is explicit that "a zero reads as nothing spent, and
+// agent-tui#4's own postmortem is explicit that "a zero reads as nothing spent, and
 // this estate has been bitten by exactly that silent-blindness three
 // times." Known is the only field a caller may branch display logic on;
 // Value is meaningless when Known is false and must not be printed.
@@ -27,12 +27,12 @@ func KnownFigure(v float64) Figure { return Figure{Known: true, Value: v} }
 
 // Limit is a harness's distance to whatever cap ccusage can compute
 // locally. Not every harness has one: codex's ChatGPT plan quota -- the
-// exact bucket issue #4 says went dark -- is not something ccusage's local
+// exact bucket issue agent-tui#4 says went dark -- is not something ccusage's local
 // usage-log parse can see at all (verified against `ccusage codex --help`:
 // daily/monthly/session only, no blocks or token-limit concept; same for
 // `ccusage pi --help`). Limit.Known is false for those, always, and
 // Percent must never be read as "0% used" just because there was nothing
-// to compute -- that is the exact silent-blindness issue #4 warns against,
+// to compute -- that is the exact silent-blindness issue agent-tui#4 warns against,
 // applied to quota instead of spend.
 type Limit struct {
 	Known   bool
@@ -46,7 +46,7 @@ type Harness struct {
 	Name      string // ccusage's own agent id: "claude", "codex", "pi", ...
 	Cost      Figure // totalCost, USD
 	Tokens    Figure // totalTokens -- includes cache read/creation, NOT just input+output
-	CacheRead Figure // cacheReadTokens, broken out per issue #4's #2, never folded into Tokens
+	CacheRead Figure // cacheReadTokens, broken out per issue agent-tui#4's agent-tui#2, never folded into Tokens
 	Limit     Limit
 	Quota     Quota // codexbar's session/weekly usage window via quota.sh (agent-tui#49 item 3); zero value is Known false
 }
@@ -61,7 +61,7 @@ type Harness struct {
 // Quotas is deliberately a SEPARATE source from Known/Harnesses -- quota.sh
 // (agent-tui#49 item 3) and ccusage are two independent subprocess calls,
 // and one failing must never blank out the other. A machine with no
-// working ccusage but a working quota.sh (the review that reopened #49)
+// working ccusage but a working quota.sh (the review that reopened agent-tui#49)
 // must still show real session/weekly percentages; Quotas carries that
 // even when Known is false and Harnesses is empty. When Known is true,
 // this same data has ALSO already been merged onto each Harness.Quota by
@@ -89,7 +89,7 @@ func UnknownWithQuota(quotas map[string]Quota) Snapshot {
 	return Snapshot{Known: false, Quotas: quotas}
 }
 
-// harnessOrder ranks the harnesses issue #4 named explicitly first --
+// harnessOrder ranks the harnesses issue agent-tui#4 named explicitly first --
 // Claude carries ~94% of spend, codex is the one that went dark, pi is the
 // long-tail baseline -- so the panel always leads with the two the issue is
 // actually about. Anything else ccusage detects sorts alphabetically after

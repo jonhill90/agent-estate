@@ -13,7 +13,7 @@ import (
 )
 
 // Participant is one name @-mentions can address -- the room's participant
-// model, richer than "the one agent this thread belongs to" (#114's own
+// model, richer than "the one agent this thread belongs to" (agent-tui#114's own
 // framing). Built from the estate's live lane state, the same "sessions"
 // MCP read internal/agents.Fetcher already projects into a Row (see
 // cmd/estate/chat.go's buildParticipantsFetch) -- never a hardcoded list,

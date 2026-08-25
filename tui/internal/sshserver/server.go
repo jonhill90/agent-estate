@@ -1,7 +1,7 @@
 // Package sshserver serves an existing tea.Model over SSH using
 // charmbracelet/wish (agent-tui#67) -- it never renders anything itself and
 // never knows this is estate's shell.Model specifically; cmd/estate wires
-// that in as a Handler. wish is the adopt-vs-build answer named by #67's own
+// that in as a Handler. wish is the adopt-vs-build answer named by agent-tui#67's own
 // brief: it exists specifically to serve Bubble Tea apps over SSH, is in the
 // same GitHub org as Bubble Tea (github.com/charmbracelet), MIT licensed,
 // 5.4k stars, pushed within the last month as of 2026-08-20, and backs

@@ -205,7 +205,7 @@ func main() {
 	// missing config renders as today (activeTheme falls back to
 	// theme.Default with an empty notice), while a malformed config or an
 	// unknown theme name still resolves to theme.Default but carries a
-	// notice every pane renders visibly -- #27 acceptance item 3, "an
+	// notice every pane renders visibly -- agent-tui#27 acceptance item 3, "an
 	// undeterminable preference is never silently treated as a valid one."
 	// activeTheme/themeNotice are handed to shell.Model.WithTheme below,
 	// once -- agent-tui#51 moved the RUNTIME half of this (every pane
@@ -317,7 +317,7 @@ func main() {
 	// NewMultiSession, not NewWithCost: agent-tui#13 is the regression that
 	// shipped a rail showing one session's lanes when six sessions
 	// (including `director`) exist. WithOps wires agent-tui#14's write path
-	// (attach/detach/add/remove) in on top of #13's multi-session rail --
+	// (attach/detach/add/remove) in on top of agent-tui#13's multi-session rail --
 	// session.New(client) shares the exact same MCP connection every read
 	// above already uses, never a second client and never tmux itself.
 	// Skipped entirely when client == nil (agent-tui#49 item 1's degraded
@@ -330,7 +330,7 @@ func main() {
 	// theme field doc comment and theme.CycleRequestedMsg), and its own
 	// WithTheme below fans activeTheme/themeNotice out to all four via
 	// applyTheme. Threading it into each pane here AND again in shell
-	// would recreate #48's exact defect the moment the two calls drift.
+	// would recreate agent-tui#48's exact defect the moment the two calls drift.
 	railModel := rail.NewMultiSession(sessionsFetch, lanesFetch, costFetch, *directorSession).
 		WithTasks(buildTaskFetch(ledgerSrc, *sqliteBin)).
 		// *session is the same flag lanesFetch (above) already reads to
@@ -377,8 +377,8 @@ func main() {
 	// resolved at all -- chat.FallbackSource's own doc comment.
 	chatModel := chat.New(chat.NewFallbackSource(chat.NewClaudeCodeSource(resolveClaudeProjectsDir(*claudeProjectsDir))))
 	// chat.WithSender wires SPEC-shell.md S7's sending half --
-	// agent-supervisor#508/#509's session_send, reached the exact way
-	// #103's own investigation said it had to be: through the supervisor
+	// agent-supervisor#508/agent-supervisor#509's session_send, reached the exact way
+	// agent-tui#103's own investigation said it had to be: through the supervisor
 	// MCP surface, sessionops.New(client) (already built above for the
 	// rail's own write path), never a second subprocess transport in this
 	// repo. session.ErrSendUnknown is translated to chat.ErrUnknown right

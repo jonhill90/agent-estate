@@ -1,6 +1,6 @@
 // agent-tui#13: the multi-session rendering path -- everything New/
 // NewWithCost's flat single-session View() branch in model.go does not
-// need. Kept in its own file so the flat path (board.go, every pre-#13
+// need. Kept in its own file so the flat path (board.go, every pre-agent-tui#13
 // test) stays a diff-free read; nothing in model.go's non-sessions branch
 // changed shape because of what is here.
 package rail
@@ -19,10 +19,10 @@ import (
 // screen" -- the picker rule agent-tui#13 requirement 5 asks for, applied
 // to grouping the same way lane.GlyphSet applies it to glyphs: every entry
 // here is real, numbered, and swapped live against the same on-screen data
-// with the 'g' key, never decided silently (the #10 mistake this issue's
+// with the 'g' key, never decided silently (the agent-tui#10 mistake this issue's
 // own process note calls out). groupStyles[0] is the default.
 //
-// Only two of #13's three suggested shapes are implemented here --
+// Only two of agent-tui#13's three suggested shapes are implemented here --
 // flat-with-headers and indented-tree. Collapsible needs per-session
 // expand/collapse state that survives a refetch, a real feature of its own
 // scope; the PR for this names it as a landed-half, not a silent drop.
@@ -88,12 +88,12 @@ func (m Model) renderSessionHeader(s lane.Session, innerWidth int, st railStyles
 // safety-over-decoration order: an unsupervised session must always read
 // unsupervised, even when it is also the configured director session --
 // theme.RoleUnsupervised wins over theme.RoleDirector when both apply, the
-// same precedence the pre-#27 unsupervisedAccent/directorAccent constants
+// same precedence the pre-agent-tui#27 unsupervisedAccent/directorAccent constants
 // documented. Pulled out of renderSessionHeader as its own pure function
 // (no lipgloss.Render involved) specifically so this precedence is directly
 // testable: go test runs with no tty, so lipgloss renders no ANSI escapes
 // at all under its default color profile there, and a byte-for-byte
-// comparison of two Render() calls would not have caught #18's own review
+// comparison of two Render() calls would not have caught agent-tui#18's own review
 // finding that this precedence had no test. ok is false when neither
 // condition applies -- s gets the header's default (unstyled) look, same as
 // before this existed.
@@ -185,7 +185,7 @@ func (m Model) renderSessionsBody(innerWidth int, st railStyles) []string {
 	}
 
 	// The legend: same discipline as the flat view (every state must be
-	// nameable, issue #107 hard-acceptance item 3), plus which session the
+	// nameable, issue agent-tui#107 hard-acceptance item 3), plus which session the
 	// selection is in now that "selected" spans all of them.
 	flat := m.sessionsFlat()
 	b = append(b, st.dim.Width(innerWidth).Render(""))

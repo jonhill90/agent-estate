@@ -9,7 +9,7 @@ package lane
 // "no switch statement anywhere names a variant by ID."
 
 // Renderability is a structural claim about a glyph's codepoints, not a
-// runtime measurement of Jon's terminal. #11's own research is explicit
+// runtime measurement of Jon's terminal. agent-tui#11's own research is explicit
 // that a terminal application cannot query which font is loaded, and that
 // render-and-measure (print a glyph, query cursor position, compare width)
 // is "fiddly under tmux and needs a real tty" -- exactly the gallery's own
@@ -17,7 +17,7 @@ package lane
 // fiddliness by asking a question Unicode itself can answer with certainty:
 // which block is this codepoint in. That is weaker than "does it actually
 // render here" but it is never wrong in the way a guess can be wrong, which
-// is the same "fail toward the safe answer" rule #11 asks of font
+// is the same "fail toward the safe answer" rule agent-tui#11 asks of font
 // detection, applied one level down to individual glyphs.
 type Renderability int
 
@@ -101,7 +101,7 @@ func isPUA(r rune) bool {
 // multiplication sign, dingbats block) lives there and is not an emoji --
 // this codebase has been rendering it as plain text since the first
 // variant shipped, and flagging it here would be exactly the kind of
-// wrong-because-it-was-never-checked classification #11 warns against. A
+// wrong-because-it-was-never-checked classification agent-tui#11 warns against. A
 // bare dingbat without VS16 renders as text on the overwhelming majority
 // of terminals; only the supplementary-plane pictographs and an explicit
 // VS16 are unambiguous enough to warn about.
@@ -110,7 +110,7 @@ func isEmojiRange(r rune) bool {
 }
 
 // Candidate is one glyph the gallery shows for a state that no Variant has
-// adopted -- #11 is explicit that the gallery's point is "discovery, not
+// adopted -- agent-tui#11 is explicit that the gallery's point is "discovery, not
 // confirmation": showing only what shipped answers a question Jon did not
 // ask ("what glyphs could I use").
 type Candidate struct {

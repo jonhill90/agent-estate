@@ -7,7 +7,7 @@ package shell
 // model_teatest_test.go already uses. Agent-tui#38's own acceptance is
 // explicit: "Demonstrated by driving the navigation keys, not by a
 // screenshot," and "a control that is not pressed is not proven" is the
-// same #23 lesson this repo has already paid for once ([a]ttach shipped
+// same agent-tui#23 lesson this repo has already paid for once ([a]ttach shipped
 // dead because nothing ever pressed it).
 
 import (
@@ -225,7 +225,7 @@ func TestFlowUnavailableRendersInPlaceOfFlow(t *testing.T) {
 // TestF6NavigatesToChatPane is the same drive for the chat pane
 // (agent-tui#20) -- chat.Model.View's own title line ("chat") plus its
 // fixture thread title is the marker, same shape as board/cost/gallery's
-// own navigation tests above. Chat is [f6], not [f5]: #68 (flow,
+// own navigation tests above. Chat is [f6], not [f5]: agent-tui#68 (flow,
 // agent-tui#64) landed on main first and already claimed [f5] -- see
 // this rebase's own commit message for the conflict this resolves.
 func TestF6NavigatesToChatPane(t *testing.T) {
@@ -259,7 +259,7 @@ func TestF1ReturnsToHomePane(t *testing.T) {
 // shell's own footer legend -- the one place focus is rendered -- actually
 // flips from "focus:rail" to "focus:content" and back. This is the seam
 // routeKey depends on: a broken toggleFocus would leave this byte-for-byte
-// identical, exactly the failure mode agent-tui#29/#23 both warn about.
+// identical, exactly the failure mode agent-tui#29/agent-tui#23 both warn about.
 func TestTabTogglesFocusBetweenRailAndContent(t *testing.T) {
 	tm := run(t, testModel())
 	waitFor(t, tm, "focus:rail")
@@ -273,7 +273,7 @@ func TestTabTogglesFocusBetweenRailAndContent(t *testing.T) {
 
 // TestCtrlCQuitsFromAnyPane drives ctrl+c after navigating away from home,
 // asserting the real Program actually terminates -- agent-tui#38's
-// acceptance item "q/ctrl+c quits from every pane," and the #22 trap this
+// acceptance item "q/ctrl+c quits from every pane," and the agent-tui#22 trap this
 // repo has already shipped once (a mode that swallowed every key,
 // including quit).
 func TestCtrlCQuitsFromAnyPane(t *testing.T) {

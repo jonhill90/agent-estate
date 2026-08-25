@@ -18,7 +18,7 @@ be read as already true of this repo or of agent-supervisor.
 **2026-08-23 update (agent-tui#105):** re-verified against AgentBox's
 current `main` tip (`f71a9f0`, no commits since 2026-08-22) and this repo's
 own current tree (`cff10f9`) — see "Settled / adequate already" and
-"#105's three genuinely open questions" below for what changed (one new
+"agent-tui#105's three genuinely open questions" below for what changed (one new
 AgentBox file, `src/git_credentials.py`) and what did not.
 
 ## Where this picks up
@@ -71,7 +71,7 @@ Read directly, not assumed:
 
 ## Settled / adequate already
 
-Not one of #105's three open questions — the interface and the eventual
+Not one of agent-tui#105's three open questions — the interface and the eventual
 TUI-side signal are both already scoped correctly, and neither should be
 re-litigated:
 
@@ -100,9 +100,9 @@ re-litigated:
   identical to a local one, so the two are distinguishable only if whatever
   created the lane says so.
 
-## #105's three genuinely open questions
+## agent-tui#105's three genuinely open questions
 
-Each answered below with what is true today and, per #105, what would have
+Each answered below with what is true today and, per agent-tui#105, what would have
 to become true for the answer to change — none of the three are agent-tui's
 to resolve unilaterally.
 
@@ -225,7 +225,7 @@ is the component being evaluated.
   AgentBox was never built to be watched by a second process the way a
   tmux pane already is.
 - AgentBox is explicitly single-operator, Phase 1, local-only — see
-  "#105's three genuinely open questions" → "3. Concurrency / threat-model
+  "agent-tui#105's three genuinely open questions" → "3. Concurrency / threat-model
   gap" above for the current evidence and what would have to become true
   before this is a viable dispatch target.
 

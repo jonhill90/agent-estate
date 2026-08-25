@@ -10,8 +10,8 @@ import (
 // layout.go's Layouts build on -- ShapeSingleLine cards render through
 // cardLine directly, every card shape uses formatAge, and every Layout
 // opens with writeWIP. agent-tui#10 replaced this file's own by-column/
-// by-repo picker (the two "Views" shipped in #6) with layout.go's wider
-// Layouts picker, which supersedes it: #10's own text says to "keep and
+// by-repo picker (the two "Views" shipped in agent-tui#6) with layout.go's wider
+// Layouts picker, which supersedes it: agent-tui#10's own text says to "keep and
 // evolve what variant 2 [by-repo] was", and layout.go's GroupByRepo/
 // renderSwimlanes is that evolution -- real boxed columns per repo,
 // swimlaned, rather than a second parallel picker left with no caller.

@@ -6,7 +6,7 @@
 //
 // Restores testdata/vhs/agents-mode.tape's own build step
 // (`go build -o /tmp/agentsdemo ./cmd/agentsdemo`), which has referenced
-// this path since the tape was added in #91 (49887de) -- that PR's diff
+// this path since the tape was added in agent-tui#91 (49887de) -- that PR's diff
 // added the tape but never committed the binary it names, so the tape has
 // been unrunnable since it landed. Measured, not assumed: `git log
 // --diff-filter=D -- 'cmd/agentsdemo/*'` finds no deletion commit either;

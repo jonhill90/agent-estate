@@ -1,7 +1,7 @@
 // Package session is agent-tui#14's write path: attach, detach, add and
 // remove a tmux session. Every operation here is a supervisor MCP
 // tools/call -- this package contains no os/exec, no tmux invocation, and
-// no knowledge of tmux's own CLI. That is the architectural rule #14's own
+// no knowledge of tmux's own CLI. That is the architectural rule agent-tui#14's own
 // issue states as non-negotiable: "The TUI must never manipulate tmux
 // directly. Every operation goes through the supervisor over the same MCP
 // surface it already reads from." internal/mcp.Client is the transport;
@@ -64,7 +64,7 @@ type Interface interface {
 	// unless confirm is literally true.
 	Remove(session string, confirm bool) (RemoveResult, error)
 	// Send posts an ad-hoc message into an EXISTING agent session --
-	// agent-supervisor#508/#509's session_send, and the capability
+	// agent-supervisor#508/agent-supervisor#509's session_send, and the capability
 	// SPEC-shell.md S7 was blocked on. sessionID is the harness's own
 	// session id (e.g. Claude Code's session_id -- internal/chat.Thread.ID
 	// already is exactly this, per that field's own doc comment), never a

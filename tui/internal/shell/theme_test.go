@@ -3,12 +3,12 @@ package shell
 // This file covers agent-tui#51's two defects, both against a real
 // tea.Program via teatest (same discipline as model_teatest_test.go):
 //
-//  1. Persistence: pressing 't' never called theme.Save (#48's diff fixed
+//  1. Persistence: pressing 't' never called theme.Save (agent-tui#48's diff fixed
 //     this by duplicating a saveTheme(th) call into four packages).
 //  2. Shared value: one 't' keypress must change every pane at once --
 //     four independent in-memory copies cannot do this, which is why the
 //     rail and the active content pane could show two different themes on
-//     screen simultaneously. This is the defect #48's diff did not fix and
+//     screen simultaneously. This is the defect agent-tui#48's diff did not fix and
 //     a rebase would not fix either -- see theme.CycleRequestedMsg's own
 //     doc comment for the full rationale.
 
@@ -74,7 +74,7 @@ func TestKeyTPersistsThemeChoice(t *testing.T) {
 // TestKeyTRepaintsRailAndContentPaneTogether is defect 2 specifically:
 // one keypress, every pane's rendered theme changes together. Focus starts
 // on the rail (New's default) so the keypress is routed to rail.Model,
-// exactly the case where #48's four-owner design could show the rail on
+// exactly the case where agent-tui#48's four-owner design could show the rail on
 // one theme and the content pane on another -- the fix must make the
 // GALLERY pane (never focused, never directly sent the keypress) repaint
 // too, in the same frame's worth of output.
@@ -97,7 +97,7 @@ func TestKeyTRepaintsRailAndContentPaneTogether(t *testing.T) {
 
 	// Both the rail's own "theme: <name>" line and the gallery's own
 	// footer line render theme.Cycle(theme.Default).Name -- one owner, one
-	// value, both surfaces. Before #51, only the KEY-RECEIVING pane (rail)
+	// value, both surfaces. Before agent-tui#51, only the KEY-RECEIVING pane (rail)
 	// would show this; gallery would still read Default.
 	got := bytes.Count(out, []byte(theme.Cycle(theme.Default).Name))
 	if got < 2 {

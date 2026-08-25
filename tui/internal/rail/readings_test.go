@@ -14,7 +14,7 @@ import (
 // driveKey sends msg through Update the same way bubbletea's runtime would
 // -- every test below goes through this, not a struct literal poking
 // m.reading/m.tasks directly, per the issue's own functionally-driven bar
-// (#23's whole lesson: "not one check pressed a key").
+// (agent-tui#23's whole lesson: "not one check pressed a key").
 func driveKey(t *testing.T, m Model, key string) Model {
 	t.Helper()
 	updated, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
@@ -208,7 +208,7 @@ func TestNeedsHumanFlagsBlockedLaneEvenWithNoLedgerTask(t *testing.T) {
 
 // TestPlainViewHasNoTaskDataWithNoTaskFetch is the backward-compatibility
 // contract every WithXxx addition in this package carries: a Model built
-// without WithTasks (every pre-#26 rail test, and cmd/agent-tui with no
+// without WithTasks (every pre-agent-tui#26 rail test, and cmd/agent-tui with no
 // -ledger set) must render sane, never a template with a hole in it.
 func TestPlainViewHasNoTaskDataWithNoTaskFetch(t *testing.T) {
 	m := New(func() ([]lane.Lane, error) { return nil, nil })

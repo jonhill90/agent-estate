@@ -90,7 +90,7 @@ func TestLedgerCopier_RefreshPropagatesBackupError(t *testing.T) {
 }
 
 // TestLedgerCopier_ConcurrentRefreshDoesNotRace reproduces the ACTUAL root
-// cause behind PR #50's second review round: rail's own task fetch
+// cause behind PR agent-tui#50's second review round: rail's own task fetch
 // (internal/rail's 2s refresh loop, agent-tui#26) and board's fetch both
 // call Refresh() on the SAME shared copier (main.go wires one
 // ledgerSource into both). Two concurrent `sqlite3 ... .backup dest`
@@ -153,7 +153,7 @@ func TestLedgerCopier_ConcurrentRefreshDoesNotRace(t *testing.T) {
 // execBackupRunner test: a real sqlite3 binary, a real (non-contended)
 // source database, .backup producing a real dest file. The contention case
 // this function's own doc comment describes ("database is locked" under a
-// live writer, verified during PR #50's second review round against the
+// live writer, verified during PR agent-tui#50's second review round against the
 // real live ledger) is not reproduced here -- simulating genuine lock
 // contention from a single test process is its own can of worms; this test
 // only guards that the PRAGMA argument added for that fix didn't break the
@@ -185,7 +185,7 @@ func TestExecBackupRunner_SucceedsAgainstRealSqlite3(t *testing.T) {
 // sits ONLY in the -wal sidecar (deliberately not checkpointed here), the
 // exact condition the old plain-file-copy implementation missed --
 // producing either a stale copy (row silently absent) or a "database is
-// locked" error, both reproduced against PR #50's review. execBackupRunner
+// locked" error, both reproduced against PR agent-tui#50's review. execBackupRunner
 // (sqlite3's own ".backup") must read source and -wal together and produce
 // one self-contained copy with the row included.
 func TestLedgerCopier_RefreshAgainstRealWALSource(t *testing.T) {

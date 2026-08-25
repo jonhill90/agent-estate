@@ -79,7 +79,7 @@ func TestDirectorIsVisiblyDistinct(t *testing.T) {
 	}
 }
 
-// TestUnsupervisedSessionsAreMarked is the safety-critical case #13 and its
+// TestUnsupervisedSessionsAreMarked is the safety-critical case agent-tui#13 and its
 // traced comment both call out: Jon's own session (or any session the
 // estate has no ledger evidence for) must never render indistinguishably
 // from one the estate manages -- his sessions were destroyed three times by
@@ -229,7 +229,7 @@ func TestSessionsFetchErrorIsShownNeverBlank(t *testing.T) {
 }
 
 // TestBoardStillGetsFlatSingleSessionModel is the non-regression check for
-// board.go and every pre-#13 rail test: New/NewWithCost must render exactly
+// board.go and every pre-agent-tui#13 rail test: New/NewWithCost must render exactly
 // the flat single-session list they always did, untouched by sessions.go
 // existing.
 func TestBoardStillGetsFlatSingleSessionModel(t *testing.T) {
@@ -286,7 +286,7 @@ func TestSessionsFallbackRendersSingleSessionWithNote(t *testing.T) {
 	}
 	// agent-tui#55: this used to assert "agent-supervisor#158" -- as#158
 	// merged 2026-08-15, and a hardcoded reference to a closed issue is
-	// exactly the stale-attribution defect #55 exists to fix. What must
+	// exactly the stale-attribution defect agent-tui#55 exists to fix. What must
 	// stay true is that a genuinely unavailable tool (errSessionsToolUnavailable
 	// above, a JSON-RPC "unknown tool" error, not a timeout) reads that way,
 	// checked at runtime -- see isTimeoutErr/renderFallbackNote.
@@ -347,7 +347,7 @@ func TestSessionsFallbackDistinguishesTimeoutFromUnavailable(t *testing.T) {
 
 // TestSessionsFetchErrorWithNoFallbackStillShowsUnavailable is at#13's
 // original behavior, unchanged: a Model built with lanesFetch == nil (no
-// pre-#18 call site passes one) must render exactly what
+// pre-agent-tui#18 call site passes one) must render exactly what
 // TestSessionsFetchErrorIsShownNeverBlank above already checks -- this test
 // additionally checks that NO fallback single-session data appears, since
 // there is none to show.

@@ -73,7 +73,7 @@ historical shape (four-pane, rail-fixed) but is no longer accurate; treat
 the correction above as current.
 
 `cmd/estate/main.go` constructs exactly **one** `tea.NewProgram` call site,
-running `internal/shell.Model` (agent-tui#38, landed on `main` in PR #43).
+running `internal/shell.Model` (agent-tui#38, landed on `main` in PR agent-tui#43).
 `internal/shell.Model` owns a persistent left rail (`internal/rail`, always
 visible) and a content area that holds one of four panes — board, cost,
 gallery, flow, chat (`internal/flow`, agent-tui#64; `internal/chat`, agent-tui#20) — switched with `[f1]`–`[f6]`,
@@ -88,13 +88,13 @@ whichever pane is active.
 | `-gallery` | `PaneGallery` | yes — same reasoning; the gallery pane itself reads only compiled-in glyph data |
 | `-flow` | `PaneFlow` | yes, plus the same `-ledger`/board data `-board` needs — flow reads board's own `Snapshot()` (`shell.Model` pushes it in after every `board.Update`), never a second gh/ledger read; refuses to start under the same `boardOK == false` rule `-board` does |
 
-This is a real change from the pre-#38 shape (four mutually exclusive
+This is a real change from the pre-agent-tui#38 shape (four mutually exclusive
 `tea.NewProgram` sites selected by boolean flags, each its own process):
 every flag above now only chooses which pane the ONE process opens on
 (`shell.Model.WithStart`, `cmd/estate/main.go`'s `start` switch). Because
 the rail is now always on screen, every launch needs a supervisor
 connection — including a bare `-cost`/`-gallery` start, which needed none
-before #38 because there was no rail beside it to feed. This is the
+before agent-tui#38 because there was no rail beside it to feed. This is the
 mechanism behind agent-tui#49's first defect: bare launch demands a
 connection it cannot silently do without, and currently fails closed
 (`os.Exit(1)`) instead of degrading — see "Known defects" below.
@@ -309,9 +309,9 @@ Two data models, kept deliberately separate:
 closed; the three defects below are historical, kept for record with their
 fixes noted rather than deleted. See `AGENTS.md`'s own "Known defects"
 section for the fix evidence (`cmd/estate/main.go`'s `supervisorRepoResolved`
-handling for #1, `resolveLedgerSource`/`defaultLedgerLivePath`/
-`newLedgerCopier` for #2, `internal/cost/quota.go`'s `QuotaRunner`/
-`ExecQuotaRunner` wiring for #3) — the same evidence, not re-derived here.
+handling for agent-tui#1, `resolveLedgerSource`/`defaultLedgerLivePath`/
+`newLedgerCopier` for agent-tui#2, `internal/cost/quota.go`'s `QuotaRunner`/
+`ExecQuotaRunner` wiring for agent-tui#3) — the same evidence, not re-derived here.
 
 agent-tui#49 (open) records three; all three were confirmed here by
 running the built binary, not by reading source:
@@ -335,7 +335,7 @@ running the built binary, not by reading source:
    this panel actually reads, contrary to what its presence in
    `agent-supervisor` might suggest.
 
-None of the three is a defect in what shipped for #38 — the shell composes
+None of the three is a defect in what shipped for agent-tui#38 — the shell composes
 correctly; these are pre-existing gaps in the individual panes it now
 exposes by navigation as well as by launch flag. Fixing or re-documenting
 any of them is in scope for future work on this repo; presenting only the

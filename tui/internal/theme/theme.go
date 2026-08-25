@@ -2,13 +2,13 @@
 // render path -- colour, border character, chrome padding, glyph rune --
 // moves here, out of internal/board, internal/rail, internal/cost and
 // internal/gallery, and those packages ask for a Role instead of naming a
-// concrete colour. "Changing the entire look is editing ONE thing" (#27,
+// concrete colour. "Changing the entire look is editing ONE thing" (agent-tui#27,
 // Jon's own framing of the acceptance test) means editing registry.go, not
 // any render path file.
 //
 // This is deliberately NOT internal/lane/variants.go's job. Glyph SETS
 // (which rune animates which lane state) were already made data by
-// agent-supervisor#107's addendum and agent-tui#11/#16 -- see
+// agent-supervisor#107's addendum and agent-tui#11/agent-tui#16 -- see
 // internal/lane/glyph.go's own doc comment. Theme governs the chrome AROUND
 // those glyphs (selection background, borders, session accents, column
 // colours, warn/error colour) and the one glyph that lives outside any
@@ -19,7 +19,7 @@ package theme
 import "github.com/charmbracelet/lipgloss"
 
 // Role is a semantic slot a theme fills with a colour -- never a concrete
-// colour name at the call site (#27 item 2: "a theme answers by role
+// colour name at the call site (agent-tui#27 item 2: "a theme answers by role
 // ... never by concrete colour name"). Adding a role costs a line here plus
 // one entry per Theme in registry.go; nothing else needs to know a role
 // exists until a render path file asks for it.

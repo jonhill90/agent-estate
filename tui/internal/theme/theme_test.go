@@ -17,7 +17,7 @@ func TestAllThemesCoverEveryRole(t *testing.T) {
 }
 
 func TestMonoDiffersFromDefaultOnEveryRole(t *testing.T) {
-	// #27: "one theme proves nothing" -- Mono exists to make a missed
+	// agent-tui#27: "one theme proves nothing" -- Mono exists to make a missed
 	// literal visible, which only works if it disagrees with Default on
 	// every single role, not just some of them.
 	for role := range Default.Colors {

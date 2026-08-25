@@ -1,8 +1,8 @@
-# Full nav-tree walk, re-run for agent-b5.md: PR #96 (feat/three-stubs) was
-# rebased onto main after #95 (Knowledge wiring) landed underneath it, and
+# Full nav-tree walk, re-run for agent-b5.md: PR agent-tui#96 (feat/three-stubs) was
+# rebased onto main after agent-tui#95 (Knowledge wiring) landed underneath it, and
 # main's Connect group lost a child (Models -- w5f.md removed it, see
 # internal/nav/tree.go's own doc comment) while gaining Knowledge as a
-# routed destination elsewhere. This walk is #94's own tape (24
+# routed destination elsewhere. This walk is agent-tui#94's own tape (24
 # destinations now, not 25 -- one fewer: Models is gone, nothing replaced
 # it) re-run against the POST-MERGE tree to catch any route this merge's
 # resolution regressed, not just the two this branch fixed.
@@ -33,7 +33,7 @@ Screenshot testdata/vhs/out/00-home.png
 
 Down
 Enter
-# agent-tui#94/#97's own root-cause writeup measured real elapsed time at
+# agent-tui#94/agent-tui#97's own root-cause writeup measured real elapsed time at
 # 17s-25s+ (gh-latency-bound, never hangs) -- 4s only ever caught
 # "not fetched yet", not a rendering bug. Confirmed live during
 # navcheck.md: a 30s recheck showed real figures every time 4s did not.

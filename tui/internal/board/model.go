@@ -16,11 +16,11 @@ import (
 // value (5s) at ~138 GraphQL points/min against gh issue list/gh pr list --
 // ~8,160/hr against a 5,000/hr shared budget, enough to starve
 // agent-supervisor's own dispatch (agent-supervisor#144). 60s is not a
-// magic number chosen to hit some target ratio: it is what #28's own text
+// magic number chosen to hit some target ratio: it is what agent-tui#28's own text
 // calls "honest for issue state" -- this is a screen a human reads, not a
 // control loop, and nothing on it needs sub-minute freshness. See
 // cmd/agent-tui's -board-refresh flag, which is how the value can be
-// argued without a rebuild (#28 acceptance item 2).
+// argued without a rebuild (agent-tui#28 acceptance item 2).
 const DefaultRefreshInterval = 60 * time.Second
 
 // Snapshot is one fetch's worth of already-derived board state.
@@ -58,7 +58,7 @@ type Model struct {
 
 	// refreshInterval is how often Init/the refreshMsg loop below re-ticks.
 	// Set once, at construction (New/NewWithRefreshInterval), never mutated
-	// after -- there is no key that changes it, on purpose: #28's fix is a
+	// after -- there is no key that changes it, on purpose: agent-tui#28's fix is a
 	// deploy-time flag (cmd/agent-tui's -board-refresh), not a runtime
 	// control, so the same "argued without a rebuild" flag also can't be
 	// fat-fingered from the keyboard mid-session back down toward 5s.
@@ -71,7 +71,7 @@ type Model struct {
 	// pre-footer -- see View) are scrolled past. agent-tui#29: the board
 	// had no viewport at all, so content taller than the pane was only
 	// ever reachable by whatever the terminal itself did with overflow --
-	// which, per #29's own report, was "show the bottom, headers scrolled
+	// which, per agent-tui#29's own report, was "show the bottom, headers scrolled
 	// off, no indication anything is hidden." View clamps this to
 	// [0, maxScrollOffset] on every render, so it is safe for Update to
 	// move it by any amount, including past either end.
@@ -80,8 +80,8 @@ type Model struct {
 	// deselected holds repos toggled OFF by GitHubID, lowercased. Empty
 	// means "show every repo" -- the default with zero interaction, and
 	// the same shape the current estate already renders, so a lane that
-	// never touches a letter key sees exactly what it saw before #10.
-	// Toggling is a pure filter over the already-fetched Snapshot (#10
+	// never touches a letter key sees exactly what it saw before agent-tui#10.
+	// Toggling is a pure filter over the already-fetched Snapshot (agent-tui#10
 	// item 4: "data fetching must stay off the render path") -- no repo
 	// selection ever triggers a new fetch.
 	deselected map[string]bool
@@ -93,11 +93,11 @@ type Model struct {
 
 	// theme is agent-tui#27's seam: every colour/border/padding value
 	// View() and layout.go's Render use comes from here, never a literal
-	// at the call site. Defaults to theme.Default so every pre-#27 caller
+	// at the call site. Defaults to theme.Default so every pre-agent-tui#27 caller
 	// (every test that builds a Model with New) renders exactly as before
 	// this field existed.
 	theme theme.Theme
-	// themeNotice is #27 acceptance item 3's "says so visibly" half: set
+	// themeNotice is agent-tui#27 acceptance item 3's "says so visibly" half: set
 	// only when cmd/agent-tui's theme.Load resolved a malformed config or
 	// an unknown theme name, never for a plain missing config (which is
 	// not an error). Rendered once, right under the title.
@@ -119,7 +119,7 @@ func (m Model) WithTheme(th theme.Theme, notice string) Model {
 
 // NewWithRefreshInterval is New, with the tick interval as an explicit
 // argument -- cmd/agent-tui's -board-refresh flag (and $AGENT_TUI_BOARD_REFRESH)
-// call this directly so the value is settable without a rebuild (#28
+// call this directly so the value is settable without a rebuild (agent-tui#28
 // acceptance item 2); New itself keeps DefaultRefreshInterval so every
 // existing caller and test that never touches the flag keeps working
 // unchanged.
@@ -178,7 +178,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, doFetch(m.fetch)
 		case "0":
 			// Show every repo again -- the single key that undoes any
-			// combination of letter toggles, so "select 1 or many" (#10
+			// combination of letter toggles, so "select 1 or many" (agent-tui#10
 			// item 2) never leaves a lane stuck unable to see something it
 			// deselected and forgot about.
 			m.deselected = nil
@@ -281,7 +281,7 @@ func (m Model) styles() boardStyles {
 		// than reusing dim inline, or a literal colour) specifically so
 		// agent-tui#27's theme table can restyle just this element without
 		// a second pass through this file. Currently identical to dim;
-		// #27 owns making it look like anything more than that.
+		// agent-tui#27 owns making it look like anything more than that.
 		scrollIndicator: lipgloss.NewStyle().Faint(true),
 	}
 }
@@ -420,7 +420,7 @@ func (m Model) visibleCards() []Card {
 
 // repoLegend prints every fetched repo beside the letter key that toggles
 // it, selected ones marked "*" -- the same "discoverable on screen"
-// requirement digitKey's own legend already meets (#10: "cycle keys must
+// requirement digitKey's own legend already meets (agent-tui#10: "cycle keys must
 // be discoverable on screen, as [1-4] already is"). [0] always shows too,
 // so the reset key is never something a lane has to remember.
 func (m Model) repoLegend() string {
@@ -447,10 +447,10 @@ func (m Model) repoLegend() string {
 }
 
 // Aged/blocked colouring is no longer a post-processing pass over plain
-// text. #6 through #9 needed that shape (colorizeAged/isAgedCardLine) only
+// text. agent-tui#6 through agent-tui#9 needed that shape (colorizeAged/isAgedCardLine) only
 // because RenderByColumn/RenderByRepo returned plain strings with a bare
 // "!" marker that model.go alone knew how to recolour, and the indent
-// depth varied by which Render function wrote a line. #10 retired both of
+// depth varied by which Render function wrote a line. agent-tui#10 retired both of
 // those functions (view.go's doc comment) in favour of layout.go's
 // Layouts, whose renderCard bakes cardWarnColor directly into a card's own
 // lipgloss.Style at construction time -- there is no marker text left to

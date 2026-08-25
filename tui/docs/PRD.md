@@ -79,7 +79,7 @@ always recomputed fresh from GitHub + the ledger, never stored — this board
 is a projection, not a fourth data store.
 
 **Status:** shipped as a pane inside the one persistent shell (`[f2]`,
-agent-tui#38/#43), composed with the rail rather than a separate program.
+agent-tui#38/agent-tui#43), composed with the rail rather than a separate program.
 Navigating to it with no `-ledger` configured currently renders an
 "unavailable" message rather than degrading further or explaining the fix
 in-pane — agent-tui#49, see `docs/SPEC.md`'s "Known defects."
@@ -221,7 +221,7 @@ One process. A persistent rail always visible. The other views — board,
 cost, gallery, chat, and whatever comes after — as panes inside that one
 process, not quit-and-relaunch screens behind flags. The anchor feature
 carrying all four of its verbs, safely. **One process, a persistent rail,
-board/cost/gallery/chat all as panes — shipped** (agent-tui#38 PR #43,
+board/cost/gallery/chat all as panes — shipped** (agent-tui#38 PR agent-tui#43,
 agent-tui#20). What remains: attach/detach, a live chat transport, and
 the three defects agent-tui#49 found by driving the shipped shell (bare
 launch fails closed instead of degrading; the board and cost panes fail

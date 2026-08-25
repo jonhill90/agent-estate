@@ -114,7 +114,7 @@ func TestThemeSwitchChangesEverySurface(t *testing.T) {
 	assertBG(theme.RoleSelectedBG, outDefault, outMono)
 
 	// The director glyph rune itself (theme.DirectorMark) must switch too
-	// -- a glyph rune, not just a colour, per #27's own inventory category.
+	// -- a glyph rune, not just a colour, per agent-tui#27's own inventory category.
 	if !strings.Contains(outDefault, theme.Default.DirectorMark) {
 		t.Errorf("Default's render does not contain Default's own director mark %q", theme.Default.DirectorMark)
 	}
@@ -186,7 +186,7 @@ func colorFragment(rendered string) string {
 	return m
 }
 
-// TestThemeNoticeRendersVisibly closes the loop on #27 acceptance item 3
+// TestThemeNoticeRendersVisibly closes the loop on agent-tui#27 acceptance item 3
 // end to end: theme.Load's own tests (internal/theme/config_test.go) prove
 // it RETURNS a non-empty notice for a malformed/unknown config; this proves
 // that notice, once wired through WithTheme exactly as cmd/agent-tui wires
@@ -201,7 +201,7 @@ func TestThemeNoticeRendersVisibly(t *testing.T) {
 
 	// The missing-config case (empty notice) must NOT render a spurious
 	// line -- rendering exactly as today for a plain missing config is
-	// #27 acceptance item 3's other half.
+	// agent-tui#27 acceptance item 3's other half.
 	quiet := New(func() ([]lane.Lane, error) { return nil, nil }).WithTheme(theme.Default, "").View()
 	if strings.Contains(quiet, "unknown theme") {
 		t.Fatalf("an empty theme notice rendered a notice line anyway:\n%s", quiet)

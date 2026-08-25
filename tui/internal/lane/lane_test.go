@@ -37,7 +37,7 @@ func TestDecodeReadsModel(t *testing.T) {
 }
 
 // TestDecodeModelDefaultsToZeroValueWhenAbsent -- a lanes.sh from before
-// #115 (or a fixture that omits the field) must decode to Go's zero value,
+// agent-tui#115 (or a fixture that omits the field) must decode to Go's zero value,
 // not a JSON error, so this stays as backward-compatible as every other
 // field here.
 func TestDecodeModelDefaultsToZeroValueWhenAbsent(t *testing.T) {

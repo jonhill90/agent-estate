@@ -174,7 +174,7 @@ func TestScrollIndicatorEmptyWhenEverythingFits(t *testing.T) {
 // TestViewNeverExceedsHeightBudget is flow's own version of
 // shell.TestViewNeverExceedsContentHeightPlusFooter -- agent-tui#29's
 // lesson applied to a brand-new pane before it ships, not found the same
-// way #29 was (a live pane silently overrunning its budget).
+// way agent-tui#29 was (a live pane silently overrunning its budget).
 func TestViewNeverExceedsHeightBudget(t *testing.T) {
 	m := New().WithSnapshot(fakeSnap(), time.Now(), nil)
 	next, _ := m.Update(tea.WindowSizeMsg{Width: 80, Height: 24})
@@ -186,7 +186,7 @@ func TestViewNeverExceedsHeightBudget(t *testing.T) {
 	}
 }
 
-// Test80x24Renders is #64's own QA requirement: verify a small, realistic
+// Test80x24Renders is agent-tui#64's own QA requirement: verify a small, realistic
 // terminal size doesn't panic and produces a non-empty, bounded frame --
 // the actual "capture the pane and read it" check happens in a live tmux
 // pane (see the PR description), this only pins the same size in a test so

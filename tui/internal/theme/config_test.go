@@ -26,7 +26,7 @@ func TestLoadMalformedJSONReturnsDefaultWithNotice(t *testing.T) {
 		t.Fatalf("theme = %q, want %q", th.ID, Default.ID)
 	}
 	if notice == "" {
-		t.Fatal("notice is empty; a malformed config must say so visibly (#27 acceptance item 3)")
+		t.Fatal("notice is empty; a malformed config must say so visibly (agent-tui#27 acceptance item 3)")
 	}
 }
 
@@ -39,7 +39,7 @@ func TestLoadUnknownThemeReturnsDefaultWithNotice(t *testing.T) {
 		t.Fatalf("theme = %q, want %q", th.ID, Default.ID)
 	}
 	if notice == "" {
-		t.Fatal("notice is empty; an unknown theme name must say so visibly (#27 acceptance item 3)")
+		t.Fatal("notice is empty; an unknown theme name must say so visibly (agent-tui#27 acceptance item 3)")
 	}
 }
 
@@ -186,7 +186,7 @@ func TestLoadColorInvalidEntriesDoNotBlockValidOnes(t *testing.T) {
 }
 
 // TestLoadColorBadValueShapesAllBehaveIdentically is agent-tui#36's fix:
-// #34's review found six ways a "colors" entry's VALUE can be wrong, but
+// agent-tui#34's review found six ways a "colors" entry's VALUE can be wrong, but
 // only four of them (a bad string) were exercised before this test --
 // a JSON number or nested object made json.Unmarshal fail the whole file
 // via the old `map[string]string` decode, discarding "theme" and every

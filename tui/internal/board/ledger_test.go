@@ -70,7 +70,7 @@ func TestReadTaskRowsDecodesAndParsesSourceURL(t *testing.T) {
 }
 
 func TestReadTaskRowsLeavesUnresolvableURLUnparsed(t *testing.T) {
-	// The pre-#127 fallback shape agent-dotfiles used before it had a real
+	// The pre-agent-tui#127 fallback shape agent-dotfiles used before it had a real
 	// GitHub URL: "issue:<n>@<dir>". sourceURLRE must not match it, and
 	// Derive (card_test.go) must skip a row like this rather than crash.
 	out := `[{"task_id":"x","source_kind":"issue","source_url":"issue:241@tmp.bax5AOE3RP","source_ref":"241","source_state":"UNKNOWN","source_status":"created","task_status":"complete","lane":"","created_at":1,"updated_at":1,"delivered_at":null,"accepted_at":null,"completed_at":null}]`

@@ -49,7 +49,7 @@ func TestDeriveJoinsSessionsAndTasksByLedgerLaneKey(t *testing.T) {
 // pre-fix shape) must NOT match, because the real ledger never writes a
 // lane key that way (see this file's own package doc comment, "confirmed
 // against a live ledger.sqlite3 copy"). If Derive's join reverts to l.Name,
-// this goes red the other direction -- Task would read "#26" instead of
+// this goes red the other direction -- Task would read "agent-tui#26" instead of
 // staying "(no task)".
 func TestDeriveDoesNotJoinByDescriptiveName(t *testing.T) {
 	sessions := []lane.Session{

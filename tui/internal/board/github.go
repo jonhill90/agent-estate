@@ -70,7 +70,7 @@ func (p PR) ClosesIssue(number int) bool {
 // done"; reimplementing GitHub's own closing-keyword resolution here would
 // be swapping a GraphQL call for a correctness risk instead, on the one
 // field (issue<->PR linkage) this board can least afford to get wrong.
-// #28's rate fix for this call site is therefore the refresh interval
+// agent-tui#28's rate fix for this call site is therefore the refresh interval
 // (model.go's DefaultRefreshInterval / -board-refresh), not a transport
 // change.
 var prFields = "number,title,state,url,createdAt,updatedAt,closedAt,mergedAt,mergeStateStatus,headRefName,closingIssuesReferences"

@@ -7,7 +7,7 @@
 // truth over the ledger's task_status wherever they disagree, per
 // board.Derive's switch) into a pipeline reading, and adds a local,
 // I/O-free animation tick so the pipeline visibly moves between fetches
-// (#64: "it will seem like watching a company work," not a dashboard that
+// (agent-tui#64: "it will seem like watching a company work," not a dashboard that
 // only changes once a minute).
 package flow
 
@@ -20,7 +20,7 @@ import (
 // Stage is one node of the flow pipeline. Unlike board.Column (five
 // columns tuned for a kanban board), Stage is ordered left-to-right the way
 // work actually moves through the estate, and treats Blocked as a loop back
-// into Working/Review rather than a fifth parallel column -- issue #64's
+// into Working/Review rather than a fifth parallel column -- issue agent-tui#64's
 // own framing ("review -> fix -> re-review is a CYCLE").
 type Stage int
 
@@ -52,7 +52,7 @@ func (s Stage) String() string {
 // set once Stage == StageDone, and distinguishes "a PR closed this issue by
 // merging" from "the issue closed with no merging PR" -- the honest split
 // board.Card's own data supports. It is deliberately never "refused": this
-// package has no signal (#401's reaper stamps are exactly the kind of
+// package has no signal (agent-supervisor#401's reaper stamps are exactly the kind of
 // ledger claim AGENTS.md says gh must override, and even gh's CLOSED state
 // doesn't say why) that would let it assert a refusal rather than any other
 // reason an issue closed without a merge.
@@ -109,11 +109,11 @@ func StageCounts(items []Item) [stageCount]int {
 }
 
 // InFlight returns Working/Review/Blocked items only -- the "actually
-// moving right now" subset the body list shows by default (#64: a flow
+// moving right now" subset the body list shows by default (agent-tui#64: a flow
 // view is about motion, and Queued/Done are the two stages that, by
 // definition, are not moving). Sorted oldest-in-current-stage first
-// (largest Card.Age), so the item that has sat the longest -- #64's own
-// example, #251 at 22 turns and 918 minutes -- always sorts to the top,
+// (largest Card.Age), so the item that has sat the longest -- agent-tui#64's own
+// example, agent-supervisor#251 at 22 turns and 918 minutes -- always sorts to the top,
 // exactly where a human scanning for a stuck item would look first.
 func InFlight(items []Item) []Item {
 	out := make([]Item, 0, len(items))

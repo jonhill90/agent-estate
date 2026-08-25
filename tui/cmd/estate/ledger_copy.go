@@ -36,7 +36,7 @@ type backupRunner func(source, dest string) error
 // real live ledger under active writes still hit "database is locked"
 // outright without this, because sqlite3's default busy timeout is 0 (fail
 // immediately, no retry) -- verified against the actual live ledger during
-// PR #50's second review round.
+// PR agent-tui#50's second review round.
 const backupBusyTimeout = "5000"
 
 // execBackupRunner shells sqlite3's own ".backup" dot-command out -- the
@@ -47,7 +47,7 @@ const backupBusyTimeout = "5000"
 // alone never reads -- board's own sqlite3 subprocess then opens that
 // stale copy and, worse, its own connection can find the main file locked
 // against a concurrent writer ("database is locked", the exact failure PR
-// #50's review reproduced). ".backup" is SQLite's own Online Backup API
+// agent-tui#50's review reproduced). ".backup" is SQLite's own Online Backup API
 // wrapped in a CLI dot-command: it pages through the live database's
 // in-memory/WAL state safely WHILE a writer still has it open, and
 // produces one self-contained destination file with no WAL/shm sidecars
@@ -85,7 +85,7 @@ func execBackupRunner(sqliteBin string) backupRunner {
 // those two independent tea.Cmd goroutines can call Refresh at nearly the
 // same moment, and two concurrent `sqlite3 ... .backup dest` subprocesses
 // racing to write the SAME dest file is exactly what produced "database is
-// locked" during PR #50's second review round -- NOT contention with the
+// locked" during PR agent-tui#50's second review round -- NOT contention with the
 // live supervisor's own writer (a standalone repro loop against the real
 // live ledger, with no second estate-side backup running, did not
 // reproduce the failure at all; a concurrent second Refresh always did).

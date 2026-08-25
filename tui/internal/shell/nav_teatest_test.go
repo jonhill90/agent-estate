@@ -83,7 +83,7 @@ func TestEnterOnAnUnwiredRouteRendersStub(t *testing.T) {
 
 // TestKnowledgeRouteShowsRealKnowledgePane is w3e.md's own regression test:
 // "Knowledge" (row 5: Home, Dashboard, Agents, Chat, Tasks, Knowledge) used
-// to fall through to PaneStub even though internal/knowledge (#87) had been
+// to fall through to PaneStub even though internal/knowledge (agent-tui#87) had been
 // on main the whole time -- routeToPane simply never got a "knowledge" ->
 // PaneKnowledge arm (see TestEnterOnAnUnwiredRouteRendersStub's doc comment
 // for the git-history-verified root cause). It must now render the real
@@ -106,7 +106,7 @@ func TestKnowledgeRouteShowsRealKnowledgePane(t *testing.T) {
 // TestLibraryRouteShowsRealLibraryPane closes a gap found while checking
 // the SAME class of bug the Knowledge regression was: routeToPane already
 // maps "library" -> PaneLibrary (added alongside Knowledge's own nav row in
-// #93), but nothing in this package had ever driven the route through a
+// agent-tui#93), but nothing in this package had ever driven the route through a
 // real Program to prove it -- `grep -rln "PaneLibrary\|library\."
 // internal/shell/*_test.go` returned nothing before this test. "Library" is
 // row 6 (Home, Dashboard, Agents, Chat, Tasks, Knowledge, Library).

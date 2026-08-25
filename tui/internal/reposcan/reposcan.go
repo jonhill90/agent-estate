@@ -16,12 +16,23 @@
 // before a repo split (or written by an agent that forgot which repo it was
 // in) can point at the wrong issue forever.
 //
+// agent-tui#157 extended the guard to Go comments too, after the
+// qualification pass that PR shipped found the same hazard living in
+// hundreds of `//` doc comments (internal/board/layout.go,
+// internal/shell/model.go, ...), not just Markdown -- a bare '#N' in a Go
+// comment resolves exactly as silently after a repo merge as one in a
+// README. The scan is comment-text only, never full source: a Go string
+// literal can legitimately contain a bare '#N' that is not a citation at
+// all (a rendered UI marker like board's own `"#1 "` card-number prefix,
+// or a JSON hex colour), and treating those as violations would make the
+// guard un-runnable. See extractGoComments's own doc comment for how that
+// split is done, and TestBareReferenceGuardIgnoresGoStringLiterals for the
+// regression this exists to prevent.
+//
 // This guard is deliberately narrow, same as its agent-dotfiles source:
-//   - It only scans tracked *.md files. internal/mcpservers/server.go's own
-//     `agent-tui#494` was a Go comment, not a Markdown file, and is not
-//     re-checked by this guard going forward -- catching stale references
-//     in code comments generally is a different, larger scope this port
-//     does not attempt.
+//   - It only scans tracked *.md files and the *comment* text of tracked
+//     *.go files -- never Go string literals, shell/Python source, or
+//     `.tape` files, each a real but out-of-scope extension of its own.
 //   - A '#N' preceded by a word character or '/' (`owner/repo#9`,
 //     `agent-tui#9`) is already qualified and out of scope: it names a
 //     specific repository, even without a leading owner. This guard
@@ -37,6 +48,8 @@ package reposcan
 import (
 	"encoding/json"
 	"fmt"
+	"go/scanner"
+	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -82,8 +95,8 @@ func stripCodeSpans(text string) string {
 	return inlineCodeRE.ReplaceAllString(withoutFences, "")
 }
 
-func trackedMarkdownFiles(root string) ([]string, error) {
-	cmd := exec.Command("git", "-C", root, "ls-files", "*.md")
+func trackedFiles(root, pattern string) ([]string, error) {
+	cmd := exec.Command("git", "-C", root, "ls-files", pattern)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("git ls-files: %w", err)
@@ -95,6 +108,56 @@ func trackedMarkdownFiles(root string) ([]string, error) {
 		}
 	}
 	return files, nil
+}
+
+func trackedMarkdownFiles(root string) ([]string, error) {
+	return trackedFiles(root, "*.md")
+}
+
+func trackedGoFiles(root string) ([]string, error) {
+	return trackedFiles(root, "*.go")
+}
+
+// extractGoComments returns src with every byte OUTSIDE a `//` or `/* */`
+// comment replaced by a space (newlines preserved), so FindBareReferenceViolations
+// can scan it with the exact same line numbers as the original file while
+// seeing only comment text -- never a string literal, which can legitimately
+// contain a bare '#N' that is not a citation (a rendered UI marker like
+// internal/board's own "#1 " card-number prefix, or a hex colour in a JSON
+// fixture). go/scanner is used rather than a regex so a '#' or "//" inside a
+// string or rune literal is never mistaken for a comment boundary.
+func extractGoComments(src []byte) (string, error) {
+	fset := token.NewFileSet()
+	file := fset.AddFile("", fset.Base(), len(src))
+
+	out := make([]byte, len(src))
+	for i, b := range src {
+		if b == '\n' {
+			out[i] = '\n'
+		} else {
+			out[i] = ' '
+		}
+	}
+
+	var s scanner.Scanner
+	// ScanComments so comment tokens are emitted at all; errors are
+	// swallowed via a no-op handler because a syntactically invalid .go
+	// file (mid-edit, generated, etc.) should degrade to "no comments
+	// found" for this guard, not fail the whole scan.
+	s.Init(file, src, func(pos token.Position, msg string) {}, scanner.ScanComments)
+	for {
+		pos, tok, lit := s.Scan()
+		if tok == token.EOF {
+			break
+		}
+		if tok != token.COMMENT {
+			continue
+		}
+		start := file.Offset(pos)
+		end := start + len(lit)
+		copy(out[start:end], lit)
+	}
+	return string(out), nil
 }
 
 // LoadKnownNumbers reads the manifest at path: one issue/PR number per
@@ -166,8 +229,10 @@ func FindBareReferenceViolations(path, text string, known, allowed map[int]bool)
 	return out
 }
 
-// ScanRepository scans every tracked *.md file under root for bare '#N'
-// citations that do not resolve in this repository.
+// ScanRepository scans every tracked *.md file, plus the comment text of
+// every tracked *.go file, under root for bare '#N' citations that do not
+// resolve in this repository. Go string literals are never scanned -- see
+// extractGoComments's own doc comment for why.
 func ScanRepository(root, manifestPath, allowlistPath string) ([]Violation, error) {
 	known, err := LoadKnownNumbers(manifestPath)
 	if err != nil {
@@ -177,18 +242,41 @@ func ScanRepository(root, manifestPath, allowlistPath string) ([]Violation, erro
 	if err != nil {
 		return nil, err
 	}
-	files, err := trackedMarkdownFiles(root)
+
+	var all []Violation
+
+	mdFiles, err := trackedMarkdownFiles(root)
 	if err != nil {
 		return nil, err
 	}
-	var all []Violation
-	for _, rel := range files {
+	for _, rel := range mdFiles {
 		data, err := os.ReadFile(filepath.Join(root, rel))
 		if err != nil {
 			return nil, err
 		}
 		all = append(all, FindBareReferenceViolations(rel, string(data), known, allowed)...)
 	}
+
+	goFiles, err := trackedGoFiles(root)
+	if err != nil {
+		return nil, err
+	}
+	for _, rel := range goFiles {
+		data, err := os.ReadFile(filepath.Join(root, rel))
+		if err != nil {
+			return nil, err
+		}
+		comments, err := extractGoComments(data)
+		if err != nil {
+			return nil, fmt.Errorf("%s: %w", rel, err)
+		}
+		// Same code-span convention as the Markdown path: a backtick-quoted
+		// example inside a doc comment (`` `#202` `` illustrating what a
+		// FIXED file used to literally say) is not a live citation.
+		comments = stripCodeSpans(comments)
+		all = append(all, FindBareReferenceViolations(rel, comments, known, allowed)...)
+	}
+
 	sort.Slice(all, func(i, j int) bool {
 		if all[i].Path != all[j].Path {
 			return all[i].Path < all[j].Path

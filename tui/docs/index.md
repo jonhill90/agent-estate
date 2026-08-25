@@ -30,4 +30,4 @@ okf_version: "0.2"
 
 # CI / Guards
 
-* [Tape-build guard](vhscheck-guard.md) - What `internal/vhscheck` checks, why it exists (#132/#133), how it tells a live `go build` from a comment mentioning a path, and how to run it.
+* [Tape-build guard](vhscheck-guard.md) - What `internal/vhscheck` checks, why it exists (agent-tui#132/agent-tui#133), how it tells a live `go build` from a comment mentioning a path, and how to run it.

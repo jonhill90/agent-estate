@@ -10,7 +10,7 @@ import "testing"
 // U+EE15 -- and neither wrong guess would have failed
 // TestEveryVariantNamesEveryState, since that test only checks that a
 // state has SOME glyph, not that the glyph is the right one. A silently
-// wrong Nerd Font icon is worse than ASCII per #11's own framing ("a nerd
+// wrong Nerd Font icon is worse than ASCII per agent-tui#11's own framing ("a nerd
 // set that renders stale as blank is worse than ASCII") -- rendering the
 // WRONG icon with full confidence is the same failure shape one level
 // worse: not blank, not sane either.

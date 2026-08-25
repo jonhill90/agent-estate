@@ -12,18 +12,18 @@ import (
 	"github.com/charmbracelet/lipgloss"
 )
 
-// config is the on-disk shape of a user's theme preference. #27 shipped
+// config is the on-disk shape of a user's theme preference. agent-tui#27 shipped
 // exactly one field -- "theme", a name that selects a whole shipped
 // Theme. Agent-tui#34 adds "colors": a role-name -> hex-string map letting
 // a user define their own per-role colours instead of only picking
-// between shipped ones, which is what #33's review found #27's format
+// between shipped ones, which is what agent-tui#33's review found agent-tui#27's format
 // could not express ("per-role colours are compile-time data, not
 // user-editable JSON").
 // Colors is decoded as json.RawMessage per entry, not string: a
 // map[string]string forces json.Unmarshal to fail the WHOLE file the
 // moment one entry is a JSON number or object, discarding every other
 // valid "colors" entry and "theme" along with it (agent-tui#36's finding
-// against #34 -- a typo'd colour lost a user's entire theme, not just
+// against agent-tui#34 -- a typo'd colour lost a user's entire theme, not just
 // that one role). Holding each entry as raw JSON until
 // applyColorOverrides inspects it means a wrong-typed entry fails on its
 // own, exactly like a wrong-shaped string already did.
@@ -64,7 +64,7 @@ func isKnownRole(name string) bool {
 // this issue calls out. base's own Colors map is never mutated -- All's
 // shipped Theme values must stay identical across every Load call.
 //
-// Each entry in colors is validated against the three failure modes #33's
+// Each entry in colors is validated against the three failure modes agent-tui#33's
 // review named as having "nowhere to fail" before user-authored colours
 // existed: a blank role name, a role name this build's Theme has no slot
 // for, and a value that is not a colour. Each produces its own notice
@@ -178,7 +178,7 @@ func ConfigPath() string {
 // Every notice this call produces -- a bad "theme" value, and each bad
 // "colors" entry -- is joined into the single notice string this
 // function has always returned; the caller (cmd/agent-tui) renders
-// whatever it gets as one line per #27's existing wiring, unchanged.
+// whatever it gets as one line per agent-tui#27's existing wiring, unchanged.
 func Load(path string) (Theme, string) {
 	data, err := os.ReadFile(path)
 	if err != nil {

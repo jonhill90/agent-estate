@@ -111,9 +111,9 @@ func modelWithOps(ops session.Interface) Model {
 }
 
 // TestPlainModelIgnoresOpsKeys is the backward-compatibility contract every
-// pre-#14 rail test relies on implicitly: a Model with ops == nil (every
+// pre-agent-tui#14 rail test relies on implicitly: a Model with ops == nil (every
 // constructor call that does not chain WithOps) must treat a/d/n/x exactly
-// as it treated any other unmapped key before #14 existed -- never a nil
+// as it treated any other unmapped key before agent-tui#14 existed -- never a nil
 // interface panic.
 func TestPlainModelIgnoresOpsKeys(t *testing.T) {
 	m := New(func() ([]lane.Lane, error) { return nil, nil })
@@ -127,7 +127,7 @@ func TestPlainModelIgnoresOpsKeys(t *testing.T) {
 }
 
 // TestAttachKeyIsNoLongerWired is agent-tui#23's fix, driven the same way
-// TestAttachCallsOpsWithSelectedSession (this test's pre-#23 self) drove
+// TestAttachCallsOpsWithSelectedSession (this test's pre-agent-tui#23 self) drove
 // 'a' -- through m.Update(), the real production dispatch entry point, not
 // a direct call to handleOpsKey or any lower handler. Live testing against
 // a real mcp_server.py and an isolated tmux server with more than one

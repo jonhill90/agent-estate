@@ -29,7 +29,7 @@ func TestResolveUsesLatestObservationPerRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := AppendObservation(filepath.Join(dir, "observations", "chat.jsonl"),
-		Observation{Date: "2026-08-22", Source: "PR #99", Verdict: VerdictRenders, Notes: "real source"}); err != nil {
+		Observation{Date: "2026-08-22", Source: "PR agent-tui#99", Verdict: VerdictRenders, Notes: "real source"}); err != nil {
 		t.Fatal(err)
 	}
 
@@ -41,7 +41,7 @@ func TestResolveUsesLatestObservationPerRoute(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("got %d rows, want 2", len(rows))
 	}
-	if !rows[0].Known || rows[0].Obs.Verdict != VerdictRenders || rows[0].Obs.Source != "PR #99" {
+	if !rows[0].Known || rows[0].Obs.Verdict != VerdictRenders || rows[0].Obs.Source != "PR agent-tui#99" {
 		t.Errorf("chat row = %+v, want the LATEST (2026-08-22) observation, not the older one", rows[0])
 	}
 	if rows[1].Known {
@@ -63,10 +63,10 @@ func TestRenderNeverMeasuredRouteIsCouldNotMeasureNotBlank(t *testing.T) {
 func TestRenderIncludesEveryRowsSourceSoNewestIsDecidableFromTheFile(t *testing.T) {
 	rows := []ResolvedRow{
 		{Entry: ManifestEntry{ID: "chat", Label: "Chat"}, Known: true,
-			Obs: Observation{Date: "2026-08-22", Source: "PR #99", Verdict: VerdictRenders, Notes: "real"}},
+			Obs: Observation{Date: "2026-08-22", Source: "PR agent-tui#99", Verdict: VerdictRenders, Notes: "real"}},
 	}
 	out := Render(rows)
-	if !strings.Contains(out, "PR #99") || !strings.Contains(out, "2026-08-22") {
+	if !strings.Contains(out, "PR agent-tui#99") || !strings.Contains(out, "2026-08-22") {
 		t.Errorf("Render output missing the observation's own source/date -- a reader must be able to tell what produced this row without asking anyone:\n%s", out)
 	}
 }

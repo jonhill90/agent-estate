@@ -1,6 +1,6 @@
 // agent-tui#26: "the rail is too thin to QA" -- Jon attached, saw a session
 // list with a detail block and two cyclers, pressed the one interactive key
-// that did anything (#23's now-fixed no-op aside), and was done. The rail
+// that did anything (agent-tui#23's now-fixed no-op aside), and was done. The rail
 // had nothing behind it: no answer to what a lane is actually working on,
 // how long that has been open, or whether it needs a human.
 //
@@ -9,10 +9,10 @@
 // board screen. This file reuses that SAME read (board.ReadTaskRows,
 // board.TaskRow) rather than inventing a second way to reach the ledger, per
 // the issue's own constraint. It does not reuse board.Derive: that also
-// calls `gh issue list`/`gh pr list` per repo, and #28/#29 measured that
+// calls `gh issue list`/`gh pr list` per repo, and agent-tui#28/agent-tui#29 measured that
 // GraphQL cost against a slow refresh interval deliberately chosen for the
 // board screen -- wiring it into the rail's own tighter refresh tick would
-// reintroduce the exact rate problem #28/#29 just fixed. What this file adds
+// reintroduce the exact rate problem agent-tui#28/agent-tui#29 just fixed. What this file adds
 // is ledger-only and needs no GitHub call: a task's own source ref
 // (source_kind/source_ref, e.g. "agent-tui#26"), its created_at for age, and
 // delivered_at/accepted_at for the review/verdict signal -- three columns

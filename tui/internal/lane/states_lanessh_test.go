@@ -14,7 +14,7 @@ import (
 // rather than one that re-asserts AllStates's own contents back at itself.
 // TestEveryVariantNamesEveryState in lane_test.go proves every GlyphSet
 // covers AllStates; this proves AllStates covers lanes.sh. Neither test can
-// stand in for the other -- #3 happened precisely because only the first
+// stand in for the other -- agent-tui#3 happened precisely because only the first
 // existed.
 //
 // This repo deliberately imports no agent-supervisor internals (README:
@@ -81,7 +81,7 @@ func TestAllStatesCoversLanesShStates(t *testing.T) {
 // 10 states out of 13 still went green, because TestAllStatesCoversLanesShStates
 // only fails on a MISSING state, and `busy`/`hung`/`broken` were never
 // offered to it in the first place: this is agent-tui#3 again, one layer
-// down, in the guard #3 asked for.
+// down, in the guard agent-tui#3 asked for.
 //
 // The fix: require `state=IDENT` to start a shell statement -- preceded by
 // start-of-line, whitespace, or `;` -- rather than requiring it to END the
@@ -97,7 +97,7 @@ func TestAllStatesCoversLanesShStates(t *testing.T) {
 // requiring `[A-Za-z][A-Za-z0-9_-]*` immediately after `=` simply does not
 // match that line at all -- not "matches and gets it wrong", but doesn't
 // match -- so the assignment vanished from statesEmittedBy's output with no
-// signal anywhere that anything was missed. That is #3's exact failure
+// signal anywhere that anything was missed. That is agent-tui#3's exact failure
 // shape one layer down again: AllStates can be incomplete while every test
 // checking it stays green, because the parser silently skipped an
 // assignment it didn't recognize instead of saying so.
@@ -169,7 +169,7 @@ type unresolvedAssignment struct {
 // collide today" is not a property worth depending on -- a future header
 // rewritten as `# state=broken -> re-home it` would silently inflate the
 // parsed count without it, and that is exactly the "passes for the wrong
-// reason" failure mode #3 and this guard both exist to close. What this
+// reason" failure mode agent-tui#3 and this guard both exist to close. What this
 // does NOT do is treat a `#` mid-line as anything special beyond stripping
 // it off the captured value of a `state=` match (trailingCommentRe, below)
 // so a resolvable literal followed by a trailing comment (e.g.
@@ -209,8 +209,8 @@ func statesEmittedBy(src string) (literal []string, unresolved []unresolvedAssig
 // lanesShEvaluation is the outcome of checking one lanes.sh source's
 // state= assignments against AllStates: which resolved literals AllStates
 // doesn't know about, and which assignments couldn't be resolved at all.
-// Either being non-empty means the guard must fail -- missing is #3's
-// original check, unresolved is #19's.
+// Either being non-empty means the guard must fail -- missing is agent-tui#3's
+// original check, unresolved is agent-tui#19's.
 type lanesShEvaluation struct {
 	literal    []string // resolved state literals found (regardless of AllStates coverage)
 	missing    []string // resolved state literals AllStates does not list
@@ -248,14 +248,14 @@ func evaluateLanesSh(src string) lanesShEvaluation {
 
 // The three tests below are the mutation check agent-tui#19 asks for, run
 // against fixtures this test controls rather than against whatever
-// agent-supervisor's lanes.sh happens to say this hour (per #19's "Note on
+// agent-supervisor's lanes.sh happens to say this hour (per agent-tui#19's "Note on
 // timing": agent-supervisor#149 may switch to a literal assignment, which
 // would remove today's trigger without closing this issue -- the guard
 // itself, not that one call site, is what these fixtures pin down). None of
 // them touch AGENT_SUPERVISOR_REPO, so they run unconditionally in CI and
 // locally.
 
-// TestStatesEmittedBy_DynamicAssignmentGoesRed is the acceptance test #19
+// TestStatesEmittedBy_DynamicAssignmentGoesRed is the acceptance test agent-tui#19
 // names directly: a lanes.sh-shaped fixture with a `state=$(...)` command
 // substitution assigning a state absent from AllStates must make the guard
 // fail (unresolved, not silently dropped), not pass while blind to it.
@@ -282,11 +282,11 @@ func TestStatesEmittedBy_DynamicAssignmentGoesRed(t *testing.T) {
 	// pass/fail condition, the same one TestAllStatesCoversLanesShStates
 	// checks, actually fires for this fixture.
 	if len(result.missing) == 0 && len(result.unresolved) == 0 {
-		t.Fatalf("guard would report PASS on a fixture containing an unresolved dynamic assignment -- that is exactly the defect #19 was filed about")
+		t.Fatalf("guard would report PASS on a fixture containing an unresolved dynamic assignment -- that is exactly the defect agent-tui#19 was filed about")
 	}
 }
 
-// TestStatesEmittedBy_LiteralAssignmentsStillWork is #19's second
+// TestStatesEmittedBy_LiteralAssignmentsStillWork is agent-tui#19's second
 // requirement: the existing literal-assignment coverage (agent-tui#3's
 // fix -- both the trailing-assignment shape and the inline `;`-separated
 // shape on one line) must keep working unchanged.
@@ -352,7 +352,7 @@ func TestStatesEmittedBy_EmptyAssignmentGoesUnresolved(t *testing.T) {
 	}
 }
 
-// TestAllStatesCoversLanesShStates_KnownStatesPass is #19's third
+// TestAllStatesCoversLanesShStates_KnownStatesPass is agent-tui#19's third
 // requirement: a lanes.sh whose states all appear in AllStates must still
 // pass -- a guard that fails on everything (including its own fix) is not
 // a guard. Uses every literal in AllStates so this also doubles as a check

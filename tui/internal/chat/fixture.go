@@ -45,7 +45,7 @@ func NewFixtureSource() FixtureSource { return FixtureSource{} }
 // their tests, not a moving one). Timestamps are relative to a fixed
 // instant rather than time.Now() so a render captured today reads the same
 // tomorrow. lane-d carries enough messages to overflow any realistic
-// terminal height on its own -- the fixture this repo's own #29 regression
+// terminal height on its own -- the fixture this repo's own agent-tui#29 regression
 // (a board that could not scroll) says every scrollable view needs: a
 // fixture that actually forces the scroll path, not one that happens to
 // fit.

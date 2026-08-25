@@ -32,7 +32,7 @@ const meterWidth = 20
 // internal/rail's ~20-24 usable columns, where agent-tui#4 asked the panel
 // to actually live ("glanceable, always there, no command to run"). Each
 // line leads with limit pressure when ccusage can compute one (the number
-// issue #4 says matters: quota exhaustion, not spend) and falls back to
+// issue agent-tui#4 says matters: quota exhaustion, not spend) and falls back to
 // today's cost when it can't (codex, pi, or Claude with no
 // -claude-block-limit configured), so a harness with no quota source still
 // shows something live rather than a blank line. width is accepted for
@@ -78,7 +78,7 @@ func formatFigure(f Figure, format string) string {
 
 // RenderBars is the CodexBar-style layout: a filled/empty ascii meter for
 // limit pressure (when known), cache-read broken onto its own line per
-// issue #4's #2 rather than folded into a token total.
+// issue agent-tui#4's agent-tui#2 rather than folded into a token total.
 func RenderBars(snap Snapshot, width int) string {
 	if !snap.Known {
 		return "cost: unknown (ccusage unreadable)\n" + renderQuotaOnly(snap.Quotas)
@@ -211,7 +211,7 @@ func renderQuotaOnly(quotas map[string]Quota) string {
 }
 
 // sortProviderNames orders provider names the same way sortHarnesses
-// already orders Harnesses -- claude/codex/pi first (issue #4's own
+// already orders Harnesses -- claude/codex/pi first (issue agent-tui#4's own
 // reasoning), everything else alphabetically after -- so this render path
 // and the per-Harness one never disagree about ordering.
 func sortProviderNames(names []string) {

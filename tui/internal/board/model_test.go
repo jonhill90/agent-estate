@@ -16,7 +16,7 @@ func keyMsg(s string) tea.KeyMsg {
 }
 
 // TestDigitKeySwitchesLayout mirrors internal/rail's own digit-key test:
-// pressing a number selects Layouts[n-1] against the layout picker #10
+// pressing a number selects Layouts[n-1] against the layout picker agent-tui#10
 // replaced view.go's Views with.
 func TestDigitKeySwitchesLayout(t *testing.T) {
 	m := New(func() (Snapshot, error) { return Snapshot{}, nil })

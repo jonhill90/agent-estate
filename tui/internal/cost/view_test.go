@@ -112,7 +112,7 @@ func TestEveryViewMarksAWarningState(t *testing.T) {
 	}
 }
 
-// TestEveryViewBreaksOutCacheRead is agent-tui#4's #2: cache-read must
+// TestEveryViewBreaksOutCacheRead is agent-tui#4's agent-tui#2: cache-read must
 // appear as its own labeled figure, distinct from the token total, in
 // every layout -- not folded silently into "tokens".
 func TestEveryViewBreaksOutCacheRead(t *testing.T) {

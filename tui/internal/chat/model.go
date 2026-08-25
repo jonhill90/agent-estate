@@ -20,7 +20,7 @@ import (
 // tmux send-keys"), expressed as this package's adapter seam, the same
 // shape Source (thread.go) already is. Called from inside a tea.Cmd
 // (trySend below), never inline in Update -- a real Sender's own round
-// trip can legitimately run minutes (agent-supervisor#508/#509's
+// trip can legitimately run minutes (agent-supervisor#508/agent-supervisor#509's
 // session_send drives a live agent turn), and blocking Update for that
 // long would freeze the whole shell, not just this pane.
 //
@@ -643,7 +643,7 @@ func (m Model) sync() Model {
 	// push the pane's total line count past what its outer lipgloss.Height
 	// box enforces, and lipgloss does not truncate overflow -- it would
 	// silently push the footer down instead, the same failure class as
-	// #29's untruncated board.
+	// agent-tui#29's untruncated board.
 	m.listVP.Width = mx.listWidth
 	m.listVP.Height = mx.bodyHeight - composerHeight - 1
 	var listLines []string

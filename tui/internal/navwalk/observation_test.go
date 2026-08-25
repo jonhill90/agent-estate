@@ -11,7 +11,7 @@ func TestAppendObservationThenReadRoundTrips(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "chat.jsonl")
 
-	want := Observation{Date: "2026-08-22", Source: "PR #99", Verdict: VerdictRenders, Notes: "real threads"}
+	want := Observation{Date: "2026-08-22", Source: "PR agent-tui#99", Verdict: VerdictRenders, Notes: "real threads"}
 	if err := AppendObservation(path, want); err != nil {
 		t.Fatalf("AppendObservation: %v", err)
 	}
@@ -30,7 +30,7 @@ func TestAppendObservationNeverRewritesAnEarlierLine(t *testing.T) {
 	path := filepath.Join(dir, "dashboard.jsonl")
 
 	first := Observation{Date: "2026-08-20", Source: "walk agent-tui#94", Verdict: VerdictEmpty, Notes: "stuck"}
-	second := Observation{Date: "2026-08-22", Source: "PR #97", Verdict: VerdictRenders, Notes: "fixed"}
+	second := Observation{Date: "2026-08-22", Source: "PR agent-tui#97", Verdict: VerdictRenders, Notes: "fixed"}
 	if err := AppendObservation(path, first); err != nil {
 		t.Fatal(err)
 	}
@@ -96,7 +96,7 @@ func TestLatestOfEmptyIsNotOK(t *testing.T) {
 // lane B measures Chat" takes under this scheme. Before this fix, both
 // lanes edited the SAME testdata/vhs/full-nav-walk-report.md and every
 // such pair of PRs conflicted (agent-b3.md's own brief names three:
-// #97/#98/#99). Skips if git is not on PATH rather than failing a build
+// agent-tui#97/agent-tui#98/agent-tui#99). Skips if git is not on PATH rather than failing a build
 // environment that lacks it.
 func TestTwoRoutesNeverConflict(t *testing.T) {
 	gitBin, err := exec.LookPath("git")
@@ -139,24 +139,24 @@ func TestTwoRoutesNeverConflict(t *testing.T) {
 	// Lane A: branches off main, measures ONLY Dashboard.
 	run("checkout", "-q", "-b", "lane-a")
 	if err := AppendObservation(filepath.Join(obsDir, "dashboard.jsonl"),
-		Observation{Date: "2026-08-22", Source: "PR #97 (lane A)", Verdict: VerdictRenders, Notes: "fixed"}); err != nil {
+		Observation{Date: "2026-08-22", Source: "PR agent-tui#97 (lane A)", Verdict: VerdictRenders, Notes: "fixed"}); err != nil {
 		t.Fatal(err)
 	}
 	run("commit", "-aq", "-m", "lane A: dashboard fixed")
 
 	// Lane B: branches off the SAME base, measures ONLY Chat -- a
-	// DIFFERENT route, simulating the real #97/#99 scenario where two
+	// DIFFERENT route, simulating the real agent-tui#97/agent-tui#99 scenario where two
 	// lanes measured two different nav destinations.
 	run("checkout", "-q", "main")
 	run("checkout", "-q", "-b", "lane-b")
 	if err := AppendObservation(filepath.Join(obsDir, "chat.jsonl"),
-		Observation{Date: "2026-08-22", Source: "PR #99 (lane B)", Verdict: VerdictRenders, Notes: "real source"}); err != nil {
+		Observation{Date: "2026-08-22", Source: "PR agent-tui#99 (lane B)", Verdict: VerdictRenders, Notes: "real source"}); err != nil {
 		t.Fatal(err)
 	}
 	run("commit", "-aq", "-m", "lane B: chat wired to a real source")
 
 	// Merge lane A into main, then merge lane B into main -- the exact
-	// sequence "#97 merges, then #99 merges" takes. If this were still one
+	// sequence "agent-tui#97 merges, then agent-tui#99 merges" takes. If this were still one
 	// shared table file both lanes edited, the second merge would conflict
 	// (agent-b3.md's own brief: this happened for real, three times). Per
 	// route storage means these are two different files; git's own merge
@@ -181,14 +181,14 @@ func TestTwoRoutesNeverConflict(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest, ok := Latest(dashObs); !ok || latest.Source != "PR #97 (lane A)" {
+	if latest, ok := Latest(dashObs); !ok || latest.Source != "PR agent-tui#97 (lane A)" {
 		t.Errorf("dashboard's latest observation = %+v, want lane A's -- merge must not have discarded it", latest)
 	}
 	chatObs, err := ReadObservations(filepath.Join(obsDir, "chat.jsonl"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if latest, ok := Latest(chatObs); !ok || latest.Source != "PR #99 (lane B)" {
+	if latest, ok := Latest(chatObs); !ok || latest.Source != "PR agent-tui#99 (lane B)" {
 		t.Errorf("chat's latest observation = %+v, want lane B's -- merge must not have discarded it", latest)
 	}
 }

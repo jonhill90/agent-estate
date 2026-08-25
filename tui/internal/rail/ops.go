@@ -2,7 +2,7 @@
 // through internal/session.Interface (an MCP tools/call each), never
 // through tmux directly (see internal/session's own package doc for why
 // that is non-negotiable). Kept in its own file for the same reason
-// sessions.go is: model.go's non-write path (every pre-#14 test, board.go's
+// sessions.go is: model.go's non-write path (every pre-agent-tui#14 test, board.go's
 // flat single-session render) stays a diff-free read, and nothing there
 // changes shape because of what is here.
 //
@@ -145,7 +145,7 @@ func (m Model) selectedSessionName() (string, bool) {
 
 // handleOpsKey is model.go's Update's first stop for every key when
 // m.ops != nil. handled == false means "no opinion, fall through to the
-// read-only switch" -- the only way out when m.ops == nil (every pre-#14
+// read-only switch" -- the only way out when m.ops == nil (every pre-agent-tui#14
 // Model) or the idle mode's switch does not recognise the key.
 func (m Model) handleOpsKey(msg tea.KeyMsg) (Model, tea.Cmd, bool) {
 	if m.ops == nil {

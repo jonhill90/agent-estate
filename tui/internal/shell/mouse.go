@@ -26,7 +26,7 @@ import (
 // rendering only, never the ledger or dispatch, so being wrong costs this
 // file.
 //
-// REBASED 2026-08-22 onto SPEC-shell.md S3 (#74): the sidebar (internal/nav),
+// REBASED 2026-08-22 onto SPEC-shell.md S3 (agent-tui#74): the sidebar (internal/nav),
 // not the footer's f-key legend, is the real nav now -- rail moved off the
 // fixed left column entirely (PaneLanes). This file originally marked
 // per-Pane zones on footer tokens (home/board/cost/gallery/flow/chat); it now

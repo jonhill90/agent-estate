@@ -6,7 +6,7 @@
 // holds board/cost/gallery -- also unchanged packages, mounted here rather
 // than rewritten. Nothing in board/cost/gallery/rail's own render or key
 // logic moves; this package only composes them and routes tea.Msg between
-// them, the same "views become panes, not programs" framing issue #38 asks
+// them, the same "views become panes, not programs" framing issue agent-tui#38 asks
 // for.
 package shell
 
@@ -46,7 +46,7 @@ import (
 
 // Pane names which model currently occupies the content area. paneHome is
 // the default -- no view has been chosen yet, exactly what a bare "no
-// flags" run rendered before #38 (a rail with nothing beside it), except
+// flags" run rendered before agent-tui#38 (a rail with nothing beside it), except
 // that space is now reachable rather than permanently blank.
 type Pane int
 
@@ -102,11 +102,11 @@ const (
 	// personal vault at $AGENT_MEMORY_VAULT) -- merged standalone, same
 	// "ship the pane, wire the route later" precedent S6/S8-S11 and
 	// dashboard/library all followed at some point, but its own wiring
-	// step never landed: #93 (library.go's own commit message) says so
+	// step never landed: agent-tui#93 (library.go's own commit message) says so
 	// explicitly ("unlike Knowledge, wired into the shell in the same
 	// change that built it" -- Library's, not Knowledge's), and `git log
-	// --oneline -- internal/shell/model.go` shows #87 itself never
-	// touched this file at all. #94's nav walk caught the resulting gap:
+	// --oneline -- internal/shell/model.go` shows agent-tui#87 itself never
+	// touched this file at all. agent-tui#94's nav walk caught the resulting gap:
 	// the "knowledge" route rendered PaneStub the whole time. This is
 	// that wiring, agent-tui#94's own fix.
 	PaneKnowledge
@@ -132,7 +132,7 @@ const (
 	// implemented: hill90-app's platform/vault/secrets-schema.yaml,
 	// projected to levels 1-4 of that issue's own exposure scale, never
 	// level 5 (see internal/secrets' own package doc comment). Storage and
-	// Discord stay PaneStub -- #101 found no credential-free, local
+	// Discord stay PaneStub -- agent-tui#101 found no credential-free, local
 	// equivalent of schema.yaml for either (Storage's real backend is a
 	// live, credential-bearing S3/MinIO call; Discord has no backend in
 	// this estate at all) -- see internal/stub.Descriptions' "storage"/
@@ -251,7 +251,7 @@ const footerHeight = 1
 // the keypress that revealed it.
 type Model struct {
 	// navCursor is the sidebar cursor. It lives here, not in nav.Model,
-	// because #73's nav owns no cursor by design (see its Update doc).
+	// because agent-tui#73's nav owns no cursor by design (see its Update doc).
 	navCursor int
 
 	// nav is SPEC-shell.md S3's app shell change: the persistent left
@@ -388,7 +388,7 @@ type Model struct {
 
 // New builds a Model from the four already-constructed pane models --
 // cmd/agent-tui wires each one's Fetcher/WithOps/etc. exactly as it did
-// before #38; this constructor changes none of that, it only holds the
+// before agent-tui#38; this constructor changes none of that, it only holds the
 // results. Theme is the one exception (agent-tui#51): callers no longer
 // call WithTheme on each pane themselves -- New defaults every pane to
 // whatever theme it already carries (theme.Default, same as a freshly
@@ -431,7 +431,7 @@ func (m Model) WithStart(p Pane) Model {
 }
 
 // WithTheme returns a copy of m with th and notice wired in as the ONE
-// shared theme value -- agent-tui#51: unlike before #51, this is no
+// shared theme value -- agent-tui#51: unlike before agent-tui#51, this is no
 // longer additive-only chrome for the shell's own render (the footer
 // legend and the board-unavailable notice); it is now also pushed into
 // every pane via applyTheme, replacing the pane-by-pane WithTheme calls
@@ -603,7 +603,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// theme.CycleRequestedMsg's doc comment). Cycling here, once,
 		// and re-applying via applyTheme is what makes a single
 		// keypress repaint the rail AND the active content pane
-		// together -- the defect #48's four-owner diff could not fix
+		// together -- the defect agent-tui#48's four-owner diff could not fix
 		// even after a rebase.
 		return m.cycleTheme()
 
@@ -828,11 +828,11 @@ func (m Model) routeKey(msg tea.KeyMsg) (Model, tea.Cmd) {
 // something the moment this lands, rather than nothing at all until each
 // one's own later item (S6-S12) is built.
 func (m Model) routeNavKey(msg tea.KeyMsg) (Model, tea.Cmd) {
-	// CONFLICT RESOLUTION, 2026-08-22. S1/S2 (#73) and S3 (#74) were built in
+	// CONFLICT RESOLUTION, 2026-08-22. S1/S2 (agent-tui#73) and S3 (agent-tui#74) were built in
 	// parallel by two agents and each created its own internal/nav. The merged
-	// tree keeps #73's, which deliberately owns NO cursor -- its Update doc
+	// tree keeps agent-tui#73's, which deliberately owns NO cursor -- its Update doc
 	// says the shell drives up/down/enter/left and nav only handles [b]. So
-	// the cursor lives here, over Tree.Flatten(), which #73 documents as
+	// the cursor lives here, over Tree.Flatten(), which agent-tui#73 documents as
 	// existing for exactly this traversal.
 	nodes := m.nav.Tree().Flatten()
 	if len(nodes) == 0 {
@@ -1314,7 +1314,7 @@ func (m Model) syncExternal(item nav.Item) Model {
 // blank one -- "a visible stub beats a hidden screen" (S5) applies here
 // too.
 func (m Model) stubView() string {
-	// #73's nav exposes the active route id, not the item; Descriptions is
+	// agent-tui#73's nav exposes the active route id, not the item; Descriptions is
 	// keyed by the same ids nav.Build() emits, so the id is the lookup key.
 	title := m.nav.Active()
 	desc, ok := stub.Descriptions[title]
@@ -1328,7 +1328,7 @@ func (m Model) stubView() string {
 // package's footer/home/unavailable views is the same, matching how
 // rail/board/cost's own legend lines are drawn (Faint, no explicit
 // colour) so the shell's chrome does not introduce a literal colour
-// agent-tui#27/#36 already moved out of every other render path (the "do
+// agent-tui#27/agent-tui#36 already moved out of every other render path (the "do
 // not restyle" trap named in this issue).
 var legendStyle = lipgloss.NewStyle().Faint(true)
 
@@ -1418,7 +1418,7 @@ func (m Model) homeView() string {
 // -ledger to build a real board.Fetcher from. -board itself still refuses
 // to START this way (unchanged, main.go's own check) -- this is only for
 // reaching the board by navigation from some OTHER starting view, which
-// #38 makes possible for the first time.
+// agent-tui#38 makes possible for the first time.
 func (m Model) unavailableView() string {
 	errStyle := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Color(theme.RoleError))
 	lines := []string{

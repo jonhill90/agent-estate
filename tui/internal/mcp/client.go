@@ -239,7 +239,7 @@ func (c *Client) CallTool(name string, arguments map[string]any) (string, error)
 // (session_attach/detach/add/remove/remove_check, lanes, sessions, digest,
 // ledger, events) is a local, no-network-hop operation -- callTimeout's own
 // doc comment explains why 10s is the honest budget for those. session_send
-// (agent-supervisor#508/#509) is not one of those: it drives a live agent
+// (agent-supervisor#508/agent-supervisor#509) is not one of those: it drives a live agent
 // turn through `supervisord send`, which can legitimately run for the
 // daemon's own per-turn budget (agent.DefaultTimeout, 15 minutes, on the
 // agent-supervisor side) before it can even report an honest "unknown".

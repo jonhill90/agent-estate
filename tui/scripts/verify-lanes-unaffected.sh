@@ -2,7 +2,7 @@
 # agent-supervisor#107 hard-acceptance item 2: "lanes.sh output BYTE-IDENTICAL
 # with the app running and not running." This is that proof, not a
 # screenshot. It runs against an ISOLATED tmux server (never the machine's
-# real one -- agent-supervisor's own AGENTS.md rule 4, and #173's fixture is
+# real one -- agent-supervisor's own AGENTS.md rule 4, and agent-supervisor#173's fixture is
 # exactly what a fixed-width injected pane broke) and diffs lanes.sh --json
 # for a set of decoy windows before and after estate runs in its OWN
 # window of the same session.

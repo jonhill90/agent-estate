@@ -42,7 +42,7 @@ type fetchResultMsg struct {
 
 // Model is the cost panel's Bubble Tea program -- a separate, deeper detail
 // screen from internal/rail.Model and internal/board.Model, shown only
-// behind -cost. Issue #4 itself asks for the panel to be "glanceable,
+// behind -cost. Issue agent-tui#4 itself asks for the panel to be "glanceable,
 // always there, no command to run"; that requirement is met by
 // internal/rail's own compact cost line (rail.NewWithCost, wired in
 // cmd/agent-tui) rendering by default with no flag, not by this screen.
@@ -62,7 +62,7 @@ type Model struct {
 	quitting    bool
 
 	// theme is agent-tui#27's seam -- see board.Model's identical field for
-	// the full rationale. Defaults to theme.Default so every pre-#27
+	// the full rationale. Defaults to theme.Default so every pre-agent-tui#27
 	// caller renders exactly as before this field existed.
 	theme       theme.Theme
 	themeNotice string

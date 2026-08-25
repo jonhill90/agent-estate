@@ -8,7 +8,7 @@ generated:
 # agent-tui#122 follow-up: lanechat variant screenshots
 
 Three real, working screens for the combined Lanes+Chat surface
-(`internal/lanechat/{laneprimary,roomprimary,unifiedlist}`, agent-tui#115/#122),
+(`internal/lanechat/{laneprimary,roomprimary,unifiedlist}`, agent-tui#115/agent-tui#122),
 captured so Jon can look at all three side by side instead of digging through
 file paths or re-running the tapes himself. This doc **does not pick a
 variant** — that decision is still his. See each tape for the full narration:
@@ -75,7 +75,7 @@ this doc renders from a durable path).
 ## Not decided here
 
 Which of the three — lane-primary, room-primary, or unified-list — becomes
-the actual combined Lanes+Chat surface is unchanged from #122: a taste
+the actual combined Lanes+Chat surface is unchanged from agent-tui#122: a taste
 decision left to Jon looking at the frames above. Nothing here wires a
 variant into `internal/nav` or `internal/shell`'s default routes, and this
 doc does not recommend one.

@@ -85,7 +85,7 @@ func TestValidateMentionsNoMentionsAlwaysPasses(t *testing.T) {
 }
 
 // TestHighlightMentionsStylesTheTokenDistinctFromPlainText proves the
-// rendering half of #114: "mentions must be visible in the rendered
+// rendering half of agent-tui#114: "mentions must be visible in the rendered
 // transcript as mentions, not as plain text that happens to start with @."
 func TestHighlightMentionsStylesTheTokenDistinctFromPlainText(t *testing.T) {
 	// go test's own stdout is not a terminal, so lipgloss's default
@@ -135,7 +135,7 @@ func TestTrySendRefusesMentionOfAbsentParticipantWithoutCallingSender(t *testing
 		t.Fatal("trySend returned a Cmd for a refused mention -- the daemon transport must never be reached")
 	}
 	if senderCalled {
-		t.Fatal("Sender was called despite an unresolved @-mention -- the exact failure #114 exists to prevent")
+		t.Fatal("Sender was called despite an unresolved @-mention -- the exact failure agent-tui#114 exists to prevent")
 	}
 	if m.sendOutcome != sendFailed {
 		t.Fatalf("sendOutcome = %v, want sendFailed", m.sendOutcome)
@@ -168,7 +168,7 @@ func TestTrySendSendsWhenMentionResolvesToARunningParticipant(t *testing.T) {
 	}
 }
 
-// TestUnknownSendOutcomeSurvivesAValidMention is the regression #114's own
+// TestUnknownSendOutcomeSurvivesAValidMention is the regression agent-tui#114's own
 // verification list asks for by name: "a test that an unknown-fate send
 // still renders as unknown after the composer change -- do not let the new
 // path collapse the three states into two." A message with a mention that

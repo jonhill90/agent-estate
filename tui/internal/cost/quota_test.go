@@ -108,7 +108,7 @@ func TestRenderQuota_KnownRendersBothPercentages(t *testing.T) {
 }
 
 // TestUnknownWithQuota_RendersQuotaEvenWhenCcusageUnknown reproduces the
-// reopened half of agent-tui#49 item 3: PR #50's review found a real
+// reopened half of agent-tui#49 item 3: PR agent-tui#50's review found a real
 // machine with a working quota.sh but no working ccusage, and the cost
 // panel showed "cost: unknown (ccusage unreadable)" with NO quota line at
 // all -- the old code returned before quota.sh was ever consulted whenever
@@ -136,7 +136,7 @@ func TestUnknownWithQuota_RendersQuotaEvenWhenCcusageUnknown(t *testing.T) {
 // TestUnknownWithQuota_NoQuotaDataRendersExactlyAsUnknown pins that the new
 // quota-only render path adds NOTHING when there is genuinely no quota
 // data either (quota.sh not configured/unreachable) -- must read identical
-// to the pre-#49 "cost: unknown (ccusage unreadable)\n", not a dangling
+// to the pre-agent-tui#49 "cost: unknown (ccusage unreadable)\n", not a dangling
 // empty quota line.
 func TestUnknownWithQuota_NoQuotaDataRendersExactlyAsUnknown(t *testing.T) {
 	for _, v := range Views {

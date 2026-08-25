@@ -174,7 +174,7 @@ func TestAgentsCostRefreshIntervalIsFiveMinutes(t *testing.T) {
 	}
 }
 
-// TestRefreshMsgDoesNotFetchCost is refreshInterval's own half of #139: the
+// TestRefreshMsgDoesNotFetchCost is refreshInterval's own half of agent-tui#139: the
 // 2s ticker must drive the sessions/task fetch only, never m.costFetch --
 // folding costFetch back into this case is exactly the regression this
 // guards, independent of the constant-value pin above (a mutant that

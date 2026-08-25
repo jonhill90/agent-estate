@@ -10,10 +10,10 @@ import (
 
 // benchCards builds a synthetic but realistically-shaped fixture: n cards
 // spread across 5 repos and every Column, some aged, some blocked -- large
-// enough to make a per-Layout cost difference visible (#10 item 4:
+// enough to make a per-Layout cost difference visible (agent-tui#10 item 4:
 // "measure and report render time; if a variant is expensive, say so").
 // This is a synthetic fixture, not real data -- the acceptance screenshots
-// (#10 item 1) are what must come from a real fetch; this benchmark exists
+// (agent-tui#10 item 1) are what must come from a real fetch; this benchmark exists
 // to catch a Layout that is disproportionately expensive at a size larger
 // than what this estate's four-repo issue count happens to be today.
 func benchCards(n int) []Card {

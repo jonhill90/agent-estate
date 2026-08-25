@@ -198,7 +198,7 @@ func TestIndependenceEdgeCases(t *testing.T) {
 // TestBlankReviewLaneSelfApprovalBypass ports jonhill90/skills#260's
 // BlankReviewLaneSelfApprovalBypass regression test class near-verbatim:
 // a security regression found by build-3 in jonhill90/skills's
-// pr_verdict.py (fixed there in #260) and independently confirmed present
+// pr_verdict.py (fixed there in agent-supervisor#260) and independently confirmed present
 // here in this Go port under the identical bug shape. A BLANK
 // `Review-Lane:` value let reviewLaneRE's post-colon `\s*` consume the
 // line break and capture the NEXT line's text (`Reviewed-SHA: ...`)

@@ -4,7 +4,7 @@
 // generator -- two lanes measuring two DIFFERENT routes still collide on
 // the same file, and the losing side's resolution can silently discard a
 // real measurement someone else took (exactly what happened across PR
-// #97/#98/#99: three lanes, one shared table, three near-simultaneous
+// agent-tui#97/agent-tui#98/agent-tui#99: three lanes, one shared table, three near-simultaneous
 // conflicts).
 //
 // The fix: one JSONL file per nav destination
@@ -54,7 +54,7 @@ const (
 // "newest" decidable from the file itself (agent-b3.md's own
 // requirement) -- Date in YYYY-MM-DD form so plain string comparison
 // orders correctly, Source naming the PR or run that produced it (e.g.
-// "PR #97 (agent-b3.md)") so a reader never has to guess who measured
+// "PR agent-tui#97 (agent-b3.md)") so a reader never has to guess who measured
 // this or trust an unlabelled claim.
 type Observation struct {
 	Date    string  `json:"date"`

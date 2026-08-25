@@ -12,7 +12,7 @@ import "github.com/charmbracelet/lipgloss"
 var Default = Theme{
 	ID:          "signal-dark",
 	Name:        "Signal (default)",
-	Description: "today's appearance, unchanged -- the pre-#27 hardcoded look, relocated here byte-for-byte",
+	Description: "today's appearance, unchanged -- the pre-agent-tui#27 hardcoded look, relocated here byte-for-byte",
 	Colors: map[Role]lipgloss.Color{
 		RoleError:        lipgloss.Color("#ff5555"), // board/cost/rail errStyle
 		RoleWarn:         lipgloss.Color("#f1c40f"), // board cardWarnColor, cost warnStyle
@@ -42,7 +42,7 @@ var Default = Theme{
 // rounded to thick, padding widens, and the director mark changes glyph
 // entirely, so the mutation check (un-route one literal, watch the
 // two-theme test fail) has something to catch on every axis the inventory
-// found. The hill90 palette Jon actually wants is a follow-up (#27: "do
+// found. The hill90 palette Jon actually wants is a follow-up (agent-tui#27: "do
 // not invent a palette to ship with"); this is deliberately not it.
 var Mono = Theme{
 	ID:          "mono-contrast",
@@ -91,7 +91,7 @@ func ByID(id string) (Theme, bool) {
 
 // Cycle returns the theme in All that follows current, wrapping around --
 // agent-tui#25's other half of "per-user, persisted": the config file
-// (config.go's Load/Save) is the committed preference, but issue #25's
+// (config.go's Load/Save) is the committed preference, but issue agent-tui#25's
 // scope item 3 also asks for "switchable at runtime as well as at
 // startup, if it is cheap... he has consistently wanted to compare rather
 // than commit." This is that comparison -- a live, in-memory swap the

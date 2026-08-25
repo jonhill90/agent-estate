@@ -7,7 +7,7 @@ generated:
 
 # agent-tui#61: knowledge graph view of agent memory -- variants + spike
 
-**The issue's own gate is still real.** #61 is filed BACKLOG, "do not
+**The issue's own gate is still real.** agent-tui#61 is filed BACKLOG, "do not
 start this," depends on OKF v0.2 (provenance/freshness/lifecycle/trust
 fields) and the memory-scoping design. Checked against the vault as of
 2026-08-20: `$AGENT_MEMORY_VAULT/agent/index.md` still declares
@@ -17,10 +17,10 @@ agent/facts` and `grep -ril "progressive disclosure" agent/facts` both
 came up empty -- the phrase only appears in raw, unresolved corpus
 prompts). Both dependencies are open. This work was dispatched anyway
 (PHASE 4, explicit) as a spike/variant pass, not as the feature landing --
-nothing here is wired live, same discipline as agent-tui#62/#63's own
+nothing here is wired live, same discipline as agent-tui#62/agent-tui#63's own
 `tools/uivariants`.
 
-**#61 also carries a live correction worth restating here**: the issue's
+**agent-tui#61 also carries a live correction worth restating here**: the issue's
 claim that a graph "might be the first feature that argues for the web
 frontend" cited a parameter (`future=survives-web-frontend`) that a later
 comment on the same issue struck as invented -- zero corpus hits for
@@ -54,7 +54,7 @@ d3-force implements), not a library gap papered over.
 
 **First half false as of `56513a2`, corrected 2026-08-23 (estate-loop/
 b-docs-stale sweep, pass 2) — flagged but left unfixed by the prior sweep
-pass (#119) as low priority given this doc's own throwaway-spike framing;
+pass (agent-tui#119) as low priority given this doc's own throwaway-spike framing;
 fixed now since the brief for this pass asks for every false claim
 corrected, not just high-priority ones.** `bubbles` is now in `go.mod`
 (`github.com/charmbracelet/bubbles v1.0.0`) — added for `internal/chat`'s
@@ -123,14 +123,14 @@ A gate check on this issue (before any further view work resumed) found
 content, was candidate-shaped rather than generic: node `typ` was a fixed
 four-value OKF enum and edges had no room for a weighted similarity link
 -- building the draggable view against it as-is would have been a soft
-vote for OKF markdown+wikilinks before #116 (reserved for Jon) picks a
+vote for OKF markdown+wikilinks before agent-tui#116 (reserved for Jon) picks a
 storage format.
 
 That model is now candidate-neutral: `node.typ` is an open-ended string
 (`""` for uncategorized, any tag a caller wants), and `edge.weight` is an
 optional float, zero-value for a plain binary link. `graph_test.go`'s
 `TestGenericModelFitsNonOKFCandidate` builds a second graph shaped like
-#116's candidate 2 (vector-embedding neighborhoods -- opaque cluster-id
+agent-tui#116's candidate 2 (vector-embedding neighborhoods -- opaque cluster-id
 types, real similarity weights) through the exact same `graphData`/
 `node`/`edge` types the OKF-shaped demo below uses, with no special case
 for either shape. `colorFor`/`glyphFor` (`main.go`) render any type tag,
@@ -149,7 +149,7 @@ code changed.
 
 ## Scope: one graph or one per project
 
-Untouched here on purpose. #61 says the graph must render whatever the
+Untouched here on purpose. agent-tui#61 says the graph must render whatever the
 memory-scoping work decides "which memories belong to this project"
 means, not invent its own answer -- and that work has not landed (see the
 gate check above). All three variants above render one undifferentiated

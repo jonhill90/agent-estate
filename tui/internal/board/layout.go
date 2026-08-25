@@ -2,9 +2,9 @@
 // board." view.go's Views (RenderByColumn/RenderByRepo) answer "which
 // grouping" as plain text; Layout answers "what does it look like" --
 // column style, density, card shape, colour theme, and the closed-items
-// question Jon was asked once already (#8) and must not be asked again.
+// question Jon was asked once already (agent-tui#8) and must not be asked again.
 // Every Layout is DATA (a struct literal in the Layouts slice below), never
-// a new Render function hand-written per combination -- per #10's own
+// a new Render function hand-written per combination -- per agent-tui#10's own
 // acceptance item 5, a layout set has to be data behind an interface, and
 // this file's own layout_bench_test.go measures what it costs to prove
 // that's true, not just claim it.
@@ -48,7 +48,7 @@ const (
 
 // Theme controls colour. Restrained is one muted colour throughout;
 // aged/blocked markers still warn in both themes -- theme is decoration,
-// never the only signal for an ugly state (#10: "every state renders,
+// never the only signal for an ugly state (agent-tui#10: "every state renders,
 // including the ugly ones").
 type Theme int
 
@@ -67,8 +67,8 @@ const (
 	GroupByRepo
 )
 
-// ClosedFilter is #8's still-open question ("should closed items show, and
-// for how long?"), shipped as a variant per #10's instruction rather than a
+// ClosedFilter is agent-tui#8's still-open question ("should closed items show, and
+// for how long?"), shipped as a variant per agent-tui#10's instruction rather than a
 // second prompt.
 type ClosedFilter int
 
@@ -81,11 +81,11 @@ const (
 // closedRecentWindow is "last 24h" -- Card.Age for a Done card is
 // now-CompletedAt (card.go), so this needs no wall-clock read of its own at
 // render time; it is a pure function of the already-fetched Snapshot, same
-// as every other Layout.Render below (#10 item 4: "data fetching must stay
+// as every other Layout.Render below (agent-tui#10 item 4: "data fetching must stay
 // off the render path").
 const closedRecentWindow = 24 * 60 * 60 // seconds, compared against Card.Age.Seconds()
 
-// Layout is one full board presentation: every axis #10 asked for, bundled
+// Layout is one full board presentation: every axis agent-tui#10 asked for, bundled
 // as one cycle-able unit, the same picker shape internal/rail's glyph sets
 // and view.go's own Views already use. Adding or dropping a combination is
 // a line in the Layouts slice below, not a new Render func.
@@ -103,11 +103,11 @@ type Layout struct {
 
 // Layouts is every board presentation this drop ships, in picker order.
 // Six, not two: "i like 2 more" is ambiguous between "I prefer variant 2"
-// and "four/two was not enough range" (#10's own text), and the fix for an
+// and "four/two was not enough range" (agent-tui#10's own text), and the fix for an
 // ambiguous preference is to build both readings, not ask which. Variant
 // 2's own grouping (by-repo) is kept and evolved (kanban-repo, compact-repo
 // below, both real swimlanes now instead of a flat indented list), and the
-// range is widened to six, spanning every axis #10 named at least once:
+// range is widened to six, spanning every axis agent-tui#10 named at least once:
 // both groupings, all three column styles, both densities, both card
 // shapes, both themes, and all three closed-item settings.
 var Layouts = []Layout{
@@ -144,7 +144,7 @@ var Layouts = []Layout{
 }
 
 // columnColorRole maps a board Column to the theme.Role its vivid-theme
-// accent uses -- Vivid gives every column its own colour (#10: "eye
+// accent uses -- Vivid gives every column its own colour (agent-tui#10: "eye
 // candy"); Restrained collapses every column to theme.RoleNeutral so the
 // vivid/restrained axis stays genuinely decorative -- see the warn role
 // used by renderCard below for why an aged/blocked card still stands out
@@ -220,7 +220,7 @@ func (l Layout) Render(cards []Card, wip []WIP, width int, th theme.Theme) strin
 // renderSwimlanes is GroupByRepo: one repo per row, that repo's own columns
 // joined horizontally beneath its header -- real swimlanes, not a flat
 // indented list, over the exact grouping view.go's RenderByRepo already
-// answers (#10: "keep and evolve what variant 2 was").
+// answers (agent-tui#10: "keep and evolve what variant 2 was").
 func renderSwimlanes(cards []Card, l Layout, width int, th theme.Theme) string {
 	var repos []string
 	seen := map[string]bool{}
@@ -248,7 +248,7 @@ func renderSwimlanes(cards []Card, l Layout, width int, th theme.Theme) string {
 }
 
 // renderColumnRow renders Columns side by side as real panes -- the "real
-// columns with cards" core of #10 item 1. showRepoTag is false inside a
+// columns with cards" core of agent-tui#10 item 1. showRepoTag is false inside a
 // swimlane (the repo is already the row's own header, per-card repeating
 // it would be noise); true for the by-column grouping, where cards from
 // every repo sit in the same column and the tag is the only thing telling
@@ -279,7 +279,7 @@ func renderColumnRow(cards []Card, l Layout, width int, showRepoTag bool, th the
 
 // renderColumnPane is one column's box/rule/whitespace container -- the
 // unit ColumnStyle actually varies. Header + count always render, even for
-// an empty column (#10's "every state renders" extends to "every column
+// an empty column (agent-tui#10's "every state renders" extends to "every column
 // renders", the board-level equivalent of internal/lane's AllStates guard
 // -- see layout_test.go's TestEveryLayoutRendersEveryColumn).
 func renderColumnPane(col Column, cards []Card, l Layout, paneWidth int, showRepoTag bool, th theme.Theme) string {
@@ -347,7 +347,7 @@ func renderColumnPane(col Column, cards []Card, l Layout, paneWidth int, showRep
 // renderCard renders one card, single- or multi-line per l.Card. The aged
 // marker and its warn colour (theme.RoleWarn) always apply regardless of
 // l.Theme -- a pretty board that de-emphasizes an aged/blocked card by
-// colour is the same failure #10 already ruled out for omitting one
+// colour is the same failure agent-tui#10 already ruled out for omitting one
 // entirely. Every line is explicitly truncated to innerWidth before it is
 // styled -- see renderColumnPane's own doc comment for why this can't be
 // left to lipgloss's automatic wrap.
