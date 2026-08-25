@@ -63,6 +63,19 @@
 #   without it the sweep is tree-test-only, which is sufficient on its own
 #   -- GitHub is a second opinion, not a requirement.
 #
+# THE CROSS-CHECK RUNS BOTH WAYS. Tree-says-merged-but-GitHub-disagrees was
+# the only direction checked until agent-supervisor#646's review caught the
+# gap: tree-says-not-merged was never cross-checked against GitHub at all,
+# so a branch GitHub had recorded as MERGED could still be reported plain
+# "not-merged" with no mention that the two sources disagreed. Measured on
+# the live repo (#646): 3 of the 5 "not-merged" branches that morning were
+# branches GitHub calls MERGED -- a later, unrelated commit on main had
+# since removed the content those PRs added, so the tree test's "not
+# merged" is a legitimate (and separately worth knowing) false negative,
+# not a bug in the tree test itself. Either direction of disagreement is
+# reported as "gh-disagreement" and the branch is kept either way --
+# disagreement changes what gets reported, never what gets deleted.
+#
 # Every branch this sweep looks at gets exactly one printed line saying
 # what happened to it and why -- deleted, would-delete, or skipped-and-why.
 # A silent "0 deleted" is the bug this replaces; this does not reintroduce
@@ -212,7 +225,18 @@ while IFS= read -r b; do
   fi
   tree=$(printf '%s\n' "$out" | head -1)
   if [ "$tree" != "$mt" ]; then
-    _skip not-merged "$b -- $BASE does not already contain its content (tree test)"
+    # Cross-check the other direction too: the tree test can be a false
+    # negative when a PR genuinely merged but a later, unrelated commit on
+    # $BASE removed the content it added -- $BASE's tree no longer matches
+    # what that merge produced, even though GitHub still shows it MERGED.
+    # That is a legitimate disagreement between the two sources, not a
+    # reason to hide it (agent-supervisor#646) -- report it and keep the
+    # branch, same as the reverse direction below.
+    if [ "$gh_known" -eq 1 ] && _gh_merged "$b"; then
+      _skip gh-disagreement "$b -- tree test says $BASE does not contain its content, but GitHub's PR record for it is MERGED (its content may have since been removed from $BASE by a later commit); reported rather than silently resolved (agent-supervisor#646)"
+    else
+      _skip not-merged "$b -- $BASE does not already contain its content (tree test)"
+    fi
     continue
   fi
 

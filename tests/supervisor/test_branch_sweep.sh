@@ -230,6 +230,42 @@ check "GitHub-disagreement branch was not deleted" 0 $?
 case "$GH_OUT" in *"skip topic-unmerged -- origin/main does not already contain its content"*) r=0 ;; *) r=1 ;; esac
 check "GitHub path does not disturb the plain not-merged verdict" 0 "$r"
 
+# --- the OTHER direction: agent-supervisor#646's fix. The tree test says
+#     "not merged" (main no longer contains this branch's content), but
+#     GitHub's own record says the PR MERGED -- e.g. a later, unrelated
+#     commit removed what the PR added. This must be reported as a
+#     disagreement, not silently swallowed into a plain "not-merged" line
+#     with no mention that GitHub disagrees. A branch with a genuinely
+#     unmerged, GitHub-unknown PR (topic-unmerged, checked again below)
+#     must NOT be reported this way -- that would be the opposite bug, a
+#     change that reports everything as a disagreement.
+git -C "$REPO" checkout -qb topic-tree-says-unmerged main
+echo never_landed > "$REPO/tree-says-unmerged.txt"
+git -C "$REPO" add -A && git -C "$REPO" -c commit.gpgsign=false commit -q -m "content GitHub says merged, but main's tree disagrees"
+backdate_head "$REPO" "$OLD"
+git -C "$REPO" push -q origin topic-tree-says-unmerged
+git -C "$REPO" checkout -q main
+
+echo
+echo "=== live run WITH the GitHub cross-check, reverse-direction disagreement ==="
+GH_OUT2=$(STUB_GH_PR_ROWS=$'topic-merged-disagree\tOPEN\ntopic-tree-says-unmerged\tMERGED' \
+  PATH="$STUBS:$PATH" "$SWEEP" "$REPO" origin/main 2>&1)
+echo "$GH_OUT2"
+line_reverse=$(grep -F 'topic-tree-says-unmerged --' <<<"$GH_OUT2")
+echo
+echo "topic-tree-says-unmerged: $line_reverse"
+case "$line_reverse" in *"skip topic-tree-says-unmerged"*"tree test says"*"does not contain its content"*"GitHub's PR record for it is MERGED"*) r=0 ;; *) r=1 ;; esac
+check "tree-says-not-merged but GitHub-says-MERGED is reported as a disagreement" 0 "$r"
+git -C "$REPO" show-ref --verify --quiet refs/heads/topic-tree-says-unmerged
+check "reverse-direction disagreement branch was not deleted" 0 $?
+
+# A genuinely unmerged branch with no PR at all recorded on GitHub must
+# still read as plain not-merged in this same run -- proves the new check
+# only fires on an actual GitHub-MERGED record, not on every not-merged verdict.
+line_still_unmerged=$(grep -F 'topic-unmerged --' <<<"$GH_OUT2")
+case "$line_still_unmerged" in *"skip topic-unmerged -- origin/main does not already contain its content"*) r=0 ;; *) r=1 ;; esac
+check "genuinely unmerged, GitHub-unknown branch is still plain not-merged, not reported as a disagreement" 0 "$r"
+
 echo
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
