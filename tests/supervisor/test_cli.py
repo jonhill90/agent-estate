@@ -1424,8 +1424,18 @@ class TaskLaneCliTest(unittest.TestCase):
 
             result = self._task_lane(root, "ad193-telegram-to-director")
 
+            # agent-supervisor#631/#634: `pane_id` is this task's frozen
+            # `lanes.pane_id` snapshot, taken at assignment time so a later
+            # renumber-driven reuse of the "t:3" STRING for a different
+            # pane cannot corrupt this task's own recorded identity. It is
+            # not incidental output -- `resolve-pr-contributors.sh` and
+            # `verdict-independence.sh` both read it (`task-lane`'s own
+            # `elif` branch in cli.py cites both) to feed
+            # `lane-relation --other-pane-id`, so it belongs in this
+            # contract, not just in the row this test happens to produce.
             self.assertEqual(
-                {"task": "ad193-telegram-to-director", "known": True, "lane": "t:3"}, result
+                {"task": "ad193-telegram-to-director", "known": True, "lane": "t:3", "pane_id": "%3"},
+                result,
             )
 
     def test_the_answer_survives_the_task_completing_and_the_lane_going_free_again(self):
@@ -1452,8 +1462,18 @@ class TaskLaneCliTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as root:
             result = self._task_lane(root, "ad999-never-dispatched")
 
+            # `pane_id` is `None` here, not `""` -- the same distinction
+            # `lane` already draws between "this task genuinely does not
+            # exist" (`None`) and "this task exists but predates a column"
+            # (`""`, see the dispatched-task test above for a task that DOES
+            # exist). Collapsing the two into one falsy value would erase
+            # that distinction for every OTHER unknown-row verb in this file
+            # (`issue-lane`, `pr-lane` do the same for their own fields), not
+            # just this one -- `known:false` staying a self-consistent
+            # shape across every lookup verb is worth more than shaving one
+            # key off this specific response.
             self.assertEqual(
-                {"task": "ad999-never-dispatched", "known": False, "lane": None}, result
+                {"task": "ad999-never-dispatched", "known": False, "lane": None, "pane_id": None}, result
             )
 
 
