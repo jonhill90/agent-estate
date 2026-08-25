@@ -919,6 +919,50 @@ class LedgerTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "immutable result"):
             self.ledger.complete("review-870", b"different result\n", pane_nonce="nonce-22-a")
 
+    def test_completion_adopts_an_orphaned_result_file_with_no_recorded_hash(self):
+        """agent-supervisor#623: a prior `complete()` wrote the result file
+        and then crashed before the row update that follows a write ever
+        ran (the exact `after_result` failpoint `test_completion_
+        reconciles_each_injected_crash_point` exercises below) -- the row
+        is left with `result_path`/`result_sha256` both NULL while the
+        lane's genuine result already sits on disk. A later completion
+        attempt, even with DIFFERENT bytes (a fresh note text, not the
+        original content -- record-completion's `--note` will not match
+        word for word), must ADOPT the file already there rather than
+        refuse it as an immutability conflict: the row has never recorded
+        a hash of its own for the new bytes to conflict with."""
+        self.assign()
+        orphaned = b"# Result\n\nThe lane's real, already-written report.\n"
+        (self.ledger.results_dir / "review-870.md").write_bytes(orphaned)
+
+        completed = self.ledger.complete(
+            "review-870", b"a completely different note text\n", pane_nonce="nonce-22-a"
+        )
+
+        self.assertEqual("complete", completed["status"])
+        self.assertEqual(hashlib.sha256(orphaned).hexdigest(), completed["result_sha256"])
+        self.assertEqual(str(self.ledger.results_dir / "review-870.md"), completed["result_path"])
+        # The orphaned file itself was never touched -- proof this adopted
+        # it rather than silently overwriting it.
+        self.assertEqual(orphaned, Path(completed["result_path"]).read_bytes())
+
+    def test_completion_still_refuses_a_genuine_overwrite_once_a_hash_is_recorded(self):
+        """The direction the immutability guard exists for must survive
+        #623's fix: once a row has genuinely recorded a result, a later
+        call with different content is still refused outright -- adopting
+        an ORPHANED file must never widen into tolerating an OVERWRITE of a
+        result the ledger already knows about."""
+        self.assign()
+        first = self.ledger.complete("review-870", b"# Result\n\nFirst.\n", pane_nonce="nonce-22-a")
+        self.assertEqual("complete", first["status"])
+
+        with self.assertRaisesRegex(ValueError, "immutable result"):
+            self.ledger.complete("review-870", b"# Result\n\nDifferent.\n", pane_nonce="nonce-22-a")
+
+        # And the originally recorded result is untouched.
+        reloaded = self.ledger.get_task("review-870")
+        self.assertEqual(first["result_sha256"], reloaded["result_sha256"])
+
     def test_completion_reconciles_each_injected_crash_point(self):
         result = b"# Evidence\n\nchecks passed\n"
         for failpoint in ("after_result", "after_task", "after_event"):
