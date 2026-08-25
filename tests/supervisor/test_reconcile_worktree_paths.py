@@ -9,7 +9,7 @@ from pathlib import Path
 SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "scripts" / "supervisor"
 sys.path.insert(0, str(SUPERVISOR_DIR))
 
-from core import Ledger  # noqa: E402
+from core import Ledger, normalize_worktree_path  # noqa: E402
 from reconcile_worktree_paths import WorktreePathReconciler  # noqa: E402
 
 
@@ -102,7 +102,16 @@ class WorktreePathReconcilerTest(unittest.TestCase):
         self.assertEqual(["as611-fix"], [item["task"] for item in report["backfilled"]])
         self.assertEqual([], report["unresolved"])
         self.assertEqual([], report["errors"])
-        self.assertEqual(worktree_dir.name, self.ledger.get_task("as611-fix")["worktree_path"])
+        # agent-supervisor#624: the sweep now writes the CANONICAL spelling
+        # (`normalize_worktree_path`), not the raw text `worktree_dir.name`
+        # happened to carry -- on this host `tempfile.TemporaryDirectory`
+        # mints paths under `/var/...`, itself a symlink into
+        # `/private/var/...`, so this is a real resolve on this platform,
+        # not a no-op assertion.
+        self.assertEqual(
+            normalize_worktree_path(worktree_dir.name),
+            self.ledger.get_task("as611-fix")["worktree_path"],
+        )
 
     def test_dry_run_reports_without_writing(self):
         worktree_dir = tempfile.TemporaryDirectory()

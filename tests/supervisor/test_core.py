@@ -1756,6 +1756,113 @@ class LedgerTest(unittest.TestCase):
         would wrongly declare every such row the same worktree."""
         self.assertIsNone(self.ledger.get_task_for_worktree(""))
 
+    def test_get_task_for_worktree_matches_across_var_and_private_var_spellings(self):
+        """agent-supervisor#624: the measured bug. On macOS `/var` is a
+        symlink to `/private/var`, but the two live writers of
+        `worktree_path` (`dispatch.sh`'s resolved `pwd -P` write and
+        `reconcile_worktree_paths.py`'s unresolved-text write, pre-#624 fix)
+        do not agree which spelling lands in the column. A correctly-
+        dispatched lane must be found no matter which of the four
+        (`/var` vs `/private/var`) x (doubled vs single separator)
+        combinations either side holds."""
+        self.ledger.record_dispatch(
+            lane="free-624",
+            pane_id="%624",
+            nonce="nonce-624",
+            harness="claude",
+            repo="/repo/free-624",
+            server_id="server-a",
+            session_id="$624",
+            command="claude.exe",
+            task_id="as624-fix",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/624",
+            source_ref="624",
+            summary="#624 fix; worktree=/var/folders/xx/T//ad-624-fix-99",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-624"],
+            status_marker=None,
+            # the ledger row holds the RESOLVED, single-separator spelling --
+            # what dispatch.sh's own `pwd -P` write produces.
+            worktree_path="/private/var/folders/xx/T/ad-624-fix-99",
+        )
+
+        for queried_path, label in (
+            ("/private/var/folders/xx/T/ad-624-fix-99", "resolved, single separator (matches the row as-is)"),
+            ("/private/var/folders/xx/T//ad-624-fix-99", "resolved, doubled separator"),
+            ("/var/folders/xx/T/ad-624-fix-99", "unresolved, single separator"),
+            ("/var/folders/xx/T//ad-624-fix-99", "unresolved, doubled separator (the hook's own old literal shape)"),
+        ):
+            found = self.ledger.get_task_for_worktree(queried_path)
+            self.assertIsNotNone(found, f"expected a match for {label}: {queried_path!r}")
+            self.assertEqual("as624-fix", found["id"], f"wrong task for {label}: {queried_path!r}")
+
+    def test_get_task_for_worktree_still_refuses_an_undispatched_path_after_normalizing(self):
+        """agent-supervisor#624's own verification bar, second direction:
+        normalizing the comparison must not turn into a guess. A path that
+        merely resolves to the same shape as a real row, but is not
+        actually that row, must still read as unknown -- this is #562's
+        whole purpose, and an overly-aggressive normalization would defeat
+        it more thoroughly than the bug being fixed."""
+        self.ledger.record_dispatch(
+            lane="free-624b",
+            pane_id="%624b",
+            nonce="nonce-624b",
+            harness="claude",
+            repo="/repo/free-624b",
+            server_id="server-a",
+            session_id="$624b",
+            command="claude.exe",
+            task_id="as624-real",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/624",
+            source_ref="624",
+            summary="#624 real dispatch",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-624b"],
+            status_marker=None,
+            worktree_path="/private/var/folders/xx/T/ad-624-real-1",
+        )
+        # Same directory, both spellings resolve the same, but a DIFFERENT
+        # worktree that was never dispatched.
+        self.assertIsNone(
+            self.ledger.get_task_for_worktree("/var/folders/xx/T//ad-624-never-dispatched-2")
+        )
+
+    def test_get_task_for_worktree_still_refuses_a_null_worktree_path_row(self):
+        """agent-supervisor#624's third verification case: a task row that
+        exists but never had its worktree_path recorded (still '', same as
+        the pre-#117 rows `test_get_task_for_worktree_unknown_for_a_blank_
+        path` covers) must stay refused after normalization -- an empty
+        path must never come out matching whatever this process's own
+        cwd happens to be, so `normalize_worktree_path` special-cases
+        blank input explicitly rather than running it through the
+        general prefix-rewrite (#632's fix-pass moved this off
+        `os.path.realpath`, whose own blank-input behavior -- resolving
+        to the current directory -- was the original hazard this same
+        case existed to catch)."""
+        self.ledger.record_dispatch(
+            lane="free-624c",
+            pane_id="%624c",
+            nonce="nonce-624c",
+            harness="claude",
+            repo="/repo/free-624c",
+            server_id="server-a",
+            session_id="$624c",
+            command="claude.exe",
+            task_id="as624-no-worktree",
+            source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/624",
+            source_ref="624",
+            summary="#624 dispatched with no worktree column recorded",
+            source_state="OPEN",
+            evidence=["claimed by dispatch.sh for lane free-624c"],
+            status_marker=None,
+            worktree_path="",
+        )
+        self.assertIsNone(self.ledger.get_task_for_worktree(""))
+        self.assertIsNone(self.ledger.get_task_for_worktree(os.getcwd()))
+
     def test_get_task_for_worktree_never_returns_a_review_task(self):
         """agent-supervisor#76's rule holds here too: a review task must
         never stand in as the author, even if (implausibly) it shared a

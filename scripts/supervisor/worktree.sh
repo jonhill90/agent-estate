@@ -582,8 +582,27 @@ install_dispatch_origin_guard() {
 #!/bin/bash
 # Installed by worktree.sh (agent-supervisor#562). See install_dispatch_origin_guard's
 # own comment in that file for the full reasoning -- this is the mechanism half.
+#
+# agent-supervisor#624: DEST is derived here, at push time, via \`git
+# rev-parse --show-toplevel\` -- never baked in as a literal string the way
+# this hook used to embed \$dest directly. Git invokes a hook with its own
+# GIT_DIR/work-tree already resolved to the worktree the push is actually
+# coming from, so this reads the SAME worktree the old baked literal named,
+# just re-derived instead of frozen at install time. That matters because
+# \`cli.py worktree-lane\` compares this against whatever spelling
+# \`tasks.worktree_path\` holds; baking one spelling in here meant a hook
+# installed while one path form was in fashion could never match a row
+# written in the other, no matter how the comparison itself was fixed. This
+# still relies on \`worktree-lane\` normalizing both sides (Ledger.
+# get_task_for_worktree) -- re-deriving DEST here removes the SECOND
+# possible source of a spelling mismatch, not the only one.
 LEDGER_PYTHON="\${AGENT_PYTHON_BIN:-python3}"
-OUT=\$("\$LEDGER_PYTHON" "$HERE/cli.py" worktree-lane --path "$dest" --include-reviews 2>&1)
+DEST=\$(git rev-parse --show-toplevel 2>/dev/null)
+if [ -z "\$DEST" ]; then
+  echo "worktree: pre-push refused -- could not resolve this worktree's own path to check it against the dispatch ledger (agent-supervisor#624)." >&2
+  exit 1
+fi
+OUT=\$("\$LEDGER_PYTHON" "$HERE/cli.py" worktree-lane --path "\$DEST" --include-reviews 2>&1)
 RC=\$?
 if [ "\$RC" -ne 0 ]; then
   echo "worktree: pre-push refused -- could not read the dispatch ledger to check this worktree's origin (ambiguous, NOT the same as 'determined undispatched'; agent-supervisor#562):" >&2
@@ -593,7 +612,7 @@ fi
 if grep -qF '"known":true' <<<"\$OUT"; then
   exit 0
 fi
-echo "worktree: pre-push refused -- $dest has no dispatch record in the ledger (agent-supervisor#562)." >&2
+echo "worktree: pre-push refused -- \$DEST has no dispatch record in the ledger (agent-supervisor#562)." >&2
 echo "worktree: this push is coming from a lane worktree the ledger never saw dispatch.sh register --" >&2
 echo "worktree: dispatch this work through dispatch.sh against a real issue before pushing it." >&2
 echo "worktree: genuinely human-authored work does not use a lane worktree at all -- push it from your own clone instead." >&2

@@ -299,6 +299,66 @@ def lane_population(lane_id, row=None):
     return "off-pane"
 
 
+_MACOS_PRIVATE_SYMLINK_PREFIXES = ("/tmp", "/var", "/etc")
+
+
+def normalize_worktree_path(path):
+    """Canonical spelling of a worktree path, for comparison only
+    (agent-supervisor#624, fix-pass #632).
+
+    `#624`'s first cut called `os.path.realpath`, which resolves symlinks
+    by asking the LOCAL filesystem -- and that is exactly what made it
+    wrong. Two things broke it, both found by #632's failing test:
+
+    1. This repo's own CI (`.github/workflows/*.yml`, `runs-on:
+       ubuntu-latest`) has no `/var` -> `/private/var` symlink at all --
+       that mapping is a macOS convention, not a universal one. `realpath`
+       on Linux is a no-op for these paths, so the unresolved and resolved
+       spellings compared UNEQUAL there even though they name the same
+       directory on the macOS host that actually wrote them. A comparison
+       whose correctness depends on which machine happens to run it is not
+       a fix, it just moves where the bug hides.
+    2. Even on macOS, a worktree the dispatching host has since torn down
+       (`worktree.sh done`/`gc`) still has a `tasks.worktree_path` row
+       naming it -- and MUST still resolve to its lane, because #632's own
+       cross-check items (`lane-retire.sh` reading `worktree_path` after
+       `#628`, `#629`'s authorship resolution) both read this column long
+       after the directory that could still corroborate its plumbing is
+       often already gone. `realpath` degrading gracefully for a missing
+       PATH is not the same guarantee as the SYMLINK PREFIX itself still
+       being resolvable -- and relying on either was never necessary: the
+       set of macOS symlinks this defect actually turns on is small,
+       fixed, and well-known, so it is spelled out explicitly here instead
+       of asked of a filesystem that may not agree, may not still hold the
+       directory, or may not even be macOS.
+
+    So this now does its own two, purely textual, steps:
+
+    - `os.path.normpath` collapses repeated separators (`//` inside
+      `$TMPDIR`, seen live in `#624`'s own report) -- string manipulation,
+      no filesystem access, no existence requirement.
+    - A literal prefix rewrite maps `/tmp`, `/var`, `/etc` to their
+      `/private/...` spelling -- the exact, closed set of top-level
+      symlinks macOS ships by default (`/private/tmp`, `/private/var`,
+      `/private/etc` are the real directories; `/tmp`, `/var`, `/etc` are
+      the symlinks). Deliberately NOT `os.path.realpath`: this holds
+      identically whether the path still exists, whether it ever existed
+      on THIS host, and whether this process is running on macOS or the
+      Linux CI runner reading the same ledger row in a test.
+
+    Blank stays blank, on purpose: `get_task_for_worktree` relies on this
+    to keep refusing a blank/NULL `worktree_path` rather than having an
+    empty path normalize to something that could spuriously match.
+    """
+    if not path:
+        return ""
+    normalized = os.path.normpath(path)
+    for prefix in _MACOS_PRIVATE_SYMLINK_PREFIXES:
+        if normalized == prefix or normalized.startswith(prefix + "/"):
+            return "/private" + normalized
+    return normalized
+
+
 def pid_is_alive(pid):
     """True unless `pid` is provably gone on THIS host.
 
@@ -2199,17 +2259,30 @@ class Ledger:
         column existed carry '' (see `_migrate_tasks_table`), and matching
         one blank against another would wrongly declare every pre-#117 task
         the same worktree.
+
+        Compared through `normalize_worktree_path` on BOTH sides
+        (agent-supervisor#624): `dispatch.sh`'s `record-dispatch` and
+        `reconcile_worktree_paths.py`'s backfill sweep have been observed
+        writing two different spellings of the same directory (resolved
+        `/private/var/...` vs. the unresolved, sometimes doubled-separator
+        `/var/...` a brief's own text carries) -- a bare `=` comparison
+        cannot see they name the same place, so a correctly-dispatched
+        lane reads as undispatched depending on which shape its row
+        happened to get. This is a point lookup either way: `worktree.sh
+        new` mints a fresh path per dispatch, so at most one row is
+        expected to normalize to the same value.
         """
-        if not worktree_path:
+        normalized_query = normalize_worktree_path(worktree_path)
+        if not normalized_query:
             return None
         with contextlib.closing(self._connect()) as connection:
             rows = connection.execute(
-                "SELECT * FROM tasks WHERE worktree_path = ? ORDER BY created_at ASC, id ASC",
-                (worktree_path,),
+                "SELECT * FROM tasks WHERE worktree_path != ''",
             ).fetchall()
         candidates = [
             self._dict(row) for row in rows
-            if include_reviews or not self._task_looks_like_review(row["id"], row["summary"])
+            if normalize_worktree_path(row["worktree_path"]) == normalized_query
+            and (include_reviews or not self._task_looks_like_review(row["id"], row["summary"]))
         ]
         if len(candidates) == 1:
             return candidates[0]
