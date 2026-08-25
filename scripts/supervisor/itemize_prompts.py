@@ -41,10 +41,12 @@ by whoever (human or a later, deliberate pass) actually decided two items
 relate -- never guessed from co-occurring in one --load batch.
 
 Usage:
-  itemize_prompts.py --drop-noise [--limit N]            strip agent/system text and synthetic
-                                                          eval fixtures first (see below)
-  itemize_prompts.py --reclassify-synthetic [--limit N]  correct already-itemised open items that
+  itemize_prompts.py --drop-noise [--limit N]            strip agent/system text, and flag
+                                                          candidate synthetic eval fixtures for
+                                                          review, first (see below)
+  itemize_prompts.py --reclassify-synthetic [--limit N]  flag already-itemised open items that
                                                           predate the #583 synthetic-fixture marker
+                                                          for review (status=needs_review, #652)
   itemize_prompts.py --extract [--limit N] > candidates.json
   itemize_prompts.py --load judged.json
 
@@ -95,40 +97,63 @@ def _item_id(prompt_id, index, body):
 # The structural fact: mine_prompts.py stamps `context` with
 # CONTEXT_UNDETERMINED when a transcript turn has no prior assistant turn to
 # derive context from. A synthetic eval fixture is invoked as the FIRST and
-# ONLY turn of its own throwaway transcript file, so it always lands here;
-# a real operator prompt sits inside a longer working session and almost
-# always carries real prior-turn context instead.
+# ONLY turn of its own throwaway transcript file, so it always lands here.
 #
-# Measured against the live corpus (issue #583, `unacknowledged`, 198 rows):
-# this marker flags 37, a 12-of-12 hand-read sample of the 37 is entirely
-# fixture filenames, and it selects ZERO of three known-real operator
-# directives (a resource-usage directive, the worktree-sweep question
-# `it-332b79a4dd086f0a`, and a transcript-mining directive).
+# agent-supervisor#652: this marker is a CANDIDATE signal, not proof, and
+# #583's original PR (58ccee4) got that wrong -- it dropped straight to
+# `status='dropped'` on this marker alone. Re-measured on the live ledger:
+# a real operator directive ("Update the stale defect note in AGENTS.md
+# referencing commit b00db9b", `it-b7e0b317eb2ce85b`) carries the identical
+# marker, because it is the first turn of a session that opened with `/clear`
+# -- an ordinary way this operator restarts mid-task, verified against the
+# raw transcript (`cwd /Users/jon/source/repos/Personal/agent-tui`, branch
+# `feat/secrets-storage-decision-101`). `context` does not separate "no prior
+# assistant turn in THIS FILE" from "no prior turn at all" -- a `/clear`
+# produces the former for a turn that is entirely real.
 #
-# `prompts.project` (empty-string session cwd) was tried alongside `context`
-# and is INERT on this population: every row `context` catches already has
-# empty `project` too, so it adds nothing -- and unlike `context`, nothing
-# in this pipeline (`mine_prompts.py record_prompt`) writes `project` for a
-# newly-mined prompt, so keying on it would silently stop catching anything
-# the day today's already-populated rows age out. `context` is written at
-# mine time by code in this repo; that is the property this filter needs
-# and the only one of the two that has it.
+# `prompts.project` was tried as a second, corroborating signal and rejected:
+# on the 37 items the pre-#652 code actually dropped, EVERY ONE -- both the
+# confirmed-synthetic rows and the one confirmed-real one -- carries
+# `project IS NULL`. It does not merely fail to add rows (the #583 PR's
+# claim); it is unable to tell the real row from the synthetic ones within
+# this exact batch, so keying a drop on "context marker AND empty project"
+# would still have dropped the AGENTS.md directive. (Separately, `project`
+# is NOT globally inert as the #583 PR claimed -- 811 of the 1020
+# CONTEXT_UNDETERMINED rows across the whole corpus carry a non-empty
+# `project` -- but non-emptiness elsewhere doesn't help distinguish real
+# from synthetic on the specific rows this marker flags.)
 #
-# This is a FLOOR, not a full classifier: an eval fixture delivered inside a
-# longer transcript would carry real context and be missed. Extending it to
-# a filename-existence check was tried and rejected (issue #583 comment) --
-# it has a 100% false-positive rate, because real directives routinely name
-# files in repos this estate's four-repo scan can't see, and briefs living
-# under `~/.local/state/estate-loop/` look exactly like directives about a
-# file that doesn't exist.
-SYNTHETIC_REASON = f"agent-supervisor#583: synthetic eval-scenario fixture (context={CONTEXT_UNDETERMINED!r})"
+# Content-shape was tried too and is the thing #583 already rejected: reading
+# the 37 dropped bodies side by side, the real AGENTS.md directive is not
+# distinguishable from the fixtures by phrasing, length, or specificity --
+# it names a file and a commit exactly the way the fixtures name files.
+#
+# With no reliable second signal in the current schema, this marker alone
+# can flag a CANDIDATE but must never itself decide `dropped` -- see
+# `Ledger.flag_needs_review` / the `needs_review` view (core.py). A human or
+# a later pass with an actual corroborating signal promotes a `needs_review`
+# item onward from there (`Ledger.drop_item` if confirmed synthetic, or back
+# to 'open' if confirmed real); this module only ever produces the
+# unconfirmed intermediate state.
+NEEDS_REVIEW_REASON = (
+    f"agent-supervisor#652: candidate synthetic eval-scenario fixture, unconfirmed "
+    f"(context={CONTEXT_UNDETERMINED!r}) -- context alone also matches a real post-/clear "
+    f"operator turn; needs a second signal or human confirmation before dropping"
+)
+# Kept as an alias so a diff reader following #583's original name from the
+# issue thread lands here; nothing in this module writes `status='dropped'`
+# from it directly any more (see `NEEDS_REVIEW_REASON` above).
+SYNTHETIC_REASON = NEEDS_REVIEW_REASON
 
 
 def synthetic_provenance_reason(context):
-    """Return SYNTHETIC_REASON if `context` is the exact no-prior-turn marker
-    mine_prompts.py stamps, else None. Structural: reads a column mine_prompts.py
-    derived from transcript SHAPE, never the prompt's own text."""
-    return SYNTHETIC_REASON if context == CONTEXT_UNDETERMINED else None
+    """Return NEEDS_REVIEW_REASON if `context` is the exact no-prior-turn
+    marker mine_prompts.py stamps, else None. Structural: reads a column
+    mine_prompts.py derived from transcript SHAPE, never the prompt's own
+    text -- and, per agent-supervisor#652, a CANDIDATE reason only: the
+    caller must route a match to `needs_review`, never straight to
+    `dropped` (see this module's docstring above)."""
+    return NEEDS_REVIEW_REASON if context == CONTEXT_UNDETERMINED else None
 
 
 # Structural markers of text an AGENT or the HARNESS produced, not Jon.
@@ -160,41 +185,55 @@ def noise_reason(text):
 
 
 def drop_noise(ledger, limit=None):
-    """Mechanically exclude agent/system-authored AND synthetic-fixture rows
-    from the itemisation queue. Returns (dropped, kept) counts. No model call
-    -- see module docstring. Idempotent via the same `add_item`/`get_item`
-    check `load` uses: a prompt already itemised (dropped or otherwise) is
-    left alone.
+    """Mechanically exclude agent/system-authored rows, and flag
+    candidate-synthetic-fixture rows for review, from the itemisation queue.
+    Returns (dropped, needs_review, kept) counts. No model call -- see
+    module docstring. Idempotent via the same `add_item`/`get_item` check
+    `load` uses: a prompt already itemised (dropped, needs_review, or
+    otherwise) is left alone.
 
     Two independent structural checks, tried in order, first match wins:
     text-shape (`noise_reason`, agent-supervisor#313 -- boilerplate an agent
-    or the harness produced) and provenance-shape (`synthetic_provenance_reason`,
-    agent-supervisor#583 -- an eval-scenario fixture with no real prior-turn
-    context). Neither reads what the prompt is ABOUT."""
-    dropped = kept = 0
+    or the harness produced) drops outright, because that marker IS proof --
+    "That file is your complete brief." is never something Jon typed.
+    Provenance-shape (`synthetic_provenance_reason`, agent-supervisor#583)
+    is NOT proof by itself (agent-supervisor#652 -- see that function's own
+    comment) and so lands the item in `needs_review`, not `dropped`. Neither
+    check reads what the prompt is ABOUT."""
+    dropped = needs_review = kept = 0
     for prompt in ledger.list_unitemised_prompts(limit=limit):
-        reason = noise_reason(prompt["text_raw"])
-        excluded_as = "non-Jon text"
-        if reason is None:
-            reason = synthetic_provenance_reason(prompt["context"])
-            excluded_as = "synthetic fixture"
-        if reason is None:
-            kept += 1
+        noise = noise_reason(prompt["text_raw"])
+        if noise is not None:
+            item_id = _item_id(prompt["id"], 0, f"noise:{noise}")
+            if ledger.get_item(item_id) is None:
+                ledger.add_item(
+                    item_id,
+                    prompt_id=prompt["id"],
+                    kind="thought",
+                    body=f"[excluded: non-Jon text -- {noise}]",
+                    weight="retracted",
+                    status="dropped",
+                    status_reason=noise,
+                )
+            dropped += 1
             continue
-        item_id = _item_id(prompt["id"], 0, f"noise:{reason}")
-        if ledger.get_item(item_id) is not None:
+        candidate = synthetic_provenance_reason(prompt["context"])
+        if candidate is not None:
+            item_id = _item_id(prompt["id"], 0, f"noise:{candidate}")
+            if ledger.get_item(item_id) is None:
+                ledger.add_item(
+                    item_id,
+                    prompt_id=prompt["id"],
+                    kind="thought",
+                    body=f"[flagged: candidate synthetic fixture -- {candidate}]",
+                    weight="retracted",
+                    status="needs_review",
+                    status_reason=candidate,
+                )
+            needs_review += 1
             continue
-        ledger.add_item(
-            item_id,
-            prompt_id=prompt["id"],
-            kind="thought",
-            body=f"[excluded: {excluded_as} -- {reason}]",
-            weight="retracted",
-            status="dropped",
-            status_reason=reason,
-        )
-        dropped += 1
-    return dropped, kept
+        kept += 1
+    return dropped, needs_review, kept
 
 
 def reclassify_synthetic(ledger, limit=None):
@@ -203,16 +242,22 @@ def reclassify_synthetic(ledger, limit=None):
     already sitting in `unacknowledged` from a prior run -- this walks every
     currently-open item, applies the same `synthetic_provenance_reason`
     check to its originating prompt's `context`, and corrects the item's
-    status in place (`Ledger.drop_item`) rather than deleting or duplicating
-    it. Returns (reclassified, kept) item counts. Idempotent: a second run
-    finds nothing left with status='open' to reclassify."""
+    status in place. Returns (reclassified, kept) item counts. Idempotent:
+    a second run finds nothing left with status='open' to reclassify.
+
+    agent-supervisor#652: corrects to `status='needs_review'`
+    (`Ledger.flag_needs_review`), never straight to `status='dropped'` --
+    `synthetic_provenance_reason` is a candidate signal, not proof (see its
+    own comment); this function's job is only to move a stale-classified
+    OPEN item into the confirmation queue, same as a freshly-itemised one
+    gets from `drop_noise`."""
     reclassified = kept = 0
     for item in ledger.list_open_items(limit=limit):
         reason = synthetic_provenance_reason(item["prompt_context"])
         if reason is None:
             kept += 1
             continue
-        ledger.drop_item(item["id"], reason)
+        ledger.flag_needs_review(item["id"], reason)
         reclassified += 1
     return reclassified, kept
 
@@ -251,11 +296,11 @@ def main():
         "AGENT_SUPERVISOR_STATE_DIR", os.path.expanduser("~/.local/state/agent-dotfiles-supervisor")))
     ap.add_argument("--extract", action="store_true")
     ap.add_argument("--drop-noise", action="store_true",
-                     help="mechanically exclude agent/system-authored and synthetic-fixture rows "
-                          "(no model) before --extract")
+                     help="mechanically exclude agent/system-authored rows (no model), and flag "
+                          "candidate-synthetic-fixture rows for review, before --extract")
     ap.add_argument("--reclassify-synthetic", action="store_true",
-                     help="agent-supervisor#583: correct already-itemised open items whose prompt "
-                          "carries the synthetic eval-fixture context marker to status=dropped")
+                     help="agent-supervisor#583/#652: correct already-itemised open items whose prompt "
+                          "carries the synthetic eval-fixture context marker to status=needs_review")
     ap.add_argument("--limit", type=int, default=None)
     ap.add_argument("--load", metavar="FILE")
     args = ap.parse_args()
@@ -266,15 +311,16 @@ def main():
     ledger = Ledger(args.state_dir)
 
     if args.drop_noise:
-        dropped, kept = drop_noise(ledger, limit=args.limit)
-        print(f"drop-noise: {dropped} rows excluded (non-Jon text or synthetic fixture), "
+        dropped, needs_review, kept = drop_noise(ledger, limit=args.limit)
+        print(f"drop-noise: {dropped} rows excluded as non-Jon text, "
+              f"{needs_review} rows flagged as candidate synthetic fixtures (needs_review), "
               f"{kept} rows kept as candidates")
         return 0
 
     if args.reclassify_synthetic:
         reclassified, kept = reclassify_synthetic(ledger, limit=args.limit)
-        print(f"reclassify-synthetic: {reclassified} open items dropped as synthetic fixtures, "
-              f"{kept} open items left as-is")
+        print(f"reclassify-synthetic: {reclassified} open items flagged needs_review as candidate "
+              f"synthetic fixtures, {kept} open items left as-is")
         return 0
 
     if args.extract:

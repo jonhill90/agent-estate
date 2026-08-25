@@ -4519,7 +4519,10 @@ class PromptCorpusTest(unittest.TestCase):
             for row in self._raw("SELECT name FROM sqlite_master WHERE type='view'")
         }
         self.assertEqual(
-            {"unacknowledged", "live_parameters", "conflicts", "open_questions", "possibility_count"},
+            {
+                "unacknowledged", "live_parameters", "conflicts", "open_questions",
+                "possibility_count", "needs_review",
+            },
             views,
         )
 
@@ -4647,7 +4650,7 @@ class PromptCorpusTest(unittest.TestCase):
         rows = self.ledger.list_unitemised_prompts(limit=1)
         self.assertEqual(1, len(rows))
 
-    def test_read_prompt_view_reads_each_of_the_five_by_name(self):
+    def test_read_prompt_view_reads_each_by_name(self):
         self._seed_prompt("p1")
         self.ledger.add_item("i-open", prompt_id="p1", kind="directive", body="b", weight="hard", status="open")
         for view in Ledger.PROMPT_VIEWS:
@@ -4699,6 +4702,137 @@ class PromptCorpusTest(unittest.TestCase):
         self.ledger.add_item("i2", prompt_id="p2", kind="directive", body="b", weight="hard")
         rows = self.ledger.list_open_items(limit=1)
         self.assertEqual(1, len(rows))
+
+    def test_needs_review_status_requires_a_reason(self):
+        """agent-supervisor#652: same contract as 'dropped' -- a status that
+        excludes an item from `unacknowledged` on an unconfirmed judgement
+        must always carry the reason a later reviewer needs."""
+        self._seed_prompt("p1")
+        with self.assertRaises(ValueError):
+            self.ledger.add_item(
+                "i1", prompt_id="p1", kind="directive", body="b", weight="hard", status="needs_review",
+            )
+        row = self.ledger.add_item(
+            "i2", prompt_id="p1", kind="directive", body="b", weight="hard",
+            status="needs_review", status_reason="candidate synthetic fixture, unconfirmed",
+        )
+        self.assertEqual("needs_review", row["status"])
+
+    def test_needs_review_view_is_needs_review_items_only(self):
+        self._seed_prompt("p1")
+        self.ledger.add_item("i-open", prompt_id="p1", kind="directive", body="b", weight="hard", status="open")
+        self.ledger.add_item(
+            "i-review", prompt_id="p1", kind="directive", body="b", weight="hard",
+            status="needs_review", status_reason="candidate, unconfirmed",
+        )
+        self.ledger.add_item(
+            "i-dropped", prompt_id="p1", kind="directive", body="b", weight="hard",
+            status="dropped", status_reason="excluded",
+        )
+        ids = {row["id"] for row in self._raw("SELECT id FROM needs_review")}
+        self.assertEqual({"i-review"}, ids)
+
+    def test_needs_review_item_excluded_from_unacknowledged(self):
+        self._seed_prompt("p1")
+        self.ledger.add_item(
+            "i-review", prompt_id="p1", kind="directive", body="b", weight="hard",
+            status="needs_review", status_reason="candidate, unconfirmed",
+        )
+        self.assertEqual([], self.ledger.read_prompt_view("unacknowledged"))
+
+    def test_flag_needs_review_requires_a_reason(self):
+        self._seed_prompt("p1")
+        self.ledger.add_item("i1", prompt_id="p1", kind="directive", body="b", weight="hard")
+        with self.assertRaises(ValueError):
+            self.ledger.flag_needs_review("i1", "")
+
+    def test_flag_needs_review_rejects_an_unknown_id(self):
+        with self.assertRaises(ValueError):
+            self.ledger.flag_needs_review("nope", "reason")
+
+    def test_flag_needs_review_corrects_status_in_place_without_touching_judgement_fields(self):
+        """agent-supervisor#652: same "reviewable and reversible" contract
+        `drop_item` already honours -- kind/body/weight/id are untouched,
+        only status/status_reason move."""
+        self._seed_prompt("p1")
+        self.ledger.add_item("i1", prompt_id="p1", kind="directive", body="do it", weight="hard")
+        row = self.ledger.flag_needs_review("i1", "candidate synthetic fixture, unconfirmed")
+        self.assertEqual("needs_review", row["status"])
+        self.assertEqual("candidate synthetic fixture, unconfirmed", row["status_reason"])
+        self.assertEqual("directive", row["kind"])
+        self.assertEqual("do it", row["body"])
+        self.assertEqual("hard", row["weight"])
+        self.assertEqual([], self.ledger.read_prompt_view("unacknowledged"))
+
+
+class RestoreContextAloneDropsTest(unittest.TestCase):
+    """agent-supervisor#652: an item the pre-#652 `reclassify_synthetic`
+    dropped on `context` alone must come back out of `dropped` -- restored
+    to `needs_review`, not silently left mis-classified forever just because
+    the ledger already existed when the fix landed."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.root = Path(self.tempdir.name)
+
+    def test_pre_652_context_alone_drop_is_restored_to_needs_review_on_next_open(self):
+        ledger = Ledger(self.root, clock=lambda: 1_000)
+        ledger.record_prompt(
+            "p1", at=1_000, text_raw="Update the stale defect note in AGENTS.md "
+                                      "referencing commit b00db9b.",
+            context="[context undetermined: no prior assistant turn in this transcript file]",
+        )
+        # Simulate the pre-#652 write path directly: `add_item(status='dropped', ...)`
+        # is exactly what `itemize_prompts.drop_noise` did before this fix pass.
+        ledger.add_item(
+            "it-real", prompt_id="p1", kind="directive",
+            body="Update the stale defect note in AGENTS.md referencing commit b00db9b.",
+            weight="hard", status="dropped",
+            status_reason="agent-supervisor#583: synthetic eval-scenario fixture "
+                           "(context='[context undetermined: no prior assistant turn "
+                           "in this transcript file]')",
+        )
+        self.assertEqual("dropped", ledger.get_item("it-real")["status"])
+
+        # Re-opening the SAME ledger runs the migration/backfill again --
+        # this is the shape `restore.sh`/every other migration in this file
+        # takes: a ledger that predates a fix gets corrected the next time
+        # anything opens it, not only via a one-off manual script.
+        reopened = Ledger(self.root, clock=lambda: 2_000)
+        row = reopened.get_item("it-real")
+        self.assertEqual("needs_review", row["status"])
+        self.assertIn("652", row["status_reason"])
+        # Judgement fields untouched.
+        self.assertEqual("directive", row["kind"])
+        self.assertEqual("hard", row["weight"])
+        self.assertIn("it-real", [r["id"] for r in reopened.read_prompt_view("needs_review")])
+
+    def test_restore_is_idempotent(self):
+        ledger = Ledger(self.root, clock=lambda: 1_000)
+        ledger.record_prompt("p1", at=1_000, text_raw="x", context="ctx")
+        ledger.add_item(
+            "it-real", prompt_id="p1", kind="directive", body="x", weight="hard", status="dropped",
+            status_reason="agent-supervisor#583: synthetic eval-scenario fixture (context='ctx')",
+        )
+        Ledger(self.root, clock=lambda: 2_000)
+        first = Ledger(self.root, clock=lambda: 3_000).get_item("it-real")
+        second = Ledger(self.root, clock=lambda: 4_000).get_item("it-real")
+        self.assertEqual(first["status"], second["status"])
+        self.assertEqual(first["status_reason"], second["status_reason"])
+
+    def test_a_confirmed_true_drop_unrelated_to_583_is_left_alone(self):
+        """Only rows carrying the exact pre-#652 #583 reason prefix move --
+        an ordinary text-shape drop (agent-supervisor#313, dispatch briefs
+        etc.) is unaffected."""
+        ledger = Ledger(self.root, clock=lambda: 1_000)
+        ledger.record_prompt("p1", at=1_000, text_raw="x", context="ctx")
+        ledger.add_item(
+            "it-noise", prompt_id="p1", kind="thought", body="x", weight="retracted",
+            status="dropped", status_reason="dispatch brief (claude-print contract line)",
+        )
+        reopened = Ledger(self.root, clock=lambda: 2_000)
+        self.assertEqual("dropped", reopened.get_item("it-noise")["status"])
 
 
 if __name__ == "__main__":
