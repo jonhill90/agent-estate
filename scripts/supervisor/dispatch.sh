@@ -1532,7 +1532,14 @@ if [ "$LANE_HARNESS" = claude ] && [ -z "$LIVE_PANE" ] \
     exit 1
   else
     echo "dispatch: claude lane $LANE selected -- routing #$ISSUE_ARG over claude-print instead (agent-supervisor#171); $LANE stays free for --live-pane work" >&2
-    "$HERE/dispatch-claude-print.sh" "$ISSUE_ARG" "$SLUG" "$BRIEF" "$CLAUDE_PRINT_REPO" "$REPO_PATH"
+    # agent-supervisor#617: --force was parsed into COLLISION_FORCE above and
+    # forwarded to the tmux flow's own collision-check call below (:1735),
+    # but this claude-print flow -- the DEFAULT for a plain single-issue
+    # dispatch (#171) -- dropped it on the floor: dispatch-claude-print.sh
+    # runs its own collision check and only honours --force if it is on
+    # dispatch-claude-print.sh's OWN argv. Not forwarding it here made the
+    # documented escape hatch unreachable on the common path.
+    "$HERE/dispatch-claude-print.sh" "$ISSUE_ARG" "$SLUG" "$BRIEF" "$CLAUDE_PRINT_REPO" "$REPO_PATH" ${COLLISION_FORCE:+--force}
     exit $?
   fi
 fi
