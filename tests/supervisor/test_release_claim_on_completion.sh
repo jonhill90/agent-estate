@@ -102,7 +102,7 @@ S5="$D/state5"; mkdir -p "$S5"
 env_run "$S5" record-dispatch --lane t:1 --task as216-stuck --summary "#216 stuck lane" \
   --pane-id %1 --pane-path "$D/repo" --command claude --server-id srv --session-id sess \
   --issue 216 --github acme/repo --harness claude >/dev/null
-env_run "$S5" cancel-open-task --lane t:1 >/dev/null
+env_run "$S5" cancel-open-task --lane t:1 --abandoned >/dev/null
 out=$(holder 216); rc=$?
 want_exit "cancel-open-task releases the issue claim of the lane it frees" "$rc" 0 "$out"
 

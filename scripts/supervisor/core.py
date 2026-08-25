@@ -1660,10 +1660,23 @@ class Ledger:
         return row["pane_id"]
 
     @staticmethod
-    def _cancel_task_row(connection, task_id, now):
+    def _cancel_task_row(connection, task_id, now, *, result_path=None, result_sha256=None):
+        """`result_path`/`result_sha256` (agent-supervisor#649): every prior
+        caller left these NULL, which is exactly the bug -- an operator's
+        `cancel-open-task` was the ONLY door left once a lane's pane was gone
+        (`complete --task` correctly refuses a dead pane's stale nonce), so
+        it recorded whatever the lane had actually delivered as
+        indistinguishable from genuine abandonment. Every INTERNAL caller
+        (the re-registration cleanup in `_register_lane_tx`) still passes
+        neither -- that path has no result to offer and no operator judgement
+        behind it, so it stays a bare cancellation, unchanged. Only
+        `cancel_open_task`'s own caller-facing path supplies these now, and
+        only after the caller has explicitly said whether there is a result
+        to record (see that method's docstring).
+        """
         connection.execute(
-            "UPDATE tasks SET status='cancelled', updated_at=?, completed_at=? WHERE id=?",
-            (now, now, task_id),
+            "UPDATE tasks SET status='cancelled', result_path=?, result_sha256=?, updated_at=?, completed_at=? WHERE id=?",
+            (result_path, result_sha256, now, now, task_id),
         )
         connection.execute(
             "UPDATE source_tasks SET status='cancelled', updated_at=? WHERE id=?",
@@ -2016,7 +2029,7 @@ class Ledger:
         is not always a dispatched task -- `claim_lane` writes a
         `ledger-claim:<lane>:<token>` row under the same `tasks` table, and an
         operator recovering a stranded lane by hand does not always know
-        which shape it is, only the lane. Same SELECT `_cancel_open_task_tx`
+        which shape it is, only the lane. Same SELECT `_find_open_task_for_cancel`
         uses to find "whatever owns this lane" -- that method exists
         precisely because a lane can be occupied by either shape and the
         caller should not have to know which -- but this is read-only, for a
@@ -2670,6 +2683,30 @@ class Ledger:
             ).fetchall()
         return [self._dict(row) for row in rows]
 
+    def list_terminal_tasks_missing_result(self):
+        """Every `complete`/`failed`/`cancelled` row carrying no result.
+
+        agent-supervisor#649: before this existed, the only way to see this
+        state was to query `ledger.sqlite3` by hand -- which is how the
+        issue's own measurement was taken (951 of 951 `cancelled` rows,
+        3 of 942 `complete`, 17 of 198 `failed`). `cancel_open_task` no
+        longer lets a caller land here silently (it now requires an explicit
+        `result` or `abandoned=True`), but this stays a live query rather
+        than a one-time count: a genuine `abandoned=True` cancellation is
+        expected to show up here forever, and a `complete`/`failed` row
+        missing a result is always worth a look regardless of how it got
+        that way.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM tasks
+                WHERE status IN ('complete','failed','cancelled') AND result_path IS NULL
+                ORDER BY completed_at, id
+                """
+            ).fetchall()
+        return [self._dict(row) for row in rows]
+
     def list_open_worktrees(self):
         """(lane, task id, worktree path) for every IN-FLIGHT task with a
         recorded worktree -- agent-supervisor#291's collision check.
@@ -3072,19 +3109,15 @@ class Ledger:
     def accept(self, task_id, *, pane_nonce):
         return self._transition(task_id, pane_nonce, ("delivered",), "accepted", "accepted_at")
 
-    def _cancel_open_task_tx(self, connection, lane, now):
+    def _find_open_task_for_cancel(self, connection, lane):
         if connection.execute("SELECT 1 FROM lanes WHERE lane = ?", (lane,)).fetchone() is None:
             raise ValueError(f"unknown lane: {lane}")
-        row = connection.execute(
+        return connection.execute(
             "SELECT * FROM tasks WHERE lane = ? AND status NOT IN ('complete','failed','cancelled')",
             (lane,),
         ).fetchone()
-        if row is None:
-            return None
-        self._cancel_task_row(connection, row["id"], now)
-        return self._dict(connection.execute("SELECT * FROM tasks WHERE id=?", (row["id"],)).fetchone())
 
-    def cancel_open_task(self, lane):
+    def cancel_open_task(self, lane, *, result=None, abandoned=False):
         """Free a lane's outstanding task by marking it cancelled.
 
         agent-dotfiles#144 finding 3: this had no caller anywhere in the tree
@@ -3100,10 +3133,46 @@ class Ledger:
         one, an unknown id silently reported as "already free", is how a
         typo'd `--lane` looks identical to a real completion. Raises for the
         former; only a registered lane with no open task returns `None` now.
+
+        agent-supervisor#649: `complete --task` correctly refuses once a
+        lane's pane is gone (the pane-incarnation guard is the invariant, not
+        the bug), so this became the ONLY door out for a task whose lane died
+        after the work actually shipped -- and it wrote `result_path: NULL`
+        every time, indistinguishable from a task that genuinely produced
+        nothing. Measured: all 951 of the ledger's `cancelled` rows carry a
+        null result, and every one of the 14 that are PR-scoped belongs to a
+        PR that merged. `result` and `abandoned` are mutually exclusive and
+        one of them is now REQUIRED -- there is no default, on purpose: a
+        caller that does not know whether there is a result to record is not
+        in a position to have this method guess. Pass `result` (bytes) when
+        the caller has recovered what the lane delivered before its pane
+        went away; pass `abandoned=True` when there genuinely is nothing.
+        Written through the same immutable, hashed `_write_result` path
+        `complete()` uses, so a cancelled-with-result row carries
+        `result_sha256` exactly the way a completed one does.
         """
+        if abandoned and result is not None:
+            raise ValueError("cancel_open_task: pass a result or abandoned=True, not both")
+        if not abandoned and result is None:
+            raise ValueError("cancel_open_task: pass a result or abandoned=True")
         now = int(self.clock())
-        with self._locked(), self._transaction() as connection:
-            return self._cancel_open_task_tx(connection, lane, now)
+        with self._locked():
+            with contextlib.closing(self._connect()) as probe:
+                row = self._find_open_task_for_cancel(probe, lane)
+            if row is None:
+                return None
+            destination = digest = None
+            if result is not None:
+                destination, digest = self._write_result(row["id"], result, known_hash=row["result_sha256"])
+            with self._transaction() as connection:
+                self._cancel_task_row(
+                    connection,
+                    row["id"],
+                    now,
+                    result_path=str(destination) if destination is not None else None,
+                    result_sha256=digest,
+                )
+                return self._dict(connection.execute("SELECT * FROM tasks WHERE id=?", (row["id"],)).fetchone())
 
     def record_dispatch(
         self,
