@@ -537,6 +537,56 @@ author_lane_for() {
       _al_add_contrib "$c_lane" "$c_task"
     done < <(jq -r '.contributors[] | "\(.lane)\t\(.task)"' <<<"$pr_contrib_json")
   fi
+  # Path 4.5 (agent-supervisor#635): the ledger's OWN worktree record for
+  # this PR's head branch -- the same second, independent source
+  # agent-supervisor#619 (`f2cbf7df`) added to dispatch.sh's own author
+  # chain (`resolve-pr-contributors.sh`), never carried over here. Skills#284
+  # measured the gap directly: task `Skills266-sk266scenario` carries a
+  # recorded `worktree_path` and lane `Skills:2`, but its task id (minted
+  # from the checkout directory's case, `session_for_repo()`) matches
+  # neither the issue/PR-task/PR-contributor lookups above nor a task id
+  # reconstructed from the branch (Path 5, below) -- the worktree path is
+  # the only key that still lines up.
+  #
+  # Deliberately preferred over Path 5's branch-name heuristic: a lane that
+  # renames its branch defeats that heuristic no matter how ids are
+  # spelled, but the worktree itself is never renamed (see
+  # `get_task_for_worktree`'s own docstring). Every candidate this finds is
+  # checked ON DISK against the PR's actual head branch
+  # (`git -C <path> rev-parse --abbrev-ref HEAD`) before being trusted --
+  # nothing here may assume the first row it reads is the right one.
+  #
+  # `cli.py status`'s `.tasks[]`, not `open-worktrees`, is the candidate
+  # source -- measured directly against skills#284 itself: by the time a PR
+  # reaches review its authoring task has usually already been marked
+  # `complete` (`record-completion`, written at delivery), and
+  # `list_open_worktrees` (`open-worktrees`) deliberately excludes
+  # `complete`/`failed`/`cancelled` rows -- it exists for #291's collision
+  # check ("is a worktree still IN FLIGHT"), a different question from "did
+  # the ledger ever record this worktree", which is what authorship needs
+  # to answer here. `worktree-lane`'s own point lookup
+  # (`get_task_for_worktree`) has no status filter at all, so nothing about
+  # widening the candidate source here loosens what ultimately decides a
+  # match. A blank or unset `worktree_path` never reaches this loop at all
+  # (`.worktree_path // empty` drops it), and a `git -C ""` probe would only
+  # ever fail closed regardless.
+  if [ -n "$head_ref" ]; then
+    local all_tasks_json ow_path ow_branch worktree_json w_lane w_task
+    if all_tasks_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" status 2>/dev/null); then
+      while IFS= read -r ow_path; do
+        [ -n "$ow_path" ] || continue
+        [ -d "$ow_path" ] || continue
+        ow_branch=$(git -C "$ow_path" rev-parse --abbrev-ref HEAD 2>/dev/null) || continue
+        [ -n "$ow_branch" ] && [ "$ow_branch" = "$head_ref" ] || continue
+        if worktree_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" worktree-lane --path "$ow_path" 2>/dev/null) \
+           && jq -e '.known == true' >/dev/null 2>&1 <<<"$worktree_json"; then
+          w_lane=$(jq -r '.lane' <<<"$worktree_json")
+          w_task=$(jq -r '.task // ""' <<<"$worktree_json")
+          _al_add_contrib "$w_lane" "$w_task"
+        fi
+      done < <(jq -r '[.tasks[]?.worktree_path // empty] | unique[]' <<<"$all_tasks_json")
+    fi
+  fi
   if [ "${#contrib_lanes[@]}" -gt 0 ]; then
     contrib_json=$(_al_contrib_json)
     _al_cleanup

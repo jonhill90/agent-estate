@@ -1171,6 +1171,168 @@ if [ "$rc" -eq 1 ]; then ok "#605: a daemon-shaped lane with no supervisord sign
 if [ ! -f "$MARKER" ]; then ok "#605: ...and never merges"; else bad "#605: unverified daemon-named lane -- never merges" "$out"; fi
 echo "$out" | grep -q "not comparable lane ids" && ok "#605: unverified daemon-named lane refusal names the reason" || bad "#605: unverified daemon-named lane refusal named" "$out"
 
+# --- agent-supervisor#635: skills#284's exact shape -- a task resolvable
+# ONLY by `tasks.worktree_path`. The task id (`Skills266-sk266scenario`,
+# capital `S` from `session_for_repo()` reading the checkout directory's
+# case) matches neither the issue-lookup paths (no closing-issue reference
+# here) nor a task id reconstructed from the branch
+# (`lane/266-sk266scenario` -> `266-sk266scenario`, still the wrong case and
+# missing the session prefix). Only the worktree itself -- recorded via
+# `record-dispatch --worktree`, never renamed even though the branch inside
+# it can be -- still lines up. This is the gap `#619` (`f2cbf7df`) closed for
+# `dispatch.sh`'s own author chain but never carried into this file's. ------
+rm -f "$MARKER"
+cat > "$FIX/head_284.json" <<'S'
+{"headRefOid": "sha-284"}
+S
+green_checkruns sha-284
+cat > "$FIX/author_284.json" <<'S'
+{"headRefName": "lane/266-sk266scenario", "closingIssuesReferences": [], "commits": []}
+S
+cat > "$FIX/reviews_284.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:9\nReviewed-SHA: sha-284", "createdAt": "2026-08-25T00:00:00Z"}]}
+S
+WT284="$D/wt-284"
+mkdir -p "$WT284"
+git -C "$WT284" init -q
+git -C "$WT284" config user.email test@example.com
+git -C "$WT284" config user.name "Test"
+git -C "$WT284" checkout -q -b lane/266-sk266scenario
+git -C "$WT284" commit -q --allow-empty -m init
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane Skills:2 --task Skills266-sk266scenario --summary "seed" --pane-id %92 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 9284 --github "$REPO" \
+  --harness claude --worktree "$WT284" >/dev/null
+register_tmux_lane t:9 %93
+out=$("$MERGE_PR" "$REPO" 284 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "#635: worktree-path-only authorship (skills#284's shape) merges"; else bad "#635: worktree-path-only authorship merges" "got rc=$rc: $out"; fi
+if [ -f "$MARKER" ]; then ok "#635: ...and actually calls gh pr merge"; else bad "#635: worktree-path-only authorship -- gh pr merge called" "$out"; fi
+echo "$out" | grep -q "independence confirmed" && ok "#635: success names independence" || bad "#635: success names independence" "$out"
+
+# --- ...and the same worktree-resolved authorship still catches a self-
+# review: the reviewer lane IS the worktree's own recorded lane, so this
+# must refuse exactly like the pre-existing #179 case does -- the new
+# resolution path surfaces evidence, it does not weaken what consumes it. --
+rm -f "$MARKER"
+cat > "$FIX/head_291.json" <<'S'
+{"headRefOid": "sha-291"}
+S
+green_checkruns sha-291
+cat > "$FIX/author_291.json" <<'S'
+{"headRefName": "lane/267-sk267scenario", "closingIssuesReferences": [], "commits": []}
+S
+cat > "$FIX/reviews_291.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: Skills:2\nReviewed-SHA: sha-291", "createdAt": "2026-08-25T00:00:00Z"}]}
+S
+WT291="$D/wt-291"
+mkdir -p "$WT291"
+git -C "$WT291" init -q
+git -C "$WT291" config user.email test@example.com
+git -C "$WT291" config user.name "Test"
+git -C "$WT291" checkout -q -b lane/267-sk267scenario
+git -C "$WT291" commit -q --allow-empty -m init
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane Skills:2 --task Skills267-sk267scenario --summary "seed" --pane-id %92 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 9291 --github "$REPO" \
+  --harness claude --worktree "$WT291" >/dev/null
+out=$("$MERGE_PR" "$REPO" 291 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#635: worktree-resolved self-review still refuses"; else bad "#635: worktree-resolved self-review refuses" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#635: ...and never merges"; else bad "#635: worktree-resolved self-review -- never merges" "$out"; fi
+
+# --- ...and a PR with NO ledger record at all still fails closed, even when
+# a worktree that happens to sit on the SAME branch name exists on disk --
+# proves resolution is keyed off the ledger's own `open-worktrees` record,
+# never off scanning disk for a matching branch. -----------------------------
+rm -f "$MARKER"
+cat > "$FIX/head_292.json" <<'S'
+{"headRefOid": "sha-292"}
+S
+green_checkruns sha-292
+cat > "$FIX/author_292.json" <<'S'
+{"headRefName": "lane/268-sk268scenario", "closingIssuesReferences": [], "commits": []}
+S
+cat > "$FIX/reviews_292.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:9\nReviewed-SHA: sha-292", "createdAt": "2026-08-25T00:00:00Z"}]}
+S
+WT292="$D/wt-292"
+mkdir -p "$WT292"
+git -C "$WT292" init -q
+git -C "$WT292" config user.email test@example.com
+git -C "$WT292" config user.name "Test"
+git -C "$WT292" checkout -q -b lane/268-sk268scenario
+git -C "$WT292" commit -q --allow-empty -m init
+# Deliberately no record-dispatch call: the ledger never heard of this
+# worktree, so `open-worktrees` cannot name it no matter what branch it is
+# on.
+out=$("$MERGE_PR" "$REPO" 292 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#635: no ledger record still refuses, even with a same-branch worktree on disk"; else bad "#635: no ledger record still refuses" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#635: ...and never merges"; else bad "#635: no ledger record -- never merges" "$out"; fi
+echo "$out" | grep -q "unresolved" && ok "#635: no-ledger-record refusal names the reason" || bad "#635: no-ledger-record refusal named" "$out"
+
+# --- ...and a task row whose worktree_path is blank still fails closed --
+# it must not match every PR the way a wildcard or prefix match would.
+# `list_open_worktrees` (`open-worktrees`) already filters
+# `worktree_path != ''` at the query, so this proves that filter is still
+# what this file relies on, not a looser match added here. ------------------
+rm -f "$MARKER"
+cat > "$FIX/head_293.json" <<'S'
+{"headRefOid": "sha-293"}
+S
+green_checkruns sha-293
+cat > "$FIX/author_293.json" <<'S'
+{"headRefName": "lane/269-sk269scenario", "closingIssuesReferences": [], "commits": []}
+S
+cat > "$FIX/reviews_293.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:9\nReviewed-SHA: sha-293", "createdAt": "2026-08-25T00:00:00Z"}]}
+S
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane Skills:2 --task Skills269-sk269scenario --summary "seed" --pane-id %92 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 9293 --github "$REPO" \
+  --harness claude >/dev/null
+out=$("$MERGE_PR" "$REPO" 293 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#635: a task row with a blank worktree_path still refuses (no wildcard match)"; else bad "#635: blank worktree_path still refuses" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#635: ...and never merges"; else bad "#635: blank worktree_path -- never merges" "$out"; fi
+echo "$out" | grep -q "unresolved" && ok "#635: blank-worktree_path refusal names the reason" || bad "#635: blank-worktree_path refusal named" "$out"
+
+# --- ...and a worktree whose branch merely STARTS WITH the PR's head branch
+# must not match -- exact-string comparison only, never a prefix match. This
+# is the mutation the issue explicitly names as unacceptable ("match on
+# prefix"): the ledger's only open worktree here belongs to a wholly
+# unrelated task whose branch happens to share the PR's head ref as a
+# prefix. Exact matching must find nothing and refuse unknown; a prefix-
+# match mutation resolves the unrelated task's lane as the author instead.
+rm -f "$MARKER"
+cat > "$FIX/head_294.json" <<'S'
+{"headRefOid": "sha-294"}
+S
+green_checkruns sha-294
+cat > "$FIX/author_294.json" <<'S'
+{"headRefName": "lane/266-sk", "closingIssuesReferences": [], "commits": []}
+S
+cat > "$FIX/reviews_294.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:9\nReviewed-SHA: sha-294", "createdAt": "2026-08-25T00:00:00Z"}]}
+S
+WT294="$D/wt-294-decoy"
+mkdir -p "$WT294"
+git -C "$WT294" init -q
+git -C "$WT294" config user.email test@example.com
+git -C "$WT294" config user.name "Test"
+git -C "$WT294" checkout -q -b lane/266-sk-decoy-unrelated-branch
+git -C "$WT294" commit -q --allow-empty -m init
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane Decoy:1 --task Decoy266-decoy-task --summary "seed" --pane-id %94 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 9294 --github "$REPO" \
+  --harness claude --worktree "$WT294" >/dev/null
+out=$("$MERGE_PR" "$REPO" 294 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#635: a worktree branch that merely starts with the PR's head branch does not match"; else bad "#635: prefix-sharing branch does not match" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#635: ...and never merges"; else bad "#635: prefix-sharing branch -- never merges" "$out"; fi
+echo "$out" | grep -q "unresolved" && ok "#635: prefix-sharing-branch refusal names the reason" || bad "#635: prefix-sharing-branch refusal named" "$out"
+
 rm -rf "$D"
 
 echo "  -> $pass ok, $fail failed"
