@@ -26,6 +26,54 @@ rewriting what they correct:**
   an example's literal argument names. Per this project's "correct rather
   than delete" rule, the examples below are left as written.
 
+## Before anything else: `cd` into the pinned tooling clone, not your own cwd
+
+`agent-supervisor#654`. Every `scripts/supervisor/...` command in this file
+is written as a path relative to your own shell. If your shell's cwd is the
+shared, interactively-used checkout (`~/source/repos/Personal/agent-supervisor`),
+that is exactly the gap #654 measured directly: `dispatch.sh` merged a fix
+(#650) that a real `--reviews-pr` dispatch from that checkout never saw,
+because a merge changes `origin/main`, not a working tree nobody advanced.
+Three separate merged fixes were inert against the running loop the same
+day, discovered only by a human diffing the running file against
+`origin/main` by hand.
+
+Run this once, at the start of every tick, before any other command below:
+
+```bash
+cd ~/.local/state/agent-dotfiles-supervisor/live
+```
+
+(`$SUPERVISOR_LIVE`, if set, overrides that default — same variable
+`advance-live.sh` itself reads.) This is the SAME pinned worktree #99/#130
+already keep current for the watchdog LaunchAgent — nothing but
+`advance-live.sh`'s own update step is supposed to write to it, and every
+example below now resolves against it once you have `cd`'d in, with no
+further changes needed to the commands themselves. Never run
+`scripts/supervisor/*` from `~/source/repos/Personal/agent-supervisor`
+directly — that checkout is explicitly for a human or a lane to work in
+interactively (`#73`), and its state is exactly what this loop's own tooling
+must never depend on.
+
+If the `cd` fails, the clone is missing or broken — run
+`scripts/supervisor/advance-live.sh` once, from a known-good checkout, to
+(re)create it (its own "live/ was deleted" recovery path, #367), then retry
+this tick. Do not fall back to running tooling from your own cwd; that
+silently reintroduces the exact gap this section exists to close.
+
+Sanity-check it is actually current before trusting it, especially after a
+long gap since the last tick:
+
+```bash
+scripts/supervisor/tooling-drift.sh
+```
+
+Everything reporting `in sync` means the clone matches `origin/main` for
+every file it holds under `scripts/supervisor/`. Anything else — `behind by
+N commit(s)` or `diverged` — means `advance-live.sh`'s own update step is
+not doing its job; report that rather than proceeding on tooling you cannot
+trust matches what was actually reviewed and merged.
+
 ## Before the quota gate: hold the supervisor lease, or stop entirely
 
 agent-dotfiles#238. Nothing below this line establishes WHO the supervisor

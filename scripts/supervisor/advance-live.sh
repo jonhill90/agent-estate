@@ -691,6 +691,27 @@ fi
 
 target=$(git -C "$LIVE" rev-parse origin/main 2>/dev/null) || fail "origin/main unreadable in $LIVE even after a successful fetch -- not advancing"
 
+# --- fast-forward-only guard (agent-supervisor#654 Part 2) -----------------
+# Same discipline #73's guard already established for the shared checkout --
+# refuse rather than force, refuse rather than silently diverge -- applied
+# here to a clone nothing but this script's own advance ever touches.
+# `git checkout --detach $target` moves HEAD unconditionally: given a $cur
+# that is NOT an ancestor of $target (a local commit landed in $LIVE that
+# should never exist there, since nothing else is supposed to write to it),
+# the checkout below would still "succeed", silently abandoning that commit
+# rather than refusing over it -- the exact silent-divergence this issue's
+# Part 2 forbids. `behind` below counts commits reachable from $target that
+# $cur lacks; it says nothing about commits $cur has that $target lacks, so
+# it cannot catch this on its own. This is-ancestor check by construction
+# always passes in the ordinary case (nothing else ever commits here) and is
+# the one thing standing between "the update step's own bug" and a silent
+# loss if that assumption is ever violated -- exactly the case worth failing
+# loudly on, per this issue's own framing: "a refusal here is itself
+# diagnostic ... rather than an expected steady state".
+if ! git -C "$LIVE" merge-base --is-ancestor "$cur" "$target"; then
+  fail "cannot fast-forward $LIVE from $cur to $target -- $cur is not an ancestor of origin/main, so this is a real divergence, not ordinary staleness. Nothing but this script's own advance step is supposed to write to $LIVE; something else did. Refusing to force or silently diverge -- live worktree left at $cur. Investigate what committed there before re-running."
+fi
+
 behind=$(git -C "$LIVE" rev-list --count HEAD..origin/main 2>/dev/null)
 case "$behind" in
   ''|*[!0-9]*) fail "behind-count unreadable in $LIVE -- not advancing" ;;

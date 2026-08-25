@@ -38,6 +38,12 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
+# agent-supervisor#654 Part 2: the loop-owned clone advance-live.sh already
+# keeps current for watchdog.sh (#99/#130) is also where the TICK prompt
+# below sends the Director to run tooling from -- see the "cd into the
+# pinned clone" step it now contains. Same default chain advance-live.sh
+# itself uses, so this never needs to be told twice.
+LIVE="${SUPERVISOR_LIVE:-$STATE/live}"
 TARGET="${DIRECTOR_LOOP_TARGET:-director:@3}"
 QUOTA_GATE="${QUOTA_GATE:-$HERE/quota.sh}"
 # The interactive codexbar call measures ~12.5s and the gate's own default
@@ -391,6 +397,9 @@ esac
 TICK='Director tick. SHORT MEANS SHORT PROSE, NOT FEW ACTIONS. Take as many actions as the work needs; write almost nothing about them.
 
 The previous wording said "act, report one line, stop" twice and "fill the free lanes" once, so every tick resolved toward stopping. Measured 2026-08-19: 29 free lanes, 124 open issues, 49 percent of a quota window in reserve, and TWO dispatches in an hour. The estate was single-threaded by instruction, not by any cap.
+
+0. CD INTO THE PINNED TOOLING CLONE FIRST, before running anything under scripts/supervisor/ below: cd '"$LIVE"'
+   agent-supervisor#654: every scripts/supervisor/ command below is written as a path relative to your shell, and your shell is not the loop'"'"'s tooling execution surface. If this cd fails, the clone is missing or broken -- run scripts/supervisor/advance-live.sh once by hand from a known-good checkout to (re)create it, then retry this tick; do not fall back to running tooling from your own cwd (that is the shared, interactively-used checkout, and a merged fix to any of these scripts is invisible there until a human advances it by hand -- #654 measured that gap directly).
 
 1. QUOTA GATE FIRST, with the timeouts the instrument actually needs:
    QUOTA_GUARD_TIMEOUT_SECONDS=45 QUOTA_USAGE_TIMEOUT_SECONDS=45 bash scripts/supervisor/quota.sh check
