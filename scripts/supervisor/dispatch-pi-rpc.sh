@@ -103,6 +103,21 @@ LABEL="${PREFIX}${ISSUE}-${SLUG}"
 LANE="$LABEL"
 TASK_ID="$LABEL"
 
+# --- 0. host-pressure gate ---------------------------------------------------
+# agent-supervisor#643: this script starts a new agent process (a `pi --mode
+# rpc` subprocess) exactly like dispatch.sh's tmux flow does, but until now
+# had NO host-pressure check of any kind -- measured directly (grep for
+# "host-pressure" across scripts/supervisor turned up only dispatch.sh).
+# host_pressure.py (this dispatch's Python port of daemon/internal/pressure,
+# see its own module docstring) is used here, before claim.sh below, same
+# "cheapest failure first" reason dispatch.sh's own comment gives: a refused
+# dispatch must leave the estate exactly as it found it.
+HOST_PRESSURE_OUT=$("$PYTHON" "$HERE/host_pressure.py"); HOST_PRESSURE_RC=$?
+if [ "$HOST_PRESSURE_RC" -ne 0 ]; then
+  echo "dispatch-pi-rpc: $HOST_PRESSURE_OUT -- NOT dispatching #$ISSUE" >&2
+  exit 1
+fi
+
 # --- 1. claim the issue on GitHub, same tool dispatch.sh uses --------------
 if ! "$HERE/claim.sh" take "$ISSUE" "$REPO" "$LANE"; then
   echo "dispatch-pi-rpc: could not claim #$ISSUE -- not dispatching" >&2

@@ -156,6 +156,23 @@ trap release_claim_on_signal EXIT
 trap 'release_claim_on_signal; exit 143' TERM   # 128 + 15
 trap 'release_claim_on_signal; exit 130' INT    # 128 + 2
 
+# --- 0. host-pressure gate ---------------------------------------------------
+# agent-supervisor#643: this script starts a new agent process (a `claude -p`
+# subprocess, agent-supervisor#171) exactly like dispatch.sh's tmux flow
+# does, but until now had NO host-pressure check of any kind -- measured
+# directly (grep for "host-pressure" across scripts/supervisor turned up only
+# dispatch.sh). host-pressure.sh's own bash gate is deliberately NOT reused
+# here for consistency's sake alone; host_pressure.py (this dispatch's
+# Python port of daemon/internal/pressure, see its own module docstring) is
+# used instead, before claim.sh below, same "cheapest failure first" reason
+# dispatch.sh's own comment gives: a refused dispatch must leave the estate
+# exactly as it found it.
+HOST_PRESSURE_OUT=$("$PYTHON" "$HERE/host_pressure.py"); HOST_PRESSURE_RC=$?
+if [ "$HOST_PRESSURE_RC" -ne 0 ]; then
+  echo "dispatch-claude-print: $HOST_PRESSURE_OUT -- NOT dispatching #$ISSUE" >&2
+  exit 1
+fi
+
 # --- 1. claim the issue on GitHub, same tool dispatch.sh uses --------------
 if ! "$HERE/claim.sh" take "$ISSUE" "$REPO" "$LANE"; then
   echo "dispatch-claude-print: could not claim #$ISSUE -- not dispatching" >&2
