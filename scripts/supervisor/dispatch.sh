@@ -685,7 +685,7 @@ LEDGER_CLI="$HERE/cli.py"
 # carried no such field (an older cli.py; still safe, just less specific).
 LANE_REL_POPULATION_CANDIDATE=""
 LANE_REL_POPULATION_OTHER=""
-lane_relation() {  # lane_relation <lane> <other> [lane-pane-id] -> same|different|unknown
+lane_relation() {  # lane_relation <lane> <other> [lane-pane-id] [other-pane-id] -> same|different|unknown
   # agent-supervisor#235: the optional third argument is a LIVE pane id the
   # caller just measured off tmux for `$1` -- see the author-exclusion loop
   # below, which is the one caller that has a real tmux target to measure.
@@ -694,9 +694,21 @@ lane_relation() {  # lane_relation <lane> <other> [lane-pane-id] -> same|differe
   # `$1` and is exactly what `renumber-windows on` (Jon's tmux setting)
   # rewrites out from under a lane the instant a lower window closes -- see
   # `core.py`'s own comment on `cli.py lane-relation --lane-pane-id`.
-  local json rel lane_pane_id_args=()
+  #
+  # agent-supervisor#631: the optional FOURTH argument is `$2`'s own FROZEN
+  # pane id -- a contributor task's `tasks.pane_id` snapshot
+  # (`AUTHOR_PANE_IDS`, see the author-exclusion loop below) -- used INSTEAD
+  # of re-resolving `$2` through the ledger's mutable `lanes` table by
+  # string. That live lookup is exactly what a later, unrelated dispatch can
+  # silently overwrite for a contributor's OLD lane string once
+  # `renumber-windows on` hands it to a different pane: `$2` would then
+  # answer for the NEW occupant, not the historical contributor this
+  # comparison is actually about.
+  local json rel lane_pane_id_args=() other_pane_id_args=()
   [ -z "${3:-}" ] || lane_pane_id_args=(--lane-pane-id "$3")
-  json=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-relation --lane "$1" --other "$2" "${lane_pane_id_args[@]}" 2>/dev/null) || json=""
+  [ -z "${4:-}" ] || other_pane_id_args=(--other-pane-id "$4")
+  json=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-relation --lane "$1" --other "$2" \
+    "${lane_pane_id_args[@]}" "${other_pane_id_args[@]}" 2>/dev/null) || json=""
   rel=$(sed -n 's/.*"relation":"\([a-z]*\)".*/\1/p' <<<"$json" | head -1)
   LANE_REL_POPULATION_CANDIDATE=$(sed -n 's/.*"lane_population":"\([a-zA-Z-]*\)".*/\1/p' <<<"$json" | head -1)
   LANE_REL_POPULATION_OTHER=$(sed -n 's/.*"other_population":"\([a-zA-Z-]*\)".*/\1/p' <<<"$json" | head -1)
@@ -863,6 +875,7 @@ fi
 . "$HERE/resolve-pr-contributors.sh"
 AUTHOR_LANES=()
 AUTHOR_TASKS=()
+AUTHOR_PANE_IDS=()
 FALLBACK_TASK=""
 # True (1) only when `contributor-issue-lanes` (or a fallback below) was
 # consulted and answered with a NON-empty, known set. Distinguishes "no PR
@@ -1305,7 +1318,12 @@ while IFS=$'\t' read -r candidate candidate_target; do
     MATCHED_CONTRIBUTOR_TASK=""
     for ai in "${!AUTHOR_LANES[@]}"; do
       al="${AUTHOR_LANES[$ai]}"
-      if [ "$(lane_relation "$candidate" "$al" "$candidate_pane_id")" != different ]; then
+      # agent-supervisor#631: this contributor's frozen pane_id, when
+      # `resolve_pr_contributors` recorded one -- so the comparison below is
+      # against THIS task's own pane, never whatever `$al` currently
+      # resolves to in the ledger's `lanes` table.
+      al_pane_id="${AUTHOR_PANE_IDS[$ai]:-}"
+      if [ "$(lane_relation "$candidate" "$al" "$candidate_pane_id" "$al_pane_id")" != different ]; then
         MATCHED_CONTRIBUTOR_LANE="$al"
         MATCHED_CONTRIBUTOR_TASK="${AUTHOR_TASKS[$ai]}"
         break

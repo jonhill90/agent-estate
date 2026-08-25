@@ -96,9 +96,24 @@ lane_relation() {  # lane_relation <lane> <other> [lane-pane-id] -> same|differe
 # refuse to answer -- `unknown`, never the untrustworthy shape-only guess --
 # which is the AMBIGUOUS/fail-closed posture the rest of this file already
 # holds everywhere else.
-resolve_lane_relation() {  # resolve_lane_relation <lane> <other> -> same|different|unknown
-  local lane="$1" other="$2" pane_id
-  pane_id=$(_lane_own_pane_id "$lane")
+resolve_lane_relation() {  # resolve_lane_relation <lane> <other> [lane-pane-id] -> same|different|unknown
+  # agent-supervisor#631: the optional 3rd argument is a FROZEN pane id the
+  # caller already has for `$lane` -- a contributor task's `tasks.pane_id`
+  # snapshot (`contributor_lane_relation`'s `.contributors[].pane_id`,
+  # `claimed_author_conflict` has no such snapshot to pass and always omits
+  # it) -- used INSTEAD of `_lane_own_pane_id "$lane"`'s live `lanes` lookup.
+  # That lookup is exactly the one a later, unrelated dispatch can silently
+  # corrupt for a historical lane: `_register_lane_tx` upserts `lanes` keyed
+  # on the lane STRING, so a window closing and `renumber-windows on`
+  # handing that same string to a different pane leaves
+  # `_lane_own_pane_id "$lane"` answering for the NEW occupant, not the one
+  # this comparison is actually about. Omitted, this is unchanged from
+  # pre-#631 behaviour: every existing caller that has no frozen snapshot to
+  # supply keeps the live lookup exactly as before.
+  local lane="$1" other="$2" pane_id="${3:-}"
+  if [ -z "$pane_id" ]; then
+    pane_id=$(_lane_own_pane_id "$lane")
+  fi
   if [ -n "$pane_id" ]; then
     lane_relation "$lane" "$other" "$pane_id"
     return
@@ -370,7 +385,7 @@ author_lane_for() {
   local repo_full="$1" number="$2" pr_json head_ref candidates candidate issue_json
   local prefix fallback_task fallback_json outfile rc external_json external_note
   local pr_task_json pr_contrib_json contrib_json
-  local contrib_lanes=() contrib_tasks=()
+  local contrib_lanes=() contrib_tasks=() contrib_pane_ids=()
   # agent-supervisor#513: the PR body's self-attested `Author-Lane:` trailer
   # (`claimed_lane`, via `_claimed_author_lane` above) -- populated once the
   # body is available, `null` on every return path before that (the gh call
@@ -393,22 +408,39 @@ author_lane_for() {
     done
     return 1
   }
+  # agent-supervisor#631: a contributor's FROZEN `tasks.pane_id` snapshot,
+  # looked up once here (via `task-lane`, extended by #631 to carry it) and
+  # carried on the contributor's own JSON entry below -- see
+  # `contributor_lane_relation`'s use of it. `''` (never a lookup failure
+  # treated as a hard error) when the task carries no snapshot -- predates
+  # #631's column, or `task-lane` itself failed -- so a caller falls back to
+  # the pre-#631 live `lanes` lookup for that one contributor, exactly the
+  # degrade-gracefully posture every other optional field in this file
+  # already takes.
+  _al_pane_id_for_task() {
+    local task="$1"
+    [ -n "$task" ] || { printf ''; return 0; }
+    "$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" task-lane --task "$task" 2>/dev/null \
+      | jq -r '.pane_id // ""' 2>/dev/null || printf ''
+  }
   _al_add_contrib() {
     local lane="$1" task="$2"
     [ -n "$lane" ] || return 0
     _al_contrib_known "$lane" && return 0
     contrib_lanes+=("$lane")
     contrib_tasks+=("$task")
+    contrib_pane_ids+=("$(_al_pane_id_for_task "$task")")
   }
   _al_contrib_json() {
     local json="[]" i
     for i in "${!contrib_lanes[@]}"; do
       json=$(jq -nc --argjson acc "$json" --arg lane "${contrib_lanes[$i]}" --arg task "${contrib_tasks[$i]:-}" \
-        '$acc + [{lane:$lane, task:$task}]')
+        --arg pane_id "${contrib_pane_ids[$i]:-}" \
+        '$acc + [{lane:$lane, task:$task, pane_id:$pane_id}]')
     done
     printf '%s' "$json"
   }
-  _al_cleanup() { unset -f _al_contrib_known _al_add_contrib _al_contrib_json _al_cleanup; }
+  _al_cleanup() { unset -f _al_contrib_known _al_add_contrib _al_contrib_json _al_pane_id_for_task _al_cleanup; }
 
   external_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" pr-external --repo "$repo_full" --pr "$number" 2>/dev/null)
   if jq -e '.known == true' >/dev/null 2>&1 <<<"$external_json"; then
@@ -524,8 +556,9 @@ author_lane_for() {
       _al_cleanup
       jq -nc --arg lane "$(jq -r '.lane' <<<"$fallback_json")" \
              --arg task "$fallback_task" \
+             --arg pane_id "$(jq -r '.pane_id // ""' <<<"$fallback_json")" \
              --arg claimed "$claimed_lane" \
-             '{known:true, external:false, contributors:[{lane:$lane, task:$task}],
+             '{known:true, external:false, contributors:[{lane:$lane, task:$task, pane_id:$pane_id}],
                claimed_lane:(if ($claimed|length) > 0 then $claimed else null end), detail:""}'
       return
     fi
@@ -604,7 +637,7 @@ claimed_author_conflict() {  # claimed_author_conflict <author-json> <reviewer-l
 # not evidence at all, and every comparison below would be reading it.
 contributor_lane_relation() {  # contributor_lane_relation <author-json> <reviewer-lane> -> JSON
   local author_json="$1" reviewer_lane="$2"
-  local n lane task rel overall="different" matched_lane="" matched_task="" i=0
+  local n lane task pane_id rel overall="different" matched_lane="" matched_task="" i=0
   local identity id_status id_detail
 
   identity=$(_lane_identity_status "$reviewer_lane")
@@ -620,7 +653,12 @@ contributor_lane_relation() {  # contributor_lane_relation <author-json> <review
   while [ "$i" -lt "$n" ]; do
     lane=$(jq -r ".contributors[$i].lane" <<<"$author_json")
     task=$(jq -r ".contributors[$i].task // \"\"" <<<"$author_json")
-    rel=$(resolve_lane_relation "$lane" "$reviewer_lane")
+    # agent-supervisor#631: this contributor's frozen `tasks.pane_id`
+    # snapshot, when `author_lane_for` recorded one -- passed through so
+    # `resolve_lane_relation` compares against THIS task's own pane, not
+    # whatever `agent-supervisor:N` currently resolves to in `lanes`.
+    pane_id=$(jq -r ".contributors[$i].pane_id // \"\"" <<<"$author_json")
+    rel=$(resolve_lane_relation "$lane" "$reviewer_lane" "$pane_id")
     if [ "$rel" = "same" ]; then
       overall="same"; matched_lane="$lane"; matched_task="$task"
       break

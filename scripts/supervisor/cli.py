@@ -420,6 +420,16 @@ def parser():
     # `digest.sh`'s independence report reasoning about lanes with no pane to
     # re-measure) gets the pre-#235 behaviour unchanged.
     lane_relation_parser.add_argument("--lane-pane-id", default=None)
+    # agent-supervisor#631: the caller's own already-known, FROZEN pane id
+    # for `--other` -- e.g. a contributor task's `tasks.pane_id` snapshot
+    # (`core.pane_id_for_task`), immune to a later dispatch overwriting the
+    # `lanes` row that string names. Without this, `--other`'s pane id is
+    # always re-resolved live from `Ledger.get_lane(args.other)` -- exactly
+    # the mutable-by-string lookup a reused lane id silently corrupts (see
+    # `tasks.pane_id`'s column comment in `core.py`). Optional and
+    # independent of `--lane-pane-id`: a caller may supply either, both, or
+    # neither, and each defaults to the pre-#631 live lookup when omitted.
+    lane_relation_parser.add_argument("--other-pane-id", default=None)
 
     author_issue_lane_parser = sub.add_parser("author-issue-lane")
     author_issue_lane_parser.add_argument("--issue", required=True)
@@ -1218,6 +1228,25 @@ def main(argv=None):
     # for a database open, and the claude-print/pi-rpc case finally can be
     # established rather than reflexively refused.
     if args.command == "lane-relation":
+        # agent-supervisor#631: identical STRINGS are `same`, full stop --
+        # checked before any pane-id reasoning (frozen or live) ever runs.
+        # `core.lane_relation` already holds this as its own first rule
+        # (`if one == other: return "same"`), but the `--lane-pane-id`
+        # branch below never consulted it before deciding from pane ids --
+        # harmless pre-#631, because both sides were always resolved LIVE at
+        # the same instant, so an identical string could only ever compare
+        # equal to itself. #631 broke that symmetry: `--other-pane-id` lets
+        # a caller supply a FROZEN historical snapshot for `--other` while
+        # `--lane-pane-id` stays a fresh live measurement, and a lane that
+        # legitimately re-registered itself since that snapshot was taken
+        # (a claude-print re-registration over the same lane string,
+        # `test_merge_pr.sh`'s own live case) then compares its OLD pane
+        # against its NEW one and wrongly answers `different` for a literal
+        # self-review. No pane fact can ever outrank the two callers naming
+        # the exact same lane id.
+        if isinstance(args.lane, str) and isinstance(args.other, str) and args.lane.strip() and args.lane.strip() == args.other.strip():
+            _print({"lane": args.lane, "other": args.other, "relation": "same"})
+            return 0
         # agent-supervisor#235: `--lane-pane-id` -- a LIVE measurement the
         # caller took off tmux itself, not a lookup -- is reconciled BEFORE
         # the string-shape check gets to answer at all, not only when that
@@ -1232,11 +1261,18 @@ def main(argv=None):
         # live pane to re-measure for a lane this call is not the candidate
         # for -- unchanged from #292's reasoning.
         if args.lane_pane_id:
-            try:
-                relation_ledger = Ledger(args.state_dir)
-                other_row = relation_ledger.get_lane(args.other)
-            except Exception:
-                other_row = None
+            # agent-supervisor#631: `--other-pane-id`, when supplied, IS
+            # `other_row` -- no ledger lookup at all, so a `lanes` row this
+            # string was reused to overwrite can never be consulted for this
+            # comparison. See the flag's own argparse help above.
+            if args.other_pane_id:
+                other_row = {"pane_id": args.other_pane_id}
+            else:
+                try:
+                    relation_ledger = Ledger(args.state_dir)
+                    other_row = relation_ledger.get_lane(args.other)
+                except Exception:
+                    other_row = None
             lane_row = {"pane_id": args.lane_pane_id}
             relation = lane_relation_from_rows(lane_row, other_row)
             if relation == "unknown":
@@ -1261,7 +1297,13 @@ def main(argv=None):
             try:
                 relation_ledger = Ledger(args.state_dir)
                 lane_row = relation_ledger.get_lane(args.lane)
-                other_row = relation_ledger.get_lane(args.other)
+                # agent-supervisor#631: same widening as the `--lane-pane-id`
+                # branch above -- `--other-pane-id` applies regardless of
+                # whether `--lane-pane-id` was also given.
+                if args.other_pane_id:
+                    other_row = {"pane_id": args.other_pane_id}
+                else:
+                    other_row = relation_ledger.get_lane(args.other)
             except Exception:
                 lane_row = other_row = None
             relation = lane_relation_from_rows(lane_row, other_row)
@@ -1452,7 +1494,17 @@ def main(argv=None):
         value = {"lane": args.lane, "cancelled": cancelled}
     elif args.command == "task-lane":
         row = ledger.get_task(args.task)
-        value = {"task": args.task, "known": row is not None, "lane": row["lane"] if row is not None else None}
+        value = {
+            "task": args.task,
+            "known": row is not None,
+            "lane": row["lane"] if row is not None else None,
+            # agent-supervisor#631: this task's frozen pane_id snapshot (see
+            # `core.pane_id_for_task` and the `tasks.pane_id` column
+            # comment) -- '' for a task predating the column, never None, so
+            # a caller can pass it straight through to
+            # `lane-relation --other-pane-id` without a truthiness surprise.
+            "pane_id": (row.get("pane_id") or "") if row is not None else None,
+        }
     elif args.command == "issue-lane":
         row = ledger.get_task_for_issue(args.issue, repo=args.repo)
         value = {

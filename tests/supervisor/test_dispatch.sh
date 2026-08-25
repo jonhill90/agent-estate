@@ -2952,7 +2952,7 @@ import os
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = 'if [ "$(lane_relation "$candidate" "$al" "$candidate_pane_id")" != different ]; then'
+marker = 'if [ "$(lane_relation "$candidate" "$al" "$candidate_pane_id" "$al_pane_id")" != different ]; then'
 assert marker in text, "author-exclusion guard not found -- script shape changed"
 assert text.count(marker) == 1, "author-exclusion guard not unique -- script shape changed"
 text = text.replace(marker, "if false; then  # MUTATED: author-exclusion always skipped", 1)
