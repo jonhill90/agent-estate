@@ -122,7 +122,7 @@ head_is() { printf '{"headRefOid": "%s"}\n' "$2" > "$FIX/head_$1.json"; }
 closes()  { printf '{"headRefName": "fix/%s-thing", "closingIssuesReferences": [{"number": %s}], "commits": []}\n' "$2" "$2" > "$FIX/author_$1.json"; }
 verdict_comment() {  # verdict_comment <pr> <lane> <reviewed-sha>
   cat > "$FIX/reviews_$1.json" <<S
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: $2\nReviewed-SHA: $3", "createdAt": "2026-08-23T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: $2\nReviewed-SHA: $3", "createdAt": "2026-08-23T00:00:00Z"}]}
 S
 }
 no_comments() { printf '{"reviews": [], "comments": []}\n' > "$FIX/reviews_$1.json"; }

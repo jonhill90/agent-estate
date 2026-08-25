@@ -481,7 +481,7 @@ cat > "$OK/fixtures/pr_view_11.json" <<'S'
 S
 cat > "$OK/fixtures/reviews_11.json" <<'S'
 {"reviews":[],"comments":[
-  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:4","createdAt":"2026-08-13T20:57:01Z"}
+  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:4\nReviewed-SHA: 1111111111111111111111111111111111111111","createdAt":"2026-08-13T20:57:01Z"}
 ],"author":{"login":"jonhill90"},"commits":[{"oid":"1111111111111111111111111111111111111111","committedDate":"2026-08-13T20:57:01Z"}]}
 S
 cat > "$OK/fixtures/pr_view_12.json" <<'S'
@@ -489,7 +489,7 @@ cat > "$OK/fixtures/pr_view_12.json" <<'S'
 S
 cat > "$OK/fixtures/reviews_12.json" <<'S'
 {"reviews":[],"comments":[
-  {"author":{"login":"jonhill90"},"body":"**Verdict: REQUEST CHANGES**\nReview-Lane: t:3","createdAt":"2026-08-13T20:58:01Z"}
+  {"author":{"login":"jonhill90"},"body":"**Verdict: REQUEST CHANGES**\nReview-Lane: t:3\nReviewed-SHA: 1212121212121212121212121212121212121212","createdAt":"2026-08-13T20:58:01Z"}
 ],"author":{"login":"jonhill90"},"commits":[{"oid":"1212121212121212121212121212121212121212","committedDate":"2026-08-13T20:58:01Z"}]}
 S
 cat > "$OK/fixtures/pr_view_13.json" <<'S'
@@ -505,7 +505,7 @@ cat > "$OK/fixtures/pr_view_14.json" <<'S'
 S
 cat > "$OK/fixtures/reviews_14.json" <<'S'
 {"reviews":[],"comments":[
-  {"author":{"login":"jonhill90"},"body":"**Verdict: REQUEST CHANGES**\nReview-Lane: t:3","createdAt":"2026-08-13T21:00:01Z"}
+  {"author":{"login":"jonhill90"},"body":"**Verdict: REQUEST CHANGES**\nReview-Lane: t:3\nReviewed-SHA: 1414141414141414141414141414141414141414","createdAt":"2026-08-13T21:00:01Z"}
 ],"author":{"login":"jonhill90"},"commits":[{"oid":"1414141414141414141414141414141414141414","committedDate":"2026-08-13T21:00:01Z"}]}
 S
 
@@ -520,7 +520,7 @@ cat > "$OK/fixtures/pr_view_15.json" <<'S'
 S
 cat > "$OK/fixtures/reviews_15.json" <<'S'
 {"reviews":[],"comments":[
-  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:3","createdAt":"2026-08-13T21:01:01Z"}
+  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:3\nReviewed-SHA: 1515151515151515151515151515151515151515","createdAt":"2026-08-13T21:01:01Z"}
 ],"author":{"login":"jonhill90"},"commits":[{"oid":"1515151515151515151515151515151515151515","committedDate":"2026-08-13T21:01:01Z"}]}
 S
 
@@ -536,7 +536,7 @@ cat > "$OK/fixtures/pr_view_16.json" <<'S'
 S
 cat > "$OK/fixtures/reviews_16.json" <<'S'
 {"reviews":[],"comments":[
-  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:3","createdAt":"2026-08-14T09:00:01Z"}
+  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:3\nReviewed-SHA: 1616161616161616161616161616161616161616","createdAt":"2026-08-14T09:00:01Z"}
 ],"author":{"login":"jonhill90"},"commits":[{"oid":"1616161616161616161616161616161616161616","committedDate":"2026-08-14T09:00:01Z"}]}
 S
 cat > "$OK/fixtures/pr_view_17.json" <<'S'
@@ -544,7 +544,7 @@ cat > "$OK/fixtures/pr_view_17.json" <<'S'
 S
 cat > "$OK/fixtures/reviews_17.json" <<'S'
 {"reviews":[],"comments":[
-  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: lane/89-rev95","createdAt":"2026-08-14T09:01:01Z"}
+  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: lane/89-rev95\nReviewed-SHA: 1717171717171717171717171717171717171717","createdAt":"2026-08-14T09:01:01Z"}
 ],"author":{"login":"jonhill90"},"commits":[{"oid":"1717171717171717171717171717171717171717","committedDate":"2026-08-14T09:01:01Z"}]}
 S
 
@@ -566,7 +566,7 @@ cat > "$OK/fixtures/pr_view_18.json" <<'S'
 S
 cat > "$OK/fixtures/reviews_18.json" <<'S'
 {"reviews":[],"comments":[
-  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:88","createdAt":"2026-08-18T09:00:01Z"}
+  {"author":{"login":"jonhill90"},"body":"**Verdict: APPROVE**\nReview-Lane: t:88\nReviewed-SHA: 1818181818181818181818181818181818181818","createdAt":"2026-08-18T09:00:01Z"}
 ],"author":{"login":"jonhill90"},"commits":[{"oid":"1818181818181818181818181818181818181818","committedDate":"2026-08-18T09:00:01Z"}]}
 S
 

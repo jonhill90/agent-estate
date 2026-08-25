@@ -242,7 +242,7 @@ cat > "$FIX/author_42.json" <<'S'
 {"headRefName": "fix/42-thing", "closingIssuesReferences": [{"number": 42}], "commits": []}
 S
 cat > "$FIX/reviews_42.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:4\nReviewed-SHA: sha-2", "createdAt": "2026-08-15T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:4\nReviewed-SHA: sha-2", "createdAt": "2026-08-15T00:00:00Z"}]}
 S
 seed_author t:3 as42-author 42
 register_tmux_lane t:4 %44
@@ -265,7 +265,7 @@ cat > "$FIX/author_43.json" <<'S'
 {"headRefName": "fix/43-thing", "closingIssuesReferences": [{"number": 43}], "commits": []}
 S
 cat > "$FIX/reviews_43.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:3\nReviewed-SHA: sha-10", "createdAt": "2026-08-15T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:3\nReviewed-SHA: sha-10", "createdAt": "2026-08-15T00:00:00Z"}]}
 S
 seed_author t:3 as43-author 43
 out=$("$MERGE_PR" "$REPO" 43 2>&1)
@@ -287,7 +287,7 @@ cat > "$FIX/author_44.json" <<'S'
 {"headRefName": "some-hand-pushed-branch", "closingIssuesReferences": [], "commits": []}
 S
 cat > "$FIX/reviews_44.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:5\nReviewed-SHA: sha-11", "createdAt": "2026-08-15T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:5\nReviewed-SHA: sha-11", "createdAt": "2026-08-15T00:00:00Z"}]}
 S
 out=$("$MERGE_PR" "$REPO" 44 2>&1)
 rc=$?
@@ -312,7 +312,7 @@ cat > "$FIX/author_62.json" <<'S'
 {"headRefName": "some-hand-pushed-branch", "closingIssuesReferences": [], "commits": []}
 S
 cat > "$FIX/reviews_62.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:9\nReviewed-SHA: sha-62", "createdAt": "2026-08-19T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:9\nReviewed-SHA: sha-62", "createdAt": "2026-08-19T00:00:00Z"}]}
 S
 register_tmux_lane t:9 %90
 python3 "$LEDGER_CLI" --state-dir "$STATE" mark-pr-external --repo "$REPO" --pr 62 --note "human pushed directly" --chain-verified >/dev/null
@@ -335,7 +335,7 @@ cat > "$FIX/author_63.json" <<'S'
 {"headRefName": "some-other-hand-pushed-branch", "closingIssuesReferences": [], "commits": []}
 S
 cat > "$FIX/reviews_63.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:9\nReviewed-SHA: sha-63", "createdAt": "2026-08-19T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:9\nReviewed-SHA: sha-63", "createdAt": "2026-08-19T00:00:00Z"}]}
 S
 out=$("$MERGE_PR" "$REPO" 63 2>&1)
 rc=$?
@@ -362,7 +362,7 @@ cat > "$FIX/author_64.json" <<'S'
 {"headRefName": "feat/prior-attempts", "closingIssuesReferences": [], "commits": []}
 S
 cat > "$FIX/reviews_64.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:9\nReviewed-SHA: sha-64", "createdAt": "2026-08-20T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:9\nReviewed-SHA: sha-64", "createdAt": "2026-08-20T00:00:00Z"}]}
 S
 python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
   --lane t:8 --task as400-fixpass400 --summary "seed" --pane-id %98 --pane-path "$D/repo" \
@@ -391,7 +391,7 @@ cat > "$FIX/author_65.json" <<'S'
 {"headRefName": "feat/prior-attempts", "closingIssuesReferences": [], "commits": []}
 S
 cat > "$FIX/reviews_65.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:8\nReviewed-SHA: sha-65", "createdAt": "2026-08-20T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:8\nReviewed-SHA: sha-65", "createdAt": "2026-08-20T00:00:00Z"}]}
 S
 python3 "$LEDGER_CLI" --state-dir "$STATE" record-pr-for-task --task as400-fixpass400 --repo "$REPO" --pr 65 >/dev/null
 out=$("$MERGE_PR" "$REPO" 65 2>&1)
@@ -531,7 +531,7 @@ cat > "$FIX/author_48.json" <<'S'
 {"headRefName": "fix/48-thing", "closingIssuesReferences": [{"number": 48}], "commits": []}
 S
 cat > "$FIX/reviews_48.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:20\nReviewed-SHA: sha-20", "createdAt": "2026-08-16T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:20\nReviewed-SHA: sha-20", "createdAt": "2026-08-16T00:00:00Z"}]}
 S
 seed_author ad182-author-b as48-author 48
 reregister_as_claude_print ad182-author-b
@@ -552,7 +552,7 @@ cat > "$FIX/author_49.json" <<'S'
 {"headRefName": "fix/49-thing", "closingIssuesReferences": [{"number": 49}], "commits": []}
 S
 cat > "$FIX/reviews_49.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: ad182-review-186\nReviewed-SHA: sha-21", "createdAt": "2026-08-16T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: ad182-review-186\nReviewed-SHA: sha-21", "createdAt": "2026-08-16T00:00:00Z"}]}
 S
 seed_author t:22 as49-author 49
 register_tmux_lane t:22 %22
@@ -584,7 +584,7 @@ cat > "$FIX/author_50.json" <<'S'
 {"headRefName": "fix/50-thing", "closingIssuesReferences": [{"number": 50}], "commits": []}
 S
 cat > "$FIX/reviews_50.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: ad182-author-b\nReviewed-SHA: sha-22", "createdAt": "2026-08-16T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: ad182-author-b\nReviewed-SHA: sha-22", "createdAt": "2026-08-16T00:00:00Z"}]}
 S
 seed_author ad182-author-b as50-author 50
 reregister_as_claude_print ad182-author-b
@@ -624,7 +624,7 @@ cat > "$FIX/author_60.json" <<'S'
 {"headRefName": "fix/60-thing", "closingIssuesReferences": [{"number": 60}], "commits": []}
 S
 cat > "$FIX/reviews_60.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: new:60\nReviewed-SHA: sha-60", "createdAt": "2026-08-18T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: new:60\nReviewed-SHA: sha-60", "createdAt": "2026-08-18T00:00:00Z"}]}
 S
 seed_author old:60 as60-author 60
 register_tmux_lane new:60 %77
@@ -649,7 +649,7 @@ cat > "$FIX/author_61.json" <<'S'
 {"headRefName": "fix/61-thing", "closingIssuesReferences": [{"number": 61}], "commits": []}
 S
 cat > "$FIX/reviews_61.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:62\nReviewed-SHA: sha-61", "createdAt": "2026-08-18T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:62\nReviewed-SHA: sha-61", "createdAt": "2026-08-18T00:00:00Z"}]}
 S
 seed_author t:3 as61-author 61
 register_tmux_lane t:62 %9
@@ -724,7 +724,7 @@ cat > "$FIX/author_70.json" <<'S'
 {"headRefName": "fix/70-thing", "closingIssuesReferences": [{"number": 70}], "commits": []}
 S
 cat > "$FIX/reviews_70.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:4\nReviewed-SHA: sha-70", "createdAt": "2026-08-20T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:4\nReviewed-SHA: sha-70", "createdAt": "2026-08-20T00:00:00Z"}]}
 S
 out=$("$MERGE_PR" "$REPO" 70 2>&1)
 rc=$?
@@ -784,7 +784,7 @@ cat > "$FIX/author_485.json" <<'S'
 {"headRefName": "fix/485-thing", "closingIssuesReferences": [{"number": 485}], "commits": []}
 S
 cat > "$FIX/reviews_485.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: REQUEST CHANGES**\n\nReview-Lane: t:5\nReviewed-SHA: sha-485", "createdAt": "2026-08-21T19:14:14Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: REQUEST CHANGES**\nReview-Lane: t:5\nReviewed-SHA: sha-485", "createdAt": "2026-08-21T19:14:14Z"}]}
 S
 seed_author t:2 as485-author 485
 register_tmux_lane t:5 %85
@@ -807,7 +807,7 @@ cat > "$FIX/author_486.json" <<'S'
 {"headRefName": "fix/486-thing", "closingIssuesReferences": [{"number": 486}], "commits": []}
 S
 cat > "$FIX/reviews_486.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:5\nReviewed-SHA: sha-486", "createdAt": "2026-08-21T19:14:14Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:5\nReviewed-SHA: sha-486", "createdAt": "2026-08-21T19:14:14Z"}]}
 S
 seed_author t:2 as486-author 486
 out=$("$MERGE_PR" "$REPO" 486 2>&1)
@@ -844,7 +844,7 @@ cat > "$FIX/author_90.json" <<'S'
 {"headRefName": "some-hand-pushed-branch", "closingIssuesReferences": [], "commits": [], "body": "Opened by hand.\n\nAuthor-Lane: estate:4\n"}
 S
 cat > "$FIX/reviews_90.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: estate:4\nReviewed-SHA: sha-90", "createdAt": "2026-08-23T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: estate:4\nReviewed-SHA: sha-90", "createdAt": "2026-08-23T00:00:00Z"}]}
 S
 register_tmux_lane estate:4 %900
 out=$("$MERGE_PR" "$REPO" 90 2>&1)
@@ -871,7 +871,7 @@ cat > "$FIX/author_91.json" <<'S'
 {"headRefName": "fix/91-thing", "closingIssuesReferences": [{"number": 91}], "commits": [], "body": "Fixes #91.\n\nAuthor-Lane: t:3\n"}
 S
 cat > "$FIX/reviews_91.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:4\nReviewed-SHA: sha-91", "createdAt": "2026-08-23T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:4\nReviewed-SHA: sha-91", "createdAt": "2026-08-23T00:00:00Z"}]}
 S
 seed_author t:3 as91-author 91
 register_tmux_lane t:4 %910
@@ -905,7 +905,7 @@ cat > "$FIX/author_92.json" <<'S'
 {"headRefName": "fix/92-thing", "closingIssuesReferences": [{"number": 92}], "commits": [], "body": "Notes.\n\nAuthor-Lane:\nReview-Lane: t:9\n"}
 S
 cat > "$FIX/reviews_92.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:9\nReviewed-SHA: sha-92", "createdAt": "2026-08-23T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:9\nReviewed-SHA: sha-92", "createdAt": "2026-08-23T00:00:00Z"}]}
 S
 seed_author t:9 as92-author 92
 out=$("$MERGE_PR" "$REPO" 92 2>&1)
@@ -932,7 +932,7 @@ cat > "$FIX/author_93.json" <<'S'
 {"headRefName": "fix/93-thing", "closingIssuesReferences": [{"number": 93}], "commits": [], "body": "Fixes #93.\n\nAuthor-Lane: t:6\n"}
 S
 cat > "$FIX/reviews_93.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:6\nReviewed-SHA: sha-93", "createdAt": "2026-08-23T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:6\nReviewed-SHA: sha-93", "createdAt": "2026-08-23T00:00:00Z"}]}
 S
 seed_author t:5 as93-author 93
 register_tmux_lane t:6 %930
@@ -995,7 +995,7 @@ cat > "$FIX/head_51.json" <<'S'
 S
 green_checkruns sha-23
 cat > "$FIX/reviews_51.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: t:9\nReviewed-SHA: sha-23", "createdAt": "2026-08-16T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:9\nReviewed-SHA: sha-23", "createdAt": "2026-08-16T00:00:00Z"}]}
 S
 register_tmux_lane t:9 %9
 
@@ -1053,7 +1053,7 @@ cat > "$FIX/author_70.json" <<'S'
 {"headRefName": "d-as70-daemon", "closingIssuesReferences": [{"number": 70}], "commits": []}
 S
 cat > "$FIX/reviews_70.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: estate:5\nReviewed-SHA: sha-70", "createdAt": "2026-08-24T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: estate:5\nReviewed-SHA: sha-70", "createdAt": "2026-08-24T00:00:00Z"}]}
 S
 seed_daemon_author daemon as70-daemon 70 70
 register_tmux_lane estate:5 %39
@@ -1073,7 +1073,7 @@ cat > "$FIX/author_71.json" <<'S'
 {"headRefName": "d-as71-daemon", "closingIssuesReferences": [{"number": 71}], "commits": []}
 S
 cat > "$FIX/reviews_71.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: estate:3\nReviewed-SHA: sha-71", "createdAt": "2026-08-24T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: estate:3\nReviewed-SHA: sha-71", "createdAt": "2026-08-24T00:00:00Z"}]}
 S
 seed_daemon_author d-as71-daemon as71-daemon 71 71
 register_tmux_lane estate:3 %40
@@ -1094,7 +1094,7 @@ cat > "$FIX/author_72.json" <<'S'
 {"headRefName": "d-as72-daemon", "closingIssuesReferences": [{"number": 72}], "commits": []}
 S
 cat > "$FIX/reviews_72.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: daemon\nReviewed-SHA: sha-72", "createdAt": "2026-08-24T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: daemon\nReviewed-SHA: sha-72", "createdAt": "2026-08-24T00:00:00Z"}]}
 S
 seed_daemon_author daemon as72-daemon 72 72
 out=$("$MERGE_PR" "$REPO" 72 2>&1)
@@ -1121,7 +1121,7 @@ cat > "$FIX/author_73.json" <<'S'
 {"headRefName": "fix/73-thing", "closingIssuesReferences": [{"number": 73}], "commits": []}
 S
 cat > "$FIX/reviews_73.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: d-as73-neverdispatched\nReviewed-SHA: sha-73", "createdAt": "2026-08-24T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: d-as73-neverdispatched\nReviewed-SHA: sha-73", "createdAt": "2026-08-24T00:00:00Z"}]}
 S
 seed_author estate:5 as73-author 73
 out=$("$MERGE_PR" "$REPO" 73 2>&1)
@@ -1146,7 +1146,7 @@ cat > "$FIX/author_74.json" <<'S'
 {"headRefName": "d-as74-fake", "closingIssuesReferences": [{"number": 74}], "commits": []}
 S
 cat > "$FIX/reviews_74.json" <<'S'
-{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\n\nReview-Lane: estate:9\nReviewed-SHA: sha-74", "createdAt": "2026-08-24T00:00:00Z"}]}
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: estate:9\nReviewed-SHA: sha-74", "createdAt": "2026-08-24T00:00:00Z"}]}
 S
 seed_fake_daemon_author d-as74-fake as74-fake-daemon 74 74
 register_tmux_lane estate:9 %41
