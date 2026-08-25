@@ -1,3 +1,52 @@
+---
+type: Archive
+description: The Go daemon (supervisord) was retired and moved here from daemon/ -- archived, not deleted. Full reasoning in agent-supervisor#627.
+generated:
+  at: 2026-08-24T00:00:00-04:00
+---
+
+# Archived 2026-08-24 -- see agent-supervisor#627
+
+This tree used to be `daemon/` at the repo root, an active Go module built
+and tested by its own CI workflow (`Daemon CI`). It is moved here, `git mv`,
+history intact, **not deleted** -- read `#627`'s issue thread, specifically
+the director's revised decision comment (the LAST one, which reverses an
+earlier "keep it" call), for the full reasoning. In short:
+
+- Production exposure was 3 tasks out of 2,006 (0.15%), one lane, ~30
+  minutes, one day, never scheduled -- not a maturing second path.
+- It had stalled (7 commits over two days, then nothing), the same shape
+  this repo's own record already treats as a warning sign elsewhere.
+- It cannot actually replace the shell control plane it was meant to
+  replace: `claim.go` shells out to `claim.sh`, a circular dependency.
+- The founding size comparison in this README (44,794 bash lines vs ~700
+  Go) had already failed its own truth-check before this decision.
+- The acceptance-gap problem that motivated building it in the first place
+  had already resolved itself, in the shell, before the daemon was retired.
+- Every merge/CI/verdict-independence safety gate stayed exclusively in
+  `scripts/supervisor` the whole time this daemon existed -- 8 of 10
+  safety-critical behaviours an independent council checked were simply
+  absent from the daemon.
+
+One genuinely valuable, mutation-proven property survived the retirement:
+`ledger.go`'s refusal to restamp a terminal task
+(`TestFinishRefusesToRestampTerminal`, #488) was ported into
+`scripts/supervisor/core.py`'s own completion write path, with an
+equivalent mutation-proven Python test
+(`test_complete_refuses_to_restamp_a_task_already_failed_or_cancelled` in
+`tests/supervisor/test_core.py`) -- see that PR for the port itself.
+
+Nothing in this tree was rewritten or stripped for the archive, including
+its incident-history comments -- `internal/claim/claim.go`'s package doc
+(the raw-SQL, no-claim-logic gap `ebec9b3` fixed) and the two bugs "found
+by running it" recorded below -- that is real, worth-keeping institutional
+memory, the same reasoning the archive decision itself used. `Daemon CI`
+(the workflow that built and tested this module) was removed rather than
+repointed at the new path, since nothing should build or test this copy
+going forward.
+
+---
+
 # supervisord
 
 The supervisor as a single Go binary. Replaces the shell/tmux control plane.
