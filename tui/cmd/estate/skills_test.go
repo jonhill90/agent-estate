@@ -7,8 +7,8 @@ import (
 
 // TestResolveSkillsEvalStatusEmptyWithNoRepo is the state a machine with no
 // jonhill90/skills checkout is in -- resolveSkillsEvalStatus must return ""
-// so skills.EvalStatusFetcher degrades to today's honest "unevaluated"
-// rather than being handed a bogus path (agent-tui#151).
+// so skills.EvalStatusFetcher renders the honest "store unreadable" state
+// (agent-tui#146) rather than being handed a bogus path.
 func TestResolveSkillsEvalStatusEmptyWithNoRepo(t *testing.T) {
 	if got := resolveSkillsEvalStatus(""); got != "" {
 		t.Errorf("resolveSkillsEvalStatus(\"\") = %q, want empty", got)

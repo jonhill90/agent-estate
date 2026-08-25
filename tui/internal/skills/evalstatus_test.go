@@ -86,11 +86,14 @@ func TestEvalStatusFetcher_MergesVerdictAndDate(t *testing.T) {
 	}
 }
 
-// TestEvalStatusFetcher_MissingStoreDegradesToUnevaluated is agent-tui#151's
-// own scope line made concrete: a store path that does not exist must not
-// error the whole skill list, and every skill must still render honestly
-// unevaluated -- exactly today's behaviour, not a regression to a crash.
-func TestEvalStatusFetcher_MissingStoreDegradesToUnevaluated(t *testing.T) {
+// TestEvalStatusFetcher_MissingStoreRendersStoreUnreadable is agent-tui#146:
+// a store path that does not exist must not error the whole skill list, but
+// it must ALSO not read as the same "unevaluated" a skill with a genuinely
+// empty record gets -- every skill renders VerdictStoreUnreadable instead,
+// a fact distinct from "checked, nothing found." (Superseded
+// TestEvalStatusFetcher_MissingStoreDegradesToUnevaluated, which asserted
+// the old collapse-to-"" behaviour agent-tui#146 fixed.)
+func TestEvalStatusFetcher_MissingStoreRendersStoreUnreadable(t *testing.T) {
 	skillsDir := t.TempDir()
 	writeSkill(t, skillsDir, "alpha", "---\nname: alpha\ndescription: x\n---\n")
 
@@ -102,19 +105,22 @@ func TestEvalStatusFetcher_MissingStoreDegradesToUnevaluated(t *testing.T) {
 	if len(got) != 1 {
 		t.Fatalf("got %+v, want exactly one skill", got)
 	}
-	if got[0].Verdict != "" {
-		t.Errorf("Verdict = %q, want zero value", got[0].Verdict)
+	if got[0].Verdict != VerdictStoreUnreadable {
+		t.Errorf("Verdict = %q, want %q", got[0].Verdict, VerdictStoreUnreadable)
 	}
 	if got[0].LastEval != nil {
 		t.Errorf("LastEval = %v, want nil", *got[0].LastEval)
 	}
 }
 
-// TestEvalStatusFetcher_EmptyPathDegradesToUnevaluated covers the
+// TestEvalStatusFetcher_EmptyPathRendersStoreUnreadable covers the
 // "no -skills-repo configured at all" case (evalStatusPath == "") -- the
 // common, expected standalone-run shape, not merely a missing-file edge
-// case.
-func TestEvalStatusFetcher_EmptyPathDegradesToUnevaluated(t *testing.T) {
+// case. This is also agent-tui#146's own reported symptom: a stock
+// checkout with no -skills-repo flag rendered every skill "unevaluated"
+// with no way to tell that from a real, empty store. (Superseded
+// TestEvalStatusFetcher_EmptyPathDegradesToUnevaluated.)
+func TestEvalStatusFetcher_EmptyPathRendersStoreUnreadable(t *testing.T) {
 	skillsDir := t.TempDir()
 	writeSkill(t, skillsDir, "alpha", "---\nname: alpha\ndescription: x\n---\n")
 
@@ -122,17 +128,18 @@ func TestEvalStatusFetcher_EmptyPathDegradesToUnevaluated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvalStatusFetcher with no store configured: %v, want nil error", err)
 	}
-	if len(got) != 1 || got[0].Verdict != "" || got[0].LastEval != nil {
-		t.Fatalf("got %+v, want one skill with zero-value Verdict/LastEval", got)
+	if len(got) != 1 || got[0].Verdict != VerdictStoreUnreadable || got[0].LastEval != nil {
+		t.Fatalf("got %+v, want one skill with Verdict %q and nil LastEval", got, VerdictStoreUnreadable)
 	}
 }
 
-// TestEvalStatusFetcher_MalformedStoreDegradesToUnevaluated -- a store that
+// TestEvalStatusFetcher_MalformedStoreRendersStoreUnreadable -- a store that
 // exists but is not valid JSON in the expected shape must degrade the same
-// way a missing one does, not surface as m.fetchErr (this is jonhill90/skills'
-// own file, not this package's -- a bad write there must not paint the
-// whole skills scan red).
-func TestEvalStatusFetcher_MalformedStoreDegradesToUnevaluated(t *testing.T) {
+// way a missing one does (VerdictStoreUnreadable, not a crash), and must
+// not surface as m.fetchErr (this is jonhill90/skills' own file, not this
+// package's -- a bad write there must not paint the whole skills scan
+// red). (Superseded TestEvalStatusFetcher_MalformedStoreDegradesToUnevaluated.)
+func TestEvalStatusFetcher_MalformedStoreRendersStoreUnreadable(t *testing.T) {
 	skillsDir := t.TempDir()
 	writeSkill(t, skillsDir, "alpha", "---\nname: alpha\ndescription: x\n---\n")
 
@@ -143,8 +150,32 @@ func TestEvalStatusFetcher_MalformedStoreDegradesToUnevaluated(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EvalStatusFetcher with a malformed store: %v, want nil error", err)
 	}
-	if len(got) != 1 || got[0].Verdict != "" {
-		t.Fatalf("got %+v, want one skill with zero-value Verdict", got)
+	if len(got) != 1 || got[0].Verdict != VerdictStoreUnreadable {
+		t.Fatalf("got %+v, want one skill with Verdict %q", got, VerdictStoreUnreadable)
+	}
+}
+
+// TestEvalStatusFetcher_UnreadableStoreDoesNotMaskARealRecord is
+// agent-tui#146's own mutation-check in the OTHER direction: a store that
+// IS readable and DOES have a record for a skill must still render that
+// record, never VerdictStoreUnreadable -- the fix must not overcorrect into
+// papering over real data with the new "could not read" state.
+func TestEvalStatusFetcher_UnreadableStoreDoesNotMaskARealRecord(t *testing.T) {
+	skillsDir := t.TempDir()
+	writeSkill(t, skillsDir, "adopt-or-build", "---\nname: adopt-or-build\ndescription: decide\n---\n")
+
+	storePath := filepath.Join(t.TempDir(), "docs", "eval-status.json")
+	writeEvalStatus(t, storePath, `{"skills": {"adopt-or-build": {"verdict": "keep", "date": "2026-08-22"}}}`)
+
+	got, err := EvalStatusFetcher(skillsDir, storePath)()
+	if err != nil {
+		t.Fatalf("EvalStatusFetcher: %v", err)
+	}
+	if len(got) != 1 || got[0].Verdict != "keep" {
+		t.Fatalf("got %+v, want one skill with Verdict %q", got, "keep")
+	}
+	if got[0].Verdict == VerdictStoreUnreadable {
+		t.Errorf("a readable store with a real record rendered VerdictStoreUnreadable")
 	}
 }
 

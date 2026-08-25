@@ -16,6 +16,21 @@ import (
 // VerdictUnevaluated anywhere in EvalStatusFetcher below.
 const VerdictCouldNotMeasure = "could_not_measure"
 
+// VerdictStoreUnreadable is Skill.Verdict's value for EVERY skill when
+// EvalStatusFetcher could not read evalStatusPath at all -- unconfigured
+// (empty path), missing file, or invalid JSON in the expected shape.
+// agent-tui#146: earlier this collapsed onto VerdictUnevaluated, which
+// erased the exact distinction this estate insists on elsewhere
+// (VerdictCouldNotMeasure vs VerdictUnevaluated, above): "we read the
+// store and it has no record for this skill" and "we never managed to
+// read the store at all" are different facts, and a reader cannot tell
+// 41 genuinely-unevaluated skills from a store that silently isn't
+// wired up if both render the same word. A skill that DOES have a
+// record still shows it (the merge loop below only runs once the store
+// loaded); this value only ever appears when the merge could not run at
+// all.
+const VerdictStoreUnreadable = "store unreadable"
+
 // evalRecord is one entry from docs/eval-status.json's own "skills" map --
 // only the two fields View renders (Verdict, LastEval's source date).
 // Evidence is on disk too but nothing in this package's Skill has a column
@@ -61,19 +76,26 @@ func loadEvalStatus(path string) (map[string]evalRecord, error) {
 // LAST EVAL is filled in from the matching record's date, VERDICT from its
 // verdict (VerdictCouldNotMeasure preserved as its own value, never
 // flattened onto VerdictUnevaluated -- see that const's own doc comment).
-// A skill with no matching Dir in the store, or evalStatusPath == "", or a
-// store that does not exist or fails to parse, is left exactly as Scan
+// A skill with no matching Dir in the store is left exactly as Scan
 // produced it -- Verdict's zero value ("unevaluated") and LastEval nil --
-// agent-tui#151's own "degrade to today's honest unevaluated when the file
-// is absent rather than erroring" scope line. This is deliberately NOT
-// surfaced through the returned error (which stays Scan's own): a caller
-// running with no skills-repo checkout configured is an expected, common
-// case, not a fetch failure of the skill list itself, so it must not
-// paint m.fetchErr red the way a genuinely broken ~/.claude/skills scan
-// would.
+// because the store WAS read and genuinely has nothing for that one skill.
+//
+// evalStatusPath == "" (nothing configured) or a store that does not exist
+// or fails to parse is a DIFFERENT fact -- every skill's Verdict is set to
+// VerdictStoreUnreadable instead (agent-tui#146: this used to degrade
+// silently to VerdictUnevaluated, which made "checked, no record" and
+// "never checked" indistinguishable -- exactly the ambiguity
+// VerdictCouldNotMeasure already exists to avoid on the other side of this
+// same store). This is still deliberately NOT surfaced through the
+// returned error (which stays Scan's own): a caller running with no
+// skills-repo checkout configured is an expected, common case, not a fetch
+// failure of the skill list itself, so it must not paint m.fetchErr red
+// the way a genuinely broken ~/.claude/skills scan would -- VERDICT itself
+// is where this estate says so instead.
 //
 // INVOCATIONS has no source in docs/eval-status.json (agent-tui#151's own
-// scope line) and is left untouched -- always nil, always "unknown".
+// scope line, unchanged by agent-tui#146) and is left untouched -- always
+// nil, always "unknown".
 func EvalStatusFetcher(skillsDir, evalStatusPath string) Fetcher {
 	return func() ([]Skill, error) {
 		out, err := Scan(skillsDir)
@@ -81,13 +103,15 @@ func EvalStatusFetcher(skillsDir, evalStatusPath string) Fetcher {
 			return nil, err
 		}
 		if evalStatusPath == "" {
+			markStoreUnreadable(out)
 			return out, nil
 		}
 		status, err := loadEvalStatus(evalStatusPath)
 		if err != nil {
-			// Absent or unreadable store: stay honestly unevaluated rather
-			// than erroring the whole skill list (this func's own doc
-			// comment).
+			// Missing, unreadable, or malformed store: every skill says so,
+			// rather than any one of them reading as a real "unevaluated"
+			// (this func's own doc comment).
+			markStoreUnreadable(out)
 			return out, nil
 		}
 		for i := range out {
@@ -104,5 +128,15 @@ func EvalStatusFetcher(skillsDir, evalStatusPath string) Fetcher {
 			}
 		}
 		return out, nil
+	}
+}
+
+// markStoreUnreadable sets every skill's Verdict to VerdictStoreUnreadable
+// in place -- the shared tail of EvalStatusFetcher's two "could not read
+// the store at all" branches (unconfigured path, and configured-but-failed
+// read/parse), kept as one function so both branches stay in sync.
+func markStoreUnreadable(skills []Skill) {
+	for i := range skills {
+		skills[i].Verdict = VerdictStoreUnreadable
 	}
 }
