@@ -2543,6 +2543,16 @@ else
   # is present) -- see cli.py's own docstring. The `--issue` args above are
   # still sent; they land in evidence, not the source key, for this path.
   [ -z "$PR_SCOPED" ] || LEDGER_ARGS+=(--pr "$PR_SCOPED")
+  # agent-supervisor#640: record review-ness as the FACT this dispatch
+  # already knows, instead of leaving `get_contributor_tasks_for_pr` to
+  # guess it back later from `$WINDOW_NAME`/`$SLUG` text via
+  # `_task_looks_like_review` -- the guess is what let a `--reviews-pr`
+  # task named `rerev...` (the "re" immediately before "rev", no `-`/`_`
+  # between them, defeats that regex) score as an AUTHOR of the PR it
+  # reviewed. `$REVIEWS_PR`, not `$PR_SCOPED`: a `--pr`-only fix pass must
+  # record itself as explicitly NOT a review (see cli.py's own docstring),
+  # never omit the flag and let it read as "unknown".
+  [ -z "$REVIEWS_PR" ] || LEDGER_ARGS+=(--is-review)
   if ! LEDGER_OUT=$("${DISPATCH_PYTHON:-python3}" "$HERE/cli.py" "${LEDGER_ARGS[@]}" 2>&1); then
     if grep -qF 'PR-DUPLICATE:' <<<"$LEDGER_OUT"; then
       PR_DUP_MSG=$(sed -n 's/^PR-DUPLICATE: //p' <<<"$LEDGER_OUT" | head -1)

@@ -443,6 +443,8 @@ class Ledger:
         self._migrate_lanes_table(failpoint=_migration_failpoint)
         self._migrate_tasks_table(failpoint=_migration_failpoint)
         self._migrate_source_tasks_table(failpoint=_migration_failpoint)
+        self._migrate_source_tasks_review_column(failpoint=_migration_failpoint)
+        self._backfill_known_misclassified_review_tasks(failpoint=_migration_failpoint)
         self._migrate_source_tasks_pull_uniqueness(failpoint=_migration_failpoint)
 
     def _connect(self, *, foreign_keys=True):
@@ -647,7 +649,20 @@ class Ledger:
                     ),
                     evidence_json TEXT NOT NULL,
                     status_marker TEXT,
-                    updated_at INTEGER NOT NULL
+                    updated_at INTEGER NOT NULL,
+                    -- agent-supervisor#640: whether THIS dispatch was known,
+                    -- at dispatch time, to be a review (`dispatch.sh
+                    -- --reviews-pr`) rather than a fix pass or original
+                    -- authoring dispatch (`--pr` / issue-scoped). 1 = review,
+                    -- 0 = explicitly recorded as not a review, NULL = not
+                    -- recorded (every row written before this column
+                    -- existed, and every issue-scoped row -- the property is
+                    -- only ever written for `source_kind='pull'` rows,
+                    -- because that is the only shape `get_contributor_tasks_
+                    -- for_pr` reads it for). NULL is the "don't know, ask
+                    -- `_task_looks_like_review`" signal -- see that method's
+                    -- own docstring.
+                    is_review INTEGER CHECK (is_review IN (0, 1))
                 );
 
                 CREATE TABLE IF NOT EXISTS events (
@@ -1318,6 +1333,113 @@ class Ledger:
                     connection.commit()
             finally:
                 connection.close()
+
+    # agent-supervisor#640: the two live rows this issue measured directly
+    # as mislabelled -- `_task_looks_like_review`'s regex requires "rev" (or
+    # "review") right after `^`, `-` or `_`, and in both ids it is preceded
+    # by "re" instead, so the OLD fallback never recognised them as reviews.
+    # Both are backfilled explicitly here rather than left to a widened
+    # regex: this issue's own "do not fix this ... by editing the regex
+    # alone" instruction rules out trying to make the pattern generally
+    # correct, and a general widening risks the opposite failure this issue
+    # is about -- see `_task_looks_like_review`'s own docstring on why
+    # "rev" as a substring is not safe to match unconditionally
+    # (`revamp-parser`, `reverse-index`). These two ids are known-good
+    # ground truth (agent-supervisor#640's own measurement: both were
+    # dispatched with `--reviews-pr`, committed nothing -- `ahead=0,
+    # dirty=0` -- and were wrongly scored as authors), so they are named
+    # here by hand instead. Every OTHER pre-existing row keeps whatever
+    # `_task_looks_like_review` already answers for it, unchanged --
+    # documented, not silently patched, per this issue's verification bar.
+    _KNOWN_MISCLASSIFIED_REVIEW_TASK_IDS = ("as637-rerev636", "Skills266-rerev284")
+
+    def _backfill_known_misclassified_review_tasks(self, *, failpoint=None):
+        """One-time, idempotent backfill for the two rows agent-supervisor#640
+        measured by hand -- see `_KNOWN_MISCLASSIFIED_REVIEW_TASK_IDS`.
+
+        Runs every `__init__`, not just once: cheap (`id IN (...)`, at most
+        two rows), and idempotent by construction -- `is_review = 1` is a
+        no-op against a row that already reads 1, and the `WHERE` clause
+        only ever touches a row that is BOTH one of these two known ids AND
+        still `source_kind = 'pull'`, so it can never overwrite a row this
+        issue did not measure. Requires the `is_review` column to already
+        exist (`_migrate_source_tasks_review_column` runs first in
+        `__init__`) -- `PRAGMA table_info` guards a ledger that predates
+        even that, rather than raising `sqlite3.OperationalError: no such
+        column` on a first-ever `__init__` ordering change.
+        """
+        with self._locked():
+            with contextlib.closing(self._connect()) as probe:
+                columns = {row["name"] for row in probe.execute("PRAGMA table_info(source_tasks)").fetchall()}
+                if "is_review" not in columns:
+                    return
+            with self._transaction() as connection:
+                self._fail(failpoint, "before_backfill")
+                connection.execute(
+                    f"""
+                    UPDATE source_tasks SET is_review = 1
+                    WHERE source_kind = 'pull'
+                      AND id IN ({",".join("?" for _ in self._KNOWN_MISCLASSIFIED_REVIEW_TASK_IDS)})
+                    """,
+                    self._KNOWN_MISCLASSIFIED_REVIEW_TASK_IDS,
+                )
+                self._fail(failpoint, "after_backfill")
+
+    def _migrate_source_tasks_review_column(self, *, failpoint=None):
+        """Add `source_tasks.is_review`, agent-supervisor#640.
+
+        Unlike `_migrate_tasks_table` / `_migrate_source_tasks_table` above,
+        this does NOT rebuild the table. `ALTER TABLE ... ADD COLUMN` is
+        sufficient here and is preferred over the drop-and-recreate dance
+        those two migrations need, for two reasons specific to THIS column:
+
+        1. It needs no CHECK constraint widened and no NOT NULL backfill
+           that is not a flat constant -- a nullable `INTEGER CHECK
+           (is_review IN (0, 1))` is exactly representable by `ADD COLUMN`
+           (verified directly: SQLite accepts a `CHECK` on an added column
+           as long as its default -- here, the implicit `NULL` every
+           pre-existing row gets -- satisfies it; `NULL` always does, since
+           SQL `CHECK` treats an unknown/NULL result as passing, not
+           failing).
+        2. `ADD COLUMN` never renames the table, so it cannot walk into
+           agent-supervisor#635/#636's hazard: `ALTER TABLE ... RENAME`
+           validates every OTHER schema object's references as part of the
+           rename (SQLite >= 3.25), and `_migrate_tasks_table` /
+           `_migrate_source_tasks_table` both have to drop and recreate
+           `ONE_OPEN_PULL_PER_SOURCE_REF` around their own rebuilds solely
+           to survive that validation. `ADD COLUMN` performs no rename at
+           all, so the trigger is never at risk here and this migration
+           does not touch it.
+
+        `PRAGMA table_info` decides whether the column already exists
+        (rather than probing `sqlite_master.sql` for a text marker, the
+        other migrations' approach) because there is no CHECK-widening or
+        column-set text to search for -- either the column is there or it
+        is not.
+
+        Every row written before this migration reads `is_review IS NULL`
+        -- "not recorded" -- and `get_contributor_tasks_for_pr` falls back
+        to `_task_looks_like_review` for exactly those rows, unchanged from
+        before this column existed (agent-supervisor#640's verification
+        bar 3). `_backfill_known_misclassified_review_tasks`, run right
+        after this in `__init__`, is the one deliberate exception.
+        """
+        with self._locked():
+            with contextlib.closing(self._connect()) as probe:
+                existing = probe.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='source_tasks'"
+                ).fetchone()
+                if existing is None:
+                    return
+                columns = {row["name"] for row in probe.execute("PRAGMA table_info(source_tasks)").fetchall()}
+                if "is_review" in columns:
+                    return
+            with self._transaction() as connection:
+                self._fail(failpoint, "before_add_is_review_column")
+                connection.execute(
+                    "ALTER TABLE source_tasks ADD COLUMN is_review INTEGER CHECK (is_review IN (0, 1))"
+                )
+                self._fail(failpoint, "after_add_is_review_column")
 
     ONE_OPEN_PULL_PER_SOURCE_REF = "one_open_pull_per_source_ref"
 
@@ -2039,6 +2161,33 @@ class Ledger:
 
     @staticmethod
     def _task_looks_like_review(task_id, summary):
+        """A NAME-GUESSING FALLBACK, not the intended mechanism.
+
+        agent-supervisor#640: whether a task is a review is a structural
+        fact known exactly at dispatch time (`dispatch.sh --reviews-pr` vs
+        `--pr`/issue-scoped) and recorded, for `source_kind='pull'` rows, in
+        `source_tasks.is_review` -- see that column's own comment on
+        `source_tasks`' `CREATE TABLE`. `get_contributor_tasks_for_pr`
+        reads that recorded column FIRST and only calls this when it reads
+        `NULL` (a row written before the column existed). Every other
+        caller here (`_non_review_tasks_for_issue`, `get_task_for_worktree`)
+        still uses this as its only mechanism -- they resolve
+        `source_kind='issue'` / plain `tasks` rows, which never carry
+        `is_review` at all (`--reviews-pr` always writes `source_kind=
+        'pull'`), so there is no recorded fact for them to prefer.
+
+        This regex is demonstrably unreliable in BOTH directions -- proven
+        by agent-supervisor#640's own measurement, not asserted: it never
+        matches "rerev636" or "rereview" (no `-`/`_` separates "re" from
+        "rev", so the required "right after `^`/`-`/`_`" boundary never
+        fires) and it DOES match "revamp-parser" and "reverse-index" (`rev`
+        occurs at the string's own start, satisfying that same boundary,
+        then `[-_0-9a-z]*` consumes the rest of the word). Do not widen it
+        to fix one of those without re-checking the other -- the two
+        failure directions pull in opposite directions on the same pattern.
+        Left exactly as measured, on purpose: this issue's own instruction
+        is not to fix the guess, but to stop needing it.
+        """
         # `task_id` and `summary` are joined with a literal space before
         # matching, so a task id whose "review"/"rev" run sits at the id's
         # own end (e.g. "as76-rev73b") is followed by that space, not by
@@ -2222,11 +2371,26 @@ class Ledger:
         on purpose, the same safe direction `get_contributor_tasks_for_issue`
         documents -- a same-numbered PR in a different repo costs an extra
         excluded candidate lane, never a missed one.
+
+        agent-supervisor#640: review-exclusion now prefers the RECORDED
+        fact, `source_tasks.is_review`, over the name-guessing regex this
+        method used exclusively before. `is_review = 1` excludes; `= 0`
+        (an explicit "not a review", written for a `--pr` fix-pass) keeps,
+        whatever the task happens to be named -- a fix-pass named
+        `revamp-parser` or `reverse-index` is never excluded once
+        `dispatch.sh` records it this way, even though
+        `_task_looks_like_review`'s own regex would misfire on both names.
+        Only `is_review IS NULL` -- a row written before this column
+        existed -- falls back to `_task_looks_like_review`, exactly the
+        (imperfect, measured) behaviour every caller of this method already
+        lived with before this column existed.
         """
         with contextlib.closing(self._connect()) as connection:
             rows = connection.execute(
                 """
-                SELECT tasks.*, source_tasks.source_url AS _source_url FROM tasks
+                SELECT tasks.*, source_tasks.source_url AS _source_url,
+                       source_tasks.is_review AS _is_review
+                FROM tasks
                 JOIN source_tasks ON source_tasks.id = tasks.id
                 WHERE source_tasks.source_kind = 'pull' AND source_tasks.source_ref = ?
                 ORDER BY tasks.created_at ASC, tasks.id ASC
@@ -2235,9 +2399,14 @@ class Ledger:
             ).fetchall()
         candidates = []
         for row in rows:
-            if self._task_looks_like_review(row["id"], row["summary"]):
+            is_review = row["_is_review"]
+            is_review = bool(is_review) if is_review is not None else self._task_looks_like_review(
+                row["id"], row["summary"]
+            )
+            if is_review:
                 continue
             candidate = self._dict(row)
+            candidate.pop("_is_review", None)
             candidate_repo = self._repo_from_source_url(candidate.pop("_source_url", None))
             if repo is not None and candidate_repo != repo:
                 continue
@@ -2563,6 +2732,7 @@ class Ledger:
         evidence,
         status_marker,
         now,
+        is_review=None,
     ):
         self._require_task_id(task_id)
         if source_kind not in ("issue", "pull"):
@@ -2577,13 +2747,20 @@ class Ledger:
             raise ValueError("terminal source task requires evidence")
         if status_marker is not None and not isinstance(status_marker, str):
             raise ValueError("source task status marker must be text")
+        # agent-supervisor#640: `None` means "not recorded" (see the
+        # `is_review` column's own comment on `source_tasks`), NOT "false" --
+        # a caller must say so explicitly with `0` to record "known,
+        # confirmed NOT a review" rather than leave the fallback regex to
+        # answer for a row it could instead have known for certain.
+        if is_review is not None and is_review not in (0, 1):
+            raise ValueError("is_review must be 0, 1, or None")
         encoded_evidence = json.dumps(evidence, sort_keys=True, separators=(",", ":"))
         connection.execute(
             """
             INSERT INTO source_tasks(
                 id, source_kind, source_url, source_ref, summary, source_state,
-                status, evidence_json, status_marker, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                status, evidence_json, status_marker, updated_at, is_review
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 source_kind=excluded.source_kind,
                 source_url=excluded.source_url,
@@ -2593,7 +2770,8 @@ class Ledger:
                 status=excluded.status,
                 evidence_json=excluded.evidence_json,
                 status_marker=excluded.status_marker,
-                updated_at=excluded.updated_at
+                updated_at=excluded.updated_at,
+                is_review=excluded.is_review
             """,
             (
                 task_id,
@@ -2606,6 +2784,7 @@ class Ledger:
                 encoded_evidence,
                 status_marker,
                 now,
+                is_review,
             ),
         )
         row = connection.execute("SELECT * FROM source_tasks WHERE id = ?", (task_id,)).fetchone()
@@ -2950,6 +3129,7 @@ class Ledger:
         transport="send-keys",
         worktree_path="",
         accepted=False,
+        is_review=None,
         failpoint=None,
     ):
         """Atomically register the lane, record the GitHub source, assign, and mark delivered.
@@ -2991,6 +3171,16 @@ class Ledger:
         harness discarded. `accepted=False` (the default) leaves the task
         `delivered`, same as before this parameter existed -- every existing
         caller is unaffected until it opts in.
+
+        agent-supervisor#640: `is_review` is `cli.py`'s own recorded answer
+        to "did `dispatch.sh --reviews-pr` invoke this?" -- `1` when it did,
+        `0` when this is a `--pr`-scoped fix pass (known, structurally, NOT
+        a review), `None` (the default) for an issue-scoped dispatch, where
+        the property is moot -- `get_contributor_tasks_for_pr` only ever
+        reads it off a `source_kind='pull'` row. Passed straight through to
+        `_reconstruct_task_tx`; see that method and the `is_review` column's
+        own comment on `source_tasks`' `CREATE TABLE` for what each value
+        means.
         """
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
@@ -3022,6 +3212,7 @@ class Ledger:
                 evidence=evidence,
                 status_marker=status_marker,
                 now=now,
+                is_review=is_review,
             )
             self._fail(failpoint, "after_reconstruct_task")
             self._assign_tx(
