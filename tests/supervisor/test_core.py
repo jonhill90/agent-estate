@@ -963,6 +963,40 @@ class LedgerTest(unittest.TestCase):
         reloaded = self.ledger.get_task("review-870")
         self.assertEqual(first["result_sha256"], reloaded["result_sha256"])
 
+    def test_complete_refuses_to_restamp_a_task_already_failed_or_cancelled(self):
+        """agent-supervisor#627: port of `daemon/internal/ledger/ledger.go`'s
+        `Finish` refusal (`#488`, `TestFinishRefusesToRestampTerminal`) into
+        this ledger's own write path. A terminal stamp must be backed by an
+        observed outcome and, once terminal, a task never gets restamped --
+        `complete()`'s own status check (`row["status"] in ("failed",
+        "cancelled")`) is that guard on this side; this pins it down the same
+        way the Go test does: reach terminal one way, then try to reach it
+        the OTHER way, and confirm both the refusal and that the original
+        terminal status survives untouched."""
+        self.assign("review-870")
+        self.ledger.mark_delivery_pending("review-870", pane_nonce="nonce-22-a")
+        self.ledger.mark_delivered("review-870", pane_nonce="nonce-22-a")
+        failed = self.ledger.fail_unaccepted("review-870", b"never accepted", pane_nonce="nonce-22-a")
+        self.assertEqual("failed", failed["status"])
+
+        with self.assertRaisesRegex(ValueError, "cannot complete failed task"):
+            self.ledger.complete("review-870", b"late completion", pane_nonce="nonce-22-a")
+
+        # The refused restamp must not have touched the terminal row at all.
+        survived = self.ledger.get_task("review-870")
+        self.assertEqual("failed", survived["status"])
+        self.assertEqual(failed["result_sha256"], survived["result_sha256"])
+
+        # Same refusal the other direction: a `cancelled` task must not be
+        # restampable to `complete` either.
+        self.assign("review-871")
+        cancelled = self.ledger.cancel_open_task("app-review")
+        self.assertEqual("cancelled", cancelled["status"])
+
+        with self.assertRaisesRegex(ValueError, "cannot complete cancelled task"):
+            self.ledger.complete("review-871", b"late completion", pane_nonce="nonce-22-a")
+        self.assertEqual("cancelled", self.ledger.get_task("review-871")["status"])
+
     def test_completion_reconciles_each_injected_crash_point(self):
         result = b"# Evidence\n\nchecks passed\n"
         for failpoint in ("after_result", "after_task", "after_event"):
