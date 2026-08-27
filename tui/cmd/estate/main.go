@@ -70,6 +70,16 @@ import (
 	sessionops "github.com/jonhill90/agent-tui/internal/session"
 )
 
+// costCacheTTL bounds how often cost.Cached lets a real `ccusage`/quota.sh
+// call through, no matter how many of railModel/costModel/dashboardModel
+// ask inside that window (agent-tui#145 -- see costFetch's own doc comment
+// below and internal/cost/cache.go). Matches internal/cost.refreshInterval
+// and internal/rail.costRefreshInterval exactly, both already 5 minutes
+// and already independently pinned by their own packages' tests -- this is
+// not a fourth independent number, just the one those two already agree
+// on, made a real ceiling on the subprocess instead of a hoped-for one.
+const costCacheTTL = 5 * time.Minute
+
 func main() {
 	var (
 		supervisorRepo = flag.String("supervisor-repo", os.Getenv("AGENT_SUPERVISOR_REPO"),
@@ -262,9 +272,32 @@ func main() {
 	}
 
 	// Built once, used by the cost pane, the rail's default cost line, and
-	// (via buildBoardFetch) nothing else -- one Fetcher, three consumers,
-	// never a second cost implementation.
-	costFetch := buildCostFetch(*ccusageBin, splitArgs(*ccusageArgs), *claudeBlockLimit, quotaRun, time.Now)
+	// (via buildDashboardFetch) the dashboard's SpendToday figure -- one
+	// Fetcher, three consumers, never a second cost implementation. (This
+	// comment previously said "via buildBoardFetch"; buildBoardFetch never
+	// touches cost at all -- corrected alongside agent-tui#145's fix,
+	// below, rather than left to keep misleading the next reader.)
+	//
+	// cost.Cached wraps that shared closure so "three consumers" stays
+	// true of the real `ccusage`/quota.sh subprocess calls, not just of
+	// the Go closure value: agent-tui#145 measured three real `ccusage
+	// daily` subprocess trees inside 30 seconds -- two starting in the
+	// same second (railModel's and costModel's own Init()-time fetches,
+	// both run from the same tea.Batch in internal/shell.Model.Init) and a
+	// third a few seconds later (dashboardModel's own fetch, which reaches
+	// costFetch only after its sessions/gh work ahead of it finishes) --
+	// against a Fetcher documented, in both internal/cost and
+	// internal/rail, to run once every five minutes. None of railModel,
+	// costModel or dashboardModel is wrong on its own: each is a distinct
+	// tea.Model with its own Init-time fetch and its own independently
+	// armed 5-minute ticker, exactly as each package's own doc comments
+	// describe. The bug was that costFetch itself carried no shared
+	// state, so three tickers asking inside the same window meant three
+	// real subprocess trees. See internal/cost/cache.go's own doc comment
+	// for why Cached, not a guard added to any one caller, is the fix --
+	// a guard inside rail alone (or cost, or dashboard, alone) would still
+	// leave the other two firing independently.
+	costFetch := cost.Cached(buildCostFetch(*ccusageBin, splitArgs(*ccusageArgs), *claudeBlockLimit, quotaRun, time.Now), costCacheTTL, time.Now)
 
 	// The shell's rail is ALWAYS on screen (agent-tui#38 acceptance item 2),
 	// so every launch tries a supervisor connection, including a bare
