@@ -47,7 +47,7 @@ class PromptCorpusTest(unittest.TestCase):
         self.assertEqual(
             {
                 "unacknowledged", "live_parameters", "conflicts", "open_questions",
-                "possibility_count", "needs_review",
+                "possibility_count", "needs_review", "capture_health",
             },
             views,
         )

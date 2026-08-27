@@ -948,6 +948,24 @@ class Ledger:
                 -- way it goes).
                 CREATE VIEW IF NOT EXISTS needs_review AS
                     SELECT * FROM items WHERE status = 'needs_review';
+
+                -- agent-supervisor#687: capture stopped silently for four
+                -- days because nothing watched the rate new prompts were
+                -- arriving at -- `unitemised backlog` stayed a correct
+                -- zero the entire time, since a healthy JUDGING half says
+                -- nothing about a dead CAPTURE half. This is that signal,
+                -- read the same plain-SQL way as the other five views: one
+                -- row, `newest_prompt_at` (NULL on a completely empty
+                -- corpus, never fabricated) and `seconds_since_capture`
+                -- computed at query time so the number is always current,
+                -- not stamped when the row was last written.
+                CREATE VIEW IF NOT EXISTS capture_health AS
+                    SELECT
+                        MAX(at) AS newest_prompt_at,
+                        CASE WHEN MAX(at) IS NULL THEN NULL
+                             ELSE CAST(strftime('%s', 'now') AS INTEGER) - MAX(at)
+                        END AS seconds_since_capture
+                    FROM prompts;
                 """
             )
         os.chmod(self.db_path, 0o600)
@@ -4826,15 +4844,17 @@ class Ledger:
     # offering an idle shape (CLAUDE.md invariant 6): a view name this does
     # not recognise is refused, never interpolated into SQL on trust.
     # `needs_review` (agent-supervisor#652) is a sixth, added the same way.
+    # `capture_health` (agent-supervisor#687) is a seventh, added the same way.
     PROMPT_VIEWS = (
         "unacknowledged", "live_parameters", "conflicts", "open_questions",
-        "possibility_count", "needs_review",
+        "possibility_count", "needs_review", "capture_health",
     )
 
     def read_prompt_view(self, view):
-        """Read one of the five named views, plain SQL, no model involved --
-        every read against `items`/`links` after itemisation is meant to be
-        exactly this and nothing more."""
+        """Read one of the named `PROMPT_VIEWS`, plain SQL, no model
+        involved -- every read against `items`/`links`/`prompts` after
+        capture and itemisation is meant to be exactly this and nothing
+        more."""
         if view not in self.PROMPT_VIEWS:
             raise ValueError(f"unknown prompt view: {view}")
         with contextlib.closing(self._connect()) as connection:
