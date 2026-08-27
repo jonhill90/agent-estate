@@ -146,6 +146,38 @@
 #              past there; unknown already allows) and never suppresses the
 #              log line naming what was overridden. See collision-check.sh's
 #              own header for what "overlap" means.
+# --adopt-pane <window-id>
+#              agent-supervisor#668: dispatch to an ALREADY-RUNNING, idle pane
+#              (a window `lanes.sh` reports free, addressed by its stable
+#              `#{window_id}` -- e.g. `@42`, the `@`-prefix optional on the
+#              command line) instead of spawning a new harness process for
+#              it. Every other step runs exactly as an ordinary dispatch does
+#              -- claim, worktree, rename, ledger record (step 6) -- so
+#              authorship resolves afterward and `merge-pr.sh` can see who
+#              wrote the PR. The one thing this mode skips is step 3.5's
+#              `respawn-pane -k`: the pane's existing process is handed the
+#              brief directly (the ordinary type-verify-submit send, step 4-5
+#              below), never killed and relaunched. That is the whole point
+#              -- zero new processes against a host's process-count ceiling.
+#              Implies `--live-pane` (this dispatch stays on the named
+#              window's own pane; it is never routed to a freshly minted
+#              `claude-print` lane). Refuses, the same way an ordinary
+#              dispatch refuses, if the named window is not free per
+#              `lanes.sh`/the ledger by the time step 1 runs. Not yet wired
+#              for a review (`--reviews-pr`), a PR-scoped follow-up (`--pr`)
+#              or a multi-issue dispatch -- refused outright with those, same
+#              posture as `--reviews-pr`/`--not-a-review`'s own contradiction
+#              check above, rather than silently degrading one of them.
+#              WHY THE PANE'S OS-LEVEL CWD IS NOT REPOINTED: #15's fix (step
+#              3.5, below) sets a pane's real starting directory the only way
+#              a running process's cwd can be changed from outside it --
+#              killing and restarting it with `-c`. This mode deliberately
+#              does not do that (see above), so an adopted pane keeps
+#              whatever OS-level cwd its last dispatch gave it; the brief
+#              still names the worktree explicitly (the same typed message
+#              every tmux dispatch sends) and this mode is for a harness that
+#              reasons in absolute paths, the same carve-out #15's own
+#              comment already makes for Claude.
 #
 # Exit 0 only when a lane has been sent a brief -- over tmux/send-keys, or
 # (new, #171, default for a plain single-issue `claude` dispatch) over a
@@ -278,6 +310,13 @@ LIVE_PANE="${DISPATCH_LIVE_PANE:-}"
 # means and why refusing is the default. Takes no value, same shape as
 # --not-a-review.
 COLLISION_FORCE=""
+# agent-supervisor#668: the window id of an already-running, idle pane this
+# dispatch should ADOPT instead of spawning a new harness process for -- see
+# this flag's own usage comment above. Empty (the default) leaves every
+# existing dispatch path -- claude-print, the tmux flow's own respawn -- byte
+# for byte unchanged; this variable is read only inside the blocks that
+# explicitly branch on it.
+ADOPT_PANE=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -329,6 +368,17 @@ while [ $# -gt 0 ]; do
       # flag hazard above.
       NOT_A_REVIEW=1
       shift
+      ;;
+    --adopt-pane)
+      # agent-supervisor#668. Same dangling-flag hazard and same fix as
+      # --pr/--reviews-pr above -- see either's own comment.
+      if [ $# -lt 2 ]; then
+        echo "dispatch: --adopt-pane requires a window id" >&2
+        sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' >&2
+        exit 1
+      fi
+      ADOPT_PANE="$2"
+      shift 2
       ;;
     *)
       POSITIONAL+=("$1")
@@ -595,6 +645,47 @@ if [ -n "$PR" ] && [ -n "$REVIEWS_PR" ] && [ "$PR" != "$REVIEWS_PR" ]; then
   exit 2
 fi
 PR_SCOPED="${REVIEWS_PR:-$PR}"
+
+# --- --adopt-pane validation (agent-supervisor#668) -------------------------
+# Refused OUTRIGHT for the three shapes this mode does not yet speak, rather
+# than silently degrading one of them: a review needs the author-exclusion
+# bookkeeping (step 0.5, above), a PR-scoped follow-up needs its own source
+# recording (step 6), and a multi-issue dispatch's window name is not simply
+# `<issue>-<slug>` for the FIRST issue the way the rest of this mode assumes.
+# None of the three is a hard technical wall; each is just untested and
+# unasked-for by #668's own brief, so this stays additive rather than
+# widening scope nobody requested. Checked here, before anything is claimed.
+if [ -n "$ADOPT_PANE" ]; then
+  if [ -n "$PR_SCOPED" ]; then
+    echo "dispatch: --adopt-pane does not yet support a PR-scoped dispatch (--reviews-pr/--pr) -- use the ordinary tmux flow for #$ISSUE_ARG instead" >&2
+    exit 2
+  fi
+  if [ "${#ISSUES[@]}" -gt 1 ]; then
+    echo "dispatch: --adopt-pane does not yet support a multi-issue dispatch ($ISSUE_ARG) -- use the ordinary tmux flow instead" >&2
+    exit 2
+  fi
+  # Accept either `@42` (what lanes.sh/tmux itself prints) or a bare `42`
+  # (what an operator is more likely to type) -- normalized to the `@N` shape
+  # every candidate_target below already carries, so the match in step 1 is a
+  # plain string comparison rather than a second regex.
+  case "$ADOPT_PANE" in
+    @[0-9]*) ADOPT_PANE_ID="$ADOPT_PANE" ;;
+    [0-9]*)  ADOPT_PANE_ID="@$ADOPT_PANE" ;;
+    *)
+      echo "dispatch: --adopt-pane '$ADOPT_PANE' is not a window id -- expected '@<N>' or '<N>' (agent-supervisor#668)" >&2
+      exit 2
+      ;;
+  esac
+  # This mode's whole point is staying on the named pane's own tmux window --
+  # never routed to a freshly minted claude-print lane (step 1.5, below) and
+  # never the pre-#171 tmux flow's OWN candidate search, which is free to
+  # land on any free lane it likes. `--live-pane` already means exactly "keep
+  # this dispatch on tmux/send-keys" (see that flag's own comment); implying
+  # it here reuses that existing meaning instead of inventing a second one.
+  LIVE_PANE=1
+else
+  ADOPT_PANE_ID=""
+fi
 
 # Window name: <prefix><issue>-<slug>, the convention loop-tick.md requires so
 # Jon can read the tmux window list and know what the estate is doing. The
@@ -1289,6 +1380,16 @@ while IFS=$'\t' read -r candidate candidate_target; do
     echo "dispatch: skipping candidate '$candidate' -- lanes.sh gave no usable window-id target ('${candidate_target:-}')" >&2
     continue
   fi
+  # agent-supervisor#668: --adopt-pane narrows this whole search to ONE
+  # candidate, the window id the caller named -- every other free lane in
+  # $SESSION is skipped rather than being eligible to win this dispatch. If
+  # that window never shows up here at all (busy, unknown to the ledger, or
+  # simply not a window lanes.sh classifies free), the loop ends with LANE
+  # still empty and falls into the ordinary "no free lane" refusal below --
+  # the same refusal shape any other dispatch gets, not a special case.
+  if [ -n "$ADOPT_PANE_ID" ] && [ "$candidate_target" != "$SESSION:$ADOPT_PANE_ID" ]; then
+    continue
+  fi
   idx="${candidate##*:}"
   wname="${WINDOW_NAME_BY_INDEX[$idx]:-}"
   # agent-dotfiles#212: excluded BEFORE the ledger's free/occupied query, not
@@ -1425,6 +1526,9 @@ while IFS=$'\t' read -r candidate candidate_target; do
 done < <("$HERE/lanes.sh" --free "$SESSION" 2>/dev/null)
 
 if [ -z "$LANE" ]; then
+  if [ -n "$ADOPT_PANE_ID" ]; then
+    echo "dispatch: --adopt-pane $ADOPT_PANE requested, but window $ADOPT_PANE_ID in session '$SESSION' is not free per lanes.sh/the ledger -- refusing rather than adopt a pane that is not genuinely idle (agent-supervisor#668)" >&2
+  fi
   if [ -n "$AUTHOR_SKIPPED" ]; then
     # AUTHOR_TASKS is guaranteed non-empty here: AUTHOR_SKIPPED is only ever
     # set inside the loop above, which only runs its exclusion branch when
@@ -1893,6 +1997,20 @@ fi
 # adapter records no launch command, is refused rather than dispatched with
 # an unverifiable cwd -- the exact failure mode #15 is about, produced on
 # purpose instead of by accident.
+# agent-supervisor#668: --adopt-pane's entire reason to exist is skipping
+# everything in this block -- the respawn IS "spawning a new claude process",
+# the exact thing this mode was built to avoid. The candidate is already a
+# live, idle harness process (lanes.sh/the ledger both said so before this
+# point), so there is no cwd to re-verify by killing and restarting it and no
+# fresh-process menu to dismiss; PROMPT_IN_LAUNCH stays 0 so step 4 below
+# falls straight through to the ordinary typed-message send (verified_preclear
+# + verified_type + verified_submit), exactly as it would for any other
+# tmux-flow dispatch. See this flag's own usage comment at the top of this
+# file for what an adopted pane's OS-level cwd is left at instead.
+if [ -n "$ADOPT_PANE" ]; then
+  PROMPT_IN_LAUNCH=0
+  echo "dispatch: --adopt-pane $ADOPT_PANE -- adopting $LANE's existing process, not respawning it (agent-supervisor#668)" >&2
+else
 HARNESS_HIDX=""
 if [ -n "$LANE_HARNESS" ]; then
   HARNESS_HIDX=$(harness_index_for_name "$LANE_HARNESS") || HARNESS_HIDX=""
@@ -1985,6 +2103,7 @@ sleep "${DISPATCH_LAUNCH_SETTLE:-3}"
 if ! verified_dismiss_menu "$LANE_TARGET" "${H_OPTION_ROW_RE[$HARNESS_HIDX]:-}" "${H_MENU_TAIL[$HARNESS_HIDX]:-6}" \
      --settle "${DISPATCH_MENU_SETTLE:-2}" --retries "${DISPATCH_MENU_RETRIES:-5}"; then
   abort_send "a startup menu never cleared in $LANE -- #$ISSUE_ARG was NOT dispatched (check the pane by hand)"
+fi
 fi
 
 # --- 4. the lane is told what it is doing, then given the work ------------
