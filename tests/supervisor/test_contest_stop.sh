@@ -24,6 +24,10 @@ echo "contest-stop.sh -- trigger, dispatch args, and rate limit (#390)"
 D=$(mktemp -d)
 cp "$SRC" "$D/contest-stop.sh"
 chmod +x "$D/contest-stop.sh"
+# agent-supervisor#682: contest-stop.sh now sources session-defaults.sh (for
+# the shared AGENT_SUPERVISOR_DEFAULT_REPO_GITHUB default) from its own $HERE,
+# same as the dispatch.sh stub below -- it has to be copied alongside it.
+cp "$HERE/../../scripts/supervisor/session-defaults.sh" "$D/session-defaults.sh"
 
 cat >"$D/dispatch.sh" <<'EOF'
 #!/bin/bash

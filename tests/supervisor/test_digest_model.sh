@@ -138,6 +138,12 @@ chk "and the sonnet worker becomes the flagged one" \
 MUT="$D/digest-mut.sh"
 sed 's/\$m != \$expected/false/' "$HERE/../../scripts/supervisor/digest.sh" > "$MUT"
 chmod +x "$MUT"
+# agent-supervisor#682: digest.sh sources session-defaults.sh (for the shared
+# AGENT_SUPERVISOR_DEFAULT_REPO default) from its own $HERE -- copying digest.sh
+# out to $D without it left AGENT_SUPERVISOR_DEFAULT_REPO unbound under `set -u`,
+# so the mutated script died before ever reaching the jq comparison it was meant
+# to exercise (empty $mut_j, not a neutralized-but-still-empty flagged field).
+cp "$HERE/../../scripts/supervisor/session-defaults.sh" "$D/session-defaults.sh"
 mut_j=$(PATH="$D/bin:$PATH" SUPERVISOR_STATE="$D/state" LANES_SESSION=t \
   DIGEST_LANES_BIN="$D/bin/lanes" bash "$MUT" --json 2>/dev/null)
 mut_flag=$(jq -r '.lane_models.lanes[] | select(.window==2) | .flagged' <<<"$mut_j")

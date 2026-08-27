@@ -44,10 +44,12 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 STAMP="$STATE/.closed-report.since"
 WINDOW_MINUTES="${CLOSED_REPORT_WINDOW_MINUTES:-30}"
-REPOS="${CLOSED_REPORT_REPOS:-jonhill90/agent-supervisor jonhill90/agent-dotfiles jonhill90/agent-tui jonhill90/skills jonhill90/agent-evals jonhill90/Hill90 jonhill90/hill90-app}"
+REPOS="${CLOSED_REPORT_REPOS:-$AGENT_SUPERVISOR_DEFAULT_REPO_GITHUB jonhill90/agent-dotfiles jonhill90/agent-tui jonhill90/skills jonhill90/agent-evals jonhill90/Hill90 jonhill90/hill90-app}"
 GH_TIMEOUT_SECONDS="${CLOSED_REPORT_GH_TIMEOUT_SECONDS:-20}"
 # A safety backstop, not the narrowing mechanism (see #364 note above). The
 # `closed:>=since` search qualifier does the actual filtering server-side;

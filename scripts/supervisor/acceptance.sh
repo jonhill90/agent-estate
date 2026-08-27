@@ -66,7 +66,9 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$HERE/../.." && pwd)"
-REPO="${ACCEPTANCE_REPO:-jonhill90/agent-supervisor}"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
+REPO="${ACCEPTANCE_REPO:-$AGENT_SUPERVISOR_DEFAULT_REPO_GITHUB}"
 LIMIT="${ACCEPTANCE_LIMIT:-20}"
 TIMEOUT="${ACCEPTANCE_TIMEOUT:-120}"
 REOPEN="${ACCEPTANCE_REOPEN:-0}"      # default DRY: report, do not reopen

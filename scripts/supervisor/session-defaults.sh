@@ -5,7 +5,24 @@
 # literals disagreeing about where new work should land. LANES_SESSION remains
 # the public override at every call site.
 
-AGENT_SUPERVISOR_DEFAULT_LANES_SESSION="${AGENT_SUPERVISOR_DEFAULT_LANES_SESSION:-agent-supervisor}"
+# #682: this repo's own name, as a bare slug (the tmux session convention: a
+# lane working in jonhill90/X runs in session X, see session_for_repo below)
+# and as the `owner/repo` GitHub identity callers build `gh --repo`/repo-list
+# arguments from. Before this, that same literal was duplicated independently
+# in eight files (closed-report.sh, watchdog.sh, digest.sh, acceptance.sh,
+# contest-stop.sh, cli.py, refresh_brief_resume.py, and this file's own
+# AGENT_SUPERVISOR_DEFAULT_LANES_SESSION below) -- a rename had to find and
+# edit all eight, and missing even one is exactly the silent-break shape the
+# merge-impact inventory ranked #3 for
+# (`docs/merge-impact-inventory-agent-estate.md`): a `gh` call against a
+# renamed repo doesn't error, it just quietly stops finding work. Every bash
+# consumer now derives from this ONE variable; only cli.py's
+# DEFAULT_REPOSITORIES and refresh_brief_resume.py's REPOS (python, no shared
+# import path to this file) still need their own edit at rename time.
+AGENT_SUPERVISOR_DEFAULT_REPO="${AGENT_SUPERVISOR_DEFAULT_REPO:-agent-supervisor}"
+AGENT_SUPERVISOR_DEFAULT_REPO_GITHUB="${AGENT_SUPERVISOR_DEFAULT_REPO_GITHUB:-jonhill90/$AGENT_SUPERVISOR_DEFAULT_REPO}"
+
+AGENT_SUPERVISOR_DEFAULT_LANES_SESSION="${AGENT_SUPERVISOR_DEFAULT_LANES_SESSION:-$AGENT_SUPERVISOR_DEFAULT_REPO}"
 
 lanes_session_or_default() {
   printf '%s\n' "${LANES_SESSION:-$AGENT_SUPERVISOR_DEFAULT_LANES_SESSION}"
