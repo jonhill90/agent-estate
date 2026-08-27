@@ -21,6 +21,7 @@ from core import (
     TERMINAL_STATUSES,
     claim_owner_token,
     cross_namespace_lane_relation,
+    lane_or_task_row,
     lane_population,
     lane_relation,
     lane_relation_from_rows,
@@ -1312,7 +1313,13 @@ def main(argv=None):
             else:
                 try:
                     relation_ledger = Ledger(args.state_dir)
-                    other_row = relation_ledger.get_lane(args.other)
+                    # agent-supervisor#689: `--other` may name a TASK id
+                    # (a pane-having lane's own review dispatched itself with
+                    # its task id, not a registered `lanes` row -- see
+                    # `core.lane_or_task_row`'s own comment) as well as a
+                    # registered lane -- try the lane first, the task's
+                    # frozen `pane_id` snapshot second.
+                    other_row = lane_or_task_row(relation_ledger, args.other)
                 except Exception:
                     other_row = None
             lane_row = {"pane_id": args.lane_pane_id}
@@ -1338,14 +1345,19 @@ def main(argv=None):
         if relation == "unknown":
             try:
                 relation_ledger = Ledger(args.state_dir)
-                lane_row = relation_ledger.get_lane(args.lane)
+                # agent-supervisor#689: same task-id fallback as the
+                # `--lane-pane-id` branch above, for BOTH sides here -- this
+                # branch runs when the shape check found neither id looks
+                # like `<session>:<index>` at all, exactly the case a
+                # task-style reviewer or author id lands in.
+                lane_row = lane_or_task_row(relation_ledger, args.lane)
                 # agent-supervisor#631: same widening as the `--lane-pane-id`
                 # branch above -- `--other-pane-id` applies regardless of
                 # whether `--lane-pane-id` was also given.
                 if args.other_pane_id:
                     other_row = {"pane_id": args.other_pane_id}
                 else:
-                    other_row = relation_ledger.get_lane(args.other)
+                    other_row = lane_or_task_row(relation_ledger, args.other)
             except Exception:
                 lane_row = other_row = None
             relation = lane_relation_from_rows(lane_row, other_row)
