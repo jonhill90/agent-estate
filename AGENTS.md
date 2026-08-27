@@ -3,6 +3,12 @@
 *(`AGENTS.md` and `CLAUDE.md` are the same file — one is a symlink, so there is
 no second copy to drift.)*
 
+**This file is an index, not a document to read end to end.** Find your task
+below, open the one or two files it names, and stop there. Every claim in it
+(path, script, flag) was checked against the tree at the commit named at the
+bottom — re-check anything you're about to rely on if it's been a while since
+that commit, the same way this rewrite had to.
+
 ## Before you ask Jon anything — read this first
 
 Jon has stated this more than twenty times. It is a **hard** parameter in his
@@ -33,95 +39,201 @@ cannot have picked wrong. It is the same instinct that ships a stub reading
 "not built yet" instead of a populated view — the defensible option over the
 useful one. Choose the useful one.
 
-Read this before changing anything. It is short on purpose. [`README.md`](README.md)
-explains what the system is; this explains what will bite you.
+[`README.md`](README.md) explains what the system is; this file explains what
+will bite you and where to look for a given task.
 
-## Layout
+## Index — what to open for which task
 
-```
-scripts/supervisor/          the system
-  lanes.sh                   classify every pane into one of ELEVEN states
-                             (stale: `grep -n 'state=' scripts/supervisor/
-                             lanes.sh | sed -E 's/.*state=([a-z-]+).*/\1/' |
-                             sort -u` on `25135ae`, 2026-08-23, finds
-                             FOURTEEN distinct states now emitted: broken,
-                             busy, dead, free, hung, menu-blocked,
-                             never-busy, scrolled, service, stale,
-                             supervisor, text-blocked, unknown, unsent —
-                             `menu-blocked`/`text-blocked` split what was
-                             one `blocked` state, and `supervisor` is new)
-  dispatch.sh                hand an issue to a lane; records the ledger row
-  lane-done.sh               completion, in the safe order
-  lane-retire.sh             administrative retirement -- unregister and
-                             restore the window's name, never kill it (#564)
-  claim.sh                   atomic lane claim
-  worktree.sh                one git worktree per lane
-  restore.sh                 rebuild every lane after a tmux server loss
-  cli.py / core.py           the SQLite ledger
-  harness_session.py         resolve the agent's own conversation id
-  adapter.py                 harness-neutral pane classification
-  harness/{claude,codex,copilot}.sh   per-harness shapes
-  send.sh                    the one verified-send primitive for typed text
-                             into a pane's input box (#178/#186); nothing else
-                             types a caller's message straight to `send-keys`
-  merge-pr.sh                the only path that merges a PR here — chains
-                             ci_gate.py (every check green at the live head
-                             SHA) and verdict-independence.sh (author cannot
-                             merge its own unreviewed PR, #179/#184)
-  verdict.py                 read a PR's review verdict from GitHub or the
-                             ledger, fail closed to "unknown", never invert
-  verdict-independence.sh    is the reviewing lane really not the author —
-                             see "Lane identity" below (#184/#192/#196/#198)
-  lane_identity.py           is a lane's REGISTRATION still true of the live
-                             tmux server it names — verified / contradicted /
-                             unverifiable, never a bare yes/no (#520)
-  register-lane-self.sh      how a hand-attached lane registers ITSELF, from
-                             `$TMUX_PANE` and explicit `-t` reads only; no
-                             flag names a lane from outside, on purpose (#520)
-  tmux-isolation.sh          `assert_isolated_tmux`, the function Invariant 4
-                             requires before any destructive tmux verb,
-                             including session creation (#185)
-  laneview/                  two viewers, neither required
-                             (stale: `ls scripts/supervisor/laneview/` on
-                             `25135ae`, 2026-08-23, shows FOUR renderers now
-                             — `text.sh`, `tui.sh`, `opensessions.sh`,
-                             `dock.sh` — `dock.sh` is new since this line
-                             was written; none is required by another)
-  look.py                    let an agent SEE a pane: capture / png / navigate / frames
-  termshot.py                ANSI-to-SVG rasteriser look.py's `png` renders through
-  ui-evidence-gate.sh        CI check: a UI PR must carry a look.py frame
-  mcp_server.py              read surface over MCP, plus four guarded
-                             session-management writes (agent-tui#14)
-                             (stale: `grep -n 'WRITE_SOURCES = {' -A8
-                             scripts/supervisor/supervisor_view.py` on
-                             `25135ae`, 2026-08-23, shows FIVE now —
-                             `session_attach`, `session_detach`,
-                             `session_add`, `session_remove`, and
-                             `session_send` (agent-supervisor#508, #509,
-                             `b30b70e`) — session_send can now drive an
-                             existing session, unlike when this line was
-                             written)
-  session_guard.py           the one place session removal is judged safe
-  watchdog.sh                liveness, from OUTSIDE the loop
-  inbox-poll.sh              Telegram poller (a service, never a lane)
-tests/supervisor/            177 tracked files; the suite is the contract
-                             (`Verified 2026-08-23` by `git ls-files
-                             tests/supervisor/ | wc -l` after adding
-                             `test_lane_retire.sh` (#564) — this line
-                             previously said 171 the same day, and 110
-                             before that (`Verified 2026-08-18`); a count
-                             this volatile is worth re-measuring, not
-                             trusting. Could not measure a current full
-                             pass/fail count: `python3 -m unittest discover
-                             -s tests/supervisor` did not finish inside this
-                             pass's time budget either, same as noted in
-                             README.md)
-```
+`scripts/supervisor/` has 100+ tracked files (`git ls-files scripts/supervisor
+| grep -cE '\.(sh|py)$'`, checked at write time). This groups them by the job
+they do, one line each, saying **what each decides**, not what it is. It is
+not a substitute for the file's own header comment — every file here has one,
+and it is longer and more specific than this line.
 
-This list is a highlight, not an inventory — `ls scripts/supervisor/*.sh
-scripts/supervisor/*.py` names more than fifty files. What is listed here is
-what changing it without reading it first will bite you for; everything else
-is discoverable by reading the directory.
+**Dispatch & lane lifecycle** — hand work to a lane, or bring one back:
+- `dispatch.sh` — pick a free lane, claim the issue, create its worktree, send
+  the brief; supports `--adopt-pane <window-id>` to hand the brief to an
+  already-running idle pane's own process instead of spawning a new one
+  (#668/#677)
+- `dispatch-claude-print.sh` / `dispatch-pi-rpc.sh` — `dispatch.sh`'s siblings
+  for the `claude -p` and `pi --mode rpc` harness shapes, not replacements
+- `claim.sh` — claim an issue on GitHub before dispatch, so two dispatchers
+  can't both hand out the same one
+- `worktree.sh` — one git worktree per lane task
+- `collision-check.sh` — refuse a dispatch whose files overlap an in-flight
+  lane's (whole-file overlap only) — #291
+- `host-pressure.sh` / `host_pressure.py` — refuse a NEW dispatch when the
+  host can't safely take it; exit 2 (not 0/1) means "could not measure",
+  refused rather than guessed
+- `count-agents.sh` — counts real Claude agent SESSIONS by `ps`'s `comm`
+  field, not `pgrep -f claude` substring matching (#663/#678/#681, the fixed
+  pid-padding bug). **As of this commit its own header still says "nothing
+  wires this in yet"** — it is not yet called from `host-pressure.sh`; check
+  its header before assuming the host guard uses it.
+- `quota.sh` — the quota floor gate; nothing else may call `codexbar` directly
+- `lane-done.sh` — rename a lane back to `free-N` on worker completion
+- `lane-retire.sh` — administrative retirement: unregister and restore the
+  window's name, never kill it (#564)
+- `register-lane-self.sh` — how a hand-attached lane registers ITSELF, from
+  `$TMUX_PANE` and explicit `-t` reads only
+- `restore.sh` — rebuild every lane after a tmux server loss, ledger-driven
+- `preserve-dead-lanes.sh` — save a dead lane's uncommitted work before it's
+  lost (#651)
+- `bootstrap-session.sh` — create the tmux session and lane windows dispatch
+  sends into
+
+**Lane state / classification** — what is this pane doing right now:
+- `lanes.sh` — classify every pane into one of the states in Invariant 6;
+  a whitelist, not a guess
+- `sessions.sh` — `lanes.sh --json` across every tmux session, not just one
+- `adapter.py` / `harness/{claude,codex,copilot}.sh` — harness-neutral pane
+  classification; harness-specific strings live only in `harness/*.sh`
+  (Invariant 7)
+- `harness-registry.sh` — loads every `harness/*.sh` adapter and answers
+  "which adapter, if any, owns this pane?"
+- `input-box.sh` — is a lane's input box empty, or holding unsent text?
+- `live-pane-exceptions.sh` — the named exceptions to send-keys retirement
+  (#284)
+- `poller-window.sh` — recognise the Telegram poller's window by name
+
+**Ledger, CLI, and reconciliation** — the durable record (Invariant 1):
+- `cli.py` — command-line entry point over the ledger
+- `core.py` — the SQLite ledger itself: `Ledger` class, transactional
+  task/event model, supervisor-lease methods (see Guards below)
+- `github_source.py` — GitHub-backed task records for the local spool
+- `sensor.py` — selected Git/GitHub state sensor
+- `supervisor_view.py` — read-only view over several backing sources, one
+  interface (`WRITE_SOURCES` there is the whitelist for the five MCP writes)
+- `mcp_server.py` — the MCP read surface, plus the guarded session-management
+  writes `supervisor_view.py`'s `WRITE_SOURCES` names
+- `session_guard.py` — the one place session removal is judged safe
+- `recycle.py` — scheduled supervisor session recycling
+- `reconcile_lane_completions.py` / `reconcile_sources.py` /
+  `reconcile_worktree_paths.py` — sweeps that fix specific historical drift
+  classes; read each one's own docstring before assuming it's still needed
+- `backfill-harness-session-ids.py`, `repair_401_reconcile_stamps.py` —
+  one-time repairs for specific past incidents, kept for their comments
+
+**PR / review / merge guards** — see "The guards a lane will hit" below.
+
+**Supervisor loop / Director** — the thing that ticks:
+- `director-loop.sh` — drive the Director on a cadence (#321)
+- `loop-tick.md` — the loop's own step-by-step tick prompt; the supervisor
+  lease is taken here, keyed on `#{pane_pid}` (the tmux pane's own live
+  process), never on `$$` — a Bash tool call's own subprocess pid dies before
+  the next tool call, which made every lease look stale (#671/#674)
+- `heartbeat.sh` — detect a stalled estate and nudge it once (#315)
+- `watchdog.sh` — restart the supervisor loop when it dies with work left,
+  found by pane COORDINATES, not name
+- `watchdog_notify.py` — decide whether the watchdog's `escalate` state
+  should reach a human
+- `sleepcheck.py` — is the loop asleep with a wakeup pending, or actually down
+- `state.sh` — the supervisor's current situation as a small hard-capped
+  document, not a conversation replay
+- `digest.sh` — one command answering "what is the state of the estate now"
+- `contest-stop.sh` — auto-contest a STOP-CONCLUSION nobody chose (#19-ish
+  history, see its own header)
+- `advance-live.sh` — advance the LIVE watchdog worktree to `origin/main`
+- `tooling-drift.sh` — tick-time drift detector for the loop's own tooling
+  surface (#654)
+- `weekly-watch.sh` / `quota-watch.sh` / `quota-watch-recover.sh` — tell Jon
+  when the weekly cap or session quota is nearly gone, and self-correct the
+  watcher if it hangs; `quota-watch.sh` resolves the live Director via the
+  supervisor lease, not a name guess (#673)
+
+**Telegram / notify:**
+- `notify.sh` — send Jon a short escalation message (Telegram first, iMessage
+  fallback)
+- `inbox.sh` / `inbox-poll.sh` / `inbox-route.sh` — read Jon's replies;
+  `inbox-poll.sh` is the automatic inbound path and a service (Invariant 8),
+  `inbox-route.sh` delivers one message to the lane it answers,
+  `director-route.sh` always delivers to the Director specifically
+- `director-inbox.sh` — out-of-band messages to the supervisor pane, without
+  typing into it
+- `closed-report.sh` — tell Jon on Telegram which issues closed, every 30 min
+- `idea.sh` — capture an idea into the corpus fast, without derailing (#341)
+- `poller-leak-cleanup.sh` / `poller-lib.sh` / `poller-recover.sh` — detect
+  and clean up leaked or dead poller processes
+
+**tmux safety** (see Invariant 4):
+- `tmux-isolation.sh` — `assert_isolated_tmux`, required before any
+  destructive tmux verb or session creation (#185)
+- `tmux-guard.sh` — a `tmux` wrapper on PATH that refuses a bare destructive
+  verb typed directly into a lane's own shell
+- `tmux_verb_guard.py` — static guard: no test may create/destroy a tmux
+  SESSION outside isolation
+- `worktree-guard-audit.sh` — audits that the isolation guard is actually
+  reachable from files that source it (#199)
+- `send.sh` — the one verified-send primitive for typed text into a pane's
+  input box (#178/#186)
+- `session-defaults.sh` — shared tmux session name/defaults, centralized so
+  a repo rename can't leave stragglers
+
+**Viewers / UI** (a UI PR needs a captured frame — see Conventions):
+- `laneview/` — four renderers (`text.sh`, `tui.sh`, `opensessions.sh`,
+  `dock.sh`); none is required by another
+- `laneview.sh` — drive one `laneview/` implementation from `lanes.sh`'s json
+- `laneview-leak-cleanup.sh` — report-first cleanup for leaked `tui.sh`
+  processes (#356)
+- `look.py` — let an agent SEE a pane: capture / png / navigate / frames
+- `termshot.py` — the ANSI-to-SVG rasteriser `look.py`'s `png` renders through
+- `dim-strip.sh` — the one place that defines "is this span a Claude Code
+  prompt suggestion, or real pane content" (#521)
+
+**Transport (harness-neutral send/receive):**
+- `transport.py` — small tmux transport, output stays inside the adapter
+- `pi_transport.py` / `acp_transport.py` / `claude_print_transport.py` —
+  siblings for `pi --mode rpc`, ACP, and `claude -p`, not replacements
+- `harness_session.py` — resolve the agent's own harness conversation id
+
+**Prompt corpus / mining:**
+- `mine_prompts.py` / `mine_jon.py` — extract the operator's own turns from
+  harness transcripts, nothing else
+- `itemize_prompts.py` — turn `prompts` rows into `items` rows, one corpus step
+- `prior-attempts.sh` — what did the last agent on this issue already find
+- `acceptance.sh` — re-run a CLOSED issue's acceptance test, reopen if back
+
+**Housekeeping:**
+- `branch-sweep.sh` — delete local branches already merged into `origin/main`
+- `audit-lanes.sh` — compare every ledger `lanes` row against live tmux, once
+- `reap-verified.sh` — one verified reap primitive for tests with a real
+  long-lived poller-shaped process
+- `lane_identity.py` — is a lane's REGISTRATION still true of the live tmux
+  server it names (verified / contradicted / unverifiable, never bare yes/no,
+  #520)
+- `would-revert.sh` — "would merging this branch revert X", by merging it,
+  not by reading a diff
+- `refresh_brief_resume.py` — regenerate a brief's `## Resume point` block
+
+`tests/supervisor/` — 199 tracked files (`git ls-files tests/supervisor | wc
+-l`, checked at write time; re-run, don't trust this number stale): the suite
+is the contract. `python3 -m unittest discover -s tests/supervisor` has not
+reliably finished inside one working session's time budget; run a targeted
+test file, not a full discovery, when you only touched one thing.
+
+## The guards a lane will actually hit
+
+Each of these can refuse your dispatch, your merge, or your PR. When one
+fires, this is where to look — one hop from the refusal message to the code
+that produced it.
+
+| Guard | Refuses | Implemented in |
+|---|---|---|
+| CI gate | merge, until every check is green at the live head SHA | `ci_gate.py`, called from `merge-pr.sh` |
+| Authorship / independence | merge, when the reviewer lane is the author lane (Invariant 9) | `verdict-independence.sh` (`lane_relation`), called from `merge-pr.sh` |
+| Collision check | dispatch, when files overlap an in-flight lane's | `collision-check.sh`, called from `dispatch.sh` step 3.2; override with `--force` |
+| Host pressure | dispatch, when the host can't safely take another agent | `host-pressure.sh` / `host_pressure.py`; exit 2 = "couldn't measure", refused, not guessed |
+| Quota floor | new work, when the subscription quota is below the floor | `quota.sh` (`MIN_REMAINING`), watched by `quota-watch.sh` |
+| Supervisor lease | a second Director loop starting while one is alive | `core.py` (`Ledger.take_supervisor_lease` / `release_supervisor_lease` / `reap_stale_supervisor_lease`), exposed via `cli.py`'s `take-supervisor-lease` / `supervisor-lease` / `release-supervisor-lease` / `reap-supervisor-lease` subcommands; owner is keyed on `#{pane_pid}` from `loop-tick.md`, never `$$` (#671/#674) |
+
+Other gates worth knowing exist, not listed above because they fire less
+often: `completion-gate.sh` (won't advance a task group until every member
+left evidence), `fixpass-evidence-gate.sh` / `fixpass_evidence_gate.py` (a fix
+pass must paste proof, not a claim — #338), `ui-evidence-gate.sh` /
+`ui-evidence-report.sh` (a UI PR needs a captured frame — #110/#468),
+`gh-comment-gate.sh` (only `post-verdict.sh` may post a Verdict/Review-Lane
+comment — #188), `mark-pr-external.sh` (gated: record a PR as authored
+outside the lane system).
 
 ## Invariants — do not break these without an explicit decision
 
@@ -230,7 +342,9 @@ absent.** Before reporting "none", "empty", "never" or "not called":
 binary attached.** After building anything protective, ask both *what calls it?*
 and *is that caller something that survives the failure it guards against?* A
 cleanup invoked from the crashing process is wired to the one thing that will not
-be running.
+be running. (`count-agents.sh`, in the index above, is a live instance of the
+first question right now — it exists, it is tested, and as of this commit
+nothing calls it.)
 
 **An abstraction can be present and correctly avoided.** Routing around a seam
 looks identical to nobody having wired it up. Check whether the avoidance is
@@ -268,7 +382,7 @@ guard and a red transcript can both be telling the truth at once.
   lane and reviewer lane are the same (invariant 9) or whose verdict cannot be
   read (`Verified 2026-08-15`, #184/#196/#198). `gh pr merge` run directly
   bypasses this — it is convention, not a platform block, same as the CI gate
-  below.
+  above.
 - One fix pass. If a PR fails a second review, close it and file what remains.
 - Cheaper model tiers for workers and reviewers; reserve the expensive tier for
   judgement.
@@ -279,3 +393,9 @@ guard and a red transcript can both be telling the truth at once.
   This is enforced, not just written down here: `.github/workflows/ui-evidence.yml`
   runs `ui-evidence-gate.sh` on every PR and fails one that touches that path
   without a `<!-- ui-evidence:v1 -->` marker in the body or a comment.
+
+---
+*Last checked against the tree at `1e2d4ae` (2026-08-27). If `git log
+--oneline scripts/supervisor | head -1` names something newer than that and
+this file hasn't moved, treat any specific claim above as unverified until
+you re-check it — don't trust it just because it's written down.*
