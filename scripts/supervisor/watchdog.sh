@@ -602,6 +602,71 @@ report() {                       # report <state> <detail> [notify-line]
   fi
 }
 
+# --- agent-supervisor#666: refresh checked: right before advance-live.sh ---
+#
+# `$iso` (and so every `checked:` line report() writes) is stamped ONCE, at
+# this file's own top, before ANY of this tick's own work runs -- including
+# every check_* call in on_exit() above advance_on_exit, and including
+# advance-live.sh's own fetch + smoke test once THAT starts. advance-live.sh's
+# post-tick window (agent-supervisor#654) re-reads that same `checked:` line
+# and refuses to mutate LIVE once too much time has passed since it -- correct
+# for loop-tick.md's OTHER caller, which has no relationship to this tick and
+# genuinely needs to know how long ago the watchdog last confirmed alive.
+#
+# For THIS caller it measures the wrong thing. advance-live.sh's own header
+# says the window is "satisfied by construction" when called from the
+# watchdog's own exit path, "the timestamp being read was written seconds
+# earlier by the caller" -- true when this function ran right after report().
+# It no longer does: on_exit() (#199, #205, #450, #526...) now runs a dozen
+# other checks first, and one of them, worktree-guard-audit.sh, has its own
+# 120s timeout and was measured failing that timeout on 131-132 consecutive
+# ticks in this estate's own watchdog.log before this fix -- eating most of
+# the window by itself before advance-live.sh is ever invoked. Measured live
+# (agent-supervisor#666): "recheck age 874s" and "920s" against a 150s
+# window, with EVERY logged attempt in advance-live.log refusing the same
+# way back to 2026-08-25 -- not a one-off stale read, a structurally
+# unsatisfiable gate for this caller.
+#
+# The fix is not a bigger number (the issue is explicit: a window widened
+# without knowing what it guards is worse than one that is too tight) and it
+# is not skipping the check for this caller either -- advance-live.sh's OWN
+# fetch + smoke test can still legitimately overrun the window (a hung
+# candidate, a slow remote), and that must still refuse; the re-check
+# immediately before the mutation (advance-live.sh's own, untouched by this
+# fix) still catches that case.
+#
+# What is wrong is only the REFERENCE POINT: re-stamp `checked:` to "now"
+# right here, immediately before handing off, so the window advance-live.sh
+# re-reads bounds ONLY the work that is actually this caller's own (the
+# fetch and the smoke test) -- restoring the "seconds earlier" property the
+# design always assumed, without changing TICK_INTERVAL, SAFETY_BUFFER, or
+# any guard advance-live.sh itself applies. Truthful, not a workaround: the
+# watchdog genuinely is still alive and mid-exit-trap at this instant, so
+# recording that instant as its own most recent confirmation is accurate,
+# not merely convenient.
+#
+# Rewrites only the `checked:` line, atomically (tmp+mv, same pattern
+# report() uses), and leaves every other field (state/detail/pane/
+# restarts/code/advance/notify) exactly as report() last wrote them --
+# nothing here should overwrite this tick's own outcome before it is known.
+# Best-effort: a failed refresh leaves the older timestamp in place, which
+# only reintroduces the pre-fix behaviour for this one tick, never something
+# worse. Never touches notification/dedup state -- this is not a new report,
+# it is the existing report's own timestamp catching up to reality.
+refresh_checked_for_advance() {
+  [ -f "$STATUS" ] || return 0
+  local tmp now
+  tmp="$STATUS.refresh.$$"
+  now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+  awk -v now="$now" '
+    /^checked:/ { print "checked:  " now; done=1; next }
+    { print }
+    END { if (!done) print "checked:  " now }
+  ' "$STATUS" >"$tmp" 2>/dev/null && [ -s "$tmp" ] && mv -f "$tmp" "$STATUS" 2>/dev/null
+  rm -f "$tmp" 2>/dev/null
+  return 0
+}
+
 # --- advancing the code this watchdog itself runs from ---------------------
 #
 # The LaunchAgent runs this file out of a PINNED detached worktree
@@ -1804,6 +1869,12 @@ advance_on_exit() {
   if ! cp -p "$HERE/poller-recover.sh" "$copy_dir/poller-recover.sh" 2>/dev/null; then
     log "ADVANCE-COPY-INCOMPLETE: poller-recover.sh could not be copied beside advance-live.sh -- the prompt poller relaunch will no-op this tick, watchdog poller-recover.sh remains the backstop"
   fi
+  # agent-supervisor#666: see refresh_checked_for_advance's own comment.
+  # Right here, immediately before the hand-off, not any earlier -- every
+  # check_* call above this point in on_exit() is exactly the same-tick work
+  # this re-stamp exists to stop being counted against advance-live.sh's
+  # post-tick window.
+  refresh_checked_for_advance
   out=$(SUPERVISOR_STATE="$STATE" SUPERVISOR_STATUS="$STATUS" bash "$copy" "$root" 2>&1)
   arc=$?
   # advance-live.sh's prompt_poller_relaunch backgrounds a waiter that execs
