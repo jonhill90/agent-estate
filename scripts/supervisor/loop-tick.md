@@ -84,12 +84,34 @@ dispatched the same five issues a first instance had claimed seconds
 earlier. `claim.sh`'s per-issue claim did not catch it (both instances
 share one GitHub identity), and nothing checked the ROLE itself.
 
-Run this before anything else, every tick, using `$$` — this process's own
-pid, stable for the life of this conversation:
+**agent-supervisor#671: not `$$`.** `$$` was believed to be "this process's
+own pid, stable for the life of this conversation" — measured false. Every
+`Bash` tool call in this harness runs in its own short-lived subprocess: two
+consecutive calls in the same turn print two different pids, and the first is
+already gone (`ps -p` exits 1, checked directly, never through a pipe) by the
+time the second one runs. A lease taken with `$$` is therefore stale before
+the tick that took it even finishes — not because the loop crashed or exited,
+but because the pid recorded was never anything but one tool call's own
+process. That is what produced agent-dotfiles#238's stale-lease symptom every
+tick: the NEXT tick's `take-supervisor-lease` finds the previous tick's owner
+provably dead, reaps it, and re-takes it under a pid that will itself be dead
+one tool call later.
+
+Use `$TMUX_PANE`'s own process instead — the same anchor
+`register-lane-self.sh` uses for the identical reason (invariant 10: a fact
+read from the pane's own environment, never inferred or guessed), and a pid
+that lives for the life of the pane, not one tool call:
 
 ```bash
-python3 scripts/supervisor/cli.py take-supervisor-lease --owner-pid $$
+OWNER_PID="$(tmux display-message -p -t "$TMUX_PANE" '#{pane_pid}' 2>/dev/null)"
+python3 scripts/supervisor/cli.py take-supervisor-lease --owner-pid "${OWNER_PID:-$$}"
 ```
+
+`$TMUX_PANE` is exported by tmux into every process it starts in a pane, so it
+is set here without asking tmux which window is focused (the exact mistake
+#187 made). The `${OWNER_PID:-$$}` fallback is only for a tick run outside
+tmux entirely (a test, a hand-invocation) — expect it to behave exactly like
+the old, broken default in that case, not as a fix for it.
 
 - **`"leased":true`** — you hold it (freshly, or still, if this is a later
   tick re-affirming the same pid). Proceed to the quota gate.
