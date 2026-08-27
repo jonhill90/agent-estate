@@ -54,6 +54,8 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 STAMP="$STATE/.contest-stop.last"
 CLAIM=""
@@ -172,7 +174,7 @@ fi
 if [ -x "$HERE/dispatch.sh" ]; then
   QUOTA_GUARD_TIMEOUT_SECONDS="${QUOTA_GUARD_TIMEOUT_SECONDS:-60}" \
   QUOTA_USAGE_TIMEOUT_SECONDS="${QUOTA_USAGE_TIMEOUT_SECONDS:-60}" \
-  bash "$HERE/dispatch.sh" 150 contest-stop "$BRIEF" jonhill90/agent-supervisor \
+  bash "$HERE/dispatch.sh" 150 contest-stop "$BRIEF" "$AGENT_SUPERVISOR_DEFAULT_REPO_GITHUB" \
     "$(cd "$HERE/../.." && pwd)" --not-a-review >"$STATE/contest-stop.dispatch.log" 2>&1
   rc=$?
   if [ "$rc" -eq 0 ]; then
