@@ -105,8 +105,35 @@ matched_lines=()
 excluded_pids=()
 while IFS= read -r line; do
   [ -n "$line" ] || continue
-  pid="${line%% *}"
-  comm="${line#* }"
+  # agent-supervisor#678: BSD `ps`'s pid= column is fixed-width, padded
+  # with LEADING spaces to the width of the widest pid currently on the
+  # host (not to the width of any one line) -- so a shorter pid is
+  # preceded by one or more spaces the moment any process elsewhere in
+  # the table has more digits. `${line%% *}` looks for the LONGEST
+  # trailing match of " *", and a leading space already satisfies that
+  # pattern starting at position 0 -- so on a padded line the "pid" it
+  # extracts is EMPTY and "comm" becomes the pid digits glued to the
+  # real comm ("8454 claude", never exactly "claude"). That candidate
+  # then fails the regex below and is silently dropped -- counted
+  # nowhere, not even into excluded_pids, which is exactly the shape
+  # #678 reported (16 counted + 2 excluded = 18 of 19; the 19th process
+  # satisfied comm==claude but appeared in neither block). Confirmed
+  # live: `ps -Ao pid=,comm=` on this host padded pid to 5 characters,
+  # and every line whose pid needed fewer than 5 digits carried a
+  # leading space that reproduced the empty-pid/glued-comm failure
+  # under the old `%%`/`#` split.
+  #
+  # `read` fixes this because it splits on RUNS of IFS whitespace and
+  # discards leading/trailing runs entirely, which is what a
+  # fixed-width padded column actually needs -- and because only two
+  # variables are named, the second one is assigned everything left on
+  # the line after the first token, so a multi-word comm like "claude
+  # bg-pty-host" still arrives whole rather than truncated to its first
+  # word. Deterministic on pid digit-width, not a race: the same
+  # process is dropped on every run for as long as some pid elsewhere in
+  # the table stays wider, which matches #678's "stable across three
+  # paired runs six seconds apart".
+  read -r pid comm <<<"$line"
   if [[ "$comm" =~ $AGENT_COMMAND_RE ]]; then
     count=$((count + 1))
     matched_lines+=("$pid  $comm")
