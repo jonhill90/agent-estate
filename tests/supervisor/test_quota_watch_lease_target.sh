@@ -69,7 +69,23 @@ echo "quota-watch.sh -- target resolution prefers the supervisor lease over a na
 #               lease owner, so pane_for_pid must walk UP from a CHILD of
 #               the pane's own first process to find it, not merely match
 #               pane_pid directly.
-tmux new-session -d -s "$S1" -n supervisor -c /tmp
+# `-f` on the FIRST command that starts the server, not `set-option`
+# afterward: base-index is a server-wide option, and `new-session` creates
+# its first window using whatever base-index the server already has at that
+# instant, so setting it after window 1 already exists is too late for that
+# window itself (agent-supervisor#459 measured this directly). Jon's
+# personal tmux.conf happens to set base-index 1, which is why this suite
+# passed locally 11/11 while failing here: a bare server -- every GitHub
+# Actions runner, and this isolated one without this line -- defaults to
+# base-index 0, so `-n supervisor` lands S1's only window on index 0 and
+# every literal "=$S1:1"/"=$S2:1" target below then fails outright
+# ("can't find window: 1") because nothing was ever created there. Both S1
+# and S2 share this isolated server (same $TMUX_TMPDIR, default socket), so
+# setting it once on the call that starts the server is enough for both.
+QW_CONF="$(mktemp "${TMPDIR:-/tmp}/qw662-tmux-conf.XXXXXX")"
+printf 'set -g base-index 1\n' > "$QW_CONF"
+tmux -f "$QW_CONF" new-session -d -s "$S1" -n supervisor -c /tmp
+rm -f "$QW_CONF"
 tmux new-session -d -s "$S2" -n director -c /tmp
 # `-l` (literal): plain `send-keys` lets the shell's own line editor interpret
 # some characters -- an interactive zsh's default history-expansion treats a
