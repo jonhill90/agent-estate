@@ -8,7 +8,7 @@
 # on ANY substring of a process's full argv, not on what the process
 # actually IS. Measured live on this host, one sample, `pgrep -f claude`
 # read 22 against 17 real agent sessions:
-#   17  agent session   claude --model sonnet --dangerously-skip-permissions ...
+#   17  agent session   claude --model sonnet <harness/claude.sh's own launch flags>
 #    2  transient zsh   /bin/zsh -c source ~/.claude/shell-snapshots/snapshot-*.sh ...
 #    1  sed             the measuring pipeline itself, matching its own argv
 #    1  tail -f         following a log living under a path containing "claude"
