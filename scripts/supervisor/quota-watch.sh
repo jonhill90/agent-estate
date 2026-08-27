@@ -69,6 +69,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 INTERVAL="${QUOTA_WATCH_INTERVAL:-300}"
 TARGET="${QUOTA_WATCH_TARGET:-agent-supervisor:@1}"
+# agent-supervisor#662: the ledger's own record of who holds the supervisor
+# role (`cli.py supervisor-lease`, `host:pid`) -- consulted by resolve_target
+# below BEFORE it ever falls back to guessing by window name. Same
+# LEDGER_PYTHON/LEDGER_CLI convention as dispatch.sh.
+LEDGER_PYTHON="${QUOTA_WATCH_PYTHON:-python3}"
+LEDGER_CLI="$HERE/cli.py"
 # Overridable so tests can point this at a stub, same convention as
 # dispatch.sh's QUOTA_GATE -- never call codexbar directly from anywhere,
 # everything goes through a quota.sh-shaped binary.
@@ -110,23 +116,99 @@ done
 
 log() { printf '%s quota-watch: %s\n' "$(date -u '+%Y-%m-%dT%H:%M:%SZ')" "$*"; }
 
+# agent-supervisor#662: walk the KERNEL'S OWN process tree upward from PID
+# (the `ps -o ppid=` idiom lanes.sh's hung-pane detection already reads
+# directly -- see that file's comment on why a fact neither tmux nor this
+# system authored is fair game to read straight, the same authorship test
+# `is_service_pane` uses) until it reaches a pid that IS some live pane's
+# `#{pane_pid}` -- a pane's own FIRST process. Echoes "session:index" and
+# returns 0 on a match. Returns 1 if the tree bottoms out with no match --
+# the lease-holder's process has exited, or it is not running under this
+# tmux server at all.
+pane_for_pid() {
+  local pid="$1" panes match
+  case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+  panes=$(tmux list-panes -a -F '#{pane_pid} #{session_name}:#{window_index}' 2>/dev/null) || return 1
+  [ -n "$panes" ] || return 1
+  while [ -n "$pid" ] && [ "$pid" -gt 1 ] 2>/dev/null; do
+    match=$(awk -v p="$pid" '$1==p{print $2; exit}' <<<"$panes")
+    if [ -n "$match" ]; then
+      printf '%s' "$match"
+      return 0
+    fi
+    pid=$(ps -o ppid= -p "$pid" 2>/dev/null | tr -d '[:space:]')
+    case "$pid" in '' | *[!0-9]*) return 1 ;; esac
+  done
+  return 1
+}
+
 # RESOLVE THE WINDOW, do not trust the @id in TARGET. tmux window ids are
 # unique within a server but are NOT stable across a server restart
 # (agent-supervisor#346) -- the default here (agent-supervisor:@1) is one of
 # the three instances the issue names, alongside director-loop.sh's
 # director:@3, which hit the identical defect the same night.
 #
+# agent-supervisor#662: a stale @id is not the only way this goes wrong. On
+# 2026-08-27 the estate's director had moved WHOLESALE to a different
+# session (`estate`, not `agent-supervisor`) -- and a name-only fallback,
+# scoped (correctly, for its own purpose) to the CONFIGURED session, found a
+# LEFTOVER window in that old session that still happened to be named
+# `supervisor`. It was not the director; it was an unrelated pane from a
+# retired layout. The fallback did exactly what it was written to do and
+# still delivered to nobody -- because window NAME is not a stable identity
+# for "the live director", it is a label, and a stale one MATCHING is not
+# evidence of anything.
+#
+# THE FIX, in priority order:
+#   1. The configured target, unchanged, if it still resolves.
+#   2. The ledger's OWN record of who holds the supervisor role right now --
+#      `cli.py supervisor-lease`, `host:pid`, taken by the director's own
+#      tick loop with its own pid (loop-tick.md's `take-supervisor-lease
+#      --owner-pid $$`). A pid is neither mutable nor guessable the way a
+#      window name is, and resolving it to a pane via `pane_for_pid` is not
+#      confined to any one session -- it finds wherever the real director
+#      actually lives now, session included. This is the one thing the
+#      by-name fallback below structurally cannot be.
+#   3. Only when the lease is absent, unreadable, or its pid's pane cannot be
+#      found (every case this script ran under before #662, and still a
+#      legitimate one -- a lease-unaware invocation must fail OPEN into the
+#      old behaviour, not refuse outright) -- the OLD by-name heuristic,
+#      still scoped to the configured session, still refusing on zero or
+#      more than one match. This is now explicitly the LOW-CONFIDENCE path:
+#      it is what produced #662's incident, so a resolution that takes it
+#      says so loudly (a page, not just a log line -- see send_takeover_alarm
+#      below), not only when a send later fails to confirm.
+#
 # UNLIKE director-loop.sh's single-purpose `director` session, this script's
 # session legitimately holds many windows -- one per lane -- so "fall back
 # when there is exactly one window" is the wrong rule here: it would find
 # several on every ordinary restart and refuse every time. The durable key
-# for THIS target is the window NAME: bootstrap-session.sh already names the
-# supervisor's own window `supervisor` (LANES_SUPERVISOR_NAME), and a
+# for path 3 is still the window NAME: bootstrap-session.sh already names
+# the supervisor's own window `supervisor` (LANES_SUPERVISOR_NAME), and a
 # respawned window can be given that name back even though it can never be
-# given its old @id back. Resolve only when exactly one window carries that
-# name; more than one (a rename race) is exactly as unresolvable as zero.
+# given its old @id back.
+#
+# `RESOLUTION_KIND` records which path resolved (direct/lease/guessed) so a
+# caller (send_message's own log line) can say how confident the delivery
+# actually is -- "wrote to a pane" and "an agent read it" are not the same
+# claim, and neither is "wrote to the pane we are SURE is the director" and
+# "wrote to a pane that merely shares its old name".
 resolve_target() {
+  RESOLUTION_KIND="direct"
   tmux capture-pane -p -t "=$TARGET" >/dev/null 2>&1 && return 0
+
+  local lease_json lease_pid resolved
+  if lease_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" supervisor-lease 2>/dev/null) \
+    && grep -qF '"held":true' <<<"$lease_json"; then
+    lease_pid=$(sed -n 's/.*"owner":"[^:"]*:\([0-9]*\)".*/\1/p' <<<"$lease_json" | head -1)
+    if [ -n "$lease_pid" ] && resolved=$(pane_for_pid "$lease_pid"); then
+      log "configured target $TARGET is gone (tmux renumbered across a restart); resolved to $resolved via the supervisor lease (pid $lease_pid) -- not a name guess"
+      TARGET="$resolved"
+      RESOLUTION_KIND="lease"
+      return 0
+    fi
+  fi
+
   local session="${TARGET%%:*}"
   local name="${LANES_SUPERVISOR_NAME:-supervisor}"
   local matches count
@@ -134,12 +216,19 @@ resolve_target() {
     | awk -F'\t' -v n="$name" '$2==n{print $1}')
   count=$(grep -c . <<<"$matches")
   if [ "$count" -eq 1 ]; then
-    local resolved="$session:$(tr -d '[:space:]' <<<"$matches")"
-    log "configured target $TARGET is gone (tmux renumbered across a restart); resolved to $resolved by window name '$name'"
+    resolved="$session:$(tr -d '[:space:]' <<<"$matches")"
+    log "configured target $TARGET is gone (tmux renumbered across a restart), and the supervisor lease did not resolve a live pane; GUESSING by window name '$name' within $session -- resolved to $resolved. This is the low-confidence path (#662): a same-named leftover in the WRONG session looks identical to this from inside $session alone."
     TARGET="$resolved"
+    RESOLUTION_KIND="guessed"
+    if send_takeover_alarm "quota-watch resolved by a name guess, not the lease (#662)" \
+      "Configured target was gone. The supervisor lease did not resolve to a live pane (absent, unreadable, or its process could not be located), so quota-watch.sh fell back to matching window name '$name' within session $session -- resolved to $resolved. This is the exact low-confidence path that delivered a wind-down to a stale leftover window before (#662): verify by hand that $resolved is really the live director, not an old layout's leftover. tmux attach -t $session"; then
+      log "escalated the name-guess resolution"
+    else
+      log "escalation for the name-guess resolution did NOT send -- still unverified, see notify.log"
+    fi
     return 0
   fi
-  log "configured target $TARGET is gone and $count window(s) in '$session' are named '$name' -- refusing to guess which is the supervisor pane; a human should look"
+  log "configured target $TARGET is gone, the supervisor lease did not resolve a live pane, and $count window(s) in '$session' are named '$name' -- refusing to guess which is the supervisor pane; a human should look"
   return 1
 }
 
@@ -268,7 +357,12 @@ while :; do
       if [ "$confirmed" != "WINDDOWN" ]; then
         log "transition ${confirmed:-<start>} -> WINDDOWN; sending ONE wind-down to $TARGET"
         if send_message "$WINDDOWN_MSG"; then
-          log "wind-down delivered"
+          # agent-supervisor#662: "delivered" is a claim about which pane got
+          # it, and a confirmed pane arriving at the wrong TARGET reads
+          # identically to success unless the log says how TARGET was found.
+          # RESOLUTION_KIND=guessed already paged separately (resolve_target
+          # above); tagged here too so the delivery record itself carries it.
+          log "wind-down delivered to $TARGET (resolution: $RESOLUTION_KIND)"
         else
           log "wind-down did NOT take -- pane did not confirm after send; a human should look"
           if send_takeover_alarm "quota-watch wind-down did NOT take (#273)" \
@@ -293,7 +387,7 @@ while :; do
       if [ "$confirmed" = "WINDDOWN" ]; then
         log "transition WINDDOWN -> SAFE; sending ONE resume to $TARGET"
         if send_message "$RESUME_MSG"; then
-          log "resume delivered and the pane is working"
+          log "resume delivered to $TARGET and the pane is working (resolution: $RESOLUTION_KIND)"
         else
           log "resume did NOT take -- pane is not working after send; a human should look"
           if send_takeover_alarm "quota-watch resume did NOT take (#273)" \
