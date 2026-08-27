@@ -182,6 +182,19 @@ watchdog_age() {
   echo $((now - epoch))
 }
 
+# The raw `checked:` VALUE (not its derived age) -- agent-supervisor#666.
+# Echoes the timestamp string and returns 0, or returns 1 with nothing
+# echoed if unreadable. Same read-fresh discipline as watchdog_age/
+# dirty_status: this is what the race gate below diffs against a baseline
+# captured earlier in this same run, to tell "a NEW real tick wrote a
+# fresher checked: while I was working" (a genuine race) apart from
+# "checked: is merely old because MY OWN necessary work -- fetch, smoke
+# test -- took a while" (not a race at all; see the gate's own comment).
+watchdog_checked_line() {
+  [ -f "$WATCHDOG_STATUS" ] || return 1
+  grep -m1 '^checked:' "$WATCHDOG_STATUS" 2>/dev/null
+}
+
 # --- agent-supervisor#24: the watchdog's own absence must be loud ----------
 # `watchdog.status`'s `checked:` line is the watchdog's own heartbeat: it is
 # rewritten on every tick, including every early-exit path (watchdog.sh's
@@ -794,15 +807,41 @@ fi
 #
 # We still require a watchdog status to EXIST and be readable before spending
 # minutes on a smoke test -- a watchdog that has never ticked from $LIVE means
-# advancing is meaningless. What moves below the smoke test is only the
-# freshness assertion, which is re-read immediately before the mutation
-# anyway (it always was; that recheck is now the real gate rather than a
-# duplicate of an earlier one).
+# advancing is meaningless.
 if [ ! -f "$WATCHDOG_STATUS" ]; then
   skip "no watchdog status at $WATCHDOG_STATUS -- watchdog has not ticked from $LIVE yet, not advancing this pass"
 fi
-watchdog_age >/dev/null || skip "no readable checked: timestamp in $WATCHDOG_STATUS -- not advancing this pass"
+entry_age=$(watchdog_age) || skip "no readable checked: timestamp in $WATCHDOG_STATUS -- not advancing this pass"
 safe_until=$((TICK_INTERVAL - SAFETY_BUFFER))
+
+# agent-supervisor#666 restores this cheap pre-smoke-test staleness check
+# (present in the original #122 design, removed by #434 when the smoke test
+# moved ahead of "the window" -- #434's own comment: "Only the freshness
+# assertion moves"; it did not say the check itself should stop existing
+# before the smoke test too, and tests/supervisor/test_advance_live.sh's
+# "stale tick skips" case still exercises exactly this: a watchdog already
+# stale BEFORE we start is a real, distinct reason not to bother -- no
+# smoke test needed to know that). Cheap and unconditional: if the watchdog
+# was already outside its own tick cadence when we started, nothing that
+# happens next can fix that.
+if [ "$entry_age" -lt 0 ] || [ "$entry_age" -gt "$safe_until" ]; then
+  skip "watchdog last ticked ${entry_age}s ago, outside the 0-${safe_until}s post-tick window -- not advancing this pass"
+fi
+
+# --- agent-supervisor#666: baseline for the SEPARATE race gate below ------
+# Measured live (this issue's own repro): a single on_exit sub-check
+# (worktree-guard-audit.sh, called from check_worktree_guard_audit) alone
+# hit ITS OWN internal 120s timeout and was killed -- consuming 120 of the
+# 150s safety budget before advance_on_exit even reached this script, on a
+# scratch/near-empty state directory, before this script's own fetch and
+# smoke test (a FULL second watchdog.sh run, including its own copy of that
+# same 120s-capped check) added anything further. The check just above
+# catches a tick that was ALREADY stale at entry; it cannot also protect
+# the recheck below without punishing every tick for its own unavoidable
+# work -- see that gate's own comment for why it is a DIFFERENT question
+# (did anything change, not how much time elapsed) and a DIFFERENT baseline
+# (captured here, at entry, not the tick's own frozen checked: line).
+baseline_checked="$(watchdog_checked_line)"
 
 # --- gate: the candidate must demonstrably run, not just have CI-green --
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/ad99-advance-smoke.XXXXXX")"
@@ -882,14 +921,57 @@ fi
 if [ "$fresh_target" != "$target" ]; then
   skip "origin/main moved from $target to $fresh_target while the smoke test ran -- the passing smoke test is evidence about $target, not $fresh_target; not advancing on untested evidence, the next pass will test the new tip"
 fi
-age=$(watchdog_age) || skip "watchdog status became unreadable while the smoke test ran -- not advancing this pass"
-if [ "$age" -lt 0 ] || [ "$age" -gt "$safe_until" ]; then
-  # THIS is the race gate now -- the only one, and it guards the mutation
-  # directly. Reaching it means the smoke test already passed, so the pass is
-  # not being thrown away: the next tick re-runs against the same target and
-  # this check is the only thing that has to fit in the window. What follows
-  # it is `git checkout --detach`, a ref update measured in milliseconds.
-  skip "watchdog tick window closed while the smoke test ran (recheck age ${age}s, outside the 0-${safe_until}s post-tick window) -- not advancing this pass; the smoke test PASSED, only the mutation waits"
+current_checked="$(watchdog_checked_line)" || skip "watchdog status became unreadable while the smoke test ran -- not advancing this pass"
+
+# --- agent-supervisor#666: THIS is the race gate now, not an absolute age -
+#
+# THE PRIOR VERSION compared elapsed wall-clock time (watchdog_age, read
+# against $WATCHDOG_STATUS's checked: line, which is frozen at THE CALLING
+# TICK'S OWN START -- watchdog.sh sets $iso once, before any of its on_exit
+# checks run, per that script's own comment) against a fixed 150s budget.
+# That measures "how long has it been since the calling tick STARTED", not
+# "did anything change since I began my own necessary work" -- and the
+# calling tick's own on_exit checks (ten of them, sequentially, before
+# advance_on_exit even reaches this script) plus this script's own fetch
+# and smoke test (a full SECOND watchdog.sh run) routinely exceed 150s
+# combined on their own, with zero concurrency involved. Measured directly
+# (this issue's own repro, comment above baseline_checked): one single
+# on_exit sub-check alone can consume the entire 120s of its own internal
+# timeout. Historically (advance-live.log, this repo's own record) 166 of
+# 347 non-current advance attempts (47.8%) were rejected by the old check,
+# clustered densely just above 150s -- consistent with "normal combined
+# overhead routinely exceeds the window", not with rare exceptional stalls.
+#
+# WHAT THE WINDOW IS ACTUALLY FOR (aa36dc3, #122's own commit message: "the
+# race check was TOCTOU"): stop `git checkout --detach` from swapping
+# $LIVE's working tree out from under a DIFFERENT, genuinely concurrent
+# watchdog tick that is actively reading files there right now. That is a
+# question about whether anything has CHANGED since this run started
+# validating its target -- not about how many seconds have elapsed while
+# THIS run did its own unavoidable work. So the gate now diffs the RAW
+# checked: VALUE captured at entry (baseline_checked, above) against a
+# fresh read right here, immediately before the mutation:
+#   - unchanged  => no other real tick has completed (and reported) since
+#                   we started; for the common SELF-triggered caller
+#                   (advance_on_exit, invoked from inside watchdog.sh's own
+#                   on_exit, same process, strictly sequential) this is
+#                   ALWAYS true by construction -- that same process cannot
+#                   have written a second, different checked: line to race
+#                   against itself. Proceed.
+#   - changed    => a DIFFERENT tick wrote a NEW checked: while this run was
+#                   busy -- genuine evidence of overlapping activity, not
+#                   merely elapsed time. Refuse, exactly as before.
+#
+# RESIDUAL, DISCLOSED GAP, not solved here: a real tick that started but has
+# not yet reached its own report() call (checked: not yet rewritten) is
+# invisible to this diff, same as it was invisible to the old age check
+# (age near 0 was treated as SAFE there too, despite a tick that just
+# started being the likeliest to still be running). Not worse than before;
+# not claimed to be a complete fix for that narrower race. Same accepted-
+# risk class #136 already established for two concurrent advance-live.sh
+# invocations.
+if [ "$current_checked" != "$baseline_checked" ]; then
+  skip "watchdog status changed while the smoke test ran (baseline '${baseline_checked}', now '${current_checked}') -- a different tick reported since this run started; not advancing on a target that may no longer be safe to swap in, the next pass re-validates"
 fi
 
 # --- capture the rollback target, AFTER every skip, before any mutation ----

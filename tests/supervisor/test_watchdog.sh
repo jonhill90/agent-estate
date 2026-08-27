@@ -533,13 +533,20 @@ else say_bad "a skipped advance leaves the live copy where it was" "moved to $(a
 if [ -e "$SA/rollback" ]; then say_bad "a skipped advance records no rollback target" "wrote $(cat "$SA/rollback")"
 else say_ok "a skipped advance records no rollback target"; fi
 
-# 7. the pre-mutation re-check: the window was open when the gate was first
-#    read and closed while the smoke test ran. That gap is variable-duration
-#    by construction -- a `git worktree add` plus a whole candidate watchdog
-#    run -- so the only check standing between a live tick and a tree swapped
-#    underneath it is the SECOND one, at the point of mutation. A test that
-#    only drives case 6 leaves this occurrence exactly as uncovered as before.
-#    Made deterministic rather than timed: the candidate's own watchdog.sh
+# 7. the pre-mutation re-check: the entry check passed, but something REAL
+#    changed the live watchdog.status while the smoke test ran. That gap is
+#    variable-duration by construction -- a `git worktree add` plus a whole
+#    candidate watchdog run -- so the only check standing between a live
+#    tick and a tree swapped underneath it is the SECOND one, at the point
+#    of mutation. A test that only drives case 6 leaves this occurrence
+#    exactly as uncovered as before. agent-supervisor#666: that second check
+#    no longer compares elapsed time against a fixed budget (the smoke
+#    test's own necessary duration routinely exceeded it on its own,
+#    independent of any real race -- see advance-live.sh's own comment) --
+#    it diffs the raw checked: value read at entry against a fresh read
+#    here, so this case is driven by making the candidate change that value
+#    to something DIFFERENT, not merely something that time-formats as
+#    older. Made deterministic rather than timed: the candidate's own watchdog.sh
 #    ages the live status while the gate is watching it.
 SB="$A/s8"; rm -rf "$SB"; mkdir -p "$SB"
 STALL=$(mktemp -d); rm -rf "$STALL"
@@ -567,7 +574,7 @@ adv_direct "$SB"; rc9=$?
 want_exit "a window that closes mid-smoke-test is a skip, not a failure" "$rc9" 0 "$(cat "$SB/out" 2>/dev/null)"
 check "the run got past the first check to the smoke test" "smoke test at $stall_sha passed" "$SB/advance.log"
 check "the window closing during the smoke test is caught before the checkout" \
-      "window closed while the smoke test ran" "$SB/out"
+      "watchdog status changed while the smoke test ran" "$SB/out"
 if [ "$(at_sha)" = "$b9" ]; then say_ok "the re-check leaves the live copy where it was"
 else say_bad "the re-check leaves the live copy where it was" "moved to $(at_sha) — checked out after the window closed"; fi
 

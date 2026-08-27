@@ -196,10 +196,13 @@ if [ "$after4" = "$target_sha3" ]; then ok "clean live advances to the new targe
 # A fourth commit whose stand-in watchdog.sh writes its own well-formed
 # smoke status (so the gate itself passes) and, standing in for "state
 # changed for real while the smoke test was running", also overwrites the
-# outer run's watchdog.status with a checked: timestamp well outside the
-# safe post-tick window. If advance-live.sh reused the $age it read before
-# the smoke test instead of re-deriving it immediately before the checkout,
-# this would still advance.
+# outer run's watchdog.status with a DIFFERENT checked: value (agent-
+# supervisor#666: the gate now diffs the raw checked: line captured at
+# entry against a fresh read here, rather than comparing elapsed time
+# against a fixed budget -- see advance-live.sh's own baseline_checked
+# comment for why). If advance-live.sh reused the checked: line it read
+# before the smoke test instead of re-reading it immediately before the
+# checkout, this would still advance.
 echo four >"$SRC/file.txt"
 git -C "$SRC" add file.txt
 cat >"$SRC/scripts/supervisor/watchdog.sh" <<'EOF'
@@ -231,7 +234,7 @@ unset TEST_MUTATE_STATUS_FILE
 want_exit "re-check notices the window closed mid-smoke-test (exit 0, skip)" "$rc" 0 "$out"
 after5=$(git -C "$LIVE" rev-parse HEAD)
 if [ "$after5" = "$before_sha4" ]; then ok "live is untouched when the re-check catches a closed window"; else bad "live is untouched when the re-check catches a closed window" "moved to $after5"; fi
-if grep -qi "closed while the smoke test ran" <<<"$out"; then ok "the refusal names the mid-smoke-test re-check"; else bad "the refusal names the mid-smoke-test re-check" "$out"; fi
+if grep -qi "changed while the smoke test ran" <<<"$out"; then ok "the refusal names the mid-smoke-test re-check"; else bad "the refusal names the mid-smoke-test re-check" "$out"; fi
 
 # --- ORIGIN/MAIN MOVES WHILE THE SMOKE TEST RUNS -------------------------
 #
