@@ -83,7 +83,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from core import Ledger  # noqa: E402
+from core import Ledger, lane_or_task_row  # noqa: E402
 
 
 VERDICT_VALUES = ("none", "approved", "rejected", "unknown")
@@ -696,11 +696,24 @@ def _review_lane_line(body):
 # The same principle #292 used for `lane_relation_from_rows` applies here:
 # when the trailer names no `<session>:<index>` token, take the first
 # whitespace-delimited token on the line and ask the LEDGER, never a guess --
-# a token that is a REGISTERED lane id is trusted; one that is not (whether
-# it is prose, a typo, or nonsense) still refuses, exactly as it did before.
-# `ledger` is optional and defaults to skipping this fallback entirely, so
-# every caller that never had a ledger to offer (unit tests included) keeps
-# its prior behaviour unchanged.
+# a token that RESOLVES (a registered lane row, or -- agent-supervisor#689 --
+# a known TASK id with its own frozen `pane_id` snapshot, `core.
+# lane_or_task_row`) is trusted; one that resolves to neither (prose, a
+# typo, nonsense) still refuses, exactly as it did before. `ledger` is
+# optional and defaults to skipping this fallback entirely, so every caller
+# that never had a ledger to offer (unit tests included) keeps its prior
+# behaviour unchanged.
+#
+# agent-supervisor#689: the task-id fallback exists because a brief predating
+# #688's `lane-whoami.sh` could tell a PANE-having lane to name itself by its
+# task id too, not only an off-pane lane -- and that trailer is not
+# unparseable prose, it is a real (if indirect) identity `lane_or_task_row`
+# can resolve through `tasks.pane_id` (#631). Returning the raw TASK id here
+# (not the lane it resolves to) is deliberate: every downstream comparison
+# (`resolve_lane_relation` / `cli.py lane-relation`) already goes through
+# `lane_or_task_row` on the SAME token to get its pane id, so nothing here
+# needs to translate it -- doing so twice, in two places, is exactly the
+# drift #108 warns against.
 def _parse_review_lane(body, ledger=None):
     """Lane stamp for comment verdicts.
 
@@ -719,7 +732,7 @@ def _parse_review_lane(body, ledger=None):
         first_token = rest.split(None, 1)[0] if rest else ""
         if first_token:
             try:
-                if ledger.get_lane(first_token):
+                if lane_or_task_row(ledger, first_token):
                     return first_token
             except Exception:
                 pass
@@ -764,7 +777,15 @@ def _author_lane_line(body):
 def _parse_author_lane(body, ledger=None):
     """Self-attested `Author-Lane:` trailer in a PR body, or `None` when
     absent or unparseable. See the module comment above `_AUTHOR_LANE_LINE_RE`
-    for the asymmetry a caller must hold: this is a REFUSE-only signal."""
+    for the asymmetry a caller must hold: this is a REFUSE-only signal.
+
+    agent-supervisor#689: same task-id fallback as `_parse_review_lane`
+    (`core.lane_or_task_row`) -- a self-attested author claim spelled as a
+    task id is exactly as resolvable, and MUST be, since this signal can
+    only ever REFUSE a merge: failing to resolve it here does not make a
+    self-review safer, it just makes this function blind to one more shape
+    of it.
+    """
     match = _AUTHOR_LANE_LINE_RE.search(body or "")
     if not match:
         return None
@@ -776,7 +797,7 @@ def _parse_author_lane(body, ledger=None):
         first_token = rest.split(None, 1)[0] if rest else ""
         if first_token:
             try:
-                if ledger.get_lane(first_token):
+                if lane_or_task_row(ledger, first_token):
                     return first_token
             except Exception:
                 pass

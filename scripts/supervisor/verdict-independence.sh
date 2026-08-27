@@ -133,12 +133,20 @@ resolve_lane_relation() {  # resolve_lane_relation <lane> <other> [lane-pane-id]
 # single-field lookup `cli.py lane-relation --lane X --other X` cannot
 # already answer would be a second way to ask the same question (#108's own
 # lesson).
+#
+# agent-supervisor#689: `core.lane_or_task_row`, not the bare `get_lane` this
+# used to call directly -- `$1` may name a TASK id rather than a registered
+# lane (a pane-having lane that stated its own task id in a `Review-Lane:`/
+# `Author-Lane:` trailer, `lane_or_task_row`'s own comment for why that is a
+# real, if indirect, identity and not unparseable prose). Every caller of
+# this function already treats an empty return exactly like "never
+# registered" -- unchanged.
 _lane_own_pane_id() {  # _lane_own_pane_id <lane> -> pane_id or empty
   "$LEDGER_PYTHON" -c '
 import sys
 sys.path.insert(0, sys.argv[1])
-from core import Ledger
-row = Ledger(sys.argv[2]).get_lane(sys.argv[3])
+from core import Ledger, lane_or_task_row
+row = lane_or_task_row(Ledger(sys.argv[2]), sys.argv[3])
 print((row or {}).get("pane_id") or "")
 ' "$HERE" "$STATE" "$1" 2>/dev/null
 }

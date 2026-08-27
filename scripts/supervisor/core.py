@@ -224,6 +224,49 @@ def pane_id_for_task(ledger, task_id):
     return (row.get("pane_id") or "").strip()
 
 
+# agent-supervisor#689 (the second half of #685): `Ledger.get_lane` alone
+# cannot resolve a `Review-Lane:`/`Author-Lane:` trailer that names a TASK id
+# rather than a registered `lanes` row. That is the shape `lane-whoami.sh`
+# emits for a pane-less (claude-print/pi-rpc) lane -- `dispatch-claude-print.
+# sh` registers `lanes.lane = <task id>` for those, so `get_lane` already
+# finds them (agent-supervisor#292) -- but it is ALSO the shape an older
+# brief (predating #688) told a PANE-having lane to name itself with, and
+# that string was never written to `lanes` at all: a task id belongs to
+# `tasks`, keyed by whichever real lane the ledger dispatched it to
+# (`tasks.lane`), with its own frozen `pane_id` snapshot (`#631`, the exact
+# mechanism `pane_id_for_task` above reads).
+#
+# So this tries a registered lane row FIRST -- the primary, still-correct
+# identity for a genuine off-pane lane -- and only when that is absent does
+# it fall back to treating `ident` as a task id and resolving through that
+# task's own frozen `pane_id`, the same snapshot `author_lane_for`
+# (verdict-independence.sh) already trusts for the AUTHOR side (#631). This
+# does not widen what counts as "same" or "different": the answer is still
+# decided by comparing `pane_id` values (`lane_relation_from_rows`), so a
+# task id that resolves to the SAME pane as the other side still reports
+# `same`, exactly as intended (agent-supervisor#689 point 3: this must not
+# turn a self-review into "independent" just because it is spelled as a task
+# id instead of a lane id).
+#
+# `None` when NEITHER a `lanes` row nor a `tasks` row exists for `ident`, or
+# when the task exists but carries no frozen `pane_id` (predates #631) --
+# unchanged fail-closed posture: an id this cannot place still refuses,
+# never guesses.
+def lane_or_task_row(ledger, ident):
+    """A pane-id-bearing dict for `ident`, trying a registered `lanes` row
+    first and a known `tasks` row's frozen `pane_id` snapshot second.
+    `None` when neither resolves."""
+    if not ident:
+        return None
+    row = ledger.get_lane(ident)
+    if row is not None:
+        return row
+    pane_id = pane_id_for_task(ledger, ident)
+    if not pane_id:
+        return None
+    return {"pane_id": pane_id}
+
+
 # agent-supervisor#605. `daemon`/`d-<task>` (`daemon/internal/ledger/
 # ledger.go`'s `EnsureLane`, called from `main.go:216`'s hardcoded `-lane`
 # default and `batch.go:103`'s per-job `d-<task>`) and `<session>:<index>`

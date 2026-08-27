@@ -1333,6 +1333,145 @@ if [ "$rc" -eq 1 ]; then ok "#635: a worktree branch that merely starts with the
 if [ ! -f "$MARKER" ]; then ok "#635: ...and never merges"; else bad "#635: prefix-sharing branch -- never merges" "$out"; fi
 echo "$out" | grep -q "unresolved" && ok "#635: prefix-sharing-branch refusal names the reason" || bad "#635: prefix-sharing-branch refusal named" "$out"
 
+# ============================================================================
+# agent-supervisor#689 (second half of #685): a `Review-Lane:`/`Author-Lane:`
+# trailer may name a TASK id even for a lane that HAS a tmux pane -- a shape
+# an older brief (predating #688's lane-whoami.sh) could produce, and
+# distinct from #292's genuine off-pane (claude-print/pi-rpc) lane ids,
+# which are already registered `lanes` rows. That token has no `lanes` row
+# at all, but it DOES resolve through the task's own frozen `pane_id`
+# snapshot (`core.lane_or_task_row`, reusing #631's mechanism -- previously
+# read only for the AUTHOR side, now also for the claimed/reviewer side).
+#
+# Three things must hold, and the refusing one (self-review) is checked
+# first and mutation-checked, per this repo's own CLAUDE.md: "every change
+# here makes more things comparable, and 'more comparable' is one careless
+# step from 'always independent'".
+# ============================================================================
+
+# --- #689a: a task-alias reviewer sharing the AUTHOR's own pane is refused
+# -- the reviewer states a DIFFERENT task id than the author's, but that task
+# was dispatched to the exact same lane/pane (t:80/%80): the shape a lane
+# reviewing its own PR under a second task id, rather than its pane string,
+# would take. Must be caught by pane-id comparison, not by string equality.
+rm -f "$MARKER"
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane t:80 --task as689-author --summary "#689 author" --pane-id %80 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 689 --github "$REPO" --harness claude >/dev/null
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-completion --task as689-author --note done >/dev/null
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane t:80 --task as689-selfreview --summary "#689 same lane, second task" --pane-id %80 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 6890 --github "$REPO" --harness claude >/dev/null
+cat > "$FIX/head_689.json" <<'S'
+{"headRefOid": "sha-689"}
+S
+green_checkruns sha-689
+cat > "$FIX/author_689.json" <<'S'
+{"headRefName": "fix/689-thing", "closingIssuesReferences": [{"number": 689}], "commits": []}
+S
+cat > "$FIX/reviews_689.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: as689-selfreview\nReviewed-SHA: sha-689", "createdAt": "2026-08-27T00:00:00Z"}]}
+S
+out=$("$MERGE_PR" "$REPO" 689 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#689: a task-alias reviewer sharing the author's own pane is refused (self-review)"; else bad "#689: task-alias same-pane self-review refused" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#689: ...and never merges"; else bad "#689: task-alias same-pane self-review -- never merges" "$out"; fi
+echo "$out" | grep -q "reviewed its own PR" && ok "#689: refusal names the self-review -- the trailer parsed, it did not fail closed as unparseable" || bad "#689: refusal names the self-review, not a parse failure" "$out"
+
+# --- #689b: a task-alias reviewer on a GENUINELY different pane merges --
+# the positive control: same shape as #689a, but the reviewer's task id
+# names a different lane/pane entirely. Proves the fix does not just refuse
+# everything task-shaped.
+rm -f "$MARKER"
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane t:80 --task as690-author --summary "#690 author" --pane-id %80 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 690 --github "$REPO" --harness claude >/dev/null
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-completion --task as690-author --note done >/dev/null
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane t:81 --task as690-reviewer --summary "#690 independent reviewer, named by its task id" --pane-id %81 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 6900 --github "$REPO" --harness claude >/dev/null
+cat > "$FIX/head_690.json" <<'S'
+{"headRefOid": "sha-690"}
+S
+green_checkruns sha-690
+cat > "$FIX/author_690.json" <<'S'
+{"headRefName": "fix/690-thing", "closingIssuesReferences": [{"number": 690}], "commits": []}
+S
+cat > "$FIX/reviews_690.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: as690-reviewer\nReviewed-SHA: sha-690", "createdAt": "2026-08-27T00:00:00Z"}]}
+S
+out=$("$MERGE_PR" "$REPO" 690 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "#689: a task-alias reviewer on a genuinely different pane merges"; else bad "#689: task-alias independent review merges" "got rc=$rc: $out"; fi
+if [ -f "$MARKER" ]; then ok "#689: ...and actually calls gh pr merge"; else bad "#689: task-alias independent -- gh pr merge called" "$out"; fi
+echo "$out" | grep -q "independence confirmed" && ok "#689: independence confirmed, not just CI green" || bad "#689: independence confirmed" "$out"
+
+# --- #689c: the claimed_author_conflict (#513) path, spelled entirely in
+# task ids -- the ledger cannot resolve authorship at all (branch matches no
+# convention, no closing issue: PR 90's own "ledger-blind" shape), but the
+# PR body's own Author-Lane: trailer and the comment's Review-Lane: trailer
+# both name task ids dispatched to the SAME lane/pane. Proves the widened
+# `_lane_own_pane_id` (verdict-independence.sh) resolves a task-shaped claim
+# too, not only the ledger-driven contributor path #689a/#689b exercise.
+rm -f "$MARKER"
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane t:85 --task as691-author-claim --summary "#691 unrelated dispatch, same lane as the reviewer" --pane-id %85 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 6910 --github "$REPO" --harness claude >/dev/null
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane t:85 --task as691-reviewer-claim --summary "#691 second task, same lane/pane as the claimed author" --pane-id %85 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 6911 --github "$REPO" --harness claude >/dev/null
+cat > "$FIX/head_691.json" <<'S'
+{"headRefOid": "sha-691"}
+S
+green_checkruns sha-691
+cat > "$FIX/author_691.json" <<'S'
+{"headRefName": "some-hand-pushed-branch", "closingIssuesReferences": [], "commits": [], "body": "Opened by hand.\n\nAuthor-Lane: as691-author-claim\n"}
+S
+cat > "$FIX/reviews_691.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: as691-reviewer-claim\nReviewed-SHA: sha-691", "createdAt": "2026-08-27T00:00:00Z"}]}
+S
+out=$("$MERGE_PR" "$REPO" 691 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#689: ledger-blind self-attested Author-Lane == Review-Lane, both task ids on the same pane, is refused"; else bad "#689: task-alias claimed_author_conflict refused" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#689: ...and never merges"; else bad "#689: task-alias claimed_author_conflict never merges" "$out"; fi
+echo "$out" | grep -q "Author-Lane: as691-author-claim" && ok "#689: refusal names the claimed author's task id" || bad "#689: refusal names the claimed author's task id" "$out"
+
+# --- MUTATION CHECK: `core.lane_or_task_row`'s task fallback returning a
+# FABRICATED, uniquely-per-token pane id (instead of the task's real frozen
+# `tasks.pane_id` snapshot) still lets the token PARSE and RESOLVE -- so
+# #689a would still pass its "the trailer parsed" assertion -- but two
+# different task ids dispatched to the SAME real pane now compare as
+# `different`, and the #689a self-review incorrectly MERGES. Confirms #689a
+# is real evidence that the pane-id comparison is doing the work, not that
+# task ids are refused by some other, unrelated mechanism.
+# ============================================================================
+MUTDIR3="$D/mutated-task-alias"
+cp -R "$HERE/../../scripts/supervisor" "$MUTDIR3"
+python3 - "$MUTDIR3/core.py" <<'PYEOF'
+import sys
+path = sys.argv[1]
+text = open(path).read()
+marker = '    return {"pane_id": pane_id}'
+assert text.count(marker) == 1, "lane_or_task_row's task-fallback return not found or not unique -- shape changed"
+text = text.replace(
+    marker,
+    '    return {"pane_id": "MUTATED-unique-per-token:" + ident}  # was: {"pane_id": pane_id}',
+    1,
+)
+open(path, "w").write(text)
+PYEOF
+rm -rf "$MUTDIR3/__pycache__" 2>/dev/null
+MUTATED3="$MUTDIR3/merge-pr.sh"
+chmod +x "$MUTATED3"
+rm -f "$MARKER"
+out=$("$MUTATED3" "$REPO" 689 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ] && [ -f "$MARKER" ]; then
+  ok "mutation confirmed: fabricating a unique pane id per task-alias token lets the #689a self-review through (case above would be red)"
+else
+  bad "mutation confirmed: fabricating a unique pane id per task-alias token lets the #689a self-review through" "got rc=$rc, merged=$([ -f "$MARKER" ] && echo yes || echo no): $out"
+fi
+
 rm -rf "$D"
 
 echo "  -> $pass ok, $fail failed"
