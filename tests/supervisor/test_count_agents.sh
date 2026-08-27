@@ -148,6 +148,53 @@ want_contains "--verbose: tail -f labeled" "log follower" "$VERR"
 want_contains "--verbose: the measuring pipeline's own sed labeled" "measuring pipeline itself" "$VERR"
 want_not_contains "--verbose: unrelated bash (never mentions claude) is not dumped into the breakdown" "999" "$VERR"
 
+# --- agent-supervisor#678: a real ps pads pid= to the width of the WIDEST
+# pid currently on the host, with LEADING spaces -- not to each line's own
+# width. A naive `${line%% *}` / `${line#* }` split treats that leading
+# space as if it were the pid/comm separator, so a genuine agent session
+# whose pid happens to be narrower than the host's current max is dropped
+# silently: not counted, not excluded either (#678's own report -- 16
+# counted + 2 excluded = 18 of 19, the 19th nowhere). This fixture
+# reproduces that shape directly: pid 8454 is 4 digits, pid 99999 elsewhere
+# on the "host" is 5, so a real `ps` right-justifies 8454 to "  8454" -- the
+# same padding the estate's own capture showed live.
+cat > "$D/bin/ps" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *comm=*)
+    cat <<'FIXTURE'
+    1 launchd
+ 8454 claude
+99999 zsh
+16962 claude bg-pty-host
+16980 claude bg-spare
+30625 zsh
+40100 tail
+40200 sed
+FIXTURE
+    ;;
+  *command=*)
+    cat <<'FIXTURE'
+    1 /sbin/launchd
+ 8454 claude --model sonnet --dangerously-skip-permissions --strict-mcp-config
+99999 /bin/zsh -c source /Users/jon/.claude/shell-snapshots/snapshot-zsh-1.sh
+16962 claude bg-pty-host --bg-pty-host /tmp/cc-daemon-501/spare/x.pty.sock
+16980 claude bg-spare --bg-spare /tmp/cc-daemon-501/spare/x.claim.sock
+30625 /bin/zsh -c source /Users/jon/.claude/shell-snapshots/snapshot-zsh-2.sh
+40100 tail -f /tmp/claude-501/some.log
+40200 sed -n /claude/p
+FIXTURE
+    ;;
+esac
+EOF
+chmod +x "$D/bin/ps"
+OUT5=$(run); RC5=$?
+want_exit "#678 padded-pid fixture: exits 0" "$RC5" "0" "$OUT5"
+want_eq "#678: the one genuine session (pid 8454, pid narrower than the host max) is still counted" "$OUT5" "1"
+VERR5=$(run_verbose 2>&1 1>/dev/null)
+want_contains "#678: pid 8454 is counted with its true pid, not merged with its own digits" "  8454  claude" "$VERR5"
+want_contains "#678: daemon helper still excluded correctly despite padding elsewhere in the table" "daemon helper (cc-daemon pty host)" "$VERR5"
+
 # --- Fails closed, never silently reports 0, when ps itself is unreadable -
 # `PATH="$D2/bin:$PATH"` keeps bash/awk/etc. resolvable (the shebang's own
 # `env bash` lookup needs a real PATH) while still putting a broken `ps`
