@@ -76,6 +76,10 @@ and it is longer and more specific than this line.
   window's name, never kill it (#564)
 - `register-lane-self.sh` — how a hand-attached lane registers ITSELF, from
   `$TMUX_PANE` and explicit `-t` reads only
+- `lane-whoami.sh` — the one command a review/fix-pass brief should name to
+  derive `Review-Lane:`: anchors on `$TMUX_PANE` when set, falls back to the
+  Invariant 10 `worktree-lane --include-reviews` self-lookup for a pane-less
+  (claude-print) lane; never a bare `tmux display-message` (#685)
 - `restore.sh` — rebuild every lane after a tmux server loss, ledger-driven
 - `preserve-dead-lanes.sh` — save a dead lane's uncommitted work before it's
   lost (#651)
@@ -299,9 +303,13 @@ outside the lane system).
     gate's independence check caught them as suspicious self-reviews (see
     invariant 9) rather than silently trusting them.
 
-    The correct self-lookup is `cli.py worktree-lane --path "$(pwd)"
-    --include-reviews` (`Ledger.get_task_for_worktree(..., include_reviews=
-    True)`). The `--include-reviews` flag matters: `worktree-lane` defaults
+    A brief should never spell this out as a raw command — name
+    `lane-whoami.sh` (index above, #685), which already picks the right
+    branch (pane vs. pane-less) and never calls `display-message` with no
+    `-t`. The self-lookup it wraps for the pane-less branch is `cli.py
+    worktree-lane --path "$(pwd)" --include-reviews`
+    (`Ledger.get_task_for_worktree(..., include_reviews=True)`). The
+    `--include-reviews` flag matters: `worktree-lane` defaults
     to `False` because its real caller, `dispatch.sh --reviews-pr`, is
     asking a DIFFERENT question — "who could plausibly have AUTHORED this
     PR?" — and a review task can never be its own PR's author (#76), so the
