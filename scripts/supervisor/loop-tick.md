@@ -319,6 +319,34 @@ not committed here. This is the one place in this repo's own docs that
 generates that text, so it is the one place drifting back to raw `gh pr
 comment` would matter.
 
+### A review or fix-pass brief must derive `Review-Lane:` with `lane-whoami.sh`, never a bare `tmux display-message`
+
+agent-supervisor#685: every brief this loop wrote told the lane to derive its
+own `Review-Lane:` id with
+
+```bash
+tmux display-message -p -t "$TMUX_PANE" '#{session_name}:#{window_index}'
+```
+
+That is correct only for a tmux-dispatched lane, where `$TMUX_PANE` is
+exported into the process. A `claude-print` (or `pi-rpc`) lane has no pane at
+all — `$TMUX_PANE` is unset, `-t` is meaningless, and `display-message`
+silently answers for whichever window happens to be FOCUSED, invariant 10's
+own trap. Measured on agent-dotfiles#330's review: dispatched to `estate:2`,
+the trailer reported `estate:1` — the director's pane, which happened to be
+focused. A brief's closing instruction for deriving `Review-Lane:` must read:
+
+```bash
+scripts/supervisor/lane-whoami.sh
+```
+
+which anchors on `$TMUX_PANE` when it is set (a pane lane) and falls back to
+the ledger's own `worktree-lane` self-lookup when it is not (a claude-print
+lane) — never on tmux focus, in either case. As with the `post-verdict.sh`
+rule above, this is the one place in this repo's own docs that generates
+that text, so it is the one place drifting back to the bare command would
+matter.
+
 ## "Blocked on Jon" is often true of an issue and false of a piece of it
 
 Before recording an issue as gated, ask what specifically is gated. The gate is
