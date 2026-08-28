@@ -196,4 +196,47 @@ fi
 
 echo "merge-pr: gate passed -- $GATE_OUT" >&2
 echo "merge-pr: independence confirmed -- $(jq -r '.detail' <<<"$IND")" >&2
-exec "$GH" pr merge "$NUMBER" --repo "$REPO" "$@"
+
+# Not `exec` any more (agent-estate#680): a merge is the one place this
+# estate has PROVABLE completion evidence for a task -- the PR closed,
+# reviewed independently, at a SHA CI already passed -- and until now
+# nothing consumed it. `reconcile_lane_completions.py`'s sweep deliberately
+# never fabricates `complete` from an idle pane alone (see its own
+# docstring); a lane that shipped and never called `cli.py complete` itself
+# either sat open forever blocking `one_open_task_per_lane`, or, if its pane
+# was later re-registered under a changed identity, got silently marked
+# `cancelled` by `_register_lane_tx` -- the correct call for THAT check
+# (it only knows identity changed, not that the work finished), but the
+# wrong permanent record for work whose own merged PR proves it finished.
+# #670 and #674 were exactly this: `Review-Lane:` verdict posted, PR merged,
+# ledger task left open/cancelled forever. This block closes that loop at
+# the one place completion evidence and the ledger both have `gh` handy,
+# without turning THIS script into a second reconciler: it is best-effort,
+# never a gate. It runs only after `gh pr merge` itself reports success, and
+# a failure or ambiguity here never changes `merge-pr.sh`'s own exit code --
+# the PR is already merged by that point, and stranding the record is a
+# lesser evil than reporting a successful merge as a failed one.
+"$GH" pr merge "$NUMBER" --repo "$REPO" "$@"
+MERGE_RC=$?
+if [ "$MERGE_RC" -eq 0 ]; then
+  PR_TASK_RC=0
+  PR_TASK_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" pr-task --repo "$REPO" --pr "$NUMBER" 2>&1) || PR_TASK_RC=$?
+  if [ "$PR_TASK_RC" -eq 0 ] && [ "$(jq -r '.known' <<<"$PR_TASK_OUT" 2>/dev/null)" = "true" ]; then
+    TASK_ID=$(jq -r '.task' <<<"$PR_TASK_OUT")
+    NOTE="merge-pr: PR #$NUMBER merged into $REPO at SHA $SHA -- reviewed independently ($(jq -r '.detail' <<<"$IND")), CI green; auto-completed from merge evidence"
+    COMPLETE_RC=0
+    COMPLETE_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" record-completion --task "$TASK_ID" --note "$NOTE" 2>&1) || COMPLETE_RC=$?
+    if [ "$COMPLETE_RC" -eq 0 ]; then
+      echo "merge-pr: task $TASK_ID marked complete from merge evidence" >&2
+    else
+      # Not an error worth failing on: the row may already be terminal
+      # (complete/failed/cancelled), which record-completion's underlying
+      # Ledger.complete refuses for failed/cancelled and no-ops for an
+      # already-complete row with matching content -- either way, nothing
+      # to do. Logged so a human can tell "checked and skipped" from
+      # "never ran" without re-deriving it.
+      echo "merge-pr: could not record completion for task $TASK_ID (non-fatal): $COMPLETE_OUT" >&2
+    fi
+  fi
+fi
+exit "$MERGE_RC"
