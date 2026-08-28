@@ -228,6 +228,94 @@ func TestMissingExportedPathsSkipsAnOptionalVar(t *testing.T) {
 	}
 }
 
+// --- agent-estate#761: /tmp fixture paths a tape never creates ---------
+
+func TestMissingTmpFixturesFlagsATapeReferencingAnUncreatedPath(t *testing.T) {
+	root := writeFixtureRepo(t, map[string]string{
+		"broken-fixture.tape": "Hide\n" +
+			`Type "HOME=/tmp/atui999-fakehome /tmp/x -skills-repo=/tmp/atui999-skillsrepo" Enter` + "\n" +
+			"Show\n",
+	}, nil) // zero mkdir/redirect anywhere -- both paths are consumed, never created
+
+	refs, err := ScanTmpFixtureRefs(filepath.Join(root, "testdata", "vhs"))
+	if err != nil {
+		t.Fatalf("ScanTmpFixtureRefs: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("ScanTmpFixtureRefs found %+v, want two references (HOME, -skills-repo)", refs)
+	}
+
+	contents, err := LoadTapeContents(filepath.Join(root, "testdata", "vhs"), refs)
+	if err != nil {
+		t.Fatalf("LoadTapeContents: %v", err)
+	}
+	missing := MissingTmpFixtures(refs, contents, nil)
+	if len(missing) != 2 {
+		t.Fatalf("MissingTmpFixtures = %+v, want both references flagged (proves the guard by construction, not by reading it)", missing)
+	}
+	t.Logf("changed line: %s:%d %q", missing[0].TapePath, missing[0].Line,
+		`Type "HOME=/tmp/atui999-fakehome /tmp/x -skills-repo=/tmp/atui999-skillsrepo" Enter`)
+}
+
+func TestMissingTmpFixturesPassesATapeThatCreatesThePath(t *testing.T) {
+	root := writeFixtureRepo(t, map[string]string{
+		"fixed-fixture.tape": "Hide\n" +
+			`Type "mkdir -p /tmp/atui999-fakehome /tmp/atui999-skillsrepo" Enter` + "\n" +
+			`Type "HOME=/tmp/atui999-fakehome /tmp/x -skills-repo=/tmp/atui999-skillsrepo" Enter` + "\n" +
+			"Show\n",
+	}, nil)
+
+	refs, err := ScanTmpFixtureRefs(filepath.Join(root, "testdata", "vhs"))
+	if err != nil {
+		t.Fatalf("ScanTmpFixtureRefs: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("ScanTmpFixtureRefs found %+v, want two references", refs)
+	}
+
+	contents, err := LoadTapeContents(filepath.Join(root, "testdata", "vhs"), refs)
+	if err != nil {
+		t.Fatalf("LoadTapeContents: %v", err)
+	}
+	missing := MissingTmpFixtures(refs, contents, nil)
+	if len(missing) != 0 {
+		t.Fatalf("MissingTmpFixtures = %+v, want none -- a tape that creates the path it references must pass", missing)
+	}
+	t.Logf("reverted line still passes: %s %q", "fixed-fixture.tape",
+		`Type "mkdir -p /tmp/atui999-fakehome /tmp/atui999-skillsrepo" Enter`)
+}
+
+func TestMissingTmpFixturesSkipsAnOptionalKey(t *testing.T) {
+	// skill-invocations.tape's own real shape: -skill-invocations-cache
+	// deliberately points at a path that does NOT exist for its first
+	// render state (InvocationsNoHistory) -- flagging that would flag the
+	// tape's own documented, correct behaviour.
+	root := writeFixtureRepo(t, map[string]string{
+		"cache-state.tape": "Hide\n" +
+			`Type "HOME=/tmp/atui999-fakehome /tmp/x -skill-invocations-cache=/tmp/atui999-cache-missing.json" Enter` + "\n" +
+			"Show\n",
+	}, nil)
+
+	refs, err := ScanTmpFixtureRefs(filepath.Join(root, "testdata", "vhs"))
+	if err != nil {
+		t.Fatalf("ScanTmpFixtureRefs: %v", err)
+	}
+	if len(refs) != 2 {
+		t.Fatalf("ScanTmpFixtureRefs found %+v, want two references (HOME, -skill-invocations-cache)", refs)
+	}
+
+	contents, err := LoadTapeContents(filepath.Join(root, "testdata", "vhs"), refs)
+	if err != nil {
+		t.Fatalf("LoadTapeContents: %v", err)
+	}
+	// HOME is still unbuilt and must still be flagged -- the allowlist is
+	// per-key, not a blanket exemption for the whole tape.
+	missing := MissingTmpFixtures(refs, contents, optionalTmpFixtureKeys)
+	if len(missing) != 1 || missing[0].Key != "HOME=" {
+		t.Fatalf("MissingTmpFixtures = %+v, want only HOME= flagged -- -skill-invocations-cache= is an explicit, documented exemption", missing)
+	}
+}
+
 // --- the real repo: this is the guard that actually runs in CI ---------
 
 func TestNoTapeReferencesAMissingCmdDirectory(t *testing.T) {
@@ -292,5 +380,35 @@ func TestNoTapeExportsAMissingFilesystemPath(t *testing.T) {
 	for _, m := range missing {
 		t.Errorf("%s:%d exports %s=%s, which does not exist -- agent-estate#754's own failure shape, a hardcoded host path going stale on the next rename",
 			m.TapePath, m.Line, m.VarName, m.Default)
+	}
+}
+
+func TestNoTapeReferencesAnUncreatedTmpFixture(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	tapesDir := filepath.Join(repoRoot, "testdata", "vhs")
+	if _, err := os.Stat(tapesDir); err != nil {
+		t.Fatalf("testdata/vhs not found at %s: %v", tapesDir, err)
+	}
+
+	refs, err := ScanTmpFixtureRefs(tapesDir)
+	if err != nil {
+		t.Fatalf("ScanTmpFixtureRefs: %v", err)
+	}
+	if len(refs) == 0 {
+		t.Fatal("ScanTmpFixtureRefs found zero /tmp fixture references across every .tape file -- almost certainly a scan bug, not reality (skill-invocations.tape and skills-eval-store.tape both launch against HOME=/tmp/... fixtures)")
+	}
+
+	contents, err := LoadTapeContents(tapesDir, refs)
+	if err != nil {
+		t.Fatalf("LoadTapeContents: %v", err)
+	}
+
+	missing := MissingTmpFixtures(refs, contents, optionalTmpFixtureKeys)
+	for _, m := range missing {
+		t.Errorf("%s:%d references %s%s, which this tape never creates -- agent-estate#761's own failure shape: a capture that succeeds (rc=0) and writes a worthless error frame instead of failing loudly",
+			m.TapePath, m.Line, m.Key, m.Path)
 	}
 }

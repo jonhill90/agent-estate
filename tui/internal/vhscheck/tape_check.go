@@ -292,3 +292,179 @@ func MissingExportedPaths(repoRoot, home string, exports []PathExport, optionalV
 	}
 	return missing
 }
+
+// agent-estate#761: two tapes (skill-invocations.tape, skills-eval-store.tape)
+// launched a binary against `/tmp` fixtures (`HOME=/tmp/...`,
+// `-skills-repo=/tmp/...`) that the tape itself never created -- a
+// different failure shape from both checks above (neither a `go build`
+// target nor an `export VAR=${VAR:-default}` line), but the same root
+// cause class MissingExportedPaths was written for: a literal filesystem
+// path a tape depends on that nothing keeps honest. Unlike the other two
+// checks, this one cannot verify against the LIVE filesystem -- a /tmp
+// fixture is built by the tape's own Hide block when vhs actually runs,
+// not present at `go test` time -- so this is a purely textual check: does
+// the tape's own content contain a creation command (`mkdir -p` naming the
+// path, or a `>`/`>>` redirect writing it directly) for every `/tmp` path
+// it references as a launch argument. That mirrors exactly the diagnostic
+// the issue itself used to find both defects (`grep -cE "mkdir|cat
+// >|printf.*>" ...`), made structural instead of a one-off grep.
+
+// tmpFixtureRefPattern matches a `KEY=/tmp/...` token inside a `Type
+// "..." Enter` line -- KEY is either a bare shell var (`HOME=`) or a CLI
+// flag (`-skills-repo=`). This is deliberately the shape a LAUNCH line
+// has, not a creation line: `mkdir -p /tmp/x` and `printf ... >
+// /tmp/x` have no `KEY=` immediately before the path, so this pattern
+// never matches a creation line by construction -- no separate
+// creation-vs-launch line classification is needed.
+var tmpFixtureRefPattern = regexp.MustCompile(`(?:^|[\s"])([A-Za-z_][A-Za-z0-9_]*=|-[A-Za-z][A-Za-z0-9-]*=)(/tmp/[A-Za-z0-9_./-]+)`)
+
+// tmpMkdirPattern captures a `mkdir`/`mkdir -p` line's own space-separated
+// path arguments, up to a shell operator (`&&`) or the end of the string
+// (VHS's own closing `"`) -- multiple directories in one `mkdir -p a b c`
+// call, exactly the shape both fixed tapes use, are all captured together
+// and split by the caller.
+var tmpMkdirPattern = regexp.MustCompile(`mkdir\s+(?:-p\s+)?([^&"]+)`)
+
+// tmpRedirectPattern captures a `>`/`>>` shell redirect's target path --
+// `printf ... > /tmp/x.json`, the shape both fixed tapes use to write a
+// fixture file's content directly.
+var tmpRedirectPattern = regexp.MustCompile(`>>?\s*(/tmp/[A-Za-z0-9_./-]+)`)
+
+// TmpFixtureRef is one `/tmp` path a tape references as a launch
+// argument, as found by ScanTmpFixtureRefs.
+type TmpFixtureRef struct {
+	TapePath string // repo-relative, e.g. "vhs/skill-invocations.tape"
+	Key      string // e.g. "HOME=" or "-skills-repo="
+	Path     string // e.g. "/tmp/atui174-fakehome"
+	Line     int    // 1-based line number
+}
+
+// ScanTmpFixtureRefs walks every `.tape` file directly under tapesDir (and
+// its subdirectories) and returns every `/tmp` path referenced via
+// tmpFixtureRefPattern, in the same stable, deterministic order the other
+// two scanners use.
+func ScanTmpFixtureRefs(tapesDir string) ([]TmpFixtureRef, error) {
+	var refs []TmpFixtureRef
+	err := filepath.WalkDir(tapesDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".tape") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		relPath, err := filepath.Rel(filepath.Dir(tapesDir), path)
+		if err != nil {
+			relPath = path
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			if !strings.Contains(line, "Type \"") || !strings.Contains(line, "/tmp/") {
+				continue
+			}
+			for _, m := range tmpFixtureRefPattern.FindAllStringSubmatch(line, -1) {
+				refs = append(refs, TmpFixtureRef{TapePath: relPath, Key: m[1], Path: m[2], Line: i + 1})
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(refs, func(i, j int) bool {
+		if refs[i].TapePath != refs[j].TapePath {
+			return refs[i].TapePath < refs[j].TapePath
+		}
+		if refs[i].Line != refs[j].Line {
+			return refs[i].Line < refs[j].Line
+		}
+		return refs[i].Path < refs[j].Path
+	})
+	return refs, nil
+}
+
+// tapeCreatesTmpPath reports whether tapeContent contains a creation
+// command (mkdir -p naming path or a directory containing it, or a
+// redirect writing path directly) for path -- purely textual, matching
+// this check's own doc comment on why it cannot use a live filesystem
+// stat the way MissingCmdDirs/MissingExportedPaths do.
+func tapeCreatesTmpPath(tapeContent, path string) bool {
+	for _, m := range tmpMkdirPattern.FindAllStringSubmatch(tapeContent, -1) {
+		for _, dir := range strings.Fields(m[1]) {
+			dir = strings.TrimSuffix(dir, `"`)
+			// Either direction counts: `mkdir -p path/deeper` implicitly
+			// creates path itself as an ancestor (skill-invocations.tape's
+			// own shape -- HOME=/tmp/atui174-fakehome is never mkdir'd on
+			// its own, only .claude/skills/<dir> beneath it), and `mkdir -p
+			// path` directly, or `mkdir -p path` with a referenced
+			// subpath beneath it, both also count.
+			if dir == path || strings.HasPrefix(path, dir+"/") || strings.HasPrefix(dir, path+"/") {
+				return true
+			}
+		}
+	}
+	for _, m := range tmpRedirectPattern.FindAllStringSubmatch(tapeContent, -1) {
+		if m[1] == path {
+			return true
+		}
+	}
+	return false
+}
+
+// optionalTmpFixtureKeys is the named, explicit allowlist for a `/tmp`
+// path a tape references BUT deliberately never creates -- the same
+// "named allowlist, not a guess" shape optionalTapeExportVars uses for
+// HILL90_APP_REPO. `-skill-invocations-cache=` is the one live case:
+// skill-invocations.tape's own header documents its first render state
+// (InvocationsNoHistory) as requiring a cache path that does NOT exist
+// (skill.go's loadInvocationCache, the "path does not exist" branch) --
+// flagging that absence would be flagging the tape's own correct,
+// documented behaviour, not a defect. A future flag earns the same
+// exemption only with the same kind of citation to the code path that
+// makes its absence a supported state, never by widening
+// tmpFixtureRefPattern or tapeCreatesTmpPath to stop seeing it.
+var optionalTmpFixtureKeys = map[string]bool{
+	"-skill-invocations-cache=": true,
+}
+
+// MissingTmpFixtures returns every TmpFixtureRef in refs whose Path is not
+// created anywhere in its own tape's content, skipping any ref whose Key
+// is in optionalKeys. tapeContents maps a ref's TapePath (as ScanTmpFixtureRefs
+// returned it) to that tape's full raw content, so this never re-reads the
+// filesystem itself -- callers that already have the content (e.g. from
+// building refs) can reuse it directly.
+func MissingTmpFixtures(refs []TmpFixtureRef, tapeContents map[string]string, optionalKeys map[string]bool) []TmpFixtureRef {
+	var missing []TmpFixtureRef
+	for _, ref := range refs {
+		if optionalKeys[ref.Key] {
+			continue
+		}
+		if !tapeCreatesTmpPath(tapeContents[ref.TapePath], ref.Path) {
+			missing = append(missing, ref)
+		}
+	}
+	return missing
+}
+
+// LoadTapeContents reads every relPath in refs' own TapePath set from
+// tapesDir's parent (relPath is already tapesDir-relative-to-its-own-parent,
+// matching ScanTapes/ScanTmpFixtureRefs's own relPath convention) and
+// returns a TapePath -> content map for MissingTmpFixtures.
+func LoadTapeContents(tapesDir string, refs []TmpFixtureRef) (map[string]string, error) {
+	out := map[string]string{}
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		if seen[ref.TapePath] {
+			continue
+		}
+		seen[ref.TapePath] = true
+		data, err := os.ReadFile(filepath.Join(filepath.Dir(tapesDir), ref.TapePath))
+		if err != nil {
+			return nil, err
+		}
+		out[ref.TapePath] = string(data)
+	}
+	return out, nil
+}
