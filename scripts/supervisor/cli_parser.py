@@ -544,6 +544,25 @@ def parser():
     pr_external_parser.add_argument("--repo", required=True)
     pr_external_parser.add_argument("--pr", required=True)
 
+    # agent-estate#741: "authored directly by the Director, verified, no
+    # lane contributed" as its OWN first-class, recordable state -- see
+    # `Ledger.mark_pr_director_authored` / `Ledger.get_pr_director_authored`.
+    # Same shape as mark-pr-external/pr-external above, on purpose -- see
+    # core_ledger_schema.py's own comment on pr_director_authorship for why
+    # this is a sibling table, not a reuse of pr_external_authorship.
+    mark_pr_director_authored_parser = sub.add_parser("mark-pr-director-authored")
+    mark_pr_director_authored_parser.add_argument("--repo", required=True)
+    mark_pr_director_authored_parser.add_argument("--pr", required=True)
+    mark_pr_director_authored_parser.add_argument("--note", required=True)
+    # Same rationale as mark-pr-external's own --chain-verified: the explicit,
+    # unmissable claim "the exhaustive chain ran and found nobody" --
+    # `mark-pr-director-authored.sh` is the only caller that passes it.
+    mark_pr_director_authored_parser.add_argument("--chain-verified", action="store_true")
+
+    pr_director_parser = sub.add_parser("pr-director")
+    pr_director_parser.add_argument("--repo", required=True)
+    pr_director_parser.add_argument("--pr", required=True)
+
     # agent-dotfiles#237: the read `restore.sh` runs after a tmux server loss.
     # Deliberately its own command rather than a flag on `status`: it must
     # work when there is no tmux server at all, so it touches no transport.
