@@ -357,13 +357,19 @@ FIX
 SHADOW2="$D/shadow-supervisor-2"
 rm -rf "$SHADOW2"; mkdir -p "$SHADOW2"
 for f in "$HERE/../../scripts/supervisor/"*; do ln -s "$f" "$SHADOW2/$(basename "$f")"; done
-rm -f "$SHADOW2/dispatch.sh"
 INDEX_MUTANT="$SHADOW2/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$INDEX_MUTANT" <<'PY' || patch_rc=$?
+# agent-supervisor#716: the brief's verified_type call now lives in
+# dispatch-send.sh, not dispatch.sh's own text -- so it is THAT symlink,
+# not dispatch.sh's, that must be replaced with a real mutated file.
+# dispatch.sh itself stays an untouched symlink; `HERE` still resolves to
+# $SHADOW2 either way (BASH_SOURCE[0] is the invoked symlink path, not its
+# target), so it keeps finding every sibling -- mutated or not -- right here.
+PYTHONPATH="$HERE" python3 - "$SHADOW2" <<'PY' || patch_rc=$?
+import os
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target_dir = sys.argv[1]
 # The brief submit -- the single most consequential target in the script.
 # agent-supervisor#178 moved the actual `tmux send-keys` call for the brief
 # into send.sh's verified_type (shared by every caller, so mutating it here
@@ -371,9 +377,12 @@ text = open(src).read()
 # equivalent regression to reproduce, is the ARGUMENT it hands that shared
 # function -- $LANE_TARGET (a window id) vs $LANE (an index).
 marker = 'verified_type "$LANE_TARGET" "$MESSAGE" \\'
-assert marker in text, "the brief's verified_type call not found -- script shape changed"
-assert text.count(marker) == 1, "the brief's verified_type call not unique -- script shape changed"
-open(dst, "w").write(text.replace(marker, 'verified_type "$LANE" "$MESSAGE" \\', 1))
+hits = M.read_owning_file(target_dir, marker)
+assert len(hits) == 1, "the brief's verified_type call not found in exactly one file -- script shape changed: %r" % hits
+owner = hits[0]
+text = open(owner).read()
+os.remove(owner)  # drop the symlink before writing a real, mutated file in its place
+open(owner, "w").write(text.replace(marker, 'verified_type "$LANE" "$MESSAGE" \\', 1))
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh with one index-addressed send-keys" \

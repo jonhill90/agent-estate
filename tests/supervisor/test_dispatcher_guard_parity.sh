@@ -50,6 +50,24 @@ for f in "${DISPATCHERS[@]}"; do
   [ -f "$SUP/$f" ] || { echo "FATAL: $SUP/$f does not exist -- this suite's own file list is stale" >&2; exit 2; }
 done
 
+# agent-supervisor#716: dispatch.sh (2753 lines) was split into a thin
+# composition root plus 7 sourced-only siblings -- see dispatch.sh's own
+# header for the full list and sourcing order. A guard this file inventories
+# by grepping "dispatch.sh" for a pattern would now read as MISSING the
+# instant the guard's own code moved into one of those siblings, which is
+# exactly the "each fix remembered only if the author happened to grep"
+# failure this suite exists to catch, turned on the suite's own file list.
+# So "dispatch.sh" here means dispatch.sh's own text PLUS every file it
+# sources to make up one script -- not the literal file on disk.
+DISPATCH_SH_FILES=(
+  dispatch.sh dispatch-rehome.sh dispatch-args.sh dispatch-preflight.sh
+  dispatch-guards.sh dispatch-lane-select.sh dispatch-worktree.sh
+  dispatch-send.sh dispatch-record.sh
+)
+for f in "${DISPATCH_SH_FILES[@]}"; do
+  [ -f "$SUP/$f" ] || { echo "FATAL: $SUP/$f does not exist -- dispatch.sh's split file list is stale" >&2; exit 2; }
+done
+
 declare -A STATUS   # STATUS["$guard|$file"] = "REQUIRED" or "EXEMPT:<reason>"
 declare -A PATTERN  # PATTERN["$guard"] = extended regex, grep -Ec against the file
 GUARDS=()
@@ -155,7 +173,11 @@ for id in "${GUARDS[@]}"; do
       bad "$id / $f -- no status recorded (neither REQUIRED nor EXEMPT); the inventory itself is incomplete"
       continue
     fi
-    count=$(grep -Ec "$pat" "$SUP/$f")
+    if [ "$f" = dispatch.sh ]; then
+      count=$(cat "${DISPATCH_SH_FILES[@]/#/$SUP/}" | grep -Ec "$pat")
+    else
+      count=$(grep -Ec "$pat" "$SUP/$f")
+    fi
     case "$st" in
       REQUIRED)
         if [ "$count" -gt 0 ]; then

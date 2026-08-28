@@ -344,23 +344,21 @@ want_missing "...and left no placeholder behind at all" "ledger-claim:t:3" "$ter
 # lane coming back AT ONCE rather than at the mercy of the next dispatch, so
 # the assertion this mutation has to break is the one taken immediately after
 # the signal, with no dispatch in between.
-NO_TRAP_MUTANT="$D/dispatch-no-trap.sh"
+# agent-supervisor#716: the traps live in dispatch-lane-select.sh now, not
+# dispatch.sh's own text -- make_mutant_scripts_dir copies the WHOLE
+# directory, and _dispatch_mutate.py's patch() searches it for whichever
+# file actually carries the marker.
+NO_TRAP_DIR=$(make_mutant_scripts_dir)
+NO_TRAP_MUTANT="$NO_TRAP_DIR/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$NO_TRAP_MUTANT" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$NO_TRAP_DIR" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 marker = '''trap 'release_claim_on_signal; release_lane_claim' EXIT
 trap 'release_claim_on_signal; release_lane_claim; exit 143' TERM   # 128 + 15
 trap 'release_claim_on_signal; release_lane_claim; exit 130' INT    # 128 + 2'''
-assert marker in text, "claim-release traps not found -- script shape changed"
-assert text.count(marker) == 1, "claim-release traps not unique -- script shape changed"
-text = text.replace(marker, ': # MUTATED: no trap -- only the enumerated abort paths release', 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, marker, ': # MUTATED: no trap -- only the enumerated abort paths release')
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh with no claim-release trap" \
@@ -378,21 +376,16 @@ else
 fi
 
 # --- MUTATION: remove the reap, and the SIGKILL case must go red ----------
-NO_REAP_MUTANT="$D/dispatch-no-reap.sh"
+# agent-supervisor#716: the reap block now lives in dispatch-guards.sh.
+NO_REAP_DIR=$(make_mutant_scripts_dir)
+NO_REAP_MUTANT="$NO_REAP_DIR/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$NO_REAP_MUTANT" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$NO_REAP_DIR" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 marker = '''if REAP_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" reap-lane-claims 2>&1); then'''
-assert marker in text, "reap block not found -- script shape changed"
-assert text.count(marker) == 1, "reap block not unique -- script shape changed"
-text = text.replace(marker, 'if REAP_OUT="" && false; then  # MUTATED: no reap of stranded claims', 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, marker, 'if REAP_OUT="" && false; then  # MUTATED: no reap of stranded claims')
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh that never reaps a stranded claim" \
@@ -550,27 +543,29 @@ want_contains "...and its claim IS released at once -- nothing is working that l
 # which is exactly the shape the re-review reproduced. Both assertions above
 # must go red on it, and by the two DIFFERENT mechanisms they test: the trap
 # (TERM) and the reap (KILL).
-LATE_COMMIT_MUTANT="$D/dispatch-late-commit.sh"
+# agent-supervisor#716: the commit-lane-claim call and its CLAIM_COMMITTED=1
+# stay together in dispatch-send.sh (step 4.5 was not split across a file
+# boundary) but step 6's header -- where this mutation re-inserts a LATE
+# CLAIM_COMMITTED=1 -- is now in dispatch-record.sh, a different file. Patched
+# as two independent M.patch() calls against the same sandbox: each finds its
+# own target file by searching, same as every other mutation in this suite.
+LATE_COMMIT_DIR=$(make_mutant_scripts_dir)
+LATE_COMMIT_MUTANT="$LATE_COMMIT_DIR/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$LATE_COMMIT_MUTANT" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$LATE_COMMIT_DIR" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
-marker = 'COMMIT_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" commit-lane-claim'
-assert marker in text, "commit-lane-claim call not found -- script shape changed"
-assert text.count(marker) == 1, "commit-lane-claim call not unique -- script shape changed"
-start = text.rindex("\n", 0, text.index(marker))
-end = text.index("CLAIM_COMMITTED=1", start) + len("CLAIM_COMMITTED=1")
-text = text[:start] + "\n: # MUTATED: no ledger commit, and CLAIM_COMMITTED set late instead" + text[end:]
+import _dispatch_mutate as M
+target = sys.argv[1]
+commit_span = '''COMMIT_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" commit-lane-claim --lane "$LANE" --token "$CLAIM_TOKEN" 2>&1) \\
+  || COMMIT_OUT="${COMMIT_OUT:-commit-lane-claim failed to run}"
+if ! grep -qF '"committed":true' <<<"$COMMIT_OUT"; then
+  sed 's/^/  /' <<<"$COMMIT_OUT" >&2
+  abort_send "could not mark $LANE's claim live before sending -- #$ISSUE_ARG was NOT dispatched (nothing was submitted)"
+fi
+CLAIM_COMMITTED=1'''
+M.patch(target, commit_span, ': # MUTATED: no ledger commit, and CLAIM_COMMITTED set late instead')
 late = "# --- 6. record what was dispatched."
-assert late in text, "step 6's header not found -- script shape changed"
-assert text.count(late) == 1, "step 6's header not unique -- script shape changed"
-text = text.replace(late, "CLAIM_COMMITTED=1  # MUTATED: back where round 1 had it\n\n" + late, 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, late, "CLAIM_COMMITTED=1  # MUTATED: back where round 1 had it\n\n" + late)
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh whose commit point is back after the send" \

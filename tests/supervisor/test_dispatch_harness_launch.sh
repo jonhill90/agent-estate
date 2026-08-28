@@ -433,21 +433,16 @@ want_contains "the claim placeholder is what is left recording the lane occupied
 # confirm the specific reason string above disappears -- a suite that still
 # reports "could not read pane metadata" with the guard removed has not
 # tested the guard, only the ledger-failure tolerance underneath it.
-BROKEN_META_GUARD="$D/dispatch-lane-meta-unguarded.sh"
+# agent-supervisor#716: the LANE_META guard now lives in dispatch-record.sh.
+BROKEN_META_DIR=$(make_mutant_scripts_dir)
+BROKEN_META_GUARD="$BROKEN_META_DIR/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$BROKEN_META_GUARD" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$BROKEN_META_DIR" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 marker = 'if [ -z "$LANE_META" ] || [[ "$LANE_META" != *"|"* ]]; then'
-assert marker in text, "LANE_META guard not found -- script shape changed"
-assert text.count(marker) == 1, "LANE_META guard not unique -- script shape changed"
-text = text.replace(marker, "if false; then  # MUTATED: guard always skipped", 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, marker, "if false; then  # MUTATED: guard always skipped")
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh whose LANE_META guard is skipped" \

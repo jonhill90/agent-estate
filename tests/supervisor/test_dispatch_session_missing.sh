@@ -151,14 +151,27 @@ want_contains "still names the exact command to run by hand" \
 MUTDIR="$D/scripts-mutant"
 cp -R "$SCRIPTS_COPY" "$MUTDIR"
 MUT="$MUTDIR/dispatch.sh"
-python3 - "$MUT" <<'PY'
-import re, sys
+# agent-supervisor#716: the session-existence block (start marker) is now the
+# LAST section of dispatch-preflight.sh, and what used to be its very next
+# line ("# --- 0. the ledger must be readable", the end marker) is now the
+# FIRST line of a different file, dispatch-guards.sh -- the split boundary
+# landed exactly between them. So this deletes from the start marker to the
+# end of dispatch-preflight.sh's own text, not to the end marker, which no
+# longer lives in the same file to search for.
+python3 - "$MUTDIR/dispatch-preflight.sh" <<'PY'
+import sys
 path = sys.argv[1]
 text = open(path).read()
 start = text.index("# --- -1. the session itself must exist")
-end = text.index("# --- 0. the ledger must be readable")
-assert start < end, "agent-supervisor#422 session-existence block not found"
-text = text[:start] + text[end:]
+# The block runs to the end of dispatch-preflight.sh's own text -- confirm
+# that is still true (no trailing section survives the cut unexpectedly)
+# rather than silently deleting less than intended.
+tail = text[start:]
+assert tail.rstrip("\n").endswith("exit 2\n  fi\nfi"), (
+    "the session-existence block is no longer dispatch-preflight.sh's last "
+    "section -- update this mutation: tail was %r" % tail[-200:]
+)
+text = text[:start]
 open(path, 'w').write(text)
 PY
 echo ok > "$BOOTSTRAP_MODE_FILE"

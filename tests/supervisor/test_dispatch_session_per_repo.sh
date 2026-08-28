@@ -114,13 +114,14 @@ want_contains "an explicit LANES_SESSION still wins over the repo-derived name" 
 MUTDIR="$D/scripts-mutant"
 cp -R "$(dirname "$DISPATCH")" "$MUTDIR"
 MUT="$MUTDIR/dispatch.sh"
-python3 - "$MUT" <<'PY'
+# agent-supervisor#716: the SESSION assignment now lives in
+# dispatch-preflight.sh, not dispatch.sh's own text.
+PYTHONPATH="$HERE" python3 - "$MUTDIR" <<'PY'
 import sys
-path = sys.argv[1]
-text = open(path).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 old = 'SESSION="$(session_for_repo "$NAME_PART")"'
-assert old in text, "dispatch.sh's per-repo SESSION assignment not found"
-open(path, 'w').write(text.replace(old, 'SESSION="$(lanes_session_or_default)"', 1))
+M.patch(target, old, 'SESSION="$(lanes_session_or_default)"')
 PY
 unset RUN_LANES_SESSION
 mut_out=$(DISPATCH_SCRIPT="$MUT" run 202 mutant-run "$D/brief.md" jonhill90/agent-tui "$REPO_PATH")

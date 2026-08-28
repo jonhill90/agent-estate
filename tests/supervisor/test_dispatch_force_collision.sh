@@ -173,15 +173,17 @@ MUT_DIR=$(mktemp -d "$D/mutant.XXXXXX")
 cp -R "$CORE_DIR/." "$MUT_DIR/"
 rm -rf "$MUT_DIR/__pycache__"
 chmod +x "$MUT_DIR"/*.sh
-python3 - "$MUT_DIR/dispatch.sh" <<'PY'
+# agent-supervisor#716: the claude-print routing call now lives in
+# dispatch-lane-select.sh, not dispatch.sh's own text -- $MUT_DIR already
+# holds the whole copied directory (above), so search it instead of assuming
+# dispatch.sh.
+PYTHONPATH="$HERE" python3 - "$MUT_DIR" <<'PY'
 import sys
-path = sys.argv[1]
-text = open(path).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 needle = '"$HERE/dispatch-claude-print.sh" "$ISSUE_ARG" "$SLUG" "$BRIEF" "$CLAUDE_PRINT_REPO" "$REPO_PATH" ${COLLISION_FORCE:+--force}'
 replacement = '"$HERE/dispatch-claude-print.sh" "$ISSUE_ARG" "$SLUG" "$BRIEF" "$CLAUDE_PRINT_REPO" "$REPO_PATH"'
-assert needle in text, "the forwarded --force call is not where this test expects -- update the mutation marker"
-text = text.replace(needle, replacement)
-open(path, "w").write(text)
+M.patch(target, needle, replacement)
 PY
 bash -n "$MUT_DIR/dispatch.sh" || bad "setup: mutant dispatch.sh is still valid bash" "bash -n failed"
 
