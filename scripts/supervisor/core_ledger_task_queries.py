@@ -569,6 +569,94 @@ class LedgerTaskQueriesMixin:
             ).fetchone()
         return self._dict(row)
 
+    def mark_pr_director_authored(self, *, repo, pr_number, note, chain_verified=False, now=None):
+        """Record that `pr_number` in `repo` was authored DIRECTLY by the
+        Director -- verified, no lane contributed -- a first-class,
+        recordable state distinct from `mark_pr_external`'s "authored
+        outside the lane system entirely" (agent-estate#741). The Director
+        is an internal estate actor, not an external one, and not a lane
+        either: `register-lane-self.sh` structurally excludes the
+        supervisor's own window from ever registering as one. Once marked,
+        this PR's contributor set resolves to KNOWN-EMPTY, same as
+        `pr_external_authorship`: no lane wrote it, so no lane is excluded
+        from reviewing it. `INSERT ... ON CONFLICT DO UPDATE`: idempotent,
+        the note/timestamp of the most recent marking wins.
+
+        GATED exactly like `mark_pr_external` (agent-supervisor#308 item 3 /
+        #321's own review, item 5), for the identical reason: this is a
+        write that widens a PR's reviewer pool, and a caller with shell
+        access but no verification could launder its own PR as "director-
+        authored" the same way it could launder one as "external".
+        `scripts/supervisor/mark-pr-director-authored.sh` is the recommended
+        entry point -- it runs the full exhaustive resolution chain before
+        ever reaching this method, AND independently verifies the caller's
+        own pane is the Director's window (the opposite identity check from
+        `mark-pr-external.sh`'s `$TMUX_PANE`-unset requirement). This method
+        itself refuses independently on the same two ledger-only sources
+        `mark_pr_external` checks: an explicit `record_pr_for_task` row, and
+        a PR-scoped `source_tasks` row (`get_contributor_tasks_for_pr`) --
+        never overwrite a real, known contributor.
+
+        `chain_verified` must be passed `True` by a caller that has actually
+        run the exhaustive chain (`mark-pr-director-authored.sh` does, and
+        only after `resolve_pr_contributors` completed clean); refused when
+        false or omitted, regardless of what the two ledger-only checks
+        below find -- same rationale as `mark_pr_external`'s own docstring:
+        this converts an unsafe silent default into a caller having to
+        explicitly claim the chain ran.
+        """
+        if not chain_verified:
+            raise ValueError(
+                f"refusing to mark PR #{pr_number} in {repo} director-authored -- "
+                f"chain_verified was not set. This method can only check two "
+                f"of the five resolution paths (an explicit record_pr_for_task "
+                f"row, and a PR-scoped source_tasks row); the other three "
+                f"(issue-linkage, worktree, legacy branch) need gh/git and "
+                f"cannot run here. Call scripts/supervisor/mark-pr-director-authored.sh, "
+                f"which runs the full exhaustive chain first and passes "
+                f"chain_verified=True only once it completes clean -- a direct "
+                f"call cannot silently skip that chain"
+            )
+        existing_task = self.get_task_for_pr_number(repo=repo, pr_number=pr_number)
+        if existing_task is not None:
+            raise ValueError(
+                f"refusing to mark PR #{pr_number} in {repo} director-authored -- "
+                f"the ledger already records task {existing_task['id']!r} (lane "
+                f"{existing_task['lane']!r}) as having opened it; marking this "
+                f"director-authored now would erase a known contributor, not record an "
+                f"absent one"
+            )
+        contributor_tasks = self.get_contributor_tasks_for_pr(pr_number)
+        if contributor_tasks:
+            names = ", ".join(f"{t['id']!r} (lane {t['lane']!r})" for t in contributor_tasks)
+            raise ValueError(
+                f"refusing to mark PR #{pr_number} in {repo} director-authored -- "
+                f"the ledger already records {names} dispatched directly against "
+                f"it; marking this director-authored now would erase known contributor(s), "
+                f"not record an absent one"
+            )
+        now = int(now if now is not None else self.clock())
+        with self._transaction() as connection:
+            connection.execute(
+                """
+                INSERT INTO pr_director_authorship (repo, pr_number, note, recorded_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (repo, pr_number) DO UPDATE SET
+                    note = excluded.note, recorded_at = excluded.recorded_at
+                """,
+                (repo, str(pr_number), note, now),
+            )
+
+    def get_pr_director_authored(self, *, repo, pr_number):
+        """The director-authorship marking for `pr_number` in `repo`, if any
+        recorded by `mark_pr_director_authored`."""
+        with contextlib.closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT * FROM pr_director_authorship WHERE repo = ? AND pr_number = ?",
+                (repo, str(pr_number)),
+            ).fetchone()
+        return self._dict(row)
+
     def get_task_for_worktree(self, worktree_path, *, include_reviews=False):
         """The task recorded against one exact worktree path (agent-supervisor#117).
 

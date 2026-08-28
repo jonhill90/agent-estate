@@ -273,6 +273,24 @@ if [ -n "$REVIEWS_PR" ]; then
     fi
   fi
 
+  # 3.3. agent-estate#741: "authored directly by the Director, verified, no
+  # lane contributed" as its OWN first-class, recordable state -- the
+  # sibling check to 3.2 above, kept a visibly DISTINCT log line on purpose
+  # (never reuse the "marked external" wording -- the two must stay
+  # distinguishable in every log/error path). See
+  # `Ledger.mark_pr_director_authored` / `mark-pr-director-authored.sh` for
+  # why this is not the same table as `pr_external_authorship`: the
+  # Director is an internal estate actor, not one authored outside the lane
+  # system, and register-lane-self.sh structurally excludes it from ever
+  # becoming a lane row either.
+  if [ -z "$CONTRIBUTORS_RESOLVED" ]; then
+    DIRECTOR_JSON=$("$LEDGER_PYTHON" "$LEDGER_CLI" pr-director --repo "$REPO" --pr "$REVIEWS_PR" 2>&1) || DIRECTOR_JSON=""
+    if grep -qF '"known":true' <<<"$DIRECTOR_JSON"; then
+      CONTRIBUTORS_RESOLVED=1
+      echo "dispatch: PR #$REVIEWS_PR is recorded as director-authored -- no lane contributors to exclude, every free lane is a valid independent reviewer" >&2
+    fi
+  fi
+
   # 4. Still silent -> refuse. Every source above answered "no record", not
   # "safe". agent-supervisor#190's fail-closed requirement: an unresolvable
   # contributor set must make this dispatch LESS likely to proceed, never
@@ -287,6 +305,7 @@ if [ -n "$REVIEWS_PR" ]; then
     echo "dispatch: could not determine PR #$REVIEWS_PR's author -- the ledger has no record by issue, by commit, or by branch '$HEAD_REF' (task ${FALLBACK_TASK:-none}) -- refusing (authorship unknown, failing closed)" >&2
     echo "dispatch: if this PR was genuinely authored outside the lane system (a human, or the watchdog), record that once with: $HERE/mark-pr-external.sh '$REPO' $REVIEWS_PR '<why>' '$REPO_PATH'" >&2
     echo "dispatch: NOTE -- use mark-pr-external.sh, not cli.py mark-pr-external directly; the CLI now refuses without --chain-verified, which only the wrapper's own exhaustive resolution chain earns (PR #331 review, finding 2)" >&2
+    echo "dispatch: if this PR was authored DIRECTLY BY THE DIRECTOR (agent-estate#741), record that once, from the Director's own pane, with: $HERE/mark-pr-director-authored.sh '$REPO' $REVIEWS_PR '<why>' '$REPO_PATH'" >&2
     # agent-supervisor#101, third red-first item: on the inferred path these
     # are TWO separate findings arriving together -- "this looked like a
     # review" and "its contributors are unresolvable" -- and read as one

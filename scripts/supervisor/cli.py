@@ -483,6 +483,14 @@ def main(argv=None):
     elif args.command == "pr-external":
         row = ledger.get_pr_external(repo=args.repo, pr_number=args.pr)
         value = {"repo": args.repo, "pr": args.pr, "known": row is not None, "note": row["note"] if row else None}
+    elif args.command == "mark-pr-director-authored":
+        ledger.mark_pr_director_authored(
+            repo=args.repo, pr_number=args.pr, note=args.note, chain_verified=args.chain_verified
+        )
+        value = {"repo": args.repo, "pr": args.pr, "marked_director_authored": True}
+    elif args.command == "pr-director":
+        row = ledger.get_pr_director_authored(repo=args.repo, pr_number=args.pr)
+        value = {"repo": args.repo, "pr": args.pr, "known": row is not None, "note": row["note"] if row else None}
     elif args.command == "record-completion":
         value = record_completion(ledger, task=args.task, lane=args.lane, note=args.note)
     elif args.command == "accept":

@@ -263,6 +263,30 @@ class LedgerSchemaMixin:
                     PRIMARY KEY (repo, pr_number)
                 );
 
+                -- agent-estate#741: "authored directly by the Director,
+                -- verified, no lane contributed" as its OWN first-class,
+                -- recordable fact -- distinct from `pr_external_authorship`
+                -- above, on purpose. #741/#748 measured why the existing
+                -- external-authorship row is the wrong fit: a director-
+                -- authored PR is not "outside the lane system" (a human's
+                -- own commit, the watchdog acting directly) -- it is an
+                -- INTERNAL estate actor, just not one `register-lane-self.sh`
+                -- can ever register (the supervisor's own window is
+                -- structurally excluded from being a lane). Reusing
+                -- `pr_external_authorship` for this would blur that
+                -- distinction in every log line and every future reader of
+                -- the table; a same-shaped sibling keeps the two visibly
+                -- separate while sharing the identical safety discipline
+                -- (see `Ledger.mark_pr_director_authored` /
+                -- `Ledger.get_pr_director_authored`).
+                CREATE TABLE IF NOT EXISTS pr_director_authorship (
+                    repo TEXT NOT NULL,
+                    pr_number TEXT NOT NULL,
+                    note TEXT,
+                    recorded_at INTEGER NOT NULL,
+                    PRIMARY KEY (repo, pr_number)
+                );
+
                 -- agent-supervisor#153. Whether a tmux SESSION (not a lane,
                 -- not a pane) is one this estate may act on -- dispatch to,
                 -- rename windows in, kill windows in. Jon's own sessions
