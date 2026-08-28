@@ -39,10 +39,17 @@
 # register_lane` calls `start_session` against a live subprocess) -- if
 # `claude` is missing, crashes, or returns anything but a well-formed JSON
 # result, this refuses and unwinds the claim and the worktree. `assign` then
-# performs the REAL delivery: a blocking `claude -p --resume <session>` call
-# that waits out the actual turn and only returns once `claude` has exited
-# with its result. Nothing in this script ever falls back to `tmux
-# send-keys` -- there is no tmux handling here at all to fall back to.
+# performs the REAL delivery: it starts a genuine `claude -p --resume
+# <session>` turn and returns once that PROCESS HAS STARTED, not once it
+# exits (agent-supervisor#278: `ClaudePrintAdapter.assign_task` calls
+# `transport.run_detached`, a `subprocess.Popen(..., start_new_session=True)`
+# that outlives this script). Stale as of an earlier revision of this
+# comment, which described `assign` as blocking until `claude` exited --
+# corrected agent-supervisor#692, whose whole defect was a dispatcher and a
+# brief both still reasoning as though something waits around to resume a
+# lane once its detached turn ends; nothing does. Nothing in this script
+# ever falls back to `tmux send-keys` -- there is no tmux handling here at
+# all to fall back to.
 #
 # Usage:
 #   dispatch-claude-print.sh <issue> <slug> <brief-file> <repo> [repo-path] [--force]
@@ -129,20 +136,22 @@ TASK_ID="$LABEL"
 # hundreds of lines before its claim loop ever runs).
 #
 # release_claim (below, unchanged) is what every DETERMINED failure calls --
-# by the time any of those lines run, `assign`'s subprocess has already
-# exited (it is a blocking foreground call), so there is nothing left running
-# and releasing is always correct there, exactly as before this fix.
+# every direct call to it in this script (steps 1-5) runs BEFORE step 6 ever
+# starts a `claude -p` process at all, so there is nothing running yet and
+# releasing is always correct there, exactly as before this fix.
 #
 # release_claim_on_signal is what the trap calls instead, gated on
-# CLAIM_COMMITTED. That gate matters only around step 6: while `assign`
-# blocks on a real `claude -p` turn, a signal reaching this shell does not
-# prove the turn stopped too (a `kill` targeting only this pid, as opposed to
-# its process group, orphans the child rather than killing it) -- so this
-# script cannot tell "nothing happened" from "work may still be running" the
-# way it can once a call has actually returned. CLAIM_COMMITTED is set right
-# before that call, the same "point of no return" line dispatch.sh draws at
-# its own step 4.5: past it, an ambiguous signal leaves the claim held rather
-# than risk releasing one that is genuinely still being worked. SIGKILL
+# CLAIM_COMMITTED. That gate matters only around step 6: once `assign`
+# starts the detached turn (agent-supervisor#278: it returns as soon as the
+# process exists, not once the turn finishes), a signal reaching this shell
+# does not prove the turn stopped too (a `kill` targeting only this pid, as
+# opposed to its process group, orphans the child rather than killing it) --
+# so this script cannot tell "nothing happened" from "work may still be
+# running" the way it can for every step before it. CLAIM_COMMITTED is set
+# right before that call, the same "point of no return" line dispatch.sh
+# draws at its own step 4.5: past it, an ambiguous signal leaves the claim
+# held rather than risk releasing one that is genuinely still being worked.
+# SIGKILL
 # cannot be trapped by any shell either way; that gap is `claim.sh
 # audit`/`reap` (#359) to cover, same as dispatch.sh's own header says of its
 # lane claim.
@@ -251,6 +260,16 @@ If you produced no code -- a review, an investigation, an options paper --
 Do not stop with the work only in your worktree. From outside, a lane that
 finished without shipping is indistinguishable from a lane that did nothing:
 unshipped work looks exactly like no work, and the worktree is temporary.
+
+**You are a single \`claude -p\` turn, not a long-lived process (agent-supervisor#692).**
+Nothing in this estate resumes you: there is no watcher, no callback, no
+"I will wait for X and continue" -- when this turn ends, the process exits and
+no one calls \`claude -p --resume\` on it again. If a step in this brief would
+normally run in the background and notify you later (a long sample, an hour of
+monitoring, "run it detached and check back"), either run it to completion
+synchronously inside this turn, or do not start it and say so in your result
+instead -- never end your turn on the expectation that something will wake you
+back up.
 EOF
 fi
 
@@ -285,21 +304,25 @@ if [ "$RECONSTRUCT_RC" -ne 0 ]; then
 $RECONSTRUCT_OUT"
 fi
 
-# --- 6. deliver -- a REAL, blocking claude -p call --------------------------
+# --- 6. deliver -- a REAL claude -p turn, started detached ------------------
 # CLAIM_COMMITTED set HERE, before the call, not after it returns -- exactly
 # dispatch.sh's step 4.5 posture (agent-supervisor#572): a signal landing
-# while `assign` blocks is landing on a turn that may already be running, and
-# the claim must not be released out from under it just because this shell
-# never saw the call finish.
+# after `assign` returns is landing on a turn that is already running
+# detached (agent-supervisor#278), and the claim must not be released out
+# from under it just because this shell has moved past the call that
+# started it.
 CLAIM_COMMITTED=1
 # `assign` routes to `ClaudePrintAdapter.assign_task` because the lane it
 # just registered carries transport=claude-print: it re-spawns
 # `claude -p --resume <session>` against $WORKTREE, sends this message as the
-# prompt, and blocks until the process exits with its JSON result -- there is
-# no tmux pane and no send-keys anywhere in this call. A crash, a timeout, or
-# a malformed result all raise, `assign` exits non-zero, and this script
-# refuses exactly like every step above it -- never a silent report of
-# success.
+# prompt, and -- as of agent-supervisor#278 -- returns once that DETACHED
+# process has started, not once it exits with a result; there is no tmux
+# pane and no send-keys anywhere in this call. A crash before the spawn, or
+# a malformed handoff, still raises and this script refuses exactly like
+# every step above it; a crash IN the turn itself, after this call has
+# already returned, is invisible here by construction (see the comment
+# below this one, and agent-supervisor#692's fix in
+# reconcile_lane_completions.py, for how that is now caught instead).
 MESSAGE="Read $BRIEF and do exactly what it says. That file is your complete brief. Do all of your work in the worktree at $WORKTREE -- it is yours, already branched; never work in the shared checkout at $REPO_PATH."
 ASSIGN_OUT=$("$PYTHON" "$CLI" assign \
   --lane "$LANE" \
