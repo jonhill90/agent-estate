@@ -343,6 +343,68 @@ if [ "$rc" -eq 1 ]; then ok "#376: unresolved + NOT marked external still refuse
 if [ ! -f "$MARKER" ]; then ok "#376: ...and never merges"; else bad "#376: unresolved + not external -- never merges" "$out"; fi
 echo "$out" | grep -q "unresolved" && ok "#376: unresolved-and-not-external refusal names the reason" || bad "#376: unresolved-and-not-external refusal named" "$out"
 
+# ============================================================================
+# agent-estate#751: `pr_director_authorship` written (agent-estate#741/#749)
+# but never read by this gate -- #376's identical bug, reintroduced for the
+# director sibling. #748 is the live reproduction: `cli.py pr-director` knows
+# it, `merge-pr.sh` refused it anyway with the same "author lane unresolved"
+# error PR 44/63 above get for genuinely unknown authorship. No `seed_author`
+# call: the whole point is that no ledger record names a contributor.
+#
+# Mutation, BOTH directions, on the SAME director-authored PR shape:
+#   PR 900 -- reviewer lane t:1, index 1 == the default LANES_SUPERVISOR_WINDOW
+#             -- the Director's own window reviewing its own PR -- REFUSED.
+#   PR 901 -- reviewer lane t:2, a genuine, differently-indexed worker lane
+#             -- ALLOWED.
+# The single line deciding between these two outcomes is
+# verdict-independence.sh's independence_verdict(), the
+# elif ($author.director == true) then ... if ($rel.overall == "same")
+# branch -- $rel here is director_reviewer_relation()'s output, computed by
+# merge-pr.sh only because AUTHOR carries director:true (author_lane_for()'s
+# new pr-director check, mirroring #376's pr-external check immediately
+# above it).
+# ============================================================================
+
+# --- PR 900: director-authored, reviewed by the Director's OWN window -----
+rm -f "$MARKER"
+cat > "$FIX/head_900.json" <<'S'
+{"headRefOid": "sha-900"}
+S
+green_checkruns sha-900
+cat > "$FIX/author_900.json" <<'S'
+{"headRefName": "docs/director-fix-900", "closingIssuesReferences": [], "commits": []}
+S
+cat > "$FIX/reviews_900.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:1\nReviewed-SHA: sha-900", "createdAt": "2026-08-27T00:00:00Z"}]}
+S
+register_tmux_lane t:1 %1900
+python3 "$LEDGER_CLI" --state-dir "$STATE" mark-pr-director-authored --repo "$REPO" --pr 900 --note "test: director-authored" --chain-verified >/dev/null
+out=$("$MERGE_PR" "$REPO" 900 2>&1)
+rc=$?
+if [ "$rc" -eq 1 ]; then ok "#751: director-authored PR reviewed from the supervisor window (t:1) refused"; else bad "#751: supervisor-window review of director PR refused" "got rc=$rc: $out"; fi
+if [ ! -f "$MARKER" ]; then ok "#751: ...and never merges"; else bad "#751: supervisor-window review of director PR -- never merges" "$out"; fi
+echo "$out" | grep -q "Director own window" && ok "#751: refusal names the Director's own window as the reason" || bad "#751: refusal names Director window" "$out"
+
+# --- PR 901: SAME director-authored shape, reviewed by a genuine worker lane
+rm -f "$MARKER"
+cat > "$FIX/head_901.json" <<'S'
+{"headRefOid": "sha-901"}
+S
+green_checkruns sha-901
+cat > "$FIX/author_901.json" <<'S'
+{"headRefName": "docs/director-fix-901", "closingIssuesReferences": [], "commits": []}
+S
+cat > "$FIX/reviews_901.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:2\nReviewed-SHA: sha-901", "createdAt": "2026-08-27T00:00:00Z"}]}
+S
+register_tmux_lane t:2 %1901
+python3 "$LEDGER_CLI" --state-dir "$STATE" mark-pr-director-authored --repo "$REPO" --pr 901 --note "test: director-authored" --chain-verified >/dev/null
+out=$("$MERGE_PR" "$REPO" 901 2>&1)
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "#751: director-authored PR reviewed from a genuine worker lane (t:2) merges"; else bad "#751: worker-lane review of director PR merges" "got rc=$rc: $out"; fi
+if [ -f "$MARKER" ]; then ok "#751: ...and actually calls gh pr merge"; else bad "#751: worker-lane review of director PR -- gh pr merge called" "$out"; fi
+echo "$out" | grep -q "independence confirmed" && ok "#751: success names independence, not just CI" || bad "#751: success names independence" "$out"
+
 # --- agent-supervisor#415: PR #400's exact shape -- no closing-issue
 # reference AND a branch name that doesn't match the legacy
 # `lane/fix/feat/chore/docs` regex (`feat/prior-attempts`), so both the

@@ -121,7 +121,16 @@ V=$(verdict_for "$REPO" "$NUMBER" "$SHA")
 AUTHOR=$(author_lane_for "$REPO" "$NUMBER")
 REVIEWER_LANE_ID=$(jq -r '.reviewer_lane // ""' <<<"$V")
 LANE_REL='{"overall":"unknown","matched_lane":null,"matched_task":null}'
-if [ -n "$REVIEWER_LANE_ID" ] && jq -e '.known == true and (.external != true) and ((.contributors // []) | length) > 0' >/dev/null 2>&1 <<<"$AUTHOR"; then
+if [ -n "$REVIEWER_LANE_ID" ] && jq -e '.known == true and (.director == true)' >/dev/null 2>&1 <<<"$AUTHOR"; then
+  # agent-estate#751: a director-authored PR has no `contributors` entry
+  # for contributor_lane_relation() to compare the reviewer against -- see
+  # director_reviewer_relation()'s own header for why this is a DIFFERENT
+  # question (is the reviewer the Director's own window) answered a
+  # different way (index vs LANES_SUPERVISOR_WINDOW), not the bare
+  # `unknown` default LANE_REL, which would refuse every review of a
+  # director-authored PR, not just a self-review from the Director's window.
+  LANE_REL=$(director_reviewer_relation "$REVIEWER_LANE_ID")
+elif [ -n "$REVIEWER_LANE_ID" ] && jq -e '.known == true and (.external != true) and ((.contributors // []) | length) > 0' >/dev/null 2>&1 <<<"$AUTHOR"; then
   # agent-supervisor#332: resolve_lane_relation(), not the bare
   # lane_relation() -- see verdict-independence.sh's own comment. This is
   # the ENFORCEMENT gate (#179); trusting a shape-only "different" here on

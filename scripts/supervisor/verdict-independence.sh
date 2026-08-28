@@ -392,6 +392,7 @@ print(lane or "")
 author_lane_for() {
   local repo_full="$1" number="$2" pr_json head_ref candidates candidate issue_json
   local prefix fallback_task fallback_json outfile rc external_json external_note
+  local director_json director_note
   local pr_task_json pr_contrib_json contrib_json
   local contrib_lanes=() contrib_tasks=() contrib_pane_ids=()
   # agent-supervisor#513: the PR body's self-attested `Author-Lane:` trailer
@@ -455,8 +456,44 @@ author_lane_for() {
     external_note=$(jq -r '.note // ""' <<<"$external_json")
     _al_cleanup
     jq -nc --arg note "$external_note" \
-      '{known:true, contributors:[], external:true, claimed_lane:null,
+      '{known:true, contributors:[], external:true, director:false, claimed_lane:null,
         detail:("authored outside the lane system" + (if ($note|length) > 0 then " -- " + $note else "" end))}'
+    return
+  fi
+
+  # agent-estate#751: `mark-pr-director-authored.sh` records a PR as
+  # authored DIRECTLY BY THE DIRECTOR -- verified, no lane contributed
+  # (`cli.py pr-director`, agent-estate#741/#749). This is the SAME bug
+  # #376 fixed above, reintroduced for the director's own sibling record:
+  # #749 wired `pr_director_authorship` into `dispatch-guards.sh` (a
+  # director-authored PR can get a reviewer) but never here, so the record
+  # was written and never read at the one gate it exists to satisfy --
+  # `merge-pr.sh` refused #748 with the identical "author lane unresolved"
+  # error #376 already fixed once for `pr_external_authorship`. Checked
+  # SECOND, immediately after the external check above and still before any
+  # ledger-lookup path, for the identical reason: a PR marked director-
+  # authored has, by construction, no lane to find either.
+  #
+  # UNLIKE external, this does NOT return `{external:true}`'s shape --
+  # `director:true` is carried instead, and `independence_verdict` treats it
+  # as a WEAKER claim than external's unconditional "independent" (see that
+  # function's own comment): the Director's own window IS this PR's author,
+  # so a review stamped from that same window must still refuse. There is
+  # no lane in `contributors` here for `contributor_lane_relation` to
+  # compare against -- the Director's window is structurally never a
+  # registered lane (`register-lane-self.sh` excludes it) -- so the caller
+  # (`merge-pr.sh`/`digest.sh`) resolves the reviewer against the Director's
+  # window through `director_reviewer_relation` instead, the same
+  # index-vs-`LANES_SUPERVISOR_WINDOW` fact `post-verdict.sh`'s own
+  # `is_supervisor` check already uses to refuse a Review-Lane: stamp from
+  # this exact window before it can even be posted (#187/#232).
+  director_json=$("$LEDGER_PYTHON" "$LEDGER_CLI" --state-dir "$STATE" pr-director --repo "$repo_full" --pr "$number" 2>/dev/null)
+  if jq -e '.known == true' >/dev/null 2>&1 <<<"$director_json"; then
+    director_note=$(jq -r '.note // ""' <<<"$director_json")
+    _al_cleanup
+    jq -nc --arg note "$director_note" \
+      '{known:true, contributors:[], external:false, director:true, claimed_lane:null,
+        detail:("authored directly by the Director" + (if ($note|length) > 0 then " -- " + $note else "" end))}'
     return
   fi
   outfile=$(mktemp "${TMPDIR:-/tmp}/author-lane-gh.XXXXXX") || {
@@ -693,6 +730,70 @@ claimed_author_conflict() {  # claimed_author_conflict <author-json> <reviewer-l
 # does not cover). Checked first and short-circuiting, because a `pane_id`
 # the server disagrees with is not weaker evidence of independence -- it is
 # not evidence at all, and every comparison below would be reading it.
+# agent-estate#751: the Director's own identity has no `contributors` entry
+# for `contributor_lane_relation` above to compare a reviewer against --
+# `register-lane-self.sh` structurally refuses to ever register the
+# supervisor's own window as a lane, so there is no `lanes.pane_id` row to
+# reconcile through `resolve_lane_relation` the way a genuine contributor
+# has (and unlike a genuine contributor, feeding a synthetic unregistered
+# lane id through `resolve_lane_relation` would only ever resolve `unknown`
+# once the reviewer's OWN registered pane_id is found, because that
+# function trusts any discoverable pane_id over the plain shape check --
+# see this function's own header for why that path was rejected). What IS
+# available is the same fact `post-verdict.sh`'s `is_supervisor` check
+# already gates a `Review-Lane:` stamp on before it can even be posted
+# (#187/#232): a lane id's INDEX component, compared against
+# `LANES_SUPERVISOR_WINDOW` -- the Director's own window is, by
+# construction, index `LANES_SUPERVISOR_WINDOW` (default 1) in whatever
+# session it runs, regardless of a session rename (agent-supervisor#108,
+# the same reasoning `core.LANE_ID_RE`/`core.lane_relation` already hold).
+#
+# Shape-only, deliberately: there is no pane_id for the Director's own
+# identity to reconcile against a live tmux server the way #520 requires
+# for a genuine registered lane, so this can only ever answer `same`/
+# `different` off the shape, or `unknown` when the reviewer lane does not
+# even parse as `<session>:<index>` (an off-pane claude-print/pi-rpc lane,
+# or a hand-typed value) -- never a guess dressed up as either.
+#
+# agent-supervisor#520 still applies to the REVIEWER's own registration
+# (not the Director's, which has none to contradict): checked first, same
+# as `contributor_lane_relation`, so a reviewer lane whose row the live
+# tmux server disagrees with is never trusted to answer `different` here
+# either.
+director_reviewer_relation() {  # director_reviewer_relation <reviewer-lane> -> JSON
+  local reviewer_lane="$1" supervisor_window="${LANES_SUPERVISOR_WINDOW:-1}" overall
+  local identity id_status id_detail
+
+  identity=$(_lane_identity_status "$reviewer_lane")
+  id_status="${identity%%$'\t'*}"
+  id_detail="${identity#*$'\t'}"
+  if [ "$id_status" = "contradicted" ]; then
+    jq -nc --arg lane "$reviewer_lane" --arg detail "$id_detail" \
+      '{overall:"contradicted", matched_lane:$lane, matched_task:null, detail:$detail}'
+    return
+  fi
+
+  overall=$("$LEDGER_PYTHON" -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import LANE_ID_RE
+reviewer_lane = sys.argv[2]
+supervisor_window = sys.argv[3]
+match = LANE_ID_RE.match((reviewer_lane or "").strip())
+if not match:
+    print("unknown")
+else:
+    try:
+        is_supervisor = int(match.group("index")) == int(supervisor_window)
+    except ValueError:
+        is_supervisor = match.group("index") == supervisor_window
+    print("same" if is_supervisor else "different")
+' "$HERE" "$reviewer_lane" "$supervisor_window" 2>/dev/null) || overall=""
+  case "$overall" in same|different) : ;; *) overall="unknown" ;; esac
+  jq -nc --arg overall "$overall" --arg lane "$reviewer_lane" \
+    '{overall:$overall, matched_lane: (if $overall != "unknown" then $lane else null end), matched_task:null}'
+}
+
 contributor_lane_relation() {  # contributor_lane_relation <author-json> <reviewer-lane> -> JSON
   local author_json="$1" reviewer_lane="$2"
   local n lane task pane_id rel overall="different" matched_lane="" matched_task="" i=0
@@ -806,6 +907,33 @@ independence_verdict() {  # independence_verdict <verdict-json> <author-json> <l
           # "independent -- author lane X" phrasing the ledger-resolved path
           # below uses.
           {value:true, detail:("independent -- PR " + $author.detail + ", reviewer lane " + $v.reviewer_lane)}
+        elif ($author.director == true) then
+          # agent-estate#751: unlike external above, a director-authored PR
+          # is NOT unconditionally independent -- the Director own window
+          # IS this PR author, so a review stamped from that same window
+          # must still refuse (the property #749 could get wrong by making
+          # "director-authored" read as "no lane, therefore anyone may
+          # review"). $rel here is director_reviewer_relation output
+          # (the caller computes it instead of contributor_lane_relation
+          # when $author.director == true -- see that function own
+          # header), never the default unknown LANE_REL: "same" means the
+          # reviewer lane index IS LANES_SUPERVISOR_WINDOW, "different"
+          # means it provably is not.
+          if ($rel.overall == "same") then
+            {value:false, detail:("NOT independent -- PR " + $author.detail + ", reviewer lane " + $v.reviewer_lane
+              + " is the Director own window -- the Director window IS this PR author, so a review from it can never be independent")}
+          elif ($rel.overall == "contradicted") then
+            # agent-supervisor#520, same posture as the ledger-resolved
+            # path below: a reviewer registration the live tmux server
+            # disagrees with is not weaker evidence, it is not evidence.
+            {value:false, detail:("NOT independent -- reviewer lane " + $v.reviewer_lane
+              + " has a registration the live tmux server contradicts: " + ($rel.detail // "no detail")
+              + " -- re-register from the pane belonging to that lane (register-lane-self.sh) and obtain a fresh review")}
+          elif ($rel.overall == "different") then
+            {value:true, detail:("independent -- PR " + $author.detail + ", reviewer lane " + $v.reviewer_lane + " is not the Director own window")}
+          else
+            {value:null, detail:("independence unknown -- reviewer lane " + $v.reviewer_lane + " could not be classified as the Director own window or a genuine worker lane")}
+          end
         elif ($rel.overall == "same") then
           # agent-supervisor#200: $rel.matched_lane is whichever contributor
           # in the WIDENED set (author_lane_for) matched the reviewer -- not

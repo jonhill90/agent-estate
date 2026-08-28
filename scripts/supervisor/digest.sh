@@ -626,7 +626,14 @@ for repo in $REPOS; do
     # jq can only compare the two strings, which is exactly what was wrong.
     reviewer_lane_id=$(jq -r '.reviewer_lane // ""' <<<"$v")
     lane_rel='{"overall":"unknown","matched_lane":null,"matched_task":null}'
-    if [ -n "$reviewer_lane_id" ] && jq -e '.known == true and (.external != true) and ((.contributors // []) | length) > 0' >/dev/null 2>&1 <<<"$author_lane"; then
+    if [ -n "$reviewer_lane_id" ] && jq -e '.known == true and (.director == true)' >/dev/null 2>&1 <<<"$author_lane"; then
+      # agent-estate#751: the SAME director_reviewer_relation() call
+      # merge-pr.sh's enforcement now makes for a director-authored PR --
+      # see that script's own comment and director_reviewer_relation()'s
+      # header for why a director-authored PR cannot reuse
+      # contributor_lane_relation() (no contributors entry to compare).
+      lane_rel=$(director_reviewer_relation "$reviewer_lane_id")
+    elif [ -n "$reviewer_lane_id" ] && jq -e '.known == true and (.external != true) and ((.contributors // []) | length) > 0' >/dev/null 2>&1 <<<"$author_lane"; then
       # agent-supervisor#332: resolve_lane_relation(), the SAME call
       # merge-pr.sh's enforcement now makes -- this report must not say
       # "independent" for a pairing the enforcement gate would refuse to
