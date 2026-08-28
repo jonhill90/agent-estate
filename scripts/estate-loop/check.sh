@@ -25,7 +25,7 @@
 #     directly.
 #   - loop dispatched and re-prompted but never MERGED -- see the merge step
 #     below, gated on CI green + an actual GitHub review (merge-pr.sh's own
-#     ci_gate.py + verdict-independence.sh for agent-supervisor, plain
+#     ci_gate.py + verdict-independence.sh for agent-estate, plain
 #     reviewDecision==APPROVED for repos with no lane ledger).
 #   - re-prompting a pane with unsubmitted text already in its input box
 #     concatenated onto it instead of replacing it -- now clears (C-u) first.
@@ -46,7 +46,15 @@ say() { echo "$(ts) $*" >> "$LOG"; }
 # #686 covers the separate GH-repo-NAME literal via session-defaults.sh;
 # this is the filesystem-checkout-PATH half of the same rename, which #686
 # does not touch.
-AGENT_SUPERVISOR_REPO="${AGENT_SUPERVISOR_REPO:-/Users/jon/source/repos/Personal/agent-supervisor}"
+#
+# agent-estate#729: the rename actually happened (checkout moved to
+# .../Personal/agent-estate, #728), so this hardcoded default went stale.
+# Prefer whichever of the two names exists on disk, rather than swapping one
+# hardcoded literal for another -- that would just rebuild the same trap
+# under a fresh label the next time this repo is renamed.
+_AGENT_SUPERVISOR_REPO_DEFAULT=/Users/jon/source/repos/Personal/agent-estate
+[ -d "$_AGENT_SUPERVISOR_REPO_DEFAULT" ] || _AGENT_SUPERVISOR_REPO_DEFAULT=/Users/jon/source/repos/Personal/agent-supervisor
+AGENT_SUPERVISOR_REPO="${AGENT_SUPERVISOR_REPO:-$_AGENT_SUPERVISOR_REPO_DEFAULT}"
 # FAIL LOUDLY, not quietly: the inventory's ranked failure mode for this
 # script was `exit 0` on a missing path reading as "no work" -- so after a
 # rename it goes quiet instead of breaking. A missing checkout is fatal here,
@@ -167,7 +175,7 @@ spec_done=0
 # level up. The real stop condition is quiescence: spec done AND every
 # tracked repo's board is clear AND nobody is mid-brief.
 open_all=0
-for repo in jonhill90/agent-tui jonhill90/agent-supervisor jonhill90/skills jonhill90/agent-dotfiles; do
+for repo in jonhill90/agent-tui jonhill90/agent-estate jonhill90/skills jonhill90/agent-dotfiles; do
   n=$(gh pr list --repo "$repo" --state open --json number --jq 'length' 2>/dev/null || echo 0)
   open_all=$((open_all + n))
 done
@@ -177,17 +185,17 @@ if [ "$spec_done" = 1 ] && [ "$open_all" -eq 0 ]; then halt "done (spec complete
 # --- Work: merge what is green and reviewed ---------------------------------
 # The loop's other known gap (fixed 2026-08-22): it dispatched and
 # re-prompted but NEVER MERGED -- 8 PRs landed overnight, zero merged by the
-# loop itself. Nothing here skips review: `merge-pr.sh` (agent-supervisor)
+# loop itself. Nothing here skips review: `merge-pr.sh` (agent-estate)
 # chains ci_gate.py + verdict-independence.sh and refuses closed on any
 # unresolved verdict; agent-tui has no lane ledger, so the bar there is
 # GitHub's own `reviewDecision == APPROVED` (a real review event happened)
 # plus every check green. Neither path merges on CI alone.
-for repo in jonhill90/agent-tui jonhill90/agent-supervisor; do
+for repo in jonhill90/agent-tui jonhill90/agent-estate; do
   gh pr list --repo "$repo" --state open --json number,reviewDecision,statusCheckRollup \
     --jq '.[] | select(.reviewDecision=="APPROVED" and ((.statusCheckRollup|length)>0) and ([.statusCheckRollup[].conclusion]|all(.=="SUCCESS"))) | .number' 2>/dev/null |
   while read -r n; do
     [ -n "$n" ] || continue
-    if [ "$repo" = "jonhill90/agent-supervisor" ]; then
+    if [ "$repo" = "jonhill90/agent-estate" ]; then
       out=$(bash "$AGENT_SUPERVISOR_REPO/scripts/supervisor/merge-pr.sh" "$repo" "$n" --squash --delete-branch 2>&1)
       rc=$?
     else

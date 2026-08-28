@@ -47,7 +47,7 @@ class CliIsRunnable(unittest.TestCase):
         had no entry point; adding one made it live. Pin the list.
         """
         self.assertEqual(
-            ["agent-dotfiles", "agent-evals", "agent-supervisor", "skills", "skills-private"],
+            ["agent-dotfiles", "agent-estate", "agent-evals", "skills", "skills-private"],
             sorted(repo["name"] for repo in cli.DEFAULT_REPOSITORIES),
         )
         # Match on repo identity, not a substring: the GitHub owner is

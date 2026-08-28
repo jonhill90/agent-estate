@@ -16,7 +16,14 @@
 # pass. If you need a different branch, make a worktree -- which is what every
 # lane already does.
 set -uo pipefail
-SHARED="${SUPERVISOR_SHARED_CHECKOUT:-$HOME/source/repos/Personal/agent-supervisor}"
+# agent-estate#729: the checkout this guards was renamed agent-supervisor ->
+# agent-estate; prefer whichever of the two actually exists on disk rather
+# than hardcoding the new name outright, so a future rename (or a host that
+# hasn't migrated yet) doesn't quietly stop being protected. SUPERVISOR_SHARED_CHECKOUT
+# still wins outright when set.
+_SHARED_DEFAULT="$HOME/source/repos/Personal/agent-estate"
+[ -d "$_SHARED_DEFAULT" ] || _SHARED_DEFAULT="$HOME/source/repos/Personal/agent-supervisor"
+SHARED="${SUPERVISOR_SHARED_CHECKOUT:-$_SHARED_DEFAULT}"
 
 payload=$(cat 2>/dev/null || true)
 cmd=$(printf '%s' "$payload" | python3 -c 'import json,sys
@@ -56,7 +63,10 @@ printf '%s' "$cmd_prefix" | grep -qE 'git +checkout +--( |$)' && exit 0
 # or the session is already there.
 here=$(pwd -P 2>/dev/null)
 target="$here"
-if printf '%s' "$cmd" | grep -qE 'cd +[^&;|]*agent-supervisor'; then target="$SHARED"; fi
+# Matches a `cd` into either name -- the pre-rename directory or its
+# agent-estate replacement -- so this doesn't quietly stop recognizing the
+# shared checkout the moment one name or the other is what's actually on disk.
+if printf '%s' "$cmd" | grep -qE 'cd +[^&;|]*agent-(estate|supervisor)'; then target="$SHARED"; fi
 [ "$target" = "$(cd "$SHARED" 2>/dev/null && pwd -P)" ] || exit 0
 
 cat >&2 <<MSG
