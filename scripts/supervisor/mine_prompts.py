@@ -143,6 +143,35 @@ def _assistant_text(rec):
     return None
 
 
+def last_assistant_text(path):
+    """The most recent assistant turn's text in one transcript file, or
+    None if the file is missing, unreadable, or has no assistant turn yet.
+
+    `harvest()` tracks this incrementally, one value per historical user
+    turn as it walks a whole file. This is the other shape a caller needs:
+    "what did the assistant last say, right now" -- the `UserPromptSubmit`
+    hook (agent-supervisor#687) wants exactly this to build `context` for a
+    prompt that has not been written to the transcript yet, without
+    re-implementing harvest()'s per-turn bookkeeping to get it."""
+    try:
+        fh = open(path, errors="ignore")
+    except (OSError, TypeError):
+        return None
+    last = None
+    with fh:
+        for line in fh:
+            if '"role":"assistant"' not in line and '"role": "assistant"' not in line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            text = _assistant_text(rec)
+            if text:
+                last = text
+    return last
+
+
 def harvest(paths, excludes):
     seen, out = set(), []
     for path in paths:

@@ -462,8 +462,19 @@ def pid_is_alive(pid):
     return True
 
 
+class LockTimeout(TimeoutError):
+    """Raised by `Ledger._locked()` when constructed with `lock_timeout` and
+    the ledger's flock is not acquired within that bound. Ordinary callers
+    (CLI, tests, the Director loop) never pass `lock_timeout` and so never
+    see this -- they keep the old wait-forever behavior. It exists for a
+    caller like `prompt_capture_hook.py` (agent-supervisor#687/#693) that
+    sits on a human's live prompt-submission path and must never block on a
+    contended or abandoned lock: *a locked ledger costs that caller a
+    bounded, small delay*, not an indefinite hang."""
+
+
 class Ledger:
-    def __init__(self, root: Path | str, *, clock=None, _migration_failpoint=None):
+    def __init__(self, root: Path | str, *, clock=None, _migration_failpoint=None, lock_timeout=None):
         self.root = Path(root)
         self.clock = clock or (lambda: int(time.time()))
         self.results_dir = self.root / "results"
@@ -471,6 +482,10 @@ class Ledger:
         self.event_payloads_dir = self.root / "event-payloads"
         self.db_path = self.root / "ledger.sqlite3"
         self.lock_path = self.root / "ledger.lock"
+        # None (default) preserves the original indefinite flock/sqlite wait
+        # for every existing caller. A caller that cannot afford to hang
+        # (see `LockTimeout` above) passes a small number of seconds instead.
+        self.lock_timeout = lock_timeout
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         os.chmod(self.root, 0o700)
         self.results_dir.mkdir(exist_ok=True, mode=0o700)
@@ -493,12 +508,41 @@ class Ledger:
         self._restore_items_dropped_on_context_alone(failpoint=_migration_failpoint)
 
     def _connect(self, *, foreign_keys=True):
-        connection = sqlite3.connect(self.db_path, timeout=30, isolation_level=None)
+        # `self.lock_timeout` also bounds sqlite3's own busy-wait (its
+        # `timeout` kwarg): with `_locked()` already serializing every
+        # writer through the flock below, contention reaching sqlite itself
+        # is rare, but a bounded caller means "bounded", not "bounded except
+        # here."
+        connect_timeout = 30 if self.lock_timeout is None else self.lock_timeout
+        connection = sqlite3.connect(self.db_path, timeout=connect_timeout, isolation_level=None)
         connection.row_factory = sqlite3.Row
         connection.execute(f"PRAGMA foreign_keys = {'ON' if foreign_keys else 'OFF'}")
         connection.execute("PRAGMA journal_mode = WAL")
         connection.execute("PRAGMA synchronous = FULL")
         return connection
+
+    def _acquire_flock(self, lock_file):
+        """Block forever (old behavior, `lock_timeout is None`) or retry
+        non-blocking acquisition until `self.lock_timeout` elapses, then
+        raise `LockTimeout`. `LOCK_NB` + short sleeps rather than a signal
+        alarm: signal-based timeouts are process-global and would corrupt
+        any other alarm a caller has set, and `flock` has no native
+        wait-with-timeout of its own."""
+        if self.lock_timeout is None:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            return
+        deadline = time.monotonic() + self.lock_timeout
+        while True:
+            try:
+                fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                return
+            except OSError:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise LockTimeout(
+                        f"ledger lock not acquired within {self.lock_timeout}s ({self.lock_path})"
+                    )
+                time.sleep(min(0.05, remaining))
 
     @contextlib.contextmanager
     def _locked(self):
@@ -510,7 +554,7 @@ class Ledger:
                 self._lock_depth -= 1
             return
         with self.lock_path.open("r+") as lock_file:
-            fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+            self._acquire_flock(lock_file)
             self._lock_depth = 1
             try:
                 yield
@@ -948,6 +992,24 @@ class Ledger:
                 -- way it goes).
                 CREATE VIEW IF NOT EXISTS needs_review AS
                     SELECT * FROM items WHERE status = 'needs_review';
+
+                -- agent-supervisor#687: capture stopped silently for four
+                -- days because nothing watched the rate new prompts were
+                -- arriving at -- `unitemised backlog` stayed a correct
+                -- zero the entire time, since a healthy JUDGING half says
+                -- nothing about a dead CAPTURE half. This is that signal,
+                -- read the same plain-SQL way as the other five views: one
+                -- row, `newest_prompt_at` (NULL on a completely empty
+                -- corpus, never fabricated) and `seconds_since_capture`
+                -- computed at query time so the number is always current,
+                -- not stamped when the row was last written.
+                CREATE VIEW IF NOT EXISTS capture_health AS
+                    SELECT
+                        MAX(at) AS newest_prompt_at,
+                        CASE WHEN MAX(at) IS NULL THEN NULL
+                             ELSE CAST(strftime('%s', 'now') AS INTEGER) - MAX(at)
+                        END AS seconds_since_capture
+                    FROM prompts;
                 """
             )
         os.chmod(self.db_path, 0o600)
@@ -4826,15 +4888,17 @@ class Ledger:
     # offering an idle shape (CLAUDE.md invariant 6): a view name this does
     # not recognise is refused, never interpolated into SQL on trust.
     # `needs_review` (agent-supervisor#652) is a sixth, added the same way.
+    # `capture_health` (agent-supervisor#687) is a seventh, added the same way.
     PROMPT_VIEWS = (
         "unacknowledged", "live_parameters", "conflicts", "open_questions",
-        "possibility_count", "needs_review",
+        "possibility_count", "needs_review", "capture_health",
     )
 
     def read_prompt_view(self, view):
-        """Read one of the five named views, plain SQL, no model involved --
-        every read against `items`/`links` after itemisation is meant to be
-        exactly this and nothing more."""
+        """Read one of the named `PROMPT_VIEWS`, plain SQL, no model
+        involved -- every read against `items`/`links`/`prompts` after
+        capture and itemisation is meant to be exactly this and nothing
+        more."""
         if view not in self.PROMPT_VIEWS:
             raise ValueError(f"unknown prompt view: {view}")
         with contextlib.closing(self._connect()) as connection:
