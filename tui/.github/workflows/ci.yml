@@ -8,6 +8,17 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    # agent-tui#168 / docs/merge-impact-inventory-agent-estate.md row 2:
+    # jonhill90/agent-supervisor is queued for rename to jonhill90/agent-estate
+    # (agent-supervisor#682, Track A). That rename has NOT happened -- this
+    # env var stays "jonhill90/agent-supervisor" until it does. It exists so
+    # the rename is a one-line edit here, not a second literal to hunt for
+    # buried in the checkout step below -- same "one var flips every
+    # consumer" shape agent-supervisor#686 used to centralize this repo's own
+    # name across its scripts; consistency with that PR's approach matters
+    # more than inventing a second mechanism.
+    env:
+      SUPERVISOR_REPOSITORY: jonhill90/agent-supervisor
     steps:
       - uses: actions/checkout@v4
         with:
@@ -21,7 +32,7 @@ jobs:
       # happens to have both repos checked out locally.
       - uses: actions/checkout@v4
         with:
-          repository: jonhill90/agent-supervisor
+          repository: ${{ env.SUPERVISOR_REPOSITORY }}
           path: agent-supervisor
       - uses: actions/setup-go@v5
         with:
