@@ -90,6 +90,17 @@ STATE_DIR = os.environ.get(
 )
 FAILURE_LOG = os.path.join(STATE_DIR, "prompt-capture-hook-failures.log")
 
+# agent-supervisor#693 (fix pass). `Ledger._locked()`'s flock is a blocking
+# call with no timeout by default -- fine for the CLI and the Director loop,
+# fatal here: this hook sits on every prompt submission, so a lock held by
+# any other writer (a concurrent `itemize_prompts.py --load`, a process that
+# died holding it) would otherwise hang the operator's terminal forever, past
+# the point the `try/except` in `main()` ever gets a chance to fail open.
+# `Ledger(..., lock_timeout=...)` bounds both the flock and sqlite's own
+# busy-wait to this many seconds; `main()`'s existing broad except already
+# catches the `LockTimeout` this raises and logs it as an ordinary failure.
+LOCK_TIMEOUT_SECONDS = 2.0
+
 
 def _log_failure(message):
     """Fail loudly without failing the prompt. stderr is Claude Code's own
@@ -177,7 +188,7 @@ def main():
     try:
         from core import Ledger
 
-        ledger = Ledger(STATE_DIR)
+        ledger = Ledger(STATE_DIR, lock_timeout=LOCK_TIMEOUT_SECONDS)
         status = capture(payload, ledger)
     except Exception as exc:  # noqa: BLE001 -- a hook must never block or crash a prompt on any failure shape
         _log_failure(f"capture failed: {type(exc).__name__}: {exc}")

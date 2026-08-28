@@ -1,7 +1,11 @@
+import fcntl
 import json
+import multiprocessing
+import os
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from pathlib import Path
 
@@ -11,6 +15,19 @@ sys.path.insert(0, str(SUPERVISOR_DIR))
 import prompt_capture_hook  # noqa: E402
 from core import Ledger  # noqa: E402
 from mine_prompts import CONTEXT_UNDETERMINED  # noqa: E402
+
+
+def _hold_ledger_lock(lock_path, hold_seconds, ready):
+    """Run in a separate process (not thread -- flock is per open file
+    description, and a thread in this same process would share the parent's
+    fd table in a way that doesn't reproduce cross-process contention) so the
+    hook subprocess under test hits a *real* held lock, the same shape a
+    concurrent `itemize_prompts.py --load` or a process that died holding
+    the lock would leave behind."""
+    with open(lock_path, "a+") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        ready.set()
+        time.sleep(hold_seconds)
 
 
 class CaptureUnitTests(unittest.TestCase):
@@ -159,6 +176,58 @@ class MainEndToEndTests(unittest.TestCase):
         unitemised = ledger.list_unitemised_prompts()
         self.assertEqual(1, len(unitemised))
         self.assertEqual("verify end to end capture", unitemised[0]["text_raw"])
+
+    def test_locked_ledger_fails_open_within_bound_not_hangs(self):
+        """agent-supervisor#693 review finding: `record_prompt()` ->
+        `Ledger._locked()`'s flock was a blocking call with no timeout, so a
+        held lock hung the hook past the point its own try/except ever got a
+        chance to fail open. `Ledger(..., lock_timeout=...)` bounds that wait;
+        this reproduces the reviewer's exact mutation -- hold the lock from a
+        second process, then invoke the real hook binary -- and asserts the
+        hook still returns quickly and writes nothing, rather than trusting
+        the unit-level `capture()` call alone."""
+        # `Ledger(self.tempdir.name)` (no lock_timeout) creates the state dir
+        # and schema up front so the held-lock process below doesn't race the
+        # hook's own first-time `_initialize()` for who creates the lock file.
+        Ledger(self.tempdir.name)
+        lock_path = os.path.join(self.tempdir.name, "ledger.lock")
+
+        ready = multiprocessing.Event()
+        holder = multiprocessing.Process(
+            target=_hold_ledger_lock, args=(lock_path, 10, ready)
+        )
+        holder.start()
+        self.addCleanup(holder.join)
+        self.addCleanup(holder.terminate)
+        self.assertTrue(ready.wait(timeout=5), "lock holder never acquired the flock")
+
+        start = time.monotonic()
+        result = self._run({"session_id": "lock-test", "prompt": "should fail open, not hang"})
+        elapsed = time.monotonic() - start
+
+        self.assertEqual(0, result.returncode, msg=result.stderr)
+        self.assertEqual("", result.stdout)
+        # LOCK_TIMEOUT_SECONDS (2.0) plus generous scheduling slack -- this
+        # is the property the fix exists for: a locked ledger costs a
+        # bounded, small delay, never the 10s the holder process sleeps for.
+        self.assertLess(
+            elapsed,
+            prompt_capture_hook.LOCK_TIMEOUT_SECONDS + 5,
+            "hook did not fail open within its bounded wait -- it hung",
+        )
+        self.assertIn("LockTimeout", result.stderr)
+
+        holder.terminate()
+        holder.join()
+
+        # The prompt from the locked attempt above must never have landed --
+        # otherwise this is silently succeeding at something other than
+        # what it claims.
+        ledger = Ledger(self.tempdir.name)
+        unitemised = ledger.list_unitemised_prompts()
+        self.assertEqual(
+            0, len(unitemised), "the locked-out attempt must not have written a prompt row"
+        )
 
 
 if __name__ == "__main__":
