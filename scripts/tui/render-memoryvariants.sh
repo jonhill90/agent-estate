@@ -4,7 +4,7 @@
 # real terminal, ANSI colour and all) -- agent-tui#61. See
 # tools/memoryvariants/main.go's package doc comment for why this is real
 # Bubble Tea/lipgloss output over hardcoded fake data, not an HTML mock,
-# same device as scripts/render-uivariants.sh (agent-tui#62/agent-tui#63).
+# same device as scripts/tui/render-uivariants.sh (agent-tui#62/agent-tui#63).
 #
 # The live mouse-drag spike (tools/memoryvariants/spike) is NOT rendered
 # here -- it needs a real interactive terminal, not a single frozen frame.
@@ -13,12 +13,15 @@
 #
 # Requires: go, freeze (https://github.com/charmbracelet/freeze) on PATH.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+# This script lives at scripts/tui/ (moved from tui/scripts/ by migration
+# Step 2c, #744); the Go module and docs/ it renders into moved to tui/ and
+# docs/tui/ respectively, so both hops are two levels up from here now.
+cd "$(dirname "$0")/../../tui"
 
 bin="$(mktemp -d)/memoryvariants"
 go build -o "$bin" ./tools/memoryvariants
 
-outdir="docs/memoryvariants"
+outdir="../docs/tui/memoryvariants"
 mkdir -p "$outdir"
 
 variants=(

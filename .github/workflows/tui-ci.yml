@@ -1,0 +1,34 @@
+name: TUI CI
+
+# agent-tui's own CI (formerly tui/.github/workflows/ci.yml), reconciled
+# under the merged repo by migration Step 2c (#744). Before the merge this
+# checked out agent-tui and agent-supervisor as two separate repos so
+# internal/lane/states_lanessh_test.go's lanes.sh cross-check had something
+# to point AGENT_SUPERVISOR_REPO at; now that both live in one checkout,
+# a single actions/checkout@v4 supplies both sides and AGENT_SUPERVISOR_REPO
+# just points at the workspace root -- no second checkout, no
+# SUPERVISOR_REPOSITORY env var to keep in sync with a future rename.
+
+on:
+  push:
+    branches: [main]
+    paths: ["tui/**", ".github/workflows/tui-ci.yml"]
+  pull_request:
+    paths: ["tui/**", ".github/workflows/tui-ci.yml"]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+      - run: go build ./...
+        working-directory: tui
+      - run: go vet ./...
+        working-directory: tui
+      - run: go test ./...
+        working-directory: tui
+        env:
+          AGENT_SUPERVISOR_REPO: ${{ github.workspace }}

@@ -7,12 +7,15 @@
 #
 # Requires: go, freeze (https://github.com/charmbracelet/freeze) on PATH.
 set -euo pipefail
-cd "$(dirname "$0")/.."
+# This script lives at scripts/tui/ (moved from tui/scripts/ by migration
+# Step 2c, #744); the Go module and docs/ it renders into moved to tui/ and
+# docs/tui/ respectively, so both hops are two levels up from here now.
+cd "$(dirname "$0")/../../tui"
 
 bin="$(mktemp -d)/uivariants"
 go build -o "$bin" ./tools/uivariants
 
-outdir="docs/uivariants"
+outdir="../docs/tui/uivariants"
 mkdir -p "$outdir"
 
 variants=(
