@@ -247,3 +247,36 @@ HARNESS_RESUME_CMD='codex resume %s'
 # so the glob needs a leading `*` that Claude's own (see harness/claude.sh)
 # does not.
 HARNESS_TRANSCRIPT_GLOB='.codex/sessions/*/*/*/*%s.jsonl'
+
+# agent-estate#446. `input-box.sh` (`input_box_state`/`input_box_text`) was
+# Claude-only by its own header: keyed on `❯` (U+276F) immediately followed
+# by U+00A0, closed by a horizontal-rule row. Verified against a real,
+# fully-ready codex pane (0.148.0, then reconfirmed on 0.149.0 -- throwaway
+# tmux socket, `TMUX_TMPDIR`, never a live lane), that read `unknown` every
+# time, empty or holding typed text, because codex's own chrome differs at
+# the byte level in both places this issue's own report named:
+#
+# The marker is `›` (U+203A), already noted above for HARNESS_OPTION_ROW_RE,
+# immediately followed by an ORDINARY space (not NBSP) -- captured live,
+# `capture-pane -pe` raw bytes for a genuinely empty box:
+#
+#   \x1b[1m› \x1b[0m \x1b[2mAsk Codex to do anything\x1b[0m
+#
+# -- bold marker, reset, plain space, then the dim placeholder (removed by
+# `strip_dim_sgr` the same way Claude's own placeholder is). A PAST TURN's
+# echoed prompt reuses the same glyph but paints the marker itself DIM
+# (`\x1b[1;2m› \x1b[0m`, captured live off a real reply) -- so
+# `strip_dim_sgr` removes the marker from every echo before
+# `input_box_state`'s "last matching row" scan ever runs, the same
+# disambiguation Claude's own NBSP-vs-space split gives it, by a different
+# mechanism this harness happens to paint for free.
+#
+# There is no closing rule at all. Measured live: an empty box is exactly one
+# row (`› ` plus the dim placeholder) followed directly by a blank row, then
+# the `<model> · <cwd>` footer; a message long enough to wrap draws its
+# continuation as plain, unmarked, indented rows and is STILL followed by a
+# blank row once the message ends, before that same footer. `blank` is
+# `input-box.sh`'s name for this close mode -- see that file's own header,
+# section 4, for the contract these two fields satisfy.
+HARNESS_INPUT_BOX_PROMPT=$'\xe2\x80\xba '
+HARNESS_INPUT_BOX_CLOSE=blank

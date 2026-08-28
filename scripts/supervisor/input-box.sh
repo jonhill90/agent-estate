@@ -1,5 +1,5 @@
 #!/bin/bash
-# Is a Claude Code lane's input box empty, or is it holding text nobody sent?
+# Is a lane's input box empty, or is it holding text nobody sent?
 #
 # WHY: agent-dotfiles#141. Two lanes sat for 40 minutes each holding a full
 # brief that had been typed into the input box and never submitted -- the
@@ -78,6 +78,52 @@
 # information", never as `empty`. Callers may only use `text` to WITHHOLD a
 # lane or FAIL a dispatch; nothing here may ever be the reason a lane becomes
 # available. That is the one-way ratchet #124 and #126 put these states under.
+#
+# --- 4. harness-parameterized, agent-estate#446 ----------------------------
+# Everything above this line was measured against Claude Code ONLY and this
+# file's own header used to say so. #446: driven live against a real codex
+# pane (0.148.0, then re-confirmed on 0.149.0 -- throwaway tmux socket,
+# `TMUX_TMPDIR`, never a live lane), `input_box_state`/`input_box_text` read
+# `unknown` against a codex pane every time, empty or holding typed text,
+# because codex's own chrome differs at the byte level in TWO ways from what
+# was hardcoded here: the marker glyph is `›` (U+203A), not `❯` (U+276F) --
+# already noted in `harness/codex.sh`'s own comment on `HARNESS_OPTION_ROW_RE`
+# -- and codex's ready-state box has NO closing horizontal rule at all; it is
+# closed by the first blank line instead (confirmed live: an empty box is one
+# row -- `› ` plus a dim placeholder -- followed directly by a blank line,
+# then the `<model> · <cwd>` footer; a wrapped long message's continuation
+# rows are plain, unmarked, indented text, also followed by a blank line
+# before the footer once the message ends).
+#
+# So both functions below now take the box's own MARKER and its CLOSE mode as
+# parameters instead of the two module constants directly, following the same
+# per-harness-field contract `harness-registry.sh` already uses for
+# `H_OPTION_ROW_RE`/`H_READY_RE`/etc: `harness/claude.sh` and
+# `harness/codex.sh` each record their own `HARNESS_INPUT_BOX_PROMPT` /
+# `HARNESS_INPUT_BOX_CLOSE`, and `send.sh`'s callers thread them through via
+# `--box-prompt`/`--box-close` (see that file). Called with NO arguments --
+# every existing caller in this repo before #446, and every fixture in
+# `test_input_box.sh` -- both functions behave EXACTLY as before: `${1-...}`
+# (not `${1:-...}`) means an OMITTED argument defaults to Claude's own marker
+# and the rule-close mode, while an EXPLICITLY EMPTY marker (what a harness
+# with no measured box shape at all -- `harness/copilot.sh` today -- passes)
+# fails closed to `unknown` immediately, never silently reusing Claude's
+# shape. That distinction is why this is `${1-x}` throughout and not the more
+# common `${1:-x}`, which cannot tell "omitted" from "passed empty" apart.
+#
+#   prompt       the literal marker bytes, immediately followed by whatever
+#                separator that harness paints after it (Claude: `❯` + NBSP;
+#                Codex: `›` + an ordinary space) -- matched the same way the
+#                original Claude-only code did, `index(line, prompt) == 1`,
+#                so a harness's own choice of separator is what keeps this
+#                from matching an echoed transcript line or a menu option row
+#                that reuses the same leading glyph (see harness/codex.sh's
+#                own note: the `›` on an echoed past turn is painted DIM,
+#                so `strip_dim_sgr` removes the marker itself before this
+#                function ever sees it -- confirmed live, not assumed).
+#   close_mode   `rule` (default) -- Claude's own shape, closed by a row of
+#                `─`/`━`. `blank` -- Codex's shape, closed by the first row
+#                that is empty once whitespace is stripped.
 
 # `❯` (U+276F) immediately followed by U+00A0. Written as byte escapes because
 # `\u` escapes need bash 4 and /bin/bash on macOS is 3.2.
@@ -91,9 +137,20 @@ INPUT_BOX_NBSP=$'\xc2\xa0'
 # doc comment for the full rationale.
 . "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/dim-strip.sh"
 
-# input_box_state < capture-pane -pe output
+# input_box_state [prompt] [close_mode] < capture-pane -pe output
 input_box_state() {
-  strip_dim_sgr | awk -v prompt="$INPUT_BOX_PROMPT" -v nbsp="$INPUT_BOX_NBSP" '
+  local prompt="${1-$INPUT_BOX_PROMPT}"
+  local close_mode="${2-rule}"
+
+  # No known box shape for this harness at all (agent-estate#446) --
+  # `harness/copilot.sh` today. `unknown` is the fail-safe answer, never a
+  # guess that reuses Claude's own marker for a harness nobody has measured.
+  if [ -z "$prompt" ]; then
+    echo unknown
+    return
+  fi
+
+  strip_dim_sgr | awk -v prompt="$prompt" -v nbsp="$INPUT_BOX_NBSP" -v close_mode="$close_mode" '
     # dim spans are already gone (strip_dim_sgr ran first) -- what is left
     # is plain text: the box marker and any typed content, never the
     # placeholder. Same detection rule as before: the marker is not itself
@@ -101,17 +158,31 @@ input_box_state() {
     { plain[NR] = $0 }
     END {
       # The LAST prompt row on the visible screen. A pane can hold more than
-      # one only if the harness repainted mid-capture; the live box is the
-      # lower one either way.
+      # one only if the harness repainted mid-capture, or (agent-estate#446,
+      # measured live against codex) an earlier turn ECHOES the same marker
+      # -- codex paints that echo dim, so strip_dim_sgr already removed the
+      # marker itself from it, and this loop never sees it. Either way the
+      # live box is the lower one.
       p = 0
       for (i = 1; i <= NR; i++) if (index(plain[i], prompt) == 1) p = i
       if (p == 0) { print "unknown"; exit }
 
-      # The rule that closes the box. Without it the box has been cut off by
-      # the bottom of the pane and its full contents are not on screen, so
+      # What closes the box. Without it the box has been cut off by the
+      # bottom of the pane and its full contents are not on screen, so
       # nothing can be concluded.
       e = 0
-      for (i = p + 1; i <= NR; i++) if (plain[i] ~ /^[─━]+$/) { e = i; break }
+      if (close_mode == "blank") {
+        # agent-estate#446: codex draws no closing rule at all -- measured
+        # live, its box (empty or holding a wrapped multi-row message) is
+        # always followed by the first genuinely blank row before the
+        # `<model> · <cwd>` footer.
+        for (i = p + 1; i <= NR; i++) {
+          t = plain[i]; gsub(/[[:space:]]/, "", t)
+          if (t == "") { e = i; break }
+        }
+      } else {
+        for (i = p + 1; i <= NR; i++) if (plain[i] ~ /^[─━]+$/) { e = i; break }
+      }
       if (e == 0) { print "unknown"; exit }
 
       # Drop everything up to and including the prompt marker itself.
@@ -150,7 +221,16 @@ input_box_state() {
 # `input_box_state`'s callers already treat `unknown`: not evidence of
 # anything.
 input_box_text() {
-  strip_dim_sgr | awk -v prompt="$INPUT_BOX_PROMPT" -v nbsp="$INPUT_BOX_NBSP" '
+  local prompt="${1-$INPUT_BOX_PROMPT}"
+  local close_mode="${2-rule}"
+
+  # Same fail-closed rule as input_box_state above: no known marker means no
+  # content to report, same as `unknown` has none.
+  if [ -z "$prompt" ]; then
+    return
+  fi
+
+  strip_dim_sgr | awk -v prompt="$prompt" -v nbsp="$INPUT_BOX_NBSP" -v close_mode="$close_mode" '
     { plain[NR] = $0 }
     END {
       p = 0
@@ -158,7 +238,14 @@ input_box_text() {
       if (p == 0) { exit }
 
       e = 0
-      for (i = p + 1; i <= NR; i++) if (plain[i] ~ /^[─━]+$/) { e = i; break }
+      if (close_mode == "blank") {
+        for (i = p + 1; i <= NR; i++) {
+          t = plain[i]; gsub(/[[:space:]]/, "", t)
+          if (t == "") { e = i; break }
+        }
+      } else {
+        for (i = p + 1; i <= NR; i++) if (plain[i] ~ /^[─━]+$/) { e = i; break }
+      }
       if (e == 0) { exit }
 
       body = plain[p]

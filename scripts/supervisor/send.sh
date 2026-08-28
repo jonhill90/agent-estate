@@ -72,7 +72,7 @@ _send_capture_matches() {
   return 0
 }
 
-# _send_head_matches <target> <token>
+# _send_head_matches <target> <token> <box_prompt> <box_close>
 #   True iff the input box's OWN content -- not the whole pane, and not "the
 #   token appears somewhere" -- STARTS WITH `token` (both whitespace-
 #   stripped). agent-supervisor#193: `_send_capture_matches` above is an
@@ -83,9 +83,19 @@ _send_capture_matches() {
 #   start of anything. `input_box_text` (input-box.sh) is what makes "the
 #   start of the box" answerable at all; an empty box body is never a match,
 #   matching `input_box_text`'s own fail-closed contract for `unknown`.
+#
+#   `box_prompt`/`box_close`, agent-estate#446: this harness's own
+#   `H_INPUT_BOX_PROMPT`/`H_INPUT_BOX_CLOSE` (harness-registry.sh), already
+#   RESOLVED to concrete values by the caller -- see `verified_type`'s own
+#   header for how `--box-prompt`/`--box-close` (or their Claude-shaped
+#   defaults, when omitted) are resolved once per call rather than here.
+#   Both REQUIRED, always, even when empty: `input_box_text` itself is what
+#   tells "omitted" (Claude's own default) from "explicitly empty" (a
+#   harness with no measured box shape) apart, and it can only do that if
+#   this function never collapses the two by leaving an argument off.
 _send_head_matches() {
-  local target="$1" needle="$2" body
-  body=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_text)
+  local target="$1" needle="$2" box_prompt="$3" box_close="$4" body
+  body=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_text "$box_prompt" "$box_close")
   needle="$(tr -d ' \n' <<<"$needle")"
   [ -n "$body" ] && [[ "$body" == "$needle"* ]]
 }
@@ -137,6 +147,24 @@ _send_head_matches() {
 #                   first) -- `dispatch.sh`'s own comment on checking both
 #                   ends applies here unchanged, just with the head half now
 #                   actually anchored instead of merely present.
+#   --box-prompt VALUE  agent-estate#446. This harness's own input-box
+#                   marker (`H_INPUT_BOX_PROMPT`, harness-registry.sh) --
+#                   threaded to `input_box_state`/`input_box_text`
+#                   (input-box.sh) wherever this function reads the box
+#                   itself: the `--proof-head` check above, and the no-proof
+#                   fallback below. OMITTED (the default -- every caller
+#                   before #446) means Claude's own marker, unchanged from
+#                   what was hardcoded here pre-#446. Given as an EMPTY
+#                   string (what a harness with no measured box shape --
+#                   `harness/copilot.sh` today -- resolves to) means "no
+#                   known box for this harness", and the box reads
+#                   `unknown`/`""` rather than silently reusing Claude's own
+#                   shape -- see input-box.sh's header, section 4, for why
+#                   this distinction needs its own flag rather than folding
+#                   into `--proof-head`.
+#   --box-close VALUE   this harness's `H_INPUT_BOX_CLOSE` -- `rule`
+#                   (Claude, the default) or `blank` (Codex). Only
+#                   meaningful alongside `--box-prompt`; see input-box.sh.
 #
 # MULTI-LINE MESSAGES ARE REFUSED, ALWAYS (agent-supervisor#186). `message`
 # containing an embedded newline is rejected before any `tmux send-keys` is
@@ -163,6 +191,7 @@ verified_type() {
   local settle=1 retries=1 preclear=0 literal=0 sent_ok=1
   local -a proof=()
   local proof_head=""
+  local box_prompt="" box_close="" box_given=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --settle) settle="$2"; shift 2 ;;
@@ -171,9 +200,22 @@ verified_type() {
       --literal) literal=1; shift ;;
       --proof) proof+=("$2"); shift 2 ;;
       --proof-head) proof_head="$2"; shift 2 ;;
+      --box-prompt) box_prompt="$2"; box_given=1; shift 2 ;;
+      --box-close) box_close="$2"; box_given=1; shift 2 ;;
       *) echo "verified_type: unknown option $1" >&2; SEND_STATUS=send_failed; return 1 ;;
     esac
   done
+  # agent-estate#446: resolved ONCE, to concrete values, whether or not the
+  # caller gave `--box-prompt`/`--box-close` -- omitted means Claude's own
+  # marker/close-mode (INPUT_BOX_PROMPT, "rule"), unchanged from what was
+  # hardcoded pre-#446; given (even as an explicit empty string, a harness
+  # with no measured box shape) is used exactly as given. See input-box.sh's
+  # header, section 4, for why "omitted" and "explicitly empty" must stay
+  # distinguishable this far down rather than collapsing to one default.
+  if [ "$box_given" != 1 ]; then
+    box_prompt="$INPUT_BOX_PROMPT"
+    box_close="rule"
+  fi
 
   if [[ "$message" == *$'\n'* ]]; then
     echo "verified_type: message contains an embedded newline -- tmux reads a bare newline as Enter mid-type regardless of --literal; refusing rather than risk an unintended submission (agent-supervisor#186)" >&2
@@ -199,13 +241,13 @@ verified_type() {
     sleep "$settle"
 
     if [ -n "$proof_head" ] || [ "${#proof[@]}" -gt 0 ]; then
-      if { [ -z "$proof_head" ] || _send_head_matches "$target" "$proof_head"; } \
+      if { [ -z "$proof_head" ] || _send_head_matches "$target" "$proof_head" "$box_prompt" "$box_close"; } \
          && { [ "${#proof[@]}" -eq 0 ] || _send_capture_matches "$target" "${proof[@]}"; }; then
         SEND_STATUS=landed
         return 0
       fi
     else
-      SEND_BOX_STATE=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_state)
+      SEND_BOX_STATE=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_state "$box_prompt" "$box_close")
       if [ "$SEND_BOX_STATE" = text ]; then
         SEND_STATUS=landed
         return 0
@@ -256,6 +298,10 @@ verified_type() {
 #   --settle N   seconds to sleep after sending before checking (default 1)
 #   --retries N  total attempts; each retry re-sends `Escape`, `C-u`, then
 #                 `/clear` Enter (default 1 -- no retry)
+#   --box-prompt VALUE / --box-close VALUE   agent-estate#446, same contract
+#                 as `verified_type`'s own flags of the same name -- see
+#                 that function's header. Omitted means Claude's own marker
+#                 and `rule` close mode, unchanged from pre-#446.
 #
 # `Escape` before `C-u`, agent-dotfiles#255: reported directly by Jon,
 # 2026-08-20/21 -- under loaded panes, the default settle/retry budget
@@ -277,13 +323,20 @@ verified_type() {
 verified_preclear() {
   local target="$1"; shift
   local settle=1 retries=1
+  local box_prompt="" box_close="" box_given=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --settle) settle="$2"; shift 2 ;;
       --retries) retries="$2"; shift 2 ;;
+      --box-prompt) box_prompt="$2"; box_given=1; shift 2 ;;
+      --box-close) box_close="$2"; box_given=1; shift 2 ;;
       *) echo "verified_preclear: unknown option $1" >&2; SEND_STATUS=send_failed; return 1 ;;
     esac
   done
+  if [ "$box_given" != 1 ]; then
+    box_prompt="$INPUT_BOX_PROMPT"
+    box_close="rule"
+  fi
 
   local attempt
   for ((attempt = 1; attempt <= retries; attempt++)); do
@@ -294,7 +347,7 @@ verified_preclear() {
       return 1
     fi
     sleep "$settle"
-    SEND_BOX_STATE=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_state)
+    SEND_BOX_STATE=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_state "$box_prompt" "$box_close")
     if [ "$SEND_BOX_STATE" = empty ]; then
       SEND_STATUS=landed
       return 0
@@ -313,6 +366,8 @@ verified_preclear() {
 #   --confirm-tries N    how many times to poll (default 10)
 #   --confirm-settle N   seconds between polls; the first poll also sleeps
 #                         this long before its first check (default 1)
+#   --box-prompt VALUE / --box-close VALUE   agent-estate#446, same contract
+#                 as `verified_type`'s own flags of the same name.
 #
 # Return 0 (SEND_STATUS=submitted), 1 (send_failed -- the Enter call itself
 # errored), 3 (stranded -- the box still shows text; CONFIRMED, not
@@ -322,13 +377,20 @@ verified_preclear() {
 verified_submit() {
   local target="$1"; shift
   local confirm_tries=10 confirm_settle=1
+  local box_prompt="" box_close="" box_given=0
   while [ $# -gt 0 ]; do
     case "$1" in
       --confirm-tries) confirm_tries="$2"; shift 2 ;;
       --confirm-settle) confirm_settle="$2"; shift 2 ;;
+      --box-prompt) box_prompt="$2"; box_given=1; shift 2 ;;
+      --box-close) box_close="$2"; box_given=1; shift 2 ;;
       *) echo "verified_submit: unknown option $1" >&2; SEND_STATUS=send_failed; return 1 ;;
     esac
   done
+  if [ "$box_given" != 1 ]; then
+    box_prompt="$INPUT_BOX_PROMPT"
+    box_close="rule"
+  fi
 
   if ! tmux send-keys -t "$target" Enter 2>/dev/null; then
     SEND_STATUS=send_failed
@@ -338,7 +400,7 @@ verified_submit() {
   local attempt
   for ((attempt = 1; attempt <= confirm_tries; attempt++)); do
     sleep "$confirm_settle"
-    SEND_BOX_STATE=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_state)
+    SEND_BOX_STATE=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_state "$box_prompt" "$box_close")
     if [ "$SEND_BOX_STATE" = empty ]; then
       SEND_STATUS=submitted
       return 0
@@ -534,6 +596,10 @@ verified_send() {
       --proof|--proof-head) type_args+=("$1" "$2"); shift 2 ;;
       --preclear|--literal) type_args+=("$1"); shift ;;
       --settle|--retries) type_args+=("$1" "$2"); shift 2 ;;
+      # agent-estate#446: BOTH stages read the box, so this flag goes to
+      # both -- verified_type's own reads (--proof-head, the no-proof
+      # fallback) and verified_submit's own poll-for-empty.
+      --box-prompt|--box-close) type_args+=("$1" "$2"); submit_args+=("$1" "$2"); shift 2 ;;
       *) echo "verified_send: unknown option $1" >&2; SEND_STATUS=send_failed; return 1 ;;
     esac
   done
