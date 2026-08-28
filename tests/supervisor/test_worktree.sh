@@ -559,10 +559,59 @@ sleep 2
 OCC_SESSION="wt478-occupied-$$"
 if rtmux new-session -d -s "$OCC_SESSION" -c "$OCC_DEST" 2>/dev/null; then
   ok "verify the instrument: a scratch tmux pane was pointed at the candidate worktree"
+
+  # agent-supervisor#762: the normalisation case specifically. Measured
+  # directly while writing this test (a plain `git worktree add` against a
+  # raw `/var/folders/...` path, then `git worktree list --porcelain`): git
+  # itself already resolves the symlink and reports `/private/var/...`, so
+  # `worktree.sh gc`'s own candidate list ($p, fed into `_gc_is_live` as
+  # `target_real`) never actually carries the raw spelling -- that half of
+  # #762's stated mismatch does not reach this code path. What DOES still
+  # carry the raw spelling is $OCC_DEST itself: the literal string `new`
+  # printed to its caller and the shape a ledger `worktree_path` column
+  # would store (dispatch.sh's `record-dispatch`, `assign_task`'s summary
+  # text -- neither calls `pwd -P` on what `new` handed back). Compare THAT
+  # raw form against tmux's own `#{pane_current_path}`, which reports the
+  # kernel-resolved cwd independent of what path a caller `cd`'d into --
+  # the actual pairing #762 measured live ("tmux reports /private/var/...
+  # while [the registered path] reports /var/..."), even though this
+  # specific consumer (`git worktree list`) turns out to be immune to it on
+  # its own.
+  OCC_PANE_RAW=$(rtmux list-panes -a -F '#{pane_current_path}' | grep -F "$(basename "$OCC_DEST")" || true)
+  if [ -n "$OCC_PANE_RAW" ] && [ "$OCC_DEST" != "$OCC_PANE_RAW" ]; then
+    ok "the normalisation case is live on this host: the raw path new/a ledger would carry ($OCC_DEST) and tmux's own pane_current_path ($OCC_PANE_RAW) are literally different strings for the same worktree"
+  else
+    echo "  skip normalisation-mismatch precondition not reproducible on this host (raw: '$OCC_DEST', tmux: '$OCC_PANE_RAW') -- the protection assertion below still runs, but does not prove the /var vs /private/var case specifically here"
+  fi
+
   occ_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=1 bash "$WT" gc "$REPO" origin/main 2>&1); occ_rc=$?
   want_exit "gc (occupied case) exits 0" "$occ_rc" 0 "$occ_out"
   if [ -d "$OCC_DEST" ]; then ok "gc refuses to remove a worktree a live tmux pane is pointed at (#478)"; else bad "gc refuses to remove a worktree a live tmux pane is pointed at (#478)" "$occ_out"; fi
   if grep -q "tmux pane's cwd is inside it" <<<"$occ_out"; then ok "the refusal names the occupying pane as the reason"; else bad "the refusal names the occupying pane as the reason" "$occ_out"; fi
+
+  # agent-supervisor#762: one `tmux list-panes` call for the whole sweep, not
+  # one per worktree. Wrap `tmux` on PATH with a call counter for this one gc
+  # invocation and prove the count is 1, not N-candidates -- a claim about
+  # call count that only a captured count, not a passing functional test,
+  # can settle (a correct-but-slow implementation passes every assertion
+  # above and still calls tmux once per candidate).
+  REAL_TMUX=$(command -v tmux)
+  COUNT_DIR=$(mktemp -d)
+  COUNTER="$COUNT_DIR/tmux"
+  cat > "$COUNTER" <<COUNTEREOF
+#!/bin/bash
+echo x >> "$COUNT_DIR/calls"
+exec "$REAL_TMUX" "\$@"
+COUNTEREOF
+  chmod +x "$COUNTER"
+  count_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=1 PATH="$COUNT_DIR:$PATH" bash "$WT" gc "$REPO" origin/main 2>&1); count_rc=$?
+  want_exit "gc (call-count case) exits 0" "$count_rc" 0 "$count_out"
+  n_calls=$(wc -l < "$COUNT_DIR/calls" 2>/dev/null || echo 0)
+  n_calls=$(tr -d ' ' <<<"$n_calls")
+  if [ -d "$OCC_DEST" ]; then ok "gc still refuses to remove the occupied worktree under the counting wrapper"; else bad "gc still refuses to remove the occupied worktree under the counting wrapper" "$count_out"; fi
+  if [ "$n_calls" = "1" ]; then ok "gc calls 'tmux list-panes' exactly once for the whole sweep, not once per candidate ($n_calls call(s) measured, agent-supervisor#762)"; else bad "gc calls 'tmux list-panes' exactly once for the whole sweep, not once per candidate" "measured $n_calls calls to tmux: $(cat "$COUNT_DIR/calls" 2>/dev/null)"; fi
+  rm -rf "$COUNT_DIR"
+
   rtmux kill-session -t "$OCC_SESSION" 2>/dev/null
 else
   bad "verify the instrument: a scratch tmux pane was pointed at the candidate worktree" "tmux new-session failed -- occupancy could not be proven for real"
