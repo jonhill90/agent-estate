@@ -19,6 +19,7 @@ subcommand's behaviour, flags, messages or exit codes changed.
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import sys
 from pathlib import Path
