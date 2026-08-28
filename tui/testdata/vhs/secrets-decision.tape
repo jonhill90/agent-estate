@@ -14,7 +14,12 @@ Set Height 850
 Set Shell "bash"
 
 Hide
-Type "export AGENT_SUPERVISOR_REPO=${AGENT_SUPERVISOR_REPO:-$HOME/source/repos/Personal/agent-supervisor}" Enter
+# Derived, not hardcoded: this tape lives inside the repo it points at
+# (agent-estate#754 -- the prior $HOME/.../agent-supervisor literal went
+# stale the day the repo was renamed to agent-estate, and every hardcoded
+# host path recurs the same way on the next rename). git rev-parse falls
+# back to pwd only if run outside a git checkout.
+Type "export AGENT_SUPERVISOR_REPO=${AGENT_SUPERVISOR_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}" Enter
 Type "export HILL90_APP_REPO=${HILL90_APP_REPO:-$HOME/source/repos/Personal/hill90-app}" Enter
 Type "go build -o /tmp/atui-secrets ./cmd/estate" Enter
 Sleep 15s
