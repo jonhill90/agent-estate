@@ -553,17 +553,32 @@ shutil.copytree(
     ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
 )
 
-core_text = (mutated_dir / "core.py").read_text()
+# agent-supervisor#706 split core.py's schema (including this trigger)
+# out into core_ledger_schema.py behind a re-export shim -- core.py itself
+# no longer contains the CREATE TRIGGER text. Search the whole core*.py
+# module set rather than the one file that used to hold it, so a future
+# re-split doesn't silently stop mutating anything: find every file that
+# contains the marker, require exactly one match TOTAL across the set (not
+# merely one per file -- a clause could be unique per-file yet duplicated
+# across files), and patch that file.
 marker = "            WHEN NEW.source_kind = 'pull' AND EXISTS ("
-assert core_text.count(marker) == 1, "pull-uniqueness trigger WHEN clause not found or not unique -- script shape changed"
+core_modules = sorted(mutated_dir.glob("core*.py"))
+hits = [(p, p.read_text().count(marker)) for p in core_modules]
+total = sum(n for _, n in hits)
+assert total == 1, (
+    "pull-uniqueness trigger WHEN clause not found or not unique across "
+    f"core*.py -- script shape changed (per-file counts: {hits})"
+)
+target = next(p for p, n in hits if n == 1)
+core_text = target.read_text()
 mutated_core = core_text.replace(
     marker,
     "            -- MUTATED: agent-supervisor#169 write-time gate defeated\n"
     "            WHEN 0 AND EXISTS (",
     1,
 )
-assert mutated_core != core_text, "mutation did not change core.py"
-(mutated_dir / "core.py").write_text(mutated_core)
+assert mutated_core != core_text, f"mutation did not change {target.name}"
+target.write_text(mutated_core)
 
 dispatch_text = dispatch_src.read_text()
 here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'

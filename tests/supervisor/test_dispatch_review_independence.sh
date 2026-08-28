@@ -718,14 +718,13 @@ want_contains "names the completed authoring task, not just the lane" "ad390-clo
 SHADOW90="$D/shadow-supervisor-90"
 rm -rf "$SHADOW90"; mkdir -p "$SHADOW90"
 for f in "$HERE/../../scripts/supervisor/"*; do ln -s "$f" "$SHADOW90/$(basename "$f")"; done
-rm -f "$SHADOW90/core.py"
 # The glob above also symlinked __pycache__ -- straight back at the REAL
-# scripts/supervisor/__pycache__, which already holds a compiled .pyc of the
-# UNMUTATED core.py. Left in place, `python3 $SHADOW90/cli.py` resolves
-# `import core` against that cache before ever reading the mutant file
-# written below, and the mutation test passes for the wrong reason: nothing
-# ran the mutated code at all. Only ever discard the SYMLINK here, never the
-# real directory it points at.
+# scripts/supervisor/__pycache__, which already holds a compiled .pyc of
+# whichever module below gets mutated. Left in place, `python3
+# $SHADOW90/cli.py` resolves `import core`/the mixin modules against that
+# cache before ever reading the mutant file written below, and the mutation
+# test passes for the wrong reason: nothing ran the mutated code at all.
+# Only ever discard the SYMLINK here, never the real directory it points at.
 rm -f "$SHADOW90/__pycache__"
 # `cli.py` also cannot stay a symlink (unlike dispatch.sh, which is bash and
 # resolves its own directory logically via `cd`+`pwd`): CPython computes
@@ -738,24 +737,49 @@ rm -f "$SHADOW90/__pycache__"
 # this copy. A real file's own directory is never resolved away.
 rm -f "$SHADOW90/cli.py"
 cp "$HERE/../../scripts/supervisor/cli.py" "$SHADOW90/cli.py"
-CORE_MUTANT="$SHADOW90/core.py"
 patch_rc=0
-python3 - "$HERE/../../scripts/supervisor/core.py" "$CORE_MUTANT" <<'PY' || patch_rc=$?
+CORE_MUTANT=$(python3 - "$HERE/../../scripts/supervisor" "$SHADOW90" <<'PY'
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+from pathlib import Path
+
+src_dir, shadow = Path(sys.argv[1]), Path(sys.argv[2])
 marker = (
     "                WHERE source_tasks.source_kind = 'issue' AND source_tasks.source_ref = ?\n"
     "                ORDER BY tasks.created_at ASC, tasks.id ASC\n"
 )
-assert text.count(marker) == 1, "get_author_task_for_issue's query not found -- script shape changed"
+# agent-supervisor#706 split core.py's Ledger into mixins under
+# core_ledger_*.py -- get_author_task_for_issue's query now lives in
+# core_ledger_task_queries.py, not core.py. Search the whole core*.py
+# module set rather than one named file, so a future re-split doesn't
+# silently stop mutating anything: require exactly one match TOTAL across
+# the set (a clause could be unique per-file yet duplicated across files)
+# and patch whichever file actually has it.
+core_modules = sorted(src_dir.glob("core*.py"))
+hits = [(p, p.read_text().count(marker)) for p in core_modules]
+total = sum(n for _, n in hits)
+assert total == 1, (
+    "get_author_task_for_issue's query not found or not unique across "
+    f"core*.py -- script shape changed (per-file counts: {hits})"
+)
+target = next(p for p, n in hits if n == 1)
+text = target.read_text()
 mutated = marker.replace(
     "ORDER BY",
     "AND tasks.status NOT IN ('complete', 'failed', 'cancelled')\n                ORDER BY",
 )
-open(dst, "w").write(text.replace(marker, mutated, 1))
+mutated_text = text.replace(marker, mutated, 1)
+assert mutated_text != text, f"mutation did not change {target.name}"
+# The symlink for the target module points at the REAL file -- writing
+# through it would mutate the actual repo source. Remove the symlink first,
+# same reasoning as cli.py above, then write a real, mutated copy in its
+# place.
+dst = shadow / target.name
+dst.unlink()
+dst.write_text(mutated_text)
+print(dst)
 PY
-if [ "$patch_rc" -ne 0 ]; then
+) || patch_rc=$?
+if [ "$patch_rc" -ne 0 ] || [ -z "$CORE_MUTANT" ]; then
   bad "setup: patched a copy of core.py whose author lookup considers only open tasks" \
     "could not patch core.py (exit $patch_rc) -- treating as a failure, not a skip"
 else
