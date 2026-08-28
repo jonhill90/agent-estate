@@ -89,10 +89,34 @@ case "$CMD" in
   *) [ -n "$ISSUE" ] || { echo "claim: $CMD needs an issue number" >&2; exit 2; } ;;
 esac
 
+# agent-supervisor#694: [repo] is documented above as OWNER/NAME, but nothing
+# checked that shape before baking it straight into an API path. A bare repo
+# name ("agent-supervisor") built `repos/agent-supervisor/issues/N` --
+# `gh api` read that as a request for a repo literally named
+# "agent-supervisor" owned by nobody, got a 404, and every caller below
+# reports a 404 as "cannot read #$ISSUE -- refusing to claim on an unreadable
+# state". That message is correct for a genuinely unreadable issue (a real
+# outage, a wrong issue number) but wrong for this case: the issue was
+# perfectly readable, the argument was malformed. Both produced the
+# identical refusal, so a dispatcher retried or investigated GitHub
+# availability instead of its own argument.
+#
+# Validated once, here, before any gh call and before api_base can build a
+# bad path from it: OWNER/NAME is exactly one non-slash segment, a slash,
+# one more non-slash segment. This does not touch the genuinely-unreadable
+# case at all -- a real 404 (wrong issue number, wrong-but-valid repo) still
+# reaches the "cannot read" refusal in `take`/`check` below unchanged, HTTP
+# status and all.
+if [ -n "${REPO:-}" ] && ! [[ "$REPO" =~ ^[^/[:space:]]+/[^/[:space:]]+$ ]]; then
+  echo "claim: [repo] '$REPO' is not OWNER/NAME -- refusing before any GitHub call" >&2
+  exit 2
+fi
+
 # api_base -> "repos/OWNER/NAME" when [repo] was given, else the same
 # {owner}/{repo} placeholder `gh` itself resolves from the working directory
 # for every other command here -- `gh api` has no `-R` flag, so the repo has
-# to be baked into the path instead.
+# to be baked into the path instead. REPO is already validated as OWNER/NAME
+# (or empty) by the time this is ever called.
 api_base() {
   if [ -n "${REPO:-}" ]; then printf 'repos/%s\n' "$REPO"
   else printf 'repos/{owner}/{repo}\n'; fi
