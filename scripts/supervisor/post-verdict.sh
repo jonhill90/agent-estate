@@ -101,12 +101,20 @@
 #     "un-post" a wrong comment, only to make sure the caller finds out.
 #
 # Usage:
-#   post-verdict.sh <repo> <number> [--issue]
+#   post-verdict.sh <repo> <number> [--issue] [--expect-verdict]
 #
 # <repo> is owner/name. <number> is the PR (default) or issue (--issue)
 # number. The body is read from STDIN, never from an argument -- this
 # script has no --body / --body-file flag of its own to confuse, on
 # purpose, the same lesson notify.sh's positional interface encodes.
+#
+# --expect-verdict (agent-estate#719): tells this script that the body it
+# is about to post MUST carry a complete Verdict:/Review-Lane:/Reviewed-SHA:
+# trailer, and to refuse (exit 10) with an exact statement of the missing
+# shape if it does not. Opt-in per call, never inferred from the body's own
+# wording -- a review-dispatch or fix-pass-reply brief should pass it; a
+# caller posting an ordinary comment (status updates, `--issue` notes) omits
+# it and keeps today's behaviour unchanged.
 #
 #   printf '%s\n' "$VERDICT_TEXT" | post-verdict.sh jonhill90/agent-supervisor 167
 #
@@ -135,6 +143,18 @@
 #          of somebody else's trailer -- see `verdict._unblocked_verdict_labels`
 #          for the exact check and why it does not give this the same
 #          inline-code pass `_scan_verdict_lines` gives a comment being READ).
+# Exit 10  refused -- `--expect-verdict` was passed but the body has NO
+#          complete Verdict:/Review-Lane:/Reviewed-SHA: block at all
+#          (agent-estate#719 item 1: a review that ends in prose --
+#          "...Recommend APPROVE." -- with no trailer whatsoever). This is
+#          opt-in per caller, not inferred from the body's own prose: a
+#          brief dispatching a review or a fix-pass reply that must end in a
+#          verdict should pass this flag so the refusal happens HERE, with
+#          an exact statement of what to add, instead of failing silently
+#          through as an "ordinary comment" and only surfacing later as an
+#          unexplained stuck PR at the merge gate. A caller that does not
+#          pass it keeps today's behaviour: a body with neither trailer
+#          line is still an ordinary comment, untouched by any check here.
 #
 # IF YOU ARE WRITING BRIEF TEXT FOR A REVIEW OR FIX-PASS DISPATCH (#412):
 # the class of bug #187 measured was never a committed script calling `gh
@@ -183,9 +203,11 @@ esac
 shift 2 || true
 
 KIND="pr"
+EXPECT_VERDICT=""
 while [ $# -gt 0 ]; do
   case "$1" in
     --issue) KIND="issue"; shift ;;
+    --expect-verdict) EXPECT_VERDICT=1; shift ;;
     *) echo "post-verdict.sh: unrecognised argument '$1'" >&2; usage ;;
   esac
 done
@@ -302,6 +324,25 @@ fi
 if [ "$has_lane_line" = "true" ] && [ "$has_verdict" != "true" ]; then
   echo "post-verdict.sh: refusing to post -- body has a Review-Lane: line ('$raw_lane_line') but no Verdict: line -- a lane stamp with nothing to attribute is almost always a mistake" >&2
   exit 7
+fi
+
+# --- opt-in: a caller that KNOWS this post must carry a verdict says so ---
+# (agent-estate#719 item 1). Only reached when has_verdict is false AND
+# has_lane_line is false -- either trailer alone already refuses above.
+# This never fires unless the caller passes --expect-verdict: post-verdict.sh
+# has no way to tell a review reply from an ordinary status comment by
+# reading the body's prose, and guessing that from wording is exactly the
+# "infer a verdict from prose" move agent-estate#719 forbids for reading a
+# comment back -- the same principle applies to inferring INTENT at write
+# time. The caller (a review/fix-pass dispatch brief) states its own intent
+# instead.
+if [ -n "$EXPECT_VERDICT" ] && [ "$has_verdict" != "true" ]; then
+  echo "post-verdict.sh: refusing to post -- --expect-verdict was passed but the body has no Verdict:/Review-Lane:/Reviewed-SHA: trailer at all" >&2
+  echo "post-verdict.sh: end the comment with exactly this three-line block, nothing between the lines:" >&2
+  echo "post-verdict.sh:   Verdict: APPROVE|REQUEST_CHANGES" >&2
+  echo "post-verdict.sh:   Review-Lane: <session>:<index>" >&2
+  echo "post-verdict.sh:   Reviewed-SHA: <the 40-char head SHA you reviewed>" >&2
+  exit 10
 fi
 
 if [ "$has_lane_line" = "true" ]; then

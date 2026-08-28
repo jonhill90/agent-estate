@@ -309,8 +309,15 @@ the lane to run it. When a brief's dispatch is a review (`--reviews-pr`) or
 a fix pass replying with a verdict, its closing instruction must read:
 
 ```bash
-printf '%s\n' "$BODY" | scripts/supervisor/post-verdict.sh <repo> <N>
+printf '%s\n' "$BODY" | scripts/supervisor/post-verdict.sh <repo> <N> --expect-verdict
 ```
+
+`--expect-verdict` (agent-estate#719 item 1) is what turns "the review ended
+in prose with no trailer at all" into a refusal AT POST TIME, naming the
+exact missing block, instead of an ordinary-looking comment that only
+surfaces as an unexplained stuck PR later at the merge gate. Pass it for
+any dispatch whose whole point is producing a verdict; omit it for an
+ordinary status comment that was never going to carry one.
 
 never a raw `gh pr comment`/`gh issue comment` invocation. `gh-comment-gate.sh`
 only greps this repo's own committed `*.sh` files for the raw form — by its
