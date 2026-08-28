@@ -202,6 +202,44 @@ send_takeover_alarm() {
   fi
 }
 
+# --- agent-estate#735 (decided on #721): mechanise corpus STAGING
+# (extract-and-stage only, never judge) as its own tick step. Run
+# UNCONDITIONALLY and BEFORE the quota gate below -- corpus-stage.sh spends
+# no model tokens (`itemize_prompts.py --extract` is a pure SQL read, its
+# own docstring: "picks nothing, decides nothing") and writes no
+# `weight`/`kind` judgement, so there is no reason to gate it on quota SAFE;
+# backlog visibility should keep working even during a WIND DOWN. Judging
+# stays a dispatched, reviewable lane via `--load` -- this step never calls
+# it, under any conditions (#721's decision, not reopened here). Escalation
+# reuses `send_takeover_alarm` (defined just above) rather than inventing a
+# second escalation idiom, the same reuse this file's other tick-level
+# incidents (quota/live/stale-target below) already share.
+CORPUS_STAGE_SCRIPT="${CORPUS_STAGE_SCRIPT:-$HERE/corpus-stage.sh}"
+if [ -x "$CORPUS_STAGE_SCRIPT" ]; then
+  corpus_stdout_file="$STATE/.corpus-stage.tick-stdout.$$"
+  corpus_stderr_file="$STATE/.corpus-stage.tick-stderr.$$"
+  mkdir -p "$STATE" 2>/dev/null || true
+  "$CORPUS_STAGE_SCRIPT" >"$corpus_stdout_file" 2>"$corpus_stderr_file"
+  corpus_rc=$?
+  while IFS= read -r line; do log "$line"; done <"$corpus_stderr_file"
+  corpus_metrics=$(cat "$corpus_stdout_file")
+  rm -f "$corpus_stdout_file" "$corpus_stderr_file"
+  log "corpus-stage metrics: $corpus_metrics"
+  case "$corpus_rc" in
+    0) ;;
+    1)
+      send_takeover_alarm "director-loop: prompt corpus backlog crossed loud-absence threshold (#735)" \
+        "The unjudged prompt-corpus backlog crossed its threshold this tick ($corpus_metrics). Dispatch a judging lane: the current batch is already staged at $STATE/corpus-stage.json for it to read directly (itemize_prompts.py --extract's output, no re-derivation needed) -- judge it and run itemize_prompts.py --load, never from this loop. See agent-supervisor#721/#735 for how the threshold was measured."
+      ;;
+    *)
+      send_takeover_alarm "director-loop: corpus staging failed (#735)" \
+        "itemize_prompts.py --extract failed this tick (rc=$corpus_rc) via corpus-stage.sh -- see the log above for its diagnostic output. This is an instrument failure, not an empty backlog; do not read silence here as 'nothing unjudged'."
+      ;;
+  esac
+else
+  log "corpus-stage: $CORPUS_STAGE_SCRIPT not found or not executable -- skipping this tick's staging step"
+fi
+
 # --- quota gate. Fail closed on anything that is not a definite SAFE.
 # agent-supervisor#474: capture the gate's own diagnostic output instead of
 # discarding it -- it names which samples timed out vs answered "unknown"
