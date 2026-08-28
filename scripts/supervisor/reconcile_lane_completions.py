@@ -150,6 +150,7 @@ import re
 import subprocess
 
 from core import CLAIM_TASK_PREFIX, pid_is_alive
+from verdict import GithubReviewVerdictSource
 
 # Mirrors agent-supervisor#401's own acceptance script's grep exactly, so a
 # specimen this finds is a specimen that script would also flag.
@@ -160,6 +161,15 @@ _PR_URL_RE = re.compile(r'https://github\.com/[^\s",]+/pull/[0-9]+')
 # after `run_detached` returns -- the only place this sweep can learn the
 # pid of the subprocess it is about to judge.
 _DISPATCHED_PID_RE = re.compile(r"dispatched detached: task=\S+ lane=\S+ pid=(\d+)")
+
+# agent-supervisor#774 half B: `source_tasks.source_url` for a `--pr`/
+# `--reviews-pr`-scoped dispatch (`source_kind='pull'`) is minted by
+# `cli_dispatch_record.py` as exactly this shape -- see that module's own
+# `source_url = f"https://github.com/{github}/pull/{pr}"` line. Anchored
+# full-match (not `_PR_URL_RE`'s bare substring search above), because this
+# is read back FROM a column this same system wrote, not scraped out of
+# free-form prose.
+_PULL_SOURCE_URL_RE = re.compile(r"https://github\.com/(?P<repo>[^/\s]+/[^/\s]+)/pull/(?P<number>[0-9]+)")
 
 DEFAULT_IDLE_AFTER_SECONDS = 300
 # agent-supervisor#374: deliberately much longer than DEFAULT_IDLE_AFTER_SECONDS.
@@ -199,6 +209,7 @@ class LaneCompletionReconciler:
         ledger,
         runner=None,
         lanes_bin="lanes.sh",
+        gh_bin="gh",
         idle_after=DEFAULT_IDLE_AFTER_SECONDS,
         stale_after=DEFAULT_STALE_AFTER_SECONDS,
         clock=None,
@@ -206,6 +217,10 @@ class LaneCompletionReconciler:
         self.ledger = ledger
         self.runner = runner or subprocess_runner
         self.lanes_bin = lanes_bin
+        # agent-supervisor#774 half B: same `gh_bin` convention
+        # `reconcile_sources.py`'s `SourceTaskReconciler` already uses --
+        # one env-configurable binary name, not a second hardcoded "gh".
+        self.gh_bin = gh_bin
         self.idle_after = idle_after
         self.stale_after = stale_after
         self.clock = clock or ledger.clock
@@ -314,6 +329,28 @@ class LaneCompletionReconciler:
             except Exception as error:
                 report["errors"].append({"session": session, "error": str(error)})
                 for task, _index in entries:
+                    # agent-supervisor#774 half B: the session itself is
+                    # gone (e.g. the pre-#739 `agent-supervisor:N` session,
+                    # renamed away) -- there is no pane left to observe, so
+                    # this can never resolve `complete` from pane state. A
+                    # REVIEWER task stuck in exactly this shape can still be
+                    # settled from real merge/verdict evidence instead (see
+                    # `_reviewer_task_merge_evidence`'s own docstring) --
+                    # tried before falling back to unresolved, never in
+                    # place of the error being reported above.
+                    pr_url = self._reviewer_task_merge_evidence(task)
+                    if pr_url is not None:
+                        self._complete_from_evidence(
+                            task,
+                            pr_url=pr_url,
+                            now=now,
+                            report=report,
+                            evidence_description=(
+                                f"its own review of {pr_url} was approved under this exact "
+                                "lane's Review-Lane: trailer and that PR is confirmed MERGED"
+                            ),
+                        )
+                        continue
                     report["unresolved"].append(task["id"])
                 continue
 
@@ -346,6 +383,70 @@ class LaneCompletionReconciler:
             report["errors"].append({"task": task["id"], "error": str(error)})
             return
         report["completed"].append(task["id"])
+
+    def _reviewer_task_merge_evidence(self, task):
+        """agent-supervisor#774 half B: `_lane_log_pr_url`'s counterpart for
+        a REVIEWER task, not an author task. Three real tasks
+        (`ae680-ae680-rev765`, `ae767-ae767-rev769`, `ae761-ae761-rev770`)
+        were left stuck `delivered` forever by the `by_session` loop below:
+        their recorded lane names the pre-rename tmux session
+        `agent-supervisor:N`, which no longer exists after #739's session
+        move, so `_fetch_session_lanes` correctly raises and the whole
+        session's rows fall to `unresolved` -- correctly, since a session
+        that cannot be read is not evidence of anything BY ITSELF. But
+        unlike `_lane_log_pr_url`'s author-task shape (#401: "did this lane
+        open a PR"), a review task never opens anything -- it reviews
+        someone else's PR and posts a `Verdict:`/`Review-Lane:` comment on
+        it -- so the evidence this checks is different in kind, not just in
+        source: three independent, checkable facts, never an inference from
+        idleness (this sweep's central rule, restated in its own module
+        docstring).
+
+        1. This task's own `source_tasks` row (`Ledger.get_source_task`,
+           written once at dispatch time by `cli_dispatch_record.py` for a
+           `--reviews-pr`-scoped dispatch) is a REVIEW of a real PR --
+           `source_kind='pull'` AND `is_review=1`, never inferred from the
+           task id or brief text.
+        2. That PR's OPERATIVE verdict, resolved through `verdict.py`'s own
+           already-tested `GithubReviewVerdictSource` (no second regex over
+           `Verdict:`/`Review-Lane:` lines -- `merge-pr.sh`'s own gate reads
+           through the exact same class), is `approved`, AND is attributed
+           (`reviewer_lane`) to precisely THIS task's own lane -- a verdict
+           posted by some other reviewer settles nothing about whether
+           *this* task's work happened.
+        3. That PR is independently confirmed MERGED via a live `gh pr
+           view`, not inferred from the verdict alone -- an APPROVE can be
+           posted and the PR still sit open.
+
+        Returns the PR's URL (the same shape `_complete_from_evidence`'s
+        note already expects) when all three hold; `None` the moment any
+        one of them does not -- a `gh`/network failure, a PR that is not
+        this task's own review, a verdict from a different lane, or a PR
+        that is approved but not yet merged are all `None`, never guessed
+        into a completion.
+        """
+        source = self.ledger.get_source_task(task["id"])
+        if source is None or source.get("source_kind") != "pull" or source.get("is_review") != 1:
+            return None
+        match = _PULL_SOURCE_URL_RE.fullmatch(source.get("source_url") or "")
+        if match is None:
+            return None
+        repo, number = match.group("repo"), match.group("number")
+        verdict_source = GithubReviewVerdictSource(runner=self.runner, ledger=self.ledger)
+        try:
+            result = verdict_source.verdict(repo=repo, number=int(number))
+        except Exception:
+            return None
+        if result.get("verdict") != "approved" or result.get("reviewer_lane") != task["lane"]:
+            return None
+        try:
+            raw = self.runner([self.gh_bin, "pr", "view", number, "--repo", repo, "--json", "state,url"])
+            payload = json.loads(raw)
+        except Exception:
+            return None
+        if payload.get("state") != "MERGED":
+            return None
+        return payload.get("url") or source["source_url"]
 
     def _lane_log_pr_url(self, task_id):
         """agent-supervisor#401: the cheap evidence check -- does this
@@ -463,7 +564,7 @@ class LaneCompletionReconciler:
             return True
         return False
 
-    def _complete_from_evidence(self, task, *, pr_url, now, report):
+    def _complete_from_evidence(self, task, *, pr_url, now, report, evidence_description=None):
         """agent-supervisor#401: the lane never signalled, but its own
         lane-log names a PR it opened -- cheap evidence available at stamp
         time that settles what neither `_fail_unaccepted` nor
@@ -471,13 +572,26 @@ class LaneCompletionReconciler:
         (via the ordinary `complete()` path, so the note lands at the
         canonical `<task_id>.md`) instead of stamping a failure the
         evidence already contradicts.
+
+        `evidence_description` overrides the default "its lane-log names"
+        phrasing below -- agent-supervisor#774 half B's reviewer-task path
+        (`_reviewer_task_merge_evidence`) settles this from a REVIEW's own
+        merge/verdict evidence, never a lane-log, and the note text must
+        say so rather than claim a lane-log match that never happened.
         """
+        if evidence_description is None:
+            evidence_description = f"its lane-log names {pr_url}"
+            evidence_kind = "lane-log PR evidence"
+            issue_ref = "agent-supervisor#401"
+        else:
+            evidence_kind = "review/merge evidence"
+            issue_ref = "agent-supervisor#774"
         note = (
             f"reconcile-lane-completions: {task['lane']} never signalled completion, "
-            f"but its lane-log names {pr_url} as of {int(now)} -- cheap evidence "
+            f"but {evidence_description} as of {int(now)} -- cheap evidence "
             "available at stamp time settles this before a failure is stamped: "
-            "auto-completed from lane-log PR evidence, not from an observed pane "
-            "(agent-supervisor#401)"
+            f"auto-completed from {evidence_kind}, not from an observed pane "
+            f"({issue_ref})"
         ).encode("utf-8")
         allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
         try:

@@ -35,6 +35,49 @@ class FakeLanesRunner:
         return json.dumps(rows)
 
 
+class FakeReviewerGhRunner:
+    """agent-supervisor#774 half B: answers `lanes.sh --json <session>`
+    (always raising -- the stuck shape this test class exercises is a
+    session that no longer exists at all, e.g. the pre-#739
+    `agent-supervisor:N` session) and `gh pr view <number> ...` calls from
+    an in-memory per-PR-number map, so `_reviewer_task_merge_evidence`'s two
+    real `gh` reads (the verdict source's reviews/comments read, and this
+    sweep's own merge-state read) can be tested without a live GitHub call.
+    """
+
+    def __init__(self, prs):
+        # prs: {number: {"reviews": [...], "comments": [...], "commits": [...], "state": "MERGED"|"OPEN"}}
+        self.prs = prs
+        self.calls = []
+
+    def __call__(self, command):
+        self.calls.append(command)
+        if command[0] != "gh":
+            raise RuntimeError(f"lanes.sh unavailable for session {command[-1]}")
+        number = command[3]
+        pr = self.prs.get(number)
+        if pr is None:
+            raise RuntimeError(f"no such PR {number}")
+        json_fields = command[-1]
+        if json_fields == "reviews,comments,author,commits":
+            return json.dumps(
+                {
+                    "reviews": pr.get("reviews", []),
+                    "comments": pr.get("comments", []),
+                    "author": pr.get("author", {}),
+                    "commits": pr.get("commits", []),
+                }
+            )
+        if json_fields == "state,url":
+            return json.dumps(
+                {
+                    "state": pr.get("state", "OPEN"),
+                    "url": pr.get("url", f"https://github.com/jonhill90/agent-estate/pull/{number}"),
+                }
+            )
+        raise RuntimeError(f"unexpected gh --json fields: {json_fields}")
+
+
 class LaneCompletionReconcilerTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -329,6 +372,131 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         self.assertIn("as155-observed-completion", report["unresolved"])
         self.assertEqual(1, len(report["errors"]))
         self.assertEqual("agent-supervisor", report["errors"][0]["session"])
+
+    def dispatch_review(self, task_id, *, lane, pr_number, repo="jonhill90/agent-estate"):
+        """Records one REVIEW dispatch (`dispatch.sh --reviews-pr`) the way
+        `cli_dispatch_record.py` actually shapes it: `source_kind='pull'`,
+        `is_review=1`, `source_url` naming the PR being reviewed -- the
+        exact `ae680-ae680-rev765`/`ae767-ae767-rev769`/`ae761-ae761-rev770`
+        shape (agent-supervisor#774 half B), never the issue-scoped shape
+        `dispatch()` above uses."""
+        return self.ledger.record_dispatch(
+            lane=lane, pane_id="%9", nonce=f"nonce-{task_id}", harness="claude",
+            repo="/repo/agent-estate", server_id="server-a", session_id="$9", command="claude",
+            task_id=task_id, source_kind="pull",
+            source_url=f"https://github.com/{repo}/pull/{pr_number}",
+            source_ref=str(pr_number), summary=f"reviews PR #{pr_number}", source_state="OPEN",
+            evidence=[f"claimed by dispatch.sh for lane {lane}", f"pr: {pr_number}"],
+            status_marker=None, is_review=1,
+        )
+
+    def test_stuck_reviewer_task_with_merged_pr_and_matching_verdict_completes(self):
+        """agent-supervisor#774 half B: the exact live shape --
+        `ae680-ae680-rev765`/`ae767-ae767-rev769`/`ae761-ae761-rev770` --
+        a review task whose lane names a tmux session gone after #739's
+        rename, so `lanes.sh --json` for it raises outright. Real evidence
+        (this lane's own posted Verdict: APPROVE, and the PR it names
+        confirmed MERGED) must complete the task instead of leaving it
+        `unresolved` forever."""
+        self.dispatch_review("ae680-ae680-rev765", lane="agent-supervisor:2", pr_number=765)
+        verdict_comment = {
+            "body": "Verdict: APPROVE\nReview-Lane: agent-supervisor:2\nReviewed-SHA: " + "a" * 40,
+            "author": {"login": "jonhill90"},
+            "createdAt": "2026-08-28T15:00:00Z",
+        }
+        runner = FakeReviewerGhRunner(
+            {"765": {"comments": [verdict_comment], "state": "MERGED", "url": "https://github.com/jonhill90/agent-estate/pull/765"}}
+        )
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, idle_after=300).sweep()
+
+        task = self.ledger.get_task("ae680-ae680-rev765")
+        self.assertEqual("complete", task["status"])
+        self.assertEqual(["ae680-ae680-rev765"], report["completed"])
+        self.assertEqual(["ae680-ae680-rev765"], report["completed_from_evidence"])
+        self.assertEqual([], report["unresolved"])
+        result_bytes = Path(task["result_path"]).read_bytes()
+        self.assertIn(b"pull/765", result_bytes)
+        self.assertIn(b"agent-supervisor:2", result_bytes)
+
+    def test_reviewer_task_with_no_verdict_comment_and_open_pr_stays_unresolved(self):
+        """Mutation, direction 1: the PR this task reviewed is still OPEN
+        and carries no verdict comment at all -- the synthetic
+        no-merge-evidence specimen the brief requires. Must NOT be
+        completed; must fall through to the ordinary session-error
+        `unresolved` outcome, same as before this fix existed."""
+        self.dispatch_review("ae999-ae999-rev999", lane="agent-supervisor:5", pr_number=999)
+        runner = FakeReviewerGhRunner({"999": {"comments": [], "state": "OPEN"}})
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, idle_after=300).sweep()
+
+        task = self.ledger.get_task("ae999-ae999-rev999")
+        self.assertEqual("delivered", task["status"])
+        self.assertEqual([], report["completed"])
+        self.assertIn("ae999-ae999-rev999", report["unresolved"])
+        self.assertEqual(1, len(report["errors"]))
+
+    def test_reviewer_task_with_approved_verdict_but_pr_still_open_stays_unresolved(self):
+        """Mutation, direction 2: a real, matching Verdict: APPROVE exists,
+        but the PR it names has not actually merged yet -- an APPROVE is
+        not the same fact as a merge, and this path must check both
+        independently rather than inferring one from the other."""
+        self.dispatch_review("ae998-ae998-rev998", lane="agent-supervisor:6", pr_number=998)
+        verdict_comment = {
+            "body": "Verdict: APPROVE\nReview-Lane: agent-supervisor:6\nReviewed-SHA: " + "b" * 40,
+            "author": {"login": "jonhill90"},
+            "createdAt": "2026-08-28T15:00:00Z",
+        }
+        runner = FakeReviewerGhRunner({"998": {"comments": [verdict_comment], "state": "OPEN"}})
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, idle_after=300).sweep()
+
+        task = self.ledger.get_task("ae998-ae998-rev998")
+        self.assertEqual("delivered", task["status"])
+        self.assertEqual([], report["completed"])
+        self.assertIn("ae998-ae998-rev998", report["unresolved"])
+
+    def test_reviewer_task_with_verdict_from_a_different_lane_stays_unresolved(self):
+        """Mutation, direction 3: the PR is merged and carries a real
+        Verdict: APPROVE, but it was posted under a DIFFERENT lane's
+        Review-Lane: trailer -- someone else reviewed it, or reviewed it
+        under a name this task does not own. Must not be read as evidence
+        this TASK's own work happened."""
+        self.dispatch_review("ae997-ae997-rev997", lane="agent-supervisor:7", pr_number=997)
+        verdict_comment = {
+            "body": "Verdict: APPROVE\nReview-Lane: agent-supervisor:9\nReviewed-SHA: " + "c" * 40,
+            "author": {"login": "jonhill90"},
+            "createdAt": "2026-08-28T15:00:00Z",
+        }
+        runner = FakeReviewerGhRunner(
+            {"997": {"comments": [verdict_comment], "state": "MERGED", "url": "https://github.com/jonhill90/agent-estate/pull/997"}}
+        )
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, idle_after=300).sweep()
+
+        task = self.ledger.get_task("ae997-ae997-rev997")
+        self.assertEqual("delivered", task["status"])
+        self.assertEqual([], report["completed"])
+        self.assertIn("ae997-ae997-rev997", report["unresolved"])
+
+    def test_issue_scoped_task_with_dead_session_is_never_treated_as_a_reviewer_task(self):
+        """An ordinary AUTHOR (issue-scoped) task stuck behind the same
+        dead-session shape must not be routed through the reviewer-evidence
+        path at all -- `source_kind='issue'` (or no `is_review`) short-
+        circuits `_reviewer_task_merge_evidence` to `None` before any `gh`
+        call is even attempted."""
+        self.dispatch("as155-observed-completion", lane="agent-supervisor:8")
+        runner = FakeReviewerGhRunner({})
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, idle_after=300).sweep()
+
+        task = self.ledger.get_task("as155-observed-completion")
+        self.assertEqual("delivered", task["status"])
+        self.assertIn("as155-observed-completion", report["unresolved"])
+        # one failed `lanes.sh --json` attempt, and nothing else -- no `gh`
+        # call was ever made for a non-review task.
+        gh_calls = [call for call in runner.calls if call[0] == "gh"]
+        self.assertEqual(0, len(gh_calls))
 
     def test_lane_missing_from_the_session_answer_is_left_unresolved(self):
         """The window this task's lane names is not in `lanes.sh`'s answer at
