@@ -85,9 +85,12 @@ and it is longer and more specific than this line.
   refused rather than guessed
 - `count-agents.sh` — counts real Claude agent SESSIONS by `ps`'s `comm`
   field, not `pgrep -f claude` substring matching (#663/#678/#681, the fixed
-  pid-padding bug). **As of this commit its own header still says "nothing
-  wires this in yet"** — it is not yet called from `host-pressure.sh`; check
-  its header before assuming the host guard uses it.
+  pid-padding bug). **Now wired into `host-pressure.sh`'s session gate**
+  (landed 2026-08-28 by `7990313`, "fix(supervisor): wire count-agents.sh
+  into host-pressure.sh's session gate (#663) (#766)") — `host-pressure.sh`
+  calls it directly at its session count check (`grep -n count-agents
+  scripts/supervisor/host-pressure.sh`, line 189); it is no longer the case
+  that nothing calls it.
 - `quota.sh` — the quota floor gate; nothing else may call `codexbar` directly
 - `lane-done.sh` — rename a lane back to `free-N` on worker completion
 - `lane-retire.sh` — administrative retirement: unregister and restore the
@@ -250,7 +253,7 @@ outside it entirely):
   not by reading a diff
 - `refresh_brief_resume.py` — regenerate a brief's `## Resume point` block
 
-`tests/supervisor/` — 279 tracked files (`git ls-files tests/supervisor | wc
+`tests/supervisor/` — 301 tracked files (`git ls-files tests/supervisor | wc
 -l`, checked at write time; re-run, don't trust this number stale): the suite
 is the contract. `python3 -m unittest discover -s tests/supervisor` has not
 reliably finished inside one working session's time budget; run a targeted
@@ -395,9 +398,11 @@ absent.** Before reporting "none", "empty", "never" or "not called":
 binary attached.** After building anything protective, ask both *what calls it?*
 and *is that caller something that survives the failure it guards against?* A
 cleanup invoked from the crashing process is wired to the one thing that will not
-be running. (`count-agents.sh`, in the index above, is a live instance of the
-first question right now — it exists, it is tested, and as of this commit
-nothing calls it.)
+be running. (`count-agents.sh`, in the index above, was a live instance of the
+first question — it existed, it was tested, and for a time nothing called
+it, until `host-pressure.sh` was wired to call it directly (#663/#766,
+2026-08-28; see the index entry above) — check whether a case like this is
+still unresolved before citing it as a fresh example.)
 
 **An abstraction can be present and correctly avoided.** Routing around a seam
 looks identical to nobody having wired it up. Check whether the avoidance is
@@ -665,11 +670,12 @@ go test ./...
 
 All three verified green on `main` `6942926` (29 packages with tests,
 `cmd/estate`, `internal/sshserver`, and the `tools/` spikes have none).
-**Stale as of `390c99a`, re-measured 2026-08-23 (`find . -name '*_test.go'`):**
-`cmd/estate` now has five `_test.go` files (`ledger_copy_test.go`,
-`cost_test.go`, `docs_test.go`, `secrets_test.go`, `supervisor_test.go`) and
-`tools/memoryvariants/spike` has one (`main_test.go`); only
-`internal/sshserver` still genuinely has none. CI
+**Stale as of `390c99a`, re-measured 2026-08-23 (`find . -name '*_test.go'`),
+re-measured again 2026-08-28 (`git ls-files 'tui/cmd/estate/*_test.go'`):**
+`cmd/estate` now has seven `_test.go` files (`chat_test.go`,
+`cost_test.go`, `docs_test.go`, `ledger_copy_test.go`, `secrets_test.go`,
+`skills_test.go`, `supervisor_test.go`) and `tools/memoryvariants/spike` has
+one (`main_test.go`); only `internal/sshserver` still genuinely has none. CI
 (`.github/workflows/*.yml`) runs the same three
 commands on `ubuntu-latest`, Go 1.26, plus a fourth check gated on a live
 `agent-supervisor` checkout: `internal/lane/states_lanessh_test.go`
