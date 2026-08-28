@@ -171,6 +171,16 @@ NOISE_MARKERS = (
     ("I'm answering on Jon's behalf", "agent explicitly relaying, not Jon"),
     ("Hill90 lane supervisor.", "Hill90 loop-tick template"),
     ("Hill90 sweep. Jon is", "Hill90 loop-tick template"),
+    # agent-estate#755: same "That file is your complete brief." contract
+    # line above, word-order variant -- the director-tick brief-pointer
+    # shape ("Your complete brief is /private/tmp/director-NNN.md -- read
+    # it and decide") missed the existing marker on word order alone.
+    # Interim relief only; see #755 for why the general "tick-loop status
+    # sent to the Director" case needs write-time provenance, not a marker.
+    ("Your complete brief is", "director-tick brief pointer (word-order variant of the dispatch-brief contract line)"),
+    # adapter.py:550's exact liveness-probe text (`start_session`), sent
+    # verbatim to confirm a freshly-dispatched pane is alive -- never typed.
+    ("Reply with exactly the single word: ready.", "liveness probe (adapter.py start_session)"),
 )
 
 

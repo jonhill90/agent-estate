@@ -241,5 +241,45 @@ class SyntheticProvenanceTests(unittest.TestCase):
         self.assertEqual((0, 0), second)
 
 
+class NoiseMarkersTests(unittest.TestCase):
+    """agent-estate#755: the two mechanical markers added for the director-tick
+    brief-pointer and liveness-probe shapes, plus the exact near-miss #755
+    measured (the existing "That file is your complete brief." marker missing
+    the word-order variant) -- pinned so neither marker regresses silently."""
+
+    def test_director_tick_brief_pointer_is_caught(self):
+        text = (
+            "Director decision required. Your complete brief is "
+            "/private/tmp/director-750-tick.md — read it and decide, then "
+            "record the decision on #750 and act on it."
+        )
+        self.assertIsNotNone(itemize_prompts.noise_reason(text))
+
+    def test_liveness_probe_is_caught(self):
+        self.assertIsNotNone(
+            itemize_prompts.noise_reason("Reply with exactly the single word: ready.")
+        )
+
+    def test_a_real_status_report_to_the_director_is_not_caught(self):
+        # #755's own example of the general case this fix does NOT attempt --
+        # a tick-loop status send with no structural marker. Must stay None:
+        # a false positive here is the silently-discarded-directive failure
+        # the whole corpus exists to prevent, not a false negative to fix here.
+        text = (
+            "#748 cannot get a reviewer: resolve_pr_contributors returns "
+            "AUTHOR_LANES=[] and CONTRIBUTORS_RESOLVED empty -- branch "
+            "fix/hvecore-path-747b, task none, no dispatched issue behind it."
+        )
+        self.assertIsNone(itemize_prompts.noise_reason(text))
+
+    def test_pre_755_word_order_did_not_match_the_existing_marker(self):
+        # Regression pin for the near-miss itself: the ORIGINAL marker
+        # ("That file is your complete brief.") alone must not match the
+        # director-tick shape -- if it ever does, #755's own measurement
+        # (mechanically verified, not assumed) was wrong.
+        director_tick_text = "Your complete brief is /private/tmp/x.md — read it and decide"
+        self.assertNotIn("That file is your complete brief.", director_tick_text)
+
+
 if __name__ == "__main__":
     unittest.main()
