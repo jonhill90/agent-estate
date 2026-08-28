@@ -9,13 +9,21 @@ import (
 	"testing"
 )
 
+// repoRoot resolves to this package's own scan root, not the git toplevel.
+// Before agent-estate#744's Step 2c merge, this package's git toplevel WAS
+// its scan root -- agent-tui was its own repository. Post-merge, `git
+// rev-parse --show-toplevel` resolves to the merged agent-estate root, one
+// level above where this package (and the testdata this guard has always
+// scanned) actually lives. Anchoring at "<toplevel>/tui" restores the exact
+// pre-merge scope: same manifest, same allowlist, same tracked-file set,
+// just resolved from underneath a directory this package didn't have before.
 func repoRoot(t *testing.T) string {
 	t.Helper()
 	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
 	if err != nil {
 		t.Fatalf("git rev-parse --show-toplevel: %v", err)
 	}
-	return strings.TrimSpace(string(out))
+	return filepath.Join(strings.TrimSpace(string(out)), "tui")
 }
 
 // TestBareIssueReferencesResolveInThisRepository is the actual guard: every
