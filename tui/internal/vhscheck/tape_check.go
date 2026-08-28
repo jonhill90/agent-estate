@@ -126,3 +126,169 @@ func MissingCmdDirs(repoRoot string, refs []Reference) []Reference {
 	}
 	return missing
 }
+
+// agent-estate#754: twelve tapes hardcoded
+// `${AGENT_SUPERVISOR_REPO:-$HOME/source/repos/Personal/agent-supervisor}`
+// -- a literal filesystem path outside the cmdRefPattern's scope entirely,
+// so it went stale the day that directory was renamed to agent-estate and
+// nothing above caught it. This is the same failure SHAPE as agent-tui#132
+// (a hardcoded reference to a path that doesn't exist) on a DIFFERENT kind
+// of line -- an `export VAR=${VAR:-default}` default, not a `go build`
+// target -- so it needs its own scan and its own existence check rather
+// than a widened cmdRefPattern.
+
+// exportPattern matches a `Type "export VAR=${VAR:-default}" Enter` line
+// and captures the variable name and its literal default text. Anchored to
+// this exact `${VAR:-...}` shape -- the one every tape in this repo
+// actually uses (`git grep -n 'Type "export' testdata/vhs` confirms it,
+// same way cmdRefPattern's own comment justifies its anchor) -- rather than
+// any bare `export` occurrence, so a comment mentioning "export" in prose
+// is never mistaken for a live dependency.
+var exportPattern = regexp.MustCompile(`Type "export ([A-Za-z_][A-Za-z0-9_]*)=\$\{[A-Za-z_][A-Za-z0-9_]*:-([^}]*)\}" Enter`)
+
+// PathExport is one `export VAR=${VAR:-default}` line whose default is a
+// literal filesystem path -- as opposed to a derived one, see IsDerived.
+type PathExport struct {
+	TapePath string // repo-relative, e.g. "vhs/agents.tape"
+	VarName  string // e.g. "AGENT_SUPERVISOR_REPO"
+	Default  string // the raw default text, e.g. "$HOME/source/repos/Personal/hill90-app"
+	Line     int    // 1-based line number
+}
+
+// IsDerived reports whether Default is computed by the shell (contains
+// `$(`) rather than written as a literal path. A derived default -- the
+// fix agent-estate#754 applied, deriving AGENT_SUPERVISOR_REPO from `git
+// rev-parse --show-toplevel` instead of a hardcoded sibling-checkout path
+// -- has nothing static to check: its value depends on where vhs is run
+// from, which is exactly the "much larger and flakier surface" this
+// package's own header says it stays out of. Only literal defaults are
+// checkable without running a shell.
+func (p PathExport) IsDerived() bool {
+	return strings.Contains(p.Default, "$(")
+}
+
+// looksLikeAPath reports whether a default value is shaped like a
+// filesystem path at all, so a default like "8080" or "true" (a plausible
+// shape for some future non-path export) is never scanned as one. A
+// derived (`$(...)`) default counts too -- it is still a path-shaped
+// export, just not a checkable one; ScanExportedPaths returns it and
+// MissingExportedPaths is the one that skips it via IsDerived, so a
+// caller inspecting ScanExportedPaths's own output can still see it.
+func looksLikeAPath(s string) bool {
+	return strings.HasPrefix(s, "/") || strings.HasPrefix(s, "$HOME") || strings.HasPrefix(s, "~") || strings.HasPrefix(s, "./") || strings.HasPrefix(s, "../") || strings.Contains(s, "$(")
+}
+
+// ScanExportedPaths walks every `.tape` file directly under tapesDir (and
+// its subdirectories) and returns every `export VAR=${VAR:-default}` line
+// whose default is shaped like a literal filesystem path, in the same
+// stable order ScanTapes uses. A derived default (IsDerived) is still
+// returned -- callers that only care about checkable literals filter on
+// IsDerived themselves, the same way MissingExportedPaths does.
+func ScanExportedPaths(tapesDir string) ([]PathExport, error) {
+	var exports []PathExport
+	err := filepath.WalkDir(tapesDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || !strings.HasSuffix(path, ".tape") {
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		relPath, err := filepath.Rel(filepath.Dir(tapesDir), path)
+		if err != nil {
+			relPath = path
+		}
+		for i, line := range strings.Split(string(data), "\n") {
+			if !strings.Contains(line, "Type \"export") {
+				continue
+			}
+			m := exportPattern.FindStringSubmatch(line)
+			if m == nil {
+				continue
+			}
+			def := strings.TrimSpace(m[2])
+			if !looksLikeAPath(def) {
+				continue
+			}
+			exports = append(exports, PathExport{TapePath: relPath, VarName: m[1], Default: def, Line: i + 1})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	sort.Slice(exports, func(i, j int) bool {
+		if exports[i].TapePath != exports[j].TapePath {
+			return exports[i].TapePath < exports[j].TapePath
+		}
+		return exports[i].Line < exports[j].Line
+	})
+	return exports, nil
+}
+
+// resolvePathExport turns a PathExport's literal Default into an absolute
+// path, resolving a `$HOME`/`~` prefix against home (the caller's own
+// os.UserHomeDir(), passed in rather than read here so a test never
+// depends on the machine actually running it) and a bare relative path
+// against repoRoot -- the same "resolve against a known root, never guess"
+// shape MissingCmdDirs already uses for cmd/<name>.
+func resolvePathExport(repoRoot, home, def string) string {
+	switch {
+	case strings.HasPrefix(def, "$HOME"):
+		return filepath.Join(home, strings.TrimPrefix(def, "$HOME"))
+	case strings.HasPrefix(def, "~"):
+		return filepath.Join(home, strings.TrimPrefix(def, "~"))
+	case filepath.IsAbs(def):
+		return def
+	default:
+		return filepath.Join(repoRoot, def)
+	}
+}
+
+// MissingExportedPaths returns every literal PathExport in exports whose
+// resolved Default does not exist on disk, skipping:
+//
+//   - derived defaults (IsDerived) -- nothing static to check, see its doc
+//   - any VarName present in optionalVars -- a named, explicit allowlist,
+//     not a guess (Invariant 6's own "whitelist, not a guess" applied
+//     here): HILL90_APP_REPO is the one live case, and it belongs on this
+//     list on the evidence of its own downstream code, not by assumption --
+//     internal/apidocs.resolveOpenAPISpec and internal/secrets.
+//     resolveSecretsSchema both have their own tests
+//     (TestResolveOpenAPISpecKeepsAWrongRepoPath-shaped) proving an absent
+//     or wrong HILL90_APP_REPO is a supported, rendered "not configured"
+//     state, not a hard failure the way a stale AGENT_SUPERVISOR_REPO is
+//     (a wrong mcp_server.py path fails the whole session, not one pane).
+//     CI's own tui-ci.yml confirms the same asymmetry operationally: it
+//     sets AGENT_SUPERVISOR_REPO explicitly and never sets HILL90_APP_REPO
+//     at all, so hill90-app's default is *expected* to be absent there.
+//     A future optional sibling-repo export earns the same exemption by
+//     being added here explicitly, with the same kind of citation --
+//     never by widening looksLikeAPath or resolvePathExport to stop seeing
+//     it.
+//
+// home is the resolved value for a `$HOME`-prefixed default; pass "" if it
+// could not be determined (os.UserHomeDir() failing) and every such export
+// is skipped rather than falsely flagged -- "could not measure" is a real
+// outcome here, not a guess.
+func MissingExportedPaths(repoRoot, home string, exports []PathExport, optionalVars map[string]bool) []PathExport {
+	var missing []PathExport
+	for _, exp := range exports {
+		if exp.IsDerived() || optionalVars[exp.VarName] {
+			continue
+		}
+		if strings.HasPrefix(exp.Default, "$HOME") || strings.HasPrefix(exp.Default, "~") {
+			if home == "" {
+				continue
+			}
+		}
+		resolved := resolvePathExport(repoRoot, home, exp.Default)
+		if info, err := os.Stat(resolved); err != nil || !info.IsDir() {
+			missing = append(missing, exp)
+		}
+	}
+	return missing
+}

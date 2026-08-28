@@ -127,6 +127,107 @@ func TestACommentedGoBuildLineIsStillAReference(t *testing.T) {
 	}
 }
 
+// --- agent-estate#754: exported filesystem paths, not just cmd/ targets --
+
+func TestMissingExportedPathsFlagsATapeExportingAMissingPath(t *testing.T) {
+	root := writeFixtureRepo(t, map[string]string{
+		"broken-export.tape": "Hide\n" +
+			`Type "export FOO=${FOO:-./scripts/does-not-exist}" Enter` + "\n" +
+			"Show\n",
+	}, nil)
+
+	exports, err := ScanExportedPaths(filepath.Join(root, "testdata", "vhs"))
+	if err != nil {
+		t.Fatalf("ScanExportedPaths: %v", err)
+	}
+	if len(exports) != 1 || exports[0].VarName != "FOO" {
+		t.Fatalf("ScanExportedPaths found %+v, want one FOO export", exports)
+	}
+
+	missing := MissingExportedPaths(root, "", exports, nil)
+	if len(missing) != 1 {
+		t.Fatalf("MissingExportedPaths = %+v, want exactly one missing export (proves the guard by construction, not by reading it)", missing)
+	}
+	t.Logf("changed line: %s:%d %q", missing[0].TapePath, missing[0].Line, `Type "export FOO=${FOO:-./scripts/does-not-exist}" Enter`)
+}
+
+func TestMissingExportedPathsPassesATapeExportingARealPath(t *testing.T) {
+	root := writeFixtureRepo(t, map[string]string{
+		"good-export.tape": "Hide\n" +
+			`Type "export FOO=${FOO:-./cmd/realthing}" Enter` + "\n" +
+			"Show\n",
+	}, []string{"realthing"})
+	if err := os.MkdirAll(filepath.Join(root, "cmd", "realthing"), 0o755); err != nil {
+		t.Fatalf("mkdir cmd/realthing: %v", err)
+	}
+
+	exports, err := ScanExportedPaths(filepath.Join(root, "testdata", "vhs"))
+	if err != nil {
+		t.Fatalf("ScanExportedPaths: %v", err)
+	}
+
+	missing := MissingExportedPaths(root, "", exports, nil)
+	if len(missing) != 0 {
+		t.Fatalf("MissingExportedPaths = %+v, want none -- an export pointing at a real directory must pass", missing)
+	}
+	t.Logf("reverted line still passes: %s:%d %q", exports[0].TapePath, exports[0].Line, `Type "export FOO=${FOO:-./cmd/realthing}" Enter`)
+}
+
+func TestMissingExportedPathsSkipsADerivedDefault(t *testing.T) {
+	// The exact shape agent-estate#754 repointed AGENT_SUPERVISOR_REPO to:
+	// a `$(...)` command substitution has nothing static to check, and
+	// must never be flagged just because the literal text isn't a path
+	// that exists on disk.
+	root := writeFixtureRepo(t, map[string]string{
+		"derived.tape": "Hide\n" +
+			`Type "export AGENT_SUPERVISOR_REPO=${AGENT_SUPERVISOR_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}" Enter` + "\n" +
+			"Show\n",
+	}, nil)
+
+	exports, err := ScanExportedPaths(filepath.Join(root, "testdata", "vhs"))
+	if err != nil {
+		t.Fatalf("ScanExportedPaths: %v", err)
+	}
+	if len(exports) != 1 || !exports[0].IsDerived() {
+		t.Fatalf("ScanExportedPaths found %+v, want one derived AGENT_SUPERVISOR_REPO export", exports)
+	}
+
+	missing := MissingExportedPaths(root, "", exports, nil)
+	if len(missing) != 0 {
+		t.Fatalf("MissingExportedPaths = %+v, want none -- a derived default is out of scope for existence-checking", missing)
+	}
+}
+
+func TestMissingExportedPathsSkipsAnOptionalVar(t *testing.T) {
+	// HILL90_APP_REPO's own shape in this repo today: a literal $HOME
+	// default pointing at a sibling checkout that is genuinely absent in
+	// CI (tui-ci.yml never sets it) and whose own downstream code
+	// (internal/apidocs, internal/secrets) already treats absence as a
+	// supported "not configured" state. The named allowlist is what keeps
+	// that legitimate case from being flagged alongside a genuine
+	// regression.
+	root := writeFixtureRepo(t, map[string]string{
+		"optional.tape": "Hide\n" +
+			`Type "export HILL90_APP_REPO=${HILL90_APP_REPO:-$HOME/source/repos/Personal/hill90-app}" Enter` + "\n" +
+			"Show\n",
+	}, nil)
+
+	exports, err := ScanExportedPaths(filepath.Join(root, "testdata", "vhs"))
+	if err != nil {
+		t.Fatalf("ScanExportedPaths: %v", err)
+	}
+	if len(exports) != 1 || exports[0].VarName != "HILL90_APP_REPO" {
+		t.Fatalf("ScanExportedPaths found %+v, want one HILL90_APP_REPO export", exports)
+	}
+
+	// No home dir supplied and the allowlist names the var -- either alone
+	// would suppress the flag; both apply here, matching the real check.
+	missing := MissingExportedPaths(root, "/nonexistent-home", exports, map[string]bool{"HILL90_APP_REPO": true})
+	if len(missing) != 0 {
+		t.Fatalf("MissingExportedPaths = %+v, want none -- HILL90_APP_REPO is an explicit, documented exemption", missing)
+	}
+}
+
 // --- the real repo: this is the guard that actually runs in CI ---------
 
 func TestNoTapeReferencesAMissingCmdDirectory(t *testing.T) {
@@ -151,5 +252,45 @@ func TestNoTapeReferencesAMissingCmdDirectory(t *testing.T) {
 	for _, m := range missing {
 		t.Errorf("%s:%d references %s, which does not exist -- go build inside this tape fails silently, producing no screenshot (agent-tui#130/agent-tui#132)",
 			m.TapePath, m.Line, m.CmdDir())
+	}
+}
+
+// optionalTapeExportVars is the named, explicit exemption list
+// MissingExportedPaths's own doc comment requires -- see there for why
+// HILL90_APP_REPO belongs on it. Add a new entry only with the same kind
+// of citation, never by widening ScanExportedPaths/resolvePathExport to
+// stop seeing a var instead.
+var optionalTapeExportVars = map[string]bool{
+	"HILL90_APP_REPO": true,
+}
+
+func TestNoTapeExportsAMissingFilesystemPath(t *testing.T) {
+	repoRoot, err := filepath.Abs(filepath.Join("..", ".."))
+	if err != nil {
+		t.Fatalf("resolve repo root: %v", err)
+	}
+	tapesDir := filepath.Join(repoRoot, "testdata", "vhs")
+	if _, err := os.Stat(tapesDir); err != nil {
+		t.Fatalf("testdata/vhs not found at %s: %v", tapesDir, err)
+	}
+
+	exports, err := ScanExportedPaths(tapesDir)
+	if err != nil {
+		t.Fatalf("ScanExportedPaths: %v", err)
+	}
+	if len(exports) == 0 {
+		t.Fatal("ScanExportedPaths found zero exported-path lines across every .tape file -- almost certainly a scan bug, not reality (this repo's tapes export AGENT_SUPERVISOR_REPO throughout)")
+	}
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Logf("os.UserHomeDir failed (%v) -- every $HOME-prefixed export is skipped this run, not falsely flagged", err)
+		home = ""
+	}
+
+	missing := MissingExportedPaths(repoRoot, home, exports, optionalTapeExportVars)
+	for _, m := range missing {
+		t.Errorf("%s:%d exports %s=%s, which does not exist -- agent-estate#754's own failure shape, a hardcoded host path going stale on the next rename",
+			m.TapePath, m.Line, m.VarName, m.Default)
 	}
 }
