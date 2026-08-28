@@ -157,6 +157,9 @@ mv /Users/jon/source/repos/Personal/agent-supervisor \
 cd /Users/jon/source/repos/Personal/agent-estate
 git remote set-url origin https://github.com/jonhill90/agent-estate.git
 git worktree repair
+# THEN, separately -- see the measured finding below, this bare call alone
+# does not fix .worktrees/-internal worktrees:
+git worktree repair .worktrees/*
 ```
 
 **Verify:**
@@ -168,14 +171,43 @@ git -C /Users/jon/source/repos/Personal/agent-estate/.worktrees/<any-live-one> s
 # confirm at least one linked worktree still functions post-repair
 ```
 
-**Could not measure**: whether `git worktree repair` alone is sufficient for
-every worktree this repo currently has (30+ at last count, several under
-`/tmp`, `.claude/worktrees/`, and `agent-supervisor-worktrees/` — a sibling
-directory name that itself still says the old name and should probably be
-renamed too, out of scope for this runbook to enumerate exhaustively). **Do
-a dry run**: rename in a throwaway copy of the checkout first, run
-`git worktree repair`, and confirm every worktree in `git worktree list`
-resolves before doing this against the live checkout.
+**Measured 2026-08-28 (agent-supervisor#682), replacing the prior "could not
+measure"**: bare `git worktree repair` (no arguments -- the command above,
+as this runbook wrote it until now) is **not sufficient** at this repo's
+real scale. Built a throwaway origin+checkout mirroring the live shape (21
+internal `.worktrees/`-style + 107 external absolute-back-pointer
+worktrees, matching agent-supervisor's real registered count; repeated at
+agent-tui's 4+28 shape), renamed the checkout directory exactly as this
+step does, and ran the bare command:
+
+```
+before=129 after=129 prunable=21 not_found=21 status_fail=5 repair_rc=0
+```
+
+Every one of the 21 internal worktrees came back `prunable`, with `git
+status` failing `fatal: cannot change to '.../checkout/.worktrees/wt-N':
+No such file or directory` -- `git worktree list` was still printing the
+PRE-rename path. This is not a bug in `git worktree repair`, it is
+documented, narrower behavior than the bare invocation implies: per `git
+help worktree`, a moved MAIN worktree only reconnects LINKED worktrees
+automatically when neither side needs its own path corrected; a linked
+worktree that itself moved (which every `.worktrees/*` entry did here, as
+a side effect of the parent directory rename) needs its **new path passed
+explicitly** — `git worktree repair <path>...` — or `repair` run from
+inside that worktree. Re-running with `.worktrees/*` passed explicitly, at
+the same 129-worktree scale:
+
+```
+before=129 after=129 prunable=0 not_found=0 status_fail=0 repair_rc=0
+```
+
+Zero prunable, zero not-found, `git status` verified correct on a sample of
+both internal and external worktrees. The 107 EXTERNAL worktrees needed no
+extra argument in either run — they didn't move (only the main checkout
+did), so the bare call's automatic linked-worktree reconnection already
+covers them; only the internal ones require the explicit-path form. This is
+why the command above is now two calls, not one — the second is the actual
+fix this measurement found, not a defensive extra step.
 
 **Rollback:** `mv` the directory back, `git remote set-url origin
 https://github.com/jonhill90/agent-supervisor.git`, `git worktree repair`

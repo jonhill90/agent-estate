@@ -260,10 +260,26 @@ answers which question"), with ancestry kept as the cheap yes.
 
 Measured on the live checkout, 2026-08-11: 70 worktree-held branches, 26
 ancestors (what `gc` reached before), and 12 more whose content is already on
-`origin/main` — 38 reachable. The 32 it still refuses include 17 with a
-MERGED PR whose files `main` has since changed again: merged, then superseded.
-No local check can tell that apart from unmerged work, so `gc` leaves them.
-Converging is not emptying.
+`origin/main` — 38 reachable. The 32 it still refused included 17 with a
+MERGED PR whose files `main` had since changed again: merged, then superseded.
+No local check could tell that apart from unmerged work, so `gc` left them.
+
+**agent-supervisor#682 closed the "merged, then superseded" gap**: when the
+scoped-diff content check says no, `gc` now asks whether the branch has a
+MERGED PR on GitHub as a second, independent signal (`gh pr list`, batched
+once per run — the same query shape `branch-sweep.sh`'s own cross-check
+uses) — reachable with `--no-github` to skip it. Measured on the live
+`agent-supervisor` checkout, 2026-08-28: the content check alone (no scope
+change) still reached only 1 of 131 registered worktrees, same order of
+magnitude as before. `gc` was also, separately, scoped only to
+`$REPO/.worktrees/` by default (#530) — most of this repo's own dispatched
+lane worktrees actually live outside it, under
+`${WORKTREE_ROOT:-${TMPDIR:-/tmp}}/ad-<slug>-<pid>` (`new`'s own naming), so
+they were never reached by `gc` at all regardless of the content or PR
+check. `WORKTREE_GC_EXTRA_ROOTS` (unset by default, #682) opts a root into
+scope for candidates matching that exact naming — with it set to the real
+`$TMPDIR`, the same live sweep (still dry-run, still every other condition
+unchanged) reached 39 of 131. Converging is not emptying.
 
 `--dry-run` runs every check and prints what a real run would remove, without
 removing anything — the way to confirm the list against the live estate before

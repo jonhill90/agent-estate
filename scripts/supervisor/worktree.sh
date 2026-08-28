@@ -25,17 +25,27 @@
 #   worktree.sh new  <slug> [repo] [base]   create a worktree, print its path
 #   worktree.sh done <path>                 remove a worktree; refuses if dirty
 #   worktree.sh guard <repo>                exit 1 if <repo> itself is dirty
-#   worktree.sh gc [--dry-run] [repo] [base]
+#   worktree.sh gc [--dry-run] [--no-github] [repo] [base]
 #                                           remove every worktree whose
 #                                            branch's content is already on
-#                                            [base], whose tree is clean, and
-#                                            that is not LIVE -- no tmux pane
-#                                            or process references it, and it
-#                                            is older than
-#                                            $WORKTREE_GC_MIN_AGE_SECONDS
+#                                            [base] (or whose branch has a
+#                                            MERGED PR on record, #682 --
+#                                            skip that cross-check with
+#                                            --no-github), whose tree is
+#                                            clean, and that is not LIVE --
+#                                            no tmux pane or process
+#                                            references it, and it is older
+#                                            than $WORKTREE_GC_MIN_AGE_SECONDS
 #                                            (default 3600); --dry-run reports
 #                                            what it would remove and changes
-#                                            nothing
+#                                            nothing. Scoped to
+#                                            [repo]/.worktrees/ by default;
+#                                            $WORKTREE_GC_EXTRA_ROOTS (space-
+#                                            separated paths, unset by
+#                                            default) opts in additional
+#                                            roots for candidates matching
+#                                            `new`'s own ad-<slug>-<pid>
+#                                            naming (#682)
 #
 # [repo] defaults to the current directory; [base] defaults to origin/main.
 # <slug> becomes branch `lane/<slug>` -- pass the issue and a short reason,
@@ -363,6 +373,60 @@ branch_content_is_on_base() {
   # Empty output *and* a clean exit. Anything git could not answer is not an
   # answer of "merged".
   [ "$rc" -eq 0 ] && [ -z "$out" ]
+}
+
+# agent-supervisor#682: `branch_content_is_on_base`'s own comment above
+# documents its remaining gap by measurement, not guess -- of 44 non-
+# ancestor worktree-held branches counted 2026-08-11, 24 had a MERGED PR
+# and the scoped-diff test above reached only 7 of those. The other 17 are
+# "merged, then superseded": the squash landed, but a LATER commit on
+# <base> touched the same paths again, so the branch's own scoped diff
+# against <base> is no longer empty even though nothing on the branch is
+# unmerged work. Nothing local can tell that apart from a branch that was
+# never merged at all -- only the branch's own PR record can, which is
+# exactly the "second, deliberate, reviewed change" the comment above on
+# `branch_content_is_on_base` left open rather than folding in as a side
+# effect of an unrelated fix. This is that change, scoped to `gc`'s own
+# worktree-removal predicate only -- NOT wired into `worktree.sh new`'s
+# branch-reclaim check or anywhere else that deletes a REF rather than a
+# disposable checkout directory. `gc` already documents why that asymmetry
+# is safe: "gc removes worktrees, never branches. A wrong 'already merged'
+# verdict would free a tree, not delete a ref."
+#
+# `_gc_fetch_merged_prs` fetches the MERGED-PR head-ref set once per `gc`
+# run (never once per branch -- branch-sweep.sh already established this
+# batch-then-grep shape for the identical `gh pr list` call, reused here
+# rather than reinvented) and writes it to a temp file the caller manages;
+# `_gc_pr_merged_from_file` is the per-branch lookup against it. Both
+# no-op (return 1, "no second opinion available") when `gh` is missing,
+# there is no readable GitHub remote, or the caller passed `--no-github`
+# -- offline or unauthenticated must never read as "PR merged", only as
+# "this check could not run", so `gc` falls back to the content-only
+# answer it already had, never a looser one.
+_gc_fetch_merged_prs() {
+  local repo="$1" out_file="$2"
+  command -v gh >/dev/null 2>&1 || return 1
+  local slug
+  slug=$(git -C "$repo" remote get-url origin 2>/dev/null \
+         | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')
+  [ -n "$slug" ] || return 1
+  gh repo view "$slug" >/dev/null 2>&1 || return 1
+  # Same query shape as branch-sweep.sh's own GitHub cross-check
+  # (--state all + headRefName,state, filtered to MERGED locally) --
+  # reusing it rather than a second, differently-shaped `gh pr list` call
+  # means one query pattern to trust, and lets this share
+  # tests/supervisor/stubs-branch-sweep/gh's existing stub verbatim.
+  local raw
+  raw=$(gh pr list --repo "$slug" --state all --limit 4000 \
+          --json headRefName,state -q '.[] | [.headRefName,.state] | @tsv' 2>/dev/null) || return 1
+  awk -F'\t' '$2=="MERGED"{print $1}' <<<"$raw" | sort -u > "$out_file"
+  return 0
+}
+
+_gc_pr_merged_from_file() {
+  local merged_file="$1" b="$2"
+  [ -n "$merged_file" ] && [ -f "$merged_file" ] || return 1
+  grep -qxF "$b" "$merged_file"
 }
 
 # agent-supervisor#427: `refs/stash` is REPO-COMMON, not per-worktree -- every
@@ -752,9 +816,36 @@ done)
 gc)
   shift
   DRY=""
-  if [ "${1:-}" = "--dry-run" ]; then DRY=1; shift; fi
+  USE_GH=1
+  while :; do
+    case "${1:-}" in
+      --dry-run) DRY=1; shift ;;
+      # agent-supervisor#682: skip the `gh pr list` cross-check (offline,
+      # unauthenticated, or a test fixture with no real GitHub remote) --
+      # same flag name and meaning as branch-sweep.sh's own `--no-github`.
+      --no-github) USE_GH=""; shift ;;
+      *) break ;;
+    esac
+  done
   REPO="${1:-$PWD}"
   BASE="${2:-origin/main}"
+  # Fetched once per run, never once per candidate -- see
+  # `_gc_fetch_merged_prs`'s own comment for why this batches the same way
+  # branch-sweep.sh's identical `gh pr list` call already does. Empty
+  # string means "no second opinion this run" (gh missing, no GitHub
+  # remote, `gh pr list` itself failed, or --no-github) -- every caller of
+  # `_gc_pr_merged_from_file` already treats that as "check unavailable",
+  # never as "merged".
+  GH_MERGED_FILE=""
+  if [ -n "$USE_GH" ]; then
+    GH_MERGED_FILE=$(mktemp)
+    if ! _gc_fetch_merged_prs "$REPO" "$GH_MERGED_FILE"; then
+      rm -f "$GH_MERGED_FILE"
+      GH_MERGED_FILE=""
+      echo "worktree: gc proceeding without the GitHub merged-PR cross-check for $REPO (no gh, no readable remote, or gh pr list failed) -- squash-merged-then-superseded worktrees will not be reached this run (agent-supervisor#682)" >&2
+    fi
+  fi
+  trap '[ -n "$GH_MERGED_FILE" ] && rm -f "$GH_MERGED_FILE"' EXIT
   # The worktree gc is running from is nobody's garbage -- it is the caller's
   # own tree. `git worktree remove` refuses it anyway; refusing here says so
   # in gc's own words rather than as a git error.
@@ -774,6 +865,35 @@ gc)
   # /var -> /private/var) compares equal rather than failing the scope check
   # for a candidate that is genuinely inside .worktrees/.
   WORKTREES_ROOT_REAL=$(cd "$REPO/.worktrees" 2>/dev/null && pwd -P) || WORKTREES_ROOT_REAL=""
+  # agent-supervisor#682: `.worktrees/` is not where most of this estate's
+  # lane worktrees actually live. `new` (above) hands every dispatch a
+  # worktree under `${WORKTREE_ROOT:-${TMPDIR:-/tmp}}/ad-<slug>-<pid>` --
+  # NOT `$REPO/.worktrees/` -- so the scope filter above, left as an open
+  # question by #530 ("whether the two excluded path classes should ever
+  # be swept under some future design is explicitly left open, not decided
+  # here"), was quietly excluding the majority of this repo's own
+  # dispatched lane worktrees from `gc` entirely: measured against the
+  # live estate 2026-08-28, 120 of 130 registered non-main worktrees sat
+  # outside `.worktrees/`, and every one of them was skipped for that
+  # reason alone -- before liveness, age, or content were even checked.
+  #
+  # `WORKTREE_GC_EXTRA_ROOTS` (space-separated real or resolvable paths,
+  # unset by default -- no existing caller or test sets it, so default
+  # behavior is byte-for-byte unchanged) lets a caller opt a directory
+  # into scope. Even inside an opted-in root, a candidate must ALSO match
+  # `new`'s own naming shape (`ad-*-<digits>`, `$DEST`'s literal pattern
+  # above) before it is considered -- #530's own rejected example
+  # (`~/.local/state/estate-loop/review-524`, a DIFFERENT loop's state
+  # directory that happens to sit in a plausible root) is a name this
+  # pattern does not match, so pointing `WORKTREE_GC_EXTRA_ROOTS` at a
+  # broad temp root does not also sweep it in. This is a whitelist, not a
+  # widened default -- CLAUDE.md invariant 6 ("unknown means not offered,
+  # not broken").
+  EXTRA_ROOTS_REAL=()
+  for _extra_root in ${WORKTREE_GC_EXTRA_ROOTS:-}; do
+    _er_real=$(cd "$_extra_root" 2>/dev/null && pwd -P) || continue
+    EXTRA_ROOTS_REAL+=("$_er_real")
+  done
   # Parse `worktree list --porcelain`: records are blank-line separated,
   # each starting with `worktree <path>`, optionally followed by a
   # `branch refs/heads/<name>` line (absent for detached/bare entries).
@@ -833,8 +953,24 @@ gc)
         *) in_scope=0 ;;
       esac
     fi
+    # Opted-in extra roots (#682, see WORKTREE_GC_EXTRA_ROOTS's own comment
+    # above): only a candidate whose basename matches `new`'s own
+    # ad-<slug>-<pid> naming AND sits under one of the opted-in roots is
+    # brought into scope this way -- everything else stays excluded by the
+    # .worktrees/-only default, unchanged.
+    if [ "$in_scope" -eq 0 ] && [ "${#EXTRA_ROOTS_REAL[@]}" -gt 0 ]; then
+      case "$(basename "$p_real")" in
+        ad-*-[0-9]*)
+          for _er in "${EXTRA_ROOTS_REAL[@]}"; do
+            case "$p_real" in
+              "$_er"|"$_er"/*) in_scope=1; break ;;
+            esac
+          done
+          ;;
+      esac
+    fi
     if [ "$in_scope" -eq 0 ]; then
-      echo "worktree: gc skipping $p -- outside $REPO/.worktrees/ (scoped to .worktrees/ -- sweeping outside it is a separate decision, not made here)" >&2
+      echo "worktree: gc skipping $p -- outside $REPO/.worktrees/ and not opted into scope via WORKTREE_GC_EXTRA_ROOTS (sweeping outside .worktrees/ by default is a separate decision, not made here)" >&2
       skipped=$((skipped + 1))
       continue
     fi
@@ -847,16 +983,27 @@ gc)
       skipped=$((skipped + 1))
       continue
     fi
-    if ! branch_content_is_on_base "$REPO" "$b" "$BASE"; then
-      echo "worktree: gc skipping $p -- $BASE does not already contain branch '$b'" >&2
+    why=""
+    if branch_content_is_on_base "$REPO" "$b" "$BASE"; then
+      why="its content is already on $BASE"
+    elif _gc_pr_merged_from_file "$GH_MERGED_FILE" "$b"; then
+      # agent-supervisor#682: content check said no (base has moved past
+      # what the branch touched -- "merged, then superseded"), but a
+      # MERGED PR for this exact branch name is on record. The worktree
+      # holds nothing unmerged; its content landed and was later built on
+      # top of, which the scoped-diff test alone cannot distinguish from
+      # unmerged work.
+      why="its branch has a MERGED PR on GitHub even though $BASE has since diverged from its scoped diff (agent-supervisor#682)"
+    else
+      echo "worktree: gc skipping $p -- $BASE does not already contain branch '$b', and no MERGED PR is on record for it" >&2
       skipped=$((skipped + 1))
       continue
     fi
     if safe_remove "$p" "$DRY"; then
       if [ -n "$DRY" ]; then
-        echo "worktree: gc would remove $p (branch '$b' -- its content is already on $BASE)" >&2
+        echo "worktree: gc would remove $p (branch '$b' -- $why)" >&2
       else
-        echo "worktree: gc removed $p (branch '$b' -- its content is already on $BASE)" >&2
+        echo "worktree: gc removed $p (branch '$b' -- $why)" >&2
       fi
       removed=$((removed + 1))
     else
