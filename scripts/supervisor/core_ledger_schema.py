@@ -1029,6 +1029,59 @@ class LedgerSchemaMixin:
                 )
                 self._fail(failpoint, "after_add_is_review_column")
 
+    def _migrate_prompts_pane_columns(self, *, failpoint=None):
+        """Add `prompts.tmux_pane`/`prompts.tmux_pane_target`, agent-supervisor#755
+        part B.
+
+        WHY. `prompt_capture_hook.py` fires in whatever pane submitted the
+        prompt, but until this migration nothing recorded WHICH pane that
+        was -- a tick-loop status report landing in the Director's own pane
+        had no structural marker at all, unlike a dispatch brief's fixed
+        boilerplate (`itemize_prompts.NOISE_MARKERS`). `tmux_pane` is the
+        raw `$TMUX_PANE` value the hook's own process environment carried
+        (e.g. `%22`), or NULL when the submitting process had no pane at all
+        (a `claude-print`/`pi-rpc` lane, or an interactive terminal outside
+        tmux). `tmux_pane_target` is that pane resolved to `session:window`
+        via `tmux display-message -p -t "$TMUX_PANE"
+        '#{session_name}:#{window_index}'` at capture time -- the exact
+        format and invariant-10-safe `-t`-qualified call every other
+        `*-self.sh` tool in this tree already uses (`lane-whoami.sh`,
+        `register-lane-self.sh`), never a bare `display-message`. NULL when
+        `tmux_pane` is NULL, or when the pane could not be read back (a
+        dead pane, tmux not running).
+
+        Both columns are a CANDIDATE signal only, same posture as
+        `synthetic_provenance_reason` (#652): `itemize_prompts.py`'s own
+        `director_pane_reason` is the consumer, and it routes a match to
+        `needs_review`, never straight to `dropped` -- resolving a pane
+        target tells you WHICH window submitted a prompt, not that Jon
+        never attaches to that window and types into it by hand.
+
+        Same `ADD COLUMN` shape as `_migrate_source_tasks_review_column`
+        just above (nullable, no rebuild needed) rather than the
+        drop-and-recreate `_migrate_lanes_table`/`_migrate_tasks_table` use
+        -- neither column carries a CHECK that widens, so there is nothing
+        here that `ADD COLUMN` cannot represent directly."""
+        with self._locked():
+            with contextlib.closing(self._connect()) as probe:
+                existing = probe.execute(
+                    "SELECT sql FROM sqlite_master WHERE type='table' AND name='prompts'"
+                ).fetchone()
+                if existing is None:
+                    return
+                columns = {row["name"] for row in probe.execute("PRAGMA table_info(prompts)").fetchall()}
+                if "tmux_pane" in columns and "tmux_pane_target" in columns:
+                    return
+            with self._transaction() as connection:
+                if "tmux_pane" not in columns:
+                    self._fail(failpoint, "before_add_tmux_pane_column")
+                    connection.execute("ALTER TABLE prompts ADD COLUMN tmux_pane TEXT")
+                    self._fail(failpoint, "after_add_tmux_pane_column")
+                if "tmux_pane_target" not in columns:
+                    self._fail(failpoint, "before_add_tmux_pane_target_column")
+                    connection.execute("ALTER TABLE prompts ADD COLUMN tmux_pane_target TEXT")
+                    self._fail(failpoint, "after_add_tmux_pane_target_column")
+
     ONE_OPEN_PULL_PER_SOURCE_REF = "one_open_pull_per_source_ref"
 
     @classmethod

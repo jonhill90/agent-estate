@@ -106,6 +106,118 @@ class CaptureUnitTests(unittest.TestCase):
             connection.close()
 
 
+class ResolveTmuxPaneTests(unittest.TestCase):
+    """agent-supervisor#755 part B: `_resolve_tmux_pane` never blocks or
+    raises, and never guesses when `$TMUX_PANE` is unset."""
+
+    def setUp(self):
+        self._saved_env = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._saved_env)))
+
+    def test_no_tmux_pane_env_returns_none_none(self):
+        os.environ.pop("TMUX_PANE", None)
+        self.assertEqual((None, None), prompt_capture_hook._resolve_tmux_pane())
+
+    def test_resolves_via_a_fake_tmux_binary_on_path(self):
+        """A fake `tmux` on PATH stands in for the real binary, proving the
+        call shape (`display-message -p -t "$TMUX_PANE" '#{session_name}:
+        #{window_index}'`, never a bare `display-message` -- invariant 10)
+        without depending on a real tmux server existing in this test
+        environment."""
+        with tempfile.TemporaryDirectory() as bindir:
+            fake_tmux = Path(bindir) / "tmux"
+            fake_tmux.write_text(
+                "#!/bin/sh\n"
+                'if [ "$1" = "display-message" ] && [ "$2" = "-p" ] && [ "$3" = "-t" ] && [ "$4" = "%22" ]; then\n'
+                '  echo "estate:1"\n'
+                "  exit 0\n"
+                "fi\n"
+                "exit 1\n"
+            )
+            fake_tmux.chmod(0o755)
+            os.environ["TMUX_PANE"] = "%22"
+            os.environ["TMUX_BIN"] = str(fake_tmux)
+            import importlib
+            importlib.reload(prompt_capture_hook)
+            try:
+                self.assertEqual(("%22", "estate:1"), prompt_capture_hook._resolve_tmux_pane())
+            finally:
+                os.environ.pop("TMUX_BIN", None)
+                importlib.reload(prompt_capture_hook)
+
+    def test_tmux_pane_set_but_unresolvable_keeps_raw_value_only(self):
+        """A pane that no longer exists (closed between submit and hook
+        execution) must not silently invent a target -- and must not raise
+        or hang either."""
+        with tempfile.TemporaryDirectory() as bindir:
+            fake_tmux = Path(bindir) / "tmux"
+            fake_tmux.write_text("#!/bin/sh\nexit 1\n")
+            fake_tmux.chmod(0o755)
+            os.environ["TMUX_PANE"] = "%99"
+            os.environ["TMUX_BIN"] = str(fake_tmux)
+            import importlib
+            importlib.reload(prompt_capture_hook)
+            try:
+                self.assertEqual(("%99", None), prompt_capture_hook._resolve_tmux_pane())
+            finally:
+                os.environ.pop("TMUX_BIN", None)
+                importlib.reload(prompt_capture_hook)
+
+    def test_missing_tmux_binary_fails_open_not_raise(self):
+        os.environ["TMUX_PANE"] = "%1"
+        os.environ["TMUX_BIN"] = "/no/such/tmux/binary/anywhere"
+        import importlib
+        importlib.reload(prompt_capture_hook)
+        try:
+            self.assertEqual(("%1", None), prompt_capture_hook._resolve_tmux_pane())
+        finally:
+            os.environ.pop("TMUX_BIN", None)
+            importlib.reload(prompt_capture_hook)
+
+
+class CaptureWritesPaneColumnsTests(unittest.TestCase):
+    """`capture()` end to end: the resolved pane identity actually reaches
+    the `prompts` row, and a pane-less submission records NULL rather than
+    a guess."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.ledger = Ledger(self.tempdir.name)
+        self._saved_env = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._saved_env)))
+
+    def test_capture_records_resolved_pane_target(self):
+        with tempfile.TemporaryDirectory() as bindir:
+            fake_tmux = Path(bindir) / "tmux"
+            fake_tmux.write_text("#!/bin/sh\necho 'estate:1'\nexit 0\n")
+            fake_tmux.chmod(0o755)
+            os.environ["TMUX_PANE"] = "%22"
+            os.environ["TMUX_BIN"] = str(fake_tmux)
+            import importlib
+            importlib.reload(prompt_capture_hook)
+            try:
+                prompt_capture_hook.capture(
+                    {"session_id": "s1", "prompt": "Director decision required. brief at /tmp/x.md"},
+                    self.ledger,
+                )
+            finally:
+                os.environ.pop("TMUX_BIN", None)
+                importlib.reload(prompt_capture_hook)
+        rows = self.ledger.list_unitemised_prompts()
+        self.assertEqual(1, len(rows))
+        self.assertEqual("%22", rows[0]["tmux_pane"])
+        self.assertEqual("estate:1", rows[0]["tmux_pane_target"])
+
+    def test_capture_with_no_tmux_pane_records_null(self):
+        os.environ.pop("TMUX_PANE", None)
+        prompt_capture_hook.capture({"session_id": "s1", "prompt": "a claude-print lane's own turn"}, self.ledger)
+        rows = self.ledger.list_unitemised_prompts()
+        self.assertEqual(1, len(rows))
+        self.assertIsNone(rows[0]["tmux_pane"])
+        self.assertIsNone(rows[0]["tmux_pane_target"])
+
+
 class CaptureHealthViewTests(unittest.TestCase):
     """agent-supervisor#687: the staleness signal itself."""
 

@@ -22,8 +22,18 @@ class LedgerCorpusMixin:
     # updates that column again, which is what makes "raw wins on conflict"
     # true by construction rather than by convention alone.
 
-    def record_prompt(self, prompt_id, *, at, text_raw, context, text_clean=None, session=None, source_file=None):
-        """Write one prompt row. `text_raw` is set once, here, and never again."""
+    def record_prompt(self, prompt_id, *, at, text_raw, context, text_clean=None, session=None, source_file=None,
+                       tmux_pane=None, tmux_pane_target=None):
+        """Write one prompt row. `text_raw` is set once, here, and never again.
+
+        `tmux_pane`/`tmux_pane_target` (agent-supervisor#755 part B): which
+        pane, if any, submitted this prompt -- the raw `$TMUX_PANE` value
+        the capturing process saw, and that pane resolved to `session:window`
+        at capture time. Both NULL for a prompt captured with no pane (no
+        tmux at all, or a `claude-print`/`pi-rpc` lane) -- never guessed or
+        backfilled after the fact, same as every other column here. See
+        `core_ledger_schema.py`'s `_migrate_prompts_pane_columns` for why
+        these are a candidate signal only, never proof on their own."""
         if not prompt_id or not isinstance(prompt_id, str):
             raise ValueError("prompt_id is required")
         if not text_raw or not isinstance(text_raw, str):
@@ -33,10 +43,12 @@ class LedgerCorpusMixin:
         with self._locked(), self._transaction() as connection:
             connection.execute(
                 """
-                INSERT INTO prompts(id, at, text_raw, text_clean, context, session, source_file)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO prompts(id, at, text_raw, text_clean, context, session, source_file,
+                                     tmux_pane, tmux_pane_target)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
-                (prompt_id, int(at), text_raw, text_clean, context, session, source_file),
+                (prompt_id, int(at), text_raw, text_clean, context, session, source_file,
+                 tmux_pane, tmux_pane_target),
             )
             row = connection.execute("SELECT * FROM prompts WHERE id=?", (prompt_id,)).fetchone()
         return self._dict(row)
@@ -154,7 +166,7 @@ class LedgerCorpusMixin:
         re-judges body/kind/weight, only whether an item that predates the
         filter should have been dropped."""
         sql = """
-            SELECT i.*, p.context AS prompt_context
+            SELECT i.*, p.context AS prompt_context, p.tmux_pane_target AS prompt_tmux_pane_target
             FROM items i JOIN prompts p ON p.id = i.prompt_id
             WHERE i.status = 'open'
             ORDER BY p.at

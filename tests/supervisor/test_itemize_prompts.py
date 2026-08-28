@@ -1,3 +1,4 @@
+import os
 import sys
 import tempfile
 import unittest
@@ -237,6 +238,178 @@ class SyntheticProvenanceTests(unittest.TestCase):
         self.ledger.add_item("it-1", prompt_id="p1", kind="directive", body="b", weight="hard")
         first = itemize_prompts.reclassify_synthetic(self.ledger)
         second = itemize_prompts.reclassify_synthetic(self.ledger)
+        self.assertEqual((1, 0), first)
+        self.assertEqual((0, 0), second)
+
+
+class DirectorPaneReasonTests(unittest.TestCase):
+    """agent-supervisor#755 part B: pane identity (`prompts.tmux_pane_target`)
+    is a CANDIDATE signal, same discipline as `synthetic_provenance_reason`
+    (#652) -- a match must never itself decide `dropped`."""
+
+    def setUp(self):
+        self._saved_env = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._saved_env)))
+        os.environ.pop("AGENT_SUPERVISOR_MACHINE_PANES", None)
+
+    def test_no_pane_target_is_not_a_match(self):
+        self.assertIsNone(itemize_prompts.director_pane_reason(None))
+        self.assertIsNone(itemize_prompts.director_pane_reason(""))
+
+    def test_unconfigured_allowlist_matches_nothing(self):
+        """Mutation direction 1: with no allowlist configured, EVERY pane
+        target -- including the Director's own -- must be left alone rather
+        than guessed at. This is the fail-safe direction: no configuration
+        means no candidate signal, never an assumed one."""
+        self.assertIsNone(itemize_prompts.director_pane_reason("estate:1"))
+
+    def test_configured_target_via_env_is_a_candidate(self):
+        os.environ["AGENT_SUPERVISOR_MACHINE_PANES"] = "estate:1,agent-supervisor:3"
+        reason = itemize_prompts.director_pane_reason("estate:1")
+        self.assertIsNotNone(reason)
+        self.assertIn("755", reason)
+        self.assertIn("estate:1", reason)
+
+    def test_configured_target_via_explicit_known_targets_arg(self):
+        reason = itemize_prompts.director_pane_reason("estate:1", known_targets={"estate:1"})
+        self.assertIsNotNone(reason)
+
+    def test_pane_target_not_in_allowlist_is_kept(self):
+        """Mutation direction 2: a real Jon session, captured from an
+        ordinary (non-estate) terminal pane, must never match even when an
+        allowlist IS configured -- proving this keys on exact identity, not
+        on 'any pane target present'."""
+        os.environ["AGENT_SUPERVISOR_MACHINE_PANES"] = "estate:1"
+        self.assertIsNone(itemize_prompts.director_pane_reason("mytmux:0"))
+
+
+class DropNoiseDirectorPaneTests(unittest.TestCase):
+    """agent-supervisor#755 part B: `drop_noise` routes a director-pane
+    match to `needs_review`, never `dropped` -- and a genuine Jon prompt
+    captured from an ordinary terminal is never touched by this check."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ledger = Ledger(self.tmp.name, clock=lambda: 1_000)
+        self._saved_env = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._saved_env)))
+        os.environ["AGENT_SUPERVISOR_MACHINE_PANES"] = "estate:1"
+
+    def test_prompt_from_known_machine_pane_is_flagged_needs_review_not_dropped(self):
+        self.ledger.record_prompt(
+            "p1", at=1_000, context="ctx", text_raw="#748 cannot get a reviewer -- diagnosed on the PR",
+            tmux_pane="%22", tmux_pane_target="estate:1",
+        )
+        dropped, needs_review, kept = itemize_prompts.drop_noise(self.ledger)
+        self.assertEqual((0, 1, 0), (dropped, needs_review, kept))
+        self.assertEqual([], self.ledger.read_prompt_view("unacknowledged"))
+        self.assertEqual(1, len(self.ledger.read_prompt_view("needs_review")))
+
+    def test_mutation_a_genuine_jon_prompt_from_an_ordinary_terminal_is_never_misclassified(self):
+        """The exact failure this whole corpus exists to prevent (#755's own
+        non-negotiable): a real Jon directive, typed at an ordinary terminal
+        outside tmux entirely (`tmux_pane_target` is NULL, the common case
+        for an interactive Claude Code session run directly in a shell), must
+        survive `drop_noise` untouched and reach `unacknowledged`/`extract`."""
+        self.ledger.record_prompt(
+            "p1", at=1_000, context="deciding what to build next",
+            text_raw="scrap that approach, use the ledger's own session table instead",
+            tmux_pane=None, tmux_pane_target=None,
+        )
+        dropped, needs_review, kept = itemize_prompts.drop_noise(self.ledger)
+        self.assertEqual((0, 0, 1), (dropped, needs_review, kept))
+        rows = itemize_prompts.extract(self.ledger)
+        self.assertEqual(["p1"], [row["id"] for row in rows])
+
+    def test_mutation_b_a_different_estate_managed_pane_not_in_the_allowlist_is_kept(self):
+        """A pane resolved successfully, but to a target NOT on the
+        configured allowlist (e.g. a plain interactive tmux session Jon
+        opened himself, `mytmux:0`), must be kept -- proving this checks
+        exact configured identity, not merely 'was there a resolvable
+        pane'."""
+        self.ledger.record_prompt(
+            "p1", at=1_000, context="ctx", text_raw="yes, ship it",
+            tmux_pane="%5", tmux_pane_target="mytmux:0",
+        )
+        dropped, needs_review, kept = itemize_prompts.drop_noise(self.ledger)
+        self.assertEqual((0, 0, 1), (dropped, needs_review, kept))
+
+    def test_needs_review_item_carries_the_755_reason(self):
+        self.ledger.record_prompt(
+            "p1", at=1_000, context="ctx", text_raw="Director decision required. brief at /tmp/x.md",
+            tmux_pane_target="estate:1",
+        )
+        itemize_prompts.drop_noise(self.ledger)
+        item = self.ledger.get_item(itemize_prompts._item_id(
+            "p1", 0, f"noise:{itemize_prompts.director_pane_reason('estate:1', known_targets={'estate:1'})}"))
+        self.assertIsNotNone(item)
+        self.assertEqual("needs_review", item["status"])
+        self.assertIn("755", item["status_reason"])
+
+    def test_drop_noise_on_director_pane_prompt_is_idempotent(self):
+        self.ledger.record_prompt(
+            "p1", at=1_000, context="ctx", text_raw="Director decision required.",
+            tmux_pane_target="estate:1",
+        )
+        first = itemize_prompts.drop_noise(self.ledger)
+        second = itemize_prompts.drop_noise(self.ledger)
+        self.assertEqual((0, 1, 0), first)
+        self.assertEqual((0, 0, 0), second)
+
+
+class ReclassifyDirectorPaneTests(unittest.TestCase):
+    """agent-supervisor#755 part B: corrects already-itemised OPEN items
+    whose prompt predates this check, same shape as `reclassify_synthetic`
+    (#583/#652)."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.ledger = Ledger(self.tmp.name, clock=lambda: 1_000)
+        self._saved_env = dict(os.environ)
+        self.addCleanup(lambda: (os.environ.clear(), os.environ.update(self._saved_env)))
+        os.environ["AGENT_SUPERVISOR_MACHINE_PANES"] = "estate:1"
+
+    def test_reclassify_flags_an_already_itemised_open_item_for_review(self):
+        self.ledger.record_prompt(
+            "p1", at=1_000, context="ctx", text_raw="Decision required on the PR you authored.",
+            tmux_pane_target="estate:1",
+        )
+        self.ledger.add_item(
+            "it-preexisting", prompt_id="p1", kind="directive",
+            body="Decision required on the PR you authored.", weight="hard",
+        )
+        reclassified, kept = itemize_prompts.reclassify_director_pane(self.ledger)
+        self.assertEqual((1, 0), (reclassified, kept))
+        item = self.ledger.get_item("it-preexisting")
+        self.assertEqual("needs_review", item["status"])
+        self.assertIn("755", item["status_reason"])
+        # Judgement fields are untouched -- only status/status_reason changed.
+        self.assertEqual("directive", item["kind"])
+        self.assertEqual("hard", item["weight"])
+
+    def test_reclassify_leaves_a_real_open_item_from_an_ordinary_terminal_alone(self):
+        self.ledger.record_prompt(
+            "p2", at=2_000, context="ctx", text_raw="use the ledger's own session table",
+            tmux_pane_target=None,
+        )
+        self.ledger.add_item(
+            "it-real", prompt_id="p2", kind="directive",
+            body="use the ledger's own session table", weight="hard",
+        )
+        reclassified, kept = itemize_prompts.reclassify_director_pane(self.ledger)
+        self.assertEqual((0, 1), (reclassified, kept))
+        self.assertEqual("open", self.ledger.get_item("it-real")["status"])
+
+    def test_reclassify_is_idempotent(self):
+        self.ledger.record_prompt(
+            "p1", at=1_000, context="ctx", text_raw="Director decision required.",
+            tmux_pane_target="estate:1",
+        )
+        self.ledger.add_item("it-1", prompt_id="p1", kind="directive", body="b", weight="hard")
+        first = itemize_prompts.reclassify_director_pane(self.ledger)
+        second = itemize_prompts.reclassify_director_pane(self.ledger)
         self.assertEqual((1, 0), first)
         self.assertEqual((0, 0), second)
 
