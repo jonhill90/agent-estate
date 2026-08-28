@@ -5,11 +5,12 @@
 // was first called agent-tui, which named the rendering technology
 // (Bubble Tea, "tui") rather than the product; agent-tui#42 then named the
 // product "steading" in prose only, deliberately without touching this
-// binary or the module path (a ship's keelson binds its frames to the
-// keel -- the layer above orchestration, binding the panes into one
-// structure, which is what the leftover name had described since
-// agent-tui#38); the product is now called the Estate, and this rename
-// finally moves the module path, cmd/ directory, and binary to match.
+// binary or the module path. The product is now the Estate -- a steading
+// is a single farmstead, but this is the whole working holding (rail,
+// board, cost, gallery, memory, chat, workflows), which "Estate" names
+// more accurately -- and this rename finally moves the module path,
+// cmd/ directory, and binary to match (see AGENTS.md's naming note for
+// the full history).
 //
 // It reads the supervisor's MCP surface -- "sessions" (agent-tui#13, every
 // tmux session grouped) for the rail, "lanes" (one session) for -board --

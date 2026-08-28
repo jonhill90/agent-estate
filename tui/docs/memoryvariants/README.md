@@ -79,16 +79,18 @@ nothing (the pan-vs-drag distinction Hill90's own canvas enforces), and
 release lets go cleanly:
 
 ```
-$ go test ./tools/memoryvariants/... -v
+$ go test ./tools/memoryvariants/spike/... -v
 === RUN   TestDragSequenceMovesGrabbedNode
 --- PASS: TestDragSequenceMovesGrabbedNode (0.00s)
 === RUN   TestMotionWithoutPressDoesNotGrab
 --- PASS: TestMotionWithoutPressDoesNotGrab (0.00s)
 PASS
-ok  	github.com/jonhill90/keelson/tools/memoryvariants/spike	0.643s
+ok  	github.com/jonhill90/agent-tui/tools/memoryvariants/spike	0.204s
 ```
 
-(Verbatim historical output — the module path was `github.com/jonhill90/keelson` at the time this was run; it is `github.com/jonhill90/agent-tui` as of the 2026-08-23 rename. Left unedited rather than rewritten to match today's path, since this is a quote of what actually printed, not a current claim.)
+(Re-captured 2026-08-28 against the current module path, agent-tui#172 —
+the earlier paste here read `github.com/jonhill90/keelson/...`, a module
+path that no longer exists.)
 
 **Not verified, and said so rather than assumed**: real terminal
 mouse-event rate/resolution and how a drag actually feels over tmux/SSH.
