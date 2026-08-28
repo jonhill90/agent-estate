@@ -9,6 +9,7 @@ sys.path.insert(0, str(SUPERVISOR_DIR))
 
 from verdict import (  # noqa: E402
     _classify_decision_text,
+    _normalise_decision_text,
     _parse_verdict_comment,
 )
 
@@ -39,6 +40,16 @@ class DecisionTokenTests(unittest.TestCase):
         ("approved, past tense", "APPROVED", "approved"),
         ("request changes, space form", "REQUEST CHANGES", "rejected"),
         ("request changes, hyphen form", "REQUEST-CHANGES", "rejected"),
+        # agent-estate#798 (found reviewing agent-estate#797): GitHub's own
+        # spelling. `_normalise_decision_text` used to read the intraword
+        # `_` as markdown emphasis and truncate the decision text to
+        # "REQUEST" before it was ever classified -- fails closed (`None`,
+        # not a wrong "approved"), but a rejection reading as unresolved is
+        # the exact "no verdict" vs. "a verdict of no" confusion this
+        # module exists to avoid. See
+        # `test_mutation_reverting_the_underscore_fold_turns_this_case_red`
+        # below for the red/green transition.
+        ("request changes, underscore form (GitHub's own spelling)", "REQUEST_CHANGES", "rejected"),
         ("rejected, one word", "REJECTED", "rejected"),
         # agent-supervisor#475: the reversed, natural word order.
         ("reversed order, changes requested", "CHANGES REQUESTED", "rejected"),
@@ -61,7 +72,13 @@ class DecisionTokenTests(unittest.TestCase):
     ]
 
     def _normalise(self, decision_text):
-        text = re.sub(r"[*_`]+$", "", decision_text.strip()).strip()
+        # agent-estate#798: fold an INTRAWORD underscore (alphanumeric on
+        # both sides, e.g. the `_` in "REQUEST_CHANGES") to a space, the
+        # same way the real `_normalise_decision_text` now does -- a
+        # boundary underscore (`_APPROVE_`) is left for the trailing-marker
+        # strip below, unchanged from before this fix.
+        text = re.sub(r"(?<=[A-Za-z0-9])_(?=[A-Za-z0-9])", " ", decision_text.strip())
+        text = re.sub(r"[*_`]+$", "", text).strip()
         text = text.rstrip(".:;,!").strip()
         return re.sub(r"\s+", " ", text).upper()
 
@@ -109,3 +126,61 @@ class DecisionTokenTests(unittest.TestCase):
         for name, decision_text, expected in regressions:
             with self.subTest(name):
                 self.assertEqual(_classify_decision_text(self._normalise(decision_text)), expected)
+
+    def test_mutation_reverting_the_underscore_fold_turns_this_case_red(self):
+        """agent-estate#798: mutate `_normalise_decision_text` back to its
+        pre-fix shape -- no intraword-underscore fold, so a remaining `_`
+        is treated purely as an emphasis marker and truncates the decision
+        text at the first one found -- and confirm the underscore case goes
+        red (`None`, not `"rejected"`) while the space/hyphen/approve forms
+        it did not touch stay green. If it did not go red, the new case
+        above would not be real evidence of this fix; the mutation is a
+        literal revert of the one line this fix adds, not a rewrite of the
+        whole function, so a green result here would mean the case is
+        classified some other way, not by the fold this PR ships."""
+        import re as _re
+
+        def pre_798_normalise(rest):
+            text = rest.strip()
+            text = _re.sub(r"^[*_`]+", "", text)
+            marker = _re.search(r"[*_`]", text)
+            if marker:
+                text = text[: marker.start()]
+            text = text.strip().rstrip(".:;,!").strip()
+            text = text.replace("-", " ")
+            text = _re.sub(r"\s+", " ", text).upper()
+            if "+" in text:
+                text = text.split("+", 1)[0].strip()
+            return text
+
+        mutated = _classify_decision_text(pre_798_normalise("REQUEST_CHANGES"))
+        self.assertIsNone(
+            mutated,
+            "reverting the underscore fold did not turn the underscore case red -- "
+            "it is not exercising the fold this fix adds",
+        )
+
+        # The fold this fix adds does not touch these -- confirm they are
+        # unaffected by the mutation, not merely unaffected by the fix.
+        for decision_text, expected in (
+            ("REQUEST CHANGES", "rejected"),
+            ("REQUEST-CHANGES", "rejected"),
+            ("APPROVE", "approved"),
+        ):
+            with self.subTest(decision_text):
+                self.assertEqual(
+                    _classify_decision_text(pre_798_normalise(decision_text)), expected
+                )
+
+        # And the real, unmutated function must classify all four the same
+        # way -- three unaffected, one now fixed.
+        for decision_text, expected in (
+            ("REQUEST_CHANGES", "rejected"),
+            ("REQUEST-CHANGES", "rejected"),
+            ("REQUEST CHANGES", "rejected"),
+            ("APPROVE", "approved"),
+        ):
+            with self.subTest("fixed:" + decision_text):
+                self.assertEqual(
+                    _classify_decision_text(_normalise_decision_text(decision_text)), expected
+                )
