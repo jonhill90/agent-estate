@@ -194,6 +194,10 @@ and it is longer and more specific than this line.
 - `mine_prompts.py` / `mine_jon.py` — extract the operator's own turns from
   harness transcripts, nothing else
 - `itemize_prompts.py` — turn `prompts` rows into `items` rows, one corpus step
+- `backfill_prompt_gap.py` — recover prompts from a dead-capture window
+  (source transcripts, not `mine_prompts.py --store`'s live path), and
+  populate `prompts.project` from the transcript's own directory since
+  neither `record_prompt` nor `mine_prompts.py` sets it (#696)
 - `prior-attempts.sh` — what did the last agent on this issue already find
 - `acceptance.sh` — re-run a CLOSED issue's acceptance test, reopen if back
 
