@@ -113,19 +113,21 @@ want_exit "disabled thresholds let the same dispatch proceed" "$ALLOW_RC" 0 "$AL
 # go RED. Proves the REFUSE assertion above is pinned to dispatch.sh
 # actually calling host-pressure.sh, not to something else already
 # refusing (the quota stub is SAFE, the lane fixture is valid). -------------
-# Placed INSIDE scripts/supervisor/ itself, not $D: dispatch.sh resolves
-# every sibling call ($HERE/claim.sh, $HERE/worktree.sh, ...) from its OWN
-# dirname, so a mutant copied to a tempdir with no siblings fails on the
-# FIRST sibling call after the patched line, not on the thing being tested.
-# Cleaned up unconditionally on exit -- a real script, briefly, next to the
-# real ones, never left behind.
-MUT_NOGATE="$HERE/../../scripts/supervisor/dispatch-mutant-nogate.sh"
-trap 'rm -f "$MUT_NOGATE"' EXIT
+# agent-supervisor#716: the gate call now lives in dispatch-preflight.sh, not
+# dispatch.sh's own text -- copy the WHOLE directory (same sibling-resolution
+# reasoning the comment above already gives for why a mutant needs its
+# siblings alongside it) into a scratch dir, then patch whichever file in
+# that copy actually carries the marker.
+MUT_NOGATE_DIR=$(mktemp -d "$D/mutant-nogate.XXXXXX")
+cp -R "$HERE/../../scripts/supervisor/." "$MUT_NOGATE_DIR/"
+rm -rf "$MUT_NOGATE_DIR/__pycache__"
+chmod +x "$MUT_NOGATE_DIR"/*.sh
+MUT_NOGATE="$MUT_NOGATE_DIR/dispatch.sh"
 mut_rc=0
-python3 - "$DISPATCH" "$MUT_NOGATE" <<'PY' || mut_rc=$?
+PYTHONPATH="$HERE" python3 - "$MUT_NOGATE_DIR" <<'PY' || mut_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 marker = '''if [ -x "$HERE/host-pressure.sh" ]; then
   HOST_PRESSURE_OUT=$("$HERE/host-pressure.sh"); HOST_PRESSURE_RC=$?
   if [ "$HOST_PRESSURE_RC" -ne 0 ]; then
@@ -136,12 +138,9 @@ else
   echo "dispatch: host-pressure.sh missing or not executable at $HERE -- refusing to guess whether this host can take another dispatch" >&2
   exit 1
 fi'''
-assert marker in text, "host-pressure gate block not found verbatim -- script shape changed"
-assert text.count(marker) == 1, "host-pressure gate block not unique -- script shape changed"
 # Simulates the fix never having been added: no gate call, no refusal, no
 # fail-closed else -- straight through to the rest of dispatch.sh.
-text = text.replace(marker, "true  # host-pressure gate removed by mutation test", 1)
-open(dst, "w").write(text)
+M.patch(target, marker, "true  # host-pressure gate removed by mutation test")
 PY
 if [ "$mut_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh with the host-pressure call site disabled" "could not patch $DISPATCH (exit $mut_rc)"

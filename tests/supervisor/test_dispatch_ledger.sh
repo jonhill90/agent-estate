@@ -266,13 +266,19 @@ want_contains "and the brief actually goes to it" "send-keys -t t:@103" "$(tmuxl
 # free-N-named idle candidate as free, the way the pre-#174 code did,
 # regardless of what `lane-free` answers -- and rerun test 2's central
 # assertion against it.
-FALLBACK_DISPATCH="$D/dispatch-name-fallback.sh"
+# agent-supervisor#716: dispatch.sh's own body no longer holds either block
+# below (the lane-free refusal moved into dispatch-lane-select.sh, the
+# commit-lane-claim guard into dispatch-send.sh) -- so this patches a full
+# SANDBOX copy of scripts/supervisor (every sourced sibling, not just
+# dispatch.sh) and searches it for whichever file actually carries each
+# marker now. See tests/supervisor/_dispatch_mutate.py's own header.
+MUT_DIR="$D/mut-name-fallback"
 patch_rc=0
-python3 - "$DISPATCH" "$FALLBACK_DISPATCH" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$DISPATCH" "$MUT_DIR" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+src, target = sys.argv[1], sys.argv[2]
+entry = M.sandbox(src, target)
 marker = '''  CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidate" --target "$candidate_target" --window-name "$wname" 2>/dev/null) || continue
   if ! grep -qF '"free":true' <<<"$CHECK"; then
     if grep -qF '"known":false' <<<"$CHECK" && [[ ! "$wname" =~ ^free-[0-9]+$ ]]; then
@@ -282,8 +288,6 @@ marker = '''  CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidat
     fi
     continue
   fi'''
-assert marker in text, "lane-free refusal block not found -- script shape changed"
-assert text.count(marker) == 1, "lane-free refusal block not unique -- script shape changed"
 mutated = '''  # MUTATED: reproduces the pre-#174 bug -- trust the window name on a
   # ledger miss instead of refusing, bypassing the ledger read when the
   # visible pane still carries the old free-N convention.
@@ -302,7 +306,7 @@ mutated = '''  # MUTATED: reproduces the pre-#174 bug -- trust the window name o
     fi
     continue
   fi'''
-text = text.replace(marker, mutated, 1)
+M.patch(target, marker, mutated)
 # agent-dotfiles#209 round 2 adds a THIRD guard on the same path, for the same
 # reason the claim had to be skipped above: step 4.5 refuses to send unless it
 # can mark THIS dispatch's claim live, and a mutant that never claimed has
@@ -310,14 +314,9 @@ text = text.replace(marker, mutated, 1)
 # dispatching to an occupied lane, and this case would report the pre-#174 bug
 # as closed by a guard that has nothing to do with reading the ledger.
 commit_guard = 'if ! grep -qF \'"committed":true\' <<<"$COMMIT_OUT"; then'
-assert commit_guard in text, "commit guard not found -- script shape changed"
-assert text.count(commit_guard) == 1, "commit guard not unique -- script shape changed"
-text = text.replace(commit_guard, 'if false; then  # MUTATED: step 4.5 commit guard bypassed', 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, commit_guard, 'if false; then  # MUTATED: step 4.5 commit guard bypassed')
 PY
+FALLBACK_DISPATCH="$MUT_DIR/dispatch.sh"
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh that falls back to the window name" \
     "could not patch $DISPATCH (exit $patch_rc) -- treating as a failure, not a skip"

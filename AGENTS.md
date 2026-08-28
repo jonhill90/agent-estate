@@ -54,9 +54,19 @@ and it is longer and more specific than this line.
 - `dispatch.sh` — pick a free lane, claim the issue, create its worktree, send
   the brief; supports `--adopt-pane <window-id>` to hand the brief to an
   already-running idle pane's own process instead of spawning a new one
-  (#668/#677)
+  (#668/#677). Split from 2753 lines into an ~280-line composition root plus
+  8 sourced-only siblings, grouped by step (#716, same shape as #713/#708):
+  `dispatch-rehome.sh`, `dispatch-args.sh`, `dispatch-preflight.sh`,
+  `dispatch-guards.sh`, `dispatch-lane-select.sh`, `dispatch-worktree.sh`,
+  `dispatch-send.sh`, `dispatch-record.sh` — none is meant to run standalone,
+  and sourcing order is execution order.
 - `dispatch-claude-print.sh` / `dispatch-pi-rpc.sh` — `dispatch.sh`'s siblings
-  for the `claude -p` and `pi --mode rpc` harness shapes, not replacements
+  for the `claude -p` and `pi --mode rpc` harness shapes, not replacements —
+  and NOT part of the `dispatch-*.sh` split above; a mutation-test search
+  across `dispatch*.sh` must exclude them explicitly or it double-matches
+  their own, separately-written copies of the same bash-3.2-safe idioms
+  (`tests/supervisor/_dispatch_mutate.py`'s own `SPLIT_FILES` list is exact
+  for this reason, not a wildcard glob)
 - `claim.sh` — claim an issue on GitHub before dispatch, so two dispatchers
   can't both hand out the same one
 - `worktree.sh` — one git worktree per lane task

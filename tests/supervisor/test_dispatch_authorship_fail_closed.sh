@@ -502,21 +502,20 @@ fi
 # and skipped" above, and "the review lands on the OTHER free lane" -- if
 # the exclusion in the lane-selection loop is deleted, both go red because
 # dispatch sends the self-review to t:3 instead of refusing/rerouting it.
-MUTATED="$D/dispatch-no-author-guard.sh"
+# agent-supervisor#716: the author-exclusion guard now lives in
+# dispatch-lane-select.sh, not dispatch.sh's own text -- make_mutant_scripts_dir
+# (above) already copies the WHOLE directory for exactly this "or dispatch.sh
+# itself" case, so this patches whichever file in that copy actually holds
+# the marker, via _dispatch_mutate.py's generic search.
+MUTANT_DIR_NOAUTH=$(make_mutant_scripts_dir)
+MUTATED="$MUTANT_DIR_NOAUTH/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$MUTATED" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$MUTANT_DIR_NOAUTH" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 marker = 'if [ "$(lane_relation "$candidate" "$al" "$candidate_pane_id" "$al_pane_id")" != different ]; then'
-assert marker in text, "author-exclusion guard not found -- script shape changed"
-assert text.count(marker) == 1, "author-exclusion guard not unique -- script shape changed"
-text = text.replace(marker, "if false; then  # MUTATED: author-exclusion always skipped", 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, marker, "if false; then  # MUTATED: author-exclusion always skipped")
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh whose author-exclusion is disabled" \

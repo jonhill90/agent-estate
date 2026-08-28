@@ -277,20 +277,23 @@ branch_exists() { git -C "$REPO" show-ref --verify --quiet "refs/heads/$1"; }
 # blind `send-keys "$LAUNCH_CMD" Enter`.
 printf '236|| dispatch.sh must never type its launch command\n' >> "$D/issues"
 printf '238|| dispatch.sh must never type its launch command (fixed run)\n' >> "$D/issues"
-MUTATED_236="$D/dispatch-pre-236-blind-type.sh"
+# agent-supervisor#716: both markers below live in dispatch-send.sh now
+# (step 3.5 was not split across a file boundary), not in dispatch.sh's own
+# text -- make_mutant_scripts_dir copies the whole directory and
+# _dispatch_mutate.py's patch() finds the file that carries each marker.
+MUTATED_236_DIR=$(make_mutant_scripts_dir)
+MUTATED_236="$MUTATED_236_DIR/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$MUTATED_236" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$MUTATED_236_DIR" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 
 launch_cmd_marker = 'LAUNCH_CMD="${H_LAUNCH_CMD[$HARNESS_HIDX]}"\n'
-assert text.count(launch_cmd_marker) == 1, "LAUNCH_CMD assignment not found or not unique -- script shape changed"
-text = text.replace(
+M.patch(
+    target,
     launch_cmd_marker,
     launch_cmd_marker + 'LAUNCH_LITERAL="${H_SEND_LITERAL[$HARNESS_HIDX]:-0}"\n',
-    1,
 )
 
 respawn_marker = (
@@ -298,7 +301,6 @@ respawn_marker = (
     '  abort_send "tmux respawn-pane failed for $LANE -- could not put it in its worktree; #$ISSUE_ARG was NOT dispatched"\n'
     'fi\n'
 )
-assert text.count(respawn_marker) == 1, "post-#236 respawn-pane call not found or not unique -- script shape changed"
 pre_236_shape = (
     'if ! tmux respawn-pane -k -t "$LANE_TARGET" -c "$WORKTREE" 2>/dev/null; then\n'
     '  abort_send "tmux respawn-pane failed for $LANE -- could not put it in its worktree; #$ISSUE_ARG was NOT dispatched"\n'
@@ -315,12 +317,7 @@ pre_236_shape = (
     '    || abort_send "could not relaunch harness \'$LANE_HARNESS\' in $LANE -- #$ISSUE_ARG was NOT dispatched"\n'
     'fi\n'
 )
-text = text.replace(respawn_marker, pre_236_shape, 1)
-
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, respawn_marker, pre_236_shape)
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh in the pre-#236 blind-type shape" \

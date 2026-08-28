@@ -460,20 +460,17 @@ want_exit "a worktree whose origin matches [repo] dispatches normally" "$rc" 0 "
 # MUTATION-CHECK: disable the comparison and confirm the mismatch case above
 # goes red -- a check present in the diff but never actually reached would
 # leave this suite passing regardless.
-MUTATED_17="$D/dispatch-no-origin-check.sh"
+# agent-supervisor#716: the origin check (step 3.1) now lives in
+# dispatch-worktree.sh.
+MUTATED_17_DIR=$(make_mutant_scripts_dir)
+MUTATED_17="$MUTATED_17_DIR/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$MUTATED_17" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$MUTATED_17_DIR" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 marker = 'if [ -n "$REPO" ]; then\n  WORKTREE_ORIGIN='
-assert text.count(marker) == 1, "origin check not found or not unique -- script shape changed"
-text = text.replace(marker, 'if false; then\n  WORKTREE_ORIGIN=', 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, marker, 'if false; then\n  WORKTREE_ORIGIN=')
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh whose origin check is disabled" \
