@@ -173,10 +173,14 @@ check "a detached worktree reports a real ref, not HEAD" "^code: *unknown@main" 
 # branch/sha -- a live worktree pinned at the wrong repo's commit reported a
 # perfectly plausible branch@sha with nothing to say which repository it
 # belonged to. Run with no git stub, against this checkout's own real
-# `origin` remote (jonhill90/agent-supervisor), so this exercises the actual
-# derivation rather than a canned stub answer.
+# `origin` remote, so this exercises the actual derivation rather than a
+# canned stub answer. Derive the expected name the same way watchdog.sh does
+# (agent-estate#729/#731) instead of hardcoding a literal that goes stale on
+# the next rename.
+expected_repo=$(git -C "$HERE" remote get-url origin 2>/dev/null | sed 's/\.git$//' \
+     | awk -F'[:/]' 'NF>=2{print $(NF-1)"/"$NF}')
 D=$(mktemp -d); run idle "$D/w"
-check "code: line names the repo derived from origin" "^code: *jonhill90/agent-supervisor@" "$D/w/st"
+check "code: line names the repo derived from origin" "^code: *${expected_repo}@" "$D/w/st"
 
 # SUPERVISOR_REPO_NAME overrides the derived name -- same override shape as
 # SUPERVISOR_STATE/SUPERVISOR_REPOS, for a layout with no `origin` remote.
