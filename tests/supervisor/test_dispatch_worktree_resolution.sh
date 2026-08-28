@@ -507,17 +507,17 @@ fi
 # `_task_looks_like_review` for a legacy row; a wrongly-recorded `0` is
 # trusted outright and never falls back to anything. This is exactly why
 # this one forwarding line is load-bearing and gets its own mutation check.
+# agent-supervisor#716: the --is-review forwarding (step 6) now lives in
+# dispatch-record.sh.
 MUTANT_DIR_640=$(make_mutant_scripts_dir)
 MUTATED_640="$MUTANT_DIR_640/dispatch.sh"
 patch_rc=0
-python3 - "$MUTATED_640" <<'PY' || patch_rc=$?
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$MUTANT_DIR_640" <<'PY' || patch_rc=$?
 import sys
+import _dispatch_mutate as M
 target = sys.argv[1]
-text = open(target).read()
 marker = '  [ -z "$REVIEWS_PR" ] || LEDGER_ARGS+=(--is-review)\n'
-assert text.count(marker) == 1, "--is-review forwarding not found or not unique -- script shape changed"
-text = text.replace(marker, "", 1)
-open(target, "w").write(text)
+M.patch(target, marker, "")
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh with --is-review forwarding removed" \

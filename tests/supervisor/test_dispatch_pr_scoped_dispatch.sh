@@ -456,20 +456,17 @@ fi
 # now the load-bearing proof of DEFENSE IN DEPTH, not of step 0.6 alone --
 # see case 5 below for the mutation check that defeats the write-time gate
 # itself and confirms THAT one is load-bearing.
-MUTATED_159="$D/dispatch-no-pr-claim-check.sh"
+# agent-supervisor#716: the PR-lane duplicate check now lives in
+# dispatch-guards.sh.
+MUTATED_159_DIR=$(make_mutant_scripts_dir)
+MUTATED_159="$MUTATED_159_DIR/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$MUTATED_159" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$MUTATED_159_DIR" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 marker = 'if grep -qF \'"known":true\' <<<"$PR_LANE_JSON"; then'
-assert text.count(marker) == 1, "PR-lane duplicate check not found or not unique -- script shape changed"
-text = text.replace(marker, "if false; then  # MUTATED: PR-lane duplicate check always skipped", 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, marker, "if false; then  # MUTATED: PR-lane duplicate check always skipped")
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh whose PR-lane duplicate check is silenced" \

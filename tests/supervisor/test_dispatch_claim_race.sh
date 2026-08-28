@@ -352,13 +352,17 @@ want_contains "B's issue IS claimed" "jonhill90" "$(assignees 502)"
 # --- RED BEFORE THE FIX: a copy with no atomic claim at all, the exact shape
 # dispatch.sh had on origin/main before agent-dotfiles#184 -- `lane-free`'s
 # read picked a candidate and nothing closed the gap before send-keys.
-NO_CLAIM_MUTANT="$D/dispatch-no-claim.sh"
+# agent-supervisor#716: both markers below now live in dispatch-lane-select.sh
+# (the claim-lane block) and dispatch-send.sh (the commit guard) -- two
+# different files. make_mutant_scripts_dir copies the whole directory and
+# _dispatch_mutate.py's patch() finds whichever one carries each marker.
+NO_CLAIM_DIR=$(make_mutant_scripts_dir)
+NO_CLAIM_MUTANT="$NO_CLAIM_DIR/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$NO_CLAIM_MUTANT" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$NO_CLAIM_DIR" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 marker = '''  CLAIM_LANE="$candidate"
   CLAIM=$("$LEDGER_PYTHON" "$LEDGER_CLI" claim-lane --lane "$candidate" --token "$CLAIM_TOKEN" --owner-pid $$ 2>/dev/null) || { release_lane_claim; continue; }
   if grep -qF '"claimed":true' <<<"$CLAIM"; then
@@ -388,8 +392,6 @@ marker = '''  CLAIM_LANE="$candidate"
   # and only bites when the claim committed but its result did not come back
   # readable -- which would otherwise leak a claim only the reap could clear.
   release_lane_claim'''
-assert marker in text, "claim-lane block not found -- script shape changed"
-assert text.count(marker) == 1, "claim-lane block not unique -- script shape changed"
 replacement = '''  LANE="$candidate"  # MUTATED: no atomic claim at all -- agent-dotfiles#184 pre-fix shape
   LANE_TARGET="$candidate_target"
   # #15: kept even in this mutant -- this test targets the atomic-claim race
@@ -398,7 +400,7 @@ replacement = '''  LANE="$candidate"  # MUTATED: no atomic claim at all -- agent
   # is not about.
   LANE_HARNESS=$(grep -oE '"harness":"[a-z-]*"' <<<"$CHECK" | head -1 | sed -E 's/.*:"([a-z-]*)"/\\1/')
   break'''
-text = text.replace(marker, replacement, 1)
+M.patch(target, marker, replacement)
 # agent-dotfiles#209 round 2: also neutralise step 4.5's commit guard. It
 # refuses to send when the claim it is asked to mark live does not exist --
 # correct, and exactly what a mutant with no claim (or an ignored verify)
@@ -407,13 +409,7 @@ text = text.replace(marker, replacement, 1)
 # a race closed by the wrong guard. Same reason d2bce42 extended
 # test_dispatch_ledger.sh's fallback mutation past the claim call.
 commit_guard = 'if ! grep -qF \'"committed":true\' <<<"$COMMIT_OUT"; then'
-assert commit_guard in text, "commit guard not found -- script shape changed"
-assert text.count(commit_guard) == 1, "commit guard not unique -- script shape changed"
-text = text.replace(commit_guard, 'if false; then  # MUTATED: step 4.5 commit guard bypassed', 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, commit_guard, 'if false; then  # MUTATED: step 4.5 commit guard bypassed')
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh with no lane claim at all" \
@@ -435,17 +431,15 @@ fi
 # and confirm the suite goes red, or the test proves nothing. This defeats
 # dispatch.sh's OWN check of the claim result -- the bash-side half of
 # claim-then-verify -- while leaving the ledger call itself untouched.
-VERIFY_DEFEATED_MUTANT="$D/dispatch-verify-defeated.sh"
+VERIFY_DEFEATED_DIR=$(make_mutant_scripts_dir)
+VERIFY_DEFEATED_MUTANT="$VERIFY_DEFEATED_DIR/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$VERIFY_DEFEATED_MUTANT" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$VERIFY_DEFEATED_DIR" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 marker = 'if grep -qF \'"claimed":true\' <<<"$CLAIM"; then'
-assert marker in text, "claim verify guard not found -- script shape changed"
-assert text.count(marker) == 1, "claim verify guard not unique -- script shape changed"
-text = text.replace(marker, 'if true; then  # MUTATED: claim-lane verify-read mismatch made non-fatal', 1)
+M.patch(target, marker, 'if true; then  # MUTATED: claim-lane verify-read mismatch made non-fatal')
 # agent-dotfiles#209 round 2: also neutralise step 4.5's commit guard. It
 # refuses to send when the claim it is asked to mark live does not exist --
 # correct, and exactly what a mutant with no claim (or an ignored verify)
@@ -454,13 +448,7 @@ text = text.replace(marker, 'if true; then  # MUTATED: claim-lane verify-read mi
 # a race closed by the wrong guard. Same reason d2bce42 extended
 # test_dispatch_ledger.sh's fallback mutation past the claim call.
 commit_guard = 'if ! grep -qF \'"committed":true\' <<<"$COMMIT_OUT"; then'
-assert commit_guard in text, "commit guard not found -- script shape changed"
-assert text.count(commit_guard) == 1, "commit guard not unique -- script shape changed"
-text = text.replace(commit_guard, 'if false; then  # MUTATED: step 4.5 commit guard bypassed', 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, commit_guard, 'if false; then  # MUTATED: step 4.5 commit guard bypassed')
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh whose claim verify-read is non-fatal" \

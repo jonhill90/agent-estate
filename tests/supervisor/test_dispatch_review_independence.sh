@@ -515,14 +515,31 @@ base_ref = mb.stdout.strip()
 # marker unique to #190's diff, not by any commit message or SHA, so this
 # keeps working the same way pre-merge (base_ref itself lacks the marker,
 # so the loop uses it unchanged on its first pass) and post-merge alike.
+#
+# agent-supervisor#725: #720 split dispatch.sh into a composition root plus
+# sourced siblings, and AUTHOR_LANES=() moved out of dispatch.sh itself into
+# dispatch-guards.sh. Every revision of dispatch.sh from #720 onward -- even
+# ones that fully carry #190's fix via the sourced sibling -- therefore
+# lacks the marker in dispatch.sh's OWN text, and the walk below picked the
+# CURRENT (correct, already-fixed) dispatch.sh on its very first iteration,
+# mistaking it for the pre-#190 baseline: both mutation assertions then
+# exercised the real, unmutated guard and failed as "still working" instead
+# of "reverted". Same class as #706's core.py split breaking the OTHER
+# mutation in this file (see the core*.py glob a few hundred lines below) --
+# a marker search must follow code across a split, not assume it stayed in
+# one named file. Check dispatch-guards.sh at the SAME revision too (it may
+# not exist yet at a pre-#720 revision -- `git show` exiting non-zero there
+# just means "nothing to find", not an error) and only call the widening
+# absent when the marker is in neither file.
 marker = "AUTHOR_LANES=()"
 
 
-def content_at(rev):
-    return subprocess.run(
-        ["git", "-C", repo_dir, "show", f"{rev}:scripts/supervisor/dispatch.sh"],
-        check=True, capture_output=True, text=True,
-    ).stdout
+def content_at(rev, path):
+    result = subprocess.run(
+        ["git", "-C", repo_dir, "show", f"{rev}:{path}"],
+        capture_output=True, text=True,
+    )
+    return result.stdout if result.returncode == 0 else None
 
 
 # NOTE: unlike `<rev>:<path>` above (always root-relative), a `git log --
@@ -536,8 +553,12 @@ history = subprocess.run(
 
 text = None
 for rev in history:
-    candidate = content_at(rev)
-    if marker not in candidate:
+    candidate = content_at(rev, "scripts/supervisor/dispatch.sh")
+    guards_candidate = content_at(rev, "scripts/supervisor/dispatch-guards.sh")
+    widened = (candidate is not None and marker in candidate) or (
+        guards_candidate is not None and marker in guards_candidate
+    )
+    if candidate is not None and not widened:
         text = candidate
         break
 
@@ -552,6 +573,16 @@ if text is None:
 
 here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
 assert text.count(here) == 1, "HERE assignment not found or not unique -- pre-#190 script shape unexpected"
+# The candidate must be self-contained -- a revision that genuinely predates
+# both #190 and #720 -- since it is about to be dropped in as a single
+# standalone file with no sourced siblings alongside it. If a future split
+# ever moves other logic out of dispatch.sh without also moving the marker,
+# this catches it as a shape assertion rather than a silent no-op mutation.
+assert "dispatch-guards.sh" not in text, (
+    "picked dispatch.sh revision sources dispatch-guards.sh but lacks the "
+    "AUTHOR_LANES marker in either file -- shape assumption broken, refusing "
+    "to write a standalone mutant that can't actually run"
+)
 text = text.replace(here, 'HERE=%r' % repo_dir, 1)
 open(dst, "w").write(text)
 PY

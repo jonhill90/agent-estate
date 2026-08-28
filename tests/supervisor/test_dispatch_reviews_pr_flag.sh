@@ -281,27 +281,27 @@ else bad "the refused dispatch takes no claim on its own issue" "still assigned:
 # MUTATION-CHECK: put the un-guarded `${2:-}; shift 2` back and confirm the
 # suite actually notices -- a test that only ever ran the fixed script would
 # pass whether or not the guard exists.
-MUTATED_225A="$D/dispatch-no-flag-guard.sh"
+# agent-supervisor#716: the flag loop (including this guard) now lives in
+# dispatch-args.sh, whose own `${BASH_SOURCE[0]}` usages were rewritten to
+# `"$HERE/dispatch.sh"` at split time (a sourced file's BASH_SOURCE[0] is
+# ITS OWN path, not dispatch.sh's -- see dispatch-args.sh's own header) --
+# the marker below matches that rewritten text, not the pre-split original.
+MUTATED_225A_DIR=$(make_mutant_scripts_dir)
+MUTATED_225A="$MUTATED_225A_DIR/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$MUTATED_225A" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$MUTATED_225A_DIR" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 guarded = '''      if [ $# -lt 2 ]; then
         echo "dispatch: --reviews-pr requires a PR number" >&2
-        sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \\{0,1\\}//' >&2
+        sed -n '/^# Usage:/,/^$/p' "$HERE/dispatch.sh" | sed 's/^# \\{0,1\\}//' >&2
         exit 1
       fi
       REVIEWS_PR="$2"
       REVIEWS_PR_EXPLICIT=1
       shift 2'''
-assert text.count(guarded) == 1, "flag-value guard not found or not unique -- script shape changed"
-text = text.replace(guarded, '      REVIEWS_PR="${2:-}"\n      REVIEWS_PR_EXPLICIT=1\n      shift 2', 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, guarded, '      REVIEWS_PR="${2:-}"\n      REVIEWS_PR_EXPLICIT=1\n      shift 2')
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh with the flag-value guard reverted" \
@@ -381,16 +381,15 @@ want_contains "and still fails closed for the documented reason: no ledger recor
 # suite actually notices under real /bin/bash.
 MUTANT_DIR_225B=$(make_mutant_scripts_dir)
 MUTATED_225B="$MUTANT_DIR_225B/dispatch.sh"
+# agent-supervisor#716: POSITIONAL's expansion now lives in dispatch-args.sh,
+# not dispatch.sh's own text -- search the whole mutant dir for it instead.
 patch_rc=0
-python3 - "$MUTANT_DIR_225B/dispatch.sh" "$MUTANT_DIR_225B/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$MUTANT_DIR_225B" "$MUTANT_DIR_225B/resolve-pr-contributors.sh" <<'PY' || patch_rc=$?
 import sys
-dispatch_path, resolve_path = sys.argv[1], sys.argv[2]
+import _dispatch_mutate as M
+mutant_dir, resolve_path = sys.argv[1], sys.argv[2]
 
-text = open(dispatch_path).read()
-n = text.count('set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"')
-assert n == 1, "POSITIONAL 3.2-safe expansion not found or not unique -- script shape changed"
-text = text.replace('set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"', 'set -- "${POSITIONAL[@]}"', 1)
-open(dispatch_path, "w").write(text)
+M.patch(mutant_dir, 'set -- "${POSITIONAL[@]+"${POSITIONAL[@]}"}"', 'set -- "${POSITIONAL[@]}"')
 
 text = open(resolve_path).read()
 n = text.count('gh pr view "$pr" "${gh_repo_args[@]+"${gh_repo_args[@]}"}" --json headRefName')
@@ -599,20 +598,16 @@ LEDGER_STATE="$D/state-70" ledger record-completion --task ad250-no-bare-qualifi
 # MUTATION-CHECK: disable the inference block and confirm a forgotten flag
 # again dispatches straight to the author, the exact regression #70 exists
 # to close.
-MUTATED_70="$D/dispatch-no-inference.sh"
+# agent-supervisor#716: the inference block now lives in dispatch-preflight.sh.
+MUTATED_70_DIR=$(make_mutant_scripts_dir)
+MUTATED_70="$MUTATED_70_DIR/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$MUTATED_70" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$MUTATED_70_DIR" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 marker = 'if [ -z "$REVIEWS_PR" ] && [ -z "$NOT_A_REVIEW" ]; then\n  INFER_GH_REPO_ARGS=()'
-assert marker in text, "inference block not found -- script shape changed"
-text = text.replace(marker, 'if false; then  # MUTATED: inference disabled\n  INFER_GH_REPO_ARGS=()', 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, marker, 'if false; then  # MUTATED: inference disabled\n  INFER_GH_REPO_ARGS=()')
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh with inference disabled" \

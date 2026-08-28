@@ -469,23 +469,27 @@ else bad "the contradictory dispatch claims nothing" "still assigned: $(assignee
 # (the flag then falls through to POSITIONAL and sets nothing) and confirm the
 # first case above goes red again -- the escape is what carries it, not some
 # other change in this diff.
-MUTATED_101="$D/dispatch-no-escape.sh"
+# agent-supervisor#716: the flag-parsing loop (including this arm) now lives
+# in dispatch-args.sh, not dispatch.sh's own text.
+MUTATED_101_DIR=$(make_mutant_scripts_dir)
+MUTATED_101="$MUTATED_101_DIR/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$MUTATED_101" <<'PY' || patch_rc=$?
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$MUTATED_101_DIR" <<'PY' || patch_rc=$?
+import glob
 import os
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+target_dir = sys.argv[1]
 marker = '    --not-a-review)\n'
-assert marker in text, "--not-a-review arm not found -- script shape changed"
+candidates = sorted(glob.glob(os.path.join(target_dir, "dispatch*.sh")))
+hits = [f for f in candidates if marker in open(f).read()]
+assert len(hits) == 1, "--not-a-review arm not found in exactly one file -- script shape changed: %r" % hits
+path = hits[0]
+text = open(path).read()
 start = text.index(marker)
 end = text.index('      ;;\n', start) + len('      ;;\n')
 text = text[:start] + text[end:]
 assert '--not-a-review)' not in text, "the flag's case arm survived the cut"
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+open(path, "w").write(text)
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh with --not-a-review removed" \

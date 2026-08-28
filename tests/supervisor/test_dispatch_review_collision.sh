@@ -223,14 +223,26 @@ MUT_DIR=$(mktemp -d "$D/mutant.XXXXXX")
 cp -R "$CORE_DIR/." "$MUT_DIR/"
 rm -rf "$MUT_DIR/__pycache__"
 chmod +x "$MUT_DIR"/*.sh
-python3 - "$MUT_DIR/dispatch.sh" <<'PY'
+# agent-supervisor#716: the REVIEWS_PR downgrade branch now lives in
+# dispatch-worktree.sh, not dispatch.sh's own text -- $MUT_DIR already holds
+# the whole copied directory (above), so search it for whichever file
+# carries the needle instead of assuming dispatch.sh.
+python3 - "$MUT_DIR" <<'PY'
+import glob
+import os
 import re
 import sys
-path = sys.argv[1]
-text = open(path).read()
+target_dir = sys.argv[1]
 needle = '''if [ "$COLLISION_RC" -ne 0 ]; then
   if [ -n "$REVIEWS_PR_EXPLICIT" ]; then'''
-assert needle in text, "the REVIEWS_PR downgrade branch is not where this test expects -- update the mutation marker"
+candidates = sorted(glob.glob(os.path.join(target_dir, "dispatch*.sh")))
+hits = [f for f in candidates if needle in open(f).read()]
+assert len(hits) == 1, (
+    "the REVIEWS_PR downgrade branch is not found in exactly one file -- "
+    "update the mutation marker: %r" % hits
+)
+path = hits[0]
+text = open(path).read()
 # Replace the whole if/else block with the pre-fix unconditional abort_send,
 # byte-for-byte what dispatch.sh had before agent-supervisor#645.
 pattern = re.compile(

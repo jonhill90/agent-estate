@@ -282,21 +282,16 @@ if [ "$(worktrees)" = "$before" ]; then ok "an unreadable ledger creates no work
 
 # ...and that guard is load-bearing. Patch a copy that skips the step-0 check
 # and confirm the case above goes red against it.
-BROKEN_READ_GUARD="$D/dispatch-ledger-read-unguarded.sh"
+# agent-supervisor#716: the readability guard now lives in dispatch-guards.sh.
+BROKEN_READ_DIR=$(make_mutant_scripts_dir)
+BROKEN_READ_GUARD="$BROKEN_READ_DIR/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$BROKEN_READ_GUARD" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$BROKEN_READ_DIR" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 marker = 'if ! LEDGER_STATUS_OUT=$("$LEDGER_PYTHON" "$LEDGER_CLI" status 2>&1); then'
-assert marker in text, "ledger readability guard not found -- script shape changed"
-assert text.count(marker) == 1, "ledger readability guard not unique -- script shape changed"
-text = text.replace(marker, "if false; then  # MUTATED: readability guard always skipped", 1)
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, marker, "if false; then  # MUTATED: readability guard always skipped")
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh whose ledger readability guard is skipped" \
@@ -362,26 +357,19 @@ want_contains "the ledger already knows this lane, so the answer is not a name-b
 # ...and that tolerance is load-bearing. Patch a copy that makes the write
 # fatal and confirm the case above goes red against it -- a suite that still
 # passes with the failure-tolerance removed has not tested the property.
-BROKEN_DISPATCH="$D/dispatch-ledger-fatal.sh"
+# agent-supervisor#716: this line now lives in dispatch-record.sh, and the
+# copy needs its OWN full sibling set (same "finds lanes.sh, claim.sh,
+# worktree.sh, cli.py relative to its own location" reasoning the comment
+# below already gives -- now also true of dispatch.sh's own new siblings).
+BROKEN_DISPATCH_DIR=$(make_mutant_scripts_dir)
+BROKEN_DISPATCH="$BROKEN_DISPATCH_DIR/dispatch.sh"
 patch_rc=0
-python3 - "$DISPATCH" "$BROKEN_DISPATCH" <<'PY' || patch_rc=$?
-import os
+PYTHONPATH="$HERE${PYTHONPATH:+:$PYTHONPATH}" python3 - "$BROKEN_DISPATCH_DIR" <<'PY' || patch_rc=$?
 import sys
-src, dst = sys.argv[1], sys.argv[2]
-text = open(src).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 marker = "  return 0  # the ledger write is never fatal -- agent-dotfiles#140"
-assert marker in text, "ledger failure-tolerance line not found -- script shape changed"
-assert text.count(marker) == 1, "ledger failure-tolerance line not unique -- script shape changed"
-text = text.replace(marker, "  exit 1  # MUTATED: ledger write made fatal", 1)
-# The copy runs from a temp directory, and dispatch.sh finds lanes.sh,
-# claim.sh, worktree.sh and cli.py relative to its own location. Pin HERE to
-# the real one, or the copy refuses "no free lane" before reaching the line
-# under test and the mutation check passes for the wrong reason -- which is
-# what it did on the first run of this test.
-here = 'HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"'
-assert text.count(here) == 1, "HERE assignment not found or not unique -- script shape changed"
-text = text.replace(here, 'HERE=%r' % os.path.dirname(os.path.abspath(src)), 1)
-open(dst, "w").write(text)
+M.patch(target, marker, "  exit 1  # MUTATED: ledger write made fatal")
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh whose ledger write is fatal" \

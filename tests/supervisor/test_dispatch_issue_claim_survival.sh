@@ -337,24 +337,23 @@ want_missing "...no 'already claimed' mystery for the operator to chase" "alread
 NO_ICLAIM_TRAP_DIR=$(make_mutant_scripts_dir)
 cp "$CLAIM_KILL_DIR/claim.sh" "$CLAIM_KILL_DIR/claim-real.sh" "$NO_ICLAIM_TRAP_DIR/"
 chmod +x "$NO_ICLAIM_TRAP_DIR/claim.sh" "$NO_ICLAIM_TRAP_DIR/claim-real.sh"
+# agent-supervisor#716: the traps now live in dispatch-lane-select.sh, not
+# dispatch.sh's own text -- search the whole copied directory instead.
 patch_rc=0
-python3 - "$NO_ICLAIM_TRAP_DIR/dispatch.sh" <<'PY' || patch_rc=$?
+PYTHONPATH="$HERE" python3 - "$NO_ICLAIM_TRAP_DIR" <<'PY' || patch_rc=$?
 import sys
-path = sys.argv[1]
-text = open(path).read()
+import _dispatch_mutate as M
+target = sys.argv[1]
 marker = """trap 'release_claim_on_signal; release_lane_claim' EXIT
 trap 'release_claim_on_signal; release_lane_claim; exit 143' TERM   # 128 + 15
 trap 'release_claim_on_signal; release_lane_claim; exit 130' INT    # 128 + 2"""
-assert marker in text, "combined claim-release traps not found -- script shape changed"
-assert text.count(marker) == 1, "combined claim-release traps not unique -- script shape changed"
-text = text.replace(
+M.patch(
+    target,
     marker,
     "trap release_lane_claim EXIT\n"
     "trap 'release_lane_claim; exit 143' TERM   # 128 + 15  -- MUTATED: issue claim no longer trapped (#572)\n"
     "trap 'release_lane_claim; exit 130' INT    # 128 + 2",
-    1,
 )
-open(path, "w").write(text)
 PY
 if [ "$patch_rc" -ne 0 ]; then
   bad "setup: patched a copy of dispatch.sh with no issue-claim trap" \
