@@ -76,7 +76,7 @@ func TestInvocationFetcher_EmptyCachePath(t *testing.T) {
 }
 
 // TestInvocationFetcher_RealCountsIncludingGenuineZero is this test's main
-// positive case, and the one #164 was actually about: a skill with a real
+// positive case, and the one agent-tui#164 was actually about: a skill with a real
 // recorded count of 0 renders "0" via a non-nil *0, not InvocationsNoHistory
 // and not InvocationsStoreUnreadable -- a genuine zero and an absent/broken
 // cache must never look the same.
