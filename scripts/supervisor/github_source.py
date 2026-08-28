@@ -13,9 +13,15 @@ import re
 import subprocess
 
 
-MARKER_PREFIX = "<!-- hill90-supervisor:v1 "
+# #767: the marker prefix names the estate, not the tenant that used to be
+# the only one running it.  `MARKER_RE` accepts both prefixes so a marker
+# written before this change still parses; `MARKER_PREFIX`/`marker()` below
+# emit only the new one, always, from this change forward.  Do not retire
+# the old prefix here -- that is a future step once a real count (not the
+# two-comment sample checked for #767) proves nothing depends on it.
+MARKER_PREFIX = "<!-- agent-estate:v1 "
 MARKER_RE = re.compile(
-    r"<!-- hill90-supervisor:v1 (?P<payload>\{.*?\}) -->", re.DOTALL
+    r"<!-- (?:agent-estate|hill90-supervisor):v1 (?P<payload>\{.*?\}) -->", re.DOTALL
 )
 SOURCE_REF_RE = re.compile(r"^[0-9a-f]{40,64}$")
 SOURCE_URL_RE = re.compile(

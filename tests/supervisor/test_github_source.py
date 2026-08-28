@@ -11,7 +11,7 @@ from unittest.mock import patch
 SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "scripts" / "supervisor"
 sys.path.insert(0, str(SUPERVISOR_DIR))
 
-from github_source import GithubTaskSource, marker  # noqa: E402
+from github_source import GithubTaskSource, MARKER_PREFIX, marker  # noqa: E402
 from core import Ledger  # noqa: E402
 import cli  # noqa: E402
 
@@ -269,6 +269,60 @@ class GithubTaskSourceTest(unittest.TestCase):
             self.assertEqual(1, len(RecordingGithubSource.instances))
             _ledger, source_url, source_ref = RecordingGithubSource.instances[0].calls[0]
             self.assertEqual((ISSUE_URL, SHA), (source_url, source_ref))
+
+    def test_marker_writes_only_the_new_agent_estate_prefix(self):
+        # agent-estate#767: the writer emits the new prefix, always, from
+        # this change forward -- never the retired tenant name.
+        rendered = marker({"kind": "task", "source_ref": SHA, "source_url": ISSUE_URL, "task_id": "t1"})
+        self.assertTrue(rendered.startswith("<!-- agent-estate:v1 "))
+        self.assertEqual(MARKER_PREFIX, "<!-- agent-estate:v1 ")
+        self.assertNotIn("hill90-supervisor", rendered)
+
+    def test_marker_round_trips_through_the_new_prefix(self):
+        # Write with the new format, read it back.
+        task_id = "gh.jonhill90.Hill90.issue.42"
+        payload = {
+            "number": 42,
+            "url": ISSUE_URL,
+            "title": "Review the deploy guard",
+            "state": "OPEN",
+            "body": task_marker(ISSUE_URL, task_id),
+            "comments": [],
+        }
+        self.assertTrue(payload["body"].startswith("<!-- agent-estate:v1 "))
+
+        record = GithubTaskSource(FakeGh(payload)).load(source_url=ISSUE_URL, source_ref=SHA)
+
+        self.assertEqual(task_id, record["task_id"])
+        self.assertEqual(ISSUE_URL, record["source_url"])
+
+    def test_marker_reads_the_retired_hill90_supervisor_prefix_for_backward_compat(self):
+        # agent-estate#767: a marker written under the old tenant-named
+        # format, verbatim, must still parse -- nothing may retire reading
+        # it in this change.
+        task_id = "gh.jonhill90.Hill90.issue.42"
+        old_format_body = (
+            "<!-- hill90-supervisor:v1 "
+            + json.dumps(
+                {"kind": "task", "source_ref": SHA, "source_url": ISSUE_URL, "task_id": task_id},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + " -->"
+        )
+        payload = {
+            "number": 42,
+            "url": ISSUE_URL,
+            "title": "Review the deploy guard",
+            "state": "OPEN",
+            "body": old_format_body,
+            "comments": [],
+        }
+
+        record = GithubTaskSource(FakeGh(payload)).load(source_url=ISSUE_URL, source_ref=SHA)
+
+        self.assertEqual(task_id, record["task_id"])
+        self.assertEqual(ISSUE_URL, record["source_url"])
 
     def test_missing_or_moving_ref_is_rejected_before_github_can_be_trusted(self):
         source = GithubTaskSource(lambda command: self.fail(f"unexpected gh call: {command}"))
