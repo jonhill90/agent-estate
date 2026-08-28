@@ -37,7 +37,7 @@ worth stealing here is a *pattern*, not a package.
 
 Two things Jon already found stand as-is:
 
-- **`microsoft/hve-core`** (cloned at `/Users/jon/source/repos/skills-research/hve-core`,
+- **`microsoft/hve-core`** (github.com/microsoft/hve-core,
   MIT). Its `evals/baseline-equivalence` suite is a working two-arm ablation
   harness — identical stimuli run against an empty baseline and a
   materialized-agent environment, compared by an LLM judge constrained to a
