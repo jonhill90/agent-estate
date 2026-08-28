@@ -1,12 +1,12 @@
 #!/bin/bash
 # agent-supervisor#367: director-loop.sh must notice live/ is gone and try
 # to recover it, because it is the one process on a fixed cadence that keeps
-# running when live/ does not exist -- its own LaunchAgent
-# (launchd/com.jonhill.director-loop.plist) invokes it from the shared
-# checkout, never from live/ itself, unlike watchdog.sh's LaunchAgent (see
-# director-loop.sh's own header comment on this check). This is what closes
-# the "nothing noticed until a downstream command failed with ENOENT" gap
-# from the issue.
+# running when live/ does not exist -- its own LaunchAgent (rendered from
+# scripts/supervisor/launchd/templates/com.jonhill.director-loop.plist.tmpl,
+# #699/#702) invokes it from the shared checkout, never from live/ itself,
+# unlike watchdog.sh's LaunchAgent (see director-loop.sh's own header comment
+# on this check). This is what closes the "nothing noticed until a
+# downstream command failed with ENOENT" gap from the issue.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOOP="$HERE/../../scripts/supervisor/director-loop.sh"

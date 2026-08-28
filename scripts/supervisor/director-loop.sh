@@ -246,7 +246,10 @@ esac
 # --- process cd'd into a directory that no longer exists never starts.
 # --- THIS script is the one already on an independent, live/-agnostic
 # --- cadence: its own LaunchAgent invokes it from $HERE, the shared
-# --- checkout (launchd/com.jonhill.director-loop.plist), every 900s,
+# --- checkout (rendered from
+# --- scripts/supervisor/launchd/templates/com.jonhill.director-loop.plist.tmpl
+# --- via render-plists.sh, #699/#702 -- no checked-in copy of the installed
+# --- plist itself), every 900s,
 # --- regardless of whether live/ exists at all -- exactly the "does the
 # --- caller survive the failure it guards against" property this codebase
 # --- has learned to check for (CLAUDE.md). loop-tick.md's own step 0 already
