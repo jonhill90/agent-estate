@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jonhill.quota-watch</string>
+  <!-- launchd IS the loop. quota-watch.sh --once does one poll and exits, so a
+       hung codexbar cannot wedge a long-lived process the way it did on
+       2026-08-16, when the watcher blocked for three hours while pgrep still
+       reported it alive. StartInterval restarts it regardless. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@@AGENT_SUPERVISOR_REPO@@/scripts/supervisor/quota-watch.sh</string>
+    <string>--once</string>
+    <string>--target</string>
+    <string>agent-supervisor:@13</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>300</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/jon/.local/bin</string>
+    <key>HOME</key>
+    <string>/Users/jon</string>
+    <!-- codexbar needs USER: measured 2026-08-18, 5/5 exitCode 0 with it set,
+         3/3 exitCode 69 (fetch-failed) without. launchd sets neither USER nor
+         LOGNAME, which is why every scheduler read the quota meter as broken
+         while the identical call from a shell returned a percentage. -->
+    <key>USER</key>
+    <string>jon</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/jon/.local/state/agent-dotfiles-supervisor/quota-watch.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jon/.local/state/agent-dotfiles-supervisor/quota-watch.log</string>
+</dict>
+</plist>
