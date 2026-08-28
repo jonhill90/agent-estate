@@ -47,9 +47,17 @@ if [ -f "$DEFAULTS" ]; then
 import sys
 path = sys.argv[1]
 text = open(path).read()
-old = 'agent-supervisor'
-assert old in text, "shared default literal not found"
-open(path, 'w').write(text.replace(old, 'agent-dotfiles', 1))
+# #734 split AGENT_SUPERVISOR_DEFAULT_LANES_SESSION off from
+# AGENT_SUPERVISOR_DEFAULT_REPO and pinned it to the 'agent-supervisor'
+# literal directly, in prose as well as code (the comment above it explains
+# why, by name, several times) -- so a bare first-occurrence string replace
+# no longer reliably hits the load-bearing line; it can just as easily land
+# in a comment and mutate nothing this test can observe. Target the actual
+# default-value literal instead.
+old = 'AGENT_SUPERVISOR_DEFAULT_LANES_SESSION:-agent-supervisor}'
+assert old in text, "shared lanes-session default literal not found"
+new = 'AGENT_SUPERVISOR_DEFAULT_LANES_SESSION:-agent-dotfiles}'
+open(path, 'w').write(text.replace(old, new, 1))
 PY
   out=$(env -i HOME="$HOME" NOTIFY_ENV= PATH="/usr/bin:/bin" bash -c '. "$1"; lanes_session_or_default' _ "$D/session-defaults.sh" 2>&1)
   want "mutation-check: breaking the shared default is detected" "agent-dotfiles" "$out"
