@@ -393,6 +393,20 @@ def _classify_decision_text(decision_text):
 #   never as a qualifier on the decision word itself.
 def _normalise_decision_text(rest):
     text = rest.strip()
+    # agent-estate#798 (found reviewing agent-estate#797): fold an INTRAWORD
+    # underscore -- one with an alphanumeric on both sides, like the `_` in
+    # `REQUEST_CHANGES` -- to a space before any emphasis handling runs.
+    # `REQUEST_CHANGES` is GitHub's own spelling for a request-changes
+    # review and will keep being written regardless of what any doc says
+    # (agent-supervisor#475's hyphen fold below exists for the same reason).
+    # This mirrors GFM itself: GitHub disables `_`-emphasis specifically for
+    # an intraword underscore (`snake_case` never renders italic on GitHub),
+    # so treating an intraword `_` as a literal character rather than an
+    # emphasis marker matches GitHub's own rendering, not just this parser's
+    # convenience. A BOUNDARY underscore (`_APPROVE_`, wrapping the whole
+    # decision) is deliberately left alone here -- it still hits the
+    # emphasis-stripping regexes below, unchanged from before this fix.
+    text = re.sub(r"(?<=[A-Za-z0-9])_(?=[A-Za-z0-9])", " ", text)
     # Strip any OPENING emphasis wrapping the decision (`**APPROVE**` after
     # a plain, unbolded label -- #331: the old code cut at the first `**`
     # it found, which for this shape IS the opening pair, truncating the

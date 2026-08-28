@@ -500,6 +500,74 @@ EOF
 rc=$?
 if [ "$rc" -eq 0 ]; then ok "a complete Verdict:/Review-Lane:/Reviewed-SHA: block is not refused by the completeness lint"; else bad "a complete trailer block was wrongly refused (rc=$rc): $(cat "$D/block/good_err")"; fi
 
+# =========================================================================
+# 9. --expect-verdict (agent-estate#719 item 1): a caller that states its own
+#    intent -- this post must carry a verdict -- gets a refusal naming the
+#    exact missing shape when the body has no trailer at all, and callers
+#    that do NOT pass the flag keep today's behaviour unchanged (an ordinary
+#    comment with no trailer still posts).
+# =========================================================================
+mkdir -p "$D/expect/bin"
+EXPECT_LOG="$D/expect/gh.log"
+EXPECT_SENT="$D/expect/sent.body"
+cat > "$D/expect/bin/gh" <<EOF
+#!/bin/bash
+echo "gh called: \$*" >> "$EXPECT_LOG"
+if [ "\$1" = "pr" ] && [ "\$2" = "comment" ]; then
+  cat > "$EXPECT_SENT"
+  echo "https://github.com/o/r/pull/41#issuecomment-41"
+  exit 0
+elif [ "\$1" = "api" ]; then
+  cat "$EXPECT_SENT"
+  exit 0
+fi
+exit 9
+EOF
+chmod +x "$D/expect/bin/gh"
+
+# 9a. RED: the exact agent-estate#719 item-1 shape -- a review that ends in
+#     prose with no trailer at all -- is refused at exit 10 when the caller
+#     passes --expect-verdict, and gh is never invoked.
+: > "$EXPECT_LOG"
+PATH="$D/expect/bin:$PATH" \
+  bash "$POST_VERDICT" o/r 41 --expect-verdict <<'EOF' >"$D/expect/noverdict_out" 2>"$D/expect/noverdict_err"
+This PR looks correct to me. The patch-id comparison handles the rebase
+case properly and the test coverage is thorough. Recommend APPROVE.
+EOF
+rc=$?
+if [ "$rc" -eq 10 ]; then ok "--expect-verdict refuses a trailer-less prose ending (got $rc)"; else bad "--expect-verdict did not refuse a trailer-less body (rc=$rc)"; fi
+if [ ! -s "$EXPECT_LOG" ]; then ok "gh is never invoked for the --expect-verdict refusal"; else bad "gh was invoked despite the refusal: $(cat "$EXPECT_LOG")"; fi
+if grep -q "no Verdict:/Review-Lane:/Reviewed-SHA: trailer at all" "$D/expect/noverdict_err"; then
+  ok "the --expect-verdict refusal names what is missing"
+else
+  bad "no explanation of the missing trailer: $(cat "$D/expect/noverdict_err")"
+fi
+
+# 9b. GREEN (the other direction of the mutation): the SAME trailer-less
+#     prose body, WITHOUT --expect-verdict, still posts exactly as it always
+#     has -- this flag must not make post-verdict.sh more restrictive for a
+#     caller that never opted in.
+: > "$EXPECT_LOG"
+PATH="$D/expect/bin:$PATH" \
+  bash "$POST_VERDICT" o/r 41 <<'EOF' >"$D/expect/noflag_out" 2>"$D/expect/noflag_err"
+This PR looks correct to me. The patch-id comparison handles the rebase
+case properly and the test coverage is thorough. Recommend APPROVE.
+EOF
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "the same trailer-less body without --expect-verdict still posts (unchanged behaviour)"; else bad "omitting --expect-verdict changed existing behaviour (rc=$rc): $(cat "$D/expect/noflag_err")"; fi
+
+# 9c. GREEN: --expect-verdict with a genuine, complete trailer block posts
+#     normally -- the flag never blocks a real verdict.
+: > "$EXPECT_LOG"
+PATH="$D/expect/bin:$PATH" \
+  bash "$POST_VERDICT" o/r 41 --expect-verdict <<EOF >"$D/expect/good_out" 2>"$D/expect/good_err"
+**Verdict:** APPROVE, a complete trailer block
+Review-Lane: revlane:3
+Reviewed-SHA: $REVIEWED_SHA
+EOF
+rc=$?
+if [ "$rc" -eq 0 ]; then ok "--expect-verdict with a genuine trailer block posts normally"; else bad "--expect-verdict wrongly refused a genuine trailer (rc=$rc): $(cat "$D/expect/good_err")"; fi
+
 echo
 echo "post-verdict.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
