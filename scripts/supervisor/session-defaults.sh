@@ -19,10 +19,27 @@
 # consumer now derives from this ONE variable; only cli.py's
 # DEFAULT_REPOSITORIES and refresh_brief_resume.py's REPOS (python, no shared
 # import path to this file) still need their own edit at rename time.
-AGENT_SUPERVISOR_DEFAULT_REPO="${AGENT_SUPERVISOR_DEFAULT_REPO:-agent-supervisor}"
+AGENT_SUPERVISOR_DEFAULT_REPO="${AGENT_SUPERVISOR_DEFAULT_REPO:-agent-estate}"
 AGENT_SUPERVISOR_DEFAULT_REPO_GITHUB="${AGENT_SUPERVISOR_DEFAULT_REPO_GITHUB:-jonhill90/$AGENT_SUPERVISOR_DEFAULT_REPO}"
 
-AGENT_SUPERVISOR_DEFAULT_LANES_SESSION="${AGENT_SUPERVISOR_DEFAULT_LANES_SESSION:-$AGENT_SUPERVISOR_DEFAULT_REPO}"
+# #734: this rename found the ONE thing #682's centralisation didn't
+# anticipate -- the GitHub identity above and the tmux session name below
+# fed from the same literal, and after a rename they stop wanting the same
+# answer at the same moment. The GitHub slug is wrong the instant the repo
+# is renamed and should flip immediately (done above). The tmux session name
+# can't: the warm lane pool measured live at #734 time still has its 6
+# windows (4 free) sitting in a session literally named `agent-supervisor`,
+# and `agent-estate`'s own session had 1 -- flipping this default without
+# moving the pool sends every future dispatch at a nearly-empty session
+# (`dispatch.sh` reproduced this directly: "no free lane in session
+# 'agent-estate'" while 4 sat idle one session over). So this is pinned to
+# the literal, independently of AGENT_SUPERVISOR_DEFAULT_REPO, on purpose --
+# not an oversight, not "should have derived automatically". Converging it
+# back to deriving from AGENT_SUPERVISOR_DEFAULT_REPO is #739, and requires
+# actually moving or draining the live pool first; do not "simplify" this
+# back to `${AGENT_SUPERVISOR_DEFAULT_REPO}` before that lands, or dispatch
+# silently starts targeting a session with no free lanes again.
+AGENT_SUPERVISOR_DEFAULT_LANES_SESSION="${AGENT_SUPERVISOR_DEFAULT_LANES_SESSION:-agent-supervisor}"
 
 lanes_session_or_default() {
   printf '%s\n' "${LANES_SESSION:-$AGENT_SUPERVISOR_DEFAULT_LANES_SESSION}"

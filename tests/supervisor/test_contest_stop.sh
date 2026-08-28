@@ -67,7 +67,7 @@ out=$(run "$S3" --claim "no phase 4 surface" 2>&1); rc=$?
 want_exit "fires: exits 0" "$rc" 0 "$out"
 call=$(cat "$S3/dispatch-call.log" 2>/dev/null || echo "<no call recorded>")
 want_contains "fires: dispatches issue 150 (not the merged/unrelated 186)" "150 contest-stop" "$call"
-want_contains "fires: dispatches into jonhill90/agent-supervisor" "jonhill90/agent-supervisor" "$call"
+want_contains "fires: dispatches into jonhill90/agent-estate" "jonhill90/agent-estate" "$call"
 want_contains "fires: passes --not-a-review" "--not-a-review" "$call"
 if [ -f "$S3/.contest-stop.last" ]; then ok "fires: stamps the rate-limit file"; else bad "fires: stamps the rate-limit file" "$out"; fi
 
