@@ -286,6 +286,20 @@ func TestTrailerRegexTableCases(t *testing.T) {
 			"Verdict: APPROVE\r\nReviewed-SHA:\r\n" + head + "\r\n", false, ""},
 		{"reviewed_sha_crlf_value", reviewedSHARE,
 			"Reviewed-SHA: " + head + "\r\n", true, head},
+
+		// agent-tui#112 item 4: a trailer at end-of-input with no trailing
+		// newline at all -- `$` in (?m) mode also matches end-of-string, so
+		// these must match same as the newline-terminated cases above.
+		{"review_lane_no_trailing_newline_value", reviewLaneRE,
+			"Review-Lane: build-5", true, "build-5"},
+		{"review_lane_no_trailing_newline_blank", reviewLaneRE,
+			"Verdict: APPROVE\nReview-Lane:", false, ""},
+		{"author_lane_no_trailing_newline_value", authorLaneRE,
+			"Author-Lane: build-2", true, "build-2"},
+		{"reviewed_sha_no_trailing_newline_value", reviewedSHARE,
+			"Reviewed-SHA: " + head, true, head},
+		{"reviewed_sha_no_trailing_newline_blank", reviewedSHARE,
+			"Verdict: APPROVE\nReviewed-SHA:", false, ""},
 	}
 
 	for _, tc := range cases {
