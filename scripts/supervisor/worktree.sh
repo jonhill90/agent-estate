@@ -227,11 +227,35 @@ _gc_lsof_bin() {
   return 1
 }
 
+# agent-supervisor#762: `cmd_gc` below fetches `tmux list-panes -a` ONCE for
+# the whole sweep and caches it in `_GC_PANES`/`_GC_PANES_RC` before the
+# per-worktree loop starts -- 157 registered worktrees means 157 avoidable
+# subprocess spawns otherwise, one per candidate, for output that cannot
+# have changed between them (a sweep is one point-in-time snapshot, not 157
+# of them). `_GC_PANES_CACHED` distinguishes "no caller has populated the
+# cache yet" from "populated, and it happens to be empty" (a real tmux
+# server with zero panes is not the same fact as "tmux could not be asked"
+# -- the latter must return 2 and bias to keep, the former legitimately
+# means no pane occupies anything and this check must be free to say so).
+# A caller outside `cmd_gc` (a test invoking `_gc_is_live`/
+# `_gc_tmux_occupies` directly, as this file's own test suite does) leaves
+# the cache unset and gets the original per-call `tmux list-panes`, so the
+# batching is an optimisation `cmd_gc` opts into, not a contract every
+# caller must satisfy first.
+_GC_PANES_CACHED=""
+_GC_PANES=""
+_GC_PANES_RC=0
+
 # 0 = a pane's cwd is inside $1; 1 = tmux answered and none matched;
 # 2 = tmux itself could not be asked (no server, tmux missing, ...).
 _gc_tmux_occupies() {
   local target_real="$1" panes pane pane_real
-  panes=$(tmux list-panes -a -F '#{pane_current_path}' 2>/dev/null) || return 2
+  if [ -n "$_GC_PANES_CACHED" ]; then
+    [ "$_GC_PANES_RC" -eq 0 ] || return 2
+    panes="$_GC_PANES"
+  else
+    panes=$(tmux list-panes -a -F '#{pane_current_path}' 2>/dev/null) || return 2
+  fi
   while IFS= read -r pane; do
     [ -n "$pane" ] || continue
     pane_real=$(cd "$pane" 2>/dev/null && pwd -P) || continue
@@ -921,6 +945,15 @@ gc)
     paths+=("$path")
     branches+=("$branch")
   fi
+
+  # agent-supervisor#762: one `tmux list-panes -a` for the whole sweep, not
+  # one per candidate -- see `_gc_tmux_occupies`'s own comment on
+  # `_GC_PANES_CACHED` for why this is safe (a sweep is one point-in-time
+  # snapshot; querying tmux again per candidate cannot see anything the
+  # first query didn't, it can only make the sweep slower and give a later
+  # candidate a DIFFERENT snapshot than an earlier one saw).
+  _GC_PANES=$(tmux list-panes -a -F '#{pane_current_path}' 2>/dev/null); _GC_PANES_RC=$?
+  _GC_PANES_CACHED=1
 
   removed=0 skipped=0
   for i in "${!paths[@]}"; do
