@@ -144,6 +144,19 @@ and it is longer and more specific than this line.
   when the weekly cap or session quota is nearly gone, and self-correct the
   watcher if it hangs; `quota-watch.sh` resolves the live Director via the
   supervisor lease, not a name guess (#673)
+- `launchd/render-plists.sh` plus `launchd/templates/*.plist.tmpl` — render
+  the 4 live launchd jobs' plists with a versioned, rename-safe entry-point
+  path instead of a hardcoded checkout path (#682/#699); a rendered plist
+  cannot be proven to fire on this machine's current boot from the repo alone
+
+**Estate loop** (`scripts/estate-loop/` — a separate build loop: no
+supervisor, no ledger, no lease; versioned in-repo as of #695, previously
+outside it entirely):
+- `check.sh` — the loop contract driver (`agent-dotfiles/docs/loop-engineering.md`)
+- `status.sh` — deterministic estate status, one mechanical call replacing
+  what a tick used to gather by hand
+- `tick-scan.sh` — the mechanical half of a tick: detection and gated action,
+  no judgement
 
 **Telegram / notify:**
 - `notify.sh` — send Jon a short escalation message (Telegram first, iMessage
@@ -198,6 +211,9 @@ and it is longer and more specific than this line.
   (source transcripts, not `mine_prompts.py --store`'s live path), and
   populate `prompts.project` from the transcript's own directory since
   neither `record_prompt` nor `mine_prompts.py` sets it (#696)
+- `prompt_capture_hook.py` — the `UserPromptSubmit` hook that captures and
+  classifies a prompt at submit time instead of relying on someone
+  remembering to re-crawl; registered in `.claude/settings.json` (#687/#693)
 - `prior-attempts.sh` — what did the last agent on this issue already find
 - `acceptance.sh` — re-run a CLOSED issue's acceptance test, reopen if back
 
@@ -213,11 +229,15 @@ and it is longer and more specific than this line.
   not by reading a diff
 - `refresh_brief_resume.py` — regenerate a brief's `## Resume point` block
 
-`tests/supervisor/` — 199 tracked files (`git ls-files tests/supervisor | wc
+`tests/supervisor/` — 279 tracked files (`git ls-files tests/supervisor | wc
 -l`, checked at write time; re-run, don't trust this number stale): the suite
 is the contract. `python3 -m unittest discover -s tests/supervisor` has not
 reliably finished inside one working session's time budget; run a targeted
-test file, not a full discovery, when you only touched one thing.
+test file, not a full discovery, when you only touched one thing. The four
+former monolithic files (`test_dispatch.sh`, `test_verdict.py`, `test_cli.py`,
+`test_core.py`) no longer exist — each was split by topic/`TestCase` class
+(#683) into the `test_dispatch_*`, `test_verdict_*`, `test_cli_*` and
+`test_core_*` families; look there, not for the single file.
 
 ## The guards a lane will actually hit
 
@@ -407,7 +427,7 @@ guard and a red transcript can both be telling the truth at once.
   without a `<!-- ui-evidence:v1 -->` marker in the body or a comment.
 
 ---
-*Last checked against the tree at `1e2d4ae` (2026-08-27). If `git log
+*Last checked against the tree at `b083ca4` (2026-08-27). If `git log
 --oneline scripts/supervisor | head -1` names something newer than that and
 this file hasn't moved, treat any specific claim above as unverified until
 you re-check it — don't trust it just because it's written down.*
