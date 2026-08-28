@@ -12,9 +12,12 @@ import (
 var titleStyle = lipgloss.NewStyle().Bold(true)
 var legendStyle = lipgloss.NewStyle().Faint(true)
 
-// unknown is what Skill.LastEval/InvocationCount render as -- never "0" or
-// blank, the same "unknown, not zero" discipline internal/agents.Row's
-// Model/Cost fields already enforce for this exact shape of gap.
+// unknown is what Skill.LastEval renders as -- never "0" or blank, the
+// same "unknown, not zero" discipline internal/agents.Row's Model/Cost
+// fields already enforce for this exact shape of gap. INVOCATIONS no
+// longer uses this value (agent-tui#174): it renders a real count,
+// InvocationsNoHistory, or InvocationsStoreUnreadable instead -- see
+// invocations.go.
 const unknown = "unknown"
 
 // selectedStyle marks m.selected the same way internal/board and
@@ -65,9 +68,16 @@ func (m Model) View() string {
 			if verdict == "" {
 				verdict = VerdictUnevaluated
 			}
-			invocations := unknown
+			// Never "unknown" here: InvocationFetcher (invocations.go)
+			// always sets InvocationState to one of the two named
+			// sentinels whenever InvocationCount is nil, so a real zero
+			// and an absent/unreadable cache render as different words
+			// (agent-tui#174, the whole reason agent-tui#164 existed).
+			invocations := s.InvocationState
 			if s.InvocationCount != nil {
 				invocations = fmt.Sprintf("%d", *s.InvocationCount)
+			} else if invocations == "" {
+				invocations = unknown
 			}
 			line := fmt.Sprintf("%-28s %-40s %-10s %-18s %s", truncate(name, 28), truncate(s.Description, 40), truncate(lastEval, 10), truncate(verdict, 18), invocations)
 			if i == m.selected {
