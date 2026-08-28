@@ -2,19 +2,20 @@ package reposcan
 
 // This file adds a second, independent guard to the reposcan package:
 // agent-estate#768 item 4, "the stop-the-bleeding guard" for the director's
-// naming decision (#767's own doc comment / agent-estate#768's issue body).
-// The decision was B: fix the wire format now (#769 shipped that half),
-// stop new naming debt landing, and let the ~100 pre-rename `agent-supervisor`
-// references and ~285 `agent-tui` references age out via their own deferred
-// sweeps (agent-estate#768 items 1-2) rather than blanket-`sed`ing them now
-// (#729 already established that discipline: some references are true
-// statements about the past). This guard enforces only the "stop new debt"
-// half; it never touches an existing reference.
+// naming decision (agent-estate#767's own doc comment / agent-estate#768's
+// issue body). The decision was B: fix the wire format now
+// (agent-estate#769 shipped that half), stop new naming debt landing, and
+// let the ~100 pre-rename `agent-supervisor` references and ~285
+// `agent-tui` references age out via their own deferred sweeps
+// (agent-estate#768 items 1-2) rather than blanket-`sed`ing them now
+// (agent-estate#729 already established that discipline: some references
+// are true statements about the past). This guard enforces only the
+// "stop new debt" half; it never touches an existing reference.
 //
 // Two forbidden shapes, exactly the two agent-estate#768 item 4 names --
-// deliberately not a wider "hill90" or "agent-supervisor" ban, see below:
+// deliberately not a wider "hill90" or `agent-supervisor` ban, see below:
 //
-//   - hill90-supervisor / hill90-codex-supervisor: this ESTATE naming its
+//   - `hill90-supervisor` / `hill90-codex-supervisor`: this ESTATE naming its
 //     OWN state directories after the tenant it operates (agent-estate#768
 //     item 2). Exact-name denylist, not a wildcard on "hill90-*": the tenant's
 //     own repos and env var -- hill90-app, hill90-docs, hill90-ui, hill90-web,
@@ -25,7 +26,7 @@ package reposcan
 //     by the issue, are covered. Widening this to a wildcard would ban
 //     correct code; see the package doc comment on cross_repo_references.go
 //     for the same "narrow but honest" posture applied to bare '#N' scope.
-//   - agent-supervisor, unqualified: the dead pre-rename repo slug. A
+//   - `agent-supervisor`, unqualified: the dead pre-rename repo slug. A
 //     mention explicitly qualified with an owning path segment
 //     (`jonhill90/agent-supervisor`, or any `.../agent-supervisor`) is
 //     treated as a deliberate, specific pointer -- same convention the
