@@ -68,7 +68,17 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 INTERVAL="${QUOTA_WATCH_INTERVAL:-300}"
-TARGET="${QUOTA_WATCH_TARGET:-agent-supervisor:@1}"
+# agent-estate#789: `agent-supervisor:@1` is the retired session this
+# default named -- gone since the naming convergence, confirmed dead by
+# `tmux list-sessions` and by six straight refusal lines in this script's
+# own log (2026-08-27T14:30 through 2026-08-28T18:22). estate:@2 is the
+# SAME live Director pane director-loop.sh's own default already resolves
+# to for the identical problem (agent-estate#752/#760) -- reused here
+# rather than retyped as an independent literal, so the two watchers agree
+# on where the Director actually lives. `resolve_target` below is still the
+# real safety net if this ever goes stale again: it now searches every live
+# session for the target, not only this one.
+TARGET="${QUOTA_WATCH_TARGET:-estate:@2}"
 # agent-supervisor#662: the ledger's own record of who holds the supervisor
 # role (`cli.py supervisor-lease`, `host:pid`) -- consulted by resolve_target
 # below BEFORE it ever falls back to guessing by window name. Same
@@ -173,11 +183,25 @@ pane_for_pid() {
 #      found (every case this script ran under before #662, and still a
 #      legitimate one -- a lease-unaware invocation must fail OPEN into the
 #      old behaviour, not refuse outright) -- the OLD by-name heuristic,
-#      still scoped to the configured session, still refusing on zero or
-#      more than one match. This is now explicitly the LOW-CONFIDENCE path:
-#      it is what produced #662's incident, so a resolution that takes it
-#      says so loudly (a page, not just a log line -- see send_takeover_alarm
-#      below), not only when a send later fails to confirm.
+#      still refusing on zero or more than one match. This is now explicitly
+#      the LOW-CONFIDENCE path: it is what produced #662's incident, so a
+#      resolution that takes it says so loudly (a page, not just a log line
+#      -- see send_takeover_alarm below), not only when a send later fails
+#      to confirm.
+#
+# agent-estate#789: path 3 used to search only `${TARGET%%:*}` -- the
+# session parsed out of the CONFIGURED target, which is exactly the value
+# that is stale when this path is even reached. On 2026-08-27 the director
+# moved wholesale out of `agent-supervisor` and the stale default's own
+# session parse pointed the search at a session with zero matching windows,
+# so it correctly refused rather than resolving -- but it could not resolve
+# either, because the live `supervisor`-named windows in `agent-estate` and
+# `estate` were never in scope to begin with (measured directly, #789). The
+# fix widens path 3 to every LIVE session (`tmux list-sessions`, never a
+# hardcoded or guessed list), same "search everything live, not just the
+# stale-recorded location" shape #781 used for
+# reconcile_lane_completions.py's equivalent problem there. Still refuses on
+# zero or more than one match -- now counted across all sessions, not one.
 #
 # UNLIKE director-loop.sh's single-purpose `director` session, this script's
 # session legitimately holds many windows -- one per lane -- so "fall back
@@ -186,7 +210,7 @@ pane_for_pid() {
 # for path 3 is still the window NAME: bootstrap-session.sh already names
 # the supervisor's own window `supervisor` (LANES_SUPERVISOR_NAME), and a
 # respawned window can be given that name back even though it can never be
-# given its old @id back.
+# given its old @id back -- possibly in a different session than before.
 #
 # `RESOLUTION_KIND` records which path resolved (direct/lease/guessed) so a
 # caller (send_message's own log line) can say how confident the delivery
@@ -209,26 +233,36 @@ resolve_target() {
     fi
   fi
 
-  local session="${TARGET%%:*}"
+  # agent-estate#789: scan every LIVE session, never only the one parsed out
+  # of $TARGET -- that session is exactly what is stale by the time this
+  # path runs. A live enumeration (`tmux list-sessions`), same as
+  # `_resolve_renamed_session`'s own `tmux list-sessions` check in
+  # reconcile_lane_completions.py (#781) -- never a hardcoded or guessed
+  # session list.
   local name="${LANES_SUPERVISOR_NAME:-supervisor}"
-  local matches count
-  matches=$(tmux list-windows -t "$session" -F '#{window_id}	#{window_name}' 2>/dev/null \
-    | awk -F'\t' -v n="$name" '$2==n{print $1}')
+  local live_sessions s matches count
+  live_sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null)
+  matches=$(
+    while IFS= read -r s; do
+      [ -n "$s" ] || continue
+      tmux list-windows -t "$s" -F '#{session_name}	#{window_id}	#{window_name}' 2>/dev/null
+    done <<<"$live_sessions" | awk -F'\t' -v n="$name" '$3==n{print $1":"$2}'
+  )
   count=$(grep -c . <<<"$matches")
   if [ "$count" -eq 1 ]; then
-    resolved="$session:$(tr -d '[:space:]' <<<"$matches")"
-    log "configured target $TARGET is gone (tmux renumbered across a restart), and the supervisor lease did not resolve a live pane; GUESSING by window name '$name' within $session -- resolved to $resolved. This is the low-confidence path (#662): a same-named leftover in the WRONG session looks identical to this from inside $session alone."
+    resolved=$(tr -d '[:space:]' <<<"$matches")
+    log "configured target $TARGET is gone (tmux renumbered across a restart), and the supervisor lease did not resolve a live pane; GUESSING by window name '$name' across every live session -- resolved to $resolved. This is the low-confidence path (#662): a same-named leftover ANYWHERE looks identical to this from a name search alone."
     TARGET="$resolved"
     RESOLUTION_KIND="guessed"
     if send_takeover_alarm "quota-watch resolved by a name guess, not the lease (#662)" \
-      "Configured target was gone. The supervisor lease did not resolve to a live pane (absent, unreadable, or its process could not be located), so quota-watch.sh fell back to matching window name '$name' within session $session -- resolved to $resolved. This is the exact low-confidence path that delivered a wind-down to a stale leftover window before (#662): verify by hand that $resolved is really the live director, not an old layout's leftover. tmux attach -t $session"; then
+      "Configured target was gone. The supervisor lease did not resolve to a live pane (absent, unreadable, or its process could not be located), so quota-watch.sh fell back to matching window name '$name' across every live session -- resolved to $resolved. This is the exact low-confidence path that delivered a wind-down to a stale leftover window before (#662): verify by hand that $resolved is really the live director, not an old layout's leftover. tmux attach -t ${resolved%%:*}"; then
       log "escalated the name-guess resolution"
     else
       log "escalation for the name-guess resolution did NOT send -- still unverified, see notify.log"
     fi
     return 0
   fi
-  log "configured target $TARGET is gone, the supervisor lease did not resolve a live pane, and $count window(s) in '$session' are named '$name' -- refusing to guess which is the supervisor pane; a human should look"
+  log "configured target $TARGET is gone, the supervisor lease did not resolve a live pane, and $count window(s) across every live session are named '$name' -- refusing to guess which is the supervisor pane; a human should look"
   return 1
 }
 

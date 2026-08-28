@@ -242,7 +242,10 @@ else
     bad "mutation confirmed: the real lease-holder's pane receives NO NEW delivery under the reverted code" \
       "S2 'QUOTA IS LOW' count before=$s2_before after=$s2_after (expected unchanged)"
   fi
-  if grep -q "GUESSING by window name 'supervisor' within $S1" "$STATE2/quota-watch.out"; then
+  # agent-estate#789: the guess path now searches every live session, not
+  # only the stale-configured one -- the log line no longer names $S1
+  # specifically, but still says it guessed by name (never the lease).
+  if grep -q "GUESSING by window name 'supervisor' across every live session" "$STATE2/quota-watch.out"; then
     ok "mutation confirmed: the log itself says it GUESSED by name, exactly #662's own log line"
   else
     bad "mutation confirmed: the log itself says it GUESSED by name" "$(cat "$STATE2/quota-watch.out")"

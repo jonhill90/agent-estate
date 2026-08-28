@@ -89,6 +89,79 @@ tick "$STATE" "$LOG" "agent-supervisor" "agent-supervisor:@1" "$WINS"
 want_count "the configured target still exists -> sent directly, no resolution needed" \
   "send-keys -t =agent-supervisor:@1" "$LOG" 3
 
+# --- case 5: agent-estate#789's own reproduction -- the SESSION named by
+#             the stale configured target has zero matching windows, but a
+#             DIFFERENT live session does. The guess path must search every
+#             live session, not only the one parsed from the stale target,
+#             or this is exactly #789's own "refuses and cannot find the
+#             live supervisor panes that do exist in agent-estate and
+#             estate" defect. -----------------------------------------------
+STATE=$(mktemp -d "$D/state.XXXXXX"); LOG="$D/log.5"; : > "$LOG"
+PATH="$D:$PATH" QUOTA_GATE="$D/gate-winddown" TMUX_LOG="$LOG" SUPERVISOR_STATE="$STATE" \
+  TMUX_SESSIONS="agent-supervisor estate" \
+  TMUX_WINDOWS_NAMED_agent_supervisor='@11\tas311-fix\n@23\tfree-4' \
+  TMUX_WINDOWS_NAMED_estate='@2\tdirector\n@7\tsupervisor' \
+  QUOTA_WATCH_TARGET="agent-supervisor:@1" \
+  bash "$WATCH" --once >>"$STATE/quota-watch.out" 2>&1
+want_count "#789: configured session has no match, but a DIFFERENT live session does -> found and sent there" \
+  "send-keys -t =estate:@7" "$LOG" 3
+grep -q "resolved to estate:@7" "$STATE/quota-watch.out" \
+  && ok "#789: logs the cross-session resolution" \
+  || bad "#789: logs the cross-session resolution" "$(cat "$STATE/quota-watch.out")"
+
+# --- case 6: MUTATION CHECK -- with the guess path narrowed back to only
+#             the session parsed from the (stale) configured target, case
+#             5's own fixture must reproduce #789's failure: refuses,
+#             delivers nothing, even though estate:@7 is live and named
+#             right. A guard that only ever exercises the fixed behaviour
+#             would pass unchanged if this widening were reverted. ---------
+MUTANT_DIR=$(mktemp -d "$D/mutant.XXXXXX")
+cp -R "$HERE/../../scripts/supervisor/." "$MUTANT_DIR/"
+rm -rf "$MUTANT_DIR/__pycache__"
+chmod +x "$MUTANT_DIR"/*.sh
+MUTATED="$MUTANT_DIR/quota-watch.sh"
+patch_rc=0
+python3 - "$MUTATED" <<'PY' || patch_rc=$?
+import sys
+target = sys.argv[1]
+text = open(target).read()
+# Narrow the "every live session" enumeration back down to only the session
+# parsed from the (possibly stale) configured target -- reproducing #789's
+# own bug with one targeted line change, rather than reverting the whole
+# multi-session block (which makes the mutation fragile to unrelated
+# rewording nearby).
+marker = "  live_sessions=$(tmux list-sessions -F '#{session_name}' 2>/dev/null)\n"
+assert text.count(marker) == 1, "list-sessions enumeration line not found or not unique -- script shape changed"
+reverted = '  live_sessions="${TARGET%%:*}"  # MUTATED (agent-estate#789 test): back to one session\n'
+text = text.replace(marker, reverted, 1)
+open(target, "w").write(text)
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "#789 mutation: patched a mutant copy of quota-watch.sh, guess scoped back to one session" \
+    "could not patch $MUTATED (exit $patch_rc)"
+else
+  ok "#789 mutation: patched a mutant copy of quota-watch.sh, guess scoped back to one session"
+  bash -n "$MUTATED" || bad "mutant quota-watch.sh is still valid bash" "syntax error"
+
+  STATE6=$(mktemp -d "$D/state6.XXXXXX"); LOG6="$D/log.6"; : > "$LOG6"
+  PATH="$D:$PATH" QUOTA_GATE="$D/gate-winddown" TMUX_LOG="$LOG6" SUPERVISOR_STATE="$STATE6" \
+    TMUX_SESSIONS="agent-supervisor estate" \
+    TMUX_WINDOWS_NAMED_agent_supervisor='@11\tas311-fix\n@23\tfree-4' \
+    TMUX_WINDOWS_NAMED_estate='@2\tdirector\n@7\tsupervisor' \
+    QUOTA_WATCH_TARGET="agent-supervisor:@1" \
+    bash "$MUTATED" --once >>"$STATE6/quota-watch.out" 2>&1
+
+  if ! grep -q '^send-keys' "$LOG6"; then
+    ok "#789 mutation confirmed: session-scoped guess reproduces the incident -- fails loudly, sends nothing"
+  else
+    bad "#789 mutation confirmed: session-scoped guess reproduces the incident -- fails loudly, sends nothing" \
+      "$(cat "$LOG6")"
+  fi
+  grep -q "refusing to guess" "$STATE6/quota-watch.out" \
+    && ok "#789 mutation confirmed: refusal is logged, never a silent success" \
+    || bad "#789 mutation confirmed: refusal is logged, never a silent success" "$(cat "$STATE6/quota-watch.out")"
+fi
+
 echo
 echo "quota-watch target: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

@@ -33,7 +33,15 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 LEDGER="$STATE/ledger.sqlite3"
 STAMP="$STATE/.heartbeat.state"
-TARGET="${HEARTBEAT_TARGET:-director:@3}"
+# agent-estate#789 (found while auditing quota-watch.sh's identical bug):
+# `director` is the same retired session director-loop.sh's own default
+# named before #752/#760, and quota-watch.sh's before #789 -- gone since the
+# naming convergence. estate:@2 is the same live Director pane both of
+# those already resolve to; reused here rather than retyped as an
+# independent literal. The by-name fallback below (a handful of lines down)
+# still self-heals a renumbered @id within this session; it has no path for
+# a renamed SESSION, same gap #789 fixed structurally for quota-watch.sh.
+TARGET="${HEARTBEAT_TARGET:-estate:@2}"
 # How long the estate may show no ledger write before it counts as stalled.
 STALE_AFTER="${HEARTBEAT_STALE_AFTER:-1800}"
 # Never nudge more often than this, however long the stall runs. A stalled
