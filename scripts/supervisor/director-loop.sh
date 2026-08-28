@@ -37,6 +37,11 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# agent-estate#771: the corpus-judge dispatch step below needs the shared
+# AGENT_SUPERVISOR_DEFAULT_REPO_GITHUB default -- same source contest-stop.sh
+# already reads it from, rather than a second literal.
+# shellcheck source=./session-defaults.sh
+. "$HERE/session-defaults.sh"
 STATE="${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}"
 # agent-supervisor#654 Part 2: the loop-owned clone advance-live.sh already
 # keeps current for watchdog.sh (#99/#130) is also where the TICK prompt
@@ -228,8 +233,88 @@ if [ -x "$CORPUS_STAGE_SCRIPT" ]; then
   case "$corpus_rc" in
     0) ;;
     1)
-      send_takeover_alarm "director-loop: prompt corpus backlog crossed loud-absence threshold (#735)" \
-        "The unjudged prompt-corpus backlog crossed its threshold this tick ($corpus_metrics). Dispatch a judging lane: the current batch is already staged at $STATE/corpus-stage.json for it to read directly (itemize_prompts.py --extract's output, no re-derivation needed) -- judge it and run itemize_prompts.py --load, never from this loop. See agent-supervisor#721/#735 for how the threshold was measured."
+      # agent-estate#771: mechanically DISPATCH a judging lane the moment the
+      # backlog crosses the threshold #743 already computes above -- closing
+      # the gap #771's own recommendation named ("nothing consumes those
+      # numbers for dispatch"). This step never judges: it never calls a
+      # model and never runs itemize_prompts.py --load itself; it only
+      # decides WHEN judging is handed to a lane, exactly the #721 boundary
+      # ("judging stays a dispatched, reviewable lane"). Same mechanical,
+      # no-agent-judgement dispatch shape as contest-stop.sh's own call
+      # further down this file.
+      #
+      # DEDUP IS FREE, not reinvented here: dispatch.sh's own step 2 calls
+      # claim.sh, which refuses (exit 1, "already claimed") when
+      # $CORPUS_JUDGE_ISSUE is still assigned to the lane a prior tick
+      # dispatched -- and that claim stays held for exactly as long as the
+      # lane is running (claim.sh's release only fires from a terminal
+      # completion path: cli.py's complete/record-completion/
+      # cancel-open-task, or dispatch.sh's own pre-send abort paths). So a
+      # second tick firing while a judging lane is still in-flight hits the
+      # SAME guard every other dispatch in this estate already relies on for
+      # exactly-once delivery -- there is no second, parallel judging lane
+      # to race the staged batch. #771 itself is never closed by this
+      # dispatch (--not-a-review, and nothing here calls `gh issue close`),
+      # so it stays the standing home for every future batch per the brief.
+      #
+      # A refusal for any reason -- no free lane, quota wind-down, host
+      # pressure, or the dedup guard above -- is read as "try again next
+      # tick", never as a reason to judge inline from this loop; dispatch.sh
+      # itself already re-checks quota/host-pressure on every call, so this
+      # step does not need a second copy of either gate.
+      CORPUS_JUDGE_ISSUE="${CORPUS_JUDGE_ISSUE:-771}"
+      CORPUS_JUDGE_DISPATCH_SCRIPT="${CORPUS_JUDGE_DISPATCH_SCRIPT:-$HERE/dispatch.sh}"
+      CORPUS_JUDGE_REPO="${CORPUS_JUDGE_REPO:-$AGENT_SUPERVISOR_DEFAULT_REPO_GITHUB}"
+      CORPUS_JUDGE_REPO_PATH="${CORPUS_JUDGE_REPO_PATH:-$(cd "$HERE/../.." && pwd)}"
+      corpus_stage_file_path="${CORPUS_STAGE_FILE:-$STATE/corpus-stage.json}"
+      if [ -x "$CORPUS_JUDGE_DISPATCH_SCRIPT" ]; then
+        judge_brief="$STATE/.corpus-judge-brief.$$.md"
+        cat > "$judge_brief" <<EOF
+# Judge the staged prompt-corpus backlog (agent-estate#771)
+
+The loop tick's backlog gate crossed its threshold this run: $corpus_metrics
+(the count/age thresholds above are the #721/#735 measured values -- see
+corpus-stage.sh's own header for how they were derived).
+
+The current unjudged batch is already staged at $corpus_stage_file_path --
+itemize_prompts.py --extract's own output from this tick. Read it directly;
+do not re-run the query.
+
+## What to do
+
+1. Read $corpus_stage_file_path and judge each staged prompt (kind, weight,
+   status, a one-line why) -- see agent-estate#771's own resolved judging
+   pass for the shape a judgement takes.
+2. Load your judgements: itemize_prompts.py --load <your-judged-file>. Confirm
+   idempotency by running the same --load a second time and reporting both
+   counts (N written / 0 already present the second time).
+3. Re-query unitemised, read-only (sqlite3 -readonly or file:...?mode=ro),
+   and report the before/after count.
+4. Post your results as a PLAIN COMMENT on agent-estate#771. This issue stays
+   OPEN as the standing home for every batch -- do not close it and do not
+   open a new issue for this dispatch.
+
+## The boundary that must not move
+
+This dispatch is JUDGING, not code. No PR is expected; the comment on #771
+carrying your judgement table and before/after counts is the deliverable.
+Never write weight/kind from this loop -- only a dispatched lane judges.
+EOF
+        judge_log="$STATE/.corpus-judge.dispatch.log"
+        "$CORPUS_JUDGE_DISPATCH_SCRIPT" "$CORPUS_JUDGE_ISSUE" judge-corpus "$judge_brief" \
+          "$CORPUS_JUDGE_REPO" "$CORPUS_JUDGE_REPO_PATH" --not-a-review \
+          >"$judge_log" 2>&1
+        judge_rc=$?
+        rm -f "$judge_brief"
+        if [ "$judge_rc" -eq 0 ]; then
+          log "corpus judging lane dispatched against #$CORPUS_JUDGE_ISSUE ($corpus_metrics)"
+        else
+          log "corpus judging dispatch refused (rc=$judge_rc) -- no free lane, quota wind-down, host pressure, and #$CORPUS_JUDGE_ISSUE already claimed by an in-flight lane are all expected reasons; retrying next tick, never judging inline from this loop. dispatch.sh's own output:"
+          while IFS= read -r line; do log "  $line"; done <"$judge_log"
+        fi
+      else
+        log "corpus-judge: $CORPUS_JUDGE_DISPATCH_SCRIPT not found or not executable -- skipping this tick's dispatch attempt"
+      fi
       ;;
     *)
       send_takeover_alarm "director-loop: corpus staging failed (#735)" \
