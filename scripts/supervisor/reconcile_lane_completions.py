@@ -281,6 +281,16 @@ class LaneCompletionReconciler:
             "failed_stale_delivery": [],
             "failed_stale_acceptance": [],
             "unresolved": [],
+            # agent-supervisor#692: subset of failed_stale_delivery/
+            # failed_stale_acceptance -- task ids terminated on a CONFIRMED
+            # dead pid (see `_pid_confirmed_dead`) rather than on having
+            # merely outlived `stale_after` with no corroborating evidence.
+            # Named separately so a human (or watchdog.log) can tell "this
+            # one died and we know it" from "this one just went quiet long
+            # enough" without reading the note text -- the same reason
+            # #488's liveness_alive/liveness_indeterminate are split out
+            # below.
+            "died_without_completing": [],
             # agent-supervisor#488: subsets of "unresolved" -- task ids left
             # alone specifically because a liveness check blocked a failure
             # stamp, named separately so a human (or watchdog.log) can tell
@@ -372,6 +382,43 @@ class LaneCompletionReconciler:
             return None
         matches = _DISPATCHED_PID_RE.findall(text)
         return int(matches[-1]) if matches else None
+
+    def _pid_confirmed_dead(self, task):
+        """agent-supervisor#692: is this row a `claude-print` lane whose
+        dispatch-time pid (`_lane_log_pid`, #488) has DEMONSTRABLY exited --
+        the one signal strong enough to terminate a row immediately,
+        without waiting out `stale_after`.
+
+        Three of the four lanes #692 measured dead (as679, as680, at167)
+        ended their OWN turn -- `claude -p` exited normally, on purpose,
+        because the brief it was given asked it to wait for an asynchronous
+        callback nothing in this estate ever sends. The pid this sweep can
+        already read from the lane-log (`ClaudePrintAdapter.assign_task`
+        writes it at spawn, before the row even reaches `delivered`) is not
+        an absence to wait out like `updated_at` staleness is -- it is a
+        positive fact, available from the very first sweep tick after the
+        process exits. A row this method returns `True` for is, by
+        construction, still `delivered` or `accepted` (the caller only
+        reaches here via `list_delivered_open_tasks`/`list_accepted_open_
+        tasks`), so there is no race with a genuine late completion: if the
+        process that would have called `complete()` has already exited and
+        the row is still open, it never will.
+
+        Returns `False` for every case this fast path does not cover --
+        not a claude-print lane, no lane record, no pid ever logged, or a
+        pid still alive. `False` here is NOT a claim the row is alive or
+        indeterminate; it only means "this fast path does not apply, fall
+        back to the wall-clock dwell + `_liveness_blocks_failure` gate a
+        `pi-rpc` row (or a claude-print row `_lane_log_pid` cannot read)
+        still needs."
+        """
+        lane = self.ledger.get_lane(task["lane"])
+        if lane is None or lane.get("transport") != "claude-print":
+            return False
+        pid = self._lane_log_pid(task["id"])
+        if pid is None:
+            return False
+        return not pid_is_alive(pid)
 
     def _liveness_blocks_failure(self, task, *, now, report):
         """agent-supervisor#488: the gate `_sweep_nonobservable`/
@@ -487,34 +534,55 @@ class LaneCompletionReconciler:
         whether the lane's own transport log already names a PR it opened;
         if so, `_complete_from_evidence` completes the task from THAT
         instead -- a positive fact, not an absence.
+
+        agent-supervisor#692: "nothing but silence" no longer describes a
+        `claude-print` row whose dispatch-time pid has demonstrably exited
+        -- `_pid_confirmed_dead` is a positive fact, not an absence, so it
+        bypasses `stale_after` entirely rather than waiting the full dwell
+        to reach the same conclusion a much-cheaper check already settled.
+        Four lanes sat `delivered`/`accepted` for 110-227 minutes before
+        anything noticed; this is what turns that into a same-tick signal.
         """
         updated_at = task.get("updated_at")
         if not isinstance(updated_at, (int, float)):
             report["unresolved"].append(task["id"])
             return
         age_seconds = now - updated_at
-        if age_seconds < self.stale_after:
-            report["unresolved"].append(task["id"])
-            return
-        # agent-supervisor#488: a demonstrably alive (or unknowable) pid
-        # blocks this failure stamp outright, before any evidence check --
-        # see `_liveness_blocks_failure`'s own docstring for why both
-        # directions resolve to "leave the row alone".
-        if self._liveness_blocks_failure(task, now=now, report=report):
-            return
+        died_without_completing = self._pid_confirmed_dead(task)
+        if not died_without_completing:
+            if age_seconds < self.stale_after:
+                report["unresolved"].append(task["id"])
+                return
+            # agent-supervisor#488: a demonstrably alive (or unknowable) pid
+            # blocks this failure stamp outright, before any evidence check
+            # -- see `_liveness_blocks_failure`'s own docstring for why both
+            # directions resolve to "leave the row alone".
+            if self._liveness_blocks_failure(task, now=now, report=report):
+                return
         pr_url = self._lane_log_pr_url(task["id"])
         if pr_url is not None:
             self._complete_from_evidence(task, pr_url=pr_url, now=now, report=report)
             return
-        note = (
-            f"reconcile-lane-completions: {task['lane']} has no observable pane "
-            f"(non-tmux lane id) and has sat at status=delivered for "
-            f"{int(age_seconds)}s (>= {self.stale_after}s) as of {int(now)} -- "
-            "no completion signal arrived, and this transport has no pane to poll "
-            "for one; that is not the same claim as the work having failed, only "
-            "that nothing was observed -- terminated failed only to free the lane "
-            "for redispatch (agent-supervisor#374, agent-supervisor#401)"
-        ).encode("utf-8")
+        if died_without_completing:
+            note = (
+                f"reconcile-lane-completions: {task['lane']} died_without_completing -- "
+                f"its dispatch-time pid has demonstrably exited as of {int(now)}, "
+                f"{int(age_seconds)}s after its last update; a claude-print lane gets no "
+                "automatic resume, so an exited process on a still-open task is a "
+                "terminal fact on its own, not something worth a stale_after dwell to "
+                "confirm -- terminated failed only to free the lane for redispatch "
+                "(agent-supervisor#692)"
+            ).encode("utf-8")
+        else:
+            note = (
+                f"reconcile-lane-completions: {task['lane']} has no observable pane "
+                f"(non-tmux lane id) and has sat at status=delivered for "
+                f"{int(age_seconds)}s (>= {self.stale_after}s) as of {int(now)} -- "
+                "no completion signal arrived, and this transport has no pane to poll "
+                "for one; that is not the same claim as the work having failed, only "
+                "that nothing was observed -- terminated failed only to free the lane "
+                "for redispatch (agent-supervisor#374, agent-supervisor#401)"
+            ).encode("utf-8")
         allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
         try:
             self.ledger.fail_stale_delivery(task["id"], note, pane_nonce=task["pane_nonce"], allow_claim=allow_claim)
@@ -522,6 +590,8 @@ class LaneCompletionReconciler:
             report["errors"].append({"task": task["id"], "error": str(error)})
             return
         report["failed_stale_delivery"].append(task["id"])
+        if died_without_completing:
+            report["died_without_completing"].append(task["id"])
 
     def _sweep_nonobservable_accepted(self, task, *, now, report):
         """agent-supervisor#414: `_sweep_nonobservable`'s counterpart for a
@@ -538,34 +608,56 @@ class LaneCompletionReconciler:
         stamped "failed, not completed" with zero evidence check. Same
         `_lane_log_pr_url` check as `_fail_unaccepted`/`_sweep_nonobservable`,
         applied here for the same reason.
+
+        agent-supervisor#692: same immediate-pid-death fast path as
+        `_sweep_nonobservable` -- see that method's own docstring for why
+        `_pid_confirmed_dead` bypasses `stale_after` rather than waiting it
+        out. `as679-lease-anchor` and `as680-lane-completion`, two of the
+        four lanes #692 measured, had both reached `accepted` before ending
+        their own turn to wait on a callback nothing sends; this is the
+        path that stamps them, same tick their process actually exited.
         """
         updated_at = task.get("updated_at")
         if not isinstance(updated_at, (int, float)):
             report["unresolved"].append(task["id"])
             return
         age_seconds = now - updated_at
-        if age_seconds < self.stale_after:
-            report["unresolved"].append(task["id"])
-            return
-        # agent-supervisor#488: same liveness gate as `_sweep_nonobservable`
-        # -- the measured case (`as473-as473x`) reached exactly this method
-        # via `status='accepted'`, stamped `failed` while its `claude -p`
-        # subprocess was still alive and accumulating CPU an hour later.
-        if self._liveness_blocks_failure(task, now=now, report=report):
-            return
+        died_without_completing = self._pid_confirmed_dead(task)
+        if not died_without_completing:
+            if age_seconds < self.stale_after:
+                report["unresolved"].append(task["id"])
+                return
+            # agent-supervisor#488: same liveness gate as
+            # `_sweep_nonobservable` -- the measured case (`as473-as473x`)
+            # reached exactly this method via `status='accepted'`, stamped
+            # `failed` while its `claude -p` subprocess was still alive and
+            # accumulating CPU an hour later.
+            if self._liveness_blocks_failure(task, now=now, report=report):
+                return
         pr_url = self._lane_log_pr_url(task["id"])
         if pr_url is not None:
             self._complete_from_evidence(task, pr_url=pr_url, now=now, report=report)
             return
-        note = (
-            f"reconcile-lane-completions: {task['lane']} has no observable pane "
-            f"(non-tmux lane id) and has sat at status=accepted for "
-            f"{int(age_seconds)}s (>= {self.stale_after}s) as of {int(now)} -- "
-            "no completion signal arrived, and this transport has no pane to poll "
-            "for one; that is not the same claim as the work having failed, only "
-            "that nothing was observed -- terminated failed only to free the lane "
-            "for redispatch (agent-supervisor#414, agent-supervisor#401)"
-        ).encode("utf-8")
+        if died_without_completing:
+            note = (
+                f"reconcile-lane-completions: {task['lane']} died_without_completing -- "
+                f"its dispatch-time pid has demonstrably exited as of {int(now)}, "
+                f"{int(age_seconds)}s after its last update; a claude-print lane gets no "
+                "automatic resume, so an exited process on a still-open task is a "
+                "terminal fact on its own, not something worth a stale_after dwell to "
+                "confirm -- terminated failed only to free the lane for redispatch "
+                "(agent-supervisor#692)"
+            ).encode("utf-8")
+        else:
+            note = (
+                f"reconcile-lane-completions: {task['lane']} has no observable pane "
+                f"(non-tmux lane id) and has sat at status=accepted for "
+                f"{int(age_seconds)}s (>= {self.stale_after}s) as of {int(now)} -- "
+                "no completion signal arrived, and this transport has no pane to poll "
+                "for one; that is not the same claim as the work having failed, only "
+                "that nothing was observed -- terminated failed only to free the lane "
+                "for redispatch (agent-supervisor#414, agent-supervisor#401)"
+            ).encode("utf-8")
         allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
         try:
             self.ledger.fail_stale_acceptance(
@@ -575,3 +667,5 @@ class LaneCompletionReconciler:
             report["errors"].append({"task": task["id"], "error": str(error)})
             return
         report["failed_stale_acceptance"].append(task["id"])
+        if died_without_completing:
+            report["died_without_completing"].append(task["id"])

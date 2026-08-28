@@ -443,6 +443,13 @@ failed_stale_acceptance = d.get("failed_stale_acceptance", [])
 # an unremarkable dwell.
 liveness_alive = d.get("liveness_alive", [])
 liveness_indeterminate = d.get("liveness_indeterminate", [])
+# agent-supervisor#692: subset of failed_stale_delivery/failed_stale_acceptance
+# above -- task ids terminated on a CONFIRMED dead pid rather than merely
+# having outlived stale_after with nothing corroborating. Named separately so
+# a human scanning watchdog.log can tell "we know this one died" from "this
+# one just went quiet long enough", the same reason liveness_alive/
+# liveness_indeterminate are split out below.
+died_without_completing = d.get("died_without_completing", [])
 unresolved = len(d.get("unresolved", []))
 errors = len(d.get("errors", []))
 names = ",".join(completed)
@@ -451,6 +458,7 @@ stale_names = ",".join(failed_stale_delivery)
 stale_accepted_names = ",".join(failed_stale_acceptance)
 alive_names = ",".join(liveness_alive)
 indeterminate_names = ",".join(liveness_indeterminate)
+died_names = ",".join(died_without_completing)
 print(
     f"completed={len(completed)} failed_unaccepted={len(failed_unaccepted)} "
     f"failed_stale_delivery={len(failed_stale_delivery)} "
@@ -461,6 +469,7 @@ print(
     + (f" (no-pane-accepted-stale: {stale_accepted_names})" if stale_accepted_names else "")
     + (f" (liveness-blocked-failure: {alive_names})" if alive_names else "")
     + (f" (liveness-indeterminate: {indeterminate_names})" if indeterminate_names else "")
+    + (f" (died-without-completing: {died_names})" if died_names else "")
 )
 ' 2>"$py_err_file")
   py_rc=$?

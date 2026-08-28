@@ -513,7 +513,12 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         self.assertFalse((self.ledger.results_dir / "ad401-accepted-dead-task.md").exists())
         note = result_path.read_bytes()
         self.assertNotIn(b"failed, not completed", note)
-        self.assertIn(b"no completion signal arrived", note)
+        # agent-supervisor#692: a confirmed-dead pid now fails IMMEDIATELY
+        # via the died_without_completing fast path -- see
+        # test_accepted_dead_pid_fails_immediately_via_died_without_completing
+        # for that behaviour directly; this test's own job is unchanged (a
+        # dead accepted lane with no PR evidence still fails).
+        self.assertIn(b"died_without_completing", note)
 
     def test_accepted_nonobservable_lane_before_stale_after_is_left_unresolved(self):
         """An accepted headless lane younger than `stale_after` may still be
@@ -616,7 +621,13 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         self.assertFalse((self.ledger.results_dir / "ad401-silent-task.md").exists())
         note = result_path.read_bytes()
         self.assertNotIn(b"failed, not completed", note)
-        self.assertIn(b"no completion signal arrived", note)
+        # agent-supervisor#692: a confirmed-dead pid now fails IMMEDIATELY
+        # via the died_without_completing fast path rather than waiting out
+        # stale_after -- see test_dead_pid_fails_immediately_without_waiting_
+        # for_stale_after and its accepted-path sibling for that behaviour
+        # directly; this test's own job is unchanged (a dead pid with no PR
+        # evidence still fails, never completes).
+        self.assertIn(b"died_without_completing", note)
 
     def test_nonobservable_lane_with_no_pid_evidence_is_indeterminate_not_failed(self):
         """agent-supervisor#488: no lane-log at all means this sweep has no
@@ -701,6 +712,91 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         """Mirrors the exact line `ClaudePrintAdapter.assign_task` appends
         to `lane-logs/<task_id>.log` at dispatch time."""
         self._write_lane_log(task_id, f"\n--- dispatched detached: task={task_id} lane={lane} pid={pid} ---\n")
+
+    def test_dead_pid_fails_immediately_without_waiting_for_stale_after(self):
+        """agent-supervisor#692: as679-lease-anchor/as680-lane-completion/
+        at167-tui-leak all ended their own claude -p turn to wait on a
+        callback nothing sends, then sat `delivered`/`accepted` for
+        110-227 minutes before anything noticed. A confirmed-dead pid is a
+        positive fact available the very first sweep tick after the
+        process exits -- this must fail the task well before `stale_after`
+        (here: seconds, not the default hour), and name it distinctly in
+        `died_without_completing`."""
+        self.dispatch_claude_print("ad692-dead-fast-task", lane="ad692-dead-fast")
+        self._write_dispatched_pid_log("ad692-dead-fast-task", self._dead_pid(), lane="ad692-dead-fast")
+        runner = FakeLanesRunner({})
+
+        # clock is only 5s past dispatch -- nowhere near stale_after=3600
+        # (the default), yet the pid is already confirmed dead.
+        report = LaneCompletionReconciler(self.ledger, runner=runner, clock=lambda: 1_005).sweep()
+
+        task = self.ledger.get_task("ad692-dead-fast-task")
+        self.assertEqual("failed", task["status"])
+        self.assertEqual(["ad692-dead-fast-task"], report["failed_stale_delivery"])
+        self.assertEqual(["ad692-dead-fast-task"], report["died_without_completing"])
+        result_path = Path(task["result_path"])
+        note = result_path.read_bytes()
+        self.assertIn(b"died_without_completing", note)
+
+    def test_dead_pid_fast_path_still_prefers_pr_evidence(self):
+        """A confirmed-dead pid does not skip the cheap-evidence check --
+        if the lane's own log already names a PR it opened before dying,
+        that still completes the task instead of failing it."""
+        self.dispatch_claude_print("ad692-dead-with-pr-task", lane="ad692-dead-with-pr")
+        self._write_dispatched_pid_log(
+            "ad692-dead-with-pr-task", self._dead_pid(), lane="ad692-dead-with-pr"
+        )
+        log_path = self.ledger.root / "lane-logs" / "ad692-dead-with-pr-task.log"
+        with open(log_path, "a") as handle:
+            handle.write("opened https://github.com/jonhill90/agent-supervisor/pull/9002\n")
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, clock=lambda: 1_005).sweep()
+
+        task = self.ledger.get_task("ad692-dead-with-pr-task")
+        self.assertEqual("complete", task["status"])
+        self.assertEqual([], report["died_without_completing"])
+        self.assertEqual(["ad692-dead-with-pr-task"], report["completed_from_evidence"])
+
+    def test_live_pid_still_waits_out_stale_after_not_failed_early(self):
+        """A live process must never be fast-failed just because this fast
+        path exists -- mutation check in the other direction from the dead-
+        pid test above: only a CONFIRMED dead pid takes the fast path."""
+        self.dispatch_claude_print("ad692-live-fast-task", lane="ad692-live-fast")
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+        self.addCleanup(proc.kill)
+        self.addCleanup(proc.wait)
+        try:
+            self._write_dispatched_pid_log("ad692-live-fast-task", proc.pid, lane="ad692-live-fast")
+            runner = FakeLanesRunner({})
+
+            report = LaneCompletionReconciler(self.ledger, runner=runner, clock=lambda: 1_005).sweep()
+
+            task = self.ledger.get_task("ad692-live-fast-task")
+            self.assertEqual("delivered", task["status"])
+            self.assertEqual([], report["died_without_completing"])
+            self.assertIn("ad692-live-fast-task", report["unresolved"])
+        finally:
+            proc.kill()
+            proc.wait()
+
+    def test_accepted_dead_pid_fails_immediately_via_died_without_completing(self):
+        """Same fast path, exercised through `_sweep_nonobservable_accepted`
+        -- the exact method `as679-lease-anchor`/`as680-lane-completion`
+        (both reached `accepted` before dying) would route through."""
+        self.dispatch_claude_print("ad692-accepted-dead-fast-task", lane="ad692-accepted-dead-fast")
+        self.ledger.accept("ad692-accepted-dead-fast-task", pane_nonce="nonce-ad692-accepted-dead-fast")
+        self._write_dispatched_pid_log(
+            "ad692-accepted-dead-fast-task", self._dead_pid(), lane="ad692-accepted-dead-fast"
+        )
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, clock=lambda: 1_005).sweep()
+
+        task = self.ledger.get_task("ad692-accepted-dead-fast-task")
+        self.assertEqual("failed", task["status"])
+        self.assertEqual(["ad692-accepted-dead-fast-task"], report["failed_stale_acceptance"])
+        self.assertEqual(["ad692-accepted-dead-fast-task"], report["died_without_completing"])
 
     def test_never_accepted_lane_with_pr_evidence_completes_instead_of_failing(self):
         """Same cheap-evidence check on the tmux `_fail_unaccepted` path: a
