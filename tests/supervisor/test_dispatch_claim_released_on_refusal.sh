@@ -43,6 +43,7 @@ CLAUDE_PRINT="$CORE_DIR/dispatch-claude-print.sh"
 export QUOTA_GATE="$HERE/stubs/quota-safe"
 export SUPERVISOR_MAX_LOAD_PER_CORE=0
 export SUPERVISOR_MIN_FREE_MEM_GB=0
+export SUPERVISOR_MAX_AGENT_SESSIONS=0
 pass=0; fail=0
 
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }

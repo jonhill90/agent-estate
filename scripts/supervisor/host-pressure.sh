@@ -46,18 +46,36 @@
 # (gastown), so that package -- not a phantom `check.sh` -- is treated here
 # as the reusable logic the brief was actually pointing at.
 #
+# THIRD GATE: agent SESSION count (agent-supervisor#663). The estate tick's
+# own host guard compared a raw `pgrep -f claude | wc -l` against a ceiling
+# of 20 -- and that instrument matches on ANY process whose argv mentions a
+# `.claude` path, not on what the process actually is. Measured live, one
+# sample: `pgrep -f claude` read 22 while only 17 real agent sessions were
+# running (2 transient snapshot shells, 1 sed -- the measuring pipeline
+# matching its own argv, 1 tail -f on a log under a claude-501 path, 2
+# cc-daemon helpers). #663 does not touch whether 20 is the right ceiling,
+# only that the number compared against it should be the real session
+# count. `count-agents.sh` (this directory) is that real count -- it
+# matches `ps`'s `comm` field exactly against `^(claude|claude\.exe)$`,
+# never a substring -- so this gate shells out to it instead of
+# reimplementing the same classification a second time here.
+#
 # Usage: host-pressure.sh
 #   Prints one line (the verdict and why) to stdout, always.
 #   Exit 0 / 1 / 2 as above.
 #
 # Override via environment (0 disables that one check, matching
 # pressure.Limits' own "0 disables" doc comment):
-#   SUPERVISOR_MAX_LOAD_PER_CORE  (default 3.0)
-#   SUPERVISOR_MIN_FREE_MEM_GB    (default 1.5)
+#   SUPERVISOR_MAX_LOAD_PER_CORE    (default 3.0)
+#   SUPERVISOR_MIN_FREE_MEM_GB      (default 1.5)
+#   SUPERVISOR_MAX_AGENT_SESSIONS   (default 20)
 set -uo pipefail
+
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 MAX_LOAD_PER_CORE="${SUPERVISOR_MAX_LOAD_PER_CORE:-3.0}"
 MIN_FREE_MEM_GB="${SUPERVISOR_MIN_FREE_MEM_GB:-1.5}"
+MAX_AGENT_SESSIONS="${SUPERVISOR_MAX_AGENT_SESSIONS:-20}"
 
 # _load1: darwin's 1-minute load average via sysctl. `vm.loadavg` prints
 # Darwin is where this estate's actual dispatch runs (Jon's own Mac); Linux
@@ -158,6 +176,24 @@ main() {
     fi
     if awk -v f="$free" -v m="$MIN_FREE_MEM_GB" 'BEGIN { exit !(f < m) }'; then
       echo "host-pressure: free memory ${free}GB < ${MIN_FREE_MEM_GB}GB -- refusing a new dispatch"
+      return 1
+    fi
+  fi
+
+  if [ "$MAX_AGENT_SESSIONS" -gt 0 ] 2>/dev/null; then
+    if [ ! -x "$HERE/count-agents.sh" ]; then
+      echo "host-pressure: could not read agent session count (count-agents.sh missing or not executable at $HERE) -- refusing to guess whether the host is safe"
+      return 2
+    fi
+    local sessions rc
+    sessions=$("$HERE/count-agents.sh" 2>/dev/null)
+    rc=$?
+    if [ "$rc" -ne 0 ] || [ -z "$sessions" ]; then
+      echo "host-pressure: could not read agent session count (count-agents.sh exited $rc) -- refusing to guess whether the host is safe"
+      return 2
+    fi
+    if [ "$sessions" -ge "$MAX_AGENT_SESSIONS" ] 2>/dev/null; then
+      echo "host-pressure: agent sessions $sessions >= $MAX_AGENT_SESSIONS -- refusing a new dispatch"
       return 1
     fi
   fi

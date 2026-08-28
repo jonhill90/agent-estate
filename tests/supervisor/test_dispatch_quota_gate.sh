@@ -26,6 +26,7 @@ DISPATCH="$HERE/../../scripts/supervisor/dispatch.sh"
 # resources, and a real CI runner's load/free-memory is uncontrolled).
 export SUPERVISOR_MAX_LOAD_PER_CORE=0
 export SUPERVISOR_MIN_FREE_MEM_GB=0
+export SUPERVISOR_MAX_AGENT_SESSIONS=0
 export DISPATCH_LIVE_PANE=1
 pass=0; fail=0
 

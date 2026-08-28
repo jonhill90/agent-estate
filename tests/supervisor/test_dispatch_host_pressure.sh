@@ -105,8 +105,10 @@ fi
 
 # --- the load-bearing ALLOW case: disabled thresholds (0 = off, matching
 # host-pressure.sh's own documented convention) proceed past the gate to a
-# full, successful dispatch. -------------------------------------------------
-ALLOW_OUT=$(run env SUPERVISOR_MAX_LOAD_PER_CORE=0 SUPERVISOR_MIN_FREE_MEM_GB=0); ALLOW_RC=$?
+# full, successful dispatch. All three gates disabled -- agent-supervisor#663's
+# session-count gate included, since this real host's own real session count
+# is not something this test controls or should assert on. -----------------
+ALLOW_OUT=$(run env SUPERVISOR_MAX_LOAD_PER_CORE=0 SUPERVISOR_MIN_FREE_MEM_GB=0 SUPERVISOR_MAX_AGENT_SESSIONS=0); ALLOW_RC=$?
 want_exit "disabled thresholds let the same dispatch proceed" "$ALLOW_RC" 0 "$ALLOW_OUT"
 
 # --- MUTATION 1: remove the gate call from dispatch.sh -> REFUSE case must
