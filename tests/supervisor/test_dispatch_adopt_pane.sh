@@ -24,6 +24,7 @@ CLI="$HERE/../../scripts/supervisor/cli.py"
 export QUOTA_GATE="$HERE/stubs/quota-safe"
 export SUPERVISOR_MAX_LOAD_PER_CORE=0
 export SUPERVISOR_MIN_FREE_MEM_GB=0
+export SUPERVISOR_MAX_AGENT_SESSIONS=0
 # agent-supervisor#171/#668: every PLAIN dispatch call in this suite that does
 # NOT pass --adopt-pane (--adopt-pane forces LIVE_PANE=1 itself, see
 # dispatch.sh) must still force the pre-#171 tmux flow explicitly. This suite

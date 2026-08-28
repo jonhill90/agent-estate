@@ -30,6 +30,7 @@ export QUOTA_GATE="$HERE/stubs/quota-safe"
 # per case.
 export SUPERVISOR_MAX_LOAD_PER_CORE=0
 export SUPERVISOR_MIN_FREE_MEM_GB=0
+export SUPERVISOR_MAX_AGENT_SESSIONS=0
 # agent-supervisor#171: this suite is specifically about the tmux/send-keys
 # flow (window naming, verified_type/verified_submit, the #241 id-vs-index
 # split, ...) -- none of it stubs a `claude` binary, so leaving the new
