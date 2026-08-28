@@ -1,5 +1,7 @@
 import sqlite3
 import sys
+import tempfile
+import unittest
 from pathlib import Path
 
 
@@ -222,5 +224,52 @@ class MutableClock:
 
     def __call__(self):
         return self.value
+
+
+class LedgerTestBase(unittest.TestCase):
+    """Shared fixture for the `test_core_ledger_*` files split out of the
+    former `test_core_ledger.py` (agent-supervisor#683's `test_core_*`
+    shape, applied here). One lane (`app-review`, harness `codex`) is
+    registered in `setUp`; `seed_source`/`assign` are the two helpers nearly
+    every ledger test in that split needs to get a task onto that lane."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.clock = MutableClock()
+        self.ledger = Ledger(Path(self.tempdir.name), clock=self.clock)
+        self.ledger.register_lane(
+            lane="app-review",
+            pane_id="%22",
+            nonce="nonce-22-a",
+            harness="codex",
+            repo="/repo/app",
+            server_id="server-a",
+            session_id="$4",
+            command="codex",
+        )
+
+    def seed_source(self, task_id, summary="Review PR 870 without editing", source_state="OPEN"):
+        self._source_number = getattr(self, "_source_number", 869) + 1
+        self.ledger.reconstruct_task(
+            task_id=task_id,
+            source_kind="issue",
+            source_url=f"https://github.com/jonhill90/Hill90/issues/{self._source_number}",
+            source_ref="a" * 40,
+            summary=summary,
+            source_state=source_state,
+            status="created",
+            evidence=[],
+            status_marker=None,
+        )
+
+    def assign(self, task_id="review-870"):
+        self.seed_source(task_id)
+        return self.ledger.assign(
+            task_id=task_id,
+            lane="app-review",
+            pane_nonce="nonce-22-a",
+            summary="Review PR 870 without editing",
+        )
 
 
