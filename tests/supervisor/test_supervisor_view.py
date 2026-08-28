@@ -248,8 +248,13 @@ class LedgerSourceTest(unittest.TestCase):
     def test_closed_status_set_matches_the_ledger_s_own(self):
         """`lane_available` and the one_open_task_per_lane index define
         "outstanding" in SQL. This constant restates it, so it is pinned
-        against that SQL rather than left to drift."""
-        core = (SUPERVISOR_DIR / "core.py").read_text(encoding="utf-8")
+        against that SQL rather than left to drift.
+
+        `lane_available` lives in `core_ledger_lanes.py`, not `core.py`,
+        since agent-supervisor#706 split `core.py` behind a re-export shim
+        (the `sync.py`/#336 pattern) -- `core.py` is now a composition root
+        and no longer holds any SQL literal itself."""
+        core = (SUPERVISOR_DIR / "core_ledger_lanes.py").read_text(encoding="utf-8")
         rendered = ", ".join(f"'{status}'" for status in CLOSED_TASK_STATUSES)
         self.assertIn(f"status NOT IN ({rendered})", core)
 

@@ -1447,18 +1447,33 @@ echo "$out" | grep -q "Author-Lane: as691-author-claim" && ok "#689: refusal nam
 # ============================================================================
 MUTDIR3="$D/mutated-task-alias"
 cp -R "$HERE/../../scripts/supervisor" "$MUTDIR3"
-python3 - "$MUTDIR3/core.py" <<'PYEOF'
+python3 - "$MUTDIR3" <<'PYEOF'
 import sys
-path = sys.argv[1]
-text = open(path).read()
+from pathlib import Path
+mutdir = Path(sys.argv[1])
+# agent-supervisor#706 split core.py's Ledger into mixins under
+# core_ledger_*.py -- lane_or_task_row now lives in core_lane_relation.py,
+# not core.py. Search the whole core*.py module set rather than one named
+# file, so a future re-split doesn't silently stop mutating anything:
+# require exactly one match TOTAL across the set (a clause could be unique
+# per-file yet duplicated across files) and patch whichever file has it.
 marker = '    return {"pane_id": pane_id}'
-assert text.count(marker) == 1, "lane_or_task_row's task-fallback return not found or not unique -- shape changed"
-text = text.replace(
+core_modules = sorted(mutdir.glob("core*.py"))
+hits = [(p, p.read_text().count(marker)) for p in core_modules]
+total = sum(n for _, n in hits)
+assert total == 1, (
+    "lane_or_task_row's task-fallback return not found or not unique across "
+    f"core*.py -- shape changed (per-file counts: {hits})"
+)
+target = next(p for p, n in hits if n == 1)
+text = target.read_text()
+mutated = text.replace(
     marker,
     '    return {"pane_id": "MUTATED-unique-per-token:" + ident}  # was: {"pane_id": pane_id}',
     1,
 )
-open(path, "w").write(text)
+assert mutated != text, f"mutation did not change {target.name}"
+target.write_text(mutated)
 PYEOF
 rm -rf "$MUTDIR3/__pycache__" 2>/dev/null
 MUTATED3="$MUTDIR3/merge-pr.sh"
