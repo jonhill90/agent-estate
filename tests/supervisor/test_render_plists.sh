@@ -29,9 +29,15 @@ trap 'rm -rf "$WORK"' EXIT
 # script's rendered output is installed on a *different*, fixed host later by
 # launchd -- so its default has to name that host's checkout, not wherever
 # render-plists.sh itself happens to run from. Ask the filesystem directly,
-# using the exact same literal default render-plists.sh itself falls back to
+# using the exact same resolution render-plists.sh itself falls back to
 # (kept in sync by design, not derived from the script under test).
-DEFAULT_REPO="/Users/jon/source/repos/Personal/agent-supervisor"
+#
+# agent-estate#729: render-plists.sh's default now prefers whichever of
+# agent-estate/agent-supervisor exists on disk (the rename actually
+# happened, #728) -- mirrored here so this test keeps proving the SCRIPT's
+# real resolution, not a name that predates it.
+DEFAULT_REPO="/Users/jon/source/repos/Personal/agent-estate"
+[ -d "$DEFAULT_REPO/.git" ] || DEFAULT_REPO="/Users/jon/source/repos/Personal/agent-supervisor"
 has_default_checkout=0
 [ -d "$DEFAULT_REPO/.git" ] && has_default_checkout=1
 
