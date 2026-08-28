@@ -804,6 +804,38 @@ fi
 watchdog_age >/dev/null || skip "no readable checked: timestamp in $WATCHDOG_STATUS -- not advancing this pass"
 safe_until=$((TICK_INTERVAL - SAFETY_BUFFER))
 
+# --- agent-supervisor#709: fail fast when the window is ALREADY closed ----
+# The final recheck below (right before the mutation) is the real gate and
+# stays untouched -- it has to be, because the smoke test itself can still
+# push a genuinely-fresh entry past the window. This is a SEPARATE, earlier
+# check for a different case that final recheck cannot distinguish from that
+# one: `checked:` already being older than `safe_until` before the smoke test
+# even starts.
+#
+# MEASURED, not assumed (agent-supervisor#709): every one of the four SKIP
+# magnitudes #709 cites (302798s, 874s, 920s, 318s) reflects `checked:`
+# already stale by roughly that much on entry -- the watchdog LaunchAgent not
+# having ticked recently (#659's territory, or a deliberate Director stop),
+# not the smoke test's own duration. Reproduced directly: seeding
+# watchdog.status 179s stale (window is 150s) and running this script
+# unmodified still executes the full `git worktree add` + candidate
+# `watchdog.sh` smoke test before discovering, at the final recheck, that the
+# age is now 180s -- one second of real elapsed time from the smoke test
+# itself, on top of a deficit that already existed before any of it ran. A
+# doomed pass was still paying full smoke-test cost, and the eventual "recheck
+# age Ns" message reported that already-existing deficit as if it were
+# entirely the smoke test's overrun, which is what led #666/#667 to first
+# suspect the smoke test's duration rather than the watchdog's own staleness.
+#
+# This does not widen the window and does not change whether a pass CAN
+# succeed -- it only stops paying for a smoke test whose result the existing
+# final recheck was always going to discard, and reports the honest reason
+# (already closed on entry, distinct from closed during the test).
+pre_age=$(watchdog_age) || skip "watchdog status became unreadable -- not advancing this pass"
+if [ "$pre_age" -lt 0 ] || [ "$pre_age" -gt "$safe_until" ]; then
+  skip "watchdog tick window is already closed before the smoke test starts (checked: is ${pre_age}s old, outside the 0-${safe_until}s post-tick window) -- not advancing this pass; not running the smoke test for a mutation the recheck could never allow"
+fi
+
 # --- gate: the candidate must demonstrably run, not just have CI-green --
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/ad99-advance-smoke.XXXXXX")"
 cleanup() {

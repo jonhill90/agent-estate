@@ -39,6 +39,10 @@ cat >"$SRC/scripts/supervisor/watchdog.sh" <<'EOF'
 set -uo pipefail
 STATUS="${SUPERVISOR_STATUS:?}"
 mkdir -p "$(dirname "$STATUS")"
+# agent-supervisor#709: a marker so the outer test can tell whether the smoke
+# test ran at all, distinct from whether it passed -- the fail-fast check
+# added for #709 must skip BEFORE this candidate is ever invoked.
+[ -n "${TEST_SMOKE_RAN_MARKER:-}" ] && touch "$TEST_SMOKE_RAN_MARKER"
 {
   printf 'checked:  %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   printf 'state:    pane_unreadable\n'
@@ -124,6 +128,30 @@ if grep -q "outside the" <<<"$out"; then ok "stale tick names the safe window"; 
 after=$(git -C "$LIVE" rev-parse HEAD)
 if [ "$after" = "$before_sha" ]; then ok "stale tick leaves live untouched"; else bad "stale tick leaves live untouched" "moved to $after"; fi
 
+# --- agent-supervisor#709: a tick already outside the window on entry must --
+# --- skip WITHOUT ever running the smoke test -------------------------------
+# #709: all four SKIP magnitudes measured on the real estate (302798s, 874s,
+# 920s, 318s) trace to `checked:` already being that stale before
+# advance-live.sh even started -- the watchdog not having ticked recently,
+# not the smoke test's own duration -- and yet the pre-#709 code paid the
+# full cost of a `git worktree add` + candidate `watchdog.sh` smoke test on
+# every one of those passes before discovering the recheck was always going
+# to refuse. This pins that the fail-fast check actually fires before the
+# smoke test, not just that a skip eventually happens (the prior test above
+# already covered exit code / live-untouched; the marker is the new
+# assertion this case needs).
+S=$(mktemp -d); stale_status "$S" 179
+MARKER="$S/.smoke-ran"
+rm -f "$MARKER"
+export TEST_SMOKE_RAN_MARKER="$MARKER"
+out=$(run "$S" 2>&1); rc=$?
+unset TEST_SMOKE_RAN_MARKER
+want_exit "already-closed-on-entry skips (exit 0)" "$rc" 0 "$out"
+if [ -f "$MARKER" ]; then bad "already-closed-on-entry never runs the smoke test" "marker present -- smoke test ran"; else ok "already-closed-on-entry never runs the smoke test"; fi
+if grep -qi "before the smoke test starts" <<<"$out"; then ok "already-closed-on-entry names the pre-smoke-test check distinctly"; else bad "already-closed-on-entry names the pre-smoke-test check distinctly" "$out"; fi
+after=$(git -C "$LIVE" rev-parse HEAD)
+if [ "$after" = "$before_sha" ]; then ok "already-closed-on-entry leaves live untouched"; else bad "already-closed-on-entry leaves live untouched" "moved to $after"; fi
+
 # --- fresh tick, but the candidate at origin/main is broken: gate refuses -
 BROKEN=$(mktemp -d)
 git -C "$SRC" worktree add -q --detach "$BROKEN" origin/main
@@ -151,8 +179,16 @@ git -C "$SRC" worktree prune >/dev/null 2>&1
 
 # --- fresh tick, good candidate: advances, records rollback ---------------
 S=$(mktemp -d); fresh_status "$S"
+# agent-supervisor#709: positive control for the marker used above -- a
+# fresh-on-entry tick MUST still run the smoke test, so the marker mechanism
+# itself proves it can observe a real run, not just a real skip.
+MARKER709="$S/.smoke-ran"
+rm -f "$MARKER709"
+export TEST_SMOKE_RAN_MARKER="$MARKER709"
 out=$(run "$S" 2>&1); rc=$?
+unset TEST_SMOKE_RAN_MARKER
 want_exit "good candidate advances (exit 0)" "$rc" 0 "$out"
+if [ -f "$MARKER709" ]; then ok "fresh-on-entry still runs the smoke test (agent-supervisor#709 marker control)"; else bad "fresh-on-entry still runs the smoke test (agent-supervisor#709 marker control)" "marker absent"; fi
 after=$(git -C "$LIVE" rev-parse HEAD)
 if [ "$after" = "$target_sha" ]; then ok "good candidate advances live to origin/main"; else bad "good candidate advances live to origin/main" "at $after, wanted $target_sha"; fi
 if [ -f "$S/.live-rollback-sha" ] && [ "$(cat "$S/.live-rollback-sha")" = "$before_sha" ]; then
