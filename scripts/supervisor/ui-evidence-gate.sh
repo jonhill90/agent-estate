@@ -45,8 +45,20 @@ fi
 PATTERN="$UI_EVIDENCE_PATH_RE"
 MARKER="${UI_EVIDENCE_MARKER:-<!-- ui-evidence:v1 -->}"
 
-changed="$(gh pr diff "$PR" --name-only 2>&1)" || {
-  echo "ui-evidence-gate: gh pr diff failed: $changed" >&2
+# `gh pr diff --name-only` goes through the diff endpoint, which GitHub
+# refuses outright ("HTTP 406: diff exceeded the maximum number of files
+# (300)") on a PR wide enough to carry a full tree migration -- #745
+# measured 392 changed paths and the diff endpoint would not return a file
+# list at all, not even a truncated one. The paginated files endpoint
+# (`GET /pulls/{n}/files`) is a different, unbounded-by-diff-size route
+# to the same filename list; `gh api ... --paginate` walks all its pages.
+# Verified directly: it returned all 392 paths for #745 where the diff
+# endpoint returned nothing, and matched the diff endpoint file-for-file
+# on a small control PR (#737, 1 file) -- so this is not a route that
+# happens to work large, it is the same list both ways when both can be
+# gotten.
+changed="$(gh api "repos/{owner}/{repo}/pulls/$PR/files" --paginate -q '.[].filename' 2>&1)" || {
+  echo "ui-evidence-gate: gh api pulls/$PR/files failed: $changed" >&2
   exit 2
 }
 

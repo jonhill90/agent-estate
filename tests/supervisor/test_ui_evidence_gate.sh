@@ -18,13 +18,24 @@ echo "ui-evidence-gate.sh"
 D=$(mktemp -d); mkdir -p "$D/bin"
 # Stub gh: scripted purely from env vars set before each call, so each case
 # below is self-contained rather than depending on call order.
-#   GH_STUB_DIFF       newline-separated changed file paths
+#   GH_STUB_DIFF       newline-separated changed file paths (returned by the
+#                      paginated files endpoint -- named _DIFF for historical
+#                      reasons, but see agent-estate#745/#744: the gate no
+#                      longer calls `gh pr diff`, because that route refuses
+#                      outright past 300 changed files. It calls
+#                      `gh api repos/{owner}/{repo}/pulls/<n>/files --paginate`
+#                      instead, which pages past that cap.)
 #   GH_STUB_BODY       PR body text
 #   GH_STUB_COMMENTS   newline-separated comment bodies
+#   GH_STUB_API_FAIL   when set, the api stub fails like an unreadable PR
 cat > "$D/bin/gh" <<'STUB'
 #!/bin/bash
 case "$1 $2" in
-  "pr diff")
+  "api repos/{owner}/{repo}/pulls/"*)
+    if [ -n "${GH_STUB_API_FAIL:-}" ]; then
+      echo "$GH_STUB_API_FAIL" >&2
+      exit 1
+    fi
     printf '%s\n' "$GH_STUB_DIFF"
     ;;
   "pr view")
@@ -114,6 +125,42 @@ if [ "$rc" -eq 1 ]; then
   ok "mutation check: breaking the marker constant flips a real pass to a fail"
 else
   bad "mutation check: breaking the marker constant flips a real pass to a fail" "rc=$rc out=$out"
+fi
+
+# --- case 5: gh api (files endpoint) itself fails -> refuse, exit 2 -----
+# The unreadable-list case is still fatal -- that is different from "the
+# list is merely large," which case 6/7 below prove is no longer fatal.
+out="$(GH_STUB_API_FAIL='HTTP 404: Not Found' GH_STUB_BODY='' GH_STUB_COMMENTS='' \
+  UI_EVIDENCE_PATH_RE='scripts/supervisor/laneview/' bash "$GATE" 42 2>&1)"
+rc=$?
+if [ "$rc" -eq 2 ] && grep -q 'gh api pulls/42/files failed' <<<"$out"; then
+  ok "an unreadable file list still refuses with exit 2"
+else
+  bad "an unreadable file list still refuses with exit 2" "rc=$rc out=$out"
+fi
+
+# --- case 6 (mutation, direction A): a large PR WITH a UI path and no ---
+# marker must still be refused. agent-estate#745's own PR (392 changed
+# paths) is the real-world trigger for this: fix the "can't see the list"
+# failure without accidentally also making "the list is huge" a free pass.
+BIG_NON_UI="$(for i in $(seq 1 350); do echo "docs/file$i.md"; done)"
+out="$(run_gate "$(printf '%s\nscripts/supervisor/laneview/tui.sh\n' "$BIG_NON_UI")" \
+  'no evidence attached' '' 2>&1)"
+rc=$?
+if [ "$rc" -eq 1 ] && grep -q 'carries no' <<<"$out"; then
+  ok "mutation A: a >300-path PR that touches a UI path is still refused without evidence"
+else
+  bad "mutation A: a >300-path PR that touches a UI path is still refused without evidence" "rc=$rc out=$out"
+fi
+
+# --- case 7 (mutation, direction B): a large PR with NO UI paths must ---
+# still exit 0 -- this is the actual #745 shape: 392 paths, none of them UI.
+out="$(run_gate "$BIG_NON_UI" '' '' 2>&1)"
+rc=$?
+if [ "$rc" -eq 0 ] && grep -q 'no UI paths changed' <<<"$out"; then
+  ok "mutation B: a >300-path PR with no UI paths still exits 0"
+else
+  bad "mutation B: a >300-path PR with no UI paths still exits 0" "rc=$rc out=$out"
 fi
 
 rm -rf "$D"
