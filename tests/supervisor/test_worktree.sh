@@ -955,6 +955,152 @@ fi
 rm -rf "$OUTSIDE_ROOT" 2>/dev/null
 git -C "$REPO" worktree prune >/dev/null 2>&1
 
+# --- gc: squash-merged, then superseded -- PR-merged fallback (#682) ------
+# `branch_content_is_on_base`'s own scoped-diff test says "not merged" once
+# `origin/main` has moved on and touched the same paths again after a squash
+# merge -- the gap that function's own comment and this file's header
+# document by measurement ("17 with a MERGED PR whose files main has since
+# changed again: merged, then superseded"). A branch's own MERGED PR record
+# is the second, independent signal `gc` now uses to still recognise that
+# case as safe -- via a stubbed `gh` on PATH, same shape and stub file
+# branch-sweep.sh's own tests already use
+# (tests/supervisor/stubs-branch-sweep/gh, STUB_GH_PR_ROWS).
+GH_STUB_DIR="$HERE/stubs-branch-sweep"
+gc682() { env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=0 PATH="$GH_STUB_DIR:$PATH" "$@"; }
+
+out=$(bash "$WT" new 682-super "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "gc setup: new (squash-merged-then-superseded case) exits 0" "$rc" 0 "$out"
+SUPER_DEST="$out"
+require_dest "new (squash-merged-then-superseded case)" "$SUPER_DEST"
+echo "squashed-then-superseded change" > "$SUPER_DEST/super.txt"
+git -C "$SUPER_DEST" add super.txt
+git -C "$SUPER_DEST" -c user.email=test@example.com -c user.name=Test commit -q -m "squash-merged, later superseded"
+git -C "$SUPER_DEST" push -q origin lane/682-super
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --squash origin/lane/682-super
+git -C "$REPO" commit -q -m "squashed: lane/682-super"
+echo "later commit on main touches the same file again" >> "$REPO/super.txt"
+git -C "$REPO" commit -q -am "main supersedes what the squash merge added"
+git -C "$REPO" push -q origin main
+git -C "$SUPER_DEST" fetch -q origin
+SUPER_REAL=$(cd "$SUPER_DEST" && pwd -P)
+
+# Baseline: verify the instrument first. Without the GitHub cross-check
+# (--no-github, same as gh being entirely unavailable), the content check
+# alone must still leave this candidate stuck -- proving this fixture
+# reproduces the documented gap, not something the content check already
+# handled.
+nogh_out=$(STUB_GH_PR_ROWS=$'lane/682-super\tMERGED' gc682 bash "$WT" gc --dry-run --no-github "$REPO" origin/main 2>&1)
+if grep -q "would remove $SUPER_REAL" <<<"$nogh_out"; then
+  bad "gc --no-github leaves the squash-merged-then-superseded worktree stuck (baseline, #682)" "$nogh_out"
+else
+  ok "gc --no-github leaves the squash-merged-then-superseded worktree stuck (baseline, #682)"
+fi
+
+# With the cross-check: the stub reports lane/682-super as MERGED, so gc
+# must now remove it, and say why.
+super_dry=$(STUB_GH_PR_ROWS=$'lane/682-super\tMERGED' gc682 bash "$WT" gc --dry-run "$REPO" origin/main 2>&1)
+if grep -q "would remove $SUPER_REAL" <<<"$super_dry"; then ok "gc --dry-run offers the squash-merged-then-superseded worktree once its PR is on record as MERGED (#682)"; else bad "gc --dry-run offers the squash-merged-then-superseded worktree once its PR is on record as MERGED (#682)" "$super_dry"; fi
+if grep -q "would remove $SUPER_REAL.*MERGED PR" <<<"$super_dry"; then ok "the offer names the MERGED PR as the reason, not the content check"; else bad "the offer names the MERGED PR as the reason, not the content check" "$super_dry"; fi
+
+super_out=$(STUB_GH_PR_ROWS=$'lane/682-super\tMERGED' gc682 bash "$WT" gc "$REPO" origin/main 2>&1)
+if [ -d "$SUPER_DEST" ]; then bad "gc removes a squash-merged-then-superseded worktree once its PR is on record as MERGED (#682)" "$SUPER_DEST still present: $super_out"; else ok "gc removes a squash-merged-then-superseded worktree once its PR is on record as MERGED (#682)"; fi
+
+# --- gc: genuinely unmerged content is still refused even with the GitHub
+# cross-check active (#682, the other direction) -----------------------
+out=$(bash "$WT" new 682-real-unmerged "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "gc setup: new (genuinely unmerged, gh cross-check active) exits 0" "$rc" 0 "$out"
+REALUNMERGED_DEST="$out"
+require_dest "new (genuinely unmerged, gh cross-check active)" "$REALUNMERGED_DEST"
+echo "never merged anywhere" > "$REALUNMERGED_DEST/never-merged.txt"
+git -C "$REALUNMERGED_DEST" add never-merged.txt
+git -C "$REALUNMERGED_DEST" -c user.email=test@example.com -c user.name=Test commit -q -m "genuinely unmerged work"
+git -C "$REALUNMERGED_DEST" push -q origin lane/682-real-unmerged
+REALUNMERGED_REAL=$(cd "$REALUNMERGED_DEST" && pwd -P)
+
+# The stub's merged-PR set names an unrelated branch only -- lane/682-real-
+# unmerged must not be swept in just because the cross-check ran at all.
+realunmerged_out=$(STUB_GH_PR_ROWS=$'lane/999-unrelated\tMERGED' gc682 bash "$WT" gc "$REPO" origin/main 2>&1)
+if [ -d "$REALUNMERGED_DEST" ]; then ok "gc leaves a genuinely unmerged worktree in place even with the GitHub cross-check active (#682)"; else bad "gc leaves a genuinely unmerged worktree in place even with the GitHub cross-check active (#682)" "$REALUNMERGED_DEST removed: $realunmerged_out"; fi
+if grep -q "no MERGED PR is on record" <<<"$realunmerged_out"; then ok "the refusal says no MERGED PR is on record, not just 'not merged'"; else bad "the refusal says no MERGED PR is on record, not just 'not merged'" "$realunmerged_out"; fi
+
+# --- MUTATION: force the PR-merged fallback to always say yes -> the
+# genuinely-unmerged candidate above (still on disk, correctly preserved)
+# must go RED, proving the two assertions above are pinned to a real check
+# reading the merged-PR file, not something else already refusing it.
+MUT_PR="$D/worktree-mutant-pr-merged.sh"
+mut_pr_rc=0
+python3 - "$WT" "$MUT_PR" <<'PY' || mut_pr_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''_gc_pr_merged_from_file() {
+  local merged_file="$1" b="$2"
+  [ -n "$merged_file" ] && [ -f "$merged_file" ] || return 1
+  grep -qxF "$b" "$merged_file"
+}'''
+assert marker in text, "_gc_pr_merged_from_file not found -- script shape changed"
+assert text.count(marker) == 1, "_gc_pr_merged_from_file not unique -- script shape changed"
+open(dst, "w").write(text.replace(marker, "_gc_pr_merged_from_file() {\n  return 0\n}", 1))
+PY
+if [ "$mut_pr_rc" -ne 0 ]; then
+  bad "setup: patched a copy of worktree.sh with the PR-merged fallback forced to 'yes'" "could not patch $WT (exit $mut_pr_rc)"
+else
+  ok "setup: patched a copy of worktree.sh with the PR-merged fallback forced to 'yes'"
+  chmod +x "$MUT_PR"
+  mut_pr_out=$(STUB_GH_PR_ROWS=$'lane/999-unrelated\tMERGED' gc682 bash "$MUT_PR" gc "$REPO" origin/main 2>&1)
+  if [ ! -d "$REALUNMERGED_DEST" ]; then
+    ok "mutation confirmed: forcing the PR-merged fallback to always say yes lets gc remove a genuinely unmerged worktree (the refusal's GREEN assertion would now be RED)"
+  else
+    bad "mutation confirmed: forcing the PR-merged fallback to always say yes lets gc remove a genuinely unmerged worktree" "expected removal on the mutant, $REALUNMERGED_DEST is still present: $mut_pr_out"
+  fi
+fi
+git -C "$REPO" worktree prune >/dev/null 2>&1
+
+# --- gc: WORKTREE_GC_EXTRA_ROOTS opts an external root into scope, but
+# only for candidates matching `new`'s own ad-<slug>-<pid> naming (#682) --
+EXTRA_ROOT=$(mktemp -d)
+AD_NAMED_DEST="$EXTRA_ROOT/ad-682-extraroot-$$"
+git -C "$REPO" worktree add -q -b lane/682-extraroot "$AD_NAMED_DEST" origin/main
+echo "extra-root, ad-named change" >> "$AD_NAMED_DEST/file.txt"
+git -C "$AD_NAMED_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "extra-root ad-named merged work"
+git -C "$AD_NAMED_DEST" push -q origin lane/682-extraroot
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/682-extraroot
+git -C "$REPO" push -q origin main
+git -C "$AD_NAMED_DEST" fetch -q origin
+
+PLAIN_NAMED_DEST="$EXTRA_ROOT/plain-name-$$"
+git -C "$REPO" worktree add -q -b lane/682-plainname "$PLAIN_NAMED_DEST" origin/main
+echo "extra-root, plain-named change" >> "$PLAIN_NAMED_DEST/file.txt"
+git -C "$PLAIN_NAMED_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "extra-root plain-named merged work"
+git -C "$PLAIN_NAMED_DEST" push -q origin lane/682-plainname
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/682-plainname
+git -C "$REPO" push -q origin main
+git -C "$PLAIN_NAMED_DEST" fetch -q origin
+
+AD_NAMED_REAL=$(cd "$AD_NAMED_DEST" && pwd -P)
+PLAIN_NAMED_REAL=$(cd "$PLAIN_NAMED_DEST" && pwd -P)
+
+# Neither is offered without opting the root in -- same default as every
+# other worktree registered outside $REPO/.worktrees/.
+noextra_out=$(gc478 gc --dry-run "$REPO" origin/main 2>&1)
+if grep -q "would remove $AD_NAMED_REAL" <<<"$noextra_out"; then bad "gc --dry-run never offers an ad-named worktree outside .worktrees/ without WORKTREE_GC_EXTRA_ROOTS" "$noextra_out"; else ok "gc --dry-run never offers an ad-named worktree outside .worktrees/ without WORKTREE_GC_EXTRA_ROOTS"; fi
+
+# Opting EXTRA_ROOT in: the ad-<slug>-<pid>-named candidate is now offered,
+# the plain-named one in the SAME opted-in root is still not -- the pattern
+# match is a whitelist, not "everything under this root now qualifies".
+extra_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=0 WORKTREE_GC_EXTRA_ROOTS="$EXTRA_ROOT" bash "$WT" gc --dry-run "$REPO" origin/main 2>&1)
+if grep -q "would remove $AD_NAMED_REAL" <<<"$extra_out"; then ok "gc --dry-run offers an ad-named worktree once its root is opted in via WORKTREE_GC_EXTRA_ROOTS (#682)"; else bad "gc --dry-run offers an ad-named worktree once its root is opted in via WORKTREE_GC_EXTRA_ROOTS (#682)" "$extra_out"; fi
+if grep -q "would remove $PLAIN_NAMED_REAL" <<<"$extra_out"; then bad "gc --dry-run still refuses a plain-named worktree in the SAME opted-in root (naming, not root, gates scope)" "$extra_out"; else ok "gc --dry-run still refuses a plain-named worktree in the SAME opted-in root (naming, not root, gates scope)"; fi
+
+extra_real_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=0 WORKTREE_GC_EXTRA_ROOTS="$EXTRA_ROOT" bash "$WT" gc "$REPO" origin/main 2>&1)
+if [ -d "$AD_NAMED_DEST" ]; then bad "gc removes an ad-named worktree once its root is opted in" "$AD_NAMED_DEST still present: $extra_real_out"; else ok "gc removes an ad-named worktree once its root is opted in"; fi
+if [ -d "$PLAIN_NAMED_DEST" ]; then ok "gc leaves a plain-named worktree in the same opted-in root untouched"; else bad "gc leaves a plain-named worktree in the same opted-in root untouched" "$PLAIN_NAMED_DEST removed: $extra_real_out"; fi
+rm -rf "$EXTRA_ROOT" 2>/dev/null
+git -C "$REPO" worktree prune >/dev/null 2>&1
+
 # Tear down the private throwaway tmux server -- never the default socket,
 # scoped to $RT and gated by assert_isolated_tmux, same as test_lane_done.sh.
 cleanup_rt
