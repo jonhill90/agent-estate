@@ -174,11 +174,23 @@ check "a detached worktree reports a real ref, not HEAD" "^code: *unknown@main" 
 # perfectly plausible branch@sha with nothing to say which repository it
 # belonged to. Run with no git stub, against this checkout's own real
 # `origin` remote, so this exercises the actual derivation rather than a
-# canned stub answer. Derive the expected name the same way watchdog.sh does
-# (agent-estate#729/#731) instead of hardcoding a literal that goes stale on
-# the next rename.
-expected_repo=$(git -C "$HERE" remote get-url origin 2>/dev/null | sed 's/\.git$//' \
-     | awk -F'[:/]' 'NF>=2{print $(NF-1)"/"$NF}')
+# canned stub answer.
+#
+# agent-estate#729/#731: a hardcoded literal here goes stale on every rename,
+# but computing the expectation with the SAME sed/awk pipeline watchdog.sh
+# uses (scripts/supervisor/watchdog.sh:393-394) is worse -- a defect in that
+# pipeline reproduces identically in the expectation, so the assertion could
+# no longer fail on a derivation bug and would only prove *a* `code:` line
+# was emitted (caught in review, see PR#731). Derive it through an
+# independent mechanism instead -- Python regex, not awk field-splitting --
+# so a bug in watchdog.sh's own parsing still shows up as a mismatch here.
+expected_repo=$(git -C "$HERE" remote get-url origin 2>/dev/null | python3 -c '
+import re, sys
+url = sys.stdin.read().strip()
+url = re.sub(r"\.git$", "", url)
+m = re.search(r"[:/]([^/:]+)/([^/:]+)$", url)
+print(f"{m.group(1)}/{m.group(2)}" if m else "")
+')
 D=$(mktemp -d); run idle "$D/w"
 check "code: line names the repo derived from origin" "^code: *${expected_repo}@" "$D/w/st"
 
