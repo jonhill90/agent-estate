@@ -19,37 +19,65 @@ WORK="$(mktemp -d)"
 trap 'rm -rf "$WORK"' EXIT
 
 # --- default resolution renders all 4, valid plists -------------------------
+# render-plists.sh's default is a fixed production-checkout path (Jon's Mac),
+# kept only to preserve pre-rename byte-identical output when
+# AGENT_SUPERVISOR_REPO is unset. Unlike director-loop.sh/quota-watch.sh/etc,
+# which self-resolve their OWN path via dirname "${BASH_SOURCE[0]}", this
+# script's rendered output is installed on a *different*, fixed host later by
+# launchd -- so its default has to name that host's checkout, not wherever
+# render-plists.sh itself happens to run from. A GitHub runner (or any
+# checkout that isn't Jon's Mac) has no such path, so a FATAL from the
+# default case describes the host, not a defect in the script; skip with the
+# reason, the same way plutil/live-plists are already skipped below.
 OUT_DEFAULT="$WORK/default"
 (unset AGENT_SUPERVISOR_REPO; bash "$RENDER" --out-dir "$OUT_DEFAULT" >"$WORK/default.log" 2>&1)
 rc=$?
-if [ "$rc" -eq 0 ]; then say_ok "default resolution exits 0"; else say_bad "default resolution exits 0" "rc=$rc, log: $(cat "$WORK/default.log")"; fi
+default_ok=0
+if [ "$rc" -eq 1 ] && grep -q "^FATAL: AGENT_SUPERVISOR_REPO does not resolve to a real checkout" "$WORK/default.log"; then
+  echo "  SKIP no default checkout on this host ($(sed -n 's/^FATAL: //p' "$WORK/default.log"))"
+elif [ "$rc" -eq 0 ]; then
+  say_ok "default resolution exits 0"
+  default_ok=1
+else
+  say_bad "default resolution exits 0" "rc=$rc, log: $(cat "$WORK/default.log")"
+fi
 
-count="$(find "$OUT_DEFAULT" -maxdepth 1 -name '*.plist' 2>/dev/null | wc -l | tr -d ' ')"
-if [ "$count" = "4" ]; then say_ok "renders exactly 4 plists"; else say_bad "renders exactly 4 plists" "found $count"; fi
+if [ "$default_ok" -eq 1 ]; then
+  count="$(find "$OUT_DEFAULT" -maxdepth 1 -name '*.plist' 2>/dev/null | wc -l | tr -d ' ')"
+  if [ "$count" = "4" ]; then say_ok "renders exactly 4 plists"; else say_bad "renders exactly 4 plists" "found $count"; fi
+else
+  echo "  SKIP renders exactly 4 plists (no default checkout on this host)"
+fi
 
-if command -v plutil >/dev/null 2>&1; then
+if [ "$default_ok" -eq 1 ] && command -v plutil >/dev/null 2>&1; then
   bad=0
   for f in "$OUT_DEFAULT"/*.plist; do
     plutil -lint "$f" >/dev/null 2>&1 || bad=$((bad+1))
   done
   if [ "$bad" -eq 0 ]; then say_ok "every rendered plist is valid XML (plutil -lint)"; else say_bad "every rendered plist is valid XML" "$bad invalid"; fi
+elif [ "$default_ok" -ne 1 ]; then
+  echo "  SKIP every rendered plist is valid XML (no default checkout on this host)"
 else
   echo "  SKIP plutil not on PATH"
 fi
 
 # --- positive control: diff itself must be able to detect a real difference,
 #     before its zero below is trusted as "matches production" ---------------
-MUTATED="$WORK/mutated.plist"
-cp "$OUT_DEFAULT/com.jonhill.director-loop.plist" "$MUTATED"
-sed -i '' 's/900/901/' "$MUTATED"
-diff -q "$OUT_DEFAULT/com.jonhill.director-loop.plist" "$MUTATED" >/dev/null 2>&1
-diff_rc=$?
-if [ "$diff_rc" -ne 0 ]; then say_ok "positive control: diff detects a real difference"; else say_bad "positive control: diff detects a real difference" "diff reported no difference on a deliberately mutated file"; fi
+if [ "$default_ok" -eq 1 ]; then
+  MUTATED="$WORK/mutated.plist"
+  cp "$OUT_DEFAULT/com.jonhill.director-loop.plist" "$MUTATED"
+  sed -i '' 's/900/901/' "$MUTATED"
+  diff -q "$OUT_DEFAULT/com.jonhill.director-loop.plist" "$MUTATED" >/dev/null 2>&1
+  diff_rc=$?
+  if [ "$diff_rc" -ne 0 ]; then say_ok "positive control: diff detects a real difference"; else say_bad "positive control: diff detects a real difference" "diff reported no difference on a deliberately mutated file"; fi
+else
+  echo "  SKIP positive control: diff detects a real difference (no default checkout on this host)"
+fi
 
 # --- default resolution matches the live plists byte-for-byte, IF this host
 #     actually has them (this repo's tests may run off this machine) --------
 LIVE="$HOME/Library/LaunchAgents"
-if [ -d "$LIVE" ] && [ -f "$LIVE/com.jonhill.director-loop.plist" ]; then
+if [ "$default_ok" -eq 1 ] && [ -d "$LIVE" ] && [ -f "$LIVE/com.jonhill.director-loop.plist" ]; then
   mismatches=0
   for name in director-loop quota-watch supervisor-heartbeat weekly-watch; do
     diff -q "$LIVE/com.jonhill.$name.plist" "$OUT_DEFAULT/com.jonhill.$name.plist" >/dev/null 2>&1 || mismatches=$((mismatches+1))
