@@ -97,10 +97,17 @@ and it is longer and more specific than this line.
   window's name, never kill it (#564)
 - `register-lane-self.sh` — how a hand-attached lane registers ITSELF, from
   `$TMUX_PANE` and explicit `-t` reads only
-- `lane-whoami.sh` — the one command a review/fix-pass brief should name to
-  derive `Review-Lane:`: anchors on `$TMUX_PANE` when set, falls back to the
-  Invariant 10 `worktree-lane --include-reviews` self-lookup for a pane-less
-  (claude-print) lane; never a bare `tmux display-message` (#685)
+- `lane-whoami.sh` — the fallback command a hand-written brief should name to
+  derive `Review-Lane:` when nothing has already stated it: anchors on
+  `$TMUX_PANE` when set, falls back to the Invariant 10 `worktree-lane
+  --include-reviews` self-lookup for a pane-less (claude-print) lane; never a
+  bare `tmux display-message` (#685). **Superseded as the PRIMARY path by
+  #793**: `dispatch.sh`/`dispatch-claude-print.sh`/`dispatch-pi-rpc.sh` now
+  STATE the lane's own id directly in the deliverable contract they append to
+  every brief, because asking a lane to derive its own id — even correctly,
+  via this script — is the step that failed twice (`skills#289`,
+  `skills#291`, both after #685 landed). A lane should read the stated value
+  first; this script is for a brief written outside that contract.
 - `restore.sh` — rebuild every lane after a tmux server loss, ledger-driven
 - `preserve-dead-lanes.sh` — save a dead lane's uncommitted work before it's
   lost (#651)

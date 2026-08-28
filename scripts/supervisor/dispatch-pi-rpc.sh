@@ -156,6 +156,9 @@ abort() {
 }
 
 # --- 3. the standing deliverable contract, same text dispatch.sh appends --
+# agent-estate#793: $LANE is already known here -- state it instead of
+# telling the lane to derive it via tmux, which has no meaning for a
+# pane-less pi-rpc lane at all.
 CONTRACT_MARKER="<!-- dispatch:deliverable-contract -->"
 if ! grep -qF "$CONTRACT_MARKER" "$BRIEF" 2>/dev/null; then
   cat >>"$BRIEF" <<EOF || abort "could not append the deliverable contract to $BRIEF -- #$ISSUE was NOT dispatched"
@@ -164,6 +167,13 @@ $CONTRACT_MARKER
 ## Delivering this work
 
 Added by \`dispatch-pi-rpc.sh\` on every dispatch, not by the brief's author.
+
+**Your lane id is \`$LANE\`.** Use this exact value for any \`Review-Lane:\` or
+\`Lane:\` trailer this brief asks you to write -- it is stated here, not
+something to derive. You have no tmux pane, so do not attempt \`tmux
+display-message\` at all (agent-estate#793); if you need to double-check
+this value, \`scripts/supervisor/lane-whoami.sh\` is the one command that
+resolves it correctly for a pane-less lane too.
 
 Unless this brief says otherwise, when you are finished:
 **push your branch and open a PR**.
