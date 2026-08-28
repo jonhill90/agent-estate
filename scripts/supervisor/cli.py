@@ -666,4 +666,24 @@ def main(argv=None):
 # nothing and exited 0, which reads as success to any wrapper checking $?. The
 # import-based tests all passed throughout, because they call main() directly.
 if __name__ == "__main__":
-    sys.exit(main())
+    # agent-supervisor#788: `RuntimeError`/`ValueError` are this file's own
+    # vocabulary for an expected refusal -- "unknown task", "unknown lane",
+    # "cannot complete failed task" and the like (see record_completion's own
+    # `raise RuntimeError(f"unknown {identity}")`, and the many
+    # `ValueError`s core.py's `Ledger` raises for an illegal transition).
+    # In-process callers (`cli.main([...])` from a test, or from another
+    # module) still see the real exception -- several tests assert exactly
+    # that with `assertRaises(RuntimeError)` -- so this catches only at the
+    # process boundary, where an uncaught one prints a full Python traceback
+    # to stderr that a caller checking $? never asked for and a caller
+    # checking stderr for problems reads as a crash. `lane-retire.sh` hits
+    # this on an already-free lane (a known-benign, expected refusal, exit 1
+    # either way) and was printing exactly that traceback before this fix.
+    # Anything NOT one of these two types (a KeyError, an AttributeError --
+    # an actual bug, not a modelled refusal) still tracebacks, deliberately:
+    # this narrows what gets a clean line, it does not silence failures.
+    try:
+        sys.exit(main())
+    except (RuntimeError, ValueError) as error:
+        print(f"cli.py: {error}", file=sys.stderr)
+        sys.exit(1)

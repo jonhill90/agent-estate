@@ -267,5 +267,30 @@ want_exit "an open task with no recorded worktree is refused" "$rc" 1 "$out"
 want_contains "...with a message distinct from a dirty-tree or unpushed-commit refusal" "no worktree recorded in the ledger" "$out"
 want_contains "the window keeps its original name" "as615-unknown-lane" "$(wname "$IDX7")"
 
+# ============================================================================
+# 8. agent-supervisor#788: retiring a lane that is ALREADY FREE -- no open
+#    task in the ledger at all, never dispatched or already released by hand
+#    -- must exit 0 (step 6's own comment: "not an error here, just nothing
+#    to release") with CLEAN stderr, not just exit 0. Before this fix,
+#    `cli.py record-completion --lane ...` raised an uncaught
+#    `RuntimeError` from `cli_completion.py:74`, and this script's own
+#    best-effort catch (`if ! LEDGER_OUT=$(...)`) captured and re-echoed the
+#    full Python traceback to stderr -- a success path that reads as a
+#    crash to any caller checking stderr for problems, not just $?.
+# ============================================================================
+rtmux new-window -t "$SESS:9" -n as788-already-free-lane -c "$CLEAN_WT"
+wait_pane_cwd 9
+IDX8=$(rtmux list-windows -t "$SESS" -F '#{window_index} #{window_name}' | awk '/as788-already-free-lane/{print $1}')
+# Deliberately no register_open_task call -- this lane has no ledger row at all.
+
+out=$(run "$IDX8"); rc=$?
+want_exit "an already-free lane retires cleanly (exit 0)" "$rc" 0 "$out"
+want_contains "renamed back to free-N" "free-${IDX8}" "$(wname "$IDX8")"
+if grep -qi "Traceback (most recent call last)" <<<"$out"; then
+  bad "stderr carries no raw Python traceback" "$out"
+else
+  ok "stderr carries no raw Python traceback"
+fi
+
 echo "lane-retire.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
