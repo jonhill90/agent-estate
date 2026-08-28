@@ -41,7 +41,16 @@ done
 # default that keeps today's (pre-rename) behavior byte-identical, an env
 # var that wins when a caller sets it, and a loud FATAL (not a quiet
 # fallback to "no work") when neither resolves to a real checkout.
-AGENT_SUPERVISOR_REPO="${AGENT_SUPERVISOR_REPO:-/Users/jon/source/repos/Personal/agent-supervisor}"
+#
+# agent-estate#729: the rename actually happened (agent-supervisor ->
+# agent-estate, #728), so the literal default above went stale -- it named a
+# directory that no longer exists. Prefer whichever of the two names is
+# actually on disk rather than hardcoding the new one outright: a hardcoded
+# name is exactly what outlived its repo this morning, and this default gets
+# baked into 4 launchd ProgramArguments entries that run unattended.
+_AGENT_SUPERVISOR_REPO_DEFAULT=/Users/jon/source/repos/Personal/agent-estate
+[ -d "$_AGENT_SUPERVISOR_REPO_DEFAULT" ] || _AGENT_SUPERVISOR_REPO_DEFAULT=/Users/jon/source/repos/Personal/agent-supervisor
+AGENT_SUPERVISOR_REPO="${AGENT_SUPERVISOR_REPO:-$_AGENT_SUPERVISOR_REPO_DEFAULT}"
 if [ ! -d "$AGENT_SUPERVISOR_REPO" ]; then
   echo "FATAL: AGENT_SUPERVISOR_REPO does not resolve to a real checkout: $AGENT_SUPERVISOR_REPO" >&2
   exit 1

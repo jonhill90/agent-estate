@@ -108,7 +108,8 @@
 #   SUPERVISOR_LIVE       live worktree path; default $SUPERVISOR_STATE/live
 #   SUPERVISOR_REPO       git checkout to recreate a MISSING live worktree
 #                         from (agent-supervisor#367); default
-#                         ~/source/repos/Personal/agent-supervisor
+#                         ~/source/repos/Personal/agent-estate (or
+#                         agent-supervisor, whichever exists -- #729)
 #   SUPERVISOR_STATUS     the LIVE watchdog's own status file (read, not written)
 #   ADVANCE_LOG           default $SUPERVISOR_STATE/advance-live.log
 #   ADVANCE_ROLLBACK      default $SUPERVISOR_STATE/.live-rollback-sha
@@ -603,9 +604,11 @@ watchdog_stale_check
 # THE RECREATE SOURCE is a separate git checkout, not $LIVE itself -- there
 # is nothing at $LIVE to read a remote from once it is gone. SUPERVISOR_REPO
 # names it, defaulting to the shared checkout this whole estate already
-# treats as canonical for agent-supervisor (cli.py's own REPOS table, and
+# treats as canonical for this repo (cli.py's own REPOS table, and
 # CLAUDE.md's "the Director runs scripts/supervisor/ out of the shared
-# checkout at ~/source/repos/Personal/agent-supervisor").
+# checkout at ~/source/repos/Personal/agent-estate"). agent-estate#729:
+# the rename actually happened, so prefer whichever of the two names exists
+# on disk rather than swapping one hardcoded literal for another.
 if ! git -C "$LIVE" rev-parse --git-dir >/dev/null 2>&1; then
   if [ -e "$LIVE" ] && [ -n "$(ls -A "$LIVE" 2>/dev/null)" ]; then
     fail "not a git worktree: $LIVE -- and it is a non-empty directory, not merely absent; refusing to overwrite it without a human confirming its contents are not needed"
@@ -613,7 +616,9 @@ if ! git -C "$LIVE" rev-parse --git-dir >/dev/null 2>&1; then
   [ -f "$ROLLBACK" ] || fail "not a git worktree: $LIVE (missing) -- and no rollback sha recorded at $ROLLBACK, so there is no known-good target to recreate it at; a human must supply one"
   recreate_sha=$(tr -d '[:space:]' <"$ROLLBACK" 2>/dev/null)
   [ -n "$recreate_sha" ] || fail "not a git worktree: $LIVE (missing) -- and $ROLLBACK is empty, so there is no known-good target to recreate it at; a human must supply one"
-  RECREATE_REPO="${SUPERVISOR_REPO:-$HOME/source/repos/Personal/agent-supervisor}"
+  _RECREATE_REPO_DEFAULT="$HOME/source/repos/Personal/agent-estate"
+  [ -d "$_RECREATE_REPO_DEFAULT" ] || _RECREATE_REPO_DEFAULT="$HOME/source/repos/Personal/agent-supervisor"
+  RECREATE_REPO="${SUPERVISOR_REPO:-$_RECREATE_REPO_DEFAULT}"
   git -C "$RECREATE_REPO" rev-parse --git-dir >/dev/null 2>&1 \
     || fail "not a git worktree: $LIVE (missing) -- and the recreate source $RECREATE_REPO is not a git repository either; set SUPERVISOR_REPO to a working checkout"
   mkdir -p "$(dirname "$LIVE")" || fail "could not create the parent directory of $LIVE -- not recreating"
