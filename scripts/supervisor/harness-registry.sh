@@ -21,7 +21,7 @@
 #   H_BLOCKED_MARKERS  H_OPTION_ROW_RE  H_MENU_ENTER_RE  H_MENU_TAIL
 #   H_TEXT_PROMPT_RE  H_LAUNCH_CMD  H_RESUME_CMD  H_SEND_LITERAL  H_MODEL_RE
 #   H_LIMIT_RE  H_UNATTENDED_CMD  H_LAUNCH_TAKES_PROMPT  H_LAUNCH_PROMPT_FAILURE_RE
-#   H_TRANSCRIPT_GLOB
+#   H_TRANSCRIPT_GLOB  H_INPUT_BOX_PROMPT  H_INPUT_BOX_CLOSE
 #
 # agent-dotfiles#256: H_UNATTENDED_CMD is DELIBERATELY separate from
 # H_LAUNCH_CMD, even though today it happens to equal it for claude and
@@ -120,6 +120,18 @@ H_LAUNCH_TAKES_PROMPT=(); H_LAUNCH_PROMPT_FAILURE_RE=()
 # checked, and restore.sh refuses rather than resuming against an
 # unconfirmed transcript.
 H_TRANSCRIPT_GLOB=()
+# agent-estate#446: the harness's own input-box marker and how its box is
+# CLOSED -- threaded into `input-box.sh`'s `input_box_state`/`input_box_text`
+# by `send.sh`'s callers (`--box-prompt`/`--box-close`), the same way
+# `H_OPTION_ROW_RE` already flows into `verified_dismiss_menu`. Empty
+# H_INPUT_BOX_PROMPT (the default -- `harness/copilot.sh` today, its input
+# box never measured) is a real answer, not a gap: `input_box_state`/
+# `input_box_text` fail closed to `unknown`/nothing for it rather than
+# reusing Claude's own marker on a pane nobody confirmed paints it. See
+# `input-box.sh`'s own header (section 4) for what each field means and why
+# `harness/claude.sh` and `harness/codex.sh` both set it explicitly now
+# instead of only `input-box.sh`'s module constants doing so.
+H_INPUT_BOX_PROMPT=(); H_INPUT_BOX_CLOSE=()
 # LANES_HARNESS_DIR is the name `lanes.sh` has always used and its tests still
 # set (they point it at a MUTATED copy of the adapters to prove one adapter's
 # breakage cannot move another harness's lane). Kept as an alias so that
@@ -132,7 +144,7 @@ for _hf in "$HARNESS_DIR"/*.sh; do
         HARNESS_TEXT_PROMPT_RE HARNESS_LAUNCH_CMD HARNESS_RESUME_CMD HARNESS_SEND_LITERAL \
         HARNESS_MODEL_RE HARNESS_LIMIT_RE HARNESS_UNATTENDED_CMD \
         HARNESS_LAUNCH_TAKES_PROMPT HARNESS_LAUNCH_PROMPT_FAILURE_RE \
-        HARNESS_TRANSCRIPT_GLOB
+        HARNESS_TRANSCRIPT_GLOB HARNESS_INPUT_BOX_PROMPT HARNESS_INPUT_BOX_CLOSE
   # shellcheck disable=SC1090
   . "$_hf"
   : "${HARNESS_NAME:?$_hf did not set HARNESS_NAME}"
@@ -157,6 +169,8 @@ for _hf in "$HARNESS_DIR"/*.sh; do
   H_LAUNCH_TAKES_PROMPT+=("${HARNESS_LAUNCH_TAKES_PROMPT:-0}")
   H_LAUNCH_PROMPT_FAILURE_RE+=("${HARNESS_LAUNCH_PROMPT_FAILURE_RE:-}")
   H_TRANSCRIPT_GLOB+=("${HARNESS_TRANSCRIPT_GLOB:-}")
+  H_INPUT_BOX_PROMPT+=("${HARNESS_INPUT_BOX_PROMPT:-}")
+  H_INPUT_BOX_CLOSE+=("${HARNESS_INPUT_BOX_CLOSE:-}")
 done
 unset _hf
 

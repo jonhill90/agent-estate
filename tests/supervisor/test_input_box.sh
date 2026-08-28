@@ -132,5 +132,68 @@ want "a dialog option row is not a box" unknown \
 want "source text quoting the marker does not become the box" empty \
   "$(printf '%s\n%s\n%s\n%s\n' "reviewing: ${P}Read /brief.md" "$RULE" "${P}" "$RULE")"
 
+# --- agent-estate#446: a SECOND, genuinely different box shape --------------
+# #446's own root cause: `tests/supervisor/stubs/tmux-dispatch` always drew
+# Claude's own `❯`+NBSP box chrome regardless of which harness a test said it
+# was dispatching to, so nothing in the suite could catch a differently-
+# shaped box going unrecognised -- the codex regression shipped invisibly.
+# These fixtures are codex's OWN chrome, byte-for-byte what a real, fully-
+# ready codex pane (0.148.0, then reconfirmed 0.149.0) painted in a throwaway
+# tmux socket, never inferred: marker `›` (U+203A) immediately followed by an
+# ORDINARY space (not NBSP, unlike Claude); no closing rule at all -- the box
+# is closed by the first blank row instead. See harness/codex.sh's own
+# HARNESS_INPUT_BOX_PROMPT/HARNESS_INPUT_BOX_CLOSE comment for the full
+# captures these fixtures are built from.
+# CODEX_PROMPT_BYTES is what `input_box_state`/`input_box_text` are actually
+# called with -- the marker AFTER strip_dim_sgr has already removed every
+# SGR code (`›` + an ordinary space, nothing else). CODEX_P below is a
+# DIFFERENT thing: the RAW fixture prefix, bold-SGR-wrapped, matching what a
+# real capture-pane -pe actually returns before this file's own dim-strip
+# runs on it. Conflating the two here was the bug the first draft of this
+# test caught the hard way -- an explicit constant for each keeps it from
+# happening again.
+CODEX_PROMPT_BYTES=$'\xe2\x80\xba '
+want_codex() { # want_codex <name> <expected> <capture>
+  local got; got=$(input_box_state "$CODEX_PROMPT_BYTES" blank <<<"$3")
+  if [ "$got" = "$2" ]; then echo "  ok   $1"; pass=$((pass+1));
+  else echo "  FAIL $1 — want '$2', got '$got', for:"; sed 's/^/       /' <<<"$3"; fail=$((fail+1)); fi
+}
+
+# Bold marker, reset, ORDINARY space -- captured raw bytes:
+#   \x1b[1m\xe2\x80\xba\x1b[0m<space>
+CODEX_P=$'\033[1m\xe2\x80\xba\033[0m '
+CODEX_FOOTER='  gpt-5.6-terra medium · /private/tmp'
+
+box_codex() { printf '%s\n\n%s\n' "${CODEX_P}$1" "$CODEX_FOOTER"; }
+
+want_codex "codex: a brief typed and never submitted is text" text \
+  "$(box_codex 'Read /private/tmp/brief-446-codex.md and do exactly what it says.')"
+want_codex "codex: a genuinely empty box (placeholder only) is empty" empty \
+  "$(box_codex "$(printf '\033[2mAsk Codex to do anything\033[0m')")"
+want_codex "codex: a box with nothing in it at all is empty" empty "$(box_codex '')"
+
+# No closing rule at all (agent-estate#446's own finding) -- the box is
+# closed by the first BLANK row, and a wrapped message's continuation rows
+# (plain, unmarked, indented -- measured live) are still followed by one
+# once the message ends, before the footer.
+want_codex "codex: text wrapped onto an unmarked continuation row is text" text \
+  "$(printf '%s\n%s\n\n%s\n' "${CODEX_P}Read /brief.md and do exactly" \
+     "  what it says. Do all of your work in the worktree" "$CODEX_FOOTER")"
+
+# A past turn's echoed prompt reuses the SAME glyph, but codex paints the
+# MARKER ITSELF dim (measured live: `\x1b[1;2m› \x1b[0m<text>`) -- so
+# strip_dim_sgr removes it before this file's "last matching row" scan ever
+# sees it, the same disambiguation Claude's NBSP-vs-space split gives it, by
+# a mechanism this harness happens to paint for free. Still must not become
+# the box.
+want_codex "codex: a past turn's dim-marked echo is not mistaken for the box" empty \
+  "$(printf '%s\n%s\n%s\n\n%s\n' "$(printf '\033[1;2m\xe2\x80\xba\033[0m Say hello and nothing else.')" \
+     '' 'Hello' "$(box_codex "$(printf '\033[2mAsk Codex to do anything\033[0m')")")"
+
+# A box cut off by the bottom of the pane (no blank row ever follows) is
+# still unknown, the identical fail-safe Claude's rule-close gets.
+want_codex "codex: a box cut off by the bottom of the pane is unknown" unknown \
+  "$(printf '%s\n' "${CODEX_P}Read /brief.md and do exactly what it says.")"
+
 echo "  $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

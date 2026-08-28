@@ -346,7 +346,7 @@ python3 - "$SEND" "$MUTANT_PRECLEAR" <<'PY' || patch_rc=$?
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = '''    SEND_BOX_STATE=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_state)
+marker = '''    SEND_BOX_STATE=$(tmux capture-pane -pe -t "$target" 2>/dev/null | input_box_state "$box_prompt" "$box_close")
     if [ "$SEND_BOX_STATE" = empty ]; then
       SEND_STATUS=landed
       return 0

@@ -300,3 +300,17 @@ HARNESS_TEXT_PROMPT_RE='Type the [a-z]'
 # above (e.g. dropping "with <effort> effort" to match a shape never
 # observed) is a guess, not a fix, per every other marker in this file.
 HARNESS_MODEL_RE='(Opus|Sonnet|Haiku)[[:space:]]+[0-9]+(\.[0-9]+)?([[:space:]]+with[[:space:]]+[a-z]+[[:space:]]+effort)?[[:space:]]*·'
+
+# agent-estate#446: this harness's own input-box marker and close mode, for
+# `input-box.sh`'s `input_box_state`/`input_box_text` -- see that file's own
+# header (section 4) for the full contract. Literal duplicate of that file's
+# own `INPUT_BOX_PROMPT` constant, not a reference to it: this file is
+# sourced independently by `harness-registry.sh`, in a loop that unsets and
+# re-sources one harness at a time, with no guarantee `input-box.sh` has been
+# sourced into the same shell at all -- the same reason every other
+# harness-specific literal in this file (HARNESS_LAUNCH_CMD, the regexes
+# above) is a duplicate rather than a cross-file reference. `❯` (U+276F)
+# immediately followed by U+00A0 (NBSP); `rule`, Claude's own box closed by a
+# `─`/`━` row -- both unchanged from what `input-box.sh` measured pre-#446.
+HARNESS_INPUT_BOX_PROMPT=$'\xe2\x9d\xaf\xc2\xa0'
+HARNESS_INPUT_BOX_CLOSE=rule

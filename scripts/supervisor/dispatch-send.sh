@@ -58,14 +58,24 @@
 # + verified_type + verified_submit), exactly as it would for any other
 # tmux-flow dispatch. See this flag's own usage comment at the top of this
 # file for what an adopted pane's OS-level cwd is left at instead.
-if [ -n "$ADOPT_PANE" ]; then
-  PROMPT_IN_LAUNCH=0
-  echo "dispatch: --adopt-pane $ADOPT_PANE -- adopting $LANE's existing process, not respawning it (agent-supervisor#668)" >&2
-else
+# agent-estate#446: resolved BEFORE the --adopt-pane branch below, not only
+# inside the respawn branch -- an adopted pane still needs its harness's own
+# input-box shape for the verified_preclear/verified_type/verified_submit
+# calls further down (step 4), which run for BOTH branches. Left unresolved
+# here, those calls would fall through to `${H_INPUT_BOX_PROMPT[$HARNESS_HIDX]}`
+# with HARNESS_HIDX either unset (a `set -u` abort) or empty (which bash's
+# arithmetic-subscript rule silently reads as INDEX 0 -- Claude's own entry,
+# since harness/claude.sh sorts first -- reusing Claude's box shape for
+# whatever harness the adopted pane actually runs, a wrong-answer failure
+# mode strictly worse than the honest `unknown` this file is closing).
 HARNESS_HIDX=""
 if [ -n "$LANE_HARNESS" ]; then
   HARNESS_HIDX=$(harness_index_for_name "$LANE_HARNESS") || HARNESS_HIDX=""
 fi
+if [ -n "$ADOPT_PANE" ]; then
+  PROMPT_IN_LAUNCH=0
+  echo "dispatch: --adopt-pane $ADOPT_PANE -- adopting $LANE's existing process, not respawning it (agent-supervisor#668)" >&2
+else
 if [ -z "$HARNESS_HIDX" ] || [ -z "${H_LAUNCH_CMD[$HARNESS_HIDX]:-}" ]; then
   abort_send "no launch command recorded for harness '${LANE_HARNESS:-unknown}' in $LANE -- cannot relaunch it in the worktree, so its cwd cannot be verified correct (#15); #$ISSUE_ARG was NOT dispatched"
 fi
@@ -155,6 +165,37 @@ if ! verified_dismiss_menu "$LANE_TARGET" "${H_OPTION_ROW_RE[$HARNESS_HIDX]:-}" 
      --settle "${DISPATCH_MENU_SETTLE:-2}" --retries "${DISPATCH_MENU_RETRIES:-5}"; then
   abort_send "a startup menu never cleared in $LANE -- #$ISSUE_ARG was NOT dispatched (check the pane by hand)"
 fi
+fi
+
+# agent-estate#446: this lane's own input-box marker/close-mode, resolved
+# once here and threaded to every verified_preclear/verified_type/
+# verified_submit call below via --box-prompt/--box-close -- ALWAYS passed
+# explicitly (never an omitted flag) so this stays two plain scalar
+# variables rather than a possibly-empty bash ARRAY: `"${arr[@]}"` on a
+# zero-element indexed array aborts with "unbound variable" under `set -u`
+# on bash 3.2 (macOS's own `/bin/bash`, confirmed live -- this script's own
+# shebang), the same bash-3.2 constraint harness-registry.sh's own header
+# documents for why it uses indexed rather than associative arrays.
+#
+# BOTH `:-`, deliberately (not the empty-means-"positively unmeasured"
+# sentinel `input-box.sh`'s own header, section 4, documents for a caller
+# that wants it): a harness with no HARNESS_INPUT_BOX_PROMPT recorded at all
+# -- `harness/copilot.sh` today, and any lane whose LANE_HARNESS never
+# resolved -- falls back to Claude's own marker/`rule`, the SAME read this
+# whole file gave every harness before #446. That is a deliberate, narrow
+# fix: only `codex` (the harness #446 is actually about, MEASURED live
+# against a real pane -- see harness/codex.sh) gets its own shape here.
+# Widening this to fail an unmeasured harness closed to `unknown` is a real
+# improvement input-box.sh's own contract supports, but it is a SEPARATE,
+# larger behavior change (copilot's box has never been measured either way,
+# and this file's own dispatch already relies on the Claude-shaped fallback
+# working for it today) that #446 did not ask for and this change does not
+# make.
+BOX_PROMPT="$INPUT_BOX_PROMPT"
+BOX_CLOSE="rule"
+if [ -n "$HARNESS_HIDX" ]; then
+  BOX_PROMPT="${H_INPUT_BOX_PROMPT[$HARNESS_HIDX]:-$INPUT_BOX_PROMPT}"
+  BOX_CLOSE="${H_INPUT_BOX_CLOSE[$HARNESS_HIDX]:-rule}"
 fi
 
 # --- 4. the lane is told what it is doing, then given the work ------------
@@ -279,7 +320,8 @@ DISPATCH_SEND_EPOCH=$(date +%s)
 # to clear and nothing typed yet for a corrupted `/clear` to glue onto.
 if [ "$PROMPT_IN_LAUNCH" != 1 ]; then
   if ! verified_preclear "$LANE_TARGET" \
-       --settle "${DISPATCH_SETTLE:-5}" --retries "${DISPATCH_PRECLEAR_RETRIES:-6}"; then
+       --settle "${DISPATCH_SETTLE:-5}" --retries "${DISPATCH_PRECLEAR_RETRIES:-6}" \
+       --box-prompt "$BOX_PROMPT" --box-close "$BOX_CLOSE"; then
     if [ "$SEND_STATUS" = send_failed ]; then
       abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
     fi
@@ -336,7 +378,8 @@ if [ "$PROMPT_IN_LAUNCH" != 1 ]; then
        --settle "${DISPATCH_SETTLE:-1}" --retries 2 --preclear \
        --proof-head "Read $BRIEF" \
        --proof "$WORKTREE" \
-       --proof "never work in the shared checkout at $REPO_PATH."; then
+       --proof "never work in the shared checkout at $REPO_PATH." \
+       --box-prompt "$BOX_PROMPT" --box-close "$BOX_CLOSE"; then
     if [ "$SEND_STATUS" = send_failed ]; then
       abort_send "send-keys to $LANE failed -- #$ISSUE_ARG was not dispatched"
     fi
@@ -457,7 +500,8 @@ if [ "$PROMPT_IN_LAUNCH" = 1 ]; then
   fi
 elif ! verified_submit "$LANE_TARGET" \
      --confirm-tries "${DISPATCH_CONFIRM_TRIES:-10}" \
-     --confirm-settle "${DISPATCH_SETTLE:-1}"; then
+     --confirm-settle "${DISPATCH_SETTLE:-1}" \
+     --box-prompt "$BOX_PROMPT" --box-close "$BOX_CLOSE"; then
   case "$SEND_STATUS" in
     send_failed)
       abort_send "could not submit the brief in $LANE -- #$ISSUE_ARG was not dispatched" ;;
