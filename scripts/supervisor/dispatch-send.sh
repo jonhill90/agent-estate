@@ -187,6 +187,18 @@ fi
 # instruction that was not in it -- and for a read-only review brief, "push
 # your branch and open a PR" contradicted the brief's own first line. In the
 # file it sits with the rest of the instructions and defers to them.
+# agent-estate#793: this dispatcher already knows exactly which lane $LANE
+# is -- lane selection resolved it above, independent of tmux focus. A lane
+# asked to name itself for a `Review-Lane:`/`Lane:` trailer used to be told
+# to derive that answer itself with a bare `tmux display-message`, which
+# reports the SESSION'S ACTIVE window, not the caller's own pane -- wrong
+# for any lane dispatched into a window that is not currently focused, with
+# no error (skills#289, skills#291: both stamped the supervisor's own
+# window). Stating the value here removes the derivation step entirely: a
+# lane that is TOLD its id cannot mis-derive it. `lane-whoami.sh` still
+# exists as a fallback for a brief that predates this contract or is typed
+# by hand outside dispatch.sh -- it is not removed, just no longer the
+# primary path for anything this dispatcher itself sends.
 CONTRACT_MARKER="<!-- dispatch:deliverable-contract -->"
 if ! grep -qF "$CONTRACT_MARKER" "$BRIEF" 2>/dev/null; then
   cat >>"$BRIEF" <<EOF || abort_send "could not append the deliverable contract to $BRIEF -- #$ISSUE_ARG was NOT dispatched"
@@ -195,6 +207,14 @@ $CONTRACT_MARKER
 ## Delivering this work
 
 Added by \`dispatch.sh\` on every dispatch, not by the brief's author.
+
+**Your lane id is \`$LANE\`.** Use this exact value for any \`Review-Lane:\` or
+\`Lane:\` trailer this brief asks you to write -- it is stated here, not
+something to derive. Do not run a bare \`tmux display-message\` to find it;
+that command answers for whichever window is currently focused, not
+necessarily this one (agent-estate#793). If you need to double-check it,
+\`scripts/supervisor/lane-whoami.sh\` is the one command that gets this right
+regardless of focus.
 
 Unless this brief says otherwise, when you are finished:
 **push your branch and open a PR**.

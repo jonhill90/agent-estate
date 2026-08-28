@@ -319,33 +319,35 @@ not committed here. This is the one place in this repo's own docs that
 generates that text, so it is the one place drifting back to raw `gh pr
 comment` would matter.
 
-### A review or fix-pass brief must derive `Review-Lane:` with `lane-whoami.sh`, never a bare `tmux display-message`
+### A review or fix-pass brief never asks the lane to derive `Review-Lane:` — dispatch already states it
 
-agent-supervisor#685: every brief this loop wrote told the lane to derive its
-own `Review-Lane:` id with
+agent-supervisor#685 first fixed this by pointing every brief at
+`lane-whoami.sh` instead of a bare `tmux display-message`. That closed the
+`claude-print` gap but not the whole defect: `skills#289` and `skills#291`
+still stamped the supervisor's own window AFTER #685 landed, because a hand-
+written brief outside this repo's own generated text told the lane to
+derive its id, and asking is exactly the step that fails — a lane in a
+non-active tmux window asking `display-message` (bare, or even the `-t
+"$TMUX_PANE"` form typed by hand instead of run through `lane-whoami.sh`)
+can still get this wrong. agent-estate#793: `dispatch.sh`,
+`dispatch-claude-print.sh` and `dispatch-pi-rpc.sh` already resolved `$LANE`
+before ever writing the brief, so the deliverable contract they append now
+STATES it —
 
-```bash
-tmux display-message -p -t "$TMUX_PANE" '#{session_name}:#{window_index}'
+```
+**Your lane id is `<session>:<index>`.** Use this exact value for any
+`Review-Lane:` or `Lane:` trailer this brief asks you to write.
 ```
 
-That is correct only for a tmux-dispatched lane, where `$TMUX_PANE` is
-exported into the process. A `claude-print` (or `pi-rpc`) lane has no pane at
-all — `$TMUX_PANE` is unset, `-t` is meaningless, and `display-message`
-silently answers for whichever window happens to be FOCUSED, invariant 10's
-own trap. Measured on agent-dotfiles#330's review: dispatched to `estate:2`,
-the trailer reported `estate:1` — the director's pane, which happened to be
-focused. A brief's closing instruction for deriving `Review-Lane:` must read:
-
-```bash
-scripts/supervisor/lane-whoami.sh
-```
-
-which anchors on `$TMUX_PANE` when it is set (a pane lane) and falls back to
-the ledger's own `worktree-lane` self-lookup when it is not (a claude-print
-lane) — never on tmux focus, in either case. As with the `post-verdict.sh`
-rule above, this is the one place in this repo's own docs that generates
-that text, so it is the one place drifting back to the bare command would
-matter.
+— and a brief's own closing instruction should say the same: point at the
+stated value in the deliverable contract, not at a command to run. A lane
+that is *told* its id cannot mis-derive one. `lane-whoami.sh` is not
+removed — it is the fallback for a brief written by hand, outside
+`dispatch.sh`'s own contract, or predating it — but it is no longer the
+first thing a generated brief's closing instruction should name. As with
+the `post-verdict.sh` rule above, this is the one place in this repo's own
+docs that generates that text, so it is the one place drifting back to
+"go derive it yourself" would matter.
 
 ## "Blocked on Jon" is often true of an issue and false of a piece of it
 
