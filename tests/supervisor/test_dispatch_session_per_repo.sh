@@ -128,7 +128,7 @@ unset RUN_LANES_SESSION
 mut_out=$(DISPATCH_SCRIPT="$MUT" run 202 mutant-run "$D/brief.md" jonhill90/agent-tui "$REPO_PATH")
 mut_log=$(cat "$D/tmux.log")
 want_contains "mutation-check: reverting to the global default is detected" \
-  "send-keys -t agent-supervisor:@103 Enter" "$mut_log"
+  "send-keys -t agent-estate:@103 Enter" "$mut_log"
 
 if [ "$fail" -eq 0 ]; then
   echo "PASS dispatch.sh: session-per-repo ($pass checks)"

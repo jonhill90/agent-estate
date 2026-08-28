@@ -29,7 +29,7 @@ fi
 if [ -f "$DEFAULTS" ]; then
   out=$(env -i HOME="$HOME" NOTIFY_ENV= PATH="/usr/bin:/bin" bash -c '. "$1"; lanes_session_or_default' _ "$DEFAULTS" 2>&1)
   rc=$?
-  [ "$rc" -eq 0 ] && want "scrubbed env resolves the default session" "agent-supervisor" "$out" \
+  [ "$rc" -eq 0 ] && want "scrubbed env resolves the default session" "agent-estate" "$out" \
     || bad "scrubbed env resolves the default session" "rc=$rc out=$out"
 
   out=$(env -i HOME="$HOME" NOTIFY_ENV= PATH="/usr/bin:/bin" LANES_SESSION=custom-session \
@@ -47,15 +47,13 @@ if [ -f "$DEFAULTS" ]; then
 import sys
 path = sys.argv[1]
 text = open(path).read()
-# #734 split AGENT_SUPERVISOR_DEFAULT_LANES_SESSION off from
-# AGENT_SUPERVISOR_DEFAULT_REPO and pinned it to the 'agent-supervisor'
-# literal directly, in prose as well as code (the comment above it explains
-# why, by name, several times) -- so a bare first-occurrence string replace
-# no longer reliably hits the load-bearing line; it can just as easily land
-# in a comment and mutate nothing this test can observe. Target the actual
-# default-value literal instead.
-old = 'AGENT_SUPERVISOR_DEFAULT_LANES_SESSION:-agent-supervisor}'
-assert old in text, "shared lanes-session default literal not found"
+# #739: the pool converged (session renamed in place, no pane touched), so
+# this now derives from AGENT_SUPERVISOR_DEFAULT_REPO instead of carrying
+# its own pinned literal (#734's interim state, retired here). Target the
+# actual derivation line, not a bare literal -- there is no longer a
+# standalone 'agent-supervisor' string on this line to mutate.
+old = 'AGENT_SUPERVISOR_DEFAULT_LANES_SESSION:-$AGENT_SUPERVISOR_DEFAULT_REPO}'
+assert old in text, "shared lanes-session default derivation not found"
 new = 'AGENT_SUPERVISOR_DEFAULT_LANES_SESSION:-agent-dotfiles}'
 open(path, 'w').write(text.replace(old, new, 1))
 PY
@@ -90,7 +88,7 @@ if [ -f "$DEFAULTS" ]; then
   out=$(env -i HOME="$HOME" NOTIFY_ENV= PATH="/usr/bin:/bin" \
     bash -c '. "$1"; session_for_repo ""' _ "$DEFAULTS" 2>&1)
   rc=$?
-  [ "$rc" -eq 0 ] && want "session_for_repo falls back to the shared default with no repo" "agent-supervisor" "$out" \
+  [ "$rc" -eq 0 ] && want "session_for_repo falls back to the shared default with no repo" "agent-estate" "$out" \
     || bad "session_for_repo falls back to the shared default with no repo" "rc=$rc out=$out"
 fi
 
