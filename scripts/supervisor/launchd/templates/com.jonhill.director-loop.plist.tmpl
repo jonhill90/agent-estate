@@ -25,9 +25,22 @@
          assigns fresh ones. After the 2026-08-18 crash the loop kept firing
          against director:@3, which no longer existed, and logged "a human
          should look" every 15 minutes -- correct refusal, but it could not
-         self-heal because the id was baked in. -->
+         self-heal because the id was baked in.
+
+         agent-estate#752: the SESSION itself was later renamed director ->
+         estate (the window kept its old name, "director" -- `tmux
+         list-windows -t estate` still shows window 1 named that, which is
+         how this went unnoticed) -- director-loop.sh's own self-heal only
+         resolves a renumbered WINDOW within the same session, not a renamed
+         SESSION, so this drifted silently from Aug 22 until #752 measured it.
+         estate:@2 is the live, current Director window as of this fix.
+         Session-name drift has now hit this literal, the lanes-session
+         default (#734), and the lane-pool location (#739) three separate
+         times -- #739's eventual convergence is the place a role-based
+         resolution (derive, don't hardcode) belongs, not invented here for
+         one more literal. -->
     <string>--target</string>
-    <string>director:@35</string>
+    <string>estate:@2</string>
   </array>
   <key>StartInterval</key>
   <integer>900</integer>
