@@ -41,7 +41,14 @@ B=/Users/jon/.local/state/estate-loop
 # stripping rule anyway, for a future addition to this file's classification
 # that DOES need to read the box, and for a harness release where the
 # launch-time suppression stops working.
-AGENT_SUPERVISOR_REPO="${AGENT_SUPERVISOR_REPO:-/Users/jon/source/repos/Personal/agent-supervisor}"
+# agent-estate#729: the rename actually happened (checkout moved to
+# .../Personal/agent-estate, #728), so this hardcoded default went stale.
+# Prefer whichever of the two names exists on disk, rather than swapping one
+# hardcoded literal for another -- that would just rebuild the same trap
+# under a fresh label the next time this repo is renamed.
+_AGENT_SUPERVISOR_REPO_DEFAULT=/Users/jon/source/repos/Personal/agent-estate
+[ -d "$_AGENT_SUPERVISOR_REPO_DEFAULT" ] || _AGENT_SUPERVISOR_REPO_DEFAULT=/Users/jon/source/repos/Personal/agent-supervisor
+AGENT_SUPERVISOR_REPO="${AGENT_SUPERVISOR_REPO:-$_AGENT_SUPERVISOR_REPO_DEFAULT}"
 # agent-supervisor#682: FAIL LOUDLY, not quietly, when this doesn't resolve
 # to a real checkout. The inventory's ranked failure mode for this file was
 # `exit 0` on a missing path reading as "no work" -- a scan that finds
@@ -62,29 +69,29 @@ DIM_STRIP="$AGENT_SUPERVISOR_REPO/scripts/supervisor/dim-strip.sh"
 # `gh pr merge` call below where a new, unreviewed commit could land on the
 # branch and get merged under cover of an approval that was never given for
 # it -- the same stale-SHA class merge-pr.sh's own ci_gate.py already
-# guards against for agent-supervisor; this closes the same hole on the
+# guards against for agent-estate; this closes the same hole on the
 # plain-`gh` path used for repos with no lane ledger.
-# agent-supervisor is handled SEPARATELY (fixed 2026-08-22, found while
-# investigating why check.log had never once shown an automated merge
+# agent-estate (this repo) is handled SEPARATELY (fixed 2026-08-22, found
+# while investigating why check.log had never once shown an automated merge
 # there despite real comment-verdict reviews existing, e.g. #505):
 # verdicts in this repo arrive as a `Verdict:`/`Review-Lane:` PR COMMENT,
 # never a native GitHub review, so `reviewDecision` sits empty/null
 # forever no matter how thoroughly a PR was actually reviewed -- the
-# pre-filter below silently excluded every single agent-supervisor PR from
+# pre-filter below silently excluded every single agent-estate PR from
 # ever reaching the merge attempt. `merge-pr.sh` already knows how to read
 # a comment verdict (via verdict.py) and already gates on CI+independence
 # correctly; the fix is to stop pre-filtering this repo on a signal it
 # doesn't use and let merge-pr.sh's own gates decide instead.
-gh pr list --repo jonhill90/agent-supervisor --state open --json number,headRefOid \
+gh pr list --repo jonhill90/agent-estate --state open --json number,headRefOid \
   --jq '.[] | "\(.number) \(.headRefOid)"' 2>/dev/null |
 while read -r n sha; do
   [ -n "$n" ] && [ -n "$sha" ] || continue
-  out=$(bash "$AGENT_SUPERVISOR_REPO/scripts/supervisor/merge-pr.sh" jonhill90/agent-supervisor "$n" --squash --delete-branch --match-head-commit "$sha" 2>&1)
+  out=$(bash "$AGENT_SUPERVISOR_REPO/scripts/supervisor/merge-pr.sh" jonhill90/agent-estate "$n" --squash --delete-branch --match-head-commit "$sha" 2>&1)
   rc=$?
   # merge-pr.sh refuses (rc=1) for every not-yet-mergeable PR, which is
   # most of them most ticks -- that's normal gate behavior, not a finding.
   # Only log it when it actually did something.
-  [ "$rc" -eq 0 ] && echo "MERGED jonhill90/agent-supervisor#$n rc=$rc sha=$sha out=$out"
+  [ "$rc" -eq 0 ] && echo "MERGED jonhill90/agent-estate#$n rc=$rc sha=$sha out=$out"
 done
 
 # `--match-head-commit` pins the merge to the exact SHA this scan just

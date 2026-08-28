@@ -1360,8 +1360,9 @@ rm -rf "$D6"
 # --- estate) and advance-live.sh could only refuse -- "not a git worktree" --
 # --- with no way to rebuild it. .live-rollback-sha already records where it
 # --- should be; SUPERVISOR_REPO names the shared checkout to recreate it
-# --- from (defaulting to ~/source/repos/Personal/agent-supervisor in the
-# --- real script, overridden here to the test fixture).
+# --- from (defaulting to whichever of ~/source/repos/Personal/agent-estate
+# --- or agent-supervisor exists on disk in the real script -- #729 -- and
+# --- overridden here to the test fixture).
 D7=$(mktemp -d)
 git init -q --bare "$D7/origin.git"
 git clone -q "$D7/origin.git" "$D7/src" 2>/dev/null

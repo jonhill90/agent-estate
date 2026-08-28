@@ -66,9 +66,27 @@ def _repositories_from_env():
     return out or None
 
 
+def _first_existing_path(*candidates):
+    """agent-estate#729: this repo's own entry below named a directory that
+    no longer exists once agent-supervisor was renamed to agent-estate
+    (#728). Prefer whichever candidate is actually on disk rather than
+    hardcoding just the new name -- swapping one hardcoded literal for
+    another rebuilds the exact defect this issue is about, one rename early.
+    """
+    for candidate in candidates:
+        path = os.path.expanduser(candidate)
+        if os.path.isdir(path):
+            return path
+    return os.path.expanduser(candidates[0])
+
+
 DEFAULT_REPOSITORIES = _repositories_from_env() or (
     {"name": "agent-dotfiles", "path": os.path.expanduser("~/source/repos/Personal/agent-dotfiles"), "github": "jonhill90/agent-dotfiles"},
-    {"name": "agent-supervisor", "path": os.path.expanduser("~/source/repos/Personal/agent-supervisor"), "github": "jonhill90/agent-supervisor"},
+    {
+        "name": "agent-estate",
+        "path": _first_existing_path("~/source/repos/Personal/agent-estate", "~/source/repos/Personal/agent-supervisor"),
+        "github": "jonhill90/agent-estate",
+    },
     {"name": "skills", "path": os.path.expanduser("~/source/repos/Personal/Skills"), "github": "jonhill90/skills"},
     {"name": "skills-private", "path": os.path.expanduser("~/source/repos/Personal/skills-private"), "github": "jonhill90/skills-private"},
     {"name": "agent-evals", "path": os.path.expanduser("~/source/repos/Personal/agent-evals"), "github": "jonhill90/agent-evals"},

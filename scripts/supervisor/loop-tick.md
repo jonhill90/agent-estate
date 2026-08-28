@@ -18,10 +18,10 @@ rewriting what they correct:**
   example below points at `~/source/repos/Personal/agent-dotfiles` and
   `jonhill90/agent-dotfiles` as the repo being operated on — accurate as one
   of the five swept repos, but the scripts those examples invoke now live in
-  *this* repo (`agent-supervisor`), not in `agent-dotfiles`. Substitute
-  `agent-supervisor`'s own path when dispatching work in this repo; do not
-  copy an example's repo argument verbatim without checking which repo the
-  work is actually in.
+  *this* repo (`agent-estate`, renamed from `agent-supervisor` — #728/#729),
+  not in `agent-dotfiles`. Substitute this repo's own path when dispatching
+  work in this repo; do not copy an example's repo argument verbatim without
+  checking which repo the work is actually in.
 - Neither correction changes what to *do* — only where to look and which repo
   an example's literal argument names. Per this project's "correct rather
   than delete" rule, the examples below are left as written.
@@ -30,7 +30,7 @@ rewriting what they correct:**
 
 `agent-supervisor#654`. Every `scripts/supervisor/...` command in this file
 is written as a path relative to your own shell. If your shell's cwd is the
-shared, interactively-used checkout (`~/source/repos/Personal/agent-supervisor`),
+shared, interactively-used checkout (`~/source/repos/Personal/agent-estate`),
 that is exactly the gap #654 measured directly: `dispatch.sh` merged a fix
 (#650) that a real `--reviews-pr` dispatch from that checkout never saw,
 because a merge changes `origin/main`, not a working tree nobody advanced.
@@ -50,7 +50,7 @@ already keep current for the watchdog LaunchAgent — nothing but
 `advance-live.sh`'s own update step is supposed to write to it, and every
 example below now resolves against it once you have `cd`'d in, with no
 further changes needed to the commands themselves. Never run
-`scripts/supervisor/*` from `~/source/repos/Personal/agent-supervisor`
+`scripts/supervisor/*` from `~/source/repos/Personal/agent-estate`
 directly — that checkout is explicitly for a human or a lane to work in
 interactively (`#73`), and its state is exactly what this loop's own tooling
 must never depend on.

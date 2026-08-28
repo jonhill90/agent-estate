@@ -173,10 +173,26 @@ check "a detached worktree reports a real ref, not HEAD" "^code: *unknown@main" 
 # branch/sha -- a live worktree pinned at the wrong repo's commit reported a
 # perfectly plausible branch@sha with nothing to say which repository it
 # belonged to. Run with no git stub, against this checkout's own real
-# `origin` remote (jonhill90/agent-supervisor), so this exercises the actual
-# derivation rather than a canned stub answer.
+# `origin` remote, so this exercises the actual derivation rather than a
+# canned stub answer.
+#
+# agent-estate#729/#731: a hardcoded literal here goes stale on every rename,
+# but computing the expectation with the SAME sed/awk pipeline watchdog.sh
+# uses (scripts/supervisor/watchdog.sh:393-394) is worse -- a defect in that
+# pipeline reproduces identically in the expectation, so the assertion could
+# no longer fail on a derivation bug and would only prove *a* `code:` line
+# was emitted (caught in review, see PR#731). Derive it through an
+# independent mechanism instead -- Python regex, not awk field-splitting --
+# so a bug in watchdog.sh's own parsing still shows up as a mismatch here.
+expected_repo=$(git -C "$HERE" remote get-url origin 2>/dev/null | python3 -c '
+import re, sys
+url = sys.stdin.read().strip()
+url = re.sub(r"\.git$", "", url)
+m = re.search(r"[:/]([^/:]+)/([^/:]+)$", url)
+print(f"{m.group(1)}/{m.group(2)}" if m else "")
+')
 D=$(mktemp -d); run idle "$D/w"
-check "code: line names the repo derived from origin" "^code: *jonhill90/agent-supervisor@" "$D/w/st"
+check "code: line names the repo derived from origin" "^code: *${expected_repo}@" "$D/w/st"
 
 # SUPERVISOR_REPO_NAME overrides the derived name -- same override shape as
 # SUPERVISOR_STATE/SUPERVISOR_REPOS, for a layout with no `origin` remote.
