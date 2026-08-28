@@ -124,6 +124,12 @@ func main() {
 			"local jonhill90/skills checkout, used only to find "+skillsEvalStatusRelPath+" (agent-tui#151) -- "+
 				"the Skills pane's LAST EVAL/VERDICT columns. Empty or a checkout with no eval-status.json "+
 				"degrades those columns to today's honest \"unknown\"/\"unevaluated\" rather than erroring.")
+		skillInvocationsCache = flag.String("skill-invocations-cache", os.Getenv("AGENT_TUI_SKILL_INVOCATIONS_CACHE"),
+			"private per-machine cache file for the Skills pane's INVOCATIONS column (agent-tui#174) -- built "+
+				"out of band by `go run ./cmd/skillinvocations`, never live-scanned here. Empty resolves to "+
+				"skills.DefaultInvocationCachePath() ($XDG_STATE_HOME or $HOME/.local/state, joined with "+
+				"agent-tui/skill-invocations.json); a cache that has never been built there renders \"no local "+
+				"history\", never \"unknown\".")
 		secretsSchema = flag.String("secrets-schema", envOr("AGENT_TUI_SECRETS_SCHEMA", ""),
 			"secrets-schema.yaml rendered by the Connect -> Secrets pane (agent-tui#101) -- key names, vault "+
 				"paths and consuming services only, never a value. Empty falls back to "+
@@ -476,7 +482,10 @@ func main() {
 	var mcpserversModel mcpservers.Model
 	var adminModel admin.Model
 	if homeDirErr == nil {
-		skillsModel = skills.New(skills.EvalStatusFetcher(filepath.Join(homeDir, ".claude", "skills"), resolveSkillsEvalStatus(*skillsRepo)))
+		skillsModel = skills.New(skills.InvocationFetcher(
+			skills.EvalStatusFetcher(filepath.Join(homeDir, ".claude", "skills"), resolveSkillsEvalStatus(*skillsRepo)),
+			resolveInvocationsCache(*skillInvocationsCache),
+		))
 
 		cwd, cwdErr := os.Getwd()
 		if cwdErr != nil {

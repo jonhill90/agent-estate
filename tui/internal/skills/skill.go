@@ -8,9 +8,9 @@
 // .../Personal/Skills/skills/adopt-or-build) -- one directory scan reaches
 // both halves of S8's own "from X and Y" phrasing, not two reads.
 //
-// Of S8's four columns, one now has a real source and one still does not,
-// measured rather than assumed, exactly the shape S6 (internal/agents)
-// already found for model/cost:
+// Of S8's four columns, all four now have a real source, measured rather
+// than assumed, exactly the shape S6 (internal/agents) already found for
+// model/cost:
 //   - Last eval result / verdict: WIRED 2026-08-24 (agent-tui#151), reading
 //     FIXED 2026-08-25 (agent-tui#146). jonhill90/skills#230's harness
 //     (scripts/eval_skill.py) persists its verdicts in
@@ -40,24 +40,44 @@
 //     with docs/eval-status.json, cmd/estate/skills.go's
 //     resolveSkillsEvalStatus) -- unchanged by agent-tui#146, which is the
 //     reading fix, not a new source.
-//   - Invocation count: still no source, unchanged by agent-tui#146.
-//     Nothing in this estate counts skill invocations.
-//     `mine-transcripts` (a skill in this same repo) is a deliberate,
-//     periodic, human-triggered review of transcripts for new skill
-//     CANDIDATES -- not a counter, and not run automatically.
+//   - Invocation count: WIRED agent-tui#174, per the decision recorded on
+//     agent-tui#164 ("A's mechanism": transcript-derived, cached, private,
+//     shipped honest). `Skill` tool-call blocks in this machine's own
+//     `~/.claude/projects/**/*.jsonl` transcripts are the source --
+//     confirmed the same JSON shape (`message.content[].type=="tool_use"`,
+//     `.name=="Skill"`, `.input.skill=="<dir>"`) holds across the FULL
+//     corpus, not a sample (invocations.go's own doc comment has the
+//     measurement). This is a raw per-machine count of how often the
+//     `Skill` tool was invoked for a given skill, inflated by repeated use
+//     inside a single loop -- it is NOT a value judgement and, per the
+//     standing rule (jonhill90/skills#287), a low count here must never by
+//     itself become a reason to drop a skill; only an eval verdict does
+//     that. `mine-transcripts` (a skill in this same repo) is a separate,
+//     deliberate, periodic, human-triggered review of transcripts for new
+//     skill CANDIDATES -- not this counter, and not run automatically.
+//     Counting requires scanning the whole transcript corpus (multiple
+//     GB), so it is never done live inside the TUI's own fetch loop --
+//     InvocationFetcher (invocations.go) only ever READS a pre-built,
+//     per-machine, uncommitted cache file; something else (`cmd/
+//     skillinvocations`, this repo's own builder) writes it, on the same
+//     cadence a human chooses to re-run it, mirroring how
+//     `scripts/eval_skill.py` builds `docs/eval-status.json` out of band
+//     from what EvalStatusFetcher merely reads.
 //
-// InvocationCount is therefore always nil. LastEval is nil and Verdict is
-// its zero value ("unevaluated") for any skill EvalStatusFetcher's
-// (successfully read) store has no record for -- absence as a typed value,
-// never a bare zero (AGENTS.md), the same pattern internal/agents.Row.
-// Model/Cost already established for this exact shape of gap. "Unevaluated"
-// is a real, positive fact, not a filler string: SPEC-shell.md S8's own
-// model is explicit that a skill with no recorded invocations is
-// UNEVALUATED, not dead, and this field exists to say that in words rather
-// than let an empty cell be misread as "looks unused." When the store
-// itself could not be read at all, every skill's Verdict is
-// VerdictStoreUnreadable instead -- a different, equally typed value for a
-// different fact (evalstatus.go's own doc comment).
+// LastEval is nil and Verdict is its zero value ("unevaluated") for any
+// skill EvalStatusFetcher's (successfully read) store has no record for --
+// absence as a typed value, never a bare zero (AGENTS.md), the same
+// pattern internal/agents.Row. Model/Cost already established for this
+// exact shape of gap. "Unevaluated" is a real, positive fact, not a filler
+// string: SPEC-shell.md S8's own model is explicit that a skill with no
+// recorded invocations is UNEVALUATED, not dead, and this field exists to
+// say that in words rather than let an empty cell be misread as "looks
+// unused." When the store itself could not be read at all, every skill's
+// Verdict is VerdictStoreUnreadable instead -- a different, equally typed
+// value for a different fact (evalstatus.go's own doc comment).
+// InvocationCount/InvocationState draw the identical three-way distinction
+// for INVOCATIONS -- see this file's own field comment and
+// invocations.go's InvocationsNoHistory/InvocationsStoreUnreadable.
 package skills
 
 import (
@@ -85,12 +105,29 @@ type Skill struct {
 	Description string
 	ParseErr    string
 
-	// LastEval and InvocationCount are always nil today -- see this
-	// package's own doc comment for the measured reason. A caller must
-	// render "unknown," never "0" or blank, exactly as
-	// internal/agents.Row's identical fields already require.
-	LastEval        *string
+	// LastEval is always nil today -- see this package's own doc comment
+	// for the measured reason. A caller must render "unknown," never "0"
+	// or blank, exactly as internal/agents.Row's identical field requires.
+	LastEval *string
+
+	// InvocationCount and InvocationState are agent-tui#174's own pair,
+	// the same "typed absence, never a bare zero" shape VerdictStoreUnreadable
+	// established for VERDICT (evalstatus.go's own doc comment) applied to
+	// INVOCATIONS: InvocationCount is non-nil only when
+	// InvocationFetcher's cache was read successfully AND has (possibly
+	// zero) data for this skill's Dir -- a genuine 0 renders as "0", not
+	// as either sentinel below. InvocationState carries the fact when
+	// InvocationCount is nil, and must be one of InvocationsNoHistory
+	// (the cache was read successfully but never built, or built empty --
+	// "no local history", never "unknown") or InvocationsStoreUnreadable
+	// (the cache exists but could not be parsed, or a plain read error
+	// occurred). View renders exactly one of these three -- count,
+	// InvocationsNoHistory, InvocationsStoreUnreadable -- and they must
+	// never collapse onto each other or onto "unknown": collapsing "real
+	// zero" onto "absent" is the exact defect agent-tui#164 reported for
+	// VERDICT before agent-tui#146 fixed it.
 	InvocationCount *int
+	InvocationState string
 
 	// Verdict is agent-evals#21's own vocabulary (keep/improve/rename/drop)
 	// plus "unevaluated" -- its zero value, since agent-evals persists no
