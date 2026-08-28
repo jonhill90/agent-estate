@@ -67,6 +67,7 @@ class LedgerCoreMixin:
         self._migrate_source_tasks_pull_uniqueness(failpoint=_migration_failpoint)
         self._migrate_items_table(failpoint=_migration_failpoint)
         self._restore_items_dropped_on_context_alone(failpoint=_migration_failpoint)
+        self._migrate_prompts_pane_columns(failpoint=_migration_failpoint)
 
     def _connect(self, *, foreign_keys=True):
         # `self.lock_timeout` also bounds sqlite3's own busy-wait (its

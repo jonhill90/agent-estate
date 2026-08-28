@@ -22,7 +22,11 @@ WHAT THIS DOES, and just as importantly what it does NOT do:
    timestamp), `context` is the transcript's own last assistant turn
    (`mine_prompts.last_assistant_text`), or `mine_prompts.CONTEXT_UNDETERMINED`
    when there is none -- never invented (`context` is NOT NULL and
-   load-bearing, core.py's own comment on that column).
+   load-bearing, core.py's own comment on that column). Also records
+   `tmux_pane`/`tmux_pane_target` (agent-supervisor#755 part B) -- which
+   pane, if any, this hook's own process inherited `$TMUX_PANE` from,
+   resolved to `session:window` the same invariant-10-safe way every
+   `*-self.sh` tool does. See `_resolve_tmux_pane`'s own docstring.
 2. If the prompt matches a known STRUCTURAL noise marker (dispatch-brief
    boilerplate, loop-tick cron text, harness-injected role=user shapes --
    the SAME marker lists `itemize_prompts.py`/`mine_prompts.py` already use,
@@ -101,6 +105,7 @@ in-process failure already does -- losing a corpus row, never a prompt.
 import hashlib
 import json
 import os
+import subprocess
 import sys
 import time
 
@@ -139,6 +144,51 @@ def _log_failure(message):
         pass  # stderr above is the fallback; a log write failing is not this hook's to escalate further
 
 
+TMUX_BIN = os.environ.get("TMUX_BIN", "tmux")
+
+# agent-supervisor#755 part B. `tmux display-message` must never block this
+# hook past its own budget -- same reasoning as LOCK_TIMEOUT_SECONDS above,
+# scaled down: this is a single local IPC round trip to a tmux server that
+# is either up or isn't, never something worth waiting seconds on.
+TMUX_RESOLVE_TIMEOUT_SECONDS = 1.0
+
+
+def _resolve_tmux_pane():
+    """Return `(tmux_pane, tmux_pane_target)` for the pane this hook's own
+    process was invoked in, or `(None, None)` if there is none.
+
+    `$TMUX_PANE` is inherited from whatever shell/pane spawned the harness
+    process the hook is a child of -- exactly the same anchor
+    `register-lane-self.sh` and `lane-whoami.sh` already use, never a bare
+    `tmux display-message` with no `-t` (CLAUDE.md invariant 10: that reads
+    the SESSION's currently focused window, not the caller's own pane).
+
+    A `claude-print`/`pi-rpc` lane, or an interactive terminal outside tmux
+    entirely, has no `$TMUX_PANE` at all -- `(None, None)` for both, same
+    as every other column here that records absence rather than guessing.
+    Never raises: a tmux lookup failing (pane closed, tmux not on PATH, the
+    call timing out) degrades to `(tmux_pane, None)` -- the raw env value is
+    still worth recording even when it could not be resolved further -- and
+    never blocks or crashes prompt capture, per this module's own
+    NEVER BLOCKS invariant."""
+    tmux_pane = os.environ.get("TMUX_PANE") or None
+    if not tmux_pane:
+        return None, None
+    try:
+        result = subprocess.run(
+            [TMUX_BIN, "display-message", "-p", "-t", tmux_pane, "#{session_name}:#{window_index}"],
+            capture_output=True,
+            text=True,
+            timeout=TMUX_RESOLVE_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return tmux_pane, None
+    if result.returncode != 0:
+        return tmux_pane, None
+    target = result.stdout.strip()
+    return tmux_pane, (target or None)
+
+
 def _prompt_id(session_id, text):
     """`hp-` (hook-prompt) namespace -- see module docstring for why this is
     deliberately distinct from `mine_prompts.py`'s `mp-` ids. Same session +
@@ -167,6 +217,7 @@ def capture(payload, ledger):
     if ledger.get_prompt(prompt_id) is None:
         context = last_assistant_text(transcript_path) if transcript_path else None
         context = (context or CONTEXT_UNDETERMINED)[:400]
+        tmux_pane, tmux_pane_target = _resolve_tmux_pane()
         ledger.record_prompt(
             prompt_id,
             at=int(time.time()),
@@ -174,6 +225,8 @@ def capture(payload, ledger):
             context=context,
             session=session_id,
             source_file=os.path.basename(transcript_path) if transcript_path else None,
+            tmux_pane=tmux_pane,
+            tmux_pane_target=tmux_pane_target,
         )
         wrote_prompt = True
     else:
