@@ -113,6 +113,36 @@ with a demonstrably dead pid (`pid_is_alive` returns `False`) reaches the
 `_lane_log_pr_url` evidence check and, failing that, the failure stamp
 below -- unchanged from before this fix in that case.
 
+agent-supervisor#779 (#774 half C): a task's recorded lane names a tmux
+SESSION that no longer exists -- renamed away (#739, #752, and this issue
+are three renames in one session's history; "the next rename" is not
+hypothetical) or destroyed outright. Before this fix, `_fetch_session_lanes`
+raising for that session left every task in it `unresolved` forever: the
+stored session name never changes on its own, and nothing ever revisited
+the row. #774's own three stuck reviewer tasks were exactly this.
+
+`_resolve_renamed_session` is the fallback, tried only when the ordinary
+per-session `lanes.sh --json` call itself fails. It resolves the SAME lane
+under its CURRENT session name using the one identity a `tmux
+rename-session` does not touch: the pane_id the ledger recorded for this
+lane at registration time (`lanes.pane_id`, confirmed stable across a
+rename by #739's own direct test). Every step is live evidence, never a
+guess: the pane_id comes from the ledger's own row, "does it still answer"
+is checked with a live `tmux display-message` against that exact pane_id,
+the session it now names is checked against `tmux list-sessions`'s own
+live output before being trusted, and the window at the resolved index is
+then read the ordinary way (`lanes.sh --json` on THAT session) so the
+state/idle_seconds evidence downstream is identical either way -- this
+changes HOW the pane is found for the failure case only, never whether
+idleness alone is sufficient to complete it (unchanged from every fix
+above). Any step that cannot confirm a single live location -- the pane_id
+column empty, the pane gone, `tmux list-sessions` not naming the resolved
+session, the resolved window absent from that session's own answer --
+returns `None` and the task stays `unresolved`, the same fail-closed
+posture as "old name, gone forever". This never touches the 931 historical
+`agent-supervisor:%` rows already `complete` (#728): only tasks still
+`delivered`/`accepted` ever reach `sweep()`'s per-session loop at all.
+
 agent-supervisor#401: "no signal arrived" and "the work did not happen" are
 different claims, and the wording this sweep used to write conflated them
 -- `results/ad275-fix275.md` read "failed, not completed" while its own
@@ -313,31 +343,120 @@ class LaneCompletionReconciler:
                 windows = self._fetch_session_lanes(session)
             except Exception as error:
                 report["errors"].append({"session": session, "error": str(error)})
+                # agent-supervisor#779 (#774 half C): the recorded session
+                # itself is unreadable -- try the SAME lane under its
+                # current name before giving up. See `_resolve_renamed_
+                # session`'s own docstring for what "evidence-based" means
+                # here; `None` means it could not confirm a single live
+                # location, and the task is left unresolved exactly as
+                # before this fallback existed.
                 for task, _index in entries:
-                    report["unresolved"].append(task["id"])
+                    resolved = self._resolve_renamed_session(task, stale_session=session)
+                    if resolved is None:
+                        report["unresolved"].append(task["id"])
+                        continue
+                    resolved_session, window = resolved
+                    self._evaluate_window(
+                        task, window, session=resolved_session, now=now, report=report, via_fallback=True
+                    )
                 continue
 
             for task, index in entries:
                 window = windows.get(index)
-                if window is None or window.get("state") != "free":
-                    report["unresolved"].append(task["id"])
-                    continue
-                idle_seconds = window.get("idle_seconds")
-                if not isinstance(idle_seconds, (int, float)) or idle_seconds < self.idle_after:
-                    report["unresolved"].append(task["id"])
-                    continue
-                if task.get("accepted_at") is None:
-                    self._fail_unaccepted(task, session=session, idle_seconds=idle_seconds, now=now, report=report)
-                    continue
-                self._complete_observed(task, session=session, idle_seconds=idle_seconds, now=now, report=report)
+                self._evaluate_window(task, window, session=session, now=now, report=report)
 
         return report
 
-    def _complete_observed(self, task, *, session, idle_seconds, now, report):
+    def _evaluate_window(self, task, window, *, session, now, report, via_fallback=False):
+        """The state/idle/accepted evidence check shared by the ordinary
+        per-session lookup and `_resolve_renamed_session`'s fallback -- the
+        two differ only in HOW `window` was found, never in what counts as
+        enough evidence to act on it (#774 half C's own constraint)."""
+        if window is None or window.get("state") != "free":
+            report["unresolved"].append(task["id"])
+            return
+        idle_seconds = window.get("idle_seconds")
+        if not isinstance(idle_seconds, (int, float)) or idle_seconds < self.idle_after:
+            report["unresolved"].append(task["id"])
+            return
+        if task.get("accepted_at") is None:
+            self._fail_unaccepted(
+                task, session=session, idle_seconds=idle_seconds, now=now, report=report, via_fallback=via_fallback
+            )
+            return
+        self._complete_observed(
+            task, session=session, idle_seconds=idle_seconds, now=now, report=report, via_fallback=via_fallback
+        )
+
+    def _resolve_renamed_session(self, task, *, stale_session):
+        """agent-supervisor#779 (#774 half C): find this task's lane under
+        its CURRENT session name, using the pane_id the ledger recorded for
+        it at registration time -- the one identity a `tmux rename-session`
+        does not touch (#739). See this module's top-level docstring for
+        the full rationale.
+
+        Returns `(resolved_session, window)` -- `window` in the exact shape
+        `_fetch_session_lanes` already produces, so `_evaluate_window` reads
+        it identically either way -- or `None` if any step below cannot
+        confirm a single live location with certainty:
+
+        * no `lanes` row for this task's OWN recorded lane string, or that
+          row carries no `pane_id` (never registered, or predates the
+          column)
+        * `tmux display-message` against that exact pane_id fails (the pane
+          itself is gone, not merely renamed) or answers a session that is
+          somehow still `stale_session` (contradicts the caller's own
+          failed lookup; something else is wrong, so this refuses rather
+          than loop back into it)
+        * `tmux list-sessions` -- a live enumeration, never a hardcoded or
+          guessed name -- does not name the session `display-message`
+          claimed
+        * `lanes.sh --json` on the resolved session itself fails, or does
+          not carry a window at the resolved index
+
+        Every one of those is a positive live check, not an inference --
+        the same "only ones a caller can enumerate live" discipline this
+        brief asked for.
+        """
+        lane_row = self.ledger.get_lane(task["lane"])
+        if lane_row is None:
+            return None
+        pane_id = (lane_row.get("pane_id") or "").strip()
+        if not pane_id:
+            return None
+        try:
+            target = self.runner(["tmux", "display-message", "-t", pane_id, "-p", "#{session_name}:#{window_index}"])
+        except Exception:
+            return None
+        session, sep, index = target.strip().rpartition(":")
+        if not sep or not session or not index.isdigit() or session == stale_session:
+            return None
+        try:
+            live_sessions = self.runner(["tmux", "list-sessions", "-F", "#{session_name}"])
+        except Exception:
+            return None
+        if session not in live_sessions.splitlines():
+            return None
+        try:
+            windows = self._fetch_session_lanes(session)
+        except Exception:
+            return None
+        window = windows.get(index)
+        if window is None:
+            return None
+        return session, window
+
+    def _complete_observed(self, task, *, session, idle_seconds, now, report, via_fallback=False):
+        fallback_note = (
+            f" (recorded lane's session was gone; resolved via its pane_id to "
+            f"{session!r}, current as of {int(now)} -- agent-supervisor#779)"
+            if via_fallback
+            else ""
+        )
         note = (
             f"reconcile-lane-completions: {task['lane']} observed free for "
             f"{int(idle_seconds)}s (>= {self.idle_after}s) as of {int(now)} -- "
-            "never signalled completion; auto-completed from observed pane state"
+            f"never signalled completion; auto-completed from observed pane state{fallback_note}"
         ).encode("utf-8")
         allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
         try:
@@ -488,7 +607,7 @@ class LaneCompletionReconciler:
         report["completed"].append(task["id"])
         report["completed_from_evidence"].append(task["id"])
 
-    def _fail_unaccepted(self, task, *, session, idle_seconds, now, report):
+    def _fail_unaccepted(self, task, *, session, idle_seconds, now, report, via_fallback=False):
         """agent-supervisor#193: observed free/idle with no `accepted_at` is
         not a completion -- see `sweep`'s own docstring. Terminated `failed`
         instead, loud about exactly why (#118's lesson, same as
@@ -500,13 +619,19 @@ class LaneCompletionReconciler:
         if pr_url is not None:
             self._complete_from_evidence(task, pr_url=pr_url, now=now, report=report)
             return
+        fallback_note = (
+            f" (recorded lane's session was gone; resolved via its pane_id to "
+            f"{session!r}, current as of {int(now)} -- agent-supervisor#779)"
+            if via_fallback
+            else ""
+        )
         note = (
             f"reconcile-lane-completions: {task['lane']} observed free for "
             f"{int(idle_seconds)}s (>= {self.idle_after}s) as of {int(now)} -- "
             "never signalled completion AND no accepted_at recorded (this dispatch "
             "was never confirmed to land); no completion signal arrived, which is "
             "not the same claim as the work having failed -- terminated failed only "
-            "to free the lane for redispatch (agent-supervisor#193, agent-supervisor#401)"
+            f"to free the lane for redispatch (agent-supervisor#193, agent-supervisor#401){fallback_note}"
         ).encode("utf-8")
         allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
         try:
