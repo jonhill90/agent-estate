@@ -230,9 +230,20 @@ git filter-repo --to-subdirectory-filter tui
 
 This produces `.git/filter-repo/commit-map` — a two-column old-SHA/new-SHA
 mapping for every rewritten commit (paths change, so tree hashes and
-therefore commit hashes change; the original 89 SHAs will not exist
+therefore commit hashes change; the original SHAs will not exist
 verbatim in the merged repo — this is expected, not history loss, and the
 commit-map is exactly the tool for proving that).
+
+**Measured 2026-08-28 (Step 2a rehearsal, ae736-step2a): `agent-tui@main`'s
+own commit count is 106, not 89.** `git rev-list --count HEAD` on a fresh
+`--no-local` clone of `agent-tui@main`, both before and after the
+`filter-repo` rewrite, reports 106 — matching each other (proving no
+commits were lost or added by the rewrite) but not matching this runbook's
+`89`, which is stale: 17 commits have landed on `agent-tui@main` since the
+`agent-supervisor#535` inventory's `agent-tui@8c2db69` measurement this
+runbook cites as its source of truth. Re-measure the live count
+(`git rev-list --count HEAD` on a fresh clone) immediately before running
+step 2b for real — do not carry `89` (or `106`) forward as a constant.
 
 **Prefer this over `git merge --allow-unrelated-histories` on the raw,
 un-rewritten history**: without the subdirectory prefix, every one of the
@@ -242,6 +253,15 @@ merge attempt, with no clean 3-way resolution (unrelated histories share no
 common ancestor for git to diff against). Prefixing first means only the
 files meant to live under `tui/` collide with nothing.
 
+**Measured 2026-08-28 (same rehearsal): this list undercounts by one.**
+`comm -12` between `agent-tui@main`'s top-level tree (`git ls-tree
+--name-only HEAD`) and `agent-estate@origin/main`'s top-level tree gives
+seven collisions, not six: the six named above, plus `.gitignore`. Both
+repos have their own root `.gitignore`; an unrewritten merge would collide
+on it exactly like the other six. `.gitignore` collides too — content
+decision needed for it same as the six named files, not just a mechanical
+move.
+
 ### 2b. Merge the rewritten history into `agent-estate`
 
 ```
@@ -250,7 +270,12 @@ git checkout -b migrate/agent-tui-merge
 git remote add tui-rewritten /tmp/agent-tui-rewrite
 git fetch tui-rewritten main
 git merge --allow-unrelated-histories tui-rewritten/main \
-  -m "merge agent-tui's history under tui/ (89 commits, --allow-unrelated-histories)"
+  -m "merge agent-tui's history under tui/ (<N> commits, --allow-unrelated-histories)"
+# <N> = the live `git rev-list --count HEAD` from the fresh clone in 2a,
+# re-measured at run time -- do not carry forward 89 or any other cached
+# figure (see the 2026-08-28 rehearsal note above 2a: agent-tui@main was
+# 106 commits on that date, not 89, and will have moved again by the time
+# this step actually runs)
 ```
 
 **Verify — prove history survived by resolving a known old SHA, not by
@@ -287,7 +312,7 @@ diff <(git -C /tmp/agent-tui-rewrite show <new-sha>:tui/go.mod) \
 ```
 
 Repeat the SHA check for at least one more commit from a different point in
-the 89-commit range (e.g. the very first `agent-tui` commit) — one sample
+the commit range (e.g. the very first `agent-tui` commit) — one sample
 proves the tip merged, not that every commit's content survived.
 
 **Rollback:** everything above happened on `migrate/agent-tui-merge`, not
@@ -310,6 +335,13 @@ top-level files as clearly-labeled sections (`## The daemon`, `## The
 TUI`) — do not concatenate blindly; both currently open with framing
 ("before you ask Jon anything" / naming-history) that should exist once,
 not twice, in the merged file.
+
+`.gitignore`: a seventh collision, missing from this section's own list
+above and from the inventory's six (measured 2026-08-28, Step 2a
+rehearsal) — union the two root `.gitignore`s by hand same as the three
+markdown files; `tui/`-scoped patterns from `agent-tui`'s copy either move
+under a `tui/`-prefixed pattern or get folded into the merged root file,
+whichever keeps both repos' existing ignore behavior working post-merge.
 
 `docs/index.md`: write one new index at the root, grouped by area
 (`supervisor/`, `tui/`), replacing both repos' separate indexes
