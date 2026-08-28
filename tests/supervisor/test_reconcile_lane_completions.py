@@ -1,5 +1,7 @@
 import hashlib
 import json
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -841,6 +843,118 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
 
         self.assertEqual(sorted(["as155-task-a", "as155-task-b"]), sorted(report["completed"]))
         self.assertEqual(1, len(runner.calls))
+
+
+TMUX_AVAILABLE = shutil.which("tmux") is not None
+
+
+def _isolated_env(tmux_tmpdir):
+    """Same isolation discipline as test_mcp_server_client_identity.py's own
+    helper: a private TMUX_TMPDIR, TMUX unset so nothing here can ever
+    address the ambient/default socket (CLAUDE.md invariant 4)."""
+    env = dict(os.environ)
+    env["TMUX_TMPDIR"] = tmux_tmpdir
+    env.pop("TMUX", None)
+    return env
+
+
+def _tmux(env, *args):
+    return subprocess.run(["tmux", *args], env=env, check=True, capture_output=True, text=True, timeout=10)
+
+
+class HybridRunner:
+    """`lanes.sh --json <session>` stays a fake, in-memory answer -- same
+    posture as `FakeLanesRunner` -- but any `tmux` command runs FOR REAL
+    against the isolated server this test spun up, so
+    `_resolve_renamed_session`'s live `display-message`/`list-sessions`
+    calls exercise a genuine `tmux rename-session`, not a simulated one
+    (this brief's own verification requirement)."""
+
+    def __init__(self, windows, env):
+        self.windows = windows
+        self.env = env
+        self.calls = []
+
+    def __call__(self, command):
+        self.calls.append(command)
+        if command[0] == "tmux":
+            return subprocess.run(
+                command, env=self.env, check=True, capture_output=True, text=True, timeout=10
+            ).stdout
+        session = command[-1]
+        rows = self.windows.get(session)
+        if rows is None:
+            raise RuntimeError(f"lanes.sh unavailable for session {session}")
+        return json.dumps(rows)
+
+
+@unittest.skipUnless(TMUX_AVAILABLE, "tmux is not installed")
+class RenamedSessionFallbackTest(unittest.TestCase):
+    """agent-supervisor#779 (#774 half C): the fallback path for a task
+    whose recorded session no longer exists because it was RENAMED, not
+    destroyed -- the class #774 measured live against #739's own rename.
+    """
+
+    def setUp(self):
+        self.tmpdir = tempfile.mkdtemp(prefix="as779-tmux-")
+        self.env = _isolated_env(self.tmpdir)
+        self.addCleanup(self._cleanup)
+        _tmux(self.env, "new-session", "-d", "-s", "old-session")
+        panes = _tmux(self.env, "list-panes", "-t", "old-session", "-F", "#{window_index}\t#{pane_id}").stdout
+        self.window_index, self.pane_id = panes.strip().split("\t")
+        self.ledger = Ledger(Path(tempfile.mkdtemp(prefix="as779-ledger-")), clock=lambda: 1_000)
+        self.addCleanup(lambda: shutil.rmtree(self.ledger.root, ignore_errors=True))
+
+    def _cleanup(self):
+        subprocess.run(["tmux", "kill-server"], env=self.env, capture_output=True, timeout=10)
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    def _dispatch(self, task_id, *, lane):
+        return self.ledger.record_dispatch(
+            lane=lane, pane_id=self.pane_id, nonce="nonce-779", harness="claude",
+            repo="/repo/agent-supervisor", server_id="server-a", session_id="$779", command="claude",
+            task_id=task_id, source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/774",
+            source_ref="774", summary="issue #774", source_state="OPEN",
+            evidence=[f"claimed by dispatch.sh for lane {lane}", "issues: 774"],
+            status_marker=None, accepted=True,
+        )
+
+    def test_renamed_session_is_found_under_its_new_name(self):
+        """Positive direction: the recorded session is genuinely gone
+        (renamed), the SAME window is found live under its current name via
+        pane_id, and the task completes exactly as it would have under the
+        old name."""
+        lane = f"old-session:{self.window_index}"
+        self._dispatch("as779-renamed", lane=lane)
+        _tmux(self.env, "rename-session", "-t", "old-session", "new-session")
+
+        runner = HybridRunner({"new-session": [{"window": int(self.window_index), "state": "free",
+                                                 "idle_seconds": 400}]}, self.env)
+        report = LaneCompletionReconciler(self.ledger, runner=runner, idle_after=300).sweep()
+
+        task = self.ledger.get_task("as779-renamed")
+        self.assertEqual("complete", task["status"])
+        self.assertEqual(["as779-renamed"], report["completed"])
+        self.assertEqual([], report["unresolved"])
+        self.assertEqual(1, len(report["errors"]))  # the stale name still errors once
+        self.assertEqual("old-session", report["errors"][0]["session"])
+
+    def test_genuinely_gone_session_stays_unresolved_not_guessed(self):
+        """Negative direction: the pane itself is gone (killed, not
+        renamed) -- pane_id can no longer be resolved live, so the fallback
+        must refuse rather than guess, same as before this fix existed."""
+        lane = f"old-session:{self.window_index}"
+        self._dispatch("as779-gone", lane=lane)
+        _tmux(self.env, "kill-session", "-t", "old-session")
+
+        runner = HybridRunner({}, self.env)
+        report = LaneCompletionReconciler(self.ledger, runner=runner, idle_after=300).sweep()
+
+        task = self.ledger.get_task("as779-gone")
+        self.assertEqual("delivered", task["status"])
+        self.assertIn("as779-gone", report["unresolved"])
+        self.assertEqual([], report["completed"])
 
 
 if __name__ == "__main__":
