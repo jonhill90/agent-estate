@@ -128,7 +128,10 @@ and it is longer and more specific than this line.
   the next tool call, which made every lease look stale (#671/#674)
 - `heartbeat.sh` — detect a stalled estate and nudge it once (#315)
 - `watchdog.sh` — restart the supervisor loop when it dies with work left,
-  found by pane COORDINATES, not name
+  found by pane COORDINATES, not name; sourced-only siblings
+  `watchdog-harness.sh` / `watchdog-status.sh` / `watchdog-checks.sh` /
+  `watchdog-advance.sh` split its 2126 lines by responsibility (#704), not
+  replacements — none is meant to run standalone
 - `watchdog_notify.py` — decide whether the watchdog's `escalate` state
   should reach a human
 - `sleepcheck.py` — is the loop asleep with a wakeup pending, or actually down
