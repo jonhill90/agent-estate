@@ -93,7 +93,8 @@ mkdir -p "$SRC/scripts/supervisor"
 # --json's stdout (captured with 2>&1), json.loads chokes on it, and THAT
 # is what pages: "could not parse lanes.sh --json ... output", not
 # anything about the deliberate-stop path itself. Measured live (#522).
-for f in watchdog.sh advance-live.sh poller-window.sh poller-recover.sh session-defaults.sh \
+for f in watchdog.sh watchdog-harness.sh watchdog-status.sh watchdog-checks.sh watchdog-advance.sh \
+         advance-live.sh poller-window.sh poller-recover.sh session-defaults.sh \
          sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh lanes.sh input-box.sh \
          dim-strip.sh poller-lib.sh; do
   cp "$SUP/$f" "$SRC/scripts/supervisor/"
@@ -332,15 +333,19 @@ if [ -z "$(up_calls)" ]; then say_ok "a normal relaunch pages nobody"
 else say_bad "a normal relaunch pages nobody" "paged: $(up_calls)"; fi
 
 # --- 1b. mutation: reproduce the pre-fix shape, confirm it goes RED --------
-# Patches $LIVE's OWN watchdog.sh copy step back to what shipped before this
-# fix (advance-live.sh and poller-window.sh only, no poller-recover.sh copy
+# Patches $LIVE's OWN copy step back to what shipped before this fix
+# (advance-live.sh and poller-window.sh only, no poller-recover.sh copy
 # attempt at all). poller-recover.sh stays present beside it in
 # $LIVE/scripts/supervisor -- exactly the pre-fix bug: the file exists, but
 # the copy step never carries it into copy_dir, so $HERE/poller-recover.sh
 # resolves inside copy_dir and is missing. If this does not go red, test 1
 # above is not actually pinned to the fix.
+#
+# agent-supervisor#704: advance_on_exit()/the copy_dir step live in
+# watchdog-advance.sh now, not watchdog.sh itself -- patch the file that
+# actually contains this code, not the one that used to.
 patch_rc=0
-python3 - "$LIVE/scripts/supervisor/watchdog.sh" <<'PY' || patch_rc=$?
+python3 - "$LIVE/scripts/supervisor/watchdog-advance.sh" <<'PY' || patch_rc=$?
 import sys
 path = sys.argv[1]
 text = open(path).read()

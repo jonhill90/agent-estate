@@ -110,7 +110,8 @@ mkdir -p "$SRC/scripts/supervisor"
 # started paging on it, which is what actually broke "pages nobody" below.
 # agent-supervisor#521: input-box.sh gained its own dependency on
 # dim-strip.sh -- same gap as test_watchdog_poller_copy.sh, same fix.
-for f in watchdog.sh advance-live.sh poller-window.sh poller-recover.sh session-defaults.sh \
+for f in watchdog.sh watchdog-harness.sh watchdog-status.sh watchdog-checks.sh watchdog-advance.sh \
+         advance-live.sh poller-window.sh poller-recover.sh session-defaults.sh \
          sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh lanes.sh input-box.sh \
          dim-strip.sh poller-lib.sh; do
   cp "$SUP/$f" "$SRC/scripts/supervisor/"

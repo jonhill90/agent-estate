@@ -45,7 +45,8 @@ build_fixture() { # build_fixture <root-dir> -> sets SRC/LIVE/A as globals
   git -C "$SRC" config user.email t@e.com; git -C "$SRC" config user.name T
   git -C "$SRC" checkout -q -b main
   mkdir -p "$SRC/scripts/supervisor"
-  for f in watchdog.sh advance-live.sh poller-window.sh poller-recover.sh session-defaults.sh \
+  for f in watchdog.sh watchdog-harness.sh watchdog-status.sh watchdog-checks.sh watchdog-advance.sh \
+           advance-live.sh poller-window.sh poller-recover.sh session-defaults.sh \
            sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh lanes.sh input-box.sh \
            dim-strip.sh poller-lib.sh worktree-guard-audit.sh; do
     cp "$SUP/$f" "$SRC/scripts/supervisor/"
