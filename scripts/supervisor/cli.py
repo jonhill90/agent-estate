@@ -536,7 +536,11 @@ def main(argv=None):
     elif args.command == "reconcile-lane-completions":
         lanes_bin = os.environ.get("AGENT_LANES_BIN", str(Path(__file__).resolve().parent / "lanes.sh"))
         value = LaneCompletionReconciler(
-            ledger, lanes_bin=lanes_bin, idle_after=args.idle_after, stale_after=args.stale_after
+            ledger,
+            lanes_bin=lanes_bin,
+            gh_bin=os.environ.get("AGENT_GH_BIN", "gh"),
+            idle_after=args.idle_after,
+            stale_after=args.stale_after,
         ).sweep()
     elif args.command == "observe":
         lanes = args.lane or [
