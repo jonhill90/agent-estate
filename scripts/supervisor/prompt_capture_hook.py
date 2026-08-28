@@ -76,6 +76,27 @@ INPUT SHAPE (Claude Code's own `UserPromptSubmit` hook contract): one JSON
 object on stdin --
   {"session_id": "...", "transcript_path": "...", "cwd": "...", "prompt": "..."}
 Anything missing degrades gracefully (see `main` below) rather than raising.
+
+REGISTRATION MUST ALSO FAIL OPEN (agent-supervisor#730). Everything above
+governs what happens once this file's own `main()` starts running -- but
+`#730`'s incident was a case where it never got the chance to: the harness
+invokes this hook as the *shell command* `python3
+$CLAUDE_PROJECT_DIR/scripts/supervisor/prompt_capture_hook.py`, and when
+`$CLAUDE_PROJECT_DIR` is stale (captured at process start, before a repo
+rename), that path does not exist. `python3` then never imports this
+module at all -- the `try/except` in `main()` below is never reached -- and
+exits with the CPython interpreter's own code for "can't open file":
+**2**. Per Claude Code's `UserPromptSubmit` contract, exit code 2 from a
+hook command is specifically "blocking error: discard the prompt", exit 0
+is "proceed", and any other non-zero code is merely a non-blocking warning.
+CPython's file-not-found exit code colliding with the harness's own
+"block" code is what silently ate two directives to the director -- not a
+bug in this file's Python. Because the failure happens before this
+process runs, no change inside `main()` can fix it; the registration
+itself (`.claude/settings.json`'s `UserPromptSubmit` command) must
+guarantee exit 0 regardless of whether `python3` ever manages to open this
+file, appending `|| exit 0` so a launch failure degrades the same way an
+in-process failure already does -- losing a corpus row, never a prompt.
 """
 import hashlib
 import json

@@ -9,7 +9,8 @@ import time
 import unittest
 from pathlib import Path
 
-SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "scripts" / "supervisor"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+SUPERVISOR_DIR = REPO_ROOT / "scripts" / "supervisor"
 sys.path.insert(0, str(SUPERVISOR_DIR))
 
 import prompt_capture_hook  # noqa: E402
@@ -228,6 +229,68 @@ class MainEndToEndTests(unittest.TestCase):
         self.assertEqual(
             0, len(unitemised), "the locked-out attempt must not have written a prompt row"
         )
+
+
+class RegistrationFailsOpenTests(unittest.TestCase):
+    """agent-supervisor#730: the incident was NOT a bug in this file's own
+    Python -- `main()`'s try/except never even got a chance to run, because
+    `python3 $CLAUDE_PROJECT_DIR/.../prompt_capture_hook.py` fails to launch
+    at all when `CLAUDE_PROJECT_DIR` is stale (captured before a repo
+    rename), and CPython's own exit code for "can't open file" is 2 --
+    which collides with Claude Code's `UserPromptSubmit` contract, where
+    exit 2 specifically means "blocking error: discard the prompt" (see
+    `.claude/references/hooks-guide.md`'s exit-code table). No unit test on
+    `capture()` or `main()` can catch this class of failure, because both
+    run inside the same process that never starts -- this test runs the
+    exact command string `.claude/settings.json` registers, the same way
+    the harness does, under `bash -c`."""
+
+    def setUp(self):
+        settings = json.loads((REPO_ROOT / ".claude" / "settings.json").read_text())
+        [hook_entry] = settings["hooks"]["UserPromptSubmit"]
+        [hook] = hook_entry["hooks"]
+        self.command = hook["command"]
+        self.assertIn("prompt_capture_hook.py", self.command)
+
+    def _run_registered_command(self, project_dir, state_dir):
+        return subprocess.run(
+            ["bash", "-c", self.command],
+            input=json.dumps({"session_id": "s1", "prompt": "a directive that must not be lost"}),
+            capture_output=True,
+            text=True,
+            env={
+                **os.environ,
+                "CLAUDE_PROJECT_DIR": project_dir,
+                "AGENT_SUPERVISOR_STATE_DIR": state_dir,
+            },
+            timeout=30,
+        )
+
+    def test_stale_project_dir_fails_open_not_blocking(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            result = self._run_registered_command(
+                project_dir="/tmp/nonexistent-agent-supervisor-project-dir", state_dir=state_dir
+            )
+            self.assertEqual(
+                0,
+                result.returncode,
+                "a stale CLAUDE_PROJECT_DIR must fail open (exit 0), not exit 2 -- "
+                "exit 2 is Claude Code's own 'discard the prompt' code, and this exact "
+                "collision (python3's file-not-found exit code == 2) is #730's incident",
+            )
+            self.assertEqual("", result.stdout)
+            failure_log = Path(state_dir) / "prompt-capture-hook-failures.log"
+            self.assertTrue(failure_log.exists(), "the launch failure must still be visible somewhere")
+            self.assertIn("No such file or directory", failure_log.read_text())
+
+    def test_real_project_dir_still_captures_the_prompt(self):
+        with tempfile.TemporaryDirectory() as state_dir:
+            result = self._run_registered_command(project_dir=str(REPO_ROOT), state_dir=state_dir)
+            self.assertEqual(0, result.returncode, msg=result.stderr)
+            ledger = Ledger(state_dir)
+            unitemised = ledger.list_unitemised_prompts()
+            self.assertEqual(1, len(unitemised), "the registered command must still capture on the happy path")
+            self.assertEqual("a directive that must not be lost", unitemised[0]["text_raw"])
 
 
 if __name__ == "__main__":
