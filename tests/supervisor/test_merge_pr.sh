@@ -1549,6 +1549,128 @@ else
   bad "mutation confirmed: fabricating a unique pane id per task-alias token lets the #689a self-review through" "got rc=$rc, merged=$([ -f "$MARKER" ] && echo yes || echo no): $out"
 fi
 
+# ============================================================================
+# agent-estate#680: a merge is provable completion evidence for the task
+# that opened the PR -- `merge-pr.sh` must record it via `record-completion`
+# after `gh pr merge` succeeds, and must never fail the merge itself if that
+# write is impossible (already-terminal row, unresolvable task, ledger
+# error).
+# ============================================================================
+
+task_status() {  # task_status <task-id> -- reads status/completed_at straight from the ledger
+  python3 -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger
+row = Ledger(sys.argv[2]).get_task(sys.argv[3])
+if row is None:
+    print("missing")
+else:
+    print(row["status"], row["completed_at"] is not None)
+' "$HERE/../../scripts/supervisor" "$STATE" "$1"
+}
+
+# --- #680: author task still open (never called `cli.py complete` itself)
+# gets completed from merge evidence once `gh pr merge` succeeds -----------
+rm -f "$MARKER"
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane t:20 --task as680-author --summary "seed" --pane-id %20 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 680 --github "$REPO" \
+  --harness claude >/dev/null
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-pr-for-task --task as680-author --repo "$REPO" --pr 680 >/dev/null
+cat > "$FIX/head_680.json" <<'S'
+{"headRefOid": "sha-680"}
+S
+green_checkruns sha-680
+cat > "$FIX/author_680.json" <<'S'
+{"headRefName": "fix/680-thing", "closingIssuesReferences": [{"number": 680}], "commits": []}
+S
+cat > "$FIX/reviews_680.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:21\nReviewed-SHA: sha-680", "createdAt": "2026-08-27T00:00:00Z"}]}
+S
+register_tmux_lane t:21 %21
+before=$(task_status as680-author)
+out=$("$MERGE_PR" "$REPO" 680 2>&1)
+rc=$?
+after=$(task_status as680-author)
+if [ "$rc" -eq 0 ]; then ok "#680: still merges on green CI + independent review"; else bad "#680: still merges" "got rc=$rc: $out"; fi
+if [ -f "$MARKER" ]; then ok "#680: gh pr merge actually called"; else bad "#680: gh pr merge actually called" "$out"; fi
+if [ "$before" = "delivered False" ]; then ok "#680: author task was open before merge"; else bad "#680: author task open precondition" "got: $before"; fi
+if [ "$after" = "complete True" ]; then ok "#680: author task auto-completed from merge evidence"; else bad "#680: author task auto-completed from merge evidence" "got: $after"; fi
+echo "$out" | grep -q "as680-author marked complete from merge evidence" && ok "#680: completion is named in the output" || bad "#680: completion named in output" "$out"
+
+# --- #680: replay is idempotent -- record-completion on an already-complete
+# row must not turn a second, otherwise-identical merge call into a failure
+# (it is a no-op re-run of an already-merged PR in practice, but the gate
+# logic re-evaluates fully; what matters here is only the completion write) -
+rm -f "$MARKER"
+out2=$("$MERGE_PR" "$REPO" 680 2>&1)
+rc2=$?
+after2=$(task_status as680-author)
+if [ "$rc2" -eq 0 ]; then ok "#680: re-merge (idempotent replay) still exits 0"; else bad "#680: re-merge still exits 0" "got rc=$rc2: $out2"; fi
+if [ "$after2" = "complete True" ]; then ok "#680: already-complete task stays complete on replay"; else bad "#680: already-complete task stays complete" "got: $after2"; fi
+
+# --- #680: no ledger record for this PR at all -- merge still succeeds, and
+# the missing-completion write is logged, never treated as a merge failure -
+rm -f "$MARKER"
+cat > "$FIX/head_681.json" <<'S'
+{"headRefOid": "sha-681"}
+S
+green_checkruns sha-681
+cat > "$FIX/author_681.json" <<'S'
+{"headRefName": "some-hand-pushed-branch", "closingIssuesReferences": [], "commits": []}
+S
+cat > "$FIX/reviews_681.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:22\nReviewed-SHA: sha-681", "createdAt": "2026-08-27T00:00:00Z"}]}
+S
+register_tmux_lane t:22 %22
+python3 "$LEDGER_CLI" --state-dir "$STATE" mark-pr-external --repo "$REPO" --pr 681 --note "human pushed directly" --chain-verified >/dev/null
+out3=$("$MERGE_PR" "$REPO" 681 2>&1)
+rc3=$?
+if [ "$rc3" -eq 0 ]; then ok "#680: no pr-task record -- merge still succeeds"; else bad "#680: no pr-task record -- merge still succeeds" "got rc=$rc3: $out3"; fi
+if [ -f "$MARKER" ]; then ok "#680: no pr-task record -- gh pr merge still called"; else bad "#680: no pr-task record -- gh pr merge still called" "$out3"; fi
+
+# --- MUTATION: dropping the post-merge completion write entirely must turn
+# the first assertion above (author task auto-completed) red -- proves this
+# suite would actually catch a regression that silently removed the fix.
+MUTDIR4="$D/mut4"
+mkdir -p "$MUTDIR4"
+python3 - "$HERE/../../scripts/supervisor/merge-pr.sh" "$MUTDIR4/merge-pr.sh" <<'PYEOF'
+import re, sys
+src_path, dst_path = sys.argv[1], sys.argv[2]
+text = open(src_path).read()
+target = 'if [ "$MERGE_RC" -eq 0 ]; then\n  PR_TASK_RC=0'
+assert target in text, "expected post-merge completion block not found"
+mutated = text.replace(target, 'if false; then\n  PR_TASK_RC=0', 1)
+assert mutated != text, "mutation did not change merge-pr.sh"
+open(dst_path, "w").write(mutated)
+PYEOF
+chmod +x "$MUTDIR4/merge-pr.sh"
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-dispatch \
+  --lane t:23 --task as680b-author --summary "seed" --pane-id %23 --pane-path "$D/repo" \
+  --command claude --server-id srv --session-id sess --issue 6801 --github "$REPO" \
+  --harness claude >/dev/null
+python3 "$LEDGER_CLI" --state-dir "$STATE" record-pr-for-task --task as680b-author --repo "$REPO" --pr 682 >/dev/null
+cat > "$FIX/head_682.json" <<'S'
+{"headRefOid": "sha-682"}
+S
+green_checkruns sha-682
+cat > "$FIX/author_682.json" <<'S'
+{"headRefName": "fix/682-thing", "closingIssuesReferences": [{"number": 682}], "commits": []}
+S
+cat > "$FIX/reviews_682.json" <<'S'
+{"reviews": [], "comments": [{"author": {"login": "jonhill90"}, "body": "**Verdict: APPROVE**\nReview-Lane: t:24\nReviewed-SHA: sha-682", "createdAt": "2026-08-27T00:00:00Z"}]}
+S
+register_tmux_lane t:24 %24
+rm -f "$MARKER"
+"$MUTDIR4/merge-pr.sh" "$REPO" 682 >/dev/null 2>&1
+after_mut=$(task_status as680b-author)
+if [ "$after_mut" != "complete True" ]; then
+  ok "mutation confirmed: dropping the post-merge completion write leaves as680b-author open (case above would be red)"
+else
+  bad "mutation confirmed: dropping the post-merge completion write leaves as680b-author open" "got: $after_mut"
+fi
+
 rm -rf "$D"
 
 echo "  -> $pass ok, $fail failed"
