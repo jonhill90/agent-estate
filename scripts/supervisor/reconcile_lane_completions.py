@@ -220,9 +220,17 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from pathlib import Path
 
 from core import CLAIM_TASK_PREFIX, pid_is_alive
+from core_lane_relation import normalize_worktree_path
 from verdict import GithubReviewVerdictSource
+
+# agent-estate#827 fix2: the one CLI seam onto harness-registry.sh's
+# bash-3.2 arrays (see harness-launch-cmd.sh's own header) --
+# `_vacate_pane_before_reap` shells out to this rather than hardcoding a
+# second copy of any harness's H_LAUNCH_CMD.
+HARNESS_LAUNCH_CMD_SH = str(Path(__file__).resolve().parent / "harness-launch-cmd.sh")
 
 # Mirrors agent-supervisor#401's own acceptance script's grep exactly, so a
 # specimen this finds is a specimen that script would also flag.
@@ -548,11 +556,192 @@ class LaneCompletionReconciler:
             task = self.ledger.get_task(task_id)
             if task is None:
                 continue
+            # agent-estate#825: see `_vacate_pane_before_reap`'s own
+            # docstring -- must run BEFORE the reap call below, on the same
+            # task, for the same reason the orphan sweep runs before this
+            # whole method (a stray occupant is exactly what makes
+            # `worktree.sh reap`'s liveness guard refuse).
+            #
+            # agent-estate#827 fix2: the vacate step's own outcome is
+            # recorded on the SAME dict `reap_task_worktree` returns, as its
+            # own `vacate` key -- never folded into `outcome`/`reason`,
+            # which are `reap_task_worktree`'s to set. A silently-failed
+            # vacate (tmux unreachable, no harness recorded, respawn
+            # failed) and a correctly SKIPPED one (lane already live, pane
+            # already elsewhere) both used to be invisible here, indistinguishable
+            # from each other or from the pre-#825 bug once the reap call's
+            # own `refused`/"cwd is inside it (#478)" outcome is all a reader
+            # sees -- see `_vacate_pane_before_reap`'s own docstring for the
+            # full enumeration of what `vacate` can say.
+            vacate_outcome = self._vacate_pane_before_reap(task)
             try:
                 result = self.worktree_reaper.reap_task_worktree(task)
             except Exception as error:
                 result = {"task": task_id, "outcome": "error", "error": str(error)}
+            result["vacate"] = vacate_outcome
             report["worktrees"].append(result)
+
+    def _vacate_pane_before_reap(self, task):
+        """agent-estate#825: `worktree.sh reap`'s own liveness guard
+        (`_gc_is_live`, agent-supervisor#478) correctly refuses to remove a
+        worktree while any tmux pane's `#{pane_current_path}` is inside it
+        -- it cannot tell "abandoned" from "still working" from the path
+        alone. The gap #825 traced is that THIS lane's own pane is exactly
+        what is still pointing there: a lane's shell `cd`s into its
+        worktree once, at dispatch (`dispatch-send.sh`'s `respawn-pane -k
+        -c "$WORKTREE"`), and never leaves it again on its own -- posting a
+        review verdict and going idle does not move the pane. Every review
+        lane's worktree therefore looked permanently "live" to the guard
+        above, even minutes after its own task went terminal (measured:
+        eleven idle panes across every session held a finished task's
+        worktree open this way, all refused with "a tmux pane's cwd is
+        inside it (#478)").
+
+        Typing `cd` into the pane does not fix this. `dispatch-send.sh`'s
+        own comment (agent-supervisor#15) already established why: past
+        dispatch, a pane is the harness's own chat input, not a shell, so
+        text sent there is a PROMPT an agent reads, never a command a shell
+        executes. The only mechanism that actually changes a pane's
+        OS-level cwd is the one dispatch itself already uses to PUT a lane
+        in its worktree in the first place -- `respawn-pane -k -c <dir>`,
+        which kills whatever the pane's current process is and starts a
+        fresh process at `<dir>`.
+
+        agent-estate#827 fix2: the FIRST version of this method handed
+        `respawn-pane` no command at all, so `<dir>` got a bare login
+        shell, not a fresh harness. `lanes.sh` classifies a pane by the
+        command actually running in it (`lanes.sh:536`) -- a shell is never
+        `free`, and the window still carries the finished task's own name,
+        so `lanes.sh:589` read it `stale`, and `dispatch-lane-select.sh`
+        only ever offers `state=="free"` (`lanes.sh --free`, `awk
+        '$4=="free"'`). That silently removed a lane from the dispatch pool
+        until a human noticed and restarted it -- worse than #825's own
+        symptom (disk space), a genuine review of #827 caught it before it
+        shipped. The fix relaunches the SAME harness this lane was already
+        running (`harness-launch-cmd.sh`, resolved from the ledger's own
+        recorded `harness` for this lane -- never guessed, never a second
+        hardcoded copy of a harness's launch line), the identical command
+        `dispatch-send.sh` would type into this pane on its NEXT dispatch
+        anyway (`dispatch-send.sh` unconditionally `respawn-pane -k`s every
+        lane it reuses regardless of what is running there). Once that
+        fresh harness paints its own idle/ready chrome, the pane reads
+        `free` again, exactly as a freshly bootstrapped lane does
+        (`bootstrap-session.sh`'s own `LAUNCH_CMD` start) -- dispatchable,
+        with its cwd correctly OUTSIDE the worktree this sweep is about to
+        reap.
+
+        Deliberately narrow: only a lane THIS sweep just confirmed
+        terminal, whose CURRENT pane cwd (re-read here, not the possibly
+        several-seconds-stale window snapshot from earlier in this sweep)
+        is provably inside ITS OWN `worktree_path`, is touched -- never a
+        guess, and never a pane whose lane has since been redispatched
+        (`_lane_is_live` reads the ledger, the identical check
+        `LaneWorktreeReaper.reap_task_worktree` makes right after this
+        returns, so a race that redispatched this lane in between leaves
+        its now-live pane alone).
+
+        Best-effort, on purpose: this is an OPTIMIZATION that makes the
+        liveness guard's INPUT honest, never a precondition the reap call
+        after it depends on. Any failure here (no pane, tmux unreachable, a
+        path that will not resolve, no harness recorded, the registry not
+        recognising it) is swallowed -- `reap_task_worktree` still runs and
+        still refuses exactly as it did before this method existed, so
+        nothing here can make reaping WORSE than the pre-#825 behaviour,
+        only sometimes better. And crucially, unlike the first version:
+        never bare-shells a pane it cannot safely relaunch a harness into
+        -- an unresolved harness is treated the SAME as "no pane"/"pane
+        unreachable" (skip, leave the lane exactly as it was), not as
+        licence to fall back to the no-`LAUNCH_CMD` respawn that caused
+        this fix.
+
+        Returns one of these outcome strings, recorded verbatim on the
+        `report["worktrees"]` entry this task lands in as its own `vacate`
+        key -- see agent-estate#827 fix2's own second requirement: a
+        silently-failed vacate and a correctly skipped one must never both
+        collapse into the reap call's own `refused` outcome, which is
+        indistinguishable from the pre-#825 bug on its own.
+
+        `"skipped:no_worktree_reaper"`   -- no reaper was configured (defensive; the
+                                            caller already skips this whole method then)
+        `"skipped:no_worktree_path"`     -- task carries no usable `worktree_path`
+        `"skipped:lane_live"`            -- the lane was redispatched since this sweep read it terminal
+        `"skipped:no_pane_transport"`    -- claude-print/pi-rpc: no tmux pane to move at all
+        `"skipped:pane_unreachable"`     -- `tmux display-message` failed (no such pane, tmux down)
+        `"skipped:pane_path_empty"`      -- display-message answered nothing usable
+        `"skipped:not_in_worktree"`      -- the pane is already elsewhere; nothing to do
+        `"skipped:git_common_dir_unreachable"` -- `git rev-parse --git-common-dir` failed
+        `"skipped:no_common_dir"`        -- that call answered nothing usable
+        `"skipped:no_park_dir"`          -- the common dir's own parent could not be derived
+        `"skipped:no_harness"`           -- the ledger has no `harness` recorded for this lane
+        `"skipped:no_harness_launch_cmd"` -- `harness-launch-cmd.sh` could not resolve one
+        `"attempted:succeeded"`          -- `respawn-pane -k -c <dir> <launch_cmd>` returned clean
+        `"attempted:failed"`             -- that same call raised
+        """
+        if self.worktree_reaper is None:
+            return "skipped:no_worktree_reaper"
+        worktree_path = normalize_worktree_path(task.get("worktree_path") or "")
+        if not worktree_path:
+            return "skipped:no_worktree_path"
+        if self.worktree_reaper._lane_is_live(task.get("lane")):
+            return "skipped:lane_live"
+        parsed = _parse_lane(task.get("lane") or "")
+        if parsed is None:
+            return "skipped:no_pane_transport"  # claude-print/pi-rpc -- nothing to move
+        session, index = parsed
+        target = f"{session}:{index}"
+        try:
+            pane_path = self.runner(["tmux", "display-message", "-t", target, "-p", "#{pane_current_path}"])
+        except Exception:
+            return "skipped:pane_unreachable"
+        pane_path = normalize_worktree_path((pane_path or "").strip())
+        if not pane_path:
+            return "skipped:pane_path_empty"
+        if pane_path != worktree_path and not pane_path.startswith(worktree_path.rstrip("/") + "/"):
+            return "skipped:not_in_worktree"  # the pane is already elsewhere -- nothing for this to do
+        # The shared checkout's own root, derived from the worktree's git
+        # metadata rather than guessed at or hardcoded -- the same "park in
+        # the shared checkout" location `bootstrap-session.sh` already
+        # starts every lane's window in, and the one `lane-retire.sh`'s own
+        # comment (agent-supervisor#615) already names as where an idle
+        # pane naturally lands.
+        try:
+            common_dir = self.runner(
+                ["git", "-C", worktree_path, "rev-parse", "--path-format=absolute", "--git-common-dir"]
+            )
+        except Exception:
+            return "skipped:git_common_dir_unreachable"
+        common_dir = (common_dir or "").strip()
+        if not common_dir:
+            return "skipped:no_common_dir"
+        park_dir = str(Path(common_dir).parent)
+        if not park_dir:
+            return "skipped:no_park_dir"
+        # agent-estate#827 fix2: the harness THIS lane was already running,
+        # from the ledger -- never re-guessed from a pane command, and
+        # never defaulted to any one harness. No recorded harness (a lane
+        # never registered, or predating the `harness` column) means this
+        # cannot safely relaunch anything, so it skips exactly like every
+        # other unresolved-input case above rather than falling back to a
+        # bare shell.
+        lane_row = self.ledger.get_lane(task.get("lane"))
+        harness = (lane_row or {}).get("harness") or ""
+        if not harness:
+            return "skipped:no_harness"
+        try:
+            launch_cmd = self.runner(["bash", HARNESS_LAUNCH_CMD_SH, harness])
+        except Exception:
+            return "skipped:no_harness_launch_cmd"
+        launch_cmd = (launch_cmd or "").strip()
+        if not launch_cmd:
+            return "skipped:no_harness_launch_cmd"
+        try:
+            self.runner(["tmux", "respawn-pane", "-k", "-t", target, "-c", park_dir, launch_cmd])
+        except Exception:
+            # Best-effort (see docstring) -- the reap call right after this
+            # returns will simply see the same refusal it always would
+            # have, never a worse outcome than before this method existed.
+            return "attempted:failed"
+        return "attempted:succeeded"
 
     def _evaluate_window(self, task, window, *, session, now, report, via_fallback=False):
         """The state/idle/accepted evidence check shared by the ordinary

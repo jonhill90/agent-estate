@@ -1330,7 +1330,16 @@ class WorktreeReaperWiringTest(unittest.TestCase):
         ).sweep()
         self.assertEqual(["ae804-wire2"], report["completed"])
         self.assertEqual(["ae804-wire2"], reaper.calls)
-        self.assertEqual([{"task": "ae804-wire2", "outcome": "reaped"}], report["worktrees"])
+        # agent-estate#827 fix2: every `report["worktrees"]` entry now also
+        # carries its own `vacate` outcome (see `_vacate_pane_before_reap`'s
+        # docstring for the full enumeration) -- `skipped:no_worktree_path`
+        # here because `self.dispatch` (this file's own fixture helper)
+        # never records a `worktree_path`, so the vacate step correctly
+        # declines before ever touching a pane.
+        self.assertEqual(
+            [{"task": "ae804-wire2", "outcome": "reaped", "vacate": "skipped:no_worktree_path"}],
+            report["worktrees"],
+        )
 
     def test_unresolved_task_is_never_offered_to_the_worktree_reaper(self):
         """A task this sweep leaves `unresolved` (still busy, or not past
