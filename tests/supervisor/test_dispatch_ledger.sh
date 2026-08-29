@@ -282,13 +282,7 @@ src, target = sys.argv[1], sys.argv[2]
 entry = M.sandbox(src, target)
 marker = '''  CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidate" --target "$candidate_target" --window-name "$wname" 2>/dev/null) || continue
   if ! grep -qF '"free":true' <<<"$CHECK"; then
-    if grep -qF '"known":false' <<<"$CHECK" && [[ ! "$wname" =~ ^free-[0-9]+$ ]]; then
-      append_exclusion "dispatch:   $candidate: pane idle, but unknown to the ledger and window name '$wname' is not the free-N migration shape"
-    else
-      describe_excluded_lane "$candidate" free
-    fi
-    continue
-  fi'''
+    if grep -qF '"known":false' <<<"$CHECK"; then'''
 mutated = '''  # MUTATED: reproduces the pre-#174 bug -- trust the window name on a
   # ledger miss instead of refusing, bypassing the ledger read when the
   # visible pane still carries the old free-N convention.
@@ -300,13 +294,7 @@ mutated = '''  # MUTATED: reproduces the pre-#174 bug -- trust the window name o
     break
   fi
   if ! grep -qF '"free":true' <<<"$CHECK"; then
-    if grep -qF '"known":false' <<<"$CHECK" && [[ ! "$wname" =~ ^free-[0-9]+$ ]]; then
-      append_exclusion "dispatch:   $candidate: pane idle, but unknown to the ledger and window name '$wname' is not the free-N migration shape"
-    else
-      describe_excluded_lane "$candidate" free
-    fi
-    continue
-  fi'''
+    if grep -qF '"known":false' <<<"$CHECK"; then'''
 M.patch(target, marker, mutated)
 # agent-dotfiles#209 round 2 adds a THIRD guard on the same path, for the same
 # reason the claim had to be skipped above: step 4.5 refuses to send unless it
