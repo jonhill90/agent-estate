@@ -3,7 +3,11 @@
 # stops fixpass-evidence.yml's issue_comment trigger from re-evaluating the
 # gate on a comment that structurally cannot change its answer (a plain
 # "fix pass" narration comment, posted before the real evidence comment,
-# was measured publishing a spurious FAILURE check-run on #810 -- twice).
+# was measured publishing one spurious FAILURE check-run on #810 -- see
+# fixpass-comment-relevant.sh's own header comment for the full run-log
+# table; #811 originally claimed two such races, #812's reviewer found the
+# second cited incident was the gate correctly rejecting a malformed
+# evidence comment).
 #
 # This is the mutation-check the brief asks for, run in both directions:
 # a comment shaped like #810's real evidence marker or a real Verdict:

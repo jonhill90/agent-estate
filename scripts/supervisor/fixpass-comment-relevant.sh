@@ -1,12 +1,28 @@
 #!/bin/bash
 # agent-estate#811: fixpass-evidence.yml's issue_comment trigger fires on
 # EVERY comment posted to a PR, not just ones that could change the gate's
-# answer. Measured on #810, twice: a lane posted a "fix pass" narration
-# comment (no marker) before its actual evidence comment -- 3m04s apart the
-# first time, 6s the second -- and each narration comment alone re-ran
-# fixpass_evidence_gate.py, which (correctly, at that instant) found no
-# evidence yet and published an explicit FAILURE check-run. The gate's own
-# answer was never wrong; the trigger fired on comments that could not
+# answer. #811 originally claimed this raced twice on #810; #812's reviewer
+# matched every fixpass-evidence.yml run against #810 to its triggering
+# comment and log line, which found ONE genuine race, not two (see #811's
+# correction comment, and #812's PR body):
+#
+#   comment (UTC)                          gate output              race?
+#   11:39:18 round-1 rejection             "carries no marker"      no -- correct, no evidence yet
+#   11:48:52 fix-pass narration, no marker "carries no marker"      YES -- the one genuine race
+#   11:51:43 evidence                      SUCCESS                  --
+#   12:05:24 round-2 rejection             "predate the most        no -- correct
+#                                            recent rejection"
+#   12:13:52 evidence, carries the marker  "all predate the most    no -- the comment itself was
+#                                            recent rejection"        malformed (missing its
+#                                                                      `exit code:` line); the gate
+#                                                                      was right to not count it
+#   12:15:52 evidence re-post              SUCCESS                  --
+#
+# The 11:48:52 narration comment (no marker) re-ran fixpass_evidence_gate.py,
+# which (correctly, at that instant) found no evidence yet and published an
+# explicit FAILURE check-run seconds before the real evidence existed -- that
+# is the one defect this filter fixes. The gate's own answer was never
+# wrong in either case; the trigger fired on a comment that could not
 # possibly change it.
 #
 # THE FIX IS A PRE-FILTER, NOT A GRACE WINDOW. fixpass_evidence_gate.py's
