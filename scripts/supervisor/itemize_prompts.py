@@ -78,6 +78,7 @@ import argparse
 import hashlib
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -185,6 +186,51 @@ NOISE_MARKERS = (
     # adapter.py:550's exact liveness-probe text (`start_session`), sent
     # verbatim to confirm a freshly-dispatched pane is alive -- never typed.
     ("Reply with exactly the single word: ready.", "liveness probe (adapter.py start_session)"),
+    # agent-estate#705 tail: a raw <task-notification> block, delivered
+    # verbatim by the harness when a backgrounded tool call finishes --
+    # never typed. The opening tag alone is a fixed, non-varying literal
+    # (see the pi_transport/adapter task-notification renderer), so it
+    # belongs here as a plain substring rather than in NOISE_PATTERNS below.
+    ("<task-notification>", "harness task-notification block (backgrounded tool-call result), not typed"),
+)
+
+
+# agent-estate#705 tail: two more dispatcher-generated shapes, structurally
+# identical every time EXCEPT for one variable field the dispatcher fills in
+# (a PR number, a /private/tmp/ filename) -- so a literal NOISE_MARKERS
+# substring can't match every instance, only the ones that happen to repeat
+# the same number/filename verbatim. Regex on the fixed surrounding text,
+# never on topic -- same discipline as NOISE_MARKERS (see module docstring's
+# "match on structure, never on topic keywords").
+#
+# Evidence for both, read from the live ledger backlog #705 itself was filed
+# on (five straggler prompts, 2026-08-29):
+#   - "Check `gh pr checks 805` for the agent-estate PR (worktree at ...)"
+#     x2, PR number identical here but the CI-poll dispatch template
+#     (director-loop.sh's own generated text) fills in whichever PR is
+#     currently being watched -- the number is the variable, the surrounding
+#     "Check `gh pr checks N` for the agent-estate PR" scaffold is not.
+#   - "Read /private/tmp/director-watchdog.md and decide. ..." and
+#     "Read /private/tmp/director-smoke.md and decide. ..." -- the
+#     director-tick brief-pointer shape (same class the word-order variant
+#     "Your complete brief is" marker above already covers), filename is the
+#     variable, "Read /private/tmp/<file> and decide." is not.
+#
+# agent-estate#810 fix-pass: both regexes below are anchored with `^\s*`
+# (leading whitespace tolerated). Without the anchor, `.search()` matches
+# the scaffold ANYWHERE in the text -- including inside a longer, genuinely
+# human prompt that merely QUOTES the dispatcher's own wording while asking
+# to change it (e.g. "The brief text always says `Check `gh pr checks 805``
+# for the agent-estate PR -- can we vary that wording..."), which a #810
+# reviewer demonstrated directly against `noise_reason()`. A dispatcher
+# ALWAYS puts its scaffold at the very start of the prompt it sends; a human
+# quoting or discussing it does not. See TailNoisePatternsTests'
+# test_anchor_regression_* pair for the pinned regression cases.
+NOISE_PATTERNS = (
+    (re.compile(r"^\s*Check `gh pr checks \d+` for the agent-estate PR"),
+     "dispatcher CI-poll check (director-loop.sh gh-pr-checks template, PR number varies)"),
+    (re.compile(r"^\s*Read /private/tmp/\S+ and decide\."),
+     "director-tick brief pointer to a /private/tmp/ scratch file (filename varies)"),
 )
 
 
@@ -266,10 +312,15 @@ def director_pane_reason(tmux_pane_target, known_targets=None):
 
 def noise_reason(text):
     """Return the matched reason string, or None if `text` looks Jon-authored.
-    First match wins; markers are structural, not stylistic -- this never
-    reads tone or content, only fixed boilerplate shapes."""
+    First match wins; markers/patterns are structural, not stylistic -- this
+    never reads tone or content, only fixed boilerplate shapes (literal
+    substrings in NOISE_MARKERS, or the fixed-scaffold-with-one-variable-
+    field regexes in NOISE_PATTERNS, agent-estate#705)."""
     for marker, reason in NOISE_MARKERS:
         if marker in text:
+            return reason
+    for pattern, reason in NOISE_PATTERNS:
+        if pattern.search(text):
             return reason
     return None
 
