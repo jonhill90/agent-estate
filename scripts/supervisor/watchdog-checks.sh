@@ -723,7 +723,17 @@ check_worktree_guard_audit() {
     guard_audit_check_failed "could not create a scratch file for worktree-guard-audit.sh's output"
     return 0
   }
-  "$HERE/worktree-guard-audit.sh" "$root" >"$out_file" 2>&1 &
+  # agent-estate#808: SUPERVISOR_GUARD_AUDIT_MAX_WORKTREES is unset on every
+  # real production tick, so WORKTREE_GUARD_MAX_WORKTREES below is empty and
+  # worktree-guard-audit.sh's own default (0, unlimited) applies -- this
+  # watchdog's own production ticks keep auditing every live worktree,
+  # unchanged. advance-live.sh's smoke test is the only caller that sets
+  # SUPERVISOR_GUARD_AUDIT_MAX_WORKTREES, to bound the audit's cost inside
+  # that one validation run -- see worktree-guard-audit.sh's own
+  # WORKTREE_GUARD_MAX_WORKTREES doc comment for why a bounded run still
+  # catches a real audit-logic regression.
+  WORKTREE_GUARD_MAX_WORKTREES="${SUPERVISOR_GUARD_AUDIT_MAX_WORKTREES:-}" \
+    "$HERE/worktree-guard-audit.sh" "$root" >"$out_file" 2>&1 &
   audit_pid=$!
   waited=0
   timed_out=0

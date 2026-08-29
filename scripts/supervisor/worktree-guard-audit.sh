@@ -99,6 +99,36 @@
 #                           tick can only ever overrun the bound by about one
 #                           tick's own cost, never by the accumulated cost of
 #                           every tick that ran before it.
+#   WORKTREE_GUARD_MAX_WORKTREES
+#                           agent-estate#808: cap the walk to the FIRST N
+#                           entries `git worktree list` returns (default: 0,
+#                           meaning unlimited -- every real production tick
+#                           leaves this unset and keeps auditing every live
+#                           worktree, unchanged). `git worktree list`'s order
+#                           is the repo's own worktree administration order
+#                           (main worktree first, then linked worktrees in
+#                           the order they were added) -- stable across runs
+#                           against the same repo state, so "first N" is
+#                           deterministic and reproducible, unlike a
+#                           time-budget cutoff that would vary with host
+#                           load. This exists ONLY because
+#                           advance-live.sh's smoke test re-audits the SAME
+#                           production worktree farm the real watchdog does
+#                           (its scratch worktree is a linked worktree of the
+#                           live repo, and `git worktree list` output is
+#                           shared across every worktree of one repo) --
+#                           #808 measured that smoke-test audit at 123.4s of
+#                           a 138.4s smoke run against a 150s window, 11.6s
+#                           of slack. The audit's job inside a smoke test is
+#                           to prove the CANDIDATE watchdog.sh writes a
+#                           well-formed status, not to re-benchmark full-farm
+#                           performance on every promotion -- a structural
+#                           bug in the audit logic shows up on a bounded
+#                           subset just as reliably as on the full farm. When
+#                           set, the summary line below reports both the
+#                           worktrees actually walked and the total the repo
+#                           reports, so a bounded run is never mistaken for a
+#                           full one.
 set -uo pipefail
 
 REPO="${1:-.}"
@@ -266,12 +296,28 @@ tests/supervisor/test_watchdog_poller_copy.sh"
 FILES="${WORKTREE_GUARD_FILES:-$DEFAULT_FILES}"
 MARKER="${WORKTREE_GUARD_MARKER:-assert_isolated_tmux}"
 VERB_MARKER="${WORKTREE_GUARD_VERB_MARKER:-tmux (new-session|kill-session|kill-server|kill-window|respawn-(pane|window))}"
+MAX_WORKTREES="${WORKTREE_GUARD_MAX_WORKTREES:-0}"
+
+WORKTREES="$(git -C "$REPO" worktree list | awk '{print $1, $2}')"
+total_worktrees=0
+# `wc -l` pads its count with leading spaces on macOS/BSD; awk's own NR
+# never does, so use that instead of `wc -l | tr -d ' '`.
+[ -n "$WORKTREES" ] && total_worktrees=$(awk 'END{print NR}' <<<"$WORKTREES")
 
 gaps=0
 unknowns=0
 checked=0
+walked=0
 while IFS= read -r line; do
   [ -n "$line" ] || continue
+  # agent-estate#808: a bounded smoke-test run stops walking worktrees here,
+  # never mid-worktree -- each worktree's own file loop still runs to
+  # completion, so a bound never reports a half-checked worktree as fully
+  # audited. Unset/0 (every real production tick) never enters this branch.
+  if [ "$MAX_WORKTREES" -gt 0 ] && [ "$walked" -ge "$MAX_WORKTREES" ]; then
+    break
+  fi
+  walked=$((walked + 1))
   wt_path="$(awk '{print $1}' <<<"$line")"
   wt_sha="$(awk '{print $2}' <<<"$line")"
   [ -n "$wt_sha" ] || continue
@@ -298,7 +344,15 @@ while IFS= read -r line; do
       gaps=$((gaps + 1))
     fi
   done <<<"$FILES"
-done < <(git -C "$REPO" worktree list | awk '{print $1, $2}')
+done <<<"$WORKTREES"
 
-echo "worktree-guard-audit: $checked file@worktree pairs checked, $gaps gap(s), $unknowns unknown(s)"
+# agent-estate#808: when bounded, say so in the summary line itself -- a
+# bounded smoke-test run and a full production run must never be
+# indistinguishable from their own output, or a genuinely narrowed audit
+# could be misread as having covered the whole farm.
+if [ "$MAX_WORKTREES" -gt 0 ] && [ "$walked" -lt "$total_worktrees" ]; then
+  echo "worktree-guard-audit: $checked file@worktree pairs checked, $gaps gap(s), $unknowns unknown(s) (bounded: $walked of $total_worktrees worktree(s) walked)"
+else
+  echo "worktree-guard-audit: $checked file@worktree pairs checked, $gaps gap(s), $unknowns unknown(s)"
+fi
 [ "$gaps" -eq 0 ] && [ "$unknowns" -eq 0 ]
