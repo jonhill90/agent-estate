@@ -1434,6 +1434,18 @@ class LeakedWorktreeBacklogTest(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.ledger = Ledger(Path(self.tempdir.name), clock=lambda: 1_000)
 
+    def _lane_shaped_worktree_dir(self, name, *, under=None):
+        """A directory whose OWN basename matches `_LANE_WORKTREE_NAME_RE`
+        (`ad-<n>-<task>-<pid>`, `worktree.sh new`'s own naming) -- what
+        every real leaked lane worktree (`ad-341-fix341-7071`'s own shape)
+        actually looks like, distinct from a bare `tempfile.mkdtemp()`
+        directory, which agent-estate#837 exists to stop offering."""
+        parent = tempfile.mkdtemp(dir=under)
+        self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+        path = os.path.join(parent, name)
+        os.makedirs(path)
+        return path
+
     def _record_completion_style_task(self, task_id, *, lane, worktree_path=""):
         """Mirrors what `cli.py record-completion` actually does: a
         dispatch, then `ledger.complete(...)` called directly -- never
@@ -1455,8 +1467,7 @@ class LeakedWorktreeBacklogTest(unittest.TestCase):
         via `record_completion`, worktree still present, lane not
         currently occupied by anything else. Must reach both reapers even
         though this sweep itself completed nothing."""
-        worktree_dir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, worktree_dir, ignore_errors=True)
+        worktree_dir = self._lane_shaped_worktree_dir("ad-341-fix341-70091")
         self._record_completion_style_task("ae834-leak1", lane="leak-session:9", worktree_path=worktree_dir)
 
         runner = FakeLanesRunner({})
@@ -1487,9 +1498,12 @@ class LeakedWorktreeBacklogTest(unittest.TestCase):
         exact suite passed on macOS (where `tempfile.mkdtemp()` defaults to
         `/var/folders/...`, never triggering the rewrite) and failed on
         CI. Forcing `dir='/tmp'` here reproduces the failure on every
-        platform, not just Linux."""
-        worktree_dir = tempfile.mkdtemp(dir="/tmp")
-        self.addCleanup(shutil.rmtree, worktree_dir, ignore_errors=True)
+        platform, not just Linux. Named `ad-834-leaktmp-<pid>` -- a bare
+        `tempfile.mkdtemp()` name would now also be excluded by
+        agent-estate#837's own naming-shape gate, which is a DIFFERENT
+        fix than the one this test guards; see
+        `NotLaneShapedBacklogWorktreeTest` below for that one."""
+        worktree_dir = self._lane_shaped_worktree_dir("ad-834-leaktmp-70092", under="/tmp")
         self._record_completion_style_task("ae834-leak-tmp", lane="leak-session:12", worktree_path=worktree_dir)
 
         runner = FakeLanesRunner({})
@@ -1529,8 +1543,7 @@ class LeakedWorktreeBacklogTest(unittest.TestCase):
         it). The REAL `LaneWorktreeReaper.reap_task_worktree` must refuse
         with `lane_live`, re-reading `get_open_task_for_lane` fresh, and
         `worktree.sh` must never be shelled out to at all."""
-        worktree_dir = tempfile.mkdtemp()
-        self.addCleanup(shutil.rmtree, worktree_dir, ignore_errors=True)
+        worktree_dir = self._lane_shaped_worktree_dir("ad-834-leak2-70093")
         lane = "leak-session:11"
         self._record_completion_style_task("ae834-leak2", lane=lane, worktree_path=worktree_dir)
         # Redispatch the same lane -- a new OPEN task now occupies it,
@@ -1561,6 +1574,139 @@ class LeakedWorktreeBacklogTest(unittest.TestCase):
         # The redispatched task itself must never appear here -- it is not
         # terminal.
         self.assertNotIn("ae834-leak2b", [e["task"] for e in report["worktrees"]])
+
+
+class BacklogCandidateShapeTest(unittest.TestCase):
+    """agent-estate#837: `#834`'s own `_leaked_worktree_candidate_ids`
+    offered ANY already-terminal task whose `worktree_path` was still a
+    directory -- measured live, a historical row carrying
+    `worktree_path=/tmp` passed that check and reached the reap guard
+    chain, refused only by `_gc_is_live` (a running process's cwd happened
+    to be inside `/tmp` at that moment), a property of the moment, not of
+    `/tmp`. `_looks_like_lane_worktree` is the fix: this class proves all
+    three of its tests independently, and mutation-checks the naming test
+    (`test_arbitrary_directory_not_worktree_shaped_is_never_offered` goes
+    red the moment `_LANE_WORKTREE_NAME_RE`'s check is removed, since
+    nothing else in this specimen would exclude it)."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.ledger = Ledger(Path(self.tempdir.name), clock=lambda: 1_000)
+
+    def _record_completion_style_task(self, task_id, *, lane, worktree_path):
+        self.ledger.record_dispatch(
+            lane=lane, pane_id="%9", nonce=f"nonce-{task_id}", harness="claude",
+            repo="/repo/agent-estate", server_id="server-a", session_id="$9", command="claude",
+            task_id=task_id, source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-estate/issues/837",
+            source_ref="837", summary="issue #837", source_state="OPEN",
+            evidence=[f"claimed by dispatch.sh for lane {lane}", "issues: 837"],
+            status_marker=None, accepted=True, worktree_path=worktree_path,
+        )
+        self.ledger.complete(task_id, b"finished without signalling", pane_nonce=f"nonce-{task_id}")
+
+    def test_arbitrary_directory_not_worktree_shaped_is_never_offered(self):
+        """`/tmp`'s own shape: a real directory, terminal in the ledger,
+        but named nothing like `ad-<n>-<task>-<pid>`, not under any known
+        repository's `.worktrees`, and not named by any repository's own
+        `git worktree list`. Must never reach either reaper -- this is the
+        live specimen the issue measured, reproduced with a synthetic
+        directory rather than the real `/tmp` so the test never risks
+        touching it."""
+        arbitrary_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, arbitrary_dir, ignore_errors=True)
+        self._record_completion_style_task("ae837-nonshape", lane="leak-session:20", worktree_path=arbitrary_dir)
+
+        runner = FakeLanesRunner({})
+        worktree_reaper = FakeWorktreeReaper(ledger=self.ledger)
+        orphan_log = []
+        orphan_reaper = FakeOrphanReaper(orphan_log)
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300,
+            orphan_reaper=orphan_reaper, worktree_reaper=worktree_reaper,
+            # No known repositories on this host -- isolates the naming/
+            # registration checks from whatever repos this test happens to
+            # run next to.
+            repositories=[],
+        ).sweep()
+
+        self.assertEqual([], worktree_reaper.calls)
+        self.assertEqual([], report["worktrees"])
+        self.assertNotIn(("orphan", "ae837-nonshape"), orphan_log)
+
+    def test_directory_registered_in_a_repos_git_worktree_list_is_still_offered(self):
+        """Test 1 of `_looks_like_lane_worktree`'s three, in isolation: a
+        worktree whose NAME does not match the naming shape at all (so
+        tests 2/3 cannot be what admits it), but which a known
+        repository's own `git worktree list` still names right now --
+        proves registration alone is sufficient."""
+        oddly_named_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, oddly_named_dir, ignore_errors=True)
+        self._record_completion_style_task("ae837-registered", lane="leak-session:21", worktree_path=oddly_named_dir)
+
+        class FakeGitWorktreeListRunner:
+            def __call__(self, argv):
+                if argv[0] == "git" and "worktree" in argv and "list" in argv:
+                    return f"worktree {oddly_named_dir}\nHEAD abc123\nbranch refs/heads/lane/oddly\n\n"
+                raise RuntimeError(f"unexpected command in this test: {argv}")
+
+        worktree_reaper = FakeWorktreeReaper(ledger=self.ledger)
+        report = LaneCompletionReconciler(
+            self.ledger, runner=FakeGitWorktreeListRunner(), idle_after=300,
+            worktree_reaper=worktree_reaper,
+            repositories=[{"name": "fake-repo", "path": tempfile.gettempdir(), "github": "example/fake"}],
+        ).sweep()
+
+        self.assertEqual(["ae837-registered"], worktree_reaper.calls)
+        entries = [e for e in report["worktrees"] if e["task"] == "ae837-registered"]
+        self.assertEqual(1, len(entries))
+        self.assertEqual("reaped", entries[0]["outcome"])
+
+    def test_directory_under_a_repos_worktrees_root_is_still_offered(self):
+        """Test 2 of the three, in isolation: a worktree whose name does
+        not match the naming shape and is not registered in any `git
+        worktree list`, but which lives under a known repository's own
+        `.worktrees` root -- proves the known-root test alone is
+        sufficient."""
+        repo_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, repo_dir, ignore_errors=True)
+        worktrees_root = os.path.join(repo_dir, ".worktrees")
+        oddly_named_dir = os.path.join(worktrees_root, "not-ad-shaped-at-all")
+        os.makedirs(oddly_named_dir)
+        self._record_completion_style_task("ae837-underroot", lane="leak-session:22", worktree_path=oddly_named_dir)
+
+        runner = FakeLanesRunner({})
+        worktree_reaper = FakeWorktreeReaper(ledger=self.ledger)
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300,
+            worktree_reaper=worktree_reaper,
+            repositories=[{"name": "fake-repo", "path": repo_dir, "github": "example/fake"}],
+        ).sweep()
+
+        self.assertEqual(["ae837-underroot"], worktree_reaper.calls)
+
+    def test_ad_shaped_name_alone_is_offered_with_no_known_repository_at_all(self):
+        """Test 3 of the three, in isolation: no repository configured at
+        all (agent-estate#822's own `$TMPDIR/ad-*` population, which
+        `orphan-worktree-reap.sh` already reasons about the identical
+        way -- neither test 1 nor test 2 can see it, since it was never
+        registered anywhere), but the directory's OWN name matches
+        `ad-<n>-<task>-<pid>` -- must still be offered."""
+        worktree_dir = os.path.join(tempfile.mkdtemp(), "ad-822-orphan-88123")
+        os.makedirs(worktree_dir)
+        self.addCleanup(shutil.rmtree, os.path.dirname(worktree_dir), ignore_errors=True)
+        self._record_completion_style_task("ae837-nameonly", lane="leak-session:23", worktree_path=worktree_dir)
+
+        runner = FakeLanesRunner({})
+        worktree_reaper = FakeWorktreeReaper(ledger=self.ledger)
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300,
+            worktree_reaper=worktree_reaper,
+            repositories=[],
+        ).sweep()
+
+        self.assertEqual(["ae837-nameonly"], worktree_reaper.calls)
 
 
 if __name__ == "__main__":
