@@ -42,7 +42,7 @@ func main() {
 		id      = flag.String("id", "", "-record: the nav route id (internal/nav.Item.ID, e.g. \"chat\")")
 		date    = flag.String("date", "", "-record: YYYY-MM-DD the observation was made")
 		source  = flag.String("source", "", "-record: what produced this observation, e.g. \"PR agent-tui#101 (my-brief.md)\"")
-		verdict = flag.String("verdict", "", "-record: RENDERS | STUB | EMPTY | BROKEN | REMOVED | \"could not measure\"")
+		verdict = flag.String("verdict", "", "-record: RENDERS | STALE | STUB | EMPTY | BROKEN | REMOVED | \"could not measure\"")
 		notes   = flag.String("notes", "", "-record: what was actually seen, specific enough for a stranger to check")
 	)
 	flag.Parse()

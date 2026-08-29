@@ -94,6 +94,30 @@ type Model struct {
 	fetchErr    error
 	lastFetched time.Time
 
+	// fetchInFlight guards m.fetch the same way internal/rail.Model's own
+	// fetchInFlight guards its "sessions"/"lanes" fetch, and for the
+	// identical reason (agent-tui#175, the same defect shape as
+	// agent-tui#55, never ported here when this package picked up its own
+	// "sessions" fetch): refreshMsg fires every refreshInterval (2s)
+	// regardless of whether the PREVIOUS fetch has answered, and
+	// mcp_server.py answers exactly one tools/call at a time (a plain "for
+	// line in stdin" loop, no concurrency of its own -- see that file's own
+	// doc comment). Before this guard, this pane's own 2s ticker kept
+	// issuing a new "sessions" call whether or not the last one had
+	// returned -- including while a DIFFERENT pane (e.g. internal/rail,
+	// visible or not, per shell.Model.routeAll's "every pane stays live"
+	// policy) was doing the exact same thing against the exact same
+	// single-threaded server over the exact same mcp.Client. That is a
+	// self-inflicted request pile-up, not a slow server: measured directly
+	// against a live mcp_server.py, five consecutive "sessions" calls on
+	// one long-lived process answered in ~1s each, so a queue fed faster
+	// than it drains is the only way a "no reply within 10s" surfaces here.
+	// Set true the moment a fetch is issued (New/Init and the refreshMsg/"r"
+	// cases below all do), cleared only when fetchResultMsg handles that
+	// fetch's result (success or failure) -- see fetchResultMsg's own
+	// comment for why clearing it unconditionally, first, matters.
+	fetchInFlight bool
+
 	// costFetchInFlight single-flights m.costFetch (agent-tui#139): set the
 	// moment a cost fetch is issued (Init and the costRefreshMsg case both
 	// do), cleared only when its result (success or failure) is handled in
@@ -124,7 +148,7 @@ type Model struct {
 // internal/rail.WithTasks documents (Row.Task then reads "(no task)" for
 // every row, never a fetch error).
 func New(fetch Fetcher) Model {
-	return Model{fetch: fetch, width: 100, height: 30, theme: theme.Default}
+	return Model{fetch: fetch, fetchInFlight: fetch != nil, width: 100, height: 30, theme: theme.Default}
 }
 
 // WithTasks wires in a ledger read for the Task column -- mirrors
@@ -214,7 +238,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case refreshMsg:
 		// agent-tui#139: costFetch no longer rides this ticker -- see
 		// costRefreshMsg below, and refreshInterval's doc comment for why.
-		cmds := []tea.Cmd{refreshCmd(), doFetch(m.fetch)}
+		// agent-tui#175: m.fetch only re-fires when the previous one has
+		// already answered -- see fetchInFlight's own doc comment for why
+		// an unconditional re-fire here is exactly the request pile-up that
+		// issue was.
+		cmds := []tea.Cmd{refreshCmd()}
+		if m.fetch != nil && !m.fetchInFlight {
+			m.fetchInFlight = true
+			cmds = append(cmds, doFetch(m.fetch))
+		}
 		if m.taskFetch != nil {
 			cmds = append(cmds, doTaskFetch(m.taskFetch))
 		}
@@ -232,9 +264,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Batch(costRefreshCmd(), doCostFetch(m.costFetch))
 
 	case fetchResultMsg:
-		m.sessions = msg.sessions
+		// agent-tui#175: clear the in-flight guard BEFORE anything else in
+		// this case, unconditionally (success or failure) -- same discipline
+		// as costFetchResultMsg below and internal/rail's own
+		// fetchResultMsg/sessionsFetchResultMsg (fetchInFlight's own doc
+		// comment). Leaving it set on any path wedges every future
+		// refreshMsg/"r" into believing one is still outstanding forever.
+		m.fetchInFlight = false
 		m.fetchErr = msg.err
+		// agent-tui#175's second, independent defect: a failed refresh used
+		// to overwrite m.sessions with msg.sessions's zero value even on
+		// error, collapsing a populated view to "(no agents)" -- which reads
+		// exactly like a genuinely empty estate. Only replace m.sessions on
+		// success now; on error the prior (possibly stale) rows stay on
+		// screen, same discipline internal/rail.Model's fetchResultMsg and
+		// sessionsFetchResultMsg already apply for the identical "sessions"
+		// read. m.fetchErr above still renders the "! sessions unavailable"
+		// banner, and View()'s "age:" line (fed by lastFetched, unchanged
+		// below) grows on every failed cycle -- together they mark the rows
+		// as stale rather than pretending they are current.
 		if msg.err == nil {
+			m.sessions = msg.sessions
 			m.lastFetched = time.Now()
 		}
 		return m, nil
@@ -265,6 +315,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.quitting = true
 			return m, tea.Quit
 		case "r":
+			// agent-tui#175: same fetchInFlight guard refreshMsg uses -- a
+			// manual "r" while a fetch (periodic or a previous "r") is
+			// already outstanding must not add a second request behind it;
+			// the one already in flight will land and repaint regardless.
+			if m.fetch == nil || m.fetchInFlight {
+				return m, nil
+			}
+			m.fetchInFlight = true
 			return m, doFetch(m.fetch)
 		case "n":
 			// SPEC-shell.md S6: "Read-only until S7" -- a visible, named

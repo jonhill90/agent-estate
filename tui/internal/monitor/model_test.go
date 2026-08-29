@@ -43,6 +43,14 @@ func TestUpdate_RefreshKeyTriggersFetch(t *testing.T) {
 		called = true
 		return Snapshot{}, nil
 	})
+
+	// New seeds fetchInFlight true for the first fetch Init() always issues
+	// (fetchInFlight's own doc comment) -- resolve that seeded fetch before
+	// exercising a genuinely idle "r", the same way
+	// internal/agents/model_test.go's TestRKeyRefetches does.
+	next, _ := m.Update(fetchResultMsg{err: errors.New("seed")})
+	m = next.(Model)
+
 	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
 	if cmd == nil {
 		t.Fatal("expected a command from [r]")

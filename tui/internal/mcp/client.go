@@ -29,6 +29,22 @@ import (
 // human staring at a frozen "attaching…" footer for minutes. It is a var,
 // not a const, so tests can shrink it rather than actually waiting out a
 // production-length deadline.
+//
+// Re-justified, not just re-measured, for agent-tui#177: callSem (below)
+// now means a call's own 10s budget also has to cover any time spent
+// queued behind other callers on this same Client, not just its own round
+// trip. cmd/estate/main.go's worst realistic fan-out sharing one Client's
+// sessionsFetch/lanesFetch closures is five: internal/rail's own two 2s
+// tickers (lanes, sessions), internal/agents' 2s ticker, internal/monitor's
+// 2s ticker, and internal/chat's participants-roster 2s ticker
+// (participantsRefreshInterval) -- all independently armed, all liable to
+// land in the same tick window. At the measured ~1s per call (#175/#176's
+// five consecutive "sessions" calls: 1.21s/1.03s/1.19s/1.03s/0.99s), five
+// queued calls tail out around 5s -- comfortably inside 10s, with the
+// second half of the budget as headroom for a genuinely slower call rather
+// than the ordinary cross-pane queue depth this estate produces today.
+// 10s stays the number; it was not derived for queueing before, and now it
+// has been.
 var callTimeout = 10 * time.Second
 
 // Client owns one child process speaking MCP over stdio. Callers must call
@@ -78,6 +94,44 @@ type Client struct {
 	// fixes (previously: 200 goroutines still parked past every call's
 	// deadline; now: goroutines return to baseline).
 	writeMu chan struct{}
+
+	// callSem admits exactly one callTimeout round trip (registration,
+	// write AND the wait for its reply) at a time -- agent-tui#177. Every
+	// tool this client calls is served by mcp_server.py,
+	// which "serves exactly one tools/call at a time" by its own docstring
+	// (a plain read-a-line loop, no concurrency of its own); agent-tui#175
+	// found that internal/agents' own 2s ticker re-issuing "sessions" while
+	// its previous call was still outstanding queued behind itself at that
+	// single-threaded server until one aged past callTimeout. #176 fixed
+	// that pane's own self-overlap with a per-pane fetchInFlight guard, but
+	// #177 (the reviewer of #176) reproduced the identical timeout on a
+	// loaded box anyway: internal/rail, internal/agents, internal/monitor
+	// and internal/chat's own participants roster are FOUR independent
+	// tea.Model tickers (2s each, cmd/estate/main.go's sessionsFetch/
+	// lanesFetch closures, all sharing this one *Client) that have never
+	// heard of each other -- a guard inside any one of them single-flights
+	// only its own pane's calls, so three or four panes ticking together
+	// still hand the server three or four concurrent requests. That defect
+	// now has three prior homes fixed locally and separately (#55, #139,
+	// #175) -- the constraint being violated ("one call in flight") belongs
+	// to the transport this Client owns, not to a fourth per-pane copy of
+	// the same guard, so it is enforced here instead.
+	//
+	// A buffered channel of capacity 1, the same pattern as writeMu above
+	// and for the identical reason (agent-tui#171): acquiring it is done in
+	// a select alongside `<-ctx.Done()`, so a caller queued behind a slow
+	// or stuck predecessor gives up once ITS OWN deadline passes rather
+	// than piling up on an un-abortable channel send forever. Released via
+	// `defer` immediately after acquisition (see callTimeout), so every
+	// return path -- success, a JSON-RPC error, a write error, or a
+	// timeout -- frees the slot; see client_test.go's
+	// TestCallSemReleasedAfterFailedCall for the regression test proving a
+	// failing call does not leak this slot (a leaked slot deadlocks every
+	// future caller on this Client permanently, which is worse than the
+	// timeout this fix closes), and TestCallSemSerialisesConcurrentCalls
+	// for the cross-pane reproduction the timeout itself was measured
+	// against.
+	callSem chan struct{}
 }
 
 type rpcRequest struct {
@@ -157,6 +211,7 @@ func Start(name string, arg ...string) (*Client, error) {
 		stderr:  stderr,
 		pend:    make(map[int64]chan rpcResponse),
 		writeMu: make(chan struct{}, 1),
+		callSem: make(chan struct{}, 1),
 	}
 	go c.readLoop()
 
@@ -215,6 +270,27 @@ func (c *Client) call(method string, params any) (json.RawMessage, error) {
 // a budget minutes wide instead of callTimeout's 10s, without touching
 // what every other tool call waits for.
 func (c *Client) callTimeout(method string, params any, timeout time.Duration) (json.RawMessage, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+
+	// callSem -- see its own doc comment on Client (agent-tui#177). Acquired
+	// before this call even registers a pend entry, so a caller that never
+	// gets its turn never has anything to unregister; released via defer
+	// the moment acquisition succeeds, so EVERY return path below --
+	// success, a JSON-RPC error, a write error, or either of the two
+	// timeout branches -- frees the slot for the next queued caller. A
+	// caller queued here that loses the race against its own ctx returns
+	// the same honest timeoutError the write-wait and reply-wait branches
+	// below already return, never silently drops the call: it is simply
+	// never sent, and the caller (a tea.Model's own doFetch) is free to
+	// retry on its next tick exactly as it does for any other timeout.
+	select {
+	case c.callSem <- struct{}{}:
+	case <-ctx.Done():
+		return nil, &timeoutError{fmt.Errorf("mcp: %s: no reply within %s (still waiting for a prior call to finish)", method, timeout)}
+	}
+	defer func() { <-c.callSem }()
+
 	id := atomic.AddInt64(&c.nextID, 1)
 	req := rpcRequest{JSONRPC: "2.0", ID: id, Method: method, Params: params}
 	body, err := json.Marshal(req)
@@ -226,9 +302,6 @@ func (c *Client) callTimeout(method string, params any, timeout time.Duration) (
 	c.mu.Lock()
 	c.pend[id] = ch
 	c.mu.Unlock()
-
-	ctx, cancel := context.WithTimeout(context.Background(), timeout)
-	defer cancel()
 
 	// writeMu, not mu -- see writeMu's own doc comment (agent-tui#167,
 	// reopened by agent-tui#171). Acquiring the token is itself bounded by
@@ -292,15 +365,33 @@ func (c *Client) CallTool(name string, arguments map[string]any) (string, error)
 // (session_attach/detach/add/remove/remove_check, lanes, sessions, digest,
 // ledger, events) is a local, no-network-hop operation -- callTimeout's own
 // doc comment explains why 10s is the honest budget for those. session_send
-// (agent-supervisor#508/agent-supervisor#509) is not one of those: it drives a live agent
+// (jonhill90/agent-supervisor#508/jonhill90/agent-supervisor#509) is not one of those: it drives a live agent
 // turn through `supervisord send`, which can legitimately run for the
 // daemon's own per-turn budget (agent.DefaultTimeout, 15 minutes, on the
-// agent-supervisor side) before it can even report an honest "unknown".
+// jonhill90/agent-supervisor side) before it can even report an honest "unknown".
 // Forcing that call through callTimeout's 10s window would not surface a
 // real problem -- it would misreport nearly every real send as a client-side
 // timeout well before the daemon ever gets the chance to answer honestly.
 // internal/session.Ops.Send is the one caller that uses this; every other
 // caller keeps using CallTool's fixed budget unchanged.
+//
+// session_send and callSem (agent-tui#177): this call goes through the same
+// callSem as every other tool, so a live send genuinely does hold the slot
+// for as long as the daemon takes to answer, and every periodic ticker
+// sharing this Client (rail/agents/monitor/chat) queues behind it and times
+// out at its own 10s budget for the duration. This is not a regression
+// callSem introduces: mcp_server.py already "serves exactly one tools/call
+// at a time" (its own docstring) before this fix existed, so a slow send
+// already made the server unable to answer anyone else while it ran --
+// those tickers' calls were already being written and then timing out
+// unanswered at their own 10s mark. callSem changes WHERE that wait is
+// visible (client-side, before the request is even sent, instead of
+// server-side after it queues) but not whether it happens or how long it
+// takes to fail. A caller that needed session_send to not block routine
+// refreshes would need a second Client (a second subprocess), not a carve-
+// out here -- not attempted in this fix; no evidence today that routine
+// refreshes stalling for the length of one live send is worse than the
+// alternative of a second mcp_server.py process per agent-tui.
 func (c *Client) CallToolTimeout(name string, arguments map[string]any, timeout time.Duration) (string, error) {
 	raw, err := c.callTimeout("tools/call", map[string]any{"name": name, "arguments": arguments}, timeout)
 	if err != nil {
