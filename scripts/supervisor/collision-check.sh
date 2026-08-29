@@ -107,15 +107,30 @@ usage() { sed -n '/^# Usage:/,/^$/p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//' 
 
 # --- file detection ---------------------------------------------------------
 
+# agent-estate#840: the marker `dispatch-claude-print.sh`, `dispatch-pi-rpc.sh`
+# and `dispatch-send.sh` all write immediately before the standing
+# deliverable contract they append to every brief. Text from this line
+# onward is the dispatcher's own boilerplate, not the brief author's prose --
+# it names the dispatcher's own filename (`dispatch-claude-print.sh` etc.) in
+# every single dispatch, which manufactured a collision against whichever
+# lane happened to be editing that dispatcher at the time (observed: two
+# refused #836 review dispatches while an unrelated lane touched
+# dispatch-claude-print.sh). Scanning stops at this marker; prose ABOVE it
+# still collides normally.
+CONTRACT_MARKER='<!-- dispatch:deliverable-contract -->'
+
 # Every backtick-quoted, path-shaped token in $1 (a file), resolved against
 # `git -C $2 ls-files` -- exact match first, then unambiguous basename match.
 # A token matching more than one file by basename is skipped: which one was
-# meant is exactly the guesswork this check refuses to do.
+# meant is exactly the guesswork this check refuses to do. Text at or after
+# CONTRACT_MARKER is excluded first (see marker comment above) -- it is the
+# dispatcher's own appended boilerplate, never the brief author's intent.
 _files_named_in() {
-  local text_file="$1" repo="$2" all_files token matches
+  local text_file="$1" repo="$2" all_files token matches authored_text
   [ -f "$text_file" ] || return 0
   all_files=$(git -C "$repo" ls-files 2>/dev/null) || return 0
   [ -n "$all_files" ] || return 0
+  authored_text=$(awk -v marker="$CONTRACT_MARKER" '$0 == marker { exit } { print }' "$text_file")
   while IFS= read -r token; do
     [ -n "$token" ] || continue
     if grep -qxF "$token" <<<"$all_files"; then
@@ -126,7 +141,7 @@ _files_named_in() {
     if [ "$(wc -l <<<"${matches:-}")" -eq 1 ] && [ -n "$matches" ]; then
       printf '%s\n' "$matches"
     fi
-  done < <(grep -oE '`[A-Za-z0-9_./-]+\.[A-Za-z0-9]+`' "$text_file" 2>/dev/null | tr -d '`' | sort -u)
+  done < <(grep -oE '`[A-Za-z0-9_./-]+\.[A-Za-z0-9]+`' <<<"$authored_text" 2>/dev/null | tr -d '`' | sort -u)
 }
 
 # Files this PR's diff touches, relative to the repo -- the most precise
