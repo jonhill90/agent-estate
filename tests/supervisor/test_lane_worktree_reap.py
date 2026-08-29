@@ -21,6 +21,7 @@ fallback is `worktree.sh`'s own concern, already tested in
 """
 
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -48,6 +49,65 @@ WORKTREE_SH = str(SUPERVISOR_DIR / "worktree.sh")
 # has no need for otherwise. Set at import time, inherited by every
 # `worktree.sh reap` subprocess this module spawns.
 os.environ["WORKTREE_GC_MIN_AGE_SECONDS"] = "0"
+
+# agent-estate#805: `_gc_is_live`'s FIRST check (`_gc_tmux_occupies`) shells
+# to `tmux list-panes -a` before it ever looks at a process's cwd or the
+# worktree's own age -- and answers "cannot tell, so keep" (refused) the
+# instant that ask fails, whether tmux is entirely absent from PATH or a
+# binary is present but no server is running. This suite's own CI job
+# (`unit-tests`, unlike `shell-suites`) never installed tmux at all, so
+# every reap this module drove there answered "refused", not because any
+# guard behaved differently, but because the one signal `_gc_is_live` asks
+# FIRST could not be asked -- confirmed by reproducing it locally with tmux
+# made unreachable on PATH, which turns every "reaped" case in this file
+# into the exact `AssertionError: 'refused' != 'reaped'` CI reported, with
+# `report["reason"]` reading "could not query tmux panes; refusing to
+# guess whether it is live (#478)". The fix is not a looser guard -- it is
+# giving the guard a REAL, DETERMINISTIC answer to ask, the same way
+# `test_worktree_reap.sh`'s own `rtmux`/`$RT` fixture already does for the
+# shell suite: a throwaway, isolated tmux server (never the operator's own
+# attached session -- CLAUDE.md invariant 4), with one anchor session whose
+# cwd is nowhere near any worktree this module builds, so `tmux list-panes
+# -a` always answers with a real (non-matching) list rather than "no
+# server" or "command not found". `unit-tests` installing tmux
+# (`.github/workflows/validate.yml`) makes the binary reachable in the
+# first place; `setUpModule`/`tearDownModule` below make the answer it
+# gives deterministic rather than dependent on whatever tmux session, if
+# any, happens to be attached to the machine actually running the suite.
+_TMUX_RT = None
+_TMUX_ANCHOR = f"ae805-anchor-{os.getpid()}"
+_PRIOR_TMUX_TMPDIR = None
+_PRIOR_TMUX = None
+
+
+def setUpModule():
+    global _TMUX_RT, _PRIOR_TMUX_TMPDIR, _PRIOR_TMUX
+    if shutil.which("tmux") is None:
+        raise unittest.SkipTest(
+            "tmux is not installed -- lane_worktree_reap's real reap() call "
+            "cannot be proven against its own liveness guard without one"
+        )
+    _TMUX_RT = tempfile.mkdtemp(prefix="ae805-tmux-")
+    _PRIOR_TMUX_TMPDIR = os.environ.get("TMUX_TMPDIR")
+    _PRIOR_TMUX = os.environ.pop("TMUX", None)
+    os.environ["TMUX_TMPDIR"] = _TMUX_RT
+    subprocess.run(
+        ["tmux", "-f", "/dev/null", "new-session", "-d", "-s", _TMUX_ANCHOR, "-c", _TMUX_RT],
+        check=True, capture_output=True, text=True,
+    )
+
+
+def tearDownModule():
+    if _TMUX_RT is None:
+        return  # setUpModule skipped before creating anything to tear down
+    subprocess.run(["tmux", "-f", "/dev/null", "kill-server"], capture_output=True, text=True)
+    shutil.rmtree(_TMUX_RT, ignore_errors=True)
+    if _PRIOR_TMUX_TMPDIR is None:
+        os.environ.pop("TMUX_TMPDIR", None)
+    else:
+        os.environ["TMUX_TMPDIR"] = _PRIOR_TMUX_TMPDIR
+    if _PRIOR_TMUX is not None:
+        os.environ["TMUX"] = _PRIOR_TMUX
 
 
 def _no_github_runner(argv):
@@ -147,6 +207,37 @@ class LaneWorktreeReaperTest(unittest.TestCase):
         report = self.reaper.reap_task_worktree(task)
         self.assertEqual(report["outcome"], "reaped")
         self.assertFalse(worktree.is_dir(), "the worktree must actually be gone, not merely reported reaped")
+
+    def test_reap_is_scoped_to_the_one_path_it_is_given(self):
+        """agent-estate#805's review named this gap: `reap` takes exactly
+        one worktree path and must never widen its blast radius to a
+        SIBLING worktree under the same root, unlike `gc`'s own sweep
+        (which is deliberately scoped by `WORKTREE_GC_EXTRA_ROOTS`, see
+        `lane_worktree_reap.py`'s own module docstring on why a completion-
+        time caller reaps one target rather than pointing `gc` at a shared
+        root). Build two sibling worktrees off the same repo -- one
+        reapable, one dirty and not -- and confirm reaping the first never
+        touches the second, regardless of which one is passed."""
+        target = self.fixture.new_worktree("804-sib-target")
+        (target / "file.txt").write_text("merged change\n", encoding="utf-8")
+        self.fixture.merge_worktree(target, "804-sib-target", message="merged work")
+
+        sibling = self.fixture.new_worktree("804-sib-untouched")
+        with (sibling / "file.txt").open("a", encoding="utf-8") as handle:
+            handle.write("dirty sibling, never reaped by this call\n")
+
+        task = {
+            "id": "ae804-sib", "lane": "agent-supervisor:1",
+            "status": "complete", "worktree_path": str(target),
+        }
+        report = self.reaper.reap_task_worktree(task)
+        self.assertEqual(report["outcome"], "reaped")
+        self.assertFalse(target.is_dir(), "the named target must actually be gone")
+        self.assertTrue(sibling.is_dir(), "an untouched sibling worktree must survive a reap of a different path")
+        self.assertIn(
+            "dirty sibling", (sibling / "file.txt").read_text(encoding="utf-8"),
+            "the sibling's own uncommitted content must be untouched",
+        )
 
     def test_mutation_2a_dirty_worktree_survives(self):
         """Terminal task, branch merged, but the tree is DIRTY -> survives."""
