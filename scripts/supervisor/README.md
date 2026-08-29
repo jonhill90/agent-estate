@@ -281,6 +281,14 @@ scope for candidates matching that exact naming — with it set to the real
 `$TMPDIR`, the same live sweep (still dry-run, still every other condition
 unchanged) reached 39 of 131. Converging is not emptying.
 
+**agent-estate#821**: the above described where worktrees landed through
+2026-08-28. `new` now creates every NEW worktree under `$REPO/.worktrees/`
+by default (still overridable with `WORKTREE_ROOT`), so a freshly dispatched
+lane worktree is inside `gc`'s default scope from the start — no
+`WORKTREE_GC_EXTRA_ROOTS` needed for it. The ~251 pre-#821 worktrees already
+stranded under `$TMPDIR` are unaffected by this change; draining those is a
+separate reaper, filed alongside #821.
+
 `--dry-run` runs every check and prints what a real run would remove, without
 removing anything — the way to confirm the list against the live estate before
 trusting it. It is idempotent and safe to run repeatedly, but it is not wired

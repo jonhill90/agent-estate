@@ -6,9 +6,14 @@ left running (`lane_orphan_reap.py`, agent-estate#800/#802). It never
 touches the *worktree* itself -- every dispatch creates one
 (`worktree.sh new`), and nothing removes it: `git worktree prune` only
 drops registrations whose directory is already gone, and `worktree.sh gc`
-refuses anything outside `.worktrees/` by default, which is where every
-lane worktree this sweep can see actually lives (`${WORKTREE_ROOT:-
-${TMPDIR:-/tmp}}/ad-<slug>-<pid>`, `WORKTREE_GC_EXTRA_ROOTS` opt-in only,
+refuses anything outside `.worktrees/` by default. Before agent-estate#821,
+that was NOT where a dispatched lane worktree actually lived (`${WORKTREE_ROOT:-
+${TMPDIR:-/tmp}}/ad-<slug>-<pid>`, invisible to `gc`'s default scope unless
+opted in via `WORKTREE_GC_EXTRA_ROOTS`); #821 moved `new`'s own default to
+create every NEW worktree inside `$REPO/.worktrees/` in the first place, so
+this sweep and `gc`'s default scope now agree without an opt-in for
+anything dispatched after that change. Worktrees created before #821 landed
+are unaffected and still need `WORKTREE_GC_EXTRA_ROOTS` (a separate reaper,
 not something this sweep runs on a schedule). That accumulation caused
 #800's six-day `advance-live` stall: `worktree-guard-audit.sh` is
 O(worktrees), and it took 198 registered worktrees (168 abandoned) pushing

@@ -1150,6 +1150,71 @@ if [ -d "$PLAIN_NAMED_DEST" ]; then ok "gc leaves a plain-named worktree in the 
 rm -rf "$EXTRA_ROOT" 2>/dev/null
 git -C "$REPO" worktree prune >/dev/null 2>&1
 
+# --- agent-estate#821: `new`'s DEFAULT location, with no WORKTREE_ROOT set --
+# Every fixture above sets WORKTREE_ROOT explicitly (needed so this suite's
+# own gc assertions land inside a throwaway root instead of the real
+# $TMPDIR); none of them proves what a REAL dispatch gets with nothing
+# overriding the default. A separate, minimal repo, so this section's own
+# unset-WORKTREE_ROOT call can't be confused with the WORKTREE_ROOT-scoped
+# fixtures already registered against $REPO above.
+D821=$(mktemp -d)
+git init -q --bare "$D821/origin.git"
+git clone -q "$D821/origin.git" "$D821/repo"
+REPO821="$D821/repo"
+git -C "$REPO821" config user.email test@example.com
+git -C "$REPO821" config user.name "Test"
+git -C "$REPO821" checkout -q -b main
+echo one > "$REPO821/file.txt"
+git -C "$REPO821" add file.txt
+git -C "$REPO821" commit -q -m initial
+git -C "$REPO821" push -q -u origin main
+# Same .worktrees/-untracked hazard the main fixture above already
+# confirmed and worked around -- ignore it here too, before `new` runs,
+# so the "guard sees a clean repo" assertion below means what it says.
+echo ".worktrees/" >> "$REPO821/.gitignore"
+git -C "$REPO821" add .gitignore
+git -C "$REPO821" commit -q -m "ignore .worktrees/"
+git -C "$REPO821" push -q origin main
+
+default_out=$(env -u WORKTREE_ROOT AGENT_PYTHON_BIN="$D/bin/allow-python3" bash "$WT" new 821-default "$REPO821" origin/main 2>/dev/null); default_rc=$?
+want_exit "new (no WORKTREE_ROOT) exits 0" "$default_rc" 0 "$default_out"
+DEFAULT_DEST="$default_out"
+require_dest "new (no WORKTREE_ROOT)" "$DEFAULT_DEST"
+
+EXPECT_ROOT_REAL=$(cd "$REPO821/.worktrees" 2>/dev/null && pwd -P)
+DEFAULT_DEST_REAL=$(cd "$DEFAULT_DEST" 2>/dev/null && pwd -P) || DEFAULT_DEST_REAL="$DEFAULT_DEST"
+case "$DEFAULT_DEST_REAL" in
+  "$EXPECT_ROOT_REAL"/*) ok "new with no WORKTREE_ROOT lands inside \$REPO/.worktrees/ (agent-estate#821)" ;;
+  *) bad "new with no WORKTREE_ROOT lands inside \$REPO/.worktrees/ (agent-estate#821)" "got $DEFAULT_DEST_REAL, expected under $EXPECT_ROOT_REAL" ;;
+esac
+
+if git -C "$REPO821" worktree list --porcelain | grep -qF "worktree $DEFAULT_DEST_REAL"; then
+  ok "the default-location worktree is registered in \`git worktree list\`"
+else
+  bad "the default-location worktree is registered in \`git worktree list\`" "$(git -C "$REPO821" worktree list)"
+fi
+
+# The whole point (#821's own brief): a default-location worktree must be
+# reachable by gc's existing, already-guarded scope with no extra opt-in --
+# confirmed here by actually running gc against it, not just checking a
+# path prefix. Not yet old enough to pass the liveness-age floor: gc must
+# refuse it as live, the same guard live/merged worktrees get everywhere
+# else in this suite -- not silently skip it as "out of scope".
+gc_default_out=$(env -u TMUX TMUX_TMPDIR="$RT" bash "$WT" gc --dry-run "$REPO821" origin/main 2>&1)
+if grep -qF "$DEFAULT_DEST_REAL" <<<"$gc_default_out"; then
+  ok "gc's default-scope sweep sees the default-location worktree at all (agent-estate#821)"
+else
+  bad "gc's default-scope sweep sees the default-location worktree at all (agent-estate#821)" "$gc_default_out"
+fi
+if grep -qF "gc skipping $DEFAULT_DEST_REAL -- outside" <<<"$gc_default_out"; then
+  bad "the default-location worktree is not skipped as 'outside .worktrees/'" "$gc_default_out"
+else
+  ok "the default-location worktree is not skipped as 'outside .worktrees/'"
+fi
+
+git -C "$REPO821" worktree remove --force "$DEFAULT_DEST" >/dev/null 2>&1
+rm -rf "$D821"
+
 # Tear down the private throwaway tmux server -- never the default socket,
 # scoped to $RT and gated by assert_isolated_tmux, same as test_lane_done.sh.
 cleanup_rt
