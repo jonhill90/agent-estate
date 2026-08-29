@@ -388,7 +388,18 @@ log=$(tmuxlog)
 # assertion actually cares about happens from the rename onward, same as
 # every other case in this run that reads `log` after the relaunch step.
 log_after_rename_before_rehome=$(sed -n '/^rename-window/,/^respawn-pane/{/^respawn-pane/!p;}' <<<"$log")
-want_missing "a mangled brief is never submitted" "send-keys -t t:@103 Enter" "$log_after_rename_before_rehome"
+# #818: verified_preclear now sends `/clear` and its own `Enter` as two
+# separate send-keys calls, so that preclear Enter now shows up as its own
+# bare `send-keys ... Enter` line inside this same window -- legitimate, and
+# unrelated to whether the BRIEF text was ever followed by a submit. What
+# this assertion actually guards is "no Enter after the LAST attempt to type
+# the brief text", so scope the search to strictly after that line rather
+# than the whole rename..rehome window.
+log_after_last_brief_send=$(awk -v pat="$D/brief.md" '
+  { lines[NR] = $0; if (index($0, pat) > 0) last = NR }
+  END { for (i = last + 1; i <= NR; i++) print lines[i] }
+' <<<"$log_after_rename_before_rehome")
+want_missing "a mangled brief is never submitted" "send-keys -t t:@103 Enter" "$log_after_last_brief_send"
 if [ "$(assignees 84)" = "" ]; then ok "a mangled brief releases the claim"; else bad "a mangled brief releases the claim" "assignees: $(assignees 84)"; fi
 if [ "$(worktrees)" = "$before" ]; then ok "a mangled brief leaves no worktree behind"; else bad "a mangled brief leaves no worktree behind" "$before -> $(worktrees)"; fi
 pane_path=$(cat "$D/panes/3.path" 2>/dev/null || true)
