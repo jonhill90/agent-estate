@@ -268,6 +268,7 @@ class LaneCompletionReconciler:
         idle_after=DEFAULT_IDLE_AFTER_SECONDS,
         stale_after=DEFAULT_STALE_AFTER_SECONDS,
         clock=None,
+        orphan_reaper=None,
     ):
         self.ledger = ledger
         self.runner = runner or subprocess_runner
@@ -279,6 +280,17 @@ class LaneCompletionReconciler:
         self.idle_after = idle_after
         self.stale_after = stale_after
         self.clock = clock or ledger.clock
+        # agent-estate#800: this sweep already determines a lane's task has
+        # gone terminal; it never looked at what that lane left running.
+        # `None` by default (every existing caller/test that does not pass
+        # this keeps behaving exactly as before -- reaping OS processes is
+        # a materially different hazard than writing a ledger row, kept
+        # opt-in here and wired explicitly at the one real caller, `cli.py`
+        # reconcile-lane-completions). Injected here (rather than
+        # constructed fresh per sweep) so a caller can share one instance's
+        # `runner`/binaries and so tests can substitute a fake without
+        # touching this class's own constructor signature further.
+        self.orphan_reaper = orphan_reaper
 
     def _fetch_session_lanes(self, session):
         """One batched `lanes.sh --json <session>` call -> {index: row}."""
@@ -370,6 +382,13 @@ class LaneCompletionReconciler:
             "liveness_alive": [],
             "liveness_indeterminate": [],
             "errors": [],
+            # agent-estate#800: one entry per task this sweep just moved to
+            # a terminal status, naming what `self.orphan_reaper` (if any)
+            # found and did with that task's worktree -- see
+            # `_reap_orphans_for_this_sweep`'s own docstring. Always
+            # present so a caller can tell "reaping ran and found nothing"
+            # from "reaping was never wired" without inspecting `self`.
+            "orphans": [],
         }
 
         now = self.clock()
@@ -425,7 +444,41 @@ class LaneCompletionReconciler:
                 window = windows.get(index)
                 self._evaluate_window(task, window, session=session, now=now, report=report)
 
+        self._reap_orphans_for_this_sweep(report)
         return report
+
+    def _reap_orphans_for_this_sweep(self, report):
+        """agent-estate#800: for every task THIS sweep just moved to a
+        terminal status (`completed`, `failed_unaccepted`,
+        `failed_stale_delivery`, `failed_stale_acceptance` -- the four
+        lists a task id can land in exactly once per sweep), ask
+        `self.orphan_reaper` (if one was given) to reap whatever background
+        descendants that task's worktree left running.
+
+        A no-op when `self.orphan_reaper` is `None` (the default -- see
+        this class's own `__init__` docstring for why reaping stays
+        opt-in). Never lets a reaper's own exception break this sweep's
+        ledger writes, which have already committed by the time this runs
+        -- a reap failure is recorded in `report["orphans"]` as an error
+        entry, not raised.
+        """
+        if self.orphan_reaper is None:
+            return
+        terminal_task_ids = (
+            report["completed"]
+            + report["failed_unaccepted"]
+            + report["failed_stale_delivery"]
+            + report["failed_stale_acceptance"]
+        )
+        for task_id in terminal_task_ids:
+            task = self.ledger.get_task(task_id)
+            if task is None:
+                continue
+            try:
+                result = self.orphan_reaper.reap_task_orphans(task)
+            except Exception as error:
+                result = {"task": task_id, "outcome": "error", "error": str(error)}
+            report["orphans"].append(result)
 
     def _evaluate_window(self, task, window, *, session, now, report, via_fallback=False):
         """The state/idle/accepted evidence check shared by the ordinary

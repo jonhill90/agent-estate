@@ -39,6 +39,7 @@ from core import (
     lane_relation_from_rows,
 )
 from github_source import GithubTaskSource
+from lane_orphan_reap import LaneOrphanReaper
 from pi_transport import PiRPCTransport
 from reconcile_lane_completions import LaneCompletionReconciler
 from reconcile_sources import SourceTaskReconciler
@@ -535,12 +536,24 @@ def main(argv=None):
         ).sweep(dry_run=args.dry_run)
     elif args.command == "reconcile-lane-completions":
         lanes_bin = os.environ.get("AGENT_LANES_BIN", str(Path(__file__).resolve().parent / "lanes.sh"))
+        # agent-estate#800: the one real production caller of this sweep --
+        # wired here, not defaulted on inside `LaneCompletionReconciler`
+        # itself, so every existing test constructing that class directly
+        # keeps its prior behaviour (see that class's own `__init__`
+        # docstring). `AGENT_REAP_LANE_ORPHANS=0` is the escape hatch if
+        # this ever needs to be disabled in production without a code
+        # change -- opt-out, not opt-in, because the whole point of #800
+        # was that nothing was reaping these by default.
+        orphan_reaper = None
+        if os.environ.get("AGENT_REAP_LANE_ORPHANS", "1") != "0":
+            orphan_reaper = LaneOrphanReaper(ledger)
         value = LaneCompletionReconciler(
             ledger,
             lanes_bin=lanes_bin,
             gh_bin=os.environ.get("AGENT_GH_BIN", "gh"),
             idle_after=args.idle_after,
             stale_after=args.stale_after,
+            orphan_reaper=orphan_reaper,
         ).sweep()
     elif args.command == "observe":
         lanes = args.lane or [
