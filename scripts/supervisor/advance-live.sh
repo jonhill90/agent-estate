@@ -119,6 +119,20 @@
 #                                    get before this is treated as the
 #                                    watchdog LaunchAgent being gone rather
 #                                    than mid-cadence; default 3
+#   ADVANCE_SKIP_STREAK_FILE      where the consecutive-skip counter (#800)
+#                                 persists across invocations; default
+#                                 $SUPERVISOR_STATE/.advance-live-skip-streak
+#   ADVANCE_SKIP_ESCALATE_AFTER  consecutive skip()s before this reports
+#                                 loudly and pages a human (#800); default 20
+#   ADVANCE_SKIP_ESCALATE_EPISODE  dedup marker so the page fires once per
+#                                   streak, not once per tick past the
+#                                   threshold; default
+#                                   $SUPERVISOR_STATE/.advance-live-escalate-episode
+#   ADVANCE_NOTIFY_SCRIPT   the human-notification script the escalation
+#                           above calls; default $HERE/notify.sh, same
+#                           override convention as heartbeat.sh's
+#                           HEARTBEAT_NOTIFY_SCRIPT (agent-supervisor#273) --
+#                           tests point this at a recording stub instead
 #   WATCHDOG_LAUNCHD_LABEL  the watchdog's own LaunchAgent label, used to
 #                           attribute a bootout; default
 #                           com.jonhill.supervisor-watchdog
@@ -158,9 +172,81 @@ STALE_AFTER=$((TICK_INTERVAL * STALE_MULTIPLE))
 # worse than the silent-stale bug #11 fixed, per review on PR #51.
 FETCH_TIMEOUT_SECONDS="${ADVANCE_FETCH_TIMEOUT_SECONDS:-20}"
 
+SKIP_STREAK_FILE="${ADVANCE_SKIP_STREAK_FILE:-$STATE/.advance-live-skip-streak}"
+SKIP_ESCALATE_AFTER="${ADVANCE_SKIP_ESCALATE_AFTER:-20}"
+SKIP_ESCALATE_EPISODE="${ADVANCE_SKIP_ESCALATE_EPISODE:-$STATE/.advance-live-escalate-episode}"
+NOTIFY_SCRIPT="${ADVANCE_NOTIFY_SCRIPT:-$HERE/notify.sh}"
+
 log() { mkdir -p "$(dirname "$LOG")" 2>/dev/null; printf '%s %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "$*" >>"$LOG"; }
 fail() { log "FAIL: $*"; echo "advance-live: $*" >&2; exit 1; }
-skip() { log "SKIP: $*"; echo "advance-live: $*"; exit 0; }
+
+# --- agent-estate#800: make a long run of skips as loud as a failure -------
+# Measured on the real estate (#800): 486 passing smoke tests, 302 SKIPs,
+# and -- separately, and this matters -- the "0 advances" figure #800 led
+# with does not hold up against this file's own history (see this PR's own
+# description for the correction). What IS real and unchanged by that
+# correction: every SKIP here is individually well-formed, exits 0, and logs
+# like a healthy, conservative refusal. Read one at a time, 302 of them are
+# indistinguishable from 302 legitimate "not this tick"s. Only the RUN of
+# them -- the same guard declining pass after pass with no advance in
+# between -- is the signal that something is actually stuck, and nothing
+# before this counted that run.
+#
+# A FILE, NOT AN IN-PROCESS COUNTER: this script exits after every single
+# invocation (`skip()`/`fail()` both `exit`), so nothing survives between
+# ticks except what is written to disk. $SKIP_STREAK_FILE is that counter,
+# bumped on every skip and cleared on every non-skip terminal state
+# (ADVANCED, CURRENT) so the streak measures CONSECUTIVE skips, not a
+# lifetime total.
+#
+# ESCALATE ONCE PER STREAK, NOT ONCE PER TICK PAST THE THRESHOLD. The
+# lane that first designed this (orphaned diff, preserved on #800) named the
+# exact failure a naive "streak >= threshold -> page" would cause: with a
+# 180s cadence, a streak that reaches 302 stays past a 20-skip threshold for
+# 282 more ticks, which would page 282 times for one incident.
+# $SKIP_ESCALATE_EPISODE is a marker written the first time a streak crosses
+# the threshold; its presence means "already paged for this streak," and it
+# is cleared alongside the counter on the next non-skip terminal state --
+# the next genuinely new streak pages again, the same streak never does.
+read_skip_streak() {
+  local n
+  n=$(cat "$SKIP_STREAK_FILE" 2>/dev/null)
+  case "$n" in ''|*[!0-9]*) echo 0 ;; *) echo "$n" ;; esac
+}
+
+reset_skip_streak() {
+  rm -f "$SKIP_STREAK_FILE" "$SKIP_ESCALATE_EPISODE" 2>/dev/null
+}
+
+# Bumps the on-disk streak, echoes the new value, and pages once when it
+# first crosses $SKIP_ESCALATE_AFTER. Never fails the caller: a failure to
+# write the streak file or to send the page must not turn a SKIP into a
+# FAIL -- the underlying decision not to advance is still correct even if
+# this bookkeeping fails, so every step below is best-effort and logged
+# rather than propagated.
+bump_and_report_skip_streak() {
+  local n
+  n=$(( $(read_skip_streak) + 1 ))
+  mkdir -p "$(dirname "$SKIP_STREAK_FILE")" 2>/dev/null
+  { printf '%s\n' "$n" >"$SKIP_STREAK_FILE.$$" && mv -f "$SKIP_STREAK_FILE.$$" "$SKIP_STREAK_FILE"; } 2>/dev/null
+
+  [ "$n" -ge "$SKIP_ESCALATE_AFTER" ] || return 0
+  if [ -f "$SKIP_ESCALATE_EPISODE" ]; then
+    return 0
+  fi
+  mkdir -p "$(dirname "$SKIP_ESCALATE_EPISODE")" 2>/dev/null
+  { printf '%s\n' "$n" >"$SKIP_ESCALATE_EPISODE.$$" && mv -f "$SKIP_ESCALATE_EPISODE.$$" "$SKIP_ESCALATE_EPISODE"; } 2>/dev/null
+
+  local subject="advance-live: $n consecutive skips"
+  local body="$LIVE has not advanced in $n straight passes (>= ${SKIP_ESCALATE_AFTER}). Every one of those passes logged a well-formed SKIP and exited 0, which reads as healthy from any single log line -- only the run of them is the problem. See $LOG."
+  log "ESCALATE: $n consecutive skips (>= ${SKIP_ESCALATE_AFTER}) -- $LIVE has not advanced in $n straight passes"
+  echo "advance-live: ESCALATE -- $n consecutive skips, $LIVE has not advanced" >&2
+  if ! AGENT_NOTIFY_CALLER=supervisor bash "$NOTIFY_SCRIPT" "$subject" "$body" >>"$LOG" 2>&1; then
+    log "ESCALATE: notify.sh did not confirm delivery -- see $LOG above for its own output"
+  fi
+}
+
+skip() { log "SKIP: $*"; echo "advance-live: $*"; bump_and_report_skip_streak; exit 0; }
 
 # `git status --porcelain` on LIVE. Read fresh every call -- never cache the
 # result, because every caller of this exists to catch LIVE changing out
@@ -753,6 +839,10 @@ fi
 if [ "$cur" = "$target" ] || [ "$behind" -eq 0 ]; then
   log "CURRENT: $cur already matches origin/main after a fresh fetch, nothing to advance"
   echo "advance-live: current, $cur already matches origin/main (fetched fresh)"
+  # #800: CURRENT is not a skip -- live genuinely has nothing to do, which is
+  # a healthy terminal state, not a guard declining. Reset the streak so a
+  # tree that is caught up does not keep an old skip run alive.
+  reset_skip_streak
   maybe_restart_poller "$cur"
   exit 0
 fi
@@ -975,4 +1065,7 @@ fi
 
 log "ADVANCED $LIVE from $cur to $target ($behind commit(s))"
 echo "advance-live: advanced $LIVE from ${cur:0:12} to ${target:0:12} ($behind commit(s))"
+# #800: an actual advance is the streak's real reset point -- the guard did
+# what it exists to do, so whatever run of skips came before is over.
+reset_skip_streak
 maybe_restart_poller "$newsha"
