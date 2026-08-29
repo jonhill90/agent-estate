@@ -12,8 +12,18 @@ asserting it. Every kill is confirmed by re-checking the pid afterward
 own corrected comment states: "Signal 15 was ignored by these processes; 9
 was needed. Whatever you send, verify the process is gone rather than
 trusting the signal."
+
+`TmuxServerExclusionTest` at the bottom proves the agent-estate#802 fix
+pass: a tmux SERVER process for a live session -- reparented to `init` as
+part of normal daemonization, its own argv naming a terminal task's
+worktree path -- must never be a reap candidate, even though it looks
+identical to a genuine orphan by the argv+ppid signal alone. Mirrors the
+live-lane mutation test's own rigor: a real `tmux new-session -d` server,
+not a fake, confirmed still alive (via `tmux list-sessions`) afterward.
 """
 
+import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -29,6 +39,7 @@ from lane_orphan_reap import (  # noqa: E402
     LaneOrphanReaper,
     cwd_matches_worktree,
     find_candidate_pids,
+    is_tmux_server_process,
     parse_ps_lines,
 )
 
@@ -85,6 +96,27 @@ class PureFunctionTest(unittest.TestCase):
     def test_find_candidate_pids_blank_path_matches_nothing(self):
         rows = [{"pid": 1, "ppid": 1, "args": "anything at all"}]
         self.assertEqual(find_candidate_pids(rows, ""), [])
+
+    def test_find_candidate_pids_excludes_tmux_server_process(self):
+        """agent-estate#802: shaped exactly like the PR's own live-host
+        sample (`tmux new-session ... -c <worktree_path>`, ppid=1) -- the
+        review's own reproduction, as a synthetic row. A genuinely orphaned
+        non-tmux descendant of the SAME worktree must still be caught."""
+        rows = [
+            {"pid": 9273, "ppid": 1, "args": "tmux new-session -d -s revtest -c /tmp/ad-649-finish649-80092"},
+            {"pid": 9274, "ppid": 1, "args": "yes /tmp/ad-649-finish649-80092"},
+        ]
+        self.assertEqual(find_candidate_pids(rows, "/tmp/ad-649-finish649-80092"), [9274])
+
+    def test_is_tmux_server_process_checks_argv0_not_a_substring(self):
+        self.assertTrue(is_tmux_server_process("tmux new-session -d -s x -c /tmp/y"))
+        self.assertTrue(is_tmux_server_process("/opt/homebrew/bin/tmux new-session -d -s x -c /tmp/y"))
+        # A legitimate orphaned descendant that merely MENTIONS tmux later
+        # in its own command line must still read as reapable -- this
+        # excludes the process that IS a tmux server, not every process
+        # that talks about one.
+        self.assertFalse(is_tmux_server_process('bash -c "echo tmux new-session" /tmp/y'))
+        self.assertFalse(is_tmux_server_process(""))
 
 
 class RealOrphanProcessTest(unittest.TestCase):
@@ -275,6 +307,100 @@ class LaneOrphanReaperLedgerIntegrationTest(unittest.TestCase):
         report = reaper.reap_task_orphans(completed_first)
         self.assertEqual(report["outcome"], "lane_live")
         self.assertTrue(_pid_alive(pid))
+
+
+def _isolated_tmux_env(tmux_tmpdir):
+    """Same isolation discipline as test_reconcile_lane_completions.py's own
+    `_isolated_env` helper: a private TMUX_TMPDIR, TMUX unset so nothing
+    here can ever address the ambient/default socket (CLAUDE.md invariant
+    4). Duplicated locally rather than imported -- this file and that one
+    are independent test modules and neither imports test helpers from the
+    other."""
+    env = dict(os.environ)
+    env["TMUX_TMPDIR"] = tmux_tmpdir
+    env.pop("TMUX", None)
+    return env
+
+
+@unittest.skipUnless(shutil.which("tmux") is not None, "tmux is not installed")
+class TmuxServerExclusionTest(unittest.TestCase):
+    """agent-estate#802's review reproduced this exact shape against a live
+    host and it is not a corner case: a `tmux new-session -d -c
+    <worktree_path>` server is reparented to `init` the instant it
+    daemonizes -- as part of normal, correct operation -- with its own
+    argv naming the worktree path a lane was dispatched into. That is
+    indistinguishable from a genuine orphan by ppid+argv alone once the
+    task recorded against that worktree goes terminal, which says nothing
+    about whether the tmux session itself has been torn down. This proves
+    the exclusion holds against a REAL server process, isolated on its own
+    socket (never the default one -- CLAUDE.md invariant 4), not a fake.
+    """
+
+    def setUp(self):
+        self.tmux_tmpdir = tempfile.mkdtemp(prefix="ae802-tmux-")
+        self.env = _isolated_tmux_env(self.tmux_tmpdir)
+        self.addCleanup(self._cleanup)
+        self.worktree = tempfile.mkdtemp(prefix="ae802-worktree-")
+        self.addCleanup(lambda: shutil.rmtree(self.worktree, ignore_errors=True))
+        subprocess.run(["git", "init", "-q", self.worktree], check=True)
+        self.session = "ae802-revtest"
+        subprocess.run(
+            ["tmux", "new-session", "-d", "-s", self.session, "-c", self.worktree],
+            env=self.env, check=True, capture_output=True, timeout=10,
+        )
+        self.server_pid = self._find_server_pid()
+        self.assertIsNotNone(
+            self.server_pid,
+            "the fixture's own tmux server pid was not found by ps -- this test proves nothing without it",
+        )
+
+    def _cleanup(self):
+        subprocess.run(["tmux", "kill-server"], env=self.env, capture_output=True, timeout=10)
+        shutil.rmtree(self.tmux_tmpdir, ignore_errors=True)
+
+    def _find_server_pid(self):
+        ps_out = subprocess.run(["ps", "-axo", "pid,ppid,args"], capture_output=True, text=True, check=True).stdout
+        for row in parse_ps_lines(ps_out):
+            if row["ppid"] == 1 and is_tmux_server_process(row["args"]) and self.worktree in row["args"]:
+                return row["pid"]
+        return None
+
+    def test_server_is_reparented_to_init_by_normal_daemonization(self):
+        """Confirms the premise rather than merely asserting it: a `tmux
+        new-session -d` server really is ppid==1 immediately, as ordinary
+        daemonization -- not a crash or a manual reparenting trick like
+        this suite's other fixtures use to simulate an actual orphan."""
+        result = subprocess.run(["ps", "-o", "ppid=", "-p", str(self.server_pid)], capture_output=True, text=True)
+        self.assertEqual(result.stdout.strip(), "1")
+
+    def test_tmux_server_process_is_excluded_from_candidates(self):
+        ps_out = subprocess.run(["ps", "-axo", "pid,ppid,args"], capture_output=True, text=True, check=True).stdout
+        candidates = find_candidate_pids(parse_ps_lines(ps_out), self.worktree)
+        self.assertNotIn(
+            self.server_pid, candidates,
+            "a live tmux server for a recognized session must never be a reap candidate",
+        )
+
+    def test_reap_task_orphans_leaves_the_live_session_untouched(self):
+        """End to end, mirroring `test_mutation_2_live_lane_orphan_is_untouched`'s
+        rigor: task terminal, lane not live, worktree clean -- every OTHER
+        gate says reap, and this must still refuse because the only
+        candidate found IS the tmux server itself. A fix that simply
+        stopped reaping everything would pass this alone; paired with
+        `test_mutation_1_completed_lane_orphan_is_reaped` above (a
+        genuinely orphaned non-tmux process is still reaped), it proves
+        the exclusion is specific, not a blanket retreat."""
+        task = {"id": "ae802-t1", "lane": "agent-supervisor:9", "status": "complete", "worktree_path": self.worktree}
+        reaper = LaneOrphanReaper(FakeLedger())
+        report = reaper.reap_task_orphans(task)
+        self.assertNotEqual(report["outcome"], "reaped")
+        self.assertNotIn(self.server_pid, report["reaped"])
+        # Confirmed live via a real tmux query against the isolated
+        # server, not by trusting the report dict alone.
+        list_result = subprocess.run(
+            ["tmux", "list-sessions"], env=self.env, capture_output=True, text=True, timeout=10
+        )
+        self.assertIn(self.session, list_result.stdout)
 
 
 if __name__ == "__main__":

@@ -44,6 +44,33 @@ would have signalled it is gone) before this module will ever consider a
 pid a candidate. A process that merely mentions the path in its argv but
 still has a live, non-init parent is not orphaned; it is left alone.
 
+## The tmux-server exclusion (agent-estate#802)
+
+`ppid == 1` does not mean "orphaned" on its own -- it is also what a
+`tmux new-session -d` server looks like from the moment it daemonizes,
+as part of normal, correct operation, not a failure. #802's review
+reproduced this concretely: a lane's tmux session, started with `-c
+<worktree_path>`, is a live server process whose own argv names that
+worktree path and whose ppid is 1 for the entire lifetime of the
+session -- indistinguishable from a genuinely orphaned descendant by the
+argv+ppid signal alone. A task going terminal says nothing about whether
+its tmux session has been torn down; killing that server destroys every
+pane and all unrecorded terminal state under it, the exact class of
+mistake CLAUDE.md's invariant 4 exists to prevent (this estate has lost
+its live sessions to it three times).
+
+So `find_candidate_pids` additionally excludes any row whose OWN argv[0]
+names the `tmux` binary (`is_tmux_server_process`) -- this asks what the
+candidate process itself IS, not what session name or age it has. An
+allowlist of "known" session names was considered and rejected: it goes
+stale the moment a new pool bootstraps, the same reason the worktree-path
+check above does not enumerate lanes by name either. Checking argv[0]
+specifically (not a substring search over the whole command line) matters:
+a lane's legitimate orphaned descendant invoked as `bash -c "... tmux ..."`
+has `bash` as its own argv[0], not `tmux`, and must still be reapable --
+this excludes the process that IS a tmux server, never every process that
+merely mentions one.
+
 ## The hazard that governs this module (agent-estate#800's own words)
 
 "This reaps processes. Getting it wrong destroys running work. The estate
@@ -113,12 +140,33 @@ def parse_ps_lines(ps_output):
     return rows
 
 
+def is_tmux_server_process(args):
+    """True when this process's OWN argv[0] names the `tmux` binary -- i.e.
+    this pid is a tmux server/client process, not merely one whose command
+    line happens to mention tmux somewhere later.
+
+    Checked on argv[0]'s basename only, never a substring search over the
+    whole command line: a lane's own legitimate orphaned descendant
+    invoked as e.g. `bash -c "... tmux ..."` has `bash` as its own argv[0],
+    not `tmux`, and must still be reapable. This excludes the process that
+    IS a tmux server, never every process that merely talks about one. See
+    this module's "The tmux-server exclusion" docstring section for why
+    this is asked of the process itself rather than of a session-name
+    allowlist.
+    """
+    first = args.strip().split(None, 1)
+    if not first:
+        return False
+    return Path(first[0]).name == "tmux"
+
+
 def find_candidate_pids(ps_rows, worktree_path):
     """Reparented (`ppid == 1`) processes whose own command line names this
-    exact worktree path. This is the cheap argv half of the two-signal
-    check this module's docstring describes -- callers should still
-    confirm cwd via `cwd_matches_worktree` before reaping, where `lsof` is
-    available.
+    exact worktree path -- excluding any row that IS a tmux server process
+    itself (`is_tmux_server_process`; agent-estate#802). This is the cheap
+    argv half of the two-signal check this module's docstring describes --
+    callers should still confirm cwd via `cwd_matches_worktree` before
+    reaping, where `lsof` is available.
 
     Checked against BOTH the raw `worktree_path` string and its
     `normalize_worktree_path` spelling: `ps ... args` shows whatever
@@ -141,7 +189,9 @@ def find_candidate_pids(ps_rows, worktree_path):
     return [
         row["pid"]
         for row in ps_rows
-        if row["ppid"] == 1 and any(needle in row["args"] for needle in needles)
+        if row["ppid"] == 1
+        and any(needle in row["args"] for needle in needles)
+        and not is_tmux_server_process(row["args"])
     ]
 
 
