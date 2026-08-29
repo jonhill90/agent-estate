@@ -15,12 +15,18 @@ Set Height 900
 Set Shell "bash"
 
 Hide
-# Derived, not hardcoded: this tape lives inside the repo it points at
-# (agent-estate#754 -- the prior $HOME/.../agent-supervisor literal went
-# stale the day the repo was renamed to agent-estate, and every hardcoded
-# host path recurs the same way on the next rename). git rev-parse falls
-# back to pwd only if run outside a git checkout.
-Type "export AGENT_SUPERVISOR_REPO=${AGENT_SUPERVISOR_REPO:-$(git rev-parse --show-toplevel 2>/dev/null || pwd)}" Enter
+# agent-tui#168 (the third reference, not named by the issue itself):
+# this used to force AGENT_SUPERVISOR_REPO to a hardcoded
+# $HOME/source/repos/Personal/agent-supervisor default, which no longer
+# exists on this box now that it renamed to agent-estate -- so a bare
+# run of this tape drove the built binary's own "supervisor repo not
+# found" degraded path and still produced a GIF, silently. Removed
+# rather than updated to a second hardcoded name: cmd/estate/
+# supervisor.go's discoverSupervisorRepo already tries both names (and
+# any git walk-up) with no env var needed, so leaving AGENT_SUPERVISOR_REPO
+# unset here exercises that real resolution instead of a tape-local
+# fallback list that would drift from it. An explicit override still
+# works if $AGENT_SUPERVISOR_REPO is exported before running vhs.
 Show
 
 Type "/tmp/atui-recheck" Enter
