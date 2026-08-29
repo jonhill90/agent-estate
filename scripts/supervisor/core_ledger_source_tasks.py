@@ -122,11 +122,20 @@ class LedgerSourceTasksMixin:
         status,
         evidence,
         status_marker,
+        is_review=None,
     ):
         """Replace one local source spool record with facts read from GitHub.
 
         This intentionally has no lane or pane dependency: reconstruction must
         work after the entire supervisor state directory has been recreated.
+
+        agent-estate#838: `is_review` defaults to `None` ("not recorded"),
+        unchanged for every existing caller (`github_source.py`'s spool
+        reconstruction, `dispatch-pi-rpc.sh`'s plain issue dispatch) -- only
+        `dispatch-claude-print.sh`'s new `--reviews-pr` path passes `1`, the
+        same fact `record_dispatch` already records for the tmux flow's
+        `--reviews-pr` dispatches (see that function's own docstring on
+        `is_review`).
         """
         now = int(self.clock())
         with self._locked(), self._transaction() as connection:
@@ -142,6 +151,7 @@ class LedgerSourceTasksMixin:
                 evidence=evidence,
                 status_marker=status_marker,
                 now=now,
+                is_review=is_review,
             )
 
     def update_source_task_state(self, task_id, *, source_state=None, status=None):

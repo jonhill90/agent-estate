@@ -649,6 +649,7 @@ def main(argv=None):
             status="created",
             evidence=args.evidence,
             status_marker=None,
+            is_review=args.is_review,
         )
     elif args.command == "restore-plan":
         value = ledger.restore_plan()

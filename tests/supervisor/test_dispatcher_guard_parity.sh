@@ -140,16 +140,24 @@ guard collision-check-present 'collision-check\.sh' \
 
 # 7. #645/#650 -- the collision refusal downgrades to informational ONLY for
 # an EXPLICIT --reviews-pr dispatch (REVIEWS_PR_EXPLICIT), never for the
-# wider #70 inference -- a write dispatch must still be refused. Both
-# siblings lack this because neither accepts --reviews-pr at all: dispatch.sh
-# only delegates to dispatch-claude-print.sh when REVIEWS_PR and PR are both
-# empty (dispatch.sh :1538-1539), and dispatch-pi-rpc.sh's usage comment
-# never documents the flag either. There is no review-scoped case either
-# script can reach for this guard to scope.
+# wider #70 inference -- a write dispatch must still be refused.
+#
+# agent-estate#838: dispatch-claude-print.sh is no longer exempt. It now
+# accepts `--reviews-pr` (and `--reviews-pr-explicit`) for exactly one entry
+# path -- dispatch-lane-select.sh's own reroute, thrown only when the tmux
+# candidate loop excluded every free lane in the target session as a PR
+# contributor and none was left to review it. Its own `--reviews-pr-explicit`
+# gate mirrors dispatch.sh's `REVIEWS_PR_EXPLICIT` exactly, for the same
+# #650 reason: keying the downgrade on the mere presence of `$REVIEWS_PR`
+# (which the reroute always sets, since it only fires for a real review)
+# would risk a future direct caller of this script inheriting the downgrade
+# for a genuine write. dispatch-pi-rpc.sh is UNCHANGED -- it still accepts no
+# `--reviews-pr` shape at all and is never routed to by default (guard #6),
+# so it has no review-scoped case for this guard to encode either.
 guard collision-downgrade-scoped-to-writes 'REVIEWS_PR_EXPLICIT' \
   "$R" \
-  "EXEMPT:by-design -- dispatch-claude-print.sh never accepts --reviews-pr (dispatch.sh only delegates here when REVIEWS_PR and PR are both empty, :1538-1539); the write-vs-review distinction this guard encodes has no review-scoped case to apply to, so the unconditional refusal is correct for every case this script can reach." \
-  "EXEMPT:by-design -- same as dispatch-claude-print.sh (no --reviews-pr support), and also has no collision check at all (guard #6), so there is nothing here to scope."
+  "$R" \
+  "EXEMPT:by-design -- dispatch-pi-rpc.sh accepts no --reviews-pr shape and is never routed to by default (guard #6); no review-scoped case exists for this guard to encode."
 
 # 8. the worktree-occupancy check dispatch.sh's abort_send() runs before
 # removing a worktree -- refuses cleanup while the lane's own tmux pane is

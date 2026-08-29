@@ -134,10 +134,21 @@
 #              A review (`--reviews-pr`), a PR-scoped follow-up (`--pr`) or a
 #              multi-issue dispatch (`<issue>,<issue>...`) is left on the
 #              pre-#171 tmux flow regardless of this flag for now --
-#              `dispatch-claude-print.sh` does not yet speak any of those
-#              three shapes, and silently dropping one would be worse than
-#              routing it the old way; see agent-supervisor#171's own
-#              tracked follow-up.
+#              `dispatch-claude-print.sh` does not speak `--pr` or a
+#              multi-issue dispatch, and silently dropping either would be
+#              worse than routing it the old way; see agent-supervisor#171's
+#              own tracked follow-up. A review IS now an exception to "left
+#              on the tmux flow" in exactly one circumstance
+#              (agent-estate#838, dispatch-lane-select.sh): when the tmux
+#              candidate loop excludes every free lane in the target session
+#              as a PR contributor (agent-dotfiles#212) and none is left to
+#              hand the review to, this reroutes over `claude-print` instead
+#              of refusing -- see that reroute's own comment for why a
+#              freshly-minted `claude-print` lane needs none of
+#              `--reviews-pr`'s author-exclusion bookkeeping to stay
+#              independent. An ordinary review with a genuinely free
+#              non-author lane is UNAFFECTED and still runs the tmux flow
+#              exactly as before.
 # --force
 #              agent-supervisor#291: dispatch anyway when the pre-dispatch
 #              collision check (step 3.2) finds #<issue>'s files overlap an
@@ -180,13 +191,17 @@
 #              comment already makes for Claude.
 #
 # Exit 0 only when a lane has been sent a brief -- over tmux/send-keys, or
-# (new, #171, default for a plain single-issue `claude` dispatch) over a
-# freshly minted `claude-print` lane. Exit 1 on any refusal -- no free lane,
-# an issue someone else already claimed, a worktree that could not be
-# created, a send that failed, a `claude-print` register/assign that could
-# not reach `claude` (this NEVER falls back to send-keys -- see
+# (new, #171, default for a plain single-issue `claude` dispatch; also #838,
+# a review rerouted around a scarce session) over a freshly minted
+# `claude-print` lane. Exit 1 on any refusal -- no free lane, an issue
+# someone else already claimed, a worktree that could not be created, a send
+# that failed, a `claude-print` register/assign that could not reach
+# `claude` (this NEVER falls back to send-keys -- see
 # `dispatch-claude-print.sh`'s own header), or a review whose only free lane
-# wrote the PR under review.
+# wrote the PR under review AND could not be rerouted (`--live-pane` was
+# requested, `[repo]` could not be resolved, or no `claude` binary is on
+# PATH -- see dispatch-lane-select.sh's own reroute comment for the exact
+# conditions).
 
 set -uo pipefail
 
