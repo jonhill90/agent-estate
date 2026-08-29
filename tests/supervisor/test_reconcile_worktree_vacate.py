@@ -229,28 +229,43 @@ class FakePaneState:
     reads it to decide `refused` vs `reaped` -- so both halves of the real
     production call chain agree on ONE deterministic answer to "is a pane
     inside this worktree", instead of each asking a real tmux server or
-    `lsof` and hoping they agree with the fixture."""
+    `lsof` and hoping they agree with the fixture.
+
+    `last_launch_cmd` is agent-estate#827 fix2's own addition: the exact
+    string `_vacate_pane_before_reap` handed `respawn-pane` as its launch
+    command, so a test can assert it is never empty (fix2's own defect --
+    the first version respawned with NO command at all, leaving a bare
+    shell)."""
 
     def __init__(self, pane_path):
         self.pane_path = pane_path
         self.respawned_to = []
+        self.last_launch_cmd = None
 
 
 class FakeReconcilerRunner:
     """Drop-in for `LaneCompletionReconciler`'s own `runner` -- answers
     `lanes.sh --json <session>` from an in-memory row (identical shape to
     the real-tmux suite's own `SessionRunner`), and answers every
-    `tmux`/`git` call `_vacate_pane_before_reap` itself issues
-    (`display-message`, `rev-parse --git-common-dir`, `respawn-pane`)
-    against `FakePaneState` instead of a real tmux server -- so the real,
+    `tmux`/`git`/`bash harness-launch-cmd.sh` call `_vacate_pane_before_reap`
+    itself issues (`display-message`, `rev-parse --git-common-dir`,
+    `harness-launch-cmd.sh`, `respawn-pane`) against `FakePaneState` instead
+    of a real tmux server or the real harness registry -- so the real,
     unmodified `_vacate_pane_before_reap` method runs end to end and its
-    real effect (moving the pane) is what this suite observes."""
+    real effect (moving the pane, WITH a launch command) is what this suite
+    observes.
 
-    def __init__(self, state, session, window, common_dir):
+    `launch_cmd` defaults to a non-empty fake -- most fixtures in this file
+    want the shipped, successful path; `launch_cmd=""` (or `None`) models
+    agent-estate#827 fix2's own unresolved-harness case (no `H_LAUNCH_CMD`
+    for this harness, or `harness-launch-cmd.sh` failing outright)."""
+
+    def __init__(self, state, session, window, common_dir, launch_cmd="FAKE_LAUNCH_CMD --ready"):
         self.state = state
         self.session = session
         self.window = window
         self.common_dir = common_dir
+        self.launch_cmd = launch_cmd
         self.calls = []
 
     def __call__(self, command):
@@ -259,10 +274,25 @@ class FakeReconcilerRunner:
             return self.state.pane_path + "\n"
         if command[0] == "git" and "--git-common-dir" in command:
             return self.common_dir + "\n"
+        if command[0] == "bash" and command[1].endswith("harness-launch-cmd.sh"):
+            if not self.launch_cmd:
+                raise RuntimeError("harness-launch-cmd.sh: no harness named '%s'" % command[2])
+            return self.launch_cmd + "\n"
         if command[0] == "tmux" and command[1] == "respawn-pane":
-            park_dir = command[-1]
+            # agent-estate#827 fix2's own defect, pinned: the FIRST version
+            # of `_vacate_pane_before_reap` called `respawn-pane` with NO
+            # trailing launch command at all (bare shell). Shape-checked
+            # here, not merely positionally unpacked, so THAT mutation is
+            # caught as a call this fake refuses to answer, rather than
+            # silently reinterpreting `-c`/`park_dir` as `launch_cmd`/
+            # `park_dir` and passing anyway.
+            if len(command) != 8 or command[:3] != ["tmux", "respawn-pane", "-k"] \
+                    or command[3] != "-t" or command[5] != "-c" or not command[7]:
+                raise AssertionError(f"respawn-pane called with no launch command (bare shell): {command}")
+            park_dir, launch_cmd = command[6], command[7]
             self.state.pane_path = park_dir
             self.state.respawned_to.append(park_dir)
+            self.state.last_launch_cmd = launch_cmd
             return ""
         session = command[-1]
         if session != self.session:
@@ -356,6 +386,15 @@ class VacatePaneBeforeReapDeterministicTest(unittest.TestCase):
         self.assertTrue(pane_state.respawned_to, "the pane must have been moved before the reap call ran")
         self.assertNotEqual(str(self.worktree), pane_state.pane_path)
         self.assertEqual(1, len(reap_calls), "reap must be called exactly once, after the vacate step")
+        # agent-estate#827 fix2, requirement 1: the pane must be parked with
+        # a REAL launch command, never bare -- the defect the fix pass
+        # closed was `respawn-pane -k -c <dir>` with no trailing argv at
+        # all, which leaves a login shell lanes.sh can never read `free`.
+        self.assertTrue(pane_state.last_launch_cmd, "the parked pane must have been given a launch command, not left bare")
+        # agent-estate#827 fix2, requirement 2: the vacate step's own
+        # outcome is recorded on the SAME dict, distinguishable from the
+        # reap call's `outcome`/`reason`.
+        self.assertEqual("attempted:succeeded", report["worktrees"][0]["vacate"], report["worktrees"][0])
 
     def test_direction_2_mutation_without_the_vacate_step_the_refusal_reproduces(self):
         """Mutation check (agent-estate#827's own brief): the SAME fixture,
@@ -387,6 +426,66 @@ class VacatePaneBeforeReapDeterministicTest(unittest.TestCase):
         self.assertFalse(pane_state.respawned_to, "the vacate step was disabled -- the pane must never have moved")
         self.assertTrue(self.worktree.is_dir(), "without the vacate step, the worktree must survive exactly as before #825")
 
+    def test_direction_3_mutation_unresolved_harness_skips_instead_of_bare_shelling(self):
+        """agent-estate#827 fix2's own mutation check for requirement 1: an
+        unresolved harness (no `H_LAUNCH_CMD` for it, or `harness-launch-
+        cmd.sh` failing outright -- `launch_cmd=""` below simulates both)
+        must never fall back to the pre-fix2 bare respawn. It skips
+        entirely: the pane never moves, the reap call sees it still inside
+        and refuses exactly like direction 2, and `vacate` records WHY."""
+        self._build_lane("ae827-nolaunch")
+        pane_state = FakePaneState(pane_path=str(self.worktree))
+        reconciler_runner = FakeReconcilerRunner(
+            pane_state, "s-827", 3, common_dir=str(Path(self.tempdir.name) / "shared" / ".git"),
+            launch_cmd="",
+        )
+        reaper = LaneWorktreeReaper(self.ledger, runner=fake_reap_runner(pane_state))
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=reconciler_runner, idle_after=300, worktree_reaper=reaper,
+        ).sweep()
+
+        self.assertEqual(["ae827-nolaunch"], report["completed"])
+        self.assertEqual(1, len(report["worktrees"]))
+        self.assertEqual("refused", report["worktrees"][0]["outcome"])
+        self.assertIn("cwd is inside it (#478)", report["worktrees"][0]["reason"])
+        self.assertFalse(pane_state.respawned_to, "an unresolved harness must never respawn the pane at all")
+        self.assertEqual("skipped:no_harness_launch_cmd", report["worktrees"][0]["vacate"], report["worktrees"][0])
+        self.assertTrue(self.worktree.is_dir(), "the worktree must survive -- reap is still correctly refused")
+
+    def test_vacate_outcome_field_records_a_respawn_failure_distinctly_from_a_skip(self):
+        """agent-estate#827 fix2's own requirement 2: a vacate that was
+        genuinely ATTEMPTED but whose `respawn-pane` call itself failed
+        (tmux unreachable mid-call, say) must record `attempted:failed`,
+        never collapse into the same `skipped:*` bucket a lane this method
+        correctly declined to touch would produce -- the two must stay
+        distinguishable, which is the whole point of this field existing."""
+        self._build_lane("ae827-respawnfails")
+        pane_state = FakePaneState(pane_path=str(self.worktree))
+
+        class RaisingRespawnRunner(FakeReconcilerRunner):
+            def __call__(self, command):
+                if command[0] == "tmux" and command[1] == "respawn-pane":
+                    self.calls.append(command)
+                    raise RuntimeError("tmux respawn-pane: the server vanished")
+                return super().__call__(command)
+
+        reconciler_runner = RaisingRespawnRunner(
+            pane_state, "s-827", 3, common_dir=str(Path(self.tempdir.name) / "shared" / ".git"),
+        )
+        reaper = LaneWorktreeReaper(self.ledger, runner=fake_reap_runner(pane_state))
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=reconciler_runner, idle_after=300, worktree_reaper=reaper,
+        ).sweep()
+
+        self.assertEqual(1, len(report["worktrees"]))
+        self.assertEqual("attempted:failed", report["worktrees"][0]["vacate"], report["worktrees"][0])
+        self.assertNotEqual(
+            "skipped:no_harness_launch_cmd", report["worktrees"][0]["vacate"],
+            "a genuinely attempted-but-failed respawn must not read the same as a correctly declined one",
+        )
+
 
 class SessionRunner:
     """`lanes.sh --json <session>` answers from an in-memory row (this
@@ -405,7 +504,12 @@ class SessionRunner:
 
     def __call__(self, command):
         self.calls.append(command)
-        if command[0] in ("tmux", "git"):
+        # agent-estate#827 fix2: `bash` is `harness-launch-cmd.sh` --
+        # exercised for REAL here (see `VacatePaneBeforeReapRealTmuxTest.
+        # setUp`'s `HARNESS_REGISTRY_DIR` override, which points the real
+        # registry loader at a harmless stub harness instead of letting it
+        # resolve the genuine `claude` binary and actually launch one).
+        if command[0] in ("tmux", "git", "bash"):
             return subprocess.run(
                 command, env=self.env, check=True, capture_output=True, text=True, timeout=10
             ).stdout
@@ -437,6 +541,21 @@ class VacatePaneBeforeReapRealTmuxTest(unittest.TestCase):
         self.addCleanup(self.fixture.cleanup)
         self.tmpdir = tempfile.mkdtemp(prefix="ae825-tmux-")
         self.env = _isolated_env(self.tmpdir)
+        # agent-estate#827 fix2: `_vacate_pane_before_reap` now relaunches
+        # this lane's own recorded harness ("claude", set by `_build_lane`
+        # below) via the REAL `harness-launch-cmd.sh` -- pointed at a
+        # one-harness stub registry rather than the real one, so this test
+        # proves the CLI seam end to end without ever actually invoking the
+        # real `claude` binary inside its private tmux session.
+        self.harness_dir = Path(tempfile.mkdtemp(prefix="ae827-harness-"))
+        self.addCleanup(shutil.rmtree, self.harness_dir, ignore_errors=True)
+        (self.harness_dir / "claude.sh").write_text(
+            "HARNESS_NAME=claude\n"
+            "HARNESS_COMMAND_RE='^sleep$'\n"
+            "HARNESS_READY_RE='ready'\n"
+            "HARNESS_LAUNCH_CMD='sleep 30'\n"
+        )
+        self.env["HARNESS_REGISTRY_DIR"] = str(self.harness_dir)
         self.addCleanup(self._kill_tmux)
         self.state_tempdir = tempfile.TemporaryDirectory()
         self.addCleanup(self.state_tempdir.cleanup)
