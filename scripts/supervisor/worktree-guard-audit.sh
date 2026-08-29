@@ -76,6 +76,16 @@
 #                           per-`git show` bound in seconds (default: 5).
 #                           A single hung read is reported as UNKNOWN and
 #                           does not stop the rest of the walk.
+#   WORKTREE_GUARD_POLL_INTERVAL_SECONDS
+#                           how often bounded_show's poll loop wakes to
+#                           check whether the backgrounded `git show` has
+#                           finished (default: 0.05, agent-estate#800). The
+#                           bound this file-timeout applies is always
+#                           re-expressed in elapsed seconds -- ticks are
+#                           `FILE_TIMEOUT_SECONDS / POLL_INTERVAL_SECONDS`,
+#                           never a fixed iteration count -- so changing the
+#                           poll interval cannot silently change how long a
+#                           real hang is allowed to run.
 set -uo pipefail
 
 REPO="${1:-.}"
@@ -85,6 +95,23 @@ if ! git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 FILE_TIMEOUT="${WORKTREE_GUARD_FILE_TIMEOUT_SECONDS:-5}"
+POLL_INTERVAL="${WORKTREE_GUARD_POLL_INTERVAL_SECONDS:-0.05}"
+# agent-estate#800: bounded_show's poll loop used to sleep a full second per
+# iteration, so a 9ms `git show` still cost ~1s -- the loop's first `kill -0`
+# runs microseconds after backgrounding, finds the child still alive, and
+# the body always sleeps once. Measured: 19 worktrees x 13 files = 247
+# checks took 253s (1.02s/check) against a 9ms `git show`. A sub-second poll
+# fixes that, but FILE_TIMEOUT must still mean elapsed SECONDS, not
+# iterations -- MAX_TICKS re-derives the iteration count from the two
+# durations instead of assuming one iteration is one second, so the 5s bound
+# stays 5s no matter what POLL_INTERVAL is set to.
+MAX_TICKS="$(awk -v t="$FILE_TIMEOUT" -v p="$POLL_INTERVAL" 'BEGIN {
+  n = t / p
+  i = int(n)
+  if (n > i) i++
+  if (i < 1) i = 1
+  print i
+}')"
 
 # agent-supervisor#205: watchdog.sh's own outer bound on this whole script
 # (SUPERVISOR_GUARD_AUDIT_TIMEOUT) can TERM/KILL this process mid-file-check,
@@ -120,8 +147,35 @@ cleanup_show() {
   # finishes the job regardless of whether TERM's default handler already did.
   kill -TERM "$CUR_SHOW_PID" 2>/dev/null
   kill -KILL "$CUR_SHOW_PID" 2>/dev/null
+  CUR_SHOW_PID=""
 }
-trap cleanup_show TERM INT EXIT
+# agent-estate#800: a TERM/INT handler that only reaps the CURRENT child and
+# returns, without terminating the script itself, does not stop the walk --
+# bash resumes the interrupted loop right after the handler returns. That
+# leaves a window between "current hang reaped" and "outer KILL lands" in
+# which the walk can advance to the NEXT worktree/file and background a
+# SECOND `git show`, one the already-fired TERM will never reap and the
+# outer KILL (unblockable, cannot be trapped) cannot reap either -- an
+# orphan despite the two-bound design. Finer polling (this file's own
+# agent-estate#800 fix) makes this window worse, not better: catching TERM
+# sooner leaves MORE of the caller's fixed TERM-then-KILL grace period free
+# for the walk to reach that next iteration, not less. So on TERM/INT this
+# handler reaps the in-flight child, then re-raises the same signal against
+# itself with its own trap removed -- the shell's default disposition then
+# actually terminates the process, matching the property the two-bound
+# design already assumed was true. sig_cleanup_show is a thin per-signal
+# wrapper (not `cleanup_show TERM` from `trap ... TERM INT` directly)
+# because that shared-form invocation would not tell cleanup_show which
+# signal name to re-raise.
+sig_cleanup_show() {
+  local sig="$1"
+  cleanup_show
+  trap - "$sig"
+  kill -s "$sig" "$$"
+}
+trap 'sig_cleanup_show TERM' TERM
+trap 'sig_cleanup_show INT' INT
+trap cleanup_show EXIT
 
 # Bounded `git show <sha>:<path>`. Never called via `$(...)` -- see the
 # CUR_SHOW_PID comment above for why that would defeat the trap this relies
@@ -138,14 +192,14 @@ bounded_show() {
   waited=0
   timed_out=0
   while kill -0 "$CUR_SHOW_PID" 2>/dev/null; do
-    if [ "$waited" -ge "$FILE_TIMEOUT" ]; then
+    if [ "$waited" -ge "$MAX_TICKS" ]; then
       timed_out=1
       kill -TERM "$CUR_SHOW_PID" 2>/dev/null
       sleep 1
       kill -KILL "$CUR_SHOW_PID" 2>/dev/null
       break
     fi
-    sleep 1
+    sleep "$POLL_INTERVAL"
     waited=$((waited + 1))
   done
   wait "$CUR_SHOW_PID" 2>/dev/null
