@@ -129,6 +129,21 @@ type Model struct {
 	participants      []Participant
 	participantsFetch ParticipantsFetcher
 
+	// participantsFetchInFlight guards m.participantsFetch the same way
+	// internal/rail.Model's and internal/agents.Model's own fetchInFlight
+	// fields guard their "sessions" reads, for the exact defect
+	// agent-tui#177 measured: participantsTickMsg fired every
+	// participantsRefreshInterval (2s) regardless of whether the previous
+	// fetch had answered, so under load this ticker kept enqueueing
+	// requests behind rail/agents/monitor's own against the same
+	// single-threaded mcp_server.py rather than waiting for its own to
+	// drain (internal/agents/model.go's fetchInFlight doc comment has the
+	// fuller measurement). Set true the moment a fetch is issued (Init and
+	// the participantsTickMsg case below), cleared only in
+	// participantsFetchMsg -- see that case's own comment for why clearing
+	// it first, unconditionally, matters.
+	participantsFetchInFlight bool
+
 	theme       theme.Theme
 	themeNotice string
 }
@@ -176,8 +191,15 @@ func (m Model) WithSender(s Sender) Model {
 // convention WithSender/WithTasks document elsewhere in this module.
 // ValidateMentions then refuses every @-mention as unknown against an
 // empty participants slice, which is the honest answer, not a crash.
+// participantsFetchInFlight starts true whenever fetch != nil, matching
+// internal/rail.Model.New's and internal/agents.New's own fetchInFlight
+// seed: Init() below always issues the first participants fetch
+// unconditionally when a fetch is wired, so the guard must already reflect
+// that before the first participantsTickMsg (participantsRefreshInterval
+// later) can check it.
 func (m Model) WithParticipants(fetch ParticipantsFetcher) Model {
 	m.participantsFetch = fetch
+	m.participantsFetchInFlight = fetch != nil
 	return m
 }
 
@@ -328,6 +350,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case participantsFetchMsg:
+		// agent-tui#177: clear the in-flight guard BEFORE anything else in
+		// this case, unconditionally (success or failure) -- same
+		// discipline as internal/agents' own fetchResultMsg case. Leaving
+		// it set on any path (including a timeout) wedges every future
+		// participantsTickMsg into believing one is still outstanding
+		// forever, silently freezing the roster (and every @-mention
+		// validated against it) on stale data.
+		m.participantsFetchInFlight = false
 		// A failed fetch leaves m.participants at its last-known value
 		// rather than clearing it -- the same "blind, not quiet" choice
 		// internal/rail's own Fetcher failures make: a stale roster that
@@ -340,7 +370,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case participantsTickMsg:
-		return m, tea.Batch(participantsTickCmd(), m.participantsFetchCmd())
+		// agent-tui#177: m.participantsFetch only re-fires when the
+		// previous one has already answered -- see
+		// participantsFetchInFlight's own doc comment for why an
+		// unconditional re-fire here is exactly the request pile-up that
+		// issue measured.
+		cmds := []tea.Cmd{participantsTickCmd()}
+		if m.participantsFetch != nil && !m.participantsFetchInFlight {
+			m.participantsFetchInFlight = true
+			cmds = append(cmds, m.participantsFetchCmd())
+		}
+		return m, tea.Batch(cmds...)
 
 	case tea.KeyMsg:
 		return m.handleKey(msg)

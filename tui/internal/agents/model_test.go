@@ -132,19 +132,148 @@ func TestNKeySetsANamedNoticeRatherThanSilentlyDoingNothing(t *testing.T) {
 }
 
 // TestRKeyRefetches confirms manual refresh actually asks Fetcher again --
-// board/rail/cost's own "[r] refresh" convention.
+// board/rail/cost's own "[r] refresh" convention. New seeds fetchInFlight
+// true (fetchInFlight's own doc comment: Init() always fires the first fetch
+// unconditionally, so the guard must already reflect that) -- this test
+// resolves that seeded fetch first, the same way
+// internal/rail/inflight_test.go's TestRefreshMsgDoesNotOverlapInFlightSessionsFetch
+// does, before asserting that a genuinely idle "r" issues a new one.
 func TestRKeyRefetches(t *testing.T) {
 	calls := 0
 	fetch := func() ([]lane.Session, error) { calls++; return nil, nil }
 	m := New(fetch)
 
-	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if !m.fetchInFlight {
+		t.Fatal("New must seed fetchInFlight true -- Init() always fires the first fetch")
+	}
+	next, _ := m.Update(fetchResultMsg{sessions: nil, err: nil})
+	m = next.(Model)
+	if m.fetchInFlight {
+		t.Fatal("fetchResultMsg must clear fetchInFlight")
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	m = next.(Model)
 	if cmd == nil {
 		t.Fatal("[r] returned a nil cmd, want a fetch")
 	}
 	cmd()
 	if calls != 1 {
 		t.Fatalf("fetch called %d times after [r], want 1", calls)
+	}
+	if !m.fetchInFlight {
+		t.Fatal("[r] must set fetchInFlight true for the fetch it just issued")
+	}
+}
+
+// TestRKeyNoopsWhileFetchInFlight is agent-tui#175's core reproduction: a
+// manual "r" (or the periodic refreshMsg ticker, which shares this same
+// guard) pressed while a previous fetch has not yet answered must NOT queue
+// a second "sessions" call against mcp_server.py's single-threaded stdio
+// loop (that file's own "for line in stdin" doc comment) -- a request pile-up
+// there, not server slowness, is what turned every refresh into
+// "no reply within 10s" (see fetchInFlight's own doc comment on Model).
+func TestRKeyNoopsWhileFetchInFlight(t *testing.T) {
+	calls := 0
+	fetch := func() ([]lane.Session, error) { calls++; return nil, nil }
+	m := New(fetch) // seeds fetchInFlight true, matching Init's own first fetch
+
+	_, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("r")})
+	if cmd != nil {
+		t.Fatal("[r] while a fetch is already in flight must return a nil cmd, not queue a second fetch")
+	}
+	if calls != 0 {
+		t.Fatalf("fetch called %d times, want 0 -- the in-flight guard should have blocked it", calls)
+	}
+}
+
+// TestRefreshMsgDoesNotOverlapInFlightFetch is agents.Model's own version of
+// internal/rail/inflight_test.go's TestRefreshMsgDoesNotOverlapInFlightSessionsFetch:
+// two refreshMsg ticks landing before the first fetch answers must issue
+// exactly one fetch, not two.
+func TestRefreshMsgDoesNotOverlapInFlightFetch(t *testing.T) {
+	calls := 0
+	fetch := func() ([]lane.Session, error) { calls++; return nil, errors.New("slow, not yet answered") }
+	m := New(fetch)
+
+	// New seeds fetchInFlight true for the first fetch Init() always issues
+	// (fetchInFlight's own doc comment) -- resolve that seeded fetch before
+	// exercising refreshMsg's own overlap guard, same as TestRKeyRefetches.
+	next, _ := m.Update(fetchResultMsg{err: errors.New("seed")})
+	m = next.(Model)
+
+	next, cmd := m.Update(refreshMsg(time.Now()))
+	m = next.(Model)
+	runAgentsCmd(cmd)
+	if calls != 1 {
+		t.Fatalf("first refreshMsg: fetch called %d times, want 1", calls)
+	}
+
+	next, cmd = m.Update(refreshMsg(time.Now()))
+	m = next.(Model)
+	runAgentsCmd(cmd)
+	if calls != 1 {
+		t.Fatalf("second, overlapping refreshMsg must not re-fire the fetch -- called %d times, want 1", calls)
+	}
+
+	next, _ = m.Update(fetchResultMsg{err: errors.New("finally answered")})
+	m = next.(Model)
+	next, cmd = m.Update(refreshMsg(time.Now()))
+	runAgentsCmd(cmd)
+	if calls != 2 {
+		t.Fatalf("once the prior fetch resolved, the next refreshMsg must issue a new one -- got %d, want 2", calls)
+	}
+}
+
+// runAgentsCmd executes cmd and every sub-command of any tea.BatchMsg it
+// returns -- refreshMsg's own Cmd batches refreshCmd() (a real tea.Tick)
+// alongside doFetch(m.fetch); only the latter should actually invoke fetch
+// when run.
+func runAgentsCmd(cmd tea.Cmd) {
+	if cmd == nil {
+		return
+	}
+	msg := cmd()
+	if msg == nil {
+		return
+	}
+	if batch, ok := msg.(tea.BatchMsg); ok {
+		for _, sub := range batch {
+			runAgentsCmd(sub)
+		}
+	}
+}
+
+// TestFailedRefreshKeepsPriorRows is agent-tui#175's second, independent
+// defect: a failed refresh must not discard the last good result -- "(no
+// agents)" is indistinguishable from a genuinely empty estate. A populated
+// Model that then receives a failing fetchResultMsg must keep its rows and
+// surface the error, not collapse to zero rows.
+func TestFailedRefreshKeepsPriorRows(t *testing.T) {
+	m := New(nil)
+	next, _ := m.Update(fetchResultMsg{sessions: []lane.Session{
+		{Name: "s", Lanes: []lane.Lane{{Name: "w1", State: "busy"}}},
+	}})
+	m = next.(Model)
+	if len(m.Rows()) != 1 {
+		t.Fatalf("setup: Rows() = %+v, want one row before the failure", m.Rows())
+	}
+
+	next, _ = m.Update(fetchResultMsg{sessions: nil, err: errors.New("mcp: tools/call: no reply within 10s")})
+	m = next.(Model)
+
+	if len(m.Rows()) != 1 {
+		t.Fatalf("Rows() after a failed refresh = %+v, want the prior row kept, not discarded", m.Rows())
+	}
+	view := m.View()
+	if !strings.Contains(view, "s:w1") {
+		t.Fatalf("View() after a failed refresh must still show the stale row:\n%s", view)
+	}
+	if !strings.Contains(view, "sessions unavailable") {
+		t.Fatalf("View() after a failed refresh must still surface the error:\n%s", view)
+	}
+	if strings.Contains(view, "(no agents)") {
+		t.Fatalf("View() after a failed refresh must not read as a genuinely empty estate:\n%s", view)
 	}
 }
 

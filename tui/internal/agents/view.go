@@ -3,6 +3,7 @@ package agents
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/lipgloss"
 
@@ -35,6 +36,14 @@ func (m Model) View() string {
 	if m.fetchErr != nil {
 		errStyle := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Color(theme.RoleError))
 		b.WriteString(errStyle.Render("! sessions unavailable: "+m.fetchErr.Error()) + "\n")
+		// agent-tui#175: a failed refresh no longer clears m.sessions (see
+		// Update's fetchResultMsg case), so rows below may be the last GOOD
+		// fetch rather than current data -- say so explicitly rather than
+		// let a reader mistake an unlabelled table for a fresh one.
+		if !m.lastFetched.IsZero() {
+			age := time.Since(m.lastFetched).Round(time.Second)
+			b.WriteString(legendStyle.Render(fmt.Sprintf("(showing last good data, age: %s)", age)) + "\n")
+		}
 	}
 
 	rows := m.Rows()

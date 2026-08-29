@@ -2,6 +2,8 @@ package mcp
 
 import (
 	"bufio"
+	"encoding/json"
+	"io"
 	"os"
 	"os/exec"
 	"strings"
@@ -146,6 +148,7 @@ func TestPendRegistrationNotBlockedByStuckWrite(t *testing.T) {
 		stdout:  bufio.NewReader(strings.NewReader("")),
 		pend:    make(map[int64]chan rpcResponse),
 		writeMu: make(chan struct{}, 1),
+		callSem: make(chan struct{}, 1),
 	}
 
 	// Goroutine A: a call whose stdin Write blocks forever (simulating the
@@ -220,6 +223,7 @@ func TestFloodOfCallsDoesNotPileUpOnWriteMu(t *testing.T) {
 		stdout:  bufio.NewReader(strings.NewReader("")),
 		pend:    make(map[int64]chan rpcResponse),
 		writeMu: make(chan struct{}, 1),
+		callSem: make(chan struct{}, 1),
 	}
 
 	// Goroutine A: wedges forever inside stdin.Write, exactly like a real
@@ -263,4 +267,148 @@ func TestFloodOfCallsDoesNotPileUpOnWriteMu(t *testing.T) {
 
 	// w.Close, not c.Close -- see the identical note above.
 	_ = w.Close()
+}
+
+// discardWriteCloser accepts every Write instantly and never blocks --
+// unlike blockingWriter above, this models a write that succeeds (the
+// child's stdin is being read fine) on a Client whose reply never arrives,
+// so callTimeout fails via the reply-wait ctx.Done() branch rather than
+// ever touching writeMu's own contention.
+type discardWriteCloser struct{}
+
+func (discardWriteCloser) Write(p []byte) (int, error) { return len(p), nil }
+func (discardWriteCloser) Close() error                { return nil }
+
+// TestCallSemReleasedAfterFailedCall is the regression test for the "do not
+// leave the guard held on the error path" requirement in agent-tui#177's
+// brief: callSem (client.go) must be released even when callTimeout returns
+// an error, or one failing call permanently deadlocks every later caller on
+// this Client -- strictly worse than the cross-pane timeout this fix closes.
+// This uses a stdout that never produces a reply (an empty reader), so the
+// call fails via the reply-wait ctx.Done() branch, then asserts the slot is
+// immediately acquirable again rather than still held.
+//
+// Mutation check (agent-tui#177's brief, "break it deliberately and confirm
+// a test goes red"): moving callSem's `defer func() { <-c.callSem }()` in
+// client.go so it runs only on the success path (e.g. inlining the release
+// at the end of the function body instead of via defer right after
+// acquisition) makes this test fail with "callSem still held" -- confirmed
+// by hand during this fix's own review, not left as an assertion nobody ran.
+func TestCallSemReleasedAfterFailedCall(t *testing.T) {
+	orig := callTimeout
+	callTimeout = 50 * time.Millisecond
+	defer func() { callTimeout = orig }()
+
+	c := &Client{
+		stdin:   discardWriteCloser{},
+		stdout:  bufio.NewReader(strings.NewReader("")),
+		pend:    make(map[int64]chan rpcResponse),
+		writeMu: make(chan struct{}, 1),
+		callSem: make(chan struct{}, 1),
+	}
+
+	_, err := c.callTimeout("nope", nil, callTimeout)
+	if err == nil {
+		t.Fatal("callTimeout against a Client whose stdout never replies returned no error")
+	}
+
+	select {
+	case c.callSem <- struct{}{}:
+		<-c.callSem
+	default:
+		t.Fatal("callSem still held after a failed call -- agent-tui#177's guard leaked its " +
+			"serialisation slot on the error path, which deadlocks every future caller on this Client")
+	}
+}
+
+// TestCallSemLimitsInFlightRequestsToOne is the cross-pane reproduction
+// agent-tui#177 asks for: several concurrent CallTool-shaped calls through
+// the SAME Client (exactly cmd/estate/main.go's shape -- internal/rail,
+// internal/agents, internal/monitor and internal/chat's participants roster
+// all share one sessionsFetch/lanesFetch closure over one *mcp.Client) must
+// never have more than one request outstanding (written, awaiting a reply)
+// at once.
+//
+// Deliberately NOT a wall-clock/elapsed-time assertion: the fake server
+// below answers requests strictly one at a time regardless of client
+// behaviour (its decode-sleep-reply loop is itself sequential), so total
+// wall time for N calls is ~N*delay whether or not the CLIENT serialises --
+// that shape of test was tried first and verified, by hand, to keep passing
+// even with callSem's acquire/release deleted, which makes it useless as a
+// regression test. What actually distinguishes "the client serialises" is
+// how many requests are simultaneously registered in c.pend (written but
+// not yet answered): callSem restricts this to at most 1; without it, up to
+// N goroutines can each register a pend entry and write their request
+// before any reply arrives, since writeMu only guards the brief Write call
+// itself, not the wait that follows it.
+//
+// Mutation check (agent-tui#177's brief, "break it deliberately and confirm
+// a test goes red"): deleting callSem's acquire/defer-release pair in
+// client.go's callTimeout makes this test fail with "observed 5 requests
+// simultaneously in flight" -- confirmed by hand during this fix's own
+// review (a wall-clock version of this same mutation, tried first, did NOT
+// go red, for the reason explained above).
+func TestCallSemLimitsInFlightRequestsToOne(t *testing.T) {
+	stdinR, stdinW := io.Pipe()
+	stdoutR, stdoutW := io.Pipe()
+
+	const delay = 100 * time.Millisecond
+	go func() {
+		dec := json.NewDecoder(stdinR)
+		for {
+			var req rpcRequest
+			if err := dec.Decode(&req); err != nil {
+				return
+			}
+			time.Sleep(delay)
+			resp := rpcResponse{
+				JSONRPC: "2.0",
+				ID:      req.ID,
+				Result:  json.RawMessage(`{"content":[{"type":"text","text":"ok"}]}`),
+			}
+			b, err := json.Marshal(resp)
+			if err != nil {
+				return
+			}
+			if _, err := stdoutW.Write(append(b, '\n')); err != nil {
+				return
+			}
+		}
+	}()
+
+	c := &Client{
+		stdin:   stdinW,
+		stdout:  bufio.NewReader(stdoutR),
+		pend:    make(map[int64]chan rpcResponse),
+		writeMu: make(chan struct{}, 1),
+		callSem: make(chan struct{}, 1),
+	}
+	go c.readLoop()
+
+	const n = 5
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = c.callTimeout("sessions", nil, 2*time.Second)
+		}()
+	}
+
+	// Sample mid-flight, once the first request is certainly already
+	// registered and being "processed" (asleep in the fake server) but
+	// before it can possibly have replied -- if callSem let every flood
+	// goroutine past registration instead of queuing them, all 5 pend
+	// entries would already exist by now.
+	time.Sleep(delay / 2)
+	c.mu.Lock()
+	inFlight := len(c.pend)
+	c.mu.Unlock()
+
+	wg.Wait()
+
+	if inFlight > 1 {
+		t.Fatalf("observed %d requests simultaneously in flight through one Client, want at most 1 -- "+
+			"agent-tui#177's callSem did not serialise cross-pane callers", inFlight)
+	}
 }

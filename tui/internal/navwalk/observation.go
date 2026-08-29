@@ -42,6 +42,7 @@ type Verdict string
 
 const (
 	VerdictRenders         Verdict = "RENDERS"
+	VerdictStale           Verdict = "STALE"
 	VerdictStub            Verdict = "STUB"
 	VerdictEmpty           Verdict = "EMPTY"
 	VerdictBroken          Verdict = "BROKEN"

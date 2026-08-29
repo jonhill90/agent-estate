@@ -52,11 +52,15 @@ func Render(rows []ResolvedRow) string {
 		"re-run the generator. A route with no observation file yet renders " +
 		"as `could not measure` below, not a blank row.\n\n")
 
-	b.WriteString("Legend: **RENDERS** real content, looks right · **EMPTY** " +
-		"renders but shows nothing (correct or bug, stated in its own notes) · " +
-		"**STUB** still the placeholder · **BROKEN** error/panic/garbage · " +
-		"**REMOVED** no longer a destination at all · **could not measure** " +
-		"never recorded or unreachable.\n\n")
+	b.WriteString("Legend: **RENDERS** real content, looks right · **STALE** " +
+		"rendered real content known not to be current -- a fetch failed or " +
+		"timed out and the pane fell back to its last good data instead of " +
+		"blanking (agent-tui#176's designed failure mode), notes state the " +
+		"age where the pane itself surfaces one · **EMPTY** renders but shows " +
+		"nothing (correct or bug, stated in its own notes) · **STUB** still " +
+		"the placeholder · **BROKEN** error/panic/garbage · **REMOVED** no " +
+		"longer a destination at all · **could not measure** never recorded " +
+		"or unreachable.\n\n")
 
 	b.WriteString("| # | Destination | Result | Source | Notes |\n")
 	b.WriteString("|---|---|---|---|---|\n")
@@ -84,7 +88,7 @@ func Render(rows []ResolvedRow) string {
 		}
 		counts[r.Obs.Verdict]++
 	}
-	order := []Verdict{VerdictRenders, VerdictStub, VerdictEmpty, VerdictBroken, VerdictRemoved, VerdictCouldNotMeasure}
+	order := []Verdict{VerdictRenders, VerdictStale, VerdictStub, VerdictEmpty, VerdictBroken, VerdictRemoved, VerdictCouldNotMeasure}
 	for _, v := range order {
 		if counts[v] == 0 && v != VerdictRenders {
 			continue

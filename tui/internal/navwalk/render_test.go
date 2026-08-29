@@ -89,3 +89,37 @@ func TestRenderSummaryCountsMatchTheRows(t *testing.T) {
 		t.Errorf("Render summary missing could not measure: 1:\n%s", out)
 	}
 }
+
+// TestRenderStaleIsItsOwnVerdictNotRenders is agent-tui#182's own
+// mutation check: a route showing agent-tui#176's retained-last-good-data
+// behaviour must count and print as STALE, not fold silently into
+// RENDERS -- the exact distinction agent-tui#182 was filed to restore.
+func TestRenderStaleIsItsOwnVerdictNotRenders(t *testing.T) {
+	rows := []ResolvedRow{
+		{Entry: ManifestEntry{ID: "agents", Label: "Agents"}, Known: true,
+			Obs: Observation{Verdict: VerdictStale, Date: "2026-08-29", Source: "s",
+				Notes: "showing last good data, age: 22s"}},
+		{Entry: ManifestEntry{ID: "chat", Label: "Chat"}, Known: true,
+			Obs: Observation{Verdict: VerdictRenders, Date: "2026-08-29", Source: "s"}},
+	}
+	out := Render(rows)
+	if !strings.Contains(out, "| Agents | STALE |") {
+		t.Errorf("Render output missing a STALE row for Agents:\n%s", out)
+	}
+	if !strings.Contains(out, "STALE: 1") {
+		t.Errorf("Render summary missing STALE: 1:\n%s", out)
+	}
+	if !strings.Contains(out, "RENDERS: 1") {
+		t.Errorf("Render summary missing RENDERS: 1 -- a STALE row must not also count as RENDERS:\n%s", out)
+	}
+}
+
+// TestVerdictStaleValueIsStable pins the exact string persisted to disk
+// (testdata/vhs/nav-walk/observations/*.jsonl) -- a future rename of the
+// Go constant must not silently reflow every JSONL file already recorded
+// with the old string.
+func TestVerdictStaleValueIsStable(t *testing.T) {
+	if VerdictStale != "STALE" {
+		t.Fatalf("VerdictStale = %q, want %q", VerdictStale, "STALE")
+	}
+}
