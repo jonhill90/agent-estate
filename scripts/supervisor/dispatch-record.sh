@@ -176,9 +176,11 @@ else
     fi
   fi
   # agent-supervisor#117: recorded CANONICAL, not as `worktree.sh` printed
-  # it. `WORKTREE` is built from `$TMPDIR`/`WORKTREE_ROOT`, and on macOS
-  # both `/tmp` and (the `/var/folders/...` `$TMPDIR` default) `/var` are
-  # themselves symlinks into `/private` -- `git worktree list --porcelain`
+  # it. `WORKTREE` is built from `$REPO/.worktrees` by default since
+  # agent-estate#821 (or `$TMPDIR`/`WORKTREE_ROOT` when that's overridden),
+  # and on macOS both `/tmp` and (the `/var/folders/...` `$TMPDIR` default)
+  # `/var` are themselves symlinks into `/private` -- `git worktree list
+  # --porcelain`
   # (step 3's own lookup, above) reports the RESOLVED path, so recording
   # the unresolved one here would make every future lookup miss by
   # construction, silently, for every dispatch on such a host. Falls back

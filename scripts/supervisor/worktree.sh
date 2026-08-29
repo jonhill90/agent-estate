@@ -742,7 +742,20 @@ new)
   REPO="${3:-$PWD}"
   BASE="${4:-origin/main}"
   BRANCH="lane/$SLUG"
-  ROOT="${WORKTREE_ROOT:-${TMPDIR:-/tmp}}"
+  # agent-estate#821: default INSIDE $REPO/.worktrees/, not $TMPDIR. `gc`'s
+  # own scope filter (below, #530/#682) only ever swept $REPO/.worktrees/ by
+  # default; a worktree created under $TMPDIR was invisible to it and to
+  # `git worktree prune` alike the moment nothing else referenced it --
+  # measured live 2026-08-29: 427 ad-*/ dirs under $TMPDIR, only 176
+  # registered against any of the four repos' `git worktree list`, the
+  # other 251 permanently outside every existing guard's reach. Landing
+  # every NEW worktree inside .worktrees/ puts it in scope for the same
+  # dirty/ahead-of-main/live-cwd/unmerged checks `gc` already proves,
+  # instead of adding a second, weaker set of checks elsewhere.
+  # `WORKTREE_ROOT` still overrides this outright -- every test in this
+  # suite already sets it to a throwaway fixture root, and that contract is
+  # unchanged; only the DEFAULT moves off $TMPDIR.
+  ROOT="${WORKTREE_ROOT:-$REPO/.worktrees}"
   DEST="$ROOT/ad-$SLUG-$$"
   if [ -e "$DEST" ]; then
     echo "worktree: $DEST already exists" >&2
@@ -986,9 +999,10 @@ gc)
   # for a candidate that is genuinely inside .worktrees/.
   WORKTREES_ROOT_REAL=$(cd "$REPO/.worktrees" 2>/dev/null && pwd -P) || WORKTREES_ROOT_REAL=""
   # agent-supervisor#682: `.worktrees/` is not where most of this estate's
-  # lane worktrees actually live. `new` (above) hands every dispatch a
-  # worktree under `${WORKTREE_ROOT:-${TMPDIR:-/tmp}}/ad-<slug>-<pid>` --
-  # NOT `$REPO/.worktrees/` -- so the scope filter above, left as an open
+  # lane worktrees actually live -- AS OF THIS COMMENT, 2026-08-28: `new`
+  # (above) used to hand every dispatch a worktree under
+  # `${WORKTREE_ROOT:-${TMPDIR:-/tmp}}/ad-<slug>-<pid>` -- NOT
+  # `$REPO/.worktrees/` -- so the scope filter above, left as an open
   # question by #530 ("whether the two excluded path classes should ever
   # be swept under some future design is explicitly left open, not decided
   # here"), was quietly excluding the majority of this repo's own
@@ -996,6 +1010,14 @@ gc)
   # live estate 2026-08-28, 120 of 130 registered non-main worktrees sat
   # outside `.worktrees/`, and every one of them was skipped for that
   # reason alone -- before liveness, age, or content were even checked.
+  # agent-estate#821 changed `new`'s DEFAULT (not `WORKTREE_GC_EXTRA_ROOTS`,
+  # which is unrelated and still opt-in) to land every NEW worktree inside
+  # `$REPO/.worktrees/` in the first place -- the measurement above is
+  # historical, describing why the scope filter and `WORKTREE_GC_EXTRA_ROOTS`
+  # exist, not the current shape of where a freshly dispatched worktree
+  # lands. `WORKTREE_GC_EXTRA_ROOTS` still matters for the pre-#821 backlog
+  # (a separate reaper, per #821's own brief) and for any worktree created
+  # by hand or by a caller passing an explicit `WORKTREE_ROOT` override.
   #
   # `WORKTREE_GC_EXTRA_ROOTS` (space-separated real or resolvable paths,
   # unset by default -- no existing caller or test sets it, so default

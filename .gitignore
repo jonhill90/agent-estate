@@ -12,6 +12,15 @@ __pycache__/
 # two cannot drift.
 *.LOCAL.md
 
+# agent-estate#821: worktree.sh new's default location for every lane
+# worktree it creates for THIS repo (WORKTREE_ROOT still overrides it).
+# Unignored, `git status`/`worktree.sh guard` in the main checkout would
+# report every linked worktree under here as an untracked directory --
+# confirmed live: `git worktree add .worktrees/x` followed by `git status
+# --porcelain` in the main checkout prints `?? .worktrees/` until this is
+# in place.
+/.worktrees/
+
 # tui/ build artifacts (agent-tui's own .gitignore, re-anchored under tui/
 # now that it's a subdirectory rather than its own repo root)
 /tui/estate
