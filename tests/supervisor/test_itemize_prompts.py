@@ -532,15 +532,19 @@ class TailNoisePatternsTests(unittest.TestCase):
         self.assertIsNone(itemize_prompts.noise_reason(text))
 
     def test_anchor_regression_quoted_scaffold_in_a_longer_prompt_gh_pr_checks(self):
-        # agent-estate#810 REQUEST_CHANGES: `noise_reason` used unanchored
-        # `.search()`, so it matched the dispatcher's fixed scaffold
-        # anywhere in the text -- including inside a genuinely human prompt
-        # that merely QUOTES the scaffold while asking to change it. Pinned
-        # verbatim from the reviewer's own PR comment. Must stay None.
+        # agent-estate#810 REQUEST_CHANGES (second round): the first fix
+        # pass's pinned string had a doubled backtick right after the PR
+        # number ("`Check `gh pr checks 805`` for") -- one backtick too
+        # many for the regex's own single `` ` `` before " for", so it
+        # never matched *either* anchored or unanchored and proved nothing.
+        # This string reproduces the dispatcher's scaffold with correct
+        # single backticks, quoted mid-sentence (not at the string's own
+        # start) -- so the unanchored regex genuinely matches it via
+        # `.search()`, and the anchor is what turns that match back to None.
         text = (
-            "The brief text always says `Check `gh pr checks 805`` for the "
-            "agent-estate PR -- can we vary that wording so it does not "
-            "read as robotic?"
+            "Yesterday the dispatcher sent: Check `gh pr checks 805` for "
+            "the agent-estate PR (worktree at /tmp/x) -- can we vary that "
+            "wording so it does not read as robotic?"
         )
         self.assertIsNone(itemize_prompts.noise_reason(text))
 
