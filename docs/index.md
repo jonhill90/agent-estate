@@ -17,6 +17,8 @@ The dispatcher, ledger, and lane-supervision system.
 * [0008 — An estate-lane's PR authorship: self-run cross-check now, an independent poller as the real fix, on an explicit trigger](decisions/0008-estate-lane-pr-authorship-evidence.md) - Should a lane self-assert its own PR authorship, or must it only ever be recorded by whatever dispatched the work -- decided, with the losing argument answered.
 * [0010 — Estate-lane PR authorship, after three failures: redesign, bound, and say plainly what is not proven](decisions/0010-estate-authorship-three-failures.md) - Three attempts at ledger-proven PR authorship have each failed differently. Decided -- what changes, what's bounded, what's documented as a limit rather than solved.
 * [0011 — `dispatch.sh` proven; the standing rule, and the backlog's real path, established not assumed](decisions/0011-dispatch-sh-standing-rule-and-backlog-path.md) - dispatch.sh works end to end -- the standing rule for all future dispatch, what retires, and the established (not assumed) legitimate path for the fifteen already-open PRs.
+* [0012 — Invariant evidence](decisions/0012-invariant-evidence.md) - Extended evidence for AGENTS.md's Invariants 4, 9, and 10 -- the incidents that produced each rule, moved out of the index.
+* [0013 — The tui/ merge gate](decisions/0013-tui-merge-gate.md) - Why `cmd/mergepr` exists and the blank-`Review-Lane:` self-approval bypass it had to close, behind AGENTS.md's "Merging PRs you did not author" section.
 
 ## Product
 
@@ -28,6 +30,7 @@ The dispatcher, ledger, and lane-supervision system.
 * [Restore after a tmux server loss](runbooks/restore-after-tmux-loss.md) - Verified steps for bringing every lane back after the tmux server dies.
 * [Retiring the `send-keys` lanes (agent-supervisor#284)](runbooks/send-keys-retirement-284.md) - Enumeration of the 29 `send-keys` rows measured for #284's retirement.
 * [agent-tui + agent-supervisor → agent-estate migration](runbooks/agent-estate-migration.md) - Executable command sequence for merging agent-tui into agent-supervisor as agent-estate, with a verification and a rollback after every step.
+* [A merged fix can look identical to an unfixed defect](runbooks/stale-checkout-diagnosis.md) - `agent-supervisor#308`'s stale-checkout misdiagnosis, behind AGENTS.md's failure-modes section.
 
 ## Diagrams
 
@@ -78,3 +81,7 @@ The terminal UI client, merged in under `tui/` by migration Step 2b/2c (#682, #7
 ## CI / Guards
 
 * [Tape-build guard](tui/vhscheck-guard.md) - What `internal/vhscheck` checks, why it exists (agent-tui#132/agent-tui#133), how it tells a live `go build` from a comment mentioning a path, and how to run it.
+
+## Reference
+
+* [agent-tui#49 — closed, three defects, all fixed](tui/known-defects-49.md) - Full detail behind AGENTS.md's "Known defects" clean bill of health.
