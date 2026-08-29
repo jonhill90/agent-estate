@@ -334,10 +334,86 @@ want_contains "a /clear whose Enter never submits is DETECTED, not reported as l
 [ "$(cat "$D/panes/1" 2>/dev/null)" = "/clear" ] \
   && ok "...and the box is CONFIRMED still holding the unsubmitted /clear afterward" \
   || bad "the box should still hold the unsubmitted /clear" "$(cat "$D/panes/1" 2>/dev/null)"
-retry_count=$(grep -c '^send-keys -t t:1 /clear Enter$' "$D/tmux.log" 2>/dev/null || echo 0)
+# agent-estate#817: "/clear" and Enter are now two SEPARATE send-keys calls
+# (not one "/clear" Enter call) -- see verified_preclear's own header for
+# why. Count the "/clear" sends, not a combined line that no longer exists.
+retry_count=$(grep -c '^send-keys -t t:1 /clear$' "$D/tmux.log" 2>/dev/null || echo 0)
 [ "$retry_count" -eq 2 ] \
   && ok "...and it actually retried (--retries 2), not just failed once" \
   || bad "expected 2 /clear attempts logged, got $retry_count" "$(cat "$D/tmux.log")"
+enter_count=$(grep -c '^send-keys -t t:1 Enter$' "$D/tmux.log" 2>/dev/null || echo 0)
+[ "$enter_count" -eq 2 ] \
+  && ok "...and each retry sent Enter as its OWN separate send-keys call (#817)" \
+  || bad "expected 2 separate Enter sends logged, got $enter_count" "$(cat "$D/tmux.log")"
+
+# --- 7b. agent-estate#817: codex's autocomplete swallows a COMBINED
+# "/clear" Enter, split Enter survives -----------------------------------
+# `DISPATCH_SWALLOW_COMBINED_CLEAR_ENTER` (stub, above) reproduces the live
+# failure exactly: Enter is eaten only when it rides the SAME send-keys call
+# as "/clear". This is the one case in this file where the real send.sh
+# must differ from a pre-#817 copy of itself -- see the mutation check right
+# after this.
+reset_pane
+out=$(run_send env DISPATCH_SWALLOW_COMBINED_CLEAR_ENTER=1 bash -c "
+  . '$SEND'
+  verified_preclear '$TARGET' --settle 0 --retries 1
+  echo \"rc=\$? status=\$SEND_STATUS\"
+")
+want_contains "#817: a /clear whose Enter is its OWN send-keys call survives codex's combined-send swallow" "rc=0 status=landed" "$out"
+
+# --- MUTATION CHECK: recombine "/clear" and Enter into one send-keys call -
+# agent-estate#817's own acceptance bar: break the fix deliberately (put the
+# split back together) and confirm the codex-shaped swallow above now goes
+# red -- proving the split, not something else, is what survives it.
+MUTANT_COMBINED="$D/send-mutant-combined.sh"
+patch_rc=0
+python3 - "$SEND" "$MUTANT_COMBINED" <<'PY' || patch_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''    if ! tmux send-keys -t "$target" "/clear" 2>/dev/null; then
+      SEND_STATUS=send_failed
+      return 1
+    fi
+    # agent-estate#817: Enter is its OWN send-keys call, not combined with
+    # "/clear" above -- a combined call's Enter lands while codex's
+    # slash-command autocomplete dropdown is still open and gets consumed
+    # confirming the completion instead of submitting. The sleep between the
+    # two calls is what gives the dropdown time to settle before Enter fires.
+    sleep "$settle"
+    if ! tmux send-keys -t "$target" Enter 2>/dev/null; then
+      SEND_STATUS=send_failed
+      return 1
+    fi'''
+assert marker in text, "verified_preclear's split /clear-then-Enter block not found -- send.sh shape changed"
+assert text.count(marker) == 1, "the split block is not unique -- send.sh shape changed"
+mutated = '''    if ! tmux send-keys -t "$target" "/clear" Enter 2>/dev/null; then
+      SEND_STATUS=send_failed
+      return 1
+    fi'''
+open(dst, "w").write(text.replace(marker, mutated, 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  bad "setup: patched a copy of send.sh with #817's split recombined" \
+    "could not patch $SEND (exit $patch_rc) -- treating as a failure, not a skip"
+else
+  ok "setup: patched a copy of send.sh with #817's split recombined (pre-#817 shape)"
+  reset_pane
+  out=$(run_send env DISPATCH_SWALLOW_COMBINED_CLEAR_ENTER=1 bash -c "
+    . '$MUTANT_COMBINED'
+    verified_preclear '$TARGET' --settle 0 --retries 1
+    echo \"rc=\$? status=\$SEND_STATUS\"
+  ")
+  want_contains "MUTATION CONFIRMED (red): recombining /clear+Enter reproduces #817 -- the codex-shaped swallow now wins" "rc=2 status=not_landed" "$out"
+
+  reset_pane
+  out=$(run_send env DISPATCH_SWALLOW_COMBINED_CLEAR_ENTER=1 bash -c "
+    . '$SEND'
+    verified_preclear '$TARGET' --settle 0 --retries 1
+    echo \"rc=\$? status=\$SEND_STATUS\"
+  ")
+  want_contains "RESTORED (green): the real send.sh, same scenario, survives the combined-send swallow again" "rc=0 status=landed" "$out"
+fi
 
 # --- MUTATION CHECK: skip the post-/clear confirmation --------------------
 MUTANT_PRECLEAR="$D/send-mutant-preclear.sh"

@@ -209,6 +209,18 @@ case "$sub" in
             # exactly), modelling #141's original shape now that #193 added
             # a verified pre-clear ahead of it: the pre-clear succeeds, and
             # only the BRIEF's later submit is swallowed.
+            #
+            # DISPATCH_SWALLOW_COMBINED_CLEAR_ENTER=1 (agent-estate#817):
+            # models codex-cli 0.149.0's own slash-command-autocomplete race
+            # live-reproduced against a real codex pane -- Enter is only
+            # eaten when it arrives in the SAME `send-keys` call as other
+            # keys (`${#keys[@]} -gt 1`, exactly what "/clear" Enter" as one
+            # combined call looks like), never when it is its own separate
+            # call. This is the one swallow flag that is actually SHAPE-
+            # sensitive rather than content-sensitive: it is what proves the
+            # #817 fix (Enter split into its own send-keys call) is what
+            # closes the gap, not merely that /clear's Enter can be made to
+            # land somehow.
             swallow_this=0
             was_preclear_submit=0
             [ "$(cat "$buf" 2>/dev/null)" = "/clear" ] && was_preclear_submit=1
@@ -217,6 +229,9 @@ case "$sub" in
             elif [ "${DISPATCH_SWALLOW_PRECLEAR_ENTER:-0}" = 1 ] && [ "$was_preclear_submit" = 1 ]; then
               swallow_this=1
             elif [ "${DISPATCH_SWALLOW_BRIEF_ENTER:-0}" = 1 ] && [ "$was_preclear_submit" != 1 ]; then
+              swallow_this=1
+            elif [ "${DISPATCH_SWALLOW_COMBINED_CLEAR_ENTER:-0}" = 1 ] && [ "$was_preclear_submit" = 1 ] \
+                 && [ "${#keys[@]}" -gt 1 ]; then
               swallow_this=1
             fi
             if [ "$swallow_this" != 1 ]; then
@@ -251,7 +266,12 @@ case "$sub" in
             # genuinely empty (a real crash does empty the box on its way
             # out) before `verified_survived`'s later display-message read
             # finds the window gone.
-            if [ -n "${STUB_KILL_ON_SUBMIT:-}" ] && [ "${#keys[@]}" -eq 1 ] && [ -e "$buf.renamed" ]; then
+            #
+            # agent-estate#817: `was_preclear_submit` excludes the pre-clear's
+            # own now-separate Enter for the same reason DISPATCH_TEST_SEND_SIGNAL's
+            # condition just below does -- see that hook's own comment.
+            if [ -n "${STUB_KILL_ON_SUBMIT:-}" ] && [ "${#keys[@]}" -eq 1 ] && [ -e "$buf.renamed" ] \
+               && [ "$was_preclear_submit" != 1 ]; then
               : > "$buf.killed"
             fi
             # agent-dotfiles#209 round 2. Signal the DISPATCHER at the exact
@@ -262,10 +282,19 @@ case "$sub" in
             # free the lane out from under it.
             #
             # Fires ONLY on a bare `send-keys -t <lane> Enter`, which is the
-            # brief submit. `/clear` is sent as `send-keys -t <lane> /clear
-            # Enter` (two key arguments) and the retype loop's C-u is not an
-            # Enter at all, so neither trips this. Off unless
-            # DISPATCH_TEST_SEND_SIGNAL is exported; no non-test caller sets it.
+            # brief submit. The retype loop's C-u is not an Enter at all, so
+            # that never trips this. Off unless DISPATCH_TEST_SEND_SIGNAL is
+            # exported; no non-test caller sets it.
+            #
+            # agent-estate#817: `/clear`'s own Enter is now ALSO a bare
+            # `send-keys -t <lane> Enter` (previously it went out combined,
+            # `send-keys -t <lane> /clear Enter`, two key arguments, which
+            # never matched `${#keys[@]} -eq 1` on its own). `was_preclear_submit`
+            # -- computed just above from the buffer's content the instant
+            # BEFORE this Enter cleared it -- is what still tells the two
+            # apart post-#817: excluding it here is exactly the same
+            # distinction the swallow branches above already draw between
+            # the pre-clear's own submit and the brief's.
             #
             # #15 added a THIRD bare-Enter send earlier in the same dispatch --
             # step 3.5's harness relaunch, before the rename. The `.renamed`
@@ -277,7 +306,8 @@ case "$sub" in
             # a plain foreground command, not inside a command substitution, so
             # this stub's parent IS the script's own shell -- the same process
             # `--owner-pid` names on the claim.
-            if [ -n "${DISPATCH_TEST_SEND_SIGNAL:-}" ] && [ "${#keys[@]}" -eq 1 ] && [ -e "$buf.renamed" ]; then
+            if [ -n "${DISPATCH_TEST_SEND_SIGNAL:-}" ] && [ "${#keys[@]}" -eq 1 ] && [ -e "$buf.renamed" ] \
+               && [ "$was_preclear_submit" != 1 ]; then
               printf 'signalled %s to %s at submit\n' "$DISPATCH_TEST_SEND_SIGNAL" "$PPID" >> "$LOG"
               kill "-${DISPATCH_TEST_SEND_SIGNAL}" "$PPID" 2>/dev/null
               # On a TERM the dispatcher runs its trap only once this
