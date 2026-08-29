@@ -76,6 +76,29 @@
 #                           per-`git show` bound in seconds (default: 5).
 #                           A single hung read is reported as UNKNOWN and
 #                           does not stop the rest of the walk.
+#   WORKTREE_GUARD_POLL_INTERVAL_SECONDS
+#                           how often bounded_show's poll loop wakes to
+#                           check whether the backgrounded `git show` has
+#                           finished (default: 0.05, agent-estate#800).
+#                           bounded_show measures its OWN elapsed wall-clock
+#                           time against FILE_TIMEOUT on every wake rather
+#                           than counting ticks and multiplying by this
+#                           interval -- a fix-pass on #800 (skills:2) found
+#                           the tick-counting version overran its bound by
+#                           ~50% at the default interval (measured 7.7s
+#                           against a 6s ceiling: 5s FILE_TIMEOUT + 1s TERM
+#                           grace) because each tick costs more than exactly
+#                           POLL_INTERVAL -- there is a roughly constant
+#                           per-iteration overhead (fork+exec for `sleep`
+#                           plus loop bookkeeping, ~11.5ms measured on this
+#                           host) that a naive `elapsed = ticks * interval`
+#                           model does not see, and that overhead is paid
+#                           once per tick, so a small interval (many ticks
+#                           for the same bound) pays it many more times.
+#                           Checking real elapsed time instead means a slow
+#                           tick can only ever overrun the bound by about one
+#                           tick's own cost, never by the accumulated cost of
+#                           every tick that ran before it.
 set -uo pipefail
 
 REPO="${1:-.}"
@@ -85,6 +108,32 @@ if ! git -C "$REPO" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
 fi
 
 FILE_TIMEOUT="${WORKTREE_GUARD_FILE_TIMEOUT_SECONDS:-5}"
+POLL_INTERVAL="${WORKTREE_GUARD_POLL_INTERVAL_SECONDS:-0.05}"
+# agent-estate#800: bounded_show's poll loop used to sleep a full second per
+# iteration, so a 9ms `git show` still cost ~1s -- the loop's first `kill -0`
+# runs microseconds after backgrounding, finds the child still alive, and
+# the body always sleeps once. Measured: 19 worktrees x 13 files = 247
+# checks took 253s (1.02s/check) against a 9ms `git show`. A sub-second poll
+# fixes that.
+#
+# #800 fix-pass (skills:2): the first cut at this re-derived a tick COUNT
+# (FILE_TIMEOUT / POLL_INTERVAL) and compared the loop's own iteration
+# counter against it, on the assumption that one iteration costs exactly
+# POLL_INTERVAL. It does not -- `sleep`'s fork+exec plus loop bookkeeping
+# adds a roughly constant per-iteration overhead, paid once per tick, so a
+# small POLL_INTERVAL (many ticks for the same bound) overran by that
+# overhead many times over: measured 7.7s against a 6s ceiling (5s
+# FILE_TIMEOUT + 1s TERM grace) at the default 0.05s interval, a genuine
+# ~50% overrun, not noise. See `now_seconds` and bounded_show below for the
+# wall-clock replacement -- it checks elapsed time directly instead of
+# inferring it from a tick count, so it cannot drift with iteration cost.
+
+# `date +%s.%N` gives fractional-second wall-clock time; GNU coreutils and
+# the BSD/macOS system `date` both support `%N` on every host this has been
+# checked against (verified directly on this host's system `date`, not
+# assumed). One fork per call -- called at most twice per bounded_show tick,
+# same order of cost as the `sleep` every tick already pays.
+now_seconds() { date +%s.%N; }
 
 # agent-supervisor#205: watchdog.sh's own outer bound on this whole script
 # (SUPERVISOR_GUARD_AUDIT_TIMEOUT) can TERM/KILL this process mid-file-check,
@@ -120,8 +169,35 @@ cleanup_show() {
   # finishes the job regardless of whether TERM's default handler already did.
   kill -TERM "$CUR_SHOW_PID" 2>/dev/null
   kill -KILL "$CUR_SHOW_PID" 2>/dev/null
+  CUR_SHOW_PID=""
 }
-trap cleanup_show TERM INT EXIT
+# agent-estate#800: a TERM/INT handler that only reaps the CURRENT child and
+# returns, without terminating the script itself, does not stop the walk --
+# bash resumes the interrupted loop right after the handler returns. That
+# leaves a window between "current hang reaped" and "outer KILL lands" in
+# which the walk can advance to the NEXT worktree/file and background a
+# SECOND `git show`, one the already-fired TERM will never reap and the
+# outer KILL (unblockable, cannot be trapped) cannot reap either -- an
+# orphan despite the two-bound design. Finer polling (this file's own
+# agent-estate#800 fix) makes this window worse, not better: catching TERM
+# sooner leaves MORE of the caller's fixed TERM-then-KILL grace period free
+# for the walk to reach that next iteration, not less. So on TERM/INT this
+# handler reaps the in-flight child, then re-raises the same signal against
+# itself with its own trap removed -- the shell's default disposition then
+# actually terminates the process, matching the property the two-bound
+# design already assumed was true. sig_cleanup_show is a thin per-signal
+# wrapper (not `cleanup_show TERM` from `trap ... TERM INT` directly)
+# because that shared-form invocation would not tell cleanup_show which
+# signal name to re-raise.
+sig_cleanup_show() {
+  local sig="$1"
+  cleanup_show
+  trap - "$sig"
+  kill -s "$sig" "$$"
+}
+trap 'sig_cleanup_show TERM' TERM
+trap 'sig_cleanup_show INT' INT
+trap cleanup_show EXIT
 
 # Bounded `git show <sha>:<path>`. Never called via `$(...)` -- see the
 # CUR_SHOW_PID comment above for why that would defeat the trap this relies
@@ -130,23 +206,32 @@ trap cleanup_show TERM INT EXIT
 # already harmless case -- "nothing to leak"), 2 on a real timeout (the
 # caller must treat this as unknown, never as absent or clean).
 bounded_show() {
-  local sha="$1" path="$2" out_file rc waited timed_out
+  local sha="$1" path="$2" out_file rc timed_out start_ts now_ts overrun
   SHOW_CONTENT=""
   out_file="$(mktemp "${TMPDIR:-/tmp}/wga-show.XXXXXX")" || return 2
   git -C "$REPO" show "${sha}:${path}" >"$out_file" 2>/dev/null &
   CUR_SHOW_PID=$!
-  waited=0
+  start_ts="$(now_seconds)"
   timed_out=0
   while kill -0 "$CUR_SHOW_PID" 2>/dev/null; do
-    if [ "$waited" -ge "$FILE_TIMEOUT" ]; then
+    now_ts="$(now_seconds)"
+    # Elapsed wall-clock time against FILE_TIMEOUT directly -- never a tick
+    # count times POLL_INTERVAL. See the header comment above FILE_TIMEOUT
+    # for why: a tick count assumes every iteration costs exactly
+    # POLL_INTERVAL, which is false by a roughly constant per-iteration
+    # overhead, and that overhead compounds with tick count instead of
+    # staying fixed. `awk` does the float compare -- bash arithmetic is
+    # integer-only and $start_ts/$now_ts carry fractional seconds.
+    overrun="$(awk -v s="$start_ts" -v n="$now_ts" -v t="$FILE_TIMEOUT" \
+      'BEGIN { print (n - s >= t) ? 1 : 0 }')"
+    if [ "$overrun" -eq 1 ]; then
       timed_out=1
       kill -TERM "$CUR_SHOW_PID" 2>/dev/null
       sleep 1
       kill -KILL "$CUR_SHOW_PID" 2>/dev/null
       break
     fi
-    sleep 1
-    waited=$((waited + 1))
+    sleep "$POLL_INTERVAL"
   done
   wait "$CUR_SHOW_PID" 2>/dev/null
   rc=$?

@@ -163,8 +163,59 @@ else
   bad "2c. the log names the timeout explicitly" "lg=$(cat "$D/lg" 2>/dev/null)"
 fi
 
+# --- 3. the bound must not drift at a SMALL poll interval ------------------
+# agent-estate#800 fix-pass (skills:2): the first cut re-derived a tick count
+# (FILE_TIMEOUT / POLL_INTERVAL) and compared the loop's own counter against
+# it, assuming every tick costs exactly POLL_INTERVAL. It does not -- a
+# roughly constant per-tick overhead (fork+exec for `sleep` plus loop
+# bookkeeping) is paid once per tick, so a SMALL interval (many ticks for
+# the same bound) pays that overhead many more times and the bound overruns
+# by more, not less. Section 1 above already covers the default interval;
+# this is deliberately the worst case for that class of bug -- a 5x smaller
+# interval than section 1 (0.01s vs the 0.05s default), the regime where
+# tick-counting drift is most visible. This is the test that actually
+# catches the #800 fix-pass finding: a hang timed with the DEFAULT interval
+# overran a 6s ceiling (5s FILE_TIMEOUT + 1s TERM grace) by ~1.7s per hang
+# (measured ~7.7s); at this smaller interval the same tick-counting bug
+# overran by ~5.2s per hang (measured ~11.2s) -- both against a REPO/wt pair
+# (2 worktrees, so the whole-process ceiling here is ~12s, not ~6s). A fix
+# that checks elapsed wall-clock time directly (rather than inferring it
+# from a tick count) cannot drift with iteration cost -- it holds at ~12-13s
+# regardless of how small POLL_INTERVAL is set.
+start=$SECONDS
+out_c="$(PATH="$BIN:$PATH" \
+  WORKTREE_GUARD_FILE_TIMEOUT_SECONDS=5 \
+  WORKTREE_GUARD_POLL_INTERVAL_SECONDS=0.01 \
+  "$AUDIT" "$REPO" 2>&1)"
+rc_c=$?
+elapsed_c=$((SECONDS - start))
+
+# 16s tolerance: comfortably above the fixed ~12-13s (2 worktrees x ~6-6.5s
+# each) and comfortably below the tick-counting bug's ~22s (2 worktrees x
+# ~11.2s each, measured directly against the pre-fix code) -- tight enough
+# that this section fails if the drift bug ever comes back, unlike section
+# 1's 15s tolerance which was loose enough to pass even with the bug present
+# at FILE_TIMEOUT=2.
+if [ "$elapsed_c" -le 16 ]; then
+  ok "3a. a hung 'git show' at a small POLL_INTERVAL (0.01s) does not drift past the bound (${elapsed_c}s, ceiling ~12-13s for 2 worktrees)"
+else
+  bad "3a. a hung 'git show' at a small POLL_INTERVAL (0.01s) does not drift past the bound" "took ${elapsed_c}s (tick-counting drift would be ~22s)"
+fi
+
+if [ "$rc_c" != "0" ]; then
+  ok "3b. the small-interval timeout still makes the audit exit non-zero"
+else
+  bad "3b. the small-interval timeout still makes the audit exit non-zero" "rc=0 out=$out_c"
+fi
+
+if grep -qE "^worktree-guard-audit:.*, [1-9][0-9]* unknown\(s\)" <<<"$out_c"; then
+  ok "3c. the small-interval timeout is still reported as unknown, not a clean pass"
+else
+  bad "3c. the small-interval timeout is still reported as unknown, not a clean pass" "out=$out_c"
+fi
+
 # None of the shim's recorded hang pids (the stand-in for the hung git
-# process, in either test 1 or test 2 above) may still be alive -- the outer
+# process, in tests 1, 2, or 3 above) may still be alive -- the outer
 # bound must actually kill what it bounds, not just stop waiting on it.
 # Checked by recorded pid identity, not by matching "sleep 300" against the
 # process table, which is not unique enough on a host running other suites
