@@ -47,6 +47,34 @@ name: Fixpass evidence
 # `_gate_superseded_by_ui_evidence` matches that literal name, and renaming
 # it would require updating that function (and its tests) too -- out of
 # scope for this small fix.
+#
+# agent-estate#811: the issue_comment trigger above already re-evaluates
+# when evidence arrives (that part was never the bug), but it re-evaluates
+# on EVERY comment, not just one that could change the answer. Measured on
+# #810 twice: a lane's plain "fix pass" narration comment (no marker) was
+# posted before its actual evidence comment -- 3m04s apart the first time,
+# 6s the second -- and each narration comment alone re-ran the gate, which
+# (correctly, at that instant) found no evidence yet and published an
+# explicit FAILURE check-run 21s-9s before the real evidence existed. Every
+# genuine race resolved itself the moment the evidence comment posted (its
+# own issue_comment run always saw itself, in both observed cases) -- the
+# actual defect was the spurious extra failures in between, which is what
+# forced a manual `gh run rerun` and left two same-named check-runs on the
+# PR to read.
+#
+# Chose OPTION 1 (filtered), not option 2 (grace window) or option 3
+# (post-before-push convention): fixpass_evidence_gate.py's own evaluate()
+# can only be swayed by a comment carrying the literal EVIDENCE_MARKER or a
+# `Verdict:` line (`_is_rejected_verdict_comment` requires one); a comment
+# with neither is a structural no-op for the gate, so skipping evaluation
+# for it cannot hide a real answer -- see
+# scripts/supervisor/fixpass-comment-relevant.sh for the filter and its own
+# reasoning about why this is a safe superset match, not a guess. A grace
+# window (option 2) would slow down every GENUINE failure by an arbitrary
+# N with no such guarantee; option 3 depends on every lane getting an
+# ordering right that nothing enforces, and does not by itself stop an
+# unrelated narration comment from re-triggering a fail (the actual
+# mechanism observed on #810 was never about push order).
 on:
   pull_request:
     types: [opened, synchronize, reopened, edited]
@@ -82,11 +110,28 @@ jobs:
         if: github.event_name == 'pull_request'
         run: |
           python3 scripts/supervisor/fixpass_evidence_gate.py --repo "${{ github.repository }}" --number "${{ github.event.pull_request.number }}"
+      # agent-estate#811: skip re-evaluation for a comment that structurally
+      # cannot change the gate's answer (see the header comment above and
+      # fixpass-comment-relevant.sh). COMMENT_BODY is passed via env, never
+      # interpolated into the script text -- untrusted comment content
+      # inline in a `run:` block is a script-injection vector.
+      - name: Is this comment relevant to fixpass evidence? (agent-estate#811)
+        id: relevance
+        if: github.event_name == 'issue_comment'
+        env:
+          COMMENT_BODY: ${{ github.event.comment.body }}
+        run: |
+          if printf '%s' "$COMMENT_BODY" | bash scripts/supervisor/fixpass-comment-relevant.sh; then
+            echo "relevant=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "relevant=false" >> "$GITHUB_OUTPUT"
+            echo "fixpass-gate: comment carries neither the evidence marker nor a Verdict: line -- cannot change the gate's answer, skipping re-evaluation (agent-estate#811)"
+          fi
       # issue_comment: see the #597 correction above -- publish the result
       # explicitly against the PR's real head SHA instead of trusting the
       # run's own (wrong) head_sha.
       - name: Check fixpass evidence (issue_comment, explicit head SHA)
-        if: github.event_name == 'issue_comment'
+        if: github.event_name == 'issue_comment' && steps.relevance.outputs.relevant == 'true'
         env:
           UI_EVIDENCE_GATE_BIN: scripts/supervisor/fixpass-evidence-gate.sh
           UI_EVIDENCE_CHECK_NAME: fixpass-gate
