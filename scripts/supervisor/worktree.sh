@@ -25,7 +25,7 @@
 #   worktree.sh new  <slug> [repo] [base]   create a worktree, print its path
 #   worktree.sh done <path>                 remove a worktree; refuses if dirty
 #   worktree.sh guard <repo>                exit 1 if <repo> itself is dirty
-#   worktree.sh reap [--no-github] <path> [base]
+#   worktree.sh reap [--dry-run] [--no-github] <path> [base]
 #                                           single-target twin of `gc` below,
 #                                            for a caller that already knows
 #                                            exactly which one worktree it
@@ -48,6 +48,34 @@
 #                                            guard refused (reason on
 #                                            stderr); the worktree survives
 #                                            either way this call errors.
+#                                            NEVER requires <path> to appear
+#                                            in `git worktree list` -- every
+#                                            check above resolves through
+#                                            <path>'s own `.git` pointer via
+#                                            `-C <path>`, not through the
+#                                            owning repo's registration list
+#                                            (agent-estate#822's own reason
+#                                            for calling this directly rather
+#                                            than reimplementing the chain:
+#                                            an unregistered-but-git-resolvable
+#                                            worktree clears it exactly like a
+#                                            registered one would). --dry-run
+#                                            runs every guard and reports what
+#                                            it would do, changing nothing --
+#                                            same contract as `gc`'s own
+#                                            --dry-run.
+#   worktree.sh is-live <path>             exit 0 if `_gc_is_live` (tmux pane,
+#                                            process cwd, or too-young-to-trust
+#                                            either signal) says <path> is
+#                                            live; exit 1 if it is clear. A
+#                                            thin subcommand wrapper so a
+#                                            caller outside this file (e.g.
+#                                            agent-estate#822's orphan sweep)
+#                                            can ask the same liveness
+#                                            question `gc`/`reap` already ask,
+#                                            without sourcing this file (its
+#                                            own bottom half is a `case "$1"`
+#                                            dispatch, not sourcing-safe).
 #   worktree.sh gc [--dry-run] [--no-github] [repo] [base]
 #                                           remove every worktree whose
 #                                            branch's content is already on
@@ -863,9 +891,11 @@ done)
 reap)
   shift
   USE_GH=1
+  DRY=""
   while :; do
     case "${1:-}" in
       --no-github) USE_GH=""; shift ;;
+      --dry-run) DRY=1; shift ;;
       *) break ;;
     esac
   done
@@ -929,9 +959,22 @@ reap)
     exit 1
   fi
 
-  safe_remove "$TARGET" || exit 1
-  echo "worktree: reaped $TARGET (branch '$BRANCH' -- $WHY)" >&2
+  safe_remove "$TARGET" "$DRY" || exit 1
+  if [ -n "$DRY" ]; then
+    echo "worktree: reap dry run -- would reap $TARGET (branch '$BRANCH' -- $WHY)" >&2
+  else
+    echo "worktree: reaped $TARGET (branch '$BRANCH' -- $WHY)" >&2
+  fi
   exit 0 ;;
+
+is-live)
+  TARGET="${2:-}"
+  [ -n "$TARGET" ] || usage
+  [ -d "$TARGET" ] || { echo "worktree: $TARGET does not exist" >&2; exit 1; }
+  if _gc_is_live "$TARGET"; then
+    exit 0
+  fi
+  exit 1 ;;
 
 gc)
   shift
