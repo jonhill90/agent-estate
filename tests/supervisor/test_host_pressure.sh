@@ -98,91 +98,99 @@ fake_darwin 50.00 10 100
 OUT=$(SUPERVISOR_MAX_LOAD_PER_CORE=0 SUPERVISOR_MIN_FREE_MEM_GB=0 SUPERVISOR_MAX_AGENT_SESSIONS=0 HOST_PRESSURE_TEST_OS=Darwin PATH="$D/bin:$PATH" "$GATE"); RC=$?
 want_exit "0/0 disables both checks even under real pressure" "$RC" 0 "$OUT"
 
-# --- THIRD GATE: agent session count (agent-supervisor#663) ---------------
-# Isolates the session gate by disabling load/mem (fake_darwin gives them
-# harmless values anyway, but 0/0 removes any doubt) and fakes `ps` so
-# count-agents.sh -- the real, unfaked script this gate shells out to --
-# reads a deterministic session count. Reproduces #663's own measured
-# breakdown exactly: 17 real agent sessions (comm=claude) plus the same
-# five noise shapes the issue measured (2 transient snapshot shells, 1 sed
-# matching its own argv, 1 tail -f, 2 cc-daemon helpers) -- 22 processes a
-# naive `pgrep -f claude` would count, same as the issue's own number,
-# while the real session count stays 17.
-fake_ps_sessions() {
-  # $1 = number of real agent sessions (comm=claude) to fabricate.
-  local n="$1" i
-  {
-    echo '#!/bin/bash'
-    echo 'case "$*" in'
-    echo '  *comm=*)'
-    echo '    cat <<FIXTURE'
-    for ((i = 1; i <= n; i++)); do echo "$((1000 + i)) claude"; done
-    # The same five #663 noise shapes -- comm never matches
-    # ^(claude|claude\.exe)$ so count-agents.sh excludes all of them, but a
-    # naive `pgrep -f claude` (matching full argv) would have counted every
-    # one, which is how #663's 22-vs-17 gap arose in the first place.
-    echo "9001 /bin/zsh"
-    echo "9002 /bin/zsh"
-    echo "9003 sed"
-    echo "9004 tail"
-    echo "9005 claude bg-pty-host"
-    echo "9006 claude bg-spare"
-    echo 'FIXTURE'
-    echo '    ;;'
-    echo 'esac'
-  } > "$D/bin/ps"
-  chmod +x "$D/bin/ps"
+# --- THIRD GATE: work in flight, not agent session count (#663, re-scoped
+# by #826) --------------------------------------------------------------
+# Isolates the gate by disabling load/mem (fake_darwin gives them harmless
+# values anyway, but 0/0 removes any doubt) and fakes the two inputs
+# count-work-in-flight.sh itself reads (sessions.sh and cli.py, via that
+# script's own WORK_IN_FLIGHT_SESSIONS_SH/WORK_IN_FLIGHT_CLI env seams --
+# see test_count_work_in_flight.sh for that instrument's own coverage in
+# isolation). This section only has to prove host-pressure.sh's GATE reads
+# and compares the number correctly, not re-derive the aggregation.
+fake_work_in_flight() {
+  # $1 = number of busy/hung tmux lanes to fabricate (one session, that
+  # many lane rows, all "busy" -- this gate does not care which of the two
+  # states, only that neither is "free").
+  local n="$1" i lanes="[]"
+  local rows=""
+  for ((i = 1; i <= n; i++)); do
+    [ -n "$rows" ] && rows="$rows,"
+    rows="$rows{\"name\": \"lane-$i\", \"state\": \"busy\"}"
+  done
+  cat > "$D/fake-sessions.sh" <<EOF
+#!/bin/bash
+cat <<'JSON'
+[{"session": "agent-supervisor", "lanes": [$rows]}]
+JSON
+EOF
+  chmod +x "$D/fake-sessions.sh"
+  cat > "$D/fake-cli.py" <<'EOF'
+#!/usr/bin/env python3
+print('{"lanes": [], "tasks": []}')
+EOF
+  export WORK_IN_FLIGHT_SESSIONS_SH="$D/fake-sessions.sh"
+  export WORK_IN_FLIGHT_CLI="$D/fake-cli.py"
 }
 
 fake_darwin 1.00 10 10000000
-fake_ps_sessions 17
+fake_work_in_flight 17
 OUT=$(SUPERVISOR_MAX_LOAD_PER_CORE=0 SUPERVISOR_MIN_FREE_MEM_GB=0 HOST_PRESSURE_TEST_OS=Darwin PATH="$D/bin:$PATH" "$GATE"); RC=$?
-want_exit "#663's own numbers: 17 real sessions (of 22 pgrep-shaped hits) stays under the ceiling of 20, allows" "$RC" 0 "$OUT"
+want_exit "17 lanes with work in flight stays under the ceiling of 20, allows" "$RC" 0 "$OUT"
 want_contains "...says why" "within limits" "$OUT"
 
-fake_ps_sessions 22
+fake_work_in_flight 22
 OUT=$(SUPERVISOR_MAX_LOAD_PER_CORE=0 SUPERVISOR_MIN_FREE_MEM_GB=0 HOST_PRESSURE_TEST_OS=Darwin PATH="$D/bin:$PATH" "$GATE"); RC=$?
-want_exit "22 real sessions >= the default ceiling of 20 refuses" "$RC" 1 "$OUT"
-want_contains "...names the actual comparison" "agent sessions 22 >= 20" "$OUT"
+want_exit "22 lanes with work in flight >= the default ceiling of 20 refuses" "$RC" 1 "$OUT"
+want_contains "...names the actual comparison" "work in flight 22 >= 20" "$OUT"
 
 OUT=$(SUPERVISOR_MAX_LOAD_PER_CORE=0 SUPERVISOR_MIN_FREE_MEM_GB=0 SUPERVISOR_MAX_AGENT_SESSIONS=0 HOST_PRESSURE_TEST_OS=Darwin PATH="$D/bin:$PATH" "$GATE"); RC=$?
-want_exit "SUPERVISOR_MAX_AGENT_SESSIONS=0 disables the session gate even at 22 sessions" "$RC" 0 "$OUT"
+want_exit "SUPERVISOR_MAX_AGENT_SESSIONS=0 disables the gate even at 22 lanes with work in flight" "$RC" 0 "$OUT"
 
-# Fail closed when count-agents.sh itself cannot be found next to a copy of
-# host-pressure.sh (the same "instrument cannot see" shape as the load/mem
-# gates' own fail-closed cases above).
+# #826's own load-bearing case: 20 tmux panes exist (18 real agent
+# processes, by count-agents.sh's own still-correct classification) but
+# only a handful are actually busy/hung -- the gate must allow a new
+# dispatch here, where the OLD raw-pane-count gate refused it.
+fake_work_in_flight 4
+OUT=$(SUPERVISOR_MAX_LOAD_PER_CORE=0 SUPERVISOR_MIN_FREE_MEM_GB=0 HOST_PRESSURE_TEST_OS=Darwin PATH="$D/bin:$PATH" "$GATE"); RC=$?
+want_exit "#826: 4 lanes actually busy, well under 20 tmux panes existing, allows -- the whole point of this fix" "$RC" 0 "$OUT"
+want_contains "...says why" "within limits" "$OUT"
+
+unset WORK_IN_FLIGHT_SESSIONS_SH WORK_IN_FLIGHT_CLI
+
+# Fail closed when count-work-in-flight.sh itself cannot be found next to a
+# copy of host-pressure.sh (the same "instrument cannot see" shape as the
+# load/mem gates' own fail-closed cases above).
 D3=$(mktemp -d)
 cp "$GATE" "$D3/host-pressure.sh"
 chmod +x "$D3/host-pressure.sh"
 OUT=$(SUPERVISOR_MAX_LOAD_PER_CORE=0 SUPERVISOR_MIN_FREE_MEM_GB=0 HOST_PRESSURE_TEST_OS=Darwin PATH="$D/bin:$PATH" "$D3/host-pressure.sh"); RC=$?
-want_exit "count-agents.sh missing next to host-pressure.sh fails closed (refuses), never reads as healthy" "$RC" 2 "$OUT"
-want_contains "...says it could not measure, not that it's fine" "could not read agent session count" "$OUT"
+want_exit "count-work-in-flight.sh missing next to host-pressure.sh fails closed (refuses), never reads as healthy" "$RC" 2 "$OUT"
+want_contains "...says it could not measure, not that it's fine" "could not read work-in-flight count" "$OUT"
 
-# --- MUTATION: invert the session-count comparison -> the REFUSE case must go RED
+# --- MUTATION: invert the work-in-flight comparison -> the REFUSE case must go RED
 MUT_SESS="$D/host-pressure-mutant-invert-sessions.sh"
 mut_sess_rc=0
 python3 - "$GATE" "$MUT_SESS" <<'PY' || mut_sess_rc=$?
 import sys
 src, dst = sys.argv[1], sys.argv[2]
 text = open(src).read()
-marker = '[ "$sessions" -ge "$MAX_AGENT_SESSIONS" ]'
-assert marker in text, "session-count comparison not found -- script shape changed"
-assert text.count(marker) == 1, "session-count comparison not unique -- script shape changed"
-open(dst, "w").write(text.replace(marker, '[ "$sessions" -lt "$MAX_AGENT_SESSIONS" ]', 1))
+marker = '[ "$inflight" -ge "$MAX_AGENT_SESSIONS" ]'
+assert marker in text, "work-in-flight comparison not found -- script shape changed"
+assert text.count(marker) == 1, "work-in-flight comparison not unique -- script shape changed"
+open(dst, "w").write(text.replace(marker, '[ "$inflight" -lt "$MAX_AGENT_SESSIONS" ]', 1))
 PY
 if [ "$mut_sess_rc" -ne 0 ]; then
-  bad "setup: patched a copy of host-pressure.sh with the session comparison inverted" "could not patch $GATE (exit $mut_sess_rc)"
+  bad "setup: patched a copy of host-pressure.sh with the work-in-flight comparison inverted" "could not patch $GATE (exit $mut_sess_rc)"
 else
   chmod +x "$MUT_SESS"
-  cp "$HERE/../../scripts/supervisor/count-agents.sh" "$D/count-agents.sh"
-  mkdir -p "$D/harness"
-  cp "$HERE/../../scripts/supervisor/harness/claude.sh" "$D/harness/claude.sh"
-  fake_ps_sessions 22
+  cp "$HERE/../../scripts/supervisor/count-work-in-flight.sh" "$D/count-work-in-flight.sh"
+  fake_work_in_flight 22
   MUT_SESS_OUT=$(SUPERVISOR_MAX_LOAD_PER_CORE=0 SUPERVISOR_MIN_FREE_MEM_GB=0 HOST_PRESSURE_TEST_OS=Darwin PATH="$D/bin:$PATH" "$MUT_SESS"); MUT_SESS_RC=$?
+  unset WORK_IN_FLIGHT_SESSIONS_SH WORK_IN_FLIGHT_CLI
   if [ "$MUT_SESS_RC" -eq 0 ]; then
-    ok "mutation confirmed: inverting the session comparison lets 22 sessions through (the REFUSE case's GREEN assertion would now be RED)"
+    ok "mutation confirmed: inverting the work-in-flight comparison lets 22 in through (the REFUSE case's GREEN assertion would now be RED)"
   else
-    bad "mutation confirmed: inverting the session comparison lets 22 sessions through" "expected exit 0 on the mutant, got $MUT_SESS_RC: $MUT_SESS_OUT"
+    bad "mutation confirmed: inverting the work-in-flight comparison lets 22 in through" "expected exit 0 on the mutant, got $MUT_SESS_RC: $MUT_SESS_OUT"
   fi
 fi
 
