@@ -582,7 +582,18 @@ class LaneCompletionReconciler:
             task_id = task["id"]
             if task_id in seen:
                 continue
-            worktree_path = normalize_worktree_path(task.get("worktree_path") or "")
+            # `normalize_worktree_path` is for COMPARISON only (its own
+            # docstring) -- it rewrites a `/tmp`-rooted path to its
+            # `/private/tmp` spelling unconditionally, even on Linux CI
+            # where no such symlink or directory exists. Checking the
+            # NORMALIZED path against the filesystem here silently
+            # excluded every candidate whose real worktree lived under
+            # `/tmp` on a host without that symlink -- caught by CI
+            # (unit-tests, ubuntu-latest) failing this method's own new
+            # tests where a local macOS run had passed. The raw
+            # `worktree_path` -- what the OS actually created -- is what
+            # `Path.is_dir()` must be asked about; only reject a blank one.
+            worktree_path = task.get("worktree_path") or ""
             if not worktree_path or not Path(worktree_path).is_dir():
                 continue
             seen.add(task_id)

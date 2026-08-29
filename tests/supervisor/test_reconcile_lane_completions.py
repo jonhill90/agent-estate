@@ -1477,6 +1477,32 @@ class LeakedWorktreeBacklogTest(unittest.TestCase):
         self.assertEqual(1, len(entries))
         self.assertEqual("reaped", entries[0]["outcome"])
 
+    def test_backlog_task_under_tmp_is_offered_even_without_a_private_tmp_symlink(self):
+        """Regression: `normalize_worktree_path` rewrites a `/tmp`-rooted
+        path to its `/private/tmp` spelling for COMPARISON only (its own
+        docstring) -- Linux CI (`unit-tests`, ubuntu-latest) has no such
+        symlink or directory at all. Checking the NORMALIZED path against
+        the filesystem silently excluded every real candidate whose
+        worktree lived directly under `/tmp` -- caught live when this
+        exact suite passed on macOS (where `tempfile.mkdtemp()` defaults to
+        `/var/folders/...`, never triggering the rewrite) and failed on
+        CI. Forcing `dir='/tmp'` here reproduces the failure on every
+        platform, not just Linux."""
+        worktree_dir = tempfile.mkdtemp(dir="/tmp")
+        self.addCleanup(shutil.rmtree, worktree_dir, ignore_errors=True)
+        self._record_completion_style_task("ae834-leak-tmp", lane="leak-session:12", worktree_path=worktree_dir)
+
+        runner = FakeLanesRunner({})
+        worktree_reaper = FakeWorktreeReaper(ledger=self.ledger)
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300, worktree_reaper=worktree_reaper,
+        ).sweep()
+
+        self.assertEqual(["ae834-leak-tmp"], worktree_reaper.calls)
+        entries = [e for e in report["worktrees"] if e["task"] == "ae834-leak-tmp"]
+        self.assertEqual(1, len(entries))
+        self.assertEqual("reaped", entries[0]["outcome"])
+
     def test_backlog_task_whose_worktree_is_already_gone_is_never_offered(self):
         """A historical terminal row whose worktree was already reaped (or
         hand-cleaned) must not be re-offered on every future sweep forever
