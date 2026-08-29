@@ -454,5 +454,107 @@ class NoiseMarkersTests(unittest.TestCase):
         self.assertNotIn("That file is your complete brief.", director_tick_text)
 
 
+class TailNoisePatternsTests(unittest.TestCase):
+    """agent-estate#705 tail: the three shapes behind the five stragglers the
+    684-prompt backlog left after it drained -- a raw <task-notification>
+    block (fixed literal, NOISE_MARKERS), and two dispatcher templates that
+    repeat verbatim except for one variable field (a PR number, a
+    /private/tmp/ filename -- NOISE_PATTERNS regexes). Each gets a match
+    case pinned against the exact live-ledger text (agent-estate#705's own
+    issue comment) and a non-match case against plausible hand-written text
+    that shares vocabulary but not structure -- the same two-directional
+    discipline #755's NoiseMarkersTests above already established, and the
+    same warning this issue's own brief restates: a topic filter previously
+    matched real PR discussions ("career"/"resume" catching "Hill90 resume
+    sweep"), so these match on fixed scaffolding, never on "PR", "read", or
+    "task" appearing anywhere in the text."""
+
+    def test_gh_pr_checks_dispatch_is_caught(self):
+        # Verbatim shape of the two identical stragglers agent-estate#705's
+        # own issue comment quotes.
+        text = (
+            "Check `gh pr checks 805` for the agent-estate PR (worktree at "
+            "/var/folders/_b/n12wrrv55hlfyfcpsx6smkqm0000gn/T/ad-804-ci805-95947). "
+            "unit-tests already passed (confirmed: Ran 1108 tests, OK skipped=3, "
+            "both previously-failing tests now pass)."
+        )
+        self.assertIsNotNone(itemize_prompts.noise_reason(text))
+
+    def test_gh_pr_checks_dispatch_is_caught_regardless_of_pr_number(self):
+        # The variable field: a different PR number must still match --
+        # this is the whole reason it's a regex and not another literal
+        # NOISE_MARKERS entry.
+        text = "Check `gh pr checks 291` for the agent-estate PR (worktree at /tmp/x)."
+        self.assertIsNotNone(itemize_prompts.noise_reason(text))
+
+    def test_a_real_pr_check_request_is_not_caught(self):
+        # Plausible hand-typed text that shares vocabulary ("Check", "gh pr
+        # checks", "PR", "805") but not the dispatcher's fixed scaffold --
+        # must stay None.
+        text = "Check the gh pr checks output for 805 yourself, I don't trust the bot on this one."
+        self.assertIsNone(itemize_prompts.noise_reason(text))
+
+    def test_director_tmp_read_and_decide_is_caught(self):
+        # Verbatim shape of the two director-*.md stragglers.
+        text = (
+            "Read /private/tmp/director-watchdog.md and decide. Short version: "
+            "the supervisor-watchdog LaunchAgent you loaded in #659 has been "
+            "booted out (state=not running, runs=10, clean exit)."
+        )
+        self.assertIsNotNone(itemize_prompts.noise_reason(text))
+
+    def test_director_tmp_read_and_decide_is_caught_regardless_of_filename(self):
+        text = "Read /private/tmp/director-smoke.md and decide. #800 is down to one lever."
+        self.assertIsNotNone(itemize_prompts.noise_reason(text))
+
+    def test_a_real_request_to_read_a_scratch_file_is_not_caught(self):
+        # Plausible hand-typed text naming the same directory and verb but
+        # not the dispatcher's fixed "and decide." scaffold -- must stay
+        # None.
+        text = "Can you read the notes I left at /private/tmp/scratch.md and tell me what you think, no rush."
+        self.assertIsNone(itemize_prompts.noise_reason(text))
+
+    def test_task_notification_block_is_caught(self):
+        text = (
+            "<task-notification>\n<task-id>bl2oi771b</task-id>\n"
+            "<tool-use-id>toolu_0145WTb2gM7HPxybvkbYfjrW</tool-use-id>\n"
+            "<status>killed</status>\n"
+            "<summary>Background command \"Wait for full test suite to complete\" "
+            "was stopped</summary>\n</task-notification>"
+        )
+        self.assertIsNotNone(itemize_prompts.noise_reason(text))
+
+    def test_a_real_message_about_task_notifications_is_not_caught(self):
+        # Mentions the topic ("task notification") without the literal tag
+        # -- must stay None; this is the exact class of false positive the
+        # brief warns about (topic, not structure).
+        text = "I want to discuss task notification UX -- should we surface a toast for background task completion?"
+        self.assertIsNone(itemize_prompts.noise_reason(text))
+
+    def test_drop_noise_on_each_new_shape_is_idempotent(self):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        ledger = Ledger(tmp.name, clock=lambda: 1_000)
+        text = "Check `gh pr checks 805` for the agent-estate PR (worktree at /tmp/x)."
+        ledger.record_prompt("p1", at=1_000, context="ctx", text_raw=text)
+
+        first = itemize_prompts.drop_noise(ledger)
+        second = itemize_prompts.drop_noise(ledger)
+        # The prompt already has an items row from the first pass, so
+        # list_unitemised_prompts no longer returns it at all -- the second
+        # pass sees nothing left to classify, same idempotency shape
+        # DropNoiseTests.test_drop_noise_is_idempotent already pins for the
+        # existing NOISE_MARKERS entries.
+        self.assertEqual((1, 0, 0), first)
+        self.assertEqual((0, 0, 0), second)
+
+        item = ledger.get_item(itemize_prompts._item_id(
+            "p1", 0, f"noise:{itemize_prompts.noise_reason(text)}"))
+        self.assertIsNotNone(item)
+        self.assertEqual(item["status"], "dropped")
+        self.assertEqual(item["kind"], "thought")
+        self.assertEqual(item["weight"], "retracted")
+
+
 if __name__ == "__main__":
     unittest.main()
