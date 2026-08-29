@@ -62,6 +62,18 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: "3.12"
+      # agent-estate#805: test_lane_worktree_reap.py drives the REAL
+      # `worktree.sh reap` (agent-estate#804), whose `_gc_is_live` guard
+      # asks a real `tmux` binary "is any pane's cwd inside this worktree"
+      # before it will ever call a case "safe to remove". Without tmux on
+      # PATH at all, that ask can't be answered ("could not query tmux
+      # panes"), and the guard fails closed -- refusing the very
+      # clean/merged cases the mutation suite expects reaped, at THIS job
+      # only: shell-suites already installs tmux for the same reason,
+      # unit-tests never did because nothing here shelled out to it before
+      # #804 landed.
+      - name: Install tmux
+        run: sudo apt-get update && sudo apt-get install -y tmux
       - run: python -m unittest discover -s tests -v
         env:
           # The 89 bash suites run in the shell-suites shards below, not
