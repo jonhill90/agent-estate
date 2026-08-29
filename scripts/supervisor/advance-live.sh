@@ -946,11 +946,38 @@ fi
 
 SMOKE="$SCRATCH/.smoke"
 mkdir -p "$SMOKE"
+# agent-estate#808: SCRATCH is a linked worktree of THIS repo ($LIVE), so
+# worktree-guard-audit.sh's `git worktree list` -- shared administration
+# data across every worktree of one repo -- sees the SAME full production
+# farm the real watchdog audits, not a small scratch-only set. That made
+# this smoke test re-walk every live worktree on every promotion: measured
+# 123.4s of a 138.4s smoke run against the 150s tick window, only 11.6s of
+# slack, and it already missed a real tick once (recheck age 313s).
+#
+# SUPERVISOR_GUARD_AUDIT_MAX_WORKTREES bounds the audit to the first N
+# worktrees ONLY for this smoke-test invocation -- production ticks never
+# set this var, so watchdog-checks.sh's check_worktree_guard_audit leaves
+# WORKTREE_GUARD_MAX_WORKTREES unset and worktree-guard-audit.sh's own
+# default (0, unlimited) applies there, unchanged. The audit's job inside a
+# smoke test is to prove the CANDIDATE watchdog.sh writes a well-formed
+# status, not to re-benchmark full-farm performance on every promotion -- a
+# structural bug in the audit's logic shows up on a bounded subset just as
+# reliably as on the full farm (verified directly, agent-estate#808: a
+# deliberately unguarded fixture worktree was still caught with
+# WORKTREE_GUARD_MAX_WORKTREES set well below the fixture repo's total).
+#
+# 40 is sized for a REAL safety margin, not bare-minimum fitting -- #808
+# measured ~0.084s per file@worktree check (123.4s / (113 worktrees x 13
+# files)), so 40 worktrees x 13 files ~= 520 checks ~= 44s of audit, versus
+# the unbounded ~123s. That leaves the smoke test's other ~15s of non-audit
+# overhead at ~59s total against the 150s window -- ~91s of slack, comfortably
+# above the 60s+ target and nowhere near the 11.6s that caused the miss.
 SUPERVISOR_STATE="$SMOKE" SUPERVISOR_STATUS="$SMOKE/watchdog.status" \
 SUPERVISOR_LOG="$SMOKE/watchdog.log" SUPERVISOR_STAMP="$SMOKE/.last-restart" \
 SUPERVISOR_HISTORY="$SMOKE/.restart-history" NOTIFY_ENV="$SMOKE/none.env" \
 SUPERVISOR_PANE="advance-live-smoke-test:999.1" \
 SUPERVISOR_LIVE="$SMOKE/live" \
+SUPERVISOR_GUARD_AUDIT_MAX_WORKTREES=40 \
   bash "$SCRATCH/scripts/supervisor/watchdog.sh" >"$SMOKE/stdout" 2>"$SMOKE/stderr"
 smoke_rc=$?
 
