@@ -168,6 +168,23 @@ after it (a live pane, when one can still be found, is strictly better
 evidence than a review's paper trail) and before falling back to
 `unresolved` -- never in place of the session-read error already reported.
 
+agent-estate#804: `_reap_orphans_for_this_sweep` (#800/#802) already ran
+`self.orphan_reaper` against every task this sweep just moved to a
+terminal status; nothing then touched the worktree that task's process(es)
+ran in. `_reap_worktrees_for_this_sweep` is that missing half -- same
+opt-in-via-injection shape as `orphan_reaper` (`self.worktree_reaper`,
+`None` by default so every existing caller/test keeps its prior behaviour),
+run AFTER the orphan sweep for the same tick's terminal tasks, deliberately
+in that order: a stray background process still sitting in the worktree's
+cwd is exactly what `worktree.sh reap`'s own liveness check (`_gc_is_live`,
+reused unmodified) would refuse to remove out from under, so reaping it
+first with `orphan_reaper` is what lets a worktree that would otherwise be
+refused as "live" become reapable in the same tick, rather than needing a
+second sweep to notice its occupant is already gone. See `lane_worktree_
+reap.py`'s own module docstring for the accrual-rate measurement and the
+immediate-vs-deferred reasoning -- both left as open questions by the
+issue.
+
 agent-supervisor#401: "no signal arrived" and "the work did not happen" are
 different claims, and the wording this sweep used to write conflated them
 -- `results/ad275-fix275.md` read "failed, not completed" while its own
@@ -269,6 +286,7 @@ class LaneCompletionReconciler:
         stale_after=DEFAULT_STALE_AFTER_SECONDS,
         clock=None,
         orphan_reaper=None,
+        worktree_reaper=None,
     ):
         self.ledger = ledger
         self.runner = runner or subprocess_runner
@@ -291,6 +309,14 @@ class LaneCompletionReconciler:
         # `runner`/binaries and so tests can substitute a fake without
         # touching this class's own constructor signature further.
         self.orphan_reaper = orphan_reaper
+        # agent-estate#804: this sweep's missing half of #800/#802's own
+        # completion -- reaping a lane's PROCESSES said nothing about the
+        # WORKTREE they ran in. Same opt-in-by-injection shape as
+        # `orphan_reaper` above and for the identical reason (see that
+        # attribute's own comment): `None` by default so every existing
+        # caller/test keeps its prior behaviour, wired explicitly at the
+        # one real caller, `cli.py reconcile-lane-completions`.
+        self.worktree_reaper = worktree_reaper
 
     def _fetch_session_lanes(self, session):
         """One batched `lanes.sh --json <session>` call -> {index: row}."""
@@ -389,6 +415,13 @@ class LaneCompletionReconciler:
             # present so a caller can tell "reaping ran and found nothing"
             # from "reaping was never wired" without inspecting `self`.
             "orphans": [],
+            # agent-estate#804: one entry per task this sweep just moved to
+            # a terminal status, naming what `self.worktree_reaper` (if
+            # any) found and did with that task's own worktree -- see
+            # `_reap_worktrees_for_this_sweep`'s own docstring. Always
+            # present, same "wired vs. not" distinction `orphans` above
+            # already makes.
+            "worktrees": [],
         }
 
         now = self.clock()
@@ -445,7 +478,26 @@ class LaneCompletionReconciler:
                 self._evaluate_window(task, window, session=session, now=now, report=report)
 
         self._reap_orphans_for_this_sweep(report)
+        # agent-estate#804: run AFTER the orphan sweep above, on the SAME
+        # terminal-task set -- see this module's own top-level docstring
+        # for why that order matters (a stray process the orphan reaper
+        # just killed is exactly what would otherwise make `worktree.sh
+        # reap`'s own liveness guard refuse the worktree it was sitting
+        # in).
+        self._reap_worktrees_for_this_sweep(report)
         return report
+
+    def _terminal_task_ids_for_this_sweep(self, report):
+        """The four `report` lists a task id can land in exactly once per
+        sweep, on a single terminal status write -- shared by both reapers
+        below so each looks at the identical set THIS sweep just produced,
+        never a stale one from a prior call."""
+        return (
+            report["completed"]
+            + report["failed_unaccepted"]
+            + report["failed_stale_delivery"]
+            + report["failed_stale_acceptance"]
+        )
 
     def _reap_orphans_for_this_sweep(self, report):
         """agent-estate#800: for every task THIS sweep just moved to a
@@ -464,13 +516,7 @@ class LaneCompletionReconciler:
         """
         if self.orphan_reaper is None:
             return
-        terminal_task_ids = (
-            report["completed"]
-            + report["failed_unaccepted"]
-            + report["failed_stale_delivery"]
-            + report["failed_stale_acceptance"]
-        )
-        for task_id in terminal_task_ids:
+        for task_id in self._terminal_task_ids_for_this_sweep(report):
             task = self.ledger.get_task(task_id)
             if task is None:
                 continue
@@ -479,6 +525,34 @@ class LaneCompletionReconciler:
             except Exception as error:
                 result = {"task": task_id, "outcome": "error", "error": str(error)}
             report["orphans"].append(result)
+
+    def _reap_worktrees_for_this_sweep(self, report):
+        """agent-estate#804: `_reap_orphans_for_this_sweep`'s own missing
+        half -- for every task THIS sweep just moved to a terminal status,
+        ask `self.worktree_reaper` (if one was given) to reap that task's
+        own worktree, through `worktree.sh reap`'s guard chain (unmerged,
+        dirty, or live all refuse; see `lane_worktree_reap.py`'s own module
+        docstring for the full rationale, including the accrual-rate
+        measurement this issue asked for).
+
+        A no-op when `self.worktree_reaper` is `None` (opt-in, same
+        constructor-injection shape as `orphan_reaper` -- see this class's
+        own `__init__` docstring). Never lets a reaper's own exception
+        break this sweep's ledger writes, which have already committed by
+        the time this runs -- a reap failure is recorded in
+        `report["worktrees"]` as an error entry, not raised.
+        """
+        if self.worktree_reaper is None:
+            return
+        for task_id in self._terminal_task_ids_for_this_sweep(report):
+            task = self.ledger.get_task(task_id)
+            if task is None:
+                continue
+            try:
+                result = self.worktree_reaper.reap_task_worktree(task)
+            except Exception as error:
+                result = {"task": task_id, "outcome": "error", "error": str(error)}
+            report["worktrees"].append(result)
 
     def _evaluate_window(self, task, window, *, session, now, report, via_fallback=False):
         """The state/idle/accepted evidence check shared by the ordinary

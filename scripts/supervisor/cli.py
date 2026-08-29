@@ -40,6 +40,7 @@ from core import (
 )
 from github_source import GithubTaskSource
 from lane_orphan_reap import LaneOrphanReaper
+from lane_worktree_reap import LaneWorktreeReaper
 from pi_transport import PiRPCTransport
 from reconcile_lane_completions import LaneCompletionReconciler
 from reconcile_sources import SourceTaskReconciler
@@ -547,6 +548,15 @@ def main(argv=None):
         orphan_reaper = None
         if os.environ.get("AGENT_REAP_LANE_ORPHANS", "1") != "0":
             orphan_reaper = LaneOrphanReaper(ledger)
+        # agent-estate#804: same opt-out convention as AGENT_REAP_LANE_
+        # ORPHANS above -- wired here, not defaulted on inside
+        # LaneCompletionReconciler itself, for the identical reason (every
+        # existing test constructing that class directly keeps its prior
+        # behaviour). Opt-out, not opt-in, because the whole point of #804
+        # was that nothing was reaping these worktrees by default.
+        worktree_reaper = None
+        if os.environ.get("AGENT_REAP_LANE_WORKTREES", "1") != "0":
+            worktree_reaper = LaneWorktreeReaper(ledger)
         value = LaneCompletionReconciler(
             ledger,
             lanes_bin=lanes_bin,
@@ -554,6 +564,7 @@ def main(argv=None):
             idle_after=args.idle_after,
             stale_after=args.stale_after,
             orphan_reaper=orphan_reaper,
+            worktree_reaper=worktree_reaper,
         ).sweep()
     elif args.command == "observe":
         lanes = args.lane or [

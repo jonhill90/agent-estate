@@ -1256,5 +1256,142 @@ class ReviewerTaskWithGenuinelyDeadPaneTest(unittest.TestCase):
         self.assertEqual([], report["unresolved"])
 
 
+class FakeWorktreeReaper:
+    """Records every `reap_task_worktree` call and answers a canned outcome
+    per task id -- the only substitute `_reap_worktrees_for_this_sweep`
+    needs, since the real guard chain (dirty/unmerged/live) is already
+    proven end to end against real git fixtures in
+    `test_lane_worktree_reap.py`. This class exists to prove the WIRING:
+    which tasks get offered to the reaper, in what order relative to the
+    orphan reaper, and never for a task this sweep did not just terminate."""
+
+    def __init__(self, outcomes=None):
+        self.outcomes = outcomes or {}
+        self.calls = []
+
+    def reap_task_worktree(self, task):
+        self.calls.append(task["id"])
+        return {"task": task["id"], "outcome": self.outcomes.get(task["id"], "reaped")}
+
+
+class FakeOrphanReaper:
+    """Same recording shape as `FakeWorktreeReaper`, for the ordering
+    assertion below (agent-estate#804: the worktree reaper must run AFTER
+    the orphan reaper on the same terminal-task set, not before and not
+    independently)."""
+
+    def __init__(self, calls_log):
+        self.calls_log = calls_log
+
+    def reap_task_orphans(self, task):
+        self.calls_log.append(("orphan", task["id"]))
+        return {"task": task["id"], "outcome": "no_candidates"}
+
+
+class WorktreeReaperWiringTest(unittest.TestCase):
+    """agent-estate#804: `_reap_worktrees_for_this_sweep` is `#802`'s own
+    `_reap_orphans_for_this_sweep` missing half. These tests exercise the
+    WIRING only (which tasks get offered, in what order, opt-in/opt-out) --
+    the reaper's own removal decision is proven separately, against real
+    git fixtures, in `test_lane_worktree_reap.py`."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.ledger = Ledger(Path(self.tempdir.name), clock=lambda: 1_000)
+
+    def dispatch(self, task_id, *, lane="agent-supervisor:2"):
+        return self.ledger.record_dispatch(
+            lane=lane, pane_id="%2", nonce="nonce-2", harness="claude",
+            repo="/repo/agent-supervisor", server_id="server-a", session_id="$2", command="claude",
+            task_id=task_id, source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/804",
+            source_ref="804", summary="issue #804", source_state="OPEN",
+            evidence=[f"claimed by dispatch.sh for lane {lane}", "issues: 804"],
+            status_marker=None, accepted=True,
+        )
+
+    def test_no_worktree_reaper_means_no_report_entries(self):
+        """The default -- `worktree_reaper=None` -- must change nothing
+        about the sweep's own completion behaviour, same opt-in contract
+        `orphan_reaper` already holds."""
+        self.dispatch("ae804-wire1")
+        runner = FakeLanesRunner({"agent-supervisor": [{"window": 2, "state": "free", "idle_seconds": 400}]})
+        report = LaneCompletionReconciler(self.ledger, runner=runner, idle_after=300).sweep()
+        self.assertEqual(["ae804-wire1"], report["completed"])
+        self.assertEqual([], report["worktrees"])
+
+    def test_terminal_task_is_offered_to_the_worktree_reaper(self):
+        self.dispatch("ae804-wire2")
+        runner = FakeLanesRunner({"agent-supervisor": [{"window": 2, "state": "free", "idle_seconds": 400}]})
+        reaper = FakeWorktreeReaper()
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300, worktree_reaper=reaper,
+        ).sweep()
+        self.assertEqual(["ae804-wire2"], report["completed"])
+        self.assertEqual(["ae804-wire2"], reaper.calls)
+        self.assertEqual([{"task": "ae804-wire2", "outcome": "reaped"}], report["worktrees"])
+
+    def test_unresolved_task_is_never_offered_to_the_worktree_reaper(self):
+        """A task this sweep leaves `unresolved` (still busy, or not past
+        the dwell) never went terminal -- it must never reach the reaper at
+        all, mirroring `_reap_orphans_for_this_sweep`'s own identical
+        constraint for processes."""
+        self.dispatch("ae804-wire3")
+        runner = FakeLanesRunner({"agent-supervisor": [{"window": 2, "state": "busy", "idle_seconds": 0}]})
+        reaper = FakeWorktreeReaper()
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300, worktree_reaper=reaper,
+        ).sweep()
+        self.assertEqual(["ae804-wire3"], report["unresolved"])
+        self.assertEqual([], reaper.calls)
+        self.assertEqual([], report["worktrees"])
+
+    def test_worktree_reaper_runs_after_the_orphan_reaper_on_the_same_task(self):
+        """agent-estate#804's own ordering requirement: a stray process the
+        orphan reaper just killed is exactly what would otherwise make
+        `worktree.sh reap`'s own liveness check refuse the worktree it was
+        sitting in -- so the orphan reaper must run FIRST, on the same
+        terminal task, every time."""
+        self.dispatch("ae804-wire4")
+        runner = FakeLanesRunner({"agent-supervisor": [{"window": 2, "state": "free", "idle_seconds": 400}]})
+        order = []
+        orphan_reaper = FakeOrphanReaper(order)
+        worktree_reaper = FakeWorktreeReaper()
+        original_call = worktree_reaper.reap_task_worktree
+
+        def recording_call(task):
+            order.append(("worktree", task["id"]))
+            return original_call(task)
+
+        worktree_reaper.reap_task_worktree = recording_call
+
+        LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300,
+            orphan_reaper=orphan_reaper, worktree_reaper=worktree_reaper,
+        ).sweep()
+
+        self.assertEqual([("orphan", "ae804-wire4"), ("worktree", "ae804-wire4")], order)
+
+    def test_worktree_reaper_exception_is_recorded_not_raised(self):
+        """A reaper failure must never break this sweep's own ledger
+        writes, which have already committed by the time this runs -- same
+        posture `_reap_orphans_for_this_sweep` already holds."""
+        self.dispatch("ae804-wire5")
+        runner = FakeLanesRunner({"agent-supervisor": [{"window": 2, "state": "free", "idle_seconds": 400}]})
+
+        class ExplodingReaper:
+            def reap_task_worktree(self, task):
+                raise RuntimeError("worktree.sh reap blew up")
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300, worktree_reaper=ExplodingReaper(),
+        ).sweep()
+        self.assertEqual(["ae804-wire5"], report["completed"])
+        self.assertEqual(1, len(report["worktrees"]))
+        self.assertEqual("ae804-wire5", report["worktrees"][0]["task"])
+        self.assertEqual("error", report["worktrees"][0]["outcome"])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -25,6 +25,29 @@
 #   worktree.sh new  <slug> [repo] [base]   create a worktree, print its path
 #   worktree.sh done <path>                 remove a worktree; refuses if dirty
 #   worktree.sh guard <repo>                exit 1 if <repo> itself is dirty
+#   worktree.sh reap [--no-github] <path> [base]
+#                                           single-target twin of `gc` below,
+#                                            for a caller that already knows
+#                                            exactly which one worktree it
+#                                            means and must never risk
+#                                            sweeping a sibling's tree as a
+#                                            side effect of reaping this one
+#                                            (agent-estate#804). Reuses the
+#                                            EXACT SAME predicate chain `gc`
+#                                            runs per-candidate -- not live
+#                                            (`_gc_is_live`), branch content
+#                                            already on [base] or a MERGED PR
+#                                            on record (`branch_content_is_
+#                                            on_base` / `_gc_pr_merged_from_
+#                                            file`, skippable with
+#                                            --no-github), then `safe_remove`
+#                                            -- against exactly <path>,
+#                                            without enumerating or touching
+#                                            any other registered worktree.
+#                                            Exit 0 = removed; exit 1 = a
+#                                            guard refused (reason on
+#                                            stderr); the worktree survives
+#                                            either way this call errors.
 #   worktree.sh gc [--dry-run] [--no-github] [repo] [base]
 #                                           remove every worktree whose
 #                                            branch's content is already on
@@ -835,6 +858,79 @@ done)
   [ -n "$TARGET" ] || usage
   [ -d "$TARGET" ] || { echo "worktree: $TARGET does not exist" >&2; exit 1; }
   safe_remove "$TARGET" || exit 1
+  exit 0 ;;
+
+reap)
+  shift
+  USE_GH=1
+  while :; do
+    case "${1:-}" in
+      --no-github) USE_GH=""; shift ;;
+      *) break ;;
+    esac
+  done
+  TARGET="${1:-}"
+  [ -n "$TARGET" ] || usage
+  BASE="${2:-origin/main}"
+  [ -d "$TARGET" ] || { echo "worktree: $TARGET does not exist" >&2; exit 1; }
+
+  # Single-target twin of `gc`'s own per-candidate predicate chain below,
+  # reusing exactly the same functions gc already calls rather than a
+  # second, differently-shaped implementation of the same checks
+  # (agent-estate#804 -- "reuse worktree.sh's existing guards, do not
+  # reimplement them"). This exists because a completion-time caller
+  # (`reconcile_lane_completions.py`) already knows precisely which
+  # worktree the task it just terminated owns; pointing `gc`'s own sweep at
+  # a shared root via WORKTREE_GC_EXTRA_ROOTS to reach it would also bring
+  # every SIBLING lane worktree under that root into scope for the same
+  # call, which is a materially bigger blast radius than "reap this one".
+  #
+  # $TARGET doubles as its own "$repo" argument to every reused function
+  # below (`_gc_is_live`, `branch_content_is_on_base`, `_gc_fetch_merged_
+  # prs`): a linked worktree shares its refs, objects and remote config
+  # with the repo that created it, so `git -C "$TARGET" ...` against
+  # `refs/heads/<branch>`, `$BASE`, or `remote.origin.url` all answer
+  # identically to running the same command against the main checkout --
+  # there is nothing here that needs a second, separate repo path.
+  if _gc_is_live "$TARGET"; then
+    exit 1
+  fi
+
+  # gc's own per-candidate loop skips a branchless (detached/bare) entry
+  # outright, before ever asking whether its content is merged -- same
+  # posture here: a target `reap` cannot name a branch for is left alone,
+  # never guessed at. `safe_remove`'s own detached-HEAD-with-unreachable-
+  # commit guard (below) exists for a worktree that WAS on a branch and
+  # was deliberately detached mid-task; this earlier check is for one that
+  # answers "no branch" outright.
+  BRANCH=$(git -C "$TARGET" symbolic-ref -q --short HEAD) || BRANCH=""
+  if [ -z "$BRANCH" ]; then
+    echo "worktree: $TARGET has no branch (detached HEAD) -- refusing without a branch to check against $BASE" >&2
+    exit 1
+  fi
+
+  GH_MERGED_FILE=""
+  if [ -n "$USE_GH" ]; then
+    GH_MERGED_FILE=$(mktemp)
+    if ! _gc_fetch_merged_prs "$TARGET" "$GH_MERGED_FILE"; then
+      rm -f "$GH_MERGED_FILE"
+      GH_MERGED_FILE=""
+      echo "worktree: reap proceeding without the GitHub merged-PR cross-check for $TARGET (no gh, no readable remote, or gh pr list failed) -- a squash-merged-then-superseded branch will not be reached this call (agent-supervisor#682)" >&2
+    fi
+  fi
+  trap '[ -n "$GH_MERGED_FILE" ] && rm -f "$GH_MERGED_FILE"' EXIT
+
+  if branch_content_is_on_base "$TARGET" "$BRANCH" "$BASE"; then
+    WHY="its content is already on $BASE"
+  elif _gc_pr_merged_from_file "$GH_MERGED_FILE" "$BRANCH"; then
+    WHY="its branch has a MERGED PR on GitHub even though $BASE has since diverged from its scoped diff (agent-supervisor#682)"
+  else
+    echo "worktree: $TARGET -- $BASE does not already contain branch '$BRANCH', and no MERGED PR is on record for it; refusing to remove unmerged work" >&2
+    exit 1
+  fi
+
+  safe_remove "$TARGET" || exit 1
+  echo "worktree: reaped $TARGET (branch '$BRANCH' -- $WHY)" >&2
   exit 0 ;;
 
 gc)
