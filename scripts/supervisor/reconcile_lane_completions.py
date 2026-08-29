@@ -248,15 +248,54 @@ never widens what makes removal safe -- that guard chain is unchanged and
 unweakened; see `_leaked_worktree_candidate_ids`'s own docstring for the
 new candidate set this adds and `Ledger.list_terminal_tasks_with_worktree`
 for what it queries.
+
+agent-estate#837: measured live on the real ledger, `#834`'s widened
+BACKLOG half of that union offered a historical row carrying
+`worktree_path=/tmp` to the reap guard chain -- `Path("/tmp").is_dir()` is
+true, so the only filter in place let it through. It was refused, but by
+`_gc_is_live` (a running process's cwd happened to be inside `/tmp` at that
+moment) -- a property of the moment the sweep ran, not a property of
+`/tmp` itself. Same measurement: 181 backlog candidates, 157 refused,
+14 genuinely reaped, 10 already gone -- and the 157 refusals recur on
+EVERY future sweep, because a refused candidate stays a candidate
+forever (`list_terminal_tasks_with_worktree` has no way to know a row was
+already asked and refused). `_looks_like_lane_worktree` is the fix for the
+first half: three tests, any one sufficient, reusing `orphan-worktree-
+reap.sh`'s own reasoning rather than inventing a fourth scheme --
+registered in a known repo's own `git worktree list`, under a known
+worktree root (`<repo>/.worktrees`), or named the way `worktree.sh new`
+actually names one (`ad-<n>-<task>-<pid>`, `DEST="$ROOT/ad-$SLUG-$$"`).
+`/tmp` fails all three. Applied ONLY to the `#834` backlog half of the
+union below, never to a task this sweep itself just completed -- a lane
+this system dispatched and just finished always has a `worktree_path`
+`worktree.sh new` itself produced, so narrowing that half would only add
+risk (a legitimate same-sweep completion refused for looking "wrong
+shaped") with no corresponding benefit (it was never the source of either
+finding).
+
+The second finding -- the 157 refusals recurring every sweep -- is NOT
+fixed here. Distinguishing a refusal that can never turn into a reap (the
+path is not a git repository at all, or is not a worktree) from one that
+is genuinely transient (a live lane, a dirty tree, an unmerged branch
+still being worked) means classifying `worktree.sh reap`'s own guard-chain
+outcomes by permanence, and getting that wrong in the "permanent" direction
+means caching a refusal for a worktree that could still legitimately be
+reaped later. Nothing here can prove that classification safe without
+touching the guard chain the brief for this issue named out of scope; the
+narrowing above already removes `/tmp` and everything else not
+worktree-shaped from the recurring set, which is the honest measurement to
+take before deciding whether a caching scheme is still worth the risk.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 from pathlib import Path
 
+from cli_parser import DEFAULT_REPOSITORIES
 from core import CLAIM_TASK_PREFIX, pid_is_alive
 from core_lane_relation import normalize_worktree_path
 from verdict import GithubReviewVerdictSource
@@ -285,6 +324,48 @@ _DISPATCHED_PID_RE = re.compile(r"dispatched detached: task=\S+ lane=\S+ pid=(\d
 # is read back FROM a column this same system wrote, not scraped out of
 # free-form prose.
 _PULL_SOURCE_URL_RE = re.compile(r"https://github\.com/(?P<repo>[^/\s]+/[^/\s]+)/pull/(?P<number>[0-9]+)")
+
+# agent-estate#837: the shape every dispatch actually produces --
+# `worktree.sh new`'s own `DEST="$ROOT/ad-$SLUG-$$"`, and
+# `orphan-worktree-reap.sh`'s own naming whitelist (`ad-*-[0-9]*`) for the
+# identical reason (CLAUDE.md invariant 6: unknown means not offered, not
+# swept in). `/tmp`'s basename is `tmp` -- fails this outright.
+_LANE_WORKTREE_NAME_RE = re.compile(r"^ad-[0-9]+-.+-[0-9]+$")
+
+
+def _known_worktree_roots(repositories):
+    """Every `<repo>/.worktrees` directory a known repository resolves to
+    (`worktree.sh new`'s own default DEST base, agent-estate#821) --
+    real-path-resolved (`os.path.realpath`) so a symlinked spelling (macOS's
+    `/tmp` -> `/private/tmp`) compares equal to however a candidate's own
+    `worktree_path` spelled it, the same reasoning `worktree.sh gc`'s own
+    `WORKTREES_ROOT_REAL` comparison already documents. Deliberately does
+    NOT include bare `$TMPDIR`/`$WORKTREE_ROOT` -- that would accept ANY
+    directory anywhere under it, which is the exact over-broad shape
+    agent-estate#837 exists to narrow away from (`/tmp` itself is `$TMPDIR`
+    on most hosts). A `$TMPDIR`-rooted worktree is still recognised, just by
+    `_LANE_WORKTREE_NAME_RE` below on its own basename, same as every other
+    root."""
+    roots = set()
+    for repo in repositories:
+        path = repo.get("path") if isinstance(repo, dict) else None
+        if not path or not os.path.isdir(path):
+            continue
+        roots.add(os.path.realpath(os.path.join(path, ".worktrees")))
+    return roots
+
+
+def _is_under_any_root(real_path, roots):
+    for root in roots:
+        if not root:
+            continue
+        try:
+            Path(real_path).relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
+
 
 DEFAULT_IDLE_AFTER_SECONDS = 300
 # agent-supervisor#374: deliberately much longer than DEFAULT_IDLE_AFTER_SECONDS.
@@ -330,6 +411,7 @@ class LaneCompletionReconciler:
         clock=None,
         orphan_reaper=None,
         worktree_reaper=None,
+        repositories=None,
     ):
         self.ledger = ledger
         self.runner = runner or subprocess_runner
@@ -360,6 +442,14 @@ class LaneCompletionReconciler:
         # caller/test keeps its prior behaviour, wired explicitly at the
         # one real caller, `cli.py reconcile-lane-completions`.
         self.worktree_reaper = worktree_reaper
+        # agent-estate#837: which repositories' own `git worktree list` and
+        # `.worktrees` root count as "known", for `_looks_like_lane_worktree`
+        # below. Defaults to the estate's real repo list (`cli_parser.
+        # DEFAULT_REPOSITORIES`, itself overridable via
+        # `SUPERVISOR_REPOSITORIES` -- see that module) rather than binding
+        # it at import time, so a test can inject a fixture repo list
+        # without needing an env var round trip.
+        self.repositories = repositories if repositories is not None else DEFAULT_REPOSITORIES
 
     def _fetch_session_lanes(self, session):
         """One batched `lanes.sh --json <session>` call -> {index: row}."""
@@ -542,6 +632,69 @@ class LaneCompletionReconciler:
             + report["failed_stale_acceptance"]
         )
 
+    def _registered_worktree_paths(self):
+        """agent-estate#837: every path some known repository's own `git
+        worktree list` still names, real-path-resolved -- the first of
+        `_looks_like_lane_worktree`'s three tests, reusing `orphan-worktree-
+        reap.sh`'s own `REGISTERED` array reasoning rather than inventing a
+        second one.
+
+        Computed once per sweep call (`self.repositories` is a handful of
+        entries, not per-candidate), through `self.runner` like every other
+        git/gh/tmux read in this class -- never a bare `subprocess.run`, so
+        a test can substitute a fake without a second injection point. A
+        repository this host does not have checked out, or whose `git
+        worktree list` fails for any reason, contributes nothing to the
+        set; the naming-shape and known-root tests are what still protect a
+        candidate in that case -- never raises, never blocks the sweep.
+        """
+        registered = set()
+        for repo in self.repositories:
+            path = repo.get("path") if isinstance(repo, dict) else None
+            if not path or not os.path.isdir(path):
+                continue
+            try:
+                out = self.runner(["git", "-C", path, "worktree", "list", "--porcelain"])
+            except Exception:
+                continue
+            for line in (out or "").splitlines():
+                if line.startswith("worktree "):
+                    registered.add(os.path.realpath(line[len("worktree "):]))
+        return registered
+
+    def _looks_like_lane_worktree(self, worktree_path, registered, roots):
+        """agent-estate#837: the gate a BACKLOG candidate (one THIS sweep
+        did not itself just complete) must pass before it is even offered
+        to the reap guard chain -- not a replacement for that chain, which
+        runs unchanged and unweakened after this. Three independent tests,
+        any one sufficient, mirroring `orphan-worktree-reap.sh`'s own
+        reasoning rather than inventing a fourth scheme:
+
+        1. registered in a known repository's own `git worktree list`
+           right now (`registered`, from `_registered_worktree_paths`);
+        2. under a known worktree root, `<repo>/.worktrees` for a known
+           repository (`roots`, from `_known_worktree_roots`);
+        3. named the way `worktree.sh new` actually names one --
+           `ad-<n>-<task>-<pid>` (`_LANE_WORKTREE_NAME_RE`), regardless of
+           where it lives, so a leaked `$TMPDIR/ad-...` directory (#822's
+           own population, which neither test 1 nor test 2 can see) is
+           still recognised.
+
+        `/tmp` fails all three: it is not any repository's registered
+        worktree, `$TMPDIR`/`/tmp` itself is deliberately excluded from
+        `roots` (see that function's own docstring), and its basename
+        `tmp` does not match the naming shape. A real leaked lane worktree
+        (`ad-341-fix341-7071`'s own shape) passes test 3 on its name alone,
+        with no dependency on the repo it came from still being checked
+        out on this host.
+        """
+        real = os.path.realpath(worktree_path)
+        if real in registered:
+            return True
+        if _is_under_any_root(real, roots):
+            return True
+        return bool(_LANE_WORKTREE_NAME_RE.match(os.path.basename(worktree_path.rstrip("/"))))
+
     def _leaked_worktree_candidate_ids(self, report):
         """agent-estate#834: `_terminal_task_ids_for_this_sweep` alone only
         ever named a task THIS sweep just decided terminal -- a task
@@ -570,6 +723,14 @@ class LaneCompletionReconciler:
         module's own top-level docstring's agent-estate#834 paragraph for
         why that is what makes widening the candidate SET safe). This
         method only decides what gets OFFERED, never what gets removed.
+
+        agent-estate#837: the backlog half below also has to look like a
+        lane worktree before it is offered at all -- see
+        `_looks_like_lane_worktree`'s own docstring and this module's
+        top-level agent-estate#837 paragraph for why `/tmp` passed the
+        `is_dir()` check alone and why this shape gate applies ONLY to this
+        backlog half, never to `_terminal_task_ids_for_this_sweep`'s ids
+        above.
         """
         seen = set()
         ids = []
@@ -578,6 +739,12 @@ class LaneCompletionReconciler:
                 continue
             seen.add(task_id)
             ids.append(task_id)
+        # Computed lazily, once per call, only if there is at least one
+        # on-disk backlog candidate to judge -- a sweep with an empty
+        # backlog (the common case once #837's own 157-refusal backlog is
+        # worked down) never pays for a single `git worktree list` call.
+        registered = None
+        roots = None
         for task in self.ledger.list_terminal_tasks_with_worktree():
             task_id = task["id"]
             if task_id in seen:
@@ -595,6 +762,11 @@ class LaneCompletionReconciler:
             # `Path.is_dir()` must be asked about; only reject a blank one.
             worktree_path = task.get("worktree_path") or ""
             if not worktree_path or not Path(worktree_path).is_dir():
+                continue
+            if registered is None:
+                registered = self._registered_worktree_paths()
+                roots = _known_worktree_roots(self.repositories)
+            if not self._looks_like_lane_worktree(worktree_path, registered, roots):
                 continue
             seen.add(task_id)
             ids.append(task_id)
