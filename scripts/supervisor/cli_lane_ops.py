@@ -89,7 +89,10 @@ def lane_free(ledger, transport, *, lane, target, window_name):
       currently named. A hand-renamed window, or one still carrying a task
       name for a task the ledger has never heard finished, must not change
       this: the whole point of the change is that authority moved off the
-      name.
+      name. When this branch is about to report the lane FREE, its recorded
+      `harness` is cross-checked against the live pane before being trusted
+      (agent-dotfiles#819) -- see the comment at that check for why a stale
+      row must not reach a caller silently.
     * The ledger has never heard of this lane, and the window is currently
       named by the `free-N` convention -- the one-time MIGRATION path for a
       lane whose availability today exists only as that name (every lane
@@ -152,12 +155,71 @@ def lane_free(ledger, transport, *, lane, target, window_name):
     known = ledger.lane_available(lane)
     if known is not None:
         record = ledger.get_lane(lane)
+        recorded_harness = record["harness"] if record else None
+        if known and record:
+            # agent-dotfiles#819: a slot re-registered under a different
+            # harness (e.g. `bootstrap-session.sh --add-lanes --harness
+            # codex` respawning a pane that last ran claude) can keep this
+            # OLD `lanes.harness` row -- `_register_lane_tx` only rewrites a
+            # row when the pane's identity changes, and a respawn onto the
+            # same slot does not always trip that. Measured on
+            # `agent-dotfiles:2`: this branch returned `"harness":"claude"`
+            # from a stale row while the pane's own `@hill90_lane_harness`
+            # read `codex` correctly the entire time -- dispatch then applied
+            # claude's input-box shape to a codex pane and failed with a
+            # symptom byte-identical to #817's autocomplete race.
+            #
+            # Cross-check the SAME way the backfill branch below already
+            # does (exact-binary inference first, the recorded option as
+            # fallback) rather than trusting the row unconditionally. Read
+            # only when the lane is about to be reported free: dispatch is
+            # the one caller this matters for, and `dispatch-lane-select.sh`
+            # only calls `lane-free` for candidates `lanes.sh --free` already
+            # found idle-looking, so this adds no tmux read for a lane
+            # already excluded as busy.
+            #
+            # A pane probe that itself cannot be read (a stale/unresolvable
+            # tmux target, the same shape `dispatch.sh`'s own LANE_META
+            # sanity guard exists for) is "cannot tell", not "contradicts" --
+            # caught broadly and treated as no live signal, same as an
+            # absent option below. Refusing a dispatch because tmux hiccuped
+            # on a DIAGNOSTIC read would be strictly worse than the bug this
+            # exists to catch; only a POSITIVELY resolved conflict refuses.
+            try:
+                command = transport.metadata(target)["command"]
+                live_option = transport.get_option(target, HARNESS_OPTION)
+            except Exception:
+                command, live_option = None, None
+            inferred = HARNESS_BY_COMMAND.get(command)
+            live_option = live_option if live_option in HARNESS_COMMANDS else None
+            live = inferred or live_option
+            if live and live != recorded_harness:
+                # Refuse, not self-correct (agent-dotfiles#819's own
+                # decision): a ledger write from inside a read-only query
+                # would hide the fault instead of surfacing it, and this
+                # function already promises callers it takes no lock and
+                # writes nothing for a known lane (see the "WHAT THIS DOES
+                # NOT DO" note above). A refusal costs one manual
+                # `cli.py register`, exactly the repair #819 already used;
+                # a silent self-correct would make the NEXT drift as
+                # invisible as this one was.
+                return {
+                    "lane": lane,
+                    "known": False,
+                    "free": False,
+                    "backfilled": False,
+                    "reason": (
+                        f"recorded harness {recorded_harness!r} does not match "
+                        f"the live pane (command {command!r}, {HARNESS_OPTION} "
+                        f"{live_option!r})"
+                    ),
+                }
         return {
             "lane": lane,
             "known": True,
             "free": known,
             "backfilled": False,
-            "harness": record["harness"] if record else None,
+            "harness": recorded_harness,
         }
     if not FREE_WINDOW_NAME_RE.match(window_name):
         return {"lane": lane, "known": False, "free": False, "backfilled": False}
