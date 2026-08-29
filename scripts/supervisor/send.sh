@@ -267,23 +267,58 @@ verified_type() {
 
 # verified_preclear <target> [--settle N] [--retries N]
 #
-# Sends `Escape` then `C-u` then `/clear` + Enter, and confirms the screen
-# actually blanked -- the input box reads `empty`, not `text` or `unknown` --
-# before returning success. agent-supervisor#193: `/clear`'s own Enter can be
-# swallowed exactly the way #178 already found a brief's Enter can be, and
-# unlike a stranded brief this failure was INVISIBLE downstream -- the next
-# `verified_type` call still found its proof tokens (as true substrings of
-# "/clear" glued onto the front of the retyped brief) and reported `landed`.
-# Confirming the blank HERE, before anything else is ever typed, is the
-# fail-closed fix `dispatch.sh`'s own comment above this call promised and
-# did not yet deliver: "abort the dispatch if it did not [clear], rather
-# than typing over an unsubmitted line."
+# Sends `Escape` then `C-u` then `/clear`, THEN `Enter` as its own separate
+# `send-keys` call, and confirms the screen actually blanked -- the input
+# box reads `empty`, not `text` or `unknown` -- before returning success.
+# agent-supervisor#193: `/clear`'s own Enter can be swallowed exactly the way
+# #178 already found a brief's Enter can be, and unlike a stranded brief
+# this failure was INVISIBLE downstream -- the next `verified_type` call
+# still found its proof tokens (as true substrings of "/clear" glued onto
+# the front of the retyped brief) and reported `landed`. Confirming the
+# blank HERE, before anything else is ever typed, is the fail-closed fix
+# `dispatch.sh`'s own comment above this call promised and did not yet
+# deliver: "abort the dispatch if it did not [clear], rather than typing
+# over an unsubmitted line."
 #
 # This is deliberately its own primitive, not a `verified_type`/
 # `verified_submit` pair: `/clear` blanks the WHOLE screen, which the
 # `--proof` substring check was never built to read through (see
 # `verified_type`'s header) -- the only thing checkable here is that the box
 # came back empty, so that is the whole of what this function confirms.
+#
+# agent-estate#817: `/clear` and `Enter` used to go out in ONE `send-keys`
+# call ("/clear" Enter as two arguments to a single invocation). Against
+# codex-cli 0.149.0, typing `/clear` opens a slash-command autocomplete
+# dropdown, and that combined call's Enter lands while the dropdown is still
+# open -- it confirms the completion instead of submitting, leaving the pane
+# holding an unsubmitted "/clear" forever (every retry re-runs the identical
+# race). This is the SAME class the tick protocol already warns about
+# elsewhere in this file (a combined send dropping a character and
+# producing "command not found: laude") -- `blind_send`'s own
+# type-then-`sleep`-then-Enter shape, below, is the established fix for
+# exactly this failure mode; `/clear` had just never needed it until codex's
+# autocomplete made the race land every time instead of occasionally.
+#
+# UNCONDITIONAL, not codex-only: this function is shared with claude, which
+# is 463 of 467 lanes, so the split had to be proven safe there too before
+# landing -- not merely "does not obviously break claude", but driven live
+# against a real claude pane and confirmed it still blanks (see #817's PR
+# body for the transcript). A harness-conditional split would need
+# `verified_preclear`'s caller to know and pass the harness, a new
+# parameter every existing caller (`dispatch-send.sh`, `watchdog.sh`,
+# ...) would have to be updated to thread through, for a difference that
+# does not exist: claude clears exactly the same way, combined or split, and
+# an unconditional split is one code path to keep correct instead of two
+# that can silently drift apart the next time either harness's timing
+# changes again.
+#
+# Escape alone was considered and rejected as the fix (#817's own text):
+# sending `Escape` before the combined `/clear` Enter does NOT prevent the
+# race, because codex's autocomplete dropdown reopens the instant `/clear`
+# is retyped -- confirmed by reproducing the swallow live with the existing
+# `Escape` already in place above. The pause between the text and the Enter
+# is what closes the gap the dropdown needs to steal the keystroke, not
+# dismissing the dropdown once.
 #
 # `Escape` before `C-u`, agent-dotfiles#255: Jon's own recovery from three
 # consecutive real refusals on 2026-08-21 was manual `Escape` then `C-u`
@@ -295,9 +330,14 @@ verified_type() {
 # on codex's own directory-trust menu too -- see harness/codex.sh's note on
 # that menu for why a fresh dispatch's very first pane content is often it.
 #
-#   --settle N   seconds to sleep after sending before checking (default 1)
+#   --settle N   seconds to sleep after sending before checking, and also
+#                 the pause between `/clear` landing and `Enter` firing
+#                 (default 1) -- reusing one knob rather than adding a
+#                 second matches `blind_send`'s own `--type-settle`
+#                 precedent just below in this file.
 #   --retries N  total attempts; each retry re-sends `Escape`, `C-u`, then
-#                 `/clear` Enter (default 1 -- no retry)
+#                 `/clear` and Enter as their own separate calls again
+#                 (default 1 -- no retry)
 #   --box-prompt VALUE / --box-close VALUE   agent-estate#446, same contract
 #                 as `verified_type`'s own flags of the same name -- see
 #                 that function's header. Omitted means Claude's own marker
@@ -319,7 +359,8 @@ verified_type() {
 #
 # Return 0 (SEND_STATUS=landed, box confirmed empty), 2 (not_landed -- the
 # box still shows text, or could not be read at all, after every retry), or
-# 1 (send_failed -- the `/clear` send-keys call itself errored).
+# 1 (send_failed -- either the `/clear` or the (now separate) `Enter`
+# send-keys call itself errored).
 verified_preclear() {
   local target="$1"; shift
   local settle=1 retries=1
@@ -342,7 +383,17 @@ verified_preclear() {
   for ((attempt = 1; attempt <= retries; attempt++)); do
     tmux send-keys -t "$target" Escape 2>/dev/null
     tmux send-keys -t "$target" C-u 2>/dev/null
-    if ! tmux send-keys -t "$target" "/clear" Enter 2>/dev/null; then
+    if ! tmux send-keys -t "$target" "/clear" 2>/dev/null; then
+      SEND_STATUS=send_failed
+      return 1
+    fi
+    # agent-estate#817: Enter is its OWN send-keys call, not combined with
+    # "/clear" above -- a combined call's Enter lands while codex's
+    # slash-command autocomplete dropdown is still open and gets consumed
+    # confirming the completion instead of submitting. The sleep between the
+    # two calls is what gives the dropdown time to settle before Enter fires.
+    sleep "$settle"
+    if ! tmux send-keys -t "$target" Enter 2>/dev/null; then
       SEND_STATUS=send_failed
       return 1
     fi
