@@ -46,19 +46,35 @@
 # (gastown), so that package -- not a phantom `check.sh` -- is treated here
 # as the reusable logic the brief was actually pointing at.
 #
-# THIRD GATE: agent SESSION count (agent-supervisor#663). The estate tick's
-# own host guard compared a raw `pgrep -f claude | wc -l` against a ceiling
-# of 20 -- and that instrument matches on ANY process whose argv mentions a
-# `.claude` path, not on what the process actually is. Measured live, one
-# sample: `pgrep -f claude` read 22 while only 17 real agent sessions were
-# running (2 transient snapshot shells, 1 sed -- the measuring pipeline
-# matching its own argv, 1 tail -f on a log under a claude-501 path, 2
-# cc-daemon helpers). #663 does not touch whether 20 is the right ceiling,
-# only that the number compared against it should be the real session
-# count. `count-agents.sh` (this directory) is that real count -- it
-# matches `ps`'s `comm` field exactly against `^(claude|claude\.exe)$`,
-# never a substring -- so this gate shells out to it instead of
-# reimplementing the same classification a second time here.
+# THIRD GATE: work IN FLIGHT, not agent SESSION count (agent-supervisor#663,
+# re-scoped by #826). The estate tick's own host guard originally compared a
+# raw `pgrep -f claude | wc -l` against a ceiling of 20 -- and that
+# instrument matches on ANY process whose argv mentions a `.claude` path,
+# not on what the process actually is. Measured live, one sample: `pgrep -f
+# claude` read 22 while only 17 real agent sessions were running (2
+# transient snapshot shells, 1 sed -- the measuring pipeline matching its
+# own argv, 1 tail -f on a log under a claude-501 path, 2 cc-daemon
+# helpers). #663 fixed THAT instrument -- `count-agents.sh` (this
+# directory) matches `ps`'s `comm` field exactly against
+# `^(claude|claude\.exe)$`, never a substring -- but #663 explicitly left
+# whether 20 is the right ceiling for AGENT PROCESSES untouched, and it
+# turned out the ceiling was never about processes at all.
+#
+# #826, measured live a second time: 18 tmux panes existed (all real
+# `claude` processes by count-agents.sh's own correct classification), the
+# host was idle (~0.4 load/core, swap flat), and 4+ of those panes were
+# `free` -- correctly idle, several for 4-7 days -- yet the gate refused a
+# new dispatch anyway, because it was comparing "how many agent processes
+# exist" against a ceiling meant to protect the host from LOAD, and a free
+# lane adds none. `count-agents.sh` itself is not touched by this fix and
+# stays exactly what #663 built: the real count of Claude processes, as
+# opposed to `pgrep` noise. What changed is which number this gate
+# compares against the ceiling: `count-work-in-flight.sh` (this directory)
+# counts lanes in lanes.sh's `busy`/`hung` states (#83's own real-work-vs-
+# idle distinction) across every tmux session, plus any pane-less
+# claude-print/pi-rpc dispatch the ledger still has an open task for -- see
+# that script's own header for the full accounting. This gate shells out
+# to it instead of reimplementing the same aggregation a second time here.
 #
 # Usage: host-pressure.sh
 #   Prints one line (the verdict and why) to stdout, always.
@@ -68,7 +84,12 @@
 # pressure.Limits' own "0 disables" doc comment):
 #   SUPERVISOR_MAX_LOAD_PER_CORE    (default 3.0)
 #   SUPERVISOR_MIN_FREE_MEM_GB      (default 1.5)
-#   SUPERVISOR_MAX_AGENT_SESSIONS   (default 20)
+#   SUPERVISOR_MAX_AGENT_SESSIONS   (default 20) -- a WORK-IN-FLIGHT cap
+#                                   since #826, not a raw pane/process
+#                                   count: see the THIRD GATE comment above.
+#                                   Name kept as-is (not renamed) so no
+#                                   caller's env or docs need to change,
+#                                   only what the number means.
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -181,19 +202,19 @@ main() {
   fi
 
   if [ "$MAX_AGENT_SESSIONS" -gt 0 ] 2>/dev/null; then
-    if [ ! -x "$HERE/count-agents.sh" ]; then
-      echo "host-pressure: could not read agent session count (count-agents.sh missing or not executable at $HERE) -- refusing to guess whether the host is safe"
+    if [ ! -x "$HERE/count-work-in-flight.sh" ]; then
+      echo "host-pressure: could not read work-in-flight count (count-work-in-flight.sh missing or not executable at $HERE) -- refusing to guess whether the host is safe"
       return 2
     fi
-    local sessions rc
-    sessions=$("$HERE/count-agents.sh" 2>/dev/null)
+    local inflight rc
+    inflight=$("$HERE/count-work-in-flight.sh" 2>/dev/null)
     rc=$?
-    if [ "$rc" -ne 0 ] || [ -z "$sessions" ]; then
-      echo "host-pressure: could not read agent session count (count-agents.sh exited $rc) -- refusing to guess whether the host is safe"
+    if [ "$rc" -ne 0 ] || [ -z "$inflight" ]; then
+      echo "host-pressure: could not read work-in-flight count (count-work-in-flight.sh exited $rc) -- refusing to guess whether the host is safe"
       return 2
     fi
-    if [ "$sessions" -ge "$MAX_AGENT_SESSIONS" ] 2>/dev/null; then
-      echo "host-pressure: agent sessions $sessions >= $MAX_AGENT_SESSIONS -- refusing a new dispatch"
+    if [ "$inflight" -ge "$MAX_AGENT_SESSIONS" ] 2>/dev/null; then
+      echo "host-pressure: work in flight $inflight >= $MAX_AGENT_SESSIONS -- refusing a new dispatch"
       return 1
     fi
   fi
