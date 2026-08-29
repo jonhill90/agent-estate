@@ -822,3 +822,39 @@ class LedgerTaskQueriesMixin:
                 """
             ).fetchall()
         return [self._dict(row) for row in rows]
+
+    def list_terminal_tasks_with_worktree(self):
+        """Every already-terminal (`complete`/`failed`/`cancelled`) row that
+        still names a `worktree_path` -- agent-estate#834.
+
+        This is `list_open_worktrees` above with its status filter
+        inverted: that query finds tasks a fresh dispatch could still
+        collide with, this one finds tasks a completion-time reaper could
+        still retire. Both exist because a task's `worktree_path` says
+        nothing about WHEN it went terminal -- `record_completion` (`cli.py
+        record-completion`, `dispatch.sh`'s own suggested recovery for a
+        lane that finished without signalling) writes `status='complete'`
+        directly, outside `reconcile_lane_completions.py`'s sweep, so a row
+        can sit here indefinitely with nothing having ever revisited its
+        worktree or its pane. `reconcile_lane_completions.py`'s own
+        `_leaked_worktree_candidate_ids` is the one caller: it unions this
+        query's ids with the ids the current sweep just transitioned, so a
+        row that went terminal minutes, days, or months ago through ANY
+        path is still offered to the same reap guard chain a same-sweep
+        completion already goes through -- never a second, weaker check.
+
+        `worktree_path != ''` excludes a claim-row placeholder and any task
+        dispatched before agent-supervisor#117 added the column, same as
+        `list_open_worktrees` already does -- neither names a directory
+        there is anything to reap.
+        """
+        with contextlib.closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM tasks
+                WHERE status IN ('complete','failed','cancelled')
+                  AND worktree_path != ''
+                ORDER BY updated_at, id
+                """
+            ).fetchall()
+        return [self._dict(row) for row in rows]

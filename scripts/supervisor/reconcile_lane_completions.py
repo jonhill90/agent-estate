@@ -213,6 +213,41 @@ lane-log named PR #283, MERGED. Two changes here:
   not a literal overwrite (this method's underlying write is
   immutable-once), but a late, genuine `complete()` call finding the slot
   already claimed and its content rejected as conflicting.
+
+agent-estate#834: `_reap_orphans_for_this_sweep` and
+`_reap_worktrees_for_this_sweep` used to look ONLY at
+`_terminal_task_ids_for_this_sweep` -- the four lists a task lands in when
+THIS sweep is what transitioned it. `cli.py record-completion` writes
+`status='complete'` directly (it is `dispatch.sh`'s own suggested recovery
+for a lane that finished without signalling, so this is not a rare path),
+which means the task is already terminal by the time any sweep runs and
+never enters those four lists -- its pane is never vacated and its
+worktree is never reaped, permanently, because nothing ever revisits an
+already-terminal task. Demonstrated live: `record-completion` on
+`agent-dotfiles:2`, then `reconcile-lane-completions` returning every list
+empty while the pane stayed parked inside `ad-341-fix341-7071` and the
+directory stayed on disk.
+
+Two ways to close that gap were on the table (`#834`'s own body sets them
+out without picking): call the reaper directly from `record_completion`,
+or widen what a sweep is willing to look at. This picks the second.
+Calling the reaper from `record_completion` would duplicate the vacate-
+before-reap ordering guarantee `#827` needed two review rounds to get
+right, in a second call site that could drift from this one. Widening the
+candidate set instead means every terminal task, however it got that way,
+goes through the exact same reap path a same-sweep completion already
+goes through -- one ordering guarantee, one guard chain, not two. Safe to
+widen because nothing downstream of candidate SELECTION trusts "when" a
+task went terminal, only what is true right now: `LaneWorktreeReaper.
+reap_task_worktree`'s `lane_live` check re-reads `get_open_task_for_lane`
+fresh, `_vacate_pane_before_reap` re-reads `_lane_is_live` and the pane's
+current `tmux display-message` cwd, and `worktree.sh reap`'s own guard
+chain (dirty, unmerged, a live process or pane still inside, detached HEAD)
+runs fresh against the worktree on disk. Widening the SET a sweep looks at
+never widens what makes removal safe -- that guard chain is unchanged and
+unweakened; see `_leaked_worktree_candidate_ids`'s own docstring for the
+new candidate set this adds and `Ledger.list_terminal_tasks_with_worktree`
+for what it queries.
 """
 
 from __future__ import annotations
@@ -507,11 +542,60 @@ class LaneCompletionReconciler:
             + report["failed_stale_acceptance"]
         )
 
+    def _leaked_worktree_candidate_ids(self, report):
+        """agent-estate#834: `_terminal_task_ids_for_this_sweep` alone only
+        ever named a task THIS sweep just decided terminal -- a task
+        written terminal by `cli.py record-completion` (outside any sweep)
+        never entered those four lists, so its worktree and pane were never
+        offered to either reaper, ever. This method is the union both
+        reapers below now iterate: this-sweep ids first (unchanged from
+        before -- every existing wiring test's ordering/dedup assumption
+        still holds), plus every OTHER already-terminal task the ledger
+        itself still names a `worktree_path` for AND whose directory is
+        still actually present on disk right now.
+
+        The on-disk check is done here, once, rather than left to each
+        reaper: `Ledger.list_terminal_tasks_with_worktree` can return
+        hundreds of historical rows whose worktree was already reaped (or
+        hand-cleaned) long ago, and there is nothing for either reaper to
+        do with those -- `reap_task_worktree` would just answer
+        `worktree_missing` after already paying for `_lane_is_live` and
+        (for the worktree reaper) a `tmux display-message` round trip in
+        `_vacate_pane_before_reap`. Filtering to worktrees that still exist
+        keeps every sweep's cost proportional to the actual leak, not to
+        the ledger's full terminal-task history.
+
+        Deliberately does NOT re-check liveness here -- that stays each
+        reaper's own job, re-evaluated fresh at call time (see this
+        module's own top-level docstring's agent-estate#834 paragraph for
+        why that is what makes widening the candidate SET safe). This
+        method only decides what gets OFFERED, never what gets removed.
+        """
+        seen = set()
+        ids = []
+        for task_id in self._terminal_task_ids_for_this_sweep(report):
+            if task_id in seen:
+                continue
+            seen.add(task_id)
+            ids.append(task_id)
+        for task in self.ledger.list_terminal_tasks_with_worktree():
+            task_id = task["id"]
+            if task_id in seen:
+                continue
+            worktree_path = normalize_worktree_path(task.get("worktree_path") or "")
+            if not worktree_path or not Path(worktree_path).is_dir():
+                continue
+            seen.add(task_id)
+            ids.append(task_id)
+        return ids
+
     def _reap_orphans_for_this_sweep(self, report):
         """agent-estate#800: for every task THIS sweep just moved to a
         terminal status (`completed`, `failed_unaccepted`,
         `failed_stale_delivery`, `failed_stale_acceptance` -- the four
-        lists a task id can land in exactly once per sweep), ask
+        lists a task id can land in exactly once per sweep) OR any other
+        already-terminal task `_leaked_worktree_candidate_ids` finds still
+        holding a worktree on disk (agent-estate#834), ask
         `self.orphan_reaper` (if one was given) to reap whatever background
         descendants that task's worktree left running.
 
@@ -524,7 +608,7 @@ class LaneCompletionReconciler:
         """
         if self.orphan_reaper is None:
             return
-        for task_id in self._terminal_task_ids_for_this_sweep(report):
+        for task_id in self._leaked_worktree_candidate_ids(report):
             task = self.ledger.get_task(task_id)
             if task is None:
                 continue
@@ -536,12 +620,14 @@ class LaneCompletionReconciler:
 
     def _reap_worktrees_for_this_sweep(self, report):
         """agent-estate#804: `_reap_orphans_for_this_sweep`'s own missing
-        half -- for every task THIS sweep just moved to a terminal status,
-        ask `self.worktree_reaper` (if one was given) to reap that task's
-        own worktree, through `worktree.sh reap`'s guard chain (unmerged,
-        dirty, or live all refuse; see `lane_worktree_reap.py`'s own module
-        docstring for the full rationale, including the accrual-rate
-        measurement this issue asked for).
+        half -- for every task in that same candidate set (this sweep's own
+        terminal transitions, plus `_leaked_worktree_candidate_ids`'
+        agent-estate#834 backlog), ask `self.worktree_reaper` (if one was
+        given) to reap that task's own worktree, through `worktree.sh
+        reap`'s guard chain (unmerged, dirty, or live all refuse; see
+        `lane_worktree_reap.py`'s own module docstring for the full
+        rationale, including the accrual-rate measurement this issue asked
+        for).
 
         A no-op when `self.worktree_reaper` is `None` (opt-in, same
         constructor-injection shape as `orphan_reaper` -- see this class's
@@ -552,7 +638,7 @@ class LaneCompletionReconciler:
         """
         if self.worktree_reaper is None:
             return
-        for task_id in self._terminal_task_ids_for_this_sweep(report):
+        for task_id in self._leaked_worktree_candidate_ids(report):
             task = self.ledger.get_task(task_id)
             if task is None:
                 continue
@@ -630,15 +716,19 @@ class LaneCompletionReconciler:
         with its cwd correctly OUTSIDE the worktree this sweep is about to
         reap.
 
-        Deliberately narrow: only a lane THIS sweep just confirmed
-        terminal, whose CURRENT pane cwd (re-read here, not the possibly
-        several-seconds-stale window snapshot from earlier in this sweep)
-        is provably inside ITS OWN `worktree_path`, is touched -- never a
-        guess, and never a pane whose lane has since been redispatched
-        (`_lane_is_live` reads the ledger, the identical check
-        `LaneWorktreeReaper.reap_task_worktree` makes right after this
-        returns, so a race that redispatched this lane in between leaves
-        its now-live pane alone).
+        Deliberately narrow: only a task confirmed terminal RIGHT NOW
+        (agent-estate#834: this includes a task this sweep just transitioned
+        AND one `_leaked_worktree_candidate_ids` found already terminal from
+        an earlier sweep or a direct `record_completion` call -- "when" it
+        went terminal is irrelevant to this check), whose CURRENT pane cwd
+        (re-read here, not the possibly several-seconds-stale window
+        snapshot from earlier in this sweep, and for a backlog task there
+        may be no earlier snapshot at all) is provably inside ITS OWN
+        `worktree_path`, is touched -- never a guess, and never a pane whose
+        lane has since been redispatched (`_lane_is_live` reads the ledger,
+        the identical check `LaneWorktreeReaper.reap_task_worktree` makes
+        right after this returns, so a race that redispatched this lane in
+        between leaves its now-live pane alone).
 
         Best-effort, on purpose: this is an OPTIMIZATION that makes the
         liveness guard's INPUT honest, never a precondition the reap call

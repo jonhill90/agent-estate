@@ -14,6 +14,7 @@ SUPERVISOR_DIR = Path(__file__).resolve().parents[2] / "scripts" / "supervisor"
 sys.path.insert(0, str(SUPERVISOR_DIR))
 
 from core import Ledger  # noqa: E402
+from lane_worktree_reap import LaneWorktreeReaper  # noqa: E402
 from reconcile_lane_completions import LaneCompletionReconciler  # noqa: E402
 
 
@@ -1263,11 +1264,24 @@ class FakeWorktreeReaper:
     proven end to end against real git fixtures in
     `test_lane_worktree_reap.py`. This class exists to prove the WIRING:
     which tasks get offered to the reaper, in what order relative to the
-    orphan reaper, and never for a task this sweep did not just terminate."""
+    orphan reaper, and never for a task this sweep did not just terminate.
 
-    def __init__(self, outcomes=None):
+    `ledger` is optional and only needed by a test that actually exercises
+    `_vacate_pane_before_reap` against a task carrying a real
+    `worktree_path` (that method calls `_lane_is_live` before this fake's
+    own `reap_task_worktree` is ever reached) -- every existing caller
+    that never sets a `worktree_path` on its fixture short-circuits before
+    that call and never needed this."""
+
+    def __init__(self, outcomes=None, ledger=None):
         self.outcomes = outcomes or {}
         self.calls = []
+        self.ledger = ledger
+
+    def _lane_is_live(self, lane):
+        if self.ledger is None:
+            return False
+        return self.ledger.get_open_task_for_lane(lane) is not None
 
     def reap_task_worktree(self, task):
         self.calls.append(task["id"])
@@ -1400,6 +1414,127 @@ class WorktreeReaperWiringTest(unittest.TestCase):
         self.assertEqual(1, len(report["worktrees"]))
         self.assertEqual("ae804-wire5", report["worktrees"][0]["task"])
         self.assertEqual("error", report["worktrees"][0]["outcome"])
+
+
+class LeakedWorktreeBacklogTest(unittest.TestCase):
+    """agent-estate#834: a task written terminal OUTSIDE any sweep (the
+    live repro was `cli.py record-completion`, `dispatch.sh`'s own
+    suggested recovery for a lane that finished without signalling) never
+    entered `_terminal_task_ids_for_this_sweep`'s four lists, so neither
+    reaper ever revisited its pane or its worktree -- forever.
+    `_leaked_worktree_candidate_ids` is the fix: every OTHER already-
+    terminal task whose worktree_path still exists on disk is unioned in.
+    Mutation-checked both directions: a leaked backlog task IS now offered
+    (the positive case #834 demonstrated live), and a backlog task whose
+    lane has since been redispatched is STILL refused, never touched (the
+    hard constraint this brief names above the feature)."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.ledger = Ledger(Path(self.tempdir.name), clock=lambda: 1_000)
+
+    def _record_completion_style_task(self, task_id, *, lane, worktree_path=""):
+        """Mirrors what `cli.py record-completion` actually does: a
+        dispatch, then `ledger.complete(...)` called directly -- never
+        through `LaneCompletionReconciler.sweep()`, exactly the gap #834
+        demonstrated live."""
+        self.ledger.record_dispatch(
+            lane=lane, pane_id="%9", nonce=f"nonce-{task_id}", harness="claude",
+            repo="/repo/agent-estate", server_id="server-a", session_id="$9", command="claude",
+            task_id=task_id, source_kind="issue",
+            source_url=f"https://github.com/jonhill90/agent-estate/issues/834",
+            source_ref="834", summary="issue #834", source_state="OPEN",
+            evidence=[f"claimed by dispatch.sh for lane {lane}", "issues: 834"],
+            status_marker=None, accepted=True, worktree_path=worktree_path,
+        )
+        self.ledger.complete(task_id, b"finished without signalling", pane_nonce=f"nonce-{task_id}")
+
+    def test_backlog_task_with_worktree_still_on_disk_is_offered_to_both_reapers(self):
+        """The positive case: `ad-341-fix341-7071`'s own shape -- terminal
+        via `record_completion`, worktree still present, lane not
+        currently occupied by anything else. Must reach both reapers even
+        though this sweep itself completed nothing."""
+        worktree_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, worktree_dir, ignore_errors=True)
+        self._record_completion_style_task("ae834-leak1", lane="leak-session:9", worktree_path=worktree_dir)
+
+        runner = FakeLanesRunner({})
+        worktree_reaper = FakeWorktreeReaper(ledger=self.ledger)
+        orphan_log = []
+        orphan_reaper = FakeOrphanReaper(orphan_log)
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300,
+            orphan_reaper=orphan_reaper, worktree_reaper=worktree_reaper,
+        ).sweep()
+
+        # Nothing about THIS sweep completed the task -- it was already
+        # terminal before the sweep ever ran.
+        self.assertEqual([], report["completed"])
+        self.assertEqual(["ae834-leak1"], worktree_reaper.calls)
+        self.assertIn(("orphan", "ae834-leak1"), orphan_log)
+        entries = [e for e in report["worktrees"] if e["task"] == "ae834-leak1"]
+        self.assertEqual(1, len(entries))
+        self.assertEqual("reaped", entries[0]["outcome"])
+
+    def test_backlog_task_whose_worktree_is_already_gone_is_never_offered(self):
+        """A historical terminal row whose worktree was already reaped (or
+        hand-cleaned) must not be re-offered on every future sweep forever
+        -- `_leaked_worktree_candidate_ids` filters to directories that
+        still exist."""
+        gone_dir = tempfile.mkdtemp()
+        shutil.rmtree(gone_dir)
+        self._record_completion_style_task("ae834-leak-gone", lane="leak-session:10", worktree_path=gone_dir)
+
+        runner = FakeLanesRunner({})
+        worktree_reaper = FakeWorktreeReaper(ledger=self.ledger)
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300, worktree_reaper=worktree_reaper,
+        ).sweep()
+
+        self.assertEqual([], worktree_reaper.calls)
+        self.assertEqual([], report["worktrees"])
+
+    def test_backlog_task_with_lane_since_redispatched_is_refused_never_reaped(self):
+        """Mutation direction 2, the hard constraint: `ae834-leak2` went
+        terminal outside any sweep and its worktree is still on disk --
+        exactly the shape the fix now offers to the reaper -- but the SAME
+        lane has since been redispatched (a fresh OPEN task now occupies
+        it). The REAL `LaneWorktreeReaper.reap_task_worktree` must refuse
+        with `lane_live`, re-reading `get_open_task_for_lane` fresh, and
+        `worktree.sh` must never be shelled out to at all."""
+        worktree_dir = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, worktree_dir, ignore_errors=True)
+        lane = "leak-session:11"
+        self._record_completion_style_task("ae834-leak2", lane=lane, worktree_path=worktree_dir)
+        # Redispatch the same lane -- a new OPEN task now occupies it,
+        # exactly the live-lane case this fix must never touch.
+        self.ledger.record_dispatch(
+            lane=lane, pane_id="%11", nonce="nonce-leak2b", harness="claude",
+            repo="/repo/agent-estate", server_id="server-a", session_id="$11", command="claude",
+            task_id="ae834-leak2b", source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-estate/issues/900",
+            source_ref="900", summary="issue #900", source_state="OPEN",
+            evidence=[f"claimed by dispatch.sh for lane {lane}", "issues: 900"],
+            status_marker=None, accepted=True,
+        )
+
+        class ExplodingRunner:
+            def __call__(self, argv):
+                raise AssertionError(f"worktree.sh must never be invoked for a live lane: {argv}")
+
+        real_reaper = LaneWorktreeReaper(self.ledger, runner=ExplodingRunner())
+        runner = FakeLanesRunner({})
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300, worktree_reaper=real_reaper,
+        ).sweep()
+
+        entries = [e for e in report["worktrees"] if e["task"] == "ae834-leak2"]
+        self.assertEqual(1, len(entries))
+        self.assertEqual("lane_live", entries[0]["outcome"])
+        # The redispatched task itself must never appear here -- it is not
+        # terminal.
+        self.assertNotIn("ae834-leak2b", [e["task"] for e in report["worktrees"]])
 
 
 if __name__ == "__main__":
