@@ -215,10 +215,21 @@ NOISE_MARKERS = (
 #     director-tick brief-pointer shape (same class the word-order variant
 #     "Your complete brief is" marker above already covers), filename is the
 #     variable, "Read /private/tmp/<file> and decide." is not.
+#
+# agent-estate#810 fix-pass: both regexes below are anchored with `^\s*`
+# (leading whitespace tolerated). Without the anchor, `.search()` matches
+# the scaffold ANYWHERE in the text -- including inside a longer, genuinely
+# human prompt that merely QUOTES the dispatcher's own wording while asking
+# to change it (e.g. "The brief text always says `Check `gh pr checks 805``
+# for the agent-estate PR -- can we vary that wording..."), which a #810
+# reviewer demonstrated directly against `noise_reason()`. A dispatcher
+# ALWAYS puts its scaffold at the very start of the prompt it sends; a human
+# quoting or discussing it does not. See TailNoisePatternsTests'
+# test_anchor_regression_* pair for the pinned regression cases.
 NOISE_PATTERNS = (
-    (re.compile(r"Check `gh pr checks \d+` for the agent-estate PR"),
+    (re.compile(r"^\s*Check `gh pr checks \d+` for the agent-estate PR"),
      "dispatcher CI-poll check (director-loop.sh gh-pr-checks template, PR number varies)"),
-    (re.compile(r"Read /private/tmp/\S+ and decide\."),
+    (re.compile(r"^\s*Read /private/tmp/\S+ and decide\."),
      "director-tick brief pointer to a /private/tmp/ scratch file (filename varies)"),
 )
 

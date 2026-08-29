@@ -531,6 +531,46 @@ class TailNoisePatternsTests(unittest.TestCase):
         text = "I want to discuss task notification UX -- should we surface a toast for background task completion?"
         self.assertIsNone(itemize_prompts.noise_reason(text))
 
+    def test_anchor_regression_quoted_scaffold_in_a_longer_prompt_gh_pr_checks(self):
+        # agent-estate#810 REQUEST_CHANGES: `noise_reason` used unanchored
+        # `.search()`, so it matched the dispatcher's fixed scaffold
+        # anywhere in the text -- including inside a genuinely human prompt
+        # that merely QUOTES the scaffold while asking to change it. Pinned
+        # verbatim from the reviewer's own PR comment. Must stay None.
+        text = (
+            "The brief text always says `Check `gh pr checks 805`` for the "
+            "agent-estate PR -- can we vary that wording so it does not "
+            "read as robotic?"
+        )
+        self.assertIsNone(itemize_prompts.noise_reason(text))
+
+    def test_anchor_regression_quoted_scaffold_in_a_longer_prompt_tmp_read(self):
+        # Same defect, the other pattern. Pinned verbatim from the
+        # reviewer's own PR comment. Must stay None.
+        text = (
+            'I noticed the dispatcher literally said "Read '
+            '/private/tmp/foo.md and decide." which seems lazy, can we '
+            "improve the wording?"
+        )
+        self.assertIsNone(itemize_prompts.noise_reason(text))
+
+    def test_reviewer_third_case_task_notification_still_matches_pre_existing(self):
+        # The reviewer's third case: 'Yesterday I saw <task-notification>
+        # tags spam the terminal, can we suppress them?' This matches
+        # through NOISE_MARKERS' plain-substring check on the literal
+        # "<task-notification>" tag -- a PRE-EXISTING mechanism this PR did
+        # not introduce and is not anchored (NOISE_MARKERS never was; only
+        # the two NOISE_PATTERNS regexes above needed the `^\s*` anchor).
+        # Decision (agent-estate#810 fix-pass): leave NOISE_MARKERS
+        # unanchored here. Anchoring every literal marker to "start of
+        # prompt" would change matching behaviour for every existing entry
+        # in NOISE_MARKERS, a wider blast radius than this PR's subject (two
+        # new regexes), and belongs in its own change if pursued. This test
+        # documents the current, unfixed behaviour so a future change to it
+        # is a deliberate decision, not a silent regression either way.
+        text = "Yesterday I saw <task-notification> tags spam the terminal, can we suppress them?"
+        self.assertIsNotNone(itemize_prompts.noise_reason(text))
+
     def test_drop_noise_on_each_new_shape_is_idempotent(self):
         tmp = tempfile.TemporaryDirectory()
         self.addCleanup(tmp.cleanup)
