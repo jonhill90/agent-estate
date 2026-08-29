@@ -52,7 +52,7 @@
 # all to fall back to.
 #
 # Usage:
-#   dispatch-claude-print.sh <issue> <slug> <brief-file> <repo> [repo-path] [--force]
+#   dispatch-claude-print.sh <issue> <slug> <brief-file> <repo> [repo-path] [--force] [--reviews-pr <n>] [--reviews-pr-explicit]
 #
 # Same argument meanings as `dispatch-pi-rpc.sh`.
 #
@@ -63,6 +63,36 @@
 #          one transport only is not a guard, so this script runs the exact
 #          same check dispatch.sh does, at the same point in the flow (right
 #          after the worktree exists).
+#
+# --reviews-pr <n>  agent-estate#838. NOT a general-purpose flag an operator
+#          types by hand -- the one caller is dispatch-lane-select.sh's own
+#          reroute, thrown ONLY when the tmux candidate loop just excluded
+#          every free lane in the target session as a contributor to PR <n>
+#          (agent-dotfiles#212's own AUTHOR_LANES exclusion) and no
+#          non-author lane is left to hand the review to. `agent-dotfiles`
+#          and `agent-tui` each run a supervisor plus exactly one worker
+#          lane (#838's own measurement), so that refusal is not a rare edge
+#          case there -- it is every review, every time. Routing the review
+#          over `claude-print` instead sidesteps the problem structurally: a
+#          `claude-print` lane's id is minted fresh per dispatch (`$LABEL`
+#          below), so it can never equal a contributor's lane id, with no
+#          author-exclusion bookkeeping needed here at all. Marks the
+#          reconstructed task `source_kind=pull`, `source_ref=<n>` (not
+#          `issue`) and `is_review=1` -- the same facts `record_dispatch`
+#          records for the tmux flow's own `--reviews-pr` (see cli.py's
+#          `record_dispatch` docstring on `pr`/`is_review`) -- so a second
+#          dispatch against the same PR is still caught by `cli.py pr-lane`
+#          (dispatch-guards.sh step 0.6) before it ever reaches here.
+#
+# --reviews-pr-explicit  agent-estate#838/agent-supervisor#650. Threaded
+#          through from dispatch.sh's own `REVIEWS_PR_EXPLICIT` (set only
+#          when the caller passed `--reviews-pr` on its OWN argv, never for
+#          the #70 inference's guess) so step 2.5's collision downgrade below
+#          carries the exact same restriction dispatch.sh's tmux flow
+#          already enforces (see that flow's own comment on why the
+#          downgrade must never key on inference alone -- #650 was a real
+#          bypass caused by exactly that). Meaningless without `--reviews-pr`
+#          also set; ignored if so.
 #
 # Exit 0 only once a real `claude -p` turn has exited and the task is
 # recorded complete. Exit non-zero on any refusal -- no free `claude` binary,
@@ -76,13 +106,18 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PYTHON="${DISPATCH_PYTHON:-python3}"
 CLI="$HERE/cli.py"
 
-# `--force` is pulled out wherever it appears, same as dispatch.sh's own
-# flag-scanning loop, so the remaining args keep their positional meaning.
+# `--force`/`--reviews-pr`/`--reviews-pr-explicit` are pulled out wherever
+# they appear, same as dispatch.sh's own flag-scanning loop, so the
+# remaining args keep their positional meaning.
 COLLISION_FORCE=""
+REVIEWS_PR=""
+REVIEWS_PR_EXPLICIT=""
 POSITIONAL=()
 while [ $# -gt 0 ]; do
   case "$1" in
     --force) COLLISION_FORCE=1; shift ;;
+    --reviews-pr) REVIEWS_PR="${2:-}"; shift 2 ;;
+    --reviews-pr-explicit) REVIEWS_PR_EXPLICIT=1; shift ;;
     *) POSITIONAL+=("$1"); shift ;;
   esac
 done
@@ -96,6 +131,15 @@ REPO_PATH="${5:-$PWD}"
 
 if [ -z "$ISSUE" ] || [ -z "$SLUG" ] || [ -z "$BRIEF" ] || [ -z "$REPO" ]; then
   echo "usage: dispatch-claude-print.sh <issue> <slug> <brief-file> <repo> [repo-path]" >&2
+  exit 2
+fi
+
+# agent-estate#838: refuse a non-numeric --reviews-pr outright rather than
+# let it flow into a GitHub URL / ledger source_ref that silently means
+# something else -- same posture dispatch.sh's own flag parsing takes for
+# every other id it accepts.
+if [ -n "$REVIEWS_PR" ] && ! [[ "$REVIEWS_PR" =~ ^[0-9]+$ ]]; then
+  echo "dispatch-claude-print: --reviews-pr '$REVIEWS_PR' is not a PR number" >&2
   exit 2
 fi
 
@@ -228,18 +272,43 @@ abort() {
 # fatal. `--exclude-lane "$LANE"` is a no-op here in practice (this lane has
 # no prior ledger row -- it does not exist until `register`/`reconstruct-task`
 # below), kept only so this call reads identically to dispatch.sh's.
+# `${REVIEWS_PR:+--pr "$REVIEWS_PR"}`: same as dispatch.sh's own
+# `${PR_SCOPED:+--pr "$PR_SCOPED"}` -- scopes the diff collision-check.sh
+# reads against the PR actually under review, not an unrelated one.
 COLLISION_OUT=$("$HERE/collision-check.sh" check \
   --issue "$ISSUE" --brief "$BRIEF" --worktree "$WORKTREE" \
   --repo-path "$REPO_PATH" --repo "$REPO" \
   --exclude-lane "$LANE" \
+  ${REVIEWS_PR:+--pr "$REVIEWS_PR"} \
   ${COLLISION_FORCE:+--force} 2>&1)
 COLLISION_RC=$?
 if [ "$COLLISION_RC" -ne 0 ]; then
-  sed 's/^/dispatch-claude-print: collision-check: /' <<<"$COLLISION_OUT" >&2
-  abort "#$ISSUE's files collide with an in-flight lane -- NOT dispatched. Re-run with --force if this overlap is known and intended (agent-supervisor#291)"
+  if [ -n "$REVIEWS_PR_EXPLICIT" ]; then
+    # agent-supervisor#645/#650, mirrored from dispatch.sh's own tmux flow
+    # (dispatch-worktree.sh): a `--reviews-pr` dispatch's deliverable is a PR
+    # comment, never a commit, so it cannot produce the two-writers-one-file
+    # collision #291 exists to catch -- downgraded to the informational line
+    # below, same as an ALLOW. Keyed on REVIEWS_PR_EXPLICIT, never on the
+    # mere presence of `$REVIEWS_PR`: #650 was a real bypass caused by
+    # keying this on an INFERRED review, which let a genuine write dispatch
+    # whose title happened to match agent-supervisor#70's inference pattern
+    # skip this guard. This script has no inference of its own -- the only
+    # way `$REVIEWS_PR` is ever set here is dispatch-lane-select.sh's own
+    # reroute call, which always passes `--reviews-pr-explicit` alongside it
+    # when (and only when) dispatch.sh's own `REVIEWS_PR_EXPLICIT` was set --
+    # but the check stays explicit rather than implicit so a future direct
+    # caller of this script cannot accidentally inherit the downgrade by
+    # passing `--reviews-pr` alone.
+    :
+  else
+    sed 's/^/dispatch-claude-print: collision-check: /' <<<"$COLLISION_OUT" >&2
+    abort "#$ISSUE's files collide with an in-flight lane -- NOT dispatched. Re-run with --force if this overlap is known and intended (agent-supervisor#291)"
+  fi
 fi
-# ALLOW (no-conflict, unknown, or forced) -- on stdout, matching this
-# script's own success-path convention (see the final echo block below).
+# ALLOW (no-conflict, unknown, or forced), or a REFUSE downgraded to
+# information for an EXPLICIT `--reviews-pr` dispatch (see above) -- on
+# stdout, matching this script's own success-path convention (see the final
+# echo block below).
 sed 's/^/dispatch-claude-print: collision-check: /' <<<"$COLLISION_OUT"
 
 # --- 3. the standing deliverable contract, same text dispatch.sh appends --
@@ -305,15 +374,54 @@ $REGISTER_OUT"
 fi
 
 # --- 5. record the work as a task, before any delivery is attempted -------
-SOURCE_URL="https://github.com/$REPO/issues/$ISSUE"
+# agent-estate#838: a `--reviews-pr` reroute records a PULL-shaped row, keyed
+# by the PR under review rather than the tracking issue -- the same shape
+# `cli_dispatch_record.record_dispatch` builds for the tmux flow's own
+# `--pr`/`--reviews-pr` (see that function's own docstring). This is what
+# lets `cli.py pr-lane` (dispatch-guards.sh step 0.6) catch a SECOND dispatch
+# against the same PR, and what `--is-review` records as the fact this
+# reroute already knows instead of leaving it to be guessed back later from
+# `$TASK_ID`/summary text (agent-supervisor#640's own reasoning). `$ISSUE` is
+# still the tracking issue this dispatch was claimed against (`claim.sh
+# take`, step 1 above) -- named in the summary and evidence below so a human
+# reading the ledger can still see which issue this review traces back to,
+# even though the SOURCE row itself is keyed on the PR.
+if [ -n "$REVIEWS_PR" ]; then
+  SOURCE_KIND_ARGS=(--source-kind pull --is-review)
+  SOURCE_URL="https://github.com/$REPO/pull/$REVIEWS_PR"
+  SOURCE_REF="$REVIEWS_PR"
+  RECONSTRUCT_EVIDENCE=("claimed by dispatch-claude-print.sh for lane $LANE" "reviews PR $REVIEWS_PR" "issue: $ISSUE")
+else
+  SOURCE_KIND_ARGS=()
+  SOURCE_URL="https://github.com/$REPO/issues/$ISSUE"
+  SOURCE_REF="$ISSUE"
+  RECONSTRUCT_EVIDENCE=("claimed by dispatch-claude-print.sh for lane $LANE")
+fi
+RECONSTRUCT_EVIDENCE_ARGS=()
+for e in "${RECONSTRUCT_EVIDENCE[@]}"; do
+  RECONSTRUCT_EVIDENCE_ARGS+=(--evidence "$e")
+done
 RECONSTRUCT_OUT=$("$PYTHON" "$CLI" reconstruct-task \
   --task "$TASK_ID" \
+  "${SOURCE_KIND_ARGS[@]+"${SOURCE_KIND_ARGS[@]}"}" \
   --source-url "$SOURCE_URL" \
-  --source-ref "$ISSUE" \
+  --source-ref "$SOURCE_REF" \
   --summary "#$ISSUE $SLUG; worktree=$WORKTREE; brief=$BRIEF" \
-  --evidence "claimed by dispatch-claude-print.sh for lane $LANE" 2>&1)
+  "${RECONSTRUCT_EVIDENCE_ARGS[@]}" 2>&1)
 RECONSTRUCT_RC=$?
 if [ "$RECONSTRUCT_RC" -ne 0 ]; then
+  if [ -n "$REVIEWS_PR" ] && grep -qF 'source_tasks.source_ref' <<<"$RECONSTRUCT_OUT"; then
+    # agent-supervisor#169's own race, reached through this reroute instead
+    # of `record_dispatch`: dispatch-guards.sh step 0.6 already checked
+    # `pr-lane` before dispatch-lane-select.sh ever reached this reroute,
+    # but that check is a plain read, seconds before this write -- a second
+    # dispatcher can still win the same PR in between. The
+    # `one_open_pull_per_source_ref` trigger (core_ledger_schema.py) is what
+    # actually closes it, atomically, the same guarantee `record_dispatch`
+    # relies on for the tmux flow.
+    abort "PR #$REVIEWS_PR already claimed by another lane (source_tasks.source_ref conflict) -- NOT dispatched:
+$RECONSTRUCT_OUT"
+  fi
   abort "reconstruct-task failed -- #$ISSUE was NOT dispatched:
 $RECONSTRUCT_OUT"
 fi

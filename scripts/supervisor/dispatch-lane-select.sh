@@ -486,6 +486,47 @@ while IFS=$'\t' read -r candidate candidate_target; do
 done < <("$HERE/lanes.sh" --free "$SESSION" 2>/dev/null)
 
 if [ -z "$LANE" ]; then
+  # --- agent-estate#838: reroute a review over claude-print instead of
+  # refusing outright, when the only reason no lane is free is that every
+  # free candidate just got excluded as a PR #$REVIEWS_PR contributor -----
+  #
+  # WHY: `agent-dotfiles` and `agent-tui` each run a supervisor plus exactly
+  # ONE worker lane (#838's own measurement) -- for those two repos, this
+  # refusal is not a rare edge case, it is EVERY review, every time, and the
+  # only prior escape was an operator remembering `LANES_SESSION=<bigger
+  # session>` (documented nowhere near the failure, #838's own issue text).
+  # A `claude-print` lane's id is minted fresh per dispatch
+  # (dispatch-claude-print.sh's `$LABEL`), so it can never equal a
+  # contributor's lane id -- routing there sidesteps the scarcity
+  # structurally, with none of the author-exclusion bookkeeping the tmux
+  # candidate loop above needs, because there is no shared, reusable lane to
+  # exclude from in the first place.
+  #
+  # THE REFUSAL STAYS THE BACKSTOP, not replaced: every condition below is
+  # narrow on purpose, and falling through any one of them lands on the
+  # unchanged refusal text after this block, unchanged from before #838.
+  # `--live-pane` in particular is NEVER overridden here (this brief's own
+  # hard constraint) -- a caller that asked to keep a pane still gets the
+  # ordinary refusal, exactly as before.
+  if [ -n "$AUTHOR_SKIPPED" ] && [ -z "$ADOPT_PANE_ID" ] && [ -z "$LIVE_PANE" ] \
+      && [ "${#ISSUES[@]}" -eq 1 ] && [ -z "$PR" ]; then
+    CLAUDE_PRINT_REPO_838="$REPO"
+    if [ -z "$CLAUDE_PRINT_REPO_838" ]; then
+      CLAUDE_PRINT_REPO_838=$(cd "$REPO_PATH" 2>/dev/null && gh repo view --json nameWithOwner -q .nameWithOwner 2>/dev/null) || CLAUDE_PRINT_REPO_838=""
+    fi
+    if [ -z "$CLAUDE_PRINT_REPO_838" ]; then
+      echo "dispatch: no free lane other than the author of PR #$REVIEWS_PR, and [repo] could not be resolved to reroute the review over claude-print (agent-estate#838) -- falling through to the ordinary refusal" >&2
+    elif ! command -v claude >/dev/null 2>&1; then
+      echo "dispatch: no free lane other than the author of PR #$REVIEWS_PR, and no 'claude' binary on PATH to reroute the review through -- refusing rather than falling back to send-keys (agent-estate#838); #$ISSUE_ARG was NOT dispatched" >&2
+      exit 1
+    else
+      CONTRIBUTOR_TASKS_JOINED_838=$(IFS=,; echo "${AUTHOR_TASKS[*]}")
+      echo "dispatch: no free lane other than the author of PR #$REVIEWS_PR (tasks $CONTRIBUTOR_TASKS_JOINED_838) in session '$SESSION' -- rerouting the review over claude-print instead of refusing (agent-estate#838); every claude-print lane is a fresh identity, never the author's" >&2
+      "$HERE/dispatch-claude-print.sh" "$ISSUE_ARG" "$SLUG" "$BRIEF" "$CLAUDE_PRINT_REPO_838" "$REPO_PATH" \
+        --reviews-pr "$REVIEWS_PR" ${REVIEWS_PR_EXPLICIT:+--reviews-pr-explicit} ${COLLISION_FORCE:+--force}
+      exit $?
+    fi
+  fi
   if [ -n "$ADOPT_PANE_ID" ]; then
     echo "dispatch: --adopt-pane $ADOPT_PANE requested, but window $ADOPT_PANE_ID in session '$SESSION' is not free per lanes.sh/the ledger -- refusing rather than adopt a pane that is not genuinely idle (agent-supervisor#668)" >&2
   fi

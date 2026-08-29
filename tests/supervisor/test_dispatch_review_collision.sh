@@ -228,6 +228,15 @@ chmod +x "$MUT_DIR"/*.sh
 # dispatch-worktree.sh, not dispatch.sh's own text -- $MUT_DIR already holds
 # the whole copied directory (above), so search it for whichever file
 # carries the needle instead of assuming dispatch.sh.
+#
+# agent-estate#838 gave dispatch-claude-print.sh its OWN copy of this exact
+# branch shape (scoped to its own `--reviews-pr` reroute entry path, never
+# reachable from THIS test's tmux-flow scenario) -- excluded by name from the
+# candidate glob, the same way test_dispatch.sh's own SPLIT_FILES exclusion
+# keeps dispatch-claude-print.sh/dispatch-pi-rpc.sh out of dispatch.sh's own
+# split-file mutation searches (see this repo's CLAUDE.md index entry on
+# `dispatch-claude-print.sh`/`dispatch-pi-rpc.sh` for why they carry their
+# own copies of shared idioms rather than being part of that split).
 python3 - "$MUT_DIR" <<'PY'
 import glob
 import os
@@ -236,7 +245,11 @@ import sys
 target_dir = sys.argv[1]
 needle = '''if [ "$COLLISION_RC" -ne 0 ]; then
   if [ -n "$REVIEWS_PR_EXPLICIT" ]; then'''
-candidates = sorted(glob.glob(os.path.join(target_dir, "dispatch*.sh")))
+excluded = {"dispatch-claude-print.sh"}
+candidates = sorted(
+    f for f in glob.glob(os.path.join(target_dir, "dispatch*.sh"))
+    if os.path.basename(f) not in excluded
+)
 hits = [f for f in candidates if needle in open(f).read()]
 assert len(hits) == 1, (
     "the REVIEWS_PR downgrade branch is not found in exactly one file -- "

@@ -308,6 +308,12 @@ def parser():
     reconstruct_task_parser.add_argument("--source-ref", required=True)
     reconstruct_task_parser.add_argument("--summary", required=True)
     reconstruct_task_parser.add_argument("--evidence", action="append", default=[])
+    # agent-estate#838: tri-state, default None ("not recorded") -- unchanged
+    # for every caller that omits it. Only `dispatch-claude-print.sh`'s new
+    # `--reviews-pr` reroute passes `--is-review`, the same fact
+    # `record-dispatch`'s own `--is-review` already records for the tmux
+    # flow (see that flag's own comment above).
+    reconstruct_task_parser.add_argument("--is-review", action="store_true", default=None)
 
     # agent-dotfiles#174: the read side of the seam #140 opened. `dispatch.sh`
     # calls this once per idle-looking candidate instead of trusting the
