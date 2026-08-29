@@ -220,8 +220,10 @@ from __future__ import annotations
 import json
 import re
 import subprocess
+from pathlib import Path
 
 from core import CLAIM_TASK_PREFIX, pid_is_alive
+from core_lane_relation import normalize_worktree_path
 from verdict import GithubReviewVerdictSource
 
 # Mirrors agent-supervisor#401's own acceptance script's grep exactly, so a
@@ -548,11 +550,114 @@ class LaneCompletionReconciler:
             task = self.ledger.get_task(task_id)
             if task is None:
                 continue
+            # agent-estate#825: see `_vacate_pane_before_reap`'s own
+            # docstring -- must run BEFORE the reap call below, on the same
+            # task, for the same reason the orphan sweep runs before this
+            # whole method (a stray occupant is exactly what makes
+            # `worktree.sh reap`'s liveness guard refuse).
+            self._vacate_pane_before_reap(task)
             try:
                 result = self.worktree_reaper.reap_task_worktree(task)
             except Exception as error:
                 result = {"task": task_id, "outcome": "error", "error": str(error)}
             report["worktrees"].append(result)
+
+    def _vacate_pane_before_reap(self, task):
+        """agent-estate#825: `worktree.sh reap`'s own liveness guard
+        (`_gc_is_live`, agent-supervisor#478) correctly refuses to remove a
+        worktree while any tmux pane's `#{pane_current_path}` is inside it
+        -- it cannot tell "abandoned" from "still working" from the path
+        alone. The gap #825 traced is that THIS lane's own pane is exactly
+        what is still pointing there: a lane's shell `cd`s into its
+        worktree once, at dispatch (`dispatch-send.sh`'s `respawn-pane -k
+        -c "$WORKTREE"`), and never leaves it again on its own -- posting a
+        review verdict and going idle does not move the pane. Every review
+        lane's worktree therefore looked permanently "live" to the guard
+        above, even minutes after its own task went terminal (measured:
+        eleven idle panes across every session held a finished task's
+        worktree open this way, all refused with "a tmux pane's cwd is
+        inside it (#478)").
+
+        Typing `cd` into the pane does not fix this. `dispatch-send.sh`'s
+        own comment (agent-supervisor#15) already established why: past
+        dispatch, a pane is the harness's own chat input, not a shell, so
+        text sent there is a PROMPT an agent reads, never a command a shell
+        executes. The only mechanism that actually changes a pane's
+        OS-level cwd is the one dispatch itself already uses to PUT a lane
+        in its worktree in the first place -- `respawn-pane -k -c <dir>`,
+        which kills whatever the pane's current process is and starts a
+        fresh shell at `<dir>`. Calling it here costs nothing a subsequent
+        dispatch was not already going to spend: `dispatch-send.sh`
+        unconditionally `respawn-pane -k`s every lane it reuses regardless
+        of what is running there, since the pool only ever offers dispatch
+        a lane already read `free` -- and a task only reaches this method
+        by having been read `free` (idle, past this sweep's own dwell)
+        itself, moments earlier in the SAME sweep.
+
+        Deliberately narrow: only a lane THIS sweep just confirmed
+        terminal, whose CURRENT pane cwd (re-read here, not the possibly
+        several-seconds-stale window snapshot from earlier in this sweep)
+        is provably inside ITS OWN `worktree_path`, is touched -- never a
+        guess, and never a pane whose lane has since been redispatched
+        (`_lane_is_live` reads the ledger, the identical check
+        `LaneWorktreeReaper.reap_task_worktree` makes right after this
+        returns, so a race that redispatched this lane in between leaves
+        its now-live pane alone).
+
+        Best-effort, on purpose: this is an OPTIMIZATION that makes the
+        liveness guard's INPUT honest, never a precondition the reap call
+        after it depends on. Any failure here (no pane, tmux unreachable, a
+        path that will not resolve) is swallowed -- `reap_task_worktree`
+        still runs and still refuses exactly as it did before this method
+        existed, so nothing here can make reaping WORSE than the pre-#825
+        behaviour, only sometimes better.
+        """
+        if self.worktree_reaper is None:
+            return
+        worktree_path = normalize_worktree_path(task.get("worktree_path") or "")
+        if not worktree_path:
+            return
+        if self.worktree_reaper._lane_is_live(task.get("lane")):
+            return
+        parsed = _parse_lane(task.get("lane") or "")
+        if parsed is None:
+            return  # no-pane transport (claude-print/pi-rpc) -- nothing to move
+        session, index = parsed
+        target = f"{session}:{index}"
+        try:
+            pane_path = self.runner(["tmux", "display-message", "-t", target, "-p", "#{pane_current_path}"])
+        except Exception:
+            return
+        pane_path = normalize_worktree_path((pane_path or "").strip())
+        if not pane_path:
+            return
+        if pane_path != worktree_path and not pane_path.startswith(worktree_path.rstrip("/") + "/"):
+            return  # the pane is already elsewhere -- nothing for this to do
+        # The shared checkout's own root, derived from the worktree's git
+        # metadata rather than guessed at or hardcoded -- the same "park in
+        # the shared checkout" location `bootstrap-session.sh` already
+        # starts every lane's window in, and the one `lane-retire.sh`'s own
+        # comment (agent-supervisor#615) already names as where an idle
+        # pane naturally lands.
+        try:
+            common_dir = self.runner(
+                ["git", "-C", worktree_path, "rev-parse", "--path-format=absolute", "--git-common-dir"]
+            )
+        except Exception:
+            return
+        common_dir = (common_dir or "").strip()
+        if not common_dir:
+            return
+        park_dir = str(Path(common_dir).parent)
+        if not park_dir:
+            return
+        try:
+            self.runner(["tmux", "respawn-pane", "-k", "-t", target, "-c", park_dir])
+        except Exception:
+            # Best-effort (see docstring) -- the reap call right after this
+            # returns will simply see the same refusal it always would
+            # have, never a worse outcome than before this method existed.
+            pass
 
     def _evaluate_window(self, task, window, *, session, now, report, via_fallback=False):
         """The state/idle/accepted evidence check shared by the ordinary
