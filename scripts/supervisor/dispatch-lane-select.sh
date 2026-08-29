@@ -398,8 +398,34 @@ while IFS=$'\t' read -r candidate candidate_target; do
   # which is the defect, one seam later.
   CHECK=$("$LEDGER_PYTHON" "$LEDGER_CLI" lane-free --lane "$candidate" --target "$candidate_target" --window-name "$wname" 2>/dev/null) || continue
   if ! grep -qF '"free":true' <<<"$CHECK"; then
-    if grep -qF '"known":false' <<<"$CHECK" && [[ ! "$wname" =~ ^free-[0-9]+$ ]]; then
-      append_exclusion "dispatch:   $candidate: pane idle, but unknown to the ledger and window name '$wname' is not the free-N migration shape"
+    if grep -qF '"known":false' <<<"$CHECK"; then
+      # agent-estate#820: `lane-free` already builds a `reason` string for
+      # every known:false refusal it can explain (the #819 harness-drift
+      # cross-check and the pre-existing #216 backfill branch both set one)
+      # -- surface it the same way claim-lane's `reason` already is below,
+      # instead of falling through to describe_excluded_lane, which has no
+      # visibility into this reason at all and, for the drift/backfill case
+      # (window IS free-N shape, task is empty), reports the actively wrong
+      # "pane is idle, but no claim could be won": no claim was ever
+      # attempted here, lane-free refused before claim-lane was reached.
+      #
+      # NOT `json_field reason` here: that helper's capture group excludes
+      # ',' (it stops at the first top-level JSON comma), but the #819
+      # drift reason embeds a literal comma inside the value itself
+      # ("...does not match the live pane (command 'codex', @hill90_lane_"
+      # "harness 'codex')") -- json_field would silently truncate it at
+      # that comma. `reason` is always the last key `lane-free` emits (the
+      # CLI's `json.dumps(..., sort_keys=True)` puts it after backfilled/
+      # free/known/lane alphabetically), so it is safe to capture greedily
+      # to the object's closing `"}` instead.
+      free_reason=$(sed -n 's/.*"reason":"\(.*\)"}.*/\1/p' <<<"$CHECK")
+      if [ -n "$free_reason" ]; then
+        append_exclusion "dispatch:   $candidate: $free_reason"
+      elif [[ ! "$wname" =~ ^free-[0-9]+$ ]]; then
+        append_exclusion "dispatch:   $candidate: pane idle, but unknown to the ledger and window name '$wname' is not the free-N migration shape"
+      else
+        describe_excluded_lane "$candidate" free
+      fi
     else
       describe_excluded_lane "$candidate" free
     fi

@@ -383,8 +383,52 @@ printf '217|| an unrecorded node lane must stay refused\n' >> "$D/issues"
 out=$(LEDGER_STATE="$D/state-217" run 217 unrecorded-node "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
 want_exit "a dispatch with no free lane refuses" "$rc" 1 "$out"
 want_contains "the refusal names the unidentifiable lane" "no free lane" "$out"
+# agent-estate#820: lane-free's own reason -- built by cli_lane_ops.py but,
+# before this fix, never read by dispatch-lane-select.sh -- must now reach
+# this same exclusion output, naming the actual cause instead of a generic
+# skip.
+want_contains "the exclusion names WHY the lane could not be identified" \
+  "cannot tell which harness pane command 'node' is" "$out"
 log=$(tmuxlog)
 want_missing "nothing was ever sent to the unrecorded lane" "send-keys -t t:@108" "$log"
+
+# --- agent-estate#820/#819: a harness-drift refusal names the repair ------
+#
+# A lane the ledger already knows as `claude` (a stale row #819 itself
+# measured: bootstrap-session.sh respawned the pane onto a different
+# harness without rewriting the identity-keyed row), but whose LIVE pane is
+# actually running `codex` and whose window was renamed back to the
+# `free-N` migration shape. `cli_lane_ops.py`'s harness cross-check refuses
+# with a `reason` naming the mismatch -- before this fix, dispatch-lane-
+# select.sh fell through to describe_excluded_lane's generic "pane is idle,
+# but no claim could be won", which is actively wrong here: no claim was
+# ever attempted, lane-free refused first.
+printf '819|| a harness-drifted lane must refuse with the actual cause\n' >> "$D/issues"
+# Register the ledger row while the pane genuinely runs claude --
+# `register_lane`'s own plausibility check (`_command_matches`) refuses a
+# harness the live pane visibly contradicts, so the stale row can only be
+# built by registering it truthfully first, exactly like the real #819
+# drift: the row was correct when written, and only went stale afterwards.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+9|free-9|claude.exe|❯ ready|1|0
+FIX
+preregister_lane "$D/state-819" t:9 t:9
+# Now the pane respawns onto codex without the ledger row changing -- #819's
+# own reproduction shape. The window keeps the `free-N` name; only the live
+# command differs from what the ledger still records.
+cat > "$D/lanes" <<'FIX'
+1|arch|claude.exe|❯ ready|1|0
+9|free-9|codex|  gpt-5.5 medium · /repo/path|1|0
+FIX
+out=$(LEDGER_STATE="$D/state-819" run 819 harness-drift "$D/brief-orig.md" acme/agent-dotfiles "$REPO"); rc=$?
+want_exit "a dispatch to a harness-drifted lane refuses" "$rc" 1 "$out"
+want_contains "the exclusion names the actual mismatch, not a generic skip" \
+  "recorded harness 'claude' does not match the live pane" "$out"
+want_missing "the misleading claim-contention message does not appear for a refusal lane-free itself made" \
+  "no claim could be won" "$out"
+log=$(tmuxlog)
+want_missing "nothing was ever sent to the drifted lane" "send-keys -t t:@109" "$log"
 
 # --- THE LANE_META SANITY GUARD (agent-dotfiles#144 finding 4) ------------
 #
