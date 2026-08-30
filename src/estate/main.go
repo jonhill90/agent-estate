@@ -29,6 +29,7 @@ func usage() {
   estate dispatch <issue> <brief-file>  run one agent turn, gated and recorded
   estate merge <repo> <pr> <issue> <reviewer-lane>
                                         may this PR merge? checks + independence
+  estate corpus-audit [n]               hard parameters least supported by your words
   estate tasks                          latest state of every task
   estate inflight                       tasks still occupying a slot
 
@@ -59,6 +60,40 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("within limits")
+
+	case "corpus-audit":
+		fs, err := corpus.Audit()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		limit := 20
+		if len(os.Args) > 2 {
+			fmt.Sscanf(os.Args[2], "%d", &limit)
+		}
+		suspect := 0
+		for _, f := range fs {
+			if len(f.Invented) > 0 || f.Overlap < 0.25 {
+				suspect++
+			}
+		}
+		fmt.Printf("%d hard parameters audited; %d assert more than the prompt behind them\n\n", len(fs), suspect)
+		for i, f := range fs {
+			if i >= limit {
+				break
+			}
+			fmt.Printf("[%s] overlap %.0f%%", f.ItemID, f.Overlap*100)
+			if len(f.Invented) > 0 {
+				fmt.Printf("  ADDED OBLIGATION: %s", strings.Join(f.Invented, ", "))
+			}
+			if f.PromptIsQuestion {
+				fmt.Printf("  (source prompt is a QUESTION)")
+			}
+			fmt.Printf("\n  param:  %s\n  prompt: %.220s\n\n", f.Param, f.Prompt)
+		}
+		if suspect > 0 {
+			os.Exit(1)
+		}
 
 	case "merge":
 		if len(os.Args) < 6 {
