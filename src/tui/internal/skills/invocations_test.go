@@ -139,7 +139,7 @@ func TestBuildInvocationCache_CountsSkillToolUseAcrossShapes(t *testing.T) {
 		`{"message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"tmux"}}]}}`,
 	)
 
-	counts, err := BuildInvocationCache(dir)
+	counts, err := BuildInvocationCache(dir, "")
 	if err != nil {
 		t.Fatalf("BuildInvocationCache: %v", err)
 	}
@@ -154,6 +154,74 @@ func TestBuildInvocationCache_CountsSkillToolUseAcrossShapes(t *testing.T) {
 	}
 	if len(counts) != 2 {
 		t.Errorf("got %d distinct skills, want 2: %+v", len(counts), counts)
+	}
+}
+
+// TestBuildInvocationCache_ExcludesBuiltinCommands is agent-estate#890's own
+// mutation target for the first defect: a transcript recording /model,
+// /model sonnet, model, compact, run and loop under `input.skill` (the
+// exact six values agent-estate#890's reconciliation found) must produce NO skill
+// entries for any of them, whether spelled with a leading "/", with
+// trailing arguments, or bare. A genuine skill invocation in the same file
+// must still be counted, so this test also catches an exclusion so broad
+// it swallows real data.
+func TestBuildInvocationCache_ExcludesBuiltinCommands(t *testing.T) {
+	dir := t.TempDir()
+	writeTranscriptLine(t, filepath.Join(dir, "a.jsonl"),
+		`{"message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"/model"}}]}}`,
+		`{"message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"/model sonnet"}}]}}`,
+		`{"message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"model"}}]}}`,
+		`{"message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"compact"}}]}}`,
+		`{"message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"run"}}]}}`,
+		`{"message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"loop"}}]}}`,
+		`{"message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"devils-advocate"}}]}}`,
+	)
+
+	counts, err := BuildInvocationCache(dir, "")
+	if err != nil {
+		t.Fatalf("BuildInvocationCache: %v", err)
+	}
+	for _, builtin := range []string{"/model", "/model sonnet", "model", "compact", "run", "loop"} {
+		if n, ok := counts[builtin]; ok {
+			t.Errorf("counts[%q] = %d, want no entry at all (a built-in command is not a skill)", builtin, n)
+		}
+	}
+	if counts["devils-advocate"] != 1 {
+		t.Errorf("devils-advocate = %d, want 1 (a real skill invocation in the same file must still count)",
+			counts["devils-advocate"])
+	}
+	if len(counts) != 1 {
+		t.Errorf("got %d distinct entries, want 1 (only devils-advocate): %+v", len(counts), counts)
+	}
+}
+
+// TestBuildInvocationCache_ZeroFillsSkillsWithNoInvocations is agent-estate#890's own
+// mutation target for the second defect: a skill directory under skillsDir
+// that the transcript corpus never invoked must still appear in the
+// returned map, with a real 0 -- not be silently absent.
+func TestBuildInvocationCache_ZeroFillsSkillsWithNoInvocations(t *testing.T) {
+	dir := t.TempDir()
+	writeTranscriptLine(t, filepath.Join(dir, "a.jsonl"),
+		`{"message":{"content":[{"type":"tool_use","name":"Skill","input":{"skill":"devils-advocate"}}]}}`,
+	)
+
+	skillsDir := t.TempDir()
+	writeSkill(t, skillsDir, "devils-advocate", "---\nname: devils-advocate\ndescription: x\n---\n")
+	writeSkill(t, skillsDir, "never-invoked", "---\nname: never-invoked\ndescription: x\n---\n")
+
+	counts, err := BuildInvocationCache(dir, skillsDir)
+	if err != nil {
+		t.Fatalf("BuildInvocationCache: %v", err)
+	}
+	if counts["devils-advocate"] != 1 {
+		t.Errorf("devils-advocate = %d, want 1", counts["devils-advocate"])
+	}
+	n, ok := counts["never-invoked"]
+	if !ok {
+		t.Fatalf("never-invoked has no entry at all, want a real 0 (skillsDir zero-fill)")
+	}
+	if n != 0 {
+		t.Errorf("never-invoked = %d, want 0", n)
 	}
 }
 
