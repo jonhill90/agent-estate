@@ -1,0 +1,38 @@
+#!/bin/bash
+# Stub tmux for director-loop.sh's window-NAME resolution tests
+# (agent-supervisor#466). Unlike tmux-heartbeat-target's "esc to interrupt"
+# content (which director-loop.sh reads as BUSY and skips ticking on), this
+# stub answers the good target with plain, idle-looking content so the
+# script proceeds past its busy check and actually calls send-keys -- what
+# these tests need to observe to prove resolution picked the RIGHT window.
+#
+# TMUX_SESSIONS       space-separated sessions that "exist"
+# TMUX_GOOD_TARGET     the one session:window capture-pane succeeds on (unset
+#                      or a value nothing matches means "nothing is
+#                      reachable", forcing every tick to refuse)
+# TMUX_WINDOWS_NAMED   newline-separated "id<TAB>name" pairs list-windows
+#                      reports for the configured session
+LOG="${TMUX_LOG:?}"
+printf '%s\n' "$*" >> "$LOG"
+
+case "$1" in
+  has-session)
+    sess="$3"
+    for s in $TMUX_SESSIONS; do [ "$s" = "$sess" ] && exit 0; done
+    exit 1
+    ;;
+  list-windows)
+    printf '%b\n' "$TMUX_WINDOWS_NAMED"
+    ;;
+  capture-pane)
+    # $2=-p $3=-t $4="=session:target"
+    tgt="${4#=}"
+    if [ -n "${TMUX_GOOD_TARGET:-}" ] && [ "$tgt" = "$TMUX_GOOD_TARGET" ]; then
+      echo "> "
+      exit 0
+    fi
+    exit 1
+    ;;
+  send-keys) : ;;
+esac
+exit 0

@@ -1,0 +1,1816 @@
+"""Reconciliation sweep for lanes a worker finished without signalling.
+
+agent-supervisor#155: five, then six, lanes in one night finished their
+work -- opened a PR, posted a review verdict -- and then went idle without
+ever running `lane-done.sh`'s `tmux wait-for -S <channel>`. `lanes.sh`
+correctly read the pane `free`; the ledger correctly kept the task
+`delivered`, because nothing had told it otherwise. `dispatch.sh` then
+correctly refused to offer that lane -- the ledger is the record -- leaving
+capacity idle until a human ran `cli.py record-completion` by hand. Measured
+end to end (see the PR body): every one of the six briefs was missing the
+"Final shell action: tmux wait-for -S ..." instruction `loop-tick.md`
+describes as the mechanism's load-bearing step. That step lived in prose,
+not in `dispatch.sh`'s own auto-appended brief footer, and was never
+consistently added -- a completion mechanism that depends on the lane (or
+the operator, on its behalf) remembering to announce itself is exactly the
+shape #133/#142 already replaced for `source_tasks`: this sweep is that same
+fix applied to lane occupancy instead of issue state.
+
+Design mirrors `reconcile_sources.py` deliberately:
+
+* The observed facts, not an announcement. `Ledger.list_delivered_open_tasks`
+  is the durable fact ("this task was dispatched and never completed");
+  `lanes.sh --json <session>` is the observed fact ("this lane's pane is
+  free, right now, and has been for N seconds") -- read-only, exactly what
+  `dispatch.sh` already reads to decide whether to offer a lane, and exactly
+  what `digest.sh`'s existing delivered-vs-pane reconciliation section
+  already computes for a human to act on by hand (this sweep is that same
+  join, wired to act instead of only to report).
+* Batched per session, not per lane: one `lanes.sh --json <session>` call
+  answers for every delivered task whose lane lives in that session, the
+  same batching argument `reconcile_sources.py` makes for `gh`.
+* Fail-closed / unknown stays unknown: a lane whose session cannot be read,
+  whose window is missing from `lanes.sh`'s answer, whose pane is anything
+  other than `free`, or that has been free for less than `idle_after`
+  seconds is left untouched. Marking a lane complete because it merely
+  *might* be done is worse than leaving one idle -- the whitelist discipline
+  `lanes.sh` itself documents ("`unknown` means not offered, not broken").
+* The `idle_after` dwell (default 300s, matching `digest.sh`'s
+  `DIGEST_RECONCILE_IDLE_AFTER`) exists for the exact danger `lane-done.sh`'s
+  own header names: "idle" also means "between tool calls" or "blocked on an
+  approval prompt holding an unposted verdict", and reclaiming on idle alone
+  once nearly destroyed a verdict (#102). A lane that has read `free`
+  continuously for five minutes is not a pane mid-repaint.
+* Loud, not silent (#118's lesson, acceptance #4): every lane this sweep
+  completes is named in its report, and `record_completion`'s own note text
+  says exactly why -- so a human reading `watchdog.status` can tell "the
+  sweep is doing its job" from "nothing happened this tick" without opening
+  a pane.
+* Idempotent: once a task is `complete`, `list_delivered_open_tasks` no
+  longer returns it, so a second sweep with nothing new to find performs no
+  writes and reports it as such.
+
+This does NOT replace `lane-done.sh`. A worker whose brief DOES carry the
+`wait-for` instruction still gets the fast, `dwell`-free release the moment
+its channel fires -- this sweep is the backstop for every dispatch that
+mechanism's own fragility (a brief that never got the line, a background
+waiter lost across a supervisor `/clear`) leaves stranded, on a bounded
+delay instead of "until a human notices".
+
+agent-supervisor#374: everything above assumes a pane to poll. A
+`claude-print`/`pi-rpc` lane id never matches `_parse_lane`'s
+`<session>:<index>` shape -- there is no window to look up -- so every one
+of those tasks fell straight into `unresolved` above and stayed `delivered`
+forever; 101 of them were found stuck this way in one ledger. Those
+transports genuinely have nothing to poll (`ClaudePrintAdapter`'s own
+docstring: "there is no long-lived protocol session to resume mid-call"),
+so this sweep's second half judges them on wall-clock dwell since the
+row's own `updated_at` instead of a pane reading -- weaker evidence (an
+absence, not an observation), so it is NEVER used to assert success on its
+own: `stale_after` past due with no corroborating evidence (see #401
+below) resolves to `failed` via `Ledger.fail_stale_delivery`, never to
+`complete`. A task younger than `stale_after` is left `unresolved`, same
+as before -- it may simply still be the one live turn that will call
+`complete` itself.
+
+agent-supervisor#414: #374's fix covers a no-pane task stuck at
+`status='delivered'`, but a claude-print/pi-rpc worker that gets far enough
+to call `cli.py accept` moves its own row to `status='accepted'` --
+`Ledger.accept`, the ONE place that happens, is called from nowhere else
+(see `Ledger.list_accepted_open_tasks`'s docstring). That status is outside
+`list_delivered_open_tasks`'s `WHERE status='delivered'` filter, so the
+row vanishes from every sweep above -- including #374's own -- the instant
+it is accepted. Measured live: five claude-print dispatches sat at
+`status=accepted` for 2+ hours, zero commits, zero comments, and this sweep
+never looked at them again. The third pass below is `_sweep_nonobservable`
+applied to `list_accepted_open_tasks()` instead of
+`list_delivered_open_tasks()`, same `stale_after` dwell, terminating via
+`Ledger.fail_stale_acceptance` instead of `fail_stale_delivery` -- the only
+difference is which query feeds it and which terminal write is eligible,
+because the source status differs.
+
+agent-supervisor#488: "no signal arrived" is not "the process has exited",
+either. `_sweep_nonobservable`/`_sweep_nonobservable_accepted` judge a
+claude-print/pi-rpc row on wall-clock dwell since `updated_at` alone --
+measured live, that stamped `as473-as473x` `failed` (`completed_at`
+recorded) while `ps` showed its `claude -p ... [Hill90 task as473-as473x]`
+subprocess still alive and accumulating CPU roughly an hour past that
+timestamp. A supervisor trusting that stamp would redispatch the same
+issue to a second lane, or reclaim the first lane's worktree out from under
+a still-running process -- exactly the two outcomes agent-supervisor#401's
+own `_complete_from_evidence` exists to avoid on the completion side. The
+fix: before either method writes a failure, `_lane_log_pid` reads the pid
+`ClaudePrintAdapter.assign_task` already wrote to this same lane-log at
+dispatch time (`--- dispatched detached: task=... lane=... pid=... ---`)
+and `core.pid_is_alive` checks it with `os.kill(pid, 0)`. A pid that
+answers alive blocks the failure stamp outright (`unresolved`, named in
+`report["liveness_alive"]` so it reads distinctly from a merely-too-young
+row). A row whose log never named a pid at all (missing log, unreadable,
+no dispatch line) is liveness-INDETERMINATE, not assumed alive or dead --
+also left `unresolved`, named separately in `report["liveness_indeterminate"]`
+so the two reasons are never conflated in what gets reported. Only a row
+with a demonstrably dead pid (`pid_is_alive` returns `False`) reaches the
+`_lane_log_pr_url` evidence check and, failing that, the failure stamp
+below -- unchanged from before this fix in that case.
+
+agent-supervisor#779 (#774 half C): a task's recorded lane names a tmux
+SESSION that no longer exists -- renamed away (#739, #752, and this issue
+are three renames in one session's history; "the next rename" is not
+hypothetical) or destroyed outright. Before this fix, `_fetch_session_lanes`
+raising for that session left every task in it `unresolved` forever: the
+stored session name never changes on its own, and nothing ever revisited
+the row. #774's own three stuck reviewer tasks were exactly this.
+
+`_resolve_renamed_session` is the fallback, tried only when the ordinary
+per-session `lanes.sh --json` call itself fails. It resolves the SAME lane
+under its CURRENT session name using the one identity a `tmux
+rename-session` does not touch: the pane_id the ledger recorded for this
+lane at registration time (`lanes.pane_id`, confirmed stable across a
+rename by #739's own direct test). Every step is live evidence, never a
+guess: the pane_id comes from the ledger's own row, "does it still answer"
+is checked with a live `tmux display-message` against that exact pane_id,
+the session it now names is checked against `tmux list-sessions`'s own
+live output before being trusted, and the window at the resolved index is
+then read the ordinary way (`lanes.sh --json` on THAT session) so the
+state/idle_seconds evidence downstream is identical either way -- this
+changes HOW the pane is found for the failure case only, never whether
+idleness alone is sufficient to complete it (unchanged from every fix
+above). Any step that cannot confirm a single live location -- the pane_id
+column empty, the pane gone, `tmux list-sessions` not naming the resolved
+session, the resolved window absent from that session's own answer --
+returns `None` and the task stays `unresolved`, the same fail-closed
+posture as "old name, gone forever". This never touches the 931 historical
+`agent-supervisor:%` rows already `complete` (#728): only tasks still
+`delivered`/`accepted` ever reach `sweep()`'s per-session loop at all.
+
+agent-supervisor#774 half B, rescoped after #781 (#779/half C) shipped:
+`_resolve_renamed_session` above resolves a lane whose SESSION was renamed
+-- it needs a live pane to answer `tmux display-message`. A pane that is
+genuinely, permanently gone (killed, crashed, or torn down before
+`lane-done.sh` ran) answers nothing under ANY name, so that fallback
+returns `None` for it too -- reproduced live, not assumed: see
+`tests/supervisor/test_reconcile_lane_completions.py`'s
+`ReviewerTaskWithGenuinelyDeadPaneTest`, which actually kills a tmux
+session (not renames it) under isolation and confirms the task stays
+`delivered` forever without this fix. That is structurally the SAME gap
+agent-supervisor#401 already closed for AUTHOR tasks (below): a lane that
+finished and left real evidence behind -- a posted `Verdict:`/
+`Review-Lane:` comment, a merged PR -- has no live pane to observe under
+any name. `#401`'s fix reads a lane-log for a PR an AUTHOR task opened; a
+REVIEWER task never opens anything, so `_reviewer_task_merge_evidence`
+reads the review's own evidence instead: the task's own `source_tasks` row
+naming the PR it reviewed (`source_kind='pull'`, `is_review=1`), that PR's
+operative verdict resolved through `verdict.py`'s own tested
+`GithubReviewVerdictSource` and attributed to precisely this task's lane,
+and the PR's live, independently-confirmed `MERGED` state via `gh pr
+view`. Tried in the SAME except-branch as `_resolve_renamed_session`,
+after it (a live pane, when one can still be found, is strictly better
+evidence than a review's paper trail) and before falling back to
+`unresolved` -- never in place of the session-read error already reported.
+
+agent-estate#804: `_reap_orphans_for_this_sweep` (#800/#802) already ran
+`self.orphan_reaper` against every task this sweep just moved to a
+terminal status; nothing then touched the worktree that task's process(es)
+ran in. `_reap_worktrees_for_this_sweep` is that missing half -- same
+opt-in-via-injection shape as `orphan_reaper` (`self.worktree_reaper`,
+`None` by default so every existing caller/test keeps its prior behaviour),
+run AFTER the orphan sweep for the same tick's terminal tasks, deliberately
+in that order: a stray background process still sitting in the worktree's
+cwd is exactly what `worktree.sh reap`'s own liveness check (`_gc_is_live`,
+reused unmodified) would refuse to remove out from under, so reaping it
+first with `orphan_reaper` is what lets a worktree that would otherwise be
+refused as "live" become reapable in the same tick, rather than needing a
+second sweep to notice its occupant is already gone. See `lane_worktree_
+reap.py`'s own module docstring for the accrual-rate measurement and the
+immediate-vs-deferred reasoning -- both left as open questions by the
+issue.
+
+agent-supervisor#401: "no signal arrived" and "the work did not happen" are
+different claims, and the wording this sweep used to write conflated them
+-- `results/ad275-fix275.md` read "failed, not completed" while its own
+lane-log named PR #283, MERGED. Two changes here:
+
+* Before either `_fail_unaccepted` or `_sweep_nonobservable` stamps a
+  failure, `_lane_log_pr_url` checks the one piece of cheap evidence
+  already sitting on disk at stamp time: does this lane's own transport
+  log (`lane-logs/<task_id>.log`, written by `ClaudePrintAdapter.
+  assign_task`) name a pull request it opened? If so, that settles it --
+  `_complete_from_evidence` completes the task instead of failing it. This
+  is deliberately the same check agent-supervisor#401's own acceptance
+  script runs (`grep -qoE '.../pull/[0-9]+' lane-logs/$t.log`): a specimen
+  this sweep would now still fail is a specimen that script would flag.
+* When there is genuinely no evidence either way, the note text no longer
+  asserts "failed, not completed" -- it says only what is actually known
+  (no signal arrived) and says explicitly that this is not a claim the
+  work itself failed. The ledger status written is still `failed` (it has
+  to be: `one_open_task_per_lane` needs a terminal status to free the
+  lane, and there is no weaker terminal status in this schema to reach
+  for) -- but `_write_result` is now given `suffix=".reconcile"`, so this
+  verdict lands at `<task_id>.reconcile.md`, never at `<task_id>.md`. That
+  canonical slot stays free for the lane's own report, if one ever
+  arrives late -- see `Ledger._write_result`'s own docstring for why
+  writing there first was the actual "overwrite" the issue's title named:
+  not a literal overwrite (this method's underlying write is
+  immutable-once), but a late, genuine `complete()` call finding the slot
+  already claimed and its content rejected as conflicting.
+
+agent-estate#834: `_reap_orphans_for_this_sweep` and
+`_reap_worktrees_for_this_sweep` used to look ONLY at
+`_terminal_task_ids_for_this_sweep` -- the four lists a task lands in when
+THIS sweep is what transitioned it. `cli.py record-completion` writes
+`status='complete'` directly (it is `dispatch.sh`'s own suggested recovery
+for a lane that finished without signalling, so this is not a rare path),
+which means the task is already terminal by the time any sweep runs and
+never enters those four lists -- its pane is never vacated and its
+worktree is never reaped, permanently, because nothing ever revisits an
+already-terminal task. Demonstrated live: `record-completion` on
+`agent-dotfiles:2`, then `reconcile-lane-completions` returning every list
+empty while the pane stayed parked inside `ad-341-fix341-7071` and the
+directory stayed on disk.
+
+Two ways to close that gap were on the table (`#834`'s own body sets them
+out without picking): call the reaper directly from `record_completion`,
+or widen what a sweep is willing to look at. This picks the second.
+Calling the reaper from `record_completion` would duplicate the vacate-
+before-reap ordering guarantee `#827` needed two review rounds to get
+right, in a second call site that could drift from this one. Widening the
+candidate set instead means every terminal task, however it got that way,
+goes through the exact same reap path a same-sweep completion already
+goes through -- one ordering guarantee, one guard chain, not two. Safe to
+widen because nothing downstream of candidate SELECTION trusts "when" a
+task went terminal, only what is true right now: `LaneWorktreeReaper.
+reap_task_worktree`'s `lane_live` check re-reads `get_open_task_for_lane`
+fresh, `_vacate_pane_before_reap` re-reads `_lane_is_live` and the pane's
+current `tmux display-message` cwd, and `worktree.sh reap`'s own guard
+chain (dirty, unmerged, a live process or pane still inside, detached HEAD)
+runs fresh against the worktree on disk. Widening the SET a sweep looks at
+never widens what makes removal safe -- that guard chain is unchanged and
+unweakened; see `_leaked_worktree_candidate_ids`'s own docstring for the
+new candidate set this adds and `Ledger.list_terminal_tasks_with_worktree`
+for what it queries.
+
+agent-estate#837: measured live on the real ledger, `#834`'s widened
+BACKLOG half of that union offered a historical row carrying
+`worktree_path=/tmp` to the reap guard chain -- `Path("/tmp").is_dir()` is
+true, so the only filter in place let it through. It was refused, but by
+`_gc_is_live` (a running process's cwd happened to be inside `/tmp` at that
+moment) -- a property of the moment the sweep ran, not a property of
+`/tmp` itself. Same measurement: 181 backlog candidates, 157 refused,
+14 genuinely reaped, 10 already gone -- and the 157 refusals recur on
+EVERY future sweep, because a refused candidate stays a candidate
+forever (`list_terminal_tasks_with_worktree` has no way to know a row was
+already asked and refused). `_looks_like_lane_worktree` is the fix for the
+first half: three tests, any one sufficient, reusing `orphan-worktree-
+reap.sh`'s own reasoning rather than inventing a fourth scheme --
+registered in a known repo's own `git worktree list`, under a known
+worktree root (`<repo>/.worktrees`), or named the way `worktree.sh new`
+actually names one (`ad-<n>-<task>-<pid>`, `DEST="$ROOT/ad-$SLUG-$$"`).
+`/tmp` fails all three. Applied ONLY to the `#834` backlog half of the
+union below, never to a task this sweep itself just completed -- a lane
+this system dispatched and just finished always has a `worktree_path`
+`worktree.sh new` itself produced, so narrowing that half would only add
+risk (a legitimate same-sweep completion refused for looking "wrong
+shaped") with no corresponding benefit (it was never the source of either
+finding).
+
+The second finding -- the 157 refusals recurring every sweep -- is NOT
+fixed here. Distinguishing a refusal that can never turn into a reap (the
+path is not a git repository at all, or is not a worktree) from one that
+is genuinely transient (a live lane, a dirty tree, an unmerged branch
+still being worked) means classifying `worktree.sh reap`'s own guard-chain
+outcomes by permanence, and getting that wrong in the "permanent" direction
+means caching a refusal for a worktree that could still legitimately be
+reaped later. Nothing here can prove that classification safe without
+touching the guard chain the brief for this issue named out of scope; the
+narrowing above already removes `/tmp` and everything else not
+worktree-shaped from the recurring set, which is the honest measurement to
+take before deciding whether a caching scheme is still worth the risk.
+
+agent-estate#841: three `claude-print` lanes in one session ended their own
+turn waiting on a job they had backgrounded and could never resume ($14.32,
+187 turns, all three) -- `claude -p`/`pi --mode rpc` genuinely exit once
+their final JSON result prints, so nothing was ever coming back, and each
+one's own closing words said as much: "I'll wait for the background
+shell-suites run ... before finalizing the PR." The issue's own three
+directions were left undecided; this takes the one entirely implementable
+here -- detect the shape at completion, rather than trying to stop a lane
+from backgrounding work at all (needs harness surface nobody here
+controls) or building cheap recovery (downstream of noticing in the first
+place). `_died_waiting_on_background` is the classifier: a lane's own
+final result text (`_lane_log_final_result_text`, read from the exact
+transport log `_lane_log_pr_url` already reads) matches a waiting-to-be-
+resumed shape AND it wrote no result file AND neither a PR
+(`_lane_log_pr_url`) nor an issue/PR comment (`_lane_log_comment_url`) can
+be attributed to it in that same log. The conjunction is deliberate and
+load-bearing, per the issue's own framing: a phrase match alone would fire
+on a lane that said something similar and still shipped, so "produced
+nothing" gates the wording, never the reverse.
+
+Deliberately NOT a new trigger for when a failure fires: this is checked
+only in `_sweep_nonobservable`/`_sweep_nonobservable_accepted`, at the
+exact point both methods already have -- after every existing gate
+(`_pid_confirmed_dead`, `stale_after`, `_liveness_blocks_failure`) has
+already decided this task is failing, and after `_lane_log_pr_url` has
+already cleared it of having shipped a PR. It only chooses a more specific
+note and an additional `report["died_waiting_on_background"]` tag for a
+failure this sweep was already about to write -- never a reason a lane is
+failed that would not otherwise have been. That keeps `_pid_confirmed_dead`,
+`_liveness_blocks_failure` and every completion path (`_complete_observed`,
+`_complete_from_evidence`) byte-for-byte unchanged, which is what makes
+"never mark a lane failed that actually shipped" hold: this can only ever
+relabel a failure the untouched gates above already produced.
+"""
+
+from __future__ import annotations
+
+import json
+import os
+import re
+import subprocess
+import tempfile
+from pathlib import Path
+
+from cli_parser import DEFAULT_REPOSITORIES
+from core import CLAIM_TASK_PREFIX, pid_is_alive
+from core_lane_relation import normalize_worktree_path
+from verdict import GithubReviewVerdictSource
+
+# agent-estate#827 fix2: the one CLI seam onto harness-registry.sh's
+# bash-3.2 arrays (see harness-launch-cmd.sh's own header) --
+# `_vacate_pane_before_reap` shells out to this rather than hardcoding a
+# second copy of any harness's H_LAUNCH_CMD.
+HARNESS_LAUNCH_CMD_SH = str(Path(__file__).resolve().parent / "harness-launch-cmd.sh")
+
+# Mirrors agent-supervisor#401's own acceptance script's grep exactly, so a
+# specimen this finds is a specimen that script would also flag.
+_PR_URL_RE = re.compile(r'https://github\.com/[^\s",]+/pull/[0-9]+')
+
+# agent-supervisor#488: mirrors the exact line `ClaudePrintAdapter.
+# assign_task` (`adapter.py`) writes to `lane-logs/<task_id>.log` right
+# after `run_detached` returns -- the only place this sweep can learn the
+# pid of the subprocess it is about to judge.
+_DISPATCHED_PID_RE = re.compile(r"dispatched detached: task=\S+ lane=\S+ pid=(\d+)")
+
+# agent-supervisor#774 half B: `source_tasks.source_url` for a `--pr`/
+# `--reviews-pr`-scoped dispatch (`source_kind='pull'`) is minted by
+# `cli_dispatch_record.py` as exactly this shape -- see that module's own
+# `source_url = f"https://github.com/{github}/pull/{pr}"` line. Anchored
+# full-match (not `_PR_URL_RE`'s bare substring search above), because this
+# is read back FROM a column this same system wrote, not scraped out of
+# free-form prose.
+_PULL_SOURCE_URL_RE = re.compile(r"https://github\.com/(?P<repo>[^/\s]+/[^/\s]+)/pull/(?P<number>[0-9]+)")
+
+# agent-estate#837: the shape every dispatch actually produces --
+# `worktree.sh new`'s own `DEST="$ROOT/ad-$SLUG-$$"`, and
+# `orphan-worktree-reap.sh`'s own naming whitelist (`ad-*-[0-9]*`) for the
+# identical reason (CLAUDE.md invariant 6: unknown means not offered, not
+# swept in). `/tmp`'s basename is `tmp` -- fails this outright.
+_LANE_WORKTREE_NAME_RE = re.compile(r"^ad-[0-9]+-.+-[0-9]+$")
+
+# agent-estate#841: the shape all three measured specimens' final result
+# text shared -- "Waiting for the vhs tape's PNG capture to finish
+# (background Monitor task running)", "Waiting for the background VHS run
+# to finish (task bbcsv7l10)", "I'll wait for the background shell-suites
+# run and the monitor to report back" -- a lane ending its own turn on the
+# expectation something will resume it, which nothing in this estate ever
+# does (a `claude -p`/`pi-rpc` process that prints its final JSON result
+# has, by construction, already exited -- see `claude_print_transport.py`'s
+# own module docstring). Deliberately loose (any `wait`/`waiting` within one
+# clause of `background`/`resume`/`report back`) -- see this module's own
+# agent-estate#841 paragraph below for why a phrase match alone would be
+# brittle, and why `_died_waiting_on_background` never trusts this pattern
+# on its own.
+_WAITING_ON_BACKGROUND_RE = re.compile(
+    r"\bwait(?:ing)?\b[^.]{0,120}\b(?:background|resume|report back)\b",
+    re.IGNORECASE,
+)
+
+# agent-estate#841: a lane's own transport log already carries evidence of
+# every `gh issue comment`/`gh pr comment` it actually posted -- the CLI
+# prints the new comment's own URL on success, and that URL always carries
+# `#issuecomment-<id>` (an issue and a PR share one comment endpoint on
+# GitHub, so one pattern covers both). Distinct from `_PR_URL_RE` above,
+# which matches a PR's own URL (opened, not merely commented on).
+_GH_COMMENT_URL_RE = re.compile(r'https://github\.com/[^\s",]+/(?:issues|pull)/[0-9]+#issuecomment-[0-9]+')
+
+
+def _known_worktree_roots(repositories):
+    """Every `<repo>/.worktrees` directory a known repository resolves to
+    (`worktree.sh new`'s own default DEST base, agent-estate#821) --
+    real-path-resolved (`os.path.realpath`) so a symlinked spelling (macOS's
+    `/tmp` -> `/private/tmp`) compares equal to however a candidate's own
+    `worktree_path` spelled it, the same reasoning `worktree.sh gc`'s own
+    `WORKTREES_ROOT_REAL` comparison already documents. Deliberately does
+    NOT include bare `$TMPDIR`/`$WORKTREE_ROOT` -- that would accept ANY
+    directory anywhere under it, which is the exact over-broad shape
+    agent-estate#837 exists to narrow away from (`/tmp` itself is `$TMPDIR`
+    on most hosts). A `$TMPDIR`-rooted worktree is still recognised, just by
+    `_LANE_WORKTREE_NAME_RE` below on its own basename, same as every other
+    root."""
+    roots = set()
+    for repo in repositories:
+        path = repo.get("path") if isinstance(repo, dict) else None
+        if not path or not os.path.isdir(path):
+            continue
+        roots.add(os.path.realpath(os.path.join(path, ".worktrees")))
+    return roots
+
+
+def _is_under_any_root(real_path, roots):
+    for root in roots:
+        if not root:
+            continue
+        try:
+            Path(real_path).relative_to(root)
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+def _repo_for_worktree_path(worktree_path, repositories):
+    """agent-estate#847: which known repository's own GitHub remote should
+    answer the merged-PR cross-check for `worktree_path` -- the same
+    `<repo>/.worktrees` root test `_known_worktree_roots`/`_is_under_any_root`
+    already run for backlog-candidate recognition above, but returning the
+    OWNING repo dict here rather than a bare yes/no, since batching the
+    merged-PR fetch (`_reap_worktrees_for_this_sweep`) needs an actual repo
+    path to hand `worktree.sh fetch-merged-prs` -- exactly the `$repo`
+    argument `_gc_fetch_merged_prs` already resolves `origin` from. `None`
+    when no known repository's `.worktrees` root contains this path -- the
+    caller falls back to `reap`'s own per-call fetch rather than fetching
+    against a guessed repo."""
+    real = os.path.realpath(worktree_path)
+    for repo in repositories:
+        path = repo.get("path") if isinstance(repo, dict) else None
+        if not path or not os.path.isdir(path):
+            continue
+        root = os.path.realpath(os.path.join(path, ".worktrees"))
+        try:
+            Path(real).relative_to(root)
+        except ValueError:
+            continue
+        return repo
+    return None
+
+
+DEFAULT_IDLE_AFTER_SECONDS = 300
+# agent-supervisor#374: deliberately much longer than DEFAULT_IDLE_AFTER_SECONDS.
+# The tmux path's dwell gates a POSITIVE observation (pane read free N seconds
+# ago); this one gates the ABSENCE of any observation at all for a transport
+# that never had a pane to poll, so it needs enough headroom that a long-running
+# claude-print/pi-rpc turn is not mistaken for an abandoned one.
+DEFAULT_STALE_AFTER_SECONDS = 3600
+
+
+def subprocess_runner(command):
+    return subprocess.run(command, check=True, capture_output=True, text=True).stdout
+
+
+def _parse_lane(lane):
+    """`<session>:<index>` -> `(session, index)`, or `None` if it doesn't parse.
+
+    Mirrors the shape `dispatch.sh`/`lanes.sh` mint every lane id in
+    (`core.py`'s `lane_relation` parses the same shape for the same reason).
+    A lane id that does not parse this way was never minted by this system
+    -- left unresolved rather than guessed at, same fail-closed posture
+    `reconcile_sources.py` takes for an unparseable `source_url`.
+    """
+    if not isinstance(lane, str):
+        return None
+    session, sep, index = lane.rpartition(":")
+    if not sep or not session or not index.isdigit():
+        return None
+    return session, index
+
+
+class LaneCompletionReconciler:
+    """Sweep every open `delivered` task forward from OBSERVED pane state."""
+
+    def __init__(
+        self,
+        ledger,
+        runner=None,
+        lanes_bin="lanes.sh",
+        gh_bin="gh",
+        idle_after=DEFAULT_IDLE_AFTER_SECONDS,
+        stale_after=DEFAULT_STALE_AFTER_SECONDS,
+        clock=None,
+        orphan_reaper=None,
+        worktree_reaper=None,
+        repositories=None,
+    ):
+        self.ledger = ledger
+        self.runner = runner or subprocess_runner
+        self.lanes_bin = lanes_bin
+        # agent-supervisor#774 half B: same `gh_bin` convention
+        # `reconcile_sources.py`'s `SourceTaskReconciler` already uses --
+        # one env-configurable binary name, not a second hardcoded "gh".
+        self.gh_bin = gh_bin
+        self.idle_after = idle_after
+        self.stale_after = stale_after
+        self.clock = clock or ledger.clock
+        # agent-estate#800: this sweep already determines a lane's task has
+        # gone terminal; it never looked at what that lane left running.
+        # `None` by default (every existing caller/test that does not pass
+        # this keeps behaving exactly as before -- reaping OS processes is
+        # a materially different hazard than writing a ledger row, kept
+        # opt-in here and wired explicitly at the one real caller, `cli.py`
+        # reconcile-lane-completions). Injected here (rather than
+        # constructed fresh per sweep) so a caller can share one instance's
+        # `runner`/binaries and so tests can substitute a fake without
+        # touching this class's own constructor signature further.
+        self.orphan_reaper = orphan_reaper
+        # agent-estate#804: this sweep's missing half of #800/#802's own
+        # completion -- reaping a lane's PROCESSES said nothing about the
+        # WORKTREE they ran in. Same opt-in-by-injection shape as
+        # `orphan_reaper` above and for the identical reason (see that
+        # attribute's own comment): `None` by default so every existing
+        # caller/test keeps its prior behaviour, wired explicitly at the
+        # one real caller, `cli.py reconcile-lane-completions`.
+        self.worktree_reaper = worktree_reaper
+        # agent-estate#837: which repositories' own `git worktree list` and
+        # `.worktrees` root count as "known", for `_looks_like_lane_worktree`
+        # below. Defaults to the estate's real repo list (`cli_parser.
+        # DEFAULT_REPOSITORIES`, itself overridable via
+        # `SUPERVISOR_REPOSITORIES` -- see that module) rather than binding
+        # it at import time, so a test can inject a fixture repo list
+        # without needing an env var round trip.
+        self.repositories = repositories if repositories is not None else DEFAULT_REPOSITORIES
+
+    def _fetch_session_lanes(self, session):
+        """One batched `lanes.sh --json <session>` call -> {index: row}."""
+        payload = json.loads(self.runner([self.lanes_bin, "--json", session]))
+        return {str(row["window"]): row for row in payload}
+
+    def sweep(self):
+        """Complete every ACCEPTED lane observably free long enough. Safe on
+        a schedule.
+
+        Returns a report dict: `completed` (task ids actually released as
+        `complete`), `failed_unaccepted` (task ids terminated `failed`
+        instead -- observably free long enough, but never accepted; see
+        below), `unresolved` (left alone -- not observably free long
+        enough, or the pane could not be read this run), and `errors` (a
+        session's `lanes.sh --json` call itself failed, affecting every
+        task that depended on it).
+
+        agent-supervisor#193: "lane free, idle past the dwell" alone is not
+        evidence a task's work ever started -- `at25-rev33`'s brief landed
+        as noise the harness discarded, the lane went quiet exactly like a
+        finished one, and this sweep used to certify it `complete` from that
+        alone. `accepted_at` is now the gate: it is set only by
+        `record_dispatch`'s own confirmation that its send actually landed
+        (see that method's docstring), never by mere pane quiet. A task that
+        is free-and-idle-enough WITH `accepted_at` set completes exactly as
+        before; one free-and-idle-enough WITHOUT it is terminated `failed`
+        instead -- never silently left `delivered` forever (that would just
+        strand the lane), and never asserted `complete` (that would be the
+        false record #193 filed against). Fail-closed cuts one way here: a
+        real completion is never reported as accepted-but-wasn't, because
+        `accepted_at` is written before this sweep ever runs, not inferred
+        by it.
+        """
+        tasks = self.ledger.list_delivered_open_tasks()
+
+        by_session = {}
+        unresolvable = []
+        for task in tasks:
+            parsed = _parse_lane(task["lane"])
+            if parsed is None:
+                unresolvable.append(task)
+                continue
+            session, index = parsed
+            by_session.setdefault(session, []).append((task, index))
+
+        # agent-supervisor#414: a second, independent unresolvable set,
+        # fed from `list_accepted_open_tasks()` rather than
+        # `list_delivered_open_tasks()` -- see this module's own docstring
+        # for why a no-pane lane's row moves out of the first query the
+        # instant its worker calls `accept`. Only the non-observable half
+        # applies here: a tmux lane's `accepted_at` never moves `status`
+        # off `delivered` (`record_dispatch`'s own flag, not `Ledger.
+        # accept`), so a lane id that DOES parse as `<session>:<index>`
+        # can never actually reach `status='accepted'` in the first place --
+        # there is no per-session pane-observed half to add.
+        unresolvable_accepted = [
+            task for task in self.ledger.list_accepted_open_tasks() if _parse_lane(task["lane"]) is None
+        ]
+
+        report = {
+            "completed": [],
+            # agent-supervisor#401: subset of "completed" -- task ids that
+            # would otherwise have been stamped failed, but a PR named in
+            # their lane-log settled it first. Called out separately so a
+            # human reading the report can tell "observed free" apart from
+            # "cheap evidence recovered this one" at a glance.
+            "completed_from_evidence": [],
+            "failed_unaccepted": [],
+            "failed_stale_delivery": [],
+            "failed_stale_acceptance": [],
+            "unresolved": [],
+            # agent-supervisor#692: subset of failed_stale_delivery/
+            # failed_stale_acceptance -- task ids terminated on a CONFIRMED
+            # dead pid (see `_pid_confirmed_dead`) rather than on having
+            # merely outlived `stale_after` with no corroborating evidence.
+            # Named separately so a human (or watchdog.log) can tell "this
+            # one died and we know it" from "this one just went quiet long
+            # enough" without reading the note text -- the same reason
+            # #488's liveness_alive/liveness_indeterminate are split out
+            # below.
+            "died_without_completing": [],
+            # agent-estate#841: subset of "failed_stale_delivery"/
+            # "failed_stale_acceptance" (and, when the pid fast path also
+            # fired, of "died_without_completing" too) -- task ids failed
+            # specifically because their own final result text described
+            # waiting on a backgrounded job, with no result file and no PR
+            # or comment to show for it. Named separately from
+            # "died_without_completing" so a human reading the report can
+            # tell "this lane threw its work away waiting on a background
+            # job" apart from "this lane's process merely died" at a
+            # glance -- see `_died_waiting_on_background`'s own docstring.
+            "died_waiting_on_background": [],
+            # agent-supervisor#488: subsets of "unresolved" -- task ids left
+            # alone specifically because a liveness check blocked a failure
+            # stamp, named separately so a human (or watchdog.log) can tell
+            # "this one is too young" apart from "this one is provably still
+            # running" or "this one could not be checked at all" without
+            # reading the note text.
+            "liveness_alive": [],
+            "liveness_indeterminate": [],
+            "errors": [],
+            # agent-estate#800: one entry per task this sweep just moved to
+            # a terminal status, naming what `self.orphan_reaper` (if any)
+            # found and did with that task's worktree -- see
+            # `_reap_orphans_for_this_sweep`'s own docstring. Always
+            # present so a caller can tell "reaping ran and found nothing"
+            # from "reaping was never wired" without inspecting `self`.
+            "orphans": [],
+            # agent-estate#804: one entry per task this sweep just moved to
+            # a terminal status, naming what `self.worktree_reaper` (if
+            # any) found and did with that task's own worktree -- see
+            # `_reap_worktrees_for_this_sweep`'s own docstring. Always
+            # present, same "wired vs. not" distinction `orphans` above
+            # already makes.
+            "worktrees": [],
+        }
+
+        now = self.clock()
+
+        for task in unresolvable:
+            self._sweep_nonobservable(task, now=now, report=report)
+        for task in unresolvable_accepted:
+            self._sweep_nonobservable_accepted(task, now=now, report=report)
+        for session, entries in by_session.items():
+            try:
+                windows = self._fetch_session_lanes(session)
+            except Exception as error:
+                report["errors"].append({"session": session, "error": str(error)})
+                # agent-supervisor#779 (#774 half C): the recorded session
+                # itself is unreadable -- try the SAME lane under its
+                # current name before giving up. See `_resolve_renamed_
+                # session`'s own docstring for what "evidence-based" means
+                # here; `None` means it could not confirm a single live
+                # location, and the task is left unresolved exactly as
+                # before this fallback existed.
+                for task, _index in entries:
+                    resolved = self._resolve_renamed_session(task, stale_session=session)
+                    if resolved is not None:
+                        resolved_session, window = resolved
+                        self._evaluate_window(
+                            task, window, session=resolved_session, now=now, report=report, via_fallback=True
+                        )
+                        continue
+                    # agent-supervisor#774 half B: no live pane could be
+                    # found under any name -- the pane is genuinely gone,
+                    # not merely renamed. A REVIEWER task stuck in exactly
+                    # this shape can still be settled from real merge/
+                    # verdict evidence instead (see
+                    # `_reviewer_task_merge_evidence`'s own docstring),
+                    # tried before falling back to unresolved.
+                    pr_url = self._reviewer_task_merge_evidence(task)
+                    if pr_url is not None:
+                        self._complete_from_evidence(
+                            task,
+                            pr_url=pr_url,
+                            now=now,
+                            report=report,
+                            evidence_description=(
+                                f"its own review of {pr_url} was approved under this exact "
+                                "lane's Review-Lane: trailer and that PR is confirmed MERGED"
+                            ),
+                        )
+                        continue
+                    report["unresolved"].append(task["id"])
+                continue
+
+            for task, index in entries:
+                window = windows.get(index)
+                self._evaluate_window(task, window, session=session, now=now, report=report)
+
+        self._reap_orphans_for_this_sweep(report)
+        # agent-estate#804: run AFTER the orphan sweep above, on the SAME
+        # terminal-task set -- see this module's own top-level docstring
+        # for why that order matters (a stray process the orphan reaper
+        # just killed is exactly what would otherwise make `worktree.sh
+        # reap`'s own liveness guard refuse the worktree it was sitting
+        # in).
+        self._reap_worktrees_for_this_sweep(report)
+        return report
+
+    def _terminal_task_ids_for_this_sweep(self, report):
+        """The four `report` lists a task id can land in exactly once per
+        sweep, on a single terminal status write -- shared by both reapers
+        below so each looks at the identical set THIS sweep just produced,
+        never a stale one from a prior call."""
+        return (
+            report["completed"]
+            + report["failed_unaccepted"]
+            + report["failed_stale_delivery"]
+            + report["failed_stale_acceptance"]
+        )
+
+    def _registered_worktree_paths(self):
+        """agent-estate#837: every path some known repository's own `git
+        worktree list` still names, real-path-resolved -- the first of
+        `_looks_like_lane_worktree`'s three tests, reusing `orphan-worktree-
+        reap.sh`'s own `REGISTERED` array reasoning rather than inventing a
+        second one.
+
+        Computed once per sweep call (`self.repositories` is a handful of
+        entries, not per-candidate), through `self.runner` like every other
+        git/gh/tmux read in this class -- never a bare `subprocess.run`, so
+        a test can substitute a fake without a second injection point. A
+        repository this host does not have checked out, or whose `git
+        worktree list` fails for any reason, contributes nothing to the
+        set; the naming-shape and known-root tests are what still protect a
+        candidate in that case -- never raises, never blocks the sweep.
+        """
+        registered = set()
+        for repo in self.repositories:
+            path = repo.get("path") if isinstance(repo, dict) else None
+            if not path or not os.path.isdir(path):
+                continue
+            try:
+                out = self.runner(["git", "-C", path, "worktree", "list", "--porcelain"])
+            except Exception:
+                continue
+            for line in (out or "").splitlines():
+                if line.startswith("worktree "):
+                    registered.add(os.path.realpath(line[len("worktree "):]))
+        return registered
+
+    def _looks_like_lane_worktree(self, worktree_path, registered, roots):
+        """agent-estate#837: the gate a BACKLOG candidate (one THIS sweep
+        did not itself just complete) must pass before it is even offered
+        to the reap guard chain -- not a replacement for that chain, which
+        runs unchanged and unweakened after this. Three independent tests,
+        any one sufficient, mirroring `orphan-worktree-reap.sh`'s own
+        reasoning rather than inventing a fourth scheme:
+
+        1. registered in a known repository's own `git worktree list`
+           right now (`registered`, from `_registered_worktree_paths`);
+        2. under a known worktree root, `<repo>/.worktrees` for a known
+           repository (`roots`, from `_known_worktree_roots`);
+        3. named the way `worktree.sh new` actually names one --
+           `ad-<n>-<task>-<pid>` (`_LANE_WORKTREE_NAME_RE`), regardless of
+           where it lives, so a leaked `$TMPDIR/ad-...` directory (#822's
+           own population, which neither test 1 nor test 2 can see) is
+           still recognised.
+
+        `/tmp` fails all three: it is not any repository's registered
+        worktree, `$TMPDIR`/`/tmp` itself is deliberately excluded from
+        `roots` (see that function's own docstring), and its basename
+        `tmp` does not match the naming shape. A real leaked lane worktree
+        (`ad-341-fix341-7071`'s own shape) passes test 3 on its name alone,
+        with no dependency on the repo it came from still being checked
+        out on this host.
+        """
+        real = os.path.realpath(worktree_path)
+        if real in registered:
+            return True
+        if _is_under_any_root(real, roots):
+            return True
+        return bool(_LANE_WORKTREE_NAME_RE.match(os.path.basename(worktree_path.rstrip("/"))))
+
+    def _leaked_worktree_candidate_ids(self, report):
+        """agent-estate#834: `_terminal_task_ids_for_this_sweep` alone only
+        ever named a task THIS sweep just decided terminal -- a task
+        written terminal by `cli.py record-completion` (outside any sweep)
+        never entered those four lists, so its worktree and pane were never
+        offered to either reaper, ever. This method is the union both
+        reapers below now iterate: this-sweep ids first (unchanged from
+        before -- every existing wiring test's ordering/dedup assumption
+        still holds), plus every OTHER already-terminal task the ledger
+        itself still names a `worktree_path` for AND whose directory is
+        still actually present on disk right now.
+
+        The on-disk check is done here, once, rather than left to each
+        reaper: `Ledger.list_terminal_tasks_with_worktree` can return
+        hundreds of historical rows whose worktree was already reaped (or
+        hand-cleaned) long ago, and there is nothing for either reaper to
+        do with those -- `reap_task_worktree` would just answer
+        `worktree_missing` after already paying for `_lane_is_live` and
+        (for the worktree reaper) a `tmux display-message` round trip in
+        `_vacate_pane_before_reap`. Filtering to worktrees that still exist
+        keeps every sweep's cost proportional to the actual leak, not to
+        the ledger's full terminal-task history.
+
+        Deliberately does NOT re-check liveness here -- that stays each
+        reaper's own job, re-evaluated fresh at call time (see this
+        module's own top-level docstring's agent-estate#834 paragraph for
+        why that is what makes widening the candidate SET safe). This
+        method only decides what gets OFFERED, never what gets removed.
+
+        agent-estate#837: the backlog half below also has to look like a
+        lane worktree before it is offered at all -- see
+        `_looks_like_lane_worktree`'s own docstring and this module's
+        top-level agent-estate#837 paragraph for why `/tmp` passed the
+        `is_dir()` check alone and why this shape gate applies ONLY to this
+        backlog half, never to `_terminal_task_ids_for_this_sweep`'s ids
+        above.
+        """
+        seen = set()
+        ids = []
+        for task_id in self._terminal_task_ids_for_this_sweep(report):
+            if task_id in seen:
+                continue
+            seen.add(task_id)
+            ids.append(task_id)
+        # Computed lazily, once per call, only if there is at least one
+        # on-disk backlog candidate to judge -- a sweep with an empty
+        # backlog (the common case once #837's own 157-refusal backlog is
+        # worked down) never pays for a single `git worktree list` call.
+        registered = None
+        roots = None
+        for task in self.ledger.list_terminal_tasks_with_worktree():
+            task_id = task["id"]
+            if task_id in seen:
+                continue
+            # `normalize_worktree_path` is for COMPARISON only (its own
+            # docstring) -- it rewrites a `/tmp`-rooted path to its
+            # `/private/tmp` spelling unconditionally, even on Linux CI
+            # where no such symlink or directory exists. Checking the
+            # NORMALIZED path against the filesystem here silently
+            # excluded every candidate whose real worktree lived under
+            # `/tmp` on a host without that symlink -- caught by CI
+            # (unit-tests, ubuntu-latest) failing this method's own new
+            # tests where a local macOS run had passed. The raw
+            # `worktree_path` -- what the OS actually created -- is what
+            # `Path.is_dir()` must be asked about; only reject a blank one.
+            worktree_path = task.get("worktree_path") or ""
+            if not worktree_path or not Path(worktree_path).is_dir():
+                continue
+            if registered is None:
+                registered = self._registered_worktree_paths()
+                roots = _known_worktree_roots(self.repositories)
+            if not self._looks_like_lane_worktree(worktree_path, registered, roots):
+                continue
+            seen.add(task_id)
+            ids.append(task_id)
+        return ids
+
+    def _reap_orphans_for_this_sweep(self, report):
+        """agent-estate#800: for every task THIS sweep just moved to a
+        terminal status (`completed`, `failed_unaccepted`,
+        `failed_stale_delivery`, `failed_stale_acceptance` -- the four
+        lists a task id can land in exactly once per sweep) OR any other
+        already-terminal task `_leaked_worktree_candidate_ids` finds still
+        holding a worktree on disk (agent-estate#834), ask
+        `self.orphan_reaper` (if one was given) to reap whatever background
+        descendants that task's worktree left running.
+
+        A no-op when `self.orphan_reaper` is `None` (the default -- see
+        this class's own `__init__` docstring for why reaping stays
+        opt-in). Never lets a reaper's own exception break this sweep's
+        ledger writes, which have already committed by the time this runs
+        -- a reap failure is recorded in `report["orphans"]` as an error
+        entry, not raised.
+        """
+        if self.orphan_reaper is None:
+            return
+        for task_id in self._leaked_worktree_candidate_ids(report):
+            task = self.ledger.get_task(task_id)
+            if task is None:
+                continue
+            try:
+                result = self.orphan_reaper.reap_task_orphans(task)
+            except Exception as error:
+                result = {"task": task_id, "outcome": "error", "error": str(error)}
+            report["orphans"].append(result)
+
+    def _fetch_merged_prs_once(self, repo_path):
+        """agent-estate#847: `worktree.sh fetch-merged-prs <repo_path>
+        <out-file>`, run exactly once per repository per sweep -- mirrors
+        `_gc_fetch_merged_prs` (reused verbatim by the shell subcommand,
+        never reimplemented here) rather than a second, Python-side `gh pr
+        list` call. Returns the temp file path on success, `None` if the
+        fetch itself failed or `gh`/the remote were unavailable this run --
+        the identical "no second opinion available" posture `worktree.sh
+        reap`'s own inline fetch already has, just moved up to run once
+        instead of once per candidate. The caller (`_merged_prs_file_for_
+        task`) is the only one that decides when to call this and owns the
+        returned file's cleanup."""
+        fd, out_path = tempfile.mkstemp(prefix="worktree-merged-prs-")
+        os.close(fd)
+        try:
+            self.runner(["bash", self.worktree_reaper.worktree_bin, "fetch-merged-prs", repo_path, out_path])
+        except Exception:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+            return None
+        return out_path
+
+    def _merged_prs_file_for_task(self, task, cache):
+        """agent-estate#847: the merged-PR snapshot `task`'s own reap call
+        should use, fetched at most once per REPOSITORY this sweep (not
+        once per candidate -- #847's own measured cause: 77 of 131
+        candidates in one sweep each paid an independent ~1.9s `gh pr list`
+        round trip for the identical answer). `cache` is a dict this sweep
+        owns, keyed by the owning repo's own `path`; a repo whose fetch
+        already ran this sweep (success OR failure -- `None` is cached too,
+        so a failed fetch is never retried a second time for the same
+        sweep) is never asked again. A task whose worktree does not resolve
+        to any known repository (`_repo_for_worktree_path` returns `None`)
+        gets `None` here too, and `reap_task_worktree` falls back to
+        `worktree.sh reap`'s own per-call fetch for that one candidate --
+        exactly its pre-#847 behaviour, never a looser check."""
+        repo = _repo_for_worktree_path(task.get("worktree_path") or "", self.repositories)
+        if repo is None:
+            return None
+        repo_path = repo["path"]
+        if repo_path not in cache:
+            cache[repo_path] = self._fetch_merged_prs_once(repo_path)
+        return cache[repo_path]
+
+    def _reap_worktrees_for_this_sweep(self, report):
+        """agent-estate#804: `_reap_orphans_for_this_sweep`'s own missing
+        half -- for every task in that same candidate set (this sweep's own
+        terminal transitions, plus `_leaked_worktree_candidate_ids`'
+        agent-estate#834 backlog), ask `self.worktree_reaper` (if one was
+        given) to reap that task's own worktree, through `worktree.sh
+        reap`'s guard chain (unmerged, dirty, or live all refuse; see
+        `lane_worktree_reap.py`'s own module docstring for the full
+        rationale, including the accrual-rate measurement this issue asked
+        for).
+
+        A no-op when `self.worktree_reaper` is `None` (opt-in, same
+        constructor-injection shape as `orphan_reaper` -- see this class's
+        own `__init__` docstring). Never lets a reaper's own exception
+        break this sweep's ledger writes, which have already committed by
+        the time this runs -- a reap failure is recorded in
+        `report["worktrees"]` as an error entry, not raised.
+
+        agent-estate#847: before looping, `merged_prs_cache` starts empty
+        and is filled in lazily by `_merged_prs_file_for_task` as each
+        candidate's owning repository is first seen -- one `gh pr list`
+        round trip per repository this sweep touches, not one per
+        candidate. The cache (and every temp file it created) is torn down
+        in the `finally` below regardless of how the loop ends, so a sweep
+        that raises partway through never leaks a temp file.
+        """
+        if self.worktree_reaper is None:
+            return
+        candidate_ids = self._leaked_worktree_candidate_ids(report)
+        if not candidate_ids:
+            return
+        merged_prs_cache = {}
+        try:
+            for task_id in candidate_ids:
+                task = self.ledger.get_task(task_id)
+                if task is None:
+                    continue
+                # agent-estate#825: see `_vacate_pane_before_reap`'s own
+                # docstring -- must run BEFORE the reap call below, on the
+                # same task, for the same reason the orphan sweep runs
+                # before this whole method (a stray occupant is exactly
+                # what makes `worktree.sh reap`'s liveness guard refuse).
+                #
+                # agent-estate#827 fix2: the vacate step's own outcome is
+                # recorded on the SAME dict `reap_task_worktree` returns, as
+                # its own `vacate` key -- never folded into
+                # `outcome`/`reason`, which are `reap_task_worktree`'s to
+                # set. A silently-failed vacate (tmux unreachable, no
+                # harness recorded, respawn failed) and a correctly SKIPPED
+                # one (lane already live, pane already elsewhere) both used
+                # to be invisible here, indistinguishable from each other or
+                # from the pre-#825 bug once the reap call's own
+                # `refused`/"cwd is inside it (#478)" outcome is all a
+                # reader sees -- see `_vacate_pane_before_reap`'s own
+                # docstring for the full enumeration of what `vacate` can
+                # say.
+                vacate_outcome = self._vacate_pane_before_reap(task)
+                merged_prs_file = self._merged_prs_file_for_task(task, merged_prs_cache)
+                try:
+                    result = self.worktree_reaper.reap_task_worktree(task, merged_prs_file=merged_prs_file)
+                except Exception as error:
+                    result = {"task": task_id, "outcome": "error", "error": str(error)}
+                result["vacate"] = vacate_outcome
+                report["worktrees"].append(result)
+        finally:
+            for cached_path in merged_prs_cache.values():
+                if cached_path:
+                    try:
+                        os.remove(cached_path)
+                    except OSError:
+                        pass
+
+    def _vacate_pane_before_reap(self, task):
+        """agent-estate#825: `worktree.sh reap`'s own liveness guard
+        (`_gc_is_live`, agent-supervisor#478) correctly refuses to remove a
+        worktree while any tmux pane's `#{pane_current_path}` is inside it
+        -- it cannot tell "abandoned" from "still working" from the path
+        alone. The gap #825 traced is that THIS lane's own pane is exactly
+        what is still pointing there: a lane's shell `cd`s into its
+        worktree once, at dispatch (`dispatch-send.sh`'s `respawn-pane -k
+        -c "$WORKTREE"`), and never leaves it again on its own -- posting a
+        review verdict and going idle does not move the pane. Every review
+        lane's worktree therefore looked permanently "live" to the guard
+        above, even minutes after its own task went terminal (measured:
+        eleven idle panes across every session held a finished task's
+        worktree open this way, all refused with "a tmux pane's cwd is
+        inside it (#478)").
+
+        Typing `cd` into the pane does not fix this. `dispatch-send.sh`'s
+        own comment (agent-supervisor#15) already established why: past
+        dispatch, a pane is the harness's own chat input, not a shell, so
+        text sent there is a PROMPT an agent reads, never a command a shell
+        executes. The only mechanism that actually changes a pane's
+        OS-level cwd is the one dispatch itself already uses to PUT a lane
+        in its worktree in the first place -- `respawn-pane -k -c <dir>`,
+        which kills whatever the pane's current process is and starts a
+        fresh process at `<dir>`.
+
+        agent-estate#827 fix2: the FIRST version of this method handed
+        `respawn-pane` no command at all, so `<dir>` got a bare login
+        shell, not a fresh harness. `lanes.sh` classifies a pane by the
+        command actually running in it (`lanes.sh:536`) -- a shell is never
+        `free`, and the window still carries the finished task's own name,
+        so `lanes.sh:589` read it `stale`, and `dispatch-lane-select.sh`
+        only ever offers `state=="free"` (`lanes.sh --free`, `awk
+        '$4=="free"'`). That silently removed a lane from the dispatch pool
+        until a human noticed and restarted it -- worse than #825's own
+        symptom (disk space), a genuine review of #827 caught it before it
+        shipped. The fix relaunches the SAME harness this lane was already
+        running (`harness-launch-cmd.sh`, resolved from the ledger's own
+        recorded `harness` for this lane -- never guessed, never a second
+        hardcoded copy of a harness's launch line), the identical command
+        `dispatch-send.sh` would type into this pane on its NEXT dispatch
+        anyway (`dispatch-send.sh` unconditionally `respawn-pane -k`s every
+        lane it reuses regardless of what is running there). Once that
+        fresh harness paints its own idle/ready chrome, the pane reads
+        `free` again, exactly as a freshly bootstrapped lane does
+        (`bootstrap-session.sh`'s own `LAUNCH_CMD` start) -- dispatchable,
+        with its cwd correctly OUTSIDE the worktree this sweep is about to
+        reap.
+
+        Deliberately narrow: only a task confirmed terminal RIGHT NOW
+        (agent-estate#834: this includes a task this sweep just transitioned
+        AND one `_leaked_worktree_candidate_ids` found already terminal from
+        an earlier sweep or a direct `record_completion` call -- "when" it
+        went terminal is irrelevant to this check), whose CURRENT pane cwd
+        (re-read here, not the possibly several-seconds-stale window
+        snapshot from earlier in this sweep, and for a backlog task there
+        may be no earlier snapshot at all) is provably inside ITS OWN
+        `worktree_path`, is touched -- never a guess, and never a pane whose
+        lane has since been redispatched (`_lane_is_live` reads the ledger,
+        the identical check `LaneWorktreeReaper.reap_task_worktree` makes
+        right after this returns, so a race that redispatched this lane in
+        between leaves its now-live pane alone).
+
+        Best-effort, on purpose: this is an OPTIMIZATION that makes the
+        liveness guard's INPUT honest, never a precondition the reap call
+        after it depends on. Any failure here (no pane, tmux unreachable, a
+        path that will not resolve, no harness recorded, the registry not
+        recognising it) is swallowed -- `reap_task_worktree` still runs and
+        still refuses exactly as it did before this method existed, so
+        nothing here can make reaping WORSE than the pre-#825 behaviour,
+        only sometimes better. And crucially, unlike the first version:
+        never bare-shells a pane it cannot safely relaunch a harness into
+        -- an unresolved harness is treated the SAME as "no pane"/"pane
+        unreachable" (skip, leave the lane exactly as it was), not as
+        licence to fall back to the no-`LAUNCH_CMD` respawn that caused
+        this fix.
+
+        Returns one of these outcome strings, recorded verbatim on the
+        `report["worktrees"]` entry this task lands in as its own `vacate`
+        key -- see agent-estate#827 fix2's own second requirement: a
+        silently-failed vacate and a correctly skipped one must never both
+        collapse into the reap call's own `refused` outcome, which is
+        indistinguishable from the pre-#825 bug on its own.
+
+        `"skipped:no_worktree_reaper"`   -- no reaper was configured (defensive; the
+                                            caller already skips this whole method then)
+        `"skipped:no_worktree_path"`     -- task carries no usable `worktree_path`
+        `"skipped:lane_live"`            -- the lane was redispatched since this sweep read it terminal
+        `"skipped:no_pane_transport"`    -- claude-print/pi-rpc: no tmux pane to move at all
+        `"skipped:pane_unreachable"`     -- `tmux display-message` failed (no such pane, tmux down)
+        `"skipped:pane_path_empty"`      -- display-message answered nothing usable
+        `"skipped:not_in_worktree"`      -- the pane is already elsewhere; nothing to do
+        `"skipped:git_common_dir_unreachable"` -- `git rev-parse --git-common-dir` failed
+        `"skipped:no_common_dir"`        -- that call answered nothing usable
+        `"skipped:no_park_dir"`          -- the common dir's own parent could not be derived
+        `"skipped:no_harness"`           -- the ledger has no `harness` recorded for this lane
+        `"skipped:no_harness_launch_cmd"` -- `harness-launch-cmd.sh` could not resolve one
+        `"attempted:succeeded"`          -- `respawn-pane -k -c <dir> <launch_cmd>` returned clean
+        `"attempted:failed"`             -- that same call raised
+        """
+        if self.worktree_reaper is None:
+            return "skipped:no_worktree_reaper"
+        worktree_path = normalize_worktree_path(task.get("worktree_path") or "")
+        if not worktree_path:
+            return "skipped:no_worktree_path"
+        if self.worktree_reaper._lane_is_live(task.get("lane")):
+            return "skipped:lane_live"
+        parsed = _parse_lane(task.get("lane") or "")
+        if parsed is None:
+            return "skipped:no_pane_transport"  # claude-print/pi-rpc -- nothing to move
+        session, index = parsed
+        target = f"{session}:{index}"
+        try:
+            pane_path = self.runner(["tmux", "display-message", "-t", target, "-p", "#{pane_current_path}"])
+        except Exception:
+            return "skipped:pane_unreachable"
+        pane_path = normalize_worktree_path((pane_path or "").strip())
+        if not pane_path:
+            return "skipped:pane_path_empty"
+        if pane_path != worktree_path and not pane_path.startswith(worktree_path.rstrip("/") + "/"):
+            return "skipped:not_in_worktree"  # the pane is already elsewhere -- nothing for this to do
+        # The shared checkout's own root, derived from the worktree's git
+        # metadata rather than guessed at or hardcoded -- the same "park in
+        # the shared checkout" location `bootstrap-session.sh` already
+        # starts every lane's window in, and the one `lane-retire.sh`'s own
+        # comment (agent-supervisor#615) already names as where an idle
+        # pane naturally lands.
+        try:
+            common_dir = self.runner(
+                ["git", "-C", worktree_path, "rev-parse", "--path-format=absolute", "--git-common-dir"]
+            )
+        except Exception:
+            return "skipped:git_common_dir_unreachable"
+        common_dir = (common_dir or "").strip()
+        if not common_dir:
+            return "skipped:no_common_dir"
+        park_dir = str(Path(common_dir).parent)
+        if not park_dir:
+            return "skipped:no_park_dir"
+        # agent-estate#827 fix2: the harness THIS lane was already running,
+        # from the ledger -- never re-guessed from a pane command, and
+        # never defaulted to any one harness. No recorded harness (a lane
+        # never registered, or predating the `harness` column) means this
+        # cannot safely relaunch anything, so it skips exactly like every
+        # other unresolved-input case above rather than falling back to a
+        # bare shell.
+        lane_row = self.ledger.get_lane(task.get("lane"))
+        harness = (lane_row or {}).get("harness") or ""
+        if not harness:
+            return "skipped:no_harness"
+        try:
+            launch_cmd = self.runner(["bash", HARNESS_LAUNCH_CMD_SH, harness])
+        except Exception:
+            return "skipped:no_harness_launch_cmd"
+        launch_cmd = (launch_cmd or "").strip()
+        if not launch_cmd:
+            return "skipped:no_harness_launch_cmd"
+        try:
+            self.runner(["tmux", "respawn-pane", "-k", "-t", target, "-c", park_dir, launch_cmd])
+        except Exception:
+            # Best-effort (see docstring) -- the reap call right after this
+            # returns will simply see the same refusal it always would
+            # have, never a worse outcome than before this method existed.
+            return "attempted:failed"
+        return "attempted:succeeded"
+
+    def _evaluate_window(self, task, window, *, session, now, report, via_fallback=False):
+        """The state/idle/accepted evidence check shared by the ordinary
+        per-session lookup and `_resolve_renamed_session`'s fallback -- the
+        two differ only in HOW `window` was found, never in what counts as
+        enough evidence to act on it (#774 half C's own constraint)."""
+        if window is None or window.get("state") != "free":
+            report["unresolved"].append(task["id"])
+            return
+        idle_seconds = window.get("idle_seconds")
+        if not isinstance(idle_seconds, (int, float)) or idle_seconds < self.idle_after:
+            report["unresolved"].append(task["id"])
+            return
+        if task.get("accepted_at") is None:
+            self._fail_unaccepted(
+                task, session=session, idle_seconds=idle_seconds, now=now, report=report, via_fallback=via_fallback
+            )
+            return
+        self._complete_observed(
+            task, session=session, idle_seconds=idle_seconds, now=now, report=report, via_fallback=via_fallback
+        )
+
+    def _resolve_renamed_session(self, task, *, stale_session):
+        """agent-supervisor#779 (#774 half C): find this task's lane under
+        its CURRENT session name, using the pane_id the ledger recorded for
+        it at registration time -- the one identity a `tmux rename-session`
+        does not touch (#739). See this module's top-level docstring for
+        the full rationale.
+
+        Returns `(resolved_session, window)` -- `window` in the exact shape
+        `_fetch_session_lanes` already produces, so `_evaluate_window` reads
+        it identically either way -- or `None` if any step below cannot
+        confirm a single live location with certainty:
+
+        * no `lanes` row for this task's OWN recorded lane string, or that
+          row carries no `pane_id` (never registered, or predates the
+          column)
+        * `tmux display-message` against that exact pane_id fails (the pane
+          itself is gone, not merely renamed) or answers a session that is
+          somehow still `stale_session` (contradicts the caller's own
+          failed lookup; something else is wrong, so this refuses rather
+          than loop back into it)
+        * `tmux list-sessions` -- a live enumeration, never a hardcoded or
+          guessed name -- does not name the session `display-message`
+          claimed
+        * `lanes.sh --json` on the resolved session itself fails, or does
+          not carry a window at the resolved index
+
+        Every one of those is a positive live check, not an inference --
+        the same "only ones a caller can enumerate live" discipline this
+        brief asked for.
+        """
+        lane_row = self.ledger.get_lane(task["lane"])
+        if lane_row is None:
+            return None
+        pane_id = (lane_row.get("pane_id") or "").strip()
+        if not pane_id:
+            return None
+        try:
+            target = self.runner(["tmux", "display-message", "-t", pane_id, "-p", "#{session_name}:#{window_index}"])
+        except Exception:
+            return None
+        session, sep, index = target.strip().rpartition(":")
+        if not sep or not session or not index.isdigit() or session == stale_session:
+            return None
+        try:
+            live_sessions = self.runner(["tmux", "list-sessions", "-F", "#{session_name}"])
+        except Exception:
+            return None
+        if session not in live_sessions.splitlines():
+            return None
+        try:
+            windows = self._fetch_session_lanes(session)
+        except Exception:
+            return None
+        window = windows.get(index)
+        if window is None:
+            return None
+        return session, window
+
+    def _reviewer_task_merge_evidence(self, task):
+        """agent-supervisor#774 half B: `_lane_log_pr_url`'s counterpart for
+        a REVIEWER task, not an author task, tried only when
+        `_resolve_renamed_session` has already failed to find a live pane
+        under any name (this module's top-level docstring). A review task
+        never opens anything -- it reviews someone else's PR and posts a
+        `Verdict:`/`Review-Lane:` comment on it -- so the evidence this
+        checks is different in kind, not just in source: three independent,
+        checkable facts, never an inference from idleness (this sweep's
+        central rule, restated in its own module docstring).
+
+        1. This task's own `source_tasks` row (`Ledger.get_source_task`,
+           written once at dispatch time by `cli_dispatch_record.py` for a
+           `--reviews-pr`-scoped dispatch) is a REVIEW of a real PR --
+           `source_kind='pull'` AND `is_review=1`, never inferred from the
+           task id or brief text.
+        2. That PR's OPERATIVE verdict, resolved through `verdict.py`'s own
+           already-tested `GithubReviewVerdictSource` (no second regex over
+           `Verdict:`/`Review-Lane:` lines -- `merge-pr.sh`'s own gate reads
+           through the exact same class), is `approved`, AND is attributed
+           (`reviewer_lane`) to precisely THIS task's own lane -- a verdict
+           posted by some other reviewer settles nothing about whether
+           *this* task's work happened.
+        3. That PR is independently confirmed MERGED via a live `gh pr
+           view`, not inferred from the verdict alone -- an APPROVE can be
+           posted and the PR still sit open.
+
+        Returns the PR's URL (the same shape `_complete_from_evidence`'s
+        note already expects) when all three hold; `None` the moment any
+        one of them does not -- a `gh`/network failure, a PR that is not
+        this task's own review, a verdict from a different lane, or a PR
+        that is approved but not yet merged are all `None`, never guessed
+        into a completion.
+        """
+        source = self.ledger.get_source_task(task["id"])
+        if source is None or source.get("source_kind") != "pull" or source.get("is_review") != 1:
+            return None
+        match = _PULL_SOURCE_URL_RE.fullmatch(source.get("source_url") or "")
+        if match is None:
+            return None
+        repo, number = match.group("repo"), match.group("number")
+        verdict_source = GithubReviewVerdictSource(runner=self.runner, ledger=self.ledger)
+        try:
+            result = verdict_source.verdict(repo=repo, number=int(number))
+        except Exception:
+            return None
+        if result.get("verdict") != "approved" or result.get("reviewer_lane") != task["lane"]:
+            return None
+        try:
+            raw = self.runner([self.gh_bin, "pr", "view", number, "--repo", repo, "--json", "state,url"])
+            payload = json.loads(raw)
+        except Exception:
+            return None
+        if payload.get("state") != "MERGED":
+            return None
+        return payload.get("url") or source["source_url"]
+
+    def _complete_observed(self, task, *, session, idle_seconds, now, report, via_fallback=False):
+        fallback_note = (
+            f" (recorded lane's session was gone; resolved via its pane_id to "
+            f"{session!r}, current as of {int(now)} -- agent-supervisor#779)"
+            if via_fallback
+            else ""
+        )
+        note = (
+            f"reconcile-lane-completions: {task['lane']} observed free for "
+            f"{int(idle_seconds)}s (>= {self.idle_after}s) as of {int(now)} -- "
+            f"never signalled completion; auto-completed from observed pane state{fallback_note}"
+        ).encode("utf-8")
+        allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
+        try:
+            self.ledger.complete(task["id"], note, pane_nonce=task["pane_nonce"], allow_claim=allow_claim)
+        except Exception as error:
+            report["errors"].append({"task": task["id"], "error": str(error)})
+            return
+        report["completed"].append(task["id"])
+
+    def _lane_log_pr_url(self, task_id):
+        """agent-supervisor#401: the cheap evidence check -- does this
+        lane's own transport log already name a pull request it opened?
+        `lane-logs/<task_id>.log` is written by `ClaudePrintAdapter.
+        assign_task` (the detached `claude -p` transcript) and is available
+        at stamp time, no network call needed. Absence (no file, no match)
+        answers `None`, same fail-closed posture as the rest of this
+        module -- it is evidence FOR completion, never evidence against it.
+        """
+        log_path = self.ledger.root / "lane-logs" / f"{task_id}.log"
+        try:
+            text = log_path.read_text(errors="replace")
+        except OSError:
+            return None
+        match = _PR_URL_RE.search(text)
+        return match.group(0) if match else None
+
+    def _lane_log_comment_url(self, task_id):
+        """agent-estate#841: the comment-posting counterpart to
+        `_lane_log_pr_url` above -- does this lane's own transport log name
+        an issue or PR comment it actually posted? Same fail-closed posture:
+        no log, no match, answers `None`, and this is only ever evidence
+        FOR a lane having produced something, never evidence against it.
+        """
+        log_path = self.ledger.root / "lane-logs" / f"{task_id}.log"
+        try:
+            text = log_path.read_text(errors="replace")
+        except OSError:
+            return None
+        match = _GH_COMMENT_URL_RE.search(text)
+        return match.group(0) if match else None
+
+    def _lane_log_final_result_text(self, task_id):
+        """agent-estate#841: the lane's own closing words, read back from
+        the SAME transport log every other evidence check in this module
+        already reads -- `claude -p --output-format json`/`pi --mode rpc`
+        both print one JSON object per turn, `{"type":"result",...,
+        "result":"<final text>",...}`, onto the stream `run_detached`
+        redirects into `lane-logs/<task_id>.log` (`claude_print_transport.
+        py`'s own module docstring). Parsed line by line -- the documented
+        shape is one compact object per line, not pretty-printed, so this
+        deliberately does not attempt a multi-line brace-matching parse
+        (this module's own `_died_waiting_on_background` needs the LAST
+        one, matching `_lane_log_pid`'s "last dispatch wins" convention for
+        a lane resumed more than once).
+
+        Returns the `result` field's text, or `None` when the log is
+        missing/unreadable or never carries a well-formed `type: "result"`
+        line -- `None` here means "no evidence either way", never "the
+        lane said nothing", so callers must never treat it as a phrase-match
+        failure.
+        """
+        log_path = self.ledger.root / "lane-logs" / f"{task_id}.log"
+        try:
+            text = log_path.read_text(errors="replace")
+        except OSError:
+            return None
+        final_text = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("{") or not line.endswith("}"):
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("type") != "result":
+                continue
+            result = payload.get("result")
+            if isinstance(result, str):
+                final_text = result
+        return final_text
+
+    def _died_waiting_on_background(self, task_id):
+        """agent-estate#841: is this task the exact shape
+        `agent-estate#841` measured -- a lane that ended its own turn
+        waiting on a backgrounded job nothing in this estate ever resumes,
+        having produced nothing to show for it?
+
+        The conjunction is the load-bearing half, deliberately, per the
+        issue's own framing: a phrase match on "waiting"/"background" alone
+        would fire on a lane that said something similar and still shipped.
+        All three must hold, each an independent piece of evidence already
+        available at stamp time (no network call):
+
+        1. the lane's own final result text (`_lane_log_final_result_text`)
+           matches `_WAITING_ON_BACKGROUND_RE` -- it said it was waiting to
+           be resumed;
+        2. no result file was ever written (`incoming/<task_id>.md`,
+           the same path `ClaudePrintAdapter.assign_task`'s own prompt
+           tells the lane to write at completion) -- it never got there;
+        3. neither `_lane_log_pr_url` nor `_lane_log_comment_url` finds
+           anything in the SAME log -- no PR opened, no issue/PR comment
+           posted. A lane that opened a PR or posted a comment is not this
+           failure, whatever its closing sentence said (agent-estate#841's
+           own words) -- checked last, so a lane that shipped anything at
+           all short-circuits out before its wording is even considered.
+
+        Fails closed on every one: unreadable/missing text on any check
+        answers `False`, never `True` -- "cannot tell whether this lane
+        produced something" must leave the lane alone (this issue's own
+        hard constraint), not guess it into a failure it may not deserve.
+        """
+        final_text = self._lane_log_final_result_text(task_id)
+        if not final_text or not _WAITING_ON_BACKGROUND_RE.search(final_text):
+            return False
+        result_file = self.ledger.root / "incoming" / f"{task_id}.md"
+        if result_file.exists():
+            return False
+        if self._lane_log_pr_url(task_id) is not None:
+            return False
+        if self._lane_log_comment_url(task_id) is not None:
+            return False
+        return True
+
+    def _lane_log_pid(self, task_id):
+        """agent-supervisor#488: the pid `ClaudePrintAdapter.assign_task`
+        recorded in this lane's own transport log at dispatch time, or
+        `None` if the log is missing, unreadable, or never got that far
+        (no `--- dispatched detached: ... ---` line). `None` is NOT the
+        same claim as "no pid" -- it means this sweep has no way to check
+        liveness at all, and callers must treat it as indeterminate, not
+        as a stand-in for either alive or dead. When a lane-log records
+        more than one dispatch (a rare retried send), the LAST one is the
+        pid actually running now.
+        """
+        log_path = self.ledger.root / "lane-logs" / f"{task_id}.log"
+        try:
+            text = log_path.read_text(errors="replace")
+        except OSError:
+            return None
+        matches = _DISPATCHED_PID_RE.findall(text)
+        return int(matches[-1]) if matches else None
+
+    def _pid_confirmed_dead(self, task):
+        """agent-supervisor#692: is this row a `claude-print` lane whose
+        dispatch-time pid (`_lane_log_pid`, #488) has DEMONSTRABLY exited --
+        the one signal strong enough to terminate a row immediately,
+        without waiting out `stale_after`.
+
+        Three of the four lanes #692 measured dead (as679, as680, at167)
+        ended their OWN turn -- `claude -p` exited normally, on purpose,
+        because the brief it was given asked it to wait for an asynchronous
+        callback nothing in this estate ever sends. The pid this sweep can
+        already read from the lane-log (`ClaudePrintAdapter.assign_task`
+        writes it at spawn, before the row even reaches `delivered`) is not
+        an absence to wait out like `updated_at` staleness is -- it is a
+        positive fact, available from the very first sweep tick after the
+        process exits. A row this method returns `True` for is, by
+        construction, still `delivered` or `accepted` (the caller only
+        reaches here via `list_delivered_open_tasks`/`list_accepted_open_
+        tasks`), so there is no race with a genuine late completion: if the
+        process that would have called `complete()` has already exited and
+        the row is still open, it never will.
+
+        Returns `False` for every case this fast path does not cover --
+        not a claude-print lane, no lane record, no pid ever logged, or a
+        pid still alive. `False` here is NOT a claim the row is alive or
+        indeterminate; it only means "this fast path does not apply, fall
+        back to the wall-clock dwell + `_liveness_blocks_failure` gate a
+        `pi-rpc` row (or a claude-print row `_lane_log_pid` cannot read)
+        still needs."
+        """
+        lane = self.ledger.get_lane(task["lane"])
+        if lane is None or lane.get("transport") != "claude-print":
+            return False
+        pid = self._lane_log_pid(task["id"])
+        if pid is None:
+            return False
+        return not pid_is_alive(pid)
+
+    def _liveness_blocks_failure(self, task, *, now, report):
+        """agent-supervisor#488: the gate `_sweep_nonobservable`/
+        `_sweep_nonobservable_accepted` both run before writing a failure
+        stamp. Returns `True` (and records why in `report`) when the
+        subprocess this row's lane-log named is demonstrably still alive,
+        OR when a `claude-print` lane's liveness cannot be determined at
+        all -- the safe answer in both cases is to leave the row alone
+        rather than guess, because stamping a LIVE task failed destroys
+        work (see this module's top-level docstring); only a DEMONSTRABLY
+        dead pid, or a lane transport with no live subprocess to protect in
+        the first place, lets the caller proceed to `_lane_log_pr_url` and,
+        failing that, the failure write.
+
+        Scoped to `transport == 'claude-print'` deliberately: that is the
+        ONE transport whose `assign_task` starts a detached, genuinely
+        long-running subprocess and returns before it finishes (`adapter.py`'s
+        own comment: "the child is in its own process group, so it survives
+        this process exiting"). A `pi-rpc` lane's transport is terminated
+        before `assign_task` ever returns (`PiRPCAdapter`'s own docstring:
+        "the resulting transport is always terminated before returning"), so
+        by the time this sweep's `stale_after` dwell has even elapsed there
+        is no live process left to protect -- treating an unreadable pid as
+        indeterminate for THAT transport would just resurrect the #374/#414
+        stuck-forever shape this module's own fix history already closed.
+        A lane this method cannot even look up (`get_lane` returns `None`)
+        is treated the same as non-`claude-print`, for the same reason
+        `_parse_lane` already fails closed elsewhere in this module: an
+        absent record is not evidence of a live claude-print subprocess.
+        """
+        lane = self.ledger.get_lane(task["lane"])
+        if lane is None or lane.get("transport") != "claude-print":
+            return False
+        pid = self._lane_log_pid(task["id"])
+        if pid is None:
+            report["unresolved"].append(task["id"])
+            report["liveness_indeterminate"].append(task["id"])
+            return True
+        if pid_is_alive(pid):
+            report["unresolved"].append(task["id"])
+            report["liveness_alive"].append(task["id"])
+            return True
+        return False
+
+    def _complete_from_evidence(self, task, *, pr_url, now, report, evidence_description=None):
+        """agent-supervisor#401: the lane never signalled, but its own
+        lane-log names a PR it opened -- cheap evidence available at stamp
+        time that settles what neither `_fail_unaccepted` nor
+        `_sweep_nonobservable` can observe directly. Completes the task
+        (via the ordinary `complete()` path, so the note lands at the
+        canonical `<task_id>.md`) instead of stamping a failure the
+        evidence already contradicts.
+
+        `evidence_description` overrides the default "its lane-log names"
+        phrasing below -- agent-supervisor#774 half B's reviewer-task path
+        (`_reviewer_task_merge_evidence`) settles this from a REVIEW's own
+        merge/verdict evidence, never a lane-log, and the note text must
+        say so rather than claim a lane-log match that never happened.
+        """
+        if evidence_description is None:
+            evidence_description = f"its lane-log names {pr_url}"
+            evidence_kind = "lane-log PR evidence"
+            issue_ref = "agent-supervisor#401"
+        else:
+            evidence_kind = "review/merge evidence"
+            issue_ref = "agent-supervisor#774"
+        note = (
+            f"reconcile-lane-completions: {task['lane']} never signalled completion, "
+            f"but {evidence_description} as of {int(now)} -- cheap evidence "
+            "available at stamp time settles this before a failure is stamped: "
+            f"auto-completed from {evidence_kind}, not from an observed pane "
+            f"({issue_ref})"
+        ).encode("utf-8")
+        allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
+        try:
+            self.ledger.complete(task["id"], note, pane_nonce=task["pane_nonce"], allow_claim=allow_claim)
+        except Exception as error:
+            report["errors"].append({"task": task["id"], "error": str(error)})
+            return
+        report["completed"].append(task["id"])
+        report["completed_from_evidence"].append(task["id"])
+
+    def _fail_unaccepted(self, task, *, session, idle_seconds, now, report, via_fallback=False):
+        """agent-supervisor#193: observed free/idle with no `accepted_at` is
+        not a completion -- see `sweep`'s own docstring. Terminated `failed`
+        instead, loud about exactly why (#118's lesson, same as
+        `_complete_observed`'s note), so a human reading the report or
+        `watchdog.status` can tell this apart from an ordinary completion at
+        a glance, not just from the ledger's status column.
+        """
+        pr_url = self._lane_log_pr_url(task["id"])
+        if pr_url is not None:
+            self._complete_from_evidence(task, pr_url=pr_url, now=now, report=report)
+            return
+        fallback_note = (
+            f" (recorded lane's session was gone; resolved via its pane_id to "
+            f"{session!r}, current as of {int(now)} -- agent-supervisor#779)"
+            if via_fallback
+            else ""
+        )
+        note = (
+            f"reconcile-lane-completions: {task['lane']} observed free for "
+            f"{int(idle_seconds)}s (>= {self.idle_after}s) as of {int(now)} -- "
+            "never signalled completion AND no accepted_at recorded (this dispatch "
+            "was never confirmed to land); no completion signal arrived, which is "
+            "not the same claim as the work having failed -- terminated failed only "
+            f"to free the lane for redispatch (agent-supervisor#193, agent-supervisor#401){fallback_note}"
+        ).encode("utf-8")
+        allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
+        try:
+            self.ledger.fail_unaccepted(task["id"], note, pane_nonce=task["pane_nonce"], allow_claim=allow_claim)
+        except Exception as error:
+            report["errors"].append({"task": task["id"], "error": str(error)})
+            return
+        report["failed_unaccepted"].append(task["id"])
+
+    def _sweep_nonobservable(self, task, *, now, report):
+        """agent-supervisor#374: a lane id `_parse_lane` cannot read as
+        `<session>:<index>` (claude-print, pi-rpc) has no pane at all, so the
+        tmux path above can never reach it. Resolve on wall-clock dwell
+        since the row's own `updated_at` instead -- an absence of signal,
+        not an observation, so on its own this only ever moves a stale row
+        to `failed` (`fail_stale_delivery`), never asserts `complete`. A row
+        younger than `stale_after` is left `unresolved`, exactly like a
+        session `lanes.sh` could not read.
+
+        agent-supervisor#401: "on its own" is the qualifier that changed --
+        101 of the 133 wrong results this issue measured came through this
+        exact path (every claude-print/pi-rpc lane routes here, and it is
+        the ONLY sweep half with nothing but silence to go on). Before
+        stamping failure from that silence, `_lane_log_pr_url` checks
+        whether the lane's own transport log already names a PR it opened;
+        if so, `_complete_from_evidence` completes the task from THAT
+        instead -- a positive fact, not an absence.
+
+        agent-supervisor#692: "nothing but silence" no longer describes a
+        `claude-print` row whose dispatch-time pid has demonstrably exited
+        -- `_pid_confirmed_dead` is a positive fact, not an absence, so it
+        bypasses `stale_after` entirely rather than waiting the full dwell
+        to reach the same conclusion a much-cheaper check already settled.
+        Four lanes sat `delivered`/`accepted` for 110-227 minutes before
+        anything noticed; this is what turns that into a same-tick signal.
+        """
+        updated_at = task.get("updated_at")
+        if not isinstance(updated_at, (int, float)):
+            report["unresolved"].append(task["id"])
+            return
+        age_seconds = now - updated_at
+        died_without_completing = self._pid_confirmed_dead(task)
+        if not died_without_completing:
+            if age_seconds < self.stale_after:
+                report["unresolved"].append(task["id"])
+                return
+            # agent-supervisor#488: a demonstrably alive (or unknowable) pid
+            # blocks this failure stamp outright, before any evidence check
+            # -- see `_liveness_blocks_failure`'s own docstring for why both
+            # directions resolve to "leave the row alone".
+            if self._liveness_blocks_failure(task, now=now, report=report):
+                return
+        pr_url = self._lane_log_pr_url(task["id"])
+        if pr_url is not None:
+            self._complete_from_evidence(task, pr_url=pr_url, now=now, report=report)
+            return
+        # agent-estate#841: checked here, after every existing gate above has
+        # already decided this task is failing and after the PR-evidence
+        # check just above has already cleared it of having shipped -- this
+        # only ever chooses which note/bucket a failure THIS sweep already
+        # decided on gets written with, never whether one is written (see
+        # `_died_waiting_on_background`'s own docstring for the full
+        # conjunction).
+        died_waiting_on_background = self._died_waiting_on_background(task["id"])
+        if died_waiting_on_background:
+            note = (
+                f"reconcile-lane-completions: {task['lane']} died_waiting_on_background -- "
+                f"its own final result text describes waiting on a backgrounded job to "
+                f"resume it, but it wrote no result file and neither opened a PR nor posted "
+                f"a comment; nothing in this estate resumes a claude-print/pi-rpc lane, so "
+                f"the work it did is thrown away with it as of {int(now)}, "
+                f"{int(age_seconds)}s after its last update -- terminated failed only to "
+                "free the lane for redispatch (agent-estate#841)"
+            ).encode("utf-8")
+        elif died_without_completing:
+            note = (
+                f"reconcile-lane-completions: {task['lane']} died_without_completing -- "
+                f"its dispatch-time pid has demonstrably exited as of {int(now)}, "
+                f"{int(age_seconds)}s after its last update; a claude-print lane gets no "
+                "automatic resume, so an exited process on a still-open task is a "
+                "terminal fact on its own, not something worth a stale_after dwell to "
+                "confirm -- terminated failed only to free the lane for redispatch "
+                "(agent-supervisor#692)"
+            ).encode("utf-8")
+        else:
+            note = (
+                f"reconcile-lane-completions: {task['lane']} has no observable pane "
+                f"(non-tmux lane id) and has sat at status=delivered for "
+                f"{int(age_seconds)}s (>= {self.stale_after}s) as of {int(now)} -- "
+                "no completion signal arrived, and this transport has no pane to poll "
+                "for one; that is not the same claim as the work having failed, only "
+                "that nothing was observed -- terminated failed only to free the lane "
+                "for redispatch (agent-supervisor#374, agent-supervisor#401)"
+            ).encode("utf-8")
+        allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
+        try:
+            self.ledger.fail_stale_delivery(task["id"], note, pane_nonce=task["pane_nonce"], allow_claim=allow_claim)
+        except Exception as error:
+            report["errors"].append({"task": task["id"], "error": str(error)})
+            return
+        report["failed_stale_delivery"].append(task["id"])
+        if died_without_completing:
+            report["died_without_completing"].append(task["id"])
+        if died_waiting_on_background:
+            report["died_waiting_on_background"].append(task["id"])
+
+    def _sweep_nonobservable_accepted(self, task, *, now, report):
+        """agent-supervisor#414: `_sweep_nonobservable`'s counterpart for a
+        no-pane task already moved to `status='accepted'` -- same dwell
+        gate against `updated_at`, same `stale_after` threshold, but the
+        source status this method's caller has already filtered for is
+        `accepted`, not `delivered`, so the terminal write is
+        `fail_stale_acceptance`, the one Ledger method eligible for it.
+
+        agent-supervisor#401 (found late, in review of the #401 fix itself):
+        this path had nothing but silence to reason from too -- a
+        claude-print/pi-rpc lane that got as far as `accept()`, shipped a PR
+        that MERGED (named in its own lane-log), then went quiet, was still
+        stamped "failed, not completed" with zero evidence check. Same
+        `_lane_log_pr_url` check as `_fail_unaccepted`/`_sweep_nonobservable`,
+        applied here for the same reason.
+
+        agent-supervisor#692: same immediate-pid-death fast path as
+        `_sweep_nonobservable` -- see that method's own docstring for why
+        `_pid_confirmed_dead` bypasses `stale_after` rather than waiting it
+        out. `as679-lease-anchor` and `as680-lane-completion`, two of the
+        four lanes #692 measured, had both reached `accepted` before ending
+        their own turn to wait on a callback nothing sends; this is the
+        path that stamps them, same tick their process actually exited.
+        """
+        updated_at = task.get("updated_at")
+        if not isinstance(updated_at, (int, float)):
+            report["unresolved"].append(task["id"])
+            return
+        age_seconds = now - updated_at
+        died_without_completing = self._pid_confirmed_dead(task)
+        if not died_without_completing:
+            if age_seconds < self.stale_after:
+                report["unresolved"].append(task["id"])
+                return
+            # agent-supervisor#488: same liveness gate as
+            # `_sweep_nonobservable` -- the measured case (`as473-as473x`)
+            # reached exactly this method via `status='accepted'`, stamped
+            # `failed` while its `claude -p` subprocess was still alive and
+            # accumulating CPU an hour later.
+            if self._liveness_blocks_failure(task, now=now, report=report):
+                return
+        pr_url = self._lane_log_pr_url(task["id"])
+        if pr_url is not None:
+            self._complete_from_evidence(task, pr_url=pr_url, now=now, report=report)
+            return
+        # agent-estate#841: same relabeling-only check as
+        # `_sweep_nonobservable`'s own -- see that method's comment and
+        # `_died_waiting_on_background`'s docstring for the full reasoning.
+        died_waiting_on_background = self._died_waiting_on_background(task["id"])
+        if died_waiting_on_background:
+            note = (
+                f"reconcile-lane-completions: {task['lane']} died_waiting_on_background -- "
+                f"its own final result text describes waiting on a backgrounded job to "
+                f"resume it, but it wrote no result file and neither opened a PR nor posted "
+                f"a comment; nothing in this estate resumes a claude-print/pi-rpc lane, so "
+                f"the work it did is thrown away with it as of {int(now)}, "
+                f"{int(age_seconds)}s after its last update -- terminated failed only to "
+                "free the lane for redispatch (agent-estate#841)"
+            ).encode("utf-8")
+        elif died_without_completing:
+            note = (
+                f"reconcile-lane-completions: {task['lane']} died_without_completing -- "
+                f"its dispatch-time pid has demonstrably exited as of {int(now)}, "
+                f"{int(age_seconds)}s after its last update; a claude-print lane gets no "
+                "automatic resume, so an exited process on a still-open task is a "
+                "terminal fact on its own, not something worth a stale_after dwell to "
+                "confirm -- terminated failed only to free the lane for redispatch "
+                "(agent-supervisor#692)"
+            ).encode("utf-8")
+        else:
+            note = (
+                f"reconcile-lane-completions: {task['lane']} has no observable pane "
+                f"(non-tmux lane id) and has sat at status=accepted for "
+                f"{int(age_seconds)}s (>= {self.stale_after}s) as of {int(now)} -- "
+                "no completion signal arrived, and this transport has no pane to poll "
+                "for one; that is not the same claim as the work having failed, only "
+                "that nothing was observed -- terminated failed only to free the lane "
+                "for redispatch (agent-supervisor#414, agent-supervisor#401)"
+            ).encode("utf-8")
+        allow_claim = task["id"].startswith(CLAIM_TASK_PREFIX)
+        try:
+            self.ledger.fail_stale_acceptance(
+                task["id"], note, pane_nonce=task["pane_nonce"], allow_claim=allow_claim
+            )
+        except Exception as error:
+            report["errors"].append({"task": task["id"], "error": str(error)})
+            return
+        report["failed_stale_acceptance"].append(task["id"])
+        if died_without_completing:
+            report["died_without_completing"].append(task["id"])
+        if died_waiting_on_background:
+            report["died_waiting_on_background"].append(task["id"])

@@ -1,0 +1,1360 @@
+"""Verdict-source adapter: is a PR reviewed, and if so, approved or rejected?
+
+`digest.sh` used to answer this by regex-matching the prose of a PR's last
+comment (agent-dotfiles#203). That read "I cannot approve this, it is
+unsafe." as an approval, and a genuine `--request-changes` review as nothing
+at all -- an instrument that inverts its answer is worse than one that has
+none. This module replaces it with a real seam: `digest.sh` calls one CLI
+command and prints whatever comes back, with no knowledge of where the
+answer came from.
+
+Two sources ship today, per Jon's "adapters, not choices" directive:
+
+- `GithubReviewVerdictSource` reads GitHub's own review state
+  (`gh pr view --json reviews`). Self-approval is refused by GitHub for a
+  single-identity estate, but self `--request-changes` is not -- so this
+  source already reports real rejections today and starts reporting real
+  approvals the moment a second identity reviews. No code change needed
+  here for that; only a distinct reviewer login.
+- `LedgerVerdictSource` reads a verdict a reviewing lane recorded directly
+  in the supervisor ledger (`Ledger.record_pr_verdict`) -- the estate's own
+  record of what it decided, independent of whether GitHub can represent
+  it ("tmux is not a database": an authored fact belongs in the ledger).
+
+Adding a third source is a new class plus one `SOURCES` entry. Removing one
+is deleting its class and entry -- `digest.sh` and the CLI contract are
+unaffected either way.
+
+Every source fails CLOSED: a source that cannot read its backing store
+returns "unknown", never "approved" or "none". `main()` wraps the whole
+resolution in its own try/except for the same reason -- a source that raises
+must still produce a well-formed "unknown" verdict, not a crashed process a
+caller might mistake for "no verdict recorded".
+
+A moved head is not always a content change (agent-dotfiles#226). #218 made
+every source refuse to answer for a head it never saw -- correct, but it
+cannot tell a content-preserving rebase (every SHA on the branch changes by
+construction) from a push that actually changed something, and this estate
+rebases constantly. `_content_unchanged_since()` narrows that.
+
+WHAT IT COMPARES, exactly -- a figure states its instrument, and the first
+attempt at this got the instrument wrong in a way that only showed up
+against the real API. For each of the two heads it takes the commits that
+head introduces over `merge-base(<the PR's base branch>, head)`, runs each
+commit's own diff through `git patch-id --stable`, and compares the two
+SETS of patch-ids. Anchoring both sides on the PR's base branch is the
+whole point: `merge-base(old, new)` is symmetric, so it resolves to the
+PRE-rebase base for both sides, and the "new" side then carries every
+commit `main` gained in between as if the branch had authored them. That
+made the comparison answer "did `main` stand still?" rather than "did the
+reviewed content change?" -- measured False on #226's own commits, the
+exact case it was written for. A per-commit patch-id set over each side's
+own merge-base is immune: a commit's patch does not change when `main`
+moves underneath it.
+
+PROMOTION RULE: the verdict is promoted when every patch-id now on the
+branch was among the patch-ids reviewed (current set is a subset of the
+reviewed set) -- i.e. nothing unreviewed has entered. Equal sets are the
+pure-rebase case. A PROPER subset also promotes, and this is a deliberate
+widening, named here because it is the one place this is looser than "any
+content change stays unknown": a rebase can drop a commit whose work
+`main` superseded, which is precisely what happened on #226's own example
+(`0538cc6` -> `69784bd` dropped a `known_references.json` refresh because
+upstream #210 replaced that file with `.txt`). The count of dropped
+patch-ids is stated in `detail`, so the reader sees it. Adding a commit or
+amending one is never promoted -- either puts a patch-id on the branch
+that no review covers.
+
+A `True` promotes the verdict and says so in `detail`; anything else
+(`False`, or `None` when the comparison itself could not be computed --
+network, an unreachable commit, a base branch that could not be read)
+leaves the verdict `unknown`, same as before this existed. It never
+auto-carries an approval past a change it cannot rule out.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import subprocess
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from core import Ledger, lane_or_task_row  # noqa: E402
+
+
+VERDICT_VALUES = ("none", "approved", "rejected", "unknown")
+
+
+class VerdictSource:
+    """One way of answering "what did we decide about this PR?".
+
+    `verdict()` must never raise -- catch everything internally and return
+    `{"verdict": "unknown", "detail": "..."}` instead, so a caller iterating
+    several sources never has one blow up the rest. `head_sha`, when given,
+    is the PR's CURRENT head (`headRefOid`) -- a source that recorded its
+    answer against an older commit must not answer for this one
+    (agent-dotfiles#218). `head_sha=None` means the caller has no head to
+    check against; a source then answers as it always has, unable to tell
+    a current verdict from a stale one.
+    """
+
+    def verdict(self, *, repo, number, head_sha=None):
+        raise NotImplementedError
+
+
+def _subprocess_runner(command):
+    return subprocess.run(command, check=True, capture_output=True, text=True, timeout=30).stdout
+
+
+def _default_patch_id(diff_text):
+    """Runs `diff_text` through the real `git patch-id --stable` and returns
+    its id, or None if no id could be computed (empty diff, git failure) --
+    None must read as "comparison inconclusive", never as "matches"."""
+    if not diff_text or not diff_text.strip():
+        return None
+    try:
+        result = subprocess.run(
+            ["git", "patch-id", "--stable"],
+            input=diff_text,
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=True,
+        )
+    except Exception:
+        return None
+    line = result.stdout.strip()
+    if not line:
+        return None
+    return line.split()[0]
+
+
+# A branch longer than this is not compared at all -- GitHub's compare and
+# commit-list endpoints paginate, and a silently truncated commit list would
+# understate what is on the branch, which is the one error direction that
+# could promote an unreviewed patch. Over the cap, fail closed.
+_MAX_BRANCH_COMMITS = 100
+
+
+def _fetch_base_ref(runner, repo, number):
+    """The PR's base branch (`main` here). Needed because the comparison must
+    anchor BOTH heads on their own merge-base with the base branch;
+    `merge-base(old, new)` is symmetric and therefore resolves to the
+    pre-rebase base for both, which is what made the first attempt at this
+    measure `main`'s movement instead of the branch's content
+    (agent-dotfiles#226). Returns None (never raises) so a caller fails
+    closed."""
+    try:
+        payload = json.loads(runner(["gh", "pr", "view", str(number), "--repo", repo, "--json", "baseRefName"]))
+    except Exception:
+        return None
+    base_ref = payload.get("baseRefName") if isinstance(payload, dict) else None
+    return base_ref if isinstance(base_ref, str) and base_ref else None
+
+
+def _fetch_branch_commits(runner, repo, base_ref, head_sha):
+    """The SHAs `head_sha` introduces over merge-base(base_ref, head_sha), via
+    GitHub's own three-dot compare. Because the base is the PR's base branch
+    and not the other head, what `main` gained underneath a rebase is
+    excluded rather than counted as the branch's own work. Returns None
+    (never raises) when the answer cannot be trusted -- fetch failure, an
+    empty range, a range over the cap, or a list that does not actually end
+    at `head_sha` (the shape a truncated page takes)."""
+    try:
+        raw = runner(["gh", "api", f"repos/{repo}/compare/{base_ref}...{head_sha}", "--jq", ".commits[].sha"])
+    except Exception:
+        return None
+    shas = [line.strip() for line in (raw or "").splitlines() if line.strip()]
+    if not shas or len(shas) > _MAX_BRANCH_COMMITS:
+        return None
+    tail = shas[-1]
+    if not (tail.startswith(head_sha) or head_sha.startswith(tail)):
+        return None
+    return shas
+
+
+def _fetch_patch_ids(runner, patch_id_fn, repo, shas):
+    """The set of `git patch-id --stable` ids for `shas`, each commit's own
+    diff fetched on its own. None if any one of them could not be reduced to
+    an id -- a partial set would understate the branch."""
+    ids = set()
+    for sha in shas:
+        try:
+            diff = runner(["gh", "api", "-H", "Accept: application/vnd.github.v3.diff", f"repos/{repo}/commits/{sha}"])
+        except Exception:
+            return None
+        patch_id = patch_id_fn(diff)
+        if patch_id is None:
+            return None
+        ids.add(patch_id)
+    return ids or None
+
+
+def _content_unchanged_since(*, runner, patch_id_fn, repo, number, old_sha, new_sha):
+    """Did anything the reviewer did not see get onto this branch?
+
+    Returns `(unchanged, basis)`. `unchanged` is True when every patch-id the
+    current head introduces was also introduced by the reviewed head, False
+    when at least one was not, and None when the comparison could not be
+    computed at all -- which the caller MUST treat as "cannot confirm", never
+    as a match (agent-dotfiles#226). `basis` names the instrument and is
+    empty unless `unchanged` is True. See this module's docstring for what is
+    compared and why the subset rule, not equality, is the promotion test."""
+    if old_sha == new_sha:
+        return True, "same head"
+    base_ref = _fetch_base_ref(runner, repo, number)
+    if base_ref is None:
+        return None, ""
+    reviewed_shas = _fetch_branch_commits(runner, repo, base_ref, old_sha)
+    current_shas = _fetch_branch_commits(runner, repo, base_ref, new_sha)
+    if reviewed_shas is None or current_shas is None:
+        return None, ""
+    reviewed_ids = _fetch_patch_ids(runner, patch_id_fn, repo, reviewed_shas)
+    current_ids = _fetch_patch_ids(runner, patch_id_fn, repo, current_shas)
+    if reviewed_ids is None or current_ids is None:
+        return None, ""
+    instrument = f"git patch-id --stable per commit over merge-base({base_ref}, head)..head"
+    if current_ids - reviewed_ids:
+        return False, ""
+    dropped = reviewed_ids - current_ids
+    if dropped:
+        basis = (
+            f"every commit now on the branch was reviewed; {len(dropped)} of {len(reviewed_ids)} "
+            f"reviewed commit patch(es) no longer present, none added ({instrument})"
+        )
+    else:
+        basis = f"reviewed content unchanged, identical set of {len(current_ids)} commit patch(es) ({instrument})"
+    return True, basis
+
+
+# agent-supervisor#192: a verdict line is recognised on its CONTENT, not its
+# emphasis. `**Verdict:` alone missed every reviewer who wrote plain
+# `Verdict: APPROVE` or the heading form `## Verdict: APPROVE` -- three
+# approved, CI-green PRs (#169, #176, #191) sat blocked because the bold
+# form happened to be the only one #53 anchored on. This matches, per LINE
+# (not "body starts with"; a verdict line often follows prose or a rationale
+# -- #169's REQUEST CHANGES sits after other text), an optional `#`..`######`
+# heading marker, an optional `**`/`*` opening emphasis, the literal word
+# "Verdict" in any case, then `:`. Liberal in what counts as the LABEL;
+# strict about the DECISION text after it -- see `_classify_decision_text`
+# for what "strict" means (agent-supervisor#198).
+#
+# agent-supervisor#213 (this widening): the LABEL used to require "Verdict:"
+# to sit immediately after the optional heading/emphasis markers -- so a
+# reviewer who wrote a lead-in before the label on the same line ("##
+# Independent review verdict: APPROVE", "## Independent review of #333 --
+# verdict: APPROVE") never matched at all, even though "verdict:" is right
+# there in the line. The `.*?` prefix allows arbitrary lead-in text before
+# the label; it stays a fail-closed match because "verdict" mentioned in
+# prose WITHOUT an immediately-following colon (agent-supervisor#53's guard
+# 4, "I think the verdict here should be REQUEST CHANGES") still does not
+# contain the literal substring "verdict:" and so still does not match.
+#
+# agent-supervisor#540: that same `.*?` lead-in tolerance let a REVIEW
+# COMMENT DISCUSSING THE GATE ITSELF shadow a real verdict elsewhere on the
+# same PR -- "2. **Gate accepts an independent `Verdict:` trailer as a
+# second source of authorship truth" matched this regex (the literal
+# substring "verdict:" is right there, immediately followed by a colon,
+# exactly what #213 asks this regex to accept), producing a "decision text
+# not recognised" refusal for a line that was never a verdict attempt at
+# all -- it was prose QUOTING the trailer's own name inside inline code
+# span backticks, mid-sentence, in a numbered list item about how the gate
+# ought to work. The label itself is now a captured group (group 1) so
+# `_scan_verdict_lines` can check whether THAT SPAN specifically -- not the
+# whole line -- falls inside a pair of single backticks; see
+# `_label_inside_inline_code` for why this is checked on the label alone
+# and not by stripping every backtick span from the line (a genuine
+# decision VALUE wrapped in backticks, e.g. "Verdict: `APPROVE`", must keep
+# matching -- `_normalise_decision_text` already strips that wrapping
+# itself, unaffected by this change since it only ever sees text AFTER the
+# label).
+_VERDICT_LINE_RE = re.compile(r"^#{0,6}\s*.*?\*{0,2}(verdict:)\**\s*(.*)$", re.IGNORECASE)
+
+
+_INLINE_CODE_SPAN_RE = re.compile(r"`[^`\n]*`")
+
+
+def _label_inside_inline_code(line, label_start, label_end):
+    """True when `line[label_start:label_end]` -- the literal "verdict:"
+    text a `_VERDICT_LINE_RE` match found -- sits inside a single-backtick
+    inline-code span on that same line (agent-supervisor#540). A FENCED
+    (triple-backtick) code block is already excluded before any line
+    reaches here (`_scan_verdict_lines`'s own `in_fence` tracking); this
+    catches the narrower case a fence can't: a single line of ordinary
+    prose that quotes the trailer's own syntax inline, e.g. `` `Verdict:`
+    `` inside a sentence. Only the LABEL's own span is checked, not the
+    whole line -- a decision value wrapped in backticks after a real,
+    unquoted label ("Verdict: `APPROVE`") must still match; stripping
+    every inline-code span from the line before matching would silently
+    eat that value instead, which `_normalise_decision_text` already
+    handles correctly on its own and this function must not interfere
+    with."""
+    for span in _INLINE_CODE_SPAN_RE.finditer(line):
+        if span.start() <= label_start and label_end <= span.end():
+            return True
+    return False
+
+
+# agent-supervisor#198: the decision text used to be matched with `in` --
+# a substring test -- which read `Verdict: NOT APPROVED` and `Verdict:
+# DISAPPROVE` as `approved`, because both strings contain "APPROVE". Every
+# other ambiguity in this module refuses; this one instead picked the
+# single most dangerous answer, and only in that direction: `REQUEST
+# CHANGES` was checked first so a body naming both phrases correctly
+# refused, but any rejection phrased WITHOUT those two exact words that
+# happened to contain "APPROVE" as a substring landed on approve. The
+# failure was one-directional and it always favoured merging.
+#
+# The fix is a whole-token match against a deliberately short, explicit
+# list, decided here rather than grown ad hoc:
+#   approved         -- APPROVE, APPROVED
+#   rejected         -- REQUEST CHANGES, REQUEST-CHANGES, REJECTED
+# Anything else -- including a recognised word wrapped in more words, e.g.
+# "APPROVED WITH CHANGES" (a real thing reviewers write, and it is neither
+# an approval nor a rejection) -- is unrecognised. A negation anywhere in
+# the text (`NOT`, `DIS`, `NO`, `N'T`) is also unrecognised outright, ahead
+# of the token match, even though whole-token matching alone already
+# defeats the two measured cases (`NOT APPROVED` and `DISAPPROVE` are each
+# a single token that is not in either list) -- named explicitly here
+# because this module does not attempt sentiment analysis on a negation
+# and must not be "improved" into trying to.
+#
+# agent-supervisor#475: two more REJECTED tokens, both measured verbatim off
+# real review comments (#472, skills#228) that a human reader would call an
+# unambiguous rejection and this module refused as unrecognised:
+#   "CHANGES REQUESTED"  -- title case, the natural reversed word order
+#                            ("changes were requested" reads more naturally
+#                            than "request changes" as a past-tense verdict).
+#   "CHANGES-REQUESTED"  -- the same reversed order, hyphenated. Reached via
+#                            `_normalise_decision_text` folding hyphens to
+#                            spaces before the token compare (see there), so
+#                            it never needs its own literal entry here --
+#                            named anyway so a reader auditing this set does
+#                            not have to go re-derive that path.
+# Whole-token matching keeps this safe the same way it already was:
+# "CHANGES REQUESTED" is still an exact-token entry, not a substring probe,
+# so nothing gets more lenient than case 1/2 specifically ask for.
+_NEGATION_MARKERS = ("NOT", "DIS", "NO", "N'T")
+_APPROVED_TOKENS = frozenset({"APPROVE", "APPROVED"})
+_REJECTED_TOKENS = frozenset({"REQUEST CHANGES", "REQUEST-CHANGES", "REJECTED", "CHANGES REQUESTED"})
+# agent-supervisor#639: a third decision, RETRACTED -- a reviewing lane
+# withdrawing a verdict IT posted, in the same complete-block shape a real
+# verdict takes (`Verdict: RETRACTED` / `Review-Lane:` / `Reviewed-SHA:`),
+# so a retraction gets #595's "must be a complete unbroken block"
+# discipline, the same as any real decision, rather than free-text prose
+# the gate would have to guess at. `_comment_verdict` is what acts on this
+# value -- see its docstring for how a RETRACTED comment supersedes an
+# earlier decision from the SAME review lane and nothing else.
+_RETRACTED_TOKENS = frozenset({"RETRACTED", "RETRACT"})
+
+
+def _classify_decision_text(decision_text):
+    """`decision_text` is already normalised (trailing markup/punctuation
+    stripped, whitespace collapsed, upper-cased) by the caller. Returns
+    "approved", "rejected", "retracted", or None -- None for anything not
+    an exact match to the lists above, including a negated one; a decision
+    text this module cannot classify must not be guessed at, the same
+    fail-closed stance the rest of this module takes."""
+    if any(marker in decision_text for marker in _NEGATION_MARKERS):
+        return None
+    if decision_text in _APPROVED_TOKENS:
+        return "approved"
+    if decision_text in _REJECTED_TOKENS:
+        return "rejected"
+    if decision_text in _RETRACTED_TOKENS:
+        return "retracted"
+    return None
+
+
+# agent-supervisor#213 (this widening): two more DECISION-text shapes real
+# reviewers wrote that the old normalisation mishandled:
+#
+# - bold AROUND the decision (`**APPROVE**`, not just a bold LABEL). The old
+#   code did `rest.find("**")` and cut there -- correct for `**Verdict:
+#   APPROVE**` (rest is `APPROVE**`, the first `**` it finds IS the
+#   closing pair), but wrong for `Verdict: **APPROVE**` (rest is
+#   `**APPROVE**`, the first `**` it finds is the OPENING pair, so it cut
+#   the whole decision down to an empty string -- measured on #331:
+#   `merge-pr: refused ... (decision text not recognised: "")`). Stripping
+#   `**`/`*`/`_`/`` ` `` from BOTH ends, rather than truncating at the first
+#   occurrence, handles emphasis wrapped around either side of the decision.
+# - a trailing action appended after the decision with `+` (`APPROVE +
+#   MERGE`, #321). This is intentionally narrower than the decision-token
+#   match itself staying a whole-token match (see `_classify_decision_text`)
+#   -- only the FIRST `+`-separated segment is classified, so "APPROVE +
+#   MERGE" resolves via its "APPROVE" segment while "APPROVED WITH CHANGES"
+#   (no `+`, a real qualifier reviewers write that changes what was
+#   decided, not a trailing instruction) is untouched by this and stays
+#   unrecognised exactly as before -- `+` reads as "and also do this",
+#   never as a qualifier on the decision word itself.
+def _normalise_decision_text(rest):
+    text = rest.strip()
+    # agent-estate#798 (found reviewing agent-estate#797): fold an INTRAWORD
+    # underscore -- one with an alphanumeric on both sides, like the `_` in
+    # `REQUEST_CHANGES` -- to a space before any emphasis handling runs.
+    # `REQUEST_CHANGES` is GitHub's own spelling for a request-changes
+    # review and will keep being written regardless of what any doc says
+    # (agent-supervisor#475's hyphen fold below exists for the same reason).
+    # This mirrors GFM itself: GitHub disables `_`-emphasis specifically for
+    # an intraword underscore (`snake_case` never renders italic on GitHub),
+    # so treating an intraword `_` as a literal character rather than an
+    # emphasis marker matches GitHub's own rendering, not just this parser's
+    # convenience. A BOUNDARY underscore (`_APPROVE_`, wrapping the whole
+    # decision) is deliberately left alone here -- it still hits the
+    # emphasis-stripping regexes below, unchanged from before this fix.
+    text = re.sub(r"(?<=[A-Za-z0-9])_(?=[A-Za-z0-9])", " ", text)
+    # Strip any OPENING emphasis wrapping the decision (`**APPROVE**` after
+    # a plain, unbolded label -- #331: the old code cut at the first `**`
+    # it found, which for this shape IS the opening pair, truncating the
+    # decision to "" before it was ever classified).
+    text = re.sub(r"^[*_`]+", "", text)
+    # Truncate at the first emphasis marker still remaining -- the closing
+    # half of a wrapped decision once its opening half is already gone
+    # above, OR (when the decision was never wrapped at all) a closing
+    # marker that belongs to the LABEL's own trailing content, e.g.
+    # `REQUEST CHANGES**  head SHA abc123`. Either way, nothing at or past
+    # it is part of the decision.
+    marker = re.search(r"[*_`]", text)
+    if marker:
+        text = text[: marker.start()]
+    text = text.strip().rstrip(".:;,!").strip()
+    # agent-supervisor#475: "changes-requested" (hyphenated) is the same
+    # decision as "changes requested" (spaced) -- fold before the whitespace
+    # collapse below so both land on one normalised form and need only one
+    # token in `_REJECTED_TOKENS`, not a hyphenated duplicate of every entry.
+    text = text.replace("-", " ")
+    text = re.sub(r"\s+", " ", text).upper()
+    if "+" in text:
+        text = text.split("+", 1)[0].strip()
+    return text
+
+
+def _scan_verdict_lines(body):
+    """The list of `(decision, decision_text)` for every LINE of `body` that
+    is the FIRST line of a genuine, unbroken three-line trailer block: a
+    `Verdict:`-matching line immediately followed by a `Review-Lane:` line
+    and then immediately by a `Reviewed-SHA:` line -- three consecutive raw
+    lines, nothing (not even a blank line) between them
+    (agent-supervisor#595).
+
+    `_VERDICT_LINE_RE` itself is a SUBSTRING match, NOT anchored to the
+    start of the line -- #213 deliberately allows arbitrary lead-in prose
+    before the label ("Final call -- Verdict: APPROVE", "## Independent
+    review of #333 -- verdict: APPROVE") so a verdict written after a
+    reviewer's own reasoning still matches. That looseness is exactly what
+    let ordinary prose manufacture a fake verdict: #595 measured a
+    stale-SHA discussion ("A stale `Reviewed-SHA` does not automatically
+    sink a verdict: `verdict.py` can promote") and a sentence wrapped
+    mid-line ("...covered is the verdict:"), each matching the label with
+    nothing genuine following at all, and #595's own issue body named a
+    fourth shape -- a bold-wrapped mid-sentence QUOTE, `**Verdict:
+    APPROVE**` (e.g. `I saw "**Verdict: APPROVE**" in the log`), that reads
+    as a real approval under a bare label match even though it is plainly a
+    quotation. A lone `Verdict:`-shaped line was never enough on its own to
+    answer "is this a real decision" -- what makes a match OPERATIVE, per
+    #595's decision, is being the first line of a complete three-line
+    block, not the label match by itself. This function still does not
+    narrow `_VERDICT_LINE_RE` -- narrowing it to line-start was considered
+    and disproven earlier in #595's own thread: it breaks the lead-in-prose
+    shape above and #544's bold-label-outside-decision shape (`**Verdict:**
+    APPROVE`).
+
+    agent-supervisor#609: fenced code blocks (```...```) are NO LONGER
+    excluded from this scan -- a genuinely operative trailer block that
+    happens to be wrapped in a fence for formatting (PR #608's own comment)
+    was previously invisible here. Once "does a complete three-line block
+    exist" is the discriminator, being inside a fence stops being a safe
+    universal signal for "this is just a quotation" -- a bare fence marker
+    line does not itself match any of the three trailer regexes, so it
+    still naturally breaks the three-line chain the one time it actually
+    matters (a fence marker landing INSIDE what would otherwise be a
+    block). Named risk, accepted, not attempted here (per #595's own
+    decision comment): a comment that deliberately quotes someone else's
+    genuine three-line trailer for illustration will, under this rule,
+    itself parse as a fresh operative verdict.
+
+    A markdown blockquote line (starts with `>`, GitHub's own "quote
+    reply" shape) is still excluded from consideration entirely (#192) --
+    a reply quoting an EARLIER comment's verdict must not be read as this
+    comment restating it; that exclusion was never named as something to
+    remove.
+
+    `decision_text` is normalised (markup/punctuation stripped, whitespace
+    collapsed, upper-cased) before being classified by
+    `_classify_decision_text`, and is returned RAW-normalised alongside the
+    classification either way -- callers that need to name an unrecognised
+    decision in a refusal reason (agent-supervisor#198) get the text to
+    name without re-deriving it. `decision` is None for a qualifying line
+    whose text `_classify_decision_text` does not recognise; the caller
+    decides what an unrecognised or absent line means, this function only
+    reports what is on each qualifying line.
+
+    agent-supervisor#475's "empty `Verdict:` label, standalone decision
+    word later in the comment" fallback is RETIRED by this change, not
+    merely left unchanged -- see the comment at `_bare_decision_line`'s
+    (former) call site below for why that shape can never satisfy the
+    three-line requirement, and `BareDecisionLineTests` in
+    `tests/supervisor/test_verdict.py` for the updated coverage.
+
+    Shared by `_parse_verdict_comment` (one comment, may reference several
+    lines) and `GithubReviewVerdictSource._comment_verdict` (several
+    comments, needs the raw text of an unrecognised LAST verdict line)."""
+    lines = []
+    for raw_line in (body or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith(">"):
+            continue
+        lines.append(line)
+
+    results = []
+    for index, line in enumerate(lines):
+        match = _VERDICT_LINE_RE.match(line)
+        if not match:
+            continue
+        # agent-supervisor#540: a label whose own "verdict:" text sits
+        # inside a pair of single backticks is prose QUOTING the trailer's
+        # syntax, not a real label -- see `_label_inside_inline_code`'s own
+        # doc comment for the shape this excludes and why only the label's
+        # span (group 1), not the whole line, is checked.
+        if _label_inside_inline_code(line, match.start(1), match.end(1)):
+            continue
+        # agent-supervisor#595: this match is OPERATIVE only when it is the
+        # first line of an unbroken three-line block -- immediately
+        # followed by a `Review-Lane:` line and then immediately by a
+        # `Reviewed-SHA:` line. A label with nothing genuine following it
+        # (the #553/#531/#595-issue-body poisoning shapes) is skipped, not
+        # collected -- see this function's own docstring for the incidents
+        # this closes. agent-supervisor#475's empty-label/bare-decision-word
+        # fallback (`_bare_decision_line`) used to be wired in here for a
+        # label found with no decision text on its own line; it is not
+        # called from here anymore, on purpose -- that shape (an empty
+        # `Verdict:` label followed by prose, then a standalone decision
+        # word much later) never has `Review-Lane:`/`Reviewed-SHA:`
+        # immediately after the empty label, so it structurally can never
+        # satisfy the requirement above. `_bare_decision_line` itself is
+        # left defined only because its own pure-function unit tests still
+        # exercise it directly.
+        if index + 2 >= len(lines):
+            continue
+        if not _REVIEW_LANE_LINE_RE.match(lines[index + 1]):
+            continue
+        if not _REVIEWED_SHA_RE.match(lines[index + 2]):
+            continue
+        decision_text = _normalise_decision_text(match.group(2))
+        results.append((_classify_decision_text(decision_text), decision_text))
+    return results
+
+
+def _unblocked_verdict_labels(body):
+    """The write-time mirror of agent-supervisor#595's read-time fix. Every
+    line matching `_VERDICT_LINE_RE` that is NOT the first line of a
+    complete, unbroken `Verdict:`/`Review-Lane:`/`Reviewed-SHA:` block,
+    returned raw (stripped) -- an empty list means every `Verdict:`-shaped
+    line in `body` is already part of a genuine block.
+
+    Deliberately ignores `_label_inside_inline_code` -- `_scan_verdict_lines`
+    excludes a label inside single backticks because that shape is very
+    often prose QUOTING the trailer's own syntax when it is being READ back
+    off GitHub after the fact. At WRITE time, the body being checked is the
+    one this repo's own `post-verdict.sh` is about to post; if it types
+    `` `Verdict: APPROVE` `` with backticks around the label but no real
+    trailer following, that is far more likely to be a mistake (a stray
+    backtick, a half-finished draft) than a deliberate quotation of
+    something else's syntax, so this check does not give it the same pass.
+
+    Used by `post-verdict.sh`'s embedded lint to refuse posting a bare
+    `Verdict:` label before it goes out -- cheap defense-in-depth for
+    agent-authored comments specifically. This does not, and is not meant
+    to, cover every posting path (a human typing directly into the GitHub
+    web UI, or a codex lane posting via its own `gh pr comment` outside
+    this script) -- see `post-verdict.sh`'s own header comment for that
+    scope."""
+    lines = []
+    for raw_line in (body or "").splitlines():
+        line = raw_line.strip()
+        if line.startswith(">"):
+            continue
+        lines.append(line)
+
+    offenders = []
+    for index, line in enumerate(lines):
+        if not _VERDICT_LINE_RE.match(line):
+            continue
+        complete = (
+            index + 2 < len(lines)
+            and bool(_REVIEW_LANE_LINE_RE.match(lines[index + 1]))
+            and bool(_REVIEWED_SHA_RE.match(lines[index + 2]))
+        )
+        if not complete:
+            offenders.append(line)
+    return offenders
+
+
+def _bare_decision_line(lines):
+    """Among `lines` (already quote-filtered), the one standalone decision --
+    a line with no `Verdict:` label of its own that, run through the same
+    normaliser a label's decision text gets, is exactly one of the known
+    APPROVE/REQUEST-CHANGES tokens and nothing else. Returns `(decision,
+    decision_text)`, or None when no such line exists or more than one
+    DISTINCT decision is found among candidate lines -- the same
+    "disagreement refuses, never guesses" rule `_parse_verdict_comment`
+    already applies across multiple labelled lines (agent-supervisor#196),
+    applied here across multiple bare ones.
+
+    agent-supervisor#595: `_scan_verdict_lines` no longer calls this
+    function. It used to fire for a `Verdict:` label found with empty text
+    (agent-supervisor#475 case 3), scanning the rest of the comment for a
+    standalone decision word to adopt. That shape is structurally
+    incompatible with #595's three-consecutive-line requirement -- an empty
+    `Verdict:` label followed immediately by `Review-Lane:`/`Reviewed-SHA:`
+    lines would have nothing FOR this function to find (there is no
+    trailing prose to search), and an empty label followed by prose (the
+    #475 shape this function was written for) never has a genuine trailer
+    pair immediately after it either. #475's case 3 is superseded, not
+    ported forward. `_bare_decision_line` is left defined, unwired, only
+    because its own pure-function behaviour (not the retired wiring) is
+    still directly unit-tested in `tests/supervisor/test_verdict.py`."""
+    found = {}
+    for line in lines:
+        if _VERDICT_LINE_RE.match(line):
+            continue
+        candidate = _normalise_decision_text(line)
+        decision = _classify_decision_text(candidate)
+        if decision is not None:
+            found[decision] = candidate
+    if len(found) == 1:
+        ((decision, text),) = found.items()
+        return decision, text
+    return None
+
+
+def _parse_verdict_comment(body):
+    """A comment counts as a verdict when `_scan_verdict_lines` finds at
+    least one qualifying line with a RECOGNISED decision (see
+    `_classify_decision_text`). "Qualifying", per agent-supervisor#595, means
+    the `Verdict:` label is the first line of a complete, unbroken
+    `Verdict:`/`Review-Lane:`/`Reviewed-SHA:` block -- the underlying label
+    match (`_VERDICT_LINE_RE`) is a substring match with no anchor to the
+    start of the line (see `_scan_verdict_lines`'s own docstring for why
+    that stays loose on purpose); a bare `Verdict:`-shaped line with nothing
+    genuine following it is never enough on its own to make this function
+    see a decision at all, fenced or not (agent-supervisor#609).
+
+    #196: every qualifying line in the comment is consulted, not just the
+    first, so a SINGLE comment can carry more than one verdict line -- a
+    reviewer who drafts `Verdict: APPROVE`, reconsiders, and writes
+    `Verdict: REQUEST CHANGES` further down. Returning on the first match
+    would let that earlier, superseded APPROVE silently win, which is
+    exactly the "REQUEST CHANGES read as approved" failure this module
+    exists to prevent -- so this collects every qualifying line's decision
+    instead of stopping at the first:
+
+    - a line whose decision text is not recognised is SKIPPED, not treated
+      as a terminal failure -- a later line in the same comment still gets
+      a chance to supply a valid decision;
+    - two or more qualifying lines that agree (same decision, repeated) are
+      fine -- restating a verdict is not a conflict, and the comment
+      resolves to that decision;
+    - two or more qualifying lines with DIFFERING decisions make the whole
+      comment ambiguous -- this refuses with None rather than picking
+      either one, first or last: `unknown`/ambiguous must refuse at the
+      merge gate, never resolve to a decision.
+
+    Returns "approved", "rejected", or None -- None when no line qualifies,
+    when every qualifying line's decision text is unrecognised, or when
+    qualifying lines disagree; a comment this module cannot classify
+    cleanly must not be guessed at, the same fail-closed stance every
+    other source in this module takes. Callers that need to know WHY --
+    unrecognised text vs. no verdict line at all vs. a genuine conflict --
+    use `_scan_verdict_lines` directly (agent-supervisor#198); this
+    function only answers the yes/no/refuse question."""
+    decisions = {decision for decision, _ in _scan_verdict_lines(body) if decision is not None}
+    if len(decisions) == 1:
+        return decisions.pop()
+    return None
+
+
+# agent-supervisor#232: the old regex anchored the WHOLE rest of the line
+# (`\s*$`) to the lane token, so a reviewer explaining how it established its
+# own identity -- exactly what #187 asks reviewers to do -- lost its verdict
+# to a trailing parenthetical the parser had no way to ignore. A lane id is
+# spelled `<session>:<index>` (`core.LANE_ID_RE`'s own shape); this now takes
+# the FIRST token on the line that matches that shape and ignores everything
+# after it. Comparison downstream (`lane_relation`) stays exact-string strict
+# -- only the parse is lenient.
+_REVIEW_LANE_LINE_RE = re.compile(r"(?im)^\s*Review-Lane:(.*)$")
+_LANE_SHAPE_RE = re.compile(r"[^\s()]+:[0-9]+")
+
+
+def _review_lane_line(body):
+    """The raw `Review-Lane:` line, if one exists at all -- independent of
+    whether it parses. Used only to name the offending text in a refusal
+    (agent-supervisor#232: "print the line it could not parse, not just the
+    requirement"); never itself trusted as a lane id."""
+    match = _REVIEW_LANE_LINE_RE.search(body or "")
+    return match.group(0).strip() if match else None
+
+
+# agent-supervisor#292/#276: `_LANE_SHAPE_RE` only recognises a tmux lane id
+# (`<session>:<index>`) -- a claude-print or pi-rpc lane has no window to
+# index, so its id IS its task id (e.g. `ad182-review-186`), a shape this
+# regex can never match. Measured against PR #277: a claude-print reviewer's
+# otherwise-correct `Review-Lane:` trailer was refused as unparseable,
+# indistinguishable from a hand-typed "not-a-lane-id-at-all" -- the two are
+# the same free-text shape and cannot be told apart by regex alone.
+#
+# The same principle #292 used for `lane_relation_from_rows` applies here:
+# when the trailer names no `<session>:<index>` token, take the first
+# whitespace-delimited token on the line and ask the LEDGER, never a guess --
+# a token that RESOLVES (a registered lane row, or -- agent-supervisor#689 --
+# a known TASK id with its own frozen `pane_id` snapshot, `core.
+# lane_or_task_row`) is trusted; one that resolves to neither (prose, a
+# typo, nonsense) still refuses, exactly as it did before. `ledger` is
+# optional and defaults to skipping this fallback entirely, so every caller
+# that never had a ledger to offer (unit tests included) keeps its prior
+# behaviour unchanged.
+#
+# agent-supervisor#689: the task-id fallback exists because a brief predating
+# #688's `lane-whoami.sh` could tell a PANE-having lane to name itself by its
+# task id too, not only an off-pane lane -- and that trailer is not
+# unparseable prose, it is a real (if indirect) identity `lane_or_task_row`
+# can resolve through `tasks.pane_id` (#631). Returning the raw TASK id here
+# (not the lane it resolves to) is deliberate: every downstream comparison
+# (`resolve_lane_relation` / `cli.py lane-relation`) already goes through
+# `lane_or_task_row` on the SAME token to get its pane id, so nothing here
+# needs to translate it -- doing so twice, in two places, is exactly the
+# drift #108 warns against.
+def _parse_review_lane(body, ledger=None):
+    """Lane stamp for comment verdicts.
+
+    GitHub login cannot identify a lane in this estate because every agent
+    posts through the same account. A comment verdict can only be compared for
+    independence when the reviewing lane states its lane id explicitly.
+    """
+    match = _REVIEW_LANE_LINE_RE.search(body or "")
+    if not match:
+        return None
+    token = _LANE_SHAPE_RE.search(match.group(1))
+    if token:
+        return token.group(0)
+    if ledger is not None:
+        rest = match.group(1).strip()
+        first_token = rest.split(None, 1)[0] if rest else ""
+        if first_token:
+            try:
+                if lane_or_task_row(ledger, first_token):
+                    return first_token
+            except Exception:
+                pass
+    return None
+
+
+# agent-supervisor#513: the PR-body complement to `_parse_review_lane` above.
+# `git grep -rn 'Author-Lane' -- scripts/` found nothing reads this trailer
+# at all (measured against agent-dotfiles#308, which carries one) --
+# authorship resolved only from a ledger dispatch row, so any PR opened
+# outside `dispatch.sh` has no attributable author regardless of what its own
+# body says. Parsed the same permissive way as `_parse_review_lane` (lane-
+# shaped token first, ledger-recognised free-text token as fallback) for the
+# same reason: a claude-print/pi-rpc lane id has no `<session>:<index>`
+# shape for `_LANE_SHAPE_RE` to find (#292's own reasoning applies equally
+# to a self-attesting AUTHOR as to a self-attesting reviewer).
+#
+# THE ASYMMETRY THIS EXISTS TO HOLD, stated once here because every caller
+# of this function must honour it: the trailer is self-attested, so it can
+# only ever be used to REFUSE a merge (a lane admitting it authored a PR is
+# trustworthy, because lying that way costs the liar), never to PERMIT one
+# (a lane not claiming authorship, or claiming a DIFFERENT lane than the
+# reviewer, proves nothing -- it may simply have omitted the trailer, and
+# treating that absence as evidence of independence is exactly the
+# blindness-reads-as-clean failure this estate keeps having). Concretely:
+# `author_lane_for` (verdict-independence.sh) surfaces this parse as its own
+# `claimed_lane` field, kept OUT of the `contributors` array the permit path
+# (`independence_verdict`) reads -- so a self-attested claim can never widen
+# who counts as "the known author" for the purpose of granting independence,
+# only narrow who can be caught self-reviewing when the ledger has nothing.
+_AUTHOR_LANE_LINE_RE = re.compile(r"(?im)^\s*Author-Lane:(.*)$")
+
+
+def _author_lane_line(body):
+    """The raw `Author-Lane:` line, if one exists at all -- independent of
+    whether it parses. Mirrors `_review_lane_line`; used only to name the
+    offending text in a refusal, never trusted as a lane id itself."""
+    match = _AUTHOR_LANE_LINE_RE.search(body or "")
+    return match.group(0).strip() if match else None
+
+
+def _parse_author_lane(body, ledger=None):
+    """Self-attested `Author-Lane:` trailer in a PR body, or `None` when
+    absent or unparseable. See the module comment above `_AUTHOR_LANE_LINE_RE`
+    for the asymmetry a caller must hold: this is a REFUSE-only signal.
+
+    agent-supervisor#689: same task-id fallback as `_parse_review_lane`
+    (`core.lane_or_task_row`) -- a self-attested author claim spelled as a
+    task id is exactly as resolvable, and MUST be, since this signal can
+    only ever REFUSE a merge: failing to resolve it here does not make a
+    self-review safer, it just makes this function blind to one more shape
+    of it.
+    """
+    match = _AUTHOR_LANE_LINE_RE.search(body or "")
+    if not match:
+        return None
+    token = _LANE_SHAPE_RE.search(match.group(1))
+    if token:
+        return token.group(0)
+    if ledger is not None:
+        rest = match.group(1).strip()
+        first_token = rest.split(None, 1)[0] if rest else ""
+        if first_token:
+            try:
+                if lane_or_task_row(ledger, first_token):
+                    return first_token
+            except Exception:
+                pass
+    return None
+
+
+# agent-supervisor#213: the SHA a `**Verdict:` comment applies to, beside
+# `Review-Lane:`. Every OTHER verdict source in this module already refuses
+# to answer for a head it never saw (#218's review-object check, extended
+# by #226/#229 to tell a content-preserving rebase from a real change) --
+# the comment path, which is the estate's PRIMARY posting path (the codex
+# lane posts `gh pr comment`, never `gh pr review` -- see this class's own
+# docstring), had NO such check at all. Two PRs (#204, #207) merged on an
+# APPROVE comment written 6-9 minutes before the commit actually merged,
+# one across a rebase, because `_comment_verdict` never compared a SHA.
+_REVIEWED_SHA_RE = re.compile(r"(?im)^\s*Reviewed-SHA:\s*([A-Za-z0-9_.:@/-]+)\s*$")
+
+
+def _parse_reviewed_sha(body):
+    """The SHA a `Reviewed-SHA:` trailer states a comment's verdict covers.
+    None when absent -- a caller must treat that as "unstated", never as
+    "matches"; #213's issue explicitly requires ambiguity to refuse, not to
+    read as fresh. Same permissive token class the lane parser uses --
+    extraction stays permissive; `_SHA_SHAPE_RE` below is what validates
+    shape, in `_comment_freshness`, not here."""
+    match = _REVIEWED_SHA_RE.search(body or "")
+    return match.group(1) if match else None
+
+
+# agent-supervisor#232: a git SHA is 40 hex characters, full stop.
+# `_comment_freshness` used to go straight from "not equal to head_sha" to
+# `_content_unchanged_since` -- a real API call comparing branch commits --
+# for ANY mismatch, so a truncated trailer that happened to be a valid
+# prefix of the true head (e.g. 39 of the 40 chars) could resolve to the
+# same commit under git's own forgiving prefix matching and pass as
+# "unchanged since", silently. That is exactly backwards: a malformed
+# trailer is a defect in the TRAILER, not a question about the branch's
+# content, and #218's SHA comparison never even gets to run behind a
+# genuinely wrong-shaped value. Checked only on the mismatch path -- an
+# EXACT match (the common case, and every existing fixture in this repo)
+# still short-circuits before this is ever consulted.
+_SHA_SHAPE_RE = re.compile(r"^[0-9a-fA-F]{40}$")
+
+
+def _newest_commit_date(commits):
+    """The latest commit timestamp on the PR, from the `commits` field of
+    `gh pr view --json ...,commits` (agent-supervisor#213's timestamp
+    backstop -- proposal 2). Prefers `committedDate` (when the commit
+    actually landed) over `authoredDate` (which a rebase or amend can carry
+    forward unchanged) per commit. Returns None -- never a guess -- unless
+    `commits` is a non-empty list of dicts each carrying a usable date; a
+    caller must fail closed on None, the same discipline every other
+    freshness comparison in this module already takes."""
+    if not isinstance(commits, list) or not commits:
+        return None
+    dates = []
+    for commit in commits:
+        if not isinstance(commit, dict):
+            return None
+        date = commit.get("committedDate") or commit.get("authoredDate")
+        if not isinstance(date, str) or not date:
+            return None
+        dates.append(date)
+    return max(dates)
+
+
+class GithubReviewVerdictSource(VerdictSource):
+    """Reads GitHub's own review state, and -- agent-supervisor#53 -- issue
+    comments with a `Verdict:` line (any heading/emphasis form -- #192).
+    Never comment PROSE: a comment only counts through
+    `_parse_verdict_comment`'s match, the same fail-closed discipline #203
+    established for reviews. That match is NOT anchored to the start of the
+    line -- `_VERDICT_LINE_RE` is a deliberate substring match, so a lead-in
+    before the label ("Final call -- Verdict: APPROVE") still counts -- what
+    makes a match OPERATIVE, per agent-supervisor#595, is being the first
+    line of a complete, unbroken `Verdict:`/`Review-Lane:`/`Reviewed-SHA:`
+    block (fenced or not, per #609); a bare `Verdict:`-shaped line with
+    nothing genuine following it is never enough on its own. See
+    `_scan_verdict_lines`'s own docstring for the poisoning incidents this
+    closes.
+
+    The codex lane posts its verdicts as `gh pr comment`, not `gh pr
+    review` -- a review object alone missed exactly the reviews that
+    matter most (agent-supervisor#53). A review object still wins outright
+    when it is decisive at the current head: comments are consulted only
+    when the review side has nothing decisive to say (`none`, or `unknown`
+    from a stale/superseded review), so PRs with a real review object are
+    unaffected by this addition.
+
+    This class only READS the comment; it has no opinion on how one gets
+    posted. `post-verdict.sh` (#188/#412) is the estate's own posting path
+    for the `Review-Lane:`/`Verdict:` pair this class parses -- see its
+    header comment and `scripts/supervisor/loop-tick.md`'s review-dispatch
+    section for what a brief should tell a reviewing lane to run instead of
+    a raw `gh pr comment`."""
+
+    def __init__(self, runner=None, patch_id=None, ledger=None):
+        self.runner = runner or _subprocess_runner
+        self.patch_id = patch_id or _default_patch_id
+        # agent-supervisor#292/#276: optional, and used ONLY as a fallback in
+        # `_parse_review_lane` to recognise a registered claude-print/pi-rpc
+        # lane id -- every other read stays exactly as it was.
+        self.ledger = ledger
+
+    def verdict(self, *, repo, number, head_sha=None):
+        try:
+            raw = self.runner(
+                ["gh", "pr", "view", str(number), "--repo", repo, "--json", "reviews,comments,author,commits"]
+            )
+            payload = json.loads(raw)
+            reviews = payload.get("reviews", [])
+            comments = payload.get("comments", [])
+            commits = payload.get("commits", [])
+            if not isinstance(reviews, list):
+                raise ValueError("reviews is not a list")
+            if not isinstance(comments, list):
+                raise ValueError("comments is not a list")
+        except Exception as error:
+            return {"verdict": "unknown", "detail": f"github review read failed: {error}"}
+        review_result = self._review_verdict(reviews, repo=repo, number=number, head_sha=head_sha)
+        if review_result["verdict"] in ("approved", "rejected"):
+            return review_result
+        comment_result = self._comment_verdict(comments, repo=repo, number=number, head_sha=head_sha, commits=commits)
+        if comment_result is not None:
+            return comment_result
+        return review_result
+
+    def _comment_verdict(self, comments, *, repo=None, number=None, head_sha=None, commits=None):
+        """The most recent OPERATIVE comment verdict, scanning newest to
+        oldest (chronological, as `gh` returns `comments`, reversed here) --
+        a later re-review supersedes an earlier one, the same "current
+        state" reading the review side already gives a fresh review over a
+        stale one. Returns None only when nothing operative is found at
+        all, so the caller falls back to `review_result` unchanged.
+
+        agent-supervisor#639: `Verdict: RETRACTED` is a decision like any
+        other -- same complete, unbroken `Verdict:`/`Review-Lane:`/
+        `Reviewed-SHA:` block #595 already requires, nothing loosened for
+        it. Walking newest to oldest, a RETRACTED comment adds its own
+        `Review-Lane:` lane to `retracted_lanes` and is itself skipped --
+        never reported as the PR's verdict -- and every OLDER decision from
+        that SAME lane is then skipped as it is reached, so a retracted
+        APPROVE never resurfaces as operative regardless of how it was
+        posted. A decision from a DIFFERENT lane, or the SAME lane posted
+        AFTER the retraction (a genuine re-review), is untouched --
+        retraction reaches backward only, and only within its own lane, so
+        a reviewer's own later comment can never accidentally void a
+        genuine approval from someone else, or a fresh one of its own
+        (#639's own "a genuine verdict must still count" bar). A retraction
+        whose OWN `Review-Lane:` cannot be parsed can never be trusted to
+        know what it is retracting -- it is reported `unknown` instead of
+        silently dropped, the same refusal shape #232 gives any other
+        malformed trailer; silently dropping it would let the very
+        approval it meant to withdraw stand, exactly the "fails safe only
+        by accident" shape #639 was filed over.
+
+        agent-supervisor#198: this used to track only the last comment with
+        a RECOGNISED decision, silently skipping past one whose decision
+        text was unrecognised to an earlier, valid one underneath it -- a
+        rejection phrased in words this module could not classify would
+        have resolved to the reviewer's own earlier, since-superseded
+        approval, the same "stale answer silently wins" failure #196 fixed
+        for two lines inside one comment. So the most recent verdict-
+        bearing comment reached (after any retraction skipping above) is
+        authoritative even when its decision cannot be classified: an
+        unrecognised or internally-ambiguous comment returns a decisive
+        `unknown` result naming the unrecognised text, never a silent
+        fall-through to an older answer or to `none` -- `none` must mean
+        "nothing was ever posted", not "something was posted that this
+        module could not read" (#192's "never refuses without a reason"
+        property, extended to this path).
+
+        agent-supervisor#213: a decisive comment verdict is also checked
+        for FRESHNESS against `head_sha`, via `_comment_freshness` -- the
+        same guard `_review_verdict` has had since #218, missing here until
+        now even though the comment path is this estate's primary posting
+        path. `repo`/`number`/`commits` are only used by that check.
+
+        agent-supervisor#232: a malformed `Review-Lane:` line (present but
+        unparseable) and a stale/malformed `Reviewed-SHA:` are INDEPENDENT
+        trailer defects -- the issue's own reproduction had both at once,
+        and losing the second behind the first cost a whole re-review.
+        Both are collected into `problems` and reported TOGETHER in one
+        refusal, never one-at-a-time."""
+        retracted_lanes = set()
+        winner = None  # (comment, scan, unattributed_retraction)
+        for comment in reversed(comments):
+            if not isinstance(comment, dict):
+                continue
+            scan = _scan_verdict_lines(comment.get("body"))
+            if not scan:
+                continue
+            decisions = {decision for decision, _ in scan if decision is not None}
+            if len(decisions) == 1 and next(iter(decisions)) == "retracted":
+                lane = _parse_review_lane(comment.get("body"), ledger=self.ledger)
+                if lane is not None:
+                    retracted_lanes.add(lane)
+                    continue
+                winner = (comment, scan, True)
+                break
+            if len(decisions) == 1:
+                lane = _parse_review_lane(comment.get("body"), ledger=self.ledger)
+                if lane is not None and lane in retracted_lanes:
+                    continue
+            winner = (comment, scan, False)
+            break
+        if winner is None:
+            return None
+        comment, scan, unattributed_retraction = winner
+        body = comment.get("body")
+        author = (comment.get("author") or {}).get("login")
+        reviewer_lane = _parse_review_lane(body, ledger=self.ledger)
+        raw_lane_line = _review_lane_line(body)
+        created_at = comment.get("createdAt") or ""
+        who = f"@{author}" if author else "an unknown author"
+        when = f" at {created_at}" if created_at else ""
+        lane = f", review lane {reviewer_lane}" if reviewer_lane else ""
+
+        if unattributed_retraction:
+            return {
+                "verdict": "unknown",
+                "detail": (
+                    f"PR comment retraction by {who}{lane}{when} -- "
+                    f"could not parse lane id from: {raw_lane_line}"
+                ),
+            }
+
+        decisions = {decision for decision, _ in scan if decision is not None}
+        if len(decisions) == 1:
+            verdict_value = decisions.pop()
+            detail = f"PR comment verdict ({verdict_value}) by {who}{lane}{when}"
+            problems = []
+            if raw_lane_line is not None and reviewer_lane is None:
+                problems.append(f"could not parse lane id from: {raw_lane_line}")
+            note = ""
+            if head_sha is not None:
+                fresh, note, refusal = self._comment_freshness(
+                    body=body, created_at=created_at, head_sha=head_sha, commits=commits,
+                    repo=repo, number=number,
+                )
+                if not fresh:
+                    problems.append(refusal)
+            if problems:
+                return {"verdict": "unknown", "detail": f"{detail} -- " + "; ".join(problems)}
+            if note:
+                detail = f"{detail}, {note}"
+            result = {"verdict": verdict_value, "detail": detail, "verdict_kind": "comment"}
+            if reviewer_lane:
+                result["reviewer_lane"] = reviewer_lane
+            return result
+
+        unrecognised = [text for decision, text in scan if decision is None]
+        if unrecognised:
+            named = "; ".join(f'"{text}"' for text in unrecognised)
+            reason = f"decision text not recognised: {named}"
+        else:
+            reason = "conflicting Verdict: lines in one comment"
+        detail = f"PR comment verdict unresolved ({reason}) by {who}{lane}{when}"
+        return {"verdict": "unknown", "detail": detail}
+
+    def _comment_freshness(self, *, body, created_at, head_sha, commits, repo, number):
+        """Is a `**Verdict:` comment still current at `head_sha`? Two
+        mechanisms (agent-supervisor#213), honest one first:
+
+        1. `Reviewed-SHA:` trailer -- the reviewer states the SHA their
+           verdict covers. Matching `head_sha`: fresh. Differing: fall back
+           to the SAME content-unchanged-since-rebase comparison #218/#226
+           already give the review-object path (`_content_unchanged_since`),
+           so a pure rebase still promotes; anything else refuses, naming
+           both SHAs.
+        2. No trailer -- every verdict comment posted before this existed,
+           and any reviewer who has not adopted the trailer yet -- the
+           timestamp backstop: refuse if the newest commit on the PR is
+           younger than this comment. Weaker (a force-push can rewrite
+           dates; #213's issue says so explicitly) but it is the only
+           signal available for a verdict already on record, and refusing
+           beats trusting a comment that cannot be tied to a SHA at all.
+
+           agent-supervisor#595: this method is only ever reached from
+           `_comment_verdict` for a comment `_scan_verdict_lines` already
+           found OPERATIVE -- which, since #595, means the comment's body
+           necessarily contains a genuine `Reviewed-SHA:` line (it is
+           required, immediately after `Verdict:`/`Review-Lane:`, for the
+           label to be operative at all). So mechanism 2 above is, in
+           practice, no longer reachable through THIS call site: `reviewed_sha
+           is None` cannot happen when `body` is the body of a comment
+           `_comment_verdict` already decided was operative. The mechanism
+           itself is left in place, correct in isolation, and still directly
+           unit-tested (`tests/supervisor/test_verdict.py`'s
+           `GithubCommentVerdictTests` calls this method directly for that
+           reason) -- not deleted, because a caller reaching this method with
+           a body that never went through `_scan_verdict_lines` at all (none
+           exists today, but nothing prevents one tomorrow) would still need
+           it. Named here so a future reader does not mistake the dead path
+           for an oversight.
+
+        Returns `(fresh, note, refusal)`. `fresh` False means the caller
+        MUST return `unknown` with `refusal` appended to its own detail --
+        never the decisive verdict. `note`, when non-empty, is a suffix
+        for the caller's own detail (e.g. the rebase basis)."""
+        reviewed_sha = _parse_reviewed_sha(body)
+        if reviewed_sha is not None:
+            if reviewed_sha == head_sha:
+                return True, "", ""
+            if not _SHA_SHAPE_RE.match(reviewed_sha):
+                # #232: shape, not just equality -- a truncated/malformed
+                # trailer is refused HERE, naming the defect in the trailer
+                # itself, rather than being handed to
+                # `_content_unchanged_since` where a value that happens to be
+                # a valid prefix of the real head can resolve to the same
+                # commit and pass silently.
+                return False, "", (
+                    f"malformed Reviewed-SHA ({len(reviewed_sha)} chars, not 40 hex) -- "
+                    f"cannot confirm it covers current head {head_sha}"
+                )
+            unchanged, basis = _content_unchanged_since(
+                runner=self.runner, patch_id_fn=self.patch_id,
+                repo=repo, number=number, old_sha=reviewed_sha, new_sha=head_sha,
+            )
+            if unchanged:
+                return True, f"head moved {reviewed_sha} -> {head_sha}, {basis}", ""
+            return False, "", f"covers Reviewed-SHA {reviewed_sha}, not current head {head_sha}"
+
+        newest = _newest_commit_date(commits)
+        if newest is None:
+            return False, "", (
+                f"no Reviewed-SHA trailer and PR commit timestamps could not be read -- "
+                f"cannot tell whether it covers current head {head_sha}"
+            )
+        if not created_at:
+            return False, "", (
+                f"no Reviewed-SHA trailer and no timestamp of its own -- "
+                f"cannot tell whether it covers current head {head_sha}"
+            )
+        if newest > created_at:
+            return False, "", (
+                f"no Reviewed-SHA trailer, and a commit as recent as {newest} exists -- "
+                f"cannot confirm it covers current head {head_sha}"
+            )
+        return True, f"no Reviewed-SHA trailer, timestamp backstop: newest commit {newest} <= verdict {created_at}", ""
+
+    def _review_verdict(self, reviews, *, repo, number, head_sha=None):
+        decisive = [r for r in reviews if isinstance(r, dict) and r.get("state") in ("CHANGES_REQUESTED", "APPROVED")]
+        if head_sha is None:
+            # No head to check freshness against -- answer as before #218,
+            # unable to tell a current review from a stale one.
+            states = [r.get("state") for r in decisive]
+            if "CHANGES_REQUESTED" in states:
+                return {"verdict": "rejected", "detail": "GitHub review state CHANGES_REQUESTED", "verdict_kind": "github_review"}
+            if "APPROVED" in states:
+                return {"verdict": "approved", "detail": "GitHub review state APPROVED", "verdict_kind": "github_review"}
+            return {"verdict": "none", "detail": ""}
+        current = [r for r in decisive if (r.get("commit") or {}).get("oid") == head_sha]
+        rebase_basis = None
+        if not current and decisive:
+            stale_oids = sorted({(r.get("commit") or {}).get("oid") for r in decisive if (r.get("commit") or {}).get("oid")})
+            for oid in stale_oids:
+                unchanged, basis = _content_unchanged_since(
+                    runner=self.runner,
+                    patch_id_fn=self.patch_id,
+                    repo=repo,
+                    number=number,
+                    old_sha=oid,
+                    new_sha=head_sha,
+                )
+                if unchanged:
+                    current = [r for r in decisive if (r.get("commit") or {}).get("oid") == oid]
+                    rebase_basis = f"head moved {oid} -> {head_sha}, {basis}"
+                    break
+        current_states = [r.get("state") for r in current]
+        if "CHANGES_REQUESTED" in current_states:
+            return {
+                "verdict": "rejected",
+                "detail": rebase_basis or f"GitHub review state CHANGES_REQUESTED at {head_sha}",
+                "verdict_kind": "github_review",
+            }
+        if "APPROVED" in current_states:
+            return {
+                "verdict": "approved",
+                "detail": rebase_basis or f"GitHub review state APPROVED at {head_sha}",
+                "verdict_kind": "github_review",
+            }
+        if decisive:
+            stale_shas = sorted({(r.get("commit") or {}).get("oid") or "unknown-sha" for r in decisive})
+            return {
+                "verdict": "unknown",
+                "detail": f"review(s) filed against {', '.join(stale_shas)}, not current head {head_sha}",
+            }
+        return {"verdict": "none", "detail": ""}
+
+
+class LedgerVerdictSource(VerdictSource):
+    """Reads a verdict a reviewing lane recorded in the supervisor ledger."""
+
+    def __init__(self, ledger, runner=None, patch_id=None):
+        self.ledger = ledger
+        self.runner = runner or _subprocess_runner
+        self.patch_id = patch_id or _default_patch_id
+
+    def verdict(self, *, repo, number, head_sha=None):
+        try:
+            row = self.ledger.get_pr_verdict(repo=repo, number=number)
+        except Exception as error:
+            return {"verdict": "unknown", "detail": f"ledger read failed: {error}"}
+        if row is None:
+            return {"verdict": "none", "detail": ""}
+        if row.get("verdict") not in ("approved", "rejected"):
+            return {"verdict": "unknown", "detail": "ledger row has an unrecognised verdict value"}
+        recorded_sha = row.get("head_sha")
+        if head_sha is not None and recorded_sha != head_sha:
+            unchanged, basis = _content_unchanged_since(
+                runner=self.runner,
+                patch_id_fn=self.patch_id,
+                repo=repo,
+                number=number,
+                old_sha=recorded_sha,
+                new_sha=head_sha,
+            )
+            if unchanged:
+                return {
+                    "verdict": row["verdict"],
+                    "detail": (
+                        f"ledger: {row['reviewer']} recorded at {row['updated_at']} for {recorded_sha}, "
+                        f"head moved {recorded_sha} -> {head_sha}, {basis}"
+                    ),
+                    "verdict_kind": "ledger",
+                    "reviewer_lane": row["reviewer"],
+                }
+            return {
+                "verdict": "unknown",
+                "detail": f"ledger verdict recorded at {recorded_sha}, not current head {head_sha}",
+            }
+        return {
+            "verdict": row["verdict"],
+            "detail": f"ledger: {row['reviewer']} recorded at {row['updated_at']} for {recorded_sha}",
+            "verdict_kind": "ledger",
+            "reviewer_lane": row["reviewer"],
+        }
+
+
+SOURCES = {
+    "github": GithubReviewVerdictSource,
+    "ledger": LedgerVerdictSource,
+}
+
+
+def build_source(name, *, state_dir):
+    if name not in SOURCES:
+        raise ValueError(f"unknown verdict source: {name!r} (known: {', '.join(sorted(SOURCES))})")
+    if name == "ledger":
+        return LedgerVerdictSource(Ledger(state_dir))
+    if name == "github":
+        # agent-supervisor#292/#276: gives `_parse_review_lane` the ledger it
+        # needs to recognise a claude-print/pi-rpc lane id in a Review-Lane:
+        # trailer -- see that function's own comment for why a regex alone
+        # can never tell one apart from hand-typed nonsense.
+        return GithubReviewVerdictSource(ledger=Ledger(state_dir))
+    return SOURCES[name]()
+
+
+def resolve(names, *, state_dir, repo, number, head_sha=None):
+    """Try each named source in order. A decisive verdict (approved/rejected)
+    from an earlier source wins outright. If none is decisive, a source
+    error ("unknown") wins over a later source's plain "none" -- an error
+    must never be silently masked by "nothing to report" from elsewhere in
+    the chain. Only when every source is reachable and none has anything on
+    record does this return "none". `head_sha`, when given, is the PR's
+    current head -- a source is passed it so it can refuse to answer for a
+    review or ledger record filed against an older commit (#218)."""
+    first_unknown = None
+    for name in names:
+        try:
+            source = build_source(name, state_dir=state_dir)
+            result = source.verdict(repo=repo, number=number, head_sha=head_sha)
+        except Exception as error:
+            result = {"verdict": "unknown", "detail": f"{name}: {error}"}
+        if result.get("verdict") not in VERDICT_VALUES:
+            result = {"verdict": "unknown", "detail": f"{name}: returned an unrecognised verdict"}
+        if result["verdict"] in ("approved", "rejected"):
+            return result
+        if result["verdict"] == "unknown" and first_unknown is None:
+            first_unknown = result
+    return first_unknown or {"verdict": "none", "detail": ""}
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--state-dir", required=True)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    get = sub.add_parser("get", help="resolve the verdict for one PR")
+    get.add_argument("--repo", required=True, help="owner/name")
+    get.add_argument("--number", type=int, required=True)
+    get.add_argument(
+        "--source",
+        default="github",
+        help="comma-separated source names to try in order (default: github; "
+        "'ledger' has no caller that writes to it yet -- agent-dotfiles#214)",
+    )
+    get.add_argument(
+        "--head-sha",
+        default=None,
+        help="the PR's current headRefOid; a verdict filed against a different "
+        "commit resolves to unknown rather than answering for a head it never "
+        "saw (agent-dotfiles#218). Omit only when the caller has no head to "
+        "check against.",
+    )
+
+    record = sub.add_parser("record", help="record a verdict in the ledger source")
+    record.add_argument("--repo", required=True, help="owner/name")
+    record.add_argument("--number", type=int, required=True)
+    record.add_argument("--verdict", choices=("approved", "rejected"), required=True)
+    record.add_argument("--head-sha", required=True)
+    record.add_argument("--reviewer", required=True)
+    record.add_argument("--note")
+
+    args = parser.parse_args(argv)
+
+    if args.command == "record":
+        ledger = Ledger(args.state_dir)
+        row = ledger.record_pr_verdict(
+            repo=args.repo,
+            number=args.number,
+            verdict=args.verdict,
+            head_sha=args.head_sha,
+            reviewer=args.reviewer,
+            note=args.note,
+        )
+        print(json.dumps(row))
+        return 0
+
+    try:
+        names = [n.strip() for n in args.source.split(",") if n.strip()]
+        if not names:
+            raise ValueError("no verdict source named")
+        result = resolve(
+            names, state_dir=args.state_dir, repo=args.repo, number=args.number, head_sha=args.head_sha
+        )
+    except Exception as error:
+        result = {"verdict": "unknown", "detail": f"verdict resolution failed: {error}"}
+    print(json.dumps(result))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

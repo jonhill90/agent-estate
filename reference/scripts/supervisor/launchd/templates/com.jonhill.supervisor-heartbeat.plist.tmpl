@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jonhill.supervisor-heartbeat</string>
+  <!-- launchd IS the loop. heartbeat.sh --once does one pass and exits, so a
+       wedged tmux or a hung sqlite cannot leave a long-lived process that
+       pgrep still reports alive -- the failure quota-watch hit for three
+       hours on 2026-08-16. StartInterval restarts it regardless.
+
+       900s (15 min) is the poll; STALE_AFTER (1800s, in the script) is the
+       judgement. Polling faster than the staleness window costs nothing and
+       catches the transition sooner; the hourly nudge cooldown is what
+       actually bounds how often it can speak. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@@AGENT_SUPERVISOR_REPO@@/scripts/supervisor/heartbeat.sh</string>
+    <string>--once</string>
+    <string>--target</string>
+    <string>director:@3</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/jon/.local/bin</string>
+    <key>HOME</key>
+    <string>/Users/jon</string>
+    <!-- codexbar needs USER: measured 2026-08-18, 5/5 exitCode 0 with it set,
+         3/3 exitCode 69 (fetch-failed) without. launchd sets neither USER nor
+         LOGNAME, which is why every scheduler read the quota meter as broken
+         while the identical call from a shell returned a percentage. -->
+    <key>USER</key>
+    <string>jon</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/jon/.local/state/agent-dotfiles-supervisor/heartbeat.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jon/.local/state/agent-dotfiles-supervisor/heartbeat.log</string>
+</dict>
+</plist>

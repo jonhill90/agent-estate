@@ -1,0 +1,19 @@
+#!/bin/bash
+# Stub interpreter for the formatter-crash scenario in
+# test_watchdog_source_task_sweep.sh (as#142 fix-pass review).
+#
+# check_source_task_sweep() makes exactly two python invocations: one runs
+# a real script file (cli.py, argv[1] is a path) and must behave like a real
+# interpreter so the sweep itself still succeeds; the other is the inline
+# summary formatter, invoked as `python3 -c '<script>'` (argv[1] is the
+# literal flag "-c"). This stub answers the first call by delegating to a
+# real python3 and simulates the second call crashing -- reproducing the
+# exact failure shape the reviewer found (a SyntaxError inside the
+# formatter's own subprocess), so the test can assert watchdog.sh surfaces
+# that crash distinctly instead of folding it into "not parseable".
+if [ "$1" = "-c" ]; then
+  echo "stub-python3-crash: simulated SyntaxError in the formatter" >&2
+  exit 1
+fi
+REAL_PYTHON3="${STUB_REAL_PYTHON3:-python3}"
+exec "$REAL_PYTHON3" "$@"

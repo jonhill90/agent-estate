@@ -1,0 +1,1160 @@
+#!/bin/bash
+# Behaviour tests for watchdog.sh using stub tmux/gh binaries.
+#
+# These exist because three bugs shipped in this script for want of a test:
+# an inverted ghost-text comparison, a failed `gh` query counted as zero work,
+# and a /loop delivered into a busy pane where it queues as inert plain text.
+set -uo pipefail
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+WATCHDOG="$HERE/../../scripts/supervisor/watchdog.sh"
+STUBS="$HERE/stubs"
+# agent-supervisor#199/#205: every case below hands watchdog.sh a fresh
+# SUPERVISOR_STATE, so check_worktree_guard_audit's own throttle (a stamp
+# file under that state dir) never has a prior run to find and would run the
+# real worktree-guard-audit.sh -- against whatever repo this worktree
+# happens to be checked out in -- on every single tick. That check has its
+# own dedicated test (test_watchdog_worktree_guard_audit.sh); this file is
+# about the rest of watchdog.sh's behaviour, so disable it here the same way
+# that test disables the checks it isn't about.
+export SUPERVISOR_GUARD_AUDIT_INTERVAL=99999999999
+pass=0; fail=0
+check() { # check <name> <expected-substring> <file>
+  if grep -q "$2" "$3" 2>/dev/null; then echo "  ok   $1"; pass=$((pass+1));
+  else echo "  FAIL $1 — expected '$2' in $(cat "$3" 2>/dev/null | tr '\n' ' ')"; fail=$((fail+1)); fi
+}
+run() { # run <state> <workdir>
+  # An empty transcript dir by default: sleepcheck finds no pending wakeup, so
+  # these tests exercise the watchdog's own decisions rather than the live
+  # supervisor's sleep state. Without this the suite passes or fails depending
+  # on whether the real loop happens to be asleep when it runs.
+  rm -rf "$2"; mkdir -p "$2" "$2/transcripts"
+  SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE="$1" STUB_SENT="$2/sent" \
+  STUB_BUSY_AFTER="${STUB_BUSY_AFTER:-}" STUB_COUNTER="$2/counter" \
+  SUPERVISOR_STATE="$2" SUPERVISOR_STATUS="$2/st" SUPERVISOR_LOG="$2/lg" \
+  SUPERVISOR_STAMP="$2/stamp" SUPERVISOR_HISTORY="$2/hist" NOTIFY_ENV="$2/none.env" \
+  SLEEPCHECK_DIR="${STUB_SLEEPCHECK_DIR:-$2/transcripts}" \
+  bash "$WATCHDOG" >/dev/null 2>"$2/err"
+}
+
+echo "watchdog.sh"
+
+# A busy supervisor is working, not dead. Nothing may be sent to it.
+D=$(mktemp -d); run busy "$D/w"
+check "busy pane reports working" "state:    working" "$D/w/st"
+# Not asserted as "$D/w/sent is empty": agent-supervisor#10's poller-recover.sh
+# now runs on every exit path too (a different subsystem, same reasoning as
+# the inbox-poll heartbeat check below), and against this stub -- which does
+# not implement list-windows/list-panes, so every target reads as absent --
+# it unconditionally queues its OWN send-keys for the unrelated inbox-poll
+# window into the same STUB_SENT file. That is a real send-keys, correctly
+# unrelated to $PANE; the property this test is actually pinning is "no
+# /loop reaches a busy pane", the same thing every other keystroke assertion
+# in this file checks.
+! grep -q '/loop' "$D/w/sent" 2>/dev/null \
+  && { echo "  ok   busy pane receives no /loop"; pass=$((pass+1)); } \
+  || { echo "  FAIL busy pane was sent a /loop: $(cat "$D/w/sent" 2>/dev/null)"; fail=$((fail+1)); }
+# A healthy tick carries no notify: line -- nothing was sent, so there is no
+# send outcome to report. Asserted because the state: line alone does not
+# prove the ordinary write path ran: while `notify:` was being added, a false
+# test as the last command in the status group made every FIRST write fail
+# ("WATCHDOG CANNOT WRITE STATUS") and only the failure-path rewrite produced
+# a file at all -- and this suite stayed green through it.
+if grep -q '^notify:' "$D/w/st" 2>/dev/null; then
+  echo "  FAIL a healthy tick reported a notify outcome: $(grep '^notify:' "$D/w/st")"; fail=$((fail+1))
+else
+  echo "  ok   a healthy tick writes status with no notify: line"; pass=$((pass+1))
+fi
+if grep -q 'CANNOT WRITE STATUS' "$D/w/err" 2>/dev/null; then
+  echo "  FAIL the first status write failed and was papered over"; fail=$((fail+1))
+else
+  echo "  ok   the first status write is the one that lands"; pass=$((pass+1))
+fi
+
+# An idle pane with work is a dead loop: restart it, and the /loop must
+# actually be delivered.
+D=$(mktemp -d); run idle "$D/w"
+check "idle pane with work restarts" "state:    restarted" "$D/w/st"
+check "restart delivers a /loop"     "/loop" "$D/w/sent"
+
+# agent-supervisor#365: a REAL pane after a REAL /clear paints a dim
+# placeholder in the input box, byte-for-byte the fixture the stub returns
+# for `-pe` under STUB_PANE_STATE=ghost-real (see tests/supervisor/
+# test_input_box.sh, which pins the identical bytes). `input_box_state`
+# must read that as empty and restart same as a bare idle pane -- a test
+# that only fed clean synthetic captures would pass while the ghost-text
+# bug (#141/#351) survived, so this is the real byte sequence, not a
+# stand-in.
+D=$(mktemp -d); run ghost-real "$D/w"
+check "a real ghost placeholder is not mistaken for typed text" "state:    restarted" "$D/w/st"
+check "restart delivers a /loop past a ghost placeholder"       "/loop" "$D/w/sent"
+
+# The other real case: a genuine unsubmitted brief in the box (not dim). Must
+# be left alone -- clobbering it is the #178 corruption this file exists to
+# prevent.
+D=$(mktemp -d); run unsent-real "$D/w"
+check "real un-submitted text in the box is left alone" "state:    human_typing" "$D/w/st"
+if grep -q '/loop' "$D/w/sent" 2>/dev/null; then
+  echo "  FAIL a /loop was sent into a box holding real unsubmitted text: $(cat "$D/w/sent")"; fail=$((fail+1))
+else
+  echo "  ok   no /loop is sent into a box holding real unsubmitted text"; pass=$((pass+1))
+fi
+
+# The race: idle when first checked, busy by the time the /loop is sent.
+# Without the pre-send guard the command is queued as plain text, never
+# parses as a slash command, and the loop silently never re-arms.
+D=$(mktemp -d); STUB_BUSY_AFTER=1 run idle "$D/w"
+check "pane that turns busy mid-probe is not sent to" "state:    working" "$D/w/st"
+if grep -q '/loop' "$D/w/sent" 2>/dev/null; then
+  echo "  FAIL a /loop was delivered into a busy pane"; fail=$((fail+1))
+else
+  echo "  ok   no /loop delivered into a busy pane"; pass=$((pass+1))
+fi
+
+# A loop with a pending wakeup is asleep, not dead. The watchdog must leave it
+# alone even though the pane is idle and there is queued work -- restarting a
+# sleeping loop is what churned the supervisor all night before #59.
+D=$(mktemp -d); mkdir -p "$D/sleeping"
+python3 - "$D/sleeping/t.jsonl" <<'PYEOF'
+import json, sys, datetime
+stamp = (datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(seconds=60)).strftime("%Y-%m-%dT%H:%M:%S.000Z")
+rec = {"timestamp": stamp, "message": {"content": [
+    {"type": "tool_use", "name": "ScheduleWakeup", "input": {"delaySeconds": 3600}}]}}
+open(sys.argv[1], "w").write(json.dumps(rec) + "\n")
+PYEOF
+STUB_SLEEPCHECK_DIR="$D/sleeping" run idle "$D/w"
+check "a sleeping loop is left alone" "state:    asleep" "$D/w/st"
+if grep -q '/loop' "$D/w/sent" 2>/dev/null; then
+  echo "  FAIL a sleeping loop was restarted"; fail=$((fail+1))
+else
+  echo "  ok   a sleeping loop receives no keystrokes"; pass=$((pass+1))
+fi
+
+# The status file must name the code that produced it. The LaunchAgent runs
+# this script from the repo working tree, so the live guard is whatever branch
+# is checked out -- an invisible dependency until it is printed.
+D=$(mktemp -d); run idle "$D/w"
+check "status names the running branch and sha" "^code:" "$D/w/st"
+
+# A missing state directory used to make every status write fail silently:
+# exit 0, and watchdog.status quietly stops updating -- indistinguishable from
+# a dead cron, which is the condition this tool exists to detect.
+D=$(mktemp -d); rm -rf "$D/absent"
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy \
+SUPERVISOR_STATE="$D/absent" SLEEPCHECK_DIR="$D/none" \
+  bash "$WATCHDOG" >/dev/null 2>&1
+if [ -f "$D/absent/watchdog.status" ]; then
+  echo "  ok   a missing state directory is created, not failed into silently"; pass=$((pass+1))
+else
+  echo "  FAIL status was not written when the state directory was absent"; fail=$((fail+1))
+fi
+
+# The live copy runs from a DETACHED worktree, so 'git rev-parse --abbrev-ref'
+# returns the literal "HEAD". Reporting that would make the provenance line
+# useless exactly where it matters most.
+D=$(mktemp -d); mkdir -p "$D/gitstub" "$D/w"
+cat > "$D/gitstub/git" <<'GITEOF'
+#!/bin/bash
+for a in "$@"; do
+  case "$a" in
+    --abbrev-ref) echo "HEAD"; exit 0 ;;
+    --points-at)  echo "main"; exit 0 ;;
+    --short)      echo "deadbee"; exit 0 ;;
+  esac
+done
+exit 0
+GITEOF
+chmod +x "$D/gitstub/git"
+SUPERVISOR_PATH="$D/gitstub:$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy \
+SUPERVISOR_STATE="$D/w" SLEEPCHECK_DIR="$D/none" \
+  bash "$WATCHDOG" >/dev/null 2>&1
+check "a detached worktree reports a real ref, not HEAD" "^code: *unknown@main" "$D/w/watchdog.status"
+
+# agent-supervisor#1: the `code:` line must name the REPO too, not just the
+# branch/sha -- a live worktree pinned at the wrong repo's commit reported a
+# perfectly plausible branch@sha with nothing to say which repository it
+# belonged to. Run with no git stub, against this checkout's own real
+# `origin` remote, so this exercises the actual derivation rather than a
+# canned stub answer.
+#
+# agent-estate#729/#731: a hardcoded literal here goes stale on every rename,
+# but computing the expectation with the SAME sed/awk pipeline watchdog.sh
+# uses (scripts/supervisor/watchdog.sh:393-394) is worse -- a defect in that
+# pipeline reproduces identically in the expectation, so the assertion could
+# no longer fail on a derivation bug and would only prove *a* `code:` line
+# was emitted (caught in review, see PR#731). Derive it through an
+# independent mechanism instead -- Python regex, not awk field-splitting --
+# so a bug in watchdog.sh's own parsing still shows up as a mismatch here.
+expected_repo=$(git -C "$HERE" remote get-url origin 2>/dev/null | python3 -c '
+import re, sys
+url = sys.stdin.read().strip()
+url = re.sub(r"\.git$", "", url)
+m = re.search(r"[:/]([^/:]+)/([^/:]+)$", url)
+print(f"{m.group(1)}/{m.group(2)}" if m else "")
+')
+D=$(mktemp -d); run idle "$D/w"
+check "code: line names the repo derived from origin" "^code: *${expected_repo}@" "$D/w/st"
+
+# SUPERVISOR_REPO_NAME overrides the derived name -- same override shape as
+# SUPERVISOR_STATE/SUPERVISOR_REPOS, for a layout with no `origin` remote.
+D=$(mktemp -d); mkdir -p "$D/w"
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=idle STUB_SENT="$D/w/sent" \
+STUB_COUNTER="$D/w/counter" SUPERVISOR_STATE="$D/w" SUPERVISOR_STATUS="$D/w/st" \
+SUPERVISOR_LOG="$D/w/lg" SUPERVISOR_STAMP="$D/w/stamp" SUPERVISOR_HISTORY="$D/w/hist" \
+NOTIFY_ENV="$D/w/none.env" SLEEPCHECK_DIR="$D/w/transcripts" SUPERVISOR_REPO_NAME="a-second-machine/clone" \
+  bash "$WATCHDOG" >/dev/null 2>&1
+check "SUPERVISOR_REPO_NAME overrides the derived repo name" "^code: *a-second-machine/clone@" "$D/w/st"
+
+# --- escalation must survive an unreachable channel (#91) ------------------
+# The one path that reaches a human, driven end to end through watchdog.sh
+# with a STUB notifier -- never a real channel. Tick 1's notifier exits 1;
+# tick 2's works and must still be called. Marking the episode notified on
+# *attempt* meant tick 2 was deduped away and Jon was never paged.
+escalate_run() { # escalate_run <workdir> <notify-script>
+  rm -rf "$1"; mkdir -p "$1" "$1/transcripts"
+  # MAX_RESTARTS restarts already inside ESCALATE_WINDOW -> the escalate branch.
+  now=$(date +%s)
+  for i in 1 2 3; do echo $((now - 60)); done > "$1/hist"
+  SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=idle STUB_SENT="$1/sent" \
+  SUPERVISOR_STATE="$1" SUPERVISOR_STATUS="$1/st" SUPERVISOR_LOG="$1/lg" \
+  SUPERVISOR_STAMP="$1/stamp" SUPERVISOR_HISTORY="$1/hist" NOTIFY_ENV="$1/none.env" \
+  SLEEPCHECK_DIR="$1/transcripts" NOTIFY_SCRIPT="$2" \
+  bash "$WATCHDOG" >/dev/null 2>&1
+}
+
+D=$(mktemp -d)
+cat > "$D/down.sh" <<'EOF'
+#!/bin/bash
+echo "attempted" >> "$(dirname "$0")/down-calls"
+echo "no channel reachable" >&2
+exit 1
+EOF
+cat > "$D/up.sh" <<'EOF'
+#!/bin/bash
+echo "$1|$2" >> "$(dirname "$0")/up-calls"
+EOF
+chmod +x "$D/down.sh" "$D/up.sh"
+
+# Tick 1: escalate, channel down.
+escalate_run "$D/w" "$D/down.sh"
+check "escalate with a dead channel still reports escalate" "state:    escalate" "$D/w/st"
+check "the failed send is named in watchdog.status" "^notify: *FAILED" "$D/w/st"
+check "the failed send is named in the notify log" "NOTIFY-FAILED" "$D/w/watchdog-notify.log"
+check "the notify log says a retry is coming" "will retry" "$D/w/watchdog-notify.log"
+if grep -q '"notified": *false' "$D/w/.watchdog-escalate-episode.json" 2>/dev/null; then
+  echo "  ok   a failed send does not consume the escalation episode"; pass=$((pass+1))
+else
+  echo "  FAIL episode marked notified after a failed send: $(cat "$D/w/.watchdog-escalate-episode.json" 2>/dev/null)"; fail=$((fail+1))
+fi
+
+# Tick 2: same escalation, channel back. The state dir is kept, so the episode
+# flag written by tick 1 is the one this tick reads -- which is the whole bug.
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=idle STUB_SENT="$D/w/sent" \
+SUPERVISOR_STATE="$D/w" SUPERVISOR_STATUS="$D/w/st" SUPERVISOR_LOG="$D/w/lg" \
+SUPERVISOR_STAMP="$D/w/stamp" SUPERVISOR_HISTORY="$D/w/hist" NOTIFY_ENV="$D/w/none.env" \
+SLEEPCHECK_DIR="$D/w/transcripts" NOTIFY_SCRIPT="$D/up.sh" \
+  bash "$WATCHDOG" >/dev/null 2>&1
+check "the next tick retries the send"        "Supervisor escalation" "$D/up-calls"
+check "and records that it was delivered"     "NOTIFY-SENT" "$D/w/watchdog-notify.log"
+
+# Tick 3: delivered, so dedup takes over. One page per episode, not a burst.
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=idle STUB_SENT="$D/w/sent" \
+SUPERVISOR_STATE="$D/w" SUPERVISOR_STATUS="$D/w/st" SUPERVISOR_LOG="$D/w/lg" \
+SUPERVISOR_STAMP="$D/w/stamp" SUPERVISOR_HISTORY="$D/w/hist" NOTIFY_ENV="$D/w/none.env" \
+SLEEPCHECK_DIR="$D/w/transcripts" NOTIFY_SCRIPT="$D/up.sh" \
+  bash "$WATCHDOG" >/dev/null 2>&1
+if [ "$(wc -l < "$D/up-calls" | tr -d ' ')" = 1 ]; then
+  echo "  ok   a delivered escalation is not re-sent every tick"; pass=$((pass+1))
+else
+  echo "  FAIL escalation sent $(wc -l < "$D/up-calls") times: $(cat "$D/up-calls")"; fail=$((fail+1))
+fi
+
+
+# --- the live copy is pinned, and staleness must be visible (#99) ----------
+#
+# The LaunchAgent runs watchdog.sh from a detached worktree that NOTHING in this
+# repository updates, so a merged fix can sit on main while the live copy keeps
+# running the old one. `code: detached @ <sha>` reads exactly as healthy as a
+# current sha unless the reader already knows what main is.
+#
+# This needs its own git repository: the count is computed from the directory
+# holding watchdog.sh, which for every other test in this file is the real
+# checkout, whose relationship to origin/main is whatever the working session
+# happens to be doing. A test that depends on that is not a test.
+G="$D/gitrepo"; mkdir -p "$G/scripts/supervisor"
+cp "$HERE/../../scripts/supervisor/watchdog.sh" "$G/scripts/supervisor/"
+for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh session-defaults.sh \
+           watchdog-harness.sh watchdog-status.sh watchdog-checks.sh watchdog-advance.sh; do
+  cp "$HERE/../../scripts/supervisor/$dep" "$G/scripts/supervisor/" 2>/dev/null
+done
+# The harness adapters are part of what watchdog.sh needs to decide anything
+# at all since #215 -- without them its busy probe cannot tell, and a tick
+# that cannot tell assumes busy and stops. A copy that omits them is not a
+# copy of the watchdog.
+cp -R "$HERE/../../scripts/supervisor/harness" "$G/scripts/supervisor/" 2>/dev/null
+git -C "$G" init -q
+git -C "$G" config user.email t@e.com; git -C "$G" config user.name T
+git -C "$G" add -A >/dev/null 2>&1
+git -C "$G" commit -q -m "live copy"
+
+wd_run() { # runs the COPY, not this repository's own watchdog.sh
+  rm -rf "$1"; mkdir -p "$1" "$1/transcripts"
+  SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=idle STUB_SENT="$1/sent" \
+  STUB_COUNTER="$1/counter" \
+  SUPERVISOR_STATE="$1" SUPERVISOR_STATUS="$1/st" SUPERVISOR_LOG="$1/lg" \
+  SUPERVISOR_STAMP="$1/stamp" SUPERVISOR_HISTORY="$1/hist" NOTIFY_ENV="$1/none.env" \
+  SLEEPCHECK_DIR="$1/transcripts" \
+  bash "$G/scripts/supervisor/watchdog.sh" >/dev/null 2>"$1/err"
+}
+
+git -C "$G" update-ref refs/remotes/origin/main HEAD
+wd_run "$D/wcur"
+if grep -q "behind origin/main" "$D/wcur/st" 2>/dev/null; then
+  echo "  FAIL a current live copy is not labelled stale"; fail=$((fail+1))
+else
+  echo "  ok   a current live copy is not labelled stale"; pass=$((pass+1))
+fi
+
+# Advance origin/main past the live copy, exactly as a merge does.
+echo newer > "$G/newfile"
+git -C "$G" add -A >/dev/null 2>&1
+git -C "$G" commit -q -m "merged after the live copy was pinned"
+git -C "$G" update-ref refs/remotes/origin/main HEAD
+git -C "$G" checkout -q HEAD~1 2>/dev/null
+wd_run "$D/wstale"
+if grep -q "1 behind origin/main" "$D/wstale/st" 2>/dev/null; then
+  echo "  ok   a stale live copy says how far behind it is"; pass=$((pass+1))
+else
+  echo "  FAIL a stale live copy says how far behind it is"; fail=$((fail+1))
+  sed 's/^/       /' "$D/wstale/st" 2>/dev/null
+fi
+# No fetch happens, so a zero is not proof of freshness. The wording must say
+# the was not refetched by this check rather than implying a currency it cannot check.
+if grep -q "not refetched by this check" "$D/wstale/st" 2>/dev/null; then
+  echo "  ok   the status says the comparison was not refetched by this check"; pass=$((pass+1))
+else
+  echo "  FAIL the status says the comparison was not refetched by this check"; fail=$((fail+1))
+fi
+
+
+# An UNREADABLE comparison must not read as "up to date". The first version of
+# this check wrote `''|0) code_note=""`, lumping a failed git call in with a
+# genuine zero -- the exact defect the line exists to prevent, inside the fix
+# for it. Caught in review before merge.
+#
+# Delete origin/main entirely: rev-list fails, `behind` is empty, and a status
+# with no note would claim currency the check never established.
+git -C "$G" update-ref -d refs/remotes/origin/main 2>/dev/null
+wd_run "$D/wnoref"
+if grep -q "cannot compare" "$D/wnoref/st" 2>/dev/null; then
+  echo "  ok   an unreadable comparison says so instead of reading as current"; pass=$((pass+1))
+else
+  echo "  FAIL an unreadable comparison says so instead of reading as current"; fail=$((fail+1))
+  sed 's/^/       /' "$D/wnoref/st" 2>/dev/null
+fi
+if grep -q "behind origin/main" "$D/wnoref/st" 2>/dev/null; then
+  echo "  FAIL an unreadable comparison does not claim a behind-count"; fail=$((fail+1))
+else
+  echo "  ok   an unreadable comparison does not claim a behind-count"; pass=$((pass+1))
+fi
+
+
+# --- the watchdog advances the live copy it runs from (#130) ---------------
+#
+# Detecting the drift and being unable to fix it put the fixer in the loop --
+# the component that goes down, and that is down BY DESIGN during an
+# escalation. These cases drive the real watchdog.sh and the real
+# advance-live.sh against a THROWAWAY live worktree; never the estate's own,
+# because a test that corrupts the live copy takes the guard down with it.
+A=$(mktemp -d)
+git init -q --bare "$A/origin.git"
+git clone -q "$A/origin.git" "$A/src" 2>/dev/null
+SRC="$A/src"
+git -C "$SRC" config user.email t@e.com; git -C "$SRC" config user.name T
+git -C "$SRC" checkout -q -b main
+mkdir -p "$SRC/scripts/supervisor"
+for f in watchdog.sh watchdog-harness.sh watchdog-status.sh watchdog-checks.sh watchdog-advance.sh \
+         advance-live.sh poller-window.sh session-defaults.sh sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
+  cp "$HERE/../../scripts/supervisor/$f" "$SRC/scripts/supervisor/"
+done
+cp -R "$HERE/../../scripts/supervisor/harness" "$SRC/scripts/supervisor/"
+# A tracked file no later commit here touches, so an uncommitted edit to it is
+# the non-conflicting shape `git checkout --detach` carries silently forward --
+# what makes advance-live.sh's dirty refusal load-bearing rather than a
+# courtesy.
+echo baseline >"$SRC/untouched.txt"
+git -C "$SRC" add -A >/dev/null 2>&1
+git -C "$SRC" commit -q -m "first"
+git -C "$SRC" push -q -u origin main
+LIVE="$A/live"
+git -C "$SRC" worktree add -q --detach "$LIVE" origin/main
+
+adv_commit() { # adv_commit <text> -- one more commit on origin/main
+  echo "$1" >"$SRC/marker.txt"
+  git -C "$SRC" add -A >/dev/null 2>&1
+  git -C "$SRC" commit -q -m "$1"
+  git -C "$SRC" push -q origin main
+  git -C "$LIVE" fetch -q origin main
+}
+adv_run() { # adv_run <state-dir> [pane-state] [notify-script]
+  rm -rf "$1"; mkdir -p "$1" "$1/transcripts"
+  SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE="${2:-busy}" STUB_SENT="$1/sent" \
+  SUPERVISOR_STATE="$1" SUPERVISOR_STATUS="$1/st" SUPERVISOR_LOG="$1/lg" \
+  SUPERVISOR_STAMP="$1/stamp" SUPERVISOR_HISTORY="$1/hist" NOTIFY_ENV="$1/none.env" \
+  SUPERVISOR_LIVE="$LIVE" SLEEPCHECK_DIR="$1/transcripts" NOTIFY_SCRIPT="${3:-}" \
+  bash "$LIVE/scripts/supervisor/watchdog.sh" >/dev/null 2>"$1/err"
+}
+at_sha() { git -C "$LIVE" rev-parse HEAD; }
+say_ok()  { echo "  ok   $1"; pass=$((pass+1)); }
+say_bad() { echo "  FAIL $1 — $2"; fail=$((fail+1)); }
+want_exit() { # want_exit <name> <got> <want> [context]
+  if [ "$2" = "$3" ]; then say_ok "$1"; else say_bad "$1" "expected exit $3, got $2: ${4:-}"; fi
+}
+
+# 1. behind origin/main: the watchdog advances it.
+adv_commit second
+t2=$(git -C "$LIVE" rev-parse origin/main); b2=$(at_sha)
+adv_run "$A/s1"
+if [ "$(at_sha)" = "$t2" ]; then say_ok "a watchdog tick advances a live copy that is behind"
+else say_bad "a watchdog tick advances a live copy that is behind" "still at $(at_sha), wanted $t2 (was $b2); $(cat "$A/s1/st" 2>/dev/null | tr '\n' ' ')"; fi
+check "the advance is reported in the status file" "^advance: *advanced" "$A/s1/st"
+check "and the code: line still reports the drift this tick ran with" "1 behind origin/main" "$A/s1/st"
+
+# 2. already current: nothing is touched, and the report still happens.
+b3=$(at_sha)
+adv_run "$A/s2"
+if [ "$(at_sha)" = "$b3" ]; then say_ok "a current live copy is not touched"
+else say_bad "a current live copy is not touched" "moved to $(at_sha)"; fi
+check "a current live copy still reports its state" "state:    working" "$A/s2/st"
+check "a current live copy says there was nothing to advance" "^advance: *current" "$A/s2/st"
+
+# 3. a refused advance (dirty live tree) is a report, not a crash. The tick
+#    must still do its normal job and say why it did not advance.
+adv_commit third
+t4=$(git -C "$LIVE" rev-parse origin/main); b4=$(at_sha)
+echo "someone's unfinished edit" >>"$LIVE/untouched.txt"
+adv_run "$A/s3"; rc3=$?
+want_exit "a refused advance leaves the watchdog exiting 0" "$rc3" 0 "$(cat "$A/s3/err" 2>/dev/null)"
+check "a refused advance still writes the tick's normal status" "state:    working" "$A/s3/st"
+check "the refusal reason is in the status file" "^advance: *refused.*uncommitted changes" "$A/s3/st"
+check "the refusal reason is in the watchdog log" "ADVANCE-REFUSED" "$A/s3/lg"
+if [ "$(at_sha)" = "$b4" ]; then say_ok "a refused advance leaves live where it was"
+else say_bad "a refused advance leaves live where it was" "moved to $(at_sha)"; fi
+if [ -n "$(git -C "$LIVE" status --porcelain)" ]; then say_ok "the uncommitted edit survives the refusal"
+else say_bad "the uncommitted edit survives the refusal" "live is clean — the edit was carried forward or lost"; fi
+git -C "$LIVE" checkout -q -- untouched.txt
+
+# 4. a candidate that fails advance-live.sh's run-gate is NOT checked out.
+#    The gate is what answers the objection this design was first rejected
+#    over: a watchdog that cannot run cannot become the live one.
+BRK=$(mktemp -d); rm -rf "$BRK"
+git -C "$SRC" worktree add -q --detach "$BRK" origin/main
+printf '#!/bin/bash\nexit 1\n' >"$BRK/scripts/supervisor/watchdog.sh"
+git -C "$BRK" -c user.email=t@e.com -c user.name=T commit -aq -m "break watchdog.sh"
+brk_sha=$(git -C "$BRK" rev-parse HEAD)
+# Push the broken commit to the real origin/main -- advance-live.sh fetches
+# it itself before comparing (agent-supervisor#11), so pointing only LIVE's
+# local ref at an unpushed commit would be silently overwritten by that fetch.
+git -C "$BRK" push -q origin HEAD:refs/heads/main
+b5=$(at_sha)
+adv_run "$A/s4"
+if [ "$(at_sha)" = "$b5" ]; then say_ok "a candidate that fails its run-gate is not checked out"
+else say_bad "a candidate that fails its run-gate is not checked out" "live moved to $(at_sha) — the broken commit is now the guard"; fi
+check "the failed run-gate is named in the status file" "^advance: *refused.*well-formed status" "$A/s4/st"
+git -C "$BRK" push -q --force origin "$t4:refs/heads/main"
+git -C "$LIVE" update-ref refs/remotes/origin/main "$t4"
+git -C "$SRC" worktree remove --force "$BRK" >/dev/null 2>&1
+git -C "$SRC" worktree prune >/dev/null 2>&1
+
+# 5. during an escalation the code is FROZEN, deliberately: the sha a human was
+#    paged with must still be the sha they find. The `code:` line keeps saying
+#    how far behind it is -- the report is not what changes.
+cat >"$A/notify.sh" <<'EOF'
+#!/bin/bash
+echo "$1" >> "$(dirname "$0")/pages"
+EOF
+chmod +x "$A/notify.sh"
+b6=$(at_sha)
+rm -rf "$A/s5"; mkdir -p "$A/s5" "$A/s5/transcripts"
+nowsec=$(date +%s); for i in 1 2 3; do echo $((nowsec - 60)); done >"$A/s5/hist"
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=idle STUB_SENT="$A/s5/sent" \
+SUPERVISOR_STATE="$A/s5" SUPERVISOR_STATUS="$A/s5/st" SUPERVISOR_LOG="$A/s5/lg" \
+SUPERVISOR_STAMP="$A/s5/stamp" SUPERVISOR_HISTORY="$A/s5/hist" NOTIFY_ENV="$A/s5/none.env" \
+SUPERVISOR_LIVE="$LIVE" SLEEPCHECK_DIR="$A/s5/transcripts" NOTIFY_SCRIPT="$A/notify.sh" \
+  bash "$LIVE/scripts/supervisor/watchdog.sh" >/dev/null 2>"$A/s5/err"
+check "an escalating tick still escalates" "state:    escalate" "$A/s5/st"
+check "an escalating tick holds the advance on purpose" "^advance: *held" "$A/s5/st"
+check "the hold is in the watchdog log" "ADVANCE-HELD" "$A/s5/lg"
+check "the code: line still reports the drift during an escalation" "1 behind origin/main" "$A/s5/st"
+if [ "$(at_sha)" = "$b6" ]; then say_ok "an escalation leaves the live copy where the page said it was"
+else say_bad "an escalation leaves the live copy where the page said it was" "moved to $(at_sha)"; fi
+
+# 5b. an unreadable origin/main: the `code:` line's three outcomes are
+#     untouched by any of this, and an advance that cannot compare refuses.
+# agent-supervisor#11: advance-live.sh now fetches before comparing, so a
+# merely-deleted local ref would just be recreated from a reachable remote.
+# The `code:` line's own comparison (watchdog.sh's report(), computed before
+# the exit trap's fetch ever runs) still reads the deleted local ref, so
+# deleting it still exercises that half; breaking the remote URL as well is
+# what makes advance-live.sh's own fetch fail too, exactly the offline/
+# auth-expired/timeout class #11 names.
+git -C "$LIVE" update-ref -d refs/remotes/origin/main
+real_origin_url=$(git -C "$LIVE" remote get-url origin)
+git -C "$LIVE" remote set-url origin "$A/does-not-exist.git"
+b7=$(at_sha)
+adv_run "$A/s6"
+check "an unreadable comparison still says so" "cannot compare" "$A/s6/st"
+check "and the advance refuses rather than guessing" "^advance: *refused" "$A/s6/st"
+if [ "$(at_sha)" = "$b7" ]; then say_ok "an unreadable comparison leaves live untouched"
+else say_bad "an unreadable comparison leaves live untouched" "moved to $(at_sha)"; fi
+git -C "$LIVE" remote set-url origin "$real_origin_url"
+
+# --- the race gate itself: outside the post-tick window, do not advance (#135)
+#
+# Everything above reaches advance-live.sh through watchdog.sh's exit trap,
+# which has just written a fresh `checked:` timestamp -- so `age` is ~0s and
+# inside the window in every one of those cases, and the gate's SKIP branch is
+# never taken. Three mutations of the window check (disabling it at its first
+# occurrence, at the pre-mutation re-check, and both) left the suite at
+# 50 passed, 0 failed. These two cases drive the skip outcome instead, by
+# seeding a stale timestamp and calling advance-live.sh DIRECTLY -- the trap
+# cannot produce a stale one.
+stamp_at() { # stamp_at <seconds-ago> -- a watchdog `checked:` timestamp in the past
+  python3 -c 'import datetime,sys
+print((datetime.datetime.now(datetime.timezone.utc)
+       - datetime.timedelta(seconds=int(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$1"
+}
+seed_status() { # seed_status <status-file> <seconds-ago>
+  mkdir -p "$(dirname "$1")"
+  printf 'checked:  %s\nstate:    working\n' "$(stamp_at "$2")" >"$1"
+}
+adv_direct() { # adv_direct <state-dir> -- advance-live.sh alone, no watchdog tick
+  SUPERVISOR_STATE="$1" SUPERVISOR_STATUS="$1/st" SUPERVISOR_LIVE="$LIVE" \
+  ADVANCE_LOG="$1/advance.log" ADVANCE_ROLLBACK="$1/rollback" \
+    bash "$LIVE/scripts/supervisor/advance-live.sh" >"$1/out" 2>&1
+}
+
+# origin/main was deleted by 5b; restore it so there is something to advance.
+git -C "$LIVE" update-ref refs/remotes/origin/main "$t4"
+
+# 6. the initial check: a tick that is long past leaves the advance for a
+#    later pass rather than swapping the tree out from under the next one.
+b8=$(at_sha)
+SA="$A/s7"; rm -rf "$SA"; mkdir -p "$SA"
+seed_status "$SA/st" 200
+adv_direct "$SA"; rc8=$?
+want_exit "a stale watchdog tick is a skip, not a failure" "$rc8" 0 "$(cat "$SA/out" 2>/dev/null)"
+check "outside the post-tick window the advance is skipped" \
+      "outside the 0-150s post-tick window" "$SA/out"
+check "the skip is in the advance log" "SKIP:.*outside the 0-150s post-tick window" "$SA/advance.log"
+if [ "$(at_sha)" = "$b8" ]; then say_ok "a skipped advance leaves the live copy where it was"
+else say_bad "a skipped advance leaves the live copy where it was" "moved to $(at_sha) — the race gate did not hold"; fi
+if [ -e "$SA/rollback" ]; then say_bad "a skipped advance records no rollback target" "wrote $(cat "$SA/rollback")"
+else say_ok "a skipped advance records no rollback target"; fi
+
+# 7. the pre-mutation re-check: the window was open when the gate was first
+#    read and closed while the smoke test ran. That gap is variable-duration
+#    by construction -- a `git worktree add` plus a whole candidate watchdog
+#    run -- so the only check standing between a live tick and a tree swapped
+#    underneath it is the SECOND one, at the point of mutation. A test that
+#    only drives case 6 leaves this occurrence exactly as uncovered as before.
+#    Made deterministic rather than timed: the candidate's own watchdog.sh
+#    ages the live status while the gate is watching it.
+SB="$A/s8"; rm -rf "$SB"; mkdir -p "$SB"
+STALL=$(mktemp -d); rm -rf "$STALL"
+git -C "$SRC" worktree add -q --detach "$STALL" "$t4"
+stale_stamp=$(stamp_at 200)
+cat >"$STALL/scripts/supervisor/watchdog.sh" <<EOF
+#!/bin/bash
+# Test fixture, not a watchdog. It writes the well-formed status advance-live.sh's
+# run-gate demands, so the candidate passes the gate and the run reaches the
+# pre-mutation re-check -- and it ages the LIVE status out of the post-tick
+# window while it runs, which is what a tick overrunning its own cadence does.
+printf 'checked:  %s\nstate:    working\n' "\$(date -u +%Y-%m-%dT%H:%M:%SZ)" >"\$SUPERVISOR_STATUS"
+printf 'checked:  %s\nstate:    working\n' '$stale_stamp' >'$SB/st'
+EOF
+git -C "$STALL" -c user.email=t@e.com -c user.name=T commit -aq -m "candidate whose run outlives the window"
+stall_sha=$(git -C "$STALL" rev-parse HEAD)
+# Push to the real origin/main, not just LIVE's local ref -- advance-live.sh
+# fetches before comparing (agent-supervisor#11), so a local-only ref would
+# be overwritten by that fetch before the smoke test ever ran.
+git -C "$STALL" push -q origin HEAD:refs/heads/main
+
+b9=$(at_sha)
+seed_status "$SB/st" 0
+adv_direct "$SB"; rc9=$?
+want_exit "a window that closes mid-smoke-test is a skip, not a failure" "$rc9" 0 "$(cat "$SB/out" 2>/dev/null)"
+check "the run got past the first check to the smoke test" "smoke test at $stall_sha passed" "$SB/advance.log"
+check "the window closing during the smoke test is caught before the checkout" \
+      "window closed while the smoke test ran" "$SB/out"
+if [ "$(at_sha)" = "$b9" ]; then say_ok "the re-check leaves the live copy where it was"
+else say_bad "the re-check leaves the live copy where it was" "moved to $(at_sha) — checked out after the window closed"; fi
+
+git -C "$STALL" push -q --force origin "$t4:refs/heads/main"
+git -C "$LIVE" update-ref refs/remotes/origin/main "$t4"
+git -C "$SRC" worktree remove --force "$STALL" >/dev/null 2>&1
+git -C "$SRC" worktree prune >/dev/null 2>&1
+
+leftover=$(git -C "$SRC" worktree list --porcelain | grep -c 'ad99-advance-smoke' || true)
+if [ "$leftover" -eq 0 ]; then say_ok "no smoke-test worktrees left registered"
+else say_bad "no smoke-test worktrees left registered" "$leftover still registered"; fi
+
+# A run from somewhere that is NOT the pinned live copy must never check out
+# over the tree it is running from -- this is what keeps the suite above, and
+# a developer's own checkout, from being mutated by a test.
+D=$(mktemp -d); run busy "$D/w"
+if grep -q '^advance:' "$D/w/st" 2>/dev/null; then
+  say_bad "a watchdog that is not the live copy does not advance anything" "reported $(grep '^advance:' "$D/w/st")"
+else
+  say_ok "a watchdog that is not the live copy does not advance anything"
+fi
+
+git -C "$SRC" worktree remove --force "$LIVE" >/dev/null 2>&1
+rm -rf "$A"
+
+# --- #163: the inbox-poll heartbeat, the death report_stop() cannot report -
+#
+# inbox-poll.sh pages Jon itself from `trap report_stop EXIT`, but SIGKILL,
+# an OOM kill, or a hard power loss run no trap at all -- the process just
+# stops updating inbox-poll.status's `checked:` line. These drive the real
+# watchdog.sh end to end with a stub notifier, the same shape as the
+# escalate_run tests above, but against inbox-poll.status instead of
+# watchdog.status.
+stamp_ago() { # stamp_ago <seconds-ago> -- an inbox-poll.status `checked:` timestamp
+  python3 -c 'import datetime,sys
+print((datetime.datetime.now(datetime.timezone.utc)
+       - datetime.timedelta(seconds=int(sys.argv[1]))).strftime("%Y-%m-%dT%H:%M:%SZ"))' "$1"
+}
+write_inbox_status() { # write_inbox_status <path> <seconds-ago> <state>
+  printf 'checked: %s\nstate:   %s\ndetail:  listening\npid:     999\n' "$(stamp_ago "$2")" "$3" >"$1"
+}
+hb_run() { # hb_run <workdir> <inbox-poll.status-seconds-ago-or-absent> <state> [notify-script]
+  rm -rf "$1"; mkdir -p "$1" "$1/transcripts"
+  if [ "$2" != "absent" ]; then write_inbox_status "$1/inbox-poll.status" "$2" "$3"; fi
+  SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy STUB_SENT="$1/sent" \
+  SUPERVISOR_STATE="$1" SUPERVISOR_STATUS="$1/st" SUPERVISOR_LOG="$1/lg" \
+  SUPERVISOR_STAMP="$1/stamp" SUPERVISOR_HISTORY="$1/hist" NOTIFY_ENV="$1/none.env" \
+  SLEEPCHECK_DIR="$1/transcripts" NOTIFY_SCRIPT="${4:-}" \
+  SUPERVISOR_INBOX_POLL_STATUS="$1/inbox-poll.status" \
+  SUPERVISOR_HEARTBEAT_EPISODE="$1/.hb-episode.json" \
+  INBOX_HEARTBEAT_STALE_AFTER=100 \
+    bash "$WATCHDOG" >/dev/null 2>"$1/err"
+}
+
+# Stub notifier, in a directory of its own that outlives every case below --
+# each case gets a fresh mktemp workdir via hb_run's `rm -rf`, and the
+# notifier itself must not live inside one of those or a later case's setup
+# would delete the very script the earlier case's watchdog run needs. Calls
+# are recorded beside the script itself ($0.calls), not beside the case's
+# workdir, so every case shares one call log -- read it, then truncate it,
+# between cases.
+NOTIFY_DIR=$(mktemp -d)
+cat >"$NOTIFY_DIR/up.sh" <<'EOF'
+#!/bin/bash
+echo "$1|$2" >> "$0.calls"
+EOF
+chmod +x "$NOTIFY_DIR/up.sh"
+UP="$NOTIFY_DIR/up.sh"
+up_calls() { cat "$UP.calls" 2>/dev/null; }
+up_call_count() { wc -l <"$UP.calls" 2>/dev/null | tr -d ' '; }
+
+# 1. Missing status file: never paged, reported distinctly from stale.
+D=$(mktemp -d)
+hb_run "$D/w" absent ok "$UP"
+check "a missing inbox-poll.status is named in watchdog.status" "^heartbeat: .*missing" "$D/w/st"
+if [ -z "$(up_calls)" ]; then say_ok "a missing status file never pages"
+else say_bad "a missing status file never pages" "paged: $(up_calls)"; fi
+
+# 2. Fresh heartbeat (well under the 100s threshold): no page.
+D=$(mktemp -d)
+hb_run "$D/w" 5 ok "$UP"
+check "a fresh heartbeat is reported alive" "^heartbeat: .*alive" "$D/w/st"
+if [ -z "$(up_calls)" ]; then say_ok "a fresh heartbeat never pages"
+else say_bad "a fresh heartbeat never pages" "paged: $(up_calls)"; fi
+
+# 3. Stale heartbeat (past the 100s threshold), state still ok (a SIGKILL: the
+#    process is gone but the last heartbeat it wrote never says so): pages.
+: >"$UP.calls"
+D=$(mktemp -d)
+hb_run "$D/w" 500 ok "$UP"
+check "a stale heartbeat is reported in watchdog.status" "^heartbeat: .*new stale-heartbeat episode" "$D/w/st"
+if grep -q "watchdog: inbox-poll heartbeat stale" "$UP.calls" 2>/dev/null; then
+  say_ok "a stale heartbeat pages through the notify path"
+else
+  say_bad "a stale heartbeat pages through the notify path" "got: $(up_calls)"
+fi
+
+# 4. Same stale episode, second tick: deduped, not paged again. Reuses $D/w
+#    from case 3 -- the episode file written there is what this tick must
+#    read to dedup correctly.
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy STUB_SENT="$D/w/sent" \
+SUPERVISOR_STATE="$D/w" SUPERVISOR_STATUS="$D/w/st" SUPERVISOR_LOG="$D/w/lg" \
+SUPERVISOR_STAMP="$D/w/stamp" SUPERVISOR_HISTORY="$D/w/hist" NOTIFY_ENV="$D/w/none.env" \
+SLEEPCHECK_DIR="$D/w/transcripts" NOTIFY_SCRIPT="$UP" \
+SUPERVISOR_INBOX_POLL_STATUS="$D/w/inbox-poll.status" \
+SUPERVISOR_HEARTBEAT_EPISODE="$D/w/.hb-episode.json" \
+INBOX_HEARTBEAT_STALE_AFTER=100 \
+  bash "$WATCHDOG" >/dev/null 2>"$D/w/err2"
+if [ "$(up_call_count)" = 1 ]; then
+  say_ok "a stale-heartbeat episode is not re-paged every tick"
+else
+  say_bad "a stale-heartbeat episode is not re-paged every tick" "paged $(up_call_count) times"
+fi
+
+# 5. An orderly stop (state: stopped, written by inbox-poll.sh's own
+#    report_stop() on the way out) must NOT also page here, no matter how
+#    stale `checked:` has become since -- report_stop already decided
+#    whether to page Jon for this exit (#155). Alarming on it too pages him
+#    twice for one event, which the brief calls out by name.
+: >"$UP.calls"
+D=$(mktemp -d)
+hb_run "$D/w" 999999 stopped "$UP"
+check "an orderly stop is reported distinctly, not as a page" "^heartbeat: .*own stop" "$D/w/st"
+if [ -z "$(up_calls)" ]; then say_ok "an orderly stop never double-pages"
+else say_bad "an orderly stop never double-pages" "paged: $(up_calls)"; fi
+
+# 6. The escalate-restart notifier and the heartbeat notifier must not share
+#    dedup state: a live escalation must still page even while a stale
+#    heartbeat is also being reported (and vice versa) -- they are different
+#    episodes about different subsystems.
+: >"$UP.calls"
+D=$(mktemp -d); mkdir -p "$D/w/transcripts"
+write_inbox_status "$D/w/inbox-poll.status" 500 ok
+now=$(date +%s); for i in 1 2 3; do echo $((now - 60)); done >"$D/w/hist"
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=idle STUB_SENT="$D/w/sent" \
+SUPERVISOR_STATE="$D/w" SUPERVISOR_STATUS="$D/w/st" SUPERVISOR_LOG="$D/w/lg" \
+SUPERVISOR_STAMP="$D/w/stamp" SUPERVISOR_HISTORY="$D/w/hist" NOTIFY_ENV="$D/w/none.env" \
+SLEEPCHECK_DIR="$D/w/transcripts" NOTIFY_SCRIPT="$UP" \
+SUPERVISOR_INBOX_POLL_STATUS="$D/w/inbox-poll.status" \
+SUPERVISOR_HEARTBEAT_EPISODE="$D/w/.hb-episode.json" \
+INBOX_HEARTBEAT_STALE_AFTER=100 \
+  bash "$WATCHDOG" >/dev/null 2>"$D/w/err"
+check "the watchdog still escalates the loop-restart failure" "state:    escalate" "$D/w/st"
+check "and separately reports the stale heartbeat" "^heartbeat: .*new stale-heartbeat episode" "$D/w/st"
+if [ "$(up_call_count)" = 2 ]; then
+  say_ok "two independent alarms in one tick each page once, not zero and not a burst"
+else
+  say_bad "two independent alarms in one tick each page once, not zero and not a burst" \
+    "paged $(up_call_count) time(s): $(up_calls)"
+fi
+
+# --- #18: duplicate inbox-poll.sh processes are measured by pid -----------
+#
+# inbox-poll.status names the last poller that wrote it, so it cannot answer
+# "how many pollers are alive?" The watchdog's tick already reads the poller
+# subsystem; this check must ask pgrep/ps and report duplicates with every pid
+# and start time, while leaving the healthy one-poller case silent.
+pc_run() { # pc_run <workdir> <pid-list> [extra env assignments...]
+  local dir="$1" pids="$2"; shift 2
+  rm -rf "$dir"; mkdir -p "$dir" "$dir/transcripts"
+  printf 'checked: %s\nstate:   ok\ndetail:  listening\npid:     999\n' "$(stamp_ago 5)" >"$dir/inbox-poll.status"
+  env SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy STUB_SENT="$dir/sent" \
+    SUPERVISOR_STATE="$dir" SUPERVISOR_STATUS="$dir/st" SUPERVISOR_LOG="$dir/lg" \
+    SUPERVISOR_STAMP="$dir/stamp" SUPERVISOR_HISTORY="$dir/hist" NOTIFY_ENV="$dir/none.env" \
+    SLEEPCHECK_DIR="$dir/transcripts" NOTIFY_SCRIPT="$UP" \
+    SUPERVISOR_INBOX_POLL_STATUS="$dir/inbox-poll.status" \
+    STUB_POLLER_PIDS="$pids" STUB_PS_LSTART_111="Thu Aug 13 04:05:56 2026" \
+    STUB_PS_LSTART_222="Thu Aug 13 04:08:56 2026" "$@" \
+    bash "$WATCHDOG" >/dev/null 2>"$dir/err"
+}
+
+D=$(mktemp -d)
+pc_run "$D/w" "111 222" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
+  STUB_PS_PPID_222=111 STUB_PS_PGID_222=111
+if grep -q '^poller:' "$D/w/st" 2>/dev/null || grep -q 'POLLER-DUPLICATE' "$D/w/lg" 2>/dev/null; then
+  say_bad "a poller and its own same-pgid child are silent" "$(cat "$D/w/st" 2>/dev/null | tr '\n' ' '); log=$(cat "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
+else
+  say_ok "a poller and its own same-pgid child are silent"
+fi
+
+MUT_CHILD=$(mktemp -d); mkdir -p "$MUT_CHILD/scripts/supervisor"
+cp "$WATCHDOG" "$MUT_CHILD/scripts/supervisor/watchdog.sh"
+for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh session-defaults.sh poller-lib.sh \
+           watchdog-harness.sh watchdog-status.sh watchdog-checks.sh watchdog-advance.sh; do
+  cp "$HERE/../../scripts/supervisor/$dep" "$MUT_CHILD/scripts/supervisor/" 2>/dev/null
+done
+cp -R "$HERE/../../scripts/supervisor/harness" "$MUT_CHILD/scripts/supervisor/" 2>/dev/null
+patch_rc=0
+# agent-supervisor#382: this logic now lives in poller-lib.sh, sourced by
+# watchdog.sh -- the mutation targets that file, not the copied watchdog.sh.
+python3 - "$MUT_CHILD/scripts/supervisor/poller-lib.sh" <<'PY' || patch_rc=$?
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = '''      if [ "$ppid" = "$parent_pid" ] && [ "$pgid" != "unknown" ] && [ "$pgid" = "$parent_pgid" ]; then
+        skip=1
+        break
+      fi'''
+assert old in text, "same-pgid child suppression block not found"
+assert text.count(old) == 1, "same-pgid child suppression block not unique"
+open(path, "w").write(text.replace(old, '      : # child suppression removed for this mutation test', 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  say_bad "setup: mutated the duplicate-poller child suppression away" "patch failed with exit $patch_rc"
+else
+  chmod +x "$MUT_CHILD/scripts/supervisor/watchdog.sh"
+  old_watchdog="$WATCHDOG"
+  WATCHDOG="$MUT_CHILD/scripts/supervisor/watchdog.sh"
+  D=$(mktemp -d)
+  pc_run "$D/w" "111 222" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
+    STUB_PS_PPID_222=111 STUB_PS_PGID_222=111
+  WATCHDOG="$old_watchdog"
+  if grep -q 'DUPLICATE' "$D/w/st" "$D/w/lg" 2>/dev/null; then
+    say_ok "mutation confirmed: removing same-pgid child suppression counts the poll-cycle child (the assertion above would be red)"
+  else
+    say_bad "mutation confirmed: removing same-pgid child suppression counts the poll-cycle child" \
+      "mutant stayed silent: $(cat "$D/w/st" "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
+  fi
+fi
+
+D=$(mktemp -d)
+pc_run "$D/w" "111 222" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
+  STUB_PS_PPID_222=20055 STUB_PS_PGID_222=222
+check "duplicate pollers are reported in watchdog.status" "^poller:.*DUPLICATE" "$D/w/st"
+check "the duplicate report names pid 111" "pid 111 started Thu Aug 13 04:05:56 2026" "$D/w/st"
+check "the duplicate report names pid 222" "pid 222 started Thu Aug 13 04:08:56 2026" "$D/w/st"
+check "the duplicate report is logged loudly" "POLLER-DUPLICATE" "$D/w/lg"
+
+D=$(mktemp -d)
+pc_run "$D/w" "111"
+if grep -q '^poller:' "$D/w/st" 2>/dev/null || grep -q 'POLLER-DUPLICATE' "$D/w/lg" 2>/dev/null; then
+  say_bad "exactly one live poller is silent" "$(cat "$D/w/st" 2>/dev/null | tr '\n' ' '); log=$(cat "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
+else
+  say_ok "exactly one live poller is silent"
+fi
+
+# --- #147: a sandboxed test fixture's copy of inbox-poll.sh, still alive
+# under a mktemp'd path and MARKED as the watchdog's own fixture, must not
+# be counted as a second poller. This is the exact shape measured live: one
+# real poller (pid 111, installed path) plus one leaked watchdog test
+# fixture (pid 333, launched from underneath a mktemp'd path) -- unrelated
+# by ppid/pgid, so the parent/child suppression above cannot silence it;
+# only the marker (poller_fixture_marker in watchdog.sh) can. The marker is
+# a real file on disk next to the (real, if unused) script path, since
+# poller_is_verified_fixture stats it directly -- the stub ps only fakes
+# `ps` output, not the filesystem.
+FIXDIR=$(mktemp -d)
+touch "$FIXDIR/inbox-poll.sh" "$FIXDIR/.watchdog-test-fixture"
+D=$(mktemp -d)
+pc_run "$D/w" "111 333" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
+  STUB_PS_PPID_333=84088 STUB_PS_PGID_333=333 \
+  STUB_PS_COMMAND_333="/bin/bash $FIXDIR/inbox-poll.sh"
+if grep -q '^poller:' "$D/w/st" 2>/dev/null || grep -q 'POLLER-DUPLICATE' "$D/w/lg" 2>/dev/null; then
+  say_bad "a real poller plus a MARKED sandboxed test fixture is silent" \
+    "$(cat "$D/w/st" 2>/dev/null | tr '\n' ' '); log=$(cat "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
+else
+  say_ok "a real poller plus a MARKED sandboxed test fixture is silent"
+fi
+
+# --- #194 (reviewer's adversarial case): a GENUINE independent second
+# poller -- unrelated ppid/pgid from the real one, deployed by hand from a
+# temp checkout, and carrying NO fixture marker -- must still fire. This is
+# the exact case the first version of this fix (path-substring alone, no
+# marker) silenced instead of catching, per PR #194's review. Same
+# directory shape as the fixture above, minus the marker file, proving path
+# alone is no longer sufficient to go quiet.
+DEPLOYDIR=$(mktemp -d)
+touch "$DEPLOYDIR/inbox-poll.sh"
+D=$(mktemp -d)
+pc_run "$D/w" "111 444" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
+  STUB_PS_PPID_444=1 STUB_PS_PGID_444=444 \
+  STUB_PS_COMMAND_444="/bin/bash $DEPLOYDIR/inbox-poll.sh"
+check "an unmarked independent poller under a temp path still fires POLLER-DUPLICATE" "^poller:.*DUPLICATE" "$D/w/st"
+check "the unmarked-independent-poller report is logged loudly" "POLLER-DUPLICATE" "$D/w/lg"
+
+MUT_SANDBOX=$(mktemp -d); mkdir -p "$MUT_SANDBOX/scripts/supervisor"
+cp "$WATCHDOG" "$MUT_SANDBOX/scripts/supervisor/watchdog.sh"
+for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh session-defaults.sh poller-lib.sh \
+           watchdog-harness.sh watchdog-status.sh watchdog-checks.sh watchdog-advance.sh; do
+  cp "$HERE/../../scripts/supervisor/$dep" "$MUT_SANDBOX/scripts/supervisor/" 2>/dev/null
+done
+cp -R "$HERE/../../scripts/supervisor/harness" "$MUT_SANDBOX/scripts/supervisor/" 2>/dev/null
+patch_rc=0
+# agent-supervisor#382: this logic now lives in poller-lib.sh, sourced by
+# watchdog.sh -- the mutation targets that file, not the copied watchdog.sh.
+python3 - "$MUT_SANDBOX/scripts/supervisor/poller-lib.sh" <<'PY' || patch_rc=$?
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = '''poller_is_verified_fixture() { # poller_is_verified_fixture <cmd>
+  local marker
+  marker=$(poller_fixture_marker "$1")
+  [ -n "$marker" ] && [ -f "$marker" ]
+}'''
+assert old in text, "fixture-marker verification not found"
+assert text.count(old) == 1, "fixture-marker verification not unique"
+open(path, "w").write(text.replace(old, 'poller_is_verified_fixture() { return 0; }', 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  say_bad "setup: mutated the fixture-marker verification into always-trust" "patch failed with exit $patch_rc"
+else
+  chmod +x "$MUT_SANDBOX/scripts/supervisor/watchdog.sh"
+  old_watchdog="$WATCHDOG"
+  WATCHDOG="$MUT_SANDBOX/scripts/supervisor/watchdog.sh"
+  D=$(mktemp -d)
+  pc_run "$D/w" "111 444" STUB_PS_PPID_111=20055 STUB_PS_PGID_111=111 \
+    STUB_PS_PPID_444=1 STUB_PS_PGID_444=444 \
+    STUB_PS_COMMAND_444="/bin/bash $DEPLOYDIR/inbox-poll.sh"
+  WATCHDOG="$old_watchdog"
+  if grep -q 'DUPLICATE' "$D/w/st" "$D/w/lg" 2>/dev/null; then
+    say_bad "mutation confirmed: always-trusting the fixture marker silences a genuine independent poller (the assertion above would be red)" \
+      "mutant still fired: $(cat "$D/w/st" "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
+  else
+    say_ok "mutation confirmed: always-trusting the fixture marker silences a genuine independent poller (the assertion above would be red)"
+  fi
+fi
+
+D=$(mktemp -d)
+pc_run "$D/w" ""
+check "zero live pollers are reported as dead, not duplicates" "^poller:.*dead.*zero live" "$D/w/st"
+if grep -q 'DUPLICATE' "$D/w/st" "$D/w/lg" 2>/dev/null; then
+  say_bad "zero live pollers do not report duplicates" "$(cat "$D/w/st" "$D/w/lg" 2>/dev/null | tr '\n' ' ')"
+else
+  say_ok "zero live pollers do not report duplicates"
+fi
+
+# Mutation check: forcing the measured count to 1 is the exact broken shape
+# the brief names. The duplicate assertions above would go red.
+MUT=$(mktemp -d); mkdir -p "$MUT/scripts/supervisor"
+cp "$WATCHDOG" "$MUT/scripts/supervisor/watchdog.sh"
+for dep in sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh poller-recover.sh poller-window.sh session-defaults.sh poller-lib.sh \
+           watchdog-harness.sh watchdog-status.sh watchdog-checks.sh watchdog-advance.sh; do
+  cp "$HERE/../../scripts/supervisor/$dep" "$MUT/scripts/supervisor/" 2>/dev/null
+done
+cp -R "$HERE/../../scripts/supervisor/harness" "$MUT/scripts/supervisor/" 2>/dev/null
+# agent-supervisor#704: the poller process count now lives in
+# watchdog-checks.sh, not watchdog.sh itself -- patch the file that
+# actually contains this code.
+patch_rc=0
+python3 - "$MUT/scripts/supervisor/watchdog-checks.sh" <<'PY' || patch_rc=$?
+import sys
+path = sys.argv[1]
+text = open(path).read()
+old = 'count=$(grep -c . <<<"$rows" 2>/dev/null || true)'
+assert old in text, "poller process count assignment not found"
+assert text.count(old) == 1, "poller process count assignment not unique"
+open(path, "w").write(text.replace(old, 'count=1', 1))
+PY
+if [ "$patch_rc" -ne 0 ]; then
+  say_bad "setup: mutated the duplicate-poller count to always return 1" "patch failed with exit $patch_rc"
+else
+  chmod +x "$MUT/scripts/supervisor/watchdog.sh"
+  D=$(mktemp -d)
+  rm -rf "$D/w"; mkdir -p "$D/w" "$D/w/transcripts"
+  printf 'checked: %s\nstate:   ok\ndetail:  listening\npid:     999\n' "$(stamp_ago 5)" >"$D/w/inbox-poll.status"
+  env SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=busy STUB_SENT="$D/w/sent" \
+    SUPERVISOR_STATE="$D/w" SUPERVISOR_STATUS="$D/w/st" SUPERVISOR_LOG="$D/w/lg" \
+    SUPERVISOR_STAMP="$D/w/stamp" SUPERVISOR_HISTORY="$D/w/hist" NOTIFY_ENV="$D/w/none.env" \
+    SLEEPCHECK_DIR="$D/w/transcripts" NOTIFY_SCRIPT="$UP" \
+    SUPERVISOR_INBOX_POLL_STATUS="$D/w/inbox-poll.status" \
+    STUB_POLLER_PIDS="111 222" STUB_PS_LSTART_111="Thu Aug 13 04:05:56 2026" \
+    STUB_PS_LSTART_222="Thu Aug 13 04:08:56 2026" \
+    bash "$MUT/scripts/supervisor/watchdog.sh" >/dev/null 2>"$D/w/err"
+  if grep -q 'DUPLICATE' "$D/w/st" "$D/w/lg" 2>/dev/null; then
+    say_bad "mutation confirmed: count=1 hides duplicate pollers" "mutant still reported duplicates"
+  else
+    say_ok "mutation confirmed: count=1 hides duplicate pollers (the assertions above would be red)"
+  fi
+fi
+
+# --- #215: the busy probe is harness-parameterised, and fails closed -------
+#
+# The probe used to be one Claude Code literal (`esc to interrupt`) grepped out
+# of a six-line capture, with no branch for "this is not a Claude pane". On any
+# harness that does not paint that string the check fell through to NOT BUSY,
+# and a mid-turn lane was read as a dead one -- by the component whose job is to
+# intervene when a lane is stuck. The direction is what matters: the watchdog
+# acts on idle, so a false idle is an intervention against a working lane, while
+# a false busy costs one skipped tick.
+#
+# The probe now asks the same harness/*.sh adapters lanes.sh asks (via
+# harness-registry.sh) and has three outcomes, not two: busy, idle, and
+# cannot-tell -- and cannot-tell is treated as busy.
+hrun() { # hrun <pane-state> <pane-command> <workdir> [extra env assignments...]
+  local st="$1" cmd="$2" dir="$3"; shift 3
+  rm -rf "$dir"; mkdir -p "$dir" "$dir/transcripts"
+  env SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE="$st" STUB_PANE_COMMAND="$cmd" \
+    STUB_SENT="$dir/sent" SUPERVISOR_STATE="$dir" SUPERVISOR_STATUS="$dir/st" \
+    SUPERVISOR_LOG="$dir/lg" SUPERVISOR_STAMP="$dir/stamp" SUPERVISOR_HISTORY="$dir/hist" \
+    NOTIFY_ENV="$dir/none.env" SLEEPCHECK_DIR="$dir/transcripts" "$@" \
+    bash "$WATCHDOG" >/dev/null 2>"$dir/err"
+}
+not_sent() { # not_sent <name> <workdir>
+  if [ -s "$2/sent" ] && grep -q '/loop' "$2/sent" 2>/dev/null; then
+    say_bad "$1" "a /loop was delivered: $(tr '\n' ' ' <"$2/sent")"
+  else
+    say_ok "$1"
+  fi
+}
+was_sent() { # was_sent <name> <workdir>
+  if grep -q '/loop' "$2/sent" 2>/dev/null; then say_ok "$1"
+  else say_bad "$1" "nothing was delivered: $(tr '\n' ' ' <"$2/sent" 2>/dev/null)"; fi
+}
+
+# 1. THE DEFECT ITSELF. A real, mid-turn Copilot pane: `◎ Working esc
+#    interrupt` -- `esc interrupt`, not Claude's `esc to interrupt`. One
+#    missing word, and the old probe called a working lane dead.
+D=$(mktemp -d); hrun copilot-busy node "$D/w"
+check "a mid-turn copilot pane is not restarted" "state:    working" "$D/w/st"
+not_sent "a mid-turn copilot pane receives no keystrokes" "$D/w"
+
+# 2. A real mid-turn codex pane. Its marker happens to BE Claude's literal, but
+#    it sits four non-empty lines above the footer -- so this row proves the
+#    per-harness tail window (HARNESS_BUSY_TAIL=4) is honoured, not that the
+#    shared string is. A last-line-only probe reads this pane idle.
+D=$(mktemp -d); hrun codex-busy codex "$D/w"
+check "a mid-turn codex pane is not restarted" "state:    working" "$D/w/st"
+not_sent "a mid-turn codex pane receives no keystrokes" "$D/w"
+
+# 3. THE UNKNOWN CASE. A pane whose command no adapter under harness/ claims
+#    (pi, opencode, anything new). Nothing can be concluded about it, so the
+#    only safe conclusion is "assume busy" -- never idle.
+D=$(mktemp -d); hrun alien pi "$D/w"
+check "an unrecognised harness fails closed, not idle" "state:    harness_unknown" "$D/w/st"
+not_sent "an unrecognised harness receives no keystrokes" "$D/w"
+
+# 4. The adapters themselves being unreachable is the same cannot-tell. Point
+#    the registry at an empty directory: no adapter claims anything, and the
+#    watchdog must not fall back to a hardcoded guess.
+D=$(mktemp -d); mkdir -p "$D/noadapters"
+hrun busy claude "$D/w" HARNESS_REGISTRY_DIR="$D/noadapters"
+check "no adapters at all fails closed" "state:    harness_unknown" "$D/w/st"
+not_sent "no adapters at all receives no keystrokes" "$D/w"
+
+# 5. An unreadable/blank capture is cannot-tell too. `capture-pane` exiting
+#    non-zero is already `pane_unreadable`; this is the other half -- it
+#    succeeds and returns nothing, which the old probe scored as "the string is
+#    absent", i.e. idle.
+D=$(mktemp -d); hrun blank claude "$D/w" STUB_BLANK_CAPTURE=1
+check "an empty capture fails closed" "state:    harness_unknown" "$D/w/st"
+not_sent "an empty capture receives no keystrokes" "$D/w"
+
+# 6. THE OTHER DIRECTION, and it is what keeps case 3 honest. Fail-closed must
+#    not become always-closed: a genuinely idle lane on a NON-Claude harness,
+#    with work queued, must still be restarted. A probe that answered "busy" to
+#    everything would pass cases 1-5 and be useless.
+D=$(mktemp -d); hrun copilot-ready node "$D/w"
+check "an idle copilot pane with work is still restarted" "state:    restarted" "$D/w/st"
+was_sent "an idle copilot pane is still sent a /loop" "$D/w"
+
+# 7. The pre-send re-check (the second call site) is harness-parameterised too.
+#    It is the one that guards against a /loop queuing as inert text in a pane
+#    that became busy mid-probe -- and it carried the same Claude literal.
+#    STUB_BUSY_AFTER flips the stub to a COPILOT busy shape after the first
+#    capture, which is idle-then-busy on a non-Claude harness.
+D=$(mktemp -d); hrun copilot-ready node "$D/w" STUB_BUSY_AFTER=1 STUB_BUSY_SHAPE=copilot-busy \
+  STUB_COUNTER="$D/w/counter"
+check "a copilot pane that turns busy mid-probe is not sent to" "state:    working" "$D/w/st"
+not_sent "no /loop delivered into a busy copilot pane" "$D/w"
+
+# 8. The registry is part of what this script needs to decide anything. If it
+#    is missing beside watchdog.sh -- a partial deploy, a copied file -- the
+#    probe must say so and assume busy rather than resurrect the old literal.
+D=$(mktemp -d); mkdir -p "$D/partial/scripts/supervisor"
+for f in watchdog.sh watchdog-harness.sh watchdog-status.sh watchdog-checks.sh watchdog-advance.sh \
+         session-defaults.sh sleepcheck.py watchdog_notify.py loop-tick.md; do
+  cp "$HERE/../../scripts/supervisor/$f" "$D/partial/scripts/supervisor/" 2>/dev/null
+done
+rm -rf "$D/pw"; mkdir -p "$D/pw" "$D/pw/transcripts"
+SUPERVISOR_PATH="$STUBS:/usr/bin:/bin" STUB_PANE_STATE=idle STUB_PANE_COMMAND=claude \
+STUB_SENT="$D/pw/sent" SUPERVISOR_STATE="$D/pw" SUPERVISOR_STATUS="$D/pw/st" \
+SUPERVISOR_LOG="$D/pw/lg" SUPERVISOR_STAMP="$D/pw/stamp" SUPERVISOR_HISTORY="$D/pw/hist" \
+NOTIFY_ENV="$D/pw/none.env" SLEEPCHECK_DIR="$D/pw/transcripts" \
+  bash "$D/partial/scripts/supervisor/watchdog.sh" >/dev/null 2>"$D/pw/err"
+check "a missing harness registry fails closed" "state:    harness_unknown" "$D/pw/st"
+not_sent "a missing harness registry receives no keystrokes" "$D/pw"
+
+# --- #22: recovery availability must fail loud and precise -----------------
+#
+# The watchdog runs poller-recover.sh from an EXIT trap, so a missing or
+# non-executable recovery script can leave the main tick looking healthy while
+# inbox-poll recovery never runs. The pre-fix `-x` gate conflated "absent" with
+# "present but mode 644" and logged only "no poller-recover.sh beside this
+# watchdog". These cases run under an env -i LaunchAgent-shaped environment:
+# only HOME, NOTIFY_ENV and PATH are inherited.
+launchd_gate_run() { # launchd_gate_run <workdir> <poller-recover-state>
+  local root="$1" state="$2" home="$1/home"
+  rm -rf "$root"; mkdir -p "$root/app/scripts/supervisor" "$home" "$home/.local/state/agent-dotfiles-supervisor/transcripts"
+  for f in watchdog.sh watchdog-harness.sh watchdog-status.sh watchdog-checks.sh watchdog-advance.sh \
+           session-defaults.sh sleepcheck.py watchdog_notify.py loop-tick.md harness-registry.sh; do
+    cp "$HERE/../../scripts/supervisor/$f" "$root/app/scripts/supervisor/" 2>/dev/null
+  done
+  cp -R "$HERE/../../scripts/supervisor/harness" "$root/app/scripts/supervisor/" 2>/dev/null
+  case "$state" in
+    absent) : ;;
+    nonexec)
+      printf '#!/bin/bash\nprintf should-not-run\\n\n' >"$root/app/scripts/supervisor/poller-recover.sh"
+      chmod 644 "$root/app/scripts/supervisor/poller-recover.sh"
+      ;;
+    exec)
+      printf '#!/bin/bash\nexit 0\n' >"$root/app/scripts/supervisor/poller-recover.sh"
+      chmod 755 "$root/app/scripts/supervisor/poller-recover.sh"
+      ;;
+    fails)
+      printf '#!/bin/bash\necho "FAILED -- could not determine poller windows (tmux query failed)"\nexit 1\n' \
+        >"$root/app/scripts/supervisor/poller-recover.sh"
+      chmod 755 "$root/app/scripts/supervisor/poller-recover.sh"
+      ;;
+  esac
+  env -i HOME="$home" NOTIFY_ENV="$home/none.env" PATH="$STUBS:/usr/bin:/bin" \
+    bash "$root/app/scripts/supervisor/watchdog.sh" >/dev/null 2>"$root/err"
+}
+
+D=$(mktemp -d); launchd_gate_run "$D/w" nonexec
+check "a present but non-executable poller-recover.sh is reported as a broken install" \
+      "poller-recover.sh exists but is not executable" "$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.log"
+check "the broken install is visible in watchdog.status" \
+      "^recovery: broken" "$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.status"
+
+D=$(mktemp -d); launchd_gate_run "$D/w" absent
+check "an absent poller-recover.sh is reported distinctly from a bad mode" \
+      "poller-recover.sh is missing beside this watchdog" "$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.log"
+check "the missing recovery script is visible in watchdog.status" \
+      "^recovery: missing" "$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.status"
+
+D=$(mktemp -d); launchd_gate_run "$D/w" exec
+if grep -q '^recovery:' "$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.status" 2>/dev/null; then
+  say_bad "an executable poller-recover.sh keeps the healthy path silent" \
+    "$(grep '^recovery:' "$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.status")"
+else
+  say_ok "an executable poller-recover.sh keeps the healthy path silent"
+fi
+
+# --- agent-supervisor#41 (agent-supervisor#28): a recovery ATTEMPT that
+# fails must be as loud as a missing/non-executable install, not swallowed
+# into watchdog.log alone. Measured incident: poller-recover.sh exited 1 on
+# 37 consecutive ticks (a real, functional refusal -- not a broken
+# install) while watchdog.status's `recovery:` line stayed entirely absent,
+# because check_poller_window() only ever called recovery_note for the
+# missing/broken cases above.
+D=$(mktemp -d); launchd_gate_run "$D/w" fails
+WSTATUS="$D/w/home/.local/state/agent-dotfiles-supervisor/watchdog.status"
+check "a poller-recover.sh that runs and fails is reported in watchdog.status" \
+      "^recovery: failed" "$WSTATUS"
+check "the failure names what poller-recover.sh itself said" \
+      "could not determine poller windows" "$WSTATUS"
+check "a first-ever failure names it as attempt 1" \
+      "attempt 1 in a row" "$WSTATUS"
+check "no prior success reads as never, not a guessed timestamp" \
+      "last confirmed recovery: never" "$WSTATUS"
+
+# A second consecutive failure, same state dir (same STATE, so the fail-streak
+# file persists) -- the streak count must accumulate, the way #28's 37 did.
+env -i HOME="$D/w/home" NOTIFY_ENV="$D/w/home/none.env" PATH="$STUBS:/usr/bin:/bin" \
+  bash "$D/w/app/scripts/supervisor/watchdog.sh" >/dev/null 2>"$D/w/err2"
+check "a second consecutive failure increments the streak, not resets it" \
+      "attempt 2 in a row" "$WSTATUS"
+
+# --- MUTATION: a recovery attempt that fails five times in a row must never
+# read as healthy in the plain-text digest.sh view -- prove the wiring by
+# reading the SAME status file back through digest.sh's own status_field
+# awk helper the way digest.sh does, rather than trusting grep alone.
+STATUS_FIELD_AWK='$0 ~ "^" label ":" { sub("^" label ": *", ""); print; exit }'
+recovery_value=$(awk -v label="recovery" "$STATUS_FIELD_AWK" "$WSTATUS")
+if [[ "$recovery_value" == failed* ]]; then
+  say_ok "digest.sh's own field reader sees the failure text, not a truncated or missing line"
+else
+  say_bad "digest.sh's own field reader sees the failure" "got '$recovery_value'"
+fi
+
+echo "  $pass passed, $fail failed"
+[ "$fail" -eq 0 ]

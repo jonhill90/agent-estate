@@ -1,0 +1,23 @@
+#!/bin/bash
+# Stub for DISPATCH_PYTHON -- simulates a ledger CLI whose RESOLUTION-CHAIN
+# reads fail mid-chain, while leaving the final write call (mark-pr-external
+# itself) healthy. Used to reproduce the PR #331 review's finding 1: a
+# resolve-pr-contributors.sh lookup whose ledger CLI call itself errors must
+# make the whole chain refuse (UNKNOWN), never fall through to "checked,
+# found nobody" the way a genuinely empty chain does.
+#
+# Delegates every other subcommand to the real python3/cli.py unchanged.
+set -uo pipefail
+
+cli="$1"; shift
+subcommand="${1:-}"
+
+case "$subcommand" in
+  contributor-issue-lanes|pr-task|contributor-pr-lanes|worktree-lane|task-lane)
+    echo "python3-fail-reads: simulated ledger read failure for '$subcommand'" >&2
+    exit 1
+    ;;
+  *)
+    exec python3 "$cli" "$@"
+    ;;
+esac

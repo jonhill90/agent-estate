@@ -1,0 +1,27 @@
+#!/bin/bash
+# agent-supervisor#144: simulates a GraphQL budget at 0/5000 for watchdog.sh's
+# idle work-count loop -- `gh issue list`/`gh pr list` (GraphQL) fail exactly
+# the way an exhausted budget does; `gh api repos/.../issues`/`.../pulls`
+# (REST core) answer with a real, non-degraded count. Proves the loop no
+# longer depends on the exhausted budget, rather than mocking that it doesn't.
+set -uo pipefail
+case "$1" in
+  issue|pr)
+    echo 'gh: GraphQL: API rate limit exceeded (graphqlRateLimit)' >&2
+    exit 1 ;;
+  api)
+    endpoint="$2"; path="${endpoint%%\?*}"
+    jqf=""; prev=""
+    for a in "$@"; do
+      [ "$prev" = "--jq" ] && jqf="$a"
+      prev="$a"
+    done
+    case "$path" in
+      */issues) body='[{"number":1,"labels":[]}]' ;;
+      */pulls)  body='[]' ;;
+      *) exit 1 ;;
+    esac
+    if [ -n "$jqf" ]; then jq -r "$jqf" <<<"$body"; else printf '%s\n' "$body"; fi
+    exit 0 ;;
+  *) exit 1 ;;
+esac

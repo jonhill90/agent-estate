@@ -1,0 +1,76 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.jonhill.director-loop</string>
+  <!-- agent-supervisor#321. The Director was described as "self-driving on a
+       15-min loop" for weeks and was not: no crontab, no launchd job, no
+       self-scheduled wakeup. Every action came from an external nudge. This
+       is the loop that description assumed existed.
+
+       900s cadence, deliberately SHORTER than heartbeat.sh's 1800s stall
+       threshold: in a healthy estate this always gets there first, and a
+       heartbeat nudge therefore means THIS failed -- a signal worth having.
+
+       director-loop.sh --once does one pass and exits, so a wedged tmux
+       cannot leave a long-lived process that pgrep still reports alive. It
+       refuses to send to a busy pane or over a non-empty input box. -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>@@AGENT_SUPERVISOR_REPO@@/scripts/supervisor/director-loop.sh</string>
+  </array>
+  <key>StartInterval</key>
+  <integer>900</integer>
+  <key>RunAtLoad</key>
+  <false/>
+  <key>ProcessType</key>
+  <string>Background</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/Users/jon/.local/bin</string>
+    <key>HOME</key>
+    <string>/Users/jon</string>
+    <!-- codexbar needs USER: measured 2026-08-18, 5/5 exitCode 0 with it set,
+         3/3 exitCode 69 (fetch-failed) without. launchd sets neither USER nor
+         LOGNAME, which is why every scheduler read the quota meter as broken
+         while the identical call from a shell returned a percentage. -->
+    <key>USER</key>
+    <string>jon</string>
+    <!-- agent-estate#752, corrected mid-fix: director-loop.sh has NO
+         argument parser at all (grepped the whole 545-line script -- no
+         getopts, no "$1"/"$@" handling at top level). The `--target
+         director:@35` pair this array used to carry was dead on arrival;
+         changing its VALUE (this fix's first, incomplete attempt) changed
+         nothing live, because the script never read it. The script's only
+         real input is `${DIRECTOR_LOOP_TARGET:-director:@3}` (line 47) --
+         an environment variable, not a flag. This is that variable, set
+         where it's actually consulted.
+
+         The SESSION itself was renamed director -> estate (the window kept
+         its old name, "director" -- `tmux list-windows -t estate` still
+         shows window 1 named that, which is how this went unnoticed since
+         Aug 22). director-loop.sh's own self-heal only resolves a
+         renumbered WINDOW within the same session, not a renamed SESSION.
+         estate:@2 is the live, current Director window, confirmed directly
+         (`tmux list-windows -t estate -F "#{window_index} #{window_id}
+         #{window_name}"`) -- window ids survive renumbering within a
+         session; only a full tmux server restart invalidates them, same
+         caveat the removed comment above already carried.
+
+         Session-name drift has now hit this literal, the lanes-session
+         default (#734), and the lane-pool location (#739) three separate
+         times -- #739's eventual convergence is the place a role-based
+         resolution (derive, don't hardcode) belongs, not invented here for
+         one more literal. -->
+    <key>DIRECTOR_LOOP_TARGET</key>
+    <string>estate:@2</string>
+  </dict>
+  <key>StandardOutPath</key>
+  <string>/Users/jon/.local/state/agent-dotfiles-supervisor/director-loop.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/jon/.local/state/agent-dotfiles-supervisor/director-loop.log</string>
+</dict>
+</plist>

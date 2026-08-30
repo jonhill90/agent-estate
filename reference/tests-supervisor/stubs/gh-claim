@@ -1,0 +1,259 @@
+#!/bin/bash
+# Stub gh for claim.sh and dispatch.sh tests.
+#
+# GH_ISSUES holds one line per open issue:   <number>|<assignees-csv>|<title>|<state>
+# GH_PRS    holds one line per open PR:      <number>|<body>|<headRefName>|<commit-msgs>
+#
+# <state> is optional and defaults to OPEN when the field is absent, so
+# fixtures written before #95 (three fields) still describe open issues.
+#
+# <headRefName> is optional and defaults to empty (agent-dotfiles#212 added
+# it) so fixtures written before that landed (two fields) still describe PR
+# bodies for `claim.sh stale`, which never reads this column.
+#
+# <commit-msgs> is optional and defaults to empty (agent-supervisor#35 added
+# it): a `;`-separated list of commit message headlines, used to synthesize
+# `pr view --json commits` for the authorship guard's commit-message
+# fallback. `pr view --json closingIssuesReferences` is synthesized from
+# <body> the same way real GitHub derives it: a `Fixes|Closes|Resolves #N`
+# match, case-insensitive. agent-supervisor#473: a cross-repo reference,
+# `Fixes owner/repo#N`, is matched too and carries its own `repository` in
+# the synthesized JSON, exactly like the real API -- a bare `#N` match omits
+# `repository` entirely (dispatch.sh's own resolution defaults an absent
+# `repository` to the PR's own repo, never guesses one).
+#
+# Writes land back in GH_ISSUES, so a claim taken by one invocation is visible
+# to the next -- which is the whole point of the test: a SECOND dispatcher must
+# see what the first one wrote. A stub that discarded writes would pass the
+# refusal test for the wrong reason.
+set -uo pipefail
+I="${GH_ISSUES:?}"
+P="${GH_PRS:-/dev/null}"
+ME="${GH_ME:-jonhill90}"
+
+sub="$1"; shift
+case "$sub" in
+  api)
+    # agent-supervisor#144: claim.sh now speaks REST (`gh api repos/...`),
+    # not GraphQL (`gh issue view`/`gh issue list`/`gh pr list`, still
+    # stubbed below for dispatch.sh, which is unconverted). Requires the real
+    # `jq` binary to emulate `gh api`'s own bundled `-q`/`--jq` -- present on
+    # every CI runner this suite runs on.
+    endpoint=""; method="GET"; jqf=""; fields=(); include=""
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --paginate) shift ;;
+        -i) include=1; shift ;;
+        -X) method="$2"; shift 2 ;;
+        -q) jqf="$2"; shift 2 ;;
+        -f) fields+=("$2"); shift 2 ;;
+        *) endpoint="$1"; shift ;;
+      esac
+    done
+    path="${endpoint%%\?*}"
+    query=""
+    case "$endpoint" in *\?*) query="${endpoint#*\?}" ;; esac
+    emit() { # emit <json> -- apply -q if given, else print raw
+      if [ -n "$jqf" ]; then jq -r "$jqf" <<<"$1"; else printf '%s\n' "$1"; fi
+    }
+    assignees_json_for() { # assignees_json_for <csv> -> [{"login":"a"},...]
+      local csv="$1"
+      [ -n "$csv" ] || { echo '[]'; return; }
+      tr ',' '\n' <<<"$csv" | jq -R . | jq -sc 'map({login:.})'
+    }
+    case "$path" in
+      user)
+        emit "{\"login\":\"$ME\"}" ;;
+      */issues/*/assignees)
+        num=$(basename "$(dirname "$path")")
+        who=""
+        for f in ${fields[@]+"${fields[@]}"}; do case "$f" in assignees\[\]=*) who="${f#*=}" ;; esac; done
+        tmp=$(mktemp)
+        while IFS='|' read -r n a t st; do
+          if [ "$n" = "$num" ] && [ -n "$who" ]; then
+            if [ "$method" = "POST" ]; then
+              case ",$a," in *",$who,"*) ;; *) a="${a:+$a,}$who" ;; esac
+            elif [ "$method" = "DELETE" ]; then
+              a=$(tr ',' '\n' <<<"$a" | grep -vx "$who" | paste -sd, -)
+            fi
+          fi
+          printf '%s|%s|%s|%s\n' "$n" "$a" "$t" "$st"
+        done < "$I" > "$tmp"
+        mv "$tmp" "$I"
+        emit '[]' ;;
+      repos/*/issues/[0-9]*)
+        # agent-supervisor#228: a few state-field sentinels (uppercase, so
+        # they never collide with a real OPEN/CLOSED) simulate the shapes
+        # that broke claim.sh's old guard -- a rate-limited REST response, a
+        # truncated body, and a fully empty one. Each is emitted the way the
+        # real `gh api` would: on error, the body is the raw error JSON, not
+        # run through the `-q` filter (`emit` is bypassed), and with `-i` the
+        # HTTP status line and headers are prepended, exactly like the real
+        # flag this stub is now standing in for.
+        num="${path##*/}"
+        line=$(awk -F'|' -v n="$num" '$1==n' "$I")
+        if [ -z "$line" ]; then
+          if [ -n "$include" ]; then
+            printf 'HTTP/2.0 404 Not Found\r\n\r\n{"message":"Not Found"}\n'
+          else
+            echo "gh: no issue $num" >&2
+          fi
+          exit 1
+        fi
+        a=$(cut -d'|' -f2 <<<"$line"); st=$(cut -d'|' -f4 <<<"$line"); st="${st:-OPEN}"
+        case "$st" in
+          RATE_LIMIT)
+            body='{"message":"API rate limit exceeded for user ID 19524513. Please retry your request again later.","documentation_url":"https://docs.github.com/rest/overview/rate-limits-for-the-rest-api"}'
+            if [ -n "$include" ]; then
+              printf 'HTTP/2.0 403 Forbidden\r\nx-ratelimit-reset: 1999999999\r\n\r\n%s\n' "$body"
+            else
+              printf '%s\n' "$body"
+            fi
+            exit 1 ;;
+          MALFORMED)
+            body='{'
+            if [ -n "$include" ]; then
+              printf 'HTTP/2.0 200 OK\r\n\r\n%s\n' "$body"
+            else
+              printf '%s\n' "$body"
+            fi
+            exit 0 ;;
+          EMPTY)
+            if [ -n "$include" ]; then
+              printf 'HTTP/2.0 200 OK\r\n\r\n\n'
+            fi
+            exit 0 ;;
+          *)
+            st=$(tr 'A-Z' 'a-z' <<<"$st")
+            json=$(jq -nc --argjson number "$num" --arg state "$st" --argjson assignees "$(assignees_json_for "$a")" \
+              '{number:$number, state:$state, assignees:$assignees}')
+            if [ -n "$include" ]; then
+              printf 'HTTP/2.0 200 OK\r\n\r\n%s\n' "$json"
+            else
+              emit "$json"
+            fi
+            ;;
+        esac ;;
+      repos/*/issues)
+        state_filter="open"
+        case "$query" in *state=all*) state_filter="all" ;; esac
+        out="[]"
+        while IFS='|' read -r n a t st; do
+          [ -n "$n" ] || continue
+          st="${st:-OPEN}"; st=$(tr 'A-Z' 'a-z' <<<"$st")
+          [ "$state_filter" = "open" ] && [ "$st" != "open" ] && continue
+          entry=$(jq -nc --argjson number "$n" --arg state "$st" --argjson assignees "$(assignees_json_for "$a")" \
+            '{number:$number, state:$state, assignees:$assignees}')
+          out=$(jq -nc --argjson acc "$out" --argjson e "$entry" '$acc + [$e]')
+        done < "$I"
+        emit "$out" ;;
+      repos/*/pulls)
+        out="[]"
+        while IFS='|' read -r n b h c; do
+          [ -n "$n" ] || continue
+          entry=$(jq -nc --argjson number "$n" --arg body "$b" '{number:$number, body:$body}')
+          out=$(jq -nc --argjson acc "$out" --argjson e "$entry" '$acc + [$e]')
+        done < "$P"
+        emit "$out" ;;
+      *) echo "gh-claim stub: unhandled api endpoint $path" >&2; exit 1 ;;
+    esac
+    exit 0 ;;
+  issue)
+    verb="$1"; shift
+    num=""
+    # First bare argument is the issue number for view/edit/comment.
+    for a in "$@"; do case "$a" in [0-9]*) num="$a"; break ;; esac; done
+    case "$verb" in
+      view)
+        line=$(awk -F'|' -v n="$num" '$1==n' "$I")
+        [ -n "$line" ] || { echo "gh: no issue $num" >&2; exit 1; }
+        a=$(cut -d'|' -f2 <<<"$line"); t=$(cut -d'|' -f3 <<<"$line")
+        st=$(cut -d'|' -f4 <<<"$line"); st="${st:-OPEN}"
+        # Only the -q shapes claim.sh asks for: state+assignees combined, or
+        # assignees alone; anything else falls back to the title.
+        if [[ "$*" == *"state"* && "$*" == *"assignees"* ]]; then
+          printf '%s\t%s\n' "$st" "$a"
+        elif [[ "$*" == *"assignees"* ]]; then
+          printf '%s\n' "$a"
+        else
+          printf '%s\n' "$t"
+        fi
+        ;;
+      list)
+        # claim.sh asks for number<TAB>assignees over open issues.
+        while IFS='|' read -r n a t; do printf '%s\t%s\n' "$n" "$a"; done < "$I"
+        ;;
+      edit)
+        add=""; rm=""
+        while [ $# -gt 0 ]; do
+          case "$1" in
+            --add-assignee) add="$2"; shift 2 ;;
+            --remove-assignee) rm="$2"; shift 2 ;;
+            *) shift ;;
+          esac
+        done
+        [ "$add" = "@me" ] && add="$ME"
+        [ "$rm" = "@me" ] && rm="$ME"
+        tmp=$(mktemp)
+        while IFS='|' read -r n a t st; do
+          if [ "$n" = "$num" ]; then
+            if [ -n "$add" ]; then
+              case ",$a," in *",$add,"*) ;; *) a="${a:+$a,}$add" ;; esac
+            fi
+            if [ -n "$rm" ]; then
+              a=$(tr ',' '\n' <<<"$a" | grep -vx "$rm" | paste -sd, -)
+            fi
+          fi
+          printf '%s|%s|%s|%s\n' "$n" "$a" "$t" "$st"
+        done < "$I" > "$tmp"
+        mv "$tmp" "$I"
+        ;;
+    esac ;;
+  pr)
+    verb="$1"; shift
+    case "$verb" in
+      view)
+        num=""
+        for a in "$@"; do case "$a" in [0-9]*) num="$a"; break ;; esac; done
+        line=$(awk -F'|' -v n="$num" '$1==n' "$P")
+        [ -n "$line" ] || { echo "gh: no pull request $num" >&2; exit 1; }
+        body=$(cut -d'|' -f2 <<<"$line")
+        href=$(cut -d'|' -f3 <<<"$line")
+        commit_msgs=$(cut -d'|' -f4 <<<"$line")
+        # agent-supervisor#473: plain grep/bash-regex extraction, not a
+        # python3 subprocess -- this stub sits on the hot path of nearly
+        # every dispatch.sh test case, several of them timing-sensitive
+        # (DISPATCH_TEST_RACE_HOOK, the #190 pane-respawn mutation check).
+        # A python3 startup per `gh pr view` call measurably perturbed one
+        # of those (confirmed: identical mutant script bytes, identical
+        # preceding output, only the added subprocess latency differed) --
+        # `jq`, a compiled binary already required by this stub's `api`
+        # case above, costs orders of magnitude less.
+        issues_json="[]"
+        while IFS= read -r match; do
+          [ -n "$match" ] || continue
+          if [[ "$match" =~ ([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)#([0-9]+)$ ]]; then
+            entry=$(jq -nc --arg owner "${BASH_REMATCH[1]}" --arg name "${BASH_REMATCH[2]}" \
+              --argjson number "${BASH_REMATCH[3]}" \
+              '{number:$number, repository:{name:$name, owner:{login:$owner}}}')
+          elif [[ "$match" =~ \#([0-9]+)$ ]]; then
+            entry=$(jq -nc --argjson number "${BASH_REMATCH[1]}" '{number:$number}')
+          else
+            continue
+          fi
+          issues_json=$(jq -nc --argjson acc "$issues_json" --argjson e "$entry" '$acc + [$e]')
+        done < <(grep -oiE '(fixes|closes|resolves) +([A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+#|#)[0-9]+' <<<"$body")
+        commits_json="[]"
+        if [ -n "$commit_msgs" ]; then
+          commits_json="[$(tr ';' '\n' <<<"$commit_msgs" | awk 'NF{printf "%s{\"messageHeadline\":\"%s\"}", (n++>0?",":""), $0}')]"
+        fi
+        printf '{"headRefName":"%s","closingIssuesReferences":%s,"commits":%s}\n' \
+          "$href" "$issues_json" "$commits_json"
+        ;;
+      list)
+        # pr list --json number,body -q '.[]|...'  -> number<TAB>body
+        while IFS='|' read -r n b h; do [ -n "$n" ] && printf '%s\t%s\n' "$n" "$b"; done < "$P"
+        ;;
+    esac ;;
+esac
+exit 0

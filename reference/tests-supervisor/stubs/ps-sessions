@@ -1,0 +1,8 @@
+#!/bin/bash
+# Stub `ps` for sessions.sh tests. The fixtures in test_sessions.sh never
+# need a service pane or a live grandchild (that shape is exhaustively
+# covered by test_lanes.sh against the single-session stub) -- this always
+# reports "nothing here", which makes `is_service_pane` and
+# `pane_has_live_children` in lanes.sh both answer false, the same as any
+# real lane whose pane runs a plain shell or a bare harness.
+exit 1
