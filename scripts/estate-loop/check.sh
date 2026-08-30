@@ -141,14 +141,31 @@ if [ "$pct" -ge 97 ]; then halt "halted-quota (weekly ${pct}%)"; fi
 # Check the CODE instead of PR titles (build-loop.md's own rule: "check the
 # code, not your memory"): every SPEC-shell.md item's backing package
 # either exists on origin/main or it doesn't.
-cd /Users/jon/source/repos/Personal/agent-tui || exit 0
+# agent-estate#880: this used to `cd` into the decommissioned agent-tui repo
+# and read its frozen snapshot of docs/SPEC-shell.md and internal/. #867
+# moved the TUI's tree to src/tui/internal/ in THIS repo, so agent-tui can
+# never see a package added, renamed or removed again -- it happened to
+# still agree (12 S-items, same layout) only because it froze carrying that
+# same state, which made the bug invisible rather than absent. Read the
+# living tree instead.
+cd "$AGENT_SUPERVISOR_REPO" || exit 0
 git fetch origin --quiet 2>/dev/null
-remaining=$(git show origin/main:docs/SPEC-shell.md 2>/dev/null | grep -cE '^## S[0-9]+ —' || echo 0)
+# A missing spec file and a finished spec must not read the same. `|| echo 0`
+# used to make both cases produce "0 remaining" -- a vanished path looked
+# identical to a completed one. Fail loudly instead: no output from `git
+# show` (missing path/ref) is fatal here, not degraded into "nothing left".
+spec_text=$(git show origin/main:docs/tui/SPEC-shell.md 2>/dev/null)
+if [ -z "$spec_text" ]; then
+  say "FATAL: origin/main:docs/tui/SPEC-shell.md unreadable -- cannot measure spec completion"
+  echo "FATAL: origin/main:docs/tui/SPEC-shell.md unreadable -- cannot measure spec completion" >&2
+  exit 1
+fi
+remaining=$(grep -cE '^## S[0-9]+ —' <<<"$spec_text")
 # One boolean per S-item, checked against the actual package tree (S1/S2
 # both live in internal/nav and so share one check; S4 is routeToPane's
 # wiring, not a package of its own).
-has_pkg() { git show "origin/main:internal/$1" >/dev/null 2>&1; }
-shell_model=$(git show origin/main:internal/shell/model.go 2>/dev/null)
+has_pkg() { git show "origin/main:src/tui/internal/$1" >/dev/null 2>&1; }
+shell_model=$(git show origin/main:src/tui/internal/shell/model.go 2>/dev/null)
 s4_wired=0
 grep -q '"tasks": *PaneBoard' <<<"$shell_model" && grep -q '"usage": *PaneCost' <<<"$shell_model" \
   && grep -q '"lanes": *PaneLanes' <<<"$shell_model" && s4_wired=1
