@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/corpus"
+	"github.com/jonhill90/agent-estate/estate/internal/gate"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 	"github.com/jonhill90/agent-estate/estate/internal/pressure"
 )
@@ -26,6 +27,8 @@ func usage() {
 
   estate pressure                       report whether the host can take work
   estate dispatch <issue> <brief-file>  run one agent turn, gated and recorded
+  estate merge <repo> <pr> <issue> <reviewer-lane>
+                                        may this PR merge? checks + independence
   estate tasks                          latest state of every task
   estate inflight                       tasks still occupying a slot
 
@@ -56,6 +59,27 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("within limits")
+
+	case "merge":
+		if len(os.Args) < 6 {
+			usage()
+			os.Exit(2)
+		}
+		repo, issue, reviewer := os.Args[2], os.Args[4], os.Args[5]
+		var pr int
+		if _, err := fmt.Sscanf(os.Args[3], "%d", &pr); err != nil {
+			fmt.Fprintln(os.Stderr, "estate: pr must be a number:", os.Args[3])
+			os.Exit(2)
+		}
+		d := gate.Evaluate(repo, pr, reviewer, issue, l)
+		fmt.Printf("%s#%d head %s\n", repo, pr, d.HeadOID)
+		if !d.Allow {
+			for _, r := range d.Reasons {
+				fmt.Fprintln(os.Stderr, "refuse: "+r)
+			}
+			os.Exit(1)
+		}
+		fmt.Println("may merge: all checks green at head, reviewer is not the author")
 
 	case "tasks", "inflight":
 		var rs []ledger.Record
