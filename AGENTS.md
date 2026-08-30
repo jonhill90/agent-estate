@@ -393,6 +393,15 @@ measured against. See
   judgement.
 - Anything touching tmux behaviour runs against an isolated socket or on a
   throwaway host — never the machine you are working on.
+- **Credential store — read-only, no exceptions.** Never write, reset, or
+  probe the macOS Keychain; a failed read is a report, not a repair. See
+  `agent-dotfiles/AGENTS.md` for the canonical rule and incident rationale
+  (agent-estate#665).
+- **Nothing hand-authored or pane-written merges**, until the per-instance
+  re-dispatch cost starts to dominate — at which point revisit. A change
+  must go through a dispatched lane with a ledger-resolvable author, no
+  exception path today, the same posture the CI gate and author-exclusion
+  guard above already take.
 - A UI PR (touching `scripts/supervisor/laneview/`) needs a captured frame,
   not a description, as evidence — `look.py capture`/`look.py frames`. This
   is enforced, not just written down here: `.github/workflows/ui-evidence.yml`
