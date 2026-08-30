@@ -5,6 +5,21 @@ generated:
   at: 2026-08-23T13:43:05-04:00
 ---
 
+> **Verification banner — 2026-08-30.** The shell and Python supervisor this
+> repo used to carry was deleted; `scripts/` and `tests/supervisor` now live
+> under `reference/` as read-only material. This document predates the move of
+> the TUI into `src/tui` and was written against the retired `agent-tui` repo.
+>
+> **Verified today, against the tree:** the code lives in `src/tui`
+> (48 packages); the entrypoints are `src/tui/cmd/{agentsdemo,demo,estate,fakemcp,mergepr,namingdebtbaseline,navwalk,prverdict,skillinvocations}`.
+> Sibling documents referenced below (`docs/PRD.md`, `docs/SPEC.md`,
+> `docs/SPEC-shell.md`, `docs/SPEC-agentbox-execution-mode.md`) **were deleted**
+> and are not coming back.
+>
+> **Not verified today:** every behavioural claim below. It was accurate when
+> written and no one has re-checked it since the move. Treat it as a lead, not
+> as fact — confirm against `src/tui` before relying on any of it.
+
 # PRD — agent-tui
 
 **What this document is:** what the product is FOR, in Jon's own framing.
