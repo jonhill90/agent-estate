@@ -1,8 +1,24 @@
 #!/usr/bin/env bash
 # count-agents.sh -- print the number of Claude agent SESSIONS running on
-# this host, and nothing else. Nothing wires this in yet; it is the
-# instrument the estate tick's STEP 0 host guard should call instead of its
-# current `pgrep -f claude | wc -l`.
+# this host, and nothing else. NOT CALLED BY ANY LIVE CODE PATH (verified
+# by grep -rn "count-agents" --include='*.sh' --include='*.py' . -- every
+# hit outside this file is a comment or a test-suite reference to the
+# script under test). It is an instrument for the incident narrative below
+# (agent-supervisor#663) and for manual debugging, not a dependency of the
+# dispatch gate. The dispatch path solves the work-in-flight problem a
+# different way -- count-work-in-flight.sh classifies tmux pane STATE
+# (lanes.sh's busy/hung/free/... denylist), not a process census, and does
+# not call this script or re-derive its classification. host-pressure.sh's
+# session gate calls count-work-in-flight.sh and is wired into
+# dispatch-preflight.sh; dispatch-claude-print.sh and dispatch-pi-rpc.sh
+# call host_pressure.py instead, which has no work-in-flight/session gate
+# of any kind (load-per-core and free-memory only) -- it is not a parity
+# port of host-pressure.sh's third gate. Separately, no "STEP 0" host guard
+# exists in loop-tick.md or director-loop.sh; the standalone
+# estate-loop/check.sh's own "Stop 2b: host pressure" reimplements a third,
+# independent raw uptime/load-per-core check in awk, with no session cap
+# and no call to count-agents.sh, count-work-in-flight.sh, host-pressure.sh,
+# or host_pressure.py.
 #
 # WHY THIS EXISTS (agent-supervisor#663): `pgrep -f claude` matches
 # on ANY substring of a process's full argv, not on what the process
