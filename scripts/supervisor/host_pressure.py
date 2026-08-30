@@ -46,6 +46,19 @@ EITHER kind -- ``dispatch-claude-print.sh`` and ``dispatch-pi-rpc.sh``, both
 of which start a new agent process the same way ``dispatch.sh`` does. Those
 two now call this module's CLI the same way ``dispatch.sh`` calls
 ``host-pressure.sh`` -- see their own "host pressure" comments.
+
+THE THIRD GATE, added by agent-estate#904: ``host-pressure.sh``'s session /
+work-in-flight cap (`#826`/`#899`) had no equivalent here at all -- this
+module's own ``Result`` carried only load and free memory, so
+``dispatch-claude-print.sh`` and ``dispatch-pi-rpc.sh`` could dispatch past
+any work-in-flight ceiling as long as load/mem looked fine. Fixed the same
+way the rest of this file already treats ``count-work-in-flight.sh``: SHELL
+OUT to it (see :func:`_default_inflight_count`) rather than port its
+lane-state classification a second time -- a second implementation of that
+fail-closed classifier is a second thing to keep correct, and
+`#831`/`#899` is already the story of getting it wrong once. Reads the same
+``SUPERVISOR_MAX_AGENT_SESSIONS`` env var ``host-pressure.sh`` reads, so the
+two gates cannot drift to different limits.
 """
 
 from __future__ import annotations
@@ -64,6 +77,13 @@ from dataclasses import dataclass
 DEFAULT_MAX_LOAD_PER_CORE = 3.0
 DEFAULT_MIN_FREE_MEM_GB = 1.5
 
+# Same default host-pressure.sh's own MAX_AGENT_SESSIONS uses -- one source
+# for both gates (agent-estate#904). The cap value itself is the Director's
+# call, not this module's; changing it here without also changing
+# host-pressure.sh's default would recreate the exact drift #904 exists to
+# close.
+DEFAULT_MAX_AGENT_SESSIONS = 20
+
 
 class PressureReadError(Exception):
     """A metric could not be read at all -- distinct from "read and over"."""
@@ -73,6 +93,7 @@ class PressureReadError(Exception):
 class Limits:
     max_load_per_core: float = DEFAULT_MAX_LOAD_PER_CORE
     min_free_mem_gb: float = DEFAULT_MIN_FREE_MEM_GB
+    max_agent_sessions: int = DEFAULT_MAX_AGENT_SESSIONS
 
 
 @dataclass(frozen=True)
@@ -95,10 +116,15 @@ def default_limits() -> Limits:
 
 def limits_from_env() -> Limits:
     """Same override convention as host-pressure.sh: SUPERVISOR_MAX_LOAD_PER_CORE
-    / SUPERVISOR_MIN_FREE_MEM_GB, 0 disables that one check."""
+    / SUPERVISOR_MIN_FREE_MEM_GB / SUPERVISOR_MAX_AGENT_SESSIONS, 0 disables
+    that one check. SUPERVISOR_MAX_AGENT_SESSIONS is the exact same env var
+    host-pressure.sh's own MAX_AGENT_SESSIONS reads (agent-estate#904) --
+    one name, one source of truth, so the two gates cannot enforce different
+    limits."""
     return Limits(
         max_load_per_core=float(os.environ.get("SUPERVISOR_MAX_LOAD_PER_CORE", DEFAULT_MAX_LOAD_PER_CORE)),
         min_free_mem_gb=float(os.environ.get("SUPERVISOR_MIN_FREE_MEM_GB", DEFAULT_MIN_FREE_MEM_GB)),
+        max_agent_sessions=int(os.environ.get("SUPERVISOR_MAX_AGENT_SESSIONS", DEFAULT_MAX_AGENT_SESSIONS)),
     )
 
 
@@ -174,21 +200,73 @@ def _default_free_mem_gb() -> float:
     return float(match.group(1)) * 1024 / (1024 ** 3)
 
 
-def check(limits: Limits | None = None, *, load1=None, free_mem_gb=None, cpu_count=None) -> Result:
+def _work_in_flight_script() -> str:
+    """count-work-in-flight.sh, next to this module -- same "sibling script"
+    resolution host-pressure.sh's own `$HERE/count-work-in-flight.sh` uses."""
+    return os.path.join(os.path.dirname(os.path.abspath(__file__)), "count-work-in-flight.sh")
+
+
+def _default_inflight_count() -> int:
+    """Shells out to count-work-in-flight.sh -- agent-supervisor#899's merged,
+    mutation-tested, fail-closed answer to "how many lanes are executing
+    right now", the exact script host-pressure.sh's own session gate calls.
+    Reused rather than re-derived (agent-estate#904): porting that lane-state
+    classification into Python a second time would be a second
+    implementation to keep correct, and #831/#899 is already the story of
+    getting it wrong once with just one.
+
+    Overridable via HOST_PRESSURE_WORK_IN_FLIGHT_SH for tests only, same
+    seam shape count-work-in-flight.sh's own WORK_IN_FLIGHT_* env vars use --
+    production code never sets it.
+    """
+    script = os.environ.get("HOST_PRESSURE_WORK_IN_FLIGHT_SH", _work_in_flight_script())
+    if not os.access(script, os.X_OK):
+        raise PressureReadError(
+            f"could not read work-in-flight count (count-work-in-flight.sh missing or not executable at {script})"
+        )
+    try:
+        result = subprocess.run(
+            [script], capture_output=True, text=True, timeout=30
+        )
+    except Exception as exc:  # noqa: BLE001 -- any failure here is "could not read"
+        raise PressureReadError(f"could not read work-in-flight count (count-work-in-flight.sh failed: {exc})") from exc
+    if result.returncode != 0 or not result.stdout.strip():
+        raise PressureReadError(
+            f"could not read work-in-flight count (count-work-in-flight.sh exited {result.returncode})"
+        )
+    try:
+        return int(result.stdout.strip())
+    except ValueError as exc:
+        raise PressureReadError(
+            f"could not read work-in-flight count (count-work-in-flight.sh returned non-numeric output: {result.stdout.strip()!r})"
+        ) from exc
+
+
+def check(
+    limits: Limits | None = None,
+    *,
+    load1=None,
+    free_mem_gb=None,
+    cpu_count=None,
+    inflight_count=None,
+) -> Result:
     """Reads the live host. An unreadable metric is NOT treated as healthy --
     the could-not-measure rule this estate learned the hard way: a check
     that cannot see must not report clean.
 
-    load1 / free_mem_gb / cpu_count are injectable for tests -- they default
-    to the real readers above. Each raises PressureReadError (or, for
-    cpu_count, returns None/0) on an unreadable metric.
+    load1 / free_mem_gb / cpu_count / inflight_count are injectable for
+    tests -- they default to the real readers above. Each raises
+    PressureReadError (or, for cpu_count, returns None/0) on an unreadable
+    metric.
     """
     limits = limits or default_limits()
     load1 = load1 or _default_load1
     free_mem_gb = free_mem_gb or _default_free_mem_gb
     cpu_count = cpu_count or os.cpu_count
+    inflight_count = inflight_count or _default_inflight_count
 
     load_per_core = 0.0
+    free = 0.0
 
     if limits.max_load_per_core > 0:
         try:
@@ -218,9 +296,19 @@ def check(limits: Limits | None = None, *, load1=None, free_mem_gb=None, cpu_cou
                 ok=False, load_per_core=load_per_core, free_mem_gb=free,
                 reason=f"free memory {free:.2f}GB < {limits.min_free_mem_gb}GB",
             )
-        return Result(ok=True, load_per_core=load_per_core, free_mem_gb=free, reason="within limits")
 
-    return Result(ok=True, load_per_core=load_per_core, free_mem_gb=0.0, reason="within limits")
+    if limits.max_agent_sessions > 0:
+        try:
+            inflight = inflight_count()
+        except PressureReadError as exc:
+            return Result(ok=False, load_per_core=load_per_core, free_mem_gb=free, reason=str(exc))
+        if inflight >= limits.max_agent_sessions:
+            return Result(
+                ok=False, load_per_core=load_per_core, free_mem_gb=free,
+                reason=f"work in flight {inflight} >= {limits.max_agent_sessions}",
+            )
+
+    return Result(ok=True, load_per_core=load_per_core, free_mem_gb=free, reason="within limits")
 
 
 def main(argv=None) -> int:

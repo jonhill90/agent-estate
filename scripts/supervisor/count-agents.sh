@@ -11,9 +11,12 @@
 # not call this script or re-derive its classification. host-pressure.sh's
 # session gate calls count-work-in-flight.sh and is wired into
 # dispatch-preflight.sh; dispatch-claude-print.sh and dispatch-pi-rpc.sh
-# call host_pressure.py instead, which has no work-in-flight/session gate
-# of any kind (load-per-core and free-memory only) -- it is not a parity
-# port of host-pressure.sh's third gate. Separately, no "STEP 0" host guard
+# call host_pressure.py instead, which (agent-estate#904) now ALSO shells
+# out to count-work-in-flight.sh for its own session gate, reading the same
+# SUPERVISOR_MAX_AGENT_SESSIONS host-pressure.sh reads -- before #904 it had
+# no work-in-flight gate of any kind (load-per-core and free-memory only),
+# which this comment used to say and is exactly why #904 was filed.
+# Separately, no "STEP 0" host guard
 # exists in loop-tick.md or director-loop.sh; the standalone
 # estate-loop/check.sh's own "Stop 2b: host pressure" reimplements a third,
 # independent raw uptime/load-per-core check in awk, with no session cap
