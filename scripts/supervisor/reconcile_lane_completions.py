@@ -285,6 +285,40 @@ touching the guard chain the brief for this issue named out of scope; the
 narrowing above already removes `/tmp` and everything else not
 worktree-shaped from the recurring set, which is the honest measurement to
 take before deciding whether a caching scheme is still worth the risk.
+
+agent-estate#841: three `claude-print` lanes in one session ended their own
+turn waiting on a job they had backgrounded and could never resume ($14.32,
+187 turns, all three) -- `claude -p`/`pi --mode rpc` genuinely exit once
+their final JSON result prints, so nothing was ever coming back, and each
+one's own closing words said as much: "I'll wait for the background
+shell-suites run ... before finalizing the PR." The issue's own three
+directions were left undecided; this takes the one entirely implementable
+here -- detect the shape at completion, rather than trying to stop a lane
+from backgrounding work at all (needs harness surface nobody here
+controls) or building cheap recovery (downstream of noticing in the first
+place). `_died_waiting_on_background` is the classifier: a lane's own
+final result text (`_lane_log_final_result_text`, read from the exact
+transport log `_lane_log_pr_url` already reads) matches a waiting-to-be-
+resumed shape AND it wrote no result file AND neither a PR
+(`_lane_log_pr_url`) nor an issue/PR comment (`_lane_log_comment_url`) can
+be attributed to it in that same log. The conjunction is deliberate and
+load-bearing, per the issue's own framing: a phrase match alone would fire
+on a lane that said something similar and still shipped, so "produced
+nothing" gates the wording, never the reverse.
+
+Deliberately NOT a new trigger for when a failure fires: this is checked
+only in `_sweep_nonobservable`/`_sweep_nonobservable_accepted`, at the
+exact point both methods already have -- after every existing gate
+(`_pid_confirmed_dead`, `stale_after`, `_liveness_blocks_failure`) has
+already decided this task is failing, and after `_lane_log_pr_url` has
+already cleared it of having shipped a PR. It only chooses a more specific
+note and an additional `report["died_waiting_on_background"]` tag for a
+failure this sweep was already about to write -- never a reason a lane is
+failed that would not otherwise have been. That keeps `_pid_confirmed_dead`,
+`_liveness_blocks_failure` and every completion path (`_complete_observed`,
+`_complete_from_evidence`) byte-for-byte unchanged, which is what makes
+"never mark a lane failed that actually shipped" hold: this can only ever
+relabel a failure the untouched gates above already produced.
 """
 
 from __future__ import annotations
@@ -331,6 +365,32 @@ _PULL_SOURCE_URL_RE = re.compile(r"https://github\.com/(?P<repo>[^/\s]+/[^/\s]+)
 # identical reason (CLAUDE.md invariant 6: unknown means not offered, not
 # swept in). `/tmp`'s basename is `tmp` -- fails this outright.
 _LANE_WORKTREE_NAME_RE = re.compile(r"^ad-[0-9]+-.+-[0-9]+$")
+
+# agent-estate#841: the shape all three measured specimens' final result
+# text shared -- "Waiting for the vhs tape's PNG capture to finish
+# (background Monitor task running)", "Waiting for the background VHS run
+# to finish (task bbcsv7l10)", "I'll wait for the background shell-suites
+# run and the monitor to report back" -- a lane ending its own turn on the
+# expectation something will resume it, which nothing in this estate ever
+# does (a `claude -p`/`pi-rpc` process that prints its final JSON result
+# has, by construction, already exited -- see `claude_print_transport.py`'s
+# own module docstring). Deliberately loose (any `wait`/`waiting` within one
+# clause of `background`/`resume`/`report back`) -- see this module's own
+# agent-estate#841 paragraph below for why a phrase match alone would be
+# brittle, and why `_died_waiting_on_background` never trusts this pattern
+# on its own.
+_WAITING_ON_BACKGROUND_RE = re.compile(
+    r"\bwait(?:ing)?\b[^.]{0,120}\b(?:background|resume|report back)\b",
+    re.IGNORECASE,
+)
+
+# agent-estate#841: a lane's own transport log already carries evidence of
+# every `gh issue comment`/`gh pr comment` it actually posted -- the CLI
+# prints the new comment's own URL on success, and that URL always carries
+# `#issuecomment-<id>` (an issue and a PR share one comment endpoint on
+# GitHub, so one pattern covers both). Distinct from `_PR_URL_RE` above,
+# which matches a PR's own URL (opened, not merely commented on).
+_GH_COMMENT_URL_RE = re.compile(r'https://github\.com/[^\s",]+/(?:issues|pull)/[0-9]+#issuecomment-[0-9]+')
 
 
 def _known_worktree_roots(repositories):
@@ -532,6 +592,17 @@ class LaneCompletionReconciler:
             # #488's liveness_alive/liveness_indeterminate are split out
             # below.
             "died_without_completing": [],
+            # agent-estate#841: subset of "failed_stale_delivery"/
+            # "failed_stale_acceptance" (and, when the pid fast path also
+            # fired, of "died_without_completing" too) -- task ids failed
+            # specifically because their own final result text described
+            # waiting on a backgrounded job, with no result file and no PR
+            # or comment to show for it. Named separately from
+            # "died_without_completing" so a human reading the report can
+            # tell "this lane threw its work away waiting on a background
+            # job" apart from "this lane's process merely died" at a
+            # glance -- see `_died_waiting_on_background`'s own docstring.
+            "died_waiting_on_background": [],
             # agent-supervisor#488: subsets of "unresolved" -- task ids left
             # alone specifically because a liveness check blocked a failure
             # stamp, named separately so a human (or watchdog.log) can tell
@@ -1189,6 +1260,104 @@ class LaneCompletionReconciler:
         match = _PR_URL_RE.search(text)
         return match.group(0) if match else None
 
+    def _lane_log_comment_url(self, task_id):
+        """agent-estate#841: the comment-posting counterpart to
+        `_lane_log_pr_url` above -- does this lane's own transport log name
+        an issue or PR comment it actually posted? Same fail-closed posture:
+        no log, no match, answers `None`, and this is only ever evidence
+        FOR a lane having produced something, never evidence against it.
+        """
+        log_path = self.ledger.root / "lane-logs" / f"{task_id}.log"
+        try:
+            text = log_path.read_text(errors="replace")
+        except OSError:
+            return None
+        match = _GH_COMMENT_URL_RE.search(text)
+        return match.group(0) if match else None
+
+    def _lane_log_final_result_text(self, task_id):
+        """agent-estate#841: the lane's own closing words, read back from
+        the SAME transport log every other evidence check in this module
+        already reads -- `claude -p --output-format json`/`pi --mode rpc`
+        both print one JSON object per turn, `{"type":"result",...,
+        "result":"<final text>",...}`, onto the stream `run_detached`
+        redirects into `lane-logs/<task_id>.log` (`claude_print_transport.
+        py`'s own module docstring). Parsed line by line -- the documented
+        shape is one compact object per line, not pretty-printed, so this
+        deliberately does not attempt a multi-line brace-matching parse
+        (this module's own `_died_waiting_on_background` needs the LAST
+        one, matching `_lane_log_pid`'s "last dispatch wins" convention for
+        a lane resumed more than once).
+
+        Returns the `result` field's text, or `None` when the log is
+        missing/unreadable or never carries a well-formed `type: "result"`
+        line -- `None` here means "no evidence either way", never "the
+        lane said nothing", so callers must never treat it as a phrase-match
+        failure.
+        """
+        log_path = self.ledger.root / "lane-logs" / f"{task_id}.log"
+        try:
+            text = log_path.read_text(errors="replace")
+        except OSError:
+            return None
+        final_text = None
+        for line in text.splitlines():
+            line = line.strip()
+            if not line.startswith("{") or not line.endswith("}"):
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("type") != "result":
+                continue
+            result = payload.get("result")
+            if isinstance(result, str):
+                final_text = result
+        return final_text
+
+    def _died_waiting_on_background(self, task_id):
+        """agent-estate#841: is this task the exact shape
+        `agent-estate#841` measured -- a lane that ended its own turn
+        waiting on a backgrounded job nothing in this estate ever resumes,
+        having produced nothing to show for it?
+
+        The conjunction is the load-bearing half, deliberately, per the
+        issue's own framing: a phrase match on "waiting"/"background" alone
+        would fire on a lane that said something similar and still shipped.
+        All three must hold, each an independent piece of evidence already
+        available at stamp time (no network call):
+
+        1. the lane's own final result text (`_lane_log_final_result_text`)
+           matches `_WAITING_ON_BACKGROUND_RE` -- it said it was waiting to
+           be resumed;
+        2. no result file was ever written (`incoming/<task_id>.md`,
+           the same path `ClaudePrintAdapter.assign_task`'s own prompt
+           tells the lane to write at completion) -- it never got there;
+        3. neither `_lane_log_pr_url` nor `_lane_log_comment_url` finds
+           anything in the SAME log -- no PR opened, no issue/PR comment
+           posted. A lane that opened a PR or posted a comment is not this
+           failure, whatever its closing sentence said (agent-estate#841's
+           own words) -- checked last, so a lane that shipped anything at
+           all short-circuits out before its wording is even considered.
+
+        Fails closed on every one: unreadable/missing text on any check
+        answers `False`, never `True` -- "cannot tell whether this lane
+        produced something" must leave the lane alone (this issue's own
+        hard constraint), not guess it into a failure it may not deserve.
+        """
+        final_text = self._lane_log_final_result_text(task_id)
+        if not final_text or not _WAITING_ON_BACKGROUND_RE.search(final_text):
+            return False
+        result_file = self.ledger.root / "incoming" / f"{task_id}.md"
+        if result_file.exists():
+            return False
+        if self._lane_log_pr_url(task_id) is not None:
+            return False
+        if self._lane_log_comment_url(task_id) is not None:
+            return False
+        return True
+
     def _lane_log_pid(self, task_id):
         """agent-supervisor#488: the pid `ClaudePrintAdapter.assign_task`
         recorded in this lane's own transport log at dispatch time, or
@@ -1407,7 +1576,25 @@ class LaneCompletionReconciler:
         if pr_url is not None:
             self._complete_from_evidence(task, pr_url=pr_url, now=now, report=report)
             return
-        if died_without_completing:
+        # agent-estate#841: checked here, after every existing gate above has
+        # already decided this task is failing and after the PR-evidence
+        # check just above has already cleared it of having shipped -- this
+        # only ever chooses which note/bucket a failure THIS sweep already
+        # decided on gets written with, never whether one is written (see
+        # `_died_waiting_on_background`'s own docstring for the full
+        # conjunction).
+        died_waiting_on_background = self._died_waiting_on_background(task["id"])
+        if died_waiting_on_background:
+            note = (
+                f"reconcile-lane-completions: {task['lane']} died_waiting_on_background -- "
+                f"its own final result text describes waiting on a backgrounded job to "
+                f"resume it, but it wrote no result file and neither opened a PR nor posted "
+                f"a comment; nothing in this estate resumes a claude-print/pi-rpc lane, so "
+                f"the work it did is thrown away with it as of {int(now)}, "
+                f"{int(age_seconds)}s after its last update -- terminated failed only to "
+                "free the lane for redispatch (agent-estate#841)"
+            ).encode("utf-8")
+        elif died_without_completing:
             note = (
                 f"reconcile-lane-completions: {task['lane']} died_without_completing -- "
                 f"its dispatch-time pid has demonstrably exited as of {int(now)}, "
@@ -1436,6 +1623,8 @@ class LaneCompletionReconciler:
         report["failed_stale_delivery"].append(task["id"])
         if died_without_completing:
             report["died_without_completing"].append(task["id"])
+        if died_waiting_on_background:
+            report["died_waiting_on_background"].append(task["id"])
 
     def _sweep_nonobservable_accepted(self, task, *, now, report):
         """agent-supervisor#414: `_sweep_nonobservable`'s counterpart for a
@@ -1482,7 +1671,21 @@ class LaneCompletionReconciler:
         if pr_url is not None:
             self._complete_from_evidence(task, pr_url=pr_url, now=now, report=report)
             return
-        if died_without_completing:
+        # agent-estate#841: same relabeling-only check as
+        # `_sweep_nonobservable`'s own -- see that method's comment and
+        # `_died_waiting_on_background`'s docstring for the full reasoning.
+        died_waiting_on_background = self._died_waiting_on_background(task["id"])
+        if died_waiting_on_background:
+            note = (
+                f"reconcile-lane-completions: {task['lane']} died_waiting_on_background -- "
+                f"its own final result text describes waiting on a backgrounded job to "
+                f"resume it, but it wrote no result file and neither opened a PR nor posted "
+                f"a comment; nothing in this estate resumes a claude-print/pi-rpc lane, so "
+                f"the work it did is thrown away with it as of {int(now)}, "
+                f"{int(age_seconds)}s after its last update -- terminated failed only to "
+                "free the lane for redispatch (agent-estate#841)"
+            ).encode("utf-8")
+        elif died_without_completing:
             note = (
                 f"reconcile-lane-completions: {task['lane']} died_without_completing -- "
                 f"its dispatch-time pid has demonstrably exited as of {int(now)}, "
@@ -1513,3 +1716,5 @@ class LaneCompletionReconciler:
         report["failed_stale_acceptance"].append(task["id"])
         if died_without_completing:
             report["died_without_completing"].append(task["id"])
+        if died_waiting_on_background:
+            report["died_waiting_on_background"].append(task["id"])
