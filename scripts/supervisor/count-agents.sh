@@ -101,25 +101,58 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/harness/claude.sh"
 AGENT_COMMAND_RE="$HARNESS_COMMAND_RE"
 
-# agent-estate#613 sub-decision 1: argv shapes that positively identify a
+# agent-estate#613 sub-decision 1 / agent-estate#871 review (ae871-rev871,
+# REQUEST_CHANGES on 28adf24): argv shapes that positively identify a
 # cc-daemon-owned process, independent of what `comm` resolves to on this
-# host (see the header comment above). Each alternative names ONE daemon
-# role, mirroring the header's own bg-pty-host/bg-spare naming:
-#   --bg-pty-host   cc-daemon's pooled pty host (its own launch flag)
-#   --bg-spare      cc-daemon's spare-claim helper (its own launch flag)
+# host (see the header comment above).
+#
+# ae871-rev871's finding: the first cut of this regex anchored ONLY the
+# `daemon run` alternative to a token sequence; the other three
+# (--bg-pty-host, --bg-spare, --fork-session) were bare substring matches
+# against the WHOLE argv string. A dispatched claude -p lane's own task
+# prompt is itself a positional argv element (claude_print_transport.py:
+# `command.append(prompt)`, always the LAST token, after every real launch
+# flag) -- so a lane merely asked to review/discuss this issue (whose
+# prompt then names these flags, e.g. "check whether --fork-session leaks
+# into a dispatched lane's argv") had its own comm=claude session excluded
+# from the count. That is the false-exclusion direction #613 says is
+# categorically worse than the false-inclusion this whole check exists to
+# fix: an under-count leaves the host-pressure guard blind to real load.
+#
+# THE FIX: every alternative is now anchored the SAME way `daemon run`
+# already was -- required to appear immediately after the invocation's own
+# `claude`/`claude.exe` token (at the very start of the cmdline, or right
+# after a path separator, i.e. this IS the daemon's own launch line, not
+# text appearing somewhere later in it). A print-mode lane's own launch
+# flags (`-p`, `--output-format`, `--model`, `--resume <id>`, ...) always
+# occupy that position instead, and its free-text prompt is pushed to the
+# END, well past this anchor -- so prose mentioning any of these flags by
+# name can no longer match. Each alternative names ONE daemon role,
+# mirroring the header's own bg-pty-host/bg-spare naming:
+#   --bg-pty-host   cc-daemon's pooled pty host -- launched as
+#                    `claude(.exe) [bg-pty-host ]--bg-pty-host ...` (the
+#                    `bg-pty-host` subcommand token is optional: present
+#                    when comm still carries the daemon's own title, absent
+#                    when comm has resolved to a bare interpreter path)
+#   --bg-spare      cc-daemon's spare-claim helper -- same shape,
+#                    `claude(.exe) [bg-spare ]--bg-spare ...`
 #   daemon run      the `claude(.exe) daemon run` subcommand, cc-daemon's
 #                    supervisor process -- anchored to "claude(.exe) daemon
-#                    run" as a token sequence, not a bare substring, so a
-#                    real lane's own prose ("daemon run" typed in a comment
-#                    or task title) cannot accidentally match
-#   --fork-session  the flag cc-daemon uses to fork a pooled session for
-#                    `--session-id ... --resume ...` -- checked against
+#                    run" as a token sequence immediately after the
+#                    invocation's own name, not a bare substring
+#   --fork-session  the flag cc-daemon uses to fork a pooled session,
+#                    always launched as `claude(.exe) --session-id <id>
+#                    --fork-session ...` -- checked against
 #                    harness/claude.sh's own HARNESS_LAUNCH_CMD and
 #                    HARNESS_RESUME_CMD (2026-08-29): neither ever passes
-#                    `--session-id` or `--fork-session`, so this flag
-#                    appearing in argv is never a real dispatched or
-#                    restored lane, only cc-daemon's own forking
-DAEMON_ARGV_RE='--bg-pty-host|--bg-spare|--fork-session|(^|/)claude(\.exe)?[[:space:]]+daemon[[:space:]]+run([[:space:]]|$)'
+#                    `--session-id` immediately after the invocation's own
+#                    name, so this shape appearing there is never a real
+#                    dispatched or restored lane, only cc-daemon's own
+#                    forking
+DAEMON_ARGV_RE='(^|/)claude(\.exe)?[[:space:]]+(bg-pty-host[[:space:]]+)?--bg-pty-host([[:space:]]|$)'
+DAEMON_ARGV_RE="$DAEMON_ARGV_RE"'|(^|/)claude(\.exe)?[[:space:]]+(bg-spare[[:space:]]+)?--bg-spare([[:space:]]|$)'
+DAEMON_ARGV_RE="$DAEMON_ARGV_RE"'|(^|/)claude(\.exe)?[[:space:]]+--session-id[[:space:]]+[^[:space:]]+[[:space:]]+--fork-session([[:space:]]|$)'
+DAEMON_ARGV_RE="$DAEMON_ARGV_RE"'|(^|/)claude(\.exe)?[[:space:]]+daemon[[:space:]]+run([[:space:]]|$)'
 
 VERBOSE=0
 for arg in "$@"; do

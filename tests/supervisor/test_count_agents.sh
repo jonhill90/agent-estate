@@ -219,6 +219,37 @@ chmod +x "$D2/bin/ps"
 OUT4=$(PATH="$D2/bin:$PATH" "$SCRIPT" 2>&1); RC4=$?
 want_exit "ps runs but prints nothing: refuses rather than reporting 0" "$RC4" "2" "$OUT4"
 
+# --- agent-estate#871 review: fault-inject the SECOND `ps` call specifically
+# (the `command=` one DAEMON_ARGV_RE is checked against), distinct from the
+# two cases above which both break the FIRST, fatal `comm=` call. The
+# script's own comment says this one FAILS OPEN: if it can't be read,
+# CMD_OUT stays empty, every argv lookup finds no line for a given pid, and
+# a daemon process that can't be positively identified via argv is COUNTED
+# rather than excluded (never default to excluding something you can't
+# positively identify as daemon infrastructure). The reviewer read this in
+# the diff but did not fault-inject it; do that here. A `ps` that answers
+# `comm=` but fails `command=` reproduces the exact failure this comment
+# describes -- verify the process is counted, not silently dropped.
+D5=$(mktemp -d); mkdir -p "$D5/bin"
+cat > "$D5/bin/ps" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *comm=*)
+    cat <<'FIXTURE'
+920 claude
+FIXTURE
+    ;;
+  *command=*)
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$D5/bin/ps"
+run5() { PATH="$D5/bin:$PATH" "$SCRIPT" "$@"; }
+OUT9=$(run5); RC9=$?
+want_exit "fail-open: second (command=) ps call failing still exits 0" "$RC9" "0" "$OUT9"
+want_eq "fail-open: a process that can't be argv-identified is COUNTED, not excluded, when the second ps call fails" "$OUT9" "1"
+
 # --- agent-estate#613 sub-decision 1: daemon exclusion by argv, not by an
 # accident of what `comm` resolves to -----------------------------------
 # Reproduces the Director's live finding verbatim: on a host where a
@@ -292,6 +323,80 @@ chmod +x "$D3/bin/ps"
 OUT7=$(run3); RC7=$?
 want_exit "#613: comm=claude with 'daemon run' only in unrelated prose: exits 0" "$RC7" "0" "$OUT7"
 want_eq "#613: fail-closed -- comm already identifies this as a real agent session, so it still counts" "$OUT7" "1"
+
+# --- agent-estate#871 review (ae871-rev871, REQUEST_CHANGES on 28adf24) §3:
+# a dispatched claude -p lane's own task PROMPT is a positional argv element
+# (claude_print_transport.py: `command.append(prompt)`, always the LAST
+# token). Before this fix, three of DAEMON_ARGV_RE's four alternatives were
+# bare substring matches against the WHOLE argv string, so a lane merely
+# asked to discuss/review these flags by name had its own genuine session
+# excluded -- the false-exclusion direction #613 says is categorically
+# worse than the false-inclusion this whole check exists to fix (an
+# under-count leaves the host-pressure guard blind to real load). This
+# fixture reproduces the reviewer's exact construction: two live-shaped
+# comm=claude sessions whose prompts each name one of the unanchored flags.
+D4=$(mktemp -d); mkdir -p "$D4/bin"
+cat > "$D4/bin/ps" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *comm=*)
+    cat <<'FIXTURE'
+910 claude
+911 claude
+FIXTURE
+    ;;
+  *command=*)
+    cat <<'FIXTURE'
+910 claude -p --output-format json --model sonnet --dangerously-skip-permissions --strict-mcp-config --resume abc-123 Review agent-estate#871 and check whether the daemon --fork-session flag ever leaks into a real dispatched lanes argv
+911 claude -p --output-format json --model sonnet --dangerously-skip-permissions --strict-mcp-config --resume def-456 Investigate the --bg-pty-host socket path bug reported by the Director
+FIXTURE
+    ;;
+esac
+EOF
+chmod +x "$D4/bin/ps"
+run4() { PATH="$D4/bin:$PATH" "$SCRIPT" "$@"; }
+OUT8=$(run4); RC8=$?
+want_exit "#871 §3: two dispatched lanes whose prompts name daemon flags: exits 0" "$RC8" "0" "$OUT8"
+want_eq "#871 §3: both genuine lanes still count (2), not excluded because their PROMPT text mentions a daemon flag" "$OUT8" "2"
+
+# --- agent-estate#871 review §4 Direction A: the mutation gap the reviewer
+# found. Every #613 fixture above pairs a daemon argv shape with a comm
+# that ALSO independently fails AGENT_COMMAND_RE (a two-word title like
+# "claude bg-pty-host", or a full interpreter path) -- so on THIS host,
+# blanking DAEMON_ARGV_RE to match nothing does not turn any test red: the
+# pre-existing comm mismatch already excludes those pids regardless of
+# whether DAEMON_ARGV_RE does anything at all. Verified live as part of
+# this fix (see PR comment): with DAEMON_ARGV_RE set to match nothing,
+# `count-agents.sh: 29 passed, 0 failed` -- the suite passed with the
+# mechanism this whole issue is about entirely disabled. The one pairing
+# where DAEMON_ARGV_RE is actually load-bearing is comm resolving to the
+# BARE `claude`/`claude.exe` string (matches AGENT_COMMAND_RE on its own)
+# while argv is still daemon-shaped -- the exact scenario the header
+# comment warns could happen after an install-path change. This fixture
+# pins THAT pairing, so a mutation blanking DAEMON_ARGV_RE fails HERE.
+D6=$(mktemp -d); mkdir -p "$D6/bin"
+cat > "$D6/bin/ps" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *comm=*)
+    cat <<'FIXTURE'
+930 claude.exe
+931 claude
+FIXTURE
+    ;;
+  *command=*)
+    cat <<'FIXTURE'
+930 claude.exe --bg-pty-host /tmp/cc-daemon-501/spare/x.pty.sock
+931 claude --model sonnet --dangerously-skip-permissions --strict-mcp-config
+FIXTURE
+    ;;
+esac
+EOF
+chmod +x "$D6/bin/ps"
+run6() { PATH="$D6/bin:$PATH" "$SCRIPT" "$@"; }
+OUT10=$(run6); RC10=$?
+want_exit "#871 §4A: bare comm=claude.exe daemon pairing exits 0" "$RC10" "0" "$OUT10"
+want_eq "#871 §4A: DAEMON_ARGV_RE is load-bearing here -- excludes the bare-comm daemon pid, counts only the 1 real session" "$OUT10" "1"
 
 echo
 echo "count-agents.sh: $pass passed, $fail failed"
