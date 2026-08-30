@@ -1478,15 +1478,25 @@ class FakeWorktreeReaper:
     def __init__(self, outcomes=None, ledger=None):
         self.outcomes = outcomes or {}
         self.calls = []
+        self.merged_prs_files = {}
         self.ledger = ledger
+        # agent-estate#847: `_fetch_merged_prs_once` reads this off the real
+        # `LaneWorktreeReaper` it is given -- present here so a test wiring
+        # this fake in never trips an AttributeError if a fixture's own
+        # `worktree_path` happens to resolve to a known repository. Every
+        # existing test's fixtures resolve to no known repository (see
+        # `_repo_for_worktree_path`), so this value is never actually used
+        # to shell out -- it only has to exist.
+        self.worktree_bin = "worktree.sh"
 
     def _lane_is_live(self, lane):
         if self.ledger is None:
             return False
         return self.ledger.get_open_task_for_lane(lane) is not None
 
-    def reap_task_worktree(self, task):
+    def reap_task_worktree(self, task, *, merged_prs_file=None):
         self.calls.append(task["id"])
+        self.merged_prs_files[task["id"]] = merged_prs_file
         return {"task": task["id"], "outcome": self.outcomes.get(task["id"], "reaped")}
 
 
@@ -1585,9 +1595,9 @@ class WorktreeReaperWiringTest(unittest.TestCase):
         worktree_reaper = FakeWorktreeReaper()
         original_call = worktree_reaper.reap_task_worktree
 
-        def recording_call(task):
+        def recording_call(task, **kwargs):
             order.append(("worktree", task["id"]))
-            return original_call(task)
+            return original_call(task, **kwargs)
 
         worktree_reaper.reap_task_worktree = recording_call
 
@@ -1606,7 +1616,7 @@ class WorktreeReaperWiringTest(unittest.TestCase):
         runner = FakeLanesRunner({"agent-supervisor": [{"window": 2, "state": "free", "idle_seconds": 400}]})
 
         class ExplodingReaper:
-            def reap_task_worktree(self, task):
+            def reap_task_worktree(self, task, *, merged_prs_file=None):
                 raise RuntimeError("worktree.sh reap blew up")
 
         report = LaneCompletionReconciler(
@@ -1616,6 +1626,196 @@ class WorktreeReaperWiringTest(unittest.TestCase):
         self.assertEqual(1, len(report["worktrees"]))
         self.assertEqual("ae804-wire5", report["worktrees"][0]["task"])
         self.assertEqual("error", report["worktrees"][0]["outcome"])
+
+
+class RecordingFetchRunner:
+    """Answers `lanes.sh --json <session>` from `windows` (same shape
+    `FakeLanesRunner` already uses) AND intercepts `bash <worktree_bin>
+    fetch-merged-prs <repo> <out>` -- recording every fetch call in order
+    and, unless `fail_fetch` is set, writing `fetch_writes` to `<out>` the
+    same way the real `worktree.sh fetch-merged-prs` subcommand would.
+    Exists to prove `_reap_worktrees_for_this_sweep`'s own batching claim
+    (agent-estate#847): one fetch per REPOSITORY this sweep touches, never
+    one per candidate."""
+
+    def __init__(self, windows, worktree_bin, fetch_writes="", fail_fetch=False):
+        self.windows = windows
+        self.worktree_bin = worktree_bin
+        self.fetch_writes = fetch_writes
+        self.fail_fetch = fail_fetch
+        self.fetch_calls = []
+
+    def __call__(self, command):
+        if len(command) >= 5 and command[0] == "bash" and command[1] == self.worktree_bin and command[2] == "fetch-merged-prs":
+            repo_path, out_path = command[3], command[4]
+            self.fetch_calls.append(repo_path)
+            if self.fail_fetch:
+                raise subprocess.CalledProcessError(1, command)
+            Path(out_path).write_text(self.fetch_writes)
+            return ""
+        session = command[-1]
+        rows = self.windows.get(session)
+        if rows is None:
+            raise RuntimeError(f"lanes.sh unavailable for session {session}")
+        return json.dumps(rows)
+
+
+class MergedPrBatchingTest(unittest.TestCase):
+    """agent-estate#847: `_reap_worktrees_for_this_sweep` must fetch the
+    merged-PR set at most once per repository THIS SWEEP touches, never
+    once per candidate -- the measured cause (`ae846-fix846b`'s profile:
+    77 of 131 candidates each paying an independent ~1.9s `gh pr list`
+    round trip for what was, within one sweep, always the identical
+    answer). Uses `FakeWorktreeReaper` (the wiring double, same as
+    `WorktreeReaperWiringTest` above) so the removal decision itself is out
+    of scope here -- only WHICH repository gets fetched, HOW MANY TIMES,
+    and WHICH file each candidate's `reap_task_worktree` call receives."""
+
+    def setUp(self):
+        self.tempdir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tempdir.cleanup)
+        self.ledger = Ledger(Path(self.tempdir.name), clock=lambda: 1_000)
+        self.repo_a = Path(self.tempdir.name) / "repo-a"
+        self.repo_b = Path(self.tempdir.name) / "repo-b"
+        self.repo_a.mkdir()
+        self.repo_b.mkdir()
+
+    def dispatch(self, task_id, *, lane, window, repo, worktree_path):
+        self.ledger.record_dispatch(
+            lane=lane, pane_id=f"%{window}", nonce=f"nonce-{task_id}", harness="claude",
+            repo=str(repo), server_id="server-a", session_id="$2", command="claude",
+            task_id=task_id, source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-estate/issues/847",
+            source_ref="847", summary="issue #847", source_state="OPEN",
+            evidence=[f"claimed by dispatch.sh for lane {lane}", "issues: 847"],
+            status_marker=None, accepted=True, worktree_path=str(worktree_path),
+        )
+
+    def test_two_candidates_same_repo_fetch_exactly_once(self):
+        self.dispatch(
+            "ae847-a1", lane="agent-supervisor:2", window=2,
+            repo=self.repo_a, worktree_path=self.repo_a / ".worktrees" / "ad-1",
+        )
+        self.dispatch(
+            "ae847-a2", lane="agent-supervisor:3", window=3,
+            repo=self.repo_a, worktree_path=self.repo_a / ".worktrees" / "ad-2",
+        )
+        runner = RecordingFetchRunner(
+            {"agent-supervisor": [
+                {"window": 2, "state": "free", "idle_seconds": 400},
+                {"window": 3, "state": "free", "idle_seconds": 400},
+            ]},
+            worktree_bin="worktree.sh", fetch_writes="lane/whatever\tMERGED\n",
+        )
+        reaper = FakeWorktreeReaper()
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300,
+            worktree_reaper=reaper,
+            repositories=[{"name": "repo-a", "path": str(self.repo_a), "github": "example/repo-a"}],
+        ).sweep()
+        self.assertEqual(["ae847-a1", "ae847-a2"], sorted(report["completed"]))
+        self.assertEqual([str(self.repo_a)], runner.fetch_calls, "exactly one fetch for the one repository both candidates share")
+        self.assertEqual(2, len(reaper.calls))
+        files = {reaper.merged_prs_files["ae847-a1"], reaper.merged_prs_files["ae847-a2"]}
+        self.assertEqual(1, len(files), "both candidates must receive the SAME pre-fetched file, not independent ones")
+        self.assertIsNotNone(next(iter(files)))
+
+    def test_candidates_in_different_repos_fetch_once_each(self):
+        self.dispatch(
+            "ae847-b1", lane="agent-supervisor:2", window=2,
+            repo=self.repo_a, worktree_path=self.repo_a / ".worktrees" / "ad-1",
+        )
+        self.dispatch(
+            "ae847-b2", lane="agent-supervisor:3", window=3,
+            repo=self.repo_b, worktree_path=self.repo_b / ".worktrees" / "ad-1",
+        )
+        runner = RecordingFetchRunner(
+            {"agent-supervisor": [
+                {"window": 2, "state": "free", "idle_seconds": 400},
+                {"window": 3, "state": "free", "idle_seconds": 400},
+            ]},
+            worktree_bin="worktree.sh", fetch_writes="lane/whatever\tMERGED\n",
+        )
+        reaper = FakeWorktreeReaper()
+        LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300,
+            worktree_reaper=reaper,
+            repositories=[
+                {"name": "repo-a", "path": str(self.repo_a), "github": "example/repo-a"},
+                {"name": "repo-b", "path": str(self.repo_b), "github": "example/repo-b"},
+            ],
+        ).sweep()
+        self.assertEqual({str(self.repo_a), str(self.repo_b)}, set(runner.fetch_calls))
+        self.assertEqual(2, len(runner.fetch_calls), "one fetch per repository, never a shared file across two different repos")
+        self.assertNotEqual(reaper.merged_prs_files["ae847-b1"], reaper.merged_prs_files["ae847-b2"])
+
+    def test_failed_fetch_is_not_retried_within_the_same_sweep(self):
+        """agent-estate#847: a repo whose fetch fails this sweep (no `gh`,
+        no readable remote, `gh pr list` itself failed) must fall back to
+        `None` (letting `reap`'s own per-call fetch try again, unchanged
+        from pre-#847 behaviour) for every candidate sharing that repo --
+        but the FAILED fetch itself must only be attempted once, not once
+        per candidate that shares it."""
+        self.dispatch(
+            "ae847-c1", lane="agent-supervisor:2", window=2,
+            repo=self.repo_a, worktree_path=self.repo_a / ".worktrees" / "ad-1",
+        )
+        self.dispatch(
+            "ae847-c2", lane="agent-supervisor:3", window=3,
+            repo=self.repo_a, worktree_path=self.repo_a / ".worktrees" / "ad-2",
+        )
+        runner = RecordingFetchRunner(
+            {"agent-supervisor": [
+                {"window": 2, "state": "free", "idle_seconds": 400},
+                {"window": 3, "state": "free", "idle_seconds": 400},
+            ]},
+            worktree_bin="worktree.sh", fail_fetch=True,
+        )
+        reaper = FakeWorktreeReaper()
+        LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300,
+            worktree_reaper=reaper,
+            repositories=[{"name": "repo-a", "path": str(self.repo_a), "github": "example/repo-a"}],
+        ).sweep()
+        self.assertEqual([str(self.repo_a)], runner.fetch_calls, "the failing fetch must be attempted exactly once this sweep, not once per candidate")
+        self.assertIsNone(reaper.merged_prs_files["ae847-c1"])
+        self.assertIsNone(reaper.merged_prs_files["ae847-c2"])
+
+    def test_candidate_outside_any_known_repository_never_triggers_a_fetch(self):
+        unknown_root = Path(self.tempdir.name) / "unknown-repo"
+        unknown_root.mkdir()
+        self.dispatch(
+            "ae847-d1", lane="agent-supervisor:2", window=2,
+            repo=unknown_root, worktree_path=unknown_root / ".worktrees" / "ad-1",
+        )
+        runner = RecordingFetchRunner(
+            {"agent-supervisor": [{"window": 2, "state": "free", "idle_seconds": 400}]},
+            worktree_bin="worktree.sh",
+        )
+        reaper = FakeWorktreeReaper()
+        LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300,
+            worktree_reaper=reaper,
+            # Deliberately does not name unknown_root -- only repo_a/repo_b
+            # (unused here) would ever be "known".
+            repositories=[{"name": "repo-a", "path": str(self.repo_a), "github": "example/repo-a"}],
+        ).sweep()
+        self.assertEqual([], runner.fetch_calls)
+        self.assertIsNone(reaper.merged_prs_files["ae847-d1"])
+
+    def test_no_reap_candidates_never_triggers_a_fetch(self):
+        """A sweep with nothing to reap must never pay for a fetch at all
+        -- `_reap_worktrees_for_this_sweep` returns before
+        `_merged_prs_file_for_task` is ever reached."""
+        runner = RecordingFetchRunner({}, worktree_bin="worktree.sh")
+        reaper = FakeWorktreeReaper()
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, idle_after=300,
+            worktree_reaper=reaper,
+            repositories=[{"name": "repo-a", "path": str(self.repo_a), "github": "example/repo-a"}],
+        ).sweep()
+        self.assertEqual([], report["worktrees"])
+        self.assertEqual([], runner.fetch_calls)
 
 
 class LeakedWorktreeBacklogTest(unittest.TestCase):

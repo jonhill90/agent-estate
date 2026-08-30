@@ -117,7 +117,7 @@ class LaneWorktreeReaper:
     def _lane_is_live(self, lane):
         return self.ledger.get_open_task_for_lane(lane) is not None
 
-    def reap_task_worktree(self, task):
+    def reap_task_worktree(self, task, *, merged_prs_file=None):
         """Reap `task`'s own worktree. Never raises -- every refusal and
         every outcome is returned in the report dict, exactly one of:
 
@@ -129,6 +129,14 @@ class LaneWorktreeReaper:
         `reason` is omitted on "reaped" and on every gate this module's own
         three checks refuse before ever shelling out -- there is nothing
         `worktree.sh` said in those cases because it was never called.
+
+        `merged_prs_file` (agent-estate#847): a path a caller already
+        fetched the MERGED-PR set into (`worktree.sh fetch-merged-prs`,
+        called once for a whole sweep of many `reap_task_worktree` calls)
+        rather than paying `worktree.sh reap`'s own `_gc_fetch_merged_prs`
+        network round trip on every single call. `None` (the default) keeps
+        every existing caller's behaviour exactly as before -- `reap` fetches
+        its own snapshot fresh, unchanged.
         """
         base = {"task": task.get("id"), "lane": task.get("lane")}
         worktree_path = task.get("worktree_path") or ""
@@ -145,8 +153,12 @@ class LaneWorktreeReaper:
             # this one to it. Not a failure; nothing left to reap.
             return {**base, "outcome": "worktree_missing"}
 
+        argv = ["bash", self.worktree_bin, "reap"]
+        if merged_prs_file:
+            argv += ["--merged-file", merged_prs_file]
+        argv += [worktree_path, self.base]
         try:
-            self.runner(["bash", self.worktree_bin, "reap", worktree_path, self.base])
+            self.runner(argv)
         except subprocess.CalledProcessError as error:
             return {**base, "outcome": "refused", "reason": (error.stderr or "").strip()}
         except Exception as error:
