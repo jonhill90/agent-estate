@@ -12,10 +12,11 @@ index needs lives under `docs/` and in each file's own header comment, linked
 from here rather than inlined — this file drifts less if it says less.
 
 This repo is two halves merged under migration Step 2b/2c (#682, #744): the
-daemon (`agent-supervisor`, everything at the root outside `tui/`) and the
-TUI (`agent-tui`, everything under `tui/`). Each keeps its own orientation
-section below rather than being blended into one narrative — the two had
-separate framing before the merge and still do.
+daemon (`agent-supervisor`, everything at the root outside `src/tui/`) and
+the TUI (`agent-tui`, everything under `src/tui/`, moved there from `tui/`
+by #865). Each keeps its own orientation section below rather than being
+blended into one narrative — the two had separate framing before the merge
+and still do.
 
 ## The daemon
 
@@ -406,20 +407,23 @@ you re-check it — don't trust it just because it's written down.*
 
 ## The TUI
 
-Arrival policy for the TUI half of this repo, everything under `tui/`.
-**Verified against `main` `2e810dc`, 2026-08-29.** Confirm the branch/SHA in
-`git log -1` still matches before trusting counts below; they are measured,
-not estimated. Earlier verification stamps for this section (through
+Arrival policy for the TUI half of this repo, everything under `src/tui/`
+(moved there from `tui/` by #865). **Verified against `main` `2e810dc`,
+2026-08-29, before #865's move** — path references below reflect the
+post-move `src/tui/` location; re-check counts against the current tree
+before trusting them. Earlier verification stamps for this section (through
 `390c99a`, 2026-08-23) are superseded by this one; git history has them if
 you need the trail.
 
 **Naming: the product is the Estate**, binary `estate`, Go module
-`github.com/jonhill90/agent-estate/tui` (renamed off `github.com/jonhill90/agent-tui`
-by #747, once `jonhill90/agent-tui` itself was decommissioned — the module path
-stayed `agent-tui` for a while after the product rename on purpose, since
-publishing it had pinned the import path and renaming while the repo was still
-live would have broken any consumer import; that constraint lapsed once the
-repo it named was retired). Prose in this repo's docs says "the Estate"
+`github.com/jonhill90/agent-estate/src/tui` (renamed off
+`github.com/jonhill90/agent-estate/tui` by #865, itself renamed off
+`github.com/jonhill90/agent-tui` by #747, once `jonhill90/agent-tui` itself
+was decommissioned — the module path stayed `agent-tui` for a while after the
+product rename on purpose, since publishing it had pinned the import path and
+renaming while the repo was still live would have broken any consumer
+import; that constraint lapsed once the repo it named was retired). Prose in
+this repo's docs says "the Estate"
 (capital E, lowercase article); code identifiers use `estate`. Issue
 references below keep the `agent-tui#NN` form because that is the repo they
 point at. Full naming history — `keelson` and `steading` both considered and
@@ -428,8 +432,8 @@ in [decisions/0006](docs/decisions/0006-agent-tui-merges-into-agent-supervisor.m
 
 ### What this repo is
 
-This repo (Go module `github.com/jonhill90/agent-estate/tui` — see the naming note
-above) is one terminal application: a left nav sidebar modelled 1:1 on the
+This repo (Go module `github.com/jonhill90/agent-estate/src/tui` — see the
+naming note above) is one terminal application: a left nav sidebar modelled 1:1 on the
 hill90 web app's own nav (`internal/nav`, `docs/tui/SPEC-shell.md`), with the
 task board, cost panel, glyph gallery and the lane rail over
 `agent-supervisor`'s lane/session state all reachable as routed panes in the
@@ -488,7 +492,7 @@ internal/mcpservers/ configured MCP servers -- name, scope (global/project), rea
 internal/mergepr/    merge-time gate for this repo -- chains the CI gate and internal/prverdict's comment-verdict gate, fails closed, then calls gh pr merge
 internal/monitor/    host health (load/swap/process count) + agent state counts (Observe -> Monitoring)
 internal/nav/        the 1:1-with-hill90 nav tree + sidebar component -- the fixed left column (SPEC-shell.md S1-S3)
-internal/navwalk/    one JSONL file per nav destination, replacing the single hand-merged tui/testdata/vhs/full-nav-walk-report.md
+internal/navwalk/    one JSONL file per nav destination, replacing the single hand-merged src/tui/testdata/vhs/full-nav-walk-report.md
 internal/prverdict/  reads a PR's own comments and decides whether it carries an independent, current APPROVE -- Go port of skills#255's pr_verdict.py
 internal/rail/       the lane rail -- content behind the sidebar's "Lanes" route (PaneLanes) since SPEC-shell.md S3/S4, no longer a fixed column
 internal/secrets/    Connect -> Secrets -- levels 1-4 of an exposure scale from hill90-app's secrets-schema.yaml, never level 5 (the value)
@@ -552,7 +556,7 @@ go test ./...
 `docs_test.go`, `ledger_copy_test.go`, `secrets_test.go`, `skills_test.go`,
 `supervisor_test.go`) and `tools/memoryvariants/spike` has one
 (`main_test.go`); `internal/sshserver` still has none (`git ls-files
-'tui/**/*_test.go'`, checked at write time — re-run, don't trust this
+'src/tui/**/*_test.go'`, checked at write time — re-run, don't trust this
 list stale). CI (`.github/workflows/*.yml`) runs the same three commands on
 `ubuntu-latest`, Go 1.26, plus a fourth check gated on a live
 `agent-supervisor` checkout: `internal/lane/states_lanessh_test.go`

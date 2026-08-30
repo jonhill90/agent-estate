@@ -18,8 +18,9 @@
 set -euo pipefail
 
 # This script lives at scripts/tui/, same as its sibling
-# refresh-known-references.sh; the Go module it reads is two levels up.
-tui_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../tui" && pwd)"
+# refresh-known-references.sh; the Go module it reads moved to src/tui/
+# (#865), two levels up plus src/.
+tui_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../src/tui" && pwd)"
 out="${tui_root}/internal/reposcan/testdata/naming_debt_baseline.json"
 
 ( cd "${tui_root}" && go run ./cmd/namingdebtbaseline . ) > "${out}"
