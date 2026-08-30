@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jonhill90/agent-estate/estate/internal/corpus"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 	"github.com/jonhill90/agent-estate/estate/internal/pressure"
 )
@@ -83,6 +84,16 @@ func main() {
 			fmt.Fprintln(os.Stderr, "estate: cannot read brief:", err)
 			os.Exit(2)
 		}
+		// The operator's parameters are law and outrank the brief. If they
+		// cannot be read we refuse: an agent working without them is exactly
+		// how a month went into a layer the corpus had already ruled out.
+		params, err := corpus.Hard()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch --", err)
+			os.Exit(1)
+		}
+		grounded := corpus.Grounding(issue+" "+string(brief), params) + string(brief)
+
 		if v := pressure.Check(l, pressure.Default()); !v.OK {
 			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch --")
 			for _, r := range v.Reasons {
@@ -95,13 +106,13 @@ func main() {
 			fmt.Fprintln(os.Stderr, "estate: cannot record dispatch:", err)
 			os.Exit(2)
 		}
-		fmt.Printf("dispatched %s\n", id)
+		fmt.Printf("dispatched %s (grounded in %d operator parameters)\n", id, len(params))
 
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "claude", "-p", "--output-format", "json",
 			"--dangerously-skip-permissions")
-		cmd.Stdin = strings.NewReader(string(brief))
+		cmd.Stdin = strings.NewReader(grounded)
 		out, runErr := cmd.Output()
 
 		rec := ledger.Record{ID: id, Issue: issue, Lane: id}
