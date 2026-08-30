@@ -398,6 +398,44 @@ OUT10=$(run6); RC10=$?
 want_exit "#871 §4A: bare comm=claude.exe daemon pairing exits 0" "$RC10" "0" "$OUT10"
 want_eq "#871 §4A: DAEMON_ARGV_RE is load-bearing here -- excludes the bare-comm daemon pid, counts only the 1 real session" "$OUT10" "1"
 
+# --- agent-estate#871 re-review (ae871-rerev871, REQUEST_CHANGES on
+# c34b6c3) §2: round-1's fix anchored DAEMON_ARGV_RE with `(^|/)claude...`,
+# intending "the daemon's own launch line starts here" -- but `(^|/)` binds
+# to ANY slash anywhere in the string, not just the string's own start. A
+# dispatched lane whose prompt merely QUOTES the daemon's own
+# path-qualified launch line (exactly what this PR's own diff, description,
+# and prior review comments do, verbatim) still has a `/`-preceded
+# `claude(.exe)` token sitting in argv, deep inside the free-text prompt --
+# reopening the identical false-exclusion one layer down. This fixture is
+# the re-reviewer's own construction: three live-shaped comm=claude
+# sessions whose prompts each quote the real daemon's full interpreter-path
+# launch line for one of the three previously-unanchored alternatives.
+D7=$(mktemp -d); mkdir -p "$D7/bin"
+cat > "$D7/bin/ps" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *comm=*)
+    cat <<'FIXTURE'
+940 claude
+941 claude
+942 claude
+FIXTURE
+    ;;
+  *command=*)
+    cat <<'FIXTURE'
+940 claude -p --output-format json --model sonnet --dangerously-skip-permissions --strict-mcp-config --session-id abc123 Investigate report that /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --bg-pty-host is leaking into the count-agents.sh regex, see agent-estate#871
+941 claude -p --output-format json --model sonnet --dangerously-skip-permissions --strict-mcp-config --session-id def456 Please confirm /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe daemon run never appears in a real dispatched lane, per agent-estate#871
+942 claude -p --output-format json --model sonnet --dangerously-skip-permissions --strict-mcp-config --session-id ghi789 Quote the review verbatim: /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --session-id y --fork-session --resume /Users/jon/.claude/projects/x/y.jsonl
+FIXTURE
+    ;;
+esac
+EOF
+chmod +x "$D7/bin/ps"
+run7() { PATH="$D7/bin:$PATH" "$SCRIPT" "$@"; }
+OUT11=$(run7); RC11=$?
+want_exit "#871 §2: three dispatched lanes whose prompts QUOTE the daemon's path-qualified launch line: exits 0" "$RC11" "0" "$OUT11"
+want_eq "#871 §2: all three genuine lanes still count (3), not excluded because their PROMPT text quotes the daemon's own launch line" "$OUT11" "3"
+
 echo
 echo "count-agents.sh: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
