@@ -3,7 +3,7 @@ package main
 import (
 	"path/filepath"
 
-	"github.com/jonhill90/agent-tui/internal/skills"
+	"github.com/jonhill90/agent-estate/tui/internal/skills"
 )
 
 // skillsEvalStatusRelPath is where jonhill90/skills keeps skills#230's own

@@ -85,12 +85,12 @@ $ go test ./tools/memoryvariants/spike/... -v
 === RUN   TestMotionWithoutPressDoesNotGrab
 --- PASS: TestMotionWithoutPressDoesNotGrab (0.00s)
 PASS
-ok  	github.com/jonhill90/agent-tui/tools/memoryvariants/spike	0.204s
+ok  	github.com/jonhill90/agent-estate/tui/tools/memoryvariants/spike	0.162s
 ```
 
-(Re-captured 2026-08-28 against the current module path, agent-tui#172 —
-the earlier paste here read `github.com/jonhill90/keelson/...`, a module
-path that no longer exists.)
+(Re-captured 2026-08-29 against the current module path, #747 — the earlier
+paste here read `github.com/jonhill90/agent-tui/...`, a module path that
+now names a decommissioned repo.)
 
 **Not verified, and said so rather than assumed**: real terminal
 mouse-event rate/resolution and how a drag actually feels over tmux/SSH.

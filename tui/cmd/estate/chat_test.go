@@ -4,8 +4,8 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/jonhill90/agent-tui/internal/chat"
-	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-estate/tui/internal/chat"
+	"github.com/jonhill90/agent-estate/tui/internal/lane"
 )
 
 // TestBuildParticipantsFetch_DerivesRunningFromLaneState proves the join

@@ -17,7 +17,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	zone "github.com/lrstanley/bubblezone"
 
-	"github.com/jonhill90/agent-tui/internal/nav"
+	"github.com/jonhill90/agent-estate/tui/internal/nav"
 )
 
 var (

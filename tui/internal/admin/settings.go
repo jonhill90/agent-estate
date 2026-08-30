@@ -1,6 +1,6 @@
 package admin
 
-import "github.com/jonhill90/agent-tui/internal/theme"
+import "github.com/jonhill90/agent-estate/tui/internal/theme"
 
 // fetchSettings reads this application's own persisted configuration --
 // theme.Load's own file, the one setting agent-tui has today. theme.Load

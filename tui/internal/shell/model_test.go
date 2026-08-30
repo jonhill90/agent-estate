@@ -4,7 +4,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/jonhill90/agent-tui/internal/nav"
+	"github.com/jonhill90/agent-estate/tui/internal/nav"
 )
 
 // TestRouteToPaneNeverLosesAWiredRoute is agent-b5.md's own regression

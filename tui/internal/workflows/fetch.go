@@ -9,7 +9,7 @@
 // of every dispatch this estate has made.
 package workflows
 
-import "github.com/jonhill90/agent-tui/internal/board"
+import "github.com/jonhill90/agent-estate/tui/internal/board"
 
 // Fetcher retrieves the current dispatch history -- the one adapter seam
 // this package's Model depends on. cmd/estate composes the real

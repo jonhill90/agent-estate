@@ -4,7 +4,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/jonhill90/agent-tui/internal/secrets"
+	"github.com/jonhill90/agent-estate/tui/internal/secrets"
 )
 
 // secretsSchemaRelPath is where hill90-app keeps the file Secrets renders,

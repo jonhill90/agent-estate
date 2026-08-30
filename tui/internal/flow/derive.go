@@ -14,7 +14,7 @@ package flow
 import (
 	"sort"
 
-	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-estate/tui/internal/board"
 )
 
 // Stage is one node of the flow pipeline. Unlike board.Column (five

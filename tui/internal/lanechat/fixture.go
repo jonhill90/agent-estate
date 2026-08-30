@@ -29,8 +29,8 @@ package lanechat
 import (
 	"time"
 
-	"github.com/jonhill90/agent-tui/internal/chat"
-	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-estate/tui/internal/chat"
+	"github.com/jonhill90/agent-estate/tui/internal/lane"
 )
 
 // FixtureLanes returns the same five lanes every call -- deterministic by

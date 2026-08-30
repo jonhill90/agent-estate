@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-estate/tui/internal/lane"
 )
 
 var testRepo = Repo{Label: "agent-tui", Owner: "jonhill90", Name: "agent-tui"}

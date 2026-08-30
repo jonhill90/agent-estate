@@ -1,4 +1,4 @@
-module github.com/jonhill90/agent-tui
+module github.com/jonhill90/agent-estate/tui
 
 go 1.25.0
 

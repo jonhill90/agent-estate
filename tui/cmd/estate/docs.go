@@ -7,8 +7,8 @@ import (
 	"path/filepath"
 	"runtime"
 
-	"github.com/jonhill90/agent-tui/internal/apidocs"
-	"github.com/jonhill90/agent-tui/internal/external"
+	"github.com/jonhill90/agent-estate/tui/internal/apidocs"
+	"github.com/jonhill90/agent-estate/tui/internal/external"
 )
 
 // openAPIRelPath is where hill90-app keeps the document API Docs renders,

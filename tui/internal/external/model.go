@@ -19,7 +19,7 @@ package external
 import (
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/agent-tui/internal/theme"
+	"github.com/jonhill90/agent-estate/tui/internal/theme"
 )
 
 // Opener hands a URL to the host's browser. It is the adapter seam

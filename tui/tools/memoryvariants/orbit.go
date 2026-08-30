@@ -6,7 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jonhill90/agent-tui/internal/theme"
+	"github.com/jonhill90/agent-estate/tui/internal/theme"
 )
 
 const orbitImplies = "no free-form drag at all -- one node is 'focus', its neighbours ring around it by hop distance, arrow keys re-centre. Implies: cheapest to build and to read (a hub with N spokes never overlaps), but you never see the WHOLE graph at once, only one node's neighbourhood -- this is the 'maybe grab-and-move isn't the right primitive' reading"

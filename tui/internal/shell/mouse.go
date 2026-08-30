@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	zone "github.com/lrstanley/bubblezone"
 
-	"github.com/jonhill90/agent-tui/internal/nav"
+	"github.com/jonhill90/agent-estate/tui/internal/nav"
 )
 
 // Mouse support for the shell -- clicking a nav item switches pane, the way

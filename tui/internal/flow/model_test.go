@@ -7,7 +7,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-estate/tui/internal/board"
 )
 
 func TestArrowTrackMarkerMovesWithFrame(t *testing.T) {

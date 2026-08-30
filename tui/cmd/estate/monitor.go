@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/jonhill90/agent-tui/internal/lane"
-	"github.com/jonhill90/agent-tui/internal/monitor"
+	"github.com/jonhill90/agent-estate/tui/internal/lane"
+	"github.com/jonhill90/agent-estate/tui/internal/monitor"
 )
 
 // buildMonitorFetch composes monitor.ExecHostRunner (this machine's own

@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-estate/tui/internal/board"
 )
 
 func card(col board.Column, age time.Duration, prNumber int, blockedReason string) board.Card {

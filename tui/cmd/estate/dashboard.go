@@ -4,11 +4,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/jonhill90/agent-tui/internal/board"
-	"github.com/jonhill90/agent-tui/internal/cost"
-	"github.com/jonhill90/agent-tui/internal/dashboard"
-	"github.com/jonhill90/agent-tui/internal/knowledge"
-	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-estate/tui/internal/board"
+	"github.com/jonhill90/agent-estate/tui/internal/cost"
+	"github.com/jonhill90/agent-estate/tui/internal/dashboard"
+	"github.com/jonhill90/agent-estate/tui/internal/knowledge"
+	"github.com/jonhill90/agent-estate/tui/internal/lane"
 )
 
 // buildDashboardFetch composes four seams this file already opens for other
