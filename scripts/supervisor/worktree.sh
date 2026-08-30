@@ -290,6 +290,53 @@ safe_remove() {
   return 0
 }
 
+# agent-estate#891: a landed branch held by a worktree OUTSIDE $REPO/
+# .worktrees/ is never `gc`'s to remove -- the scope filter in `gc` below
+# exists precisely to keep gc's hands off anything outside .worktrees/ (see
+# that filter's own comment). But branch-sweep.sh's branch-deletion pass
+# defers every worktree-held branch back to `gc` ("worktree.sh gc owns
+# worktree-held branches, not this sweep"), and until now gc had no way to
+# ever free one held outside .worktrees/ -- the branch stayed permanently
+# unreachable to branch-sweep.sh. Measured live: 19-20 of this repo's own
+# local branches are landed ancestors of origin/main, every one still held
+# by a worktree, and the branch-deletion pass deleted 0 of them every tick.
+#
+# THE PRIMITIVE: `git checkout --detach` at TARGET's own current commit.
+# This only rewrites TARGET's own `.git/worktrees/<name>/HEAD` from a
+# symbolic ref (`ref: refs/heads/<branch>`) to a detached ref at the SAME
+# commit sha -- the index and working tree are already checked out at that
+# commit, so nothing on disk changes. This is strictly less destructive than
+# `safe_remove` above: the worktree directory and its contents are never
+# touched, only the branch-to-worktree binding that blocks the branch's
+# deletion is released. Once detached, TARGET falls into the existing
+# "no branch (detached or bare)" gc-skip category above (the established
+# convention this follows, not a new one) on every future gc run, and the
+# branch itself is now free for branch-sweep.sh to delete.
+#
+# Same refusal shape as safe_remove: never detach the live worktree, never
+# detach anything dirty (an uncommitted change is someone's unfinished work,
+# whether or not the branch's own committed content already landed).
+detach_worktree() {
+  local target="$1"
+  local dry="${2:-}"
+  if is_live_worktree "$target"; then
+    echo "worktree: $target is the live worktree (agent-supervisor#367) -- refusing to detach it, no matter how clean or merged it looks" >&2
+    return 1
+  fi
+  local status
+  status=$(git -C "$target" status --porcelain 2>&1)
+  if [ -n "$status" ]; then
+    echo "worktree: $target has uncommitted changes -- not detaching" >&2
+    echo "$status" >&2
+    return 1
+  fi
+  # --dry-run runs every refusal above and stops here, same contract as
+  # safe_remove's own --dry-run.
+  [ -n "$dry" ] && return 0
+  git -C "$target" checkout --quiet --detach >&2 || return 1
+  return 0
+}
+
 # agent-supervisor#478: is worktree $1 LIVE -- occupied by a tmux pane, a
 # running process's cwd, or simply too young to trust either signal between
 # tool calls? `gc`'s clean+merged predicate says nothing about this; see the
@@ -1346,7 +1393,7 @@ gc)
   _GC_PANES=$(tmux list-panes -a -F '#{pane_current_path}' 2>/dev/null); _GC_PANES_RC=$?
   _GC_PANES_CACHED=1
 
-  removed=0 skipped=0
+  removed=0 detached=0 skipped=0
   for i in "${!paths[@]}"; do
     p="${paths[$i]}"
     b="${branches[$i]}"
@@ -1393,11 +1440,6 @@ gc)
           ;;
       esac
     fi
-    if [ "$in_scope" -eq 0 ]; then
-      echo "worktree: gc skipping $p -- outside $REPO/.worktrees/ and not opted into scope via WORKTREE_GC_EXTRA_ROOTS (sweeping outside .worktrees/ by default is a separate decision, not made here)" >&2
-      skipped=$((skipped + 1))
-      continue
-    fi
     if [ -n "$SELF" ] && [ "$p" = "$SELF" ]; then
       echo "worktree: gc skipping $p -- this is the worktree gc is running in" >&2
       skipped=$((skipped + 1))
@@ -1419,8 +1461,31 @@ gc)
       # unmerged work.
       why="its branch has a MERGED PR on GitHub even though $BASE has since diverged from its scoped diff (agent-supervisor#682)"
     else
-      echo "worktree: gc skipping $p -- $BASE does not already contain branch '$b', and no MERGED PR is on record for it" >&2
+      # NOT landed -- the out-of-scope skip message is unchanged either way
+      # (agent-estate#891 only changes what happens once a branch IS landed;
+      # a not-landed branch is refused exactly as before, in or out of scope).
+      if [ "$in_scope" -eq 0 ]; then
+        echo "worktree: gc skipping $p -- outside $REPO/.worktrees/ and not opted into scope via WORKTREE_GC_EXTRA_ROOTS (sweeping outside .worktrees/ by default is a separate decision, not made here)" >&2
+      else
+        echo "worktree: gc skipping $p -- $BASE does not already contain branch '$b', and no MERGED PR is on record for it" >&2
+      fi
       skipped=$((skipped + 1))
+      continue
+    fi
+    if [ "$in_scope" -eq 0 ]; then
+      # agent-estate#891: landed, but out of gc's scope to remove -- detach
+      # instead of refusing outright. See detach_worktree's own comment for
+      # the primitive and why this is safe.
+      if detach_worktree "$p" "$DRY"; then
+        if [ -n "$DRY" ]; then
+          echo "worktree: gc would detach $p from branch '$b' -- outside $REPO/.worktrees/ ($why); worktree directory and its contents left untouched, branch freed for branch-sweep.sh to delete" >&2
+        else
+          echo "worktree: gc detached $p from branch '$b' -- outside $REPO/.worktrees/ ($why); worktree directory and its contents left untouched, branch freed for branch-sweep.sh to delete" >&2
+        fi
+        detached=$((detached + 1))
+      else
+        skipped=$((skipped + 1))
+      fi
       continue
     fi
     if safe_remove "$p" "$DRY"; then
@@ -1435,9 +1500,9 @@ gc)
     fi
   done
   if [ -n "$DRY" ]; then
-    echo "worktree: gc dry run done -- would remove $removed, skipped $skipped (nothing changed)" >&2
+    echo "worktree: gc dry run done -- would remove $removed, would detach $detached, skipped $skipped (nothing changed)" >&2
   else
-    echo "worktree: gc done -- removed $removed, skipped $skipped" >&2
+    echo "worktree: gc done -- removed $removed, detached $detached, skipped $skipped" >&2
   fi
   exit 0 ;;
 
