@@ -123,14 +123,30 @@ CONTRACT_MARKER='<!-- dispatch:deliverable-contract -->'
 # `git -C $2 ls-files` -- exact match first, then unambiguous basename match.
 # A token matching more than one file by basename is skipped: which one was
 # meant is exactly the guesswork this check refuses to do. Text at or after
-# CONTRACT_MARKER is excluded first (see marker comment above) -- it is the
-# dispatcher's own appended boilerplate, never the brief author's intent.
+# the LAST line equal to CONTRACT_MARKER is excluded first (see marker
+# comment above) -- it is the dispatcher's own appended boilerplate, never
+# the brief author's intent. agent-estate#845: truncating at the FIRST match
+# instead let a brief that merely quotes the marker in its own prose (e.g.
+# a brief explaining this very fix) blind the scanner to everything after
+# it, including a real file named later in the same brief -- a false
+# ALLOW on a genuine collision. The dispatcher's own append is idempotent
+# (`grep -qF "$CONTRACT_MARKER" "$BRIEF" || cat >>...` in
+# dispatch-claude-print.sh, dispatch-pi-rpc.sh and dispatch-send.sh), so the
+# real appended contract, when present, is always the LAST occurrence of the
+# marker line -- nothing is ever written after it by the dispatcher.
 _files_named_in() {
   local text_file="$1" repo="$2" all_files token matches authored_text
   [ -f "$text_file" ] || return 0
   all_files=$(git -C "$repo" ls-files 2>/dev/null) || return 0
   [ -n "$all_files" ] || return 0
-  authored_text=$(awk -v marker="$CONTRACT_MARKER" '$0 == marker { exit } { print }' "$text_file")
+  authored_text=$(awk -v marker="$CONTRACT_MARKER" '
+    $0 == marker { last = NR }
+    { line[NR] = $0 }
+    END {
+      stop = last ? last : NR + 1
+      for (i = 1; i < stop; i++) print line[i]
+    }
+  ' "$text_file")
   while IFS= read -r token; do
     [ -n "$token" ] || continue
     if grep -qxF "$token" <<<"$all_files"; then

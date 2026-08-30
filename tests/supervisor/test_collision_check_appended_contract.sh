@@ -122,6 +122,44 @@ want_exit "a brief that names the file in its own body still collides" "$rc2" 1 
 want_contains "...naming the colliding lane" "agent-supervisor:3" "$out2"
 want_contains "...naming the colliding file" "scripts/supervisor/dispatch-claude-print.sh" "$out2"
 
+# --- 3. RED (agent-estate#845): the brief's own prose QUOTES the marker
+#        text on its own line -- above the real, dispatcher-appended
+#        contract -- while naming a real file AFTER that quoted line but
+#        BEFORE the real marker. Truncating at the FIRST marker match (the
+#        quoted one) hid the real filename and produced a false ALLOW on a
+#        genuine collision. Truncating at the LAST match (the real,
+#        dispatcher-appended one) must still find it. -----------------------
+LANE_C_WT="$D/laneC"
+git -C "$REPO" worktree add -q -b lane/900-other "$LANE_C_WT" main
+echo "lane C's fix" >> "$LANE_C_WT/scripts/supervisor/other.sh"
+register_lane "$STATE" "ae900-other" "agent-supervisor:9" "$LANE_C_WT"
+
+cat > "$D/brief-999-quoted-marker.md" <<'EOF'
+# Test brief
+
+This brief discusses the fix, which stops scanning prose at the exact
+marker line, which reads:
+
+<!-- dispatch:deliverable-contract -->
+
+Anyway, the real file this brief is actually about is `scripts/supervisor/other.sh`.
+
+<!-- dispatch:deliverable-contract -->
+## Delivering this work
+
+Added by `dispatch-claude-print.sh` on every dispatch, not by the brief's author.
+
+**Your lane id is `agent-supervisor:10`.**
+EOF
+
+out3=$(AGENT_SUPERVISOR_STATE_DIR="$STATE" DISPATCH_PYTHON=python3 \
+  "$CHECK" check --issue 999 --brief "$D/brief-999-quoted-marker.md" --worktree "$CAND_WT" \
+  --repo-path "$REPO" --exclude-lane "agent-supervisor:10" 2>&1)
+rc3=$?
+want_exit "a brief that quotes the marker in prose, then names a real file, still collides" "$rc3" 1 "$out3"
+want_contains "...naming the colliding lane (quoted-marker case)" "agent-supervisor:9" "$out3"
+want_contains "...naming the colliding file (quoted-marker case)" "scripts/supervisor/other.sh" "$out3"
+
 rm -rf "$D" "$GH_BIN"
 
 echo
