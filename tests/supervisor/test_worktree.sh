@@ -954,22 +954,85 @@ git -C "$INSIDE_DEST" fetch -q origin
 OUTSIDE_REAL=$(cd "$OUTSIDE_DEST" && pwd -P)
 INSIDE_REAL=$(cd "$INSIDE_DEST" && pwd -P)
 
+# Fingerprint OUTSIDE_DEST's tracked content before anything touches it, so
+# the detach assertion below can PROVE byte-identical content rather than
+# assert it (agent-estate#891's own mutation-test requirement). `git ls-files
+# -z | xargs -0 shasum` over the worktree's own tracked files, not `git
+# status` (which only reports difference, never confirms sameness) and not a
+# whole-directory hash (which would also see .git's own internal state
+# churn from the detach itself, unrelated to file CONTENT).
+_content_fingerprint() {
+  ( cd "$1" && git ls-files -z | LC_ALL=C sort -z | xargs -0 shasum -a 256 2>/dev/null | shasum -a 256 )
+}
+OUTSIDE_FINGERPRINT_BEFORE=$(_content_fingerprint "$OUTSIDE_DEST")
+
 scope_dry=$(gc478 gc --dry-run "$REPO" origin/main 2>&1); scope_dry_rc=$?
 want_exit "gc --dry-run (scope test) exits 0" "$scope_dry_rc" 0 "$scope_dry"
-if grep -q "would remove $OUTSIDE_REAL" <<<"$scope_dry"; then bad "gc --dry-run never offers a worktree registered outside \$REPO/.worktrees/" "$scope_dry"; else ok "gc --dry-run never offers a worktree registered outside \$REPO/.worktrees/"; fi
-if grep -q "gc skipping $OUTSIDE_REAL -- outside .*\.worktrees/" <<<"$scope_dry"; then ok "the skip names the .worktrees/ scope, not some other reason"; else bad "the skip names the .worktrees/ scope, not some other reason" "$scope_dry"; fi
-if grep -q "would remove $INSIDE_REAL" <<<"$scope_dry"; then ok "gc --dry-run still offers a worktree registered inside \$REPO/.worktrees/"; else bad "gc --dry-run still offers a worktree registered inside \$REPO/.worktrees/" "$scope_dry"; fi
+if grep -q "would remove $OUTSIDE_REAL" <<<"$scope_dry"; then bad "gc --dry-run never offers to REMOVE a worktree registered outside \$REPO/.worktrees/" "$scope_dry"; else ok "gc --dry-run never offers to REMOVE a worktree registered outside \$REPO/.worktrees/"; fi
+# agent-estate#891: OUTSIDE_DEST's branch is landed (merged into origin/main
+# above) and the worktree is otherwise fully eligible -- clean, unoccupied,
+# old enough. Its only obstacle is being outside .worktrees/, so gc must now
+# offer to DETACH it rather than leave it permanently stuck, unlike the old
+# "outside .worktrees/" skip this replaces for exactly this (landed) case.
+if grep -qF "gc would detach $OUTSIDE_REAL from branch 'lane/527-scope-outside'" <<<"$scope_dry"; then ok "gc --dry-run offers to detach a LANDED branch's out-of-scope worktree instead of refusing outright"; else bad "gc --dry-run offers to detach a LANDED branch's out-of-scope worktree instead of refusing outright" "$scope_dry"; fi
+if grep -q "would remove $INSIDE_REAL" <<<"$scope_dry"; then ok "gc --dry-run still offers to remove a worktree registered inside \$REPO/.worktrees/"; else bad "gc --dry-run still offers to remove a worktree registered inside \$REPO/.worktrees/" "$scope_dry"; fi
+
+# --dry-run must change nothing: same contract as safe_remove's own dry-run.
+if git -C "$OUTSIDE_DEST" symbolic-ref -q -- HEAD >/dev/null 2>&1; then ok "gc --dry-run leaves the out-of-scope worktree still on its branch (no mutation from a dry run)"; else bad "gc --dry-run leaves the out-of-scope worktree still on its branch" "HEAD is already detached after a dry run"; fi
 
 scope_out=$(gc478 gc "$REPO" origin/main 2>&1); scope_rc=$?
 want_exit "gc (scope test) exits 0" "$scope_rc" 0 "$scope_out"
-if [ -d "$OUTSIDE_DEST" ]; then ok "gc leaves the outside-.worktrees/ worktree in place, no matter how clean/merged/old/unoccupied it looks"; else bad "gc leaves the outside-.worktrees/ worktree in place" "$OUTSIDE_DEST was removed: $scope_out"; fi
+if [ -d "$OUTSIDE_DEST" ]; then ok "gc leaves the outside-.worktrees/ worktree DIRECTORY in place, no matter how clean/merged/old/unoccupied it looks"; else bad "gc leaves the outside-.worktrees/ worktree directory in place" "$OUTSIDE_DEST was removed: $scope_out"; fi
+if grep -qF "gc detached $OUTSIDE_REAL from branch 'lane/527-scope-outside'" <<<"$scope_out"; then ok "gc reports detaching the out-of-scope worktree from its landed branch"; else bad "gc reports detaching the out-of-scope worktree from its landed branch" "$scope_out"; fi
+if git -C "$OUTSIDE_DEST" symbolic-ref -q -- HEAD >/dev/null 2>&1; then bad "gc detaches the out-of-scope worktree's HEAD from its branch" "HEAD is still symbolic: $(git -C "$OUTSIDE_DEST" symbolic-ref -q HEAD 2>&1)"; else ok "gc detaches the out-of-scope worktree's HEAD from its branch"; fi
+if git -C "$REPO" show-ref --verify --quiet "refs/heads/lane/527-scope-outside"; then ok "detaching never deletes the branch itself -- only branch-sweep.sh may do that"; else bad "detaching never deletes the branch itself" "refs/heads/lane/527-scope-outside is gone"; fi
+OUTSIDE_FINGERPRINT_AFTER=$(_content_fingerprint "$OUTSIDE_DEST")
+if [ "$OUTSIDE_FINGERPRINT_BEFORE" = "$OUTSIDE_FINGERPRINT_AFTER" ]; then ok "MUTATION-TEST-3: the detached worktree's tracked file contents are byte-identical to before (proven via shasum, not asserted)"; else bad "MUTATION-TEST-3: the detached worktree's tracked file contents are byte-identical to before" "before=$OUTSIDE_FINGERPRINT_BEFORE after=$OUTSIDE_FINGERPRINT_AFTER"; fi
 if [ -d "$INSIDE_DEST" ]; then bad "gc removes the inside-.worktrees/ worktree" "$INSIDE_DEST still present: $scope_out"; else ok "gc removes the inside-.worktrees/ worktree"; fi
 
-# --- MUTATION: disable the .worktrees/ scope filter -> the outside
-# candidate (still on disk -- correctly preserved above) must go RED,
-# proving the assertion above is pinned to the scope filter and not to
-# something else already refusing this candidate (e.g. liveness or the
-# merge predicate).
+# --- MUTATION-TEST-2: a NOT-landed branch held by an out-of-scope worktree
+# is never detached or deleted -- the refusal is byte-for-byte the same as
+# before agent-estate#891, since this brief only changes behavior once a
+# branch IS landed.
+NOTLANDED_ROOT=$(mktemp -d)
+NOTLANDED_DEST="$NOTLANDED_ROOT/scope-outside-notlanded"
+git -C "$REPO" worktree add -q -b lane/891-scope-outside-notlanded "$NOTLANDED_DEST" origin/main
+echo "unlanded change, never pushed or merged" >> "$NOTLANDED_DEST/file.txt"
+git -C "$NOTLANDED_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "content nobody has landed anywhere"
+NOTLANDED_REAL=$(cd "$NOTLANDED_DEST" && pwd -P)
+NOTLANDED_FINGERPRINT_BEFORE=$(_content_fingerprint "$NOTLANDED_DEST")
+
+notlanded_out=$(gc478 gc "$REPO" origin/main 2>&1); notlanded_rc=$?
+want_exit "gc (not-landed out-of-scope case) exits 0" "$notlanded_rc" 0 "$notlanded_out"
+if grep -qF "gc skipping $NOTLANDED_REAL -- outside $REPO/.worktrees/" <<<"$notlanded_out"; then ok "MUTATION-TEST-2: a NOT-landed out-of-scope worktree is refused with the unchanged 'outside .worktrees/' message, not detached"; else bad "MUTATION-TEST-2: a NOT-landed out-of-scope worktree is refused with the unchanged 'outside .worktrees/' message" "$notlanded_out"; fi
+if grep -F "$NOTLANDED_REAL" <<<"$notlanded_out" | grep -qiF "detach"; then bad "a NOT-landed out-of-scope worktree is never mentioned as detached" "$notlanded_out"; else ok "a NOT-landed out-of-scope worktree is never mentioned as detached"; fi
+if git -C "$NOTLANDED_DEST" symbolic-ref -q -- HEAD >/dev/null 2>&1; then ok "MUTATION-TEST-2: the NOT-landed worktree's branch checkout is untouched (still symbolic, not detached)"; else bad "MUTATION-TEST-2: the NOT-landed worktree's branch checkout is untouched" "HEAD was detached: $(git -C "$NOTLANDED_DEST" symbolic-ref -q HEAD 2>&1)"; fi
+if git -C "$REPO" show-ref --verify --quiet "refs/heads/lane/891-scope-outside-notlanded"; then ok "MUTATION-TEST-2: the NOT-landed branch itself still exists"; else bad "MUTATION-TEST-2: the NOT-landed branch itself still exists" "branch is gone"; fi
+NOTLANDED_FINGERPRINT_AFTER=$(_content_fingerprint "$NOTLANDED_DEST")
+if [ "$NOTLANDED_FINGERPRINT_BEFORE" = "$NOTLANDED_FINGERPRINT_AFTER" ]; then ok "the NOT-landed worktree's content is untouched"; else bad "the NOT-landed worktree's content is untouched" "before=$NOTLANDED_FINGERPRINT_BEFORE after=$NOTLANDED_FINGERPRINT_AFTER"; fi
+git -C "$REPO" worktree remove --force "$NOTLANDED_DEST" >/dev/null 2>&1
+git -C "$REPO" branch -D lane/891-scope-outside-notlanded >/dev/null 2>&1
+rm -rf "$NOTLANDED_ROOT" 2>/dev/null
+
+# --- MUTATION: disable the .worktrees/ scope filter -> a fresh, still-
+# attached landed-out-of-scope candidate must go RED (removed entirely,
+# rather than merely detached), proving the assertions above are pinned to
+# the scope filter and not to something else already refusing this
+# candidate (e.g. liveness or the merge predicate). OUTSIDE_DEST itself is
+# no longer usable for this -- the real gc run above already detached it, so
+# it no longer carries a branch for the mutant's own scope-disabled removal
+# path to act on.
+MUT_OUTSIDE_ROOT=$(mktemp -d)
+MUT_OUTSIDE_DEST="$MUT_OUTSIDE_ROOT/scope-outside-mut"
+git -C "$REPO" worktree add -q -b lane/891-scope-outside-mut "$MUT_OUTSIDE_DEST" origin/main
+echo "outside-scope change (mutation fixture)" >> "$MUT_OUTSIDE_DEST/file.txt"
+git -C "$MUT_OUTSIDE_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "outside-scope merged work (mutation fixture)"
+git -C "$MUT_OUTSIDE_DEST" push -q origin lane/891-scope-outside-mut
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/891-scope-outside-mut
+git -C "$REPO" push -q origin main
+git -C "$MUT_OUTSIDE_DEST" fetch -q origin
+
 MUT_SCOPE="$D/worktree-mutant-scope.sh"
 mut_rc=0
 python3 - "$WT" "$MUT_SCOPE" <<'PY' || mut_rc=$?
@@ -995,13 +1058,173 @@ else
   ok "setup: patched a copy of worktree.sh with the .worktrees/ scope filter disabled"
   chmod +x "$MUT_SCOPE"
   mut_scope_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=0 bash "$MUT_SCOPE" gc "$REPO" origin/main 2>&1)
-  if [ ! -d "$OUTSIDE_DEST" ]; then
+  if [ ! -d "$MUT_OUTSIDE_DEST" ]; then
     ok "mutation confirmed: disabling the .worktrees/ scope filter lets gc remove a worktree registered outside it (the outside candidate's GREEN assertion would now be RED)"
   else
-    bad "mutation confirmed: disabling the .worktrees/ scope filter lets gc remove a worktree registered outside it" "expected removal on the mutant, $OUTSIDE_DEST is still present: $mut_scope_out"
+    bad "mutation confirmed: disabling the .worktrees/ scope filter lets gc remove a worktree registered outside it" "expected removal on the mutant, $MUT_OUTSIDE_DEST is still present: $mut_scope_out"
   fi
 fi
-rm -rf "$OUTSIDE_ROOT" 2>/dev/null
+rm -rf "$OUTSIDE_ROOT" "$MUT_OUTSIDE_ROOT" 2>/dev/null
+git -C "$REPO" worktree prune >/dev/null 2>&1
+
+# --- agent-estate#893: detach_worktree's own two refusals, directly -------
+# The scope-filter section above only ever exercises detach_worktree's HAPPY
+# path -- OUTSIDE_DEST is asserted clean and unoccupied before gc ever runs,
+# so neither of detach_worktree's own two refusals (dirty tree,
+# is_live_worktree) is ever reached by anything in this file. `#893`'s
+# review (6229e9d2) proved both are load-bearing today by mutating a copy of
+# this script; this section gives each refusal a direct, positive assertion
+# so a future edit that silently drops one goes red here instead of nowhere.
+# detach_worktree has no CLI subcommand of its own -- gc's out-of-scope,
+# landed-branch path is the only caller -- so both fixtures below are
+# landed, out-of-scope worktrees (same shape as OUTSIDE_DEST), reached
+# through a real `gc` run rather than sourcing worktree.sh's internals.
+#
+# Read each worktree's OWN admin `HEAD` file (`git rev-parse
+# --absolute-git-dir` inside it, not a guess at `.git/worktrees/<name>`)
+# byte-for-byte before and after, per the brief: assert on that literal
+# content, not on the refusal's own log line, so the assertion is pinned to
+# the ref binding staying intact rather than to a message string.
+DETACH_DIRTY_ROOT=$(mktemp -d)
+DETACH_DIRTY_DEST="$DETACH_DIRTY_ROOT/detach-dirty"
+git -C "$REPO" worktree add -q -b lane/893-detach-dirty "$DETACH_DIRTY_DEST" origin/main
+echo "landed change" >> "$DETACH_DIRTY_DEST/file.txt"
+git -C "$DETACH_DIRTY_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "893: landed change, detach-dirty case"
+git -C "$DETACH_DIRTY_DEST" push -q origin lane/893-detach-dirty
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/893-detach-dirty
+git -C "$REPO" push -q origin main
+git -C "$DETACH_DIRTY_DEST" fetch -q origin
+# Dirty AFTER landing -- an untracked file, same case the review exercised.
+echo "uncommitted, untracked" > "$DETACH_DIRTY_DEST/untracked-detach.txt"
+DETACH_DIRTY_REAL=$(cd "$DETACH_DIRTY_DEST" && pwd -P)
+DETACH_DIRTY_GITDIR=$(cd "$DETACH_DIRTY_DEST" && git rev-parse --absolute-git-dir)
+DETACH_DIRTY_HEAD_FILE="$DETACH_DIRTY_GITDIR/HEAD"
+DETACH_DIRTY_HEAD_BEFORE=$(cat "$DETACH_DIRTY_HEAD_FILE")
+
+dirty_detach_out=$(gc478 gc "$REPO" origin/main 2>&1); dirty_detach_rc=$?
+want_exit "gc (detach-dirty case) exits 0" "$dirty_detach_rc" 0 "$dirty_detach_out"
+if grep -qF "$DETACH_DIRTY_REAL has uncommitted changes -- not detaching" <<<"$dirty_detach_out"; then
+  ok "detach_worktree refuses a dirty (untracked-only) landed out-of-scope worktree with its own message"
+else
+  bad "detach_worktree refuses a dirty (untracked-only) landed out-of-scope worktree with its own message" "$dirty_detach_out"
+fi
+if grep -F "$DETACH_DIRTY_REAL" <<<"$dirty_detach_out" | grep -qiF "gc detached"; then
+  bad "the dirty worktree is never reported as detached" "$dirty_detach_out"
+else
+  ok "the dirty worktree is never reported as detached"
+fi
+if [ -d "$DETACH_DIRTY_DEST" ]; then ok "the dirty worktree directory survives the refused detach"; else bad "the dirty worktree directory survives the refused detach" "$dirty_detach_out"; fi
+DETACH_DIRTY_HEAD_AFTER=$(cat "$DETACH_DIRTY_HEAD_FILE")
+if [ "$DETACH_DIRTY_HEAD_BEFORE" = "$DETACH_DIRTY_HEAD_AFTER" ] && grep -qF "ref: refs/heads/lane/893-detach-dirty" <<<"$DETACH_DIRTY_HEAD_AFTER"; then
+  ok "the dirty worktree's own HEAD file is still the literal symbolic ref, byte-for-byte unchanged"
+else
+  bad "the dirty worktree's own HEAD file is still the literal symbolic ref, byte-for-byte unchanged" "before=$DETACH_DIRTY_HEAD_BEFORE after=$DETACH_DIRTY_HEAD_AFTER"
+fi
+
+DETACH_LIVE_ROOT=$(mktemp -d)
+DETACH_LIVE_DEST="$DETACH_LIVE_ROOT/detach-live"
+git -C "$REPO" worktree add -q -b lane/893-detach-live "$DETACH_LIVE_DEST" origin/main
+echo "landed change" >> "$DETACH_LIVE_DEST/file.txt"
+git -C "$DETACH_LIVE_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "893: landed change, detach-live case"
+git -C "$DETACH_LIVE_DEST" push -q origin lane/893-detach-live
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --no-edit origin/lane/893-detach-live
+git -C "$REPO" push -q origin main
+git -C "$DETACH_LIVE_DEST" fetch -q origin
+# Clean -- this fixture proves the LIVE refusal specifically, not the dirty
+# one; SUPERVISOR_LIVE below is what makes is_live_worktree report it live.
+DETACH_LIVE_REAL=$(cd "$DETACH_LIVE_DEST" && pwd -P)
+DETACH_LIVE_GITDIR=$(cd "$DETACH_LIVE_DEST" && git rev-parse --absolute-git-dir)
+DETACH_LIVE_HEAD_FILE="$DETACH_LIVE_GITDIR/HEAD"
+DETACH_LIVE_HEAD_BEFORE=$(cat "$DETACH_LIVE_HEAD_FILE")
+
+live_detach_out=$(SUPERVISOR_LIVE="$DETACH_LIVE_DEST" gc478 gc "$REPO" origin/main 2>&1); live_detach_rc=$?
+want_exit "gc (detach-live case) exits 0" "$live_detach_rc" 0 "$live_detach_out"
+if grep -qF "$DETACH_LIVE_REAL is the live worktree (agent-supervisor#367) -- refusing to detach it" <<<"$live_detach_out"; then
+  ok "detach_worktree refuses a clean, landed, out-of-scope worktree that is_live_worktree reports live"
+else
+  bad "detach_worktree refuses a clean, landed, out-of-scope worktree that is_live_worktree reports live" "$live_detach_out"
+fi
+if grep -F "$DETACH_LIVE_REAL" <<<"$live_detach_out" | grep -qiF "gc detached"; then
+  bad "the live worktree is never reported as detached" "$live_detach_out"
+else
+  ok "the live worktree is never reported as detached"
+fi
+if [ -d "$DETACH_LIVE_DEST" ]; then ok "the live worktree directory survives the refused detach"; else bad "the live worktree directory survives the refused detach" "$live_detach_out"; fi
+DETACH_LIVE_HEAD_AFTER=$(cat "$DETACH_LIVE_HEAD_FILE")
+if [ "$DETACH_LIVE_HEAD_BEFORE" = "$DETACH_LIVE_HEAD_AFTER" ] && grep -qF "ref: refs/heads/lane/893-detach-live" <<<"$DETACH_LIVE_HEAD_AFTER"; then
+  ok "the live worktree's own HEAD file is still the literal symbolic ref, byte-for-byte unchanged"
+else
+  bad "the live worktree's own HEAD file is still the literal symbolic ref, byte-for-byte unchanged" "before=$DETACH_LIVE_HEAD_BEFORE after=$DETACH_LIVE_HEAD_AFTER"
+fi
+
+# --- MUTATION-TEST: disable each refusal in turn on a patched copy of
+# worktree.sh, and prove the SAME two still-refused fixtures above now get
+# detached for real -- the assertions above go from green (real script,
+# refused) to red (mutant, detached), same pattern as the scope-filter
+# mutation check above. Neither fixture changed state above (both were
+# refused, not detached), so both are still reusable here unmodified.
+MUT_DETACH_DIRTY="$D/worktree-mutant-detach-dirty.sh"
+mut_dd_rc=0
+python3 - "$WT" "$MUT_DETACH_DIRTY" <<'PY' || mut_dd_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''  if [ -n "$status" ]; then
+    echo "worktree: $target has uncommitted changes -- not detaching" >&2
+    echo "$status" >&2
+    return 1
+  fi'''
+assert marker in text, "detach_worktree's dirty-refusal block not found -- script shape changed"
+assert text.count(marker) == 1, "detach_worktree's dirty-refusal block not unique -- script shape changed"
+open(dst, "w").write(text.replace(marker, "  true", 1))
+PY
+if [ "$mut_dd_rc" -ne 0 ]; then
+  bad "setup: patched a copy of worktree.sh with detach_worktree's dirty refusal disabled" "could not patch $WT (exit $mut_dd_rc)"
+else
+  ok "setup: patched a copy of worktree.sh with detach_worktree's dirty refusal disabled"
+  chmod +x "$MUT_DETACH_DIRTY"
+  mut_dd_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=0 bash "$MUT_DETACH_DIRTY" gc "$REPO" origin/main 2>&1)
+  if git -C "$DETACH_DIRTY_DEST" symbolic-ref -q -- HEAD >/dev/null 2>&1; then
+    bad "mutation confirmed: disabling detach_worktree's dirty refusal lets gc detach a dirty out-of-scope worktree (the dirty-refusal GREEN assertion above would now be RED)" "HEAD is still symbolic: $mut_dd_out"
+  else
+    ok "mutation confirmed: disabling detach_worktree's dirty refusal lets gc detach a dirty out-of-scope worktree (the dirty-refusal GREEN assertion above would now be RED)"
+  fi
+fi
+
+MUT_DETACH_LIVE="$D/worktree-mutant-detach-live.sh"
+mut_dl_rc=0
+python3 - "$WT" "$MUT_DETACH_LIVE" <<'PY' || mut_dl_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''  if is_live_worktree "$target"; then
+    echo "worktree: $target is the live worktree (agent-supervisor#367) -- refusing to detach it, no matter how clean or merged it looks" >&2
+    return 1
+  fi'''
+assert marker in text, "detach_worktree's live-refusal block not found -- script shape changed"
+assert text.count(marker) == 1, "detach_worktree's live-refusal block not unique -- script shape changed"
+open(dst, "w").write(text.replace(marker, "  true", 1))
+PY
+if [ "$mut_dl_rc" -ne 0 ]; then
+  bad "setup: patched a copy of worktree.sh with detach_worktree's live refusal disabled" "could not patch $WT (exit $mut_dl_rc)"
+else
+  ok "setup: patched a copy of worktree.sh with detach_worktree's live refusal disabled"
+  chmod +x "$MUT_DETACH_LIVE"
+  mut_dl_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=0 SUPERVISOR_LIVE="$DETACH_LIVE_DEST" bash "$MUT_DETACH_LIVE" gc "$REPO" origin/main 2>&1)
+  if git -C "$DETACH_LIVE_DEST" symbolic-ref -q -- HEAD >/dev/null 2>&1; then
+    bad "mutation confirmed: disabling detach_worktree's live refusal lets gc detach the live out-of-scope worktree (the live-refusal GREEN assertion above would now be RED)" "HEAD is still symbolic: $mut_dl_out"
+  else
+    ok "mutation confirmed: disabling detach_worktree's live refusal lets gc detach the live out-of-scope worktree (the live-refusal GREEN assertion above would now be RED)"
+  fi
+fi
+
+git -C "$REPO" worktree remove --force "$DETACH_DIRTY_DEST" >/dev/null 2>&1
+git -C "$REPO" branch -D lane/893-detach-dirty >/dev/null 2>&1
+git -C "$REPO" worktree remove --force "$DETACH_LIVE_DEST" >/dev/null 2>&1
+git -C "$REPO" branch -D lane/893-detach-live >/dev/null 2>&1
+rm -rf "$DETACH_DIRTY_ROOT" "$DETACH_LIVE_ROOT" 2>/dev/null
 git -C "$REPO" worktree prune >/dev/null 2>&1
 
 # --- gc: squash-merged, then superseded -- PR-merged fallback (#682) ------
