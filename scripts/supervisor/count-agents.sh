@@ -49,6 +49,28 @@
 # comm EXACTLY against `claude`/`claude.exe` (never a prefix, never a
 # substring) excludes them without needing to name them specially.
 #
+# agent-estate#613 sub-decision 1: THAT comm-exact-match ALSO excludes a
+# second, wider family of cc-daemon infrastructure -- but by accident, not
+# by name. On a host where a node-launched `claude.exe` resolves through
+# `comm` as the FULL interpreter path (e.g.
+# `/opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe`,
+# confirmed live via `ps -Ao pid=,comm=`), that path never equals the bare
+# `claude.exe` this regex expects -- so `claude.exe daemon run ...` and the
+# `--session-id ... --fork-session --resume ...` processes cc-daemon forks
+# from its pooled pty host are dropped from the count too, but only because
+# the path happens not to match, not because anything here recognizes them.
+# If the install path ever resolves such that comm becomes the bare
+# `claude.exe` again, these would silently start counting -- no code
+# change, no signal, just less headroom than expected the next ceiling
+# trip. DAEMON_ARGV_RE below (checked against full argv, independent of
+# whatever comm happens to resolve to) makes this deliberate: a process is
+# daemon-owned because its OWN argv says so (`--bg-pty-host`, `--bg-spare`,
+# the `daemon run` subcommand, or `--fork-session` -- the flag cc-daemon's
+# pooled-session forking uses that no estate launch/resume path ever
+# passes: HARNESS_LAUNCH_CMD and HARNESS_RESUME_CMD in harness/claude.sh
+# carry neither `--session-id` nor `--fork-session`), never because comm
+# happened not to match.
+#
 # SCOPE, DELIBERATELY: Claude only, matching #663's own measurement. Other
 # harness adapters exist (harness/codex.sh: `^codex$`, harness/copilot.sh:
 # `^node$`), but copilot's `^node$` would match ANY node process host-wide
@@ -79,6 +101,76 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$HERE/harness/claude.sh"
 AGENT_COMMAND_RE="$HARNESS_COMMAND_RE"
 
+# agent-estate#613 sub-decision 1 / agent-estate#871 reviews (ae871-rev871,
+# REQUEST_CHANGES on 28adf24; ae871-rerev871, REQUEST_CHANGES on c34b6c3):
+# argv shapes that positively identify a cc-daemon-owned process,
+# independent of what `comm` resolves to on this host (see the header
+# comment above).
+#
+# ae871-rev871's finding (round 1): the first cut of this regex anchored
+# ONLY the `daemon run` alternative to a token sequence; the other three
+# (--bg-pty-host, --bg-spare, --fork-session) were bare substring matches
+# against the WHOLE argv string. A dispatched claude -p lane's own task
+# prompt is itself a positional argv element (claude_print_transport.py:
+# `command.append(prompt)`, always the LAST token, after every real launch
+# flag) -- so a lane merely asked to review/discuss this issue (whose
+# prompt then names these flags) had its own comm=claude session excluded.
+#
+# ae871-rerev871's finding (round 2): the round-1 fix anchored every
+# alternative with `(^|/)claude...`, intending "the daemon's own launch
+# line starts here" -- but `(^|/)` is not a start-of-string anchor, it is
+# "start of string, OR after ANY slash anywhere in the string". A lane
+# whose prompt merely QUOTES the daemon's own path-qualified launch line
+# (e.g. reviewing this very PR, whose diff/description/comments all do
+# exactly that) still has a `/`-preceded `claude(.exe)` token sitting in
+# its argv, deep inside the free-text prompt -- so the same false-exclusion
+# reopened one layer down. Narrowing the alternatives further would only
+# repeat this: the underlying defect is that a flattened `ps` command
+# string has no positional information once matched with a non-anchored
+# regex, so ANY substring-shaped check -- however cleverly worded -- can be
+# satisfied by prose that happens to quote the real shape.
+#
+# THE FIX (round 3): anchor every alternative to the ACTUAL start of the
+# argv string with a real `^`, not `(^|/)`. CMD_OUT's lines are built by
+# `daemon_argv_for_pid`, which strips only the leading pid field -- so the
+# string checked here begins EXACTLY at argv[0] (the invoked program name
+# or path), with no earlier text to anchor past. `^([^[:space:]]*/)?claude`
+# matches "claude/claude.exe as the literal first token" (bare name) or "a
+# path ending in claude(.exe) as the literal first token" (full
+# interpreter path) -- and ONLY there: position 0 of the whole string, not
+# after every slash the string happens to contain. A print-mode lane's own
+# launch flags (`-p`, `--output-format`, `--model`, `--resume <id>`, ...)
+# occupy argv[1] onward, and its free-text prompt is pushed to the END --
+# neither can ever BE argv[0], so prose quoting the daemon's launch line,
+# however faithfully, can no longer match: `^` requires the daemon's own
+# invocation to be the thing that started the process, not text the
+# process was merely told to think about. Each alternative names ONE
+# daemon role, mirroring the header's own bg-pty-host/bg-spare naming:
+#   --bg-pty-host   cc-daemon's pooled pty host -- launched as
+#                    `claude(.exe) [bg-pty-host ]--bg-pty-host ...` (the
+#                    `bg-pty-host` subcommand token is optional: present
+#                    when comm still carries the daemon's own title, absent
+#                    when comm has resolved to a bare interpreter path)
+#   --bg-spare      cc-daemon's spare-claim helper -- same shape,
+#                    `claude(.exe) [bg-spare ]--bg-spare ...`
+#   daemon run      the `claude(.exe) daemon run` subcommand, cc-daemon's
+#                    supervisor process -- anchored to "claude(.exe) daemon
+#                    run" as a token sequence starting at argv[0], not a
+#                    bare substring
+#   --fork-session  the flag cc-daemon uses to fork a pooled session,
+#                    always launched as `claude(.exe) --session-id <id>
+#                    --fork-session ...` -- checked against
+#                    harness/claude.sh's own HARNESS_LAUNCH_CMD and
+#                    HARNESS_RESUME_CMD (2026-08-29): neither ever passes
+#                    `--session-id` immediately after the invocation's own
+#                    name, so this shape appearing there is never a real
+#                    dispatched or restored lane, only cc-daemon's own
+#                    forking
+DAEMON_ARGV_RE='^([^[:space:]]*/)?claude(\.exe)?[[:space:]]+(bg-pty-host[[:space:]]+)?--bg-pty-host([[:space:]]|$)'
+DAEMON_ARGV_RE="$DAEMON_ARGV_RE"'|^([^[:space:]]*/)?claude(\.exe)?[[:space:]]+(bg-spare[[:space:]]+)?--bg-spare([[:space:]]|$)'
+DAEMON_ARGV_RE="$DAEMON_ARGV_RE"'|^([^[:space:]]*/)?claude(\.exe)?[[:space:]]+--session-id[[:space:]]+[^[:space:]]+[[:space:]]+--fork-session([[:space:]]|$)'
+DAEMON_ARGV_RE="$DAEMON_ARGV_RE"'|^([^[:space:]]*/)?claude(\.exe)?[[:space:]]+daemon[[:space:]]+run([[:space:]]|$)'
+
 VERBOSE=0
 for arg in "$@"; do
   case "$arg" in
@@ -99,6 +191,26 @@ if [ -z "$PS_OUT" ]; then
   echo "count-agents.sh: ps returned nothing at all -- refusing to trust an empty process table" >&2
   exit 2
 fi
+
+# pid + full command, command LAST for the same truncation reason as comm
+# above. Needed for the DAEMON_ARGV_RE check below, not just for
+# --verbose's breakdown, so this now runs unconditionally rather than only
+# under --verbose. FAILS OPEN, deliberately: if this second `ps` call fails
+# or returns nothing, CMD_OUT stays empty, every argv lookup below then
+# finds no line for a given pid, and the loop falls through to the plain
+# comm-only classification it always had -- i.e. a daemon process that
+# cannot be positively identified via argv is counted rather than excluded.
+# This is the fail-closed posture #613 asks for: never default to excluding
+# something you can't positively identify as daemon infrastructure. Only
+# the FIRST `ps` call (comm=, above) is fatal -- that one is the count
+# itself; this one is strictly an additional exclusion refinement.
+CMD_OUT=$(ps -Ao pid=,command= 2>/dev/null || true)
+
+# Look up pid's full command from CMD_OUT, or "" if not found (ps failed,
+# or the pid isn't there -- both handled by the fail-open posture above).
+daemon_argv_for_pid() {
+  awk -v p="$1" '$1==p { $1=""; sub(/^ /,""); print; exit }' <<<"$CMD_OUT"
+}
 
 count=0
 matched_lines=()
@@ -134,6 +246,21 @@ while IFS= read -r line; do
   # the table stays wider, which matches #678's "stable across three
   # paired runs six seconds apart".
   read -r pid comm <<<"$line"
+  # agent-estate#613 sub-decision 1: check argv for a daemon-owned shape
+  # BEFORE the comm check, and independent of it -- a process is excluded
+  # as daemon infrastructure because its OWN argv says so
+  # (DAEMON_ARGV_RE), never because comm happened not to match
+  # AGENT_COMMAND_RE. Narrowed to pids whose comm at least mentions
+  # "claude" case-insensitively (bare name, daemon helper title, or a full
+  # interpreter path all satisfy this) so this doesn't spend an awk lookup
+  # on every unrelated process on the host.
+  if [[ "$comm" == *[Cc][Ll][Aa][Uu][Dd][Ee]* ]]; then
+    cmdline=$(daemon_argv_for_pid "$pid")
+    if [ -n "$cmdline" ] && [[ "$cmdline" =~ $DAEMON_ARGV_RE ]]; then
+      excluded_pids+=("$pid")
+      continue
+    fi
+  fi
   if [[ "$comm" =~ $AGENT_COMMAND_RE ]]; then
     count=$((count + 1))
     matched_lines+=("$pid  $comm")
@@ -149,9 +276,9 @@ if [ "$VERBOSE" -eq 1 ]; then
   # useless as a breakdown. Narrow to the pids a NAIVE `pgrep -f claude`
   # would also have matched (comm or full argv mentions "claude"
   # case-insensitively) -- that is the actual disputed set #663 measured,
-  # and the only one worth explaining. A second `ps` call, command= LAST
-  # so it is never truncated either (same rule as comm above).
-  CMD_OUT=$(ps -Ao pid=,command= 2>/dev/null || true)
+  # and the only one worth explaining. Reuses CMD_OUT (fetched
+  # unconditionally above, for the daemon-argv check every run now does),
+  # rather than a second `ps` call.
   {
     echo "count-agents: $count agent session(s), matched against comm =~ $AGENT_COMMAND_RE"
     echo "counted:"
@@ -164,17 +291,24 @@ if [ "$VERBOSE" -eq 1 ]; then
     shown=0
     for pid in "${excluded_pids[@]:-}"; do
       [ -n "$pid" ] || continue
-      cmdline=$(awk -v p="$pid" '$1==p { $1=""; sub(/^ /,""); print; exit }' <<<"$CMD_OUT")
+      cmdline=$(daemon_argv_for_pid "$pid")
       [ -n "$cmdline" ] || continue
       case "$cmdline" in
         *[Cc][Ll][Aa][Uu][Dd][Ee]*) : ;;
         *) continue ;;
       esac
       shown=$((shown + 1))
+      # agent-estate#613 sub-decision 1: matched against argv CONTENT
+      # (DAEMON_ARGV_RE's own alternatives), never a comm-shaped prefix --
+      # a comm-prefix match like `"claude bg-pty-host"*` breaks the moment
+      # comm resolves to a full interpreter path instead of the bare
+      # daemon-set title (see the header comment), which is exactly the
+      # accidental behavior this issue fixes.
       case "$cmdline" in
-        "claude bg-pty-host"*) reason="daemon helper (cc-daemon pty host)" ;;
-        "claude bg-spare"*)    reason="daemon helper (cc-daemon spare-claim)" ;;
-        "claude daemon run"*)  reason="daemon helper (cc-daemon supervisor)" ;;
+        *--bg-pty-host*)  reason="daemon helper (cc-daemon pty host, --bg-pty-host)" ;;
+        *--bg-spare*)     reason="daemon helper (cc-daemon spare-claim, --bg-spare)" ;;
+        *daemon\ run*)    reason="daemon helper (cc-daemon supervisor, daemon run)" ;;
+        *--fork-session*) reason="daemon helper (cc-daemon forked session, --fork-session)" ;;
         /bin/zsh*|/bin/bash*|*/zsh*|*/bash*) reason="transient shell (argv references a .claude path)" ;;
         tail*)                 reason="log follower (path contains \"claude\")" ;;
         sed*|awk*|grep*|ugrep*|rg*) reason="measuring pipeline itself" ;;

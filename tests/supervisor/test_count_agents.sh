@@ -142,7 +142,7 @@ want_eq "mutation B: count increments from 4 to 5 when a real agent session appe
 write_fixture
 VERR=$(run_verbose 2>&1 1>/dev/null)
 want_contains "--verbose: counted section lists the 4 real agent pids" "  100  claude" "$VERR"
-want_contains "--verbose: daemon helper labeled, not silently dropped" "daemon helper (cc-daemon pty host)" "$VERR"
+want_contains "--verbose: daemon helper labeled, not silently dropped" "daemon helper (cc-daemon pty host, --bg-pty-host)" "$VERR"
 want_contains "--verbose: transient shell labeled" "transient shell" "$VERR"
 want_contains "--verbose: tail -f labeled" "log follower" "$VERR"
 want_contains "--verbose: the measuring pipeline's own sed labeled" "measuring pipeline itself" "$VERR"
@@ -193,7 +193,7 @@ want_exit "#678 padded-pid fixture: exits 0" "$RC5" "0" "$OUT5"
 want_eq "#678: the one genuine session (pid 8454, pid narrower than the host max) is still counted" "$OUT5" "1"
 VERR5=$(run_verbose 2>&1 1>/dev/null)
 want_contains "#678: pid 8454 is counted with its true pid, not merged with its own digits" "  8454  claude" "$VERR5"
-want_contains "#678: daemon helper still excluded correctly despite padding elsewhere in the table" "daemon helper (cc-daemon pty host)" "$VERR5"
+want_contains "#678: daemon helper still excluded correctly despite padding elsewhere in the table" "daemon helper (cc-daemon pty host, --bg-pty-host)" "$VERR5"
 
 # --- Fails closed, never silently reports 0, when ps itself is unreadable -
 # `PATH="$D2/bin:$PATH"` keeps bash/awk/etc. resolvable (the shebang's own
@@ -218,6 +218,223 @@ EOF
 chmod +x "$D2/bin/ps"
 OUT4=$(PATH="$D2/bin:$PATH" "$SCRIPT" 2>&1); RC4=$?
 want_exit "ps runs but prints nothing: refuses rather than reporting 0" "$RC4" "2" "$OUT4"
+
+# --- agent-estate#871 review: fault-inject the SECOND `ps` call specifically
+# (the `command=` one DAEMON_ARGV_RE is checked against), distinct from the
+# two cases above which both break the FIRST, fatal `comm=` call. The
+# script's own comment says this one FAILS OPEN: if it can't be read,
+# CMD_OUT stays empty, every argv lookup finds no line for a given pid, and
+# a daemon process that can't be positively identified via argv is COUNTED
+# rather than excluded (never default to excluding something you can't
+# positively identify as daemon infrastructure). The reviewer read this in
+# the diff but did not fault-inject it; do that here. A `ps` that answers
+# `comm=` but fails `command=` reproduces the exact failure this comment
+# describes -- verify the process is counted, not silently dropped.
+D5=$(mktemp -d); mkdir -p "$D5/bin"
+cat > "$D5/bin/ps" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *comm=*)
+    cat <<'FIXTURE'
+920 claude
+FIXTURE
+    ;;
+  *command=*)
+    exit 1
+    ;;
+esac
+EOF
+chmod +x "$D5/bin/ps"
+run5() { PATH="$D5/bin:$PATH" "$SCRIPT" "$@"; }
+OUT9=$(run5); RC9=$?
+want_exit "fail-open: second (command=) ps call failing still exits 0" "$RC9" "0" "$OUT9"
+want_eq "fail-open: a process that can't be argv-identified is COUNTED, not excluded, when the second ps call fails" "$OUT9" "1"
+
+# --- agent-estate#613 sub-decision 1: daemon exclusion by argv, not by an
+# accident of what `comm` resolves to -----------------------------------
+# Reproduces the Director's live finding verbatim: on a host where a
+# node-launched `claude.exe` resolves through `comm` as the FULL
+# interpreter path (never the bare `claude.exe` AGENT_COMMAND_RE expects),
+# `claude.exe daemon run ...` and the `--session-id ... --fork-session
+# --resume ...` processes cc-daemon forks from its pooled pty host were
+# ALREADY excluded from the count -- but only because comm happened not to
+# match, not because anything recognized them. This fixture pins comm to
+# that exact full-path shape and asserts they are still excluded (mutation
+# direction A) AND now labeled BY NAME in --verbose (mutation direction B,
+# the actual fix: the old comm-prefix-matching reason case
+# ("claude bg-pty-host"*) could never have matched this comm shape, so the
+# same processes fell into the "other, comm did not match" bucket pre-fix
+# -- proving the label is deliberate, not merely that the count is right).
+D3=$(mktemp -d); mkdir -p "$D3/bin"
+cat > "$D3/bin/ps" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *comm=*)
+    cat <<'FIXTURE'
+600 claude
+601 /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+602 /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+603 /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+FIXTURE
+    ;;
+  *command=*)
+    cat <<'FIXTURE'
+600 claude --model sonnet --dangerously-skip-permissions --strict-mcp-config
+601 /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe daemon run --origin transient --spawned-by {"label":"claude","cwd":"/tmp","pid":1}
+602 /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --bg-pty-host /tmp/cc-daemon-501/x/pty/y.sock 254 64 -- /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --session-id y --fork-session --resume /Users/jon/.claude/projects/x/y.jsonl --model claude-sonnet-5
+603 /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --session-id y --fork-session --resume /Users/jon/.claude/projects/x/y.jsonl --model claude-sonnet-5
+FIXTURE
+    ;;
+esac
+EOF
+chmod +x "$D3/bin/ps"
+run3()          { PATH="$D3/bin:$PATH" "$SCRIPT" "$@"; }
+OUT6=$(run3); RC6=$?
+want_exit "#613: full-interpreter-path daemon fixture exits 0" "$RC6" "0" "$OUT6"
+want_eq "#613: the 1 real agent session counts, the 3 daemon-shaped claude.exe processes do not" "$OUT6" "1"
+VERR6=$(PATH="$D3/bin:$PATH" "$SCRIPT" --verbose 2>&1 1>/dev/null)
+want_contains "#613: 'daemon run' subcommand excluded by name, not by comm-path accident" "daemon helper (cc-daemon supervisor, daemon run)" "$VERR6"
+want_contains "#613: --bg-pty-host excluded by name even though comm is the full interpreter path" "daemon helper (cc-daemon pty host, --bg-pty-host)" "$VERR6"
+want_contains "#613: --fork-session (cc-daemon's pooled-session fork) excluded by name" "daemon helper (cc-daemon forked session, --fork-session)" "$VERR6"
+
+# --- Mutation: a process whose argv merely CONTAINS the substring "claude"
+# near "daemon"/"run" but is not actually a claude(.exe)-prefixed "daemon
+# run" invocation must NOT be excluded -- DAEMON_ARGV_RE's daemon-run
+# alternative is anchored to "claude(.exe) daemon run" as a token
+# sequence, not a bare "daemon" + "run" substring anywhere in argv. This is
+# the fail-closed direction: an agent process whose own prose happens to
+# mention "daemon run" (e.g. working on this very issue) must still count.
+cat > "$D3/bin/ps" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *comm=*)
+    cat <<'FIXTURE'
+700 claude
+FIXTURE
+    ;;
+  *command=*)
+    cat <<'FIXTURE'
+700 claude --model sonnet --dangerously-skip-permissions --strict-mcp-config -p "describe what claude.exe daemon run does in count-agents.sh"
+FIXTURE
+    ;;
+esac
+EOF
+chmod +x "$D3/bin/ps"
+OUT7=$(run3); RC7=$?
+want_exit "#613: comm=claude with 'daemon run' only in unrelated prose: exits 0" "$RC7" "0" "$OUT7"
+want_eq "#613: fail-closed -- comm already identifies this as a real agent session, so it still counts" "$OUT7" "1"
+
+# --- agent-estate#871 review (ae871-rev871, REQUEST_CHANGES on 28adf24) §3:
+# a dispatched claude -p lane's own task PROMPT is a positional argv element
+# (claude_print_transport.py: `command.append(prompt)`, always the LAST
+# token). Before this fix, three of DAEMON_ARGV_RE's four alternatives were
+# bare substring matches against the WHOLE argv string, so a lane merely
+# asked to discuss/review these flags by name had its own genuine session
+# excluded -- the false-exclusion direction #613 says is categorically
+# worse than the false-inclusion this whole check exists to fix (an
+# under-count leaves the host-pressure guard blind to real load). This
+# fixture reproduces the reviewer's exact construction: two live-shaped
+# comm=claude sessions whose prompts each name one of the unanchored flags.
+D4=$(mktemp -d); mkdir -p "$D4/bin"
+cat > "$D4/bin/ps" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *comm=*)
+    cat <<'FIXTURE'
+910 claude
+911 claude
+FIXTURE
+    ;;
+  *command=*)
+    cat <<'FIXTURE'
+910 claude -p --output-format json --model sonnet --dangerously-skip-permissions --strict-mcp-config --resume abc-123 Review agent-estate#871 and check whether the daemon --fork-session flag ever leaks into a real dispatched lanes argv
+911 claude -p --output-format json --model sonnet --dangerously-skip-permissions --strict-mcp-config --resume def-456 Investigate the --bg-pty-host socket path bug reported by the Director
+FIXTURE
+    ;;
+esac
+EOF
+chmod +x "$D4/bin/ps"
+run4() { PATH="$D4/bin:$PATH" "$SCRIPT" "$@"; }
+OUT8=$(run4); RC8=$?
+want_exit "#871 §3: two dispatched lanes whose prompts name daemon flags: exits 0" "$RC8" "0" "$OUT8"
+want_eq "#871 §3: both genuine lanes still count (2), not excluded because their PROMPT text mentions a daemon flag" "$OUT8" "2"
+
+# --- agent-estate#871 review §4 Direction A: the mutation gap the reviewer
+# found. Every #613 fixture above pairs a daemon argv shape with a comm
+# that ALSO independently fails AGENT_COMMAND_RE (a two-word title like
+# "claude bg-pty-host", or a full interpreter path) -- so on THIS host,
+# blanking DAEMON_ARGV_RE to match nothing does not turn any test red: the
+# pre-existing comm mismatch already excludes those pids regardless of
+# whether DAEMON_ARGV_RE does anything at all. Verified live as part of
+# this fix (see PR comment): with DAEMON_ARGV_RE set to match nothing,
+# `count-agents.sh: 29 passed, 0 failed` -- the suite passed with the
+# mechanism this whole issue is about entirely disabled. The one pairing
+# where DAEMON_ARGV_RE is actually load-bearing is comm resolving to the
+# BARE `claude`/`claude.exe` string (matches AGENT_COMMAND_RE on its own)
+# while argv is still daemon-shaped -- the exact scenario the header
+# comment warns could happen after an install-path change. This fixture
+# pins THAT pairing, so a mutation blanking DAEMON_ARGV_RE fails HERE.
+D6=$(mktemp -d); mkdir -p "$D6/bin"
+cat > "$D6/bin/ps" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *comm=*)
+    cat <<'FIXTURE'
+930 claude.exe
+931 claude
+FIXTURE
+    ;;
+  *command=*)
+    cat <<'FIXTURE'
+930 claude.exe --bg-pty-host /tmp/cc-daemon-501/spare/x.pty.sock
+931 claude --model sonnet --dangerously-skip-permissions --strict-mcp-config
+FIXTURE
+    ;;
+esac
+EOF
+chmod +x "$D6/bin/ps"
+run6() { PATH="$D6/bin:$PATH" "$SCRIPT" "$@"; }
+OUT10=$(run6); RC10=$?
+want_exit "#871 §4A: bare comm=claude.exe daemon pairing exits 0" "$RC10" "0" "$OUT10"
+want_eq "#871 §4A: DAEMON_ARGV_RE is load-bearing here -- excludes the bare-comm daemon pid, counts only the 1 real session" "$OUT10" "1"
+
+# --- agent-estate#871 re-review (ae871-rerev871, REQUEST_CHANGES on
+# c34b6c3) §2: round-1's fix anchored DAEMON_ARGV_RE with `(^|/)claude...`,
+# intending "the daemon's own launch line starts here" -- but `(^|/)` binds
+# to ANY slash anywhere in the string, not just the string's own start. A
+# dispatched lane whose prompt merely QUOTES the daemon's own
+# path-qualified launch line (exactly what this PR's own diff, description,
+# and prior review comments do, verbatim) still has a `/`-preceded
+# `claude(.exe)` token sitting in argv, deep inside the free-text prompt --
+# reopening the identical false-exclusion one layer down. This fixture is
+# the re-reviewer's own construction: three live-shaped comm=claude
+# sessions whose prompts each quote the real daemon's full interpreter-path
+# launch line for one of the three previously-unanchored alternatives.
+D7=$(mktemp -d); mkdir -p "$D7/bin"
+cat > "$D7/bin/ps" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *comm=*)
+    cat <<'FIXTURE'
+940 claude
+941 claude
+942 claude
+FIXTURE
+    ;;
+  *command=*)
+    cat <<'FIXTURE'
+940 claude -p --output-format json --model sonnet --dangerously-skip-permissions --strict-mcp-config --session-id abc123 Investigate report that /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --bg-pty-host is leaking into the count-agents.sh regex, see agent-estate#871
+941 claude -p --output-format json --model sonnet --dangerously-skip-permissions --strict-mcp-config --session-id def456 Please confirm /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe daemon run never appears in a real dispatched lane, per agent-estate#871
+942 claude -p --output-format json --model sonnet --dangerously-skip-permissions --strict-mcp-config --session-id ghi789 Quote the review verbatim: /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --session-id y --fork-session --resume /Users/jon/.claude/projects/x/y.jsonl
+FIXTURE
+    ;;
+esac
+EOF
+chmod +x "$D7/bin/ps"
+run7() { PATH="$D7/bin:$PATH" "$SCRIPT" "$@"; }
+OUT11=$(run7); RC11=$?
+want_exit "#871 §2: three dispatched lanes whose prompts QUOTE the daemon's path-qualified launch line: exits 0" "$RC11" "0" "$OUT11"
+want_eq "#871 §2: all three genuine lanes still count (3), not excluded because their PROMPT text quotes the daemon's own launch line" "$OUT11" "3"
 
 echo
 echo "count-agents.sh: $pass passed, $fail failed"
