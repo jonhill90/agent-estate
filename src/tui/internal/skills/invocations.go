@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 // InvocationsNoHistory is Skill.InvocationState's value when the
@@ -30,6 +31,87 @@ const InvocationsStoreUnreadable = "store unreadable"
 // corpus (this file's own doc comment below), not assumed from the tool's
 // display name alone.
 const skillTranscriptToolUseName = "Skill"
+
+// builtinCommandNames is Claude Code's own documented, product-shipped
+// command vocabulary (docs.claude.com/en/docs/claude-code/slash-commands),
+// normalised (no leading "/", lowercase, single token). These are never
+// filesystem skill directories -- a real Skill.Dir comes from a SKILL.md's
+// own directory name under a skills root (Scan), never from the harness's
+// built-in command table -- so any `input.skill` value that normalises to
+// one of these names is the harness logging a native command through the
+// same `Skill` tool_use block, not a skill invocation (agent-estate#890:
+// reconciling the cache against `~/.claude/skills` found /model, /model
+// sonnet, model, compact, run and loop all counted as if they were skills).
+//
+// This is a stable, documented set -- not a copy of the specific handful
+// of names agent-estate#890 happened to reconcile against -- so a new built-in shipping
+// later needs adding here once, not a fresh denylist built from whatever
+// the next reconciliation turns up. It is deliberately narrower than "every
+// skill this session's Skill tool can reach": agent-estate#890 also found artifact-design,
+// career-ops and using-tmux in the cache with no matching directory under
+// `~/.claude/skills`, and investigation found career-ops is a genuine
+// project-local skill (`.claude/skills/career-ops` in that project's own
+// checkout) and using-tmux/artifact-design are real historical invocations
+// of skills since renamed or retired -- none of the three is a built-in
+// command, so none belongs in this set; excluding them would erase real
+// invocation history, not fix the defect.
+var builtinCommandNames = map[string]bool{
+	"add-dir":           true,
+	"agents":            true,
+	"bug":               true,
+	"clear":             true,
+	"compact":           true,
+	"config":            true,
+	"context":           true,
+	"cost":              true,
+	"doctor":            true,
+	"exit":              true,
+	"export":            true,
+	"help":              true,
+	"hooks":             true,
+	"ide":               true,
+	"init":              true,
+	"login":             true,
+	"logout":            true,
+	"loop":              true,
+	"mcp":               true,
+	"memory":            true,
+	"migrate-installer": true,
+	"model":             true,
+	"output-style":      true,
+	"permissions":       true,
+	"pr-comments":       true,
+	"release-notes":     true,
+	"resume":            true,
+	"review":            true,
+	"rewind":            true,
+	"run":               true,
+	"security-review":   true,
+	"status":            true,
+	"statusline":        true,
+	"terminal-setup":    true,
+	"todos":             true,
+	"usage":             true,
+	"vim":               true,
+}
+
+// normalizeSkillInput turns a raw `input.skill` string into the token
+// countSkillInvocations checks builtinCommandNames against: a leading "/"
+// is always a slash-command spelling (a real Skill.Dir never contains one),
+// stripped along with any trailing arguments after the first space -- the
+// same collapse "/model" and "/model sonnet" both need to compare equal to
+// bare "model" (agent-estate#890 found all three recorded separately for
+// the same command). The stripped/lowered result is returned for the
+// builtinCommandNames membership check; the ORIGINAL raw string is still
+// what gets counted when it is not a built-in, so a real skill's own casing
+// or name is never altered on disk.
+func normalizeSkillInput(raw string) string {
+	s := strings.TrimPrefix(raw, "/")
+	if i := strings.IndexByte(s, ' '); i >= 0 {
+		s = s[:i]
+	}
+	return strings.ToLower(s)
+}
 
 // skillInvocationCache is the on-disk shape InvocationCachePath's file is
 // written and read as -- a flat map from Skill.Dir to a raw invocation
@@ -198,13 +280,31 @@ func markInvocationsUnreadable(skills []Skill) {
 // ~/.claude/projects, one *.jsonl file per session) for `Skill` tool_use
 // blocks and returns a Dir -> count map, keyed by the invoked skill's own
 // name (`input.skill`, which matches Skill.Dir for every real skill this
-// estate ships -- e.g. "adopt-or-build", "devils-advocate"). A slash
-// command or any other non-directory value recorded under the same field
-// (observed: "/model") is counted too, under its own literal string; it
-// simply never matches any real Skill.Dir and so never appears as a row
-// -- this function does no filtering of its own, on the same "count what
-// was actually asked for, don't guess which entries are real skills"
-// principle Scan applies to SKILL.md directories.
+// estate ships -- e.g. "adopt-or-build", "devils-advocate"). A built-in
+// command recorded under the same field (observed: "/model", "/model
+// sonnet", "model", "compact", "run", "loop") is excluded rather than
+// counted under its own literal string -- see builtinCommandNames and
+// normalizeSkillInput's own doc comments (agent-estate#890: these six read
+// as skills before this fix, three of them the same command spelled three
+// ways). Anything else not in builtinCommandNames IS still counted under
+// its own literal string with no further filtering, on the same "count
+// what was actually asked for" principle Scan applies to SKILL.md
+// directories -- including a name with no matching Skill.Dir today, since
+// that can be a genuine historical invocation of a skill since renamed,
+// retired, or living outside skillsDir (agent-estate#890's own
+// investigation: career-ops, using-tmux, artifact-design).
+//
+// skillsDir, if non-empty, is Scan'd so every skill directory found there
+// gets a real, honest 0 entry in the returned map when the corpus never
+// invoked it -- countSkillInvocations only increments for a name it
+// actually saw, so a skill invoked zero times would otherwise be silently
+// absent from the map rather than present at zero (agent-estate#890: the
+// cache read as "46 entries, none zero" while omitting five real skills
+// entirely, rather than reading 47 with five honest zeros). skillsDir
+// failing to scan (not configured, moved, unreadable) leaves counts
+// exactly as the transcript scan produced them, the same "partial data
+// beats no data" call this function already makes for one bad transcript
+// file.
 //
 // Coverage, measured against the full corpus rather than a sample
 // (agent-tui#174's own acceptance requirement, superseding an earlier
@@ -218,7 +318,7 @@ func markInvocationsUnreadable(skills []Skill) {
 // session, which this scan attributed 23 total devils-advocate calls
 // across the corpus, confirming the shape produces a real nonzero count
 // rather than a scan that silently matches nothing.
-func BuildInvocationCache(transcriptsDir string) (map[string]int, error) {
+func BuildInvocationCache(transcriptsDir, skillsDir string) (map[string]int, error) {
 	entries, err := scanTranscriptFiles(transcriptsDir)
 	if err != nil {
 		return nil, err
@@ -234,7 +334,27 @@ func BuildInvocationCache(transcriptsDir string) (map[string]int, error) {
 			continue
 		}
 	}
+	zeroFillSkillDirs(counts, skillsDir)
 	return counts, nil
+}
+
+// zeroFillSkillDirs ensures every skill Scan(skillsDir) finds has an entry
+// in counts, defaulting an absent one to a real 0 -- see BuildInvocationCache's
+// own doc comment for why. A skill already present (invoked at least once)
+// is left untouched.
+func zeroFillSkillDirs(counts map[string]int, skillsDir string) {
+	if skillsDir == "" {
+		return
+	}
+	found, err := Scan(skillsDir)
+	if err != nil {
+		return
+	}
+	for _, s := range found {
+		if _, ok := counts[s.Dir]; !ok {
+			counts[s.Dir] = 0
+		}
+	}
 }
 
 // scanTranscriptFiles walks dir for every *.jsonl file, at any depth --
@@ -288,7 +408,7 @@ func countSkillInvocations(path string, counts map[string]int) error {
 			if block.Type != "tool_use" || block.Name != skillTranscriptToolUseName {
 				continue
 			}
-			if block.Input.Skill != "" {
+			if block.Input.Skill != "" && !builtinCommandNames[normalizeSkillInput(block.Input.Skill)] {
 				counts[block.Input.Skill]++
 			}
 		}

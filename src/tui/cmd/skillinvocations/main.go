@@ -42,8 +42,16 @@ func main() {
 		defaultTranscripts = filepath.Join(homeDir, ".claude", "projects")
 	}
 
+	defaultSkills := ""
+	if homeErr == nil {
+		defaultSkills = filepath.Join(homeDir, ".claude", "skills")
+	}
+
 	transcripts := flag.String("transcripts", defaultTranscripts,
 		"directory of *.jsonl transcript files to scan, at any depth (default: ~/.claude/projects)")
+	skillsDir := flag.String("skills", defaultSkills,
+		"skills directory scanned so every skill gets a zero-filled entry when never invoked "+
+			"(default: ~/.claude/skills, the same root cmd/estate reads); pass \"\" to skip zero-fill")
 	out := flag.String("out", "", "cache file to write (default: internal/skills.DefaultInvocationCachePath())")
 	flag.Parse()
 
@@ -62,7 +70,7 @@ func main() {
 		outPath = p
 	}
 
-	counts, err := skills.BuildInvocationCache(*transcripts)
+	counts, err := skills.BuildInvocationCache(*transcripts, *skillsDir)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "skillinvocations: scanning %s: %v\n", *transcripts, err)
 		os.Exit(1)
