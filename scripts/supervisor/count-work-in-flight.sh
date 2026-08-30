@@ -18,16 +18,23 @@
 # `count-agents.sh` is untouched and still answers the first -- see its own
 # header; nothing here re-derives or replaces its classification.
 #
-# WHAT COUNTS AS WORK IN FLIGHT:
-#   - a lane in lanes.sh's `busy` or `hung` state, across EVERY tmux
-#     session (via sessions.sh, not a single-session lanes.sh call --
-#     host-pressure.sh guards the whole host, not one session). Both
-#     `busy` and `hung` are real, in-flight work by lanes.sh's own
-#     kernel-process-tree-based distinction between "correctly idle" and
-#     "quietly still working" (#83) -- `free`, `dead`, `stale`, `broken`,
-#     `blocked`, `unsent`, `unknown`, `never-busy`, `scrolled` and
-#     `service` are all NOT counted: none of them represents an agent
-#     turn actually running.
+# WHAT COUNTS AS WORK IN FLIGHT (agent-estate#826, recurrence fix): a
+# DENYLIST of lanes.sh states this file can positively confirm are NOT
+# executing right now -- `free`, `dead`, `stale`, `broken`, `service`,
+# `supervisor`, `unsent`, `menu-blocked`, `text-blocked`. Every other
+# lane counts, across EVERY tmux session (via sessions.sh, not a
+# single-session lanes.sh call -- host-pressure.sh guards the whole
+# host, not one session). That includes `busy` and `hung` (real,
+# in-flight work by lanes.sh's own kernel-process-tree-based distinction
+# between "correctly idle" and "quietly still working", #83) but also
+# `unknown`, `never-busy`, `scrolled`, a missing/malformed state field,
+# or any future lanes.sh state this script has never seen -- each of
+# those is lanes.sh itself saying it could not confidently read the
+# pane, not that the pane is idle, so it fails closed as busy rather
+# than silently reading as free (the recurrence: the first cut of this
+# fix, #831, used an ALLOWLIST of just `busy`/`hung`, which read
+# `unknown`/`scrolled` panes as zero -- see the inline script's own
+# comment below for the mutation this closes).
 #   - PLUS every pane-less claude-print/pi-rpc dispatch the ledger still
 #     has an open (non-terminal) task for. Those lanes have no tmux pane
 #     at all for lanes.sh to see (dispatch-claude-print.sh's and
@@ -91,12 +98,53 @@ except Exception:
     print("count-work-in-flight: sessions.sh --json did not return JSON", file=sys.stderr)
     sys.exit(2)
 
+# agent-estate#826 (recurrence): this used to be an ALLOWLIST -- only
+# state in ("busy", "hung") counted, everything else read as zero. That
+# is fail-OPEN: `unknown` (lanes.sh -- "no probe recognizes the last
+# line") and `scrolled` (pane content unreadable, copy-mode) are lanes.sh
+# ADMITTING it could not confidently classify the pane, and they were
+# being counted as free capacity right alongside a lane lanes.sh actually
+# verified was idle. That is exactly the direction the Director #826
+# decision forbids: a pane whose state cannot be confidently read as
+# executing must count as busy, never silently as free.
+#
+# Flipped to a DENYLIST of the states lanes.sh classifies as confidently
+# NOT executing right now -- everything else (busy, hung, unknown,
+# never-busy, scrolled, a missing/malformed state field, or any FUTURE
+# state string lanes.sh ever adds) counts as occupying a slot. A new
+# lanes.sh state this file has never seen fails closed automatically,
+# with no edit required here, instead of silently reading as free the
+# way the old allowlist would have.
+#
+# NOT_EXECUTING, one line per state, taken from the lanes.sh header comment
+#   free          idle at the prompt, verified                -> not executing
+#   dead          no agent process at all                     -> not executing
+#   stale         no agent; window name is a stale claim (#237)-> not executing
+#   broken        pane cwd no longer exists                   -> not executing
+#   service       a supervisor service window, not a lane     -> not executing
+#   supervisor    the Director own window, not a worker lane  -> not executing
+#   unsent        a brief typed but never submitted            -> not executing
+#   menu-blocked  waiting on a human at an interactive menu    -> not executing
+#   text-blocked  waiting on a human at a text prompt          -> not executing
+# Deliberately excluded from NOT_EXECUTING (so they count as busy):
+#   unknown, never-busy, scrolled -- each one is lanes.sh saying it could
+#   not confidently read the pane, not that the pane is idle.
+NOT_EXECUTING = {
+    "free", "dead", "stale", "broken", "service", "supervisor",
+    "unsent", "menu-blocked", "text-blocked",
+}
+
 busy_hung = 0
 for entry in sessions if isinstance(sessions, list) else []:
     if not isinstance(entry, dict):
         continue
     for lane in entry.get("lanes") or []:
-        if isinstance(lane, dict) and lane.get("state") in ("busy", "hung"):
+        if not isinstance(lane, dict):
+            # Malformed entry -- cannot confirm this lane is idle. Busy.
+            busy_hung += 1
+            continue
+        state = lane.get("state")
+        if not isinstance(state, str) or state not in NOT_EXECUTING:
             busy_hung += 1
 
 try:

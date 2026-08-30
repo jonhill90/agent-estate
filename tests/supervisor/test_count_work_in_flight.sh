@@ -64,7 +64,8 @@ OUT=$(run); RC=$?
 want_exit "reads exit 0" "$RC" 0 "$OUT"
 want_eq "counts busy+hung across BOTH sessions, ignores free" "$OUT" "3"
 
-# --- free/dead/stale/blocked/unsent/unknown/scrolled/service never count --
+# --- free/dead/stale/blocked/unsent/service/supervisor/broken confidently --
+# --- idle, never count --------------------------------------------------
 fake_sessions '[
   {"session": "s", "lanes": [
     {"name": "a", "state": "free"},
@@ -72,15 +73,49 @@ fake_sessions '[
     {"name": "c", "state": "stale"},
     {"name": "d", "state": "menu-blocked"},
     {"name": "e", "state": "unsent"},
-    {"name": "f", "state": "unknown"},
-    {"name": "g", "state": "scrolled"},
-    {"name": "h", "state": "service"}
+    {"name": "f", "state": "text-blocked"},
+    {"name": "g", "state": "service"},
+    {"name": "h", "state": "supervisor"},
+    {"name": "i", "state": "broken"}
   ]}
 ]'
 fake_ledger '{"lanes": [], "tasks": []}'
 OUT=$(run); RC=$?
 want_exit "reads exit 0" "$RC" 0 "$OUT"
-want_eq "none of the non-busy/hung states count -- the #826 load-bearing case" "$OUT" "0"
+want_eq "confidently-idle states never count -- the #826 load-bearing case" "$OUT" "0"
+
+# --- FAIL CLOSED: unknown/never-busy/scrolled -- lanes.sh admitting it -----
+# --- could not confidently classify the pane -- count as BUSY, never free --
+# --- (agent-estate#826 recurrence: this was the actual gap the first cut --
+# --- of the fix, #831, left open -- it allowlisted only busy/hung and ------
+# --- these three read as zero, silently reporting idle capacity for a -----
+# --- pane it could not actually read) ---------------------------------
+fake_sessions '[
+  {"session": "s", "lanes": [
+    {"name": "a", "state": "unknown"},
+    {"name": "b", "state": "never-busy"},
+    {"name": "c", "state": "scrolled"},
+    {"name": "d", "state": "free"}
+  ]}
+]'
+fake_ledger '{"lanes": [], "tasks": []}'
+OUT=$(run); RC=$?
+want_exit "reads exit 0" "$RC" 0 "$OUT"
+want_eq "unclassifiable states (unknown/never-busy/scrolled) count as busy, free stays excluded" "$OUT" "3"
+
+# --- FAIL CLOSED: a lane entry with no state field at all, or a future -----
+# --- lanes.sh state string this script has never seen, both count as busy -
+fake_sessions '[
+  {"session": "s", "lanes": [
+    {"name": "a"},
+    {"name": "b", "state": "some-future-state-not-yet-invented"},
+    {"name": "c", "state": null}
+  ]}
+]'
+fake_ledger '{"lanes": [], "tasks": []}'
+OUT=$(run); RC=$?
+want_exit "reads exit 0" "$RC" 0 "$OUT"
+want_eq "a missing, null, or unrecognized state string fails closed as busy" "$OUT" "3"
 
 # --- a pane-less claude-print lane with an open task counts once ----------
 fake_sessions '[{"session": "s", "lanes": [{"name": "a", "state": "free"}]}]'
