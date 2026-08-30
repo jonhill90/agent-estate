@@ -33,9 +33,9 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jonhill90/agent-tui/internal/board"
-	"github.com/jonhill90/agent-tui/internal/lane"
-	"github.com/jonhill90/agent-tui/internal/theme"
+	"github.com/jonhill90/agent-estate/tui/internal/board"
+	"github.com/jonhill90/agent-estate/tui/internal/lane"
+	"github.com/jonhill90/agent-estate/tui/internal/theme"
 )
 
 func main() {

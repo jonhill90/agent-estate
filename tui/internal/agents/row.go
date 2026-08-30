@@ -89,10 +89,10 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/jonhill90/agent-tui/internal/board"
-	"github.com/jonhill90/agent-tui/internal/cost"
-	"github.com/jonhill90/agent-tui/internal/lane"
-	"github.com/jonhill90/agent-tui/internal/session"
+	"github.com/jonhill90/agent-estate/tui/internal/board"
+	"github.com/jonhill90/agent-estate/tui/internal/cost"
+	"github.com/jonhill90/agent-estate/tui/internal/lane"
+	"github.com/jonhill90/agent-estate/tui/internal/session"
 )
 
 // Row is one agent -- one tmux window inside one supervised session, the

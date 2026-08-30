@@ -123,7 +123,7 @@ $ go test ./internal/vhscheck/... -v
 --- PASS: TestACommentedGoBuildLineIsStillAReference (0.00s)
 --- PASS: TestNoTapeReferencesAMissingCmdDirectory (0.00s)
 PASS
-ok  	github.com/jonhill90/agent-tui/internal/vhscheck	0.272s
+ok  	github.com/jonhill90/agent-estate/tui/internal/vhscheck	0.156s
 ```
 
 ## What this does not do

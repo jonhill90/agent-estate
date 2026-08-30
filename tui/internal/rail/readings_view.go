@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/jonhill90/agent-tui/internal/board"
-	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-estate/tui/internal/board"
+	"github.com/jonhill90/agent-estate/tui/internal/lane"
 )
 
 // renderReadingDetail is the selected-lane detail block -- what used to be

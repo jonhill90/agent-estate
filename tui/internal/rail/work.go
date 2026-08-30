@@ -25,8 +25,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/agent-tui/internal/board"
-	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-estate/tui/internal/board"
+	"github.com/jonhill90/agent-estate/tui/internal/lane"
 )
 
 // TaskFetcher retrieves every source_tasks/tasks row the ledger currently

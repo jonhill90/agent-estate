@@ -6,7 +6,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jonhill90/agent-tui/internal/theme"
+	"github.com/jonhill90/agent-estate/tui/internal/theme"
 )
 
 const gridImplies = "the literal Hill90 reading -- every node placed by a real force layout on a shared character grid, edges drawn as lines, a node 'grabbed' and dragged to a new CELL. Implies: closest to what Jon actually asked for and the only one where the whole graph is visible at once, but cell-snapped movement is coarse compared to Hill90's sub-pixel canvas (see spike/ for the live mouse-drag feasibility finding) and edges/labels overlap fast past ~15 nodes on a normal terminal width"

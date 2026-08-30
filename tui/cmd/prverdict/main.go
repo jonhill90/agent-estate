@@ -26,7 +26,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jonhill90/agent-tui/internal/prverdict"
+	"github.com/jonhill90/agent-estate/tui/internal/prverdict"
 )
 
 func main() {

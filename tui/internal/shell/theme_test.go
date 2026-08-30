@@ -20,7 +20,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
 
-	"github.com/jonhill90/agent-tui/internal/theme"
+	"github.com/jonhill90/agent-estate/tui/internal/theme"
 )
 
 // runWide is run (model_teatest_test.go)'s own teatest.NewTestModel call,

@@ -5,7 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/agent-tui/internal/theme"
+	"github.com/jonhill90/agent-estate/tui/internal/theme"
 )
 
 // refreshInterval: skills.md files change by hand, not by the second --

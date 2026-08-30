@@ -4,10 +4,10 @@ import (
 	"reflect"
 	"testing"
 
-	"github.com/jonhill90/agent-tui/internal/board"
-	"github.com/jonhill90/agent-tui/internal/cost"
-	"github.com/jonhill90/agent-tui/internal/lane"
-	"github.com/jonhill90/agent-tui/internal/session"
+	"github.com/jonhill90/agent-estate/tui/internal/board"
+	"github.com/jonhill90/agent-estate/tui/internal/cost"
+	"github.com/jonhill90/agent-estate/tui/internal/lane"
+	"github.com/jonhill90/agent-estate/tui/internal/session"
 )
 
 // TestDeriveJoinsSessionsAndTasksByLedgerLaneKey pins the fix this file's

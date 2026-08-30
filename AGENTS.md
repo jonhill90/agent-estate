@@ -414,10 +414,13 @@ not estimated. Earlier verification stamps for this section (through
 you need the trail.
 
 **Naming: the product is the Estate**, binary `estate`, Go module
-`github.com/jonhill90/agent-tui` (the module path stayed `agent-tui` on
-purpose — publishing it pinned the import path, and renaming after the flip
-would break any consumer import). Prose in this repo's docs says "the
-Estate" (capital E, lowercase article); code identifiers use `estate`. Issue
+`github.com/jonhill90/agent-estate/tui` (renamed off `github.com/jonhill90/agent-tui`
+by #747, once `jonhill90/agent-tui` itself was decommissioned — the module path
+stayed `agent-tui` for a while after the product rename on purpose, since
+publishing it had pinned the import path and renaming while the repo was still
+live would have broken any consumer import; that constraint lapsed once the
+repo it named was retired). Prose in this repo's docs says "the Estate"
+(capital E, lowercase article); code identifiers use `estate`. Issue
 references below keep the `agent-tui#NN` form because that is the repo they
 point at. Full naming history — `keelson` and `steading` both considered and
 retired, the collision checks behind each, and the mechanical rename PR — is
@@ -425,7 +428,7 @@ in [decisions/0006](docs/decisions/0006-agent-tui-merges-into-agent-supervisor.m
 
 ### What this repo is
 
-This repo (Go module `github.com/jonhill90/agent-tui` — see the naming note
+This repo (Go module `github.com/jonhill90/agent-estate/tui` — see the naming note
 above) is one terminal application: a left nav sidebar modelled 1:1 on the
 hill90 web app's own nav (`internal/nav`, `docs/tui/SPEC-shell.md`), with the
 task board, cost panel, glyph gallery and the lane rail over

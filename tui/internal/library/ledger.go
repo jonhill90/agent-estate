@@ -32,7 +32,7 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/jonhill90/agent-tui/internal/board"
+	"github.com/jonhill90/agent-estate/tui/internal/board"
 )
 
 // View names one of the ledger's own three item-listing views -- these are

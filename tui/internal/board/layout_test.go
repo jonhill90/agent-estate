@@ -8,7 +8,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 
-	"github.com/jonhill90/agent-tui/internal/theme"
+	"github.com/jonhill90/agent-estate/tui/internal/theme"
 )
 
 // TestEveryLayoutRendersEveryColumn is layout.go's equivalent of

@@ -7,8 +7,8 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
-	"github.com/jonhill90/agent-tui/internal/lane"
-	"github.com/jonhill90/agent-tui/internal/session"
+	"github.com/jonhill90/agent-estate/tui/internal/lane"
+	"github.com/jonhill90/agent-estate/tui/internal/session"
 )
 
 // fakeOps is a session.Interface with no MCP subprocess and no tmux

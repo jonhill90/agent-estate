@@ -12,7 +12,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jonhill90/agent-tui/internal/reposcan"
+	"github.com/jonhill90/agent-estate/tui/internal/reposcan"
 )
 
 func main() {

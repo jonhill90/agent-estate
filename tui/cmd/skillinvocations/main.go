@@ -32,7 +32,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"github.com/jonhill90/agent-tui/internal/skills"
+	"github.com/jonhill90/agent-estate/tui/internal/skills"
 )
 
 func main() {

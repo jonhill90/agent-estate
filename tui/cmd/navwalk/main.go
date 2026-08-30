@@ -28,7 +28,7 @@ import (
 	"fmt"
 	"os"
 
-	"github.com/jonhill90/agent-tui/internal/navwalk"
+	"github.com/jonhill90/agent-estate/tui/internal/navwalk"
 )
 
 func main() {

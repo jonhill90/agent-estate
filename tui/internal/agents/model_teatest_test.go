@@ -13,7 +13,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/exp/teatest"
 
-	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-estate/tui/internal/lane"
 )
 
 func run(t *testing.T, m Model) *teatest.TestModel {

@@ -1,8 +1,8 @@
 package main
 
 import (
-	"github.com/jonhill90/agent-tui/internal/chat"
-	"github.com/jonhill90/agent-tui/internal/lane"
+	"github.com/jonhill90/agent-estate/tui/internal/chat"
+	"github.com/jonhill90/agent-estate/tui/internal/lane"
 )
 
 // buildParticipantsFetch composes chat.ParticipantsFetcher from the exact
