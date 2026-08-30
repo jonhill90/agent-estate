@@ -790,6 +790,34 @@ else:
     print("same" if is_supervisor else "different")
 ' "$HERE" "$reviewer_lane" "$supervisor_window" 2>/dev/null) || overall=""
   case "$overall" in same|different) : ;; *) overall="unknown" ;; esac
+
+  # agent-estate#863: the shape check above only recognizes a tmux-pane
+  # lane id (`<session>:<index>`). A claude-print/pi-rpc reviewer lane is a
+  # task id, not that shape, and LANE_ID_RE.match never matches it -- so
+  # `overall` lands on `unknown` for EVERY off-pane reviewer of a
+  # director-authored PR, not as an edge case. But the Director's own
+  # window structurally never has a `lanes` row at all
+  # (register-lane-self.sh refuses to ever register
+  # `window index == LANES_SUPERVISOR_WINDOW`, see this function's own
+  # header) -- so if the reviewer resolves to ANY row here, that alone
+  # proves the reviewer isn't the Director, regardless of transport. This
+  # only widens the `unknown` case; a shape match above (`same`/
+  # `different`) is untouched. No fresh identity check needed here: the
+  # `contradicted` short-circuit above already returned before this line
+  # can even run, so by construction the reviewer's registration here can
+  # only be `verified` or `unverifiable`, never `contradicted`.
+  if [ "$overall" = "unknown" ]; then
+    if [ -n "$("$LEDGER_PYTHON" -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger, lane_or_task_row
+row = lane_or_task_row(Ledger(sys.argv[2]), sys.argv[3])
+print("1" if row else "")
+' "$HERE" "$STATE" "$reviewer_lane" 2>/dev/null)" ]; then
+      overall="different"
+    fi
+  fi
+
   jq -nc --arg overall "$overall" --arg lane "$reviewer_lane" \
     '{overall:$overall, matched_lane: (if $overall != "unknown" then $lane else null end), matched_task:null}'
 }
