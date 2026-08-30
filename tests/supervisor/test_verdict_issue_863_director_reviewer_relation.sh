@@ -29,6 +29,18 @@
 # verdict-independence.sh the same way merge-pr.sh does), not through
 # merge-pr.sh's full gate -- the defect and the fix are both entirely inside
 # this one function.
+#
+# agent-estate#866 (review of #863, PR #866): #863's fix above justified
+# itself with "the Director's own window structurally never has a `lanes`
+# row" -- that is a CALL-SITE convention (`register-lane-self.sh`'s own
+# refusal), not something `Ledger.register_lane` itself enforces. Case 6
+# below reproduces the exact row the review named: a single `register_lane`
+# call (the same primitive a hand-typed `cli.py register` or a future
+# repair/backfill script would hit) inserting a row for the Director's own
+# LIVE pane under an off-pane-shaped lane id (`rogue-reviewer`). Before the
+# fix, "a row resolved" alone was treated as proof the reviewer wasn't the
+# Director; the fix requires the resolved row's own pane_id to also NOT be
+# the pane a live tmux query finds at `LANES_SUPERVISOR_WINDOW`.
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SUP="$HERE/../../scripts/supervisor"
@@ -37,7 +49,7 @@ pass=0; fail=0
 ok()  { echo "  ok   $1"; pass=$((pass+1)); }
 bad() { echo "  FAIL $1"; sed 's/^/       /' <<<"${2:-}"; fail=$((fail+1)); }
 
-echo "verdict-independence.sh director_reviewer_relation() (agent-estate#863)"
+echo "verdict-independence.sh director_reviewer_relation() (agent-estate#863, agent-estate#866)"
 
 command -v jq >/dev/null 2>&1 || { echo "  SKIP no jq"; exit 0; }
 
@@ -45,6 +57,16 @@ D=$(mktemp -d)
 STATE="$D/state"
 mkdir -p "$STATE"
 trap 'rm -rf "$D"' EXIT
+
+# agent-estate#866: `_director_live_pane_id` (verdict-independence.sh) calls
+# `${VERDICT_TMUX_BIN:-tmux}` with no explicit binary set for cases below
+# that never touch it -- point the default at an isolated, empty
+# TMUX_TMPDIR so a bare `tmux` call on a host that happens to be running a
+# real session cannot reach it and produce a non-deterministic result.
+# Never destructive (`list-panes` only), so this is belt-and-braces rather
+# than an invariant-4 requirement.
+unset TMUX TMUX_PANE
+export TMUX_TMPDIR="$D/no-such-tmux-here"
 
 # The same variables merge-pr.sh sets before sourcing this file.
 HERE="$SUP"
@@ -161,6 +183,65 @@ elif [ "$got" = "unverifiable" ]; then
 else
   bad "#863: contradicted reviewer registration stays refused" "got '$got' -- $out"
 fi
+
+# ============================================================================
+# Case 6 (agent-estate#866 -- the live laundering path the review named): a
+# row registered for the DIRECTOR'S OWN LIVE PANE, under an off-pane-shaped
+# lane id (`rogue-reviewer`, which -- like `at187-rerev187` in Case 1 --
+# does not match `LANE_ID_RE`, so the shape check answers `unknown` exactly
+# the same way). Built via the same primitive `register_claude_print`
+# (Case 1) already uses -- a bare `Ledger.register_lane` call, standing in
+# for the hand-typed `cli.py register` the review named as the actual
+# attack -- with `pane_id` set to whatever a live tmux query would report
+# for `LANES_SUPERVISOR_WINDOW`. `transport=claude-print` keeps
+# `_lane_identity_status` at `unverifiable` (never `contradicted`): an
+# off-pane transport's pane_id is never checked against a live server by
+# `lane_identity.py` (`PANE_TRANSPORTS` there is `send-keys`-only), which is
+# exactly how a fabricated pane_id survives that check unnoticed --
+# confirming the pre-existing `contradicted` short-circuit does NOT catch
+# this shape, so this case is actually exercising the new `_director_live_
+# pane_id` comparison and not the old guard.
+#
+# Before the fix: "a row resolved" alone -> `different` (LAUNDERED).
+# After the fix: the row's own pane_id IS the Director's live pane -> `same`
+# (REFUSED), which `independence_verdict` treats as "NOT independent -- the
+# Director's own window."
+# ============================================================================
+FAKE_WINDOW_TMUX_BIN="$D/fake-tmux-window-query"
+cat > "$FAKE_WINDOW_TMUX_BIN" <<'FAKE'
+#!/bin/bash
+# _director_live_pane_id invokes: tmux list-panes -a -F "#{window_index}\t#{pane_id}"
+# Reports window 1 (the default LANES_SUPERVISOR_WINDOW) as pane
+# %director-real -- the Director's own genuinely live pane.
+printf '1\t%%director-real\n'
+printf '2\t%%worker-real\n'
+FAKE
+chmod +x "$FAKE_WINDOW_TMUX_BIN"
+register_claude_print "rogue-reviewer" "%director-real"
+out=$(VERDICT_TMUX_BIN="$FAKE_WINDOW_TMUX_BIN" LANES_SUPERVISOR_WINDOW=1 director_reviewer_relation "rogue-reviewer")
+got=$(jq -r '.overall' <<<"$out")
+[ "$got" = "same" ] && ok "#866: a row registered for the Director's own live pane refuses (same), not different" \
+  || bad "#866: rogue row naming the Director's live pane must refuse" "got '$got' -- $out"
+matched=$(jq -r '.matched_lane' <<<"$out")
+[ "$matched" = "rogue-reviewer" ] && ok "#866: ...and names the offending lane" \
+  || bad "#866: refusal names the matched lane" "$out"
+detail=$(jq -r '.detail' <<<"$out")
+[[ "$detail" == *"Director"* ]] && ok "#866: ...with a detail naming the Director's window" \
+  || bad "#866: refusal detail names the Director's window" "$out"
+
+# ============================================================================
+# Case 7 (the other mutation direction, same fixture): a genuine claude-print
+# reviewer whose pane_id is NOT the Director's live pane must still resolve
+# `different` -- proving the new comparison is exact (pane_id equality), not
+# a blanket refusal of every off-pane row once a live tmux query succeeds. If
+# this ever answers anything but `different`, the fix has widened refusal
+# past the one row #866 named and re-broken #863's own off-pane reviewers.
+# ============================================================================
+register_claude_print "genuine-claude-print-reviewer" "%worker-real"
+out=$(VERDICT_TMUX_BIN="$FAKE_WINDOW_TMUX_BIN" LANES_SUPERVISOR_WINDOW=1 director_reviewer_relation "genuine-claude-print-reviewer")
+got=$(jq -r '.overall' <<<"$out")
+[ "$got" = "different" ] && ok "#866: a genuine off-pane reviewer whose pane is NOT the Director's still resolves different" \
+  || bad "#866: genuine off-pane reviewer must still resolve different" "got '$got' -- $out"
 
 echo "$pass passed, $fail failed"
 [ "$fail" -eq 0 ]
