@@ -25,7 +25,7 @@
 #   worktree.sh new  <slug> [repo] [base]   create a worktree, print its path
 #   worktree.sh done <path>                 remove a worktree; refuses if dirty
 #   worktree.sh guard <repo>                exit 1 if <repo> itself is dirty
-#   worktree.sh reap [--dry-run] [--no-github] <path> [base]
+#   worktree.sh reap [--dry-run] [--no-github] [--merged-file <path>] <path> [base]
 #                                           single-target twin of `gc` below,
 #                                            for a caller that already knows
 #                                            exactly which one worktree it
@@ -63,7 +63,46 @@
 #                                            runs every guard and reports what
 #                                            it would do, changing nothing --
 #                                            same contract as `gc`'s own
-#                                            --dry-run.
+#                                            --dry-run. --merged-file <path>
+#                                            (agent-estate#847) skips this
+#                                            call's own `_gc_fetch_merged_prs`
+#                                            network round trip and reads the
+#                                            MERGED-PR set from <path> instead
+#                                            -- for a caller (`reconcile_lane_
+#                                            completions.py`) that already
+#                                            fetched it once for the whole
+#                                            sweep via `fetch-merged-prs`
+#                                            below and calls `reap` once per
+#                                            candidate. A <path> that does not
+#                                            exist is treated exactly like a
+#                                            failed fetch (cross-check
+#                                            skipped, never treated as "no PRs
+#                                            merged"). Never combine with
+#                                            --no-github's OWN meaning: --no-
+#                                            github still wins outright (no
+#                                            cross-check at all) if both are
+#                                            given.
+#   worktree.sh fetch-merged-prs <repo> <out-file>
+#                                           agent-estate#847: the batched half
+#                                            of `_gc_fetch_merged_prs` --
+#                                            fetches the MERGED-PR head-ref
+#                                            set for <repo> exactly once and
+#                                            writes it to <out-file>, for a
+#                                            caller (`reconcile_lane_
+#                                            completions.py`'s sweep) that is
+#                                            about to call `reap` many times
+#                                            and wants one network round trip
+#                                            shared across all of them instead
+#                                            of one per call. Exit 0 = wrote
+#                                            <out-file>; exit 1 = no second
+#                                            opinion available this run (no
+#                                            `gh`, no readable GitHub remote,
+#                                            or `gh pr list` itself failed) --
+#                                            <out-file> is not created in that
+#                                            case, and every `reap --merged-
+#                                            file` caller already treats a
+#                                            missing file as "cross-check
+#                                            unavailable", never as "merged".
 #   worktree.sh is-live <path>             exit 0 if `_gc_is_live` (tmux pane,
 #                                            process cwd, or too-young-to-trust
 #                                            either signal) says <path> is
@@ -905,10 +944,12 @@ reap)
   shift
   USE_GH=1
   DRY=""
+  MERGED_FILE_ARG=""
   while :; do
     case "${1:-}" in
       --no-github) USE_GH=""; shift ;;
       --dry-run) DRY=1; shift ;;
+      --merged-file) MERGED_FILE_ARG="${2:-}"; shift 2 ;;
       *) break ;;
     esac
   done
@@ -953,15 +994,31 @@ reap)
   fi
 
   GH_MERGED_FILE=""
+  OWN_MERGED_FILE=""
   if [ -n "$USE_GH" ]; then
-    GH_MERGED_FILE=$(mktemp)
-    if ! _gc_fetch_merged_prs "$TARGET" "$GH_MERGED_FILE"; then
-      rm -f "$GH_MERGED_FILE"
-      GH_MERGED_FILE=""
-      echo "worktree: reap proceeding without the GitHub merged-PR cross-check for $TARGET (no gh, no readable remote, or gh pr list failed) -- a squash-merged-then-superseded branch will not be reached this call (agent-supervisor#682)" >&2
+    if [ -n "$MERGED_FILE_ARG" ]; then
+      # agent-estate#847: a pre-fetched snapshot `fetch-merged-prs` wrote for
+      # this whole sweep -- reused verbatim, never re-fetched here, and
+      # never removed by this call's own EXIT trap below since the caller
+      # that created it (reconcile_lane_completions.py) owns its lifetime
+      # across every `reap` invocation in the same sweep, not just this one.
+      if [ -f "$MERGED_FILE_ARG" ]; then
+        GH_MERGED_FILE="$MERGED_FILE_ARG"
+      else
+        echo "worktree: reap proceeding without the GitHub merged-PR cross-check for $TARGET (--merged-file $MERGED_FILE_ARG does not exist)" >&2
+      fi
+    else
+      GH_MERGED_FILE=$(mktemp)
+      OWN_MERGED_FILE=1
+      if ! _gc_fetch_merged_prs "$TARGET" "$GH_MERGED_FILE"; then
+        rm -f "$GH_MERGED_FILE"
+        GH_MERGED_FILE=""
+        OWN_MERGED_FILE=""
+        echo "worktree: reap proceeding without the GitHub merged-PR cross-check for $TARGET (no gh, no readable remote, or gh pr list failed) -- a squash-merged-then-superseded branch will not be reached this call (agent-supervisor#682)" >&2
+      fi
     fi
   fi
-  trap '[ -n "$GH_MERGED_FILE" ] && rm -f "$GH_MERGED_FILE"' EXIT
+  trap '[ -n "$OWN_MERGED_FILE" ] && rm -f "$GH_MERGED_FILE"' EXIT
 
   if branch_content_is_on_base "$TARGET" "$BRANCH" "$BASE"; then
     WHY="its content is already on $BASE"
@@ -985,6 +1042,24 @@ is-live)
   [ -n "$TARGET" ] || usage
   [ -d "$TARGET" ] || { echo "worktree: $TARGET does not exist" >&2; exit 1; }
   if _gc_is_live "$TARGET"; then
+    exit 0
+  fi
+  exit 1 ;;
+
+fetch-merged-prs)
+  shift
+  FMP_REPO="${1:-}"
+  FMP_OUT="${2:-}"
+  [ -n "$FMP_REPO" ] && [ -n "$FMP_OUT" ] || usage
+  # agent-estate#847: the exact same fetch `gc`/`reap` each already run
+  # unconditionally once per invocation, exposed as its own subcommand so a
+  # caller driving many `reap` calls in one sweep (`reconcile_lane_
+  # completions.py`) can run it ONCE and hand every one of those calls
+  # `reap --merged-file $FMP_OUT` instead of each paying its own `gh pr
+  # list` round trip. Mirrors `_gc_fetch_merged_prs` verbatim -- see that
+  # function's own comment for why a failed/unavailable fetch must never be
+  # read as "no PRs merged".
+  if _gc_fetch_merged_prs "$FMP_REPO" "$FMP_OUT"; then
     exit 0
   fi
   exit 1 ;;

@@ -327,6 +327,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 from pathlib import Path
 
 from cli_parser import DEFAULT_REPOSITORIES
@@ -425,6 +426,32 @@ def _is_under_any_root(real_path, roots):
             continue
         return True
     return False
+
+
+def _repo_for_worktree_path(worktree_path, repositories):
+    """agent-estate#847: which known repository's own GitHub remote should
+    answer the merged-PR cross-check for `worktree_path` -- the same
+    `<repo>/.worktrees` root test `_known_worktree_roots`/`_is_under_any_root`
+    already run for backlog-candidate recognition above, but returning the
+    OWNING repo dict here rather than a bare yes/no, since batching the
+    merged-PR fetch (`_reap_worktrees_for_this_sweep`) needs an actual repo
+    path to hand `worktree.sh fetch-merged-prs` -- exactly the `$repo`
+    argument `_gc_fetch_merged_prs` already resolves `origin` from. `None`
+    when no known repository's `.worktrees` root contains this path -- the
+    caller falls back to `reap`'s own per-call fetch rather than fetching
+    against a guessed repo."""
+    real = os.path.realpath(worktree_path)
+    for repo in repositories:
+        path = repo.get("path") if isinstance(repo, dict) else None
+        if not path or not os.path.isdir(path):
+            continue
+        root = os.path.realpath(os.path.join(path, ".worktrees"))
+        try:
+            Path(real).relative_to(root)
+        except ValueError:
+            continue
+        return repo
+    return None
 
 
 DEFAULT_IDLE_AFTER_SECONDS = 300
@@ -872,6 +899,52 @@ class LaneCompletionReconciler:
                 result = {"task": task_id, "outcome": "error", "error": str(error)}
             report["orphans"].append(result)
 
+    def _fetch_merged_prs_once(self, repo_path):
+        """agent-estate#847: `worktree.sh fetch-merged-prs <repo_path>
+        <out-file>`, run exactly once per repository per sweep -- mirrors
+        `_gc_fetch_merged_prs` (reused verbatim by the shell subcommand,
+        never reimplemented here) rather than a second, Python-side `gh pr
+        list` call. Returns the temp file path on success, `None` if the
+        fetch itself failed or `gh`/the remote were unavailable this run --
+        the identical "no second opinion available" posture `worktree.sh
+        reap`'s own inline fetch already has, just moved up to run once
+        instead of once per candidate. The caller (`_merged_prs_file_for_
+        task`) is the only one that decides when to call this and owns the
+        returned file's cleanup."""
+        fd, out_path = tempfile.mkstemp(prefix="worktree-merged-prs-")
+        os.close(fd)
+        try:
+            self.runner(["bash", self.worktree_reaper.worktree_bin, "fetch-merged-prs", repo_path, out_path])
+        except Exception:
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+            return None
+        return out_path
+
+    def _merged_prs_file_for_task(self, task, cache):
+        """agent-estate#847: the merged-PR snapshot `task`'s own reap call
+        should use, fetched at most once per REPOSITORY this sweep (not
+        once per candidate -- #847's own measured cause: 77 of 131
+        candidates in one sweep each paid an independent ~1.9s `gh pr list`
+        round trip for the identical answer). `cache` is a dict this sweep
+        owns, keyed by the owning repo's own `path`; a repo whose fetch
+        already ran this sweep (success OR failure -- `None` is cached too,
+        so a failed fetch is never retried a second time for the same
+        sweep) is never asked again. A task whose worktree does not resolve
+        to any known repository (`_repo_for_worktree_path` returns `None`)
+        gets `None` here too, and `reap_task_worktree` falls back to
+        `worktree.sh reap`'s own per-call fetch for that one candidate --
+        exactly its pre-#847 behaviour, never a looser check."""
+        repo = _repo_for_worktree_path(task.get("worktree_path") or "", self.repositories)
+        if repo is None:
+            return None
+        repo_path = repo["path"]
+        if repo_path not in cache:
+            cache[repo_path] = self._fetch_merged_prs_once(repo_path)
+        return cache[repo_path]
+
     def _reap_worktrees_for_this_sweep(self, report):
         """agent-estate#804: `_reap_orphans_for_this_sweep`'s own missing
         half -- for every task in that same candidate set (this sweep's own
@@ -889,37 +962,60 @@ class LaneCompletionReconciler:
         break this sweep's ledger writes, which have already committed by
         the time this runs -- a reap failure is recorded in
         `report["worktrees"]` as an error entry, not raised.
+
+        agent-estate#847: before looping, `merged_prs_cache` starts empty
+        and is filled in lazily by `_merged_prs_file_for_task` as each
+        candidate's owning repository is first seen -- one `gh pr list`
+        round trip per repository this sweep touches, not one per
+        candidate. The cache (and every temp file it created) is torn down
+        in the `finally` below regardless of how the loop ends, so a sweep
+        that raises partway through never leaks a temp file.
         """
         if self.worktree_reaper is None:
             return
-        for task_id in self._leaked_worktree_candidate_ids(report):
-            task = self.ledger.get_task(task_id)
-            if task is None:
-                continue
-            # agent-estate#825: see `_vacate_pane_before_reap`'s own
-            # docstring -- must run BEFORE the reap call below, on the same
-            # task, for the same reason the orphan sweep runs before this
-            # whole method (a stray occupant is exactly what makes
-            # `worktree.sh reap`'s liveness guard refuse).
-            #
-            # agent-estate#827 fix2: the vacate step's own outcome is
-            # recorded on the SAME dict `reap_task_worktree` returns, as its
-            # own `vacate` key -- never folded into `outcome`/`reason`,
-            # which are `reap_task_worktree`'s to set. A silently-failed
-            # vacate (tmux unreachable, no harness recorded, respawn
-            # failed) and a correctly SKIPPED one (lane already live, pane
-            # already elsewhere) both used to be invisible here, indistinguishable
-            # from each other or from the pre-#825 bug once the reap call's
-            # own `refused`/"cwd is inside it (#478)" outcome is all a reader
-            # sees -- see `_vacate_pane_before_reap`'s own docstring for the
-            # full enumeration of what `vacate` can say.
-            vacate_outcome = self._vacate_pane_before_reap(task)
-            try:
-                result = self.worktree_reaper.reap_task_worktree(task)
-            except Exception as error:
-                result = {"task": task_id, "outcome": "error", "error": str(error)}
-            result["vacate"] = vacate_outcome
-            report["worktrees"].append(result)
+        candidate_ids = self._leaked_worktree_candidate_ids(report)
+        if not candidate_ids:
+            return
+        merged_prs_cache = {}
+        try:
+            for task_id in candidate_ids:
+                task = self.ledger.get_task(task_id)
+                if task is None:
+                    continue
+                # agent-estate#825: see `_vacate_pane_before_reap`'s own
+                # docstring -- must run BEFORE the reap call below, on the
+                # same task, for the same reason the orphan sweep runs
+                # before this whole method (a stray occupant is exactly
+                # what makes `worktree.sh reap`'s liveness guard refuse).
+                #
+                # agent-estate#827 fix2: the vacate step's own outcome is
+                # recorded on the SAME dict `reap_task_worktree` returns, as
+                # its own `vacate` key -- never folded into
+                # `outcome`/`reason`, which are `reap_task_worktree`'s to
+                # set. A silently-failed vacate (tmux unreachable, no
+                # harness recorded, respawn failed) and a correctly SKIPPED
+                # one (lane already live, pane already elsewhere) both used
+                # to be invisible here, indistinguishable from each other or
+                # from the pre-#825 bug once the reap call's own
+                # `refused`/"cwd is inside it (#478)" outcome is all a
+                # reader sees -- see `_vacate_pane_before_reap`'s own
+                # docstring for the full enumeration of what `vacate` can
+                # say.
+                vacate_outcome = self._vacate_pane_before_reap(task)
+                merged_prs_file = self._merged_prs_file_for_task(task, merged_prs_cache)
+                try:
+                    result = self.worktree_reaper.reap_task_worktree(task, merged_prs_file=merged_prs_file)
+                except Exception as error:
+                    result = {"task": task_id, "outcome": "error", "error": str(error)}
+                result["vacate"] = vacate_outcome
+                report["worktrees"].append(result)
+        finally:
+            for cached_path in merged_prs_cache.values():
+                if cached_path:
+                    try:
+                        os.remove(cached_path)
+                    except OSError:
+                        pass
 
     def _vacate_pane_before_reap(self, task):
         """agent-estate#825: `worktree.sh reap`'s own liveness guard

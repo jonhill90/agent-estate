@@ -210,6 +210,89 @@ else
   fi
 fi
 
+# --- agent-estate#847: batched merged-PR fetch (`fetch-merged-prs` +
+# `reap --merged-file`) -- the correctness property the issue demands
+# proven, not just asserted: a GitHub merge is append-only, so a stale
+# snapshot can only ever be wrong toward "not yet merged", never the other
+# direction. Reuses the exact squash-merged-then-superseded shape
+# test_worktree.sh's own #682 fixture builds (a candidate ONLY the PR-
+# merged fallback, never the content-diff check, can recognise as safe),
+# since that is the one shape where "did this call actually consult the
+# merged-PR file" is observable at all.
+GH_STUB_DIR="$HERE/stubs-branch-sweep"
+gh847() { env -u TMUX TMUX_TMPDIR="$RT" PATH="$GH_STUB_DIR:$PATH" "$@"; }
+
+out=$(bash "$WT" new 847-super "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "847 setup: new (squash-merged-then-superseded case) exits 0" "$rc" 0 "$out"
+FMP_DEST="$out"
+require_dest "new (847 squash-merged-then-superseded case)" "$FMP_DEST"
+echo "squashed-then-superseded change" > "$FMP_DEST/super847.txt"
+git -C "$FMP_DEST" add super847.txt
+git -C "$FMP_DEST" -c user.email=test@example.com -c user.name=Test commit -q -m "squash-merged, later superseded"
+git -C "$FMP_DEST" push -q origin lane/847-super
+git -C "$REPO" fetch -q origin
+git -C "$REPO" merge -q --squash origin/lane/847-super
+git -C "$REPO" commit -q -m "squashed: lane/847-super"
+echo "later commit on main touches the same file again" >> "$REPO/super847.txt"
+git -C "$REPO" commit -q -am "main supersedes what the 847 squash merge added"
+git -C "$REPO" push -q origin main
+git -C "$FMP_DEST" fetch -q origin
+
+# `fetch-merged-prs` itself: writes the stub's merged set to a file, once.
+FMP_FILE_MERGED="$D/847-merged-prs-after.tsv"
+rm -f "$FMP_FILE_MERGED"
+fmp_out=$(STUB_GH_PR_ROWS=$'lane/847-super\tMERGED' gh847 bash "$WT" fetch-merged-prs "$REPO" "$FMP_FILE_MERGED" 2>&1); fmp_rc=$?
+want_exit "fetch-merged-prs exits 0 and writes the merged set" "$fmp_rc" 0 "$fmp_out"
+if grep -qxF "lane/847-super" "$FMP_FILE_MERGED" 2>/dev/null; then
+  ok "fetch-merged-prs' own output file names the merged branch"
+else
+  bad "fetch-merged-prs' own output file names the merged branch" "$(cat "$FMP_FILE_MERGED" 2>&1)"
+fi
+
+# The BEFORE-merge snapshot: a `gh pr list` result fetched before this
+# branch's PR ever merged on GitHub -- the exact mid-sweep-merge shape #847
+# demands be handled. It must name no PR for lane/847-super at all.
+FMP_FILE_STALE="$D/847-merged-prs-before.tsv"
+rm -f "$FMP_FILE_STALE"
+gh847 bash "$WT" fetch-merged-prs "$REPO" "$FMP_FILE_STALE" >/dev/null 2>&1
+if [ -f "$FMP_FILE_STALE" ] && ! grep -qxF "lane/847-super" "$FMP_FILE_STALE"; then
+  ok "the pre-merge snapshot genuinely does not name lane/847-super as merged (sanity)"
+else
+  bad "the pre-merge snapshot genuinely does not name lane/847-super as merged (sanity)" "$(cat "$FMP_FILE_STALE" 2>&1)"
+fi
+
+# Mutation test proper (#847's own correctness argument): `reap
+# --merged-file` against the STALE (pre-merge) snapshot must refuse this
+# candidate for THIS pass -- never treated as merged from stale data --
+# even though the branch's PR genuinely is MERGED on GitHub by now. `gh`
+# itself is left off PATH entirely here (no `gh847` wrapper) to also prove
+# reap never falls back to a live fetch when --merged-file is given.
+stale_out=$(env -u TMUX TMUX_TMPDIR="$RT" bash "$WT" reap --merged-file "$FMP_FILE_STALE" "$FMP_DEST" origin/main 2>&1); stale_rc=$?
+want_exit "reap --merged-file refuses a candidate a STALE (pre-merge) snapshot does not name as merged (#847)" "$stale_rc" 1 "$stale_out"
+if [ -d "$FMP_DEST" ]; then ok "the squash-merged-then-superseded worktree survives this pass, judged unmerged from the stale snapshot"; else bad "the squash-merged-then-superseded worktree survives this pass" "$FMP_DEST was removed: $stale_out"; fi
+
+# Next sweep, fresh snapshot: the SAME worktree, now reaped once the
+# snapshot actually reflects the merge -- proving the mid-sweep-merge case
+# is only ever DEFERRED, never permanently missed.
+fresh_out=$(env -u TMUX TMUX_TMPDIR="$RT" bash "$WT" reap --merged-file "$FMP_FILE_MERGED" "$FMP_DEST" origin/main 2>&1); fresh_rc=$?
+want_exit "reap --merged-file removes the same candidate once a FRESH snapshot names it merged (#847)" "$fresh_rc" 0 "$fresh_out"
+if [ -d "$FMP_DEST" ]; then bad "the worktree is gone once a fresh snapshot picks up the merge" "$FMP_DEST still present: $fresh_out"; else ok "the worktree is gone once a fresh snapshot picks up the merge"; fi
+
+# `--merged-file` naming a path that does not exist: treated exactly like a
+# failed fetch (cross-check skipped), never like "no PRs merged" -- the
+# genuinely-unmerged case 2 fixture (already unmerged/unpushed, no PR at
+# all) must still be refused when the merged-file path is bogus, proving
+# "file missing" never silently degrades into "assume merged".
+out=$(bash "$WT" new 847-missing-file "$REPO" origin/main 2>/dev/null); rc=$?
+want_exit "847 setup: new (missing --merged-file case) exits 0" "$rc" 0 "$out"
+MISSING_MF_DEST="$out"
+require_dest "new (847 missing --merged-file case)" "$MISSING_MF_DEST"
+echo "unmerged, unpushed change" >> "$MISSING_MF_DEST/file.txt"
+git -C "$MISSING_MF_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "unmerged, unpushed work"
+missing_mf_out=$(env -u TMUX TMUX_TMPDIR="$RT" bash "$WT" reap --merged-file "$D/does-not-exist.tsv" "$MISSING_MF_DEST" origin/main 2>&1); missing_mf_rc=$?
+want_exit "reap --merged-file naming a nonexistent path still refuses an unmerged branch" "$missing_mf_rc" 1 "$missing_mf_out"
+if [ -d "$MISSING_MF_DEST" ]; then ok "the unmerged worktree survives a bogus --merged-file path"; else bad "the unmerged worktree survives a bogus --merged-file path" "$missing_mf_out"; fi
+
 cleanup_rt
 echo "worktree.sh reap: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
