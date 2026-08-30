@@ -865,17 +865,29 @@ else:
   # itself, matching `lane_relation`'s pane_id-based comparison elsewhere
   # in this file.
   #
-  # When the Director's live pane cannot be determined at all (no tmux
-  # reachable -- the ordinary case for a purely claude-print/pi-rpc
-  # deployment with no tmux server running anywhere), this deliberately
-  # does NOT refuse: falling back to "different" here is what keeps this
-  # branch from reverting #863 for the off-pane reviewer it exists to
-  # unblock. The residual gap this leaves -- a hand-forged row that
-  # happens to go unchecked because tmux is unreachable at review time --
-  # is narrower than the one #866 closes (a query that WOULD have caught
-  # it, catches it) and is the same honest "unverifiable is not a pass and
-  # not a failure" limit `lane_identity.py` already documents elsewhere in
-  # this file.
+  # agent-estate#866 (re-review, PR agent-estate#866 second pass): when the
+  # Director's live pane cannot be determined at all (no tmux server
+  # reachable, wrong socket, `tmux` binary missing), this branch used to
+  # fall through to "different" -- the same reasoning `_lane_identity_status`
+  # already rejected for its own unverifiable case, applied wrongly here.
+  # `director_reviewer_relation` is only ever reached for a director-authored
+  # PR, and the Director is by construction tmux-hosted (this function's own
+  # header), so "tmux unreachable" here never means "a tmux-less estate" --
+  # it means the checker's own process cannot currently see the same server
+  # the Director is sitting on. This repo records that class of event
+  # happening for real more than once (Invariant 4's own history; `restore.sh`
+  # / `preserve-dead-lanes.sh` exist because a lost tmux server recurs).
+  # During exactly such a window, "different" would let a pre-planted rogue
+  # row -- or any row that happens to carry the Director's `pane_id` -- straight
+  # through a `merge-pr.sh` call. Landing on `unknown` instead gives this the
+  # same "unverifiable is not a pass and not a failure" treatment
+  # `_lane_identity_status` already gives its own unverifiable case: it
+  # refuses (see the `unknown` handling in `merge-pr.sh`/callers), at the
+  # cost of one merge retry during a rare outage window -- a false ALLOW is
+  # categorically worse than a false REFUSE. A row that DOES resolve and
+  # whose pane_id the live server confirms differs from the Director's still
+  # answers "different", exactly as before; only the tmux-unreachable case
+  # moved from "different" to "unknown".
   #
   # No fresh identity check needed for the REVIEWER side here: the
   # `contradicted` short-circuit above already returned before this line
@@ -891,13 +903,19 @@ print((row or {}).get("pane_id") or "")
 ' "$HERE" "$STATE" "$reviewer_lane" 2>/dev/null)
     if [ -n "$reviewer_pane_id" ]; then
       director_pane_id=$(_director_live_pane_id "$supervisor_window")
-      if [ -n "$director_pane_id" ] && [ "$director_pane_id" = "$reviewer_pane_id" ]; then
-        jq -nc --arg lane "$reviewer_lane" \
-          --arg detail "reviewer lane $reviewer_lane resolves to pane $reviewer_pane_id, which is live right now at window index $supervisor_window -- the Director's own window, regardless of what lane id the row was registered under (agent-estate#866)" \
-          '{overall:"same", matched_lane:$lane, matched_task:null, detail:$detail}'
-        return
+      if [ -n "$director_pane_id" ]; then
+        if [ "$director_pane_id" = "$reviewer_pane_id" ]; then
+          jq -nc --arg lane "$reviewer_lane" \
+            --arg detail "reviewer lane $reviewer_lane resolves to pane $reviewer_pane_id, which is live right now at window index $supervisor_window -- the Director's own window, regardless of what lane id the row was registered under (agent-estate#866)" \
+            '{overall:"same", matched_lane:$lane, matched_task:null, detail:$detail}'
+          return
+        fi
+        overall="different"
       fi
-      overall="different"
+      # else: director_pane_id could not be resolved at all -- $overall stays
+      # "unknown" (its value on entry to this block), never "different".
+      # agent-estate#866 (re-review): a false ALLOW here is categorically
+      # worse than a false REFUSE during a rare tmux-outage window.
     fi
   fi
 

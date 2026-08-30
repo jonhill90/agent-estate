@@ -62,11 +62,17 @@ trap 'rm -rf "$D"' EXIT
 # `${VERDICT_TMUX_BIN:-tmux}` with no explicit binary set for cases below
 # that never touch it -- point the default at an isolated, empty
 # TMUX_TMPDIR so a bare `tmux` call on a host that happens to be running a
-# real session cannot reach it and produce a non-deterministic result.
+# real session cannot reach it and produce a non-deterministic result. The
+# directory itself must EXIST (empty, no `tmux-<uid>` socket dir inside it):
+# tmux 3.5, given a TMUX_TMPDIR whose parent directory does not exist at
+# all, was measured falling back to the real default socket (`/tmp/tmux-
+# <uid>/default`) instead of failing -- silently defeating this isolation
+# and reconnecting to whatever real session the host happens to be running.
 # Never destructive (`list-panes` only), so this is belt-and-braces rather
 # than an invariant-4 requirement.
 unset TMUX TMUX_PANE
-export TMUX_TMPDIR="$D/no-such-tmux-here"
+export TMUX_TMPDIR="$D/isolated-empty-tmux-tmpdir"
+mkdir -p "$TMUX_TMPDIR"
 
 # The same variables merge-pr.sh sets before sourcing this file.
 HERE="$SUP"
@@ -91,20 +97,61 @@ Ledger(sys.argv[2]).register_lane(
 ' "$SUP" "$STATE" "$1" "$2"
 }
 
+# agent-estate#866 (re-review, second pass): the Director's own live pane
+# must be genuinely RESOLVABLE (not just "tmux reachable") for a row to
+# legitimately answer `different` -- see Case 1b below for the
+# tmux-unreachable case, which now answers `unknown` instead. Defined here,
+# ahead of Case 1, because Case 1 itself now needs a reachable stub to test
+# what it always meant to test ("a resolvable row that is NOT the Director's
+# pane reads different"), rather than incidentally relying on tmux being
+# unreachable in the test sandbox -- that reliance was exercising the exact
+# gap #866's second review found, not the fix.
+FAKE_WINDOW_TMUX_BIN="$D/fake-tmux-window-query"
+cat > "$FAKE_WINDOW_TMUX_BIN" <<'FAKE'
+#!/bin/bash
+# _director_live_pane_id invokes: tmux list-panes -a -F "#{window_index}\t#{pane_id}"
+# Reports window 1 (the default LANES_SUPERVISOR_WINDOW) as pane
+# %director-real -- the Director's own genuinely live pane.
+printf '1\t%%director-real\n'
+printf '2\t%%worker-real\n'
+FAKE
+chmod +x "$FAKE_WINDOW_TMUX_BIN"
+
 # ============================================================================
 # Case 1 (the fix, and agent-tui#187's exact row shape): a claude-print
 # reviewer lane, registered with a live-resolvable, non-contradicted row
-# (pane_id a fresh UUID, transport=claude-print, id not matching LANE_ID_RE)
-# -> `different`.
+# (pane_id a fresh UUID, transport=claude-print, id not matching LANE_ID_RE),
+# with the Director's live pane genuinely resolvable and NOT this reviewer's
+# pane -> `different`.
 # ============================================================================
 register_claude_print "at187-rerev187" "3dfea7f3-0000-4000-8000-000000000001"
-out=$(director_reviewer_relation "at187-rerev187")
+out=$(VERDICT_TMUX_BIN="$FAKE_WINDOW_TMUX_BIN" LANES_SUPERVISOR_WINDOW=1 director_reviewer_relation "at187-rerev187")
 got=$(jq -r '.overall' <<<"$out")
 [ "$got" = "different" ] && ok "#863: claude-print reviewer with a resolvable, non-contradicted row is different" \
   || bad "#863: claude-print reviewer with a resolvable row is different" "got '$got' -- $out"
 matched=$(jq -r '.matched_lane' <<<"$out")
 [ "$matched" = "at187-rerev187" ] && ok "#863: ...and names the matched lane" \
   || bad "#863: matched_lane names the reviewer" "$out"
+
+# ============================================================================
+# Case 1b (agent-estate#866, second review -- the fix this brief adds): the
+# SAME resolvable, non-contradicted reviewer row as Case 1, but now the
+# Director's live pane cannot be determined AT ALL (no tmux server reachable
+# -- the default `VERDICT_TMUX_BIN=tmux` against this test's isolated,
+# empty `TMUX_TMPDIR`, set above). Before this fix: falls through to
+# `different` (a false ALLOW -- a pre-planted or hand-forged row carrying
+# the Director's own pane_id would launder straight through during exactly
+# this kind of tmux-outage window). After this fix: `unknown`, refused the
+# same way `_lane_identity_status`'s own unverifiable case already is.
+# ============================================================================
+register_claude_print "tmux-down-reviewer" "3dfea7f3-0000-4000-8000-000000000002"
+out=$(director_reviewer_relation "tmux-down-reviewer")
+got=$(jq -r '.overall' <<<"$out")
+[ "$got" = "unknown" ] && ok "#866: a resolvable reviewer row with the Director's live pane unresolvable is unknown, not different" \
+  || bad "#866: tmux-unreachable reviewer row must be unknown, never different" "got '$got' -- $out"
+matched=$(jq -r '.matched_lane' <<<"$out")
+[ "$matched" = "null" ] && ok "#866: ...and names no matched lane, matching every other unknown case" \
+  || bad "#866: unknown case (tmux unreachable) must name no matched lane" "$out"
 
 # ============================================================================
 # Case 2: a reviewer id that resolves to NO row at all (typo, hand-typed
@@ -206,17 +253,9 @@ fi
 # After the fix: the row's own pane_id IS the Director's live pane -> `same`
 # (REFUSED), which `independence_verdict` treats as "NOT independent -- the
 # Director's own window."
+#
+# Reuses `FAKE_WINDOW_TMUX_BIN`, defined once above ahead of Case 1.
 # ============================================================================
-FAKE_WINDOW_TMUX_BIN="$D/fake-tmux-window-query"
-cat > "$FAKE_WINDOW_TMUX_BIN" <<'FAKE'
-#!/bin/bash
-# _director_live_pane_id invokes: tmux list-panes -a -F "#{window_index}\t#{pane_id}"
-# Reports window 1 (the default LANES_SUPERVISOR_WINDOW) as pane
-# %director-real -- the Director's own genuinely live pane.
-printf '1\t%%director-real\n'
-printf '2\t%%worker-real\n'
-FAKE
-chmod +x "$FAKE_WINDOW_TMUX_BIN"
 register_claude_print "rogue-reviewer" "%director-real"
 out=$(VERDICT_TMUX_BIN="$FAKE_WINDOW_TMUX_BIN" LANES_SUPERVISOR_WINDOW=1 director_reviewer_relation "rogue-reviewer")
 got=$(jq -r '.overall' <<<"$out")
