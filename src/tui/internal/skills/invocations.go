@@ -45,25 +45,31 @@ type skillInvocationCache struct {
 // DefaultInvocationCacheDir returns this machine's own per-user state
 // directory for the cache InvocationFetcher reads -- $XDG_STATE_HOME if
 // set (the convention every other Linux/XDG-aware tool on this box
-// follows), else $HOME/.local/state, joined with "agent-tui". Deliberately
-// OUTSIDE any git checkout: agent-tui#164's decision was explicit that
-// this is private, per-machine, ephemeral cache, never evidence worth
-// versioning, and never destined for jonhill90/skills or agent-evals
-// (skills#272 already had to unwind that exact mistake once for eval
-// evidence -- this must not repeat it for invocation evidence). Returns an
-// error only if neither $XDG_STATE_HOME nor $HOME can be resolved, which
-// InvocationFetcher treats as "cache path unavailable" -- a
-// InvocationsStoreUnreadable case, since the caller asked for a location
-// and none could be produced, not "checked and empty."
+// follows), else $HOME/.local/state, joined with "estate" -- the shipped
+// binary's own name (agent-estate#874: agent-tui was the decommissioned
+// repo this package used to live in; "estate" is what a human on this box
+// actually runs, the same XDG convention every other tool here follows of
+// naming its state directory after its own binary rather than the git
+// repo/module path it happens to be built from -- "agent-estate" names the
+// repo, not the program). Deliberately OUTSIDE any git checkout:
+// agent-tui#164's decision was explicit that this is private, per-machine,
+// ephemeral cache, never evidence worth versioning, and never destined for
+// jonhill90/skills or agent-evals (skills#272 already had to unwind that
+// exact mistake once for eval evidence -- this must not repeat it for
+// invocation evidence). Returns an error only if neither $XDG_STATE_HOME
+// nor $HOME can be resolved, which InvocationFetcher treats as "cache path
+// unavailable" -- a InvocationsStoreUnreadable case, since the caller
+// asked for a location and none could be produced, not "checked and
+// empty."
 func DefaultInvocationCacheDir() (string, error) {
 	if xdg := os.Getenv("XDG_STATE_HOME"); xdg != "" {
-		return filepath.Join(xdg, "agent-tui"), nil
+		return filepath.Join(xdg, "estate"), nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".local", "state", "agent-tui"), nil
+	return filepath.Join(home, ".local", "state", "estate"), nil
 }
 
 // DefaultInvocationCachePath is DefaultInvocationCacheDir joined with this
