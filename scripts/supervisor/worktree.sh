@@ -1111,18 +1111,41 @@ reap)
   USE_GH=1
   DRY=""
   MERGED_FILE_ARG=""
-  while :; do
-    case "${1:-}" in
+  # agent-estate#897: flags are recognised WHEREVER they appear in the
+  # remaining args, not only as a leading run before the first positional --
+  # `reap <target> --dry-run` used to leave the loop below at its very first
+  # iteration (TARGET doesn't match any case arm), so --dry-run fell through
+  # unparsed and was picked up by `BASE="${2:-origin/main}"` instead, DRY
+  # never set. Every non-flag arg is collected into POSARGS instead of being
+  # assigned positionally inline, so TARGET/BASE below reflect the same
+  # answer regardless of where a recognised flag sat. An unrecognised
+  # leading-dash arg is refused outright rather than silently becoming BASE
+  # (the same silent-misassignment shape that caused #897).
+  POSARGS=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
       --no-github) USE_GH=""; shift ;;
       --dry-run) DRY=1; shift ;;
       --merged-file) MERGED_FILE_ARG="${2:-}"; shift 2 ;;
-      *) break ;;
+      --) shift; break ;;
+      -*) echo "worktree: reap: unrecognized flag '$1'" >&2; exit 1 ;;
+      *) POSARGS+=("$1"); shift ;;
     esac
   done
-  TARGET="${1:-}"
+  POSARGS+=("$@")
+  TARGET="${POSARGS[0]:-}"
   [ -n "$TARGET" ] || usage
-  BASE="${2:-origin/main}"
+  BASE="${POSARGS[1]:-origin/main}"
   [ -d "$TARGET" ] || { echo "worktree: $TARGET does not exist" >&2; exit 1; }
+  # agent-estate#897: a BASE that cannot resolve used to fall through to the
+  # GitHub MERGED-PR path further down and fail safe there ONLY because that
+  # path happened to still be reachable -- nothing upstream had actually
+  # established $BASE was a real ref. Refuse explicitly instead of letting
+  # every downstream landed-check run against a ref that cannot exist.
+  if ! git -C "$TARGET" rev-parse --verify --quiet "$BASE" >/dev/null 2>&1; then
+    echo "worktree: reap: BASE '$BASE' does not resolve in $TARGET -- refusing" >&2
+    exit 1
+  fi
 
   # Single-target twin of `gc`'s own per-candidate predicate chain below,
   # reusing exactly the same functions gc already calls rather than a
@@ -1253,18 +1276,41 @@ gc)
   shift
   DRY=""
   USE_GH=1
-  while :; do
-    case "${1:-}" in
+  # agent-estate#897: same flag-anywhere fix as `reap`, above, and for the
+  # identical reason -- `gc . --dry-run` used to leave this loop at its very
+  # first iteration (`.` matches no flag arm), so --dry-run fell through
+  # unparsed and was picked up by `BASE="${2:-origin/main}"` instead, DRY
+  # never set: a "dry run" that silently ran for real. Every non-flag arg is
+  # collected into POSARGS instead of being assigned positionally inline, so
+  # REPO/BASE below answer the same regardless of where a recognised flag
+  # sat. An unrecognised leading-dash arg is refused outright rather than
+  # silently becoming BASE.
+  POSARGS=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
       --dry-run) DRY=1; shift ;;
       # agent-supervisor#682: skip the `gh pr list` cross-check (offline,
       # unauthenticated, or a test fixture with no real GitHub remote) --
       # same flag name and meaning as branch-sweep.sh's own `--no-github`.
       --no-github) USE_GH=""; shift ;;
-      *) break ;;
+      --) shift; break ;;
+      -*) echo "worktree: gc: unrecognized flag '$1'" >&2; exit 1 ;;
+      *) POSARGS+=("$1"); shift ;;
     esac
   done
-  REPO="${1:-$PWD}"
-  BASE="${2:-origin/main}"
+  POSARGS+=("$@")
+  REPO="${POSARGS[0]:-$PWD}"
+  BASE="${POSARGS[1]:-origin/main}"
+  # agent-estate#897: a BASE that cannot resolve used to fall through to the
+  # GitHub MERGED-PR path further down and fail safe there ONLY because that
+  # path happened to still be reachable -- nothing upstream had actually
+  # established $BASE was a real ref. Refuse explicitly instead of letting
+  # every downstream landed-check in the per-candidate loop below run
+  # against a ref that cannot exist.
+  if ! git -C "$REPO" rev-parse --verify --quiet "$BASE" >/dev/null 2>&1; then
+    echo "worktree: gc: BASE '$BASE' does not resolve in $REPO -- refusing" >&2
+    exit 1
+  fi
   # Fetched once per run, never once per candidate -- see
   # `_gc_fetch_merged_prs`'s own comment for why this batches the same way
   # branch-sweep.sh's identical `gh pr list` call already does. Empty
