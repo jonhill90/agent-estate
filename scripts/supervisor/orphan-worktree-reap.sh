@@ -27,12 +27,28 @@
 #
 # A candidate whose `.git` pointer is fully broken -- the repo it once linked
 # to no longer has an admin entry for it, so git can no longer resolve
-# ANYTHING about it -- fails `reap`'s own branch-resolution step ("no branch
-# (detached HEAD)") before ever reaching a content check, and is refused,
-# fail-closed, the same direction every guard in this file already leans.
-# This sweep does not try to second-guess that outcome: a directory `reap`
-# cannot even ask a question of is reported KEPT, never assumed dead just
-# because it looks abandoned.
+# ANYTHING about it -- is not a git repository at all from this candidate's
+# own point of view, and is refused, fail-closed, the same direction every
+# guard in this file already leans. This sweep does not try to second-guess
+# that outcome: a directory that answers "not a git repository" is reported
+# KEPT, never assumed dead just because it looks abandoned.
+#
+# agent-estate#843 ("#837 finding 2"): this ONE verdict -- "not a git
+# repository" -- is cached per candidate path, checked before the rest of
+# the guard chain runs for that candidate. It is the only one of the six
+# refusal classes a live 179s run grouped (54 unmerged, 21 not-a-git-repo,
+# 19 uncommitted, 10 cwd-inside-it, 10 detached HEAD, 10 younger than the
+# age floor) that is safe to remember: a directory that is not a git repo
+# does not spontaneously become one without deliberate action, unlike the
+# other five, which are each transient by definition (a PR merges, a
+# process exits, a worktree ages past the floor, a detached HEAD's commit
+# lands on `origin/main`) or by construction. Caching any of those risks
+# `#825`'s failure shape -- a stale verdict blocking a worktree that has
+# since become reapable -- so NONE of the other five is cached here; every
+# one of them still runs `reap`'s real guard chain fresh, every sweep, same
+# as before this change. See `_nongit_identity`/`_nongit_cache_hit`/
+# `_nongit_cache_put` below for the cache itself, and its own comment for
+# why the entry self-invalidates rather than trusting a path string alone.
 #
 # Report mode first, matching `poller-leak-cleanup.sh`'s own established
 # pattern in this codebase: the default run only lists every candidate and
@@ -42,6 +58,9 @@
 # from the report pass -- state can change between the two (a new tmux pane
 # attaches, a new commit lands), and the guard chain must answer for the
 # world as it is at the moment of removal, not as it was moments earlier.
+# The one exception is the cached "not a git repository" verdict above,
+# which by construction cannot have changed to "live"/"dirty"/"unmerged" in
+# the interim -- there is no guard chain result to have gone stale.
 #
 # Usage:
 #   orphan-worktree-reap.sh [--reap] [--no-github] [--root <dir>] [--base <ref>]
@@ -52,6 +71,11 @@
 #                   (worktree.sh new's own DEST base)
 #     --base <ref>  passed through to `worktree.sh reap` as [base] (default
 #                   origin/main, same default `reap`/`gc` already use)
+#
+# ORPHAN_REAP_NONGIT_CACHE overrides the "not a git repository" cache file
+# path (default: `${SUPERVISOR_STATE:-~/.local/state/agent-dotfiles-
+# supervisor}/orphan-reap-nongit-cache.tsv`) -- tests point this at a throwaway
+# path so a real run's cache is never touched.
 #
 # Exit 0: ran to completion (report or reap), whether or not any candidate
 #         was found/reaped -- "0 candidates" is a real, valid answer, never
@@ -69,6 +93,70 @@ set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WORKTREE_SH="$HERE/worktree.sh"
+
+# agent-estate#843: `<device>:<inode>[:<birth-epoch>]` -- the same identity
+# test the kernel itself uses for "is this the same file" (recreating a
+# path always gets a fresh inode; a birth time, where the platform can
+# report one, is extra insurance against the astronomically rare inode
+# reuse case). Prints nothing (and the caller must treat that as "cannot
+# identify, do not cache") if neither `stat` flavor answers -- GNU coreutils
+# and BSD/macOS spell the same query differently, and there is no third
+# guess to fall back to.
+_nongit_identity() {
+  local p="$1" dev_inode birth
+  dev_inode=$(stat -f '%d:%i' "$p" 2>/dev/null) || dev_inode=$(stat -c '%d:%i' "$p" 2>/dev/null) || return 1
+  birth=$(stat -f '%B' "$p" 2>/dev/null)
+  if [ -z "$birth" ]; then
+    birth=$(stat -c '%W' "$p" 2>/dev/null)
+    [ "$birth" = "0" ] && birth=""
+  fi
+  printf '%s:%s' "$dev_inode" "${birth:-0}"
+}
+
+# 0 = the cache has a "not a git repository" entry for exactly this path AND
+# exactly this identity (fail closed on everything else: file missing or
+# unreadable, no entry for the path, an entry whose identity has since
+# changed -- a removed-and-recreated directory -- or two conflicting entries
+# for the same path, which can only mean the cache itself is corrupt/
+# ambiguous and must never be trusted). 1 otherwise, meaning "run the real
+# check".
+_nongit_cache_hit() {
+  local path="$1" identity="$2" cache="$3"
+  [ -n "$identity" ] || return 1
+  [ -r "$cache" ] || return 1
+  local cpath cid found=""
+  while IFS=$'\t' read -r cpath cid; do
+    [ -n "$cpath" ] || continue
+    if [ "$cpath" = "$path" ]; then
+      if [ -n "$found" ] && [ "$found" != "$cid" ]; then
+        return 1  # ambiguous entry -- do not trust either
+      fi
+      found="$cid"
+    fi
+  done < "$cache" 2>/dev/null
+  [ -n "$found" ] && [ "$found" = "$identity" ]
+}
+
+# Records ONLY the "not a git repository" verdict, keyed on path, replacing
+# any prior entry for the same path (a `mv`-based rewrite via `awk`, never an
+# in-place append, so a path that was cached under an old identity does not
+# accumulate a second, conflicting line the next time this same path is
+# checked). Best-effort: a cache directory that cannot be created, or a
+# rename that fails, leaves the cache exactly as it was -- the next sweep
+# just re-runs the real check for this path again, which is correct, not a
+# bug.
+_nongit_cache_put() {
+  local path="$1" identity="$2" cache="$3"
+  [ -n "$identity" ] || return 0
+  local dir; dir=$(dirname "$cache")
+  mkdir -p "$dir" 2>/dev/null || return 1
+  local tmp="$cache.tmp.$$"
+  awk -F'\t' -v p="$path" 'BEGIN{OFS="\t"} $1 != p {print}' "$cache" 2>/dev/null > "$tmp"
+  printf '%s\t%s\n' "$path" "$identity" >> "$tmp"
+  mv "$tmp" "$cache" 2>/dev/null || rm -f "$tmp"
+}
+
+NONGIT_CACHE="${ORPHAN_REAP_NONGIT_CACHE:-${SUPERVISOR_STATE:-$HOME/.local/state/agent-dotfiles-supervisor}/orphan-reap-nongit-cache.tsv}"
 
 REAP=0
 USE_GH_FLAG=""
@@ -166,11 +254,42 @@ registered_count=0
 kept_count=0
 to_reap=()
 
+nongit_cached_count=0
+
 for dir in "${candidates_all[@]}"; do
   [ -d "$dir" ] || continue
   dreal=$(cd "$dir" 2>/dev/null && pwd -P) || dreal="$dir"
   if [ -n "${REGISTERED[$dreal]:-}" ]; then
     registered_count=$((registered_count + 1))
+    continue
+  fi
+
+  # agent-estate#843: the one cached class, checked before the rest of the
+  # guard chain runs for this candidate. `identity` is empty when neither
+  # `stat` flavor could answer (an unreadable/vanished directory) -- both
+  # cache functions above already treat that as "cannot cache/cannot hit",
+  # so this falls straight through to the real check below, same as a cold
+  # cache would.
+  identity=$(_nongit_identity "$dreal") || identity=""
+  if _nongit_cache_hit "$dreal" "$identity" "$NONGIT_CACHE"; then
+    kept_count=$((kept_count + 1))
+    nongit_cached_count=$((nongit_cached_count + 1))
+    echo "orphan-worktree-reap: KEPT $dir -- not a git repository (cached, agent-estate#843)"
+    continue
+  fi
+
+  # A directory `git` itself cannot resolve as a work tree at all is not a
+  # candidate for `reap`'s guard chain -- there is no branch, no status, no
+  # HEAD to ask about, only a fatal error from every git subcommand that
+  # would try. `rev-parse --is-inside-work-tree` is the cheap, read-only way
+  # to ask that question without running (and mis-surfacing the failure of)
+  # the branch-resolution step `reap` itself would otherwise hit first. This
+  # is the ONLY one of the six refusal classes cached -- see the header
+  # comment's agent-estate#843 note for why the other five are not.
+  if ! git -C "$dir" rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+    kept_count=$((kept_count + 1))
+    echo "orphan-worktree-reap: KEPT $dir -- not a git repository"
+    _nongit_cache_put "$dreal" "$identity" "$NONGIT_CACHE"
     continue
   fi
 
@@ -191,7 +310,7 @@ for dir in "${candidates_all[@]}"; do
   fi
 done
 
-echo "orphan-worktree-reap: $total ad-*-<pid> dir(s) scanned, $registered_count already registered elsewhere (left to worktree.sh gc / the completion-time reaper), ${#to_reap[@]} candidate(s), $kept_count kept"
+echo "orphan-worktree-reap: $total ad-*-<pid> dir(s) scanned, $registered_count already registered elsewhere (left to worktree.sh gc / the completion-time reaper), ${#to_reap[@]} candidate(s), $kept_count kept ($nongit_cached_count via the not-a-git-repository cache, agent-estate#843)"
 
 if [ "$REAP" -ne 1 ]; then
   if [ "${#to_reap[@]}" -gt 0 ]; then

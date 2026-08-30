@@ -121,6 +121,12 @@ WORKTREE_ROOT="$D/tmproot"
 mkdir -p "$WORKTREE_ROOT"
 export WORKTREE_ROOT
 
+# agent-estate#843: the "not a git repository" cache lives at a throwaway
+# path for this whole file -- never the real per-machine default (`$HOME/
+# .local/state/agent-dotfiles-supervisor/...`), so this test can never read
+# or pollute a real cache built by a real sweep on this machine.
+export ORPHAN_REAP_NONGIT_CACHE="$D/nongit-cache.tsv"
+
 # `orphan-worktree-reap.sh`'s registration scan is pointed at $REPO only --
 # never $REPO_UNKNOWN. Everything created against $REPO_UNKNOWN below is
 # therefore genuinely unregistered from this sweep's own point of view,
@@ -251,6 +257,86 @@ else
   else
     bad "mutation confirmed: disabling the registration-scope filter reaps a registered worktree" "expected $REGISTERED_DEST to be removed by the mutant, it survived: $mut_out"
   fi
+fi
+
+# --- agent-estate#843: the "not a git repository" cache -------------------
+#
+# Case 5: a candidate that is not a git repository at all (a plain, empty
+# directory named the way `worktree.sh new` itself would). First pass must
+# name the real reason with no cache involved; a second pass over the exact
+# same, untouched directory must serve the cached verdict instead of
+# re-running `git` against it.
+NONGIT_DIR="$WORKTREE_ROOT/ad-843-nongit-11111"
+mkdir -p "$NONGIT_DIR"
+
+first_nongit_out=$(env -u TMUX TMUX_TMPDIR="$RT" bash "$ORPHAN" --no-github --root "$WORKTREE_ROOT" 2>&1)
+if grep -qF "KEPT $NONGIT_DIR -- not a git repository" <<<"$first_nongit_out" && ! grep -qF "KEPT $NONGIT_DIR -- not a git repository (cached" <<<"$first_nongit_out"; then
+  ok "first pass over a non-git directory names it 'not a git repository', uncached"
+else
+  bad "first pass over a non-git directory names it 'not a git repository', uncached" "$first_nongit_out"
+fi
+[ -s "$ORPHAN_REAP_NONGIT_CACHE" ] && ok "the not-a-git-repository verdict was written to the cache file" || bad "the not-a-git-repository verdict was written to the cache file" "cache file missing or empty: $ORPHAN_REAP_NONGIT_CACHE"
+
+second_nongit_out=$(env -u TMUX TMUX_TMPDIR="$RT" bash "$ORPHAN" --no-github --root "$WORKTREE_ROOT" 2>&1)
+if grep -qF "KEPT $NONGIT_DIR -- not a git repository (cached" <<<"$second_nongit_out"; then
+  ok "second pass over the same untouched directory is served the cached verdict"
+else
+  bad "second pass over the same untouched directory is served the cached verdict" "$second_nongit_out"
+fi
+
+# Case 6: adversarial cache poisoning -- a real, unmerged git worktree must
+# never be served a stale "not a git repository" verdict, even when the
+# cache file is hand-poisoned with an entry for its exact path. The
+# poisoned identity does not match the real directory's own
+# device:inode(:birth) identity, so it must be rejected and the real guard
+# chain must run instead.
+out=$(bash "$WT" new 843-poison "$REPO_UNKNOWN" origin/main 2>/dev/null); rc=$?
+want_exit "setup: new (poison case) exits 0" "$rc" 0 "$out"
+POISON_DEST="$out"
+require_dest "new (poison case)" "$POISON_DEST"
+echo "unmerged poison-test change" > "$POISON_DEST/poison.txt"
+git -C "$POISON_DEST" add poison.txt
+git -C "$POISON_DEST" -c user.email=test@example.com -c user.name=Test commit -q -m "unmerged, unpushed work (poison case)"
+printf '%s\tbogus-identity-does-not-match\n' "$POISON_DEST" >> "$ORPHAN_REAP_NONGIT_CACHE"
+
+poison_out=$(env -u TMUX TMUX_TMPDIR="$RT" bash "$ORPHAN" --no-github --root "$WORKTREE_ROOT" 2>&1)
+if grep -qF "KEPT $POISON_DEST -- not a git repository" <<<"$poison_out"; then
+  bad "a poisoned cache entry with a mismatched identity is never trusted" "$poison_out"
+else
+  ok "a poisoned cache entry with a mismatched identity is never trusted (real guard chain ran instead)"
+fi
+if grep -qF "KEPT $POISON_DEST" <<<"$poison_out"; then
+  ok "the real, unmerged worktree is still correctly kept (for its real reason, not a fabricated one)"
+else
+  bad "the real, unmerged worktree is still correctly kept (for its real reason, not a fabricated one)" "$poison_out"
+fi
+
+# Case 7: a path that gets removed and recreated as a real git worktree must
+# not inherit a stale non-repo verdict left over from before the removal.
+RECREATE_DIR="$WORKTREE_ROOT/ad-843-recreate-22222"
+mkdir -p "$RECREATE_DIR"
+pre_recreate_out=$(env -u TMUX TMUX_TMPDIR="$RT" bash "$ORPHAN" --no-github --root "$WORKTREE_ROOT" 2>&1)
+if grep -qF "KEPT $RECREATE_DIR -- not a git repository" <<<"$pre_recreate_out"; then
+  ok "setup: the pre-recreation directory is cached as not-a-git-repository"
+else
+  bad "setup: the pre-recreation directory is cached as not-a-git-repository" "$pre_recreate_out"
+fi
+
+rm -rf "$RECREATE_DIR"
+mkdir -p "$RECREATE_DIR"
+git -C "$RECREATE_DIR" init -q
+git -C "$RECREATE_DIR" config user.email test@example.com
+git -C "$RECREATE_DIR" config user.name Test
+echo "recreated as a real repo" > "$RECREATE_DIR/recreated.txt"
+git -C "$RECREATE_DIR" add recreated.txt
+git -C "$RECREATE_DIR" commit -q -m "recreated at the same path"
+
+post_recreate_out=$(env -u TMUX TMUX_TMPDIR="$RT" bash "$ORPHAN" --no-github --root "$WORKTREE_ROOT" 2>&1)
+recreate_line=$(grep -F "$RECREATE_DIR" <<<"$post_recreate_out")
+if grep -qF "not a git repository" <<<"$recreate_line"; then
+  bad "a path removed and recreated as a real git worktree must not inherit the stale non-repo verdict" "$recreate_line"
+else
+  ok "a path removed and recreated as a real git worktree is re-checked fresh, not served the stale verdict"
 fi
 
 cleanup_rt
