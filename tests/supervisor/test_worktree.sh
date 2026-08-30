@@ -1438,6 +1438,237 @@ fi
 git -C "$REPO821" worktree remove --force "$DEFAULT_DEST" >/dev/null 2>&1
 rm -rf "$D821"
 
+# --- agent-estate#897: `gc`/`reap` flag placement must not change behaviour,
+# and an unresolvable BASE must be refused ----------------------------------
+# `gc <repo> --dry-run` used to leave the flag loop at its very first
+# iteration (<repo> matches no flag arm), so --dry-run fell through unparsed
+# and BASE="${2:-origin/main}" picked it up instead -- DRY never set, a "dry
+# run" that mutated for real. Its own repo, own remote, own candidate -- a
+# self-contained fixture like #821's above, not reused state from $REPO
+# (whose own candidates further up this file are already gc'd away by now).
+D897=$(mktemp -d)
+git init -q --bare "$D897/origin.git"
+git clone -q "$D897/origin.git" "$D897/repo"
+REPO897="$D897/repo"
+git -C "$REPO897" config user.email test@example.com
+git -C "$REPO897" config user.name "Test"
+git -C "$REPO897" checkout -q -b main
+echo one > "$REPO897/file.txt"
+git -C "$REPO897" add file.txt
+git -C "$REPO897" commit -q -m initial
+git -C "$REPO897" push -q -u origin main
+
+out=$(env WORKTREE_ROOT="$REPO897/.worktrees" AGENT_PYTHON_BIN="$D/bin/allow-python3" bash "$WT" new 897-landed "$REPO897" origin/main 2>/dev/null); rc=$?
+want_exit "897 setup: new (landed case) exits 0" "$rc" 0 "$out"
+LANDED897_DEST="$out"
+require_dest "new (897 landed case)" "$LANDED897_DEST"
+echo "landed change" >> "$LANDED897_DEST/file.txt"
+git -C "$LANDED897_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "897 landed work"
+git -C "$LANDED897_DEST" push -q origin lane/897-landed
+git -C "$REPO897" fetch -q origin
+git -C "$REPO897" merge -q --no-edit origin/lane/897-landed
+git -C "$REPO897" push -q origin main
+git -C "$LANDED897_DEST" fetch -q origin
+
+gc897() { env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=0 bash "$WT" "$@"; }
+WT897_HEAD_PATH="$REPO897/.git/worktrees/$(basename "$LANDED897_DEST")/HEAD"
+
+# `gc <repo> --dry-run` (flag AFTER the positional) must still be a dry run --
+# the exact ordering #897 reported. Assert on the wording AND that the
+# worktree's own registration file (.git/worktrees/<name>/HEAD) is
+# byte-identical before and after, the same strength #893's review demanded
+# of detach_worktree, rather than trusting the "would remove" log line alone.
+head_before=$(cat "$WT897_HEAD_PATH")
+after_flag_out=$(gc897 gc "$REPO897" --dry-run --no-github 2>&1); after_flag_rc=$?
+head_after=$(cat "$WT897_HEAD_PATH")
+want_exit "897: 'gc <repo> --dry-run' (flag after positional) exits 0" "$after_flag_rc" 0 "$after_flag_out"
+if grep -qi "dry run" <<<"$after_flag_out"; then ok "897: 'gc <repo> --dry-run' reports a dry run, not a silent no-op or a real sweep"; else bad "897: 'gc <repo> --dry-run' reports a dry run" "$after_flag_out"; fi
+if [ "$head_before" = "$head_after" ]; then ok "897: 'gc <repo> --dry-run' (flag after positional) leaves the worktree's own HEAD registration byte-identical"; else bad "897: 'gc <repo> --dry-run' (flag after positional) leaves HEAD byte-identical" "before=$head_before after=$head_after"; fi
+if [ -d "$LANDED897_DEST" ]; then ok "897: 'gc <repo> --dry-run' (flag after positional) removed nothing from disk"; else bad "897: 'gc <repo> --dry-run' (flag after positional) removed nothing from disk" "$LANDED897_DEST is gone"; fi
+
+# The previously-working order must keep working unchanged.
+before_flag_out=$(gc897 gc --dry-run --no-github "$REPO897" 2>&1); before_flag_rc=$?
+head_after2=$(cat "$WT897_HEAD_PATH")
+want_exit "897: 'gc --dry-run <repo>' (currently-working order) exits 0" "$before_flag_rc" 0 "$before_flag_out"
+if grep -qi "dry run" <<<"$before_flag_out"; then ok "897: 'gc --dry-run <repo>' still reports a dry run"; else bad "897: 'gc --dry-run <repo>' still reports a dry run" "$before_flag_out"; fi
+if [ "$head_before" = "$head_after2" ]; then ok "897: 'gc --dry-run <repo>' leaves HEAD byte-identical"; else bad "897: 'gc --dry-run <repo>' leaves HEAD byte-identical" "before=$head_before after=$head_after2"; fi
+
+# A real (non-dry) run with the flag after the positional must actually act --
+# proves the dry-run assertions above are pinned to DRY being set, not to gc
+# refusing this candidate for some unrelated reason (age, occupancy, scope).
+real_out=$(gc897 gc "$REPO897" --no-github 2>&1); real_rc=$?
+want_exit "897: 'gc <repo> --no-github' (no --dry-run, flag after positional) exits 0" "$real_rc" 0 "$real_out"
+if [ -d "$LANDED897_DEST" ]; then bad "897: a real 'gc <repo> --no-github' run removes the landed worktree" "$LANDED897_DEST still present: $real_out"; else ok "897: a real 'gc <repo> --no-github' run removes the landed worktree"; fi
+
+# --- an unresolvable BASE must be refused, not silently answered from the
+# GitHub MERGED-PR fallback ---------------------------------------------
+out=$(env WORKTREE_ROOT="$REPO897/.worktrees" bash "$WT" new 897-badbase "$REPO897" origin/main 2>/dev/null); rc=$?
+want_exit "897 setup: new (bad-base case) exits 0" "$rc" 0 "$out"
+BADBASE897_DEST="$out"
+require_dest "new (897 bad-base case)" "$BADBASE897_DEST"
+
+badbase_out=$(gc897 gc "$REPO897" --no-github not-a-real-ref 2>&1); badbase_rc=$?
+want_exit "897: 'gc' with an unresolvable BASE exits non-zero" "$badbase_rc" 1 "$badbase_out"
+if [ "$badbase_rc" -eq 1 ]; then ok "897: 'gc' with an unresolvable BASE refuses (non-zero exit)"; else bad "897: 'gc' with an unresolvable BASE refuses" "exit=$badbase_rc: $badbase_out"; fi
+if grep -qi "does not resolve" <<<"$badbase_out"; then ok "897: 'gc' names the unresolvable BASE in its refusal"; else bad "897: 'gc' names the unresolvable BASE in its refusal" "$badbase_out"; fi
+if [ -d "$BADBASE897_DEST" ]; then ok "897: 'gc' with an unresolvable BASE removed nothing"; else bad "897: 'gc' with an unresolvable BASE removed nothing" "$BADBASE897_DEST is gone"; fi
+
+reap_badbase_out=$(gc897 reap "$BADBASE897_DEST" --no-github not-a-real-ref 2>&1); reap_badbase_rc=$?
+if [ "$reap_badbase_rc" -eq 1 ]; then ok "897: 'reap' with an unresolvable BASE refuses (non-zero exit)"; else bad "897: 'reap' with an unresolvable BASE refuses" "exit=$reap_badbase_rc: $reap_badbase_out"; fi
+if grep -qi "does not resolve" <<<"$reap_badbase_out"; then ok "897: 'reap' names the unresolvable BASE in its refusal"; else bad "897: 'reap' names the unresolvable BASE in its refusal" "$reap_badbase_out"; fi
+if [ -d "$BADBASE897_DEST" ]; then ok "897: 'reap' with an unresolvable BASE removed nothing"; else bad "897: 'reap' with an unresolvable BASE removed nothing" "$BADBASE897_DEST is gone"; fi
+
+# --- reap: same flag-after-positional contract as gc, above -----------------
+out=$(env WORKTREE_ROOT="$REPO897/.worktrees" bash "$WT" new 897-reap-landed "$REPO897" origin/main 2>/dev/null); rc=$?
+want_exit "897 setup: new (reap landed case) exits 0" "$rc" 0 "$out"
+REAPLANDED_DEST="$out"
+require_dest "new (897 reap landed case)" "$REAPLANDED_DEST"
+echo "reap landed change" >> "$REAPLANDED_DEST/file.txt"
+git -C "$REAPLANDED_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "897 reap landed work"
+git -C "$REAPLANDED_DEST" push -q origin lane/897-reap-landed
+git -C "$REPO897" fetch -q origin
+git -C "$REPO897" merge -q --no-edit origin/lane/897-reap-landed
+git -C "$REPO897" push -q origin main
+git -C "$REAPLANDED_DEST" fetch -q origin
+
+REAP_HEAD_PATH="$REPO897/.git/worktrees/$(basename "$REAPLANDED_DEST")/HEAD"
+reap_head_before=$(cat "$REAP_HEAD_PATH")
+reap_dry_out=$(gc897 reap "$REAPLANDED_DEST" --dry-run --no-github origin/main 2>&1); reap_dry_rc=$?
+reap_head_after=$(cat "$REAP_HEAD_PATH")
+want_exit "897: 'reap <target> --dry-run origin/main' (flag after positional) exits 0" "$reap_dry_rc" 0 "$reap_dry_out"
+if grep -qi "dry run" <<<"$reap_dry_out"; then ok "897: 'reap <target> --dry-run' reports a dry run"; else bad "897: 'reap <target> --dry-run' reports a dry run" "$reap_dry_out"; fi
+if [ "$reap_head_before" = "$reap_head_after" ]; then ok "897: 'reap <target> --dry-run' (flag after positional) leaves HEAD byte-identical"; else bad "897: 'reap <target> --dry-run' leaves HEAD byte-identical" "before=$reap_head_before after=$reap_head_after"; fi
+if [ -d "$REAPLANDED_DEST" ]; then ok "897: 'reap <target> --dry-run' (flag after positional) removed nothing"; else bad "897: 'reap <target> --dry-run' (flag after positional) removed nothing" "$REAPLANDED_DEST is gone"; fi
+
+reap_real_out=$(gc897 reap "$REAPLANDED_DEST" --no-github origin/main 2>&1); reap_real_rc=$?
+want_exit "897: a real 'reap <target> origin/main' (no --dry-run, flag after positional) exits 0" "$reap_real_rc" 0 "$reap_real_out"
+if [ -d "$REAPLANDED_DEST" ]; then bad "897: a real 'reap' run removes the landed target" "$REAPLANDED_DEST still present: $reap_real_out"; else ok "897: a real 'reap' run removes the landed target"; fi
+
+# --- MUTATION 1: revert the flag-anywhere parsing to the pre-#897 shape
+# (loop stops at the first non-flag arg, remaining args fall through to
+# positional $1/$2) -> the "flag after positional stays a dry run" assertion
+# above must go RED. Also strips gc's BASE-resolves check in the SAME
+# mutant -- with the flag-anywhere fix alone reverted, a flag-after-
+# positional call still fails safe via the independent BASE-validation
+# guard (BASE ends up "--dry-run", which does not resolve, so gc refuses
+# rather than mutating) -- proof the two guards are genuinely independent
+# defenses, not proof the flag-parsing revert was inert. Reverting both at
+# once reproduces the exact pre-#897 shape the issue reported. ------------
+MUT_FLAGS="$D897/worktree-mutant-flags.sh"
+mut_rc=0
+python3 - "$WT" "$MUT_FLAGS" <<'PY' || mut_rc=$?
+import re, sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+old_gc = '''  POSARGS=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --dry-run) DRY=1; shift ;;
+      # agent-supervisor#682: skip the `gh pr list` cross-check (offline,
+      # unauthenticated, or a test fixture with no real GitHub remote) --
+      # same flag name and meaning as branch-sweep.sh's own `--no-github`.
+      --no-github) USE_GH=""; shift ;;
+      --) shift; break ;;
+      -*) echo "worktree: gc: unrecognized flag '$1'" >&2; exit 1 ;;
+      *) POSARGS+=("$1"); shift ;;
+    esac
+  done
+  POSARGS+=("$@")
+  REPO="${POSARGS[0]:-$PWD}"
+  BASE="${POSARGS[1]:-origin/main}"'''
+new_gc = '''  while :; do
+    case "${1:-}" in
+      --dry-run) DRY=1; shift ;;
+      --no-github) USE_GH=""; shift ;;
+      *) break ;;
+    esac
+  done
+  REPO="${1:-$PWD}"
+  BASE="${2:-origin/main}"'''
+assert text.count(old_gc) == 1, "gc flag-parsing block not found or not unique -- script shape changed"
+text = text.replace(old_gc, new_gc, 1)
+base_check = '''  if ! git -C "$REPO" rev-parse --verify --quiet "$BASE" >/dev/null 2>&1; then
+    echo "worktree: gc: BASE '$BASE' does not resolve in $REPO -- refusing" >&2
+    exit 1
+  fi
+'''
+assert text.count(base_check) == 1, "gc BASE-validation block not found or not unique -- script shape changed"
+text = text.replace(base_check, "", 1)
+open(dst, "w").write(text)
+PY
+if [ "$mut_rc" -ne 0 ]; then
+  bad "897 MUTATION 1: patched a copy of worktree.sh with both #897 gc fixes reverted (pre-#897 shape)" "could not patch $WT (exit $mut_rc)"
+else
+  ok "897 MUTATION 1: patched a copy of worktree.sh with both #897 gc fixes reverted (pre-#897 shape)"
+  chmod +x "$MUT_FLAGS"
+  out=$(env WORKTREE_ROOT="$REPO897/.worktrees" bash "$WT" new 897-mut-landed "$REPO897" origin/main 2>/dev/null); rc=$?
+  MUTLANDED_DEST="$out"
+  if [ -n "$MUTLANDED_DEST" ] && [ -d "$MUTLANDED_DEST" ]; then
+    echo "mutant change" >> "$MUTLANDED_DEST/file.txt"
+    git -C "$MUTLANDED_DEST" -c user.email=test@example.com -c user.name=Test commit -q -am "897 mutant landed work"
+    git -C "$MUTLANDED_DEST" push -q origin lane/897-mut-landed
+    git -C "$REPO897" fetch -q origin
+    git -C "$REPO897" merge -q --no-edit origin/lane/897-mut-landed
+    git -C "$REPO897" push -q origin main
+    git -C "$MUTLANDED_DEST" fetch -q origin
+    mut_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=0 bash "$MUT_FLAGS" gc "$REPO897" --dry-run --no-github 2>&1)
+    # The exact primary-candidate assertion this mutation targets is "'gc
+    # <repo> --dry-run' reports a dry run" -- checked directly here rather
+    # than via directory survival, because a bad BASE ("--dry-run" itself,
+    # once the flag-anywhere fix is gone) can ALSO get caught downstream by
+    # gc's own unrelated guards (no real `gh` in this sandbox, an invalid
+    # BASE reads as "not landed") and skip the candidate for a DIFFERENT
+    # reason than DRY being set -- that would pass a directory-survival
+    # check for the wrong reason and mask the mutation having no effect.
+    if grep -qi "dry run" <<<"$mut_out"; then
+      bad "897 MUTATION 1: on the mutant, 'gc <repo> --dry-run' still reports a dry run (mutation had no effect -- test not pinned to this code path)" "$mut_out"
+    else
+      ok "897 MUTATION 1 confirmed: on the mutant, 'gc <repo> --dry-run' (flag after positional) no longer reports a dry run -- DRY was silently never set (candidate assertion above would now be RED)"
+    fi
+  else
+    bad "897 MUTATION 1: setup (new landed worktree for the mutant run) failed" "$out"
+  fi
+fi
+
+# --- MUTATION 2: strip the BASE-resolves check out of gc -> the "unresolvable
+# BASE is refused" assertion above must go RED. --------------------------
+MUT_BASE="$D897/worktree-mutant-base.sh"
+mut_rc=0
+python3 - "$WT" "$MUT_BASE" <<'PY' || mut_rc=$?
+import sys
+src, dst = sys.argv[1], sys.argv[2]
+text = open(src).read()
+marker = '''  if ! git -C "$REPO" rev-parse --verify --quiet "$BASE" >/dev/null 2>&1; then
+    echo "worktree: gc: BASE '$BASE' does not resolve in $REPO -- refusing" >&2
+    exit 1
+  fi
+'''
+assert text.count(marker) == 1, "gc BASE-validation block not found or not unique -- script shape changed"
+text = text.replace(marker, "", 1)
+open(dst, "w").write(text)
+PY
+if [ "$mut_rc" -ne 0 ]; then
+  bad "897 MUTATION 2: patched a copy of worktree.sh with gc's BASE validation stripped" "could not patch $WT (exit $mut_rc)"
+else
+  ok "897 MUTATION 2: patched a copy of worktree.sh with gc's BASE validation stripped"
+  chmod +x "$MUT_BASE"
+  out=$(env WORKTREE_ROOT="$REPO897/.worktrees" bash "$WT" new 897-mut-badbase "$REPO897" origin/main 2>/dev/null); rc=$?
+  MUTBADBASE_DEST="$out"
+  if [ -n "$MUTBADBASE_DEST" ] && [ -d "$MUTBADBASE_DEST" ]; then
+    mut_base_out=$(env -u TMUX TMUX_TMPDIR="$RT" WORKTREE_GC_MIN_AGE_SECONDS=0 bash "$MUT_BASE" gc "$REPO897" --no-github not-a-real-ref 2>&1); mut_base_rc=$?
+    if [ "$mut_base_rc" -eq 0 ]; then
+      ok "897 MUTATION 2 confirmed: on the mutant, an unresolvable BASE no longer refuses (exits 0 -- candidate assertion above would now be RED)"
+    else
+      bad "897 MUTATION 2: on the mutant, an unresolvable BASE still refused (mutation had no effect -- test not pinned to this code path)" "exit=$mut_base_rc: $mut_base_out"
+    fi
+  else
+    bad "897 MUTATION 2: setup (new worktree for the mutant run) failed" "$out"
+  fi
+fi
+
+git -C "$REPO897" worktree prune >/dev/null 2>&1
+rm -rf "$D897"
+
 # Tear down the private throwaway tmux server -- never the default socket,
 # scoped to $RT and gated by assert_isolated_tmux, same as test_lane_done.sh.
 cleanup_rt
