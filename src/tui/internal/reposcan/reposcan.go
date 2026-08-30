@@ -285,3 +285,4 @@ func ScanRepository(root, manifestPath, allowlistPath string) ([]Violation, erro
 	})
 	return all, nil
 }
+// probe: agent-estate#867 review -- confirms src/tui/** path filter alone triggers TUI CI (throwaway, will be closed)
