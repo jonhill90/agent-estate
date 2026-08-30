@@ -46,7 +46,21 @@
 # `#825`'s failure shape -- a stale verdict blocking a worktree that has
 # since become reapable -- so NONE of the other five is cached here; every
 # one of them still runs `reap`'s real guard chain fresh, every sweep, same
-# as before this change. See `_nongit_identity`/`_nongit_cache_hit`/
+# as before this change.
+#
+# agent-estate#846: that 179s run was `cli.py reconcile-lane-completions`
+# sweeping REGISTERED worktrees through `lane_worktree_reap.py` --
+# a different candidate set and a different call path from THIS file's own
+# sweep (unregistered `$TMPDIR/ad-*/` dirs, above). `orphan-worktree-reap.sh`
+# is never invoked by `reconcile_lane_completions.py`/`lane_worktree_reap.py`
+# and is not wired into any cron/launchd/watchdog schedule -- this cache
+# speeds up THIS script's own manual, standalone runs only. A follow-up
+# profile of the actual 179s sweep (agent-estate#846) found its cost
+# concentrates in the `unmerged`/`uncommitted` classes via a `gh pr list`
+# network call made once per branch-bearing candidate, not in the
+# not-a-git-repository class this cache addresses -- so this change does not
+# reduce that sweep's cost, and was never wired to. See
+# `_nongit_identity`/`_nongit_cache_hit`/
 # `_nongit_cache_put` below for the cache itself, and its own comment for
 # why the entry self-invalidates rather than trusting a path string alone.
 #
