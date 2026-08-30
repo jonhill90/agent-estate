@@ -21,6 +21,7 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 WT="$HERE/../../scripts/supervisor/worktree.sh"
 STUBS="$HERE/stubs-pr-sync"
+source "$HERE/../../scripts/supervisor/tmux-isolation.sh"
 pass=0; fail=0
 
 ok()   { echo "  ok   $1"; pass=$((pass+1)); }
@@ -36,6 +37,23 @@ require_dest() {
 echo "worktree.sh -- agent-estate#886 PR head-sync point"
 
 D=$(mktemp -d)
+
+# gc/reap's occupancy check (#478) refuses to guess liveness when it can't
+# reach a tmux server at all (Invariant 6) -- every real reap call below
+# must run against a throwaway, isolated tmux server, never the operator's
+# own attached session and never "whatever happens to be reachable" (#888:
+# an ambient server on a dev host makes every one of these calls a false
+# green that CI, with no server at all, cannot reproduce).
+RT="$D/tmux-rt"
+mkdir -p "$RT"
+rtmux() { env -u TMUX TMUX_TMPDIR="$RT" tmux -f /dev/null "$@"; }
+cleanup_rt() { unset TMUX; export TMUX_TMPDIR="$RT"; assert_isolated_tmux && tmux -f /dev/null kill-server 2>/dev/null; }
+ANCHOR="wt886-sync-anchor-$$"
+if ! rtmux new-session -d -s "$ANCHOR" -c "$D" 2>/dev/null; then
+  echo "  FATAL: could not start a throwaway tmux server under \$RT -- reap's liveness check cannot be tested for real" >&2
+  exit 2
+fi
+gh_env() { env -u TMUX TMUX_TMPDIR="$RT" PATH="$STUBS:$PATH" "$@"; }
 
 git init -q --bare "$D/origin.git"
 git clone -q "$D/origin.git" "$D/repo"
@@ -60,8 +78,6 @@ STUB
 chmod +x "$D/bin/allow-python3"
 export AGENT_PYTHON_BIN="$D/bin/allow-python3"
 export WORKTREE_ROOT="$REPO/.worktrees"
-
-gh_env() { env PATH="$STUBS:$PATH" "$@"; }
 
 # ============================================================================
 # Case 1: a fixup pushed directly to the PR after the lane's own last push --
@@ -121,7 +137,7 @@ if [ "$LANE_TIP_AFTER" = "$LANE_LOCAL_TIP" ]; then ok "sanity: the lane's own lo
 sleep 2
 
 # --- Baseline: no sync (--no-github) -- the gap, reproduced ---------------
-base_out=$(WORKTREE_GC_MIN_AGE_SECONDS=0 bash "$WT" reap --dry-run --no-github "$LANE_DEST" origin/main 2>&1); base_rc=$?
+base_out=$(WORKTREE_GC_MIN_AGE_SECONDS=0 env -u TMUX TMUX_TMPDIR="$RT" bash "$WT" reap --dry-run --no-github "$LANE_DEST" origin/main 2>&1); base_rc=$?
 want_exit "baseline (--no-github, no sync): reap refuses the landed-but-stale branch" "$base_rc" 1 "$base_out"
 if grep -q "does not already contain branch" <<<"$base_out"; then ok "baseline correctly reproduces #885's finding -- the local ref reads as not-landed"; else bad "baseline correctly reproduces #885's finding -- the local ref reads as not-landed" "$base_out"; fi
 
@@ -265,5 +281,6 @@ else
   fi
 fi
 
+cleanup_rt
 echo "worktree.sh -- agent-estate#886: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]
