@@ -142,7 +142,7 @@ want_eq "mutation B: count increments from 4 to 5 when a real agent session appe
 write_fixture
 VERR=$(run_verbose 2>&1 1>/dev/null)
 want_contains "--verbose: counted section lists the 4 real agent pids" "  100  claude" "$VERR"
-want_contains "--verbose: daemon helper labeled, not silently dropped" "daemon helper (cc-daemon pty host)" "$VERR"
+want_contains "--verbose: daemon helper labeled, not silently dropped" "daemon helper (cc-daemon pty host, --bg-pty-host)" "$VERR"
 want_contains "--verbose: transient shell labeled" "transient shell" "$VERR"
 want_contains "--verbose: tail -f labeled" "log follower" "$VERR"
 want_contains "--verbose: the measuring pipeline's own sed labeled" "measuring pipeline itself" "$VERR"
@@ -193,7 +193,7 @@ want_exit "#678 padded-pid fixture: exits 0" "$RC5" "0" "$OUT5"
 want_eq "#678: the one genuine session (pid 8454, pid narrower than the host max) is still counted" "$OUT5" "1"
 VERR5=$(run_verbose 2>&1 1>/dev/null)
 want_contains "#678: pid 8454 is counted with its true pid, not merged with its own digits" "  8454  claude" "$VERR5"
-want_contains "#678: daemon helper still excluded correctly despite padding elsewhere in the table" "daemon helper (cc-daemon pty host)" "$VERR5"
+want_contains "#678: daemon helper still excluded correctly despite padding elsewhere in the table" "daemon helper (cc-daemon pty host, --bg-pty-host)" "$VERR5"
 
 # --- Fails closed, never silently reports 0, when ps itself is unreadable -
 # `PATH="$D2/bin:$PATH"` keeps bash/awk/etc. resolvable (the shebang's own
@@ -218,6 +218,80 @@ EOF
 chmod +x "$D2/bin/ps"
 OUT4=$(PATH="$D2/bin:$PATH" "$SCRIPT" 2>&1); RC4=$?
 want_exit "ps runs but prints nothing: refuses rather than reporting 0" "$RC4" "2" "$OUT4"
+
+# --- agent-estate#613 sub-decision 1: daemon exclusion by argv, not by an
+# accident of what `comm` resolves to -----------------------------------
+# Reproduces the Director's live finding verbatim: on a host where a
+# node-launched `claude.exe` resolves through `comm` as the FULL
+# interpreter path (never the bare `claude.exe` AGENT_COMMAND_RE expects),
+# `claude.exe daemon run ...` and the `--session-id ... --fork-session
+# --resume ...` processes cc-daemon forks from its pooled pty host were
+# ALREADY excluded from the count -- but only because comm happened not to
+# match, not because anything recognized them. This fixture pins comm to
+# that exact full-path shape and asserts they are still excluded (mutation
+# direction A) AND now labeled BY NAME in --verbose (mutation direction B,
+# the actual fix: the old comm-prefix-matching reason case
+# ("claude bg-pty-host"*) could never have matched this comm shape, so the
+# same processes fell into the "other, comm did not match" bucket pre-fix
+# -- proving the label is deliberate, not merely that the count is right).
+D3=$(mktemp -d); mkdir -p "$D3/bin"
+cat > "$D3/bin/ps" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *comm=*)
+    cat <<'FIXTURE'
+600 claude
+601 /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+602 /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+603 /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe
+FIXTURE
+    ;;
+  *command=*)
+    cat <<'FIXTURE'
+600 claude --model sonnet --dangerously-skip-permissions --strict-mcp-config
+601 /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe daemon run --origin transient --spawned-by {"label":"claude","cwd":"/tmp","pid":1}
+602 /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --bg-pty-host /tmp/cc-daemon-501/x/pty/y.sock 254 64 -- /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --session-id y --fork-session --resume /Users/jon/.claude/projects/x/y.jsonl --model claude-sonnet-5
+603 /opt/homebrew/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe --session-id y --fork-session --resume /Users/jon/.claude/projects/x/y.jsonl --model claude-sonnet-5
+FIXTURE
+    ;;
+esac
+EOF
+chmod +x "$D3/bin/ps"
+run3()          { PATH="$D3/bin:$PATH" "$SCRIPT" "$@"; }
+OUT6=$(run3); RC6=$?
+want_exit "#613: full-interpreter-path daemon fixture exits 0" "$RC6" "0" "$OUT6"
+want_eq "#613: the 1 real agent session counts, the 3 daemon-shaped claude.exe processes do not" "$OUT6" "1"
+VERR6=$(PATH="$D3/bin:$PATH" "$SCRIPT" --verbose 2>&1 1>/dev/null)
+want_contains "#613: 'daemon run' subcommand excluded by name, not by comm-path accident" "daemon helper (cc-daemon supervisor, daemon run)" "$VERR6"
+want_contains "#613: --bg-pty-host excluded by name even though comm is the full interpreter path" "daemon helper (cc-daemon pty host, --bg-pty-host)" "$VERR6"
+want_contains "#613: --fork-session (cc-daemon's pooled-session fork) excluded by name" "daemon helper (cc-daemon forked session, --fork-session)" "$VERR6"
+
+# --- Mutation: a process whose argv merely CONTAINS the substring "claude"
+# near "daemon"/"run" but is not actually a claude(.exe)-prefixed "daemon
+# run" invocation must NOT be excluded -- DAEMON_ARGV_RE's daemon-run
+# alternative is anchored to "claude(.exe) daemon run" as a token
+# sequence, not a bare "daemon" + "run" substring anywhere in argv. This is
+# the fail-closed direction: an agent process whose own prose happens to
+# mention "daemon run" (e.g. working on this very issue) must still count.
+cat > "$D3/bin/ps" <<'EOF'
+#!/bin/bash
+case "$*" in
+  *comm=*)
+    cat <<'FIXTURE'
+700 claude
+FIXTURE
+    ;;
+  *command=*)
+    cat <<'FIXTURE'
+700 claude --model sonnet --dangerously-skip-permissions --strict-mcp-config -p "describe what claude.exe daemon run does in count-agents.sh"
+FIXTURE
+    ;;
+esac
+EOF
+chmod +x "$D3/bin/ps"
+OUT7=$(run3); RC7=$?
+want_exit "#613: comm=claude with 'daemon run' only in unrelated prose: exits 0" "$RC7" "0" "$OUT7"
+want_eq "#613: fail-closed -- comm already identifies this as a real agent session, so it still counts" "$OUT7" "1"
 
 echo
 echo "count-agents.sh: $pass passed, $fail failed"
