@@ -21,10 +21,11 @@ __pycache__/
 # in place.
 /.worktrees/
 
-# tui/ build artifacts (agent-tui's own .gitignore, re-anchored under tui/
-# now that it's a subdirectory rather than its own repo root)
-/tui/estate
-/tui/agent-tui
-/tui/bin/
+# src/tui/ build artifacts (agent-tui's own .gitignore, re-anchored under
+# src/tui/ now that it's a subdirectory rather than its own repo root, then
+# moved again by agent-estate#865/#867's tui/ -> src/tui move)
+/src/tui/estate
+/src/tui/agent-tui
+/src/tui/bin/
 *.test
-/tui/testdata/vhs/out/
+/src/tui/testdata/vhs/out/
