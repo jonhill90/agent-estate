@@ -14,14 +14,15 @@
 # Requires: go, freeze (https://github.com/charmbracelet/freeze) on PATH.
 set -euo pipefail
 # This script lives at scripts/tui/ (moved from tui/scripts/ by migration
-# Step 2c, #744); the Go module and docs/ it renders into moved to tui/ and
-# docs/tui/ respectively, so both hops are two levels up from here now.
-cd "$(dirname "$0")/../../tui"
+# Step 2c, #744); the Go module moved again to src/tui/ (#865), one level
+# deeper than before, while docs/tui/ stayed put -- the module hop is now
+# two levels up plus src/, the docs/ hop is three levels up.
+cd "$(dirname "$0")/../../src/tui"
 
 bin="$(mktemp -d)/memoryvariants"
 go build -o "$bin" ./tools/memoryvariants
 
-outdir="../docs/tui/memoryvariants"
+outdir="../../docs/tui/memoryvariants"
 mkdir -p "$outdir"
 
 variants=(

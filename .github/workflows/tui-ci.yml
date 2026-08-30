@@ -12,9 +12,9 @@ name: TUI CI
 on:
   push:
     branches: [main]
-    paths: ["tui/**", ".github/workflows/tui-ci.yml"]
+    paths: ["src/tui/**", ".github/workflows/tui-ci.yml"]
   pull_request:
-    paths: ["tui/**", ".github/workflows/tui-ci.yml"]
+    paths: ["src/tui/**", ".github/workflows/tui-ci.yml"]
 
 jobs:
   build:
@@ -25,10 +25,10 @@ jobs:
         with:
           go-version: "1.26"
       - run: go build ./...
-        working-directory: tui
+        working-directory: src/tui
       - run: go vet ./...
-        working-directory: tui
+        working-directory: src/tui
       - run: go test ./...
-        working-directory: tui
+        working-directory: src/tui
         env:
           AGENT_SUPERVISOR_REPO: ${{ github.workspace }}
