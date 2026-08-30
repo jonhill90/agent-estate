@@ -194,6 +194,39 @@ _lane_identity_status() {  # _lane_identity_status <lane> -> "<status>\t<detail>
   printf '%s\t%s\n' "$status" "$detail"
 }
 
+# agent-estate#866: the one fact `director_reviewer_relation`'s off-pane
+# fallback (agent-estate#863) needs and cannot get from any ledger row --
+# which pane is ACTUALLY, right now, sitting at the Director's own window
+# index. Deliberately NOT derived from `lanes`/`tasks`: that is exactly the
+# primitive #866 found gameable (`Ledger.register_lane` imposes no rule
+# tying a lane id to a pane_id -- only `register-lane-self.sh`'s own
+# call-site convention refuses to register `LANES_SUPERVISOR_WINDOW`, and
+# a different writer hitting the same primitive is not bound by it). Read
+# straight off the live tmux server instead, the same anchor
+# register-lane-self.sh and mark-pr-director-authored.sh already use for
+# the Director's own identity -- the difference here is this asks about a
+# window INDEX in general, not "this calling pane", because
+# `director_reviewer_relation` is not called from the Director's own pane.
+#
+# `-a` (across every session on the server), matching `lane_identity.py`'s
+# own `_list_panes` -- the Director's window may not be on the first
+# session enumerated. First match wins; `window_index` is unique per
+# session but not across sessions, so on a server running more than one
+# named session this can only promise "a" window at that index, not "the"
+# one -- the same limit `LANES_SUPERVISOR_WINDOW` itself already carries
+# everywhere else in this codebase (it is a convention assumed to be
+# consistent across every session this estate runs, never verified
+# cross-session).
+#
+# Empty on ANY failure -- no server reachable, no `tmux` binary, malformed
+# output, or no window at that index at all. That is the honest
+# "unverifiable" answer, not a guess: the caller below must treat empty as
+# "could not confirm the Director's pane", never as "confirmed different".
+_director_live_pane_id() {  # _director_live_pane_id <window-index> -> pane_id or empty
+  "${VERDICT_TMUX_BIN:-tmux}" list-panes -a -F "$(printf '#{window_index}\t#{pane_id}')" 2>/dev/null \
+    | awk -F'\t' -v idx="$1" '$1 == idx { print $2; exit }'
+}
+
 # agent-supervisor#251 (the same defect its own CI failure was measured
 # against, not a new one): `author_lane_for` below shelled out to `gh pr
 # view` with no bound at all -- the one call in this file with no timer on
@@ -762,7 +795,7 @@ claimed_author_conflict() {  # claimed_author_conflict <author-json> <reviewer-l
 # either.
 director_reviewer_relation() {  # director_reviewer_relation <reviewer-lane> -> JSON
   local reviewer_lane="$1" supervisor_window="${LANES_SUPERVISOR_WINDOW:-1}" overall
-  local identity id_status id_detail
+  local identity id_status id_detail reviewer_pane_id director_pane_id
 
   identity=$(_lane_identity_status "$reviewer_lane")
   id_status="${identity%%$'\t'*}"
@@ -790,6 +823,102 @@ else:
     print("same" if is_supervisor else "different")
 ' "$HERE" "$reviewer_lane" "$supervisor_window" 2>/dev/null) || overall=""
   case "$overall" in same|different) : ;; *) overall="unknown" ;; esac
+
+  # agent-estate#863: the shape check above only recognizes a tmux-pane
+  # lane id (`<session>:<index>`). A claude-print/pi-rpc reviewer lane is a
+  # task id, not that shape, and LANE_ID_RE.match never matches it -- so
+  # `overall` lands on `unknown` for EVERY off-pane reviewer of a
+  # director-authored PR, not as an edge case. The ORIGINAL justification
+  # here was: the Director's own window structurally never has a `lanes`
+  # row at all (register-lane-self.sh refuses to ever register `window
+  # index == LANES_SUPERVISOR_WINDOW`), so if the reviewer resolves to ANY
+  # row, that alone proves the reviewer isn't the Director, regardless of
+  # transport.
+  #
+  # agent-estate#866 (review of #863, PR agent-estate#866): that
+  # justification is false at the primitive level.
+  # `register-lane-self.sh`'s refusal is a CALL-SITE convention, not
+  # something `Ledger.register_lane` itself enforces -- a single hand-typed
+  # `cli.py register` (or any future repair/backfill script hitting the
+  # same primitive) can insert a row for the Director's own pane under an
+  # off-pane-shaped lane id (e.g. `rogue-reviewer`), and the bare
+  # "did a row resolve" test above would treat that row as proof the
+  # reviewer is not the Director -- the exact self-review-laundering shape
+  # `agent-tui#107`/`skills#255` closed, reopened via the register
+  # primitive instead of a forged trailer. `contributor_lane_relation`
+  # never has this gap because it always compares PANE_ID against a real
+  # contributor's row (a genuine dispatch fact); this branch has no such
+  # row to compare against, because the Director's own window is never
+  # dispatched to.
+  #
+  # The fix: before trusting a resolved row, ask the ONE thing no ledger
+  # row can be forged to answer -- which pane is live, RIGHT NOW, at
+  # `LANES_SUPERVISOR_WINDOW` on the actual tmux server. Never derived
+  # from a lanes/tasks row (that is exactly the primitive #866 found
+  # gameable); read straight off tmux, the same anchor
+  # register-lane-self.sh and mark-pr-director-authored.sh already use for
+  # the Director's own identity, just queried for a window index instead
+  # of "this calling pane" (this function is not called from the
+  # Director's own pane). A resolved row whose OWN pane_id matches that
+  # live pane is refused (`same`) regardless of what lane id it was
+  # registered under -- "a row resolved" is no longer sufficient by
+  # itself, matching `lane_relation`'s pane_id-based comparison elsewhere
+  # in this file.
+  #
+  # agent-estate#866 (re-review, PR agent-estate#866 second pass): when the
+  # Director's live pane cannot be determined at all (no tmux server
+  # reachable, wrong socket, `tmux` binary missing), this branch used to
+  # fall through to "different" -- the same reasoning `_lane_identity_status`
+  # already rejected for its own unverifiable case, applied wrongly here.
+  # `director_reviewer_relation` is only ever reached for a director-authored
+  # PR, and the Director is by construction tmux-hosted (this function's own
+  # header), so "tmux unreachable" here never means "a tmux-less estate" --
+  # it means the checker's own process cannot currently see the same server
+  # the Director is sitting on. This repo records that class of event
+  # happening for real more than once (Invariant 4's own history; `restore.sh`
+  # / `preserve-dead-lanes.sh` exist because a lost tmux server recurs).
+  # During exactly such a window, "different" would let a pre-planted rogue
+  # row -- or any row that happens to carry the Director's `pane_id` -- straight
+  # through a `merge-pr.sh` call. Landing on `unknown` instead gives this the
+  # same "unverifiable is not a pass and not a failure" treatment
+  # `_lane_identity_status` already gives its own unverifiable case: it
+  # refuses (see the `unknown` handling in `merge-pr.sh`/callers), at the
+  # cost of one merge retry during a rare outage window -- a false ALLOW is
+  # categorically worse than a false REFUSE. A row that DOES resolve and
+  # whose pane_id the live server confirms differs from the Director's still
+  # answers "different", exactly as before; only the tmux-unreachable case
+  # moved from "different" to "unknown".
+  #
+  # No fresh identity check needed for the REVIEWER side here: the
+  # `contradicted` short-circuit above already returned before this line
+  # can even run, so by construction the reviewer's registration here can
+  # only be `verified` or `unverifiable`, never `contradicted`.
+  if [ "$overall" = "unknown" ]; then
+    reviewer_pane_id=$("$LEDGER_PYTHON" -c '
+import sys
+sys.path.insert(0, sys.argv[1])
+from core import Ledger, lane_or_task_row
+row = lane_or_task_row(Ledger(sys.argv[2]), sys.argv[3])
+print((row or {}).get("pane_id") or "")
+' "$HERE" "$STATE" "$reviewer_lane" 2>/dev/null)
+    if [ -n "$reviewer_pane_id" ]; then
+      director_pane_id=$(_director_live_pane_id "$supervisor_window")
+      if [ -n "$director_pane_id" ]; then
+        if [ "$director_pane_id" = "$reviewer_pane_id" ]; then
+          jq -nc --arg lane "$reviewer_lane" \
+            --arg detail "reviewer lane $reviewer_lane resolves to pane $reviewer_pane_id, which is live right now at window index $supervisor_window -- the Director's own window, regardless of what lane id the row was registered under (agent-estate#866)" \
+            '{overall:"same", matched_lane:$lane, matched_task:null, detail:$detail}'
+          return
+        fi
+        overall="different"
+      fi
+      # else: director_pane_id could not be resolved at all -- $overall stays
+      # "unknown" (its value on entry to this block), never "different".
+      # agent-estate#866 (re-review): a false ALLOW here is categorically
+      # worse than a false REFUSE during a rare tmux-outage window.
+    fi
+  fi
+
   jq -nc --arg overall "$overall" --arg lane "$reviewer_lane" \
     '{overall:$overall, matched_lane: (if $overall != "unknown" then $lane else null end), matched_task:null}'
 }
