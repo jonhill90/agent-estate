@@ -991,6 +991,208 @@ class LaneCompletionReconcilerTest(unittest.TestCase):
         gh_calls = [call for call in runner.calls if call[0] == "gh"]
         self.assertEqual(0, len(gh_calls))
 
+    # -- agent-estate#841: died_waiting_on_background -----------------------
+
+    def _final_result_json(self, text, *, is_error=False):
+        """The single-line JSON object `claude -p --output-format json`
+        (and `pi --mode rpc`) print on exit, the exact shape
+        `claude_print_transport.py`'s own module docstring measures live."""
+        return json.dumps(
+            {"type": "result", "subtype": "success", "is_error": is_error,
+             "session_id": "sess-x", "result": text}
+        )
+
+    def test_waiting_shape_with_nothing_shipped_fails_and_is_tagged(self):
+        """agent-estate#841's own three specimens, reproduced: a
+        claude-print lane's dispatch-time pid has demonstrably exited, its
+        final result text is exactly `ae838-fix838`'s own closing words, it
+        wrote no result file, and its log names no PR and no comment --
+        every leg of the conjunction holds, so this must fail (not
+        complete) and land in the new `died_waiting_on_background` bucket,
+        not merely the generic `died_without_completing` one."""
+        self.dispatch_claude_print("ae841-fix838", lane="ae841-fix838")
+        pid = self._dead_pid()
+        self._write_lane_log(
+            "ae841-fix838",
+            "\n--- dispatched detached: task=ae841-fix838 lane=ae841-fix838 "
+            f"pid={pid} ---\n"
+            + self._final_result_json(
+                "I'll wait for the background shell-suites run and the monitor to "
+                "report back before finalizing the PR."
+            )
+            + "\n",
+        )
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, clock=lambda: 1_005).sweep()
+
+        task = self.ledger.get_task("ae841-fix838")
+        self.assertEqual("failed", task["status"])
+        self.assertEqual(["ae841-fix838"], report["failed_stale_delivery"])
+        self.assertEqual(["ae841-fix838"], report["died_waiting_on_background"])
+        note = Path(task["result_path"]).read_bytes()
+        self.assertIn(b"died_waiting_on_background", note)
+
+    def test_waiting_shape_but_pr_shipped_still_completes(self):
+        """Mutation, direction 1 -- the hard constraint: a lane whose final
+        text reads exactly like the waiting shape, but whose log ALSO names
+        a PR it opened, must still be completed from that evidence, never
+        failed. 'Produced nothing' is the load-bearing half of the
+        conjunction, not the wording."""
+        self.dispatch_claude_print("ae841-shipped-anyway", lane="ae841-shipped-anyway")
+        pid = self._dead_pid()
+        self._write_lane_log(
+            "ae841-shipped-anyway",
+            "\n--- dispatched detached: task=ae841-shipped-anyway "
+            f"lane=ae841-shipped-anyway pid={pid} ---\n"
+            + self._final_result_json(
+                "Waiting for the background VHS run to finish (task bbcsv7l10) before "
+                "I verify the PNGs and hashes. Opened https://github.com/jonhill90/"
+                "agent-estate/pull/9500 in the meantime."
+            )
+            + "\n",
+        )
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, clock=lambda: 1_005).sweep()
+
+        task = self.ledger.get_task("ae841-shipped-anyway")
+        self.assertEqual("complete", task["status"])
+        self.assertEqual([], report["died_waiting_on_background"])
+        self.assertEqual([], report["failed_stale_delivery"])
+        self.assertEqual(["ae841-shipped-anyway"], report["completed_from_evidence"])
+
+    def test_waiting_shape_but_comment_posted_still_fails_ordinary_not_tagged(self):
+        """Mutation, direction 2: no PR, but the log names a posted issue/PR
+        comment -- the lane produced something (a comment), so this must
+        NOT be tagged `died_waiting_on_background` even though the wording
+        matches and no PR exists. Still fails via the ordinary
+        `died_without_completing` path (no completion signal ever arrived),
+        just not under this more specific label."""
+        self.dispatch_claude_print("ae841-commented-anyway", lane="ae841-commented-anyway")
+        pid = self._dead_pid()
+        self._write_lane_log(
+            "ae841-commented-anyway",
+            "\n--- dispatched detached: task=ae841-commented-anyway "
+            f"lane=ae841-commented-anyway pid={pid} ---\n"
+            + self._final_result_json(
+                "Waiting for the vhs tape's PNG capture to finish (background Monitor "
+                "task running); I'll resume verification once it completes. Left a "
+                "status update at https://github.com/jonhill90/agent-estate/issues/841"
+                "#issuecomment-123456."
+            )
+            + "\n",
+        )
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, clock=lambda: 1_005).sweep()
+
+        task = self.ledger.get_task("ae841-commented-anyway")
+        self.assertEqual("failed", task["status"])
+        self.assertEqual(["ae841-commented-anyway"], report["failed_stale_delivery"])
+        self.assertEqual(["ae841-commented-anyway"], report["died_without_completing"])
+        self.assertEqual([], report["died_waiting_on_background"])
+
+    def test_waiting_shape_but_result_file_written_is_not_tagged(self):
+        """Mutation, direction 3: the lane wrote a result file (even if it
+        never called `complete`) -- that is itself evidence it did not
+        simply throw its own turn away, so this must not be tagged
+        `died_waiting_on_background` either."""
+        self.dispatch_claude_print("ae841-wrote-file", lane="ae841-wrote-file")
+        pid = self._dead_pid()
+        self._write_lane_log(
+            "ae841-wrote-file",
+            "\n--- dispatched detached: task=ae841-wrote-file "
+            f"lane=ae841-wrote-file pid={pid} ---\n"
+            + self._final_result_json(
+                "Waiting for the background VHS run to finish (task bbcsv7l10) before "
+                "I verify the PNGs and hashes."
+            )
+            + "\n",
+        )
+        incoming = self.ledger.root / "incoming"
+        incoming.mkdir(mode=0o700, exist_ok=True)
+        (incoming / "ae841-wrote-file.md").write_text("partial notes, never marked complete\n")
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, clock=lambda: 1_005).sweep()
+
+        task = self.ledger.get_task("ae841-wrote-file")
+        self.assertEqual("failed", task["status"])
+        self.assertEqual([], report["died_waiting_on_background"])
+        self.assertEqual(["ae841-wrote-file"], report["died_without_completing"])
+
+    def test_ordinary_dead_lane_with_no_waiting_text_is_not_tagged(self):
+        """Mutation, direction 4: a dead-pid lane whose final text has
+        nothing to do with waiting on a background job must still fail via
+        the ordinary `died_without_completing` path, unchanged, and must
+        never pick up the new, more specific tag it does not deserve."""
+        self.dispatch_claude_print("ae841-ordinary-death", lane="ae841-ordinary-death")
+        pid = self._dead_pid()
+        self._write_lane_log(
+            "ae841-ordinary-death",
+            "\n--- dispatched detached: task=ae841-ordinary-death "
+            f"lane=ae841-ordinary-death pid={pid} ---\n"
+            + self._final_result_json("Ran out of context mid-refactor; stopping here.")
+            + "\n",
+        )
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(self.ledger, runner=runner, clock=lambda: 1_005).sweep()
+
+        task = self.ledger.get_task("ae841-ordinary-death")
+        self.assertEqual("failed", task["status"])
+        self.assertEqual(["ae841-ordinary-death"], report["died_without_completing"])
+        self.assertEqual([], report["died_waiting_on_background"])
+
+    def test_waiting_shape_reached_via_ordinary_stale_after_dwell_is_tagged(self):
+        """The classification does not depend on the dead-pid fast path --
+        `_pid_confirmed_dead` only ever applies to `transport='claude-print'`
+        (see its own docstring); a `pi-rpc` lane never has a subprocess for
+        it to protect, so `_liveness_blocks_failure` never blocks it either,
+        and this only reaches the failure write once `stale_after` has
+        genuinely elapsed. A `pi-rpc` lane whose final text still matches
+        the waiting shape, with no result file and nothing shipped, must
+        still be tagged `died_waiting_on_background` once it fails this
+        way."""
+        self.ledger.register_lane(
+            lane="ae841-stale-wait", pane_id="pi-rpc:ae841-stale-wait", nonce="nonce-ae841-stale-wait",
+            harness="pi", repo="/repo/x", server_id="pi-rpc", session_id="sess-ae841-stale-wait",
+            command="pi", transport="pi-rpc",
+        )
+        self.ledger.reconstruct_task(
+            task_id="ae841-stale-wait", source_kind="issue",
+            source_url="https://github.com/jonhill90/agent-supervisor/issues/ae841-stale-wait",
+            source_ref="ae841-stale-wait", summary="issue ae841-stale-wait", source_state="OPEN",
+            status="created", evidence=["claimed by dispatch.sh for lane ae841-stale-wait"], status_marker=None,
+        )
+        self.ledger.assign(
+            task_id="ae841-stale-wait", lane="ae841-stale-wait", pane_nonce="nonce-ae841-stale-wait",
+            summary="issue ae841-stale-wait",
+        )
+        self.ledger.mark_delivery_pending("ae841-stale-wait", pane_nonce="nonce-ae841-stale-wait")
+        self.ledger.mark_delivered("ae841-stale-wait", pane_nonce="nonce-ae841-stale-wait")
+        self._write_lane_log(
+            "ae841-stale-wait",
+            self._final_result_json(
+                "Waiting for the vhs tape's PNG capture to finish (background Monitor "
+                "task running); I'll resume verification once it completes."
+            )
+            + "\n",
+        )
+        runner = FakeLanesRunner({})
+
+        report = LaneCompletionReconciler(
+            self.ledger, runner=runner, stale_after=300, clock=lambda: 2_000
+        ).sweep()
+
+        task = self.ledger.get_task("ae841-stale-wait")
+        self.assertEqual("failed", task["status"])
+        self.assertEqual(["ae841-stale-wait"], report["failed_stale_delivery"])
+        self.assertEqual(["ae841-stale-wait"], report["died_waiting_on_background"])
+        # No pid was ever logged, so this is not the dead-pid fast path.
+        self.assertEqual([], report["died_without_completing"])
+
     def test_batches_one_call_per_session_not_per_task(self):
         """Two delivered tasks in the same session must cost ONE `lanes.sh
         --json` call, not two -- the same batching argument
