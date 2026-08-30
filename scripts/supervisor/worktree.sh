@@ -137,6 +137,19 @@
 #                                            `new`'s own ad-<slug>-<pid>
 #                                            naming (#682)
 #
+# agent-estate#886: before `branch_content_is_on_base` judges a candidate,
+# both `gc` and `reap` now try `_gc_landed_with_sync`, which -- only if the
+# local-ref-only check first says "not landed" -- fetches the branch's own
+# PR's ACTUAL CURRENT HEAD (by PR number, into a scratch ref, never
+# `refs/heads/<branch>` itself) and re-runs the identical content check
+# against that. Closes the gap #885's reviewer found by hand: a review
+# fixup pushed directly to a PR's branch on GitHub after the lane's own last
+# push never reaches the lane's local branch ref on its own, so a landed PR
+# reads as "not ahead" forever. Read/fetch-only -- see `_gc_sync_pr_head`'s
+# own comment for why the scratch ref, never `refs/heads/<branch>`, and
+# `--no-github`/no `gh` disables it exactly like the existing MERGED-PR
+# cross-check (no second opinion, never a looser one).
+#
 # [repo] defaults to the current directory; [base] defaults to origin/main.
 # <slug> becomes branch `lane/<slug>` -- pass the issue and a short reason,
 # e.g. `73-worktree-isolation`, so the branch name says what it is without
@@ -466,24 +479,30 @@ _gc_is_live() {
 # if it's ever wanted -- not as a side effect of this one.
 branch_content_is_on_base() {
   local repo="$1" b="$2" base="$3"
+  # agent-estate#886: every existing caller passes 3 args and gets exactly
+  # the original behavior (compares refs/heads/<b>) -- this 4th, optional
+  # arg lets `_gc_landed_with_sync` below re-run the SAME check against a
+  # synced scratch ref instead, without a second, drifting copy of this
+  # function's own logic.
+  local ref="${4:-refs/heads/$b}"
   # Ancestry still answers yes cheaply when it survives (a rebase-merged or
   # fast-forwarded branch); it is only insufficient, never wrong.
-  git -C "$repo" merge-base --is-ancestor "refs/heads/$b" "$base" 2>/dev/null && return 0
+  git -C "$repo" merge-base --is-ancestor "$ref" "$base" 2>/dev/null && return 0
   local mb
-  mb=$(git -C "$repo" merge-base "$base" "refs/heads/$b" 2>/dev/null) || return 1
+  mb=$(git -C "$repo" merge-base "$base" "$ref" 2>/dev/null) || return 1
   [ -n "$mb" ] || return 1
   # No paths at all: the branch's tree is identical to the merge base, so it
   # carries commits with no net content. Fail closed rather than reason about
   # what an empty pathspec means to xargs.
-  git -C "$repo" diff --quiet "$mb" "refs/heads/$b" 2>/dev/null
+  git -C "$repo" diff --quiet "$mb" "$ref" 2>/dev/null
   case $? in
     0) return 1 ;;   # tree-identical to the merge base
     1) ;;            # differences exist -- the expected path
     *) return 1 ;;   # git failed; fail closed
   esac
   local out rc
-  out=$(git -C "$repo" diff --name-only -z "$mb" "refs/heads/$b" \
-        | xargs -0 git -C "$repo" diff --stat "$base..refs/heads/$b" -- 2>&1); rc=$?
+  out=$(git -C "$repo" diff --name-only -z "$mb" "$ref" \
+        | xargs -0 git -C "$repo" diff --stat "$base..$ref" -- 2>&1); rc=$?
   # Empty output *and* a clean exit. Anything git could not answer is not an
   # answer of "merged".
   [ "$rc" -eq 0 ] && [ -z "$out" ]
@@ -541,6 +560,106 @@ _gc_pr_merged_from_file() {
   local merged_file="$1" b="$2"
   [ -n "$merged_file" ] && [ -f "$merged_file" ] || return 1
   grep -qxF "$b" "$merged_file"
+}
+
+# agent-estate#886: batched branch-name -> PR-number lookup, the same
+# once-per-run shape as `_gc_fetch_merged_prs` immediately above -- a
+# SECOND `gh pr list` call rather than folding a number column into that
+# function's own output file, because `_gc_pr_merged_from_file`'s exact-
+# line-match (`grep -qxF "$b" "$merged_file"`) depends on that file staying
+# one column, and this needs OPEN PRs too (a fixup can land on a PR before
+# it ever merges), not just the MERGED subset that file is scoped to.
+_gc_fetch_pr_numbers() {
+  local repo="$1" out_file="$2"
+  command -v gh >/dev/null 2>&1 || return 1
+  local slug
+  slug=$(git -C "$repo" remote get-url origin 2>/dev/null \
+         | sed -E 's#^(git@github\.com:|https://github\.com/)##; s#\.git$##')
+  [ -n "$slug" ] || return 1
+  gh repo view "$slug" >/dev/null 2>&1 || return 1
+  local raw
+  raw=$(gh pr list --repo "$slug" --state all --limit 4000 \
+          --json headRefName,number -q '.[] | [.headRefName,.number] | @tsv' 2>/dev/null) || return 1
+  # A branch name can legitimately have opened more than one PR over its
+  # history (closed-then-reopened, or reused after `worktree.sh new`'s own
+  # abandoned-branch reclaim); first row wins, same "no ordering promise,
+  # take what's there" posture `_gc_pr_merged_from_file` already has for a
+  # duplicate MERGED row.
+  awk -F'\t' '!seen[$1]++' <<<"$raw" > "$out_file"
+  return 0
+}
+
+# agent-estate#886: fetch branch <b>'s own PR's ACTUAL CURRENT HEAD -- by PR
+# number, via `refs/pull/<n>/head` -- into the scratch ref
+# `refs/gc-pr-sync/<b>`, never into `refs/heads/<b>` itself.
+#
+# WHY NOT `refs/heads/<b>` (what the brief's own wording suggested first,
+# and what "resync a lane's local branch ref" literally says): that ref is
+# what THIS worktree's own index and working tree are checked out against.
+# `safe_remove`'s dirty-check (`git status --porcelain`) compares the
+# working tree to exactly that ref -- move it out from under a clean
+# worktree and every line the sync just pulled in reads as an uncommitted
+# local change, flipping "clean, safe to reap" to a false "dirty, refused".
+# Not the destructive direction, but it defeats the whole point: the sync
+# would make `gc`/`reap` LESS able to confirm a landed branch, not more. A
+# scratch ref is read-only from the worktree's own perspective -- nothing
+# else in this file, or anywhere in scripts/supervisor, reads
+# `refs/gc-pr-sync/*` for anything but this check, and it is deleted again
+# by `_gc_landed_with_sync` below the moment the check that needed it is
+# done, so it never accumulates across repeated `gc` runs.
+#
+# WHY BY PR NUMBER, NOT BY FETCHING `<b>` OFF `origin` DIRECTLY: this
+# repo's own merge convention deletes a PR's head branch on squash-merge
+# (`merge-pr.sh`'s own `--delete-branch`), which is exactly the case this
+# exists for -- by the time a worktree is old enough for `gc`/`reap` to be
+# judging it, the branch `origin/<b>` names is very often already gone.
+# GitHub keeps `refs/pull/<n>/head` addressable for the life of the PR
+# regardless of whether its head branch still exists, so this is the one
+# fetch target that survives the exact failure mode being fixed.
+#
+# Read/fetch-only: this adds an object and moves one scratch ref that
+# nothing else reads. It is never reachable from `safe_remove`, `git
+# worktree remove`, or any branch-deleting path in this file.
+_gc_sync_pr_head() {
+  local repo="$1" b="$2" pr_num_file="$3"
+  [ -n "$pr_num_file" ] && [ -f "$pr_num_file" ] || return 1
+  local num
+  num=$(awk -F'\t' -v b="$b" '$1==b{print $2; exit}' "$pr_num_file")
+  [ -n "$num" ] || return 1
+  git -C "$repo" fetch --no-tags --quiet origin \
+    "refs/pull/$num/head:refs/gc-pr-sync/$b" 2>/dev/null
+}
+
+# agent-estate#886: wraps `branch_content_is_on_base` with the sync point
+# above -- tries the branch's own local ref first (byte-for-byte the
+# existing, unchanged behavior), and only if that says "not landed", syncs
+# and retries against the branch's PR's actual current head. `pr_num_file`
+# empty or missing means "no second opinion available" (no `gh`, no
+# readable GitHub remote, or the caller opted out) -- exactly the same
+# fail-to-the-narrower-answer posture `_gc_pr_merged_from_file` already has,
+# never a looser one. Sets `_GC_LANDED_WHY` (global -- bash has no other way
+# to hand a caller both a verdict and its reason) only when it returns 0;
+# callers that don't care about the message can ignore it.
+_gc_landed_with_sync() {
+  local repo="$1" b="$2" base="$3" pr_num_file="$4"
+  if branch_content_is_on_base "$repo" "$b" "$base"; then
+    _GC_LANDED_WHY="its content is already on $base"
+    return 0
+  fi
+  [ -n "$pr_num_file" ] || return 1
+  local sync_ref="refs/gc-pr-sync/$b" rc=1
+  if _gc_sync_pr_head "$repo" "$b" "$pr_num_file" \
+     && git -C "$repo" show-ref --verify --quiet "$sync_ref"; then
+    if branch_content_is_on_base "$repo" "$b" "$base" "$sync_ref"; then
+      _GC_LANDED_WHY="its content is already on $base once its PR's current head is synced in -- a fixup pushed directly to the PR after this branch's own local ref last updated (agent-estate#886)"
+      rc=0
+    fi
+  fi
+  # Best-effort cleanup either way -- the answer this call needed is already
+  # decided; leaving the scratch ref around only grows the ref namespace
+  # across repeated sweeps for no further benefit.
+  git -C "$repo" update-ref -d "$sync_ref" 2>/dev/null
+  return $rc
 }
 
 # agent-supervisor#427: `refs/stash` is REPO-COMMON, not per-worktree -- every
@@ -995,6 +1114,7 @@ reap)
 
   GH_MERGED_FILE=""
   OWN_MERGED_FILE=""
+  PR_NUM_FILE=""
   if [ -n "$USE_GH" ]; then
     if [ -n "$MERGED_FILE_ARG" ]; then
       # agent-estate#847: a pre-fetched snapshot `fetch-merged-prs` wrote for
@@ -1017,11 +1137,29 @@ reap)
         echo "worktree: reap proceeding without the GitHub merged-PR cross-check for $TARGET (no gh, no readable remote, or gh pr list failed) -- a squash-merged-then-superseded branch will not be reached this call (agent-supervisor#682)" >&2
       fi
     fi
+    # agent-estate#886: same batch-once-per-call posture as the MERGED-PR
+    # fetch above, its own file, its own failure mode -- a failed/unavailable
+    # fetch means "no sync point this call", never "landed". Only attempted
+    # once GH_MERGED_FILE is actually populated (a live snapshot, fetched
+    # just above or reused via --merged-file): both this and
+    # `_gc_fetch_merged_prs` open with the identical `gh repo view $slug`
+    # reachability probe, so an empty GH_MERGED_FILE already means that
+    # probe failed (or `gh`/the remote is unreachable) -- paying for a
+    # second, doomed-to-fail network round trip here would only double the
+    # chance of this call hanging on a slow/unreachable `gh` for a result
+    # this run has already decided.
+    if [ -n "$GH_MERGED_FILE" ]; then
+      PR_NUM_FILE=$(mktemp)
+      if ! _gc_fetch_pr_numbers "$TARGET" "$PR_NUM_FILE"; then
+        rm -f "$PR_NUM_FILE"
+        PR_NUM_FILE=""
+      fi
+    fi
   fi
-  trap '[ -n "$OWN_MERGED_FILE" ] && rm -f "$GH_MERGED_FILE"' EXIT
+  trap '[ -n "$OWN_MERGED_FILE" ] && rm -f "$GH_MERGED_FILE"; [ -n "$PR_NUM_FILE" ] && rm -f "$PR_NUM_FILE"' EXIT
 
-  if branch_content_is_on_base "$TARGET" "$BRANCH" "$BASE"; then
-    WHY="its content is already on $BASE"
+  if _gc_landed_with_sync "$TARGET" "$BRANCH" "$BASE" "$PR_NUM_FILE"; then
+    WHY="$_GC_LANDED_WHY"
   elif _gc_pr_merged_from_file "$GH_MERGED_FILE" "$BRANCH"; then
     WHY="its branch has a MERGED PR on GitHub even though $BASE has since diverged from its scoped diff (agent-supervisor#682)"
   else
@@ -1088,6 +1226,7 @@ gc)
   # `_gc_pr_merged_from_file` already treats that as "check unavailable",
   # never as "merged".
   GH_MERGED_FILE=""
+  PR_NUM_FILE=""
   if [ -n "$USE_GH" ]; then
     GH_MERGED_FILE=$(mktemp)
     if ! _gc_fetch_merged_prs "$REPO" "$GH_MERGED_FILE"; then
@@ -1095,8 +1234,24 @@ gc)
       GH_MERGED_FILE=""
       echo "worktree: gc proceeding without the GitHub merged-PR cross-check for $REPO (no gh, no readable remote, or gh pr list failed) -- squash-merged-then-superseded worktrees will not be reached this run (agent-supervisor#682)" >&2
     fi
+    # agent-estate#886: batched once per gc run, same shape as the MERGED-PR
+    # fetch immediately above -- see _gc_fetch_pr_numbers's own comment for
+    # why this is a second `gh pr list` call rather than folded into that
+    # file's format. Only attempted once GH_MERGED_FILE is actually
+    # populated -- see reap's identical guard, above, for why: both fetches
+    # open with the same `gh repo view $slug` reachability probe, so an
+    # empty GH_MERGED_FILE already means that probe failed, and paying for
+    # it a second time here would only double the chance of this run
+    # hanging on a slow/unreachable `gh` for a result already decided.
+    if [ -n "$GH_MERGED_FILE" ]; then
+      PR_NUM_FILE=$(mktemp)
+      if ! _gc_fetch_pr_numbers "$REPO" "$PR_NUM_FILE"; then
+        rm -f "$PR_NUM_FILE"
+        PR_NUM_FILE=""
+      fi
+    fi
   fi
-  trap '[ -n "$GH_MERGED_FILE" ] && rm -f "$GH_MERGED_FILE"' EXIT
+  trap '[ -n "$GH_MERGED_FILE" ] && rm -f "$GH_MERGED_FILE"; [ -n "$PR_NUM_FILE" ] && rm -f "$PR_NUM_FILE"' EXIT
   # The worktree gc is running from is nobody's garbage -- it is the caller's
   # own tree. `git worktree remove` refuses it anyway; refusing here says so
   # in gc's own words rather than as a git error.
@@ -1253,8 +1408,8 @@ gc)
       continue
     fi
     why=""
-    if branch_content_is_on_base "$REPO" "$b" "$BASE"; then
-      why="its content is already on $BASE"
+    if _gc_landed_with_sync "$REPO" "$b" "$BASE" "$PR_NUM_FILE"; then
+      why="$_GC_LANDED_WHY"
     elif _gc_pr_merged_from_file "$GH_MERGED_FILE" "$b"; then
       # agent-supervisor#682: content check said no (base has moved past
       # what the branch touched -- "merged, then superseded"), but a
