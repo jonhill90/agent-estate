@@ -408,7 +408,10 @@ you re-check it — don't trust it just because it's written down.*
 ## The TUI
 
 Arrival policy for the TUI half of this repo, everything under `src/tui/`
-(moved there from `tui/` by #865). **Verified against `main` `2e810dc`,
+(moved there from `tui/` by #865). `src/` is a deliberate one-member
+convention introduced for that move, not an incomplete migration — nothing
+else (e.g. `scripts/`) moves under it without its own decision, since that
+blast radius is real and unmeasured (#875). **Verified against `main` `2e810dc`,
 2026-08-29, before #865's move** — path references below reflect the
 post-move `src/tui/` location; re-check counts against the current tree
 before trusting them. Earlier verification stamps for this section (through
