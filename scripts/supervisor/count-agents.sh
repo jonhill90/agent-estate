@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # count-agents.sh -- print the number of Claude agent SESSIONS running on
-# this host, and nothing else. Nothing wires this in yet; it is the
-# instrument the estate tick's STEP 0 host guard should call instead of its
-# current `pgrep -f claude | wc -l`.
+# this host, and nothing else. This IS wired into the dispatch path:
+# count-work-in-flight.sh builds its lane-in-flight count on this script's
+# classification, host-pressure.sh's session gate calls
+# count-work-in-flight.sh, and dispatch-preflight.sh / dispatch-claude-print.sh /
+# dispatch-pi-rpc.sh each call host-pressure.sh (or its Python port,
+# host_pressure.py) before any dispatch proceeds.
 #
 # WHY THIS EXISTS (agent-supervisor#663): `pgrep -f claude` matches
 # on ANY substring of a process's full argv, not on what the process
