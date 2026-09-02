@@ -9,7 +9,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -18,6 +17,7 @@ import (
 
 	"github.com/jonhill90/agent-estate/estate/internal/corpus"
 	"github.com/jonhill90/agent-estate/estate/internal/gate"
+	"github.com/jonhill90/agent-estate/estate/internal/harness"
 	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 	"github.com/jonhill90/agent-estate/estate/internal/pressure"
@@ -28,7 +28,8 @@ func usage() {
 	fmt.Fprint(os.Stderr, `estate -- the supervisor
 
   estate pressure                       report whether the host can take work
-  estate dispatch <issue> <brief-file>  run one agent turn, gated and recorded
+  estate dispatch [--harness=NAME] <issue> <brief-file>
+                                        run one agent turn, gated and recorded
   estate merge <repo> <pr> <issue> <reviewer-lane>
                                         may this PR merge? checks + independence
   estate corpus-audit [n]               hard parameters least supported by your words
@@ -206,7 +207,20 @@ func main() {
 			usage()
 			os.Exit(2)
 		}
-		issue, briefPath := os.Args[2], os.Args[3]
+		rest := os.Args[2:]
+		harnessName := os.Getenv("ESTATE_HARNESS")
+		if harnessName == "" {
+			harnessName = "claude"
+		}
+		if strings.HasPrefix(rest[0], "--harness=") {
+			harnessName = strings.TrimPrefix(rest[0], "--harness=")
+			rest = rest[1:]
+		}
+		if len(rest) < 2 {
+			usage()
+			os.Exit(2)
+		}
+		issue, briefPath := rest[0], rest[1]
 		brief, err := os.ReadFile(briefPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot read brief:", err)
@@ -229,6 +243,19 @@ func main() {
 			}
 			os.Exit(1)
 		}
+		// Which harness runs this turn. Refused rather than defaulted when
+		// unknown: silently falling back would run the turn somewhere the
+		// caller did not choose.
+		h, err := harness.Lookup(harnessName)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch --", err)
+			os.Exit(1)
+		}
+		if ok, _ := harness.Available(harnessName); !ok {
+			fmt.Fprintf(os.Stderr, "estate: refusing to dispatch -- harness %q is registered but its binary is not on PATH\n", harnessName)
+			os.Exit(1)
+		}
+
 		id := fmt.Sprintf("%s-%d", strings.TrimPrefix(issue, "#"), time.Now().UTC().Unix())
 
 		// The turn runs with --dangerously-skip-permissions. Give it a working
@@ -255,11 +282,13 @@ func main() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "claude", "-p", "--output-format", "json",
-			"--dangerously-skip-permissions")
-		cmd.Dir = wt.Path
-		cmd.Stdin = strings.NewReader(grounded)
-		out, runErr := cmd.Output()
+		turn, err := h.Start(ctx, wt.Path, grounded)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		defer turn.Cleanup()
+		out, runErr := turn.Cmd.Output()
 
 		rec := ledger.Record{ID: id, Issue: issue, Lane: id}
 		switch {
@@ -270,16 +299,15 @@ func main() {
 		case runErr != nil:
 			rec.State, rec.Note = ledger.Failed, runErr.Error()
 		default:
-			rec.State = ledger.Complete
-			var parsed map[string]any
-			if json.Unmarshal(out, &parsed) == nil {
-				if s, ok := parsed["result"].(string); ok {
-					rec.Result = s
-				}
+			// Reading the result is the harness's job -- each one emits its
+			// own shape. Exit 0 with output we cannot read is NOT a clean
+			// completion, and is recorded as unknown rather than failed:
+			// the turn may well have done its work.
+			res, resErr := turn.Result(out)
+			if resErr != nil {
+				rec.State, rec.Note = ledger.Unknown, resErr.Error()
 			} else {
-				// Exited 0 but we could not parse what it said. That is not a
-				// clean completion; record it honestly.
-				rec.State, rec.Note = ledger.Unknown, "exit 0 but result was not parseable JSON"
+				rec.State, rec.Result = ledger.Complete, res
 			}
 		}
 		// Tear the worktree down only when it is empty. A turn that left work

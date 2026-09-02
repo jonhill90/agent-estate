@@ -3,3 +3,7 @@
 {"at":"2026-09-02T23:19:52Z","phase_item":"phase-0","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"docs/director-loop.md"}
 {"at":"2026-09-02T23:28:11Z","phase_item":"phase-1","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"src/estate/internal/isolate (PR pending)"}
 {"at":"2026-09-02T23:34:37Z","phase_item":"phase-2","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"src/tui Home shows the live estate (frame captured)"}
+{"at":"2026-09-02T23:37:35Z","phase_item":"phase-1","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"real dispatch verified isolated end-to-end (~/.local/state/estate/ledger.jsonl)"}
+{"at":"2026-09-02T23:45:02Z","phase_item":"phase-1","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"gitignored-output data-loss hole fixed (independent review)"}
+{"at":"2026-09-02T23:48:16Z","phase_item":"phase-0","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"stop condition strengthened: only an artifact clears a stall"}
+{"at":"2026-09-02T23:56:01Z","phase_item":"phase-3","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"same brief ran through claude and codex; both recorded complete"}
