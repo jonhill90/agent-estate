@@ -15,8 +15,10 @@ import (
 	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
+	"github.com/jonhill90/agent-estate/estate/internal/quota"
 )
 
 type Limits struct {
@@ -30,9 +32,10 @@ func Default() Limits {
 }
 
 type Reading struct {
-	LoadPerCore float64
-	FreeMemMB   float64
-	InFlight    int
+	LoadPerCore     float64
+	FreeMemMB       float64
+	InFlight        int
+	WeeklyRemaining float64
 }
 
 type Verdict struct {
@@ -132,6 +135,19 @@ func Check(l *ledger.Ledger, lim Limits) Verdict {
 		if mb < lim.MinFreeMemMB {
 			v.OK = false
 			v.Reasons = append(v.Reasons, fmt.Sprintf("free memory %.0fMB below floor %.0fMB", mb, lim.MinFreeMemMB))
+		}
+	}
+
+	// Budget is a limit like any other, and the one whose blindness actually
+	// cost a week. A reading that cannot be taken refuses.
+	if r, err := quota.Read(time.Now()); err != nil {
+		v.OK = false
+		v.Reasons = append(v.Reasons, "could not measure token budget: "+err.Error())
+	} else {
+		v.Reading.WeeklyRemaining = r.WeeklyRemaining()
+		if ok, why := quota.Allow(r); !ok {
+			v.OK = false
+			v.Reasons = append(v.Reasons, why)
 		}
 	}
 

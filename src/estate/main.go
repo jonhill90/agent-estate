@@ -51,8 +51,8 @@ func main() {
 	switch os.Args[1] {
 	case "pressure":
 		v := pressure.Check(l, pressure.Default())
-		fmt.Printf("load %.2f/core  free %.0fMB  inflight %d\n",
-			v.Reading.LoadPerCore, v.Reading.FreeMemMB, v.Reading.InFlight)
+		fmt.Printf("load %.2f/core  free %.0fMB  inflight %d  weekly budget %.0f%% left\n",
+			v.Reading.LoadPerCore, v.Reading.FreeMemMB, v.Reading.InFlight, v.Reading.WeeklyRemaining)
 		if !v.OK {
 			for _, r := range v.Reasons {
 				fmt.Fprintln(os.Stderr, "refuse: "+r)
