@@ -59,7 +59,7 @@ func Audit() ([]Finding, error) {
 	             replace(replace(p.text_raw,char(10),' '),char(13),' ')
 	      from items i join prompts p on p.id = i.prompt_id
 	      where i.kind='parameter' and i.weight='hard'`
-	out, err := exec.Command("sqlite3", "-separator", sep, "file:"+p+"?mode=ro", q).Output()
+	out, err := exec.Command("sqlite3", "-separator", sep, "file:"+p+"?mode=ro&immutable=1", q).Output()
 	if err != nil {
 		return nil, fmt.Errorf("provenance query failed: %w", err)
 	}

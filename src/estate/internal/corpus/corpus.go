@@ -53,7 +53,7 @@ func Hard() ([]Param, error) {
 	}
 	q := `select coalesce(resolved_to,''), replace(replace(body, char(10), ' '), char(13), ' ')
 	      from live_parameters where weight='hard'`
-	cmd := exec.Command("sqlite3", "-separator", sep, "file:"+p+"?mode=ro", q)
+	cmd := exec.Command("sqlite3", "-separator", sep, "file:"+p+"?mode=ro&immutable=1", q)
 	out, err := cmd.Output()
 	if err != nil {
 		return nil, fmt.Errorf("corpus query failed: %w", err)

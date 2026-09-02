@@ -65,3 +65,21 @@ func TestMissingLedgerIsEmptyNotAnError(t *testing.T) {
 		t.Fatalf("Current() on absent ledger = %v, %v; want nil, nil", got, err)
 	}
 }
+
+// A missing ledger in a directory that does not exist is a wrong path, and
+// reporting "zero in flight" from it tells the cap the host is free while
+// agents run. A missing ledger in a real directory is a first run.
+func TestMissingLedgerInMissingDirectoryRefuses(t *testing.T) {
+	l := &Ledger{path: filepath.Join(t.TempDir(), "no-such-dir", "l.jsonl"), explicit: true}
+	if _, err := l.Current(); err == nil {
+		t.Fatal("Current() reported zero tasks from a path whose directory does not exist -- fail open")
+	}
+}
+
+func TestMissingLedgerInRealDirectoryIsAFirstRun(t *testing.T) {
+	l := &Ledger{path: filepath.Join(t.TempDir(), "l.jsonl"), explicit: true}
+	got, err := l.Current()
+	if err != nil || got != nil {
+		t.Fatalf("first run should be empty and fine, got %v / %v", got, err)
+	}
+}

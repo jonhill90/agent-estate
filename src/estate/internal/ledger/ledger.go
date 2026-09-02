@@ -95,8 +95,15 @@ func (l *Ledger) Append(r Record) error {
 func (l *Ledger) Current() ([]Record, error) {
 	f, err := os.Open(l.path)
 	if errors.Is(err, os.ErrNotExist) {
-		if l.explicit {
-			return nil, fmt.Errorf("ledger: configured path %s does not exist -- refusing to report zero tasks in flight", l.path)
+		// A missing file is ambiguous: a first run, or a typo/wiped state dir
+		// that would report zero lanes in flight while agents are running.
+		// The directory settles it mechanically -- if the parent exists, this
+		// is a ledger not yet written; if it does not, the path is wrong and
+		// reporting "no work in flight" would be fail-open.
+		if dir := filepath.Dir(l.path); dir != "" {
+			if _, statErr := os.Stat(dir); statErr != nil {
+				return nil, fmt.Errorf("ledger: directory for %s does not exist -- refusing to report zero tasks in flight from a path that cannot be right", l.path)
+			}
 		}
 		return nil, nil
 	}
