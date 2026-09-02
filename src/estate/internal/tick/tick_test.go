@@ -42,25 +42,24 @@ func TestCheckStalledOnThreeIdenticalEmptyTicks(t *testing.T) {
 	}
 }
 
-// The other direction. Each mutation below breaks exactly one of the three
-// conditions, and each must clear the stall -- otherwise the check is not
-// measuring what it claims and would fire on a healthy loop.
-func TestCheckClearsWhenAnySingleConditionBreaks(t *testing.T) {
-	cases := map[string]string{
-		"artifact present on the newest tick": `{"at":"2026-09-02T10:06:00Z","phase_item":"phase-0","src_head":"aaa","artifact":"docs/thing.md"}`,
-		"src_head moved on the newest tick":   `{"at":"2026-09-02T10:06:00Z","phase_item":"phase-0","src_head":"bbb","artifact":null}`,
-		"phase_item changed on newest tick":   `{"at":"2026-09-02T10:06:00Z","phase_item":"phase-1","src_head":"aaa","artifact":null}`,
+// The other direction: an artifact -- and ONLY an artifact -- clears a stall.
+//
+// This test previously also asserted that a changed src_head or a changed
+// phase_item cleared it, matching the brief's literal wording. An independent
+// review showed both of those are escape hatches for exactly the loop the
+// stop condition exists to catch, so those two cases now live in
+// TestStalledLoopThatAlternatesPhaseItemsIsStillCaught and
+// TestUnrelatedSrcCommitDoesNotClearAStall, asserting the OPPOSITE. Recorded
+// here rather than quietly deleted: the guard was strengthened, and the test
+// that encoded its weakness had to change with it.
+func TestOnlyAnArtifactClearsAStall(t *testing.T) {
+	v, err := Check(write(t, stalledA, stalledB,
+		`{"at":"2026-09-02T10:06:00Z","phase_item":"phase-0","src_head":"aaa","artifact":"docs/thing.md"}`))
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
 	}
-	for name, third := range cases {
-		t.Run(name, func(t *testing.T) {
-			v, err := Check(write(t, stalledA, stalledB, third))
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
-			}
-			if v.Stalled {
-				t.Fatalf("must not report stalled when %s: %s", name, v.Reason)
-			}
-		})
+	if v.Stalled {
+		t.Fatalf("an artifact on the newest tick must clear the stall: %s", v.Reason)
 	}
 }
 
@@ -168,5 +167,59 @@ func TestRecordThenCheckRoundTrips(t *testing.T) {
 	}
 	if !v.Stalled {
 		t.Fatal("three artifact-less Records must be readable by Check as a stall")
+	}
+}
+
+// Both of these come from an independent review of the commit that added
+// this package. Each is a loop that is, by the brief's own definition,
+// "running and producing nothing" -- and each escaped the original rule.
+
+// A loop that bounces between phase items forever, producing nothing, never
+// has three consecutive entries sharing phase_item. Under the original rule
+// it was never caught.
+func TestStalledLoopThatAlternatesPhaseItemsIsStillCaught(t *testing.T) {
+	v, err := Check(write(t,
+		`{"at":"2026-09-02T10:00:00Z","phase_item":"phase-0","src_head":"aaa","artifact":null}`,
+		`{"at":"2026-09-02T10:03:00Z","phase_item":"phase-1","src_head":"aaa","artifact":null}`,
+		`{"at":"2026-09-02T10:06:00Z","phase_item":"phase-0","src_head":"aaa","artifact":null}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !v.Stalled {
+		t.Fatalf("a loop alternating phase items and producing nothing is stalled: %s", v.Reason)
+	}
+}
+
+// An unrelated commit anywhere under src/ moved src_head between ticks. That
+// says nothing about whether THIS phase item advanced, and under the original
+// rule it cleared the stall.
+func TestUnrelatedSrcCommitDoesNotClearAStall(t *testing.T) {
+	v, err := Check(write(t,
+		`{"at":"2026-09-02T10:00:00Z","phase_item":"phase-2","src_head":"aaa","artifact":null}`,
+		`{"at":"2026-09-02T10:03:00Z","phase_item":"phase-2","src_head":"aaa","artifact":null}`,
+		`{"at":"2026-09-02T10:06:00Z","phase_item":"phase-2","src_head":"bbb","artifact":null}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !v.Stalled {
+		t.Fatalf("src head moving is not evidence this phase item advanced: %s", v.Reason)
+	}
+}
+
+// The other direction still has to hold: a tick that produced something real
+// clears the stall, whatever the phase item and src head say.
+func TestOneRealArtifactInTheWindowStillClears(t *testing.T) {
+	v, err := Check(write(t,
+		`{"at":"2026-09-02T10:00:00Z","phase_item":"phase-0","src_head":"aaa","artifact":null}`,
+		`{"at":"2026-09-02T10:03:00Z","phase_item":"phase-0","src_head":"aaa","artifact":"docs/real.md"}`,
+		`{"at":"2026-09-02T10:06:00Z","phase_item":"phase-0","src_head":"aaa","artifact":null}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Stalled {
+		t.Fatalf("a real artifact in the window means the loop is producing: %s", v.Reason)
 	}
 }

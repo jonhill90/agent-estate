@@ -29,6 +29,36 @@ Director tick.
    which of src/tui or src/estate moved.
 ```
 
+**The prompt must not restate the stop condition.** An earlier version ended
+with "if the last three entries share phase_item and src_head with artifact
+null, stop and escalate." That is the rule `estate tick check` owns, and a
+prompt carrying its own copy is how the two drift — the copy was already
+wrong within a day, describing a rule an independent review had shown does
+not catch the loop it exists to catch. The prompt calls the command and
+believes its exit code. Nothing else.
+
+## What the stop condition actually is
+
+Three consecutive ticks that produced no artifact. **Only an artifact clears
+it.**
+
+This departs from brief §3's literal wording ("the same `phase_item` and the
+same `src_head` with `artifact: null`") deliberately, because that wording
+does not catch what §3 says it is for. Both of its equality tests were escape
+hatches:
+
+- a loop bouncing `phase-0, phase-1, phase-0` forever, producing nothing,
+  never has three consecutive entries sharing `phase_item`;
+- `src_head` is `git log -1 -- src/`, the whole tree, so an unrelated commit
+  anywhere under `src/` cleared the stall for a phase item that had not
+  moved.
+
+Both are the same mistake: treating a signal that merely *changed* as evidence
+that *this* work advanced. `phase_item` and `src_head` are still recorded and
+still named in the reason — they say what was stuck and where — but they no
+longer excuse a stall. The rule is strictly stronger: every log the old form
+flagged, this one flags.
+
 ## Why step 1 is step 1
 
 `estate tick check` is a gate that fails closed, and until this file it had no

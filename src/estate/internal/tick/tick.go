@@ -161,23 +161,55 @@ func Check(path string) (Verdict, error) {
 		}, nil
 	}
 
+	// THE RULE: three consecutive ticks that produced nothing a human can
+	// look at. Nothing else clears it.
+	//
+	// The brief's section 3 words this as "the same phase_item and the same
+	// src_head with artifact: null", and this deliberately departs from that
+	// literal wording, because an independent review demonstrated the literal
+	// form does not catch what section 3 says it is for -- "a loop that is
+	// running and producing nothing":
+	//
+	//   - A loop bouncing phase-0, phase-1, phase-0 forever, producing
+	//     nothing, never has three consecutive entries sharing phase_item, so
+	//     the equality test cleared it every time.
+	//   - src_head is read as `git log -1 -- src/`, the whole tree. An
+	//     unrelated commit anywhere under src/ moved it and cleared the stall
+	//     for a phase item that had not advanced at all.
+	//
+	// Both are the SAME mistake: treating a signal that merely CHANGED as
+	// evidence that THIS work advanced. Only the artifact is that evidence,
+	// so only the artifact clears the stall. phase_item and src_head are kept
+	// in the record and named in the reason -- they say what was stuck and
+	// where -- but they no longer excuse a stall.
+	//
+	// This is strictly stronger: every log the old rule flagged, this flags.
 	last := entries[len(entries)-Window:]
-	first := last[0]
 	for _, e := range last {
 		if e.hasArtifact() {
-			return Verdict{Considered: Window, Reason: "the last " + fmt.Sprint(Window) + " ticks include one that produced an artifact"}, nil
+			return Verdict{
+				Considered: Window,
+				Reason:     fmt.Sprintf("the last %d ticks include one that produced an artifact", Window),
+			}, nil
 		}
-		if e.PhaseItem != first.PhaseItem {
-			return Verdict{Considered: Window, Reason: "the phase item changed within the last " + fmt.Sprint(Window) + " ticks"}, nil
-		}
-		if e.SrcHead != first.SrcHead {
-			return Verdict{Considered: Window, Reason: "src head moved within the last " + fmt.Sprint(Window) + " ticks"}, nil
-		}
+	}
+
+	items, heads := map[string]bool{}, map[string]bool{}
+	for _, e := range last {
+		items[e.PhaseItem] = true
+		heads[e.SrcHead] = true
+	}
+	where := fmt.Sprintf("phase item %q", last[0].PhaseItem)
+	if len(items) > 1 {
+		where = fmt.Sprintf("%d different phase items", len(items))
+	}
+	at := "src head " + last[0].SrcHead
+	if len(heads) > 1 {
+		at = "src head moving, which is not evidence this work advanced"
 	}
 	return Verdict{
 		Stalled:    true,
 		Considered: Window,
-		Reason: fmt.Sprintf("the last %d ticks all sat on phase item %q at src head %s and produced no artifact",
-			Window, first.PhaseItem, first.SrcHead),
+		Reason:     fmt.Sprintf("the last %d ticks produced no artifact (%s, %s)", Window, where, at),
 	}, nil
 }
