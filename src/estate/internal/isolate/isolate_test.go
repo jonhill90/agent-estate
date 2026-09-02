@@ -236,3 +236,49 @@ func TestRemoveRefusesToDiscardUncommittedWork(t *testing.T) {
 		t.Errorf("Dirty() = %v, %v; want true, nil", dirty, err)
 	}
 }
+
+// Regression: an independent review found that Remove()'s "never delete
+// uncollected work" guarantee did not see GITIGNORED output. `git status
+// --porcelain` omits ignored paths by default, so a turn whose only output
+// was e.g. a *.log or a build artifact reported clean and was deleted.
+//
+// The guarantee is about a HUMAN'S ability to recover a turn's output, and a
+// file's gitignore status has nothing to do with whether it was worth
+// keeping.
+func TestRemoveRefusesWhenTheOnlyOutputIsGitignored(t *testing.T) {
+	root := repo(t)
+	w, err := Create(root, "ignored-output")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Path, ".gitignore"), []byte("*.secret\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// Commit the .gitignore so the worktree is otherwise clean; the ONLY
+	// uncommitted thing left is the ignored file.
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "ignore rules"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = w.Path
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	out := filepath.Join(w.Path, "agent-output.secret")
+	if err := os.WriteFile(out, []byte("work nobody collected"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirty, err := w.Dirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirty {
+		t.Error("Dirty() must see gitignored output; a turn's result is not less real for being ignored")
+	}
+	if err := w.Remove(); err == nil {
+		t.Fatal("Remove must refuse: the worktree holds output nothing has collected")
+	}
+	if _, err := os.Stat(out); err != nil {
+		t.Fatalf("Remove destroyed gitignored output: %v", err)
+	}
+}

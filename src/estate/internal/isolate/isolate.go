@@ -136,8 +136,20 @@ func Create(repoRoot, id string) (*Worktree, error) {
 
 // Dirty reports whether the worktree holds uncommitted changes -- output a
 // dispatch produced that nothing has collected yet.
+//
+// --ignored is load-bearing, not defensive. Without it `git status
+// --porcelain` omits gitignored paths, so a turn whose only output was a
+// *.log, a build artifact, or anything else the repo ignores reported CLEAN
+// and Remove deleted it. An independent review found this; the guarantee is
+// about whether a human can still recover the turn's output, and a file's
+// gitignore status says nothing about whether it was worth keeping.
+//
+// The cost is real and chosen deliberately: a worktree containing only
+// incidental ignored junk (a .DS_Store, a stray build directory) now refuses
+// teardown and leaks until something collects it. That direction is
+// recoverable and visible. The other direction destroys work and is not.
 func (w *Worktree) Dirty() (bool, error) {
-	out, err := git(w.Path, "status", "--porcelain")
+	out, err := git(w.Path, "status", "--porcelain", "--ignored")
 	if err != nil {
 		return false, err
 	}
