@@ -5,6 +5,9 @@
 // parameters is exactly how a month went into a layer the corpus had already
 // ruled out.
 //
+// The corpus lives at ~/corpus, not under ~/.local/state: it is 5,402 prompts
+// and 958 binding parameters -- knowledge, not scratch space the harness reuses.
+//
 // Reading is done through the sqlite3 CLI rather than a driver so this stays
 // dependency-free. Note the URI form: the bare -readonly flag has been
 // observed failing with "unable to open database file (14)" under WAL
@@ -33,7 +36,7 @@ func dbPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".local", "state", "agent-dotfiles-supervisor", "ledger.sqlite3"), nil
+	return filepath.Join(home, "corpus", "ledger.sqlite3"), nil
 }
 
 const sep = "\x1f"

@@ -59,3 +59,30 @@ func TestBelowCapAllows(t *testing.T) {
 		t.Fatalf("Check() refused below the cap: %v", v.Reasons)
 	}
 }
+
+// The memory floor was never exercised: every test that called Check zeroed
+// MinFreeMemMB, so a gate reading SWAP instead of RAM shipped green and
+// refused 100% of dispatches on an 18 GB machine.
+func TestMemoryFloorIsMeasuredAgainstRealRAM(t *testing.T) {
+	mb, err := freeMemMB()
+	if err != nil {
+		t.Fatalf("freeMemMB: %v", err)
+	}
+	if mb <= 0 {
+		t.Fatalf("freeMemMB reported %.0fMB -- a machine running this test has memory; the instrument is wrong", mb)
+	}
+}
+
+func TestBelowMemoryFloorRefuses(t *testing.T) {
+	l, err := ledger.Open(filepath.Join(t.TempDir(), "l.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lim := Default()
+	lim.MaxLoadPerCore = 1e9
+	lim.MaxInFlight = 1e9
+	lim.MinFreeMemMB = 1e12 // no machine has a petabyte free
+	if v := Check(l, lim); v.OK {
+		t.Fatal("Check allowed dispatch below an unreachable memory floor")
+	}
+}

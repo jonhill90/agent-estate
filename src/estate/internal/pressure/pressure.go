@@ -11,6 +11,7 @@ package pressure
 import (
 	"fmt"
 	"os/exec"
+	"regexp"
 	"runtime"
 	"strconv"
 	"strings"
@@ -60,22 +61,51 @@ func loadPerCore() (float64, error) {
 	return l / float64(n), nil
 }
 
+// freeMemMB reports genuinely available RAM.
+//
+// This read `sysctl -n vm.swapusage` until 2026-09-02 -- SWAP, not memory. On
+// a Mac with swap disabled that is 0.00M forever, so the floor was breached on
+// every call and `estate dispatch` refused 100% of dispatches on an 18 GB
+// machine while reporting "free memory 0MB", which reads as host pressure
+// rather than a broken instrument. On a host WITH a large swap file the same
+// bug reports gigabytes free while RAM is exhausted -- fail-open, in the guard
+// whose whole purpose is preventing a meltdown.
+//
+// Available memory is free + inactive + speculative pages: inactive pages are
+// reclaimable on demand, so counting only "free" would under-report badly and
+// reintroduce a permanent refusal by a different route.
 func freeMemMB() (float64, error) {
-	out, err := exec.Command("sysctl", "-n", "vm.swapusage").Output()
+	out, err := exec.Command("vm_stat").Output()
 	if err != nil {
-		return 0, fmt.Errorf("read swapusage: %w", err)
+		return 0, fmt.Errorf("read vm_stat: %w", err)
 	}
-	// "total = 5120.00M  used = 3925.88M  free = 1194.12M  (encrypted)"
-	for _, part := range strings.Split(string(out), "free =") {
-		if !strings.Contains(part, "M") {
-			continue
-		}
-		v := strings.TrimSpace(strings.SplitN(strings.TrimSpace(part), "M", 2)[0])
-		if f, err := strconv.ParseFloat(v, 64); err == nil {
-			return f, nil
+	pageSize := 4096.0
+	if m := regexp.MustCompile(`page size of (\d+) bytes`).FindSubmatch(out); m != nil {
+		if v, err := strconv.ParseFloat(string(m[1]), 64); err == nil && v > 0 {
+			pageSize = v
 		}
 	}
-	return 0, fmt.Errorf("parse swapusage: no free field in %q", string(out))
+	pages := func(label string) (float64, error) {
+		re := regexp.MustCompile(`(?m)^` + regexp.QuoteMeta(label) + `:\s+(\d+)\.`)
+		m := re.FindSubmatch(out)
+		if m == nil {
+			return 0, fmt.Errorf("vm_stat has no %q line", label)
+		}
+		return strconv.ParseFloat(string(m[1]), 64)
+	}
+	free, err := pages("Pages free")
+	if err != nil {
+		return 0, err
+	}
+	inactive, err := pages("Pages inactive")
+	if err != nil {
+		return 0, err
+	}
+	spec, err := pages("Pages speculative")
+	if err != nil {
+		spec = 0 // absent on some versions; not fatal, the other two carry it
+	}
+	return (free + inactive + spec) * pageSize / (1024 * 1024), nil
 }
 
 // Check reports whether more work may be dispatched. Any measurement failure

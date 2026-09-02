@@ -16,7 +16,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 $CLAUDE_PROJECT_DIR/scripts/supervisor/prompt_capture_hook.py 2>>\"${AGENT_SUPERVISOR_STATE_DIR:-$HOME/.local/state/agent-dotfiles-supervisor}/prompt-capture-hook-failures.log\" || exit 0"
+            "command": "python3 $CLAUDE_PROJECT_DIR/reference/scripts/supervisor/prompt_capture_hook.py 2>>\"${AGENT_SUPERVISOR_STATE_DIR:-$HOME/.local/state/agent-dotfiles-supervisor}/prompt-capture-hook-failures.log\" || exit 0"
           }
         ]
       }

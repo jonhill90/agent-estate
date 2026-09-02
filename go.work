@@ -1,0 +1,13 @@
+go 1.25.0
+
+// One workspace so tooling resolves from the repo root. Without this,
+// `go run ./src/langguard` from the root fails with "cannot find main module"
+// -- which is why langguard failed 7 of 7 CI runs and never inspected a file.
+use (
+	./src/estate
+	./src/issuemine
+	./src/langguard
+	./src/notify
+	./src/progress
+	./src/tui
+)

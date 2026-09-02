@@ -2,6 +2,7 @@ package gate
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
@@ -53,8 +54,31 @@ func TestUnknownAuthorRefuses(t *testing.T) {
 
 func TestSelfReviewRefuses(t *testing.T) {
 	l := newLedger(t, ledger.Record{ID: "x", Issue: "42", Lane: "lane-a", State: ledger.Complete})
-	if bad := independent(l, "42", "lane-a"); len(bad) == 0 {
+	bad := independent(l, "42", "lane-a")
+	if len(bad) == 0 {
 		t.Fatal("independent() allowed a lane to review its own work")
+	}
+	// Assert WHICH refusal. The original test only checked that some refusal
+	// came back, so it passed via the unknown-author branch while the
+	// self-review branch was unreachable dead code.
+	if !strings.Contains(bad[0], "self-review") {
+		t.Fatalf("refused for the wrong reason: %q -- the self-review branch was not reached", bad[0])
+	}
+}
+
+// The regression that the original suite could not see: two lanes on one
+// issue, and one of them reviews its own work.
+func TestSelfReviewRefusedWhenAnotherLaneAlsoWorkedTheIssue(t *testing.T) {
+	l := newLedger(t,
+		ledger.Record{ID: "x", Issue: "42", Lane: "lane-a", State: ledger.Complete},
+		ledger.Record{ID: "y", Issue: "42", Lane: "lane-b", State: ledger.Complete},
+	)
+	bad := independent(l, "42", "lane-a")
+	if len(bad) == 0 {
+		t.Fatal("lane-a approved its own PR because lane-b also worked the issue -- fail open")
+	}
+	if !strings.Contains(bad[0], "self-review") {
+		t.Fatalf("refused for the wrong reason: %q", bad[0])
 	}
 }
 

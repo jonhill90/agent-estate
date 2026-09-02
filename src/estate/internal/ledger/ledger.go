@@ -44,9 +44,18 @@ type Record struct {
 	Result string    `json:"result,omitempty"`
 }
 
-type Ledger struct{ path string }
+type Ledger struct {
+	path string
+	// explicit records that a caller named this path. A missing file at a
+	// DEFAULT path is a first run and legitimately empty; a missing file at a
+	// path someone configured is a typo or a wiped state dir, and reporting it
+	// as "zero lanes in flight" tells the cap the host is free while agents
+	// are running. That direction is fail-open, so it errors instead.
+	explicit bool
+}
 
 func Open(path string) (*Ledger, error) {
+	explicit := path != ""
 	if path == "" {
 		home, err := os.UserHomeDir()
 		if err != nil {
@@ -57,7 +66,7 @@ func Open(path string) (*Ledger, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return nil, err
 	}
-	return &Ledger{path: path}, nil
+	return &Ledger{path: path, explicit: explicit}, nil
 }
 
 func (l *Ledger) Append(r Record) error {
@@ -86,6 +95,9 @@ func (l *Ledger) Append(r Record) error {
 func (l *Ledger) Current() ([]Record, error) {
 	f, err := os.Open(l.path)
 	if errors.Is(err, os.ErrNotExist) {
+		if l.explicit {
+			return nil, fmt.Errorf("ledger: configured path %s does not exist -- refusing to report zero tasks in flight", l.path)
+		}
 		return nil, nil
 	}
 	if err != nil {

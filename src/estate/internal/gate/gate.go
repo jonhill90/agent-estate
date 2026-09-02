@@ -75,6 +75,16 @@ func checksGreen(p *PR) []string {
 
 // independent reports whether the reviewing lane differs from the authoring
 // lane. Either being unknown is a refusal, not a pass.
+// independent reports whether the reviewing lane differs from every lane that
+// authored work on the issue.
+//
+// The first version filtered the reviewer OUT of the author candidates
+// (`r.Lane != reviewerLane`) before asking whether the author WAS the
+// reviewer, so the self-review branch was unreachable dead code and a lane
+// that had worked an issue alongside another lane could approve its own PR --
+// the exact failure this package exists to prevent. The test passed because it
+// only ever hit the unknown-author branch and asserted that SOME refusal came
+// back, not which one.
 func independent(l *ledger.Ledger, issue, reviewerLane string) []string {
 	if strings.TrimSpace(reviewerLane) == "" {
 		return []string{"reviewer lane not supplied -- cannot establish independence"}
@@ -83,17 +93,17 @@ func independent(l *ledger.Ledger, issue, reviewerLane string) []string {
 	if err != nil {
 		return []string{"cannot read ledger: " + err.Error()}
 	}
-	var author string
+	authors := map[string]bool{}
 	for _, r := range cur {
-		if r.Issue == issue && r.Lane != "" && r.Lane != reviewerLane {
-			author = r.Lane
+		if r.Issue == issue && r.Lane != "" {
+			authors[r.Lane] = true
 		}
 	}
-	if author == "" {
+	if len(authors) == 0 {
 		return []string{"no authoring lane on record for issue " + issue + " -- authorship unknown, refusing"}
 	}
-	if author == reviewerLane {
-		return []string{"reviewer lane " + reviewerLane + " is also the author -- self-review"}
+	if authors[reviewerLane] {
+		return []string{"reviewer lane " + reviewerLane + " also authored work on issue " + issue + " -- self-review"}
 	}
 	return nil
 }
