@@ -6,7 +6,6 @@ go 1.25.0
 use (
 	./src/estate
 	./src/issuemine
-	./src/langguard
 	./src/notify
 	./src/progress
 	./src/tui

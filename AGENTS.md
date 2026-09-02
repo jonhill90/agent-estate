@@ -693,9 +693,11 @@ read how a rule was once encoded. It is **reference material, not a codebase**:
 nothing there is maintained, run, tested, or fixed. Recovering a rule from it
 means reimplementing that rule in Go, not calling the script.
 
-`src/langguard` enforces this and runs in CI. It fails the build on any tracked
-`.sh` or `.py` outside `reference/`, `.github/` and `.claude/`. It exits 2 when
-it cannot list files, because "could not measure" must not read as clean.
+This is guidance, not a gate. A CI blocker on new shell or Python was tried and
+removed on 2026-09-02: it was an over-extreme reading of the operator's intent,
+and a hard block can wedge an agent that legitimately needs a script for
+tooling, a sandbox, or an experiment. The intent is narrow and stands — the
+APP is not built out of shell and Python. Scripts elsewhere are unremarked.
 
 **Why this is a guard and not a paragraph.** The directive that the supervisor
 is Go was recorded on 2026-08-22. Its named target was later archived, the rule
