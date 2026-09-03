@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/corpus"
+	"github.com/jonhill90/agent-estate/estate/internal/dispatchid"
 	"github.com/jonhill90/agent-estate/estate/internal/gate"
 	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
@@ -362,7 +363,11 @@ func main() {
 			}
 			os.Exit(1)
 		}
-		id := fmt.Sprintf("%s-%d", strings.TrimPrefix(issue, "#"), time.Now().UTC().Unix())
+		// Nanosecond precision plus a sequence: second precision made two
+		// turns dispatched in the same second share an id, and internal/
+		// isolate then refused the second one. A council is inherently
+		// parallel, so the identity scheme must allow it.
+		id := dispatchid.New(issue, time.Now())
 
 		// The turn runs with --dangerously-skip-permissions. Give it a
 		// working tree of its own before it starts, or do not start it:
