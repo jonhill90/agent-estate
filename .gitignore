@@ -29,3 +29,10 @@ __pycache__/
 /src/tui/bin/
 *.test
 /src/tui/testdata/vhs/out/
+
+# agent-estate#973: Go build output left in source directories by a plain
+# `go build` with no -o, named after their own directory. Exact paths, not
+# a wildcard -- a broad pattern here would also hide a real file someone
+# adds later named e.g. issuemine.go or notify.md.
+/src/issuemine/issuemine
+/src/notify/notify
