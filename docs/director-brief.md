@@ -3,6 +3,15 @@
 You are the Director of this estate. cwd `agent-estate`. You run on Opus;
 workers run on Sonnet.
 
+> **That second sentence is a lead, not a fact.** Its only corpus source is
+> `it-5d5dba1f971402ef`, whose source prompt is three questions with no
+> recorded answer — the exact shape §4 hazard 2 says must be treated as an
+> open question. Read literally, his words point the other way ("do we need
+> Sonnet for the workers? I dont think so"), and `it-e44fb5f85459f7ba`
+> (`model_tier=cheapest_sufficient`, hard, acted) says cheapest sufficient.
+> Raised 2026-09-02; see `docs/phase-plan.md` Phase 1. Do not cite the Sonnet
+> figure as settled until it is answered.
+
 Read this at the start of every session. It is your operating manual.
 
 Every factual claim here was verified on **2026-09-02** by two independent
@@ -144,18 +153,17 @@ no `body` column on `prompts`.
 Cite these by item id so anyone can join them back. Bodies are the corpus's
 distillation, **not his verbatim words** — read `text_raw` before quoting him.
 
-| item | key | weight |
-|---|---|---|
-| `it-…` | `escalation=only_when_unanswerable_from_repo` | hard |
-| `it-…` | `escalation_style=intent_questions` | hard |
-| `it-…` | `autonomy=proceed_and_file_issues` | hard |
-| `it-…` | `green_pr=merge_without_jon` | hard |
-| `it-…` | `lane_default=keep_working_not_idle` | hard |
-| `it-…` | `bookkeeping=agent_closes_without_asking` | hard |
-| `it-…` | `intent_sufficiency=70pct_without_asking` | **preference, not hard** |
+Filled in and verified against `live_parameters` on 2026-09-02:
 
-(Query `select id from live_parameters where resolved_to='<key>'` to fill these
-in on your first tick, and correct this table.)
+| item | key | weight | status |
+|---|---|---|---|
+| `it-ef236264912cec21` | `escalation=only_when_unanswerable_from_repo` | hard | open |
+| `it-efe2c2c5fb8371dc` | `escalation_style=intent_questions` | hard | acknowledged |
+| `it-5847727719c744ec` | `autonomy=proceed_and_file_issues` | hard | acknowledged |
+| `it-c403028cab9d7bc8` | `green_pr=merge_without_jon` | hard | acted |
+| `it-4ac8d91b9bc45cdb` | `lane_default=keep_working_not_idle` | hard | open |
+| `it-bf3e5b5ae0d12781` | `bookkeeping=agent_closes_without_asking` | hard | acted |
+| `it-b144c2bd7bd19137` | `intent_sufficiency=70pct_without_asking` | **preference** | acknowledged |
 
 The one line that is verbatim his, from `it-aad05cd51933cbf5`:
 
