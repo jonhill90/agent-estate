@@ -388,3 +388,33 @@ func TestPreExistingThingsAreNotEvidenceOfThisTick(t *testing.T) {
 		t.Log("first-tick behaviour: refused because the resolver reports not-after-zero; acceptable")
 	}
 }
+
+// The stop condition lived in a file its own subject can delete. A reviewer
+// showed one `rm` erases a genuine three-tick stall.
+func TestTruncatedLogIsRefusedNotTreatedAsFresh(t *testing.T) {
+	p := write(t, stalledA, stalledB, stalledC)
+
+	if err := CheckAgainstCommitted(p, 3); err != nil {
+		t.Fatalf("a log matching its committed copy is fine: %v", err)
+	}
+	if err := CheckAgainstCommitted(p, 2); err != nil {
+		t.Errorf("more records on disk than committed is normal -- ticks since the last commit: %v", err)
+	}
+	// The attack: the log is deleted or shortened.
+	short := write(t, stalledA)
+	if err := CheckAgainstCommitted(short, 3); err == nil {
+		t.Fatal("a log with fewer records than the committed copy must be refused")
+	}
+	missing := filepath.Join(t.TempDir(), "gone.jsonl")
+	if err := CheckAgainstCommitted(missing, 3); err == nil {
+		t.Fatal("a deleted log must be refused, not read as a fresh first tick")
+	}
+	// Could not measure is never clean.
+	if err := CheckAgainstCommitted(p, -1); err == nil {
+		t.Fatal("an unreadable committed copy must refuse rather than pass")
+	}
+	// A genuinely new log with nothing committed yet is legitimate.
+	if err := CheckAgainstCommitted(missing, 0); err != nil {
+		t.Errorf("a first run with nothing committed is not tampering: %v", err)
+	}
+}

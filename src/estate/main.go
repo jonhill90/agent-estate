@@ -227,6 +227,26 @@ func main() {
 			}
 
 		case "check":
+			// Before reading the record, confirm the record is still there.
+			// It lives in a file the Director can delete, and deleting it
+			// used to turn a real stall into "no tick log yet".
+			committed := -1
+			if out, err := exec.Command("git", "show", "HEAD:"+path).Output(); err == nil {
+				committed = 0
+				for _, ln := range strings.Split(string(out), "\n") {
+					if strings.TrimSpace(ln) != "" {
+						committed++
+					}
+				}
+			} else if exec.Command("git", "cat-file", "-e", "HEAD:"+path).Run() != nil {
+				// Not tracked yet: nothing committed to compare against, which
+				// is a legitimate first run rather than a failure to measure.
+				committed = 0
+			}
+			if err := tick.CheckAgainstCommitted(path, committed); err != nil {
+				fmt.Fprintln(os.Stderr, "estate: "+err.Error())
+				os.Exit(2)
+			}
 			v, err := tick.Check(path)
 			if err != nil {
 				// Could not measure. Never clean.

@@ -425,3 +425,58 @@ func lastTickAt(path string) time.Time {
 	}
 	return at
 }
+
+// Entries counts the records in the log. A missing log is zero, not an error:
+// the caller decides whether zero is legitimate.
+func Entries(path string) (int, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return 0, nil
+	}
+	if err != nil {
+		return 0, err
+	}
+	defer f.Close()
+	n := 0
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		if strings.TrimSpace(sc.Text()) != "" {
+			n++
+		}
+	}
+	return n, sc.Err()
+}
+
+// CheckAgainstCommitted refuses when the working copy of the log has fewer
+// records than the copy committed to git.
+//
+// WHY. The stop condition lived entirely in a local file that the agent it
+// constrains can delete. An independent reviewer showed the whole guarantee
+// evaporates with one `rm`: the log goes missing, lastTickAt returns zero,
+// every artifact is accepted again and a genuine three-tick stall reads as
+// "no tick log yet". A guard whose evidence its subject can destroy is not a
+// guard.
+//
+// The log is tracked in git, so the committed copy is evidence the Director
+// does not solely own. It can still be beaten -- by committing a truncated
+// log -- but that leaves a visible commit, which is the point: the cost of
+// hiding a stall becomes an artifact a human can see.
+//
+// committed is the record count in the committed copy; a negative value means
+// it could not be read, which is "could not measure" and never clean.
+func CheckAgainstCommitted(path string, committed int) error {
+	if committed < 0 {
+		return fmt.Errorf("tick: cannot read the committed copy of %s, so the record cannot be trusted", path)
+	}
+	have, err := Entries(path)
+	if err != nil {
+		return fmt.Errorf("tick: cannot count records in %s: %w", path, err)
+	}
+	if have < committed {
+		return fmt.Errorf("tick: %s holds %d record(s) but the committed copy holds %d -- "+
+			"the record has been truncated or replaced, and a stop condition whose evidence went missing must not read as healthy",
+			path, have, committed)
+	}
+	return nil
+}
