@@ -8,6 +8,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -22,6 +23,7 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 	"github.com/jonhill90/agent-estate/estate/internal/pressure"
+	"github.com/jonhill90/agent-estate/estate/internal/reclaim"
 	"github.com/jonhill90/agent-estate/estate/internal/tick"
 	"github.com/jonhill90/agent-estate/estate/internal/verifybranch"
 )
@@ -42,6 +44,9 @@ func usage() {
   estate corpus-audit [n]               hard parameters least supported by your words
   estate tasks                          latest state of every task
   estate inflight                       tasks still occupying a slot
+  estate reclaim [--apply]              report in-flight turns and whether their
+                                        process is still alive; --apply frees the
+                                        slot for any turn positively observed dead
   estate tick record <phase-item> [artifact]
                                         append this tick to the record
   estate tick check                     has the loop stalled? 1 = yes, escalate
@@ -152,6 +157,47 @@ func main() {
 			fmt.Printf("%-28s %-10s %s %s\n", r.ID, r.State, r.At.Format(time.RFC3339), r.Issue)
 		}
 		fmt.Fprintf(os.Stderr, "%d task(s)\n", len(rs))
+
+	case "reclaim":
+		apply := false
+		for _, a := range os.Args[2:] {
+			if a == "--apply" {
+				apply = true
+			}
+		}
+		inflight, err := l.InFlight()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		// A boot time that cannot be read is not fatal to the rest of this
+		// command -- Assess treats a zero boot time as "skip that check",
+		// not as evidence either way -- but it silently narrows what this
+		// run can catch, so say so.
+		boot, err := reclaim.BootTime()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate: could not read host boot time, the reboot check is disabled this run:", err)
+		}
+		assessments := reclaim.Report(inflight, boot, reclaim.PSProbe)
+		reclaimable := 0
+		for _, a := range assessments {
+			mark := "keep"
+			if a.Reclaimable {
+				mark, reclaimable = "RECLAIM", reclaimable+1
+			}
+			fmt.Printf("%-28s pid=%-8d %-8s %s\n", a.Record.ID, a.Record.PID, mark, a.Reason)
+		}
+		fmt.Fprintf(os.Stderr, "%d in flight, %d reclaimable\n", len(assessments), reclaimable)
+		if apply {
+			n, err := reclaim.Apply(l, assessments)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
+			fmt.Printf("reclaimed %d slot(s)\n", n)
+		} else if reclaimable > 0 {
+			fmt.Println("report only -- re-run with --apply to free these slots")
+		}
 
 	case "tick":
 		// The Director's loop cannot remember its own history -- every tick is
@@ -442,11 +488,12 @@ func main() {
 				"structurally, with no override.\n"
 		}
 
-		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Dispatched, Note: "worktree " + wt.Path}); err != nil {
-			fmt.Fprintln(os.Stderr, "estate: cannot record dispatch:", err)
-			os.Exit(2)
-		}
-		fmt.Printf("dispatched %s (role=%s) in %s (grounded in %d operator parameters)\n", id, role, wt.Path, len(params))
+		// The Dispatched record is appended once the pid is known (below,
+		// right after cmd.Start()), not here -- agent-estate#948 wires up
+		// ledger.Record.PID, and a dead turn can only be reclaimed by a pid
+		// that was actually recorded. Appending here, before the process
+		// exists, would leave the earlier PID-less shape and give
+		// internal/reclaim nothing to check.
 
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 		defer cancel()
@@ -454,9 +501,34 @@ func main() {
 			"--dangerously-skip-permissions")
 		cmd.Dir = wt.Path
 		cmd.Stdin = strings.NewReader(grounded)
-		out, runErr := cmd.Output()
+		var stdout bytes.Buffer
+		cmd.Stdout = &stdout
 
-		rec := ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR}
+		// Started, not merely queued, before the ledger records it: only a
+		// process that actually exists has a pid to record. A dispatch that
+		// fails to start leaves nothing running and is recorded Failed
+		// directly, never Dispatched with no pid to ever positively resolve.
+		if err := cmd.Start(); err != nil {
+			fmt.Fprintln(os.Stderr, "estate: cannot start turn:", err)
+			if aerr := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Failed, Note: "failed to start: " + err.Error()}); aerr != nil {
+				fmt.Fprintln(os.Stderr, "estate: cannot record dispatch failure:", aerr)
+			}
+			os.Exit(1)
+		}
+		pid := cmd.Process.Pid
+		// The pid is recorded the moment it is known -- before the turn does
+		// anything else -- because it is the one fact that later lets a dead
+		// turn's slot be reclaimed without guessing. See internal/reclaim.
+		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Dispatched, PID: pid, Note: "worktree " + wt.Path}); err != nil {
+			fmt.Fprintln(os.Stderr, "estate: cannot record dispatch:", err)
+			os.Exit(2)
+		}
+		fmt.Printf("dispatched %s (role=%s, pid=%d) in %s (grounded in %d operator parameters)\n", id, role, pid, wt.Path, len(params))
+
+		runErr := cmd.Wait()
+		out := stdout.Bytes()
+
+		rec := ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, PID: pid}
 		switch {
 		case ctx.Err() != nil:
 			// Timed out. We do not know whether the turn did its work, so we
