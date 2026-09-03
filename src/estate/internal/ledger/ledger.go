@@ -78,6 +78,20 @@ type Record struct {
 	// value, not merely that the branch name matches. See internal/gate's
 	// package doc for what this does and does not establish.
 	HeadSHA string `json:"head_sha,omitempty"`
+	// Base is the commit the dispatched worktree started FROM -- for a
+	// fresh dispatch, internal/isolate.Worktree.Base (the tip of the
+	// caller's checkout at Create time); for a fix pass
+	// (internal/isolate.CreateOnBranch), the tip of the pull request's own
+	// branch as fetched fresh from origin, before this turn's own commits.
+	// Recorded for every role=author turn, same estate-observed-not-agent-
+	// claimed discipline as HeadSHA. It is what agent-estate#940's "does not
+	// survive a fix pass" follow-up needs: a fix pass's HeadSHA alone proves
+	// what that ONE turn produced, but says nothing about whether the code
+	// it started from was itself legitimate. Base is not yet consulted by
+	// internal/gate's join -- see that package's doc comment for exactly
+	// what is and is not checked -- but is recorded now so it exists to
+	// check against.
+	Base string `json:"base,omitempty"`
 }
 
 // EffectiveRole returns the record's Role, defaulting an unset field to

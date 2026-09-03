@@ -140,14 +140,37 @@ func reviewerContract(id string, pr int) string {
 		"refuse a genuine approval it cannot read.\n"
 }
 
+// prHeadBranch reads a pull request's own CURRENT head branch name straight
+// from GitHub -- never a caller's guess, never whatever a brief happens to
+// say -- so a fix pass (estate dispatch fix) checks out and continues
+// exactly the branch the PR is actually pointing at right now, not a stale
+// or invented one. Same "gh pr view", no "-R" (repo inferred from cwd)
+// convention this file already uses elsewhere (see the tick-record
+// "produced" closure above).
+func prHeadBranch(pr int) (string, error) {
+	out, err := exec.Command("gh", "pr", "view", strconv.Itoa(pr), "--json", "headRefName", "-q", ".headRefName").Output()
+	if err != nil {
+		return "", err
+	}
+	branch := strings.TrimSpace(string(out))
+	if branch == "" {
+		return "", fmt.Errorf("gh reported an empty head branch for PR #%d", pr)
+	}
+	return branch, nil
+}
+
 // roleGrounding is what dispatch appends to the prompt based on role alone
 // -- the author's branch-discipline block (agent-estate#940, text
-// unchanged by #949) or the reviewer's verdict contract (reviewerContract,
-// #949). Neither role gets both, and a role that is neither (there is none
-// today) gets nothing.
-func roleGrounding(role ledger.Role, id string, reviewPR int, branch string) string {
+// unchanged by #949), the fix-pass's branch-CONTINUATION block
+// (fixPassGrounding, agent-estate#940's "does not survive a fix pass"
+// follow-up), or the reviewer's verdict contract (reviewerContract, #949).
+// Only one of the three ever applies to a given turn.
+func roleGrounding(role ledger.Role, id string, reviewPR int, branch string, fixPass bool) string {
 	switch role {
 	case ledger.RoleAuthor:
+		if fixPass {
+			return fixPassGrounding(reviewPR, branch)
+		}
 		return "\n\n## Branch discipline (agent-estate#940 -- read this before opening a PR)\n" +
 			"Your worktree's branch is already `" + branch + "` -- created by the estate " +
 			"itself, not by you. Commit your work on THIS branch and push it AS-IS:\n\n" +
@@ -165,6 +188,33 @@ func roleGrounding(role ledger.Role, id string, reviewPR int, branch string) str
 	}
 }
 
+// fixPassGrounding is a role=author turn's grounding when it is dispatched
+// to CONTINUE an existing pull request (`estate dispatch fix`) rather than
+// open a new one. The turn's own worktree (internal/isolate.CreateOnBranch)
+// is already checked out, detached, at that PR's own current head, fetched
+// fresh from origin by the estate -- not asserted by the agent and not
+// assumed from a possibly-stale local ref. The turn must push its commits
+// BACK onto that same branch, never invent a new one: the merge gate
+// (internal/gate) accepts a fix pass by chaining this dispatch's own
+// recorded Base/HeadSHA back to the PR's ORIGINAL dispatch, one completed,
+// PR-scoped ledger record at a time (see gate's package doc, "does not
+// survive a fix pass"). A push to any other branch, or under any other PR
+// number, breaks that chain and the gate refuses it structurally.
+func fixPassGrounding(pr int, branch string) string {
+	return "\n\n## Fix-pass discipline (agent-estate#940 -- read this before pushing)\n" +
+		"You are a FIX PASS on an existing pull request, PR #" + strconv.Itoa(pr) + ". Your " +
+		"worktree is already checked out -- in a DETACHED state, fetched fresh from origin by " +
+		"the estate itself, not by you -- at that PR's own current head, on branch `" + branch +
+		"`. Do NOT create a new branch and do NOT open a new pull request. Commit your fixes on " +
+		"top of what is already checked out, then push them back to the SAME existing branch:\n\n" +
+		"    git push origin HEAD:" + branch + "\n\n" +
+		"The merge gate (`estate merge`) joins this turn back to PR #" + strconv.Itoa(pr) +
+		" by reading the commit your OWN worktree ends up at once this turn exits -- never " +
+		"anything you say about it -- and chaining that commit back to the PR's original " +
+		"dispatch. Pushing anywhere else, or under a different PR number, carries no evidence " +
+		"the estate produced, and the gate refuses it structurally, with no override.\n"
+}
+
 func usage() {
 	fmt.Fprint(os.Stderr, `estate -- the supervisor
 
@@ -172,11 +222,17 @@ func usage() {
   estate dispatch <issue> <brief-file>  run one agent turn (role=author), gated and recorded
   estate dispatch review <pr> <issue> <brief-file>
                                         run one review turn (role=reviewer) against a PR
+  estate dispatch fix <pr> <issue> <brief-file>
+                                        run one fix-pass turn (role=author, PR-scoped)
+                                        continuing an EXISTING PR's own branch, fetched
+                                        fresh from origin -- not a fresh dispatch branch
   estate merge <repo> <pr> <reviewer-lane>
                                         may this PR merge? identity comes from the PR's
                                         own head ref (must be a dispatch/<id> branch),
-                                        never a caller argument and never a closing issue
-                                        -- checks green, author != reviewer, reviewer
+                                        joined either directly or through a chain of
+                                        completed fix-pass turns for that PR -- never a
+                                        caller argument and never a closing issue --
+                                        checks green, author != reviewer, reviewer
                                         actually completed a review, and posted APPROVE
   estate corpus-audit [n]               hard parameters least supported by your words
   estate knowledge                      regenerate the compiled, read-only index over
@@ -580,13 +636,34 @@ func main() {
 		// later from what a lane or a PR comment claims about itself.
 		role := ledger.RoleAuthor
 		reviewPR := 0
+		// fixPass marks a role=author turn dispatched to CONTINUE an
+		// existing pull request (agent-estate#940's "does not survive a fix
+		// pass" follow-up) rather than open a new one. It reuses reviewPR
+		// to carry the PR number -- the two are mutually exclusive by
+		// os.Args[2], never both set -- and is recorded on the ledger via
+		// the SAME PR field a role=reviewer turn already uses, so the gate
+		// can scope a fix-pass lookup to "completed role=author records for
+		// THIS PR" without a new record shape.
+		fixPass := false
 		issueIdx, briefIdx := 2, 3
-		if os.Args[2] == "review" {
+		switch os.Args[2] {
+		case "review":
 			if len(os.Args) < 6 {
 				fmt.Fprintln(os.Stderr, "estate: dispatch review needs <pr> <issue> <brief-file>")
 				os.Exit(2)
 			}
 			role = ledger.RoleReviewer
+			if _, err := fmt.Sscanf(os.Args[3], "%d", &reviewPR); err != nil {
+				fmt.Fprintln(os.Stderr, "estate: pr must be a number:", os.Args[3])
+				os.Exit(2)
+			}
+			issueIdx, briefIdx = 4, 5
+		case "fix":
+			if len(os.Args) < 6 {
+				fmt.Fprintln(os.Stderr, "estate: dispatch fix needs <pr> <issue> <brief-file>")
+				os.Exit(2)
+			}
+			fixPass = true
 			if _, err := fmt.Sscanf(os.Args[3], "%d", &reviewPR); err != nil {
 				fmt.Fprintln(os.Stderr, "estate: pr must be a number:", os.Args[3])
 				os.Exit(2)
@@ -634,7 +711,26 @@ func main() {
 			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch -- cannot locate the repository root to isolate the turn:", err)
 			os.Exit(1)
 		}
-		wt, err := isolate.Create(strings.TrimSpace(string(topOut)), id)
+		repoRoot := strings.TrimSpace(string(topOut))
+
+		var wt *isolate.Worktree
+		if fixPass {
+			// A fix pass continues the PR's OWN branch, not a fresh one --
+			// agent-estate#940's "does not survive a fix pass" gap. The
+			// branch name is read from GitHub itself (never a caller
+			// argument, never a brief's guess), and internal/isolate fetches
+			// and checks it out fresh, so this dispatch's worktree starts
+			// from what the PR's head genuinely is right now, not a
+			// possibly-stale local ref.
+			branch, berr := prHeadBranch(reviewPR)
+			if berr != nil {
+				fmt.Fprintln(os.Stderr, "estate: refusing to dispatch fix pass -- cannot read PR #"+strconv.Itoa(reviewPR)+"'s own head branch:", berr)
+				os.Exit(1)
+			}
+			wt, err = isolate.CreateOnBranch(repoRoot, id, branch)
+		} else {
+			wt, err = isolate.Create(repoRoot, id)
+		}
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "estate: "+err.Error())
 			os.Exit(1)
@@ -644,18 +740,21 @@ func main() {
 		// own head ref, joined to this exact dispatch id's role=author
 		// ledger record -- never from an issue number the brief or the PR
 		// body asserts. That join only exists if the PR is opened FROM
-		// wt.Branch. A brief that instead tells (or lets) the lane invent
-		// its own feature branch produces a PR the gate cannot join to
-		// anything, refused with no override. Author turns only: a
-		// role=reviewer turn never opens a PR, so it has nothing to state
-		// here. Reviewer turns instead get the second-source verdict
-		// contract (agent-estate#949), with this dispatch's own id and PR
-		// number already filled in so it cannot be forgotten, reworded, or
+		// wt.Branch (a fresh dispatch) or continues onto it (a fix pass,
+		// joined by chaining Base/HeadSHA back to the PR's original
+		// dispatch -- see internal/gate's package doc). A brief that
+		// instead tells (or lets) the lane invent its own feature branch
+		// produces a PR the gate cannot join to anything, refused with no
+		// override. Author turns only: a role=reviewer turn never opens or
+		// continues a PR's branch, so it has nothing to state here.
+		// Reviewer turns instead get the second-source verdict contract
+		// (agent-estate#949), with this dispatch's own id and PR number
+		// already filled in so it cannot be forgotten, reworded, or
 		// invented by whatever brief the Director happened to write.
-		// roleGrounding is the one place both blocks are produced, so a
-		// test can exercise the role switch directly without running the
+		// roleGrounding is the one place all three blocks are produced, so
+		// a test can exercise the role switch directly without running the
 		// rest of dispatch.
-		grounded += roleGrounding(role, id, reviewPR, wt.Branch)
+		grounded += roleGrounding(role, id, reviewPR, wt.Branch, fixPass)
 
 		// The Dispatched record is appended once the pid is known (below,
 		// right after cmd.Start()), not here -- agent-estate#948 wires up
@@ -760,6 +859,13 @@ func main() {
 			} else {
 				rec.Note = strings.TrimSpace(rec.Note + "; could not read worktree HEAD for provenance: " + herr.Error())
 			}
+			// Base is what this worktree started FROM -- isolate.Create's
+			// caller-checkout tip for a fresh dispatch, or
+			// isolate.CreateOnBranch's freshly-fetched PR tip for a fix
+			// pass. Recorded for every role=author turn now that the gate
+			// can chain a fix pass's Base back to an earlier turn's own
+			// HeadSHA (see internal/gate's package doc).
+			rec.Base = wt.Base
 		}
 
 		// Tear the worktree down only when it is empty. A turn that left work
