@@ -31,7 +31,7 @@ func usage() {
   estate pressure                       report whether the host can take work
   estate dispatch [--role=review] <issue> <brief-file>
                                         run one agent turn, gated and recorded
-  estate merge <repo> <pr> <issue> <reviewer-lane>
+  estate merge <repo> <pr> <reviewer-lane>
                                         may this PR merge? checks + independence
   estate corpus-audit [n]               hard parameters least supported by your words
   estate authored <issue> <lane> [note] record who wrote work on an issue
@@ -105,17 +105,17 @@ func main() {
 		}
 
 	case "merge":
-		if len(os.Args) < 6 {
+		if len(os.Args) < 5 {
 			usage()
 			os.Exit(2)
 		}
-		repo, issue, reviewer := os.Args[2], os.Args[4], os.Args[5]
+		repo, reviewer := os.Args[2], os.Args[4]
 		var pr int
 		if _, err := fmt.Sscanf(os.Args[3], "%d", &pr); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: pr must be a number:", os.Args[3])
 			os.Exit(2)
 		}
-		d := gate.Evaluate(repo, pr, reviewer, issue, l)
+		d := gate.Evaluate(repo, pr, reviewer, l)
 		fmt.Printf("%s#%d head %s\n", repo, pr, d.HeadOID)
 		if !d.Allow {
 			for _, r := range d.Reasons {

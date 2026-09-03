@@ -228,7 +228,66 @@ func short(s string) string {
 	return s
 }
 
-func Evaluate(repo string, pr int, reviewerLane string, issue string, l *ledger.Ledger) Decision {
+// identitiesFor returns the identities a pull request may be judged under:
+// its own number, plus any issue it actually closes. Both come from the pull
+// request; neither is typed by the caller.
+//
+// Round five: `estate merge` took <pr> AND <issue> separately and never
+// checked they were related, so an author could name any issue with a clean
+// author/reviewer pair and merge an unrelated change. Four rounds hardened
+// WHO reviewed and nothing checked WHAT they reviewed. Removing the caller's
+// choice is the fix; validating it would only move the guess.
+func identitiesFor(pr int, closes []int) []string {
+	out := []string{fmt.Sprint(pr)}
+	for _, n := range closes {
+		out = append(out, fmt.Sprint(n))
+	}
+	return out
+}
+
+// issuesFor runs the independence check across every identity the pull
+// request legitimately has, and refuses unless one of them is satisfied.
+// Refusals from the PR's own number are reported, because that is the
+// identity a reader expects.
+func issuesFor(l *ledger.Ledger, primary string, headAt time.Time, headKnown bool, reviewerLane string, others ...string) []string {
+	if bad := independentAt(l, primary, reviewerLane, headAt, headKnown); bad == nil {
+		return nil
+	}
+	for _, id := range others {
+		if bad := independentAt(l, id, reviewerLane, headAt, headKnown); bad == nil {
+			return nil
+		}
+	}
+	return independentAt(l, primary, reviewerLane, headAt, headKnown)
+}
+
+// closingIssues asks GitHub which issues the pull request actually closes.
+// A query that fails returns nothing rather than an error: the PR's own
+// number is always a valid identity, so the gate degrades to the stricter
+// answer instead of refusing outright.
+func closingIssues(repo string, pr int) []int {
+	parts := strings.SplitN(repo, "/", 2)
+	if len(parts) != 2 {
+		return nil
+	}
+	q := fmt.Sprintf(`{repository(owner:%q,name:%q){pullRequest(number:%d){closingIssuesReferences(first:20){nodes{number}}}}}`,
+		parts[0], parts[1], pr)
+	out, err := exec.Command("gh", "api", "graphql", "-f", "query="+q,
+		"-q", ".data.repository.pullRequest.closingIssuesReferences.nodes[].number").Output()
+	if err != nil {
+		return nil
+	}
+	var ns []int
+	for _, line := range strings.Fields(string(out)) {
+		var n int
+		if _, err := fmt.Sscanf(line, "%d", &n); err == nil {
+			ns = append(ns, n)
+		}
+	}
+	return ns
+}
+
+func Evaluate(repo string, pr int, reviewerLane string, l *ledger.Ledger) Decision {
 	d := Decision{Allow: true}
 	p, err := fetch(repo, pr)
 	if err != nil {
@@ -244,7 +303,8 @@ func Evaluate(repo string, pr int, reviewerLane string, issue string, l *ledger.
 		d.Reasons = append(d.Reasons, bad...)
 	}
 	headAt, headKnown := headSeenAt(repo, p.HeadOID)
-	if bad := independentAt(l, issue, reviewerLane, headAt, headKnown); len(bad) > 0 {
+	ids := identitiesFor(pr, closingIssues(repo, pr))
+	if bad := issuesFor(l, ids[0], headAt, headKnown, reviewerLane, ids[1:]...); len(bad) > 0 {
 		d.Allow = false
 		d.Reasons = append(d.Reasons, bad...)
 	}

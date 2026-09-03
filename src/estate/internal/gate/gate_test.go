@@ -535,3 +535,55 @@ func TestUnreadableHeadTimeRefusesRatherThanSkipping(t *testing.T) {
 		t.Errorf("the refusal must say it could not measure; got: %v", bad)
 	}
 }
+
+// Round five: the caller chose which issue the gate judged. `estate merge`
+// took <pr> AND <issue> as separate arguments and never checked they were
+// related, so an author could point the gate at any issue that happened to
+// have a clean author/reviewer pair and merge an unrelated pull request --
+// using only record shapes `estate dispatch` writes itself. Four rounds
+// hardened WHO reviewed; nothing checked WHAT they reviewed.
+//
+// The fix removes the choice: identity comes from the pull request number.
+func TestTheGateJudgesThePullRequestNotACallerSuppliedIssue(t *testing.T) {
+	l, err := ledger.Open(filepath.Join(t.TempDir(), "l.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now()
+	// A clean, genuine author/reviewer pair -- but on a DIFFERENT piece of
+	// work (issue 42). This is the borrowed alibi.
+	for _, r := range []ledger.Record{
+		{ID: "a42", Issue: "42", Lane: "worker-42", State: ledger.Complete, At: now},
+		{ID: "r42", Issue: "42", Lane: "seat-42", Role: ledger.RoleReview,
+			State: ledger.Complete, At: now, Result: "VERDICT: APPROVE"},
+	} {
+		if err := l.Append(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Asked about PR 916, which has no records of its own, the gate must
+	// refuse -- it must not be satisfiable by issue 42's clean pair.
+	bad := issuesFor(l, "916", now.Add(-time.Hour), true, "seat-42")
+	if bad == nil {
+		t.Fatal("a clean pair on unrelated work must not clear a different pull request")
+	}
+}
+
+// The identities a pull request may be judged under are its own number and
+// any issue it actually closes -- both derived from the PR, neither typed by
+// the caller.
+func TestIdentitiesComeFromThePullRequest(t *testing.T) {
+	got := identitiesFor(916, []int{7, 8})
+	want := map[string]bool{"916": true, "7": true, "8": true}
+	if len(got) != len(want) {
+		t.Fatalf("identities = %v, want %v", got, want)
+	}
+	for _, g := range got {
+		if !want[g] {
+			t.Errorf("unexpected identity %q -- it did not come from the PR", g)
+		}
+	}
+	if only := identitiesFor(916, nil); len(only) != 1 || only[0] != "916" {
+		t.Errorf("a PR closing nothing is judged under its own number alone; got %v", only)
+	}
+}
