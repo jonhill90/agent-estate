@@ -1,11 +1,14 @@
 package isolate
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // repo builds a throwaway git repo with one commit and returns its root.
@@ -760,6 +763,83 @@ func TestRemoveRefusesWhenTheRemoteCannotBeConsulted(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "commit") {
 		t.Errorf("the refusal must say the work is committed; got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(w.Path, "result.txt")); statErr != nil {
+		t.Fatalf("the refused Remove destroyed committed work anyway: %v", statErr)
+	}
+}
+
+// agent-estate#996's review, reproduced live: a remote that BLACK-HOLES the
+// fetch -- accepts the TCP connection and then never answers, rather than
+// refusing it -- must not hang Remove indefinitely. Before remoteFetchTimeout
+// existed this was bounded only by the OS TCP connect timeout (commonly
+// 60-120s or more); a listener that accepts and stays silent is exactly that
+// shape and is fully hermetic (no real network, no real origin), so this
+// does not depend on this machine's own network reachability the way the
+// reviewer's black-holed-IP reproduction did.
+func TestRemoveRefusesWhenTheFetchHangsRatherThanWaitForever(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			// Accept and say nothing -- a black hole, not a refusal. git's
+			// fetch sits waiting for a response that never comes.
+			t.Cleanup(func() { conn.Close() })
+		}
+	}()
+
+	root := repo(t)
+	origin := fmt.Sprintf("http://%s/nowhere.git", ln.Addr())
+	if out, err := exec.Command("git", "-C", root, "remote", "add", "origin", origin).CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v: %s", err, out)
+	}
+
+	w, err := Create(root, "hung-fetch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Path, "result.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "work"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = w.Path
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+
+	// Shrink the bound so the test proves the timeout fires without waiting
+	// out the real 15s production value.
+	old := remoteFetchTimeout
+	remoteFetchTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { remoteFetchTimeout = old })
+
+	start := time.Now()
+	err = w.Remove()
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Remove must refuse when the fetch to origin hangs, not silently give up and delete the worktree")
+	}
+	// Generous margin over the shrunk bound -- proves the call was actually
+	// killed rather than merely erroring for some unrelated reason after
+	// running to completion.
+	if elapsed > 5*time.Second {
+		t.Fatalf("Remove took %s to refuse a fetch bounded to %s -- the timeout is not actually bounding the call", elapsed, remoteFetchTimeout)
+	}
+	if !strings.Contains(err.Error(), "commit") {
+		t.Errorf("the refusal must say the work is committed; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "within") {
+		t.Errorf("the refusal must say it could not check in time, not just that the fetch failed; got: %v", err)
 	}
 	if _, statErr := os.Stat(filepath.Join(w.Path, "result.txt")); statErr != nil {
 		t.Fatalf("the refused Remove destroyed committed work anyway: %v", statErr)

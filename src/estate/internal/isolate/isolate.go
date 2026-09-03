@@ -21,6 +21,7 @@
 package isolate
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -28,6 +29,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // Worktree is one dispatch's isolated checkout.
@@ -86,6 +89,48 @@ func safeID(id string) error {
 func git(dir string, args ...string) ([]byte, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return out, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return out, nil
+}
+
+// remoteFetchTimeout bounds remoteHasCommit's own fetch (below). A var, not a
+// const, so a test can shrink it rather than wait out the real duration.
+//
+// 15s matches the convention src/tui's own subprocess seams already use for
+// a bounded network call (internal/cost's execTimeout, #994's
+// pressureRunner) -- reused rather than invented fresh. This is a fetch of
+// ONE branch, not a clone: 15s is generous for that over any link that is
+// actually working, and short enough that a black-holed remote (one that
+// drops packets rather than refusing the connection -- a stale VPN route, a
+// half-dead proxy, a firewall with a DROP rule) no longer leaves Remove
+// bounded only by the OS TCP connect timeout, commonly 60-120s or more.
+var remoteFetchTimeout = 15 * time.Second
+
+// gitTimeout runs git the same way git (above) does, except the process is
+// killed if it outlives ctx. Used only where an unbounded git subprocess
+// would turn a fast, local operation into one bounded by nothing but network
+// state -- see remoteHasCommit.
+//
+// exec.CommandContext's DEFAULT cancellation is not enough here: it kills
+// only the direct child, and `git fetch` over http hands the connection to a
+// `git-remote-http` grandchild that inherits git's stdout/stderr pipes. Kill
+// git alone and that grandchild survives, still holding the write end of
+// CombinedOutput's pipe open -- so Wait() keeps blocking for EOF that never
+// comes, and the "bounded" fetch hangs exactly as long as the unbounded one
+// did. Confirmed live against a black hole listener before this was added:
+// git alone, PID visible in `ps`, ran on with no parent. Putting the process
+// in its own group and killing the whole group on cancellation is what
+// actually bounds it.
+func gitTimeout(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return out, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -365,8 +410,21 @@ func (w *Worktree) Committed() (bool, error) {
 // matches Committed's own base-less path and estate pressure's exit-2
 // convention: refuse when you cannot tell, never read "could not check" as
 // "clean".
+//
+// The fetch itself is bounded by remoteFetchTimeout (above). Before this
+// bound existed, a remote that black-holed packets instead of refusing the
+// connection left this call -- and therefore Remove, and therefore every
+// teardown of committed work -- hung on nothing but the OS TCP connect
+// timeout. A timeout is itself a "could not measure": the message below
+// says so explicitly, rather than reading like an ordinary fetch failure,
+// so a caller cannot mistake "gave up waiting" for "asked and got no".
 func (w *Worktree) remoteHasCommit(commit, branch string) (bool, error) {
-	if _, err := git(w.Path, "fetch", "-q", "origin", branch); err != nil {
+	ctx, cancel := context.WithTimeout(context.Background(), remoteFetchTimeout)
+	defer cancel()
+	if _, err := gitTimeout(ctx, w.Path, "fetch", "-q", "origin", branch); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return false, fmt.Errorf("could not confirm %q on origin within %s -- the fetch did not complete in time, which is not the same as origin not having it: %w", branch, remoteFetchTimeout, err)
+		}
 		return false, fmt.Errorf("cannot fetch %q from origin to confirm its commits are referenced there: %w", branch, err)
 	}
 	if _, err := git(w.Path, "merge-base", "--is-ancestor", commit, "FETCH_HEAD"); err != nil {
