@@ -23,6 +23,8 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -137,6 +139,118 @@ type Status struct {
 	TickErr  error
 	LastTick *Tick
 	TickRuns int
+
+	// Pressure is `estate pressure`'s own verdict on whether the host can
+	// take another dispatch (agent-estate#987). Zero value (Configured
+	// false) on every Status this package built before agent-estate#987 and on any
+	// caller that never wires a pressure source in -- ReadPressure below is
+	// the only thing that ever sets it. See that function and PressureReading's
+	// own doc comment for why Configured exists as a fourth state rather
+	// than reusing Availability's zero value (Present) for "never asked."
+	Pressure Pressure
+}
+
+// PressureReading is `estate pressure`'s own reported figures and verdict,
+// carried through unchanged -- this package parses the CLI's stable text
+// output (ParsePressureLine) rather than re-deriving the pressure rules a
+// second time; src/estate/internal/pressure owns the rules
+// (AGENTS.md's "second reader" prohibition, and it is a different Go
+// module's internal package this one cannot import across the module
+// boundary regardless).
+type PressureReading struct {
+	LoadPerCore     float64
+	FreeMemMB       float64
+	InFlight        int
+	WeeklyRemaining float64 // percent still available this week
+	OK              bool    // true only when `estate pressure` exited 0
+	Reasons         []string
+}
+
+// Pressure wraps a PressureReading with the same Absent/Unreadable-shaped
+// discipline the rest of this package uses, plus one state neither Ledger
+// nor Ticks needs: Configured. Those two always have a real path to read
+// (LedgerPath/TickPath are never optional), so their own zero value is
+// never ambiguous. A pressure source IS optional -- most callers of this
+// package before agent-estate#987, and any test building a Status{} literal directly,
+// never ask for one -- so Configured false must render as "nothing to
+// show," never as Avail's zero value (Present) with an all-zero Reading,
+// which would be exactly the fabricated-zero failure AGENTS.md's "Never
+// here" section names.
+type Pressure struct {
+	Configured bool
+	Avail      Availability // meaningful only when Configured
+	Err        error        // set when Avail == Unreadable
+	Reading    PressureReading
+}
+
+// ReadPressure runs fetch (nil-safe: cmd/estate always supplies one for the
+// real program, but every existing caller/test in this module that never
+// heard of pressure passes nil and gets Pressure{}, i.e. Configured false)
+// and reports the result. fetch is the seam AGENTS.md's adapter discipline
+// requires -- this package does no exec of its own; cmd/estate/pressure.go
+// shells `estate pressure` out and hands back only its parsed
+// PressureReading or an error.
+//
+// A non-nil error means the reading itself could not be taken (the `estate`
+// binary is missing, its output could not be parsed, or it exited with a
+// code this program does not understand) -- that is Unreadable, not a
+// verdict. `estate pressure` exiting 1 because it genuinely measured
+// pressure and refused is NOT this case: buildPressureFetch in cmd/estate
+// resolves that to a real Reading with OK=false and a non-nil error is
+// never returned for it, so it renders here as Present, exactly like a
+// verdict of OK=true.
+func ReadPressure(fetch func() (PressureReading, error)) Pressure {
+	if fetch == nil {
+		return Pressure{}
+	}
+	r, err := fetch()
+	if err != nil {
+		return Pressure{Configured: true, Avail: Unreadable, Err: err}
+	}
+	return Pressure{Configured: true, Avail: Present, Reading: r}
+}
+
+// pressureLineRE matches src/estate/main.go's own "pressure" case, printed
+// unconditionally regardless of verdict:
+//
+//	load 0.14/core  free 4396MB  inflight 3  weekly budget 94% left
+//
+// Kept as one fixed pattern, not a token-by-token scan, so a future field
+// added to that line fails this parse loudly (ok=false, Unreadable) rather
+// than silently reading as zero.
+var pressureLineRE = regexp.MustCompile(`load ([0-9.]+)/core\s+free (-?[0-9.]+)MB\s+inflight (\d+)\s+weekly budget ([0-9.]+)% left`)
+
+// ParsePressureLine decodes one line of `estate pressure`'s stdout. ok is
+// false when the line does not match the exact shape above -- a caller must
+// treat that as Unreadable, never fall back to a zero-valued PressureReading.
+func ParsePressureLine(line string) (PressureReading, bool) {
+	m := pressureLineRE.FindStringSubmatch(line)
+	if m == nil {
+		return PressureReading{}, false
+	}
+	load, err1 := strconv.ParseFloat(m[1], 64)
+	free, err2 := strconv.ParseFloat(m[2], 64)
+	inflight, err3 := strconv.Atoi(m[3])
+	weekly, err4 := strconv.ParseFloat(m[4], 64)
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+		return PressureReading{}, false
+	}
+	return PressureReading{LoadPerCore: load, FreeMemMB: free, InFlight: inflight, WeeklyRemaining: weekly}, true
+}
+
+// ParsePressureReasons decodes the "refuse: <reason>" lines src/estate/
+// main.go's own "pressure" case writes to stderr, one per gate that
+// refused, only when it exits 1. Any line not carrying that exact prefix is
+// dropped rather than guessed at.
+func ParsePressureReasons(stderr string) []string {
+	var out []string
+	for _, line := range strings.Split(stderr, "\n") {
+		line = strings.TrimSpace(line)
+		if r, ok := strings.CutPrefix(line, "refuse: "); ok && r != "" {
+			out = append(out, r)
+		}
+	}
+	return out
 }
 
 // inFlight are the states that still occupy a slot. "unknown" is deliberately
@@ -351,6 +465,33 @@ func Lines(s Status) []string {
 		out = append(out,
 			fmt.Sprintf("Director: %d tick(s); last on %s", s.TickRuns, s.LastTick.PhaseItem),
 			"  "+s.LastTick.At+"  src "+short(s.LastTick.SrcHead)+"  -> "+art)
+	}
+
+	// Pressure.Configured is false for every caller that never wired a
+	// pressure source in -- omit the section entirely rather than draw a
+	// heading with nothing honest to put under it. The real program
+	// (cmd/estate) always configures this, so a human running it sees
+	// Present or Unreadable, never this branch.
+	if s.Pressure.Configured {
+		out = append(out, "")
+		switch s.Pressure.Avail {
+		case Unreadable:
+			out = append(out,
+				"Pressure: UNREADABLE -- this is not zero.",
+				"  "+errText(s.Pressure.Err))
+		default: // Present -- Absent has no meaning for a live reading
+			r := s.Pressure.Reading
+			verdict := "within limits"
+			if !r.OK {
+				verdict = "REFUSING new work"
+			}
+			out = append(out, fmt.Sprintf(
+				"Pressure: load %.2f/core  free %.0fMB  inflight %d  weekly budget %.0f%% left -- %s",
+				r.LoadPerCore, r.FreeMemMB, r.InFlight, r.WeeklyRemaining, verdict))
+			for _, reason := range r.Reasons {
+				out = append(out, "  refuse: "+reason)
+			}
+		}
 	}
 	return out
 }
