@@ -51,6 +51,7 @@ import (
 	"github.com/jonhill90/agent-estate/src/tui/internal/flow"
 	"github.com/jonhill90/agent-estate/src/tui/internal/gallery"
 	"github.com/jonhill90/agent-estate/src/tui/internal/knowledge"
+	"github.com/jonhill90/agent-estate/src/tui/internal/knowledgeindex"
 	"github.com/jonhill90/agent-estate/src/tui/internal/lane"
 	"github.com/jonhill90/agent-estate/src/tui/internal/lanechat/laneprimary"
 	"github.com/jonhill90/agent-estate/src/tui/internal/lanechat/roomprimary"
@@ -571,7 +572,7 @@ func main() {
 	knowledgeModel := knowledge.New(
 		knowledge.NewFetcher(vaultDir),
 		knowledge.NewFactLoader(vaultDir),
-	)
+	).WithCompiled(knowledgeindex.NewFetcher(compiledIndexPath()))
 
 	// apidocsModel is Docs -> API Docs: hill90-app's own OpenAPI document
 	// (internal/apidocs' package doc comment traces why that file is the

@@ -20,6 +20,7 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/dispatchid"
 	"github.com/jonhill90/agent-estate/estate/internal/gate"
 	"github.com/jonhill90/agent-estate/estate/internal/isolate"
+	"github.com/jonhill90/agent-estate/estate/internal/knowledge"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 	"github.com/jonhill90/agent-estate/estate/internal/pressure"
 	"github.com/jonhill90/agent-estate/estate/internal/tick"
@@ -39,6 +40,9 @@ func usage() {
                                         -- checks green, author != reviewer, reviewer
                                         actually completed a review, and posted APPROVE
   estate corpus-audit [n]               hard parameters least supported by your words
+  estate knowledge                      regenerate the compiled, read-only index over
+                                         GitHub stars, the memory vault, the corpus and
+                                         Loops-Research -- derived, never authoritative
   estate tasks                          latest state of every task
   estate inflight                       tasks still occupying a slot
   estate tick record <phase-item> [artifact]
@@ -105,6 +109,40 @@ func main() {
 			fmt.Printf("\n  param:  %s\n  prompt: %.220s\n\n", f.Param, f.Prompt)
 		}
 		if suspect > 0 {
+			os.Exit(1)
+		}
+
+	case "knowledge":
+		cfg, err := knowledge.DefaultConfig()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		out, err := knowledge.DefaultOutputPath()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		res := knowledge.Generate(cfg, time.Now())
+		if err := knowledge.Write(out, res); err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		unreadable := 0
+		for _, s := range res.Sources {
+			mark := "ok  "
+			extra := fmt.Sprintf("%d item(s)", s.Count)
+			if !s.OK {
+				mark = "FAIL"
+				extra = s.Reason
+				unreadable++
+			}
+			fmt.Printf("%s %-18s %s\n", mark, s.Name, extra)
+		}
+		fmt.Printf("\n%d item(s) written to %s\n", len(res.Items), out)
+		fmt.Println("derived, never authoritative -- see the file's own \"note\" field")
+		if unreadable > 0 {
+			fmt.Printf("%d source(s) could not be read; see FAIL lines above\n", unreadable)
 			os.Exit(1)
 		}
 

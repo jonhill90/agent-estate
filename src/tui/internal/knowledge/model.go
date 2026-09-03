@@ -9,6 +9,7 @@ import (
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/jonhill90/agent-estate/src/tui/internal/knowledgeindex"
 	"github.com/jonhill90/agent-estate/src/tui/internal/theme"
 )
 
@@ -37,6 +38,14 @@ type mode int
 const (
 	modeList mode = iota
 	modeReading
+	// modeCompiled is `estate knowledge`'s own compiled index
+	// (internal/knowledgeindex) -- a DIFFERENT, derived read over four
+	// sources (this vault among them), reached from modeList with [c],
+	// back with [esc]/[left], the same shape modeReading already uses.
+	// Never confuse this with modeReading: modeReading opens one fact
+	// from THIS vault; modeCompiled shows a regenerated cross-source
+	// index that only ever reads this vault, never writes it.
+	modeCompiled
 )
 
 // sortMode is the list's own sort key -- both options are computable from
@@ -114,6 +123,14 @@ type Model struct {
 	listVP viewport.Model
 	bodyVP viewport.Model
 
+	// compiled is the compiled-index sub-pane (modeCompiled) --
+	// `estate knowledge`'s own output (internal/knowledgeindex), read
+	// via its own Fetcher, never this package's own fetch/loadFact. Its
+	// zero value (New's own default, no fetch wired) renders an honest
+	// "index unreadable" rather than fabricated content; WithCompiled
+	// below wires a real Fetcher in, same shape WithTheme uses.
+	compiled knowledgeindex.Model
+
 	width, height int
 	quitting      bool
 
@@ -129,10 +146,20 @@ func New(fetch Fetcher, loadFact FactLoader) Model {
 		cache:    map[string]Fact{},
 		listVP:   viewport.New(0, 0),
 		bodyVP:   viewport.New(0, 0),
+		compiled: knowledgeindex.New(nil),
 		width:    100,
 		height:   30,
 		theme:    theme.Default,
 	}
+}
+
+// WithCompiled returns a copy of m with modeCompiled's own Fetcher wired
+// to fetch -- cmd/estate's own knowledgeindex.NewFetcher, reading
+// `estate knowledge`'s output file. Left unset, [c] still works but
+// renders the compiled pane's own honest "not generated yet" state.
+func (m Model) WithCompiled(fetch knowledgeindex.Fetcher) Model {
+	m.compiled = knowledgeindex.New(fetch)
+	return m
 }
 
 // WithTheme returns a copy of m painted with th -- the same per-pane seam
@@ -140,6 +167,7 @@ func New(fetch Fetcher, loadFact FactLoader) Model {
 func (m Model) WithTheme(th theme.Theme, notice string) Model {
 	m.theme = th
 	m.themeNotice = notice
+	m.compiled = m.compiled.WithTheme(th, notice)
 	return m.sync()
 }
 
@@ -166,7 +194,11 @@ func (m Model) Rows() []Row {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(refreshCmd(), doFetch(m.fetch))
+	// m.compiled.Init fires its own fetch here too, so [c] usually shows
+	// an already-loaded compiled index rather than a fresh "loading"
+	// frame every time -- the same background-refresh property
+	// internal/shell.routeAll already gives every top-level pane.
+	return tea.Batch(refreshCmd(), doFetch(m.fetch), m.compiled.Init())
 }
 
 func refreshCmd() tea.Cmd {
@@ -193,7 +225,22 @@ func doLoadFact(loadFact FactLoader, slug string) tea.Cmd {
 	}
 }
 
+// Update forwards every message to the compiled-index sub-model FIRST,
+// unconditionally -- internal/knowledgeindex.Model's own fetch-result
+// message is a type this package's switch below never names, so without
+// this it would silently vanish and [c] would show stale content
+// forever. The same shape as this package's own factResultMsg handling,
+// just for a whole sub-model rather than one cached field.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	next, compiledCmd := m.compiled.Update(msg)
+	m.compiled = next.(knowledgeindex.Model)
+
+	nm, cmd := m.updateSelf(msg)
+	m = nm.(Model)
+	return m, tea.Batch(cmd, compiledCmd)
+}
+
+func (m Model) updateSelf(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -245,6 +292,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, func() tea.Msg { return theme.CycleRequestedMsg{} }
 	}
 
+	if m.mode == modeCompiled {
+		switch msg.String() {
+		case "esc", "left":
+			m.mode = modeList
+			return m.sync(), nil
+		}
+		// Every other key is already handled by Update's own
+		// unconditional forward into m.compiled, above -- handleKey only
+		// owns the mode transition back out, the same split modeGraph
+		// (internal/memgraph, once wired) uses for the same reason.
+		return m, nil
+	}
+
 	if m.mode == modeReading {
 		switch msg.String() {
 		case "esc", "left":
@@ -288,6 +348,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "r":
 		return m, doFetch(m.fetch)
+	case "c":
+		m.mode = modeCompiled
+		return m.sync(), nil
 	case "s":
 		m.sort = (m.sort + 1) % 2
 		return m.sync(), nil
