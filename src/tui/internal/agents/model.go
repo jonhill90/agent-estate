@@ -7,6 +7,7 @@ import (
 
 	"github.com/jonhill90/agent-estate/src/tui/internal/board"
 	"github.com/jonhill90/agent-estate/src/tui/internal/cost"
+	"github.com/jonhill90/agent-estate/src/tui/internal/estatus"
 	"github.com/jonhill90/agent-estate/src/tui/internal/lane"
 	"github.com/jonhill90/agent-estate/src/tui/internal/theme"
 )
@@ -59,6 +60,14 @@ type TaskFetcher func() ([]board.TaskRow, error)
 // find, so a nil map from a nil fetch degrades identically.
 type CostFetcher func() (map[string]cost.Figure, error)
 
+// LedgerFetcher retrieves the estate's own dispatch-ledger state -- see
+// ledger.go's own package doc comment for why this is a second, additive
+// source rather than a replacement for Fetcher. estatus.Read/ReadWithTickErr
+// never return an error (every failure lands in Status's own typed
+// Availability fields), so unlike Fetcher this seam has no error return of
+// its own to plumb through.
+type LedgerFetcher func() estatus.Status
+
 type refreshMsg time.Time
 type costRefreshMsg time.Time
 type fetchResultMsg struct {
@@ -73,6 +82,7 @@ type costFetchResultMsg struct {
 	costs map[string]cost.Figure
 	err   error
 }
+type ledgerFetchResultMsg struct{ status estatus.Status }
 
 // Model is S6's Bubble Tea program: a flat, estate-wide list of agents
 // (Row, one per tmux lane across every session) with model/cost always
@@ -136,6 +146,14 @@ type Model struct {
 	// never a silently swallowed keypress.
 	notice string
 
+	// ledgerFetch/ledgerStatus are agent-estate#930's addition -- see
+	// ledger.go's own package doc comment. nil ledgerFetch (WithLedger
+	// never called) is a safe, silent "no ledger source configured," the
+	// same convention every other optional seam in this package follows.
+	ledgerFetch   LedgerFetcher
+	ledgerStatus  estatus.Status
+	ledgerFetched bool
+
 	width, height int
 	quitting      bool
 
@@ -172,6 +190,15 @@ func (m Model) WithCosts(fetch CostFetcher) Model {
 	return m
 }
 
+// WithLedger wires in a LedgerFetcher -- see this package's ledger.go doc
+// comment for what this adds and why it never replaces Fetcher above. nil
+// is a safe, silent default: View() then renders no ledger section at all,
+// same as WithTasks(nil)/WithCosts(nil) degrade their own columns.
+func (m Model) WithLedger(fetch LedgerFetcher) Model {
+	m.ledgerFetch = fetch
+	return m
+}
+
 // WithTheme returns a copy of m painted with th -- the same per-pane seam
 // every other package in this repo exposes.
 func (m Model) WithTheme(th theme.Theme, notice string) Model {
@@ -193,6 +220,9 @@ func (m Model) Init() tea.Cmd {
 	}
 	if m.costFetch != nil {
 		cmds = append(cmds, costRefreshCmd(), doCostFetch(m.costFetch))
+	}
+	if m.ledgerFetch != nil {
+		cmds = append(cmds, doLedgerFetch(m.ledgerFetch))
 	}
 	return tea.Batch(cmds...)
 }
@@ -229,6 +259,17 @@ func doCostFetch(fetch CostFetcher) tea.Cmd {
 	}
 }
 
+// doLedgerFetch reads a plain local file (estatus.Read's own doc comment:
+// "never returns an error"), unlike doFetch/doCostFetch above -- cheap
+// enough to ride the same refreshInterval cadence as m.fetch rather than
+// needing its own slower ticker the way costRefreshInterval exists for
+// ccusage's real subprocess cost.
+func doLedgerFetch(fetch LedgerFetcher) tea.Cmd {
+	return func() tea.Msg {
+		return ledgerFetchResultMsg{status: fetch()}
+	}
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -249,6 +290,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.taskFetch != nil {
 			cmds = append(cmds, doTaskFetch(m.taskFetch))
+		}
+		if m.ledgerFetch != nil {
+			cmds = append(cmds, doLedgerFetch(m.ledgerFetch))
 		}
 		return m, tea.Batch(cmds...)
 
@@ -293,6 +337,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.err == nil {
 			m.tasks = msg.rows
 		}
+		return m, nil
+
+	case ledgerFetchResultMsg:
+		m.ledgerStatus = msg.status
+		m.ledgerFetched = true
 		return m, nil
 
 	case costFetchResultMsg:

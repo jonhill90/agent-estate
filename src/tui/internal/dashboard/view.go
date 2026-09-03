@@ -8,9 +8,16 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
-	"github.com/jonhill90/agent-estate/src/tui/internal/lane"
 	"github.com/jonhill90/agent-estate/src/tui/internal/theme"
 )
+
+// ledgerStateOrder is src/estate/internal/ledger.State's own four values, in
+// the order dispatched work naturally reads (in flight first, terminal
+// states after) -- repeated here rather than imported (this module's own
+// two-module boundary: internal/estatus already decodes the same JSON
+// without importing src/estate, and this package does the same for display
+// order rather than adding a cross-module dependency for four strings).
+var ledgerStateOrder = []string{"dispatched", "unknown", "complete", "failed"}
 
 var titleStyle = lipgloss.NewStyle().Bold(true)
 var legendStyle = lipgloss.NewStyle().Faint(true)
@@ -79,15 +86,22 @@ func renderUSD(u USD) string {
 	return fmt.Sprintf("$%.2f", u.Value)
 }
 
-// renderAgents shows a total plus every state with at least one agent in
-// it, in internal/lane.AllStates' own order -- stable across runs, and
-// never a wall of thirteen "state: 0" lines drowning the one or two states
-// actually worth looking at. AgentsKnown false (the sessions fetch itself
-// failed) renders "unknown," never "0 total" -- a real answer and a
-// missing one must never look the same.
+// renderAgents shows a total plus every ledger state with at least one
+// in-flight turn in it, in ledgerStateOrder's own order -- stable across
+// runs. AgentsKnown false renders the reason the ledger read failed
+// (AgentsUnavailable -- "absent," "unreadable," or a bare "unknown" if no
+// reason was ever recorded), never "0 total": a real zero-agent estate and
+// a ledger this dashboard could not read must never look the same.
 func renderAgents(s Stats) string {
 	if !s.AgentsKnown {
-		return unknown
+		switch s.AgentsUnavailable {
+		case "absent":
+			return "unknown -- no dispatch has ever been recorded"
+		case "unreadable":
+			return "unknown -- ledger UNREADABLE, this is not zero"
+		default:
+			return unknown
+		}
 	}
 	total := 0
 	for _, n := range s.AgentsByState {
@@ -96,8 +110,8 @@ func renderAgents(s Stats) string {
 	if total == 0 {
 		return "0"
 	}
-	order := make(map[string]int, len(lane.AllStates))
-	for i, st := range lane.AllStates {
+	order := make(map[string]int, len(ledgerStateOrder))
+	for i, st := range ledgerStateOrder {
 		order[st] = i
 	}
 	type kv struct {

@@ -309,6 +309,21 @@ func main() {
 	// leave the other two firing independently.
 	costFetch := cost.Cached(buildCostFetch(*ccusageBin, splitArgs(*ccusageArgs), *claudeBlockLimit, quotaRun, time.Now), costCacheTTL, time.Now)
 
+	// estateLedger is the Go dispatch ledger src/estate's `estate dispatch`
+	// writes -- resolved once, here, so every reader of it (agentsModel's
+	// WithLedger below, buildDashboardFetch, and WithEstateStatus further
+	// down) shares the exact same path rather than each computing its own
+	// default and risking silent drift (agent-estate#930: the Agents pane,
+	// the Dashboard AGENTS figure, and Home's own estate status line all
+	// describe the same estate and must never each answer from a
+	// different file). ESTATE_LEDGER overrides it exactly as src/estate
+	// itself does.
+	estateLedger := os.Getenv("ESTATE_LEDGER")
+	if estateLedger == "" {
+		estateLedger = filepath.Join(os.Getenv("HOME"), ".local", "state", "estate", "ledger.jsonl")
+	}
+	ledgerStatusFetch := func() estatus.Status { return estatus.Read(estateLedger, "") }
+
 	// The shell's rail is ALWAYS on screen (agent-tui#38 acceptance item 2),
 	// so every launch tries a supervisor connection, including a bare
 	// -cost or -gallery start -- those panes themselves still read nothing
@@ -387,7 +402,13 @@ func main() {
 		// "supervisor's default" case) degrades WithSessionName("") to the
 		// same honest "(no task)" a lane the ledger never tracked already
 		// renders -- never a guessed session name.
-		WithSessionName(*session)
+		WithSessionName(*session).
+		// WithLedger is agent-estate#930's addition -- see rail.LedgerFetcher's
+		// own doc comment. sessionsFetch/lanesFetch above both read the
+		// deleted Python MCP server; ledgerStatusFetch (the same estateLedger
+		// path agentsModel/dashboardModel/WithEstateStatus also read) gives
+		// this pane's own "ledger:" line something real to show.
+		WithLedger(ledgerStatusFetch)
 	if client != nil {
 		railModel = railModel.WithOps(sessionops.New(client))
 	}
@@ -445,13 +466,15 @@ func main() {
 	// chat.WithParticipants wires agent-tui#114's room model in --
 	// buildParticipantsFetch (chat.go) reuses sessionsFetch, the exact same
 	// "sessions" MCP call agentsModel (below) and the rail already make,
-	// never a second read. Unlike WithSender above, this is NOT gated on
-	// client != nil: buildParticipantsFetch itself returns nil when
-	// sessionsFetch is nil, and chatModel.WithParticipants(nil) is the same
-	// safe no-op WithSender(nil) already is (ValidateMentions then refuses
-	// every mention as "not in this room" against an empty roster, the
-	// honest answer for a degraded launch, not a crash).
-	chatModel = chatModel.WithParticipants(buildParticipantsFetch(sessionsFetch))
+	// plus ledgerStatusFetch (agent-estate#930's fallback -- see that
+	// function's own doc comment), never a second read of either. Unlike
+	// WithSender above, this is NOT gated on client != nil:
+	// buildParticipantsFetch itself returns nil only when BOTH sources are
+	// nil, and chatModel.WithParticipants(nil) is the same safe no-op
+	// WithSender(nil) already is (ValidateMentions then refuses every
+	// mention as "not in this room" against an empty roster, the honest
+	// answer for a degraded launch, not a crash).
+	chatModel = chatModel.WithParticipants(buildParticipantsFetch(sessionsFetch, ledgerStatusFetch))
 
 	// agentsModel/skillsModel/mcpserversModel/connectorsModel/adminModel
 	// are S6/S8/S9/S10/S11's own panes -- this is the first time any of
@@ -477,9 +500,16 @@ func main() {
 	//     resolving or not.
 	homeDir, homeDirErr := os.UserHomeDir()
 
+	// WithLedger is agent-estate#930's addition -- see internal/agents/
+	// ledger.go's own package doc comment. sessionsFetch above reads the
+	// deleted Python MCP server and is permanently unable to answer in this
+	// tree; ledgerStatusFetch (same estateLedger path WithEstateStatus and
+	// buildDashboardFetch also read) gives this pane something real to show
+	// alongside it.
 	agentsModel := agents.New(sessionsFetch).
 		WithTasks(agents.TaskFetcher(buildTaskFetch(ledgerSrc, *sqliteBin))).
-		WithCosts(buildAgentCostFetch(ledgerSrc, *sqliteBin, *ccusageBin, splitArgs(*ccusageArgs)))
+		WithCosts(buildAgentCostFetch(ledgerSrc, *sqliteBin, *ccusageBin, splitArgs(*ccusageArgs))).
+		WithLedger(ledgerStatusFetch)
 
 	var skillsModel skills.Model
 	var mcpserversModel mcpservers.Model
@@ -519,8 +549,8 @@ func main() {
 	}
 	connectorsModel := connectors.New(connectors.NewFetcher(connectorsPaths))
 
-	// dashboardModel reuses sessionsFetch/costFetch (the same closures
-	// railModel/agentsModel/costModel already call) and board.FetchPRs
+	// dashboardModel reuses estateLedger/costFetch (the same closures
+	// WithEstateStatus below and costModel already call) and board.FetchPRs
 	// over the same gh runner shape buildBoardFetch already builds -- see
 	// buildDashboardFetch's own doc comment (dashboard.go) for why none of
 	// this is a second reader. $AGENT_MEMORY_VAULT resolved once, the same
@@ -528,7 +558,7 @@ func main() {
 	// truth -- empty is a real, silent "no vault configured" (VaultFacts
 	// stays unknown), not an error, matching every other optional input
 	// in this file.
-	dashboardModel := dashboard.New(buildDashboardFetch(*ghBin, *repositories, sessionsFetch, costFetch, os.Getenv("AGENT_MEMORY_VAULT")))
+	dashboardModel := dashboard.New(buildDashboardFetch(*ghBin, *repositories, estateLedger, costFetch, os.Getenv("AGENT_MEMORY_VAULT")))
 
 	start := shell.PaneHome
 	switch {
@@ -591,14 +621,10 @@ func main() {
 	// its live OpenBao deployment, is the source).
 	secretsModel := secrets.New(buildSecretsFetch(resolveSecretsSchema(*secretsSchema, *hill90AppRepo)))
 
-	// estateStatus reads the GO estate -- src/estate's dispatch ledger and the
-	// Director's tick log -- and is read fresh on every render, so Home shows
-	// the state now rather than the state at launch. Paths follow src/estate's
-	// own defaults; ESTATE_LEDGER overrides the ledger exactly as it does there.
-	estateLedger := os.Getenv("ESTATE_LEDGER")
-	if estateLedger == "" {
-		estateLedger = filepath.Join(os.Getenv("HOME"), ".local", "state", "estate", "ledger.jsonl")
-	}
+	// estateStatus reads the GO estate -- src/estate's dispatch ledger (already
+	// resolved above, as estateLedger) and the Director's tick log -- and is
+	// read fresh on every render, so Home shows the state now rather than the
+	// state at launch.
 	// Resolved from this binary's own compiled-in source location
 	// (repoRootFromSource), never from os.Getwd() -- see
 	// resolveTickLogPath's doc comment (tickpath.go) for why a cwd-relative

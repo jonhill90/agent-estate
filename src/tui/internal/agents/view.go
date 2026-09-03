@@ -7,6 +7,7 @@ import (
 
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/jonhill90/agent-estate/src/tui/internal/estatus"
 	"github.com/jonhill90/agent-estate/src/tui/internal/theme"
 )
 
@@ -68,6 +69,8 @@ func (m Model) View() string {
 		}
 	}
 
+	b.WriteString(ledgerSection(m))
+
 	b.WriteString("\n")
 	if m.notice != "" {
 		b.WriteString(legendStyle.Render(m.notice) + "\n")
@@ -75,6 +78,62 @@ func (m Model) View() string {
 	b.WriteString(legendStyle.Render("[n] thread (S7)  [r] refresh  [t] theme  [q] quit"))
 
 	return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(b.String())
+}
+
+// ledgerSection renders agent-estate#930's own addition: what src/estate's
+// Go dispatch ledger says is in flight, ADDITIVE to the table above rather
+// than a replacement for it -- see ledger.go's own package doc comment.
+// Renders nothing at all when no LedgerFetcher was wired (WithLedger never
+// called) or none has answered yet, matching this package's existing
+// "notice only appears when there is something to say" convention.
+//
+// The three ledger.Availability branches below render VISIBLY differently
+// (agent-estate#930's own "second-order lesson"): Absent says a dispatch
+// has never been recorded (first-run, not a fault), Unreadable warns this
+// is not zero, and Present with zero in-flight turns says so as a real
+// answer -- never collapsed into one "no agents" line that could mean any
+// of the three.
+func ledgerSection(m Model) string {
+	if m.ledgerFetch == nil {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("\n" + titleStyle.Render("from the dispatch ledger") + "\n")
+
+	if !m.ledgerFetched {
+		b.WriteString(legendStyle.Render("not fetched yet") + "\n")
+		return b.String()
+	}
+
+	switch m.ledgerStatus.Ledger {
+	case estatus.Absent:
+		b.WriteString(legendStyle.Render("no dispatch has ever been recorded at "+m.ledgerStatus.LedgerPath) + "\n")
+		return b.String()
+	case estatus.Unreadable:
+		errStyle := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Color(theme.RoleError))
+		reason := "no reason recorded"
+		if m.ledgerStatus.LedgerErr != nil {
+			reason = m.ledgerStatus.LedgerErr.Error()
+		}
+		b.WriteString(errStyle.Render("! ledger UNREADABLE, this is not zero: "+reason) + "\n")
+		return b.String()
+	}
+
+	rows := DeriveLedger(m.ledgerStatus)
+	if len(rows) == 0 {
+		b.WriteString(legendStyle.Render("0 turns in flight") + "\n")
+		return b.String()
+	}
+	b.WriteString(legendStyle.Render(fmt.Sprintf("%-28s %-10s %-9s %-11s %-25s %s", "ID", "ISSUE", "ROLE", "STATE", "STARTED", "PID")) + "\n")
+	for _, r := range rows {
+		pid := unknown
+		if r.PID != nil {
+			pid = fmt.Sprintf("%d", *r.PID)
+		}
+		b.WriteString(fmt.Sprintf("%-28s %-10s %-9s %-11s %-25s %s", truncate(r.ID, 28), truncate(r.Issue, 10), truncate(r.Role, 9), truncate(r.State, 11), r.Started, pid) + "\n")
+	}
+	return b.String()
 }
 
 func truncate(s string, n int) string {

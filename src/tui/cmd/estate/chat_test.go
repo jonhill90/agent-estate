@@ -3,8 +3,10 @@ package main
 import (
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/jonhill90/agent-estate/src/tui/internal/chat"
+	"github.com/jonhill90/agent-estate/src/tui/internal/estatus"
 	"github.com/jonhill90/agent-estate/src/tui/internal/lane"
 )
 
@@ -23,7 +25,7 @@ func TestBuildParticipantsFetch_DerivesRunningFromLaneState(t *testing.T) {
 				{Name: "carol", State: "stale"},
 			}},
 		}, nil
-	})
+	}, nil)
 
 	got, err := fetch()
 	if err != nil {
@@ -51,7 +53,7 @@ func TestBuildParticipantsFetch_SkipsUnreadableSessions(t *testing.T) {
 			{Name: "broken", Error: "session closed mid-read", Lanes: []lane.Lane{{Name: "ghost", State: "busy"}}},
 			{Name: "ok", Lanes: []lane.Lane{{Name: "alice", State: "busy"}}},
 		}, nil
-	})
+	}, nil)
 
 	got, err := fetch()
 	if err != nil {
@@ -68,7 +70,7 @@ func TestBuildParticipantsFetch_SkipsUnreadableSessions(t *testing.T) {
 // "blind, not quiet" rule this module applies to every other Fetcher.
 func TestBuildParticipantsFetch_PropagatesFetchError(t *testing.T) {
 	wantErr := errors.New("no supervisor connection")
-	fetch := buildParticipantsFetch(func() ([]lane.Session, error) { return nil, wantErr })
+	fetch := buildParticipantsFetch(func() ([]lane.Session, error) { return nil, wantErr }, nil)
 
 	_, err := fetch()
 	if !errors.Is(err, wantErr) {
@@ -76,13 +78,58 @@ func TestBuildParticipantsFetch_PropagatesFetchError(t *testing.T) {
 	}
 }
 
-// TestBuildParticipantsFetch_NilSessionsFetchIsANilFetcher proves
+// TestBuildParticipantsFetch_BothNilIsANilFetcher proves
 // chatModel.WithParticipants(nil) degrades exactly like WithSender(nil) --
-// never wrapping a nil dependency in a closure that would panic the first
-// time it is called.
-func TestBuildParticipantsFetch_NilSessionsFetchIsANilFetcher(t *testing.T) {
-	var fetch chat.ParticipantsFetcher = buildParticipantsFetch(nil)
+// never wrapping two nil dependencies in a closure that would panic the
+// first time it is called.
+func TestBuildParticipantsFetch_BothNilIsANilFetcher(t *testing.T) {
+	var fetch chat.ParticipantsFetcher = buildParticipantsFetch(nil, nil)
 	if fetch != nil {
-		t.Fatal("buildParticipantsFetch(nil) returned a non-nil Fetcher")
+		t.Fatal("buildParticipantsFetch(nil, nil) returned a non-nil Fetcher")
+	}
+}
+
+// TestBuildParticipantsFetch_LedgerFallbackFillsInWhenSessionsFetchIsNil is
+// agent-estate#930's own reproduction: sessionsFetch reads the deleted
+// Python MCP server and is nil/always-erroring in a real launch. The ledger
+// fallback must still produce a real, addressable roster from in-flight
+// dispatches.
+func TestBuildParticipantsFetch_LedgerFallbackFillsInWhenSessionsFetchIsNil(t *testing.T) {
+	fetch := buildParticipantsFetch(nil, func() estatus.Status {
+		return estatus.Status{
+			InFlight: []estatus.Dispatch{
+				{ID: "930-1", Issue: "#930", State: "dispatched", At: time.Now()},
+			},
+		}
+	})
+
+	got, err := fetch()
+	if err != nil {
+		t.Fatalf("fetch() = %v, want nil", err)
+	}
+	if len(got) != 1 || got[0].Name != "930-1" || !got[0].Running {
+		t.Fatalf("fetch() = %+v, want one running participant \"930-1\"", got)
+	}
+}
+
+// TestBuildParticipantsFetch_LedgerFallbackSuppressesSessionsErrorWhenItHasData
+// confirms a dead MCP server's error does not blank a roster the ledger
+// fallback could still populate -- ValidateMentions needs a real list to
+// check against, not a total failure just because one of two sources is
+// down.
+func TestBuildParticipantsFetch_LedgerFallbackSuppressesSessionsErrorWhenItHasData(t *testing.T) {
+	fetch := buildParticipantsFetch(
+		func() ([]lane.Session, error) { return nil, errors.New("no supervisor connection") },
+		func() estatus.Status {
+			return estatus.Status{InFlight: []estatus.Dispatch{{ID: "930-1", State: "dispatched", At: time.Now()}}}
+		},
+	)
+
+	got, err := fetch()
+	if err != nil {
+		t.Fatalf("fetch() = %v, want nil (ledger fallback found participants)", err)
+	}
+	if len(got) != 1 || got[0].Name != "930-1" {
+		t.Fatalf("fetch() = %+v, want one participant \"930-1\"", got)
 	}
 }

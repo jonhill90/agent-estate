@@ -226,3 +226,66 @@ func TestLinesShowsInFlightDispatches(t *testing.T) {
 		t.Errorf("an in-flight dispatch must be listed; got:\n%s", out)
 	}
 }
+
+// Role and PID are agent-facing fields (agent-estate#930): the Agents/Lanes
+// views need them to describe a turn without inventing tmux-shaped data.
+// Both must decode from the same JSON src/estate's ledger.Record writes.
+func TestDispatchDecodesRoleAndPID(t *testing.T) {
+	s := Read(write(t, "l.jsonl",
+		`{"id":"930-1","issue":"#930","role":"reviewer","state":"dispatched","at":"2026-09-03T10:00:00Z","pid":4242}`),
+		missing(t, "t.jsonl"))
+	if len(s.Dispatches) != 1 {
+		t.Fatalf("want 1 dispatch, got %d", len(s.Dispatches))
+	}
+	d := s.Dispatches[0]
+	if d.Role != "reviewer" {
+		t.Errorf("Role = %q, want %q", d.Role, "reviewer")
+	}
+	if d.PID != 4242 {
+		t.Errorf("PID = %d, want 4242", d.PID)
+	}
+}
+
+// A record written before Role/PID existed must decode as empty/zero, never
+// as a fabricated default -- this package's own reader does not apply
+// src/estate's EffectiveRole default; a caller that wants that must ask for
+// it explicitly.
+func TestDispatchWithoutRoleOrPIDDecodesZero(t *testing.T) {
+	s := Read(write(t, "l.jsonl",
+		`{"id":"old-1","issue":"#1","state":"complete","at":"2026-09-01T00:00:00Z"}`),
+		missing(t, "t.jsonl"))
+	d := s.Dispatches[0]
+	if d.Role != "" {
+		t.Errorf("Role = %q, want empty for a pre-Role record", d.Role)
+	}
+	if d.PID != 0 {
+		t.Errorf("PID = %d, want 0 for a pre-PID record", d.PID)
+	}
+}
+
+// Worktree only ever reports ok=true for the exact "worktree <path>" shape
+// src/estate's dispatch path writes (main.go: `Note: "worktree " + wt.Path`)
+// -- any other Note (a failure reason, empty, or free text that merely
+// starts differently) must report not-found rather than a guessed path.
+func TestDispatchWorktree(t *testing.T) {
+	cases := []struct {
+		name     string
+		note     string
+		wantOK   bool
+		wantPath string
+	}{
+		{"real worktree note", "worktree /tmp/estate-dispatch/repo-abc/930-1", true, "/tmp/estate-dispatch/repo-abc/930-1"},
+		{"failure note", "failed to start: exec: not found", false, ""},
+		{"empty note", "", false, ""},
+		{"prefix with no path", "worktree ", false, ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			d := Dispatch{Note: c.note}
+			path, ok := d.Worktree()
+			if ok != c.wantOK || path != c.wantPath {
+				t.Errorf("Worktree() = (%q, %v), want (%q, %v)", path, ok, c.wantPath, c.wantOK)
+			}
+		})
+	}
+}

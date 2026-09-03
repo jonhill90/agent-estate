@@ -7,21 +7,21 @@ import (
 	"github.com/jonhill90/agent-estate/src/tui/internal/board"
 	"github.com/jonhill90/agent-estate/src/tui/internal/cost"
 	"github.com/jonhill90/agent-estate/src/tui/internal/dashboard"
+	"github.com/jonhill90/agent-estate/src/tui/internal/estatus"
 	"github.com/jonhill90/agent-estate/src/tui/internal/knowledge"
-	"github.com/jonhill90/agent-estate/src/tui/internal/lane"
 )
 
 // buildDashboardFetch composes four seams this file already opens for other
-// panes -- sessionsFetch (the same "sessions" MCP call the rail and
-// agentsModel already make), board.FetchPRs over the same board.ExecRunner
-// shape buildBoardFetch already uses, costFetch (the same ccusage read
-// costModel already makes), and knowledge.LoadIndex (the one-file vault
-// read internal/knowledge's own package doc comment establishes) -- into
-// dashboard.Stats. None of these is a second reader of its source: each
-// call below re-invokes an existing Fetcher-shaped VALUE or exported
-// function with the same construction this file already resolved from
-// flags/env, exactly how sessionsFetch is already shared between railModel
-// and agentsModel (main.go's own comment on that closure).
+// panes -- estatus.ReadLedger (the same Go dispatch ledger Home's own
+// estateStatus already reads, agent-estate#930's fix for AGENTS having
+// previously read the deleted Python MCP server), board.FetchPRs over the
+// same board.ExecRunner shape buildBoardFetch already uses, costFetch (the
+// same ccusage read costModel already makes), and knowledge.LoadIndex (the
+// one-file vault read internal/knowledge's own package doc comment
+// establishes) -- into dashboard.Stats. None of these is a second reader of
+// its source: estateLedgerPath is the exact path main.go already resolves
+// for WithEstateStatus, re-read here rather than duplicated as a second
+// ledger.
 //
 // Every failure below leaves its OWN Stats field unknown rather than
 // failing the whole fetch (Stats' own doc comment) -- a `gh` rate limit
@@ -35,28 +35,26 @@ import (
 // draw two numbers, and DefaultRepos already covers every repo any real
 // dispatch has ever named (repo.go's own doc comment). Documented here as
 // a deliberate narrowing, not an oversight.
-func buildDashboardFetch(ghBin, reposEnv string, sessionsFetch func() ([]lane.Session, error), costFetch cost.Fetcher, vaultDir string) dashboard.Fetcher {
+func buildDashboardFetch(ghBin, reposEnv, estateLedgerPath string, costFetch cost.Fetcher, vaultDir string) dashboard.Fetcher {
 	ghRun := board.GitHubRunner(board.ExecRunner(ghBin))
 	repos := board.ReposFor(reposEnv, nil)
 
 	return func() (dashboard.Stats, error) {
 		var s dashboard.Stats
 
-		if sessions, err := sessionsFetch(); err == nil {
+		switch avail, _, _, inFlight := estatus.ReadLedger(estateLedgerPath); avail {
+		case estatus.Present:
 			counts := make(map[string]int)
-			for _, session := range sessions {
-				for _, l := range session.Lanes {
-					counts[l.State]++
-				}
+			for _, d := range inFlight {
+				counts[d.State]++
 			}
 			s.AgentsByState = counts
 			s.AgentsKnown = true
+		case estatus.Absent:
+			s.AgentsUnavailable = "absent"
+		case estatus.Unreadable:
+			s.AgentsUnavailable = "unreadable"
 		}
-		// err != nil: AgentsKnown stays false, AgentsByState stays nil --
-		// the sessions fetch itself already distinguishes "no supervisor
-		// connection" from "connected, zero lanes" (main.go's own
-		// sessionsFetch), and that distinction is preserved here by simply
-		// not guessing when it errors.
 
 		// One gh call per repo (board.FetchPRs already asks for every
 		// state in one request, not three) -- open count and merged-today

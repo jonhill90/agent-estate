@@ -19,15 +19,27 @@ import (
 // cmd/estate/chat.go's buildParticipantsFetch) -- never a hardcoded list,
 // per the issue's own explicit requirement.
 type Participant struct {
-	Name    string // the mention token, without "@" -- lane.Lane.Name
-	Session string // which tmux session this lane runs in
+	Name string // the mention token, without "@" -- lane.Lane.Name, or a ledger dispatch id (see Session below)
+
+	// Session is which tmux session this lane runs in, or "" for a
+	// participant sourced from src/estate's own dispatch ledger instead of
+	// a live tmux/MCP read (agent-estate#930: that MCP server no longer
+	// exists in this repository, so cmd/estate's buildParticipantsFetch
+	// falls back to the ledger when it has nothing else to offer). "" is
+	// never a real tmux session name here -- a ledger-sourced Participant's
+	// Name is the dispatch's own id, not a pane name, so it cannot collide
+	// with one built from a real session.
+	Session string
 
 	// Running is false for a lane whose own state is "dead" or "stale" --
 	// the same read internal/agents' modeFor already uses for "is a
 	// process actually here to address" (that package's own doc comment
-	// explains the evidence). A participant can be a real, known name and
-	// still not be running; ValidateMentions treats the two as distinct
-	// refusal reasons so the composer's error says which one it is.
+	// explains the evidence) -- or, for a ledger-sourced Participant,
+	// whether the dispatch is still IN FLIGHT (src/estate's own
+	// dispatched/unknown states -- internal/estatus.Status.InFlight's own
+	// filter). A participant can be a real, known name and still not be
+	// running; ValidateMentions treats the two as distinct refusal reasons
+	// so the composer's error says which one it is.
 	Running bool
 }
 
