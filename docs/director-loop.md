@@ -1,6 +1,6 @@
 # The Director's loop
 
-`Verified 2026-09-02.`
+`Verified 2026-09-03.`
 
 The Director runs on a cron inside the Claude Code ecosystem — never `launchd`,
 never `crontab`, never a shell script on a timer (brief §10, and
@@ -15,12 +15,17 @@ Recreate with `CronCreate`, `*/3 * * * *`, recurring:
 ```
 Director tick.
 
-1. Run `go run ./src/estate tick check` FIRST.
+1. Run `go build -o /tmp/estate-bin ./src/estate && /tmp/estate-bin tick check`
+   FIRST -- NOT `go run`. `go run` reports a child's exit code as text on
+   stderr (`exit status 3`) and exits 1 itself, so exit 3 (STALLED,
+   escalated) arrives indistinguishable from exit 1 (STALLED, unacknowledged)
+   -- see agent-estate#968. Believe the exit code of `/tmp/estate-bin`, never
+   of a `go run` wrapper around it.
    - Exit 0: continue.
    - Exit 1 (STALLED, unacknowledged): escalate per brief §6, then run
-     `go run ./src/estate tick escalate <phase-item> <where>` naming the
-     phase item and where you told the human, and stop -- do nothing else
-     this tick.
+     `go build -o /tmp/estate-bin ./src/estate && /tmp/estate-bin tick
+     escalate <phase-item> <where>` naming the phase item and where you told
+     the human, and stop -- do nothing else this tick.
    - Exit 3 (STALLED, escalated): this phase item/src head is still stuck
      and a human has already been told. Do not re-escalate the same stall
      every tick -- work something ELSE (a different phase item, or nothing,
@@ -30,7 +35,8 @@ Director tick.
 2. Read docs/director-brief.md §3 and docs/phase-plan.md.
 3. Advance exactly one phase item. Never work a menu. "I did not advance it,
    and why" is a legitimate result.
-4. Record it: `go run ./src/estate tick record <phase-item> [artifact]`.
+4. Record it: `go build -o /tmp/estate-bin ./src/estate && /tmp/estate-bin
+   tick record <phase-item> [artifact]`.
    Omit the artifact when there was none — do not invent one, and do not
    record "" to dodge the stop condition. **Never put an escalation's
    detail here** (a Telegram link, "told Jon") -- that goes through
@@ -98,6 +104,27 @@ artifact recorded since the last tick. Escalating the same stall over and
 over is counted, not hidden: `tick check`'s output says how many times, so a
 loop escalating every tick reads differently from one that escalated once
 and moved to other work.
+
+## Why step 1 builds the binary instead of `go run`ning it (agent-estate#968)
+
+`go run ./src/estate tick check` does not preserve the child's exit code: Go
+reports it as text on stderr (`exit status 3`) and `go run` itself always
+exits `1` when the child exits non-zero. Through that wrapper, exit 3
+(STALLED, escalated) and exit 1 (STALLED, unacknowledged) both arrive as `1`
+-- the one distinction the escalation mechanism exists to make disappears at
+the exact layer that was supposed to read it. #965's own review was asked to
+check every caller of `tick check` including this file, and approved anyway,
+because it checked the binary directly rather than the `go run` invocation
+the loop actually issues -- the same failure mode this repo names most
+often, aimed at itself.
+
+The fix changes the invocation, not `tick check`: build once
+(`go build -o /tmp/estate-bin ./src/estate`), then run the compiled binary
+and believe **its** exit code. `go build` is incremental -- with nothing
+under `src/estate` changed since the last tick it costs a few hundred
+milliseconds, not a full rebuild -- so doing it every tick (and before each
+of `tick check`/`tick escalate`/`tick record`, since all three lose the same
+fidelity through `go run`) is not a meaningful tax on the 3-minute cadence.
 
 ## Why step 1 is step 1
 
