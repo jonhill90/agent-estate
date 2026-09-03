@@ -21,6 +21,7 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/corpus"
 	"github.com/jonhill90/agent-estate/estate/internal/dispatchid"
 	"github.com/jonhill90/agent-estate/estate/internal/gate"
+	"github.com/jonhill90/agent-estate/estate/internal/harness"
 	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 	"github.com/jonhill90/agent-estate/estate/internal/knowledge"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
@@ -219,8 +220,11 @@ func usage() {
 	fmt.Fprint(os.Stderr, `estate -- the supervisor
 
   estate pressure                       report whether the host can take work
-  estate dispatch <issue> <brief-file>  run one agent turn (role=author), gated and recorded
-  estate dispatch review <pr> <issue> <brief-file>
+  estate dispatch [--harness=NAME] <issue> <brief-file>
+                                        run one agent turn (role=author), gated and recorded.
+                                        harness defaults to $ESTATE_HARNESS or "claude"; see
+                                        internal/harness for what's registered
+  estate dispatch [--harness=NAME] review <pr> <issue> <brief-file>
                                         run one review turn (role=reviewer) against a PR
   estate dispatch fix <pr> <issue> <brief-file>
                                         run one fix-pass turn (role=author, PR-scoped)
@@ -674,6 +678,24 @@ func main() {
 			usage()
 			os.Exit(2)
 		}
+		// Which harness runs this turn. A --harness= token can appear
+		// anywhere in the argument list (it is not positional, unlike
+		// everything else here), so it is stripped out before role/issue/
+		// brief parsing looks at fixed positions. Defaults to $ESTATE_HARNESS,
+		// then "claude", so every dispatch site that predates internal/harness
+		// keeps behaving exactly as before without being touched.
+		harnessName := os.Getenv("ESTATE_HARNESS")
+		if harnessName == "" {
+			harnessName = "claude"
+		}
+		rest := make([]string, 0, len(os.Args)-2)
+		for _, a := range os.Args[2:] {
+			if strings.HasPrefix(a, "--harness=") {
+				harnessName = strings.TrimPrefix(a, "--harness=")
+				continue
+			}
+			rest = append(rest, a)
+		}
 		// A review turn is dispatched against the same issue as the work it
 		// reviews, so the issue alone can never tell the merge gate apart
 		// from an authoring turn (agent-estate#926). Role, recorded here at
@@ -685,37 +707,56 @@ func main() {
 		// existing pull request (agent-estate#940's "does not survive a fix
 		// pass" follow-up) rather than open a new one. It reuses reviewPR
 		// to carry the PR number -- the two are mutually exclusive by
-		// os.Args[2], never both set -- and is recorded on the ledger via
+		// rest[0], never both set -- and is recorded on the ledger via
 		// the SAME PR field a role=reviewer turn already uses, so the gate
 		// can scope a fix-pass lookup to "completed role=author records for
 		// THIS PR" without a new record shape.
 		fixPass := false
-		issueIdx, briefIdx := 2, 3
-		switch os.Args[2] {
-		case "review":
-			if len(os.Args) < 6 {
+		issueIdx, briefIdx := 0, 1
+		switch {
+		case len(rest) > 0 && rest[0] == "review":
+			if len(rest) < 4 {
 				fmt.Fprintln(os.Stderr, "estate: dispatch review needs <pr> <issue> <brief-file>")
 				os.Exit(2)
 			}
 			role = ledger.RoleReviewer
-			if _, err := fmt.Sscanf(os.Args[3], "%d", &reviewPR); err != nil {
-				fmt.Fprintln(os.Stderr, "estate: pr must be a number:", os.Args[3])
+			if _, err := fmt.Sscanf(rest[1], "%d", &reviewPR); err != nil {
+				fmt.Fprintln(os.Stderr, "estate: pr must be a number:", rest[1])
 				os.Exit(2)
 			}
-			issueIdx, briefIdx = 4, 5
-		case "fix":
-			if len(os.Args) < 6 {
+			issueIdx, briefIdx = 2, 3
+		case len(rest) > 0 && rest[0] == "fix":
+			if len(rest) < 4 {
 				fmt.Fprintln(os.Stderr, "estate: dispatch fix needs <pr> <issue> <brief-file>")
 				os.Exit(2)
 			}
 			fixPass = true
-			if _, err := fmt.Sscanf(os.Args[3], "%d", &reviewPR); err != nil {
-				fmt.Fprintln(os.Stderr, "estate: pr must be a number:", os.Args[3])
+			if _, err := fmt.Sscanf(rest[1], "%d", &reviewPR); err != nil {
+				fmt.Fprintln(os.Stderr, "estate: pr must be a number:", rest[1])
 				os.Exit(2)
 			}
-			issueIdx, briefIdx = 4, 5
+			issueIdx, briefIdx = 2, 3
+		default:
+			if len(rest) < 2 {
+				usage()
+				os.Exit(2)
+			}
 		}
-		issue, briefPath := os.Args[issueIdx], os.Args[briefIdx]
+		issue, briefPath := rest[issueIdx], rest[briefIdx]
+		// Refused rather than defaulted when unknown: silently falling back
+		// to claude would run the turn on a harness the caller did not
+		// choose. Checked here, before the brief is even read, so an unknown
+		// or uninstalled harness never gets as far as touching pressure,
+		// ledger, or worktree state.
+		h, err := harness.Lookup(harnessName)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch --", err)
+			os.Exit(1)
+		}
+		if ok, _ := harness.Available(harnessName); !ok {
+			fmt.Fprintf(os.Stderr, "estate: refusing to dispatch -- harness %q is registered but its binary is not on PATH\n", harnessName)
+			os.Exit(1)
+		}
 		brief, err := os.ReadFile(briefPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot read brief:", err)
@@ -810,10 +851,18 @@ func main() {
 
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, "claude", "-p", "--output-format", "json",
-			"--dangerously-skip-permissions")
-		cmd.Dir = wt.Path
-		cmd.Stdin = strings.NewReader(grounded)
+		// h.Start builds the command, wires the prompt to its stdin, and
+		// hands back how to read the agent's final message out of whatever
+		// shape this harness produces -- see internal/harness's doc comment
+		// for why that split exists. The ledger, the gate and the worktree
+		// stay owned here regardless of which harness ran the turn.
+		turn, err := h.Start(ctx, wt.Path, grounded)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		defer turn.Cleanup()
+		cmd := turn.Cmd
 		var stdout bytes.Buffer
 		cmd.Stdout = &stdout
 		// exec.Cmd.Output() only captures the child's stderr into the
@@ -846,7 +895,7 @@ func main() {
 			fmt.Fprintln(os.Stderr, "estate: cannot record dispatch:", err)
 			os.Exit(2)
 		}
-		fmt.Printf("dispatched %s (role=%s, pid=%d) in %s (grounded in %d operator parameters)\n", id, role, pid, wt.Path, len(params))
+		fmt.Printf("dispatched %s (role=%s, harness=%s, pid=%d) in %s (grounded in %d operator parameters)\n", id, role, harnessName, pid, wt.Path, len(params))
 
 		runErr := cmd.Wait()
 		out := stdout.Bytes()
@@ -871,16 +920,16 @@ func main() {
 			// stdout -- see its own doc comment for why.
 			rec.Note = runErr.Error() + "; " + stderrSegment(stderrBuf.Bytes(), true) + "; " + stdoutDiagnosticSegment(out)
 		default:
-			rec.State = ledger.Complete
-			var parsed map[string]any
-			if json.Unmarshal(out, &parsed) == nil {
-				if s, ok := parsed["result"].(string); ok {
-					rec.Result = s
-				}
+			// Reading the result is the harness's job -- each one emits its
+			// own shape (claude's single JSON envelope on stdout, codex's
+			// own result file). Exit 0 with output the harness cannot read
+			// is NOT a clean completion, and is recorded Unknown rather than
+			// Failed: the turn may well have done its work.
+			res, resErr := turn.Result(out)
+			if resErr != nil {
+				rec.State, rec.Note = ledger.Unknown, resErr.Error()
 			} else {
-				// Exited 0 but we could not parse what it said. That is not a
-				// clean completion; record it honestly.
-				rec.State, rec.Note = ledger.Unknown, "exit 0 but result was not parseable JSON"
+				rec.State, rec.Result = ledger.Complete, res
 			}
 		}
 
