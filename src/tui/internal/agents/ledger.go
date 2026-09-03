@@ -1,13 +1,13 @@
 // ledger.go is agent-estate#930's fix for this package's own defect: Model
 // (model.go) has always been fed exclusively by Fetcher, the "sessions" MCP
-// call agent-supervisor's Python server used to answer. That server does
-// not exist in this repository (`git ls-files scripts/supervisor` is empty;
-// only `reference/` -- never maintained, run, tested, or fixed -- has it),
-// so Fetcher's client is nil in every real launch and this pane has never
-// once been able to show a real agent. It failed HONESTLY (fetchErr names
-// "no supervisor connection") -- which is exactly why nobody noticed: an
-// unavailable-for-one-tick seam and a seam deleted from the repository
-// render identically, forever.
+// call the deleted Python supervisor's server used to answer. That server
+// does not exist in this repository (`git ls-files scripts/supervisor` is
+// empty; only `reference/` -- never maintained, run, tested, or fixed --
+// has it), so Fetcher's client is nil in every real launch and this pane
+// has never once been able to show a real agent. It failed HONESTLY
+// (fetchErr names "no supervisor connection") -- which is exactly why nobody
+// noticed: an unavailable-for-one-tick seam and a seam deleted from the
+// repository render identically, forever.
 //
 // This file adds a second, independent, additive source: src/estate's own
 // Go dispatch ledger, the same file Home's internal/estatus already reads.
