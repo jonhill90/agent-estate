@@ -12,6 +12,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"strconv"
@@ -25,6 +26,7 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 	"github.com/jonhill90/agent-estate/estate/internal/knowledge"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
+	"github.com/jonhill90/agent-estate/estate/internal/mirror"
 	"github.com/jonhill90/agent-estate/estate/internal/pressure"
 	"github.com/jonhill90/agent-estate/estate/internal/reclaim"
 	"github.com/jonhill90/agent-estate/estate/internal/spend"
@@ -1077,6 +1079,58 @@ func main() {
 		// exists, would leave the earlier PID-less shape and give
 		// internal/reclaim nothing to check.
 
+		// Make the turn watchable before it starts. 208 dispatches have run
+		// and the operator could not watch one of them
+		// (agent-estate#1001); his parameters
+		// `terminals=tmux_persistent_required` and
+		// `observability=jon_can_watch_via_tmux` say that is the wrong shape.
+		//
+		// This is a MIRROR, not a transport. The turn below is still the
+		// subprocess whose stdout this function reads; internal/mirror only
+		// tees that stream into a transcript and opens a tmux window running
+		// `tail -f` on it. Nothing types into that pane -- internal/mirror has
+		// a test that fails if send-keys ever appears in it.
+		//
+		// The bound is the in-flight cap, read from the same pressure.Default()
+		// that bounds concurrent turns rather than written down twice, so the
+		// two cannot drift. A mirror that cannot be opened -- no tmux, or every
+		// window in the bound belongs to a live turn -- is reported and then
+		// ignored: visibility never gates work.
+		mcfg := mirror.Default(pressure.Default().MaxInFlight)
+		if os.Getenv("ESTATE_MIRROR") == "0" {
+			mcfg.Enabled = false
+		}
+		if s := os.Getenv("ESTATE_MIRROR_SESSION"); s != "" {
+			mcfg.Session = s
+		}
+		if d := os.Getenv("ESTATE_MIRROR_DIR"); d != "" {
+			mcfg.Dir = d
+		}
+		// Scopes every tmux call this dispatch makes to a private socket
+		// directory with $TMUX unset. Production leaves it empty and uses the
+		// operator's own server; it exists so a demonstration or an
+		// end-to-end check can drive a REAL dispatch without addressing the
+		// default socket, which is invariant 4's whole point.
+		if d := os.Getenv("ESTATE_MIRROR_TMUX_TMPDIR"); d != "" {
+			mcfg.TmuxTmpdir = d
+		}
+		mir, merr := mirror.Open(mcfg, mirror.Meta{
+			ID: id, Issue: issue, Role: string(role), Harness: harnessName, Worktree: wt.Path,
+		})
+		if merr != nil {
+			fmt.Fprintln(os.Stderr, "estate: dispatching unwatched --", merr)
+		} else {
+			fmt.Printf("watch: tmux attach -t %s  (window %s)  |  tail -f %s\n",
+				mcfg.Session, mir.WindowID(), mir.Path())
+		}
+		// A terminal state is stamped into the transcript however this turn
+		// ends, so a pane a human opens after the fact says what happened
+		// instead of trailing off. Close is idempotent, so the real state
+		// recorded below wins and this only fires on a path that never got
+		// there. os.Exit skips defers, so the two exiting paths between here
+		// and the ledger append close explicitly.
+		defer mir.Close("unknown", "dispatch exited before recording a terminal state")
+
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 		defer cancel()
 		// h.Start builds the command, wires the prompt to its stdin, and
@@ -1092,7 +1146,13 @@ func main() {
 		defer turn.Cleanup()
 		cmd := turn.Cmd
 		var stdout bytes.Buffer
-		cmd.Stdout = &stdout
+		// The buffer stays the transport's own capture -- Result, Spend and
+		// SessionID are all read from it, unchanged. The mirror is a second
+		// destination for the same bytes, and one that cannot fail back onto
+		// this path: mirror's sink never returns an error, so a broken
+		// transcript can never abort os/exec's copier and take the turn with
+		// it.
+		cmd.Stdout = io.MultiWriter(&stdout, mir.Stdout())
 		// exec.Cmd.Output() only captures the child's stderr into the
 		// returned *exec.ExitError when cmd.Stderr is nil -- and this path
 		// does not use Output() at all (cmd.Start()/cmd.Wait() below, so the
@@ -1101,8 +1161,12 @@ func main() {
 		// being lost with no capture path (agent-estate#950). The buffer
 		// fills as the child runs, so it holds whatever the child wrote even
 		// if the run times out below, not only on a clean exit.
+		// Mirrored too, and line-tagged there. The three infrastructure deaths
+		// this estate actually sees -- API error, quota window, signal kill --
+		// announce themselves on stderr, and those are exactly the moments a
+		// human wants a screen to look at.
 		var stderrBuf bytes.Buffer
-		cmd.Stderr = &stderrBuf
+		cmd.Stderr = io.MultiWriter(&stderrBuf, mir.Stderr())
 
 		// Started, not merely queued, before the ledger records it: only a
 		// process that actually exists has a pid to record. A dispatch that
@@ -1110,6 +1174,7 @@ func main() {
 		// directly, never Dispatched with no pid to ever positively resolve.
 		if err := cmd.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot start turn:", err)
+			mir.Close("failed", "the turn never started: "+err.Error())
 			if aerr := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Failed, Harness: harnessName, Note: "failed to start: " + err.Error()}); aerr != nil {
 				fmt.Fprintln(os.Stderr, "estate: cannot record dispatch failure:", aerr)
 			}
@@ -1119,8 +1184,10 @@ func main() {
 		// The pid is recorded the moment it is known -- before the turn does
 		// anything else -- because it is the one fact that later lets a dead
 		// turn's slot be reclaimed without guessing. See internal/reclaim.
+		mir.Logf("turn started, pid %d -- this window mirrors its output and cannot affect it", pid)
 		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Dispatched, PID: pid, Harness: harnessName, Note: "worktree " + wt.Path}); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot record dispatch:", err)
+			mir.Close("unknown", "the turn is running but the ledger could not record it: "+err.Error())
 			os.Exit(2)
 		}
 		fmt.Printf("dispatched %s (role=%s, harness=%s, pid=%d) in %s (grounded in %d operator parameters)\n", id, role, harnessName, pid, wt.Path, len(params))
@@ -1230,6 +1297,13 @@ func main() {
 			rec.Note = strings.TrimSpace(rec.Note + "; " + wt.Path + " kept: " + err.Error())
 			fmt.Fprintln(os.Stderr, "estate: "+err.Error())
 		}
+
+		// The transcript's footer names the state the ledger is about to
+		// record, so the pane and the record agree. Close does not kill the
+		// window: a turn dying is exactly when a human wants the screen, and
+		// the pane stays readable until a later dispatch retires it under the
+		// bound.
+		mir.Close(string(rec.State), rec.Note)
 
 		if err := l.Append(rec); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot record outcome:", err)
