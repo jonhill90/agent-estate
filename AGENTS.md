@@ -20,6 +20,21 @@ and still do.
 
 ## The daemon
 
+> **Read this section as history, not as a map.** Almost everything it names
+> under `scripts/supervisor/` and `tests/supervisor/` was deleted to
+> `reference/`; `git ls-files scripts/supervisor` and `git ls-files
+> tests/supervisor` both return **0**. The daemon today is Go, in
+> `src/estate`, and is a much smaller surface. Run `go run ./src/estate` with
+> no arguments for the current list rather than trusting one written here —
+> it is growing, and a list in prose goes stale between commits.
+>
+> The RULES below are still what this estate believes, and that is why the
+> section survives — but **check any specific file, flag or script against
+> the tree before relying on it**, and expect most of them to be gone.
+> Rewriting this section properly is open work, named in
+> `docs/director-brief.md` §9. What follows the next heading — how to treat
+> the corpus and when a question may reach Jon — is current and binding.
+
 ### Before you ask Jon anything — read this first
 
 Jon has stated this more than twenty times. It is a **hard** parameter in his
@@ -261,9 +276,25 @@ families; look there, not for the single file.
 
 ### The guards a lane will actually hit
 
-Each of these can refuse your dispatch, your merge, or your PR. When one
-fires, this is where to look — one hop from the refusal message to the code
-that produced it.
+> **None of the guards in the table below still exists.** Every file in its
+> "Implemented in" column resolves only to `reference/` — check any of them
+> with `git ls-files '*<name>'` and see. `git ls-files scripts/supervisor`
+> returns 0. The table is kept because the RULES are still what this estate
+> believes; it is a record of intent, not a map of live code, and nothing in
+> it will refuse anything.
+>
+> The guards that do run today are in Go, in `src/estate`: `estate pressure`
+> (host capacity, fails closed when it cannot measure) and `estate merge`
+> (checks green at head, plus reviewer ≠ author read from the ledger).
+> Reimplementing any row below means writing it in Go, not restoring the
+> script. `src/estate/agents_md_test.go` fails the build if this file names
+> an `estate` subcommand that does not exist — added because three review
+> rounds on one pull request each caught a claim about a command that was
+> real in the author's working tree and absent from the branch.
+
+Each of these *once* refused your dispatch, your merge, or your PR, and the
+"Implemented in" column says where the rule was encoded so it can be read
+before being rebuilt.
 
 | Guard | Refuses | Implemented in |
 |---|---|---|
@@ -274,14 +305,18 @@ that produced it.
 | Quota floor | new work, when the subscription quota is below the floor | `quota.sh` (`MIN_REMAINING`), watched by `quota-watch.sh` |
 | Supervisor lease | a second Director loop starting while one is alive | `core.py` (`Ledger.take_supervisor_lease` / `release_supervisor_lease` / `reap_stale_supervisor_lease`), exposed via `cli.py`'s `take-supervisor-lease` / `supervisor-lease` / `release-supervisor-lease` / `reap-supervisor-lease` subcommands; owner is keyed on `#{pane_pid}` from `loop-tick.md`, never `$$` |
 
-Other gates worth knowing exist, not listed above because they fire less
-often: `completion-gate.sh` (won't advance a task group until every member
-left evidence), `fixpass-evidence-gate.sh` / `fixpass_evidence_gate.py` (a fix
-pass must paste proof, not a claim), `ui-evidence-gate.sh` /
-`ui-evidence-report.sh` (a UI PR needs a captured frame), `gh-comment-gate.sh`
-(only `post-verdict.sh` may post a Verdict/Review-Lane comment),
-`mark-pr-external.sh` (gated: record a PR as authored outside the lane
-system).
+**These gates no longer exist.** `completion-gate.sh` (wouldn't advance a task
+group until every member left evidence), `fixpass-evidence-gate.sh` /
+`fixpass_evidence_gate.py` (a fix pass must paste proof, not a claim),
+`ui-evidence-gate.sh` / `ui-evidence-report.sh` (a UI PR needs a captured
+frame), `gh-comment-gate.sh` and `mark-pr-external.sh` all went to
+`reference/` with the shell supervisor; `git ls-files scripts/supervisor`
+returns 0. The workflows that ran them were retired on 2026-09-02 because
+they failed on every PR regardless of its contents, which is not enforcement.
+
+The **rules** are worth keeping and are recorded, with their status, in
+[`docs/ci-rules-retired.md`](docs/ci-rules-retired.md). Recovering one means
+reimplementing it in Go. Do not cite any of them as enforced.
 
 ### Invariants — do not break these without an explicit decision
 
@@ -402,11 +437,16 @@ measured against. See
   must go through a dispatched lane with a ledger-resolvable author, no
   exception path today, the same posture the CI gate and author-exclusion
   guard above already take.
-- A UI PR (touching `scripts/supervisor/laneview/`) needs a captured frame,
-  not a description, as evidence — `look.py capture`/`look.py frames`. This
-  is enforced, not just written down here: `.github/workflows/ui-evidence.yml`
-  runs `ui-evidence-gate.sh` on every PR and fails one that touches that path
-  without a `<!-- ui-evidence:v1 -->` marker in the body or a comment.
+- A UI PR needs a captured frame, not a description, as evidence. **This is a
+  convention now, not a gate.** `.github/workflows/ui-evidence.yml` and
+  `ui-evidence-gate.sh` were retired on 2026-09-02 (see
+  [`docs/ci-rules-retired.md`](docs/ci-rules-retired.md)); nothing fails a PR
+  that omits the frame. The path it named, `scripts/supervisor/laneview/`, no
+  longer exists either — the viewer is `src/tui`. **There is no capture helper
+  in this tree today**; find one with `git ls-files 'src/tui/**' | grep -i
+  frame` rather than trusting a filename written here, and if that returns
+  nothing, capturing a frame is manual. Reimplementing the gate in Go is open
+  work.
 
 ---
 *Last checked against the tree at `2e810dc` (2026-08-29). If `git log
