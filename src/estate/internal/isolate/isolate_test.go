@@ -1,11 +1,14 @@
 package isolate
 
 import (
+	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // repo builds a throwaway git repo with one commit and returns its root.
@@ -636,6 +639,210 @@ func TestRemoveStillRefusesUnlistedIgnoredContentInsideTheAllowlistedDirectory(t
 	}
 	if _, err := os.Stat(filepath.Join(full, "artifact")); err != nil {
 		t.Fatalf("the refused Remove destroyed the unlisted ignored file anyway: %v", err)
+	}
+}
+
+// agent-estate#985: the case the original refusal got wrong. The worktree's
+// commits are exactly what got pushed to origin under the SAME branch name --
+// the ordinary "committed, pushed, opened a PR" success path -- so Remove
+// must proceed rather than refuse. Confirmed on PR #984: same SHA in the
+// worktree and on origin, and the old check still refused.
+func TestRemoveProceedsWhenCommittedWorkIsReachableFromARemoteRef(t *testing.T) {
+	root := repo(t)
+	bare := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", root, "remote", "add", "origin", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v: %s", err, out)
+	}
+
+	w, err := Create(root, "pushed-work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Path, "result.txt"), []byte("the turn's output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "the turn's work"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = w.Path
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	// The exact shape #985 describes: push the worktree's OWN branch to
+	// origin under its own name, as a real dispatch does when it opens a PR.
+	if out, err := exec.Command("git", "-C", w.Path, "push", "-q", "origin", "HEAD:"+w.Branch).CombinedOutput(); err != nil {
+		t.Fatalf("git push: %v: %s", err, out)
+	}
+
+	if err := w.Remove(); err != nil {
+		t.Fatalf("Remove refused committed work that origin already has: %v", err)
+	}
+}
+
+// The remote copy must actually be checked LIVE, not assumed from a stale
+// local remote-tracking ref: a branch pushed AFTER the worktree's own last
+// fetch must still be found. (There is no earlier fetch in this test setup,
+// so this also exercises the ordinary first-contact path -- kept as its own
+// test because a caching implementation would be the natural way to get the
+// primary test above to pass while still failing this one.)
+func TestRemoveConsultsOriginLiveNotACachedTrackingRef(t *testing.T) {
+	root := repo(t)
+	bare := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", root, "remote", "add", "origin", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v: %s", err, out)
+	}
+
+	w, err := Create(root, "late-push")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Path, "result.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "work"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = w.Path
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	// Push from a SEPARATE clone, not from w.Path -- so w.Path's own git
+	// process has never fetched or seen this push before Remove runs, and a
+	// cached remote-tracking ref inside w.Path could not possibly know about
+	// it either.
+	clone := t.TempDir()
+	if out, err := exec.Command("git", "clone", "-q", w.Path, clone).CombinedOutput(); err != nil {
+		t.Fatalf("git clone: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", clone, "remote", "set-url", "origin", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git remote set-url: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", clone, "push", "-q", "origin", "HEAD:"+w.Branch).CombinedOutput(); err != nil {
+		t.Fatalf("git push from clone: %v: %s", err, out)
+	}
+
+	if err := w.Remove(); err != nil {
+		t.Fatalf("Remove must fetch live rather than trust a stale local view of origin: %v", err)
+	}
+}
+
+// The remote must be consulted, not merely assumed absent-and-therefore-fine
+// or present-and-therefore-fine: when origin cannot be reached at all, Remove
+// must refuse exactly as it does for no remote configured -- "could not
+// measure" is not "clean".
+func TestRemoveRefusesWhenTheRemoteCannotBeConsulted(t *testing.T) {
+	root := repo(t)
+	if out, err := exec.Command("git", "-C", root, "remote", "add", "origin", "/no/such/path/exists").CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v: %s", err, out)
+	}
+
+	w, err := Create(root, "unreachable-origin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Path, "result.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "work"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = w.Path
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+
+	err = w.Remove()
+	if err == nil {
+		t.Fatal("Remove must refuse when origin cannot be reached to confirm the commits are referenced there")
+	}
+	if !strings.Contains(err.Error(), "commit") {
+		t.Errorf("the refusal must say the work is committed; got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(w.Path, "result.txt")); statErr != nil {
+		t.Fatalf("the refused Remove destroyed committed work anyway: %v", statErr)
+	}
+}
+
+// agent-estate#996's review, reproduced live: a remote that BLACK-HOLES the
+// fetch -- accepts the TCP connection and then never answers, rather than
+// refusing it -- must not hang Remove indefinitely. Before remoteFetchTimeout
+// existed this was bounded only by the OS TCP connect timeout (commonly
+// 60-120s or more); a listener that accepts and stays silent is exactly that
+// shape and is fully hermetic (no real network, no real origin), so this
+// does not depend on this machine's own network reachability the way the
+// reviewer's black-holed-IP reproduction did.
+func TestRemoveRefusesWhenTheFetchHangsRatherThanWaitForever(t *testing.T) {
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() {
+		for {
+			conn, acceptErr := ln.Accept()
+			if acceptErr != nil {
+				return
+			}
+			// Accept and say nothing -- a black hole, not a refusal. git's
+			// fetch sits waiting for a response that never comes.
+			t.Cleanup(func() { conn.Close() })
+		}
+	}()
+
+	root := repo(t)
+	origin := fmt.Sprintf("http://%s/nowhere.git", ln.Addr())
+	if out, err := exec.Command("git", "-C", root, "remote", "add", "origin", origin).CombinedOutput(); err != nil {
+		t.Fatalf("git remote add: %v: %s", err, out)
+	}
+
+	w, err := Create(root, "hung-fetch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Path, "result.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "work"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = w.Path
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+
+	// Shrink the bound so the test proves the timeout fires without waiting
+	// out the real 15s production value.
+	old := remoteFetchTimeout
+	remoteFetchTimeout = 300 * time.Millisecond
+	t.Cleanup(func() { remoteFetchTimeout = old })
+
+	start := time.Now()
+	err = w.Remove()
+	elapsed := time.Since(start)
+
+	if err == nil {
+		t.Fatal("Remove must refuse when the fetch to origin hangs, not silently give up and delete the worktree")
+	}
+	// Generous margin over the shrunk bound -- proves the call was actually
+	// killed rather than merely erroring for some unrelated reason after
+	// running to completion.
+	if elapsed > 5*time.Second {
+		t.Fatalf("Remove took %s to refuse a fetch bounded to %s -- the timeout is not actually bounding the call", elapsed, remoteFetchTimeout)
+	}
+	if !strings.Contains(err.Error(), "commit") {
+		t.Errorf("the refusal must say the work is committed; got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "within") {
+		t.Errorf("the refusal must say it could not check in time, not just that the fetch failed; got: %v", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(w.Path, "result.txt")); statErr != nil {
+		t.Fatalf("the refused Remove destroyed committed work anyway: %v", statErr)
 	}
 }
 

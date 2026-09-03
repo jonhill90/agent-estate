@@ -21,6 +21,7 @@
 package isolate
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -28,6 +29,8 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"syscall"
+	"time"
 )
 
 // Worktree is one dispatch's isolated checkout.
@@ -86,6 +89,48 @@ func safeID(id string) error {
 func git(dir string, args ...string) ([]byte, error) {
 	cmd := exec.Command("git", args...)
 	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return out, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
+	}
+	return out, nil
+}
+
+// remoteFetchTimeout bounds remoteHasCommit's own fetch (below). A var, not a
+// const, so a test can shrink it rather than wait out the real duration.
+//
+// 15s matches the convention src/tui's own subprocess seams already use for
+// a bounded network call (internal/cost's execTimeout, #994's
+// pressureRunner) -- reused rather than invented fresh. This is a fetch of
+// ONE branch, not a clone: 15s is generous for that over any link that is
+// actually working, and short enough that a black-holed remote (one that
+// drops packets rather than refusing the connection -- a stale VPN route, a
+// half-dead proxy, a firewall with a DROP rule) no longer leaves Remove
+// bounded only by the OS TCP connect timeout, commonly 60-120s or more.
+var remoteFetchTimeout = 15 * time.Second
+
+// gitTimeout runs git the same way git (above) does, except the process is
+// killed if it outlives ctx. Used only where an unbounded git subprocess
+// would turn a fast, local operation into one bounded by nothing but network
+// state -- see remoteHasCommit.
+//
+// exec.CommandContext's DEFAULT cancellation is not enough here: it kills
+// only the direct child, and `git fetch` over http hands the connection to a
+// `git-remote-http` grandchild that inherits git's stdout/stderr pipes. Kill
+// git alone and that grandchild survives, still holding the write end of
+// CombinedOutput's pipe open -- so Wait() keeps blocking for EOF that never
+// comes, and the "bounded" fetch hangs exactly as long as the unbounded one
+// did. Confirmed live against a black hole listener before this was added:
+// git alone, PID visible in `ps`, ran on with no parent. Putting the process
+// in its own group and killing the whole group on cancellation is what
+// actually bounds it.
+func gitTimeout(ctx context.Context, dir string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "git", args...)
+	cmd.Dir = dir
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+	}
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		return out, fmt.Errorf("git %s: %w: %s", strings.Join(args, " "), err, strings.TrimSpace(string(out)))
@@ -339,16 +384,82 @@ func (w *Worktree) Committed() (bool, error) {
 	return strings.TrimSpace(string(head)) != w.Base, nil
 }
 
+// remoteHasCommit reports whether commit is reachable from origin's own,
+// freshly-fetched tip of branch -- a LIVE `git fetch` + `merge-base
+// --is-ancestor`, not a cached local remote-tracking ref.
+//
+// agent-estate#985: Committed (above) only asks "did HEAD move past Base?".
+// It does not consult any ref other than this worktree's own branch, so the
+// refusal it fed into Remove asserted "nothing else references these
+// commits" without ever checking whether anything did. This is the check
+// that makes the claim true: origin's OWN copy of the branch, read live.
+//
+// A cached remote-tracking ref (refs/remotes/origin/<branch>) was
+// considered and rejected. It is only as fresh as this worktree's last
+// fetch, and staleness here is dangerous in the direction that matters: a
+// tracking ref can say a commit is safely on origin when origin has since
+// been force-pushed or the branch deleted, which would wave through a
+// deletion of the only remaining copy. A live fetch costs a network round
+// trip on every teardown of committed work; that cost is accepted because
+// the alternative can be wrong in the direction this package exists to
+// prevent.
+//
+// Any failure to consult origin -- no remote configured, the network
+// unreachable, the fetch otherwise failing -- is "could not measure", and
+// is returned as an error so the caller refuses rather than guesses. That
+// matches Committed's own base-less path and estate pressure's exit-2
+// convention: refuse when you cannot tell, never read "could not check" as
+// "clean".
+//
+// The fetch itself is bounded by remoteFetchTimeout (above). Before this
+// bound existed, a remote that black-holed packets instead of refusing the
+// connection left this call -- and therefore Remove, and therefore every
+// teardown of committed work -- hung on nothing but the OS TCP connect
+// timeout. A timeout is itself a "could not measure": the message below
+// says so explicitly, rather than reading like an ordinary fetch failure,
+// so a caller cannot mistake "gave up waiting" for "asked and got no".
+func (w *Worktree) remoteHasCommit(commit, branch string) (bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), remoteFetchTimeout)
+	defer cancel()
+	if _, err := gitTimeout(ctx, w.Path, "fetch", "-q", "origin", branch); err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return false, fmt.Errorf("could not confirm %q on origin within %s -- the fetch did not complete in time, which is not the same as origin not having it: %w", branch, remoteFetchTimeout, err)
+		}
+		return false, fmt.Errorf("cannot fetch %q from origin to confirm its commits are referenced there: %w", branch, err)
+	}
+	if _, err := git(w.Path, "merge-base", "--is-ancestor", commit, "FETCH_HEAD"); err != nil {
+		var exitErr *exec.ExitError
+		// --is-ancestor's own documented convention: exit 1 means a definite
+		// "no", nothing else. Any other exit (bad revision, corrupt object,
+		// etc.) is "could not tell", which must not be read as "no".
+		if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 {
+			return false, nil
+		}
+		return false, fmt.Errorf("cannot determine whether %s is an ancestor of origin/%s: %w", commit, branch, err)
+	}
+	return true, nil
+}
+
 // Remove tears the worktree and its branch down.
 //
 // It refuses when the worktree holds uncommitted changes OR when the turn
-// committed anything. A council seat found the second case: an agent that
-// committed its work left a CLEAN git status, so the uncommitted check saw
-// nothing to collect, and `git branch -D` then deleted the only ref to those
-// commits. The agent did the tidy thing and lost more for it.
+// committed anything that origin does not also have. A council seat found
+// the committed case: an agent that committed its work left a CLEAN git
+// status, so the uncommitted check saw nothing to collect, and
+// `git branch -D` then deleted the only ref to those commits. The agent did
+// the tidy thing and lost more for it.
 //
-// Both refusals are the same rule: a dispatch's uncollected output looks
-// exactly like an empty worktree from outside, and deleting it is
+// agent-estate#985 found the committed check asserted more than it verified:
+// it only asked whether HEAD had moved past Base, never whether anything
+// else actually referenced the result, so it refused a worktree whose
+// commits were already pushed and the head of an open pull request -- the
+// success path. remoteHasCommit (above) is what makes "collected" mean what
+// the refusal message claims: reachable from origin's own tip of the
+// branch, confirmed live. A worktree whose commits origin does not have is
+// still refused exactly as before.
+//
+// All three refusals are the same rule: a dispatch's uncollected output
+// looks exactly like an empty worktree from outside, and deleting it is
 // unrecoverable while reporting it is not.
 func (w *Worktree) Remove() error {
 	committed, cerr := w.Committed()
@@ -356,7 +467,17 @@ func (w *Worktree) Remove() error {
 		return fmt.Errorf("isolate: cannot tell whether %s holds committed work, so refusing to remove it: %w", w.Path, cerr)
 	}
 	if committed {
-		return fmt.Errorf("isolate: %s has commits on %s that nothing else references; refusing to remove it -- collect them first", w.Path, w.Branch)
+		head, herr := w.Head()
+		if herr != nil {
+			return fmt.Errorf("isolate: cannot read %s's HEAD to check whether its commits are referenced elsewhere, so refusing to remove it: %w", w.Path, herr)
+		}
+		collected, rerr := w.remoteHasCommit(head, w.Branch)
+		if rerr != nil {
+			return fmt.Errorf("isolate: cannot confirm %s's commits on %s are referenced elsewhere; refusing to remove it -- collect them first: %w", w.Path, w.Branch, rerr)
+		}
+		if !collected {
+			return fmt.Errorf("isolate: %s has commits on %s that nothing else references; refusing to remove it -- collect them first", w.Path, w.Branch)
+		}
 	}
 	dirty, err := w.Dirty()
 	if err != nil {
