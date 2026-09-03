@@ -199,15 +199,32 @@ func resolveResultVerdict(result string) laneVerdict {
 	return laneVerdict{found: true, ok: true, decision: verdict}
 }
 
+// dispatchBranchPrefix is the one fixed, estate-written string
+// internal/isolate.Create prepends to a lane id to name its branch
+// ("dispatch/" + id). A lane that works out who it is from its own
+// checkout reports that branch name in its Review-Lane: trailer instead
+// of the bare id -- agent-estate#943. Stripping this exact, known prefix
+// before comparing is safe precisely because the estate itself writes it;
+// it is not a step toward substring or suffix matching, which would
+// reopen the impersonation hole agent-estate#934 closed. Only ONE leading
+// occurrence is stripped -- "dispatch/dispatch/<id>" must still refuse,
+// since a doubled prefix is not a form the estate ever writes.
+const dispatchBranchPrefix = "dispatch/"
+
+func normaliseLaneID(id string) string {
+	return strings.TrimPrefix(id, dispatchBranchPrefix)
+}
+
 func resolveLaneVerdict(comments []Comment, lane string) laneVerdict {
 	var (
 		lastBody string
 		lastScan []verdictLine
 		found    bool
 	)
+	wantLane := normaliseLaneID(lane)
 	for _, c := range comments {
 		reviewLane, hasReviewLane := parseTrailer(reviewLaneRE, c.Body)
-		if !hasReviewLane || reviewLane != lane {
+		if !hasReviewLane || normaliseLaneID(reviewLane) != wantLane {
 			continue
 		}
 		scan := scanVerdictLines(c.Body)
