@@ -73,6 +73,29 @@ type Spend struct {
 	OutputTokens        *int64
 	CacheReadTokens     *int64
 	CacheCreationTokens *int64
+	// ByModel is CostUSD and the four token fields above, broken down by the
+	// model id that actually ran (agent-estate#981). A turn is not one
+	// model: Claude Code dispatches haiku sub-agents inside a sonnet turn,
+	// and a single scalar "the model" would have to pick one and silently
+	// misattribute the other's cost -- the same failure #977/#979 refused
+	// for harness-level spend. nil (not an empty map) when the harness
+	// reports no per-model breakdown at all -- every codex turn, and any
+	// claude turn whose envelope predates this field or omitted
+	// modelUsage. An empty-but-non-nil map is not a state this package
+	// produces; ByModel is either the harness's real breakdown or nil.
+	ByModel map[string]ModelSpend
+}
+
+// ModelSpend is one model's contribution to a turn's ByModel breakdown --
+// same pointer-means-absent discipline as Spend itself. A model present in
+// ByModel is presumed to have run; a nil field within it means that specific
+// figure was not reported for that model, not that it was zero.
+type ModelSpend struct {
+	CostUSD             *float64
+	InputTokens         *int64
+	OutputTokens        *int64
+	CacheReadTokens     *int64
+	CacheCreationTokens *int64
 }
 
 // Harness is one agent CLI this estate can dispatch to.
@@ -168,12 +191,26 @@ func claudeResult(stdout []byte) (string, error) {
 }
 
 // claudeSpendEnvelope is the subset of claude -p --output-format json's
-// envelope this reads -- total_cost_usd and usage sit beside the "result"
-// field claudeResult already parses, in the same payload, on the same
-// stdout the estate already captures. total_cost_usd is Anthropic's own
-// billed figure for the turn, not a number this package computes. See
-// docs/spend-observation.md for the real captured payload this was checked
-// against.
+// envelope this reads -- total_cost_usd, usage and modelUsage sit beside the
+// "result" field claudeResult already parses, in the same payload, on the
+// same stdout the estate already captures.
+//
+// total_cost_usd is NOT Anthropic's own billed figure for the turn --
+// corrected on #981's review after #977 first claimed it was. The Claude
+// Code CLI computes it client-side, by multiplying its own token counts
+// against a bundled price table, before the turn's stdout is even printed;
+// nothing here observes a bill. It remains the best number this package can
+// record without estimating anything itself: it is first-party (the CLI's
+// own number, not this package's), inline (no second subprocess), and it is
+// the one figure that already folds in sub-agent models (see modelUsage
+// below) the way ccusage's own after-the-fact log scrape does not (see
+// docs/spend-observation.md).
+//
+// modelUsage is why total_cost_usd cannot be attributed to one model: a
+// single turn runs sonnet AND dispatches haiku sub-agents, and modelUsage
+// carries each model's own share. See docs/spend-observation.md for the
+// real captured payload this was checked against, and Spend.ByModel's doc
+// comment for why a scalar "the model for this turn" is the wrong shape.
 type claudeSpendEnvelope struct {
 	TotalCostUSD *float64 `json:"total_cost_usd"`
 	Usage        *struct {
@@ -182,6 +219,17 @@ type claudeSpendEnvelope struct {
 		CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
 		CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
 	} `json:"usage"`
+	// ModelUsage keys are model ids ("claude-sonnet-5",
+	// "claude-haiku-4-5-20251001"); the field names inside each are
+	// camelCase, unlike Usage's snake_case above -- this is claude -p's own
+	// envelope shape, not a normalization this package applies.
+	ModelUsage map[string]struct {
+		InputTokens              *int64   `json:"inputTokens"`
+		OutputTokens             *int64   `json:"outputTokens"`
+		CacheReadInputTokens     *int64   `json:"cacheReadInputTokens"`
+		CacheCreationInputTokens *int64   `json:"cacheCreationInputTokens"`
+		CostUSD                  *float64 `json:"costUSD"`
+	} `json:"modelUsage"`
 }
 
 func claudeSpend(stdout []byte) (Spend, error) {
@@ -195,6 +243,18 @@ func claudeSpend(stdout []byte) (Spend, error) {
 		s.OutputTokens = e.Usage.OutputTokens
 		s.CacheReadTokens = e.Usage.CacheReadInputTokens
 		s.CacheCreationTokens = e.Usage.CacheCreationInputTokens
+	}
+	if len(e.ModelUsage) > 0 {
+		s.ByModel = make(map[string]ModelSpend, len(e.ModelUsage))
+		for model, mu := range e.ModelUsage {
+			s.ByModel[model] = ModelSpend{
+				CostUSD:             mu.CostUSD,
+				InputTokens:         mu.InputTokens,
+				OutputTokens:        mu.OutputTokens,
+				CacheReadTokens:     mu.CacheReadInputTokens,
+				CacheCreationTokens: mu.CacheCreationInputTokens,
+			}
+		}
 	}
 	return s, nil
 }

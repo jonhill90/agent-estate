@@ -170,3 +170,26 @@ right now — including the single turn #977 itself populated — predates the
 `Harness` field this PR adds; `estate dispatch` only starts writing it going
 forward. That is the coverage gap made visible, exactly as it should be,
 not averaged over.
+
+## #981: modelUsage reconciles exactly against total_cost_usd
+
+Checked, not assumed. The two-model payload pasted above sums exactly:
+`0.000591 + 0.1877916 = 0.1883826`, which equals that same turn's own
+`total_cost_usd`. A fresh single-model call made while implementing #981
+matches too:
+
+```
+$ echo "reply with the single word pong, nothing else" | claude -p --output-format json --dangerously-skip-permissions
+{"total_cost_usd":0.2028111, ...,
+ "modelUsage":{"claude-sonnet-5":{...,"costUSD":0.2028111,...}}, "result":"pong", ...}
+```
+
+`0.2028111 == 0.2028111` — the one entry in `modelUsage` accounts for the
+whole turn. Both checks (one two-model turn, one one-model turn) reconcile
+exactly; no evidence of a per-model figure that under- or over-counts the
+turn total was found. This is not a proof for every possible turn shape
+(e.g. a turn with three or more sub-agent models was not captured), but
+`internal/spend.Aggregate` does not rely on the sum matching anyway — it
+reports `TotalCostUSD` (from `SpendCostUSD`, i.e. `total_cost_usd`) and each
+model's own `TotalCostUSD` (from `modelUsage[model].costUSD`) as two
+separately-sourced figures, never one derived from the other.

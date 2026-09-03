@@ -111,6 +111,19 @@ type Record struct {
 	SpendOutputTokens        *int64 `json:"spend_output_tokens,omitempty"`
 	SpendCacheReadTokens     *int64 `json:"spend_cache_read_tokens,omitempty"`
 	SpendCacheCreationTokens *int64 `json:"spend_cache_creation_tokens,omitempty"`
+	// SpendByModel is the same figures as SpendCostUSD/SpendInputTokens/etc,
+	// broken down by the model id that actually ran (agent-estate#981). A
+	// turn is not one model: Claude Code dispatches haiku sub-agents inside
+	// a sonnet turn, and the two bill separately in the harness's own
+	// output. Adding a scalar "Model" field would have to pick one and
+	// silently misattribute the other's cost -- the same failure #977/#979
+	// refused for harness-level spend. nil (not an empty, non-nil map) on
+	// every record that predates this field, every codex turn (codex
+	// reports no per-model breakdown at all), and any claude turn whose own
+	// envelope omitted modelUsage -- never invented from SpendCostUSD by
+	// guessing which model ran. See internal/harness.Spend.ByModel for where
+	// this is read from the harness's own output.
+	SpendByModel map[string]ModelSpend `json:"spend_by_model,omitempty"`
 	// Harness is which agent CLI ran this turn ("claude" or "codex"), read
 	// from the same --harness=/ESTATE_HARNESS selection main.go's dispatch
 	// case already resolves before Start-ing the turn -- never inferred
@@ -120,6 +133,18 @@ type Record struct {
 	// Harness is what keeps a per-turn total from silently mixing the two.
 	// Empty on any record written before this field existed.
 	Harness string `json:"harness,omitempty"`
+}
+
+// ModelSpend is one model's contribution within a turn's SpendByModel
+// breakdown -- same pointer-means-absent discipline as SpendCostUSD and the
+// other Spend* fields on Record: a nil field means that harness did not
+// report that figure for that model, never a genuine zero.
+type ModelSpend struct {
+	CostUSD             *float64 `json:"cost_usd,omitempty"`
+	InputTokens         *int64   `json:"input_tokens,omitempty"`
+	OutputTokens        *int64   `json:"output_tokens,omitempty"`
+	CacheReadTokens     *int64   `json:"cache_read_tokens,omitempty"`
+	CacheCreationTokens *int64   `json:"cache_creation_tokens,omitempty"`
 }
 
 // EffectiveRole returns the record's Role, defaulting an unset field to

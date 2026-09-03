@@ -782,6 +782,18 @@ func main() {
 			if g.TurnsWithNeither > 0 {
 				fmt.Printf("  %d turn(s) recorded neither a cost nor tokens -- absent, not free (predates #977 or unreadable harness output)\n", g.TurnsWithNeither)
 			}
+			if g.TurnsWithModelBreakdown > 0 {
+				fmt.Printf("  by model, from %d of those %d turn(s) that reported a per-model breakdown:\n", g.TurnsWithModelBreakdown, g.Turns)
+				for _, m := range g.ByModel {
+					if m.TurnsWithCost > 0 {
+						fmt.Printf("    %s: $%.4f across %d turn(s)\n", m.Model, m.TotalCostUSD, m.TurnsWithCost)
+					} else {
+						fmt.Printf("    %s: cost not reported\n", m.Model)
+					}
+				}
+			} else {
+				fmt.Println("  by model: not reported by this harness (agent-estate#981)")
+			}
 		}
 		fmt.Printf("\n%d task(s) total, %d with some spend recorded, %d with none\n",
 			rep.TotalTurns, rep.TurnsWithAnySpend, rep.TotalTurns-rep.TurnsWithAnySpend)
@@ -1037,6 +1049,18 @@ func main() {
 			rec.SpendOutputTokens = sp.OutputTokens
 			rec.SpendCacheReadTokens = sp.CacheReadTokens
 			rec.SpendCacheCreationTokens = sp.CacheCreationTokens
+			if sp.ByModel != nil {
+				rec.SpendByModel = make(map[string]ledger.ModelSpend, len(sp.ByModel))
+				for model, ms := range sp.ByModel {
+					rec.SpendByModel[model] = ledger.ModelSpend{
+						CostUSD:             ms.CostUSD,
+						InputTokens:         ms.InputTokens,
+						OutputTokens:        ms.OutputTokens,
+						CacheReadTokens:     ms.CacheReadTokens,
+						CacheCreationTokens: ms.CacheCreationTokens,
+					}
+				}
+			}
 		}
 		switch {
 		case ctx.Err() != nil:
