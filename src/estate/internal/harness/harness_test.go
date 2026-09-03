@@ -52,6 +52,9 @@ func TestEveryRegisteredHarnessRunsInTheDirectoryItIsGiven(t *testing.T) {
 			if turn.Spend == nil {
 				t.Error("a Turn must always carry Spend, even when the harness reports nothing usable")
 			}
+			if turn.SessionID == nil {
+				t.Error("a Turn must always carry SessionID, even when the harness reports nothing usable")
+			}
 		})
 	}
 }
@@ -274,6 +277,66 @@ func TestCodexSpendReadsTheRealTurnCompletedEventAndNeverInventsACost(t *testing
 func TestCodexSpendWithNoTurnCompletedEventIsAnError(t *testing.T) {
 	if _, err := codexSpend([]byte(`{"type":"thread.started","thread_id":"x"}`)); err == nil {
 		t.Fatal("a stream with no turn.completed usage must be an error, not a zero Spend")
+	}
+}
+
+// TestClaudeSessionIDReadsTheRealEnvelope proves the handle agent-estate#990
+// exists to record can actually be read out of a real captured claude -p
+// envelope -- the same session_id docs/spend-observation.md pasted next to
+// its own total_cost_usd.
+func TestClaudeSessionIDReadsTheRealEnvelope(t *testing.T) {
+	got, err := claudeSessionID([]byte(realClaudeEnvelope))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "d01a8703-42b9-4006-a3d0-83062d7d4339" {
+		t.Errorf("claudeSessionID = %q, want the real captured session_id", got)
+	}
+}
+
+func TestClaudeSessionIDMissingIsAnErrorNotEmptyString(t *testing.T) {
+	t.Run("no session_id field", func(t *testing.T) {
+		if _, err := claudeSessionID([]byte(`{"result":"pong"}`)); err == nil {
+			t.Fatal("an envelope with no session_id must be an error, not an empty string")
+		}
+	})
+	t.Run("not JSON", func(t *testing.T) {
+		if _, err := claudeSessionID([]byte("not json")); err == nil {
+			t.Fatal("unparseable stdout must be an error")
+		}
+	})
+	t.Run("real mid-response cut, captured live", func(t *testing.T) {
+		// realTruncatedClaudeEnvelope is a REAL claude -p --output-format json
+		// stdout capture, cut at 60 bytes (`| head -c 60`) 2026-09-03 -- this is
+		// the exact shape of the "API Error: Connection closed mid-response"
+		// failure this issue exists because of (see the issue body): the
+		// process exits with an incomplete JSON object, session_id never
+		// reached. main.go's dispatch loop calls this unconditionally on
+		// whatever stdout a dead turn produced, so this must error, not
+		// silently return "".
+		const realTruncatedClaudeEnvelope = `{"is_error":false,"duration_api_ms":6325,"num_turns":1,"stop`
+		if _, err := claudeSessionID([]byte(realTruncatedClaudeEnvelope)); err == nil {
+			t.Fatal("a real mid-response truncation must be an error, not an empty string -- this is the exact failure agent-estate#990 exists to make evaluable")
+		}
+	})
+}
+
+// TestCodexSessionIDReadsTheRealStream proves codex's own equivalent handle
+// (thread_id, from thread.started -- codex has no session_id at all) can be
+// read from the real captured --json stream.
+func TestCodexSessionIDReadsTheRealStream(t *testing.T) {
+	got, err := codexSessionID([]byte(realCodexJSONL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "01a06826-ac92-7b62-8418-247dee57b779" {
+		t.Errorf("codexSessionID = %q, want the real captured thread_id", got)
+	}
+}
+
+func TestCodexSessionIDWithNoThreadStartedEventIsAnError(t *testing.T) {
+	if _, err := codexSessionID([]byte(`{"type":"turn.completed","usage":{"input_tokens":1}}`)); err == nil {
+		t.Fatal("a stream with no thread.started event must be an error, not an empty string")
 	}
 }
 

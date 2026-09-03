@@ -124,6 +124,18 @@ type Record struct {
 	// guessing which model ran. See internal/harness.Spend.ByModel for where
 	// this is read from the harness's own output.
 	SpendByModel map[string]ModelSpend `json:"spend_by_model,omitempty"`
+	// SessionID is the harness's own conversation handle for this turn --
+	// claude's `session_id`, codex's `thread_id` -- read by
+	// internal/harness.Turn.SessionID directly from the harness's own
+	// stdout the instant this turn's subprocess exits, never anything the
+	// agent claimed about itself. A pointer, not a bare string: nil means
+	// "this turn's harness reported no usable handle", which must never be
+	// confused with a handle that happened to be reported as "". This is
+	// the whole of agent-estate#990 -- recording the handle so a dead lane
+	// COULD be evaluated for resume, not building resume itself. See
+	// docs/decisions/0004 for why a recorded handle must never be used to
+	// silently resume a lane whose continuity cannot be confirmed.
+	SessionID *string `json:"session_id,omitempty"`
 	// Harness is which agent CLI ran this turn ("claude" or "codex"), read
 	// from the same --harness=/ESTATE_HARNESS selection main.go's dispatch
 	// case already resolves before Start-ing the turn -- never inferred
