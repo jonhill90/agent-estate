@@ -7,6 +7,13 @@ Scope is the meta-harness. Still **not** the 40 open issues and **not** a
 backlog mined from `reference/`. Every phase ends in something a human can
 look at.
 
+> **Nothing below is on `main` except what `git log main` shows.** Phase
+> statuses name the pull request the work sits in. An earlier draft of this
+> file said "SHIPPED" for work that was open and unmerged — the sixth time a
+> reviewer has caught this author citing a branch as though it were the tree.
+> `main` currently has the CI retirement (#913) and the previous plan (#907);
+> everything else is a PR.
+
 ## The finding that reorders the plan
 
 **Loop quality tracks the VERIFIER, not the loop.** Reflexion scores 91% on
@@ -18,18 +25,23 @@ vanish when oracle labels are not available"*; without them self-correction
 *"consistently results in a decrease in performance."*
 
 `docs/tick-log.jsonl`'s artifact field is **self-reported**. That is the
-gameable seam, and this estate has already demonstrated it four times: four
-successive artifact rules (non-empty → placeholder list → looks-like-a-pointer
-→ must-resolve) were each defeated, and **every one was caught by an
-independent dispatched reviewer, never by the loop inspecting itself.** The
-verifier is doing the work. Building more loop was not the answer any of the
-four times.
+gameable seam, and this estate has demonstrated it five times: five successive
+artifact rules — non-empty, a placeholder list, looks-like-a-pointer,
+must-resolve, must-be-recent — were each defeated, by `"null"`, `"working on
+it"`, `"still going, read/write path unclear"`, `"AGENTS.md"` and `touch
+go.work`. **Every one was caught by an independent dispatched reviewer, never
+by the loop inspecting itself.** The verifier is doing the work. Building more
+loop was not the answer any of the five times, and a sixth rule is not being
+attempted.
 
-**Second finding, equally decision-relevant: length is a failure signal.**
+**Second finding: length is a failure signal — graded `[S]`, secondhand.**
 Failure trajectories run *"12–82% longer than successful ones"*; failing
-attempts consume *"up to 4× the resources of successful ones."* A long tick is
-evidence of trouble, not of effort. Velocity is not progress and neither is
-duration.
+attempts consume *"up to 4× the resources of successful ones."* The research
+read these in another paper's related-work section, not in the primaries, and
+grades them `[S]` accordingly. So this is a lead worth measuring against, not
+a result to reorganise around — which is why it buys one line in Phase 0
+(measure tick cost) rather than a phase of its own. A long tick is a reason to
+look, not proof of failure.
 
 **Third: there is no prior art for half of what we said we are building.**
 Across five comparable systems, *"nobody… orchestrates across models as a
@@ -40,22 +52,22 @@ Nothing can be copied for them.
 
 ---
 
-## Phase 0 — The verifier, not the loop `NOW`
+## Phase 0 — The verifier, not the loop `IN #914, NOT ON MAIN`
 
 Was "make the loop able to report failure". Re-aimed: the stop condition is a
 self-report and must be replaced by an external check.
 
 - Tick artifacts verified **outside** the agent that wrote them: a token must
-  post-date the previous tick (shipped), and an independent check must confirm
+  post-date the previous tick (built, in #914), and an independent check must confirm
   the phase item moved.
 - **Record tick cost and duration.** Length is a failure signal, so it has to
   be measured before it can be one.
-- `estate verify-branch` (shipped) is the shape: check where the accumulated
+- `estate verify-branch` (built, in #914) is the shape: check where the accumulated
   state does not exist.
 
 **Done when:** a tick's claim is confirmed by something that did not write it.
 
-## Phase 1 — Dispatch isolation `SHIPPED, one gap`
+## Phase 1 — Dispatch isolation `IN #909, NOT ON MAIN`
 
 Worktree per dispatch, refuses when it cannot isolate, teardown refuses to
 delete uncollected work. Verified end-to-end through two harnesses.
@@ -64,7 +76,7 @@ Remaining: the `--ignored` teardown rule over-refuses on build detritus
 (`__pycache__`), leaking a worktree per dispatch. Fix is a known-detritus
 list. Not a phase; a defect.
 
-## Phase 2 — Make the estate visible `PARTIAL`
+## Phase 2 — Make the estate visible `IN #910, NOT ON MAIN`
 
 Home shows the live ledger and tick log. Still owes a real `pressure` reading.
 
@@ -72,10 +84,10 @@ New, from the research: **a parent must not see a child's intermediate
 steps** — OpenClaw, Hermes and hve-core reached that independently, so treat
 it as settled. The viewer shows a turn's *result*, never its transcript.
 
-## Phase 3 — Cross-**model** orchestration `RE-AIMED`
+## Phase 3 — Cross-**model** orchestration `HARNESS HALF IN #911, NOT ON MAIN`
 
-Was "cross-harness dispatch", and that part shipped (claude + codex, one
-brief, both recorded). The research says the harness axis is the easy half and
+Was "cross-harness dispatch". That part is built and verified but sits in
+#911, unmerged (claude + codex, one brief, both recorded). The research says the harness axis is the easy half and
 the differentiated half is models: routing a workload to a model on grounds of
 cost, capability or **independence**, and comparing results across them.
 
@@ -134,10 +146,12 @@ be traced is a self-report too.
   loop's honesty was. Survival (ring 4) is the real content and moved to
   Phase 6.
 - **The tick-log stop condition as the loop's primary guard.** It stays, but
-  demoted: it is a self-report, and the four defeats say a self-report is worth
+  demoted: it is a self-report, and five defeats say a self-report is worth
   less than one external check.
-- **Copying prior art for the three differentiated areas.** There is none.
-  Planning to borrow was a plan to be surprised late.
+(A fourth item — "copying prior art for the three differentiated areas" —
+was listed here and removed: those three areas are framing this revision
+introduced, so there was nothing in the #907 plan to drop. Padding a drop
+list overstates how much was retracted.)
 
 ## One correction to what I was told
 
