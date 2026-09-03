@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/corpus"
+	"github.com/jonhill90/agent-estate/estate/internal/dispatchid"
 	"github.com/jonhill90/agent-estate/estate/internal/gate"
 	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
@@ -362,7 +363,16 @@ func main() {
 			}
 			os.Exit(1)
 		}
-		id := fmt.Sprintf("%s-%d", strings.TrimPrefix(issue, "#"), time.Now().UTC().Unix())
+		// dispatchid.New, not a bare timestamp: two dispatches launched in the
+		// same instant, including from two different OS processes, must not
+		// receive the same id -- see internal/dispatchid's own doc comment for
+		// why a per-second timestamp and why a process-local counter both fail
+		// this, and for the cross-process claim that actually holds it.
+		id, err := dispatchid.New(issue)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch -- "+err.Error())
+			os.Exit(1)
+		}
 
 		// The turn runs with --dangerously-skip-permissions. Give it a
 		// working tree of its own before it starts, or do not start it:
