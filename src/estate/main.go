@@ -57,6 +57,61 @@ func stderrSegment(stderr []byte, examined bool) string {
 	return "stderr: " + s
 }
 
+// stdoutDiagnosticSegment extracts a bounded, non-echoing diagnostic
+// fragment from a failed child's stdout. agent-estate#955's review: for a
+// bad or inaccessible model -- the same class as a quota or entitlement
+// error -- `claude -p --output-format json` puts its own structured error
+// on STDOUT as {"is_error":true,...,"result":"..."} and leaves stderr
+// completely empty, so stderrSegment alone drops the one diagnostic the CLI
+// actually produced.
+//
+// This does NOT dump raw stdout. Two deliberate narrowings, both there to
+// keep the operator's raw prompt out of the ledger (a standing hard rule --
+// the ledger is durable and append-only):
+//
+//   - Unparseable JSON is recorded as unparseable, with a byte count, never
+//     stored raw. Dumping raw stdout on failure is exactly the path that
+//     would leak an echoed prompt if the child ever wrote one there.
+//   - Parseable JSON only contributes its `result` text when `is_error` is
+//     true. `is_error=true` is the CLI's own classification that this text
+//     is ITS diagnostic, not the model's generated content -- and the
+//     model's own content is exactly where a partial prompt echo could
+//     live. When `is_error` is false (or absent), `result` is left alone.
+//
+// The extracted result is still passed through the same bounded-tail
+// truncation as stderrSegment, for the same append-only-ledger reason.
+func stdoutDiagnosticSegment(stdout []byte) string {
+	s := strings.TrimSpace(string(stdout))
+	if s == "" {
+		return "stdout: (empty)"
+	}
+	var parsed map[string]any
+	if err := json.Unmarshal([]byte(s), &parsed); err != nil {
+		return fmt.Sprintf("stdout: unparseable JSON (%d bytes, not recorded)", len(s))
+	}
+	isError, _ := parsed["is_error"].(bool)
+	if !isError {
+		// Not the CLI's own error classification -- do not guess at
+		// extracting text from it, since it may be the model's own
+		// (possibly prompt-echoing) content.
+		return "stdout: parsed JSON, is_error=false"
+	}
+	fields := []string{"is_error=true"}
+	if subtype, ok := parsed["subtype"].(string); ok && subtype != "" {
+		fields = append(fields, "subtype="+subtype)
+	}
+	if result, ok := parsed["result"].(string); ok {
+		result = strings.TrimSpace(result)
+		if result != "" {
+			if len(result) > stderrTailLimit {
+				result = fmt.Sprintf("%s (truncated, %d bytes total)", result[:stderrTailLimit], len(result))
+			}
+			fields = append(fields, "result="+result)
+		}
+	}
+	return "stdout: " + strings.Join(fields, ", ")
+}
+
 func usage() {
 	fmt.Fprint(os.Stderr, `estate -- the supervisor
 
@@ -617,7 +672,12 @@ func main() {
 			rec.Note = "timed out after 45m; unknown is not failed; " + stderrSegment(stderrBuf.Bytes(), true)
 		case runErr != nil:
 			rec.State = ledger.Failed
-			rec.Note = runErr.Error() + "; " + stderrSegment(stderrBuf.Bytes(), true)
+			// stdout is examined here too (agent-estate#955): a bad model or
+			// entitlement failure often puts claude -p's own JSON diagnostic
+			// on stdout with stderr left empty, and stderrSegment alone would
+			// silently drop it. stdoutDiagnosticSegment never dumps raw
+			// stdout -- see its own doc comment for why.
+			rec.Note = runErr.Error() + "; " + stderrSegment(stderrBuf.Bytes(), true) + "; " + stdoutDiagnosticSegment(out)
 		default:
 			rec.State = ledger.Complete
 			var parsed map[string]any
