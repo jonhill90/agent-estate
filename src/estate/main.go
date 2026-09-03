@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/corpus"
+	"github.com/jonhill90/agent-estate/estate/internal/dispatchid"
 	"github.com/jonhill90/agent-estate/estate/internal/gate"
 	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
@@ -362,7 +363,13 @@ func main() {
 			}
 			os.Exit(1)
 		}
-		id := fmt.Sprintf("%s-%d", strings.TrimPrefix(issue, "#"), time.Now().UTC().Unix())
+		// Second precision let two turns dispatched together share an id --
+		// internal/isolate then correctly refused the second one, and a
+		// parallel council silently became a smaller one (agent-estate#938).
+		// dispatchid mints with nanosecond precision plus the OS pid, which
+		// needs no filesystem coordination: see its doc comment for why that
+		// is what actually holds under a real race.
+		id := dispatchid.New(issue, time.Now())
 
 		// The turn runs with --dangerously-skip-permissions. Give it a
 		// working tree of its own before it starts, or do not start it:
