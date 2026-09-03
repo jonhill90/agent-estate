@@ -455,6 +455,190 @@ func TestRemoveRefusesToDiscardCommittedWork(t *testing.T) {
 	}
 }
 
+// The fix for agent-estate#983: a worktree whose ONLY ignored content is the
+// __pycache__ directory reference/'s own unmaintained Python leaves behind
+// must proceed, because there is nothing in it to collect.
+func TestRemoveProceedsWhenTheOnlyIgnoredContentIsKnownDetritus(t *testing.T) {
+	root := repo(t)
+	w, err := Create(root, "only-detritus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A tracked sibling under the same directory, plus the .gitignore rule
+	// that makes __pycache__/ ignored rather than merely untracked -- both
+	// committed BEFORE the branch's recorded Base, via the shared repo's
+	// seed commit, so this worktree's branch never advances past Base and
+	// the separate "committed work" refusal does not fire here; only Dirty
+	// is under test.
+	seed := []struct{ path, content string }{
+		{filepath.Join("reference", "scripts", "supervisor", "core.py"), "# reference only\n"},
+		{".gitignore", "__pycache__/\n"},
+	}
+	for _, f := range seed {
+		full := filepath.Join(root, f.path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(f.content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "seed reference + gitignore"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	// Re-point the branch created by Create at the new tip, keeping Base at
+	// the ORIGINAL seed commit -- Create already ran, so the worktree must
+	// pick the seeding commit up the same way a fresh checkout continuing an
+	// existing branch would.
+	if out, err := exec.Command("git", "-C", w.Path, "merge", "-q", "--ff-only", "main").CombinedOutput(); err != nil {
+		t.Fatalf("git merge --ff-only main: %v: %s", err, out)
+	}
+	head, err := w.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Base = head
+
+	pycache := filepath.Join(w.Path, "reference", "scripts", "supervisor", "__pycache__")
+	if err := os.MkdirAll(pycache, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(pycache, "mod.cpython-311.pyc"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirty, err := w.Dirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirty {
+		t.Fatal("Dirty() must not count known detritus -- reference/scripts/supervisor/__pycache__/ is regenerable and holds nothing a turn produced")
+	}
+	if err := w.Remove(); err != nil {
+		t.Fatalf("Remove must proceed when the only ignored content is known detritus: %v", err)
+	}
+}
+
+// The guard must not become "ignore everything --ignored reports": a
+// gitignored path NOT on the known-detritus list -- a lane's own built
+// binary, here -- must still refuse teardown exactly as before this fix.
+func TestRemoveStillRefusesUnlistedIgnoredContent(t *testing.T) {
+	root := repo(t)
+	w, err := Create(root, "unlisted-ignored")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Path, ".gitignore"), []byte("/estate\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "ignore rules"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = w.Path
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	bin := filepath.Join(w.Path, "estate")
+	if err := os.WriteFile(bin, []byte("not really a binary, but the only copy"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	dirty, err := w.Dirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirty {
+		t.Fatal("Dirty() must still see an unlisted gitignored file as uncollected work")
+	}
+	if err := w.Remove(); err == nil {
+		t.Fatal("Remove must still refuse: a gitignored binary not on the known-detritus list may be the only copy that exists")
+	}
+	if _, err := os.Stat(bin); err != nil {
+		t.Fatalf("the refused Remove destroyed the unlisted ignored file anyway: %v", err)
+	}
+}
+
+// The guard is an EXACT match on the one allowlisted entry, not a prefix
+// match on its directory. A gitignored path that lives inside
+// reference/scripts/supervisor/ but is not the allowlisted
+// __pycache__/ entry itself -- a sibling ignored directory, here -- must
+// still refuse teardown. This is the near-miss PR #986's review asked for:
+// a HasPrefix(path, "reference/scripts/supervisor/") mutation of
+// isKnownDetritus makes this test fail while
+// TestRemoveStillRefusesUnlistedIgnoredContent (an unrelated top-level
+// path) keeps passing, because that test never exercises anything under
+// the allowlisted directory.
+func TestRemoveStillRefusesUnlistedIgnoredContentInsideTheAllowlistedDirectory(t *testing.T) {
+	root := repo(t)
+	w, err := Create(root, "near-miss-detritus")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Same seeding shape as TestRemoveProceedsWhenTheOnlyIgnoredContentIsKnownDetritus:
+	// a tracked sibling under reference/scripts/supervisor/ is required for git to
+	// report the ignored subdirectory on its own line. Without a tracked sibling,
+	// git collapses the whole untracked "reference/" tree to one "!! reference/"
+	// line regardless of what's ignored inside it, which would make this test pass
+	// for the wrong reason -- confirmed directly: without the seed, this test
+	// passed even under the reviewer's HasPrefix mutation, because Dirty() never
+	// saw the near-miss path at all.
+	buildOutput := filepath.Join("reference", "scripts", "supervisor", "build-output")
+	seed := []struct{ path, content string }{
+		{filepath.Join("reference", "scripts", "supervisor", "core.py"), "# reference only\n"},
+		{".gitignore", "__pycache__/\n" + buildOutput + "/\n"},
+	}
+	for _, f := range seed {
+		full := filepath.Join(root, f.path)
+		if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(f.content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "seed reference + gitignore"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	if out, err := exec.Command("git", "-C", w.Path, "merge", "-q", "--ff-only", "main").CombinedOutput(); err != nil {
+		t.Fatalf("git merge --ff-only main: %v: %s", err, out)
+	}
+	head, err := w.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Base = head
+
+	full := filepath.Join(w.Path, buildOutput)
+	if err := os.MkdirAll(full, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(full, "artifact"), []byte("not really a binary, but the only copy"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	dirty, err := w.Dirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !dirty {
+		t.Fatal("Dirty() must still see reference/scripts/supervisor/build-output/ as uncollected work -- it is not the allowlisted __pycache__/ entry, only a sibling under the same directory")
+	}
+	if err := w.Remove(); err == nil {
+		t.Fatal("Remove must still refuse: a gitignored directory under reference/scripts/supervisor/ that is not the allowlisted entry may be the only copy that exists")
+	}
+	if _, err := os.Stat(filepath.Join(full, "artifact")); err != nil {
+		t.Fatalf("the refused Remove destroyed the unlisted ignored file anyway: %v", err)
+	}
+}
+
 // A worktree that committed nothing is still removable -- otherwise every
 // dispatch leaks.
 func TestRemoveStillCleansUpWhenNothingWasCommitted(t *testing.T) {
