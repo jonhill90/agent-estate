@@ -639,14 +639,36 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case tea.MouseMsg:
-		// Nav clicks first; anything the shell does not own falls through to
-		// the focused pane, which may have its own clickable regions.
+		// Nav clicks first, in ABSOLUTE screen coordinates -- handleMouse's
+		// own bubblezone marks were Scan()'d against the whole frame
+		// (View()'s own doc comment), so its InBounds checks need the raw
+		// event, untranslated.
 		if next, cmd, handled := m.handleMouse(msg); handled {
 			return next, cmd
 		}
-		// Not a nav click: hand it to the focused pane, which may own its
-		// own clickable regions.
-		next, cmd := m.routeAll(msg)
+		// Not a nav click: hand it to every pane, translated into
+		// CONTENT-PANE-LOCAL coordinates (X, minus the sidebar's own
+		// width -- the content pane always starts at absolute column
+		// navWidth, row 0; see resize()'s own doc comment for why nothing
+		// sits above it). No pane in this module has ever handled a raw
+		// tea.MouseMsg before internal/memgraph.Model (its own draggable
+		// graph pane) started to -- every mouse-aware pane from here on
+		// must be built against THIS translated coordinate space, never
+		// the screen's own, or a click/drag will silently land on the
+		// wrong cell whenever the sidebar is a nonzero width (i.e.
+		// always).
+		//
+		// Read m.nav.Width() LIVE here rather than the cached m.navWidth
+		// field. [b] (nav's own icons-only toggle) changes the sidebar's
+		// actual rendered width (fullWidth=26 -> iconWidth=4) entirely
+		// inside nav.Update, with no tea.WindowSizeMsg -- the only place
+		// m.navWidth is recomputed (resize()). Translating by the cached
+		// field left every mouse event 22 columns short of the real
+		// content-pane origin from the moment [b] was pressed until the
+		// next resize; see TestMouseTranslationLiveAfterIconsToggle.
+		local := msg
+		local.X -= m.nav.Width()
+		next, cmd := m.routeAll(local)
 		return next, cmd
 
 	case tea.KeyMsg:
