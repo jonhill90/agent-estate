@@ -1,0 +1,130 @@
+// Package knowledge builds `estate knowledge`'s compiled index -- a
+// derived, regenerable read over four sources that already exist, none
+// of them owned or written by this package:
+//
+//   - GitHub stars (gh api user/starred --paginate)
+//   - the Agent Memory vault ($AGENT_MEMORY_VAULT/agent/facts/*.md)
+//   - the operator's prompt/parameter corpus (~/corpus/ledger.sqlite3,
+//     the live_parameters view -- see internal/corpus's own doc comment
+//     for why that path, not the one CLAUDE.md documents, is correct;
+//     agent-estate#942)
+//   - ~/source/repos/Personal/Loops-Research, a plain directory of
+//     numbered markdown files
+//
+// NEVER AUTHORITATIVE. This package never writes to any of the four
+// sources, never migrates or rewrites anything, and never chooses a
+// storage format for the operator's own knowledge base -- that is his
+// open decision, not this package's to settle. What Generate produces is
+// a derived artifact: safe to delete and regenerate at any time, never
+// safe to treat as a second source of truth for anything it reads.
+//
+// NEVER RAW PROMPTS. The corpus source reads only the live_parameters
+// view (already-derived parameter statements), never the prompts table.
+// This package has no code path that can read a raw prompt's own text --
+// see corpusSource in corpus.go.
+//
+// HONEST ABSENCE. A source that cannot be read is reported as a
+// SourceResult with OK=false and a Reason, never silently dropped and
+// never rendered as an empty-but-present section -- the same typed-
+// absence discipline internal/knowledge (src/tui) and cost.Figure.Known
+// already use elsewhere in this repo.
+package knowledge
+
+import "time"
+
+// Item is one entry in the compiled index, regardless of which source
+// produced it. The three Tier fields are progressive disclosure
+// (docs_structure=progressive_disclosure, a hard operator parameter): a
+// reader who stops at Tier1 alone still has something true and useful;
+// Tier2 adds context; Tier3 points at (never duplicates, for the corpus
+// source never quotes raw text out of) the source itself.
+type Item struct {
+	// ID is a 14-char YYYYMMDDHHmmss id, one second apart from every
+	// other item this same Generate call produced -- see idClock in
+	// id.go. Notebook-MCP's own stated reason for the scheme: "prevents
+	// agent collision."
+	ID string `json:"id"`
+
+	// Source names which of the four readers produced this item --
+	// "github-stars", "vault-fact", "corpus-parameter" or
+	// "loops-research".
+	Source string `json:"source"`
+
+	// Permalink is a URL or filesystem path a reader can actually open
+	// to reach this item's own source, one per item as the operator's
+	// conventions require.
+	Permalink string `json:"permalink"`
+
+	// StructuralTags are bare, organisational -- lifted mechanically
+	// from a field the source already carries (a fact's own `type:`,
+	// a corpus parameter's own `weight`/`status`), never invented by
+	// this package.
+	StructuralTags []string `json:"structural_tags,omitempty"`
+
+	// SynapticTags are #hashtag, associative -- lifted mechanically from
+	// a source's own tagging (GitHub's own `topics` array is the only
+	// source here that carries any), kept as a visibly distinct class
+	// from StructuralTags rather than merged with it.
+	SynapticTags []string `json:"synaptic_tags,omitempty"`
+
+	// Tier1 is one line, true and useful standing alone.
+	Tier1 string `json:"tier1"`
+	// Tier2 is a short paragraph of additional context.
+	Tier2 string `json:"tier2,omitempty"`
+	// Tier3 is where the full material lives -- a pointer (Permalink
+	// repeated, a file path, a "read the fact itself" instruction),
+	// never the raw material inlined for the corpus source.
+	Tier3 string `json:"tier3,omitempty"`
+}
+
+// SourceResult is what one of the four readers actually managed --
+// Count and Items only meaningful when OK. A source that failed still
+// gets an entry here, with Reason, so failure is a visible line in the
+// output rather than a silently smaller Items slice.
+type SourceResult struct {
+	Name   string `json:"name"`
+	OK     bool   `json:"ok"`
+	Reason string `json:"reason,omitempty"`
+	Count  int    `json:"count"`
+}
+
+// Result is Generate's full output -- the whole of what gets written to
+// disk (see Write in write.go) and what a caller (estate's own CLI, the
+// TUI's compiled-index pane) reads.
+type Result struct {
+	// GeneratedAt is when this Result was built, UTC. Every generated
+	// file carries this per the operator's own convention.
+	GeneratedAt time.Time `json:"generated_at"`
+	// StalenessRule states, in one sentence, when a reader should no
+	// longer trust this Result without regenerating it.
+	StalenessRule string `json:"staleness_rule"`
+	// Note is the "derived, never authoritative" statement itself,
+	// repeated here (not just in this package's doc comment) so it
+	// travels with the artifact.
+	Note    string         `json:"note"`
+	Sources []SourceResult `json:"sources"`
+	Items   []Item         `json:"items"`
+}
+
+const stalenessRule = "stale the moment any of its four sources changes; " +
+	"this Result carries no freshness check of its own beyond generated_at " +
+	"-- regenerate with `estate knowledge` before trusting a count here " +
+	"over a live read of the source"
+
+const derivedNote = "GENERATED by `estate knowledge`. This is a derived, " +
+	"regenerable index over sources it only ever reads -- it is not, and " +
+	"must never be treated as, the authoritative home for any of them. " +
+	"Do not hand-edit this file; regenerate it instead."
+
+// Config is every input Generate needs, each one overridable so tests
+// never touch a real vault, corpus or filesystem tree.
+type Config struct {
+	VaultDir      string // $AGENT_MEMORY_VAULT
+	CorpusDBPath  string // ~/corpus/ledger.sqlite3 by default
+	LoopsResearch string // ~/source/repos/Personal/Loops-Research by default
+	// RunGH executes a gh CLI invocation and returns its stdout --
+	// the seam stars.go reads through, so a test never shells out to
+	// the real gh binary or a real network. nil means "use the real
+	// gh binary" (see stars.go's defaultGHRunner).
+	RunGH func(args ...string) ([]byte, error)
+}

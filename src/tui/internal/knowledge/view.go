@@ -54,6 +54,8 @@ func (m Model) View() string {
 	switch m.mode {
 	case modeReading:
 		return m.viewReading()
+	case modeCompiled:
+		return m.compiled.View()
 	case modeGraph:
 		return m.viewGraph()
 	}
@@ -86,7 +88,7 @@ func (m Model) viewList() string {
 	b.WriteString(m.listVP.View() + "\n")
 	b.WriteString(legendStyle.Render(truncate(scrollIndicatorText(m.listVP), m.width)) + "\n")
 
-	legend := fmt.Sprintf("sort: %s (%d facts)  [j/k] move  [pgup/pgdn] scroll  [enter] open  [g] graph  [s] sort  [r] refresh  [t] theme  [q] quit", sortLabel(m.sort), len(m.entries))
+	legend := fmt.Sprintf("sort: %s (%d facts)  [j/k] move  [pgup/pgdn] scroll  [enter] open  [c] compiled index  [g] graph  [s] sort  [r] refresh  [t] theme  [q] quit", sortLabel(m.sort), len(m.entries))
 	b.WriteString(legendStyle.Render(truncate(legend, m.width)))
 
 	return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(b.String())
