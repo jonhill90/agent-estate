@@ -160,6 +160,16 @@ func (m Model) WithGraph(fetch memgraph.Fetcher) Model {
 	return m
 }
 
+// GraphPositionOf exposes the memory-graph sub-model's own PositionOf --
+// exported for the same reason memgraph.Model.PositionOf is: a caller one
+// package away (internal/shell's own mouse-routing tests) needs to confirm
+// a drag driven through the full nav+content routing actually landed on
+// the node under the cursor, without reaching into m.graph's private
+// field directly.
+func (m Model) GraphPositionOf(id string) (x, y int, ok bool) {
+	return m.graph.PositionOf(id)
+}
+
 // WithTheme returns a copy of m painted with th -- the same per-pane seam
 // every other package in this repo exposes.
 func (m Model) WithTheme(th theme.Theme, notice string) Model {

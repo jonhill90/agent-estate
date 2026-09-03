@@ -211,7 +211,19 @@ func (m Model) View() string {
 	canvasBody := strings.Join(rows, "\n")
 	boxed := lipgloss.NewStyle().Border(m.theme.Border).BorderForeground(m.theme.Color(theme.RoleBorder)).Render(canvasBody)
 
-	hint := "hover a node for its title -- press and drag to reposition; release to drop"
+	// "hover a node for its title" was dropped from this hint in
+	// jonhill90/agent-estate#937's own fix pass: Node.Label was populated
+	// (cmd/estate/memgraph.go's buildMemgraphFetch) and never read anywhere
+	// in this package -- no hover state exists, handleMouse's
+	// MouseActionMotion case is a no-op unless a node is already grabbed
+	// (TestMotionWithoutPressDoesNotGrab), and the status line below shows
+	// the raw grabbed id, never Label. A review against the real binary
+	// confirmed hovering shows nothing. Advertising a feature that does not
+	// exist on every loaded frame was the defect; the fix here is to stop
+	// claiming it rather than build it under this repo's one-fix-pass rule.
+	// Drag itself is real (see TestDragSequenceMovesGrabbedNode) and stays
+	// in the hint below.
+	hint := "press and drag to reposition; release to drop"
 	if m.grabbed != "" {
 		hint = fmt.Sprintf("dragging %s -- release to drop", m.grabbed)
 	}

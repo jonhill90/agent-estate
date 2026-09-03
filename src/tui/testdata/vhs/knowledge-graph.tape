@@ -37,13 +37,21 @@ Enter
 Wait+Screen /\[enter\] open/
 Screenshot testdata/vhs/out/knowledge-graph-01-list.png
 
-# [tab] into the content pane, then [g] into the graph -- "hover a node"
-# is internal/memgraph.View's own static hint line, present once a graph
-# has actually loaded (the fetching/error/not-configured states render a
-# shorter frame without it).
+# [tab] into the content pane, then [g] into the graph. Waits on the
+# LEGEND line, not the drag hint below it: jonhill90/agent-estate#937's own
+# fix pass found `Wait+Screen /hover a node/` (the old hint text) matching
+# a transient single-color repaint frame at the [g] transition -- the
+# Screenshot fired on that blank frame, not on settled content, and a
+# second identical run of this tape rendered correctly. The legend
+# ("legend: ... project ...") is the LAST thing this view composes
+# (view.go's own View: canvas, then legend, then hint), so it cannot be
+# present before the whole frame has actually settled -- and the short
+# Sleep after gives the terminal one more repaint cycle of margin before
+# the shot, rather than trusting the first frame the regex matches.
 Tab
 Type "g"
-Wait+Screen /hover a node/
+Wait+Screen /legend:.*project/
+Sleep 500ms
 Screenshot testdata/vhs/out/knowledge-graph-02-graph.png
 
 Type "q"
