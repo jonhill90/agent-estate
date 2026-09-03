@@ -505,6 +505,39 @@ func main() {
 				SrcHead:   strings.TrimSpace(string(head)),
 				Artifact:  artifact,
 			}
+			// since is the PREVIOUS tick's own `at`, read before this entry is
+			// appended -- the zero value means this is the first tick ever
+			// recorded, in which case there is no window to bound either the
+			// gap or observed spend against, and both stay nil (agent-estate#982).
+			since := tick.LastAt(path)
+			if !since.IsZero() {
+				gap := int64(e.At.Sub(since).Seconds())
+				e.GapSeconds = &gap
+
+				// Observed spend for the window between the previous tick
+				// and this one: every task whose outcome became known
+				// (reached a terminal ledger state) in that window, keyed on
+				// the terminal record's own At rather than when the task was
+				// dispatched (agent-estate#989 -- dispatch-time keying let a
+				// slow task's cost fall permanently behind every later
+				// window's `since` and never be counted at all). This is
+				// NOT this tick's cost -- the Director's own turn is never
+				// dispatched by the estate, so no harness result envelope
+				// for it ever reaches the ledger, and that gap cannot be
+				// closed from here. See tick.Entry.ObservedSpendUSD's doc
+				// comment.
+				cur, err := l.Current()
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "estate: cannot read the ledger to attribute observed spend for this window, recording the tick without it:", err)
+				} else {
+					turns, turnsWithCost, total := spend.WindowedByObservation(cur, since, e.At)
+					t := int64(turns)
+					e.ObservedTurns = &t
+					if turnsWithCost > 0 {
+						e.ObservedSpendUSD = &total
+					}
+				}
+			}
 			// Recency, not existence. In a real repository almost
 			// everything already exists, so "does this resolve" was
 			// satisfied by naming any old file. The question is whether
@@ -558,6 +591,21 @@ func main() {
 				fmt.Printf("recorded %s at %s with no artifact\n", e.PhaseItem, shortHead)
 			} else {
 				fmt.Printf("recorded %s at %s -> %s\n", e.PhaseItem, shortHead, artifact)
+			}
+			if e.GapSeconds == nil {
+				fmt.Println("gap since previous tick: none -- this is the first tick this log has recorded")
+			} else {
+				fmt.Printf("gap since previous tick: %ds (cron cadence, not work duration -- see docs/director-loop.md)\n", *e.GapSeconds)
+			}
+			switch {
+			case e.ObservedTurns == nil:
+				fmt.Println("observed spend this window: not measured -- no previous tick to bound a window against")
+			case e.ObservedSpendUSD != nil:
+				fmt.Printf("observed spend this window: $%.4f across %d observed turn(s) that reported a cost, excludes the Director's own turn cost (not observable from here) -- see tick.Entry.ObservedSpendUSD\n", *e.ObservedSpendUSD, *e.ObservedTurns)
+			case *e.ObservedTurns > 0:
+				fmt.Printf("observed spend this window: not reported by any of %d turn(s) that FINISHED this window -- not pending, these are done; their harness (e.g. codex) reports no dollar figure at all -- excludes the Director's own turn cost either way\n", *e.ObservedTurns)
+			default:
+				fmt.Println("observed spend this window: no turns finished this window -- excludes the Director's own turn cost either way")
 			}
 
 		case "escalate":
@@ -648,6 +696,30 @@ func main() {
 				// Could not measure. Never clean.
 				fmt.Fprintln(os.Stderr, "estate:", err)
 				os.Exit(2)
+			}
+			// Surface the most recently recorded tick's own gap and
+			// dispatch-spend figures here -- this is a place a human already
+			// looks, every tick, per docs/director-loop.md step 1 -- rather
+			// than a new view (agent-estate#982). Printed regardless of the
+			// verdict below, so it shows on a stalled tick too.
+			if last, ok, lerr := tick.LastEntry(path); lerr != nil {
+				fmt.Fprintln(os.Stderr, "estate: cannot read the last tick's gap/spend figures:", lerr)
+			} else if ok {
+				if last.GapSeconds == nil {
+					fmt.Println("last tick's gap: none recorded (its first-ever tick, or predates agent-estate#982)")
+				} else {
+					fmt.Printf("last tick's gap: %ds (cron cadence, not work duration)\n", *last.GapSeconds)
+				}
+				switch {
+				case last.ObservedTurns == nil:
+					fmt.Println("last tick's observed spend: not recorded (no previous tick to bound a window against, or predates agent-estate#982)")
+				case last.ObservedSpendUSD != nil:
+					fmt.Printf("last tick's observed spend: $%.4f across %d observed turn(s) that reported a cost, excludes the Director's own turn cost (not observable from here)\n", *last.ObservedSpendUSD, *last.ObservedTurns)
+				case *last.ObservedTurns > 0:
+					fmt.Printf("last tick's observed spend: not reported by any of %d turn(s) that FINISHED that window -- not pending, these are done; their harness (e.g. codex) reports no dollar figure at all -- excludes the Director's own turn cost either way\n", *last.ObservedTurns)
+				default:
+					fmt.Println("last tick's observed spend: no turns finished that window -- excludes the Director's own turn cost either way")
+				}
 			}
 			if v.Stalled && v.Escalated {
 				// A different exit code, not a clean one: the phase item and
