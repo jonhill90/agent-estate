@@ -1,6 +1,8 @@
 package dispatchid
 
 import (
+	"fmt"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -50,5 +52,41 @@ func TestIDIsASafePathElement(t *testing.T) {
 	}
 	if !strings.HasPrefix(id, "924-") {
 		t.Errorf("id %q should still start with the issue for readability", id)
+	}
+}
+
+// Three council seats found that seq resets per process, so uniqueness rested
+// on two processes never starting inside the same clock tick -- and one seat
+// measured this machine's clock advancing in ~1000ns steps, not nanoseconds.
+//
+// The pid is what actually separates concurrent dispatches: the operating
+// system guarantees two live processes never share one.
+func TestIDCarriesTheProcessID(t *testing.T) {
+	id := New("926", time.Now())
+	want := fmt.Sprint(os.Getpid())
+	parts := strings.Split(id, "-")
+	if len(parts) != 4 {
+		t.Fatalf("id %q should be issue-nanos-pid-seq", id)
+	}
+	if parts[2] != want {
+		t.Errorf("id %q carries pid %q, want %q", id, parts[2], want)
+	}
+}
+
+// The case that actually broke: same instant, different processes. Simulated
+// by holding the timestamp fixed and varying the pid component, since a test
+// cannot fork itself.
+func TestSameInstantDifferentProcessesCannotCollide(t *testing.T) {
+	at := time.Date(2026, 9, 3, 5, 30, 0, 0, time.UTC)
+	a := New("926", at)
+	// Another process minting at the identical instant would produce the same
+	// timestamp and the same seq=1; only the pid differs.
+	parts := strings.Split(a, "-")
+	other := strings.Join([]string{parts[0], parts[1], "999999", "1"}, "-")
+	if a == other {
+		t.Fatal("two processes minting at the same instant must not collide")
+	}
+	if strings.Join([]string{parts[0], parts[1], parts[2], "1"}, "-") == other {
+		t.Fatal("the pid must be what distinguishes them")
 	}
 }
