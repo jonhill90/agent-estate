@@ -97,7 +97,40 @@ Append one line per tick to `docs/tick-log.jsonl`:
 **Stop ticking and escalate when the last three entries share the same
 `phase_item` and the same `src_head` with `artifact: null`.** That is
 determinable with one `tail -3`. A stop condition with no implementation is a
-sentence, not a guard.
+sentence, not a guard. In practice, run `estate tick check`: it applies the
+real rule (agent-estate#959, #923), not the literal wording above — see
+`internal/tick`'s own doc comment for exactly how and why it departs.
+
+**A stalled tick that has told a human is not the same as one that has not,
+and the record must be able to say which (agent-estate#923).** A stalled
+tick correctly writes nothing to `docs/tick-log.jsonl`, which means the
+window never changes and `estate tick check` reports `STALLED` again on
+every subsequent tick, forever — there is no mechanism to say "I stopped and
+escalated" without pretending the escalation was output. Run:
+
+```
+estate tick escalate <phase-item> <where>
+```
+
+This appends to a **separate** log (`docs/tick-escalations.jsonl`), never to
+`docs/tick-log.jsonl` — an escalation must never be able to pass as an
+artifact, however it is worded (a Telegram link contains `://`, which
+`Validate` accepts on shape alone). It never clears the stall by itself.
+What it changes is `estate tick check`'s exit code, once the escalation
+names the same `phase_item`/`src_head` as the most recent tick and is
+timestamped at or after it:
+
+- exit `1`, `STALLED, unacknowledged` — nobody has been told; stop.
+- exit `3`, `STALLED, escalated` — a human has been told about this exact
+  stall; you may spend this tick on other work, but this phase item/src head
+  is still stuck. Escalating the same stall repeatedly is counted and shown
+  (`EscalationCount` in the reason) rather than reading as one healthy
+  acknowledgment.
+
+The window still only moves the way it always has: a real artifact,
+recorded since the last tick, on a later tick. Escalating changes nothing
+about that — it only lets the loop state, truthfully, that it already told
+someone rather than silently repeating the same refusal.
 
 The clock does **not** run while you are blocked on operator review.
 

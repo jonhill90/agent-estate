@@ -39,6 +39,23 @@ func Path() string {
 	return DefaultPath
 }
 
+// DefaultEscalationPath is where an escalation is recorded, relative to the
+// repo root. ESTATE_TICK_ESCALATION_LOG overrides it.
+//
+// This is a SEPARATE file from the tick log, deliberately. See
+// RecordEscalation's doc comment for why an escalation must never share a
+// file, or a field, with the artifact record the stop condition reads.
+const DefaultEscalationPath = "docs/tick-escalations.jsonl"
+
+// EscalationPath returns the escalation log to use: ESTATE_TICK_ESCALATION_LOG
+// when set, else DefaultEscalationPath.
+func EscalationPath() string {
+	if p := os.Getenv("ESTATE_TICK_ESCALATION_LOG"); p != "" {
+		return p
+	}
+	return DefaultEscalationPath
+}
+
 // Entry is one tick, in the shape section 3 of the brief specifies.
 type Entry struct {
 	At        time.Time `json:"-"`
@@ -100,6 +117,24 @@ type Verdict struct {
 	// that is the fail-closed direction this repo already takes everywhere
 	// else (Validate's produced callback, pressure.Check, cost.Figure.Known).
 	Unverifiable int
+	// Escalated is true when the CURRENT stall (the same phase item and src
+	// head as the most recent tick) has a matching escalation on record,
+	// timestamped at or after that tick -- see CheckWithEscalation. It is
+	// never true unless Stalled is also true: an escalation acknowledges a
+	// stall, it does not create or clear one, and a stall with no matching
+	// escalation is Escalated=false however many unrelated escalations sit
+	// in the log.
+	Escalated bool
+	// EscalatedAt is when the most recent acknowledging escalation was
+	// recorded. Zero when Escalated is false.
+	EscalatedAt time.Time
+	// EscalationCount is how many escalations on record match the current
+	// stall's (phase item, src head) pair, fresh or not. A loop that
+	// escalates the SAME stall repeatedly -- because it is still stuck, not
+	// because it moved on -- must be visibly different from one that
+	// escalated once and is now waiting; this is that difference. Zero when
+	// Escalated is false.
+	EscalationCount int
 }
 
 // Window is how many consecutive entries the stop condition looks at.
@@ -184,6 +219,117 @@ func Record(path string, e Entry, produced func(tok string, since time.Time) boo
 		return fmt.Errorf("tick: append to %s: %w", path, err)
 	}
 	return nil
+}
+
+// EscalationEntry records that a stalled tick told a human, without
+// pretending that telling counts as output. See RecordEscalation's doc
+// comment for why this lives in its own log, never in the tick log itself.
+type EscalationEntry struct {
+	At        time.Time `json:"-"`
+	AtText    string    `json:"at"`
+	PhaseItem string    `json:"phase_item"`
+	SrcHead   string    `json:"src_head"`
+	// Where says who was told, and how -- "telegram", "director-inbox",
+	// whatever channel notify.sh used this time. Required: an escalation
+	// that names no recipient is not evidence anyone was actually told.
+	Where string `json:"where"`
+}
+
+// MarshalJSON writes At as ISO 8601 UTC, matching Entry's own convention.
+func (e EscalationEntry) MarshalJSON() ([]byte, error) {
+	type wire struct {
+		At        string `json:"at"`
+		PhaseItem string `json:"phase_item"`
+		SrcHead   string `json:"src_head"`
+		Where     string `json:"where"`
+	}
+	w := wire{
+		At:        e.At.UTC().Format(time.RFC3339),
+		PhaseItem: e.PhaseItem,
+		SrcHead:   e.SrcHead,
+		Where:     e.Where,
+	}
+	if e.AtText != "" {
+		w.At = e.AtText
+	}
+	return json.Marshal(w)
+}
+
+// RecordEscalation appends one escalation to path, creating it if absent.
+//
+// WHY THIS NEVER TOUCHES THE TICK LOG. agent-estate#923's own workaround --
+// and the shape a naive fix would take -- was to write the escalation as a
+// tick's "artifact". That is exactly the dodge the artifact rule exists to
+// catch: a token containing "://" (a Telegram link, a director-inbox link)
+// passes Validate on shape alone, with no recency check at all, so a
+// stalled loop could escalate three ticks running and clear the
+// repeated-artifact rule -- a seventh way to defeat it, next to the six
+// already on record in internal/tick's own package doc. Keeping the
+// escalation in its own file, under its own type, with no "artifact" field
+// at all, makes that structurally impossible: CheckWithResolver never opens
+// this path, and nothing in this package will ever read an EscalationEntry
+// as an Entry. Recording one can change what CheckWithEscalation reports
+// about an existing stall; it can never, by construction, make Check or
+// CheckWithResolver see one that Validate would otherwise have caught.
+func RecordEscalation(path string, e EscalationEntry) error {
+	if e.PhaseItem == "" {
+		return errors.New("tick: escalation phase_item is required -- an escalation that cannot name what it is acknowledging cannot acknowledge anything")
+	}
+	if strings.TrimSpace(e.Where) == "" {
+		return errors.New("tick: escalation must say who was told -- an escalation naming no recipient is not evidence anyone was")
+	}
+	line, err := json.Marshal(e)
+	if err != nil {
+		return fmt.Errorf("tick: encode escalation: %w", err)
+	}
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err != nil {
+		return fmt.Errorf("tick: open %s: %w", path, err)
+	}
+	defer f.Close()
+	if _, err := f.Write(append(line, '\n')); err != nil {
+		return fmt.Errorf("tick: append to %s: %w", path, err)
+	}
+	return nil
+}
+
+type parsedEscalation struct {
+	At        string `json:"at"`
+	PhaseItem string `json:"phase_item"`
+	SrcHead   string `json:"src_head"`
+	Where     string `json:"where"`
+}
+
+// readEscalations returns every escalation in path, in file order. A
+// missing file is zero entries, not an error -- a loop that has never
+// escalated has not failed to.
+func readEscalations(path string) ([]parsedEscalation, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tick: open %s: %w", path, err)
+	}
+	defer f.Close()
+	var out []parsedEscalation
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for n := 1; sc.Scan(); n++ {
+		text := strings.TrimSpace(sc.Text())
+		if text == "" {
+			continue
+		}
+		var p parsedEscalation
+		if err := json.Unmarshal([]byte(text), &p); err != nil {
+			return nil, fmt.Errorf("tick: %s line %d is not readable: %w", path, n, err)
+		}
+		out = append(out, p)
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("tick: read %s: %w", path, err)
+	}
+	return out, nil
 }
 
 type parsed struct {
@@ -545,6 +691,146 @@ func checkImpl(path string, resolve Resolve) (Verdict, error) {
 		Unverifiable: unverifiable,
 		Reason:       reason,
 	}, nil
+}
+
+// CheckWithEscalation is CheckWithResolver, plus recognising a recorded
+// escalation as ACKNOWLEDGMENT of the current stall rather than as evidence
+// that clears it.
+//
+// WHY A STALL CAN BE ACKNOWLEDGED BUT NEVER CLEARED BY IT. agent-estate#923:
+// the stop condition has no way to represent "stalled, escalated, awaiting a
+// response" -- a real state the brief itself names (docs/director-brief.md
+// section 3: "the clock does not run while you are blocked on operator
+// review") -- so a genuinely escalated loop reads identically to one that
+// never noticed its own stall, and the loop's own next tick is STALLED
+// again, forever, because a stalled tick correctly records nothing and the
+// window therefore never changes. The only recorded escape was a human
+// overriding the rule in the open, which is exactly the judgement call this
+// guard exists to replace.
+//
+// This function never lets recording an escalation turn into a manufactured
+// artifact: EscalationEntry has no artifact field, lives in its own log (see
+// RecordEscalation), and this function does not touch Validate, hasArtifact,
+// or the tick log at all -- it only reads the escalation log and layers a
+// second judgement on top of Verdict.Stalled. checkImpl's own verdict is
+// computed first, unmodified; an escalation can only ADD Escalated /
+// EscalatedAt / EscalationCount to an already-stalled verdict, never flip
+// Stalled itself.
+//
+// An escalation acknowledges ONLY the tick that provoked it: it must name
+// the same phase item and src head as the most recently recorded tick, and
+// be timestamped at or after it. An escalation for a stall that has since
+// moved (a new src head from real work, a new phase item) does not carry
+// forward -- the loop must escalate again to acknowledge the NEW stall, and
+// a genuinely-escalated loop that goes on to record real work moves the
+// window exactly the way checkImpl already lets any artifact move it: this
+// function adds nothing that would prevent that recovery.
+//
+// Every escalation matching the current (phase item, src head) is counted
+// in EscalationCount, fresh or not, so a loop escalating the SAME stall
+// repeatedly -- because it is still stuck, not because it moved on -- stays
+// visibly distinguishable from a loop that escalated once and is waiting.
+// Nothing here ever reports a repeatedly-escalating loop as merely
+// "escalated"; the reason string and EscalationCount always carry the
+// repeat count.
+func CheckWithEscalation(tickPath, escalationPath string, resolve Resolve) (Verdict, error) {
+	v, err := checkImpl(tickPath, resolve)
+	if err != nil || !v.Stalled {
+		return v, err
+	}
+
+	tail, ok, err := lastTickEntry(tickPath)
+	if err != nil {
+		return Verdict{}, err
+	}
+	if !ok {
+		// Unreachable in practice -- Stalled true implies entries exist --
+		// but an unmeasurable state must never read as acknowledged.
+		return v, nil
+	}
+	lastAt, _ := time.Parse(time.RFC3339, tail.At)
+
+	escalations, err := readEscalations(escalationPath)
+	if err != nil {
+		return Verdict{}, err
+	}
+
+	var (
+		matches  int
+		freshest time.Time
+		freshWho string
+		acked    bool
+	)
+	for _, e := range escalations {
+		if e.PhaseItem != tail.PhaseItem || e.SrcHead != tail.SrcHead {
+			continue
+		}
+		matches++
+		eAt, perr := time.Parse(time.RFC3339, e.At)
+		if perr != nil {
+			continue
+		}
+		if !lastAt.IsZero() && !eAt.Before(lastAt) {
+			acked = true
+			if eAt.After(freshest) {
+				freshest, freshWho = eAt, e.Where
+			}
+		}
+	}
+
+	if !acked {
+		return v, nil
+	}
+	v.Escalated = true
+	v.EscalatedAt = freshest
+	v.EscalationCount = matches
+	if matches > 1 {
+		v.Reason = fmt.Sprintf("%s -- escalated %d time(s) for this same stall, most recently to %s at %s: the underlying stall has not changed",
+			v.Reason, matches, freshWho, freshest.UTC().Format(time.RFC3339))
+	} else {
+		v.Reason = fmt.Sprintf("%s -- escalated to %s at %s", v.Reason, freshWho, freshest.UTC().Format(time.RFC3339))
+	}
+	return v, nil
+}
+
+// lastTickEntry returns the most recently recorded tick's own timestamp,
+// phase item and src head, so CheckWithEscalation can decide which stall an
+// escalation is claiming to acknowledge. ok is false when the log has no
+// entries at all.
+func lastTickEntry(path string) (struct{ At, PhaseItem, SrcHead string }, bool, error) {
+	var out struct{ At, PhaseItem, SrcHead string }
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return out, false, nil
+	}
+	if err != nil {
+		return out, false, fmt.Errorf("tick: open %s: %w", path, err)
+	}
+	defer f.Close()
+	var lastLine string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		if t := strings.TrimSpace(sc.Text()); t != "" {
+			lastLine = t
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return out, false, err
+	}
+	if lastLine == "" {
+		return out, false, nil
+	}
+	var e struct {
+		At        string `json:"at"`
+		PhaseItem string `json:"phase_item"`
+		SrcHead   string `json:"src_head"`
+	}
+	if err := json.Unmarshal([]byte(lastLine), &e); err != nil {
+		return out, false, fmt.Errorf("tick: %s last line is not readable: %w", path, err)
+	}
+	out.At, out.PhaseItem, out.SrcHead = e.At, e.PhaseItem, e.SrcHead
+	return out, true, nil
 }
 
 // lastTickAt returns the timestamp of the most recent entry, or the zero time

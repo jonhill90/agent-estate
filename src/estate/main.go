@@ -252,7 +252,20 @@ func usage() {
   estate tick check                     has the loop stalled? resolves each
                                         artifact in the window for real
                                         (a request, a status) rather than
-                                        trusting its shape; 1 = yes, escalate
+                                        trusting its shape.
+                                        exit 0 = moving
+                                        exit 1 = STALLED, unacknowledged --
+                                          stop and run 'tick escalate'
+                                        exit 3 = STALLED, escalated -- may
+                                          continue on OTHER work; this
+                                          phase item/src head is still stuck
+  estate tick escalate <phase-item> <where>
+                                        record that a human was told about
+                                        the current stall. Never counts as
+                                        an artifact and never clears the
+                                        stall by itself -- it only changes
+                                        the next 'tick check' exit code from
+                                        1 to 3 once the stall it names matches
   estate tick verify                    sweep the whole log and report how
                                         many artifacts resolve, how many
                                         don't, and how many could not be
@@ -540,6 +553,44 @@ func main() {
 				fmt.Printf("recorded %s at %s -> %s\n", e.PhaseItem, shortHead, artifact)
 			}
 
+		case "escalate":
+			// agent-estate#923: the stop condition has no way to represent
+			// "stalled, escalated, awaiting a response" -- so this records
+			// exactly that, in its own log, never the tick log. See
+			// tick.RecordEscalation's doc comment for why an escalation must
+			// never be written as a tick's artifact.
+			if len(os.Args) < 5 {
+				fmt.Fprintln(os.Stderr, "estate: tick escalate needs a phase item and who was told")
+				os.Exit(2)
+			}
+			known, err := tick.KnownPhases("docs/phase-plan.md")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
+			if err := tick.CheckPhaseItem(os.Args[3], known); err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
+			where := strings.TrimSpace(strings.Join(os.Args[4:], " "))
+			head, err := exec.Command("git", "log", "-1", "--format=%H", "--", "src/").Output()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "estate: cannot read src head, refusing to write an escalation that cannot be compared:", err)
+				os.Exit(2)
+			}
+			ee := tick.EscalationEntry{
+				At:        time.Now().UTC(),
+				PhaseItem: os.Args[3],
+				SrcHead:   strings.TrimSpace(string(head)),
+				Where:     where,
+			}
+			if err := tick.RecordEscalation(tick.EscalationPath(), ee); err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
+			fmt.Printf("escalation recorded for %s -- told %s\n", ee.PhaseItem, where)
+			fmt.Println("this does not clear the stall; it lets the next `tick check` report STALLED, escalated instead of STALLED, unacknowledged")
+
 		case "check":
 			// Before reading the record, confirm the record is still there.
 			// It lives in a file the Director can delete, and deleting it
@@ -579,15 +630,34 @@ func main() {
 			// real instead of trusting it looks openable. See
 			// tick.CheckWithResolver's doc comment for why this lives here
 			// and not in `tick record`.
-			v, err := tick.CheckWithResolver(path, newResolver(defaultHTTPStatus, defaultGHAPI))
+			//
+			// agent-estate#923: a stalled tick records nothing, so the
+			// window never changes and the same stall reports forever with
+			// no way to say "a human was told". CheckWithEscalation layers
+			// that acknowledgment on top without letting it clear the
+			// stall itself -- see its own doc comment.
+			v, err := tick.CheckWithEscalation(path, tick.EscalationPath(), newResolver(defaultHTTPStatus, defaultGHAPI))
 			if err != nil {
 				// Could not measure. Never clean.
 				fmt.Fprintln(os.Stderr, "estate:", err)
 				os.Exit(2)
 			}
+			if v.Stalled && v.Escalated {
+				// A different exit code, not a clean one: the phase item and
+				// src head named in v.Reason are STILL stalled. What changed
+				// is that a human has been told, so the loop may spend this
+				// tick on OTHER work instead of stopping outright -- it must
+				// not spend it pretending this stall resolved.
+				fmt.Fprintln(os.Stderr, "STALLED, escalated: "+v.Reason)
+				if v.EscalationCount > 1 {
+					fmt.Fprintf(os.Stderr, "repeated escalation: %d escalation(s) recorded against this same stall -- this is not a healthy loop, it is a stuck one that keeps saying so\n", v.EscalationCount)
+				}
+				fmt.Fprintln(os.Stderr, "may continue on other work while the escalation stands (brief section 3); this phase item/src head remains stalled")
+				os.Exit(3)
+			}
 			if v.Stalled {
 				fmt.Fprintln(os.Stderr, "STALLED: "+v.Reason)
-				fmt.Fprintln(os.Stderr, "stop ticking and escalate (brief section 3)")
+				fmt.Fprintln(os.Stderr, "stop ticking and escalate: estate tick escalate <phase-item> <where>, then re-check")
 				os.Exit(1)
 			}
 			fmt.Println("moving: " + v.Reason)
