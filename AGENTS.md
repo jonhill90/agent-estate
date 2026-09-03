@@ -459,11 +459,14 @@ measured against. See
   (agent-estate#947). Local only, not wired into CI (`vhs`, `ttyd` and
   `ffmpeg` aren't installed on the `ubuntu-latest` runner `tui-ci.yml` uses —
   confirmed by reading the workflow, agent-estate#976); see
-  `src/tui/testdata/vhs/README.md`. Only 4 of 27 tapes have a measured
-  `.mincolors` floor (agent-estate#976) — the rest silently fall back to
-  `-min-colors`'s own unmeasured default (1000), which agent-estate#960's own
-  sweep found rejects over a third of tapes outright, so the floor is neither
-  fully permissive nor fully closed for the other 23. Reimplementing the gate
+  `src/tui/testdata/vhs/README.md`. Most tapes have no measured `.mincolors`
+  floor — run `git ls-tree HEAD -r --name-only src/tui/testdata/vhs/ | grep
+  -c '\.tape$'` against the same with `'\.mincolors$'` rather than trusting a
+  count written here (29 tapes, 4 floors, agent-estate#976, 2026-09-03 — this
+  drifts every time a tape is added). The unmeasured rest silently fall back
+  to `-min-colors`'s own unmeasured default (1000), which agent-estate#960's
+  own sweep found rejects over a third of tapes outright, so the floor is
+  neither fully permissive nor fully closed for them. Reimplementing the gate
   in Go is open work.
 
 ---
