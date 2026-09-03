@@ -32,6 +32,45 @@ func TestResolveTickLogPath_AbsoluteFlagWinsOverRepoRoot(t *testing.T) {
 	}
 }
 
+// TestResolveTickLogPath_NonAbsoluteRepoRootDegradesHonestly reproduces the
+// -trimpath case: runtime.Caller(0) (and so repoRootFromSource) can return a
+// module-relative path instead of an absolute one. Joining that relative
+// repoRoot with the relative tickLogFlag would produce a relative result
+// that os.Open then silently resolves against the process's cwd --
+// reintroducing this PR's own defect one level down. Confirm instead that
+// the result is always absolute and, fed through estatus.Read, always comes
+// back Absent rather than accidentally reading whatever sits at a
+// cwd-relative path.
+func TestResolveTickLogPath_NonAbsoluteRepoRootDegradesHonestly(t *testing.T) {
+	relativeRepoRoot := filepath.FromSlash("github.com/jonhill90/agent-estate")
+	got := resolveTickLogPath(relativeRepoRoot, "docs/tick-log.jsonl")
+
+	if !filepath.IsAbs(got) {
+		t.Fatalf("resolveTickLogPath(%q, ...) = %q, want an absolute path -- a relative result would let os.Open silently resolve it against the process cwd", relativeRepoRoot, got)
+	}
+
+	// Stand somewhere that genuinely has no such file, to rule out the
+	// resolved path accidentally existing by coincidence.
+	elsewhere := t.TempDir()
+	oldwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(elsewhere); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(oldwd); err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	status := estatus.Read(filepath.Join(elsewhere, "no-ledger.jsonl"), got)
+	if status.Ticks != estatus.Absent {
+		t.Fatalf("Ticks = %s, want %s -- a non-absolute repoRoot must degrade honestly, never read a cwd-relative path with confidence", status.Ticks, estatus.Absent)
+	}
+}
+
 // TestTickLogSourceFileIsThisBinarysOwnPath is the load-bearing assumption
 // behind resolveTickLogPath: tickLogSourceFile must actually be this
 // repository's src/tui/cmd/estate/tickpath.go, not some GOPATH cache copy

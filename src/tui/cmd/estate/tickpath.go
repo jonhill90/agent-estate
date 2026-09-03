@@ -22,6 +22,13 @@ var tickLogSourceFile = func() string {
 // layout, not a search -- see resolveTickLogPath for why a search (walking
 // up from cwd, or hunting for a marker file) is the wrong tool for this
 // particular path.
+//
+// This is baked in at build time, not read fresh at run time: a binary that
+// outlives the checkout it was built from (the checkout later renamed or
+// deleted) computes a repoRoot that no longer exists on disk. That degrades
+// to Absent ("Director: not running") the same way a wrong launch cwd used
+// to -- see resolveTickLogPath's doc comment for why that's the accepted,
+// but silent, tradeoff, and rebuild after any checkout rename or move.
 func repoRootFromSource(sourceFile string) string {
 	return filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(filepath.Dir(sourceFile)))))
 }
@@ -54,9 +61,40 @@ func repoRootFromSource(sourceFile string) string {
 // An absolute tickLogFlag (an explicit -estate-tick-log) is honoured
 // exactly as given; only the default relative path is resolved against
 // repoRoot.
+//
+// TWO KNOWN, ACCEPTED DEGRADATIONS, both landing on Absent ("Director: no
+// tick log ... not running") rather than a confidently wrong read:
+//
+//   - repoRoot itself not absolute. runtime.Caller(0)'s file path is normally
+//     absolute, but under `go build -trimpath` it is the module-relative
+//     path instead (nothing in this repo passes -trimpath today -- this is
+//     dormant, not live; see repoRootFromSource's own doc comment). Joining
+//     a relative repoRoot with a relative tickLogFlag would produce a
+//     relative result that os.Open then resolves against the process's
+//     cwd -- reintroducing the exact cwd-dependent bug this file exists to
+//     fix, one level down, and silently, contradicting "never from
+//     os.Getwd()" above. Guarded below: a non-absolute repoRoot is refused
+//     rather than joined, and the caller sees Absent, never a cwd-relative
+//     guess.
+//   - the checkout has moved. A binary keeps repoRoot baked in from its own
+//     build; if the checkout it was built from is later renamed or deleted,
+//     repoRoot names a directory that no longer exists. os.Open on the
+//     resolved (still-absolute, still correctly-computed) path then returns
+//     fs.ErrNotExist, and estatus.Read reports Absent -- the same "Director:
+//     not running" text this PR's whole fix is about. This is the honest
+//     choice between two bad options, but it is still silent: rebuild after
+//     any checkout rename or move to clear it.
 func resolveTickLogPath(repoRoot, tickLogFlag string) string {
 	if filepath.IsAbs(tickLogFlag) {
 		return tickLogFlag
+	}
+	if !filepath.IsAbs(repoRoot) {
+		// repoRoot is not absolute -- see the trimpath degradation above.
+		// Refuse to guess: return a path guaranteed not to exist so
+		// estatus.Read reports Absent (an honest "we don't know") instead of
+		// silently resolving a repoRoot-relative join against whatever the
+		// process's cwd happens to be.
+		return filepath.Join(string(filepath.Separator), "estate-repo-root-not-absolute", tickLogFlag)
 	}
 	return filepath.Join(repoRoot, tickLogFlag)
 }
