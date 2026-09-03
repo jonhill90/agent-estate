@@ -137,36 +137,34 @@ func harnessNames(gs []HarnessSpend) []string {
 	return out
 }
 
-// agent-estate#982: only a task DISPATCHED inside the window counts, and only
-// against its terminal (Current) record's own reported cost -- never a flat
-// per-task assumption.
-func TestWindowedByDispatch_OnlyCountsDispatchesInsideTheWindow(t *testing.T) {
+// agent-estate#989: only a task OBSERVED (its own terminal record's At)
+// inside the window counts, and only against that record's own reported
+// cost -- never a flat per-task assumption, and never keyed on when the
+// task was dispatched (agent-estate#982's original, and wrong, keying).
+func TestWindowedByObservation_OnlyCountsOutcomesObservedInsideTheWindow(t *testing.T) {
 	since := mustTime(t, "2026-09-03T10:00:00Z")
 	until := mustTime(t, "2026-09-03T10:03:00Z")
 
-	all := []ledger.Record{
-		// Dispatched before the window: must not count, however much it cost.
-		{ID: "before", State: ledger.Dispatched, At: mustTime(t, "2026-09-03T09:59:00Z")},
-		// Dispatched inside the window, reported a cost.
-		{ID: "in-a", State: ledger.Dispatched, At: mustTime(t, "2026-09-03T10:01:00Z")},
-		// Dispatched inside the window, no cost reported (e.g. codex).
-		{ID: "in-b", State: ledger.Dispatched, At: mustTime(t, "2026-09-03T10:02:00Z")},
-		// Dispatched exactly at until: inclusive.
-		{ID: "in-c", State: ledger.Dispatched, At: until},
-		// Dispatched after the window: must not count.
-		{ID: "after", State: ledger.Dispatched, At: mustTime(t, "2026-09-03T10:04:00Z")},
-	}
 	current := []ledger.Record{
-		{ID: "before", State: ledger.Complete, SpendCostUSD: f64(9.0)},
-		{ID: "in-a", State: ledger.Complete, SpendCostUSD: f64(0.25)},
-		{ID: "in-b", State: ledger.Complete, SpendInputTokens: i64(100)},
-		{ID: "in-c", State: ledger.Dispatched}, // still in flight, no Spend yet
-		{ID: "after", State: ledger.Complete, SpendCostUSD: f64(9.0)},
+		// Observed (completed) before the window: must not count, however
+		// much it cost.
+		{ID: "before", State: ledger.Complete, At: mustTime(t, "2026-09-03T09:59:00Z"), SpendCostUSD: f64(9.0)},
+		// Observed inside the window, reported a cost.
+		{ID: "in-a", State: ledger.Complete, At: mustTime(t, "2026-09-03T10:01:00Z"), SpendCostUSD: f64(0.25)},
+		// Observed inside the window, no cost reported (e.g. codex).
+		{ID: "in-b", State: ledger.Complete, At: mustTime(t, "2026-09-03T10:02:00Z"), SpendInputTokens: i64(100)},
+		// Observed exactly at until: inclusive.
+		{ID: "in-c", State: ledger.Failed, At: until},
+		// Still in flight inside the window (dispatched here, but no
+		// terminal record yet): must not count until it actually finishes.
+		{ID: "in-flight", State: ledger.Dispatched, At: mustTime(t, "2026-09-03T10:02:30Z")},
+		// Observed after the window: must not count.
+		{ID: "after", State: ledger.Complete, At: mustTime(t, "2026-09-03T10:04:00Z"), SpendCostUSD: f64(9.0)},
 	}
 
-	turns, turnsWithCost, total := WindowedByDispatch(all, current, since, until)
+	turns, turnsWithCost, total := WindowedByObservation(current, since, until)
 	if turns != 3 {
-		t.Fatalf("want 3 turns dispatched in the window (in-a, in-b, in-c), got %d", turns)
+		t.Fatalf("want 3 turns observed in the window (in-a, in-b, in-c), got %d", turns)
 	}
 	if turnsWithCost != 1 {
 		t.Fatalf("want 1 turn with a reported cost (in-a only), got %d", turnsWithCost)
@@ -176,20 +174,54 @@ func TestWindowedByDispatch_OnlyCountsDispatchesInsideTheWindow(t *testing.T) {
 	}
 }
 
-// The since boundary is exclusive and until is inclusive -- a dispatch at
-// exactly `since` belongs to the PREVIOUS tick's window, not this one.
-func TestWindowedByDispatch_SinceIsExclusive(t *testing.T) {
+// The since boundary is exclusive and until is inclusive -- an outcome
+// observed exactly at `since` belongs to the PREVIOUS tick's window, not
+// this one.
+func TestWindowedByObservation_SinceIsExclusive(t *testing.T) {
 	since := mustTime(t, "2026-09-03T10:00:00Z")
 	until := mustTime(t, "2026-09-03T10:03:00Z")
-	all := []ledger.Record{
-		{ID: "at-since", State: ledger.Dispatched, At: since},
-	}
 	current := []ledger.Record{
-		{ID: "at-since", State: ledger.Complete, SpendCostUSD: f64(1.0)},
+		{ID: "at-since", State: ledger.Complete, At: since, SpendCostUSD: f64(1.0)},
 	}
-	turns, _, _ := WindowedByDispatch(all, current, since, until)
+	turns, _, _ := WindowedByObservation(current, since, until)
 	if turns != 0 {
-		t.Fatalf("a dispatch exactly at `since` belongs to the previous window; want 0 turns, got %d", turns)
+		t.Fatalf("an outcome observed exactly at `since` belongs to the previous window; want 0 turns, got %d", turns)
+	}
+}
+
+// agent-estate#989's own scenario: a task dispatched in window N that does
+// not finish until window N+1 must have its cost land in window N+1, not be
+// dropped, and not double-count in window N.
+func TestWindowedByObservation_SlowTaskLandsInTheWindowItFinishes(t *testing.T) {
+	tick1 := mustTime(t, "2026-09-03T10:00:00Z")
+	tick2 := mustTime(t, "2026-09-03T10:03:00Z")
+	tick3 := mustTime(t, "2026-09-03T10:06:00Z")
+
+	// At tick 2's window (tick1, tick2], the task is still running: no
+	// terminal record exists yet.
+	stillRunning := []ledger.Record{
+		{ID: "slow", State: ledger.Dispatched, At: mustTime(t, "2026-09-03T10:01:00Z")},
+	}
+	turns, turnsWithCost, total := WindowedByObservation(stillRunning, tick1, tick2)
+	if turns != 0 || turnsWithCost != 0 || total != 0 {
+		t.Fatalf("an in-flight task must not be counted until it has a terminal record, got turns=%d turnsWithCost=%d total=%v", turns, turnsWithCost, total)
+	}
+
+	// It finishes inside tick 3's window (tick2, tick3], with a cost.
+	finished := []ledger.Record{
+		{ID: "slow", State: ledger.Complete, At: mustTime(t, "2026-09-03T10:04:30Z"), SpendCostUSD: f64(1.5)},
+	}
+	turns, turnsWithCost, total = WindowedByObservation(finished, tick2, tick3)
+	if turns != 1 || turnsWithCost != 1 || total != 1.5 {
+		t.Fatalf("the task's cost must land in the window it finished in, got turns=%d turnsWithCost=%d total=%v", turns, turnsWithCost, total)
+	}
+
+	// And it must not ALSO be counted in tick 2's window when re-evaluated
+	// against the same (now-terminal) record -- since is what changed, not
+	// the record.
+	turns, _, _ = WindowedByObservation(finished, tick1, tick2)
+	if turns != 0 {
+		t.Fatalf("a task observed in a LATER window must not also count in an earlier one, got %d", turns)
 	}
 }
 

@@ -508,32 +508,33 @@ func main() {
 			// since is the PREVIOUS tick's own `at`, read before this entry is
 			// appended -- the zero value means this is the first tick ever
 			// recorded, in which case there is no window to bound either the
-			// gap or dispatch spend against, and both stay nil (agent-estate#982).
+			// gap or observed spend against, and both stay nil (agent-estate#982).
 			since := tick.LastAt(path)
 			if !since.IsZero() {
 				gap := int64(e.At.Sub(since).Seconds())
 				e.GapSeconds = &gap
 
-				// Dispatch-attributable spend for the window between the
-				// previous tick and this one. This is NOT this tick's cost --
-				// the Director's own turn is never dispatched by the estate,
-				// so no harness result envelope for it ever reaches the
-				// ledger, and that gap cannot be closed from here. See
-				// tick.Entry.DispatchSpendUSD's doc comment.
-				all, allErr := l.All()
-				cur, curErr := l.Current()
-				if allErr != nil || curErr != nil {
-					err := allErr
-					if err == nil {
-						err = curErr
-					}
-					fmt.Fprintln(os.Stderr, "estate: cannot read the ledger to attribute dispatch spend for this window, recording the tick without it:", err)
+				// Observed spend for the window between the previous tick
+				// and this one: every task whose outcome became known
+				// (reached a terminal ledger state) in that window, keyed on
+				// the terminal record's own At rather than when the task was
+				// dispatched (agent-estate#989 -- dispatch-time keying let a
+				// slow task's cost fall permanently behind every later
+				// window's `since` and never be counted at all). This is
+				// NOT this tick's cost -- the Director's own turn is never
+				// dispatched by the estate, so no harness result envelope
+				// for it ever reaches the ledger, and that gap cannot be
+				// closed from here. See tick.Entry.ObservedSpendUSD's doc
+				// comment.
+				cur, err := l.Current()
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "estate: cannot read the ledger to attribute observed spend for this window, recording the tick without it:", err)
 				} else {
-					turns, turnsWithCost, total := spend.WindowedByDispatch(all, cur, since, e.At)
+					turns, turnsWithCost, total := spend.WindowedByObservation(cur, since, e.At)
 					t := int64(turns)
-					e.DispatchTurns = &t
+					e.ObservedTurns = &t
 					if turnsWithCost > 0 {
-						e.DispatchSpendUSD = &total
+						e.ObservedSpendUSD = &total
 					}
 				}
 			}
@@ -597,14 +598,14 @@ func main() {
 				fmt.Printf("gap since previous tick: %ds (cron cadence, not work duration -- see docs/director-loop.md)\n", *e.GapSeconds)
 			}
 			switch {
-			case e.DispatchTurns == nil:
-				fmt.Println("dispatch spend this window: not measured -- no previous tick to bound a window against")
-			case e.DispatchSpendUSD != nil:
-				fmt.Printf("dispatch spend this window: $%.4f, dispatch-attributable only, excludes the Director's own turn cost (not observable from here) -- see tick.Entry.DispatchSpendUSD\n", *e.DispatchSpendUSD)
-			case *e.DispatchTurns > 0:
-				fmt.Printf("dispatch spend this window: not reported by any of %d dispatched turn(s) this window -- excludes the Director's own turn cost either way\n", *e.DispatchTurns)
+			case e.ObservedTurns == nil:
+				fmt.Println("observed spend this window: not measured -- no previous tick to bound a window against")
+			case e.ObservedSpendUSD != nil:
+				fmt.Printf("observed spend this window: $%.4f across %d observed turn(s) that reported a cost, excludes the Director's own turn cost (not observable from here) -- see tick.Entry.ObservedSpendUSD\n", *e.ObservedSpendUSD, *e.ObservedTurns)
+			case *e.ObservedTurns > 0:
+				fmt.Printf("observed spend this window: not reported by any of %d turn(s) that FINISHED this window -- not pending, these are done; their harness (e.g. codex) reports no dollar figure at all -- excludes the Director's own turn cost either way\n", *e.ObservedTurns)
 			default:
-				fmt.Println("dispatch spend this window: no tasks dispatched this window -- excludes the Director's own turn cost either way")
+				fmt.Println("observed spend this window: no turns finished this window -- excludes the Director's own turn cost either way")
 			}
 
 		case "escalate":
@@ -710,14 +711,14 @@ func main() {
 					fmt.Printf("last tick's gap: %ds (cron cadence, not work duration)\n", *last.GapSeconds)
 				}
 				switch {
-				case last.DispatchTurns == nil:
-					fmt.Println("last tick's dispatch spend: not recorded (no previous tick to bound a window against, or predates agent-estate#982)")
-				case last.DispatchSpendUSD != nil:
-					fmt.Printf("last tick's dispatch spend: $%.4f, dispatch-attributable only, excludes the Director's own turn cost (not observable from here)\n", *last.DispatchSpendUSD)
-				case *last.DispatchTurns > 0:
-					fmt.Printf("last tick's dispatch spend: not reported by any of %d dispatched turn(s) that window -- excludes the Director's own turn cost either way\n", *last.DispatchTurns)
+				case last.ObservedTurns == nil:
+					fmt.Println("last tick's observed spend: not recorded (no previous tick to bound a window against, or predates agent-estate#982)")
+				case last.ObservedSpendUSD != nil:
+					fmt.Printf("last tick's observed spend: $%.4f across %d observed turn(s) that reported a cost, excludes the Director's own turn cost (not observable from here)\n", *last.ObservedSpendUSD, *last.ObservedTurns)
+				case *last.ObservedTurns > 0:
+					fmt.Printf("last tick's observed spend: not reported by any of %d turn(s) that FINISHED that window -- not pending, these are done; their harness (e.g. codex) reports no dollar figure at all -- excludes the Director's own turn cost either way\n", *last.ObservedTurns)
 				default:
-					fmt.Println("last tick's dispatch spend: no tasks dispatched that window -- excludes the Director's own turn cost either way")
+					fmt.Println("last tick's observed spend: no turns finished that window -- excludes the Director's own turn cost either way")
 				}
 			}
 			if v.Stalled && v.Escalated {

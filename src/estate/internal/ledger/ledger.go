@@ -228,50 +228,6 @@ func (l *Ledger) Current() ([]Record, error) {
 	return out, nil
 }
 
-// All returns every record ever appended, in file order, uncollapsed --
-// unlike Current, which keeps only the latest record per task id.
-//
-// WHY THIS EXISTS ALONGSIDE Current. A task's Spend fields are only ever set
-// on its terminal record (main.go's dispatch case appends Dispatched first,
-// then Complete/Failed/Unknown once the subprocess exits), but that terminal
-// record's own At is the completion instant, not the dispatch instant --
-// often minutes apart. A caller that needs to know WHEN a task was
-// dispatched (agent-estate#982: attributing spend to the tick window a
-// dispatch fell in) needs the Dispatched-state record specifically, which
-// Current() never returns once a task has gone terminal. This is that raw
-// read.
-func (l *Ledger) All() ([]Record, error) {
-	f, err := os.Open(l.path)
-	if errors.Is(err, os.ErrNotExist) {
-		// Same ambiguity Current() resolves the same way: a first run is
-		// legitimately empty, a wiped/typo'd state dir is not.
-		if dir := filepath.Dir(l.path); dir != "" {
-			if _, statErr := os.Stat(dir); statErr != nil {
-				return nil, fmt.Errorf("ledger: directory for %s does not exist -- refusing to report zero records from a path that cannot be right", l.path)
-			}
-		}
-		return nil, nil
-	}
-	if err != nil {
-		return nil, err
-	}
-	defer f.Close()
-	var out []Record
-	s := bufio.NewScanner(f)
-	s.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)
-	for s.Scan() {
-		var r Record
-		if err := json.Unmarshal(s.Bytes(), &r); err != nil {
-			return nil, fmt.Errorf("ledger: malformed record: %w", err)
-		}
-		out = append(out, r)
-	}
-	if err := s.Err(); err != nil {
-		return nil, err
-	}
-	return out, nil
-}
-
 // InFlight returns tasks whose latest state is not terminal.
 func (l *Ledger) InFlight() ([]Record, error) {
 	cur, err := l.Current()

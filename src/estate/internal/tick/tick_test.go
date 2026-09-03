@@ -515,9 +515,9 @@ func TestAuditWindowRefusesAnUnknownPhaseInTheWindow(t *testing.T) {
 }
 
 // agent-estate#982: the first tick this log has ever recorded has no
-// previous `at` to measure a gap against, and no previous tick to bound a
-// dispatch-spend window against -- both must be absent, not zero.
-func TestFirstEntryHasNoGapOrDispatchFields(t *testing.T) {
+// previous `at` to measure a gap against, and no previous tick to bound an
+// observed-spend window against -- both must be absent, not zero.
+func TestFirstEntryHasNoGapOrObservedFields(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "tick-log.jsonl")
 	e := Entry{At: time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC), PhaseItem: "phase-0", SrcHead: "aaa"}
 	if err := Record(p, e, nil); err != nil {
@@ -528,7 +528,7 @@ func TestFirstEntryHasNoGapOrDispatchFields(t *testing.T) {
 		t.Fatal(err)
 	}
 	line := strings.TrimSpace(string(b))
-	for _, key := range []string{`"gap_seconds"`, `"dispatch_turns"`, `"dispatch_spend_usd"`} {
+	for _, key := range []string{`"gap_seconds"`, `"observed_turns"`, `"observed_spend_usd"`} {
 		if strings.Contains(line, key) {
 			t.Errorf("a first-ever tick must omit %s entirely (absent, not zero); got %s", key, line)
 		}
@@ -541,8 +541,8 @@ func TestFirstEntryHasNoGapOrDispatchFields(t *testing.T) {
 	if !ok {
 		t.Fatal("LastEntry must find the entry just written")
 	}
-	if last.GapSeconds != nil || last.DispatchTurns != nil || last.DispatchSpendUSD != nil {
-		t.Errorf("a first-ever tick's fields must read back nil; got gap=%v turns=%v spend=%v", last.GapSeconds, last.DispatchTurns, last.DispatchSpendUSD)
+	if last.GapSeconds != nil || last.ObservedTurns != nil || last.ObservedSpendUSD != nil {
+		t.Errorf("a first-ever tick's fields must read back nil; got gap=%v turns=%v spend=%v", last.GapSeconds, last.ObservedTurns, last.ObservedSpendUSD)
 	}
 }
 
@@ -558,8 +558,8 @@ func TestOldEntryWithNoGapOrDispatchFieldsReadsAsAbsent(t *testing.T) {
 	if !ok {
 		t.Fatal("LastEntry must find the old-shaped entry")
 	}
-	if last.GapSeconds != nil || last.DispatchTurns != nil || last.DispatchSpendUSD != nil {
-		t.Errorf("an old entry must read back with these fields nil, not zero; got gap=%v turns=%v spend=%v", last.GapSeconds, last.DispatchTurns, last.DispatchSpendUSD)
+	if last.GapSeconds != nil || last.ObservedTurns != nil || last.ObservedSpendUSD != nil {
+		t.Errorf("an old entry must read back with these fields nil, not zero; got gap=%v turns=%v spend=%v", last.GapSeconds, last.ObservedTurns, last.ObservedSpendUSD)
 	}
 }
 
