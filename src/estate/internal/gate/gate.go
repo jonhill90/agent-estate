@@ -5,29 +5,58 @@
 //  1. The pull request is open, and every required check is green AT THE
 //     HEAD SHA. Not "green somewhere" -- a check that passed on an earlier
 //     push says nothing about what is being merged now.
-//  2. A dispatched turn authored the work this PR is built from, joined
-//     STRUCTURALLY on the PR's own head ref: internal/isolate.Create writes
-//     "dispatch/<id>" as the branch for a dispatched turn's own worktree,
-//     and the reviewer lane must not be the lane that dispatch id belongs
-//     to. This is agent-estate#940's fix -- the join used to run through
-//     closingIssuesReferences (a PR body's own "Closes #N", GitHub-parsed)
-//     joined to a ledger record BY ISSUE NUMBER, which failed whenever the
-//     closing issue was filed after the dispatch it closes (#944), or
-//     simply never named in GitHub's parsed form (#937, #939). A head ref
-//     is written by the estate itself, never asserted by an agent or by a
-//     body the author controls, and needs no issue to pre-exist anything.
-//     A PR whose head ref is not a dispatch branch is refused outright --
-//     there is no fallback to the old, forgeable path.
+//
+//  2. A dispatched turn authored the work this PR is built from, joined on
+//     TWO facts together, neither sufficient alone:
+//
+//     (a) The PR's own head ref names a dispatch id: internal/isolate.Create
+//     writes "dispatch/<id>" as the branch for a dispatched turn's own
+//     worktree. This is agent-estate#940's original fix -- the join used to
+//     run through closingIssuesReferences (a PR body's own "Closes #N",
+//     GitHub-parsed) joined to a ledger record BY ISSUE NUMBER, which failed
+//     whenever the closing issue was filed after the dispatch it closes
+//     (#944), or simply never named in GitHub's parsed form (#937, #939).
+//
+//     (b) The PR's own head commit (headRefOid) equals a HeadSHA the
+//     estate itself recorded for that exact dispatch id, read directly from
+//     the worktree by main.go's dispatch case the moment that turn's own
+//     subprocess exited -- never anything the subprocess said about itself.
+//     This is #940's OWN follow-up fix: a branch ref is a NAME, and a name
+//     is written once, at Create time, but nothing stops a later push from
+//     renaming a different branch to the same "dispatch/<id>" and opening a
+//     PR from it -- every lane in this repo shares one GitHub login (see
+//     AGENTS.md), so pushing to an arbitrary branch name costs no more than
+//     writing PR body text. (a) alone binds a STRING to a ledger id; (b)
+//     binds the PR's actual CODE to it, because reaching a recorded SHA
+//     under a different id requires reproducing that exact commit object
+//     (same tree, parents, authorship, message) -- not just a lookalike
+//     name.
+//
+//     What this still does NOT establish: that the estate performed the
+//     push (it did not -- the agent still pushes; the estate only observed
+//     what its own worktree held afterward), that the recorded worktree
+//     content is itself safe or reviewed, or anything about a PR whose head
+//     was later force-pushed to new content sharing the same branch name --
+//     that case simply fails the SHA match and refuses, which is the
+//     correct direction, but it is a refusal produced by (b), not a
+//     guarantee that no such push was attempted. A PR whose head ref is not
+//     a dispatch branch, OR whose head commit does not match the recorded
+//     HeadSHA, is refused outright -- there is no fallback to the old,
+//     forgeable issue-keyed path, and no partial credit for the branch name
+//     matching alone.
+//
 //  3. That same reviewer lane has a COMPLETED review turn on record for
 //     THIS pull request. A dispatched-but-unfinished review is not
 //     independence: nobody has actually looked yet.
+//
 //  4. The reviewer's own verdict comment on the PR resolves to APPROVE,
 //     parsed from a Verdict: line -- never a substring match anywhere in
 //     the body -- and is not stale against the checks that ran at head.
 //
 // Anything unresolved -- an unknown author, a pending check, an unreadable
-// ledger, a head ref that is not a dispatch branch -- is a REFUSAL.
-// "Cannot tell" is never "allowed".
+// ledger, a head ref that is not a dispatch branch, or a head commit that
+// does not match the HeadSHA the estate itself recorded for it -- is a
+// REFUSAL. "Cannot tell" is never "allowed".
 package gate
 
 import (
@@ -197,25 +226,36 @@ func authorFromHeadRef(headRef string) (id string, ok bool) {
 	return id, true
 }
 
-// authorLaneForDispatchID returns the lane the ledger records as RoleAuthor
-// for EXACTLY this dispatch id -- the id a PR's own head ref names, per
-// authorFromHeadRef above. This is the structural join agent-estate#940
-// asks for: main.go's dispatch case writes Lane equal to id for every
-// role=author record (l.Append(ledger.Record{ID: id, Lane: id, ...})), so
-// matching on ID here is matching on the exact dispatched turn that created
-// this branch -- never an issue number a PR body asserts about itself, and
-// never any OTHER authoring turn that happens to share an issue.
-func authorLaneForDispatchID(l *ledger.Ledger, id string) (lane string, ok bool, err error) {
+// authorRecordForDispatchID returns the ledger's own role=author record for
+// EXACTLY this dispatch id -- the id a PR's own head ref names, per
+// authorFromHeadRef above. This is HALF of the structural join
+// agent-estate#940 (and its own follow-up review) asks for: main.go's
+// dispatch case writes Lane equal to id for every role=author record
+// (l.Append(ledger.Record{ID: id, Lane: id, ...})), so matching on ID here
+// is matching on the exact dispatched turn that created this branch --
+// never an issue number a PR body asserts about itself, and never any
+// OTHER authoring turn that happens to share an issue. The OTHER half is
+// the caller's job: the record's own HeadSHA field, read here but compared
+// against the PR's headRefOid by evaluate(), is what turns "a branch named
+// this" into "a commit this estate actually observed" -- see the package
+// doc's condition 2(b).
+//
+// State must be Complete, the same requirement reviewerRecord already
+// applies to a review turn: an in-flight or abandoned dispatch never
+// finished producing whatever the branch currently holds, so its own
+// worktree observation (if any was even taken) cannot be trusted as the
+// turn's final output.
+func authorRecordForDispatchID(l *ledger.Ledger, id string) (ledger.Record, bool, error) {
 	cur, err := l.Current()
 	if err != nil {
-		return "", false, err
+		return ledger.Record{}, false, err
 	}
 	for _, r := range cur {
-		if r.ID == id && r.EffectiveRole() == ledger.RoleAuthor {
-			return r.Lane, true, nil
+		if r.ID == id && r.EffectiveRole() == ledger.RoleAuthor && r.State == ledger.Complete {
+			return r, true, nil
 		}
 	}
-	return "", false, nil
+	return ledger.Record{}, false, nil
 }
 
 // reviewerRecord returns the latest COMPLETE RoleReviewer ledger record on
@@ -315,12 +355,35 @@ func evaluate(p *PR, reviewerLane string, l *ledger.Ledger) Decision {
 	if !isDispatchBranch {
 		return refuse(d, fmt.Sprintf("PR #%d head ref %q is not a dispatch branch -- authorship cannot be established structurally, refusing (agent-estate#940)", p.Number, p.HeadRefName))
 	}
-	authorLane, ok, err := authorLaneForDispatchID(l, dispatchID)
+	authorRec, ok, err := authorRecordForDispatchID(l, dispatchID)
 	if err != nil {
 		return refuse(d, "cannot read ledger for authorship: "+err.Error())
 	}
 	if !ok {
-		return refuse(d, "no role=author ledger record on file for dispatch id "+dispatchID+" (from head ref "+p.HeadRefName+") -- authorship unknown, refusing")
+		return refuse(d, "no completed role=author ledger record on file for dispatch id "+dispatchID+" (from head ref "+p.HeadRefName+") -- authorship unknown, refusing")
+	}
+	authorLane := authorRec.Lane
+
+	// The branch NAME matching a ledger id is not, by itself, evidence the
+	// PR carries that dispatch's actual work -- every lane here shares one
+	// GitHub login, so pushing different content to a branch named
+	// "dispatch/<someone-else's-id>" costs no more than writing PR body
+	// text (agent-estate#940's follow-up review, which found exactly this
+	// hole in the branch-name-only join and blocked #952 over it). HeadSHA
+	// is the estate's OWN observation -- read by main.go directly from the
+	// worktree the moment that dispatch's subprocess exited, never
+	// anything the subprocess claimed -- of which commit that specific
+	// turn actually produced. Requiring an exact match binds the PR's
+	// CODE, not merely a label, to the dispatch id. A record with no
+	// HeadSHA (never observed, or the observation itself failed) refuses
+	// rather than being treated as a pass: "could not measure" is not
+	// "fine" anywhere else in this gate, and it is not fine here either.
+	if authorRec.HeadSHA == "" {
+		return refuse(d, "role=author record for dispatch id "+dispatchID+" carries no recorded HeadSHA -- cannot confirm this PR's head commit against what that dispatch's worktree actually produced, refusing")
+	}
+	if authorRec.HeadSHA != p.HeadOID {
+		return refuse(d, "PR #"+strconv.Itoa(p.Number)+"'s head commit "+short(p.HeadOID)+" does not match the HeadSHA "+short(authorRec.HeadSHA)+
+			" the estate recorded for dispatch id "+dispatchID+" -- the branch name matches but the code it points at does not, refusing")
 	}
 
 	// A PR body may carry a self-declared Author-Lane: trailer (repo

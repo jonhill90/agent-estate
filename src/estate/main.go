@@ -477,6 +477,29 @@ func main() {
 				rec.State, rec.Note = ledger.Unknown, "exit 0 but result was not parseable JSON"
 			}
 		}
+
+		// Record what the worktree's branch actually points at now, read
+		// directly by the estate via git -- never anything the subprocess
+		// above said about itself. This is the fix for agent-estate#940's
+		// follow-up review: a branch NAME (dispatch/<id>) is written once,
+		// at isolate.Create time, but anyone with push access can later
+		// rename a different branch to the same name and push different
+		// content under it. internal/gate's structural join now requires
+		// the PR's own headRefOid to equal THIS value, so identity is bound
+		// to a commit the estate itself observed inside this specific
+		// worktree, not to a string. Only role=author turns open PRs, so
+		// only they carry this; a lookup failure is recorded as an empty
+		// HeadSHA rather than aborting the turn -- the gate treats a
+		// missing HeadSHA as "cannot establish provenance" and refuses,
+		// which is the correct fail-closed direction here.
+		if role == ledger.RoleAuthor {
+			if head, herr := wt.Head(); herr == nil {
+				rec.HeadSHA = head
+			} else {
+				rec.Note = strings.TrimSpace(rec.Note + "; could not read worktree HEAD for provenance: " + herr.Error())
+			}
+		}
+
 		// Tear the worktree down only when it is empty. A turn that left work
 		// behind has output nobody has collected, and an isolated worktree
 		// that still exists is a report; a deleted one is unrecoverable.

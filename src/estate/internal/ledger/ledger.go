@@ -65,6 +65,19 @@ type Record struct {
 	PID    int       `json:"pid,omitempty"`
 	Note   string    `json:"note,omitempty"`
 	Result string    `json:"result,omitempty"`
+	// HeadSHA is the dispatched worktree's own HEAD commit, read directly by
+	// the estate (main.go, via internal/isolate.Worktree.Head) the moment a
+	// role=author turn's subprocess exits -- never anything the subprocess's
+	// own output claimed. It is what agent-estate#940's follow-up review
+	// found missing from the head-ref join: a branch NAME the estate wrote
+	// once (at Create time) but never re-checked, so any actor with push
+	// access could rename a branch to `dispatch/<real-id>` and push
+	// different content under it. HeadSHA is the estate's own
+	// post-completion observation of WHICH commit that worktree actually
+	// produced; the gate requires the PR's headRefOid to equal this exact
+	// value, not merely that the branch name matches. See internal/gate's
+	// package doc for what this does and does not establish.
+	HeadSHA string `json:"head_sha,omitempty"`
 }
 
 // EffectiveRole returns the record's Role, defaulting an unset field to
