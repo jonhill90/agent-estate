@@ -161,7 +161,7 @@ func Check(l *ledger.Ledger, lim Limits) Verdict {
 	// Swapouts is a cumulative counter, so the DELTA over a short sample is the
 	// only honest question: is this host paging right NOW. A swap-disabled host
 	// never increments it and passes correctly.
-	if rate, err := swapoutRate(swapSampleWindow); err != nil {
+	if rate, err := swapoutRate(swapSampleWindow, swapouts); err != nil {
 		v.OK = false
 		v.Reasons = append(v.Reasons, "could not measure paging: "+err.Error())
 	} else {
@@ -219,23 +219,41 @@ func Check(l *ledger.Ledger, lim Limits) Verdict {
 
 const swapSampleWindow = 2 * time.Second
 
+// SampleWindow is the window Reading.SwapoutRate is measured over. Callers
+// that print the reading must print this with it: SwapoutRate is pages PER
+// WINDOW, not per second, and the number is meaningless without the window it
+// was counted in.
+func SampleWindow() time.Duration { return swapSampleWindow }
+
 // swapoutRate reports how many pages the host swapped OUT during the window.
 //
 // Cumulative counters sampled twice: the delta answers "is it paging now",
 // where `vm.swapusage used` only answers "has it ever paged badly". Zero on a
 // swap-disabled host, which is a true reading rather than a broken instrument.
-func swapoutRate(window time.Duration) (float64, error) {
-	a, err := swapouts()
+//
+// `sample` is a parameter rather than a direct `swapouts()` call so the delta
+// arithmetic can be driven from a test without a paging host. Without that
+// seam the function had no coverage at all: a mutant returning a constant 0 --
+// the 2026-09-03 fail-open, restored -- left the whole suite green.
+func swapoutRate(window time.Duration, sample func() (float64, error)) (float64, error) {
+	a, err := sample()
 	if err != nil {
 		return 0, err
 	}
 	time.Sleep(window)
-	b, err := swapouts()
+	b, err := sample()
 	if err != nil {
 		return 0, err
 	}
+	// A counter that went BACKWARDS is a failed measurement, not a quiet host.
+	// This returned 0 -- the PASSING value -- until #999's review pointed out
+	// that a fail-open branch in a fail-closed function is the exact shape of
+	// the bug this file exists to close. Realistically unreachable (two vm_stat
+	// reads two seconds apart cannot straddle a reboot inside one process), so
+	// refusing here costs nothing on a healthy host and makes the package
+	// header's claim -- every limit fails closed -- literally true.
 	if b < a {
-		return 0, nil // counter reset
+		return 0, fmt.Errorf("swapout counter went backwards (%.0f then %.0f); the reading cannot be trusted", a, b)
 	}
 	return b - a, nil
 }
