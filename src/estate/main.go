@@ -20,6 +20,7 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/gate"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 	"github.com/jonhill90/agent-estate/estate/internal/pressure"
+	"github.com/jonhill90/agent-estate/estate/internal/tick"
 )
 
 func usage() {
@@ -32,6 +33,9 @@ func usage() {
   estate corpus-audit [n]               hard parameters least supported by your words
   estate tasks                          latest state of every task
   estate inflight                       tasks still occupying a slot
+  estate tick record <phase-item> [artifact]
+                                        append this tick to the record
+  estate tick check                     has the loop stalled? 1 = yes, escalate
 
 Every gate fails closed: a limit that cannot be measured refuses.
 `)
@@ -131,6 +135,67 @@ func main() {
 			fmt.Printf("%-28s %-10s %s %s\n", r.ID, r.State, r.At.Format(time.RFC3339), r.Issue)
 		}
 		fmt.Fprintf(os.Stderr, "%d task(s)\n", len(rs))
+
+	case "tick":
+		// The Director's loop cannot remember its own history -- every tick is
+		// a fresh context -- so the stop condition in the brief only binds if
+		// it is a command. See internal/tick's doc comment.
+		if len(os.Args) < 3 {
+			usage()
+			os.Exit(2)
+		}
+		path := tick.Path()
+		switch os.Args[2] {
+		case "record":
+			if len(os.Args) < 4 {
+				fmt.Fprintln(os.Stderr, "estate: tick record needs a phase item")
+				os.Exit(2)
+			}
+			artifact := ""
+			if len(os.Args) > 4 {
+				artifact = os.Args[4]
+			}
+			// src head is read here rather than in internal/tick: the packages
+			// under internal/ do not shell out, and this keeps that true.
+			head, err := exec.Command("git", "log", "-1", "--format=%H", "--", "src/").Output()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "estate: cannot read src head, refusing to write a tick that cannot be compared:", err)
+				os.Exit(2)
+			}
+			e := tick.Entry{
+				At:        time.Now().UTC(),
+				PhaseItem: os.Args[3],
+				SrcHead:   strings.TrimSpace(string(head)),
+				Artifact:  artifact,
+			}
+			if err := tick.Record(path, e); err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
+			if artifact == "" {
+				fmt.Printf("recorded %s at %s with no artifact\n", e.PhaseItem, e.SrcHead[:8])
+			} else {
+				fmt.Printf("recorded %s at %s -> %s\n", e.PhaseItem, e.SrcHead[:8], artifact)
+			}
+
+		case "check":
+			v, err := tick.Check(path)
+			if err != nil {
+				// Could not measure. Never clean.
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
+			if v.Stalled {
+				fmt.Fprintln(os.Stderr, "STALLED: "+v.Reason)
+				fmt.Fprintln(os.Stderr, "stop ticking and escalate (brief section 3)")
+				os.Exit(1)
+			}
+			fmt.Println("moving: " + v.Reason)
+
+		default:
+			usage()
+			os.Exit(2)
+		}
 
 	case "dispatch":
 		if len(os.Args) < 4 {
