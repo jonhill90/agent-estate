@@ -91,15 +91,15 @@ const Window = 3
 
 // Record appends one entry to the log at path, creating it if absent.
 //
-// resolves answers "does this token name something that exists?". Passing nil
-// checks the artifact's shape only, without resolution.
-func Record(path string, e Entry, resolves func(string) bool) error {
+// produced answers "was this token made since the given time?". Passing nil
+// checks the artifact's shape only, without asking.
+func Record(path string, e Entry, produced func(tok string, since time.Time) bool) error {
 	if e.PhaseItem == "" {
 		return errors.New("tick: phase_item is required -- a tick that cannot name what it advanced is the thing this record exists to catch")
 	}
 	// Refuse the dodge at the point it would be taken, not only when reading
 	// the record back. Nothing is written when this fires.
-	if err := Validate(e.Artifact, resolves); err != nil {
+	if err := Validate(e.Artifact, lastTickAt(path), produced); err != nil {
 		return err
 	}
 	line, err := json.Marshal(e)
@@ -176,44 +176,65 @@ func Candidates(s string) []string {
 	return out
 }
 
-// Validate decides whether an artifact names something a human can actually
-// open, using resolves to ask whether a token exists.
+// Validate decides whether an artifact is evidence that THIS tick produced
+// something, using produced to ask whether a token post-dates the previous
+// tick.
 //
-// WHY RESOLUTION AND NOT INSPECTION. Three string-inspection rules were tried
-// and an independent reviewer defeated each in turn: "any non-empty string"
-// fell to "null"; a placeholder list fell to "working on it"; a
-// looks-like-a-pointer regex fell to "still going, read/write path unclear".
-// Prose can always be made to LOOK like a pointer. It cannot be made to
-// resolve. So the bar is that something in the artifact must actually exist.
+// WHY RECENCY AND NOT EXISTENCE. Four rules were tried and an independent
+// reviewer defeated each:
 //
-// A URL is accepted without resolution: it is checkable by the human reading
-// the log, and this package does not make network calls.
-func Validate(artifact string, resolves func(string) bool) error {
+//	"any non-empty string"        -> "null"
+//	a placeholder list            -> "working on it"
+//	a looks-like-a-pointer regex  -> "still going, read/write path unclear"
+//	"something must resolve"      -> "AGENTS.md"
+//
+// The fourth is the instructive one. In a real repository almost everything
+// already exists, so a stalled loop does not need prose that resolves to
+// something NEW -- one word naming something OLD passes. "Resolves" reads as
+// "verified" while meaning only "pre-existing".
+//
+// The question a tick log has to answer is not "does this name a real thing"
+// but "did this tick make something". So the bar is recency: a token counts
+// only if it post-dates the previous tick. A file modified since then, a
+// commit made since then, a pull request opened since then. Everything that
+// was already there proves nothing about the last three minutes.
+//
+// since is the previous tick's timestamp; a zero value means this is the
+// first tick and any resolving token is accepted.
+func Validate(artifact string, since time.Time, produced func(tok string, since time.Time) bool) error {
 	a := strings.TrimSpace(artifact)
 	if a == "" {
 		return nil // absent is legitimate; the caller records null
-	}
-	if isPaddedPlaceholder(a) {
-		return fmt.Errorf("tick: %q is a way of writing \"no artifact\" -- omit it instead", artifact)
 	}
 	if strings.Contains(a, "://") {
 		return nil
 	}
 	cands := Candidates(a)
 	if len(cands) == 0 {
+		// Only now is a placeholder check meaningful. Applying it to the
+		// PREFIX of any sentence refused real artifacts like "pending PR
+		// #907 merge, see docs/phase-plan.md" before they were ever looked
+		// at -- found in the same review.
+		if isPaddedPlaceholder(a) {
+			return fmt.Errorf("tick: %q is a way of writing \"no artifact\" -- omit it instead", artifact)
+		}
 		return fmt.Errorf("tick: %q names nothing a human can open -- an artifact must contain a path, a commit sha, an issue or PR number, or a URL. "+
 			"If this tick produced no artifact, omit it; saying so is a legitimate tick result", artifact)
 	}
-	if resolves == nil {
+	if produced == nil {
 		return nil
 	}
 	for _, c := range cands {
-		if resolves(c) {
+		if produced(c, since) {
 			return nil
 		}
 	}
-	return fmt.Errorf("tick: nothing in %q resolves to anything that exists (looked at: %s) -- "+
-		"an artifact must name something already there, not something described", artifact, strings.Join(cands, ", "))
+	if since.IsZero() {
+		return fmt.Errorf("tick: nothing in %q could be found (looked at: %s)", artifact, strings.Join(cands, ", "))
+	}
+	return fmt.Errorf("tick: nothing in %q was produced since the last tick at %s (looked at: %s) -- "+
+		"naming something that already existed is not evidence this tick did anything. Omit the artifact instead",
+		artifact, since.UTC().Format(time.RFC3339), strings.Join(cands, ", "))
 }
 
 // isPaddedPlaceholder catches a placeholder with words stapled on, which
@@ -370,4 +391,37 @@ func Check(path string) (Verdict, error) {
 		Considered: Window,
 		Reason:     fmt.Sprintf("the last %d ticks produced no artifact (%s, %s)", Window, where, at),
 	}, nil
+}
+
+// lastTickAt returns the timestamp of the most recent entry, or the zero time
+// when there is none. A tick's artifact is judged against the moment the
+// previous tick ended, which is the window this tick is accountable for.
+func lastTickAt(path string) time.Time {
+	f, err := os.Open(path)
+	if err != nil {
+		return time.Time{}
+	}
+	defer f.Close()
+	var last string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		if t := strings.TrimSpace(sc.Text()); t != "" {
+			last = t
+		}
+	}
+	if last == "" {
+		return time.Time{}
+	}
+	var e struct {
+		At string `json:"at"`
+	}
+	if json.Unmarshal([]byte(last), &e) != nil {
+		return time.Time{}
+	}
+	at, err := time.Parse(time.RFC3339, e.At)
+	if err != nil {
+		return time.Time{}
+	}
+	return at
 }

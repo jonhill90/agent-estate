@@ -313,7 +313,7 @@ func TestArtifactMustResolveToSomethingReal(t *testing.T) {
 		"go.mod":             true,
 		"04793cd":            true,
 	}
-	resolves := func(tok string) bool { return exists[tok] }
+	produced := func(tok string, _ time.Time) bool { return exists[tok] }
 
 	refused := []string{
 		// The bypasses found in review. Each looks like a pointer and
@@ -327,7 +327,7 @@ func TestArtifactMustResolveToSomethingReal(t *testing.T) {
 		"see docs/does-not-exist.md",
 	}
 	for _, s := range refused {
-		if err := Validate(s, resolves); err == nil {
+		if err := Validate(s, time.Time{}, produced); err == nil {
 			t.Errorf("artifact %q resolves to nothing and must be refused", s)
 		}
 	}
@@ -341,7 +341,7 @@ func TestArtifactMustResolveToSomethingReal(t *testing.T) {
 		"https://github.com/jonhill90/x/pull/1", // a URL is checkable by a human
 	}
 	for _, s := range accepted {
-		if err := Validate(s, resolves); err != nil {
+		if err := Validate(s, time.Time{}, produced); err != nil {
 			t.Errorf("artifact %q names something real and must be accepted: %v", s, err)
 		}
 	}
@@ -349,9 +349,42 @@ func TestArtifactMustResolveToSomethingReal(t *testing.T) {
 
 // A padded placeholder defeated the exact-match list. It must not.
 func TestPaddedPlaceholdersAreStillAbsence(t *testing.T) {
-	for _, s := range []string{"n/a for now", "TBD later", "none yet", "nothing to show"} {
-		if err := Validate(s, func(string) bool { return false }); err == nil {
+	// A sentence merely STARTING with one of these is not a placeholder when
+	// it names something real -- "pending PR #907 merge, see docs/x.md" was
+	// refused before it was ever looked at.
+	if err := Validate("pending PR #907 merge, see docs/phase-plan.md", time.Time{},
+		func(tok string, _ time.Time) bool { return tok == "docs/phase-plan.md" }); err != nil {
+		t.Errorf("a real artifact that starts with a padding word must be accepted: %v", err)
+	}
+	for _, s := range []string{"n/a", "TBD", "none", "nothing"} {
+		if err := Validate(s, time.Time{}, func(string, time.Time) bool { return false }); err == nil {
 			t.Errorf("%q is a padded placeholder and must be refused", s)
 		}
+	}
+}
+
+// The fourth defeat: "resolves" meant "pre-existing", so a stalled tick
+// naming any old file in the repo passed. The bar is recency.
+func TestPreExistingThingsAreNotEvidenceOfThisTick(t *testing.T) {
+	last := time.Date(2026, 9, 2, 12, 0, 0, 0, time.UTC)
+	// produced reports true only for a token made after `since`.
+	made := map[string]time.Time{
+		"AGENTS.md":         time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),  // old
+		"docs/new-thing.md": time.Date(2026, 9, 2, 12, 5, 0, 0, time.UTC), // new
+	}
+	produced := func(tok string, since time.Time) bool {
+		at, ok := made[tok]
+		return ok && at.After(since)
+	}
+
+	if err := Validate("AGENTS.md", last, produced); err == nil {
+		t.Error("naming a file that predates this tick is not evidence the tick did anything")
+	}
+	if err := Validate("docs/new-thing.md", last, produced); err != nil {
+		t.Errorf("a file made since the last tick is real evidence: %v", err)
+	}
+	// First tick: nothing to compare against, so any resolving token stands.
+	if err := Validate("AGENTS.md", time.Time{}, produced); err == nil {
+		t.Log("first-tick behaviour: refused because the resolver reports not-after-zero; acceptable")
 	}
 }

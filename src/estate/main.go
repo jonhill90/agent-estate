@@ -171,19 +171,42 @@ func main() {
 				SrcHead:   strings.TrimSpace(string(head)),
 				Artifact:  artifact,
 			}
-			// Resolution, not inspection: an artifact must name something
-			// that actually exists. Three syntactic rules were tried and each
-			// was defeated by prose; see internal/tick.Validate.
-			resolves := func(tok string) bool {
-				if strings.HasPrefix(tok, "#") {
-					return true // an issue or PR number is checkable by a human
+			// Recency, not existence. In a real repository almost
+			// everything already exists, so "does this resolve" was
+			// satisfied by naming any old file. The question is whether
+			// this tick MADE something, so each token is judged against
+			// when the previous tick ended. See internal/tick.Validate.
+			produced := func(tok string, since time.Time) bool {
+				switch {
+				case strings.HasPrefix(tok, "#"):
+					// A pull request or issue, checked for real rather than
+					// assumed. gh unavailable or the number missing means we
+					// could not confirm it, which is not confirmation.
+					out, err := exec.Command("gh", "pr", "view", strings.TrimPrefix(tok, "#"),
+						"--json", "createdAt", "-q", ".createdAt").Output()
+					if err != nil {
+						out, err = exec.Command("gh", "issue", "view", strings.TrimPrefix(tok, "#"),
+							"--json", "createdAt", "-q", ".createdAt").Output()
+					}
+					if err != nil {
+						return false
+					}
+					at, err := time.Parse(time.RFC3339, strings.TrimSpace(string(out)))
+					return err == nil && (since.IsZero() || at.After(since))
+				default:
+					if fi, err := os.Stat(tok); err == nil {
+						return since.IsZero() || fi.ModTime().After(since)
+					}
+					// A commit: use its committer date.
+					out, err := exec.Command("git", "log", "-1", "--format=%cI", tok).Output()
+					if err != nil {
+						return false
+					}
+					at, err := time.Parse(time.RFC3339, strings.TrimSpace(string(out)))
+					return err == nil && (since.IsZero() || at.After(since))
 				}
-				if _, err := os.Stat(tok); err == nil {
-					return true
-				}
-				return exec.Command("git", "cat-file", "-e", tok+"^{object}").Run() == nil
 			}
-			if err := tick.Record(path, e, resolves); err != nil {
+			if err := tick.Record(path, e, produced); err != nil {
 				fmt.Fprintln(os.Stderr, "estate:", err)
 				os.Exit(2)
 			}
