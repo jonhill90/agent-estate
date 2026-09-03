@@ -118,29 +118,49 @@ type Entry struct {
 	// summing zero non-nil dollar figures into $0.00 would read as "this
 	// window was free," which #979 already refused for the cross-harness
 	// case and this is the same defect. Every caller that prints this field
-	// must also print ObservedTurns and name what is excluded -- see
-	// spend.WindowedByObservation's doc comment.
+	// must also print ObservedTurnsWithCost (NOT ObservedTurns -- see that
+	// field's own doc comment for why the two are not interchangeable) and
+	// name what is excluded -- see spend.WindowedByObservation's doc comment.
 	ObservedSpendUSD *float64 `json:"observed_spend_usd,omitempty"`
+
+	// ObservedTurnsWithCost is how many of ObservedTurns actually reported a
+	// dollar figure -- spend.WindowedByObservation's own turnsWithCost return,
+	// carried onto the entry instead of being discarded after one boolean
+	// gate check (agent-estate#995, correcting a defect #989's fix pass
+	// introduced: the dollar line printed ObservedTurns -- the window's
+	// TOTAL observed turns -- while claiming it was the count "that reported
+	// a cost"; only ObservedTurnsWithCost is that count). ObservedTurns and
+	// ObservedTurnsWithCost diverge exactly when a window has a mix of
+	// harnesses that do and do not report a dollar figure (e.g. one claude
+	// turn with cost, one codex turn with none) -- printing ObservedTurns
+	// there overstates how many turns the dollar figure actually covers.
+	// Nil exactly when ObservedSpendUSD is nil (no window, or no turn in the
+	// window reported a cost); zero is impossible when ObservedSpendUSD is
+	// non-nil, since a non-nil total requires at least one turn to have
+	// contributed it.
+	ObservedTurnsWithCost *int64 `json:"observed_turns_with_cost,omitempty"`
 }
 
 // MarshalJSON writes At as ISO 8601 UTC and an absent Artifact as null.
 func (e Entry) MarshalJSON() ([]byte, error) {
 	type wire struct {
-		At               string   `json:"at"`
-		PhaseItem        string   `json:"phase_item"`
-		SrcHead          string   `json:"src_head"`
-		Artifact         *string  `json:"artifact"`
-		GapSeconds       *int64   `json:"gap_seconds,omitempty"`
-		ObservedTurns    *int64   `json:"observed_turns,omitempty"`
-		ObservedSpendUSD *float64 `json:"observed_spend_usd,omitempty"`
+		At                    string   `json:"at"`
+		PhaseItem             string   `json:"phase_item"`
+		SrcHead               string   `json:"src_head"`
+		Artifact              *string  `json:"artifact"`
+		GapSeconds            *int64   `json:"gap_seconds,omitempty"`
+		ObservedTurns         *int64   `json:"observed_turns,omitempty"`
+		ObservedSpendUSD      *float64 `json:"observed_spend_usd,omitempty"`
+		ObservedTurnsWithCost *int64   `json:"observed_turns_with_cost,omitempty"`
 	}
 	w := wire{
-		At:               e.At.UTC().Format(time.RFC3339),
-		PhaseItem:        e.PhaseItem,
-		SrcHead:          e.SrcHead,
-		GapSeconds:       e.GapSeconds,
-		ObservedTurns:    e.ObservedTurns,
-		ObservedSpendUSD: e.ObservedSpendUSD,
+		At:                    e.At.UTC().Format(time.RFC3339),
+		PhaseItem:             e.PhaseItem,
+		SrcHead:               e.SrcHead,
+		GapSeconds:            e.GapSeconds,
+		ObservedTurns:         e.ObservedTurns,
+		ObservedSpendUSD:      e.ObservedSpendUSD,
+		ObservedTurnsWithCost: e.ObservedTurnsWithCost,
 	}
 	if e.AtText != "" {
 		w.At = e.AtText
@@ -907,11 +927,12 @@ func LastAt(path string) time.Time { return lastTickAt(path) }
 // the moment it was written; re-computing it later against a NOW that has
 // moved on would silently change a number that already happened).
 type LastRecorded struct {
-	At               string
-	PhaseItem        string
-	GapSeconds       *int64
-	ObservedTurns    *int64
-	ObservedSpendUSD *float64
+	At                    string
+	PhaseItem             string
+	GapSeconds            *int64
+	ObservedTurns         *int64
+	ObservedSpendUSD      *float64
+	ObservedTurnsWithCost *int64
 }
 
 // LastEntry returns the most recently recorded tick's own gap and
@@ -941,21 +962,23 @@ func LastEntry(path string) (LastRecorded, bool, error) {
 		return LastRecorded{}, false, nil
 	}
 	var e struct {
-		At               string   `json:"at"`
-		PhaseItem        string   `json:"phase_item"`
-		GapSeconds       *int64   `json:"gap_seconds"`
-		ObservedTurns    *int64   `json:"observed_turns"`
-		ObservedSpendUSD *float64 `json:"observed_spend_usd"`
+		At                    string   `json:"at"`
+		PhaseItem             string   `json:"phase_item"`
+		GapSeconds            *int64   `json:"gap_seconds"`
+		ObservedTurns         *int64   `json:"observed_turns"`
+		ObservedSpendUSD      *float64 `json:"observed_spend_usd"`
+		ObservedTurnsWithCost *int64   `json:"observed_turns_with_cost"`
 	}
 	if err := json.Unmarshal([]byte(lastLine), &e); err != nil {
 		return LastRecorded{}, false, fmt.Errorf("tick: %s last line is not readable: %w", path, err)
 	}
 	return LastRecorded{
-		At:               e.At,
-		PhaseItem:        e.PhaseItem,
-		GapSeconds:       e.GapSeconds,
-		ObservedTurns:    e.ObservedTurns,
-		ObservedSpendUSD: e.ObservedSpendUSD,
+		At:                    e.At,
+		PhaseItem:             e.PhaseItem,
+		GapSeconds:            e.GapSeconds,
+		ObservedTurns:         e.ObservedTurns,
+		ObservedSpendUSD:      e.ObservedSpendUSD,
+		ObservedTurnsWithCost: e.ObservedTurnsWithCost,
 	}, true, nil
 }
 

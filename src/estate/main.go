@@ -535,6 +535,8 @@ func main() {
 					e.ObservedTurns = &t
 					if turnsWithCost > 0 {
 						e.ObservedSpendUSD = &total
+						twc := int64(turnsWithCost)
+						e.ObservedTurnsWithCost = &twc
 					}
 				}
 			}
@@ -601,7 +603,7 @@ func main() {
 			case e.ObservedTurns == nil:
 				fmt.Println("observed spend this window: not measured -- no previous tick to bound a window against")
 			case e.ObservedSpendUSD != nil:
-				fmt.Printf("observed spend this window: $%.4f across %d observed turn(s) that reported a cost, excludes the Director's own turn cost (not observable from here) -- see tick.Entry.ObservedSpendUSD\n", *e.ObservedSpendUSD, *e.ObservedTurns)
+				fmt.Printf("observed spend this window: $%.4f across %d observed turn(s) that reported a cost, excludes the Director's own turn cost (not observable from here) -- see tick.Entry.ObservedSpendUSD\n", *e.ObservedSpendUSD, *e.ObservedTurnsWithCost)
 			case *e.ObservedTurns > 0:
 				fmt.Printf("observed spend this window: not reported by any of %d turn(s) that FINISHED this window -- not pending, these are done; their harness (e.g. codex) reports no dollar figure at all -- excludes the Director's own turn cost either way\n", *e.ObservedTurns)
 			default:
@@ -714,7 +716,7 @@ func main() {
 				case last.ObservedTurns == nil:
 					fmt.Println("last tick's observed spend: not recorded (no previous tick to bound a window against, or predates agent-estate#982)")
 				case last.ObservedSpendUSD != nil:
-					fmt.Printf("last tick's observed spend: $%.4f across %d observed turn(s) that reported a cost, excludes the Director's own turn cost (not observable from here)\n", *last.ObservedSpendUSD, *last.ObservedTurns)
+					fmt.Printf("last tick's observed spend: $%.4f across %d observed turn(s) that reported a cost, excludes the Director's own turn cost (not observable from here)\n", *last.ObservedSpendUSD, *last.ObservedTurnsWithCost)
 				case *last.ObservedTurns > 0:
 					fmt.Printf("last tick's observed spend: not reported by any of %d turn(s) that FINISHED that window -- not pending, these are done; their harness (e.g. codex) reports no dollar figure at all -- excludes the Director's own turn cost either way\n", *last.ObservedTurns)
 				default:
