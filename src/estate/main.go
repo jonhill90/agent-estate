@@ -505,6 +505,38 @@ func main() {
 				SrcHead:   strings.TrimSpace(string(head)),
 				Artifact:  artifact,
 			}
+			// since is the PREVIOUS tick's own `at`, read before this entry is
+			// appended -- the zero value means this is the first tick ever
+			// recorded, in which case there is no window to bound either the
+			// gap or dispatch spend against, and both stay nil (agent-estate#982).
+			since := tick.LastAt(path)
+			if !since.IsZero() {
+				gap := int64(e.At.Sub(since).Seconds())
+				e.GapSeconds = &gap
+
+				// Dispatch-attributable spend for the window between the
+				// previous tick and this one. This is NOT this tick's cost --
+				// the Director's own turn is never dispatched by the estate,
+				// so no harness result envelope for it ever reaches the
+				// ledger, and that gap cannot be closed from here. See
+				// tick.Entry.DispatchSpendUSD's doc comment.
+				all, allErr := l.All()
+				cur, curErr := l.Current()
+				if allErr != nil || curErr != nil {
+					err := allErr
+					if err == nil {
+						err = curErr
+					}
+					fmt.Fprintln(os.Stderr, "estate: cannot read the ledger to attribute dispatch spend for this window, recording the tick without it:", err)
+				} else {
+					turns, turnsWithCost, total := spend.WindowedByDispatch(all, cur, since, e.At)
+					t := int64(turns)
+					e.DispatchTurns = &t
+					if turnsWithCost > 0 {
+						e.DispatchSpendUSD = &total
+					}
+				}
+			}
 			// Recency, not existence. In a real repository almost
 			// everything already exists, so "does this resolve" was
 			// satisfied by naming any old file. The question is whether
@@ -558,6 +590,21 @@ func main() {
 				fmt.Printf("recorded %s at %s with no artifact\n", e.PhaseItem, shortHead)
 			} else {
 				fmt.Printf("recorded %s at %s -> %s\n", e.PhaseItem, shortHead, artifact)
+			}
+			if e.GapSeconds == nil {
+				fmt.Println("gap since previous tick: none -- this is the first tick this log has recorded")
+			} else {
+				fmt.Printf("gap since previous tick: %ds (cron cadence, not work duration -- see docs/director-loop.md)\n", *e.GapSeconds)
+			}
+			switch {
+			case e.DispatchTurns == nil:
+				fmt.Println("dispatch spend this window: not measured -- no previous tick to bound a window against")
+			case e.DispatchSpendUSD != nil:
+				fmt.Printf("dispatch spend this window: $%.4f, dispatch-attributable only, excludes the Director's own turn cost (not observable from here) -- see tick.Entry.DispatchSpendUSD\n", *e.DispatchSpendUSD)
+			case *e.DispatchTurns > 0:
+				fmt.Printf("dispatch spend this window: not reported by any of %d dispatched turn(s) this window -- excludes the Director's own turn cost either way\n", *e.DispatchTurns)
+			default:
+				fmt.Println("dispatch spend this window: no tasks dispatched this window -- excludes the Director's own turn cost either way")
 			}
 
 		case "escalate":
@@ -648,6 +695,30 @@ func main() {
 				// Could not measure. Never clean.
 				fmt.Fprintln(os.Stderr, "estate:", err)
 				os.Exit(2)
+			}
+			// Surface the most recently recorded tick's own gap and
+			// dispatch-spend figures here -- this is a place a human already
+			// looks, every tick, per docs/director-loop.md step 1 -- rather
+			// than a new view (agent-estate#982). Printed regardless of the
+			// verdict below, so it shows on a stalled tick too.
+			if last, ok, lerr := tick.LastEntry(path); lerr != nil {
+				fmt.Fprintln(os.Stderr, "estate: cannot read the last tick's gap/spend figures:", lerr)
+			} else if ok {
+				if last.GapSeconds == nil {
+					fmt.Println("last tick's gap: none recorded (its first-ever tick, or predates agent-estate#982)")
+				} else {
+					fmt.Printf("last tick's gap: %ds (cron cadence, not work duration)\n", *last.GapSeconds)
+				}
+				switch {
+				case last.DispatchTurns == nil:
+					fmt.Println("last tick's dispatch spend: not recorded (no previous tick to bound a window against, or predates agent-estate#982)")
+				case last.DispatchSpendUSD != nil:
+					fmt.Printf("last tick's dispatch spend: $%.4f, dispatch-attributable only, excludes the Director's own turn cost (not observable from here)\n", *last.DispatchSpendUSD)
+				case *last.DispatchTurns > 0:
+					fmt.Printf("last tick's dispatch spend: not reported by any of %d dispatched turn(s) that window -- excludes the Director's own turn cost either way\n", *last.DispatchTurns)
+				default:
+					fmt.Println("last tick's dispatch spend: no tasks dispatched that window -- excludes the Director's own turn cost either way")
+				}
 			}
 			if v.Stalled && v.Escalated {
 				// A different exit code, not a clean one: the phase item and

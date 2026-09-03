@@ -2,6 +2,7 @@ package spend
 
 import (
 	"testing"
+	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 )
@@ -134,4 +135,69 @@ func harnessNames(gs []HarnessSpend) []string {
 		out[i] = g.Harness
 	}
 	return out
+}
+
+// agent-estate#982: only a task DISPATCHED inside the window counts, and only
+// against its terminal (Current) record's own reported cost -- never a flat
+// per-task assumption.
+func TestWindowedByDispatch_OnlyCountsDispatchesInsideTheWindow(t *testing.T) {
+	since := mustTime(t, "2026-09-03T10:00:00Z")
+	until := mustTime(t, "2026-09-03T10:03:00Z")
+
+	all := []ledger.Record{
+		// Dispatched before the window: must not count, however much it cost.
+		{ID: "before", State: ledger.Dispatched, At: mustTime(t, "2026-09-03T09:59:00Z")},
+		// Dispatched inside the window, reported a cost.
+		{ID: "in-a", State: ledger.Dispatched, At: mustTime(t, "2026-09-03T10:01:00Z")},
+		// Dispatched inside the window, no cost reported (e.g. codex).
+		{ID: "in-b", State: ledger.Dispatched, At: mustTime(t, "2026-09-03T10:02:00Z")},
+		// Dispatched exactly at until: inclusive.
+		{ID: "in-c", State: ledger.Dispatched, At: until},
+		// Dispatched after the window: must not count.
+		{ID: "after", State: ledger.Dispatched, At: mustTime(t, "2026-09-03T10:04:00Z")},
+	}
+	current := []ledger.Record{
+		{ID: "before", State: ledger.Complete, SpendCostUSD: f64(9.0)},
+		{ID: "in-a", State: ledger.Complete, SpendCostUSD: f64(0.25)},
+		{ID: "in-b", State: ledger.Complete, SpendInputTokens: i64(100)},
+		{ID: "in-c", State: ledger.Dispatched}, // still in flight, no Spend yet
+		{ID: "after", State: ledger.Complete, SpendCostUSD: f64(9.0)},
+	}
+
+	turns, turnsWithCost, total := WindowedByDispatch(all, current, since, until)
+	if turns != 3 {
+		t.Fatalf("want 3 turns dispatched in the window (in-a, in-b, in-c), got %d", turns)
+	}
+	if turnsWithCost != 1 {
+		t.Fatalf("want 1 turn with a reported cost (in-a only), got %d", turnsWithCost)
+	}
+	if total != 0.25 {
+		t.Fatalf("want total 0.25 (before/after excluded by window, in-b/in-c excluded by no reported cost), got %v", total)
+	}
+}
+
+// The since boundary is exclusive and until is inclusive -- a dispatch at
+// exactly `since` belongs to the PREVIOUS tick's window, not this one.
+func TestWindowedByDispatch_SinceIsExclusive(t *testing.T) {
+	since := mustTime(t, "2026-09-03T10:00:00Z")
+	until := mustTime(t, "2026-09-03T10:03:00Z")
+	all := []ledger.Record{
+		{ID: "at-since", State: ledger.Dispatched, At: since},
+	}
+	current := []ledger.Record{
+		{ID: "at-since", State: ledger.Complete, SpendCostUSD: f64(1.0)},
+	}
+	turns, _, _ := WindowedByDispatch(all, current, since, until)
+	if turns != 0 {
+		t.Fatalf("a dispatch exactly at `since` belongs to the previous window; want 0 turns, got %d", turns)
+	}
+}
+
+func mustTime(t *testing.T, s string) time.Time {
+	t.Helper()
+	tm, err := time.Parse(time.RFC3339, s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return tm
 }

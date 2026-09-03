@@ -12,6 +12,7 @@ package spend
 
 import (
 	"sort"
+	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 )
@@ -146,4 +147,50 @@ func Aggregate(records []ledger.Record) Report {
 		}
 	}
 	return rep
+}
+
+// WindowedByDispatch is dispatch-attributable spend for one window: every
+// task whose OWN dispatch-time record (ledger.Dispatched, whose At is the
+// instant the subprocess was launched -- see ledger.Ledger.All's doc
+// comment for why this is not the same as that task's Current() record)
+// falls strictly after since and no later than until.
+//
+// This is deliberately not Aggregate's per-harness Report: a tick-log entry
+// is one compact JSON line, not a report, so it carries a single total plus
+// the coverage it was drawn from. turns is every task dispatched in the
+// window, whatever it reported; turnsWithCost is how many of those turns'
+// Current() record carries a non-nil SpendCostUSD; totalCostUSD sums only
+// those. A caller must print turnsWithCost alongside totalCostUSD ("$X
+// across N of M dispatched turns") -- printing totalCostUSD alone reads as
+// the window's whole cost when a harness reporting no dollar figure (codex,
+// as of this writing) may have run turns inside the same window that this
+// total silently excludes. See docs/spend-observation.md for which
+// harnesses report a dollar figure at all.
+//
+// current is expected to be Ledger.Current() (latest record per task id):
+// Spend fields are only ever set on a turn's terminal record, so a task
+// still in flight when this is computed contributes to turns but not to
+// turnsWithCost, however it eventually finishes -- this is a snapshot at
+// tick-record time, not re-derived later.
+func WindowedByDispatch(all, current []ledger.Record, since, until time.Time) (turns, turnsWithCost int, totalCostUSD float64) {
+	latest := map[string]ledger.Record{}
+	for _, r := range current {
+		latest[r.ID] = r
+	}
+	seen := map[string]bool{}
+	for _, r := range all {
+		if r.State != ledger.Dispatched || r.ID == "" || seen[r.ID] {
+			continue
+		}
+		if !r.At.After(since) || r.At.After(until) {
+			continue
+		}
+		seen[r.ID] = true
+		turns++
+		if cur, ok := latest[r.ID]; ok && cur.SpendCostUSD != nil {
+			turnsWithCost++
+			totalCostUSD += *cur.SpendCostUSD
+		}
+	}
+	return
 }

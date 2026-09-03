@@ -513,3 +513,84 @@ func TestAuditWindowRefusesAnUnknownPhaseInTheWindow(t *testing.T) {
 		t.Errorf("a missing log is not an audit failure: %v", err)
 	}
 }
+
+// agent-estate#982: the first tick this log has ever recorded has no
+// previous `at` to measure a gap against, and no previous tick to bound a
+// dispatch-spend window against -- both must be absent, not zero.
+func TestFirstEntryHasNoGapOrDispatchFields(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "tick-log.jsonl")
+	e := Entry{At: time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC), PhaseItem: "phase-0", SrcHead: "aaa"}
+	if err := Record(p, e, nil); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	line := strings.TrimSpace(string(b))
+	for _, key := range []string{`"gap_seconds"`, `"dispatch_turns"`, `"dispatch_spend_usd"`} {
+		if strings.Contains(line, key) {
+			t.Errorf("a first-ever tick must omit %s entirely (absent, not zero); got %s", key, line)
+		}
+	}
+
+	last, ok, err := LastEntry(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("LastEntry must find the entry just written")
+	}
+	if last.GapSeconds != nil || last.DispatchTurns != nil || last.DispatchSpendUSD != nil {
+		t.Errorf("a first-ever tick's fields must read back nil; got gap=%v turns=%v spend=%v", last.GapSeconds, last.DispatchTurns, last.DispatchSpendUSD)
+	}
+}
+
+// An old entry, written before this field existed, must round-trip as
+// absent -- never coerced into a zero that would read as "no time passed"
+// or "genuinely free."
+func TestOldEntryWithNoGapOrDispatchFieldsReadsAsAbsent(t *testing.T) {
+	p := write(t, `{"at":"2026-09-01T10:00:00Z","phase_item":"phase-0","src_head":"aaa","artifact":"docs/x.md"}`)
+	last, ok, err := LastEntry(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("LastEntry must find the old-shaped entry")
+	}
+	if last.GapSeconds != nil || last.DispatchTurns != nil || last.DispatchSpendUSD != nil {
+		t.Errorf("an old entry must read back with these fields nil, not zero; got gap=%v turns=%v spend=%v", last.GapSeconds, last.DispatchTurns, last.DispatchSpendUSD)
+	}
+}
+
+// A second tick DOES have a previous `at` to measure a gap against, and
+// distinguishes a tick that did nothing from one that did everything only
+// in name -- both show the same cron-cadence gap, which is the whole point
+// of calling this gap_seconds and not duration_seconds.
+func TestSecondEntryRecordsGapSincePrevious(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "tick-log.jsonl")
+	first := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	if err := Record(p, Entry{At: first, PhaseItem: "phase-0", SrcHead: "aaa"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if LastAt(p) != first {
+		t.Fatalf("LastAt must return the just-written entry's own at; got %v want %v", LastAt(p), first)
+	}
+
+	// main.go computes GapSeconds itself (it needs LastAt before building
+	// the next Entry); this test only proves LastAt gives it the right
+	// number to compute from, and that Record/LastEntry round-trip whatever
+	// it sets.
+	second := first.Add(3 * time.Minute)
+	gap := int64(second.Sub(first).Seconds())
+	if err := Record(p, Entry{At: second, PhaseItem: "phase-0", SrcHead: "bbb", GapSeconds: &gap}, nil); err != nil {
+		t.Fatal(err)
+	}
+	last, ok, err := LastEntry(p)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || last.GapSeconds == nil || *last.GapSeconds != 180 {
+		t.Fatalf("want gap_seconds=180 on the second entry, got %+v (ok=%v)", last.GapSeconds, ok)
+	}
+}

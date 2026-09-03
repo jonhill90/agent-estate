@@ -83,3 +83,41 @@ func TestMissingLedgerInRealDirectoryIsAFirstRun(t *testing.T) {
 		t.Fatalf("first run should be empty and fine, got %v / %v", got, err)
 	}
 }
+
+// agent-estate#982: All() must return every record, including a task's
+// Dispatched-state one that Current() has since superseded -- that record's
+// own At is the dispatch instant a spend window needs, and Current() only
+// ever keeps the terminal record, whose At is the completion instant.
+func TestAllReturnsEveryRecordUncollapsed(t *testing.T) {
+	l := &Ledger{path: filepath.Join(t.TempDir(), "l.jsonl")}
+	for _, r := range []Record{
+		{ID: "a", State: Dispatched}, {ID: "a", State: Complete},
+		{ID: "b", State: Dispatched},
+	} {
+		if err := l.Append(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	all, err := l.All()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Fatalf("All() = %d records, want 3 (Current() would collapse to 2)", len(all))
+	}
+	cur, err := l.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cur) != 2 {
+		t.Fatalf("sanity: Current() = %d, want 2", len(cur))
+	}
+}
+
+func TestAllOnMissingLedgerIsEmptyNotAnError(t *testing.T) {
+	l := &Ledger{path: filepath.Join(t.TempDir(), "absent.jsonl")}
+	got, err := l.All()
+	if err != nil || got != nil {
+		t.Fatalf("All() on absent ledger = %v, %v; want nil, nil", got, err)
+	}
+}

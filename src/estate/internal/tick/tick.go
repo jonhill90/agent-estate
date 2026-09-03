@@ -66,20 +66,70 @@ type Entry struct {
 	// means there was none, and serialises as null -- the stop condition is
 	// written against that spelling.
 	Artifact string `json:"artifact"`
+
+	// GapSeconds is the wall-clock gap since the PREVIOUS tick's own `at`,
+	// nothing more. It is cron cadence, not work duration: a tick that did
+	// nothing and a tick that did everything both show roughly the same
+	// gap, because the Director's loop runs on a fixed interval regardless
+	// of how much a tick actually did (see docs/director-loop.md). Do not
+	// read this as effort, and do not rename it to "duration" -- that name
+	// was considered and rejected for exactly this reason (agent-estate#982).
+	// Nil on the first tick this log has ever recorded, when there is no
+	// previous `at` to measure from -- absent, not zero, the same
+	// *float64/*int64 pattern ledger.Record.SpendCostUSD uses and for the
+	// same reason: a zero here would read as "no time passed" instead of
+	// "nothing to compare against."
+	GapSeconds *int64 `json:"gap_seconds,omitempty"`
+
+	// DispatchTurns is how many tasks the estate dispatched in the window
+	// between the previous tick and this one (strictly after the previous
+	// tick's `at`, no later than this tick's own `at`) -- see
+	// spend.WindowedByDispatch. It is the denominator DispatchSpendUSD
+	// needs: a reader must be able to tell "$0 because nothing ran this
+	// window" from "$0 because nothing that ran reports a dollar figure"
+	// from "genuinely free." Nil only when there was no previous tick to
+	// bound a window against (the first tick ever recorded); zero is a
+	// legitimate, distinct value meaning the window is real and nothing was
+	// dispatched in it.
+	DispatchTurns *int64 `json:"dispatch_turns,omitempty"`
+
+	// DispatchSpendUSD is dispatch-attributable spend ONLY: the sum of
+	// ledger.Record.SpendCostUSD for tasks counted in DispatchTurns, for
+	// harnesses that report a dollar figure at all (see
+	// docs/spend-observation.md -- claude does, codex as of this writing
+	// never does). It is NEVER the cost of this tick and must never be
+	// read, printed, or compared as one: the Director itself runs as a cron
+	// inside Claude Code, the estate does not dispatch it, and no harness
+	// result envelope for the Director's own turn ever reaches the ledger.
+	// That gap is structural, not a coverage hole this field will ever
+	// close. Nil when DispatchTurns is nil (no window to measure), or when
+	// DispatchTurns is non-nil but none of those turns reported a cost --
+	// summing zero non-nil dollar figures into $0.00 would read as "this
+	// window was free," which #979 already refused for the cross-harness
+	// case and this is the same defect. Every caller that prints this field
+	// must also print DispatchTurns and name what is excluded -- see
+	// spend.WindowedByDispatch's doc comment.
+	DispatchSpendUSD *float64 `json:"dispatch_spend_usd,omitempty"`
 }
 
 // MarshalJSON writes At as ISO 8601 UTC and an absent Artifact as null.
 func (e Entry) MarshalJSON() ([]byte, error) {
 	type wire struct {
-		At        string  `json:"at"`
-		PhaseItem string  `json:"phase_item"`
-		SrcHead   string  `json:"src_head"`
-		Artifact  *string `json:"artifact"`
+		At               string   `json:"at"`
+		PhaseItem        string   `json:"phase_item"`
+		SrcHead          string   `json:"src_head"`
+		Artifact         *string  `json:"artifact"`
+		GapSeconds       *int64   `json:"gap_seconds,omitempty"`
+		DispatchTurns    *int64   `json:"dispatch_turns,omitempty"`
+		DispatchSpendUSD *float64 `json:"dispatch_spend_usd,omitempty"`
 	}
 	w := wire{
-		At:        e.At.UTC().Format(time.RFC3339),
-		PhaseItem: e.PhaseItem,
-		SrcHead:   e.SrcHead,
+		At:               e.At.UTC().Format(time.RFC3339),
+		PhaseItem:        e.PhaseItem,
+		SrcHead:          e.SrcHead,
+		GapSeconds:       e.GapSeconds,
+		DispatchTurns:    e.DispatchTurns,
+		DispatchSpendUSD: e.DispatchSpendUSD,
 	}
 	if e.AtText != "" {
 		w.At = e.AtText
@@ -831,6 +881,71 @@ func lastTickEntry(path string) (struct{ At, PhaseItem, SrcHead string }, bool, 
 	}
 	out.At, out.PhaseItem, out.SrcHead = e.At, e.PhaseItem, e.SrcHead
 	return out, true, nil
+}
+
+// LastAt is lastTickAt, exported so a caller building the NEXT entry (main.go's
+// `tick record`) can bound a dispatch-spend window against it before that
+// entry exists -- see spend.WindowedByDispatch and Entry.DispatchTurns/
+// DispatchSpendUSD's own doc comments for why "no previous tick" (the zero
+// value returned here) means no window, not a zero-length one.
+func LastAt(path string) time.Time { return lastTickAt(path) }
+
+// LastRecorded is what the most recently written tick entry itself recorded
+// for the gap/dispatch-spend fields -- what `tick check` surfaces without
+// re-deriving them (that derivation belongs to whoever wrote the entry, at
+// the moment it was written; re-computing it later against a NOW that has
+// moved on would silently change a number that already happened).
+type LastRecorded struct {
+	At               string
+	PhaseItem        string
+	GapSeconds       *int64
+	DispatchTurns    *int64
+	DispatchSpendUSD *float64
+}
+
+// LastEntry returns the most recently recorded tick's own gap and
+// dispatch-spend figures. ok is false when the log has no entries at all --
+// never confuse that with "recorded, and both fields nil."
+func LastEntry(path string) (LastRecorded, bool, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return LastRecorded{}, false, nil
+	}
+	if err != nil {
+		return LastRecorded{}, false, fmt.Errorf("tick: open %s: %w", path, err)
+	}
+	defer f.Close()
+	var lastLine string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		if t := strings.TrimSpace(sc.Text()); t != "" {
+			lastLine = t
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return LastRecorded{}, false, err
+	}
+	if lastLine == "" {
+		return LastRecorded{}, false, nil
+	}
+	var e struct {
+		At               string   `json:"at"`
+		PhaseItem        string   `json:"phase_item"`
+		GapSeconds       *int64   `json:"gap_seconds"`
+		DispatchTurns    *int64   `json:"dispatch_turns"`
+		DispatchSpendUSD *float64 `json:"dispatch_spend_usd"`
+	}
+	if err := json.Unmarshal([]byte(lastLine), &e); err != nil {
+		return LastRecorded{}, false, fmt.Errorf("tick: %s last line is not readable: %w", path, err)
+	}
+	return LastRecorded{
+		At:               e.At,
+		PhaseItem:        e.PhaseItem,
+		GapSeconds:       e.GapSeconds,
+		DispatchTurns:    e.DispatchTurns,
+		DispatchSpendUSD: e.DispatchSpendUSD,
+	}, true, nil
 }
 
 // lastTickAt returns the timestamp of the most recent entry, or the zero time
