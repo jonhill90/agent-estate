@@ -25,6 +25,13 @@ func missing(t *testing.T, name string) string {
 	return filepath.Join(t.TempDir(), name)
 }
 
+// bogus returns a path whose PARENT directory does not exist either -- a
+// wiped state directory or a mistyped flag, never a legitimate first run.
+func bogus(t *testing.T, name string) string {
+	t.Helper()
+	return filepath.Join(t.TempDir(), "no-such-dir-at-all", name)
+}
+
 // The case that was true when this package was written: no dispatch has ever
 // run. That must read as Absent, never as a present-and-empty estate.
 func TestAbsentLedgerIsNotAnEmptyEstate(t *testing.T) {
@@ -214,6 +221,66 @@ func TestLinesDirectorStatesAreDistinct(t *testing.T) {
 
 	if absent == unreadable || absent == present || unreadable == present {
 		t.Fatalf("the three Director states must render distinct text with an identical ledger side:\nabsent:\n%s\nunreadable:\n%s\npresent:\n%s", absent, unreadable, present)
+	}
+}
+
+// TestBogusLedgerParentIsUnreadableNotAbsent is the reproduction from agent-estate#920:
+// a ledger path whose parent directory does not exist either -- a wiped
+// state dir or a typo'd flag -- must never render as the calm first-run
+// message. Only a missing file with an EXISTING parent is a genuine first
+// run (TestAbsentLedgerIsNotAnEmptyEstate above pins that case).
+func TestBogusLedgerParentIsUnreadableNotAbsent(t *testing.T) {
+	s := Read(bogus(t, "ledger.jsonl"), missing(t, "t.jsonl"))
+	if s.Ledger != Unreadable {
+		t.Fatalf("Ledger = %v, want Unreadable for a path whose parent directory does not exist", s.Ledger)
+	}
+	if s.LedgerErr == nil {
+		t.Error("Unreadable must carry the reason -- a wiped/mistyped state dir, not a bare nil")
+	}
+}
+
+// TestBogusTickParentIsUnreadableNotAbsent is the same case on the tick-log
+// side: readLines is shared, so both callers must get the same treatment.
+func TestBogusTickParentIsUnreadableNotAbsent(t *testing.T) {
+	s := Read(missing(t, "l.jsonl"), bogus(t, "tick-log.jsonl"))
+	if s.Ticks != Unreadable {
+		t.Fatalf("Ticks = %v, want Unreadable for a path whose parent directory does not exist", s.Ticks)
+	}
+	if s.TickErr == nil {
+		t.Error("Unreadable must carry the reason -- a wiped/mistyped state dir, not a bare nil")
+	}
+}
+
+// TestLinesBogusLedgerRendersAsUnreadableNotFirstRun is the end-to-end
+// reproduction of agent-estate#920's actual bug report: Lines() must never print "first
+// run" reassurance for a path whose parent directory does not exist.
+func TestLinesBogusLedgerRendersAsUnreadableNotFirstRun(t *testing.T) {
+	s := Read(bogus(t, "ledger.jsonl"), missing(t, "t.jsonl"))
+	out := strings.Join(Lines(s), "\n")
+	if strings.Contains(out, "first-run state") || strings.Contains(out, "none recorded yet") {
+		t.Errorf("a bogus path must never render as a calm first-run state; got:\n%s", out)
+	}
+	if !strings.Contains(out, "UNREADABLE") {
+		t.Errorf("a bogus path must render UNREADABLE; got:\n%s", out)
+	}
+}
+
+// TestLinesThreeLedgerStatesAreDistinct pins all three typed ledger states'
+// rendered text against each other -- absent (genuine first run), the new
+// bogus-parent case (Unreadable), and an existing corrupt file (Unreadable
+// for a different reason). Mutate any one of these strings and this test
+// must go red.
+func TestLinesThreeLedgerStatesAreDistinct(t *testing.T) {
+	tick := missing(t, "t.jsonl")
+	absent := strings.Join(Lines(Read(missing(t, "l.jsonl"), tick)), "\n")
+	bogusParent := strings.Join(Lines(Read(bogus(t, "l.jsonl"), tick)), "\n")
+	corrupt := strings.Join(Lines(Read(write(t, "l.jsonl", "{bad"), tick)), "\n")
+
+	if absent == bogusParent {
+		t.Fatal("a genuine first-run state must not render identically to a wiped/mistyped state dir")
+	}
+	if absent == corrupt || bogusParent == corrupt {
+		t.Fatal("the three ledger states must all render distinct text")
 	}
 }
 
