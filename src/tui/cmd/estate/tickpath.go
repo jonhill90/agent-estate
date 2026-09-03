@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"path/filepath"
 	"runtime"
 )
@@ -62,8 +63,8 @@ func repoRootFromSource(sourceFile string) string {
 // exactly as given; only the default relative path is resolved against
 // repoRoot.
 //
-// TWO KNOWN, ACCEPTED DEGRADATIONS, both landing on Absent ("Director: no
-// tick log ... not running") rather than a confidently wrong read:
+// TWO KNOWN, ACCEPTED DEGRADATIONS -- one Unreadable, one Absent, and the
+// distinction between the two is the point (agent-estate#935):
 //
 //   - repoRoot itself not absolute. runtime.Caller(0)'s file path is normally
 //     absolute, but under `go build -trimpath` it is the module-relative
@@ -74,27 +75,37 @@ func repoRootFromSource(sourceFile string) string {
 //     cwd -- reintroducing the exact cwd-dependent bug this file exists to
 //     fix, one level down, and silently, contradicting "never from
 //     os.Getwd()" above. Guarded below: a non-absolute repoRoot is refused
-//     rather than joined, and the caller sees Absent, never a cwd-relative
-//     guess.
+//     rather than joined -- resolveTickLogPath returns a non-nil error
+//     instead of a path, and the caller (main.go) passes that error to
+//     estatus.ReadWithTickErr, which reports Unreadable, never Absent. We
+//     know exactly where we tried to look (the repo root, computed from
+//     this binary's own compiled-in source location) and that resolving it
+//     failed; that is a claim about the instrument, not about whether the
+//     Director is running, and Absent asserts the latter. An earlier
+//     version of this function returned a deliberately nonexistent path so
+//     estatus.Read's own file-open would fail into Absent -- that produced
+//     exactly the dishonest "Director: not running" sentence this comment
+//     now warns against; see the issue for the full account.
 //   - the checkout has moved. A binary keeps repoRoot baked in from its own
 //     build; if the checkout it was built from is later renamed or deleted,
 //     repoRoot names a directory that no longer exists. os.Open on the
 //     resolved (still-absolute, still correctly-computed) path then returns
-//     fs.ErrNotExist, and estatus.Read reports Absent -- the same "Director:
-//     not running" text this PR's whole fix is about. This is the honest
-//     choice between two bad options, but it is still silent: rebuild after
-//     any checkout rename or move to clear it.
-func resolveTickLogPath(repoRoot, tickLogFlag string) string {
+//     fs.ErrNotExist, and estatus.Read reports Absent -- correctly this
+//     time: repoRoot WAS resolved, the file simply is not there, which is
+//     indistinguishable from "the Director never ran" without more
+//     information than this function has. This is the honest choice between
+//     two bad options, but it is still silent: rebuild after any checkout
+//     rename or move to clear it.
+func resolveTickLogPath(repoRoot, tickLogFlag string) (string, error) {
 	if filepath.IsAbs(tickLogFlag) {
-		return tickLogFlag
+		return tickLogFlag, nil
 	}
 	if !filepath.IsAbs(repoRoot) {
 		// repoRoot is not absolute -- see the trimpath degradation above.
-		// Refuse to guess: return a path guaranteed not to exist so
-		// estatus.Read reports Absent (an honest "we don't know") instead of
-		// silently resolving a repoRoot-relative join against whatever the
-		// process's cwd happens to be.
-		return filepath.Join(string(filepath.Separator), "estate-repo-root-not-absolute", tickLogFlag)
+		// Refuse to guess: report the failure as a value instead of
+		// encoding it into a path this package's own reader would later
+		// have to fail on to arrive at the same answer.
+		return "", fmt.Errorf("cannot resolve tick log path: repo root %q is not absolute (likely a go build -trimpath binary, where runtime.Caller(0) yields a module-relative path)", repoRoot)
 	}
-	return filepath.Join(repoRoot, tickLogFlag)
+	return filepath.Join(repoRoot, tickLogFlag), nil
 }
