@@ -111,6 +111,15 @@ type Record struct {
 	SpendOutputTokens        *int64 `json:"spend_output_tokens,omitempty"`
 	SpendCacheReadTokens     *int64 `json:"spend_cache_read_tokens,omitempty"`
 	SpendCacheCreationTokens *int64 `json:"spend_cache_creation_tokens,omitempty"`
+	// Harness is which agent CLI ran this turn ("claude" or "codex"), read
+	// from the same --harness=/ESTATE_HARNESS selection main.go's dispatch
+	// case already resolves before Start-ing the turn -- never inferred
+	// later from the shape of a record's other fields. A spend reader
+	// (agent-estate#975) cannot honestly compare harnesses without this:
+	// claude reports a dollar figure and codex never does, so grouping by
+	// Harness is what keeps a per-turn total from silently mixing the two.
+	// Empty on any record written before this field existed.
+	Harness string `json:"harness,omitempty"`
 }
 
 // EffectiveRole returns the record's Role, defaulting an unset field to
