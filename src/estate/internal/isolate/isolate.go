@@ -339,16 +339,71 @@ func (w *Worktree) Committed() (bool, error) {
 	return strings.TrimSpace(string(head)) != w.Base, nil
 }
 
+// Collected reports whether this worktree's HEAD commit is reachable from
+// some ref OTHER than this worktree's own local branch -- concretely,
+// whether origin has it under any ref at all right now.
+//
+// This is a LIVE `git ls-remote origin` call, not a cached remote-tracking
+// ref (`refs/remotes/origin/*`). A remote-tracking ref only updates on
+// fetch, and this package never fetches on the teardown path -- CreateOnBranch
+// fetches at the START of a fix pass, not at the end of one, so a
+// remote-tracking ref read at Remove time can easily predate the very push
+// that collected the work it is being asked about. Trusting it would swap
+// today's false "refuses collected work" for a false "proceeds on
+// uncollected work" -- reachable from a stale ref that no longer describes
+// what origin holds, which is the direction that destroys history rather
+// than merely reporting it. The cost accepted in exchange is a network call
+// and its latency and failure mode on every teardown of a worktree that
+// committed something -- paid deliberately, once, at the one moment
+// (Remove) that is a refusal path rather than a hot loop, and it fails
+// closed (see below) rather than silently proceeding when the call fails.
+//
+// A commit is "collected" here if origin has it under ANY ref, not only
+// under a ref named the same as this worktree's own Branch -- CreateOnBranch
+// checks a fix pass out DETACHED (see its own doc comment), so a fix pass's
+// own HEAD is never on a locally-named branch matching Branch to begin with,
+// and the issue this answers ("is this reachable from something other than
+// this worktree") does not care what the remote ref is named, only that one
+// exists.
+func (w *Worktree) Collected() (bool, error) {
+	head, err := w.Head()
+	if err != nil {
+		return false, err
+	}
+	out, err := git(w.Path, "ls-remote", "origin")
+	if err != nil {
+		return false, fmt.Errorf("could not confirm whether %s is collected: %w", head, err)
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && fields[0] == head {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // Remove tears the worktree and its branch down.
 //
 // It refuses when the worktree holds uncommitted changes OR when the turn
-// committed anything. A council seat found the second case: an agent that
+// committed something that is not collected -- reachable from some ref
+// other than this worktree's own branch, confirmed live against origin (see
+// Collected). A council seat found the underlying case: an agent that
 // committed its work left a CLEAN git status, so the uncommitted check saw
 // nothing to collect, and `git branch -D` then deleted the only ref to those
-// commits. The agent did the tidy thing and lost more for it.
+// commits. The agent did the tidy thing and lost more for it. The reference
+// check closes the over-refusal that rule then produced (agent-estate#985):
+// the original check asked only "did this turn commit anything", so it
+// refused even a branch already pushed and carrying an open pull request --
+// the success path, where the commits plainly ARE collected elsewhere.
 //
-// Both refusals are the same rule: a dispatch's uncollected output looks
-// exactly like an empty worktree from outside, and deleting it is
+// If origin cannot be consulted at all (no remote configured, network
+// unavailable, `git ls-remote` fails), that is "could not measure", and it
+// refuses rather than guessing either way -- same posture as Committed's own
+// unrecorded-base case and `estate pressure`'s exit 2.
+//
+// All three refusals are the same rule: a dispatch's uncollected output
+// looks exactly like an empty worktree from outside, and deleting it is
 // unrecoverable while reporting it is not.
 func (w *Worktree) Remove() error {
 	committed, cerr := w.Committed()
@@ -356,7 +411,13 @@ func (w *Worktree) Remove() error {
 		return fmt.Errorf("isolate: cannot tell whether %s holds committed work, so refusing to remove it: %w", w.Path, cerr)
 	}
 	if committed {
-		return fmt.Errorf("isolate: %s has commits on %s that nothing else references; refusing to remove it -- collect them first", w.Path, w.Branch)
+		collected, err := w.Collected()
+		if err != nil {
+			return fmt.Errorf("isolate: %s has commits on %s and whether they are collected could not be confirmed, so refusing to remove it -- collect them first: %w", w.Path, w.Branch, err)
+		}
+		if !collected {
+			return fmt.Errorf("isolate: %s has commits on %s that nothing else references; refusing to remove it -- collect them first", w.Path, w.Branch)
+		}
 	}
 	dirty, err := w.Dirty()
 	if err != nil {

@@ -639,6 +639,89 @@ func TestRemoveStillRefusesUnlistedIgnoredContentInsideTheAllowlistedDirectory(t
 	}
 }
 
+// The fix for agent-estate#985: the old "commits nothing else references"
+// check asked only "did this turn commit anything" -- it never consulted a
+// remote at all, so it refused a branch already pushed and carrying an open
+// pull request, which is the SUCCESS path. Committed work that origin
+// actually has under some ref must proceed.
+func TestRemoveProceedsWhenCommittedWorkIsPushedToOrigin(t *testing.T) {
+	root := repo(t)
+	bare := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	if out, err := exec.Command("git", "-C", root, "remote", "add", "origin", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git remote add origin: %v: %s", err, out)
+	}
+
+	w, err := Create(root, "collected-work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Path, "result.txt"), []byte("the turn's output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "the turn's work"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = w.Path
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	// Exactly the reported shape: same SHA in the worktree and pushed to
+	// origin as a differently-named branch (a PR is opened from the
+	// dispatch branch, but nothing about "collected" should depend on the
+	// remote ref sharing the worktree's own branch name).
+	if out, err := exec.Command("git", "-C", w.Path, "push", "-q", "origin", "HEAD:refs/heads/pr-123").CombinedOutput(); err != nil {
+		t.Fatalf("git push: %v: %s", err, out)
+	}
+
+	collected, err := w.Collected()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !collected {
+		t.Fatal("Collected() must be true: origin has this exact commit under refs/heads/pr-123")
+	}
+	if err := w.Remove(); err != nil {
+		t.Fatalf("Remove must proceed: the commits are reachable from origin, not just this worktree's own branch: %v", err)
+	}
+}
+
+// The remote cannot be consulted at all -- no origin configured. This must
+// refuse, the same as before: "could not measure" is not "collected".
+func TestRemoveRefusesCommittedWorkWhenOriginCannotBeConsulted(t *testing.T) {
+	root := repo(t) // no remote configured
+	w, err := Create(root, "no-origin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Path, "result.txt"), []byte("the turn's output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "the turn's work"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = w.Path
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+
+	if _, err := w.Collected(); err == nil {
+		t.Fatal("Collected() must error when there is no origin to consult, not report false")
+	}
+	err = w.Remove()
+	if err == nil {
+		t.Fatal("Remove must refuse when it cannot confirm collection against origin")
+	}
+	if !strings.Contains(err.Error(), "could not be confirmed") {
+		t.Errorf("the refusal must say collection could not be confirmed; got: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(w.Path, "result.txt")); err != nil {
+		t.Fatalf("the refused Remove destroyed committed work anyway: %v", err)
+	}
+}
+
 // A worktree that committed nothing is still removable -- otherwise every
 // dispatch leaks.
 func TestRemoveStillCleansUpWhenNothingWasCommitted(t *testing.T) {
