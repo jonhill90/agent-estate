@@ -599,13 +599,19 @@ func main() {
 			} else {
 				fmt.Printf("gap since previous tick: %ds (cron cadence, not work duration -- see docs/director-loop.md)\n", *e.GapSeconds)
 			}
-			switch {
-			case e.ObservedTurns == nil:
+			// Classified by tick.ReadSpend rather than branched on the
+			// pointers directly, so this printer cannot dereference a field
+			// the entry does not carry -- see tick.SpendKind for why the
+			// pairing is checked at every read instead of trusted.
+			switch r := e.Spend(); r.Kind {
+			case tick.SpendNoWindow:
 				fmt.Println("observed spend this window: not measured -- no previous tick to bound a window against")
-			case e.ObservedSpendUSD != nil:
-				fmt.Printf("observed spend this window: $%.4f across %d observed turn(s) that reported a cost, excludes the Director's own turn cost (not observable from here) -- see tick.Entry.ObservedSpendUSD\n", *e.ObservedSpendUSD, *e.ObservedTurnsWithCost)
-			case *e.ObservedTurns > 0:
-				fmt.Printf("observed spend this window: not reported by any of %d turn(s) that FINISHED this window -- not pending, these are done; their harness (e.g. codex) reports no dollar figure at all -- excludes the Director's own turn cost either way\n", *e.ObservedTurns)
+			case tick.SpendReported:
+				fmt.Printf("observed spend this window: $%.4f across %d observed turn(s) that reported a cost, excludes the Director's own turn cost (not observable from here) -- see tick.Entry.ObservedSpendUSD\n", r.USD, r.TurnsWithCost)
+			case tick.SpendNoneReported:
+				fmt.Printf("observed spend this window: not reported by any of %d turn(s) that FINISHED this window -- not pending, these are done; their harness (e.g. codex) reports no dollar figure at all -- excludes the Director's own turn cost either way\n", r.Turns)
+			case tick.SpendUnreadable:
+				fmt.Printf("observed spend this window: could not be read honestly -- %s; no figure is shown rather than a made-up one\n", r.Why)
 			default:
 				fmt.Println("observed spend this window: no turns finished this window -- excludes the Director's own turn cost either way")
 			}
@@ -712,13 +718,20 @@ func main() {
 				} else {
 					fmt.Printf("last tick's gap: %ds (cron cadence, not work duration)\n", *last.GapSeconds)
 				}
-				switch {
-				case last.ObservedTurns == nil:
+				// These figures came off disk, written by some earlier
+				// process this command cannot vouch for, so they are
+				// classified before they are printed -- a broken pair here
+				// used to panic and take `tick check`, the loop's own stop
+				// condition, down with it. See tick.SpendKind.
+				switch r := last.Spend(); r.Kind {
+				case tick.SpendNoWindow:
 					fmt.Println("last tick's observed spend: not recorded (no previous tick to bound a window against, or predates agent-estate#982)")
-				case last.ObservedSpendUSD != nil:
-					fmt.Printf("last tick's observed spend: $%.4f across %d observed turn(s) that reported a cost, excludes the Director's own turn cost (not observable from here)\n", *last.ObservedSpendUSD, *last.ObservedTurnsWithCost)
-				case *last.ObservedTurns > 0:
-					fmt.Printf("last tick's observed spend: not reported by any of %d turn(s) that FINISHED that window -- not pending, these are done; their harness (e.g. codex) reports no dollar figure at all -- excludes the Director's own turn cost either way\n", *last.ObservedTurns)
+				case tick.SpendReported:
+					fmt.Printf("last tick's observed spend: $%.4f across %d observed turn(s) that reported a cost, excludes the Director's own turn cost (not observable from here)\n", r.USD, r.TurnsWithCost)
+				case tick.SpendNoneReported:
+					fmt.Printf("last tick's observed spend: not reported by any of %d turn(s) that FINISHED that window -- not pending, these are done; their harness (e.g. codex) reports no dollar figure at all -- excludes the Director's own turn cost either way\n", r.Turns)
+				case tick.SpendUnreadable:
+					fmt.Printf("last tick's observed spend: could not be read honestly -- %s; no figure is shown rather than a made-up one\n", r.Why)
 				default:
 					fmt.Println("last tick's observed spend: no turns finished that window -- excludes the Director's own turn cost either way")
 				}

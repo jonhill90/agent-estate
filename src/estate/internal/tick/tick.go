@@ -134,10 +134,16 @@ type Entry struct {
 	// harnesses that do and do not report a dollar figure (e.g. one claude
 	// turn with cost, one codex turn with none) -- printing ObservedTurns
 	// there overstates how many turns the dollar figure actually covers.
-	// Nil exactly when ObservedSpendUSD is nil (no window, or no turn in the
-	// window reported a cost); zero is impossible when ObservedSpendUSD is
-	// non-nil, since a non-nil total requires at least one turn to have
-	// contributed it.
+	// Every write path here sets this field and ObservedSpendUSD together, so
+	// on a log this code wrote, one is nil exactly when the other is. That is
+	// a property of the writer, NOT a guarantee a reader may lean on: an
+	// entry read back off disk may have been hand-edited, partially migrated,
+	// or written by a future path that sets one and forgets the other, and
+	// dereferencing this field on the strength of ObservedSpendUSD being
+	// non-nil panicked `tick check` when exactly that happened
+	// (agent-estate#997). Read these fields through ReadSpend, which
+	// classifies every combination including the incoherent ones, rather than
+	// testing one pointer and dereferencing the other.
 	ObservedTurnsWithCost *int64 `json:"observed_turns_with_cost,omitempty"`
 }
 
@@ -980,6 +986,118 @@ func LastEntry(path string) (LastRecorded, bool, error) {
 		ObservedSpendUSD:      e.ObservedSpendUSD,
 		ObservedTurnsWithCost: e.ObservedTurnsWithCost,
 	}, true, nil
+}
+
+// SpendKind is what an entry's observed-spend fields can honestly be read as.
+//
+// It exists because the pairing between ObservedSpendUSD and
+// ObservedTurnsWithCost is kept only by whoever WRITES an entry, and the
+// commands that print those figures do not write them: `tick check` reads
+// back whatever JSON is on the last line of a log that may have been
+// hand-edited, partially migrated, or appended to by a future write path that
+// sets one field of the pair and forgets the other. That is not hypothetical
+// -- agent-estate#995 exists because a fix pass wired exactly one field of a
+// pair -- and an invariant kept only by the current writer is a habit, not an
+// invariant. So the reader classifies the fields it was handed instead of
+// trusting them, and hands back values that are safe to print without
+// dereferencing anything.
+type SpendKind int
+
+const (
+	// SpendNoWindow: no observed-turn count at all, so there was no window to
+	// measure (the first tick ever recorded, or an entry predating
+	// agent-estate#982).
+	SpendNoWindow SpendKind = iota
+	// SpendNoTurns: a real window in which nothing reached a terminal state.
+	SpendNoTurns
+	// SpendNoneReported: turns finished, none of them reported a dollar
+	// figure (e.g. every one was a codex turn).
+	SpendNoneReported
+	// SpendReported: a dollar figure AND the count of turns that produced it,
+	// both present and mutually consistent -- the only reading from which a
+	// dollar line may be printed.
+	SpendReported
+	// SpendUnreadable: the fields contradict each other, so no honest dollar
+	// line can be built from them. Why names which pairing broke. This is
+	// deliberately not repaired into a plausible number: a count invented to
+	// stand beside a real dollar figure is indistinguishable from a measured
+	// one, which is the failure this whole field pair was added to prevent.
+	SpendUnreadable
+)
+
+// SpendReading is a dereference-safe reading of an entry's observed-spend
+// fields. Only the fields its Kind names are meaningful; the rest are zero
+// because they were absent or untrustworthy, never because they were
+// measured as zero.
+type SpendReading struct {
+	Kind SpendKind
+	// USD is meaningful only when Kind is SpendReported.
+	USD float64
+	// Turns is meaningful when Kind is SpendNoTurns or SpendNoneReported.
+	Turns int64
+	// TurnsWithCost is meaningful only when Kind is SpendReported.
+	TurnsWithCost int64
+	// Why is set only when Kind is SpendUnreadable, naming the exact
+	// contradiction so a reader can tell a broken entry from a quiet window.
+	Why string
+}
+
+// ReadSpend classifies the three observed-spend pointers of an entry --
+// Entry's own fields when recording, LastRecorded's when reading a log back
+// -- into the one thing that can be said about them without inventing a
+// number. Every combination is classified: anything that is not one of the
+// four coherent shapes is SpendUnreadable with a reason, never a silent
+// dereference. See SpendKind.
+func ReadSpend(turns *int64, usd *float64, turnsWithCost *int64) SpendReading {
+	switch {
+	case turns == nil:
+		// No window. Spend fields alongside a missing turn count are not a
+		// window that went unmeasured -- they are an entry that contradicts
+		// itself, and saying "not measured" would hide a real figure.
+		if usd != nil || turnsWithCost != nil {
+			return SpendReading{Kind: SpendUnreadable, Why: "the entry carries observed-spend figures but no observed-turn count to bound them"}
+		}
+		return SpendReading{Kind: SpendNoWindow}
+
+	case usd != nil && turnsWithCost == nil:
+		// The reviewer's reproduction on agent-estate#997: a dollar figure
+		// whose denominator is missing. Printing it "across 0 turns" would be
+		// a fabricated count; printing it with no count at all would restate
+		// the #995 defect in a new form.
+		return SpendReading{Kind: SpendUnreadable, Why: "the entry carries a dollar figure with no count of the turns that reported it"}
+
+	case usd == nil && turnsWithCost != nil:
+		return SpendReading{Kind: SpendUnreadable, Why: "the entry carries a count of turns that reported a cost, but no dollar figure they add up to"}
+
+	case usd != nil && turnsWithCost != nil:
+		switch {
+		case *turnsWithCost <= 0:
+			// A non-nil total requires at least one turn to have contributed
+			// it, so a zero or negative count cannot have produced this sum.
+			return SpendReading{Kind: SpendUnreadable, Why: "the entry claims a dollar figure produced by no turn at all"}
+		case *turnsWithCost > *turns:
+			return SpendReading{Kind: SpendUnreadable, Why: "the entry claims more turns reported a cost than finished in the window"}
+		}
+		return SpendReading{Kind: SpendReported, USD: *usd, Turns: *turns, TurnsWithCost: *turnsWithCost}
+
+	case *turns > 0:
+		return SpendReading{Kind: SpendNoneReported, Turns: *turns}
+
+	default:
+		return SpendReading{Kind: SpendNoTurns}
+	}
+}
+
+// Spend classifies the entry's own observed-spend fields. See ReadSpend.
+func (e Entry) Spend() SpendReading {
+	return ReadSpend(e.ObservedTurns, e.ObservedSpendUSD, e.ObservedTurnsWithCost)
+}
+
+// Spend classifies the read-back entry's observed-spend fields. See
+// ReadSpend -- this is the side that matters most, since these values came
+// off disk rather than from the code that computed them.
+func (l LastRecorded) Spend() SpendReading {
+	return ReadSpend(l.ObservedTurns, l.ObservedSpendUSD, l.ObservedTurnsWithCost)
 }
 
 // lastTickAt returns the timestamp of the most recent entry, or the zero time

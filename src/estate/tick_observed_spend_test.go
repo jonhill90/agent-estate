@@ -105,6 +105,96 @@ func TestTickCheckPrintsTurnsThatReportedCostNotTotalObservedTurns(t *testing.T)
 	}
 }
 
+// TestTickCheckSurvivesABrokenSpendPairOnDisk is the reviewer's own
+// reproduction on agent-estate#997, kept as a regression test: a tick log
+// whose last line carries observed_spend_usd with no
+// observed_turns_with_cost. No write path in this repo produces that, but
+// `tick check` does not write entries -- it reads back whatever JSON is on
+// the last line, and it used to dereference the missing pointer and panic,
+// taking the loop's own stop condition down with it (main.go:719, SIGSEGV).
+//
+// Against the code before the fix this test fails at runEstate, which
+// reports the panic and exit 2; both runs are pasted in the PR comment.
+//
+// It asserts three things, in order of what would be worst to lose: the
+// command survives; it does not print an invented turn count beside the real
+// dollar figure; and it says plainly that the entry could not be read.
+func TestTickCheckSurvivesABrokenSpendPairOnDisk(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	bin := buildEstateBinary(t)
+
+	scratch := t.TempDir()
+	tickLog := filepath.Join(scratch, "tick-log.jsonl")
+	ledgerPath := filepath.Join(scratch, "ledger.jsonl")
+
+	// The reviewer's exact hand-written line: a dollar figure whose
+	// denominator is absent.
+	const brokenPair = `{"at":"2026-09-03T10:00:00Z","phase_item":"phase-0","src_head":"deadbeef","artifact":null,"observed_turns":2,"observed_spend_usd":2.5}`
+	if err := os.WriteFile(tickLog, []byte(brokenPair+"\n"), 0o600); err != nil {
+		t.Fatalf("write scratch tick log: %v", err)
+	}
+	if err := os.WriteFile(ledgerPath, nil, 0o600); err != nil {
+		t.Fatalf("write scratch ledger: %v", err)
+	}
+
+	env := append(os.Environ(),
+		"ESTATE_TICK_LOG="+tickLog,
+		"ESTATE_LEDGER="+ledgerPath,
+	)
+
+	// runEstate fails the test on any non-zero exit, so a panic here is a
+	// failure with the crash pasted into the log.
+	out := runEstate(t, bin, repoRoot, env, "tick", "check")
+
+	// A count that was never recorded must not appear beside the figure --
+	// "across 0 observed turn(s)" would be exactly the fabricated denominator
+	// this field pair exists to prevent, and any other count would be worse.
+	if strings.Contains(out, "observed turn(s) that reported a cost") {
+		t.Fatalf("tick check printed a turn count for an entry that carries none -- got:\n%s", out)
+	}
+	if !strings.Contains(out, "last tick's observed spend: could not be read honestly") {
+		t.Fatalf("tick check must say the entry could not be read, not stay silent about it; got:\n%s", out)
+	}
+	if !strings.Contains(out, "no count of the turns that reported it") {
+		t.Fatalf("tick check must name which pairing broke; got:\n%s", out)
+	}
+}
+
+// The other half of the same guarantee: an entry written before any of these
+// fields existed carries none of them and must keep reading exactly as it
+// does today -- "not recorded", no crash, and never the unreadable branch.
+func TestTickCheckOldEntryWithNeitherFieldIsUnchanged(t *testing.T) {
+	repoRoot := findRepoRoot(t)
+	bin := buildEstateBinary(t)
+
+	scratch := t.TempDir()
+	tickLog := filepath.Join(scratch, "tick-log.jsonl")
+	ledgerPath := filepath.Join(scratch, "ledger.jsonl")
+
+	const oldEntry = `{"at":"2026-09-03T10:00:00Z","phase_item":"phase-0","src_head":"deadbeef","artifact":null}`
+	if err := os.WriteFile(tickLog, []byte(oldEntry+"\n"), 0o600); err != nil {
+		t.Fatalf("write scratch tick log: %v", err)
+	}
+	if err := os.WriteFile(ledgerPath, nil, 0o600); err != nil {
+		t.Fatalf("write scratch ledger: %v", err)
+	}
+
+	env := append(os.Environ(),
+		"ESTATE_TICK_LOG="+tickLog,
+		"ESTATE_LEDGER="+ledgerPath,
+	)
+
+	out := runEstate(t, bin, repoRoot, env, "tick", "check")
+
+	const want = "last tick's observed spend: not recorded"
+	if !strings.Contains(out, want) {
+		t.Fatalf("an entry predating agent-estate#982 must still read as %q; got:\n%s", want, out)
+	}
+	if strings.Contains(out, "could not be read honestly") {
+		t.Fatalf("an old entry is not a broken one -- it must not take the unreadable branch; got:\n%s", out)
+	}
+}
+
 // ledgerRecord is the minimal shape internal/ledger.Record needs for
 // Ledger.Current() to read back a single terminal record per task id.
 type ledgerRecord struct {
