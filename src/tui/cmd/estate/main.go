@@ -644,14 +644,22 @@ func main() {
 	// wired, unconditionally, the same as estateLedger/estateTicks above:
 	// a missing or broken `estate` binary renders as Pressure UNREADABLE
 	// on Home, not as an omitted section.
+	//
+	// Wired via WithEstatePressure, NOT composed into estateStatus's own
+	// closure below (that was agent-estate#994's fix-pass finding: a
+	// pressure fetch is a subprocess with a 15s timeout, and estateStatus
+	// used to be called synchronously inside View(), so a wedged `estate`
+	// binary froze the whole shell's input handling for up to 15s on every
+	// render that touched Home). shell.Model now runs this fetch itself,
+	// asynchronously, via Init/Update -- see WithEstatePressure's own doc
+	// comment.
 	pressureFetch := buildPressureFetch(*estateBin)
 
 	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel, flowModel, chatModel).
 		WithEstateStatus(func() estatus.Status {
-			s := estatus.ReadWithTickErr(estateLedger, estateTicks, estateTicksErr)
-			s.Pressure = estatus.ReadPressure(pressureFetch)
-			return s
+			return estatus.ReadWithTickErr(estateLedger, estateTicks, estateTicksErr)
 		}).
+		WithEstatePressure(pressureFetch).
 		WithAgents(agentsModel).
 		WithSkills(skillsModel).
 		WithMCPServers(mcpserversModel).

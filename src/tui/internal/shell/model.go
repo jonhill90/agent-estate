@@ -12,6 +12,7 @@ package shell
 
 import (
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -377,6 +378,24 @@ type Model struct {
 	leaderGen     int
 	saveTheme     func(theme.Theme) error
 	estateStatus  func() estatus.Status
+	// estatePressureFetch and estatePressure are agent-estate#994's fix-pass
+	// split of Pressure out of estateStatus's own synchronous call: fetching
+	// the ledger/tick log above is a couple of local file reads, but
+	// `estate pressure` is a subprocess with a 15s timeout
+	// (cmd/estate/pressure.go), and homeView used to call it INSIDE View()
+	// -- a wedged `estate` binary froze the entire shell's input handling
+	// for up to 15s on every render that touched Home, confirmed live
+	// against a sleeping fixture. This mirrors internal/cost's own
+	// Init()/doFetch()/Update(fetchResultMsg) shape (cost/model.go) instead
+	// of inventing a second one: estatePressureFetch is the seam
+	// (cmd/estate's buildPressureFetch), estatePressure is the last result
+	// homeView renders, and Init/Update below are the only places a fetch
+	// runs. estatePressure starts at estatus.PressurePending() the moment a
+	// fetch is wired in (WithEstatePressure), so Home shows "measuring"
+	// rather than nothing from the very first frame, before Init's own
+	// tea.Cmd has even had a chance to return.
+	estatePressureFetch func() (estatus.PressureReading, error)
+	estatePressure      estatus.Pressure
 	// themeSaveErr is the visible half of "absence is a typed value,
 	// never a bare zero" (AGENTS.md) applied to a failed persist: a
 	// theme.Save error (e.g. an unwritable config directory) must not
@@ -471,6 +490,22 @@ func (m Model) WithTheme(th theme.Theme, notice string) Model {
 // existing test in this package is unaffected.
 func (m Model) WithEstateStatus(read func() estatus.Status) Model {
 	m.estateStatus = read
+	return m
+}
+
+// WithEstatePressure wires in `estate pressure`'s own fetch (agent-estate#987),
+// run asynchronously via Init/Update rather than inside View() -- see
+// estatePressureFetch's doc comment on Model for why this is split out of
+// WithEstateStatus rather than composed into its closure the way
+// cmd/estate's main.go originally wired it. Left nil (the zero value),
+// homeView's merge is a no-op and estateStatus's own Pressure field (zero
+// value, Configured false) renders as before this PR: no Pressure section
+// at all.
+func (m Model) WithEstatePressure(fetch func() (estatus.PressureReading, error)) Model {
+	m.estatePressureFetch = fetch
+	if fetch != nil {
+		m.estatePressure = estatus.PressurePending()
+	}
 	return m
 }
 
@@ -610,13 +645,49 @@ func (m Model) Init() tea.Cmd {
 	if m.boardOK {
 		cmds = append(cmds, m.board.Init(), m.flow.Init())
 	}
+	if m.estatePressureFetch != nil {
+		cmds = append(cmds, doEstatePressureFetch(m.estatePressureFetch), estatePressureRefreshCmd())
+	}
 	return tea.Batch(cmds...)
+}
+
+// estatePressureRefreshInterval is far shorter than internal/cost's 5
+// minutes: cost.Model's own comment explains that figure is right for
+// slow-moving spend totals, but host pressure is the thing a human checks
+// specifically to see whether the estate can take another dispatch RIGHT
+// NOW -- a 5-minute-stale reading would defeat the purpose. 30s keeps a
+// wedged or slow `estate pressure` (up to 15s per attempt, pressure.go's
+// own timeout) from ever running back-to-back, while still refreshing
+// often enough that Home doesn't read as stuck.
+const estatePressureRefreshInterval = 30 * time.Second
+
+type estatePressureFetchedMsg estatus.Pressure
+type estatePressureRefreshMsg time.Time
+
+func doEstatePressureFetch(fetch func() (estatus.PressureReading, error)) tea.Cmd {
+	return func() tea.Msg {
+		return estatePressureFetchedMsg(estatus.ReadPressure(fetch))
+	}
+}
+
+func estatePressureRefreshCmd() tea.Cmd {
+	return tea.Tick(estatePressureRefreshInterval, func(t time.Time) tea.Msg { return estatePressureRefreshMsg(t) })
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		return m.resize(msg)
+
+	case estatePressureFetchedMsg:
+		// The ONLY place estatePressure is written outside WithEstatePressure's
+		// own initial PressurePending() -- homeView never calls the fetch
+		// itself (see estatePressureFetch's doc comment on Model).
+		m.estatePressure = estatus.Pressure(msg)
+		return m, nil
+
+	case estatePressureRefreshMsg:
+		return m, tea.Batch(estatePressureRefreshCmd(), doEstatePressureFetch(m.estatePressureFetch))
 
 	case theme.CycleRequestedMsg:
 		// Agent-tui#51: the ONE place a 't' keypress actually takes
@@ -1471,8 +1542,20 @@ func (m Model) homeView() string {
 	// actual state rather than a description of the app. Nothing else in
 	// this module reads that backend; see internal/estatus.
 	if m.estateStatus != nil {
+		s := m.estateStatus()
+		// Pressure is merged in from the async fetch this Model itself
+		// drives (Init/Update, above), never called here -- see
+		// estatePressureFetch's doc comment on Model for why this used to
+		// be estateStatus's own job and froze View() for up to 15s.
+		// Nil estatePressureFetch (a caller that never wired one in, e.g.
+		// every pre-agent-estate#994 test in this package) leaves
+		// s.Pressure exactly what estateStatus() itself returned --
+		// unchanged behaviour for every existing caller.
+		if m.estatePressureFetch != nil {
+			s.Pressure = m.estatePressure
+		}
 		return legendStyle.Width(m.contentWidth).Height(m.contentHeight).Render(
-			lipgloss.JoinVertical(lipgloss.Left, estatus.Lines(m.estateStatus())...),
+			lipgloss.JoinVertical(lipgloss.Left, estatus.Lines(s)...),
 		)
 	}
 	lines := []string{

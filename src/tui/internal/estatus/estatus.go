@@ -178,9 +178,29 @@ type PressureReading struct {
 // here" section names.
 type Pressure struct {
 	Configured bool
-	Avail      Availability // meaningful only when Configured
-	Err        error        // set when Avail == Unreadable
-	Reading    PressureReading
+	// Pending is true from the moment a pressure fetch is scheduled until
+	// its first result lands -- agent-estate#994's fix-pass finding: the
+	// caller that builds one of these (cmd/estate, via internal/shell's
+	// async fetch) runs `estate pressure` as a subprocess that can take up
+	// to 15s, and Home must render something honest for that whole window
+	// rather than nothing (which reads as this section not existing) or a
+	// zero Reading (which reads as a measured "everything's fine"). Avail
+	// and Reading are meaningless while this is true; a caller must check
+	// Pending before either.
+	Pending bool
+	Avail   Availability // meaningful only when Configured && !Pending
+	Err     error        // set when Avail == Unreadable
+	Reading PressureReading
+}
+
+// PressurePending returns the value a caller should show while a pressure
+// fetch is in flight and has not returned yet -- Configured so the section
+// still renders (this IS a configured source, just not answered yet), but
+// distinct from both Unreadable (we tried and failed) and Present (we have
+// a real reading). See Pressure.Pending's own doc comment for why this
+// state exists.
+func PressurePending() Pressure {
+	return Pressure{Configured: true, Pending: true}
 }
 
 // ReadPressure runs fetch (nil-safe: cmd/estate always supplies one for the
@@ -474,8 +494,10 @@ func Lines(s Status) []string {
 	// Present or Unreadable, never this branch.
 	if s.Pressure.Configured {
 		out = append(out, "")
-		switch s.Pressure.Avail {
-		case Unreadable:
+		switch {
+		case s.Pressure.Pending:
+			out = append(out, "Pressure: measuring -- `estate pressure` has not answered yet.")
+		case s.Pressure.Avail == Unreadable:
 			out = append(out,
 				"Pressure: UNREADABLE -- this is not zero.",
 				"  "+errText(s.Pressure.Err))
