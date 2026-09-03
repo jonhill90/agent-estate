@@ -153,6 +153,18 @@ func main() {
 				fmt.Fprintln(os.Stderr, "estate: tick record needs a phase item")
 				os.Exit(2)
 			}
+			// The phase item must be one the plan names. A stray write --
+			// a probe, a typo, a label invented on the spot -- was
+			// otherwise indistinguishable from a tick.
+			known, err := tick.KnownPhases("docs/phase-plan.md")
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
+			if err := tick.CheckPhaseItem(os.Args[3], known); err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
 			artifact := ""
 			if len(os.Args) > 4 {
 				artifact = os.Args[4]

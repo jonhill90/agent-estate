@@ -480,3 +480,45 @@ func CheckAgainstCommitted(path string, committed int) error {
 	}
 	return nil
 }
+
+// phaseRE matches a phase heading in the plan: "## Phase 3 — ...".
+var phaseRE = regexp.MustCompile(`(?m)^##\s+Phase\s+(\d+)\b`)
+
+// KnownPhases returns the phase items the plan actually names, as the ids a
+// tick records ("phase-0", "phase-1", …).
+//
+// WHY THE LOG ANSWERS TO THE PLAN. A tick's phase item was free text, so
+// anything could be written into the record: a typo, a label invented on the
+// spot, or -- as happened -- a throwaway probe run without ESTATE_TICK_LOG
+// set, which wrote `{"phase_item":"ph","artifact":"AGENTS.md"}` straight into
+// the production log and was then read back as a healthy tick.
+//
+// Requiring the phase item to exist in the plan makes two things true: a
+// stray write cannot masquerade as a tick, and work that does not map to any
+// phase forces the plan to be updated rather than the log to be fudged.
+func KnownPhases(planPath string) ([]string, error) {
+	b, err := os.ReadFile(planPath)
+	if err != nil {
+		return nil, fmt.Errorf("tick: cannot read %s to learn which phases exist: %w", planPath, err)
+	}
+	var out []string
+	for _, m := range phaseRE.FindAllStringSubmatch(string(b), -1) {
+		out = append(out, "phase-"+m[1])
+	}
+	if len(out) == 0 {
+		return nil, fmt.Errorf("tick: %s names no phases, so no phase item can be checked against it", planPath)
+	}
+	return out, nil
+}
+
+// CheckPhaseItem refuses a phase item the plan does not name.
+func CheckPhaseItem(item string, known []string) error {
+	for _, k := range known {
+		if item == k {
+			return nil
+		}
+	}
+	return fmt.Errorf("tick: %q is not a phase in the plan (it names: %s) -- "+
+		"if this work is real, give it a phase there rather than a label here",
+		item, strings.Join(known, ", "))
+}

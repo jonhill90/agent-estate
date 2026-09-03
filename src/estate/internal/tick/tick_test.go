@@ -418,3 +418,45 @@ func TestTruncatedLogIsRefusedNotTreatedAsFresh(t *testing.T) {
 		t.Errorf("a first run with nothing committed is not tampering: %v", err)
 	}
 }
+
+// A throwaway probe once wrote {"phase_item":"ph"} into the production log
+// because ESTATE_TICK_LOG was not set, and it was read back as a real tick.
+func TestPhaseItemMustExistInThePlan(t *testing.T) {
+	plan := filepath.Join(t.TempDir(), "plan.md")
+	body := "# Plan\n\n## Phase 0 — The verifier\n\ntext\n\n## Phase 3 — Cross-model\n\ntext\n"
+	if err := os.WriteFile(plan, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	known, err := KnownPhases(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(known) != 2 || known[0] != "phase-0" || known[1] != "phase-3" {
+		t.Fatalf("KnownPhases = %v, want [phase-0 phase-3]", known)
+	}
+	for _, ok := range []string{"phase-0", "phase-3"} {
+		if err := CheckPhaseItem(ok, known); err != nil {
+			t.Errorf("%q is in the plan: %v", ok, err)
+		}
+	}
+	// The probe, a typo, and a label invented on the spot.
+	for _, bad := range []string{"ph", "phase-9", "delivery-unblock", ""} {
+		if err := CheckPhaseItem(bad, known); err == nil {
+			t.Errorf("%q is not a phase in the plan and must be refused", bad)
+		}
+	}
+}
+
+// Could not read the plan is never clean.
+func TestUnreadablePlanRefusesRatherThanAllowingAnything(t *testing.T) {
+	if _, err := KnownPhases(filepath.Join(t.TempDir(), "absent.md")); err == nil {
+		t.Fatal("a missing plan must be an error, not an empty allowlist that permits everything")
+	}
+	empty := filepath.Join(t.TempDir(), "empty.md")
+	if err := os.WriteFile(empty, []byte("# nothing here\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := KnownPhases(empty); err == nil {
+		t.Fatal("a plan naming no phases must be an error, not a permissive empty list")
+	}
+}
