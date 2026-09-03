@@ -4,16 +4,25 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
+	"time"
+
+	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 )
 
 // TestMain lets this same test binary act as its own subprocess helper.
 // TestNew_ConcurrentProcesses re-execs os.Args[0] with DISPATCHID_HELPER=1 so
 // each child is a genuinely separate OS process -- not a goroutine sharing
 // this process's memory -- calling New and printing exactly the id it got.
+//
+// The helper branch does NOT set claimDirEnv itself -- it inherits whatever
+// TestNew_ConcurrentProcesses put in cmd.Env, which is the parent test's own
+// t.TempDir(). That is deliberate: it is what proves the override seam
+// actually reaches a child process, not just the parent's own calls to New.
 func TestMain(m *testing.M) {
 	if os.Getenv("DISPATCHID_HELPER") == "1" {
 		id, err := New(os.Getenv("DISPATCHID_ISSUE"))
@@ -25,6 +34,16 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(m.Run())
+}
+
+// useScratchClaimDir points claimDir() at a fresh t.TempDir() for the
+// duration of one test, instead of the real $TMPDIR/estate-dispatch-ids
+// every `estate dispatch` invocation uses. Without this, `go test ./...`
+// pollutes production dispatch state -- see #936, which counted 247 stale
+// claim files left by test runs on one machine.
+func useScratchClaimDir(t *testing.T) {
+	t.Helper()
+	t.Setenv(claimDirEnv, t.TempDir())
 }
 
 var safeIDPattern = regexp.MustCompile(`^[A-Za-z0-9_.-]+$`)
@@ -49,6 +68,7 @@ func assertSafe(t *testing.T, id string) {
 }
 
 func TestNew_ReturnsSafeID(t *testing.T) {
+	useScratchClaimDir(t)
 	id, err := New("929")
 	if err != nil {
 		t.Fatalf("New: %v", err)
@@ -65,6 +85,7 @@ func TestNew_ReturnsSafeID(t *testing.T) {
 // (no shared state across separate `estate dispatch` invocations) went
 // untouched.
 func TestNew_ConcurrentGoroutines(t *testing.T) {
+	useScratchClaimDir(t)
 	const n = 50
 	ids := make([]string, n)
 	errs := make([]error, n)
@@ -99,6 +120,12 @@ func TestNew_ConcurrentGoroutines(t *testing.T) {
 // the state a per-process counter or a package-level mutex sits in and so
 // would never exercise the bug this package exists to fix.
 func TestNew_ConcurrentProcesses(t *testing.T) {
+	// Setenv here reaches the children below too: cmd.Env is built from
+	// os.Environ() per child, read after this line runs, and TestMain's
+	// helper branch (in the child) calls New with no override of its own --
+	// see TestMain's doc comment for why that's the point.
+	useScratchClaimDir(t)
+
 	self, err := os.Executable()
 	if err != nil {
 		t.Fatalf("os.Executable: %v", err)
@@ -146,5 +173,65 @@ func TestNew_ConcurrentProcesses(t *testing.T) {
 	}
 	if len(seen) != n {
 		t.Fatalf("expected %d distinct ids from %d processes, got %d", n, n, len(seen))
+	}
+}
+
+// TestClaimDirSharesIsolateRoot asserts, rather than just narrates in a
+// comment, the assumption reviewed on PR #933: this package's cross-process
+// guarantee depends on every dispatching process sharing one $TMPDIR, and
+// that dependency is inherited from internal/isolate.Root, not introduced
+// here. It deliberately does NOT set claimDirEnv -- it checks the real,
+// unoverridden default both functions fall back to.
+func TestClaimDirSharesIsolateRoot(t *testing.T) {
+	t.Setenv(claimDirEnv, "")
+
+	gotClaimDir := filepath.Dir(claimDir())
+	gotIsolateRoot := filepath.Dir(filepath.Dir(isolate.Root(t.TempDir())))
+	tmp := filepath.Clean(os.TempDir())
+
+	if gotClaimDir != tmp {
+		t.Fatalf("claimDir()'s parent = %q, want os.TempDir() %q -- if this changed, the doc comment's claim that this package rides isolate.Root's own $TMPDIR assumption is no longer true and must be re-checked", gotClaimDir, tmp)
+	}
+	if gotIsolateRoot != tmp {
+		t.Fatalf("isolate.Root(...)'s grandparent = %q, want os.TempDir() %q -- isolate.Root's own layout changed; re-verify the shared-$TMPDIR assumption this package's doc comment relies on", gotIsolateRoot, tmp)
+	}
+}
+
+// TestNew_PrunesStaleClaimsOnly proves the sweep removes only claims older
+// than staleAge and leaves a fresh one (like the id New is about to mint)
+// alone -- a sweep that raced its own in-flight claim would reintroduce the
+// exact collision this package exists to prevent.
+func TestNew_PrunesStaleClaimsOnly(t *testing.T) {
+	useScratchClaimDir(t)
+	dir := claimDir()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+
+	stale := filepath.Join(dir, "932-stale")
+	if err := os.WriteFile(stale, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	old := time.Now().Add(-staleAge - time.Hour)
+	if err := os.Chtimes(stale, old, old); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+
+	fresh := filepath.Join(dir, "932-fresh")
+	if err := os.WriteFile(fresh, nil, 0o644); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+
+	id, err := New("932")
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	assertSafe(t, id)
+
+	if _, err := os.Stat(stale); !os.IsNotExist(err) {
+		t.Fatalf("stale claim file survived the sweep: err=%v", err)
+	}
+	if _, err := os.Stat(fresh); err != nil {
+		t.Fatalf("fresh claim file was swept away: %v", err)
 	}
 }

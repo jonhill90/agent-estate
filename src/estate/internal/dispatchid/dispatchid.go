@@ -33,6 +33,21 @@
 // comparison can promise across process boundaries. A losing attempt is not
 // a failure: it mutates the candidate with a random suffix and retries,
 // because the caller asked for a unique id, not for permission to give up.
+//
+// WHY SHARING $TMPDIR ACROSS DISPATCH PROCESSES IS NOT A NEW ASSUMPTION, NOT
+// AN UNCHECKED ONE. This package's cross-process guarantee only holds between
+// processes that resolve os.TempDir() to the same directory. Reviewed twice
+// (PR #933) as a possible gap: internal/isolate.Root already derives a turn's
+// WORKTREE ROOT from os.TempDir() -- not just this package's claim directory.
+// Two processes with different effective $TMPDIR build different worktree
+// roots, so they could never have shared a worktree path to collide on in
+// the first place; the bug this package exists to fix (isolate.Create
+// refusing a reused id and silently dropping a seat) requires the SAME root,
+// which requires the SAME $TMPDIR precondition isolate already depends on.
+// This package rides an assumption isolate.Root makes, not a new one.
+// TestClaimDirSharesIsolateRoot asserts this structurally rather than
+// leaving it as narrative. See agent-estate#936 for the reviewed record of
+// this decision, including what was checked and ruled out.
 package dispatchid
 
 import (
@@ -52,12 +67,22 @@ import (
 // the id space.
 const maxAttempts = 100
 
+// claimDirEnv overrides claimDir. It exists for tests only: without it,
+// every `go test` run claims ids in the exact directory real `estate
+// dispatch` invocations use, which is how a review of this package (#936)
+// found 247 stale claim files after an hour of ordinary test runs on one
+// machine. Tests set this to a t.TempDir(); nothing else should set it.
+const claimDirEnv = "ESTATE_DISPATCHID_CLAIM_DIR"
+
 // claimDir is where minted ids register themselves to guarantee cross-process
 // uniqueness. It lives outside any repository, next to isolate.Root's own
 // worktree root -- the same reasoning applies: a runaway process must not
 // write into a shared checkout, and a claim file is exactly that kind of
 // incidental write.
 func claimDir() string {
+	if dir := os.Getenv(claimDirEnv); dir != "" {
+		return dir
+	}
 	return filepath.Join(os.TempDir(), "estate-dispatch-ids")
 }
 
@@ -70,6 +95,7 @@ func New(issue string) (string, error) {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("dispatchid: cannot create claim directory %s: %w", dir, err)
 	}
+	pruneStale(dir)
 
 	issue = strings.TrimPrefix(strings.TrimSpace(issue), "#")
 	if issue == "" {
@@ -102,6 +128,36 @@ func New(issue string) (string, error) {
 		lastErr = err
 	}
 	return "", fmt.Errorf("dispatchid: could not mint a unique id for issue %q after %d attempts: %w", issue, maxAttempts, lastErr)
+}
+
+// staleAge is how long a claim file may sit before a sweep removes it. A
+// claim file's only job is winning a race between mints landing in the same
+// instant (see the package doc); once New returns, nothing ever reads that
+// file again, so a file older than this was never going to be consulted --
+// keeping it is pure disk cost, not a safety margin. Chosen generously
+// (well past any plausible dispatch cadence) so a sweep can never remove a
+// claim another in-flight New call still needs. See #936.
+const staleAge = 7 * 24 * time.Hour
+
+// pruneStale removes claim files older than staleAge from dir. It is
+// deliberately best-effort: a failed sweep is dropped, never surfaced, and
+// never blocks minting -- New's own claim attempt below is what has to fail
+// closed, not this hygiene pass. Runs once per New call; ReadDir on a
+// directory of stale zero-byte files is cheap relative to the rest of a
+// dispatch.
+func pruneStale(dir string) {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return
+	}
+	cutoff := time.Now().Add(-staleAge)
+	for _, entry := range entries {
+		info, err := entry.Info()
+		if err != nil || info.ModTime().After(cutoff) {
+			continue
+		}
+		_ = os.Remove(filepath.Join(dir, entry.Name()))
+	}
 }
 
 func randomSuffix() (string, error) {
