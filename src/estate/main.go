@@ -18,6 +18,7 @@ import (
 
 	"github.com/jonhill90/agent-estate/estate/internal/corpus"
 	"github.com/jonhill90/agent-estate/estate/internal/gate"
+	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 	"github.com/jonhill90/agent-estate/estate/internal/pressure"
 )
@@ -161,16 +162,34 @@ func main() {
 			os.Exit(1)
 		}
 		id := fmt.Sprintf("%s-%d", strings.TrimPrefix(issue, "#"), time.Now().UTC().Unix())
-		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, State: ledger.Dispatched}); err != nil {
+
+		// The turn runs with --dangerously-skip-permissions. Give it a
+		// working tree of its own before it starts, or do not start it:
+		// inheriting our cwd puts an unattended full-permission agent in the
+		// shared checkout. Isolation is established BEFORE the ledger records
+		// a dispatch, so a refusal leaves no half-started task behind.
+		topOut, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch -- cannot locate the repository root to isolate the turn:", err)
+			os.Exit(1)
+		}
+		wt, err := isolate.Create(strings.TrimSpace(string(topOut)), id)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate: "+err.Error())
+			os.Exit(1)
+		}
+
+		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, State: ledger.Dispatched, Note: "worktree " + wt.Path}); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot record dispatch:", err)
 			os.Exit(2)
 		}
-		fmt.Printf("dispatched %s (grounded in %d operator parameters)\n", id, len(params))
+		fmt.Printf("dispatched %s in %s (grounded in %d operator parameters)\n", id, wt.Path, len(params))
 
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 		defer cancel()
 		cmd := exec.CommandContext(ctx, "claude", "-p", "--output-format", "json",
 			"--dangerously-skip-permissions")
+		cmd.Dir = wt.Path
 		cmd.Stdin = strings.NewReader(grounded)
 		out, runErr := cmd.Output()
 
@@ -195,6 +214,14 @@ func main() {
 				rec.State, rec.Note = ledger.Unknown, "exit 0 but result was not parseable JSON"
 			}
 		}
+		// Tear the worktree down only when it is empty. A turn that left work
+		// behind has output nobody has collected, and an isolated worktree
+		// that still exists is a report; a deleted one is unrecoverable.
+		if err := wt.Remove(); err != nil {
+			rec.Note = strings.TrimSpace(rec.Note + "; " + wt.Path + " kept: " + err.Error())
+			fmt.Fprintln(os.Stderr, "estate: "+err.Error())
+		}
+
 		if err := l.Append(rec); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot record outcome:", err)
 			os.Exit(2)
