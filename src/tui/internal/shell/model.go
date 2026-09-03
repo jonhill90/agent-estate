@@ -25,6 +25,7 @@ import (
 	"github.com/jonhill90/agent-estate/src/tui/internal/connectors"
 	"github.com/jonhill90/agent-estate/src/tui/internal/cost"
 	"github.com/jonhill90/agent-estate/src/tui/internal/dashboard"
+	"github.com/jonhill90/agent-estate/src/tui/internal/estatus"
 	"github.com/jonhill90/agent-estate/src/tui/internal/external"
 	"github.com/jonhill90/agent-estate/src/tui/internal/flow"
 	"github.com/jonhill90/agent-estate/src/tui/internal/gallery"
@@ -366,7 +367,8 @@ type Model struct {
 	// built by New has it unset until WithThemeSave is called, so a
 	// test with no opinion on persistence (most of the pre-existing
 	// navigation tests in this package) is unaffected.
-	saveTheme func(theme.Theme) error
+	saveTheme    func(theme.Theme) error
+	estateStatus func() estatus.Status
 	// themeSaveErr is the visible half of "absence is a typed value,
 	// never a bare zero" (AGENTS.md) applied to a failed persist: a
 	// theme.Save error (e.g. an unwritable config directory) must not
@@ -452,6 +454,18 @@ func (m Model) WithTheme(th theme.Theme, notice string) Model {
 // a closure over theme.Save(theme.ConfigPath(), ...); every test in this
 // package that does not call this leaves saveTheme nil, which Update
 // treats as "nothing to persist," never a panic.
+// WithEstateStatus wires in a reader of the GO estate's own state -- the
+// dispatch ledger src/estate writes and the Director's tick log. It is the
+// first seam in this module pointed at the live backend rather than the
+// deleted Python supervisor's MCP server.
+//
+// Left nil, homeView renders the static landing text it always did, so every
+// existing test in this package is unaffected.
+func (m Model) WithEstateStatus(read func() estatus.Status) Model {
+	m.estateStatus = read
+	return m
+}
+
 func (m Model) WithThemeSave(save func(theme.Theme) error) Model {
 	m.saveTheme = save
 	return m
@@ -1418,6 +1432,14 @@ func (m Model) footer() string {
 // from the footer below -- only no longer the thing home's own content
 // teaches a human to press first.
 func (m Model) homeView() string {
+	// When a reader of the Go estate is wired in, Home shows the estate's
+	// actual state rather than a description of the app. Nothing else in
+	// this module reads that backend; see internal/estatus.
+	if m.estateStatus != nil {
+		return legendStyle.Width(m.contentWidth).Height(m.contentHeight).Render(
+			lipgloss.JoinVertical(lipgloss.Left, estatus.Lines(m.estateStatus())...),
+		)
+	}
 	lines := []string{
 		"agent-tui",
 		"",

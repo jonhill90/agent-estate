@@ -46,6 +46,7 @@ import (
 	"github.com/jonhill90/agent-estate/src/tui/internal/connectors"
 	"github.com/jonhill90/agent-estate/src/tui/internal/cost"
 	"github.com/jonhill90/agent-estate/src/tui/internal/dashboard"
+	"github.com/jonhill90/agent-estate/src/tui/internal/estatus"
 	"github.com/jonhill90/agent-estate/src/tui/internal/external"
 	"github.com/jonhill90/agent-estate/src/tui/internal/flow"
 	"github.com/jonhill90/agent-estate/src/tui/internal/gallery"
@@ -82,6 +83,7 @@ import (
 const costCacheTTL = 5 * time.Minute
 
 func main() {
+	estateTickLog := flag.String("estate-tick-log", "docs/tick-log.jsonl", "the Director's tick log, shown on Home")
 	var (
 		supervisorRepo = flag.String("supervisor-repo", os.Getenv("AGENT_SUPERVISOR_REPO"),
 			"path to an agent-supervisor checkout (contains scripts/supervisor/mcp_server.py). "+
@@ -586,7 +588,18 @@ func main() {
 	// its live OpenBao deployment, is the source).
 	secretsModel := secrets.New(buildSecretsFetch(resolveSecretsSchema(*secretsSchema, *hill90AppRepo)))
 
+	// estateStatus reads the GO estate -- src/estate's dispatch ledger and the
+	// Director's tick log -- and is read fresh on every render, so Home shows
+	// the state now rather than the state at launch. Paths follow src/estate's
+	// own defaults; ESTATE_LEDGER overrides the ledger exactly as it does there.
+	estateLedger := os.Getenv("ESTATE_LEDGER")
+	if estateLedger == "" {
+		estateLedger = filepath.Join(os.Getenv("HOME"), ".local", "state", "estate", "ledger.jsonl")
+	}
+	estateTicks := *estateTickLog
+
 	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel, flowModel, chatModel).
+		WithEstateStatus(func() estatus.Status { return estatus.Read(estateLedger, estateTicks) }).
 		WithAgents(agentsModel).
 		WithSkills(skillsModel).
 		WithMCPServers(mcpserversModel).
