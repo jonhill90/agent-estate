@@ -27,6 +27,7 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 	"github.com/jonhill90/agent-estate/estate/internal/pressure"
 	"github.com/jonhill90/agent-estate/estate/internal/reclaim"
+	"github.com/jonhill90/agent-estate/estate/internal/spend"
 	"github.com/jonhill90/agent-estate/estate/internal/tick"
 	"github.com/jonhill90/agent-estate/estate/internal/verifybranch"
 )
@@ -271,6 +272,12 @@ func usage() {
                                         don't, and how many could not be
                                         checked -- diagnostic, does not gate
   estate verify-branch <branch>         build and test a branch in its OWN tree
+  estate spend                          per-harness turn spend from the
+                                        ledger's own recorded fields --
+                                        claude reports dollars, codex only
+                                        ever reports tokens, and this never
+                                        sums a dollar figure across harnesses
+                                        that don't all report one
 
 Every gate fails closed: a limit that cannot be measured refuses.
 `)
@@ -743,6 +750,52 @@ func main() {
 		}
 		fmt.Printf("\n%s builds, vets and tests clean in its own tree\n", res.Branch)
 
+	case "spend":
+		// Current(), not the raw append log: Spend fields are only ever set
+		// on a turn's terminal record (main.go's dispatch case, right before
+		// it appends rec), and Current() collapses to exactly that record
+		// per task id -- so this never double-counts a turn's earlier
+		// Dispatched record, which never carries a Spend field at all.
+		rs, err := l.Current()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		rep := spend.Aggregate(rs)
+		if rep.TotalTurns == 0 {
+			fmt.Println("no tasks recorded")
+			break
+		}
+		for _, g := range rep.ByHarness {
+			fmt.Printf("%s -- %d turn(s)\n", g.Harness, g.Turns)
+			if g.TurnsWithCost > 0 {
+				fmt.Printf("  cost:   $%.4f across %d turn(s) that reported one\n", g.TotalCostUSD, g.TurnsWithCost)
+			} else {
+				fmt.Println("  cost:   not reported by this harness")
+			}
+			if g.TurnsWithTokens > 0 {
+				fmt.Printf("  tokens: in=%d out=%d cache_read=%d cache_creation=%d, across %d turn(s) that reported any\n",
+					g.InputTokens, g.OutputTokens, g.CacheReadTokens, g.CacheCreationTokens, g.TurnsWithTokens)
+			} else {
+				fmt.Println("  tokens: none recorded")
+			}
+			if g.TurnsWithNeither > 0 {
+				fmt.Printf("  %d turn(s) recorded neither a cost nor tokens -- absent, not free (predates #977 or unreadable harness output)\n", g.TurnsWithNeither)
+			}
+		}
+		fmt.Printf("\n%d task(s) total, %d with some spend recorded, %d with none\n",
+			rep.TotalTurns, rep.TurnsWithAnySpend, rep.TotalTurns-rep.TurnsWithAnySpend)
+		switch {
+		case len(rep.HarnessesReportingCost) == 0:
+			fmt.Println("no harness in this ledger has reported a dollar cost -- no total is printed")
+		case len(rep.HarnessesReportingTokensOnly) > 0:
+			fmt.Printf("dollar cost is only available for %s -- %s report tokens only, never dollars; there is no combined total across them\n",
+				strings.Join(rep.HarnessesReportingCost, ", "), strings.Join(rep.HarnessesReportingTokensOnly, ", "))
+		default:
+			fmt.Printf("dollar cost is available for every harness in this ledger (%s) -- see per-harness figures above, still never summed into one line\n",
+				strings.Join(rep.HarnessesReportingCost, ", "))
+		}
+
 	case "dispatch":
 		if len(os.Args) < 4 {
 			usage()
@@ -952,7 +1005,7 @@ func main() {
 		// directly, never Dispatched with no pid to ever positively resolve.
 		if err := cmd.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot start turn:", err)
-			if aerr := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Failed, Note: "failed to start: " + err.Error()}); aerr != nil {
+			if aerr := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Failed, Harness: harnessName, Note: "failed to start: " + err.Error()}); aerr != nil {
 				fmt.Fprintln(os.Stderr, "estate: cannot record dispatch failure:", aerr)
 			}
 			os.Exit(1)
@@ -961,7 +1014,7 @@ func main() {
 		// The pid is recorded the moment it is known -- before the turn does
 		// anything else -- because it is the one fact that later lets a dead
 		// turn's slot be reclaimed without guessing. See internal/reclaim.
-		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Dispatched, PID: pid, Note: "worktree " + wt.Path}); err != nil {
+		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Dispatched, PID: pid, Harness: harnessName, Note: "worktree " + wt.Path}); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot record dispatch:", err)
 			os.Exit(2)
 		}
@@ -970,7 +1023,7 @@ func main() {
 		runErr := cmd.Wait()
 		out := stdout.Bytes()
 
-		rec := ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, PID: pid}
+		rec := ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, PID: pid, Harness: harnessName}
 		// Spend is read the same way Result is -- straight out of this exact
 		// subprocess's own stdout, whatever state the turn ends up recorded
 		// in below. A turn that timed out or exited non-zero may still have

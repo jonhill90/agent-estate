@@ -136,3 +136,37 @@ distinguishable from "reported as zero" — the same discipline
 `internal/quota`'s provider-percentage reading is untouched; this is a
 different, narrower kind of number (per-turn, not per-provider-window) and
 does not replace it.
+
+## Reading it back: `estate spend`
+
+Recording was the first half. The second half (#975's own follow-up
+comment, filed once #977 merged: *"the estate observes cost and cannot
+report it"*) is `estate spend`, backed by `internal/spend.Aggregate`.
+
+It groups strictly by harness (`ledger.Record.Harness`, added alongside this
+reader since nothing previously recorded which harness ran a turn) and never
+sums a dollar figure across harnesses — the table above is exactly why: only
+`claude` has one to sum. A turn with neither `SpendCostUSD` nor any token
+field is reported as "recorded neither," not folded into a $0.00 anywhere,
+and a group's dollar total is only printed when at least one turn in it
+actually reported one.
+
+Run against this machine's real ledger (`~/.local/state/estate/ledger.jsonl`,
+172 tasks, 2026-09-03):
+
+```
+$ estate spend
+(unrecorded) -- 172 turn(s)
+  cost:   $0.8919 across 1 turn(s) that reported one
+  tokens: in=38 out=9726 cache_read=1212387 cache_creation=63213, across 1 turn(s) that reported any
+  171 turn(s) recorded neither a cost nor tokens -- absent, not free (predates #977 or unreadable harness output)
+
+172 task(s) total, 1 with some spend recorded, 171 with none
+dollar cost is available for every harness in this ledger ((unrecorded)) -- see per-harness figures above, still never summed into one line
+```
+
+Everything groups under `(unrecorded)` because every record on this ledger
+right now — including the single turn #977 itself populated — predates the
+`Harness` field this PR adds; `estate dispatch` only starts writing it going
+forward. That is the coverage gap made visible, exactly as it should be,
+not averaged over.
