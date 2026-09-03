@@ -562,6 +562,196 @@ func TestAuthorLaneTrailerAgreeingOrAbsentIsFine(t *testing.T) {
 	}
 }
 
+// ---------------------------------------------------------------------
+// agent-estate#940's own follow-up: "the join works for a fresh dispatch,
+// and does not survive a fix pass." Condition 2c -- authorRecordForFixPassChain.
+// ---------------------------------------------------------------------
+
+// The root dispatch (a1) opened the PR at "deadbeef". A LATER, independently
+// dispatched fix pass (fix1) continued the SAME branch: its own Base is
+// exactly where the root left off, and its own estate-observed HeadSHA is
+// the PR's current head. The gate must walk that one-hop chain and allow.
+func TestFixPassChainResolves(t *testing.T) {
+	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	reviewedAt := checkStart.Add(2 * time.Hour)
+	p := &PR{
+		Number:      926,
+		HeadOID:     "fixedcafe01",
+		HeadRefName: "dispatch/a1",
+		State:       "OPEN",
+		Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
+		Comments:    []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: fixedcafe01\nVerdict: APPROVE\n"}},
+	}
+	l := newLedger(t,
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
+		ledger.Record{ID: "fix1", Issue: "926", Lane: "lane-fix", Role: ledger.RoleAuthor, PR: 926, State: ledger.Complete, Base: "deadbeef", HeadSHA: "fixedcafe01"},
+		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+	)
+	d := evaluateWithPR(p, "lane-review", l)
+	if !d.Allow {
+		t.Fatalf("evaluateWithPR refused a genuine one-hop fix-pass chain that continues the root dispatch's own branch: %v", d.Reasons)
+	}
+}
+
+// The chain must walk MULTIPLE hops, not just one -- a second fix pass
+// continuing the first's own output.
+func TestFixPassChainResolvesMultipleHops(t *testing.T) {
+	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	reviewedAt := checkStart.Add(3 * time.Hour)
+	p := &PR{
+		Number:      926,
+		HeadOID:     "thirdhopsha",
+		HeadRefName: "dispatch/a1",
+		State:       "OPEN",
+		Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
+		Comments:    []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: thirdhopsha\nVerdict: APPROVE\n"}},
+	}
+	l := newLedger(t,
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
+		ledger.Record{ID: "fix1", Issue: "926", Lane: "lane-fix1", Role: ledger.RoleAuthor, PR: 926, State: ledger.Complete, Base: "deadbeef", HeadSHA: "secondhopsha"},
+		ledger.Record{ID: "fix2", Issue: "926", Lane: "lane-fix2", Role: ledger.RoleAuthor, PR: 926, State: ledger.Complete, Base: "secondhopsha", HeadSHA: "thirdhopsha"},
+		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+	)
+	d := evaluateWithPR(p, "lane-review", l)
+	if !d.Allow {
+		t.Fatalf("evaluateWithPR refused a genuine two-hop fix-pass chain: %v", d.Reasons)
+	}
+}
+
+// Bypass (the "Prove it" forgery case): a PR's current head SHA matches a
+// real, completed, PR-scoped role=author record's own HeadSHA -- but that
+// record's Base does NOT continue from this PR's root dispatch. Its HeadSHA
+// happens to equal the PR's current head (e.g. a director mistake, or an
+// attempt to borrow a real record's credibility), but nothing in the ledger
+// explains how the code got from the root's "deadbeef" to here. The chain
+// must not resolve on a HeadSHA/PR match alone.
+func TestBypass_FixPassRecordWithWrongBaseDoesNotChain(t *testing.T) {
+	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	reviewedAt := checkStart.Add(2 * time.Hour)
+	p := &PR{
+		Number:      926,
+		HeadOID:     "fixedcafe01",
+		HeadRefName: "dispatch/a1",
+		State:       "OPEN",
+		Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
+		Comments:    []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: fixedcafe01\nVerdict: APPROVE\n"}},
+	}
+	l := newLedger(t,
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
+		// Same PR number, same HeadSHA as the PR's current head -- but its
+		// OWN Base does not equal the root's HeadSHA. Nothing in the ledger
+		// accounts for how the code moved from "deadbeef" to here.
+		ledger.Record{ID: "fix1", Issue: "926", Lane: "lane-fix", Role: ledger.RoleAuthor, PR: 926, State: ledger.Complete, Base: "somewhereunrelated", HeadSHA: "fixedcafe01"},
+		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+	)
+	d := evaluateWithPR(p, "lane-review", l)
+	if d.Allow {
+		t.Fatal("SECURITY: a PR-scoped role=author record whose HeadSHA matches the PR's current head, but whose own Base does not continue from the root dispatch, was accepted as a fix-pass chain")
+	}
+	joined := strings.Join(d.Reasons, " | ")
+	if !strings.Contains(joined, "does not match the HeadSHA") {
+		t.Fatalf("refused, but not for the expected reason (chain does not resolve): %v", d.Reasons)
+	}
+}
+
+// Bypass: a genuine, completed, PR-scoped role=author record whose HeadSHA
+// happens to equal the target PR's current head, but which was scoped to a
+// DIFFERENT pull request entirely. This is the exact shape of "a PR whose
+// head carries code from a dispatch that did not produce it" -- the dispatch
+// really did produce that commit, but for PR 200, not PR 926, and PR 926's
+// own root dispatch never accounts for it.
+func TestBypass_FixPassChainCannotBorrowUnrelatedPRsDispatch(t *testing.T) {
+	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	reviewedAt := checkStart.Add(2 * time.Hour)
+	p := &PR{
+		Number:      926,
+		HeadOID:     "unrelatedsha01",
+		HeadRefName: "dispatch/a1",
+		State:       "OPEN",
+		Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
+		Comments:    []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: unrelatedsha01\nVerdict: APPROVE\n"}},
+	}
+	l := newLedger(t,
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
+		// A genuine, completed fix-pass dispatch -- for PR 200, not PR 926 --
+		// whose own Base ("deadbeef") coincidentally equals PR 926's root
+		// HeadSHA. Scoped to the wrong PR, so it must not chain here.
+		ledger.Record{ID: "other", Issue: "200", Lane: "lane-other", Role: ledger.RoleAuthor, PR: 200, State: ledger.Complete, Base: "deadbeef", HeadSHA: "unrelatedsha01"},
+		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+	)
+	d := evaluateWithPR(p, "lane-review", l)
+	if d.Allow {
+		t.Fatal("SECURITY: a PR's head SHA matching a real, completed dispatch scoped to a DIFFERENT PR number was accepted as this PR's own fix-pass chain")
+	}
+	joined := strings.Join(d.Reasons, " | ")
+	if !strings.Contains(joined, "does not match the HeadSHA") {
+		t.Fatalf("refused, but not for the expected reason (chain does not resolve): %v", d.Reasons)
+	}
+}
+
+// A fix-pass record that committed NOTHING (Base == HeadSHA) shares its
+// Base with whatever a REAL next hop off the same commit also carries. The
+// chain walker considers ledger records in order and takes the first Base
+// match it finds (authorRecordForFixPassChain's doc comment); if a no-op
+// record for that same Base happened to be appended first, picking it
+// would dead-end the walk at an already-visited SHA even though a genuine
+// continuation exists. The no-op guard is what keeps the walk from ever
+// choosing that dead end over the real hop, regardless of ledger order.
+func TestFixPassChainSkipsANoOpRecordAtTheSameBaseRatherThanDeadEnding(t *testing.T) {
+	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	reviewedAt := checkStart.Add(2 * time.Hour)
+	p := &PR{
+		Number:      926,
+		HeadOID:     "fixedcafe01",
+		HeadRefName: "dispatch/a1",
+		State:       "OPEN",
+		Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
+		Comments:    []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: fixedcafe01\nVerdict: APPROVE\n"}},
+	}
+	l := newLedger(t,
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
+		// A no-op fix pass off the SAME base as the real hop below, appended
+		// FIRST so it is the earlier candidate the walker would see.
+		ledger.Record{ID: "noop", Issue: "926", Lane: "lane-noop", Role: ledger.RoleAuthor, PR: 926, State: ledger.Complete, Base: "deadbeef", HeadSHA: "deadbeef"},
+		// The genuine continuation, off the same base, that actually is the
+		// PR's current head.
+		ledger.Record{ID: "fix1", Issue: "926", Lane: "lane-fix", Role: ledger.RoleAuthor, PR: 926, State: ledger.Complete, Base: "deadbeef", HeadSHA: "fixedcafe01"},
+		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+	)
+	d := evaluateWithPR(p, "lane-review", l)
+	if !d.Allow {
+		t.Fatalf("evaluateWithPR refused a genuine fix-pass chain merely because an earlier, unrelated no-op record shared the same Base: %v", d.Reasons)
+	}
+}
+
+// The self-review check must apply to the LATEST link in a resolved chain,
+// not only the root dispatch -- a lane that authored nothing at the root but
+// pushed the fix pass that IS the PR's current head must not be allowed to
+// review its own work.
+func TestBypass_SelfReviewViaFixPassChain(t *testing.T) {
+	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	reviewedAt := checkStart.Add(2 * time.Hour)
+	p := &PR{
+		Number:      926,
+		HeadOID:     "fixedcafe01",
+		HeadRefName: "dispatch/a1",
+		State:       "OPEN",
+		Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
+		Comments:    []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: fixedcafe01\nVerdict: APPROVE\n"}},
+	}
+	l := newLedger(t,
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
+		// The reviewer lane ITSELF pushed the fix pass that is the PR's
+		// current head.
+		ledger.Record{ID: "fix1", Issue: "926", Lane: "lane-review", Role: ledger.RoleAuthor, PR: 926, State: ledger.Complete, Base: "deadbeef", HeadSHA: "fixedcafe01"},
+		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+	)
+	d := evaluateWithPR(p, "lane-review", l)
+	if d.Allow {
+		t.Fatal("bypass: a lane that authored the fix pass which IS the PR's current head was allowed to review its own PR, because only the root dispatch's lane was checked for self-review")
+	}
+}
+
 // Bypass 6: every failure to measure must refuse, not pass. A corrupt
 // ledger (Current() returns an error, per ledger's own contract) must not
 // read as "no authors on record, therefore fine." This is confirmed twice

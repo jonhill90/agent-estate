@@ -40,6 +40,29 @@ func repo(t *testing.T) string {
 	return root
 }
 
+// repoWithRemote builds a repo (as repo does) plus a bare "origin" it can
+// fetch from, with branch already pushed there -- what CreateOnBranch needs:
+// a real remote tip to fetch and check out, not a local ref.
+func repoWithRemote(t *testing.T, branch string) string {
+	t.Helper()
+	root := repo(t)
+	bare := t.TempDir()
+	if out, err := exec.Command("git", "init", "-q", "--bare", bare).CombinedOutput(); err != nil {
+		t.Fatalf("git init --bare: %v: %s", err, out)
+	}
+	for _, args := range [][]string{
+		{"remote", "add", "origin", bare},
+		{"push", "-q", "origin", "HEAD:" + branch},
+	} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = root
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	return root
+}
+
 // Root must distinguish two repositories that share a base name, or they
 // collide in the dispatch root and refuse each other's ids.
 func TestRootIsUniquePerRepositoryNotPerBaseName(t *testing.T) {
@@ -120,6 +143,103 @@ func TestCreateUsesItsOwnBranchSoTwoDispatchesCannotCollide(t *testing.T) {
 	if a.Path == b.Path {
 		t.Fatalf("two dispatches share path %q", a.Path)
 	}
+}
+
+// CreateOnBranch is what a fix pass uses to continue an EXISTING pull
+// request's branch (agent-estate#940's "does not survive a fix pass"
+// follow-up) instead of Create's always-a-new-branch shape.
+func TestCreateOnBranchChecksOutTheFetchedTipDetached(t *testing.T) {
+	root := repoWithRemote(t, "pr-branch")
+	w, err := CreateOnBranch(root, "fix-1", "pr-branch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Remove()
+
+	if !w.Detached {
+		t.Fatal("CreateOnBranch did not mark the worktree Detached")
+	}
+	if w.Branch != "pr-branch" {
+		t.Fatalf("w.Branch = %q, want %q", w.Branch, "pr-branch")
+	}
+	out, err := exec.Command("git", "-C", w.Path, "symbolic-ref", "-q", "HEAD").CombinedOutput()
+	if err == nil {
+		t.Fatalf("HEAD is a branch (%s), not detached", strings.TrimSpace(string(out)))
+	}
+	head, err := w.Head()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if head != w.Base {
+		t.Fatalf("fresh CreateOnBranch checkout HEAD %q != recorded Base %q", head, w.Base)
+	}
+}
+
+// Two dispatches continuing the SAME PR branch, one after the other (the
+// exact fix-pass-after-the-original-dispatch shape), must not collide --
+// the whole reason the checkout is detached rather than a same-named local
+// branch (see CreateOnBranch's own doc comment).
+func TestCreateOnBranchDoesNotCollideWithAnEarlierWorktreeOnTheSameBranch(t *testing.T) {
+	root := repoWithRemote(t, "pr-branch")
+	first, err := Create(root, "original-author")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Simulate the original dispatch's worktree still holding committed,
+	// uncollected work -- Remove refuses to tear that down, so it is not
+	// guaranteed gone by the time a fix pass runs. Push its branch as the PR
+	// branch fix-1 will continue.
+	if err := os.WriteFile(filepath.Join(first.Path, "more.txt"), []byte("x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "more"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = first.Path
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	// first.Branch ("dispatch/original-author") is a DIFFERENT name than
+	// "pr-branch" -- push its content onto pr-branch to simulate a PR that
+	// really was opened from a dispatch branch.
+	if out, err := exec.Command("git", "-C", first.Path, "push", "-qf", "origin", "HEAD:pr-branch").CombinedOutput(); err != nil {
+		t.Fatalf("git push: %v: %s", err, out)
+	}
+
+	w, err := CreateOnBranch(root, "fix-1", "pr-branch")
+	if err != nil {
+		t.Fatalf("CreateOnBranch collided with the still-live original worktree: %v", err)
+	}
+	if err := w.Remove(); err != nil {
+		t.Fatalf("Remove refused a detached, uncommitted CreateOnBranch worktree: %v", err)
+	}
+}
+
+func TestCreateOnBranchRefusesRatherThanAssumeTheBranchExists(t *testing.T) {
+	t.Run("branch not on origin", func(t *testing.T) {
+		root := repoWithRemote(t, "some-other-branch")
+		if _, err := CreateOnBranch(root, "fix-1", "does-not-exist-on-origin"); err == nil {
+			t.Fatal("must refuse when origin does not have the branch")
+		}
+	})
+	t.Run("no origin remote at all", func(t *testing.T) {
+		root := repo(t)
+		if _, err := CreateOnBranch(root, "fix-1", "pr-branch"); err == nil {
+			t.Fatal("must refuse when there is no origin to fetch from")
+		}
+	})
+	t.Run("empty branch", func(t *testing.T) {
+		root := repoWithRemote(t, "pr-branch")
+		if _, err := CreateOnBranch(root, "fix-1", "   "); err == nil {
+			t.Fatal("must refuse a blank branch argument")
+		}
+	})
+	t.Run("bad dispatch id", func(t *testing.T) {
+		root := repoWithRemote(t, "pr-branch")
+		if _, err := CreateOnBranch(root, "../escape", "pr-branch"); err == nil {
+			t.Fatal("must refuse a dispatch id that can escape its directory, same as Create")
+		}
+	})
 }
 
 // Fails closed. Every one of these means "we could not isolate", and an

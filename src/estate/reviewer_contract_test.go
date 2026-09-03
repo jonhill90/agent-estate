@@ -18,7 +18,7 @@ import (
 // than re-deriving the contract text by hand.
 
 func TestRoleGrounding_ReviewerGetsContractWithInterpolatedValues(t *testing.T) {
-	got := roleGrounding(ledger.RoleReviewer, "943-1788418133", 945, "dispatch/943-1788418133")
+	got := roleGrounding(ledger.RoleReviewer, "943-1788418133", 945, "dispatch/943-1788418133", false)
 
 	if !strings.Contains(got, "## Reviewer contract") {
 		t.Fatalf("reviewer grounding missing the contract heading:\n%s", got)
@@ -67,7 +67,7 @@ func TestRoleGrounding_ReviewerGetsContractWithInterpolatedValues(t *testing.T) 
 }
 
 func TestRoleGrounding_AuthorDoesNotGetReviewerContract(t *testing.T) {
-	got := roleGrounding(ledger.RoleAuthor, "949-1788431203", 0, "dispatch/949-1788431203")
+	got := roleGrounding(ledger.RoleAuthor, "949-1788431203", 0, "dispatch/949-1788431203", false)
 
 	if strings.Contains(got, "Reviewer contract") {
 		t.Errorf("author grounding must not carry the reviewer contract:\n%s", got)
@@ -82,6 +82,35 @@ func TestRoleGrounding_AuthorDoesNotGetReviewerContract(t *testing.T) {
 	}
 	if !strings.Contains(got, "dispatch/949-1788431203") {
 		t.Errorf("author grounding does not name its own worktree branch:\n%s", got)
+	}
+}
+
+// WHY THIS TEST EXISTS. agent-estate#940's "does not survive a fix pass"
+// follow-up: a fix-pass turn must be told to continue the PR's EXISTING
+// branch, never invent a new one or open a second PR -- the opposite of a
+// fresh author dispatch's own branch-discipline block, which this test
+// confirms it does NOT also carry (a lane told both would have no way to
+// know which applies to it).
+func TestRoleGrounding_FixPassGetsContinuationBlockNotBranchDiscipline(t *testing.T) {
+	got := roleGrounding(ledger.RoleAuthor, "961-1788440000", 957, "dispatch/949-1788431203125998000-30223-1", true)
+
+	if !strings.Contains(got, "## Fix-pass discipline (agent-estate#940") {
+		t.Fatalf("fix-pass grounding missing its own heading:\n%s", got)
+	}
+	if !strings.Contains(got, "PR #957") {
+		t.Errorf("fix-pass grounding does not interpolate the PR number:\n%s", got)
+	}
+	if !strings.Contains(got, "dispatch/949-1788431203125998000-30223-1") {
+		t.Errorf("fix-pass grounding does not name the branch it must continue:\n%s", got)
+	}
+	if !strings.Contains(got, "git push origin HEAD:dispatch/949-1788431203125998000-30223-1") {
+		t.Errorf("fix-pass grounding does not state the detached-HEAD push form:\n%s", got)
+	}
+	if strings.Contains(got, "## Branch discipline (agent-estate#940") {
+		t.Errorf("fix-pass grounding must not also carry the fresh-dispatch branch-discipline block:\n%s", got)
+	}
+	if strings.Contains(got, "Do not `git checkout -b`") {
+		t.Errorf("fix-pass grounding must not carry the fresh-dispatch \"open a new PR\" instruction:\n%s", got)
 	}
 }
 

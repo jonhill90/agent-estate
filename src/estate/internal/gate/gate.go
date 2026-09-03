@@ -40,10 +40,50 @@
 //     that case simply fails the SHA match and refuses, which is the
 //     correct direction, but it is a refusal produced by (b), not a
 //     guarantee that no such push was attempted. A PR whose head ref is not
-//     a dispatch branch, OR whose head commit does not match the recorded
-//     HeadSHA, is refused outright -- there is no fallback to the old,
-//     forgeable issue-keyed path, and no partial credit for the branch name
-//     matching alone.
+//     a dispatch branch is refused outright -- there is no fallback to the
+//     old, forgeable issue-keyed path, and no partial credit for the branch
+//     name matching alone.
+//
+//     A head commit that does NOT match the root dispatch's own HeadSHA is
+//     not refused outright any more -- see condition 2c. It is refused only
+//     if 2c also fails to account for it.
+//
+//  2c. A FIX PASS -- a second (or third, ...) dispatch that pushes new
+//     commits onto a branch a first dispatch created -- moves the PR's head
+//     past the root dispatch's own recorded HeadSHA while the branch NAME
+//     stays the same (agent-estate#940's own follow-up finding: "the join
+//     works for a fresh dispatch, and does not survive a fix pass"). When
+//     2b's direct match fails, the gate tries to WALK a chain of completed,
+//     PR-scoped role=author ledger records from the root dispatch's own
+//     HeadSHA to the PR's current head: `estate dispatch fix <pr> <issue>
+//     <brief>` records PR (the number it was scoped to) and Base (the
+//     commit internal/isolate.CreateOnBranch fetched and checked out
+//     BEFORE that turn's own commits, read directly by the estate, same
+//     discipline as HeadSHA) on every such turn. The gate accepts the PR's
+//     head when there is an unbroken sequence of these records, each one's
+//     Base equal to the PREVIOUS link's HeadSHA (the root dispatch's HeadSHA
+//     for the first link), ending at a HeadSHA equal to the PR's current
+//     head commit. Every link is independently estate-observed; none is
+//     anything a lane's own branch name, PR body, or comment asserted about
+//     itself.
+//
+//     What this establishes: every commit between the root dispatch's own
+//     output and the PR's current head was produced inside a worktree this
+//     specific chain of dispatches controlled, in order, with no gap the
+//     estate did not itself observe.
+//
+//     What this does NOT establish, stated plainly because a prior review
+//     round on this exact issue blocked a change for overclaiming: it does
+//     NOT prove the estate performed the push (the agent still runs `git
+//     push`; the estate only re-reads its own worktree afterward, same as
+//     2b), and it does NOT prove any of the intermediate commits were
+//     reviewed (only the FINAL head must clear an independent APPROVE --
+//     conditions 3 and 4 below). A record whose own Base equals its own
+//     HeadSHA (a fix pass that committed nothing) is never usable as a
+//     chain hop -- it explains no code the PR's actual head does not
+//     already trace to through an earlier link, and admitting it would let
+//     an unrelated no-op record with a coincidentally matching Base sit in
+//     the chain without accounting for anything.
 //
 //  3. That same reviewer lane has a COMPLETED review turn on record for
 //     THIS pull request. A dispatched-but-unfinished review is not
@@ -258,6 +298,61 @@ func authorRecordForDispatchID(l *ledger.Ledger, id string) (ledger.Record, bool
 	return ledger.Record{}, false, nil
 }
 
+// authorRecordForFixPassChain is condition 2c of the package doc: it walks
+// a chain of completed, PR-scoped role=author ledger records forward from a
+// known-good starting commit (rootHeadSHA -- already established by the
+// caller via authorRecordForDispatchID's mandatory branch-name join, never
+// by this function) toward the PR's current head commit (headOID).
+//
+// Each hop must be a Complete role=author record recorded for EXACTLY this
+// PR number (`estate dispatch fix <pr> ...` sets PR; a plain `estate
+// dispatch <issue> ...` never does) whose own Base equals the SHA the
+// PREVIOUS hop ended at. That is what makes this a CHAIN rather than a
+// search: a record is only usable once the gate has already established
+// what came immediately before it, all the way back to the root dispatch
+// the PR's own head ref names. A record whose HeadSHA equals its own Base
+// (a fix pass that committed nothing) is skipped -- see the package doc's
+// condition 2c for why an inert record must never count as a hop.
+//
+// Returns the LAST hop's record (the one whose HeadSHA equals headOID) when
+// the chain resolves; ok=false when it does not, including when no chain
+// exists at all. visited guards against a cycle -- a malformed or
+// adversarial record set where hops point back at an already-used SHA --
+// by refusing to reuse a starting point, rather than looping forever.
+func authorRecordForFixPassChain(l *ledger.Ledger, pr int, rootHeadSHA, headOID string) (ledger.Record, bool, error) {
+	cur, err := l.Current()
+	if err != nil {
+		return ledger.Record{}, false, err
+	}
+	from := rootHeadSHA
+	visited := map[string]bool{from: true}
+	for {
+		var next ledger.Record
+		found := false
+		for _, r := range cur {
+			if r.PR != pr || r.EffectiveRole() != ledger.RoleAuthor || r.State != ledger.Complete {
+				continue
+			}
+			if r.HeadSHA == "" || r.HeadSHA == r.Base || r.Base != from {
+				continue
+			}
+			next, found = r, true
+			break
+		}
+		if !found {
+			return ledger.Record{}, false, nil
+		}
+		if next.HeadSHA == headOID {
+			return next, true, nil
+		}
+		if visited[next.HeadSHA] {
+			return ledger.Record{}, false, nil
+		}
+		visited[next.HeadSHA] = true
+		from = next.HeadSHA
+	}
+}
+
 // reviewerRecord returns the latest COMPLETE RoleReviewer ledger record on
 // file for reviewerLane against this exact PR number. This is the SECOND,
 // independent source constraint 4 cross-checks the PR comment against
@@ -362,7 +457,6 @@ func evaluate(p *PR, reviewerLane string, l *ledger.Ledger) Decision {
 	if !ok {
 		return refuse(d, "no completed role=author ledger record on file for dispatch id "+dispatchID+" (from head ref "+p.HeadRefName+") -- authorship unknown, refusing")
 	}
-	authorLane := authorRec.Lane
 
 	// The branch NAME matching a ledger id is not, by itself, evidence the
 	// PR carries that dispatch's actual work -- every lane here shares one
@@ -381,9 +475,24 @@ func evaluate(p *PR, reviewerLane string, l *ledger.Ledger) Decision {
 	if authorRec.HeadSHA == "" {
 		return refuse(d, "role=author record for dispatch id "+dispatchID+" carries no recorded HeadSHA -- cannot confirm this PR's head commit against what that dispatch's worktree actually produced, refusing")
 	}
+
+	authorLane := authorRec.Lane
 	if authorRec.HeadSHA != p.HeadOID {
-		return refuse(d, "PR #"+strconv.Itoa(p.Number)+"'s head commit "+short(p.HeadOID)+" does not match the HeadSHA "+short(authorRec.HeadSHA)+
-			" the estate recorded for dispatch id "+dispatchID+" -- the branch name matches but the code it points at does not, refusing")
+		// The root dispatch's own commit is not the PR's current head. That
+		// used to be an immediate refusal -- and still is, UNLESS a chain of
+		// completed fix-pass dispatches (condition 2c) accounts for every
+		// commit between the root's HeadSHA and the PR's actual head. See
+		// the package doc for exactly what this does and does not prove.
+		fp, fok, ferr := authorRecordForFixPassChain(l, p.Number, authorRec.HeadSHA, p.HeadOID)
+		if ferr != nil {
+			return refuse(d, "cannot read ledger for fix-pass chain: "+ferr.Error())
+		}
+		if !fok {
+			return refuse(d, "PR #"+strconv.Itoa(p.Number)+"'s head commit "+short(p.HeadOID)+" does not match the HeadSHA "+short(authorRec.HeadSHA)+
+				" the estate recorded for dispatch id "+dispatchID+", and no completed fix-pass dispatch for PR #"+strconv.Itoa(p.Number)+
+				" chains from that commit to the current head either -- the branch name matches but the code it points at does not, refusing")
+		}
+		authorLane = fp.Lane
 	}
 
 	// A PR body may carry a self-declared Author-Lane: trailer (repo

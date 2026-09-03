@@ -34,11 +34,17 @@ import (
 type Worktree struct {
 	// Path is the directory the agent turn should run in.
 	Path string
-	// Branch is the branch created for it, named for the dispatch.
+	// Branch is the branch created for it, named for the dispatch (Create),
+	// or the EXISTING branch it is continuing (CreateOnBranch).
 	Branch string
 	// Base is the commit the worktree was created from. Anything the branch
 	// points at beyond this is work the turn committed.
 	Base string
+	// Detached reports whether Path's HEAD is a detached checkout rather
+	// than a local branch named Branch -- true only for CreateOnBranch.
+	// Remove uses this to know whether there is a local branch ref left to
+	// delete at teardown.
+	Detached bool
 
 	root string
 }
@@ -143,6 +149,82 @@ func Create(repoRoot, id string) (*Worktree, error) {
 	return &Worktree{Path: path, Branch: branch, Base: strings.TrimSpace(string(baseOut)), root: repoRoot}, nil
 }
 
+// safeBranch reports whether branch can safely name a git ref to fetch and
+// check out. Not a general refname validator -- git itself rejects a truly
+// malformed ref -- but it refuses the two shapes that would otherwise reach
+// exec.Command args in a way that could be misread: empty/whitespace-only,
+// and anything starting with "-" (which git or a later `git push` could take
+// as a flag rather than a ref).
+func safeBranch(branch string) error {
+	b := strings.TrimSpace(branch)
+	if b == "" {
+		return errors.New("branch is empty")
+	}
+	if strings.HasPrefix(b, "-") {
+		return fmt.Errorf("branch %q starts with '-', which could be read as a flag rather than a ref name", b)
+	}
+	return nil
+}
+
+// CreateOnBranch gives a dispatch an isolated worktree checked out on an
+// EXISTING branch, fetched fresh from origin -- what a FIX PASS needs
+// (agent-estate#940's "does not survive a fix pass" follow-up), as opposed
+// to Create's always-a-brand-new-branch shape, which is right for a first
+// dispatch against an issue but wrong for a turn that must continue a pull
+// request's own branch instead of starting a new lineage beside it.
+//
+// The checkout is DETACHED on purpose, not a local branch named `branch`.
+// The ORIGINAL dispatch that opened the pull request may still have its own
+// worktree and local branch of that exact name sitting on disk --
+// Worktree.Remove refuses to tear down a worktree that holds committed,
+// uncollected work (see Remove's own doc comment), so that first worktree
+// is not guaranteed to be gone by the time a fix pass runs. git refuses to
+// check the same branch out in two worktrees at once; detaching sidesteps
+// that collision entirely; a caller pushes with `git push origin
+// HEAD:<branch>` rather than a plain `git push`, which works the same from
+// a detached HEAD.
+//
+// It refuses under the same conditions Create does (bad id, not a git
+// repository, worktree already exists), plus a bad branch argument, plus
+// one more: origin must actually have the branch -- a failed fetch is
+// "could not confirm the tip to continue from," not "assume it is there."
+func CreateOnBranch(repoRoot, id, branch string) (*Worktree, error) {
+	if err := safeID(id); err != nil {
+		return nil, fmt.Errorf("isolate: refusing to dispatch: %w", err)
+	}
+	if err := safeBranch(branch); err != nil {
+		return nil, fmt.Errorf("isolate: refusing to dispatch: %w", err)
+	}
+	if _, err := git(repoRoot, "rev-parse", "--git-dir"); err != nil {
+		return nil, fmt.Errorf("isolate: refusing to dispatch: %s is not a git repository, so no worktree can be made for the turn: %w", repoRoot, err)
+	}
+
+	base := Root(repoRoot)
+	if err := os.MkdirAll(base, 0o755); err != nil {
+		return nil, fmt.Errorf("isolate: refusing to dispatch: cannot create worktree root: %w", err)
+	}
+	path := filepath.Join(base, id)
+	if _, err := os.Stat(path); err == nil {
+		return nil, fmt.Errorf("isolate: refusing to dispatch: %s already exists -- another turn may be live there, and sharing it is what isolation is for", path)
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("isolate: refusing to dispatch: cannot determine whether %s is in use: %w", path, err)
+	}
+
+	// The real, current tip -- never a possibly-stale local ref, and never
+	// simply assumed present.
+	if _, err := git(repoRoot, "fetch", "origin", branch); err != nil {
+		return nil, fmt.Errorf("isolate: refusing to dispatch: cannot fetch %q from origin, so there is no confirmed tip to continue from: %w", branch, err)
+	}
+	if _, err := git(repoRoot, "worktree", "add", "--detach", path, "origin/"+branch); err != nil {
+		return nil, fmt.Errorf("isolate: refusing to dispatch: %w", err)
+	}
+	baseOut, err := git(path, "rev-parse", "HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("isolate: refusing to dispatch: cannot record the worktree's base commit: %w", err)
+	}
+	return &Worktree{Path: path, Branch: branch, Base: strings.TrimSpace(string(baseOut)), root: repoRoot, Detached: true}, nil
+}
+
 // Dirty reports whether the worktree holds uncommitted changes -- output a
 // dispatch produced that nothing has collected yet.
 //
@@ -228,6 +310,14 @@ func (w *Worktree) Remove() error {
 	}
 	if _, err := git(w.root, "worktree", "remove", w.Path); err != nil {
 		return err
+	}
+	// A CreateOnBranch worktree never had a local branch of its own -- it
+	// checked out origin/<branch> detached, on purpose, so a fix-pass
+	// worktree can never collide with the ORIGINAL dispatch's own,
+	// still-live local branch of the same name (see CreateOnBranch's doc
+	// comment). There is nothing to delete here for it.
+	if w.Detached {
+		return nil
 	}
 	if _, err := git(w.root, "branch", "-D", w.Branch); err != nil {
 		return err
