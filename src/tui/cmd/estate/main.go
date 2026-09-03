@@ -602,11 +602,14 @@ func main() {
 	// Resolved from this binary's own compiled-in source location
 	// (repoRootFromSource), never from os.Getwd() -- see
 	// resolveTickLogPath's doc comment (tickpath.go) for why a cwd-relative
-	// or cwd-walk-up resolution is exactly the defect this fixes.
-	estateTicks := resolveTickLogPath(repoRootFromSource(tickLogSourceFile), *estateTickLog)
+	// or cwd-walk-up resolution is exactly the defect this fixes. A non-nil
+	// estateTicksErr (the repo root could not be derived, e.g. a -trimpath
+	// build) is carried through to estatus.ReadWithTickErr as a value,
+	// never folded into estateTicks as a path -- agent-estate#935.
+	estateTicks, estateTicksErr := resolveTickLogPath(repoRootFromSource(tickLogSourceFile), *estateTickLog)
 
 	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel, flowModel, chatModel).
-		WithEstateStatus(func() estatus.Status { return estatus.Read(estateLedger, estateTicks) }).
+		WithEstateStatus(func() estatus.Status { return estatus.ReadWithTickErr(estateLedger, estateTicks, estateTicksErr) }).
 		WithAgents(agentsModel).
 		WithSkills(skillsModel).
 		WithMCPServers(mcpserversModel).
