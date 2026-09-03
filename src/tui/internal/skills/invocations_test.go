@@ -225,6 +225,37 @@ func TestBuildInvocationCache_ZeroFillsSkillsWithNoInvocations(t *testing.T) {
 	}
 }
 
+// TestBuiltinCommandNames_SnapshotCount is agent-estate#903's own mutation
+// target: builtinCommandNames' doc comment claims a specific snapshot (114
+// entries: 111 fetched from https://code.claude.com/docs/en/commands on
+// 2026-09-03, plus 3 historical names -- migrate-installer, output-style,
+// todos -- no longer in that table but kept because a transcript can
+// predate the current command set). Nothing in this package can re-fetch
+// that page in CI, so this test cannot confirm the map still matches the
+// live reference -- it can only confirm the map matches what the comment
+// says it is. A silent hand-edit (an entry added or removed without also
+// updating the doc comment's count and date) fails this test; re-syncing
+// against a fresh fetch is expected to require updating both together.
+func TestBuiltinCommandNames_SnapshotCount(t *testing.T) {
+	const wantCount = 114
+	if got := len(builtinCommandNames); got != wantCount {
+		t.Errorf("len(builtinCommandNames) = %d, want %d (the count builtinCommandNames' own doc "+
+			"comment claims -- update both together, with a fresh fetch date, rather than just this number)",
+			got, wantCount)
+	}
+
+	// The three historical names must still be present: they are absent
+	// from the live table but were kept deliberately (see the doc comment)
+	// rather than dropped, and a careless re-sync from the live table
+	// alone would silently lose them.
+	for _, historical := range []string{"migrate-installer", "output-style", "todos"} {
+		if !builtinCommandNames[historical] {
+			t.Errorf("builtinCommandNames[%q] = false, want true (kept deliberately -- "+
+				"see the doc comment on why a name absent from the live table is not dropped)", historical)
+		}
+	}
+}
+
 func writeTranscriptLine(t *testing.T, path string, lines ...string) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {

@@ -32,23 +32,47 @@ const InvocationsStoreUnreadable = "store unreadable"
 // display name alone.
 const skillTranscriptToolUseName = "Skill"
 
-// builtinCommandNames is Claude Code's own documented, product-shipped
-// command vocabulary (docs.claude.com/en/docs/claude-code/slash-commands),
-// normalised (no leading "/", lowercase, single token). These are never
-// filesystem skill directories -- a real Skill.Dir comes from a SKILL.md's
-// own directory name under a skills root (Scan), never from the harness's
-// built-in command table -- so any `input.skill` value that normalises to
-// one of these names is the harness logging a native command through the
-// same `Skill` tool_use block, not a skill invocation (agent-estate#890:
-// reconciling the cache against `~/.claude/skills` found /model, /model
-// sonnet, model, compact, run and loop all counted as if they were skills).
+// builtinCommandNames is a SNAPSHOT of Claude Code's documented,
+// product-shipped command vocabulary, fetched from
+// https://code.claude.com/docs/en/commands ("All commands" table -- the
+// same page's own note says this one table mixes true built-in commands
+// like /help and /compact with bundled skills like /debug and /code-review
+// that ship inside the binary rather than as a SKILL.md) on 2026-09-03:
+// 111 rows extracted from the table's first cell, plus 3 names this repo
+// had already accumulated from real transcripts that are no longer in that
+// table (migrate-installer, output-style, todos -- see below), for 114
+// entries total. TestBuiltinCommandNames_SnapshotCount pins the count so a
+// hand-edit here is caught even though nothing re-fetches the page.
 //
-// This is a stable, documented set -- not a copy of the specific handful
-// of names agent-estate#890 happened to reconcile against -- so a new built-in shipping
-// later needs adding here once, not a fresh denylist built from whatever
-// the next reconciliation turns up. It is deliberately narrower than "every
-// skill this session's Skill tool can reach": agent-estate#890 also found artifact-design,
-// career-ops and using-tmux in the cache with no matching directory under
+// This is explicitly NOT claimed to be "stable" or "complete" going
+// forward -- agent-estate#903 found the set that claim used to describe
+// covered 37 of the (then) 90+ documented commands, and re-fetching for
+// this fix found the live table had already grown to 111 in the interim.
+// The product's command surface moves faster than this file will be
+// re-synced; treat this as "known-good as of the date above," not as a
+// closed set, and re-fetch the same page before trusting a gap in this map
+// against a name that looks native but isn't excluded.
+//
+// These are never filesystem skill directories -- a real Skill.Dir comes
+// from a SKILL.md's own directory name under a skills root (Scan), never
+// from the harness's built-in command table -- so any `input.skill` value
+// that normalises to one of these names is the harness logging a native
+// command or a bundled, not-on-disk skill through the same `Skill`
+// tool_use block, not an invocation of anything Scan can find
+// (agent-estate#890: reconciling the cache against `~/.claude/skills`
+// found /model, /model sonnet, model, compact, run and loop all counted as
+// if they were skills). run and loop are documented today as bundled
+// skills rather than plain commands, same as code-review, debug,
+// security-review, simplify, dataviz and the rest of this table's
+// skill-shaped rows -- excluding all of them here is correct for the same
+// reason run/loop already were: none has a matching directory under a live
+// `~/.claude/skills` root on this machine, so nothing Scan finds would be
+// undercounted by leaving them out (verified: no name in this map
+// collides with a real `~/.claude/skills` entry as of the date above).
+//
+// It is deliberately narrower than "every skill this session's Skill tool
+// can reach": agent-estate#890 also found artifact-design, career-ops and
+// using-tmux in the cache with no matching directory under
 // `~/.claude/skills`, and investigation found career-ops is a genuine
 // project-local skill (`.claude/skills/career-ops` in that project's own
 // checkout) and using-tmux/artifact-design are real historical invocations
@@ -56,43 +80,120 @@ const skillTranscriptToolUseName = "Skill"
 // command, so none belongs in this set; excluding them would erase real
 // invocation history, not fix the defect.
 var builtinCommandNames = map[string]bool{
-	"add-dir":           true,
-	"agents":            true,
-	"bug":               true,
-	"clear":             true,
-	"compact":           true,
-	"config":            true,
-	"context":           true,
-	"cost":              true,
-	"doctor":            true,
-	"exit":              true,
-	"export":            true,
-	"help":              true,
-	"hooks":             true,
-	"ide":               true,
-	"init":              true,
-	"login":             true,
-	"logout":            true,
-	"loop":              true,
-	"mcp":               true,
-	"memory":            true,
-	"migrate-installer": true,
-	"model":             true,
-	"output-style":      true,
-	"permissions":       true,
-	"pr-comments":       true,
-	"release-notes":     true,
-	"resume":            true,
-	"review":            true,
-	"rewind":            true,
-	"run":               true,
-	"security-review":   true,
-	"status":            true,
-	"statusline":        true,
-	"terminal-setup":    true,
-	"todos":             true,
-	"usage":             true,
-	"vim":               true,
+	"add-dir":                  true,
+	"advisor":                  true,
+	"agents":                   true,
+	"artifacts":                true,
+	"auto-mode-setup":          true,
+	"autocompact":              true,
+	"autofix-pr":               true,
+	"background":               true,
+	"batch":                    true,
+	"branch":                   true,
+	"btw":                      true,
+	"bug":                      true,
+	"cd":                       true,
+	"chrome":                   true,
+	"claude-api":               true,
+	"clear":                    true,
+	"code-review":              true,
+	"color":                    true,
+	"compact":                  true,
+	"config":                   true,
+	"context":                  true,
+	"copy":                     true,
+	"cost":                     true,
+	"dataviz":                  true,
+	"debug":                    true,
+	"deep-research":            true,
+	"design":                   true,
+	"design-login":             true,
+	"design-sync":              true,
+	"desktop":                  true,
+	"diff":                     true,
+	"doctor":                   true,
+	"effort":                   true,
+	"exit":                     true,
+	"export":                   true,
+	"fast":                     true,
+	"feedback":                 true,
+	"fewer-permission-prompts": true,
+	"focus":                    true,
+	"fork":                     true,
+	"goal":                     true,
+	"heapdump":                 true,
+	"help":                     true,
+	"hooks":                    true,
+	"ide":                      true,
+	"import":                   true,
+	"init":                     true,
+	"insights":                 true,
+	"install-github-app":       true,
+	"install-slack-app":        true,
+	"keybindings":              true,
+	"list-agents":              true,
+	"login":                    true,
+	"logout":                   true,
+	"loop":                     true,
+	"mcp":                      true,
+	"memory":                   true,
+	"migrate-installer":        true,
+	"mobile":                   true,
+	"model":                    true,
+	"output-style":             true,
+	"passes":                   true,
+	"permissions":              true,
+	"plan":                     true,
+	"plugin":                   true,
+	"powerup":                  true,
+	"pr-comments":              true,
+	"privacy-settings":         true,
+	"radio":                    true,
+	"rate-limit-options":       true,
+	"recap":                    true,
+	"release-notes":            true,
+	"reload-plugins":           true,
+	"reload-skills":            true,
+	"remote-control":           true,
+	"remote-env":               true,
+	"rename":                   true,
+	"resume":                   true,
+	"review":                   true,
+	"rewind":                   true,
+	"run":                      true,
+	"run-skill-generator":      true,
+	"sandbox":                  true,
+	"schedule":                 true,
+	"scroll-speed":             true,
+	"security-review":          true,
+	"setup-bedrock":            true,
+	"setup-vertex":             true,
+	"simplify":                 true,
+	"skills":                   true,
+	"stats":                    true,
+	"status":                   true,
+	"statusline":               true,
+	"stickers":                 true,
+	"stop":                     true,
+	"subtask":                  true,
+	"tasks":                    true,
+	"team-onboarding":          true,
+	"teleport":                 true,
+	"terminal-setup":           true,
+	"theme":                    true,
+	"todos":                    true,
+	"tui":                      true,
+	"ultraplan":                true,
+	"ultrareview":              true,
+	"upgrade":                  true,
+	"usage":                    true,
+	"usage-credits":            true,
+	"verify":                   true,
+	"vim":                      true,
+	"voice":                    true,
+	"web-setup":                true,
+	"workflow-authoring":       true,
+	"workflows":                true,
 }
 
 // normalizeSkillInput turns a raw `input.skill` string into the token
