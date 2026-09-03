@@ -223,3 +223,104 @@ func TestOneRealArtifactInTheWindowStillClears(t *testing.T) {
 		t.Fatalf("a real artifact in the window means the loop is producing: %s", v.Reason)
 	}
 }
+
+// From an independent review of the commit that added this package. The
+// stop condition claimed "only an artifact clears a stall". It was false:
+// ANY non-empty string cleared it, so a spinning loop dodges forever by
+// writing junk -- and the agent writing that string is the same one the
+// guard is meant to catch.
+
+func TestPlaceholderArtifactsAreAbsence(t *testing.T) {
+	// Each of these is absence spelled as presence. The literal "null" is
+	// the sharpest case: the record format uses null for absent, so a tick
+	// writing the STRING "null" is claiming output it does not have.
+	for _, junk := range []string{"null", "NULL", "none", "None", "n/a", "N/A", "-", "--", "tbd", "TBD", "nothing", "pending"} {
+		p := write(t,
+			`{"at":"2026-09-02T10:00:00Z","phase_item":"p","src_head":"a","artifact":null}`,
+			`{"at":"2026-09-02T10:03:00Z","phase_item":"p","src_head":"a","artifact":null}`,
+			`{"at":"2026-09-02T10:06:00Z","phase_item":"p","src_head":"a","artifact":"`+junk+`"}`)
+		v, err := Check(p)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !v.Stalled {
+			t.Errorf("artifact %q is absence spelled as presence; must not clear a stall", junk)
+		}
+	}
+}
+
+// Repeating the SAME artifact is not new output. A loop that keeps pointing
+// at something it produced three ticks ago is producing nothing now.
+func TestRepeatingOneArtifactIsNotNewOutput(t *testing.T) {
+	v, err := Check(write(t,
+		`{"at":"2026-09-02T10:00:00Z","phase_item":"p","src_head":"a","artifact":"docs/thing.md"}`,
+		`{"at":"2026-09-02T10:03:00Z","phase_item":"p","src_head":"a","artifact":"docs/thing.md"}`,
+		`{"at":"2026-09-02T10:06:00Z","phase_item":"p","src_head":"a","artifact":"docs/thing.md"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !v.Stalled {
+		t.Fatalf("three ticks naming one artifact produced output once, not three times: %s", v.Reason)
+	}
+}
+
+// And the other direction, which must keep working: distinct real artifacts
+// are a loop that is producing.
+func TestDistinctArtifactsAreNotAStall(t *testing.T) {
+	v, err := Check(write(t,
+		`{"at":"2026-09-02T10:00:00Z","phase_item":"p","src_head":"a","artifact":"docs/one.md"}`,
+		`{"at":"2026-09-02T10:03:00Z","phase_item":"p","src_head":"a","artifact":"docs/two.md"}`,
+		`{"at":"2026-09-02T10:06:00Z","phase_item":"p","src_head":"a","artifact":"docs/three.md"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if v.Stalled {
+		t.Fatalf("three distinct artifacts is a producing loop: %s", v.Reason)
+	}
+}
+
+// Record must refuse a placeholder rather than write it, so the dodge is not
+// available at the point it would be taken.
+func TestRecordRefusesAPlaceholderArtifact(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "t.jsonl")
+	if err := Record(p, Entry{At: time.Now(), PhaseItem: "p", SrcHead: "a", Artifact: "null"}); err == nil {
+		t.Fatal("Record must refuse an artifact that is absence spelled as presence")
+	}
+	if _, err := os.Stat(p); err == nil {
+		t.Error("a refused Record must not have written anything")
+	}
+}
+
+// A placeholder list is not enough: an independent review defeated it with
+// "working on it" and "still going" -- plausible prose naming no output. An
+// artifact must point at something a reader can open.
+func TestArtifactMustNameSomethingLocatable(t *testing.T) {
+	refused := []string{
+		"working on it", "still going", "made progress", "done",
+		"fixed the bug", "improved things", "see above",
+	}
+	for _, s := range refused {
+		if Locatable(s) {
+			t.Errorf("%q names nothing openable; must not count as an artifact", s)
+		}
+		p := filepath.Join(t.TempDir(), "t.jsonl")
+		if err := Record(p, Entry{At: time.Now(), PhaseItem: "p", SrcHead: "a", Artifact: s}); err == nil {
+			t.Errorf("Record must refuse artifact %q", s)
+		}
+	}
+	accepted := []string{
+		"docs/phase-plan.md", "src/estate/internal/tick/tick.go",
+		"PR #913", "merged #907 to main (04793cd)", "04793cd",
+		"https://github.com/jonhill90/agent-estate/pull/913",
+		"docs/tick-log.jsonl + green estate-ci",
+	}
+	for _, s := range accepted {
+		if !Locatable(s) {
+			t.Errorf("%q points at something openable and must be accepted", s)
+		}
+		p := filepath.Join(t.TempDir(), "t.jsonl")
+		if err := Record(p, Entry{At: time.Now(), PhaseItem: "p", SrcHead: "a", Artifact: s}); err != nil {
+			t.Errorf("Record refused a real artifact %q: %v", s, err)
+		}
+	}
+}

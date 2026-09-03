@@ -13,3 +13,5 @@
 {"at":"2026-09-03T00:27:58Z","phase_item":"delivery-unblock","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"AGENTS.md: fabricated citation + dead guard table corrected"}
 {"at":"2026-09-03T00:32:45Z","phase_item":"delivery-unblock","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"src/estate/agents_md_test.go: doc claims are checked in CI"}
 {"at":"2026-09-03T00:37:27Z","phase_item":"delivery-unblock","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"merged #913 to main (04793cd) -- first delivery"}
+{"at":"2026-09-03T00:41:39Z","phase_item":"delivery-unblock","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"merged #913 and #907 to main; #914 replaces the closed #908"}
+{"at":"2026-09-03T00:49:16Z","phase_item":"phase-0","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"src/estate/internal/tick/tick.go"}

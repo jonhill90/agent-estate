@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -93,6 +94,12 @@ func Record(path string, e Entry) error {
 	if e.PhaseItem == "" {
 		return errors.New("tick: phase_item is required -- a tick that cannot name what it advanced is the thing this record exists to catch")
 	}
+	// Refuse the dodge at the point it would be taken, not only when reading
+	// the record back. Nothing is written when this fires.
+	if e.Artifact != "" && !Locatable(e.Artifact) {
+		return fmt.Errorf("tick: %q names nothing a human can open -- an artifact must contain a path, a commit sha, an issue or PR number, or a URL. "+
+			"If this tick produced no artifact, omit it; saying so is a legitimate tick result", e.Artifact)
+	}
 	line, err := json.Marshal(e)
 	if err != nil {
 		return fmt.Errorf("tick: encode: %w", err)
@@ -114,10 +121,65 @@ type parsed struct {
 	Artifact  *string `json:"artifact"`
 }
 
+// placeholders are absence spelled as presence. An independent review showed
+// the original check -- "any non-empty string" -- let a spinning loop dodge
+// the stop condition forever by writing junk into the artifact field, and the
+// agent writing that string is the same one the guard exists to catch. The
+// literal "null" is the sharpest case: the record format uses null for
+// absent, so a tick writing the STRING "null" is claiming output it does not
+// have.
+var placeholders = map[string]bool{
+	"null": true, "nil": true, "none": true, "n/a": true, "na": true,
+	"-": true, "--": true, "tbd": true, "nothing": true, "pending": true,
+	"in progress": true, "wip": true, "ongoing": true, "unknown": true,
+}
+
+// IsPlaceholder reports whether s is a way of writing "no artifact" that
+// would otherwise pass as one.
+func IsPlaceholder(s string) bool {
+	return placeholders[strings.ToLower(strings.TrimSpace(s))]
+}
+
+var (
+	shaRE   = regexp.MustCompile(`\b[0-9a-f]{7,40}\b`)
+	issueRE = regexp.MustCompile(`#\d+`)
+	pathRE  = regexp.MustCompile(`(^|[\s(])[\w.-]+/[\w./-]+`)
+)
+
+// Locatable reports whether s names something a reader could actually go and
+// open: a path, a commit sha, an issue or pull request number, or a URL.
+//
+// WHY A SYNTACTIC TEST AND NOT A JUDGEMENT. A placeholder list catches
+// "null" and "tbd", but an independent review defeated that immediately with
+// "working on it" and "still going" -- plausible prose that names no output.
+// No string inspection can tell a real accomplishment from a convincing
+// sentence about one. What it CAN tell is whether the text points at
+// something. "What a human can look at" means locatable, so that is the bar:
+// an artifact must contain a pointer, and prose alone is refused.
+//
+// This is deliberately loose about whether the target EXISTS -- that is the
+// caller's job, since only it knows the working directory. Here it is only
+// about shape.
+func Locatable(s string) bool {
+	s = strings.TrimSpace(s)
+	if s == "" || IsPlaceholder(s) {
+		return false
+	}
+	if strings.Contains(s, "://") {
+		return true
+	}
+	return issueRE.MatchString(s) || pathRE.MatchString(s) || shaRE.MatchString(s)
+}
+
 // hasArtifact reports whether this tick produced something a human can look
-// at. A null artifact and an empty-string artifact are the same absence.
+// at. A null artifact, an empty-string artifact and a placeholder are the
+// same absence.
 func (p parsed) hasArtifact() bool {
-	return p.Artifact != nil && strings.TrimSpace(*p.Artifact) != ""
+	if p.Artifact == nil {
+		return false
+	}
+	a := strings.TrimSpace(*p.Artifact)
+	return a != "" && !IsPlaceholder(a)
 }
 
 // Check reads the log and reports whether the last Window entries share a
@@ -185,6 +247,37 @@ func Check(path string) (Verdict, error) {
 	//
 	// This is strictly stronger: every log the old rule flagged, this flags.
 	last := entries[len(entries)-Window:]
+
+	// Repeating ONE artifact across the window is not new output. A loop that
+	// keeps pointing at something it produced three ticks ago is producing
+	// nothing now, and naming it again must not clear the stall.
+	distinct := map[string]bool{}
+	for _, e := range last {
+		if e.hasArtifact() {
+			distinct[strings.TrimSpace(*e.Artifact)] = true
+		}
+	}
+	if len(distinct) == 1 && Window > 1 {
+		only := ""
+		for a := range distinct {
+			only = a
+		}
+		producing := 0
+		for _, e := range last {
+			if e.hasArtifact() {
+				producing++
+			}
+		}
+		if producing == Window {
+			return Verdict{
+				Stalled:    true,
+				Considered: Window,
+				Reason: fmt.Sprintf("the last %d ticks all named the same artifact (%q) -- that is one piece of output, not %d",
+					Window, only, Window),
+			}, nil
+		}
+	}
+
 	for _, e := range last {
 		if e.hasArtifact() {
 			return Verdict{
