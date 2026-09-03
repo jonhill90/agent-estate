@@ -164,6 +164,41 @@ type laneVerdict struct {
 	hasSHA      bool
 }
 
+// resolveResultVerdict applies the same Verdict:-line scanner used against a
+// PR comment to the ledger's own Result field for a reviewer's completed
+// turn -- the second, independent source constraint 4 in gate.go now
+// cross-checks the PR comment against (agent-estate#934). There is no
+// Review-Lane: trailer to match here: the record is already scoped to the
+// one reviewer lane by reviewerRecord's ledger lookup, not by anything
+// parsed out of free text.
+func resolveResultVerdict(result string) laneVerdict {
+	scan := scanVerdictLines(result)
+	if len(scan) == 0 {
+		return laneVerdict{found: false, reason: "ledger result carries no Verdict: line"}
+	}
+	decisions := map[verdictDecision]bool{}
+	var unrecognised []string
+	for _, line := range scan {
+		if line.ok {
+			decisions[line.decision] = true
+		} else {
+			unrecognised = append(unrecognised, `"`+line.text+`"`)
+		}
+	}
+	if len(decisions) != 1 {
+		reason := "conflicting Verdict: lines in ledger result"
+		if len(unrecognised) > 0 {
+			reason = "decision text not recognised in ledger result: " + strings.Join(unrecognised, "; ")
+		}
+		return laneVerdict{found: true, ok: false, reason: reason}
+	}
+	var verdict verdictDecision
+	for d := range decisions {
+		verdict = d
+	}
+	return laneVerdict{found: true, ok: true, decision: verdict}
+}
+
 func resolveLaneVerdict(comments []Comment, lane string) laneVerdict {
 	var (
 		lastBody string

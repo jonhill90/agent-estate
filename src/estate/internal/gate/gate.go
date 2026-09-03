@@ -156,18 +156,22 @@ func authorLanes(l *ledger.Ledger, issues map[string]bool) (map[string]bool, err
 	return out, nil
 }
 
-// reviewerCompleted reports whether reviewerLane has a COMPLETE RoleReviewer
-// record on file for this exact PR number, and its completion time -- the
-// ledger-owned timestamp used as the staleness anchor's other side (see
-// earliestCheckStart). A dispatched-but-not-yet-Complete review turn does
+// reviewerRecord returns the latest COMPLETE RoleReviewer ledger record on
+// file for reviewerLane against this exact PR number. This is the SECOND,
+// independent source constraint 4 cross-checks the PR comment against
+// (agent-estate#934): the record's Result field is written locally by the
+// dispatch process itself, from the reviewer subprocess's own output, when
+// that turn completes. A party who can post a GitHub PR comment under this
+// estate's shared login cannot write here -- only a process this estate
+// itself dispatched can. A dispatched-but-not-yet-Complete review turn does
 // not satisfy this: "a dispatched but unfinished review turn is not
 // independence" (constraint 3).
-func reviewerCompleted(l *ledger.Ledger, pr int, reviewerLane string) (time.Time, bool, error) {
+func reviewerRecord(l *ledger.Ledger, pr int, reviewerLane string) (ledger.Record, bool, error) {
 	cur, err := l.Current()
 	if err != nil {
-		return time.Time{}, false, err
+		return ledger.Record{}, false, err
 	}
-	var latest time.Time
+	var latest ledger.Record
 	found := false
 	for _, r := range cur {
 		if r.Lane != reviewerLane || r.PR != pr {
@@ -179,12 +183,23 @@ func reviewerCompleted(l *ledger.Ledger, pr int, reviewerLane string) (time.Time
 		if r.State != ledger.Complete {
 			continue
 		}
-		if !found || r.At.After(latest) {
-			latest = r.At
+		if !found || r.At.After(latest.At) {
+			latest = r
 			found = true
 		}
 	}
 	return latest, found, nil
+}
+
+// reviewerCompleted reports whether reviewerLane has a COMPLETE RoleReviewer
+// record on file for this exact PR number, and its completion time -- the
+// ledger-owned timestamp used as the staleness anchor's other side (see
+// earliestCheckStart). A thin wrapper over reviewerRecord kept for its own
+// existing callers and tests; evaluate itself calls reviewerRecord directly
+// so it can also reach the record's Result field.
+func reviewerCompleted(l *ledger.Ledger, pr int, reviewerLane string) (time.Time, bool, error) {
+	rec, ok, err := reviewerRecord(l, pr, reviewerLane)
+	return rec.At, ok, err
 }
 
 func short(s string) string {
@@ -254,13 +269,14 @@ func evaluate(p *PR, reviewerLane string, l *ledger.Ledger) Decision {
 		return refuse(d, "reviewer lane "+reviewerLane+" also authored work on an issue this PR closes -- self-review")
 	}
 
-	reviewedAt, ok, err := reviewerCompleted(l, p.Number, reviewerLane)
+	rec, ok, err := reviewerRecord(l, p.Number, reviewerLane)
 	if err != nil {
 		return refuse(d, "cannot read ledger for reviewer completion: "+err.Error())
 	}
 	if !ok {
 		return refuse(d, "reviewer lane "+reviewerLane+" has no completed role=reviewer turn on record for PR #"+strconv.Itoa(p.Number)+" -- a dispatched review that never finished is not independence")
 	}
+	reviewedAt := rec.At
 
 	lv := resolveLaneVerdict(p.Comments, reviewerLane)
 	if !lv.found {
@@ -269,6 +285,27 @@ func evaluate(p *PR, reviewerLane string, l *ledger.Ledger) Decision {
 	if !lv.ok {
 		return refuse(d, "reviewer "+reviewerLane+"'s own verdict comment is unresolved -- "+lv.reason)
 	}
+
+	// Cross-check against the SECOND, independent source: the ledger's own
+	// Result field for this exact reviewer turn, written locally by the
+	// dispatch process from the reviewer subprocess's own output -- never
+	// from anything a GitHub comment asserts about itself. A comment anyone
+	// with the shared login can post is not, by itself, proof of what the
+	// reviewer actually concluded (agent-estate#934); this record is the
+	// one thing a forged comment cannot also forge. Unreadable, unparsable,
+	// or disagreeing with the PR comment are each their own refusal --
+	// "cannot tell" is never "allowed", same as every other check here.
+	rv := resolveResultVerdict(rec.Result)
+	if !rv.found {
+		return refuse(d, "reviewer "+reviewerLane+"'s ledger record carries no parsable Verdict: line in its own Result -- cannot cross-check the PR comment against it, refusing")
+	}
+	if !rv.ok {
+		return refuse(d, "reviewer "+reviewerLane+"'s ledger Result verdict is unresolved -- "+rv.reason)
+	}
+	if rv.decision != lv.decision {
+		return refuse(d, "reviewer "+reviewerLane+"'s PR comment says "+string(lv.decision)+" but the ledger's own record of that turn says "+string(rv.decision)+" -- the two independent sources disagree, refusing")
+	}
+
 	if lv.decision != verdictApproved {
 		return refuse(d, "reviewer "+reviewerLane+"'s own verdict comment is "+string(lv.decision)+", not an approval")
 	}
