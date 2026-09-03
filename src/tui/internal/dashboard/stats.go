@@ -48,13 +48,29 @@ func KnownUSD(v float64) USD { return USD{Known: true, Value: v} }
 // failure modes, and folding them into one bit would hide which one is
 // actually blind.
 type Stats struct {
-	// AgentsByState is internal/lane.Lane.State -> count, summed across
-	// every session internal/agents' own "sessions" fetch returns -- the
-	// SAME fetch, not a second MCP call (Fetcher, below). nil means the
-	// fetch itself failed; an empty, non-nil map with AgentsKnown true
-	// means it succeeded and found no lanes at all, a real answer.
+	// AgentsByState is src/estate's own ledger.State (dispatched/complete/
+	// failed/unknown) -> count, summed across every IN-FLIGHT turn the Go
+	// ledger records (internal/estatus.Status.InFlight -- the same read
+	// Home's own dashboard-adjacent status line already performs; see
+	// cmd/estate/dashboard.go's own doc comment). This used to be a count of
+	// tmux lanes read through the deleted Python MCP server
+	// (agent-estate#930) -- that seam is permanently gone in this tree, so
+	// AGENTS now answers "how many dispatched turns does the estate's own
+	// record say are still running," not "how many tmux panes are open."
+	// nil means the ledger could not be read; an empty, non-nil map with
+	// AgentsKnown true means it read fine and nothing is in flight, a real
+	// answer.
 	AgentsByState map[string]int
 	AgentsKnown   bool
+	// AgentsUnavailable explains AgentsKnown == false: "absent" (no
+	// dispatch has ever been recorded -- a first-run estate, not a fault),
+	// "unreadable" (the ledger exists but could not be parsed -- this is
+	// NOT zero), or empty (no reason was recorded, e.g. a caller that
+	// never set it). agent-estate#930's own "second-order lesson": a seam
+	// unavailable for one tick and a seam that has never once worked must
+	// not render identically forever -- this field is how the dashboard
+	// tells them apart instead of collapsing both into a bare "unknown."
+	AgentsUnavailable string
 
 	OpenPRs     Count // gh pr list --state open, summed across board.ReposFor's repos
 	MergedToday Count // gh pr list --state merged --search "merged:>=<today>", same repos

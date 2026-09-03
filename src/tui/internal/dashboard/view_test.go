@@ -1,18 +1,42 @@
 package dashboard
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
-// TestRenderAgentsOrdersByLaneAllStates pins renderAgents' own ordering
-// contract: stable, matching internal/lane.AllStates -- not map iteration
-// order, which Go deliberately randomizes.
-func TestRenderAgentsOrdersByLaneAllStates(t *testing.T) {
+// TestRenderAgentsOrdersByLedgerState pins renderAgents' own ordering
+// contract: stable, matching ledgerStateOrder (src/estate's own
+// dispatched/unknown/complete/failed) -- not map iteration order, which Go
+// deliberately randomizes. agent-estate#930 moved AgentsByState from tmux
+// lane states to the Go ledger's own States; this pins the new vocabulary.
+func TestRenderAgentsOrdersByLedgerState(t *testing.T) {
 	s := Stats{AgentsKnown: true, AgentsByState: map[string]int{
-		"broken": 1, "free": 2, "busy": 1,
+		"failed": 1, "dispatched": 2, "unknown": 1,
 	}}
 	got := renderAgents(s)
-	want := "4 total (free:2 busy:1 broken:1)"
+	want := "4 total (dispatched:2 unknown:1 failed:1)"
 	if got != want {
 		t.Fatalf("renderAgents = %q, want %q", got, want)
+	}
+}
+
+// TestRenderAgentsDistinguishesAbsentFromUnreadable is agent-estate#930's
+// own "second-order lesson": a ledger that has never been written to and a
+// ledger that exists but could not be parsed must never render the same
+// bare "unknown" -- one is a first-run estate, the other is an instrument
+// failure that must not be mistaken for zero agents.
+func TestRenderAgentsDistinguishesAbsentFromUnreadable(t *testing.T) {
+	absent := renderAgents(Stats{AgentsKnown: false, AgentsUnavailable: "absent"})
+	unreadable := renderAgents(Stats{AgentsKnown: false, AgentsUnavailable: "unreadable"})
+	if absent == unreadable {
+		t.Fatalf("absent and unreadable rendered identically: %q", absent)
+	}
+	if !strings.Contains(absent, "no dispatch has ever been recorded") {
+		t.Errorf("absent = %q, want it to name the first-run case", absent)
+	}
+	if !strings.Contains(unreadable, "not zero") {
+		t.Errorf("unreadable = %q, want it to warn this is not zero", unreadable)
 	}
 }
 

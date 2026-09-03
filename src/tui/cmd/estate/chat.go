@@ -2,6 +2,7 @@ package main
 
 import (
 	"github.com/jonhill90/agent-estate/src/tui/internal/chat"
+	"github.com/jonhill90/agent-estate/src/tui/internal/estatus"
 	"github.com/jonhill90/agent-estate/src/tui/internal/lane"
 )
 
@@ -24,27 +25,57 @@ import (
 // A session sessions.sh could not read (sess.Error != "") contributes no
 // participants for its own lanes, same as lane.Session's own doc comment
 // requires elsewhere in this module -- unreadable, not "no lanes."
-func buildParticipantsFetch(sessionsFetch func() ([]lane.Session, error)) chat.ParticipantsFetcher {
-	if sessionsFetch == nil {
+//
+// agent-estate#930: sessionsFetch reads the deleted Python MCP server and
+// is permanently unable to answer in this tree -- ledgerStatusFetch (the
+// same estateLedger path main.go already resolves for agentsModel/
+// dashboardModel/WithEstateStatus) fills in with the Go ledger's own
+// in-flight dispatches, one Participant per turn, ID as Name (a ledger
+// dispatch has no tmux pane name to offer) and Session left empty (see
+// Participant.Session's own doc comment for why that is never mistaken for
+// a real tmux session). This ADDS to whatever sessionsFetch returns rather
+// than replacing it -- if tmux/MCP is ever restored, its participants keep
+// appearing exactly as before, alongside the ledger's.
+func buildParticipantsFetch(sessionsFetch func() ([]lane.Session, error), ledgerStatusFetch func() estatus.Status) chat.ParticipantsFetcher {
+	if sessionsFetch == nil && ledgerStatusFetch == nil {
 		return nil
 	}
 	return func() ([]chat.Participant, error) {
-		sessions, err := sessionsFetch()
-		if err != nil {
-			return nil, err
-		}
 		var out []chat.Participant
-		for _, sess := range sessions {
-			if sess.Error != "" {
-				continue
+		var sessionsErr error
+
+		if sessionsFetch != nil {
+			sessions, err := sessionsFetch()
+			sessionsErr = err
+			if err == nil {
+				for _, sess := range sessions {
+					if sess.Error != "" {
+						continue
+					}
+					for _, l := range sess.Lanes {
+						out = append(out, chat.Participant{
+							Name:    l.Name,
+							Session: sess.Name,
+							Running: l.State != "dead" && l.State != "stale",
+						})
+					}
+				}
 			}
-			for _, l := range sess.Lanes {
-				out = append(out, chat.Participant{
-					Name:    l.Name,
-					Session: sess.Name,
-					Running: l.State != "dead" && l.State != "stale",
-				})
+		}
+
+		if ledgerStatusFetch != nil {
+			status := ledgerStatusFetch()
+			for _, d := range status.InFlight {
+				out = append(out, chat.Participant{Name: d.ID, Running: true})
 			}
+		}
+
+		// Only report the sessions-side error when it contributed nothing
+		// at all -- if the ledger fallback found real participants, a dead
+		// MCP server is not this fetch's own failure to report; ValidateMentions
+		// still has a real roster to check @-mentions against.
+		if sessionsErr != nil && len(out) == 0 {
+			return nil, sessionsErr
 		}
 		return out, nil
 	}

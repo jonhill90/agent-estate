@@ -30,14 +30,58 @@ import (
 // Dispatch is one recorded state transition of an agent turn. It mirrors
 // src/estate/internal/ledger.Record; the two modules do not share types, so
 // this decodes the same JSON rather than importing across the module
-// boundary.
+// boundary. Only the fields agent-facing views can honestly use are decoded
+// here -- PR, Result and HeadSHA exist on the source record too but nothing
+// in this module reads them yet; add them when something does, rather than
+// carrying fields nobody derives from.
 type Dispatch struct {
 	ID    string    `json:"id"`
 	Issue string    `json:"issue"`
 	Lane  string    `json:"lane"`
+	// Role is the turn's role at dispatch time -- "author" or "reviewer"
+	// (src/estate/internal/ledger.Role's own two constants). Empty on a
+	// record written before this field existed; a reader must treat that
+	// the same way src/estate's own Record.EffectiveRole does (default to
+	// "author"), not as evidence of a third role.
+	Role  string    `json:"role,omitempty"`
 	State string    `json:"state"`
 	At    time.Time `json:"at"`
-	Note  string    `json:"note,omitempty"`
+	// PID is the dispatched subprocess's own process id, recorded the
+	// moment src/estate's `estate dispatch` observed it start
+	// (agent-estate#944) -- 0 when this record predates that PR or the
+	// process failed to start before a pid was ever assigned. A live pid
+	// does not by itself prove the process is still running (pids get
+	// reused -- see agent-estate#944's own reclaim package for the check that does),
+	// so this is identifying information, not a liveness signal.
+	PID  int    `json:"pid,omitempty"`
+	Note string `json:"note,omitempty"`
+}
+
+// worktreeNotePrefix is the exact literal src/estate's dispatch path writes
+// into a Dispatched record's Note (main.go: `Note: "worktree " + wt.Path`)
+// -- the only place a turn's worktree path is recorded at all; there is no
+// dedicated ledger field for it. Matching this one fixed prefix on a
+// specific state is reading a value the estate deliberately wrote down, not
+// pattern-matching pane content the way this codebase's own "failure mode"
+// section warns against -- but it is still free text, not a typed field, so
+// Worktree (below) fails closed: any record that does not carry exactly
+// this shape reports not-ok rather than guessing.
+const worktreeNotePrefix = "worktree "
+
+// Worktree returns the worktree path src/estate recorded for this dispatch,
+// and whether one was found. Only ever true for a record whose Note was
+// written by the exact `"worktree " + path` convention above -- a record
+// with a different Note (a failure reason, a reclaim note, or nothing) is
+// reported not-ok, never a guessed or empty path.
+func (d Dispatch) Worktree() (string, bool) {
+	if !strings.HasPrefix(d.Note, worktreeNotePrefix) {
+		return "", false
+	}
+	path := strings.TrimPrefix(d.Note, worktreeNotePrefix)
+	if strings.TrimSpace(path) == "" {
+		return "", false
+	}
+	return path, true
 }
 
 // Tick is one entry of the Director's tick log (docs/tick-log.jsonl).
@@ -115,6 +159,25 @@ func Read(ledgerPath, tickPath string) Status {
 	}
 	s.Ticks, s.TickErr, s.LastTick, s.TickRuns = readTicks(tickPath)
 	return s
+}
+
+// ReadLedger is Read narrowed to the ledger half only, for a caller that has
+// no tick log to report against (agent-estate#930: the Dashboard/Agents/
+// rail/Chat panes describe dispatched turns, never the Director's own tick
+// cadence -- Read's tick-log reporting has no meaning for them, and passing
+// it an empty tickPath would misreport Ticks as Unreadable for a question
+// nobody asked). Returns exactly the two fields Read would have set from
+// the ledger side: availability plus the newest-per-id records, in the
+// same InFlight subset Status.InFlight already keys off.
+func ReadLedger(ledgerPath string) (Availability, error, []Dispatch, []Dispatch) {
+	avail, err, dispatches := readDispatches(ledgerPath)
+	var inFlight []Dispatch
+	for _, d := range dispatches {
+		if inFlightStates[d.State] {
+			inFlight = append(inFlight, d)
+		}
+	}
+	return avail, err, dispatches, inFlight
 }
 
 // ReadWithTickErr is Read for a caller that already tried to resolve the

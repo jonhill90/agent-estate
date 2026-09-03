@@ -19,6 +19,7 @@ import (
 
 	"github.com/jonhill90/agent-estate/src/tui/internal/board"
 	"github.com/jonhill90/agent-estate/src/tui/internal/cost"
+	"github.com/jonhill90/agent-estate/src/tui/internal/estatus"
 	"github.com/jonhill90/agent-estate/src/tui/internal/lane"
 	"github.com/jonhill90/agent-estate/src/tui/internal/session"
 	"github.com/jonhill90/agent-estate/src/tui/internal/theme"
@@ -57,6 +58,22 @@ type Fetcher func() ([]lane.Lane, error)
 // this type. NewMultiSession is the only constructor that sets it.
 type SessionsFetcher func() ([]lane.Session, error)
 
+// LedgerFetcher retrieves src/estate's own dispatch-ledger state --
+// agent-estate#930's addition. Fetcher/SessionsFetcher above both read a
+// Python MCP server (`scripts/supervisor/mcp_server.py`) that no longer
+// exists in this repository (only `reference/` -- never maintained, run,
+// tested, or fixed -- has it), so in a real launch their client is nil and
+// this pane's own lane list can never be populated from them. This is an
+// ADDITIVE second source, the same "read, never invent" discipline every
+// other seam in this module follows: a ledger record carries no tmux
+// window, glyph state, or idle time, so this never feeds lane.Lane -- see
+// the "ledger:" line in View() for what it actually renders (a count, not
+// a fabricated lane list). estatus.Read never returns an error (every
+// failure lands in Status's own typed Availability), so unlike Fetcher/
+// SessionsFetcher this seam has no error return of its own to plumb
+// through.
+type LedgerFetcher func() estatus.Status
+
 type tickMsg time.Time
 type refreshMsg time.Time
 type costRefreshMsg time.Time
@@ -75,6 +92,10 @@ type costFetchResultMsg struct {
 	snap cost.Snapshot
 	err  error
 }
+
+// ledgerFetchResultMsg is agent-estate#930's addition -- see LedgerFetcher's
+// own doc comment.
+type ledgerFetchResultMsg struct{ status estatus.Status }
 
 // Model is the rail's Bubble Tea model.
 type Model struct {
@@ -216,6 +237,23 @@ type Model struct {
 	// set only when cmd/agent-tui's theme.Load resolved a malformed
 	// config or an unknown theme name, never for a plain missing config.
 	themeNotice string
+
+	// ledgerFetch/ledgerStatus are agent-estate#930's addition -- see
+	// LedgerFetcher's own doc comment. nil ledgerFetch (WithLedger never
+	// called) is a safe, silent default, the same convention costFetch/
+	// taskFetch above already follow: View() renders no "ledger:" line at
+	// all.
+	ledgerFetch   LedgerFetcher
+	ledgerStatus  estatus.Status
+	ledgerFetched bool
+}
+
+// WithLedger wires in a LedgerFetcher -- see that type's own doc comment
+// for what this adds and why it never replaces Fetcher/SessionsFetcher.
+// nil is a safe, silent default, same as WithTasks(nil).
+func (m Model) WithLedger(fetch LedgerFetcher) Model {
+	m.ledgerFetch = fetch
+	return m
 }
 
 // WithTheme returns a copy of m with th (and, when non-empty, a visible
@@ -319,6 +357,9 @@ func (m Model) Init() tea.Cmd {
 	if m.taskFetch != nil {
 		cmds = append(cmds, doTaskFetch(m.taskFetch))
 	}
+	if m.ledgerFetch != nil {
+		cmds = append(cmds, doLedgerFetch(m.ledgerFetch))
+	}
 	return tea.Batch(cmds...)
 }
 
@@ -352,6 +393,16 @@ func doSessionsFetch(fetch SessionsFetcher) tea.Cmd {
 	return func() tea.Msg {
 		sessions, err := fetch()
 		return sessionsFetchResultMsg{sessions: sessions, err: err}
+	}
+}
+
+// doLedgerFetch reads a plain local file (estatus.Read's own doc comment:
+// "never returns an error") -- cheap enough to ride the same refreshInterval
+// cadence as m.fetch/m.sessionsFetch below, unlike costRefreshInterval's
+// much slower cadence for a real ccusage subprocess.
+func doLedgerFetch(fetch LedgerFetcher) tea.Cmd {
+	return func() tea.Msg {
+		return ledgerFetchResultMsg{status: fetch()}
 	}
 }
 
@@ -525,6 +576,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 
+	case ledgerFetchResultMsg:
+		m.ledgerStatus = msg.status
+		m.ledgerFetched = true
+		return m, nil
+
 	// agent-tui#14: results of the write operations (agent-tui#23: attach
 	// and detach no longer produce one of these -- see ops.go's package doc
 	// comment). Each is produced by exactly one doXxx tea.Cmd in ops.go and
@@ -610,6 +666,9 @@ func (m Model) doFetchAll() (Model, tea.Cmd) {
 	}
 	if m.taskFetch != nil {
 		cmds = append(cmds, doTaskFetch(m.taskFetch))
+	}
+	if m.ledgerFetch != nil {
+		cmds = append(cmds, doLedgerFetch(m.ledgerFetch))
 	}
 	return m, tea.Batch(cmds...)
 }
@@ -771,8 +830,39 @@ func (m Model) View() string {
 		}
 	}
 
+	// The ledger line (agent-estate#930): what src/estate's own Go dispatch
+	// ledger says is in flight, ADDITIVE to whatever the lane list above
+	// rendered -- see LedgerFetcher's own doc comment for why this is a
+	// count, never a fabricated lane. Only present when cmd/estate wired a
+	// ledgerFetch in (WithLedger) -- New()/NewMultiSession alone render
+	// nothing here, same degradation costFetch/taskFetch above already
+	// follow. The three branches below render VISIBLY different text
+	// (agent-estate#930's own "second-order lesson"): absent, unreadable,
+	// and a real in-flight count must never collapse into one "unknown."
+	if m.ledgerFetch != nil {
+		b = append(b, st.dim.Width(innerWidth).Render(""))
+		b = append(b, st.legend.Width(innerWidth).Render(renderLedgerLine(m)))
+	}
+
 	content := lipgloss.JoinVertical(lipgloss.Left, b...)
 	return st.border.Height(m.height - 1).Render(content)
+}
+
+// renderLedgerLine is ledgerFetch's own one-line summary -- see the View()
+// call site's doc comment for why the rail's 28-column width gets a count
+// rather than a second lane table.
+func renderLedgerLine(m Model) string {
+	if !m.ledgerFetched {
+		return "ledger: not fetched yet"
+	}
+	switch m.ledgerStatus.Ledger {
+	case estatus.Absent:
+		return "ledger: no dispatch ever recorded"
+	case estatus.Unreadable:
+		return "ledger: UNREADABLE, not zero"
+	default:
+		return fmt.Sprintf("ledger: %d in flight", len(m.ledgerStatus.InFlight))
+	}
 }
 
 // renderFallbackNote is at#18's visible note: a NewMultiSession Model whose
