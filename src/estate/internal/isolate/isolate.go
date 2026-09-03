@@ -165,6 +165,26 @@ func (w *Worktree) Dirty() (bool, error) {
 	return strings.TrimSpace(string(out)) != "", nil
 }
 
+// Head returns the worktree's current HEAD commit -- the estate's own,
+// direct git observation of what the dispatched turn's worktree actually
+// points at, read after the turn's subprocess has exited. This is NOT
+// anything the subprocess said about itself; it is the same primitive
+// Committed uses to answer a yes/no question, exposed here so a caller (see
+// main.go's dispatch case) can record WHICH commit, not merely whether one
+// exists. That recorded commit is what internal/gate's structural join
+// binds a PR's own headRefOid against -- see agent-estate#940's follow-up
+// review, which found that a branch NAME alone (this package's own
+// dispatch/<id> convention) is not evidence of identity because anyone with
+// push access can rename a branch and push different content under it. A
+// SHA the estate itself observed inside this specific worktree is.
+func (w *Worktree) Head() (string, error) {
+	out, err := git(w.Path, "rev-parse", "HEAD")
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 // Committed reports whether the branch has moved beyond the commit it was
 // created at -- that is, whether the turn committed anything.
 func (w *Worktree) Committed() (bool, error) {
