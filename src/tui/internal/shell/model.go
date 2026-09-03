@@ -649,6 +649,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 
 	case tea.KeyMsg:
+		// The finder and a pending leader chord claim keys BEFORE the
+		// always-on bindings. A council seat showed tab bypassed both: it was
+		// matched in the switch below, so a pending chord survived into the
+		// next keystroke and hijacked it. Only ctrl+c outranks them, because
+		// a user must always be able to leave.
+		if msg.String() != "ctrl+c" {
+			if m.finderOpen {
+				return m.finderKey(msg)
+			}
+			if m.leaderPending {
+				return m.resolveLeader(msg.String())
+			}
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			// A universal escape hatch, not routed through any pane: the
@@ -664,52 +677,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.focus = toggleFocus(m.focus)
 			return m, nil
 		}
-		// The jump list claims every key while open: a fuzzy prompt that let
-		// some keys fall through would fire actions the user cannot see.
-		if m.finderOpen {
-			return m.finderKey(msg)
-		}
-		// Leader handling sits after the always-on keys and before pane
-		// routing, so a pending chord claims the next keystroke wherever the
-		// focus is -- but never inside a composer (leaderTakesKeys).
-		if m.leaderPending {
-			return m.resolveLeader(msg.String())
-		}
 		if msg.String() == LeaderKey && m.leaderTakesKeys() {
 			m.leaderMiss = ""
 			return m.startLeader()
-		}
-		switch msg.String() {
-		// Digits 1-9 are the direct-jump keys. They were f1-f9 until Jon
-		// asked for function keys out of the nav entirely; digits were
-		// chosen because they collide with nothing already bound (b, t, q,
-		// tab, arrows, enter) and read the same in the footer as on the
-		// keyboard. syncPane is the same route<->Pane switch Confirm drives,
-		// called here too so the sidebar's highlight does not go stale the
-		// moment one of these bypasses it.
-		case "1":
-			return m.syncPane(PaneHome), nil
-		case "2":
-			return m.syncPane(PaneBoard), nil
-		case "3":
-			return m.syncPane(PaneCost), nil
-		case "4":
-			return m.syncPane(PaneGallery), nil
-		case "5":
-			return m.syncPane(PaneFlow), nil
-		case "6":
-			return m.syncPane(PaneChat), nil
-		// 7-9 are agent-tui#115's three decide-by-variant panes -- reached
-		// only by key (and their own -lanechat-* startup flags), the same
-		// "no sidebar route" state panes 4 and 5 are already
-		// in, deliberately: giving one a nav.Build() route would be picking
-		// a shape, which this issue exists to NOT do.
-		case "7":
-			return m.syncPane(PaneLaneChatLanePrimary), nil
-		case "8":
-			return m.syncPane(PaneLaneChatRoomPrimary), nil
-		case "9":
-			return m.syncPane(PaneLaneChatUnifiedList), nil
 		}
 		return m.routeKey(msg)
 	}

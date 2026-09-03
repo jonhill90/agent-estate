@@ -360,3 +360,62 @@ func waitFor(t *testing.T, tm *teatest.TestModel, want string) []byte {
 	t.Fatalf("waitFor %q: not seen after 8s. Output so far:\n%s", want, b.String())
 	return nil
 }
+
+// TestFinderJumpsThroughARealProgram closes the gap a council seat named:
+// every leader chord was driven end-to-end here, but the finder never was.
+// "A control that is not pressed is not proven" applies to it too -- and the
+// finder is the one control that can send you somewhere you did not choose.
+func TestFinderJumpsThroughARealProgram(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "[space] menu")
+
+	// <space><space> opens the jump list.
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	waitFor(t, tm, "find ›")
+
+	// Fuzzy: "knw" must find Knowledge without those letters being adjacent.
+	for _, r := range "knw" {
+		tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	waitFor(t, tm, "Knowledge")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	// The Knowledge pane's own content -- its fact table header -- not the
+	// finder's echo of the route name, which would prove only that the text
+	// was typed.
+	waitFor(t, tm, "SLUG")
+}
+
+// Escape must close the finder without navigating. A jump list that moves
+// you on the way out is worse than one that does nothing.
+//
+// Asserted at the Model level rather than through teatest: the program only
+// redraws changed regions, so "the finder is gone" is not reliably visible in
+// a terminal diff. The end-to-end wiring is proven by
+// TestFinderJumpsThroughARealProgram above; this proves the semantics.
+func TestFinderEscapeDoesNotNavigate(t *testing.T) {
+	m := testModel()
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	base := sized.(Model)
+	before := base.active
+
+	a, _ := base.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	b, _ := a.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	open := b.(Model)
+	if !open.finderOpen {
+		t.Fatal("<space><space> must open the finder")
+	}
+	for _, r := range "knw" {
+		nx, _ := open.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		open = nx.(Model)
+	}
+	closed, _ := open.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got := closed.(Model)
+	if got.finderOpen {
+		t.Error("esc must close the finder")
+	}
+	if got.active != before {
+		t.Errorf("esc must not navigate: active moved %v -> %v", before, got.active)
+	}
+}

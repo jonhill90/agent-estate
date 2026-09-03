@@ -98,6 +98,13 @@ func routeItems(m Model) []finder.Item {
 // current pane. A pane with a text composer must keep its space bar: a leader
 // that eats spaces inside a message box is a worse bug than no leader at all.
 func (m Model) leaderTakesKeys() bool {
+	// The rail owns a composer of its own -- typing a session name -- and it
+	// is reachable while the sidebar has focus, which is exactly when the
+	// pane-based exemption below would say "safe". Ask the component that
+	// owns the state rather than inferring from where the cursor is.
+	if m.rail.CapturingText() {
+		return false
+	}
 	switch m.active {
 	case PaneChat, PaneLaneChatLanePrimary, PaneLaneChatRoomPrimary, PaneLaneChatUnifiedList:
 		return m.focus == focusRail
