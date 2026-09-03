@@ -428,7 +428,7 @@ func TestAReviewThatRefusedIsNotAnApproval(t *testing.T) {
 				t.Fatal(err)
 			}
 		}
-		if bad := independentAt(l, "916", "seat", time.Time{}); bad == nil {
+		if bad := independentAt(l, "916", "seat", time.Time{}, true); bad == nil {
 			t.Errorf("a review whose report reads %.30q is not an approval", body)
 		}
 	}
@@ -448,7 +448,7 @@ func TestAnApprovingReviewSatisfiesTheGate(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if bad := independentAt(l, "916", "seat", time.Time{}); bad != nil {
+	if bad := independentAt(l, "916", "seat", time.Time{}, true); bad != nil {
 		t.Fatalf("an approving review by a non-author satisfies the gate; got: %v", bad)
 	}
 }
@@ -472,11 +472,66 @@ func TestAReviewThatPredatesTheHeadIsStale(t *testing.T) {
 		}
 	}
 	// Head pushed AFTER the review: the review saw something else.
-	if bad := independentAt(l, "916", "seat", reviewedAt.Add(time.Minute)); bad == nil {
+	if bad := independentAt(l, "916", "seat", reviewedAt.Add(time.Minute), true); bad == nil {
 		t.Fatal("a review predating the head has not reviewed what is being merged")
 	}
 	// Head pushed BEFORE the review: the review saw this.
-	if bad := independentAt(l, "916", "seat", reviewedAt.Add(-time.Minute)); bad != nil {
+	if bad := independentAt(l, "916", "seat", reviewedAt.Add(-time.Minute), true); bad != nil {
 		t.Fatalf("a review after the head is current; got: %v", bad)
+	}
+}
+
+// Round four, finding 2: approved() matched "VERDICT: APPROVE" anywhere in
+// the report. A review that QUOTES the string -- which every council comment
+// in this repo does, in its seat table -- read as an approval.
+func TestApprovalMustBeTheVerdictLineNotAQuote(t *testing.T) {
+	refuse := []string{
+		// A real refusal that quotes a previous round's approval.
+		"VERDICT: REQUEST CHANGES\n\nRound one said VERDICT: APPROVE but that was wrong.",
+		// A seat table, exactly as this repo's council comments render one.
+		"VERDICT: REQUEST CHANGES\n\n| seat | verdict |\n| a | VERDICT: APPROVE |\n",
+		"I would say VERDICT: APPROVE if not for the defect below.\nVERDICT: COULD NOT DETERMINE",
+		"",
+		"no verdict at all",
+	}
+	for _, r := range refuse {
+		if approved(r) {
+			t.Errorf("must not read as an approval: %.60q", r)
+		}
+	}
+	accept := []string{
+		"VERDICT: APPROVE\n\nchecked and sound",
+		"  VERDICT: APPROVE  \n\nleading space is fine",
+		"Some preamble line.\nVERDICT: APPROVE\nfindings: none",
+	}
+	for _, r := range accept {
+		if !approved(r) {
+			t.Errorf("must read as an approval: %.60q", r)
+		}
+	}
+}
+
+// Round four, finding 3: an unreadable head time silently disabled the
+// staleness check. Every other gate here refuses when it cannot measure.
+func TestUnreadableHeadTimeRefusesRatherThanSkipping(t *testing.T) {
+	l, err := ledger.Open(filepath.Join(t.TempDir(), "l.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range []ledger.Record{
+		{ID: "a", Issue: "916", Lane: "author", State: ledger.Complete, At: time.Now()},
+		{ID: "s", Issue: "916", Lane: "seat", Role: ledger.RoleReview, State: ledger.Complete,
+			At: time.Now(), Result: "VERDICT: APPROVE"},
+	} {
+		if err := l.Append(r); err != nil {
+			t.Fatal(err)
+		}
+	}
+	bad := independentAt(l, "916", "seat", time.Time{}, false)
+	if bad == nil {
+		t.Fatal("an unknown head time must refuse: could-not-measure is never clean")
+	}
+	if !strings.Contains(strings.Join(bad, " "), "could not") {
+		t.Errorf("the refusal must say it could not measure; got: %v", bad)
 	}
 }

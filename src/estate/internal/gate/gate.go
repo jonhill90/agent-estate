@@ -95,22 +95,37 @@ func checksGreen(p *PR) []string {
 // REQUEST CHANGES" is read correctly, and anything unparseable is NOT an
 // approval -- a review nobody can read has not approved anything.
 func approved(report string) bool {
-	up := strings.ToUpper(report)
-	if strings.Contains(up, "VERDICT: REQUEST CHANGES") || strings.Contains(up, "VERDICT: COULD NOT DETERMINE") {
-		return false
+	// The verdict must be a LINE of its own, not a substring anywhere in the
+	// prose. A council seat found the substring form read a refusal as an
+	// approval whenever the refusal quoted a previous round -- and every
+	// council comment in this repo quotes verdicts, in its seat table. The
+	// first verdict line wins, so a report that opens by refusing cannot be
+	// rescued by a later quotation.
+	for _, raw := range strings.Split(report, "\n") {
+		line := strings.ToUpper(strings.TrimSpace(raw))
+		if !strings.HasPrefix(line, "VERDICT:") {
+			continue
+		}
+		v := strings.TrimSpace(strings.TrimPrefix(line, "VERDICT:"))
+		switch {
+		case strings.HasPrefix(v, "REQUEST CHANGES"), strings.HasPrefix(v, "COULD NOT DETERMINE"):
+			return false
+		case strings.HasPrefix(v, "APPROVE"):
+			return true
+		}
 	}
-	return strings.Contains(up, "VERDICT: APPROVE")
+	return false
 }
 
 // independent is independentAt with no head time, used where the head's age
 // is unknown. Prefer independentAt.
 func independent(l *ledger.Ledger, issue, reviewerLane string) []string {
-	return independentAt(l, issue, reviewerLane, time.Time{})
+	return independentAt(l, issue, reviewerLane, time.Time{}, true)
 }
 
 // independentAt adds headAt: the moment the commit being merged was created.
 // A review recorded BEFORE that reviewed something else.
-func independentAt(l *ledger.Ledger, issue, reviewerLane string, headAt time.Time) []string {
+func independentAt(l *ledger.Ledger, issue, reviewerLane string, headAt time.Time, headKnown bool) []string {
 	if strings.TrimSpace(reviewerLane) == "" {
 		return []string{"reviewer lane not supplied -- cannot establish independence"}
 	}
@@ -157,7 +172,7 @@ func independentAt(l *ledger.Ledger, issue, reviewerLane string, headAt time.Tim
 				switch {
 				case !approved(r.Result):
 					reviewNotApproved = true
-				case !headAt.IsZero() && r.At.Before(headAt):
+				case headKnown && r.At.Before(headAt):
 					// The review ran before this head existed.
 					reviewStale = true
 				default:
@@ -181,6 +196,10 @@ func independentAt(l *ledger.Ledger, issue, reviewerLane string, headAt time.Tim
 	}
 	if authors[reviewerLane] {
 		return []string{"reviewer lane " + reviewerLane + " also authored work on issue " + issue + " -- self-review"}
+	}
+	if !headKnown {
+		return []string{"could not read when the head commit of issue " + issue +
+			" was created, so a review cannot be shown to have seen it -- refusing rather than assuming"}
 	}
 	if !reviewed {
 		switch {
@@ -224,29 +243,40 @@ func Evaluate(repo string, pr int, reviewerLane string, issue string, l *ledger.
 		d.Allow = false
 		d.Reasons = append(d.Reasons, bad...)
 	}
-	if bad := independentAt(l, issue, reviewerLane, headCommittedAt(repo, p.HeadOID)); len(bad) > 0 {
+	headAt, headKnown := headSeenAt(repo, p.HeadOID)
+	if bad := independentAt(l, issue, reviewerLane, headAt, headKnown); len(bad) > 0 {
 		d.Allow = false
 		d.Reasons = append(d.Reasons, bad...)
 	}
 	return d
 }
 
-// headCommittedAt returns when the commit being merged was created, so a
-// review recorded before it can be recognised as stale. A time we cannot read
-// is the zero time, which disables the staleness test rather than inventing
-// one: the other checks still apply and the caller is told nothing false.
-func headCommittedAt(repo, oid string) time.Time {
+// headSeenAt returns when GitHub first SAW the head commit, and whether that
+// could be read at all.
+//
+// It deliberately does not use the commit's committer date: a council seat
+// pointed out that GIT_COMMITTER_DATE is set by whoever makes the commit, so
+// a head can claim to predate a review that never saw it. A check run's
+// startedAt is stamped by GitHub when the commit arrives, and the gate
+// already requires checks to exist and be green, so it is available for free
+// and is not the author's to choose.
+//
+// A time that cannot be read returns false. The caller refuses on that:
+// every other limit in this package fails closed, and this one used to be
+// the exception.
+func headSeenAt(repo, oid string) (time.Time, bool) {
 	if oid == "" {
-		return time.Time{}
+		return time.Time{}, false
 	}
 	out, err := exec.Command("gh", "api",
-		fmt.Sprintf("repos/%s/commits/%s", repo, oid), "-q", ".commit.committer.date").Output()
+		fmt.Sprintf("repos/%s/commits/%s/check-runs", repo, oid),
+		"-q", "[.check_runs[].started_at] | sort | .[0]").Output()
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, false
 	}
 	at, err := time.Parse(time.RFC3339, strings.TrimSpace(string(out)))
 	if err != nil {
-		return time.Time{}
+		return time.Time{}, false
 	}
-	return at
+	return at, true
 }
