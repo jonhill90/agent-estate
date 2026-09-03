@@ -260,3 +260,171 @@ func writeFile(t *testing.T, path, content string) {
 		t.Fatalf("writeFile: %v", err)
 	}
 }
+
+// --- agent-tui#878: ConfigPath's new-vs-legacy fallback --------------------
+//
+// Every case below stubs userConfigDir at a fresh t.TempDir() rather than
+// touching the operator's real config dir, and clears both env overrides so
+// the resolution actually exercises resolveConfigPath's Stat-based fallback.
+
+func withConfigDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	orig := userConfigDir
+	userConfigDir = func() (string, error) { return dir, nil }
+	t.Cleanup(func() { userConfigDir = orig })
+
+	for _, k := range []string{"ESTATE_THEME_CONFIG", "AGENT_TUI_THEME_CONFIG"} {
+		if v, ok := os.LookupEnv(k); ok {
+			t.Cleanup(func() { os.Setenv(k, v) })
+		} else {
+			t.Cleanup(func() { os.Unsetenv(k) })
+		}
+		os.Unsetenv(k)
+	}
+	return dir
+}
+
+func TestConfigPathNeitherPresentReturnsNewPath(t *testing.T) {
+	dir := withConfigDir(t)
+	want := filepath.Join(dir, "estate", "theme.json")
+	if got := ConfigPath(); got != want {
+		t.Fatalf("ConfigPath() = %q, want new path %q when neither file exists", got, want)
+	}
+}
+
+func TestConfigPathNewPresentOldAbsentReturnsNewPath(t *testing.T) {
+	dir := withConfigDir(t)
+	newPath := filepath.Join(dir, "estate", "theme.json")
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, newPath, `{"theme": "mono-contrast"}`)
+
+	if got := ConfigPath(); got != newPath {
+		t.Fatalf("ConfigPath() = %q, want new path %q", got, newPath)
+	}
+}
+
+// TestConfigPathNewAbsentOldPresentFallsBackAndIsReadable is the case this
+// issue exists for: an operator's real, pre-rename theme.json must still be
+// found and actually load correctly, not just be named by ConfigPath.
+func TestConfigPathNewAbsentOldPresentFallsBackAndIsReadable(t *testing.T) {
+	dir := withConfigDir(t)
+	oldPath := filepath.Join(dir, "agent-tui", "theme.json")
+	if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, oldPath, `{"theme": "mono-contrast", "colors": null}`)
+
+	got := ConfigPath()
+	if got != oldPath {
+		t.Fatalf("ConfigPath() = %q, want legacy path %q (fallback)", got, oldPath)
+	}
+
+	th, notice := Load(got)
+	if notice != "" {
+		t.Fatalf("notice = %q, want empty -- a valid legacy file is not an error", notice)
+	}
+	if th.ID != Mono.ID {
+		t.Fatalf("theme = %q, want %q -- the legacy preference must actually be read, not silently dropped to Default", th.ID, Mono.ID)
+	}
+}
+
+// TestConfigPathBothPresentPrefersNew documents the both-present choice:
+// existence, not mtime, decides -- once a file exists at the new name, it is
+// authoritative even if the legacy file is more recently modified.
+func TestConfigPathBothPresentPrefersNew(t *testing.T) {
+	dir := withConfigDir(t)
+	newPath := filepath.Join(dir, "estate", "theme.json")
+	oldPath := filepath.Join(dir, "agent-tui", "theme.json")
+	for _, p := range []string{newPath, oldPath} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile(t, newPath, `{"theme": "signal-dark"}`)
+	writeFile(t, oldPath, `{"theme": "mono-contrast"}`)
+
+	if got := ConfigPath(); got != newPath {
+		t.Fatalf("ConfigPath() = %q, want new path %q when both exist", got, newPath)
+	}
+}
+
+// TestConfigPathOldPresentButUnreadableStillResolvesAndLoadReportsNotice
+// covers the "old present but unreadable" case named in agent-tui#878:
+// ConfigPath only decides WHICH path to hand back (Stat sees the file, so it
+// still "exists"); Load is what turns the permission failure into an honest
+// notice rather than a silently-swallowed one.
+func TestConfigPathOldPresentButUnreadableStillResolvesAndLoadReportsNotice(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root ignores file permissions; this case can't be exercised as root")
+	}
+	dir := withConfigDir(t)
+	oldPath := filepath.Join(dir, "agent-tui", "theme.json")
+	if err := os.MkdirAll(filepath.Dir(oldPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, oldPath, `{"theme": "mono-contrast"}`)
+	if err := os.Chmod(oldPath, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(oldPath, 0o644) })
+
+	got := ConfigPath()
+	if got != oldPath {
+		t.Fatalf("ConfigPath() = %q, want legacy path %q -- Stat sees an unreadable file as present", got, oldPath)
+	}
+
+	th, notice := Load(got)
+	if th.ID != Default.ID {
+		t.Fatalf("theme = %q, want %q -- an unreadable file must fall back to Default, never crash or silently keep an old value", th.ID, Default.ID)
+	}
+	if notice == "" {
+		t.Fatal("notice is empty; an unreadable legacy file must say so visibly, not silently look like \"never configured\"")
+	}
+}
+
+func TestConfigPathEnvOverrideWinsOverBothFiles(t *testing.T) {
+	dir := withConfigDir(t)
+	override := filepath.Join(t.TempDir(), "custom-theme.json")
+	os.Setenv("ESTATE_THEME_CONFIG", override)
+	t.Cleanup(func() { os.Unsetenv("ESTATE_THEME_CONFIG") })
+
+	newPath := filepath.Join(dir, "estate", "theme.json")
+	if err := os.MkdirAll(filepath.Dir(newPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, newPath, `{"theme": "signal-dark"}`)
+
+	if got := ConfigPath(); got != override {
+		t.Fatalf("ConfigPath() = %q, want env override %q", got, override)
+	}
+}
+
+func TestConfigPathLegacyEnvOverrideStillWorks(t *testing.T) {
+	withConfigDir(t)
+	override := filepath.Join(t.TempDir(), "legacy-custom-theme.json")
+	os.Setenv("AGENT_TUI_THEME_CONFIG", override)
+	t.Cleanup(func() { os.Unsetenv("AGENT_TUI_THEME_CONFIG") })
+
+	if got := ConfigPath(); got != override {
+		t.Fatalf("ConfigPath() = %q, want legacy env override %q", got, override)
+	}
+}
+
+func TestConfigPathNewEnvOverrideWinsOverLegacyEnvOverride(t *testing.T) {
+	withConfigDir(t)
+	newOverride := filepath.Join(t.TempDir(), "new-custom-theme.json")
+	oldOverride := filepath.Join(t.TempDir(), "old-custom-theme.json")
+	os.Setenv("ESTATE_THEME_CONFIG", newOverride)
+	os.Setenv("AGENT_TUI_THEME_CONFIG", oldOverride)
+	t.Cleanup(func() {
+		os.Unsetenv("ESTATE_THEME_CONFIG")
+		os.Unsetenv("AGENT_TUI_THEME_CONFIG")
+	})
+
+	if got := ConfigPath(); got != newOverride {
+		t.Fatalf("ConfigPath() = %q, want the new-named override %q to win when both are set", got, newOverride)
+	}
+}

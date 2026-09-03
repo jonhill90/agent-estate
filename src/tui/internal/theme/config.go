@@ -137,20 +137,90 @@ func rawValueText(raw json.RawMessage) (value string, isString bool) {
 	return strings.TrimSpace(string(raw)), false
 }
 
-// ConfigPath returns where a user's theme preference lives: the
-// $AGENT_TUI_THEME_CONFIG override if set, else
-// $XDG_CONFIG_HOME-or-os.UserConfigDir()/agent-tui/theme.json -- the same
-// per-user, per-OS convention config packages typically use, so this is not
-// a second, agent-tui-specific config directory scheme.
+// ConfigPath returns where a user's theme preference lives.
+//
+// The product renamed agent-tui -> the Estate (decisions/0006), but this
+// path never moved: it was still writing "agent-tui/theme.json" under
+// os.UserConfigDir(), and on the host this was checked against (agent-tui#878),
+// that directory holds a real, current preference --
+// "$HOME/Library/Application Support/agent-tui/theme.json" containing
+// {"theme": "signal-dark", "colors": null}, last modified before this fix.
+// Silently switching the path segment to "estate" with no fallback would have
+// made that preference vanish with no error: the next launch would find
+// nothing at the new path and fall back to Default, which looks identical to
+// "never configured" -- the exact failure this repo's own CLAUDE.md names as
+// its most common defect shape ("an instrument that cannot see a thing looks
+// exactly like the thing being absent").
+//
+// Resolution order:
+//
+//  1. $ESTATE_THEME_CONFIG, if set -- the new-named override. Wins over the
+//     legacy override below if both happen to be set, since it is the more
+//     specific, more recently stated instruction.
+//  2. $AGENT_TUI_THEME_CONFIG, if set -- the pre-rename override name, kept
+//     working indefinitely; something may already set it (agent-tui#876).
+//  3. Otherwise, resolve two candidate paths under os.UserConfigDir() (per-OS
+//     convention -- $HOME/Library/Application Support on macOS,
+//     $XDG_CONFIG_HOME-or-$HOME/.config on other Unix): "estate/theme.json"
+//     (new) and "agent-tui/theme.json" (legacy). If the new one exists, return it --
+//     once a file lives at the new name, by any means (including a prior
+//     Save from this same build), it is authoritative and the legacy file is
+//     left untouched. Otherwise, if the legacy file exists, return IT --
+//     Load then reads the operator's real preference from where it actually
+//     is, and a subsequent Save (e.g. picking a theme in the UI) writes back
+//     to that same legacy path, updating it in place rather than creating a
+//     second, diverging copy. This is a deliberate choice over migrating on
+//     first read: it never deletes or duplicates the operator's file, and an
+//     older build (still hardcoding "agent-tui/theme.json") keeps reading
+//     and writing the same file with no coordination needed. The cost is
+//     that the file keeps its legacy directory name until something writes
+//     to the new one directly (e.g. a fresh install with no legacy file to
+//     find). If neither exists, return the new path, so a first-ever Save
+//     starts the operator on the new name.
+//
+// Existence is checked with plain existence (os.Stat succeeding), not mtime:
+// a file that exists at the new path is authoritative regardless of which
+// file was touched more recently, avoiding any dependency on clock skew
+// between the two Stat calls. A legacy file that exists but is unreadable
+// (e.g. permission-denied) still counts as "exists" here -- ConfigPath only
+// decides WHICH path to hand back; Load is what turns an unreadable file
+// into its own honest notice rather than a silent Default.
 func ConfigPath() string {
+	if p := os.Getenv("ESTATE_THEME_CONFIG"); p != "" {
+		return p
+	}
 	if p := os.Getenv("AGENT_TUI_THEME_CONFIG"); p != "" {
 		return p
 	}
-	dir, err := os.UserConfigDir()
+
+	dir, err := userConfigDir()
 	if err != nil {
 		dir = "."
 	}
-	return filepath.Join(dir, "agent-tui", "theme.json")
+	return resolveConfigPath(dir)
+}
+
+// userConfigDir is os.UserConfigDir, indirected so config_test.go can point
+// ConfigPath's resolution at a temp directory instead of the operator's real
+// "$HOME/Library/Application Support" -- that directory holds this operator's
+// actual theme.json (agent-tui#878's own finding), so a test asserting
+// fallback behaviour must never read or write it.
+var userConfigDir = os.UserConfigDir
+
+// resolveConfigPath implements ConfigPath's step 3 (new-vs-legacy fallback)
+// against an already-resolved base dir, split out so it's testable without
+// also stubbing the env-var checks above it.
+func resolveConfigPath(dir string) string {
+	newPath := filepath.Join(dir, "estate", "theme.json")
+	legacyPath := filepath.Join(dir, "agent-tui", "theme.json")
+
+	if _, err := os.Stat(newPath); err == nil {
+		return newPath
+	}
+	if _, err := os.Stat(legacyPath); err == nil {
+		return legacyPath
+	}
+	return newPath
 }
 
 // Load reads path and resolves a Theme plus a notice to show the user, if
