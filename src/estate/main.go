@@ -29,10 +29,12 @@ func usage() {
 	fmt.Fprint(os.Stderr, `estate -- the supervisor
 
   estate pressure                       report whether the host can take work
-  estate dispatch <issue> <brief-file>  run one agent turn, gated and recorded
+  estate dispatch [--role=review] <issue> <brief-file>
+                                        run one agent turn, gated and recorded
   estate merge <repo> <pr> <issue> <reviewer-lane>
                                         may this PR merge? checks + independence
   estate corpus-audit [n]               hard parameters least supported by your words
+  estate authored <issue> <lane> [note] record who wrote work on an issue
   estate tasks                          latest state of every task
   estate inflight                       tasks still occupying a slot
   estate tick record <phase-item> [artifact]
@@ -138,6 +140,28 @@ func main() {
 			fmt.Printf("%-28s %-10s %s %s\n", r.ID, r.State, r.At.Format(time.RFC3339), r.Issue)
 		}
 		fmt.Fprintf(os.Stderr, "%d task(s)\n", len(rs))
+
+	case "authored":
+		// Records that a lane authored work on an issue. The gate treats a
+		// hand-written record as an ASSERTION, not evidence: it narrows who
+		// may review, and cannot permit a merge.
+		if len(os.Args) < 4 {
+			fmt.Fprintln(os.Stderr, "estate: authored needs an issue and a lane")
+			os.Exit(2)
+		}
+		aIssue, aLane := os.Args[2], os.Args[3]
+		aNote := ""
+		if len(os.Args) > 4 {
+			aNote = os.Args[4]
+		}
+		if err := l.Append(ledger.Record{
+			ID:    fmt.Sprintf("authored-%s-%s", strings.TrimPrefix(aIssue, "#"), aLane),
+			Issue: aIssue, Lane: aLane, State: ledger.Authored, Note: aNote,
+		}); err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		fmt.Printf("recorded %s as an author of issue %s\n", aLane, aIssue)
 
 	case "tick":
 		// The Director's loop cannot remember its own history -- every tick is
@@ -339,7 +363,20 @@ func main() {
 			usage()
 			os.Exit(2)
 		}
-		issue, briefPath := os.Args[2], os.Args[3]
+		rest := os.Args[2:]
+		// A turn dispatched to REVIEW an issue is not an author of it. The
+		// merge gate requires this record; without a writer the exemption is
+		// dead code and every real review is refused as self-review.
+		role := ledger.RoleAuthor
+		if rest[0] == "--role=review" {
+			role = ledger.RoleReview
+			rest = rest[1:]
+		}
+		if len(rest) < 2 {
+			usage()
+			os.Exit(2)
+		}
+		issue, briefPath := rest[0], rest[1]
 		brief, err := os.ReadFile(briefPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot read brief:", err)
@@ -380,7 +417,7 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, State: ledger.Dispatched, Note: "worktree " + wt.Path}); err != nil {
+		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, State: ledger.Dispatched, Note: "worktree " + wt.Path}); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot record dispatch:", err)
 			os.Exit(2)
 		}
@@ -394,7 +431,7 @@ func main() {
 		cmd.Stdin = strings.NewReader(grounded)
 		out, runErr := cmd.Output()
 
-		rec := ledger.Record{ID: id, Issue: issue, Lane: id}
+		rec := ledger.Record{ID: id, Issue: issue, Lane: id, Role: role}
 		switch {
 		case ctx.Err() != nil:
 			// Timed out. We do not know whether the turn did its work, so we

@@ -26,22 +26,41 @@ const (
 	Complete   State = "complete"   // process exited 0 and produced a result
 	Failed     State = "failed"     // process exited non-zero
 	Unknown    State = "unknown"    // timed out or could not be observed
+	// Authored records that a lane authored work on an issue -- a PR it
+	// opened. It is not a running turn and never occupied a slot, so it is
+	// terminal. It exists because the merge gate must be able to answer "who
+	// wrote this?" for work that did not come from a dispatched turn, and
+	// its only alternative was refusing every such PR forever.
+	Authored State = "authored"
+)
+
+// Roles a lane can hold on an issue. Empty is RoleAuthor so records written
+// before this existed keep meaning what they meant.
+const (
+	RoleAuthor = ""
+	RoleReview = "review"
 )
 
 // Terminal reports whether a state means the slot is free.
 // Unknown is deliberately NOT terminal: a turn we could not observe may still
 // be running, and treating it as finished is how a cap fails open.
-func (s State) Terminal() bool { return s == Complete || s == Failed }
+func (s State) Terminal() bool { return s == Complete || s == Failed || s == Authored }
 
 type Record struct {
-	ID     string    `json:"id"`
-	Issue  string    `json:"issue"`
-	Lane   string    `json:"lane"`
-	State  State     `json:"state"`
-	At     time.Time `json:"at"`
-	PID    int       `json:"pid,omitempty"`
-	Note   string    `json:"note,omitempty"`
-	Result string    `json:"result,omitempty"`
+	ID    string    `json:"id"`
+	Issue string    `json:"issue"`
+	Lane  string    `json:"lane"`
+	State State     `json:"state"`
+	At    time.Time `json:"at"`
+	PID   int       `json:"pid,omitempty"`
+	// Role says what the lane was doing on this issue. Empty means authoring,
+	// which keeps every record written before this field existed correct.
+	// RoleReview marks a turn dispatched to REVIEW the issue rather than work
+	// it -- without this the merge gate counts a reviewer as an author of the
+	// thing it reviewed, and refuses every review as self-review.
+	Role   string `json:"role,omitempty"`
+	Note   string `json:"note,omitempty"`
+	Result string `json:"result,omitempty"`
 }
 
 type Ledger struct {

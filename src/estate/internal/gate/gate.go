@@ -18,6 +18,7 @@ import (
 	"fmt"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 )
@@ -85,7 +86,31 @@ func checksGreen(p *PR) []string {
 // the exact failure this package exists to prevent. The test passed because it
 // only ever hit the unknown-author branch and asserted that SOME refusal came
 // back, not which one.
+// approved reports whether a review turn's own report says APPROVE.
+//
+// A council seat found the gate never read what the review SAID: a turn that
+// returned REQUEST CHANGES satisfied it exactly like an approval, because
+// `reviewed` was set from the record's existence and not its content. The
+// negative readings are checked first so "I would APPROVE but VERDICT:
+// REQUEST CHANGES" is read correctly, and anything unparseable is NOT an
+// approval -- a review nobody can read has not approved anything.
+func approved(report string) bool {
+	up := strings.ToUpper(report)
+	if strings.Contains(up, "VERDICT: REQUEST CHANGES") || strings.Contains(up, "VERDICT: COULD NOT DETERMINE") {
+		return false
+	}
+	return strings.Contains(up, "VERDICT: APPROVE")
+}
+
+// independent is independentAt with no head time, used where the head's age
+// is unknown. Prefer independentAt.
 func independent(l *ledger.Ledger, issue, reviewerLane string) []string {
+	return independentAt(l, issue, reviewerLane, time.Time{})
+}
+
+// independentAt adds headAt: the moment the commit being merged was created.
+// A review recorded BEFORE that reviewed something else.
+func independentAt(l *ledger.Ledger, issue, reviewerLane string, headAt time.Time) []string {
 	if strings.TrimSpace(reviewerLane) == "" {
 		return []string{"reviewer lane not supplied -- cannot establish independence"}
 	}
@@ -94,9 +119,61 @@ func independent(l *ledger.Ledger, issue, reviewerLane string) []string {
 		return []string{"cannot read ledger: " + err.Error()}
 	}
 	authors := map[string]bool{}
+	// derived records whether ANY authorship came from a dispatched turn.
+	//
+	// `estate authored` lets a caller write any lane as the author of any
+	// issue. A council found the consequence: name a decoy as author, pass
+	// your own lane as reviewer, and the gate says "may merge" -- laundering
+	// a self-merge as an independent one.
+	//
+	// So the two kinds of record are not equal. Authorship from a dispatched
+	// turn is EVIDENCE: the estate ran that turn and recorded it. Authorship
+	// written by hand is an ASSERTION, and an assertion by the party who
+	// benefits is not a basis for permitting anything. It still NARROWS who
+	// may review -- catching self-review -- it just cannot WIDEN who may
+	// merge.
+	derived := false
+	// reviewed records whether the lane offered as reviewer actually has a
+	// COMPLETED review turn on this issue.
+	//
+	// Round two of the council: the reviewer lane was an unverified string
+	// supplied by the caller. The gate only checked it differed from the
+	// authors, so an author could invent any name -- "some-other-lane" --
+	// and get "may merge". RoleReview was being written and never required,
+	// which made the independence check theatre.
+	reviewed := false
+	reviewNotApproved := false
+	reviewStale := false
 	for _, r := range cur {
+		// A lane dispatched to REVIEW an issue is not one of its authors.
+		// Without this the reviewer is counted as having worked the issue and
+		// every review is refused as self-review -- which is what happened the
+		// first time a review was dispatched against the issue it reviewed.
+		if r.Role == ledger.RoleReview {
+			// A review that failed, timed out, or is still running has not
+			// reviewed anything; counting it would let a crashed seat satisfy
+			// the gate.
+			if r.Issue == issue && r.Lane == reviewerLane && r.State == ledger.Complete {
+				switch {
+				case !approved(r.Result):
+					reviewNotApproved = true
+				case !headAt.IsZero() && r.At.Before(headAt):
+					// The review ran before this head existed.
+					reviewStale = true
+				default:
+					reviewed = true
+				}
+			}
+			continue
+		}
 		if r.Issue == issue && r.Lane != "" {
 			authors[r.Lane] = true
+			// Only a turn that actually finished is authorship evidence. A
+			// failed or unobserved turn proves nothing about who wrote the
+			// work.
+			if r.State == ledger.Complete {
+				derived = true
+			}
 		}
 	}
 	if len(authors) == 0 {
@@ -104,6 +181,23 @@ func independent(l *ledger.Ledger, issue, reviewerLane string) []string {
 	}
 	if authors[reviewerLane] {
 		return []string{"reviewer lane " + reviewerLane + " also authored work on issue " + issue + " -- self-review"}
+	}
+	if !reviewed {
+		switch {
+		case reviewStale:
+			return []string{"reviewer lane " + reviewerLane + " reviewed issue " + issue +
+				" before the current head existed -- that review saw different code"}
+		case reviewNotApproved:
+			return []string{"reviewer lane " + reviewerLane + "'s review of issue " + issue +
+				" does not say APPROVE -- a review that refused, could not determine, or cannot be read is not an approval"}
+		default:
+			return []string{"reviewer lane " + reviewerLane + " has no completed review on record for issue " + issue +
+				" -- an unverified reviewer name cannot establish independence"}
+		}
+	}
+	if !derived {
+		return []string{"authorship for issue " + issue + " is asserted by `estate authored`, not derived from a dispatched turn -- " +
+			"an assertion by the party it benefits cannot establish independence. This is for a human to merge"}
 	}
 	return nil
 }
@@ -130,9 +224,29 @@ func Evaluate(repo string, pr int, reviewerLane string, issue string, l *ledger.
 		d.Allow = false
 		d.Reasons = append(d.Reasons, bad...)
 	}
-	if bad := independent(l, issue, reviewerLane); len(bad) > 0 {
+	if bad := independentAt(l, issue, reviewerLane, headCommittedAt(repo, p.HeadOID)); len(bad) > 0 {
 		d.Allow = false
 		d.Reasons = append(d.Reasons, bad...)
 	}
 	return d
+}
+
+// headCommittedAt returns when the commit being merged was created, so a
+// review recorded before it can be recognised as stale. A time we cannot read
+// is the zero time, which disables the staleness test rather than inventing
+// one: the other checks still apply and the caller is told nothing false.
+func headCommittedAt(repo, oid string) time.Time {
+	if oid == "" {
+		return time.Time{}
+	}
+	out, err := exec.Command("gh", "api",
+		fmt.Sprintf("repos/%s/commits/%s", repo, oid), "-q", ".commit.committer.date").Output()
+	if err != nil {
+		return time.Time{}
+	}
+	at, err := time.Parse(time.RFC3339, strings.TrimSpace(string(out)))
+	if err != nil {
+		return time.Time{}
+	}
+	return at
 }
