@@ -24,8 +24,9 @@ and still do.
 > under `scripts/supervisor/` and `tests/supervisor/` was deleted to
 > `reference/`; `git ls-files scripts/supervisor` and `git ls-files
 > tests/supervisor` both return **0**. The daemon today is Go, in
-> `src/estate`, and is a much smaller surface: `pressure`, `dispatch`,
-> `merge`, `tasks`/`inflight`, `tick`, `authored`, `corpus-audit`.
+> `src/estate`, and is a much smaller surface. Run `go run ./src/estate` with
+> no arguments for the current list rather than trusting one written here —
+> it is growing, and a list in prose goes stale between commits.
 >
 > The RULES below are still what this estate believes, and that is why the
 > section survives — but **check any specific file, flag or script against
@@ -283,10 +284,13 @@ families; look there, not for the single file.
 > it will refuse anything.
 >
 > The guards that do run today are in Go, in `src/estate`: `estate pressure`
-> (host capacity, fails closed when it cannot measure), `estate merge`
-> (checks green at head, plus reviewer ≠ author read from the ledger), and
-> `estate tick check` (the Director's own stop condition). Reimplementing any
-> row below means writing it in Go, not restoring the script.
+> (host capacity, fails closed when it cannot measure) and `estate merge`
+> (checks green at head, plus reviewer ≠ author read from the ledger).
+> Reimplementing any row below means writing it in Go, not restoring the
+> script. `src/estate/agents_md_test.go` fails the build if this file names
+> an `estate` subcommand that does not exist — added because three review
+> rounds on one pull request each caught a claim about a command that was
+> real in the author's working tree and absent from the branch.
 
 Each of these *once* refused your dispatch, your merge, or your PR, and the
 "Implemented in" column says where the rule was encoded so it can be read
