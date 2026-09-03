@@ -128,6 +128,60 @@ func TestAggregate_MixedHarnessSetNeverSumsAcrossHarnesses(t *testing.T) {
 	}
 }
 
+// TestAggregate_ByModelSumsAcrossTurnsAndNeverForCodex covers #981: a
+// harness that reports SpendByModel gets a per-model breakdown, summed
+// correctly when two turns both name the same model; a harness that never
+// reports one (codex) must leave TurnsWithModelBreakdown at 0 and ByModel
+// empty, never inventing a breakdown from its scalar cost/tokens.
+func TestAggregate_ByModelSumsAcrossTurnsAndNeverForCodex(t *testing.T) {
+	rep := Aggregate([]ledger.Record{
+		{ID: "a1", Harness: "claude", State: ledger.Complete, SpendCostUSD: f64(0.1883826), SpendByModel: map[string]ledger.ModelSpend{
+			"claude-haiku-4-5-20251001": {CostUSD: f64(0.000591), InputTokens: i64(1)},
+			"claude-sonnet-5":           {CostUSD: f64(0.1877916), InputTokens: i64(1)},
+		}},
+		{ID: "a2", Harness: "claude", State: ledger.Complete, SpendCostUSD: f64(0.05), SpendByModel: map[string]ledger.ModelSpend{
+			"claude-sonnet-5": {CostUSD: f64(0.05), InputTokens: i64(3)},
+		}},
+		{ID: "a3", Harness: "claude", State: ledger.Complete, SpendCostUSD: f64(0.02)}, // no breakdown -- envelope predates modelUsage
+		{ID: "c1", Harness: "codex", State: ledger.Complete, SpendInputTokens: i64(27131)},
+	})
+	byName := map[string]HarnessSpend{}
+	for _, g := range rep.ByHarness {
+		byName[g.Harness] = g
+	}
+
+	claude := byName["claude"]
+	if claude.TurnsWithModelBreakdown != 2 {
+		t.Fatalf("want 2 claude turns with a model breakdown (a3 has none), got %d", claude.TurnsWithModelBreakdown)
+	}
+	if len(claude.ByModel) != 2 {
+		t.Fatalf("want 2 distinct models, got %+v", claude.ByModel)
+	}
+	models := map[string]ModelSpend{}
+	for _, m := range claude.ByModel {
+		models[m.Model] = m
+	}
+	haiku := models["claude-haiku-4-5-20251001"]
+	if haiku.TurnsWithCost != 1 || haiku.TotalCostUSD != 0.000591 {
+		t.Fatalf("unexpected haiku sum: %+v", haiku)
+	}
+	sonnet := models["claude-sonnet-5"]
+	if sonnet.TurnsWithCost != 2 || sonnet.TotalCostUSD < 0.23779 || sonnet.TotalCostUSD > 0.23780 {
+		t.Fatalf("sonnet must sum across both turns that named it, got %+v", sonnet)
+	}
+	if sonnet.InputTokens != 4 {
+		t.Fatalf("sonnet InputTokens should sum 1+3=4 across the two turns, got %d", sonnet.InputTokens)
+	}
+
+	codex := byName["codex"]
+	if codex.TurnsWithModelBreakdown != 0 {
+		t.Fatalf("codex must never report a model breakdown, got TurnsWithModelBreakdown=%d", codex.TurnsWithModelBreakdown)
+	}
+	if len(codex.ByModel) != 0 {
+		t.Fatalf("codex.ByModel must be empty, got %+v", codex.ByModel)
+	}
+}
+
 func harnessNames(gs []HarnessSpend) []string {
 	out := make([]string, len(gs))
 	for i, g := range gs {

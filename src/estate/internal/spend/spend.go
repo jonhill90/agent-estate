@@ -52,6 +52,41 @@ type HarnessSpend struct {
 	// #977, or a turn whose harness output could not be read at all. This
 	// is coverage, not zero spend, and Report says so.
 	TurnsWithNeither int
+
+	// TurnsWithModelBreakdown is how many of this group's Turns had a
+	// non-nil SpendByModel -- almost always fewer than Turns, and the gap
+	// is coverage, not a claim those turns cost nothing per model. Every
+	// codex turn leaves this at 0 (agent-estate#981: codex reports no
+	// per-model breakdown at all); a claude turn whose envelope omitted
+	// modelUsage does too.
+	TurnsWithModelBreakdown int
+
+	// ByModel is this harness's spend broken down further by model id,
+	// summed only over the TurnsWithModelBreakdown turns above -- never
+	// inferred from TotalCostUSD by guessing which model ran. Sorted by
+	// model name. Empty whenever TurnsWithModelBreakdown is 0; a caller
+	// must check that count before reading ByModel as complete coverage of
+	// this harness's turns.
+	ByModel []ModelSpend
+}
+
+// ModelSpend is one model's contribution to a harness's turns, summed only
+// from the turns whose SpendByModel reported that model -- same
+// pointer-means-absent discipline upstream (internal/harness.ModelSpend,
+// ledger.ModelSpend) collapses into these plain sums, since by aggregation
+// time "did this turn report a figure" is a per-field TurnsWith* count, not
+// a pointer.
+type ModelSpend struct {
+	Model string
+
+	TurnsWithCost int
+	TotalCostUSD  float64
+
+	TurnsWithTokens     int
+	InputTokens         int64
+	OutputTokens        int64
+	CacheReadTokens     int64
+	CacheCreationTokens int64
 }
 
 // Report is spend grouped by harness, plus the coverage figures that keep a
@@ -87,6 +122,29 @@ func Aggregate(records []ledger.Record) Report {
 		return g
 	}
 
+	// modelGroups is keyed harness -> model id, kept separate from groups
+	// above so a harness with zero model breakdowns (codex, always) ends up
+	// with a nil modelGroups[h] rather than an empty-but-present map.
+	modelGroups := map[string]map[string]*ModelSpend{}
+	modelOrder := map[string][]string{}
+	getModel := func(h, model string) *ModelSpend {
+		if h == "" {
+			h = unknownHarness
+		}
+		byModel, ok := modelGroups[h]
+		if !ok {
+			byModel = map[string]*ModelSpend{}
+			modelGroups[h] = byModel
+		}
+		if m, ok := byModel[model]; ok {
+			return m
+		}
+		m := &ModelSpend{Model: model}
+		byModel[model] = m
+		modelOrder[h] = append(modelOrder[h], model)
+		return m
+	}
+
 	for _, r := range records {
 		g := get(r.Harness)
 		g.Turns++
@@ -117,6 +175,34 @@ func Aggregate(records []ledger.Record) Report {
 		if !hasCost && !hasTokens {
 			g.TurnsWithNeither++
 		}
+
+		if r.SpendByModel != nil {
+			g.TurnsWithModelBreakdown++
+			for model, ms := range r.SpendByModel {
+				m := getModel(r.Harness, model)
+				if ms.CostUSD != nil {
+					m.TurnsWithCost++
+					m.TotalCostUSD += *ms.CostUSD
+				}
+				hasModelTokens := ms.InputTokens != nil || ms.OutputTokens != nil ||
+					ms.CacheReadTokens != nil || ms.CacheCreationTokens != nil
+				if hasModelTokens {
+					m.TurnsWithTokens++
+					if ms.InputTokens != nil {
+						m.InputTokens += *ms.InputTokens
+					}
+					if ms.OutputTokens != nil {
+						m.OutputTokens += *ms.OutputTokens
+					}
+					if ms.CacheReadTokens != nil {
+						m.CacheReadTokens += *ms.CacheReadTokens
+					}
+					if ms.CacheCreationTokens != nil {
+						m.CacheCreationTokens += *ms.CacheCreationTokens
+					}
+				}
+			}
+		}
 	}
 
 	sort.Strings(order)
@@ -136,6 +222,13 @@ func Aggregate(records []ledger.Record) Report {
 	rep := Report{}
 	for _, h := range sorted {
 		g := *groups[h]
+		if models := modelOrder[h]; len(models) > 0 {
+			sortedModels := append([]string(nil), models...)
+			sort.Strings(sortedModels)
+			for _, model := range sortedModels {
+				g.ByModel = append(g.ByModel, *modelGroups[h][model])
+			}
+		}
 		rep.ByHarness = append(rep.ByHarness, g)
 		rep.TotalTurns += g.Turns
 		rep.TurnsWithAnySpend += g.Turns - g.TurnsWithNeither

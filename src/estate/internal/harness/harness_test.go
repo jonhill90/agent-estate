@@ -196,6 +196,55 @@ func TestClaudeSpendOnUnparseableOutputIsAnError(t *testing.T) {
 	}
 }
 
+// realClaudeEnvelope has no modelUsage block at all -- an envelope this
+// shape must leave ByModel nil, not an empty-but-non-nil map (ModelSpend's
+// own doc comment says an empty map is not a state this package produces).
+func TestClaudeSpendWithNoModelUsageLeavesByModelNil(t *testing.T) {
+	s, err := claudeSpend([]byte(realClaudeEnvelope))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.ByModel != nil {
+		t.Errorf("ByModel = %+v, want nil -- this envelope carries no modelUsage block", s.ByModel)
+	}
+}
+
+// realClaudeEnvelopeWithModelUsage is the two-model payload from
+// docs/spend-observation.md: Claude Code dispatched a haiku sub-agent
+// inside a sonnet turn, and modelUsage carries each model's own share.
+const realClaudeEnvelopeWithModelUsage = `{"is_error":false,"total_cost_usd":0.1883826,
+"usage":{"input_tokens":2,"cache_creation_input_tokens":30393,
+"cache_read_input_tokens":17892,"output_tokens":4},
+"modelUsage":{"claude-haiku-4-5-20251001":{"inputTokens":1,"outputTokens":1,
+"cacheReadInputTokens":0,"cacheCreationInputTokens":0,"costUSD":0.000591},
+"claude-sonnet-5":{"inputTokens":1,"outputTokens":3,
+"cacheReadInputTokens":17892,"cacheCreationInputTokens":30393,"costUSD":0.1877916}},
+"result":"pong"}`
+
+func TestClaudeSpendParsesModelUsageIntoByModel(t *testing.T) {
+	s, err := claudeSpend([]byte(realClaudeEnvelopeWithModelUsage))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(s.ByModel) != 2 {
+		t.Fatalf("ByModel = %+v, want 2 entries", s.ByModel)
+	}
+	haiku, ok := s.ByModel["claude-haiku-4-5-20251001"]
+	if !ok || haiku.CostUSD == nil || *haiku.CostUSD != 0.000591 {
+		t.Errorf("haiku entry = %+v, want costUSD 0.000591", haiku)
+	}
+	sonnet, ok := s.ByModel["claude-sonnet-5"]
+	if !ok || sonnet.CostUSD == nil || *sonnet.CostUSD != 0.1877916 {
+		t.Errorf("sonnet entry = %+v, want costUSD 0.1877916", sonnet)
+	}
+	// The reconciliation check docs/spend-observation.md's #981 section
+	// states: the two model costs sum exactly to the turn's total_cost_usd.
+	sum := *haiku.CostUSD + *sonnet.CostUSD
+	if s.CostUSD == nil || sum != *s.CostUSD {
+		t.Errorf("haiku + sonnet costUSD = %v, want it to equal total_cost_usd %v", sum, s.CostUSD)
+	}
+}
+
 // realCodexTurnCompleted is codex exec --json's real "turn.completed" line,
 // captured live 2026-09-03 -- see docs/spend-observation.md.
 const realCodexJSONL = `{"type":"thread.started","thread_id":"01a06826-ac92-7b62-8418-247dee57b779"}
