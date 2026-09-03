@@ -596,7 +596,11 @@ func main() {
 	if estateLedger == "" {
 		estateLedger = filepath.Join(os.Getenv("HOME"), ".local", "state", "estate", "ledger.jsonl")
 	}
-	estateTicks := *estateTickLog
+	// Resolve relative to the repository, not to wherever the app was
+	// launched from. The default is "docs/tick-log.jsonl"; launched from
+	// anywhere else it resolved to nothing and Home reported the Director as
+	// not running -- blindness rendered as absence.
+	estateTicks := estatus.Resolve(*estateTickLog)
 
 	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel, flowModel, chatModel).
 		WithEstateStatus(func() estatus.Status { return estatus.Read(estateLedger, estateTicks) }).

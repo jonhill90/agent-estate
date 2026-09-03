@@ -194,3 +194,39 @@ func TestLinesShowsInFlightDispatches(t *testing.T) {
 		t.Errorf("an in-flight dispatch must be listed; got:\n%s", out)
 	}
 }
+
+// Issue jonhill90/agent-estate#920, found by a council convened after
+// jonhill90/agent-estate#918 merged: readLines
+// mapped ANY os.IsNotExist to Absent, so a wiped or mistyped path rendered
+// as the calm "no turn has ever been dispatched" message.
+//
+// The backend this views, src/estate's ledger, deliberately distinguishes
+// those cases -- a missing file at a default path is a first run; a missing
+// file whose DIRECTORY is also missing means we were pointed somewhere that
+// does not exist. The viewer was softer than the thing it views, on exactly
+// the case the backend calls dangerous.
+func TestMissingParentIsUnreadableNotAbsent(t *testing.T) {
+	// Parent exists, file does not: a legitimate first run.
+	firstRun := filepath.Join(t.TempDir(), "ledger.jsonl")
+	s := Read(firstRun, firstRun)
+	if s.Ledger != Absent {
+		t.Errorf("a missing file in an existing directory is Absent, got %v", s.Ledger)
+	}
+
+	// Parent does not exist: we were pointed somewhere that is not there.
+	bogus := filepath.Join(t.TempDir(), "no-such-dir", "ledger.jsonl")
+	b := Read(bogus, bogus)
+	if b.Ledger != Unreadable {
+		t.Errorf("a missing PARENT directory is Unreadable, got %v", b.Ledger)
+	}
+	if b.LedgerErr == nil {
+		t.Error("Unreadable must carry the reason")
+	}
+	joined := strings.Join(Lines(b), "\n")
+	if strings.Contains(joined, "no turn has ever been dispatched") {
+		t.Errorf("a path that does not exist must not render as a calm first run:\n%s", joined)
+	}
+	if !strings.Contains(joined, "UNREADABLE") {
+		t.Errorf("it must say it could not look:\n%s", joined)
+	}
+}

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -166,6 +167,15 @@ func readLines(path string) ([]string, Availability, error) {
 	}
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
+		// A missing file whose DIRECTORY exists is a first run. A missing
+		// file whose directory is also missing means we were pointed
+		// somewhere that does not exist -- a wiped state dir or a typo --
+		// and reporting that as "nothing has happened yet" is the instrument
+		// claiming absence when it is merely blind. src/estate's own ledger
+		// draws the same distinction for the same reason.
+		if _, derr := os.Stat(filepath.Dir(path)); derr != nil {
+			return nil, Unreadable, fmt.Errorf("%s: its directory does not exist, so this path was never going to hold anything: %w", path, derr)
+		}
 		return nil, Absent, nil
 	}
 	if err != nil {
