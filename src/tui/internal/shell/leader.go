@@ -67,6 +67,15 @@ var leaderBindings = []binding{
 	{"a", "agents", PaneAgents},
 	{"k", "knowledge", PaneKnowledge},
 	{"d", "dashboard", PaneDashboard},
+	// The three decide-by-variant lane-chat panes have no sidebar route by
+	// design, so the fuzzy finder -- which reads the nav tree -- cannot see
+	// them. They were reached only by f7/f8/f9, and deleting those keys
+	// orphaned all three: unreachable by keyboard AND mouse. Two council
+	// seats caught it. A pane with no route needs an explicit binding or it
+	// does not exist.
+	{"p", "lane chat", PaneLaneChatLanePrimary},
+	{"r", "room chat", PaneLaneChatRoomPrimary},
+	{"v", "chat list", PaneLaneChatUnifiedList},
 }
 
 // FinderKey opens the fuzzy jump list from the leader menu, as

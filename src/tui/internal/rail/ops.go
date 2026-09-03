@@ -367,3 +367,8 @@ func (m Model) renderRemoveConfirm(innerWidth int, st railStyles) []string {
 // Exported deliberately rather than inferred from focus: the shell must ask
 // the component that owns the state, not guess from where the cursor is.
 func (m Model) CapturingText() bool { return m.opsMode == opsModeAdding }
+
+// EnterAddForTest puts the rail into name-entry mode. Exported for the
+// shell's regression test, which must assert the shell yields its leader key
+// to this state -- and cannot reach opsMode from another package.
+func (m Model) EnterAddForTest() Model { m.opsMode = opsModeAdding; return m }
