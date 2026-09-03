@@ -39,6 +39,15 @@ func dbPath() (string, error) {
 	return filepath.Join(home, "corpus", "ledger.sqlite3"), nil
 }
 
+// Path returns the corpus database path this process will actually read --
+// the same resolution Hard() and Audit() use. AGENTS.md documents this path
+// in prose ("Before you ask Jon anything -- read this first"); it drifted
+// out of sync with the real one once already (agent-estate#942). Exported so
+// a test can check the doc against this function instead of a literal.
+func Path() (string, error) {
+	return dbPath()
+}
+
 const sep = "\x1f"
 
 // Hard returns every binding parameter. An error here must stop a dispatch,

@@ -43,10 +43,19 @@ somewhere polite.
 
 **Exhaust the record before a question reaches him**, in this order:
 
-1. **Query the corpus.** `~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3`
-   — 3,700+ of his own prompts, 900+ live hard constraints. Views:
-   `live_parameters`, `open_questions`, `unacknowledged`, `possibility_count`.
-   If you have not queried it this session, you have not earned the question.
+1. **Query the corpus.** `~/corpus/ledger.sqlite3` — the same path
+   `internal/corpus.Path()` resolves for every dispatch's own grounding, so
+   the two cannot drift apart unnoticed
+   (`src/estate/internal/corpus/agents_md_test.go` fails the build if they
+   do). Measured read-only 2026-09-03: 5,403 prompts, 1,104 live hard
+   constraints in `live_parameters` (re-run the count yourself before citing
+   it further — it grows). Views: `live_parameters`, `open_questions`,
+   `unacknowledged`, `possibility_count`.
+   `~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3` is a **different,
+   nearly-empty database** (0 live parameters measured the same day) — do not
+   query it for this rule (agent-estate#942).
+   If you have not queried the corpus this session, you have not earned the
+   question.
 2. **Read the docs and the code.** `agent-dotfiles/docs/` carries ~2,467 lines
    of spec — PRD, SPEC, loop-engineering, supervisor-disposition, loop-signals.
    A loop was once declared "never planned" because someone searched the wrong
