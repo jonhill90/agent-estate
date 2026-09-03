@@ -41,10 +41,22 @@
 // full of live turns. Transcripts on disk are bounded the same way, by
 // Config.Keep.
 //
+// LIVENESS IS DECIDED WITHOUT THE DYING PROCESS'S COOPERATION. What makes a
+// window retireable is ended(), and it does NOT simply look for the footer
+// Close() writes: a footer is only ever produced by a graceful exit, and the
+// deaths this estate has are SIGKILL and the OOM killer. A bound whose
+// liveness signal requires cooperation degrades into a permanent refusal
+// after enough hard deaths -- see ended's own comment for the three
+// cooperation-free signals that replaced it.
+//
 // TMUX SAFETY. A bare `tmux kill-server` from a lane destroyed this estate
 // three times in one day, and a loop over window INDEXES once destroyed the
 // Telegram poller, because killing window 4 renumbers 5 into 4. So:
 //
+//   - Every tmux invocation goes through tmuxCmd, which refuses any verb
+//     outside a six-entry allowlist (see allowedVerbs). That is the
+//     enforcement: a control verb does not run here regardless of which file
+//     asked for it or how the string was assembled.
 //   - Nothing here runs kill-server or kill-session, ever. The only
 //     destructive verb in this package is kill-window.
 //   - kill-window is only ever given a `#{window_id}` (`@7`) read out of
@@ -76,8 +88,10 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -86,12 +100,22 @@ import (
 // somebody else's and is never touched, whatever session it is in.
 const WindowPrefix = "estate-turn-"
 
-// footerMarker is what Close() stamps at the end of a transcript. Its
-// presence is how a later Open() tells an ended mirror (retireable) from a
-// live one (never retired). It is deliberately a property of the transcript,
-// not a second registry file: the transcript is the record, and a registry
-// that could disagree with it would be a new class of drift.
+// footerMarker is what Close() stamps at the end of a transcript. It is the
+// FIRST of three signals ended() uses, not the only one -- see ended's own
+// comment for why a footer alone is not a liveness test.
+//
+// It is deliberately a property of the transcript, not a second registry
+// file: the transcript is the record, and a registry that could disagree with
+// it would be a new class of drift.
 const footerMarker = "=== estate: turn ended"
+
+// ownerMarker prefixes the header line naming the process that is writing a
+// transcript. It exists because a footer is only ever written by a GRACEFUL
+// exit, and the deaths this estate actually suffers are not graceful -- this
+// host was OOM-killed the day this package was written, and SIGKILL skips
+// every defer. A pid is a liveness signal the dying process does not have to
+// cooperate to produce.
+const ownerMarker = "owner-pid: "
 
 var (
 	// ErrDisabled means the caller switched mirroring off. Not a failure.
@@ -132,6 +156,21 @@ type Config struct {
 	// envelope at the end), and a pane that has shown nothing for ten minutes
 	// is indistinguishable from a pane that is broken. Zero disables it.
 	Heartbeat time.Duration
+	// MaxAge is the backstop half of the liveness test: a transcript with no
+	// footer that has not been written to for longer than this belongs to a
+	// turn that cannot still be running, whatever a pid says. It must stay
+	// comfortably LONGER than the caller's own turn timeout (45m in
+	// `estate dispatch`), because the only cost of being generous here is a
+	// dead pane surviving a while, while the cost of being mean is retiring a
+	// live turn's screen.
+	MaxAge time.Duration
+	// OwnerPID is the process whose death means this transcript can never gain
+	// a footer. Zero means this process. Injectable so a test can write a
+	// transcript owned by a pid it controls the liveness of.
+	OwnerPID int
+	// Alive answers "is that pid still running". Nil means the real probe.
+	// A probe that cannot tell must answer true: never retire on ignorance.
+	Alive func(pid int) bool
 	// Now is the clock, injectable for tests.
 	Now func() time.Time
 }
@@ -147,6 +186,10 @@ func Default(max int) Config {
 		Keep:      100,
 		Protected: []string{"Hill90"},
 		Heartbeat: 15 * time.Second,
+		// Twice the caller's 45m turn timeout. A turn that reached the timeout
+		// is killed by its own context, so a transcript untouched for 90
+		// minutes cannot belong to anything still running.
+		MaxAge: 90 * time.Minute,
 	}
 }
 
@@ -171,10 +214,49 @@ func (c Config) withDefaults() Config {
 	if c.Keep <= 0 {
 		c.Keep = 100
 	}
+	if c.MaxAge <= 0 {
+		c.MaxAge = 90 * time.Minute
+	}
+	if c.OwnerPID == 0 {
+		c.OwnerPID = os.Getpid()
+	}
+	if c.Alive == nil {
+		c.Alive = pidAlive
+	}
 	if c.Now == nil {
 		c.Now = time.Now
 	}
 	return c
+}
+
+// pidAlive is the real liveness probe. Signal 0 delivers nothing; it only
+// asks the kernel whether the pid can be signalled.
+//
+// EVERY UNCERTAIN ANSWER IS "ALIVE". A permission error means the process
+// exists and belongs to someone else; a lookup that fails for any other
+// reason means we could not tell. Both return true, because the cost of a
+// wrong "dead" is retiring a running turn's screen and the cost of a wrong
+// "alive" is a dead pane lingering until MaxAge catches it.
+func pidAlive(pid int) bool {
+	if pid <= 0 {
+		return false
+	}
+	p, err := os.FindProcess(pid)
+	if err != nil {
+		return true
+	}
+	err = p.Signal(syscall.Signal(0))
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, syscall.EPERM), errors.Is(err, os.ErrPermission):
+		return true
+	case errors.Is(err, syscall.ESRCH), errors.Is(err, os.ErrProcessDone):
+		return false
+	default:
+		// An answer nobody recognises is not evidence of death.
+		return true
+	}
 }
 
 // Meta is what the header of a transcript states about the turn, all of it
@@ -318,6 +400,9 @@ func (m *Mirror) writeHeader() {
 	fmt.Fprintf(&b, "harness:  %s\n", m.meta.Harness)
 	fmt.Fprintf(&b, "worktree: %s\n", m.meta.Worktree)
 	fmt.Fprintf(&b, "started:  %s\n", m.started.Format(time.RFC3339))
+	// The liveness signal, written at the top where it cannot depend on the
+	// dying process cooperating later. See ended().
+	fmt.Fprintf(&b, "%s%d\n", ownerMarker, m.cfg.OwnerPID)
 	b.WriteString("\nThis pane is a MIRROR of the turn's output, not a terminal it runs in.\n")
 	b.WriteString("The estate never types into it and nothing you type here reaches the agent.\n")
 	b.WriteString("Killing this pane does not kill the turn; the turn is a subprocess elsewhere.\n")
@@ -531,12 +616,51 @@ func (c Config) checkSocketDir() error {
 	return nil
 }
 
-// tmuxCmd builds a tmux invocation scoped to cfg's socket directory. When
-// TmuxTmpdir is set the command runs against a private server with $TMUX
-// unset -- the isolation idiom every test in this repo must use, so no test
-// can address the default socket. Callers must have passed checkSocketDir
-// first; see its comment for what an unusable directory silently does.
+// allowedVerbs is every tmux verb this package may run, and the whole of it.
+//
+// THIS IS THE MECHANISM, NOT THE SOURCE SCANS. "This package is a viewer,
+// never a control path" was previously guarded only by reading source for
+// banned strings, which a sibling file in the same package or a verb built
+// from concatenated literals walks straight past (both demonstrated in review
+// of #1003). An allowlist checked where the command is actually built cannot
+// be evaded by how the verb was spelled or which file spelled it: a verb that
+// is not on this list does not run, however it was computed.
+//
+// Note what is on it: five read/create verbs, and exactly one destructive
+// one. kill-window is here because the bound needs it; kill-server,
+// kill-session and kill-pane are absent, and so is every verb that writes
+// INTO a pane (send-keys, paste-buffer, respawn-*, run-shell).
+var allowedVerbs = map[string]bool{
+	"has-session":     true,
+	"new-session":     true,
+	"list-windows":    true,
+	"display-message": true,
+	"new-window":      true,
+	"kill-window":     true,
+}
+
+// tmuxCmd builds a tmux invocation scoped to cfg's socket directory, and
+// refuses any verb outside allowedVerbs. When TmuxTmpdir is set the command
+// runs against a private server with $TMUX unset -- the isolation idiom every
+// test in this repo must use, so no test can address the default socket.
+// Callers must have passed checkSocketDir first; see its comment for what an
+// unusable directory silently does.
+//
+// A refused verb is returned as a command that cannot start (exec.Cmd.Err is
+// returned by Start, so Run/Output/CombinedOutput all surface it) rather than
+// as a panic or an os.Exit: this package must never be able to take a running
+// turn down, and every caller here already treats a failed tmux call as "no
+// pane", which is the correct outcome for a verb that should not exist.
 func tmuxCmd(cfg Config, args ...string) *exec.Cmd {
+	if len(args) == 0 || !allowedVerbs[args[0]] {
+		verb := "<none>"
+		if len(args) > 0 {
+			verb = args[0]
+		}
+		c := exec.Command("tmux")
+		c.Err = fmt.Errorf("mirror: refusing tmux verb %q -- this package is a viewer; only %s may run", verb, strings.Join(sortedVerbs(), ", "))
+		return c
+	}
 	c := exec.Command("tmux", args...)
 	if cfg.TmuxTmpdir != "" {
 		env := make([]string, 0, len(os.Environ())+1)
@@ -549,6 +673,15 @@ func tmuxCmd(cfg Config, args ...string) *exec.Cmd {
 		c.Env = append(env, "TMUX_TMPDIR="+cfg.TmuxTmpdir)
 	}
 	return c
+}
+
+func sortedVerbs() []string {
+	vs := make([]string, 0, len(allowedVerbs))
+	for v := range allowedVerbs {
+		vs = append(vs, v)
+	}
+	sort.Strings(vs)
+	return vs
 }
 
 // target exact-matches a session. tmux prefix-matches a bare name, so
@@ -599,15 +732,79 @@ func windows(cfg Config) ([]win, error) {
 	return ws, nil
 }
 
-// ended reports whether a transcript carries Close's footer. A transcript
-// that cannot be read at all is treated as ended: the window is following a
-// file nobody can read, which is not a mirror of anything live.
+// ended reports whether a turn is over, and therefore whether its window may
+// be retired and its transcript pruned.
+//
+// A FOOTER IS NOT A LIVENESS TEST, and treating it as one was a real defect
+// (found in review of #1003). Close() writes the footer, and Close() only
+// runs on a graceful exit. The deaths this estate actually has are SIGKILL
+// and the OOM killer, which skip every defer -- so "no footer" meant "live
+// forever", one poisoned window per hard death, until six of them filled the
+// bound and every later dispatch ran unmirrored with no cure but a human
+// removing a window by hand. That is the 176-worktree shape: nothing cleans
+// up at a non-graceful death.
+//
+// So liveness is decided by three signals, none of which needs the dying
+// process to have written anything:
+//
+//  1. The transcript cannot be read. Ended -- a window following a file
+//     nobody can read is not a mirror of anything live.
+//  2. The footer is there. Ended, and this stays the fast, exact answer for
+//     the overwhelmingly common graceful case.
+//  3. The owning process is gone. Ended -- a transcript's footer can only
+//     ever be written by the process named in its own header, so once that
+//     pid is not running, no footer is coming. An UNCERTAIN probe answers
+//     "alive" (see pidAlive), so this only fires on a positive death.
+//  4. Nothing has written to it for MaxAge. Ended -- the backstop for a
+//     transcript with no owner line (written by an older build) and for pid
+//     reuse, where a recycled pid makes a dead turn look live. A running turn
+//     writes a heartbeat every 15s and is killed by its own 45m timeout, so
+//     90 minutes of silence cannot be a live turn.
+//
+// The failure directions are deliberately asymmetric. Wrongly "ended"
+// retires a screen someone might be watching; wrongly "live" leaves a dead
+// pane up a little longer. Every uncertainty above resolves toward "live",
+// and MaxAge is the only thing that ever overrides that -- which is why it is
+// set at twice the turn timeout rather than near it.
 func ended(cfg Config, dispatchID string) bool {
-	b, err := os.ReadFile(filepath.Join(cfg.Dir, dispatchID+".log"))
+	// Idempotent, and it is what makes a zero-valued MaxAge mean "the
+	// default" rather than "everything is stale".
+	cfg = cfg.withDefaults()
+	path := filepath.Join(cfg.Dir, dispatchID+".log")
+	b, err := os.ReadFile(path)
 	if err != nil {
 		return true
 	}
-	return strings.Contains(string(b), footerMarker)
+	if strings.Contains(string(b), footerMarker) {
+		return true
+	}
+	if pid, ok := ownerPID(string(b)); ok && cfg.Alive != nil && !cfg.Alive(pid) {
+		return true
+	}
+	fi, serr := os.Stat(path)
+	if serr != nil {
+		return true
+	}
+	return cfg.Now().Sub(fi.ModTime()) > cfg.MaxAge
+}
+
+// ownerPID reads the pid the header names. Absent or unparseable is reported
+// as "no answer" rather than as pid 0, so a caller falls through to the age
+// backstop instead of treating a missing line as a dead process.
+func ownerPID(transcript string) (int, bool) {
+	i := strings.Index(transcript, ownerMarker)
+	if i < 0 {
+		return 0, false
+	}
+	rest := transcript[i+len(ownerMarker):]
+	if j := strings.IndexAny(rest, "\r\n"); j >= 0 {
+		rest = rest[:j]
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(rest))
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	return pid, true
 }
 
 // ownWindow is the window holding this process's own pane, if it has one. It

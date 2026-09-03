@@ -282,6 +282,26 @@ func usage() {
                                         that don't all report one
 
 Every gate fails closed: a limit that cannot be measured refuses.
+
+Watching a dispatched turn. Each turn is mirrored into a tmux window running
+'tail -f' on its own transcript (~/.local/state/estate/mirror/<id>.log). That
+pane is a VIEWER: nothing typed there reaches the agent, and killing it does
+not touch the turn. Windows are bounded by the same in-flight cap that bounds
+concurrent turns; a turn that cannot get one runs unmirrored rather than
+waiting. Environment:
+
+  ESTATE_MIRROR=0                       switch mirroring off entirely
+  ESTATE_MIRROR_SESSION=<name>          tmux session to open windows in
+                                        (default "estate")
+  ESTATE_MIRROR_DIR=<path>              where transcripts are written
+  ESTATE_MIRROR_TMUX_TMPDIR=<path>      scope every tmux call to a PRIVATE
+                                        socket directory, for a demo or an
+                                        end-to-end check that must not touch
+                                        the operator's own tmux server. The
+                                        directory must already exist: tmux
+                                        silently falls back to the default
+                                        socket otherwise, so a missing one is
+                                        refused rather than obeyed
 `)
 }
 
@@ -1127,8 +1147,13 @@ func main() {
 		// ends, so a pane a human opens after the fact says what happened
 		// instead of trailing off. Close is idempotent, so the real state
 		// recorded below wins and this only fires on a path that never got
-		// there. os.Exit skips defers, so the two exiting paths between here
-		// and the ledger append close explicitly.
+		// there. os.Exit skips defers, so EVERY exiting path between here and
+		// the ledger append closes explicitly -- there are three, and review
+		// of #1003 found the h.Start one missing while this comment claimed
+		// there were two. TestEveryExitInsideTheMirrorRegionStampsTheTranscript
+		// now enumerates them from the parsed source rather than asserting
+		// that some known strings are present, which is what let a third path
+		// hide.
 		defer mir.Close("unknown", "dispatch exited before recording a terminal state")
 
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
@@ -1141,6 +1166,7 @@ func main() {
 		turn, err := h.Start(ctx, wt.Path, grounded)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "estate:", err)
+			mir.Close("failed", "the harness could not build the turn: "+err.Error())
 			os.Exit(2)
 		}
 		defer turn.Cleanup()

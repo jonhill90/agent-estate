@@ -1,6 +1,7 @@
 package mirror
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -60,6 +61,12 @@ func shortTempDir(t *testing.T) string {
 // killIsolatedServer is the ONLY place a destructive server-wide verb appears
 // in this package's tests, and it refuses to run against anything but a
 // private socket directory this test itself created.
+//
+// It builds its own command rather than going through tmuxCmd, because
+// tmuxCmd now refuses kill-server outright (allowedVerbs). That refusal is
+// the point -- the production code may not run this verb at all, so a test
+// that needs it must say so in its own file, visibly, behind the two guards
+// below.
 func killIsolatedServer(t *testing.T, cfg Config) {
 	t.Helper()
 	if cfg.TmuxTmpdir == "" {
@@ -68,7 +75,22 @@ func killIsolatedServer(t *testing.T, cfg Config) {
 	if !strings.HasPrefix(cfg.TmuxTmpdir, sockRoot+"/") {
 		t.Fatalf("socket directory %q is not one this test made; refusing to kill", cfg.TmuxTmpdir)
 	}
-	tmuxCmd(cfg, "kill-server").Run()
+	isolatedTmux(cfg, "kill-server").Run()
+}
+
+// isolatedTmux is the tests' own tmux builder, carrying tmuxCmd's isolation
+// but not its verb allowlist. Only test setup and teardown may use it.
+func isolatedTmux(cfg Config, args ...string) *exec.Cmd {
+	c := exec.Command("tmux", args...)
+	env := make([]string, 0, len(os.Environ())+1)
+	for _, e := range os.Environ() {
+		if strings.HasPrefix(e, "TMUX=") || strings.HasPrefix(e, "TMUX_TMPDIR=") {
+			continue
+		}
+		env = append(env, e)
+	}
+	c.Env = append(env, "TMUX_TMPDIR="+cfg.TmuxTmpdir)
+	return c
 }
 
 func meta(id string) Meta {
@@ -372,6 +394,247 @@ func TestRefusesToRetireALiveTurnsWindow(t *testing.T) {
 	}
 }
 
+// --- liveness without cooperation ------------------------------------------
+
+// deadPID is a pid nothing owns. It is only ever handed to a fake Alive in
+// these tests, never signalled.
+const deadPID = 999001
+
+// hardKilled opens a mirror the way a dispatch does and then abandons it
+// WITHOUT Close, which is exactly what SIGKILL and the OOM killer do: no
+// footer is ever written, because defers do not run.
+func hardKilled(t *testing.T, cfg Config, id string) {
+	t.Helper()
+	cfg.OwnerPID = deadPID
+	m, err := Open(cfg, meta(id))
+	if err != nil {
+		t.Fatalf("Open(%s): %v", id, err)
+	}
+	// Release the file handle without stamping a footer -- a killed process
+	// leaves no footer, but it also leaves no open descriptor.
+	m.s.close()
+}
+
+// TestAHardKilledDispatchDoesNotPoisonTheBoundForever is the review's own
+// reproduction, now asserting the opposite outcome.
+//
+// Before: a transcript with no footer was "live" forever, so two hard-killed
+// dispatches at Max=2 made every later dispatch refuse with ErrAtCapacity,
+// permanently, curable only by a human removing a window. At the production
+// bound that is six deaths and then no dispatch is ever mirrored again.
+//
+// After: the owning process is gone, so no footer is ever coming, so the
+// window is retireable.
+func TestAHardKilledDispatchDoesNotPoisonTheBoundForever(t *testing.T) {
+	cfg := isolated(t)
+	cfg.Max = 2
+	// Nothing but the two abandoned turns is dead.
+	cfg.Alive = func(pid int) bool { return pid != deadPID }
+
+	for _, id := range []string{"1001-z1", "1001-z2"} {
+		hardKilled(t, cfg, id)
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := len(windowNames(t, cfg)); got != 2 {
+		t.Fatalf("setup: expected 2 zombie windows, got %v", windowNames(t, cfg))
+	}
+	// No footer anywhere -- the old signal is genuinely absent, so this test
+	// cannot be passing for the wrong reason.
+	for _, id := range []string{"1001-z1", "1001-z2"} {
+		if strings.Contains(read(t, filepath.Join(cfg.Dir, id+".log")), footerMarker) {
+			t.Fatalf("%s carries a footer; this is not the hard-kill case", id)
+		}
+	}
+
+	// Three later dispatches in a row must each get a window.
+	for i := 0; i < 3; i++ {
+		m, err := Open(cfg, meta(fmt.Sprintf("1001-later%d", i)))
+		if err != nil {
+			t.Fatalf("later dispatch %d was refused a mirror by dead windows: %v", i, err)
+		}
+		names := windowNames(t, cfg)
+		if len(names) > cfg.Max {
+			t.Fatalf("bound of %d exceeded: %v", cfg.Max, names)
+		}
+		found := false
+		for _, n := range names {
+			if n == WindowPrefix+m.meta.ID {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("later dispatch %d got no window: %v", i, names)
+		}
+		m.Close("complete", "")
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// TestALiveTurnIsNeverRetiredForLackOfAFooter is the other direction, and the
+// one that matters more: a running turn has no footer either, and must never
+// be mistaken for a zombie. Its pid is alive and its transcript is fresh, so
+// neither the pid signal nor the age backstop may fire.
+func TestALiveTurnIsNeverRetiredForLackOfAFooter(t *testing.T) {
+	cfg := isolated(t)
+	cfg.Max = 2
+	asked := 0
+	cfg.Alive = func(pid int) bool { asked++; return true }
+
+	live := make([]*Mirror, 0, 2)
+	for _, id := range []string{"1001-live1", "1001-live2"} {
+		m, err := Open(cfg, meta(id))
+		if err != nil {
+			t.Fatalf("Open(%s): %v", id, err)
+		}
+		live = append(live, m)
+	}
+	defer func() {
+		for _, m := range live {
+			m.Close("complete", "")
+		}
+	}()
+
+	if _, err := Open(cfg, meta("1001-live3")); err == nil {
+		t.Fatalf("a live turn's window was retired to make room for another")
+	} else if !strings.Contains(err.Error(), ErrAtCapacity.Error()) {
+		t.Fatalf("wrong refusal: %v", err)
+	}
+	if got := len(windowNames(t, cfg)); got != 2 {
+		t.Fatalf("a live turn lost its window: %v", windowNames(t, cfg))
+	}
+	if asked == 0 {
+		t.Fatalf("the pid signal was never consulted; this test proves nothing about it")
+	}
+}
+
+// TestAnUncertainProbeIsTreatedAsAlive: the failure directions are not
+// symmetric. Retiring a running turn's screen is worse than leaving a dead
+// pane up, so anything short of a positive death means live.
+func TestAnUncertainProbeIsTreatedAsAlive(t *testing.T) {
+	cfg := isolated(t)
+	cfg.Max = 1
+	cfg.Alive = func(pid int) bool { return true } // "could not tell" answers true
+	hardKilled(t, cfg, "1001-unsure")
+
+	if _, err := Open(cfg, meta("1001-next")); err == nil {
+		t.Fatalf("a window whose liveness could not be determined was retired anyway")
+	}
+}
+
+// TestAStaleTranscriptIsEndedEvenIfItsPidLooksAlive is the backstop, and it
+// is what stops pid REUSE from reintroducing the permanent poison: a recycled
+// pid makes a dead turn look live forever, so age has the final word. The
+// margin is deliberate -- MaxAge is twice the caller's own 45m turn timeout,
+// so nothing still running can reach it.
+func TestAStaleTranscriptIsEndedEvenIfItsPidLooksAlive(t *testing.T) {
+	cfg := isolated(t)
+	cfg.Max = 1
+	cfg.MaxAge = 90 * time.Minute
+	cfg.Alive = func(pid int) bool { return true } // pid reuse: it "exists"
+	hardKilled(t, cfg, "1001-stale")
+
+	// Age it past MaxAge. The transcript's own last write is the clock.
+	old := time.Now().Add(-2 * time.Hour)
+	p := filepath.Join(cfg.Dir, "1001-stale.log")
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	if !ended(cfg, "1001-stale") {
+		t.Fatalf("a transcript untouched for 2 hours is still reported live")
+	}
+	// Freshly written, same fake-alive pid, must still be live -- the
+	// backstop must not be doing all the work.
+	hardKilled(t, cfg, "1001-fresh")
+	if ended(cfg, "1001-fresh") {
+		t.Fatalf("a just-written transcript with a live pid was reported ended")
+	}
+}
+
+// TestATranscriptWithNoOwnerLineFallsBackToAge covers transcripts written by
+// a build before the owner line existed: no pid to ask about, so the age
+// backstop is the only signal, and a missing line must not read as pid 0.
+func TestATranscriptWithNoOwnerLineFallsBackToAge(t *testing.T) {
+	cfg := isolated(t)
+	cfg.MaxAge = time.Hour
+	cfg.Alive = func(pid int) bool {
+		t.Fatalf("the pid probe was called for a transcript that names no pid")
+		return false
+	}
+	p := filepath.Join(cfg.Dir, "1001-legacy.log")
+	if err := os.WriteFile(p, []byte("=== estate turn 1001-legacy ===\nno owner line here\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile: %v", err)
+	}
+	if ended(cfg, "1001-legacy") {
+		t.Fatalf("a fresh footerless transcript with no owner line was reported ended")
+	}
+	old := time.Now().Add(-2 * time.Hour)
+	if err := os.Chtimes(p, old, old); err != nil {
+		t.Fatalf("Chtimes: %v", err)
+	}
+	if !ended(cfg, "1001-legacy") {
+		t.Fatalf("an ancient footerless transcript with no owner line is still live")
+	}
+}
+
+// TestTheHeaderNamesTheProcessThatWouldWriteTheFooter: the whole liveness
+// chain rests on that line existing and being readable.
+func TestTheHeaderNamesTheProcessThatWouldWriteTheFooter(t *testing.T) {
+	cfg := isolated(t)
+	m, err := Open(cfg, meta("1001-owner"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer m.Close("complete", "")
+	pid, ok := ownerPID(read(t, m.Path()))
+	if !ok {
+		t.Fatalf("the transcript names no owning process:\n%s", read(t, m.Path()))
+	}
+	if pid != os.Getpid() {
+		t.Fatalf("owner-pid is %d, want this process %d", pid, os.Getpid())
+	}
+}
+
+// TestAHardKilledTurnsTranscriptIsEventuallyPruned: same root cause as the
+// bound. prune only ever removed ended transcripts, so a footerless one was
+// immortal on disk as well as on screen.
+// TestAHardKilledTurnsTranscriptIsEventuallyPruned: same root cause as the
+// bound, and the same fix. prune only ever removes ENDED transcripts, so
+// while "ended" meant "has a footer", a hard-killed turn's transcript was
+// immortal on disk as well as on screen -- it did not even count toward Keep.
+//
+// Max=1 so each new turn retires the previous window; once no window is
+// following a transcript, Keep may remove it.
+func TestAHardKilledTurnsTranscriptIsEventuallyPruned(t *testing.T) {
+	cfg := isolated(t)
+	cfg.Max = 1
+	cfg.Keep = 1
+	cfg.Alive = func(pid int) bool { return pid != deadPID }
+
+	ids := []string{"1001-k1", "1001-k2", "1001-k3", "1001-k4"}
+	for _, id := range ids {
+		hardKilled(t, cfg, id)
+		time.Sleep(10 * time.Millisecond)
+	}
+	logs := 0
+	entries, err := os.ReadDir(cfg.Dir)
+	if err != nil {
+		t.Fatalf("ReadDir: %v", err)
+	}
+	for _, e := range entries {
+		if strings.HasSuffix(e.Name(), ".log") {
+			logs++
+		}
+	}
+	// Keep (1) plus the one still on screen. Four hard-killed turns must not
+	// leave four transcripts.
+	if logs > cfg.Keep+cfg.Max {
+		t.Fatalf("hard-killed transcripts are never pruned: %d files with Keep=%d Max=%d", logs, cfg.Keep, cfg.Max)
+	}
+	if _, serr := os.Stat(filepath.Join(cfg.Dir, "1001-k4.log")); serr != nil {
+		t.Fatalf("pruning removed the most recent record: %v", serr)
+	}
+}
+
 func TestTranscriptsOnDiskAreBounded(t *testing.T) {
 	cfg := isolated(t)
 	cfg.Max = 2
@@ -564,41 +827,113 @@ func TestHeartbeatKeepsAPaneVisiblyAliveWhenAHarnessPrintsNothing(t *testing.T) 
 
 // --- structural guarantees ------------------------------------------------
 
-// TestThePackageHasNoControlPath is the invariant the issue turns on:
-// visibility is not transport. If any send-keys (or paste-buffer, or a write
-// into a pane by any other verb) ever appears in this package, this fails --
-// which is the only way "the estate must never type into that pane" survives
-// a future edit that looks locally reasonable.
-func TestThePackageHasNoControlPath(t *testing.T) {
-	src, err := os.ReadFile("mirror.go")
-	if err != nil {
-		t.Fatalf("reading own source: %v", err)
+// --- the control-path guarantee, and exactly how much each half holds -----
+
+// TestNoControlVerbCanRun is the PRIMARY guard, and the only one of the three
+// here that cannot be walked around. Every tmux invocation in this package is
+// built by tmuxCmd, and tmuxCmd refuses any verb outside allowedVerbs -- so a
+// control path does not run regardless of which file wrote it or how the verb
+// string was assembled. Review of #1003 defeated the source scan below twice
+// (a sibling file, and "send"+"-"+"keys"); neither evasion survives this.
+func TestNoControlVerbCanRun(t *testing.T) {
+	cfg := isolated(t)
+	if err := ensureSession(cfg); err != nil {
+		t.Fatalf("ensureSession: %v", err)
 	}
-	body := stripComments(string(src))
-	for _, banned := range []string{"send-keys", "paste-buffer", "load-buffer", "set-buffer", "run-shell", "respawn-pane", "respawn-window"} {
-		if strings.Contains(body, banned) {
-			t.Fatalf("mirror.go uses %q -- this package is a viewer, not a control path", banned)
+	m, err := Open(cfg, meta("1001-noctl"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer m.Close("complete", "")
+
+	// Every way this package could type into, or destroy more than, one
+	// window -- including a verb built at runtime, which no source scan sees.
+	built := "send" + "-" + "keys"
+	for _, verb := range []string{built, "paste-buffer", "load-buffer", "set-buffer", "run-shell", "respawn-pane", "respawn-window", "kill-server", "kill-session", "kill-pane"} {
+		out, rerr := tmuxCmd(cfg, verb, "-t", target(cfg.Session), "hello", "Enter").CombinedOutput()
+		if rerr == nil {
+			t.Fatalf("tmuxCmd ran %q: %s", verb, out)
+		}
+		if !strings.Contains(rerr.Error(), "refusing tmux verb") {
+			t.Fatalf("%q failed for the wrong reason (it must be REFUSED, not merely broken): %v", verb, rerr)
+		}
+	}
+	// And the refusal is a refusal, not collateral damage: the session and
+	// its mirror window are still there afterwards.
+	if got := len(windowNames(t, cfg)); got != 1 {
+		t.Fatalf("a refused verb disturbed the session: %v", windowNames(t, cfg))
+	}
+	// The one destructive verb the bound genuinely needs is still allowed --
+	// an allowlist that refused everything would pass this test by being
+	// useless.
+	if !allowedVerbs["kill-window"] {
+		t.Fatalf("kill-window is no longer allowed; the bound cannot be enforced")
+	}
+}
+
+// TestNoControlVerbIsWrittenAnywhereInThePackage is defence in depth over
+// TestNoControlVerbCanRun, and it is worth being exact about its reach:
+//
+//   - It reads EVERY non-test .go file in this package directory, not just
+//     mirror.go. A control path in a sibling file used to pass green.
+//   - It matches literal strings only. A verb assembled at runtime
+//     ("send" + "-" + "keys") is INVISIBLE to it. That hole is deliberate
+//     and is not closed here -- it is closed by tmuxCmd's allowlist, which
+//     rejects the verb when the command is built.
+//   - _test.go files are excluded because this file itself names every
+//     banned verb, on purpose, to prove they are refused.
+func TestNoControlVerbIsWrittenAnywhereInThePackage(t *testing.T) {
+	for name, body := range packageSources(t) {
+		for _, banned := range []string{"send-keys", "paste-buffer", "load-buffer", "set-buffer", "run-shell", "respawn-pane", "respawn-window"} {
+			if strings.Contains(body, banned) {
+				t.Fatalf("%s uses %q -- this package is a viewer, not a control path", name, banned)
+			}
 		}
 	}
 }
 
 // TestThePackageNeverAddressesAWholeServerOrSession guards invariant 4 at the
-// source level: the only destructive verb here is kill-window, and it is only
-// ever given a window id.
+// source level, across every file in the package. Same literal-only reach as
+// the test above; the enforcing half is allowedVerbs.
 func TestThePackageNeverAddressesAWholeServerOrSession(t *testing.T) {
-	src, err := os.ReadFile("mirror.go")
-	if err != nil {
-		t.Fatalf("reading own source: %v", err)
-	}
-	body := stripComments(string(src))
-	for _, banned := range []string{"kill-server", "kill-session", "kill-pane"} {
-		if strings.Contains(body, banned) {
-			t.Fatalf("mirror.go uses %q; nothing here may address more than one window", banned)
+	srcs := packageSources(t)
+	for name, body := range srcs {
+		for _, banned := range []string{"kill-server", "kill-session", "kill-pane"} {
+			if strings.Contains(body, banned) {
+				t.Fatalf("%s uses %q; nothing here may address more than one window", name, banned)
+			}
 		}
 	}
-	if !strings.Contains(body, "kill-window") {
+	if !strings.Contains(srcs["mirror.go"], "kill-window") {
 		t.Fatalf("kill-window vanished from mirror.go -- the bound is no longer enforced")
 	}
+}
+
+// packageSources returns every non-test .go file in this package directory,
+// comment-stripped. The scan is directory-wide because a guard that reads one
+// file cannot honestly claim to cover a package.
+func packageSources(t *testing.T) map[string]string {
+	t.Helper()
+	entries, err := os.ReadDir(".")
+	if err != nil {
+		t.Fatalf("reading package directory: %v", err)
+	}
+	out := map[string]string{}
+	for _, e := range entries {
+		name := e.Name()
+		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		b, rerr := os.ReadFile(name)
+		if rerr != nil {
+			t.Fatalf("reading %s: %v", name, rerr)
+		}
+		out[name] = stripComments(string(b))
+	}
+	if len(out) == 0 {
+		t.Fatalf("the package scan found no source files -- the guard is measuring nothing")
+	}
+	return out
 }
 
 // TestEveryTargetIsExactMatched: tmux prefix-matches a bare session name, so
@@ -623,7 +958,9 @@ func TestEveryTargetIsExactMatched(t *testing.T) {
 func TestTmuxCmdIsolatesTheSocketAndDropsTMUX(t *testing.T) {
 	cfg := Config{TmuxTmpdir: "/tmp/estate-mirror-socket-test"}
 	t.Setenv("TMUX", "/private/tmp/tmux-501/default,1234,0")
-	c := tmuxCmd(cfg, "list-sessions")
+	// An allowlisted verb, because a refused one is returned as a command
+	// that never runs and so carries no environment to inspect.
+	c := tmuxCmd(cfg, "list-windows")
 	var sawDir bool
 	for _, e := range c.Env {
 		if e == "TMUX_TMPDIR=/tmp/estate-mirror-socket-test" {

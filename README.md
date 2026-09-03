@@ -32,6 +32,18 @@ An agent turn is a **subprocess** — `claude -p --output-format json` with the
 brief on stdin. Delivery is a process exit and a parsed result. Nothing is ever
 concluded from what a terminal pane appears to show.
 
+A turn is nonetheless **watchable**: its output is teed into a transcript under
+`~/.local/state/estate/mirror/`, and a tmux window in the `estate` session runs
+`tail -f` on that file. The pane is a viewer, not a terminal the turn runs in —
+nothing typed there reaches the agent and killing it does not touch the turn.
+Windows are bounded by the same in-flight cap that bounds concurrent turns, and
+a turn that cannot get one runs unmirrored rather than waiting. `ESTATE_MIRROR=0`
+switches it off; `estate` with no arguments lists the rest of the switches.
+Note that with the default `claude` harness the agent's own output only appears
+when the turn exits (`--output-format json` emits one envelope at the end); a
+15-second heartbeat line is what keeps such a pane distinguishable from a broken
+one. `--harness=codex` streams genuinely.
+
 Three limits gate dispatch and all must pass: load per core, free memory, and
 lanes in flight. **Every one fails closed** — a limit that cannot be measured
 refuses. A turn that timed out or produced unparseable output is recorded
