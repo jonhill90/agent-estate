@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -199,6 +200,20 @@ func readLines(path string) ([]string, Availability, error) {
 	}
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
+		// A missing file is ambiguous by itself: a genuine first run (nothing
+		// has been written yet, but the state directory is there waiting for
+		// it) or a wiped/mistyped state directory (the path cannot ever have
+		// been right). The parent directory settles it mechanically, mirroring
+		// src/estate/internal/ledger.Ledger.Current's own check: if the parent
+		// exists, this is Absent -- legitimate. If the parent does not exist
+		// either, reporting Absent would render reassurance ("first run") for
+		// a path that was never valid, so this is Unreadable instead, the same
+		// way ReadWithTickErr's tickResolveErr forces Unreadable rather than
+		// letting a predictably-missing file be misread as Absent.
+		dir := filepath.Dir(path)
+		if _, statErr := os.Stat(dir); statErr != nil {
+			return nil, Unreadable, fmt.Errorf("%s: parent directory %s does not exist -- this path cannot have ever been written, so this is not a first run", path, dir)
+		}
 		return nil, Absent, nil
 	}
 	if err != nil {
