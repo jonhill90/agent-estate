@@ -9,6 +9,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -17,8 +18,6 @@ import (
 
 	"github.com/jonhill90/agent-estate/estate/internal/corpus"
 	"github.com/jonhill90/agent-estate/estate/internal/gate"
-	"github.com/jonhill90/agent-estate/estate/internal/harness"
-	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 	"github.com/jonhill90/agent-estate/estate/internal/pressure"
 	"github.com/jonhill90/agent-estate/estate/internal/tick"
@@ -28,8 +27,7 @@ func usage() {
 	fmt.Fprint(os.Stderr, `estate -- the supervisor
 
   estate pressure                       report whether the host can take work
-  estate dispatch [--harness=NAME] [--role=review] <issue> <brief-file>
-                                        run one agent turn, gated and recorded
+  estate dispatch <issue> <brief-file>  run one agent turn, gated and recorded
   estate merge <repo> <pr> <issue> <reviewer-lane>
                                         may this PR merge? checks + independence
   estate corpus-audit [n]               hard parameters least supported by your words
@@ -38,7 +36,6 @@ func usage() {
   estate tick record <phase-item> [artifact]
                                         append this tick to the record
   estate tick check                     has the loop stalled? 1 = yes, escalate
-  estate authored <issue> <lane> [note] record who wrote work on an issue
 
 Every gate fails closed: a limit that cannot be measured refuses.
 `)
@@ -160,9 +157,7 @@ func main() {
 			}
 			// src head is read here rather than in internal/tick so that the
 			// package stays a pure reader of the record and can be tested
-			// without a git repository. (Other packages here do shell out --
-			// corpus, pressure, quota and gate all do -- so this is a choice
-			// about testability, not a rule about internal/.)
+			// without a git repository.
 			head, err := exec.Command("git", "log", "-1", "--format=%H", "--", "src/").Output()
 			if err != nil {
 				fmt.Fprintln(os.Stderr, "estate: cannot read src head, refusing to write a tick that cannot be compared:", err)
@@ -178,10 +173,9 @@ func main() {
 				fmt.Fprintln(os.Stderr, "estate:", err)
 				os.Exit(2)
 			}
-			// e.SrcHead is empty in a repository with no commit touching
-			// src/ -- a real state, and slicing it panicked AFTER the record
-			// had already been appended, so the write succeeded while the
-			// command crashed. Found by an independent review.
+			// SrcHead is empty in a repository with no commit touching src/ --
+			// a real state, and slicing it panicked AFTER the record had been
+			// appended, so the write succeeded while the command crashed.
 			shortHead := e.SrcHead
 			if len(shortHead) > 8 {
 				shortHead = shortHead[:8]
@@ -214,61 +208,12 @@ func main() {
 			os.Exit(2)
 		}
 
-	case "authored":
-		// Records that a lane authored work on an issue. The merge gate reads
-		// this to answer "who wrote this?", and refuses when it cannot -- so
-		// without a way to WRITE the fact, every PR not produced by a
-		// dispatched turn was unmergeable forever. This does not relax the
-		// gate; it gives it something true to read.
-		if len(os.Args) < 4 {
-			fmt.Fprintln(os.Stderr, "estate: authored needs an issue and a lane")
-			os.Exit(2)
-		}
-		issue, lane := os.Args[2], os.Args[3]
-		note := ""
-		if len(os.Args) > 4 {
-			note = os.Args[4]
-		}
-		rec := ledger.Record{
-			ID:    fmt.Sprintf("authored-%s-%s", strings.TrimPrefix(issue, "#"), lane),
-			Issue: issue,
-			Lane:  lane,
-			State: ledger.Authored,
-			Note:  note,
-		}
-		if err := l.Append(rec); err != nil {
-			fmt.Fprintln(os.Stderr, "estate:", err)
-			os.Exit(2)
-		}
-		fmt.Printf("recorded %s as an author of issue %s\n", lane, issue)
-
 	case "dispatch":
 		if len(os.Args) < 4 {
 			usage()
 			os.Exit(2)
 		}
-		rest := os.Args[2:]
-		harnessName := os.Getenv("ESTATE_HARNESS")
-		if harnessName == "" {
-			harnessName = "claude"
-		}
-		if strings.HasPrefix(rest[0], "--harness=") {
-			harnessName = strings.TrimPrefix(rest[0], "--harness=")
-			rest = rest[1:]
-		}
-		// A turn dispatched to review an issue is not an author of it. The
-		// merge gate reads this; without it a reviewer is refused as a
-		// self-reviewer of the work it was sent to check.
-		role := ledger.RoleAuthor
-		if len(rest) > 0 && rest[0] == "--role=review" {
-			role = ledger.RoleReview
-			rest = rest[1:]
-		}
-		if len(rest) < 2 {
-			usage()
-			os.Exit(2)
-		}
-		issue, briefPath := rest[0], rest[1]
+		issue, briefPath := os.Args[2], os.Args[3]
 		brief, err := os.ReadFile(briefPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot read brief:", err)
@@ -291,54 +236,21 @@ func main() {
 			}
 			os.Exit(1)
 		}
-		// Which harness runs this turn. Refused rather than defaulted when
-		// unknown: silently falling back would run the turn somewhere the
-		// caller did not choose.
-		h, err := harness.Lookup(harnessName)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch --", err)
-			os.Exit(1)
-		}
-		if ok, _ := harness.Available(harnessName); !ok {
-			fmt.Fprintf(os.Stderr, "estate: refusing to dispatch -- harness %q is registered but its binary is not on PATH\n", harnessName)
-			os.Exit(1)
-		}
-
 		id := fmt.Sprintf("%s-%d", strings.TrimPrefix(issue, "#"), time.Now().UTC().Unix())
-
-		// The turn runs with --dangerously-skip-permissions. Give it a working
-		// tree of its own before it starts, or do not start it: inheriting our
-		// cwd puts an unattended full-permission agent in the shared checkout.
-		// Isolation is established BEFORE the ledger records a dispatch, so a
-		// refusal leaves no half-started task behind.
-		topOut, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch -- cannot locate the repository root to isolate the turn:", err)
-			os.Exit(1)
-		}
-		wt, err := isolate.Create(strings.TrimSpace(string(topOut)), id)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "estate: "+err.Error())
-			os.Exit(1)
-		}
-
-		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, State: ledger.Dispatched, Note: "worktree " + wt.Path}); err != nil {
+		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, State: ledger.Dispatched}); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot record dispatch:", err)
 			os.Exit(2)
 		}
-		fmt.Printf("dispatched %s in %s (grounded in %d operator parameters)\n", id, wt.Path, len(params))
+		fmt.Printf("dispatched %s (grounded in %d operator parameters)\n", id, len(params))
 
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 		defer cancel()
-		turn, err := h.Start(ctx, wt.Path, grounded)
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "estate:", err)
-			os.Exit(2)
-		}
-		defer turn.Cleanup()
-		out, runErr := turn.Cmd.Output()
+		cmd := exec.CommandContext(ctx, "claude", "-p", "--output-format", "json",
+			"--dangerously-skip-permissions")
+		cmd.Stdin = strings.NewReader(grounded)
+		out, runErr := cmd.Output()
 
-		rec := ledger.Record{ID: id, Issue: issue, Lane: id, Role: role}
+		rec := ledger.Record{ID: id, Issue: issue, Lane: id}
 		switch {
 		case ctx.Err() != nil:
 			// Timed out. We do not know whether the turn did its work, so we
@@ -347,25 +259,18 @@ func main() {
 		case runErr != nil:
 			rec.State, rec.Note = ledger.Failed, runErr.Error()
 		default:
-			// Reading the result is the harness's job -- each one emits its
-			// own shape. Exit 0 with output we cannot read is NOT a clean
-			// completion, and is recorded as unknown rather than failed:
-			// the turn may well have done its work.
-			res, resErr := turn.Result(out)
-			if resErr != nil {
-				rec.State, rec.Note = ledger.Unknown, resErr.Error()
+			rec.State = ledger.Complete
+			var parsed map[string]any
+			if json.Unmarshal(out, &parsed) == nil {
+				if s, ok := parsed["result"].(string); ok {
+					rec.Result = s
+				}
 			} else {
-				rec.State, rec.Result = ledger.Complete, res
+				// Exited 0 but we could not parse what it said. That is not a
+				// clean completion; record it honestly.
+				rec.State, rec.Note = ledger.Unknown, "exit 0 but result was not parseable JSON"
 			}
 		}
-		// Tear the worktree down only when it is empty. A turn that left work
-		// behind has output nobody has collected, and an isolated worktree that
-		// still exists is a report; a deleted one is unrecoverable.
-		if err := wt.Remove(); err != nil {
-			rec.Note = strings.TrimSpace(rec.Note + "; " + wt.Path + " kept: " + err.Error())
-			fmt.Fprintln(os.Stderr, "estate: "+err.Error())
-		}
-
 		if err := l.Append(rec); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot record outcome:", err)
 			os.Exit(2)
