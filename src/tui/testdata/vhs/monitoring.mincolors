@@ -1,0 +1,10 @@
+# measured 2026-09-03 (agent-estate#960): 3 consecutive
+# `vhs testdata/vhs/monitoring.tape` runs, single unretried attempts
+# each. Every target identical across all 3 runs:
+#   00-monitoring-observe-header-selected.png: 909, 909, 909
+#   01-monitoring-initial.png:                 220, 220, 220
+#   02-monitoring-after-refresh.png:            220, 220, 220
+# Floor is half the lowest observed settled count for that target.
+00-monitoring-observe-header-selected.png=454
+01-monitoring-initial.png=110
+02-monitoring-after-refresh.png=110

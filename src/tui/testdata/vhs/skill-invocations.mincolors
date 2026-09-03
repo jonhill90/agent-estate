@@ -1,0 +1,16 @@
+# measured 2026-09-03 (agent-estate#960): 7 consecutive
+# `vhs testdata/vhs/skill-invocations.tape` runs, single unretried
+# attempts each (run-2 through run-8):
+#   skill-invocations-01-no-history.png:    217 every run (7/7)
+#   skill-invocations-03-real-counts.png:   217 every run (7/7)
+#   skill-invocations-02-store-unreadable.png: 218 in 6/7 runs, and 334
+#     in the 7th (run-2) -- a genuine partial/torn frame, kept on disk
+#     as PARTIAL-skill-inv-02.png for reference. 334 > 218: this
+#     confirms the issue's own point that colour count cannot separate
+#     a partial frame from a settled one in general -- it is the retry
+#     loop (RunUntilSettled), not this floor, that is relied on to catch
+#     a case like this one. The floor below is set from the settled
+#     evidence (218) only; it does not and cannot promise to reject 334.
+skill-invocations-01-no-history.png=108
+skill-invocations-02-store-unreadable.png=109
+skill-invocations-03-real-counts.png=108

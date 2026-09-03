@@ -24,6 +24,17 @@
 // partial" as not-a-real-capture), and retry the ENTIRE run when it
 // isn't. That is an assertion against the actual captured artifact, not
 // a longer guess about timing.
+//
+// agent-estate#960: a single GLOBAL colour floor cannot do this. Measured
+// against every tape in this repo (see floor.go's own doc comment and
+// the PR that closed agent-estate#960 for the numbers), a sparse pane's own settled
+// frame can measure fewer distinct colours than a busier pane's own
+// partial/torn one -- 219-446 colours for a correct testdata/vhs/
+// knowledge-index.tape frame, 263 for a genuine torn frame of the far
+// busier testdata/vhs/agents-mode.tape. Those ranges overlap, so no
+// constant works for both. floor.go's PerTargetFloors is the fix: a
+// floor recorded next to the TAPE, from that tape's own measured
+// settled colour count, not borrowed from a different tape's evidence.
 package vhscapture
 
 import (
@@ -81,8 +92,14 @@ type TargetResult struct {
 	Path   string
 	Exists bool
 	Colors int
-	Err    error
-	Pass   bool
+	// Floor is the colour floor this target was actually checked
+	// against -- printed alongside Colors so a report shows WHICH
+	// number a pass/fail was measured relative to, not just the count.
+	// agent-estate#960: this varies per target now (PerTargetFloors),
+	// so it can no longer be inferred from a single global constant.
+	Floor int
+	Err   error
+	Pass  bool
 }
 
 // Attempt is one full tape run's verification, across every Screenshot
@@ -97,15 +114,22 @@ type Attempt struct {
 	Passed  bool
 }
 
-// verifyAttempt checks every target against minColors and reports
-// whether ALL of them passed -- one bad frame in a multi-screenshot tape
-// fails the whole attempt, matching how RunUntilSettled retries the
-// entire vhs invocation rather than one screenshot at a time.
-func verifyAttempt(n int, targets []string, minColors int) Attempt {
+// verifyAttempt checks every target against its own floor (from
+// floorFor) and reports whether ALL of them passed -- one bad frame in
+// a multi-screenshot tape fails the whole attempt, matching how
+// RunUntilSettled retries the entire vhs invocation rather than one
+// screenshot at a time. floorFor is called once per target, not cached,
+// so RunUntilSettled's own per-tape/per-target lookup (see floor.go)
+// runs fresh on every attempt -- cheap, and it means a floor file edited
+// mid-run (there is no reason to, but nothing here assumes otherwise)
+// takes effect on the next attempt rather than being stale for the rest
+// of the process.
+func verifyAttempt(n int, targets []string, floorFor func(target string) int) Attempt {
 	a := Attempt{N: n}
 	allPass := true
 	for _, t := range targets {
-		r := TargetResult{Path: t}
+		floor := floorFor(t)
+		r := TargetResult{Path: t, Floor: floor}
 		info, err := os.Stat(t)
 		if err != nil || info.Size() == 0 {
 			if err == nil {
@@ -122,7 +146,7 @@ func verifyAttempt(n int, targets []string, minColors int) Attempt {
 		if err != nil {
 			r.Err = err
 			allPass = false
-		} else if colors < minColors {
+		} else if colors < floor {
 			allPass = false
 		} else {
 			r.Pass = true
@@ -144,10 +168,12 @@ type Report struct {
 // RunUntilSettled runs runTape up to maxAttempts times. Before each run
 // it removes any stale file at every target (so a leftover PNG from a
 // previous attempt can never be mistaken for this attempt's own
-// capture), then verifies every target against minColors. It stops and
-// reports success on the first attempt where every target passes, and
-// returns an error if none of maxAttempts did.
-func RunUntilSettled(targets []string, minColors, maxAttempts int, runTape func() error) (Report, error) {
+// capture), then verifies every target against the floor floorFor
+// reports for it -- see floor.go for why this is per-target rather than
+// one number shared across every tape. It stops and reports success on
+// the first attempt where every target passes, and returns an error if
+// none of maxAttempts did.
+func RunUntilSettled(targets []string, floorFor func(target string) int, maxAttempts int, runTape func() error) (Report, error) {
 	var report Report
 	for n := 1; n <= maxAttempts; n++ {
 		for _, t := range targets {
@@ -157,7 +183,7 @@ func RunUntilSettled(targets []string, minColors, maxAttempts int, runTape func(
 			report.Attempts = append(report.Attempts, Attempt{N: n, RanErr: err})
 			continue
 		}
-		a := verifyAttempt(n, targets, minColors)
+		a := verifyAttempt(n, targets, floorFor)
 		report.Attempts = append(report.Attempts, a)
 		if a.Passed {
 			report.Settled = true
@@ -165,6 +191,14 @@ func RunUntilSettled(targets []string, minColors, maxAttempts int, runTape func(
 		}
 	}
 	return report, fmt.Errorf("no attempt out of %d produced a settled capture for all %d target(s)", maxAttempts, len(targets))
+}
+
+// UniformFloor returns a floorFor function that applies the same floor
+// to every target -- the shape RunUntilSettled/verifyAttempt took before
+// agent-estate#960, kept for a caller (or a test) that genuinely has one
+// number for every target and has no reason to look one up per-target.
+func UniformFloor(n int) func(target string) int {
+	return func(string) int { return n }
 }
 
 // Print writes a human-readable, run-by-run account of report to w --
@@ -187,9 +221,9 @@ func (r Report) Print(w io.Writer) {
 			case res.Err != nil && !res.Exists:
 				fmt.Fprintf(w, "    %s: MISSING (%v)\n", res.Path, res.Err)
 			case !res.Pass:
-				fmt.Fprintf(w, "    %s: %d distinct colors (below floor)\n", res.Path, res.Colors)
+				fmt.Fprintf(w, "    %s: %d distinct colors (below floor %d)\n", res.Path, res.Colors, res.Floor)
 			default:
-				fmt.Fprintf(w, "    %s: %d distinct colors\n", res.Path, res.Colors)
+				fmt.Fprintf(w, "    %s: %d distinct colors (floor %d)\n", res.Path, res.Colors, res.Floor)
 			}
 		}
 	}

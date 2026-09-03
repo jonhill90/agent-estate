@@ -1,0 +1,8 @@
+# measured 2026-09-03 (agent-estate#960): 6 consecutive
+# `vhs testdata/vhs/agents-mode.tape` runs, single unretried attempts
+# each -- the exact flake this tape's own header comment and #947
+# documented: 3/6 blank (1 colour), 3/6 settled at exactly 4393 colours.
+# No partial/torn frame was reproduced in this batch; #947's own review
+# separately measured one at 263 colours for this tape. Floor is half
+# the lowest observed settled count.
+agents-mode-01-list.png=2196
