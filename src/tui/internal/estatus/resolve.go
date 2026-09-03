@@ -1,6 +1,7 @@
 package estatus
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -26,13 +27,23 @@ import (
 // Nothing is invented: if neither exists the ORIGINAL is returned, so the
 // reader reports honestly rather than being handed a path that was guessed.
 func Resolve(path string) string {
+	exeDir := ""
+	if exe, err := os.Executable(); err == nil {
+		exeDir = filepath.Dir(exe)
+	}
+	return ResolveFrom(path, exeDir)
+}
+
+// ResolveFrom is Resolve with the binary's directory supplied, so the
+// no-repository case is testable.
+func ResolveFrom(path, exeDir string) string {
 	if path == "" || filepath.IsAbs(path) {
 		return path
 	}
 	if _, err := os.Stat(path); err == nil {
 		return path
 	}
-	root, err := repoRoot()
+	root, err := repoRootAt(exeDir)
 	if err != nil {
 		return path
 	}
@@ -43,25 +54,30 @@ func Resolve(path string) string {
 	return path
 }
 
-// repoRoot asks git, from the executable's own directory rather than the
-// caller's -- the binary lives in the tree it reports on, the shell does not.
-func repoRoot() (string, error) {
-	dir := ""
-	if exe, err := os.Executable(); err == nil {
-		dir = filepath.Dir(exe)
+// repoRootAt asks git from the BINARY's own directory, and nowhere else.
+//
+// There is deliberately no working-directory fallback. A council seat built
+// the binary outside any repository, ran it inside an unrelated git repo that
+// happened to contain docs/tick-log.jsonl, and was shown that repo's
+// fabricated content as the Director's record.
+//
+// Reporting absence when blind is the bug this file fixes. Reporting SOMEONE
+// ELSE'S data as yours is worse: it is a fabrication with a timestamp on it,
+// and no reader could tell. If the binary is not inside a repository there is
+// no "the repo" to resolve against, and guessing which one the user meant is
+// the invention this package refuses to make. The caller can always name the
+// path explicitly.
+func repoRootAt(dir string) (string, error) {
+	if dir == "" {
+		return "", errNoRepo
 	}
 	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
-	if dir != "" {
-		cmd.Dir = dir
-	}
+	cmd.Dir = dir
 	out, err := cmd.Output()
 	if err != nil {
-		// Fall back to the working directory: a binary copied out of the
-		// tree still deserves a chance to find the repo it was pointed at.
-		out, err = exec.Command("git", "rev-parse", "--show-toplevel").Output()
-		if err != nil {
-			return "", err
-		}
+		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
 }
+
+var errNoRepo = fmt.Errorf("estatus: the binary is not inside a repository, so a relative path cannot be resolved")
