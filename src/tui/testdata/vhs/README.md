@@ -4,6 +4,51 @@
 view to `out/`. It is how a change to the shell gets looked at before anyone
 is asked to QA it.
 
+## Capturing evidence for a PR: use `vhscapture`, not a bare `vhs` run
+
+agent-estate#947: `vhs`'s own `Screenshot` command silently writes a stale,
+blank, or transitional frame some fraction of the time -- independent of
+which tape it is, what the tape waits on before screenshotting, and how
+much application content is on screen. Measured directly, twice:
+
+- `agents-mode.tape`'s own header comment (agent-tui#130): an isolated tape
+  with nothing but a `printf` marker + `Wait+Screen` + `Screenshot` (no Go
+  program at all) still wrote a blank/missing frame 5/8 runs.
+- Re-measured for agent-estate#947 (2026-09-03), same box, same `vhs` v0.11.0: the
+  identical marker tape went 8/20 (40%) missing/blank, and `agents-mode.tape`
+  itself, run bare 10 consecutive times with zero code changes, produced a
+  correct 4393-colour frame 5 times and a blank single-colour (0,0,0)-shaped
+  frame the other 5 -- a coin flip.
+
+A previous attempt changed `knowledge-graph.tape`'s wait condition to
+`Wait+Screen /legend:.*project/` plus a trailing `Sleep 500ms`, reasoning
+that waiting on the LAST thing `View()` composes plus a settle sleep would
+be enough. The failure rate was unchanged, because the race is inside
+`vhs`'s own tty-to-PNG rasterization, not in how long or what the tape
+waits on before asking for a screenshot. **No tape-level wait fixes this** --
+this is true of all 26 tapes in this directory, not just the one agent-estate#947 was
+filed against, because the reproduction above involves zero tape-specific
+content.
+
+`internal/vhscapture` (and its CLI, `cmd/vhscapture`) is the fix: it runs
+the whole tape, verifies every `Screenshot` target actually landed and
+clears a distinct-colour floor, and retries the ENTIRE run -- never a
+longer sleep -- when it didn't. Re-run against `agents-mode.tape`, 11
+consecutive times, `-min-colors 100`: 11/11 eventually settled (1-6 vhs
+attempts each, well inside the default `-max-attempts 8`), and PASS/FAIL
+per attempt is printed for every run, not just the last one.
+
+```
+go build -o /tmp/vhscapture ./cmd/vhscapture
+/tmp/vhscapture -tape testdata/vhs/agents-mode.tape -min-colors 100
+```
+
+`-min-colors` defaults to 2 (catches a fully blank single-colour frame).
+Raise it once you know a tape's own settled colour count (run it a few
+times bare first) to also reject a partial/transitional frame like the
+259-colour case agent-estate#947's review found, that a bare "file exists" check would
+miss.
+
 ## Why VHS and not something we wrote
 
 Decided by an adopt-or-build pass, 2026-08-22. Checked with `gh api`, not
