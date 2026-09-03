@@ -1062,6 +1062,13 @@ func main() {
 				}
 			}
 		}
+		// SessionID is read the same unconditional way Spend is -- straight
+		// out of this exact subprocess's own stdout, regardless of the state
+		// this turn ends up recorded in below. A harness that reported no
+		// usable handle for this turn leaves SessionID nil, never "".
+		if sid, siderr := turn.SessionID(out); siderr == nil {
+			rec.SessionID = &sid
+		}
 		switch {
 		case ctx.Err() != nil:
 			// Timed out. We do not know whether the turn did its work, so we

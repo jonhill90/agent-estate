@@ -46,6 +46,18 @@ type Turn struct {
 	// means nothing usable was found; the caller treats that as "no spend
 	// recorded" for this turn, not as the turn failing.
 	Spend func(stdout []byte) (Spend, error)
+	// SessionID extracts the harness's own conversation handle for this turn,
+	// from the same finished command's stdout Result and Spend read --
+	// claude's `session_id`, codex's `thread_id`. This is the piece
+	// docs/phase-plan.md's Phase 3 says the estate throws away today: a lane
+	// that dies mid-turn cannot be resumed because nothing recorded the
+	// handle the harness itself already reported. An error means the
+	// harness reported no usable handle for this turn; the caller records
+	// that as absent (nil), never an empty string -- same discipline as
+	// Spend. Recording the handle does NOT mean this package or its caller
+	// can hand it back to resume a conversation; that is deliberately out of
+	// scope (agent-estate#990).
+	SessionID func(stdout []byte) (string, error)
 	// Cleanup releases anything Start allocated. Always safe to call.
 	Cleanup func()
 }
@@ -168,10 +180,11 @@ func (claude) Start(ctx context.Context, dir, prompt string) (*Turn, error) {
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(prompt)
 	return &Turn{
-		Cmd:     cmd,
-		Result:  claudeResult,
-		Spend:   claudeSpend,
-		Cleanup: func() {},
+		Cmd:       cmd,
+		Result:    claudeResult,
+		Spend:     claudeSpend,
+		SessionID: claudeSessionID,
+		Cleanup:   func() {},
 	}, nil
 }
 
@@ -212,6 +225,7 @@ func claudeResult(stdout []byte) (string, error) {
 // real captured payload this was checked against, and Spend.ByModel's doc
 // comment for why a scalar "the model for this turn" is the wrong shape.
 type claudeSpendEnvelope struct {
+	SessionID    string   `json:"session_id"`
 	TotalCostUSD *float64 `json:"total_cost_usd"`
 	Usage        *struct {
 		InputTokens              *int64 `json:"input_tokens"`
@@ -259,6 +273,23 @@ func claudeSpend(stdout []byte) (Spend, error) {
 	return s, nil
 }
 
+// claudeSessionID reads the same envelope claudeResult and claudeSpend
+// already parse for its "session_id" field -- the handle
+// docs/spend-observation.md's captured payload shows sitting right beside
+// "result" and "total_cost_usd" in claude -p --output-format json's single
+// JSON object. Absent or blank is an error, never an empty string, so the
+// caller records this turn's handle as genuinely unreported rather than "".
+func claudeSessionID(stdout []byte) (string, error) {
+	var e claudeSpendEnvelope
+	if err := json.Unmarshal(stdout, &e); err != nil {
+		return "", fmt.Errorf("claude: session id envelope not parseable JSON: %w", err)
+	}
+	if e.SessionID == "" {
+		return "", fmt.Errorf("claude: JSON envelope had no session_id field")
+	}
+	return e.SessionID, nil
+}
+
 // --- codex -------------------------------------------------------------
 
 type codex struct{}
@@ -302,8 +333,9 @@ func (codex) Start(ctx context.Context, dir, prompt string) (*Turn, error) {
 			}
 			return strings.TrimSpace(string(b)), nil
 		},
-		Spend:   codexSpend,
-		Cleanup: func() { os.Remove(path) },
+		Spend:     codexSpend,
+		SessionID: codexSessionID,
+		Cleanup:   func() { os.Remove(path) },
 	}, nil
 }
 
@@ -311,8 +343,9 @@ func (codex) Start(ctx context.Context, dir, prompt string) (*Turn, error) {
 // stdout. Only the shape of a "turn.completed" event's usage is read here;
 // every other event type is skipped.
 type codexEvent struct {
-	Type  string `json:"type"`
-	Usage *struct {
+	Type     string `json:"type"`
+	ThreadID string `json:"thread_id"`
+	Usage    *struct {
 		InputTokens        *int64 `json:"input_tokens"`
 		CachedInputTokens  *int64 `json:"cached_input_tokens"`
 		CacheWriteTokens   *int64 `json:"cache_write_input_tokens"`
@@ -353,4 +386,28 @@ func codexSpend(stdout []byte) (Spend, error) {
 		CacheReadTokens:     found.Usage.CachedInputTokens,
 		CacheCreationTokens: found.Usage.CacheWriteTokens,
 	}, nil
+}
+
+// codexSessionID reads codex exec --json's "thread.started" event for its
+// thread_id -- codex's own shape for the same conversation handle claude
+// calls session_id (see docs/spend-observation.md's real captured stream:
+// {"type":"thread.started","thread_id":"01a06826-ac92-7b62-8418-247dee57b779"}
+// is the first line codex --json ever emits). Unlike codexSpend's
+// turn.completed, a thread has exactly one thread.started per invocation
+// here, so the first one found is used.
+func codexSessionID(stdout []byte) (string, error) {
+	for _, line := range strings.Split(string(stdout), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var e codexEvent
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			continue // not every stdout line is a codex JSON event
+		}
+		if e.Type == "thread.started" && e.ThreadID != "" {
+			return e.ThreadID, nil
+		}
+	}
+	return "", fmt.Errorf("codex: no thread.started event with a thread_id found in --json output")
 }
