@@ -33,15 +33,50 @@ const (
 // be running, and treating it as finished is how a cap fails open.
 func (s State) Terminal() bool { return s == Complete || s == Failed }
 
+// Role is what a dispatched turn was sent to do, fixed at dispatch time.
+// The merge gate must derive authorship and independence from this field --
+// not from the issue a turn happens to share with the work it reviews. A
+// review turn is dispatched against the same issue as the work it reviews
+// (the bug this package exists to fix: "the merge gate cannot tell a
+// reviewer from an author"), so Issue alone can never distinguish them.
+type Role string
+
+const (
+	// RoleAuthor is the default: a turn dispatched to do or fix work on an
+	// issue. Empty Role on an old record is read as RoleAuthor for backward
+	// compatibility with records written before this field existed -- see
+	// Record.EffectiveRole.
+	RoleAuthor Role = "author"
+	// RoleReviewer is a turn dispatched specifically to review a pull
+	// request. It carries PR (below), which RoleAuthor turns do not: a
+	// reviewer's independence is checked against a specific PR, not an
+	// issue.
+	RoleReviewer Role = "reviewer"
+)
+
 type Record struct {
 	ID     string    `json:"id"`
 	Issue  string    `json:"issue"`
 	Lane   string    `json:"lane"`
+	Role   Role      `json:"role,omitempty"`
+	PR     int       `json:"pr,omitempty"`
 	State  State     `json:"state"`
 	At     time.Time `json:"at"`
 	PID    int       `json:"pid,omitempty"`
 	Note   string    `json:"note,omitempty"`
 	Result string    `json:"result,omitempty"`
+}
+
+// EffectiveRole returns the record's Role, defaulting an unset field to
+// RoleAuthor. This exists ONLY to keep records written before this field
+// existed readable as what they always were -- an authoring turn. A record
+// written after this field existed must set Role explicitly; the gate
+// package does not use this default for anything dispatched going forward.
+func (r Record) EffectiveRole() Role {
+	if r.Role == "" {
+		return RoleAuthor
+	}
+	return r.Role
 }
 
 type Ledger struct {
