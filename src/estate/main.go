@@ -34,8 +34,9 @@ func usage() {
   estate dispatch review <pr> <issue> <brief-file>
                                         run one review turn (role=reviewer) against a PR
   estate merge <repo> <pr> <reviewer-lane>
-                                        may this PR merge? identity comes from the PR
-                                        itself (closingIssuesReferences), never a caller
+                                        may this PR merge? identity comes from the PR's
+                                        own head ref (must be a dispatch/<id> branch),
+                                        never a caller argument and never a closing issue
                                         -- checks green, author != reviewer, reviewer
                                         actually completed a review, and posted APPROVE
   estate corpus-audit [n]               hard parameters least supported by your words
@@ -113,11 +114,13 @@ func main() {
 			usage()
 			os.Exit(2)
 		}
-		// No <issue> argument: identity comes from the PR itself
-		// (closingIssuesReferences, read inside gate.Evaluate), never a
-		// caller-supplied number. Taking issue from the caller let an
-		// author name an unrelated issue with a clean author/reviewer pair
-		// and merge anything (agent-estate#926 constraint 6).
+		// No <issue> argument: identity comes from the PR's own head ref
+		// (must be a dispatch/<id> branch -- read inside gate.Evaluate),
+		// never a caller-supplied number. Taking issue from the caller let
+		// an author name an unrelated issue with a clean author/reviewer
+		// pair and merge anything (agent-estate#926 constraint 6); taking
+		// identity from closingIssuesReferences instead of the head ref had
+		// its own gap, closed by agent-estate#940.
 		repo, reviewer := os.Args[2], os.Args[4]
 		var pr int
 		if _, err := fmt.Sscanf(os.Args[3], "%d", &pr); err != nil {
@@ -415,6 +418,28 @@ func main() {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "estate: "+err.Error())
 			os.Exit(1)
+		}
+
+		// The merge gate (agent-estate#940) derives authorship from the PR's
+		// own head ref, joined to this exact dispatch id's role=author
+		// ledger record -- never from an issue number the brief or the PR
+		// body asserts. That join only exists if the PR is opened FROM
+		// wt.Branch. A brief that instead tells (or lets) the lane invent
+		// its own feature branch produces a PR the gate cannot join to
+		// anything, refused with no override. Author turns only: a
+		// role=reviewer turn never opens a PR, so it has nothing to state
+		// here.
+		if role == ledger.RoleAuthor {
+			grounded += "\n\n## Branch discipline (agent-estate#940 -- read this before opening a PR)\n" +
+				"Your worktree's branch is already `" + wt.Branch + "` -- created by the estate " +
+				"itself, not by you. Commit your work on THIS branch and push it AS-IS:\n\n" +
+				"    git push -u origin " + wt.Branch + "\n\n" +
+				"Open your pull request FROM `" + wt.Branch + "`. Do not `git checkout -b` a " +
+				"hand-named branch (e.g. `feat/...`, `fix/...`) and open the PR from that instead --" +
+				" the merge gate (`estate merge`) derives authorship by reading the PR's own head " +
+				"ref back and joining it to this exact dispatch's ledger record. A PR opened from " +
+				"any other branch carries no evidence the estate produced, and the gate refuses it " +
+				"structurally, with no override.\n"
 		}
 
 		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Dispatched, Note: "worktree " + wt.Path}); err != nil {
