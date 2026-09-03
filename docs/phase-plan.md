@@ -160,11 +160,23 @@ model release is not what the source says. Cherny says *"every time that a new
 model comes out, we delete a bunch of the system prompt"*, and the ablation
 (`CLAUDE_CODE_SIMPLE=1`) deletes **all** of them, finding the model *"a little
 bit more intelligent without these prompts."* No percentage is given. The
-direction stands and it indicts our own documents: `docs/director-brief.md` is
-302 lines and `AGENTS.md` is 42KB describing a deleted supervisor. Cherny's
-instruction is blunt — *"every six months, delete your CLAUDE.md, delete your
-skills, delete your hooks."* Shrinking them is Phase 0 work, because a brief
-nobody can hold is another unverified claim.
+direction stands and it indicts our own documents: at `43b93b5`,
+`docs/director-brief.md` is **310** lines and `AGENTS.md` is **44,722 bytes**
+describing a deleted supervisor. Cherny's instruction is blunt — *"every six
+months, delete your [CLAUDE.md], delete your skills, delete your hooks."* The
+bracket is the research's own correction: the transcript reads *"quantum D"*,
+and `17-practitioners.md` flags the substitution as a reading rather than his
+word. Shrinking our documents is Phase 0 work, because a brief nobody can hold
+is another unverified claim.
+
+**And this file is not exempt.** At `33e7e34` it was **174 lines / 1,439
+words**, against **129** in the version it supersedes — 35% longer while
+arguing for shorter documents, and roughly two and a half pages rather than
+the "two pages, 160 lines" an earlier draft of this PR claimed. Both of those
+figures were wrong in the flattering direction. This paragraph made it longer
+again; measure it yourself with `wc -l` rather than trusting a number written
+inside the file it describes, which is stale the moment it is saved. Cutting
+it is Phase 0 work, and the next revision should be shorter or say why not.
 
 ## The risk that has not changed
 
