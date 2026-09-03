@@ -179,6 +179,70 @@ func TestVerdictApprovePasses(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
+// agent-estate#943 -- reviewLaneRE must absorb the one fixed,
+// estate-written "dispatch/" branch prefix internal/isolate.Create puts
+// on a lane's own checkout, without loosening to a substring or suffix
+// match (that family of holes took six review rounds to close --
+// agent-estate#934).
+// ---------------------------------------------------------------------
+
+func TestVerdictReviewLaneDispatchPrefixMatches(t *testing.T) {
+	body := "Review-Lane: dispatch/938-1788417348\nReviewed-SHA: abc123\nVerdict: APPROVE\n"
+	lv := resolveLaneVerdict([]Comment{{Body: body}}, "938-1788417348")
+	if !lv.found || !lv.ok || lv.decision != verdictApproved {
+		t.Fatalf("resolveLaneVerdict did not match a Review-Lane: trailer carrying the dispatch/ branch prefix: %+v", lv)
+	}
+}
+
+func TestVerdictReviewLaneBareFormStillMatches(t *testing.T) {
+	body := "Review-Lane: 938-1788417348\nReviewed-SHA: abc123\nVerdict: APPROVE\n"
+	lv := resolveLaneVerdict([]Comment{{Body: body}}, "938-1788417348")
+	if !lv.found || !lv.ok || lv.decision != verdictApproved {
+		t.Fatalf("resolveLaneVerdict did not match the bare (unprefixed) Review-Lane: form: %+v", lv)
+	}
+}
+
+func TestVerdictReviewLaneEmbeddedInLongerStringRefuses(t *testing.T) {
+	body := "Review-Lane: not-really-938-1788417348\nVerdict: APPROVE\n"
+	lv := resolveLaneVerdict([]Comment{{Body: body}}, "938-1788417348")
+	if lv.found {
+		t.Fatal("resolveLaneVerdict matched a Review-Lane: trailer that only embeds the lane id inside a longer string")
+	}
+}
+
+func TestVerdictReviewLaneMatchingSuffixRefuses(t *testing.T) {
+	body := "Review-Lane: 8938-1788417348\nVerdict: APPROVE\n"
+	lv := resolveLaneVerdict([]Comment{{Body: body}}, "938-1788417348")
+	if lv.found {
+		t.Fatal("resolveLaneVerdict matched a different lane whose id merely ends with the wanted lane id")
+	}
+}
+
+func TestVerdictReviewLaneDoubledPrefixRefuses(t *testing.T) {
+	body := "Review-Lane: dispatch/dispatch/938-1788417348\nVerdict: APPROVE\n"
+	lv := resolveLaneVerdict([]Comment{{Body: body}}, "938-1788417348")
+	if lv.found {
+		t.Fatal("resolveLaneVerdict matched a doubled dispatch/ prefix -- only the single, estate-written prefix may be stripped")
+	}
+}
+
+func TestVerdictReviewLaneQuotedInTableDoesNotMatchDifferentLane(t *testing.T) {
+	// The council-comment shape that caused a real hole before
+	// (agent-estate#926/#934): a comment quotes another lane's own
+	// trailer inside a table or code block. reviewLaneRE is anchored to
+	// the START of a line, so a quoted trailer buried mid-line (a table
+	// cell) must never be read as this comment's own Review-Lane:.
+	body := "Review-Lane: dispatch/938-1788417348\nVerdict: APPROVE\n\n" +
+		"## Council\n" +
+		"| seat | trailer |\n|---|---|\n" +
+		"| council | Review-Lane: dispatch/999-1788417348 |\n"
+	lv := resolveLaneVerdict([]Comment{{Body: body}}, "999-1788417348")
+	if lv.found {
+		t.Fatal("resolveLaneVerdict matched a different lane's Review-Lane: trailer quoted inside a table cell")
+	}
+}
+
+// ---------------------------------------------------------------------
 // earliestCheckStart -- constraint 5: staleness against when checks
 // actually started, not a committer date.
 // ---------------------------------------------------------------------
