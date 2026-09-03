@@ -971,6 +971,20 @@ func main() {
 		out := stdout.Bytes()
 
 		rec := ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, PID: pid}
+		// Spend is read the same way Result is -- straight out of this exact
+		// subprocess's own stdout, whatever state the turn ends up recorded
+		// in below. A turn that timed out or exited non-zero may still have
+		// written a spend-bearing diagnostic (claude does this on some
+		// failures), so this is attempted unconditionally rather than only
+		// on the Complete path; a harness that reported nothing usable
+		// leaves every Spend* field nil, never a guess.
+		if sp, sperr := turn.Spend(out); sperr == nil {
+			rec.SpendCostUSD = sp.CostUSD
+			rec.SpendInputTokens = sp.InputTokens
+			rec.SpendOutputTokens = sp.OutputTokens
+			rec.SpendCacheReadTokens = sp.CacheReadTokens
+			rec.SpendCacheCreationTokens = sp.CacheCreationTokens
+		}
 		switch {
 		case ctx.Err() != nil:
 			// Timed out. We do not know whether the turn did its work, so we

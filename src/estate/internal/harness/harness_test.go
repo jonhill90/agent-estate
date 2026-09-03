@@ -49,6 +49,9 @@ func TestEveryRegisteredHarnessRunsInTheDirectoryItIsGiven(t *testing.T) {
 			if turn.Result == nil || turn.Cleanup == nil {
 				t.Error("a Turn must always carry Result and Cleanup, even when they are no-ops")
 			}
+			if turn.Spend == nil {
+				t.Error("a Turn must always carry Spend, even when the harness reports nothing usable")
+			}
 		})
 	}
 }
@@ -69,7 +72,7 @@ func TestClaudeRunsNonInteractivelyWithItsOwnFlags(t *testing.T) {
 func TestCodexRunsNonInteractivelyInsideItsOwnSandbox(t *testing.T) {
 	_, a := args(t, "codex", t.TempDir(), "p")
 	joined := strings.Join(a, " ")
-	for _, want := range []string{"codex exec", "--sandbox workspace-write", "--output-last-message", "--skip-git-repo-check"} {
+	for _, want := range []string{"codex exec", "--json", "--sandbox workspace-write", "--output-last-message", "--skip-git-repo-check"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("codex args missing %q; got: %s", want, joined)
 		}
@@ -151,6 +154,78 @@ func TestUnreadableOutputIsAnErrorNotAnEmptyResult(t *testing.T) {
 			t.Fatalf("got %q, %v; want \"done\", nil", got, err)
 		}
 	})
+}
+
+// realClaudeEnvelope is claude -p --output-format json's real stdout,
+// captured live 2026-09-03 against a real turn ("reply pong") -- see
+// docs/spend-observation.md for the full payload and how it was taken.
+// Trimmed to the fields claudeSpend actually reads plus enough surrounding
+// shape to prove trailing fields don't break parsing.
+const realClaudeEnvelope = `{"is_error":false,"duration_api_ms":2220,"num_turns":1,
+"session_id":"d01a8703-42b9-4006-a3d0-83062d7d4339","total_cost_usd":0.1883826,
+"usage":{"input_tokens":2,"cache_creation_input_tokens":30393,
+"cache_read_input_tokens":17892,"output_tokens":4},"result":"pong"}`
+
+func TestClaudeSpendReadsTheRealEnvelope(t *testing.T) {
+	s, err := claudeSpend([]byte(realClaudeEnvelope))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.CostUSD == nil {
+		t.Fatal("CostUSD must be populated -- claude's own envelope carries total_cost_usd")
+	}
+	if *s.CostUSD != 0.1883826 {
+		t.Errorf("CostUSD = %v, want 0.1883826", *s.CostUSD)
+	}
+	for name, got := range map[string]*int64{
+		"InputTokens": s.InputTokens, "OutputTokens": s.OutputTokens,
+		"CacheReadTokens": s.CacheReadTokens, "CacheCreationTokens": s.CacheCreationTokens,
+	} {
+		if got == nil {
+			t.Errorf("%s must be populated from the real envelope's usage block", name)
+		}
+	}
+	if *s.InputTokens != 2 || *s.OutputTokens != 4 || *s.CacheReadTokens != 17892 || *s.CacheCreationTokens != 30393 {
+		t.Errorf("token fields = %+v, want the real captured values", s)
+	}
+}
+
+func TestClaudeSpendOnUnparseableOutputIsAnError(t *testing.T) {
+	if _, err := claudeSpend([]byte("not json")); err == nil {
+		t.Fatal("unparseable stdout must be an error, not a zero Spend")
+	}
+}
+
+// realCodexTurnCompleted is codex exec --json's real "turn.completed" line,
+// captured live 2026-09-03 -- see docs/spend-observation.md.
+const realCodexJSONL = `{"type":"thread.started","thread_id":"01a06826-ac92-7b62-8418-247dee57b779"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"pong"}}
+{"type":"turn.completed","usage":{"input_tokens":27131,"cached_input_tokens":11008,"cache_write_input_tokens":0,"output_tokens":5,"reasoning_output_tokens":0}}`
+
+func TestCodexSpendReadsTheRealTurnCompletedEventAndNeverInventsACost(t *testing.T) {
+	s, err := codexSpend([]byte(realCodexJSONL))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s.CostUSD != nil {
+		t.Errorf("CostUSD = %v, want nil -- codex reports no dollar figure, and this package must not estimate one", *s.CostUSD)
+	}
+	if s.InputTokens == nil || *s.InputTokens != 27131 {
+		t.Errorf("InputTokens = %v, want 27131", s.InputTokens)
+	}
+	if s.OutputTokens == nil || *s.OutputTokens != 5 {
+		t.Errorf("OutputTokens = %v, want 5", s.OutputTokens)
+	}
+	if s.CacheReadTokens == nil || *s.CacheReadTokens != 11008 {
+		t.Errorf("CacheReadTokens = %v, want 11008", s.CacheReadTokens)
+	}
+}
+
+func TestCodexSpendWithNoTurnCompletedEventIsAnError(t *testing.T) {
+	if _, err := codexSpend([]byte(`{"type":"thread.started","thread_id":"x"}`)); err == nil {
+		t.Fatal("a stream with no turn.completed usage must be an error, not a zero Spend")
+	}
 }
 
 // A registered harness whose binary is not installed is a real state, and
