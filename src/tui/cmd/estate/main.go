@@ -568,8 +568,15 @@ func main() {
 	// configured" the package's own LoadIndex already turns into a
 	// visible notice, not an error this file needs to guard against.
 	vaultDir := os.Getenv("AGENT_MEMORY_VAULT")
+	// The Knowledge route shows the vault AND the compiled index, so the
+	// index is visible without anyone running a command. Repo root is
+	// resolved the same way the tick log is, so it works from any directory.
+	knowledgeRoot := "."
+	if out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output(); err == nil {
+		knowledgeRoot = strings.TrimSpace(string(out))
+	}
 	knowledgeModel := knowledge.New(
-		knowledge.NewFetcher(vaultDir),
+		knowledge.NewCompiledFetcher(vaultDir, knowledgeRoot, time.Now),
 		knowledge.NewFactLoader(vaultDir),
 	)
 

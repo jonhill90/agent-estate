@@ -37,6 +37,7 @@ func usage() {
   estate inflight                       tasks still occupying a slot
   estate tick record <phase-item> [artifact]
                                         append this tick to the record
+  estate knowledge                     compile the index over every knowledge source
   estate tick check                     has the loop stalled? 1 = yes, escalate
   estate verify-branch <branch>         build and test a branch in its OWN tree
 
@@ -138,6 +139,9 @@ func main() {
 			fmt.Printf("%-28s %-10s %s %s\n", r.ID, r.State, r.At.Format(time.RFC3339), r.Issue)
 		}
 		fmt.Fprintf(os.Stderr, "%d task(s)\n", len(rs))
+
+	case "knowledge":
+		runKnowledge()
 
 	case "tick":
 		// The Director's loop cannot remember its own history -- every tick is
