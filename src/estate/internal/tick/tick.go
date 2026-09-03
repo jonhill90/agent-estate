@@ -66,20 +66,107 @@ type Entry struct {
 	// means there was none, and serialises as null -- the stop condition is
 	// written against that spelling.
 	Artifact string `json:"artifact"`
+
+	// GapSeconds is the wall-clock gap since the PREVIOUS tick's own `at`,
+	// nothing more. It is cron cadence, not work duration: a tick that did
+	// nothing and a tick that did everything both show roughly the same
+	// gap, because the Director's loop runs on a fixed interval regardless
+	// of how much a tick actually did (see docs/director-loop.md). Do not
+	// read this as effort, and do not rename it to "duration" -- that name
+	// was considered and rejected for exactly this reason (agent-estate#982).
+	// Nil on the first tick this log has ever recorded, when there is no
+	// previous `at` to measure from -- absent, not zero, the same
+	// *float64/*int64 pattern ledger.Record.SpendCostUSD uses and for the
+	// same reason: a zero here would read as "no time passed" instead of
+	// "nothing to compare against."
+	GapSeconds *int64 `json:"gap_seconds,omitempty"`
+
+	// ObservedTurns is how many tasks had their outcome become known
+	// (reached a terminal ledger state) in the window between the previous
+	// tick and this one (strictly after the previous tick's `at`, no later
+	// than this tick's own `at`) -- see spend.WindowedByObservation. It is
+	// the denominator ObservedSpendUSD needs: a reader must be able to tell
+	// "$0 because nothing finished this window" from "$0 because nothing
+	// that finished reports a dollar figure" from "genuinely free." Nil
+	// only when there was no previous tick to bound a window against (the
+	// first tick ever recorded); zero is a legitimate, distinct value
+	// meaning the window is real and nothing finished in it.
+	//
+	// NAMED "observed", NOT "dispatched" (agent-estate#989, correcting
+	// #982's own original naming and keying). A task is windowed by WHEN
+	// ITS OUTCOME BECAME KNOWN, not when it was launched: keying on launch
+	// time meant a task dispatched in window N that did not finish until a
+	// later window had its cost silently and permanently dropped, since its
+	// dispatch instant was already behind every later window's own `since`
+	// by the time it finished. Keying on the terminal record's own At
+	// instead means a task's cost lands in exactly one window, whichever
+	// one it actually finished in, however long it ran -- see
+	// spend.WindowedByObservation's doc comment for the full reasoning.
+	ObservedTurns *int64 `json:"observed_turns,omitempty"`
+
+	// ObservedSpendUSD is observed spend ONLY: the sum of
+	// ledger.Record.SpendCostUSD for tasks counted in ObservedTurns, for
+	// harnesses that report a dollar figure at all (see
+	// docs/spend-observation.md -- claude does, codex as of this writing
+	// never does). It is NEVER the cost of this tick and must never be
+	// read, printed, or compared as one: the Director itself runs as a cron
+	// inside Claude Code, the estate does not dispatch it, and no harness
+	// result envelope for the Director's own turn ever reaches the ledger.
+	// That gap is structural, not a coverage hole this field will ever
+	// close. Nil when ObservedTurns is nil (no window to measure), or when
+	// ObservedTurns is non-nil but none of those turns reported a cost --
+	// summing zero non-nil dollar figures into $0.00 would read as "this
+	// window was free," which #979 already refused for the cross-harness
+	// case and this is the same defect. Every caller that prints this field
+	// must also print ObservedTurnsWithCost (NOT ObservedTurns -- see that
+	// field's own doc comment for why the two are not interchangeable) and
+	// name what is excluded -- see spend.WindowedByObservation's doc comment.
+	ObservedSpendUSD *float64 `json:"observed_spend_usd,omitempty"`
+
+	// ObservedTurnsWithCost is how many of ObservedTurns actually reported a
+	// dollar figure -- spend.WindowedByObservation's own turnsWithCost return,
+	// carried onto the entry instead of being discarded after one boolean
+	// gate check (agent-estate#995, correcting a defect #989's fix pass
+	// introduced: the dollar line printed ObservedTurns -- the window's
+	// TOTAL observed turns -- while claiming it was the count "that reported
+	// a cost"; only ObservedTurnsWithCost is that count). ObservedTurns and
+	// ObservedTurnsWithCost diverge exactly when a window has a mix of
+	// harnesses that do and do not report a dollar figure (e.g. one claude
+	// turn with cost, one codex turn with none) -- printing ObservedTurns
+	// there overstates how many turns the dollar figure actually covers.
+	// Every write path here sets this field and ObservedSpendUSD together, so
+	// on a log this code wrote, one is nil exactly when the other is. That is
+	// a property of the writer, NOT a guarantee a reader may lean on: an
+	// entry read back off disk may have been hand-edited, partially migrated,
+	// or written by a future path that sets one and forgets the other, and
+	// dereferencing this field on the strength of ObservedSpendUSD being
+	// non-nil panicked `tick check` when exactly that happened
+	// (agent-estate#997). Read these fields through ReadSpend, which
+	// classifies every combination including the incoherent ones, rather than
+	// testing one pointer and dereferencing the other.
+	ObservedTurnsWithCost *int64 `json:"observed_turns_with_cost,omitempty"`
 }
 
 // MarshalJSON writes At as ISO 8601 UTC and an absent Artifact as null.
 func (e Entry) MarshalJSON() ([]byte, error) {
 	type wire struct {
-		At        string  `json:"at"`
-		PhaseItem string  `json:"phase_item"`
-		SrcHead   string  `json:"src_head"`
-		Artifact  *string `json:"artifact"`
+		At                    string   `json:"at"`
+		PhaseItem             string   `json:"phase_item"`
+		SrcHead               string   `json:"src_head"`
+		Artifact              *string  `json:"artifact"`
+		GapSeconds            *int64   `json:"gap_seconds,omitempty"`
+		ObservedTurns         *int64   `json:"observed_turns,omitempty"`
+		ObservedSpendUSD      *float64 `json:"observed_spend_usd,omitempty"`
+		ObservedTurnsWithCost *int64   `json:"observed_turns_with_cost,omitempty"`
 	}
 	w := wire{
-		At:        e.At.UTC().Format(time.RFC3339),
-		PhaseItem: e.PhaseItem,
-		SrcHead:   e.SrcHead,
+		At:                    e.At.UTC().Format(time.RFC3339),
+		PhaseItem:             e.PhaseItem,
+		SrcHead:               e.SrcHead,
+		GapSeconds:            e.GapSeconds,
+		ObservedTurns:         e.ObservedTurns,
+		ObservedSpendUSD:      e.ObservedSpendUSD,
+		ObservedTurnsWithCost: e.ObservedTurnsWithCost,
 	}
 	if e.AtText != "" {
 		w.At = e.AtText
@@ -831,6 +918,186 @@ func lastTickEntry(path string) (struct{ At, PhaseItem, SrcHead string }, bool, 
 	}
 	out.At, out.PhaseItem, out.SrcHead = e.At, e.PhaseItem, e.SrcHead
 	return out, true, nil
+}
+
+// LastAt is lastTickAt, exported so a caller building the NEXT entry (main.go's
+// `tick record`) can bound an observed-spend window against it before that
+// entry exists -- see spend.WindowedByObservation and Entry.ObservedTurns/
+// ObservedSpendUSD's own doc comments for why "no previous tick" (the zero
+// value returned here) means no window, not a zero-length one.
+func LastAt(path string) time.Time { return lastTickAt(path) }
+
+// LastRecorded is what the most recently written tick entry itself recorded
+// for the gap/observed-spend fields -- what `tick check` surfaces without
+// re-deriving them (that derivation belongs to whoever wrote the entry, at
+// the moment it was written; re-computing it later against a NOW that has
+// moved on would silently change a number that already happened).
+type LastRecorded struct {
+	At                    string
+	PhaseItem             string
+	GapSeconds            *int64
+	ObservedTurns         *int64
+	ObservedSpendUSD      *float64
+	ObservedTurnsWithCost *int64
+}
+
+// LastEntry returns the most recently recorded tick's own gap and
+// observed-spend figures. ok is false when the log has no entries at all --
+// never confuse that with "recorded, and both fields nil."
+func LastEntry(path string) (LastRecorded, bool, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return LastRecorded{}, false, nil
+	}
+	if err != nil {
+		return LastRecorded{}, false, fmt.Errorf("tick: open %s: %w", path, err)
+	}
+	defer f.Close()
+	var lastLine string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		if t := strings.TrimSpace(sc.Text()); t != "" {
+			lastLine = t
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return LastRecorded{}, false, err
+	}
+	if lastLine == "" {
+		return LastRecorded{}, false, nil
+	}
+	var e struct {
+		At                    string   `json:"at"`
+		PhaseItem             string   `json:"phase_item"`
+		GapSeconds            *int64   `json:"gap_seconds"`
+		ObservedTurns         *int64   `json:"observed_turns"`
+		ObservedSpendUSD      *float64 `json:"observed_spend_usd"`
+		ObservedTurnsWithCost *int64   `json:"observed_turns_with_cost"`
+	}
+	if err := json.Unmarshal([]byte(lastLine), &e); err != nil {
+		return LastRecorded{}, false, fmt.Errorf("tick: %s last line is not readable: %w", path, err)
+	}
+	return LastRecorded{
+		At:                    e.At,
+		PhaseItem:             e.PhaseItem,
+		GapSeconds:            e.GapSeconds,
+		ObservedTurns:         e.ObservedTurns,
+		ObservedSpendUSD:      e.ObservedSpendUSD,
+		ObservedTurnsWithCost: e.ObservedTurnsWithCost,
+	}, true, nil
+}
+
+// SpendKind is what an entry's observed-spend fields can honestly be read as.
+//
+// It exists because the pairing between ObservedSpendUSD and
+// ObservedTurnsWithCost is kept only by whoever WRITES an entry, and the
+// commands that print those figures do not write them: `tick check` reads
+// back whatever JSON is on the last line of a log that may have been
+// hand-edited, partially migrated, or appended to by a future write path that
+// sets one field of the pair and forgets the other. That is not hypothetical
+// -- agent-estate#995 exists because a fix pass wired exactly one field of a
+// pair -- and an invariant kept only by the current writer is a habit, not an
+// invariant. So the reader classifies the fields it was handed instead of
+// trusting them, and hands back values that are safe to print without
+// dereferencing anything.
+type SpendKind int
+
+const (
+	// SpendNoWindow: no observed-turn count at all, so there was no window to
+	// measure (the first tick ever recorded, or an entry predating
+	// agent-estate#982).
+	SpendNoWindow SpendKind = iota
+	// SpendNoTurns: a real window in which nothing reached a terminal state.
+	SpendNoTurns
+	// SpendNoneReported: turns finished, none of them reported a dollar
+	// figure (e.g. every one was a codex turn).
+	SpendNoneReported
+	// SpendReported: a dollar figure AND the count of turns that produced it,
+	// both present and mutually consistent -- the only reading from which a
+	// dollar line may be printed.
+	SpendReported
+	// SpendUnreadable: the fields contradict each other, so no honest dollar
+	// line can be built from them. Why names which pairing broke. This is
+	// deliberately not repaired into a plausible number: a count invented to
+	// stand beside a real dollar figure is indistinguishable from a measured
+	// one, which is the failure this whole field pair was added to prevent.
+	SpendUnreadable
+)
+
+// SpendReading is a dereference-safe reading of an entry's observed-spend
+// fields. Only the fields its Kind names are meaningful; the rest are zero
+// because they were absent or untrustworthy, never because they were
+// measured as zero.
+type SpendReading struct {
+	Kind SpendKind
+	// USD is meaningful only when Kind is SpendReported.
+	USD float64
+	// Turns is meaningful when Kind is SpendNoTurns or SpendNoneReported.
+	Turns int64
+	// TurnsWithCost is meaningful only when Kind is SpendReported.
+	TurnsWithCost int64
+	// Why is set only when Kind is SpendUnreadable, naming the exact
+	// contradiction so a reader can tell a broken entry from a quiet window.
+	Why string
+}
+
+// ReadSpend classifies the three observed-spend pointers of an entry --
+// Entry's own fields when recording, LastRecorded's when reading a log back
+// -- into the one thing that can be said about them without inventing a
+// number. Every combination is classified: anything that is not one of the
+// four coherent shapes is SpendUnreadable with a reason, never a silent
+// dereference. See SpendKind.
+func ReadSpend(turns *int64, usd *float64, turnsWithCost *int64) SpendReading {
+	switch {
+	case turns == nil:
+		// No window. Spend fields alongside a missing turn count are not a
+		// window that went unmeasured -- they are an entry that contradicts
+		// itself, and saying "not measured" would hide a real figure.
+		if usd != nil || turnsWithCost != nil {
+			return SpendReading{Kind: SpendUnreadable, Why: "the entry carries observed-spend figures but no observed-turn count to bound them"}
+		}
+		return SpendReading{Kind: SpendNoWindow}
+
+	case usd != nil && turnsWithCost == nil:
+		// The reviewer's reproduction on agent-estate#997: a dollar figure
+		// whose denominator is missing. Printing it "across 0 turns" would be
+		// a fabricated count; printing it with no count at all would restate
+		// the #995 defect in a new form.
+		return SpendReading{Kind: SpendUnreadable, Why: "the entry carries a dollar figure with no count of the turns that reported it"}
+
+	case usd == nil && turnsWithCost != nil:
+		return SpendReading{Kind: SpendUnreadable, Why: "the entry carries a count of turns that reported a cost, but no dollar figure they add up to"}
+
+	case usd != nil && turnsWithCost != nil:
+		switch {
+		case *turnsWithCost <= 0:
+			// A non-nil total requires at least one turn to have contributed
+			// it, so a zero or negative count cannot have produced this sum.
+			return SpendReading{Kind: SpendUnreadable, Why: "the entry claims a dollar figure produced by no turn at all"}
+		case *turnsWithCost > *turns:
+			return SpendReading{Kind: SpendUnreadable, Why: "the entry claims more turns reported a cost than finished in the window"}
+		}
+		return SpendReading{Kind: SpendReported, USD: *usd, Turns: *turns, TurnsWithCost: *turnsWithCost}
+
+	case *turns > 0:
+		return SpendReading{Kind: SpendNoneReported, Turns: *turns}
+
+	default:
+		return SpendReading{Kind: SpendNoTurns}
+	}
+}
+
+// Spend classifies the entry's own observed-spend fields. See ReadSpend.
+func (e Entry) Spend() SpendReading {
+	return ReadSpend(e.ObservedTurns, e.ObservedSpendUSD, e.ObservedTurnsWithCost)
+}
+
+// Spend classifies the read-back entry's observed-spend fields. See
+// ReadSpend -- this is the side that matters most, since these values came
+// off disk rather than from the code that computed them.
+func (l LastRecorded) Spend() SpendReading {
+	return ReadSpend(l.ObservedTurns, l.ObservedSpendUSD, l.ObservedTurnsWithCost)
 }
 
 // lastTickAt returns the timestamp of the most recent entry, or the zero time

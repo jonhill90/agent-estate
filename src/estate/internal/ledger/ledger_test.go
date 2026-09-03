@@ -83,3 +83,4 @@ func TestMissingLedgerInRealDirectoryIsAFirstRun(t *testing.T) {
 		t.Fatalf("first run should be empty and fine, got %v / %v", got, err)
 	}
 }
+

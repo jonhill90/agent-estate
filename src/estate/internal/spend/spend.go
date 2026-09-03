@@ -12,6 +12,7 @@ package spend
 
 import (
 	"sort"
+	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 )
@@ -239,4 +240,65 @@ func Aggregate(records []ledger.Record) Report {
 		}
 	}
 	return rep
+}
+
+// WindowedByObservation is observed spend for one window: every task whose
+// own TERMINAL record (ledger.State.Terminal -- Complete or Failed; Unknown
+// is deliberately excluded because it may still be running, see
+// ledger.State.Terminal's doc comment) has an At falling strictly after
+// since and no later than until.
+//
+// WHY OBSERVATION TIME, NOT DISPATCH TIME. An earlier version of this
+// function (agent-estate#982) keyed the window on the task's OWN
+// Dispatched-state record instead -- the instant it was launched, not the
+// instant its outcome became known. The Director ticks every few minutes
+// and a dispatched lane routinely runs far longer than that, so a task
+// dispatched in window N that does not finish until window N+2 had its
+// dispatch instant permanently behind every later window's own `since`: its
+// cost was never re-tried in a later window and never landed in the window
+// it dispatched in either, because that window had already been recorded
+// before the task finished. It was not deferred, it was dropped, silently,
+// for the common case rather than an edge case (agent-estate#989's review of
+// #982's own PR). Keying on the terminal record's own At instead means every
+// task's cost lands in EXACTLY ONE window -- the one during which its
+// outcome became known -- because Current() keeps one terminal record per
+// task id, its At is fixed once written, and consecutive tick windows are
+// contiguous and non-overlapping. Nothing is deferred and nothing is ever
+// dropped.
+//
+// This is why the field this feeds is named "observed", not "dispatched":
+// it answers "what did we learn happened, in this window", not "what did we
+// start, in this window."
+//
+// This is deliberately not Aggregate's per-harness Report: a tick-log entry
+// is one compact JSON line, not a report, so it carries a single total plus
+// the coverage it was drawn from. turns is every task whose outcome became
+// known in the window, whatever it reported; turnsWithCost is how many of
+// those carry a non-nil SpendCostUSD; totalCostUSD sums only those. A
+// caller must print turnsWithCost alongside totalCostUSD ("$X across N of M
+// observed turns") -- printing totalCostUSD alone reads as the window's
+// whole cost when a harness reporting no dollar figure (codex, as of this
+// writing) may have completed turns inside the same window that this total
+// silently excludes. See docs/spend-observation.md for which harnesses
+// report a dollar figure at all.
+//
+// current is expected to be Ledger.Current() (latest record per task id): a
+// task still in flight when this is computed has no terminal record yet, so
+// it contributes to neither turns nor turnsWithCost in this window -- it
+// will contribute to whichever later window it actually finishes in.
+func WindowedByObservation(current []ledger.Record, since, until time.Time) (turns, turnsWithCost int, totalCostUSD float64) {
+	for _, r := range current {
+		if !r.State.Terminal() {
+			continue
+		}
+		if !r.At.After(since) || r.At.After(until) {
+			continue
+		}
+		turns++
+		if r.SpendCostUSD != nil {
+			turnsWithCost++
+			totalCostUSD += *r.SpendCostUSD
+		}
+	}
+	return
 }
