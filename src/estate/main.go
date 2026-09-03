@@ -29,6 +29,34 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/verifybranch"
 )
 
+// stderrTailLimit bounds how much of a failed child's stderr enters the
+// ledger. The ledger is append-only JSONL; an unbounded blob turns one bad
+// turn into a file nobody can read back, so we keep a tail and say so.
+const stderrTailLimit = 4096
+
+// stderrSegment turns a captured stderr blob into a ledger-note fragment.
+// Absence is a typed value, not a bare zero: "captured, and it was blank"
+// must read differently from "nobody looked" -- the same discipline this
+// repo already applies to cost.Figure.Known and session.Worktree.Clean.
+// examined=false is not reachable from main today (cmd.Stderr is always
+// wired to a buffer before the child runs) but is kept as an explicit
+// parameter, not inferred from a nil/empty slice, so the distinction stays
+// checkable by a test even though production always examines.
+func stderrSegment(stderr []byte, examined bool) string {
+	if !examined {
+		return "stderr: not captured"
+	}
+	s := strings.TrimSpace(string(stderr))
+	if s == "" {
+		return "stderr: (empty)"
+	}
+	if len(s) > stderrTailLimit {
+		return fmt.Sprintf("stderr (truncated to last %d of %d bytes): %s",
+			stderrTailLimit, len(s), s[len(s)-stderrTailLimit:])
+	}
+	return "stderr: " + s
+}
+
 func usage() {
 	fmt.Fprint(os.Stderr, `estate -- the supervisor
 
@@ -541,6 +569,16 @@ func main() {
 		cmd.Stdin = strings.NewReader(grounded)
 		var stdout bytes.Buffer
 		cmd.Stdout = &stdout
+		// exec.Cmd.Output() only captures the child's stderr into the
+		// returned *exec.ExitError when cmd.Stderr is nil -- and this path
+		// does not use Output() at all (cmd.Start()/cmd.Wait() below, so the
+		// pid is known before the ledger records Dispatched). Wiring our own
+		// buffer here is what makes that stderr readable at all instead of
+		// being lost with no capture path (agent-estate#950). The buffer
+		// fills as the child runs, so it holds whatever the child wrote even
+		// if the run times out below, not only on a clean exit.
+		var stderrBuf bytes.Buffer
+		cmd.Stderr = &stderrBuf
 
 		// Started, not merely queued, before the ledger records it: only a
 		// process that actually exists has a pid to record. A dispatch that
@@ -570,10 +608,16 @@ func main() {
 		switch {
 		case ctx.Err() != nil:
 			// Timed out. We do not know whether the turn did its work, so we
-			// must not say it failed and must not free the slot.
-			rec.State, rec.Note = ledger.Unknown, "timed out after 45m; unknown is not failed"
+			// must not say it failed and must not free the slot. We still
+			// capture stderr for free either way, and a partial write made
+			// before the kill can be the only clue toward re-dispatching
+			// versus waiting -- worth keeping even though the state stays
+			// Unknown.
+			rec.State = ledger.Unknown
+			rec.Note = "timed out after 45m; unknown is not failed; " + stderrSegment(stderrBuf.Bytes(), true)
 		case runErr != nil:
-			rec.State, rec.Note = ledger.Failed, runErr.Error()
+			rec.State = ledger.Failed
+			rec.Note = runErr.Error() + "; " + stderrSegment(stderrBuf.Bytes(), true)
 		default:
 			rec.State = ledger.Complete
 			var parsed map[string]any
