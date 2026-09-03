@@ -1,23 +1,34 @@
 // Package gate decides whether a pull request may merge.
 //
-// Two independent conditions, both of which must pass, both failing closed:
+// Four independent conditions, all of which must pass, all failing closed:
 //
-//  1. Every required check is green AT THE HEAD SHA. Not "green somewhere" --
-//     a check that passed on an earlier push says nothing about what is being
-//     merged now.
-//  2. The reviewer is not the author. The old supervisor lost a task row on
-//     cancel, could no longer say who wrote a PR, and approved a lane to
-//     review its own work.
+//  1. The pull request is open, and every required check is green AT THE
+//     HEAD SHA. Not "green somewhere" -- a check that passed on an earlier
+//     push says nothing about what is being merged now.
+//  2. A dispatched turn authored the work this PR closes, and the reviewer
+//     lane is not among those authoring lanes. Authorship is read from
+//     ledger records this estate itself wrote at dispatch time -- never
+//     from a caller-supplied issue number, and never from anything a PR's
+//     own body or comments assert about themselves. See agent-estate#926.
+//  3. That same reviewer lane has a COMPLETED review turn on record for
+//     THIS pull request. A dispatched-but-unfinished review is not
+//     independence: nobody has actually looked yet.
+//  4. The reviewer's own verdict comment on the PR resolves to APPROVE,
+//     parsed from a Verdict: line -- never a substring match anywhere in
+//     the body -- and is not stale against the checks that ran at head.
 //
 // Anything unresolved -- an unknown author, a pending check, an unreadable
-// ledger -- is a REFUSAL. "Cannot tell" is never "allowed".
+// ledger, a PR that closes no issue GitHub can confirm -- is a REFUSAL.
+// "Cannot tell" is never "allowed".
 package gate
 
 import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
+	"strconv"
 	"strings"
+	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 )
@@ -26,13 +37,25 @@ type Check struct {
 	Name       string `json:"name"`
 	Status     string `json:"status"`
 	Conclusion string `json:"conclusion"`
+	StartedAt  string `json:"startedAt"`
+}
+
+type Comment struct {
+	Body      string `json:"body"`
+	CreatedAt string `json:"createdAt"`
+}
+
+type closingIssue struct {
+	Number int `json:"number"`
 }
 
 type PR struct {
-	Number  int     `json:"number"`
-	HeadOID string  `json:"headRefOid"`
-	State   string  `json:"state"`
-	Checks  []Check `json:"statusCheckRollup"`
+	Number        int            `json:"number"`
+	HeadOID       string         `json:"headRefOid"`
+	State         string         `json:"state"`
+	Checks        []Check        `json:"statusCheckRollup"`
+	ClosingIssues []closingIssue `json:"closingIssuesReferences"`
+	Comments      []Comment      `json:"comments"`
 }
 
 type Decision struct {
@@ -41,9 +64,16 @@ type Decision struct {
 	HeadOID string
 }
 
+// fetch reads the pull request's own state from GitHub. Everything Evaluate
+// needs to establish identity (closingIssuesReferences), freshness (checks
+// plus their own startedAt) and the reviewer's public verdict (comments)
+// comes from here -- never from a caller argument, per constraint 6 of
+// agent-estate#926: an author who could name any issue they liked used to
+// be able to merge anything, using only record shapes `estate dispatch`
+// writes itself.
 func fetch(repo string, pr int) (*PR, error) {
 	out, err := exec.Command("gh", "pr", "view", fmt.Sprint(pr), "-R", repo,
-		"--json", "number,headRefOid,state,statusCheckRollup").Output()
+		"--json", "number,headRefOid,state,statusCheckRollup,closingIssuesReferences,comments").Output()
 	if err != nil {
 		return nil, fmt.Errorf("gh pr view %s#%d: %w", repo, pr, err)
 	}
@@ -73,39 +103,88 @@ func checksGreen(p *PR) []string {
 	return bad
 }
 
-// independent reports whether the reviewing lane differs from the authoring
-// lane. Either being unknown is a refusal, not a pass.
-// independent reports whether the reviewing lane differs from every lane that
-// authored work on the issue.
-//
-// The first version filtered the reviewer OUT of the author candidates
-// (`r.Lane != reviewerLane`) before asking whether the author WAS the
-// reviewer, so the self-review branch was unreachable dead code and a lane
-// that had worked an issue alongside another lane could approve its own PR --
-// the exact failure this package exists to prevent. The test passed because it
-// only ever hit the unknown-author branch and asserted that SOME refusal came
-// back, not which one.
-func independent(l *ledger.Ledger, issue, reviewerLane string) []string {
-	if strings.TrimSpace(reviewerLane) == "" {
-		return []string{"reviewer lane not supplied -- cannot establish independence"}
-	}
-	cur, err := l.Current()
-	if err != nil {
-		return []string{"cannot read ledger: " + err.Error()}
-	}
-	authors := map[string]bool{}
-	for _, r := range cur {
-		if r.Issue == issue && r.Lane != "" {
-			authors[r.Lane] = true
+// earliestCheckStart is the earliest startedAt reported across the PR's
+// checks -- the earliest moment GitHub itself observed work happening
+// against the current head. Used as the staleness anchor for constraint 5:
+// "measured against when the checks actually ran, not a committer date,
+// which the author controls." A check run's startedAt is written by
+// GitHub's own runner when it picks the job up; nothing a PR author does to
+// a commit's authored/committer date touches it.
+func earliestCheckStart(p *PR) (time.Time, bool) {
+	var earliest time.Time
+	found := false
+	for _, c := range p.Checks {
+		if c.StartedAt == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339, c.StartedAt)
+		if err != nil {
+			continue
+		}
+		if !found || t.Before(earliest) {
+			earliest = t
+			found = true
 		}
 	}
-	if len(authors) == 0 {
-		return []string{"no authoring lane on record for issue " + issue + " -- authorship unknown, refusing"}
+	return earliest, found
+}
+
+// authorLanes returns every lane the ledger records as RoleAuthor on any of
+// the given issues. Reviewer turns are deliberately excluded here even
+// though they may share the same Issue field -- a review turn is dispatched
+// against the same issue as the work it reviews, which is exactly the
+// ambiguity agent-estate#926 reports: "That lane authored nothing. It was a
+// review seat... The gate derives authorship from the issue prefix in a
+// dispatch id, and a review turn carries the same issue as the work it
+// reviews, so the two are indistinguishable." Role, recorded at dispatch,
+// is what removes the ambiguity.
+func authorLanes(l *ledger.Ledger, issues map[string]bool) (map[string]bool, error) {
+	cur, err := l.Current()
+	if err != nil {
+		return nil, err
 	}
-	if authors[reviewerLane] {
-		return []string{"reviewer lane " + reviewerLane + " also authored work on issue " + issue + " -- self-review"}
+	out := map[string]bool{}
+	for _, r := range cur {
+		if r.Lane == "" || !issues[r.Issue] {
+			continue
+		}
+		if r.EffectiveRole() != ledger.RoleAuthor {
+			continue
+		}
+		out[r.Lane] = true
 	}
-	return nil
+	return out, nil
+}
+
+// reviewerCompleted reports whether reviewerLane has a COMPLETE RoleReviewer
+// record on file for this exact PR number, and its completion time -- the
+// ledger-owned timestamp used as the staleness anchor's other side (see
+// earliestCheckStart). A dispatched-but-not-yet-Complete review turn does
+// not satisfy this: "a dispatched but unfinished review turn is not
+// independence" (constraint 3).
+func reviewerCompleted(l *ledger.Ledger, pr int, reviewerLane string) (time.Time, bool, error) {
+	cur, err := l.Current()
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	var latest time.Time
+	found := false
+	for _, r := range cur {
+		if r.Lane != reviewerLane || r.PR != pr {
+			continue
+		}
+		if r.EffectiveRole() != ledger.RoleReviewer {
+			continue
+		}
+		if r.State != ledger.Complete {
+			continue
+		}
+		if !found || r.At.After(latest) {
+			latest = r.At
+			found = true
+		}
+	}
+	return latest, found, nil
 }
 
 func short(s string) string {
@@ -115,13 +194,26 @@ func short(s string) string {
 	return s
 }
 
-func Evaluate(repo string, pr int, reviewerLane string, issue string, l *ledger.Ledger) Decision {
-	d := Decision{Allow: true}
+// Evaluate is the whole gate. repo and pr identify the pull request; every
+// other fact it needs -- who authored the work it closes, whether the
+// reviewer actually reviewed, and what they said -- is derived from GitHub
+// and the ledger, never from a caller-supplied argument.
+func Evaluate(repo string, pr int, reviewerLane string, l *ledger.Ledger) Decision {
 	p, err := fetch(repo, pr)
 	if err != nil {
 		return Decision{Allow: false, Reasons: []string{"could not read the PR: " + err.Error()}}
 	}
-	d.HeadOID = p.HeadOID
+	return evaluate(p, reviewerLane, l)
+}
+
+// evaluate is Evaluate's whole decision logic, taking an already-fetched PR
+// so tests can drive it against a fixture without a gh/network dependency
+// -- against the SAME function main.go and Evaluate call, not a
+// reimplementation. A test exercising a copy of this logic instead of this
+// function itself would not catch a real regression here; this seam is
+// what lets gate_test.go's bypass mutations do that.
+func evaluate(p *PR, reviewerLane string, l *ledger.Ledger) Decision {
+	d := Decision{Allow: true, HeadOID: p.HeadOID}
 	if !strings.EqualFold(p.State, "OPEN") {
 		d.Allow = false
 		d.Reasons = append(d.Reasons, "pull request is "+strings.ToLower(p.State))
@@ -130,9 +222,71 @@ func Evaluate(repo string, pr int, reviewerLane string, issue string, l *ledger.
 		d.Allow = false
 		d.Reasons = append(d.Reasons, bad...)
 	}
-	if bad := independent(l, issue, reviewerLane); len(bad) > 0 {
-		d.Allow = false
-		d.Reasons = append(d.Reasons, bad...)
+
+	if strings.TrimSpace(reviewerLane) == "" {
+		return refuse(d, "reviewer lane not supplied -- cannot establish independence")
 	}
+
+	// Identity comes from the PR itself, never a caller argument
+	// (constraint 6). A PR GitHub reports as closing nothing is refused
+	// rather than treated as authorless-and-fine: an unlinked PR gives the
+	// gate no issue to check authorship against at all.
+	if len(p.ClosingIssues) == 0 {
+		return refuse(d, fmt.Sprintf("PR #%d closes no issue GitHub can confirm -- authorship cannot be established, refusing", p.Number))
+	}
+	issues := map[string]bool{}
+	for _, ci := range p.ClosingIssues {
+		issues[strconv.Itoa(ci.Number)] = true
+	}
+
+	authors, err := authorLanes(l, issues)
+	if err != nil {
+		return refuse(d, "cannot read ledger for authorship: "+err.Error())
+	}
+	if len(authors) == 0 {
+		var names []string
+		for n := range issues {
+			names = append(names, "#"+n)
+		}
+		return refuse(d, "no authoring (role=author) lane on record for "+strings.Join(names, ", ")+" -- authorship unknown, refusing")
+	}
+	if authors[reviewerLane] {
+		return refuse(d, "reviewer lane "+reviewerLane+" also authored work on an issue this PR closes -- self-review")
+	}
+
+	reviewedAt, ok, err := reviewerCompleted(l, p.Number, reviewerLane)
+	if err != nil {
+		return refuse(d, "cannot read ledger for reviewer completion: "+err.Error())
+	}
+	if !ok {
+		return refuse(d, "reviewer lane "+reviewerLane+" has no completed role=reviewer turn on record for PR #"+strconv.Itoa(p.Number)+" -- a dispatched review that never finished is not independence")
+	}
+
+	lv := resolveLaneVerdict(p.Comments, reviewerLane)
+	if !lv.found {
+		return refuse(d, lv.reason)
+	}
+	if !lv.ok {
+		return refuse(d, "reviewer "+reviewerLane+"'s own verdict comment is unresolved -- "+lv.reason)
+	}
+	if lv.decision != verdictApproved {
+		return refuse(d, "reviewer "+reviewerLane+"'s own verdict comment is "+string(lv.decision)+", not an approval")
+	}
+	if lv.hasSHA && lv.reviewedSHA != p.HeadOID {
+		return refuse(d, "reviewer "+reviewerLane+"'s Reviewed-SHA "+lv.reviewedSHA+" does not match current head "+p.HeadOID+" -- stale, does not count")
+	}
+
+	if earliest, hasEarliest := earliestCheckStart(p); hasEarliest && reviewedAt.Before(earliest) {
+		return refuse(d, "reviewer "+reviewerLane+" completed at "+reviewedAt.Format(time.RFC3339)+
+			", before the current head's checks started at "+earliest.Format(time.RFC3339)+
+			" -- reviewed against stale code")
+	}
+
+	return d
+}
+
+func refuse(d Decision, reason string) Decision {
+	d.Allow = false
+	d.Reasons = append(d.Reasons, reason)
 	return d
 }

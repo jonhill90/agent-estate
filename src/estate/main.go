@@ -29,9 +29,14 @@ func usage() {
 	fmt.Fprint(os.Stderr, `estate -- the supervisor
 
   estate pressure                       report whether the host can take work
-  estate dispatch <issue> <brief-file>  run one agent turn, gated and recorded
-  estate merge <repo> <pr> <issue> <reviewer-lane>
-                                        may this PR merge? checks + independence
+  estate dispatch <issue> <brief-file>  run one agent turn (role=author), gated and recorded
+  estate dispatch review <pr> <issue> <brief-file>
+                                        run one review turn (role=reviewer) against a PR
+  estate merge <repo> <pr> <reviewer-lane>
+                                        may this PR merge? identity comes from the PR
+                                        itself (closingIssuesReferences), never a caller
+                                        -- checks green, author != reviewer, reviewer
+                                        actually completed a review, and posted APPROVE
   estate corpus-audit [n]               hard parameters least supported by your words
   estate tasks                          latest state of every task
   estate inflight                       tasks still occupying a slot
@@ -103,17 +108,22 @@ func main() {
 		}
 
 	case "merge":
-		if len(os.Args) < 6 {
+		if len(os.Args) < 5 {
 			usage()
 			os.Exit(2)
 		}
-		repo, issue, reviewer := os.Args[2], os.Args[4], os.Args[5]
+		// No <issue> argument: identity comes from the PR itself
+		// (closingIssuesReferences, read inside gate.Evaluate), never a
+		// caller-supplied number. Taking issue from the caller let an
+		// author name an unrelated issue with a clean author/reviewer pair
+		// and merge anything (agent-estate#926 constraint 6).
+		repo, reviewer := os.Args[2], os.Args[4]
 		var pr int
 		if _, err := fmt.Sscanf(os.Args[3], "%d", &pr); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: pr must be a number:", os.Args[3])
 			os.Exit(2)
 		}
-		d := gate.Evaluate(repo, pr, reviewer, issue, l)
+		d := gate.Evaluate(repo, pr, reviewer, l)
 		fmt.Printf("%s#%d head %s\n", repo, pr, d.HeadOID)
 		if !d.Allow {
 			for _, r := range d.Reasons {
@@ -121,7 +131,7 @@ func main() {
 			}
 			os.Exit(1)
 		}
-		fmt.Println("may merge: all checks green at head, reviewer is not the author")
+		fmt.Println("may merge: checks green at head, reviewer completed an independent review and approved at the current head")
 
 	case "tasks", "inflight":
 		var rs []ledger.Record
@@ -339,7 +349,27 @@ func main() {
 			usage()
 			os.Exit(2)
 		}
-		issue, briefPath := os.Args[2], os.Args[3]
+		// A review turn is dispatched against the same issue as the work it
+		// reviews, so the issue alone can never tell the merge gate apart
+		// from an authoring turn (agent-estate#926). Role, recorded here at
+		// dispatch time, is what removes the ambiguity -- never inferred
+		// later from what a lane or a PR comment claims about itself.
+		role := ledger.RoleAuthor
+		reviewPR := 0
+		issueIdx, briefIdx := 2, 3
+		if os.Args[2] == "review" {
+			if len(os.Args) < 6 {
+				fmt.Fprintln(os.Stderr, "estate: dispatch review needs <pr> <issue> <brief-file>")
+				os.Exit(2)
+			}
+			role = ledger.RoleReviewer
+			if _, err := fmt.Sscanf(os.Args[3], "%d", &reviewPR); err != nil {
+				fmt.Fprintln(os.Stderr, "estate: pr must be a number:", os.Args[3])
+				os.Exit(2)
+			}
+			issueIdx, briefIdx = 4, 5
+		}
+		issue, briefPath := os.Args[issueIdx], os.Args[briefIdx]
 		brief, err := os.ReadFile(briefPath)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot read brief:", err)
@@ -380,11 +410,11 @@ func main() {
 			os.Exit(1)
 		}
 
-		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, State: ledger.Dispatched, Note: "worktree " + wt.Path}); err != nil {
+		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Dispatched, Note: "worktree " + wt.Path}); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot record dispatch:", err)
 			os.Exit(2)
 		}
-		fmt.Printf("dispatched %s in %s (grounded in %d operator parameters)\n", id, wt.Path, len(params))
+		fmt.Printf("dispatched %s (role=%s) in %s (grounded in %d operator parameters)\n", id, role, wt.Path, len(params))
 
 		ctx, cancel := context.WithTimeout(context.Background(), 45*time.Minute)
 		defer cancel()
@@ -394,7 +424,7 @@ func main() {
 		cmd.Stdin = strings.NewReader(grounded)
 		out, runErr := cmd.Output()
 
-		rec := ledger.Record{ID: id, Issue: issue, Lane: id}
+		rec := ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR}
 		switch {
 		case ctx.Err() != nil:
 			// Timed out. We do not know whether the turn did its work, so we

@@ -1,0 +1,212 @@
+package gate
+
+// Comment verdict-line parsing, ported from src/tui's internal/prverdict
+// (itself a port of jonhill90/skills#255's pr_verdict.py, itself a port of
+// agent-supervisor's verdict.py) into this module -- src/estate and src/tui
+// are separate Go modules, so this is a copy, not an import. What differs
+// from prverdict.Resolve: that package compares a comment's Review-Lane:
+// trailer against a PR body's self-declared Author-Lane: trailer, because
+// src/tui has no ledger and self-declared trailers are the only authorship
+// signal it can reach. This package has a ledger (internal/ledger), so
+// authorship and reviewer-completion are established there (see gate.go and
+// review.go); this file's only job is constraint 4 of agent-estate#926 --
+// "approval must be parsed from the verdict LINE, not matched anywhere in
+// the body" -- applied to the ONE reviewer lane the ledger has already
+// confirmed completed a review of this PR.
+//
+// agent-supervisor#192/#198/#213/#475 are the fixed bugs this regex and
+// classifier already carry (see prverdict.go's doc comment for detail);
+// they are not re-derived here.
+
+import (
+	"regexp"
+	"strings"
+)
+
+// verdictLineRE recognises a verdict line on its content, not its emphasis.
+var verdictLineRE = regexp.MustCompile(`(?i)^#{0,6}\s*.*?\*{0,2}verdict:\**\s*(.*)$`)
+
+// Whole-token match, not substring: "Verdict: NOT APPROVED" contains
+// "APPROVE" and must not read as an approval.
+var negationMarkers = []string{"NOT", "DIS", "NO", "N'T"}
+
+var approvedTokens = map[string]bool{"APPROVE": true, "APPROVED": true}
+
+var rejectedTokens = map[string]bool{
+	"REQUEST CHANGES":   true,
+	"REQUEST-CHANGES":   true,
+	"REJECTED":          true,
+	"CHANGES REQUESTED": true,
+}
+
+type verdictDecision string
+
+const (
+	verdictApproved verdictDecision = "approved"
+	verdictRejected verdictDecision = "rejected"
+)
+
+func classifyDecisionText(decisionText string) (verdictDecision, bool) {
+	for _, marker := range negationMarkers {
+		if strings.Contains(decisionText, marker) {
+			return "", false
+		}
+	}
+	if approvedTokens[decisionText] {
+		return verdictApproved, true
+	}
+	if rejectedTokens[decisionText] {
+		return verdictRejected, true
+	}
+	return "", false
+}
+
+var (
+	leadingEmphasisRE = regexp.MustCompile("^[*_`]+")
+	emphasisMarkerRE  = regexp.MustCompile("[*_`]")
+	whitespaceRunRE   = regexp.MustCompile(`\s+`)
+)
+
+func normaliseDecisionText(rest string) string {
+	text := strings.TrimSpace(rest)
+	text = leadingEmphasisRE.ReplaceAllString(text, "")
+	if loc := emphasisMarkerRE.FindStringIndex(text); loc != nil {
+		text = text[:loc[0]]
+	}
+	text = strings.TrimSpace(text)
+	text = strings.TrimRight(text, ".:;,!")
+	text = strings.TrimSpace(text)
+	text = strings.ReplaceAll(text, "-", " ")
+	text = whitespaceRunRE.ReplaceAllString(text, " ")
+	text = strings.ToUpper(text)
+	if idx := strings.Index(text, "+"); idx >= 0 {
+		text = strings.TrimSpace(text[:idx])
+	}
+	return text
+}
+
+type verdictLine struct {
+	decision verdictDecision
+	ok       bool
+	text     string
+}
+
+// scanVerdictLines never reads a line inside a fenced code block or a
+// markdown blockquote (GitHub's "quote reply" shape) -- a verdict quoted as
+// an example, or quoted from an earlier comment, must not be read as this
+// comment restating it. This is exactly the trap agent-estate#926 names:
+// "every council comment in this repo quotes prior verdicts in its seat
+// table, so a substring match reads a REQUEST CHANGES that quotes an
+// approval as an approval."
+func scanVerdictLines(body string) []verdictLine {
+	var lines []string
+	inFence := false
+	for _, raw := range strings.Split(body, "\n") {
+		line := strings.TrimSpace(raw)
+		if strings.HasPrefix(line, "```") {
+			inFence = !inFence
+			continue
+		}
+		if inFence || strings.HasPrefix(line, ">") {
+			continue
+		}
+		lines = append(lines, line)
+	}
+	var results []verdictLine
+	for _, line := range lines {
+		match := verdictLineRE.FindStringSubmatch(line)
+		if match == nil {
+			continue
+		}
+		text := normaliseDecisionText(match[1])
+		decision, ok := classifyDecisionText(text)
+		results = append(results, verdictLine{decision: decision, ok: ok, text: text})
+	}
+	return results
+}
+
+// reviewLaneRE / reviewedSHARE anchor to `[ \t]*` (never bare `\s*`) between
+// the trailer's colon and its value, and end each pattern with `\r?$` on
+// its OWN line. A bare `\s*` there can walk across the newline when the
+// trailer's value is blank and capture the NEXT line as if it were the
+// value (jonhill90/skills#258/#260, agent-tui#112) -- ported unchanged
+// because the same regex shape is used here.
+var (
+	reviewLaneRE  = regexp.MustCompile(`(?im)^[ \t]*Review-Lane:[ \t]*(.*)\r?$`)
+	reviewedSHARE = regexp.MustCompile(`(?im)^[ \t]*Reviewed-SHA:[ \t]*([A-Za-z0-9]+)[ \t]*\r?$`)
+)
+
+func parseTrailer(re *regexp.Regexp, body string) (string, bool) {
+	match := re.FindStringSubmatch(body)
+	if match == nil {
+		return "", false
+	}
+	value := strings.TrimSpace(match[1])
+	if value == "" {
+		return "", false
+	}
+	return value, true
+}
+
+// laneVerdict is this package's own wiring on top of the ported scanner
+// above: find the reviewer's OWN verdict comment for lane, and resolve it.
+// verdictComment finds the LAST comment carrying both a qualifying
+// Verdict: line and a Review-Lane: trailer matching lane exactly -- "last"
+// so a lane that first REQUEST CHANGES and later re-reviews APPROVE is read
+// as its current verdict, and an unrecognised decision on a later comment
+// is never silently overridden by an earlier approval underneath it.
+type laneVerdict struct {
+	found       bool
+	decision    verdictDecision
+	ok          bool
+	reason      string
+	reviewedSHA string
+	hasSHA      bool
+}
+
+func resolveLaneVerdict(comments []Comment, lane string) laneVerdict {
+	var (
+		lastBody string
+		lastScan []verdictLine
+		found    bool
+	)
+	for _, c := range comments {
+		reviewLane, hasReviewLane := parseTrailer(reviewLaneRE, c.Body)
+		if !hasReviewLane || reviewLane != lane {
+			continue
+		}
+		scan := scanVerdictLines(c.Body)
+		if len(scan) == 0 {
+			continue
+		}
+		lastBody = c.Body
+		lastScan = scan
+		found = true
+	}
+	if !found {
+		return laneVerdict{found: false, reason: "no PR comment carries both a Verdict: line and Review-Lane: " + lane}
+	}
+
+	decisions := map[verdictDecision]bool{}
+	var unrecognised []string
+	for _, line := range lastScan {
+		if line.ok {
+			decisions[line.decision] = true
+		} else {
+			unrecognised = append(unrecognised, `"`+line.text+`"`)
+		}
+	}
+	if len(decisions) != 1 {
+		reason := "conflicting Verdict: lines in reviewer's own comment"
+		if len(unrecognised) > 0 {
+			reason = "decision text not recognised: " + strings.Join(unrecognised, "; ")
+		}
+		return laneVerdict{found: true, ok: false, reason: reason}
+	}
+	var verdict verdictDecision
+	for d := range decisions {
+		verdict = d
+	}
+	sha, hasSHA := parseTrailer(reviewedSHARE, lastBody)
+	return laneVerdict{found: true, ok: true, decision: verdict, reviewedSHA: sha, hasSHA: hasSHA}
+}
