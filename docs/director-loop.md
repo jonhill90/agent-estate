@@ -15,16 +15,27 @@ Recreate with `CronCreate`, `*/3 * * * *`, recurring:
 ```
 Director tick.
 
-1. Run `go run ./src/estate tick check` FIRST. Exit 1 means the loop is
-   stalled: stop ticking, escalate per brief §6, and do nothing else this
-   tick. Exit 2 means the record is unreadable — that is not clean, treat it
-   as a stall. Exit 0 means continue.
+1. Run `go run ./src/estate tick check` FIRST.
+   - Exit 0: continue.
+   - Exit 1 (STALLED, unacknowledged): escalate per brief §6, then run
+     `go run ./src/estate tick escalate <phase-item> <where>` naming the
+     phase item and where you told the human, and stop -- do nothing else
+     this tick.
+   - Exit 3 (STALLED, escalated): this phase item/src head is still stuck
+     and a human has already been told. Do not re-escalate the same stall
+     every tick -- work something ELSE (a different phase item, or nothing,
+     stated plainly) instead of repeating the escalation for its own sake.
+   - Exit 2: the record is unreadable -- that is not clean, treat it as a
+     stall (escalate, same as exit 1).
 2. Read docs/director-brief.md §3 and docs/phase-plan.md.
 3. Advance exactly one phase item. Never work a menu. "I did not advance it,
    and why" is a legitimate result.
 4. Record it: `go run ./src/estate tick record <phase-item> [artifact]`.
    Omit the artifact when there was none — do not invent one, and do not
-   record "" to dodge the stop condition.
+   record "" to dodge the stop condition. **Never put an escalation's
+   detail here** (a Telegram link, "told Jon") -- that goes through
+   `tick escalate`'s own log, never the artifact field; see
+   `internal/tick.RecordEscalation`'s doc comment for why.
 5. End by stating what a human can now do that they could not before, naming
    which of src/tui or src/estate moved.
 ```
@@ -59,6 +70,35 @@ still named in the reason — they say what was stuck and where — but they no
 longer excuse a stall. The rule is strictly stronger: every log the old form
 flagged, this one flags.
 
+## The stall that could not record itself (agent-estate#923)
+
+A stalled tick correctly writes nothing to `docs/tick-log.jsonl` — it
+produced no artifact, so nothing else was true to write. But that means the
+window never changes, so `tick check` reports `STALLED` on the *next* tick
+too, and every tick after that, forever. There was no way to record "I
+noticed, told a human, and am waiting" — the state brief §3 itself names
+("the clock does not run while you are blocked on operator review") but that
+the record had no field for. The only thing that ever broke the loop was a
+human overriding the rule in the open, which is the exact judgement call the
+rule exists to remove.
+
+`estate tick escalate <phase-item> <where>` fixes this by writing to a
+**second, separate** log (`docs/tick-escalations.jsonl`) that `tick check`
+reads alongside the tick log. It never counts as an artifact — there is no
+artifact field on an escalation entry, and it cannot be smuggled through
+`tick record`'s artifact argument either (see step 4 above and
+`internal/tick.RecordEscalation`'s doc comment for the exact `://`-shaped
+dodge that would otherwise open). It only tells `tick check` that THIS
+stall — same `phase_item`, same `src_head` as the most recent tick — has
+already been told to a human. `tick check`'s exit code then splits three
+ways instead of two: still moving (0), stalled and nobody told (1), stalled
+and a human already knows (3). Nothing here lets Stalled itself go back to
+false — the window still only moves the way it always has, on a real
+artifact recorded since the last tick. Escalating the same stall over and
+over is counted, not hidden: `tick check`'s output says how many times, so a
+loop escalating every tick reads differently from one that escalated once
+and moved to other work.
+
 ## Why step 1 is step 1
 
 `estate tick check` is a gate that fails closed, and until this file it had no
@@ -75,7 +115,8 @@ Adapt it to state, per brief §3:
 |---|---|
 | advancing a phase item | 3 minutes |
 | blocked on operator review, nothing else unblocked | widen; a wakeup with nothing to react to manufactures make-work |
-| stalled per `tick check` | stop, escalate |
+| stalled per `tick check`, unacknowledged (exit 1) | stop, escalate |
+| stalled per `tick check`, already escalated (exit 3) | move to other work; do not repeat the same escalation every tick |
 | budget at ~10% remaining | cancel the cron; schedule one that fires when usage returns (`it-fb0cfce397677cb3`, hard) |
 
 Widening is a judgement the Director makes and announces, not a thing it waits
