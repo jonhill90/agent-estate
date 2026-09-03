@@ -89,7 +89,7 @@ Two, both in Go, both failing closed.
 | Guard | Refuses | Implemented in |
 |---|---|---|
 | Host pressure | a new dispatch when the host cannot safely take one — and equally when it cannot measure the host at all, because blindness is not capacity. The token-budget floor is one of its limits, not a separate gate: `internal/quota` refuses at roughly 10% remaining, and a reading older than 20 minutes counts as no reading | `estate pressure`, `src/estate/internal/pressure`, `src/estate/internal/quota` |
-| Merge gate | a merge unless the PR is open with every required check green at its live head SHA, a dispatched turn is joined to it by BOTH its `dispatch/<id>` head ref and a head SHA the estate itself recorded, the reviewer is a different dispatch from the author, and a parsable APPROVE was actually posted | `estate merge`, `src/estate/internal/gate` |
+| Merge gate | to *allow* a merge unless the PR is open with every required check green at its live head SHA, a dispatched turn is joined to it by BOTH its `dispatch/<id>` head ref and a head SHA the estate itself recorded, the reviewer is a different dispatch from the author, and a parsable APPROVE was actually posted. It decides and prints; the merge itself is still someone else's `gh pr merge` — see the Conventions section and **#980** | `estate merge`, `src/estate/internal/gate` |
 
 `estate dispatch` refuses to start a turn at all when the named harness is
 unknown or its binary is not on PATH, when the operator's hard parameters
@@ -104,7 +104,11 @@ establish, at more length than a table can.
 
 **Nothing else refuses anything.** The collision check, the supervisor lease,
 the completion gate, the fix-pass evidence gate and the UI evidence gate were
-all mechanisms of the deleted supervisor, and none was reimplemented.
+all mechanisms of the deleted supervisor, and none was reimplemented. What each
+of those five rules actually *said* is recorded in
+[`docs/ci-rules-retired.md`](docs/ci-rules-retired.md), along with
+`gh-comment-gate.sh` and `mark-pr-external.sh` — read it there rather than
+recovering a rule from `reference/`'s source.
 
 ### Invariants — do not break these without an explicit decision
 
@@ -235,11 +239,24 @@ measured against. (The runbook this used to cite,
   fixup commits. A review turn is dispatched with `estate dispatch review`,
   which records `role=reviewer` at dispatch time, so the gate never has to
   infer the role later from what a lane or a PR comment claims about itself.
-- This is enforced at merge, not just at dispatch: `estate merge` is the only
-  path that should merge a PR here, and it refuses one whose author and
-  reviewer are the same dispatch, or whose verdict it cannot parse. `gh pr
-  merge` run directly bypasses it — the gate is a command someone must call,
-  not a platform block.
+- This is checked at merge, not just at dispatch — but read the command's name
+  as a question, not an action. **`estate merge <repo> <pr> <reviewer-lane>`
+  evaluates and exits; it does not merge anything.** It decides whether the PR
+  may merge — open, every required check green at the live head SHA, author and
+  reviewer different dispatches, and an independent parsable APPROVE posted at
+  that same head — then prints its verdict. Exit 0 prints `may merge: …` and
+  **you still have to run `gh pr merge` yourself**; exit 1 prints each refusal
+  reason to stderr. `internal/gate` shells out only to `gh pr view`; it has no
+  `gh pr merge` call anywhere. That the name promises an action it never
+  performs is **agent-estate#980, open** — so the gate is advisory in the
+  literal sense that skipping the evaluation, not running `gh pr merge`, is
+  what bypasses it.
+- The gate refuses any head ref that is not a `dispatch/<id>` branch:
+  authorship here is established structurally, and it cannot be established at
+  all for an operator-authored branch. The refusal is correct — and it means
+  **an operator-authored PR has no gated merge path today.** (`agent-estate#940`
+  is closed; it is the change that built this join, and the refusal message
+  names it.)
 - One fix pass. If a PR fails a second review, close it and file what
   remains. A fix pass continues the PR's own branch (`estate dispatch fix`),
   never a fresh one.
@@ -266,11 +283,14 @@ measured against. (The runbook this used to cite,
 
 ---
 *The claims in this section were checked against this branch's own tree at
-`9a115b2` (2026-09-03) — every path, command and count above was re-run, and
+`430e199` (2026-09-03) — every path, command and count above was re-run, and
 what could not be found is named as absent rather than described. Re-check
 before relying on any of it: `src/estate/agents_md_test.go` is the only
-automated check on this file, and it validates only that an `estate`
-subcommand named here exists. It does not validate prose.*
+automated check on this file, and it validates **subcommand names only** — it
+would pass a section that described every one of them doing the wrong thing.
+A review caught exactly that here: this section once said `estate merge`
+merges. It does not merge; it decides. Read a verb against the code, never
+against the command's name.*
 
 ## The TUI
 
