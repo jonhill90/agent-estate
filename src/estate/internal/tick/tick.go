@@ -84,10 +84,79 @@ type Verdict struct {
 	// can say "not stalled, but only one tick on record" rather than implying
 	// a healthy history it never saw.
 	Considered int
+	// Unverifiable is how many artifacts in the window this verdict was
+	// drawn from could not be resolved by CheckWithResolver -- a network
+	// call failed outright, gh was unreachable, a timeout. It is zero when
+	// Check (no resolver) was used, or every artifact in the window resolved
+	// one way or the other.
+	//
+	// This is the typed third state agent-estate#931 asks for. It must never
+	// be read as "these artifacts are confirmed real" (that repeats the
+	// defect this package exists to fix -- a fabricated artifact accepted
+	// because nothing looked) and never as "these artifacts are fake"
+	// (that would turn a flaky network into a false report a human has to
+	// untangle from a genuine one). An unverifiable artifact does not clear
+	// the stall on its own -- see CheckWithResolver's doc comment for why
+	// that is the fail-closed direction this repo already takes everywhere
+	// else (Validate's produced callback, pressure.Check, cost.Figure.Known).
+	Unverifiable int
 }
 
 // Window is how many consecutive entries the stop condition looks at.
 const Window = 3
+
+// Resolution is the answer resolving one artifact token gives.
+//
+// WHY A THIRD STATE. agent-estate#931: the Director recorded
+// ".../pull/926#issuecomment-latest" and, in the same session,
+// ".../issues/940#issuecomment-5523579200" -- a plausible 10-digit comment id
+// that simply does not exist (the real one was 5523608412). Both passed
+// Validate, because a URL is accepted on shape alone (see the "://" branch
+// below) and shape cannot tell a fabricated id from a real one. Only asking
+// the source -- a real request, a real status -- can. But a real request can
+// also fail to complete for reasons that have nothing to do with whether the
+// artifact is real: the network is down, gh is unauthenticated, a request
+// times out. Collapsing that failure into either Valid or Invalid would
+// re-introduce exactly the kind of false signal this package exists to
+// remove, in the opposite direction. So it is its own value.
+type Resolution int
+
+const (
+	// ResolveUnknown means the check itself could not be made. Never coerced
+	// to Valid or Invalid -- see the type's doc comment.
+	ResolveUnknown Resolution = iota
+	// ResolveValid means the artifact was checked and names something real.
+	ResolveValid
+	// ResolveInvalid means the artifact was checked and does NOT name
+	// something real -- a 404, a comment id that does not exist, a path
+	// absent at the recorded src_head.
+	ResolveInvalid
+)
+
+// String reports the resolution as a word, for log lines and CLI output.
+func (r Resolution) String() string {
+	switch r {
+	case ResolveValid:
+		return "valid"
+	case ResolveInvalid:
+		return "invalid"
+	default:
+		return "unknown"
+	}
+}
+
+// Resolve makes the actual external check for one artifact string, recorded
+// against the src_head the tick that wrote it named, and says why in a
+// human-readable detail.
+//
+// It is a function type supplied by the caller -- the same pattern Record's
+// produced parameter already uses -- so this package stays a pure reader/
+// writer that tests without a network connection, gh, or a git checkout. The
+// real implementation (an HTTP request, a `gh api` call, `git cat-file -e`
+// against src_head) lives in main.go, next to Record's produced, for the
+// same reason produced does: it needs os/exec and the network, and this
+// package must not.
+type Resolve func(artifact, srcHead string) (Resolution, string)
 
 // Record appends one entry to the log at path, creating it if absent.
 //
@@ -293,7 +362,47 @@ func (p parsed) hasArtifact() bool {
 // A log that does not exist yet is not a stall -- it is a loop that has not
 // ticked. A log that exists and cannot be parsed is an error: "could not
 // measure" must never read as clean.
+//
+// This is the shape-only check the package has always done: an artifact
+// counts as evidence if it looks like it names something a human could open.
+// See CheckWithResolver for the version that actually asks.
 func Check(path string) (Verdict, error) {
+	return checkImpl(path, nil)
+}
+
+// CheckWithResolver is Check, plus resolving every artifact in the window
+// against resolve rather than trusting its shape.
+//
+// WHERE THIS BELONGS, AND WHY NOT Record. agent-estate#931 lists three
+// places verification could live: inside Record (fails closed on a flaky
+// connection, and Record's whole job is to keep writing the Director's own
+// history -- a recording step that refuses because the network hiccupped
+// stops the loop for a reason that has nothing to do with the work, which
+// the issue explicitly rules out); a separate `estate tick verify` sweep
+// (finds a fabrication only after it has already sat in the log clearing
+// stalls, possibly for a while); or here, in Check -- which already gates
+// the loop every tick, already fails closed on a corrupt log or a truncated
+// one, and already re-derives write-time rules at read time (AuditWindow) on
+// the grounds that Record only protects entries written through the CLI.
+// Resolving the window here catches a fabricated artifact at the next tick,
+// the same tick boundary the stop condition itself operates on, without
+// touching Record's own contract.
+//
+// An artifact that resolves ResolveInvalid does not clear the stall -- it is
+// treated exactly as if it were absent, which is what the evidence says it
+// is. An artifact that resolves ResolveUnknown ALSO does not clear the
+// stall, but is counted separately in Verdict.Unverifiable and named in the
+// reason, rather than silently folded into either bucket: this repo already
+// treats "could not measure" as "refuse" everywhere else it appears
+// (pressure.Check, Validate's produced callback, CheckAgainstCommitted's
+// negative committed count), and a network hiccup producing a spurious stall
+// report is a human glancing at one extra escalation, not a fabricated
+// artifact quietly passing as real.
+func CheckWithResolver(path string, resolve Resolve) (Verdict, error) {
+	return checkImpl(path, resolve)
+}
+
+func checkImpl(path string, resolve Resolve) (Verdict, error) {
 	f, err := os.Open(path)
 	if errors.Is(err, fs.ErrNotExist) {
 		return Verdict{Reason: "no tick log yet"}, nil
@@ -353,43 +462,64 @@ func Check(path string) (Verdict, error) {
 	// This is strictly stronger: every log the old rule flagged, this flags.
 	last := entries[len(entries)-Window:]
 
+	// Judge each entry's artifact once: does it count as evidence this tick
+	// produced something. With no resolver this is exactly the old
+	// shape-only hasArtifact(). With one, ResolveInvalid is treated as no
+	// artifact and ResolveUnknown is neither -- see CheckWithResolver's doc
+	// comment for why an unresolvable artifact must not clear a stall.
+	counted := make([]string, len(last)) // "" means does not count
+	unverifiable := 0
+	for i, e := range last {
+		if !e.hasArtifact() {
+			continue
+		}
+		a := strings.TrimSpace(*e.Artifact)
+		if resolve == nil {
+			counted[i] = a
+			continue
+		}
+		switch res, _ := resolve(a, e.SrcHead); res {
+		case ResolveValid:
+			counted[i] = a
+		case ResolveUnknown:
+			unverifiable++
+		case ResolveInvalid:
+			// Resolved, and it is not real: counts as absent, same as if
+			// the field had been empty.
+		}
+	}
+
 	// Repeating ONE artifact across the window is not new output. A loop that
 	// keeps pointing at something it produced three ticks ago is producing
 	// nothing now, and naming it again must not clear the stall.
 	distinct := map[string]bool{}
-	for _, e := range last {
-		if e.hasArtifact() {
-			distinct[strings.TrimSpace(*e.Artifact)] = true
+	producing := 0
+	for _, a := range counted {
+		if a != "" {
+			distinct[a] = true
+			producing++
 		}
 	}
-	if len(distinct) == 1 && Window > 1 {
+	if len(distinct) == 1 && Window > 1 && producing == Window {
 		only := ""
 		for a := range distinct {
 			only = a
 		}
-		producing := 0
-		for _, e := range last {
-			if e.hasArtifact() {
-				producing++
-			}
-		}
-		if producing == Window {
-			return Verdict{
-				Stalled:    true,
-				Considered: Window,
-				Reason: fmt.Sprintf("the last %d ticks all named the same artifact (%q) -- that is one piece of output, not %d",
-					Window, only, Window),
-			}, nil
-		}
+		return Verdict{
+			Stalled:      true,
+			Considered:   Window,
+			Unverifiable: unverifiable,
+			Reason: fmt.Sprintf("the last %d ticks all named the same artifact (%q) -- that is one piece of output, not %d",
+				Window, only, Window),
+		}, nil
 	}
 
-	for _, e := range last {
-		if e.hasArtifact() {
-			return Verdict{
-				Considered: Window,
-				Reason:     fmt.Sprintf("the last %d ticks include one that produced an artifact", Window),
-			}, nil
-		}
+	if producing > 0 {
+		return Verdict{
+			Considered:   Window,
+			Unverifiable: unverifiable,
+			Reason:       fmt.Sprintf("the last %d ticks include one that produced an artifact", Window),
+		}, nil
 	}
 
 	items, heads := map[string]bool{}, map[string]bool{}
@@ -405,10 +535,15 @@ func Check(path string) (Verdict, error) {
 	if len(heads) > 1 {
 		at = "src head moving, which is not evidence this work advanced"
 	}
+	reason := fmt.Sprintf("the last %d ticks produced no artifact (%s, %s)", Window, where, at)
+	if unverifiable > 0 {
+		reason += fmt.Sprintf("; %d artifact(s) in the window could not be checked (network or tooling failure) and are counted as neither real nor fabricated", unverifiable)
+	}
 	return Verdict{
-		Stalled:    true,
-		Considered: Window,
-		Reason:     fmt.Sprintf("the last %d ticks produced no artifact (%s, %s)", Window, where, at),
+		Stalled:      true,
+		Considered:   Window,
+		Unverifiable: unverifiable,
+		Reason:       reason,
 	}, nil
 }
 
@@ -588,4 +723,65 @@ func AuditWindow(path string, known []string) error {
 		}
 	}
 	return nil
+}
+
+// VerifiedEntry is one log entry's artifact together with what resolving it
+// found, for `estate tick verify`'s report -- the whole log, not just the
+// window Check reads, so a human can see how much of the history is
+// evidence and how much is not.
+type VerifiedEntry struct {
+	At         string
+	PhaseItem  string
+	Artifact   string
+	Resolution Resolution
+	Detail     string
+}
+
+// VerifyAll resolves the artifact of every entry in the log that has one,
+// using resolve to make the real check. Entries with no artifact are
+// skipped -- there is nothing there to resolve, and that is a legitimate
+// tick result, not a gap in the report.
+func VerifyAll(path string, resolve Resolve) ([]VerifiedEntry, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tick: open %s: %w", path, err)
+	}
+	defer f.Close()
+
+	var out []VerifiedEntry
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for n := 1; sc.Scan(); n++ {
+		text := strings.TrimSpace(sc.Text())
+		if text == "" {
+			continue
+		}
+		var p parsed
+		var at struct {
+			At string `json:"at"`
+		}
+		if err := json.Unmarshal([]byte(text), &p); err != nil {
+			return nil, fmt.Errorf("tick: %s line %d is not readable: %w", path, n, err)
+		}
+		json.Unmarshal([]byte(text), &at) //nolint:errcheck -- best-effort for the report's timestamp column
+		if !p.hasArtifact() {
+			continue
+		}
+		a := strings.TrimSpace(*p.Artifact)
+		res, detail := resolve(a, p.SrcHead)
+		out = append(out, VerifiedEntry{
+			At:         at.At,
+			PhaseItem:  p.PhaseItem,
+			Artifact:   a,
+			Resolution: res,
+			Detail:     detail,
+		})
+	}
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("tick: read %s: %w", path, err)
+	}
+	return out, nil
 }

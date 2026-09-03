@@ -136,7 +136,14 @@ func usage() {
                                         slot for any turn positively observed dead
   estate tick record <phase-item> [artifact]
                                         append this tick to the record
-  estate tick check                     has the loop stalled? 1 = yes, escalate
+  estate tick check                     has the loop stalled? resolves each
+                                        artifact in the window for real
+                                        (a request, a status) rather than
+                                        trusting its shape; 1 = yes, escalate
+  estate tick verify                    sweep the whole log and report how
+                                        many artifacts resolve, how many
+                                        don't, and how many could not be
+                                        checked -- diagnostic, does not gate
   estate verify-branch <branch>         build and test a branch in its OWN tree
 
 Every gate fails closed: a limit that cannot be measured refuses.
@@ -453,7 +460,13 @@ func main() {
 				fmt.Fprintln(os.Stderr, "estate:", err)
 				os.Exit(2)
 			}
-			v, err := tick.Check(path)
+			// agent-estate#931: shape alone accepted two fabricated artifacts
+			// in one session, one of them a plausible GitHub comment id that
+			// simply did not exist. Resolve each artifact in the window for
+			// real instead of trusting it looks openable. See
+			// tick.CheckWithResolver's doc comment for why this lives here
+			// and not in `tick record`.
+			v, err := tick.CheckWithResolver(path, newResolver(defaultHTTPStatus, defaultGHAPI))
 			if err != nil {
 				// Could not measure. Never clean.
 				fmt.Fprintln(os.Stderr, "estate:", err)
@@ -465,13 +478,45 @@ func main() {
 				os.Exit(1)
 			}
 			fmt.Println("moving: " + v.Reason)
-			// Say what this verdict does NOT establish. The artifact field is
-			// written by the agent being measured; five successive rules to
-			// validate it were each defeated by an independent reviewer. What
-			// is checked on read is shape and phase membership, not that the
-			// tick caused the thing it names.
-			fmt.Println("note: artifacts are self-reported. This confirms they name something " +
-				"openable and sit under a real phase -- not that this loop produced them.")
+			if v.Unverifiable > 0 {
+				// Distinct third state, said out loud rather than folded into
+				// "moving": this run did not confirm every artifact in the
+				// window, and that is not the same as confirming them.
+				fmt.Printf("note: %d artifact(s) in the window could not be checked (network or gh unreachable) -- "+
+					"not treated as fabricated, not treated as confirmed\n", v.Unverifiable)
+			}
+			fmt.Println("note: artifacts that resolved are confirmed to name something real as of this check, " +
+				"not that this loop is what produced them.")
+
+		case "verify":
+			// A diagnostic sweep of the whole log, not just the window Check
+			// reads -- see agent-estate#931's request to "report how many
+			// existing entries resolve, how many do not, and how many could
+			// not be checked" honestly, rather than tuning until the number
+			// looks good. This command never gates anything; it only reports.
+			entries, err := tick.VerifyAll(path, newResolver(defaultHTTPStatus, defaultGHAPI))
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
+			var valid, invalid, unknown int
+			for _, e := range entries {
+				switch e.Resolution {
+				case tick.ResolveValid:
+					valid++
+				case tick.ResolveInvalid:
+					invalid++
+					fmt.Printf("INVALID  %s  %s -- %s\n", e.At, e.Artifact, e.Detail)
+				default:
+					unknown++
+					fmt.Printf("UNKNOWN  %s  %s -- %s\n", e.At, e.Artifact, e.Detail)
+				}
+			}
+			fmt.Printf("%d artifact(s) checked: %d resolve, %d do not, %d could not be checked\n",
+				len(entries), valid, invalid, unknown)
+			if invalid > 0 {
+				os.Exit(1)
+			}
 
 		default:
 			usage()
