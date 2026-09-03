@@ -572,7 +572,9 @@ func main() {
 	knowledgeModel := knowledge.New(
 		knowledge.NewFetcher(vaultDir),
 		knowledge.NewFactLoader(vaultDir),
-	).WithCompiled(knowledgeindex.NewFetcher(compiledIndexPath()))
+	).
+		WithCompiled(knowledgeindex.NewFetcher(compiledIndexPath())).
+		WithGraph(buildMemgraphFetch(vaultDir))
 
 	// apidocsModel is Docs -> API Docs: hill90-app's own OpenAPI document
 	// (internal/apidocs' package doc comment traces why that file is the

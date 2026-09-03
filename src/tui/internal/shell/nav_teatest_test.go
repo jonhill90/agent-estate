@@ -103,6 +103,36 @@ func TestKnowledgeRouteShowsRealKnowledgePane(t *testing.T) {
 	}
 }
 
+// TestKnowledgeRouteGKeyReachesTheMemoryGraphPane is agent-tui's own
+// "make the knowledge graph a real, draggable pane inside the app" issue:
+// the graph (internal/memgraph) must be reachable by navigating to the
+// Knowledge route, exactly like a real user would (leader menu or sidebar
+// down to Knowledge, [g] into the graph), not only constructible in a
+// unit test that never goes through internal/shell at all.
+func TestKnowledgeRouteGKeyReachesTheMemoryGraphPane(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "⌂ Home")
+
+	for i := 0; i < 5; i++ { // Home -> Dashboard -> Agents -> Chat -> Tasks -> Knowledge
+		tm.Send(tea.KeyMsg{Type: tea.KeyDown})
+	}
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	waitFor(t, tm, "test-marker-fact")
+
+	// [enter] on the sidebar only selects the route -- it does not move
+	// focus into the content pane (routeNavKey's own doc comment: an
+	// unrecognised key while the sidebar has focus falls through to
+	// homeKey, which only knows "q"/"t"). [tab] is what actually hands
+	// keys to the pane, same as a real user would press before typing a
+	// pane-specific key.
+	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	out := waitFor(t, tm, "drag to reposition")
+	if bytes.Contains(out, []byte("[g] graph")) {
+		t.Fatalf("still rendering the knowledge list's own legend after [g]:\n%s", out)
+	}
+}
+
 // TestLibraryRouteShowsRealLibraryPane closes a gap found while checking
 // the SAME class of bug the Knowledge regression was: routeToPane already
 // maps "library" -> PaneLibrary (added alongside Knowledge's own nav row in

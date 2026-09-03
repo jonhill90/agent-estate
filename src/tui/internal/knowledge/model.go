@@ -10,6 +10,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jonhill90/agent-estate/src/tui/internal/knowledgeindex"
+	"github.com/jonhill90/agent-estate/src/tui/internal/memgraph"
 	"github.com/jonhill90/agent-estate/src/tui/internal/theme"
 )
 
@@ -46,6 +47,11 @@ const (
 	// from THIS vault; modeCompiled shows a regenerated cross-source
 	// index that only ever reads this vault, never writes it.
 	modeCompiled
+	// modeGraph is the whole vault as a draggable force-directed graph
+	// (internal/memgraph) -- reached from modeList with [g], back to
+	// modeList with [esc]/[left], the same shape modeReading already
+	// uses for its own two-way transition.
+	modeGraph
 )
 
 // sortMode is the list's own sort key -- both options are computable from
@@ -131,6 +137,14 @@ type Model struct {
 	// below wires a real Fetcher in, same shape WithTheme uses.
 	compiled knowledgeindex.Model
 
+	// graph is the memory-graph pane (modeGraph) -- agent-tui's own
+	// "make the knowledge graph a real, draggable pane inside the app"
+	// issue. Its zero value (New's own default, no fetch wired) renders
+	// an honest "not configured" rather than a demo graph; WithGraph
+	// below is what wires a real Fetcher in, same shape WithTheme uses
+	// for theme.Theme.
+	graph memgraph.Model
+
 	width, height int
 	quitting      bool
 
@@ -147,6 +161,7 @@ func New(fetch Fetcher, loadFact FactLoader) Model {
 		listVP:   viewport.New(0, 0),
 		bodyVP:   viewport.New(0, 0),
 		compiled: knowledgeindex.New(nil),
+		graph:    memgraph.New(nil),
 		width:    100,
 		height:   30,
 		theme:    theme.Default,
@@ -162,12 +177,33 @@ func (m Model) WithCompiled(fetch knowledgeindex.Fetcher) Model {
 	return m
 }
 
+// WithGraph returns a copy of m with its memory-graph pane (modeGraph)
+// wired to fetch -- cmd/estate's own buildMemgraphFetch, in the real
+// binary. Left unset (New's own zero-value memgraph.Model), [g] still
+// works but the graph pane renders its own honest "not configured" state
+// rather than a demo graph.
+func (m Model) WithGraph(fetch memgraph.Fetcher) Model {
+	m.graph = memgraph.New(fetch)
+	return m
+}
+
+// GraphPositionOf exposes the memory-graph sub-model's own PositionOf --
+// exported for the same reason memgraph.Model.PositionOf is: a caller one
+// package away (internal/shell's own mouse-routing tests) needs to confirm
+// a drag driven through the full nav+content routing actually landed on
+// the node under the cursor, without reaching into m.graph's private
+// field directly.
+func (m Model) GraphPositionOf(id string) (x, y int, ok bool) {
+	return m.graph.PositionOf(id)
+}
+
 // WithTheme returns a copy of m painted with th -- the same per-pane seam
 // every other package in this repo exposes.
 func (m Model) WithTheme(th theme.Theme, notice string) Model {
 	m.theme = th
 	m.themeNotice = notice
 	m.compiled = m.compiled.WithTheme(th, notice)
+	m.graph = m.graph.WithTheme(th)
 	return m.sync()
 }
 
@@ -194,11 +230,11 @@ func (m Model) Rows() []Row {
 }
 
 func (m Model) Init() tea.Cmd {
-	// m.compiled.Init fires its own fetch here too, so [c] usually shows
-	// an already-loaded compiled index rather than a fresh "loading"
-	// frame every time -- the same background-refresh property
-	// internal/shell.routeAll already gives every top-level pane.
-	return tea.Batch(refreshCmd(), doFetch(m.fetch), m.compiled.Init())
+	// m.compiled.Init and m.graph.Init each fire their own fetch here too,
+	// so [c] and [g] usually show an already-loaded sub-pane rather than a
+	// fresh "loading" frame every time -- the same background-refresh
+	// property internal/shell.routeAll already gives every top-level pane.
+	return tea.Batch(refreshCmd(), doFetch(m.fetch), m.compiled.Init(), m.graph.Init())
 }
 
 func refreshCmd() tea.Cmd {
@@ -225,19 +261,26 @@ func doLoadFact(loadFact FactLoader, slug string) tea.Cmd {
 	}
 }
 
-// Update forwards every message to the compiled-index sub-model FIRST,
-// unconditionally -- internal/knowledgeindex.Model's own fetch-result
-// message is a type this package's switch below never names, so without
-// this it would silently vanish and [c] would show stale content
-// forever. The same shape as this package's own factResultMsg handling,
-// just for a whole sub-model rather than one cached field.
+// Update forwards every message to BOTH sub-models FIRST, unconditionally --
+// internal/knowledgeindex.Model's own fetch-result message and
+// internal/memgraph.Model's own fetch-result and mouse messages are types
+// this package's switch below never names, so without this they would
+// silently vanish and [c]/[g] would show stale content forever. This is
+// the exact "background refresh even while not the active mode" property
+// internal/shell.routeAll already gives every top-level pane; modeCompiled
+// and modeGraph are each a pane-within-a-pane and need the same property
+// for the same reason -- a drag started before quite reaching modeGraph
+// display should never be dropped mid-gesture.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	next, compiledCmd := m.compiled.Update(msg)
 	m.compiled = next.(knowledgeindex.Model)
 
+	graphNext, graphCmd := m.graph.Update(msg)
+	m.graph = graphNext.(memgraph.Model)
+
 	nm, cmd := m.updateSelf(msg)
 	m = nm.(Model)
-	return m, tea.Batch(cmd, compiledCmd)
+	return m, tea.Batch(cmd, compiledCmd, graphCmd)
 }
 
 func (m Model) updateSelf(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -301,7 +344,19 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// Every other key is already handled by Update's own
 		// unconditional forward into m.compiled, above -- handleKey only
 		// owns the mode transition back out, the same split modeGraph
-		// (internal/memgraph, once wired) uses for the same reason.
+		// uses for the same reason.
+		return m, nil
+	}
+
+	if m.mode == modeGraph {
+		switch msg.String() {
+		case "esc", "left":
+			m.mode = modeList
+			return m.sync(), nil
+		}
+		// Every other key (mouse-drag reload "r", or nothing) is already
+		// handled by Update's own unconditional forward into m.graph,
+		// above -- handleKey only owns the mode transition back out.
 		return m, nil
 	}
 
@@ -350,6 +405,9 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, doFetch(m.fetch)
 	case "c":
 		m.mode = modeCompiled
+		return m.sync(), nil
+	case "g":
+		m.mode = modeGraph
 		return m.sync(), nil
 	case "s":
 		m.sort = (m.sort + 1) % 2

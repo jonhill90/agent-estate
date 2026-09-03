@@ -33,6 +33,7 @@ import (
 	"github.com/jonhill90/agent-estate/src/tui/internal/lane"
 	"github.com/jonhill90/agent-estate/src/tui/internal/library"
 	"github.com/jonhill90/agent-estate/src/tui/internal/mcpservers"
+	"github.com/jonhill90/agent-estate/src/tui/internal/memgraph"
 	"github.com/jonhill90/agent-estate/src/tui/internal/monitor"
 	"github.com/jonhill90/agent-estate/src/tui/internal/rail"
 	"github.com/jonhill90/agent-estate/src/tui/internal/secrets"
@@ -83,7 +84,9 @@ func testModel() Model {
 		func(slug string) (knowledge.Fact, error) {
 			return knowledge.Fact{Slug: slug, Title: "test marker fact", Body: "fake body"}, nil
 		},
-	)
+	).WithGraph(func() (memgraph.Graph, error) {
+		return memgraph.Graph{Nodes: []memgraph.Node{{ID: "test-marker-fact", Label: "test marker fact", Type: "project"}}}, nil
+	})
 	lb := library.New(
 		func(view library.View, weight, status string) ([]library.ItemRow, error) {
 			return []library.ItemRow{{ID: "it-deadbeef", Kind: "fact", Weight: "hard", Status: "open", BodySnippet: "test-marker-item"}}, nil

@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+
+	"github.com/jonhill90/agent-estate/src/tui/internal/memgraph"
 )
 
 func testEntries() []IndexEntry {
@@ -264,5 +266,106 @@ func TestViewNeverExceedsHeightAtRealisticWidths(t *testing.T) {
 				}
 			}
 		}
+	}
+}
+
+// driveGraphInit runs m.graph's own Init command synchronously and pushes
+// its resulting fetchResultMsg through Model.Update -- the same
+// "construct, run Init, push its Cmd's Msg back through Update" sequence
+// a real Program's runtime performs, used here so a test can get past the
+// initial async load without a full teatest.Program.
+func driveGraphInit(t *testing.T, m Model) Model {
+	t.Helper()
+	cmd := m.graph.Init()
+	if cmd == nil {
+		return m
+	}
+	next, _ := m.Update(cmd())
+	return next.(Model)
+}
+
+// TestGKeyEntersGraphModeAndEscReturns is this pane's own reachability
+// proof for internal/memgraph's pane: [g] from the list must switch to
+// modeGraph and render the graph sub-model's own content, and [esc] must
+// return to the list -- the same round-trip TestEscReturnsToList already
+// proves for modeReading.
+func TestGKeyEntersGraphModeAndEscReturns(t *testing.T) {
+	m := New(nil, nil).WithGraph(func() (memgraph.Graph, error) {
+		return memgraph.Graph{Nodes: []memgraph.Node{{ID: "n1", Label: "fact one", Type: "project"}}}, nil
+	})
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = next.(Model)
+	next, _ = m.Update(fetchResultMsg{entries: testEntries()})
+	m = next.(Model)
+	m = driveGraphInit(t, m)
+
+	if !strings.Contains(m.View(), "[g] graph") {
+		t.Fatalf("list legend does not advertise [g]:\n%s", m.View())
+	}
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	m = next.(Model)
+	if m.mode != modeGraph {
+		t.Fatal("\"g\" from list mode did not enter modeGraph")
+	}
+
+	out := m.View()
+	if !strings.Contains(out, "drag to reposition") {
+		t.Fatalf("modeGraph did not render memgraph's own frame:\n%s", out)
+	}
+	if strings.Contains(out, "[g] graph") {
+		t.Fatalf("still rendering the list legend while in modeGraph:\n%s", out)
+	}
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.mode != modeList {
+		t.Fatal("[esc] from modeGraph did not return to modeList")
+	}
+}
+
+// TestGraphModeDragMovesANode is the shell-of-the-shell drive: a mouse
+// press/motion/release forwarded through knowledge.Model.Update (exactly
+// how internal/shell.routeAll delivers a MouseMsg to every pane) must
+// reach internal/memgraph.Model and move the grabbed node, proving the
+// unconditional forward in Update actually wires the two together rather
+// than only memgraph's own isolated tests proving the mechanism works.
+func TestGraphModeDragMovesANode(t *testing.T) {
+	fetch := func() (memgraph.Graph, error) {
+		return memgraph.Graph{
+			Nodes: []memgraph.Node{{ID: "n1", Type: "project"}, {ID: "n2", Type: "feedback"}},
+			Edges: []memgraph.Edge{{From: "n1", To: "n2"}},
+		}, nil
+	}
+	m := New(nil, nil).WithGraph(fetch)
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = next.(Model)
+	m = driveGraphInit(t, m)
+
+	x0, y0, ok := m.graph.PositionOf("n1")
+	if !ok {
+		t.Fatalf("test setup: node n1 has no position after graph load")
+	}
+
+	press := tea.MouseMsg{X: x0 + 1, Y: y0 + 1, Action: tea.MouseActionPress}
+	next, _ = m.Update(press)
+	m = next.(Model)
+
+	tx, ty := x0+1, y0
+	if x0 == 0 {
+		tx = x0 + 1
+	} else {
+		tx = x0 - 1
+	}
+	release := tea.MouseMsg{X: tx + 1, Y: ty + 1, Action: tea.MouseActionRelease}
+	next, _ = m.Update(release)
+	m = next.(Model)
+
+	fx, fy, _ := m.graph.PositionOf("n1")
+	if fx == x0 && fy == y0 {
+		t.Fatalf("dragging n1 through knowledge.Model.Update did not move it: stayed at (%d,%d)", x0, y0)
+	}
+	if fx != tx || fy != ty {
+		t.Fatalf("n1 landed at (%d,%d), want (%d,%d)", fx, fy, tx, ty)
 	}
 }

@@ -279,20 +279,26 @@ func evaluateWithPR(p *PR, reviewerLane string, l *ledger.Ledger) Decision {
 
 // cleanFixture is a PR and ledger that satisfy every constraint at once --
 // the baseline every bypass test starts from, breaking exactly one thing.
+// The PR's head ref is "dispatch/a1", matching the role=author ledger
+// record's own ID -- the structural join agent-estate#940 establishes --
+// AND the PR's headRefOid ("deadbeef") matches that record's own HeadSHA,
+// the second half of the join #940's follow-up review added: the branch
+// name alone is not enough, the estate's own recorded commit must agree
+// with what the PR actually points at.
 func cleanFixture(t *testing.T) (*PR, *ledger.Ledger) {
 	t.Helper()
 	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
 	reviewedAt := checkStart.Add(1 * time.Hour)
 	p := &PR{
-		Number:        926,
-		HeadOID:       "deadbeef",
-		State:         "OPEN",
-		Checks:        []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
-		ClosingIssues: []closingIssue{{Number: 926}},
-		Comments:      []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: deadbeef\nVerdict: APPROVE\n"}},
+		Number:      926,
+		HeadOID:     "deadbeef",
+		HeadRefName: "dispatch/a1",
+		State:       "OPEN",
+		Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
+		Comments:    []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: deadbeef\nVerdict: APPROVE\n"}},
 	}
 	l := newLedger(t,
-		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete},
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
 		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
 	)
 	return p, l
@@ -306,16 +312,44 @@ func TestCleanFixturePasses(t *testing.T) {
 	}
 }
 
-// Bypass 1: reviewer lane also has a role=author record on the closing
-// issue. Removing the self-review check must be the ONLY way this passes.
+// Bypass 1: the lane the head ref's dispatch id resolves to (structurally,
+// via authorFromHeadRef + authorLaneForDispatchID) IS the reviewer lane.
+// Removing the self-review check must be the ONLY way this passes.
 func TestBypass_SelfReview(t *testing.T) {
+	p, _ := cleanFixture(t)
+	checkStart, err := time.Parse(time.RFC3339, p.Checks[0].StartedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewedAt := checkStart.Add(1 * time.Hour)
+	l := newLedger(t,
+		// The dispatch id "a1" the head ref names ("dispatch/a1") was
+		// authored by lane-review itself. HeadSHA matches the PR's head so
+		// the HeadSHA check passes and this test isolates the self-review
+		// check specifically, not the newer provenance check.
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-review", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
+		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+	)
+	d := evaluateWithPR(p, "lane-review", l)
+	if d.Allow {
+		t.Fatal("bypass: a lane that also authored the dispatch this PR's head ref names was allowed to review its own PR")
+	}
+}
+
+// The lane that dispatched the code that closed a related issue, but is NOT
+// the lane whose dispatch id the PR's own head ref names, must NOT be
+// treated as a self-review. authorLanes()'s issue-keyed matching (superseded
+// by the head-ref join for authorship, but still tested in isolation above)
+// must never leak back into evaluate()'s self-review check -- an unrelated
+// authoring turn sharing the issue is not this PR's author.
+func TestUnrelatedAuthorOnSameIssueIsNotSelfReview(t *testing.T) {
 	p, l := cleanFixture(t)
 	if err := l.Append(ledger.Record{ID: "a2", Issue: "926", Lane: "lane-review", Role: ledger.RoleAuthor, State: ledger.Complete}); err != nil {
 		t.Fatal(err)
 	}
 	d := evaluateWithPR(p, "lane-review", l)
-	if d.Allow {
-		t.Fatal("bypass: a lane that also authored work on the closing issue was allowed to review its own PR")
+	if !d.Allow {
+		t.Fatalf("evaluateWithPR refused a PR whose head-ref-derived author was NOT the reviewer, merely because the reviewer separately authored something on the same issue: %v", d.Reasons)
 	}
 }
 
@@ -332,7 +366,7 @@ func TestBypass_UnfinishedReview(t *testing.T) {
 	p, _ := cleanFixture(t)
 	p.Checks = []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS"}}
 	l := newLedger(t,
-		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete},
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
 		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Dispatched},
 	)
 	d := evaluateWithPR(p, "lane-review", l)
@@ -362,7 +396,7 @@ func TestBypass_StaleReview(t *testing.T) {
 	checkStart, _ := time.Parse(time.RFC3339, p.Checks[0].StartedAt)
 	staleAt := checkStart.Add(-1 * time.Hour)
 	l := newLedger(t,
-		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete},
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
 		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: staleAt, Result: "Verdict: APPROVE\n"},
 	)
 	d := evaluateWithPR(p, "lane-review", l)
@@ -371,30 +405,160 @@ func TestBypass_StaleReview(t *testing.T) {
 	}
 }
 
-// Bypass 5: caller-supplied issue is no longer accepted at all -- Evaluate
-// takes no issue argument (a signature-level guarantee: main.go's "merge"
-// case no longer has one to pass), so an author cannot point the gate at an
-// unrelated, cleanly-authored issue using only record shapes `estate
-// dispatch` writes itself (agent-estate#926's exact reported exploit). A PR
-// reporting NO closing issue must refuse rather than merge on the strength
-// of some unrelated issue's clean author/reviewer pair. Removing the
-// explicit "closes no issue" guard does not, by itself, open this hole --
-// an empty issue set also makes authorLanes() return nothing, so the
-// "authorship unknown" guard downstream still refuses. Both guards are
-// asserted here (via the Reasons text) precisely because the explicit one
-// is what makes the refusal reason legible ("closes no issue") rather than
-// merely "cannot tell who authored this" -- an operator debugging a refused
-// merge needs to know which of the two it is.
-func TestBypass_UnlinkedPRRefusesEvenWithAPerfectLedgerElsewhere(t *testing.T) {
+// Bypass 5 (agent-estate#940, superseding its own former shape): caller-
+// supplied issue is still not accepted at all -- Evaluate takes no issue
+// argument. Identity now comes from the PR's own head ref rather than
+// closingIssuesReferences, so the exploit this used to guard against
+// (pointing the gate at an unrelated, cleanly-authored ISSUE) no longer has
+// an issue-keyed door to walk through in the first place: a PR whose head
+// ref is an arbitrary feature branch is refused regardless of what it
+// claims to close, or what any unrelated issue's ledger history looks like.
+func TestBypass_HeadRefNotDispatchBranchRefuses(t *testing.T) {
+	p, l := cleanFixture(t)
+	p.HeadRefName = "feat/some-hand-named-branch"
+	d := evaluateWithPR(p, "lane-review", l)
+	if d.Allow {
+		t.Fatal("bypass: a PR whose head ref is not a dispatch branch was allowed to merge")
+	}
+	joined := strings.Join(d.Reasons, " | ")
+	if !strings.Contains(joined, "is not a dispatch branch") {
+		t.Fatalf("refused, but not for the expected reason (head ref is not a dispatch branch): %v", d.Reasons)
+	}
+}
+
+// A dispatch branch whose id has no matching role=author ledger record --
+// e.g. the worktree existed but the ledger was wiped, or the id is simply
+// wrong -- must refuse rather than treat "found no record" as "no author,
+// so nothing to self-review against."
+func TestBypass_DispatchBranchWithNoMatchingAuthorRecordRefuses(t *testing.T) {
+	p, l := cleanFixture(t)
+	p.HeadRefName = "dispatch/does-not-exist"
+	d := evaluateWithPR(p, "lane-review", l)
+	if d.Allow {
+		t.Fatal("bypass: a dispatch branch naming an id with no role=author ledger record was allowed to merge")
+	}
+	joined := strings.Join(d.Reasons, " | ")
+	if !strings.Contains(joined, "role=author ledger record") {
+		t.Fatalf("refused, but not for the expected reason (no matching author record): %v", d.Reasons)
+	}
+}
+
+// Bypass 5.1 (agent-estate#940's follow-up review, which blocked #952 over
+// exactly this): the exact forgery demonstrated in that review. A lane with
+// no relationship to dispatch id "a1" pushes ITS OWN content to a branch it
+// names "dispatch/a1" -- borrowing a real, completed, unrelated dispatch's
+// id -- and opens a PR from it. The branch-name join alone would resolve
+// "a1" to the real author's lane and let this straight through. Requiring
+// the PR's own head commit to match the HeadSHA the estate itself recorded
+// for "a1" is what catches it: the attacker's commit ("attackercommit123")
+// is real content, but it is not the content dispatch id "a1" actually
+// produced, so it cannot equal the recorded SHA without literally
+// reproducing that exact commit object.
+func TestBypass_HeadSHAMismatchRefuses(t *testing.T) {
+	p, l := cleanFixture(t)
+	// cleanFixture's a1 record carries HeadSHA "deadbeef" -- the estate's own
+	// recorded observation of what dispatch id a1 actually produced. Simulate
+	// an attacker's PR pointing dispatch/a1 at different, self-pushed content.
+	p.HeadOID = "attackercommit123"
+	d := evaluateWithPR(p, "lane-review", l)
+	if d.Allow {
+		t.Fatal("SECURITY: a PR whose head ref names a real dispatch id, but whose head commit does not match that dispatch's own recorded HeadSHA, was allowed to merge -- branch-name forgery")
+	}
+	joined := strings.Join(d.Reasons, " | ")
+	if !strings.Contains(joined, "does not match the HeadSHA") {
+		t.Fatalf("refused, but not for the expected reason (HeadSHA mismatch): %v", d.Reasons)
+	}
+}
+
+// A role=author record written before HeadSHA existed (or one whose
+// worktree observation itself failed -- see main.go's dispatch case) has no
+// recorded commit to compare against. That absence must refuse, not be
+// treated as "no evidence either way, so nothing contradicts it."
+func TestBypass_MissingHeadSHARefuses(t *testing.T) {
+	p, l := newLedgerWithAuthorRecord(t, ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete})
+	d := evaluateWithPR(p, "lane-review", l)
+	if d.Allow {
+		t.Fatal("bypass: a role=author record with no recorded HeadSHA was treated as provenance-confirmed")
+	}
+	joined := strings.Join(d.Reasons, " | ")
+	if !strings.Contains(joined, "no recorded HeadSHA") {
+		t.Fatalf("refused, but not for the expected reason (missing HeadSHA): %v", d.Reasons)
+	}
+}
+
+// An in-flight or abandoned dispatch (State != Complete) must not resolve
+// authorship even if it happens to carry a HeadSHA from some earlier,
+// incomplete observation -- the same requirement reviewerRecord already
+// applies to review turns. A turn that never finished cannot vouch for what
+// its own worktree currently holds.
+func TestBypass_IncompleteAuthorRecordRefuses(t *testing.T) {
+	p, l := newLedgerWithAuthorRecord(t, ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Dispatched, HeadSHA: "deadbeef"})
+	d := evaluateWithPR(p, "lane-review", l)
+	if d.Allow {
+		t.Fatal("bypass: a role=author record that was never Complete was accepted as authorship")
+	}
+}
+
+// newLedgerWithAuthorRecord builds cleanFixture's PR (head ref dispatch/a1,
+// head commit deadbeef) paired with a caller-supplied a1 record and a
+// genuine, unrelated reviewer completion -- for tests exercising only the
+// author-record shape.
+func newLedgerWithAuthorRecord(t *testing.T, authorRec ledger.Record) (*PR, *ledger.Ledger) {
+	t.Helper()
+	p, _ := cleanFixture(t)
+	checkStart, err := time.Parse(time.RFC3339, p.Checks[0].StartedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewedAt := checkStart.Add(1 * time.Hour)
+	l := newLedger(t,
+		authorRec,
+		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+	)
+	return p, l
+}
+
+// The structural fix's whole point (agent-estate#940's #944 case): a PR
+// closing NO issue GitHub can confirm -- or closing an issue filed after the
+// dispatch that will close it -- must still merge when its head ref is a
+// genuine dispatch branch with a real role=author record. Proves the old
+// mandatory closing-issue requirement is actually gone, not merely unused.
+func TestAllowsWithNoClosingIssueWhenHeadRefIsAGenuineDispatchBranch(t *testing.T) {
 	p, l := cleanFixture(t)
 	p.ClosingIssues = nil
 	d := evaluateWithPR(p, "lane-review", l)
+	if !d.Allow {
+		t.Fatalf("evaluateWithPR refused a PR with a genuine dispatch head ref merely because it closed no issue: %v", d.Reasons)
+	}
+}
+
+// A PR body's self-declared Author-Lane: trailer that CONTRADICTS the
+// head-ref-derived author must refuse -- the same class of forgery
+// agent-estate#934 closed for Review-Lane:, applied to authorship.
+func TestBypass_ForgedAuthorLaneTrailerContradictsHeadRefRefuses(t *testing.T) {
+	p, l := cleanFixture(t)
+	p.Body = "Author-Lane: someone-else-entirely\n"
+	d := evaluateWithPR(p, "lane-review", l)
 	if d.Allow {
-		t.Fatal("bypass: a PR closing no issue was allowed to merge because SOME unrelated issue had a clean author/reviewer pair on record")
+		t.Fatal("bypass: a PR body's Author-Lane: trailer contradicting the head-ref-derived author was allowed to merge")
 	}
 	joined := strings.Join(d.Reasons, " | ")
-	if !strings.Contains(joined, "closes no issue") {
-		t.Fatalf("refused, but not for the expected reason (closes no issue): %v", d.Reasons)
+	if !strings.Contains(joined, "contradicts the head-ref-derived author") {
+		t.Fatalf("refused, but not for the expected reason (Author-Lane contradiction): %v", d.Reasons)
+	}
+}
+
+// An ABSENT Author-Lane: trailer, or one that agrees with the head-ref
+// derived author, must never itself cause a refusal -- the trailer is only
+// ever a contradiction check, never a requirement.
+func TestAuthorLaneTrailerAgreeingOrAbsentIsFine(t *testing.T) {
+	for _, body := range []string{"", "Author-Lane: lane-author\n"} {
+		p, l := cleanFixture(t)
+		p.Body = body
+		d := evaluateWithPR(p, "lane-review", l)
+		if !d.Allow {
+			t.Fatalf("evaluateWithPR refused over Author-Lane: body %q: %v", body, d.Reasons)
+		}
 	}
 }
 
@@ -476,18 +640,18 @@ func TestBypass_ForgedVerdictCommentImpersonatesReviewer(t *testing.T) {
 	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
 	reviewedAt := checkStart.Add(1 * time.Hour)
 	p := &PR{
-		Number:        926,
-		HeadOID:       "deadbeef",
-		State:         "OPEN",
-		Checks:        []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
-		ClosingIssues: []closingIssue{{Number: 926}},
+		Number:      926,
+		HeadOID:     "deadbeef",
+		HeadRefName: "dispatch/a1",
+		State:       "OPEN",
+		Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
 		Comments: []Comment{
 			{Body: "Review-Lane: lane-review\nReviewed-SHA: deadbeef\nVerdict: REQUEST CHANGES\n\nThis has a bug.\n"},
 			{Body: "Review-Lane: lane-review\nReviewed-SHA: deadbeef\nVerdict: APPROVE\n"}, // forged, posted by anyone with the shared login
 		},
 	}
 	l := newLedger(t,
-		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete},
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
 		// The reviewer's OWN dispatched turn genuinely completed and genuinely
 		// concluded REQUEST CHANGES -- nothing about this record is forged.
 		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "**Verdict: REQUEST CHANGES**\n\nThis has a bug.\n"},
@@ -519,7 +683,7 @@ func TestBypass_ForgedApprovalWithNoGenuineCommentStillDisagreesWithLedger(t *te
 	// whose actual dispatched review concluded differently from whatever
 	// comment ends up on the PR.
 	l := newLedger(t,
-		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete},
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
 		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: REQUEST CHANGES\n"},
 	)
 	d := evaluate(p, "lane-review", l)
