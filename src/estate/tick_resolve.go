@@ -88,6 +88,16 @@ func defaultGHAPI(path string) (exists bool, notFound bool, err error) {
 // agent-estate#931.
 var githubCommentRE = regexp.MustCompile(`github\.com/([^/\s]+)/([^/\s]+)/(?:issues|pull)/(\d+)#issuecomment-(\d+)`)
 
+// issuecommentFragmentRE recognises an issue/PR comment fragment by name
+// alone, digits or not -- used only to tell "this names a comment, but not
+// one githubCommentRE could confirm a numeric id for" apart from every other
+// kind of fragment. GitHub itself never mints a non-numeric comment id (the
+// id is the row's own database primary key), so an #issuecomment- fragment
+// with anything but digits after it cannot be a real comment by
+// construction -- this is a fact about GitHub's URL grammar, not a guess
+// about what "looks" fabricated.
+var issuecommentFragmentRE = regexp.MustCompile(`#issuecomment-(.*)$`)
+
 // shaLikeRE matches a bare candidate token that looks like a commit sha,
 // distinguishing it from a path in resolveToken.
 var shaLikeRE = regexp.MustCompile(`^[0-9a-f]{7,40}$`)
@@ -141,6 +151,31 @@ func resolveURL(u string, doHTTP httpStatus, doGH ghAPI) (tick.Resolution, strin
 			return tick.ResolveUnknown, "gh api returned neither success nor a confirmed 404 for " + u
 		}
 	}
+
+	// agent-estate#959: githubCommentRE only matches a NUMERIC comment
+	// anchor. A comment anchor with anything else after "#issuecomment-"
+	// (the placeholder "#issuecomment-latest" from agent-estate#931 is
+	// exactly this) fell through to the plain status check below, which
+	// requests the base issue/PR page -- Go's net/http never sends a URL
+	// fragment to the server, so that page returns 200 whether or not any
+	// such comment exists, and the fabrication was silently reported Valid.
+	// GitHub itself never mints a non-numeric comment id, so no comment
+	// this fragment could name exists, full stop: Invalid, not Unknown.
+	if m := issuecommentFragmentRE.FindStringSubmatch(u); m != nil {
+		return tick.ResolveInvalid, fmt.Sprintf("%s names a comment anchor with no numeric id -- GitHub never mints one, so it cannot exist", u)
+	}
+
+	// General form of the same bug: ANY fragment names something a plain
+	// request to the base URL cannot confirm or deny, because the fragment
+	// is never sent to the server. Reporting Valid here would be optimistic
+	// on the strength of the base page alone -- exactly the failure mode
+	// above, for whatever the next fragment shape turns out to be. This is
+	// not a check on what the fragment looks like; it fires for every
+	// fragment, real-looking or not.
+	if frag := urlFragment(u); frag != "" {
+		return tick.ResolveUnknown, fmt.Sprintf("%s carries a fragment (#%s) a request to the base URL cannot verify -- fragments are never sent to the server", u, frag)
+	}
+
 	status, err := doHTTP(u)
 	if err != nil {
 		return tick.ResolveUnknown, "could not reach " + u + ": " + err.Error()
@@ -233,6 +268,18 @@ func resolveToken(tok, _ string) (tick.Resolution, string) {
 		}
 		return tick.ResolveInvalid, tok + " does not exist in the repository or on disk"
 	}
+}
+
+// urlFragment returns the part of u after its first "#", or "" if u carries
+// no fragment. Plain string splitting, not net/url.Parse -- these artifacts
+// are free-text log entries, not guaranteed well-formed URLs, and a bare
+// "#" split is exactly what net/http itself does before it drops the
+// fragment on the client side.
+func urlFragment(u string) string {
+	if i := strings.IndexByte(u, '#'); i >= 0 {
+		return u[i+1:]
+	}
+	return ""
 }
 
 // expandHome replaces a leading "~" with the user's home directory. Any

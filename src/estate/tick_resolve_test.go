@@ -76,6 +76,51 @@ func TestFabricatedArtifactsDoNotResolve(t *testing.T) {
 	if m := githubCommentRE.FindStringSubmatch(fabricatedPlaceholderURL); m != nil {
 		t.Fatalf("expected %q not to match the comment-id pattern (it has no digit anchor); got %v", fabricatedPlaceholderURL, m)
 	}
+
+	// agent-estate#959: the gap in the assertion above -- proving the regex
+	// doesn't match is not proving resolveURL rejects the URL. A live check
+	// against github.com confirmed the fall-through HTTP path returned 200
+	// for this exact URL before this fix (the real PR page, fragment
+	// dropped by net/http). httpThatWouldPass200IfCalled stands in for that
+	// live 200 -- if resolveURL is still taking the generic HTTP path for a
+	// "#issuecomment-" fragment, this reproduces the bug and fails; a
+	// genuinely fixed resolveURL never calls it at all.
+	httpThatWouldPass200IfCalled := func(u string) (int, error) { return 200, nil }
+	res, detail := resolveURL(fabricatedPlaceholderURL, httpThatWouldPass200IfCalled, gh)
+	if res == tick.ResolveValid {
+		t.Fatalf("resolveURL(%q) = valid (%s) -- this is agent-estate#931's own placeholder fabrication, confirmed live to return 200 on the base page; it must never resolve Valid on that strength alone", fabricatedPlaceholderURL, detail)
+	}
+}
+
+// TestNonNumericCommentAnchorIsInvalid: GitHub never mints a non-numeric
+// comment id, so "#issuecomment-<anything but digits>" cannot name a real
+// comment by construction -- Invalid, not merely Unknown.
+func TestNonNumericCommentAnchorIsInvalid(t *testing.T) {
+	res, detail := resolveURL(fabricatedPlaceholderURL, neverCalledHTTP(t), fakeGH(nil))
+	if res != tick.ResolveInvalid {
+		t.Fatalf("resolveURL(%q) = %s (%s), want invalid -- no GitHub comment id is ever non-numeric", fabricatedPlaceholderURL, res, detail)
+	}
+}
+
+// TestUnverifiableFragmentIsUnknownNotValid: the general form of the bug --
+// any URL fragment a plain status check cannot confirm must not be silently
+// satisfied by the base page resolving. This is not specific to
+// "issuecomment"; any fragment shape must take this path.
+func TestUnverifiableFragmentIsUnknownNotValid(t *testing.T) {
+	u := "https://github.com/jonhill90/agent-estate/pull/926#discussion_r999999999"
+	httpThatWouldPass200IfCalled := func(string) (int, error) { return 200, nil }
+	res, detail := resolveURL(u, httpThatWouldPass200IfCalled, fakeGH(nil))
+	if res != tick.ResolveUnknown {
+		t.Fatalf("resolveURL(%q) = %s (%s), want unknown -- a fragment the base-page request cannot verify must never read as Valid", u, res, detail)
+	}
+
+	// Positive control: a URL with no fragment at all is unaffected and
+	// still takes the plain HTTP path.
+	plain := "https://example.com/report.md"
+	res2, _ := resolveURL(plain, httpThatWouldPass200IfCalled, fakeGH(nil))
+	if res2 != tick.ResolveValid {
+		t.Fatalf("resolveURL(%q) = %s, want valid -- a fragment-free URL must be unaffected", plain, res2)
+	}
 }
 
 // Test 2: a genuine artifact is accepted.
