@@ -185,6 +185,38 @@ func TestLinesDistinguishAbsentFromEmptyFromUnreadable(t *testing.T) {
 	}
 }
 
+// TestLinesDirectorStatesAreDistinct pins the Director/tick-log line itself,
+// not just the Ledger line beside it. TestLinesDistinguishAbsentFromEmptyFromUnreadable
+// above breaks the ledger and tick fixtures together, so every one of its
+// assertions is satisfiable from the Ledger half of Lines() alone -- verified
+// by mutating the Director branch of the switch in Lines to render identical
+// text for Absent and Unreadable and re-running that test: it still passed.
+// Here the ledger side is held IDENTICAL (present, empty) across all three
+// cases, so only the Ticks availability can account for any difference in
+// the rendered output -- the Director text has nowhere else to come from.
+func TestLinesDirectorStatesAreDistinct(t *testing.T) {
+	ledger := write(t, "l.jsonl") // present, empty -- identical in all three cases below
+
+	absent := strings.Join(Lines(Read(ledger, missing(t, "t.jsonl"))), "\n")
+	unreadable := strings.Join(Lines(Read(ledger, write(t, "t.jsonl", "{bad"))), "\n")
+	present := strings.Join(Lines(Read(ledger, write(t, "t.jsonl",
+		`{"at":"2026-09-03T00:00:00Z","phase_item":"repro","src_head":"deadbeef01","artifact":"pr#1"}`))), "\n")
+
+	if !strings.Contains(absent, "Director: no tick log at") || !strings.Contains(absent, "not running") {
+		t.Errorf("an absent tick log must render its own Director text; got:\n%s", absent)
+	}
+	if !strings.Contains(unreadable, "Director: tick log UNREADABLE") {
+		t.Errorf("an unreadable tick log must render its own Director text; got:\n%s", unreadable)
+	}
+	if !strings.Contains(present, "Director: 1 tick(s); last on repro") {
+		t.Errorf("a present tick log must render its own Director text; got:\n%s", present)
+	}
+
+	if absent == unreadable || absent == present || unreadable == present {
+		t.Fatalf("the three Director states must render distinct text with an identical ledger side:\nabsent:\n%s\nunreadable:\n%s\npresent:\n%s", absent, unreadable, present)
+	}
+}
+
 func TestLinesShowsInFlightDispatches(t *testing.T) {
 	s := Read(write(t, "l.jsonl",
 		`{"id":"907-1","issue":"#907","state":"dispatched","at":"2026-09-02T10:00:00Z"}`),

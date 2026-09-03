@@ -596,7 +596,11 @@ func main() {
 	if estateLedger == "" {
 		estateLedger = filepath.Join(os.Getenv("HOME"), ".local", "state", "estate", "ledger.jsonl")
 	}
-	estateTicks := *estateTickLog
+	// Resolved from this binary's own compiled-in source location
+	// (repoRootFromSource), never from os.Getwd() -- see
+	// resolveTickLogPath's doc comment (tickpath.go) for why a cwd-relative
+	// or cwd-walk-up resolution is exactly the defect this fixes.
+	estateTicks := resolveTickLogPath(repoRootFromSource(tickLogSourceFile), *estateTickLog)
 
 	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel, flowModel, chatModel).
 		WithEstateStatus(func() estatus.Status { return estatus.Read(estateLedger, estateTicks) }).
