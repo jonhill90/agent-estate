@@ -20,6 +20,20 @@ and still do.
 
 ## The daemon
 
+> **Read this section as history, not as a map.** Almost everything it names
+> under `scripts/supervisor/` and `tests/supervisor/` was deleted to
+> `reference/`; `git ls-files scripts/supervisor` and `git ls-files
+> tests/supervisor` both return **0**. The daemon today is Go, in
+> `src/estate`, and is a much smaller surface: `pressure`, `dispatch`,
+> `merge`, `tasks`/`inflight`, `tick`, `authored`, `corpus-audit`.
+>
+> The RULES below are still what this estate believes, and that is why the
+> section survives — but **check any specific file, flag or script against
+> the tree before relying on it**, and expect most of them to be gone.
+> Rewriting this section properly is open work, named in
+> `docs/director-brief.md` §9. What follows the next heading — how to treat
+> the corpus and when a question may reach Jon — is current and binding.
+
 ### Before you ask Jon anything — read this first
 
 Jon has stated this more than twenty times. It is a **hard** parameter in his
@@ -261,9 +275,22 @@ families; look there, not for the single file.
 
 ### The guards a lane will actually hit
 
-Each of these can refuse your dispatch, your merge, or your PR. When one
-fires, this is where to look — one hop from the refusal message to the code
-that produced it.
+> **None of the guards in the table below still exists.** Every file in its
+> "Implemented in" column resolves only to `reference/` — check any of them
+> with `git ls-files '*<name>'` and see. `git ls-files scripts/supervisor`
+> returns 0. The table is kept because the RULES are still what this estate
+> believes; it is a record of intent, not a map of live code, and nothing in
+> it will refuse anything.
+>
+> The guards that do run today are in Go, in `src/estate`: `estate pressure`
+> (host capacity, fails closed when it cannot measure), `estate merge`
+> (checks green at head, plus reviewer ≠ author read from the ledger), and
+> `estate tick check` (the Director's own stop condition). Reimplementing any
+> row below means writing it in Go, not restoring the script.
+
+Each of these *once* refused your dispatch, your merge, or your PR, and the
+"Implemented in" column says where the rule was encoded so it can be read
+before being rebuilt.
 
 | Guard | Refuses | Implemented in |
 |---|---|---|
@@ -411,9 +438,11 @@ measured against. See
   `ui-evidence-gate.sh` were retired on 2026-09-02 (see
   [`docs/ci-rules-retired.md`](docs/ci-rules-retired.md)); nothing fails a PR
   that omits the frame. The path it named, `scripts/supervisor/laneview/`, no
-  longer exists either — the viewer is `src/tui`, and
-  `src/tui/internal/shell/frame_capture_test.go` is how a frame is captured
-  and regenerated today. Reimplementing the gate in Go is open work.
+  longer exists either — the viewer is `src/tui`. **There is no capture helper
+  in this tree today**; find one with `git ls-files 'src/tui/**' | grep -i
+  frame` rather than trusting a filename written here, and if that returns
+  nothing, capturing a frame is manual. Reimplementing the gate in Go is open
+  work.
 
 ---
 *Last checked against the tree at `2e810dc` (2026-08-29). If `git log

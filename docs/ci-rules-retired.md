@@ -40,7 +40,7 @@ both returned **0**.
 | `validate.yml` | the Python/shell supervisor suite passes, sharded | **Obsolete.** The suite it ran does not exist. `estate-ci.yml` and `tui-ci.yml` cover the Go tree. |
 | `completion-gate.yml` | a task group does not advance until every member left evidence | **Not reimplemented.** Worth reviving in Go if task groups return. |
 | `fixpass-evidence.yml` | a fix pass must paste proof, not claim a fix | **Not reimplemented.** The underlying discipline is live in how briefs are written, but nothing enforces it. |
-| `ui-evidence.yml` | a PR touching the viewer needs a captured frame, not a description | **Not reimplemented, and this one is live policy.** `CLAUDE.md` still states it as enforced; it is not. `src/tui/internal/shell/frame_capture_test.go` makes the frame reproducible, so a Go gate has something to check against. |
+| `ui-evidence.yml` | a PR touching the viewer needs a captured frame, not a description | **Not reimplemented.** It remains a convention that nothing enforces. `AGENTS.md` said it was enforced; that was corrected in the same pull request that retired the workflow, so the two agree as of this file's date. |
 
 One thing worth keeping from `completion-gate.yml` specifically: it ran a
 **mutation of its own gate** in CI — it replaced the gate with `exit 0` and
