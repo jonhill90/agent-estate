@@ -532,8 +532,8 @@ func TestAllowsWithNoClosingIssueWhenHeadRefIsAGenuineDispatchBranch(t *testing.
 	}
 }
 
-// A PR body's self-declared Author-Lane: trailer that CONTRADICTS the
-// head-ref-derived author must refuse -- the same class of forgery
+// A PR body's self-declared Author-Lane: trailer naming a lane OUTSIDE the
+// verified author chain must refuse -- the same class of forgery
 // agent-estate#934 closed for Review-Lane:, applied to authorship.
 func TestBypass_ForgedAuthorLaneTrailerContradictsHeadRefRefuses(t *testing.T) {
 	p, l := cleanFixture(t)
@@ -543,8 +543,8 @@ func TestBypass_ForgedAuthorLaneTrailerContradictsHeadRefRefuses(t *testing.T) {
 		t.Fatal("bypass: a PR body's Author-Lane: trailer contradicting the head-ref-derived author was allowed to merge")
 	}
 	joined := strings.Join(d.Reasons, " | ")
-	if !strings.Contains(joined, "contradicts the head-ref-derived author") {
-		t.Fatalf("refused, but not for the expected reason (Author-Lane contradiction): %v", d.Reasons)
+	if !strings.Contains(joined, "names a lane outside the verified author chain") {
+		t.Fatalf("refused, but not for the expected reason (Author-Lane outside chain): %v", d.Reasons)
 	}
 }
 
@@ -721,6 +721,128 @@ func TestFixPassChainSkipsANoOpRecordAtTheSameBaseRatherThanDeadEnding(t *testin
 	d := evaluateWithPR(p, "lane-review", l)
 	if !d.Allow {
 		t.Fatalf("evaluateWithPR refused a genuine fix-pass chain merely because an earlier, unrelated no-op record shared the same Base: %v", d.Reasons)
+	}
+}
+
+// agent-estate#940's over-refusal, demonstrated on real PRs #963/#964: an
+// Author-Lane: trailer naming the ROOT dispatch of a chain whose current
+// head was moved by a later fix pass must be ACCEPTED, not refused. The
+// trailer was written when the PR was opened, before any fix pass existed,
+// so it necessarily names the root -- that is still a true statement about
+// who authored this PR, even after the chain-terminal author changes.
+func TestAuthorLaneTrailerNamingChainRootIsAccepted(t *testing.T) {
+	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	reviewedAt := checkStart.Add(2 * time.Hour)
+	p := &PR{
+		Number:      926,
+		HeadOID:     "fixedcafe01",
+		HeadRefName: "dispatch/a1",
+		State:       "OPEN",
+		Body:        "Closes #926\n\nAuthor-Lane: lane-author\n",
+		Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
+		Comments:    []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: fixedcafe01\nVerdict: APPROVE\n"}},
+	}
+	l := newLedger(t,
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
+		ledger.Record{ID: "fix1", Issue: "926", Lane: "lane-fix", Role: ledger.RoleAuthor, PR: 926, State: ledger.Complete, Base: "deadbeef", HeadSHA: "fixedcafe01"},
+		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+	)
+	d := evaluateWithPR(p, "lane-review", l)
+	if !d.Allow {
+		t.Fatalf("evaluateWithPR refused an Author-Lane: trailer naming the verified chain's own root dispatch: %v", d.Reasons)
+	}
+}
+
+// A trailer naming a MID-CHAIN hop (neither the root nor the terminal
+// author) in a multi-hop chain must also be accepted -- every hop the gate
+// itself walked is a lane that genuinely authored some of this PR's code.
+func TestAuthorLaneTrailerNamingMidChainHopIsAccepted(t *testing.T) {
+	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	reviewedAt := checkStart.Add(3 * time.Hour)
+	p := &PR{
+		Number:      926,
+		HeadOID:     "thirdhopsha",
+		HeadRefName: "dispatch/a1",
+		State:       "OPEN",
+		Body:        "Closes #926\n\nAuthor-Lane: lane-fix1\n",
+		Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
+		Comments:    []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: thirdhopsha\nVerdict: APPROVE\n"}},
+	}
+	l := newLedger(t,
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
+		ledger.Record{ID: "fix1", Issue: "926", Lane: "lane-fix1", Role: ledger.RoleAuthor, PR: 926, State: ledger.Complete, Base: "deadbeef", HeadSHA: "secondhopsha"},
+		ledger.Record{ID: "fix2", Issue: "926", Lane: "lane-fix2", Role: ledger.RoleAuthor, PR: 926, State: ledger.Complete, Base: "secondhopsha", HeadSHA: "thirdhopsha"},
+		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+	)
+	d := evaluateWithPR(p, "lane-review", l)
+	if !d.Allow {
+		t.Fatalf("evaluateWithPR refused an Author-Lane: trailer naming a genuine mid-chain hop: %v", d.Reasons)
+	}
+}
+
+// Bypass: a trailer naming a lane the chain walk never visited at all --
+// neither the root nor any fix-pass hop -- must still refuse. Accepting any
+// hop is not the same as accepting anything; the trailer must still name a
+// lane the Base/HeadSHA walk itself established produced code here.
+func TestBypass_AuthorLaneTrailerNamingLaneOutsideChainRefuses(t *testing.T) {
+	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	reviewedAt := checkStart.Add(2 * time.Hour)
+	p := &PR{
+		Number:      926,
+		HeadOID:     "fixedcafe01",
+		HeadRefName: "dispatch/a1",
+		State:       "OPEN",
+		Body:        "Closes #926\n\nAuthor-Lane: lane-never-dispatched\n",
+		Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
+		Comments:    []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: fixedcafe01\nVerdict: APPROVE\n"}},
+	}
+	l := newLedger(t,
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
+		ledger.Record{ID: "fix1", Issue: "926", Lane: "lane-fix", Role: ledger.RoleAuthor, PR: 926, State: ledger.Complete, Base: "deadbeef", HeadSHA: "fixedcafe01"},
+		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+	)
+	d := evaluateWithPR(p, "lane-review", l)
+	if d.Allow {
+		t.Fatal("bypass: an Author-Lane: trailer naming a lane the chain walk never visited was allowed to merge")
+	}
+	joined := strings.Join(d.Reasons, " | ")
+	if !strings.Contains(joined, "names a lane outside the verified author chain") {
+		t.Fatalf("refused, but not for the expected reason (Author-Lane outside chain): %v", d.Reasons)
+	}
+}
+
+// Bypass: a trailer naming a lane that genuinely IS a fix-pass author, but
+// for a DIFFERENT PR's own chain -- not this PR's. The chain walk is
+// already PR-scoped (authorRecordForFixPassChain filters r.PR != pr), so
+// that lane never enters this PR's chainLanes set; the trailer must still
+// refuse even though the lane name is real and really did author something
+// somewhere.
+func TestBypass_AuthorLaneTrailerNamingDifferentPRsChainRefuses(t *testing.T) {
+	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	reviewedAt := checkStart.Add(2 * time.Hour)
+	p := &PR{
+		Number:      926,
+		HeadOID:     "fixedcafe01",
+		HeadRefName: "dispatch/a1",
+		State:       "OPEN",
+		Body:        "Closes #926\n\nAuthor-Lane: lane-other-pr-fix\n",
+		Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
+		Comments:    []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: fixedcafe01\nVerdict: APPROVE\n"}},
+	}
+	l := newLedger(t,
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
+		ledger.Record{ID: "fix1", Issue: "926", Lane: "lane-fix", Role: ledger.RoleAuthor, PR: 926, State: ledger.Complete, Base: "deadbeef", HeadSHA: "fixedcafe01"},
+		// A real fix-pass author, completed, but scoped to PR 200, not 926.
+		ledger.Record{ID: "other", Issue: "200", Lane: "lane-other-pr-fix", Role: ledger.RoleAuthor, PR: 200, State: ledger.Complete, Base: "somesha", HeadSHA: "othersha"},
+		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+	)
+	d := evaluateWithPR(p, "lane-review", l)
+	if d.Allow {
+		t.Fatal("bypass: an Author-Lane: trailer naming a lane that authored a DIFFERENT PR's fix pass was allowed to merge")
+	}
+	joined := strings.Join(d.Reasons, " | ")
+	if !strings.Contains(joined, "names a lane outside the verified author chain") {
+		t.Fatalf("refused, but not for the expected reason (Author-Lane outside chain): %v", d.Reasons)
 	}
 }
 

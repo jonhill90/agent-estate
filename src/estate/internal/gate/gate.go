@@ -314,18 +314,28 @@ func authorRecordForDispatchID(l *ledger.Ledger, id string) (ledger.Record, bool
 // (a fix pass that committed nothing) is skipped -- see the package doc's
 // condition 2c for why an inert record must never count as a hop.
 //
-// Returns the LAST hop's record (the one whose HeadSHA equals headOID) when
-// the chain resolves; ok=false when it does not, including when no chain
-// exists at all. visited guards against a cycle -- a malformed or
-// adversarial record set where hops point back at an already-used SHA --
-// by refusing to reuse a starting point, rather than looping forever.
-func authorRecordForFixPassChain(l *ledger.Ledger, pr int, rootHeadSHA, headOID string) (ledger.Record, bool, error) {
+// Returns the LAST hop's record (the one whose HeadSHA equals headOID) plus
+// every hop's own record, root-to-tip, when the chain resolves; ok=false
+// when it does not, including when no chain exists at all. The full hop
+// list is what lets a caller ask "which lanes actually produced code
+// between the root and the current head", not merely "which lane produced
+// the head" -- see evaluate's Author-Lane: trailer check, which must accept
+// a trailer naming ANY hop, not only the last one (agent-estate#940's
+// "over-refuses on the chain" finding: the root dispatch authored the PR
+// and wrote the trailer at open time; a later fix pass becomes the new
+// chain-terminal author, and both are simultaneously true).
+//
+// visited guards against a cycle -- a malformed or adversarial record set
+// where hops point back at an already-used SHA -- by refusing to reuse a
+// starting point, rather than looping forever.
+func authorRecordForFixPassChain(l *ledger.Ledger, pr int, rootHeadSHA, headOID string) (ledger.Record, []ledger.Record, bool, error) {
 	cur, err := l.Current()
 	if err != nil {
-		return ledger.Record{}, false, err
+		return ledger.Record{}, nil, false, err
 	}
 	from := rootHeadSHA
 	visited := map[string]bool{from: true}
+	var hops []ledger.Record
 	for {
 		var next ledger.Record
 		found := false
@@ -340,13 +350,14 @@ func authorRecordForFixPassChain(l *ledger.Ledger, pr int, rootHeadSHA, headOID 
 			break
 		}
 		if !found {
-			return ledger.Record{}, false, nil
+			return ledger.Record{}, nil, false, nil
 		}
+		hops = append(hops, next)
 		if next.HeadSHA == headOID {
-			return next, true, nil
+			return next, hops, true, nil
 		}
 		if visited[next.HeadSHA] {
-			return ledger.Record{}, false, nil
+			return ledger.Record{}, nil, false, nil
 		}
 		visited[next.HeadSHA] = true
 		from = next.HeadSHA
@@ -477,13 +488,22 @@ func evaluate(p *PR, reviewerLane string, l *ledger.Ledger) Decision {
 	}
 
 	authorLane := authorRec.Lane
+	// chainLanes is every lane the gate has structurally verified produced
+	// SOME commit between the root dispatch's own output and the PR's
+	// current head -- the root itself, always, plus one entry per walked
+	// fix-pass hop. This is the set an Author-Lane: trailer is checked
+	// against below, not just the chain-terminal authorLane: a trailer
+	// written when the PR was FIRST opened necessarily names the root, and
+	// staying correct after a fix pass moves the terminal author elsewhere
+	// does not make the root's own claim false.
+	chainLanes := map[string]bool{normaliseLaneID(authorLane): true}
 	if authorRec.HeadSHA != p.HeadOID {
 		// The root dispatch's own commit is not the PR's current head. That
 		// used to be an immediate refusal -- and still is, UNLESS a chain of
 		// completed fix-pass dispatches (condition 2c) accounts for every
 		// commit between the root's HeadSHA and the PR's actual head. See
 		// the package doc for exactly what this does and does not prove.
-		fp, fok, ferr := authorRecordForFixPassChain(l, p.Number, authorRec.HeadSHA, p.HeadOID)
+		fp, hops, fok, ferr := authorRecordForFixPassChain(l, p.Number, authorRec.HeadSHA, p.HeadOID)
 		if ferr != nil {
 			return refuse(d, "cannot read ledger for fix-pass chain: "+ferr.Error())
 		}
@@ -493,17 +513,28 @@ func evaluate(p *PR, reviewerLane string, l *ledger.Ledger) Decision {
 				" chains from that commit to the current head either -- the branch name matches but the code it points at does not, refusing")
 		}
 		authorLane = fp.Lane
+		for _, hop := range hops {
+			chainLanes[normaliseLaneID(hop.Lane)] = true
+		}
 	}
 
 	// A PR body may carry a self-declared Author-Lane: trailer (repo
 	// convention, AGENTS.md/CLAUDE.md). It is never trusted to ESTABLISH
 	// identity -- the head ref above already did that structurally -- but
-	// if one is present and disagrees with what the head ref resolved to,
-	// that is exactly the shape of a forged trailer, the same class of hole
+	// if one is present and names a lane OUTSIDE the verified chain, that is
+	// exactly the shape of a forged trailer, the same class of hole
 	// agent-estate#934 closed for Review-Lane:, and is refused rather than
-	// silently ignored.
-	if claimed, has := parseAuthorLaneTrailer(p.Body); has && normaliseLaneID(claimed) != normaliseLaneID(authorLane) {
-		return refuse(d, "PR body's Author-Lane: trailer (\""+claimed+"\") contradicts the head-ref-derived author (\""+authorLane+"\") -- refusing")
+	// silently ignored. A trailer naming ANY hop the gate has itself walked
+	// -- the root dispatch that opened the PR, or a later fix pass that
+	// moved the head -- is accepted: both are genuinely "the lane that
+	// authored this PR", just at different points in its history
+	// (agent-estate#940's "the gate's Author-Lane: check over-refuses every
+	// fix-passed PR"). This does NOT loosen the chain walk itself -- a
+	// trailer can only ever match a lane the Base/HeadSHA walk above already
+	// verified produced code in this exact PR's history.
+	if claimed, has := parseAuthorLaneTrailer(p.Body); has && !chainLanes[normaliseLaneID(claimed)] {
+		return refuse(d, "PR body's Author-Lane: trailer (\""+claimed+"\") names a lane outside the verified author chain (root "+authorRec.Lane+
+			", current head authored by \""+authorLane+"\") -- refusing")
 	}
 
 	if authorLane == reviewerLane {
