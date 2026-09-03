@@ -38,8 +38,41 @@ type Turn struct {
 	// NOT the same as the turn failing -- the caller records that distinction
 	// as "unknown" rather than "failed".
 	Result func(stdout []byte) (string, error)
+	// Spend extracts what the harness itself reported this turn cost, from
+	// the same finished command's stdout Result reads. See Spend's own doc
+	// comment for the discipline this follows: every field is either read
+	// directly from the harness's own output, or left nil -- never computed
+	// by multiplying a token count by a price this package assumes. An error
+	// means nothing usable was found; the caller treats that as "no spend
+	// recorded" for this turn, not as the turn failing.
+	Spend func(stdout []byte) (Spend, error)
 	// Cleanup releases anything Start allocated. Always safe to call.
 	Cleanup func()
+}
+
+// Spend is what a harness itself reported about one turn's cost. Every
+// field is a pointer so "the harness did not report this" (nil) is never
+// confused with "the harness reported zero" -- the same discipline
+// src/tui/internal/cost.Figure.Known uses for the identical problem.
+//
+// CostUSD is deliberately absent for any harness that does not itself state
+// a dollar figure (codex, as of this writing -- see docs/spend-observation.md).
+// This package refuses to fill that gap by multiplying token counts against
+// a price table it would have to keep in sync with the provider's own
+// billing: that is estimating, and #975 is explicit that estimating is
+// exactly the failure mode a spend ledger must not reintroduce.
+type Spend struct {
+	// CostUSD is the harness's own reported dollar cost for this turn, or
+	// nil if the harness reports none.
+	CostUSD *float64
+	// InputTokens, OutputTokens, CacheReadTokens, CacheCreationTokens are
+	// token counts the harness itself reported for this turn, or nil if it
+	// reported none. Each harness's own Spend function documents which of
+	// these it can fill.
+	InputTokens         *int64
+	OutputTokens        *int64
+	CacheReadTokens     *int64
+	CacheCreationTokens *int64
 }
 
 // Harness is one agent CLI this estate can dispatch to.
@@ -114,6 +147,7 @@ func (claude) Start(ctx context.Context, dir, prompt string) (*Turn, error) {
 	return &Turn{
 		Cmd:     cmd,
 		Result:  claudeResult,
+		Spend:   claudeSpend,
 		Cleanup: func() {},
 	}, nil
 }
@@ -129,6 +163,38 @@ func claudeResult(stdout []byte) (string, error) {
 	s, ok := parsed["result"].(string)
 	if !ok {
 		return "", fmt.Errorf("claude: JSON envelope had no string \"result\" field")
+	}
+	return s, nil
+}
+
+// claudeSpendEnvelope is the subset of claude -p --output-format json's
+// envelope this reads -- total_cost_usd and usage sit beside the "result"
+// field claudeResult already parses, in the same payload, on the same
+// stdout the estate already captures. total_cost_usd is Anthropic's own
+// billed figure for the turn, not a number this package computes. See
+// docs/spend-observation.md for the real captured payload this was checked
+// against.
+type claudeSpendEnvelope struct {
+	TotalCostUSD *float64 `json:"total_cost_usd"`
+	Usage        *struct {
+		InputTokens              *int64 `json:"input_tokens"`
+		OutputTokens             *int64 `json:"output_tokens"`
+		CacheReadInputTokens     *int64 `json:"cache_read_input_tokens"`
+		CacheCreationInputTokens *int64 `json:"cache_creation_input_tokens"`
+	} `json:"usage"`
+}
+
+func claudeSpend(stdout []byte) (Spend, error) {
+	var e claudeSpendEnvelope
+	if err := json.Unmarshal(stdout, &e); err != nil {
+		return Spend{}, fmt.Errorf("claude: spend envelope not parseable JSON: %w", err)
+	}
+	s := Spend{CostUSD: e.TotalCostUSD}
+	if e.Usage != nil {
+		s.InputTokens = e.Usage.InputTokens
+		s.OutputTokens = e.Usage.OutputTokens
+		s.CacheReadTokens = e.Usage.CacheReadInputTokens
+		s.CacheCreationTokens = e.Usage.CacheCreationInputTokens
 	}
 	return s, nil
 }
@@ -156,6 +222,7 @@ func (codex) Start(ctx context.Context, dir, prompt string) (*Turn, error) {
 	f.Close()
 
 	cmd := exec.CommandContext(ctx, "codex", "exec",
+		"--json",
 		"--sandbox", "workspace-write",
 		"--skip-git-repo-check",
 		"--output-last-message", path,
@@ -175,6 +242,55 @@ func (codex) Start(ctx context.Context, dir, prompt string) (*Turn, error) {
 			}
 			return strings.TrimSpace(string(b)), nil
 		},
+		Spend:   codexSpend,
 		Cleanup: func() { os.Remove(path) },
+	}, nil
+}
+
+// codexEvent is one line of codex exec --json's JSONL event stream on
+// stdout. Only the shape of a "turn.completed" event's usage is read here;
+// every other event type is skipped.
+type codexEvent struct {
+	Type  string `json:"type"`
+	Usage *struct {
+		InputTokens        *int64 `json:"input_tokens"`
+		CachedInputTokens  *int64 `json:"cached_input_tokens"`
+		CacheWriteTokens   *int64 `json:"cache_write_input_tokens"`
+		OutputTokens       *int64 `json:"output_tokens"`
+		ReasoningOutTokens *int64 `json:"reasoning_output_tokens"`
+	} `json:"usage"`
+}
+
+// codexSpend reads codex exec --json's "turn.completed" event for its
+// per-turn token usage. Codex reports no dollar figure anywhere in its own
+// output (see docs/spend-observation.md), so Spend.CostUSD is always nil
+// here -- filling it by multiplying tokens against a price table this
+// package would have to maintain is exactly the estimating #975 rules out.
+// A stream with several turns (a resumed/forked session) is not something
+// --json's -p path produces here; the LAST turn.completed line is used in
+// case it ever does, so a later turn's usage wins over an earlier one.
+func codexSpend(stdout []byte) (Spend, error) {
+	var found *codexEvent
+	for _, line := range strings.Split(string(stdout), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		var e codexEvent
+		if err := json.Unmarshal([]byte(line), &e); err != nil {
+			continue // not every stdout line is a codex JSON event
+		}
+		if e.Type == "turn.completed" && e.Usage != nil {
+			found = &e
+		}
+	}
+	if found == nil {
+		return Spend{}, fmt.Errorf("codex: no turn.completed usage event found in --json output")
+	}
+	return Spend{
+		InputTokens:         found.Usage.InputTokens,
+		OutputTokens:        found.Usage.OutputTokens,
+		CacheReadTokens:     found.Usage.CachedInputTokens,
+		CacheCreationTokens: found.Usage.CacheWriteTokens,
 	}, nil
 }

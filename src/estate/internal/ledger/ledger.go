@@ -92,6 +92,25 @@ type Record struct {
 	// what is and is not checked -- but is recorded now so it exists to
 	// check against.
 	Base string `json:"base,omitempty"`
+	// SpendCostUSD is the harness's own reported dollar cost for this turn --
+	// read by internal/harness.Turn.Spend directly from the harness's own
+	// output the instant this turn's subprocess exits, never a number the
+	// agent claimed about itself. A pointer, not a bare float64: nil means
+	// "this harness reported no dollar figure" (codex, as of this writing),
+	// which must never be confused with a genuine $0.00 turn. See
+	// docs/spend-observation.md for what each harness can and cannot report
+	// and why this package refuses to fill a missing dollar figure by
+	// multiplying a token count against a price table of its own.
+	SpendCostUSD *float64 `json:"spend_cost_usd,omitempty"`
+	// SpendInputTokens, SpendOutputTokens, SpendCacheReadTokens and
+	// SpendCacheCreationTokens are per-turn token counts, same
+	// estate-observed-not-agent-claimed discipline as SpendCostUSD above.
+	// Populated for both claude and codex turns when the harness's own
+	// output carried them; nil, not zero, when it did not.
+	SpendInputTokens         *int64 `json:"spend_input_tokens,omitempty"`
+	SpendOutputTokens        *int64 `json:"spend_output_tokens,omitempty"`
+	SpendCacheReadTokens     *int64 `json:"spend_cache_read_tokens,omitempty"`
+	SpendCacheCreationTokens *int64 `json:"spend_cache_creation_tokens,omitempty"`
 }
 
 // EffectiveRole returns the record's Role, defaulting an unset field to
