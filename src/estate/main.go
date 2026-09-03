@@ -21,6 +21,7 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 	"github.com/jonhill90/agent-estate/estate/internal/pressure"
 	"github.com/jonhill90/agent-estate/estate/internal/tick"
+	"github.com/jonhill90/agent-estate/estate/internal/verifybranch"
 )
 
 func usage() {
@@ -36,6 +37,7 @@ func usage() {
   estate tick record <phase-item> [artifact]
                                         append this tick to the record
   estate tick check                     has the loop stalled? 1 = yes, escalate
+  estate verify-branch <branch>         build and test a branch in its OWN tree
 
 Every gate fails closed: a limit that cannot be measured refuses.
 `)
@@ -207,6 +209,43 @@ func main() {
 			usage()
 			os.Exit(2)
 		}
+
+	case "verify-branch":
+		// Checks a branch where its own contents are the only contents. The
+		// caller's working tree carries state from every branch worked on,
+		// so a check run there answers a question about that tree, not this
+		// branch. See internal/verifybranch's doc comment for the four
+		// failures that produced this command.
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "estate: verify-branch needs a branch name")
+			os.Exit(2)
+		}
+		top, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate: cannot find the repository root:", err)
+			os.Exit(2)
+		}
+		res, err := verifybranch.Verify(strings.TrimSpace(string(top)), os.Args[2], []string{"src/estate", "src/tui"})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		for _, st := range res.Steps {
+			mark := "ok  "
+			if st.Err != nil {
+				mark = "FAIL"
+			}
+			fmt.Printf("%s %s: %s\n", mark, st.Module, st.Cmd)
+		}
+		if !res.OK() {
+			fmt.Fprintf(os.Stderr, "\nrefuse: %s failed on branch %s\n", res.Failed, res.Branch)
+			if n := len(res.Steps); n > 0 {
+				fmt.Fprintln(os.Stderr, strings.TrimSpace(res.Steps[n-1].Output))
+			}
+			fmt.Fprintln(os.Stderr, "\nworktree kept for inspection:", res.Worktree)
+			os.Exit(1)
+		}
+		fmt.Printf("\n%s builds, vets and tests clean in its own tree\n", res.Branch)
 
 	case "dispatch":
 		if len(os.Args) < 4 {
