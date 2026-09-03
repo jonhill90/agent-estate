@@ -145,7 +145,8 @@ const (
 	// Lanes and Chat into one surface -- each its own real, fixture-backed
 	// pane (internal/lanechat/{laneprimary,roomprimary,unifiedlist}), NOT a
 	// replacement for PaneLanes/PaneChat above, which stay exactly as they
-	// are. Reached only via [7]/[8]/[9] and the -lanechat-* startup
+	// are. Reached via the leader keys p/r/v (leaderBindings) and the
+	// -lanechat-* startup
 	// flags (cmd/estate/main.go) -- none has a nav.Build() route, the same
 	// "no sidebar route yet" state PaneGallery/PaneFlow are already in (see
 	// paneToRoute's own doc comment), because wiring one into the nav tree
@@ -1388,11 +1389,11 @@ func (m Model) footer() string {
 	if m.focus == focusContent {
 		focusName = "content"
 	}
-	// Compact by design past "[2] board" (the one substring model_teatest_test.go
+	// Compact by design past the leader hint (the one substring model_teatest_test.go
 	// pins exactly): six pane keys plus quit must fit inside a realistic
 	// terminal width alongside a themeSaveErr appended below, or the error
 	// truncates before it says anything -- see this line's own git blame
-	// for the width budget that broke when [5] flow, then [6] chat, were
+	// for the width budget that broke when flow, then chat, were
 	// added. [↑↓] [enter] [←] [b] (SPEC-shell.md S3) are only meaningful
 	// while focus is on the sidebar -- shown always anyway, same as the
 	// f-keys above being shown while a different pane is active, rather
@@ -1413,7 +1414,8 @@ func (m Model) footer() string {
 	// the right way round -- an unreadable footer helps nobody, and the
 	// keyboard still works.
 	//
-	// Only [4]gallery/[5]flow are marked here -- home/board/cost/chat now
+	// Only the leader hint and quit are marked here -- the footer no longer
+	// lists panes, so home/board/cost/chat
 	// have real rows in the sidebar (nav.Build()'s tree) and are clicked
 	// there instead (handleMouse's sidebar-row zones); gallery and flow
 	// predate SPEC-shell.md and have no sidebar route (routeToPane's own

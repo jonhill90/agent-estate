@@ -1,6 +1,7 @@
 package shell
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -194,5 +195,29 @@ func TestTabDoesNotHijackAPendingChord(t *testing.T) {
 	}
 	if a.leaderMiss != "tab" {
 		t.Errorf("an unbound chord key must be reported, got %q", a.leaderMiss)
+	}
+}
+
+// A council seat found the leader-key change left a doc comment telling a
+// reader to press [7]/[8]/[9] -- keys the same change had deleted. Every
+// other f-key and digit reference in this file and in docs/tui was updated;
+// that one was missed, so the file described a control that does nothing.
+//
+// This is the defect class the whole PR is about, so it gets a check rather
+// than another round of care.
+func TestNoSourceCommentAdvertisesADeletedKey(t *testing.T) {
+	src, err := os.ReadFile("model.go")
+	if err != nil {
+		t.Fatalf("cannot read model.go, so nothing was verified: %v", err)
+	}
+	body := string(src)
+	for _, gone := range []string{
+		"[f1]", "[f2]", "[f3]", "[f4]", "[f5]", "[f6]", "[f7]", "[f8]", "[f9]",
+		"[1]home", "[2] board", "[3]cost", "[4]gallery", "[5]flow", "[6]chat",
+		"[7]/[8]/[9]",
+	} {
+		if strings.Contains(body, gone) {
+			t.Errorf("model.go still advertises %q, a key this scheme removed", gone)
+		}
 	}
 }
