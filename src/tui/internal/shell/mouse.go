@@ -41,6 +41,9 @@ const (
 	zoneFlow    = "nav-flow"
 	zoneQuit    = "nav-quit"
 	zoneFocus   = "nav-focus"
+	// zoneLeader opens the which-key menu, so every pane stays reachable by
+	// mouse now that the footer no longer lists them individually.
+	zoneLeader = "nav-leader"
 )
 
 // footerPaneZones is footerPaneZones' own small data table (the same
@@ -144,6 +147,16 @@ func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd, bool) {
 			return m, nil, true
 		}
 	}
+	if m.zones.Get(zoneLeader).InBounds(msg) {
+		// Clicking the hint opens the menu immediately -- a mouse user has
+		// already expressed intent and should not wait out the keyboard
+		// timeout.
+		m.leaderPending = true
+		m.leaderMenu = true
+		m.leaderMiss = ""
+		m.leaderGen++
+		return m, nil, true
+	}
 	if m.zones.Get(zoneFocus).InBounds(msg) {
 		m.focus = toggleFocus(m.focus)
 		return m, nil, true
@@ -170,7 +183,7 @@ func (m Model) allZoneIDs() []string {
 	for _, i := range visible {
 		ids = append(ids, navRowZone(i))
 	}
-	ids = append(ids, zoneFocus, zoneQuit)
+	ids = append(ids, zoneFocus, zoneQuit, zoneLeader)
 	for _, z := range footerPaneZones {
 		ids = append(ids, z.id)
 	}

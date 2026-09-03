@@ -53,7 +53,7 @@ func TestKeyTPersistsThemeChoice(t *testing.T) {
 	})
 
 	tm := run(t, m)
-	waitFor(t, tm, "[2] board")
+	waitFor(t, tm, "[space] menu")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
 	// The rail's own footer line ("theme: <name>") is the visible proof
@@ -116,7 +116,7 @@ func TestKeyTSurfacesASaveFailureWithoutBlockingTheCycle(t *testing.T) {
 	})
 
 	tm := runWide(t, m)
-	waitFor(t, tm, "[2] board")
+	waitFor(t, tm, "[space] menu")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
 	out := waitFor(t, tm, theme.Cycle(theme.Default).Name)

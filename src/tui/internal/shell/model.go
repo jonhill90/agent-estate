@@ -367,8 +367,12 @@ type Model struct {
 	// built by New has it unset until WithThemeSave is called, so a
 	// test with no opinion on persistence (most of the pre-existing
 	// navigation tests in this package) is unaffected.
-	saveTheme    func(theme.Theme) error
-	estateStatus func() estatus.Status
+	leaderPending bool
+	leaderMenu    bool
+	leaderMiss    string
+	leaderGen     int
+	saveTheme     func(theme.Theme) error
+	estateStatus  func() estatus.Status
 	// themeSaveErr is the visible half of "absence is a typed value,
 	// never a bare zero" (AGENTS.md) applied to a failed persist: a
 	// theme.Save error (e.g. an unwritable config directory) must not
@@ -622,6 +626,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// even after a rebase.
 		return m.cycleTheme()
 
+	case whichKeyMsg:
+		// Only open the menu if this timer belongs to the leader press still
+		// pending; a stale timer from an abandoned press must not pop up over
+		// whatever the user is doing now.
+		if m.leaderPending && msg.gen == m.leaderGen {
+			m.leaderMenu = true
+		}
+		return m, nil
 	case tea.MouseMsg:
 		// Nav clicks first; anything the shell does not own falls through to
 		// the focused pane, which may have its own clickable regions.
@@ -648,6 +660,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab":
 			m.focus = toggleFocus(m.focus)
 			return m, nil
+		}
+		// Leader handling sits after the always-on keys and before pane
+		// routing, so a pending chord claims the next keystroke wherever the
+		// focus is -- but never inside a composer (leaderTakesKeys).
+		if m.leaderPending {
+			return m.resolveLeader(msg.String())
+		}
+		if msg.String() == LeaderKey && m.leaderTakesKeys() {
+			m.leaderMiss = ""
+			return m.startLeader()
+		}
+		switch msg.String() {
 		// Digits 1-9 are the direct-jump keys. They were f1-f9 until Jon
 		// asked for function keys out of the nav entirely; digits were
 		// chosen because they collide with nothing already bound (b, t, q,
@@ -1237,6 +1261,11 @@ func (m Model) View() string {
 	// before it needs an answer; see that function's own doc comment for
 	// why the wait belongs on the rare mouse-event path, not on every
 	// render (View() runs far more often than a human clicks anything).
+	// The which-key menu sits between the body and the footer, so it covers
+	// no content and appears where the eye already is when reading bindings.
+	if menu := m.leaderView(); menu != "" {
+		return m.zones.Scan(lipgloss.JoinVertical(lipgloss.Left, body, menu, m.footer()))
+	}
 	return m.zones.Scan(lipgloss.JoinVertical(lipgloss.Left, body, m.footer()))
 }
 
@@ -1408,10 +1437,9 @@ func (m Model) footer() string {
 	// there instead (handleMouse's sidebar-row zones); gallery and flow
 	// predate SPEC-shell.md and have no sidebar route (routeToPane's own
 	// doc comment), so the footer is still their only click target.
-	plain := "[tab] focus:" + focusName + " [↑↓] [enter] [←] [b] [1]home [2] board [3]cost [4]gallery [5]flow [6]chat [q]quit"
-	marked := m.zones.Mark(zoneFocus, "[tab] focus:"+focusName) + " [↑↓] [enter] [←] [b] [1]home [2] board [3]cost " +
-		m.zones.Mark(zoneGallery, "[4]gallery") + " " +
-		m.zones.Mark(zoneFlow, "[5]flow") + " [6]chat " +
+	plain := "[tab] focus:" + focusName + " [↑↓] [enter] [←] [b] " + m.leaderHint() + " [q]quit"
+	marked := m.zones.Mark(zoneFocus, "[tab] focus:"+focusName) + " [↑↓] [enter] [←] [b] " +
+		m.zones.Mark(zoneLeader, m.leaderHint()) + " " +
 		m.zones.Mark(zoneQuit, "[q]quit")
 
 	suffix := ""
