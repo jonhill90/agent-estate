@@ -282,3 +282,88 @@ func TestRemoveRefusesWhenTheOnlyOutputIsGitignored(t *testing.T) {
 		t.Fatalf("Remove destroyed gitignored output: %v", err)
 	}
 }
+
+// From a council seat: Remove() destroyed COMMITTED agent output. An agent
+// that commits its work on the dispatch branch leaves a clean `git status`,
+// so Dirty() reported nothing to collect, and Remove() then ran
+// `git branch -D` -- deleting the only ref to those commits.
+//
+// The uncommitted case was already covered. This is the opposite one, and it
+// is worse: the agent did the tidy thing and lost more for it.
+func TestRemoveRefusesToDiscardCommittedWork(t *testing.T) {
+	root := repo(t)
+	w, err := Create(root, "committed-work")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(w.Path, "result.txt"), []byte("the turn's output"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-qm", "the turn's work"}} {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = w.Path
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v: %s", args, err, out)
+		}
+	}
+	// git status is clean now -- that is the trap.
+	dirty, err := w.Dirty()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dirty {
+		t.Fatal("precondition: a committed worktree is not dirty")
+	}
+
+	err = w.Remove()
+	if err == nil {
+		t.Fatal("Remove must refuse: the branch holds commits nothing else references")
+	}
+	if !strings.Contains(err.Error(), "commit") {
+		t.Errorf("the refusal must say the work is committed; got: %v", err)
+	}
+	// And the work must still be there.
+	if _, err := os.Stat(filepath.Join(w.Path, "result.txt")); err != nil {
+		t.Fatalf("the refused Remove destroyed committed work anyway: %v", err)
+	}
+	out, err := exec.Command("git", "-C", root, "branch", "--list", w.Branch).Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(out)) == "" {
+		t.Error("the branch holding the commits was deleted")
+	}
+}
+
+// A worktree that committed nothing is still removable -- otherwise every
+// dispatch leaks.
+func TestRemoveStillCleansUpWhenNothingWasCommitted(t *testing.T) {
+	root := repo(t)
+	w, err := Create(root, "no-commits")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Remove(); err != nil {
+		t.Fatalf("a worktree with no commits and no changes must be removable: %v", err)
+	}
+}
+
+// If we never learned where the branch started, we cannot tell what is new.
+// That is "could not measure", and it must refuse rather than read as
+// "nothing was committed".
+func TestUnknownBaseRefusesRatherThanAssumingNothingWasCommitted(t *testing.T) {
+	root := repo(t)
+	w, err := Create(root, "no-base")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { w.Base = ""; _ = w.Remove() }()
+
+	w.Base = "" // as if Create had not recorded it
+	if _, err := w.Committed(); err == nil {
+		t.Fatal("an unrecorded base must be an error, not a confident false")
+	}
+	if err := w.Remove(); err == nil {
+		t.Fatal("Remove must refuse when it cannot tell whether work was committed")
+	}
+}

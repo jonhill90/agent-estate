@@ -36,6 +36,9 @@ type Worktree struct {
 	Path string
 	// Branch is the branch created for it, named for the dispatch.
 	Branch string
+	// Base is the commit the worktree was created from. Anything the branch
+	// points at beyond this is work the turn committed.
+	Base string
 
 	root string
 }
@@ -131,7 +134,13 @@ func Create(repoRoot, id string) (*Worktree, error) {
 	if _, err := git(repoRoot, "worktree", "add", "-b", branch, path); err != nil {
 		return nil, fmt.Errorf("isolate: refusing to dispatch: %w", err)
 	}
-	return &Worktree{Path: path, Branch: branch, root: repoRoot}, nil
+	// Remember where the branch started, so teardown can tell whether the
+	// turn committed anything.
+	baseOut, err := git(path, "rev-parse", "HEAD")
+	if err != nil {
+		return nil, fmt.Errorf("isolate: refusing to dispatch: cannot record the worktree's base commit: %w", err)
+	}
+	return &Worktree{Path: path, Branch: branch, Base: strings.TrimSpace(string(baseOut)), root: repoRoot}, nil
 }
 
 // Dirty reports whether the worktree holds uncommitted changes -- output a
@@ -156,12 +165,40 @@ func (w *Worktree) Dirty() (bool, error) {
 	return strings.TrimSpace(string(out)) != "", nil
 }
 
+// Committed reports whether the branch has moved beyond the commit it was
+// created at -- that is, whether the turn committed anything.
+func (w *Worktree) Committed() (bool, error) {
+	if w.Base == "" {
+		// We never learned where it started, so we cannot tell what is new.
+		// That is "could not measure", and it must not read as "nothing".
+		return false, fmt.Errorf("isolate: no base commit recorded for %s", w.Path)
+	}
+	head, err := git(w.Path, "rev-parse", "HEAD")
+	if err != nil {
+		return false, err
+	}
+	return strings.TrimSpace(string(head)) != w.Base, nil
+}
+
 // Remove tears the worktree and its branch down.
 //
-// It refuses when the worktree holds uncommitted changes. A dispatch's
-// uncollected output looks exactly like an empty worktree from the outside,
-// and deleting it is unrecoverable; reporting it is not.
+// It refuses when the worktree holds uncommitted changes OR when the turn
+// committed anything. A council seat found the second case: an agent that
+// committed its work left a CLEAN git status, so the uncommitted check saw
+// nothing to collect, and `git branch -D` then deleted the only ref to those
+// commits. The agent did the tidy thing and lost more for it.
+//
+// Both refusals are the same rule: a dispatch's uncollected output looks
+// exactly like an empty worktree from outside, and deleting it is
+// unrecoverable while reporting it is not.
 func (w *Worktree) Remove() error {
+	committed, cerr := w.Committed()
+	if cerr != nil {
+		return fmt.Errorf("isolate: cannot tell whether %s holds committed work, so refusing to remove it: %w", w.Path, cerr)
+	}
+	if committed {
+		return fmt.Errorf("isolate: %s has commits on %s that nothing else references; refusing to remove it -- collect them first", w.Path, w.Branch)
+	}
 	dirty, err := w.Dirty()
 	if err != nil {
 		return fmt.Errorf("isolate: cannot tell whether %s holds uncommitted work, so refusing to remove it: %w", w.Path, err)
