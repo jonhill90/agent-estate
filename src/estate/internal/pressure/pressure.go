@@ -22,21 +22,21 @@ import (
 )
 
 type Limits struct {
-	MaxLoadPerCore float64
-	MinFreeMemMB   float64
-	MaxSwapUsedMB  float64
-	MaxWorktrees   int
-	MaxInFlight    int
+	MaxLoadPerCore       float64
+	MinFreeMemMB         float64
+	MaxSwapoutsPerSample float64
+	MaxWorktrees         int
+	MaxInFlight          int
 }
 
 func Default() Limits {
-	return Limits{MaxLoadPerCore: 3.0, MinFreeMemMB: 512, MaxSwapUsedMB: 512, MaxWorktrees: 40, MaxInFlight: 6}
+	return Limits{MaxLoadPerCore: 3.0, MinFreeMemMB: 512, MaxSwapoutsPerSample: 1, MaxWorktrees: 40, MaxInFlight: 6}
 }
 
 type Reading struct {
 	LoadPerCore     float64
 	FreeMemMB       float64
-	SwapUsedMB      float64
+	SwapoutRate     float64
 	Worktrees       int
 	InFlight        int
 	WeeklyRemaining float64
@@ -142,42 +142,43 @@ func Check(l *ledger.Ledger, lim Limits) Verdict {
 		}
 	}
 
-	// SWAP IS THE LIMIT freeMemMB CANNOT SEE, and its absence cost the host on
-	// 2026-09-03. freeMemMB counts free+inactive+speculative as available --
-	// defensible, since inactive pages are reclaimable -- but on a host already
-	// paging, those pages are exactly what the OS is fighting over. The gate
-	// read "free 4835MB, within limits" with 332MB genuinely free and 627MB of
-	// a 1024MB swap file in use; dispatch continued, memory ran out, macOS
-	// killed the tmux server, and the Director and the operator's own session
-	// died with it. The comment above freeMemMB predicted this failure in
-	// writing -- "reports gigabytes free while RAM is exhausted, fail-open" --
-	// and it happened anyway, because nothing measured the one signal that
-	// distinguishes a healthy 4GB of inactive pages from a starving one.
+	// ACTIVE PAGING is the limit freeMemMB cannot see, and its absence cost the
+	// host on 2026-09-03. freeMemMB counts free+inactive+speculative as
+	// available -- defensible, since inactive pages are reclaimable -- but on a
+	// host already paging, those pages are exactly what the OS is fighting
+	// over. The gate read "free 4835MB, within limits" with 332MB genuinely
+	// free; dispatch continued, memory ran out, macOS killed the tmux server,
+	// and the Director and the operator's own session died with it.
 	//
-	// A host with swap disabled reports 0.00M used, passes, and is correct to:
-	// a machine that cannot swap is not swapping. So this does NOT reintroduce
-	// the permanent refusal that the old vm.swapusage bug caused.
-	if mb, err := swapUsedMB(); err != nil {
+	// The FIRST fix for this gated on `vm.swapusage used` and was wrong in the
+	// opposite direction: `used` is a HIGH-WATER MARK. macOS does not page back
+	// in eagerly, so an hour after the crisis the host read 619MB used while
+	// `memory_pressure` reported 52% free and Swapouts had not moved in five
+	// seconds. That gate would have refused dispatch forever on a healthy
+	// machine -- the same permanent-refusal bug as the original vm.swapusage
+	// read, reintroduced by its own fix.
+	//
+	// Swapouts is a cumulative counter, so the DELTA over a short sample is the
+	// only honest question: is this host paging right NOW. A swap-disabled host
+	// never increments it and passes correctly.
+	if rate, err := swapoutRate(swapSampleWindow); err != nil {
 		v.OK = false
-		v.Reasons = append(v.Reasons, "could not measure swap: "+err.Error())
+		v.Reasons = append(v.Reasons, "could not measure paging: "+err.Error())
 	} else {
-		v.Reading.SwapUsedMB = mb
-		if mb > lim.MaxSwapUsedMB {
+		v.Reading.SwapoutRate = rate
+		if rate >= lim.MaxSwapoutsPerSample {
 			v.OK = false
-			v.Reasons = append(v.Reasons, fmt.Sprintf("swap in use %.0fMB above ceiling %.0fMB -- host is paging", mb, lim.MaxSwapUsedMB))
+			v.Reasons = append(v.Reasons, fmt.Sprintf("%.0f swapouts during a %s sample -- host is actively paging", rate, swapSampleWindow))
 		}
 	}
 
-	// WORKTREES ARE A BACKSTOP, not a resource reading. On 2026-09-03 the
-	// estate reached 176 dispatch worktrees -- one per turn, never removed --
-	// because nothing cleaned up at a terminal state. That alone did not
-	// exhaust RAM (worktrees are disk), but an unbounded count is the visible
-	// symptom of an unbounded loop, and it degrades every git operation the
-	// estate performs. This limit exists so a runaway is refused even when the
-	// memory gauge is wrong, which it was.
-	//
-	// Counted, not estimated: a wrong count here would be the same class of
-	// bug as the one this whole change is fixing.
+	// WORKTREES ARE A BACKSTOP, not a resource reading. On 2026-09-03 the estate
+	// reached 176 dispatch worktrees -- one per turn, never removed, because
+	// nothing cleaned up at a terminal state. That alone did not exhaust RAM
+	// (worktrees are disk), but an unbounded count is the visible symptom of an
+	// unbounded loop and it degrades every git operation the estate performs.
+	// This limit exists so a runaway is refused even when the memory gauge is
+	// wrong, which it was.
 	if n, err := worktreeCount(); err != nil {
 		v.OK = false
 		v.Reasons = append(v.Reasons, "could not count worktrees: "+err.Error())
@@ -216,38 +217,43 @@ func Check(l *ledger.Ledger, lim Limits) Verdict {
 	return v
 }
 
-// swapUsedMB reports how much swap the host is actively using.
+const swapSampleWindow = 2 * time.Second
+
+// swapoutRate reports how many pages the host swapped OUT during the window.
 //
-// Deliberately reads `used`, not `total`: macOS grows its swap file on demand,
-// so total says how far it has already been pushed, while used says whether it
-// is being pushed now. 0.00M on a swap-disabled host is a true reading, not a
-// broken instrument -- see the note at the call site.
-func swapUsedMB() (float64, error) {
-	out, err := exec.Command("sysctl", "-n", "vm.swapusage").Output()
+// Cumulative counters sampled twice: the delta answers "is it paging now",
+// where `vm.swapusage used` only answers "has it ever paged badly". Zero on a
+// swap-disabled host, which is a true reading rather than a broken instrument.
+func swapoutRate(window time.Duration) (float64, error) {
+	a, err := swapouts()
 	if err != nil {
-		return 0, fmt.Errorf("read vm.swapusage: %w", err)
+		return 0, err
 	}
-	return parseSwapUsed(out)
+	time.Sleep(window)
+	b, err := swapouts()
+	if err != nil {
+		return 0, err
+	}
+	if b < a {
+		return 0, nil // counter reset
+	}
+	return b - a, nil
 }
 
-// parseSwapUsed is split out so the units and the swap-disabled case are
-// testable without a host that happens to be in the right state.
-func parseSwapUsed(out []byte) (float64, error) {
-	m := regexp.MustCompile(`used\s*=\s*([0-9.]+)([MGK])`).FindSubmatch(out)
-	if m == nil {
-		return 0, fmt.Errorf("vm.swapusage has no used field: %q", strings.TrimSpace(string(out)))
-	}
-	v, err := strconv.ParseFloat(string(m[1]), 64)
+func swapouts() (float64, error) {
+	out, err := exec.Command("vm_stat").Output()
 	if err != nil {
-		return 0, fmt.Errorf("parse swap used: %w", err)
+		return 0, fmt.Errorf("read vm_stat: %w", err)
 	}
-	switch string(m[2]) {
-	case "G":
-		v *= 1024
-	case "K":
-		v /= 1024
+	return parseSwapouts(out)
+}
+
+func parseSwapouts(out []byte) (float64, error) {
+	m := regexp.MustCompile(`(?mi)^Swapouts:\s+(\d+)`).FindSubmatch(out)
+	if m == nil {
+		return 0, fmt.Errorf("vm_stat has no Swapouts line")
 	}
-	return v, nil
+	return strconv.ParseFloat(string(m[1]), 64)
 }
 
 // worktreeCount reports how many git worktrees this repository has.

@@ -78,7 +78,7 @@ func TestBelowCapAllowsOrRefusesForTheRightReason(t *testing.T) {
 	// isolates the IN-FLIGHT cap. Without this it fails on any host that is
 	// genuinely paging -- which is a true reading, not a broken gate, and is
 	// exactly the state that killed the host on 2026-09-03.
-	lim.MaxSwapUsedMB = 1e9
+	lim.MaxSwapoutsPerSample = 1e9
 	lim.MaxWorktrees = 1e9
 	if err := l.Append(ledger.Record{ID: "a", State: ledger.Complete}); err != nil {
 		t.Fatal(err)
@@ -139,47 +139,27 @@ func TestBelowMemoryFloorRefuses(t *testing.T) {
 // refuses is the bug this replaced (vm.swapusage read as memory, refusing
 // 100% of dispatches); a guard that only passes is the bug that killed the
 // host on 2026-09-03. Neither direction alone is evidence.
-func TestSwapUsedParsesEveryUnitAndSwapDisabled(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		out  string
-		want float64
-	}{
-		{"megabytes, the host at the time it died", "total = 1024.00M  used = 627.19M  free = 396.81M  (encrypted)", 627.19},
-		{"gigabytes are converted, not truncated", "total = 4.00G  used = 2.50G  free = 1.50G", 2560},
-		{"kilobytes are converted", "total = 1024.00M  used = 512.00K  free = 1023.50M", 0.5},
-		{"swap disabled reads zero and that is TRUE, not broken", "total = 0.00M  used = 0.00M  free = 0.00M", 0},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseSwapUsed([]byte(tc.out))
-			if err != nil {
-				t.Fatalf("parse %q: %v", tc.out, err)
-			}
-			if got != tc.want {
-				t.Fatalf("got %v MB, want %v MB", got, tc.want)
-			}
-		})
+func TestSwapoutsParsedAndDeltaIsWhatMatters(t *testing.T) {
+	quiet := []byte("Mach Virtual Memory Statistics:\nSwapins:  6587.\nSwapouts:  49904.\n")
+	n, err := parseSwapouts(quiet)
+	if err != nil || n != 49904 {
+		t.Fatalf("parse: got %v %v, want 49904", n, err)
+	}
+	// The bug this replaced: a HIGH-WATER MARK reads as pressure forever. The
+	// host an hour after the outage had 619MB swap used, 52 percent free, and ZERO
+	// new swapouts -- healthy. A rate of 0 must pass.
+	if 0 >= Default().MaxSwapoutsPerSample {
+		t.Fatal("a host that is not paging must pass; gating on cumulative swap would refuse forever")
+	}
+	// And real paging must refuse.
+	if !(5 >= Default().MaxSwapoutsPerSample) {
+		t.Fatal("active paging must refuse")
 	}
 }
 
-func TestSwapThresholdRefusesOnlyAboveTheCeiling(t *testing.T) {
-	const ceiling = 512.0
-	// Below the ceiling a healthy host must PASS. Without this direction the
-	// gate could be hard-wired to refuse and still look green.
-	for _, mb := range []float64{0, 1, 511, 512} {
-		if mb > ceiling {
-			t.Fatalf("fixture %v is not below the ceiling", mb)
-		}
-	}
-	// Above it, the state that actually killed the host must REFUSE.
-	if !(627.19 > ceiling) {
-		t.Fatal("627MB of swap must exceed the 512MB ceiling -- this is the exact reading from the outage")
-	}
-}
-
-func TestSwapUnreadableRefusesRatherThanPasses(t *testing.T) {
-	if _, err := parseSwapUsed([]byte("garbage with no used field")); err == nil {
-		t.Fatal("an unreadable swap reading must error so Check() fails closed; returning 0 would read as a healthy host")
+func TestSwapoutsUnreadableRefusesRatherThanPasses(t *testing.T) {
+	if _, err := parseSwapouts([]byte("no such line")); err == nil {
+		t.Fatal("an unreadable paging counter must error so Check() fails closed")
 	}
 }
 
