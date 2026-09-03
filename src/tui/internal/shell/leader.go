@@ -9,6 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 
+	"github.com/jonhill90/agent-estate/src/tui/internal/finder"
 	"github.com/jonhill90/agent-estate/src/tui/internal/theme"
 )
 
@@ -68,6 +69,31 @@ var leaderBindings = []binding{
 	{"d", "dashboard", PaneDashboard},
 }
 
+// FinderKey opens the fuzzy jump list from the leader menu, as
+// <leader><space> does in LazyVim.
+const FinderKey = " "
+
+// routeItems is every navigable destination, as jump-list items.
+//
+// It reads the SAME nav tree the sidebar draws, so a route can never appear
+// in one and not the other -- a finder with its own hand-kept list is a
+// second source of truth that goes stale silently.
+func routeItems(m Model) []finder.Item {
+	var out []finder.Item
+	for _, n := range m.nav.Tree().Flatten() {
+		if n.IsGroupHeader() || n.Item.ID == "" {
+			continue
+		}
+		out = append(out, finder.Item{
+			Kind:   "route",
+			ID:     n.Item.ID,
+			Label:  n.Item.Label,
+			Detail: m.nav.Tree().GroupContaining(n.Item.ID),
+		})
+	}
+	return out
+}
+
 // leaderTakesKeys reports whether the leader may claim a keystroke in the
 // current pane. A pane with a text composer must keep its space bar: a leader
 // that eats spaces inside a message box is a worse bug than no leader at all.
@@ -97,6 +123,11 @@ func (m Model) resolveLeader(key string) (Model, tea.Cmd) {
 	m.leaderPending = false
 	m.leaderMenu = false
 	if key == "esc" || key == "ctrl+c" {
+		return m, nil
+	}
+	if key == FinderKey {
+		m.finder = finder.New(routeItems(m))
+		m.finderOpen = true
 		return m, nil
 	}
 	for _, b := range leaderBindings {
@@ -133,6 +164,7 @@ func (m Model) leaderView() string {
 		}
 		rows = append(rows, strings.Join(cells[i:end], "   "))
 	}
+	cells = append(cells, fmt.Sprintf("%s %s", keyStyle.Render("space"), "find…"))
 	title := dim.Render("leader — press a key, esc to cancel")
 	return lipgloss.JoinVertical(lipgloss.Left, append([]string{title}, rows...)...)
 }
@@ -147,4 +179,81 @@ func (m Model) leaderHint() string {
 		return "[space] …"
 	}
 	return "[space] menu"
+}
+
+// finderKey handles a keystroke while the jump list is open. It returns
+// handled=false for nothing, because the finder claims every key while it is
+// open: a fuzzy prompt that lets some keys fall through to the pane behind it
+// would fire actions the user cannot see.
+func (m Model) finderKey(msg tea.KeyMsg) (Model, tea.Cmd) {
+	switch msg.String() {
+	case "esc", "ctrl+c":
+		m.finderOpen = false
+		return m, nil
+	case "enter":
+		it, ok := m.finder.Choice()
+		m.finderOpen = false
+		if !ok {
+			// Nothing matched. Closing without jumping is the honest
+			// outcome; jumping "somewhere" would be worse than doing nothing.
+			return m, nil
+		}
+		if pane, known := routeToPane[it.ID]; known {
+			return m.syncPane(pane), nil
+		}
+		// A route with no pane is a stub, and the sidebar still moves so the
+		// user can see where they landed.
+		m.nav = m.nav.WithActive(it.ID)
+		m.active = PaneStub
+		return m, nil
+	case "up", "ctrl+p":
+		m.finder = m.finder.Move(-1)
+		return m, nil
+	case "down", "ctrl+n":
+		m.finder = m.finder.Move(1)
+		return m, nil
+	case "backspace":
+		m.finder = m.finder.Backspace()
+		return m, nil
+	}
+	if r := msg.Runes; len(r) == 1 {
+		m.finder = m.finder.Type(r[0])
+	}
+	return m, nil
+}
+
+// finderView renders the prompt and the ranked matches.
+func (m Model) finderView() string {
+	if !m.finderOpen {
+		return ""
+	}
+	dim := lipgloss.NewStyle().Foreground(m.theme.Color(theme.RoleNeutral))
+	sel := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Color(theme.RoleDirector))
+
+	rows := []string{dim.Render("find › ") + m.finder.Query + "▌"}
+	if len(m.finder.Matches) == 0 {
+		rows = append(rows, dim.Render("  no match"))
+		return lipgloss.JoinVertical(lipgloss.Left, rows...)
+	}
+	shown := m.finder.Matches
+	if len(shown) > m.finder.Height {
+		shown = shown[:m.finder.Height]
+	}
+	for i, mt := range shown {
+		line := "  " + mt.Item.Label
+		if mt.Item.Detail != "" {
+			line += dim.Render("  " + mt.Item.Detail)
+		}
+		if i == m.finder.Selected {
+			line = sel.Render("› " + mt.Item.Label)
+			if mt.Item.Detail != "" {
+				line += dim.Render("  " + mt.Item.Detail)
+			}
+		}
+		rows = append(rows, line)
+	}
+	if len(m.finder.Matches) > len(shown) {
+		rows = append(rows, dim.Render(fmt.Sprintf("  … %d more", len(m.finder.Matches)-len(shown))))
+	}
+	return lipgloss.JoinVertical(lipgloss.Left, rows...)
 }

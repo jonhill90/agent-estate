@@ -27,6 +27,7 @@ import (
 	"github.com/jonhill90/agent-estate/src/tui/internal/dashboard"
 	"github.com/jonhill90/agent-estate/src/tui/internal/estatus"
 	"github.com/jonhill90/agent-estate/src/tui/internal/external"
+	"github.com/jonhill90/agent-estate/src/tui/internal/finder"
 	"github.com/jonhill90/agent-estate/src/tui/internal/flow"
 	"github.com/jonhill90/agent-estate/src/tui/internal/gallery"
 	"github.com/jonhill90/agent-estate/src/tui/internal/knowledge"
@@ -368,6 +369,8 @@ type Model struct {
 	// test with no opinion on persistence (most of the pre-existing
 	// navigation tests in this package) is unaffected.
 	leaderPending bool
+	finderOpen    bool
+	finder        finder.Model
 	leaderMenu    bool
 	leaderMiss    string
 	leaderGen     int
@@ -660,6 +663,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab":
 			m.focus = toggleFocus(m.focus)
 			return m, nil
+		}
+		// The jump list claims every key while open: a fuzzy prompt that let
+		// some keys fall through would fire actions the user cannot see.
+		if m.finderOpen {
+			return m.finderKey(msg)
 		}
 		// Leader handling sits after the always-on keys and before pane
 		// routing, so a pending chord claims the next keystroke wherever the
@@ -1263,6 +1271,9 @@ func (m Model) View() string {
 	// render (View() runs far more often than a human clicks anything).
 	// The which-key menu sits between the body and the footer, so it covers
 	// no content and appears where the eye already is when reading bindings.
+	if find := m.finderView(); find != "" {
+		return m.zones.Scan(lipgloss.JoinVertical(lipgloss.Left, body, find, m.footer()))
+	}
 	if menu := m.leaderView(); menu != "" {
 		return m.zones.Scan(lipgloss.JoinVertical(lipgloss.Left, body, menu, m.footer()))
 	}
