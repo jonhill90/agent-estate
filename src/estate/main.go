@@ -130,8 +130,10 @@ func reviewerContract(id string, pr int) string {
 		"unparsable -- comply with both exactly:\n\n" +
 		"1. **Your PR comment** must contain a line reading exactly `Verdict: APPROVE` or " +
 		"`Verdict: REQUEST CHANGES`, plus `Review-Lane: " + id + "` and `Reviewed-SHA: <the sha you reviewed>` " +
-		"trailers. `Review-Lane:` must be `" + id + "` verbatim -- not `dispatch/" + id + "`, not any " +
-		"other label.\n" +
+		"trailers. State `Review-Lane:` as `" + id + "` -- the bare id, not `" + gate.DispatchBranchPrefix + id + "` " +
+		"or any other label. (The gate strips one leading `" + gate.DispatchBranchPrefix + "` before comparing, " +
+		"so the branch-prefixed form would still pass -- but the bare id is what's asked for here, and " +
+		"an invented label is not accepted at all.)\n" +
 		"2. **Your own final result text** -- what you return when you finish, not only the PR " +
 		"comment -- must ALSO contain a `Verdict: APPROVE` or `Verdict: REQUEST CHANGES` line. A " +
 		"prose summary such as \"Review posted: **APPROVE**\" does not parse, and the gate will " +

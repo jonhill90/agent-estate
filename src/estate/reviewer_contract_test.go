@@ -4,6 +4,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/jonhill90/agent-estate/estate/internal/gate"
 	"github.com/jonhill90/agent-estate/estate/internal/ledger"
 )
 
@@ -42,9 +43,19 @@ func TestRoleGrounding_ReviewerGetsContractWithInterpolatedValues(t *testing.T) 
 	}
 	// #949's second failure: Review-Lane: dispatch/938-1788417348 (branch-
 	// prefixed) and Review-Lane: 941-review-pr941reviewer (an invented
-	// label). The contract must forbid both explicitly.
-	if !strings.Contains(got, "not `dispatch/943-1788418133`") {
-		t.Errorf("reviewer grounding does not forbid the branch-prefixed form of the trailer:\n%s", got)
+	// label). The contract must name the bare id as what's requested.
+	// It must NOT claim the branch-prefixed form is refused -- internal/gate's
+	// normaliseLaneID has stripped exactly one leading dispatch/ prefix
+	// before comparing since #945, so that form is accepted, just not the
+	// requested style. Stating it as forbidden was #957's own bug; see
+	// TestReviewerContractAgreesWithGateAcceptance below, which fails if
+	// this claim and the gate's real behaviour ever drift apart again.
+	// It must go on to say that form is accepted, not refused -- checked
+	// as one sentence, not a whole-string scan for "will refuse", since
+	// the contract's second requirement legitimately uses "will refuse"
+	// about an unrelated failure (an unparsable Verdict: line).
+	if !strings.Contains(got, "not `dispatch/943-1788418133` or any other label. (The gate strips one leading `dispatch/` before comparing, so the branch-prefixed form would still pass") {
+		t.Errorf("reviewer grounding must state the branch-prefixed Review-Lane: form is accepted (not requested, not refused) by the gate:\n%s", got)
 	}
 
 	// It must not also carry the author's branch-discipline block --
@@ -71,5 +82,39 @@ func TestRoleGrounding_AuthorDoesNotGetReviewerContract(t *testing.T) {
 	}
 	if !strings.Contains(got, "dispatch/949-1788431203") {
 		t.Errorf("author grounding does not name its own worktree branch:\n%s", got)
+	}
+}
+
+// WHY THIS TEST EXISTS. agent-estate#957 shipped a reviewer contract
+// stating that a `dispatch/`-prefixed Review-Lane: trailer is refused,
+// when internal/gate's normaliseLaneID has stripped exactly one leading
+// `dispatch/` before comparing since #945 -- the gate accepts that form.
+// A contract confidently stating the wrong format is worse than none: a
+// reviewer who emits the prefixed form was being told it was wrong when
+// it wasn't. This test ties reviewerContract's claim to the real gate
+// behaviour it describes, via internal/gate's exported
+// DispatchBranchPrefix and AcceptsReviewLane, so it fails if the two
+// drift apart again -- either because reviewerContract starts claiming
+// refusal again, or because internal/gate is tightened to actually refuse
+// the prefixed form while the contract still says it "would still pass".
+func TestReviewerContractAgreesWithGateAcceptance(t *testing.T) {
+	const id = "943-1788418133"
+	prefixed := gate.DispatchBranchPrefix + id
+
+	if !gate.AcceptsReviewLane(prefixed, id) {
+		t.Fatalf("internal/gate no longer accepts a %q-prefixed Review-Lane: trailer for lane %q -- "+
+			"reviewerContract's claim that this form \"would still pass\" is now false and must be corrected", gate.DispatchBranchPrefix, id)
+	}
+
+	got := reviewerContract(id, 945)
+	if !strings.Contains(got, prefixed) {
+		t.Fatalf("reviewer contract does not mention the branch-prefixed trailer form %q at all:\n%s", prefixed, got)
+	}
+	// Checked as one sentence, not a whole-string scan for "will refuse":
+	// the contract's second requirement legitimately uses "will refuse"
+	// about an unrelated failure (an unparsable Verdict: line), and a
+	// substring match against the whole block would false-positive on it.
+	if !strings.Contains(got, "the branch-prefixed form would still pass") {
+		t.Errorf("reviewer contract no longer states that the branch-prefixed form is accepted by the gate, contradicting AcceptsReviewLane:\n%s", got)
 	}
 }
