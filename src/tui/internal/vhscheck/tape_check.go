@@ -427,6 +427,17 @@ func tapeCreatesTmpPath(tapeContent, path string) bool {
 // tmpFixtureRefPattern or tapeCreatesTmpPath to stop seeing it.
 var optionalTmpFixtureKeys = map[string]bool{
 	"-skill-invocations-cache=": true,
+	// AGENT_TUI_ESTATE_BIN=: pressure.tape (agent-estate#987) deliberately
+	// references two /tmp paths under this one key -- /tmp/fake-estate-ok,
+	// which it does create (a real `estate pressure` stand-in, for the
+	// Present/OK capture), and /tmp/estate-does-not-exist, which it must
+	// NOT create: that path's whole purpose is to exercise Home's
+	// Unreadable rendering for a missing `estate` binary (estatus.
+	// ReadPressure's fail-closed path). The check is keyed per-Key, not
+	// per-Path, so it cannot tell the two apart; flagging the key here
+	// exempts the deliberately-absent one without weakening the check for
+	// any other tape.
+	"AGENT_TUI_ESTATE_BIN=": true,
 }
 
 // MissingTmpFixtures returns every TmpFixtureRef in refs whose Path is not

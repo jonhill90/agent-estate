@@ -146,6 +146,10 @@ func main() {
 				"so it never has to hardcode a list. Defaults to $SUPERVISOR_REPOSITORIES.")
 		showCost = flag.Bool("cost", false, "start on the cost pane (agent-tui#4) instead of home -- [3] reaches "+
 			"it from any start (agent-tui#38). Reads ccusage, never reimplements its per-harness usage parse.")
+		estateBin = flag.String("estate-bin", envOr("AGENT_TUI_ESTATE_BIN", "estate"),
+			"estate binary to run `pressure` against for Home's own pressure reading (agent-estate#987). Point "+
+				"this at a binary that does not exist to exercise the unreadable path: Home must render "+
+				"\"UNREADABLE\", never a fabricated zero reading.")
 		ccusageBin = flag.String("ccusage-bin", envOr("AGENT_TUI_CCUSAGE_BIN", "npx"),
 			"binary to run for ccusage calls. Combined with -ccusage-args (default \"ccusage\"). Point this at a "+
 				"binary that does not exist to exercise the blindness path (agent-tui#4 acceptance item 2): the "+
@@ -634,8 +638,28 @@ func main() {
 	// never folded into estateTicks as a path -- agent-estate#935.
 	estateTicks, estateTicksErr := resolveTickLogPath(repoRootFromSource(tickLogSourceFile), *estateTickLog)
 
+	// pressureFetch runs `estate pressure` (buildPressureFetch,
+	// pressure.go) -- the daemon's own gate, never re-derived here
+	// (agent-estate#987; AGENTS.md's "second reader" prohibition). Always
+	// wired, unconditionally, the same as estateLedger/estateTicks above:
+	// a missing or broken `estate` binary renders as Pressure UNREADABLE
+	// on Home, not as an omitted section.
+	//
+	// Wired via WithEstatePressure, NOT composed into estateStatus's own
+	// closure below (that was agent-estate#994's fix-pass finding: a
+	// pressure fetch is a subprocess with a 15s timeout, and estateStatus
+	// used to be called synchronously inside View(), so a wedged `estate`
+	// binary froze the whole shell's input handling for up to 15s on every
+	// render that touched Home). shell.Model now runs this fetch itself,
+	// asynchronously, via Init/Update -- see WithEstatePressure's own doc
+	// comment.
+	pressureFetch := buildPressureFetch(*estateBin)
+
 	m := shell.New(railModel, boardModel, boardOK, boardUnavailable, costModel, galleryModel, flowModel, chatModel).
-		WithEstateStatus(func() estatus.Status { return estatus.ReadWithTickErr(estateLedger, estateTicks, estateTicksErr) }).
+		WithEstateStatus(func() estatus.Status {
+			return estatus.ReadWithTickErr(estateLedger, estateTicks, estateTicksErr)
+		}).
+		WithEstatePressure(pressureFetch).
 		WithAgents(agentsModel).
 		WithSkills(skillsModel).
 		WithMCPServers(mcpserversModel).

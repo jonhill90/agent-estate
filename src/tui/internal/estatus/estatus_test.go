@@ -1,8 +1,10 @@
 package estatus
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -354,5 +356,111 @@ func TestDispatchWorktree(t *testing.T) {
 				t.Errorf("Worktree() = (%q, %v), want (%q, %v)", path, ok, c.wantPath, c.wantOK)
 			}
 		})
+	}
+}
+
+// TestParsePressureLine pins ParsePressureLine against src/estate/main.go's
+// own printed line (its "pressure" case) verbatim, plus the shapes that
+// must fail rather than silently decode to zero.
+func TestParsePressureLine(t *testing.T) {
+	r, ok := ParsePressureLine("load 0.14/core  free 4396MB  inflight 3  weekly budget 94% left")
+	if !ok {
+		t.Fatal("a well-formed pressure line must parse")
+	}
+	want := PressureReading{LoadPerCore: 0.14, FreeMemMB: 4396, InFlight: 3, WeeklyRemaining: 94}
+	if !reflect.DeepEqual(r, want) {
+		t.Errorf("ParsePressureLine() = %+v, want %+v", r, want)
+	}
+
+	for _, bad := range []string{
+		"",
+		"within limits",
+		"load 0.14/core free 4396MB inflight 3", // missing weekly budget field
+		"garbage output from a binary of a totally different shape",
+	} {
+		if _, ok := ParsePressureLine(bad); ok {
+			t.Errorf("ParsePressureLine(%q) unexpectedly parsed; a malformed line must fail closed, not decode to a zero reading", bad)
+		}
+	}
+}
+
+// TestParsePressureReasons pins the stderr decode against the exact
+// "refuse: <reason>" shape src/estate/main.go's "pressure" case writes.
+func TestParsePressureReasons(t *testing.T) {
+	got := ParsePressureReasons("refuse: load 3.10 at or above limit 3.00\nrefuse: 6 lanes in flight, cap is 6\n")
+	want := []string{"load 3.10 at or above limit 3.00", "6 lanes in flight, cap is 6"}
+	if len(got) != len(want) {
+		t.Fatalf("ParsePressureReasons() = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("reason %d = %q, want %q", i, got[i], want[i])
+		}
+	}
+	if r := ParsePressureReasons(""); r != nil {
+		t.Errorf("ParsePressureReasons(\"\") = %v, want nil", r)
+	}
+}
+
+// TestReadPressureNilFetchLeavesUnconfigured is the fabrication guard this
+// whole design exists for: a Status built by any caller that never wired a
+// pressure source in (every existing caller before agent-estate#987) must never render
+// a Present, all-zero reading -- Lines() must omit the section entirely.
+func TestReadPressureNilFetchLeavesUnconfigured(t *testing.T) {
+	p := ReadPressure(nil)
+	if p.Configured {
+		t.Fatalf("ReadPressure(nil) = %+v, want Configured false", p)
+	}
+	s := Status{Pressure: p}
+	out := strings.Join(Lines(s), "\n")
+	if strings.Contains(out, "Pressure") {
+		t.Errorf("an unconfigured pressure source must not render a Pressure line at all; got:\n%s", out)
+	}
+}
+
+// TestReadPressurePresent and TestReadPressureUnreadable pin the two real
+// outcomes Home can show, and that they render distinct, honest text --
+// never a fabricated zero for the failure case.
+func TestReadPressurePresent(t *testing.T) {
+	fetch := func() (PressureReading, error) {
+		return PressureReading{LoadPerCore: 0.5, FreeMemMB: 1000, InFlight: 1, WeeklyRemaining: 80, OK: true}, nil
+	}
+	s := Status{Pressure: ReadPressure(fetch)}
+	out := strings.Join(Lines(s), "\n")
+	if !strings.Contains(out, "within limits") {
+		t.Errorf("a measured, OK reading must say so; got:\n%s", out)
+	}
+	if strings.Contains(out, "UNREADABLE") {
+		t.Errorf("a real reading must never render as UNREADABLE; got:\n%s", out)
+	}
+}
+
+func TestReadPressureRefusing(t *testing.T) {
+	fetch := func() (PressureReading, error) {
+		return PressureReading{LoadPerCore: 3.5, FreeMemMB: 100, InFlight: 6, WeeklyRemaining: 1, OK: false,
+			Reasons: []string{"load 3.50 at or above limit 3.00"}}, nil
+	}
+	s := Status{Pressure: ReadPressure(fetch)}
+	out := strings.Join(Lines(s), "\n")
+	if !strings.Contains(out, "REFUSING new work") {
+		t.Errorf("a measured refusal must say so distinctly from both OK and UNREADABLE; got:\n%s", out)
+	}
+	if !strings.Contains(out, "load 3.50 at or above limit 3.00") {
+		t.Errorf("a refusal's own reason must be shown, not swallowed; got:\n%s", out)
+	}
+}
+
+func TestReadPressureUnreadable(t *testing.T) {
+	fetch := func() (PressureReading, error) { return PressureReading{}, errors.New("exec: \"estate\": executable file not found in $PATH") }
+	s := Status{Pressure: ReadPressure(fetch)}
+	if s.Pressure.Avail != Unreadable {
+		t.Fatalf("Pressure.Avail = %v, want Unreadable", s.Pressure.Avail)
+	}
+	out := strings.Join(Lines(s), "\n")
+	if !strings.Contains(out, "Pressure: UNREADABLE -- this is not zero.") {
+		t.Errorf("a pressure fetch failure must render UNREADABLE, never a blank or zero reading; got:\n%s", out)
+	}
+	if strings.Contains(out, "0.00/core") {
+		t.Errorf("an unreadable pressure source must never render fabricated zero figures; got:\n%s", out)
 	}
 }
