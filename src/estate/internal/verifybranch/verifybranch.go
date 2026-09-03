@@ -78,6 +78,8 @@ func Verify(repoRoot, branch string, modules []string) (Result, error) {
 			// something to quietly skip.
 			res.Steps = append(res.Steps, Step{Module: mod, Cmd: "stat", Output: err.Error(), Err: err})
 			res.Failed = mod + " is not present on this branch"
+			cleanup(repoRoot, dir, base)
+			res.Worktree = ""
 			return res, nil
 		}
 		for _, c := range [][]string{
@@ -89,17 +91,29 @@ func Verify(repoRoot, branch string, modules []string) (Result, error) {
 			res.Steps = append(res.Steps, Step{Module: mod, Cmd: strings.Join(c, " "), Output: out, Err: err})
 			if err != nil {
 				res.Failed = mod + ": " + strings.Join(c, " ")
+				// The failing OUTPUT is the evidence and is captured above.
+				// Keeping the tree as well leaked one worktree per failed
+				// run, registered in .git/worktrees with nothing reaping it.
+				// An unbounded leak is worse than losing a directory whose
+				// contents are just the branch.
+				cleanup(repoRoot, dir, base)
+				res.Worktree = ""
 				return res, nil
 			}
 		}
 	}
 
-	// Clean up only on success. A failed verification leaves the worktree so
-	// the caller can inspect the tree the failure actually happened in.
-	run(repoRoot, "git", "worktree", "remove", "--force", dir)
-	os.RemoveAll(base)
+	cleanup(repoRoot, dir, base)
 	res.Worktree = ""
 	return res, nil
+}
+
+// cleanup removes the worktree and prunes registrations left behind by any
+// earlier run that died before cleaning up after itself.
+func cleanup(repoRoot, dir, base string) {
+	run(repoRoot, "git", "worktree", "remove", "--force", dir)
+	os.RemoveAll(base)
+	run(repoRoot, "git", "worktree", "prune")
 }
 
 func run(dir, name string, args ...string) (string, error) {

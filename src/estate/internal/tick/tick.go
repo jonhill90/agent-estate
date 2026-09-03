@@ -90,15 +90,17 @@ type Verdict struct {
 const Window = 3
 
 // Record appends one entry to the log at path, creating it if absent.
-func Record(path string, e Entry) error {
+//
+// resolves answers "does this token name something that exists?". Passing nil
+// checks the artifact's shape only, without resolution.
+func Record(path string, e Entry, resolves func(string) bool) error {
 	if e.PhaseItem == "" {
 		return errors.New("tick: phase_item is required -- a tick that cannot name what it advanced is the thing this record exists to catch")
 	}
 	// Refuse the dodge at the point it would be taken, not only when reading
 	// the record back. Nothing is written when this fires.
-	if e.Artifact != "" && !Locatable(e.Artifact) {
-		return fmt.Errorf("tick: %q names nothing a human can open -- an artifact must contain a path, a commit sha, an issue or PR number, or a URL. "+
-			"If this tick produced no artifact, omit it; saying so is a legitimate tick result", e.Artifact)
+	if err := Validate(e.Artifact, resolves); err != nil {
+		return err
 	}
 	line, err := json.Marshal(e)
 	if err != nil {
@@ -143,32 +145,95 @@ func IsPlaceholder(s string) bool {
 var (
 	shaRE   = regexp.MustCompile(`\b[0-9a-f]{7,40}\b`)
 	issueRE = regexp.MustCompile(`#\d+`)
-	pathRE  = regexp.MustCompile(`(^|[\s(])[\w.-]+/[\w./-]+`)
+	// A path token: either something containing a slash, or a bare filename
+	// with an extension (AGENTS.md, go.mod) -- the latter was wrongly refused
+	// when only slashes counted.
+	pathRE = regexp.MustCompile(`[\w.-]+(?:/[\w.-]+)+|[\w-]+\.[A-Za-z0-9]{1,8}`)
 )
 
-// Locatable reports whether s names something a reader could actually go and
-// open: a path, a commit sha, an issue or pull request number, or a URL.
-//
-// WHY A SYNTACTIC TEST AND NOT A JUDGEMENT. A placeholder list catches
-// "null" and "tbd", but an independent review defeated that immediately with
-// "working on it" and "still going" -- plausible prose that names no output.
-// No string inspection can tell a real accomplishment from a convincing
-// sentence about one. What it CAN tell is whether the text points at
-// something. "What a human can look at" means locatable, so that is the bar:
-// an artifact must contain a pointer, and prose alone is refused.
-//
-// This is deliberately loose about whether the target EXISTS -- that is the
-// caller's job, since only it knows the working directory. Here it is only
-// about shape.
-func Locatable(s string) bool {
-	s = strings.TrimSpace(s)
-	if s == "" || IsPlaceholder(s) {
-		return false
+// Candidates returns the tokens in s that could name something real: paths,
+// commit shas, and issue or PR numbers.
+func Candidates(s string) []string {
+	seen := map[string]bool{}
+	var out []string
+	add := func(t string) {
+		t = strings.Trim(t, ".,;:()[]\"'")
+		if t == "" || seen[t] {
+			return
+		}
+		seen[t] = true
+		out = append(out, t)
 	}
-	if strings.Contains(s, "://") {
+	for _, m := range pathRE.FindAllString(s, -1) {
+		add(m)
+	}
+	for _, m := range shaRE.FindAllString(s, -1) {
+		add(m)
+	}
+	for _, m := range issueRE.FindAllString(s, -1) {
+		add(m)
+	}
+	return out
+}
+
+// Validate decides whether an artifact names something a human can actually
+// open, using resolves to ask whether a token exists.
+//
+// WHY RESOLUTION AND NOT INSPECTION. Three string-inspection rules were tried
+// and an independent reviewer defeated each in turn: "any non-empty string"
+// fell to "null"; a placeholder list fell to "working on it"; a
+// looks-like-a-pointer regex fell to "still going, read/write path unclear".
+// Prose can always be made to LOOK like a pointer. It cannot be made to
+// resolve. So the bar is that something in the artifact must actually exist.
+//
+// A URL is accepted without resolution: it is checkable by the human reading
+// the log, and this package does not make network calls.
+func Validate(artifact string, resolves func(string) bool) error {
+	a := strings.TrimSpace(artifact)
+	if a == "" {
+		return nil // absent is legitimate; the caller records null
+	}
+	if isPaddedPlaceholder(a) {
+		return fmt.Errorf("tick: %q is a way of writing \"no artifact\" -- omit it instead", artifact)
+	}
+	if strings.Contains(a, "://") {
+		return nil
+	}
+	cands := Candidates(a)
+	if len(cands) == 0 {
+		return fmt.Errorf("tick: %q names nothing a human can open -- an artifact must contain a path, a commit sha, an issue or PR number, or a URL. "+
+			"If this tick produced no artifact, omit it; saying so is a legitimate tick result", artifact)
+	}
+	if resolves == nil {
+		return nil
+	}
+	for _, c := range cands {
+		if resolves(c) {
+			return nil
+		}
+	}
+	return fmt.Errorf("tick: nothing in %q resolves to anything that exists (looked at: %s) -- "+
+		"an artifact must name something already there, not something described", artifact, strings.Join(cands, ", "))
+}
+
+// isPaddedPlaceholder catches a placeholder with words stapled on, which
+// defeated the exact-match list ("n/a for now", "TBD later").
+func isPaddedPlaceholder(s string) bool {
+	low := strings.ToLower(strings.TrimSpace(s))
+	if placeholders[low] {
 		return true
 	}
-	return issueRE.MatchString(s) || pathRE.MatchString(s) || shaRE.MatchString(s)
+	for p := range placeholders {
+		if low == p || strings.HasPrefix(low, p+" ") {
+			return true
+		}
+	}
+	for _, lead := range []string{"none", "nothing", "no artifact", "not yet", "still"} {
+		if strings.HasPrefix(low, lead+" ") {
+			return true
+		}
+	}
+	return false
 }
 
 // hasArtifact reports whether this tick produced something a human can look
@@ -179,7 +244,7 @@ func (p parsed) hasArtifact() bool {
 		return false
 	}
 	a := strings.TrimSpace(*p.Artifact)
-	return a != "" && !IsPlaceholder(a)
+	return a != "" && !isPaddedPlaceholder(a)
 }
 
 // Check reads the log and reports whether the last Window entries share a

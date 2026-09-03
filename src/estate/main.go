@@ -171,7 +171,19 @@ func main() {
 				SrcHead:   strings.TrimSpace(string(head)),
 				Artifact:  artifact,
 			}
-			if err := tick.Record(path, e); err != nil {
+			// Resolution, not inspection: an artifact must name something
+			// that actually exists. Three syntactic rules were tried and each
+			// was defeated by prose; see internal/tick.Validate.
+			resolves := func(tok string) bool {
+				if strings.HasPrefix(tok, "#") {
+					return true // an issue or PR number is checkable by a human
+				}
+				if _, err := os.Stat(tok); err == nil {
+					return true
+				}
+				return exec.Command("git", "cat-file", "-e", tok+"^{object}").Run() == nil
+			}
+			if err := tick.Record(path, e, resolves); err != nil {
 				fmt.Fprintln(os.Stderr, "estate:", err)
 				os.Exit(2)
 			}

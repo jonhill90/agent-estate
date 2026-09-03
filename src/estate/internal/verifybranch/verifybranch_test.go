@@ -86,10 +86,18 @@ func TestVerifyCatchesABranchThatOnlyBuildsInTheAuthorsTree(t *testing.T) {
 	if !strings.Contains(lastOutput(res), "elsewhere") {
 		t.Errorf("the failure should name the missing import; got:\n%s", lastOutput(res))
 	}
-	if res.Worktree == "" {
-		t.Error("a failed verification must keep its worktree so the caller can look")
-	} else {
-		os.RemoveAll(filepath.Dir(res.Worktree))
+	// A failed run must NOT leave a worktree behind: one per failure, with
+	// nothing reaping them, is an unbounded leak. The captured output is the
+	// evidence.
+	if res.Worktree != "" {
+		t.Errorf("a failed verification leaked a worktree at %s", res.Worktree)
+	}
+	out, err := exec.Command("git", "-C", root, "worktree", "list").Output()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := strings.Count(string(out), "\n"); n > 1 {
+		t.Errorf("worktrees left registered after a failed run:\n%s", out)
 	}
 }
 
@@ -103,7 +111,7 @@ func TestAbsentModuleIsAFailureNotASkip(t *testing.T) {
 		t.Fatal("naming a module that is not on the branch must fail, not pass")
 	}
 	if res.Worktree != "" {
-		os.RemoveAll(filepath.Dir(res.Worktree))
+		t.Errorf("an absent-module failure leaked a worktree at %s", res.Worktree)
 	}
 }
 

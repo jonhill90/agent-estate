@@ -124,10 +124,10 @@ func TestRecordAppendsOneParseableLine(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "tick-log.jsonl")
 	at := time.Date(2026, 9, 2, 11, 0, 0, 0, time.UTC)
 
-	if err := Record(p, Entry{At: at, PhaseItem: "phase-0", SrcHead: "aaa"}); err != nil {
+	if err := Record(p, Entry{At: at, PhaseItem: "phase-0", SrcHead: "aaa"}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if err := Record(p, Entry{At: at, PhaseItem: "phase-0", SrcHead: "aaa", Artifact: "docs/x.md"}); err != nil {
+	if err := Record(p, Entry{At: at, PhaseItem: "phase-0", SrcHead: "aaa", Artifact: "docs/x.md"}, nil); err != nil {
 		t.Fatal(err)
 	}
 
@@ -157,7 +157,7 @@ func TestRecordThenCheckRoundTrips(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "tick-log.jsonl")
 	at := time.Date(2026, 9, 2, 11, 0, 0, 0, time.UTC)
 	for i := 0; i < 3; i++ {
-		if err := Record(p, Entry{At: at.Add(time.Duration(i) * time.Minute), PhaseItem: "phase-0", SrcHead: "aaa"}); err != nil {
+		if err := Record(p, Entry{At: at.Add(time.Duration(i) * time.Minute), PhaseItem: "phase-0", SrcHead: "aaa"}, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -283,7 +283,7 @@ func TestDistinctArtifactsAreNotAStall(t *testing.T) {
 // available at the point it would be taken.
 func TestRecordRefusesAPlaceholderArtifact(t *testing.T) {
 	p := filepath.Join(t.TempDir(), "t.jsonl")
-	if err := Record(p, Entry{At: time.Now(), PhaseItem: "p", SrcHead: "a", Artifact: "null"}); err == nil {
+	if err := Record(p, Entry{At: time.Now(), PhaseItem: "p", SrcHead: "a", Artifact: "null"}, nil); err == nil {
 		t.Fatal("Record must refuse an artifact that is absence spelled as presence")
 	}
 	if _, err := os.Stat(p); err == nil {
@@ -291,36 +291,67 @@ func TestRecordRefusesAPlaceholderArtifact(t *testing.T) {
 	}
 }
 
-// A placeholder list is not enough: an independent review defeated it with
-// "working on it" and "still going" -- plausible prose naming no output. An
-// artifact must point at something a reader can open.
-func TestArtifactMustNameSomethingLocatable(t *testing.T) {
+// The old syntactic Locatable() test lived here. It is superseded by
+// TestArtifactMustResolveToSomethingReal below: a reviewer defeated the
+// syntactic rule with prose containing a slash, so the rule was replaced with
+// resolution rather than patched. Recorded rather than silently deleted --
+// the check got stronger, and the test asserting the weaker rule went with it.
+
+// Third attempt at "is this artifact real?". The first two were string
+// inspection and an independent reviewer defeated both:
+//
+//	"any non-empty string"  -> defeated by "null"
+//	placeholder list        -> defeated by "working on it"
+//	locatable-looking text  -> defeated by "read/write path unclear"
+//
+// Prose can always be made to look like a pointer. It cannot be made to
+// RESOLVE. So the artifact must name something that actually exists.
+func TestArtifactMustResolveToSomethingReal(t *testing.T) {
+	exists := map[string]bool{
+		"docs/phase-plan.md": true,
+		"AGENTS.md":          true,
+		"go.mod":             true,
+		"04793cd":            true,
+	}
+	resolves := func(tok string) bool { return exists[tok] }
+
 	refused := []string{
-		"working on it", "still going", "made progress", "done",
-		"fixed the bug", "improved things", "see above",
+		// The bypasses found in review. Each looks like a pointer and
+		// resolves to nothing.
+		"still going, read/write path unclear",
+		"working on it, pass/fail undecided",
+		"either/or, haven't picked yet",
+		"n/a for now",
+		"null",
+		"made progress on src/estate/nonexistent.go",
+		"see docs/does-not-exist.md",
 	}
 	for _, s := range refused {
-		if Locatable(s) {
-			t.Errorf("%q names nothing openable; must not count as an artifact", s)
-		}
-		p := filepath.Join(t.TempDir(), "t.jsonl")
-		if err := Record(p, Entry{At: time.Now(), PhaseItem: "p", SrcHead: "a", Artifact: s}); err == nil {
-			t.Errorf("Record must refuse artifact %q", s)
+		if err := Validate(s, resolves); err == nil {
+			t.Errorf("artifact %q resolves to nothing and must be refused", s)
 		}
 	}
+
 	accepted := []string{
-		"docs/phase-plan.md", "src/estate/internal/tick/tick.go",
-		"PR #913", "merged #907 to main (04793cd)", "04793cd",
-		"https://github.com/jonhill90/agent-estate/pull/913",
-		"docs/tick-log.jsonl + green estate-ci",
+		"docs/phase-plan.md",
+		"AGENTS.md",                             // root-level file, wrongly refused before
+		"go.mod",                                // ditto
+		"merged #907 to main (04793cd)",         // sha embedded in prose is fine: it resolves
+		"fixed the thing in docs/phase-plan.md", // prose is fine when something in it resolves
+		"https://github.com/jonhill90/x/pull/1", // a URL is checkable by a human
 	}
 	for _, s := range accepted {
-		if !Locatable(s) {
-			t.Errorf("%q points at something openable and must be accepted", s)
+		if err := Validate(s, resolves); err != nil {
+			t.Errorf("artifact %q names something real and must be accepted: %v", s, err)
 		}
-		p := filepath.Join(t.TempDir(), "t.jsonl")
-		if err := Record(p, Entry{At: time.Now(), PhaseItem: "p", SrcHead: "a", Artifact: s}); err != nil {
-			t.Errorf("Record refused a real artifact %q: %v", s, err)
+	}
+}
+
+// A padded placeholder defeated the exact-match list. It must not.
+func TestPaddedPlaceholdersAreStillAbsence(t *testing.T) {
+	for _, s := range []string{"n/a for now", "TBD later", "none yet", "nothing to show"} {
+		if err := Validate(s, func(string) bool { return false }); err == nil {
+			t.Errorf("%q is a padded placeholder and must be refused", s)
 		}
 	}
 }
