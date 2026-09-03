@@ -274,14 +274,18 @@ that produced it.
 | Quota floor | new work, when the subscription quota is below the floor | `quota.sh` (`MIN_REMAINING`), watched by `quota-watch.sh` |
 | Supervisor lease | a second Director loop starting while one is alive | `core.py` (`Ledger.take_supervisor_lease` / `release_supervisor_lease` / `reap_stale_supervisor_lease`), exposed via `cli.py`'s `take-supervisor-lease` / `supervisor-lease` / `release-supervisor-lease` / `reap-supervisor-lease` subcommands; owner is keyed on `#{pane_pid}` from `loop-tick.md`, never `$$` |
 
-Other gates worth knowing exist, not listed above because they fire less
-often: `completion-gate.sh` (won't advance a task group until every member
-left evidence), `fixpass-evidence-gate.sh` / `fixpass_evidence_gate.py` (a fix
-pass must paste proof, not a claim), `ui-evidence-gate.sh` /
-`ui-evidence-report.sh` (a UI PR needs a captured frame), `gh-comment-gate.sh`
-(only `post-verdict.sh` may post a Verdict/Review-Lane comment),
-`mark-pr-external.sh` (gated: record a PR as authored outside the lane
-system).
+**These gates no longer exist.** `completion-gate.sh` (wouldn't advance a task
+group until every member left evidence), `fixpass-evidence-gate.sh` /
+`fixpass_evidence_gate.py` (a fix pass must paste proof, not a claim),
+`ui-evidence-gate.sh` / `ui-evidence-report.sh` (a UI PR needs a captured
+frame), `gh-comment-gate.sh` and `mark-pr-external.sh` all went to
+`reference/` with the shell supervisor; `git ls-files scripts/supervisor`
+returns 0. The workflows that ran them were retired on 2026-09-02 because
+they failed on every PR regardless of its contents, which is not enforcement.
+
+The **rules** are worth keeping and are recorded, with their status, in
+[`docs/ci-rules-retired.md`](docs/ci-rules-retired.md). Recovering one means
+reimplementing it in Go. Do not cite any of them as enforced.
 
 ### Invariants — do not break these without an explicit decision
 
@@ -402,11 +406,14 @@ measured against. See
   must go through a dispatched lane with a ledger-resolvable author, no
   exception path today, the same posture the CI gate and author-exclusion
   guard above already take.
-- A UI PR (touching `scripts/supervisor/laneview/`) needs a captured frame,
-  not a description, as evidence — `look.py capture`/`look.py frames`. This
-  is enforced, not just written down here: `.github/workflows/ui-evidence.yml`
-  runs `ui-evidence-gate.sh` on every PR and fails one that touches that path
-  without a `<!-- ui-evidence:v1 -->` marker in the body or a comment.
+- A UI PR needs a captured frame, not a description, as evidence. **This is a
+  convention now, not a gate.** `.github/workflows/ui-evidence.yml` and
+  `ui-evidence-gate.sh` were retired on 2026-09-02 (see
+  [`docs/ci-rules-retired.md`](docs/ci-rules-retired.md)); nothing fails a PR
+  that omits the frame. The path it named, `scripts/supervisor/laneview/`, no
+  longer exists either — the viewer is `src/tui`, and
+  `src/tui/internal/shell/frame_capture_test.go` is how a frame is captured
+  and regenerated today. Reimplementing the gate in Go is open work.
 
 ---
 *Last checked against the tree at `2e810dc` (2026-08-29). If `git log
