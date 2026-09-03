@@ -259,6 +259,18 @@ func main() {
 				fmt.Fprintln(os.Stderr, "estate: "+err.Error())
 				os.Exit(2)
 			}
+			// Re-apply the writer's rules at read time. Record only guards
+			// entries written through this CLI, and entries arrive by other
+			// routes -- a hand-edit, a merge, or a probe run without
+			// ESTATE_TICK_LOG, which has already landed one line in the
+			// production log.
+			if known, err := tick.KnownPhases("docs/phase-plan.md"); err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			} else if err := tick.AuditWindow(path, known); err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
 			v, err := tick.Check(path)
 			if err != nil {
 				// Could not measure. Never clean.
@@ -271,6 +283,13 @@ func main() {
 				os.Exit(1)
 			}
 			fmt.Println("moving: " + v.Reason)
+			// Say what this verdict does NOT establish. The artifact field is
+			// written by the agent being measured; five successive rules to
+			// validate it were each defeated by an independent reviewer. What
+			// is checked on read is shape and phase membership, not that the
+			// tick caused the thing it names.
+			fmt.Println("note: artifacts are self-reported. This confirms they name something " +
+				"openable and sit under a real phase -- not that this loop produced them.")
 
 		default:
 			usage()

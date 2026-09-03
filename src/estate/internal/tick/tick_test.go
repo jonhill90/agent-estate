@@ -460,3 +460,56 @@ func TestUnreadablePlanRefusesRatherThanAllowingAnything(t *testing.T) {
 		t.Fatal("a plan naming no phases must be an error, not a permissive empty list")
 	}
 }
+
+// Round five: every write-time protection was bypassed at read time. Check
+// only applied the shape test, so hand-appended, well-formed junk cleared a
+// stall -- and this repo's own log already proves non-CLI writes happen.
+func TestForgedEntriesDoNotClearAStall(t *testing.T) {
+	forged := write(t,
+		`{"at":"2026-09-03T02:00:00Z","phase_item":"phase-0","src_head":"x","artifact":"banana-not-real-1"}`,
+		`{"at":"2026-09-03T02:03:00Z","phase_item":"phase-0","src_head":"x","artifact":"banana-not-real-2"}`,
+		`{"at":"2026-09-03T02:06:00Z","phase_item":"phase-0","src_head":"x","artifact":"banana-not-real-3"}`)
+	v, err := Check(forged)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !v.Stalled {
+		t.Fatalf("artifacts the writer would refuse must not clear a stall on read: %s", v.Reason)
+	}
+}
+
+// An entry naming a phase the plan does not have, inside the window the
+// verdict is computed from, is refused rather than counted.
+func TestAuditWindowRefusesAnUnknownPhaseInTheWindow(t *testing.T) {
+	known := []string{"phase-0", "phase-1"}
+	good := write(t,
+		`{"at":"2026-09-03T02:00:00Z","phase_item":"phase-0","src_head":"x","artifact":"docs/a.md"}`,
+		`{"at":"2026-09-03T02:03:00Z","phase_item":"phase-1","src_head":"x","artifact":"docs/b.md"}`,
+		`{"at":"2026-09-03T02:06:00Z","phase_item":"phase-0","src_head":"x","artifact":"docs/c.md"}`)
+	if err := AuditWindow(good, known); err != nil {
+		t.Errorf("a window of real phases must pass: %v", err)
+	}
+
+	forged := write(t,
+		`{"at":"2026-09-03T02:00:00Z","phase_item":"phase-0","src_head":"x","artifact":"docs/a.md"}`,
+		`{"at":"2026-09-03T02:03:00Z","phase_item":"phase-0","src_head":"x","artifact":"docs/b.md"}`,
+		`{"at":"2026-09-03T02:06:00Z","phase_item":"anything-i-want","src_head":"x","artifact":"docs/c.md"}`)
+	if err := AuditWindow(forged, known); err == nil {
+		t.Fatal("a phase the plan does not name, inside the window, must be refused")
+	}
+
+	// History outside the window is preserved, not refused: the real log
+	// deliberately keeps one polluted line.
+	historic := write(t,
+		`{"at":"2026-09-03T01:00:00Z","phase_item":"ph","src_head":"x","artifact":"AGENTS.md"}`,
+		`{"at":"2026-09-03T02:00:00Z","phase_item":"phase-0","src_head":"x","artifact":"docs/a.md"}`,
+		`{"at":"2026-09-03T02:03:00Z","phase_item":"phase-0","src_head":"x","artifact":"docs/b.md"}`,
+		`{"at":"2026-09-03T02:06:00Z","phase_item":"phase-1","src_head":"x","artifact":"docs/c.md"}`)
+	if err := AuditWindow(historic, known); err != nil {
+		t.Errorf("pollution outside the window is history, not a reason to wedge the loop: %v", err)
+	}
+	// A missing log is not a tampering error.
+	if err := AuditWindow(filepath.Join(t.TempDir(), "none.jsonl"), known); err != nil {
+		t.Errorf("a missing log is not an audit failure: %v", err)
+	}
+}

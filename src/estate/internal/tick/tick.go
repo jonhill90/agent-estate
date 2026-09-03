@@ -260,12 +260,31 @@ func isPaddedPlaceholder(s string) bool {
 // hasArtifact reports whether this tick produced something a human can look
 // at. A null artifact, an empty-string artifact and a placeholder are the
 // same absence.
+// hasArtifact reports whether this tick produced something a human can look
+// at.
+//
+// It applies the SAME shape rule the writer applies, because Record's
+// validation only protects entries written through the CLI, and entries
+// arrive by other routes -- a hand-edit, a merge, or a probe run without
+// ESTATE_TICK_LOG, which has already put one line into the production log.
+// An entry naming something no reader could open is absence however it got
+// here.
+//
+// Recency is NOT re-checked here: it needs a per-entry resolver and would
+// mean git and network calls on every read. That is a real limit and it is
+// stated in Check's own output.
 func (p parsed) hasArtifact() bool {
 	if p.Artifact == nil {
 		return false
 	}
 	a := strings.TrimSpace(*p.Artifact)
-	return a != "" && !isPaddedPlaceholder(a)
+	if a == "" || isPaddedPlaceholder(a) {
+		return false
+	}
+	if strings.Contains(a, "://") {
+		return true
+	}
+	return len(Candidates(a)) > 0
 }
 
 // Check reads the log and reports whether the last Window entries share a
@@ -521,4 +540,52 @@ func CheckPhaseItem(item string, known []string) error {
 	return fmt.Errorf("tick: %q is not a phase in the plan (it names: %s) -- "+
 		"if this work is real, give it a phase there rather than a label here",
 		item, strings.Join(known, ", "))
+}
+
+// AuditWindow refuses when an entry in the window the stop condition reads
+// names a phase the plan does not have.
+//
+// WHY THE WINDOW AND NOT THE WHOLE LOG. The log is append-only history and
+// already contains one polluted line -- a probe written before phase items
+// were checked. Refusing on history would wedge the loop over a line that is
+// deliberately preserved. The last Window entries are what the verdict is
+// computed from, so those are what must be well-formed.
+func AuditWindow(path string, known []string) error {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("tick: cannot audit %s: %w", path, err)
+	}
+	defer f.Close()
+
+	var items []string
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for sc.Scan() {
+		t := strings.TrimSpace(sc.Text())
+		if t == "" {
+			continue
+		}
+		var e struct {
+			PhaseItem string `json:"phase_item"`
+		}
+		if json.Unmarshal([]byte(t), &e) != nil {
+			return fmt.Errorf("tick: %s holds an unreadable record, so the verdict cannot be computed", path)
+		}
+		items = append(items, e.PhaseItem)
+	}
+	if err := sc.Err(); err != nil {
+		return err
+	}
+	if len(items) > Window {
+		items = items[len(items)-Window:]
+	}
+	for _, it := range items {
+		if err := CheckPhaseItem(it, known); err != nil {
+			return fmt.Errorf("tick: the last %d records include one the writer would have refused: %w", Window, err)
+		}
+	}
+	return nil
 }
