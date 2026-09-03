@@ -245,10 +245,10 @@ func TestClickingGalleryInFooterStillWorks(t *testing.T) {
 	m, _ = m.resize(tea.WindowSizeMsg{Width: 160, Height: 40})
 	_ = m.View()
 
-	x, y := locate(t, m, "[f4]gallery")
+	x, y := locate(t, m, "[4]gallery")
 	next, handled := clickAt(t, m, x+2, y)
 	if !handled {
-		t.Fatalf("click at (%d,%d) on [f4]gallery was not handled", x+2, y)
+		t.Fatalf("click at (%d,%d) on [4]gallery was not handled", x+2, y)
 	}
 	if next.active != PaneGallery {
 		t.Fatalf("after clicking gallery want PaneGallery, got %v", next.active)

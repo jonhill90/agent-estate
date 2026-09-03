@@ -93,7 +93,7 @@ variants trading boxes-vs-rules, density, and grouping. A card's column is
 always recomputed fresh from GitHub + the ledger, never stored — this board
 is a projection, not a fourth data store.
 
-**Status:** shipped as a pane inside the one persistent shell (`[f2]`,
+**Status:** shipped as a pane inside the one persistent shell (`[2]`,
 agent-tui#38/agent-tui#43), composed with the rail rather than a separate program.
 Navigating to it with no `-ledger` configured currently renders an
 "unavailable" message rather than degrading further or explaining the fix
@@ -114,7 +114,7 @@ explicit "unknown" rendering rather than a fabricated zero when a figure
 can't be determined (`internal/cost.Figure.Known`) — the panel has been
 bitten by silent-zero blindness before and is built not to repeat it.
 
-**Status:** shipped as a pane inside the one persistent shell (`[f3]`),
+**Status:** shipped as a pane inside the one persistent shell (`[3]`),
 with its compact form also composed inside the rail (`cost.RenderCompact`).
 Its "unknown" quota fallback is honest, but it does not yet read
 `scripts/supervisor/quota.sh` — agent-tui#49, see `docs/SPEC.md`'s "Known
@@ -136,7 +136,7 @@ judged all five original candidates live against a running rail, not the
 gallery in isolation, and the other three were deleted outright rather than
 merely deprioritised.
 
-**Status:** shipped as a pane inside the one persistent shell (`[f4]`); the
+**Status:** shipped as a pane inside the one persistent shell (`[4]`); the
 two kept glyph sets are live in the rail today.
 
 ### Chat with threads, live
@@ -148,7 +148,7 @@ any kind. So "watch the agents talk" can only honestly mean every live
 session's transcript rendered together, which requires an application shell
 capable of showing more than one thing at once.
 
-**Status:** shipped as a pane inside the shell (`[f6]`, agent-tui#20) —
+**Status:** shipped as a pane inside the shell (`[6]`, agent-tui#20) —
 `chat.Source`, a fixture implementation (`chat.FixtureSource`), and two
 layouts (thread list + transcript, with a synthetic unified-feed thread;
 multi-pane tail with focus). Scrollable, not clipped: the thread list and

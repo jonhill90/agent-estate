@@ -44,7 +44,7 @@ import (
 // gh, no ledger -- the same "construct from fakes, never a subprocess"
 // discipline every other package's tests in this repo already follow (see
 // AGENTS.md's Adapter discipline section). boardOK true with one card is
-// what lets TestF2NavigatesToBoardPane assert on real board content rather
+// what lets TestDigit2NavigatesToBoardPane assert on real board content rather
 // than only the unavailable placeholder.
 func testModel() Model {
 	r := rail.New(func() ([]lane.Lane, error) { return nil, nil })
@@ -155,50 +155,50 @@ func run(t *testing.T, m Model) *teatest.TestModel {
 // agent-tui#38 acceptance item 1, "no-flag launch opens the app."
 func TestNoFlagOpensHomePaneWithRailVisible(t *testing.T) {
 	tm := run(t, testModel())
-	out := waitFor(t, tm, "[f2] board")
+	out := waitFor(t, tm, "[2] board")
 	if !bytes.Contains(out, []byte("[tab] focus:rail")) {
 		t.Fatalf("footer missing on initial frame:\n%s", out)
 	}
 }
 
-// TestF2NavigatesToBoardPane presses f2 against a real running Program and
+// TestDigit2NavigatesToBoardPane presses f2 against a real running Program and
 // asserts the board pane's own content actually replaces the home pane's
 // -- not that the key was accepted, that the VIEW changed to prove it.
-func TestF2NavigatesToBoardPane(t *testing.T) {
+func TestDigit2NavigatesToBoardPane(t *testing.T) {
 	tm := run(t, testModel())
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[2] board")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF2})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
 	waitFor(t, tm, "#7 ")
 }
 
-// TestF3NavigatesToCostPane is TestF2NavigatesToBoardPane's sibling for
+// TestDigit3NavigatesToCostPane is TestDigit2NavigatesToBoardPane's sibling for
 // the cost pane -- cost.Model.View's own titleStyle line ("cost") is the
 // marker, same as board's card-number marker above.
-func TestF3NavigatesToCostPane(t *testing.T) {
+func TestDigit3NavigatesToCostPane(t *testing.T) {
 	tm := run(t, testModel())
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[2] board")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF3})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'3'}})
 	waitFor(t, tm, "cost")
 }
 
-// TestF4NavigatesToGalleryPane is the same drive for the gallery pane.
-func TestF4NavigatesToGalleryPane(t *testing.T) {
+// TestDigit4NavigatesToGalleryPane is the same drive for the gallery pane.
+func TestDigit4NavigatesToGalleryPane(t *testing.T) {
 	tm := run(t, testModel())
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[2] board")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF4})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
 	waitFor(t, tm, "glyph gallery")
 }
 
-// TestF5NavigatesToFlowPane is TestF2NavigatesToBoardPane's sibling for the
+// TestDigit5NavigatesToFlowPane is TestDigit2NavigatesToBoardPane's sibling for the
 // flow pane (agent-tui#64) -- flow's own title line is the marker.
-func TestF5NavigatesToFlowPane(t *testing.T) {
+func TestDigit5NavigatesToFlowPane(t *testing.T) {
 	tm := run(t, testModel())
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[2] board")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF5})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}})
 	waitFor(t, tm, "flow -- work moving")
 }
 
@@ -216,23 +216,23 @@ func TestFlowUnavailableRendersInPlaceOfFlow(t *testing.T) {
 	m := New(r, b, false, "no -ledger configured", c, g, fl, ch)
 
 	tm := run(t, m)
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[2] board")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF5})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'5'}})
 	waitFor(t, tm, "board unavailable")
 }
 
-// TestF6NavigatesToChatPane is the same drive for the chat pane
+// TestDigit6NavigatesToChatPane is the same drive for the chat pane
 // (agent-tui#20) -- chat.Model.View's own title line ("chat") plus its
 // fixture thread title is the marker, same shape as board/cost/gallery's
-// own navigation tests above. Chat is [f6], not [f5]: agent-tui#68 (flow,
-// agent-tui#64) landed on main first and already claimed [f5] -- see
+// own navigation tests above. Chat is [6], not [5]: agent-tui#68 (flow,
+// agent-tui#64) landed on main first and already claimed [5] -- see
 // this rebase's own commit message for the conflict this resolves.
-func TestF6NavigatesToChatPane(t *testing.T) {
+func TestDigit6NavigatesToChatPane(t *testing.T) {
 	tm := run(t, testModel())
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[2] board")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF6})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'6'}})
 	waitFor(t, tm, "lane/20-chat-threads")
 }
 
@@ -241,17 +241,17 @@ func TestF6NavigatesToChatPane(t *testing.T) {
 // pressed f1 to prove the way back to home works too.
 func TestF1ReturnsToHomePane(t *testing.T) {
 	// homeMarker is homeView's own line, not the footer's -- the footer's
-	// "[f2] board" is present on EVERY pane, so it cannot tell "we are on
+	// "[2] board" is present on EVERY pane, so it cannot tell "we are on
 	// home" apart from "we are on gallery with the footer still showing".
 	const homeMarker = "[tab] move focus into the sidebar"
 
 	tm := run(t, testModel())
 	waitFor(t, tm, homeMarker)
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF4})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
 	waitFor(t, tm, "glyph gallery")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF1})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'1'}})
 	waitFor(t, tm, homeMarker)
 }
 
@@ -278,9 +278,9 @@ func TestTabTogglesFocusBetweenRailAndContent(t *testing.T) {
 // including quit).
 func TestCtrlCQuitsFromAnyPane(t *testing.T) {
 	tm := run(t, testModel())
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[2] board")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF4})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'4'}})
 	waitFor(t, tm, "glyph gallery")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
@@ -292,7 +292,7 @@ func TestCtrlCQuitsFromAnyPane(t *testing.T) {
 // terminates, exactly like ctrl+c does.
 func TestQQuitsFromHomePane(t *testing.T) {
 	tm := run(t, testModel())
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[2] board")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second))
@@ -312,9 +312,9 @@ func TestBoardUnavailableRendersInPlaceOfBoard(t *testing.T) {
 	m := New(r, b, false, "no -ledger configured", c, g, fl, ch)
 
 	tm := run(t, m)
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[2] board")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF2})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'2'}})
 	waitFor(t, tm, "board unavailable")
 }
 

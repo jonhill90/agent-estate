@@ -30,7 +30,7 @@ func TestInitialFrameShowsSidebarNotRail(t *testing.T) {
 // Dashboard -> Agents -> Chat -> Tasks) then Enter, and asserts the REAL
 // board pane's own content actually replaces home's -- SPEC-shell.md S4's
 // "Tasks -> internal/board" mapping, driven through the keyboard instead
-// of the legacy [f2].
+// of the legacy [2].
 func TestDownArrowEnterNavigatesToTasksRoute(t *testing.T) {
 	tm := run(t, testModel())
 	waitFor(t, tm, "⌂ Home")

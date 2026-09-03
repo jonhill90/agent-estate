@@ -25,7 +25,7 @@ import (
 
 // runWide is run (model_teatest_test.go)'s own teatest.NewTestModel call,
 // but at a wider terminal -- 100 columns is model_teatest_test.go's own
-// deliberate choice for its navigation tests, but agent-tui#64's [f5] flow
+// deliberate choice for its navigation tests, but agent-tui#64's [5] flow
 // addition to the footer legend pushed TestKeyTSurfacesASaveFailure's
 // "! theme not saved: ..." suffix past truncate()'s 100-column budget, so
 // that one assertion needs the room this gives it -- the footer's actual
@@ -53,7 +53,7 @@ func TestKeyTPersistsThemeChoice(t *testing.T) {
 	})
 
 	tm := run(t, m)
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[2] board")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
 	// The rail's own footer line ("theme: <name>") is the visible proof
@@ -116,7 +116,7 @@ func TestKeyTSurfacesASaveFailureWithoutBlockingTheCycle(t *testing.T) {
 	})
 
 	tm := runWide(t, m)
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[2] board")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
 	out := waitFor(t, tm, theme.Cycle(theme.Default).Name)
