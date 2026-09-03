@@ -40,14 +40,24 @@ per attempt is printed for every run, not just the last one.
 
 ```
 go build -o /tmp/vhscapture ./cmd/vhscapture
-/tmp/vhscapture -tape testdata/vhs/agents-mode.tape -min-colors 100
+/tmp/vhscapture -tape testdata/vhs/agents-mode.tape
 ```
 
-`-min-colors` defaults to 2 (catches a fully blank single-colour frame).
-Raise it once you know a tape's own settled colour count (run it a few
-times bare first) to also reject a partial/transitional frame like the
-259-colour case agent-estate#947's review found, that a bare "file exists" check would
-miss.
+`-min-colors` defaults to **1000**, not 2. agent-estate#956's review found the old
+default of 2 accepted a synthetic 259-colour PNG -- the exact
+partial/transitional shape both agent-estate#947 and this PR's own body name as
+not-a-real-capture -- as "settled" on the first attempt, at the tool's own
+bare invocation with no flags. 1000 is picked from the measured
+distribution, not taste: blank frames are 1 colour, the partial shape that
+slipped through is 259, and the two settled frames measured directly
+(`agents-mode.tape`) were 4393 and 5674 colours. 1000 sits roughly 4x above
+the observed partial shape and well under half the lowest observed settled
+shape, so the tool now rejects both failure classes agent-estate#947 named at its own
+default -- no flag required to get a default that enforces the floor it
+claims to. This is still only two tapes' worth of measured settled counts;
+a tape whose own real settled frame happens to fall under 1000 needs an
+explicit `-min-colors` override once you've measured it bare a few times,
+the same as before.
 
 ## Why VHS and not something we wrote
 

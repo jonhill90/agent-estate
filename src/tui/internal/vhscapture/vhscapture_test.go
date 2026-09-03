@@ -76,6 +76,42 @@ func writeMultiColorPNG(t *testing.T, path string, n int) {
 	}
 }
 
+// writeManyColorPNG writes a PNG with exactly n distinct colors, for n
+// larger than writeMultiColorPNG can produce -- writeMultiColorPNG derives
+// each color from x%256 arithmetic, which repeats with period 256 and so
+// tops out well under a few hundred truly distinct colors regardless of n.
+// This encodes each color from a plain incrementing index across all three
+// channels (a bijection up to 16,777,216), so a caller asking for
+// thousands of colors -- the range agent-estate#956's measured settled frames
+// (4393, 5674) actually live in -- gets exactly that many.
+func writeManyColorPNG(t *testing.T, path string, n int) {
+	t.Helper()
+	const w = 128
+	h := (n + w - 1) / w
+	if h < 1 {
+		h = 1
+	}
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	var last color.RGBA
+	for i := 0; i < w*h; i++ {
+		x, y := i%w, i/w
+		c := last
+		if i < n {
+			c = color.RGBA{R: uint8(i), G: uint8(i >> 8), B: uint8(i >> 16), A: 255}
+			last = c
+		}
+		img.Set(x, y, c)
+	}
+	f, err := os.Create(path)
+	if err != nil {
+		t.Fatalf("create %s: %v", path, err)
+	}
+	defer f.Close()
+	if err := png.Encode(f, img); err != nil {
+		t.Fatalf("encode %s: %v", path, err)
+	}
+}
+
 func TestCountColorsDistinguishesBlankFromReal(t *testing.T) {
 	dir := t.TempDir()
 	blank := filepath.Join(dir, "blank.png")
@@ -187,6 +223,67 @@ func TestRunUntilSettledRemovesStaleFileBeforeEachAttempt(t *testing.T) {
 	}
 	if sawFileAtRunTapeStart {
 		t.Fatalf("stale file from a previous run was still present when runTape started")
+	}
+}
+
+// defaultMinColors mirrors cmd/vhscapture's own -min-colors default. It is
+// duplicated here deliberately rather than imported (main.go is package
+// main) -- if the CLI's default ever drifts from this value without this
+// test being updated too, that drift is the bug this test exists to catch.
+const defaultMinColors = 1000
+
+// TestRunUntilSettledRejectsPartialFrameAtDefaultMinColors is agent-estate#956's
+// review, reproduced as a red-before/green-after mutation check: a
+// synthetic 259-colour PNG -- the exact partial/transitional shape both
+// agent-estate#947 and this PR's own body name as not-a-real-capture -- must be
+// rejected at the tool's own default threshold, with no flag needed to get
+// that behaviour. Before this fix (-min-colors defaulted to 2) this exact
+// frame passed on the first attempt; at defaultMinColors it must exhaust
+// every attempt and report failure instead.
+func TestRunUntilSettledRejectsPartialFrameAtDefaultMinColors(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "shot.png")
+	runTape := func() error {
+		writeMultiColorPNG(t, target, 259) // agent-estate#956's own adversarial case
+		return nil
+	}
+
+	report, err := RunUntilSettled([]string{target}, defaultMinColors, 4, runTape)
+	if err == nil {
+		t.Fatalf("RunUntilSettled: want error for a 259-colour partial frame at the default min-colors, got nil (settled=%v)", report.Settled)
+	}
+	if report.Settled {
+		t.Fatalf("report.Settled = true, want false -- a 259-colour frame must not count as settled at the default")
+	}
+	for _, a := range report.Attempts {
+		if a.Passed {
+			t.Fatalf("attempt %d passed verification against a 259-colour frame at min-colors=%d; want every attempt to fail", a.N, defaultMinColors)
+		}
+	}
+}
+
+// TestRunUntilSettledAcceptsSettledFrameAtDefaultMinColors is the other
+// mutation direction: a frame at the low end of the two measured real
+// settled counts (4393 and 5674 colours, agents-mode.tape) must still pass
+// at the default -- the raised default must not be so high it rejects a
+// genuine capture.
+func TestRunUntilSettledAcceptsSettledFrameAtDefaultMinColors(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "shot.png")
+	runTape := func() error {
+		writeManyColorPNG(t, target, 4393) // the lower of the two measured settled counts
+		return nil
+	}
+
+	report, err := RunUntilSettled([]string{target}, defaultMinColors, 4, runTape)
+	if err != nil {
+		t.Fatalf("RunUntilSettled: %v (want a 4393-colour settled frame to pass at the default min-colors)", err)
+	}
+	if !report.Settled {
+		t.Fatalf("report.Settled = false, want true")
+	}
+	if len(report.Attempts) != 1 {
+		t.Fatalf("len(report.Attempts) = %d, want 1 (should settle on the first attempt)", len(report.Attempts))
 	}
 }
 

@@ -28,7 +28,19 @@ import (
 
 func main() {
 	tape := flag.String("tape", "", "path to the .tape file to run (required)")
-	minColors := flag.Int("min-colors", 2, "an attempt's Screenshot output must have at least this many distinct colors to count as settled; 2 catches a blank single-color frame, raise it for a tape whose known-good frame count you've already measured")
+	// 1000 is picked from agent-estate#956's review evidence, not taste: blank
+	// frames measure 1 color, the partial/transitional frame the review
+	// caught slipping past the old default of 2 measured 259 colors, and
+	// the two settled frames measured directly (agents-mode.tape) were
+	// 4393 and 5674 colors. 1000 sits roughly 4x above the observed
+	// partial shape and well under half the lowest observed settled
+	// shape, so it rejects both failure classes agent-estate#947 named while still
+	// accepting real captures at the tool's own default -- no flag
+	// required to get a default that actually enforces the floor it
+	// claims to. A tape whose own settled frame is known to fall below
+	// 1000 still needs an explicit -min-colors override; this default
+	// cannot know every tape's true floor from two measured samples.
+	minColors := flag.Int("min-colors", 1000, "an attempt's Screenshot output must have at least this many distinct colors to count as settled; 1000 rejects both a blank (1 color) and a partial/transitional (259 colors, agent-estate#956) frame at the default -- raise or lower it once you've measured a specific tape's own settled color count")
 	maxAttempts := flag.Int("max-attempts", 8, "how many full tape runs to try before giving up")
 	flag.Parse()
 
