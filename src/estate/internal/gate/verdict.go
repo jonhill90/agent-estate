@@ -212,7 +212,7 @@ func resolveResultVerdict(result string) laneVerdict {
 	return laneVerdict{found: true, ok: true, decision: verdict}
 }
 
-// dispatchBranchPrefix is the one fixed, estate-written string
+// DispatchBranchPrefix is the one fixed, estate-written string
 // internal/isolate.Create prepends to a lane id to name its branch
 // ("dispatch/" + id). A lane that works out who it is from its own
 // checkout reports that branch name in its Review-Lane: trailer instead
@@ -222,10 +222,27 @@ func resolveResultVerdict(result string) laneVerdict {
 // reopen the impersonation hole agent-estate#934 closed. Only ONE leading
 // occurrence is stripped -- "dispatch/dispatch/<id>" must still refuse,
 // since a doubled prefix is not a form the estate ever writes.
-const dispatchBranchPrefix = "dispatch/"
+//
+// Exported (agent-estate#957) so a Review-Lane: contract stated outside
+// this package -- main.reviewerContract, which tells a reviewer lane what
+// form the trailer must take -- can assert its own text against this
+// literal instead of restating it by hand and drifting out of agreement,
+// which is exactly how #957 shipped a contract forbidding a form this
+// package deliberately accepts.
+const DispatchBranchPrefix = "dispatch/"
 
 func normaliseLaneID(id string) string {
-	return strings.TrimPrefix(id, dispatchBranchPrefix)
+	return strings.TrimPrefix(id, DispatchBranchPrefix)
+}
+
+// AcceptsReviewLane reports whether a Review-Lane: trailer value would be
+// read as naming wantLane, under the exact normalisation
+// resolveLaneVerdict applies. Exported (agent-estate#957) alongside
+// DispatchBranchPrefix for the same reason: a contract stated outside this
+// package that describes what the gate accepts for this trailer should
+// assert it against the real comparison, not restate the rule by hand.
+func AcceptsReviewLane(trailerValue, wantLane string) bool {
+	return normaliseLaneID(trailerValue) == normaliseLaneID(wantLane)
 }
 
 func resolveLaneVerdict(comments []Comment, lane string) laneVerdict {

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 
@@ -110,6 +111,58 @@ func stdoutDiagnosticSegment(stdout []byte) string {
 		}
 	}
 	return "stdout: " + strings.Join(fields, ", ")
+}
+
+// reviewerContract states the second-source verdict contract the merge gate
+// (internal/gate) already enforces, filled in with the values the estate
+// itself knows at dispatch time -- the lane's own dispatch id and the PR
+// number it was dispatched against -- rather than left for a brief to
+// restate and inevitably drift (agent-estate#949). Every failure named in
+// #949 was an agent inventing or reformatting one of these two values:
+// a Review-Lane: trailer that was branch-prefixed or an invented label
+// instead of the bare id, and a ledger Result with no parsable Verdict:
+// line at all. Stating the contract here, with the id and PR number already
+// filled in, removes the inventing.
+func reviewerContract(id string, pr int) string {
+	return "\n\n## Reviewer contract (agent-estate#949 -- read this before posting a verdict)\n" +
+		"You are reviewing PR #" + strconv.Itoa(pr) + " as lane `" + id + "`. The merge gate " +
+		"cross-checks two independent sources and refuses the merge if either is missing or " +
+		"unparsable -- comply with both exactly:\n\n" +
+		"1. **Your PR comment** must contain a line reading exactly `Verdict: APPROVE` or " +
+		"`Verdict: REQUEST CHANGES`, plus `Review-Lane: " + id + "` and `Reviewed-SHA: <the sha you reviewed>` " +
+		"trailers. State `Review-Lane:` as `" + id + "` -- the bare id, not `" + gate.DispatchBranchPrefix + id + "` " +
+		"or any other label. (The gate strips one leading `" + gate.DispatchBranchPrefix + "` before comparing, " +
+		"so the branch-prefixed form would still pass -- but the bare id is what's asked for here, and " +
+		"an invented label is not accepted at all.)\n" +
+		"2. **Your own final result text** -- what you return when you finish, not only the PR " +
+		"comment -- must ALSO contain a `Verdict: APPROVE` or `Verdict: REQUEST CHANGES` line. A " +
+		"prose summary such as \"Review posted: **APPROVE**\" does not parse, and the gate will " +
+		"refuse a genuine approval it cannot read.\n"
+}
+
+// roleGrounding is what dispatch appends to the prompt based on role alone
+// -- the author's branch-discipline block (agent-estate#940, text
+// unchanged by #949) or the reviewer's verdict contract (reviewerContract,
+// #949). Neither role gets both, and a role that is neither (there is none
+// today) gets nothing.
+func roleGrounding(role ledger.Role, id string, reviewPR int, branch string) string {
+	switch role {
+	case ledger.RoleAuthor:
+		return "\n\n## Branch discipline (agent-estate#940 -- read this before opening a PR)\n" +
+			"Your worktree's branch is already `" + branch + "` -- created by the estate " +
+			"itself, not by you. Commit your work on THIS branch and push it AS-IS:\n\n" +
+			"    git push -u origin " + branch + "\n\n" +
+			"Open your pull request FROM `" + branch + "`. Do not `git checkout -b` a " +
+			"hand-named branch (e.g. `feat/...`, `fix/...`) and open the PR from that instead --" +
+			" the merge gate (`estate merge`) derives authorship by reading the PR's own head " +
+			"ref back and joining it to this exact dispatch's ledger record. A PR opened from " +
+			"any other branch carries no evidence the estate produced, and the gate refuses it " +
+			"structurally, with no override.\n"
+	case ledger.RoleReviewer:
+		return reviewerContract(id, reviewPR)
+	default:
+		return ""
+	}
 }
 
 func usage() {
@@ -595,19 +648,14 @@ func main() {
 		// its own feature branch produces a PR the gate cannot join to
 		// anything, refused with no override. Author turns only: a
 		// role=reviewer turn never opens a PR, so it has nothing to state
-		// here.
-		if role == ledger.RoleAuthor {
-			grounded += "\n\n## Branch discipline (agent-estate#940 -- read this before opening a PR)\n" +
-				"Your worktree's branch is already `" + wt.Branch + "` -- created by the estate " +
-				"itself, not by you. Commit your work on THIS branch and push it AS-IS:\n\n" +
-				"    git push -u origin " + wt.Branch + "\n\n" +
-				"Open your pull request FROM `" + wt.Branch + "`. Do not `git checkout -b` a " +
-				"hand-named branch (e.g. `feat/...`, `fix/...`) and open the PR from that instead --" +
-				" the merge gate (`estate merge`) derives authorship by reading the PR's own head " +
-				"ref back and joining it to this exact dispatch's ledger record. A PR opened from " +
-				"any other branch carries no evidence the estate produced, and the gate refuses it " +
-				"structurally, with no override.\n"
-		}
+		// here. Reviewer turns instead get the second-source verdict
+		// contract (agent-estate#949), with this dispatch's own id and PR
+		// number already filled in so it cannot be forgotten, reworded, or
+		// invented by whatever brief the Director happened to write.
+		// roleGrounding is the one place both blocks are produced, so a
+		// test can exercise the role switch directly without running the
+		// rest of dispatch.
+		grounded += roleGrounding(role, id, reviewPR, wt.Branch)
 
 		// The Dispatched record is appended once the pid is known (below,
 		// right after cmd.Start()), not here -- agent-estate#948 wires up

@@ -216,11 +216,11 @@ func authorLanes(l *ledger.Ledger, issues map[string]bool) (map[string]bool, err
 // prefix is not a shape the estate ever writes, so accepting it would be
 // widening the match past what "the estate wrote this" can actually prove.
 func authorFromHeadRef(headRef string) (id string, ok bool) {
-	if !strings.HasPrefix(headRef, dispatchBranchPrefix) {
+	if !strings.HasPrefix(headRef, DispatchBranchPrefix) {
 		return "", false
 	}
-	id = strings.TrimPrefix(headRef, dispatchBranchPrefix)
-	if id == "" || strings.HasPrefix(id, dispatchBranchPrefix) {
+	id = strings.TrimPrefix(headRef, DispatchBranchPrefix)
+	if id == "" || strings.HasPrefix(id, DispatchBranchPrefix) {
 		return "", false
 	}
 	return id, true
