@@ -7,3 +7,4 @@
 {"at":"2026-09-02T23:45:02Z","phase_item":"phase-1","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"gitignored-output data-loss hole fixed (independent review)"}
 {"at":"2026-09-02T23:48:16Z","phase_item":"phase-0","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"stop condition strengthened: only an artifact clears a stall"}
 {"at":"2026-09-02T23:56:01Z","phase_item":"phase-3","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"same brief ran through claude and codex; both recorded complete"}
+{"at":"2026-09-03T00:00:18Z","phase_item":"delivery-unblock","src_head":"0a138d873daaace91cc39871e0f68165edd77ead","artifact":"docs/ci-rules-retired.md + green estate-ci"}
