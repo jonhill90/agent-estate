@@ -99,7 +99,7 @@ func main() {
 		mcpCmd = flag.String("mcp-cmd", os.Getenv("AGENT_TUI_MCP_CMD"),
 			"full override command line for the MCP server, e.g. a remote SSH hop. Takes precedence over -supervisor-repo.")
 		showBoard = flag.Bool("board", false, "start on the task board pane (agent-tui#6) instead of home -- the "+
-			"persistent rail stays on screen either way (agent-tui#38); [f2] reaches the board pane from any "+
+			"persistent rail stays on screen either way (agent-tui#38); [2] reaches the board pane from any "+
 			"start. Read-only: derives its columns fresh on every fetch, never stores one.")
 		claudeProjectsDir = flag.String("claude-projects-dir", os.Getenv("AGENT_TUI_CLAUDE_PROJECTS_DIR"),
 			"directory holding Claude Code CLI's own per-project session transcripts (chat.ClaudeCodeSource's "+
@@ -143,7 +143,7 @@ func main() {
 			"colon-separated name=path=owner/repo entries, same shape as agent-supervisor's SUPERVISOR_REPOSITORIES "+
 				"(.env.example) -- the board unions this with every repo it discovers in the ledger's own source_urls, "+
 				"so it never has to hardcode a list. Defaults to $SUPERVISOR_REPOSITORIES.")
-		showCost = flag.Bool("cost", false, "start on the cost pane (agent-tui#4) instead of home -- [f3] reaches "+
+		showCost = flag.Bool("cost", false, "start on the cost pane (agent-tui#4) instead of home -- [3] reaches "+
 			"it from any start (agent-tui#38). Reads ccusage, never reimplements its per-harness usage parse.")
 		ccusageBin = flag.String("ccusage-bin", envOr("AGENT_TUI_CCUSAGE_BIN", "npx"),
 			"binary to run for ccusage calls. Combined with -ccusage-args (default \"ccusage\"). Point this at a "+
@@ -166,28 +166,28 @@ func main() {
 				"\"unknown\", the same discipline -claude-block-limit's honesty constraint already holds ccusage to.")
 		showGallery = flag.Bool("gallery", false, "start on the glyph gallery pane (agent-tui#11) instead of home -- "+
 			"every lane state against every candidate glyph, including glyphs not yet in any set, each flagged "+
-			"with whether it needs a Nerd Font. [f4] reaches it from any start (agent-tui#38).")
+			"with whether it needs a Nerd Font. [4] reaches it from any start (agent-tui#38).")
 		showFlow = flag.Bool("flow", false, "start on the flow pane (agent-tui#64) instead of home -- a live view of "+
 			"work moving between dispatched/working/review/blocked/done, reading the exact same Snapshot -board "+
-			"does (never a second gh/ledger read; needs the same -ledger the board does). [f5] reaches it from "+
+			"does (never a second gh/ledger read; needs the same -ledger the board does). [5] reaches it from "+
 			"any start (agent-tui#38).")
 		showChat = flag.Bool("chat", false, "start on the chat pane (agent-tui#20) instead of home -- threads as "+
-			"ACP sessions, live via session/update once a lane runs on a structured transport. [f6] reaches it "+
-			"from any start (agent-tui#38) -- [f5] was already claimed by -flow (agent-tui#64) by the time this "+
+			"ACP sessions, live via session/update once a lane runs on a structured transport. [6] reaches it "+
+			"from any start (agent-tui#38) -- [5] was already claimed by -flow (agent-tui#64) by the time this "+
 			"landed. No lane in this estate is on 'acp' or 'pi-rpc' today (agent-tui#20's own finding), so this "+
 			"renders internal/chat.FixtureSource -- visibly synthetic data proving the seam, never a live "+
 			"transcript.")
 		showLaneChatLanePrimary = flag.Bool("lanechat-lane-primary", false, "start on agent-tui#115's "+
 			"lane-primary decide-by-variant pane instead of home -- the rail stays the spine, a conversation "+
-			"opens against the selected lane. [f7] reaches it from any start. Fixture data only, same as "+
+			"opens against the selected lane. [7] reaches it from any start. Fixture data only, same as "+
 			"-gallery -- this does not replace or change -lanes or -chat.")
 		showLaneChatRoomPrimary = flag.Bool("lanechat-room-primary", false, "start on agent-tui#115's "+
 			"room-primary decide-by-variant pane instead of home -- one room per lane, the lane's live state "+
-			"rendered as room metadata on the same row. [f8] reaches it from any start. Fixture data only, "+
+			"rendered as room metadata on the same row. [8] reaches it from any start. Fixture data only, "+
 			"does not replace or change -lanes or -chat.")
 		showLaneChatUnifiedList = flag.Bool("lanechat-unified-list", false, "start on agent-tui#115's "+
 			"unified-list decide-by-variant pane instead of home -- lanes and threads as one list of agents "+
-			"you can talk to, each row expandable in place. [f9] reaches it from any start. Fixture data "+
+			"you can talk to, each row expandable in place. [9] reaches it from any start. Fixture data "+
 			"only, does not replace or change -lanes or -chat.")
 		boardRefresh = flag.Duration("board-refresh", envOrDuration("AGENT_TUI_BOARD_REFRESH", board.DefaultRefreshInterval),
 			"how often -board re-fetches on its own tick (agent-tui#28). The previous hardcoded 5s measured at "+
@@ -395,7 +395,7 @@ func main() {
 	// so -board's own refusal (showBoard && !boardOK) and the shell's
 	// navigation-time guard share exactly one source of truth -- see
 	// shell.Model.unavailableView for how boardUnavailable renders when a
-	// human reaches [f2] with boardOK false.
+	// human reaches [2] with boardOK false.
 	boardFetch := buildBoardFetch(ledgerSrc, *ghBin, *sqliteBin, *repositories, lanesFetch)
 	boardModel := board.NewWithRefreshInterval(boardFetch, *boardRefresh)
 

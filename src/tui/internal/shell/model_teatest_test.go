@@ -44,7 +44,7 @@ import (
 // gh, no ledger -- the same "construct from fakes, never a subprocess"
 // discipline every other package's tests in this repo already follow (see
 // AGENTS.md's Adapter discipline section). boardOK true with one card is
-// what lets TestF2NavigatesToBoardPane assert on real board content rather
+// what lets TestLeaderTNavigatesToBoardPane assert on real board content rather
 // than only the unavailable placeholder.
 func testModel() Model {
 	r := rail.New(func() ([]lane.Lane, error) { return nil, nil })
@@ -155,50 +155,54 @@ func run(t *testing.T, m Model) *teatest.TestModel {
 // agent-tui#38 acceptance item 1, "no-flag launch opens the app."
 func TestNoFlagOpensHomePaneWithRailVisible(t *testing.T) {
 	tm := run(t, testModel())
-	out := waitFor(t, tm, "[f2] board")
+	out := waitFor(t, tm, "[space] menu")
 	if !bytes.Contains(out, []byte("[tab] focus:rail")) {
 		t.Fatalf("footer missing on initial frame:\n%s", out)
 	}
 }
 
-// TestF2NavigatesToBoardPane presses f2 against a real running Program and
+// TestLeaderTNavigatesToBoardPane presses f2 against a real running Program and
 // asserts the board pane's own content actually replaces the home pane's
 // -- not that the key was accepted, that the VIEW changed to prove it.
-func TestF2NavigatesToBoardPane(t *testing.T) {
+func TestLeaderTNavigatesToBoardPane(t *testing.T) {
 	tm := run(t, testModel())
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[space] menu")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF2})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	waitFor(t, tm, "#7 ")
 }
 
-// TestF3NavigatesToCostPane is TestF2NavigatesToBoardPane's sibling for
+// TestLeaderUNavigatesToCostPane is TestLeaderTNavigatesToBoardPane's sibling for
 // the cost pane -- cost.Model.View's own titleStyle line ("cost") is the
 // marker, same as board's card-number marker above.
-func TestF3NavigatesToCostPane(t *testing.T) {
+func TestLeaderUNavigatesToCostPane(t *testing.T) {
 	tm := run(t, testModel())
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[space] menu")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF3})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'u'}})
 	waitFor(t, tm, "cost")
 }
 
-// TestF4NavigatesToGalleryPane is the same drive for the gallery pane.
-func TestF4NavigatesToGalleryPane(t *testing.T) {
+// TestLeaderGNavigatesToGalleryPane is the same drive for the gallery pane.
+func TestLeaderGNavigatesToGalleryPane(t *testing.T) {
 	tm := run(t, testModel())
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[space] menu")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF4})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 	waitFor(t, tm, "glyph gallery")
 }
 
-// TestF5NavigatesToFlowPane is TestF2NavigatesToBoardPane's sibling for the
+// TestLeaderFNavigatesToFlowPane is TestLeaderTNavigatesToBoardPane's sibling for the
 // flow pane (agent-tui#64) -- flow's own title line is the marker.
-func TestF5NavigatesToFlowPane(t *testing.T) {
+func TestLeaderFNavigatesToFlowPane(t *testing.T) {
 	tm := run(t, testModel())
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[space] menu")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF5})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
 	waitFor(t, tm, "flow -- work moving")
 }
 
@@ -216,23 +220,25 @@ func TestFlowUnavailableRendersInPlaceOfFlow(t *testing.T) {
 	m := New(r, b, false, "no -ledger configured", c, g, fl, ch)
 
 	tm := run(t, m)
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[space] menu")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF5})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'f'}})
 	waitFor(t, tm, "board unavailable")
 }
 
-// TestF6NavigatesToChatPane is the same drive for the chat pane
+// TestLeaderCNavigatesToChatPane is the same drive for the chat pane
 // (agent-tui#20) -- chat.Model.View's own title line ("chat") plus its
 // fixture thread title is the marker, same shape as board/cost/gallery's
-// own navigation tests above. Chat is [f6], not [f5]: agent-tui#68 (flow,
-// agent-tui#64) landed on main first and already claimed [f5] -- see
+// own navigation tests above. Chat is [6], not [5]: agent-tui#68 (flow,
+// agent-tui#64) landed on main first and already claimed [5] -- see
 // this rebase's own commit message for the conflict this resolves.
-func TestF6NavigatesToChatPane(t *testing.T) {
+func TestLeaderCNavigatesToChatPane(t *testing.T) {
 	tm := run(t, testModel())
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[space] menu")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF6})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'c'}})
 	waitFor(t, tm, "lane/20-chat-threads")
 }
 
@@ -241,17 +247,19 @@ func TestF6NavigatesToChatPane(t *testing.T) {
 // pressed f1 to prove the way back to home works too.
 func TestF1ReturnsToHomePane(t *testing.T) {
 	// homeMarker is homeView's own line, not the footer's -- the footer's
-	// "[f2] board" is present on EVERY pane, so it cannot tell "we are on
+	// "[space] menu" is present on EVERY pane, so it cannot tell "we are on
 	// home" apart from "we are on gallery with the footer still showing".
 	const homeMarker = "[tab] move focus into the sidebar"
 
 	tm := run(t, testModel())
 	waitFor(t, tm, homeMarker)
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF4})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 	waitFor(t, tm, "glyph gallery")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF1})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'h'}})
 	waitFor(t, tm, homeMarker)
 }
 
@@ -278,9 +286,10 @@ func TestTabTogglesFocusBetweenRailAndContent(t *testing.T) {
 // including quit).
 func TestCtrlCQuitsFromAnyPane(t *testing.T) {
 	tm := run(t, testModel())
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[space] menu")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF4})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'g'}})
 	waitFor(t, tm, "glyph gallery")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
@@ -292,7 +301,7 @@ func TestCtrlCQuitsFromAnyPane(t *testing.T) {
 // terminates, exactly like ctrl+c does.
 func TestQQuitsFromHomePane(t *testing.T) {
 	tm := run(t, testModel())
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[space] menu")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
 	tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second))
@@ -312,9 +321,10 @@ func TestBoardUnavailableRendersInPlaceOfBoard(t *testing.T) {
 	m := New(r, b, false, "no -ledger configured", c, g, fl, ch)
 
 	tm := run(t, m)
-	waitFor(t, tm, "[f2] board")
+	waitFor(t, tm, "[space] menu")
 
-	tm.Send(tea.KeyMsg{Type: tea.KeyF2})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'t'}})
 	waitFor(t, tm, "board unavailable")
 }
 
@@ -349,4 +359,63 @@ func waitFor(t *testing.T, tm *teatest.TestModel, want string) []byte {
 	}
 	t.Fatalf("waitFor %q: not seen after 8s. Output so far:\n%s", want, b.String())
 	return nil
+}
+
+// TestFinderJumpsThroughARealProgram closes the gap a council seat named:
+// every leader chord was driven end-to-end here, but the finder never was.
+// "A control that is not pressed is not proven" applies to it too -- and the
+// finder is the one control that can send you somewhere you did not choose.
+func TestFinderJumpsThroughARealProgram(t *testing.T) {
+	tm := run(t, testModel())
+	waitFor(t, tm, "[space] menu")
+
+	// <space><space> opens the jump list.
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	waitFor(t, tm, "find ›")
+
+	// Fuzzy: "knw" must find Knowledge without those letters being adjacent.
+	for _, r := range "knw" {
+		tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+	}
+	waitFor(t, tm, "Knowledge")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
+	// The Knowledge pane's own content -- its fact table header -- not the
+	// finder's echo of the route name, which would prove only that the text
+	// was typed.
+	waitFor(t, tm, "SLUG")
+}
+
+// Escape must close the finder without navigating. A jump list that moves
+// you on the way out is worse than one that does nothing.
+//
+// Asserted at the Model level rather than through teatest: the program only
+// redraws changed regions, so "the finder is gone" is not reliably visible in
+// a terminal diff. The end-to-end wiring is proven by
+// TestFinderJumpsThroughARealProgram above; this proves the semantics.
+func TestFinderEscapeDoesNotNavigate(t *testing.T) {
+	m := testModel()
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	base := sized.(Model)
+	before := base.active
+
+	a, _ := base.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	b, _ := a.(Model).Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	open := b.(Model)
+	if !open.finderOpen {
+		t.Fatal("<space><space> must open the finder")
+	}
+	for _, r := range "knw" {
+		nx, _ := open.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{r}})
+		open = nx.(Model)
+	}
+	closed, _ := open.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got := closed.(Model)
+	if got.finderOpen {
+		t.Error("esc must close the finder")
+	}
+	if got.active != before {
+		t.Errorf("esc must not navigate: active moved %v -> %v", before, got.active)
+	}
 }

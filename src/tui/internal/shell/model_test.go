@@ -1,8 +1,11 @@
 package shell
 
 import (
+	"os"
 	"strings"
 	"testing"
+
+	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/jonhill90/agent-estate/src/tui/internal/nav"
 )
@@ -115,6 +118,106 @@ func TestViewNeverExceedsContentHeightPlusFooter(t *testing.T) {
 		want := m.contentHeight + footerHeight
 		if got != want {
 			t.Errorf("pane %d: View() rendered %d lines, want exactly %d (contentHeight=%d + footerHeight=%d) -- a pane exceeding its budget pushes the footer off screen", pane, got, want, m.contentHeight, footerHeight)
+		}
+	}
+}
+
+// Regression for a council finding: removing the function keys orphaned the
+// three decide-by-variant lane-chat panes. They have no sidebar route by
+// design, so the fuzzy finder cannot reach them either -- an explicit leader
+// binding is the only thing that keeps them alive.
+//
+// This asserts reachability for EVERY pane the leader is responsible for, so
+// the next person to add a pane finds out here rather than from a user.
+func TestEveryLeaderBoundPaneIsReachable(t *testing.T) {
+	seen := map[Pane]string{}
+	for _, b := range leaderBindings {
+		if prev, dup := seen[b.Pane]; dup {
+			t.Errorf("pane %v bound twice: %q and %q", b.Pane, prev, b.Key)
+		}
+		seen[b.Pane] = b.Key
+	}
+	for _, want := range []Pane{
+		PaneLaneChatLanePrimary, PaneLaneChatRoomPrimary, PaneLaneChatUnifiedList,
+	} {
+		if _, ok := seen[want]; !ok {
+			t.Errorf("pane %v has no sidebar route and no leader binding -- it is unreachable", want)
+		}
+	}
+	keys := map[string]bool{}
+	for _, b := range leaderBindings {
+		if keys[b.Key] {
+			t.Errorf("leader key %q is bound twice", b.Key)
+		}
+		keys[b.Key] = true
+		if b.Key == FinderKey {
+			t.Errorf("leader key %q collides with the finder", b.Key)
+		}
+	}
+}
+
+// Regression: the leader must not eat the space bar while the rail is taking
+// a session name. Fixed by inspection in the previous round with no test; a
+// council seat pointed out that a fix nobody can re-break safely is not
+// finished.
+func TestLeaderYieldsToTheRailComposer(t *testing.T) {
+	m := testModel()
+	m.focus = focusRail
+	if !m.leaderTakesKeys() {
+		t.Fatal("precondition: with an idle rail the leader is active")
+	}
+	m.rail = m.rail.EnterAddForTest()
+	if m.leaderTakesKeys() {
+		t.Fatal("while the rail is capturing text the leader must not claim keys")
+	}
+}
+
+// Regression: tab was matched before the leader/finder checks, so a pending
+// chord survived into the next keystroke and hijacked it.
+func TestTabDoesNotHijackAPendingChord(t *testing.T) {
+	m := testModel()
+	sized, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	base := sized.(Model)
+	beforeFocus := base.focus
+
+	pending, _ := base.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{' '}})
+	p := pending.(Model)
+	if !p.leaderPending {
+		t.Fatal("precondition: the leader is pending")
+	}
+	after, _ := p.Update(tea.KeyMsg{Type: tea.KeyTab})
+	a := after.(Model)
+	if a.leaderPending {
+		t.Error("tab must be consumed by the pending chord, not left dangling")
+	}
+	if a.focus != beforeFocus {
+		t.Error("tab must not also toggle focus while a chord is pending")
+	}
+	if a.leaderMiss != "tab" {
+		t.Errorf("an unbound chord key must be reported, got %q", a.leaderMiss)
+	}
+}
+
+// A council seat found the leader-key change left a doc comment telling a
+// reader to press [7]/[8]/[9] -- keys the same change had deleted. Every
+// other f-key and digit reference in this file and in docs/tui was updated;
+// that one was missed, so the file described a control that does nothing.
+//
+// This is the defect class the whole PR is about, so it gets a check rather
+// than another round of care.
+func TestNoSourceCommentAdvertisesADeletedKey(t *testing.T) {
+	src, err := os.ReadFile("model.go")
+	if err != nil {
+		t.Fatalf("cannot read model.go, so nothing was verified: %v", err)
+	}
+	body := string(src)
+	for _, gone := range []string{
+		"[f1]", "[f2]", "[f3]", "[f4]", "[f5]", "[f6]", "[f7]", "[f8]", "[f9]",
+		"[1]home", "[2] board", "[3]cost", "[4]gallery", "[5]flow", "[6]chat",
+		"[7]/[8]/[9]",
+	} {
+		if strings.Contains(body, gone) {
+			t.Errorf("model.go still advertises %q, a key this scheme removed", gone)
 		}
 	}
 }

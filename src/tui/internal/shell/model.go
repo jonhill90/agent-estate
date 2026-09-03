@@ -27,6 +27,7 @@ import (
 	"github.com/jonhill90/agent-estate/src/tui/internal/dashboard"
 	"github.com/jonhill90/agent-estate/src/tui/internal/estatus"
 	"github.com/jonhill90/agent-estate/src/tui/internal/external"
+	"github.com/jonhill90/agent-estate/src/tui/internal/finder"
 	"github.com/jonhill90/agent-estate/src/tui/internal/flow"
 	"github.com/jonhill90/agent-estate/src/tui/internal/gallery"
 	"github.com/jonhill90/agent-estate/src/tui/internal/knowledge"
@@ -144,7 +145,8 @@ const (
 	// Lanes and Chat into one surface -- each its own real, fixture-backed
 	// pane (internal/lanechat/{laneprimary,roomprimary,unifiedlist}), NOT a
 	// replacement for PaneLanes/PaneChat above, which stay exactly as they
-	// are. Reached only via [f7]/[f8]/[f9] and the -lanechat-* startup
+	// are. Reached via the leader keys p/r/v (leaderBindings) and the
+	// -lanechat-* startup
 	// flags (cmd/estate/main.go) -- none has a nav.Build() route, the same
 	// "no sidebar route yet" state PaneGallery/PaneFlow are already in (see
 	// paneToRoute's own doc comment), because wiring one into the nav tree
@@ -211,12 +213,12 @@ var routeToPane = map[string]Pane{
 // paneToRoute is routeToPane's inverse, used to keep the nav sidebar's own
 // highlight in sync when a Pane is chosen some way OTHER than confirming a
 // nav row -- the -board/-cost startup flags (WithStart) and the legacy
-// f1-f6 keys both bypass m.nav entirely, so without this the sidebar could
+// digit keys both bypass m.nav entirely, so without this the sidebar could
 // show "Home" highlighted while the content pane is actually Board.
 // PaneGallery and PaneFlow have no entry: neither is in nav.Build()'s tree
 // (agent-tui#64's flow and the glyph gallery predate SPEC-shell.md and are
 // not part of the hill90 nav this spec mirrors), so reaching them via their
-// own f4/f5 keys leaves the sidebar's highlight exactly where it was --
+// own 4/5 keys leaves the sidebar's highlight exactly where it was --
 // documented, not silently wrong, until a future item decides whether they
 // get a route of their own.
 // PaneAgents/PaneSkills/PaneMCPServers/PaneConnectors/PaneAdmin have no
@@ -367,8 +369,14 @@ type Model struct {
 	// built by New has it unset until WithThemeSave is called, so a
 	// test with no opinion on persistence (most of the pre-existing
 	// navigation tests in this package) is unaffected.
-	saveTheme    func(theme.Theme) error
-	estateStatus func() estatus.Status
+	leaderPending bool
+	finderOpen    bool
+	finder        finder.Model
+	leaderMenu    bool
+	leaderMiss    string
+	leaderGen     int
+	saveTheme     func(theme.Theme) error
+	estateStatus  func() estatus.Status
 	// themeSaveErr is the visible half of "absence is a typed value,
 	// never a bare zero" (AGENTS.md) applied to a failed persist: a
 	// theme.Save error (e.g. an unwritable config directory) must not
@@ -622,6 +630,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// even after a rebase.
 		return m.cycleTheme()
 
+	case whichKeyMsg:
+		// Only open the menu if this timer belongs to the leader press still
+		// pending; a stale timer from an abandoned press must not pop up over
+		// whatever the user is doing now.
+		if m.leaderPending && msg.gen == m.leaderGen {
+			m.leaderMenu = true
+		}
+		return m, nil
 	case tea.MouseMsg:
 		// Nav clicks first; anything the shell does not own falls through to
 		// the focused pane, which may have its own clickable regions.
@@ -634,6 +650,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return next, cmd
 
 	case tea.KeyMsg:
+		// The finder and a pending leader chord claim keys BEFORE the
+		// always-on bindings. A council seat showed tab bypassed both: it was
+		// matched in the switch below, so a pending chord survived into the
+		// next keystroke and hijacked it. Only ctrl+c outranks them, because
+		// a user must always be able to leave.
+		if msg.String() != "ctrl+c" {
+			if m.finderOpen {
+				return m.finderKey(msg)
+			}
+			if m.leaderPending {
+				return m.resolveLeader(msg.String())
+			}
+		}
 		switch msg.String() {
 		case "ctrl+c":
 			// A universal escape hatch, not routed through any pane: the
@@ -648,34 +677,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case "tab":
 			m.focus = toggleFocus(m.focus)
 			return m, nil
-		// f1-f6 are agent-tui#38's pre-nav keys, kept working unchanged
-		// (nothing that scripts them may break, SPEC-shell.md S3) --
-		// syncPane below is the same route<->Pane switch Confirm below
-		// drives, called here too so the sidebar's own highlight does not
-		// go stale the moment one of these bypasses it.
-		case "f1":
-			return m.syncPane(PaneHome), nil
-		case "f2":
-			return m.syncPane(PaneBoard), nil
-		case "f3":
-			return m.syncPane(PaneCost), nil
-		case "f4":
-			return m.syncPane(PaneGallery), nil
-		case "f5":
-			return m.syncPane(PaneFlow), nil
-		case "f6":
-			return m.syncPane(PaneChat), nil
-		// f7-f9 are agent-tui#115's three decide-by-variant panes -- reached
-		// only by key (and their own -lanechat-* startup flags), the same
-		// "no sidebar route" state PaneGallery/PaneFlow's f4/f5 are already
-		// in, deliberately: giving one a nav.Build() route would be picking
-		// a shape, which this issue exists to NOT do.
-		case "f7":
-			return m.syncPane(PaneLaneChatLanePrimary), nil
-		case "f8":
-			return m.syncPane(PaneLaneChatRoomPrimary), nil
-		case "f9":
-			return m.syncPane(PaneLaneChatUnifiedList), nil
+		}
+		if msg.String() == LeaderKey && m.leaderTakesKeys() {
+			m.leaderMiss = ""
+			return m.startLeader()
 		}
 		return m.routeKey(msg)
 	}
@@ -711,7 +716,7 @@ func toggleFocus(f focus) focus {
 
 // syncPane sets m.active to p and, when p has a nav route (routeToPane's
 // inverse, paneToRoute), moves the sidebar's own highlight to match --
-// the f1-f6 legacy keys and any future non-nav way of choosing a Pane
+// the digit keys and any future non-nav way of choosing a Pane
 // should go through this rather than assigning m.active directly, so the
 // sidebar cannot silently disagree with what is on screen.
 func (m Model) syncPane(p Pane) Model {
@@ -1235,6 +1240,14 @@ func (m Model) View() string {
 	// before it needs an answer; see that function's own doc comment for
 	// why the wait belongs on the rare mouse-event path, not on every
 	// render (View() runs far more often than a human clicks anything).
+	// The which-key menu sits between the body and the footer, so it covers
+	// no content and appears where the eye already is when reading bindings.
+	if find := m.finderView(); find != "" {
+		return m.zones.Scan(lipgloss.JoinVertical(lipgloss.Left, body, find, m.footer()))
+	}
+	if menu := m.leaderView(); menu != "" {
+		return m.zones.Scan(lipgloss.JoinVertical(lipgloss.Left, body, menu, m.footer()))
+	}
 	return m.zones.Scan(lipgloss.JoinVertical(lipgloss.Left, body, m.footer()))
 }
 
@@ -1376,11 +1389,11 @@ func (m Model) footer() string {
 	if m.focus == focusContent {
 		focusName = "content"
 	}
-	// Compact by design past "[f2] board" (the one substring model_teatest_test.go
+	// Compact by design past the leader hint (the one substring model_teatest_test.go
 	// pins exactly): six pane keys plus quit must fit inside a realistic
 	// terminal width alongside a themeSaveErr appended below, or the error
 	// truncates before it says anything -- see this line's own git blame
-	// for the width budget that broke when [f5] flow, then [f6] chat, were
+	// for the width budget that broke when flow, then chat, were
 	// added. [↑↓] [enter] [←] [b] (SPEC-shell.md S3) are only meaningful
 	// while focus is on the sidebar -- shown always anyway, same as the
 	// f-keys above being shown while a different pane is active, rather
@@ -1401,15 +1414,15 @@ func (m Model) footer() string {
 	// the right way round -- an unreadable footer helps nobody, and the
 	// keyboard still works.
 	//
-	// Only [f4]gallery/[f5]flow are marked here -- home/board/cost/chat now
+	// Only the leader hint and quit are marked here -- the footer no longer
+	// lists panes, so home/board/cost/chat
 	// have real rows in the sidebar (nav.Build()'s tree) and are clicked
 	// there instead (handleMouse's sidebar-row zones); gallery and flow
 	// predate SPEC-shell.md and have no sidebar route (routeToPane's own
 	// doc comment), so the footer is still their only click target.
-	plain := "[tab] focus:" + focusName + " [↑↓] [enter] [←] [b] [f1]home [f2] board [f3]cost [f4]gallery [f5]flow [f6]chat [q]quit"
-	marked := m.zones.Mark(zoneFocus, "[tab] focus:"+focusName) + " [↑↓] [enter] [←] [b] [f1]home [f2] board [f3]cost " +
-		m.zones.Mark(zoneGallery, "[f4]gallery") + " " +
-		m.zones.Mark(zoneFlow, "[f5]flow") + " [f6]chat " +
+	plain := "[tab] focus:" + focusName + " [↑↓] [enter] [←] [b] " + m.leaderHint() + " [q]quit"
+	marked := m.zones.Mark(zoneFocus, "[tab] focus:"+focusName) + " [↑↓] [enter] [←] [b] " +
+		m.zones.Mark(zoneLeader, m.leaderHint()) + " " +
 		m.zones.Mark(zoneQuit, "[q]quit")
 
 	suffix := ""
@@ -1423,11 +1436,11 @@ func (m Model) footer() string {
 	return legendStyle.Width(m.width).Render(marked + suffix)
 }
 
-// homeView used to advertise the f1-f6 keys as if they were the only way
+// homeView used to advertise the digit keys as if they were the only way
 // to reach a pane -- true before SPEC-shell.md S3, stale the moment the
 // nav sidebar became the real navigation surface (S1-S4) and S6/S8/S9/
 // S10/S11 gave most of those f-keys' destinations, and many more besides,
-// a real sidebar route of their own. f1-f6 still work (S3's own "nothing
+// a real sidebar route of their own. The digit keys still work (S3's own "nothing
 // that scripts them may break" acceptance line), so they are not removed
 // from the footer below -- only no longer the thing home's own content
 // teaches a human to press first.

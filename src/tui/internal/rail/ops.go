@@ -355,3 +355,20 @@ func (m Model) renderRemoveConfirm(innerWidth int, st railStyles) []string {
 	lines = append(lines, st.legend.Width(innerWidth).Render("[any key] dismiss"))
 	return lines
 }
+
+// CapturingText reports whether the rail is mid text entry -- typing a
+// session name, where space is a character and not a command.
+//
+// The shell needs this because its leader key is space. Without it the leader
+// eats the space bar inside the rail's own composer, so a session cannot be
+// called "my session". A council seat found exactly that: the shell exempted
+// the chat panes and did not know the rail had a composer of its own.
+//
+// Exported deliberately rather than inferred from focus: the shell must ask
+// the component that owns the state, not guess from where the cursor is.
+func (m Model) CapturingText() bool { return m.opsMode == opsModeAdding }
+
+// EnterAddForTest puts the rail into name-entry mode. Exported for the
+// shell's regression test, which must assert the shell yields its leader key
+// to this state -- and cannot reach opsMode from another package.
+func (m Model) EnterAddForTest() Model { m.opsMode = opsModeAdding; return m }

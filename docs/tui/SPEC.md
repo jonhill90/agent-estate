@@ -77,7 +77,7 @@ three of the four-constant growth is `agent-tui#115`/`#122`'s
 `PaneLaneChatUnifiedList` (the combined Lanes+Chat surface variants),
 added since this count was last taken; not re-deriving whether the
 original 20 was itself exact at the time it was written, only that 24 is
-the live count now. `[f1]`-`[f6]` still map
+the live count now. `[1]`-`[6]` still map
 to exactly the original six — Home/Board/Cost/Gallery/Flow/Chat
 (`internal/shell/model.go`'s key-handling `switch`, `case "f1"` through
 `case "f6"`) — everything added since (Agents, Skills, MCP Servers,
@@ -91,7 +91,7 @@ the correction above as current.
 running `internal/shell.Model` (agent-tui#38, landed on `main` in PR agent-tui#43).
 `internal/shell.Model` owns a persistent left rail (`internal/rail`, always
 visible) and a content area that holds one of four panes — board, cost,
-gallery, flow, chat (`internal/flow`, agent-tui#64; `internal/chat`, agent-tui#20) — switched with `[f1]`–`[f6]`,
+gallery, flow, chat (`internal/flow`, agent-tui#64; `internal/chat`, agent-tui#20) — switched with `[1]`–`[6]`,
 never a relaunch. `[tab]` toggles keyboard focus between the rail and
 whichever pane is active.
 
@@ -148,7 +148,7 @@ other file in the package unchanged.
   way, so the rail's own session-name-entry mode can still accept a literal
   `q` as a character.
 - **`boardOK`** mirrors `-board`'s own launch-time refusal (no ledger, no
-  start) but for *navigation*: reaching the board pane by `[f2]` when no
+  start) but for *navigation*: reaching the board pane by `[2]` when no
   `-ledger` was configured renders `shell.Model.unavailableView` — `"!
   board unavailable"` plus the reason string — instead of running the
   board's fetch loop against an empty path. Verified live: `go build -o
@@ -259,7 +259,7 @@ config file is untouched until they edit it themselves.
 
 ### `chat.Source` (agent-tui#20)
 
-`internal/chat` is wired into `internal/shell` as `PaneChat` (`[f6]` -- `[f5]` was already `PaneFlow`, agent-tui#64, by the time this rebased onto it).
+`internal/chat` is wired into `internal/shell` as `PaneChat` (`[6]` -- `[5]` was already `PaneFlow`, agent-tui#64, by the time this rebased onto it).
 `chat.Source` is the fixture-backed read seam (`chat.FixtureSource` is the
 only implementation shipped — no lane in this estate runs on a structured
 transport yet, see `internal/chat/fixture.go`'s doc comment), with two
@@ -337,7 +337,7 @@ running the built binary, not by reading source:
    $AGENT_SUPERVISOR_REPO, or -mcp-cmd` and exits 1 (`connect()`'s default
    case, `cmd/estate/main.go`) instead of opening in a degraded state.
 2. **The board pane's unavailable message.** Reaching `PaneBoard` via
-   `[f2]` with no `-ledger` renders `shell.Model.unavailableView`'s `"!
+   `[2]` with no `-ledger` renders `shell.Model.unavailableView`'s `"!
    board unavailable"` plus `main.go`'s `boardUnavailable` string
    (`"no -ledger (or $AGENT_TUI_LEDGER) configured -- point it at a COPY of
    the ledger to use the board"`) — confirmed present in
@@ -373,7 +373,7 @@ All items below verified 2026-08-16 against `b00db9b` unless noted:
    longer blocked on the supervisor side, only on someone doing the
    agent-tui-side work.
 2. **Chat has no live transport.** `internal/chat` is wired into the shell
-   (agent-tui#20, `[f6]`) and renders correctly, but the only `chat.Source`
+   (agent-tui#20, `[6]`) and renders correctly, but the only `chat.Source`
    shipped is `chat.FixtureSource` — no lane in this estate runs on a
    structured transport (`acp`/`pi-rpc`) yet, so there is nothing live to
    read. **False as of `390c99a`, corrected 2026-08-23** — same correction

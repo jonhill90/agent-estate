@@ -237,20 +237,34 @@ func TestPressWithoutReleaseDoesNotNavigate(t *testing.T) {
 	}
 }
 
-// TestClickingGalleryInFooterStillWorks is the footer-only half of this
-// rebase: gallery has no sidebar row at all (routeToPane's own doc
-// comment), so its footer zone must still be clickable exactly as before.
-func TestClickingGalleryInFooterStillWorks(t *testing.T) {
+// TestClickingTheLeaderHintOpensTheMenu replaces a test that clicked the
+// footer's own [f4]gallery / [f5]flow zones. Those zones are gone: the footer
+// no longer lists panes, because a legend that only fits six entries cannot
+// show twenty.
+//
+// Every pane must still be reachable by MOUSE, so the hint itself is the
+// zone, and clicking it opens the which-key menu immediately -- a mouse user
+// has already expressed intent and should not wait out the keyboard timeout.
+// Without this, removing the f-keys would have quietly removed mouse
+// navigation with them.
+func TestClickingTheLeaderHintOpensTheMenu(t *testing.T) {
 	m := testModel()
 	m, _ = m.resize(tea.WindowSizeMsg{Width: 160, Height: 40})
 	_ = m.View()
 
-	x, y := locate(t, m, "[f4]gallery")
+	x, y := locate(t, m, "[space] menu")
 	next, handled := clickAt(t, m, x+2, y)
 	if !handled {
-		t.Fatalf("click at (%d,%d) on [f4]gallery was not handled", x+2, y)
+		t.Fatalf("click at (%d,%d) on the leader hint was not handled", x+2, y)
 	}
-	if next.active != PaneGallery {
-		t.Fatalf("after clicking gallery want PaneGallery, got %v", next.active)
+	if !next.leaderMenu {
+		t.Fatal("clicking the leader hint must open the which-key menu")
+	}
+	// And the menu must actually name the panes, or it is not a menu.
+	view := next.View()
+	for _, want := range []string{"gallery", "tasks", "knowledge"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("the open menu must list %q; it did not", want)
+		}
 	}
 }
