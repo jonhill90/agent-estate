@@ -134,7 +134,20 @@ func scanVerdictLines(body string) []verdictLine {
 var (
 	reviewLaneRE  = regexp.MustCompile(`(?im)^[ \t]*Review-Lane:[ \t]*(.*)\r?$`)
 	reviewedSHARE = regexp.MustCompile(`(?im)^[ \t]*Reviewed-SHA:[ \t]*([A-Za-z0-9]+)[ \t]*\r?$`)
+	// authorLaneRE mirrors reviewLaneRE's shape for the PR body's own
+	// Author-Lane: trailer (repo convention, AGENTS.md/CLAUDE.md). Used only
+	// as a contradiction check in gate.go, never as the authorship source
+	// itself -- see authorFromHeadRef and authorLaneForDispatchID.
+	authorLaneRE = regexp.MustCompile(`(?im)^[ \t]*Author-Lane:[ \t]*(.*)\r?$`)
 )
+
+// parseAuthorLaneTrailer reads the PR body's own Author-Lane: trailer, if
+// any. It is deliberately the same parseTrailer(reviewLaneRE-shaped) helper
+// used for Review-Lane: and Reviewed-SHA:, so a blank value or a trailer
+// with no match behaves identically to those two known-safe cases.
+func parseAuthorLaneTrailer(body string) (string, bool) {
+	return parseTrailer(authorLaneRE, body)
+}
 
 func parseTrailer(re *regexp.Regexp, body string) (string, bool) {
 	match := re.FindStringSubmatch(body)

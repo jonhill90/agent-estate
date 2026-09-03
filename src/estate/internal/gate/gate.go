@@ -5,11 +5,19 @@
 //  1. The pull request is open, and every required check is green AT THE
 //     HEAD SHA. Not "green somewhere" -- a check that passed on an earlier
 //     push says nothing about what is being merged now.
-//  2. A dispatched turn authored the work this PR closes, and the reviewer
-//     lane is not among those authoring lanes. Authorship is read from
-//     ledger records this estate itself wrote at dispatch time -- never
-//     from a caller-supplied issue number, and never from anything a PR's
-//     own body or comments assert about themselves. See agent-estate#926.
+//  2. A dispatched turn authored the work this PR is built from, joined
+//     STRUCTURALLY on the PR's own head ref: internal/isolate.Create writes
+//     "dispatch/<id>" as the branch for a dispatched turn's own worktree,
+//     and the reviewer lane must not be the lane that dispatch id belongs
+//     to. This is agent-estate#940's fix -- the join used to run through
+//     closingIssuesReferences (a PR body's own "Closes #N", GitHub-parsed)
+//     joined to a ledger record BY ISSUE NUMBER, which failed whenever the
+//     closing issue was filed after the dispatch it closes (#944), or
+//     simply never named in GitHub's parsed form (#937, #939). A head ref
+//     is written by the estate itself, never asserted by an agent or by a
+//     body the author controls, and needs no issue to pre-exist anything.
+//     A PR whose head ref is not a dispatch branch is refused outright --
+//     there is no fallback to the old, forgeable path.
 //  3. That same reviewer lane has a COMPLETED review turn on record for
 //     THIS pull request. A dispatched-but-unfinished review is not
 //     independence: nobody has actually looked yet.
@@ -18,7 +26,7 @@
 //     the body -- and is not stale against the checks that ran at head.
 //
 // Anything unresolved -- an unknown author, a pending check, an unreadable
-// ledger, a PR that closes no issue GitHub can confirm -- is a REFUSAL.
+// ledger, a head ref that is not a dispatch branch -- is a REFUSAL.
 // "Cannot tell" is never "allowed".
 package gate
 
@@ -52,7 +60,9 @@ type closingIssue struct {
 type PR struct {
 	Number        int            `json:"number"`
 	HeadOID       string         `json:"headRefOid"`
+	HeadRefName   string         `json:"headRefName"`
 	State         string         `json:"state"`
+	Body          string         `json:"body"`
 	Checks        []Check        `json:"statusCheckRollup"`
 	ClosingIssues []closingIssue `json:"closingIssuesReferences"`
 	Comments      []Comment      `json:"comments"`
@@ -65,15 +75,16 @@ type Decision struct {
 }
 
 // fetch reads the pull request's own state from GitHub. Everything Evaluate
-// needs to establish identity (closingIssuesReferences), freshness (checks
-// plus their own startedAt) and the reviewer's public verdict (comments)
-// comes from here -- never from a caller argument, per constraint 6 of
-// agent-estate#926: an author who could name any issue they liked used to
-// be able to merge anything, using only record shapes `estate dispatch`
-// writes itself.
+// needs to establish identity (headRefName, and the body only to catch a
+// contradicting Author-Lane: trailer -- never to establish identity itself),
+// freshness (checks plus their own startedAt) and the reviewer's public
+// verdict (comments) comes from here -- never from a caller argument, per
+// constraint 6 of agent-estate#926: an author who could name any issue they
+// liked used to be able to merge anything, using only record shapes `estate
+// dispatch` writes itself.
 func fetch(repo string, pr int) (*PR, error) {
 	out, err := exec.Command("gh", "pr", "view", fmt.Sprint(pr), "-R", repo,
-		"--json", "number,headRefOid,state,statusCheckRollup,closingIssuesReferences,comments").Output()
+		"--json", "number,headRefOid,headRefName,state,body,statusCheckRollup,closingIssuesReferences,comments").Output()
 	if err != nil {
 		return nil, fmt.Errorf("gh pr view %s#%d: %w", repo, pr, err)
 	}
@@ -138,6 +149,16 @@ func earliestCheckStart(p *PR) (time.Time, bool) {
 // dispatch id, and a review turn carries the same issue as the work it
 // reviews, so the two are indistinguishable." Role, recorded at dispatch,
 // is what removes the ambiguity.
+//
+// STATUS (agent-estate#940): evaluate no longer calls this to establish
+// authorship -- the issue-keyed join it implements is the join #940 found
+// broken (it needs a PR body to declare "Closes #N" in GitHub's own parsed
+// form, AND it needs that issue to already exist at dispatch time, which is
+// false whenever the Director files the closing issue after dispatching the
+// work that closes it -- agent-estate#944's exact case). It is kept, tested,
+// and correct for what it does; a future caller wanting issue-keyed
+// authorship as ADDITIONAL, non-blocking evidence alongside the head-ref
+// join below can still reach for it.
 func authorLanes(l *ledger.Ledger, issues map[string]bool) (map[string]bool, error) {
 	cur, err := l.Current()
 	if err != nil {
@@ -154,6 +175,47 @@ func authorLanes(l *ledger.Ledger, issues map[string]bool) (map[string]bool, err
 		out[r.Lane] = true
 	}
 	return out, nil
+}
+
+// authorFromHeadRef reports the dispatch id a PR's head ref names, if any.
+// internal/isolate.Create writes exactly "dispatch/<id>" as the branch for a
+// dispatched turn's own worktree (isolate.go's Create); this is the inverse
+// read of that one fixed, estate-written string. Only a SINGLE leading
+// occurrence is stripped -- "dispatch/dispatch/<id>" is refused rather than
+// unwrapped, the same discipline verdict.go's normaliseLaneID already
+// applies to the Review-Lane: trailer, and for the same reason: a doubled
+// prefix is not a shape the estate ever writes, so accepting it would be
+// widening the match past what "the estate wrote this" can actually prove.
+func authorFromHeadRef(headRef string) (id string, ok bool) {
+	if !strings.HasPrefix(headRef, dispatchBranchPrefix) {
+		return "", false
+	}
+	id = strings.TrimPrefix(headRef, dispatchBranchPrefix)
+	if id == "" || strings.HasPrefix(id, dispatchBranchPrefix) {
+		return "", false
+	}
+	return id, true
+}
+
+// authorLaneForDispatchID returns the lane the ledger records as RoleAuthor
+// for EXACTLY this dispatch id -- the id a PR's own head ref names, per
+// authorFromHeadRef above. This is the structural join agent-estate#940
+// asks for: main.go's dispatch case writes Lane equal to id for every
+// role=author record (l.Append(ledger.Record{ID: id, Lane: id, ...})), so
+// matching on ID here is matching on the exact dispatched turn that created
+// this branch -- never an issue number a PR body asserts about itself, and
+// never any OTHER authoring turn that happens to share an issue.
+func authorLaneForDispatchID(l *ledger.Ledger, id string) (lane string, ok bool, err error) {
+	cur, err := l.Current()
+	if err != nil {
+		return "", false, err
+	}
+	for _, r := range cur {
+		if r.ID == id && r.EffectiveRole() == ledger.RoleAuthor {
+			return r.Lane, true, nil
+		}
+	}
+	return "", false, nil
 }
 
 // reviewerRecord returns the latest COMPLETE RoleReviewer ledger record on
@@ -242,31 +304,38 @@ func evaluate(p *PR, reviewerLane string, l *ledger.Ledger) Decision {
 		return refuse(d, "reviewer lane not supplied -- cannot establish independence")
 	}
 
-	// Identity comes from the PR itself, never a caller argument
-	// (constraint 6). A PR GitHub reports as closing nothing is refused
-	// rather than treated as authorless-and-fine: an unlinked PR gives the
-	// gate no issue to check authorship against at all.
-	if len(p.ClosingIssues) == 0 {
-		return refuse(d, fmt.Sprintf("PR #%d closes no issue GitHub can confirm -- authorship cannot be established, refusing", p.Number))
+	// Identity comes from the PR's own head ref, never a caller argument
+	// (constraint 6) and never a closing issue a PR body asserts about
+	// itself. See package doc's condition 2 and agent-estate#940: a head
+	// ref is written by internal/isolate.Create, not by the agent and not
+	// by whoever opened the PR, so a PR whose head is not a dispatch
+	// branch carries no evidence the estate itself produced -- refused
+	// outright, with no fallback to the old issue-keyed path.
+	dispatchID, isDispatchBranch := authorFromHeadRef(p.HeadRefName)
+	if !isDispatchBranch {
+		return refuse(d, fmt.Sprintf("PR #%d head ref %q is not a dispatch branch -- authorship cannot be established structurally, refusing (agent-estate#940)", p.Number, p.HeadRefName))
 	}
-	issues := map[string]bool{}
-	for _, ci := range p.ClosingIssues {
-		issues[strconv.Itoa(ci.Number)] = true
-	}
-
-	authors, err := authorLanes(l, issues)
+	authorLane, ok, err := authorLaneForDispatchID(l, dispatchID)
 	if err != nil {
 		return refuse(d, "cannot read ledger for authorship: "+err.Error())
 	}
-	if len(authors) == 0 {
-		var names []string
-		for n := range issues {
-			names = append(names, "#"+n)
-		}
-		return refuse(d, "no authoring (role=author) lane on record for "+strings.Join(names, ", ")+" -- authorship unknown, refusing")
+	if !ok {
+		return refuse(d, "no role=author ledger record on file for dispatch id "+dispatchID+" (from head ref "+p.HeadRefName+") -- authorship unknown, refusing")
 	}
-	if authors[reviewerLane] {
-		return refuse(d, "reviewer lane "+reviewerLane+" also authored work on an issue this PR closes -- self-review")
+
+	// A PR body may carry a self-declared Author-Lane: trailer (repo
+	// convention, AGENTS.md/CLAUDE.md). It is never trusted to ESTABLISH
+	// identity -- the head ref above already did that structurally -- but
+	// if one is present and disagrees with what the head ref resolved to,
+	// that is exactly the shape of a forged trailer, the same class of hole
+	// agent-estate#934 closed for Review-Lane:, and is refused rather than
+	// silently ignored.
+	if claimed, has := parseAuthorLaneTrailer(p.Body); has && normaliseLaneID(claimed) != normaliseLaneID(authorLane) {
+		return refuse(d, "PR body's Author-Lane: trailer (\""+claimed+"\") contradicts the head-ref-derived author (\""+authorLane+"\") -- refusing")
+	}
+
+	if authorLane == reviewerLane {
+		return refuse(d, "reviewer lane "+reviewerLane+" is also the dispatch that authored this PR's own head branch -- self-review")
 	}
 
 	rec, ok, err := reviewerRecord(l, p.Number, reviewerLane)
