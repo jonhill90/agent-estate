@@ -451,11 +451,23 @@ measured against. See
   `ui-evidence-gate.sh` were retired on 2026-09-02 (see
   [`docs/ci-rules-retired.md`](docs/ci-rules-retired.md)); nothing fails a PR
   that omits the frame. The path it named, `scripts/supervisor/laneview/`, no
-  longer exists either — the viewer is `src/tui`. **There is no capture helper
-  in this tree today**; find one with `git ls-files 'src/tui/**' | grep -i
-  frame` rather than trusting a filename written here, and if that returns
-  nothing, capturing a frame is manual. Reimplementing the gate in Go is open
-  work.
+  longer exists either — the viewer is `src/tui`. **The capture helper is
+  `src/tui/cmd/vhscapture`** (`go run ./cmd/vhscapture -tape
+  testdata/vhs/<name>.tape`, run from `src/tui`) — retries a whole `vhs` run
+  until every `Screenshot` target clears its colour floor, since a bare `vhs`
+  run silently writes a stale/blank frame some fraction of the time
+  (agent-estate#947). Local only, not wired into CI (`vhs`, `ttyd` and
+  `ffmpeg` aren't installed on the `ubuntu-latest` runner `tui-ci.yml` uses —
+  confirmed by reading the workflow, agent-estate#976); see
+  `src/tui/testdata/vhs/README.md`. Most tapes have no measured `.mincolors`
+  floor — run `git ls-tree HEAD -r --name-only src/tui/testdata/vhs/ | grep
+  -c '\.tape$'` against the same with `'\.mincolors$'` rather than trusting a
+  count written here (29 tapes, 4 floors, agent-estate#976, 2026-09-03 — this
+  drifts every time a tape is added). The unmeasured rest silently fall back
+  to `-min-colors`'s own unmeasured default (1000), which agent-estate#960's
+  own sweep found rejects over a third of tapes outright, so the floor is
+  neither fully permissive nor fully closed for them. Reimplementing the gate
+  in Go is open work.
 
 ---
 *Last checked against the tree at `2e810dc` (2026-08-29). If `git log
