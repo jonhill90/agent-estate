@@ -22,25 +22,29 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 
 	"github.com/jonhill90/agent-estate/src/tui/internal/vhscapture"
 )
 
 func main() {
 	tape := flag.String("tape", "", "path to the .tape file to run (required)")
-	// 1000 is picked from agent-estate#956's review evidence, not taste: blank
-	// frames measure 1 color, the partial/transitional frame the review
-	// caught slipping past the old default of 2 measured 259 colors, and
-	// the two settled frames measured directly (agents-mode.tape) were
-	// 4393 and 5674 colors. 1000 sits roughly 4x above the observed
-	// partial shape and well under half the lowest observed settled
-	// shape, so it rejects both failure classes agent-estate#947 named while still
-	// accepting real captures at the tool's own default -- no flag
-	// required to get a default that actually enforces the floor it
-	// claims to. A tape whose own settled frame is known to fall below
-	// 1000 still needs an explicit -min-colors override; this default
-	// cannot know every tape's true floor from two measured samples.
-	minColors := flag.Int("min-colors", 1000, "an attempt's Screenshot output must have at least this many distinct colors to count as settled; 1000 rejects both a blank (1 color) and a partial/transitional (259 colors, agent-estate#956) frame at the default -- raise or lower it once you've measured a specific tape's own settled color count")
+	// 1000 is agent-estate#956's own evidence -- blank frames measure 1
+	// color, the partial/transitional frame that review caught measured
+	// 259, and the two settled frames it measured directly
+	// (agents-mode.tape) were 4393 and 5674. agent-estate#960 then measured
+	// this default against every tape in the repo and found it rejects
+	// over a third of them: a sparse pane's own real settled frame can
+	// measure a few hundred colors, below this default and below a
+	// busier tape's own partial/torn frame -- no single number is above
+	// one and below the other. This flag is now the FALLBACK only, used
+	// when a tape has no sidecar floor file recorded next to it (see
+	// internal/vhscapture's PerTargetFloors); it no longer claims to be
+	// the right number for every tape. Passing this flag explicitly
+	// overrides any sidecar for every target in this run, uniformly --
+	// useful to force a specific floor while debugging, not something a
+	// normal run should need.
+	minColors := flag.Int("min-colors", 1000, "fallback distinct-color floor for a target with no recorded sidecar (see PerTargetFloors); passing this explicitly overrides every target's sidecar floor uniformly")
 	maxAttempts := flag.Int("max-attempts", 8, "how many full tape runs to try before giving up")
 	flag.Parse()
 
@@ -61,6 +65,37 @@ func main() {
 		os.Exit(2)
 	}
 
+	explicitMinColors := false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "min-colors" {
+			explicitMinColors = true
+		}
+	})
+
+	sidecarFloors, err := vhscapture.PerTargetFloors(*tape)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "vhscapture: reading %s: %v\n", vhscapture.SidecarPath(*tape), err)
+		os.Exit(2)
+	}
+
+	floorFor := func(target string) int {
+		if !explicitMinColors {
+			if v, ok := sidecarFloors[filepath.Base(target)]; ok {
+				return v
+			}
+		}
+		return *minColors
+	}
+
+	switch {
+	case explicitMinColors:
+		fmt.Printf("vhscapture: min-colors=%d for every target (explicit flag)\n", *minColors)
+	case len(sidecarFloors) > 0:
+		fmt.Printf("vhscapture: per-target floors from %s (fallback %d for any target it doesn't name)\n", vhscapture.SidecarPath(*tape), *minColors)
+	default:
+		fmt.Printf("vhscapture: min-colors=%d for every target (no sidecar at %s -- unmeasured, this default may reject a genuine sparse frame; see agent-estate#960)\n", *minColors, vhscapture.SidecarPath(*tape))
+	}
+
 	tapePath := *tape
 	runTape := func() error {
 		cmd := exec.Command("vhs", tapePath)
@@ -69,7 +104,7 @@ func main() {
 		return cmd.Run()
 	}
 
-	report, runErr := vhscapture.RunUntilSettled(targets, *minColors, *maxAttempts, runTape)
+	report, runErr := vhscapture.RunUntilSettled(targets, floorFor, *maxAttempts, runTape)
 	report.Print(os.Stdout)
 	if runErr != nil {
 		fmt.Fprintf(os.Stderr, "vhscapture: %v\n", runErr)

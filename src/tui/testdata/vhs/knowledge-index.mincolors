@@ -1,0 +1,17 @@
+# measured 2026-09-03 (agent-estate#960): 4 consecutive
+# `vhs testdata/vhs/knowledge-index.tape` runs, single unretried attempts
+# each. Every target measured IDENTICAL across all 4 runs -- no variance
+# observed, unlike agents-mode.tape's blank/settled split:
+#   knowledge-01-vault-list.png:        220, 220, 220, 220
+#   knowledge-02-compiled-list.png:     446, 446, 446, 446
+#   knowledge-03-compiled-detail.png:   219, 219, 219, 219
+#   knowledge-04-back-to-vault-list.png:220, 220, 220, 220
+# Floor is half the lowest observed settled count for that target --
+# comfortably above a 1-colour blank capture, comfortably below every
+# real observed value. This is the exact case #960 was filed about: all
+# four of these sit below cmd/vhscapture's own 1000-colour global
+# default and would have been rejected by it.
+knowledge-01-vault-list.png=110
+knowledge-02-compiled-list.png=223
+knowledge-03-compiled-detail.png=109
+knowledge-04-back-to-vault-list.png=110

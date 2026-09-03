@@ -159,7 +159,7 @@ func TestRunUntilSettledRetriesPastBlankAndMissingFrames(t *testing.T) {
 		return nil
 	}
 
-	report, err := RunUntilSettled([]string{target}, 2, 8, runTape)
+	report, err := RunUntilSettled([]string{target}, UniformFloor(2), 8, runTape)
 	if err != nil {
 		t.Fatalf("RunUntilSettled: %v", err)
 	}
@@ -189,7 +189,7 @@ func TestRunUntilSettledExhaustsAttemptsAndReportsFailure(t *testing.T) {
 		return nil
 	}
 
-	report, err := RunUntilSettled([]string{target}, 2, 4, runTape)
+	report, err := RunUntilSettled([]string{target}, UniformFloor(2), 4, runTape)
 	if err == nil {
 		t.Fatalf("RunUntilSettled: want error when every attempt stays blank, got nil")
 	}
@@ -218,7 +218,7 @@ func TestRunUntilSettledRemovesStaleFileBeforeEachAttempt(t *testing.T) {
 		return nil
 	}
 
-	if _, err := RunUntilSettled([]string{target}, 2, 1, runTape); err != nil {
+	if _, err := RunUntilSettled([]string{target}, UniformFloor(2), 1, runTape); err != nil {
 		t.Fatalf("RunUntilSettled: %v", err)
 	}
 	if sawFileAtRunTapeStart {
@@ -248,7 +248,7 @@ func TestRunUntilSettledRejectsPartialFrameAtDefaultMinColors(t *testing.T) {
 		return nil
 	}
 
-	report, err := RunUntilSettled([]string{target}, defaultMinColors, 4, runTape)
+	report, err := RunUntilSettled([]string{target}, UniformFloor(defaultMinColors), 4, runTape)
 	if err == nil {
 		t.Fatalf("RunUntilSettled: want error for a 259-colour partial frame at the default min-colors, got nil (settled=%v)", report.Settled)
 	}
@@ -275,7 +275,7 @@ func TestRunUntilSettledAcceptsSettledFrameAtDefaultMinColors(t *testing.T) {
 		return nil
 	}
 
-	report, err := RunUntilSettled([]string{target}, defaultMinColors, 4, runTape)
+	report, err := RunUntilSettled([]string{target}, UniformFloor(defaultMinColors), 4, runTape)
 	if err != nil {
 		t.Fatalf("RunUntilSettled: %v (want a 4393-colour settled frame to pass at the default min-colors)", err)
 	}
@@ -300,7 +300,7 @@ func TestReportPrintShowsEveryAttemptNotJustTheLast(t *testing.T) {
 		}
 		return nil
 	}
-	report, err := RunUntilSettled([]string{target}, 2, 8, runTape)
+	report, err := RunUntilSettled([]string{target}, UniformFloor(2), 8, runTape)
 	if err != nil {
 		t.Fatalf("RunUntilSettled: %v", err)
 	}
