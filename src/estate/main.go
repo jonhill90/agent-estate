@@ -33,6 +33,7 @@ func usage() {
   estate merge <repo> <pr> <issue> <reviewer-lane>
                                         may this PR merge? checks + independence
   estate corpus-audit [n]               hard parameters least supported by your words
+  estate reconcile [--apply]           in-flight turns that cannot still be running
   estate tasks                          latest state of every task
   estate inflight                       tasks still occupying a slot
   estate tick record <phase-item> [artifact]
@@ -122,6 +123,9 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("may merge: all checks green at head, reviewer is not the author")
+
+	case "reconcile":
+		runReconcile(l, len(os.Args) > 2 && os.Args[2] == "--apply")
 
 	case "tasks", "inflight":
 		var rs []ledger.Record
