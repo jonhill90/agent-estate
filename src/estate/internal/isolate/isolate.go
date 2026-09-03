@@ -225,6 +225,41 @@ func CreateOnBranch(repoRoot, id, branch string) (*Worktree, error) {
 	return &Worktree{Path: path, Branch: branch, Base: strings.TrimSpace(string(baseOut)), root: repoRoot, Detached: true}, nil
 }
 
+// knownDetritus lists worktree-relative paths -- exactly as `git status
+// --porcelain --ignored` reports them, including the trailing "/" git prints
+// for a directory -- that are known to be regenerable build byproducts
+// rather than a dispatch turn's own output. Dirty does not count an ignored
+// path matching one of these toward "uncollected work"; every other ignored
+// path still refuses teardown, and so does anything that is not merely
+// ignored (untracked, modified, staged).
+//
+// This is an ALLOWLIST of specific, seen material -- NOT "ignore everything
+// --ignored reports." A lane's built binary, a local config file, or a
+// captured frame can be gitignored and still be the only copy of that
+// output in existence; those must keep refusing teardown. Add an entry only
+// after it has actually been seen leaking worktrees, not speculatively.
+var knownDetritus = []string{
+	// reference/ is deleted, unmaintained shell/Python kept only so it can be
+	// READ, never run -- see this repo's own CLAUDE.md. Every dispatch's git
+	// worktree still ends up running the Python interpreter over it somewhere
+	// in its toolchain, which leaves compiled bytecode behind: 100%
+	// regenerable, and it holds nothing any turn produced. Measured against
+	// 138 live dispatch worktrees: agent-estate#983.
+	"reference/scripts/supervisor/__pycache__/",
+}
+
+// isKnownDetritus reports whether path -- as printed after the "!! " prefix
+// of a `git status --porcelain --ignored` line -- names known detritus
+// rather than a turn's own output.
+func isKnownDetritus(path string) bool {
+	for _, d := range knownDetritus {
+		if path == d {
+			return true
+		}
+	}
+	return false
+}
+
 // Dirty reports whether the worktree holds uncommitted changes -- output a
 // dispatch produced that nothing has collected yet.
 //
@@ -239,12 +274,34 @@ func CreateOnBranch(repoRoot, id, branch string) (*Worktree, error) {
 // incidental ignored junk (a .DS_Store, a stray build directory) now refuses
 // teardown and leaks until something collects it. That direction is
 // recoverable and visible. The other direction destroys work and is not.
+//
+// The one exception is knownDetritus above: an ignored path matched there is
+// excluded from this count because it has been confirmed, not assumed, to be
+// regenerable rather than a turn's output (agent-estate#983 -- the refusal
+// above fired on 124 of 138 live dispatch worktrees whose only ignored
+// content was exactly one such path, and the message it printed was false in
+// every one of them). Anything ignored that is NOT on the list still counts
+// as dirty, same as before this exception existed.
 func (w *Worktree) Dirty() (bool, error) {
 	out, err := git(w.Path, "status", "--porcelain", "--ignored")
 	if err != nil {
 		return false, err
 	}
-	return strings.TrimSpace(string(out)) != "", nil
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		path, ok := strings.CutPrefix(line, "!! ")
+		if !ok {
+			// Not an ignored-only entry -- untracked, modified, staged, or
+			// anything else git status reports. Always real.
+			return true, nil
+		}
+		if !isKnownDetritus(path) {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Head returns the worktree's current HEAD commit -- the estate's own,
