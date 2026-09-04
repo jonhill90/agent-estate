@@ -164,17 +164,50 @@ func prHeadBranch(pr int) (string, error) {
 	return branch, nil
 }
 
+// knowledgeGrounding is the one paragraph every dispatched turn receives
+// telling it the compiled knowledge index (agent-estate#1019 onward) exists
+// at all -- appended after whatever role-specific block roleGrounding
+// already returns, never in place of it (agent-estate#1049: nine knowledge
+// PRs merged and zero mentions of "knowledge" in this file's grounding).
+//
+// It names `go run ./src/estate knowledge ...`, not a bare `estate` binary,
+// because that is what was actually verified from inside a dispatch
+// worktree: `estate` is not on PATH there (`which estate` fails, checked
+// from this exact worktree layout), but `go run ./src/estate knowledge
+// query "test"` succeeds when run from the worktree root, which is where
+// h.Start (see dispatch below) starts every turn's process. Anything
+// telling a turn to invoke a bare `estate` would be untested and, per the
+// PATH check above, false.
+//
+// Deliberately NOT a pre-fetch: no query result is ever injected here, only
+// the fact that querying is possible (agent-estate#1049's "no automatic
+// pre-fetch" -- injecting results into every prompt would recreate the
+// fixed-payload problem this issue exists to fix, one layer up).
+func knowledgeGrounding() string {
+	return "\n\n## Knowledge retrieval exists (agent-estate#1049)\n" +
+		"Before asserting what the operator decided, ask: `go run ./src/estate knowledge " +
+		"query [--private] \"<question>\"` returns small, ranked, cited pointers, and " +
+		"`go run ./src/estate knowledge get [--private] <id>` returns one pointer's full " +
+		"body -- run both from this worktree's root; `estate` itself is not on PATH here. " +
+		"The index is derived, never authoritative, and may be reported stale. `no_match` " +
+		"means no match, `withheld_private` means matches exist but are private, and " +
+		"`--private` lifts that filter and says so in its own output -- do not paste " +
+		"private material into anything public. This is a tool, not a required step: use " +
+		"it if it helps, and the turn still works when the index is missing.\n"
+}
+
 // roleGrounding is what dispatch appends to the prompt based on role alone
 // -- the author's branch-discipline block (agent-estate#940, text
 // unchanged by #949), the fix-pass's branch-CONTINUATION block
 // (fixPassGrounding, agent-estate#940's "does not survive a fix pass"
-// follow-up), or the reviewer's verdict contract (reviewerContract, #949).
-// Only one of the three ever applies to a given turn.
+// follow-up), or the reviewer's verdict contract (reviewerContract, #949) --
+// plus, since agent-estate#1049, knowledgeGrounding appended to every one of
+// them: the one block that does not vary by role.
 func roleGrounding(role ledger.Role, id string, reviewPR int, branch string, fixPass bool) string {
 	switch role {
 	case ledger.RoleAuthor:
 		if fixPass {
-			return fixPassGrounding(reviewPR, branch)
+			return fixPassGrounding(reviewPR, branch) + knowledgeGrounding()
 		}
 		return "\n\n## Branch discipline (agent-estate#940 -- read this before opening a PR)\n" +
 			"Your worktree's branch is already `" + branch + "` -- created by the estate " +
@@ -185,9 +218,10 @@ func roleGrounding(role ledger.Role, id string, reviewPR int, branch string, fix
 			" the merge gate (`estate merge`) derives authorship by reading the PR's own head " +
 			"ref back and joining it to this exact dispatch's ledger record. A PR opened from " +
 			"any other branch carries no evidence the estate produced, and the gate refuses it " +
-			"structurally, with no override.\n"
+			"structurally, with no override.\n" +
+			knowledgeGrounding()
 	case ledger.RoleReviewer:
-		return reviewerContract(id, reviewPR)
+		return reviewerContract(id, reviewPR) + knowledgeGrounding()
 	default:
 		return ""
 	}
