@@ -47,14 +47,42 @@ const (
 const (
 	tier1FieldWeight = 3.0
 	tier2FieldWeight = 1.0
+
+	// ancestorFieldWeight is agent-estate#1113's variant B: a repo-docs
+	// section's ANCESTOR heading text (Item.Tier1AncestorScored) is still
+	// searchable, just not at the same 3x weight as the section's own
+	// leaf heading -- unlike tier1FieldWeight/tier2FieldWeight, this one
+	// was measured and is not a default anyone published; see #1113's PR
+	// body for the per-case table across ancestorFieldWeight=0 (variant
+	// A -- ancestors dropped from scoring entirely) and =1.0 (variant B)
+	// against the golden set, and which one this value reflects.
+	ancestorFieldWeight = 1.0
 )
 
-// tier1SearchableText and tier2SearchableText are searchableText's own
-// two fields, kept separate here (rather than flattened into one string)
-// because BM25 field weighting needs to know which field a term came
-// from -- information a single joined string throws away.
+// tier1SearchableText, ancestorSearchableText and tier2SearchableText are
+// searchableText's own three fields, kept separate here (rather than
+// flattened into one string) because BM25 field weighting needs to know
+// which field a term came from -- information a single joined string
+// throws away.
+//
+// tier1SearchableText reads Item.Tier1Scored when the item sets it
+// (repo-docs only, agent-estate#1113) -- a section's own LEAF heading,
+// never its ancestor path -- and falls back to Tier1 itself for every
+// other source, whose Tier1 is already one leaf-shaped line with no
+// ancestor path to split out.
 func tier1SearchableText(it Item) string {
-	return strings.ToLower(strings.Join(append([]string{it.Tier1}, append(it.StructuralTags, it.SynapticTags...)...), " \x1f "))
+	tier1 := it.Tier1Scored
+	if tier1 == "" {
+		tier1 = it.Tier1
+	}
+	return strings.ToLower(strings.Join(append([]string{tier1}, append(it.StructuralTags, it.SynapticTags...)...), " \x1f "))
+}
+
+// ancestorSearchableText carries a repo-docs section's dropped ancestor
+// heading text (Item.Tier1AncestorScored) -- empty, and so contributing
+// nothing, for every other source.
+func ancestorSearchableText(it Item) string {
+	return strings.ToLower(it.Tier1AncestorScored)
 }
 
 func tier2SearchableText(it Item) string {
@@ -70,6 +98,9 @@ func weightedTermFreqs(it Item) (freqs map[string]float64, length float64) {
 	freqs = map[string]float64{}
 	for term, c := range fieldTermCounts(tier1SearchableText(it)) {
 		freqs[term] += tier1FieldWeight * float64(c)
+	}
+	for term, c := range fieldTermCounts(ancestorSearchableText(it)) {
+		freqs[term] += ancestorFieldWeight * float64(c)
 	}
 	for term, c := range fieldTermCounts(tier2SearchableText(it)) {
 		freqs[term] += tier2FieldWeight * float64(c)

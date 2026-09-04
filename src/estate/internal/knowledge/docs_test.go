@@ -223,6 +223,35 @@ func TestRepoDocsSourceIDIsStableAcrossCheckoutRoots(t *testing.T) {
 	}
 }
 
+// TestRepoDocsSourceSplitsScoredTier1FromDisplayedTier1 is agent-estate
+// #1113's own regression fixture: Tier1 (displayed) stays the full
+// ancestor path, Tier1Scored carries the section's own leaf heading only,
+// and Tier1AncestorScored carries the dropped ancestor text -- so the
+// scorer and the reader see different things by construction, not by
+// accident.
+func TestRepoDocsSourceSplitsScoredTier1FromDisplayedTier1(t *testing.T) {
+	dir := writeFixtureRepo(t)
+	_, items := repoDocsSource(dir)
+
+	var conventions Item
+	found := false
+	for _, it := range items {
+		if it.Tier1 == "fixture-repo — agent orientation — The daemon — Conventions" {
+			conventions = it
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("no item with the daemon's own \"Conventions\" heading path: %+v", items)
+	}
+	if conventions.Tier1Scored != "Conventions" {
+		t.Errorf("Tier1Scored = %q, want the leaf heading only (\"Conventions\")", conventions.Tier1Scored)
+	}
+	if conventions.Tier1AncestorScored != "fixture-repo — agent orientation — The daemon" {
+		t.Errorf("Tier1AncestorScored = %q, want every heading above the leaf", conventions.Tier1AncestorScored)
+	}
+}
+
 func TestFindRepoRootReturnsEmptyWhenNoMarkerExists(t *testing.T) {
 	if got := findRepoRoot(t.TempDir()); got != "" {
 		t.Fatalf("findRepoRoot() = %q, want \"\" (no AGENTS.md anywhere above a bare temp dir)", got)
