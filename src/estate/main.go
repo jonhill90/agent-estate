@@ -463,6 +463,7 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 		fmt.Println("*** MOSTLY WITHHELD -- most matching items are private; the results below are a minority of the answer ***")
 	}
 	printContradictions(qr.Contradictions)
+	printSourceStatuses(qr.SourceStatuses)
 	fmt.Printf("%d match(es) for %q (showing %d, %d not returned, %d withheld as private)\n\n",
 		qr.TotalMatched, qr.Question, len(qr.Matches), qr.NotReturned, qr.WithheldPrivate)
 	for _, m := range qr.Matches {
@@ -481,7 +482,6 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 	fmt.Println("ranking: " + qr.RankingBasis)
 	fmt.Println("ask `estate knowledge get <id>` for one item's full tier2/tier3")
 	printRepoDocsRootIfAny(matchSources(qr.Matches))
-	printSourceStatuses(qr.SourceStatuses)
 }
 
 // matchSources collects the distinct Source values across a set of
@@ -679,6 +679,30 @@ func printContradictions(cs []knowledge.Contradiction) {
 	}
 }
 
+// printSourceStatuses renders any source that failed to read when the index
+// was BUILT (as opposed to no item matching, or the index itself being
+// unreadable NOW -- see printKnowledgeQuery's own doc comment). Printed
+// ABOVE the match list in the matched path (never after it, alongside
+// printContradictions) because agent-estate#1116: a degraded source is a
+// property of the SET the same way a contradiction is -- it says part of
+// the answer was never in the running -- and burying it below ten
+// confident-looking matches let a reader act on an answer that was
+// silently incomplete. In the two early-return states (StateNoMatch,
+// StateWithheldPrivate) it already ran first, since there is no match list
+// to bury it under in the first place; this only changes the matched path
+// to the same position.
+//
+// A "note:" line, not a "*** ***" banner: whether the degraded source is
+// one the query would actually have drawn from isn't something a
+// QueryResult can currently answer -- SourceStatuses names which of the
+// four build-time readers failed, but nothing here ties a failed source to
+// which matched terms it would have scored, so a caller can't tell "this
+// gap is unrelated to your question" from "this gap is exactly your
+// question" from this record alone. Coverage.State already carries the
+// louder machine-readable signal (CoverageDegraded/CoverageMixed) for a
+// caller that wants to branch on it; this is the prose surface, kept at
+// the same visibility as the contradiction notes it sits beside rather
+// than invented as a signal this package cannot actually back.
 func printSourceStatuses(sources []knowledge.SourceResult) {
 	for _, s := range sources {
 		if !s.OK {
