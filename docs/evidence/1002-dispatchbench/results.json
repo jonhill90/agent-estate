@@ -1,0 +1,422 @@
+{
+  "started_at": "2026-09-04T01:17:06.245613Z",
+  "finished_at": "2026-09-04T01:20:01.868134Z",
+  "turns_requested": 10,
+  "workload": "10 turns per arm; turn i reads the i-th of 10 generated 40-line text files in the working directory and reports its line count and one word from it",
+  "limits": {
+    "MinFreeMemMB": 2048,
+    "MaxSwapoutsPerSample": 1,
+    "MaxWorkerRSSMB": 2000
+  },
+  "model": "",
+  "results": [
+    {
+      "arm": "stateless",
+      "turn": 1,
+      "prompt": "Read the file f01.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 6534,
+      "answered": true,
+      "cost_usd": 0.352869,
+      "input_tokens": 4,
+      "output_tokens": 229,
+      "cache_read_tokens": 61014,
+      "cache_creation_tokens": 31598,
+      "token_source": "claude -p --output-format json envelope",
+      "memory": {
+        "peak_worker_rss_mb": 643.359375,
+        "peak_host_rss_mb": 12858.63671875,
+        "min_free_mem_mb": 7147.671875,
+        "max_swapouts_per_2s": 0,
+        "samples": 9
+      }
+    },
+    {
+      "arm": "stateless",
+      "turn": 2,
+      "prompt": "Read the file f02.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 11401,
+      "answered": true,
+      "cost_usd": 0.37703299999999995,
+      "input_tokens": 6,
+      "output_tokens": 368,
+      "cache_read_tokens": 111122,
+      "cache_creation_tokens": 31159,
+      "token_source": "claude -p --output-format json envelope",
+      "memory": {
+        "peak_worker_rss_mb": 645.8125,
+        "peak_host_rss_mb": 12802.83984375,
+        "min_free_mem_mb": 7059.8125,
+        "max_swapouts_per_2s": 0,
+        "samples": 16
+      }
+    },
+    {
+      "arm": "stateless",
+      "turn": 3,
+      "prompt": "Read the file f03.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 14397,
+      "answered": true,
+      "cost_usd": 0.36137899999999995,
+      "input_tokens": 6,
+      "output_tokens": 404,
+      "cache_read_tokens": 109544,
+      "cache_creation_tokens": 29584,
+      "token_source": "claude -p --output-format json envelope",
+      "memory": {
+        "peak_worker_rss_mb": 645.078125,
+        "peak_host_rss_mb": 12789.65234375,
+        "min_free_mem_mb": 7114,
+        "max_swapouts_per_2s": 0,
+        "samples": 22
+      }
+    },
+    {
+      "arm": "stateless",
+      "turn": 4,
+      "prompt": "Read the file f04.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 6618,
+      "answered": true,
+      "cost_usd": 0.3237175,
+      "input_tokens": 4,
+      "output_tokens": 179,
+      "cache_read_tokens": 63951,
+      "cache_creation_tokens": 28661,
+      "token_source": "claude -p --output-format json envelope",
+      "memory": {
+        "peak_worker_rss_mb": 640.671875,
+        "peak_host_rss_mb": 13813.984375,
+        "min_free_mem_mb": 6744.75,
+        "max_swapouts_per_2s": 0,
+        "samples": 10
+      }
+    },
+    {
+      "arm": "stateless",
+      "turn": 5,
+      "prompt": "Read the file f05.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 6973,
+      "answered": true,
+      "cost_usd": 0.3249575,
+      "input_tokens": 4,
+      "output_tokens": 226,
+      "cache_read_tokens": 63951,
+      "cache_creation_tokens": 28669,
+      "token_source": "claude -p --output-format json envelope",
+      "memory": {
+        "peak_worker_rss_mb": 643.453125,
+        "peak_host_rss_mb": 13860.8671875,
+        "min_free_mem_mb": 7252.21875,
+        "max_swapouts_per_2s": 0,
+        "samples": 10
+      }
+    },
+    {
+      "arm": "stateless",
+      "turn": 6,
+      "prompt": "Read the file f06.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 12512,
+      "answered": true,
+      "cost_usd": 0.377013,
+      "input_tokens": 6,
+      "output_tokens": 368,
+      "cache_read_tokens": 111122,
+      "cache_creation_tokens": 31159,
+      "token_source": "claude -p --output-format json envelope",
+      "memory": {
+        "peak_worker_rss_mb": 646.234375,
+        "peak_host_rss_mb": 13921.1015625,
+        "min_free_mem_mb": 6542.984375,
+        "max_swapouts_per_2s": 0,
+        "samples": 18
+      }
+    },
+    {
+      "arm": "stateless",
+      "turn": 7,
+      "prompt": "Read the file f07.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 7132,
+      "answered": true,
+      "cost_usd": 0.3249725,
+      "input_tokens": 4,
+      "output_tokens": 226,
+      "cache_read_tokens": 63951,
+      "cache_creation_tokens": 28669,
+      "token_source": "claude -p --output-format json envelope",
+      "memory": {
+        "peak_worker_rss_mb": 641.6875,
+        "peak_host_rss_mb": 13690.5625,
+        "min_free_mem_mb": 7174.046875,
+        "max_swapouts_per_2s": 0,
+        "samples": 11
+      }
+    },
+    {
+      "arm": "stateless",
+      "turn": 8,
+      "prompt": "Read the file f08.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 6994,
+      "answered": true,
+      "cost_usd": 0.3237425,
+      "input_tokens": 4,
+      "output_tokens": 180,
+      "cache_read_tokens": 63951,
+      "cache_creation_tokens": 28661,
+      "token_source": "claude -p --output-format json envelope",
+      "memory": {
+        "peak_worker_rss_mb": 637.328125,
+        "peak_host_rss_mb": 13605.7734375,
+        "min_free_mem_mb": 7212.703125,
+        "max_swapouts_per_2s": 0,
+        "samples": 10
+      }
+    },
+    {
+      "arm": "stateless",
+      "turn": 9,
+      "prompt": "Read the file f09.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 7573,
+      "answered": true,
+      "cost_usd": 0.32399749999999994,
+      "input_tokens": 4,
+      "output_tokens": 187,
+      "cache_read_tokens": 63951,
+      "cache_creation_tokens": 28669,
+      "token_source": "claude -p --output-format json envelope",
+      "memory": {
+        "peak_worker_rss_mb": 637.109375,
+        "peak_host_rss_mb": 13906.75,
+        "min_free_mem_mb": 7196.34375,
+        "max_swapouts_per_2s": 0,
+        "samples": 12
+      }
+    },
+    {
+      "arm": "stateless",
+      "turn": 10,
+      "prompt": "Read the file f10.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 6645,
+      "answered": true,
+      "cost_usd": 0.32393649999999996,
+      "input_tokens": 4,
+      "output_tokens": 261,
+      "cache_read_tokens": 63769,
+      "cache_creation_tokens": 28487,
+      "token_source": "claude -p --output-format json envelope",
+      "memory": {
+        "peak_worker_rss_mb": 642.4375,
+        "peak_host_rss_mb": 14220.703125,
+        "min_free_mem_mb": 7042.03125,
+        "max_swapouts_per_2s": 0,
+        "samples": 9
+      }
+    },
+    {
+      "arm": "persistent",
+      "turn": 1,
+      "prompt": "Read the file f01.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 5986,
+      "answered": true,
+      "cost_usd": null,
+      "input_tokens": 4,
+      "output_tokens": 218,
+      "cache_read_tokens": 49739,
+      "cache_creation_tokens": 51453,
+      "token_source": "Claude Code session transcript",
+      "memory": {
+        "peak_worker_rss_mb": 693.8125,
+        "peak_host_rss_mb": 13556.984375,
+        "min_free_mem_mb": 7134.625,
+        "max_swapouts_per_2s": 0,
+        "samples": 9
+      }
+    },
+    {
+      "arm": "persistent",
+      "turn": 2,
+      "prompt": "Read the file f02.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 4419,
+      "answered": true,
+      "cost_usd": null,
+      "input_tokens": 4,
+      "output_tokens": 114,
+      "cache_read_tokens": 103182,
+      "cache_creation_tokens": 1768,
+      "token_source": "Claude Code session transcript",
+      "memory": {
+        "peak_worker_rss_mb": 711.265625,
+        "peak_host_rss_mb": 13483.4375,
+        "min_free_mem_mb": 7136.34375,
+        "max_swapouts_per_2s": 0,
+        "samples": 7
+      }
+    },
+    {
+      "arm": "persistent",
+      "turn": 3,
+      "prompt": "Read the file f03.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 4398,
+      "answered": true,
+      "cost_usd": null,
+      "input_tokens": 4,
+      "output_tokens": 114,
+      "cache_read_tokens": 106732,
+      "cache_creation_tokens": 1768,
+      "token_source": "Claude Code session transcript",
+      "memory": {
+        "peak_worker_rss_mb": 732.96875,
+        "peak_host_rss_mb": 13614.96875,
+        "min_free_mem_mb": 7113.640625,
+        "max_swapouts_per_2s": 0,
+        "samples": 8
+      }
+    },
+    {
+      "arm": "persistent",
+      "turn": 4,
+      "prompt": "Read the file f04.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 4020,
+      "answered": true,
+      "cost_usd": null,
+      "input_tokens": 4,
+      "output_tokens": 114,
+      "cache_read_tokens": 110282,
+      "cache_creation_tokens": 1768,
+      "token_source": "Claude Code session transcript",
+      "memory": {
+        "peak_worker_rss_mb": 749.875,
+        "peak_host_rss_mb": 14047.96875,
+        "min_free_mem_mb": 6989.1875,
+        "max_swapouts_per_2s": 0,
+        "samples": 6
+      }
+    },
+    {
+      "arm": "persistent",
+      "turn": 5,
+      "prompt": "Read the file f05.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 3825,
+      "answered": true,
+      "cost_usd": null,
+      "input_tokens": 4,
+      "output_tokens": 114,
+      "cache_read_tokens": 113832,
+      "cache_creation_tokens": 1768,
+      "token_source": "Claude Code session transcript",
+      "memory": {
+        "peak_worker_rss_mb": 751.4375,
+        "peak_host_rss_mb": 14172.4375,
+        "min_free_mem_mb": 6916.34375,
+        "max_swapouts_per_2s": 0,
+        "samples": 5
+      }
+    },
+    {
+      "arm": "persistent",
+      "turn": 6,
+      "prompt": "Read the file f06.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 4393,
+      "answered": true,
+      "cost_usd": null,
+      "input_tokens": 3,
+      "output_tokens": 114,
+      "cache_read_tokens": 117512,
+      "cache_creation_tokens": 1897,
+      "token_source": "Claude Code session transcript",
+      "memory": {
+        "peak_worker_rss_mb": 756.125,
+        "peak_host_rss_mb": 14192,
+        "min_free_mem_mb": 6967.890625,
+        "max_swapouts_per_2s": 0,
+        "samples": 7
+      }
+    },
+    {
+      "arm": "persistent",
+      "turn": 7,
+      "prompt": "Read the file f07.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 4088,
+      "answered": true,
+      "cost_usd": null,
+      "input_tokens": 4,
+      "output_tokens": 114,
+      "cache_read_tokens": 121190,
+      "cache_creation_tokens": 1768,
+      "token_source": "Claude Code session transcript",
+      "memory": {
+        "peak_worker_rss_mb": 759.09375,
+        "peak_host_rss_mb": 14253.90625,
+        "min_free_mem_mb": 7008.765625,
+        "max_swapouts_per_2s": 0,
+        "samples": 6
+      }
+    },
+    {
+      "arm": "persistent",
+      "turn": 8,
+      "prompt": "Read the file f08.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 4424,
+      "answered": true,
+      "cost_usd": null,
+      "input_tokens": 4,
+      "output_tokens": 114,
+      "cache_read_tokens": 124740,
+      "cache_creation_tokens": 1768,
+      "token_source": "Claude Code session transcript",
+      "memory": {
+        "peak_worker_rss_mb": 760.375,
+        "peak_host_rss_mb": 14465.890625,
+        "min_free_mem_mb": 7037.71875,
+        "max_swapouts_per_2s": 0,
+        "samples": 7
+      }
+    },
+    {
+      "arm": "persistent",
+      "turn": 9,
+      "prompt": "Read the file f09.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 3800,
+      "answered": true,
+      "cost_usd": null,
+      "input_tokens": 4,
+      "output_tokens": 114,
+      "cache_read_tokens": 128290,
+      "cache_creation_tokens": 1768,
+      "token_source": "Claude Code session transcript",
+      "memory": {
+        "peak_worker_rss_mb": 761.953125,
+        "peak_host_rss_mb": 14472.234375,
+        "min_free_mem_mb": 6966.75,
+        "max_swapouts_per_2s": 0,
+        "samples": 6
+      }
+    },
+    {
+      "arm": "persistent",
+      "turn": 10,
+      "prompt": "Read the file f10.txt in this directory. Reply with exactly one line containing the number of lines in the file, a space, and the seventh word on line 7. No other text.",
+      "wall_ms": 3834,
+      "answered": true,
+      "cost_usd": null,
+      "input_tokens": 4,
+      "output_tokens": 114,
+      "cache_read_tokens": 131840,
+      "cache_creation_tokens": 1768,
+      "token_source": "Claude Code session transcript",
+      "memory": {
+        "peak_worker_rss_mb": 762.859375,
+        "peak_host_rss_mb": 14428.34375,
+        "min_free_mem_mb": 6926.625,
+        "max_swapouts_per_2s": 0,
+        "samples": 5
+      }
+    }
+  ],
+  "host_overall": {
+    "peak_worker_rss_mb": 762.859375,
+    "peak_host_rss_mb": 14489.6484375,
+    "min_free_mem_mb": 6542.984375,
+    "max_swapouts_per_2s": 0,
+    "samples": 265
+  },
+  "lane_cost_report": "Total cost:            $1.56\nTotal duration (API):  53s\nTotal duration (wall): 1m 6s\nTotal code changes:    0 lines added, 0 lines removed\nUsage by model:\nclaude-haiku-4-5:  1.1k input, 32 output, 0 cache read, 0 cache write ($0.0013)\nclaude-opus-5:  4.6k input, 1.6k output, 1.6m cache read, 67.7k cache write ($1.56)"
+}

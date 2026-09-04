@@ -115,11 +115,85 @@ func freeMemMB() (float64, error) {
 	return (free + inactive + spec) * pageSize / (1024 * 1024), nil
 }
 
+// Host reports whether the HOST ITSELF is healthy enough to carry more work
+// -- load, free memory and active paging -- and nothing else. No ledger, no
+// quota, no worktree count.
+//
+// WHY THIS IS SEPARATE FROM Check. Check answers "may the estate dispatch
+// another turn", which is a question about the estate as well as the machine:
+// it refuses at the in-flight cap and at the worktree ceiling. A caller that
+// is ALREADY the in-flight turn -- a benchmark harness watching its own
+// worker, cmd/dispatchbench -- would be refused by its own existence if it
+// asked Check, and would then have to grow a second reader of vm_stat to get
+// an answer. A second reader is exactly how the estate ends up with two
+// gauges that disagree, which is the failure #999 was.
+//
+// Same discipline as Check, because it is the same code: every limit fails
+// CLOSED. A reading that cannot be taken is OK=false with the failure named.
+// Reading.Worktrees, InFlight and WeeklyRemaining are left zero here and are
+// NOT claims that those are zero -- a caller that needs them must call Check.
+func Host(lim Limits) Verdict {
+	v := Verdict{OK: true}
+	hostLimits(&v, lim)
+	return v
+}
+
 // Check reports whether more work may be dispatched. Any measurement failure
 // produces OK=false with the failure named -- blindness is not capacity.
 func Check(l *ledger.Ledger, lim Limits) Verdict {
 	v := Verdict{OK: true}
 
+	hostLimits(&v, lim)
+
+	// WORKTREES ARE A BACKSTOP, not a resource reading. On 2026-09-03 the estate
+	// reached 176 dispatch worktrees -- one per turn, never removed, because
+	// nothing cleaned up at a terminal state. That alone did not exhaust RAM
+	// (worktrees are disk), but an unbounded count is the visible symptom of an
+	// unbounded loop and it degrades every git operation the estate performs.
+	// This limit exists so a runaway is refused even when the memory gauge is
+	// wrong, which it was.
+	if n, err := worktreeCount(); err != nil {
+		v.OK = false
+		v.Reasons = append(v.Reasons, "could not count worktrees: "+err.Error())
+	} else {
+		v.Reading.Worktrees = n
+		if n > lim.MaxWorktrees {
+			v.OK = false
+			v.Reasons = append(v.Reasons, fmt.Sprintf("%d worktrees above ceiling %d -- terminal turns are not cleaning up", n, lim.MaxWorktrees))
+		}
+	}
+
+	// Budget is a limit like any other, and the one whose blindness actually
+	// cost a week. A reading that cannot be taken refuses.
+	if r, err := quota.Read(time.Now()); err != nil {
+		v.OK = false
+		v.Reasons = append(v.Reasons, "could not measure token budget: "+err.Error())
+	} else {
+		v.Reading.WeeklyRemaining = r.WeeklyRemaining()
+		if ok, why := quota.Allow(r); !ok {
+			v.OK = false
+			v.Reasons = append(v.Reasons, why)
+		}
+	}
+
+	inflight, err := l.InFlight()
+	if err != nil {
+		v.OK = false
+		v.Reasons = append(v.Reasons, "could not read ledger: "+err.Error())
+	} else {
+		v.Reading.InFlight = len(inflight)
+		if len(inflight) >= lim.MaxInFlight {
+			v.OK = false
+			v.Reasons = append(v.Reasons, fmt.Sprintf("%d lanes in flight, cap is %d", len(inflight), lim.MaxInFlight))
+		}
+	}
+	return v
+}
+
+// hostLimits applies the three limits that are about the machine rather than
+// the estate, in the order Check has always applied them, so Host and Check
+// cannot drift into two different readings of the same host.
+func hostLimits(v *Verdict, lim Limits) {
 	if lpc, err := loadPerCore(); err != nil {
 		v.OK = false
 		v.Reasons = append(v.Reasons, "could not measure load: "+err.Error())
@@ -171,50 +245,6 @@ func Check(l *ledger.Ledger, lim Limits) Verdict {
 			v.Reasons = append(v.Reasons, fmt.Sprintf("%.0f swapouts during a %s sample -- host is actively paging", rate, swapSampleWindow))
 		}
 	}
-
-	// WORKTREES ARE A BACKSTOP, not a resource reading. On 2026-09-03 the estate
-	// reached 176 dispatch worktrees -- one per turn, never removed, because
-	// nothing cleaned up at a terminal state. That alone did not exhaust RAM
-	// (worktrees are disk), but an unbounded count is the visible symptom of an
-	// unbounded loop and it degrades every git operation the estate performs.
-	// This limit exists so a runaway is refused even when the memory gauge is
-	// wrong, which it was.
-	if n, err := worktreeCount(); err != nil {
-		v.OK = false
-		v.Reasons = append(v.Reasons, "could not count worktrees: "+err.Error())
-	} else {
-		v.Reading.Worktrees = n
-		if n > lim.MaxWorktrees {
-			v.OK = false
-			v.Reasons = append(v.Reasons, fmt.Sprintf("%d worktrees above ceiling %d -- terminal turns are not cleaning up", n, lim.MaxWorktrees))
-		}
-	}
-
-	// Budget is a limit like any other, and the one whose blindness actually
-	// cost a week. A reading that cannot be taken refuses.
-	if r, err := quota.Read(time.Now()); err != nil {
-		v.OK = false
-		v.Reasons = append(v.Reasons, "could not measure token budget: "+err.Error())
-	} else {
-		v.Reading.WeeklyRemaining = r.WeeklyRemaining()
-		if ok, why := quota.Allow(r); !ok {
-			v.OK = false
-			v.Reasons = append(v.Reasons, why)
-		}
-	}
-
-	inflight, err := l.InFlight()
-	if err != nil {
-		v.OK = false
-		v.Reasons = append(v.Reasons, "could not read ledger: "+err.Error())
-	} else {
-		v.Reading.InFlight = len(inflight)
-		if len(inflight) >= lim.MaxInFlight {
-			v.OK = false
-			v.Reasons = append(v.Reasons, fmt.Sprintf("%d lanes in flight, cap is %d", len(inflight), lim.MaxInFlight))
-		}
-	}
-	return v
 }
 
 const swapSampleWindow = 2 * time.Second
