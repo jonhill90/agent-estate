@@ -574,19 +574,6 @@ func unknownTagReasons(unknown []string, sources []SourceResult) []string {
 	return reasons
 }
 
-// failedSourceForTag looks for a source in sources that is both !OK
-// (failed to build, so it produced zero items and could never have made
-// this tag "known" no matter what it names) and whose Name plausibly
-// names the same source as tag's "source:<name>" suffix. The comparison
-// tolerates a trailing "s" on either side because addSourceTag derives
-// the tag from each ITEM's own Source string, while SourceResult.Name is
-// each READER's own family name, and those two vocabularies already
-// disagree on plurality for at least one real source (vault.go's items
-// carry Source "vault-fact", singular, while vaultSource's own
-// SourceResult.Name is "vault-facts", plural) -- not a bug this function
-// is fixing, just the naming gap it has to see through to tell "this
-// source failed" from "no such source" for that exact tag.
-
 // isCorpusKindTag reports whether name (already prefix-stripped and
 // singularised the same way failedSourceForTag treats every other tag) is
 // one of corpusKinds' own "corpus-<kind>" values -- agent-estate#1120's
@@ -610,6 +597,18 @@ func isCorpusKindTag(name string) bool {
 	return false
 }
 
+// failedSourceForTag looks for a source in sources that is both !OK
+// (failed to build, so it produced zero items and could never have made
+// this tag "known" no matter what it names) and whose Name plausibly
+// names the same source as tag's "source:<name>" suffix. The comparison
+// tolerates a trailing "s" on either side because addSourceTag derives
+// the tag from each ITEM's own Source string, while SourceResult.Name is
+// each READER's own family name, and those two vocabularies already
+// disagree on plurality for at least one real source (vault.go's items
+// carry Source "vault-fact", singular, while vaultSource's own
+// SourceResult.Name is "vault-facts", plural) -- not a bug this function
+// is fixing, just the naming gap it has to see through to tell "this
+// source failed" from "no such source" for that exact tag.
 func failedSourceForTag(tag string, sources []SourceResult) (SourceResult, bool) {
 	const prefix = "source:"
 	if !strings.HasPrefix(tag, prefix) {
