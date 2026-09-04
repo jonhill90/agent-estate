@@ -197,12 +197,15 @@ type QueryResult struct {
 	// what a caller with that access folds against.
 	IndexGeneratedBy GeneratedBy `json:"index_generated_by,omitzero"`
 	// Coverage is the machine-readable trustworthiness signal every
-	// successfully-read QueryResult carries -- see CoverageState. It is
-	// the zero Coverage{} on StateIndexMissing/StateIndexUnreadable
-	// (there is no compiled index to have a coverage opinion about);
-	// every other state always sets it, even StateNoMatch, because a
-	// source failing at build time has nothing to do with whether this
-	// particular question happened to score anything.
+	// QueryResult carries -- see CoverageState. It is
+	// {State: CoverageNotApplicable} on StateIndexMissing/
+	// StateIndexUnreadable (there is no compiled index to have a coverage
+	// opinion about -- agent-estate#1141: a bare zero Coverage{} there
+	// serialised as `"coverage":{"state":""}`, indistinguishable on the
+	// wire from a forgotten field); every other state always sets a real
+	// opinion, even StateNoMatch, because a source failing at build time
+	// has nothing to do with whether this particular question happened to
+	// score anything.
 	Coverage Coverage `json:"coverage"`
 	// Contradictions flags a corpus-question and a vault-fact/corpus-
 	// directive that both landed in Matches on the same matched terms --
@@ -309,6 +312,19 @@ const (
 	// directly -- a caller with access to its own running checkout folds
 	// it in via WithFreshnessReason, passing this state.
 	CoverageBinaryMismatch CoverageState = "binary_mismatch"
+	// CoverageNotApplicable means there was no compiled index to have a
+	// coverage opinion about at all -- StateIndexMissing or
+	// StateIndexUnreadable, agent-estate#1141. Deliberately distinct from
+	// CoverageComplete: "every source read cleanly" is a claim about a
+	// real index this package examined, and a missing or unreadable index
+	// was never examined, so making that claim would be a fabrication, not
+	// a shortcut. It is also distinct from the bare zero value -- a
+	// Coverage{} with an empty State is exactly what a caller cannot tell
+	// apart from a forgotten field, which is the gap this state closes.
+	// Reasons is always empty here: `state`/`reason` on the surrounding
+	// QueryResult already say why, and duplicating that into a
+	// CoverageReason would be the same fact under two names.
+	CoverageNotApplicable CoverageState = "not_applicable"
 	// CoverageMixed means more than one of the above applied to the same
 	// result -- e.g. a source failed AND the answer was also withheld by
 	// policy. Reasons names each contributing state individually; Mixed is
@@ -866,13 +882,15 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return QueryResult{
-				State:  StateIndexMissing,
-				Reason: fmt.Sprintf("no compiled index at %s -- run `estate knowledge` first", indexPath),
+				State:    StateIndexMissing,
+				Reason:   fmt.Sprintf("no compiled index at %s -- run `estate knowledge` first", indexPath),
+				Coverage: Coverage{State: CoverageNotApplicable},
 			}
 		}
 		return QueryResult{
-			State:  StateIndexUnreadable,
-			Reason: err.Error(),
+			State:    StateIndexUnreadable,
+			Reason:   err.Error(),
+			Coverage: Coverage{State: CoverageNotApplicable},
 		}
 	}
 
