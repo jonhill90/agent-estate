@@ -85,7 +85,20 @@ func repoDocsSource(repoRoot string) (SourceResult, []Item) {
 				continue // a section with a heading but no prose has nothing to answer with
 			}
 			tier1 := strings.Join(sec.HeadingPath, " — ")
-			permalink := full + "#" + headingAnchor(sec.HeadingPath)
+			// agent-estate#1072: the permalink is repo-relative (rel, not
+			// full) so itemID -- a pure function of permalink -- produces
+			// the same id for the same section regardless of which
+			// checkout's absolute path generated the index. Every
+			// dispatched turn runs in its own worktree (internal/isolate),
+			// so an absolute-path permalink minted a different id per
+			// worktree for identical content; a lane citing an id in a PR
+			// body was uncitable from a reviewer's own worktree. The
+			// tradeoff named in the issue: a repo-relative locator is not
+			// independently openable the way full was -- see main.go's
+			// printRepoDocsRoot, which resolves and prints this checkout's
+			// own repo root once alongside any repo-docs match/item, so a
+			// reader still knows what to join the permalink to.
+			permalink := rel + "#" + headingAnchor(sec.HeadingPath)
 			publishable, basis := classify("repo-docs")
 			items = append(items, Item{
 				ID:             itemID(permalink),
@@ -94,7 +107,7 @@ func repoDocsSource(repoRoot string) (SourceResult, []Item) {
 				StructuralTags: []string{"repo-docs", rel},
 				Tier1:          truncate(tier1, 200),
 				Tier2:          truncate(body, 800),
-				Tier3:          "open " + full + " for the full section",
+				Tier3:          "open " + rel + " for the full section (repo-relative -- see the repo root your own checkout resolves)",
 				Publishable:    publishable,
 				PublishBasis:   basis,
 			})
