@@ -111,6 +111,52 @@ func TestGenerateAddsSourceTagForFiltering(t *testing.T) {
 	}
 }
 
+// TestGenerateRecordsGeneratedBy reproduces agent-estate#1082's own
+// measured gap: Generate's output must carry GeneratedBy.Commit, resolved
+// through the exact same seam ResolveBuildCommit exercises directly. Before
+// #1082, Result had no GeneratedBy field at all -- this is the field this
+// issue adds, wired at the one place (Generate) every caller's index goes
+// through.
+func TestGenerateRecordsGeneratedBy(t *testing.T) {
+	cfg := Config{
+		RepoRoot:     "/repo",
+		CorpusDBPath: filepath.Join(t.TempDir(), "absent.sqlite3"),
+		RunGH: func(args ...string) ([]byte, error) {
+			return nil, os.ErrNotExist
+		},
+		RunGit: func(args ...string) ([]byte, error) {
+			if args[len(args)-1] == "--porcelain" {
+				return []byte(""), nil
+			}
+			return []byte("deadbeefcafedeadbeefcafedeadbeefcafedead\n"), nil
+		},
+	}
+	now := time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC)
+	res := Generate(cfg, now)
+	if res.GeneratedBy.Commit != "deadbeefcafedeadbeefcafedeadbeefcafedead" {
+		t.Fatalf("GeneratedBy.Commit = %q, want the resolved HEAD", res.GeneratedBy.Commit)
+	}
+	if !res.GeneratedBy.BuiltAt.Equal(now) {
+		t.Fatalf("GeneratedBy.BuiltAt = %v, want %v", res.GeneratedBy.BuiltAt, now)
+	}
+}
+
+// TestGenerateRecordsUnknownGeneratedByWhenUnresolvable is the dirty-tree/
+// no-checkout arm of the same requirement: never a guessed commit.
+func TestGenerateRecordsUnknownGeneratedByWhenUnresolvable(t *testing.T) {
+	cfg := Config{
+		RepoRoot:     "", // no checkout resolved
+		CorpusDBPath: filepath.Join(t.TempDir(), "absent.sqlite3"),
+		RunGH: func(args ...string) ([]byte, error) {
+			return nil, os.ErrNotExist
+		},
+	}
+	res := Generate(cfg, time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC))
+	if res.GeneratedBy.Commit != unknownCommit {
+		t.Fatalf("GeneratedBy.Commit = %q, want %q", res.GeneratedBy.Commit, unknownCommit)
+	}
+}
+
 func hasTag(tags []string, want string) bool {
 	for _, t := range tags {
 		if t == want {

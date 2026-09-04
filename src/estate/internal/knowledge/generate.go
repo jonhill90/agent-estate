@@ -11,7 +11,11 @@ import "time"
 // what makes it stable across two Generate calls over the same sources.
 func Generate(cfg Config, now time.Time) Result {
 	res := Result{
-		GeneratedAt:   now.UTC(),
+		GeneratedAt: now.UTC(),
+		GeneratedBy: GeneratedBy{
+			Commit:  ResolveBuildCommit(cfg),
+			BuiltAt: now.UTC(),
+		},
 		StalenessRule: stalenessRule,
 		Note:          derivedNote,
 	}
