@@ -344,6 +344,67 @@ func TestDragOnEmptyCanvasPansTheView(t *testing.T) {
 	}
 }
 
+// TestLostReleaseDoesNotLeaveANodeGrabbed is the regression this PR's own
+// review found. The release that would end a node drag can genuinely never
+// arrive: shell.handleMouse returns handled=true for a left release over a
+// nav-sidebar row and returns before routing to the panes, so a drag ending
+// over the sidebar delivers this model a press and a motion and no release
+// at all.
+//
+// This drives exactly that -- press on node a, motion, NO release -- and
+// then a fresh, entirely separate gesture on empty canvas. The second
+// gesture must pan. Before the fix, `grabbed` survived the missing release
+// and the motion case (which checks grabbed before panning) teleported node
+// a onto the cursor instead.
+func TestLostReleaseDoesNotLeaveANodeGrabbed(t *testing.T) {
+	m := loaded(t)
+
+	// Gesture 1: grab node a and drag it, then let the release go missing.
+	sx, sy, _ := m.ScreenPositionOf("a")
+	next, _ := m.Update(tea.MouseMsg{X: sx + boxInset, Y: sy + boxInset + headerRows, Action: tea.MouseActionPress})
+	m = next.(Model)
+	if m.grabbed != "a" {
+		t.Fatalf("press on node a: grabbed = %q, want \"a\"", m.grabbed)
+	}
+	next, _ = m.Update(tea.MouseMsg{X: sx + 1 + boxInset, Y: sy + boxInset + headerRows, Action: tea.MouseActionMotion})
+	m = next.(Model)
+	// No release. The gesture is abandoned mid-flight, exactly as it is
+	// when the terminal's release event is swallowed by the shell.
+
+	gx0, gy0, _ := m.PositionOf("a")
+	px0, py0 := m.PanOffset()
+
+	// Empty space is found AFTER gesture 1, since that gesture moved node a
+	// and a cell that was clear before it may not be clear now.
+	ex, ey, ok := emptyCell(m)
+	if !ok {
+		t.Skip("canvas too small in this fixture to find empty space")
+	}
+
+	// Gesture 2: a normal drag starting on empty canvas.
+	next, _ = m.Update(tea.MouseMsg{X: ex + boxInset, Y: ey + boxInset + headerRows, Action: tea.MouseActionPress})
+	m = next.(Model)
+	if m.grabbed != "" {
+		t.Fatalf("a new press on empty canvas left %q grabbed from the abandoned gesture, want nothing held", m.grabbed)
+	}
+	if !m.panning {
+		t.Fatal("press on empty canvas after a lost release did not begin a pan")
+	}
+
+	const dx, dy = 4, 2
+	next, _ = m.Update(tea.MouseMsg{X: ex + dx + boxInset, Y: ey + dy + boxInset + headerRows, Action: tea.MouseActionMotion})
+	m = next.(Model)
+
+	gx1, gy1, _ := m.PositionOf("a")
+	if gx1 != gx0 || gy1 != gy0 {
+		t.Fatalf("the empty-canvas drag teleported node a from (%d,%d) to (%d,%d) -- it must pan, not move a stale grab", gx0, gy0, gx1, gy1)
+	}
+	px1, py1 := m.PanOffset()
+	if px1 != px0+dx || py1 != py0+dy {
+		t.Fatalf("PanOffset() = (%d,%d) after a %d,%d empty-canvas drag, want (%d,%d) -- the view did not pan", px1, py1, dx, dy, px0+dx, py0+dy)
+	}
+}
+
 // emptyCell finds an interior cell at least 2 away (Chebyshev) from every
 // node's painted position, so a press there is unambiguously off-node
 // (nodeAtScreen's tolerance is 1).

@@ -589,14 +589,30 @@ func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 	x, y := msg.X-boxInset, msg.Y-boxInset-headerRows
 	switch msg.Action {
 	case tea.MouseActionPress:
+		// A press is the ONLY thing that decides which gesture is running,
+		// so it clears both first rather than setting one and leaving the
+		// other however the last gesture left it. That matters because the
+		// release which would otherwise have cleared `grabbed` can genuinely
+		// go missing: shell.handleMouse returns handled=true for a left
+		// release over a nav-sidebar row and returns BEFORE routing to the
+		// panes, so a drag that ends over the sidebar never delivers its
+		// release here. Without this reset a stale `grabbed` survived into
+		// the next gesture and the motion case below -- which checks grabbed
+		// before panning -- teleported that node instead of panning.
+		m.grabbed, m.dragged, m.panning = "", false, false
 		if id, ok := m.nodeAtScreen(x, y); ok {
-			m.grabbed, m.dragged = id, false
+			m.grabbed = id
 			return m, nil
 		}
 		m.panning = true
 		m.panFromX, m.panFromY = x, y
 
 	case tea.MouseActionMotion:
+		// grabbed is checked before panning, but the press case above now
+		// guarantees at most one of the two is ever set, so this order can
+		// no longer decide anything -- it is kept because a node grab is the
+		// more specific gesture, and if the invariant were ever broken again
+		// the wrong outcome should at least be the one the user pointed at.
 		if m.grabbed != "" {
 			m.dragged = true
 			gx, gy := m.toGraph(x, y)
@@ -608,6 +624,9 @@ func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 		}
 
 	case tea.MouseActionRelease:
+		// Symmetric with the press case: a release ends every gesture, not
+		// just the one branch it happens to take.
+		m.panning = false
 		if id := m.grabbed; id != "" {
 			m.grabbed = ""
 			if !m.dragged {
@@ -617,7 +636,6 @@ func (m Model) handleMouse(msg tea.MouseMsg) (Model, tea.Cmd) {
 			gx, gy := m.toGraph(x, y)
 			return m.withPos(id, gx, gy), nil
 		}
-		m.panning = false
 	}
 	return m, nil
 }
