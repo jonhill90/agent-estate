@@ -529,6 +529,16 @@ func main() {
 			}
 			fmt.Printf("id:        %s\nsource:    %s\npermalink: %s\ntier1:     %s\ntier2:     %s\ntier3:     %s\n",
 				item.ID, item.Source, item.Permalink, item.Tier1, item.Tier2, item.Tier3)
+			// structural_tags carries kind: (agent-estate#1035, alongside
+			// the weight:/status: tags that were already being compiled
+			// but never actually printed here) -- this line is what makes
+			// the advisor's "as a question, not as law" test visible: a
+			// question item's tags read "kind:question, weight:hard,
+			// status:resolved", never rendered identically to a hard
+			// parameter's "kind:parameter, weight:hard, status:acted".
+			if len(item.StructuralTags) > 0 {
+				fmt.Printf("tags:      %s\n", strings.Join(item.StructuralTags, ", "))
+			}
 			if item.PromptID != "" {
 				fmt.Printf("prompt_id: %s\n", item.PromptID)
 			}
