@@ -105,6 +105,19 @@ type Case struct {
 	// Note documents anything a reader of the raw case shouldn't have to
 	// infer -- e.g. that a case is the deliberate low-term-overlap one.
 	Note string `json:"note,omitempty"`
+	// TargetText is the target item's own record text -- verbatim, the
+	// same string a query against the real index would score the
+	// question against (e.g. a github-stars item's "<repo> -- <starred
+	// description>" tier1) -- kept so cmd/goldenquery can measure how
+	// much of Question's own vocabulary the fixture author copied from
+	// the answer rather than derived from a caller's actual need
+	// (agent-estate#1115: the merged star_cases.json questions reused 67%
+	// of their target's own words, which is why every case landed at
+	// rank 1 and the stratum had no headroom left to detect a
+	// regression). Empty for a stratum that has not wired this
+	// measurement yet -- cmd/goldenquery skips the overlap line for any
+	// case missing it rather than reporting a false zero.
+	TargetText string `json:"target_text,omitempty"`
 }
 
 // Load parses the embedded cases.json. It only ever fails if cases.json
