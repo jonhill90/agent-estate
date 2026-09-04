@@ -3,6 +3,7 @@ package knowledge
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -16,7 +17,7 @@ source: fixture
 
 # Test fact
 
-Body text this package never reads.
+Body text carrying a distinctive word: xenoglyph.
 `
 
 func writeVaultFact(t *testing.T, vaultDir, slug, content string) {
@@ -44,6 +45,36 @@ func TestVaultSourceReadsEveryFactFile(t *testing.T) {
 	}
 	if items[0].StructuralTags[0] != "project" {
 		t.Errorf("StructuralTags = %v, want [project] from the fact's own type:", items[0].StructuralTags)
+	}
+}
+
+// TestVaultSourceCompilesBodyIntoTier2 is agent-estate#1027's own
+// acceptance test: a word that appears only in a fact's body (never in
+// its title or description) must land in the compiled Item somewhere
+// searchableText (query.go) already reads -- Tier2 -- not just in Tier3,
+// which searchableText explicitly excludes. Get callers (main.go) also
+// read Tier2 straight off Item, so this is the same assertion as "Get
+// returns real content" from the item's own shape, without spinning up
+// the CLI.
+func TestVaultSourceCompilesBodyIntoTier2(t *testing.T) {
+	dir := t.TempDir()
+	writeVaultFact(t, dir, "one", fixtureVaultFact)
+
+	_, items := vaultSource(dir)
+	if len(items) != 1 {
+		t.Fatalf("got %d items, want 1", len(items))
+	}
+	if !strings.Contains(items[0].Tier2, "xenoglyph") {
+		t.Errorf("Tier2 = %q, want it to contain the fact's own body text", items[0].Tier2)
+	}
+	if !strings.Contains(items[0].Tier2, "a fact used only by this package's own tests") {
+		t.Errorf("Tier2 = %q, want the fact's description kept as a lead-in", items[0].Tier2)
+	}
+	// searchableText (query.go) reads Tier1+Tier2, never Tier3 -- so a
+	// body-only word must be findable through Tier2 without Query ever
+	// being asked to read a fourth field.
+	if strings.Contains(items[0].Tier1, "xenoglyph") {
+		t.Errorf("Tier1 = %q, unexpectedly carries body text -- Tier1 must stay the short summary", items[0].Tier1)
 	}
 }
 

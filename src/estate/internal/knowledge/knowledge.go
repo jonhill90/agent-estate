@@ -72,7 +72,15 @@ type Item struct {
 
 	// Tier1 is one line, true and useful standing alone.
 	Tier1 string `json:"tier1"`
-	// Tier2 is a short paragraph of additional context.
+	// Tier2 is a short paragraph of additional context, for three of
+	// the four sources. The vault-fact source is the exception
+	// (agent-estate#1027): its Tier2 carries the fact's own full body,
+	// not a summary of it, because that body was ~86% of the fact and
+	// entirely unsearchable otherwise -- query.go's searchableText
+	// already reads Tier1+Tier2, so this is what made vault fact bodies
+	// searchable without any change to query.go itself. The disclosure
+	// boundary is unmoved: Match (query.go) carries Tier1 only, so this
+	// content is searchable but still not returned until Get is called.
 	Tier2 string `json:"tier2,omitempty"`
 	// Tier3 is where the full material lives -- a pointer (Permalink
 	// repeated, a file path, a "read the fact itself" instruction),

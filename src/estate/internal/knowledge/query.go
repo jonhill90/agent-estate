@@ -169,7 +169,10 @@ func searchableText(it Item) string {
 
 // scoreItem counts how many distinct terms appear as a substring of
 // it's searchable text, and names which ones -- the score IS the count,
-// nothing hidden or weighted behind it.
+// nothing hidden or weighted behind it. This is still the filtering and
+// display score (requiredScore's floor and Match.Score both read this
+// unweighted count) -- see rankingWeight for the separate, weighted
+// figure that decides sort order.
 func scoreItem(it Item, terms []string) (score int, matched []string) {
 	text := searchableText(it)
 	for _, t := range terms {
@@ -178,6 +181,44 @@ func scoreItem(it Item, terms []string) (score int, matched []string) {
 		}
 	}
 	return len(matched), matched
+}
+
+// tier1Weight and tier2Weight are rankingWeight's per-term multipliers.
+// #1027 compiled vault fact bodies (median ~2.3KB) into Tier2, and an
+// unweighted match count let a passing mention deep in a body outweigh a
+// short item whose title is actually about the subject -- #1043's review
+// measured this directly: five previously-passing golden-set cases in
+// unrelated sources (corpus-parameter, loops-research) flipped HIT->MISS
+// because long vault bodies out-scored them on raw term count alone. A
+// term found in Tier1 or either tag field counts for tier1Weight; the
+// same term found only inside Tier2 counts for tier2Weight. 3:1 was
+// picked as the smallest ratio that reliably lets a single Tier1/tag
+// term outrank an item whose only matches are buried in Tier2 -- see
+// query_test.go's field-weighting cases for the measured before/after.
+const (
+	tier1Weight = 3
+	tier2Weight = 1
+)
+
+// rankingWeight scores matched (the terms scoreItem already found) by
+// where each one was found, so ranking -- unlike the required-score floor
+// and the printed Match.Score -- treats a Tier1/tag hit as worth more
+// than the same term appearing only in Tier2. It never re-scans for new
+// terms; matched is scoreItem's own output, so a term this function
+// weights is always one that already cleared requiredScore.
+func rankingWeight(it Item, matched []string) int {
+	tier1Text := strings.ToLower(strings.Join(append([]string{it.Tier1}, append(it.StructuralTags, it.SynapticTags...)...), " \x1f "))
+	tier2Text := strings.ToLower(it.Tier2)
+	weight := 0
+	for _, t := range matched {
+		switch {
+		case strings.Contains(tier1Text, t):
+			weight += tier1Weight
+		case strings.Contains(tier2Text, t):
+			weight += tier2Weight
+		}
+	}
+	return weight
 }
 
 // minMatchedTerms is the floor an item's score must clear to be
@@ -313,8 +354,11 @@ const rankingBasisText = "score = count of distinct question terms " +
 	"(stop words and words of length <=2 removed) found as a substring " +
 	"of the item's own tier1, tier2, structural_tags or synaptic_tags; " +
 	"an item must match at least min(3, distinct question terms) of them " +
-	"to be returned at all -- see requiredScore in query.go; " +
-	"ties broken by item id, oldest first"
+	"to be returned at all -- see requiredScore in query.go; ranking " +
+	"itself is by a separate weighted figure, not the printed score: a " +
+	"term found in tier1/tags outweighs the same term found only in " +
+	"tier2 (3:1) -- see rankingWeight in query.go; ties on that weight " +
+	"broken by the printed score, then by item id, oldest first"
 
 // Query reads the compiled index at indexPath and returns a small,
 // ranked, cited set of items scored against question -- see QueryState
@@ -397,6 +441,7 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 		item    Item
 		score   int
 		matched []string
+		weight  int
 	}
 	required := requiredScore(terms)
 	var all []scored
@@ -413,10 +458,16 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 			withheldPrivate++
 			continue
 		}
-		all = append(all, scored{it, score, matched})
+		all = append(all, scored{it, score, matched, rankingWeight(it, matched)})
 	}
 
+	// Sort by weight first -- Tier1/tag matches outrank Tier2-only
+	// matches (see rankingWeight) -- falling back to the unweighted
+	// matched-term count, then item id, for items tied on weight.
 	sort.SliceStable(all, func(i, j int) bool {
+		if all[i].weight != all[j].weight {
+			return all[i].weight > all[j].weight
+		}
 		if all[i].score != all[j].score {
 			return all[i].score > all[j].score
 		}

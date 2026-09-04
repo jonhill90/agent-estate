@@ -23,6 +23,12 @@ type vaultFact struct {
 	Title       string
 	Description string
 	Created     string
+	// Body is everything after the closing frontmatter fence, trimmed --
+	// the fact's own full text (agent-estate#1027). Compiled into
+	// Item.Tier2 so it enters Query's searchable text (searchableText in
+	// query.go already reads Tier1+Tier2); this package changes what
+	// goes into that existing field, not query.go's own logic.
+	Body string
 }
 
 // vaultSource reads every agent/facts/*.md file's own frontmatter under
@@ -72,6 +78,21 @@ func vaultSource(vaultDir string) (SourceResult, []Item) {
 		if f.Type != "" {
 			structural = append(structural, f.Type)
 		}
+		// tier2 carries the fact's own full body, not just its
+		// description (agent-estate#1027) -- description is kept as a
+		// lead-in when present so Tier2 alone still reads sensibly, but
+		// the body is what closes the ~14% indexed-fraction gap #1027
+		// measured: query.go's searchableText already reads Tier1+Tier2,
+		// so this is the whole fix on this package's side of the
+		// boundary -- no change to query.go's own logic.
+		tier2 := f.Body
+		if f.Description != "" {
+			if tier2 != "" {
+				tier2 = f.Description + "\n\n" + tier2
+			} else {
+				tier2 = f.Description
+			}
+		}
 		publishable, basis := classify("vault-fact")
 		items = append(items, Item{
 			ID:             itemID(path),
@@ -79,7 +100,7 @@ func vaultSource(vaultDir string) (SourceResult, []Item) {
 			Permalink:      path,
 			StructuralTags: structural,
 			Tier1:          truncate(tier1, 200),
-			Tier2:          f.Description,
+			Tier2:          tier2,
 			Tier3:          "open " + path + " for the full fact",
 			Publishable:    publishable,
 			PublishBasis:   basis,
@@ -132,5 +153,15 @@ func parseVaultFact(data string) (vaultFact, error) {
 	if !closed {
 		return vaultFact{}, fmt.Errorf("frontmatter fence never closed")
 	}
+
+	// Everything after the closing fence is the fact's own body --
+	// captured verbatim (agent-estate#1027), never reworded or
+	// summarised by this package.
+	var body strings.Builder
+	for sc.Scan() {
+		body.WriteString(sc.Text())
+		body.WriteByte('\n')
+	}
+	f.Body = strings.TrimSpace(body.String())
 	return f, nil
 }
