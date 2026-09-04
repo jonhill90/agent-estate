@@ -153,6 +153,16 @@ type QueryResult struct {
 	// item matching, or the index itself being unreadable NOW).
 	SourceStatuses   []SourceResult `json:"source_statuses,omitempty"`
 	IndexGeneratedAt time.Time      `json:"index_generated_at,omitzero"`
+	// IndexGeneratedBy carries the compiled index's own GeneratedBy
+	// forward unchanged -- agent-estate#1082, the same "carry the
+	// build-time record forward, never recompute it here" discipline
+	// SourceStatuses already uses. The comparison against the CURRENTLY
+	// RUNNING checkout's own commit needs live filesystem/git access this
+	// package deliberately does not have (Query takes only an index path
+	// and a question, mirroring CoverageState's own doc comment on why
+	// the staleness comparison itself lives in main.go); this field is
+	// what a caller with that access folds against.
+	IndexGeneratedBy GeneratedBy `json:"index_generated_by,omitzero"`
 	// Coverage is the machine-readable trustworthiness signal every
 	// successfully-read QueryResult carries -- see CoverageState. It is
 	// the zero Coverage{} on StateIndexMissing/StateIndexUnreadable
@@ -180,7 +190,10 @@ type QueryResult struct {
 // stays in main.go; only the fold-in (WithFreshnessReason, below) lives
 // here, so a caller that already has filesystem access only ever needs to
 // call it, never invent a new shape or a second copy of the compose-to-
-// mixed rule withLimitedReason already established.
+// mixed rule withLimitedReason already established. `binary_mismatch`
+// (agent-estate#1082) follows the exact same split: the comparison needs
+// the CURRENTLY RUNNING checkout's own commit, which main.go resolves via
+// knowledge.ResolveBuildCommit and folds in the same way.
 type CoverageState string
 
 const (
@@ -222,6 +235,24 @@ const (
 	// would overclaim a staleness that was never actually observed. See
 	// CoverageStale.
 	CoverageUnknownFreshness CoverageState = "unknown"
+	// CoverageBinaryMismatch means the compiled index's own GeneratedBy
+	// commit and the CURRENTLY RUNNING checkout's commit were both
+	// positively resolved and differ -- agent-estate#1082. Deliberately
+	// its own state, not folded into CoverageStale: CoverageStale means a
+	// SOURCE changed since the index was built, which says nothing about
+	// whether the sources here are current -- an index-vs-binary mismatch
+	// can happen with every source perfectly fresh (a doc-only commit
+	// landed since the index was built) or with the source axis totally
+	// unaffected. Calling that "stale" would overclaim staleness about the
+	// sources when the actual finding is about the code that read them.
+	// This is detection, never prevention or refusal (#1082's own
+	// framing): an index built by a different commit is usually fine, so
+	// this state exists for a caller to know, not to be blocked by --
+	// Query never refuses on it and neither does any caller folding it in.
+	// Like CoverageStale/CoverageUnknownFreshness, not set by this package
+	// directly -- a caller with access to its own running checkout folds
+	// it in via WithFreshnessReason, passing this state.
+	CoverageBinaryMismatch CoverageState = "binary_mismatch"
 	// CoverageMixed means more than one of the above applied to the same
 	// result -- e.g. a source failed AND the answer was also withheld by
 	// policy. Reasons names each contributing state individually; Mixed is
@@ -555,6 +586,7 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 		RankingBasis:     rankingBasisText,
 		SourceStatuses:   res.Sources,
 		IndexGeneratedAt: res.GeneratedAt,
+		IndexGeneratedBy: res.GeneratedBy,
 		PrivateIncluded:  includePrivate,
 		// Set before any early return below -- a source that failed at
 		// build time is reported regardless of whether this particular

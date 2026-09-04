@@ -154,6 +154,13 @@ type Result struct {
 	// GeneratedAt is when this Result was built, UTC. Every generated
 	// file carries this per the operator's own convention.
 	GeneratedAt time.Time `json:"generated_at"`
+	// GeneratedBy records WHAT built this Result -- agent-estate#1082,
+	// the field #1047/#1080's own staleness comparison stopped short of:
+	// that comparison is source-against-index; nothing before this
+	// compared index-against-binary. See GeneratedBy's own doc comment
+	// for how Commit is resolved and when it is "unknown" instead of a
+	// guess.
+	GeneratedBy GeneratedBy `json:"generated_by"`
 	// StalenessRule states, in one sentence, when a reader should no
 	// longer trust this Result without regenerating it.
 	StalenessRule string `json:"staleness_rule"`
@@ -163,6 +170,21 @@ type Result struct {
 	Note    string         `json:"note"`
 	Sources []SourceResult `json:"sources"`
 	Items   []Item         `json:"items"`
+}
+
+// GeneratedBy names the commit that built this Result -- agent-estate#1082.
+// Commit is "unknown" (never a guessed value) when it could not be
+// positively determined: no git checkout resolved (Config.RepoRoot empty),
+// git itself unavailable, or the checkout was dirty when Generate ran -- a
+// dirty tree has no single commit that actually describes what produced
+// the index, so recording HEAD anyway would assert a false precision. This
+// follows the same rule github-stars' own freshness-unknown case already
+// follows (see query.go's CoverageUnknownFreshness): absence of evidence
+// is not evidence of freshness, so absence of a resolvable commit is not
+// evidence the running commit built this index either.
+type GeneratedBy struct {
+	Commit  string    `json:"commit"`
+	BuiltAt time.Time `json:"built_at"`
 }
 
 const stalenessRule = "stale the moment any of its five sources changes; " +
@@ -191,4 +213,9 @@ type Config struct {
 	// the real gh binary or a real network. nil means "use the real
 	// gh binary" (see stars.go's defaultGHRunner).
 	RunGH func(args ...string) ([]byte, error)
+	// RunGit executes a git CLI invocation and returns its stdout --
+	// the seam build_commit.go reads through to resolve GeneratedBy.Commit,
+	// so a test never shells out to the real git binary. nil means "use
+	// the real git binary" (see build_commit.go's defaultGitRunner).
+	RunGit func(args ...string) ([]byte, error)
 }

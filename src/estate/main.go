@@ -434,6 +434,7 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 	// blind exactly once for real: a stale index answered silently, and
 	// only manual regeneration caught it.
 	printIndexFreshness(qr.IndexGeneratedAt)
+	printBuildCommitMismatch(qr.IndexGeneratedBy, currentBuildCommit())
 
 	switch qr.State {
 	case knowledge.StateNoMatch:
@@ -826,6 +827,83 @@ func foldFreshnessIntoCoverage(cov knowledge.Coverage, generatedAt time.Time) kn
 	return cov
 }
 
+// shortCommit renders a commit for terminal output -- the first 12 hex
+// characters, the same truncation `git rev-parse --short` and this repo's
+// own tick.go already use elsewhere, or the value verbatim (currently only
+// ever "unknown") when it is shorter than that.
+func shortCommit(c string) string {
+	if len(c) > 12 {
+		return c[:12]
+	}
+	return c
+}
+
+// currentBuildCommit resolves the commit of the checkout THIS invocation of
+// `estate` is running from -- knowledge.DefaultConfig's own RepoRoot
+// resolution, passed straight to knowledge.ResolveBuildCommit so this is
+// the exact same commit-resolution logic Generate itself uses (one
+// implementation, agent-estate#1082), applied to the query side instead of
+// the build side. A DefaultConfig failure (home dir unresolvable) folds in
+// as unknown, never a fatal error -- this is a caveat on an otherwise-real
+// answer, never a reason to refuse the query itself.
+func currentBuildCommit() string {
+	cfg, err := knowledge.DefaultConfig()
+	if err != nil {
+		return "unknown"
+	}
+	return knowledge.ResolveBuildCommit(cfg)
+}
+
+// foldGeneratedByIntoCoverage folds an index-vs-binary comparison
+// (agent-estate#1082) into qr's own Coverage. current is the CURRENTLY
+// RUNNING checkout's own commit, resolved once by the caller (via
+// currentBuildCommit) and passed in here rather than re-resolved, so this
+// function and printBuildCommitMismatch below always compare against the
+// exact same reading. Both sides must be positively resolved ("unknown" on
+// either side means no comparison could be made at all, not a mismatch --
+// #1082's own "not a guess" requirement: an unknown commit is never
+// treated as matching OR as differing). A real mismatch folds in as
+// CoverageBinaryMismatch, naming both commits; a real match folds in
+// nothing at all, the same "no reason needed when everything is fine"
+// shape coverageFromSources already uses. generatedBy.Commit == "" covers
+// an index written before this field existed -- treated the same as
+// "unknown", never as a false mismatch or a false match.
+func foldGeneratedByIntoCoverage(cov knowledge.Coverage, generatedBy knowledge.GeneratedBy, current string) knowledge.Coverage {
+	indexCommit := generatedBy.Commit
+	if indexCommit == "" {
+		indexCommit = "unknown"
+	}
+	if indexCommit == "unknown" || current == "unknown" || current == "" {
+		return cov
+	}
+	if indexCommit == current {
+		return cov
+	}
+	return cov.WithFreshnessReason(knowledge.CoverageBinaryMismatch, "",
+		fmt.Sprintf("index built by %s, this checkout is at %s -- usually fine, not a refusal; regenerate with `estate knowledge` if this query needs the newer commit's own changes reflected",
+			shortCommit(indexCommit), shortCommit(current)))
+}
+
+// printBuildCommitMismatch prints the same index-vs-binary finding
+// foldGeneratedByIntoCoverage folds into Coverage, so a human reading
+// prose sees what a machine reading Coverage sees -- the same
+// one-measurement-two-renderings discipline printIndexFreshness/
+// foldFreshnessIntoCoverage already established for source staleness.
+// current is the same resolved value the caller passes to
+// foldGeneratedByIntoCoverage. Silent when generatedBy carries no
+// resolvable commit (nothing to compare) or the two commits match.
+func printBuildCommitMismatch(generatedBy knowledge.GeneratedBy, current string) {
+	indexCommit := generatedBy.Commit
+	if indexCommit == "" {
+		indexCommit = "unknown"
+	}
+	if indexCommit == "unknown" || current == "unknown" || current == "" || indexCommit == current {
+		return
+	}
+	fmt.Printf("note: index built by commit %s, this checkout is at %s -- not a problem by itself, just what built what\n",
+		shortCommit(indexCommit), shortCommit(current))
+}
+
 // formatAge renders a duration the way a human reading terminal output
 // wants it -- one unit, rounded down, never a Go-native
 // "3h24m10.001s". A negative duration (a source's clock skewed ahead of
@@ -937,6 +1015,10 @@ func main() {
 			// sees. No-op when IndexGeneratedAt is zero (the two
 			// index-read-failure states already returned above).
 			qr.Coverage = foldFreshnessIntoCoverage(qr.Coverage, qr.IndexGeneratedAt)
+			// agent-estate#1082: fold the index-vs-binary comparison in
+			// the same way -- detection, not prevention or refusal (see
+			// foldGeneratedByIntoCoverage's own doc comment).
+			qr.Coverage = foldGeneratedByIntoCoverage(qr.Coverage, qr.IndexGeneratedBy, currentBuildCommit())
 			if asJSON {
 				printKnowledgeQueryJSON(qr)
 			} else {

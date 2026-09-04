@@ -546,6 +546,27 @@ func TestQueryCoverageCompleteWhenAllSourcesOK(t *testing.T) {
 	}
 }
 
+// TestQueryCarriesIndexGeneratedByForward is agent-estate#1082's own
+// reproduction against Query: a compiled index carrying a real
+// GeneratedBy must have that same value on QueryResult.IndexGeneratedBy,
+// unchanged -- Query never recomputes it, only carries it forward, the
+// same discipline SourceStatuses/IndexGeneratedAt already use.
+func TestQueryCarriesIndexGeneratedByForward(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.json")
+	res := testIndex()
+	res.GeneratedBy = GeneratedBy{
+		Commit:  "abc123def4567890abc123def4567890abc123d",
+		BuiltAt: res.GeneratedAt,
+	}
+	if err := Write(path, res); err != nil {
+		t.Fatal(err)
+	}
+	got := Query(path, "what did Jon decide about auth tokens", 0, false)
+	if got.IndexGeneratedBy.Commit != "abc123def4567890abc123def4567890abc123d" {
+		t.Fatalf("IndexGeneratedBy.Commit = %q, want the index's own recorded commit", got.IndexGeneratedBy.Commit)
+	}
+}
+
 // TestQueryCoverageLimitedOnWithheldPrivate folds #1055's own
 // StateMatchedWithheldMajority into the same Coverage structure --
 // agent-estate#1058's sequencing note: this must reuse the shape #1055
