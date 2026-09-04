@@ -36,5 +36,26 @@ func Generate(cfg Config, now time.Time) Result {
 	res.Sources = append(res.Sources, docsRes)
 	res.Items = append(res.Items, docsItems...)
 
+	addSourceTag(res.Items)
+
 	return res
+}
+
+// addSourceTag appends "source:<Item.Source>" to every item's own
+// StructuralTags, in place -- agent-estate#1069. Every one of the five
+// readers above already sets Item.Source to its own family name
+// ("github-stars", "repo-docs", "corpus-directive", ...); this is the one
+// place all five converge before Generate returns, so it is the one place
+// that needs to know about the filter rather than each source file
+// duplicating the same one-line append. The tag composes with the
+// existing exact-tag filter (extractTagFilters/itemHasAllTags in
+// query.go) for free -- it is a key:value structural tag exactly like
+// kind:directive already is, so `source:repo-docs <question>` filters the
+// same way `kind:directive <question>` already does. This never touches
+// or removes the colon-less tags a source already carries (`repo-docs`,
+// `github-stars`, `AGENTS.md`) -- it only adds one more.
+func addSourceTag(items []Item) {
+	for i := range items {
+		items[i].StructuralTags = append(items[i].StructuralTags, "source:"+items[i].Source)
+	}
 }
