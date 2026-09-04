@@ -1,0 +1,98 @@
+[
+  {
+    "id": "nl-01",
+    "question": "how do I merge a pull request in this repo",
+    "expected_source": "repo-docs",
+    "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-tui--merging-prs-you-did-not-author",
+    "rationale": "Target is AGENTS.md's own \"The TUI -- Merging PRs you did not author\" section title, chosen before any query ran (agent-estate#1073). Baseline on a7d413c (agent-estate#1069, default/public, unscoped): rank 2.",
+    "note": "natural-language stratum (#1073/#1069/#1053) -- a lane phrasing, not a term drawn from the target section itself. Reported as its own stratum, never averaged with cases.json's score (#1069)."
+  },
+  {
+    "id": "nl-02",
+    "question": "can I create a tmux session in a test",
+    "expected_source": "repo-docs",
+    "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-daemon--invariants-do-not-break-these-without-an-explicit-decision",
+    "rationale": "Target is AGENTS.md's own \"The daemon -- Invariants\" section title (Invariant 4 is the tmux-in-a-test rule; sections are indexed whole, not by sub-bullet). Chosen before any query ran. Baseline on a7d413c: never returned in the top 10 -- the record says \"socket\", the question says \"session\" (the #1063 vocabulary-mismatch class, per #1069's comment).",
+    "note": "natural-language stratum (#1073/#1069/#1053). Deliberately the low-term-overlap case for this stratum: the question and the section's indexed text share almost no vocabulary."
+  },
+  {
+    "id": "nl-03",
+    "question": "what should I do before reporting that something is missing",
+    "expected_source": "repo-docs",
+    "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-daemon--the-failure-mode-this-codebase-produces-most",
+    "rationale": "Target is AGENTS.md's own \"The daemon -- The failure mode this codebase produces most\" section title, chosen before any query ran. Baseline on a7d413c: rank 4 (buried, not absent).",
+    "note": "natural-language stratum (#1073/#1069/#1053)."
+  },
+  {
+    "id": "nl-04",
+    "question": "is it ok to write this part in python",
+    "expected_source": "repo-docs",
+    "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-implementation-language-is-go-this-is-checked-not-trusted",
+    "rationale": "Target is AGENTS.md's own \"The implementation language is Go. This is checked, not trusted.\" section title, chosen before any query ran. Baseline on a7d413c: never returned in the top 10 -- the record says \"Go\", the question says \"python\" (the #1063 vocabulary-mismatch class, per #1069's comment).",
+    "note": "natural-language stratum (#1073/#1069/#1053). Deliberately the second low-term-overlap case for this stratum."
+  },
+  {
+    "id": "nl-05",
+    "question": "where do I put a new view in the terminal app",
+    "expected_source": "repo-docs",
+    "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-tui--what-not-to-do-here",
+    "rationale": "Target is AGENTS.md's own \"The TUI -- What NOT to do here\" section title, chosen before any query ran. Baseline on a7d413c: rank 9 (buried, worst of the buried-but-present cases).",
+    "note": "natural-language stratum (#1073/#1069/#1053)."
+  },
+  {
+    "id": "nl-06",
+    "question": "how do I run the tests for the terminal app",
+    "expected_source": "repo-docs",
+    "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-tui--running-the-tests",
+    "rationale": "Target is AGENTS.md's own \"The TUI -- Running the tests\" section title, chosen before any query ran. Baseline on a7d413c: rank 6 (buried, not absent).",
+    "note": "natural-language stratum (#1073/#1069/#1053)."
+  },
+  {
+    "id": "nl-07",
+    "question": "what checks stop a bad merge",
+    "expected_source": "repo-docs",
+    "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-daemon--the-guards-that-actually-run",
+    "rationale": "Target is AGENTS.md's own \"The daemon -- The guards that actually run\" section title, chosen before any query ran. Baseline on a7d413c: rank 6 (buried, not absent).",
+    "note": "natural-language stratum (#1073/#1069/#1053)."
+  },
+  {
+    "id": "nl-08",
+    "question": "when am I allowed to ask Jon a question",
+    "expected_source": "repo-docs",
+    "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-daemon--before-you-ask-jon-anything-read-this-first",
+    "rationale": "Target is AGENTS.md's own \"The daemon -- Before you ask Jon anything -- read this first\" section title, chosen before any query ran. Baseline on a7d413c: rank 6 (buried, not absent).",
+    "note": "natural-language stratum (#1073/#1069/#1053)."
+  },
+  {
+    "id": "nl-09",
+    "question": "what does the pressure gate do",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/product/SPEC.md#agent-estate-spec--the-pressure-gate-srcestateinternalpressure",
+    "rationale": "Target is docs/product/SPEC.md's own \"The pressure gate\" section title, chosen before any query ran. Baseline on a7d413c: rank 1.",
+    "note": "natural-language stratum (#1073/#1069/#1053)."
+  },
+  {
+    "id": "nl-10",
+    "question": "how does dispatch work",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/product/SPEC.md#agent-estate-spec--dispatch-srcestate-estate-dispatch-issue-brief-file",
+    "rationale": "Target is docs/product/SPEC.md's own \"Dispatch\" section title, chosen before any query ran. Baseline on a7d413c: rank 3.",
+    "note": "natural-language stratum (#1073/#1069/#1053)."
+  },
+  {
+    "id": "nl-11",
+    "question": "what is this product for",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/product/PRD.md#agent-estate-prd--what-this-is-for",
+    "rationale": "Target is docs/product/PRD.md's own \"What this is for\" section title, chosen before any query ran. Baseline on a7d413c: rank 1.",
+    "note": "natural-language stratum (#1073/#1069/#1053)."
+  },
+  {
+    "id": "nl-12",
+    "question": "what will this system refuse to do",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/product/PRD.md#agent-estate-prd--what-it-refuses-to-do",
+    "rationale": "Target is docs/product/PRD.md's own \"What it refuses to do\" section title, chosen before any query ran. Baseline on a7d413c: rank 2.",
+    "note": "natural-language stratum (#1073/#1069/#1053)."
+  }
+]

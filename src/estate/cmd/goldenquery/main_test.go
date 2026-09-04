@@ -87,3 +87,24 @@ func TestEvaluateFailsNoMatchCaseWhenSomethingActuallyMatched(t *testing.T) {
 		t.Fatal("evaluate() pass = true for a no_match case that actually matched something")
 	}
 }
+
+// agent-estate#1073: firstMatchRank is the natural-language stratum's own
+// primitive -- it must find a match at any rank in the returned list, not
+// only within a top-3 slice, so both the top-3 and top-10 numbers can be
+// derived from one query per case.
+
+func TestFirstMatchRankFindsRankBeyondThree(t *testing.T) {
+	c := goldenset.Case{ID: "t4", ExpectedSource: goldenset.SourceCorpusParameter, ExpectedIdentifier: "it-abc123"}
+	matches := parseMatches(sampleMatchedStdout)
+	if got := firstMatchRank(c, matches); got != 2 {
+		t.Fatalf("firstMatchRank() = %d, want 2", got)
+	}
+}
+
+func TestFirstMatchRankZeroWhenNeverReturned(t *testing.T) {
+	c := goldenset.Case{ID: "t5", ExpectedSource: goldenset.SourceVaultFact, ExpectedIdentifier: "never-appears.md"}
+	matches := parseMatches(sampleMatchedStdout)
+	if got := firstMatchRank(c, matches); got != 0 {
+		t.Fatalf("firstMatchRank() = %d, want 0", got)
+	}
+}
