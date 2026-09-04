@@ -517,6 +517,59 @@ func knownTags(items []Item) map[string]bool {
 	return known
 }
 
+// unknownTagReasons renders one unresolved tag-filter's reason per entry
+// in unknown, distinguishing the two readings a bare "not present in the
+// compiled index" collapses together (agent-estate#1120's correction
+// comment): a tag naming no known source at all (a typo -- fix the
+// query) versus a tag naming a source that DID try to build and failed
+// (fix the source -- the query was fine). Both facts already exist on
+// QueryResult before this function runs -- sources is res.Sources,
+// carrying each reader's own OK/Reason, and unknown is the tag-filter
+// path's own list of what did not resolve -- so this is wording over
+// data already computed, not a new field.
+func unknownTagReasons(unknown []string, sources []SourceResult) []string {
+	reasons := make([]string, 0, len(unknown))
+	for _, tf := range unknown {
+		if src, ok := failedSourceForTag(tf, sources); ok {
+			reasons = append(reasons, fmt.Sprintf(
+				"%s -- names source %q, which failed to build: %s",
+				tf, src.Name, src.Reason))
+			continue
+		}
+		reasons = append(reasons, fmt.Sprintf("%s -- not present in the compiled index", tf))
+	}
+	return reasons
+}
+
+// failedSourceForTag looks for a source in sources that is both !OK
+// (failed to build, so it produced zero items and could never have made
+// this tag "known" no matter what it names) and whose Name plausibly
+// names the same source as tag's "source:<name>" suffix. The comparison
+// tolerates a trailing "s" on either side because addSourceTag derives
+// the tag from each ITEM's own Source string, while SourceResult.Name is
+// each READER's own family name, and those two vocabularies already
+// disagree on plurality for at least one real source (vault.go's items
+// carry Source "vault-fact", singular, while vaultSource's own
+// SourceResult.Name is "vault-facts", plural) -- not a bug this function
+// is fixing, just the naming gap it has to see through to tell "this
+// source failed" from "no such source" for that exact tag.
+func failedSourceForTag(tag string, sources []SourceResult) (SourceResult, bool) {
+	const prefix = "source:"
+	if !strings.HasPrefix(tag, prefix) {
+		return SourceResult{}, false
+	}
+	name := strings.TrimSuffix(strings.TrimPrefix(tag, prefix), "s")
+	for _, s := range sources {
+		if s.OK {
+			continue
+		}
+		if strings.TrimSuffix(strings.ToLower(s.Name), "s") == name {
+			return s, true
+		}
+	}
+	return SourceResult{}, false
+}
+
 // itemHasAllTags reports whether it carries EVERY one of tags (already
 // lowercased) as a whole, exact structural or synaptic tag -- never a
 // substring match, which is what term scoring already does elsewhere in
@@ -627,8 +680,7 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 			// instead, exactly like StateIndexMissing/StateNoMatch never
 			// collapsing into each other elsewhere in this file.
 			out.State = StateNoMatch
-			out.Reason = fmt.Sprintf("unknown tag(s): %s -- not present in the compiled index",
-				strings.Join(unknown, ", "))
+			out.Reason = fmt.Sprintf("unknown tag(s): %s", strings.Join(unknownTagReasons(unknown, res.Sources), ", "))
 			return out
 		}
 		out.RankingBasis += fmt.Sprintf("; filtered first to items carrying the exact tag(s) %s, ranked only within that set",
