@@ -108,6 +108,39 @@ type Match struct {
 	// reader of Matches can tell which entries are private even inside
 	// private mode, not just that private mode was on (agent-estate#1033).
 	Publishable bool `json:"publishable"`
+	// Weight and Status are copied straight off the source item's own
+	// "weight:<value>"/"status:<value>" structural tags -- agent-estate#1128.
+	// Only corpus items (corpus-parameter, corpus-directive, corpus-question,
+	// corpus-correction; see corpus.go's corpusSource) carry those tags at
+	// all, so both are empty ("", omitted from JSON) for every other
+	// source. Never a second read of the corpus: weightAndStatus below only
+	// parses StructuralTags the item already carries, the same tags
+	// searchableText already folds into scoring -- this is display, not a
+	// new lookup, and it changes no ranking (Score is computed before this
+	// pair is ever read).
+	Weight string `json:"weight,omitempty"`
+	Status string `json:"status,omitempty"`
+}
+
+// weightAndStatus pulls the "weight:<value>" and "status:<value>"
+// structural tags off tags -- agent-estate#1128's own gap: the compiled
+// index's structural_tags carries both markers already, but the printed
+// match line and the JSON Match shape dropped them, so a hard directive
+// and a dropped or merely-preferred one rendered identically. Returns ""
+// for whichever tag is absent (every non-corpus source, and any corpus row
+// whose own weight or status column was empty when corpus.go read it) --
+// absence here is never defaulted to a word like "hard" or "acted", since
+// that would be inventing a value the source item never actually carried.
+func weightAndStatus(tags []string) (weight, status string) {
+	for _, t := range tags {
+		switch {
+		case strings.HasPrefix(t, "weight:"):
+			weight = strings.TrimPrefix(t, "weight:")
+		case strings.HasPrefix(t, "status:"):
+			status = strings.TrimPrefix(t, "status:")
+		}
+	}
+	return weight, status
 }
 
 // QueryResult is Query's full, typed answer.
@@ -555,18 +588,6 @@ func unknownTagReasons(unknown []string, sources []SourceResult) []string {
 	return reasons
 }
 
-// failedSourceForTag looks for a source in sources that is both !OK
-// (failed to build, so it produced zero items and could never have made
-// this tag "known" no matter what it names) and whose Name plausibly
-// names the same source as tag's "source:<name>" suffix. The comparison
-// tolerates a trailing "s" on either side because addSourceTag derives
-// the tag from each ITEM's own Source string, while SourceResult.Name is
-// each READER's own family name, and those two vocabularies already
-// disagree on plurality for at least one real source (vault.go's items
-// carry Source "vault-fact", singular, while vaultSource's own
-// SourceResult.Name is "vault-facts", plural) -- not a bug this function
-// is fixing, just the naming gap it has to see through to tell "this
-// source failed" from "no such source" for that exact tag.
 // isCorpusKindTag reports whether name (already prefix-stripped and
 // singularised the same way failedSourceForTag treats every other tag) is
 // one of corpusKinds' own "corpus-<kind>" values -- agent-estate#1120's
@@ -590,6 +611,18 @@ func isCorpusKindTag(name string) bool {
 	return false
 }
 
+// failedSourceForTag looks for a source in sources that is both !OK
+// (failed to build, so it produced zero items and could never have made
+// this tag "known" no matter what it names) and whose Name plausibly
+// names the same source as tag's "source:<name>" suffix. The comparison
+// tolerates a trailing "s" on either side because addSourceTag derives
+// the tag from each ITEM's own Source string, while SourceResult.Name is
+// each READER's own family name, and those two vocabularies already
+// disagree on plurality for at least one real source (vault.go's items
+// carry Source "vault-fact", singular, while vaultSource's own
+// SourceResult.Name is "vault-facts", plural) -- not a bug this function
+// is fixing, just the naming gap it has to see through to tell "this
+// source failed" from "no such source" for that exact tag.
 func failedSourceForTag(tag string, sources []SourceResult) (SourceResult, bool) {
 	const prefix = "source:"
 	if !strings.HasPrefix(tag, prefix) {
@@ -835,6 +868,7 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 		n = limit
 	}
 	for _, s := range all[:n] {
+		weight, status := weightAndStatus(s.item.StructuralTags)
 		out.Matches = append(out.Matches, Match{
 			ID:           s.item.ID,
 			Source:       s.item.Source,
@@ -843,6 +877,8 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 			Score:        int(math.Round(s.score)),
 			MatchedTerms: s.matched,
 			Publishable:  s.item.Publishable,
+			Weight:       weight,
+			Status:       status,
 		})
 	}
 	out.NotReturned = out.TotalMatched - len(out.Matches)

@@ -480,12 +480,32 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 	for _, m := range qr.Matches {
 		// The header line's shape ("[id] source (score N: terms)") is a
 		// parsed format -- cmd/goldenquery's matchHeader regex reads it
-		// back verbatim -- so the [PRIVATE] marker goes on the Tier1
-		// line instead of appended here, where it would break that
-		// regex's end-of-line anchor for every private match.
+		// back verbatim -- so the [PRIVATE] marker, and now the
+		// weight/status marker (agent-estate#1128), go on the Tier1 line
+		// instead of appended here, where either would break that regex's
+		// end-of-line anchor for every match it applies to.
 		tier1 := m.Tier1
 		if !m.Publishable {
 			tier1 = "[PRIVATE] " + tier1
+		}
+		// weight/status print unconditionally whenever the source item
+		// carried them (every corpus-* source; every other source leaves
+		// both "" and prints nothing here) -- never only when non-default.
+		// A reader who sees no marker on a non-corpus item already knows
+		// why (that source has no weight/status at all); a reader who saw
+		// a marker only for "unusual" values would have no way to tell
+		// "this item is weight=hard/status=acted" apart from "this source
+		// doesn't carry the concept", which is exactly the ambiguity
+		// #1128 exists to remove.
+		if m.Weight != "" || m.Status != "" {
+			tags := []string{}
+			if m.Weight != "" {
+				tags = append(tags, "weight="+m.Weight)
+			}
+			if m.Status != "" {
+				tags = append(tags, "status="+m.Status)
+			}
+			tier1 = "[" + strings.Join(tags, " ") + "] " + tier1
 		}
 		fmt.Printf("[%s] %s (score %d: %s)\n  %s\n  %s\n\n",
 			m.ID, m.Source, m.Score, strings.Join(m.MatchedTerms, ", "), tier1, m.Permalink)
