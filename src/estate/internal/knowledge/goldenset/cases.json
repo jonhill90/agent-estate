@@ -1,0 +1,108 @@
+[
+  {
+    "id": "vault-01",
+    "question": "What is the rule when a Director's own PR is ready to merge -- can it merge that PR itself?",
+    "expected_source": "vault-fact",
+    "expected_identifier": "author-never-self-merges.md",
+    "rationale": "The vault fact is titled 'Author never self-merges -- retained' and states directly: 'Merge authority is not permission to merge your own work.' It is the authoritative statement of this rule, not a paraphrase of it."
+  },
+  {
+    "id": "vault-02",
+    "question": "Why do all the agents in a tmux session suddenly look logged out at the same time?",
+    "expected_source": "vault-fact",
+    "expected_identifier": "a-locked-keychain-looks-like-a-tmux-session-problem.md",
+    "note": "deliberately low term overlap: the fact's indexed tier1/tier2 (title + description) never say 'tmux' or 'logged out' -- those words appear only in the fact's full body (the Symptom section), which Query never indexes. This tests whether reworded real-world phrasing survives substring-only ranking.",
+    "rationale": "This exact symptom -- 'every tmux-hosted agent reports {\"loggedIn\": false}' -- is the fact's own documented incident (agent-supervisor#582). It is the one file that explains the cause (a locked login keychain), so it is authoritative regardless of whether the current ranking finds it."
+  },
+  {
+    "id": "vault-03",
+    "question": "What happened during the week Jon had already ruled out the shell and Python supervisor but it kept getting maintained anyway?",
+    "expected_source": "vault-fact",
+    "expected_identifier": "check-the-directive-before-the-work.md",
+    "rationale": "The fact documents this exact week: '493 issues, 159 open... Jon had already ruled that layer out. He ended the week with nothing delivered and said so.' No other fact covers this incident."
+  },
+  {
+    "id": "vault-04",
+    "question": "What is the recurring defect where someone fixes the body of a document but leaves the title or heading asserting the old thing?",
+    "expected_source": "vault-fact",
+    "expected_identifier": "correct-the-label-not-just-the-body.md",
+    "rationale": "The fact's own title states this pattern verbatim: 'Fixing the body and leaving the label is the most repeated defect -- the label is what gets trusted.'"
+  },
+  {
+    "id": "corpus-01",
+    "question": "Does the tmux theme need to match Jon's own dotfiles exactly?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-ac0a4ce618bc5fd7",
+    "rationale": "live_parameters row it-ac0a4ce618bc5fd7 resolves to 'tmux_theme=match_jons_dotfiles' with body 'The tmux theme must match Jon's own dotfiles exactly, not an approximation.' -- a direct, hard parameter answer to this exact question."
+  },
+  {
+    "id": "corpus-02",
+    "question": "What should happen when a PR is refused for being behind main?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-d0db3ce9917a1a5c",
+    "rationale": "live_parameters row it-d0db3ce9917a1a5c resolves to 'behind_pr=update_branch_never_admin_merge': 'When a PR is refused as BEHIND, update the branch and let CI re-run rather than reaching for --admin.'"
+  },
+  {
+    "id": "corpus-03",
+    "question": "Am I allowed to merge my own green, mergeable PRs instead of leaving them for Jon?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-c403028cab9d7bc8",
+    "rationale": "live_parameters row it-c403028cab9d7bc8 resolves to 'green_pr=merge_without_jon': 'Do not park green, mergeable PRs on me -- merge them yourself and only escalate the genuinely gated ones.'"
+  },
+  {
+    "id": "corpus-04",
+    "question": "What does CLEAN actually mean when git reports a PR has no merge conflict?",
+    "expected_source": "corpus-parameter",
+    "expected_identifier": "corpus:item:it-2c9e97e40325747a",
+    "rationale": "live_parameters row it-2c9e97e40325747a resolves to 'merge_status=clean_is_textual_not_semantic': 'CLEAN means git found no textual conflict, not that the result is coherent.'"
+  },
+  {
+    "id": "stars-01",
+    "question": "Which starred repo lets an AI agent capture macOS screenshots through an MCP server?",
+    "expected_source": "github-stars",
+    "expected_identifier": "https://github.com/openclaw/Peekaboo",
+    "rationale": "openclaw/Peekaboo's own starred description: 'a macOS CLI & optional MCP server that enables AI agents to capture screenshots of applications, or the entire system, with optional visual question answering.' No other starred repo matches this description."
+  },
+  {
+    "id": "stars-02",
+    "question": "Is there a starred tool that puts a colored frame and name tag on every Mac in a fleet so I stop confusing them over remote desktop?",
+    "expected_source": "github-stars",
+    "expected_identifier": "https://github.com/steipete/Nameplate",
+    "rationale": "steipete/Nameplate's own starred description: 'Brand every Mac in your fleet -- colored frame, name tag, watermark, and connect splash as click-through overlays. Never wonder which Mac you remoted into again.'"
+  },
+  {
+    "id": "stars-03",
+    "question": "Which starred project turns a codebase, its docs, SQL schemas and configs into a queryable knowledge graph without a vector store?",
+    "expected_source": "github-stars",
+    "expected_identifier": "https://github.com/Graphify-Labs/graphify",
+    "rationale": "Graphify-Labs/graphify's own starred description: 'Turn any codebase, with its docs, SQL schemas, configs, and PDFs, into a queryable knowledge graph... local deterministic AST parsing, every edge explained, no vector store.'"
+  },
+  {
+    "id": "loops-01",
+    "question": "Which loops-research chapter says generation is now cheap and a loop's speed is bottlenecked by its verification half?",
+    "expected_source": "loops-research",
+    "expected_identifier": "04-verifiers.md",
+    "rationale": "04-verifiers.md opens with exactly this claim: 'generation is cheap now; the loop spins only as fast as its verification half.' It is the file's own first paragraph, not a summary composed elsewhere."
+  },
+  {
+    "id": "loops-02",
+    "question": "Which loops-research note says persistent memory remains underdeveloped in real agent loops?",
+    "expected_source": "loops-research",
+    "expected_identifier": "09-memory.md",
+    "rationale": "09-memory.md's own first paragraph: 'the survey's finding that persistent memory remains underdeveloped in real loops makes this one of the two biggest greenfield opportunities.'"
+  },
+  {
+    "id": "loops-03",
+    "question": "What does the loops-research corpus say about triggers being the contract field most loops still get wrong, since most are kicked off by hand?",
+    "expected_source": "loops-research",
+    "expected_identifier": "03-triggers.md",
+    "rationale": "03-triggers.md's own first paragraph: 'A trigger is the first contract field and the one the surveyed corpus is weakest on... Most loops in the wild are still manually kicked.'"
+  },
+  {
+    "id": "none-01",
+    "question": "What's the office vending machine restocking schedule?",
+    "expected_source": "none",
+    "expected_identifier": "",
+    "rationale": "Verified absent from all four sources before running any query: no vault fact or Loops-Research file matches 'vending'/'restocking' (grep -ril), no live_parameters row's body mentions 'vending'/'restock' (sqlite3 COUNT(*)=0), and no starred repo's description matches either term. This is the required no_match case -- the honest answer is that nothing in the index answers it."
+  }
+]
