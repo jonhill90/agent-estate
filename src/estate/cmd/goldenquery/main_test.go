@@ -142,3 +142,74 @@ func TestScopedQuestionPrependsGivenSourceWhenScoped(t *testing.T) {
 		t.Fatalf("scopedQuestion(scoped, github-stars) = %q, want %q", got, want)
 	}
 }
+
+// agent-estate#1133: isPublishableReachable is the reachable-set test the
+// corrected "publishable-reachable score" line is built on. github-stars
+// and repo-docs are the only two sources classify.go marks safe to
+// default public (internal/knowledge/classify.go); every other
+// ExpectedSource -- including "none" -- is excluded from the reachable
+// score, never counted as a reachable miss.
+
+func TestIsPublishableReachableTrueForGithubStarsAndRepoDocs(t *testing.T) {
+	for _, s := range []goldenset.ExpectedSource{goldenset.SourceGithubStars, goldenset.SourceRepoDocs} {
+		if !isPublishableReachable(s) {
+			t.Errorf("isPublishableReachable(%q) = false, want true", s)
+		}
+	}
+}
+
+func TestIsPublishableReachableFalseForPrivateSourcesAndNone(t *testing.T) {
+	for _, s := range []goldenset.ExpectedSource{
+		goldenset.SourceVaultFact, goldenset.SourceCorpusParameter,
+		goldenset.SourceLoopsResearch, goldenset.SourceNone,
+	} {
+		if isPublishableReachable(s) {
+			t.Errorf("isPublishableReachable(%q) = true, want false", s)
+		}
+	}
+}
+
+// agent-estate#1133: splitPublishable is what turns one default-mode run
+// over all 17 of cases.json's cases into the reachable score's own
+// numerator/denominator plus the two counts the line's own text must
+// disclose (excludedPrivate, and none-01 reported separately) -- this is
+// the fix for the bug the issue reports: before this, the aggregate
+// hits/total this function replaces counted all 17 in the denominator,
+// reporting "5/17" for a run that found every reachable case there was to
+// find.
+
+func TestSplitPublishableExcludesPrivateSourcesFromReachableDenominator(t *testing.T) {
+	results := []result{
+		{c: goldenset.Case{ID: "v1", ExpectedSource: goldenset.SourceVaultFact}, pass: false},
+		{c: goldenset.Case{ID: "c1", ExpectedSource: goldenset.SourceCorpusParameter}, pass: false},
+		{c: goldenset.Case{ID: "l1", ExpectedSource: goldenset.SourceLoopsResearch}, pass: false},
+		{c: goldenset.Case{ID: "g1", ExpectedSource: goldenset.SourceGithubStars}, pass: true},
+		{c: goldenset.Case{ID: "r1", ExpectedSource: goldenset.SourceRepoDocs}, pass: true},
+		{c: goldenset.Case{ID: "n1", ExpectedSource: goldenset.SourceNone}, pass: false},
+	}
+	hits, total, excludedPrivate, none := splitPublishable(results)
+	if hits != 2 || total != 2 {
+		t.Fatalf("splitPublishable() hits/total = %d/%d, want 2/2 (only github-stars and repo-docs count)", hits, total)
+	}
+	if excludedPrivate != 3 {
+		t.Fatalf("splitPublishable() excludedPrivate = %d, want 3 (vault-fact, corpus-parameter, loops-research)", excludedPrivate)
+	}
+	if none == nil || none.c.ID != "n1" {
+		t.Fatalf("splitPublishable() none = %+v, want the SourceNone case (n1)", none)
+	}
+}
+
+func TestSplitPublishableReachableHitsMissAPrivateMiss(t *testing.T) {
+	// A private-source case's own pass/fail must never leak into the
+	// reachable score -- a vault-fact case failing in default mode (the
+	// expected, correct outcome under disclosure policy) must not lower
+	// the reachable score's own hit rate.
+	results := []result{
+		{c: goldenset.Case{ID: "v1", ExpectedSource: goldenset.SourceVaultFact}, pass: false},
+		{c: goldenset.Case{ID: "g1", ExpectedSource: goldenset.SourceGithubStars}, pass: true},
+	}
+	hits, total, _, _ := splitPublishable(results)
+	if hits != 1 || total != 1 {
+		t.Fatalf("splitPublishable() hits/total = %d/%d, want 1/1 -- a private-source miss must not enter the reachable denominator", hits, total)
+	}
+}

@@ -76,6 +76,30 @@
 // number is never averaged with cases.json's, the repo-docs stratum's, or
 // the two mode scores below it.
 //
+// agent-estate#1133: the "publishable-only score" line this runner used
+// to print (default-mode hits over ALL 17 of cases.json's cases) was a
+// perfect result rendered as a failure. 11 of the 17 cases have an
+// ExpectedSource internal/knowledge/classify.go classifies private
+// (vault-fact, corpus-parameter, loops-research) -- those cases CANNOT be
+// found in default mode by construction, disclosure policy, not ranking,
+// keeps them out (see internal/knowledge/disclosure.go). Counting them in
+// the denominator reported "5/17 = 29%" for a run that in fact found
+// every one of the 5 publishable-reachable cases (github-stars,
+// repo-docs) it was possible to find. This runner now reports that
+// reachable-set score directly -- hits over the reachable subset only --
+// and prints the excluded count and reason on the same line, per the
+// issue's own requirement that a corrected number must not hide how much
+// of the stratum was skipped (a bare "5/5" with the exclusion unstated
+// would be the same defect inverted). The 17-total denominator and the
+// two counts (11 private, 1 none-01) are still printed; nothing is
+// silently dropped from the report, only from the score's own arithmetic.
+// none-01 (the single ExpectedSource=="none" case) is excluded from the
+// reachable-set score on its own line, separately, rather than folded
+// into either the reachable numerator or the excluded-private count: it
+// is not a disclosure exclusion (a no_match case has no identifier to
+// disclose) and its default-mode outcome is reported honestly rather than
+// silently counted as a win for the reachable score.
+//
 // Usage:
 //
 //	go run ./cmd/goldenquery [-bin estate] [-v]
@@ -171,6 +195,26 @@ type result struct {
 	exitCode int
 	got      []parsedMatch
 	detail   string // filled on failure or runner error
+}
+
+// isPublishableReachable reports whether source is one of the two
+// ExpectedSource values `estate knowledge query`'s default (public) mode
+// can ever return a match for -- agent-estate#1133's reachable set. This
+// deliberately duplicates internal/knowledge/classify.go's own
+// github-stars/repo-docs "safe to default public" table rather than
+// importing it: cmd/goldenquery has no compile-time dependency on
+// internal/knowledge (see this file's own top-of-file doc comment for
+// why), so the two-source list is repeated here, not shared. If
+// classify.go's table ever grows a third publishable source, this
+// function goes stale silently -- there is no test tying the two
+// together, so re-check classify.go directly before trusting this list.
+func isPublishableReachable(source goldenset.ExpectedSource) bool {
+	switch source {
+	case goldenset.SourceGithubStars, goldenset.SourceRepoDocs:
+		return true
+	default:
+		return false
+	}
 }
 
 func evaluate(c goldenset.Case, stdout string, exitCode int) result {
@@ -366,12 +410,14 @@ func runStratum(w *bufio.Writer, bin string, verbose bool, scoped bool, cases []
 
 // runMode runs every case once, in the single mode (private or not)
 // named by label, printing per-case detail (misses always, hits only
-// under -v) to w. It returns the resulting hits/total and whether at
-// least one case actually ran to completion, so main can tell "scored
-// low" apart from "could not run at all" independently per mode.
-func runMode(w *bufio.Writer, bin string, cases []goldenset.Case, private bool, label string, verbose bool) (hits, total int, ranAtLeastOne bool) {
+// under -v) to w. It returns every case's own result (agent-estate#1133
+// needs the per-case ExpectedSource to split the default-mode run into
+// its reachable and excluded subsets -- an aggregate hits/total alone
+// cannot do that split) plus whether at least one case actually ran to
+// completion, so main can tell "scored low" apart from "could not run at
+// all" independently per mode.
+func runMode(w *bufio.Writer, bin string, cases []goldenset.Case, private bool, label string, verbose bool) (results []result, ranAtLeastOne bool) {
 	fmt.Fprintf(w, "=== %s ===\n", label)
-	var results []result
 	for _, c := range cases {
 		stdout, exitCode, err := runQuery(bin, c.Question, private)
 		if err != nil {
@@ -407,13 +453,36 @@ func runMode(w *bufio.Writer, bin string, cases []goldenset.Case, private bool, 
 		}
 	}
 
-	for _, r := range results {
-		if r.pass {
-			hits++
+	return results, ranAtLeastOne
+}
+
+// splitPublishable takes runMode's default-mode results (agent-estate#1133)
+// and splits cases.json's 17 cases into the three groups the corrected
+// "publishable-reachable" line needs: the reachable set this run can
+// actually be scored against (github-stars, repo-docs -- see
+// isPublishableReachable), the private-by-construction set default mode
+// can never return a match for regardless of ranking quality, and the one
+// SourceNone case, reported separately because a no_match case is neither
+// a disclosure exclusion nor a reachable-set hit. reachableHits/reachableTotal
+// are the corrected score's own numerator/denominator; excludedPrivate is
+// the count this line's own text must disclose so the report cannot regress
+// back into a bare, unqualified "5/5". noneResult is nil if cases.json ever
+// stops carrying a SourceNone case.
+func splitPublishable(results []result) (reachableHits, reachableTotal, excludedPrivate int, noneResult *result) {
+	for i, r := range results {
+		switch {
+		case r.c.ExpectedSource == goldenset.SourceNone:
+			noneResult = &results[i]
+		case isPublishableReachable(r.c.ExpectedSource):
+			reachableTotal++
+			if r.pass {
+				reachableHits++
+			}
+		default:
+			excludedPrivate++
 		}
 	}
-	total = len(results)
-	return hits, total, ranAtLeastOne
+	return reachableHits, reachableTotal, excludedPrivate, noneResult
 }
 
 func main() {
@@ -434,8 +503,20 @@ func main() {
 	// mode's result is reused for the other -- a case that is private
 	// is expected to miss in publishable-only mode and that is not an
 	// error in this runner or a regression in `estate knowledge query`.
-	privateHits, privateTotal, ranPrivate := runMode(w, *bin, cases, true, "retrieval score (--private)", *verbose)
-	pubHits, pubTotal, ranPub := runMode(w, *bin, cases, false, "publishable-only score (default)", *verbose)
+	privateResults, ranPrivate := runMode(w, *bin, cases, true, "retrieval score (--private)", *verbose)
+	privateHits, privateTotal := 0, len(privateResults)
+	for _, r := range privateResults {
+		if r.pass {
+			privateHits++
+		}
+	}
+
+	// agent-estate#1133: default mode is still run once over every case in
+	// cases.json -- splitPublishable does the reachable/excluded split
+	// afterward, from this single run's own results, rather than this
+	// runner querying the reachable subset a second time.
+	pubResults, ranPub := runMode(w, *bin, cases, false, "publishable-only run (default/public, per-case detail below)", *verbose)
+	reachableHits, reachableTotal, excludedPrivate, noneResult := splitPublishable(pubResults)
 
 	// agent-estate#1073: the natural-language stratum is a separate
 	// question from cases.json's ("will a caller who does not already
@@ -478,7 +559,23 @@ func main() {
 	fmt.Fprintf(w, "natural-language stratum, top-3  (default/public, scoped source:repo-docs -- #1077, expected roughly 8-9/12 on df2cf75):  %d/%d\n", nlScopedTop3, nlScopedTotal)
 	fmt.Fprintf(w, "natural-language stratum, top-10 (default/public, scoped source:repo-docs -- #1077):                                    %d/%d\n", nlScopedTop10, nlScopedTotal)
 	fmt.Fprintf(w, "retrieval score (private, comparable to the 12/15 baseline on 6f28626): %d/%d\n", privateHits, privateTotal)
-	fmt.Fprintf(w, "publishable-only score (default, what a caller who may not see private material can find): %d/%d\n", pubHits, pubTotal)
+	// agent-estate#1133: the corrected line. cases.json has 17 cases total;
+	// %d of them (excludedPrivate) have an ExpectedSource classify.go marks
+	// private (vault-fact, corpus-parameter, loops-research) and cannot be
+	// found in default mode by disclosure policy, not by any ranking
+	// deficiency -- they are excluded from the score's own denominator, not
+	// silently dropped from the report. none-01 is reported on its own line
+	// immediately below, neither counted as a reachable hit nor folded into
+	// excludedPrivate: it is not a disclosure exclusion.
+	fmt.Fprintf(w, "publishable-reachable score (default/public; %d of 17 cases excluded -- ExpectedSource is private by construction and unreachable in this mode regardless of ranking, see internal/knowledge/classify.go; 1 of 17 (none-01) reported separately below, not counted here): %d/%d\n",
+		excludedPrivate, reachableHits, reachableTotal)
+	if noneResult != nil {
+		noneStatus := "MISS"
+		if noneResult.pass {
+			noneStatus = "HIT"
+		}
+		fmt.Fprintf(w, "none-01 (expected_source=none, excluded from the reachable score above -- a no_match case has no identifier to be reachable or private): %s (exit %d)\n", noneStatus, noneResult.exitCode)
+	}
 	// agent-estate#1111: the github-stars stratum's own line -- a stratum
 	// this runner could not previously print at all. Never averaged with
 	// the two lines above it: top-3 and top-10 are printed together on
