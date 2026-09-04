@@ -5,7 +5,8 @@
     "expected_source": "repo-docs",
     "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-tui--merging-prs-you-did-not-author",
     "rationale": "Target is AGENTS.md's own \"The TUI -- Merging PRs you did not author\" section title, chosen before any query ran (agent-estate#1073). Baseline on a7d413c (agent-estate#1069, default/public, unscoped): rank 2.",
-    "note": "natural-language stratum (#1073/#1069/#1053) -- a lane phrasing, not a term drawn from the target section itself. Reported as its own stratum, never averaged with cases.json's score (#1069)."
+    "note": "natural-language stratum (#1073/#1069/#1053) -- a lane phrasing, not a term drawn from the target section itself. Reported as its own stratum, never averaged with cases.json's score (#1069).",
+    "target_text": "agent-estate — agent orientation — The TUI — Merging PRs you did not author -- Every agent lane pushes through the same shared GitHub login, so `gh pr\nreview --approve` is refused as self-review regardless of who is actually\nasking — a real cross-lane review is recorded as a plain PR comment instead\nof a GitHub review object, carrying:\n\n```\nVerdict: APPROVE            (or REQUEST CHANGES, with specifics)\nReview-Lane: \u003creviewing lane's own name\u003e\nReviewed-SHA: \u003cthe exact head commit SHA reviewed\u003e\n```\n\nand the PR's own body states which lane opened it: `Author-Lane: \u003cauthoring\nlane's own name\u003e`.\n\n**`cmd/mergepr` is THE way to merge a PR in this repo. Do not `gh pr merge`\ndirectly, and do not run `cmd/prverdict` as a manual pre-check and then merge\nby hand.**\n\n```\ngo run ./cmd/mergepr -repo \u003cowner/name\u003e -number \u003cN\u003e\ngo run ./cmd/mergepr -repo \u003cowner/name\u003e -number \u003cN\u003e -- …"
   },
   {
     "id": "nl-02",
@@ -13,7 +14,8 @@
     "expected_source": "repo-docs",
     "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-daemon--invariants-do-not-break-these-without-an-explicit-decision",
     "rationale": "Target is AGENTS.md's own \"The daemon -- Invariants\" section title (Invariant 4 is the tmux-in-a-test rule; sections are indexed whole, not by sub-bullet). Chosen before any query ran. Baseline on a7d413c: never returned in the top 10 -- the record says \"socket\", the question says \"session\" (the #1063 vocabulary-mismatch class, per #1069's comment).",
-    "note": "natural-language stratum (#1073/#1069/#1053). Deliberately the low-term-overlap case for this stratum: the question and the section's indexed text share almost no vocabulary."
+    "note": "natural-language stratum (#1073/#1069/#1053). Deliberately the low-term-overlap case for this stratum: the question and the section's indexed text share almost no vocabulary.",
+    "target_text": "agent-estate — agent orientation — The daemon — Invariants — do not break these without an explicit decision -- These are rules, not a map of live code. Several were once enforced by scripts\nthat no longer exist; each one says so where it applies.\n\n1. **The ledger is the record; the live system is the screen.** Anything\n   *decided and remembered* belongs in the ledger; anything *observed right\n   now* is read from the running thing. The test is authorship: did this\n   system write the value, or did something else produce it as a byproduct?\n   The ledger today is `src/estate/internal/ledger` — append-only JSON lines\n   at `$ESTATE_LEDGER`, defaulting to `~/.local/state/estate/ledger.jsonl`,\n   not the SQLite `ledger.sqlite3` the old supervisor used. The decision\n   record this invariant used to cite (`docs/decisions/0001-sqlite-ledger.md`)\n   is **not in this tree**.\n\n2. **Write the durable fact be…"
   },
   {
     "id": "nl-03",
@@ -21,7 +23,8 @@
     "expected_source": "repo-docs",
     "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-daemon--the-failure-mode-this-codebase-produces-most",
     "rationale": "Target is AGENTS.md's own \"The daemon -- The failure mode this codebase produces most\" section title, chosen before any query ran. Baseline on a7d413c: rank 4 (buried, not absent).",
-    "note": "natural-language stratum (#1073/#1069/#1053)."
+    "note": "natural-language stratum (#1073/#1069/#1053).",
+    "target_text": "agent-estate — agent orientation — The daemon — The failure mode this codebase produces most -- **An instrument that cannot see a thing looks exactly like the thing being\nabsent.** Before reporting \"none\", \"empty\", \"never\" or \"not called\":\n\n- Check the whole tree, not one file. `grep`ing a single script and concluding\n  \"nothing calls this\" was wrong when the callers were one file away.\n- Test *tracking* (`git ls-files`), not directory existence. A gitignored\n  `__pycache__` made a completed deletion look incomplete.\n- Capture exit codes directly. `cmd | tail` gives you `tail`'s status.\n- Verify a mutation applied before believing the result it produced.\n- Cite **functions and behaviours, never line numbers.** A comment citing its own\n  callers by line was already wrong in the diff that added it."
   },
   {
     "id": "nl-04",
@@ -29,7 +32,8 @@
     "expected_source": "repo-docs",
     "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-implementation-language-is-go-this-is-checked-not-trusted",
     "rationale": "Target is AGENTS.md's own \"The implementation language is Go. This is checked, not trusted.\" section title, chosen before any query ran. Baseline on a7d413c: never returned in the top 10 -- the record says \"Go\", the question says \"python\" (the #1063 vocabulary-mismatch class, per #1069's comment).",
-    "note": "natural-language stratum (#1073/#1069/#1053). Deliberately the second low-term-overlap case for this stratum."
+    "note": "natural-language stratum (#1073/#1069/#1053). Deliberately the second low-term-overlap case for this stratum.",
+    "target_text": "agent-estate — agent orientation — The implementation language is Go. This is checked, not trusted. -- **The app is Go.** Shell and Python are not an implementation option here, at\nany size, for any reason, including \"just this one script\" and \"only for\ndelivery\".\n\n`reference/` holds the deleted shell and Python supervisor, kept so an agent can\nread how a rule was once encoded. It is **reference material, not a codebase**:\nnothing there is maintained, run, tested, or fixed. Recovering a rule from it\nmeans reimplementing that rule in Go, not calling the script.\n\nThis is guidance, not a gate. A CI blocker on new shell or Python was tried and\nremoved on 2026-09-02: it was an over-extreme reading of the operator's intent,\nand a hard block can wedge an agent that legitimately needs a script for\ntooling, a sandbox, or an experiment. The intent is narrow and stands — the\nAPP is not built out of s…"
   },
   {
     "id": "nl-05",
@@ -37,7 +41,8 @@
     "expected_source": "repo-docs",
     "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-tui--what-not-to-do-here",
     "rationale": "Target is AGENTS.md's own \"The TUI -- What NOT to do here\" section title, chosen before any query ran. Baseline on a7d413c: rank 9 (buried, worst of the buried-but-present cases).",
-    "note": "natural-language stratum (#1073/#1069/#1053)."
+    "note": "natural-language stratum (#1073/#1069/#1053).",
+    "target_text": "agent-estate — agent orientation — The TUI — What NOT to do here -- - Do not add a new `tea.NewProgram` call site. `internal/shell.Model` is the\n  one program (a new view is a pane added to the shell, never a second\n  program selected by a launch flag).\n- Do not call `os/exec` for tmux from any package under `internal/`. Every\n  tmux-adjacent operation is a supervisor MCP tool call.\n- Do not restore `[a]ttach`/`[d]etach` in the rail without checking\n  `agent-supervisor#202`'s shape first. They were removed because MCP's\n  stdio transport gave the supervisor no way to know which tmux client was\n  asking, so `switch-client`/`detach-client` acted on an arbitrary attached\n  client while reporting success. `agent-supervisor#202` (\"session_attach/\n  session_detach name which tmux client acts, and refuse to guess\") fixed\n  the supervisor-side blocker, but `sessi…"
   },
   {
     "id": "nl-06",
@@ -45,7 +50,8 @@
     "expected_source": "repo-docs",
     "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-tui--running-the-tests",
     "rationale": "Target is AGENTS.md's own \"The TUI -- Running the tests\" section title, chosen before any query ran. Baseline on a7d413c: rank 6 (buried, not absent).",
-    "note": "natural-language stratum (#1073/#1069/#1053)."
+    "note": "natural-language stratum (#1073/#1069/#1053).",
+    "target_text": "agent-estate — agent orientation — The TUI — Running the tests -- ```\ngo build ./...\ngo vet ./...\ngo test ./...\n```\n\n`cmd/estate` has seven `_test.go` files (`chat_test.go`, `cost_test.go`,\n`docs_test.go`, `ledger_copy_test.go`, `secrets_test.go`, `skills_test.go`,\n`supervisor_test.go`) and `tools/memoryvariants/spike` has one\n(`main_test.go`); `internal/sshserver` still has none (`git ls-files\n'src/tui/**/*_test.go'`, checked at write time — re-run, don't trust this\nlist stale). CI (`.github/workflows/*.yml`) runs the same three commands on\n`ubuntu-latest`, Go 1.26, plus a fourth check gated on a live\n`agent-supervisor` checkout: `internal/lane/states_lanessh_test.go`\ncross-checks `lane.AllStates` against `lanes.sh`'s own `state=` assignments\nwhen `$AGENT_SUPERVISOR_REPO` is set, and skips otherwise — this repo must\nstill build and test standalone with…"
   },
   {
     "id": "nl-07",
@@ -53,7 +59,8 @@
     "expected_source": "repo-docs",
     "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-daemon--the-guards-that-actually-run",
     "rationale": "Target is AGENTS.md's own \"The daemon -- The guards that actually run\" section title, chosen before any query ran. Baseline on a7d413c: rank 6 (buried, not absent).",
-    "note": "natural-language stratum (#1073/#1069/#1053)."
+    "note": "natural-language stratum (#1073/#1069/#1053).",
+    "target_text": "agent-estate — agent orientation — The daemon — The guards that actually run -- Two, both in Go, both failing closed.\n\n| Guard | Refuses | Implemented in |\n|---|---|---|\n| Host pressure | a new dispatch when the host cannot safely take one — and equally when it cannot measure the host at all, because blindness is not capacity. The token-budget floor is one of its limits, not a separate gate: `internal/quota` refuses at roughly 10% remaining, and a reading older than 20 minutes counts as no reading | `estate pressure`, `src/estate/internal/pressure`, `src/estate/internal/quota` |\n| Merge gate | to *allow* a merge unless the PR is open with every required check green at its live head SHA, a dispatched turn is joined to it by BOTH its `dispatch/\u003cid\u003e` head ref and a head SHA the estate itself recorded, the reviewer is a different dispatch from the author, and a parsable …"
   },
   {
     "id": "nl-08",
@@ -61,15 +68,17 @@
     "expected_source": "repo-docs",
     "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-daemon--before-you-ask-jon-anything-read-this-first",
     "rationale": "Target is AGENTS.md's own \"The daemon -- Before you ask Jon anything -- read this first\" section title, chosen before any query ran. Baseline on a7d413c: rank 6 (buried, not absent).",
-    "note": "natural-language stratum (#1073/#1069/#1053)."
+    "note": "natural-language stratum (#1073/#1069/#1053).",
+    "target_text": "agent-estate — agent orientation — The daemon — Before you ask Jon anything — read this first -- Jon has stated this more than twenty times. It is a **hard** parameter in his\ncorpus and it keeps being broken, so it goes at the top of the file rather than\nsomewhere polite.\n\n**Exhaust the record before a question reaches him**, in this order:\n\n1. **Query the corpus.** `~/corpus/ledger.sqlite3` — the same path\n   `internal/corpus.Path()` resolves for every dispatch's own grounding, so\n   the two cannot drift apart unnoticed\n   (`src/estate/internal/corpus/agents_md_test.go` fails the build if they\n   do). Measured read-only 2026-09-03: 5,403 prompts, 1,104 live hard\n   constraints in `live_parameters` (re-run the count yourself before citing\n   it further — it grows). Views: `live_parameters`, `open_questions`,\n   `unacknowledged`, `possibility_count`.\n   `~/.local/state/agent-dotfiles-…"
   },
   {
     "id": "nl-09",
-    "question": "what does the pressure gate do",
+    "question": "what stops a new agent from starting when the machine is busy",
     "expected_source": "repo-docs",
     "expected_identifier": "docs/product/SPEC.md#agent-estate-spec--the-pressure-gate-srcestateinternalpressure",
     "rationale": "Target is docs/product/SPEC.md's own \"The pressure gate\" section title, chosen before any query ran. Baseline on a7d413c: rank 1.",
-    "note": "natural-language stratum (#1073/#1069/#1053)."
+    "note": "natural-language stratum (#1073/#1069/#1053). Re-authored under agent-estate#1140/#1115's method: the original question (\"what does the pressure gate do\") reused both content words of the section's own title (\"pressure\", \"gate\"), landing rank 1 with 100% term overlap against target_text -- no headroom to detect a regression. Rewritten from a caller's actual need (why a dispatch attempt might be refused) without reading the section title's own wording first; the section was looked up only afterward to confirm it still answers the need.",
+    "target_text": "agent-estate — SPEC — The pressure gate — `src/estate/internal/pressure` -- Three independent limits, all of which must pass:\n\n| limit | default | source |\n|---|---|---|\n| load per core | \u003c 3.0 | `sysctl -n vm.loadavg` / `runtime.NumCPU()` |\n| free memory | \u003e= 512 MB | `sysctl -n vm.swapusage` |\n| lanes in flight | \u003c 6 | ledger, non-terminal records |\n\n**Every one fails closed.** A measurement that errors sets `OK=false` with the\nfailure named. This exists because the previous estate had three pressure checks\nthat did not consult each other and a session cap the dispatchers in use never\ncalled; the host needed a hard restart twice."
   },
   {
     "id": "nl-10",
@@ -77,15 +86,17 @@
     "expected_source": "repo-docs",
     "expected_identifier": "docs/product/SPEC.md#agent-estate-spec--dispatch-srcestate-estate-dispatch-issue-brief-file",
     "rationale": "Target is docs/product/SPEC.md's own \"Dispatch\" section title, chosen before any query ran. Baseline on a7d413c: rank 3.",
-    "note": "natural-language stratum (#1073/#1069/#1053)."
+    "note": "natural-language stratum (#1073/#1069/#1053).",
+    "target_text": "agent-estate — SPEC — Dispatch — `src/estate` (`estate dispatch \u003cissue\u003e \u003cbrief-file\u003e`) -- 1. Read the brief. Refuse if unreadable.\n2. Check pressure. **Refuse before creating anything** if the host is loaded —\n   the old dispatcher created a branch and worktree first and leaked both on\n   every refusal.\n3. Append `dispatched`.\n4. Run `claude -p --output-format json` as a subprocess with the brief on stdin,\n   under a 45-minute context timeout.\n5. Append the outcome:\n   - context deadline hit → `unknown` (\"unknown is not failed\"), slot stays held\n   - non-zero exit → `failed`\n   - exit 0 with parseable JSON → `complete`, result recorded\n   - exit 0 with unparseable output → `unknown`, not a clean completion\n\nExit status is 0 only for `complete`."
   },
   {
     "id": "nl-11",
-    "question": "what is this product for",
+    "question": "what problem does this whole system solve for the operator",
     "expected_source": "repo-docs",
     "expected_identifier": "docs/product/PRD.md#agent-estate-prd--what-this-is-for",
     "rationale": "Target is docs/product/PRD.md's own \"What this is for\" section title, chosen before any query ran. Baseline on a7d413c: rank 1.",
-    "note": "natural-language stratum (#1073/#1069/#1053)."
+    "note": "natural-language stratum (#1073/#1069/#1053). Re-authored under agent-estate#1140/#1115's method: the original question (\"what is this product for\") reused the section's own content word (\"product\"), landing rank 1 with 100% term overlap against target_text -- no headroom to detect a regression. Rewritten from a caller's actual need (why this whole system exists) without reading the section title's own wording first; the section was looked up only afterward to confirm it still answers the need.",
+    "target_text": "agent-estate — PRD — What this is for -- One person runs a fleet of agents on one Mac. The estate is the machinery that\nlets that happen without the machine falling over and without work being lost:\nit decides whether there is room to start an agent, starts it, records what\nhappened, and shows the operator the state of everything.\n\nIt is a product, not a pile of automation. The measure of a change is what a\nhuman can do after it that they could not before."
   },
   {
     "id": "nl-12",
@@ -93,6 +104,7 @@
     "expected_source": "repo-docs",
     "expected_identifier": "docs/product/PRD.md#agent-estate-prd--what-it-refuses-to-do",
     "rationale": "Target is docs/product/PRD.md's own \"What it refuses to do\" section title, chosen before any query ran. Baseline on a7d413c: rank 2.",
-    "note": "natural-language stratum (#1073/#1069/#1053)."
+    "note": "natural-language stratum (#1073/#1069/#1053).",
+    "target_text": "agent-estate — PRD — What it refuses to do -- - Drive an agent by typing into a terminal pane and reading pixels back.\n- Free a slot for a turn it did not observe finish.\n- Delete a branch, worktree or file without a recoverable copy.\n- Extend a layer that a standing directive has ruled out — the correct response\n  is to stop and say so, not to do it well."
   }
 ]
