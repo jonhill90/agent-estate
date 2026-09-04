@@ -2,7 +2,7 @@ package knowledge
 
 import "time"
 
-// Generate runs all four sources and assembles one Result. Each source
+// Generate runs all five sources and assembles one Result. Each source
 // is independent: one failing never stops the others, and never removes
 // its own line from Sources -- see this package's own doc comment on
 // honest absence. now is injected so tests get a fixed GeneratedAt
@@ -31,6 +31,10 @@ func Generate(cfg Config, now time.Time) Result {
 	loopsRes, loopsItems := loopsSource(cfg.LoopsResearch)
 	res.Sources = append(res.Sources, loopsRes)
 	res.Items = append(res.Items, loopsItems...)
+
+	docsRes, docsItems := repoDocsSource(cfg.RepoRoot)
+	res.Sources = append(res.Sources, docsRes)
+	res.Items = append(res.Items, docsItems...)
 
 	return res
 }

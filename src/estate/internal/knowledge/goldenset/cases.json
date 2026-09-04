@@ -99,10 +99,24 @@
     "rationale": "03-triggers.md's own first paragraph: 'A trigger is the first contract field and the one the surveyed corpus is weakest on... Most loops in the wild are still manually kicked.'"
   },
   {
+    "id": "docs-01",
+    "question": "What does this repo's own AGENTS.md say about capturing exit codes instead of piping a command through something like tail?",
+    "expected_source": "repo-docs",
+    "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-daemon--the-failure-mode-this-codebase-produces-most",
+    "rationale": "AGENTS.md's own \"The failure mode this codebase produces most\" section states this rule verbatim: 'Capture exit codes directly. `cmd | tail` gives you `tail`'s status.' Before this source existed, AGENTS.md/CLAUDE.md was not indexed at all -- this is the exact rule the #1034 issue names as the motivating case."
+  },
+  {
+    "id": "docs-02",
+    "question": "What did the retired collision-check.sh guard refuse, and how was a lane considered 'in flight'?",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/ci-rules-retired.md#ci-rules-retired-with-the-shell-supervisor--rules-retired-with-their-scripts-not-with-a-workflow",
+    "rationale": "docs/ci-rules-retired.md's \"Rules retired with their scripts, not with a workflow\" section states it directly: collision-check.sh refused 'a dispatch whose files overlap an in-flight lane's files', and 'In flight' is defined there as 'every ledger task not recorded complete/failed/cancelled that has a recorded worktree path.' No other file in the index carries this."
+  },
+  {
     "id": "none-01",
     "question": "What's the office vending machine restocking schedule?",
     "expected_source": "none",
     "expected_identifier": "",
-    "rationale": "Verified absent from all four sources before running any query: no vault fact or Loops-Research file matches 'vending'/'restocking' (grep -ril), no live_parameters row's body mentions 'vending'/'restock' (sqlite3 COUNT(*)=0), and no starred repo's description matches either term. This is the required no_match case -- the honest answer is that nothing in the index answers it."
+    "rationale": "Verified absent from all five sources before running any query: no vault fact or Loops-Research file matches 'vending'/'restocking' (grep -ril), no live_parameters row's body mentions 'vending'/'restock' (sqlite3 COUNT(*)=0), no starred repo's description matches either term, and no AGENTS.md/docs/*.md section mentions 'vending' or 'restock' either (grep -ril). This is the required no_match case -- the honest answer is that nothing in the index answers it."
   }
 ]
