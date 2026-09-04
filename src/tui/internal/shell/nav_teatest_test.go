@@ -127,7 +127,7 @@ func TestKnowledgeRouteGKeyReachesTheMemoryGraphPane(t *testing.T) {
 	// pane-specific key.
 	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
-	out := waitFor(t, tm, "drag to reposition")
+	out := waitFor(t, tm, "click a node")
 	if bytes.Contains(out, []byte("[g] graph")) {
 		t.Fatalf("still rendering the knowledge list's own legend after [g]:\n%s", out)
 	}

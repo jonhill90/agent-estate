@@ -145,6 +145,13 @@ type Model struct {
 	// for theme.Theme.
 	graph memgraph.Model
 
+	// graphFetch/graphDetail are the two seams the graph pane is built
+	// from, held here rather than only inside m.graph so WithGraph and
+	// WithGraphDetail can each rebuild without dropping the other's --
+	// see rebuildGraph.
+	graphFetch  memgraph.Fetcher
+	graphDetail memgraph.DetailLoader
+
 	width, height int
 	quitting      bool
 
@@ -183,7 +190,24 @@ func (m Model) WithCompiled(fetch knowledgeindex.Fetcher) Model {
 // works but the graph pane renders its own honest "not configured" state
 // rather than a demo graph.
 func (m Model) WithGraph(fetch memgraph.Fetcher) Model {
-	m.graph = memgraph.New(fetch)
+	m.graphFetch = fetch
+	return m.rebuildGraph()
+}
+
+// WithGraphDetail wires the graph's click-to-open seam
+// (memgraph.DetailLoader) -- cmd/estate's own buildMemgraphDetail, one
+// fact read per opened node. Separate from WithGraph, and deliberately
+// ORDER-INDEPENDENT with it: both only record a field and rebuild, so
+// neither call can silently discard what the other already wired (which
+// is exactly what a WithGraph that reconstructed memgraph.New in place
+// would have done to a detail loader set first).
+func (m Model) WithGraphDetail(load memgraph.DetailLoader) Model {
+	m.graphDetail = load
+	return m.rebuildGraph()
+}
+
+func (m Model) rebuildGraph() Model {
+	m.graph = memgraph.New(m.graphFetch).WithDetailLoader(m.graphDetail).WithTheme(m.theme)
 	return m
 }
 
@@ -272,18 +296,25 @@ func doLoadFact(loadFact FactLoader, slug string) tea.Cmd {
 // for the same reason -- a drag started before quite reaching modeGraph
 // display should never be dropped mid-gesture.
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	// Whether the graph had a node OPEN must be read before the forward
+	// below, not after: [esc] means "close this node" while one is open
+	// and "leave the graph" otherwise, and by the time m.graph has
+	// handled the key it has already closed it -- asking afterwards would
+	// always answer "nothing was open" and one [esc] would do both.
+	graphWasOpen := m.graph.Opened()
+
 	next, compiledCmd := m.compiled.Update(msg)
 	m.compiled = next.(knowledgeindex.Model)
 
 	graphNext, graphCmd := m.graph.Update(msg)
 	m.graph = graphNext.(memgraph.Model)
 
-	nm, cmd := m.updateSelf(msg)
+	nm, cmd := m.updateSelf(msg, graphWasOpen)
 	m = nm.(Model)
 	return m, tea.Batch(cmd, compiledCmd, graphCmd)
 }
 
-func (m Model) updateSelf(msg tea.Msg) (tea.Model, tea.Cmd) {
+func (m Model) updateSelf(msg tea.Msg, graphWasOpen bool) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
 		m.width, m.height = msg.Width, msg.Height
@@ -321,12 +352,12 @@ func (m Model) updateSelf(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.sync(), nil
 
 	case tea.KeyMsg:
-		return m.handleKey(msg)
+		return m.handleKey(msg, graphWasOpen)
 	}
 	return m, nil
 }
 
-func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+func (m Model) handleKey(msg tea.KeyMsg, graphWasOpen bool) (tea.Model, tea.Cmd) {
 	switch msg.String() {
 	case "q", "ctrl+c":
 		m.quitting = true
@@ -351,6 +382,13 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if m.mode == modeGraph {
 		switch msg.String() {
 		case "esc", "left":
+			if graphWasOpen {
+				// The graph pane just closed the node this [esc] was for
+				// (memgraph.Model.handleKey). Leaving modeGraph too would
+				// collapse two steps into one keypress and drop the user
+				// back on the list without ever showing the graph again.
+				return m, nil
+			}
 			m.mode = modeList
 			return m.sync(), nil
 		}

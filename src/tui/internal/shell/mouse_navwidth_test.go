@@ -18,6 +18,8 @@ package shell
 
 import (
 	"testing"
+
+	"github.com/jonhill90/agent-estate/src/tui/internal/memgraph"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -41,7 +43,7 @@ func graphNodePosition(t *testing.T) (x, y int) {
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
-	waitFor(t, tm, "drag to reposition")
+	waitFor(t, tm, "click a node")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyCtrlC})
 	final := tm.FinalModel(t, teatest.WithFinalTimeout(2*time.Second))
@@ -63,12 +65,15 @@ func graphNodePosition(t *testing.T) (x, y int) {
 func TestMouseTranslationLiveAfterIconsToggle(t *testing.T) {
 	x0, y0 := graphNodePosition(t)
 
-	// boxInset -- internal/memgraph's own box border width (model.go's own
-	// boxInset doc comment): a mouse event's pane-local coordinate is the
-	// node's canvas position plus this inset, the same relationship
-	// internal/memgraph/model_test.go's own TestDragSequenceMovesGrabbedNode
-	// asserts within that package.
-	const boxInset = 1
+	// memgraph.CanvasOrigin -- the pane-local cell internal/memgraph paints
+	// its canvas (0,0) at, asked for rather than spelled out: a mouse
+	// event's pane-local coordinate is the node's canvas position plus this
+	// origin, the same relationship internal/memgraph/model_test.go's own
+	// TestDragSequenceMovesGrabbedNode asserts within that package. This
+	// used to be a hardcoded `const boxInset = 1`, which silently stopped
+	// naming the right cell the moment agent-estate#1006 added a header
+	// count line above the frame.
+	originX, originY := memgraph.CanvasOrigin()
 	// iconWidth -- internal/nav's own collapsed sidebar width
 	// (nav/model.go's own fullWidth/iconWidth doc comment).
 	const iconWidth = 4
@@ -81,7 +86,7 @@ func TestMouseTranslationLiveAfterIconsToggle(t *testing.T) {
 	tm.Send(tea.KeyMsg{Type: tea.KeyEnter})
 	tm.Send(tea.KeyMsg{Type: tea.KeyTab})
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
-	waitFor(t, tm, "drag to reposition")
+	waitFor(t, tm, "click a node")
 
 	// Collapse the sidebar WITHOUT a resize -- [tab] back to the sidebar
 	// first, since [b] is nav's own key and only takes effect while the
@@ -94,8 +99,8 @@ func TestMouseTranslationLiveAfterIconsToggle(t *testing.T) {
 
 	// The node's REAL screen column is now iconWidth + boxInset + x0 -- NOT
 	// the pre-collapse fullWidth + boxInset + x0. Press exactly there.
-	screenX := iconWidth + boxInset + x0
-	screenY := boxInset + y0
+	screenX := iconWidth + originX + x0
+	screenY := originY + y0
 
 	// Move away from the left canvas edge so the drag target stays
 	// in-bounds regardless of where the single-node layout happened to

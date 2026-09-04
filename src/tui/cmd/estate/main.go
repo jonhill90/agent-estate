@@ -608,7 +608,8 @@ func main() {
 		knowledge.NewFactLoader(vaultDir),
 	).
 		WithCompiled(knowledgeindex.NewFetcher(compiledIndexPath())).
-		WithGraph(buildMemgraphFetch(vaultDir))
+		WithGraph(buildMemgraphFetch(vaultDir)).
+		WithGraphDetail(buildMemgraphDetail(vaultDir))
 
 	// apidocsModel is Docs -> API Docs: hill90-app's own OpenAPI document
 	// (internal/apidocs' package doc comment traces why that file is the

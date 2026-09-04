@@ -310,7 +310,7 @@ func TestGKeyEntersGraphModeAndEscReturns(t *testing.T) {
 	}
 
 	out := m.View()
-	if !strings.Contains(out, "drag to reposition") {
+	if !strings.Contains(out, "click a node") {
 		t.Fatalf("modeGraph did not render memgraph's own frame:\n%s", out)
 	}
 	if strings.Contains(out, "[g] graph") {
@@ -347,7 +347,14 @@ func TestGraphModeDragMovesANode(t *testing.T) {
 		t.Fatalf("test setup: node n1 has no position after graph load")
 	}
 
-	press := tea.MouseMsg{X: x0 + 1, Y: y0 + 1, Action: tea.MouseActionPress}
+	// The pane-local cell a node's own canvas position is painted at --
+	// memgraph.CanvasOrigin, never a hardcoded inset: agent-estate#1006's
+	// header count line moved every node down a row, and spelling the old
+	// offset out here is how this test would have kept passing while
+	// testing nothing.
+	ox, oy := memgraph.CanvasOrigin()
+
+	press := tea.MouseMsg{X: x0 + ox, Y: y0 + oy, Action: tea.MouseActionPress}
 	next, _ = m.Update(press)
 	m = next.(Model)
 
@@ -357,7 +364,15 @@ func TestGraphModeDragMovesANode(t *testing.T) {
 	} else {
 		tx = x0 - 1
 	}
-	release := tea.MouseMsg{X: tx + 1, Y: ty + 1, Action: tea.MouseActionRelease}
+	// A motion event is what makes this a DRAG rather than a click: since
+	// agent-estate#1006 a press+release on one node with no motion between
+	// them is the click-to-open verb, and would open n1 instead of moving
+	// it (TestGraphClickOpensNodeThroughKnowledge covers that path).
+	motion := tea.MouseMsg{X: tx + ox, Y: ty + oy, Action: tea.MouseActionMotion}
+	next, _ = m.Update(motion)
+	m = next.(Model)
+
+	release := tea.MouseMsg{X: tx + ox, Y: ty + oy, Action: tea.MouseActionRelease}
 	next, _ = m.Update(release)
 	m = next.(Model)
 
@@ -367,5 +382,80 @@ func TestGraphModeDragMovesANode(t *testing.T) {
 	}
 	if fx != tx || fy != ty {
 		t.Fatalf("n1 landed at (%d,%d), want (%d,%d)", fx, fy, tx, ty)
+	}
+}
+
+// TestGraphClickOpensNodeThroughKnowledge is the host-pane half of
+// agent-estate#1006's click-to-open verb: a press+release with no motion,
+// forwarded exactly the way internal/shell.routeAll delivers a MouseMsg,
+// must reach internal/memgraph.Model, ask the DetailLoader for THAT node,
+// and render the content it returns. Without this, memgraph's own tests
+// prove the mechanism and nothing proves it is wired.
+func TestGraphClickOpensNodeThroughKnowledge(t *testing.T) {
+	fetch := func() (memgraph.Graph, error) {
+		return memgraph.Graph{
+			Nodes: []memgraph.Node{{ID: "n1", Label: "fact one", Type: "project"}},
+		}, nil
+	}
+	var asked []string
+	load := func(id string) (memgraph.Detail, error) {
+		asked = append(asked, id)
+		return memgraph.Detail{
+			ID:    id,
+			Label: "fact one",
+			Type:  "project",
+			Body:  "the real body of fact one",
+		}, nil
+	}
+
+	m := New(nil, nil).WithGraph(fetch).WithGraphDetail(load)
+	next, _ := m.Update(tea.WindowSizeMsg{Width: 100, Height: 30})
+	m = next.(Model)
+	m = driveGraphInit(t, m)
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	m = next.(Model)
+
+	ox, oy := memgraph.CanvasOrigin()
+	x0, y0, ok := m.graph.PositionOf("n1")
+	if !ok {
+		t.Fatal("test setup: node n1 has no position after graph load")
+	}
+
+	next, _ = m.Update(tea.MouseMsg{X: x0 + ox, Y: y0 + oy, Action: tea.MouseActionPress})
+	m = next.(Model)
+	next, cmd := m.Update(tea.MouseMsg{X: x0 + ox, Y: y0 + oy, Action: tea.MouseActionRelease})
+	m = next.(Model)
+	if cmd == nil {
+		t.Fatal("the click produced no command through knowledge.Model.Update -- the DetailLoader is never asked")
+	}
+
+	// Drain the batched command until the detail load's own message
+	// surfaces, then feed it back the way a real Program would.
+	next, _ = m.Update(cmd())
+	m = next.(Model)
+
+	if len(asked) != 1 || asked[0] != "n1" {
+		t.Fatalf("DetailLoader was asked for %v, want exactly [n1]", asked)
+	}
+	if !strings.Contains(m.View(), "the real body of fact one") {
+		t.Fatalf("the opened node's own content is not on the frame:\n%s", m.View())
+	}
+
+	// [esc] must close the NODE and stay in the graph -- one keypress must
+	// not collapse both steps and drop the user back on the list.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.mode != modeGraph {
+		t.Fatal("[esc] closing an opened node also left modeGraph")
+	}
+	if !strings.Contains(m.View(), "click a node") {
+		t.Fatalf("[esc] did not return to the graph frame:\n%s", m.View())
+	}
+
+	// A second [esc], with no node open, leaves the graph as it always did.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	m = next.(Model)
+	if m.mode != modeList {
+		t.Fatal("[esc] with no node open did not return to modeList")
 	}
 }
