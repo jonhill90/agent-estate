@@ -140,8 +140,32 @@ func TestKnowledgeQueryJSONCarriesCoverageAndDoesNotBecomeAQueryTerm(t *testing.
 			t.Fatalf("the json-decoy item was returned -- \"--json\" scored as a search term:\n%s", out)
 		}
 	}
-	if qr.Coverage.State != knowledge.CoverageComplete {
-		t.Fatalf("Coverage.State = %q, want %q for a healthy index with no withheld/degraded material", qr.Coverage.State, knowledge.CoverageComplete)
+	// agent-estate#1080: this CLI path now also folds #1047's staleness
+	// comparison into Coverage, and github-stars has no local file to stat
+	// (it is read live via `gh`) -- so even an otherwise fully-OK index,
+	// run through the real CLI without a controlled AGENT_MEMORY_VAULT/
+	// ESTATE_CORPUS, always carries an "unknown" freshness reason for it.
+	// This test's own intent (transport correctness: --json doesn't leak
+	// into the question, Coverage carries no DEGRADED/LIMITED material
+	// beyond that) still holds -- only the "nothing at all to report"
+	// expectation, which #1080 says was never true for github-stars,
+	// changes.
+	if qr.Coverage.State != knowledge.CoverageUnknownFreshness {
+		t.Fatalf("Coverage.State = %q, want %q -- github-stars' freshness is never checkable via a real CLI run", qr.Coverage.State, knowledge.CoverageUnknownFreshness)
+	}
+	for _, r := range qr.Coverage.Reasons {
+		if r.State == knowledge.CoverageDegraded || r.State == knowledge.CoverageLimited {
+			t.Fatalf("Coverage.Reasons carries an unexpected %s reason for a healthy index: %+v", r.State, qr.Coverage.Reasons)
+		}
+	}
+	var sawUnknownGithubStars bool
+	for _, r := range qr.Coverage.Reasons {
+		if r.State == knowledge.CoverageUnknownFreshness && r.Source == "github-stars" {
+			sawUnknownGithubStars = true
+		}
+	}
+	if !sawUnknownGithubStars {
+		t.Fatalf("Coverage.Reasons does not name github-stars as unknown freshness: %+v", qr.Coverage.Reasons)
 	}
 }
 
@@ -187,17 +211,32 @@ func TestKnowledgeQueryJSONDegradedCoverageNamesFailedSource(t *testing.T) {
 	if err := json.Unmarshal(out, &qr); err != nil {
 		t.Fatalf("stdout is not valid QueryResult JSON: %v\n%s", err, out)
 	}
-	if qr.Coverage.State != knowledge.CoverageDegraded {
-		t.Fatalf("Coverage.State = %q, want %q\n%s", qr.Coverage.State, knowledge.CoverageDegraded, out)
+	// agent-estate#1080: github-stars is both build-time DEGRADED (per this
+	// fixture's own SourceResult) AND always freshness-UNKNOWN through the
+	// real CLI (no local file to stat) -- two distinct causes on the same
+	// source, so Coverage.State composes to Mixed exactly as it already
+	// does for any other two-cause case (see
+	// TestQueryCoverageMixedWhenSourceFailedAndPrivacyWithheld).
+	if qr.Coverage.State != knowledge.CoverageMixed {
+		t.Fatalf("Coverage.State = %q, want %q\n%s", qr.Coverage.State, knowledge.CoverageMixed, out)
 	}
-	named := false
+	var sawDegraded, sawUnknown bool
 	for _, r := range qr.Coverage.Reasons {
-		if r.Source == "github-stars" {
-			named = true
+		if r.Source != "github-stars" {
+			continue
+		}
+		switch r.State {
+		case knowledge.CoverageDegraded:
+			sawDegraded = true
+		case knowledge.CoverageUnknownFreshness:
+			sawUnknown = true
 		}
 	}
-	if !named {
-		t.Fatalf("Coverage.Reasons does not name the failed source github-stars:\n%s", out)
+	if !sawDegraded {
+		t.Fatalf("Coverage.Reasons does not name the failed source github-stars as degraded:\n%s", out)
+	}
+	if !sawUnknown {
+		t.Fatalf("Coverage.Reasons does not also name github-stars as unknown freshness:\n%s", out)
 	}
 }
 
