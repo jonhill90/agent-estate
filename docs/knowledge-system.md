@@ -198,7 +198,8 @@ the raw index file, can still see what built it.
 index (has a source changed since the index was built?), which says nothing
 about whether the code doing the reading is the code that built it. A stale
 binary serving a query against a newer (or older) index was, before this,
-undetectable from the output alone. Four incidents motivated adding it.
+undetectable from the output alone. Four incidents motivated adding it
+(#1082, including a fourth recorded in its comments).
 
 `generated_by.commit` is `"unknown"` — never a guessed value — whenever it
 could not be positively determined: no git checkout resolved, `git` itself
