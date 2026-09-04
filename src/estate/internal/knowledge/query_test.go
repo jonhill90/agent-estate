@@ -1,6 +1,7 @@
 package knowledge
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -64,14 +65,15 @@ func writeTestIndex(t *testing.T) string {
 	return path
 }
 
-// TestQueryMatchedRanksByTermOverlap also exercises the minMatchedTerms
-// floor (agent-estate#1026): the question has three distinct scoreable
-// terms ("decide" -- matched via "decided" -- "auth", "tokens"), so an
-// item needs all three to clear the floor. The auth-token-rotation fact
-// does (its own Tier2 uses "decided"); the corpus item only shares two
-// of the three ("auth", "tokens") and is correctly excluded -- weaker
-// evidence than the fact that matches every term, not a false positive
-// like none-01's coincidental two-term match.
+// TestQueryMatchedRanksByTermOverlap exercises BM25 ranking, not a hard
+// floor (agent-estate#1054 retired minMatchedTerms): the question has
+// three distinct scoreable terms ("decide" -- matched via "decided" --
+// "auth", "tokens"). The auth-token-rotation fact matches all three (its
+// own Tier2 uses "decided"); the corpus item shares only two of the three
+// ("auth", "tokens"). Under BM25 the weaker corpus item is still a real
+// candidate and is returned -- but it must rank BELOW the fact that
+// matches every term, and the unrelated deploy-window fact (zero overlap)
+// must not appear at all.
 func TestQueryMatchedRanksByTermOverlap(t *testing.T) {
 	path := writeTestIndex(t)
 	got := Query(path, "what did Jon decide about auth tokens", 0, false)
@@ -79,20 +81,15 @@ func TestQueryMatchedRanksByTermOverlap(t *testing.T) {
 	if got.State != StateMatched {
 		t.Fatalf("State = %q, want %q (reason=%q)", got.State, StateMatched, got.Reason)
 	}
-	if got.TotalMatched != 1 {
-		t.Fatalf("TotalMatched = %d, want 1", got.TotalMatched)
+	if len(got.Matches) == 0 {
+		t.Fatal("no matches at all")
 	}
-	if len(got.Matches) != 1 || got.Matches[0].ID != "20260903120000" {
-		t.Fatalf("Matches = %+v, want just the auth-token-rotation fact", got.Matches)
+	if got.Matches[0].ID != "20260903120000" {
+		t.Fatalf("Matches[0] = %+v, want the auth-token-rotation fact (all 3 terms) ranked first", got.Matches[0])
 	}
-	// The unrelated deploy-window fact and the weaker two-of-three corpus
-	// item must not appear.
 	for _, m := range got.Matches {
 		if m.ID == "20260903120001" {
-			t.Fatalf("deploy-window fact matched an auth-token question: %+v", m)
-		}
-		if m.ID == "20260903120002" {
-			t.Fatalf("corpus item matched only 2 of 3 terms but was still returned: %+v", m)
+			t.Fatalf("deploy-window fact (zero term overlap) matched an auth-token question: %+v", m)
 		}
 	}
 	if got.RankingBasis == "" {
@@ -130,13 +127,11 @@ func TestQueryNoMatchIsDistinctFromMissingIndex(t *testing.T) {
 	}
 }
 
-// TestQueryFiltersACoincidentalLowScoreMatch is agent-estate#1026's
-// none-01 shape reproduced against a small fixture: a five-term question
-// where an unrelated item happens to share only two generic words with
-// it must not be returned -- the minMatchedTerms floor exists exactly
-// to keep this out of StateMatched, so the caller reaches StateNoMatch
-// (a real "nothing answers this") instead of an unfalsifiable answer.
-func TestQueryFiltersACoincidentalLowScoreMatch(t *testing.T) {
+// TestQueryZeroOverlapIsStillNoMatch is the baseline #1054 keeps rather
+// than replaces: an item sharing NOT ONE stemmed term with the question
+// scores exactly 0 and must not be returned -- this is BM25's own
+// definition of "no overlap", not a minimum-count floor.
+func TestQueryZeroOverlapIsStillNoMatch(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "index.json")
 	res := Result{
 		GeneratedAt:   time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
@@ -145,8 +140,46 @@ func TestQueryFiltersACoincidentalLowScoreMatch(t *testing.T) {
 		Items: []Item{
 			{
 				ID: "20260903120010", Source: "github-stars",
-				Permalink: "https://github.com/apache/airflow",
-				Tier1:     "apache/airflow -- Apache Airflow - A platform to programmatically author, schedule, and monitor workflows",
+				Permalink:   "https://github.com/apache/airflow",
+				Tier1:       "apache/airflow -- Apache Airflow - A platform to programmatically author, schedule, and monitor workflows",
+				Publishable: true, PublishBasis: "test fixture: marked publishable",
+			},
+		},
+	}
+	if err := Write(path, res); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Query(path, "office vending machine restocking rotation cadence", 0, false)
+	if got.State != StateNoMatch {
+		t.Fatalf("State = %q, want %q (matches=%+v)", got.State, StateNoMatch, got.Matches)
+	}
+	if len(got.Matches) != 0 {
+		t.Fatalf("Matches = %+v, want none", got.Matches)
+	}
+}
+
+// TestQueryNoHardFloorASingleSharedTermStillSurfaces is agent-estate#1026's
+// none-01 shape (a five-term question sharing one generic word with an
+// unrelated item), but proves the OPPOSITE of what the retired
+// minMatchedTerms floor asserted: #1054 explicitly retires the hard
+// count floor because term WEIGHTING, not exclusion, is what should keep
+// a coincidental common-term match from outranking a genuine one. A
+// single real (if weak and non-discriminating) term overlap is now a
+// real, if low-ranked, candidate rather than being thrown away before
+// ranking is ever consulted.
+func TestQueryNoHardFloorASingleSharedTermStillSurfaces(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.json")
+	res := Result{
+		GeneratedAt:   time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
+		StalenessRule: stalenessRule,
+		Note:          derivedNote,
+		Items: []Item{
+			{
+				ID: "20260903120010", Source: "github-stars",
+				Permalink:   "https://github.com/apache/airflow",
+				Tier1:       "apache/airflow -- Apache Airflow - A platform to programmatically author, schedule, and monitor workflows",
+				Publishable: true, PublishBasis: "test fixture: marked publishable",
 			},
 		},
 	}
@@ -155,11 +188,79 @@ func TestQueryFiltersACoincidentalLowScoreMatch(t *testing.T) {
 	}
 
 	got := Query(path, "office vending machine restocking schedule", 0, false)
-	if got.State != StateNoMatch {
-		t.Fatalf("State = %q, want %q -- a 2-of-5 coincidental term match should not clear the floor (matches=%+v)", got.State, StateNoMatch, got.Matches)
+	if got.State != StateMatched {
+		t.Fatalf("State = %q, want %q -- a real single-term overlap (\"schedule\") should surface, "+
+			"not be discarded by a count floor (matches=%+v, reason=%q)", got.State, StateMatched, got.Matches, got.Reason)
 	}
-	if len(got.Matches) != 0 {
-		t.Fatalf("Matches = %+v, want none", got.Matches)
+	if len(got.Matches) != 1 || got.Matches[0].ID != "20260903120010" {
+		t.Fatalf("Matches = %+v, want the one item sharing \"schedule\"", got.Matches)
+	}
+	if len(got.Matches[0].MatchedTerms) != 1 || got.Matches[0].MatchedTerms[0] != "schedule" {
+		t.Fatalf("MatchedTerms = %+v, want exactly the stemmed \"schedule\" term", got.Matches[0].MatchedTerms)
+	}
+}
+
+// TestQueryRareTermBeatsCommonTermCoincidence is #1054's own required
+// property, stated directly: "a rare term matching once must be able to
+// beat three common terms matching by coincidence." Five noise items
+// each carry three words the corpus overall treats as common (they
+// appear in most items, so BM25's idf discounts them close to zero); the
+// target item carries none of those three words but does carry one rare
+// term found nowhere else in the corpus. A question combining the rare
+// term with the three common ones must rank the target first even though
+// it matches only 1 of 4 query terms against the noise items' 3 of 4.
+func TestQueryRareTermBeatsCommonTermCoincidence(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.json")
+	items := []Item{
+		{
+			ID: "target", Source: "vault-fact",
+			Permalink:   "/vault/agent/facts/target.md",
+			Tier1:       "zzrareterm standalone finding",
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		},
+	}
+	// Noise: "common", "words", "everywhere" appear in every one of these
+	// five unrelated items plus the target's neighbours -- common enough
+	// across the corpus that BM25's idf discounts them heavily, exactly
+	// the coincidence #1026's none-01 case and #1054 both describe.
+	for i := 0; i < 5; i++ {
+		items = append(items, Item{
+			ID:          fmt.Sprintf("noise-%d", i),
+			Source:      "vault-fact",
+			Permalink:   fmt.Sprintf("/vault/agent/facts/noise-%d.md", i),
+			Tier1:       fmt.Sprintf("common words everywhere -- unrelated fact number %d", i),
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		})
+	}
+	// A few more items also carrying "common"/"words"/"everywhere" so
+	// those terms are genuinely corpus-common, not just repeated across
+	// the five noise items themselves.
+	for i := 5; i < 9; i++ {
+		items = append(items, Item{
+			ID:          fmt.Sprintf("filler-%d", i),
+			Source:      "vault-fact",
+			Permalink:   fmt.Sprintf("/vault/agent/facts/filler-%d.md", i),
+			Tier1:       fmt.Sprintf("common words everywhere -- filler item %d", i),
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		})
+	}
+	res := Result{
+		GeneratedAt:   time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
+		StalenessRule: stalenessRule,
+		Note:          derivedNote,
+		Items:         items,
+	}
+	if err := Write(path, res); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Query(path, "zzrareterm common words everywhere", 0, false)
+	if got.State != StateMatched {
+		t.Fatalf("State = %q, want %q (reason=%q)", got.State, StateMatched, got.Reason)
+	}
+	if len(got.Matches) == 0 || got.Matches[0].ID != "target" {
+		t.Fatalf("Matches[0] = %+v, want \"target\" (the rare-term item) ranked first ahead of the "+
+			"common-term coincidences", got.Matches)
 	}
 }
 
@@ -457,14 +558,17 @@ func tagFilterIndex(t *testing.T) string {
 	return path
 }
 
-// fieldWeightIndex reproduces #1043's review finding in miniature: a
-// short item whose Tier1 (title) actually names the subject, sitting
-// next to a long item whose Tier1 is unrelated but whose Tier2 body
-// happens to contain more of the question's own terms. #1027 compiled
-// full vault fact bodies into Tier2, and an unweighted matched-term
-// count let the long body outrank the on-topic title purely on raw
-// count -- this fixture is that shape at the smallest size that still
-// clears requiredScore(3) for both items.
+// fieldWeightIndex reproduces #1043's review finding, isolated from term
+// COUNT so it tests field weight alone: both items match exactly the
+// same three question terms -- one item carries them in Tier1 (its
+// title), the other carries the identical three words only in Tier2 (a
+// long, otherwise-unrelated body) -- #1027 compiled full vault fact
+// bodies into Tier2, and an unweighted matched-term count let a body's
+// incidental mention outrank an on-topic title purely on raw presence.
+// Under BM25 field weighting (agent-estate#1054) the Tier1 item must
+// still score higher for the SAME term overlap, because a term found in
+// Tier1 counts for more of that item's term frequency than the same term
+// found only in Tier2.
 func fieldWeightIndex(t *testing.T) string {
 	t.Helper()
 	idx := Result{
@@ -479,12 +583,11 @@ func fieldWeightIndex(t *testing.T) string {
 			},
 			{
 				ID: "20260904000001", Source: "vault-fact",
-				Permalink: "/vault/agent/facts/unrelated-title-long-body.md",
+				Permalink: "/vault/agent/facts/unrelated-title-body-only-match.md",
 				Tier1:     "an unrelated fact about deploy windows",
 				Tier2: "this body happens to mention tmux, and separately a " +
-					"session, and later a keychain, and further down locked, " +
-					"and finally recovery -- five of the question's own terms, " +
-					"none of them in this item's own title",
+					"session, and later a keychain -- the same three terms as " +
+					"the on-topic item, none of them in this item's own title",
 				Publishable: true, PublishBasis: "test fixture: marked publishable",
 			},
 		},
@@ -599,16 +702,21 @@ func TestQueryTagFilterComposesWithQuestionTerms(t *testing.T) {
 }
 
 // TestQueryRanksATier1MatchAboveALongerTier2OnlyMatch pins the
-// field-weighted ranking fix: the on-topic-title item matches only 3 of
-// the question's 5 scoreable terms (all in Tier1), the unrelated item
-// matches all 5 (all in Tier2 only, i.e. a strictly higher unweighted
-// score) -- yet the on-topic item must rank first, because a term found
-// in Tier1 outweighs the same term found only in Tier2 (see rankingWeight
-// in query.go). Before this fix, sort was by unweighted score alone and
-// the long-body item would have ranked first.
+// field-weighted ranking fix, isolated from term count (see
+// fieldWeightIndex): both items match exactly the same 3 of the
+// question's 3 scoreable terms, one in Tier1, the other only in Tier2 --
+// the on-topic item must still rank first and score strictly higher,
+// because BM25's own field weight (tier1FieldWeight, bm25.go) makes a
+// Tier1 hit worth more of that item's term frequency than the identical
+// term found only in Tier2. Unlike the old hierarchical sort this
+// replaced, that field-weight advantage is additive, not absolute -- a
+// large enough term-COUNT advantage for the Tier2-only item could still
+// outweigh it (see TestQueryRareTermBeatsCommonTermCoincidence for the
+// property BM25 is actually required to hold), so this fixture keeps
+// term count equal on purpose to test field weight alone.
 func TestQueryRanksATier1MatchAboveALongerTier2OnlyMatch(t *testing.T) {
 	path := fieldWeightIndex(t)
-	got := Query(path, "tmux session keychain locked recovery", 0, false)
+	got := Query(path, "tmux session keychain", 0, false)
 
 	if got.State != StateMatched {
 		t.Fatalf("State = %q, want %q (reason=%q)", got.State, StateMatched, got.Reason)
@@ -620,9 +728,76 @@ func TestQueryRanksATier1MatchAboveALongerTier2OnlyMatch(t *testing.T) {
 		t.Fatalf("Matches[0].ID = %q, want the on-topic-title item ranked first (got %+v)",
 			got.Matches[0].ID, got.Matches)
 	}
-	if got.Matches[0].Score >= got.Matches[1].Score {
+	if got.Matches[0].Score <= got.Matches[1].Score {
 		t.Fatalf("fixture no longer exercises the case: on-topic item's printed score (%d) "+
-			"must be lower than the long-body item's (%d) for this test to prove weighting, "+
-			"not just raw score, decided the order", got.Matches[0].Score, got.Matches[1].Score)
+			"must be strictly higher than the Tier2-only item's (%d) for this test to prove "+
+			"field weighting, not term count, decided the order", got.Matches[0].Score, got.Matches[1].Score)
+	}
+}
+
+// TestQueryParaphraseSurvivesTheRetiredFloor is agent-estate#1054's own
+// traced case, reproduced as a fixture: a target item about stale model
+// listings, queried with its own words ("models listed stale refreshed")
+// scores well and ranks first; queried with a realistic paraphrase ("are
+// the model names up to date") the OLD scorer matched only "model" as a
+// substring of "models" (score 1) against requiredScore's floor of 3, so
+// the target was excluded BEFORE ranking was ever consulted, while two
+// unrelated items sharing "model"/"names"/"date" as separate incidental
+// words scored 3 and were returned instead. This is confirmed directly
+// against a3c389d (the pre-#1054 commit) in the PR body's before/after
+// transcript -- the same fixture, run against the OLD Query, excludes
+// "target" from paraphrase.Matches entirely. BM25 has no such floor: the
+// target is now a real, nonzero-scoring candidate and must be returned,
+// even though ranking it strictly ahead of the two incidental matches
+// depends on this corpus's actual idf distribution and is a stronger,
+// separate claim -- see TestQueryRareTermBeatsCommonTermCoincidence for
+// the fixture that isolates and proves THAT property directly.
+func TestQueryParaphraseSurvivesTheRetiredFloor(t *testing.T) {
+	items := []Item{
+		{
+			ID: "target", Source: "vault-fact",
+			Permalink:   "/vault/agent/facts/models-stale.md",
+			Tier1:       "models listed stale -- refresh required",
+			Tier2:       "The models list goes stale after 30 days and must be refreshed by hand.",
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		},
+		{
+			ID: "unrelated-1", Source: "vault-fact",
+			Permalink:   "/vault/agent/facts/unrelated1.md",
+			Tier1:       "date names for the release model",
+			Tier2:       "an unrelated fact that happens to use the words model, names and date incidentally",
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		},
+		{
+			ID: "unrelated-2", Source: "vault-fact",
+			Permalink:   "/vault/agent/facts/unrelated2.md",
+			Tier1:       "another unrelated fact",
+			Tier2:       "this one names a date and a model too, purely by coincidence",
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		},
+	}
+	path := filepath.Join(t.TempDir(), "index.json")
+	if err := Write(path, Result{Items: items}); err != nil {
+		t.Fatal(err)
+	}
+
+	own := Query(path, "models listed stale refreshed", 0, false)
+	if own.State != StateMatched || len(own.Matches) == 0 || own.Matches[0].ID != "target" {
+		t.Fatalf("own-words query: got %+v, want target ranked first", own.Matches)
+	}
+
+	paraphrase := Query(path, "are the model names up to date", 0, false)
+	if paraphrase.State != StateMatched {
+		t.Fatalf("paraphrase query: State = %q, want %q (reason=%q)", paraphrase.State, StateMatched, paraphrase.Reason)
+	}
+	var foundTarget bool
+	for _, m := range paraphrase.Matches {
+		if m.ID == "target" {
+			foundTarget = true
+		}
+	}
+	if !foundTarget {
+		t.Fatalf("paraphrase query: Matches = %+v, want \"target\" present -- "+
+			"this is the exact case the retired requiredScore floor excluded before ranking ever ran", paraphrase.Matches)
 	}
 }
