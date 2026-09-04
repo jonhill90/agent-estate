@@ -152,8 +152,11 @@ that no longer exist; each one says so where it applies.
    that calls tmux: `internal/mirror`'s `tmuxCmd` routes every invocation
    through a six-verb allowlist (`allowedVerbs`), so `kill-server`,
    `kill-session` and `respawn-*` cannot run from it at all, and
-   `Config.TmuxTmpdir` scopes each call to a private socket directory with
-   `$TMUX` unset. Read that as covering `internal/mirror`, not the tree.
+   `Config.TmuxTmpdir`, **when set**, scopes each call to a private socket
+   directory with `$TMUX` unset — that is the isolation idiom the tests use,
+   and `ESTATE_MIRROR_TMUX_TMPDIR` is what sets it; production leaves it empty
+   and addresses the operator's own server on purpose, since watching that
+   server is the feature. Read that as covering `internal/mirror`, not the tree.
    `internal/isolate` is about git worktrees, not tmux — do not read it as
    this guard.
 
@@ -183,9 +186,10 @@ that no longer exist; each one says so where it applies.
 8. **A service is not a lane.** The Telegram poller was the instance: never
    dispatch to it, never "restart" it as a lane, and remember it consumed its
    own inbound queue by acking the offset, so running the inbox by hand
-   returned nothing — which is not evidence nobody wrote. **There is no
-   poller under `src/`** (`git grep -il poller -- src` finds nothing); the
-   rule is kept for the class, not for a live process.
+   returned nothing — which is not evidence nobody wrote. **There is no poller
+   implementation under `src/`** (`git grep -in poller -- src` finds exactly one
+   line: a comment in `internal/mirror` citing this incident, not a process);
+   the rule is kept for the class, not for a live process.
 
 9. **Identity is what the estate minted, never a name someone chose.** For
    the old supervisor that string was `<session>:<index>`. Today it is the
@@ -295,9 +299,8 @@ measured against. (The runbook this used to cite,
 ---
 *The claims in this section were checked against this branch's own tree as
 rebased onto `ef06010` (2026-09-03) — every path, command and count above was
-re-run, and
-what could not be found is named as absent rather than described. Re-check
-before relying on any of it: `src/estate/agents_md_test.go` is the only
+re-run, and what could not be found is named as absent rather than described.
+Re-check before relying on any of it: `src/estate/agents_md_test.go` is the only
 automated check on this file, and it validates **subcommand names only** — it
 would pass a section that described every one of them doing the wrong thing.
 A review caught exactly that here: this section once said `estate merge`
