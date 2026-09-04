@@ -245,6 +245,13 @@ func usage() {
   estate knowledge                      regenerate the compiled, read-only index over
                                          GitHub stars, the memory vault, the corpus and
                                          Loops-Research -- derived, never authoritative
+  estate knowledge query <question>     small, ranked, cited pointers into the compiled
+                                         index -- never bodies; states matched, no_match,
+                                         index_missing or index_unreadable, never one
+                                         collapsed "nothing" answer
+  estate knowledge get <id>             the one item Tier1/Tier2/Tier3 body a query
+                                         match pointed at -- the second half of
+                                         progressive disclosure
   estate tasks                          latest state of every task
   estate inflight                       tasks still occupying a slot
   estate reclaim [--apply]              report in-flight turns and whether their
@@ -303,6 +310,46 @@ waiting. Environment:
                                         socket otherwise, so a missing one is
                                         refused rather than obeyed
 `)
+}
+
+// printKnowledgeQuery renders a knowledge.QueryResult for a terminal --
+// the four distinguishable states #1019 requires (matched, no_match,
+// index_missing, index_unreadable) each print visibly differently, never
+// collapsing to the same "nothing here" shape.
+func printKnowledgeQuery(qr knowledge.QueryResult) {
+	switch qr.State {
+	case knowledge.StateIndexMissing:
+		fmt.Fprintln(os.Stderr, "estate: "+qr.Reason)
+		return
+	case knowledge.StateIndexUnreadable:
+		fmt.Fprintln(os.Stderr, "estate: index unreadable: "+qr.Reason)
+		return
+	case knowledge.StateNoMatch:
+		fmt.Printf("no item matches %q\n", qr.Question)
+		if qr.Reason != "" {
+			fmt.Println(qr.Reason)
+		}
+		printSourceStatuses(qr.SourceStatuses)
+		return
+	}
+
+	fmt.Printf("%d match(es) for %q (showing %d, %d not returned)\n\n",
+		qr.TotalMatched, qr.Question, len(qr.Matches), qr.NotReturned)
+	for _, m := range qr.Matches {
+		fmt.Printf("[%s] %s (score %d: %s)\n  %s\n  %s\n\n",
+			m.ID, m.Source, m.Score, strings.Join(m.MatchedTerms, ", "), m.Tier1, m.Permalink)
+	}
+	fmt.Println("ranking: " + qr.RankingBasis)
+	fmt.Println("ask `estate knowledge get <id>` for one item's full tier2/tier3")
+	printSourceStatuses(qr.SourceStatuses)
+}
+
+func printSourceStatuses(sources []knowledge.SourceResult) {
+	for _, s := range sources {
+		if !s.OK {
+			fmt.Printf("note: source %s was unavailable when the index was built: %s\n", s.Name, s.Reason)
+		}
+	}
 }
 
 func main() {
@@ -370,6 +417,47 @@ func main() {
 		}
 
 	case "knowledge":
+		if len(os.Args) > 2 && os.Args[2] == "query" {
+			if len(os.Args) < 4 {
+				fmt.Fprintln(os.Stderr, "usage: estate knowledge query <question>")
+				os.Exit(2)
+			}
+			out, err := knowledge.DefaultOutputPath()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
+			question := strings.Join(os.Args[3:], " ")
+			qr := knowledge.Query(out, question, 0)
+			printKnowledgeQuery(qr)
+			switch qr.State {
+			case knowledge.StateIndexMissing, knowledge.StateIndexUnreadable:
+				os.Exit(2)
+			case knowledge.StateNoMatch:
+				os.Exit(1)
+			}
+			return
+		}
+		if len(os.Args) > 2 && os.Args[2] == "get" {
+			if len(os.Args) < 4 {
+				fmt.Fprintln(os.Stderr, "usage: estate knowledge get <id>")
+				os.Exit(2)
+			}
+			out, err := knowledge.DefaultOutputPath()
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "estate:", err)
+				os.Exit(2)
+			}
+			item, ok, reason := knowledge.Get(out, os.Args[3])
+			if !ok {
+				fmt.Fprintln(os.Stderr, "estate: "+reason)
+				os.Exit(1)
+			}
+			fmt.Printf("id:        %s\nsource:    %s\npermalink: %s\ntier1:     %s\ntier2:     %s\ntier3:     %s\n",
+				item.ID, item.Source, item.Permalink, item.Tier1, item.Tier2, item.Tier3)
+			return
+		}
+
 		cfg, err := knowledge.DefaultConfig()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "estate:", err)
