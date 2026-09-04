@@ -15,6 +15,7 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -332,6 +333,18 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 	case knowledge.StateIndexUnreadable:
 		fmt.Fprintln(os.Stderr, "estate: index unreadable: "+qr.Reason)
 		return
+	}
+
+	// agent-estate#1036: every state that got this far read a real,
+	// successfully-parsed index (IndexGeneratedAt is set for all three
+	// remaining states -- see Query in query.go), so the index's own age
+	// and whether it has fallen behind its sources is printed once, here,
+	// before any of the three shapes below. #1045's reviewer hit this
+	// blind exactly once for real: a stale index answered silently, and
+	// only manual regeneration caught it.
+	printIndexFreshness(qr.IndexGeneratedAt)
+
+	switch qr.State {
 	case knowledge.StateNoMatch:
 		fmt.Printf("no item matches %q\n", qr.Question)
 		if qr.Reason != "" {
@@ -423,6 +436,145 @@ func printSourceStatuses(sources []knowledge.SourceResult) {
 		if !s.OK {
 			fmt.Printf("note: source %s was unavailable when the index was built: %s\n", s.Name, s.Reason)
 		}
+	}
+}
+
+// indexSourceMtime is one observed reading against one of the four
+// sources knowledge.Generate compiles from (see knowledge.go's package
+// comment) -- either a real mtime, or a reason it could not be read.
+// Unknown is its own field, deliberately not a zero time.Time, so
+// "could not check" is never rendered as if it were "checked and fresh"
+// (agent-estate#1036: absence of evidence is not evidence of freshness).
+type indexSourceMtime struct {
+	name   string
+	mtime  time.Time
+	known  bool
+	reason string
+}
+
+// indexSourceMtimes reads this stat is a read, nothing more, matching
+// this task's "sources read-only" constraint -- three of the four
+// sources knowledge.Generate reads (see knowledge.go's package comment)
+// have a real path on disk to stat. The fourth, GitHub stars, is read
+// live via `gh api user/starred` with no local cache file this CLI can
+// stat (agent-estate#942's "measured, not assumed" discipline applies
+// here too: no such file exists to check, so it is reported unknown
+// rather than guessed at).
+func indexSourceMtimes(cfg knowledge.Config) []indexSourceMtime {
+	statNewest := func(name, dir string) indexSourceMtime {
+		if dir == "" {
+			return indexSourceMtime{name: name, reason: "path not configured"}
+		}
+		fi, err := os.Stat(dir)
+		if err != nil {
+			return indexSourceMtime{name: name, reason: err.Error()}
+		}
+		newest := fi.ModTime()
+		// A directory's own mtime only moves when an entry is added or
+		// removed, not when an existing file's content changes -- so
+		// editing an existing vault fact or research note in place
+		// would look fresh under the directory mtime alone. Reading
+		// each entry's own mtime too (one extra stat each, still
+		// read-only) catches that case.
+		entries, err := os.ReadDir(dir)
+		if err == nil {
+			for _, e := range entries {
+				info, err := e.Info()
+				if err != nil {
+					continue
+				}
+				if info.ModTime().After(newest) {
+					newest = info.ModTime()
+				}
+			}
+		}
+		return indexSourceMtime{name: name, mtime: newest, known: true}
+	}
+
+	return []indexSourceMtime{
+		statNewest("agent-memory-vault", filepath.Join(cfg.VaultDir, "agent", "facts")),
+		statFile("corpus-db", cfg.CorpusDBPath),
+		statNewest("loops-research", cfg.LoopsResearch),
+		{
+			name:   "github-stars",
+			reason: "read live via `gh api user/starred`, no local cache file to stat",
+		},
+	}
+}
+
+// statFile stats a single file (the corpus database, unlike the vault
+// and research directories, is one file with no entries to widen the
+// reading over) and reports its mtime, or the reason it could not be
+// read -- never a zero time standing in silently for "unknown".
+func statFile(name, path string) indexSourceMtime {
+	if path == "" {
+		return indexSourceMtime{name: name, reason: "path not configured"}
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		return indexSourceMtime{name: name, reason: err.Error()}
+	}
+	return indexSourceMtime{name: name, mtime: fi.ModTime(), known: true}
+}
+
+// printIndexFreshness prints the compiled index's own age, then
+// compares it against the four sources knowledge.Generate reads and
+// names any that changed since -- agent-estate#1036. It never
+// regenerates anything; a stat is the only filesystem access it
+// performs. generatedAt.IsZero() means the caller has no successfully-
+// read index to report on (StateIndexMissing/StateIndexUnreadable
+// already returned before this is called), so it is a silent no-op.
+func printIndexFreshness(generatedAt time.Time) {
+	if generatedAt.IsZero() {
+		return
+	}
+	fmt.Printf("index built %s ago (%s)\n", formatAge(time.Since(generatedAt)), generatedAt.Format(time.RFC3339))
+
+	cfg, err := knowledge.DefaultConfig()
+	if err != nil {
+		fmt.Printf("note: could not resolve source paths to check staleness against: %s\n", err)
+		return
+	}
+
+	var stale, unknown []string
+	for _, s := range indexSourceMtimes(cfg) {
+		if !s.known {
+			unknown = append(unknown, fmt.Sprintf("%s (%s)", s.name, s.reason))
+			continue
+		}
+		if s.mtime.After(generatedAt) {
+			stale = append(stale, fmt.Sprintf("%s (changed %s ago)", s.name, formatAge(time.Since(s.mtime))))
+		}
+	}
+
+	if len(stale) > 0 {
+		fmt.Printf("index is BEHIND its sources: %s -- regenerate with `estate knowledge` before trusting this over a live read\n",
+			strings.Join(stale, ", "))
+	}
+	for _, u := range unknown {
+		fmt.Printf("note: staleness against %s could not be checked -- reported as unknown, not assumed fresh\n", u)
+	}
+}
+
+// formatAge renders a duration the way a human reading terminal output
+// wants it -- one unit, rounded down, never a Go-native
+// "3h24m10.001s". A negative duration (a source's clock skewed ahead of
+// the index's own, or the reverse) still renders as a magnitude with its
+// sign preserved by the caller's own wording, never a panic or a bare
+// "-3h".
+func formatAge(d time.Duration) string {
+	if d < 0 {
+		d = -d
+	}
+	switch {
+	case d < time.Minute:
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
 }
 
