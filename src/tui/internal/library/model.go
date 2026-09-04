@@ -82,10 +82,18 @@ type Model struct {
 	fetch      Fetcher
 	loadDetail DetailLoader
 	fetchCount CountFetcher
+	fetchQueue QueueFetcher
 
 	view   View
 	weight string
 	status string
+
+	// usingQueue is true while [d] has switched the list to QueueFiledAsLaw
+	// -- a separate mode from view/weight/status, not a fifth value squeezed
+	// into any of those three: it selects an entirely different query shape
+	// (ledger.go's own Queue doc comment) and disables [v]/[f]/[x] while
+	// active (handleKey below) rather than composing with them.
+	usingQueue bool
 
 	rows     []ItemRow
 	fetchErr error
@@ -173,7 +181,22 @@ func (m *Model) applySource() {
 	m.fetch = src.Fetch
 	m.loadDetail = src.LoadDetail
 	m.fetchCount = src.FetchCount
+	m.fetchQueue = src.FetchQueue
 	m.unconfigured = src.Fetch == nil
+}
+
+// effectiveUnconfigured reports whether the currently-active fetch path --
+// the current View's own Fetcher, or QueueFiledAsLaw's own QueueFetcher
+// while [d] is active -- has nothing wired. Kept as a method rather than a
+// second stored field: m.unconfigured already tracks the View path (set in
+// applySource, read by every existing test), and deriving the Queue path
+// from m.fetchQueue directly means the two can never drift out of sync
+// with which mode m.usingQueue actually says is active.
+func (m Model) effectiveUnconfigured() bool {
+	if m.usingQueue {
+		return m.fetchQueue == nil
+	}
+	return m.unconfigured
 }
 
 // currentSourceName is what view.go shows for the active corpus -- falls
@@ -196,7 +219,19 @@ func (m Model) WithTheme(th theme.Theme, notice string) Model {
 }
 
 func (m Model) Init() tea.Cmd {
-	return tea.Batch(refreshCmd(), doFetch(m.fetch, m.view, m.weight, m.status), doFetchCount(m.fetchCount))
+	return tea.Batch(refreshCmd(), m.doCurrentFetch(), doFetchCount(m.fetchCount))
+}
+
+// doCurrentFetch issues whichever fetch is currently active: the View path
+// (doFetch, honouring weight/status) or, while [d] has QueueFiledAsLaw
+// active, the Queue path (doFetchQueue) instead. The one place that
+// decision is made, so Init/refreshMsg/the [c]/[r] key handlers never have
+// to duplicate the branch.
+func (m Model) doCurrentFetch() tea.Cmd {
+	if m.usingQueue {
+		return doFetchQueue(m.fetchQueue, QueueFiledAsLaw)
+	}
+	return doFetch(m.fetch, m.view, m.weight, m.status)
 }
 
 func refreshCmd() tea.Cmd {
@@ -209,6 +244,16 @@ func doFetch(fetch Fetcher, view View, weight, status string) tea.Cmd {
 	}
 	return func() tea.Msg {
 		rows, err := fetch(view, weight, status)
+		return fetchResultMsg{rows: rows, err: err}
+	}
+}
+
+func doFetchQueue(fetchQueue QueueFetcher, q Queue) tea.Cmd {
+	if fetchQueue == nil {
+		return nil
+	}
+	return func() tea.Msg {
+		rows, err := fetchQueue(q)
 		return fetchResultMsg{rows: rows, err: err}
 	}
 }
@@ -240,7 +285,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.sync(), nil
 
 	case refreshMsg:
-		return m, tea.Batch(refreshCmd(), doFetch(m.fetch, m.view, m.weight, m.status), doFetchCount(m.fetchCount))
+		return m, tea.Batch(refreshCmd(), m.doCurrentFetch(), doFetchCount(m.fetchCount))
 
 	case fetchResultMsg:
 		m.fetchErr = msg.err
@@ -317,7 +362,7 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.mode = modeList
 		m.opening = ""
 		m.readErr = ""
-		return m.sync(), tea.Batch(doFetch(m.fetch, m.view, m.weight, m.status), doFetchCount(m.fetchCount))
+		return m.sync(), tea.Batch(m.doCurrentFetch(), doFetchCount(m.fetchCount))
 	}
 
 	if m.mode == modeReading {
@@ -357,16 +402,44 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch msg.String() {
 	case "r":
-		return m, tea.Batch(doFetch(m.fetch, m.view, m.weight, m.status), doFetchCount(m.fetchCount))
+		return m, tea.Batch(m.doCurrentFetch(), doFetchCount(m.fetchCount))
+	case "d":
+		// Toggles QueueFiledAsLaw on/off -- a different query shape from
+		// view/weight/status (ledger.go's own Queue doc comment), so it
+		// gets its own key rather than becoming a fifth View to cycle
+		// through with [v]. Clears rows rather than leaving the OTHER
+		// mode's stale list on screen while the new fetch is in flight --
+		// the same reasoning [c]'s own handler already applies when
+		// switching corpus.
+		m.usingQueue = !m.usingQueue
+		m.selected = 0
+		m.rows = nil
+		return m.sync(), m.doCurrentFetch()
 	case "v":
+		if m.usingQueue {
+			// QueueFiledAsLaw has no View underneath it to cycle -- [v]
+			// is a no-op while active, not a silent switch back to view
+			// mode (that is [d]'s own job).
+			return m, nil
+		}
 		m.view = nextView(m.view)
 		m.selected = 0
 		return m.sync(), doFetch(m.fetch, m.view, m.weight, m.status)
 	case "f":
+		if m.usingQueue {
+			// The queue's weight predicate (weight='hard') is fixed --
+			// see filedAsLawQuery's own doc comment.
+			return m, nil
+		}
 		m.weight = nextInCycle(weightCycle, m.weight)
 		m.selected = 0
 		return m.sync(), doFetch(m.fetch, m.view, m.weight, m.status)
 	case "x":
+		if m.usingQueue {
+			// The queue's status predicate (acted/resolved/acknowledged)
+			// is fixed -- see filedAsLawQuery's own doc comment.
+			return m, nil
+		}
 		m.status = nextInCycle(statusCycle, m.status)
 		m.selected = 0
 		return m.sync(), doFetch(m.fetch, m.view, m.weight, m.status)

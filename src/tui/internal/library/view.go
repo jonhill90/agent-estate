@@ -40,11 +40,23 @@ func (m Model) View() string {
 
 func (m Model) viewList() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render(truncate("library: "+m.currentSourceName(), m.width)) + "\n")
+	title := "library: " + m.currentSourceName()
+	if m.usingQueue {
+		// Named explicitly rather than left to the legend line alone --
+		// the whole point of [d] is that this list is NOT the current
+		// View's own rows (agent-estate#1094).
+		title += " -- queue: questions filed as law, by damage"
+	}
+	b.WriteString(titleStyle.Render(truncate(title, m.width)) + "\n")
 
-	if m.unconfigured {
+	unconfigured := m.effectiveUnconfigured()
+	if unconfigured {
 		errStyle := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Color(theme.RoleError))
-		b.WriteString(errStyle.Render(truncate(unconfiguredMessage(m.sources[m.sourceIdx].Name), m.width)) + "\n")
+		msg := unconfiguredMessage(m.sources[m.sourceIdx].Name)
+		if m.usingQueue {
+			msg = queueUnconfiguredMessage(m.sources[m.sourceIdx].Name)
+		}
+		b.WriteString(errStyle.Render(truncate(msg, m.width)) + "\n")
 	} else if m.fetchErr != nil {
 		errStyle := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Color(theme.RoleError))
 		b.WriteString(errStyle.Render(truncate("! could not read the corpus: "+m.fetchErr.Error(), m.width)) + "\n")
@@ -62,10 +74,18 @@ func (m Model) viewList() string {
 	}
 	b.WriteString(legendStyle.Render(truncate(countLine, m.width)) + "\n")
 
-	legend := fmt.Sprintf(
-		"view: %s (%d rows)  weight: %s  status: %s  [j/k] move  [enter] open  [v] view  [f] weight  [x] status  [c] corpus  [r] refresh  [t] theme  [q] quit",
-		m.view.Label(), len(m.rows), filterLabel(m.weight), filterLabel(m.status),
-	)
+	var legend string
+	if m.usingQueue {
+		legend = fmt.Sprintf(
+			"queue: filed as law, damage order (%d rows)  [j/k] move  [enter] open  [d] back to views  [c] corpus  [r] refresh  [t] theme  [q] quit",
+			len(m.rows),
+		)
+	} else {
+		legend = fmt.Sprintf(
+			"view: %s (%d rows)  weight: %s  status: %s  [j/k] move  [enter] open  [v] view  [f] weight  [x] status  [d] damage queue  [c] corpus  [r] refresh  [t] theme  [q] quit",
+			m.view.Label(), len(m.rows), filterLabel(m.weight), filterLabel(m.status),
+		)
+	}
 	b.WriteString(legendStyle.Render(truncate(legend, m.width)))
 
 	return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(b.String())
@@ -85,9 +105,21 @@ func unconfiguredMessage(name string) string {
 	return "! " + name + " not configured -- point its own flag/env var at it, or let it auto-discover"
 }
 
+// queueUnconfiguredMessage is effectiveUnconfigured's own "could not look"
+// banner for QueueFiledAsLaw specifically -- distinct wording from
+// unconfiguredMessage above so a reader who toggled [d] on a corpus whose
+// Fetch works fine (but whose FetchQueue is nil) sees "the queue is not
+// wired", never "this corpus is broken" or a silent empty list.
+func queueUnconfiguredMessage(name string) string {
+	if name == "" {
+		return "! the filed-as-law queue is not configured for this corpus"
+	}
+	return "! " + name + "'s filed-as-law queue is not configured"
+}
+
 func (m Model) renderListLines() string {
 	if len(m.rows) == 0 {
-		if m.unconfigured || m.fetchErr != nil {
+		if m.effectiveUnconfigured() || m.fetchErr != nil {
 			// The error banner above already says the ledger could not be
 			// read -- this pane must not ALSO say "(no items)" underneath
 			// it, which would read as "looked, found nothing" rather than

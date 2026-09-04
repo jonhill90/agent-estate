@@ -79,6 +79,27 @@ func TestVKeyCyclesViewAgainstARealProgram(t *testing.T) {
 	waitFor(t, tm, "live_parameters")
 }
 
+// TestDKeyShowsTheQueueAgainstARealProgram proves [d] actually switches to
+// QueueFiledAsLaw's own rows through a real Program, not just Update()
+// called by hand -- the pty-level half of TestDKeyTogglesQueueAndReFetches
+// (agent-estate#1094).
+func TestDKeyShowsTheQueueAgainstARealProgram(t *testing.T) {
+	src := Source{
+		Name: "shared",
+		Fetch: func(View, string, string) ([]ItemRow, error) {
+			return []ItemRow{{ID: "it-view0000000001", Kind: "parameter"}}, nil
+		},
+		FetchQueue: func(Queue) ([]ItemRow, error) {
+			return []ItemRow{{ID: "it-lawq0000000001", Kind: "question", Status: "acted"}}, nil
+		},
+	}
+	tm := run(t, NewSources([]Source{src}))
+	waitFor(t, tm, "it-view0000000001")
+
+	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	waitFor(t, tm, "it-lawq0000000001")
+}
+
 // TestQQuitsARealProgram matches every other pane's own convention.
 func TestQQuitsARealProgram(t *testing.T) {
 	tm := run(t, New(nil, nil, nil))
