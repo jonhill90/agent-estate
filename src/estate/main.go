@@ -751,6 +751,17 @@ func main() {
 			return
 		}
 
+		// agent-estate#1061 Finding 3: any other os.Args[2] is a typo, not a
+		// request to regenerate. A bare `estate knowledge` (os.Args[2]
+		// absent) still falls through to generation below -- that is the
+		// documented behaviour -- but an unrecognised subcommand must be
+		// refused before it reaches knowledge.Generate/Write, which writes
+		// to the one index path every lane shares (#1048).
+		if len(os.Args) > 2 {
+			fmt.Fprintf(os.Stderr, "estate: unrecognised knowledge subcommand %q -- valid: query, get, or no subcommand to regenerate\n", os.Args[2])
+			os.Exit(2)
+		}
+
 		cfg, err := knowledge.DefaultConfig()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "estate:", err)
