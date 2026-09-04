@@ -55,6 +55,14 @@ once can outrank several common terms matching by coincidence, so an item
 needs only one weighted term match (score > 0) to be returned at all
 (agent-estate#1054).
 
+**The score printed to a caller is BM25's own figure rounded to the nearest
+integer for display, applied after ranking.** Sorting itself runs on the
+unrounded float, breaking ties only on genuine float equality — so two
+printed results sharing the same displayed score are not necessarily a tie;
+they may simply have rounded together. Measured on `81034df`: most of an
+ordinary ten-result page shares its printed score with at least one other
+result, purely from rounding.
+
 ## How do I scope a query to one source? (source:<name> scoping)
 
 Prepend a `source:<name>` token to the question — e.g.
@@ -94,6 +102,15 @@ shape, each with its own exit code from `estate knowledge query`:
 | 1 | `no_match` | the index was read fine; nothing in it scored above zero against this question — a real, empty answer, not a failure |
 | 2 | `index_missing` / `index_unreadable` | the compiled index itself could not be read at all — run `estate knowledge` first |
 | 3 | `withheld_private` | something answers this question, but every matching item is private and this call did not ask for private material |
+
+**In practice, exit 3 fires when the public sources themselves were absent or
+unreadable when the index was built** — a checkout with no `AGENTS.md`
+reachable above it, `gh` off `PATH` — not as a routine outcome of a
+private-heavy question against a normally-built index. Measured on `81034df`:
+against the live index, with every source readable, even a deliberately
+private-heavy question still scrapes at least one public match and lands on
+`matched_withheld_majority` (exit 0) instead; two independent attempts to
+reach `withheld_private` that way both failed for this reason.
 
 `matched_withheld_majority` deliberately shares exit 0 with `matched`: it
 still returned a real, citable public answer, just one where more matching
