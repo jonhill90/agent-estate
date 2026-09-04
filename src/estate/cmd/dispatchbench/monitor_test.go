@@ -5,7 +5,28 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/jonhill90/agent-estate/estate/internal/pressure"
 )
+
+// hostGaugesWork reports whether this host's memory and paging gauges can be
+// read at all. On the Linux CI runner they cannot -- `vm_stat` does not exist
+// and `sysctl -n vm.loadavg` fails -- so pressure.Host correctly refuses
+// EVERYTHING, and a test asserting "refuses for the right reason" or "allows
+// when neutralised" would be measuring the runner rather than the code.
+//
+// The two tests below therefore bind on macOS, which is the only place this
+// benchmark runs, and skip elsewhere. Same idiom, and same reason, as
+// internal/pressure's own hostIsMeasurable.
+func hostGaugesWork() bool {
+	return pressure.Host(pressure.Limits{
+		MaxLoadPerCore:       1e9,
+		MinFreeMemMB:         0,
+		MaxSwapoutsPerSample: 1e9,
+		MaxWorktrees:         1e9,
+		MaxInFlight:          1e9,
+	}).OK
+}
 
 // A worker is a tree. Measuring only the root would report a turn that shells
 // out as costing nothing, which is the number the whole decision record turns
@@ -52,6 +73,9 @@ func TestReadProcsSeesThisProcess(t *testing.T) {
 // The floor gate must fire. Given a floor no host can meet, the harness must
 // refuse to start -- the mechanism the first attempt at #1002 lacked.
 func TestPreflightRefusesBelowAnImpossibleFloor(t *testing.T) {
+	if !hostGaugesWork() {
+		t.Skip("host memory/paging gauges are not readable here")
+	}
 	m, err := newMonitor(filepath.Join(t.TempDir(), "s.jsonl"), benchLimits{MinFreeMemMB: 1e12, MaxSwapoutsPerSample: 1, MaxWorkerRSSMB: 1e9})
 	if err != nil {
 		t.Fatal(err)
@@ -69,6 +93,9 @@ func TestPreflightRefusesBelowAnImpossibleFloor(t *testing.T) {
 // ...and it must NOT fire on a healthy host, or the benchmark could never run
 // and the test above would be satisfied by a Preflight that always refuses.
 func TestPreflightAllowsWhenTheHostIsFine(t *testing.T) {
+	if !hostGaugesWork() {
+		t.Skip("host memory/paging gauges are not readable here")
+	}
 	m, err := newMonitor(filepath.Join(t.TempDir(), "s.jsonl"), benchLimits{MinFreeMemMB: 0, MaxSwapoutsPerSample: 1e9, MaxWorkerRSSMB: 1e9})
 	if err != nil {
 		t.Fatal(err)
