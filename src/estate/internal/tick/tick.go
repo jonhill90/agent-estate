@@ -25,6 +25,8 @@ import (
 	"regexp"
 	"strings"
 	"time"
+
+	"github.com/jonhill90/agent-estate/estate/internal/phaseplan"
 )
 
 // DefaultPath is where the brief says the record lives, relative to the repo
@@ -1188,9 +1190,6 @@ func CheckAgainstCommitted(path string, committed int) error {
 	return nil
 }
 
-// phaseRE matches a phase heading in the plan: "## Phase 3 — ...".
-var phaseRE = regexp.MustCompile(`(?m)^##\s+Phase\s+(\d+)\b`)
-
 // KnownPhases returns the phase items the plan actually names, as the ids a
 // tick records ("phase-0", "phase-1", …).
 //
@@ -1203,17 +1202,62 @@ var phaseRE = regexp.MustCompile(`(?m)^##\s+Phase\s+(\d+)\b`)
 // Requiring the phase item to exist in the plan makes two things true: a
 // stray write cannot masquerade as a tick, and work that does not map to any
 // phase forces the plan to be updated rather than the log to be fudged.
+//
+// The plan itself is parsed by internal/phaseplan, not here. This package
+// once carried its own regexp over the same file; internal/status needs the
+// same headings (plus the pull request numbers each names), and two readers
+// of one document drifting apart is the defect agent-estate#1012 exists to
+// remove. One parser, two callers.
 func KnownPhases(planPath string) ([]string, error) {
-	b, err := os.ReadFile(planPath)
+	ps, err := phaseplan.Parse(planPath)
 	if err != nil {
-		return nil, fmt.Errorf("tick: cannot read %s to learn which phases exist: %w", planPath, err)
+		return nil, fmt.Errorf("tick: %w", err)
 	}
+	return phaseplan.IDs(ps), nil
+}
+
+// PhaseItems returns the phase item of every entry in the log, in file
+// order, exactly as written -- typos included.
+//
+// It deliberately does NOT filter, correct or bucket anything: a caller
+// aggregating this (internal/status) has to be able to show `ph`,
+// `delivery-unblock` and `phase-plan` as themselves. Those three are real
+// entries in the production log written before `tick record` checked the
+// field against the plan, and the history is append-only: they stay as they
+// are and are classified unknown at read time, never rewritten and never
+// silently counted as the nearest real phase.
+//
+// A missing log is zero items, not an error -- the same reading Entries
+// gives it.
+func PhaseItems(path string) ([]string, error) {
+	f, err := os.Open(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("tick: open %s: %w", path, err)
+	}
+	defer f.Close()
 	var out []string
-	for _, m := range phaseRE.FindAllStringSubmatch(string(b), -1) {
-		out = append(out, "phase-"+m[1])
+	sc := bufio.NewScanner(f)
+	sc.Buffer(make([]byte, 0, 64*1024), 1024*1024)
+	for n := 1; sc.Scan(); n++ {
+		t := strings.TrimSpace(sc.Text())
+		if t == "" {
+			continue
+		}
+		var e struct {
+			PhaseItem string `json:"phase_item"`
+		}
+		if err := json.Unmarshal([]byte(t), &e); err != nil {
+			// Corruption, not absence: a short list here would read as a
+			// quieter history than the log actually holds.
+			return nil, fmt.Errorf("tick: %s line %d is not readable: %w", path, n, err)
+		}
+		out = append(out, e.PhaseItem)
 	}
-	if len(out) == 0 {
-		return nil, fmt.Errorf("tick: %s names no phases, so no phase item can be checked against it", planPath)
+	if err := sc.Err(); err != nil {
+		return nil, fmt.Errorf("tick: read %s: %w", path, err)
 	}
 	return out, nil
 }

@@ -594,3 +594,51 @@ func TestSecondEntryRecordsGapSincePrevious(t *testing.T) {
 		t.Fatalf("want gap_seconds=180 on the second entry, got %+v (ok=%v)", last.GapSeconds, ok)
 	}
 }
+
+// PhaseItems is what internal/status aggregates. It must hand back every
+// entry's label EXACTLY as written -- the production log holds `ph` (a typo),
+// `delivery-unblock` and `phase-plan`, none of which is a phase, and the log
+// is append-only so none of them is being rewritten. Filtering or correcting
+// them here would hide the very thing the report exists to show.
+func TestPhaseItemsReturnsEveryLabelVerbatim(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "tick-log.jsonl")
+	body := `{"at":"2026-09-01T00:00:00Z","phase_item":"phase-0","src_head":"a","artifact":null}
+{"at":"2026-09-01T00:03:00Z","phase_item":"ph","src_head":"a","artifact":null}
+
+{"at":"2026-09-01T00:06:00Z","phase_item":"delivery-unblock","src_head":"a","artifact":null}
+`
+	if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := PhaseItems(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"phase-0", "ph", "delivery-unblock"}
+	if len(got) != len(want) {
+		t.Fatalf("PhaseItems = %v, want %v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("PhaseItems[%d] = %q, want %q", i, got[i], want[i])
+		}
+	}
+}
+
+// A missing log is zero items; a corrupt one is an error. A short list read
+// as history would report a quieter loop than the record actually holds.
+func TestPhaseItemsDistinguishesMissingFromCorrupt(t *testing.T) {
+	dir := t.TempDir()
+	items, err := PhaseItems(filepath.Join(dir, "absent.jsonl"))
+	if err != nil || len(items) != 0 {
+		t.Fatalf("missing log: got %v, %v; want no items and no error", items, err)
+	}
+	bad := filepath.Join(dir, "bad.jsonl")
+	if err := os.WriteFile(bad, []byte("{not json}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := PhaseItems(bad); err == nil {
+		t.Fatal("a corrupt log was read as an empty history")
+	}
+}
