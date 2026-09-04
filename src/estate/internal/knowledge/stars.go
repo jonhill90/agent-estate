@@ -73,6 +73,7 @@ func starsSource(run func(args ...string) ([]byte, error), clock *idClock) (Sour
 		if r.Description != "" {
 			tier1 = r.FullName + " -- " + r.Description
 		}
+		publishable, basis := classify("github-stars")
 		items = append(items, Item{
 			ID:             clock.NextID(),
 			Source:         "github-stars",
@@ -82,6 +83,8 @@ func starsSource(run func(args ...string) ([]byte, error), clock *idClock) (Sour
 			Tier1:          truncate(tier1, 200),
 			Tier2:          r.Description,
 			Tier3:          r.HTMLURL,
+			Publishable:    publishable,
+			PublishBasis:   basis,
 		})
 	}
 
