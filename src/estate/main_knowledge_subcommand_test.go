@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -109,8 +110,26 @@ func TestKnowledgeBareRegeneratesAndSubcommandsUnaffected(t *testing.T) {
 			}
 			code = exitErr.ExitCode()
 		}
-		if code != 0 {
-			t.Fatalf("bare `estate knowledge` exit code = %d, want 0 (documented regeneration behaviour must be unaffected)\n%s", code, out)
+		// This subtest's whole point is telling "refused as an unrecognised
+		// subcommand" apart from "ran the regeneration path and some
+		// source(s) failed" -- exit code alone cannot, since both land on a
+		// non-zero code (2 for refusal, 1 for a source failure -- see
+		// `case "knowledge":` in main.go). CI's sandbox has neither `gh` on
+		// PATH nor $AGENT_MEMORY_VAULT set, so github-stars and vault-facts
+		// genuinely FAIL there, and this must still pass -- only a laptop
+		// with every source reachable gets exit 0. So: assert the refusal
+		// path was NOT taken (exit 2, and its "unrecognised knowledge
+		// subcommand" message), assert the regeneration path's own
+		// "written to" line did print, and assert the index landed on
+		// disk -- without asserting every source succeeded.
+		if code == 2 {
+			t.Fatalf("bare `estate knowledge` exit code = 2 -- refused as an unrecognised subcommand instead of reaching regeneration\n%s", out)
+		}
+		if strings.Contains(string(out), "unrecognised knowledge subcommand") {
+			t.Fatalf("bare `estate knowledge` was refused as an unrecognised subcommand -- it must reach the regeneration path\n%s", out)
+		}
+		if !strings.Contains(string(out), "item(s) written to") {
+			t.Fatalf("bare `estate knowledge` did not reach the regeneration path's own write-confirmation line (documented regeneration behaviour must be unaffected)\n%s", out)
 		}
 		if _, err := os.Stat(filepath.Join(dir, "index.json")); err != nil {
 			t.Fatalf("bare `estate knowledge` did not write an index: %v\n%s", err, out)
