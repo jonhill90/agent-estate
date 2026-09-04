@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 // buildFixtureCorpus creates a real sqlite3 database at dir/ledger.sqlite3
@@ -45,8 +44,7 @@ INSERT INTO items (id, kind, body, weight, status, resolved_to) VALUES
 
 func TestCorpusSourceReadsLiveParametersOnly(t *testing.T) {
 	path := buildFixtureCorpus(t, fixtureDDL)
-	clock := newIDClock(time.Now())
-	res, items := corpusSource(path, clock)
+	res, items := corpusSource(path)
 	if !res.OK || res.Count != 2 {
 		t.Fatalf("corpusSource() result = %+v, want OK count=2", res)
 	}
@@ -61,8 +59,7 @@ func TestCorpusSourceReadsLiveParametersOnly(t *testing.T) {
 }
 
 func TestCorpusSourceUnreadablePathIsHonest(t *testing.T) {
-	clock := newIDClock(time.Now())
-	res, items := corpusSource(filepath.Join(t.TempDir(), "absent.sqlite3"), clock)
+	res, items := corpusSource(filepath.Join(t.TempDir(), "absent.sqlite3"))
 	if res.OK {
 		t.Fatal("corpusSource() reported OK for an absent database")
 	}
@@ -75,8 +72,7 @@ func TestCorpusSourceUnreadablePathIsHonest(t *testing.T) {
 }
 
 func TestCorpusSourceEmptyPathIsHonest(t *testing.T) {
-	clock := newIDClock(time.Now())
-	res, _ := corpusSource("", clock)
+	res, _ := corpusSource("")
 	if res.OK {
 		t.Fatal("corpusSource(\"\", ...) reported OK with no path configured")
 	}

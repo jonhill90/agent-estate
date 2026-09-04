@@ -14,7 +14,7 @@ import (
 // from the file's own first `# ` heading (falling back to its filename),
 // Tier2 the first non-empty paragraph after it. Never recurses, never
 // rewrites: this is a plain read of a plain directory of notes.
-func loopsSource(dir string, clock *idClock) (SourceResult, []Item) {
+func loopsSource(dir string) (SourceResult, []Item) {
 	res := SourceResult{Name: "loops-research"}
 	if dir == "" {
 		res.Reason = "no Loops-Research path configured"
@@ -47,7 +47,7 @@ func loopsSource(dir string, clock *idClock) (SourceResult, []Item) {
 		}
 		publishable, basis := classify("loops-research")
 		items = append(items, Item{
-			ID:             clock.NextID(),
+			ID:             itemID(path),
 			Source:         "loops-research",
 			Permalink:      path,
 			StructuralTags: []string{"loops-research"},

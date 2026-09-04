@@ -53,6 +53,14 @@ func writeTestIndex(t *testing.T) string {
 	return path
 }
 
+// TestQueryMatchedRanksByTermOverlap also exercises the minMatchedTerms
+// floor (agent-estate#1026): the question has three distinct scoreable
+// terms ("decide" -- matched via "decided" -- "auth", "tokens"), so an
+// item needs all three to clear the floor. The auth-token-rotation fact
+// does (its own Tier2 uses "decided"); the corpus item only shares two
+// of the three ("auth", "tokens") and is correctly excluded -- weaker
+// evidence than the fact that matches every term, not a false positive
+// like none-01's coincidental two-term match.
 func TestQueryMatchedRanksByTermOverlap(t *testing.T) {
 	path := writeTestIndex(t)
 	got := Query(path, "what did Jon decide about auth tokens", 0)
@@ -60,18 +68,20 @@ func TestQueryMatchedRanksByTermOverlap(t *testing.T) {
 	if got.State != StateMatched {
 		t.Fatalf("State = %q, want %q (reason=%q)", got.State, StateMatched, got.Reason)
 	}
-	if got.TotalMatched != 2 {
-		t.Fatalf("TotalMatched = %d, want 2", got.TotalMatched)
+	if got.TotalMatched != 1 {
+		t.Fatalf("TotalMatched = %d, want 1", got.TotalMatched)
 	}
-	if len(got.Matches) != 2 {
-		t.Fatalf("len(Matches) = %d, want 2", len(got.Matches))
+	if len(got.Matches) != 1 || got.Matches[0].ID != "20260903120000" {
+		t.Fatalf("Matches = %+v, want just the auth-token-rotation fact", got.Matches)
 	}
-	// Both auth items should outrank the unrelated deploy-window fact,
-	// which must not appear at all (score 0 -- "auth"/"tokens" don't
-	// occur in its text).
+	// The unrelated deploy-window fact and the weaker two-of-three corpus
+	// item must not appear.
 	for _, m := range got.Matches {
 		if m.ID == "20260903120001" {
 			t.Fatalf("deploy-window fact matched an auth-token question: %+v", m)
+		}
+		if m.ID == "20260903120002" {
+			t.Fatalf("corpus item matched only 2 of 3 terms but was still returned: %+v", m)
 		}
 	}
 	if got.RankingBasis == "" {
@@ -109,6 +119,39 @@ func TestQueryNoMatchIsDistinctFromMissingIndex(t *testing.T) {
 	}
 }
 
+// TestQueryFiltersACoincidentalLowScoreMatch is agent-estate#1026's
+// none-01 shape reproduced against a small fixture: a five-term question
+// where an unrelated item happens to share only two generic words with
+// it must not be returned -- the minMatchedTerms floor exists exactly
+// to keep this out of StateMatched, so the caller reaches StateNoMatch
+// (a real "nothing answers this") instead of an unfalsifiable answer.
+func TestQueryFiltersACoincidentalLowScoreMatch(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.json")
+	res := Result{
+		GeneratedAt:   time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
+		StalenessRule: stalenessRule,
+		Note:          derivedNote,
+		Items: []Item{
+			{
+				ID: "20260903120010", Source: "github-stars",
+				Permalink: "https://github.com/apache/airflow",
+				Tier1:     "apache/airflow -- Apache Airflow - A platform to programmatically author, schedule, and monitor workflows",
+			},
+		},
+	}
+	if err := Write(path, res); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Query(path, "office vending machine restocking schedule", 0)
+	if got.State != StateNoMatch {
+		t.Fatalf("State = %q, want %q -- a 2-of-5 coincidental term match should not clear the floor (matches=%+v)", got.State, StateNoMatch, got.Matches)
+	}
+	if len(got.Matches) != 0 {
+		t.Fatalf("Matches = %+v, want none", got.Matches)
+	}
+}
+
 func TestQueryIndexMissingIsTypedSeparatelyFromNoMatch(t *testing.T) {
 	got := Query(filepath.Join(t.TempDir(), "never-generated.json"), "auth tokens", 0)
 	if got.State != StateIndexMissing {
@@ -138,7 +181,7 @@ func TestQueryIndexUnreadableIsTypedSeparatelyFromMissing(t *testing.T) {
 // and id, or it must not be returned at all.
 func TestQueryNeverReturnsAnUncitedMatch(t *testing.T) {
 	path := writeTestIndex(t)
-	got := Query(path, "auth tokens deploy window", 0)
+	got := Query(path, "auth tokens", 0)
 	if len(got.Matches) == 0 {
 		t.Fatal("test setup produced no matches to check citations on")
 	}

@@ -31,7 +31,7 @@ type vaultFact struct {
 // single fact file that fails to parse is skipped and does not fail the
 // whole source, since agent/index.md itself already tolerates unparsed
 // bullet lines (src/tui's ParseIndex).
-func vaultSource(vaultDir string, clock *idClock) (SourceResult, []Item) {
+func vaultSource(vaultDir string) (SourceResult, []Item) {
 	res := SourceResult{Name: "vault-facts"}
 	if vaultDir == "" {
 		res.Reason = "$AGENT_MEMORY_VAULT is not set"
@@ -74,7 +74,7 @@ func vaultSource(vaultDir string, clock *idClock) (SourceResult, []Item) {
 		}
 		publishable, basis := classify("vault-fact")
 		items = append(items, Item{
-			ID:             clock.NextID(),
+			ID:             itemID(path),
 			Source:         "vault-fact",
 			Permalink:      path,
 			StructuralTags: structural,
