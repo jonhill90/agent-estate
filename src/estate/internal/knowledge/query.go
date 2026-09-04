@@ -32,6 +32,16 @@ const (
 	// StateIndexUnreadable means a file exists at the path but is not a
 	// valid compiled index (truncated write, foreign JSON, corruption).
 	StateIndexUnreadable QueryState = "index_unreadable"
+	// StateWithheldPrivate means at least one item scored above zero, but
+	// every one of them is Item.Publishable == false and the caller did
+	// not ask for private material -- agent-estate#1033. This is
+	// deliberately its own state, never collapsed into StateNoMatch: "no
+	// item answers this" and "an item answers this but you may not see
+	// it by default" are different answers, and conflating them is
+	// exactly the error class the other three states already exist to
+	// prevent. Reason names the count; WithheldPrivate on QueryResult
+	// carries it as a typed field too.
+	StateWithheldPrivate QueryState = "withheld_private"
 )
 
 // QueryLimit is the hard cap on items Query returns in one call --
@@ -61,22 +71,46 @@ type Match struct {
 	// it, so the ranking basis is never opaque.
 	Score        int      `json:"score"`
 	MatchedTerms []string `json:"matched_terms"`
+	// Publishable is copied from the source Item -- see Item's own doc
+	// comment. Under the default, publishable-only filter every
+	// returned Match has this true; it only ever reads false when the
+	// caller explicitly asked for private material (includePrivate) and
+	// this particular item is one of the private ones shown -- so a
+	// reader of Matches can tell which entries are private even inside
+	// private mode, not just that private mode was on (agent-estate#1033).
+	Publishable bool `json:"publishable"`
 }
 
 // QueryResult is Query's full, typed answer.
 type QueryResult struct {
 	State    QueryState `json:"state"`
-	Reason   string     `json:"reason,omitempty"` // set for IndexMissing/IndexUnreadable
+	Reason   string     `json:"reason,omitempty"` // set for IndexMissing/IndexUnreadable/WithheldPrivate
 	Question string     `json:"question,omitempty"`
 	// RankingBasis states, in one sentence, how Score was computed --
 	// #1019's "the output must make the basis legible" requirement.
 	RankingBasis string  `json:"ranking_basis,omitempty"`
 	Matches      []Match `json:"matches,omitempty"`
-	// TotalMatched is every item that scored above zero, before the cap.
+	// TotalMatched is every PUBLISHABLE item that scored above zero
+	// (or, in private mode, every item regardless of Publishable),
+	// before the cap -- the same population Matches is drawn from.
 	TotalMatched int `json:"total_matched"`
 	// NotReturned is TotalMatched minus len(Matches) -- how many real
-	// matches this call did not show. Always stated, never implied.
+	// matches this call did not show because of the display cap. Always
+	// stated, never implied.
 	NotReturned int `json:"not_returned"`
+	// WithheldPrivate is how many otherwise-matching items were excluded
+	// because Item.Publishable is false and the caller did not ask for
+	// private material (agent-estate#1033) -- always 0 when
+	// PrivateIncluded is true, since nothing is withheld in that mode.
+	// Counted separately from NotReturned on purpose: one is "you asked
+	// to see fewer than matched", the other is "you were not shown this
+	// because it is private" -- collapsing them would hide the reason.
+	WithheldPrivate int `json:"withheld_private"`
+	// PrivateIncluded is true when this call was made with
+	// includePrivate -- the explicit, visible marker #1028's point 3
+	// asks for: a caller reading only this result (not the call site)
+	// can still tell private material may be present below.
+	PrivateIncluded bool `json:"private_included"`
 	// SourceStatuses carries the compiled index's own per-source
 	// OK/Reason forward unchanged -- #1019's third absence: a source
 	// that was unreadable when the index was BUILT (as opposed to no
@@ -179,14 +213,23 @@ const rankingBasisText = "score = count of distinct question terms " +
 
 // Query reads the compiled index at indexPath and returns a small,
 // ranked, cited set of items scored against question -- see QueryState
-// for the three ways this can come back empty without being the same
+// for the four ways this can come back empty without being the same
 // answer. limit <= 0 uses QueryLimit.
+//
+// PUBLISHABLE-ONLY BY DEFAULT (agent-estate#1033). includePrivate=false
+// (what every caller gets unless it explicitly asks otherwise) drops any
+// item with Publishable == false before it is ever scored into
+// TotalMatched or Matches -- a caller that asks for nothing special gets
+// nothing private, full stop. includePrivate=true lifts the filter and
+// sets PrivateIncluded on the result, so the private material is both
+// present AND visibly marked as present in the result itself, not just
+// selectable via a call-site flag nobody reading the output can see.
 //
 // NO SYNTHESIS: every returned Match is a pointer (id, source,
 // permalink, the item's own Tier1) copied verbatim from the index, never
 // summarised, reworded or generated -- see this package's own doc
 // comment on honest absence and #1019's "no fabrication" requirement.
-func Query(indexPath, question string, limit int) QueryResult {
+func Query(indexPath, question string, limit int, includePrivate bool) QueryResult {
 	if limit <= 0 {
 		limit = QueryLimit
 	}
@@ -210,6 +253,7 @@ func Query(indexPath, question string, limit int) QueryResult {
 		RankingBasis:     rankingBasisText,
 		SourceStatuses:   res.Sources,
 		IndexGeneratedAt: res.GeneratedAt,
+		PrivateIncluded:  includePrivate,
 	}
 
 	terms := queryTerms(question)
@@ -226,9 +270,14 @@ func Query(indexPath, question string, limit int) QueryResult {
 	}
 	required := requiredScore(terms)
 	var all []scored
+	withheldPrivate := 0
 	for _, it := range res.Items {
 		score, matched := scoreItem(it, terms)
 		if score < required {
+			continue
+		}
+		if !includePrivate && !it.Publishable {
+			withheldPrivate++
 			continue
 		}
 		all = append(all, scored{it, score, matched})
@@ -242,7 +291,18 @@ func Query(indexPath, question string, limit int) QueryResult {
 	})
 
 	out.TotalMatched = len(all)
+	out.WithheldPrivate = withheldPrivate
 	if len(all) == 0 {
+		if withheldPrivate > 0 {
+			// A real match existed -- it was simply private, and this
+			// call did not ask for private material. Distinct from
+			// StateNoMatch on purpose: see StateWithheldPrivate's own
+			// doc comment.
+			out.State = StateWithheldPrivate
+			out.Reason = fmt.Sprintf("%d item(s) matched but %s private -- rerun with --private to include them",
+				withheldPrivate, plural(withheldPrivate, "is", "are"))
+			return out
+		}
 		out.State = StateNoMatch
 		return out
 	}
@@ -260,19 +320,35 @@ func Query(indexPath, question string, limit int) QueryResult {
 			Tier1:        s.item.Tier1,
 			Score:        s.score,
 			MatchedTerms: s.matched,
+			Publishable:  s.item.Publishable,
 		})
 	}
 	out.NotReturned = out.TotalMatched - len(out.Matches)
 	return out
 }
 
+// plural picks singular or plural phrasing for a count without pulling
+// in a full pluralization dependency -- withheldPrivate's own message is
+// the only caller.
+func plural(n int, singular, pluralForm string) string {
+	if n == 1 {
+		return singular
+	}
+	return pluralForm
+}
+
 // Get looks up one item by its full id -- the second step of #1019's
 // progressive disclosure: Query returns pointers, Get returns the one
 // body a caller actually asked for (Tier1 + Tier2 + Tier3, still cited
 // by Source and Permalink, still nothing beyond what the index itself
-// stored). ok is false when the index couldn't be read or id matches
-// nothing in it; reason names which.
-func Get(indexPath, id string) (item Item, ok bool, reason string) {
+// stored). ok is false when the index couldn't be read, id matches
+// nothing in it, or (agent-estate#1033) the item is private and
+// includePrivate is false -- reason names which. Stable ids
+// (agent-estate#1032) made this last case necessary: a private item's id
+// can be written down and re-fetched later, so Query filtering Publishable
+// out of its own Matches is not enough on its own -- Get must refuse the
+// direct lookup too, or the filter is only cosmetic.
+func Get(indexPath, id string, includePrivate bool) (item Item, ok bool, reason string) {
 	res, err := Read(indexPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -282,6 +358,9 @@ func Get(indexPath, id string) (item Item, ok bool, reason string) {
 	}
 	for _, it := range res.Items {
 		if it.ID == id {
+			if !includePrivate && !it.Publishable {
+				return Item{}, false, fmt.Sprintf("item %s is private (%s) -- rerun with --private to fetch it", id, it.PublishBasis)
+			}
 			return it, true, ""
 		}
 	}

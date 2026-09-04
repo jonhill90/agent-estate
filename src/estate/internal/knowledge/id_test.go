@@ -100,7 +100,7 @@ func TestItemIDIsStableAcrossTwoGenerateCalls(t *testing.T) {
 	if err := Write(path, second); err != nil {
 		t.Fatal(err)
 	}
-	item, ok, reason := Get(path, star1.ID)
+	item, ok, reason := Get(path, star1.ID, false)
 	if !ok {
 		t.Fatalf("Get(%q) after regenerate ok=false, reason=%q", star1.ID, reason)
 	}
