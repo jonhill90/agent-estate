@@ -3,6 +3,7 @@ package ledger
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -84,3 +85,50 @@ func TestMissingLedgerInRealDirectoryIsAFirstRun(t *testing.T) {
 	}
 }
 
+
+// Phase is the join agent-estate#1012 needs: what actually ran, against what
+// we were trying to do. Empty must stay ABSENT on the wire -- a record
+// written before the field existed and a dispatch that named no phase are
+// the same absence, and neither may read back as a real phase.
+func TestPhaseRoundTripsAndOmitsWhenUnstated(t *testing.T) {
+	dir := t.TempDir()
+	l, err := Open(filepath.Join(dir, "ledger.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Append(Record{ID: "stated", State: Dispatched, Phase: "phase-3"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := l.Append(Record{ID: "unstated", State: Dispatched}); err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(filepath.Join(dir, "ledger.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(string(raw)), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("wrote %d line(s), want 2", len(lines))
+	}
+	if !strings.Contains(lines[0], `"phase":"phase-3"`) {
+		t.Errorf("stated phase did not reach the wire: %s", lines[0])
+	}
+	if strings.Contains(lines[1], `"phase"`) {
+		t.Errorf("an unstated phase was written as a value rather than omitted: %s", lines[1])
+	}
+
+	cur, err := l.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, r := range cur {
+		got[r.ID] = r.Phase
+	}
+	if got["stated"] != "phase-3" {
+		t.Errorf("read back phase %q, want phase-3", got["stated"])
+	}
+	if got["unstated"] != "" {
+		t.Errorf("read back phase %q for a record that stated none, want empty", got["unstated"])
+	}
+}

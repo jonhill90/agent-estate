@@ -145,6 +145,29 @@ type Record struct {
 	// Harness is what keeps a per-turn total from silently mixing the two.
 	// Empty on any record written before this field existed.
 	Harness string `json:"harness,omitempty"`
+	// Phase is which phase of docs/phase-plan.md this turn was dispatched
+	// against -- "phase-0", "phase-3" -- resolved by the estate from
+	// --phase=/$ESTATE_PHASE and CHECKED against the plan's own headings
+	// (internal/phaseplan) before the turn starts, exactly the path Harness
+	// takes from --harness=/$ESTATE_HARNESS through harness.Lookup. It is
+	// never read back off anything the agent said about itself, and never
+	// inferred later from the issue number or the shape of a record's other
+	// fields.
+	//
+	// WHY IT EXISTS (agent-estate#1012). Before this field, a grep for any
+	// phase-ish key across every ledger record returned nothing: the record
+	// of what ACTUALLY RAN could not be joined to the record of what we were
+	// trying to do, which is precisely the join "where are we" needs.
+	//
+	// EMPTY MEANS UNATTRIBUTED, NEVER "phase 0". A dispatch that named no
+	// phase leaves this empty, and every reader must say so as its own state
+	// -- see internal/status, which counts unattributed turns out loud rather
+	// than distributing them across phases. Defaulting an unstated phase to
+	// any real phase would fabricate exactly the attribution this field was
+	// added to measure, and would be indistinguishable from a stated one.
+	// Empty is also what every record written before this field existed
+	// carries, and those two absences are the same absence: nobody stated it.
+	Phase string `json:"phase,omitempty"`
 }
 
 // ModelSpend is one model's contribution within a turn's SpendByModel

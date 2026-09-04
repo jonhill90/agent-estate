@@ -273,6 +273,7 @@ describes the deleted shell supervisor). Be explicit about which you mean.
 | `estate pressure` | four gates: load/core, free RAM, lanes in flight, weekly budget |
 | `estate dispatch <issue> <brief-file>` | one agent turn as a subprocess, grounded in the corpus |
 | `estate tasks` / `inflight` | the append-only ledger (`$ESTATE_LEDGER`, default `~/.local/state/estate/ledger.jsonl`) |
+| `estate status` | "where are we": in-flight turns **with ages**, open PRs and issues, and phase progress derived from the plan's PR numbers against `git log origin/main` — never the plan's own status strings. Nothing cached; exit 1 means a source could not be read |
 | `estate merge <repo> <pr> <issue> <lane>` | checks green at head + reviewer ≠ author |
 | `estate corpus-audit` | parameters vs source prompts — **see the warning below** |
 

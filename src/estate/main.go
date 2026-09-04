@@ -30,6 +30,7 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/pressure"
 	"github.com/jonhill90/agent-estate/estate/internal/reclaim"
 	"github.com/jonhill90/agent-estate/estate/internal/spend"
+	"github.com/jonhill90/agent-estate/estate/internal/status"
 	"github.com/jonhill90/agent-estate/estate/internal/tick"
 	"github.com/jonhill90/agent-estate/estate/internal/verifybranch"
 )
@@ -223,10 +224,14 @@ func usage() {
 	fmt.Fprint(os.Stderr, `estate -- the supervisor
 
   estate pressure                       report whether the host can take work
-  estate dispatch [--harness=NAME] <issue> <brief-file>
+  estate dispatch [--harness=NAME] [--phase=phase-N] <issue> <brief-file>
                                         run one agent turn (role=author), gated and recorded.
                                         harness defaults to $ESTATE_HARNESS or "claude"; see
-                                        internal/harness for what's registered
+                                        internal/harness for what's registered.
+                                        phase defaults to $ESTATE_PHASE and is CHECKED against
+                                        docs/phase-plan.md's own headings -- an unknown phase
+                                        is refused, an unstated one is recorded as absent and
+                                        never guessed at
   estate dispatch [--harness=NAME] review <pr> <issue> <brief-file>
                                         run one review turn (role=reviewer) against a PR
   estate dispatch fix <pr> <issue> <brief-file>
@@ -245,6 +250,15 @@ func usage() {
   estate knowledge                      regenerate the compiled, read-only index over
                                          GitHub stars, the memory vault, the corpus and
                                          Loops-Research -- derived, never authoritative
+  estate status                         where are we? in-flight turns WITH AGES,
+                                        open PRs and issues, and phase progress
+                                        computed from the plan's own PR numbers
+                                        against main's history -- never from the
+                                        plan's hand-written status strings, one
+                                        of which was wrong at b45f917. Derived at
+                                        call time, nothing cached. Exit 1 means a
+                                        source could not be read and the report
+                                        is narrower than it looks
   estate tasks                          latest state of every task
   estate inflight                       tasks still occupying a slot
   estate reclaim [--apply]              report in-flight turns and whether their
@@ -430,6 +444,36 @@ func main() {
 			os.Exit(1)
 		}
 		fmt.Println("may merge: checks green at head, reviewer completed an independent review and approved at the current head")
+
+	case "status":
+		// One derived answer to "where are we" (agent-estate#1012). Four
+		// records exist -- corpus, forge, ledger, plan -- and none references
+		// another, so the question took four hand-stitched queries and kept
+		// being asked. Everything below is computed HERE, at call time, from
+		// the source that owns it; nothing is cached and nothing is written.
+		//
+		// The plan's own status strings are not an input. At b45f917 the plan
+		// said Phase 0 was "NOT ON MAIN" while `git log origin/main | grep -c
+		// '(#914)'` returned 1 -- three of its four strings right and one
+		// wrong, which reads as maintained. internal/phaseplan takes the PR
+		// NUMBERS out of those strings and this command asks git the rest.
+		rep := status.Build(status.Config{
+			Now:            time.Now(),
+			PlanPath:       "docs/phase-plan.md",
+			InFlight:       l.InFlight,
+			Current:        l.Current,
+			MergedPRs:      mergedPRs,
+			OpenPRs:        openPRs,
+			OpenIssues:     openIssues,
+			TickPhaseItems: func() ([]string, error) { return tick.PhaseItems(tick.Path()) },
+		})
+		status.Render(os.Stdout, rep)
+		if rep.Unresolved() > 0 {
+			// A report that could not ask must not exit like one that asked
+			// and found nothing -- the same fail-closed direction `estate
+			// knowledge` already takes on an unreadable source.
+			os.Exit(1)
+		}
 
 	case "tasks", "inflight":
 		var rs []ledger.Record
@@ -938,10 +982,22 @@ func main() {
 		if harnessName == "" {
 			harnessName = "claude"
 		}
+		// Which phase of docs/phase-plan.md this turn is being dispatched
+		// against. Same shape as --harness= exactly: a non-positional token,
+		// defaulting to an environment variable, resolved and CHECKED by the
+		// estate before the turn starts (agent-estate#1012 asks for this
+		// field to follow the path Harness and SessionID took, and this is
+		// that path). It differs from harness in one deliberate way -- it has
+		// no fallback value. An unstated phase is recorded absent; see below.
+		phaseName := os.Getenv("ESTATE_PHASE")
 		rest := make([]string, 0, len(os.Args)-2)
 		for _, a := range os.Args[2:] {
 			if strings.HasPrefix(a, "--harness=") {
 				harnessName = strings.TrimPrefix(a, "--harness=")
+				continue
+			}
+			if strings.HasPrefix(a, "--phase=") {
+				phaseName = strings.TrimPrefix(a, "--phase=")
 				continue
 			}
 			rest = append(rest, a)
@@ -1006,6 +1062,29 @@ func main() {
 		if ok, _ := harness.Available(harnessName); !ok {
 			fmt.Fprintf(os.Stderr, "estate: refusing to dispatch -- harness %q is registered but its binary is not on PATH\n", harnessName)
 			os.Exit(1)
+		}
+		// A stated phase must be one the plan actually names, checked here
+		// against the plan's own headings before anything else happens --
+		// the same rule `tick record` already applies to a tick's phase
+		// item, applied to the record of what RAN rather than only to the
+		// record of what was claimed. A typo (`ph` is in the tick log's
+		// history) is refused at write time rather than aggregated later.
+		//
+		// An UNSTATED phase is not defaulted. There is no honest fallback:
+		// picking one would fabricate an attribution indistinguishable from a
+		// real one, which is the whole defect ledger.Record.Phase exists to
+		// measure. It is recorded empty and `estate status` counts it as
+		// unattributed, out loud.
+		if phaseName != "" {
+			known, kerr := tick.KnownPhases("docs/phase-plan.md")
+			if kerr != nil {
+				fmt.Fprintln(os.Stderr, "estate: refusing to dispatch --", kerr)
+				os.Exit(1)
+			}
+			if perr := tick.CheckPhaseItem(phaseName, known); perr != nil {
+				fmt.Fprintln(os.Stderr, "estate: refusing to dispatch --", perr)
+				os.Exit(1)
+			}
 		}
 		brief, err := os.ReadFile(briefPath)
 		if err != nil {
@@ -1201,7 +1280,7 @@ func main() {
 		if err := cmd.Start(); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot start turn:", err)
 			mir.Close("failed", "the turn never started: "+err.Error())
-			if aerr := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Failed, Harness: harnessName, Note: "failed to start: " + err.Error()}); aerr != nil {
+			if aerr := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Failed, Harness: harnessName, Phase: phaseName, Note: "failed to start: " + err.Error()}); aerr != nil {
 				fmt.Fprintln(os.Stderr, "estate: cannot record dispatch failure:", aerr)
 			}
 			os.Exit(1)
@@ -1211,17 +1290,25 @@ func main() {
 		// anything else -- because it is the one fact that later lets a dead
 		// turn's slot be reclaimed without guessing. See internal/reclaim.
 		mir.Logf("turn started, pid %d -- this window mirrors its output and cannot affect it", pid)
-		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Dispatched, PID: pid, Harness: harnessName, Note: "worktree " + wt.Path}); err != nil {
+		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Dispatched, PID: pid, Harness: harnessName, Phase: phaseName, Note: "worktree " + wt.Path}); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot record dispatch:", err)
 			mir.Close("unknown", "the turn is running but the ledger could not record it: "+err.Error())
 			os.Exit(2)
 		}
-		fmt.Printf("dispatched %s (role=%s, harness=%s, pid=%d) in %s (grounded in %d operator parameters)\n", id, role, harnessName, pid, wt.Path, len(params))
+		phaseNote := phaseName
+		if phaseNote == "" {
+			// Said out loud, not left blank: an unattributed turn is one
+			// `estate status` will count against the completeness of every
+			// per-phase figure it prints, and the moment to notice that is
+			// while dispatching, not while reading the report.
+			phaseNote = "none stated -- this turn will be unattributed in `estate status`"
+		}
+		fmt.Printf("dispatched %s (role=%s, harness=%s, phase=%s, pid=%d) in %s (grounded in %d operator parameters)\n", id, role, harnessName, phaseNote, pid, wt.Path, len(params))
 
 		runErr := cmd.Wait()
 		out := stdout.Bytes()
 
-		rec := ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, PID: pid, Harness: harnessName}
+		rec := ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, PID: pid, Harness: harnessName, Phase: phaseName}
 		// Spend is read the same way Result is -- straight out of this exact
 		// subprocess's own stdout, whatever state the turn ends up recorded
 		// in below. A turn that timed out or exited non-zero may still have

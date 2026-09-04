@@ -24,9 +24,27 @@ docs/tui/       TUI design, with a verification banner on unchecked claims
 ```
 estate pressure                       can this host take more work?
 estate dispatch <issue> <brief-file>  run one agent turn, gated and recorded
+estate status                         where are we? derived, never stored
 estate tasks                          latest state of every task
 estate inflight                       tasks still occupying a slot
 ```
+
+`estate status` is the one answer to "where are we", computed at the moment it
+is asked from the records that already own each figure: in-flight turns **with
+ages** from the ledger, open pull requests and issues from the forge, and phase
+progress worked out by taking the pull request numbers `docs/phase-plan.md`
+names and asking `git log origin/main` whether they landed. It never reads that
+document's hand-written status strings — at `b45f917` three of the four were
+right and one was wrong, which reads as maintained and is worse than all four
+being wrong. Nothing is cached: a stored summary is the drift being fixed.
+Anything it could not read says so where the figure would have gone, and the
+command exits 1 rather than passing a narrowed report off as a complete one.
+
+A dispatch may state which phase it is for — `--phase=phase-3` or
+`$ESTATE_PHASE` — and the estate checks it against the plan's own headings
+before the turn starts, so a typo is refused rather than aggregated later. An
+unstated phase is recorded as absent and counted as unattributed; there is no
+default, because a guessed attribution is indistinguishable from a real one.
 
 An agent turn is a **subprocess** — `claude -p --output-format json` with the
 brief on stdin. Delivery is a process exit and a parsed result. Nothing is ever
