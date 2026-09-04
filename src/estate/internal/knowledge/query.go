@@ -171,6 +171,15 @@ type QueryResult struct {
 	// source failing at build time has nothing to do with whether this
 	// particular question happened to score anything.
 	Coverage Coverage `json:"coverage"`
+	// Contradictions flags a corpus-question and a vault-fact/corpus-
+	// directive that both landed in Matches on the same matched terms --
+	// agent-estate#1051. Deliberately NOT part of Coverage: see
+	// Contradiction's own doc comment (contradiction.go) for why this
+	// needed its own field rather than a new Coverage reason. Empty on
+	// every state Matches is empty on, and whenever no pair happens to
+	// share a term -- absence here is not itself evidence of agreement,
+	// only that this package's narrow, deterministic check found nothing.
+	Contradictions []Contradiction `json:"contradictions,omitempty"`
 }
 
 // CoverageState is the taxonomy for whether a QueryResult can be trusted
@@ -718,6 +727,7 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 		})
 	}
 	out.NotReturned = out.TotalMatched - len(out.Matches)
+	out.Contradictions = detectContradictions(out.Matches)
 	return out
 }
 
