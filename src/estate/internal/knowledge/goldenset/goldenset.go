@@ -56,6 +56,24 @@ var casesJSON []byte
 //go:embed natural_cases.json
 var naturalCasesJSON []byte
 
+// starCasesJSON is agent-estate#1111's own fixture: the github-stars
+// natural-language stratum. #1073's own natural-language stratum is
+// repo-docs only (TestNaturalCasesAreAllRepoDocs enforces it); #1063's
+// follow-on comment measured that repo-docs is only 23% of the public
+// store (118 of 509 items) and github-stars the other 77% (391 of 509),
+// so no number goldenquery printed before this fixture could move on a
+// github-stars regression. The eight cases here answer the same question
+// #1073 answers for repo-docs -- does a caller who does not already know
+// the answer land on it -- for the source that was previously invisible.
+// Targets were chosen from each starred repo's own description before
+// any query ran, same discipline as natural_cases.json and cases.json.
+// Kept as its own loader, not folded into LoadNatural, for the same
+// reason natural_cases.json is kept separate from cases.json: this
+// stratum must never be averaged with either of the other two.
+//
+//go:embed star_cases.json
+var starCasesJSON []byte
+
 // ExpectedSource names which of estate knowledge's five compiled sources
 // (or "none") a case's answer comes from -- see internal/knowledge's own
 // Item.Source values, which these mirror exactly except for "none".
@@ -109,6 +127,19 @@ func LoadNatural() ([]Case, error) {
 	var cases []Case
 	if err := json.Unmarshal(naturalCasesJSON, &cases); err != nil {
 		return nil, fmt.Errorf("goldenset: natural_cases.json is malformed: %w", err)
+	}
+	return cases, nil
+}
+
+// LoadStars parses the embedded star_cases.json -- the github-stars
+// natural-language stratum (agent-estate#1111). It only ever fails if
+// star_cases.json itself is malformed -- there is no filesystem path to
+// miss at runtime. Kept as a separate loader from both Load and
+// LoadNatural so this stratum's score is never averaged with either.
+func LoadStars() ([]Case, error) {
+	var cases []Case
+	if err := json.Unmarshal(starCasesJSON, &cases); err != nil {
+		return nil, fmt.Errorf("goldenset: star_cases.json is malformed: %w", err)
 	}
 	return cases, nil
 }

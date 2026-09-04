@@ -64,6 +64,18 @@
 // not move. Both lines print always; neither replaces or averages with
 // the other.
 //
+// agent-estate#1111: a FOURTH, separately labelled number reports
+// internal/knowledge/goldenset's github-stars stratum -- #1063's own
+// comment measured that repo-docs (#1073/#1077's own stratum) is only 23%
+// of the public store (118 of 509 items) and github-stars the other 77%
+// (391 of 509), so a github-stars regression moved none of the numbers
+// above it. Eight cases, each targeting a specific starred repo, chosen
+// from the repo's own description before any query ran, run unscoped
+// only in default (public) mode -- #1063's own comment measured that
+// source: scoping does not move this stratum, unlike repo-docs. This
+// number is never averaged with cases.json's, the repo-docs stratum's, or
+// the two mode scores below it.
+//
 // Usage:
 //
 //	go run ./cmd/goldenquery [-bin estate] [-v]
@@ -225,18 +237,20 @@ type naturalResult struct {
 }
 
 // scopedQuestion is agent-estate#1077's own primitive: it builds the
-// question text runNaturalStratum actually sends for one of its two runs
-// over the same fixture. Unscoped returns question unchanged; scoped
-// prepends "source:repo-docs " -- the same source: tag filter #1071/#1069
-// wired into Query, and the source every case in natural_cases.json
-// expects (goldenset.SourceRepoDocs). Kept as its own pure function, not
-// inlined into the loop, so the exact scoping behaviour is independently
-// testable without shelling out to a real binary.
-func scopedQuestion(question string, scoped bool) string {
+// question text runStratum actually sends for one of its runs over a
+// fixture. Unscoped returns question unchanged; scoped prepends
+// "source:<source> " -- the same source: tag filter #1071/#1069 wired
+// into Query. source names which source: tag to scope on -- generalised
+// in agent-estate#1111 from a hardcoded "repo-docs" so the same primitive
+// serves both the repo-docs stratum (#1073) and the github-stars stratum
+// (#1111) rather than being duplicated per source. Kept as its own pure
+// function, not inlined into the loop, so the exact scoping behaviour is
+// independently testable without shelling out to a real binary.
+func scopedQuestion(question, source string, scoped bool) string {
 	if !scoped {
 		return question
 	}
-	return "source:repo-docs " + question
+	return "source:" + source + " " + question
 }
 
 // runNaturalStratum runs agent-estate#1073's checked-in natural-language
@@ -260,15 +274,44 @@ func runNaturalStratum(w *bufio.Writer, bin string, verbose bool, scoped bool) (
 		fmt.Fprintln(w, "goldenquery: natural-language stratum:", err)
 		return 0, 0, 0, false
 	}
-
 	label := "unscoped"
 	if scoped {
 		label = "scoped, source:repo-docs prepended -- agent-estate#1077"
 	}
 	fmt.Fprintf(w, "=== natural-language stratum (default/public, %s -- agent-estate#1073) ===\n", label)
+	return runStratum(w, bin, verbose, scoped, cases, "repo-docs")
+}
+
+// runStarStratum runs agent-estate#1111's checked-in github-stars
+// natural-language fixture (internal/knowledge/goldenset.LoadStars) once
+// per case, in default (public) mode only -- same discipline as
+// runNaturalStratum: never --private, and never merged with any other
+// stratum's own score. #1063's own comment measured that scoping "bought
+// stars nothing" (7/8 -> 7/8, against repo-docs' 4/12 -> 8/12), so unlike
+// the repo-docs stratum this one is run unscoped only -- a scoped run
+// would print a second number this issue's own evidence says will not
+// move, and goldenquery prints one line for this stratum, not four.
+func runStarStratum(w *bufio.Writer, bin string, verbose bool) (top3Hits, top10Hits, total int, ranAtLeastOne bool) {
+	cases, err := goldenset.LoadStars()
+	if err != nil {
+		fmt.Fprintln(w, "goldenquery: github-stars stratum:", err)
+		return 0, 0, 0, false
+	}
+	fmt.Fprintln(w, "=== github-stars stratum (default/public, unscoped -- agent-estate#1111) ===")
+	return runStratum(w, bin, verbose, false, cases, "github-stars")
+}
+
+// runStratum is the shared run loop behind runNaturalStratum and
+// runStarStratum (generalised in agent-estate#1111 from runNaturalStratum's
+// original repo-docs-only body): it runs every case in cases once, in
+// default (public) mode only, scoping each question's source: tag to
+// sourceTag when scoped is set, and returns the resulting top-3/top-10 hit
+// counts. Neither caller reuses the other's result, and neither result is
+// ever averaged with cases.json's or any other stratum's own score.
+func runStratum(w *bufio.Writer, bin string, verbose bool, scoped bool, cases []goldenset.Case, sourceTag string) (top3Hits, top10Hits, total int, ranAtLeastOne bool) {
 	var results []naturalResult
 	for _, c := range cases {
-		stdout, exitCode, err := runQuery(bin, scopedQuestion(c.Question, scoped), false)
+		stdout, exitCode, err := runQuery(bin, scopedQuestion(c.Question, sourceTag, scoped), false)
 		if err != nil {
 			results = append(results, naturalResult{c: c})
 			fmt.Fprintf(w, "[ERROR] %s -- %q: %s\n\n", c.ID, c.Question, err)
@@ -409,7 +452,15 @@ func main() {
 	nlScopedTop3, nlScopedTop10, nlScopedTotal, ranNaturalScoped := runNaturalStratum(w, *bin, *verbose, true)
 	ranNatural := ranNaturalUnscoped || ranNaturalScoped
 
-	if !ranPrivate && !ranPub && !ranNatural {
+	// agent-estate#1111: the github-stars stratum is the complement of
+	// #1073's repo-docs-only one -- #1063's own comment measured that
+	// repo-docs is 23% of the public store and github-stars the other
+	// 77%, invisible to every number above until this fixture. Reported
+	// on its own, never averaged with cases.json's or the repo-docs
+	// stratum's own numbers (see runStarStratum's own doc comment).
+	starTop3, starTop10, starTotal, ranStars := runStarStratum(w, *bin, *verbose)
+
+	if !ranPrivate && !ranPub && !ranNatural && !ranStars {
 		fmt.Fprintln(w, "goldenquery: could not run any case -- is the estate binary on PATH, and has `estate knowledge` been run to compile the index?")
 		w.Flush()
 		os.Exit(2)
@@ -428,5 +479,13 @@ func main() {
 	fmt.Fprintf(w, "natural-language stratum, top-10 (default/public, scoped source:repo-docs -- #1077):                                    %d/%d\n", nlScopedTop10, nlScopedTotal)
 	fmt.Fprintf(w, "retrieval score (private, comparable to the 12/15 baseline on 6f28626): %d/%d\n", privateHits, privateTotal)
 	fmt.Fprintf(w, "publishable-only score (default, what a caller who may not see private material can find): %d/%d\n", pubHits, pubTotal)
+	// agent-estate#1111: the github-stars stratum's own line -- a stratum
+	// this runner could not previously print at all. Never averaged with
+	// the two lines above it: top-3 and top-10 are printed together on
+	// one line here, unlike the repo-docs stratum's four, because #1063's
+	// own comment measured that scoping does not move this stratum (see
+	// runStarStratum's doc comment) and this issue adds measurement, not
+	// a second scoped run to go with it.
+	fmt.Fprintf(w, "github-stars stratum (default/public, unscoped -- #1111, agent-estate#1063's own measured baseline top-3(@5) 7/8, top-10 8/8 by hand): top-3 %d/%d, top-10 %d/%d\n", starTop3, starTotal, starTop10, starTotal)
 	w.Flush()
 }

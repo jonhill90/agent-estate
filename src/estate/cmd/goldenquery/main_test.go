@@ -115,7 +115,7 @@ func TestFirstMatchRankZeroWhenNeverReturned(t *testing.T) {
 // once it's added.
 
 func TestScopedQuestionLeavesQuestionUnchangedWhenUnscoped(t *testing.T) {
-	got := scopedQuestion("how do I merge a pull request in this repo", false)
+	got := scopedQuestion("how do I merge a pull request in this repo", "repo-docs", false)
 	want := "how do I merge a pull request in this repo"
 	if got != want {
 		t.Fatalf("scopedQuestion(unscoped) = %q, want %q", got, want)
@@ -123,9 +123,22 @@ func TestScopedQuestionLeavesQuestionUnchangedWhenUnscoped(t *testing.T) {
 }
 
 func TestScopedQuestionPrependsSourceRepoDocsWhenScoped(t *testing.T) {
-	got := scopedQuestion("how do I merge a pull request in this repo", true)
+	got := scopedQuestion("how do I merge a pull request in this repo", "repo-docs", true)
 	want := "source:repo-docs how do I merge a pull request in this repo"
 	if got != want {
 		t.Fatalf("scopedQuestion(scoped) = %q, want %q", got, want)
+	}
+}
+
+// agent-estate#1111: scopedQuestion's source parameter is what lets the
+// same primitive serve the github-stars stratum, not just repo-docs --
+// this case fails against the parent commit, where the parameter does not
+// exist and the tag is hardcoded to "repo-docs".
+
+func TestScopedQuestionPrependsGivenSourceWhenScoped(t *testing.T) {
+	got := scopedQuestion("which starred repo does X", "github-stars", true)
+	want := "source:github-stars which starred repo does X"
+	if got != want {
+		t.Fatalf("scopedQuestion(scoped, github-stars) = %q, want %q", got, want)
 	}
 }
