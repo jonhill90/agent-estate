@@ -393,3 +393,168 @@ func TestGetPrivateModeReturnsPrivateItem(t *testing.T) {
 		t.Error("fetched item's own Publishable field reads true for a private fixture item")
 	}
 }
+
+// tagFilterIndex reproduces agent-estate#1024's own measured shape at
+// small scale: several items carry a status: tag (most status:open,
+// exactly one status:needs_review), and one item's own PROSE happens to
+// contain the words "status" and "open" without ever carrying the tag --
+// the exact false-positive #1024 measured against the real index
+// (loop_test_harnesses=copilot,pi, "matched 'status' and 'open'" as bare
+// terms). A correct exact-tag filter returns only the status:open items;
+// the unrelated term-matching prose item must never appear.
+func tagFilterIndex(t *testing.T) string {
+	t.Helper()
+	res := Result{
+		GeneratedAt:   time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
+		StalenessRule: stalenessRule,
+		Note:          derivedNote,
+		Items: []Item{
+			{
+				ID: "20260903140000", Source: "corpus-parameter",
+				Permalink:      "corpus:item:9101",
+				StructuralTags: []string{"weight:hard", "status:open"},
+				Tier1:          "open question: which storage format replaces index.json",
+				Publishable:    false, PublishBasis: "corpus-parameter: source defaults to private",
+			},
+			{
+				ID: "20260903140001", Source: "corpus-parameter",
+				Permalink:      "corpus:item:9102",
+				StructuralTags: []string{"weight:hard", "status:open"},
+				Tier1:          "open question: which harness handles the web upload path",
+				Publishable:    false, PublishBasis: "corpus-parameter: source defaults to private",
+			},
+			{
+				ID: "20260903140002", Source: "corpus-parameter",
+				Permalink:      "corpus:item:9103",
+				StructuralTags: []string{"weight:hard", "status:needs_review"},
+				Tier1:          "needs review: retire the shell fallback",
+				Publishable:    false, PublishBasis: "corpus-parameter: source defaults to private",
+			},
+			{
+				ID: "20260903140003", Source: "corpus-parameter",
+				Permalink:   "corpus:item:9104",
+				Tier1:       "loop_test_harnesses=copilot,pi -- the parameter's own status is open for review",
+				Publishable: false, PublishBasis: "corpus-parameter: source defaults to private",
+			},
+			{
+				// A tag that carries "status:open" as a SUBSTRING of a
+				// longer, different tag, never as the tag itself. An
+				// exact filter must reject this; a substring-matching
+				// filter (the mutation this file's own test guards
+				// against) would wrongly accept it.
+				ID: "20260903140004", Source: "corpus-parameter",
+				Permalink:      "corpus:item:9105",
+				StructuralTags: []string{"weight:hard", "status:open_pending_migration"},
+				Tier1:          "a different, longer-named status that merely starts with status:open",
+				Publishable:    false, PublishBasis: "corpus-parameter: source defaults to private",
+			},
+		},
+	}
+	path := filepath.Join(t.TempDir(), "index.json")
+	if err := Write(path, res); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestQueryExactTagFilterExcludesTermCoincidence is #1024's own reported
+// defect, reproduced: "status:open" as a bare term search matches every
+// item carrying ANY status: tag plus any item whose prose merely contains
+// "status" and "open" as separate words; the exact-tag filter must return
+// only the two items genuinely carrying the exact tag status:open.
+func TestQueryExactTagFilterExcludesTermCoincidence(t *testing.T) {
+	path := tagFilterIndex(t)
+	got := Query(path, "status:open", 0, true)
+
+	if got.State != StateMatched {
+		t.Fatalf("State = %q, want %q (reason=%q)", got.State, StateMatched, got.Reason)
+	}
+	if got.TotalMatched != 2 {
+		t.Fatalf("TotalMatched = %d, want 2 (exactly the status:open items)", got.TotalMatched)
+	}
+	seen := map[string]bool{}
+	for _, m := range got.Matches {
+		seen[m.ID] = true
+	}
+	if !seen["20260903140000"] || !seen["20260903140001"] {
+		t.Fatalf("Matches = %+v, want both status:open items", got.Matches)
+	}
+	if seen["20260903140002"] {
+		t.Fatal("status:needs_review item matched a status:open filter")
+	}
+	if seen["20260903140003"] {
+		t.Fatal("the term-coincidence item (prose contains \"status\" and \"open\" but carries no status: tag) was returned")
+	}
+	if seen["20260903140004"] {
+		t.Fatal("an item tagged status:open_pending_migration (status:open as a SUBSTRING, not the tag itself) was returned -- filter is not exact")
+	}
+	if len(got.TagFilters) != 1 || got.TagFilters[0] != "status:open" {
+		t.Fatalf("TagFilters = %+v, want [status:open]", got.TagFilters)
+	}
+}
+
+// TestQueryTagFilterAloneWithNoQuestionIsLegal covers #1024's explicit
+// requirement: "list everything tagged status:open" (a filter with no
+// question terms at all) must be a real, legal query, not routed into the
+// "no scoreable terms" no_match path a term-only empty question hits.
+func TestQueryTagFilterAloneWithNoQuestionIsLegal(t *testing.T) {
+	path := tagFilterIndex(t)
+	got := Query(path, "status:open", 0, true)
+	if got.State != StateMatched {
+		t.Fatalf("State = %q, want %q -- a tag filter alone must be a legal query", got.State, StateMatched)
+	}
+}
+
+// TestQueryTagFilterDefaultModeWithholdsPrivateMatches is #1024's own
+// composition requirement: the real corpus's status:open items are
+// private (corpus-parameter defaults to private), so a default-mode tag
+// query must report StateWithheldPrivate ("something matched, you may
+// not see it"), never StateNoMatch ("nothing matched") and never a
+// weakened filter that shows them anyway.
+func TestQueryTagFilterDefaultModeWithholdsPrivateMatches(t *testing.T) {
+	path := tagFilterIndex(t)
+	got := Query(path, "status:open", 0, false)
+	if got.State != StateWithheldPrivate {
+		t.Fatalf("State = %q, want %q (reason=%q)", got.State, StateWithheldPrivate, got.Reason)
+	}
+	if got.WithheldPrivate != 2 {
+		t.Fatalf("WithheldPrivate = %d, want 2", got.WithheldPrivate)
+	}
+	if len(got.Matches) != 0 {
+		t.Fatalf("Matches = %+v, want none in default mode", got.Matches)
+	}
+}
+
+// TestQueryUnknownTagFilterIsNoMatchNotError is #1024's explicit rule: an
+// unrecognised tag must report StateNoMatch with a reason naming it,
+// never silently fall through to scoring the whole index (which would
+// look identical to a real, well-formed answer) and never a Go error.
+func TestQueryUnknownTagFilterIsNoMatchNotError(t *testing.T) {
+	path := tagFilterIndex(t)
+	got := Query(path, "status:nonexistentbogus", 0, true)
+	if got.State != StateNoMatch {
+		t.Fatalf("State = %q, want %q", got.State, StateNoMatch)
+	}
+	if got.Reason == "" {
+		t.Error("Reason is empty on an unknown-tag no_match")
+	}
+	if len(got.Matches) != 0 {
+		t.Fatalf("Matches = %+v, want none for an unknown tag", got.Matches)
+	}
+}
+
+// TestQueryTagFilterComposesWithQuestionTerms proves "filter first, rank
+// within": a tag filter combined with question terms narrows to the
+// tagged population, then ranks only inside it -- an item carrying the
+// tag but not matching the terms is excluded exactly like ordinary term
+// scoring already excludes non-matching items.
+func TestQueryTagFilterComposesWithQuestionTerms(t *testing.T) {
+	path := tagFilterIndex(t)
+	got := Query(path, "status:open storage format", 0, true)
+	if got.State != StateMatched {
+		t.Fatalf("State = %q, want %q (reason=%q)", got.State, StateMatched, got.Reason)
+	}
+	if got.TotalMatched != 1 || len(got.Matches) != 1 || got.Matches[0].ID != "20260903140000" {
+		t.Fatalf("Matches = %+v, want just the storage-format item", got.Matches)
+	}
+}

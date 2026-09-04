@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"sort"
 	"strings"
 	"time"
@@ -86,6 +87,13 @@ type QueryResult struct {
 	State    QueryState `json:"state"`
 	Reason   string     `json:"reason,omitempty"` // set for IndexMissing/IndexUnreadable/WithheldPrivate
 	Question string     `json:"question,omitempty"`
+	// TagFilters is the set of exact structural/synaptic tags extracted
+	// from Question and applied BEFORE term scoring (agent-estate#1024)
+	// -- "status:open" filters to items carrying that exact tag, never
+	// items whose text merely contains "status" and "open" as separate
+	// words. Always states what was applied, even when empty, so a
+	// reader of the result never has to guess whether tag filtering ran.
+	TagFilters []string `json:"tag_filters,omitempty"`
 	// RankingBasis states, in one sentence, how Score was computed --
 	// #1019's "the output must make the basis legible" requirement.
 	RankingBasis string  `json:"ranking_basis,omitempty"`
@@ -204,6 +212,103 @@ func requiredScore(terms []string) int {
 	return minMatchedTerms
 }
 
+// tagFilterPattern matches one whitespace-delimited token shaped like an
+// exact structural/synaptic tag -- "status:open", "weight:hard": a single
+// colon, letters/digits/underscore/hyphen on the key side, letters/digits/
+// underscore/dot/hyphen on the value side, and nothing else in the token.
+// A URL ("https://x") never matches -- the character right after the
+// colon in a URL is "/", which this pattern's value-side class excludes --
+// so an ordinary question is never misread as carrying a tag filter it
+// didn't intend. This is deliberately the SAME "key:value" shape every
+// tag in this package is actually written in (corpus.go's weight:/status:,
+// the only colon-shaped tags this index produces today) -- see
+// extractTagFilters's own doc comment for why a bare word is never treated
+// as a tag filter even though bare tags exist (vault.go's f.Type,
+// stars.go's "github-stars").
+var tagFilterPattern = regexp.MustCompile(`^[A-Za-z][A-Za-z0-9_-]*:[A-Za-z0-9][A-Za-z0-9_.-]*$`)
+
+// extractTagFilters splits a raw question into its exact-tag-filter tokens
+// and everything else (agent-estate#1024). Composable and orthogonal to
+// term search on purpose: "status:open auth tokens" filters to items
+// carrying the exact tag status:open, then ranks by ordinary term overlap
+// ONLY among that filtered set -- "filter first, rank within" from the
+// issue. Tags are returned lowercased (comparison is case-insensitive,
+// matching searchableText's own lowering); a bare word with no colon
+// (e.g. "github-stars", a real structural tag with no key:value shape) is
+// deliberately left in the remaining question and scored as an ordinary
+// term instead of being treated as an exact filter -- this issue asks
+// specifically for "status:open means the 54, not the 1,230", not for
+// every bare structural tag to become filterable, and doing the latter
+// would make an ordinary word like "auth" (which is never a whole tag on
+// its own) ambiguous with a real one.
+func extractTagFilters(question string) (tags []string, remaining string) {
+	fields := strings.Fields(question)
+	var rest []string
+	seen := map[string]bool{}
+	for _, f := range fields {
+		if tagFilterPattern.MatchString(f) {
+			lower := strings.ToLower(f)
+			if !seen[lower] {
+				seen[lower] = true
+				tags = append(tags, lower)
+			}
+			continue
+		}
+		rest = append(rest, f)
+	}
+	return tags, strings.Join(rest, " ")
+}
+
+// knownTags is the lowercased vocabulary of every structural or synaptic
+// tag ANY item in the index carries, regardless of that item's own
+// Publishable value -- extractTagFilters's output is checked against this
+// so a filter naming a tag nothing in the index has ever carried reports
+// StateNoMatch honestly instead of silently returning zero items in the
+// exact shape a real, empty, well-formed query also produces
+// (agent-estate#1024: "an unknown tag is no_match, not an error, and
+// never silently ignored"). Checked against the FULL item set, private
+// items included, so a tag that exists only on private items is still
+// "known" -- the privacy filter downstream is what turns that into
+// StateWithheldPrivate, not this function turning it into a false
+// StateNoMatch.
+func knownTags(items []Item) map[string]bool {
+	known := map[string]bool{}
+	for _, it := range items {
+		for _, t := range it.StructuralTags {
+			known[strings.ToLower(t)] = true
+		}
+		for _, t := range it.SynapticTags {
+			known[strings.ToLower(t)] = true
+		}
+	}
+	return known
+}
+
+// itemHasAllTags reports whether it carries EVERY one of tags (already
+// lowercased) as a whole, exact structural or synaptic tag -- never a
+// substring match, which is what term scoring already does elsewhere in
+// this file and what this filter exists to be orthogonal to. len(tags)==0
+// (no tag filter in the question) always passes, so this is a no-op for
+// every question this issue's filter doesn't change.
+func itemHasAllTags(it Item, tags []string) bool {
+	if len(tags) == 0 {
+		return true
+	}
+	have := map[string]bool{}
+	for _, t := range it.StructuralTags {
+		have[strings.ToLower(t)] = true
+	}
+	for _, t := range it.SynapticTags {
+		have[strings.ToLower(t)] = true
+	}
+	for _, t := range tags {
+		if !have[t] {
+			return false
+		}
+	}
+	return true
+}
+
 const rankingBasisText = "score = count of distinct question terms " +
 	"(stop words and words of length <=2 removed) found as a substring " +
 	"of the item's own tier1, tier2, structural_tags or synaptic_tags; " +
@@ -256,11 +361,36 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 		PrivateIncluded:  includePrivate,
 	}
 
-	terms := queryTerms(question)
-	if len(terms) == 0 {
+	tagFilters, remainingQuestion := extractTagFilters(question)
+	out.TagFilters = tagFilters
+	terms := queryTerms(remainingQuestion)
+	if len(terms) == 0 && len(tagFilters) == 0 {
 		out.State = StateNoMatch
 		out.Reason = "question contained no scoreable terms after stop-word removal"
 		return out
+	}
+
+	if len(tagFilters) > 0 {
+		known := knownTags(res.Items)
+		var unknown []string
+		for _, tf := range tagFilters {
+			if !known[tf] {
+				unknown = append(unknown, tf)
+			}
+		}
+		if len(unknown) > 0 {
+			// Silently dropping an unrecognised filter would fall through
+			// to scoring the whole index and look like a real answer --
+			// #1024 is explicit this must be its own honest no_match
+			// instead, exactly like StateIndexMissing/StateNoMatch never
+			// collapsing into each other elsewhere in this file.
+			out.State = StateNoMatch
+			out.Reason = fmt.Sprintf("unknown tag(s): %s -- not present in the compiled index",
+				strings.Join(unknown, ", "))
+			return out
+		}
+		out.RankingBasis += fmt.Sprintf("; filtered first to items carrying the exact tag(s) %s, ranked only within that set",
+			strings.Join(tagFilters, ", "))
 	}
 
 	type scored struct {
@@ -272,6 +402,9 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 	var all []scored
 	withheldPrivate := 0
 	for _, it := range res.Items {
+		if !itemHasAllTags(it, tagFilters) {
+			continue
+		}
 		score, matched := scoreItem(it, terms)
 		if score < required {
 			continue
