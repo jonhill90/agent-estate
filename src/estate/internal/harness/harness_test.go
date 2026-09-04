@@ -3,6 +3,7 @@ package harness
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -365,5 +366,27 @@ func TestCleanupRemovesWhatStartAllocated(t *testing.T) {
 	turn.Cleanup()
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Errorf("Cleanup left %s behind", path)
+	}
+}
+
+// The flag whose ABSENCE cost $108. Tested in both directions: the default
+// must be sonnet, and an override must be honoured -- a test that only
+// checked "some model is passed" would have passed against the broken code
+// too, since the bug was the flag not existing at all.
+func TestClaudeDispatchAlwaysPinsAModel(t *testing.T) {
+	t.Setenv("ESTATE_WORKER_MODEL", "")
+	got := claudeArgs()
+	if !slices.Contains(got, "--model") {
+		t.Fatalf("dispatch passes no --model; a worker inherits the dispatching session's model (opus). args=%v", got)
+	}
+	i := slices.Index(got, "--model")
+	if i+1 >= len(got) || got[i+1] != "claude-sonnet-5" {
+		t.Fatalf("default worker model must be sonnet per worker_model=sonnet; got %v", got)
+	}
+	t.Setenv("ESTATE_WORKER_MODEL", "claude-haiku-4-5")
+	got = claudeArgs()
+	i = slices.Index(got, "--model")
+	if got[i+1] != "claude-haiku-4-5" {
+		t.Fatalf("ESTATE_WORKER_MODEL must override the default; got %v", got)
 	}
 }

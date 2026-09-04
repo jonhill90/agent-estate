@@ -175,8 +175,14 @@ func (claude) Name() string { return "claude" }
 func (claude) Sandboxed() bool { return false }
 
 func (claude) Start(ctx context.Context, dir, prompt string) (*Turn, error) {
-	cmd := exec.CommandContext(ctx, "claude", "-p", "--output-format", "json",
-		"--dangerously-skip-permissions")
+	// --model is REQUIRED, not optional. Without it a dispatched worker
+	// inherits whatever model the dispatching session runs, which is opus.
+	// Jon's parameter is worker_model=sonnet and it went unenforced for the
+	// life of this estate: 28 of 102 measured turns ran claude-opus-5[1m] and
+	// took $108.18 of $144.36 -- 75% of all spend -- doing work sonnet was
+	// chosen for. The flag was simply absent; nothing overrode it, nothing
+	// logged it, and the cost looked like ordinary usage.
+	cmd := exec.CommandContext(ctx, "claude", claudeArgs()...)
 	cmd.Dir = dir
 	cmd.Stdin = strings.NewReader(prompt)
 	return &Turn{
@@ -410,4 +416,13 @@ func codexSessionID(stdout []byte) (string, error) {
 		}
 	}
 	return "", fmt.Errorf("codex: no thread.started event with a thread_id found in --json output")
+}
+
+// claudeArgs is split out so the model pin is testable without running a turn.
+func claudeArgs() []string {
+	model := os.Getenv("ESTATE_WORKER_MODEL")
+	if model == "" {
+		model = "claude-sonnet-5"
+	}
+	return []string{"-p", "--output-format", "json", "--model", model, "--dangerously-skip-permissions"}
 }
