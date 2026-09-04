@@ -129,6 +129,42 @@ rejected: "there is nothing" and "there is something you may not see" are
 different answers a script branching on `$?` needs to tell apart
 (agent-estate#1037).
 
+**A fifth situation hides inside `no_match` itself: an empty index.** An
+index that is present, valid, readable and fresh but carries zero `items` — a
+truncated or partial write, a full disk, an interrupted regeneration (#1123
+narrowed how this happens but did not close it) — reads exactly like
+`no_match` against a real, populated index that genuinely has nothing
+relevant, unless something says otherwise. Both are honestly `no_match` (the
+index *was* read fine, which is what that exit code already means) — this is
+not a sixth state or a new exit code — but the two remedies are opposite:
+rephrase the question, or regenerate a broken index. Every `QueryResult`
+therefore carries `index_item_count` (the compiled index's own `len(items)`,
+set on every state a real index was read for), and prose mode always prints
+`index contains N item(s)` on a `no_match` result. Only the empty-index case
+also gets a `reason` naming the difference explicitly — the ordinary
+"nothing scored" shape against a genuinely non-empty index is unchanged by
+this and still prints no reason, on purpose (agent-estate#1124's own issue
+scoped the fix to the empty case, not to every `no_match`):
+
+```
+no item matches "zzqxwv qrtplm bnkdfz"
+the compiled index at /path/to/index.json contains 0 items -- it was read
+successfully but has nothing to answer with; this is a build defect
+(truncated write, full disk, interrupted regeneration), not a phrasing
+problem -- regenerate it with `estate knowledge`, do not just rephrase
+the question
+index contains 0 item(s)
+```
+
+against a real index's genuine miss:
+
+```
+no item matches "zzqxwv qrtplm bnkdfz"
+index contains 3959 item(s)
+```
+
+(agent-estate#1124)
+
 ## What does the `coverage` field mean, and what should I do about each value?
 
 Every successfully-read `QueryResult` — including a `no_match` one — carries

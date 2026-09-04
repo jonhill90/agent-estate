@@ -183,6 +183,74 @@ func TestQueryZeroOverlapIsStillNoMatch(t *testing.T) {
 	}
 }
 
+// TestQueryEmptyIndexIsDistinctFromGenuineNoMatch is agent-estate#1124: an
+// index that is present, valid, readable and fresh but carries zero items
+// must not answer identically to a real, populated index that genuinely
+// has nothing relevant to the same question. Both are StateNoMatch (the
+// index WAS read fine in both cases -- that is exactly what StateNoMatch
+// means), but IndexItemCount and Reason must differ, because the remedies
+// are opposite: rephrase the question, or regenerate a broken index. A
+// caller reading only the printed "no item matches" line with nothing
+// else could not otherwise tell the two apart.
+func TestQueryEmptyIndexIsDistinctFromGenuineNoMatch(t *testing.T) {
+	emptyPath := filepath.Join(t.TempDir(), "empty-index.json")
+	if err := Write(emptyPath, Result{
+		GeneratedAt:   time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
+		StalenessRule: stalenessRule,
+		Note:          derivedNote,
+		Sources: []SourceResult{
+			{Name: "vault-facts", OK: true, Count: 0},
+		},
+		Items: nil,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	const question = "zzqxwv qrtplm bnkdfz"
+	emptyGot := Query(emptyPath, question, 0, false)
+	realGot := Query(writeTestIndex(t), question, 0, false)
+
+	if emptyGot.State != StateNoMatch {
+		t.Fatalf("empty index: State = %q, want %q", emptyGot.State, StateNoMatch)
+	}
+	if realGot.State != StateNoMatch {
+		t.Fatalf("real index: State = %q, want %q", realGot.State, StateNoMatch)
+	}
+
+	if emptyGot.IndexItemCount != 0 {
+		t.Errorf("empty index: IndexItemCount = %d, want 0", emptyGot.IndexItemCount)
+	}
+	if realGot.IndexItemCount == 0 {
+		t.Errorf("real index: IndexItemCount = 0, want > 0 (real index has items)")
+	}
+
+	if emptyGot.Reason == "" {
+		t.Error("empty index: Reason is empty -- an empty index must say so, not answer silently")
+	}
+	if emptyGot.Reason == realGot.Reason {
+		t.Fatalf("empty index and real-but-unmatched index produced the SAME reason %q -- the two must be distinguishable", emptyGot.Reason)
+	}
+}
+
+// TestQueryOrdinaryNoMatchReasonIsUnchanged locks in the deliberate scope
+// decision behind #1124: the ordinary "nothing scored" no_match shape (a
+// real, non-empty index that genuinely has nothing relevant) keeps
+// whatever Reason it had before this issue -- empty, today -- because the
+// issue asks only that an EMPTY index be distinguishable from a genuine
+// no_match, not that every no_match gain new prose. Widening this was
+// flagged explicitly as a separate decision (see query.go's own comment
+// at the empty-index branch); this test is what would catch that
+// widening happening by accident in a future edit.
+func TestQueryOrdinaryNoMatchReasonIsUnchanged(t *testing.T) {
+	got := Query(writeTestIndex(t), "zzqxwv qrtplm bnkdfz", 0, false)
+	if got.State != StateNoMatch {
+		t.Fatalf("State = %q, want %q", got.State, StateNoMatch)
+	}
+	if got.Reason != "" {
+		t.Errorf("Reason = %q, want empty -- ordinary no_match against a non-empty index is unchanged by #1124", got.Reason)
+	}
+}
+
 // TestQueryNoHardFloorASingleSharedTermStillSurfaces is agent-estate#1026's
 // none-01 shape (a five-term question sharing one generic word with an
 // unrelated item), but proves the OPPOSITE of what the retired

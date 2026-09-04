@@ -180,6 +180,20 @@ type QueryResult struct {
 	// share a term -- absence here is not itself evidence of agreement,
 	// only that this package's narrow, deterministic check found nothing.
 	Contradictions []Contradiction `json:"contradictions,omitempty"`
+	// IndexItemCount is len(items) in the successfully-read compiled
+	// index, set on every state Read succeeded on (every state except
+	// StateIndexMissing/StateIndexUnreadable, where there was no index to
+	// count) -- agent-estate#1124. Without this, "no item matches the
+	// question" against a valid-but-EMPTY index (a truncated or partial
+	// write, a full disk, an interrupted regeneration -- #1123 narrowed
+	// how this happens but did not close it) is byte-identical to the
+	// same message against a real, populated index that genuinely has
+	// nothing relevant: both are StateNoMatch, both mean "the index was
+	// read fine", and a caller told "no match" cannot tell "rephrase your
+	// question" from "your index is broken, regenerate it" without this
+	// number. Always present (even 0) so a caller never has to
+	// special-case "count omitted means zero".
+	IndexItemCount int `json:"index_item_count"`
 }
 
 // CoverageState is the taxonomy for whether a QueryResult can be trusted
@@ -686,6 +700,11 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 		// build time is reported regardless of whether this particular
 		// question goes on to match anything (agent-estate#1058).
 		Coverage: coverageFromSources(res.Sources),
+		// Set before any early return below, same reasoning as Coverage
+		// above -- agent-estate#1124 needs this on every no_match shape
+		// this function can return, not just the term-scoring one at the
+		// bottom.
+		IndexItemCount: len(res.Items),
 	}
 
 	tagFilters, remainingQuestion := extractTagFilters(question)
@@ -779,6 +798,22 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 			return out
 		}
 		out.State = StateNoMatch
+		if len(res.Items) == 0 {
+			// Distinct from the ordinary "nothing scored" shape just below
+			// this block (which deliberately keeps Reason empty, as it
+			// does today -- agent-estate#1124's own issue narrows the fix
+			// to the empty-index case specifically and flags widening
+			// ordinary no_match as a separate decision, not implied by
+			// this one). An index that is present, valid, readable and
+			// fresh but carries zero items is a build defect (a truncated
+			// write, a full disk, an interrupted regeneration -- #1123
+			// narrowed how this happens but did not close it), not a
+			// question that needs rephrasing, and the two must not read
+			// the same. Still StateNoMatch/exit 1, not a new state or
+			// exit code -- the index WAS read fine, which is exactly what
+			// StateNoMatch already means.
+			out.Reason = fmt.Sprintf("the compiled index at %s contains 0 items -- it was read successfully but has nothing to answer with; this is a build defect (truncated write, full disk, interrupted regeneration), not a phrasing problem -- regenerate it with `estate knowledge`, do not just rephrase the question", indexPath)
+		}
 		return out
 	}
 
