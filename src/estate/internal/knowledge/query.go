@@ -241,8 +241,8 @@ type QueryResult struct {
 // prints) is derived from this, never the only signal -- #1052's finding,
 // generalised.
 //
-// Only the complete/limited/degraded/mixed arms are populated by this
-// package today. `stale` and `unknown` are #1047's own staleness
+// Only the complete/limited/degraded/mixed/not_applicable arms are
+// populated by this package today. `stale` and `unknown` are #1047's own staleness
 // comparison (printIndexFreshness / freshnessFindings in main.go), which
 // needs live filesystem access this package deliberately does not have
 // (Query takes only an index path and a question) -- the comparison itself
