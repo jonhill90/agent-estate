@@ -153,6 +153,130 @@ type QueryResult struct {
 	// item matching, or the index itself being unreadable NOW).
 	SourceStatuses   []SourceResult `json:"source_statuses,omitempty"`
 	IndexGeneratedAt time.Time      `json:"index_generated_at,omitzero"`
+	// Coverage is the machine-readable trustworthiness signal every
+	// successfully-read QueryResult carries -- see CoverageState. It is
+	// the zero Coverage{} on StateIndexMissing/StateIndexUnreadable
+	// (there is no compiled index to have a coverage opinion about);
+	// every other state always sets it, even StateNoMatch, because a
+	// source failing at build time has nothing to do with whether this
+	// particular question happened to score anything.
+	Coverage Coverage `json:"coverage"`
+}
+
+// CoverageState is the taxonomy for whether a QueryResult can be trusted
+// as a complete answer -- agent-estate#1058. It replaces what would
+// otherwise become three separately-shaped signals (a source that failed
+// at build time, a caller-visible policy withholding, and staleness) with
+// one structure a caller reads before treating a real answer and exit 0
+// as a COMPLETE answer. Human prose (the "note:"/banner lines a caller
+// prints) is derived from this, never the only signal -- #1052's finding,
+// generalised.
+//
+// Only the complete/limited/degraded/mixed arms are populated by this
+// package today. `stale` is #1047's own staleness comparison
+// (printIndexFreshness in main.go), which needs live filesystem access
+// this package deliberately does not have (Query takes only an index path
+// and a question) -- folding it into this same structure is left to a
+// caller that already has that access, not duplicated here. The states are
+// named so that fold-in is additive: a caller populating a `stale` reason
+// onto a Coverage this package already returned only ever needs to update
+// State to CoverageStale or CoverageMixed, never invent a new shape.
+type CoverageState string
+
+const (
+	// CoverageComplete means every source that fed the compiled index was
+	// read successfully at build time and nothing was withheld by policy.
+	CoverageComplete CoverageState = "complete"
+	// CoverageLimited means the query itself withheld eligible material by
+	// policy -- StateWithheldPrivate or StateMatchedWithheldMajority's own
+	// population (#1052, #1033), expressed here as the same structure a
+	// degraded source uses rather than a second, differently-shaped signal.
+	CoverageLimited CoverageState = "limited"
+	// CoverageDegraded means a source the compiled index depends on could
+	// not be read when it was built -- agent-estate#1058, the arm this
+	// issue adds. Deliberately not named "incomplete": in public mode,
+	// withholding by policy (CoverageLimited) is the boundary working as
+	// intended, not a malfunction, and a word implying failure would train
+	// a caller to ignore it. A degraded source IS a malfunction -- the two
+	// must not share a label.
+	CoverageDegraded CoverageState = "degraded"
+	// CoverageStale is reserved for #1047's staleness comparison folding
+	// into this structure -- not set by this package (see CoverageState's
+	// own doc comment for why).
+	CoverageStale CoverageState = "stale"
+	// CoverageMixed means more than one of the above applied to the same
+	// result -- e.g. a source failed AND the answer was also withheld by
+	// policy. Reasons names each contributing state individually; Mixed is
+	// the top-level signal a caller checking only Coverage.State still
+	// catches all of them without doing its own boolean arithmetic.
+	CoverageMixed CoverageState = "mixed"
+)
+
+// CoverageReason is one concrete, per-cause entry behind a non-complete
+// Coverage -- which source (if any), which state, and enough detail for a
+// caller to act: fix the source and rebuild (degraded), widen scope or
+// pass --private (limited), regenerate (a future stale reason). A caller
+// reading only Coverage.State still knows "this may not be trustworthy";
+// a caller reading Reasons knows what to do about it.
+type CoverageReason struct {
+	State  CoverageState `json:"state"`
+	Source string        `json:"source,omitempty"`
+	Detail string        `json:"detail"`
+}
+
+// Coverage is the machine-readable trustworthiness signal every
+// successfully-read QueryResult carries -- see CoverageState. Complete
+// with no Reasons is the good case; any other State always carries at
+// least one Reason naming why.
+type Coverage struct {
+	State   CoverageState    `json:"state"`
+	Reasons []CoverageReason `json:"reasons,omitempty"`
+}
+
+// coverageFromSources builds the degraded arm of Coverage from a compiled
+// index's own per-source OK/Reason record (agent-estate#1058) -- the data
+// was already there (Generate writes it; see knowledge.go's SourceResult
+// doc comment). This is wiring an existing record through, not a new
+// mechanism.
+func coverageFromSources(sources []SourceResult) Coverage {
+	var reasons []CoverageReason
+	for _, s := range sources {
+		if s.OK {
+			continue
+		}
+		detail := s.Reason
+		if detail == "" {
+			detail = "source could not be read when the index was built"
+		}
+		reasons = append(reasons, CoverageReason{
+			State:  CoverageDegraded,
+			Source: s.Name,
+			Detail: detail,
+		})
+	}
+	if len(reasons) == 0 {
+		return Coverage{State: CoverageComplete}
+	}
+	return Coverage{State: CoverageDegraded, Reasons: reasons}
+}
+
+// withLimitedReason folds query-time privacy withholding
+// (StateWithheldPrivate / StateMatchedWithheldMajority, #1033/#1052) into
+// cov as its own CoverageReason -- the same shared structure a degraded
+// source uses, rather than a second, differently-shaped signal (#1058's
+// sequencing note on its issue). A cov already CoverageDegraded (a source
+// failed AND the query was also withheld) becomes CoverageMixed so a
+// caller reading only Coverage.State still catches both; a cov that was
+// CoverageComplete becomes CoverageLimited outright.
+func (cov Coverage) withLimitedReason(detail string) Coverage {
+	switch cov.State {
+	case CoverageComplete:
+		cov.State = CoverageLimited
+	case CoverageDegraded:
+		cov.State = CoverageMixed
+	}
+	cov.Reasons = append(cov.Reasons, CoverageReason{State: CoverageLimited, Detail: detail})
+	return cov
 }
 
 // stopWords are filtered out of a question before scoring -- common
@@ -380,6 +504,10 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 		SourceStatuses:   res.Sources,
 		IndexGeneratedAt: res.GeneratedAt,
 		PrivateIncluded:  includePrivate,
+		// Set before any early return below -- a source that failed at
+		// build time is reported regardless of whether this particular
+		// question goes on to match anything (agent-estate#1058).
+		Coverage: coverageFromSources(res.Sources),
 	}
 
 	tagFilters, remainingQuestion := extractTagFilters(question)
@@ -470,6 +598,7 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 			out.State = StateWithheldPrivate
 			out.Reason = fmt.Sprintf("%d item(s) matched but %s private -- rerun with --private to include them",
 				withheldPrivate, plural(withheldPrivate, "is", "are"))
+			out.Coverage = out.Coverage.withLimitedReason(out.Reason)
 			return out
 		}
 		out.State = StateNoMatch
@@ -487,6 +616,7 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 		out.State = StateMatchedWithheldMajority
 		out.Reason = fmt.Sprintf("%d of %d matching item(s) are private -- the %d shown are a minority of the answer; rerun with --private to include the rest",
 			withheldPrivate, withheldPrivate+out.TotalMatched, out.TotalMatched)
+		out.Coverage = out.Coverage.withLimitedReason(out.Reason)
 	}
 	n := len(all)
 	if n > limit {
