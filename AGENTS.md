@@ -20,10 +20,12 @@ and still do.
 
 ## The daemon
 
-The daemon is Go, in `src/estate`: one binary, one append-only ledger, and no
-tmux code of its own. Run `go run ./src/estate` with no arguments for the
-current subcommand list — it grows, and a list written in prose goes stale
-between commits.
+The daemon is Go, in `src/estate`: one binary, one append-only ledger, and one
+narrowly-scoped tmux caller (`internal/mirror`, added by #1003 — it opens a
+read-only viewer window on a turn's transcript, and tmux is never the
+transport). Run `go run ./src/estate` with no arguments for the current
+subcommand list — it grows, and a list written in prose goes stale between
+commits.
 
 **The shell and Python supervisor this section used to index is deleted.**
 `git ls-files scripts/supervisor tests/supervisor` returns **0**. Those files
@@ -144,17 +146,26 @@ that no longer exist; each one says so where it applies.
    `kill-session`, `kill-window` and `respawn-*` must be scoped with
    `TMUX_TMPDIR` and gated on an isolation assertion — a bare `tmux
    kill-server` from a lane destroyed the entire live estate three times in
-   one day. The guard that enforced this (`tmux-isolation.sh`) is gone and
-   **nothing in the Go tree enforces it**; `src/estate` runs no tmux command
-   at all (`grep -ril tmux src/estate` finds two comments and no call), so
-   this binds any script or test you write outside the app.
+   one day. The guard that enforced this (`tmux-isolation.sh`) is gone, and
+   **no general guard replaced it** — this still binds any script or test you
+   write outside the app. What does now exist is scoped to the one package
+   that calls tmux: `internal/mirror`'s `tmuxCmd` routes every invocation
+   through a six-verb allowlist (`allowedVerbs`), so `kill-server`,
+   `kill-session` and `respawn-*` cannot run from it at all, and
+   `Config.TmuxTmpdir` scopes each call to a private socket directory with
+   `$TMUX` unset. Read that as covering `internal/mirror`, not the tree.
    `internal/isolate` is about git worktrees, not tmux — do not read it as
    this guard.
 
 5. **Address windows by `window_id` (`@7`), never by index.** Killing window
    4 renumbers 5 into 4. A loop killing indices hits shifting targets; that
-   destroyed the Telegram poller. Same status as 4: no live caller in this
-   tree, and nothing enforcing it.
+   destroyed the Telegram poller. `internal/mirror` is the live caller and it
+   honours this: `kill-window` is its only destructive verb, and every id it
+   passes came out of a `list-windows` call in the same pair, never an index
+   and never a name. Its package comment also reconciles this against the
+   operator parameter `lane_addressing=session_index_not_raw_window_id` —
+   that rule governs *delivering* to a lane across a server restart, which
+   this package never does.
 
 6. **`unknown` means "not offered", not "broken".** A classifier over live
    state should be a whitelist: only a recognised shape is offered as free.
@@ -282,8 +293,9 @@ measured against. (The runbook this used to cite,
   CI. Reimplementing the gate in Go is open work.
 
 ---
-*The claims in this section were checked against this branch's own tree at
-`430e199` (2026-09-03) — every path, command and count above was re-run, and
+*The claims in this section were checked against this branch's own tree as
+rebased onto `ef06010` (2026-09-03) — every path, command and count above was
+re-run, and
 what could not be found is named as absent rather than described. Re-check
 before relying on any of it: `src/estate/agents_md_test.go` is the only
 automated check on this file, and it validates **subcommand names only** — it
