@@ -353,12 +353,13 @@ waiting. Environment:
 }
 
 // printKnowledgeQuery renders a knowledge.QueryResult for a terminal --
-// the five distinguishable states agent-estate#1019/#1033 require
-// (matched, no_match, index_missing, index_unreadable, withheld_private)
-// each print visibly differently, never collapsing to the same "nothing
-// here" shape. When PrivateIncluded is set, that is stated in the output
-// itself (agent-estate#1028's point 3) -- not only in a doc comment or a
-// flag the reader of the printed text cannot see.
+// the six distinguishable states agent-estate#1019/#1033/#1052 require
+// (matched, matched_withheld_majority, no_match, index_missing,
+// index_unreadable, withheld_private) each print visibly differently,
+// never collapsing to the same "nothing here" shape. When PrivateIncluded
+// is set, that is stated in the output itself (agent-estate#1028's point
+// 3) -- not only in a doc comment or a flag the reader of the printed
+// text cannot see.
 func printKnowledgeQuery(qr knowledge.QueryResult) {
 	switch qr.State {
 	case knowledge.StateIndexMissing:
@@ -396,6 +397,14 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 	if qr.PrivateIncluded {
 		fmt.Println("*** PRIVATE MODE -- private items may be included below ***")
 	}
+	if qr.State == knowledge.StateMatchedWithheldMajority {
+		// agent-estate#1052: exit 0 and "matched" alone read as plain
+		// success -- this banner is the loud, hard-to-miss signal that a
+		// caller reading the state word (not just $?) needs, since the
+		// exit code deliberately does not change here (see
+		// knowledgeQueryExitCode's own comment for why).
+		fmt.Println("*** MOSTLY WITHHELD -- most matching items are private; the results below are a minority of the answer ***")
+	}
 	fmt.Printf("%d match(es) for %q (showing %d, %d not returned, %d withheld as private)\n\n",
 		qr.TotalMatched, qr.Question, len(qr.Matches), qr.NotReturned, qr.WithheldPrivate)
 	for _, m := range qr.Matches {
@@ -421,7 +430,9 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 // agent branching on $? needs to tell apart, never two states sharing a
 // code by omission.
 //
-//	0  StateMatched          -- at least one publishable item answers this
+//	0  StateMatched,
+//	   StateMatchedWithheldMajority -- at least one publishable item answers
+//	                                   this and was returned
 //	1  StateNoMatch          -- the index was read fine; nothing answers this
 //	2  StateIndexMissing,
 //	   StateIndexUnreadable  -- the index itself could not be read at all
@@ -437,6 +448,15 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 // command can reach (0/1/2 are the pre-existing, load-bearing codes named in
 // #1033 and are never renumbered here), so it cannot silently collide with
 // an existing caller's expectations.
+//
+// StateMatchedWithheldMajority (agent-estate#1052) deliberately shares
+// StateMatched's exit code rather than getting a new one. It was measured
+// against a real index and every golden-set query that returns it still
+// carries a real, citable public answer (see StateMatchedWithheldMajority's
+// own doc comment for the numbers) -- treating it as a non-zero exit would
+// have turned those into runner failures, moving the golden score, which
+// #1052 explicitly forbids. A caller that inspects the state word itself,
+// not just $?, is the one this state is for.
 func knowledgeQueryExitCode(state knowledge.QueryState) int {
 	switch state {
 	case knowledge.StateIndexMissing, knowledge.StateIndexUnreadable:
@@ -445,7 +465,7 @@ func knowledgeQueryExitCode(state knowledge.QueryState) int {
 		return 3
 	case knowledge.StateNoMatch:
 		return 1
-	default: // StateMatched
+	default: // StateMatched, StateMatchedWithheldMajority
 		return 0
 	}
 }

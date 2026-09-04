@@ -1,6 +1,7 @@
 package knowledge
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -333,6 +334,81 @@ func TestQueryWithheldPrivateIsDistinctFromNoMatch(t *testing.T) {
 	}
 	if got.Reason == "" {
 		t.Error("Reason is empty on a withheld-private result")
+	}
+}
+
+// withheldMajorityIndex builds a fixture with one publishable item and
+// privateCount private items, all four terms of "credential rotation
+// keychain policy" scoreable against every item's Tier1 -- agent-estate#1052's
+// shape: a real public answer exists and is returned, but the private
+// population outnumbers it.
+func withheldMajorityIndex(t *testing.T, privateCount int) string {
+	t.Helper()
+	items := []Item{
+		{
+			ID: "20260903140000", Source: "vault-fact",
+			Permalink:   "/vault/agent/facts/credential-rotation.md",
+			Tier1:       "credential rotation keychain policy -- public summary",
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		},
+	}
+	for i := 0; i < privateCount; i++ {
+		id := fmt.Sprintf("2026090314000%d", i+1)
+		items = append(items, Item{
+			ID:          id,
+			Source:      "corpus-parameter",
+			Permalink:   "corpus:item:" + id,
+			Tier1:       "credential rotation keychain policy -- private detail",
+			Publishable: false, PublishBasis: "corpus-parameter: source defaults to private",
+		})
+	}
+	path := filepath.Join(t.TempDir(), "index.json")
+	res := Result{
+		GeneratedAt:   time.Date(2026, 9, 3, 14, 0, 0, 0, time.UTC),
+		StalenessRule: stalenessRule,
+		Note:          derivedNote,
+		Items:         items,
+	}
+	if err := Write(path, res); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestQueryMatchedWithheldMajorityFiresWhenPrivateOutnumbersPublic is the
+// direct regression test for agent-estate#1052: a query with more withheld
+// private matches than returned public ones must be distinguishable from an
+// ordinary StateMatched, without collapsing into StateWithheldPrivate
+// (which requires zero public matches) or changing what was actually
+// returned.
+func TestQueryMatchedWithheldMajorityFiresWhenPrivateOutnumbersPublic(t *testing.T) {
+	path := withheldMajorityIndex(t, 2) // 1 public, 2 private -- majority private
+	got := Query(path, "credential rotation keychain policy", 0, false)
+
+	if got.State != StateMatchedWithheldMajority {
+		t.Fatalf("State = %q, want %q (reason=%q)", got.State, StateMatchedWithheldMajority, got.Reason)
+	}
+	if len(got.Matches) != 1 {
+		t.Fatalf("len(Matches) = %d, want 1 -- the public item must still be returned, not suppressed", len(got.Matches))
+	}
+	if got.WithheldPrivate != 2 {
+		t.Fatalf("WithheldPrivate = %d, want 2", got.WithheldPrivate)
+	}
+	if got.Reason == "" {
+		t.Error("Reason is empty on a majority-withheld matched result")
+	}
+}
+
+// TestQueryMatchedWithheldMajorityDoesNotFireOnATie covers the boundary:
+// equal public and private counts is NOT a majority, so this must stay
+// plain StateMatched -- a strict ">" comparison, not ">=", per
+// StateMatchedWithheldMajority's own doc comment.
+func TestQueryMatchedWithheldMajorityDoesNotFireOnATie(t *testing.T) {
+	path := withheldMajorityIndex(t, 1) // 1 public, 1 private -- a tie
+	got := Query(path, "credential rotation keychain policy", 0, false)
+
+	if got.State != StateMatched {
+		t.Fatalf("State = %q, want %q (a 1-public/1-private tie is not a majority)", got.State, StateMatched)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -105,6 +106,65 @@ func TestKnowledgeQueryExitCodesAreDistinct(t *testing.T) {
 			t.Fatalf("index_unreadable: exit code = %d, want 2", code)
 		}
 	})
+}
+
+// TestKnowledgeQueryMatchedWithheldMajorityExitsZero is the direct
+// regression test for agent-estate#1052: a query that returns real public
+// matches but withholds MORE private matches than it returned must still
+// exit 0 -- see StateMatchedWithheldMajority's own doc comment in query.go
+// for why the exit code deliberately does not change -- while printing an
+// unmistakable banner that a caller reading stdout (not just $?) cannot
+// miss. Before this fix, this exact shape (1 public item, 2 private items,
+// all matching) exited 0 with no distinguishable signal from an ordinary,
+// fully-answered query -- printKnowledgeQuery's banner and Query's new
+// state are what this test would fail without.
+func TestKnowledgeQueryMatchedWithheldMajorityExitsZero(t *testing.T) {
+	bin := buildEstateBinary(t)
+	dir := t.TempDir()
+	idx := filepath.Join(dir, "index.json")
+
+	items := []knowledge.Item{
+		{
+			ID: "it-0000000000000010", Source: "vault-fact",
+			Permalink: "/tmp/public.md", Tier1: "credential rotation keychain policy",
+			Publishable: true, PublishBasis: "vault fact, always public",
+		},
+		{
+			ID: "it-0000000000000011", Source: "corpus-parameter",
+			Permalink: "/tmp/private1.md", Tier1: "credential rotation keychain escalation",
+			Publishable: false, PublishBasis: "corpus parameter, private by default",
+		},
+		{
+			ID: "it-0000000000000012", Source: "corpus-parameter",
+			Permalink: "/tmp/private2.md", Tier1: "credential rotation keychain review",
+			Publishable: false, PublishBasis: "corpus parameter, private by default",
+		},
+	}
+	res := knowledge.Result{GeneratedAt: time.Now().UTC(), Items: items}
+	if err := knowledge.Write(idx, res); err != nil {
+		t.Fatalf("write fixture index: %v", err)
+	}
+
+	cmd := exec.Command(bin, "knowledge", "query", "credential rotation keychain")
+	cmd.Env = append(os.Environ(),
+		"ESTATE_KNOWLEDGE_INDEX="+idx,
+		"ESTATE_LEDGER="+filepath.Join(dir, "ledger.jsonl"),
+	)
+	out, runErr := cmd.CombinedOutput()
+	code := 0
+	if runErr != nil {
+		exitErr, ok := runErr.(*exec.ExitError)
+		if !ok {
+			t.Fatalf("run estate knowledge query: %v\n%s", runErr, out)
+		}
+		code = exitErr.ExitCode()
+	}
+	if code != 0 {
+		t.Fatalf("exit code = %d, want 0 (a genuinely-matched, majority-withheld result must not exit non-zero)\n%s", code, out)
+	}
+	if !strings.Contains(string(out), "MOSTLY WITHHELD") {
+		t.Fatalf("stdout carries no majority-withheld banner for a 1-public/2-private match:\n%s", out)
+	}
 }
 
 // buildEstateBinary (shared with tick_observed_spend_test.go) compiles the
