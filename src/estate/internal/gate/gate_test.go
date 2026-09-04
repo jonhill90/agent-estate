@@ -1072,3 +1072,86 @@ func TestBypass_ForgedApprovalWithNoGenuineCommentStillDisagreesWithLedger(t *te
 		t.Fatal("bypass: PR comment APPROVE with a ledger Result of REQUEST CHANGES was allowed")
 	}
 }
+
+// ---------------------------------------------------------------------
+// agent-estate#1107: an abbreviated Reviewed-SHA that DOES name the current
+// head must be accepted, not refused as "stale" -- the gate was comparing
+// strings, not resolving identity. shaFixture uses a realistic 40-char head
+// OID (cleanFixture's 8-char "deadbeef" is too short to build a genuinely
+// abbreviated prefix against) so these tests can construct a real 7-char
+// prefix of the head, a real full SHA that is genuinely a DIFFERENT, older
+// commit, and an abbreviation too short to trust either way.
+// ---------------------------------------------------------------------
+
+const shaFixtureHead = "03f5084009942a45a2303b09c5ab8bc8af5434d"
+
+func shaFixture(t *testing.T, reviewedSHA string) (*PR, *ledger.Ledger) {
+	t.Helper()
+	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	reviewedAt := checkStart.Add(1 * time.Hour)
+	p := &PR{
+		Number:      1106,
+		HeadOID:     shaFixtureHead,
+		HeadRefName: "dispatch/a1",
+		State:       "OPEN",
+		Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
+		Comments:    []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: " + reviewedSHA + "\nVerdict: APPROVE\n"}},
+	}
+	l := newLedger(t,
+		ledger.Record{ID: "a1", Issue: "1106", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: shaFixtureHead},
+		ledger.Record{ID: "r1", Issue: "1106", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 1106, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+	)
+	return p, l
+}
+
+// Test 1 (issue's own reproduction, PR #1106): a 7-char Reviewed-SHA naming
+// the current head, in the exact abbreviated form the reviewer actually
+// wrote, must be accepted.
+func TestReviewedSHA_AbbreviatedMatchAccepted(t *testing.T) {
+	p, l := shaFixture(t, shaFixtureHead[:7])
+	d := evaluateWithPR(p, "lane-review", l)
+	if !d.Allow {
+		t.Fatalf("refused an abbreviated Reviewed-SHA that names the current head: %v", d.Reasons)
+	}
+}
+
+// Test 2: a real, older, full-length SHA -- genuinely a different commit,
+// not just different notation -- must still be refused, and with the
+// "stale" wording, because that diagnosis is correct here. Deleting
+// classifyReviewedSHA's stale branch (i.e. accepting anything that isn't
+// caught by the ambiguous-length guard) turns this green->never-refuses,
+// which is exactly the regression the issue's "must not relax" constraint
+// guards against.
+func TestReviewedSHA_GenuinelyOlderSHAStillRefusedAsStale(t *testing.T) {
+	olderSHA := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	p, l := shaFixture(t, olderSHA)
+	d := evaluateWithPR(p, "lane-review", l)
+	if d.Allow {
+		t.Fatal("bypass: a Reviewed-SHA naming a genuinely different, older commit was accepted")
+	}
+	joined := strings.Join(d.Reasons, " | ")
+	if !strings.Contains(joined, "stale") {
+		t.Fatalf("refused, but not with the stale diagnosis (this case IS genuinely stale): %v", d.Reasons)
+	}
+}
+
+// Test 3: an abbreviation short enough that it could name more than one
+// commit must be refused rather than guessed, even though it happens to be
+// a true prefix of the current head. Length alone, with no local git object
+// database to disambiguate against, is the only uniqueness signal this gate
+// has -- see classifyReviewedSHA's own doc comment.
+func TestReviewedSHA_AmbiguouslyShortRefusedNotGuessed(t *testing.T) {
+	tooShort := shaFixtureHead[:4]
+	p, l := shaFixture(t, tooShort)
+	d := evaluateWithPR(p, "lane-review", l)
+	if d.Allow {
+		t.Fatal("bypass: a Reviewed-SHA too short to identify one commit was accepted as a match")
+	}
+	joined := strings.Join(d.Reasons, " | ")
+	if strings.Contains(joined, "stale") {
+		t.Fatalf("refused for the wrong reason (stale implies a different commit was reviewed; this one is merely too short to tell): %v", d.Reasons)
+	}
+	if !strings.Contains(joined, "too short") {
+		t.Fatalf("refused, but not with the ambiguous-length diagnosis: %v", d.Reasons)
+	}
+}

@@ -417,6 +417,48 @@ func short(s string) string {
 	return s
 }
 
+// minReviewedSHAPrefix is the shortest a Reviewed-SHA trailer may be and
+// still be trusted as identifying one commit. This gate has no local git
+// object database to run a real `git rev-parse --disambiguate` against (it
+// sees only the PR's own head OID from `gh pr view` -- see Evaluate's own
+// doc comment); a length floor is the fallback uniqueness check the issue
+// asks for. Git's own porcelain refuses anything under 4, and GitHub's UI
+// never prints fewer than 7 -- 7 is the floor here too, so a trailer this
+// gate accepts is one any human reading the PR would also recognise as
+// unambiguous.
+const minReviewedSHAPrefix = 7
+
+// reviewedSHAStatus classifies a reviewer's Reviewed-SHA trailer against the
+// PR's actual head OID. It is deliberately three-valued, not a bool: a
+// trailer that is a real prefix of a DIFFERENT, older commit is "stale" (the
+// reviewer genuinely reviewed something else); a trailer too short to name
+// one commit is "ambiguous" (this gate cannot tell what it names at all);
+// only an exact match or an unambiguous prefix of the CURRENT head is a
+// match. Conflating the last two is agent-estate#1107 -- a correct
+// abbreviated review reported as if it were a stale one.
+type reviewedSHAStatus int
+
+const (
+	shaMatches reviewedSHAStatus = iota
+	shaStale
+	shaAmbiguous
+)
+
+func classifyReviewedSHA(reviewed, head string) reviewedSHAStatus {
+	reviewed = strings.ToLower(strings.TrimSpace(reviewed))
+	head = strings.ToLower(head)
+	if reviewed == head {
+		return shaMatches
+	}
+	if len(reviewed) < minReviewedSHAPrefix {
+		return shaAmbiguous
+	}
+	if len(reviewed) < len(head) && strings.HasPrefix(head, reviewed) {
+		return shaMatches
+	}
+	return shaStale
+}
+
 // Evaluate is the whole gate. repo and pr identify the pull request; every
 // other fact it needs -- who authored the work it closes, whether the
 // reviewer actually reviewed, and what they said -- is derived from GitHub
@@ -596,8 +638,13 @@ func evaluate(p *PR, reviewerLane string, l *ledger.Ledger) Decision {
 	if lv.decision != verdictApproved {
 		return refuse(d, "reviewer "+reviewerLane+"'s own verdict comment is "+string(lv.decision)+", not an approval")
 	}
-	if lv.hasSHA && lv.reviewedSHA != p.HeadOID {
-		return refuse(d, "reviewer "+reviewerLane+"'s Reviewed-SHA "+lv.reviewedSHA+" does not match current head "+p.HeadOID+" -- stale, does not count")
+	if lv.hasSHA {
+		switch classifyReviewedSHA(lv.reviewedSHA, p.HeadOID) {
+		case shaStale:
+			return refuse(d, "reviewer "+reviewerLane+"'s Reviewed-SHA "+lv.reviewedSHA+" does not match current head "+p.HeadOID+" -- stale, does not count")
+		case shaAmbiguous:
+			return refuse(d, "reviewer "+reviewerLane+"'s Reviewed-SHA "+lv.reviewedSHA+" is too short ("+strconv.Itoa(len(strings.TrimSpace(lv.reviewedSHA)))+" chars, need "+strconv.Itoa(minReviewedSHAPrefix)+") to identify a single commit against current head "+p.HeadOID+" -- refusing rather than guessing")
+		}
 	}
 
 	if earliest, hasEarliest := earliestCheckStart(p); hasEarliest && reviewedAt.Before(earliest) {
