@@ -1037,6 +1037,32 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 		return all[i].item.ID < all[j].item.ID
 	})
 
+	// No per-source-file cap is applied here on purpose -- agent-estate#1105
+	// measured one and rejected it. Its own case (`source:repo-docs how
+	// does dispatch work`) had docs/knowledge-system.md holding 6 of 10
+	// slots and the correct docs/product/SPEC.md dispatch section sitting
+	// at rank 4, on a build where #1113/#1117's leaf-heading fix and
+	// #1134/#1137's match floor were both already in. Sweeping a cap of
+	// 5/4/3/2 sections per file (built at the same compiled index, only
+	// the cap value varying) never moved that section's rank -- it was
+	// already above every capped-away slot, so the cap only changed which
+	// wrong sections filled the remainder. At cap=2 it actively cost a
+	// previously-correct case: nl-07 ("what checks stop a bad merge",
+	// target AGENTS.md's own "guards that actually run" section) dropped
+	// from a rank-5 hit to absent from the top 10, because two OTHER
+	// AGENTS.md sections already outranked it and the cap silently
+	// dropped the correct one along with them -- the golden set's own
+	// unscoped and scoped natural-language top-10 lines both went 8/12 to
+	// 7/12 at cap=2 and held at every looser cap. Neither the ratchet
+	// (agent-estate#1066) nor the aggregate caught this by itself: the
+	// top-10 lines are deliberately unratcheted (#1112, corpus-growth
+	// drift), and the aggregate for cap=5/4/3 is bit-for-bit identical to
+	// uncapped -- only the per-case nl-07 table shows the cost. This
+	// confirmed, rather than refuted, the standing objection that a cap is
+	// suppression, not correction: it can silently remove a correct answer
+	// that happens to share a file with several higher-scoring sections
+	// while never fixing the rank of the case that motivated it. See
+	// #1105's own measurement comment for the full per-cap tables.
 	out.TotalMatched = len(all)
 	out.WithheldPrivate = withheldPrivate
 	if len(all) == 0 {
