@@ -29,6 +29,12 @@ func buildFixtureCorpus(t *testing.T, ddl string) string {
 // directive/question/correction too, none of which has an equivalent
 // view), but the view is kept here so a regression that reintroduces a
 // view-based read is still exercised against the same shape.
+//
+// Rows 10-12 are agent-estate#1131's own regression fixture for the narrow
+// thought carve-out: row 10 is a low-firmness thought (still bulk
+// excluded), row 11 is a weight='hard' thought that must now survive, and
+// row 12 is a weight='hard' thought that is ALSO retracted -- retracted
+// still wins over the carve-out, the same as every other kind.
 const fixtureDDL = `
 CREATE TABLE items (
   id INTEGER PRIMARY KEY,
@@ -52,17 +58,20 @@ INSERT INTO items (id, prompt_id, kind, body, weight, status, resolved_to) VALUE
   (7, 107, 'question', 'Should ACP replace tmux as the transport?', 'hard', 'resolved', 'multiplexer=KEEP_TMUX'),
   (8, 108, 'question', 'A retracted question, must not appear.', 'retracted', 'open', NULL),
   (9, 109, 'correction', 'Not X after all -- Y is correct.', 'hard', 'acted', NULL),
-  (10, 110, 'thought', 'A stray musing, must not appear -- thought is excluded entirely.', 'preference', 'acted', NULL);
+  (10, 110, 'thought', 'A stray low-firmness musing, must not appear -- bulk excluded.', 'preference', 'acted', NULL),
+  (11, 111, 'thought', 'A hard thought carve-out row, must appear.', 'hard', 'open', NULL),
+  (12, 112, 'thought', 'A retracted hard thought, must not appear -- retracted still wins.', 'retracted', 'open', NULL);
 `
 
 func TestCorpusSourceReadsLiveItemsOfCompiledKindsOnly(t *testing.T) {
 	path := buildFixtureCorpus(t, fixtureDDL)
 	res, items := corpusSource(path)
 	// 2 live parameters + 1 live directive + 1 live question + 1 live
-	// correction = 5. The retracted rows of each kind, the bare `prompt`
-	// row, and the `thought` row must all be absent.
-	if !res.OK || res.Count != 5 {
-		t.Fatalf("corpusSource() result = %+v, want OK count=5", res)
+	// correction + 1 hard thought (row 11) = 6. The retracted rows of each
+	// kind, the bare `prompt` row, the low-firmness thought (row 10) and
+	// the retracted hard thought (row 12) must all be absent.
+	if !res.OK || res.Count != 6 {
+		t.Fatalf("corpusSource() result = %+v, want OK count=6", res)
 	}
 	for _, it := range items {
 		if strings.Contains(it.Tier1, "must never be reachable") || strings.Contains(it.Tier2, "must never be reachable") {
@@ -71,8 +80,67 @@ func TestCorpusSourceReadsLiveItemsOfCompiledKindsOnly(t *testing.T) {
 		if strings.Contains(it.Tier1, "retracted") || strings.Contains(it.Tier2, "retracted") {
 			t.Fatalf("corpusSource() included a retracted item: %+v", it)
 		}
-		if strings.Contains(it.Tier1, "stray musing") || strings.Contains(it.Tier2, "stray musing") {
-			t.Fatalf("corpusSource() included a thought item, which #1035 excludes: %+v", it)
+		if strings.Contains(it.Tier1, "low-firmness musing") || strings.Contains(it.Tier2, "low-firmness musing") {
+			t.Fatalf("corpusSource() included a bulk-excluded thought item: %+v", it)
+		}
+	}
+}
+
+// TestCorpusSourceIncludesHardThoughtOnly is agent-estate#1131's own
+// regression: the ~200 thought survivors of #1035's bulk exclusion are not
+// uniformly noise -- 28 of them (measured 2026-09-04) carry weight='hard'
+// and are neither retracted nor dropped, the corpus's own marker for a
+// binding constraint that #1035's own justification did not cover. This
+// checks the carve-out is narrow: the hard thought row survives, the
+// low-firmness one still does not, and neither the row count nor the
+// predicate hardcodes today's 28.
+func TestCorpusSourceIncludesHardThoughtOnly(t *testing.T) {
+	path := buildFixtureCorpus(t, fixtureDDL)
+	_, items := corpusSource(path)
+
+	var thoughtItems []Item
+	for _, it := range items {
+		if it.Source == "corpus-thought" {
+			thoughtItems = append(thoughtItems, it)
+		}
+	}
+	if len(thoughtItems) != 1 {
+		t.Fatalf("corpusSource() compiled %d corpus-thought item(s), want 1 (the hard row only): %+v", len(thoughtItems), thoughtItems)
+	}
+	if !strings.Contains(thoughtItems[0].Tier1, "hard thought carve-out") && !strings.Contains(thoughtItems[0].Tier2, "hard thought carve-out") {
+		t.Fatalf("corpusSource() compiled the wrong thought row as corpus-thought: %+v", thoughtItems[0])
+	}
+	for _, tag := range thoughtItems[0].StructuralTags {
+		if tag == "weight:hard" {
+			return
+		}
+	}
+	t.Fatalf("corpus-thought item StructuralTags = %v, want to contain \"weight:hard\"", thoughtItems[0].StructuralTags)
+}
+
+// TestBulkExcludedThoughtRowIsAPredicateNotACount guards against
+// agent-estate#1131 recreating the exact defect it reports: a fixed number
+// standing in for a rule that must be re-evaluated against the corpus as
+// it grows. bulkExcludedThoughtRow must decide solely from (weight,
+// status), never from how many rows have already been seen.
+func TestBulkExcludedThoughtRowIsAPredicateNotACount(t *testing.T) {
+	cases := []struct {
+		weight, status string
+		wantExcluded    bool
+	}{
+		{"hard", "open", false},
+		{"hard", "acknowledged", false},
+		{"hard", "acted", false},
+		{"hard", "resolved", false},
+		{"preference", "acted", true},
+		{"preference", "acknowledged", true},
+		{"soft", "open", true},
+		{"", "", true},
+	}
+	for _, c := range cases {
+		got := bulkExcludedThoughtRow(c.weight, c.status)
+		if got != c.wantExcluded {
+			t.Fatalf("bulkExcludedThoughtRow(%q, %q) = %v, want %v", c.weight, c.status, got, c.wantExcluded)
 		}
 	}
 }
@@ -117,6 +185,7 @@ func TestCorpusSourceCarriesKindStructuralTag(t *testing.T) {
 		"corpus-directive":  "kind:directive",
 		"corpus-question":   "kind:question",
 		"corpus-correction": "kind:correction",
+		"corpus-thought":    "kind:thought",
 	}
 	seen := map[string]bool{}
 	for _, it := range items {
@@ -171,15 +240,16 @@ func TestCorpusSourceNewKindsDefaultPrivate(t *testing.T) {
 func TestCorpusSourceCarriesPromptID(t *testing.T) {
 	path := buildFixtureCorpus(t, fixtureDDL)
 	_, items := corpusSource(path)
-	if len(items) != 5 {
-		t.Fatalf("corpusSource() returned %d items, want 5", len(items))
+	if len(items) != 6 {
+		t.Fatalf("corpusSource() returned %d items, want 6", len(items))
 	}
 	want := map[string]string{
-		"1": "101",
-		"2": "102",
-		"5": "105",
-		"7": "107",
-		"9": "109",
+		"1":  "101",
+		"2":  "102",
+		"5":  "105",
+		"7":  "107",
+		"9":  "109",
+		"11": "111",
 	}
 	for _, it := range items {
 		id := strings.TrimPrefix(it.Tier3, "the corpus's own item ")

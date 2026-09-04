@@ -33,22 +33,43 @@ const corpusSep = "\x1f"
 // unchanged.
 //
 // thought (3,979, the largest kind by more than 2x) is deliberately
-// EXCLUDED. Measured against the real corpus (2026-09-04): 3,782 of
-// 3,979 thought rows -- 95% -- are already weight='retracted' or
-// status='needs_review'/'dropped', meaning the corpus's own judging pass
-// already looked at nearly all of them and did not promote them to a
-// decided kind. The ~200 that remain are overwhelmingly weight=
-// 'preference' at status='acted'/'acknowledged' -- processed, low-firmness
-// ambient context, not a parameter, directive, question or correction
-// anyone failed to capture as one. Including thought would roughly
-// quadruple the index again on top of what directive+question+correction
-// already add, for a kind that is mostly noise by the corpus's own
-// classification. What a reader loses by this exclusion: transient
-// musings and stray context that were never judged actionable enough to
-// become one of the other four kinds -- recoverable, if ever needed, by
-// querying the corpus's own `thought` rows directly; the compiled index's
-// purpose is "what's decided and live", not "everything ever said aloud".
-var corpusKinds = []string{"parameter", "directive", "question", "correction"}
+// EXCLUDED IN BULK, with one narrow carve-out. Measured against the real
+// corpus (2026-09-04): 3,785 of 3,979 thought rows -- 95.1% -- are already
+// weight='retracted' or status='needs_review'/'dropped', meaning the
+// corpus's own judging pass already looked at nearly all of them and did
+// not promote them to a decided kind. Of the 194 that remain, 166 (86%)
+// are weight='preference' -- processed, low-firmness ambient context, not
+// a parameter, directive, question or correction anyone failed to capture
+// as one, and genuinely excludable on the reasoning above. The other 28
+// (14%) carry weight='hard': the corpus's own marker for a binding
+// constraint, at status='open'/'acknowledged'/'acted'/'resolved', none
+// retracted or dropped. A row the corpus itself marks weight='hard' and
+// not retracted is decided and live by this package's own stated purpose
+// ("what's decided and live", not "everything ever said aloud") no matter
+// which kind column it sits under -- agent-estate#1131: the same defect
+// #1035 fixed for directive/question one level down, surviving inside
+// this comment's own justification for thought. bulkExcludedThoughtRow
+// below states the boundary as a predicate, not a count, because 28 is
+// today's number and will drift as the corpus grows; querying it again
+// is cheap and this comment does not try to stay numerically current.
+// What a reader still loses by the bulk exclusion: transient musings and
+// stray context that were never judged actionable enough to become one of
+// the other four kinds or to be marked weight='hard' -- recoverable, if
+// ever needed, by querying the corpus's own `thought` rows directly.
+var corpusKinds = []string{"parameter", "directive", "question", "correction", "thought"}
+
+// bulkExcludedThoughtRow reports whether a thought-kind row (weight,
+// status already known not to be 'retracted' -- the caller applies that
+// filter first, same as every other kind) falls inside the bulk
+// exclusion corpusKinds' own comment describes, rather than the narrow
+// weight='hard' carve-out. A thought row is compiled into the index only
+// when this returns false.
+func bulkExcludedThoughtRow(weight, status string) bool {
+	if weight == "hard" {
+		return false
+	}
+	return true
+}
 
 // corpusSourceName maps a corpus kind to this package's own Item.Source
 // value. parameter keeps "corpus-parameter" -- the value already cited by
@@ -76,8 +97,12 @@ func corpusSourceName(kind string) string {
 // possibility_count and conflicts/capture_health exist). Querying `items`
 // directly with the same weight != 'retracted' filter live_parameters
 // already encodes keeps this function's own "live set, not merely
-// resolved" semantics identical across all four kinds rather than
-// reading three different filters for three different reasons.
+// resolved" semantics identical across parameter, directive, question and
+// correction rather than reading three different filters for three
+// different reasons. thought is the one kind in corpusKinds this
+// weight != 'retracted' filter does not fully decide on its own --
+// bulkExcludedThoughtRow, applied per-row below, narrows it further to the
+// weight='hard' carve-out corpusKinds' own comment describes.
 //
 // RAW PROMPTS NEVER LEAVE THE SOURCE. This query selects prompt_id --
 // items' own bare id column, the same identifier
@@ -133,6 +158,9 @@ func corpusSource(dbPath string) (SourceResult, []Item) {
 		id, resolvedTo, weight, status, body, promptID, kind := parts[0], parts[1], parts[2], parts[3], parts[4], parts[5], parts[6]
 		body = strings.TrimSpace(body)
 		if body == "" && resolvedTo == "" {
+			continue
+		}
+		if kind == "thought" && bulkExcludedThoughtRow(weight, status) {
 			continue
 		}
 		tier1 := resolvedTo
