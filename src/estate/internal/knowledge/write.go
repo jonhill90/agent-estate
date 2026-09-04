@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+
+	"github.com/jonhill90/agent-estate/estate/internal/isolate"
 )
 
 // DefaultConfig resolves every source path the same way estate's other
@@ -65,6 +67,26 @@ func findRepoRoot(start string) string {
 // DefaultOutputPath is where Write puts the compiled index absent an
 // override -- a cache-shaped location, not the repository, since this
 // file is regenerable and disposable (repo_root=clean).
+//
+// agent-estate#1048: every dispatched turn used to resolve the SAME shared
+// path here, so two lanes running `estate knowledge` concurrently -- or a
+// lane and the Director -- silently overwrote each other's index and each
+// other's measurements. internal/isolate already gives each dispatched turn
+// its own git worktree for exactly this class of problem (see that
+// package's own doc comment); this is the same argument applied to the
+// index. A turn running inside a worktree isolate.Create/CreateOnBranch
+// made (isolate.IsDispatchWorktree, keyed off the process's own working
+// directory) gets a path namespaced by its own dispatch id, so no two turns
+// can resolve the same default. A caller that is not inside one of those
+// worktrees -- the operator at a terminal, the Director -- sees no change:
+// IsDispatchWorktree reports false and the shared default below is
+// returned exactly as before.
+//
+// The explicit ESTATE_KNOWLEDGE_INDEX override, checked first, is
+// unaffected either way -- a turn or a reviewer that sets it by hand still
+// gets exactly that path, per agent-estate#1048's own "the workaround
+// should be the default, not a thing careful reviewers remember" -- taking
+// the override away would break the measurements that already depend on it.
 func DefaultOutputPath() (string, error) {
 	if p := os.Getenv("ESTATE_KNOWLEDGE_INDEX"); p != "" {
 		return p, nil
@@ -72,6 +94,11 @@ func DefaultOutputPath() (string, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
+	}
+	if wd, err := os.Getwd(); err == nil {
+		if id, ok := isolate.IsDispatchWorktree(wd); ok {
+			return filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "dispatch", id, "index.json"), nil
+		}
 	}
 	return filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "index.json"), nil
 }
