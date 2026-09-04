@@ -173,14 +173,14 @@ type QueryResult struct {
 // generalised.
 //
 // Only the complete/limited/degraded/mixed arms are populated by this
-// package today. `stale` is #1047's own staleness comparison
-// (printIndexFreshness in main.go), which needs live filesystem access
-// this package deliberately does not have (Query takes only an index path
-// and a question) -- folding it into this same structure is left to a
-// caller that already has that access, not duplicated here. The states are
-// named so that fold-in is additive: a caller populating a `stale` reason
-// onto a Coverage this package already returned only ever needs to update
-// State to CoverageStale or CoverageMixed, never invent a new shape.
+// package today. `stale` and `unknown` are #1047's own staleness
+// comparison (printIndexFreshness / freshnessFindings in main.go), which
+// needs live filesystem access this package deliberately does not have
+// (Query takes only an index path and a question) -- the comparison itself
+// stays in main.go; only the fold-in (WithFreshnessReason, below) lives
+// here, so a caller that already has filesystem access only ever needs to
+// call it, never invent a new shape or a second copy of the compose-to-
+// mixed rule withLimitedReason already established.
 type CoverageState string
 
 const (
@@ -200,10 +200,28 @@ const (
 	// a caller to ignore it. A degraded source IS a malfunction -- the two
 	// must not share a label.
 	CoverageDegraded CoverageState = "degraded"
-	// CoverageStale is reserved for #1047's staleness comparison folding
-	// into this structure -- not set by this package (see CoverageState's
-	// own doc comment for why).
+	// CoverageStale means a source the compiled index depends on has been
+	// OBSERVED to have changed since the index was built -- its mtime is
+	// demonstrably newer than IndexGeneratedAt. Reasons names the source,
+	// the way CoverageDegraded already does; report, never repair -- this
+	// package (and the caller folding it in) only ever states the finding,
+	// it does not regenerate anything. Not set by this package directly
+	// (see CoverageState's own doc comment for why) -- a caller with
+	// filesystem access folds it in via WithFreshnessReason.
 	CoverageStale CoverageState = "stale"
+	// CoverageUnknownFreshness means a source's freshness could NOT be
+	// determined at all -- github-stars is read live via `gh api
+	// user/starred` with no local file to stat, so there is nothing to
+	// compare IndexGeneratedAt against. Deliberately a state distinct from
+	// both CoverageComplete and CoverageStale, never collapsed into either:
+	// "confirmed unchanged" (complete), "confirmed newer" (stale, an
+	// actionable finding -- regenerate) and "never actually checked" are
+	// three different claims, and #1080's governing rule -- absence of
+	// evidence is not evidence of freshness -- forbids the third from ever
+	// rendering as the reassuring first, while folding it into the second
+	// would overclaim a staleness that was never actually observed. See
+	// CoverageStale.
+	CoverageUnknownFreshness CoverageState = "unknown"
 	// CoverageMixed means more than one of the above applied to the same
 	// result -- e.g. a source failed AND the answer was also withheld by
 	// policy. Reasons names each contributing state individually; Mixed is
@@ -215,7 +233,8 @@ const (
 // CoverageReason is one concrete, per-cause entry behind a non-complete
 // Coverage -- which source (if any), which state, and enough detail for a
 // caller to act: fix the source and rebuild (degraded), widen scope or
-// pass --private (limited), regenerate (a future stale reason). A caller
+// pass --private (limited), regenerate (stale), or nothing at all --
+// unknown freshness has no fix, only a caveat. A caller
 // reading only Coverage.State still knows "this may not be trustworthy";
 // a caller reading Reasons knows what to do about it.
 type CoverageReason struct {
@@ -276,6 +295,39 @@ func (cov Coverage) withLimitedReason(detail string) Coverage {
 		cov.State = CoverageMixed
 	}
 	cov.Reasons = append(cov.Reasons, CoverageReason{State: CoverageLimited, Detail: detail})
+	return cov
+}
+
+// WithFreshnessReason folds one staleness-comparison finding (#1047,
+// folded into Coverage's own structure by #1080) into cov -- state must be
+// CoverageStale or CoverageUnknownFreshness, source names which of
+// knowledge.Generate's sources the finding is about (empty when the
+// finding covers the comparison itself, e.g. source paths could not be
+// resolved at all), and detail is the human-readable why.
+//
+// Uses the exact compose-to-mixed rule withLimitedReason already
+// established, generalised from one folded-in dimension to however many
+// distinct non-complete causes a single result ends up carrying: a cov
+// still CoverageComplete becomes exactly the state being folded in; a cov
+// that already carries this same state (e.g. a second stale source found
+// after a first) stays that state, with the new reason simply appended;
+// any other existing state (Limited, Degraded, or a different freshness
+// finding already folded in -- Stale and UnknownFreshness are distinct
+// causes and one folding in after the other IS "more than one applied")
+// becomes CoverageMixed, so a caller reading only Coverage.State still
+// catches every contributing cause without doing its own boolean
+// arithmetic over Reasons.
+func (cov Coverage) WithFreshnessReason(state CoverageState, source, detail string) Coverage {
+	switch cov.State {
+	case CoverageComplete:
+		cov.State = state
+	case state:
+		// Already this same single-cause state -- another finding of the
+		// same kind doesn't change State, only adds a Reason below.
+	default:
+		cov.State = CoverageMixed
+	}
+	cov.Reasons = append(cov.Reasons, CoverageReason{State: state, Source: source, Detail: detail})
 	return cov
 }
 

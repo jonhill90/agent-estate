@@ -683,43 +683,100 @@ func statFile(name, path string) indexSourceMtime {
 	return indexSourceMtime{name: name, mtime: fi.ModTime(), known: true}
 }
 
-// printIndexFreshness prints the compiled index's own age, then
-// compares it against the four sources knowledge.Generate reads and
-// names any that changed since -- agent-estate#1036. It never
-// regenerates anything; a stat is the only filesystem access it
-// performs. generatedAt.IsZero() means the caller has no successfully-
-// read index to report on (StateIndexMissing/StateIndexUnreadable
-// already returned before this is called), so it is a silent no-op.
+// freshnessFindings compares generatedAt against every source
+// knowledge.Generate reads (indexSourceMtimes) and splits the result into
+// sources demonstrably newer than the index (stale) and sources whose
+// freshness could not be determined at all (unknown, e.g. github-stars --
+// no local file to stat). This is the single read-only measurement both
+// printIndexFreshness's prose (agent-estate#1036) and
+// foldFreshnessIntoCoverage's structure (agent-estate#1080) are derived
+// from, so the two can never disagree about what was actually observed --
+// one measurement, two renderings, never a second copy of the comparison.
+// cfgErr non-nil means the comparison could not run at all (source paths
+// themselves could not be resolved); both callers treat that as its own
+// finding, not a silent skip.
+func freshnessFindings(generatedAt time.Time) (stale, unknown []indexSourceMtime, cfgErr error) {
+	cfg, err := knowledge.DefaultConfig()
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, s := range indexSourceMtimes(cfg) {
+		if !s.known {
+			unknown = append(unknown, s)
+			continue
+		}
+		if s.mtime.After(generatedAt) {
+			stale = append(stale, s)
+		}
+	}
+	return stale, unknown, nil
+}
+
+// printIndexFreshness prints the compiled index's own age, then names any
+// source freshnessFindings reports as changed since or uncheckable --
+// agent-estate#1036. It never regenerates anything; freshnessFindings'
+// own stat calls are the only filesystem access this performs.
+// generatedAt.IsZero() means the caller has no successfully-read index to
+// report on (StateIndexMissing/StateIndexUnreadable already returned
+// before this is called), so it is a silent no-op.
 func printIndexFreshness(generatedAt time.Time) {
 	if generatedAt.IsZero() {
 		return
 	}
 	fmt.Printf("index built %s ago (%s)\n", formatAge(time.Since(generatedAt)), generatedAt.Format(time.RFC3339))
 
-	cfg, err := knowledge.DefaultConfig()
+	stale, unknown, err := freshnessFindings(generatedAt)
 	if err != nil {
 		fmt.Printf("note: could not resolve source paths to check staleness against: %s\n", err)
 		return
 	}
 
-	var stale, unknown []string
-	for _, s := range indexSourceMtimes(cfg) {
-		if !s.known {
-			unknown = append(unknown, fmt.Sprintf("%s (%s)", s.name, s.reason))
-			continue
-		}
-		if s.mtime.After(generatedAt) {
-			stale = append(stale, fmt.Sprintf("%s (changed %s ago)", s.name, formatAge(time.Since(s.mtime))))
-		}
-	}
-
 	if len(stale) > 0 {
+		names := make([]string, len(stale))
+		for i, s := range stale {
+			names[i] = fmt.Sprintf("%s (changed %s ago)", s.name, formatAge(time.Since(s.mtime)))
+		}
 		fmt.Printf("index is BEHIND its sources: %s -- regenerate with `estate knowledge` before trusting this over a live read\n",
-			strings.Join(stale, ", "))
+			strings.Join(names, ", "))
 	}
 	for _, u := range unknown {
-		fmt.Printf("note: staleness against %s could not be checked -- reported as unknown, not assumed fresh\n", u)
+		fmt.Printf("note: staleness against %s (%s) could not be checked -- reported as unknown, not assumed fresh\n", u.name, u.reason)
 	}
+}
+
+// foldFreshnessIntoCoverage folds freshnessFindings' result into qr's own
+// Coverage as structured CoverageStale/CoverageUnknownFreshness reasons --
+// agent-estate#1080's fold-in of #1047's staleness comparison, so a
+// machine caller reading only Coverage (never the prose printed alongside
+// it) still learns what printIndexFreshness already told a human: a
+// confirmed-newer source names itself as CoverageStale, and a source whose
+// freshness could not be determined at all -- github-stars, standingly --
+// reports CoverageUnknownFreshness rather than silently reading as fresh.
+// generatedAt.IsZero() mirrors printIndexFreshness's own no-op guard: no
+// successfully-read index means nothing to compare, and Coverage is
+// already the zero value for those two states (see QueryResult's own doc
+// comment). A cfg resolution failure is itself folded in as
+// CoverageUnknownFreshness with no named source -- every source's
+// freshness is equally uncheckable when the comparison can't run at all,
+// which is at least as severe as any single source being uncheckable.
+func foldFreshnessIntoCoverage(cov knowledge.Coverage, generatedAt time.Time) knowledge.Coverage {
+	if generatedAt.IsZero() {
+		return cov
+	}
+	stale, unknown, err := freshnessFindings(generatedAt)
+	if err != nil {
+		return cov.WithFreshnessReason(knowledge.CoverageUnknownFreshness, "",
+			"could not resolve source paths to check staleness against: "+err.Error())
+	}
+	for _, s := range stale {
+		cov = cov.WithFreshnessReason(knowledge.CoverageStale, s.name,
+			fmt.Sprintf("changed %s ago, after the index was built", formatAge(time.Since(s.mtime))))
+	}
+	for _, u := range unknown {
+		cov = cov.WithFreshnessReason(knowledge.CoverageUnknownFreshness, u.name,
+			"staleness could not be checked: "+u.reason)
+	}
+	return cov
 }
 
 // formatAge renders a duration the way a human reading terminal output
@@ -826,6 +883,13 @@ func main() {
 			}
 			question := strings.Join(rest, " ")
 			qr := knowledge.Query(out, question, 0, includePrivate)
+			// agent-estate#1080: fold #1047's staleness comparison into
+			// Coverage itself, not just the prose printIndexFreshness
+			// prints below -- a machine caller reading only Coverage must
+			// see the same freshness finding a human reading the note
+			// sees. No-op when IndexGeneratedAt is zero (the two
+			// index-read-failure states already returned above).
+			qr.Coverage = foldFreshnessIntoCoverage(qr.Coverage, qr.IndexGeneratedAt)
 			if asJSON {
 				printKnowledgeQueryJSON(qr)
 			} else {

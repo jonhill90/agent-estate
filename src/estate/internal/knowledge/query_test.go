@@ -1019,3 +1019,67 @@ func TestQueryParaphraseSurvivesTheRetiredFloor(t *testing.T) {
 			"this is the exact case the retired requiredScore floor excluded before ranking ever ran", paraphrase.Matches)
 	}
 }
+
+// TestCoverageWithFreshnessReasonComposesLikeLimitedAndDegraded is the
+// direct regression test for agent-estate#1080: WithFreshnessReason must
+// fold CoverageStale/CoverageUnknownFreshness into Coverage using the
+// exact same compose-to-mixed rule withLimitedReason already established
+// for CoverageLimited/CoverageDegraded, never a differently-shaped signal.
+func TestCoverageWithFreshnessReasonComposesLikeLimitedAndDegraded(t *testing.T) {
+	// Complete -> Stale outright, naming the source.
+	stale := Coverage{State: CoverageComplete}.WithFreshnessReason(CoverageStale, "agent-memory-vault", "changed 3m ago")
+	if stale.State != CoverageStale {
+		t.Fatalf("Complete + stale reason: State = %q, want %q", stale.State, CoverageStale)
+	}
+	if len(stale.Reasons) != 1 || stale.Reasons[0].Source != "agent-memory-vault" {
+		t.Fatalf("stale.Reasons = %+v, want one reason naming agent-memory-vault", stale.Reasons)
+	}
+
+	// Complete -> UnknownFreshness outright, naming the source.
+	unknown := Coverage{State: CoverageComplete}.WithFreshnessReason(CoverageUnknownFreshness, "github-stars", "no local file to stat")
+	if unknown.State != CoverageUnknownFreshness {
+		t.Fatalf("Complete + unknown reason: State = %q, want %q", unknown.State, CoverageUnknownFreshness)
+	}
+	// CoverageUnknownFreshness must never be mistaken for CoverageComplete
+	// -- #1080's governing rule, checked structurally, not just by prose.
+	if unknown.State == CoverageComplete {
+		t.Fatalf("unknown freshness collapsed into CoverageComplete -- absence of evidence must never render as fresh")
+	}
+
+	// A second stale finding on an already-stale Coverage stays Stale, not
+	// Mixed -- two causes of the SAME kind is not "more than one kind".
+	twoStale := stale.WithFreshnessReason(CoverageStale, "loops-research", "changed 1h ago")
+	if twoStale.State != CoverageStale {
+		t.Fatalf("Stale + another stale reason: State = %q, want %q to stay", twoStale.State, CoverageStale)
+	}
+	if len(twoStale.Reasons) != 2 {
+		t.Fatalf("twoStale.Reasons = %+v, want 2", twoStale.Reasons)
+	}
+
+	// Stale + UnknownFreshness on the same result -> Mixed, both causes
+	// still individually visible in Reasons.
+	mixed := stale.WithFreshnessReason(CoverageUnknownFreshness, "github-stars", "no local file to stat")
+	if mixed.State != CoverageMixed {
+		t.Fatalf("Stale + unknown reason: State = %q, want %q", mixed.State, CoverageMixed)
+	}
+	var sawStale, sawUnknown bool
+	for _, r := range mixed.Reasons {
+		switch r.State {
+		case CoverageStale:
+			sawStale = true
+		case CoverageUnknownFreshness:
+			sawUnknown = true
+		}
+	}
+	if !sawStale || !sawUnknown {
+		t.Fatalf("mixed.Reasons missing stale and/or unknown: %+v", mixed.Reasons)
+	}
+
+	// A freshness reason folded onto an already-Degraded/Limited Coverage
+	// becomes Mixed too, exactly as Degraded+Limited already does.
+	degraded := Coverage{State: CoverageDegraded, Reasons: []CoverageReason{{State: CoverageDegraded, Source: "vault-facts", Detail: "unreadable"}}}
+	degradedThenStale := degraded.WithFreshnessReason(CoverageStale, "agent-memory-vault", "changed 3m ago")
+	if degradedThenStale.State != CoverageMixed {
+		t.Fatalf("Degraded + stale reason: State = %q, want %q", degradedThenStale.State, CoverageMixed)
+	}
+}
