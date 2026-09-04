@@ -117,6 +117,15 @@ func main() {
 				"(agent-tui#49 item 2). Set this explicitly only to point at a different ledger or a "+
 				"hand-made copy; the ledger read itself (`sqlite3 PRAGMA query_only=1`, not `-readonly` -- see "+
 				"internal/board/ledger.go) never opens whatever this resolves to more than once per fetch.")
+		corpusLedger = flag.String("corpus-ledger", envOr("AGENT_TUI_CORPUS_LEDGER", ""),
+			"path to the OPERATOR'S OWN corpus (agent-estate#1088) -- a different, much larger database than "+
+				"-ledger's shared prompt/decision ledger (7,311 items / 1,104 live hard parameters measured "+
+				"2026-09-03, against the shared ledger's 72/0). Opened read-only via the file:...?mode=ro URI "+
+				"form, never copied (src/estate/internal/corpus's own precedent for this exact file). Left "+
+				"unset, defaults to $HOME/corpus/ledger.sqlite3, the same path "+
+				"src/estate/internal/corpus.Path() resolves; left unresolvable there too, the library pane's "+
+				"[c]-cycled operator Source renders itself \"not configured\" rather than refusing to start -- "+
+				"unlike -ledger, no flag makes this mandatory.")
 		openAPISpec = flag.String("openapi", envOr("AGENT_TUI_OPENAPI", ""),
 			"OpenAPI document rendered by the Docs -> API Docs pane. Empty falls back to "+
 				"$HILL90_APP_REPO/"+openAPIRelPath+"; with neither, that pane says so rather than "+
@@ -247,6 +256,13 @@ func main() {
 	// only way -board still refuses to start is boardOK == false below --
 	// discovery genuinely found nothing, not merely "you didn't pass -ledger".
 	ledgerSrc, boardOK, boardUnavailable := resolveLedgerSource(*ledger, *sqliteBin)
+	// The operator's own corpus (agent-estate#1088) is never mandatory to
+	// start -- unlike boardOK above, corpusOK is never checked against an
+	// os.Exit refusal here. An unconfigured corpus surfaces on screen as
+	// the library pane's own "not configured" Source state
+	// (buildLibrarySources, library.go), the same visible-not-silent
+	// treatment -ledger's own unconfigured path already gets.
+	corpusSrc, _, _ := resolveCorpusSource(*corpusLedger)
 	if *showBoard && !boardOK {
 		fmt.Fprintln(os.Stderr, "estate: -board unavailable --", boardUnavailable)
 		os.Exit(1)
@@ -584,11 +600,7 @@ func main() {
 		start = shell.PaneLaneChatUnifiedList
 	}
 
-	libraryModel := library.New(
-		buildLibraryFetch(ledgerSrc, *sqliteBin),
-		buildLibraryDetailLoader(ledgerSrc, *sqliteBin),
-		buildLibraryCountFetch(ledgerSrc, *sqliteBin),
-	)
+	libraryModel := library.NewSources(buildLibrarySources(ledgerSrc, corpusSrc, *sqliteBin))
 
 	// monitorModel/workflowsModel are w5f.md's two new panes -- see
 	// monitor.go/workflows.go's own doc comments for what each reuses

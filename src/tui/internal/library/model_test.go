@@ -222,3 +222,126 @@ func TestStaleDetailLoadIsDropped(t *testing.T) {
 		t.Fatal("a stale detailResultMsg was cached -- it should have been dropped")
 	}
 }
+
+// TestCKeyCyclesSourceAndReFetches is agent-estate#1088's own contract: [c]
+// switches which corpus's Fetcher is called, exactly like [v]/[f]/[x] switch
+// which query is run against the ONE corpus this package used to have. This
+// is the test that could not exist -- let alone pass -- before NewSources:
+// against the parent commit (agent-estate#1080, 2df4d3f), library.Model had
+// exactly one corpus wired in at construction and no key that changed it.
+func TestCKeyCyclesSourceAndReFetches(t *testing.T) {
+	var gotCalls []string
+	sharedFetch := func(View, string, string) ([]ItemRow, error) {
+		gotCalls = append(gotCalls, "shared")
+		return []ItemRow{{ID: "it-shared0000000"}}, nil
+	}
+	operatorFetch := func(View, string, string) ([]ItemRow, error) {
+		gotCalls = append(gotCalls, "operator")
+		return []ItemRow{{ID: "it-operator000000"}}, nil
+	}
+	m := NewSources([]Source{
+		{Name: "shared", Fetch: sharedFetch},
+		{Name: "operator", Fetch: operatorFetch},
+	})
+	if m.currentSourceName() != "shared" {
+		t.Fatalf("default source = %q, want shared (the shared corpus stays the default)", m.currentSourceName())
+	}
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	m = next.(Model)
+	if m.currentSourceName() != "operator" {
+		t.Fatalf("after [c], source = %q, want operator", m.currentSourceName())
+	}
+	if cmd == nil {
+		t.Fatal("[c] did not return a re-fetch command")
+	}
+	msg := cmd()
+	// tea.Batch returns a batchMsg; Update must handle it via the same
+	// message pump a real Program uses, but this test only needs to know
+	// the underlying doFetch/doFetchCount thunks it wraps actually ran.
+	if b, ok := msg.(tea.BatchMsg); ok {
+		for _, c := range b {
+			if c != nil {
+				c()
+			}
+		}
+	}
+	if len(gotCalls) != 1 || gotCalls[0] != "operator" {
+		t.Fatalf("calls after [c] = %v, want exactly one call to the operator fetch", gotCalls)
+	}
+
+	// One more [c] wraps back to shared.
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	m = next.(Model)
+	if m.currentSourceName() != "shared" {
+		t.Fatalf("after a second [c], source = %q, want shared (wrapped around)", m.currentSourceName())
+	}
+}
+
+// TestCKeyIsANoOpWithOneSource is New's own single-source sugar: [c] must
+// not panic or change anything when there is nothing to cycle to.
+func TestCKeyIsANoOpWithOneSource(t *testing.T) {
+	m := New(fakeFetch(testRows(), nil), nil, nil)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	m = next.(Model)
+	if cmd != nil {
+		t.Fatal("[c] with only one source returned a non-nil cmd, want a no-op")
+	}
+	if m.currentSourceName() != "corpus" {
+		t.Fatalf("source name = %q, want the unnamed-Source fallback", m.currentSourceName())
+	}
+}
+
+// TestSwitchingSourceClearsCacheAndRows guards against a source switch
+// showing the WRONG corpus's cached text under a coincidentally-matching
+// id, or its stale row list, while the new source's own fetch is still in
+// flight.
+func TestSwitchingSourceClearsCacheAndRows(t *testing.T) {
+	m := NewSources([]Source{
+		{Name: "shared", Fetch: fakeFetch(testRows(), nil), LoadDetail: func(id string) (ItemDetail, error) {
+			return ItemDetail{ID: id, Body: "SHARED BODY"}, nil
+		}},
+		{Name: "operator", Fetch: fakeFetch(nil, nil)},
+	})
+	next, _ := m.Update(fetchResultMsg{rows: testRows()})
+	m = next.(Model)
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("enter")})
+	m = next.(Model)
+	if cmd != nil {
+		msg := cmd()
+		next, _ = m.Update(msg)
+		m = next.(Model)
+	}
+	if len(m.cache) == 0 {
+		t.Fatal("setup did not actually cache an item -- test is not exercising what it claims to")
+	}
+
+	next, _ = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	m = next.(Model)
+	if len(m.cache) != 0 {
+		t.Fatalf("cache not cleared after switching corpus: %+v", m.cache)
+	}
+	if len(m.rows) != 0 {
+		t.Fatalf("rows not cleared after switching corpus: %+v", m.rows)
+	}
+	if m.mode != modeList {
+		t.Fatal("switching corpus did not return to list mode")
+	}
+}
+
+// TestUnconfiguredSourceRendersItsOwnName proves the two corpora's
+// "not configured" states stay distinguishable by name -- cycling [c] to
+// an unconfigured operator corpus must not read as "the corpus you just
+// saw work is now broken".
+func TestUnconfiguredSourceRendersItsOwnName(t *testing.T) {
+	m := NewSources([]Source{
+		{Name: "shared", Fetch: fakeFetch(testRows(), nil)},
+		{Name: "operator", Fetch: nil},
+	})
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("c")})
+	m = next.(Model)
+	out := m.View()
+	if !strings.Contains(out, "operator not configured") {
+		t.Fatalf("unconfigured operator source did not name itself:\n%s", out)
+	}
+}

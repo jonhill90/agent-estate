@@ -40,11 +40,11 @@ func (m Model) View() string {
 
 func (m Model) viewList() string {
 	var b strings.Builder
-	b.WriteString(titleStyle.Render(truncate("library", m.width)) + "\n")
+	b.WriteString(titleStyle.Render(truncate("library: "+m.currentSourceName(), m.width)) + "\n")
 
 	if m.unconfigured {
 		errStyle := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Color(theme.RoleError))
-		b.WriteString(errStyle.Render(truncate("! no ledger configured -- point -ledger (or $AGENT_TUI_LEDGER) at a copy, or let it auto-discover the live one", m.width)) + "\n")
+		b.WriteString(errStyle.Render(truncate(unconfiguredMessage(m.sources[m.sourceIdx].Name), m.width)) + "\n")
 	} else if m.fetchErr != nil {
 		errStyle := lipgloss.NewStyle().Bold(true).Foreground(m.theme.Color(theme.RoleError))
 		b.WriteString(errStyle.Render(truncate("! could not read the corpus: "+m.fetchErr.Error(), m.width)) + "\n")
@@ -63,12 +63,26 @@ func (m Model) viewList() string {
 	b.WriteString(legendStyle.Render(truncate(countLine, m.width)) + "\n")
 
 	legend := fmt.Sprintf(
-		"view: %s (%d rows)  weight: %s  status: %s  [j/k] move  [enter] open  [v] view  [f] weight  [x] status  [r] refresh  [t] theme  [q] quit",
+		"view: %s (%d rows)  weight: %s  status: %s  [j/k] move  [enter] open  [v] view  [f] weight  [x] status  [c] corpus  [r] refresh  [t] theme  [q] quit",
 		m.view.Label(), len(m.rows), filterLabel(m.weight), filterLabel(m.status),
 	)
 	b.WriteString(legendStyle.Render(truncate(legend, m.width)))
 
 	return lipgloss.NewStyle().Width(m.width).Height(m.height).Render(b.String())
+}
+
+// unconfiguredMessage is the visible "could not look" banner for a Source
+// with no Fetch wired. An unnamed Source keeps the exact wording this
+// package shipped before multi-source support (New's single-source sugar,
+// and every test in this package that predates agent-estate#1088); a named
+// Source (cmd/estate's real two-corpus wiring) names itself explicitly so
+// cycling [c] to an unconfigured second corpus reads as "this one, not the
+// one you just saw work".
+func unconfiguredMessage(name string) string {
+	if name == "" {
+		return "! no ledger configured -- point -ledger (or $AGENT_TUI_LEDGER) at a copy, or let it auto-discover the live one"
+	}
+	return "! " + name + " not configured -- point its own flag/env var at it, or let it auto-discover"
 }
 
 func (m Model) renderListLines() string {
