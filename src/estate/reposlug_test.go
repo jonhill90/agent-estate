@@ -82,7 +82,11 @@ func TestRepoSlugRefusesRatherThanHangingOnAForgeThatNeverAnswers(t *testing.T) 
 			t.Fatalf("repoSlug took %s to honour a %s bound -- the deadline is not killing the subprocess tree", elapsed, repoSlugTimeout)
 		}
 	case <-time.After(30 * time.Second):
-		t.Fatal("repoSlug never returned: the gh call is unbounded, so a dispatch on a black-holed route would never return either")
+		// Either there is no bound at all, or there is one that does not
+		// bind because only the direct child is signalled and a helper
+		// still holds the output pipe. Both mutants produce this, and both
+		// are the same defect from a dispatch's point of view.
+		t.Fatal("repoSlug never returned: the gh call is not effectively bounded, so a dispatch on a black-holed route would never return either")
 	}
 }
 
