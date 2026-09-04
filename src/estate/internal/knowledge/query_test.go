@@ -564,6 +564,16 @@ func TestQueryIndexMissingIsTypedSeparatelyFromNoMatch(t *testing.T) {
 	if got.Reason == "" {
 		t.Error("Reason is empty on a missing index")
 	}
+	// agent-estate#1141: Coverage must be a typed "there is no index to
+	// have an opinion about" value, never the bare zero Coverage{} --
+	// serialised, a zero Coverage is `"coverage":{"state":""}`,
+	// indistinguishable on the wire from a forgotten field.
+	if got.Coverage.State != CoverageNotApplicable {
+		t.Fatalf("Coverage.State = %q, want %q on a missing index", got.Coverage.State, CoverageNotApplicable)
+	}
+	if len(got.Coverage.Reasons) != 0 {
+		t.Fatalf("Coverage.Reasons = %+v, want none -- Reason on QueryResult already says why", got.Coverage.Reasons)
+	}
 }
 
 func TestQueryIndexUnreadableIsTypedSeparatelyFromMissing(t *testing.T) {
@@ -577,6 +587,12 @@ func TestQueryIndexUnreadableIsTypedSeparatelyFromMissing(t *testing.T) {
 	}
 	if got.Reason == "" {
 		t.Error("Reason is empty on an unreadable index")
+	}
+	// agent-estate#1141: same typed-absence requirement as the missing-index
+	// case above -- an unreadable index has no more of an index to have a
+	// coverage opinion about than a missing one does.
+	if got.Coverage.State != CoverageNotApplicable {
+		t.Fatalf("Coverage.State = %q, want %q on an unreadable index", got.Coverage.State, CoverageNotApplicable)
 	}
 }
 

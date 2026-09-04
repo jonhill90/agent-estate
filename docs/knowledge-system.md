@@ -182,6 +182,7 @@ trustworthy right now.
 | `stale` | a source has been *observed* to have changed since the index was built | regenerate the index |
 | `unknown` | a source's freshness could not be determined at all — e.g. GitHub stars are read live with no local file to stat against | no fix; a caveat, not an actionable finding |
 | `mixed` | more than one of the above applied to the same result | read `coverage.reasons` for each contributing cause |
+| `not_applicable` | there was no compiled index to have a coverage opinion about (`state: index_missing` or `index_unreadable`) | fix `reason` on the result, not `coverage` -- nothing to regenerate here yet |
 
 `degraded` and `limited` are deliberately different words for a reason:
 withholding private material in default mode is the boundary working as
@@ -197,8 +198,10 @@ inside it (`src/estate/internal/knowledge/query.go`,
 `internal/knowledge/contradiction.go`, agent-estate#1051/#1104). The two
 answer different questions: `coverage` asks *"was this search complete?"* —
 every one of its states (`complete`, `limited`, `degraded`, `stale`,
-`unknown`, `mixed`) is something the caller can act on by rerunning,
-regenerating, or trusting the answer as-is. A contradiction's own remedy is
+`unknown`, `mixed`, `not_applicable`) is something the caller can act on by
+rerunning, regenerating, trusting the answer as-is, or (for
+`not_applicable`) reading `reason` on the result instead. A contradiction's
+own remedy is
 none of those — it is *"a human must decide which of these two is true"* —
 which fits none of `coverage`'s states, so it is not one of them.
 
