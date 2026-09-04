@@ -553,6 +553,29 @@ func unknownTagReasons(unknown []string, sources []SourceResult) []string {
 // SourceResult.Name is "vault-facts", plural) -- not a bug this function
 // is fixing, just the naming gap it has to see through to tell "this
 // source failed" from "no such source" for that exact tag.
+// isCorpusKindTag reports whether name (already prefix-stripped and
+// singularised the same way failedSourceForTag treats every other tag) is
+// one of corpusKinds' own "corpus-<kind>" values -- agent-estate#1120's
+// reopened gap. corpusSource (corpus.go) compiles all of corpusKinds into
+// ONE reader pass and reports it as a single SourceResult{Name:
+// "corpus-items"}, but each ITEM out of that pass carries its own kind as
+// its Source (corpusSourceName: "corpus-parameter", "corpus-directive",
+// "corpus-question", "corpus-correction") -- a different word entirely
+// from "corpus-items", not a plurality mismatch, so the trailing-"s" trim
+// below can never bridge it no matter how it's tuned. This is an explicit,
+// enumerated exception rather than a widening of that plural-tolerant
+// match: it lists exactly the four tag values corpusSource is known to
+// produce and nothing else, so it cannot start matching some other
+// source's name by accident the way a looser general rule could.
+func isCorpusKindTag(name string) bool {
+	for _, k := range corpusKinds {
+		if name == "corpus-"+k {
+			return true
+		}
+	}
+	return false
+}
+
 func failedSourceForTag(tag string, sources []SourceResult) (SourceResult, bool) {
 	const prefix = "source:"
 	if !strings.HasPrefix(tag, prefix) {
@@ -564,6 +587,9 @@ func failedSourceForTag(tag string, sources []SourceResult) (SourceResult, bool)
 			continue
 		}
 		if strings.TrimSuffix(strings.ToLower(s.Name), "s") == name {
+			return s, true
+		}
+		if s.Name == "corpus-items" && isCorpusKindTag(name) {
 			return s, true
 		}
 	}

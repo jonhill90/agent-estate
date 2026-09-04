@@ -939,6 +939,7 @@ func TestQueryUnknownTagFilterDistinguishesFailedSourceFromTypo(t *testing.T) {
 		GeneratedAt: time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC),
 		Sources: []SourceResult{
 			{Name: "vault-facts", OK: false, Reason: "cannot list /nonexistent/agent/facts: no such file or directory"},
+			{Name: "corpus-items", OK: false, Reason: "corpus unreadable at /nonexistent/corpus/ledger.sqlite3: no such file or directory"},
 			{Name: "repo-docs", OK: true, Count: 1},
 		},
 		Items: []Item{
@@ -968,6 +969,23 @@ func TestQueryUnknownTagFilterDistinguishesFailedSourceFromTypo(t *testing.T) {
 	}
 	if !strings.Contains(failed.Reason, "no such file or directory") {
 		t.Fatalf("Reason = %q, want it to carry the source's own failure detail", failed.Reason)
+	}
+
+	// The failed-corpus case: source:corpus-directive names one of
+	// corpusSource's own four kinds, but corpusSource reports itself as a
+	// single SourceResult{Name: "corpus-items"} -- a different word
+	// entirely, not a plurality mismatch, so this exercises
+	// isCorpusKindTag's explicit exception rather than the trailing-"s"
+	// trim above it.
+	failedCorpus := Query(path, "source:corpus-directive something", 0, true)
+	if failedCorpus.State != StateNoMatch {
+		t.Fatalf("State = %q, want %q", failedCorpus.State, StateNoMatch)
+	}
+	if !strings.Contains(failedCorpus.Reason, "corpus-items") || !strings.Contains(failedCorpus.Reason, "failed to build") {
+		t.Fatalf("Reason = %q, want it to name the failed source corpus-items", failedCorpus.Reason)
+	}
+	if !strings.Contains(failedCorpus.Reason, "corpus unreadable") {
+		t.Fatalf("Reason = %q, want it to carry the source's own failure detail", failedCorpus.Reason)
 	}
 
 	// The genuine-typo case: no source, live or failed, is named
