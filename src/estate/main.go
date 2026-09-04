@@ -192,8 +192,10 @@ func knowledgeGrounding() string {
 		"The index is derived, never authoritative, and may be reported stale. `no_match` " +
 		"means no match, `withheld_private` means matches exist but are private, and " +
 		"`--private` lifts that filter and says so in its own output -- do not paste " +
-		"private material into anything public. This is a tool, not a required step: use " +
-		"it if it helps, and the turn still works when the index is missing.\n"
+		"private material into anything public. Add `--json` to either command for the " +
+		"full machine-readable result, Coverage (agent-estate#1065's trustworthiness " +
+		"signal) included, instead of parsing the prose. This is a tool, not a required " +
+		"step: use it if it helps, and the turn still works when the index is missing.\n"
 }
 
 // roleGrounding is what dispatch appends to the prompt based on role alone
@@ -280,18 +282,25 @@ func usage() {
   estate knowledge                      regenerate the compiled, read-only index over
                                          GitHub stars, the memory vault, the corpus and
                                          Loops-Research -- derived, never authoritative
-  estate knowledge query [--private] <question>
+  estate knowledge query [--private] [--json] <question>
                                          small, ranked, cited pointers into the compiled
                                          index -- never bodies; publishable-only by
                                          default (agent-estate#1033), --private lifts
                                          that filter and says so in the output; states
                                          matched, no_match, index_missing,
                                          index_unreadable or withheld_private, never one
-                                         collapsed "nothing" answer
-  estate knowledge get [--private] <id> the one item Tier1/Tier2/Tier3 body a query
+                                         collapsed "nothing" answer; --json emits the
+                                         full QueryResult, Coverage included, as JSON on
+                                         stdout instead of prose (agent-estate#1068); an
+                                         unrecognised flag is refused, never folded into
+                                         the question
+  estate knowledge get [--private] [--json] <id>
+                                         the one item Tier1/Tier2/Tier3 body a query
                                          match pointed at -- the second half of
                                          progressive disclosure; refuses a private id
-                                         without --private (agent-estate#1033)
+                                         without --private (agent-estate#1033); --json
+                                         emits {ok, reason, item} on stdout instead of
+                                         prose (agent-estate#1068)
   estate tasks                          latest state of every task
   estate inflight                       tasks still occupying a slot
   estate reclaim [--apply]              report in-flight turns and whether their
@@ -512,18 +521,80 @@ func knowledgeQueryExitCode(state knowledge.QueryState) int {
 }
 
 // parseKnowledgeArgs splits a `knowledge query`/`knowledge get` argument
-// list into the --private flag (if present, anywhere in the list) and
-// the remaining positional arguments -- agent-estate#1033's explicit,
-// opt-in private mode. --private is never inferred from context.
-func parseKnowledgeArgs(args []string) (includePrivate bool, rest []string) {
+// list into --private (agent-estate#1033's explicit, opt-in private mode),
+// --json (agent-estate#1068's structured output mode), and the remaining
+// positional arguments. Neither flag is ever inferred from context.
+//
+// unknown carries the first argument that looks like a flag (starts with
+// "--") but is neither of the two recognised ones -- agent-estate#1068
+// Finding 2: before this, any unrecognised flag fell into rest and was
+// silently joined into the question text itself (`--json` became a search
+// term, scoring items that merely mention "json"), giving a confident
+// wrong answer to a different question instead of an error. The caller
+// must check unknown and refuse before running any query -- see
+// `case "knowledge":` in main.
+func parseKnowledgeArgs(args []string) (includePrivate, asJSON bool, rest []string, unknown string) {
 	for _, a := range args {
-		if a == "--private" {
+		switch {
+		case a == "--private":
 			includePrivate = true
-			continue
+		case a == "--json":
+			asJSON = true
+		case strings.HasPrefix(a, "--"):
+			if unknown == "" {
+				unknown = a
+			}
+		default:
+			rest = append(rest, a)
 		}
-		rest = append(rest, a)
 	}
-	return includePrivate, rest
+	return includePrivate, asJSON, rest, unknown
+}
+
+// printKnowledgeQueryJSON renders a knowledge.QueryResult as JSON on
+// stdout -- agent-estate#1068 Finding 1: QueryResult (including Coverage,
+// the machine-readable trustworthiness signal #1065 landed) is already
+// fully JSON-tagged, so this is transport only, never a second
+// computation of what Query decided. Every state (matched, no_match,
+// index_missing, index_unreadable, withheld_private,
+// matched_withheld_majority) is emitted the same way, unlike prose mode's
+// early stderr returns for the two index-read failures -- a JSON caller
+// reads State, not which stream the process wrote to.
+func printKnowledgeQueryJSON(qr knowledge.QueryResult) {
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(qr); err != nil {
+		fmt.Fprintln(os.Stderr, "estate: encode json:", err)
+		os.Exit(2)
+	}
+}
+
+// knowledgeGetJSON is `knowledge get --json`'s stdout shape -- Get itself
+// returns (Item, bool, string), so this wraps that same triple as JSON
+// rather than inventing a new field set. Item is nil (omitted) whenever
+// ok is false, so a JSON caller never has to distinguish a genuine
+// zero-value Item from "there is no item" -- Reason already carries why.
+type knowledgeGetJSON struct {
+	OK     bool            `json:"ok"`
+	Reason string          `json:"reason,omitempty"`
+	Item   *knowledge.Item `json:"item,omitempty"`
+}
+
+// printKnowledgeGetJSON renders one knowledge.Get result as JSON on
+// stdout -- the structured counterpart to the prose block later in
+// `case "knowledge":`, applied to `get` as the one-line extension #1068
+// asked for explicitly.
+func printKnowledgeGetJSON(item knowledge.Item, ok bool, reason string) {
+	out := knowledgeGetJSON{OK: ok, Reason: reason}
+	if ok {
+		out.Item = &item
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	if err := enc.Encode(out); err != nil {
+		fmt.Fprintln(os.Stderr, "estate: encode json:", err)
+		os.Exit(2)
+	}
 }
 
 func printSourceStatuses(sources []knowledge.SourceResult) {
@@ -739,9 +810,13 @@ func main() {
 
 	case "knowledge":
 		if len(os.Args) > 2 && os.Args[2] == "query" {
-			includePrivate, rest := parseKnowledgeArgs(os.Args[3:])
+			includePrivate, asJSON, rest, unknown := parseKnowledgeArgs(os.Args[3:])
+			if unknown != "" {
+				fmt.Fprintf(os.Stderr, "estate: unrecognised flag %q for knowledge query -- valid: --private, --json\n", unknown)
+				os.Exit(2)
+			}
 			if len(rest) == 0 {
-				fmt.Fprintln(os.Stderr, "usage: estate knowledge query [--private] <question>")
+				fmt.Fprintln(os.Stderr, "usage: estate knowledge query [--private] [--json] <question>")
 				os.Exit(2)
 			}
 			out, err := knowledge.DefaultOutputPath()
@@ -751,14 +826,22 @@ func main() {
 			}
 			question := strings.Join(rest, " ")
 			qr := knowledge.Query(out, question, 0, includePrivate)
-			printKnowledgeQuery(qr)
+			if asJSON {
+				printKnowledgeQueryJSON(qr)
+			} else {
+				printKnowledgeQuery(qr)
+			}
 			os.Exit(knowledgeQueryExitCode(qr.State))
 			return
 		}
 		if len(os.Args) > 2 && os.Args[2] == "get" {
-			includePrivate, rest := parseKnowledgeArgs(os.Args[3:])
+			includePrivate, asJSON, rest, unknown := parseKnowledgeArgs(os.Args[3:])
+			if unknown != "" {
+				fmt.Fprintf(os.Stderr, "estate: unrecognised flag %q for knowledge get -- valid: --private, --json\n", unknown)
+				os.Exit(2)
+			}
 			if len(rest) == 0 {
-				fmt.Fprintln(os.Stderr, "usage: estate knowledge get [--private] <id>")
+				fmt.Fprintln(os.Stderr, "usage: estate knowledge get [--private] [--json] <id>")
 				os.Exit(2)
 			}
 			out, err := knowledge.DefaultOutputPath()
@@ -767,6 +850,13 @@ func main() {
 				os.Exit(2)
 			}
 			item, ok, reason := knowledge.Get(out, rest[0], includePrivate)
+			if asJSON {
+				printKnowledgeGetJSON(item, ok, reason)
+				if !ok {
+					os.Exit(1)
+				}
+				return
+			}
 			if !ok {
 				fmt.Fprintln(os.Stderr, "estate: "+reason)
 				os.Exit(1)
