@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -94,6 +95,29 @@ func TestQueryMatchedRanksByTermOverlap(t *testing.T) {
 	}
 	if got.RankingBasis == "" {
 		t.Error("RankingBasis is empty -- ranking basis must be legible")
+	}
+}
+
+// TestRankingBasisNamesLiveFieldWeights pins the ranking-basis prose to
+// the actual field-weight constants bm25.go scores with, not to fixed
+// wording (agent-estate#1119): a value formatted straight out of the
+// constant, rather than a hand-copied literal, so this test breaks the
+// build the moment someone changes a weight in bm25.go without touching
+// this string -- see #1117, which changed ancestorFieldWeight underneath
+// a RankingBasis that never mentioned it and nothing caught. Pinning the
+// numbers (not the surrounding sentence) is the deliberate choice here:
+// a test asserting the exact sentence would be rewritten, and likely
+// disabled in frustration, the first time the prose is merely reworded
+// for clarity with the weights unchanged.
+func TestRankingBasisNamesLiveFieldWeights(t *testing.T) {
+	for _, want := range []string{
+		fmt.Sprintf("tier1FieldWeight=%v", tier1FieldWeight),
+		fmt.Sprintf("tier2FieldWeight=%v", tier2FieldWeight),
+		fmt.Sprintf("ancestorFieldWeight=%v", ancestorFieldWeight),
+	} {
+		if !strings.Contains(rankingBasisText, want) {
+			t.Errorf("rankingBasisText does not mention %q -- a field weight changed in bm25.go without updating the printed ranking basis (agent-estate#1119)", want)
+		}
 	}
 }
 
