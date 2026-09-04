@@ -177,6 +177,52 @@ func TestFindRepoRootWalksUpToAGENTSMD(t *testing.T) {
 	}
 }
 
+// TestRepoDocsSourceIDIsStableAcrossCheckoutRoots is agent-estate#1072's
+// own regression: two DIFFERENT checkout roots holding byte-identical
+// content must mint the SAME id for the same section. Before the fix,
+// repoDocsSource's permalink embedded the absolute path passed in as
+// repoRoot, so itemID (a pure function of permalink) produced a
+// different id per checkout for identical prose -- exactly the failure
+// #1072 measured between /tmp/estate-main and a second worktree of the
+// same commit. This asserts on the id, not merely that the permalink
+// "looks relative" -- a relative-looking string that still differed
+// between checkouts would pass a weaker check and still break citations.
+func TestRepoDocsSourceIDIsStableAcrossCheckoutRoots(t *testing.T) {
+	rootA := writeFixtureRepo(t)
+	rootB := writeFixtureRepo(t)
+	if rootA == rootB {
+		t.Fatal("t.TempDir() gave the same path twice -- test setup is broken, not the fix")
+	}
+
+	_, itemsA := repoDocsSource(rootA)
+	_, itemsB := repoDocsSource(rootB)
+	if len(itemsA) != len(itemsB) {
+		t.Fatalf("got %d items from rootA, %d from rootB -- fixtures must be identical", len(itemsA), len(itemsB))
+	}
+
+	byTier1A := make(map[string]Item, len(itemsA))
+	for _, it := range itemsA {
+		byTier1A[it.Tier1] = it
+	}
+	for _, itB := range itemsB {
+		itA, ok := byTier1A[itB.Tier1]
+		if !ok {
+			t.Fatalf("section %q present in rootB's items but not rootA's", itB.Tier1)
+		}
+		if itA.ID != itB.ID {
+			t.Fatalf("section %q got id %s from rootA (%s) but %s from rootB (%s) -- same section, different checkout, different id",
+				itB.Tier1, itA.ID, rootA, itB.ID, rootB)
+		}
+		if itA.Permalink != itB.Permalink {
+			t.Fatalf("section %q got permalink %q from rootA but %q from rootB -- permalink must not embed the checkout root",
+				itB.Tier1, itA.Permalink, itB.Permalink)
+		}
+		if filepath.IsAbs(itB.Permalink) {
+			t.Fatalf("permalink %q is an absolute path -- must be repo-relative", itB.Permalink)
+		}
+	}
+}
+
 func TestFindRepoRootReturnsEmptyWhenNoMarkerExists(t *testing.T) {
 	if got := findRepoRoot(t.TempDir()); got != "" {
 		t.Fatalf("findRepoRoot() = %q, want \"\" (no AGENTS.md anywhere above a bare temp dir)", got)

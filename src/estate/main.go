@@ -422,7 +422,48 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 	}
 	fmt.Println("ranking: " + qr.RankingBasis)
 	fmt.Println("ask `estate knowledge get <id>` for one item's full tier2/tier3")
+	printRepoDocsRootIfAny(matchSources(qr.Matches))
 	printSourceStatuses(qr.SourceStatuses)
+}
+
+// matchSources collects the distinct Source values across a set of
+// query matches -- printRepoDocsRootIfAny's own input, so it only prints
+// the note when a repo-docs match is actually present.
+func matchSources(matches []knowledge.Match) []string {
+	sources := make([]string, len(matches))
+	for i, m := range matches {
+		sources[i] = m.Source
+	}
+	return sources
+}
+
+// printRepoDocsRootIfAny prints this checkout's own repo root once, iff
+// "repo-docs" appears among sources -- agent-estate#1072: repo-docs
+// permalinks are repo-relative (AGENTS.md#anchor, not an absolute path)
+// so the same section gets the same id from any checkout, but a reader
+// still needs to know what to join a relative permalink to before it can
+// actually open the file. Resolved fresh via knowledge.DefaultConfig(),
+// the same repo-root logic every other knowledge command already uses --
+// this is the *current* checkout's root, which is what a reader sitting
+// at this terminal actually wants, not whatever checkout originally
+// generated the index.
+func printRepoDocsRootIfAny(sources []string) {
+	hasRepoDocs := false
+	for _, s := range sources {
+		if s == "repo-docs" {
+			hasRepoDocs = true
+			break
+		}
+	}
+	if !hasRepoDocs {
+		return
+	}
+	cfg, err := knowledge.DefaultConfig()
+	if err != nil || cfg.RepoRoot == "" {
+		fmt.Println("repo-docs permalinks are relative to this checkout's repo root, which could not be resolved here -- open them from a checkout containing AGENTS.md")
+		return
+	}
+	fmt.Println("repo-docs permalinks are relative to this checkout's repo root: " + cfg.RepoRoot)
 }
 
 // knowledgeQueryExitCode maps a QueryResult's typed State to the exit code
@@ -735,6 +776,7 @@ func main() {
 			}
 			fmt.Printf("id:        %s\nsource:    %s\npermalink: %s\ntier1:     %s\ntier2:     %s\ntier3:     %s\n",
 				item.ID, item.Source, item.Permalink, item.Tier1, item.Tier2, item.Tier3)
+			printRepoDocsRootIfAny([]string{item.Source})
 			// structural_tags carries kind: (agent-estate#1035, alongside
 			// the weight:/status: tags that were already being compiled
 			// but never actually printed here) -- this line is what makes
