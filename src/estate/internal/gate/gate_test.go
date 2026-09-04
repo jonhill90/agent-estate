@@ -780,6 +780,35 @@ func TestAuthorLaneTrailerNamingMidChainHopIsAccepted(t *testing.T) {
 	}
 }
 
+// agent-estate#1067: a trailer written in AGENTS.md Invariant 9's documented
+// "<session>:<index>" identity form, whose lane part names a real chain
+// member (here the chain root), must be ACCEPTED -- not refused for using
+// the repo's own documented convention. Reproduces #1008's real refusal:
+// trailer "agent-supervisor:lane-author" against a chain whose root is
+// "lane-author".
+func TestAuthorLaneTrailerSessionQualifiedChainRootIsAccepted(t *testing.T) {
+	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	reviewedAt := checkStart.Add(2 * time.Hour)
+	p := &PR{
+		Number:      926,
+		HeadOID:     "fixedcafe01",
+		HeadRefName: "dispatch/a1",
+		State:       "OPEN",
+		Body:        "Closes #926\n\nAuthor-Lane: agent-supervisor:lane-author\n",
+		Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
+		Comments:    []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: fixedcafe01\nVerdict: APPROVE\n"}},
+	}
+	l := newLedger(t,
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
+		ledger.Record{ID: "fix1", Issue: "926", Lane: "lane-fix", Role: ledger.RoleAuthor, PR: 926, State: ledger.Complete, Base: "deadbeef", HeadSHA: "fixedcafe01"},
+		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+	)
+	d := evaluateWithPR(p, "lane-review", l)
+	if !d.Allow {
+		t.Fatalf("evaluateWithPR refused a session-qualified Author-Lane: trailer naming the verified chain root: %v", d.Reasons)
+	}
+}
+
 // Bypass: a trailer naming a lane the chain walk never visited at all --
 // neither the root nor any fix-pass hop -- must still refuse. Accepting any
 // hop is not the same as accepting anything; the trailer must still name a
@@ -808,6 +837,46 @@ func TestBypass_AuthorLaneTrailerNamingLaneOutsideChainRefuses(t *testing.T) {
 	joined := strings.Join(d.Reasons, " | ")
 	if !strings.Contains(joined, "names a lane outside the verified author chain") {
 		t.Fatalf("refused, but not for the expected reason (Author-Lane outside chain): %v", d.Reasons)
+	}
+}
+
+// agent-estate#1067's "not a substring match" requirement, and the case
+// that matters most in that issue: a trailer naming a lane genuinely OUTSIDE
+// the verified chain must still refuse, whether or not it carries a
+// session qualifier. Stripping "<session>:" must never turn "the lane part
+// happens not to match" into a pass -- and it must not let a qualifier
+// smuggle a real chain id's SUFFIX past the check either (the "agent-
+// supervisor:" prefix accepted elsewhere is only ever stripped down to an
+// EXACT chain member, never used to justify embedding one).
+func TestBypass_AuthorLaneTrailerNamingLaneOutsideChainRefusesWithSessionQualifier(t *testing.T) {
+	checkStart := time.Date(2026, 9, 3, 10, 0, 0, 0, time.UTC)
+	reviewedAt := checkStart.Add(2 * time.Hour)
+	for _, trailer := range []string{
+		"agent-supervisor:lane-never-dispatched",
+		"lane-author:lane-never-dispatched",
+	} {
+		p := &PR{
+			Number:      926,
+			HeadOID:     "fixedcafe01",
+			HeadRefName: "dispatch/a1",
+			State:       "OPEN",
+			Body:        "Closes #926\n\nAuthor-Lane: " + trailer + "\n",
+			Checks:      []Check{{Name: "ci", Status: "COMPLETED", Conclusion: "SUCCESS", StartedAt: checkStart.Format(time.RFC3339)}},
+			Comments:    []Comment{{Body: "Review-Lane: lane-review\nReviewed-SHA: fixedcafe01\nVerdict: APPROVE\n"}},
+		}
+		l := newLedger(t,
+			ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
+			ledger.Record{ID: "fix1", Issue: "926", Lane: "lane-fix", Role: ledger.RoleAuthor, PR: 926, State: ledger.Complete, Base: "deadbeef", HeadSHA: "fixedcafe01"},
+			ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Verdict: APPROVE\n"},
+		)
+		d := evaluateWithPR(p, "lane-review", l)
+		if d.Allow {
+			t.Fatalf("bypass: session-qualified Author-Lane: trailer %q naming a lane the chain walk never visited was allowed to merge", trailer)
+		}
+		joined := strings.Join(d.Reasons, " | ")
+		if !strings.Contains(joined, "names a lane outside the verified author chain") {
+			t.Fatalf("trailer %q: refused, but not for the expected reason (Author-Lane outside chain): %v", trailer, d.Reasons)
+		}
 	}
 }
 

@@ -235,6 +235,25 @@ func normaliseLaneID(id string) string {
 	return strings.TrimPrefix(id, DispatchBranchPrefix)
 }
 
+// stripSessionQualifier strips an optional leading "<session>:" qualifier --
+// AGENTS.md Invariant 9's documented lane identity form, "<session>:<index>"
+// (e.g. "agent-supervisor:1006-...-28789-1") -- returning the id unchanged
+// when no qualifier is present. Only the FIRST colon is treated as the
+// qualifier boundary: a dispatch id itself never contains one, so splitting
+// there is unambiguous.
+//
+// This is deliberately NOT a substring match. The caller compares the
+// entire remainder after the colon against a verified chain lane with exact
+// equality (via normaliseLaneID) -- a trailer cannot pass by embedding a
+// real id inside a longer string, only by naming exactly that id after an
+// optional session prefix (agent-estate#1067).
+func stripSessionQualifier(id string) string {
+	if idx := strings.IndexByte(id, ':'); idx >= 0 {
+		return id[idx+1:]
+	}
+	return id
+}
+
 // AcceptsReviewLane reports whether a Review-Lane: trailer value would be
 // read as naming wantLane, under the exact normalisation
 // resolveLaneVerdict applies. Exported (agent-estate#957) alongside

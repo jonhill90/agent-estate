@@ -532,9 +532,24 @@ func evaluate(p *PR, reviewerLane string, l *ledger.Ledger) Decision {
 	// fix-passed PR"). This does NOT loosen the chain walk itself -- a
 	// trailer can only ever match a lane the Base/HeadSHA walk above already
 	// verified produced code in this exact PR's history.
-	if claimed, has := parseAuthorLaneTrailer(p.Body); has && !chainLanes[normaliseLaneID(claimed)] {
-		return refuse(d, "PR body's Author-Lane: trailer (\""+claimed+"\") names a lane outside the verified author chain (root "+authorRec.Lane+
-			", current head authored by \""+authorLane+"\") -- refusing")
+	//
+	// A trailer may ALSO carry the "<session>:" qualifier AGENTS.md
+	// Invariant 9 documents as the identity form ("<session>:<index>") --
+	// stripping it before comparing is normalisation of a documented
+	// SYNONYM for the same lane, never a widening of what is accepted:
+	// stripSessionQualifier's own doc comment is where the exact-match, no-
+	// substring guarantee lives (agent-estate#1067, following #1008's
+	// "agent-supervisor:1006-...-28789-1" trailer for a chain root the gate
+	// itself named "1006-...-28789-1"). A trailer that matches only after
+	// stripping a qualifier is accepted exactly like an unqualified match --
+	// there is nothing further to distinguish once the lane part checks out.
+	if claimed, has := parseAuthorLaneTrailer(p.Body); has {
+		unqualified := normaliseLaneID(claimed)
+		qualified := normaliseLaneID(stripSessionQualifier(claimed))
+		if !chainLanes[unqualified] && !chainLanes[qualified] {
+			return refuse(d, "PR body's Author-Lane: trailer (\""+claimed+"\") names a lane outside the verified author chain (root "+authorRec.Lane+
+				", current head authored by \""+authorLane+"\") -- refusing")
+		}
 	}
 
 	if authorLane == reviewerLane {
