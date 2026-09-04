@@ -447,6 +447,12 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 		if qr.Reason != "" {
 			fmt.Println(qr.Reason)
 		}
+		// agent-estate#1124: printed unconditionally, not only when
+		// suspiciously low -- a real answer of "0 items" against a broken
+		// index and "3959 items, none of them relevant" against a healthy
+		// one must never render as the same line. See IndexItemCount's own
+		// doc comment.
+		fmt.Printf("index contains %d item(s)\n", qr.IndexItemCount)
 		printSourceStatuses(qr.SourceStatuses)
 		return
 	case knowledge.StateWithheldPrivate:
