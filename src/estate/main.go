@@ -529,6 +529,9 @@ func main() {
 			}
 			fmt.Printf("id:        %s\nsource:    %s\npermalink: %s\ntier1:     %s\ntier2:     %s\ntier3:     %s\n",
 				item.ID, item.Source, item.Permalink, item.Tier1, item.Tier2, item.Tier3)
+			if item.PromptID != "" {
+				fmt.Printf("prompt_id: %s\n", item.PromptID)
+			}
 			return
 		}
 
