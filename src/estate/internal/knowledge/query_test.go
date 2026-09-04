@@ -948,6 +948,84 @@ func TestQueryUnknownTagFilterIsNoMatchNotError(t *testing.T) {
 	}
 }
 
+// TestQueryUnknownTagFilterDistinguishesFailedSourceFromTypo is
+// agent-estate#1120's own correction: "unknown tag(s): ... -- not present
+// in the compiled index" reads as "no such source exists" even when the
+// tag names a source that tried to build and failed -- the truth in that
+// case is the opposite of a typo, and a caller acting on the wrong
+// reading fixes the wrong thing. A tag naming a source that is actually
+// absent from res.Sources (a genuine typo) must keep the original
+// wording; a tag naming a source recorded !OK in res.Sources must name
+// the failure instead.
+func TestQueryUnknownTagFilterDistinguishesFailedSourceFromTypo(t *testing.T) {
+	res := Result{
+		GeneratedAt: time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC),
+		Sources: []SourceResult{
+			{Name: "vault-facts", OK: false, Reason: "cannot list /nonexistent/agent/facts: no such file or directory"},
+			{Name: "corpus-items", OK: false, Reason: "corpus unreadable at /nonexistent/corpus/ledger.sqlite3: no such file or directory"},
+			{Name: "repo-docs", OK: true, Count: 1},
+		},
+		Items: []Item{
+			{
+				ID: "20260904000010", Source: "repo-docs",
+				Permalink:      "docs/example.md",
+				StructuralTags: []string{"source:repo-docs"},
+				Tier1:          "an unrelated repo-docs item, present so the index is not empty",
+				Publishable:    true, PublishBasis: "test fixture: marked publishable",
+			},
+		},
+	}
+	path := filepath.Join(t.TempDir(), "index.json")
+	if err := Write(path, res); err != nil {
+		t.Fatal(err)
+	}
+
+	// The failed-source case: source:vault-fact names vault-facts, which
+	// is recorded !OK -- no item ever carried this tag because the
+	// source that would have produced it never built.
+	failed := Query(path, "source:vault-fact something", 0, true)
+	if failed.State != StateNoMatch {
+		t.Fatalf("State = %q, want %q", failed.State, StateNoMatch)
+	}
+	if !strings.Contains(failed.Reason, "vault-facts") || !strings.Contains(failed.Reason, "failed to build") {
+		t.Fatalf("Reason = %q, want it to name the failed source vault-facts", failed.Reason)
+	}
+	if !strings.Contains(failed.Reason, "no such file or directory") {
+		t.Fatalf("Reason = %q, want it to carry the source's own failure detail", failed.Reason)
+	}
+
+	// The failed-corpus case: source:corpus-directive names one of
+	// corpusSource's own four kinds, but corpusSource reports itself as a
+	// single SourceResult{Name: "corpus-items"} -- a different word
+	// entirely, not a plurality mismatch, so this exercises
+	// isCorpusKindTag's explicit exception rather than the trailing-"s"
+	// trim above it.
+	failedCorpus := Query(path, "source:corpus-directive something", 0, true)
+	if failedCorpus.State != StateNoMatch {
+		t.Fatalf("State = %q, want %q", failedCorpus.State, StateNoMatch)
+	}
+	if !strings.Contains(failedCorpus.Reason, "corpus-items") || !strings.Contains(failedCorpus.Reason, "failed to build") {
+		t.Fatalf("Reason = %q, want it to name the failed source corpus-items", failedCorpus.Reason)
+	}
+	if !strings.Contains(failedCorpus.Reason, "corpus unreadable") {
+		t.Fatalf("Reason = %q, want it to carry the source's own failure detail", failedCorpus.Reason)
+	}
+
+	// The genuine-typo case: no source, live or failed, is named
+	// anything resembling this -- the original wording must survive
+	// unchanged.
+	typo := Query(path, "source:not-a-real-source something", 0, true)
+	if typo.State != StateNoMatch {
+		t.Fatalf("State = %q, want %q", typo.State, StateNoMatch)
+	}
+	if !strings.Contains(typo.Reason, "not present in the compiled index") {
+		t.Fatalf("Reason = %q, want the original typo wording preserved", typo.Reason)
+	}
+	if strings.Contains(typo.Reason, "failed to build") {
+		t.Fatalf("Reason = %q, a genuine typo must never be reported as a failed source", typo.Reason)
+	}
+}
+
 // TestQueryTagFilterComposesWithQuestionTerms proves "filter first, rank
 // within": a tag filter combined with question terms narrows to the
 // tagged population, then ranks only inside it -- an item carrying the
