@@ -595,13 +595,14 @@ func unknownTagReasons(unknown []string, sources []SourceResult) []string {
 // ONE reader pass and reports it as a single SourceResult{Name:
 // "corpus-items"}, but each ITEM out of that pass carries its own kind as
 // its Source (corpusSourceName: "corpus-parameter", "corpus-directive",
-// "corpus-question", "corpus-correction") -- a different word entirely
-// from "corpus-items", not a plurality mismatch, so the trailing-"s" trim
-// below can never bridge it no matter how it's tuned. This is an explicit,
-// enumerated exception rather than a widening of that plural-tolerant
-// match: it lists exactly the four tag values corpusSource is known to
-// produce and nothing else, so it cannot start matching some other
-// source's name by accident the way a looser general rule could.
+// "corpus-question", "corpus-correction", "corpus-thought") -- a different
+// word entirely from "corpus-items", not a plurality mismatch, so the
+// trailing-"s" trim below can never bridge it no matter how it's tuned.
+// This is an explicit, enumerated exception rather than a widening of
+// that plural-tolerant match: it lists exactly the five tag values
+// corpusSource is known to produce and nothing else, so it cannot start
+// matching some other source's name by accident the way a looser general
+// rule could.
 func isCorpusKindTag(name string) bool {
 	for _, k := range corpusKinds {
 		if name == "corpus-"+k {
