@@ -29,6 +29,18 @@ func TestReadItemsSetsQueryOnlyAndView(t *testing.T) {
 	}
 }
 
+// TestReadItemsAcceptsNeedsReviewView is agent-estate#1089's own view-list
+// contract at the query-builder level: ReadItems must accept needs_review
+// as a valid view and query it by name -- fails against the parent commit
+// (329b4ee), where ViewNeedsReview did not exist and this view was refused
+// as "unknown".
+func TestReadItemsAcceptsNeedsReviewView(t *testing.T) {
+	run := fakeRunner(t, []string{"-json", "/tmp/copy.sqlite3", "PRAGMA query_only=1", "FROM needs_review"}, `[]`, nil)
+	if _, err := ReadItems(run, "/tmp/copy.sqlite3", ViewNeedsReview, "", ""); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestReadItemsDecodesRealShape(t *testing.T) {
 	out := `[{"id":"it-abf738372b578388","kind":"parameter","weight":"hard","status":"acknowledged","resolved_to":"scheduler=claude_code_native_cron_only","body_snippet":"Never set up a cron outside the Claude Code ecosystem"}]`
 	run := fakeRunner(t, []string{"live_parameters"}, out, nil)

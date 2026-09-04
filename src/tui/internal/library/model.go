@@ -52,10 +52,13 @@ func filterLabel(s string) string {
 	return s
 }
 
-// Model is the library view: the corpus's own live_parameters/
-// open_questions/unacknowledged views, cycled with [v], each optionally
-// narrowed by weight ([f]) and status ([x]), plus possibility_count shown
-// as a standing legend regardless of which view is active. Read-only --
+// Model is the library view: the corpus's own needs_review/live_parameters/
+// open_questions/unacknowledged views, cycled with [v] -- needs_review
+// first, the Model's own default view (agent-estate#1089: adjudicating the
+// few hundred flagged items is the operator's stated need, not browsing the
+// ~1,100 live parameters that are mostly fine) -- each optionally narrowed
+// by weight ([f]) and status ([x]), plus possibility_count shown as a
+// standing legend regardless of which view is active. Read-only --
 // this package has no write path, no key or method that touches the
 // ledger for anything but a SELECT. Wired into internal/shell via
 // WithLibrary (cmd/estate/main.go).
@@ -148,7 +151,7 @@ func NewSources(sources []Source) Model {
 		sources:      sources,
 		sourceIdx:    0,
 		unconfigured: sources[0].Fetch == nil,
-		view:         ViewLiveParameters,
+		view:         ViewNeedsReview,
 		cache:        map[string]ItemDetail{},
 		listVP:       viewport.New(0, 0),
 		bodyVP:       viewport.New(0, 0),
