@@ -111,9 +111,15 @@ func TestQueryMatchCarriesWeightAndStatus(t *testing.T) {
 			ID: "20260903120003", Source: "corpus-directive",
 			Permalink:      "corpus:item:9001",
 			StructuralTags: []string{"kind:directive", "weight:preference", "status:dropped"},
-			Tier1:          "quarantine token backups off the primary token store",
-			Tier2:          "quarantine token backups off the primary token store",
-			Publishable:    true, PublishBasis: "test fixture: marked publishable",
+			// Carries BOTH query terms ("auth", "token"), not just one --
+			// agent-estate#1134's sparse-source floor (minMatchedTerms)
+			// requires min(3, the question's own term count) distinct
+			// terms to match for a corpus-<kind> item; the two-term
+			// question "auth tokens" caps that at 2, so this fixture must
+			// share both to remain a candidate at all.
+			Tier1:       "quarantine auth token backups off the primary token store",
+			Tier2:       "quarantine auth token backups off the primary token store",
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
 		},
 	)
 	path := filepath.Join(t.TempDir(), "index.json")
@@ -312,16 +318,27 @@ func TestQueryOrdinaryNoMatchReasonIsUnchanged(t *testing.T) {
 	}
 }
 
-// TestQueryNoHardFloorASingleSharedTermStillSurfaces is agent-estate#1026's
-// none-01 shape (a five-term question sharing one generic word with an
-// unrelated item), but proves the OPPOSITE of what the retired
-// minMatchedTerms floor asserted: #1054 explicitly retires the hard
-// count floor because term WEIGHTING, not exclusion, is what should keep
-// a coincidental common-term match from outranking a genuine one. A
-// single real (if weak and non-discriminating) term overlap is now a
-// real, if low-ranked, candidate rather than being thrown away before
-// ranking is ever consulted.
-func TestQueryNoHardFloorASingleSharedTermStillSurfaces(t *testing.T) {
+// TestQuerySparseSourceFloorExcludesCoincidentalSingleTerm is agent-
+// estate#1134's own measured none-01 shape (a five-term question sharing
+// one generic word with an unrelated github-stars item) -- and it now
+// asserts the OPPOSITE of what this test asserted before #1134: #1054's
+// "no hard floor, term weighting alone decides relevance" rule turned
+// out, measured against a REAL 3989-item index, to let a genuinely absent
+// topic ("the office vending machine restocking schedule", verified
+// absent from every source before the golden case was written) return 22
+// confident, cited results and exit 0 -- github-stars is 391
+// heterogeneous one-line tool descriptions, large and varied enough that
+// an ordinary word like "schedule" reliably coincides with something
+// unrelated (apache/airflow, a workflow scheduler, here). #1134 restores
+// a narrow, source-scoped floor (minMatchedTerms) for exactly this
+// source family; this fixture is that regression test, not the one it
+// replaces. See TestQueryRareTermBeatsCommonTermCoincidence and
+// TestQueryParaphraseSurvivesTheRetiredFloor (both vault-fact, NOT in
+// sparseMatchSources) for where #1054's original no-floor property still
+// holds, and TestQueryNaturalLanguageSingleTermQuestionStillSurfaces for
+// where it holds even inside a sparse-floored source: a one-term
+// QUESTION is never held to a bar it cannot reach.
+func TestQuerySparseSourceFloorExcludesCoincidentalSingleTerm(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "index.json")
 	res := Result{
 		GeneratedAt:   time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
@@ -341,15 +358,126 @@ func TestQueryNoHardFloorASingleSharedTermStillSurfaces(t *testing.T) {
 	}
 
 	got := Query(path, "office vending machine restocking schedule", 0, false)
+	if got.State != StateNoMatch {
+		t.Fatalf("State = %q, want %q -- a github-stars item sharing only one of the question's five "+
+			"distinct terms (\"schedule\") is exactly none-01's measured coincidence and must not surface "+
+			"(matches=%+v)", got.State, StateNoMatch, got.Matches)
+	}
+	if len(got.Matches) != 0 {
+		t.Fatalf("Matches = %+v, want none", got.Matches)
+	}
+}
+
+// TestQueryNaturalLanguageSingleTermQuestionStillSurfaces proves
+// minMatchedTerms never holds a QUESTION to a bar it cannot reach, even
+// inside a sparseMatchSources source: agent-estate#1134's floor is
+// min(cap, the question's own distinct term count), so a one-term
+// question against github-stars still only needs its one term to match
+// -- this is the "single rare term still wins" property #1134 was told
+// to keep intact, demonstrated on the exact source family the new floor
+// tightens. Mirrors the golden set's real nl-11 case ("what is this
+// product for" -> "product", a single-term question against repo-docs)
+// on the stricter, sparse side of the floor instead.
+func TestQueryNaturalLanguageSingleTermQuestionStillSurfaces(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.json")
+	res := Result{
+		GeneratedAt:   time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
+		StalenessRule: stalenessRule,
+		Note:          derivedNote,
+		Items: []Item{
+			{
+				ID: "20260903120011", Source: "github-stars",
+				Permalink:   "https://github.com/openclaw/Peekaboo",
+				Tier1:       "openclaw/Peekaboo -- a macOS screenshot MCP server for AI agents",
+				Publishable: true, PublishBasis: "test fixture: marked publishable",
+			},
+		},
+	}
+	if err := Write(path, res); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Query(path, "screenshot", 0, false)
 	if got.State != StateMatched {
-		t.Fatalf("State = %q, want %q -- a real single-term overlap (\"schedule\") should surface, "+
-			"not be discarded by a count floor (matches=%+v, reason=%q)", got.State, StateMatched, got.Matches, got.Reason)
+		t.Fatalf("State = %q, want %q -- a one-distinct-term question only ever needs its own one "+
+			"term to match, sparse source or not (reason=%q)", got.State, StateMatched, got.Reason)
 	}
-	if len(got.Matches) != 1 || got.Matches[0].ID != "20260903120010" {
-		t.Fatalf("Matches = %+v, want the one item sharing \"schedule\"", got.Matches)
+	if len(got.Matches) != 1 || got.Matches[0].ID != "20260903120011" {
+		t.Fatalf("Matches = %+v, want the one item sharing \"screenshot\"", got.Matches)
 	}
-	if len(got.Matches[0].MatchedTerms) != 1 || got.Matches[0].MatchedTerms[0] != "schedule" {
-		t.Fatalf("MatchedTerms = %+v, want exactly the stemmed \"schedule\" term", got.Matches[0].MatchedTerms)
+}
+
+// TestQueryRepoDocsTitleMatchSurvivesFloorBelowTermCount is agent-
+// estate#1134's follow-up narrowing, measured against the real index: of
+// the three natural-language-stratum cases minMatchedTerms=2 cost (nl-04,
+// nl-10, nl-12 -- all single-term matches against 3+-term questions), two
+// (nl-10's "dispatch", nl-12's "refuse") matched their target's own
+// section TITLE, not just body text -- see titleFloorExemptSources' own
+// doc comment. A title hit is real, specific signal (the section is
+// LITERALLY about the matched word) in a way a body-text coincidence is
+// not, so it is let through minMatchedTerms' floor even at a single
+// matched term. This fixture reproduces that shape directly: a 3-term
+// question sharing only "guard" with the target, and "guard" is the
+// target's own Tier1 title, not merely mentioned in its Tier2 body.
+func TestQueryRepoDocsTitleMatchSurvivesFloorBelowTermCount(t *testing.T) {
+	items := []Item{
+		{
+			ID: "target", Source: "repo-docs",
+			Permalink:   "docs/guards.md#the-merge-guard",
+			Tier1:       "The merge guard",
+			Tier2:       "Refuses a merge whose PR is not open or whose checks are not green.",
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		},
+	}
+	path := filepath.Join(t.TempDir(), "index.json")
+	if err := Write(path, Result{Items: items}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Query(path, "what stops a broken guard", 0, false)
+	if got.State != StateMatched {
+		t.Fatalf("State = %q, want %q -- a single matched term (\"guard\") that IS the item's own "+
+			"title must clear the floor even though the question has 3+ distinct terms (reason=%q)",
+			got.State, StateMatched, got.Reason)
+	}
+	if len(got.Matches) != 1 || got.Matches[0].ID != "target" {
+		t.Fatalf("Matches = %+v, want the title-matching target", got.Matches)
+	}
+}
+
+// TestQueryRepoDocsBodyOnlySingleTermStaysExcluded is
+// TestQueryRepoDocsTitleMatchSurvivesFloorBelowTermCount's regression
+// guard: the exemption it proves is scoped to a TITLE hit specifically,
+// never to "any single matched term in repo-docs" -- that broader version
+// was tried and measured to reopen none-01 (its own repo-docs body-only
+// coincidences, e.g. "machine"/"schedule", returned as matches again; see
+// titleFloorExemptSources' own doc comment). Same shape as the title-match
+// fixture above, except the shared term ("guard") appears only in the
+// item's Tier2 body, never its Tier1 title -- this must stay excluded
+// exactly like #1134's original floor already excluded it.
+func TestQueryRepoDocsBodyOnlySingleTermStaysExcluded(t *testing.T) {
+	items := []Item{
+		{
+			ID: "noise", Source: "repo-docs",
+			Permalink:   "docs/unrelated.md#some-other-section",
+			Tier1:       "Some other section",
+			Tier2:       "This paragraph happens to mention a guard rail in passing, unrelated to the question.",
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		},
+	}
+	path := filepath.Join(t.TempDir(), "index.json")
+	if err := Write(path, Result{Items: items}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Query(path, "what stops a broken guard", 0, false)
+	if got.State != StateNoMatch {
+		t.Fatalf("State = %q, want %q -- a single matched term found only in the item's Tier2 body, "+
+			"never its Tier1 title, must not clear the floor (matches=%+v)",
+			got.State, StateNoMatch, got.Matches)
+	}
+	if len(got.Matches) != 0 {
+		t.Fatalf("Matches = %+v, want none", got.Matches)
 	}
 }
 
@@ -358,17 +486,28 @@ func TestQueryNoHardFloorASingleSharedTermStillSurfaces(t *testing.T) {
 // beat three common terms matching by coincidence." Five noise items
 // each carry three words the corpus overall treats as common (they
 // appear in most items, so BM25's idf discounts them close to zero); the
-// target item carries none of those three words but does carry one rare
-// term found nowhere else in the corpus. A question combining the rare
-// term with the three common ones must rank the target first even though
-// it matches only 1 of 4 query terms against the noise items' 3 of 4.
+// target item carries none of those three words but does carry two rare
+// terms found nowhere else in the corpus. A question combining the two
+// rare terms with the three common ones must rank the target first even
+// though it matches only 2 of 5 query terms against the noise items' 3 of
+// 5.
+//
+// TWO rare terms, not #1054's original one -- agent-estate#1134's own
+// vault-fact floor (minMatchedTerms, non-sparse cap 2) requires at least
+// 2 distinct terms to match once the question itself has 2 or more
+// scoreable terms, so a fixture proving "rare beats common" has to clear
+// that floor to be admitted as a candidate at all before the ranking
+// claim can even be tested. The floor does not touch SCORING, only
+// candidacy -- idf-based weighting is still what decides target ranks
+// first, not term count -- so this remains the same property #1054
+// named, demonstrated the way #1134's floor now requires it to be shown.
 func TestQueryRareTermBeatsCommonTermCoincidence(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "index.json")
 	items := []Item{
 		{
 			ID: "target", Source: "vault-fact",
 			Permalink:   "/vault/agent/facts/target.md",
-			Tier1:       "zzrareterm standalone finding",
+			Tier1:       "zzrareterm zzsecondrareterm standalone finding",
 			Publishable: true, PublishBasis: "test fixture: marked publishable",
 		},
 	}
@@ -407,7 +546,7 @@ func TestQueryRareTermBeatsCommonTermCoincidence(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	got := Query(path, "zzrareterm common words everywhere", 0, false)
+	got := Query(path, "zzrareterm zzsecondrareterm common words everywhere", 0, false)
 	if got.State != StateMatched {
 		t.Fatalf("State = %q, want %q (reason=%q)", got.State, StateMatched, got.Reason)
 	}
@@ -1209,25 +1348,34 @@ func TestQueryRanksATier1MatchAboveALongerTier2OnlyMatch(t *testing.T) {
 // traced case, reproduced as a fixture: a target item about stale model
 // listings, queried with its own words ("models listed stale refreshed")
 // scores well and ranks first; queried with a realistic paraphrase ("are
-// the model names up to date") the OLD scorer matched only "model" as a
-// substring of "models" (score 1) against requiredScore's floor of 3, so
-// the target was excluded BEFORE ranking was ever consulted, while two
-// unrelated items sharing "model"/"names"/"date" as separate incidental
-// words scored 3 and were returned instead. This is confirmed directly
-// against a3c389d (the pre-#1054 commit) in the PR body's before/after
-// transcript -- the same fixture, run against the OLD Query, excludes
-// "target" from paraphrase.Matches entirely. BM25 has no such floor: the
-// target is now a real, nonzero-scoring candidate and must be returned,
-// even though ranking it strictly ahead of the two incidental matches
-// depends on this corpus's actual idf distribution and is a stronger,
-// separate claim -- see TestQueryRareTermBeatsCommonTermCoincidence for
-// the fixture that isolates and proves THAT property directly.
+// the model names date current") the OLD scorer matched only "model" and
+// "date" as substrings (score too low) against requiredScore's floor of
+// 3, so the target was excluded BEFORE ranking was ever consulted, while
+// two unrelated items sharing "model"/"names"/"date" as separate
+// incidental words scored higher and were returned instead. BM25 has no
+// SCORE floor: the target is a real, nonzero-scoring candidate on both
+// terms, even though ranking it strictly ahead of the two incidental
+// matches depends on this corpus's actual idf distribution and is a
+// stronger, separate claim -- see TestQueryRareTermBeatsCommonTermCoincidence
+// for the fixture that isolates and proves THAT property directly.
+//
+// TWO shared terms, not #1054's original one -- agent-estate#1134's own
+// vault-fact floor (minMatchedTerms, non-sparse cap 2) requires at least
+// 2 distinct terms to match once the question has 2 or more scoreable
+// terms, so #1054's exact original paraphrase ("are the model names up
+// to date", sharing only the single near-zero-idf term "model" with
+// target) no longer survives under #1134 -- see #1134's own PR body for
+// that specific, honestly-reported cost. This fixture instead proves the
+// weaker, still-real claim #1134 leaves intact: a paraphrase sharing TWO
+// weak/common terms (neither one alone distinguishing, same as before)
+// still surfaces the target, rather than requiring the paraphrase to
+// share the target's own exact wording.
 func TestQueryParaphraseSurvivesTheRetiredFloor(t *testing.T) {
 	items := []Item{
 		{
 			ID: "target", Source: "vault-fact",
 			Permalink:   "/vault/agent/facts/models-stale.md",
-			Tier1:       "models listed stale -- refresh required",
+			Tier1:       "models listed stale -- refresh required, checked against a rollout date",
 			Tier2:       "The models list goes stale after 30 days and must be refreshed by hand.",
 			Publishable: true, PublishBasis: "test fixture: marked publishable",
 		},
@@ -1256,7 +1404,7 @@ func TestQueryParaphraseSurvivesTheRetiredFloor(t *testing.T) {
 		t.Fatalf("own-words query: got %+v, want target ranked first", own.Matches)
 	}
 
-	paraphrase := Query(path, "are the model names up to date", 0, false)
+	paraphrase := Query(path, "are the model names date current", 0, false)
 	if paraphrase.State != StateMatched {
 		t.Fatalf("paraphrase query: State = %q, want %q (reason=%q)", paraphrase.State, StateMatched, paraphrase.Reason)
 	}
@@ -1268,7 +1416,7 @@ func TestQueryParaphraseSurvivesTheRetiredFloor(t *testing.T) {
 	}
 	if !foundTarget {
 		t.Fatalf("paraphrase query: Matches = %+v, want \"target\" present -- "+
-			"this is the exact case the retired requiredScore floor excluded before ranking ever ran", paraphrase.Matches)
+			"a paraphrase sharing two weak terms with the target must still surface it", paraphrase.Matches)
 	}
 }
 

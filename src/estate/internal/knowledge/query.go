@@ -669,6 +669,147 @@ func itemHasAllTags(it Item, tags []string) bool {
 	return true
 }
 
+// sparseMatchSources are the item sources whose sheer volume and
+// fragmentation make a single coincidental term match statistically
+// unremarkable -- agent-estate#1134. github-stars is ~391 heterogeneous
+// one-line tool descriptions spanning every software topic; the five
+// corpus-<kind> sources (see corpusKinds) are ~3345 independently
+// authored, often one-sentence fragments. Measured against a real,
+// freshly built index: the golden set's own no_match case (none-01,
+// "the office vending machine restocking schedule", verified absent from
+// every source before it was written) scored a nonzero BM25 match
+// against 22 publishable items and 64 total, every one of them from
+// these two source families, each hit driven by exactly one ordinary
+// English word ("office", "machine", "schedule") the question happened
+// to share with an unrelated repo description or corpus fragment.
+// BM25's own idf weighting cannot tell that coincidence apart from a
+// genuine rare-term hit on relevance alone -- measured on the same
+// index, "office" (idf 7.04, the rarest word in that noise) is RARER
+// than "dispatch" (idf 4.05), which is the one real matched term behind
+// a genuine natural-language-stratum hit (nl-10, agent-estate#1073).
+// Rarity and relevance are different axes; sparseMatchSources is the
+// acknowledgment that, for these two source families specifically, this
+// corpus's scale makes rarity alone an unreliable proxy for relevance.
+//
+// vault-fact, loops-research and repo-docs are deliberately NOT in this
+// set: they are small, curated, single-purpose documents (111, 24 and
+// 118 items respectively, versus 391+3345) where one weighted Tier1
+// (title) term match is real signal, not noise. They still carry
+// minMatchedTerms' own gentler, non-sparse floor (min(2, the question's
+// distinct term count)), because none-01's own measurement found isolated
+// single-term coincidences there too (a repo-docs section matching only
+// "machine", a vault-fact matching only "schedule") -- just far fewer of
+// them, and never enough to rank above the sparse-source noise. Measured:
+// requiring sparseFloorCap (3) rather than 2 for these three sources
+// would exclude 7 of the natural-language stratum's 12 genuine low-
+// overlap hits (agent-estate#1073) -- nl-03/05/06/07/08/10/12, whose
+// correct answer matches on only 1-2 distinct terms precisely BECAUSE the
+// question is a paraphrase, not a quote; the gentler floor of 2 costs
+// only nl-10/nl-12 (2 of 12, both single-term matches against a 3+-term
+// question), the other five (2-term matches) survive. That population is
+// exactly what #1054 removed the old floor to stop discarding; a floor of
+// 3 there would be reverting #1054 for the cases it was built to fix. See
+// #1134's own PR body for the measured before/after across every
+// golden-set stratum.
+var sparseMatchSources = map[string]bool{
+	"github-stars":      true,
+	"corpus-parameter":  true,
+	"corpus-directive":  true,
+	"corpus-question":   true,
+	"corpus-correction": true,
+	"corpus-thought":    true,
+}
+
+// minMatchedTerms is the per-item floor a candidate must clear on DISTINCT
+// matched terms to be returned at all -- agent-estate#1134's narrow
+// restoration of the floor #1054 removed, scaled by source (see
+// sparseMatchSources' own doc comment for why the two families it lists
+// carry a stricter bar than every other source). Both floors are adaptive
+// on queryTermCount the same way the pre-#1054 floor was (#1054's own
+// commit message: "excluded anything below min(3, distinct terms)
+// matched"), so a short question is never held to a bar it cannot reach:
+// a one-distinct-term query still only needs its one term to match,
+// regardless of source -- a floor here can only ever be LOWER than its
+// own cap, never impose a requirement the query itself has no way to
+// satisfy.
+//
+// sparseFloorCap=3 and nonSparseFloorCap=2 were both measured, not
+// assumed, against a real freshly built index (agent-estate#1134): 3 is
+// the smallest sparse-source cap that excludes every one of none-01's 64
+// matched candidates in that family (the worst, an item matching 2
+// distinct terms by coincidence) while still admitting every real
+// cases.json hit in a sparse source (the weakest, corpus-02, matches
+// exactly 3) -- a cap of 2 would leave that one 2-term coincidental match
+// standing and none-01 would still (wrongly) report matched. 2 is the
+// smallest non-sparse cap that clears none-01's residual single-term
+// noise in vault-fact/repo-docs (each such candidate matched exactly 1
+// term) while costing only 2 of the natural-language stratum's 12 real
+// hits (nl-10, nl-12 -- both single-term matches against a 3+-term
+// question; every 2-term hit in that stratum still clears a floor of 2).
+const (
+	sparseFloorCap    = 3
+	nonSparseFloorCap = 2
+)
+
+func minMatchedTerms(source string, queryTermCount int) int {
+	floorCap := nonSparseFloorCap
+	if sparseMatchSources[source] {
+		floorCap = sparseFloorCap
+	}
+	if queryTermCount < floorCap {
+		return queryTermCount
+	}
+	return floorCap
+}
+
+// titleFloorExemptSources are the sources where a single matched term
+// landing in the item's own TITLE (tier1, never tier2 body text) is let
+// through minMatchedTerms' floor even when the term count alone would not
+// clear it -- agent-estate#1134's follow-up narrowing (see its own PR
+// thread, "the cost is not yet shown to be minimal"). Scoped to repo-docs
+// only, not vault-fact or loops-research: only repo-docs carries the
+// tier1/tier2 split (agent-estate#1113's leaf-heading-as-tier1) that makes
+// "this term is the item's own heading" a distinct, checkable signal
+// separate from term count.
+//
+// Measured, not assumed, against a real freshly built index: every one of
+// none-01's residual repo-docs single-term coincidences (8 candidates,
+// terms "machine"/"schedule") matched tier2 body text ONLY -- zero of them
+// hit an item's own tier1 title -- so this exemption costs none-01 nothing.
+// Of the three cases minMatchedTerms=2 regressed (nl-04, nl-10, nl-12, all
+// single-term matches against 3+-term questions), two (nl-10's "dispatch",
+// nl-12's "refuse") match their target's own section title and are
+// recovered by this exemption; nl-04's "python" matches only its target's
+// tier2 body (the target section is titled "The implementation language
+// is Go", which does not contain the word "python") and stays a MISS --
+// tried lowering the floor further to recover it too (repo-docs floor=1,
+// i.e. no floor at all there) and that reopens none-01 (its own "machine"/
+// "schedule" tier2 hits return as matches again, confirmed by rerunning
+// with that change), so nl-04's regression is accepted rather than traded
+// for none-01 reporting matched again. See #1134's PR body for the
+// measured before/after this exemption produces.
+var titleFloorExemptSources = map[string]bool{
+	"repo-docs": true,
+}
+
+// matchesTitle reports whether any of matched (terms already scored
+// nonzero against it by BM25Scorer.Score) is present in it's own tier1
+// field specifically, as opposed to only its tier2 body -- the same field
+// split bm25.go's weightedTermFreqs already computes for scoring, reused
+// here as a boolean signal rather than a weight.
+func matchesTitle(it Item, matched []string) bool {
+	if len(matched) == 0 {
+		return false
+	}
+	tier1Terms := fieldTermCounts(tier1SearchableText(it))
+	for _, m := range matched {
+		if tier1Terms[m] > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 const rankingBasisText = "score = Okapi BM25 (k1=1.2, b=0.75) over stemmed, " +
 	"stop-word-filtered question terms against the item's own tier1, tier2, " +
 	"structural_tags and synaptic_tags -- tier1/tags weighted 3x tier2 " +
@@ -679,10 +820,22 @@ const rankingBasisText = "score = Okapi BM25 (k1=1.2, b=0.75) over stemmed, " +
 	"separate field weighted 1x (ancestorFieldWeight=1, agent-estate#1113 " +
 	"-- ancestors are searchable but no longer inflate score at the leaf's " +
 	"weight), and every other source has no ancestor field so this split " +
-	"does not apply to it -- see bm25.go; no minimum-match floor: a rare " +
-	"term matching once can outrank several common terms matching by " +
-	"coincidence, so an item needs only ONE weighted term match (score > 0) " +
-	"to be returned at all -- see BM25Scorer in bm25.go, agent-estate#1054; " +
+	"does not apply to it -- see bm25.go; #1054's own no-hard-floor rule " +
+	"(a rare term matching once can outrank several common terms matching " +
+	"by coincidence) still governs ranking everywhere, but a matched item " +
+	"must ALSO clear a per-item distinct-term floor to be returned at all " +
+	"-- agent-estate#1134's narrow, source-scoped, measured restoration: " +
+	"vault-fact/loops-research/repo-docs need min(2, the question's own " +
+	"distinct term count) distinct terms to match; github-stars and every " +
+	"corpus-<kind> source need min(3, ...) -- never more than the question " +
+	"itself has, so a one-term question is never held to a bar it cannot " +
+	"reach. The stricter cap on the second pair is measured, not assumed: " +
+	"those two source families are large and fragmented enough that a " +
+	"single ordinary word reliably coincides with something unrelated -- " +
+	"see minMatchedTerms and sparseMatchSources in query.go; a repo-docs " +
+	"item is let through that floor on a single matched term anyway when " +
+	"the term is the item's own TITLE (tier1), not merely body text -- " +
+	"see titleFloorExemptSources and matchesTitle in query.go; " +
 	"the printed score is BM25's own figure rounded to the nearest integer " +
 	"for display; ties on the unrounded figure broken by item id, oldest first"
 
@@ -801,6 +954,23 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 			// concept is moot there, and exclusion is already fully
 			// handled by itemHasAllTags above.
 			continue
+		}
+		if len(terms) > 0 && len(matched) < minMatchedTerms(it.Source, len(terms)) {
+			// agent-estate#1134's narrow, source-scoped floor -- see
+			// minMatchedTerms's own doc comment for the measured
+			// reasoning. Only ever tightens sparseMatchSources; every
+			// other source keeps #1054's "score > 0 is enough" rule
+			// exactly as it was.
+			//
+			// titleFloorExemptSources is the one measured narrowing on
+			// top of that floor: a single matched term that IS the
+			// item's own title, not just body text buried in it, is let
+			// through anyway -- see matchesTitle's and
+			// titleFloorExemptSources' own doc comments for what was
+			// measured before adding this and what it costs.
+			if !(titleFloorExemptSources[it.Source] && matchesTitle(it, matched)) {
+				continue
+			}
 		}
 		if !includePrivate && !it.Publishable {
 			withheldPrivate++
