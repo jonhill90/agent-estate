@@ -688,9 +688,9 @@ func main() {
 	// lines sit together (same fixture, same commit) and are themselves
 	// never averaged with each other -- see runNaturalStratum's doc comment
 	// for what each answers.
-	fmt.Fprintf(w, "natural-language stratum, top-3  (default/public, unscoped -- #1073, baseline 5/12 on a7d413c):  %d/%d\n", nlTop3, nlTotal)
-	fmt.Fprintf(w, "natural-language stratum, top-10 (default/public, unscoped -- #1073, baseline 10/12 on a7d413c): %d/%d\n", nlTop10, nlTotal)
-	fmt.Fprintf(w, "natural-language stratum, top-3  (default/public, scoped source:repo-docs -- #1077, expected roughly 8-9/12 on df2cf75):  %d/%d\n", nlScopedTop3, nlScopedTotal)
+	fmt.Fprintf(w, "natural-language stratum, top-3  (default/public, unscoped -- #1073):  %d/%d\n", nlTop3, nlTotal)
+	fmt.Fprintf(w, "natural-language stratum, top-10 (default/public, unscoped -- #1073): %d/%d\n", nlTop10, nlTotal)
+	fmt.Fprintf(w, "natural-language stratum, top-3  (default/public, scoped source:repo-docs -- #1077):  %d/%d\n", nlScopedTop3, nlScopedTotal)
 	fmt.Fprintf(w, "natural-language stratum, top-10 (default/public, scoped source:repo-docs -- #1077):                                    %d/%d\n", nlScopedTop10, nlScopedTotal)
 	// agent-estate#1115: a stratum where every question reuses most of its
 	// target's own words has no headroom left to catch a regression --
@@ -703,7 +703,7 @@ func main() {
 	} else {
 		fmt.Fprintln(w, "natural-language stratum term overlap vs target_text (agent-estate#1115): not measured -- no case carries target_text yet")
 	}
-	fmt.Fprintf(w, "retrieval score (private, comparable to the 12/15 baseline on 6f28626): %d/%d\n", privateHits, privateTotal)
+	fmt.Fprintf(w, "retrieval score (private): %d/%d\n", privateHits, privateTotal)
 	// agent-estate#1133: the corrected line. cases.json has 17 cases total;
 	// %d of them (excludedPrivate) have an ExpectedSource classify.go marks
 	// private (vault-fact, corpus-parameter, loops-research) and cannot be
@@ -728,7 +728,7 @@ func main() {
 	// own comment measured that scoping does not move this stratum (see
 	// runStarStratum's doc comment) and this issue adds measurement, not
 	// a second scoped run to go with it.
-	fmt.Fprintf(w, "github-stars stratum (default/public, unscoped -- #1111, agent-estate#1063's own measured baseline top-3(@5) 7/8, top-10 8/8 by hand): top-3 %d/%d, top-10 %d/%d\n", starTop3, starTotal, starTop10, starTotal)
+	fmt.Fprintf(w, "github-stars stratum (default/public, unscoped -- #1111): top-3 %d/%d, top-10 %d/%d\n", starTop3, starTotal, starTop10, starTotal)
 	// agent-estate#1115: the merged fixture's questions reused 67% of
 	// their own target's words and landed 8/8 -- a saturated score with
 	// no headroom to detect a regression. The stratum was re-authored
