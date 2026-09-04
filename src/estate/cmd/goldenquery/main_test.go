@@ -199,6 +199,85 @@ func TestSplitPublishableExcludesPrivateSourcesFromReachableDenominator(t *testi
 	}
 }
 
+// agent-estate#1066: buildRatchets/ratchetFailures are the regression-ratchet
+// primitives -- a ratcheted line that drops below its recorded floor must
+// be reported as a failure, and every ratchet's reason must be non-empty so
+// the accepted-cost text this issue requires can never silently go missing.
+
+func TestRatchetOkAtOrAboveFloor(t *testing.T) {
+	r := ratchet{name: "x", got: 6, total: 12, minimum: 6}
+	if !r.ok() {
+		t.Fatal("ratchet.ok() = false at exactly the floor, want true")
+	}
+	r.got = 7
+	if !r.ok() {
+		t.Fatal("ratchet.ok() = false above the floor, want true")
+	}
+}
+
+func TestRatchetFailsBelowFloor(t *testing.T) {
+	r := ratchet{name: "x", got: 5, total: 12, minimum: 6}
+	if r.ok() {
+		t.Fatal("ratchet.ok() = true below the floor, want false")
+	}
+}
+
+func TestBuildRatchetsEveryEntryCarriesAReason(t *testing.T) {
+	none := &result{c: goldenset.Case{ID: "none-01", ExpectedSource: goldenset.SourceNone}, pass: true, exitCode: 1}
+	rs := buildRatchets(6, 12, 6, 12, 16, 17, 5, 5, 7, 7, 8, none)
+	if len(rs) == 0 {
+		t.Fatal("buildRatchets() returned no ratchets")
+	}
+	for _, r := range rs {
+		if r.reason == "" {
+			t.Errorf("ratchet %q has no reason -- agent-estate#1066 requires the accepted-cost reason travel with the check itself", r.name)
+		}
+	}
+}
+
+func TestBuildRatchetsAllPassAtRecordedBaselines(t *testing.T) {
+	none := &result{c: goldenset.Case{ID: "none-01", ExpectedSource: goldenset.SourceNone}, pass: true, exitCode: 1}
+	rs := buildRatchets(6, 12, 6, 12, 16, 17, 5, 5, 7, 7, 8, none)
+	if failed := ratchetFailures(rs); len(failed) != 0 {
+		t.Fatalf("ratchetFailures() at recorded add887e baselines = %+v, want none", failed)
+	}
+}
+
+func TestBuildRatchetsNoneResultMustBeHitToPass(t *testing.T) {
+	miss := &result{c: goldenset.Case{ID: "none-01", ExpectedSource: goldenset.SourceNone}, pass: false, exitCode: 0}
+	rs := buildRatchets(6, 12, 6, 12, 16, 17, 5, 5, 7, 7, 8, miss)
+	failed := ratchetFailures(rs)
+	if len(failed) != 1 {
+		t.Fatalf("ratchetFailures() with a missed none-01 = %+v, want exactly 1 failure", failed)
+	}
+	if failed[0].name != "none-01 (absence must report no_match)" {
+		t.Fatalf("ratchetFailures()[0].name = %q, want the none-01 ratchet", failed[0].name)
+	}
+}
+
+func TestRatchetFailuresDetectsRegressionBelowFloor(t *testing.T) {
+	// natural-language top-3 drops from the recorded 6/12 to 5/12 -- a
+	// genuine regression, not the known top-10 drift this ratchet
+	// deliberately excludes.
+	none := &result{c: goldenset.Case{ID: "none-01", ExpectedSource: goldenset.SourceNone}, pass: true, exitCode: 1}
+	rs := buildRatchets(5, 12, 6, 12, 16, 17, 5, 5, 7, 7, 8, none)
+	failed := ratchetFailures(rs)
+	if len(failed) != 1 || failed[0].name != "natural-language stratum top-3, unscoped" {
+		t.Fatalf("ratchetFailures() = %+v, want exactly the unscoped top-3 ratchet failing", failed)
+	}
+}
+
+func TestRatchetFailuresPassesWhenNoneResultIsNil(t *testing.T) {
+	// A checkout where cases.json has stopped carrying a SourceNone case at
+	// all must not crash or spuriously fail this ratchet -- see
+	// splitPublishable's own doc comment for the same "noneResult may be
+	// nil" contract.
+	rs := buildRatchets(6, 12, 6, 12, 16, 17, 5, 5, 7, 7, 8, nil)
+	if failed := ratchetFailures(rs); len(failed) != 0 {
+		t.Fatalf("ratchetFailures() with nil noneResult = %+v, want none", failed)
+	}
+}
+
 func TestSplitPublishableReachableHitsMissAPrivateMiss(t *testing.T) {
 	// A private-source case's own pass/fail must never leak into the
 	// reachable score -- a vault-fact case failing in default mode (the

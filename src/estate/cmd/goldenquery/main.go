@@ -100,15 +100,35 @@
 // disclose) and its default-mode outcome is reported honestly rather than
 // silently counted as a win for the reachable score.
 //
+// agent-estate#1066: three prior tickets each disclosed an accepted cost in
+// prose and had it rediscovered downstream as a surprise (#1043's vault
+// bodies, #1060's dropped floor, the same drop's control contamination).
+// This runner now carries a RATCHET (buildRatchets, below) over a subset of
+// the lines it already measures: a line included there fails the whole run
+// (exit 1, distinct from the operational exit 2) if it drops below a floor
+// recorded, with its accepted-cost reason, in the assertion message itself
+// -- never only in a PR body. Two known-drifting lines (natural-language
+// top-10, both unscoped and scoped -- agent-estate#1112 measured them
+// moving with the live corpus alone, no code change) and both term-overlap
+// lines (fixture-honesty signals, not quality ones) are deliberately NOT
+// ratcheted; buildRatchets' own doc comment is the one place that list and
+// its reasoning are allowed to live.
+//
 // Usage:
 //
 //	go run ./cmd/goldenquery [-bin estate] [-v]
 //
-// Exit code is 0 whenever the measurement itself ran to completion,
-// regardless of the score -- a low hit rate is a successful measurement,
-// not a runner failure (see #1023's own brief). Exit code is 2 only when
-// the measurement could not be attempted at all (binary not found, every
-// single case errored out before returning a real state, in EITHER mode).
+// Exit code is 0 when the measurement ran to completion and every
+// ratcheted line held at or above its accepted floor. Exit code is 1 when
+// the measurement ran but a ratcheted line regressed below its floor --
+// distinct from operational failure; the ratchet section printed at the end
+// of the report names which line and why that floor was accepted. A low
+// score on a line this runner does NOT ratchet is still a successful
+// measurement and does not affect the exit code on its own -- see
+// buildRatchets' doc comment for exactly which lines those are. Exit code
+// is 2 only when the measurement could not be attempted at all (binary not
+// found, every single case errored out before returning a real state in
+// EITHER mode, or the golden set itself failed to load).
 package main
 
 import (
@@ -497,6 +517,100 @@ func splitPublishable(results []result) (reachableHits, reachableTotal, excluded
 	return reachableHits, reachableTotal, excludedPrivate, noneResult
 }
 
+// ratchet is one agent-estate#1066 regression guard: a named measurement
+// already printed elsewhere in this report, its accepted floor, and the
+// reason that floor is what it is. The reason is required and is printed
+// as part of the FAIL line itself (see main) -- #1066's own thesis is that
+// a cost disclosed only in prose or a PR body is a cost that gets
+// rediscovered downstream; putting it in the assertion message is what
+// stops that.
+type ratchet struct {
+	name    string
+	got     int
+	total   int
+	minimum int
+	reason  string
+}
+
+// ok reports whether this ratchet's currently measured value still meets
+// its accepted floor. total is carried for the printed line only (got/total
+// alongside the floor) and never compared -- two runs with different totals
+// (a fixture gaining or losing a case) are a different, louder failure this
+// ratchet does not attempt to catch.
+func (r ratchet) ok() bool {
+	return r.got >= r.minimum
+}
+
+// buildRatchets is agent-estate#1066's own set of regression guards --
+// deliberately NOT every line this runner prints, and NOT every line that
+// could in principle regress. Two families are excluded on purpose, and
+// this comment is the one place that exclusion and its reasoning live
+// rather than being scattered per call site:
+//
+//   - The natural-language stratum's top-10 lines, both unscoped and
+//     scoped, drift with the live corpus alone -- no code change required.
+//     Measured moving 10/12->9/12 and 11/12->10/12 in one night and back,
+//     and agent-estate#1112's own review reproduced the identical drift on
+//     unmodified main side by side. The mechanism is structural: the
+//     stratum's targets are a fixed set of repo-docs sections while the
+//     index grows around them, so new competitors arrive, the answer does
+//     not move, but its rank does. A ratchet on either line would fire on a
+//     day nobody touched the scorer, and a check that cries wolf gets
+//     disabled -- worse than no ratchet at all (#1066's own thesis). The
+//     top-3 lines from the SAME stratum ARE ratcheted below: #1112 measured
+//     drift only on the top-10 cutoff, never top-3, in either run.
+//   - Both term-overlap lines (github-stars, natural-language) measure
+//     fixture honesty -- how much of a question's own wording already
+//     appears in its target -- not retrieval quality. Ratcheting either
+//     would reward authoring questions that share no words with anything,
+//     which is not the goal (agent-estate#1115, agent-estate#1138).
+//
+// Every floor below is the value measured on add887e (2026-09-04), the
+// first commit where the baselines it ratchets had stopped moving --
+// agent-estate#1137 and agent-estate#1138 were the last two changes to move
+// them, and both are required preconditions for this function to exist at
+// all (see this issue's own sequencing precondition). Re-measure before
+// trusting these numbers further; they are one observation from one
+// checkout, not a constant.
+func buildRatchets(nlTop3, nlTotal, nlScopedTop3, nlScopedTotal, privateHits, privateTotal, reachableHits, reachableTotal, starTop3, starTop10, starTotal int, noneResult *result) []ratchet {
+	rs := []ratchet{
+		{"natural-language stratum top-3, unscoped", nlTop3, nlTotal, 6,
+			"agent-estate#1066: floor at the value measured on add887e after #1137/#1138 landed -- agent-estate#1112 found drift only on this stratum's top-10 cutoff, not top-3, so top-3 is safe to ratchet"},
+		{"natural-language stratum top-3, scoped source:repo-docs", nlScopedTop3, nlScopedTotal, 6,
+			"agent-estate#1066: same floor and same reasoning as the unscoped top-3 line above, measured on add887e"},
+		{"retrieval score (private)", privateHits, privateTotal, 16,
+			"agent-estate#1066: floor at the value measured on add887e -- unaffected by #1137/#1138, neither of which touched a private-mode cases.json case"},
+		{"publishable-reachable score", reachableHits, reachableTotal, 5,
+			"agent-estate#1066: floor at the value measured on add887e -- agent-estate#1133 established this as the reachable-only denominator (github-stars, repo-docs), not the raw 17"},
+		{"github-stars stratum top-3", starTop3, starTotal, 7,
+			"agent-estate#1066: floor at the value measured on add887e"},
+		{"github-stars stratum top-10", starTop10, starTotal, 7,
+			"agent-estate#1066: accepted regression from a prior 8/8 -- agent-estate#1138 re-authored github-stars questions from need rather than target-description overlap, which cost one hit; this floor is the post-#1138 value, never the pre-#1138 8/8"},
+	}
+	if noneResult != nil {
+		got := 0
+		if noneResult.pass {
+			got = 1
+		}
+		rs = append(rs, ratchet{"none-01 (absence must report no_match)", got, 1, 1,
+			"agent-estate#1066: this is agent-estate#1137's own fix, not a floor with room to slip further -- none-01 failing to exit 1/no_match is the exact regression #1137 closed"})
+	}
+	return rs
+}
+
+// ratchetFailures runs every ratchet and returns only the ones that did not
+// hold -- kept separate from printing (main does that) so this logic is
+// testable without capturing stdout.
+func ratchetFailures(rs []ratchet) []ratchet {
+	var failed []ratchet
+	for _, r := range rs {
+		if !r.ok() {
+			failed = append(failed, r)
+		}
+	}
+	return failed
+}
+
 func main() {
 	bin := flag.String("bin", "estate", "path to the estate binary to exec `knowledge query` against")
 	verbose := flag.Bool("v", false, "print every case, not just misses")
@@ -618,5 +732,32 @@ func main() {
 	} else {
 		fmt.Fprintln(w, "github-stars stratum term overlap vs target_text (agent-estate#1115): not measured -- no case carries target_text")
 	}
+
+	// agent-estate#1066: the ratchet. Everything above this line is
+	// unchanged reporting; this is the only section that can change the
+	// exit code away from the operational 0/2 pair the rest of this runner
+	// already used. See buildRatchets' own doc comment for exactly which
+	// lines are guarded here, which two are deliberately not, and why.
+	fmt.Fprintln(w, "---")
+	fmt.Fprintln(w, "ratchet (agent-estate#1066 -- fails the run, not just the printed number, when a guarded line drops below its accepted floor):")
+	ratchets := buildRatchets(nlTop3, nlTotal, nlScopedTop3, nlScopedTotal, privateHits, privateTotal, reachableHits, reachableTotal, starTop3, starTop10, starTotal, noneResult)
+	for _, r := range ratchets {
+		status := "OK"
+		if !r.ok() {
+			status = "FAIL"
+		}
+		fmt.Fprintf(w, "  [%s] %s: %d/%d (floor %d) -- %s\n", status, r.name, r.got, r.total, r.minimum, r.reason)
+	}
+	fmt.Fprintln(w, "  not ratcheted, known corpus-growth drift (agent-estate#1112): natural-language stratum top-10, unscoped and scoped")
+	fmt.Fprintln(w, "  not ratcheted, measures fixture honesty not quality (agent-estate#1066, agent-estate#1115): term overlap, github-stars and natural-language")
+
+	failed := ratchetFailures(ratchets)
 	w.Flush()
+	if len(failed) > 0 {
+		fmt.Fprintf(os.Stderr, "goldenquery: %d ratchet(s) regressed below their accepted floor -- see the ratchet section above for which and why\n", len(failed))
+		for _, r := range failed {
+			fmt.Fprintf(os.Stderr, "  %s: %d/%d, floor %d -- %s\n", r.name, r.got, r.total, r.minimum, r.reason)
+		}
+		os.Exit(1)
+	}
 }
