@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/reclaim"
 	"github.com/jonhill90/agent-estate/estate/internal/spend"
 	"github.com/jonhill90/agent-estate/estate/internal/tick"
+	"github.com/jonhill90/agent-estate/estate/internal/toolusage"
 	"github.com/jonhill90/agent-estate/estate/internal/verifybranch"
 )
 
@@ -350,6 +352,15 @@ func usage() {
                                         ever reports tokens, and this never
                                         sums a dollar figure across harnesses
                                         that don't all report one
+  estate toolusage <turn-id>             which tools a dispatched turn actually
+                                        invoked, structurally walked from its
+                                        harness transcript (joined via the
+                                        ledger's own recorded session id,
+                                        agent-estate#990) -- names and counts
+                                        only, never transcript content
+  estate toolusage --recent [n]          same, aggregated across the n most
+                                        recently completed turns that carry a
+                                        recorded session id (default 20)
 
 Every gate fails closed: a limit that cannot be measured refuses.
 
@@ -373,6 +384,28 @@ waiting. Environment:
                                         socket otherwise, so a missing one is
                                         refused rather than obeyed
 `)
+}
+
+// printToolUsage renders a toolusage.Counts tally -- tool names and integers
+// only, never transcript content (agent-estate#1096's hard rule: a turn's
+// transcript may carry operator material, so nothing beyond a count is ever
+// printed here).
+func printToolUsage(c toolusage.Counts) {
+	names := make([]string, 0, len(c.Tools))
+	for n := range c.Tools {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	for _, n := range names {
+		fmt.Printf("%-24s %d\n", n, c.Tools[n])
+	}
+	if len(names) == 0 {
+		fmt.Println("no tool_use blocks found")
+	}
+	fmt.Printf("\nknowledge query: %d (source: scoped: %d)\n", c.KnowledgeQuery, c.KnowledgeQueryScoped)
+	if c.Malformed > 0 {
+		fmt.Printf("%d of %d transcript line(s) could not be parsed\n", c.Malformed, c.Lines)
+	}
 }
 
 // printKnowledgeQuery renders a knowledge.QueryResult for a terminal --
@@ -1089,6 +1122,77 @@ func main() {
 		} else if reclaimable > 0 {
 			fmt.Println("report only -- re-run with --apply to free these slots")
 		}
+
+	case "toolusage":
+		// agent-estate#1096: which tools did a dispatched turn actually
+		// invoke, read from its harness transcript via the session id join
+		// #990 built. Read-only, counts-only -- see internal/toolusage's
+		// package doc for the three parses this replaces and why they were
+		// wrong.
+		root, terr := toolusage.DefaultTranscriptsRoot()
+		if terr != nil {
+			fmt.Fprintln(os.Stderr, "estate:", terr)
+			os.Exit(2)
+		}
+		cur, err := l.Current()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		if len(os.Args) > 2 && os.Args[2] == "--recent" {
+			n := 20
+			if len(os.Args) > 3 {
+				fmt.Sscanf(os.Args[3], "%d", &n)
+			}
+			recs := toolusage.RecentWithSession(cur, n)
+			if len(recs) == 0 {
+				fmt.Println("no completed turn in this ledger has a recorded session id")
+				break
+			}
+			var all []toolusage.Counts
+			resolved, missing := 0, 0
+			for _, r := range recs {
+				path, ferr := toolusage.FindTranscript(root, *r.SessionID)
+				if ferr != nil {
+					missing++
+					continue
+				}
+				c, perr := toolusage.Parse(path)
+				if perr != nil {
+					fmt.Fprintln(os.Stderr, "estate: could not read transcript for", r.ID, ":", perr)
+					continue
+				}
+				all = append(all, c)
+				resolved++
+			}
+			printToolUsage(toolusage.Merge(all))
+			fmt.Printf("\n%d turn(s) considered, %d transcript(s) resolved, %d not found\n", len(recs), resolved, missing)
+			break
+		}
+		if len(os.Args) < 3 {
+			fmt.Fprintln(os.Stderr, "usage: estate toolusage <turn-id> | estate toolusage --recent [n]")
+			os.Exit(2)
+		}
+		rec, rerr := toolusage.Resolve(cur, os.Args[2])
+		if rerr != nil {
+			fmt.Fprintln(os.Stderr, "estate:", rerr)
+			os.Exit(1)
+		}
+		if rec.SessionID == nil || *rec.SessionID == "" {
+			fmt.Println("no session id recorded for this turn -- see ledger.Record.SessionID's doc comment for when a harness reports none")
+			break
+		}
+		path, ferr := toolusage.FindTranscript(root, *rec.SessionID)
+		if ferr != nil {
+			fmt.Fprintln(os.Stderr, "estate:", ferr)
+			os.Exit(1)
+		}
+		c, perr := toolusage.Parse(path)
+		if perr != nil {
+			fmt.Fprintln(os.Stderr, "estate:", perr)
+			os.Exit(2)
+		}
+		printToolUsage(c)
 
 	case "tick":
 		// The Director's loop cannot remember its own history -- every tick is
