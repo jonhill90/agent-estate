@@ -20,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/corpus"
@@ -306,13 +307,59 @@ func repoTopLevel() (string, error) {
 	return root, nil
 }
 
+// repoSlugTimeout bounds repoSlug's subprocess. `gh repo view` reads
+// nothing local -- it is a GraphQL round trip to api.github.com -- and
+// repoSlug runs TWICE on every `estate dispatch`: once inside
+// sweepWorktrees, which sits ahead of the pressure gate, and once to build
+// the dispatch worktree's own Landed seam. Unbounded, it was the first
+// network-dependent thing a dispatch did and the one call on the teardown
+// path with no ceiling, so a black-holed remote -- a stale VPN route, a
+// half-dead proxy, a firewall that drops rather than rejects -- stopped
+// dispatches returning at all rather than making them refuse.
+//
+// 15s, matching isolate.ghTimeout, isolate's remoteFetchTimeout and
+// internal/cost's execTimeout, rather than inventing a fresh number: this is
+// one metadata round trip on the same API as GHLanded's, so there is no
+// reason for it to be allowed longer than the call it exists to supply an
+// argument to. It is chosen to be survivable, not tight -- a slow-but-alive
+// forge answers well inside it, and anything past it is a network that is
+// not going to answer this run.
+//
+// Wall clock this puts on a dispatch, stated because "bounded" is not
+// "free": one repoSlug (15s) plus, per removal, one fetch (15s) and one
+// forge call (15s), times maxSweepPerRun -- so a worst case of roughly four
+// minutes of sweep ahead of the pressure gate when every network call
+// black-holes at once. That is the price of never hanging; it was previously
+// unbounded in exchange for nothing.
+var repoSlugTimeout = 15 * time.Second
+
 // repoSlug is "owner/name" for the checkout we are in, asked of gh rather
 // than written down: a hardcoded slug is wrong the first time this runs
 // against a fork or a rename, and it is exactly the kind of claim that
 // looks right forever while being false.
+//
+// Every failure -- gh missing, unauthenticated, the network gone, the
+// deadline hit -- is returned as an error, and both callers treat that as
+// "slug unknown, so leave the Landed seam nil", which degrades to exactly
+// the pre-#1000 behaviour: origin's branch is then the only evidence Remove
+// accepts, and it refuses rather than guessing.
 func repoSlug() (string, error) {
-	out, err := exec.Command("gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner").Output()
+	ctx, cancel := context.WithTimeout(context.Background(), repoSlugTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
+	// Killing only the direct child is not enough, and this is the lesson
+	// agent-estate#996's own fix pass paid for: gh (like git over http)
+	// hands work to helper processes that INHERIT the output pipes, so
+	// Output() goes on blocking on the grandchild's copy of the pipe long
+	// after the parent is dead. Setpgid puts the whole tree in one group and
+	// Cancel signals the group, which is what actually makes the bound bind.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	out, err := cmd.Output()
 	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("could not read this repository's name within %s -- giving up waiting is not an answer: %w", repoSlugTimeout, err)
+		}
 		return "", err
 	}
 	slug := strings.TrimSpace(string(out))

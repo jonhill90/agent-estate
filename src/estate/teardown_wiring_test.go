@@ -1,7 +1,6 @@
 package main
 
 import (
-	"os"
 	"regexp"
 	"strings"
 	"testing"
@@ -24,14 +23,11 @@ import (
 // that is only ever established by a real dispatch, and the pull request
 // says which one.
 
-func mainSource(t *testing.T) string {
-	t.Helper()
-	b, err := os.ReadFile("main.go")
-	if err != nil {
-		t.Fatalf("cannot read main.go: %v", err)
-	}
-	return string(b)
-}
+// These read main.go through mirror_wiring_test.go's own mainSource, which
+// strips // comments before returning the source. Sharing it is deliberate
+// rather than incidental: the teardown block's comments name `wt.Remove()`
+// and the sweep call in prose, so a guard reading the raw text would count
+// the commentary as call sites and pass for the wrong reason.
 
 // The one call site that deletes a dispatch's own worktree must sit inside
 // a terminal-state guard.

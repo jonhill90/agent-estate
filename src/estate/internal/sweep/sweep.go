@@ -32,6 +32,15 @@
 //   - a path outside this repository's own dispatch root is refused before
 //     anything looks at it, so a corrupted or hand-edited record can never
 //     aim `git worktree remove` at something else on the disk.
+//   - and consequently, a sweep run from INSIDE a dispatch worktree sweeps
+//     nothing. The root is derived from the caller's own checkout, so a
+//     nested caller computes a different isolate.Root() and refuses every
+//     record the main checkout wrote. That is the fail-safe direction --
+//     nothing is removed on a root it cannot vouch for -- but it means the
+//     automatic sweep on the dispatch path is a no-op whenever a dispatch
+//     is launched from within a worktree, and this host really does carry
+//     several such roots. Draining those needs a sweep run from the shared
+//     checkout; it is not something a nested run will get to.
 //
 // And eligibility only earns a worktree the right to be OFFERED to
 // Worktree.Remove. Remove's three refusals -- uncommitted work, commits
