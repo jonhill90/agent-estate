@@ -9,20 +9,21 @@ import (
 
 // TestGenerateReportsEverySourceHonestlyWhenAllFail is the whole "a
 // source that cannot be read must say so" requirement, exercised
-// end-to-end: four unreachable sources produce four SourceResults, all
+// end-to-end: five unreachable sources produce five SourceResults, all
 // OK=false with a Reason, never a silently empty Result.
 func TestGenerateReportsEverySourceHonestlyWhenAllFail(t *testing.T) {
 	cfg := Config{
 		VaultDir:      "",
 		CorpusDBPath:  filepath.Join(t.TempDir(), "absent.sqlite3"),
 		LoopsResearch: filepath.Join(t.TempDir(), "absent"),
+		RepoRoot:      filepath.Join(t.TempDir(), "absent-repo"),
 		RunGH: func(args ...string) ([]byte, error) {
 			return nil, os.ErrNotExist
 		},
 	}
 	res := Generate(cfg, time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC))
-	if len(res.Sources) != 4 {
-		t.Fatalf("got %d sources, want 4", len(res.Sources))
+	if len(res.Sources) != 5 {
+		t.Fatalf("got %d sources, want 5", len(res.Sources))
 	}
 	for _, s := range res.Sources {
 		if s.OK {

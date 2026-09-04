@@ -46,9 +46,10 @@ func TestEveryCaseHasQuestionAndRationale(t *testing.T) {
 	}
 }
 
-// TestCoversAllFourSources is #1019's own requirement: "A set that only
-// exercises one source measures one source."
-func TestCoversAllFourSources(t *testing.T) {
+// TestCoversAllFiveSources is #1019's own requirement (widened by
+// agent-estate#1034 to cover its fifth source, repo-docs): "A set that
+// only exercises one source measures one source."
+func TestCoversAllFiveSources(t *testing.T) {
 	cases, err := Load()
 	if err != nil {
 		t.Fatal(err)
@@ -58,6 +59,7 @@ func TestCoversAllFourSources(t *testing.T) {
 		SourceCorpusParameter: false,
 		SourceGithubStars:     false,
 		SourceLoopsResearch:   false,
+		SourceRepoDocs:        false,
 	}
 	for _, c := range cases {
 		if _, ok := want[c.ExpectedSource]; ok {

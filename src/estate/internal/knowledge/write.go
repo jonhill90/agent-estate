@@ -28,7 +28,38 @@ func DefaultConfig() (Config, error) {
 		// corpus is ~/corpus/ledger.sqlite3.
 		cfg.CorpusDBPath = filepath.Join(home, "corpus", "ledger.sqlite3")
 	}
+	if p := os.Getenv("ESTATE_REPO_ROOT"); p != "" {
+		cfg.RepoRoot = p
+	} else if wd, err := os.Getwd(); err == nil {
+		cfg.RepoRoot = findRepoRoot(wd) // "" if no AGENTS.md found above wd
+	}
 	return cfg, nil
+}
+
+// findRepoRoot walks upward from start looking for a directory
+// containing AGENTS.md -- the same marker-file convention `git` itself
+// uses for `.git`, so `estate knowledge` resolves the same repo root
+// regardless of whether it is invoked from the repo root or from a
+// subdirectory such as src/estate. Returns "" (never an error) if no
+// AGENTS.md is found within maxRepoRootDepth levels -- repoDocsSource
+// (docs.go) treats that as one failed source, the same honest-absence
+// path every other source in this package already uses, not a fatal
+// DefaultConfig error.
+const maxRepoRootDepth = 12
+
+func findRepoRoot(start string) string {
+	dir := start
+	for i := 0; i < maxRepoRootDepth; i++ {
+		if _, err := os.Stat(filepath.Join(dir, "AGENTS.md")); err == nil {
+			return dir
+		}
+		parent := filepath.Dir(dir)
+		if parent == dir {
+			return "" // reached filesystem root without finding AGENTS.md
+		}
+		dir = parent
+	}
+	return ""
 }
 
 // DefaultOutputPath is where Write puts the compiled index absent an
@@ -47,7 +78,7 @@ func DefaultOutputPath() (string, error) {
 
 // Write serializes res as indented JSON to path, creating its parent
 // directory if needed. This is the ONLY write this whole package
-// performs -- to its own output path, never to any of the four sources.
+// performs -- to its own output path, never to any of the five sources.
 func Write(path string, res Result) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return fmt.Errorf("cannot create %s: %w", filepath.Dir(path), err)

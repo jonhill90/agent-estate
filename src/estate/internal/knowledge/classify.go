@@ -3,7 +3,7 @@ package knowledge
 // classify decides Item.Publishable and Item.PublishBasis for source, at
 // compile time (agent-estate#1028) -- see Item's own doc comment for the
 // "UNCLASSIFIED MEANS PRIVATE" rule this function exists to enforce. Every
-// item any of the four sources produce is run through this call before it
+// item any of the five sources produce is run through this call before it
 // enters a Result; no source constructs an Item's Publishable field
 // itself.
 //
@@ -23,14 +23,18 @@ package knowledge
 // item today; this function states that as a source-level rule directly
 // instead of running the same branch once per item.
 //
-// The one source that IS safe to default public is github-stars: a
-// starred repo is already public GitHub activity, visible on the
-// operator's own public GitHub profile, with no personal content risk by
-// construction -- starring something does not reveal employment,
-// compensation, third parties, credentials, medical or family
-// information, the six categories #1028's own probe was built to catch.
-// Every other source defaults private until a real per-item signal
-// exists to classify against.
+// The sources safe to default public are github-stars and, as of
+// agent-estate#1034, repo-docs: a starred repo is already public GitHub
+// activity, visible on the operator's own public GitHub profile, with no
+// personal content risk by construction -- starring something does not
+// reveal employment, compensation, third parties, credentials, medical
+// or family information, the six categories #1028's own probe was built
+// to catch. repo-docs is AGENTS.md and docs/**/*.md in this repository,
+// itself public (agent-estate is a public repo) -- the same reasoning,
+// applied deliberately rather than left to the default branch below, per
+// #1034's own instruction that this be an explicit table entry, never a
+// fallthrough. Every other source defaults private until a real per-item
+// signal exists to classify against.
 //
 // WHAT THIS WILL MISS. A source-level rule cannot see content, so it
 // misses in exactly one direction: a starred repository whose name,
@@ -50,6 +54,8 @@ func classify(source string) (publishable bool, basis string) {
 	switch source {
 	case "github-stars":
 		return true, "github-stars: already public GitHub activity -- no per-item marker needed"
+	case "repo-docs":
+		return true, "repo-docs: AGENTS.md and docs/**/*.md are checked into a public repository -- explicit classification, not a fallthrough (agent-estate#1034)"
 	default:
 		return false, source + ": source defaults to private -- no per-item publishability marker exists yet (agent-estate#1028)"
 	}

@@ -25,7 +25,10 @@
 // string is checked whole (a string is trivially its own suffix); a
 // vault fact or Loops-Research file is checked by basename only, since
 // $AGENT_MEMORY_VAULT and the Loops-Research checkout path are
-// per-machine and the slug is what is actually stable.
+// per-machine and the slug is what is actually stable. A repo-docs case
+// (agent-estate#1034) is checked the same way, by "<relative
+// path>.md#<anchor>" -- repoRoot itself is per-machine, but the relative
+// path and the section's own anchor are not.
 package goldenset
 
 import (
@@ -37,7 +40,7 @@ import (
 //go:embed cases.json
 var casesJSON []byte
 
-// ExpectedSource names which of estate knowledge's four compiled sources
+// ExpectedSource names which of estate knowledge's five compiled sources
 // (or "none") a case's answer comes from -- see internal/knowledge's own
 // Item.Source values, which these mirror exactly except for "none".
 type ExpectedSource string
@@ -47,6 +50,9 @@ const (
 	SourceCorpusParameter ExpectedSource = "corpus-parameter"
 	SourceGithubStars     ExpectedSource = "github-stars"
 	SourceLoopsResearch   ExpectedSource = "loops-research"
+	// SourceRepoDocs is agent-estate#1034's own source: AGENTS.md and
+	// docs/**/*.md, indexed by heading.
+	SourceRepoDocs ExpectedSource = "repo-docs"
 	// SourceNone marks a case whose honest answer is that nothing in the
 	// index answers it -- the absence path #1019 requires be measured.
 	SourceNone ExpectedSource = "none"

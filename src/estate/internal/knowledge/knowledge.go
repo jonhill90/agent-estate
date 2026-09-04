@@ -1,5 +1,5 @@
 // Package knowledge builds `estate knowledge`'s compiled index -- a
-// derived, regenerable read over four sources that already exist, none
+// derived, regenerable read over five sources that already exist, none
 // of them owned or written by this package:
 //
 //   - GitHub stars (gh api user/starred --paginate)
@@ -10,8 +10,13 @@
 //     agent-estate#942)
 //   - ~/source/repos/Personal/Loops-Research, a plain directory of
 //     numbered markdown files
+//   - this repository's own written rules: AGENTS.md (CLAUDE.md is the
+//     same file, a symlink) and every docs/**/*.md file -- agent-estate
+//     #1034, added because the rules every dispatched lane in this repo
+//     is required to obey were, until this source existed, not a
+//     knowledge source themselves
 //
-// NEVER AUTHORITATIVE. This package never writes to any of the four
+// NEVER AUTHORITATIVE. This package never writes to any of its five
 // sources, never migrates or rewrites anything, and never chooses a
 // storage format for the operator's own knowledge base -- that is his
 // open decision, not this package's to settle. What Generate produces is
@@ -48,9 +53,9 @@ type Item struct {
 	// written into anything durable).
 	ID string `json:"id"`
 
-	// Source names which of the four readers produced this item --
-	// "github-stars", "vault-fact", "corpus-parameter" or
-	// "loops-research".
+	// Source names which of the five readers produced this item --
+	// "github-stars", "vault-fact", "corpus-parameter", "loops-research"
+	// or "repo-docs".
 	Source string `json:"source"`
 
 	// Permalink is a URL or filesystem path a reader can actually open
@@ -123,7 +128,7 @@ type Item struct {
 	PromptID string `json:"prompt_id,omitempty"`
 }
 
-// SourceResult is what one of the four readers actually managed --
+// SourceResult is what one of the five readers actually managed --
 // Count and Items only meaningful when OK. A source that failed still
 // gets an entry here, with Reason, so failure is a visible line in the
 // output rather than a silently smaller Items slice.
@@ -152,7 +157,7 @@ type Result struct {
 	Items   []Item         `json:"items"`
 }
 
-const stalenessRule = "stale the moment any of its four sources changes; " +
+const stalenessRule = "stale the moment any of its five sources changes; " +
 	"this Result carries no freshness check of its own beyond generated_at " +
 	"-- regenerate with `estate knowledge` before trusting a count here " +
 	"over a live read of the source"
@@ -168,6 +173,11 @@ type Config struct {
 	VaultDir      string // $AGENT_MEMORY_VAULT
 	CorpusDBPath  string // ~/corpus/ledger.sqlite3 by default
 	LoopsResearch string // ~/source/repos/Personal/Loops-Research by default
+	// RepoRoot is this agent-estate checkout's own root -- the directory
+	// containing AGENTS.md and docs/. See write.go's findRepoRoot for how
+	// DefaultConfig resolves it; empty means repoDocsSource reports
+	// itself unresolved rather than guessing a path (docs.go).
+	RepoRoot string
 	// RunGH executes a gh CLI invocation and returns its stdout --
 	// the seam stars.go reads through, so a test never shells out to
 	// the real gh binary or a real network. nil means "use the real
