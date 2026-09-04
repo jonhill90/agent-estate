@@ -43,6 +43,26 @@ const (
 	// prevent. Reason names the count; WithheldPrivate on QueryResult
 	// carries it as a typed field too.
 	StateWithheldPrivate QueryState = "withheld_private"
+	// StateMatchedWithheldMajority means at least one publishable item
+	// scored above zero and was returned -- same population as
+	// StateMatched -- but MORE items were withheld as private than were
+	// returned (agent-estate#1052). This exists so a caller reading the
+	// State field as a bare string, not just $?, can tell "answered" from
+	// "technically answered, mostly hidden" without doing its own ratio
+	// arithmetic on WithheldPrivate/TotalMatched.
+	//
+	// Deliberately maps to the SAME exit code as StateMatched (0), never
+	// a new one -- see knowledgeQueryExitCode in main.go. A query in this
+	// state still produced a real, citable public answer; three of the
+	// golden set's own publishable-only hits (agent-estate#1023's
+	// stars-01/02/03) sit well past the majority line measured against a
+	// real index (24 public/58 private, 5/72, 6/97), so making this state
+	// a distinct non-zero exit would turn those honest hits into runner
+	// failures and move the golden score -- #1052 is explicit that must
+	// not happen. The louder signal lives in the printed state word and a
+	// dedicated banner line (see printKnowledgeQuery in main.go), not in
+	// the exit code.
+	StateMatchedWithheldMajority QueryState = "matched_withheld_majority"
 )
 
 // QueryLimit is the hard cap on items Query returns in one call --
@@ -85,7 +105,7 @@ type Match struct {
 // QueryResult is Query's full, typed answer.
 type QueryResult struct {
 	State    QueryState `json:"state"`
-	Reason   string     `json:"reason,omitempty"` // set for IndexMissing/IndexUnreadable/WithheldPrivate
+	Reason   string     `json:"reason,omitempty"` // set for IndexMissing/IndexUnreadable/WithheldPrivate/MatchedWithheldMajority
 	Question string     `json:"question,omitempty"`
 	// TagFilters is the set of exact structural/synaptic tags extracted
 	// from Question and applied BEFORE term scoring (agent-estate#1024)
@@ -492,6 +512,17 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 	}
 
 	out.State = StateMatched
+	if withheldPrivate > out.TotalMatched {
+		// More matching items were withheld as private than were
+		// returned -- agent-estate#1052. Still StateMatched's exit code
+		// (0): see StateMatchedWithheldMajority's own doc comment for
+		// why a non-zero exit here was measured and rejected. Strict
+		// majority (">"), not ">=", so an even split still reads as a
+		// real, if incomplete, answer rather than a mostly-hidden one.
+		out.State = StateMatchedWithheldMajority
+		out.Reason = fmt.Sprintf("%d of %d matching item(s) are private -- the %d shown are a minority of the answer; rerun with --private to include the rest",
+			withheldPrivate, withheldPrivate+out.TotalMatched, out.TotalMatched)
+	}
 	n := len(all)
 	if n > limit {
 		n = limit
