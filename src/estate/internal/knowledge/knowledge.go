@@ -77,6 +77,29 @@ type Item struct {
 
 	// Tier1 is one line, true and useful standing alone.
 	Tier1 string `json:"tier1"`
+
+	// Tier1Scored, when non-empty, is what bm25.go's tier1SearchableText
+	// indexes at tier1FieldWeight INSTEAD OF Tier1 -- agent-estate#1113:
+	// for repo-docs, Tier1 is a section's full ancestor heading path (its
+	// file's H1 title down to its own heading), which is exactly right for
+	// a caller to READ but wrong to score at 3x uniformly, because two
+	// unrelated sections of the same file share every ancestor term. A
+	// document titled "How does knowledge retrieval work in this repo?"
+	// put "how"/"does"/"work" at 3x into all eleven of its own sections,
+	// burying an unrelated but genuinely relevant section (see #1113's own
+	// measurement). Tier1Scored carries the section's OWN leaf heading
+	// only; Tier1AncestorScored (below) carries the dropped ancestor text,
+	// still searchable but at a lower weight. Empty for every source
+	// except repo-docs, which is the only one whose Tier1 is a multi-level
+	// path rather than already one leaf-shaped line -- see docs.go.
+	Tier1Scored string `json:"tier1_scored,omitempty"`
+
+	// Tier1AncestorScored carries a repo-docs item's ancestor heading text
+	// (everything Tier1Scored drops), searchable at ancestorFieldWeight
+	// (bm25.go) rather than tier1FieldWeight. Never displayed -- Tier1
+	// alone is what a caller sees; this and Tier1Scored only change what
+	// the scorer reads. Empty for every source except repo-docs.
+	Tier1AncestorScored string `json:"tier1_ancestor_scored,omitempty"`
 	// Tier2 is a short paragraph of additional context, for three of
 	// the four sources. The vault-fact source is the exception
 	// (agent-estate#1027): its Tier2 carries the fact's own full body,

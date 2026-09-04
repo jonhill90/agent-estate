@@ -85,6 +85,14 @@ func repoDocsSource(repoRoot string) (SourceResult, []Item) {
 				continue // a section with a heading but no prose has nothing to answer with
 			}
 			tier1 := strings.Join(sec.HeadingPath, " — ")
+			// agent-estate#1113: Tier1 (above, displayed verbatim) stays
+			// the full ancestor path -- that is what makes a repo-docs
+			// citation legible. tier1Leaf/tier1Ancestors split the SAME
+			// text for scoring only, via Item.Tier1Scored/
+			// Tier1AncestorScored -- see knowledge.go's doc comments on
+			// those fields for why the split exists.
+			tier1Leaf := sec.HeadingPath[len(sec.HeadingPath)-1]
+			tier1Ancestors := strings.Join(sec.HeadingPath[:len(sec.HeadingPath)-1], " — ")
 			// agent-estate#1072: the permalink is repo-relative (rel, not
 			// full) so itemID -- a pure function of permalink -- produces
 			// the same id for the same section regardless of which
@@ -101,15 +109,17 @@ func repoDocsSource(repoRoot string) (SourceResult, []Item) {
 			permalink := rel + "#" + headingAnchor(sec.HeadingPath)
 			publishable, basis := classify("repo-docs")
 			items = append(items, Item{
-				ID:             itemID(permalink),
-				Source:         "repo-docs",
-				Permalink:      permalink,
-				StructuralTags: []string{"repo-docs", rel},
-				Tier1:          truncate(tier1, 200),
-				Tier2:          truncate(body, 800),
-				Tier3:          "open " + rel + " for the full section (repo-relative -- see the repo root your own checkout resolves)",
-				Publishable:    publishable,
-				PublishBasis:   basis,
+				ID:                  itemID(permalink),
+				Source:              "repo-docs",
+				Permalink:           permalink,
+				StructuralTags:      []string{"repo-docs", rel},
+				Tier1:               truncate(tier1, 200),
+				Tier1Scored:         truncate(tier1Leaf, 200),
+				Tier1AncestorScored: truncate(tier1Ancestors, 200),
+				Tier2:               truncate(body, 800),
+				Tier3:               "open " + rel + " for the full section (repo-relative -- see the repo root your own checkout resolves)",
+				Publishable:         publishable,
+				PublishBasis:        basis,
 			})
 		}
 	}
