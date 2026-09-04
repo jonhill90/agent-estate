@@ -1,20 +1,44 @@
-// Package library renders the SHARED prompt/decision corpus --
-// ~/.local/state/agent-dotfiles-supervisor/ledger.sqlite3's own
-// live_parameters/open_questions/unacknowledged/possibility_count views,
-// the counterpart internal/knowledge is not: knowledge is Jon's PERSONAL
-// memory vault (agent/facts, one operator, plain markdown files);
-// library is the corpus every agent in the estate is supposed to consult
-// before asking Jon anything -- one shared SQLite ledger, not a vault, and
-// today reachable only by hand-typing SQL. w5c.md's own brief: "put it on
-// screen."
+// Package library renders a prompt/decision corpus -- live_parameters/
+// open_questions/unacknowledged/possibility_count, the same seven views
+// every corpus of this shape exposes -- as a routed TUI pane. Which corpus
+// is not fixed: it is a SUPPLIED CHOICE (Source, fetch.go; Model.NewSources),
+// the same way every other external dependency in this half of the repo is
+// supplied by cmd/estate/main.go rather than hardcoded in internal/. Two are
+// wired in today (cmd/estate/library.go): the SHARED prompt/decision ledger
+// (agent-dotfiles-supervisor's own database, source_tasks/tasks'
+// counterpart internal/board already reads -- this package's original,
+// still-default target) and the OPERATOR'S OWN corpus at ~/corpus, a
+// materially larger and differently-scoped database (agent-estate#1088 --
+// 7,311 items and 1,104 live hard parameters measured 2026-09-03, against
+// the shared ledger's 72/0). Neither replaces the other; [c] cycles between
+// whichever Sources cmd/estate actually configured, shared first.
 //
-// This is the SAME ledger.sqlite3 internal/board already reads (source_tasks/
-// tasks) -- not a second ledger reader, a second projection of the one
-// this module already knows how to open safely. Reuses board.LedgerRunner/
-// board.ExecRunner (the same `sqlite3 -json` + `PRAGMA query_only=1`
-// pattern board.ReadTaskRows documents) and cmd/estate's own ledgerSource
-// (the auto-copying "must be a copy, never the live file" seam agent-tui#49
-// item 2 built) -- see cmd/estate/library.go for the composition.
+// The counterpart internal/knowledge is not: knowledge is Jon's PERSONAL
+// memory vault (agent/facts, plain markdown files); library is a corpus of
+// judged prompts, held in SQLite, not a vault, and before agent-estate#1088
+// reachable only by hand-typing SQL or reading the wrong one of the two
+// (agent-estate#942). w5c.md's own brief: "put it on screen."
+//
+// READ-ONLY, ALWAYS, FOR BOTH SOURCES. This package has no write path -- no
+// key or method here issues anything but a SELECT -- and every dbPath this
+// file is handed is opened accordingly: `PRAGMA query_only=1` ahead of every
+// query (board.LedgerRunner/board.ExecRunner, the same `sqlite3 -json`
+// pattern board.ReadTaskRows documents), and for the operator's own corpus,
+// cmd/estate additionally opens the file itself with the `file:...?mode=ro`
+// URI form (src/estate/internal/corpus's own precedent for the identical
+// database, not a copy -- see cmd/estate/library.go's own doc comment for
+// why a copy is unnecessary here but was for the shared ledger).
+//
+// LOCAL, NOT OUTWARD-FACING -- STATED, NOT INHERITED. Rendering the
+// operator's own corpus in a TUI pane puts his private prompt/decision
+// record on screen. That is acceptable ONLY because this pane runs on his
+// own machine (or over his own -ssh-addr) and nothing in this package
+// writes what it reads anywhere else: no log line, no screenshot, no test
+// fixture, and no PR body may ever carry real corpus text -- every test in
+// this package and its own teatest siblings builds a synthetic fixture
+// database instead of touching either real corpus (agent-estate#1088). If
+// this pane is ever reachable by anyone other than the operator himself,
+// that changes this boundary and must be re-argued, not assumed away.
 //
 // PROGRESSIVE DISCLOSURE is a hard constraint here, the same one
 // internal/knowledge's own package doc comment states for the vault: this

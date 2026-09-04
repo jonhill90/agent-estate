@@ -57,9 +57,25 @@ func filterLabel(s string) string {
 // narrowed by weight ([f]) and status ([x]), plus possibility_count shown
 // as a standing legend regardless of which view is active. Read-only --
 // this package has no write path, no key or method that touches the
-// ledger for anything but a SELECT. Not wired into internal/shell yet --
-// matches every other view this repo has built standalone-first.
+// ledger for anything but a SELECT. Wired into internal/shell via
+// WithLibrary (cmd/estate/main.go).
+//
+// The corpus itself is a SUPPLIED CHOICE (agent-estate#1088), cycled with
+// [c] across sources -- today the shared prompt/decision ledger
+// (internal/board's own database, this package's original target) and the
+// operator's own ~/corpus, both read-only. The shared corpus stays index 0
+// (the default) unless a caller's own Source order says otherwise; see
+// cmd/estate/library.go for which two sources this repo actually wires in
+// and why the shared one is still first.
 type Model struct {
+	sources   []Source
+	sourceIdx int
+
+	// fetch/loadDetail/fetchCount always mirror sources[sourceIdx] -- kept
+	// as their own fields, rather than read through sources on every call,
+	// because every existing call site in this file already reads them
+	// this way (predates multi-source support) and cycling sources is rare
+	// (one key, [c]) next to every other read.
 	fetch      Fetcher
 	loadDetail DetailLoader
 	fetchCount CountFetcher
@@ -106,19 +122,32 @@ type Model struct {
 	themeNotice string
 }
 
-// New builds a Model with fetch/loadDetail/fetchCount wired in. fetch == nil
-// (cmd/estate had no ledger to build one from) is a distinct, VISIBLE
-// state from "fetch ran and found zero rows" -- w5c.md's own hard
-// requirement -- tracked here as unconfigured rather than left to read as
-// an empty (Init never issues doFetch, so m.fetchErr would otherwise stay
-// nil forever and the list would silently render "(no items)" for a
-// ledger that was never even asked).
+// New builds a single-source Model with fetch/loadDetail/fetchCount wired
+// in directly -- sugar for NewSources with one unnamed Source, kept for
+// every existing caller (including this package's own tests) that has no
+// second corpus to offer. fetch == nil (cmd/estate had no ledger to build
+// one from) is a distinct, VISIBLE state from "fetch ran and found zero
+// rows" -- w5c.md's own hard requirement -- tracked here as unconfigured
+// rather than left to read as an empty (Init never issues doFetch, so
+// m.fetchErr would otherwise stay nil forever and the list would silently
+// render "(no items)" for a ledger that was never even asked).
 func New(fetch Fetcher, loadDetail DetailLoader, fetchCount CountFetcher) Model {
-	return Model{
-		fetch:        fetch,
-		loadDetail:   loadDetail,
-		fetchCount:   fetchCount,
-		unconfigured: fetch == nil,
+	return NewSources([]Source{{Fetch: fetch, LoadDetail: loadDetail, FetchCount: fetchCount}})
+}
+
+// NewSources builds a Model over one or more corpora, starting on sources[0]
+// (agent-estate#1088: the shared corpus stays the default; cmd/estate/
+// library.go is what decides the order). A caller passing an empty slice
+// gets a single unconfigured Source, matching New(nil, nil, nil)'s own
+// behaviour rather than panicking on sources[0].
+func NewSources(sources []Source) Model {
+	if len(sources) == 0 {
+		sources = []Source{{}}
+	}
+	m := Model{
+		sources:      sources,
+		sourceIdx:    0,
+		unconfigured: sources[0].Fetch == nil,
 		view:         ViewLiveParameters,
 		cache:        map[string]ItemDetail{},
 		listVP:       viewport.New(0, 0),
@@ -127,6 +156,32 @@ func New(fetch Fetcher, loadDetail DetailLoader, fetchCount CountFetcher) Model 
 		height:       30,
 		theme:        theme.Default,
 	}
+	m.applySource()
+	return m
+}
+
+// applySource copies the current sources[sourceIdx]'s three seams into
+// fetch/loadDetail/fetchCount and recomputes unconfigured -- the one place
+// a source switch ([c]) or initial build (NewSources) touches those three
+// fields, so every other method in this file keeps reading them exactly as
+// it did before multi-source support existed.
+func (m *Model) applySource() {
+	src := m.sources[m.sourceIdx]
+	m.fetch = src.Fetch
+	m.loadDetail = src.LoadDetail
+	m.fetchCount = src.FetchCount
+	m.unconfigured = src.Fetch == nil
+}
+
+// currentSourceName is what view.go shows for the active corpus -- falls
+// back to "corpus" for a Source built with no Name (New's single-source
+// sugar, and this package's own tests), so the title line is never blank.
+func (m Model) currentSourceName() string {
+	name := m.sources[m.sourceIdx].Name
+	if name == "" {
+		return "corpus"
+	}
+	return name
 }
 
 // WithTheme returns a copy of m painted with th -- the same per-pane seam
@@ -233,6 +288,33 @@ func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case "t":
 		return m, func() tea.Msg { return theme.CycleRequestedMsg{} }
+	case "c":
+		// Handled here, above the modeReading branch below, deliberately --
+		// [c] must work from EITHER pane (list or an open item), the same
+		// as [q]/[t] just above it. A switch always returns to modeList:
+		// staying in modeReading would keep showing the OLD corpus's
+		// bodyVP content (or "(loading)") under a title that now names the
+		// new corpus, which reads as data leaking across the switch.
+		if len(m.sources) < 2 {
+			// Nothing to cycle to -- e.g. New's single-source sugar, or
+			// cmd/estate found no second corpus configured. A no-op, not
+			// an error: [c] simply has nothing to do yet.
+			return m, nil
+		}
+		m.sourceIdx = (m.sourceIdx + 1) % len(m.sources)
+		m.applySource()
+		m.selected = 0
+		// A different corpus is a different database -- items opened
+		// under the old source stay cached under ids that mean nothing
+		// here, and could even collide with a same-shaped id from this
+		// source. Clear rather than risk showing the wrong corpus's text
+		// under a coincidentally-matching id.
+		m.rows = nil
+		m.cache = map[string]ItemDetail{}
+		m.mode = modeList
+		m.opening = ""
+		m.readErr = ""
+		return m.sync(), tea.Batch(doFetch(m.fetch, m.view, m.weight, m.status), doFetchCount(m.fetchCount))
 	}
 
 	if m.mode == modeReading {
