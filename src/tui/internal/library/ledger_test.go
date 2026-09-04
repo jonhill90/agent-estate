@@ -113,6 +113,50 @@ func TestReadItemDetailNoRowsIsAnError(t *testing.T) {
 	}
 }
 
+// TestReadQueueBuildsTheFiledAsLawPredicate is agent-estate#1094's own
+// query-builder contract: QueueFiledAsLaw selects from the base
+// items/prompts tables (never a named view -- there is none for this
+// predicate) with the fixed kind/weight/status/damage-order shape.
+// Undefined symbol Queue/QueueFiledAsLaw/ReadQueue against the parent
+// commit (e6d3c26) -- this whole test fails to compile there.
+func TestReadQueueBuildsTheFiledAsLawPredicate(t *testing.T) {
+	run := fakeRunner(t, []string{
+		"-json", "/tmp/copy.sqlite3", "PRAGMA query_only=1",
+		"FROM items i JOIN prompts p",
+		"i.kind = 'question'", "i.weight = 'hard'",
+		"i.status IN ('acted', 'resolved', 'acknowledged')",
+		"ORDER BY CASE i.status WHEN 'acted' THEN 0 WHEN 'resolved' THEN 1 WHEN 'acknowledged' THEN 2",
+	}, `[]`, nil)
+	if _, err := ReadQueue(run, "/tmp/copy.sqlite3", QueueFiledAsLaw); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestReadQueueDecodesRealShape(t *testing.T) {
+	out := `[{"id":"it-bcfead91db16c4c6","kind":"question","weight":"hard","status":"acted","resolved_to":"","body_snippet":"a question filed as law and acted upon"}]`
+	run := fakeRunner(t, []string{"i.kind = 'question'"}, out, nil)
+	rows, err := ReadQueue(run, "x.sqlite3", QueueFiledAsLaw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].Status != "acted" || rows[0].ResolvedTo != "" {
+		t.Fatalf("got %+v", rows)
+	}
+}
+
+func TestReadQueueRejectsUnknownQueue(t *testing.T) {
+	if _, err := ReadQueue(nil, "x.sqlite3", Queue("drop table items")); err == nil {
+		t.Fatal("expected an error for an unknown queue, got nil")
+	}
+}
+
+func TestReadQueuePropagatesRunnerError(t *testing.T) {
+	run := fakeRunner(t, nil, "", errors.New("boom"))
+	if _, err := ReadQueue(run, "x.sqlite3", QueueFiledAsLaw); err == nil {
+		t.Fatal("expected an error")
+	}
+}
+
 func TestReadPossibilityCountDecodes(t *testing.T) {
 	run := fakeRunner(t, []string{"possibility_count"}, `[{"count":931}]`, nil)
 	n, err := ReadPossibilityCount(run, "x.sqlite3")

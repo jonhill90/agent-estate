@@ -41,6 +41,15 @@
 // this pane is ever reachable by anyone other than the operator himself,
 // that changes this boundary and must be re-argued, not assumed away.
 //
+// A Queue (below, QueueFiledAsLaw) is a SECOND, DELIBERATELY SEPARATE
+// vocabulary from View: a View names one of the ledger's own real SQL
+// views; a Queue is a predicate this package computes itself over the base
+// items/prompts tables because the predicate it needs (agent-estate#1094 --
+// "questions filed as law") is not one of the ledger's own views and this
+// package may not create one (no write path -- see READ-ONLY below). Kept
+// as its own type, not a fifth View value, so the two can never be
+// confused for each other at a call site.
+//
 // PROGRESSIVE DISCLOSURE is a hard constraint here, the same one
 // internal/knowledge's own package doc comment states for the vault: this
 // package must never pull a full row set to draw a list. ReadItems below
@@ -248,6 +257,77 @@ FROM items i JOIN prompts p ON p.id = i.prompt_id WHERE i.id = '%s' LIMIT 1;`, i
 		return ItemDetail{}, fmt.Errorf("library: no item %s (it may have been re-judged since the list was drawn)", id)
 	}
 	return rows[0], nil
+}
+
+// Queue is a client-side predicate this package evaluates itself over the
+// corpus's own items/prompts tables -- deliberately NOT a View. A View
+// (above) names one of the ledger's own real SQL views; kind='question' AND
+// weight='hard' (agent-estate#1094 -- "questions filed as law") is not one
+// of them, and this package may not make it one: it has no write path, and
+// a CREATE VIEW would write to a read-only source (this file's own package
+// doc comment). So the predicate lives here instead, as ITS OWN TYPE rather
+// than a fifth View value -- a Queue can never be silently passed where a
+// View is expected (or the reverse), and validQueues (below) is this type's
+// own allow-list, the same discipline validViews already applies to View.
+// This is the second filtering vocabulary agent-estate#1093's review flagged as a real
+// cost of building this: the containment is Queue itself, not a shared
+// string type doing double duty.
+type Queue string
+
+// QueueFiledAsLaw is the one Queue this package ships: hard-weight
+// questions the estate has treated as settled -- acted upon or marked
+// resolved/acknowledged -- with, per agent-estate#1094's own measurement,
+// almost none of them (2 of 138) carrying a resolved_to target that could
+// be checked. filedAsLawQuery (below) orders it by damage, most dangerous
+// first: acted (treated as binding and acted upon) before resolved (marked
+// settled) before acknowledged. status='open' is deliberately excluded --
+// those 15 are already the corpus's own open_questions view, and mixing
+// them into this queue would blur "still open" into "was treated as
+// settled" under one list.
+const QueueFiledAsLaw Queue = "filed_as_law"
+
+var validQueues = map[Queue]bool{QueueFiledAsLaw: true}
+
+// filedAsLawQuery builds QueueFiledAsLaw's query. Unlike itemsQuery, this
+// selects from the base items/prompts tables, never a named view -- there
+// is no view for this predicate and this package may not create one. Both
+// the WHERE clause and the ORDER BY CASE damage-ordering are fixed, unlike
+// itemsQuery's caller-supplied weight/status: this Queue has exactly one
+// shape, so there is no caller-supplied value here to widen into an
+// injection point, and ReadQueue below still checks its Queue argument
+// against validQueues rather than assuming the only caller is honest.
+func filedAsLawQuery() string {
+	return `SELECT i.id AS id, i.kind AS kind, i.weight AS weight, i.status AS status,
+coalesce(i.resolved_to,'') AS resolved_to, substr(i.body,1,120) AS body_snippet
+FROM items i JOIN prompts p ON p.id = i.prompt_id
+WHERE i.kind = 'question' AND i.weight = 'hard' AND i.status IN ('acted', 'resolved', 'acknowledged')
+ORDER BY CASE i.status WHEN 'acted' THEN 0 WHEN 'resolved' THEN 1 WHEN 'acknowledged' THEN 2 ELSE 3 END, p.at DESC
+LIMIT 200;`
+}
+
+// ReadQueue runs q's fixed query against dbPath. There is only one Queue
+// today, but q is still checked against validQueues before it reaches this
+// file's own hardcoded SQL, the same discipline ReadItems applies to
+// View/weight/status, rather than special-casing the single member away.
+// A corpus whose items table lacks the kind/weight columns this predicate
+// needs surfaces as a sqlite3 error here (propagated as fetchErr by the
+// caller), never a silently empty result -- the same typed-absence
+// contract itemsQuery already relies on for weight/status.
+func ReadQueue(run board.LedgerRunner, dbPath string, q Queue) ([]ItemRow, error) {
+	if !validQueues[q] {
+		return nil, fmt.Errorf("library: unknown queue %q", q)
+	}
+	out, err := run([]string{"-json", dbPath, "PRAGMA query_only=1;\n" + filedAsLawQuery()})
+	if err != nil {
+		return nil, fmt.Errorf("library: read ledger %s: %w", dbPath, err)
+	}
+	var rows []ItemRow
+	if len(out) > 0 {
+		if err := json.Unmarshal(out, &rows); err != nil {
+			return nil, fmt.Errorf("library: decode item rows: %w", err)
+		}
+	}
+	return rows, nil
 }
 
 // ReadPossibilityCount reads possibility_count -- "how many hard

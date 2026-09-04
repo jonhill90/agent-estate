@@ -23,12 +23,14 @@ func buildLibrarySources(ledgerSrc, corpusSrc ledgerSource, sqliteBin string) []
 			Fetch:      buildLibraryFetch(ledgerSrc, sqliteBin),
 			LoadDetail: buildLibraryDetailLoader(ledgerSrc, sqliteBin),
 			FetchCount: buildLibraryCountFetch(ledgerSrc, sqliteBin),
+			FetchQueue: buildLibraryQueueFetch(ledgerSrc, sqliteBin),
 		},
 		{
 			Name:       "operator",
 			Fetch:      buildLibraryFetch(corpusSrc, sqliteBin),
 			LoadDetail: buildLibraryDetailLoader(corpusSrc, sqliteBin),
 			FetchCount: buildLibraryCountFetch(corpusSrc, sqliteBin),
+			FetchQueue: buildLibraryQueueFetch(corpusSrc, sqliteBin),
 		},
 	}
 }
@@ -70,6 +72,25 @@ func buildLibraryDetailLoader(ledger ledgerSource, sqliteBin string) library.Det
 			return library.ItemDetail{}, err
 		}
 		return library.ReadItemDetail(sqliteRun, ledgerPath, id)
+	}
+}
+
+// buildLibraryQueueFetch composes library.ReadQueue with a ledgerSource --
+// the Queue analogue of buildLibraryFetch above, same nil-degrades-to-nil
+// rule (agent-estate#1094: a Source's queue slot can be unconfigured
+// independently of its View slot, and library.Model's
+// effectiveUnconfigured renders that distinctly).
+func buildLibraryQueueFetch(ledger ledgerSource, sqliteBin string) library.QueueFetcher {
+	if ledger == nil {
+		return nil
+	}
+	sqliteRun := board.LedgerRunner(board.ExecRunner(sqliteBin))
+	return func(q library.Queue) ([]library.ItemRow, error) {
+		ledgerPath, err := ledger()
+		if err != nil {
+			return nil, err
+		}
+		return library.ReadQueue(sqliteRun, ledgerPath, q)
 	}
 }
 

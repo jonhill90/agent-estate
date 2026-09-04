@@ -254,6 +254,113 @@ func TestStaleDetailLoadIsDropped(t *testing.T) {
 	}
 }
 
+// fakeSourceWithQueue builds a Source whose Fetch/FetchQueue are separately
+// observable -- every test below that drives [d] needs to prove the QUEUE
+// path was called, not the view path, and vice versa.
+func fakeSourceWithQueue(name string, viewRows []ItemRow, queueRows []ItemRow) (Source, *[]string) {
+	calls := &[]string{}
+	return Source{
+		Name: name,
+		Fetch: func(View, string, string) ([]ItemRow, error) {
+			*calls = append(*calls, "view")
+			return viewRows, nil
+		},
+		FetchQueue: func(Queue) ([]ItemRow, error) {
+			*calls = append(*calls, "queue")
+			return queueRows, nil
+		},
+	}, calls
+}
+
+// TestDKeyTogglesQueueAndReFetches is agent-estate#1094's own contract: [d]
+// switches the active fetch path to QueueFiledAsLaw and re-queries, the
+// same shape [v]/[f]/[x] already prove for view/weight/status. Undefined
+// symbol usingQueue/doFetchQueue against the parent commit -- fails to
+// compile there.
+func TestDKeyTogglesQueueAndReFetches(t *testing.T) {
+	src, calls := fakeSourceWithQueue("shared",
+		[]ItemRow{{ID: "it-view0000000000"}},
+		[]ItemRow{{ID: "it-queue000000000", Status: "acted"}})
+	m := NewSources([]Source{src})
+
+	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m = next.(Model)
+	if !m.usingQueue {
+		t.Fatal("[d] did not switch to queue mode")
+	}
+	if cmd == nil {
+		t.Fatal("[d] did not return a re-fetch command")
+	}
+	msg := cmd()
+	next, _ = m.Update(msg)
+	m = next.(Model)
+	if len(*calls) != 1 || (*calls)[0] != "queue" {
+		t.Fatalf("calls after [d] = %v, want exactly one call to the queue fetch", *calls)
+	}
+	if len(m.rows) != 1 || m.rows[0].ID != "it-queue000000000" {
+		t.Fatalf("rows after [d] = %+v, want the queue's own row", m.rows)
+	}
+
+	// A second [d] returns to view mode and re-fetches the view path.
+	next, cmd = m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m = next.(Model)
+	if m.usingQueue {
+		t.Fatal("second [d] did not return to view mode")
+	}
+	msg = cmd()
+	next, _ = m.Update(msg)
+	m = next.(Model)
+	if len(*calls) != 2 || (*calls)[1] != "view" {
+		t.Fatalf("calls after second [d] = %v, want a second call to the view fetch", *calls)
+	}
+}
+
+// TestVFXKeysAreNoOpsWhileQueueActive is filedAsLawQuery's own fixed-shape
+// contract at the Model level: QueueFiledAsLaw has no view/weight/status
+// underneath it to cycle, so [v]/[f]/[x] must do nothing while [d] is
+// active rather than silently composing with (or exiting) the queue.
+func TestVFXKeysAreNoOpsWhileQueueActive(t *testing.T) {
+	src, calls := fakeSourceWithQueue("shared", nil, []ItemRow{{ID: "it-queue000000000"}})
+	m := NewSources([]Source{src})
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m = next.(Model)
+	*calls = nil // clear the [d] toggle's own fetch call
+
+	for _, key := range []string{"v", "f", "x"} {
+		next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(key)})
+		m = next.(Model)
+		if cmd != nil {
+			t.Fatalf("[%s] while queue active returned a non-nil cmd, want a no-op", key)
+		}
+	}
+	if !m.usingQueue {
+		t.Fatal("[v]/[f]/[x] must not exit queue mode")
+	}
+	if len(*calls) != 0 {
+		t.Fatalf("[v]/[f]/[x] issued a fetch while queue active: %v", *calls)
+	}
+}
+
+// TestQueueUnconfiguredRendersVisiblyNotAsAnEmptyList is this pane's own
+// typed-absence requirement (agent-estate#1094's "Must not happen": a
+// corpus lacking these columns, or a Source with no FetchQueue wired at
+// all, must read as "could not look", never as an empty queue) applied to
+// the [d] path specifically -- a Source with a working Fetch but a nil
+// FetchQueue must show a visible, queue-specific error the moment [d] is
+// pressed, not "(no items match this view/filter)".
+func TestQueueUnconfiguredRendersVisiblyNotAsAnEmptyList(t *testing.T) {
+	m := NewSources([]Source{{Name: "shared", Fetch: fakeFetch(testRows(), nil), FetchQueue: nil}})
+	next, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("d")})
+	m = next.(Model)
+	out := m.View()
+	if !strings.Contains(out, "filed-as-law queue is not configured") {
+		t.Fatalf("[d] with a nil FetchQueue did not render a visible config error:\n%s", out)
+	}
+	if strings.Contains(out, "no items match") {
+		t.Fatalf("an unconfigured queue must never render as an empty list:\n%s", out)
+	}
+}
+
 // TestCKeyCyclesSourceAndReFetches is agent-estate#1088's own contract: [c]
 // switches which corpus's Fetcher is called, exactly like [v]/[f]/[x] switch
 // which query is run against the ONE corpus this package used to have. This
