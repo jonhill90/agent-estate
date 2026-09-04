@@ -183,6 +183,16 @@ func prHeadBranch(pr int) (string, error) {
 // the fact that querying is possible (agent-estate#1049's "no automatic
 // pre-fetch" -- injecting results into every prompt would recreate the
 // fixed-payload problem this issue exists to fix, one layer up).
+//
+// Also names `source:<name>` scoping (agent-estate#1081): measured on
+// 4b41a1f, a lane following this grounding with no mention of the flag took
+// the unscoped path and scored 4/12 on the checked-in stratum where the
+// scoped path scores 8/12 -- and #1087's own knowledge doc, while it
+// retrieves, only surfaces the flag to a lane whose query already contains
+// the word "source"; a lane asking how to get fewer irrelevant results does
+// not find it by searching. This one sentence is the only path that reaches
+// the lane that has not yet learned the vocabulary; the doc stays the
+// explainer, pointed at rather than duplicated here.
 func knowledgeGrounding() string {
 	return "\n\n## Knowledge retrieval exists (agent-estate#1049)\n" +
 		"Before asserting what the operator decided, ask: `go run ./src/estate knowledge " +
@@ -195,7 +205,11 @@ func knowledgeGrounding() string {
 		"private material into anything public. Add `--json` to either command for the " +
 		"full machine-readable result, Coverage (agent-estate#1065's trustworthiness " +
 		"signal) included, instead of parsing the prose. This is a tool, not a required " +
-		"step: use it if it helps, and the turn still works when the index is missing.\n"
+		"step: use it if it helps, and the turn still works when the index is missing. " +
+		"If results look noisy or off-topic, prefix the query with `source:<name>` -- e.g. " +
+		"`source:repo-docs` for how this repo works, `source:corpus-directive` for what " +
+		"the operator has decided -- to narrow to one source (agent-estate#1081; see " +
+		"`docs/knowledge-system.md` for the full scoping rules).\n"
 }
 
 // roleGrounding is what dispatch appends to the prompt based on role alone
