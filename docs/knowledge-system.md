@@ -1,7 +1,7 @@
 # How does knowledge retrieval work in this repo?
 
 This describes `estate knowledge`'s compiled index as it exists **on
-`2df4d3f`** (2026-09-04) — the mechanism, not a decision. Every number below
+`256af11`** (2026-09-04) — the mechanism, not a decision. Every number below
 carries the commit it was measured on; treat an unstamped figure elsewhere as
 a lead, not a fact.
 
@@ -149,6 +149,76 @@ malfunction. Conflating them would train a caller to ignore a real failure.
 `coverage.reasons` always names which source (if any) and why, whenever
 `coverage.state` is not `complete`.
 
+## What does the `contradictions` field mean, and what should I do about it?
+
+`QueryResult` carries a `contradictions` field **beside** `coverage`, never
+inside it (`src/estate/internal/knowledge/query.go`,
+`internal/knowledge/contradiction.go`, agent-estate#1051/#1104). The two
+answer different questions: `coverage` asks *"was this search complete?"* —
+every one of its states (`complete`, `limited`, `degraded`, `stale`,
+`unknown`, `mixed`) is something the caller can act on by rerunning,
+regenerating, or trusting the answer as-is. A contradiction's own remedy is
+none of those — it is *"a human must decide which of these two is true"* —
+which fits none of `coverage`'s states, so it is not one of them.
+
+A contradiction fires when a `corpus-question` item (something the corpus
+itself classified as asked-but-unresolved) and a `vault-fact` or
+`corpus-directive` item (something asserting a settled position) both land
+in the same result set, on the same shared terms, close enough in rank and
+score to plausibly be about the same subject. All three thresholds — shared
+terms, rank, score ratio — are fixed and content-blind; see
+`contradiction.go`'s own doc comment for the exact values and the
+measurements that picked them.
+
+**It surfaces; it never adjudicates.** `Contradiction` names only the two
+item ids, their sources, and the shared terms — there is no verdict field,
+no re-ranking of either match, and no suppression of either one from the
+result list. Nothing in this package decides which side is right; that
+decision is the reader's, not the index's. Printed prose renders this as a
+`note:` line above the match list, naming both ids and telling the reader to
+read both before acting — never as a resolved fact folded into either
+match's own tier text.
+
+Absence of a contradiction is not evidence of agreement — it only means this
+package's narrow, deterministic check found no pair meeting all three
+thresholds in this particular result set; a real disagreement sitting
+further down the ranking, or scored too far apart, will not fire.
+
+## How do I tell which binary built the index?
+
+Every compiled index carries `generated_by` (`src/estate/internal/knowledge/
+knowledge.go`, agent-estate#1082): the commit of the checkout that ran
+`estate knowledge` to build it, plus when. `QueryResult` carries the same
+value forward, unchanged, as `index_generated_by`
+(`internal/knowledge/query.go`) — a caller reading a query result, not just
+the raw index file, can still see what built it.
+
+**Why this exists.** Nothing before this compared the *index* against the
+*binary reading it* — #1047/#1080's own staleness check is source-against-
+index (has a source changed since the index was built?), which says nothing
+about whether the code doing the reading is the code that built it. A stale
+binary serving a query against a newer (or older) index was, before this,
+undetectable from the output alone. Four incidents motivated adding it.
+
+`generated_by.commit` is `"unknown"` — never a guessed value — whenever it
+could not be positively determined: no git checkout resolved, `git` itself
+unavailable or erroring, or **a dirty working tree**, deliberately, since a
+dirty tree has no single commit that actually describes what produced the
+index (`build_commit.go`'s `ResolveBuildCommit`). `unknown` here is a
+correct, honest answer, not a failure to record — the same "report, never
+guess" rule this doc's `coverage.state: unknown` already follows for a
+different unmeasurable source (github-stars' freshness).
+
+At query time, `estate knowledge query` resolves the **currently running**
+checkout's own commit the same way and folds a real, positively-resolved
+mismatch into `coverage` as `binary_mismatch`, naming both commits — printed
+as a `note:` line in prose, machine-readable in `--json`. Either side being
+`unknown` is never treated as a match or a mismatch; only two positively
+resolved, differing commits fire it. This is detection, never prevention: an
+index built by a different commit is often fine (a doc-only commit landed
+since), so `binary_mismatch` is something to know, not something a query
+refuses on.
+
 ## What does `--json` give me that the prose output doesn't?
 
 `--json` on either `query` or `get` emits the full result as JSON on stdout
@@ -183,6 +253,50 @@ on its own — `get` refuses the direct lookup too, or the filter would be
 only cosmetic.
 
 Never paste `--private` output into anything public.
+
+## How do I know if a `prompt_id` can be opened?
+
+`get`'s own `prompt_id:` line has printed a bare id for every corpus-sourced
+item since agent-estate#1031, and a bare id reads as "provenance is
+available" whether or not it actually is. Measured against the real corpus
+(2026-09-04): only about 12% of hard items' prompts carry a non-empty
+`text_clean` — the only field the operator's rules permit quoting at all
+(`text_raw` is never disclosed, under any flag). Following a prompt_id leads
+to nothing quotable most of the time, and a bare id cannot tell a caller
+which case it is in.
+
+`knowledge get` resolves this explicitly as a `disclosure` field
+(`src/estate/internal/knowledge/disclosure.go`, agent-estate#1061/#1106) —
+distinct from `Publishable`/`--private`, which gate the *item* as a whole:
+`disclosure` is about whether this one item's own `prompt_id` leads
+somewhere inspectable, one of four states:
+
+| `disclosure.state` | means |
+|---|---|
+| `available_clean` | the corpus's own row for this `prompt_id` has a non-empty `text_clean`, and this item is visible in this call's scope — a caller MAY open it |
+| `unavailable` | the row exists but `text_clean` is empty — the common case; the source was never cleaned for quoting, which is not a failure |
+| `restricted` | the row (and possibly its `text_clean`) exists, but this item is private and this call did not pass `--private` |
+| `source_missing` | this item's `prompt_id` does not resolve to any row in the corpus's prompts table at all — broken lineage, not merely uncleaned |
+
+The point is that a caller can tell **"has a prompt id"** (the bare
+`prompt_id:` line, true for every corpus item) from **"has inspectable
+evidence"** (one of these four states, resolved by a live corpus read at
+`get` time). This distinction did not exist before agent-estate#1061; the
+`prompt_id:` line alone could not make it.
+
+**This reports whether the text exists — it never prints it.**
+`ResolveDisclosure` has no code path that returns `text_clean` or
+`text_raw`; `disclosure.detail` names the evidence behind the state (e.g.
+"text_clean exists for this item's prompt — not printed by this call"),
+never the content itself. `--private` unlocks `restricted` into whichever of
+the other three states actually applies; it does not change what
+`ResolveDisclosure` is capable of returning. `text_raw` never leaves the
+corpus through this field, under any flag.
+
+A check that could not be performed at all — no corpus path configured, the
+corpus unreadable — is reported as `provenance: could not check -- <reason>`
+(prose) or `disclosure_error` (`--json`), never silently folded into one of
+the four real states.
 
 ## How do I check my own doc changes before shipping them?
 
