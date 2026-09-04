@@ -120,6 +120,29 @@ type Match struct {
 	// pair is ever read).
 	Weight string `json:"weight,omitempty"`
 	Status string `json:"status,omitempty"`
+	// TiedOnScore is how many OTHER candidates -- among every item that
+	// cleared scoring, before the display cap, not just the returned page
+	// -- share this item's exact unrounded BM25 float, i.e. the size of its
+	// tie group on the sort comparator's own primary key, minus itself
+	// (agent-estate#1046). Zero (omitted from JSON) means this item's
+	// unrounded score is unique among candidates and its position was
+	// decided by score alone.
+	//
+	// This exists because the printed Score above is deliberately rounded
+	// for display while sort.SliceStable's comparator (see Query) keys on
+	// the unrounded float and falls back to item ID only on an EXACT float
+	// tie -- a gap #1046's own investigation found meant that fallback
+	// governed a population no caller, reviewer, or golden-set run could
+	// observe: two items 0.4 apart print the same integer Score and read as
+	// "tied" when they never reached the ID fallback at all. Publishing the
+	// unrounded float itself was rejected (see this field's issue) because
+	// it invites comparing BM25 figures ACROSS different questions or
+	// indexes, which is meaningless -- different terms, different idf, a
+	// point the RankingBasis text and Score's own doc comment both already
+	// make. A count is safe to compare anywhere: "0" always means "not
+	// affected by the tie-break", regardless of which question or index
+	// produced it.
+	TiedOnScore int `json:"tied_on_score,omitempty"`
 }
 
 // weightAndStatus pulls the "weight:<value>" and "status:<value>"
@@ -853,7 +876,12 @@ const rankingBasisText = "score = Okapi BM25 (k1=1.2, b=0.75) over stemmed, " +
 	"the term is the item's own TITLE (tier1), not merely body text -- " +
 	"see titleFloorExemptSources and matchesTitle in query.go; " +
 	"the printed score is BM25's own figure rounded to the nearest integer " +
-	"for display; ties on the unrounded figure broken by item id, oldest first"
+	"for display; ties on the unrounded figure broken by item id, oldest " +
+	"first -- each Match's tied_on_score (agent-estate#1046) states how " +
+	"many other candidates share its exact unrounded score, so the " +
+	"population that ID tie-break actually governs is visible without " +
+	"publishing a raw float that would invite comparing scores across " +
+	"different questions or indexes, which BM25 does not support"
 
 // Query reads the compiled index at indexPath and returns a small,
 // ranked, cited set of items scored against question -- see QueryState
@@ -1052,6 +1080,16 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 			withheldPrivate, withheldPrivate+out.TotalMatched, out.TotalMatched)
 		out.Coverage = out.Coverage.withLimitedReason(out.Reason)
 	}
+	// tieGroupSize counts, for every DISTINCT unrounded score in all, how
+	// many candidates share it -- the same exact-float equality the sort
+	// comparator above uses, computed once over the whole candidate set
+	// (not just the returned page) so a returned item tied with one cut by
+	// the display cap still reports its true group size (agent-estate#1046).
+	tieGroupSize := map[float64]int{}
+	for _, s := range all {
+		tieGroupSize[s.score]++
+	}
+
 	n := len(all)
 	if n > limit {
 		n = limit
@@ -1068,6 +1106,7 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 			Publishable:  s.item.Publishable,
 			Weight:       weight,
 			Status:       status,
+			TiedOnScore:  tieGroupSize[s.score] - 1,
 		})
 	}
 	out.NotReturned = out.TotalMatched - len(out.Matches)

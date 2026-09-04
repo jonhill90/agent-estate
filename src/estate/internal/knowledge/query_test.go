@@ -1499,3 +1499,78 @@ func TestCoverageWithFreshnessReasonComposesLikeLimitedAndDegraded(t *testing.T)
 		t.Fatalf("Degraded + stale reason: State = %q, want %q", degradedThenStale.State, CoverageMixed)
 	}
 }
+
+// TestQueryMatchTiedOnScorePopulatesForAnExactFloatTie exercises
+// agent-estate#1046: Match.TiedOnScore must report the true tie-group size
+// on the sort comparator's own unrounded-float key, over the whole
+// candidate set, not just the returned page -- and must be silent (0) for
+// an item whose score is not tied with anything.
+//
+// Two vault-fact items given IDENTICAL Tier1/Tier2 text (same term
+// frequencies, same document length) score EXACTLY equal under BM25 --
+// real float equality, the same condition Query's own comparator falls
+// back to the item-id tie-break on -- so both must report TiedOnScore == 1
+// (one other candidate shares its score). A third item overlapping on
+// fewer terms scores strictly lower and must report TiedOnScore == 0.
+func TestQueryMatchTiedOnScorePopulatesForAnExactFloatTie(t *testing.T) {
+	idx := Result{
+		GeneratedAt: time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC),
+		Items: []Item{
+			{
+				ID: "20260904120000", Source: "vault-fact",
+				Permalink:   "/vault/agent/facts/one.md",
+				Tier1:       "rotate tokens every ninety days",
+				Tier2:       "rotate tokens every ninety days",
+				Publishable: true, PublishBasis: "test fixture",
+			},
+			{
+				ID: "20260904120001", Source: "vault-fact",
+				Permalink:   "/vault/agent/facts/two.md",
+				Tier1:       "rotate tokens every ninety days",
+				Tier2:       "rotate tokens every ninety days",
+				Publishable: true, PublishBasis: "test fixture",
+			},
+			{
+				ID: "20260904120002", Source: "vault-fact",
+				Permalink:   "/vault/agent/facts/three.md",
+				Tier1:       "rotate tokens",
+				Tier2:       "rotate tokens",
+				Publishable: true, PublishBasis: "test fixture",
+			},
+		},
+	}
+	path := filepath.Join(t.TempDir(), "index.json")
+	if err := Write(path, idx); err != nil {
+		t.Fatalf("Write() error: %v", err)
+	}
+
+	got := Query(path, "rotate tokens every ninety days", 0, false)
+	if got.State != StateMatched {
+		t.Fatalf("State = %q, want %q (reason=%q)", got.State, StateMatched, got.Reason)
+	}
+	if len(got.Matches) != 3 {
+		t.Fatalf("len(Matches) = %d, want 3: %+v", len(got.Matches), got.Matches)
+	}
+
+	byID := map[string]Match{}
+	for _, m := range got.Matches {
+		byID[m.ID] = m
+	}
+
+	one, two, three := byID["20260904120000"], byID["20260904120001"], byID["20260904120002"]
+	if one.TiedOnScore != 1 {
+		t.Errorf("one.TiedOnScore = %d, want 1 (tied with the other identical-text item)", one.TiedOnScore)
+	}
+	if two.TiedOnScore != 1 {
+		t.Errorf("two.TiedOnScore = %d, want 1 (tied with the other identical-text item)", two.TiedOnScore)
+	}
+	if three.TiedOnScore != 0 {
+		t.Errorf("three.TiedOnScore = %d, want 0 (fewer matched terms -> a strictly lower, untied score)", three.TiedOnScore)
+	}
+	// The two tied items must in fact be ordered by the documented item-id
+	// fallback (oldest first) -- confirming TiedOnScore is naming the exact
+	// population the comparator's fallback governs, not an unrelated count.
+	if got.Matches[0].ID != "20260904120000" || got.Matches[1].ID != "20260904120001" {
+		t.Fatalf("tied pair not ordered by item id: got %s, %s", got.Matches[0].ID, got.Matches[1].ID)
+	}
+}

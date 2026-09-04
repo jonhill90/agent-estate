@@ -507,8 +507,17 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 			}
 			tier1 = "[" + strings.Join(tags, " ") + "] " + tier1
 		}
-		fmt.Printf("[%s] %s (score %d: %s)\n  %s\n  %s\n\n",
-			m.ID, m.Source, m.Score, strings.Join(m.MatchedTerms, ", "), tier1, m.Permalink)
+		tieNote := ""
+		if m.TiedOnScore > 0 {
+			// agent-estate#1046: this item's UNROUNDED score exactly ties
+			// m.TiedOnScore other candidates, so its position relative to
+			// them was decided by the item-id fallback, not by relevance --
+			// appended to the header line, after the printed (rounded)
+			// score, never in place of it.
+			tieNote = fmt.Sprintf(", tied with %d other(s) on unrounded score", m.TiedOnScore)
+		}
+		fmt.Printf("[%s] %s (score %d: %s%s)\n  %s\n  %s\n\n",
+			m.ID, m.Source, m.Score, strings.Join(m.MatchedTerms, ", "), tieNote, tier1, m.Permalink)
 	}
 	fmt.Println("ranking: " + qr.RankingBasis)
 	fmt.Println("ask `estate knowledge get <id>` for one item's full tier2/tier3")
