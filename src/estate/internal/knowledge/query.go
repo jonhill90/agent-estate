@@ -3,6 +3,7 @@ package knowledge
 import (
 	"errors"
 	"fmt"
+	"math"
 	"os"
 	"regexp"
 	"sort"
@@ -86,10 +87,17 @@ type Match struct {
 	Source    string `json:"source"`
 	Permalink string `json:"permalink"`
 	Tier1     string `json:"tier1"`
-	// Score is the number of distinct question terms this item's own
-	// text matched -- see scoreItem. It is not a probability or a
-	// learned weight; MatchedTerms names exactly which words produced
-	// it, so the ranking basis is never opaque.
+	// Score is this item's BM25 relevance figure against the question
+	// (agent-estate#1054), rounded to the nearest integer for display --
+	// sorting itself is done on the unrounded float (see scored.score in
+	// Query), so two items a whole point apart here can still be
+	// correctly ordered even though BM25Scorer.Score returned figures
+	// closer than that. It is not a probability, not a raw term count,
+	// and not comparable across two different questions or two different
+	// indexes -- only across Matches returned for the SAME question
+	// against the SAME index. MatchedTerms names exactly which (stemmed)
+	// words contributed to it, so the basis stays legible even though the
+	// number itself is now continuous rather than a literal count.
 	Score        int      `json:"score"`
 	MatchedTerms []string `json:"matched_terms"`
 	// Publishable is copied from the source Item -- see Item's own doc
@@ -160,117 +168,65 @@ var stopWords = map[string]bool{
 	"jon": true, "i": true, "me": true, "my": true, "that": true, "this": true,
 }
 
-// queryTerms lowercases and splits question into the distinct, non-stop
-// words Query scores against. Punctuation is treated as a separator, not
-// part of a term, so "auth?" and "auth" match the same item text.
-func queryTerms(question string) []string {
-	fields := strings.FieldsFunc(strings.ToLower(question), func(r rune) bool {
+// splitWords lowercases s and splits it on anything that isn't a letter
+// or digit -- punctuation is a separator, never part of a term, so
+// "auth?" and "auth" land on the same word.
+func splitWords(s string) []string {
+	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
 		return !('a' <= r && r <= 'z' || '0' <= r && r <= '9')
 	})
+}
+
+// queryTerms splits question into the distinct, non-stop, stemmed words
+// Query scores against -- stemmed so a question's own inflection
+// ("refreshed") reaches the same term as an item's ("refresh"), per
+// agent-estate#1054. Deduplicated because a question scores each
+// distinct term against an item once; fieldTermCounts (below) is the
+// non-deduplicated sibling used for building a document's own term
+// frequencies, where repetition matters.
+func queryTerms(question string) []string {
 	seen := map[string]bool{}
 	var terms []string
-	for _, f := range fields {
-		if len(f) <= 2 || stopWords[f] || seen[f] {
+	for _, f := range splitWords(question) {
+		if len(f) <= 2 || stopWords[f] {
 			continue
 		}
-		seen[f] = true
-		terms = append(terms, f)
+		s := stem(f)
+		if seen[s] {
+			continue
+		}
+		seen[s] = true
+		terms = append(terms, s)
 	}
 	return terms
 }
 
+// fieldTermCounts tokenizes text with the SAME stopword and length rules
+// queryTerms applies to a question -- so a document and a question that
+// mean the same thing land in the same term space -- but does not
+// deduplicate: BM25's term-frequency component needs to know a term
+// appeared three times, not just that it appeared.
+func fieldTermCounts(text string) map[string]int {
+	counts := map[string]int{}
+	for _, f := range splitWords(text) {
+		if len(f) <= 2 || stopWords[f] {
+			continue
+		}
+		counts[stem(f)]++
+	}
+	return counts
+}
+
 // searchableText is every field of an item a question term may match --
 // Tier1 and Tier2 (Tier3 is a pointer, never indexed content) plus both
-// tag classes. Never includes anything beyond what Item already carries;
-// Query never re-reads a source.
+// tag classes, joined into one string. Kept as the single-field view of
+// an item's indexed text (e.g. "does anything here mention X at all");
+// the scorer itself (bm25.go) reads Tier1/tags and Tier2 as two SEPARATE
+// fields -- tier1SearchableText/tier2SearchableText -- because BM25 field
+// weighting needs to know which field a term came from, information this
+// flattened form throws away.
 func searchableText(it Item) string {
-	return strings.ToLower(strings.Join(append([]string{it.Tier1, it.Tier2}, append(it.StructuralTags, it.SynapticTags...)...), " \x1f "))
-}
-
-// scoreItem counts how many distinct terms appear as a substring of
-// it's searchable text, and names which ones -- the score IS the count,
-// nothing hidden or weighted behind it. This is still the filtering and
-// display score (requiredScore's floor and Match.Score both read this
-// unweighted count) -- see rankingWeight for the separate, weighted
-// figure that decides sort order.
-func scoreItem(it Item, terms []string) (score int, matched []string) {
-	text := searchableText(it)
-	for _, t := range terms {
-		if strings.Contains(text, t) {
-			matched = append(matched, t)
-		}
-	}
-	return len(matched), matched
-}
-
-// tier1Weight and tier2Weight are rankingWeight's per-term multipliers.
-// #1027 compiled vault fact bodies (median ~2.3KB) into Tier2, and an
-// unweighted match count let a passing mention deep in a body outweigh a
-// short item whose title is actually about the subject -- #1043's review
-// measured this directly: five previously-passing golden-set cases in
-// unrelated sources (corpus-parameter, loops-research) flipped HIT->MISS
-// because long vault bodies out-scored them on raw term count alone. A
-// term found in Tier1 or either tag field counts for tier1Weight; the
-// same term found only inside Tier2 counts for tier2Weight. 3:1 was
-// picked as the smallest ratio that reliably lets a single Tier1/tag
-// term outrank an item whose only matches are buried in Tier2 -- see
-// query_test.go's field-weighting cases for the measured before/after.
-const (
-	tier1Weight = 3
-	tier2Weight = 1
-)
-
-// rankingWeight scores matched (the terms scoreItem already found) by
-// where each one was found, so ranking -- unlike the required-score floor
-// and the printed Match.Score -- treats a Tier1/tag hit as worth more
-// than the same term appearing only in Tier2. It never re-scans for new
-// terms; matched is scoreItem's own output, so a term this function
-// weights is always one that already cleared requiredScore.
-func rankingWeight(it Item, matched []string) int {
-	tier1Text := strings.ToLower(strings.Join(append([]string{it.Tier1}, append(it.StructuralTags, it.SynapticTags...)...), " \x1f "))
-	tier2Text := strings.ToLower(it.Tier2)
-	weight := 0
-	for _, t := range matched {
-		switch {
-		case strings.Contains(tier1Text, t):
-			weight += tier1Weight
-		case strings.Contains(tier2Text, t):
-			weight += tier2Weight
-		}
-	}
-	return weight
-}
-
-// minMatchedTerms is the floor an item's score must clear to be
-// returned at all -- agent-estate#1026's none-01 case ("office vending
-// machine restocking schedule", 5 scoreable terms) scored 2 against an
-// unrelated GitHub star purely by chance (two generic words, "machine"
-// and "schedule", each appearing in a handful of items for unrelated
-// reasons), and Query returned it instead of ever reaching no_match.
-// Every genuine hit measured against the golden set (agent-estate#1023)
-// matched 4 or more distinct terms; 3 sits below that with room, and
-// above the 1- and 2-term coincidental matches the false positive and
-// its neighbours produced. A minimum matched-COUNT was chosen over a
-// minimum score (the two are the same axis here, since score IS the
-// matched-term count) and over discounting document-frequent terms,
-// because measuring this index's actual term frequencies showed
-// "office"/"machine"/"schedule" are NOT common overall (well under 2%
-// of items each) -- the false positive is a low-probability coincidence
-// across several rare terms, not one term that clears the bar everywhere,
-// so document-frequency discounting would not have caught it.
-const minMatchedTerms = 3
-
-// requiredScore is the per-question floor: min(minMatchedTerms,
-// len(terms)). A question with fewer distinct terms than the floor
-// cannot possibly reach it, so the floor becomes "every term must
-// match" instead -- a 1- or 2-term question ("auth tokens") still finds
-// its item on a full match; it is not silently unanswerable just because
-// it is short.
-func requiredScore(terms []string) int {
-	if len(terms) < minMatchedTerms {
-		return len(terms)
-	}
-	return minMatchedTerms
+	return tier1SearchableText(it) + " \x1f " + tier2SearchableText(it)
 }
 
 // tagFilterPattern matches one whitespace-delimited token shaped like an
@@ -370,15 +326,16 @@ func itemHasAllTags(it Item, tags []string) bool {
 	return true
 }
 
-const rankingBasisText = "score = count of distinct question terms " +
-	"(stop words and words of length <=2 removed) found as a substring " +
-	"of the item's own tier1, tier2, structural_tags or synaptic_tags; " +
-	"an item must match at least min(3, distinct question terms) of them " +
-	"to be returned at all -- see requiredScore in query.go; ranking " +
-	"itself is by a separate weighted figure, not the printed score: a " +
-	"term found in tier1/tags outweighs the same term found only in " +
-	"tier2 (3:1) -- see rankingWeight in query.go; ties on that weight " +
-	"broken by the printed score, then by item id, oldest first"
+const rankingBasisText = "score = Okapi BM25 (k1=1.2, b=0.75) over stemmed, " +
+	"stop-word-filtered question terms against the item's own tier1, tier2, " +
+	"structural_tags and synaptic_tags -- tier1/tags weighted 3x tier2 as a " +
+	"BM25 field weight (agent-estate#1043's measured ratio, carried forward " +
+	"rather than discarded -- see bm25.go); no minimum-match floor: a rare " +
+	"term matching once can outrank several common terms matching by " +
+	"coincidence, so an item needs only ONE weighted term match (score > 0) " +
+	"to be returned at all -- see BM25Scorer in bm25.go, agent-estate#1054; " +
+	"the printed score is BM25's own figure rounded to the nearest integer " +
+	"for display; ties on the unrounded figure broken by item id, oldest first"
 
 // Query reads the compiled index at indexPath and returns a small,
 // ranked, cited set of items scored against question -- see QueryState
@@ -459,35 +416,43 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 
 	type scored struct {
 		item    Item
-		score   int
+		score   float64
 		matched []string
-		weight  int
 	}
-	required := requiredScore(terms)
+	// Built over res.Items -- the whole index, unfiltered by tag or
+	// privacy -- so a term's idf never shifts between a default-mode and
+	// a --private call against the same index (see NewBM25Scorer's own
+	// doc comment).
+	scorer := NewBM25Scorer(res.Items)
 	var all []scored
 	withheldPrivate := 0
 	for _, it := range res.Items {
 		if !itemHasAllTags(it, tagFilters) {
 			continue
 		}
-		score, matched := scoreItem(it, terms)
-		if score < required {
+		score, matched := scorer.Score(it, terms)
+		if score <= 0 && len(terms) > 0 {
+			// No hard floor (agent-estate#1054): an item with a real,
+			// nonzero weighted overlap is a real candidate, however
+			// small -- BM25's own weighting, not a minimum-count
+			// threshold, is what keeps a coincidental common-term match
+			// from outranking a genuine one. Only a literal zero (no
+			// query term appears in this item's text at all) excludes.
+			// len(terms) == 0 is the tag-filter-only case (#1024,
+			// "status:open" with no other words): every term-scoring
+			// concept is moot there, and exclusion is already fully
+			// handled by itemHasAllTags above.
 			continue
 		}
 		if !includePrivate && !it.Publishable {
 			withheldPrivate++
 			continue
 		}
-		all = append(all, scored{it, score, matched, rankingWeight(it, matched)})
+		all = append(all, scored{it, score, matched})
 	}
 
-	// Sort by weight first -- Tier1/tag matches outrank Tier2-only
-	// matches (see rankingWeight) -- falling back to the unweighted
-	// matched-term count, then item id, for items tied on weight.
+	// Sort by BM25 score, item id breaking ties (oldest first).
 	sort.SliceStable(all, func(i, j int) bool {
-		if all[i].weight != all[j].weight {
-			return all[i].weight > all[j].weight
-		}
 		if all[i].score != all[j].score {
 			return all[i].score > all[j].score
 		}
@@ -533,7 +498,7 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 			Source:       s.item.Source,
 			Permalink:    s.item.Permalink,
 			Tier1:        s.item.Tier1,
-			Score:        s.score,
+			Score:        int(math.Round(s.score)),
 			MatchedTerms: s.matched,
 			Publishable:  s.item.Publishable,
 		})
