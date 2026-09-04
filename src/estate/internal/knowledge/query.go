@@ -544,9 +544,15 @@ func itemHasAllTags(it Item, tags []string) bool {
 
 const rankingBasisText = "score = Okapi BM25 (k1=1.2, b=0.75) over stemmed, " +
 	"stop-word-filtered question terms against the item's own tier1, tier2, " +
-	"structural_tags and synaptic_tags -- tier1/tags weighted 3x tier2 as a " +
-	"BM25 field weight (agent-estate#1043's measured ratio, carried forward " +
-	"rather than discarded -- see bm25.go); no minimum-match floor: a rare " +
+	"structural_tags and synaptic_tags -- tier1/tags weighted 3x tier2 " +
+	"(tier1FieldWeight=3, tier2FieldWeight=1, agent-estate#1043's " +
+	"measured ratio, carried forward rather than discarded) as BM25 field " +
+	"weights; for repo-docs items only, a section's own LEAF heading is " +
+	"scored as tier1 (the 3x weight) while its ANCESTOR heading path is a " +
+	"separate field weighted 1x (ancestorFieldWeight=1, agent-estate#1113 " +
+	"-- ancestors are searchable but no longer inflate score at the leaf's " +
+	"weight), and every other source has no ancestor field so this split " +
+	"does not apply to it -- see bm25.go; no minimum-match floor: a rare " +
 	"term matching once can outrank several common terms matching by " +
 	"coincidence, so an item needs only ONE weighted term match (score > 0) " +
 	"to be returned at all -- see BM25Scorer in bm25.go, agent-estate#1054; " +

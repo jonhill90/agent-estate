@@ -49,10 +49,15 @@ only the ids it actually needs — never the reverse.
 
 Ranking is Okapi BM25 (k1=1.2, b=0.75) over stemmed, stop-word-filtered
 question terms against an item's Tier1, Tier2, and both tag classes — Tier1
-and tags weighted 3x Tier2 as a BM25 field weight (agent-estate#1043's
-measured ratio). There is no minimum-match floor: one rare term matching
-once can outrank several common terms matching by coincidence, so an item
-needs only one weighted term match (score > 0) to be returned at all
+and tags weighted 3x Tier2 as a BM25 field weight (tier1FieldWeight=3,
+tier2FieldWeight=1, agent-estate#1043's measured ratio). For repo-docs
+items only, a section's own leaf heading is scored as Tier1 (the 3x weight)
+while its ancestor heading path is a separate field weighted 1x
+(ancestorFieldWeight=1, agent-estate#1113) — the full heading path no
+longer counts at the leaf's 3x weight, and every other source has no
+ancestor field to split out. There is no minimum-match floor: one rare term
+matching once can outrank several common terms matching by coincidence, so
+an item needs only one weighted term match (score > 0) to be returned at all
 (agent-estate#1054).
 
 **The score printed to a caller is BM25's own figure rounded to the nearest
