@@ -108,3 +108,24 @@ func TestFirstMatchRankZeroWhenNeverReturned(t *testing.T) {
 		t.Fatalf("firstMatchRank() = %d, want 0", got)
 	}
 }
+
+// agent-estate#1077: scopedQuestion is the natural-language stratum's
+// scoped-run primitive -- these two cases fail against the parent commit
+// (df2cf75/3449f91), where the function does not exist at all, and pass
+// once it's added.
+
+func TestScopedQuestionLeavesQuestionUnchangedWhenUnscoped(t *testing.T) {
+	got := scopedQuestion("how do I merge a pull request in this repo", false)
+	want := "how do I merge a pull request in this repo"
+	if got != want {
+		t.Fatalf("scopedQuestion(unscoped) = %q, want %q", got, want)
+	}
+}
+
+func TestScopedQuestionPrependsSourceRepoDocsWhenScoped(t *testing.T) {
+	got := scopedQuestion("how do I merge a pull request in this repo", true)
+	want := "source:repo-docs how do I merge a pull request in this repo"
+	if got != want {
+		t.Fatalf("scopedQuestion(scoped) = %q, want %q", got, want)
+	}
+}

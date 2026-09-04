@@ -49,10 +49,20 @@
 // chosen from each answer's own section title before any query ran (#1069).
 // cases.json measures whether retrieval can find a KNOWN item; this
 // stratum measures whether a caller who does not already know the answer
-// LANDS on it -- a different property, run in default (public, unscoped)
-// mode only, reporting both top-3 and top-10 hit rates. #1069 settled that
-// this number must never be averaged with cases.json's two: report all
-// three separately, leading with the weakest.
+// LANDS on it -- a different property, run in default (public) mode only,
+// reporting both top-3 and top-10 hit rates. #1069 settled that this
+// number must never be averaged with cases.json's two: report all three
+// separately, leading with the weakest.
+//
+// agent-estate#1077: this stratum is itself run TWICE over the same
+// twelve cases -- unscoped (the question exactly as written) and scoped
+// ("source:repo-docs " prepended to every question, the same source:
+// filter #1071/#1069 wired into Query). Source scoping is what took this
+// stratum from roughly 4-5/12 to roughly 8-9/12 by hand, and that gain had
+// no ratchet before this: nothing would fail if source: filtering
+// silently stopped narrowing results, since the unscoped line alone would
+// not move. Both lines print always; neither replaces or averages with
+// the other.
 //
 // Usage:
 //
@@ -214,24 +224,51 @@ type naturalResult struct {
 	ran  bool
 }
 
+// scopedQuestion is agent-estate#1077's own primitive: it builds the
+// question text runNaturalStratum actually sends for one of its two runs
+// over the same fixture. Unscoped returns question unchanged; scoped
+// prepends "source:repo-docs " -- the same source: tag filter #1071/#1069
+// wired into Query, and the source every case in natural_cases.json
+// expects (goldenset.SourceRepoDocs). Kept as its own pure function, not
+// inlined into the loop, so the exact scoping behaviour is independently
+// testable without shelling out to a real binary.
+func scopedQuestion(question string, scoped bool) string {
+	if !scoped {
+		return question
+	}
+	return "source:repo-docs " + question
+}
+
 // runNaturalStratum runs agent-estate#1073's checked-in natural-language
 // fixture (internal/knowledge/goldenset.LoadNatural) once per case, in
-// default (public, unscoped) mode only -- matching the baseline #1069
-// measured by hand on a7d413c (top-3 5/12, top-10 10/12). This stratum is
-// never run in --private mode and never merged with cases.json's own
-// score: #1069 settled that the two measure different things and must be
-// reported separately, weaker one leading.
-func runNaturalStratum(w *bufio.Writer, bin string, verbose bool) (top3Hits, top10Hits, total int, ranAtLeastOne bool) {
+// default (public) mode only -- never --private, and never merged with
+// cases.json's own score: #1069 settled that the two measure different
+// things and must be reported separately, weaker one leading.
+//
+// agent-estate#1077: scoped selects between this stratum's two runs over
+// the SAME twelve cases -- unscoped (the question exactly as written,
+// baseline top-3 5/12, top-10 10/12 measured by hand on a7d413c) and
+// scoped ("source:repo-docs " prepended to every question, the same
+// source: filter #1071 wired into Query). The unscoped run answers "what
+// does a lane that does not know about scoping get?"; the scoped run
+// answers "does the source: mechanism still narrow results?" -- #1077's
+// own gap was that only the first question had a reported number, so
+// source: filtering could silently stop working with nothing catching it.
+func runNaturalStratum(w *bufio.Writer, bin string, verbose bool, scoped bool) (top3Hits, top10Hits, total int, ranAtLeastOne bool) {
 	cases, err := goldenset.LoadNatural()
 	if err != nil {
 		fmt.Fprintln(w, "goldenquery: natural-language stratum:", err)
 		return 0, 0, 0, false
 	}
 
-	fmt.Fprintln(w, "=== natural-language stratum (default/public, unscoped -- agent-estate#1073) ===")
+	label := "unscoped"
+	if scoped {
+		label = "scoped, source:repo-docs prepended -- agent-estate#1077"
+	}
+	fmt.Fprintf(w, "=== natural-language stratum (default/public, %s -- agent-estate#1073) ===\n", label)
 	var results []naturalResult
 	for _, c := range cases {
-		stdout, exitCode, err := runQuery(bin, c.Question, false)
+		stdout, exitCode, err := runQuery(bin, scopedQuestion(c.Question, scoped), false)
 		if err != nil {
 			results = append(results, naturalResult{c: c})
 			fmt.Fprintf(w, "[ERROR] %s -- %q: %s\n\n", c.ID, c.Question, err)
@@ -362,7 +399,15 @@ func main() {
 	// know the answer land on it?", not "can retrieval find a known
 	// item?") and #1069 requires it be reported on its own, never
 	// averaged into either number above.
-	nlTop3, nlTop10, nlTotal, ranNatural := runNaturalStratum(w, *bin, *verbose)
+	//
+	// agent-estate#1077: run the SAME twelve cases twice -- once exactly
+	// as written (unscoped) and once with "source:repo-docs " prepended
+	// to every question (scoped). Both lines print always; neither is
+	// derived from or replaces the other (see runNaturalStratum's own
+	// doc comment).
+	nlTop3, nlTop10, nlTotal, ranNaturalUnscoped := runNaturalStratum(w, *bin, *verbose, false)
+	nlScopedTop3, nlScopedTop10, nlScopedTotal, ranNaturalScoped := runNaturalStratum(w, *bin, *verbose, true)
+	ranNatural := ranNaturalUnscoped || ranNaturalScoped
 
 	if !ranPrivate && !ranPub && !ranNatural {
 		fmt.Fprintln(w, "goldenquery: could not run any case -- is the estate binary on PATH, and has `estate knowledge` been run to compile the index?")
@@ -373,9 +418,14 @@ func main() {
 	fmt.Fprintln(w, "---")
 	// #1069: lead with the weaker stratum, never averaged with the other
 	// two -- a combined number describes the test mix, not the weakest
-	// way real agents fail.
+	// way real agents fail. #1077: the scoped and unscoped natural-language
+	// lines sit together (same fixture, same commit) and are themselves
+	// never averaged with each other -- see runNaturalStratum's doc comment
+	// for what each answers.
 	fmt.Fprintf(w, "natural-language stratum, top-3  (default/public, unscoped -- #1073, baseline 5/12 on a7d413c):  %d/%d\n", nlTop3, nlTotal)
 	fmt.Fprintf(w, "natural-language stratum, top-10 (default/public, unscoped -- #1073, baseline 10/12 on a7d413c): %d/%d\n", nlTop10, nlTotal)
+	fmt.Fprintf(w, "natural-language stratum, top-3  (default/public, scoped source:repo-docs -- #1077, expected roughly 8-9/12 on df2cf75):  %d/%d\n", nlScopedTop3, nlScopedTotal)
+	fmt.Fprintf(w, "natural-language stratum, top-10 (default/public, scoped source:repo-docs -- #1077):                                    %d/%d\n", nlScopedTop10, nlScopedTotal)
 	fmt.Fprintf(w, "retrieval score (private, comparable to the 12/15 baseline on 6f28626): %d/%d\n", privateHits, privateTotal)
 	fmt.Fprintf(w, "publishable-only score (default, what a caller who may not see private material can find): %d/%d\n", pubHits, pubTotal)
 	w.Flush()
