@@ -301,6 +301,15 @@ func usage() {
                                          without --private (agent-estate#1033); --json
                                          emits {ok, reason, item} on stdout instead of
                                          prose (agent-estate#1068)
+  estate vault-view                     regenerate a browsable Markdown view of the
+                                         corpus's hard items (every kind, weight=hard)
+                                         into $AGENT_MEMORY_VAULT/agent/parameters/ --
+                                         one file per kind, an index, prompt_id and
+                                         status on every entry, questions marked
+                                         distinctly from decisions (agent-estate#1084).
+                                         Backs up the whole vault before every write.
+                                         Derived, regenerable, never authoritative --
+                                         and never read back by 'estate knowledge'
   estate tasks                          latest state of every task
   estate inflight                       tasks still occupying a slot
   estate reclaim [--apply]              report in-flight turns and whether their
@@ -926,6 +935,34 @@ func main() {
 			fmt.Printf("%d source(s) could not be read; see FAIL lines above\n", unreadable)
 			os.Exit(1)
 		}
+
+	case "vault-view":
+		// agent-estate#1084: a view FOR the operator, not for an agent's own
+		// retrieval -- deliberately a separate command from `estate
+		// knowledge`, not a subcommand of it, since it writes to a different
+		// place (the vault, not the shared compiled index) under a different
+		// failure discipline (refuse and write nothing at all, rather than
+		// `knowledge`'s per-source FAIL-and-continue).
+		if len(os.Args) > 2 {
+			fmt.Fprintf(os.Stderr, "estate: vault-view takes no arguments, got %q\n", strings.Join(os.Args[2:], " "))
+			os.Exit(2)
+		}
+		vvCfg, err := knowledge.DefaultVaultViewConfig()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		vvRes, err := knowledge.GenerateVaultView(vvCfg, time.Now())
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate:", err)
+			os.Exit(2)
+		}
+		fmt.Printf("vault backed up to %s\n", vvRes.BackupPath)
+		for _, k := range []string{"directive", "parameter", "correction", "question", "thought"} {
+			fmt.Printf("%-10s %d item(s)\n", k, vvRes.Counts[k])
+		}
+		fmt.Printf("\n%d hard item(s) written to %s\n", vvRes.Total, vvRes.OutputDir)
+		fmt.Println("derived, regenerable, never authoritative -- see index.md's own note")
 
 	case "merge":
 		if len(os.Args) < 5 {
