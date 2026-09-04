@@ -19,6 +19,37 @@ func fakeFetch(rows []ItemRow, err error) Fetcher {
 	return func(View, string, string) ([]ItemRow, error) { return rows, err }
 }
 
+// TestNewOpensOnTheReviewQueue is agent-estate#1089's own contract: a new
+// Model's first screen is the review queue (needs_review), not
+// live_parameters -- fails against the parent commit (329b4ee), where
+// NewSources hardcoded view: ViewLiveParameters and ViewNeedsReview did not
+// exist at all.
+func TestNewOpensOnTheReviewQueue(t *testing.T) {
+	var gotView View
+	fetch := func(v View, weight, status string) ([]ItemRow, error) {
+		gotView = v
+		return nil, nil
+	}
+	m := New(fetch, nil, nil)
+	if m.view != ViewNeedsReview {
+		t.Fatalf("Model.view = %q, want needs_review", m.view)
+	}
+	cmd := m.Init()
+	if cmd == nil {
+		t.Fatal("Init() returned a nil command")
+	}
+	if b, ok := cmd().(tea.BatchMsg); ok {
+		for _, c := range b {
+			if c != nil {
+				c()
+			}
+		}
+	}
+	if gotView != ViewNeedsReview {
+		t.Fatalf("Init()'s own initial fetch queried view %q, want needs_review", gotView)
+	}
+}
+
 // TestFetchResultPopulatesRows drives Update directly (cheaper than a full
 // teatest.Program, the same two-tier discipline every other package in
 // this module uses).
@@ -93,19 +124,19 @@ func TestVKeyCyclesView(t *testing.T) {
 		return nil, nil
 	}
 	m := New(fetch, nil, nil)
-	if m.view != ViewLiveParameters {
-		t.Fatalf("default view = %q, want live_parameters", m.view)
+	if m.view != ViewNeedsReview {
+		t.Fatalf("default view = %q, want needs_review (agent-estate#1089: the queue is the pane's first screen)", m.view)
 	}
 	next, cmd := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
 	m = next.(Model)
-	if m.view != ViewOpenQuestions {
-		t.Fatalf("after [v], view = %q, want open_questions", m.view)
+	if m.view != ViewLiveParameters {
+		t.Fatalf("after [v], view = %q, want live_parameters", m.view)
 	}
 	if cmd == nil {
 		t.Fatal("[v] did not return a re-fetch command")
 	}
 	cmd()
-	if calls != 1 || gotView != ViewOpenQuestions {
+	if calls != 1 || gotView != ViewLiveParameters {
 		t.Fatalf("re-fetch did not use the new view: calls=%d gotView=%q", calls, gotView)
 	}
 }

@@ -1,6 +1,7 @@
-// Package library renders a prompt/decision corpus -- live_parameters/
-// open_questions/unacknowledged/possibility_count, the same seven views
-// every corpus of this shape exposes -- as a routed TUI pane. Which corpus
+// Package library renders a prompt/decision corpus -- needs_review/
+// live_parameters/open_questions/unacknowledged/possibility_count, four of
+// the seven views every corpus of this shape exposes -- as a routed TUI
+// pane. Which corpus
 // is not fixed: it is a SUPPLIED CHOICE (Source, fetch.go; Model.NewSources),
 // the same way every other external dependency in this half of the repo is
 // supplied by cmd/estate/main.go rather than hardcoded in internal/. Two are
@@ -59,28 +60,38 @@ import (
 	"github.com/jonhill90/agent-estate/src/tui/internal/board"
 )
 
-// View names one of the ledger's own three item-listing views -- these are
-// the ledger's real SQL views (core.py's own CREATE VIEW live_parameters/
-// open_questions/unacknowledged), not something this package invents a
-// projection of. All three share one column set (items.*), verified
-// against the live schema, 2026-08-22 -- this is what lets ReadItems below
-// use ONE query shape for all three rather than three separate ones.
+// View names one of the ledger's own item-listing views -- these are the
+// ledger's real SQL views (core.py's own CREATE VIEW needs_review/
+// live_parameters/open_questions/unacknowledged), not something this
+// package invents a projection of. All four share one column set
+// (items.*), verified against the live schema, 2026-08-22 (needs_review
+// re-confirmed 2026-09-04, agent-estate#1089) -- this is what lets
+// ReadItems below use ONE query shape for all four rather than four
+// separate ones.
 type View string
 
 const (
+	// ViewNeedsReview is the review queue -- status = 'needs_review', 174
+	// items measured on 329b4ee (agent-estate#1089). It is first in Views
+	// and the Model's own default (model.go) on the operator's stated
+	// need: adjudicating the few hundred items the corpus itself flagged
+	// as unsure, not browsing the ~1,100 that are mostly fine.
+	ViewNeedsReview    View = "needs_review"
 	ViewLiveParameters View = "live_parameters"
 	ViewOpenQuestions  View = "open_questions"
 	ViewUnacknowledged View = "unacknowledged"
 )
 
 // Views is every selectable view, in the cycling order the [v] key steps
-// through -- live_parameters first: "what is still binding" is the
-// question this package's own package doc comment says the corpus answers
-// most often.
-var Views = []View{ViewLiveParameters, ViewOpenQuestions, ViewUnacknowledged}
+// through -- needs_review first, matching the default view a new Model
+// opens on (agent-estate#1089: the queue is the pane's first screen, not
+// live_parameters's "what is still binding").
+var Views = []View{ViewNeedsReview, ViewLiveParameters, ViewOpenQuestions, ViewUnacknowledged}
 
 func (v View) Label() string {
 	switch v {
+	case ViewNeedsReview:
+		return "needs review"
 	case ViewOpenQuestions:
 		return "open questions"
 	case ViewUnacknowledged:
@@ -99,7 +110,7 @@ func (v View) Label() string {
 // (WithView/WithFilters, model.go, are the only callers, and both are
 // key-cycled through these exact lists), refused rather than quoted and
 // passed through.
-var validViews = map[View]bool{ViewLiveParameters: true, ViewOpenQuestions: true, ViewUnacknowledged: true}
+var validViews = map[View]bool{ViewNeedsReview: true, ViewLiveParameters: true, ViewOpenQuestions: true, ViewUnacknowledged: true}
 var validWeights = map[string]bool{"": true, "hard": true, "preference": true, "retracted": true}
 var validStatuses = map[string]bool{"": true, "open": true, "acknowledged": true, "acted": true, "resolved": true, "dropped": true}
 

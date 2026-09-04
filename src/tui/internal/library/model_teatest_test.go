@@ -73,10 +73,10 @@ func TestVKeyCyclesViewAgainstARealProgram(t *testing.T) {
 		return []ItemRow{{ID: "it-realid00000001", Kind: "parameter", BodySnippet: string(v)}}, nil
 	}
 	tm := run(t, New(fetch, nil, nil))
-	waitFor(t, tm, "live_parameters")
+	waitFor(t, tm, "needs_review")
 
 	tm.Send(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("v")})
-	waitFor(t, tm, "open_questions")
+	waitFor(t, tm, "live_parameters")
 }
 
 // TestQQuitsARealProgram matches every other pane's own convention.
