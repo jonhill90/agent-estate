@@ -3,7 +3,6 @@ package knowledge
 import (
 	"errors"
 	"testing"
-	"time"
 )
 
 func TestStarsSourceParsesEachRepoAsOneItem(t *testing.T) {
@@ -13,8 +12,7 @@ func TestStarsSourceParsesEachRepoAsOneItem(t *testing.T) {
 				`{"full_name":"b/two","html_url":"https://github.com/b/two","description":"","topics":[]}` + "\n",
 		), nil
 	}
-	clock := newIDClock(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
-	res, items := starsSource(fake, clock)
+	res, items := starsSource(fake)
 
 	if !res.OK || res.Count != 2 {
 		t.Fatalf("starsSource() result = %+v", res)
@@ -39,8 +37,7 @@ func TestStarsSourceUnreadableIsHonestNotEmpty(t *testing.T) {
 	fake := func(args ...string) ([]byte, error) {
 		return nil, errors.New("gh: not authenticated")
 	}
-	clock := newIDClock(time.Now())
-	res, items := starsSource(fake, clock)
+	res, items := starsSource(fake)
 	if res.OK {
 		t.Fatal("starsSource() reported OK for a failing gh call")
 	}
@@ -60,8 +57,7 @@ func TestStarsSourceIDsDoNotCollide(t *testing.T) {
 				`{"full_name":"a/three","html_url":"z"}` + "\n",
 		), nil
 	}
-	clock := newIDClock(time.Date(2026, 9, 3, 0, 0, 0, 0, time.UTC))
-	_, items := starsSource(fake, clock)
+	_, items := starsSource(fake)
 	seen := map[string]bool{}
 	for _, it := range items {
 		if seen[it.ID] {

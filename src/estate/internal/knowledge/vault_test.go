@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 const fixtureVaultFact = `---
@@ -36,8 +35,7 @@ func TestVaultSourceReadsEveryFactFile(t *testing.T) {
 	writeVaultFact(t, dir, "one", fixtureVaultFact)
 	writeVaultFact(t, dir, "two", fixtureVaultFact)
 
-	clock := newIDClock(time.Now())
-	res, items := vaultSource(dir, clock)
+	res, items := vaultSource(dir)
 	if !res.OK || res.Count != 2 {
 		t.Fatalf("vaultSource() result = %+v", res)
 	}
@@ -50,8 +48,7 @@ func TestVaultSourceReadsEveryFactFile(t *testing.T) {
 }
 
 func TestVaultSourceEmptyDirIsHonestNotEmpty(t *testing.T) {
-	clock := newIDClock(time.Now())
-	res, items := vaultSource("", clock)
+	res, items := vaultSource("")
 	if res.OK {
 		t.Fatal("vaultSource(\"\", ...) reported OK for an unset vault dir")
 	}
@@ -64,8 +61,7 @@ func TestVaultSourceEmptyDirIsHonestNotEmpty(t *testing.T) {
 }
 
 func TestVaultSourceMissingFactsDirIsHonest(t *testing.T) {
-	clock := newIDClock(time.Now())
-	res, _ := vaultSource(t.TempDir(), clock)
+	res, _ := vaultSource(t.TempDir())
 	if res.OK {
 		t.Fatal("vaultSource() reported OK for a vault with no agent/facts directory")
 	}
@@ -83,8 +79,7 @@ func TestVaultSourceSkipsOneUnparseableFactWithoutFailingTheSource(t *testing.T)
 	writeVaultFact(t, dir, "good", fixtureVaultFact)
 	writeVaultFact(t, dir, "bad", "no frontmatter fence here at all\n")
 
-	clock := newIDClock(time.Now())
-	res, items := vaultSource(dir, clock)
+	res, items := vaultSource(dir)
 	if !res.OK || res.Count != 1 {
 		t.Fatalf("vaultSource() result = %+v, want OK with count 1", res)
 	}

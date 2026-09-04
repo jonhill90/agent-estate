@@ -28,7 +28,7 @@ const corpusSep = "\x1f"
 // documents the wrong path) before calling this. Opened, per the
 // operator's own stated requirement, only as
 // file:<path>?mode=ro&immutable=1.
-func corpusSource(dbPath string, clock *idClock) (SourceResult, []Item) {
+func corpusSource(dbPath string) (SourceResult, []Item) {
 	res := SourceResult{Name: "corpus-parameters"}
 	if dbPath == "" {
 		res.Reason = "no corpus path configured"
@@ -74,10 +74,11 @@ func corpusSource(dbPath string, clock *idClock) (SourceResult, []Item) {
 			structural = append(structural, "status:"+status)
 		}
 		publishable, basis := classify("corpus-parameter")
+		permalink := fmt.Sprintf("corpus:item:%s", id)
 		items = append(items, Item{
-			ID:             clock.NextID(),
+			ID:             itemID(permalink),
 			Source:         "corpus-parameter",
-			Permalink:      fmt.Sprintf("corpus:item:%s", id),
+			Permalink:      permalink,
 			StructuralTags: structural,
 			Tier1:          truncate(tier1, 200),
 			Tier2:          truncate(body, 400),

@@ -4,7 +4,6 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
-	"time"
 )
 
 func TestLoopsSourceReadsHeadingAndParagraph(t *testing.T) {
@@ -14,8 +13,7 @@ func TestLoopsSourceReadsHeadingAndParagraph(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	clock := newIDClock(time.Now())
-	res, items := loopsSource(dir, clock)
+	res, items := loopsSource(dir)
 	if !res.OK || res.Count != 1 {
 		t.Fatalf("loopsSource() result = %+v", res)
 	}
@@ -28,8 +26,7 @@ func TestLoopsSourceReadsHeadingAndParagraph(t *testing.T) {
 }
 
 func TestLoopsSourceMissingDirIsHonest(t *testing.T) {
-	clock := newIDClock(time.Now())
-	res, items := loopsSource(filepath.Join(t.TempDir(), "does-not-exist"), clock)
+	res, items := loopsSource(filepath.Join(t.TempDir(), "does-not-exist"))
 	if res.OK {
 		t.Fatal("loopsSource() reported OK for a missing directory")
 	}
@@ -49,8 +46,7 @@ func TestLoopsSourceIgnoresNonMarkdownFiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "a.md"), []byte("# A\n\npara\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	clock := newIDClock(time.Now())
-	res, _ := loopsSource(dir, clock)
+	res, _ := loopsSource(dir)
 	if res.Count != 1 {
 		t.Fatalf("loopsSource() count = %d, want 1 (non-.md file must be ignored)", res.Count)
 	}

@@ -138,9 +138,43 @@ func scoreItem(it Item, terms []string) (score int, matched []string) {
 	return len(matched), matched
 }
 
+// minMatchedTerms is the floor an item's score must clear to be
+// returned at all -- agent-estate#1026's none-01 case ("office vending
+// machine restocking schedule", 5 scoreable terms) scored 2 against an
+// unrelated GitHub star purely by chance (two generic words, "machine"
+// and "schedule", each appearing in a handful of items for unrelated
+// reasons), and Query returned it instead of ever reaching no_match.
+// Every genuine hit measured against the golden set (agent-estate#1023)
+// matched 4 or more distinct terms; 3 sits below that with room, and
+// above the 1- and 2-term coincidental matches the false positive and
+// its neighbours produced. A minimum matched-COUNT was chosen over a
+// minimum score (the two are the same axis here, since score IS the
+// matched-term count) and over discounting document-frequent terms,
+// because measuring this index's actual term frequencies showed
+// "office"/"machine"/"schedule" are NOT common overall (well under 2%
+// of items each) -- the false positive is a low-probability coincidence
+// across several rare terms, not one term that clears the bar everywhere,
+// so document-frequency discounting would not have caught it.
+const minMatchedTerms = 3
+
+// requiredScore is the per-question floor: min(minMatchedTerms,
+// len(terms)). A question with fewer distinct terms than the floor
+// cannot possibly reach it, so the floor becomes "every term must
+// match" instead -- a 1- or 2-term question ("auth tokens") still finds
+// its item on a full match; it is not silently unanswerable just because
+// it is short.
+func requiredScore(terms []string) int {
+	if len(terms) < minMatchedTerms {
+		return len(terms)
+	}
+	return minMatchedTerms
+}
+
 const rankingBasisText = "score = count of distinct question terms " +
 	"(stop words and words of length <=2 removed) found as a substring " +
 	"of the item's own tier1, tier2, structural_tags or synaptic_tags; " +
+	"an item must match at least min(3, distinct question terms) of them " +
+	"to be returned at all -- see requiredScore in query.go; " +
 	"ties broken by item id, oldest first"
 
 // Query reads the compiled index at indexPath and returns a small,
@@ -190,10 +224,11 @@ func Query(indexPath, question string, limit int) QueryResult {
 		score   int
 		matched []string
 	}
+	required := requiredScore(terms)
 	var all []scored
 	for _, it := range res.Items {
 		score, matched := scoreItem(it, terms)
-		if score == 0 {
+		if score < required {
 			continue
 		}
 		all = append(all, scored{it, score, matched})

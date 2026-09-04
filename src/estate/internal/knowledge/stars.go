@@ -41,7 +41,7 @@ func defaultGHRunner(args ...string) ([]byte, error) {
 // each into one Item. A source that cannot be read at all (gh missing,
 // not authenticated, network down) returns a SourceResult with OK=false
 // and the real error as Reason -- never a silently empty Items slice.
-func starsSource(run func(args ...string) ([]byte, error), clock *idClock) (SourceResult, []Item) {
+func starsSource(run func(args ...string) ([]byte, error)) (SourceResult, []Item) {
 	if run == nil {
 		run = defaultGHRunner
 	}
@@ -75,7 +75,7 @@ func starsSource(run func(args ...string) ([]byte, error), clock *idClock) (Sour
 		}
 		publishable, basis := classify("github-stars")
 		items = append(items, Item{
-			ID:             clock.NextID(),
+			ID:             itemID(r.HTMLURL),
 			Source:         "github-stars",
 			Permalink:      r.HTMLURL,
 			StructuralTags: []string{"github-stars"},

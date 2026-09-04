@@ -39,10 +39,13 @@ import "time"
 // Tier2 adds context; Tier3 points at (never duplicates, for the corpus
 // source never quotes raw text out of) the source itself.
 type Item struct {
-	// ID is a 14-char YYYYMMDDHHmmss id, one second apart from every
-	// other item this same Generate call produced -- see idClock in
-	// id.go. Notebook-MCP's own stated reason for the scheme: "prevents
-	// agent collision."
+	// ID is derived from Permalink alone (see id.go's itemID) -- an
+	// "it-<16 hex chars>" value, stable across two Generate calls over
+	// the same sources, because it is a function of the item's own
+	// permalink rather than the wall clock at compile time
+	// (agent-estate#1026: the clock-based scheme this replaced changed
+	// on every regenerate, breaking `get <id>` the moment an id was
+	// written into anything durable).
 	ID string `json:"id"`
 
 	// Source names which of the four readers produced this item --
