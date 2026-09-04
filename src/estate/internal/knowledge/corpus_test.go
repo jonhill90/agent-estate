@@ -35,11 +35,11 @@ CREATE TABLE items (
   acked_at TEXT
 );
 CREATE VIEW live_parameters AS SELECT * FROM items WHERE kind = 'parameter' AND weight != 'retracted';
-INSERT INTO items (id, kind, body, weight, status, resolved_to) VALUES
-  (1, 'parameter', 'Prefer CLI-backed workflows.', 'hard', 'live', 'tooling=cli_first'),
-  (2, 'parameter', 'Use uv for Python.', 'soft', 'live', 'python=uv'),
-  (3, 'parameter', 'A retracted one, must not appear.', 'retracted', 'live', 'gone=yes'),
-  (4, 'prompt', 'this must never be reachable from this package', 'hard', 'live', NULL);
+INSERT INTO items (id, prompt_id, kind, body, weight, status, resolved_to) VALUES
+  (1, 101, 'parameter', 'Prefer CLI-backed workflows.', 'hard', 'live', 'tooling=cli_first'),
+  (2, 102, 'parameter', 'Use uv for Python.', 'soft', 'live', 'python=uv'),
+  (3, 103, 'parameter', 'A retracted one, must not appear.', 'retracted', 'live', 'gone=yes'),
+  (4, NULL, 'prompt', 'this must never be reachable from this package', 'hard', 'live', NULL);
 `
 
 func TestCorpusSourceReadsLiveParametersOnly(t *testing.T) {
@@ -54,6 +54,53 @@ func TestCorpusSourceReadsLiveParametersOnly(t *testing.T) {
 		}
 		if strings.Contains(it.Tier1, "retracted") {
 			t.Fatalf("corpusSource() included a retracted parameter: %+v", it)
+		}
+	}
+}
+
+// TestCorpusSourceCarriesPromptID is agent-estate#1031's own regression:
+// every corpus-derived item must trace back to the prompts row behind it,
+// via the bare id the corpus itself already carries in prompt_id -- never
+// via the prompt's own text, which this package must never read (see
+// corpusSource's own doc comment). This fails if a corpus-derived item is
+// ever compiled with an empty PromptID.
+func TestCorpusSourceCarriesPromptID(t *testing.T) {
+	path := buildFixtureCorpus(t, fixtureDDL)
+	_, items := corpusSource(path)
+	if len(items) != 2 {
+		t.Fatalf("corpusSource() returned %d items, want 2", len(items))
+	}
+	want := map[string]string{
+		"1": "101",
+		"2": "102",
+	}
+	for _, it := range items {
+		id := strings.TrimPrefix(it.Tier3, "the corpus's own item ")
+		id = strings.TrimSuffix(id, " (live_parameters) -- not this file")
+		wantPromptID, ok := want[id]
+		if !ok {
+			t.Fatalf("unexpected item id %q in corpusSource() output", id)
+		}
+		if it.PromptID == "" {
+			t.Fatalf("corpusSource() item %q has empty PromptID -- every corpus-derived item must carry one (agent-estate#1031)", id)
+		}
+		if it.PromptID != wantPromptID {
+			t.Fatalf("corpusSource() item %q PromptID = %q, want %q", id, it.PromptID, wantPromptID)
+		}
+	}
+}
+
+// TestCorpusSourcePromptIDNeverCarriesText guards the hard constraint:
+// the field is the bare corpus id only, never anything resembling the
+// prompt's own words.
+func TestCorpusSourcePromptIDNeverCarriesText(t *testing.T) {
+	path := buildFixtureCorpus(t, fixtureDDL)
+	_, items := corpusSource(path)
+	for _, it := range items {
+		for _, r := range it.PromptID {
+			if r < '0' || r > '9' {
+				t.Fatalf("corpusSource() item PromptID = %q is not purely numeric -- looks like it may carry more than an id", it.PromptID)
+			}
 		}
 	}
 }

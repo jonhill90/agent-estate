@@ -100,6 +100,27 @@ type Item struct {
 	// guess which rule produced a given item's classification. Always
 	// set alongside Publishable, by the same classify call.
 	PublishBasis string `json:"publish_basis"`
+
+	// PromptID is the corpus's own prompts.id this item's prompt_id
+	// column names -- the trace agent-estate#1031 asks this package to
+	// carry, so a query result can be joined back to the operator's own
+	// words instead of stopping at a distillation. Set only for
+	// Source == "corpus-parameter"; empty for the other three sources,
+	// each of whose own Permalink already IS its trace to origin (a
+	// vault fact's own file path, a star's own html_url, a
+	// Loops-Research file's own path) -- corpus-parameter is the one
+	// source whose Permalink (corpus:item:<id>) names the distillation
+	// and stops there, per #1031's own framing.
+	//
+	// THE ID ONLY, NEVER THE TEXT. This carries prompts.id, the same
+	// bare identifier corpus.go's own query already reads -- never
+	// prompts.text_raw or prompts.text_clean. See corpus.go's own doc
+	// comment for why no query in this package reaches either text
+	// column, and Item's own "UNCLASSIFIED MEANS PRIVATE" note above: a
+	// traceable pointer to private material is still private material,
+	// so this id is exactly as sensitive as the item it sits on, not a
+	// side channel around Publishable.
+	PromptID string `json:"prompt_id,omitempty"`
 }
 
 // SourceResult is what one of the four readers actually managed --

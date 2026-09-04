@@ -16,12 +16,15 @@ const corpusSep = "\x1f"
 // 'hard' only): this index means to reflect the corpus's own live set,
 // not the subset a dispatch is grounded in.
 //
-// RAW PROMPTS NEVER LEAVE THE SOURCE. This query selects only from
-// live_parameters (kind='parameter', already-derived statements, one per
-// item.body) -- there is no column here, and no query anywhere in this
-// package, that reaches the corpus's own `prompts` table. That is the
-// hard rule this function exists to keep, not an incidental property of
-// the query below.
+// RAW PROMPTS NEVER LEAVE THE SOURCE. This query selects prompt_id --
+// live_parameters' own bare id column, the same identifier
+// internal/corpus's provenance.go joins against prompts.id -- and
+// nothing else from that lineage. There is no column here, and no query
+// anywhere in this package, that reaches prompts.text_raw or
+// prompts.text_clean. That is the hard rule this function exists to
+// keep, not an incidental property of the query below (agent-estate#1031:
+// prompt_id makes an item traceable to what the operator actually said,
+// without this package ever holding the words themselves).
 //
 // dbPath must already be a real, stat-able file; the caller (Generate)
 // resolves ~/corpus/ledger.sqlite3 (agent-estate#942's own trap: CLAUDE.md
@@ -40,7 +43,7 @@ func corpusSource(dbPath string) (SourceResult, []Item) {
 	}
 
 	q := `select id, coalesce(resolved_to,''), coalesce(weight,''), coalesce(status,''),
-	      replace(replace(body, char(10), ' '), char(13), ' ')
+	      replace(replace(body, char(10), ' '), char(13), ' '), prompt_id
 	      from live_parameters order by id`
 	cmd := exec.Command("sqlite3", "-separator", corpusSep, "file:"+dbPath+"?mode=ro&immutable=1", q)
 	out, err := cmd.Output()
@@ -53,11 +56,11 @@ func corpusSource(dbPath string) (SourceResult, []Item) {
 	sc := bufio.NewScanner(strings.NewReader(string(out)))
 	sc.Buffer(make([]byte, 0, 64*1024), 8*1024*1024)
 	for sc.Scan() {
-		parts := strings.SplitN(sc.Text(), corpusSep, 5)
-		if len(parts) != 5 {
+		parts := strings.SplitN(sc.Text(), corpusSep, 6)
+		if len(parts) != 6 {
 			continue
 		}
-		id, resolvedTo, weight, status, body := parts[0], parts[1], parts[2], parts[3], parts[4]
+		id, resolvedTo, weight, status, body, promptID := parts[0], parts[1], parts[2], parts[3], parts[4], parts[5]
 		body = strings.TrimSpace(body)
 		if body == "" && resolvedTo == "" {
 			continue
@@ -85,6 +88,7 @@ func corpusSource(dbPath string) (SourceResult, []Item) {
 			Tier3:          "the corpus's own item " + id + " (live_parameters) -- not this file",
 			Publishable:    publishable,
 			PublishBasis:   basis,
+			PromptID:       promptID,
 		})
 	}
 	if err := sc.Err(); err != nil {
