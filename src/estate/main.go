@@ -623,18 +623,32 @@ func printKnowledgeQueryJSON(qr knowledge.QueryResult) {
 // rather than inventing a new field set. Item is nil (omitted) whenever
 // ok is false, so a JSON caller never has to distinguish a genuine
 // zero-value Item from "there is no item" -- Reason already carries why.
+//
+// Disclosure and DisclosureError are agent-estate#1061's own addition,
+// sitting BESIDE Item rather than inside it -- the same placement #1104
+// chose for Contradictions beside Coverage on QueryResult, for the same
+// reason: this is a signal ABOUT the item's own prompt_id, computed by a
+// live corpus read at `get` time, not a field the compiled index itself
+// carries. Both are omitted together (an unresolvable prompt_id, e.g.
+// item.PromptID == "") -- a JSON caller sees neither key rather than a
+// null Disclosure, matching Item's own omit-on-absence convention above.
 type knowledgeGetJSON struct {
-	OK     bool            `json:"ok"`
-	Reason string          `json:"reason,omitempty"`
-	Item   *knowledge.Item `json:"item,omitempty"`
+	OK              bool                  `json:"ok"`
+	Reason          string                `json:"reason,omitempty"`
+	Item            *knowledge.Item       `json:"item,omitempty"`
+	Disclosure      *knowledge.Disclosure `json:"disclosure,omitempty"`
+	DisclosureError string                `json:"disclosure_error,omitempty"`
 }
 
 // printKnowledgeGetJSON renders one knowledge.Get result as JSON on
 // stdout -- the structured counterpart to the prose block later in
 // `case "knowledge":`, applied to `get` as the one-line extension #1068
-// asked for explicitly.
-func printKnowledgeGetJSON(item knowledge.Item, ok bool, reason string) {
-	out := knowledgeGetJSON{OK: ok, Reason: reason}
+// asked for explicitly. disc/discErr are the caller's own already-
+// resolved agent-estate#1061 disclosure result (or check failure) --
+// this function only transports them, it never calls ResolveDisclosure
+// itself.
+func printKnowledgeGetJSON(item knowledge.Item, ok bool, reason string, disc *knowledge.Disclosure, discErr string) {
+	out := knowledgeGetJSON{OK: ok, Reason: reason, Disclosure: disc, DisclosureError: discErr}
 	if ok {
 		out.Item = &item
 	}
@@ -1063,8 +1077,28 @@ func main() {
 				os.Exit(2)
 			}
 			item, ok, reason := knowledge.Get(out, rest[0], includePrivate)
+			// agent-estate#1061: resolve the disclosure state for this
+			// item's own prompt_id before printing anything -- only when
+			// Get actually succeeded and the item carries one at all (the
+			// same gate the prompt_id print line below already applies;
+			// the four non-corpus sources never set PromptID). A failure
+			// to CHECK (corpus unreadable, path unresolvable) is carried
+			// as discErr and reported as "could not check", never
+			// silently promoted into one of the four real states.
+			var disc *knowledge.Disclosure
+			var discErr string
+			if ok && item.PromptID != "" {
+				cfg, cfgErr := knowledge.DefaultConfig()
+				if cfgErr != nil {
+					discErr = cfgErr.Error()
+				} else if d, rerr := knowledge.ResolveDisclosure(cfg.CorpusDBPath, item, includePrivate); rerr != nil {
+					discErr = rerr.Error()
+				} else {
+					disc = &d
+				}
+			}
 			if asJSON {
-				printKnowledgeGetJSON(item, ok, reason)
+				printKnowledgeGetJSON(item, ok, reason, disc, discErr)
 				if !ok {
 					os.Exit(1)
 				}
@@ -1092,6 +1126,15 @@ func main() {
 			}
 			if item.PromptID != "" {
 				fmt.Printf("prompt_id: %s\n", item.PromptID)
+				// agent-estate#1061: state whether this prompt_id actually
+				// leads anywhere a caller may open -- never the text
+				// itself (see disclosure.go's own "never the text" note).
+				switch {
+				case disc != nil:
+					fmt.Printf("provenance: %s -- %s\n", disc.State, disc.Detail)
+				case discErr != "":
+					fmt.Printf("provenance: could not check -- %s\n", discErr)
+				}
 			}
 			return
 		}
