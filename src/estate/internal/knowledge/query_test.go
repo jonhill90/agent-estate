@@ -457,6 +457,45 @@ func tagFilterIndex(t *testing.T) string {
 	return path
 }
 
+// fieldWeightIndex reproduces #1043's review finding in miniature: a
+// short item whose Tier1 (title) actually names the subject, sitting
+// next to a long item whose Tier1 is unrelated but whose Tier2 body
+// happens to contain more of the question's own terms. #1027 compiled
+// full vault fact bodies into Tier2, and an unweighted matched-term
+// count let the long body outrank the on-topic title purely on raw
+// count -- this fixture is that shape at the smallest size that still
+// clears requiredScore(3) for both items.
+func fieldWeightIndex(t *testing.T) string {
+	t.Helper()
+	idx := Result{
+		GeneratedAt: time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC),
+		Items: []Item{
+			{
+				ID: "20260904000000", Source: "vault-fact",
+				Permalink:   "/vault/agent/facts/on-topic-title.md",
+				Tier1:       "tmux session keychain locked",
+				Tier2:       "",
+				Publishable: true, PublishBasis: "test fixture: marked publishable",
+			},
+			{
+				ID: "20260904000001", Source: "vault-fact",
+				Permalink: "/vault/agent/facts/unrelated-title-long-body.md",
+				Tier1:     "an unrelated fact about deploy windows",
+				Tier2: "this body happens to mention tmux, and separately a " +
+					"session, and later a keychain, and further down locked, " +
+					"and finally recovery -- five of the question's own terms, " +
+					"none of them in this item's own title",
+				Publishable: true, PublishBasis: "test fixture: marked publishable",
+			},
+		},
+	}
+	path := filepath.Join(t.TempDir(), "index.json")
+	if err := Write(path, idx); err != nil {
+		t.Fatalf("Write() error: %v", err)
+	}
+	return path
+}
+
 // TestQueryExactTagFilterExcludesTermCoincidence is #1024's own reported
 // defect, reproduced: "status:open" as a bare term search matches every
 // item carrying ANY status: tag plus any item whose prose merely contains
@@ -556,5 +595,34 @@ func TestQueryTagFilterComposesWithQuestionTerms(t *testing.T) {
 	}
 	if got.TotalMatched != 1 || len(got.Matches) != 1 || got.Matches[0].ID != "20260903140000" {
 		t.Fatalf("Matches = %+v, want just the storage-format item", got.Matches)
+	}
+}
+
+// TestQueryRanksATier1MatchAboveALongerTier2OnlyMatch pins the
+// field-weighted ranking fix: the on-topic-title item matches only 3 of
+// the question's 5 scoreable terms (all in Tier1), the unrelated item
+// matches all 5 (all in Tier2 only, i.e. a strictly higher unweighted
+// score) -- yet the on-topic item must rank first, because a term found
+// in Tier1 outweighs the same term found only in Tier2 (see rankingWeight
+// in query.go). Before this fix, sort was by unweighted score alone and
+// the long-body item would have ranked first.
+func TestQueryRanksATier1MatchAboveALongerTier2OnlyMatch(t *testing.T) {
+	path := fieldWeightIndex(t)
+	got := Query(path, "tmux session keychain locked recovery", 0, false)
+
+	if got.State != StateMatched {
+		t.Fatalf("State = %q, want %q (reason=%q)", got.State, StateMatched, got.Reason)
+	}
+	if len(got.Matches) != 2 {
+		t.Fatalf("len(Matches) = %d, want 2", len(got.Matches))
+	}
+	if got.Matches[0].ID != "20260904000000" {
+		t.Fatalf("Matches[0].ID = %q, want the on-topic-title item ranked first (got %+v)",
+			got.Matches[0].ID, got.Matches)
+	}
+	if got.Matches[0].Score >= got.Matches[1].Score {
+		t.Fatalf("fixture no longer exercises the case: on-topic item's printed score (%d) "+
+			"must be lower than the long-body item's (%d) for this test to prove weighting, "+
+			"not just raw score, decided the order", got.Matches[0].Score, got.Matches[1].Score)
 	}
 }
