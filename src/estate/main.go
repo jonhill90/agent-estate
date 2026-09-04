@@ -462,6 +462,7 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 		// knowledgeQueryExitCode's own comment for why).
 		fmt.Println("*** MOSTLY WITHHELD -- most matching items are private; the results below are a minority of the answer ***")
 	}
+	printContradictions(qr.Contradictions)
 	fmt.Printf("%d match(es) for %q (showing %d, %d not returned, %d withheld as private)\n\n",
 		qr.TotalMatched, qr.Question, len(qr.Matches), qr.NotReturned, qr.WithheldPrivate)
 	for _, m := range qr.Matches {
@@ -642,6 +643,25 @@ func printKnowledgeGetJSON(item knowledge.Item, ok bool, reason string) {
 	if err := enc.Encode(out); err != nil {
 		fmt.Fprintln(os.Stderr, "estate: encode json:", err)
 		os.Exit(2)
+	}
+}
+
+// printContradictions renders knowledge.Query's own agent-estate#1051
+// finding: a corpus-question and a vault-fact/corpus-directive that both
+// landed in this result set on the same matched terms. Printed above the
+// match list (never inside it, never reordering anything) because it is
+// a property of the SET, not of either individual match -- see
+// Contradiction's own doc comment in contradiction.go for why this is
+// its own signal rather than a Coverage reason. Never says which side is
+// right; names only the two ids and the shared terms, and tells the
+// reader to look.
+func printContradictions(cs []knowledge.Contradiction) {
+	for _, c := range cs {
+		fmt.Printf("note: [%s] (%s) and [%s] (%s) disagree on %s -- a question on this subject appears unresolved; read both before acting\n",
+			c.QuestionID, c.QuestionSource, c.AssertionID, c.AssertionSource, strings.Join(c.SharedTerms, ", "))
+	}
+	if len(cs) > 0 {
+		fmt.Println()
 	}
 }
 
