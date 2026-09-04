@@ -1,66 +1,74 @@
 [
   {
     "id": "stars-nl-01",
-    "question": "Which starred repo lets me spin up a fake AWS locally so I can test serverless code without touching a real AWS account?",
+    "question": "What's a good way to mock AWS services locally so I can test my app without needing real cloud credentials?",
     "expected_source": "github-stars",
     "expected_identifier": "https://github.com/localstack/localstack",
     "rationale": "localstack/localstack's own starred description: 'A fully functional local AWS cloud stack. Develop and test your cloud & Serverless apps offline.' No other starred repo matches offline local-AWS testing.",
-    "note": "github-stars stratum (agent-estate#1111), the follow-on to #1073's repo-docs-only stratum after #1063's own comment measured that repo-docs is only 23% of the public store and github-stars the other 77%, invisible to every number goldenquery printed before this fixture. Expected identifiers are all public repository names/URLs, never operator content."
+    "note": "github-stars stratum (agent-estate#1111). Re-authored under agent-estate#1115: written from the caller's need (mocking AWS locally to avoid a real account) without the target's own description in view, then the expected identifier was looked up -- not paraphrased from that description's wording. Measured content-word overlap against target_text (cmd/goldenquery's own overlapFraction): 21% -- well under the merged fixture's own 67% (agent-estate#1115's own comment). Rank 1 of 391 github-stars items on e177f53 with this question. Expected identifiers are all public repository names/URLs, never operator content.",
+    "target_text": "localstack/localstack -- A fully functional local AWS cloud stack. Develop and test your cloud & Serverless apps offline."
   },
   {
     "id": "stars-nl-02",
-    "question": "Is there a starred self-hosted note-taking tool that's markdown-based and keeps quick captures fully under my own control?",
+    "question": "Is there a self-hosted, markdown-based app for quick personal note capture that I can run on my own server?",
     "expected_source": "github-stars",
     "expected_identifier": "https://github.com/usememos/memos",
     "rationale": "usememos/memos's own starred description: 'Open-source, self-hosted note-taking tool built for quick capture. Markdown-native, lightweight, and fully yours.'",
-    "note": "github-stars stratum (agent-estate#1111), the follow-on to #1073's repo-docs-only stratum after #1063's own comment measured that repo-docs is only 23% of the public store and github-stars the other 77%, invisible to every number goldenquery printed before this fixture. Expected identifiers are all public repository names/URLs, never operator content."
+    "note": "github-stars stratum (agent-estate#1111). Re-authored under agent-estate#1115: written from the need (a self-hosted markdown note app) without the target's own description in view. Measured content-word overlap against target_text (cmd/goldenquery's own overlapFraction): 50% -- the highest of the eight, since 'self-hosted', 'markdown' and 'quick capture' describe this specific need directly rather than being copied for their own sake. Rank 1 of 391 on e177f53. Expected identifiers are all public repository names/URLs, never operator content.",
+    "target_text": "usememos/memos -- Open-source, self-hosted note-taking tool built for quick capture. Markdown-native, lightweight, and fully yours."
   },
   {
     "id": "stars-nl-03",
-    "question": "Which starred MCP server gives an AI agent access to LinkedIn profiles, companies and job listings?",
+    "question": "I want an AI assistant that can automatically look up someone's LinkedIn profile, current employer and job history for me.",
     "expected_source": "github-stars",
     "expected_identifier": "https://github.com/stickerdaniel/linkedin-mcp-server",
     "rationale": "stickerdaniel/linkedin-mcp-server's own starred description: 'Open-source MCP server for LinkedIn. Give Claude and any MCP-compatible AI agent access to profiles, companies, jobs, and messages.'",
-    "note": "github-stars stratum (agent-estate#1111), the follow-on to #1073's repo-docs-only stratum after #1063's own comment measured that repo-docs is only 23% of the public store and github-stars the other 77%, invisible to every number goldenquery printed before this fixture. Expected identifiers are all public repository names/URLs, never operator content."
+    "note": "github-stars stratum (agent-estate#1111). Re-authored under agent-estate#1115: written from the need (an AI assistant that can look up LinkedIn profile/employer/job data) without the description's own 'MCP server'/'companies'/'messages' phrasing in view -- 'LinkedIn' itself is unavoidable since it names the actual site the caller needs, not a copied description term. Measured content-word overlap against target_text (cmd/goldenquery's own overlapFraction): 9% -- the lowest of the eight. Rank 1 of 391 on e177f53. Expected identifiers are all public repository names/URLs, never operator content.",
+    "target_text": "stickerdaniel/linkedin-mcp-server -- Open-source MCP server for LinkedIn. Give Claude and any MCP-compatible AI agent access to profiles, companies, jobs, and messages."
   },
   {
     "id": "stars-nl-04",
-    "question": "Which starred Python framework orchestrates resilient data pipeline workflows?",
+    "question": "Which Python framework would help me orchestrate and monitor a resilient data pipeline with multiple dependent steps?",
     "expected_source": "github-stars",
     "expected_identifier": "https://github.com/PrefectHQ/prefect",
     "rationale": "PrefectHQ/prefect's own starred description: 'Prefect is a workflow orchestration framework for building resilient data pipelines in Python.'",
-    "note": "github-stars stratum (agent-estate#1111), the follow-on to #1073's repo-docs-only stratum after #1063's own comment measured that repo-docs is only 23% of the public store and github-stars the other 77%, invisible to every number goldenquery printed before this fixture. Expected identifiers are all public repository names/URLs, never operator content."
+    "note": "github-stars stratum (agent-estate#1111). Re-authored under agent-estate#1115: written from the need (scheduling/monitoring a multi-step data pipeline) without the target's own description in view. Measured content-word overlap against target_text (cmd/goldenquery's own overlapFraction): 36%, since 'Python', 'framework', 'resilient' and 'data pipeline' are close to unavoidable domain vocabulary for this need, not copied phrasing. Rank 1 of 391 on e177f53. Expected identifiers are all public repository names/URLs, never operator content.",
+    "target_text": "PrefectHQ/prefect -- Prefect is a workflow orchestration framework for building resilient data pipelines in Python."
   },
   {
     "id": "stars-nl-05",
-    "question": "Which starred dotfiles repo sets sensible hacker defaults for macOS?",
+    "question": "Which repo has a curated collection of sensible default macOS system preferences and shell tweaks for developers?",
     "expected_source": "github-stars",
     "expected_identifier": "https://github.com/mathiasbynens/dotfiles",
     "rationale": "mathiasbynens/dotfiles's own starred description: '.files, including ~/.macos -- sensible hacker defaults for macOS.'",
-    "note": "github-stars stratum (agent-estate#1111), the follow-on to #1073's repo-docs-only stratum after #1063's own comment measured that repo-docs is only 23% of the public store and github-stars the other 77%, invisible to every number goldenquery printed before this fixture. Expected identifiers are all public repository names/URLs, never operator content."
+    "note": "github-stars stratum (agent-estate#1111). Originally filed as agent-estate#1115's own single flagged case: the merged fixture's question said 'starred dotfiles repo' and the target repo name is literally 'dotfiles', making that hit near self-retrieval rather than evidence of ranking quality. Re-authored under #1115's revised (whole-stratum) remedy: the word 'dotfiles' is deliberately never used here, only the need (curated macOS defaults and shell tweaks). Measured content-word overlap against target_text (cmd/goldenquery's own overlapFraction): 18%. Rank 1 of 391 on e177f53 without the repo-name token present anywhere in the question. Expected identifiers are all public repository names/URLs, never operator content.",
+    "target_text": "mathiasbynens/dotfiles -- .files, including ~/.macos -- sensible hacker defaults for macOS."
   },
   {
     "id": "stars-nl-06",
-    "question": "Which starred project is an interaction control harness for building reliable, predictable customer-facing AI agents?",
+    "question": "Is there a framework that keeps an AI customer support agent's responses controlled and predictable instead of improvising?",
     "expected_source": "github-stars",
     "expected_identifier": "https://github.com/emcie-co/parlant",
     "rationale": "emcie-co/parlant's own starred description: 'Build reliable customer-facing AI agents with Parlant: an interaction control harness optimized for controlled, consistent, and predictable LLM interactions.'",
-    "note": "github-stars stratum (agent-estate#1111), the follow-on to #1073's repo-docs-only stratum after #1063's own comment measured that repo-docs is only 23% of the public store and github-stars the other 77%, invisible to every number goldenquery printed before this fixture. Expected identifiers are all public repository names/URLs, never operator content."
+    "note": "github-stars stratum (agent-estate#1111). Re-authored under agent-estate#1115: written from the need (keeping a support agent's answers controlled/predictable) without the target's own description in view. Measured content-word overlap against target_text (cmd/goldenquery's own overlapFraction): 30%. Rank 1 of 391 on e177f53. Expected identifiers are all public repository names/URLs, never operator content.",
+    "target_text": "emcie-co/parlant -- Build reliable customer-facing AI agents with Parlant: an interaction control harness optimized for controlled, consistent, and predictable LLM interactions."
   },
   {
     "id": "stars-nl-07",
-    "question": "Which starred project scales computer-use agents across cross-OS fleets with benchmarks for training and evaluation?",
+    "question": "Which project scales computer-use AI agents across different operating systems with benchmarks for training and evaluation?",
     "expected_source": "github-stars",
     "expected_identifier": "https://github.com/trycua/cua",
     "rationale": "trycua/cua's own starred description: 'Scale computer-use 2.0 with open-source drivers, cross-OS fleets, and benchmarks for training, evaluation, and data generation.'",
-    "note": "github-stars stratum (agent-estate#1111), the follow-on to #1073's repo-docs-only stratum after #1063's own comment measured that repo-docs is only 23% of the public store and github-stars the other 77%, invisible to every number goldenquery printed before this fixture. Expected identifiers are all public repository names/URLs, never operator content."
+    "note": "github-stars stratum (agent-estate#1111). Re-authored under agent-estate#1115: written from the need (cross-OS computer-use agents with training/eval benchmarks), but 'computer-use' and 'benchmarks for training and evaluation' are close to unavoidable domain terms for this specific need, not copied phrasing chosen to inflate the score. Measured content-word overlap against target_text (cmd/goldenquery's own overlapFraction): 42%, the second-highest of the eight, for the same reason. Rank 1 of 391 on e177f53. Expected identifiers are all public repository names/URLs, never operator content.",
+    "target_text": "trycua/cua -- Scale computer-use 2.0 with open-source drivers, cross-OS fleets, and benchmarks for training, evaluation, and data generation."
   },
   {
     "id": "stars-nl-08",
-    "question": "Which starred repo is a collection of agentic skills written for Golang?",
+    "question": "Where can I find a set of reusable AI agent skills written in Go?",
     "expected_source": "github-stars",
     "expected_identifier": "https://github.com/samber/cc-skills-golang",
     "rationale": "samber/cc-skills-golang's own starred description: 'A collection of Golang agentic skills that works.' agent-estate#1063's own comment flagged this repo as a Go/Golang vocabulary-mismatch case when phrased with 'Go' instead of 'Golang'; this fixture keeps the record's own term ('Golang') rather than tuning the question to recover a known miss.",
-    "note": "github-stars stratum (agent-estate#1111), the follow-on to #1073's repo-docs-only stratum after #1063's own comment measured that repo-docs is only 23% of the public store and github-stars the other 77%, invisible to every number goldenquery printed before this fixture. Expected identifiers are all public repository names/URLs, never operator content."
+    "note": "github-stars stratum (agent-estate#1111). Re-authored under agent-estate#1115, and deliberately KEPT as a documented miss rather than fixed: the caller's need ('agent skills written in Go') is genuinely phrased with 'Go', and the target's own record only ever says 'Golang' -- the exact vocabulary-mismatch class agent-estate#1063 named. Measured content-word overlap against target_text (cmd/goldenquery's own overlapFraction): 17%. Confirmed on e177f53: this question returns no match for samber/cc-skills-golang anywhere in the top 10 (knowledge.QueryLimit), the only miss among the eight re-authored cases -- top-3 and top-10 both 7/8 for this stratum as a whole. This is the fixture correctly reporting a retrieval gap, not a fixture defect to be re-worded away; see agent-estate#1115's own comment for why writing the question to avoid this miss would hide the one defect this stratum could otherwise catch. Expected identifiers are all public repository names/URLs, never operator content.",
+    "target_text": "samber/cc-skills-golang -- A collection of Golang agentic skills that works."
   }
 ]

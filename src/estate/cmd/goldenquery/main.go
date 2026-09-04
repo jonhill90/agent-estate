@@ -312,18 +312,20 @@ func scopedQuestion(question, source string, scoped bool) string {
 // answers "does the source: mechanism still narrow results?" -- #1077's
 // own gap was that only the first question had a reported number, so
 // source: filtering could silently stop working with nothing catching it.
-func runNaturalStratum(w *bufio.Writer, bin string, verbose bool, scoped bool) (top3Hits, top10Hits, total int, ranAtLeastOne bool) {
+func runNaturalStratum(w *bufio.Writer, bin string, verbose bool, scoped bool) (top3Hits, top10Hits, total int, ranAtLeastOne bool, overlapMean float64, overlapMeasured int) {
 	cases, err := goldenset.LoadNatural()
 	if err != nil {
 		fmt.Fprintln(w, "goldenquery: natural-language stratum:", err)
-		return 0, 0, 0, false
+		return 0, 0, 0, false, 0, 0
 	}
 	label := "unscoped"
 	if scoped {
 		label = "scoped, source:repo-docs prepended -- agent-estate#1077"
 	}
 	fmt.Fprintf(w, "=== natural-language stratum (default/public, %s -- agent-estate#1073) ===\n", label)
-	return runStratum(w, bin, verbose, scoped, cases, "repo-docs")
+	top3Hits, top10Hits, total, ranAtLeastOne = runStratum(w, bin, verbose, scoped, cases, "repo-docs")
+	overlapMean, overlapMeasured, _ = meanOverlap(cases)
+	return
 }
 
 // runStarStratum runs agent-estate#1111's checked-in github-stars
@@ -335,14 +337,16 @@ func runNaturalStratum(w *bufio.Writer, bin string, verbose bool, scoped bool) (
 // the repo-docs stratum this one is run unscoped only -- a scoped run
 // would print a second number this issue's own evidence says will not
 // move, and goldenquery prints one line for this stratum, not four.
-func runStarStratum(w *bufio.Writer, bin string, verbose bool) (top3Hits, top10Hits, total int, ranAtLeastOne bool) {
+func runStarStratum(w *bufio.Writer, bin string, verbose bool) (top3Hits, top10Hits, total int, ranAtLeastOne bool, overlapMean float64, overlapMeasured int) {
 	cases, err := goldenset.LoadStars()
 	if err != nil {
 		fmt.Fprintln(w, "goldenquery: github-stars stratum:", err)
-		return 0, 0, 0, false
+		return 0, 0, 0, false, 0, 0
 	}
 	fmt.Fprintln(w, "=== github-stars stratum (default/public, unscoped -- agent-estate#1111) ===")
-	return runStratum(w, bin, verbose, false, cases, "github-stars")
+	top3Hits, top10Hits, total, ranAtLeastOne = runStratum(w, bin, verbose, false, cases, "github-stars")
+	overlapMean, overlapMeasured, _ = meanOverlap(cases)
+	return
 }
 
 // runStratum is the shared run loop behind runNaturalStratum and
@@ -381,6 +385,14 @@ func runStratum(w *bufio.Writer, bin string, verbose bool, scoped bool, cases []
 			}
 			fmt.Fprintf(w, "[%s] %s -- %q\n", status, c.ID, c.Question)
 			fmt.Fprintf(w, "  expected: %s (%s)\n", c.ExpectedIdentifier, c.ExpectedSource)
+			// agent-estate#1115: print this case's own term overlap right
+			// next to its result, not only in the stratum-level mean --
+			// a reader deciding whether a HIT is evidence of ranking
+			// quality or near self-retrieval needs the per-case number,
+			// not just the average.
+			if frac, ok := overlapFraction(c.Question, c.TargetText); ok {
+				fmt.Fprintf(w, "  term overlap vs target_text: %.0f%%\n", frac*100)
+			}
 			if !hit10 {
 				if exitCode != 0 {
 					fmt.Fprintf(w, "  detail:   exit %d\n", exitCode)
@@ -529,8 +541,8 @@ func main() {
 	// to every question (scoped). Both lines print always; neither is
 	// derived from or replaces the other (see runNaturalStratum's own
 	// doc comment).
-	nlTop3, nlTop10, nlTotal, ranNaturalUnscoped := runNaturalStratum(w, *bin, *verbose, false)
-	nlScopedTop3, nlScopedTop10, nlScopedTotal, ranNaturalScoped := runNaturalStratum(w, *bin, *verbose, true)
+	nlTop3, nlTop10, nlTotal, ranNaturalUnscoped, nlOverlapMean, nlOverlapMeasured := runNaturalStratum(w, *bin, *verbose, false)
+	nlScopedTop3, nlScopedTop10, nlScopedTotal, ranNaturalScoped, _, _ := runNaturalStratum(w, *bin, *verbose, true)
 	ranNatural := ranNaturalUnscoped || ranNaturalScoped
 
 	// agent-estate#1111: the github-stars stratum is the complement of
@@ -539,7 +551,7 @@ func main() {
 	// 77%, invisible to every number above until this fixture. Reported
 	// on its own, never averaged with cases.json's or the repo-docs
 	// stratum's own numbers (see runStarStratum's own doc comment).
-	starTop3, starTop10, starTotal, ranStars := runStarStratum(w, *bin, *verbose)
+	starTop3, starTop10, starTotal, ranStars, starOverlapMean, starOverlapMeasured := runStarStratum(w, *bin, *verbose)
 
 	if !ranPrivate && !ranPub && !ranNatural && !ranStars {
 		fmt.Fprintln(w, "goldenquery: could not run any case -- is the estate binary on PATH, and has `estate knowledge` been run to compile the index?")
@@ -558,6 +570,17 @@ func main() {
 	fmt.Fprintf(w, "natural-language stratum, top-10 (default/public, unscoped -- #1073, baseline 10/12 on a7d413c): %d/%d\n", nlTop10, nlTotal)
 	fmt.Fprintf(w, "natural-language stratum, top-3  (default/public, scoped source:repo-docs -- #1077, expected roughly 8-9/12 on df2cf75):  %d/%d\n", nlScopedTop3, nlScopedTotal)
 	fmt.Fprintf(w, "natural-language stratum, top-10 (default/public, scoped source:repo-docs -- #1077):                                    %d/%d\n", nlScopedTop10, nlScopedTotal)
+	// agent-estate#1115: a stratum where every question reuses most of its
+	// target's own words has no headroom left to catch a regression --
+	// print the mean term-overlap alongside the hit rate so that fact is
+	// visible without a bespoke measurement each time. This stratum has
+	// no case wired with goldenset.Case.TargetText yet, so this reports
+	// "not measured" honestly rather than a false 0%.
+	if nlOverlapMeasured > 0 {
+		fmt.Fprintf(w, "natural-language stratum term overlap vs target_text (agent-estate#1115): mean %.0f%% (measured %d/%d cases)\n", nlOverlapMean*100, nlOverlapMeasured, nlTotal)
+	} else {
+		fmt.Fprintln(w, "natural-language stratum term overlap vs target_text (agent-estate#1115): not measured -- no case carries target_text yet")
+	}
 	fmt.Fprintf(w, "retrieval score (private, comparable to the 12/15 baseline on 6f28626): %d/%d\n", privateHits, privateTotal)
 	// agent-estate#1133: the corrected line. cases.json has 17 cases total;
 	// %d of them (excludedPrivate) have an ExpectedSource classify.go marks
@@ -584,5 +607,16 @@ func main() {
 	// runStarStratum's doc comment) and this issue adds measurement, not
 	// a second scoped run to go with it.
 	fmt.Fprintf(w, "github-stars stratum (default/public, unscoped -- #1111, agent-estate#1063's own measured baseline top-3(@5) 7/8, top-10 8/8 by hand): top-3 %d/%d, top-10 %d/%d\n", starTop3, starTotal, starTop10, starTotal)
+	// agent-estate#1115: the merged fixture's questions reused 67% of
+	// their own target's words and landed 8/8 -- a saturated score with
+	// no headroom to detect a regression. The stratum was re-authored
+	// from the caller's need rather than the target's description; this
+	// line is what makes that fact self-reporting instead of requiring a
+	// fresh measurement by hand every time it is questioned again.
+	if starOverlapMeasured > 0 {
+		fmt.Fprintf(w, "github-stars stratum term overlap vs target_text (agent-estate#1115, was 67%% pre-re-authoring): mean %.0f%% (measured %d/%d cases)\n", starOverlapMean*100, starOverlapMeasured, starTotal)
+	} else {
+		fmt.Fprintln(w, "github-stars stratum term overlap vs target_text (agent-estate#1115): not measured -- no case carries target_text")
+	}
 	w.Flush()
 }

@@ -1,6 +1,9 @@
 package goldenset
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 // These tests check the github-stars stratum's own shape (#1111) --
 // coverage, no duplicate ids, every case has what a case needs -- never
@@ -76,6 +79,56 @@ func TestStarCasesExpectedIdentifiersArePublicRepoPaths(t *testing.T) {
 	for _, c := range cases {
 		if len(c.ExpectedIdentifier) < len("https://github.com/") || c.ExpectedIdentifier[:len("https://github.com/")] != "https://github.com/" {
 			t.Errorf("case %s expected_identifier %q is not a github.com URL", c.ID, c.ExpectedIdentifier)
+		}
+	}
+}
+
+// TestEveryStarCaseHasTargetText guards agent-estate#1115's own
+// measurement primitive: cmd/goldenquery's overlapFraction needs a
+// TargetText to measure a case's question against, and a case missing it
+// would silently drop out of the stratum's reported mean rather than
+// failing loudly here.
+func TestEveryStarCaseHasTargetText(t *testing.T) {
+	cases, err := LoadStars()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		if c.TargetText == "" {
+			t.Errorf("case %s has no target_text -- agent-estate#1115's overlap measurement needs one", c.ID)
+		}
+	}
+}
+
+// TestStarCaseQuestionsDoNotEchoOwnerOrRepoName guards the exact defect
+// agent-estate#1115 was filed over: stars-nl-05's original question said
+// "starred dotfiles repo" against a target literally named
+// mathiasbynens/dotfiles, making the hit near self-retrieval rather than
+// evidence of ranking quality. This checks every case's question against
+// its own target's owner and repo-name segments (case-insensitively) so a
+// future edit cannot reintroduce that one case's defect unnoticed -- it
+// does not (and cannot) catch the broader description-text leak #1115's
+// own comment measured, which is why cmd/goldenquery's overlapFraction
+// exists as a continuously-run measurement rather than a one-time gate.
+func TestStarCaseQuestionsDoNotEchoOwnerOrRepoName(t *testing.T) {
+	cases, err := LoadStars()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		full := strings.TrimPrefix(c.ExpectedIdentifier, "https://github.com/")
+		parts := strings.SplitN(full, "/", 2)
+		if len(parts) != 2 {
+			t.Errorf("case %s expected_identifier %q does not look like https://github.com/<owner>/<repo>", c.ID, c.ExpectedIdentifier)
+			continue
+		}
+		owner, repo := parts[0], parts[1]
+		q := strings.ToLower(c.Question)
+		if strings.Contains(q, strings.ToLower(owner)) {
+			t.Errorf("case %s question contains its own target's owner %q -- near self-retrieval, see agent-estate#1115", c.ID, owner)
+		}
+		if strings.Contains(q, strings.ToLower(repo)) {
+			t.Errorf("case %s question contains its own target's repo name %q -- near self-retrieval, see agent-estate#1115", c.ID, repo)
 		}
 	}
 }
