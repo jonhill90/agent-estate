@@ -124,9 +124,13 @@ type Match struct {
 	// cleared scoring, before the display cap, not just the returned page
 	// -- share this item's exact unrounded BM25 float, i.e. the size of its
 	// tie group on the sort comparator's own primary key, minus itself
-	// (agent-estate#1046). Zero (omitted from JSON) means this item's
-	// unrounded score is unique among candidates and its position was
-	// decided by score alone.
+	// (agent-estate#1046). Zero means this item's unrounded score is unique
+	// among candidates and its position was decided by score alone -- the
+	// JSON key is always present (no omitempty) so a caller reading raw
+	// JSON can tell "not tied" from "field absent because the binary is
+	// older / the path forgot to set it" (agent-estate#1141 made the same
+	// call for CoverageState, for the same reason: an absent key is less
+	// distinguishable from a serialisation bug than an explicit zero).
 	//
 	// This exists because the printed Score above is deliberately rounded
 	// for display while sort.SliceStable's comparator (see Query) keys on
@@ -142,7 +146,7 @@ type Match struct {
 	// make. A count is safe to compare anywhere: "0" always means "not
 	// affected by the tie-break", regardless of which question or index
 	// produced it.
-	TiedOnScore int `json:"tied_on_score,omitempty"`
+	TiedOnScore int `json:"tied_on_score"`
 }
 
 // weightAndStatus pulls the "weight:<value>" and "status:<value>"
