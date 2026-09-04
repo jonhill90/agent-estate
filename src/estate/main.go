@@ -245,13 +245,18 @@ func usage() {
   estate knowledge                      regenerate the compiled, read-only index over
                                          GitHub stars, the memory vault, the corpus and
                                          Loops-Research -- derived, never authoritative
-  estate knowledge query <question>     small, ranked, cited pointers into the compiled
-                                         index -- never bodies; states matched, no_match,
-                                         index_missing or index_unreadable, never one
+  estate knowledge query [--private] <question>
+                                         small, ranked, cited pointers into the compiled
+                                         index -- never bodies; publishable-only by
+                                         default (agent-estate#1033), --private lifts
+                                         that filter and says so in the output; states
+                                         matched, no_match, index_missing,
+                                         index_unreadable or withheld_private, never one
                                          collapsed "nothing" answer
-  estate knowledge get <id>             the one item Tier1/Tier2/Tier3 body a query
+  estate knowledge get [--private] <id> the one item Tier1/Tier2/Tier3 body a query
                                          match pointed at -- the second half of
-                                         progressive disclosure
+                                         progressive disclosure; refuses a private id
+                                         without --private (agent-estate#1033)
   estate tasks                          latest state of every task
   estate inflight                       tasks still occupying a slot
   estate reclaim [--apply]              report in-flight turns and whether their
@@ -313,9 +318,12 @@ waiting. Environment:
 }
 
 // printKnowledgeQuery renders a knowledge.QueryResult for a terminal --
-// the four distinguishable states #1019 requires (matched, no_match,
-// index_missing, index_unreadable) each print visibly differently, never
-// collapsing to the same "nothing here" shape.
+// the five distinguishable states agent-estate#1019/#1033 require
+// (matched, no_match, index_missing, index_unreadable, withheld_private)
+// each print visibly differently, never collapsing to the same "nothing
+// here" shape. When PrivateIncluded is set, that is stated in the output
+// itself (agent-estate#1028's point 3) -- not only in a doc comment or a
+// flag the reader of the printed text cannot see.
 func printKnowledgeQuery(qr knowledge.QueryResult) {
 	switch qr.State {
 	case knowledge.StateIndexMissing:
@@ -331,17 +339,49 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 		}
 		printSourceStatuses(qr.SourceStatuses)
 		return
+	case knowledge.StateWithheldPrivate:
+		fmt.Printf("no PUBLISHABLE item matches %q\n", qr.Question)
+		fmt.Println(qr.Reason)
+		printSourceStatuses(qr.SourceStatuses)
+		return
 	}
 
-	fmt.Printf("%d match(es) for %q (showing %d, %d not returned)\n\n",
-		qr.TotalMatched, qr.Question, len(qr.Matches), qr.NotReturned)
+	if qr.PrivateIncluded {
+		fmt.Println("*** PRIVATE MODE -- private items may be included below ***")
+	}
+	fmt.Printf("%d match(es) for %q (showing %d, %d not returned, %d withheld as private)\n\n",
+		qr.TotalMatched, qr.Question, len(qr.Matches), qr.NotReturned, qr.WithheldPrivate)
 	for _, m := range qr.Matches {
+		// The header line's shape ("[id] source (score N: terms)") is a
+		// parsed format -- cmd/goldenquery's matchHeader regex reads it
+		// back verbatim -- so the [PRIVATE] marker goes on the Tier1
+		// line instead of appended here, where it would break that
+		// regex's end-of-line anchor for every private match.
+		tier1 := m.Tier1
+		if !m.Publishable {
+			tier1 = "[PRIVATE] " + tier1
+		}
 		fmt.Printf("[%s] %s (score %d: %s)\n  %s\n  %s\n\n",
-			m.ID, m.Source, m.Score, strings.Join(m.MatchedTerms, ", "), m.Tier1, m.Permalink)
+			m.ID, m.Source, m.Score, strings.Join(m.MatchedTerms, ", "), tier1, m.Permalink)
 	}
 	fmt.Println("ranking: " + qr.RankingBasis)
 	fmt.Println("ask `estate knowledge get <id>` for one item's full tier2/tier3")
 	printSourceStatuses(qr.SourceStatuses)
+}
+
+// parseKnowledgeArgs splits a `knowledge query`/`knowledge get` argument
+// list into the --private flag (if present, anywhere in the list) and
+// the remaining positional arguments -- agent-estate#1033's explicit,
+// opt-in private mode. --private is never inferred from context.
+func parseKnowledgeArgs(args []string) (includePrivate bool, rest []string) {
+	for _, a := range args {
+		if a == "--private" {
+			includePrivate = true
+			continue
+		}
+		rest = append(rest, a)
+	}
+	return includePrivate, rest
 }
 
 func printSourceStatuses(sources []knowledge.SourceResult) {
@@ -418,8 +458,9 @@ func main() {
 
 	case "knowledge":
 		if len(os.Args) > 2 && os.Args[2] == "query" {
-			if len(os.Args) < 4 {
-				fmt.Fprintln(os.Stderr, "usage: estate knowledge query <question>")
+			includePrivate, rest := parseKnowledgeArgs(os.Args[3:])
+			if len(rest) == 0 {
+				fmt.Fprintln(os.Stderr, "usage: estate knowledge query [--private] <question>")
 				os.Exit(2)
 			}
 			out, err := knowledge.DefaultOutputPath()
@@ -427,20 +468,21 @@ func main() {
 				fmt.Fprintln(os.Stderr, "estate:", err)
 				os.Exit(2)
 			}
-			question := strings.Join(os.Args[3:], " ")
-			qr := knowledge.Query(out, question, 0)
+			question := strings.Join(rest, " ")
+			qr := knowledge.Query(out, question, 0, includePrivate)
 			printKnowledgeQuery(qr)
 			switch qr.State {
 			case knowledge.StateIndexMissing, knowledge.StateIndexUnreadable:
 				os.Exit(2)
-			case knowledge.StateNoMatch:
+			case knowledge.StateNoMatch, knowledge.StateWithheldPrivate:
 				os.Exit(1)
 			}
 			return
 		}
 		if len(os.Args) > 2 && os.Args[2] == "get" {
-			if len(os.Args) < 4 {
-				fmt.Fprintln(os.Stderr, "usage: estate knowledge get <id>")
+			includePrivate, rest := parseKnowledgeArgs(os.Args[3:])
+			if len(rest) == 0 {
+				fmt.Fprintln(os.Stderr, "usage: estate knowledge get [--private] <id>")
 				os.Exit(2)
 			}
 			out, err := knowledge.DefaultOutputPath()
@@ -448,10 +490,13 @@ func main() {
 				fmt.Fprintln(os.Stderr, "estate:", err)
 				os.Exit(2)
 			}
-			item, ok, reason := knowledge.Get(out, os.Args[3])
+			item, ok, reason := knowledge.Get(out, rest[0], includePrivate)
 			if !ok {
 				fmt.Fprintln(os.Stderr, "estate: "+reason)
 				os.Exit(1)
+			}
+			if !item.Publishable {
+				fmt.Println("*** PRIVATE MODE -- this item is private ***")
 			}
 			fmt.Printf("id:        %s\nsource:    %s\npermalink: %s\ntier1:     %s\ntier2:     %s\ntier3:     %s\n",
 				item.ID, item.Source, item.Permalink, item.Tier1, item.Tier2, item.Tier3)
