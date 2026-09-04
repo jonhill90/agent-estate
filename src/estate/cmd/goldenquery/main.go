@@ -19,6 +19,30 @@
 // yet landed -- it has no compile-time dependency on that code, only a
 // runtime one on the binary it is pointed at.
 //
+// agent-estate#1040: #1037's publishability enforcement means one run of
+// the golden set no longer measures one property. The default mode of
+// `estate knowledge query` withholds private items, and 11 of the set's
+// 15 cases expect a private identifier (vault-fact, corpus-parameter and
+// loops-research are all classified private by #1030; only github-stars
+// is publishable) -- so a default-mode-only run reports a policy fact
+// (how much of the index a caller who may not see private material can
+// reach) dressed up as a ranking score. This runner therefore always
+// runs every case TWICE, once in default mode and once with --private,
+// and reports two independent, separately labelled numbers:
+//
+//   - retrieval score  -- private mode, comparable to the 12/15 baseline
+//     measured on 6f28626 before enforcement landed. This is the ranking
+//     quality signal #1023 was built to produce.
+//   - publishable-only score -- default mode, answering a different and
+//     also real question: how much can a caller who may not see private
+//     material actually find? A low number here is expected and correct
+//     whenever most of the golden set's answers are private -- it is not
+//     a ranking regression.
+//
+// Neither number stands in for the other. Do not collapse them into one
+// printed "score" -- that is the exact conflation this runner exists to
+// prevent (see #1040).
+//
 // Usage:
 //
 //	go run ./cmd/goldenquery [-bin estate] [-v]
@@ -27,7 +51,7 @@
 // regardless of the score -- a low hit rate is a successful measurement,
 // not a runner failure (see #1023's own brief). Exit code is 2 only when
 // the measurement could not be attempted at all (binary not found, every
-// single case errored out before returning a real state).
+// single case errored out before returning a real state, in EITHER mode).
 package main
 
 import (
@@ -59,12 +83,20 @@ type parsedMatch struct {
 	Permalink string
 }
 
-// runQuery execs `<bin> knowledge query <question>` and returns its raw
-// stdout, stderr and exit code -- never parsed logic here, just the
-// subprocess boundary, so parseMatches (below) is independently testable
-// against a captured string.
-func runQuery(bin, question string) (stdout string, exitCode int, err error) {
-	cmd := exec.Command(bin, "knowledge", "query", question)
+// runQuery execs `<bin> knowledge query [--private] <question>` and
+// returns its raw stdout, stderr and exit code -- never parsed logic
+// here, just the subprocess boundary, so parseMatches (below) is
+// independently testable against a captured string. private selects
+// which of #1040's two measurement modes this invocation belongs to;
+// it is never inferred, only passed straight through to the real CLI's
+// own opt-in --private flag (agent-estate#1033).
+func runQuery(bin, question string, private bool) (stdout string, exitCode int, err error) {
+	args := []string{"knowledge", "query"}
+	if private {
+		args = append(args, "--private")
+	}
+	args = append(args, question)
+	cmd := exec.Command(bin, args...)
 	var outBuf, errBuf bytes.Buffer
 	cmd.Stdout = &outBuf
 	cmd.Stderr = &errBuf
@@ -145,24 +177,16 @@ func evaluate(c goldenset.Case, stdout string, exitCode int) result {
 	return r
 }
 
-func main() {
-	bin := flag.String("bin", "estate", "path to the estate binary to exec `knowledge query` against")
-	verbose := flag.Bool("v", false, "print every case, not just misses")
-	flag.Parse()
-
-	cases, err := goldenset.Load()
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "goldenquery:", err)
-		os.Exit(2)
-	}
-
-	w := bufio.NewWriter(os.Stdout)
-	defer w.Flush()
-
+// runMode runs every case once, in the single mode (private or not)
+// named by label, printing per-case detail (misses always, hits only
+// under -v) to w. It returns the resulting hits/total and whether at
+// least one case actually ran to completion, so main can tell "scored
+// low" apart from "could not run at all" independently per mode.
+func runMode(w *bufio.Writer, bin string, cases []goldenset.Case, private bool, label string, verbose bool) (hits, total int, ranAtLeastOne bool) {
+	fmt.Fprintf(w, "=== %s ===\n", label)
 	var results []result
-	ranAtLeastOne := false
 	for _, c := range cases {
-		stdout, exitCode, err := runQuery(*bin, c.Question)
+		stdout, exitCode, err := runQuery(bin, c.Question, private)
 		if err != nil {
 			results = append(results, result{c: c, detail: err.Error()})
 			continue
@@ -170,7 +194,7 @@ func main() {
 		ranAtLeastOne = true
 		r := evaluate(c, stdout, exitCode)
 		results = append(results, r)
-		if *verbose || !r.pass {
+		if verbose || !r.pass {
 			status := "MISS"
 			if r.pass {
 				status = "HIT"
@@ -196,18 +220,44 @@ func main() {
 		}
 	}
 
-	if !ranAtLeastOne {
-		fmt.Fprintln(w, "goldenquery: could not run any case -- is the estate binary on PATH, and has `estate knowledge` been run to compile the index?")
-		w.Flush()
-		os.Exit(2)
-	}
-
-	hits := 0
 	for _, r := range results {
 		if r.pass {
 			hits++
 		}
 	}
-	fmt.Fprintf(w, "hits/total: %d/%d\n", hits, len(results))
+	total = len(results)
+	return hits, total, ranAtLeastOne
+}
+
+func main() {
+	bin := flag.String("bin", "estate", "path to the estate binary to exec `knowledge query` against")
+	verbose := flag.Bool("v", false, "print every case, not just misses")
+	flag.Parse()
+
+	cases, err := goldenset.Load()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "goldenquery:", err)
+		os.Exit(2)
+	}
+
+	w := bufio.NewWriter(os.Stdout)
+	defer w.Flush()
+
+	// #1040: two independent passes, two independent numbers. Neither
+	// mode's result is reused for the other -- a case that is private
+	// is expected to miss in publishable-only mode and that is not an
+	// error in this runner or a regression in `estate knowledge query`.
+	privateHits, privateTotal, ranPrivate := runMode(w, *bin, cases, true, "retrieval score (--private)", *verbose)
+	pubHits, pubTotal, ranPub := runMode(w, *bin, cases, false, "publishable-only score (default)", *verbose)
+
+	if !ranPrivate && !ranPub {
+		fmt.Fprintln(w, "goldenquery: could not run any case -- is the estate binary on PATH, and has `estate knowledge` been run to compile the index?")
+		w.Flush()
+		os.Exit(2)
+	}
+
+	fmt.Fprintln(w, "---")
+	fmt.Fprintf(w, "retrieval score (private, comparable to the 12/15 baseline on 6f28626): %d/%d\n", privateHits, privateTotal)
+	fmt.Fprintf(w, "publishable-only score (default, what a caller who may not see private material can find): %d/%d\n", pubHits, pubTotal)
 	w.Flush()
 }
