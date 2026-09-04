@@ -83,3 +83,41 @@ func buildMemgraphFetch(vaultDir string) memgraph.Fetcher {
 		return memgraph.Graph{Nodes: nodes, Edges: edges}, nil
 	}
 }
+
+// buildMemgraphDetail composes internal/knowledge.LoadFact into a
+// memgraph.DetailLoader -- the real, non-fixture source behind the graph
+// pane's click-to-open verb (agent-estate#1006), and the second half of
+// the same "seam defined in internal/, composed here" shape
+// buildMemgraphFetch above already uses.
+//
+// It reads exactly ONE fact, when that one node is opened. That is the
+// whole point of it being a separate seam from the Fetcher: the graph
+// build above must open every file once to find the [[wikilink]] edges,
+// but a node's own BODY -- the thing a reader actually opens it for -- is
+// never held for the whole vault, matching internal/knowledge's own
+// progressive-disclosure constraint rather than working around it.
+//
+// Nothing here names a storage format to the pane. memgraph.Detail is a
+// plain value; swapping this composition for one over a different backing
+// store is a change to this function alone, which is what keeps that
+// decision Jon's to make.
+func buildMemgraphDetail(vaultDir string) memgraph.DetailLoader {
+	return func(id string) (memgraph.Detail, error) {
+		fact, err := knowledge.LoadFact(vaultDir, id)
+		if err != nil {
+			return memgraph.Detail{}, err
+		}
+		label := fact.Title
+		if label == "" {
+			label = fact.Slug
+		}
+		return memgraph.Detail{
+			ID:      fact.Slug,
+			Label:   label,
+			Type:    fact.Type,
+			Summary: fact.Description,
+			Created: fact.Created,
+			Body:    fact.Body,
+		}, nil
+	}
+}

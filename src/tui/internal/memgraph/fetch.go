@@ -14,3 +14,16 @@ package memgraph
 // Adapter discipline table). Every test in this package builds a fake
 // instead.
 type Fetcher func() (Graph, error)
+
+// DetailLoader resolves ONE node's own content, by id -- the seam
+// click-to-open reads through, and the second half of this package's
+// adapter surface. Same rules as Fetcher above: declared here, never
+// implemented here (cmd/estate's buildMemgraphDetail composes
+// internal/knowledge.LoadFact into it), faked by every test in this
+// package.
+//
+// It is called once per open, not once per fetch and not once per frame
+// -- see Detail's own doc comment (graph.go) for why loading node
+// content lazily is a constraint of this design rather than an
+// optimisation.
+type DetailLoader func(id string) (Detail, error)

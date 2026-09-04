@@ -39,3 +39,29 @@ type Graph struct {
 	Nodes []Node
 	Edges []Edge
 }
+
+// Detail is ONE node's own content, resolved only when that node is
+// actually opened (DetailLoader, fetch.go) -- never carried on Node, and
+// never loaded for the whole graph up front. That split is deliberate
+// twice over:
+//
+//   - Progressive disclosure. internal/knowledge is built on "never read
+//     a fact's body to draw a list" (its own package doc comment); a
+//     graph is a list of nodes, so opening one node must cost one node's
+//     read, not the vault's.
+//   - Storage neutrality. Like Node/Edge/Graph above, nothing here names
+//     a file, a row, a table or a query. The memory vault's storage
+//     backend is Jon's own open decision (markdown vs sqlite vs duckdb
+//     vs something else) and this pane must not settle it by implication
+//     -- a DetailLoader over any of them satisfies this type unchanged.
+//
+// Body is the thing itself, verbatim from whatever compiled the index --
+// this pane renders it, it never parses, rewrites or writes it back.
+type Detail struct {
+	ID      string
+	Label   string
+	Type    string
+	Summary string
+	Created string
+	Body    string
+}

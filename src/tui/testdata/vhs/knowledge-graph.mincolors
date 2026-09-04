@@ -1,0 +1,20 @@
+# measured 2026-09-03 (agent-estate#1006), against the real
+# $AGENT_MEMORY_VAULT on this machine: 3 consecutive
+# `go run ./cmd/vhscapture -tape testdata/vhs/knowledge-graph.tape
+# -min-colors 2` runs, every one settling on its first attempt. Every
+# target identical across all 3 runs:
+#   01-legend-header-labels.png: 7665, 7665, 7665
+#   02-zoomed.png:               4592, 4592, 4592
+#   03-node-opened.png:          1009, 1009, 1009
+# Floor is half the lowest observed settled count for that target, the
+# same rule monitoring.mincolors states.
+#
+# Recorded rather than left to the -min-colors default (1000) for a
+# specific reason, not for completeness: 03-node-opened.png measures 1009,
+# which clears that default by nine colours. One theme change, one shorter
+# fact opened, or one narrower terminal would drop a genuinely settled
+# frame under it, and this tape would start failing for a reason that has
+# nothing to do with what it captures.
+knowledge-graph-01-legend-header-labels.png=3832
+knowledge-graph-02-zoomed.png=2296
+knowledge-graph-03-node-opened.png=504
