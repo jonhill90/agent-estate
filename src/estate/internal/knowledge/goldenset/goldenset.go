@@ -40,6 +40,22 @@ import (
 //go:embed cases.json
 var casesJSON []byte
 
+// naturalCasesJSON is agent-estate#1073's own fixture: the twelve
+// natural-language questions #1069 measured by hand at top-3 5/12, top-10
+// 10/12 on a7d413c, checked in so that measurement stops living only in a
+// session transcript (this repo's own rule -- see AGENTS.md's "Invariants"
+// section, invariant 1). It answers a different question from cases.json:
+// cases.json asks whether retrieval can find a known item; this asks
+// whether a caller who does not already know the answer lands on it. Every
+// target was chosen from its document's own section title before any query
+// ran (see each case's own rationale) -- never re-derived from what
+// retrieval currently returns. #1069 settled that this stratum's score must
+// never be averaged with cases.json's -- report both, separately, leading
+// with the weaker.
+//
+//go:embed natural_cases.json
+var naturalCasesJSON []byte
+
 // ExpectedSource names which of estate knowledge's five compiled sources
 // (or "none") a case's answer comes from -- see internal/knowledge's own
 // Item.Source values, which these mirror exactly except for "none".
@@ -79,6 +95,20 @@ func Load() ([]Case, error) {
 	var cases []Case
 	if err := json.Unmarshal(casesJSON, &cases); err != nil {
 		return nil, fmt.Errorf("goldenset: cases.json is malformed: %w", err)
+	}
+	return cases, nil
+}
+
+// LoadNatural parses the embedded natural_cases.json -- the
+// natural-language stratum (agent-estate#1073). It only ever fails if
+// natural_cases.json itself is malformed -- there is no filesystem path to
+// miss at runtime. Kept as a separate loader, not folded into Load, because
+// the two sets must never be scored together (#1069): a caller that wants
+// one stratum should not have to filter the other back out.
+func LoadNatural() ([]Case, error) {
+	var cases []Case
+	if err := json.Unmarshal(naturalCasesJSON, &cases); err != nil {
+		return nil, fmt.Errorf("goldenset: natural_cases.json is malformed: %w", err)
 	}
 	return cases, nil
 }

@@ -43,6 +43,17 @@
 // printed "score" -- that is the exact conflation this runner exists to
 // prevent (see #1040).
 //
+// agent-estate#1073: a THIRD, separately labelled pair of numbers reports
+// internal/knowledge/goldenset's natural-language stratum -- twelve
+// questions phrased the way a dispatched lane actually asks them, targets
+// chosen from each answer's own section title before any query ran (#1069).
+// cases.json measures whether retrieval can find a KNOWN item; this
+// stratum measures whether a caller who does not already know the answer
+// LANDS on it -- a different property, run in default (public, unscoped)
+// mode only, reporting both top-3 and top-10 hit rates. #1069 settled that
+// this number must never be averaged with cases.json's two: report all
+// three separately, leading with the weakest.
+//
 // Usage:
 //
 //	go run ./cmd/goldenquery [-bin estate] [-v]
@@ -177,6 +188,102 @@ func evaluate(c goldenset.Case, stdout string, exitCode int) result {
 	return r
 }
 
+// firstMatchRank returns the 1-based rank of the first returned match whose
+// Permalink carries c's ExpectedIdentifier as a suffix, scanning the FULL
+// returned list (up to knowledge.QueryLimit, currently 10) rather than a
+// top-3 slice -- agent-estate#1073's natural-language stratum reports
+// top-3 AND top-10 hit rates from the same run, so the rank has to be
+// found once against the whole list and then compared against both
+// cutoffs, never re-queried per cutoff. Returns 0 if no returned match
+// carries the identifier.
+func firstMatchRank(c goldenset.Case, matches []parsedMatch) int {
+	for i, m := range matches {
+		if strings.HasSuffix(m.Permalink, c.ExpectedIdentifier) {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// naturalResult is one natural-language-stratum case's outcome: its found
+// rank (0 if never returned) and whether the query itself ran to
+// completion at all.
+type naturalResult struct {
+	c    goldenset.Case
+	rank int
+	ran  bool
+}
+
+// runNaturalStratum runs agent-estate#1073's checked-in natural-language
+// fixture (internal/knowledge/goldenset.LoadNatural) once per case, in
+// default (public, unscoped) mode only -- matching the baseline #1069
+// measured by hand on a7d413c (top-3 5/12, top-10 10/12). This stratum is
+// never run in --private mode and never merged with cases.json's own
+// score: #1069 settled that the two measure different things and must be
+// reported separately, weaker one leading.
+func runNaturalStratum(w *bufio.Writer, bin string, verbose bool) (top3Hits, top10Hits, total int, ranAtLeastOne bool) {
+	cases, err := goldenset.LoadNatural()
+	if err != nil {
+		fmt.Fprintln(w, "goldenquery: natural-language stratum:", err)
+		return 0, 0, 0, false
+	}
+
+	fmt.Fprintln(w, "=== natural-language stratum (default/public, unscoped -- agent-estate#1073) ===")
+	var results []naturalResult
+	for _, c := range cases {
+		stdout, exitCode, err := runQuery(bin, c.Question, false)
+		if err != nil {
+			results = append(results, naturalResult{c: c})
+			fmt.Fprintf(w, "[ERROR] %s -- %q: %s\n\n", c.ID, c.Question, err)
+			continue
+		}
+		ranAtLeastOne = true
+		matches := parseMatches(stdout)
+		rank := 0
+		if exitCode == 0 {
+			rank = firstMatchRank(c, matches)
+		}
+		results = append(results, naturalResult{c: c, rank: rank, ran: true})
+
+		hit3 := rank >= 1 && rank <= 3
+		hit10 := rank >= 1 && rank <= 10
+		if verbose || !hit10 {
+			status := "MISS (not in top 10)"
+			switch {
+			case hit3:
+				status = "HIT top-3"
+			case hit10:
+				status = fmt.Sprintf("HIT top-10 only (rank %d)", rank)
+			}
+			fmt.Fprintf(w, "[%s] %s -- %q\n", status, c.ID, c.Question)
+			fmt.Fprintf(w, "  expected: %s (%s)\n", c.ExpectedIdentifier, c.ExpectedSource)
+			if !hit10 {
+				if exitCode != 0 {
+					fmt.Fprintf(w, "  detail:   exit %d\n", exitCode)
+				}
+				for i, m := range matches {
+					if i >= 10 {
+						break
+					}
+					fmt.Fprintf(w, "  got[%d]:   [%s] %s score=%d permalink=%s\n", i, m.ID, m.Source, m.Score, m.Permalink)
+				}
+			}
+			fmt.Fprintln(w)
+		}
+	}
+
+	for _, r := range results {
+		if r.rank >= 1 && r.rank <= 3 {
+			top3Hits++
+		}
+		if r.rank >= 1 && r.rank <= 10 {
+			top10Hits++
+		}
+	}
+	total = len(results)
+	return top3Hits, top10Hits, total, ranAtLeastOne
+}
+
 // runMode runs every case once, in the single mode (private or not)
 // named by label, printing per-case detail (misses always, hits only
 // under -v) to w. It returns the resulting hits/total and whether at
@@ -250,13 +357,25 @@ func main() {
 	privateHits, privateTotal, ranPrivate := runMode(w, *bin, cases, true, "retrieval score (--private)", *verbose)
 	pubHits, pubTotal, ranPub := runMode(w, *bin, cases, false, "publishable-only score (default)", *verbose)
 
-	if !ranPrivate && !ranPub {
+	// agent-estate#1073: the natural-language stratum is a separate
+	// question from cases.json's ("will a caller who does not already
+	// know the answer land on it?", not "can retrieval find a known
+	// item?") and #1069 requires it be reported on its own, never
+	// averaged into either number above.
+	nlTop3, nlTop10, nlTotal, ranNatural := runNaturalStratum(w, *bin, *verbose)
+
+	if !ranPrivate && !ranPub && !ranNatural {
 		fmt.Fprintln(w, "goldenquery: could not run any case -- is the estate binary on PATH, and has `estate knowledge` been run to compile the index?")
 		w.Flush()
 		os.Exit(2)
 	}
 
 	fmt.Fprintln(w, "---")
+	// #1069: lead with the weaker stratum, never averaged with the other
+	// two -- a combined number describes the test mix, not the weakest
+	// way real agents fail.
+	fmt.Fprintf(w, "natural-language stratum, top-3  (default/public, unscoped -- #1073, baseline 5/12 on a7d413c):  %d/%d\n", nlTop3, nlTotal)
+	fmt.Fprintf(w, "natural-language stratum, top-10 (default/public, unscoped -- #1073, baseline 10/12 on a7d413c): %d/%d\n", nlTop10, nlTotal)
 	fmt.Fprintf(w, "retrieval score (private, comparable to the 12/15 baseline on 6f28626): %d/%d\n", privateHits, privateTotal)
 	fmt.Fprintf(w, "publishable-only score (default, what a caller who may not see private material can find): %d/%d\n", pubHits, pubTotal)
 	w.Flush()
