@@ -407,6 +407,80 @@ func TestQueryNaturalLanguageSingleTermQuestionStillSurfaces(t *testing.T) {
 	}
 }
 
+// TestQueryRepoDocsTitleMatchSurvivesFloorBelowTermCount is agent-
+// estate#1134's follow-up narrowing, measured against the real index: of
+// the three natural-language-stratum cases minMatchedTerms=2 cost (nl-04,
+// nl-10, nl-12 -- all single-term matches against 3+-term questions), two
+// (nl-10's "dispatch", nl-12's "refuse") matched their target's own
+// section TITLE, not just body text -- see titleFloorExemptSources' own
+// doc comment. A title hit is real, specific signal (the section is
+// LITERALLY about the matched word) in a way a body-text coincidence is
+// not, so it is let through minMatchedTerms' floor even at a single
+// matched term. This fixture reproduces that shape directly: a 3-term
+// question sharing only "guard" with the target, and "guard" is the
+// target's own Tier1 title, not merely mentioned in its Tier2 body.
+func TestQueryRepoDocsTitleMatchSurvivesFloorBelowTermCount(t *testing.T) {
+	items := []Item{
+		{
+			ID: "target", Source: "repo-docs",
+			Permalink:   "docs/guards.md#the-merge-guard",
+			Tier1:       "The merge guard",
+			Tier2:       "Refuses a merge whose PR is not open or whose checks are not green.",
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		},
+	}
+	path := filepath.Join(t.TempDir(), "index.json")
+	if err := Write(path, Result{Items: items}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Query(path, "what stops a broken guard", 0, false)
+	if got.State != StateMatched {
+		t.Fatalf("State = %q, want %q -- a single matched term (\"guard\") that IS the item's own "+
+			"title must clear the floor even though the question has 3+ distinct terms (reason=%q)",
+			got.State, StateMatched, got.Reason)
+	}
+	if len(got.Matches) != 1 || got.Matches[0].ID != "target" {
+		t.Fatalf("Matches = %+v, want the title-matching target", got.Matches)
+	}
+}
+
+// TestQueryRepoDocsBodyOnlySingleTermStaysExcluded is
+// TestQueryRepoDocsTitleMatchSurvivesFloorBelowTermCount's regression
+// guard: the exemption it proves is scoped to a TITLE hit specifically,
+// never to "any single matched term in repo-docs" -- that broader version
+// was tried and measured to reopen none-01 (its own repo-docs body-only
+// coincidences, e.g. "machine"/"schedule", returned as matches again; see
+// titleFloorExemptSources' own doc comment). Same shape as the title-match
+// fixture above, except the shared term ("guard") appears only in the
+// item's Tier2 body, never its Tier1 title -- this must stay excluded
+// exactly like #1134's original floor already excluded it.
+func TestQueryRepoDocsBodyOnlySingleTermStaysExcluded(t *testing.T) {
+	items := []Item{
+		{
+			ID: "noise", Source: "repo-docs",
+			Permalink:   "docs/unrelated.md#some-other-section",
+			Tier1:       "Some other section",
+			Tier2:       "This paragraph happens to mention a guard rail in passing, unrelated to the question.",
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		},
+	}
+	path := filepath.Join(t.TempDir(), "index.json")
+	if err := Write(path, Result{Items: items}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Query(path, "what stops a broken guard", 0, false)
+	if got.State != StateNoMatch {
+		t.Fatalf("State = %q, want %q -- a single matched term found only in the item's Tier2 body, "+
+			"never its Tier1 title, must not clear the floor (matches=%+v)",
+			got.State, StateNoMatch, got.Matches)
+	}
+	if len(got.Matches) != 0 {
+		t.Fatalf("Matches = %+v, want none", got.Matches)
+	}
+}
+
 // TestQueryRareTermBeatsCommonTermCoincidence is #1054's own required
 // property, stated directly: "a rare term matching once must be able to
 // beat three common terms matching by coincidence." Five noise items

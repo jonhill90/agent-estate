@@ -762,6 +762,54 @@ func minMatchedTerms(source string, queryTermCount int) int {
 	return floorCap
 }
 
+// titleFloorExemptSources are the sources where a single matched term
+// landing in the item's own TITLE (tier1, never tier2 body text) is let
+// through minMatchedTerms' floor even when the term count alone would not
+// clear it -- agent-estate#1134's follow-up narrowing (see its own PR
+// thread, "the cost is not yet shown to be minimal"). Scoped to repo-docs
+// only, not vault-fact or loops-research: only repo-docs carries the
+// tier1/tier2 split (agent-estate#1113's leaf-heading-as-tier1) that makes
+// "this term is the item's own heading" a distinct, checkable signal
+// separate from term count.
+//
+// Measured, not assumed, against a real freshly built index: every one of
+// none-01's residual repo-docs single-term coincidences (8 candidates,
+// terms "machine"/"schedule") matched tier2 body text ONLY -- zero of them
+// hit an item's own tier1 title -- so this exemption costs none-01 nothing.
+// Of the three cases minMatchedTerms=2 regressed (nl-04, nl-10, nl-12, all
+// single-term matches against 3+-term questions), two (nl-10's "dispatch",
+// nl-12's "refuse") match their target's own section title and are
+// recovered by this exemption; nl-04's "python" matches only its target's
+// tier2 body (the target section is titled "The implementation language
+// is Go", which does not contain the word "python") and stays a MISS --
+// tried lowering the floor further to recover it too (repo-docs floor=1,
+// i.e. no floor at all there) and that reopens none-01 (its own "machine"/
+// "schedule" tier2 hits return as matches again, confirmed by rerunning
+// with that change), so nl-04's regression is accepted rather than traded
+// for none-01 reporting matched again. See #1134's PR body for the
+// measured before/after this exemption produces.
+var titleFloorExemptSources = map[string]bool{
+	"repo-docs": true,
+}
+
+// matchesTitle reports whether any of matched (terms already scored
+// nonzero against it by BM25Scorer.Score) is present in it's own tier1
+// field specifically, as opposed to only its tier2 body -- the same field
+// split bm25.go's weightedTermFreqs already computes for scoring, reused
+// here as a boolean signal rather than a weight.
+func matchesTitle(it Item, matched []string) bool {
+	if len(matched) == 0 {
+		return false
+	}
+	tier1Terms := fieldTermCounts(tier1SearchableText(it))
+	for _, m := range matched {
+		if tier1Terms[m] > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 const rankingBasisText = "score = Okapi BM25 (k1=1.2, b=0.75) over stemmed, " +
 	"stop-word-filtered question terms against the item's own tier1, tier2, " +
 	"structural_tags and synaptic_tags -- tier1/tags weighted 3x tier2 " +
@@ -784,7 +832,10 @@ const rankingBasisText = "score = Okapi BM25 (k1=1.2, b=0.75) over stemmed, " +
 	"reach. The stricter cap on the second pair is measured, not assumed: " +
 	"those two source families are large and fragmented enough that a " +
 	"single ordinary word reliably coincides with something unrelated -- " +
-	"see minMatchedTerms and sparseMatchSources in query.go; " +
+	"see minMatchedTerms and sparseMatchSources in query.go; a repo-docs " +
+	"item is let through that floor on a single matched term anyway when " +
+	"the term is the item's own TITLE (tier1), not merely body text -- " +
+	"see titleFloorExemptSources and matchesTitle in query.go; " +
 	"the printed score is BM25's own figure rounded to the nearest integer " +
 	"for display; ties on the unrounded figure broken by item id, oldest first"
 
@@ -910,7 +961,16 @@ func Query(indexPath, question string, limit int, includePrivate bool) QueryResu
 			// reasoning. Only ever tightens sparseMatchSources; every
 			// other source keeps #1054's "score > 0 is enough" rule
 			// exactly as it was.
-			continue
+			//
+			// titleFloorExemptSources is the one measured narrowing on
+			// top of that floor: a single matched term that IS the
+			// item's own title, not just body text buried in it, is let
+			// through anyway -- see matchesTitle's and
+			// titleFloorExemptSources' own doc comments for what was
+			// measured before adding this and what it costs.
+			if !(titleFloorExemptSources[it.Source] && matchesTitle(it, matched)) {
+				continue
+			}
 		}
 		if !includePrivate && !it.Publishable {
 			withheldPrivate++
