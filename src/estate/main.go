@@ -369,6 +369,40 @@ func printKnowledgeQuery(qr knowledge.QueryResult) {
 	printSourceStatuses(qr.SourceStatuses)
 }
 
+// knowledgeQueryExitCode maps a QueryResult's typed State to the exit code
+// `estate knowledge query` reports -- one code per state that a script or
+// agent branching on $? needs to tell apart, never two states sharing a
+// code by omission.
+//
+//	0  StateMatched          -- at least one publishable item answers this
+//	1  StateNoMatch          -- the index was read fine; nothing answers this
+//	2  StateIndexMissing,
+//	   StateIndexUnreadable  -- the index itself could not be read at all
+//	3  StateWithheldPrivate  -- something answers this, but it is private and
+//	                            this call did not ask for private material
+//
+// 3 was picked, not 1, because collapsing withheld_private into no_match is
+// the exact error this function exists to prevent -- see agent-estate#1037's
+// review comment on PR #1037: "there is nothing" (no_match) and "there is
+// something you may not see" (withheld_private) are different answers, and a
+// caller branching only on $? could not tell them apart under the prior
+// two-code mapping. 3 is unused by every other `estate` exit path this
+// command can reach (0/1/2 are the pre-existing, load-bearing codes named in
+// #1033 and are never renumbered here), so it cannot silently collide with
+// an existing caller's expectations.
+func knowledgeQueryExitCode(state knowledge.QueryState) int {
+	switch state {
+	case knowledge.StateIndexMissing, knowledge.StateIndexUnreadable:
+		return 2
+	case knowledge.StateWithheldPrivate:
+		return 3
+	case knowledge.StateNoMatch:
+		return 1
+	default: // StateMatched
+		return 0
+	}
+}
+
 // parseKnowledgeArgs splits a `knowledge query`/`knowledge get` argument
 // list into the --private flag (if present, anywhere in the list) and
 // the remaining positional arguments -- agent-estate#1033's explicit,
@@ -471,12 +505,7 @@ func main() {
 			question := strings.Join(rest, " ")
 			qr := knowledge.Query(out, question, 0, includePrivate)
 			printKnowledgeQuery(qr)
-			switch qr.State {
-			case knowledge.StateIndexMissing, knowledge.StateIndexUnreadable:
-				os.Exit(2)
-			case knowledge.StateNoMatch, knowledge.StateWithheldPrivate:
-				os.Exit(1)
-			}
+			os.Exit(knowledgeQueryExitCode(qr.State))
 			return
 		}
 		if len(os.Args) > 2 && os.Args[2] == "get" {
