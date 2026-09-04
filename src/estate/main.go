@@ -297,7 +297,12 @@ func usage() {
   estate corpus-audit [n]               hard parameters least supported by your words
   estate knowledge                      regenerate the compiled, read-only index over
                                          GitHub stars, the memory vault, the corpus and
-                                         Loops-Research -- derived, never authoritative
+                                         Loops-Research -- derived, never authoritative;
+                                         refuses (exit 1) to overwrite an index already
+                                         on disk if this run would flip any source from
+                                         ok=true to ok=false relative to it
+                                         (agent-estate#1123) -- pass --allow-coverage-loss
+                                         to write the degraded index anyway
   estate knowledge query [--private] [--json] <question>
                                          small, ranked, cited pointers into the compiled
                                          index -- never bodies; publishable-only by
@@ -1169,8 +1174,16 @@ func main() {
 		// documented behaviour -- but an unrecognised subcommand must be
 		// refused before it reaches knowledge.Generate/Write, which writes
 		// to the one index path every lane shares (#1048).
-		if len(os.Args) > 2 {
-			fmt.Fprintf(os.Stderr, "estate: unrecognised knowledge subcommand %q -- valid: query, get, or no subcommand to regenerate\n", os.Args[2])
+		//
+		// --allow-coverage-loss (agent-estate#1123) is the one flag this
+		// path accepts rather than a subcommand: it does not change what
+		// gets generated, only whether a regeneration that would make a
+		// source strictly worse than what's already on disk is allowed to
+		// proceed. See the coverage-regression block below for what it
+		// gates.
+		allowCoverageLoss := len(os.Args) > 2 && os.Args[2] == "--allow-coverage-loss"
+		if len(os.Args) > 2 && !allowCoverageLoss {
+			fmt.Fprintf(os.Stderr, "estate: unrecognised knowledge subcommand %q -- valid: query, get, --allow-coverage-loss, or no subcommand to regenerate\n", os.Args[2])
 			os.Exit(2)
 		}
 
@@ -1185,6 +1198,24 @@ func main() {
 			os.Exit(2)
 		}
 		res := knowledge.Generate(cfg, time.Now())
+		// agent-estate#1123: refuse to silently overwrite a healthier index
+		// already on disk with a degraded one. If out does not exist yet or
+		// is not a valid compiled index, there is nothing to regress
+		// against -- knowledge.Read's own error is not this guard's
+		// concern, so it is deliberately ignored here rather than surfaced.
+		if existing, readErr := knowledge.Read(out); readErr == nil {
+			if regressions := knowledge.CoverageRegressions(existing, res); len(regressions) > 0 {
+				fmt.Fprintln(os.Stderr, "estate: this regeneration would reduce coverage relative to the index already on disk:")
+				for _, r := range regressions {
+					fmt.Fprintln(os.Stderr, "  "+r)
+				}
+				if !allowCoverageLoss {
+					fmt.Fprintln(os.Stderr, "estate: refusing to write -- pass `estate knowledge --allow-coverage-loss` to write it anyway")
+					os.Exit(1)
+				}
+				fmt.Fprintln(os.Stderr, "estate: --allow-coverage-loss set -- writing the degraded index anyway")
+			}
+		}
 		if err := knowledge.Write(out, res); err != nil {
 			fmt.Fprintln(os.Stderr, "estate:", err)
 			os.Exit(2)
