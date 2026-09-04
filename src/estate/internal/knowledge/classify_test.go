@@ -3,6 +3,7 @@ package knowledge
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -11,17 +12,60 @@ import (
 // isolation: any source name it has not positively allow-listed comes back
 // Publishable=false with a non-empty basis -- never true, never a blank
 // reason a reader has to guess at. This includes a source name that does
-// not exist yet, on purpose: a fifth source added tomorrow with no
+// not exist yet, on purpose: a new source added tomorrow with no
 // classify.go change is private by construction, not by someone
-// remembering to add a case here.
+// remembering to add a case here. loops-research and vault-fact are
+// deliberately NOT in this list as of agent-estate#1059 -- they have their
+// own explicit table entries now (see
+// TestClassifyLoopsResearchAndVaultFactAreExplicitNotDefault below) and
+// this test must exercise only sources still relying on the fallthrough,
+// or a future edit to the default branch could satisfy this test while
+// silently changing their basis string.
 func TestClassifyDefaultsUnknownSourcesPrivate(t *testing.T) {
-	for _, source := range []string{"vault-fact", "corpus-parameter", "loops-research", "some-future-source"} {
+	for _, source := range []string{"corpus-parameter", "some-future-source"} {
 		publishable, basis := classify(source)
 		if publishable {
 			t.Errorf("classify(%q) = publishable=true, want false (unclassified means private)", source)
 		}
 		if basis == "" {
 			t.Errorf("classify(%q) gave no basis for its verdict", source)
+		}
+	}
+}
+
+// TestClassifyLoopsResearchAndVaultFactAreExplicitNotDefault is the test
+// agent-estate#1059 exists for. Before this change, both sources were
+// private only because they fell through to classify's default branch --
+// an accident of an unrelated rule, not a stated decision about either
+// source. This test pins each one to its OWN table entry, distinguishable
+// from the default branch's basis string, so that widening the default
+// branch to publishable (a plausible future edit -- see the default test
+// above) cannot silently flip these two along with it.
+//
+// To confirm this test is load-bearing rather than vacuous: temporarily
+// change classify's default case to `return true, "default now public"`
+// and run this test -- TestClassifyDefaultsUnknownSourcesPrivate fails (as
+// expected, that test covers the default branch), and this test PASSES
+// unchanged, because loops-research and vault-fact never reach the
+// default branch. That is the property being asserted: their privacy does
+// not derive from the default. See the PR body for that run's output.
+func TestClassifyLoopsResearchAndVaultFactAreExplicitNotDefault(t *testing.T) {
+	const defaultBasisSuffix = "source defaults to private -- no per-item publishability marker exists yet (agent-estate#1028)"
+
+	for _, source := range []string{"loops-research", "vault-fact"} {
+		publishable, basis := classify(source)
+		if publishable {
+			t.Errorf("classify(%q) = publishable=true, want false", source)
+		}
+		if basis == "" {
+			t.Errorf("classify(%q) gave no basis for its verdict", source)
+			continue
+		}
+		if strings.Contains(basis, defaultBasisSuffix) {
+			t.Errorf("classify(%q) basis %q still reads as the default fallthrough -- want its own explicit table entry (agent-estate#1059)", source, basis)
+		}
+		if !strings.Contains(basis, "agent-estate#1059") {
+			t.Errorf("classify(%q) basis %q does not cite agent-estate#1059 -- want evidence this is a stated decision, not a default", source, basis)
 		}
 	}
 }
