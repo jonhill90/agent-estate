@@ -878,3 +878,74 @@ func TestUnknownBaseRefusesRatherThanAssumingNothingWasCommitted(t *testing.T) {
 		t.Fatal("Remove must refuse when it cannot tell whether work was committed")
 	}
 }
+
+// agent-estate#1048: IsDispatchWorktree is the read side of the layout
+// Create/CreateOnBranch write -- a caller inside one of THIS package's own
+// worktrees must be told which dispatch id it is inside, and a caller
+// anywhere else (the shared checkout, an unrelated tmp dir) must get a
+// confident "no", never a guess.
+func TestIsDispatchWorktreeIdentifiesARealWorktreeByItsOwnID(t *testing.T) {
+	root := repo(t)
+	w, err := Create(root, "907-1756000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Remove()
+
+	id, ok := IsDispatchWorktree(w.Path)
+	if !ok || id != "907-1756000001" {
+		t.Fatalf("IsDispatchWorktree(%s) = (%q, %v), want (\"907-1756000001\", true)", w.Path, id, ok)
+	}
+
+	// A subdirectory of the worktree (e.g. <worktree>/src/estate) must
+	// resolve the same id -- estate is usually invoked from below the
+	// worktree root, not from it directly.
+	sub := filepath.Join(w.Path, "src", "estate")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if id, ok := IsDispatchWorktree(sub); !ok || id != "907-1756000001" {
+		t.Fatalf("IsDispatchWorktree(%s) = (%q, %v), want (\"907-1756000001\", true)", sub, id, ok)
+	}
+}
+
+func TestIsDispatchWorktreeRefusesTheSharedCheckoutAndUnrelatedPaths(t *testing.T) {
+	root := repo(t)
+	if id, ok := IsDispatchWorktree(root); ok {
+		t.Fatalf("shared checkout %s must not read as a dispatch worktree, got id %q", root, id)
+	}
+	if id, ok := IsDispatchWorktree(t.TempDir()); ok {
+		t.Fatalf("an unrelated tmp dir must not read as a dispatch worktree, got id %q", id)
+	}
+	if id, ok := IsDispatchWorktree(filepath.Join(os.TempDir(), "estate-dispatch")); ok {
+		t.Fatalf("the bare dispatch root itself (no id beneath it) must not read as a worktree, got id %q", id)
+	}
+}
+
+// Two turns dispatched against the same repo must never resolve the same
+// worktree path -- the property agent-estate#1048's per-turn index path
+// depends on. Create itself already refuses a colliding id (see
+// TestCreateUsesItsOwnBranchSoTwoDispatchesCannotCollide); this asserts the
+// read side agrees: two distinct ids read back as two distinct ids.
+func TestIsDispatchWorktreeGivesTwoTurnsDistinctIDs(t *testing.T) {
+	root := repo(t)
+	a, err := Create(root, "turn-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Remove()
+	b, err := Create(root, "turn-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Remove()
+
+	idA, okA := IsDispatchWorktree(a.Path)
+	idB, okB := IsDispatchWorktree(b.Path)
+	if !okA || !okB {
+		t.Fatalf("IsDispatchWorktree: okA=%v okB=%v, want both true", okA, okB)
+	}
+	if idA == idB {
+		t.Fatalf("two distinct dispatch turns resolved the same id %q", idA)
+	}
+}

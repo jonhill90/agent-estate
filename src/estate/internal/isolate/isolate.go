@@ -194,6 +194,60 @@ func Create(repoRoot, id string) (*Worktree, error) {
 	return &Worktree{Path: path, Branch: branch, Base: strings.TrimSpace(string(baseOut)), root: repoRoot}, nil
 }
 
+// IsDispatchWorktree reports whether path lies inside a worktree this
+// package created (Create or CreateOnBranch, above) -- i.e. somewhere under
+// TMPDIR/estate-dispatch/<repo-name>-<repo-hash>/<dispatch-id>, possibly a
+// subdirectory of it such as <worktree>/src/estate. If so it returns the
+// dispatch id, the worktree's own top-level directory name under Root.
+//
+// This is the read side of the same layout Root/Create/CreateOnBranch write:
+// no separate marker file, no env var of its own -- just the path shape this
+// package already commits to. Anything that needs to know "am I running
+// inside one specific dispatch's isolated checkout, and which one" (e.g.
+// agent-estate#1048's per-turn knowledge index path) asks this rather than
+// re-deriving the layout.
+//
+// A path outside TMPDIR/estate-dispatch, or one that names the dispatch root
+// itself with no id segment beneath it, returns ("", false) -- the caller's
+// own default path, never a guess.
+func IsDispatchWorktree(path string) (id string, ok bool) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", false
+	}
+	// os.Getwd() on macOS resolves the /var -> /private/var symlink;
+	// os.TempDir() does not. Compared unresolved, a worktree's own working
+	// directory would never match its literal path under os.TempDir() at
+	// all -- confirmed live, this was caught by this package's own test
+	// failing against a real os.Chdir before EvalSymlinks was added.
+	// Resolving both sides the same way is what makes the comparison below
+	// mean what it says.
+	dispatchRoot := resolveSymlinksOrSelf(filepath.Join(os.TempDir(), "estate-dispatch"))
+	rel, err := filepath.Rel(dispatchRoot, resolveSymlinksOrSelf(abs))
+	if err != nil || rel == "." || strings.HasPrefix(rel, "..") {
+		return "", false
+	}
+	parts := strings.Split(rel, string(filepath.Separator))
+	// parts[0] is the per-repo root's own <name>-<hash> directory; parts[1]
+	// is the dispatch id (Create/CreateOnBranch's filepath.Join(base, id)).
+	// Both must be present and non-empty -- a bare TMPDIR/estate-dispatch or
+	// TMPDIR/estate-dispatch/<repo> is not, itself, one turn's worktree.
+	if len(parts) < 2 || parts[0] == "" || parts[1] == "" {
+		return "", false
+	}
+	return parts[1], true
+}
+
+// resolveSymlinksOrSelf returns p with symlinks resolved, or p unchanged if
+// it cannot be resolved (e.g. it does not exist yet) -- "could not resolve"
+// falls back to the literal path rather than failing the caller outright.
+func resolveSymlinksOrSelf(p string) string {
+	if r, err := filepath.EvalSymlinks(p); err == nil {
+		return r
+	}
+	return p
+}
+
 // safeBranch reports whether branch can safely name a git ref to fetch and
 // check out. Not a general refname validator -- git itself rejects a truly
 // malformed ref -- but it refuses the two shapes that would otherwise reach
