@@ -569,15 +569,23 @@ func (r ratchet) ok() bool {
 // first commit where the baselines it ratchets had stopped moving --
 // agent-estate#1137 and agent-estate#1138 were the last two changes to move
 // them, and both are required preconditions for this function to exist at
-// all (see this issue's own sequencing precondition). Re-measure before
-// trusting these numbers further; they are one observation from one
+// all (see this issue's own sequencing precondition) -- EXCEPT the two
+// natural-language top-3 floors, which agent-estate#1140 deliberately
+// lowered from 6 to 4 the same way #1138 lowered the github-stars top-10
+// floor: nl-09 and nl-11 were re-authored from a caller's actual need
+// instead of borrowing the target section's own title wording (both were
+// 100% term overlap, rank 1), and both fell out of the top 10 entirely as a
+// result. That drop is the fixture getting better while the retriever is
+// unchanged, not a retrieval regression -- see each ratchet's own reason
+// string, never only this comment or a PR body. Re-measure before trusting
+// any of these numbers further; they are one observation from one
 // checkout, not a constant.
 func buildRatchets(nlTop3, nlTotal, nlScopedTop3, nlScopedTotal, privateHits, privateTotal, reachableHits, reachableTotal, starTop3, starTop10, starTotal int, noneResult *result) []ratchet {
 	rs := []ratchet{
-		{"natural-language stratum top-3, unscoped", nlTop3, nlTotal, 6,
-			"agent-estate#1066: floor at the value measured on add887e after #1137/#1138 landed -- agent-estate#1112 found drift only on this stratum's top-10 cutoff, not top-3, so top-3 is safe to ratchet"},
-		{"natural-language stratum top-3, scoped source:repo-docs", nlScopedTop3, nlScopedTotal, 6,
-			"agent-estate#1066: same floor and same reasoning as the unscoped top-3 line above, measured on add887e"},
+		{"natural-language stratum top-3, unscoped", nlTop3, nlTotal, 4,
+			"agent-estate#1066: floor LOWERED from 6 to 4 by agent-estate#1140 -- nl-09 and nl-11 were re-authored from a caller's actual need instead of the section title's own wording (both were 100% term overlap, rank 1, no headroom to detect a regression), which is expected to move them out of the top 10 entirely, not just out of the top 3. This is the fixture getting better while the retriever is unchanged, not a retrieval regression -- see agent-estate#1140's PR body"},
+		{"natural-language stratum top-3, scoped source:repo-docs", nlScopedTop3, nlScopedTotal, 4,
+			"agent-estate#1066: same floor drop (6 to 4) and same reasoning as the unscoped top-3 line above -- agent-estate#1140 re-authored nl-09/nl-11, and source: scoping does not recover either miss"},
 		{"retrieval score (private)", privateHits, privateTotal, 16,
 			"agent-estate#1066: floor at the value measured on add887e -- unaffected by #1137/#1138, neither of which touched a private-mode cases.json case"},
 		{"publishable-reachable score", reachableHits, reachableTotal, 5,
