@@ -44,6 +44,24 @@ const (
 // single-document simplification) rather than scored as two independent
 // BM25 results and summed, so one avgdl and one length normalisation
 // covers both fields consistently.
+//
+// agent-estate#1135 swept tier1FieldWeight (1.0/1.5/2.0/2.5/3.0/4.0) against
+// the full golden set to check this carried-forward 3:1 ratio under BM25
+// for the first time since #1060 replaced substring matching -- it had
+// never been re-measured under term-frequency saturation (k1) and length
+// normalisation (b), the two mechanisms that damp exactly what 3:1 was
+// tuned to compensate for. Every aggregate line was flat from 1.0 to 3.0
+// and regressed only at 4.0 (natural-language top-3 4/12->3/12 in both the
+// unscoped and scoped runs, retrieval score (private) 16/17->15/17 from a
+// new vault-01 miss). vault-02 -- the case that prompted the sweep, its
+// authoritative fact sitting at rank 5, outside cases.json's top-3 window
+// -- moved WORSE as tier1FieldWeight dropped (rank 9 at 1.0, rank 6-7
+// through 1.5-2.5) and only matched its current rank-5 at 3.0 and 4.0: the
+// hypothesis that a lower weight would demote its tier1-heavy competitors
+// enough to surface it was checked and did not hold across this whole
+// range. 3.0 is therefore the best-measured point with no measured
+// upside from moving it, and vault-02 needs a remedy other than this
+// weight -- see #1135's PR body for the full per-weight, per-case tables.
 const (
 	tier1FieldWeight = 3.0
 	tier2FieldWeight = 1.0
