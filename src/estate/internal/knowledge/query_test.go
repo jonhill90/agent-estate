@@ -98,6 +98,67 @@ func TestQueryMatchedRanksByTermOverlap(t *testing.T) {
 	}
 }
 
+// TestQueryMatchCarriesWeightAndStatus is agent-estate#1128's own
+// regression: a corpus item's "weight:<value>"/"status:<value>" structural
+// tags must reach Match.Weight/Match.Status unchanged, and a non-corpus
+// item (which never carries either tag) must leave both empty rather than
+// defaulting to a word like "hard" or "acted" the source item never
+// actually stated.
+func TestQueryMatchCarriesWeightAndStatus(t *testing.T) {
+	idx := testIndex()
+	idx.Items = append(idx.Items,
+		Item{
+			ID: "20260903120003", Source: "corpus-directive",
+			Permalink:      "corpus:item:9001",
+			StructuralTags: []string{"kind:directive", "weight:preference", "status:dropped"},
+			Tier1:          "quarantine token backups off the primary token store",
+			Tier2:          "quarantine token backups off the primary token store",
+			Publishable:    true, PublishBasis: "test fixture: marked publishable",
+		},
+	)
+	path := filepath.Join(t.TempDir(), "index.json")
+	if err := Write(path, idx); err != nil {
+		t.Fatalf("Write() error: %v", err)
+	}
+
+	got := Query(path, "auth tokens", 0, false)
+	if got.State != StateMatched {
+		t.Fatalf("State = %q, want %q (reason=%q)", got.State, StateMatched, got.Reason)
+	}
+
+	byID := map[string]Match{}
+	for _, m := range got.Matches {
+		byID[m.ID] = m
+	}
+
+	hard, ok := byID["20260903120002"]
+	if !ok {
+		t.Fatalf("corpus-parameter fixture (weight:hard, no status tag) did not match: %+v", got.Matches)
+	}
+	if hard.Weight != "hard" {
+		t.Errorf("Weight = %q, want %q", hard.Weight, "hard")
+	}
+	if hard.Status != "" {
+		t.Errorf("Status = %q, want empty -- this fixture item carries no status: tag", hard.Status)
+	}
+
+	dropped, ok := byID["20260903120003"]
+	if !ok {
+		t.Fatalf("corpus-directive fixture (weight:preference, status:dropped) did not match: %+v", got.Matches)
+	}
+	if dropped.Weight != "preference" || dropped.Status != "dropped" {
+		t.Errorf("Weight/Status = %q/%q, want %q/%q", dropped.Weight, dropped.Status, "preference", "dropped")
+	}
+
+	fact, ok := byID["20260903120000"]
+	if !ok {
+		t.Fatalf("vault-fact fixture did not match: %+v", got.Matches)
+	}
+	if fact.Weight != "" || fact.Status != "" {
+		t.Errorf("Weight/Status = %q/%q on a vault-fact item, want both empty -- this source never carries weight/status tags", fact.Weight, fact.Status)
+	}
+}
+
 // TestRankingBasisNamesLiveFieldWeights pins the ranking-basis prose to
 // the actual field-weight constants bm25.go scores with, not to fixed
 // wording (agent-estate#1119): a value formatted straight out of the
