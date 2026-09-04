@@ -475,6 +475,149 @@ func withheldMajorityIndex(t *testing.T, privateCount int) string {
 	return path
 }
 
+// TestQueryCoverageDegradedNamesTheFailedSource is the direct regression
+// test for agent-estate#1058: a query answered from an index built with a
+// failed source must say so in the structured Coverage field, naming which
+// source, even though the answer itself (State/Matches/exit code) is
+// unchanged -- this is #1058's own repro (vault-facts unreachable, a query
+// that still finds two public items and returns exit 0 today with nothing
+// about the vault's absence anywhere in the result).
+func TestQueryCoverageDegradedNamesTheFailedSource(t *testing.T) {
+	path := writeTestIndex(t) // testIndex()'s own github-stars entry is OK: false
+	got := Query(path, "what did Jon decide about auth tokens", 0, false)
+
+	if got.Coverage.State != CoverageDegraded {
+		t.Fatalf("Coverage.State = %q, want %q", got.Coverage.State, CoverageDegraded)
+	}
+	var named bool
+	for _, r := range got.Coverage.Reasons {
+		if r.State == CoverageDegraded && r.Source == "github-stars" {
+			named = true
+			if r.Detail == "" {
+				t.Error("degraded reason has an empty Detail")
+			}
+		}
+	}
+	if !named {
+		t.Fatalf("Coverage.Reasons does not name the failed source github-stars: %+v", got.Coverage.Reasons)
+	}
+	// The answer itself must be unchanged -- #1058 says report, never fail
+	// the query or change what was returned.
+	if got.State != StateMatched {
+		t.Fatalf("State = %q, want %q -- a degraded source must not change the match state", got.State, StateMatched)
+	}
+}
+
+// TestQueryCoverageDegradedSurvivesAGenuineNoMatch proves the degraded
+// signal is independent of whether THIS question happened to match
+// anything -- a source that failed at build time is a property of the
+// index, not of the query.
+func TestQueryCoverageDegradedSurvivesAGenuineNoMatch(t *testing.T) {
+	path := writeTestIndex(t)
+	got := Query(path, "kubernetes ingress rate limiting", 0, false)
+	if got.State != StateNoMatch {
+		t.Fatalf("State = %q, want %q", got.State, StateNoMatch)
+	}
+	if got.Coverage.State != CoverageDegraded {
+		t.Fatalf("Coverage.State = %q, want %q on a no-match result over a degraded index", got.Coverage.State, CoverageDegraded)
+	}
+}
+
+// TestQueryCoverageCompleteWhenAllSourcesOK is the negative case: an index
+// built with every source OK must report Coverage.State == complete, with
+// no Reasons.
+func TestQueryCoverageCompleteWhenAllSourcesOK(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.json")
+	res := testIndex()
+	res.Sources = []SourceResult{
+		{Name: "vault-facts", OK: true, Count: 2},
+		{Name: "corpus-parameters", OK: true, Count: 1},
+		{Name: "github-stars", OK: true, Count: 5},
+	}
+	if err := Write(path, res); err != nil {
+		t.Fatal(err)
+	}
+	got := Query(path, "what did Jon decide about auth tokens", 0, false)
+	if got.Coverage.State != CoverageComplete {
+		t.Fatalf("Coverage.State = %q, want %q", got.Coverage.State, CoverageComplete)
+	}
+	if len(got.Coverage.Reasons) != 0 {
+		t.Fatalf("Coverage.Reasons = %+v, want none on a fully-OK index", got.Coverage.Reasons)
+	}
+}
+
+// TestQueryCoverageLimitedOnWithheldPrivate folds #1055's own
+// StateMatchedWithheldMajority into the same Coverage structure --
+// agent-estate#1058's sequencing note: this must reuse the shape #1055
+// settled on, not invent a second one.
+func TestQueryCoverageLimitedOnWithheldPrivate(t *testing.T) {
+	path := withheldMajorityIndex(t, 2) // no Sources set -- all-OK, so complete would otherwise apply
+	got := Query(path, "credential rotation keychain policy", 0, false)
+
+	if got.State != StateMatchedWithheldMajority {
+		t.Fatalf("State = %q, want %q", got.State, StateMatchedWithheldMajority)
+	}
+	if got.Coverage.State != CoverageLimited {
+		t.Fatalf("Coverage.State = %q, want %q", got.Coverage.State, CoverageLimited)
+	}
+	var named bool
+	for _, r := range got.Coverage.Reasons {
+		if r.State == CoverageLimited && r.Detail != "" {
+			named = true
+		}
+	}
+	if !named {
+		t.Fatalf("Coverage.Reasons does not carry a limited reason: %+v", got.Coverage.Reasons)
+	}
+}
+
+// TestQueryCoverageMixedWhenSourceFailedAndPrivacyWithheld is the co-occur
+// case the issue's council comment calls out explicitly: a degraded source
+// AND a policy withholding on the SAME result must both be visible under
+// one top-level state (mixed), not silently collapse to just one of them.
+func TestQueryCoverageMixedWhenSourceFailedAndPrivacyWithheld(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "index.json")
+	res := Result{
+		GeneratedAt:   time.Date(2026, 9, 3, 12, 0, 0, 0, time.UTC),
+		StalenessRule: stalenessRule,
+		Note:          derivedNote,
+		Sources: []SourceResult{
+			{Name: "vault-facts", OK: false, Reason: "cannot list /nonexistent/vault/agent/facts"},
+		},
+		Items: []Item{
+			{
+				ID: "20260903130002", Source: "corpus-parameter",
+				Permalink:   "corpus:item:9002",
+				Tier1:       "credential rotation keychain policy -- fail closed on missing creds",
+				Publishable: false, PublishBasis: "corpus-parameter: source defaults to private",
+			},
+		},
+	}
+	if err := Write(path, res); err != nil {
+		t.Fatal(err)
+	}
+
+	got := Query(path, "credential rotation keychain", 0, false)
+	if got.State != StateWithheldPrivate {
+		t.Fatalf("State = %q, want %q", got.State, StateWithheldPrivate)
+	}
+	if got.Coverage.State != CoverageMixed {
+		t.Fatalf("Coverage.State = %q, want %q", got.Coverage.State, CoverageMixed)
+	}
+	var sawDegraded, sawLimited bool
+	for _, r := range got.Coverage.Reasons {
+		switch r.State {
+		case CoverageDegraded:
+			sawDegraded = true
+		case CoverageLimited:
+			sawLimited = true
+		}
+	}
+	if !sawDegraded || !sawLimited {
+		t.Fatalf("Coverage.Reasons missing degraded and/or limited: %+v", got.Coverage.Reasons)
+	}
+}
+
 // TestQueryMatchedWithheldMajorityFiresWhenPrivateOutnumbersPublic is the
 // direct regression test for agent-estate#1052: a query with more withheld
 // private matches than returned public ones must be distinguishable from an
