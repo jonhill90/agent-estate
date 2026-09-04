@@ -73,6 +73,7 @@ func corpusSource(dbPath string, clock *idClock) (SourceResult, []Item) {
 		if status != "" {
 			structural = append(structural, "status:"+status)
 		}
+		publishable, basis := classify("corpus-parameter")
 		items = append(items, Item{
 			ID:             clock.NextID(),
 			Source:         "corpus-parameter",
@@ -81,6 +82,8 @@ func corpusSource(dbPath string, clock *idClock) (SourceResult, []Item) {
 			Tier1:          truncate(tier1, 200),
 			Tier2:          truncate(body, 400),
 			Tier3:          "the corpus's own item " + id + " (live_parameters) -- not this file",
+			Publishable:    publishable,
+			PublishBasis:   basis,
 		})
 	}
 	if err := sc.Err(); err != nil {

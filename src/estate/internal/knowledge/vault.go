@@ -72,6 +72,7 @@ func vaultSource(vaultDir string, clock *idClock) (SourceResult, []Item) {
 		if f.Type != "" {
 			structural = append(structural, f.Type)
 		}
+		publishable, basis := classify("vault-fact")
 		items = append(items, Item{
 			ID:             clock.NextID(),
 			Source:         "vault-fact",
@@ -80,6 +81,8 @@ func vaultSource(vaultDir string, clock *idClock) (SourceResult, []Item) {
 			Tier1:          truncate(tier1, 200),
 			Tier2:          f.Description,
 			Tier3:          "open " + path + " for the full fact",
+			Publishable:    publishable,
+			PublishBasis:   basis,
 		})
 	}
 

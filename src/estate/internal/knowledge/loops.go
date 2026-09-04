@@ -45,6 +45,7 @@ func loopsSource(dir string, clock *idClock) (SourceResult, []Item) {
 		if heading == "" {
 			heading = strings.TrimSuffix(name, ".md")
 		}
+		publishable, basis := classify("loops-research")
 		items = append(items, Item{
 			ID:             clock.NextID(),
 			Source:         "loops-research",
@@ -53,6 +54,8 @@ func loopsSource(dir string, clock *idClock) (SourceResult, []Item) {
 			Tier1:          truncate(heading, 200),
 			Tier2:          truncate(para, 400),
 			Tier3:          "open " + path + " for the full note",
+			Publishable:    publishable,
+			PublishBasis:   basis,
 		})
 	}
 

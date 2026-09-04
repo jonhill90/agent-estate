@@ -75,6 +75,28 @@ type Item struct {
 	// repeated, a file path, a "read the fact itself" instruction),
 	// never the raw material inlined for the corpus source.
 	Tier3 string `json:"tier3,omitempty"`
+
+	// Publishable states whether this item may leave the operator's own
+	// machine -- pasted into a public artifact, shown to a caller with
+	// no explicit request for private material. Set once, here in the
+	// compile step (see classify in classify.go), and carried verbatim
+	// into index.json; a caller reads it, it never recomputes it.
+	//
+	// UNCLASSIFIED MEANS PRIVATE (agent-estate#1028). The zero value of
+	// this field is false, and classify's own default branch returns
+	// false for any source it does not positively know to be public --
+	// so an item this package cannot classify, or a new source added
+	// tomorrow that nobody has updated classify for, is private by
+	// construction, not by a filter someone remembered to add at query
+	// time. See classify.go's own doc comment for what this default-deny
+	// rule does and does not catch.
+	Publishable bool `json:"publishable"`
+
+	// PublishBasis states, in one short phrase, why Publishable has the
+	// value it does -- so an audit of the compiled index never has to
+	// guess which rule produced a given item's classification. Always
+	// set alongside Publishable, by the same classify call.
+	PublishBasis string `json:"publish_basis"`
 }
 
 // SourceResult is what one of the four readers actually managed --
