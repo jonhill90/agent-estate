@@ -120,17 +120,37 @@ func run(args []string, stdout, stderr *os.File) int {
 // rather than being reimplemented here as a second literal string, per that
 // review's second recommendation -- one source of truth for "what is the
 // live corpus."
+//
+// A second review (same PR, second REQUEST CHANGES) found that a DANGLING
+// symlink at the guarded name bypassed this entirely: resolveForCompare used
+// to fall back to the unresolved path whenever filepath.EvalSymlinks failed,
+// and EvalSymlinks fails with ENOENT on a symlink whose target does not
+// exist -- exactly the case a real bypass needs, since the fallback then
+// compares the *link's own name* rather than what it points at. That
+// fallback is correct for a path that plainly doesn't exist and never was a
+// symlink (nothing else to compare there); it is wrong for a symlink whose
+// target can't be resolved, because the one signal that path carries -- the
+// resolvable-or-not state of its target -- is exactly what gets thrown away.
+// resolveForCompare now returns an error in that specific case, and
+// refuseLivePath treats "cannot resolve what this symlink names" as a
+// refusal in its own right, never as evidence of safety.
 func refuseLivePath(dbPath string) (string, bool) {
-	candidate := resolveForCompare(dbPath)
+	candidate, err := resolveForCompare(dbPath)
+	if err != nil {
+		return fmt.Sprintf("cannot resolve %s: %v -- refusing rather than guessing whether it names the live corpus", dbPath, err), true
+	}
 
 	if livePath, err := corpus.Path(); err == nil {
-		if candidate == resolveForCompare(livePath) {
+		if liveResolved, err := resolveForCompare(livePath); err == nil && candidate == liveResolved {
 			return fmt.Sprintf("matches the live corpus path (%s)", livePath), true
 		}
 	}
 	// Fallback in case corpus.Path() errored (e.g. HOME unset): the
-	// well-known suffix, still resolved and case-folded the same way.
-	if strings.HasSuffix(candidate, resolveForCompare(filepath.Join("corpus", "ledger.sqlite3"))) {
+	// well-known suffix, still resolved and case-folded the same way. The
+	// literal "corpus/ledger.sqlite3" fragment being compared here never
+	// itself exists as a standalone path, so it always resolves cleanly.
+	fallbackSuffix, _ := resolveForCompare(filepath.Join("corpus", "ledger.sqlite3"))
+	if fallbackSuffix != "" && strings.HasSuffix(candidate, fallbackSuffix) {
 		return "matches the live corpus path (~/corpus/ledger.sqlite3)", true
 	}
 	if strings.Contains(candidate, strings.ToLower("agent-dotfiles-supervisor")) {
@@ -140,12 +160,26 @@ func refuseLivePath(dbPath string) (string, bool) {
 }
 
 // resolveForCompare turns a path into the form refuseLivePath compares:
-// absolute, cleaned, symlinks resolved when the target exists (falling back
-// to the unresolved absolute path when it does not -- e.g. a -db path that
-// hasn't been created yet), tilde-expanded against $HOME, and case-folded
-// since this tool runs on case-insensitive filesystems (APFS default) where
-// two differently-spelled strings can name the same file.
-func resolveForCompare(p string) string {
+// absolute, cleaned, symlinks resolved when the target exists, tilde-expanded
+// against $HOME, and case-folded since this tool runs on case-insensitive
+// filesystems (APFS default) where two differently-spelled strings can name
+// the same file.
+//
+// Two distinct "doesn't fully resolve" cases must NOT be treated the same:
+//
+//   - The cleaned path is not a symlink at all (os.Lstat finds nothing, or
+//     finds a plain file/dir) -- there is nothing further to resolve, so
+//     comparing the cleaned-but-unresolved form is the correct and only
+//     answer. This covers a -db path that hasn't been created yet.
+//   - The cleaned path (or something in its chain) IS a symlink, and
+//     filepath.EvalSymlinks fails to resolve it (e.g. ENOENT on a dangling
+//     target). Here the unresolved path is the *link's own name*, not what
+//     it points at -- silently comparing that throws away the one thing the
+//     symlink actually carries, and a dangling link placed at the guarded
+//     name would then compare as "not live" while writing straight through
+//     it. This case returns an error; refuseLivePath treats that as a
+//     refusal, never as evidence the path is safe.
+func resolveForCompare(p string) (string, error) {
 	if p == "~" {
 		if home, err := os.UserHomeDir(); err == nil {
 			p = home
@@ -162,15 +196,33 @@ func resolveForCompare(p string) string {
 	}
 	clean := filepath.Clean(abs)
 
-	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
-		clean = resolved
+	info, lstatErr := os.Lstat(clean)
+	if lstatErr != nil {
+		// Nothing exists at this name at all -- not a symlink, dangling or
+		// otherwise, just absent. Safe to compare the cleaned literal form.
+		return strings.ToLower(clean), nil
 	}
-	// EvalSymlinks failing (path does not exist yet, permission denied,
-	// etc.) is not evidence the path is safe -- it just means resolution
-	// can't help, so fall through to comparing the unresolved-but-cleaned
-	// form below rather than returning early.
 
-	return strings.ToLower(clean)
+	if info.Mode()&os.ModeSymlink == 0 {
+		// Exists and is not itself a symlink. EvalSymlinks may still resolve
+		// a symlinked parent directory in the chain; if it fails here (rare
+		// -- e.g. a parent removed between the Lstat and this call) fall
+		// back to the cleaned form, since the leaf itself carries no
+		// unresolved symlink signal to discard.
+		if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+			clean = resolved
+		}
+		return strings.ToLower(clean), nil
+	}
+
+	// The leaf itself is a symlink (or the first hop of a chain). Its target
+	// must resolve, however many hops that takes -- a dangling link anywhere
+	// in the chain is exactly the bypass this guards against.
+	resolved, err := filepath.EvalSymlinks(clean)
+	if err != nil {
+		return "", fmt.Errorf("symlink %s does not resolve to an existing target: %w", clean, err)
+	}
+	return strings.ToLower(resolved), nil
 }
 
 // Report is the whole run's evidence: never a bare count, always the
