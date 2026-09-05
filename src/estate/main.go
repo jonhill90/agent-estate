@@ -186,15 +186,27 @@ func prHeadBranch(pr int) (string, error) {
 // pre-fetch" -- injecting results into every prompt would recreate the
 // fixed-payload problem this issue exists to fix, one layer up).
 //
-// Also names `source:<name>` scoping (agent-estate#1081): measured on
-// 4b41a1f, a lane following this grounding with no mention of the flag took
-// the unscoped path and scored 4/12 on the checked-in stratum where the
-// scoped path scores 8/12 -- and #1087's own knowledge doc, while it
-// retrieves, only surfaces the flag to a lane whose query already contains
-// the word "source"; a lane asking how to get fewer irrelevant results does
-// not find it by searching. This one sentence is the only path that reaches
-// the lane that has not yet learned the vocabulary; the doc stays the
-// explainer, pointed at rather than duplicated here.
+// Also names `source:<name>` scoping (agent-estate#1081): #1087's own
+// knowledge doc, while it retrieves, only surfaces the flag to a lane whose
+// query already contains the word "source"; a lane asking how to get fewer
+// irrelevant results does not find it by searching. This one sentence is
+// the only path that reaches the lane that has not yet learned the
+// vocabulary; the doc stays the explainer, pointed at rather than
+// duplicated here.
+//
+// The scoped-vs-unscoped benefit named below is `--private`-only, at a
+// stated rank (agent-estate#1168 fix pass): on the checked-in stratum,
+// public mode is IDENTICAL at every rank (4/12 top-3, 8/12 top-10, scoped
+// and unscoped alike) -- scoping there narrows nothing measurable, it only
+// changes whether a wrong guess surfaces as `no_match`/`withheld_private`.
+// Under `--private`, scoped beats unscoped at both ranks measured: 4/12 vs
+// 1/12 at top-3, 8/12 vs 5/12 at top-10 (three independent measurements on
+// this same head: this PR's own reviewer, and agent-estate#1167's author
+// and reviewer). The original text here compared 8/12 (top-10, scoped)
+// against 4/12 (top-3, unscoped) -- a rank-mismatched pair, the same shape
+// of error #1167 removed from docs/knowledge-system.md as agent-estate#1081's
+// unreproducible "scoping doubles retrieval" claim. Do not restate a
+// cross-rank pair as if it were one comparison.
 func knowledgeGrounding() string {
 	return "\n\n## Knowledge retrieval exists (agent-estate#1049)\n" +
 		"A fresh dispatch worktree starts with no index at all -- `knowledge query` " +
@@ -225,10 +237,13 @@ func knowledgeGrounding() string {
 		"still works when the index is missing. If results look noisy or " +
 		"off-topic, prefix the query with `source:<name>` -- e.g. `source:repo-docs` " +
 		"for how this repo works, `source:corpus-directive` for what the operator " +
-		"has decided -- to narrow to one source, and do so whenever you already " +
-		"know which source holds the answer: scoped beats unscoped there (8/12 " +
-		"vs 4/12 on the checked-in stratum). A wrong guess is a different cost by " +
-		"mode. In public mode it is cheap: a wrong scope surfaces as `no_match` or " +
+		"has decided -- to narrow to one source. Under `--private`, do so whenever " +
+		"you already know which source holds the answer: on the checked-in " +
+		"stratum scoped beats unscoped at both ranks measured (4/12 vs 1/12 at " +
+		"top-3, 8/12 vs 5/12 at top-10). In public mode this comparison does not " +
+		"exist -- scoped and unscoped score identically at every rank (4/12 " +
+		"top-3, 8/12 top-10) -- so scoping there buys nothing measurable. A wrong " +
+		"guess is a different cost by mode. In public mode it is cheap: a wrong scope surfaces as `no_match` or " +
 		"`withheld_private`, visibly, and is fixed by re-running the same question " +
 		"unscoped. Under `--private` it is not cheap: a wrong scope can instead " +
 		"return ranked, cited, scored results from the WRONG source that look " +
