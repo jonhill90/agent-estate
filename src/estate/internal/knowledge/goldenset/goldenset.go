@@ -82,6 +82,15 @@ type ExpectedSource string
 const (
 	SourceVaultFact       ExpectedSource = "vault-fact"
 	SourceCorpusParameter ExpectedSource = "corpus-parameter"
+	// SourceCorpusDirective is agent-estate#1150's own addition: the
+	// corpus-directive-targeted stratum inside cases.json (camelcase-01
+	// through camelcase-05) that measures whether camelCase token
+	// splitting perturbs retrieval over the operator's own directive
+	// text specifically, not just the smaller corpus-parameter sample
+	// #1151 already covered. See internal/knowledge/corpus.go's
+	// corpusSourceName for why this is a distinct Source from
+	// "corpus-parameter" rather than folded into it.
+	SourceCorpusDirective ExpectedSource = "corpus-directive"
 	SourceGithubStars     ExpectedSource = "github-stars"
 	SourceLoopsResearch   ExpectedSource = "loops-research"
 	// SourceRepoDocs is agent-estate#1034's own source: AGENTS.md and

@@ -12,8 +12,14 @@ func TestLoadParsesEmbeddedCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	if len(cases) < 10 || len(cases) > 20 {
-		t.Fatalf("len(cases) = %d, want 10-20 per #1019's acceptance criterion", len(cases))
+	// Upper bound RAISED from 20 to 30 by agent-estate#1150: 17 cases at
+	// #1019's original 10-20 range, plus this issue's own 5-case
+	// corpus-directive stratum (camelcase-01..05), is 22 -- over the old
+	// ceiling. #1019's acceptance criterion was "a set big enough to
+	// cover every source without being unreadable", not literally 20;
+	// 30 keeps that headroom for the next stratum too.
+	if len(cases) < 10 || len(cases) > 30 {
+		t.Fatalf("len(cases) = %d, want 10-30 per #1019's acceptance criterion (raised from 20 by agent-estate#1150)", len(cases))
 	}
 }
 
