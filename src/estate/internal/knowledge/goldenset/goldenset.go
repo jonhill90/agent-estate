@@ -127,6 +127,35 @@ type Case struct {
 	// measurement yet -- cmd/goldenquery skips the overlap line for any
 	// case missing it rather than reporting a false zero.
 	TargetText string `json:"target_text,omitempty"`
+	// UnscopedExempt marks a case as exempt from the natural-language
+	// stratum's UNSCOPED ratchet only -- agent-estate#1209's fix pass on
+	// the hold recorded in agent-estate#1162 issuecomment-5552369384's
+	// design pass (Option 1, "scope-diagnostic cases count only toward
+	// the scoped ratchet"). Never affects the SCOPED ratchet, which still
+	// counts every case, exempt or not.
+	//
+	// This field alone is not the exemption -- it is a claim, and a
+	// self-declared claim is exactly the abuse path the design pass
+	// named: a case parked here to dodge a failing ratchet with no
+	// evidence it actually diverges. cmd/goldenquery's checkExemptions
+	// EARNS it every run by re-measuring both halves of the divergence
+	// this field asserts -- the case must MISS top-3 on the real
+	// unscoped arm (default/public) AND HIT top-3 on the real scoped arm
+	// (--private, source:repo-docs) -- and fails the whole run (not just
+	// a printed number) if either half stops holding. Setting this
+	// field to true with no corresponding, currently-true divergence is
+	// therefore not silently accepted; it is checked, continuously,
+	// against a live index. See checkExemptions in cmd/goldenquery/main.go.
+	UnscopedExempt bool `json:"unscoped_exempt,omitempty"`
+	// ExemptReason is required whenever UnscopedExempt is true (and
+	// forbidden otherwise -- TestUnscopedExemptCasesCarryReason enforces
+	// the pairing both ways) -- the one-line evidence for why this
+	// specific case is a scope-diagnostic bridge case rather than an
+	// ordinary miss, e.g. which github-stars competitors outrank it
+	// unscoped. Mirrors Rationale/Note's own discipline: the reason a
+	// human can read without re-running the measurement, even though the
+	// measurement itself is what actually enforces it.
+	ExemptReason string `json:"exempt_reason,omitempty"`
 }
 
 // Load parses the embedded cases.json. It only ever fails if cases.json

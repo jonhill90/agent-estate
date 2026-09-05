@@ -14,8 +14,8 @@ func TestLoadNaturalParsesEmbeddedCases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("LoadNatural() error: %v", err)
 	}
-	if len(cases) != 21 {
-		t.Fatalf("len(cases) = %d, want 21 -- #1073's original twelve-case set plus agent-estate#1169's nine per-file cases (nl-13..nl-21)", len(cases))
+	if len(cases) != 24 {
+		t.Fatalf("len(cases) = %d, want 24 -- #1073's original twelve-case set, agent-estate#1169's nine per-file cases (nl-13..nl-21), plus agent-estate#1162's three discriminating scoping cases (nl-22..nl-24)", len(cases))
 	}
 }
 
@@ -61,6 +61,29 @@ func TestNaturalCasesAreAllRepoDocs(t *testing.T) {
 	for _, c := range cases {
 		if c.ExpectedSource != SourceRepoDocs {
 			t.Errorf("case %s has expected_source %q, want %q -- #1073's stratum is repo-docs only", c.ID, c.ExpectedSource, SourceRepoDocs)
+		}
+	}
+}
+
+// TestUnscopedExemptCasesCarryReason is agent-estate#1209's own fixture-shape
+// guard: unscoped_exempt and exempt_reason must be set together, never one
+// without the other. A flag with no reason is unreviewable; a reason with no
+// flag is dead text that no longer does anything. This is a weaker,
+// shape-only check -- it does not verify the exemption is EARNED (that
+// requires a live index and lives in cmd/goldenquery's checkExemptions,
+// run against a real query every time goldenquery runs), only that the two
+// fields are never set independently of each other.
+func TestUnscopedExemptCasesCarryReason(t *testing.T) {
+	cases, err := LoadNatural()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		if c.UnscopedExempt && c.ExemptReason == "" {
+			t.Errorf("case %s has unscoped_exempt=true but no exempt_reason -- every exemption needs its own recorded evidence", c.ID)
+		}
+		if !c.UnscopedExempt && c.ExemptReason != "" {
+			t.Errorf("case %s has exempt_reason set but unscoped_exempt=false -- a reason with no exemption is dead text", c.ID)
 		}
 	}
 }
