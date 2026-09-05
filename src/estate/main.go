@@ -1283,20 +1283,37 @@ func main() {
 		// absent) still falls through to generation below -- that is the
 		// documented behaviour -- but an unrecognised subcommand must be
 		// refused before it reaches knowledge.Generate/Write, which writes to
-		// whatever path DefaultOutputPath resolves: this turn's own per-turn
+		// whatever path ResolveWritePath resolves: this turn's own per-turn
 		// index from inside a dispatch worktree, or the shared index every
-		// other lane reads from anywhere else (#1048).
+		// other lane reads from anywhere else (#1048) -- and the latter now
+		// requires the acknowledgement below (#1184).
 		//
-		// --allow-coverage-loss (agent-estate#1123) is the one flag this
-		// path accepts rather than a subcommand: it does not change what
-		// gets generated, only whether a regeneration that would make a
-		// source strictly worse than what's already on disk is allowed to
-		// proceed. See the coverage-regression block below for what it
-		// gates.
-		allowCoverageLoss := len(os.Args) > 2 && os.Args[2] == "--allow-coverage-loss"
-		if len(os.Args) > 2 && !allowCoverageLoss {
-			fmt.Fprintf(os.Stderr, "estate: unrecognised knowledge subcommand %q -- valid: query, get, --allow-coverage-loss, or no subcommand to regenerate\n", os.Args[2])
-			os.Exit(2)
+		// --allow-coverage-loss (agent-estate#1123) and --allow-shared-write
+		// (agent-estate#1184) are the two flags this path accepts rather than
+		// a subcommand, and either order is fine. Neither changes what gets
+		// generated -- --allow-coverage-loss allows a regeneration that would
+		// make a source strictly worse than what's on disk (see the
+		// coverage-regression block below); --allow-shared-write is the
+		// explicit opt-in ResolveWritePath requires before writing the
+		// SHARED index from a cwd that is neither an explicit
+		// ESTATE_KNOWLEDGE_INDEX override nor a real dispatch worktree --
+		// see that function's own doc comment for why this is opt-in rather
+		// than a warning or a heuristic refusal.
+		allowCoverageLoss := false
+		allowSharedWrite := false
+		for _, a := range os.Args[2:] {
+			switch a {
+			case "--allow-coverage-loss":
+				allowCoverageLoss = true
+			case "--allow-shared-write":
+				allowSharedWrite = true
+			default:
+				fmt.Fprintf(os.Stderr, "estate: unrecognised knowledge subcommand %q -- valid: query, get, --allow-coverage-loss, --allow-shared-write, or no subcommand to regenerate\n", a)
+				os.Exit(2)
+			}
+		}
+		if allowSharedWrite {
+			os.Setenv(knowledge.AllowSharedWriteEnv, "1")
 		}
 
 		cfg, err := knowledge.DefaultConfig()
@@ -1304,10 +1321,22 @@ func main() {
 			fmt.Fprintln(os.Stderr, "estate:", err)
 			os.Exit(2)
 		}
-		out, err := knowledge.DefaultOutputPath()
+		out, requiresAck, err := knowledge.ResolveWritePath()
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "estate:", err)
 			os.Exit(2)
+		}
+		if requiresAck {
+			// agent-estate#1184: this cwd resolves to the SHARED index --
+			// neither an explicit ESTATE_KNOWLEDGE_INDEX override nor a
+			// recognised dispatch worktree -- and no acknowledgement was
+			// given. Refuse rather than silently write the file every other
+			// lane reads; see knowledge.ResolveWritePath's doc comment for
+			// why this is the chosen fix shape over a heuristic refusal or a
+			// warning.
+			fmt.Fprintf(os.Stderr, "estate: this cwd resolves to the SHARED knowledge index (%s), not a per-turn or explicitly overridden one\n", out)
+			fmt.Fprintln(os.Stderr, "estate: refusing to write it without an explicit acknowledgement -- pass `estate knowledge --allow-shared-write` or set "+knowledge.AllowSharedWriteEnv+"=1 if this is deliberate")
+			os.Exit(1)
 		}
 		res := knowledge.Generate(cfg, time.Now())
 		// agent-estate#1123: refuse to silently overwrite a healthier index
