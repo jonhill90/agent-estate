@@ -388,7 +388,7 @@ func runNaturalStratum(w *bufio.Writer, bin string, verbose bool, scoped bool) (
 	// claim) toward the scoped one.
 	var exclude func(goldenset.Case) bool
 	if !scoped {
-		exclude = func(c goldenset.Case) bool { return c.UnscopedExempt }
+		exclude = isUnscopedExempt
 	}
 	top3Hits, top10Hits, total = tallyNatural(results, exclude)
 	overlapMean, overlapMeasured, _ = meanOverlap(cases)
@@ -694,8 +694,57 @@ func publishableReachableLine(totalCases, excludedPrivate, noneCount, reachableH
 // rank-identical -- nlScopedTotal would wrongly fold those cases into a
 // claim the exemption mechanism itself proves false for exactly them
 // (agent-estate#1214 review, finding 3; agent-estate#1215's fix pass).
+//
+// #1218's own fix pass (PR #1219 review) found that #1218's first value test
+// never actually drove this number through main()'s own code: it built
+// nlTotal itself, by hand, in the test body, and only checked that this
+// function echoes whatever int it is handed. A mutation that rebound
+// main()'s own nlTotal to nlScopedTotal's value immediately before the call
+// site -- keeping the identifier's name, changing only what it held --
+// passed that test unmodified, because the test never touched main()'s
+// binding at all. See corpusGrowthDriftValue below for the fix: main() no
+// longer holds a bare nlTotal int at this call site for a same-named rebind
+// to corrupt.
 func corpusGrowthDriftLine(nlTotal int) string {
 	return fmt.Sprintf("  not ratcheted, known corpus-growth drift (agent-estate#1112): natural-language stratum top-10, unscoped (public); not ratcheted, rank-identical to that unscoped line on all %d cases and so inherits its corpus-growth drift wholesale (agent-estate#1112, agent-estate#1162): natural-language stratum top-10, private scoped source:repo-docs", nlTotal)
+}
+
+// isUnscopedExempt is the exclude predicate tallyNatural's unscoped callers
+// use to drop UnscopedExempt cases from an unscoped tally -- shared by
+// runNaturalStratum's own unscoped call and corpusGrowthDriftValue below, so
+// both compute "the unscoped total" identically rather than each carrying
+// its own copy of the same rule that could drift apart under a future edit.
+func isUnscopedExempt(c goldenset.Case) bool { return c.UnscopedExempt }
+
+// corpusGrowthDriftValue derives corpusGrowthDriftLine's own argument
+// directly from the unscoped natural-language stratum's raw per-case
+// results -- the same results and the same exclusion rule
+// runNaturalStratum's own unscoped tally uses (isUnscopedExempt) -- rather
+// than from a bare nlTotal int living in main()'s local scope.
+//
+// This is PR #1219's fix pass for the gap #1218's first test left open (see
+// corpusGrowthDriftLine's own doc comment above): main() now calls
+// corpusGrowthDriftLine(corpusGrowthDriftValue(nlUnscopedResults)) instead of
+// corpusGrowthDriftLine(nlTotal). There is no nlTotal-shaped int at that call
+// site anymore for a same-named rebind (`nlTotal = nlScopedTotal`) to
+// corrupt -- the exact mutation named in review is no longer expressible at
+// this call site, because this call site does not reference nlTotal at all.
+//
+// Residual gap, stated plainly: this does not make main() itself fully
+// mutation-proof. The analogous mistake is now "pass nlScopedResults instead
+// of nlUnscopedResults at the call site" (guarded by
+// TestMainCallsCorpusGrowthDriftLineWithNlUnscopedResults's AST check on the
+// argument's identifier) or "rebind nlUnscopedResults itself right before
+// the call" (not guarded by anything here -- closing that would require
+// running main() itself end-to-end against a faked estate binary, which is
+// more restructuring than this issue's scope justifies). What IS closed: the
+// specific value computed here -- excluding UnscopedExempt cases from the
+// unscoped total -- is now driven by TestCorpusGrowthDriftValueExcludesUnscopedExemptCases
+// directly against this function, the same function main() calls, not a
+// reimplementation of its arithmetic in the test body.
+func corpusGrowthDriftValue(nlUnscopedResults []naturalResult) int {
+	_, _, total := tallyNatural(nlUnscopedResults, isUnscopedExempt)
+	return total
 }
 
 // ratchet is one agent-estate#1066 regression guard: a named measurement
@@ -1089,12 +1138,12 @@ func main() {
 	// the natural-language fixture's size as it stood when agent-estate#1112
 	// made this comparison. natural_cases.json has since grown past 21 (like
 	// cases.json's 17->22, agent-estate#1214's own finding). agent-estate#1218
-	// factored the line itself into corpusGrowthDriftLine (see its own doc
-	// comment for why the argument must be nlTotal, never nlScopedTotal) --
-	// this call site is now the one place left that can get that choice
-	// wrong, and it is a single argument name rather than a value buried
-	// inside an inline format string.
-	fmt.Fprintln(w, corpusGrowthDriftLine(nlTotal))
+	// factored the line itself into corpusGrowthDriftLine, and PR #1219's fix
+	// pass factored ITS argument's own derivation into corpusGrowthDriftValue
+	// (see both functions' own doc comments) -- this call site passes
+	// nlUnscopedResults, the raw per-case results, never nlTotal or
+	// nlScopedResults/nlScopedTotal.
+	fmt.Fprintln(w, corpusGrowthDriftLine(corpusGrowthDriftValue(nlUnscopedResults)))
 	fmt.Fprintln(w, "  not ratcheted, measures fixture honesty not quality (agent-estate#1066, agent-estate#1115): term overlap, github-stars and natural-language")
 	// agent-estate#1209: guardrail 2 -- the exempt bucket's own size,
 	// printed unconditionally alongside the ratchet lines above (even when

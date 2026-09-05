@@ -283,40 +283,39 @@ func TestExemptCountLineAlwaysPrintsAndCitesItsIssue(t *testing.T) {
 	}
 }
 
-// TestMainCallsCorpusGrowthDriftLineWithNlTotal is agent-estate#1218's
-// refactor of agent-estate#1215's fix-pass regression test
-// (TestCorpusGrowthDriftLineIsFedUnscopedTotal, same name change reflecting
-// the same rename #1214 already made for the publishable-reachable line).
+// TestMainCallsCorpusGrowthDriftLineWithNlUnscopedResults is PR #1219's
+// fix-pass rename and rewrite of agent-estate#1218's
+// TestMainCallsCorpusGrowthDriftLineWithNlTotal, following the same
+// "refactor, don't just re-point" move agent-estate#1218 itself made against
+// agent-estate#1215's TestCorpusGrowthDriftLineIsFedUnscopedTotal.
 //
-// agent-estate#1218's own finding against the old test: it asserted on the
-// spelling of the identifier fed into the inline Fprintf ("nlTotal", never
-// "nlScopedTotal"), which cannot catch `nlTotal := nlScopedTotal` -- a local
-// rebind that keeps the fed identifier's NAME "nlTotal" while giving it the
-// scoped stratum's VALUE. A guard on spelling is not a guard on meaning.
+// agent-estate#1218's own finding against the ORIGINAL (#1215) test: it
+// asserted on the spelling of the identifier fed into the inline Fprintf
+// ("nlTotal", never "nlScopedTotal"), which cannot catch `nlTotal :=
+// nlScopedTotal` -- a local rebind that keeps the fed identifier's NAME
+// "nlTotal" while giving it the scoped stratum's VALUE.
 //
-// The fix per the issue: factor the line into corpusGrowthDriftLine (see its
-// own doc comment in main.go), a pure function tested BY VALUE in
-// main_test.go's TestCorpusGrowthDriftLineReflectsGivenTotalNotScopedTotal --
-// that test proves the function itself prints whatever count it is handed,
-// derived through the same tallyNatural code path main() uses, with a case
-// set built so the unscoped and scoped totals genuinely differ. That is the
-// test that actually catches a wrong VALUE.
+// #1218's OWN fix -- factoring the line into corpusGrowthDriftLine and
+// pointing this AST test and a new value test at it -- turned out to have
+// the identical blind spot one level up: PR #1219 review ran the exact named
+// mutation (`nlTotal = nlScopedTotal` immediately before the call) and both
+// of #1218's tests passed, because neither one ever read main()'s own
+// binding of nlTotal -- this AST test only checked the fed identifier's
+// name (still "nlTotal" after the mutation), and the value test built its
+// own nlTotal from scratch rather than driving main()'s.
 //
-// This AST test is KEPT alongside it, not replaced, for a narrower reason:
-// it is the only one of the two that reads main() itself, so it is the only
-// one that still fails if the call to corpusGrowthDriftLine is deleted
-// entirely, or if the argument at the call site is swapped to the
-// wrong-but-differently-named nlScopedTotal outright (the literal mistake
-// agent-estate#1215 was filed to fix, and the most likely accidental
-// regression -- a stray edit at this one call site, not a deliberately
-// disguised shadow rebind). It does NOT, and cannot by static name-matching
-// alone, catch the shadow-rebind trick the issue names (`nlTotal :=
-// nlScopedTotal` immediately above this call) -- that is precisely why the
-// value test above exists as well. Keeping both is the "both is defensible"
-// option the issue names: one guards the call site's own wiring, the other
-// guards the formatting function's own arithmetic, and neither alone covers
-// what the other does.
-func TestMainCallsCorpusGrowthDriftLineWithNlTotal(t *testing.T) {
+// This fix pass removes the bare nlTotal int from this call site entirely
+// (see corpusGrowthDriftValue's doc comment in main.go for the full
+// argument and its stated residual gap): main() now calls
+// corpusGrowthDriftLine(corpusGrowthDriftValue(nlUnscopedResults)), so this
+// test's job narrows to what an AST test can actually prove -- that the
+// call is present (deletion coverage) and that its argument is the raw
+// unscoped results, not the scoped ones. The actual arithmetic --
+// excluding UnscopedExempt cases from the total -- is now value-tested
+// directly against corpusGrowthDriftValue in main_test.go's
+// TestCorpusGrowthDriftValueExcludesUnscopedExemptCases, the same function
+// this call site invokes, not a reimplementation of it.
+func TestMainCallsCorpusGrowthDriftLineWithNlUnscopedResults(t *testing.T) {
 	stmts := mainFuncBody(t)
 
 	for _, stmt := range stmts {
@@ -348,19 +347,31 @@ func TestMainCallsCorpusGrowthDriftLineWithNlTotal(t *testing.T) {
 			continue
 		}
 
-		// Found the call. Its one argument must be the plain identifier
-		// nlTotal, never nlScopedTotal.
+		// Found the call. Its one argument must itself be a call to
+		// corpusGrowthDriftValue, fed the raw unscoped results -- never
+		// nlTotal, nlScopedTotal or nlScopedResults directly.
 		if len(inner.Args) != 1 {
-			t.Fatalf("corpusGrowthDriftLine call has %d argument(s), want exactly 1 (nlTotal)", len(inner.Args))
+			t.Fatalf("corpusGrowthDriftLine call has %d argument(s), want exactly 1 (corpusGrowthDriftValue(nlUnscopedResults))", len(inner.Args))
 		}
-		ident, ok := inner.Args[0].(*ast.Ident)
+		valueCall, ok := inner.Args[0].(*ast.CallExpr)
 		if !ok {
-			t.Fatalf("corpusGrowthDriftLine's argument is a %T, want a plain *ast.Ident", inner.Args[0])
+			t.Fatalf("corpusGrowthDriftLine's argument is a %T, want a call to corpusGrowthDriftValue", inner.Args[0])
 		}
-		if ident.Name != "nlTotal" {
-			t.Fatalf("corpusGrowthDriftLine is called with %q, want nlTotal -- nlScopedTotal wrongly includes the UnscopedExempt cases checkExemptions requires to diverge from the unscoped line (agent-estate#1215)", ident.Name)
+		valueFn, ok := valueCall.Fun.(*ast.Ident)
+		if !ok || valueFn.Name != "corpusGrowthDriftValue" {
+			t.Fatalf("corpusGrowthDriftLine's argument calls %v, want corpusGrowthDriftValue", valueCall.Fun)
+		}
+		if len(valueCall.Args) != 1 {
+			t.Fatalf("corpusGrowthDriftValue call has %d argument(s), want exactly 1 (nlUnscopedResults)", len(valueCall.Args))
+		}
+		ident, ok := valueCall.Args[0].(*ast.Ident)
+		if !ok {
+			t.Fatalf("corpusGrowthDriftValue's argument is a %T, want a plain *ast.Ident", valueCall.Args[0])
+		}
+		if ident.Name != "nlUnscopedResults" {
+			t.Fatalf("corpusGrowthDriftValue is called with %q, want nlUnscopedResults -- nlScopedResults wrongly includes the UnscopedExempt cases checkExemptions requires to diverge from the unscoped line (agent-estate#1215, agent-estate#1218)", ident.Name)
 		}
 		return
 	}
-	t.Fatal("main() no longer calls corpusGrowthDriftLine(nlTotal) via fmt.Fprintln(w, ...) -- test could not locate the agent-estate#1112 disclosure line it guards")
+	t.Fatal("main() no longer calls corpusGrowthDriftLine(corpusGrowthDriftValue(nlUnscopedResults)) via fmt.Fprintln(w, ...) -- test could not locate the agent-estate#1112 disclosure line it guards")
 }
