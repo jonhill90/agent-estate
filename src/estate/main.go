@@ -201,17 +201,21 @@ func knowledgeGrounding() string {
 		"query [--private] \"<question>\"` returns small, ranked, cited pointers, and " +
 		"`go run ./src/estate knowledge get [--private] <id>` returns one pointer's full " +
 		"body -- run both from this worktree's root; `estate` itself is not on PATH here. " +
-		"The index is derived, never authoritative, and may be reported stale. `no_match` " +
-		"means no match, `withheld_private` means matches exist but are private, and " +
-		"`--private` lifts that filter and says so in its own output -- do not paste " +
-		"private material into anything public. Add `--json` to either command for the " +
-		"full machine-readable result, Coverage (agent-estate#1065's trustworthiness " +
-		"signal) included, instead of parsing the prose. This is a tool, not a required " +
-		"step: use it if it helps, and the turn still works when the index is missing. " +
-		"If results look noisy or off-topic, prefix the query with `source:<name>` -- e.g. " +
-		"`source:repo-docs` for how this repo works, `source:corpus-directive` for what " +
-		"the operator has decided -- to narrow to one source (agent-estate#1081; see " +
-		"`docs/knowledge-system.md` for the full scoping rules).\n"
+		"The index is derived, never authoritative, and may be reported stale. A query " +
+		"can come back five ways: `no_match` (no item fits) and `withheld_private` " +
+		"(matches exist but are private, `--private` lifts that filter) mean change your " +
+		"question -- but `index_missing`, `index_unreadable`, and an index that reads back " +
+		"with 0 items all mean the index itself is broken, and rephrasing will not help; " +
+		"regenerate it with `estate knowledge` instead. Do not paste private material into " +
+		"anything public. Add `--json` to either command for the full machine-readable " +
+		"result, Coverage (agent-estate#1065's trustworthiness signal, itself reported " +
+		"not_applicable when the index couldn't be read) included, instead of parsing the " +
+		"prose. This is a tool, not a required step: use it if it helps, and the turn " +
+		"still works when the index is missing. If results look noisy or off-topic, " +
+		"prefix the query with `source:<name>` -- e.g. `source:repo-docs` for how this " +
+		"repo works, `source:corpus-directive` for what the operator has decided -- to " +
+		"narrow to one source (agent-estate#1081; see `docs/knowledge-system.md` for the " +
+		"full scoping rules).\n"
 }
 
 // roleGrounding is what dispatch appends to the prompt based on role alone
