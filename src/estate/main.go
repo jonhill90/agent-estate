@@ -219,13 +219,26 @@ func prHeadBranch(pr int) (string, error) {
 // whether that's worth their time; telling a dispatched lane, mid-task, to
 // go run a benchmark is a cost this paragraph should not impose on every
 // turn. So the fix below is not "point at the same command instead" -- it
-// drops the stratum numbers entirely and keeps only the two claims that do
-// not move when the fixture grows: which sources are reachable in each mode
-// (structural: public mode has exactly two publishable sources and
-// `github-stars` has never outranked `repo-docs` on a repo-oriented
-// question, so `source:repo-docs` scoping there removes nothing that would
-// have won anyway) and which direction a wrong guess costs you (also
-// structural, not fixture-dependent). A reader who wants today's number
+// drops the stratum numbers entirely and keeps only claims that do not need
+// a count to be true: which sources are reachable in each mode (structural:
+// public mode has exactly two publishable sources) and which direction a
+// wrong guess costs you (also structural, not fixture-dependent).
+//
+// A third claim used to ride alongside those two, reasoned rather than
+// measured: that `github-stars` has never outranked `repo-docs` on a
+// repo-oriented question, so `source:repo-docs` scoping in public mode
+// removes nothing that would have won anyway. "Needs no count to stay true"
+// was read as "therefore true" -- the only thing actually established was
+// that the claim wouldn't go stale, not that it was correct, and that
+// conflation is what let it stand unmeasured. agent-estate#1212 measured it
+// against #1209's nl-22..nl-24 and found the opposite: `github-stars` is
+// large and dense enough in agent/tool/memory vocabulary to outrank a
+// `repo-docs` target whenever the question's own words overlap that
+// vocabulary, at ranks each case's own rationale field in
+// internal/knowledge/goldenset/natural_cases.json cites by id -- so
+// `source:repo-docs` scoping in public mode can change the ranked outcome.
+// The paragraph below states what that measurement supports, not the
+// stronger, unmeasured claim it replaced. A reader who wants today's number
 // runs `go run ./src/estate/cmd/goldenquery` or reads
 // `docs/knowledge-system.md`'s own scoping section; neither number is
 // restated here to go stale a second time. (Independently re-verified
@@ -275,13 +288,15 @@ func knowledgeGrounding() string {
 		"on purpose, agent-estate#1166: the checked-in fixture this would-be " +
 		"number is measured against grows over time, and a figure quoted in this " +
 		"paragraph would go stale silently, on every dispatched turn, with no " +
-		"stamp to date it by). In public mode this comparison does not exist: " +
-		"only two of the index's sources are publishable (`repo-docs`, " +
-		"`github-stars`), and `github-stars` has never outranked `repo-docs` on a " +
-		"repo-oriented question, so `source:repo-docs` scoping there can only " +
-		"ever remove a source that was not going to outrank the answer anyway -- " +
-		"structurally inert, not measurably inert, so this claim does not drift " +
-		"with the fixture the way a number would. A wrong " +
+		"stamp to date it by). In public mode there are only two publishable " +
+		"sources (`repo-docs`, `github-stars`), and whether `source:repo-docs` " +
+		"scoping there changes anything is not structural either way: " +
+		"`github-stars` is large and dense enough in agent/tool/memory " +
+		"vocabulary to outrank a `repo-docs` target when the question's own " +
+		"words overlap that vocabulary (agent-estate#1209, agent-estate#1212), " +
+		"so `source:repo-docs` scoping in public mode can change the ranked " +
+		"outcome -- it is not reliably inert, and it is not reliably an " +
+		"improvement either; which one depends on the question. A wrong " +
 		"guess is a different cost by mode. In public mode it is cheap: a wrong scope surfaces as `no_match` or " +
 		"`withheld_private`, visibly, and is fixed by re-running the same question " +
 		"unscoped. Under `--private` it is not cheap: a wrong scope can instead " +
