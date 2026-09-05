@@ -1,12 +1,70 @@
 package knowledge
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+// classifiedSourceNames parses classify.go's own AST and returns every
+// string literal named in a `case` clause of the switch inside func
+// classify, in source order, excluding the default clause. This is how
+// TestClassifyPublishableSetIsExactlyGithubStarsAndRepoDocs derives the
+// source set instead of hand-listing it -- see that test's own comment for
+// why a hand-listed set cannot catch a genuinely new case name.
+func classifiedSourceNames(t *testing.T) []string {
+	t.Helper()
+
+	fset := token.NewFileSet()
+	file, err := parser.ParseFile(fset, "classify.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parsing classify.go: %v", err)
+	}
+
+	var names []string
+	ast.Inspect(file, func(n ast.Node) bool {
+		fn, ok := n.(*ast.FuncDecl)
+		if !ok || fn.Name.Name != "classify" {
+			return true
+		}
+		ast.Inspect(fn.Body, func(n ast.Node) bool {
+			sw, ok := n.(*ast.SwitchStmt)
+			if !ok {
+				return true
+			}
+			for _, stmt := range sw.Body.List {
+				clause, ok := stmt.(*ast.CaseClause)
+				if !ok || clause.List == nil { // nil List is the default clause
+					continue
+				}
+				for _, expr := range clause.List {
+					lit, ok := expr.(*ast.BasicLit)
+					if !ok || lit.Kind != token.STRING {
+						continue
+					}
+					unquoted, err := strconv.Unquote(lit.Value)
+					if err != nil {
+						t.Fatalf("unquoting case literal %s: %v", lit.Value, err)
+					}
+					names = append(names, unquoted)
+				}
+			}
+			return false
+		})
+		return false
+	})
+
+	if len(names) == 0 {
+		t.Fatal("classifiedSourceNames found no case clauses in classify() -- parser is broken or classify.go's shape changed under it")
+	}
+	return names
+}
 
 // TestClassifyDefaultsUnknownSourcesPrivate is classify's own contract in
 // isolation: any source name it has not positively allow-listed comes back
@@ -105,28 +163,90 @@ func TestClassifyLoopsResearchAndVaultFactAreExplicitNotDefault(t *testing.T) {
 // catch a third *named* case added to the switch, which the default test
 // cannot, since a named case never reaches the default branch.
 //
-// To confirm this guard actually fires rather than passing vacuously:
-// temporarily add a third publishable case to classify.go (e.g.
-// `case "vault-fact": return true, "..."`) and run this test -- it fails,
-// naming the source and the mismatch. Revert and it passes again. See the
-// PR body for both runs.
+// agent-estate#1180 RESIDUAL, found by a follow-up audit: the fix above
+// still iterated a hand-written allKnownSources list. That caught a
+// LISTED source flipping publishable (e.g. changing vault-fact's case to
+// return true), but a genuinely NEW case name -- someone adds
+// `case "slack-archive": return true, ...` to classify.go tomorrow --
+// was never in the list, so it was never called, and the test passed
+// unchanged. The doc comment above claims this test "would catch a third
+// named case added to the switch" -- true only for a name already in the
+// list, which is exactly the gap a new case exploits.
+//
+// The fix here is choice (1) from that audit, not (2): derive the source
+// set from classify.go's own AST (classifiedSourceNames, above) instead
+// of hand-listing it, so the enumeration cannot go stale independently of
+// the switch it describes. Every case name the switch actually contains
+// is looked up in wantPublic below; a name with no entry fails loudly
+// (via the `ok` check) naming itself, rather than silently never being
+// asked. Choice (2) -- narrowing the doc comment to admit the gap -- was
+// rejected: it leaves the blind spot open, and knowledgeGrounding()
+// (src/estate/main.go, agent-estate#1177) ships a claim to every
+// dispatched lane that depends on the publishable set staying exactly
+// {github-stars, repo-docs} (see the long comment above). A guard that
+// cannot see a new source at all is worse than one with a slightly wrong
+// name; this repo has already recorded that a check nothing can fail is
+// not a check (see the "count-agents.sh" lesson in this repo's own
+// CLAUDE.md) -- the same reasoning applies to a check that CAN fail but
+// structurally never sees the input that would make it.
+//
+// This still cannot see everything: classifiedSourceNames only reads
+// string-literal case labels from classify()'s switch. A rewrite of
+// classify() to something other than a string switch (a map lookup, a
+// helper function, a build tag) would make classifiedSourceNames find
+// zero cases and fail loudly at the `len(names) == 0` check above, rather
+// than silently passing vacuously -- that failure is the intended
+// fallback, not a gap, since it forces whoever changes classify()'s shape
+// to update this test's derivation too.
+//
+// To confirm this guard actually fires rather than passing vacuously, two
+// mutations, both demonstrated in the PR body for this change:
+//  1. temporarily add a third publishable case under a NEW name, e.g.
+//     `case "slack-archive-TEMP": return true, "..."` -- this test fails,
+//     naming "slack-archive-TEMP" as classified true with no wantPublic
+//     entry. This is the exact case the pre-#1180-residual version of
+//     this test missed.
+//  2. temporarily flip an existing listed case's boolean, e.g. change
+//     vault-fact's case to `return true, "..."` -- this test fails,
+//     naming vault-fact's mismatch (the case the original 1180 fix
+//     already covered).
+//
+// Revert both and the test passes again.
 func TestClassifyPublishableSetIsExactlyGithubStarsAndRepoDocs(t *testing.T) {
 	wantPublic := map[string]bool{
-		"github-stars": true,
-		"repo-docs":    true,
-	}
-	allKnownSources := []string{
-		"github-stars", "repo-docs", "loops-research", "vault-fact",
-		"corpus-parameter", "some-future-source",
+		"github-stars":   true,
+		"repo-docs":      true,
+		"loops-research": false,
+		"vault-fact":     false,
 	}
 
-	for _, source := range allKnownSources {
+	for _, source := range classifiedSourceNames(t) {
+		want, ok := wantPublic[source]
+		if !ok {
+			t.Errorf("classify.go's switch has a case %q with no expectation in this test's wantPublic map -- a new source was added to classify() without updating this guard (agent-estate#1180)", source)
+			continue
+		}
 		publishable, basis := classify(source)
-		if want := wantPublic[source]; publishable != want {
+		if publishable != want {
 			t.Errorf("classify(%q) = publishable=%v, want %v -- the publishable set must stay exactly {github-stars, repo-docs} (agent-estate#1180)", source, publishable, want)
 		}
 		if basis == "" {
 			t.Errorf("classify(%q) gave no basis for its verdict", source)
+		}
+	}
+
+	// Also assert the reverse direction: every source this test expects
+	// to exist was actually found in the switch. Without this, deleting a
+	// case from classify.go (e.g. removing vault-fact's explicit entry)
+	// would silently shrink classifiedSourceNames' output and this test
+	// would just check less, not fail.
+	found := map[string]bool{}
+	for _, source := range classifiedSourceNames(t) {
+		found[source] = true
+	}
+	for source := range wantPublic {
+		if !found[source] {
+			t.Errorf("wantPublic expects a case %q but classify.go's switch no longer has it", source)
 		}
 	}
 }
