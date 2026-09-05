@@ -40,41 +40,29 @@ func realCommit(t *testing.T, repoRoot, ref string) string {
 	return strings.TrimSpace(string(out))
 }
 
-// TestKnowledgeQueryPreGuardCommitIsFlagged is the reproduction case
-// agent-estate#1191's provenance backstop exists for: an index whose
-// GeneratedBy.Commit is a REAL, positively-resolved ancestor of
-// knowledge.GuardCommit (agent-estate#1185, 2a6117f) folds in
-// CoveragePreGuardCommit, naming both commits -- FAILS BEFORE this change
-// (no such state, no such fold existed at all) and PASSES AFTER.
-func TestKnowledgeQueryPreGuardCommitIsFlagged(t *testing.T) {
-	bin := buildEstateBinary(t)
-	repoRoot := realRepoRoot(t)
-	preGuard := realCommit(t, repoRoot, knowledge.GuardCommit+"~20")
-
-	idx := filepath.Join(t.TempDir(), "index.json")
-	writeFixtureIndexWithGeneratedBy(t, idx, knowledge.GeneratedBy{Commit: preGuard, BuiltAt: time.Now().UTC()})
-
-	got := runKnowledgeQueryJSONWithRepoRoot(t, bin, idx, repoRoot)
-
-	var found bool
-	for _, r := range got.Coverage.Reasons {
-		if r.State == "pre_guard_commit" {
-			found = true
-			if !strings.Contains(r.Detail, preGuard[:12]) {
-				t.Fatalf("pre_guard_commit Detail does not name the index's own commit: %q (want %q)", r.Detail, preGuard[:12])
-			}
-			if !strings.Contains(r.Detail, knowledge.GuardCommit[:12]) {
-				t.Fatalf("pre_guard_commit Detail does not name the guard commit: %q (want %q)", r.Detail, knowledge.GuardCommit[:12])
-			}
-		}
-	}
-	if !found {
-		t.Fatalf("Coverage.Reasons does not carry a pre_guard_commit reason for a commit that genuinely predates the guard: %+v", got.Coverage.Reasons)
-	}
-	if got.Coverage.State == "complete" {
-		t.Fatalf("Coverage.State = %q -- must not read complete when the index predates the shared-write ack guard", got.Coverage.State)
-	}
-}
+// TestKnowledgeQueryPreGuardCommitIsFlagged used to live here as an
+// end-to-end reproduction (real repository, knowledge.GuardCommit~20) of
+// agent-estate#1191's provenance backstop. It was removed on review
+// (agent-estate#1199): resolving GuardCommit~20 needs 20 generations of
+// real history behind that commit, and CI's actions/checkout@v5 defaults
+// to fetch-depth 1, so that history -- and, confirmed by hand, GuardCommit
+// itself as an actual object, not merely its syntactically-valid hex
+// string -- is absent on the runner. `git merge-base --is-ancestor
+// <GuardCommit> HEAD` in a real depth-1 clone of this repo fails with
+// "fatal: Not a valid commit name", which the production code correctly
+// folds into ProvenanceUnknown -- but that means no automated test running
+// in that environment can ever observe a genuine ProvenancePreGuard or
+// ProvenanceClean answer against the real GuardCommit constant; only a
+// full clone (which CI deliberately does not do) can. The positive
+// pre-guard and clean cases are now covered hermetically, with real git
+// and full control over ancestry, by
+// internal/knowledge/provenance_realgit_test.go
+// (TestResolveGuardProvenanceRealGitPreGuardAncestor and
+// TestResolveGuardProvenanceRealGitCleanDescendant), which build their own
+// two-commit repository from scratch instead of reaching into this
+// repository's real history. GuardCommit's own identity was independently
+// confirmed against the real repository during review (diffed against its
+// parent) rather than re-proven by a test here.
 
 // TestKnowledgeQueryPostGuardCommitIsClean is the negative case: an index
 // built by a REAL descendant of knowledge.GuardCommit (the current
