@@ -671,6 +671,38 @@ func (r ratchet) ok() bool {
 // under --private, that divergence is itself worth reporting, not silently
 // folded into a floor edit.
 //
+// agent-estate#1169: the natural-language stratum's own totals moved 12->21,
+// nlTop3MaxMisses did NOT move. #1169's issue named two shapes for closing
+// the "9 of 12 repo-docs files have zero fixture coverage" gap it measured
+// -- per-file (every file gets at least one case, mechanical and checkable)
+// vs per-importance (only the documents lanes are actually directed to,
+// smaller but resting on a judgement call that drifts). This picked
+// PER-FILE: it closes exactly the failure mode #1169 described (a document
+// falling out of retrieval prints nothing and fails nothing) without
+// requiring anyone to keep re-deciding which of the 12 files "matters", and
+// it stays proportionate the same way the original 12-case set did -- one
+// case per file, not one per section (118 sections were explicitly NOT the
+// target, see #1169's own "not claiming" list). The cost accepted: nine more
+// cases to maintain, and a per-file case is a shallower probe of a large
+// file than #1073's original AGENTS.md cases were of AGENTS.md, since one
+// case cannot exercise everything in a 16-section file. nl-13..nl-21 (one
+// per previously-uncovered file: docs/director-brief.md, docs/tui/SPEC.md,
+// docs/tui/PRD.md, docs/knowledge-system.md, docs/phase-plan.md,
+// docs/director-loop.md, docs/spend-observation.md, docs/reviewer-value.md,
+// docs/ci-rules-retired.md) were each written from a caller's own need
+// against that file's actual content, never from a section's own title, and
+// each was measured landing at rank 1-3 on a fresh scratch index before
+// being checked in -- the same "chosen before any query ran, verified
+// after" discipline #1073/#1140 used. All nine passed at top-3, so this is
+// OPTION 1 from #1169's own framing (cases added that pass, miss budget
+// left alone): nlTop3MaxMisses is UNCHANGED at 8, and the denominator-
+// independent floor derived from it (ratchet.floor) rose automatically from
+// 4-of-12 to 13-of-21 with no edit here, exactly as #1152 intended. Measured
+// 13/21 on this same commit -- zero of the nine new cases missed, so the
+// floor was not loosened to absorb a failure; it moved only because the
+// total moved. See natural_cases.json's own nl-13..nl-21 entries for each
+// case's individual rank evidence.
+//
 // Re-measure before trusting any of these numbers further; they are one
 // observation from one checkout, not a constant.
 func buildRatchets(nlTop3, nlTotal, nlScopedTop3, nlScopedTotal, privateHits, privateTotal, reachableHits, reachableTotal, starTop3, starTop10, starTotal int, noneResult *result) []ratchet {
@@ -685,7 +717,7 @@ func buildRatchets(nlTop3, nlTotal, nlScopedTop3, nlScopedTotal, privateHits, pr
 	// TestBuildRatchetsReasonsStateTheirOwnMissBudget below still asserts it,
 	// the same belt-and-suspenders shape #1121 used.
 	const (
-		nlTop3MaxMisses    = 8 // floor 4 of 12 (agent-estate#1140)
+		nlTop3MaxMisses    = 8 // floor 4 of 12 (agent-estate#1140), now 13 of 21 -- agent-estate#1169 added nl-13..nl-21 (per-file coverage), all nine pass, this constant did not move
 		retrievalMaxMisses = 1 // floor 16 of 17 pre-#1150, now 21 of 22 -- agent-estate#1152
 		reachableMaxMisses = 0 // floor 5 of 5 (agent-estate#1133)
 		starTop3MaxMisses  = 1 // floor 7 of 8
@@ -694,9 +726,9 @@ func buildRatchets(nlTop3, nlTotal, nlScopedTop3, nlScopedTotal, privateHits, pr
 	)
 	rs := []ratchet{
 		{"natural-language stratum top-3, unscoped", nlTop3, nlTotal, nlTop3MaxMisses,
-			fmt.Sprintf("agent-estate#1066: tolerates at most %d miss(es) out of the current total -- floor LOWERED from 6-of-12 to 4-of-12 by agent-estate#1140, nl-09 and nl-11 were re-authored from a caller's actual need instead of the section title's own wording (both were 100%% term overlap, rank 1, no headroom to detect a regression), which is expected to move them out of the top 10 entirely, not just out of the top 3. This is the fixture getting better while the retriever is unchanged, not a retrieval regression -- see agent-estate#1140's PR body", nlTop3MaxMisses)},
+			fmt.Sprintf("agent-estate#1066: tolerates at most %d miss(es) out of the current total -- floor LOWERED from 6-of-12 to 4-of-12 by agent-estate#1140, nl-09 and nl-11 were re-authored from a caller's actual need instead of the section title's own wording (both were 100%% term overlap, rank 1, no headroom to detect a regression), which is expected to move them out of the top 10 entirely, not just out of the top 3. This is the fixture getting better while the retriever is unchanged, not a retrieval regression -- see agent-estate#1140's PR body. agent-estate#1169 added nl-13..nl-21, one PER-FILE case for each of the 9 repo-docs files (of 12 in the index) that previously had zero fixture coverage -- picked per-file over per-importance because it is mechanical and checkable rather than resting on a judgement about which files matter, at the cost of 9 more cases to maintain and each being a shallower probe than the original per-file AGENTS.md coverage. All nine measured rank <=3 before being checked in and this constant did not move -- the floor rose from 4-of-12 to 13-of-21 only because the denominator-independent total did, per agent-estate#1152, not because any miss budget was loosened", nlTop3MaxMisses)},
 		{"natural-language stratum top-3, private scoped source:repo-docs", nlScopedTop3, nlScopedTotal, nlTop3MaxMisses,
-			fmt.Sprintf("agent-estate#1162: tolerates at most %d miss(es) out of the current total -- same floor (4-of-12) and same nl-09/nl-11 reasoning as the unscoped top-3 line above, carried forward from agent-estate#1140. This line moved from public to --private mode under agent-estate#1162: the public-mode arm it replaces was measured a tautology (identical to the unscoped line on all 12 cases, at every rank, on c8e0b59 -- default/public mode has only two publishable sources, so source:repo-docs could only ever remove github-stars items, which never outranked repo-docs on any of these questions). --private mode has seven competing sources and the filter has real work to do there; source: scoping does not recover nl-09 or nl-11 even so", nlTop3MaxMisses)},
+			fmt.Sprintf("agent-estate#1162: tolerates at most %d miss(es) out of the current total -- same floor (4-of-12, now 13-of-21 after agent-estate#1169's nine per-file additions -- see the unscoped top-3 ratchet's own reason string for that decision) and same nl-09/nl-11 reasoning as the unscoped top-3 line above, carried forward from agent-estate#1140. This line moved from public to --private mode under agent-estate#1162: the public-mode arm it replaces was measured a tautology (identical to the unscoped line on all 12 cases, at every rank, on c8e0b59 -- default/public mode has only two publishable sources, so source:repo-docs could only ever remove github-stars items, which never outranked repo-docs on any of these questions). --private mode has seven competing sources and the filter has real work to do there; source: scoping does not recover nl-09 or nl-11 even so", nlTop3MaxMisses)},
 		{"retrieval score (private)", privateHits, privateTotal, retrievalMaxMisses,
 			fmt.Sprintf("agent-estate#1152: tolerates at most %d miss(es) out of the current total, denominator-independent -- unaffected by #1137/#1138, neither of which touched a private-mode cases.json case. agent-estate#1150's five camelcase-01..05 corpus-directive cases moved the denominator 17 -> 22 without raising the old hardcoded floor of 16, which silently grew the tolerated-miss count from 1 to 6; this ratchet is now defined by the miss budget instead of a hit floor, so the next case added here cannot loosen it the same way", retrievalMaxMisses)},
 		{"publishable-reachable score", reachableHits, reachableTotal, reachableMaxMisses,

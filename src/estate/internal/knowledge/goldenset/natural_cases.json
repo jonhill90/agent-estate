@@ -6,7 +6,7 @@
     "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-tui--merging-prs-you-did-not-author",
     "rationale": "Target is AGENTS.md's own \"The TUI -- Merging PRs you did not author\" section title, chosen before any query ran (agent-estate#1073). Baseline on a7d413c (agent-estate#1069, default/public, unscoped): rank 2.",
     "note": "natural-language stratum (#1073/#1069/#1053) -- a lane phrasing, not a term drawn from the target section itself. Reported as its own stratum, never averaged with cases.json's score (#1069).",
-    "target_text": "agent-estate — agent orientation — The TUI — Merging PRs you did not author -- Every agent lane pushes through the same shared GitHub login, so `gh pr\nreview --approve` is refused as self-review regardless of who is actually\nasking — a real cross-lane review is recorded as a plain PR comment instead\nof a GitHub review object, carrying:\n\n```\nVerdict: APPROVE            (or REQUEST CHANGES, with specifics)\nReview-Lane: \u003creviewing lane's own name\u003e\nReviewed-SHA: \u003cthe exact head commit SHA reviewed\u003e\n```\n\nand the PR's own body states which lane opened it: `Author-Lane: \u003cauthoring\nlane's own name\u003e`.\n\n**`cmd/mergepr` is THE way to merge a PR in this repo. Do not `gh pr merge`\ndirectly, and do not run `cmd/prverdict` as a manual pre-check and then merge\nby hand.**\n\n```\ngo run ./cmd/mergepr -repo \u003cowner/name\u003e -number \u003cN\u003e\ngo run ./cmd/mergepr -repo \u003cowner/name\u003e -number \u003cN\u003e -- …"
+    "target_text": "agent-estate — agent orientation — The TUI — Merging PRs you did not author -- Every agent lane pushes through the same shared GitHub login, so `gh pr\nreview --approve` is refused as self-review regardless of who is actually\nasking — a real cross-lane review is recorded as a plain PR comment instead\nof a GitHub review object, carrying:\n\n```\nVerdict: APPROVE            (or REQUEST CHANGES, with specifics)\nReview-Lane: <reviewing lane's own name>\nReviewed-SHA: <the exact head commit SHA reviewed>\n```\n\nand the PR's own body states which lane opened it: `Author-Lane: <authoring\nlane's own name>`.\n\n**`cmd/mergepr` is THE way to merge a PR in this repo. Do not `gh pr merge`\ndirectly, and do not run `cmd/prverdict` as a manual pre-check and then merge\nby hand.**\n\n```\ngo run ./cmd/mergepr -repo <owner/name> -number <N>\ngo run ./cmd/mergepr -repo <owner/name> -number <N> -- …"
   },
   {
     "id": "nl-02",
@@ -60,7 +60,7 @@
     "expected_identifier": "AGENTS.md#agent-estate-agent-orientation--the-daemon--the-guards-that-actually-run",
     "rationale": "Target is AGENTS.md's own \"The daemon -- The guards that actually run\" section title, chosen before any query ran. Baseline on a7d413c: rank 6 (buried, not absent).",
     "note": "natural-language stratum (#1073/#1069/#1053).",
-    "target_text": "agent-estate — agent orientation — The daemon — The guards that actually run -- Two, both in Go, both failing closed.\n\n| Guard | Refuses | Implemented in |\n|---|---|---|\n| Host pressure | a new dispatch when the host cannot safely take one — and equally when it cannot measure the host at all, because blindness is not capacity. The token-budget floor is one of its limits, not a separate gate: `internal/quota` refuses at roughly 10% remaining, and a reading older than 20 minutes counts as no reading | `estate pressure`, `src/estate/internal/pressure`, `src/estate/internal/quota` |\n| Merge gate | to *allow* a merge unless the PR is open with every required check green at its live head SHA, a dispatched turn is joined to it by BOTH its `dispatch/\u003cid\u003e` head ref and a head SHA the estate itself recorded, the reviewer is a different dispatch from the author, and a parsable …"
+    "target_text": "agent-estate — agent orientation — The daemon — The guards that actually run -- Two, both in Go, both failing closed.\n\n| Guard | Refuses | Implemented in |\n|---|---|---|\n| Host pressure | a new dispatch when the host cannot safely take one — and equally when it cannot measure the host at all, because blindness is not capacity. The token-budget floor is one of its limits, not a separate gate: `internal/quota` refuses at roughly 10% remaining, and a reading older than 20 minutes counts as no reading | `estate pressure`, `src/estate/internal/pressure`, `src/estate/internal/quota` |\n| Merge gate | to *allow* a merge unless the PR is open with every required check green at its live head SHA, a dispatched turn is joined to it by BOTH its `dispatch/<id>` head ref and a head SHA the estate itself recorded, the reviewer is a different dispatch from the author, and a parsable …"
   },
   {
     "id": "nl-08",
@@ -78,7 +78,7 @@
     "expected_identifier": "docs/product/SPEC.md#agent-estate-spec--the-pressure-gate-srcestateinternalpressure",
     "rationale": "Target is docs/product/SPEC.md's own \"The pressure gate\" section title, chosen before any query ran. Baseline on a7d413c: rank 1.",
     "note": "natural-language stratum (#1073/#1069/#1053). Re-authored under agent-estate#1140/#1115's method: the original question (\"what does the pressure gate do\") reused both content words of the section's own title (\"pressure\", \"gate\"), landing rank 1 with 100% term overlap against target_text -- no headroom to detect a regression. Rewritten from a caller's actual need (why a dispatch attempt might be refused) without reading the section title's own wording first; the section was looked up only afterward to confirm it still answers the need.",
-    "target_text": "agent-estate — SPEC — The pressure gate — `src/estate/internal/pressure` -- Three independent limits, all of which must pass:\n\n| limit | default | source |\n|---|---|---|\n| load per core | \u003c 3.0 | `sysctl -n vm.loadavg` / `runtime.NumCPU()` |\n| free memory | \u003e= 512 MB | `sysctl -n vm.swapusage` |\n| lanes in flight | \u003c 6 | ledger, non-terminal records |\n\n**Every one fails closed.** A measurement that errors sets `OK=false` with the\nfailure named. This exists because the previous estate had three pressure checks\nthat did not consult each other and a session cap the dispatchers in use never\ncalled; the host needed a hard restart twice."
+    "target_text": "agent-estate — SPEC — The pressure gate — `src/estate/internal/pressure` -- Three independent limits, all of which must pass:\n\n| limit | default | source |\n|---|---|---|\n| load per core | < 3.0 | `sysctl -n vm.loadavg` / `runtime.NumCPU()` |\n| free memory | >= 512 MB | `sysctl -n vm.swapusage` |\n| lanes in flight | < 6 | ledger, non-terminal records |\n\n**Every one fails closed.** A measurement that errors sets `OK=false` with the\nfailure named. This exists because the previous estate had three pressure checks\nthat did not consult each other and a session cap the dispatchers in use never\ncalled; the host needed a hard restart twice."
   },
   {
     "id": "nl-10",
@@ -87,7 +87,7 @@
     "expected_identifier": "docs/product/SPEC.md#agent-estate-spec--dispatch-srcestate-estate-dispatch-issue-brief-file",
     "rationale": "Target is docs/product/SPEC.md's own \"Dispatch\" section title, chosen before any query ran. Baseline on a7d413c: rank 3.",
     "note": "natural-language stratum (#1073/#1069/#1053).",
-    "target_text": "agent-estate — SPEC — Dispatch — `src/estate` (`estate dispatch \u003cissue\u003e \u003cbrief-file\u003e`) -- 1. Read the brief. Refuse if unreadable.\n2. Check pressure. **Refuse before creating anything** if the host is loaded —\n   the old dispatcher created a branch and worktree first and leaked both on\n   every refusal.\n3. Append `dispatched`.\n4. Run `claude -p --output-format json` as a subprocess with the brief on stdin,\n   under a 45-minute context timeout.\n5. Append the outcome:\n   - context deadline hit → `unknown` (\"unknown is not failed\"), slot stays held\n   - non-zero exit → `failed`\n   - exit 0 with parseable JSON → `complete`, result recorded\n   - exit 0 with unparseable output → `unknown`, not a clean completion\n\nExit status is 0 only for `complete`."
+    "target_text": "agent-estate — SPEC — Dispatch — `src/estate` (`estate dispatch <issue> <brief-file>`) -- 1. Read the brief. Refuse if unreadable.\n2. Check pressure. **Refuse before creating anything** if the host is loaded —\n   the old dispatcher created a branch and worktree first and leaked both on\n   every refusal.\n3. Append `dispatched`.\n4. Run `claude -p --output-format json` as a subprocess with the brief on stdin,\n   under a 45-minute context timeout.\n5. Append the outcome:\n   - context deadline hit → `unknown` (\"unknown is not failed\"), slot stays held\n   - non-zero exit → `failed`\n   - exit 0 with parseable JSON → `complete`, result recorded\n   - exit 0 with unparseable output → `unknown`, not a clean completion\n\nExit status is 0 only for `complete`."
   },
   {
     "id": "nl-11",
@@ -106,5 +106,86 @@
     "rationale": "Target is docs/product/PRD.md's own \"What it refuses to do\" section title, chosen before any query ran. Baseline on a7d413c: rank 2.",
     "note": "natural-language stratum (#1073/#1069/#1053).",
     "target_text": "agent-estate — PRD — What it refuses to do -- - Drive an agent by typing into a terminal pane and reading pixels back.\n- Free a slot for a turn it did not observe finish.\n- Delete a branch, worktree or file without a recoverable copy.\n- Extend a layer that a standing directive has ruled out — the correct response\n  is to stop and say so, not to do it well."
+  },
+  {
+    "id": "nl-13",
+    "question": "what should I check before treating something an operator said as a binding rule",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/director-brief.md#director-standing-brief--4-the-corpus--before-a-parameter-binds-you",
+    "rationale": "Target is docs/director-brief.md's own \"4. The corpus -- Before a parameter binds you\" section, chosen before any query ran (agent-estate#1169: this file had zero fixture coverage despite being one of the 12 repo-docs files in the index). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
+    "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/director-brief.md had no case at all before this one.",
+    "target_text": "Director — standing brief — 4. The corpus — Before a parameter binds you -- 1. **Join it to its source prompt and read what he actually typed.** At least\n   one hard parameter is fabricated: he ranted about scripts hidden in\n   `~/.local`, and an itemiser filed *\"~/.local holds state like logs and\n   status, never scripts\"* — a storage policy he never stated — as his law.\n2. **A parameter distilled from a question is not law.** He asked \"do we need\n   Sonnet for the workers?\" and it was filed as a hard rule. If the source\n   prompt ends in a question mark and no answer is recorded, treat it as an\n   open question, not a constraint.\n3. **A parameter you cannot join is not law** and must not be cited in a plan,\n   a PR, or a decision.\n4. **When a joined parameter conflicts with observed repo state, that is an\n   intent conflict** — escalate it under §5. That is pre…"
+  },
+  {
+    "id": "nl-14",
+    "question": "what bugs are already known in the TUI",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/tui/SPEC.md#spec-agent-tui-technical-design-as-it-exists--known-defects-verified-live-against-b00db9b",
+    "rationale": "Target is docs/tui/SPEC.md's own \"Known defects, verified live against `b00db9b`\" section, chosen before any query ran (agent-estate#1169: docs/tui/SPEC.md had zero fixture coverage). Measured on this checkout, scratch index built from a5b3d76: rank 3, default/public, unscoped -- AGENTS.md's own \"Known defects\" section for the daemon/TUI merge and a cost.Fetcher adapter-seam section both outrank it, which is expected since all three are legitimately about the same TUI, not a miss.",
+    "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/tui/SPEC.md had no case at all before this one.",
+    "target_text": "SPEC — agent-tui, technical design as it exists — Known defects, verified live against `b00db9b` -- **All three closed, `6942926`/`390c99a`, 2026-08-23.** `agent-tui#49` is\nclosed; the three defects below are historical, kept for record with their\nfixes noted rather than deleted. See `AGENTS.md`'s own \"Known defects\"\nsection for the fix evidence (`cmd/estate/main.go`'s `supervisorRepoResolved`\nhandling for agent-tui#1, `resolveLedgerSource`/`defaultLedgerLivePath`/\n`newLedgerCopier` for agent-tui#2, `internal/cost/quota.go`'s `QuotaRunner`/\n`ExecQuotaRunner` wiring for agent-tui#3) — the same evidence, not re-derived here.\n\nagent-tui#49 (open) records three; all three were confirmed here by\nrunning the built binary, not by reading source:\n\n1. **Bare launch exits 1.** `go build -o /tmp/estate-check ./cmd/estate\n   && /tmp/estate-check` with no flags and no `$AGENT_SUPERVISOR_REPO`\n   pri…"
+  },
+  {
+    "id": "nl-15",
+    "question": "what constraints on the TUI came from actual measurement rather than opinion",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/tui/PRD.md#prd-agent-tui--non-negotiable-constraints-from-measurement-not-taste",
+    "rationale": "Target is docs/tui/PRD.md's own \"Non-negotiable constraints, from measurement not taste\" section, chosen before any query ran (agent-estate#1169: docs/tui/PRD.md had zero fixture coverage). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
+    "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/tui/PRD.md had no case at all before this one.",
+    "target_text": "PRD — agent-tui — Non-negotiable constraints, from measurement not taste -- These come from `README.md`'s existing \"Design constraints\" section and are\ncarried forward here because they bound every feature above:\n\n- **It renders in its own window; it never injects panes into live ones.**\n  Measured on a real fixture: injecting a fixed-width pane into a tmux\n  window changed two lanes' classification, because the supervisor reads\n  panes to determine state. A sidebar built that way corrupts the state it\n  is trying to display.\n- **Acceptance for any renderer: `lanes.sh` output is byte-identical with\n  the app running and not running.** `scripts/verify-lanes-unaffected.sh`\n  is the checked proof of this.\n- **Every state the supervisor emits must be nameable** — a lane state with\n  no glyph must not silently read as idle.\n- **Single static binary**, Mac and Linux to…"
+  },
+  {
+    "id": "nl-16",
+    "question": "what does it mean if a knowledge query returns nothing",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/knowledge-system.md#how-does-knowledge-retrieval-work-in-this-repo--what-happens-when-nothing-or-the-wrong-thing-answers-a-question",
+    "rationale": "Target is docs/knowledge-system.md's own \"What happens when nothing (or the wrong thing) answers a question?\" section, chosen before any query ran (agent-estate#1169: this is the document agent-estate#1169's own issue names as \"where the grounding sends every lane\" and it had zero fixture coverage). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
+    "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/knowledge-system.md had no case at all before this one, despite being the document every lane is directed to.",
+    "target_text": "How does knowledge retrieval work in this repo? — What happens when nothing (or the wrong thing) answers a question? -- Four distinct absences, on purpose never collapsed into one \"nothing here\"\nshape, each with its own exit code from `estate knowledge query`:\n\n| exit | state | means |\n|---|---|---|\n| 0 | `matched` (or `matched_withheld_majority`) | at least one publishable item scored above zero and was returned |\n| 1 | `no_match` | the index was read fine; nothing in it scored above zero against this question — a real, empty answer, not a failure |\n| 2 | `index_missing` / `index_unreadable` | the compiled index itself could not be read at all — run `estate knowledge` first |\n| 3 | `withheld_private` | something answers this question, but every matching item is private and this call did not ask for private material |\n\n**In practice, exit 3 fires when the public sources themselves were absent or\nunreadable…"
+  },
+  {
+    "id": "nl-17",
+    "question": "what risk in the roadmap has not been addressed yet",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/phase-plan.md#phase-plan-the-meta-harness--the-risk-that-has-not-changed",
+    "rationale": "Target is docs/phase-plan.md's own \"The risk that has not changed\" section, chosen before any query ran (agent-estate#1169: docs/phase-plan.md had zero fixture coverage). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
+    "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/phase-plan.md had no case at all before this one.",
+    "target_text": "Phase plan — the meta-harness — The risk that has not changed -- Phases 0, 3, 4 and 6 live in `src/estate`, which `src/progress` scores as\n\"app\" while showing the operator nothing. Every tick report names which of\n`src/tui` / `src/estate` moved. A run of `src/estate`-only weeks is a signal to\nreorder, not to keep scoring."
+  },
+  {
+    "id": "nl-18",
+    "question": "does the director loop verify that the work it kicked off actually succeeded",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/director-loop.md#the-directors-loop--what-is-not-verified-here",
+    "rationale": "Target is docs/director-loop.md's own \"What is not verified here\" section, chosen before any query ran (agent-estate#1169: docs/director-loop.md had zero fixture coverage). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
+    "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/director-loop.md had no case at all before this one.",
+    "target_text": "The Director's loop — What is not verified here -- That the cron survives a session restart — it does not. Replacing this stopgap\nwith real loop and graph engineering is Phase 6 of `docs/phase-plan.md`, and\nuntil then a dead session means a dead loop with no external alarm."
+  },
+  {
+    "id": "nl-19",
+    "question": "how should a spend ledger handle harnesses reporting cost differently",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/spend-observation.md#what-a-turn-actually-costs-what-can-be-observed-harness-by-harness--what-this-means-for-a-spend-ledger",
+    "rationale": "Target is docs/spend-observation.md's own \"What this means for a spend ledger\" section, chosen before any query ran (agent-estate#1169: docs/spend-observation.md had zero fixture coverage). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
+    "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/spend-observation.md had no case at all before this one.",
+    "target_text": "What a turn actually costs — what can be observed, harness by harness — What this means for a spend ledger -- | harness | dollar cost, per turn | token counts, per turn | source |\n|---|---|---|---|\n| claude | **yes** — `total_cost_usd`, Anthropic's own billed figure | yes — `usage.*` | same stdout envelope the estate already reads for `result` |\n| codex | **no** — codex reports no dollar figure anywhere | yes — `turn.completed.usage` (`--json` must be added to the invocation) | stdout, once `--json` is added |\n\nSo a per-turn spend ledger can *honestly* carry:\n- `claude`: a real, harness-reported `CostUSD`, plus token counts.\n- `codex`: token counts only, `CostUSD` absent (typed absence, not a zero\n  or an estimate).\n\nThis is implemented in `internal/harness.Turn.Spend` (a new field alongside\nthe existing `Result`, same \"read what the harness itself produced\" shape)\nand recorded on `ledger.Record`…"
+  },
+  {
+    "id": "nl-20",
+    "question": "is the extra review step actually worth the tokens it costs",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/reviewer-value.md#do-the-reviewers-earn-their-tokens--what-it-cost",
+    "rationale": "Target is docs/reviewer-value.md's own \"What it cost\" section, chosen before any query ran (agent-estate#1169: docs/reviewer-value.md had zero fixture coverage). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
+    "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/reviewer-value.md had no case at all before this one.",
+    "target_text": "Do the reviewers earn their tokens? — What it cost -- Pairing each review's `dispatched`→`complete` timestamps: **51 review turns\ntotaled ~11,006 seconds (≈183 agent-minutes), averaging 216 seconds each.**\nThe 21 non-review (authoring / fix-pass) turns in the same window totaled\n~7,242 seconds (≈121 agent-minutes), averaging 345 seconds each — individual\nauthor turns ran longer, but there were more than twice as many review turns,\nso **review consumed about 52% more total agent-minutes than authoring did**,\nand outnumbered authoring turns 2.4:1. This does not separate cost by model\ntier (this estate deliberately dispatches cheaper tiers for review and\nreserves the expensive tier for judgment calls — a real mitigation this\nnumber doesn't show) and it does not include the token cost of the fix\npasses review's findings then required, which is f…"
+  },
+  {
+    "id": "nl-21",
+    "question": "of the retired CI rules which ones does anything still call",
+    "expected_source": "repo-docs",
+    "expected_identifier": "docs/ci-rules-retired.md#ci-rules-retired-with-the-shell-supervisor--what-still-runs",
+    "rationale": "Target is docs/ci-rules-retired.md's own \"What still runs\" section, chosen before any query ran (agent-estate#1169: docs/ci-rules-retired.md had zero fixture coverage). Measured on this checkout, scratch index built from a5b3d76: rank 1, default/public, unscoped.",
+    "note": "natural-language stratum (#1073/#1169) -- agent-estate#1169's per-file coverage pass: docs/ci-rules-retired.md had no case at all before this one.",
+    "target_text": "CI rules retired with the shell supervisor — What still runs -- - `estate-ci.yml` — `go build`, `go vet`, `go test` over `src/estate`.\n- `tui-ci.yml` — the same over `src/tui`.\n\nBoth are real and both must stay green."
   }
 ]
