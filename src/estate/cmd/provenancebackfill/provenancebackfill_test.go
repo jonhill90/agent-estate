@@ -271,3 +271,75 @@ func TestRefuseLivePath(t *testing.T) {
 		}
 	}
 }
+
+// TestRefuseLivePathBypasses locks the exact bypass classes PR #1232's
+// review demonstrated: a symlink to the live corpus, a case-varied spelling
+// of it, and a relative path resolving to it all reached refuseLivePath's
+// literal-string comparison unrefused. ESTATE_CORPUS points corpus.Path() at
+// a throwaway fixture file for this test, never the real corpus, so none of
+// these bypasses is attempted against $HOME/corpus/ledger.sqlite3.
+func TestRefuseLivePathBypasses(t *testing.T) {
+	dir := t.TempDir()
+	liveDir := filepath.Join(dir, "corpus")
+	if err := os.MkdirAll(liveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	livePath := filepath.Join(liveDir, "ledger.sqlite3")
+	if err := os.WriteFile(livePath, []byte("live"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("ESTATE_CORPUS", livePath)
+
+	symlinkPath := filepath.Join(dir, "notlive.sqlite3")
+	if err := os.Symlink(livePath, symlinkPath); err != nil {
+		t.Fatal(err)
+	}
+
+	caseVariant := filepath.Join(dir, "CORPUS", "Ledger.sqlite3")
+	trailingSlash := livePath + string(filepath.Separator)
+
+	t.Chdir(dir)
+	relative := filepath.Join("corpus", "ledger.sqlite3")
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"symlink to the live corpus", symlinkPath},
+		{"case-varied spelling", caseVariant},
+		{"relative path", relative},
+		{"trailing slash", trailingSlash},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			_, live := refuseLivePath(c.path)
+			if !live {
+				t.Errorf("refuseLivePath(%q) = live false, want true (this is the live corpus by %s)", c.path, c.name)
+			}
+		})
+	}
+}
+
+// TestRefuseLivePathTildeVsHome locks the "~/corpus/ledger.sqlite3" spelling
+// specifically -- flag.String never tilde-expands, so a caller passing "~"
+// literally must still resolve to the same file $HOME/corpus/ledger.sqlite3
+// names, another bypass PR #1232's review asked be checked for.
+func TestRefuseLivePathTildeVsHome(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("HOME", dir)
+	t.Setenv("ESTATE_CORPUS", "")
+
+	corpusDir := filepath.Join(dir, "corpus")
+	if err := os.MkdirAll(corpusDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	livePath := filepath.Join(corpusDir, "ledger.sqlite3")
+	if err := os.WriteFile(livePath, []byte("live"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, live := refuseLivePath("~/corpus/ledger.sqlite3")
+	if !live {
+		t.Errorf(`refuseLivePath("~/corpus/ledger.sqlite3") = live false, want true (should resolve against $HOME like the real corpus.Path())`)
+	}
+}
