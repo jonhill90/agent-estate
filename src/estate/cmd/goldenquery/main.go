@@ -64,6 +64,17 @@
 // not move. Both lines print always; neither replaces or averages with
 // the other.
 //
+// agent-estate#1162: the scoped run above moved from default/public mode
+// to --private. #1077's original scoped arm ran the filter in the one mode
+// it provably cannot matter: default/public has only two publishable
+// sources, so source:repo-docs can only ever remove github-stars items,
+// and github-stars never outranked repo-docs on any of these twelve
+// repo-oriented questions -- the public scoped and unscoped arms were
+// measured identical on all twelve cases, at every rank, on c8e0b59.
+// --private has seven competing sources, so the same filter has real work
+// to do there. See runNaturalStratum's own doc comment for the argued cost
+// of this change (public-mode source: scoping is now unguarded).
+//
 // agent-estate#1111: a FOURTH, separately labelled number reports
 // internal/knowledge/goldenset's github-stars stratum -- #1063's own
 // comment measured that repo-docs (#1073/#1077's own stratum) is only 23%
@@ -327,32 +338,42 @@ func scopedQuestion(question, source string, scoped bool) string {
 }
 
 // runNaturalStratum runs agent-estate#1073's checked-in natural-language
-// fixture (internal/knowledge/goldenset.LoadNatural) once per case, in
-// default (public) mode only -- never --private, and never merged with
-// cases.json's own score: #1069 settled that the two measure different
-// things and must be reported separately, weaker one leading.
+// fixture (internal/knowledge/goldenset.LoadNatural) once per case. The
+// unscoped run is always default (public) mode -- never --private, and
+// never merged with cases.json's own score: #1069 settled that the two
+// measure different things and must be reported separately, weaker one
+// leading.
 //
-// agent-estate#1077: scoped selects between this stratum's two runs over
-// the SAME twelve cases -- unscoped (the question exactly as written,
-// baseline top-3 5/12, top-10 10/12 measured by hand on a7d413c) and
-// scoped ("source:repo-docs " prepended to every question, the same
-// source: filter #1071 wired into Query). The unscoped run answers "what
-// does a lane that does not know about scoping get?"; the scoped run
-// answers "does the source: mechanism still narrow results?" -- #1077's
-// own gap was that only the first question had a reported number, so
-// source: filtering could silently stop working with nothing catching it.
+// agent-estate#1077 originally ran the scoped arm in public mode too
+// ("source:repo-docs " prepended, still default/public query). agent-estate#1162
+// found that arm measured scoping in the one mode it provably cannot
+// matter: default/public mode has only two publishable sources
+// (repo-docs, github-stars, agent-estate#1162's own comment), so
+// source:repo-docs can only ever remove github-stars items, and for these
+// twelve repo-oriented questions github-stars never entered the unscoped
+// top-10 -- the scoped and unscoped public arms were measured identical on
+// all twelve cases, at every ordinal rank, on c8e0b59. scoped now runs
+// --private instead: private mode has seven competing sources (corpus and
+// vault items genuinely outrank repo-docs on some of these questions), so
+// the filter has real work to do and the line can actually fail. This is
+// the "replace" side of agent-estate#1162's own undecided question -- see
+// this file's own top-of-file doc comment and buildRatchets' doc comment
+// for the argued cost: public-mode source: scoping is now entirely
+// unguarded (harmless today, since nothing can move it; not harmless if
+// github-stars ever begins competing on repo-docs questions, at which
+// point this decision should be revisited with fresh evidence).
 func runNaturalStratum(w *bufio.Writer, bin string, verbose bool, scoped bool) (top3Hits, top10Hits, total int, ranAtLeastOne bool, overlapMean float64, overlapMeasured int) {
 	cases, err := goldenset.LoadNatural()
 	if err != nil {
 		fmt.Fprintln(w, "goldenquery: natural-language stratum:", err)
 		return 0, 0, 0, false, 0, 0
 	}
-	label := "unscoped"
+	label := "default/public, unscoped"
 	if scoped {
-		label = "scoped, source:repo-docs prepended -- agent-estate#1077"
+		label = "--private, scoped source:repo-docs prepended -- agent-estate#1162, replaces agent-estate#1077's public-mode scoped arm"
 	}
-	fmt.Fprintf(w, "=== natural-language stratum (default/public, %s -- agent-estate#1073) ===\n", label)
-	top3Hits, top10Hits, total, ranAtLeastOne = runStratum(w, bin, verbose, scoped, cases, "repo-docs")
+	fmt.Fprintf(w, "=== natural-language stratum (%s -- agent-estate#1073) ===\n", label)
+	top3Hits, top10Hits, total, ranAtLeastOne = runStratum(w, bin, verbose, scoped, scoped, cases, "repo-docs")
 	overlapMean, overlapMeasured, _ = meanOverlap(cases)
 	return
 }
@@ -373,22 +394,30 @@ func runStarStratum(w *bufio.Writer, bin string, verbose bool) (top3Hits, top10H
 		return 0, 0, 0, false, 0, 0
 	}
 	fmt.Fprintln(w, "=== github-stars stratum (default/public, unscoped -- agent-estate#1111) ===")
-	top3Hits, top10Hits, total, ranAtLeastOne = runStratum(w, bin, verbose, false, cases, "github-stars")
+	top3Hits, top10Hits, total, ranAtLeastOne = runStratum(w, bin, verbose, false, false, cases, "github-stars")
 	overlapMean, overlapMeasured, _ = meanOverlap(cases)
 	return
 }
 
 // runStratum is the shared run loop behind runNaturalStratum and
 // runStarStratum (generalised in agent-estate#1111 from runNaturalStratum's
-// original repo-docs-only body): it runs every case in cases once, in
-// default (public) mode only, scoping each question's source: tag to
-// sourceTag when scoped is set, and returns the resulting top-3/top-10 hit
-// counts. Neither caller reuses the other's result, and neither result is
-// ever averaged with cases.json's or any other stratum's own score.
-func runStratum(w *bufio.Writer, bin string, verbose bool, scoped bool, cases []goldenset.Case, sourceTag string) (top3Hits, top10Hits, total int, ranAtLeastOne bool) {
+// original repo-docs-only body): it runs every case in cases once, scoping
+// each question's source: tag to sourceTag when scoped is set, and returns
+// the resulting top-3/top-10 hit counts. Neither caller reuses the other's
+// result, and neither result is ever averaged with cases.json's or any
+// other stratum's own score.
+//
+// agent-estate#1162: private selects the query mode independently of
+// scoped -- runStarStratum always passes false/false (unscoped, public,
+// unchanged since #1111); runNaturalStratum's unscoped run passes
+// false/false (still public, unchanged since #1073) and its scoped run now
+// passes true/true (private, replacing #1077's public-mode scoped arm,
+// which had no competing source to filter out and so could never move --
+// see runNaturalStratum's own doc comment).
+func runStratum(w *bufio.Writer, bin string, verbose bool, scoped bool, private bool, cases []goldenset.Case, sourceTag string) (top3Hits, top10Hits, total int, ranAtLeastOne bool) {
 	var results []naturalResult
 	for _, c := range cases {
-		stdout, exitCode, err := runQuery(bin, scopedQuestion(c.Question, sourceTag, scoped), false)
+		stdout, exitCode, err := runQuery(bin, scopedQuestion(c.Question, sourceTag, scoped), private)
 		if err != nil {
 			results = append(results, naturalResult{c: c})
 			fmt.Fprintf(w, "[ERROR] %s -- %q: %s\n\n", c.ID, c.Question, err)
@@ -578,18 +607,23 @@ func (r ratchet) ok() bool {
 // this comment is the one place that exclusion and its reasoning live
 // rather than being scattered per call site:
 //
-//   - The natural-language stratum's top-10 lines, both unscoped and
-//     scoped, drift with the live corpus alone -- no code change required.
-//     Measured moving 10/12->9/12 and 11/12->10/12 in one night and back,
-//     and agent-estate#1112's own review reproduced the identical drift on
+//   - The natural-language stratum's unscoped top-10 line drifts with the
+//     live corpus alone -- no code change required. Measured moving
+//     10/12->9/12 and 11/12->10/12 in one night and back, and
+//     agent-estate#1112's own review reproduced the identical drift on
 //     unmodified main side by side. The mechanism is structural: the
 //     stratum's targets are a fixed set of repo-docs sections while the
 //     index grows around them, so new competitors arrive, the answer does
-//     not move, but its rank does. A ratchet on either line would fire on a
+//     not move, but its rank does. A ratchet on this line would fire on a
 //     day nobody touched the scorer, and a check that cries wolf gets
 //     disabled -- worse than no ratchet at all (#1066's own thesis). The
-//     top-3 lines from the SAME stratum ARE ratcheted below: #1112 measured
-//     drift only on the top-10 cutoff, never top-3, in either run.
+//     scoped top-10 line is excluded too, but for a different reason: it now
+//     runs in --private mode (agent-estate#1162), a mode #1112 never
+//     measured drift against, so there is no evidence yet either way -- an
+//     unevidenced exclusion, not an inherited one, and worth re-examining
+//     once this mode has been observed over time. The top-3 lines from the
+//     SAME stratum ARE ratcheted below: #1112 measured drift only on the
+//     top-10 cutoff, never top-3, in the one mode it tested.
 //   - Both term-overlap lines (github-stars, natural-language) measure
 //     fixture honesty -- how much of a question's own wording already
 //     appears in its target -- not retrieval quality. Ratcheting either
@@ -620,6 +654,23 @@ func (r ratchet) ok() bool {
 //     and keeps it fixed as the total keeps growing, instead of another
 //     one-line floor edit someone has to remember to make next time.
 //
+// agent-estate#1162: the "natural-language stratum top-3, scoped" ratchet
+// now guards a DIFFERENT measurement than the one #1140's floor was set
+// against. The scoped run moved from public to --private mode (see
+// runNaturalStratum's own doc comment for why: the public-mode scoped arm
+// had zero degrees of freedom -- only two publishable sources exist, and
+// github-stars never outranked repo-docs on any of these twelve questions,
+// so the public scoped and unscoped arms were measured identical at every
+// rank on c8e0b59). Re-measured fresh under --private on this commit: still
+// 4/12, and the SAME two cases miss (nl-09, nl-11) for the SAME reason
+// #1140 recorded -- both were re-authored from a caller's actual need
+// instead of the target section's own title wording, which cost them their
+// rank in every mode measured so far, not just the public one. The floor is
+// carried forward at the same value on that basis, not re-derived from
+// scratch; if a future measurement finds these two cases behave differently
+// under --private, that divergence is itself worth reporting, not silently
+// folded into a floor edit.
+//
 // Re-measure before trusting any of these numbers further; they are one
 // observation from one checkout, not a constant.
 func buildRatchets(nlTop3, nlTotal, nlScopedTop3, nlScopedTotal, privateHits, privateTotal, reachableHits, reachableTotal, starTop3, starTop10, starTotal int, noneResult *result) []ratchet {
@@ -644,8 +695,8 @@ func buildRatchets(nlTop3, nlTotal, nlScopedTop3, nlScopedTotal, privateHits, pr
 	rs := []ratchet{
 		{"natural-language stratum top-3, unscoped", nlTop3, nlTotal, nlTop3MaxMisses,
 			fmt.Sprintf("agent-estate#1066: tolerates at most %d miss(es) out of the current total -- floor LOWERED from 6-of-12 to 4-of-12 by agent-estate#1140, nl-09 and nl-11 were re-authored from a caller's actual need instead of the section title's own wording (both were 100%% term overlap, rank 1, no headroom to detect a regression), which is expected to move them out of the top 10 entirely, not just out of the top 3. This is the fixture getting better while the retriever is unchanged, not a retrieval regression -- see agent-estate#1140's PR body", nlTop3MaxMisses)},
-		{"natural-language stratum top-3, scoped source:repo-docs", nlScopedTop3, nlScopedTotal, nlTop3MaxMisses,
-			fmt.Sprintf("agent-estate#1066: tolerates at most %d miss(es) out of the current total -- same floor drop (6-of-12 to 4-of-12) and same reasoning as the unscoped top-3 line above, agent-estate#1140 re-authored nl-09/nl-11, and source: scoping does not recover either miss", nlTop3MaxMisses)},
+		{"natural-language stratum top-3, private scoped source:repo-docs", nlScopedTop3, nlScopedTotal, nlTop3MaxMisses,
+			fmt.Sprintf("agent-estate#1162: tolerates at most %d miss(es) out of the current total -- same floor (4-of-12) and same nl-09/nl-11 reasoning as the unscoped top-3 line above, carried forward from agent-estate#1140. This line moved from public to --private mode under agent-estate#1162: the public-mode arm it replaces was measured a tautology (identical to the unscoped line on all 12 cases, at every rank, on c8e0b59 -- default/public mode has only two publishable sources, so source:repo-docs could only ever remove github-stars items, which never outranked repo-docs on any of these questions). --private mode has seven competing sources and the filter has real work to do there; source: scoping does not recover nl-09 or nl-11 even so", nlTop3MaxMisses)},
 		{"retrieval score (private)", privateHits, privateTotal, retrievalMaxMisses,
 			fmt.Sprintf("agent-estate#1152: tolerates at most %d miss(es) out of the current total, denominator-independent -- unaffected by #1137/#1138, neither of which touched a private-mode cases.json case. agent-estate#1150's five camelcase-01..05 corpus-directive cases moved the denominator 17 -> 22 without raising the old hardcoded floor of 16, which silently grew the tolerated-miss count from 1 to 6; this ratchet is now defined by the miss budget instead of a hit floor, so the next case added here cannot loosen it the same way", retrievalMaxMisses)},
 		{"publishable-reachable score", reachableHits, reachableTotal, reachableMaxMisses,
@@ -719,10 +770,11 @@ func main() {
 	// averaged into either number above.
 	//
 	// agent-estate#1077: run the SAME twelve cases twice -- once exactly
-	// as written (unscoped) and once with "source:repo-docs " prepended
-	// to every question (scoped). Both lines print always; neither is
-	// derived from or replaces the other (see runNaturalStratum's own
-	// doc comment).
+	// as written, default/public mode (unscoped) and once with
+	// "source:repo-docs " prepended to every question, --private
+	// (scoped, moved off public mode by agent-estate#1162 -- see
+	// runNaturalStratum's own doc comment). Both lines print always;
+	// neither is derived from or replaces the other.
 	nlTop3, nlTop10, nlTotal, ranNaturalUnscoped, nlOverlapMean, nlOverlapMeasured := runNaturalStratum(w, *bin, *verbose, false)
 	nlScopedTop3, nlScopedTop10, nlScopedTotal, ranNaturalScoped, _, _ := runNaturalStratum(w, *bin, *verbose, true)
 	ranNatural := ranNaturalUnscoped || ranNaturalScoped
@@ -750,8 +802,8 @@ func main() {
 	// for what each answers.
 	fmt.Fprintf(w, "natural-language stratum, top-3  (default/public, unscoped -- #1073):  %d/%d\n", nlTop3, nlTotal)
 	fmt.Fprintf(w, "natural-language stratum, top-10 (default/public, unscoped -- #1073): %d/%d\n", nlTop10, nlTotal)
-	fmt.Fprintf(w, "natural-language stratum, top-3  (default/public, scoped source:repo-docs -- #1077):  %d/%d\n", nlScopedTop3, nlScopedTotal)
-	fmt.Fprintf(w, "natural-language stratum, top-10 (default/public, scoped source:repo-docs -- #1077):                                    %d/%d\n", nlScopedTop10, nlScopedTotal)
+	fmt.Fprintf(w, "natural-language stratum, top-3  (--private, scoped source:repo-docs -- #1162):  %d/%d\n", nlScopedTop3, nlScopedTotal)
+	fmt.Fprintf(w, "natural-language stratum, top-10 (--private, scoped source:repo-docs -- #1162):                                    %d/%d\n", nlScopedTop10, nlScopedTotal)
 	// agent-estate#1115: a stratum where every question reuses most of its
 	// target's own words has no headroom left to catch a regression --
 	// print the mean term-overlap alongside the hit rate so that fact is
@@ -816,7 +868,7 @@ func main() {
 		}
 		fmt.Fprintf(w, "  [%s] %s: %d/%d (floor %d) -- %s\n", status, r.name, r.got, r.total, r.floor(), r.reason)
 	}
-	fmt.Fprintln(w, "  not ratcheted, known corpus-growth drift (agent-estate#1112): natural-language stratum top-10, unscoped and scoped")
+	fmt.Fprintln(w, "  not ratcheted, known corpus-growth drift (agent-estate#1112): natural-language stratum top-10, unscoped (public); not ratcheted, no drift evidence measured yet under the new mode (agent-estate#1162): natural-language stratum top-10, private scoped source:repo-docs")
 	fmt.Fprintln(w, "  not ratcheted, measures fixture honesty not quality (agent-estate#1066, agent-estate#1115): term overlap, github-stars and natural-language")
 
 	failed := ratchetFailures(ratchets)
