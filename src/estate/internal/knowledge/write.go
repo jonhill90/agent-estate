@@ -64,9 +64,9 @@ func findRepoRoot(start string) string {
 	return ""
 }
 
-// DefaultOutputPath is where Write puts the compiled index absent an
-// override -- a cache-shaped location, not the repository, since this
-// file is regenerable and disposable (repo_root=clean).
+// DefaultOutputPath is where the compiled index is READ from absent an
+// override -- a cache-shaped location, not the repository, since this file
+// is regenerable and disposable (repo_root=clean).
 //
 // agent-estate#1048: every dispatched turn used to resolve the SAME shared
 // path here, so two lanes running `estate knowledge` concurrently -- or a
@@ -87,20 +87,96 @@ func findRepoRoot(start string) string {
 // gets exactly that path, per agent-estate#1048's own "the workaround
 // should be the default, not a thing careful reviewers remember" -- taking
 // the override away would break the measurements that already depend on it.
+//
+// This function is safe to leave exactly as-is for READS (query, get):
+// falling through to the shared path there costs nothing, because reading
+// it cannot corrupt it. agent-estate#1184 found the fall-through IS a
+// problem for the one caller that WRITES through this same resolution --
+// see ResolveWritePath below, which is what that caller must use instead.
 func DefaultOutputPath() (string, error) {
+	path, _, err := resolveOutputPath()
+	return path, err
+}
+
+// resolveOutputPath is the resolution DefaultOutputPath and ResolveWritePath
+// both build on. sharedFallback reports whether path is the shared default
+// reached by falling through both the explicit override and the
+// dispatch-worktree check -- the one case agent-estate#1184 found unsafe to
+// hand to a writer without the caller saying so on purpose.
+func resolveOutputPath() (path string, sharedFallback bool, err error) {
 	if p := os.Getenv("ESTATE_KNOWLEDGE_INDEX"); p != "" {
-		return p, nil
+		return p, false, nil
 	}
 	home, err := os.UserHomeDir()
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if wd, err := os.Getwd(); err == nil {
 		if id, ok := isolate.IsDispatchWorktree(wd); ok {
-			return filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "dispatch", id, "index.json"), nil
+			return filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "dispatch", id, "index.json"), false, nil
 		}
 	}
-	return filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "index.json"), nil
+	return filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "index.json"), true, nil
+}
+
+// AllowSharedWriteEnv is the explicit acknowledgement required to write the
+// shared index from a cwd that resolveOutputPath cannot place: neither an
+// explicit ESTATE_KNOWLEDGE_INDEX override nor a recognised dispatch
+// worktree (isolate.IsDispatchWorktree).
+const AllowSharedWriteEnv = "ESTATE_KNOWLEDGE_ALLOW_SHARED_WRITE"
+
+// ResolveWritePath is DefaultOutputPath's counterpart for the one caller
+// that actually WRITES the compiled index (`estate knowledge`'s
+// regeneration path in main.go) rather than reading it back (query, get).
+//
+// agent-estate#1184: a reviewer created an isolated checkout the ordinary,
+// correct way -- `git worktree add /tmp/...` -- which is a real git
+// worktree but not one isolate.Create/CreateOnBranch made, so
+// IsDispatchWorktree reported false exactly as it must (widening it to
+// accept arbitrary temp paths would make every ad-hoc clone look like a
+// dispatched turn, which agent-estate#1184 rules out explicitly). Nothing
+// else stood between that "false" and DefaultOutputPath's shared-index
+// fallback, so an ordinary, correct review action silently overwrote the
+// one index every other lane reads, seeded from a PR branch rather than
+// main, with no prompt or record.
+//
+// This is fix shape 1 of the three the issue lays out (make the shared
+// write opt-in), chosen over shape 2 (refuse when the cwd LOOKS like an
+// ad-hoc isolated checkout) and shape 3 (warn and proceed):
+//
+//   - Shape 3 is out because this estate has already named the failure mode
+//     directly: "a tool that fails closed and that nothing calls is a
+//     documentation rule with a binary attached" applies just as much to a
+//     guard that reports but never refuses. The #1184 reviewer already
+//     noticed and disclosed the overwrite on their own, unprompted, with no
+//     warning to help them -- a warning proves nothing here that did not
+//     already happen without one.
+//   - Shape 2 requires a classifier that can tell "the operator, at a
+//     terminal, in their own checkout" apart from "an agent in an ad-hoc
+//     worktree" from the cwd alone. Both false directions are worse than
+//     today: false-positive blocks Jon's own terminal, false-negative is
+//     exactly the silent write this issue exists to stop, and #1184 says so
+//     explicitly ("getting it wrong in either direction is worse than the
+//     status quo"). No such signal exists in the cwd shape today, and
+//     inventing one risks being confidently wrong rather than honestly
+//     unable to tell.
+//   - Shape 1 needs no classifier at all: every cwd that is not an explicit
+//     override and not a real dispatch worktree is treated identically,
+//     which is exactly the set #1184 found unsafe. The cost is real and is
+//     named in the doc comment on purpose, not left to be discovered later:
+//     regenerating the shared index by hand -- something Jon legitimately
+//     does -- now requires this acknowledgement too. See main.go's
+//     `--allow-shared-write` flag (or setting AllowSharedWriteEnv directly)
+//     for how an operator opts back in.
+func ResolveWritePath() (path string, requiresAck bool, err error) {
+	path, shared, err := resolveOutputPath()
+	if err != nil {
+		return "", false, err
+	}
+	if shared && os.Getenv(AllowSharedWriteEnv) == "" {
+		return path, true, nil
+	}
+	return path, false, nil
 }
 
 // Write serializes res as indented JSON to path, creating its parent

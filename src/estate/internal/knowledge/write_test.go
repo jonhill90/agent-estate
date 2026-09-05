@@ -170,3 +170,109 @@ func TestDefaultOutputPathExplicitOverrideStillWinsInsideADispatchedTurn(t *test
 		t.Errorf("DefaultOutputPath() = %q, want the explicit override %q", got, override)
 	}
 }
+
+// agent-estate#1184: an ad-hoc isolated checkout -- e.g. a reviewer's own
+// `git worktree add /tmp/...` -- is a real git worktree but not one
+// isolate.Create/CreateOnBranch made, so IsDispatchWorktree correctly
+// reports false for it. Nothing used to stand between that "false" and the
+// shared index, so ResolveWritePath must refuse there (requiresAck=true)
+// rather than let a WRITE fall through silently the way a READ safely can.
+//
+// This test FAILS before the fix (requiresAck was never a concept; the
+// resolved path always mapped straight to the shared default with no
+// signal a caller could act on) and PASSES after it.
+func TestResolveWritePathRequiresAckForAnUnrecognisedCwd(t *testing.T) {
+	t.Setenv("ESTATE_KNOWLEDGE_INDEX", "")
+	t.Setenv(AllowSharedWriteEnv, "")
+
+	home, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shared := filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "index.json")
+
+	dir := t.TempDir() // NOT under TMPDIR/estate-dispatch -- an ad-hoc checkout
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	path, requiresAck, err := ResolveWritePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != shared {
+		t.Errorf("ResolveWritePath() path = %q, want the shared default %q", path, shared)
+	}
+	if !requiresAck {
+		t.Error("ResolveWritePath() requiresAck = false for an unrecognised cwd, want true -- this is agent-estate#1184")
+	}
+}
+
+// Setting AllowSharedWriteEnv is the explicit opt-in agent-estate#1184
+// requires before a write is allowed to proceed to the shared path from an
+// unrecognised cwd.
+func TestResolveWritePathAckedViaEnvAllowsTheSharedWrite(t *testing.T) {
+	t.Setenv("ESTATE_KNOWLEDGE_INDEX", "")
+	t.Setenv(AllowSharedWriteEnv, "1")
+
+	dir := t.TempDir()
+	orig, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(orig) })
+
+	_, requiresAck, err := ResolveWritePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requiresAck {
+		t.Error("ResolveWritePath() requiresAck = true after AllowSharedWriteEnv was set, want false")
+	}
+}
+
+// A real dispatch worktree must never require the acknowledgement -- only
+// the unrecognised-cwd fallback does. This is the "no operator/author
+// impact for the case that already worked" half of agent-estate#1184's
+// fix.
+func TestResolveWritePathNeverRequiresAckInsideADispatchedTurn(t *testing.T) {
+	t.Setenv("ESTATE_KNOWLEDGE_INDEX", "")
+	t.Setenv(AllowSharedWriteEnv, "")
+
+	chdirToSimulatedDispatchWorktree(t, "turn-write-path-1184")
+	_, requiresAck, err := ResolveWritePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requiresAck {
+		t.Error("ResolveWritePath() requiresAck = true inside a dispatch worktree, want false")
+	}
+}
+
+// An explicit ESTATE_KNOWLEDGE_INDEX override never requires the
+// acknowledgement either -- the caller already said exactly where to
+// write.
+func TestResolveWritePathNeverRequiresAckWithAnExplicitOverride(t *testing.T) {
+	override := filepath.Join(t.TempDir(), "explicit-index.json")
+	t.Setenv("ESTATE_KNOWLEDGE_INDEX", override)
+	t.Setenv(AllowSharedWriteEnv, "")
+
+	path, requiresAck, err := ResolveWritePath()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if path != override {
+		t.Errorf("ResolveWritePath() path = %q, want the explicit override %q", path, override)
+	}
+	if requiresAck {
+		t.Error("ResolveWritePath() requiresAck = true with an explicit override, want false")
+	}
+}
