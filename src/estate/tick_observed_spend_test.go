@@ -200,6 +200,7 @@ func TestTickCheckOldEntryWithNeitherFieldIsUnchanged(t *testing.T) {
 type ledgerRecord struct {
 	ID           string   `json:"id"`
 	State        string   `json:"state"`
+	PID          int      `json:"pid,omitempty"`
 	SpendCostUSD *float64 `json:"spend_cost_usd,omitempty"`
 }
 

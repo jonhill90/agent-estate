@@ -1744,6 +1744,20 @@ func main() {
 			} else {
 				fmt.Println("tick log: " + absPath)
 			}
+			// agent-estate#1194: `estate reclaim` already detects a ledger
+			// record left `dispatched` with no live process behind it, and
+			// reports before repairing -- but nothing ever calls it, so
+			// `inflight` and `pressure` keep counting a phantom slot until a
+			// human happens to run it by hand. tick check is the surface
+			// every tick already runs and every observer already reads, so
+			// it discloses what reclaim would find here, ahead of the
+			// verdict below -- a stranded record matters most when
+			// something else is already wrong. This is disclosure ONLY: it
+			// calls reclaim.Report, never reclaim.Apply, so tick check can
+			// never itself free a slot (see internal/reclaim's own
+			// report/--apply split, and PR #1189's precedent of disclosing
+			// a divergence without repairing it).
+			printReclaimable(l)
 			// Before reading the record, confirm the record is still there.
 			// It lives in a file the Director can delete, and deleting it
 			// used to turn a real stall into "no tick log yet".
@@ -2419,4 +2433,52 @@ func main() {
 		usage()
 		os.Exit(2)
 	}
+}
+
+// printReclaimable discloses, on every `tick check` run, how many in-flight
+// ledger records internal/reclaim finds reclaimable and which -- see
+// agent-estate#1194. It is REPORT ONLY: it calls reclaim.Report, the same
+// detection `estate reclaim` itself uses with no flag, and never
+// reclaim.Apply, so `tick check` can never repair a stranded record, only
+// name one. Two detectors that could disagree on "is this pid alive" would
+// be worse than one, so this reuses reclaim's own Assess rather than
+// re-deriving the answer.
+//
+// Absence stays typed: "no reclaimable records" (a real answer) and
+// "could not read the ledger" (a failure to look) print different lines,
+// never the same "0".
+func printReclaimable(l *ledger.Ledger) {
+	inflight, err := l.InFlight()
+	if err != nil {
+		fmt.Println("reclaimable: could not be determined -- ledger unreadable: " + err.Error())
+		return
+	}
+	// A boot time that cannot be read narrows what this run can catch (the
+	// reboot check is skipped, per Assess's own doc comment) but is not
+	// fatal to the rest of the disclosure -- same tolerance `estate reclaim`
+	// itself applies.
+	boot, berr := reclaim.BootTime()
+	if berr != nil {
+		fmt.Println("reclaimable: host boot time unavailable, the reboot check is disabled this run: " + berr.Error())
+	}
+	assessments := reclaim.Report(inflight, boot, reclaim.PSProbe)
+	var reclaimable []reclaim.Assessment
+	for _, a := range assessments {
+		if a.Reclaimable {
+			reclaimable = append(reclaimable, a)
+		}
+	}
+	if len(reclaimable) == 0 {
+		fmt.Println("reclaimable: none -- no in-flight ledger record lacks a live process")
+		return
+	}
+	if len(reclaimable) == 1 {
+		fmt.Println("reclaimable: 1 lane has a non-terminal record with no live process")
+	} else {
+		fmt.Printf("reclaimable: %d lanes have non-terminal records with no live process\n", len(reclaimable))
+	}
+	for _, a := range reclaimable {
+		fmt.Printf("  %s  %s  (dispatched %s)\n", a.Record.ID, a.Reason, a.Record.At.UTC().Format("15:04:05Z"))
+	}
+	fmt.Println("report only -- `estate reclaim --apply` frees these; tick check never does")
 }
