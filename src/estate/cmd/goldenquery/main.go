@@ -663,6 +663,20 @@ func splitPublishable(results []result) (reachableHits, reachableTotal, excluded
 	return reachableHits, reachableTotal, excludedPrivate, noneResult
 }
 
+// publishableReachableLine formats agent-estate#1133's corrected
+// "publishable-reachable score" line. agent-estate#1214: every number in
+// it, including the two case-set sizes that used to be hardcoded to 17
+// (cases.json's total at the time), is derived from this run's own counts
+// -- totalCases is len(cases.json) for THIS run, not a stored literal, so
+// the line cannot describe a case set larger or smaller than the one it
+// just measured. noneCount is how many cases.json cases were reported
+// separately as SourceNone (see splitPublishable); excludedPrivate,
+// reachableHits and reachableTotal are splitPublishable's own outputs.
+func publishableReachableLine(totalCases, excludedPrivate, noneCount, reachableHits, reachableTotal int) string {
+	return fmt.Sprintf("publishable-reachable score (default/public; %d of %d cases excluded -- ExpectedSource is private by construction and unreachable in this mode regardless of ranking, see internal/knowledge/classify.go; %d of %d (none-01) reported separately below, not counted here): %d/%d",
+		excludedPrivate, totalCases, noneCount, totalCases, reachableHits, reachableTotal)
+}
+
 // ratchet is one agent-estate#1066 regression guard: a named measurement
 // already printed elsewhere in this report, the number of misses it
 // tolerates against the CURRENT total, and the reason that tolerance is
@@ -989,16 +1003,25 @@ func main() {
 		fmt.Fprintln(w, "natural-language stratum term overlap vs target_text (agent-estate#1115): not measured -- no case carries target_text yet")
 	}
 	fmt.Fprintf(w, "retrieval score (private): %d/%d\n", privateHits, privateTotal)
-	// agent-estate#1133: the corrected line. cases.json has 17 cases total;
-	// %d of them (excludedPrivate) have an ExpectedSource classify.go marks
-	// private (vault-fact, corpus-parameter, loops-research) and cannot be
-	// found in default mode by disclosure policy, not by any ranking
-	// deficiency -- they are excluded from the score's own denominator, not
-	// silently dropped from the report. none-01 is reported on its own line
-	// immediately below, neither counted as a reachable hit nor folded into
-	// excludedPrivate: it is not a disclosure exclusion.
-	fmt.Fprintf(w, "publishable-reachable score (default/public; %d of 17 cases excluded -- ExpectedSource is private by construction and unreachable in this mode regardless of ranking, see internal/knowledge/classify.go; 1 of 17 (none-01) reported separately below, not counted here): %d/%d\n",
-		excludedPrivate, reachableHits, reachableTotal)
+	// agent-estate#1133: the corrected line. cases.json has totalCases
+	// cases this run; excludedPrivate of them have an ExpectedSource
+	// classify.go marks private (vault-fact, corpus-parameter,
+	// loops-research) and cannot be found in default mode by disclosure
+	// policy, not by any ranking deficiency -- they are excluded from the
+	// score's own denominator, not silently dropped from the report.
+	// none-01 is reported on its own line immediately below, neither
+	// counted as a reachable hit nor folded into excludedPrivate: it is
+	// not a disclosure exclusion.
+	//
+	// agent-estate#1214: totalCases and noneCount are both derived from
+	// this run's own results (pubResults holds every case in cases.json;
+	// splitPublishable partitions it into exactly these three groups), never
+	// a stored literal -- the bug this closes was cases.json growing from
+	// 17 to 22 cases while the printed line's denominator stayed a
+	// hardcoded 17 in two places.
+	totalCases := len(pubResults)
+	noneCount := totalCases - reachableTotal - excludedPrivate
+	fmt.Fprintln(w, publishableReachableLine(totalCases, excludedPrivate, noneCount, reachableHits, reachableTotal))
 	if noneResult != nil {
 		noneStatus := "MISS"
 		if noneResult.pass {
@@ -1041,7 +1064,14 @@ func main() {
 		}
 		fmt.Fprintf(w, "  [%s] %s: %d/%d (floor %d) -- %s\n", status, r.name, r.got, r.total, r.floor(), r.reason)
 	}
-	fmt.Fprintln(w, "  not ratcheted, known corpus-growth drift (agent-estate#1112): natural-language stratum top-10, unscoped (public); not ratcheted, rank-identical to that unscoped line on all 21 cases and so inherits its corpus-growth drift wholesale (agent-estate#1112, agent-estate#1162): natural-language stratum top-10, private scoped source:repo-docs")
+	// agent-estate#1214: "21 cases" used to be a stored literal here,
+	// naming the natural-language fixture's size as it stood when
+	// agent-estate#1112 made this comparison. natural_cases.json has since
+	// grown past 21 (like cases.json's 17->22, agent-estate#1214's own
+	// finding) -- nlScopedTotal is this run's own live count for the same
+	// stratum, so the sentence tracks the fixture instead of describing a
+	// past size as if it still applied.
+	fmt.Fprintf(w, "  not ratcheted, known corpus-growth drift (agent-estate#1112): natural-language stratum top-10, unscoped (public); not ratcheted, rank-identical to that unscoped line on all %d cases and so inherits its corpus-growth drift wholesale (agent-estate#1112, agent-estate#1162): natural-language stratum top-10, private scoped source:repo-docs\n", nlScopedTotal)
 	fmt.Fprintln(w, "  not ratcheted, measures fixture honesty not quality (agent-estate#1066, agent-estate#1115): term overlap, github-stars and natural-language")
 	// agent-estate#1209: guardrail 2 -- the exempt bucket's own size,
 	// printed unconditionally alongside the ratchet lines above (even when
