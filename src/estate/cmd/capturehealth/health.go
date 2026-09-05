@@ -114,9 +114,27 @@
 // rollout.AnalyzeFile/rollout.WalkRolloutFiles. No behavior changed by this
 // move -- this package's own test suite (unmodified by K2 slice 3) is what
 // proves that.
+//
+// # K2 slice 3, provenance contract (agent-estate#1139)
+//
+// FileReport.NewestTimestamp / Report.NewestTimestamp and
+// Report.SourceHealth are purely additive on top of everything above: they
+// derive from the same read-only walk this file already performed and do
+// not change any pre-existing count (see contract.go, and this package's
+// tests, for the before/after proof). Timestamp extraction is kept in THIS
+// file rather than folded into internal/rollout's own AnalyzeFile, since
+// that package is shared with cmd/corpusextract and this slice's own scope
+// is capturehealth's freshness contract, not a change to the shared parser.
 package main
 
 import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+	"time"
+
+	"github.com/jonhill90/agent-estate/estate/internal/provenance"
 	"github.com/jonhill90/agent-estate/estate/internal/rollout"
 )
 
@@ -218,6 +236,13 @@ type FileReport struct {
 	UserContentTypeCounts map[string]int `json:"user_content_type_counts"`
 
 	LineCount int `json:"line_count"`
+
+	// NewestTimestamp is the newest parsable "timestamp" value seen on any
+	// record in this file, RFC3339 as Codex itself writes it, or "" if no
+	// record in the file carried a parsable one. Additive for slice 3's
+	// freshness contract (agent-estate#1139, provenance.Freshness) -- it
+	// does not change OperatorTurns or any other pre-existing count.
+	NewestTimestamp string `json:"newest_timestamp,omitempty"`
 }
 
 // ParseFailure names one file this report could not read as rollout JSONL,
@@ -258,6 +283,20 @@ type Report struct {
 	RoleCounts            map[string]int `json:"role_counts"`
 	UserContentTypeCounts map[string]int `json:"user_content_type_counts"`
 
+	// NewestTimestamp is the newest FileReport.NewestTimestamp across every
+	// parsed file, or "" if no file carried a parsable one. Additive for
+	// slice 3's freshness contract -- see FileReport.NewestTimestamp.
+	NewestTimestamp string `json:"newest_timestamp,omitempty"`
+
+	// SourceHealth is this SAME report, expressed through the generic
+	// per-source contract a second source implements too (agent-estate#1139
+	// slice 3, internal/provenance.SourceHealth). Populated by
+	// BuildSourceHealth (contract.go); every field on it is derived from
+	// the values already computed above -- see toSourceHealth's own doc
+	// comment for the mapping. Purely additive: every field ABOVE this one
+	// is computed exactly as it was before slice 3 existed.
+	SourceHealth provenance.SourceHealth `json:"source_health"`
+
 	Files []FileReport `json:"files"`
 }
 
@@ -265,12 +304,20 @@ type Report struct {
 // rollout.FileAnalysis into this package's own FileReport. All decoding,
 // the genuineOperatorTurn predicate, and the compacted/response_item
 // same-file dedup rule live in internal/rollout -- see this file's package
-// comment, K2 slice 3 section.
+// comment, K2 slice 3 section. NewestTimestamp is the one field internal/
+// rollout does not compute -- see newestTimestampInFile's own doc comment
+// for why that scan stays local to this package instead.
 func analyzeFile(path string) (FileReport, error) {
 	fa, err := rollout.AnalyzeFile(path)
 	if err != nil {
 		return FileReport{}, err
 	}
+
+	newest, err := newestTimestampInFile(path)
+	if err != nil {
+		return FileReport{}, err
+	}
+
 	return FileReport{
 		Path:                             path,
 		SessionIDs:                       fa.SessionIDs,
@@ -286,7 +333,67 @@ func analyzeFile(path string) (FileReport, error) {
 		RoleCounts:                       fa.RoleCounts,
 		UserContentTypeCounts:            fa.UserContentTypeCounts,
 		LineCount:                        fa.LineCount,
+		NewestTimestamp:                  newest,
 	}, nil
+}
+
+// rawTimestampRecord decodes only the one field internal/rollout's own
+// RawRecord does not carry: every rollout record type shares a top-level
+// "timestamp" string, and slice 3's freshness contract is the only consumer
+// that needs it, so it is decoded here rather than added to the shared
+// parser (see this file's package comment).
+type rawTimestampRecord struct {
+	Timestamp string `json:"timestamp"`
+}
+
+// newestTimestampInFile is a second, minimal read-only pass over path: it
+// extracts the newest parsable RFC3339 "timestamp" seen on any line,
+// independent of record type, and returns "" if none parsed. It never
+// changes OperatorTurns or any other rollout.AnalyzeFile count -- it exists
+// purely to feed FileReport.NewestTimestamp / Report.NewestTimestamp
+// (agent-estate#1139 slice 3's Freshness contract).
+func newestTimestampInFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	var newest time.Time
+	var newestRaw string
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var rec rawTimestampRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			return "", fmt.Errorf("line %d: %w", lineNo, err)
+		}
+		if rec.Timestamp == "" {
+			continue
+		}
+		t, err := time.Parse(time.RFC3339Nano, rec.Timestamp)
+		if err != nil {
+			// An unparsable timestamp is metadata, not identity or a
+			// countable record -- it is silently not credited toward
+			// freshness rather than failing the whole file.
+			continue
+		}
+		if t.After(newest) {
+			newest = t
+			newestRaw = rec.Timestamp
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("scan: %w", err)
+	}
+	return newestRaw, nil
 }
 
 // buildReport is the whole tool's read-only core: list files, analyze each,
@@ -305,6 +412,7 @@ func buildReport(root string) (Report, error) {
 		UserContentTypeCounts: map[string]int{},
 	}
 
+	var newestTimestamp time.Time
 	for _, path := range files {
 		fr, err := analyzeFile(path)
 		if err != nil {
@@ -315,6 +423,12 @@ func buildReport(root string) (Report, error) {
 			continue
 		}
 		report.FilesParsed++
+		if fr.NewestTimestamp != "" {
+			if t, err := time.Parse(time.RFC3339Nano, fr.NewestTimestamp); err == nil && t.After(newestTimestamp) {
+				newestTimestamp = t
+				report.NewestTimestamp = fr.NewestTimestamp
+			}
+		}
 		report.OperatorTurnsTotal += fr.OperatorTurns
 		report.SessionMetaTotal += fr.SessionMetaRecords
 		if len(fr.SessionIDs) > 1 {

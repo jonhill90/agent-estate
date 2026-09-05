@@ -28,7 +28,17 @@ func main() {
 		os.Exit(2)
 	}
 
-	report, err := buildReport(*root)
+	// BuildSourceHealth (contract.go) runs the same walk buildReport always
+	// ran and additionally classifies it through the slice 3 per-source
+	// contract (internal/provenance.SourceHealth) -- see that file's doc
+	// comment. Unlike the plain buildReport this replaced, an unreachable or
+	// unreadable root is no longer a fatal process error: it is now a typed
+	// SourceState the report itself carries, matching the contract's own
+	// "missing and unreadable reported separately from empty" requirement
+	// (agent-estate#1139). No pre-existing count changes for a reachable
+	// root -- see contract_test.go for the before/after proof this doesn't
+	// move anything buildReport already computed.
+	report, err := BuildSourceHealth(*root)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "capturehealth: %v\n", err)
 		os.Exit(1)
@@ -81,6 +91,18 @@ func printHuman(r Report, verbose bool) {
 		}
 	} else {
 		fmt.Println("unparseable files: none")
+	}
+
+	// Appended after every pre-existing line, never inserted among them, so
+	// a before/after diff against slice 2's output shows only this new
+	// block added -- see agent-estate#1139 slice 3 acceptance criterion 4.
+	h := r.SourceHealth
+	fmt.Println("source health (contract):")
+	fmt.Printf("  source: %s  harness: %s  state: %s\n", h.SourceName, h.Harness, h.State)
+	if h.Freshness.Known {
+		fmt.Printf("  newest capture: %s (%ds ago)\n", h.Freshness.NewestCapturedAt, h.Freshness.SecondsSinceCapture)
+	} else {
+		fmt.Println("  newest capture: unknown")
 	}
 
 	if verbose {
