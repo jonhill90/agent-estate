@@ -39,6 +39,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/jonhill90/agent-estate/estate/internal/corpus"
 )
 
 func main() {
@@ -105,24 +107,70 @@ func run(args []string, stdout, stderr *os.File) int {
 	return 0
 }
 
-// refuseLivePath reports whether dbPath names the live corpus (by suffix
-// match against the well-known live locations AGENTS.md documents), never
-// by resolving symlinks or querying the OS -- a simple, auditable string
-// check that fails closed toward "looks live" when in doubt is preferable to
-// a cleverer check that could be fooled.
+// refuseLivePath reports whether dbPath names the live corpus. A prior
+// version of this check compared literal, case-sensitive path strings and
+// never resolved symlinks -- a symlink to ~/corpus/ledger.sqlite3, or a
+// case-varied spelling on this filesystem's case-insensitive default,
+// silently passed it straight into a real write (agent-estate#1139 PR #1232
+// review). resolveForCompare below normalizes both the candidate and the
+// known live locations the same way before comparing, so those bypasses no
+// longer differ from the exact-spelling case this was always meant to catch.
+//
+// The live corpus's own canonical path comes from internal/corpus.Path()
+// rather than being reimplemented here as a second literal string, per that
+// review's second recommendation -- one source of truth for "what is the
+// live corpus."
 func refuseLivePath(dbPath string) (string, bool) {
-	abs, err := filepath.Abs(dbPath)
-	if err != nil {
-		abs = dbPath
+	candidate := resolveForCompare(dbPath)
+
+	if livePath, err := corpus.Path(); err == nil {
+		if candidate == resolveForCompare(livePath) {
+			return fmt.Sprintf("matches the live corpus path (%s)", livePath), true
+		}
 	}
-	clean := filepath.Clean(abs)
-	if strings.HasSuffix(clean, filepath.Join("corpus", "ledger.sqlite3")) {
+	// Fallback in case corpus.Path() errored (e.g. HOME unset): the
+	// well-known suffix, still resolved and case-folded the same way.
+	if strings.HasSuffix(candidate, resolveForCompare(filepath.Join("corpus", "ledger.sqlite3"))) {
 		return "matches the live corpus path (~/corpus/ledger.sqlite3)", true
 	}
-	if strings.Contains(clean, "agent-dotfiles-supervisor") {
+	if strings.Contains(candidate, strings.ToLower("agent-dotfiles-supervisor")) {
 		return "matches the retired agent-dotfiles-supervisor ledger location", true
 	}
 	return "", false
+}
+
+// resolveForCompare turns a path into the form refuseLivePath compares:
+// absolute, cleaned, symlinks resolved when the target exists (falling back
+// to the unresolved absolute path when it does not -- e.g. a -db path that
+// hasn't been created yet), tilde-expanded against $HOME, and case-folded
+// since this tool runs on case-insensitive filesystems (APFS default) where
+// two differently-spelled strings can name the same file.
+func resolveForCompare(p string) string {
+	if p == "~" {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = home
+		}
+	} else if strings.HasPrefix(p, "~"+string(filepath.Separator)) {
+		if home, err := os.UserHomeDir(); err == nil {
+			p = filepath.Join(home, p[2:])
+		}
+	}
+
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		abs = p
+	}
+	clean := filepath.Clean(abs)
+
+	if resolved, err := filepath.EvalSymlinks(clean); err == nil {
+		clean = resolved
+	}
+	// EvalSymlinks failing (path does not exist yet, permission denied,
+	// etc.) is not evidence the path is safe -- it just means resolution
+	// can't help, so fall through to comparing the unresolved-but-cleaned
+	// form below rather than returning early.
+
+	return strings.ToLower(clean)
 }
 
 // Report is the whole run's evidence: never a bare count, always the
