@@ -197,25 +197,38 @@ func prHeadBranch(pr int) (string, error) {
 // explainer, pointed at rather than duplicated here.
 func knowledgeGrounding() string {
 	return "\n\n## Knowledge retrieval exists (agent-estate#1049)\n" +
-		"Before asserting what the operator decided, ask: `go run ./src/estate knowledge " +
-		"query [--private] \"<question>\"` returns small, ranked, cited pointers, and " +
-		"`go run ./src/estate knowledge get [--private] <id>` returns one pointer's full " +
-		"body -- run both from this worktree's root; `estate` itself is not on PATH here. " +
-		"The index is derived, never authoritative, and may be reported stale. A query " +
-		"can come back five ways: `no_match` (no item fits) and `withheld_private` " +
-		"(matches exist but are private, `--private` lifts that filter) mean change your " +
-		"question -- but `index_missing`, `index_unreadable`, and an index that reads back " +
-		"with 0 items all mean the index itself is broken, and rephrasing will not help; " +
-		"regenerate it with `estate knowledge` instead. Do not paste private material into " +
-		"anything public. Add `--json` to either command for the full machine-readable " +
-		"result, Coverage (agent-estate#1065's trustworthiness signal, itself reported " +
-		"not_applicable when the index couldn't be read) included, instead of parsing the " +
-		"prose. This is a tool, not a required step: use it if it helps, and the turn " +
-		"still works when the index is missing. If results look noisy or off-topic, " +
-		"prefix the query with `source:<name>` -- e.g. `source:repo-docs` for how this " +
-		"repo works, `source:corpus-directive` for what the operator has decided -- to " +
-		"narrow to one source (agent-estate#1081; see `docs/knowledge-system.md` for the " +
-		"full scoping rules).\n"
+		"A fresh dispatch worktree starts with no index at all -- `knowledge query` " +
+		"will exit non-zero until one exists. Before asking a question, run " +
+		"`go run ./src/estate knowledge` once with no subcommand, FROM THIS " +
+		"WORKTREE'S ROOT: run from there, it builds your turn's own index at its " +
+		"own path (agent-estate#1048), never the shared index every other lane " +
+		"reads -- run it from anywhere else (your home directory, another repo, " +
+		"wherever this session's cwd has drifted to) and it builds the SHARED " +
+		"index instead, which must never happen. Running the same command again " +
+		"later refreshes it -- one verb for both a turn that never had an index " +
+		"and one whose index has gone stale -- but only if you are still at this " +
+		"worktree's root when you run it. `estate` itself is not on PATH here.\n" +
+		"Then ask: `go run ./src/estate knowledge query [--private] \"<question>\"` " +
+		"returns small, ranked, cited pointers, and `go run ./src/estate knowledge " +
+		"get [--private] <id>` returns one pointer's full body. The index is " +
+		"derived, never authoritative, and may be reported stale. A query can come " +
+		"back five ways: `no_match` (no item fits) and `withheld_private` (matches " +
+		"exist but are private, `--private` lifts that filter) mean change your " +
+		"question -- but `index_missing`, `index_unreadable`, and an index that " +
+		"reads back with 0 items all mean the index itself needs (re)building: run " +
+		"`estate knowledge` again, the same command as above; rephrasing will not " +
+		"help. Do not paste private material into anything public. Add `--json` to " +
+		"either command for the full machine-readable result, Coverage " +
+		"(agent-estate#1065's trustworthiness signal, itself reported not_applicable " +
+		"when the index couldn't be read) included, instead of parsing the prose. " +
+		"This is a tool, not a required step: use it if it helps, and the turn " +
+		"still works when the index is missing. If results look noisy or " +
+		"off-topic, prefix the query with `source:<name>` -- e.g. `source:repo-docs` " +
+		"for how this repo works, `source:corpus-directive` for what the operator " +
+		"has decided -- to narrow to one source. A wrong guess is cheap: it returns " +
+		"`no_match`, not a worse ranking, and is recoverable in one step by " +
+		"re-running the same question unscoped (agent-estate#1081; see " +
+		"`docs/knowledge-system.md` for the full scoping rules).\n"
 }
 
 // roleGrounding is what dispatch appends to the prompt based on role alone
@@ -1211,8 +1224,10 @@ func main() {
 		// request to regenerate. A bare `estate knowledge` (os.Args[2]
 		// absent) still falls through to generation below -- that is the
 		// documented behaviour -- but an unrecognised subcommand must be
-		// refused before it reaches knowledge.Generate/Write, which writes
-		// to the one index path every lane shares (#1048).
+		// refused before it reaches knowledge.Generate/Write, which writes to
+		// whatever path DefaultOutputPath resolves: this turn's own per-turn
+		// index from inside a dispatch worktree, or the shared index every
+		// other lane reads from anywhere else (#1048).
 		//
 		// --allow-coverage-loss (agent-estate#1123) is the one flag this
 		// path accepts rather than a subcommand: it does not change what
