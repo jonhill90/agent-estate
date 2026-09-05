@@ -290,6 +290,44 @@ func TestBuildRatchetsEveryEntryCarriesAReason(t *testing.T) {
 	}
 }
 
+// TestBuildRatchetsMaxMissesArePinned closes the gap TestBuildRatchetsReasonsStateTheirOwnMissBudget
+// left open: that test only checks the reason string against r.maxMisses,
+// which is formatted FROM the same constant it is meant to guard -- a
+// six-way mutation of buildRatchets's six maxMisses constants (widen each
+// by one, independently) showed only two of six caused any test to fail,
+// and both of those failed incidentally (TestRatchetFailuresDetectsRegressionBelowFloor
+// and TestBuildRatchetsNoneResultMustBeHitToPass are baseline/none-result
+// checks, not a pin on the constant itself). This test hardcodes the
+// agreed-on value for every named ratchet and fails the moment any one of
+// the six constants in buildRatchets changes, whether tightened or
+// loosened, so a widened budget cannot hide behind a reason string that
+// updates itself to describe the new, looser number.
+func TestBuildRatchetsMaxMissesArePinned(t *testing.T) {
+	none := &result{c: goldenset.Case{ID: "none-01", ExpectedSource: goldenset.SourceNone}, pass: true, exitCode: 1}
+	rs := buildRatchets(4, 12, 4, 12, 16, 17, 5, 5, 7, 7, 8, none)
+	want := map[string]int{
+		"natural-language stratum top-3, unscoped":                8,
+		"natural-language stratum top-3, scoped source:repo-docs": 8,
+		"retrieval score (private)":                               1,
+		"publishable-reachable score":                             0,
+		"github-stars stratum top-3":                              1,
+		"github-stars stratum top-10":                             1,
+		"none-01 (absence must report no_match)":                  0,
+	}
+	if len(rs) != len(want) {
+		t.Fatalf("buildRatchets() returned %d ratchets, want %d -- update this test's want map to match", len(rs), len(want))
+	}
+	for _, r := range rs {
+		wantMax, known := want[r.name]
+		if !known {
+			t.Fatalf("ratchet %q is not in this test's want map -- add its agreed-on maxMisses so a future change to it is pinned", r.name)
+		}
+		if r.maxMisses != wantMax {
+			t.Errorf("ratchet %q maxMisses = %d, want %d -- a maxMisses constant in buildRatchets changed without updating this pin (agent-estate#1152 follow-up: a floor that only some ratchets pin is the same defect with a smaller number)", r.name, r.maxMisses, wantMax)
+		}
+	}
+}
+
 func TestBuildRatchetsAllPassAtRecordedBaselines(t *testing.T) {
 	// The two natural-language top-3 values are 4, the agent-estate#1140
 	// floor (lowered from add887e's 6 after nl-09/nl-11 were re-authored
