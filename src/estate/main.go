@@ -11,6 +11,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/corpus"
@@ -32,6 +34,7 @@ import (
 	"github.com/jonhill90/agent-estate/estate/internal/pressure"
 	"github.com/jonhill90/agent-estate/estate/internal/reclaim"
 	"github.com/jonhill90/agent-estate/estate/internal/spend"
+	"github.com/jonhill90/agent-estate/estate/internal/sweep"
 	"github.com/jonhill90/agent-estate/estate/internal/tick"
 	"github.com/jonhill90/agent-estate/estate/internal/toolusage"
 	"github.com/jonhill90/agent-estate/estate/internal/verifybranch"
@@ -289,6 +292,172 @@ func knowledgeGrounding() string {
 		"see `docs/knowledge-system.md` for the full scoping rules).\n"
 }
 
+// repoTopLevel is the checkout this command is being run from -- the same
+// directory internal/isolate hangs a dispatch root off, so every worktree
+// path this process reasons about is keyed to the same repository.
+func repoTopLevel() (string, error) {
+	out, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
+	if err != nil {
+		return "", err
+	}
+	root := strings.TrimSpace(string(out))
+	if root == "" {
+		return "", errors.New("git reported an empty repository root")
+	}
+	return root, nil
+}
+
+// repoSlugTimeout bounds repoSlug's subprocess. `gh repo view` reads
+// nothing local -- it is a GraphQL round trip to api.github.com -- and
+// repoSlug runs TWICE on every `estate dispatch`: once inside
+// sweepWorktrees, which sits ahead of the pressure gate, and once to build
+// the dispatch worktree's own Landed seam. Unbounded, it was the first
+// network-dependent thing a dispatch did and the one call on the teardown
+// path with no ceiling, so a black-holed remote -- a stale VPN route, a
+// half-dead proxy, a firewall that drops rather than rejects -- stopped
+// dispatches returning at all rather than making them refuse.
+//
+// 15s, matching isolate.ghTimeout, isolate's remoteFetchTimeout and
+// internal/cost's execTimeout, rather than inventing a fresh number: this is
+// one metadata round trip on the same API as GHLanded's, so there is no
+// reason for it to be allowed longer than the call it exists to supply an
+// argument to. It is chosen to be survivable, not tight -- a slow-but-alive
+// forge answers well inside it, and anything past it is a network that is
+// not going to answer this run.
+//
+// Wall clock this puts on a dispatch, stated because "bounded" is not
+// "free": one repoSlug (15s) plus, per removal, one fetch (15s) and one
+// forge call (15s), times maxSweepPerRun -- so a worst case of roughly four
+// minutes of sweep ahead of the pressure gate when every network call
+// black-holes at once. That is the price of never hanging; it was previously
+// unbounded in exchange for nothing.
+var repoSlugTimeout = 15 * time.Second
+
+// repoSlug is "owner/name" for the checkout we are in, asked of gh rather
+// than written down: a hardcoded slug is wrong the first time this runs
+// against a fork or a rename, and it is exactly the kind of claim that
+// looks right forever while being false.
+//
+// Every failure -- gh missing, unauthenticated, the network gone, the
+// deadline hit -- is returned as an error, and both callers treat that as
+// "slug unknown, so leave the Landed seam nil", which degrades to exactly
+// the pre-#1000 behaviour: origin's branch is then the only evidence Remove
+// accepts, and it refuses rather than guessing.
+func repoSlug() (string, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), repoSlugTimeout)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "gh", "repo", "view", "--json", "nameWithOwner", "-q", ".nameWithOwner")
+	// Killing only the direct child is not enough, and this is the lesson
+	// agent-estate#996's own fix pass paid for: gh (like git over http)
+	// hands work to helper processes that INHERIT the output pipes, so
+	// Output() goes on blocking on the grandchild's copy of the pipe long
+	// after the parent is dead. Setpgid puts the whole tree in one group and
+	// Cancel signals the group, which is what actually makes the bound bind.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+	out, err := cmd.Output()
+	if err != nil {
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("could not read this repository's name within %s -- giving up waiting is not an answer: %w", repoSlugTimeout, err)
+		}
+		return "", err
+	}
+	slug := strings.TrimSpace(string(out))
+	if slug == "" {
+		return "", errors.New("gh reported an empty repository name")
+	}
+	return slug, nil
+}
+
+// maxSweepPerRun bounds how many worktrees one sweep will try to tear down.
+// Teardown of committed work costs a bounded fetch plus a forge round trip
+// EACH, and the sweep runs on the path to a dispatch -- an unbounded one
+// would turn "dispatch a turn" into "wait on the network N times" on the
+// first run after an outage, when N is largest and the host is least able
+// to afford it. Anything past the bound is reported as left for the next
+// sweep, never dropped silently, and the next dispatch takes the next
+// batch: the backlog drains, it just does not drain in one breath.
+const maxSweepPerRun = 8
+
+// sweepWorktrees runs internal/sweep against the ledger's current view and
+// prints one line per record. It never returns an error to its caller: a
+// sweep is housekeeping, and housekeeping that can refuse a dispatch would
+// be a new way for the estate to stop working. Whatever it could not do, it
+// says.
+// sweepConfig assembles the Config a sweep of repoRoot runs with. It is a
+// function of its own, rather than inline in sweepWorktrees, so a test can
+// exercise the REAL Remover closure -- Reattach followed by Remove, against
+// real git -- with a stubbed forge, instead of a fake standing in for the
+// one piece of wiring that actually deletes directories. landed nil means
+// the forge is not consulted at all.
+func sweepConfig(repoRoot string, landed isolate.Landed, apply bool) sweep.Config {
+	cfg := sweep.Config{
+		Root:  isolate.Root(repoRoot),
+		Probe: reclaim.PSProbe,
+		Exists: func(path string) bool {
+			_, err := os.Stat(path)
+			return err == nil
+		},
+		Max: maxSweepPerRun,
+	}
+	if !apply {
+		// No Remover: internal/sweep decides and explains, and removes
+		// nothing. Report mode differs from apply mode by exactly this.
+		return cfg
+	}
+	cfg.Remove = func(rec ledger.Record) error {
+		corpse, rerr := isolate.Reattach(repoRoot, rec.Worktree, rec.Branch, rec.Base)
+		if rerr != nil {
+			return rerr
+		}
+		corpse.Landed = landed
+		return corpse.Remove()
+	}
+	return cfg
+}
+
+func sweepWorktrees(l *ledger.Ledger, repoRoot string, apply bool) {
+	records, err := l.Current()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "estate: cannot read the ledger to sweep worktrees:", err)
+		return
+	}
+	// The forge is asked only if the branch evidence has already failed --
+	// see internal/isolate.Remove. A slug we cannot read leaves the seam
+	// nil, which is exactly the pre-agent-estate#1000 behaviour: fewer
+	// removals, never an unsafe one.
+	var landed isolate.Landed
+	if apply {
+		if slug, serr := repoSlug(); serr == nil {
+			landed = isolate.GHLanded(slug)
+		} else {
+			fmt.Fprintln(os.Stderr, "estate: could not read this repository's name, so a squash-merged branch cannot be recognised this run:", serr)
+		}
+	}
+	cfg := sweepConfig(repoRoot, landed, apply)
+	// A boot time that cannot be read narrows what can be judged a corpse;
+	// reclaim treats zero as "skip that check", never as evidence. Same
+	// handling, and the same explicit note, as `estate reclaim`.
+	if boot, berr := reclaim.BootTime(); berr == nil {
+		cfg.Boot = boot
+	} else {
+		fmt.Fprintln(os.Stderr, "estate: could not read host boot time, the sweep's reboot check is disabled this run:", berr)
+	}
+	removed, kept := 0, 0
+	for _, r := range sweep.Run(records, cfg) {
+		if r.Removed {
+			removed++
+		} else {
+			kept++
+		}
+		fmt.Printf("%-28s %-9s %s\n", r.Record.ID, r.Record.State, r.Reason)
+	}
+	fmt.Fprintf(os.Stderr, "%d worktree(s) removed, %d left in place\n", removed, kept)
+	if !apply {
+		fmt.Fprintln(os.Stderr, "report only -- re-run with --apply to remove them")
+	}
+}
+
 // roleGrounding is what dispatch appends to the prompt based on role alone
 // -- the author's branch-discipline block (agent-estate#940, text
 // unchanged by #949), the fix-pass's branch-CONTINUATION block
@@ -402,6 +571,15 @@ func usage() {
   estate reclaim [--apply]              report in-flight turns and whether their
                                         process is still alive; --apply frees the
                                         slot for any turn positively observed dead
+  estate sweep-worktrees [--apply]      report which dispatch worktrees may be torn
+                                        down -- terminal turns, and turns whose
+                                        process is positively dead -- and why each
+                                        of the rest is kept; --apply removes them.
+                                        Never touches an 'unknown' turn. Every
+                                        teardown refusal still applies unchanged,
+                                        so a worktree holding uncollected work is
+                                        kept whatever this reports. Runs
+                                        automatically before each dispatch.
   estate tick record <phase-item> [artifact]
                                         append this tick to the record
   estate tick check                     has the loop stalled? resolves each
@@ -1535,6 +1713,20 @@ func main() {
 		}
 		printToolUsage(c)
 
+	case "sweep-worktrees":
+		apply := false
+		for _, a := range os.Args[2:] {
+			if a == "--apply" {
+				apply = true
+			}
+		}
+		repoRoot, err := repoTopLevel()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate: cannot locate the repository root to sweep its worktrees:", err)
+			os.Exit(2)
+		}
+		sweepWorktrees(l, repoRoot, apply)
+
 	case "tick":
 		// The Director's loop cannot remember its own history -- every tick is
 		// a fresh context -- so the stop condition in the brief only binds if
@@ -2111,6 +2303,27 @@ func main() {
 		}
 		grounded := corpus.Grounding(issue+" "+string(brief), params) + string(brief)
 
+		// The repository root is needed twice below -- once to sweep the
+		// worktrees earlier turns left behind, once to make this turn's own
+		// -- so it is resolved before either.
+		repoRoot, err := repoTopLevel()
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch -- cannot locate the repository root to isolate the turn:", err)
+			os.Exit(1)
+		}
+
+		// Tear down what earlier turns left behind BEFORE the pressure gate
+		// runs, not after. agent-estate#1000: a dispatch that was killed
+		// outright ran no teardown at all -- signals skip defers -- so the
+		// only thing that can collect its worktree is a later process
+		// reading the durable record. This is that later process. Running it
+		// ahead of the gate also means the gate's worktree ceiling (#999) is
+		// measured against the estate as it is once housekeeping is done,
+		// rather than refusing work over worktrees this run was about to
+		// remove anyway. It cannot itself refuse a dispatch: every failure
+		// inside it is reported and stepped over.
+		sweepWorktrees(l, repoRoot, true)
+
 		if v := pressure.Check(l, pressure.Default()); !v.OK {
 			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch --")
 			for _, r := range v.Reasons {
@@ -2131,13 +2344,7 @@ func main() {
 		// inheriting our cwd puts an unattended full-permission agent in the
 		// shared checkout. Isolation is established BEFORE the ledger records
 		// a dispatch, so a refusal leaves no half-started task behind.
-		topOut, err := exec.Command("git", "rev-parse", "--show-toplevel").Output()
-		if err != nil {
-			fmt.Fprintln(os.Stderr, "estate: refusing to dispatch -- cannot locate the repository root to isolate the turn:", err)
-			os.Exit(1)
-		}
-		repoRoot := strings.TrimSpace(string(topOut))
-
+		// repoRoot was resolved above, before the sweep.
 		var wt *isolate.Worktree
 		if fixPass {
 			// A fix pass continues the PR's OWN branch, not a fresh one --
@@ -2159,6 +2366,17 @@ func main() {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "estate: "+err.Error())
 			os.Exit(1)
+		}
+		// How teardown recognises work that landed after origin's copy of
+		// the branch was deleted by the squash merge that collected it --
+		// see internal/isolate.Landed. A slug we cannot read leaves the seam
+		// nil, which is the pre-agent-estate#1000 behaviour exactly: this
+		// turn's worktree is kept rather than removed on evidence we could
+		// not obtain.
+		if slug, serr := repoSlug(); serr == nil {
+			wt.Landed = isolate.GHLanded(slug)
+		} else {
+			fmt.Fprintln(os.Stderr, "estate: could not read this repository's name, so a squash-merged branch cannot be recognised at teardown:", serr)
 		}
 
 		// The merge gate (agent-estate#940) derives authorship from the PR's
@@ -2300,7 +2518,7 @@ func main() {
 		// anything else -- because it is the one fact that later lets a dead
 		// turn's slot be reclaimed without guessing. See internal/reclaim.
 		mir.Logf("turn started, pid %d -- this window mirrors its output and cannot affect it", pid)
-		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Dispatched, PID: pid, Harness: harnessName, Note: "worktree " + wt.Path}); err != nil {
+		if err := l.Append(ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, State: ledger.Dispatched, PID: pid, Harness: harnessName, Worktree: wt.Path, Branch: wt.Branch, Base: wt.Base, Note: "worktree " + wt.Path}); err != nil {
 			fmt.Fprintln(os.Stderr, "estate: cannot record dispatch:", err)
 			mir.Close("unknown", "the turn is running but the ledger could not record it: "+err.Error())
 			os.Exit(2)
@@ -2310,7 +2528,11 @@ func main() {
 		runErr := cmd.Wait()
 		out := stdout.Bytes()
 
-		rec := ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, PID: pid, Harness: harnessName}
+		// Worktree and Branch ride on the outcome record too, not only the
+		// Dispatched one: `estate sweep-worktrees` reads the ledger's
+		// CURRENT view (one record per task, its latest), so a fact carried
+		// only by the first record is a fact the sweep cannot see.
+		rec := ledger.Record{ID: id, Issue: issue, Lane: id, Role: role, PR: reviewPR, PID: pid, Harness: harnessName, Worktree: wt.Path, Branch: wt.Branch}
 		// Spend is read the same way Result is -- straight out of this exact
 		// subprocess's own stdout, whatever state the turn ends up recorded
 		// in below. A turn that timed out or exited non-zero may still have
@@ -2402,15 +2624,39 @@ func main() {
 			// pass. Recorded for every role=author turn now that the gate
 			// can chain a fix pass's Base back to an earlier turn's own
 			// HeadSHA (see internal/gate's package doc).
-			rec.Base = wt.Base
 		}
+		// Base is recorded for EVERY role, not only role=author. The gate
+		// only ever reads an author's, but teardown needs it whoever ran:
+		// without the commit a worktree started from, nothing can tell what
+		// that turn committed, and internal/isolate.Reattach correctly
+		// refuses (agent-estate#1000). A reviewer's abandoned worktree is
+		// exactly as much of a leak as an author's.
+		rec.Base = wt.Base
 
-		// Tear the worktree down only when it is empty. A turn that left work
-		// behind has output nobody has collected, and an isolated worktree
-		// that still exists is a report; a deleted one is unrecoverable.
-		if err := wt.Remove(); err != nil {
-			rec.Note = strings.TrimSpace(rec.Note + "; " + wt.Path + " kept: " + err.Error())
-			fmt.Fprintln(os.Stderr, "estate: "+err.Error())
+		// Tear the worktree down only when this turn reached a TERMINAL
+		// state and left nothing uncollected. A turn that left work behind
+		// has output nobody has collected, and an isolated worktree that
+		// still exists is a report; a deleted one is unrecoverable.
+		//
+		// The terminal-state condition is agent-estate#1000's, and it is not
+		// redundant with Remove's own refusals. `unknown` is what a turn
+		// times out into: the subprocess was killed at the 45-minute bound,
+		// but we do not know whether it had already pushed, opened a pull
+		// request, or left something half-written -- and a turn whose work
+		// DID land would now be recognised as collected by the Landed seam
+		// and removed on that evidence. Terminal state is what makes
+		// "collected" a safe question to act on; without it, a turn we
+		// could not observe could have its worktree deleted on the strength
+		// of a commit that says nothing about what else it was doing.
+		if rec.State.Terminal() {
+			if err := wt.Remove(); err != nil {
+				rec.Note = strings.TrimSpace(rec.Note + "; " + wt.Path + " kept: " + err.Error())
+				fmt.Fprintln(os.Stderr, "estate: "+err.Error())
+			}
+		} else {
+			kept := fmt.Sprintf("%s kept: turn is %s, which is not terminal -- unknown is not failed, and a worktree is only ever torn down for a turn we can say finished", wt.Path, rec.State)
+			rec.Note = strings.TrimSpace(rec.Note + "; " + kept)
+			fmt.Fprintln(os.Stderr, "estate: "+kept)
 		}
 
 		// The transcript's footer names the state the ledger is about to

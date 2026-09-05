@@ -28,6 +28,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -48,8 +49,130 @@ type Worktree struct {
 	// Remove uses this to know whether there is a local branch ref left to
 	// delete at teardown.
 	Detached bool
+	// Landed, when set, is the second way Remove can establish that this
+	// worktree's commits have been collected -- see the Landed type and
+	// Remove's own doc comment. nil means the question is not asked at all,
+	// which leaves Remove behaving exactly as it did before this seam
+	// existed: origin's own copy of the branch is then the only evidence
+	// accepted.
+	Landed Landed
 
 	root string
+}
+
+// Landed answers "did this commit's work reach the repository for good?" --
+// the question Remove must ask that origin's copy of the dispatch branch
+// cannot answer.
+//
+// WHY THIS EXISTS (agent-estate#1000). remoteHasCommit (below) asks whether
+// origin's own tip of the dispatch branch still contains the commit. That is
+// a true "collected" signal right up until the pull request merges: this
+// estate merges with `gh pr merge --squash --delete-branch`, so the branch
+// origin was holding the evidence on is deleted *by the very act of
+// collecting the work*. From that moment the fetch fails, remoteHasCommit
+// returns "could not measure", Remove refuses, and it refuses forever --
+// which is exactly how 176 worktrees accumulated until the host OOM-killed
+// itself.
+//
+// AHEAD-NESS IS NOT THE ANSWER, and neither is any purely-git test. A squash
+// merge writes a NEW commit with a new tree-parent lineage; the dispatch
+// branch's own commits are never ancestors of main afterwards. Measured on
+// merged PR #984: 1 commit ahead of origin/main, `merge-base --is-ancestor`
+// against main says NO. Of 63 ahead-of-main worktrees on the dying host, 34
+// had a merged pull request. `git cherry`'s patch-id matching does not
+// rescue this either: a squash of N>1 commits has no patch-id in common with
+// any of them. So the estate has to ask the forge, which is the only party
+// that records "this commit is the head of pull request N, and N merged" --
+// and records it durably, after the branch is gone. Verified against merged
+// PR #996, whose branch origin no longer has:
+//
+//	gh api repos/jonhill90/agent-estate/commits/20e5adc.../pulls
+//	  -> [{"n":996,"merged":"2026-09-03T19:58:39Z"}]
+//
+// A false "yes" here deletes the only copy of a turn's output, so every
+// failure to ask is an error and never a "no" -- same fail-closed contract
+// as remoteHasCommit and Committed.
+type Landed func(commit string) (bool, error)
+
+// ghTimeout bounds GHLanded's own subprocess, for the same reason
+// remoteFetchTimeout bounds the fetch: a network call with no bound turns
+// teardown into something that hangs rather than refuses. Same 15s as
+// remoteFetchTimeout and internal/cost's execTimeout rather than a fresh
+// number. A var, not a const, so a test can shrink it.
+var ghTimeout = 15 * time.Second
+
+// safeCommit refuses anything that is not a plain hexadecimal object name.
+// GHLanded interpolates the commit into a REST path, so a value carrying
+// "/" or ".." would address a different endpoint entirely; and a commit that
+// is not a full object name cannot be what Head() returned, which is the
+// only thing that should ever reach here.
+func safeCommit(commit string) error {
+	c := strings.TrimSpace(commit)
+	if len(c) < 7 {
+		return fmt.Errorf("commit %q is too short to be an object name", commit)
+	}
+	for _, r := range c {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return fmt.Errorf("commit %q contains %q, which is not hexadecimal", commit, r)
+		}
+	}
+	return nil
+}
+
+// GHLanded is the real Landed: it asks GitHub which pull requests contain
+// this commit and whether any of them merged. Kept beside the seam it
+// implements, the same way internal/reclaim keeps PSProbe beside Probe --
+// tests drive the decision logic through a fake, and this is the one place
+// that knows the question is answered by a subprocess.
+//
+// repo is "owner/name". Any failure -- gh missing, unauthenticated, the
+// commit unknown to the forge (404, which is what an unpushed commit
+// produces), output that does not parse -- is returned as an error, so
+// Remove refuses rather than reading "could not ask" as "not landed" or as
+// "landed". Only a definite count of merged pull requests answers the
+// question.
+func GHLanded(repo string) Landed {
+	return func(commit string) (bool, error) {
+		if err := safeCommit(commit); err != nil {
+			return false, err
+		}
+		if strings.TrimSpace(repo) == "" {
+			return false, errors.New("no repository configured, so GitHub cannot be asked whether this commit landed")
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), ghTimeout)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, "gh", "api",
+			"repos/"+repo+"/commits/"+strings.TrimSpace(commit)+"/pulls",
+			"--jq", "[.[] | select(.merged_at != null)] | length")
+		// Same process-group kill as gitTimeout: gh spawns helpers, and
+		// killing only the direct child leaves CombinedOutput's pipe held
+		// open by a grandchild, so the "bounded" call is not bounded.
+		cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+		cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			if ctx.Err() == context.DeadlineExceeded {
+				return false, fmt.Errorf("could not ask GitHub whether %s landed within %s -- giving up waiting is not an answer: %w", commit, ghTimeout, err)
+			}
+			return false, fmt.Errorf("could not ask GitHub whether %s landed: %w: %s", commit, err, strings.TrimSpace(string(out)))
+		}
+		n, perr := strconv.Atoi(strings.TrimSpace(string(out)))
+		if perr != nil {
+			return false, fmt.Errorf("could not read GitHub's answer about %s: %q", commit, strings.TrimSpace(string(out)))
+		}
+		return n > 0, nil
+	}
+}
+
+// landed asks the Landed seam, if one is configured. With none configured it
+// reports (false, nil) -- "no further evidence", never an error -- so a
+// caller that never set the seam gets precisely the behaviour Remove had
+// before it existed.
+func (w *Worktree) landed(commit string) (bool, error) {
+	if w.Landed == nil {
+		return false, nil
+	}
+	return w.Landed(commit)
 }
 
 // safeID reports whether id can name a directory and a branch without
@@ -512,7 +635,17 @@ func (w *Worktree) remoteHasCommit(commit, branch string) (bool, error) {
 // branch, confirmed live. A worktree whose commits origin does not have is
 // still refused exactly as before.
 //
-// All three refusals are the same rule: a dispatch's uncollected output
+// agent-estate#1000 found the reverse failure in the same check: origin's
+// copy of the dispatch branch is deleted BY the merge that collects the
+// work (`gh pr merge --squash --delete-branch`), so from the moment a turn
+// succeeds the fetch fails, the refusal fires, and it fires forever. That
+// is not conservatism, it is a leak -- 176 worktrees, then an OOM. The
+// Landed seam is the second, independent way to establish collection, and
+// it is consulted ONLY after the branch evidence has failed to establish
+// it. It can turn a refusal into a removal; it can never turn a removal
+// into a refusal, and it is never asked to overrule a positive.
+//
+// All these refusals are the same rule: a dispatch's uncollected output
 // looks exactly like an empty worktree from outside, and deleting it is
 // unrecoverable while reporting it is not.
 func (w *Worktree) Remove() error {
@@ -526,6 +659,23 @@ func (w *Worktree) Remove() error {
 			return fmt.Errorf("isolate: cannot read %s's HEAD to check whether its commits are referenced elsewhere, so refusing to remove it: %w", w.Path, herr)
 		}
 		collected, rerr := w.remoteHasCommit(head, w.Branch)
+		if !collected {
+			// The branch could not vouch for the commits -- either origin
+			// says no, or we could not ask it. Both are the shape a
+			// successful squash merge leaves behind, so ask the forge
+			// whether the work landed before refusing. A failure to ask is
+			// carried, not swallowed: if neither source could establish
+			// collection, we still refuse below.
+			landed, lerr := w.landed(head)
+			switch {
+			case lerr == nil && landed:
+				collected, rerr = true, nil
+			case lerr != nil && rerr == nil:
+				rerr = lerr
+			case lerr != nil && rerr != nil:
+				rerr = fmt.Errorf("%w; and %v", rerr, lerr)
+			}
+		}
 		if rerr != nil {
 			return fmt.Errorf("isolate: cannot confirm %s's commits on %s are referenced elsewhere; refusing to remove it -- collect them first: %w", w.Path, w.Branch, rerr)
 		}
@@ -555,4 +705,69 @@ func (w *Worktree) Remove() error {
 		return err
 	}
 	return nil
+}
+
+// Reattach rebuilds a Worktree value for a worktree that some OTHER process
+// created, from the facts that process durably recorded about it, so the
+// identical Remove refusals can be applied to it later.
+//
+// WHY IT HAS TO EXIST (agent-estate#1000). Create returns a Worktree that
+// lives in the dispatching process's memory, and Remove is a method on it.
+// Signals skip defers: a dispatch that is OOM-killed or SIGKILLed -- which
+// is exactly how this host died -- runs no teardown at all, and the value
+// that knew how to tear its worktree down dies with it. A design where only
+// the dying process can tidy up is the same defect with a longer list. This
+// is the third-party path: a LATER process reads the ledger's own record of
+// path, branch and base and applies the same guards to a corpse's worktree.
+//
+// It refuses rather than guessing whenever a fact needed to judge safety is
+// missing:
+//
+//   - base == "" would make Committed unable to tell what the turn
+//     committed. Committed already fails closed on that, but refusing here
+//     names the true cause instead of surfacing it three calls later.
+//   - path must sit DIRECTLY under this repository's own dispatch Root. A
+//     recorded path is a string from a file, and the operation it feeds is
+//     `git worktree remove`; confining it to the one directory this package
+//     creates worktrees in is what stops a corrupted or hand-edited record
+//     naming something else on the disk.
+//   - path must exist and be a git worktree.
+//
+// Detached is OBSERVED from the worktree itself rather than read from the
+// record: git is the authority on whether HEAD is a branch or a detached
+// checkout, and Remove uses the answer to decide whether a local branch ref
+// remains to delete. A recorded flag could be stale; `symbolic-ref` cannot.
+func Reattach(repoRoot, path, branch, base string) (*Worktree, error) {
+	if strings.TrimSpace(path) == "" {
+		return nil, errors.New("isolate: no worktree path recorded, so there is nothing to reattach to")
+	}
+	if err := safeBranch(branch); err != nil {
+		return nil, fmt.Errorf("isolate: refusing to reattach: %w", err)
+	}
+	if strings.TrimSpace(base) == "" {
+		return nil, fmt.Errorf("isolate: refusing to reattach to %s: no base commit was recorded for it, so there is no way to tell what the turn committed", path)
+	}
+	root := Root(repoRoot)
+	rel, err := filepath.Rel(root, filepath.Clean(path))
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || strings.ContainsRune(rel, filepath.Separator) {
+		return nil, fmt.Errorf("isolate: refusing to reattach to %s: it is not a worktree directly under this repository's dispatch root %s", path, root)
+	}
+	st, err := os.Stat(path)
+	if err != nil {
+		return nil, fmt.Errorf("isolate: refusing to reattach to %s: %w", path, err)
+	}
+	if !st.IsDir() {
+		return nil, fmt.Errorf("isolate: refusing to reattach to %s: it is not a directory", path)
+	}
+	if _, err := git(path, "rev-parse", "--git-dir"); err != nil {
+		return nil, fmt.Errorf("isolate: refusing to reattach to %s: it is not a git worktree: %w", path, err)
+	}
+	// `symbolic-ref -q HEAD` exits non-zero, quietly, exactly when HEAD is
+	// detached -- and the rev-parse above has already established that this
+	// is a git worktree, so a failure here cannot mean "not a repository".
+	detached := false
+	if _, err := git(path, "symbolic-ref", "-q", "HEAD"); err != nil {
+		detached = true
+	}
+	return &Worktree{Path: path, Branch: branch, Base: base, Detached: detached, root: repoRoot}, nil
 }

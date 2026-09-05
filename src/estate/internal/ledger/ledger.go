@@ -92,6 +92,27 @@ type Record struct {
 	// what is and is not checked -- but is recorded now so it exists to
 	// check against.
 	Base string `json:"base,omitempty"`
+	// Worktree and Branch are where this turn ran and which ref it ran on --
+	// internal/isolate.Worktree's own Path and Branch, written by the estate
+	// at dispatch time and repeated on the turn's outcome record.
+	//
+	// They are recorded because teardown must not depend on the dispatching
+	// process surviving (agent-estate#1000). Remove is a method on a value
+	// that lives in that process's memory, and signals skip defers: an
+	// OOM-killed dispatch takes the only thing that knew how to tear its
+	// worktree down with it. With path and branch in the durable record --
+	// alongside Base, which the same teardown needs to tell what the turn
+	// committed -- a LATER process can rebuild that value
+	// (internal/isolate.Reattach) and apply the identical refusals to a
+	// corpse's worktree. Note already carried the path as prose on the
+	// Dispatched record; prose is not a field, and the outcome record did
+	// not carry it at all.
+	//
+	// Recorded for every role, not only role=author: a reviewer turn leaves
+	// a worktree behind exactly like an author turn does, and the leak this
+	// fixes did not care which role produced it.
+	Worktree string `json:"worktree,omitempty"`
+	Branch   string `json:"branch,omitempty"`
 	// SpendCostUSD is the harness's own reported dollar cost for this turn --
 	// read by internal/harness.Turn.Spend directly from the harness's own
 	// output the instant this turn's subprocess exits, never a number the
