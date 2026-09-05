@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -218,5 +219,163 @@ func TestReconciliationReportsDisagreement(t *testing.T) {
 	PrintSummary(&buf, m, m.Dedup.CompactedUserTurnsDistinctTotal, m.Dedup.DroppedAsDuplicateOfResponseItem, m.Dedup.RecoveredOnlyInCompacted)
 	if !strings.Contains(buf.String(), "AGREES") {
 		t.Fatalf("PrintSummary output = %q, want it to say AGREES when figures match", buf.String())
+	}
+}
+
+// TestPositiveFilterExcludesDeveloperAndNonInputText is rule 1: the filter
+// is positive (role=="user" AND content[0].type=="input_text"), never a
+// negative "not assistant" filter that would wrongly admit a developer
+// instruction or a non-text content item.
+func TestPositiveFilterExcludesDeveloperAndNonInputText(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir, "roles.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-session"}}`,
+		// developer role: never a genuine operator turn, even with input_text content.
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"developer","content":[{"type":"input_text","text":"fixture: injected developer instruction"}]}}`,
+		// user role but non-input_text content (e.g. an image): never extracted.
+		`{"timestamp":"2026-01-01T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_image","text":""}]}}`,
+		// the one genuine turn in this fixture.
+		`{"timestamp":"2026-01-01T00:00:03.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: the one genuine operator turn"}]}}`,
+	})
+
+	m, err := buildManifest(dir)
+	if err != nil {
+		t.Fatalf("buildManifest: %v", err)
+	}
+	if len(m.Entries) != 1 {
+		t.Fatalf("Entries = %d, want 1 (developer role and non-input_text content must both be excluded)", len(m.Entries))
+	}
+	if m.Entries[0].TextSHA256 != hashOf("fixture: the one genuine operator turn") {
+		t.Fatalf("surviving entry does not match the one genuine operator turn")
+	}
+}
+
+// TestAttributionByMostRecentPrecedingSessionMeta is rule 2: a turn
+// attributes to the most recent preceding session_meta.payload.id in file
+// order, and a turn following a second session_meta re-attributes to the new
+// id, never the first.
+func TestAttributionByMostRecentPrecedingSessionMeta(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir, "two-sessions.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-session-one"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn under session one"}]}}`,
+		`{"timestamp":"2026-01-01T00:00:02.000Z","type":"session_meta","payload":{"id":"fixture-session-two"}}`,
+		`{"timestamp":"2026-01-01T00:00:03.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn under session two"}]}}`,
+	})
+
+	m, err := buildManifest(dir)
+	if err != nil {
+		t.Fatalf("buildManifest: %v", err)
+	}
+	if len(m.Entries) != 2 {
+		t.Fatalf("Entries = %d, want 2", len(m.Entries))
+	}
+	byHash := map[string]ManifestEntry{}
+	for _, e := range m.Entries {
+		byHash[e.TextSHA256] = e
+	}
+	first := byHash[hashOf("fixture: turn under session one")]
+	second := byHash[hashOf("fixture: turn under session two")]
+	if first.SessionID != "fixture-session-one" {
+		t.Errorf("first turn's SessionID = %q, want fixture-session-one", first.SessionID)
+	}
+	if second.SessionID != "fixture-session-two" {
+		t.Errorf("second turn's SessionID = %q, want fixture-session-two", second.SessionID)
+	}
+}
+
+// TestUnknownRecordTypeRejectedLoudly is rule 5: a record whose "type" is
+// not in knownRecordTypes refuses the whole file (folded into
+// FilesUnparseable with a reason naming the line and the type), never
+// silently skipped or bucketed as "other".
+func TestUnknownRecordTypeRejectedLoudly(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFixture(t, dir, "unknown-type.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-session"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"some_shape_nobody_has_seen","payload":{}}`,
+	})
+
+	m, err := buildManifest(dir)
+	if err != nil {
+		t.Fatalf("buildManifest: %v", err)
+	}
+	if len(m.FilesUnparseable) != 1 || m.FilesUnparseable[0].Path != path {
+		t.Fatalf("FilesUnparseable = %v, want exactly [%s]", m.FilesUnparseable, path)
+	}
+	if !strings.Contains(m.FilesUnparseable[0].Reason, "some_shape_nobody_has_seen") {
+		t.Fatalf("FilesUnparseable reason = %q, want it to name the unknown type", m.FilesUnparseable[0].Reason)
+	}
+	if m.FilesParsed != 0 {
+		t.Fatalf("FilesParsed = %d, want 0 (the unknown-type file must not be counted as parsed)", m.FilesParsed)
+	}
+	if len(m.Entries) != 0 {
+		t.Fatalf("Entries = %d, want 0 (nothing from a refused file)", len(m.Entries))
+	}
+}
+
+// TestUnknownRecordTypeMalformedJSONAlsoRejected covers the other half of
+// rule 5: a line that is not even valid JSON is refused the same way as a
+// recognised-but-unknown type, not treated differently.
+func TestUnknownRecordTypeMalformedJSONAlsoRejected(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir, "malformed.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-session"}}`,
+		`not even json`,
+	})
+
+	m, err := buildManifest(dir)
+	if err != nil {
+		t.Fatalf("buildManifest: %v", err)
+	}
+	if len(m.FilesUnparseable) != 1 {
+		t.Fatalf("FilesUnparseable = %v, want exactly 1 entry", m.FilesUnparseable)
+	}
+}
+
+// TestRerunProducesZeroDuplicates is rule 6: buildManifest is a pure
+// function of the fixture bytes on disk -- no timestamp, random value, or
+// scan-order dependency enters TextSHA256 or the manifest's shape -- so
+// running it twice over the same unchanged fixtures yields byte-identical
+// manifests, and no single run ever produces two entries sharing both the
+// same SessionID and the same TextSHA256.
+func TestRerunProducesZeroDuplicates(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir, "a.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-session"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn A"}]}}`,
+		`{"timestamp":"2026-01-01T00:00:02.000Z","type":"compacted","payload":{"message":"","replacement_history":[` +
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn A"}]},` +
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: only-in-compacted turn B"}]}` +
+			`]}}`,
+	})
+
+	m1, err := buildManifest(dir)
+	if err != nil {
+		t.Fatalf("buildManifest (run 1): %v", err)
+	}
+	m2, err := buildManifest(dir)
+	if err != nil {
+		t.Fatalf("buildManifest (run 2): %v", err)
+	}
+
+	seen := map[string]bool{}
+	for _, e := range m1.Entries {
+		key := e.SessionID + "\x00" + e.TextSHA256
+		if seen[key] {
+			t.Fatalf("duplicate entry within one run: session=%q hash=%q", e.SessionID, e.TextSHA256)
+		}
+		seen[key] = true
+	}
+
+	b1, err := json.Marshal(m1)
+	if err != nil {
+		t.Fatalf("marshal m1: %v", err)
+	}
+	b2, err := json.Marshal(m2)
+	if err != nil {
+		t.Fatalf("marshal m2: %v", err)
+	}
+	if !bytes.Equal(b1, b2) {
+		t.Fatalf("rerun produced a different manifest:\nrun 1: %s\nrun 2: %s", b1, b2)
 	}
 }
