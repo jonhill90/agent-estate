@@ -404,3 +404,70 @@ func TestWorktreeCountIsCountedNotEstimated(t *testing.T) {
 		t.Fatal("a healthy repo must pass; a ceiling that always refuses is the bug being fixed")
 	}
 }
+
+// --- Host --------------------------------------------------------------
+
+// Host must apply the host's OWN limits and none of the estate's. A caller
+// that is already the in-flight turn asks Host precisely because Check would
+// refuse it for existing; if Host quietly carried the in-flight cap or the
+// worktree ceiling, that caller would be refused anyway and would go build a
+// second reader of vm_stat, which is the failure this function exists to
+// prevent.
+func TestHostIgnoresTheEstatesOwnLimits(t *testing.T) {
+	if !hostIsMeasurable(t) {
+		t.Skip("host load/memory not readable here")
+	}
+	lim := neutralised()
+	lim.MaxWorktrees = 0 // a real repo has more than zero
+	lim.MaxInFlight = 0  // Check refuses unconditionally at this
+	v := Host(lim)
+	if !v.OK {
+		t.Fatalf("Host refused on a healthy host with only estate-side limits armed: %v", v.Reasons)
+	}
+	joined := strings.Join(v.Reasons, " ")
+	if strings.Contains(joined, worktreeReason) || strings.Contains(joined, "lanes in flight") {
+		t.Fatalf("Host applied an estate-side limit; it must apply host limits only: %v", v.Reasons)
+	}
+}
+
+// ...and it must still fail closed on the limits it DOES own. Without this,
+// a Host that returned {OK: true} unconditionally would pass the test above.
+func TestHostRefusesBelowItsOwnMemoryFloor(t *testing.T) {
+	if !hostIsMeasurable(t) {
+		t.Skip("host load/memory not readable here")
+	}
+	lim := neutralised()
+	lim.MinFreeMemMB = 1e12 // no host has a petabyte free
+	v := Host(lim)
+	if v.OK {
+		t.Fatalf("Host allowed with the memory floor above any real host; reading=%+v", v.Reading)
+	}
+	if !strings.Contains(strings.Join(v.Reasons, " "), "below floor") {
+		t.Fatalf("Host refused without naming the memory floor: %v", v.Reasons)
+	}
+}
+
+// Host and Check must read the same host the same way. If they drift, the
+// benchmark harness and the dispatch gate disagree about the same machine --
+// two gauges, which is #999's shape.
+func TestHostAndCheckAgreeOnTheHostLimits(t *testing.T) {
+	if !hostIsMeasurable(t) {
+		t.Skip("host load/memory not readable here")
+	}
+	lim := neutralised()
+	lim.MinFreeMemMB = 1e12
+	h := Host(lim)
+	c := Check(emptyLedger(t), lim)
+	if h.OK || c.OK {
+		t.Fatalf("both must refuse at an impossible memory floor; host=%v check=%v", h.Reasons, c.Reasons)
+	}
+	// The megabyte figures are two separate readings of a live host and will
+	// differ by a few MB; the SHAPE of the refusal is what must match.
+	const shape = "below floor 1000000000000MB"
+	if !strings.HasPrefix(h.Reasons[0], "free memory ") || !strings.HasSuffix(h.Reasons[0], shape) {
+		t.Fatalf("Host's first refusal is not the memory floor: %q", h.Reasons[0])
+	}
+	if !strings.HasPrefix(c.Reasons[0], "free memory ") || !strings.HasSuffix(c.Reasons[0], shape) {
+		t.Fatalf("Check's first refusal is not the memory floor: %q", c.Reasons[0])
+	}
+}

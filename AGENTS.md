@@ -27,6 +27,17 @@ transport). Run `go run ./src/estate` with no arguments for the current
 subcommand list — it grows, and a list written in prose goes stale between
 commits.
 
+`src/estate/cmd/` holds programs that are **not** the daemon and that nothing
+in it calls. There is one today: `cmd/dispatchbench` (#1002), the harness that
+measured persistent tmux lanes against stateless subprocess dispatch. It
+spends real money and loads the host, so a person runs it deliberately; its
+numbers are written down in
+[`docs/decisions/0001-dispatch-mode-counterfactual.md`](docs/decisions/0001-dispatch-mode-counterfactual.md)
+rather than re-derived by anyone who wonders. **Read that record before
+proposing persistent lanes or citing cost as the reason for stateless
+dispatch** — it refutes the cache-decay argument and finds the cost argument
+backwards; the case for stateless dispatch that survived is memory.
+
 **The shell and Python supervisor this section used to index is deleted.**
 `git ls-files scripts/supervisor tests/supervisor` returns **0**. Those files
 are kept, unmaintained, under `reference/` so a rule can be read in the form
