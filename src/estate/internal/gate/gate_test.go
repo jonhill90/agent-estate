@@ -1146,6 +1146,42 @@ func TestBypass_ForgedApprovalWithNoGenuineCommentStillDisagreesWithLedger(t *te
 	}
 }
 
+// agent-estate#1220: a reviewer whose PR comment is a genuine, parsable
+// approval but whose ledger Result carries no Verdict: line at all (the
+// exact shape a reviewer produces when it posts the comment and then only
+// *summarises* its findings in its own returned text, per PR #1219) must
+// still refuse -- the ledger Result is the second, independent source
+// (agent-estate#934), and its absence is exactly as fatal as its presence
+// disagreeing. The refusal must also name the remedy, not just the symptom,
+// so the next reviewer -- or whoever files the fix -- knows to make the
+// turn's own final text repeat the verdict block rather than just guessing.
+func TestReviewerResultWithNoVerdictLineRefusesAndNamesTheRemedy(t *testing.T) {
+	p, _ := cleanFixture(t)
+	checkStart, err := time.Parse(time.RFC3339, p.Checks[0].StartedAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reviewedAt := checkStart.Add(1 * time.Hour)
+	l := newLedger(t,
+		ledger.Record{ID: "a1", Issue: "926", Lane: "lane-author", Role: ledger.RoleAuthor, State: ledger.Complete, HeadSHA: "deadbeef"},
+		// A real completed review turn whose own returned text never repeats
+		// the Verdict: line it posted as a PR comment -- e.g. a prose summary
+		// of findings ending "No merge was performed, per the brief."
+		ledger.Record{ID: "r1", Issue: "926", Lane: "lane-review", Role: ledger.RoleReviewer, PR: 926, State: ledger.Complete, At: reviewedAt, Result: "Looked clean overall; a few minor style notes but nothing blocking."},
+	)
+	d := evaluate(p, "lane-review", l)
+	if d.Allow {
+		t.Fatal("bypass: a genuine PR comment APPROVE was accepted with no Verdict: line at all in the ledger Result to cross-check it against")
+	}
+	joined := strings.Join(d.Reasons, " | ")
+	if !strings.Contains(joined, "carries no parsable Verdict: line in its own Result") {
+		t.Fatalf("refused, but not for the expected reason (missing ledger Result verdict): %v", d.Reasons)
+	}
+	if !strings.Contains(joined, "final returned text must repeat") {
+		t.Fatalf("refused, but the message names only the symptom, not the remedy: %v", d.Reasons)
+	}
+}
+
 // ---------------------------------------------------------------------
 // agent-estate#1107: an abbreviated Reviewed-SHA that DOES name the current
 // head must be accepted, not refused as "stale" -- the gate was comparing
