@@ -1,6 +1,7 @@
 package main
 
 import (
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
@@ -63,6 +64,97 @@ func realCommit(t *testing.T, repoRoot, ref string) string {
 // repository's real history. GuardCommit's own identity was independently
 // confirmed against the real repository during review (diffed against its
 // parent) rather than re-proven by a test here.
+
+// hermeticPreGuardRepo builds a fresh, self-contained git repository in
+// t.TempDir() with one commit of its own, then makes real git report that
+// commit as genuinely NOT a descendant of knowledge.GuardCommit -- without
+// ever fetching, checking out, or otherwise depending on this actual
+// repository's history, refs, objects, config or working directory (the
+// exact dependency #1199's review found and required removed).
+//
+// The trick is `git replace`: writing refs/replace/<GuardCommit> pointing
+// at some real, local commit makes git resolve GuardCommit's hex name to a
+// genuine, locally-present commit object -- `git cat-file -t` on it
+// answers "commit", not "fatal: Not a valid object name" -- so `git
+// merge-base --is-ancestor GuardCommit indexCommit` can run to completion
+// instead of failing closed with exit 128 (which provenance.go folds into
+// ProvenanceUnknown, not the PreGuard case this test exists to catch).
+// Ancestry itself is walked over the REAL parent pointers recorded in each
+// commit object, never over a replace ref -- nothing in this repository's
+// one commit points at GuardCommit's hash as a parent, so the walk can
+// never reach it, and `--is-ancestor` genuinely (not by construction of a
+// false positive) answers "no": exit 1, "ran fine, real negative", which
+// provenance.go's errGitNo case reads as ProvenancePreGuard. This is
+// confirmed empirically, not just argued: see this file's header comment
+// for the manual `git replace` + `--is-ancestor` trace this test's shape
+// was verified against before being committed.
+func hermeticPreGuardRepo(t *testing.T) (repoRoot, indexCommit string) {
+	t.Helper()
+	dir := t.TempDir()
+	run := func(args ...string) string {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(),
+			"GIT_AUTHOR_NAME=fixture", "GIT_AUTHOR_EMAIL=fixture@example.com",
+			"GIT_COMMITTER_NAME=fixture", "GIT_COMMITTER_EMAIL=fixture@example.com",
+		)
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			t.Fatalf("git %s (in %s): %v\n%s", strings.Join(args, " "), dir, err, out)
+		}
+		return strings.TrimSpace(string(out))
+	}
+	run("init", "-q")
+	if err := os.WriteFile(filepath.Join(dir, "f.txt"), []byte("hermetic pre-guard fixture"), 0o644); err != nil {
+		t.Fatalf("write fixture file: %v", err)
+	}
+	run("add", "f.txt")
+	run("commit", "-q", "-m", "hermetic pre-guard fixture commit")
+	indexCommit = run("rev-parse", "HEAD")
+
+	// Make GuardCommit resolve to SOMETHING real and local, without it ever
+	// becoming an ancestor of indexCommit -- see the doc comment above for
+	// why replacement content is irrelevant to the ancestry walk; reusing
+	// indexCommit itself as the replacement target keeps this repo to a
+	// single real commit.
+	run("update-ref", "refs/replace/"+knowledge.GuardCommit, indexCommit)
+
+	return dir, indexCommit
+}
+
+// TestKnowledgeQueryPreGuardCommitIsFlaggedHermetically is the positive
+// (flagged) CLI-level case #1199's review found missing: an index whose
+// generated_by.commit genuinely predates knowledge.GuardCommit, queried
+// through the actual built binary and main.go's real
+// foldProvenanceIntoCoverage switch, must surface the ProvenancePreGuard
+// disclosure. Built entirely from hermeticPreGuardRepo above -- no ambient
+// history, refs, objects, config or working directory involved -- so this
+// passes identically on a full clone, a `--depth 1` clone, and CI's actual
+// shallow checkout, the exact property the removed non-hermetic
+// GuardCommit~20 test lacked.
+func TestKnowledgeQueryPreGuardCommitIsFlaggedHermetically(t *testing.T) {
+	bin := buildEstateBinary(t)
+	repoRoot, indexCommit := hermeticPreGuardRepo(t)
+
+	idx := filepath.Join(t.TempDir(), "index.json")
+	writeFixtureIndexWithGeneratedBy(t, idx, knowledge.GeneratedBy{Commit: indexCommit, BuiltAt: time.Now().UTC()})
+
+	got := runKnowledgeQueryJSONWithRepoRoot(t, bin, idx, repoRoot)
+
+	var found bool
+	for _, r := range got.Coverage.Reasons {
+		if r.State == "pre_guard_commit" {
+			found = true
+			short := indexCommit[:12]
+			if !strings.Contains(r.Detail, short) {
+				t.Fatalf("pre_guard_commit Detail does not name the index's own build commit: %q (want %q)", r.Detail, short)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("Coverage.Reasons does not carry a pre_guard_commit reason for a commit that genuinely predates GuardCommit: %+v", got.Coverage.Reasons)
+	}
+}
 
 // TestKnowledgeQueryPostGuardCommitIsClean is the negative case: an index
 // built by a REAL descendant of knowledge.GuardCommit (the current
