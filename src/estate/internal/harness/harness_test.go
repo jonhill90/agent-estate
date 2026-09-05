@@ -102,17 +102,17 @@ func TestSandboxingIsReportedHonestlyPerHarness(t *testing.T) {
 // empty turn.
 func TestUnreadableOutputIsAnErrorNotAnEmptyResult(t *testing.T) {
 	t.Run("claude: not JSON", func(t *testing.T) {
-		if _, err := claudeResult([]byte("this is not json")); err == nil {
+		if _, err := ClaudeResult([]byte("this is not json")); err == nil {
 			t.Fatal("unparseable output must be an error")
 		}
 	})
 	t.Run("claude: JSON without a result field", func(t *testing.T) {
-		if _, err := claudeResult([]byte(`{"ok":true}`)); err == nil {
+		if _, err := ClaudeResult([]byte(`{"ok":true}`)); err == nil {
 			t.Fatal("a JSON envelope with no result field must be an error")
 		}
 	})
 	t.Run("claude: good envelope", func(t *testing.T) {
-		got, err := claudeResult([]byte(`{"result":"done"}`))
+		got, err := ClaudeResult([]byte(`{"result":"done"}`))
 		if err != nil || got != "done" {
 			t.Fatalf("got %q, %v; want \"done\", nil", got, err)
 		}
@@ -171,7 +171,7 @@ const realClaudeEnvelope = `{"is_error":false,"duration_api_ms":2220,"num_turns"
 "cache_read_input_tokens":17892,"output_tokens":4},"result":"pong"}`
 
 func TestClaudeSpendReadsTheRealEnvelope(t *testing.T) {
-	s, err := claudeSpend([]byte(realClaudeEnvelope))
+	s, err := ClaudeSpend([]byte(realClaudeEnvelope))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +195,7 @@ func TestClaudeSpendReadsTheRealEnvelope(t *testing.T) {
 }
 
 func TestClaudeSpendOnUnparseableOutputIsAnError(t *testing.T) {
-	if _, err := claudeSpend([]byte("not json")); err == nil {
+	if _, err := ClaudeSpend([]byte("not json")); err == nil {
 		t.Fatal("unparseable stdout must be an error, not a zero Spend")
 	}
 }
@@ -204,7 +204,7 @@ func TestClaudeSpendOnUnparseableOutputIsAnError(t *testing.T) {
 // shape must leave ByModel nil, not an empty-but-non-nil map (ModelSpend's
 // own doc comment says an empty map is not a state this package produces).
 func TestClaudeSpendWithNoModelUsageLeavesByModelNil(t *testing.T) {
-	s, err := claudeSpend([]byte(realClaudeEnvelope))
+	s, err := ClaudeSpend([]byte(realClaudeEnvelope))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +226,7 @@ const realClaudeEnvelopeWithModelUsage = `{"is_error":false,"total_cost_usd":0.1
 "result":"pong"}`
 
 func TestClaudeSpendParsesModelUsageIntoByModel(t *testing.T) {
-	s, err := claudeSpend([]byte(realClaudeEnvelopeWithModelUsage))
+	s, err := ClaudeSpend([]byte(realClaudeEnvelopeWithModelUsage))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -286,23 +286,23 @@ func TestCodexSpendWithNoTurnCompletedEventIsAnError(t *testing.T) {
 // envelope -- the same session_id docs/spend-observation.md pasted next to
 // its own total_cost_usd.
 func TestClaudeSessionIDReadsTheRealEnvelope(t *testing.T) {
-	got, err := claudeSessionID([]byte(realClaudeEnvelope))
+	got, err := ClaudeSessionID([]byte(realClaudeEnvelope))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if got != "d01a8703-42b9-4006-a3d0-83062d7d4339" {
-		t.Errorf("claudeSessionID = %q, want the real captured session_id", got)
+		t.Errorf("ClaudeSessionID = %q, want the real captured session_id", got)
 	}
 }
 
 func TestClaudeSessionIDMissingIsAnErrorNotEmptyString(t *testing.T) {
 	t.Run("no session_id field", func(t *testing.T) {
-		if _, err := claudeSessionID([]byte(`{"result":"pong"}`)); err == nil {
+		if _, err := ClaudeSessionID([]byte(`{"result":"pong"}`)); err == nil {
 			t.Fatal("an envelope with no session_id must be an error, not an empty string")
 		}
 	})
 	t.Run("not JSON", func(t *testing.T) {
-		if _, err := claudeSessionID([]byte("not json")); err == nil {
+		if _, err := ClaudeSessionID([]byte("not json")); err == nil {
 			t.Fatal("unparseable stdout must be an error")
 		}
 	})
@@ -316,7 +316,7 @@ func TestClaudeSessionIDMissingIsAnErrorNotEmptyString(t *testing.T) {
 		// whatever stdout a dead turn produced, so this must error, not
 		// silently return "".
 		const realTruncatedClaudeEnvelope = `{"is_error":false,"duration_api_ms":6325,"num_turns":1,"stop`
-		if _, err := claudeSessionID([]byte(realTruncatedClaudeEnvelope)); err == nil {
+		if _, err := ClaudeSessionID([]byte(realTruncatedClaudeEnvelope)); err == nil {
 			t.Fatal("a real mid-response truncation must be an error, not an empty string -- this is the exact failure agent-estate#990 exists to make evaluable")
 		}
 	})
