@@ -477,6 +477,63 @@ var stopWords = map[string]bool{
 // splitWords lowercases s and splits it on anything that isn't a letter
 // or digit -- punctuation is a separator, never part of a term, so
 // "auth?" and "auth" land on the same word.
+//
+// agent-estate#1150 MEASUREMENT, NOT SHIPPED -- this function is
+// unchanged by it. #1150 named a specific instance of #1063's
+// vocabulary-gap class: vault-02's authoritative fact talks about
+// agents reporting `{"loggedIn": false}`; a caller's plain-English
+// "logged" (which stems to "log") never bridges to the document's
+// camelCase "loggedIn" (one token, "loggedin", which stems to itself),
+// because this function only ever splits on punctuation, never on a
+// case transition inside a run of letters. The dispatch note scoped
+// this turn to producing the measurement, not deciding whether to ship
+// a fix -- see #1150's PR body for the full per-case tables this
+// comment summarises.
+//
+// What was swept: a variant of this function that emits, for each
+// token, its original unsplit form AND its camelCase-split parts
+// ("loggedIn" -> "loggedin", "logged", "in") -- built as a throwaway
+// patched binary (this function plus removing the pre-lowering in
+// tier1SearchableText/tier2SearchableText/ancestorSearchableText in
+// bm25.go, which otherwise destroys the case information a camelCase
+// split needs before this function ever sees the text) and run against
+// ONE scratch index via cmd/goldenquery. One scratch index sufficed for
+// both the on and off variant binaries -- tokenisation happens entirely
+// at query time (weightedTermFreqs in bm25.go rebuilds the BM25Scorer,
+// and so re-tokenizes, on every Query call), never at index-write time,
+// so nothing about the compiled index itself needed to change between
+// variants.
+//
+// Findings, full binary diff (never rebuilt the index between runs):
+//   - vault-02 (the case that prompted this issue): rank 5 -> rank 2,
+//     cases.json's private-mode MISS -> HIT. Its matched-term set gained
+//     "log" (loggedIn -> logged -> stemmed log) and nothing else changed.
+//   - retrieval score (private): 16/17 -> 17/17 -- the one and only
+//     aggregate line that moved. Checked per-case, not just the
+//     aggregate: none of the other 16 cases flipped either direction.
+//   - Every other of the eight reported lines (natural-language top-3
+//     and top-10, unscoped and scoped; publishable-reachable; the
+//     github-stars top-3/top-10 line; none-01) was digit-for-digit
+//     unchanged, and so was every individual case's own HIT/MISS/rank
+//     within them -- not just the aggregates. The only other visible
+//     difference anywhere in the full report was a handful of
+//     rank 4-10 reorderings among already-MISS natural-language
+//     competitors (below the top-3 window that decides pass/fail);
+//     no case's own target rank moved outside vault-02.
+//   - Ratchet (buildRatchets, cmd/goldenquery/main.go): OK on every
+//     guarded line in both variants -- no floor even approached. The
+//     dispatch note's own expectation ("this moves every source by
+//     construction, the ratchet firing is expected") did not hold here.
+//   - Coverage: 473 of 3989 compiled index items (11.9%) carry at least
+//     one camelCase token by this measurement's own transition
+//     definition -- not a handful. By source: github-stars 136/391
+//     (mostly repo names), corpus-directive 126/1528, corpus-parameter
+//     70/1104, vault-fact 46/111, repo-docs 44/118, corpus-question
+//     33/506, loops-research 4/24, corpus-correction 12/179,
+//     corpus-thought 2/28. corpus-directive and corpus-parameter are
+//     the operator's own words -- the cost this issue asked to weigh
+//     explicitly (splitting perturbs their retrieval too) is real in
+//     scale, even though this measurement found no case where it did.
 func splitWords(s string) []string {
 	return strings.FieldsFunc(strings.ToLower(s), func(r rune) bool {
 		return !('a' <= r && r <= 'z' || '0' <= r && r <= '9')
