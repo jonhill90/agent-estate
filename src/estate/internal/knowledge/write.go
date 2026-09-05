@@ -99,24 +99,63 @@ func DefaultOutputPath() (string, error) {
 }
 
 // resolveOutputPath is the resolution DefaultOutputPath and ResolveWritePath
-// both build on. sharedFallback reports whether path is the shared default
-// reached by falling through both the explicit override and the
-// dispatch-worktree check -- the one case agent-estate#1184 found unsafe to
-// hand to a writer without the caller saying so on purpose.
+// both build on. sharedFallback reports whether path NAMES the shared
+// default -- whether it got there by falling through both the explicit
+// override and the dispatch-worktree check, OR by an explicit
+// ESTATE_KNOWLEDGE_INDEX override that happens to point at that same file
+// (agent-estate#1191 hole 2: the override used to skip this check entirely,
+// so pointing it at the shared path wrote the shared index with no
+// acknowledgement). Either way this is the one case agent-estate#1184 found
+// unsafe to hand to a writer without the caller saying so on purpose.
 func resolveOutputPath() (path string, sharedFallback bool, err error) {
-	if p := os.Getenv("ESTATE_KNOWLEDGE_INDEX"); p != "" {
-		return p, false, nil
-	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return "", false, err
+	}
+	shared := filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "index.json")
+
+	if p := os.Getenv("ESTATE_KNOWLEDGE_INDEX"); p != "" {
+		return p, samePath(p, shared), nil
 	}
 	if wd, err := os.Getwd(); err == nil {
 		if id, ok := isolate.IsDispatchWorktree(wd); ok {
 			return filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "dispatch", id, "index.json"), false, nil
 		}
 	}
-	return filepath.Join(home, ".local", "state", "agent-estate", "knowledge", "index.json"), true, nil
+	return shared, true, nil
+}
+
+// samePath reports whether a and b name the same file, tolerating the
+// spellings the same path can arrive in: relative vs. absolute, redundant
+// `..`/`.` segments, and a symlinked directory component (e.g. a symlinked
+// $HOME). It does NOT resolve everything two paths could mean the same
+// thing by: case-insensitive filesystem folding, bind mounts, or a hardlink
+// with no symlink between the two spellings -- those are not handled, and a
+// caller relying on this to catch them will not get an acknowledgement
+// requirement where one of those is the only difference.
+func samePath(a, b string) bool {
+	na := normalizePath(a)
+	nb := normalizePath(b)
+	return na != "" && na == nb
+}
+
+// normalizePath resolves p to an absolute, cleaned path, additionally
+// resolving symlinks in its directory component when that directory exists.
+// The file itself is deliberately not required to exist -- ResolveWritePath
+// calls this before the index has been written, so the leaf component is
+// compared literally rather than through EvalSymlinks (which requires the
+// full path to exist).
+func normalizePath(p string) string {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return ""
+	}
+	abs = filepath.Clean(abs)
+	dir, file := filepath.Split(abs)
+	if resolvedDir, err := filepath.EvalSymlinks(filepath.Clean(dir)); err == nil {
+		return filepath.Join(resolvedDir, file)
+	}
+	return abs
 }
 
 // AllowSharedWriteEnv is the explicit acknowledgement required to write the
@@ -168,6 +207,11 @@ const AllowSharedWriteEnv = "ESTATE_KNOWLEDGE_ALLOW_SHARED_WRITE"
 //     does -- now requires this acknowledgement too. See main.go's
 //     `--allow-shared-write` flag (or setting AllowSharedWriteEnv directly)
 //     for how an operator opts back in.
+// agent-estate#1191 (hole 2): shared, above, is true not only for the
+// fallback path but also for an explicit ESTATE_KNOWLEDGE_INDEX override
+// that names that same file by any spelling samePath resolves -- otherwise
+// the guard only enforced "you must opt in to fall through to the shared
+// index," not "you must opt in to write it."
 func ResolveWritePath() (path string, requiresAck bool, err error) {
 	path, shared, err := resolveOutputPath()
 	if err != nil {
