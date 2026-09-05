@@ -1,9 +1,11 @@
 # How does knowledge retrieval work in this repo?
 
 This describes `estate knowledge`'s compiled index as it exists **on
-`335b924`** (2026-09-04) — the mechanism, not a decision. Every number below
+`0140ec1`** (2026-09-04) — the mechanism, not a decision. Every number below
 carries the commit it was measured on; treat an unstamped figure elsewhere as
-a lead, not a fact.
+a lead, not a fact. The one exception is the scoping section below, which
+deliberately stopped stamping stratum hit rates as of this commit — see that
+section for why.
 
 **What this is not.** This is not the design for how the operator's knowledge
 should ultimately be stored — Markdown, SQLite and DuckDB remain open
@@ -79,59 +81,77 @@ it — combine it with real question words, not instead of them. A bare word
 with no colon (`repo-docs` alone, with no `source:` prefix) is scored as an
 ordinary search term, not treated as a filter.
 
-**Scoping is a real lever in `--private` mode and inert in public mode for
-repo questions — know which one applies before recommending it to a caller.**
-Measured fresh on `335b924` (`go run ./cmd/goldenquery`, the checked-in
-twelve-question natural-language stratum, agent-estate#1073/#1077), all four
-combinations of mode and scope:
+**Scoping is a real lever in `--private` mode and structurally inert in
+public mode for repo questions — know which one applies before recommending
+it to a caller.** This section used to carry a four-arm hit-rate table
+stamped to a commit. It doesn't anymore, on purpose (agent-estate#1165):
+that table's denominator was the checked-in natural-language stratum's case
+count, and agent-estate#1172 grew that count (12 → 21) two hours after the
+table was last re-measured and re-stamped, which made the table wrong again
+before the ink dried. This is the second time this section carried a
+fixture-derived figure that stopped reproducing — the first was
+agent-estate#1081's "scoping doubles retrieval" claim, removed by
+agent-estate#1167 — and re-stamping does not fix a doc that has no way to
+know when the fixture it quotes has moved. Run the measurement instead of
+reading it:
 
-| | top-3 hit rate | top-10 hit rate |
-|---|---|---|
-| public, unscoped | 4/12 | 8/12 |
-| public, scoped (`source:repo-docs ` prepended) | 4/12 | 8/12 |
-| `--private`, unscoped | 1/12 | 5/12 |
-| `--private`, scoped (`source:repo-docs ` prepended) | 4/12 | 8/12 |
+```
+go run ./src/estate/cmd/goldenquery
+```
 
-The public rows are **identical on all 12 cases at every ordinal rank** —
-this is structural, not a fixture quirk (agent-estate#1162, agent-estate#1165).
-Only 2 of the index's 9 sources are publishable — `repo-docs` (118 items) and
-`github-stars` (391) — so in public mode `source:repo-docs` can only ever
-remove `github-stars` items, and `github-stars` never outranked `repo-docs`
-on any of these 12 repo-oriented questions. Scoping a public-mode repo
-question does nothing here, not because scoping is weak, but because there is
-nothing else in the reachable set for it to remove.
+prints, always freshly, both public-mode arms (unscoped and
+`source:repo-docs`-scoped) and the `--private` scoped arm's own hit rates
+against the current fixture and the current index, labelled with the case
+count they were measured against. (It does not currently print the
+`--private`, unscoped arm as a fourth line of its own — that combination can
+be reproduced by hand: run the same natural-language questions through
+`knowledge query --private` with no `source:` prefix.)
 
-In `--private` mode, where all 9 sources compete, the same filter has real
-work to do: comparing the two `--private` rows case by case, scoping is
-better on 7 of 12, worse on 0, and recovers 3 cases (nl-03, nl-07, nl-08)
-that miss the unscoped top-10 entirely but land in the scoped top-10. **If you
-know which of the nine sources should answer a question — and for anything
-about this repo's own rules or mechanism, that source is `repo-docs` — scope
-the query, but expect the gain only when the call itself is `--private` (or
-when other private sources are in play as competitors).** An unknown
-`source:` value is refused honestly as `no_match` (exit 1), never silently
-ignored and never silently falling through to an unscoped search over the
-whole index (agent-estate#1024).
+**Why public-mode scoping is inert, not just currently measured at zero
+gain.** Only 2 of the index's 9 sources are publishable — `repo-docs` and
+`github-stars` — so in public mode `source:repo-docs` can only ever remove
+`github-stars` items. On every repo-oriented natural-language question
+measured so far, across two different case counts (12 on agent-estate#1162,
+21 after agent-estate#1172), `github-stars` never outranked `repo-docs`, so
+the public unscoped and public scoped arms have always come back identical,
+case for case, at every ordinal rank (agent-estate#1162, agent-estate#1165).
+Scoping a public-mode repo question does nothing here, not because scoping
+is weak, but because there is nothing else in the reachable set for it to
+remove — this is a structural argument, not a number that could drift with
+the fixture, which is why it survives here as prose while the hit-rate table
+did not.
+
+**Why `--private` scoping is worth doing.** In `--private` mode all 9
+sources compete, and `source:repo-docs` has real work to do: on both case
+counts measured so far, scoping never made the natural-language stratum's
+hit rate worse and recovered cases that missed the unscoped top-10 entirely.
+**If you know which of the nine sources should answer a question — and for
+anything about this repo's own rules or mechanism, that source is
+`repo-docs` — scope the query, but expect the gain only when the call itself
+is `--private`** (or when other private sources are in play as
+competitors). An unknown `source:` value is refused honestly as `no_match`
+(exit 1), never silently ignored and never silently falling through to an
+unscoped search over the whole index (agent-estate#1024).
 
 **Do not scope on a guess.** `source:` is a filter, not a re-ranking hint: a
 wrong guess deletes the answer outright rather than demoting it. Measured
 harmful (agent-estate#1059): a wrong `source:` value took cases that would
 otherwise land at rank 6, 8, and 5 down to no match at all (`6->None`,
-`8->None`, `5->None`, across 24 cases). Scope only when you can name which of
-the nine sources should hold the answer; scoping to be safe is the opposite
-of safe.
+`8->None`, `5->None`, across 24 cases in `cases.json`, a fixture
+agent-estate#1172 did not touch). Scope only when you can name which of the
+nine sources should hold the answer; scoping to be safe is the opposite of
+safe.
 
 **A table once stood here claiming `2df4d3f` measured 4/12 → 8/12 top-3 and
 10/12 → 11/12 top-10, both arms in public mode, calling scoping "the single
-largest quality lever available to a caller."** That pairing does not
-reproduce: this run's public-mode arms are identical (see above), and no
-combination of modes measured here produces an 11/12 top-10 figure. The
+largest quality lever available to a caller."** That pairing never
+reproduced on any commit measured since, including `2df4d3f` itself — every
+public-mode pair measured so far has come back identical (see above). The
 number reached this doc via agent-estate#1081 and is recorded on
-agent-estate#1162 as **unverified, not refuted** — nobody has reproduced it
-on any commit, including `2df4d3f` itself. The most likely explanation is
-that the original pairing compared top-3 against top-10 rather than unscoped
-against scoped, but that is a suspicion, not a proven origin, and is stated
-here as one.
+agent-estate#1162 as **unverified, not refuted**. The most likely
+explanation is that the original pairing compared top-3 against top-10
+rather than unscoped against scoped, but that is a suspicion, not a proven
+origin, and is stated here as one.
 
 ## What happens when nothing (or the wrong thing) answers a question?
 
