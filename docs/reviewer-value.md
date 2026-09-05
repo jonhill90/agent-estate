@@ -194,6 +194,51 @@ merged with an outstanding REQUEST CHANGES** — every one reached a clean,
 unanimous APPROVE (or, for the single-seat PRs, an unrejected APPROVE) before
 merge.
 
+## The verdict must land in two places, not one
+
+If you are the reviewer, this is the part that costs a whole extra turn when
+missed. `estate merge`'s gate (`internal/gate`) requires your `Verdict:` line
+in **two independent places**, not one:
+
+1. the PR comment you post — `Verdict:`, `Review-Lane:`, `Reviewed-SHA:`, the
+   convention AGENTS.md's "Merging PRs you did not author" states; and
+2. your own review turn's **final returned text**, verbatim-repeating the same
+   `Verdict:`/`Review-Lane:` block. That returned text is written by the
+   dispatch process into that lane's ledger `Result` field the moment your
+   turn exits — `internal/gate`'s `resolveResultVerdict` (`gate.go`,
+   `verdict.go`) parses `Verdict:` out of the ledger `Result` the same way it
+   parses the PR comment, and cross-checks the two against each other before
+   allowing a merge.
+
+Miss the second one and the gate refuses correctly, even though your PR
+comment was fine:
+
+```
+reviewer <lane>'s ledger record carries no parsable Verdict: line in its own
+Result -- cannot cross-check the PR comment against it; the reviewing turn's
+own final returned text must repeat the same Verdict:/Review-Lane: block it
+posted as a PR comment, refusing
+```
+
+This happened for real on PR #1219 (agent-estate#1220): a reviewer posted a
+correct `Verdict: APPROVE` comment, then summarised its findings in its own
+returned text instead of repeating the verdict block — a perfectly reasonable
+thing to do for a thorough review, and unmergeable anyway. A third review
+turn had to be dispatched purely to re-record a verdict nobody disputed.
+
+**This is not redundant, and must not be "simplified" back to one place.**
+Every lane in this repo pushes through the same shared GitHub login, so a PR
+comment alone is not proof of who actually wrote it — anyone with that login
+can post a comment claiming `Review-Lane: <any lane>` and `Verdict: APPROVE`.
+`gate_test.go`'s `TestBypass_ForgedVerdictCommentImpersonatesReviewer`
+(agent-estate#934) is the attack this closes: a forged approval comment
+overriding a lane's real `REQUEST CHANGES`. The ledger `Result` is written
+locally by the dispatch process from the reviewer subprocess's own output,
+never from anything a GitHub comment asserts about itself — it is the one
+record a forged comment cannot also forge. So: after posting the PR comment,
+make the `Verdict:`/`Review-Lane:`/`Reviewed-SHA:` block the last thing your
+own turn returns, not a prose summary of what you found.
+
 ## What this data cannot settle
 
 - **The corpus this estate is told to query first is empty in this

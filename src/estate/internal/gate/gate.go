@@ -626,7 +626,7 @@ func evaluate(p *PR, reviewerLane string, l *ledger.Ledger) Decision {
 	// "cannot tell" is never "allowed", same as every other check here.
 	rv := resolveResultVerdict(rec.Result)
 	if !rv.found {
-		return refuse(d, "reviewer "+reviewerLane+"'s ledger record carries no parsable Verdict: line in its own Result -- cannot cross-check the PR comment against it, refusing")
+		return refuse(d, "reviewer "+reviewerLane+"'s ledger record carries no parsable Verdict: line in its own Result -- cannot cross-check the PR comment against it; the reviewing turn's own final returned text must repeat the same Verdict:/Review-Lane: block it posted as a PR comment, refusing")
 	}
 	if !rv.ok {
 		return refuse(d, "reviewer "+reviewerLane+"'s ledger Result verdict is unresolved -- "+rv.reason)

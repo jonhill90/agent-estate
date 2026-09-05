@@ -254,6 +254,29 @@ measured against. (The runbook this used to cite,
   fixup commits. A review turn is dispatched with `estate dispatch review`,
   which records `role=reviewer` at dispatch time, so the gate never has to
   infer the role later from what a lane or a PR comment claims about itself.
+- **A reviewer's verdict must exist in TWO places, not one: the PR comment
+  AND the reviewing turn's own final returned text — identical `Verdict:`
+  lines in both.** The second place is not documentation convenience; the
+  turn's own returned text is what the dispatch process writes as that
+  lane's ledger `Result`, and `internal/gate` cross-checks the PR comment
+  against it as a second, independent source before allowing a merge
+  (`resolveResultVerdict` in `gate.go`/`verdict.go`). A comment carrying no
+  matching `Verdict:` line in its own `Result` refuses with "reviewer
+  \<lane\>'s ledger record carries no parsable Verdict: line in its own
+  Result" — this is not a hypothetical: it cost a full extra review turn on
+  PR #1219 (agent-estate#1220) when a reviewer posted a correct verdict
+  comment and then only *summarised* its findings in its returned text. **Do
+  not treat this as redundant with the PR comment and drop it** —
+  `gate_test.go`'s `TestBypass_ForgedVerdictCommentImpersonatesReviewer`
+  (agent-estate#934) is the reason it exists: every lane in this repo pushes
+  through the same shared GitHub login, so a PR comment alone is not proof
+  of who wrote it, and a forged `Review-Lane:`/`Verdict: APPROVE` comment
+  can otherwise override a lane's real `REQUEST CHANGES` — the ledger
+  `Result`, written locally by the dispatch process from the reviewer
+  subprocess's own output, is the one thing that comment forgery cannot also
+  forge. For a review turn, this means: after posting the PR comment, make
+  the verdict block (`Verdict:`/`Review-Lane:`/`Reviewed-SHA:`) the last
+  thing your own turn returns too, not a prose summary of what you found.
 - This is checked at merge, not just at dispatch — but read the command's name
   as a question, not an action. **`estate merge <repo> <pr> <reviewer-lane>`
   evaluates and exits; it does not merge anything.** It decides whether the PR
@@ -298,8 +321,12 @@ measured against. (The runbook this used to cite,
 
 ---
 *The claims in this section were checked against this branch's own tree as
-rebased onto `ef06010` (2026-09-03) — every path, command and count above was
+rebased onto `45326b6` (2026-09-05) — every path, command and count above was
 re-run, and what could not be found is named as absent rather than described.
+The reviewer-verdict two-place requirement above was derived directly from
+`src/estate/internal/gate/gate.go`'s refusal paths and `verdict.go`'s
+`resolveResultVerdict` doc comment, not restated from a summary of them
+(agent-estate#1220).
 Re-check before relying on any of it: `src/estate/agents_md_test.go` is the only
 automated check on this file, and it validates **subcommand names only** — it
 would pass a section that described every one of them doing the wrong thing.
