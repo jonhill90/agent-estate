@@ -48,14 +48,14 @@
 //     count is NOT a distinct-turn count -- see CompactedUserTurnsRaw's own
 //     doc comment). Deduplicated PER FILE (never across files -- a
 //     compacted record's own session lives in one file in every case this
-//     tree has) to 1,579 distinct turns: 1,533 of those (97.1%) ALSO appear
+//     tree has) to 1,579 distinct turns: 1,535 of those (97.2%) ALSO appear
 //     verbatim as an ordinary response_item in the same file -- an extractor
 //     that reads both compacted and response_item WILL double-count these.
-//     46 distinct turns (2.9%), confined to 5 files, have NO matching
+//     44 distinct turns (2.8%), confined to 5 files, have NO matching
 //     response_item anywhere in that same file -- an extractor that skips
-//     compacted entirely WILL silently lose these 46. (An earlier pass of
+//     compacted entirely WILL silently lose these 44. (An earlier pass of
 //     this same measurement matched compacted turns against response_item
-//     text GLOBALLY, across every file, and found only 12 -- the other 34
+//     text GLOBALLY, across every file, and found only 12 -- the other 32
 //     WERE findable somewhere in the corpus, just not in the file the
 //     compacted record itself lives in. The narrower, per-file number above
 //     is the one that matters: an extractor built to process one rollout
@@ -70,6 +70,19 @@
 //     CompactedOnlyInCompacted below implement) -- reading both without that
 //     dedup rule inflates operator-turn counts by roughly two orders of
 //     magnitude if raw replacement_history entries are counted directly.
+//     (Corrected 2026-09-05: an independent review of PR #1226 found the
+//     originally-shipped 1,533/46 split wrong, because the per-file overlap
+//     check was single-pass and incremental -- it tested each compacted turn
+//     against only response_item text already seen EARLIER in the same file.
+//     The live tree has a compacted record's replacement_history duplicating
+//     a response_item that appears LATER in its own file (two counterexamples
+//     found, e.g. a compacted record at line 3546 of one file whose matching
+//     response_item is at line 7087, after it); the incremental check missed
+//     both and miscounted them as only-in-compacted. analyzeFile now runs a
+//     genuine two-pass-per-file scan -- collectResponseItemTexts reads the
+//     whole file before any compacted record is checked against it -- and
+//     the 1,535/44 figures above are re-derived from that corrected scan,
+//     not copied from the review that found the bug.)
 //
 //  2. 497 session_meta records were observed across 473 files -- more
 //     sessions than files. MEASURED ANSWER: yes, a rollout file can carry
@@ -93,6 +106,7 @@ import (
 	"bufio"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -317,18 +331,31 @@ func analyzeFile(path string) (FileReport, error) {
 	}
 	defer f.Close()
 
+	// responseItemTexts is every genuine operator turn's own text ANYWHERE in
+	// this file -- collected as its own full-file first pass, not
+	// incrementally alongside the second pass below. A compacted record's
+	// replacement_history summarizes prior conversation history, but that is
+	// a statement about what it CONTAINS, not about where its matching
+	// response_item is positioned in the file: the live tree has been
+	// observed to carry a compacted record BEFORE the response_item it
+	// duplicates (agent-estate#1226 review; see this package's doc comment
+	// for the two counterexamples and corrected counts). Checking each
+	// compacted turn against only text seen so far therefore misses same-file
+	// matches that appear later, undercounting
+	// CompactedOverlapWithResponseItem and overcounting CompactedOnlyInCompacted.
+	responseItemTexts, err := collectResponseItemTexts(f)
+	if err != nil {
+		return FileReport{}, err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return FileReport{}, err
+	}
+
 	report := newFileReport(path)
 	seenSession := map[string]bool{}
 	sessionIdx := map[string]int{} // session id -> index into report.Sessions
 	currentSession := -1           // index into report.Sessions the NEXT turn attributes to, or -1
 
-	// responseItemTexts is every genuine operator turn's own text seen so
-	// far in THIS file -- used only to detect compacted/response_item
-	// overlap (finding 1). It relies on compacted records summarizing PRIOR
-	// history, which is the append-only log's own ordering guarantee: a
-	// compacted record has never been observed preceding the response_item
-	// it duplicates in the live tree (see this package's doc comment).
-	responseItemTexts := map[string]bool{}
 	// compactedTexts is every distinct compacted-turn text already counted
 	// in THIS file, so a session compacted more than once (which re-embeds
 	// its full prior history each time) does not inflate
@@ -373,7 +400,6 @@ func analyzeFile(path string) (FileReport, error) {
 			}
 			if genuineOperatorTurn(p) {
 				report.OperatorTurns++
-				responseItemTexts[p.Content[0].Text] = true
 				if currentSession >= 0 {
 					report.Sessions[currentSession].OperatorTurns++
 				}
@@ -429,6 +455,49 @@ func analyzeFile(path string) (FileReport, error) {
 		return FileReport{}, fmt.Errorf("scan: %w", err)
 	}
 	return report, nil
+}
+
+// collectResponseItemTexts is analyzeFile's first pass: every genuine
+// operator turn's own text found ANYWHERE in f, read top to bottom once. It
+// exists as a separate full pass (rather than folded into analyzeFile's main
+// loop) specifically so the compacted/response_item overlap check tests
+// against the WHOLE file, not just the text seen before a given compacted
+// record -- see analyzeFile's own doc comment for why that distinction is
+// load-bearing. f must be positioned at the start of the file on entry; the
+// caller is responsible for seeking it back before its own pass.
+func collectResponseItemTexts(f *os.File) (map[string]bool, error) {
+	texts := map[string]bool{}
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var rec rawRecord
+		if err := json.Unmarshal(line, &rec); err != nil {
+			return nil, fmt.Errorf("line %d: %w", lineNo, err)
+		}
+		if rec.Type != "response_item" {
+			continue
+		}
+		var p responseItemPayload
+		if err := json.Unmarshal(rec.Payload, &p); err != nil {
+			return nil, fmt.Errorf("line %d: response_item payload: %w", lineNo, err)
+		}
+		if p.Type != "message" || p.Role == "" {
+			continue
+		}
+		if genuineOperatorTurn(p) {
+			texts[p.Content[0].Text] = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("scan: %w", err)
+	}
+	return texts, nil
 }
 
 // walkRolloutFiles returns every *.jsonl path under root, sorted, so a report

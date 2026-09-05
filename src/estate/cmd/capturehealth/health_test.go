@@ -299,6 +299,41 @@ func TestCompactedOverlapWithResponseItem(t *testing.T) {
 	}
 }
 
+// TestCompactedOverlapMatchesResponseItemThatAppearsLater guards the defect
+// an independent review of PR #1226 found in the live tree: a compacted
+// record's replacement_history CAN duplicate a response_item that appears
+// LATER in the same file, not just one that already appeared before it. A
+// single-pass, incremental responseItemTexts set (checked "as seen so far")
+// misses this and wrongly buckets the turn into CompactedOnlyInCompacted;
+// the fix is a genuine two-pass-per-file scan (collectResponseItemTexts runs
+// to completion before any compacted record is checked against it).
+func TestCompactedOverlapMatchesResponseItemThatAppearsLater(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFixture(t, dir, "compacted-forward-ref.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-forward-ref-session"}}`,
+		// The compacted record comes FIRST in file order...
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"compacted","payload":{"message":"","replacement_history":[` +
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn whose response_item duplicate comes later in the file"}]}` +
+			`]}}`,
+		// ...and its matching response_item does not appear until AFTER it.
+		`{"timestamp":"2026-01-01T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn whose response_item duplicate comes later in the file"}]}}`,
+	})
+
+	fr, err := analyzeFile(path)
+	if err != nil {
+		t.Fatalf("analyzeFile: %v", err)
+	}
+	if fr.CompactedUserTurnsDistinct != 1 {
+		t.Fatalf("CompactedUserTurnsDistinct = %d, want 1", fr.CompactedUserTurnsDistinct)
+	}
+	if fr.CompactedOverlapWithResponseItem != 1 {
+		t.Fatalf("CompactedOverlapWithResponseItem = %d, want 1 (the response_item appears later in the file, but it is still the same file)", fr.CompactedOverlapWithResponseItem)
+	}
+	if fr.CompactedOnlyInCompacted != 0 {
+		t.Fatalf("CompactedOnlyInCompacted = %d, want 0 (an incremental, seen-so-far check would wrongly count this as 1)", fr.CompactedOnlyInCompacted)
+	}
+}
+
 // TestCompactedReembeddingDoesNotInflateDistinctCount guards the raw-vs-
 // distinct distinction directly: a session compacted TWICE re-embeds its
 // full prior history in the second compaction's replacement_history, so the
