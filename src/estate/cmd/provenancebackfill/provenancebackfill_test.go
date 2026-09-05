@@ -343,3 +343,77 @@ func TestRefuseLivePathTildeVsHome(t *testing.T) {
 		t.Errorf(`refuseLivePath("~/corpus/ledger.sqlite3") = live false, want true (should resolve against $HOME like the real corpus.Path())`)
 	}
 }
+
+// TestRefuseLivePathDanglingSymlinkBypasses locks the second REQUEST CHANGES
+// against PR #1232: a symlink placed at the guarded name whose TARGET does
+// not yet exist used to bypass refuseLivePath entirely. filepath.EvalSymlinks
+// fails on a dangling target (ENOENT); the old resolveForCompare treated that
+// failure as "nothing more to resolve" and fell back to comparing the link's
+// own unresolved name -- which never matches corpus.Path()'s value, so
+// refuseLivePath returned false and -apply proceeded to create a real SQLite
+// file at the live path through the link. The fix must refuse outright
+// whenever the candidate IS a symlink and its target cannot be resolved,
+// covering: a direct dangling link at the live name, a multi-hop chain that
+// goes dangling partway through, a link whose own name is nothing like
+// "ledger.sqlite3" but whose target IS the live path, and a ".." traversal
+// reaching the same dangling link. None of these ever creates the target --
+// proving the guard refuses without materializing what it is protecting.
+func TestRefuseLivePathDanglingSymlinkBypasses(t *testing.T) {
+	dir := t.TempDir()
+	liveDir := filepath.Join(dir, "corpus")
+	if err := os.MkdirAll(liveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	livePath := filepath.Join(liveDir, "ledger.sqlite3")
+	// The live target is deliberately NEVER created in this test -- that is
+	// the whole point of "dangling". If any case below fails to refuse and
+	// the tool proceeds to -apply, a real file would appear at livePath;
+	// asserting it never does is part of what makes this a red/green proof.
+	t.Setenv("ESTATE_CORPUS", livePath)
+
+	danglingDirect := filepath.Join(dir, "race.sqlite3")
+	if err := os.Symlink(livePath, danglingDirect); err != nil {
+		t.Fatal(err)
+	}
+
+	hop1 := filepath.Join(dir, "hop1.sqlite3")
+	hop2 := filepath.Join(dir, "hop2.sqlite3")
+	if err := os.Symlink(livePath, hop1); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(hop1, hop2); err != nil {
+		t.Fatal(err)
+	}
+
+	unrelatedName := filepath.Join(liveDir, "ledger.sqlite3-shadow")
+	if err := os.Symlink(livePath, unrelatedName); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Chdir(dir)
+	traversal := filepath.Join("..", filepath.Base(dir), "race.sqlite3")
+
+	cases := []struct {
+		name string
+		path string
+	}{
+		{"dangling symlink directly at the live name", danglingDirect},
+		{"dangling symlink chain (link -> link -> dangling live target)", hop2},
+		{"dangling symlink under an unrelated name pointing at the live path", unrelatedName},
+		{"..-traversal reaching the same dangling symlink", traversal},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			reason, live := refuseLivePath(c.path)
+			if !live {
+				t.Errorf("refuseLivePath(%q) = live false, want true (dangling symlink target could not be resolved, must fail closed)", c.path)
+			}
+			if reason == "" {
+				t.Error("refuseLivePath returned no reason alongside live=true")
+			}
+			if _, err := os.Lstat(livePath); err == nil {
+				t.Fatalf("live target %s was created by this test -- guard did not fail closed before any write", livePath)
+			}
+		})
+	}
+}
