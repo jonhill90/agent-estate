@@ -186,6 +186,190 @@ func TestUnparseableFileReportedWithPathAndReason(t *testing.T) {
 	}
 }
 
+// TestMultiSessionFileAttributesTurnsToCorrectSession is K2 slice 2's first
+// settled question (agent-estate#1139): a rollout file CAN carry more than
+// one session_meta.payload.id, and turns must attribute to whichever session
+// most recently preceded them in file order, never all fold into the file's
+// first session.
+func TestMultiSessionFileAttributesTurnsToCorrectSession(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFixture(t, dir, "multi-session.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-session-one"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: first session, turn 1"}]}}`,
+		`{"timestamp":"2026-01-01T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: first session, turn 2"}]}}`,
+		`{"timestamp":"2026-01-01T00:00:03.000Z","type":"session_meta","payload":{"id":"fixture-session-two"}}`,
+		`{"timestamp":"2026-01-01T00:00:04.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: second session, only turn"}]}}`,
+	})
+
+	fr, err := analyzeFile(path)
+	if err != nil {
+		t.Fatalf("analyzeFile: %v", err)
+	}
+	if len(fr.SessionIDs) != 2 || fr.SessionIDs[0] != "fixture-session-one" || fr.SessionIDs[1] != "fixture-session-two" {
+		t.Fatalf("SessionIDs = %v, want [fixture-session-one fixture-session-two]", fr.SessionIDs)
+	}
+	if fr.OperatorTurns != 3 {
+		t.Fatalf("OperatorTurns = %d, want 3", fr.OperatorTurns)
+	}
+	if len(fr.Sessions) != 2 {
+		t.Fatalf("Sessions = %v, want 2 entries", fr.Sessions)
+	}
+	if fr.Sessions[0].SessionID != "fixture-session-one" || fr.Sessions[0].OperatorTurns != 2 {
+		t.Errorf("Sessions[0] = %+v, want {fixture-session-one 2}", fr.Sessions[0])
+	}
+	if fr.Sessions[1].SessionID != "fixture-session-two" || fr.Sessions[1].OperatorTurns != 1 {
+		t.Errorf("Sessions[1] = %+v, want {fixture-session-two 1}", fr.Sessions[1])
+	}
+}
+
+// TestBuildReportCountsFilesWithMultipleSessions is the report-level
+// counterpart: FilesWithMultipleSessions must count only files with more than
+// one DISTINCT session id, not a file that merely repeats session_meta for
+// the same id (which is not a second session -- see SessionMetaRecords).
+func TestBuildReportCountsFilesWithMultipleSessions(t *testing.T) {
+	root := t.TempDir()
+
+	writeFixture(t, root, "single.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-single"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: single-session turn"}]}}`,
+	})
+	writeFixture(t, root, "repeated-same-id.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-repeat"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: repeated-session turn"}]}}`,
+		`{"timestamp":"2026-01-01T00:00:02.000Z","type":"session_meta","payload":{"id":"fixture-repeat"}}`,
+	})
+	writeFixture(t, root, "two-sessions.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-multi-a"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: multi-session A turn"}]}}`,
+		`{"timestamp":"2026-01-01T00:00:02.000Z","type":"session_meta","payload":{"id":"fixture-multi-b"}}`,
+		`{"timestamp":"2026-01-01T00:00:03.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: multi-session B turn"}]}}`,
+	})
+
+	report, err := buildReport(root)
+	if err != nil {
+		t.Fatalf("buildReport: %v", err)
+	}
+	if report.FilesWithMultipleSessions != 1 {
+		t.Fatalf("FilesWithMultipleSessions = %d, want 1 (only two-sessions.jsonl has 2 DISTINCT ids)", report.FilesWithMultipleSessions)
+	}
+	if report.SessionMetaTotal != 5 {
+		t.Fatalf("SessionMetaTotal = %d, want 5 (1 single + 2 repeated-same-id + 2 two-sessions raw session_meta records)", report.SessionMetaTotal)
+	}
+}
+
+// TestCompactedOverlapWithResponseItem is K2 slice 2's second settled
+// question (agent-estate#1139): a compacted record's replacement_history CAN
+// carry a turn that ALSO appears as an ordinary response_item elsewhere in
+// the same file (the double-count risk) and CAN carry a turn that appears
+// NOWHERE else (the loss risk) -- both in the same fixture, so both are
+// distinguished rather than folded into one count.
+func TestCompactedOverlapWithResponseItem(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFixture(t, dir, "compacted.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-compacted-session"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn that survives as response_item"}]}}`,
+		`{"timestamp":"2026-01-01T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fixture: assistant reply"}]}}`,
+		`{"timestamp":"2026-01-01T00:00:03.000Z","type":"compacted","payload":{"message":"","replacement_history":[` +
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn that survives as response_item"}]},` +
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn that ONLY exists in compacted"}]},` +
+			`{"type":"message","role":"assistant","content":[{"type":"output_text","text":"fixture: assistant reply"}]}` +
+			`]}}`,
+	})
+
+	fr, err := analyzeFile(path)
+	if err != nil {
+		t.Fatalf("analyzeFile: %v", err)
+	}
+	if fr.CompactedRecords != 1 {
+		t.Fatalf("CompactedRecords = %d, want 1", fr.CompactedRecords)
+	}
+	// Two user/input_text entries in replacement_history (the assistant
+	// entry is not a role=="user" turn at all).
+	if fr.CompactedUserTurnsRaw != 2 {
+		t.Fatalf("CompactedUserTurnsRaw = %d, want 2", fr.CompactedUserTurnsRaw)
+	}
+	if fr.CompactedUserTurnsDistinct != 2 {
+		t.Fatalf("CompactedUserTurnsDistinct = %d, want 2", fr.CompactedUserTurnsDistinct)
+	}
+	if fr.CompactedOverlapWithResponseItem != 1 {
+		t.Fatalf("CompactedOverlapWithResponseItem = %d, want 1 (the turn that also appears as response_item)", fr.CompactedOverlapWithResponseItem)
+	}
+	if fr.CompactedOnlyInCompacted != 1 {
+		t.Fatalf("CompactedOnlyInCompacted = %d, want 1 (the turn found ONLY in compacted)", fr.CompactedOnlyInCompacted)
+	}
+}
+
+// TestCompactedOverlapMatchesResponseItemThatAppearsLater guards the defect
+// an independent review of PR #1226 found in the live tree: a compacted
+// record's replacement_history CAN duplicate a response_item that appears
+// LATER in the same file, not just one that already appeared before it. A
+// single-pass, incremental responseItemTexts set (checked "as seen so far")
+// misses this and wrongly buckets the turn into CompactedOnlyInCompacted;
+// the fix is a genuine two-pass-per-file scan (collectResponseItemTexts runs
+// to completion before any compacted record is checked against it).
+func TestCompactedOverlapMatchesResponseItemThatAppearsLater(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFixture(t, dir, "compacted-forward-ref.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-forward-ref-session"}}`,
+		// The compacted record comes FIRST in file order...
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"compacted","payload":{"message":"","replacement_history":[` +
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn whose response_item duplicate comes later in the file"}]}` +
+			`]}}`,
+		// ...and its matching response_item does not appear until AFTER it.
+		`{"timestamp":"2026-01-01T00:00:02.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn whose response_item duplicate comes later in the file"}]}}`,
+	})
+
+	fr, err := analyzeFile(path)
+	if err != nil {
+		t.Fatalf("analyzeFile: %v", err)
+	}
+	if fr.CompactedUserTurnsDistinct != 1 {
+		t.Fatalf("CompactedUserTurnsDistinct = %d, want 1", fr.CompactedUserTurnsDistinct)
+	}
+	if fr.CompactedOverlapWithResponseItem != 1 {
+		t.Fatalf("CompactedOverlapWithResponseItem = %d, want 1 (the response_item appears later in the file, but it is still the same file)", fr.CompactedOverlapWithResponseItem)
+	}
+	if fr.CompactedOnlyInCompacted != 0 {
+		t.Fatalf("CompactedOnlyInCompacted = %d, want 0 (an incremental, seen-so-far check would wrongly count this as 1)", fr.CompactedOnlyInCompacted)
+	}
+}
+
+// TestCompactedReembeddingDoesNotInflateDistinctCount guards the raw-vs-
+// distinct distinction directly: a session compacted TWICE re-embeds its
+// full prior history in the second compaction's replacement_history, so the
+// same turn appears twice in CompactedUserTurnsRaw but must count once in
+// CompactedUserTurnsDistinct (this is exactly what the live tree does --
+// see this package's doc comment, 9,158 raw vs 1,579 distinct).
+func TestCompactedReembeddingDoesNotInflateDistinctCount(t *testing.T) {
+	dir := t.TempDir()
+	path := writeFixture(t, dir, "recompacted.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-recompacted"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"compacted","payload":{"message":"","replacement_history":[` +
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn re-embedded across two compactions"}]}` +
+			`]}}`,
+		`{"timestamp":"2026-01-01T00:00:02.000Z","type":"compacted","payload":{"message":"","replacement_history":[` +
+			`{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn re-embedded across two compactions"}]}` +
+			`]}}`,
+	})
+
+	fr, err := analyzeFile(path)
+	if err != nil {
+		t.Fatalf("analyzeFile: %v", err)
+	}
+	if fr.CompactedRecords != 2 {
+		t.Fatalf("CompactedRecords = %d, want 2", fr.CompactedRecords)
+	}
+	if fr.CompactedUserTurnsRaw != 2 {
+		t.Fatalf("CompactedUserTurnsRaw = %d, want 2 (re-embedded once per compaction)", fr.CompactedUserTurnsRaw)
+	}
+	if fr.CompactedUserTurnsDistinct != 1 {
+		t.Fatalf("CompactedUserTurnsDistinct = %d, want 1 (same text re-embedded, not a second turn)", fr.CompactedUserTurnsDistinct)
+	}
+	if fr.CompactedOnlyInCompacted != 1 {
+		t.Fatalf("CompactedOnlyInCompacted = %d, want 1", fr.CompactedOnlyInCompacted)
+	}
+}
+
 // TestBuildReportAggregatesAcrossFiles is a small end-to-end sanity check
 // over a synthetic multi-file tree, confirming aggregation sums per-file
 // counts correctly and walks subdirectories the way ~/.codex/sessions/YYYY/MM/DD
