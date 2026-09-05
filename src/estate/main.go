@@ -1730,6 +1730,20 @@ func main() {
 			fmt.Println("this does not clear the stall; it lets the next `tick check` report STALLED, escalated instead of STALLED, unacknowledged")
 
 		case "check":
+			// agent-estate#1188: tick.Path() resolves relative to the
+			// process's own cwd, with no repo-root discovery. `tick check`
+			// and `tick record` invoked from different working directories
+			// silently read and write different files -- both succeed, both
+			// print plausible numbers, and neither can tell it happened.
+			// Disclosing the absolute path every run does not change that
+			// resolution (the issue explicitly asks NOT to fix that here);
+			// it makes a divergence visible to whoever is reading the
+			// command's own output, which a relative path never can.
+			if absPath, aerr := filepath.Abs(path); aerr != nil {
+				fmt.Println("tick log: " + path + " (could not resolve to an absolute path: " + aerr.Error() + ")")
+			} else {
+				fmt.Println("tick log: " + absPath)
+			}
 			// Before reading the record, confirm the record is still there.
 			// It lives in a file the Director can delete, and deleting it
 			// used to turn a real stall into "no tick log yet".
@@ -1787,7 +1801,21 @@ func main() {
 			// verdict below, so it shows on a stalled tick too.
 			if last, ok, lerr := tick.LastEntry(path); lerr != nil {
 				fmt.Fprintln(os.Stderr, "estate: cannot read the last tick's gap/spend figures:", lerr)
-			} else if ok {
+			} else if !ok {
+				// agent-estate#1188: the frozen-file symptom was quiet
+				// because the one figure that would have exposed it -- how
+				// old the newest entry actually is -- was never printed.
+				// Print it every run, including this one: an empty log is a
+				// real state, not a gap in the disclosure.
+				fmt.Println("newest entry: none -- the tick log at this path has no entries")
+			} else {
+				if last.At == "" {
+					fmt.Println("newest entry age: unknown -- the last entry carries no timestamp")
+				} else if at, perr := time.Parse(time.RFC3339, last.At); perr != nil {
+					fmt.Printf("newest entry age: unknown -- the last entry's timestamp %q could not be parsed: %v\n", last.At, perr)
+				} else {
+					fmt.Printf("newest entry age: %s (recorded %s)\n", time.Since(at).Round(time.Second), at.UTC().Format(time.RFC3339))
+				}
 				if last.GapSeconds == nil {
 					fmt.Println("last tick's gap: none recorded (its first-ever tick, or predates agent-estate#982)")
 				} else {
