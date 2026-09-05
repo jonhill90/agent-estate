@@ -1574,3 +1574,142 @@ func TestQueryMatchTiedOnScorePopulatesForAnExactFloatTie(t *testing.T) {
 		t.Fatalf("tied pair not ordered by item id: got %s, %s", got.Matches[0].ID, got.Matches[1].ID)
 	}
 }
+
+// invariantQuestion is authored here, once, for
+// TestPublicPlusWithheldEqualsPrivateTotal below -- not lifted from
+// internal/knowledge/goldenset or any corpus/transcript (agent-estate#1179's
+// own working rule). internal/knowledge/goldenset's checked-in cases were
+// rejected as this test's fixture on purpose: agent-estate#1172 already
+// moved that fixture 12 -> 21 and broke two documents that only quoted its
+// size, which is exactly the coupling a NEW test must not add a third
+// dependent to. A hand-authored, single-purpose question, scored against a
+// hand-authored fixture built only for this test, means this test's pass/
+// fail can never move because someone else's fixture grew -- only because
+// the arithmetic this test actually checks broke. Four distinct terms
+// ("quarterly", "budget", "review", "checklist") clears both of
+// minMatchedTerms' floors (non-sparse cap 2 for vault-fact, sparse cap 3
+// for corpus-parameter) as long as every fixture item's Tier1 carries all
+// four -- so every item built below is a guaranteed candidate, and the
+// public/private split is exactly nPublic/nPrivate, never left to BM25
+// scoring chance.
+const invariantQuestion = "quarterly budget review checklist"
+
+// invariantFixture builds an index of nPublic vault-fact (publishable) and
+// nPrivate corpus-parameter (private) items, every one carrying all of
+// invariantQuestion's terms in its own Tier1 so each clears BM25 and
+// minMatchedTerms by construction -- the count of items Query returns is
+// therefore controlled here, not a side effect of scoring.
+func invariantFixture(t *testing.T, nPublic, nPrivate int) string {
+	t.Helper()
+	var items []Item
+	for i := 0; i < nPublic; i++ {
+		id := fmt.Sprintf("2026090515%04d", i)
+		items = append(items, Item{
+			ID: id, Source: "vault-fact",
+			Permalink:   "/vault/agent/facts/quarterly-budget-" + id + ".md",
+			Tier1:       "quarterly budget review checklist -- public copy " + id,
+			Publishable: true, PublishBasis: "test fixture: marked publishable",
+		})
+	}
+	for i := 0; i < nPrivate; i++ {
+		id := fmt.Sprintf("2026090516%04d", i)
+		items = append(items, Item{
+			ID: id, Source: "corpus-parameter",
+			Permalink:   "corpus:item:" + id,
+			Tier1:       "quarterly budget review checklist -- private copy " + id,
+			Publishable: false, PublishBasis: "corpus-parameter: source defaults to private",
+		})
+	}
+	path := filepath.Join(t.TempDir(), "index.json")
+	res := Result{
+		GeneratedAt:   time.Date(2026, 9, 5, 12, 0, 0, 0, time.UTC),
+		StalenessRule: stalenessRule,
+		Note:          derivedNote,
+		Items:         items,
+	}
+	if err := Write(path, res); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestPublicPlusWithheldEqualsPrivateTotal is the direct test for
+// agent-estate#1179: nothing before this asserted
+//
+//	public_total + withheld_private == private_total
+//
+// -- the identity a caller relies on when default-mode WithheldPrivate
+// tells them "N more exist, rerun with --private" and private mode then
+// shows exactly public_total+N. Both sides are read straight off
+// QueryResult (TotalMatched, WithheldPrivate), never recomputed by hand,
+// so this test catches the identity breaking in Query's own bookkeeping,
+// not just in a print statement built on top of it.
+//
+// Every case is asserted, none skipped, including the two smallest shapes
+// (agent-estate#1179's own "decide whether some shape is skipped, and
+// say why" -- the answer here is no shape is skipped):
+//
+//   - "zero match" -- nPublic=0, nPrivate=0 items even exist to match. Both
+//     runs' TotalMatched and WithheldPrivate are 0; the identity reduces to
+//     0+0==0. Kept, not skipped, because a future change that starts
+//     defaulting WithheldPrivate to some nonzero floor even with nothing to
+//     withhold would break exactly this trivial case first, and a test
+//     that only ever ran with real matches present would never see it.
+//   - "small-N, one public one hides five" -- 1 public + 5 private, the
+//     same shape the issue names from nl-04's own measurement (1 public,
+//     5 private). This is StateMatched, not StateWithheldPrivate (a real
+//     public answer exists), but WithheldPrivate must still name the 5.
+//   - "all private" -- 0 public + 4 private drives StateWithheldPrivate
+//     (every match hidden); public_total is 0 by construction, so the
+//     identity reduces to withheld_private == private_total exactly.
+//   - "all public" -- 4 public + 0 private: withheld_private is 0, so the
+//     identity reduces to public_total == private_total exactly.
+//   - "mixed" -- 3 public + 2 private, StateMatchedWithheldMajority once
+//     mixed with StateMatched's more ordinary case below it, exercising the
+//     identity against every top-level state that can carry a nonzero
+//     WithheldPrivate.
+func TestPublicPlusWithheldEqualsPrivateTotal(t *testing.T) {
+	cases := []struct {
+		name              string
+		nPublic, nPrivate int
+	}{
+		{"zero match", 0, 0},
+		{"small-N, one public one hides five", 1, 5},
+		{"all private", 0, 4},
+		{"all public", 4, 0},
+		{"mixed", 3, 2},
+	}
+
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			question := invariantQuestion
+			if c.nPublic == 0 && c.nPrivate == 0 {
+				// The zero-match shape must score nothing at all -- reuse
+				// the shared fixture's terms but query for words that
+				// appear in no fixture item this test ever builds.
+				question = "xylophone quokka zeppelin narwhal"
+			}
+			path := invariantFixture(t, c.nPublic, c.nPrivate)
+
+			public := Query(path, question, 0, false)
+			private := Query(path, question, 0, true)
+
+			if private.WithheldPrivate != 0 {
+				t.Errorf("%s: private-mode call itself withheld %d item(s); WithheldPrivate must be 0 whenever PrivateIncluded is true",
+					c.name, private.WithheldPrivate)
+			}
+			if private.TotalMatched != c.nPublic+c.nPrivate {
+				t.Fatalf("%s: private.TotalMatched = %d, want %d (fixture built %d public + %d private matching items) -- fixture construction itself is broken, not the invariant under test",
+					c.name, private.TotalMatched, c.nPublic+c.nPrivate, c.nPublic, c.nPrivate)
+			}
+
+			publicTotal := public.TotalMatched
+			withheld := public.WithheldPrivate
+			privateTotal := private.TotalMatched
+			if publicTotal+withheld != privateTotal {
+				t.Fatalf("%s: identity broken for %q -- public_total(%d) + withheld_private(%d) = %d, want private_total %d (public state=%q, private state=%q)",
+					c.name, question, publicTotal, withheld, publicTotal+withheld, privateTotal, public.State, private.State)
+			}
+		})
+	}
+}
