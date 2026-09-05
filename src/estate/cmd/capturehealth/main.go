@@ -52,6 +52,13 @@ func printHuman(r Report, verbose bool) {
 	fmt.Printf("rollout files seen: %d (parsed %d, unparseable %d)\n", r.FilesTotal, r.FilesParsed, len(r.FilesUnparseable))
 	fmt.Printf("genuine operator turns (role=user AND content[0].type=input_text): %d\n", r.OperatorTurnsTotal)
 
+	fmt.Printf("session_meta records: %d raw, %d files carry more than one DISTINCT session id\n",
+		r.SessionMetaTotal, r.FilesWithMultipleSessions)
+
+	fmt.Printf("compacted records: %d (raw replacement_history user turns: %d, distinct: %d, overlap-with-response_item: %d, only-in-compacted: %d)\n",
+		r.CompactedRecordsTotal, r.CompactedUserTurnsRawTotal, r.CompactedUserTurnsDistinctTotal,
+		r.CompactedOverlapWithResponseItemTotal, r.CompactedOnlyInCompactedTotal)
+
 	fmt.Println("record type counts:")
 	for _, k := range sortedKeys(r.RecordTypeCounts) {
 		fmt.Printf("  %-32s %d\n", k, r.RecordTypeCounts[k])
@@ -82,6 +89,13 @@ func printHuman(r Report, verbose bool) {
 			fmt.Printf("  %s\n", fr.Path)
 			fmt.Printf("    session ids: %v\n", fr.SessionIDs)
 			fmt.Printf("    operator turns: %d\n", fr.OperatorTurns)
+			for _, s := range fr.Sessions {
+				fmt.Printf("      %s: %d turns\n", s.SessionID, s.OperatorTurns)
+			}
+			if fr.CompactedRecords > 0 {
+				fmt.Printf("    compacted: %d records, %d distinct turns (%d overlap, %d only-in-compacted)\n",
+					fr.CompactedRecords, fr.CompactedUserTurnsDistinct, fr.CompactedOverlapWithResponseItem, fr.CompactedOnlyInCompacted)
+			}
 			for _, k := range sortedKeys(fr.RecordTypeCounts) {
 				fmt.Printf("    %-30s %d\n", k, fr.RecordTypeCounts[k])
 			}
