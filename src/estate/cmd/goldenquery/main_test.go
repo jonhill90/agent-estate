@@ -375,6 +375,119 @@ func TestRatchetFailuresPassesWhenNoneResultIsNil(t *testing.T) {
 	}
 }
 
+// agent-estate#1209: tallyNatural/checkExemptions/countExemptResults are the
+// exemption mechanism's own primitives -- the bridge accepted on #1209's
+// hold (agent-estate#1162 issuecomment-5552369384's design pass, Option 1).
+// A case marked UnscopedExempt is excluded from the unscoped ratchet's own
+// tally, but ONLY if it re-earns its divergence claim (MISS unscoped, HIT
+// scoped) every run -- checkExemptions is what makes the flag cost
+// something rather than being free to self-declare.
+
+func TestTallyNaturalExcludesGivenCases(t *testing.T) {
+	results := []naturalResult{
+		{c: goldenset.Case{ID: "a", UnscopedExempt: true}, rank: 10, ran: true}, // miss, exempt
+		{c: goldenset.Case{ID: "b", UnscopedExempt: false}, rank: 1, ran: true}, // hit, counted
+		{c: goldenset.Case{ID: "c", UnscopedExempt: false}, rank: 0, ran: true}, // miss, counted
+	}
+	exclude := func(c goldenset.Case) bool { return c.UnscopedExempt }
+	top3, top10, total := tallyNatural(results, exclude)
+	if total != 2 {
+		t.Fatalf("tallyNatural() total = %d, want 2 (case a excluded)", total)
+	}
+	if top3 != 1 || top10 != 1 {
+		t.Fatalf("tallyNatural() top3/top10 = %d/%d, want 1/1", top3, top10)
+	}
+}
+
+func TestTallyNaturalNilExcludeCountsEveryCase(t *testing.T) {
+	results := []naturalResult{
+		{c: goldenset.Case{ID: "a", UnscopedExempt: true}, rank: 10, ran: true},
+		{c: goldenset.Case{ID: "b"}, rank: 1, ran: true},
+	}
+	top3, top10, total := tallyNatural(results, nil)
+	// rank 10 is a top-10 hit (not top-3); rank 1 is both.
+	if total != 2 || top3 != 1 || top10 != 2 {
+		t.Fatalf("tallyNatural(nil exclude) = top3=%d top10=%d total=%d, want 1/2/2", top3, top10, total)
+	}
+}
+
+func TestCheckExemptionsPassesWhenBothHalvesHold(t *testing.T) {
+	c := goldenset.Case{ID: "nl-22", UnscopedExempt: true, ExemptReason: "seven github-stars competitors outrank it unscoped"}
+	unscoped := []naturalResult{{c: c, rank: 10, ran: true}} // MISS top-3 unscoped
+	scoped := []naturalResult{{c: c, rank: 2, ran: true}}    // HIT top-3 scoped
+	if v := checkExemptions(unscoped, scoped); len(v) != 0 {
+		t.Fatalf("checkExemptions() = %+v, want no violations when both halves hold", v)
+	}
+}
+
+// TestCheckExemptionsFailsWhenExemptCaseHitsUnscoped is guardrail 1's own
+// mutation test: breaking the unscoped half of the divergence claim (the
+// case now hits top-3 unscoped, so it isn't diagnostic anymore) must be
+// caught, not silently exempted forever.
+func TestCheckExemptionsFailsWhenExemptCaseHitsUnscoped(t *testing.T) {
+	c := goldenset.Case{ID: "nl-22", UnscopedExempt: true, ExemptReason: "some reason"}
+	unscoped := []naturalResult{{c: c, rank: 2, ran: true}} // now HITS top-3 unscoped -- claim broken
+	scoped := []naturalResult{{c: c, rank: 2, ran: true}}   // still hits scoped
+	v := checkExemptions(unscoped, scoped)
+	if len(v) != 1 {
+		t.Fatalf("checkExemptions() = %+v, want exactly 1 violation (unscoped half broken)", v)
+	}
+	if v[0].id != "nl-22" {
+		t.Fatalf("checkExemptions()[0].id = %q, want nl-22", v[0].id)
+	}
+}
+
+// TestCheckExemptionsFailsWhenExemptCaseMissesScoped is guardrail 1's other
+// mutation test: breaking the scoped half (the case no longer hits top-3
+// scoped either) must also be caught -- an exemption whose scoped half has
+// gone stale is no longer evidence of anything.
+func TestCheckExemptionsFailsWhenExemptCaseMissesScoped(t *testing.T) {
+	c := goldenset.Case{ID: "nl-23", UnscopedExempt: true, ExemptReason: "some reason"}
+	unscoped := []naturalResult{{c: c, rank: 10, ran: true}} // still misses unscoped
+	scoped := []naturalResult{{c: c, rank: 0, ran: true}}    // now MISSES scoped -- claim broken
+	v := checkExemptions(unscoped, scoped)
+	if len(v) != 1 {
+		t.Fatalf("checkExemptions() = %+v, want exactly 1 violation (scoped half broken)", v)
+	}
+	if v[0].id != "nl-23" {
+		t.Fatalf("checkExemptions()[0].id = %q, want nl-23", v[0].id)
+	}
+}
+
+func TestCheckExemptionsFailsWhenExemptWithNoReason(t *testing.T) {
+	c := goldenset.Case{ID: "nl-24", UnscopedExempt: true, ExemptReason: ""}
+	unscoped := []naturalResult{{c: c, rank: 10, ran: true}}
+	scoped := []naturalResult{{c: c, rank: 2, ran: true}}
+	v := checkExemptions(unscoped, scoped)
+	if len(v) != 1 {
+		t.Fatalf("checkExemptions() = %+v, want exactly 1 violation (missing reason)", v)
+	}
+}
+
+func TestCheckExemptionsIgnoresNonExemptCases(t *testing.T) {
+	c := goldenset.Case{ID: "nl-01"} // ordinary case, never exempt
+	unscoped := []naturalResult{{c: c, rank: 0, ran: true}}
+	scoped := []naturalResult{{c: c, rank: 0, ran: true}}
+	if v := checkExemptions(unscoped, scoped); len(v) != 0 {
+		t.Fatalf("checkExemptions() = %+v, want no violations for a non-exempt case regardless of rank", v)
+	}
+}
+
+func TestCountExemptResultsCountsAndListsIDs(t *testing.T) {
+	results := []naturalResult{
+		{c: goldenset.Case{ID: "nl-22", UnscopedExempt: true}},
+		{c: goldenset.Case{ID: "nl-23", UnscopedExempt: true}},
+		{c: goldenset.Case{ID: "nl-01"}},
+	}
+	count, ids := countExemptResults(results)
+	if count != 2 {
+		t.Fatalf("countExemptResults() count = %d, want 2", count)
+	}
+	if len(ids) != 2 || ids[0] != "nl-22" || ids[1] != "nl-23" {
+		t.Fatalf("countExemptResults() ids = %v, want [nl-22 nl-23]", ids)
+	}
+}
+
 func TestSplitPublishableReachableHitsMissAPrivateMiss(t *testing.T) {
 	// A private-source case's own pass/fail must never leak into the
 	// reachable score -- a vault-fact case failing in default mode (the

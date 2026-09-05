@@ -65,6 +65,29 @@ func TestNaturalCasesAreAllRepoDocs(t *testing.T) {
 	}
 }
 
+// TestUnscopedExemptCasesCarryReason is agent-estate#1209's own fixture-shape
+// guard: unscoped_exempt and exempt_reason must be set together, never one
+// without the other. A flag with no reason is unreviewable; a reason with no
+// flag is dead text that no longer does anything. This is a weaker,
+// shape-only check -- it does not verify the exemption is EARNED (that
+// requires a live index and lives in cmd/goldenquery's checkExemptions,
+// run against a real query every time goldenquery runs), only that the two
+// fields are never set independently of each other.
+func TestUnscopedExemptCasesCarryReason(t *testing.T) {
+	cases, err := LoadNatural()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cases {
+		if c.UnscopedExempt && c.ExemptReason == "" {
+			t.Errorf("case %s has unscoped_exempt=true but no exempt_reason -- every exemption needs its own recorded evidence", c.ID)
+		}
+		if !c.UnscopedExempt && c.ExemptReason != "" {
+			t.Errorf("case %s has exempt_reason set but unscoped_exempt=false -- a reason with no exemption is dead text", c.ID)
+		}
+	}
+}
+
 // TestNaturalCasesIDsAreDistinctFromGoldenSet guards the keying #1073
 // requires: no natural-language case may collide with a cases.json id.
 func TestNaturalCasesIDsAreDistinctFromGoldenSet(t *testing.T) {

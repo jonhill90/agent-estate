@@ -362,18 +362,35 @@ func scopedQuestion(question, source string, scoped bool) string {
 // unguarded (harmless today, since nothing can move it; not harmless if
 // github-stars ever begins competing on repo-docs questions, at which
 // point this decision should be revisited with fresh evidence).
-func runNaturalStratum(w *bufio.Writer, bin string, verbose bool, scoped bool) (top3Hits, top10Hits, total int, ranAtLeastOne bool, overlapMean float64, overlapMeasured int) {
+// agent-estate#1209: results is the per-case outcome of THIS call's own run
+// (unscoped or scoped, whichever scoped selects) -- main needs both calls'
+// raw results, not just the aggregated counts, so checkExemptions can pair
+// an exempt case's unscoped rank against its own scoped rank and verify the
+// divergence it claims actually holds this run, not merely once when the
+// case was authored.
+func runNaturalStratum(w *bufio.Writer, bin string, verbose bool, scoped bool) (top3Hits, top10Hits, total int, ranAtLeastOne bool, overlapMean float64, overlapMeasured int, results []naturalResult) {
 	cases, err := goldenset.LoadNatural()
 	if err != nil {
 		fmt.Fprintln(w, "goldenquery: natural-language stratum:", err)
-		return 0, 0, 0, false, 0, 0
+		return 0, 0, 0, false, 0, 0, nil
 	}
 	label := "default/public, unscoped"
 	if scoped {
 		label = "--private, scoped source:repo-docs prepended -- agent-estate#1162, replaces agent-estate#1077's public-mode scoped arm"
 	}
 	fmt.Fprintf(w, "=== natural-language stratum (%s -- agent-estate#1073) ===\n", label)
-	top3Hits, top10Hits, total, ranAtLeastOne = runStratum(w, bin, verbose, scoped, scoped, cases, "repo-docs")
+	results, ranAtLeastOne = runStratum(w, bin, verbose, scoped, scoped, cases, "repo-docs")
+	// agent-estate#1209: the UNSCOPED arm's own tally excludes cases marked
+	// UnscopedExempt -- see goldenset.Case.UnscopedExempt's doc comment and
+	// checkExemptions below for what earns that exclusion. The SCOPED arm
+	// excludes nothing: an exempt case is exempt from the unscoped ratchet
+	// only, and still counts as an ordinary hit (it must, by the earned
+	// claim) toward the scoped one.
+	var exclude func(goldenset.Case) bool
+	if !scoped {
+		exclude = func(c goldenset.Case) bool { return c.UnscopedExempt }
+	}
+	top3Hits, top10Hits, total = tallyNatural(results, exclude)
 	overlapMean, overlapMeasured, _ = meanOverlap(cases)
 	return
 }
@@ -394,7 +411,11 @@ func runStarStratum(w *bufio.Writer, bin string, verbose bool) (top3Hits, top10H
 		return 0, 0, 0, false, 0, 0
 	}
 	fmt.Fprintln(w, "=== github-stars stratum (default/public, unscoped -- agent-estate#1111) ===")
-	top3Hits, top10Hits, total, ranAtLeastOne = runStratum(w, bin, verbose, false, false, cases, "github-stars")
+	var results []naturalResult
+	results, ranAtLeastOne = runStratum(w, bin, verbose, false, false, cases, "github-stars")
+	// This stratum has no exemption concept (agent-estate#1209's exemption
+	// is scoped-diagnostic natural-language cases only) -- tally every case.
+	top3Hits, top10Hits, total = tallyNatural(results, nil)
 	overlapMean, overlapMeasured, _ = meanOverlap(cases)
 	return
 }
@@ -403,9 +424,9 @@ func runStarStratum(w *bufio.Writer, bin string, verbose bool) (top3Hits, top10H
 // runStarStratum (generalised in agent-estate#1111 from runNaturalStratum's
 // original repo-docs-only body): it runs every case in cases once, scoping
 // each question's source: tag to sourceTag when scoped is set, and returns
-// the resulting top-3/top-10 hit counts. Neither caller reuses the other's
-// result, and neither result is ever averaged with cases.json's or any
-// other stratum's own score.
+// every case's own naturalResult. Neither caller reuses the other's result,
+// and neither result is ever averaged with cases.json's or any other
+// stratum's own score.
 //
 // agent-estate#1162: private selects the query mode independently of
 // scoped -- runStarStratum always passes false/false (unscoped, public,
@@ -414,8 +435,15 @@ func runStarStratum(w *bufio.Writer, bin string, verbose bool) (top3Hits, top10H
 // passes true/true (private, replacing #1077's public-mode scoped arm,
 // which had no competing source to filter out and so could never move --
 // see runNaturalStratum's own doc comment).
-func runStratum(w *bufio.Writer, bin string, verbose bool, scoped bool, private bool, cases []goldenset.Case, sourceTag string) (top3Hits, top10Hits, total int, ranAtLeastOne bool) {
-	var results []naturalResult
+//
+// agent-estate#1209: this used to tally and return top3Hits/top10Hits/total
+// itself. It now returns the raw per-case results and leaves tallying to
+// tallyNatural, called separately by each caller -- runNaturalStratum's
+// unscoped call needs to exclude UnscopedExempt cases from its own tally
+// while still running (and printing) them, and the exemption can only be
+// EARNED by comparing this call's own results against the scoped call's,
+// which requires both raw result sets to survive past this function.
+func runStratum(w *bufio.Writer, bin string, verbose bool, scoped bool, private bool, cases []goldenset.Case, sourceTag string) (results []naturalResult, ranAtLeastOne bool) {
 	for _, c := range cases {
 		stdout, exitCode, err := runQuery(bin, scopedQuestion(c.Question, sourceTag, scoped), private)
 		if err != nil {
@@ -466,7 +494,22 @@ func runStratum(w *bufio.Writer, bin string, verbose bool, scoped bool, private 
 		}
 	}
 
+	return results, ranAtLeastOne
+}
+
+// tallyNatural turns a raw runStratum result set into top-3/top-10 hit
+// counts, optionally skipping any case for which exclude returns true --
+// agent-estate#1209's mechanism for keeping an UnscopedExempt case IN the
+// run (queried, printed, checked by checkExemptions below) but OUT of the
+// unscoped ratchet's own numerator/denominator. exclude may be nil, in
+// which case every result counts -- runStarStratum and the scoped
+// natural-language call both use this stratum's true, un-exempted total.
+func tallyNatural(results []naturalResult, exclude func(goldenset.Case) bool) (top3Hits, top10Hits, total int) {
 	for _, r := range results {
+		if exclude != nil && exclude(r.c) {
+			continue
+		}
+		total++
 		if r.rank >= 1 && r.rank <= 3 {
 			top3Hits++
 		}
@@ -474,8 +517,73 @@ func runStratum(w *bufio.Writer, bin string, verbose bool, scoped bool, private 
 			top10Hits++
 		}
 	}
-	total = len(results)
-	return top3Hits, top10Hits, total, ranAtLeastOne
+	return top3Hits, top10Hits, total
+}
+
+// exemptionViolation is one UnscopedExempt case whose earned-divergence
+// claim did not hold this run -- see goldenset.Case.UnscopedExempt's doc
+// comment for why a self-declared flag alone is not evidence.
+type exemptionViolation struct {
+	id     string
+	reason string
+}
+
+// checkExemptions is agent-estate#1209's guardrail 1: it re-measures, every
+// run, both halves of the divergence claim an UnscopedExempt case makes --
+// that it MISSES top-3 on the real unscoped arm AND HITS top-3 on the real
+// scoped arm -- rather than trusting the field once at authoring time. A
+// case that stops meeting either half is reported as a violation, and main
+// fails the whole run over it (exit 1, same severity as a ratchet failure),
+// which is what makes exempting a case cost something: parking an ordinary
+// miss here, or an exemption that has gone stale because the case now hits
+// unscoped or has stopped hitting scoped, cannot pass silently.
+func checkExemptions(unscoped, scoped []naturalResult) []exemptionViolation {
+	scopedByID := make(map[string]naturalResult, len(scoped))
+	for _, r := range scoped {
+		scopedByID[r.c.ID] = r
+	}
+	var out []exemptionViolation
+	for _, u := range unscoped {
+		if !u.c.UnscopedExempt {
+			if u.c.ExemptReason != "" {
+				out = append(out, exemptionViolation{u.c.ID, "carries exempt_reason but unscoped_exempt is not set -- a reason with no exemption is dead text, either set the flag or remove the reason"})
+			}
+			continue
+		}
+		if u.c.ExemptReason == "" {
+			out = append(out, exemptionViolation{u.c.ID, "unscoped_exempt is true but exempt_reason is empty -- every exemption needs its own recorded evidence"})
+		}
+		if u.rank >= 1 && u.rank <= 3 {
+			out = append(out, exemptionViolation{u.c.ID, fmt.Sprintf("claims exemption from the unscoped ratchet but HITS top-3 unscoped (rank %d) this run -- the divergence is not earned, remove unscoped_exempt", u.rank)})
+		}
+		s, ok := scopedByID[u.c.ID]
+		if !ok {
+			out = append(out, exemptionViolation{u.c.ID, "exempt case has no matching result in the scoped run -- cannot verify the scoped half of its divergence claim"})
+			continue
+		}
+		if !(s.rank >= 1 && s.rank <= 3) {
+			out = append(out, exemptionViolation{u.c.ID, fmt.Sprintf("claims exemption from the unscoped ratchet but MISSES top-3 scoped (rank %d) this run -- the divergence is not earned, remove unscoped_exempt", s.rank)})
+		}
+	}
+	return out
+}
+
+// countExemptResults reports how many of a natural-language run's own
+// results are UnscopedExempt and their ids -- agent-estate#1209's guardrail
+// 2: the exempt bucket's size must be printed every run, alongside the
+// ratchet lines, so it cannot grow unnoticed the way the stale "no drift
+// evidence" reason went unchecked for weeks (agent-estate#1207). Takes the
+// unscoped run's own results (not a fresh goldenset.LoadNatural() call) so
+// this count can never drift from the same case set the exemption actually
+// applied to this run.
+func countExemptResults(results []naturalResult) (count int, ids []string) {
+	for _, r := range results {
+		if r.c.UnscopedExempt {
+			count++
+			ids = append(ids, r.c.ID)
+		}
+	}
+	return count, ids
 }
 
 // runMode runs every case once, in the single mode (private or not)
@@ -832,9 +940,17 @@ func main() {
 	// (scoped, moved off public mode by agent-estate#1162 -- see
 	// runNaturalStratum's own doc comment). Both lines print always;
 	// neither is derived from or replaces the other.
-	nlTop3, nlTop10, nlTotal, ranNaturalUnscoped, nlOverlapMean, nlOverlapMeasured := runNaturalStratum(w, *bin, *verbose, false)
-	nlScopedTop3, nlScopedTop10, nlScopedTotal, ranNaturalScoped, _, _ := runNaturalStratum(w, *bin, *verbose, true)
+	nlTop3, nlTop10, nlTotal, ranNaturalUnscoped, nlOverlapMean, nlOverlapMeasured, nlUnscopedResults := runNaturalStratum(w, *bin, *verbose, false)
+	nlScopedTop3, nlScopedTop10, nlScopedTotal, ranNaturalScoped, _, _, nlScopedResults := runNaturalStratum(w, *bin, *verbose, true)
 	ranNatural := ranNaturalUnscoped || ranNaturalScoped
+
+	// agent-estate#1209: re-earn every UnscopedExempt case's divergence
+	// claim against THIS run's own measurement -- see checkExemptions' doc
+	// comment. A violation here is reported and fails the run below,
+	// alongside the ratchet failures, not silently absorbed into either
+	// natural-language tally.
+	exemptViolations := checkExemptions(nlUnscopedResults, nlScopedResults)
+	exemptCount, exemptIDs := countExemptResults(nlUnscopedResults)
 
 	// agent-estate#1111: the github-stars stratum is the complement of
 	// #1073's repo-docs-only one -- #1063's own comment measured that
@@ -857,8 +973,8 @@ func main() {
 	// lines sit together (same fixture, same commit) and are themselves
 	// never averaged with each other -- see runNaturalStratum's doc comment
 	// for what each answers.
-	fmt.Fprintf(w, "natural-language stratum, top-3  (default/public, unscoped -- #1073):  %d/%d\n", nlTop3, nlTotal)
-	fmt.Fprintf(w, "natural-language stratum, top-10 (default/public, unscoped -- #1073): %d/%d\n", nlTop10, nlTotal)
+	fmt.Fprintf(w, "natural-language stratum, top-3  (default/public, unscoped -- #1073; %d case(s) excluded, earned scope-diagnostic exemption -- agent-estate#1209, see exempt line below): %d/%d\n", exemptCount, nlTop3, nlTotal)
+	fmt.Fprintf(w, "natural-language stratum, top-10 (default/public, unscoped -- #1073; %d case(s) excluded, same exemption as top-3 above): %d/%d\n", exemptCount, nlTop10, nlTotal)
 	fmt.Fprintf(w, "natural-language stratum, top-3  (--private, scoped source:repo-docs -- #1162):  %d/%d\n", nlScopedTop3, nlScopedTotal)
 	fmt.Fprintf(w, "natural-language stratum, top-10 (--private, scoped source:repo-docs -- #1162):                                    %d/%d\n", nlScopedTop10, nlScopedTotal)
 	// agent-estate#1115: a stratum where every question reuses most of its
@@ -927,14 +1043,43 @@ func main() {
 	}
 	fmt.Fprintln(w, "  not ratcheted, known corpus-growth drift (agent-estate#1112): natural-language stratum top-10, unscoped (public); not ratcheted, rank-identical to that unscoped line on all 21 cases and so inherits its corpus-growth drift wholesale (agent-estate#1112, agent-estate#1162): natural-language stratum top-10, private scoped source:repo-docs")
 	fmt.Fprintln(w, "  not ratcheted, measures fixture honesty not quality (agent-estate#1066, agent-estate#1115): term overlap, github-stars and natural-language")
+	// agent-estate#1209: guardrail 2 -- the exempt bucket's own size,
+	// printed unconditionally alongside the ratchet lines above (even when
+	// the count is 0), so a reader never has to go looking for whether the
+	// unscoped ratchet's own denominator has been quietly shrunk. This is
+	// not itself a ratchet: growth here is a signal to look, not a failure
+	// on its own (see goldenset.Case.UnscopedExempt's doc comment for what
+	// DOES fail the run when an exemption stops being earned).
+	if exemptCount > 0 {
+		fmt.Fprintf(w, "  exempt from the unscoped ratchet only (agent-estate#1209, earned per-case -- see checkExemptions): %d of %d natural-language cases -- %s\n", exemptCount, nlTotal+exemptCount, strings.Join(exemptIDs, ", "))
+	} else {
+		fmt.Fprintf(w, "  exempt from the unscoped ratchet only (agent-estate#1209): 0 of %d natural-language cases\n", nlTotal)
+	}
 
 	failed := ratchetFailures(ratchets)
 	w.Flush()
+	exitStatus := 0
 	if len(failed) > 0 {
 		fmt.Fprintf(os.Stderr, "goldenquery: %d ratchet(s) regressed below their accepted floor -- see the ratchet section above for which and why\n", len(failed))
 		for _, r := range failed {
 			fmt.Fprintf(os.Stderr, "  %s: %d/%d, floor %d -- %s\n", r.name, r.got, r.total, r.floor(), r.reason)
 		}
-		os.Exit(1)
+		exitStatus = 1
+	}
+	// agent-estate#1209: an earned-exemption violation fails the run the
+	// same way a ratchet regression does -- it is exactly as serious, since
+	// it means either an ordinary miss was parked in the exempt bucket
+	// without evidence, or a genuine exemption has gone stale (the case now
+	// hits unscoped, or has stopped hitting scoped) and needs a human look,
+	// not a silent pass.
+	if len(exemptViolations) > 0 {
+		fmt.Fprintf(os.Stderr, "goldenquery: %d unscoped-exemption claim(s) did not hold this run -- an exemption must be earned every run, not asserted once\n", len(exemptViolations))
+		for _, v := range exemptViolations {
+			fmt.Fprintf(os.Stderr, "  %s: %s\n", v.id, v.reason)
+		}
+		exitStatus = 1
+	}
+	if exitStatus != 0 {
+		os.Exit(exitStatus)
 	}
 }
