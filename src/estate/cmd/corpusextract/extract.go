@@ -63,15 +63,85 @@
 // digest of the operator's own words. Never log, print, or write the raw
 // text this tool reads; it belongs to the operator, not to source control or
 // a build log.
+//
+// # Unknown record shapes are refused loudly, not swallowed
+//
+// internal/rollout.AnalyzeFile's own switch has a silent default case for
+// any record type it does not extract turns from (event_msg, turn_context,
+// world_state, inter_agent_communication_metadata) -- correct for its job,
+// since those types genuinely carry nothing to extract. But that same
+// default case would also silently accept a type nobody has ever seen, with
+// no error and no signal that a new or malformed shape slipped through
+// uncounted. validateKnownRecordTypes below runs BEFORE AnalyzeFile and
+// checks every record's own "type" against knownRecordTypes -- the
+// whitelist named in this comment -- so a file containing an unrecognised
+// type is refused for that file (folded into FilesUnparseable, same as a
+// JSON-malformed file already is) rather than silently parsed as if nothing
+// unusual were there.
 package main
 
 import (
+	"bufio"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"os"
 
 	"github.com/jonhill90/agent-estate/estate/internal/rollout"
 )
+
+// knownRecordTypes is every top-level rollout record "type" this codebase
+// recognises: the three internal/rollout.AnalyzeFile extracts turns from
+// (session_meta, response_item, compacted) plus the four it deliberately
+// extracts nothing from but still recognises as legitimate rollout shapes
+// (event_msg, turn_context, world_state,
+// inter_agent_communication_metadata). Anything else is refused loudly by
+// validateKnownRecordTypes rather than silently ignored.
+var knownRecordTypes = map[string]bool{
+	"session_meta":                       true,
+	"response_item":                      true,
+	"compacted":                          true,
+	"event_msg":                          true,
+	"turn_context":                       true,
+	"world_state":                        true,
+	"inter_agent_communication_metadata": true,
+}
+
+// validateKnownRecordTypes reads path top to bottom, decoding only each
+// line's own "type" field (never the payload -- that is AnalyzeFile's job),
+// and returns an error naming the first line whose type is not in
+// knownRecordTypes or whose JSON does not parse at all. It is a second,
+// narrower pass over the same bytes AnalyzeFile will read next -- not a
+// second parser for this format, since it never interprets a payload.
+func validateKnownRecordTypes(path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	scanner := bufio.NewScanner(f)
+	scanner.Buffer(make([]byte, 0, 64*1024), 16*1024*1024)
+	lineNo := 0
+	for scanner.Scan() {
+		lineNo++
+		line := scanner.Bytes()
+		if len(line) == 0 {
+			continue
+		}
+		var rec struct {
+			Type string `json:"type"`
+		}
+		if err := json.Unmarshal(line, &rec); err != nil {
+			return fmt.Errorf("line %d: malformed record: %w", lineNo, err)
+		}
+		if !knownRecordTypes[rec.Type] {
+			return fmt.Errorf("line %d: unknown record type %q", lineNo, rec.Type)
+		}
+	}
+	return scanner.Err()
+}
 
 // ManifestEntry is exactly what agent-estate#1139's acceptance criterion 1
 // asks for: file, session payload.id, record index, and a hash of the text
@@ -163,6 +233,14 @@ func buildManifest(root string) (Manifest, error) {
 	}
 
 	for _, path := range files {
+		if err := validateKnownRecordTypes(path); err != nil {
+			m.FilesUnparseable = append(m.FilesUnparseable, ParseFailure{
+				Path:   path,
+				Reason: err.Error(),
+			})
+			continue
+		}
+
 		fa, err := rollout.AnalyzeFile(path)
 		if err != nil {
 			m.FilesUnparseable = append(m.FilesUnparseable, ParseFailure{
