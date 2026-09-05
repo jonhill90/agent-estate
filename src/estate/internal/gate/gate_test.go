@@ -243,6 +243,79 @@ func TestVerdictReviewLaneQuotedInTableDoesNotMatchDifferentLane(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------
+// agent-estate#1216 -- parseTrailer must read the same fence/quote-filtered
+// text scanVerdictLines already reads, and must take the LAST qualifying
+// trailer, not the first. Live case: PR #1215's reviewer quoted the
+// fix-pass comment's own Review-Lane: signature as evidence, inside a
+// fence, ahead of its own unfenced signature at the end of the body -- the
+// estate's own review convention (paste the output, do not assert) is
+// exactly what produced the fenced quote.
+// ---------------------------------------------------------------------
+
+func TestVerdictQuotedTrailerInFenceIsIgnoredOwnSignatureWins(t *testing.T) {
+	body := "Verdict: APPROVE\n\n" +
+		"Evidence:\n```\nReview-Lane: other-lane\n```\n\n" +
+		"Review-Lane: lane-b\nReviewed-SHA: abc123\n"
+	lv := resolveLaneVerdict([]Comment{{Body: body}}, "lane-b")
+	if !lv.found || !lv.ok || lv.decision != verdictApproved {
+		t.Fatalf("resolveLaneVerdict did not attribute the verdict to the comment's OWN Review-Lane: signature: %+v", lv)
+	}
+	other := resolveLaneVerdict([]Comment{{Body: body}}, "other-lane")
+	if other.found {
+		t.Fatalf("resolveLaneVerdict attributed the verdict to a Review-Lane: trailer quoted inside a fence: %+v", other)
+	}
+}
+
+func TestVerdictQuotedTrailerUnfencedInProseIsNotTheSignature(t *testing.T) {
+	// Same quote, but NOT fenced -- unfenced prose discussing another
+	// lane's trailer, followed by this comment's own signature at the
+	// end. considerableLines does not filter this out (it is not fenced
+	// or quoted), so the LAST-match rule is what must save it: a
+	// signature at the end of the body outranks an earlier mention.
+	body := "Verdict: APPROVE\n\n" +
+		"The prior comment's Review-Lane: other-lane trailer is evidence this PR was reviewed before.\n\n" +
+		"Review-Lane: lane-b\nReviewed-SHA: abc123\n"
+	lv := resolveLaneVerdict([]Comment{{Body: body}}, "lane-b")
+	if !lv.found || !lv.ok || lv.decision != verdictApproved {
+		t.Fatalf("resolveLaneVerdict did not attribute the verdict to the comment's OWN trailing Review-Lane: signature: %+v", lv)
+	}
+	other := resolveLaneVerdict([]Comment{{Body: body}}, "other-lane")
+	if other.found {
+		t.Fatalf("resolveLaneVerdict attributed the verdict to an unfenced Review-Lane: mention that precedes the comment's real signature: %+v", other)
+	}
+}
+
+func TestVerdictTwoGenuineUnfencedTrailersLastOneWins(t *testing.T) {
+	// A comment with two REAL, unfenced Review-Lane: trailers naming
+	// different lanes (e.g. a corrected signature). The last one is the
+	// comment's own current, considered claim -- resolve to it, not the
+	// first.
+	body := "Review-Lane: lane-first\nVerdict: APPROVE\n\nReview-Lane: lane-b\nReviewed-SHA: abc123\n"
+	lv := resolveLaneVerdict([]Comment{{Body: body}}, "lane-b")
+	if !lv.found || !lv.ok || lv.decision != verdictApproved {
+		t.Fatalf("resolveLaneVerdict did not resolve to the LAST of two genuine unfenced Review-Lane: trailers: %+v", lv)
+	}
+	first := resolveLaneVerdict([]Comment{{Body: body}}, "lane-first")
+	if first.found {
+		t.Fatalf("resolveLaneVerdict resolved to the FIRST of two genuine unfenced Review-Lane: trailers instead of the last: %+v", first)
+	}
+}
+
+func TestVerdictQuotedTrailerBehindBlockquoteIsIgnored(t *testing.T) {
+	body := "Verdict: APPROVE\n\n" +
+		"> Review-Lane: other-lane\n> Reviewed-SHA: deadbeef\n\n" +
+		"Review-Lane: lane-b\nReviewed-SHA: abc123\n"
+	lv := resolveLaneVerdict([]Comment{{Body: body}}, "lane-b")
+	if !lv.found || !lv.ok || lv.decision != verdictApproved {
+		t.Fatalf("resolveLaneVerdict did not attribute the verdict to the comment's own Review-Lane: signature past a `>`-quoted trailer: %+v", lv)
+	}
+	other := resolveLaneVerdict([]Comment{{Body: body}}, "other-lane")
+	if other.found {
+		t.Fatalf("resolveLaneVerdict attributed the verdict to a `>`-quoted Review-Lane: trailer: %+v", other)
+	}
+}
+
+// ---------------------------------------------------------------------
 // earliestCheckStart -- constraint 5: staleness against when checks
 // actually started, not a committer date.
 // ---------------------------------------------------------------------

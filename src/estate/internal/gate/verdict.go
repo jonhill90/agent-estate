@@ -91,14 +91,19 @@ type verdictLine struct {
 	text     string
 }
 
-// scanVerdictLines never reads a line inside a fenced code block or a
-// markdown blockquote (GitHub's "quote reply" shape) -- a verdict quoted as
-// an example, or quoted from an earlier comment, must not be read as this
-// comment restating it. This is exactly the trap agent-estate#926 names:
-// "every council comment in this repo quotes prior verdicts in its seat
-// table, so a substring match reads a REQUEST CHANGES that quotes an
-// approval as an approval."
-func scanVerdictLines(body string) []verdictLine {
+// considerableLines returns body's lines with fenced code blocks and
+// markdown blockquotes (GitHub's "quote reply" shape) removed -- a verdict
+// or trailer quoted as an example, or quoted from an earlier comment, must
+// not be read as this comment restating it. This is exactly the trap
+// agent-estate#926 names: "every council comment in this repo quotes prior
+// verdicts in its seat table, so a substring match reads a REQUEST CHANGES
+// that quotes an approval as an approval." agent-estate#1216 is the same
+// trap one level up: parseTrailer used to scan body directly while
+// scanVerdictLines scanned this filtered form, so a comment quoting another
+// lane's Review-Lane: trailer inside a fence paired its OWN verdict with the
+// quoted lane instead of its own. Both scanners now read this one filtered
+// view so they cannot drift apart again.
+func considerableLines(body string) []string {
 	var lines []string
 	inFence := false
 	for _, raw := range strings.Split(body, "\n") {
@@ -112,8 +117,12 @@ func scanVerdictLines(body string) []verdictLine {
 		}
 		lines = append(lines, line)
 	}
+	return lines
+}
+
+func scanVerdictLines(body string) []verdictLine {
 	var results []verdictLine
-	for _, line := range lines {
+	for _, line := range considerableLines(body) {
 		match := verdictLineRE.FindStringSubmatch(line)
 		if match == nil {
 			continue
@@ -149,16 +158,30 @@ func parseAuthorLaneTrailer(body string) (string, bool) {
 	return parseTrailer(authorLaneRE, body)
 }
 
+// parseTrailer reads re's trailer from body's considerable text only --
+// the same fence/quote-filtered view scanVerdictLines reads (see
+// considerableLines) -- so a trailer quoted as evidence inside a fence or a
+// `>` reply can never be attributed to this comment (agent-estate#1216).
+//
+// It takes the LAST qualifying match, not the first. A signature belongs at
+// the end of a comment, and a reviewer legitimately discussing a trailer
+// earlier in the body (e.g. quoting it unfenced, in prose, before signing
+// their own) must not have that discussion read as their verdict. Taking
+// the first match, as this used to, is exactly backwards: the earliest
+// mention wins over the comment's own closing signature. This does not
+// loosen anything scanVerdictLines already refuses -- a trailer that only
+// ever appears fenced or quoted still yields no match at all, from either
+// scanner.
 func parseTrailer(re *regexp.Regexp, body string) (string, bool) {
-	match := re.FindStringSubmatch(body)
-	if match == nil {
-		return "", false
+	text := strings.Join(considerableLines(body), "\n")
+	matches := re.FindAllStringSubmatch(text, -1)
+	for i := len(matches) - 1; i >= 0; i-- {
+		value := strings.TrimSpace(matches[i][1])
+		if value != "" {
+			return value, true
+		}
 	}
-	value := strings.TrimSpace(match[1])
-	if value == "" {
-		return "", false
-	}
-	return value, true
+	return "", false
 }
 
 // laneVerdict is this package's own wiring on top of the ported scanner
