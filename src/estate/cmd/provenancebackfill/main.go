@@ -163,39 +163,38 @@ func refuseLivePath(dbPath string) (string, bool) {
 		return fmt.Sprintf("cannot resolve %s: %v -- refusing rather than guessing whether it names the live corpus", dbPath, err), true
 	}
 
-	if livePath, err := corpus.Path(); err == nil {
-		live, liveErr := resolveForCompare(livePath)
-		if liveErr != nil {
-			// The candidate side already refuses when ITS OWN resolution
-			// fails; the live reference side must refuse identically when
-			// IT cannot be resolved, rather than silently falling through
-			// to the weaker fallback checks below with nothing to compare
-			// against. An unresolvable live path is not evidence the
-			// candidate is safe -- it is the one case where identity
-			// cannot be established at all, and uncertainty here refuses
-			// exactly as it does for the candidate.
-			return fmt.Sprintf("cannot resolve live corpus path %s: %v -- refusing rather than guessing whether %s names it", livePath, liveErr, dbPath), true
-		}
-		if candidate.info != nil && live.info != nil && os.SameFile(candidate.info, live.info) {
-			return fmt.Sprintf("is the same file as the live corpus (%s), by device+inode identity", livePath), true
-		}
-		if candidate.clean == live.clean {
-			return fmt.Sprintf("matches the live corpus path (%s)", livePath), true
-		}
+	livePath, err := corpus.Path()
+	if err != nil {
+		// corpus.Path()'s only failure mode is os.UserHomeDir() erroring
+		// (internal/corpus's dbPath(): $ESTATE_CORPUS if set, otherwise
+		// os.UserHomeDir() or its error, nothing else). A prior revision of
+		// this guard fell through here to a "$HOME-anchored" fallback that
+		// called os.UserHomeDir() a SECOND time to decide how to anchor it --
+		// but it is the same call, in the same process, against the same
+		// environment: if it failed once it fails again, so that branch was
+		// dead code in the exact scenario it existed to cover, and the
+		// fallback silently degraded to a bare cwd-relative comparison that
+		// doesn't match the real live path (agent-estate#1139, PR #1234
+		// review). Refuse outright instead of guessing: an unresolvable live
+		// reference is not evidence the candidate is safe.
+		return fmt.Sprintf("cannot resolve the live corpus path: %v -- refusing rather than guessing whether %s names it", err, dbPath), true
 	}
-	// Fallback in case corpus.Path() errored (e.g. HOME unset): the
-	// well-known suffix, still resolved and case-folded the same way,
-	// anchored under $HOME explicitly rather than left to resolve relative
-	// to cwd -- corpus.Path() itself resolves against $HOME, and a fallback
-	// standing in for it must anchor the same way or it stops matching any
-	// -db value that isn't already cwd-relative to the same directory.
-	homeSuffix := filepath.Join("corpus", "ledger.sqlite3")
-	if home, homeErr := os.UserHomeDir(); homeErr == nil {
-		homeSuffix = filepath.Join(home, "corpus", "ledger.sqlite3")
+	live, liveErr := resolveForCompare(livePath)
+	if liveErr != nil {
+		// The candidate side already refuses when ITS OWN resolution
+		// fails; the live reference side must refuse identically when
+		// IT cannot be resolved, rather than silently permitting with
+		// nothing to compare against. An unresolvable live path is not
+		// evidence the candidate is safe -- it is the one case where
+		// identity cannot be established at all, and uncertainty here
+		// refuses exactly as it does for the candidate.
+		return fmt.Sprintf("cannot resolve live corpus path %s: %v -- refusing rather than guessing whether %s names it", livePath, liveErr, dbPath), true
 	}
-	if fallbackSuffix, err := resolveForCompare(homeSuffix); err == nil &&
-		fallbackSuffix.clean != "" && strings.HasSuffix(candidate.clean, fallbackSuffix.clean) {
-		return "matches the live corpus path (~/corpus/ledger.sqlite3)", true
+	if candidate.info != nil && live.info != nil && os.SameFile(candidate.info, live.info) {
+		return fmt.Sprintf("is the same file as the live corpus (%s), by device+inode identity", livePath), true
+	}
+	if candidate.clean == live.clean {
+		return fmt.Sprintf("matches the live corpus path (%s)", livePath), true
 	}
 	if strings.Contains(candidate.clean, strings.ToLower("agent-dotfiles-supervisor")) {
 		return "matches the retired agent-dotfiles-supervisor ledger location", true

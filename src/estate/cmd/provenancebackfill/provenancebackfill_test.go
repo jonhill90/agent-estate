@@ -585,3 +585,62 @@ func TestRefuseLivePathLiveSideResolutionErrorRefuses(t *testing.T) {
 		t.Error("refuseLivePath returned no reason alongside live=true")
 	}
 }
+
+// TestRefuseLivePathHomeUnsetRefuses locks the fifth instance of the same
+// family, the one PR #1234's own review found in the code that PR added:
+// corpus.Path()'s only failure mode is os.UserHomeDir() erroring, so the
+// fallback branch below it is reached ONLY when os.UserHomeDir() has already
+// failed once in this process. A prior revision called os.UserHomeDir() a
+// SECOND time there to decide whether to anchor the fallback suffix under
+// $HOME -- same process, same environment, so if it failed once it failed
+// again, and that branch was dead code in the exact scenario it existed to
+// cover. The fallback then silently degraded to a bare cwd-relative suffix
+// comparison that does not match the real, absolute live path unless cwd
+// happens to equal the real $HOME, so with HOME unset (or empty) BOTH of
+// refuseLivePath's live-reference checks went dark and the real live path
+// reached "no match" (permit).
+//
+// The fix removes the fallback entirely: when corpus.Path() cannot be
+// resolved, refuseLivePath now refuses outright rather than falling through
+// to a weaker check.
+func TestRefuseLivePathHomeUnsetRefuses(t *testing.T) {
+	realHome := t.TempDir()
+	liveDir := filepath.Join(realHome, "corpus")
+	if err := os.MkdirAll(liveDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	livePath := filepath.Join(liveDir, "ledger.sqlite3")
+	if err := os.WriteFile(livePath, []byte("live"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	otherDir := t.TempDir()
+
+	cases := []struct {
+		name    string
+		setHome func(t *testing.T)
+	}{
+		{"HOME empty", func(t *testing.T) { t.Setenv("HOME", "") }},
+		{"HOME unset", func(t *testing.T) {
+			t.Setenv("HOME", "placeholder") // t.Setenv restores this on cleanup; Unsetenv below is what matters for the test body
+			if err := os.Unsetenv("HOME"); err != nil {
+				t.Fatal(err)
+			}
+		}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			c.setHome(t)
+			t.Setenv("ESTATE_CORPUS", "")
+			t.Chdir(otherDir) // cwd deliberately not the real $HOME
+
+			reason, live := refuseLivePath(livePath) // the REAL live path, verbatim
+			if !live {
+				t.Errorf("refuseLivePath(%q) = live false (reason=%q), want true: HOME unresolvable must refuse, not fall through to a weaker check", livePath, reason)
+			}
+			if reason == "" {
+				t.Error("refuseLivePath returned no reason alongside live=true")
+			}
+		})
+	}
+}
