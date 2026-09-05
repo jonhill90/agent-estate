@@ -417,3 +417,107 @@ func TestRefuseLivePathDanglingSymlinkBypasses(t *testing.T) {
 		})
 	}
 }
+
+// TestRefuseLivePathIdentityBypasses locks the three shapes PR #1233's
+// review found still bypassed refuseLivePath at 13c890b: a symlinked PARENT
+// directory combined with a not-yet-existing leaf, a symlinked GRANDPARENT
+// directory, and a hardlink to the live file under a completely unrelated
+// name. All three share the same root cause the prior two rounds also
+// shared -- an unresolved path component (or, for the hardlink, no resolvable
+// component at all) being compared as a literal string instead of the guard
+// asking "is this the same file" -- which is why this guard now resolves
+// every component and falls back to os.SameFile identity, not just string
+// equality.
+//
+// Each subtest never creates the live target for real; a bypass here would
+// mean the tool proceeds to -apply and actually writes there, so asserting
+// livePath is never materialized is part of what makes this a red/green
+// proof (red against 13c890b, green after this fix).
+func TestRefuseLivePathIdentityBypasses(t *testing.T) {
+	t.Run("symlinked parent directory with a not-yet-existing leaf", func(t *testing.T) {
+		dir := t.TempDir()
+		liveDir := filepath.Join(dir, "realcorpus")
+		if err := os.MkdirAll(liveDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		// livePath is deliberately never created -- the leaf itself doesn't
+		// exist, only its parent chain does.
+		livePath := filepath.Join(liveDir, "ledger.sqlite3")
+		t.Setenv("ESTATE_CORPUS", livePath)
+
+		linkedDir := filepath.Join(dir, "corpus")
+		if err := os.Symlink(liveDir, linkedDir); err != nil {
+			t.Fatal(err)
+		}
+		candidate := filepath.Join(linkedDir, "ledger.sqlite3")
+
+		reason, live := refuseLivePath(candidate)
+		if !live {
+			t.Errorf("refuseLivePath(%q) = live false, want true (parent directory is a symlink to the live corpus's own directory)", candidate)
+		}
+		if reason == "" {
+			t.Error("refuseLivePath returned no reason alongside live=true")
+		}
+		if _, err := os.Lstat(livePath); err == nil {
+			t.Fatalf("live target %s was created by this test -- guard did not fail closed before any write", livePath)
+		}
+	})
+
+	t.Run("symlinked grandparent directory with a not-yet-existing leaf", func(t *testing.T) {
+		dir := t.TempDir()
+		liveRoot := filepath.Join(dir, "realroot")
+		liveDir := filepath.Join(liveRoot, "corpus")
+		if err := os.MkdirAll(liveDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		livePath := filepath.Join(liveDir, "ledger.sqlite3")
+		t.Setenv("ESTATE_CORPUS", livePath)
+
+		linkedRoot := filepath.Join(dir, "linkedroot")
+		if err := os.Symlink(liveRoot, linkedRoot); err != nil {
+			t.Fatal(err)
+		}
+		candidate := filepath.Join(linkedRoot, "corpus", "ledger.sqlite3")
+
+		reason, live := refuseLivePath(candidate)
+		if !live {
+			t.Errorf("refuseLivePath(%q) = live false, want true (grandparent directory is a symlink to the live corpus's own root)", candidate)
+		}
+		if reason == "" {
+			t.Error("refuseLivePath returned no reason alongside live=true")
+		}
+		if _, err := os.Lstat(livePath); err == nil {
+			t.Fatalf("live target %s was created by this test -- guard did not fail closed before any write", livePath)
+		}
+	})
+
+	t.Run("hardlink to the live file under an unrelated name", func(t *testing.T) {
+		dir := t.TempDir()
+		liveDir := filepath.Join(dir, "corpus")
+		if err := os.MkdirAll(liveDir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		livePath := filepath.Join(liveDir, "ledger.sqlite3")
+		if err := os.WriteFile(livePath, []byte("live"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("ESTATE_CORPUS", livePath)
+
+		// A hardlink is the same file (same device+inode) reached through a
+		// name that shares nothing textually with the live path and is not
+		// a symlink at all -- EvalSymlinks never sees it, so only identity
+		// comparison (os.SameFile) can catch this, never a string compare.
+		hardlinkPath := filepath.Join(dir, "totally-unrelated-name.db")
+		if err := os.Link(livePath, hardlinkPath); err != nil {
+			t.Skipf("hardlinks unsupported on this filesystem: %v", err)
+		}
+
+		reason, live := refuseLivePath(hardlinkPath)
+		if !live {
+			t.Errorf("refuseLivePath(%q) = live false, want true (hardlink shares an inode with the live corpus file)", hardlinkPath)
+		}
+		if reason == "" {
+			t.Error("refuseLivePath returned no reason alongside live=true")
+		}
+	})
+}

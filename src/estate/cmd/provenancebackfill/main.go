@@ -107,33 +107,56 @@ func run(args []string, stdout, stderr *os.File) int {
 	return 0
 }
 
-// refuseLivePath reports whether dbPath names the live corpus. A prior
-// version of this check compared literal, case-sensitive path strings and
-// never resolved symlinks -- a symlink to ~/corpus/ledger.sqlite3, or a
-// case-varied spelling on this filesystem's case-insensitive default,
-// silently passed it straight into a real write (agent-estate#1139 PR #1232
-// review). resolveForCompare below normalizes both the candidate and the
-// known live locations the same way before comparing, so those bypasses no
-// longer differ from the exact-spelling case this was always meant to catch.
+// refuseLivePath reports whether dbPath names the live corpus.
 //
-// The live corpus's own canonical path comes from internal/corpus.Path()
-// rather than being reimplemented here as a second literal string, per that
-// review's second recommendation -- one source of truth for "what is the
-// live corpus."
+// This is the third revision of this guard, and each of the first two
+// shipped a defect of the same shape: comparing PATH STRINGS, then adding a
+// special case each time a reviewer found a shape whose string didn't match
+// but whose target did (agent-estate#1139, PR #1232's two reviews, then
+// PR #1233's review). Three rounds of "handle this shape too" is what
+// happens when the wrong question is asked -- "does this string look like
+// the live path" can never be complete, because a filesystem has more ways
+// to name one file than any string comparison enumerates (a symlink at any
+// depth, a case-varied spelling, a hardlink under an unrelated name...).
 //
-// A second review (same PR, second REQUEST CHANGES) found that a DANGLING
-// symlink at the guarded name bypassed this entirely: resolveForCompare used
-// to fall back to the unresolved path whenever filepath.EvalSymlinks failed,
-// and EvalSymlinks fails with ENOENT on a symlink whose target does not
-// exist -- exactly the case a real bypass needs, since the fallback then
-// compares the *link's own name* rather than what it points at. That
-// fallback is correct for a path that plainly doesn't exist and never was a
-// symlink (nothing else to compare there); it is wrong for a symlink whose
-// target can't be resolved, because the one signal that path carries -- the
-// resolvable-or-not state of its target -- is exactly what gets thrown away.
-// resolveForCompare now returns an error in that specific case, and
-// refuseLivePath treats "cannot resolve what this symlink names" as a
-// refusal in its own right, never as evidence of safety.
+// This revision asks a different question: does dbPath, however it is
+// spelled or reached, lead to the SAME FILE as internal/corpus.Path()? Two
+// mechanisms answer that, and BOTH must actively clear a path before it is
+// permitted -- uncertainty from either one refuses:
+//
+//  1. resolveForCompare resolves dbPath as far as the filesystem will allow,
+//     component by component, including every parent and grandparent
+//     directory -- not just the leaf. If ANY existing component is a
+//     symlink that cannot be resolved (dangling target, ELOOP, or an
+//     Lstat failure that isn't plain "doesn't exist yet" -- permission
+//     denied, for instance), resolution stops with an error and
+//     refuseLivePath refuses outright. It never falls back to comparing
+//     what's left of the string in that case.
+//  2. Where the resolved candidate exists on disk, it is compared against
+//     the resolved live path by os.SameFile (device+inode identity), not
+//     by string equality. This is what a string comparison structurally
+//     cannot do: a hardlink to the live file under an unrelated name in an
+//     unrelated directory has no symlink for EvalSymlinks to follow and no
+//     matching path string, but it IS the live file, and SameFile sees
+//     that.
+//
+// The resolved, case-folded path string is kept as an ADDITIONAL refusal
+// condition (it still catches the not-yet-existing-leaf case, where there is
+// no inode yet for SameFile to compare) -- never as the sole basis to
+// PERMIT. Permit requires resolution to have succeeded cleanly with no
+// identity or string match found; any component that could not be resolved,
+// or any stat that could not be performed, refuses instead of guessing.
+//
+// Known limitation, out of scope for this guard: TOCTOU. This function is
+// called once, in run(), before *dbPath is reopened by path many times over
+// (ensureAttributionTable, countAttributionRows, alreadyAttributedIDs,
+// fetchPromptsForFile per basename, insertAttribution per row), each a fresh
+// `sqlite3` subprocess. A symlink swapped into place after this check and
+// before one of those later opens would write through undetected. Closing
+// that window means re-checking identity at every reopen (or holding an
+// open, unretargetable file descriptor across the whole run) -- a
+// structural change to how this tool opens the database, not a fix this
+// guard can make on its own. Tracked, not attempted here.
 func refuseLivePath(dbPath string) (string, bool) {
 	candidate, err := resolveForCompare(dbPath)
 	if err != nil {
@@ -141,45 +164,54 @@ func refuseLivePath(dbPath string) (string, bool) {
 	}
 
 	if livePath, err := corpus.Path(); err == nil {
-		if liveResolved, err := resolveForCompare(livePath); err == nil && candidate == liveResolved {
-			return fmt.Sprintf("matches the live corpus path (%s)", livePath), true
+		if live, err := resolveForCompare(livePath); err == nil {
+			if candidate.info != nil && live.info != nil && os.SameFile(candidate.info, live.info) {
+				return fmt.Sprintf("is the same file as the live corpus (%s), by device+inode identity", livePath), true
+			}
+			if candidate.clean == live.clean {
+				return fmt.Sprintf("matches the live corpus path (%s)", livePath), true
+			}
 		}
 	}
 	// Fallback in case corpus.Path() errored (e.g. HOME unset): the
 	// well-known suffix, still resolved and case-folded the same way. The
 	// literal "corpus/ledger.sqlite3" fragment being compared here never
 	// itself exists as a standalone path, so it always resolves cleanly.
-	fallbackSuffix, _ := resolveForCompare(filepath.Join("corpus", "ledger.sqlite3"))
-	if fallbackSuffix != "" && strings.HasSuffix(candidate, fallbackSuffix) {
+	if fallbackSuffix, err := resolveForCompare(filepath.Join("corpus", "ledger.sqlite3")); err == nil &&
+		fallbackSuffix.clean != "" && strings.HasSuffix(candidate.clean, fallbackSuffix.clean) {
 		return "matches the live corpus path (~/corpus/ledger.sqlite3)", true
 	}
-	if strings.Contains(candidate, strings.ToLower("agent-dotfiles-supervisor")) {
+	if strings.Contains(candidate.clean, strings.ToLower("agent-dotfiles-supervisor")) {
 		return "matches the retired agent-dotfiles-supervisor ledger location", true
 	}
 	return "", false
 }
 
-// resolveForCompare turns a path into the form refuseLivePath compares:
-// absolute, cleaned, symlinks resolved when the target exists, tilde-expanded
-// against $HOME, and case-folded since this tool runs on case-insensitive
-// filesystems (APFS default) where two differently-spelled strings can name
-// the same file.
+// resolvedPath is what resolveForCompare produces: a string form for the
+// (necessarily incomplete) additional string-equality refusal, and, when the
+// resolved path actually exists, the os.Stat result refuseLivePath uses for
+// identity comparison via os.SameFile. info is nil exactly when nothing
+// exists at the resolved path yet (e.g. a -db leaf that hasn't been created)
+// -- callers must not treat a nil info as a mismatch, only as "no identity
+// signal available here."
+type resolvedPath struct {
+	clean string
+	info  os.FileInfo
+}
+
+// resolveForCompare resolves p as far as the filesystem allows and reports
+// both a comparable string form and, if the resolved path exists, its
+// os.Stat identity. It expands a leading "~" against $HOME (flag.String
+// never does), makes the result absolute, and case-folds the string form
+// since this tool runs on case-insensitive filesystems (APFS default) where
+// two differently-spelled strings can name the same file.
 //
-// Two distinct "doesn't fully resolve" cases must NOT be treated the same:
-//
-//   - The cleaned path is not a symlink at all (os.Lstat finds nothing, or
-//     finds a plain file/dir) -- there is nothing further to resolve, so
-//     comparing the cleaned-but-unresolved form is the correct and only
-//     answer. This covers a -db path that hasn't been created yet.
-//   - The cleaned path (or something in its chain) IS a symlink, and
-//     filepath.EvalSymlinks fails to resolve it (e.g. ENOENT on a dangling
-//     target). Here the unresolved path is the *link's own name*, not what
-//     it points at -- silently comparing that throws away the one thing the
-//     symlink actually carries, and a dangling link placed at the guarded
-//     name would then compare as "not live" while writing straight through
-//     it. This case returns an error; refuseLivePath treats that as a
-//     refusal, never as evidence the path is safe.
-func resolveForCompare(p string) (string, error) {
+// Resolution walks the cleaned path one component at a time, from the root
+// down, through resolveComponentsStrict -- see that function's doc comment
+// for why every component (not just the leaf) must be checked, and why an
+// unresolvable component anywhere in the chain returns an error rather than
+// a partial answer.
+func resolveForCompare(p string) (resolvedPath, error) {
 	if p == "~" {
 		if home, err := os.UserHomeDir(); err == nil {
 			p = home
@@ -196,33 +228,73 @@ func resolveForCompare(p string) (string, error) {
 	}
 	clean := filepath.Clean(abs)
 
-	info, lstatErr := os.Lstat(clean)
-	if lstatErr != nil {
-		// Nothing exists at this name at all -- not a symlink, dangling or
-		// otherwise, just absent. Safe to compare the cleaned literal form.
-		return strings.ToLower(clean), nil
-	}
-
-	if info.Mode()&os.ModeSymlink == 0 {
-		// Exists and is not itself a symlink. EvalSymlinks may still resolve
-		// a symlinked parent directory in the chain; if it fails here (rare
-		// -- e.g. a parent removed between the Lstat and this call) fall
-		// back to the cleaned form, since the leaf itself carries no
-		// unresolved symlink signal to discard.
-		if resolved, err := filepath.EvalSymlinks(clean); err == nil {
-			clean = resolved
-		}
-		return strings.ToLower(clean), nil
-	}
-
-	// The leaf itself is a symlink (or the first hop of a chain). Its target
-	// must resolve, however many hops that takes -- a dangling link anywhere
-	// in the chain is exactly the bypass this guards against.
-	resolved, err := filepath.EvalSymlinks(clean)
+	resolved, err := resolveComponentsStrict(clean)
 	if err != nil {
-		return "", fmt.Errorf("symlink %s does not resolve to an existing target: %w", clean, err)
+		return resolvedPath{}, err
 	}
-	return strings.ToLower(resolved), nil
+
+	var info os.FileInfo
+	if fi, statErr := os.Stat(resolved); statErr == nil {
+		info = fi
+	}
+	return resolvedPath{clean: strings.ToLower(resolved), info: info}, nil
+}
+
+// resolveComponentsStrict walks clean (already absolute) one path component
+// at a time, resolving every symlink it finds along the way -- a parent
+// directory's symlink, a grandparent's, or the leaf's, all treated
+// identically, unlike the single leaf-only os.Lstat this guard used to run.
+//
+// Three outcomes, and only one of them returns a usable path:
+//
+//   - A component does not exist (os.IsNotExist): nothing under it can
+//     exist either, so nothing under it can be a symlink. The remaining
+//     components are appended literally and the walk stops. This is the
+//     ordinary "-db names a file that hasn't been created yet" case, and it
+//     is the ONLY case where "doesn't fully resolve" is treated as safe to
+//     continue with -- because there is provably nothing left to resolve.
+//   - A component IS a symlink: filepath.EvalSymlinks must resolve it (to
+//     however many hops that takes). Failure here -- a dangling target, an
+//     ELOOP cycle -- returns an error immediately. This is what closes the
+//     symlinked-parent-directory bypass PR #1233's review found: a parent
+//     component being unresolvable is no longer silently skipped just
+//     because the walk was checking the leaf.
+//   - Any other Lstat failure on an existing-or-uncertain component
+//     (permission denied, for example) also returns an error. Fail-closed
+//     means an inspection that could not be performed is never treated as
+//     evidence of safety.
+func resolveComponentsStrict(clean string) (string, error) {
+	volume := filepath.VolumeName(clean)
+	rest := strings.TrimPrefix(clean[len(volume):], string(filepath.Separator))
+	if rest == "" {
+		return clean, nil
+	}
+	parts := strings.Split(rest, string(filepath.Separator))
+
+	resolved := volume + string(filepath.Separator)
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		next := filepath.Join(resolved, part)
+		info, err := os.Lstat(next)
+		if err != nil {
+			if os.IsNotExist(err) {
+				return filepath.Join(append([]string{resolved}, parts[i:]...)...), nil
+			}
+			return "", fmt.Errorf("cannot stat %s: %w", next, err)
+		}
+		if info.Mode()&os.ModeSymlink != 0 {
+			target, err := filepath.EvalSymlinks(next)
+			if err != nil {
+				return "", fmt.Errorf("symlink %s does not resolve to an existing target: %w", next, err)
+			}
+			resolved = target
+			continue
+		}
+		resolved = next
+	}
+	return resolved, nil
 }
 
 // Report is the whole run's evidence: never a bare count, always the
