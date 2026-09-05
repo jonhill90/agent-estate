@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // writeFixture writes lines to a temp .jsonl file and returns its path.
@@ -377,5 +378,129 @@ func TestRerunProducesZeroDuplicates(t *testing.T) {
 	}
 	if !bytes.Equal(b1, b2) {
 		t.Fatalf("rerun produced a different manifest:\nrun 1: %s\nrun 2: %s", b1, b2)
+	}
+}
+
+// TestWatermarkExcludesFilesModifiedAfterIt is B1's revised acceptance
+// criteria 1 and 4: a source watermark pinned explicitly, before validation,
+// excludes any file whose own mtime is after it and NAMES that file by path
+// in the manifest -- it is never silently dropped from the count.
+func TestWatermarkExcludesFilesModifiedAfterIt(t *testing.T) {
+	dir := t.TempDir()
+	oldPath := writeFixture(t, dir, "old.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-session-old"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn in the pre-watermark file"}]}}`,
+	})
+	newPath := writeFixture(t, dir, "new.jsonl", []string{
+		`{"timestamp":"2026-02-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-session-new"}}`,
+		`{"timestamp":"2026-02-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn in the post-watermark file"}]}}`,
+	})
+
+	watermark := time.Date(2026, 1, 15, 0, 0, 0, 0, time.UTC)
+	older := watermark.Add(-24 * time.Hour)
+	newer := watermark.Add(24 * time.Hour)
+	if err := os.Chtimes(oldPath, older, older); err != nil {
+		t.Fatalf("Chtimes oldPath: %v", err)
+	}
+	if err := os.Chtimes(newPath, newer, newer); err != nil {
+		t.Fatalf("Chtimes newPath: %v", err)
+	}
+
+	m, err := buildManifestAtWatermark(dir, watermark)
+	if err != nil {
+		t.Fatalf("buildManifestAtWatermark: %v", err)
+	}
+
+	if m.WatermarkSource != "explicit" {
+		t.Errorf("WatermarkSource = %q, want explicit", m.WatermarkSource)
+	}
+	if m.FilesTotal != 2 {
+		t.Fatalf("FilesTotal = %d, want 2", m.FilesTotal)
+	}
+	if m.FilesIncluded != 1 {
+		t.Fatalf("FilesIncluded = %d, want 1", m.FilesIncluded)
+	}
+	if len(m.ExcludedAfterWatermark) != 1 || m.ExcludedAfterWatermark[0].Path != newPath {
+		t.Fatalf("ExcludedAfterWatermark = %v, want exactly [%s]", m.ExcludedAfterWatermark, newPath)
+	}
+	if len(m.Entries) != 1 {
+		t.Fatalf("Entries = %d, want 1 (only the pre-watermark file's turn)", len(m.Entries))
+	}
+	if m.Entries[0].File != oldPath {
+		t.Errorf("Entries[0].File = %q, want %q", m.Entries[0].File, oldPath)
+	}
+	if m.Entries[0].SessionID != "fixture-session-old" {
+		t.Errorf("Entries[0].SessionID = %q, want fixture-session-old", m.Entries[0].SessionID)
+	}
+}
+
+// TestRerunAtSameWatermarkIsIdentical is B1's revised acceptance criterion 5:
+// two runs pinned to the SAME watermark against an unchanged source tree
+// produce byte-identical manifests -- same count, same entry set, same
+// order.
+func TestRerunAtSameWatermarkIsIdentical(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir, "a.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-session"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn A"}]}}`,
+	})
+	writeFixture(t, dir, "b.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-session-2"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn B"}]}}`,
+	})
+
+	watermark := time.Now().Add(time.Hour)
+
+	m1, err := buildManifestAtWatermark(dir, watermark)
+	if err != nil {
+		t.Fatalf("buildManifestAtWatermark (run 1): %v", err)
+	}
+	m2, err := buildManifestAtWatermark(dir, watermark)
+	if err != nil {
+		t.Fatalf("buildManifestAtWatermark (run 2): %v", err)
+	}
+
+	b1, err := json.Marshal(m1)
+	if err != nil {
+		t.Fatalf("marshal m1: %v", err)
+	}
+	b2, err := json.Marshal(m2)
+	if err != nil {
+		t.Fatalf("marshal m2: %v", err)
+	}
+	if !bytes.Equal(b1, b2) {
+		t.Fatalf("rerun at the same watermark produced a different manifest:\nrun 1: %s\nrun 2: %s", b1, b2)
+	}
+	if len(m1.Entries) != 2 {
+		t.Fatalf("Entries = %d, want 2", len(m1.Entries))
+	}
+	if len(m1.ExcludedAfterWatermark) != 0 {
+		t.Fatalf("ExcludedAfterWatermark = %v, want none (watermark is after both files' mtimes)", m1.ExcludedAfterWatermark)
+	}
+}
+
+// TestAutoWatermarkExcludesNothing locks the "auto" mode's own contract:
+// when no explicit watermark is supplied, the derived watermark is the
+// highest mtime seen in this run's own listing pass, so by construction no
+// file in that same pass can be excluded.
+func TestAutoWatermarkExcludesNothing(t *testing.T) {
+	dir := t.TempDir()
+	writeFixture(t, dir, "a.jsonl", []string{
+		`{"timestamp":"2026-01-01T00:00:00.000Z","type":"session_meta","payload":{"id":"fixture-session"}}`,
+		`{"timestamp":"2026-01-01T00:00:01.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"fixture: turn A"}]}}`,
+	})
+
+	m, err := buildManifest(dir)
+	if err != nil {
+		t.Fatalf("buildManifest: %v", err)
+	}
+	if m.WatermarkSource != "auto" {
+		t.Errorf("WatermarkSource = %q, want auto", m.WatermarkSource)
+	}
+	if len(m.ExcludedAfterWatermark) != 0 {
+		t.Fatalf("ExcludedAfterWatermark = %v, want none", m.ExcludedAfterWatermark)
+	}
+	if m.FilesIncluded != m.FilesTotal {
+		t.Fatalf("FilesIncluded = %d, FilesTotal = %d, want equal under auto watermark", m.FilesIncluded, m.FilesTotal)
 	}
 }

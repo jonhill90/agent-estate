@@ -87,6 +87,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/jonhill90/agent-estate/estate/internal/rollout"
 )
@@ -143,6 +144,63 @@ func validateKnownRecordTypes(path string) error {
 	return scanner.Err()
 }
 
+// fileMeta is one rollout file's path plus the mtime this tool observed for
+// it in the single directory-and-stat pass listRolloutFilesWithMTimes makes.
+// Nothing downstream re-stats or re-walks root -- this is the one read of
+// filesystem metadata a run performs.
+type fileMeta struct {
+	Path    string
+	ModTime time.Time
+}
+
+// listRolloutFilesWithMTimes is the ONE filesystem read pass this tool makes
+// over root's directory structure and every file's own mtime (os.Stat only,
+// never a write, never a truncate, never a touch). Every later step --
+// watermark computation, inclusion/exclusion, validation, analysis -- works
+// from this single snapshot; nothing after this function reads the live tree
+// again, which is what makes two runs at an identical watermark reproduce
+// each other's output even while the real source tree may be growing
+// underneath them.
+func listRolloutFilesWithMTimes(root string) ([]fileMeta, error) {
+	paths, err := rollout.WalkRolloutFiles(root)
+	if err != nil {
+		return nil, err
+	}
+	metas := make([]fileMeta, 0, len(paths))
+	for _, p := range paths {
+		info, err := os.Stat(p)
+		if err != nil {
+			return nil, fmt.Errorf("stat %s: %w", p, err)
+		}
+		metas = append(metas, fileMeta{Path: p, ModTime: info.ModTime()})
+	}
+	return metas, nil
+}
+
+// watermarkFromMetas is the source watermark a run pins to when the caller
+// supplies none explicitly: the highest mtime observed across metas -- the
+// same single listing pass every other step in this run uses. Recording this
+// value BEFORE validation begins (acceptance criterion 1) and then never
+// re-deriving it from a fresh directory read is what criterion 2 ("no step
+// re-reads the live tree afterwards") requires.
+func watermarkFromMetas(metas []fileMeta) time.Time {
+	var max time.Time
+	for _, m := range metas {
+		if m.ModTime.After(max) {
+			max = m.ModTime
+		}
+	}
+	return max
+}
+
+// ExcludedFile names one source file this run saw but excluded because its
+// own mtime is after the run's watermark -- acceptance criterion 4: what was
+// skipped must be visible, never silently absent.
+type ExcludedFile struct {
+	Path    string `json:"path"`
+	ModTime string `json:"mod_time"` // RFC3339Nano, UTC
+}
+
 // ManifestEntry is exactly what agent-estate#1139's acceptance criterion 1
 // asks for: file, session payload.id, record index, and a hash of the text
 // -- never the text itself.
@@ -193,8 +251,24 @@ type DedupAccount struct {
 // ingested (never written), plus the dedup account reconciling against
 // slice 2's measured figures.
 type Manifest struct {
-	Root                    string          `json:"root"`
-	FilesTotal              int             `json:"files_total"`
+	Root string `json:"root"`
+
+	// Watermark is the source watermark this run pinned to, recorded BEFORE
+	// validation began (acceptance criterion 1), RFC3339Nano UTC.
+	// WatermarkSource says whether it was derived from this run's own
+	// listing pass ("auto", the highest mtime observed) or supplied
+	// explicitly by the caller ("explicit").
+	Watermark       string `json:"watermark"`
+	WatermarkSource string `json:"watermark_source"`
+
+	// FilesTotal is every rollout file this run's one listing pass saw,
+	// before watermark filtering. FilesIncluded is the subset at or before
+	// Watermark that validation and analysis actually ran on;
+	// ExcludedAfterWatermark names the rest (criterion 4).
+	FilesTotal             int            `json:"files_total"`
+	FilesIncluded          int            `json:"files_included"`
+	ExcludedAfterWatermark []ExcludedFile `json:"excluded_after_watermark"`
+
 	FilesParsed             int             `json:"files_parsed"`
 	FilesUnparseable        []ParseFailure  `json:"files_unparseable"`
 	Entries                 []ManifestEntry `json:"entries"`
@@ -217,22 +291,66 @@ func sha256Hex(s string) string {
 	return hex.EncodeToString(sum[:])
 }
 
-// buildManifest is the whole tool's read-only core: list files, run
-// internal/rollout's shared analysis on each, and turn its Turns into
-// ManifestEntry values (hashing text, never retaining it). It never writes
-// to root or to any file under it, and never opens the corpus.
+// buildManifest is buildManifestAtWatermark using this call's own listing
+// pass to establish the watermark automatically: the highest mtime observed
+// across every file it just listed. Callers that don't need to pin an
+// explicit, possibly-older watermark (e.g. every existing test in this
+// package) use this.
 func buildManifest(root string) (Manifest, error) {
-	files, err := rollout.WalkRolloutFiles(root)
+	metas, err := listRolloutFilesWithMTimes(root)
 	if err != nil {
 		return Manifest{}, err
 	}
+	return buildManifestFromMetas(root, metas, watermarkFromMetas(metas), "auto")
+}
 
+// buildManifestAtWatermark is the whole tool's read-only core, pinned to an
+// explicitly supplied watermark rather than one this call derives on its
+// own. It performs exactly one filesystem read pass (listRolloutFilesWithMTimes),
+// partitions the result against watermark, then runs internal/rollout's
+// shared analysis on every included file, turning its Turns into
+// ManifestEntry values (hashing text, never retaining it). It never writes to
+// root or to any file under it, and never opens the corpus.
+func buildManifestAtWatermark(root string, watermark time.Time) (Manifest, error) {
+	metas, err := listRolloutFilesWithMTimes(root)
+	if err != nil {
+		return Manifest{}, err
+	}
+	return buildManifestFromMetas(root, metas, watermark, "explicit")
+}
+
+// buildManifestFromMetas is the shared core both buildManifest and
+// buildManifestAtWatermark reduce to: given the ONE listing pass already
+// taken (metas) and the watermark to pin against, partition files into
+// included/excluded (criteria 1, 2 and 4), then validate and analyze only
+// the included files. metas is already sorted by path
+// (rollout.WalkRolloutFiles sorts), so both the excluded list and every
+// per-file loop below stay in deterministic, path-sorted order -- required
+// for criterion 5 (a rerun at the same watermark reproduces the manifest
+// exactly, including order).
+func buildManifestFromMetas(root string, metas []fileMeta, watermark time.Time, watermarkSource string) (Manifest, error) {
 	m := Manifest{
-		Root:       root,
-		FilesTotal: len(files),
+		Root:            root,
+		Watermark:       watermark.UTC().Format(time.RFC3339Nano),
+		WatermarkSource: watermarkSource,
+		FilesTotal:      len(metas),
 	}
 
-	for _, path := range files {
+	var included []fileMeta
+	for _, meta := range metas {
+		if meta.ModTime.After(watermark) {
+			m.ExcludedAfterWatermark = append(m.ExcludedAfterWatermark, ExcludedFile{
+				Path:    meta.Path,
+				ModTime: meta.ModTime.UTC().Format(time.RFC3339Nano),
+			})
+			continue
+		}
+		included = append(included, meta)
+	}
+	m.FilesIncluded = len(included)
+
+	for _, meta := range included {
+		path := meta.Path
 		if err := validateKnownRecordTypes(path); err != nil {
 			m.FilesUnparseable = append(m.FilesUnparseable, ParseFailure{
 				Path:   path,
@@ -289,7 +407,18 @@ func buildManifest(root string) (Manifest, error) {
 // acceptance criterion 2 asks for.
 func PrintSummary(w interface{ Write([]byte) (int, error) }, m Manifest, slice2Distinct, slice2Overlap, slice2Only int) {
 	fmt.Fprintf(w, "root: %s\n", m.Root)
-	fmt.Fprintf(w, "rollout files seen: %d (parsed %d, unparseable %d)\n", m.FilesTotal, m.FilesParsed, len(m.FilesUnparseable))
+	fmt.Fprintf(w, "watermark: %s (%s)\n", m.Watermark, m.WatermarkSource)
+	fmt.Fprintf(w, "rollout files seen: %d (included %d, excluded-after-watermark %d)\n",
+		m.FilesTotal, m.FilesIncluded, len(m.ExcludedAfterWatermark))
+	if len(m.ExcludedAfterWatermark) > 0 {
+		fmt.Fprintln(w, "excluded (modified after watermark):")
+		for _, f := range m.ExcludedAfterWatermark {
+			fmt.Fprintf(w, "  %s (mtime %s)\n", f.Path, f.ModTime)
+		}
+	} else {
+		fmt.Fprintln(w, "excluded (modified after watermark): none")
+	}
+	fmt.Fprintf(w, "rollout files included: %d (parsed %d, unparseable %d)\n", m.FilesIncluded, m.FilesParsed, len(m.FilesUnparseable))
 	fmt.Fprintf(w, "manifest entries: %d (%d from response_item, %d recovered from compacted)\n",
 		len(m.Entries), m.EntriesFromResponseItem, m.EntriesFromCompacted)
 	fmt.Fprintf(w, "dedup account: %d distinct compacted turns, %d dropped as duplicate-of-response_item, %d recovered only-in-compacted\n",

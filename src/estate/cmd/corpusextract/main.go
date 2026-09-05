@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 )
 
 func defaultRoot() string {
@@ -20,6 +21,15 @@ func main() {
 	root := flag.String("root", defaultRoot(), "root directory of Codex rollout JSONL files (read-only)")
 	asJSON := flag.Bool("json", false, "emit the full manifest as JSON instead of the human summary")
 	out := flag.String("out", "", "write the JSON manifest to this path instead of stdout (summary still prints to stdout unless -json)")
+
+	// watermark pins the run to an explicit point in time (RFC3339 or
+	// RFC3339Nano) rather than the default -- the highest mtime this run's
+	// own single listing pass observes. Every file whose mtime is after the
+	// watermark is excluded and named in the manifest's
+	// excluded_after_watermark list (agent-estate#1139 B1 acceptance
+	// criteria 1 and 4). Two runs given the SAME -watermark against an
+	// unchanged source tree produce an identical manifest (criterion 5).
+	watermarkFlag := flag.String("watermark", "", "pin the run to this RFC3339/RFC3339Nano timestamp instead of auto-deriving one from this run's own listing pass; files modified after it are excluded and listed")
 
 	// slice2* default to the figures agent-estate#1139 slice 2 measured
 	// against the live tree (PR #1226) -- see cmd/capturehealth's own doc
@@ -36,7 +46,22 @@ func main() {
 		os.Exit(2)
 	}
 
-	manifest, err := buildManifest(*root)
+	var manifest Manifest
+	var err error
+	if *watermarkFlag == "" {
+		manifest, err = buildManifest(*root)
+	} else {
+		var wm time.Time
+		wm, err = time.Parse(time.RFC3339Nano, *watermarkFlag)
+		if err != nil {
+			wm, err = time.Parse(time.RFC3339, *watermarkFlag)
+		}
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "corpusextract: -watermark %q: not a valid RFC3339/RFC3339Nano timestamp: %v\n", *watermarkFlag, err)
+			os.Exit(2)
+		}
+		manifest, err = buildManifestAtWatermark(*root, wm)
+	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "corpusextract: %v\n", err)
 		os.Exit(1)
